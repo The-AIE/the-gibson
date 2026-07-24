@@ -5,6 +5,7 @@
 > **Start here, based on who you are:**
 > - 🙂 **"I'm not technical — I just want software built."** Read
 >   [VIBECODING.md](VIBECODING.md). It's the only page you need, and it has no jargon.
+>   Wondering what you'd even build? [Five real examples](EXAMPLES.md).
 > - 🔧 **"I run the fleet."** Read [GUIDE.md](GUIDE.md) — the operator's manual.
 > - 🍴 **"I want to fork this for my own team."** Read
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
