@@ -1,0 +1,43 @@
+# The Gibson — green gate workflow (template)
+# Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
+# Fill <angle> placeholders from the repo's gate commands. This is the CI half of
+# docs/06 — the law that holds no matter which runtime wrote the code.
+
+name: gibson-gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci --include=dev
+
+      # Claim isolation: PRs may not edit another session's claim row
+      - run: node scripts/check-active-work.mjs
+        if: github.event_name == 'pull_request'
+
+      - run: <generate>      # e.g. npx prisma generate
+      - run: <typecheck>     # e.g. npx tsc --noEmit
+      - run: <lint>          # e.g. npm run lint
+      - run: <test>          # e.g. npx vitest run
+      - run: <build>         # e.g. npm run build
+
+  # Layers 1–3 of docs/08 (hard-fail). Extend with authz/DAST/ux-eval jobs per
+  # ci/README.md as adoption matures.
+  security-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+      - name: SAST (semgrep)
+        run: pipx run semgrep ci --config p/owasp-top-ten --config p/secrets
+      - name: Supply chain
+        run: npm audit --audit-level=critical
