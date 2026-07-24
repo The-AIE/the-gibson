@@ -19,6 +19,9 @@ Score the repo's ambient affordances before promising autonomy:
 - [ ] Schema/migration model (Prisma? migration files? who applies to prod?)
 - [ ] Secrets hygiene (.env* ignored, no committed secrets — run gitleaks once)
 
+Alongside the repo audit, run the **deployment audit** (doc 17 inspect mode) —
+its baseline numbers become the budgets the UX-eval and drift sensors enforce.
+
 Output: an adoption report with a harnessability grade and a fix-list. Low-grade
 repos get affordance-improvement issues *first* — autonomy on an illegible codebase
 is how you buy incidents.
