@@ -1,3 +1,8 @@
+---
+title: "Status message (nothing needed from owner)"
+nav_exclude: true
+---
+
 # Status message (nothing needed from owner)
 
 ```

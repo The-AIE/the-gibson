@@ -1,3 +1,8 @@
+---
+title: "Incident notice"
+nav_exclude: true
+---
+
 # Incident notice
 
 ```

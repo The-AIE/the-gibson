@@ -1,3 +1,8 @@
+---
+title: "Flaky visual diffs"
+nav_exclude: true
+---
+
 # Flaky visual diffs
 
 ## Symptoms

@@ -1,3 +1,8 @@
+---
+title: "Loop won't go green"
+nav_exclude: true
+---
+
 # Loop won't go green
 
 ## Symptoms

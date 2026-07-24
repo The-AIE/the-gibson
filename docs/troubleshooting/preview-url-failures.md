@@ -1,3 +1,8 @@
+---
+title: "Preview URL resolution failures"
+nav_exclude: true
+---
+
 # Preview URL resolution failures
 
 ## Symptoms

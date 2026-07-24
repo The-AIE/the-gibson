@@ -1,3 +1,8 @@
+---
+title: "Decision card (human gate → Operator)"
+nav_exclude: true
+---
+
 # Decision card (human gate → Operator)
 
 ```

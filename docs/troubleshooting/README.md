@@ -1,3 +1,8 @@
+---
+title: "Troubleshooting guides"
+nav_exclude: true
+---
+
 # Troubleshooting guides
 
 | Symptom | Guide |
