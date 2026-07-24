@@ -1,0 +1,26 @@
+[
+  {
+    "number": 101,
+    "title": "Schema: password reset tokens",
+    "labels": ["gibson", "tier-c", "P0"],
+    "body": "## Context\nPLAN D1\n\n## Sprint contract (acceptance criteria)\n- [ ] AC1 — migration adds ResetToken\n- [ ] AC2 — deploy apply without data loss flags\n- [ ] AC3 — schema-guard CI green\n\n## Affected area\nprisma/schema.prisma, prisma/migrations/**\n\n## Out of scope\nAPI, UI\n\n## Dependencies\nnone\n\n## Tier\nC\n"
+  },
+  {
+    "number": 102,
+    "title": "API: request reset + rate limit + email",
+    "labels": ["gibson", "tier-b", "P0"],
+    "body": "## Context\nPLAN D2\n\n## Sprint contract (acceptance criteria)\n- [ ] AC1 — constant 200 body\n- [ ] AC2 — email enqueued TTL 60m\n- [ ] AC3 — 429 after 5/hour/IP\n- [ ] AC4 — tests for AC1-3\n- [ ] AC5 — hash only stored\n\n## Affected area\napp/api/auth/reset/**, lib/email/**\n\n## Out of scope\nUI\n\n## Dependencies\nBlocked by #101\n\n## Tier\nB\n"
+  },
+  {
+    "number": 103,
+    "title": "Confirm password UI + API + session revoke",
+    "labels": ["gibson", "tier-b", "P0"],
+    "body": "## Context\nPLAN D3\n\n## Sprint contract (acceptance criteria)\n- [ ] AC1 — server-side token validate\n- [ ] AC2 — password update + revoke sessions\n- [ ] AC3 — shared password policy\n- [ ] AC4 — Playwright happy path\n- [ ] AC5 — mobile 375px usable\n\n## Affected area\napp/(auth)/reset/**, app/api/auth/reset/confirm/**\n\n## Out of scope\nLogin redesign\n\n## Dependencies\nBlocked by #102\n\n## Tier\nB\n"
+  },
+  {
+    "number": 104,
+    "title": "A11y + design-language conformance",
+    "labels": ["gibson", "tier-a", "P0"],
+    "body": "## Context\nPLAN D4\n\n## Sprint contract (acceptance criteria)\n- [ ] AC1 — axe critical/serious 0\n- [ ] AC2 — keyboard-only flows\n- [ ] AC3 — craft ≥ 7 vs design language\n\n## Affected area\napp/(auth)/reset/**\n\n## Out of scope\nNew brand colors\n\n## Dependencies\nBlocked by #103\n\n## Tier\nA\n"
+  }
+]
