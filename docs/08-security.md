@@ -66,6 +66,12 @@ created if the gate fails.** Tags/releases re-run layers 1–3 fully even if the
 constituent PRs passed, because the world (CVE feeds) changes between merge and
 release.
 
+## Worked example
+
+Filled authz matrix for a 3-role app (anon / patient / staff) + test sketch:  
+[examples/08-authz-matrix-sample.md](examples/08-authz-matrix-sample.md)  
+Scaffold: `scripts/route-inventory.mjs`. Posture: `scripts/posture-probe.sh`.
+
 ## Human gates in security
 
 - Confirmed secret leak → stop, human rotates.

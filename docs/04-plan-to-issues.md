@@ -62,6 +62,12 @@ Reuse the target repo's existing taxonomy; The Gibson requires only:
    dependencies) and have a second agent spot-check for overlap and for units too
    large. Then the queue is open.
 
+## Worked example
+
+Full PLAN.md → epic → four issues (schema serialized, contracts, labels):  
+[examples/04-plan-to-issues-sample.md](examples/04-plan-to-issues-sample.md)  
+Lint fixture: `examples/fixtures/04-issues.json` + `scripts/decompose-lint.mjs`.
+
 ## Sizing heuristics (lessons encoded)
 
 - If the contract needs >10 criteria, it's two issues.

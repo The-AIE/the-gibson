@@ -6,11 +6,13 @@
 > - 🙂 **"I'm not technical — I just want software built."** Read
 >   [VIBECODING.md](VIBECODING.md). It's the only page you need, and it has no jargon.
 >   Wondering what you'd even build? [Five real examples](EXAMPLES.md).
-> - 🔧 **"I run the fleet."** Read [GUIDE.md](GUIDE.md) — the operator's manual.
+> - 🔧 **"I run the fleet."** [QUICKSTART.md](QUICKSTART.md) then [GUIDE.md](GUIDE.md).
 > - 🍴 **"I want to fork this for my own team."** Read
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
 >   `local/`, keep getting upstream improvements.
 > - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md). That's your contract.
+> - 📚 **Reading order by audience:** [docs/00-INDEX.md](docs/00-INDEX.md) ·
+>   [FAQ.md](FAQ.md) · [docs/00-glossary.md](docs/00-glossary.md)
 >
 > Everything in this repo follows one interaction rule, the **Ask Contract**:
 > whenever the system asks a human for anything, it says *what it's asking, what
@@ -58,6 +60,53 @@ PLAN ─▶ DECOMPOSE ─▶ BUILD ─▶ TEST ─▶ REVIEW ─▶ UI/UX EVAL �
  language  contracts   claims            x-vendor   deployment   secrets    Tier C    + verify PRs
 ```
 
+```mermaid
+flowchart LR
+  subgraph doctrine["Doctrine"]
+    AG["AGENTS.md"]
+    DOCS["docs/01–19"]
+    PB["playbooks/"]
+  end
+  subgraph pipeline["SDLC pipeline"]
+    P[Plan] --> D[Decompose]
+    D --> B[Build]
+    B --> T[Test]
+    T --> R[Review]
+    R --> U[UX eval]
+    U --> S[Security]
+    S --> M[Merge]
+    M --> V[Deploy + verify]
+    V --> H[Retro / historian]
+    H -.->|ratchet| AG
+  end
+  subgraph enforce["Enforcement"]
+    SCR["scripts/"]
+    CI["ci/"]
+  end
+  subgraph memory["Memory"]
+    LES["LESSONS.md"]
+    DEC["DECISIONS.md"]
+  end
+  subgraph external["Control plane"]
+    MC["Mission Control\nqueue + telemetry"]
+  end
+  AG --> P
+  PB --> B
+  PB --> R
+  PB --> U
+  SCR --> B
+  CI --> R
+  H --> LES
+  MC -.->|dispatch| B
+  MC -.->|dispatch| R
+```
+
+| Piece | Job |
+|---|---|
+| Roles | planner · decomposer · builder · test-engineer · reviewer · ux-evaluator · security · release · historian — [docs/03](docs/03-roles.md) |
+| Stores | Gibson `memory/` (durable) + MC memory table (runtime) — [docs/09](docs/09-memory-and-self-improvement.md) |
+| MC | Who works; Gibson = how they work |
+
 Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 
 ## Core principles (the short version)
@@ -82,7 +131,11 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 
 | Doc | Contents |
 |---|---|
-| [AGENTS.md](AGENTS.md) | **Start here.** The operational contract every agent loads first |
+| [QUICKSTART.md](QUICKSTART.md) | Fastest path: clone → first adopted repo (Ask Contract steps) |
+| [FAQ.md](FAQ.md) | Common questions from the first month of operation |
+| [docs/00-INDEX.md](docs/00-INDEX.md) | Reading order by audience |
+| [docs/00-glossary.md](docs/00-glossary.md) | One-line definitions of Gibson terms |
+| [AGENTS.md](AGENTS.md) | **Agents start here.** The operational contract every agent loads first |
 | [docs/01-principles.md](docs/01-principles.md) | Design principles and the research they came from |
 | [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md) | The full pipeline, stage by stage, with gates |
 | [docs/03-roles.md](docs/03-roles.md) | The development team: nine roles, their contracts and handoffs |
@@ -104,7 +157,13 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/19-product-and-mcp.md](docs/19-product-and-mcp.md) | Chatterbuilt Foreman: the productized tier + the guided-setup MCP design |
 | [GUIDE.md](GUIDE.md) | **Mark's operator manual** — start work, approve gates, run the loop, tune the harness |
 | [VIBECODING.md](VIBECODING.md) | **The for-dummies guide** — vibecoding for non-technical owners, zero jargon |
-| [docs/DOC-BACKLOG.md](docs/DOC-BACKLOG.md) | Documentation build-out queue (Grok handoff) |
+| [docs/DOC-BACKLOG.md](docs/DOC-BACKLOG.md) | Documentation build-out queue |
+| [docs/examples/](docs/examples/) | Worked PLAN→issues, UX eval, authz matrix samples |
+| [docs/troubleshooting/](docs/troubleshooting/) | Loop, claims, preview URL, ZAP, visual flake |
+| [playbooks/](playbooks/) | Role dispatch prompts + adopt/loop |
+| [scripts/](scripts/) | claim, gate, loop, posture, upstream-sync, … |
+| [ci/](ci/) | Reusable workflow templates |
+| [adapters/](adapters/) | Claude Code / Codex / Grok / Hermes setup |
 | [ROADMAP.md](ROADMAP.md) | Build-out phases from doctrine to full automation |
 
 ## Provenance

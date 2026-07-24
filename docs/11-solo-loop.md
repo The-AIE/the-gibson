@@ -77,10 +77,12 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 The loop driver is trivially portable — a shell `while` loop invoking the runtime
 headless with the loop playbook and fresh context each hat:
 
-- **Grok:** `scripts/loop.sh --runner grok` → `grok -p "$(cat playbooks/loop-step.md)"`
-  per step. The economics make Grok the default solo runner: near-unlimited
-  flat-rate usage means the loop's iteration count is free; only quality gates —
-  and doc 15's escalation rules for hats that exceed Grok's grade — matter.
+- **Grok:** `scripts/loop.sh --runner grok --repo <path>` renders
+  `playbooks/loop-step.md` with `{{hat}}` / `{{loop_state}}` each step. The
+  economics make Grok the default solo runner: near-unlimited flat-rate usage
+  means the loop's iteration count is free; only quality gates — and doc 15's
+  escalation rules for hats that exceed Grok's grade — matter.
+  How-to: [playbooks/loop-step.md](../playbooks/loop-step.md), `scripts/loop.sh --help`.
 - **Hermes:** cron-triggered iterations rather than a hot loop; same playbook, and
   Hermes doubles as the digest/escalation channel it already owns.
 - **Claude Code / Codex:** same driver (`--runner claude|codex`), typically used in

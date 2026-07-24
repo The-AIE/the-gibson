@@ -68,6 +68,13 @@ deploy verification's UX half (doc 12).
   preview-URL wiring (`BASE_URL` from the deployment event) so any target repo gets
   this for free at adoption.
 
+## Worked example
+
+Complete Playwright flow spec + graded eval report:  
+[examples/07-ux-eval-sample.md](examples/07-ux-eval-sample.md)  
+Playbook: [playbooks/ux-evaluator.md](../playbooks/ux-evaluator.md) · preview helper:
+`scripts/preview-url.sh`.
+
 ## Known gap this closes
 
 ConferenceOS had axe in CI and a manually-invoked UI review skill, but **no automated
