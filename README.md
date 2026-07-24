@@ -121,3 +121,9 @@ Synthesized from five sources, credited throughout:
   context resets via file handoffs, frontend design language at plan time.
 - **[pi.dev](https://pi.dev/)** and **[ruvnet](https://github.com/ruvnet)** — primitives-not-features,
   self-modifying extensions, multi-host adapters, versioned memory substrates.
+
+## License
+
+Apache License 2.0 — Copyright 2026 Mark Hinkle. Fork it, customize it, run it
+(see [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md)); contributions
+back are welcome through the same pipeline the harness uses on itself.
