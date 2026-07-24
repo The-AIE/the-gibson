@@ -1,3 +1,8 @@
+---
+title: "Intake question (planner → Operator)"
+nav_exclude: true
+---
+
 # Intake question (planner → Operator)
 
 One question at a time. Business vocabulary only.

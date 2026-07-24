@@ -1,3 +1,8 @@
+---
+title: "Claim conflicts"
+nav_exclude: true
+---
+
 # Claim conflicts
 
 ## Symptoms

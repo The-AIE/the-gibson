@@ -1,3 +1,8 @@
+---
+title: "Operator message templates (docs/16)"
+nav_exclude: true
+---
+
 # Operator message templates (docs/16)
 
 Hermes (or any messaging front-end) renders **exactly four shapes**. Fill the
