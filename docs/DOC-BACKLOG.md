@@ -22,6 +22,15 @@ every claim traceable, every rule why-linked, examples runnable.
 5. **ci/ working workflows** — `gibson-gate.yml`, `security.yml`, `ux-eval.yml`,
    `retro.yml` filled in and tested against a sandbox repo.
 
+5b. **scripts/deploy-audit.sh + playbooks/deploy-audit.md** — doc 17's inspect
+   mode as runnable tooling (Vercel API/MCP: analytics, runtime + build logs;
+   bundle analyzer; log queries) emitting the scorecard + top-5 report.
+5c. **Decision-card + Operator message templates** — doc 16's four message shapes
+   as fill-in templates Hermes renders; includes the plain-language translation
+   rules and the "confusion is a bug" feedback wiring.
+5d. **VIBECODING.md hardening** — test the guide on 2–3 actual non-technical
+   readers; every point of confusion is a lesson (doc 09) and a rewrite.
+
 ## P1 — depth passes on existing docs
 
 6. **Per-doc worked examples**: doc 04 (a real PLAN.md → real issue set, full
