@@ -1,6 +1,25 @@
-# 19 — Productization: Chatterbuilt Foreman & the Guided-Setup MCP
+# 19 — Productization: Chatterbuilt Foreman, CodeWright & the Guided-Setup MCP
 
-*(Product name provisional — "Foreman" used throughout; swap is a find/replace.)*
+*(Names confirmed 2026-07-24: **Foreman** and **CodeWright**.)*
+
+## The naming system (the whole product in one story)
+
+> You talk to the **CodeWright** — like a millwright or a playwright, a
+> tradesperson who crafts working things, except what they craft is code. The
+> CodeWright listens, asks about your business, and drafts your **Blueprint** —
+> a plan in plain language you approve. The **Foreman** takes the Blueprint and
+> runs the crew until it's live. You only get pulled in for owner decisions.
+
+| Name | Is | Maps to (harness) |
+|---|---|---|
+| **CodeWright** | The vibecoding guide — intake, design language, the Blueprint | planner role + doc 16 intake + frontend-design skill |
+| **Blueprint** | The plain-language plan the owner approves | PLAN.md's operator translation (contractual per doc 16) |
+| **Foreman** | The orchestrator — runs the build across ALL Chatterbuilt subprojects | Gibson pipeline + Mission Control dispatch + decision cards |
+
+The trade-craft register is deliberate: *millwright* is instantly legible to
+blue-collar owners — the person who installs and keeps the machinery running.
+Free/paid line in the same vocabulary: **talking to the CodeWright is free
+(interview, audit, Blueprint); hiring the Foreman is the product.**
 
 ## The open-core split
 
@@ -34,19 +53,23 @@ tool output itself.
 
 ## Tool surface (v1)
 
-Setup & design (the guided walk):
+CodeWright tools (the guided design walk — the free tier):
 
-- `foreman_start` — entry point. Assesses where the user is (nothing yet / has a
-  site / has a repo), returns the appropriate first step, Ask-Contract formatted.
-  Every subsequent tool returns `next_step` so the assistant always knows how to
-  continue the walk — the user can drop off and resume; state lives server-side.
-- `foreman_interview` — the doc 16 intake, one business question at a time;
-  produces the plain-language plan + PLAN.md pair. Calls the planner skill with
-  the frontend-design skill for the design language ("what should it look and
-  feel like" as swatch/mood choices, not CSS).
-- `foreman_audit` — runs docs 13 + 17 read-only against their repo/URL; returns
-  the scorecard translated ("your site loads in 4.1s on phones; good is 2.5s")
-  plus the top-5 fixes with impact.
+- `codewright_start` — entry point. Assesses where the user is (nothing yet / has
+  a site / has a repo), returns the appropriate first step, Ask-Contract
+  formatted. Every subsequent tool returns `next_step` so the assistant always
+  knows how to continue the walk — the user can drop off and resume; state lives
+  server-side.
+- `codewright_interview` — the doc 16 intake, one business question at a time;
+  produces the **Blueprint** (plain-language) + PLAN.md pair. Calls the planner
+  skill with the frontend-design skill for the design language ("what should it
+  look and feel like" as swatch/mood choices, not CSS).
+- `codewright_audit` — runs docs 13 + 17 read-only against their repo/URL;
+  returns the scorecard translated ("your site loads in 4.1s on phones; good is
+  2.5s") plus the top-5 fixes with impact.
+
+Foreman tools (the build — the product):
+
 - `foreman_install` — generates their AGENTS section, CI gates, and labels as a
   PR to their repo, each piece explained what/does/why/risks before it asks for
   the merge. Never pushes directly; the PR *is* the ask.
@@ -81,7 +104,7 @@ doctrine.
 
 ## What stays honest
 
-Foreman without a fleet attached is a very good guided auditor and planner — that
-alone is the free tier. The paid tier attaches the fleet (Mark's, or the user's
-own runtimes) to actually execute. The gradient: **audit free → plan free →
-execution is the product.**
+The CodeWright without a Foreman attached is a very good guided auditor and
+planner — that alone is the free tier. The paid tier attaches the Foreman (the
+fleet: Mark's, or the user's own runtimes) to actually execute the Blueprint.
+The gradient: **audit free → Blueprint free → the Foreman is the product.**
