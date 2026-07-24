@@ -138,7 +138,10 @@ invoke_runner() {
   case "$RUNNER" in
     grok)
       command -v grok >/dev/null || die "grok CLI not found"
-      grok -p "$(cat "$prompt_file")"
+      # --prompt-file, not -p "$(cat ...)": rendered playbooks start with YAML
+      # frontmatter ("---"), which grok's arg parser mis-reads as a flag when
+      # passed as a positional/value string instead of a file path.
+      grok --prompt-file "$prompt_file"
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
