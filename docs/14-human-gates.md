@@ -69,3 +69,6 @@ Failing tests · red CI · flaky infrastructure · merge conflicts · missing do
 ambiguous *implementation* choices within scope · a reviewer's REQUEST_CHANGES ·
 parked PRs · an empty answer from a tool · being unsure whether code is good enough
 (the gates decide, not the feeling).
+
+---
+[← 13 · Adopting a project](13-adoption.md) · [Home](../index.md) · [15 · Spending AI money wisely →](15-model-economics.md)

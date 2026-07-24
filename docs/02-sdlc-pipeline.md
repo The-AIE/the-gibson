@@ -139,3 +139,6 @@ Details: `docs/09-memory-and-self-improvement.md`.
 - **Hotfix:** compressed path (build → test → review → merge → deploy) with the
   same gates at higher urgency; triage doctrine per target repo (e.g. ConferenceOS
   `mercury-fixes`).
+
+---
+[← 01 · Why it's built this way](01-principles.md) · [Home](../index.md) · [03 · The crew's nine jobs →](03-roles.md)

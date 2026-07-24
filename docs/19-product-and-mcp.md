@@ -122,3 +122,6 @@ against the AIE subscription — that's the whole licensing mechanism.
 This keeps a future gradient available (audit/Blueprint open to everyone as
 lead-gen, Foreman behind the subscription; or a standalone paid tier later),
 but that's a revisit condition, not the plan. Recorded in `memory/DECISIONS.md`.
+
+---
+[← 18 · Fork it, stay updated](18-fork-and-upstream.md) · [Home](../index.md)

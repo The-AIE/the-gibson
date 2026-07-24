@@ -87,3 +87,6 @@ Lint fixture: `examples/fixtures/04-issues.json` + `scripts/decompose-lint.mjs`.
   (ConferenceOS #442: schema-edit-without-migration blocked ~20 consecutive deploys).
 - Anything Tier C gets decomposed finer, not coarser — small diffs make adversarial
   review tractable.
+
+---
+[← 03 · The crew's nine jobs](03-roles.md) · [Home](../index.md) · [05 · How agents avoid collisions →](05-concurrency.md)

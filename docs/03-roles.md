@@ -100,3 +100,6 @@ free):
 | security → builder/release | layer results on the PR + issues |
 | release → historian | merge/deploy record |
 | historian → everyone | `memory/` + harness PRs |
+
+---
+[← 02 · The assembly line](02-sdlc-pipeline.md) · [Home](../index.md) · [04 · From plan to to-do list →](04-plan-to-issues.md)

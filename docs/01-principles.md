@@ -111,3 +111,6 @@ barrels instead of hand-edited hot files, auto-discovered nav/reports — these 
 codebase tractable to agents. Adoption of The Gibson (`docs/13-adoption.md`) therefore
 includes a harnessability audit, and builders are licensed to *improve* affordances
 (de-hot files, add generators) as first-class work.
+
+---
+[Home](../index.md) · [02 · The assembly line →](02-sdlc-pipeline.md)

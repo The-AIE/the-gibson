@@ -89,3 +89,6 @@ downward stress-test, applied to money).
 - Research sweeps, second opinions, X-adjacent anything → **Grok** (G/S).
 - Messaging, digests, cron ops → **Hermes** with a cheap model (G) — it's the
   fleet's voice, not its brain.
+
+---
+[← 14 · The sixteen interruptions](14-human-gates.md) · [Home](../index.md) · [16 · No terminal required →](16-nontechnical-operation.md)

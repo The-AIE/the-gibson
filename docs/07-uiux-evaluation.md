@@ -90,3 +90,6 @@ Playbook: [playbooks/ux-evaluator.md](../playbooks/ux-evaluator.md) · preview h
 ConferenceOS had axe in CI and a manually-invoked UI review skill, but **no automated
 visual/UX regression and no deployment-driving evaluator**. This doc + the templates
 make UX evaluation a pipeline stage, not a favor.
+
+---
+[← 06 · Must-pass quality checks](06-quality-gates.md) · [Home](../index.md) · [08 · The security system →](08-security.md)

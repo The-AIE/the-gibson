@@ -67,3 +67,6 @@ For repos where deploys apply schema (Prisma + Neon/Postgres pattern):
 Drift sensors (doc 06) include: Lighthouse budgets against production, deployment
 failure-rate trend, and preview-deployment pileup (stale PRs holding previews open —
 close or draft them).
+
+---
+[← 11 · One agent, running all night](11-solo-loop.md) · [Home](../index.md) · [13 · Adopting a project →](13-adoption.md)

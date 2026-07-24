@@ -151,3 +151,6 @@ a lesson).
 This tier is the productized version of the Chatterbuilt thesis (agent-run
 websites for non-technical SMBs) — The Gibson's Operator mode is the engine that
 model runs on, and Chatterbuilt is its first intended customer (ROADMAP Phase 3).
+
+---
+[← 15 · Spending AI money wisely](15-model-economics.md) · [Home](../index.md) · [17 · Site checkups and tune-ups →](17-deployment-optimization.md)
