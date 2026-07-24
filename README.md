@@ -85,6 +85,7 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/15-model-economics.md](docs/15-model-economics.md) | Which model for which task: G/S/F grades, flat-rate-first, escalation ladder |
 | [docs/16-nontechnical-operation.md](docs/16-nontechnical-operation.md) | Operator tier: chat-only interface, decision cards, the never-stuck ladder |
 | [docs/17-deployment-optimization.md](docs/17-deployment-optimization.md) | Inspecting & optimizing the deployment target: rendering, caching, cost, field vitals |
+| [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) | Fork it, customize in `local/`, keep receiving upstream updates; contribute back |
 | [GUIDE.md](GUIDE.md) | **Mark's operator manual** — start work, approve gates, run the loop, tune the harness |
 | [VIBECODING.md](VIBECODING.md) | **The for-dummies guide** — vibecoding for non-technical owners, zero jargon |
 | [docs/DOC-BACKLOG.md](docs/DOC-BACKLOG.md) | Documentation build-out queue (Grok handoff) |

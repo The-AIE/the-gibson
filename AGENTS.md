@@ -15,8 +15,9 @@ harness better than you found it.
 
 ## The Ten Laws
 
-1. **Read before you act.** Load this file, the target repo's `AGENTS.md`, and
-   `memory/LESSONS.md` before writing anything. Recall relevant fleet memory
+1. **Read before you act.** Load this file, then `local/AGENTS.local.md` if it
+   exists (fork overrides — local wins, per `docs/18-fork-and-upstream.md`), the
+   target repo's `AGENTS.md`, and `memory/LESSONS.md` before writing anything. Recall relevant fleet memory
    (Mission Control `recall`, or `memory/` grep) before starting — someone may have
    solved or claimed this already.
 2. **Claim before you touch.** One issue = one claim = one worktree = one branch.
