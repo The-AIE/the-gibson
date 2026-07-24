@@ -1,0 +1,34 @@
+title: The Gibson
+description: A portable, self-improving SDLC harness for agent fleets — you describe the outcome, the crew builds, tests, secures, and ships it.
+remote_theme: just-the-docs/just-the-docs
+url: "https://mrhinkle.github.io"
+baseurl: "/the-gibson"
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-relative-links
+
+relative_links:
+  enabled: true
+  collections: false
+
+# just-the-docs settings
+search_enabled: true
+heading_anchors: true
+color_scheme: light
+aux_links:
+  "GitHub repo":
+    - "https://github.com/mrhinkle/the-gibson"
+footer_content: "Apache-2.0 · Copyright 2026 Mark Hinkle · The Gibson"
+
+exclude:
+  - node_modules/
+  - scripts/
+  - ci/
+  - templates/
+  - local/
+  - LICENSE
+  - NOTICE
+  - CLAUDE.md
+  - "*.sh"
+  - "*.mjs"
