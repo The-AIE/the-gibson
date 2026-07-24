@@ -85,3 +85,23 @@ same exposure (same playbook content, different flag conventions) — worth a
 dry-run check before relying on them unattended.
 **Status:** fixed (grok branch only)
 **Tags:** #grok #cli #harness-bug
+
+## L-008 · 2026-07-24 · grok-runner-silent-noop-without-permission-mode
+**What happened:** Even after fixing L-007's arg-parsing bug, the solo loop
+still burned 100+ iterations against mrhinkle/chatterbuilt with zero real
+work — no claim, no worktree, no commit, `gibson/loop-state.md` never
+updated. Each iteration returned a shallow one-line paraphrase of its own
+instructions in under 10 seconds and exited cleanly (exit 0), so the driver's
+error budget never tripped — it looked healthy while doing nothing.
+**Root cause:** `invoke_runner`'s grok branch never passed a permission-mode
+flag. In headless/non-interactive invocation there's no TTY to approve tool
+calls, so grok can't act — it can only narrate. The `claude` branch already
+had `--permission-mode acceptEdits`; `codex` had `--full-auto`; grok had
+neither.
+**Harness fix:** grok branch now passes `--permission-mode bypassPermissions`.
+**Detection gap this exposes:** exit-code-based error budgets don't catch
+"ran fine, did nothing" — only "crashed." Consider a stronger sensor: if
+`gibson/loop-state.md`'s `updated:` timestamp hasn't advanced after N
+iterations, treat that as a failure too, not just non-zero exit.
+**Status:** fixed (grok branch); detection-gap fix not yet implemented
+**Tags:** #grok #cli #harness-bug #permissions

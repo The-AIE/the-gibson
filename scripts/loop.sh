@@ -128,9 +128,14 @@ render_prompt() {
     const pb=fs.readFileSync(process.argv[1],"utf8");
     const hat=process.argv[2];
     const state=fs.readFileSync(process.argv[3],"utf8");
-    let out=pb.split("{{hat}}").join(hat).split("{{loop_state}}").join(state);
+    const gibson=process.argv[4];
+    const repo=process.argv[5];
+    let out=pb.split("{{hat}}").join(hat)
+      .split("{{loop_state}}").join(state)
+      .split("{{gibson_path}}").join(gibson)
+      .split("{{repo_path}}").join(repo);
     process.stdout.write(out);
-  ' "$PLAYBOOK" "$hat" "$STATE_FILE"
+  ' "$PLAYBOOK" "$hat" "$STATE_FILE" "$GIBSON" "$REPO"
 }
 
 invoke_runner() {
@@ -141,7 +146,10 @@ invoke_runner() {
       # --prompt-file, not -p "$(cat ...)": rendered playbooks start with YAML
       # frontmatter ("---"), which grok's arg parser mis-reads as a flag when
       # passed as a positional/value string instead of a file path.
-      grok --prompt-file "$prompt_file"
+      # --permission-mode bypassPermissions: without it, grok has no TTY to
+      # request tool-call approval in headless mode, so it silently narrates
+      # instead of acting — every iteration exits in seconds with no real work.
+      grok --prompt-file "$prompt_file" --permission-mode bypassPermissions
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
