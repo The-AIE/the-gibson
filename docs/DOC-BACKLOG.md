@@ -52,6 +52,12 @@ every claim traceable, every rule why-linked, examples runnable.
 
 ## P2 — polish
 
+9b. **GitHub presentation pass** — docs render beautifully on github.com: Mermaid
+   pipeline diagram in README, doc cross-links verified, a docs/00-INDEX.md
+   reading-order page per audience, repo social preview image, About blurb +
+   topics. Every page passes the Ask Contract standard (plain first, technical
+   second); run the VIBECODING real-reader test (5d) on the README top section too.
+
 10. **Architecture diagram** (Mermaid in README): pipeline, roles, stores, MC
     relationship.
 11. **FAQ.md** — seeded from questions Mark actually asks during first month.
