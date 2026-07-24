@@ -6,6 +6,10 @@ nav_order: 12
 
 # 12 — Vercel Deployment Doctrine
 
+> 🙂 **In plain English:** The preferred host is Vercel because every proposed change
+> gets its own temporary website for testing. That free preview is how the crew tries
+> things before they touch the real site.
+
 The Gibson targets software deployed to Vercel. Vercel's model is also load-bearing
 for the harness itself: **per-PR preview deployments are what make deployment-driving
 UX evaluation (doc 07) and DAST (doc 08) free.**

@@ -6,6 +6,10 @@ nav_order: 1
 
 # 01 — Design Principles
 
+> 🙂 **In plain English:** This chapter is the "why" behind every rule. Each rule comes
+> from a real mistake or a proven idea. When two rules disagree, you follow the one that
+> better protects people and the software.
+
 Every rule in this repo traces to one of these principles, and every principle traces
 to a source that earned it — a production incident, a published harness design, or a
 measured result. When a rule and a principle conflict, the principle wins and the rule

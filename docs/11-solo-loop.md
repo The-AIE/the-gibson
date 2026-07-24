@@ -6,6 +6,10 @@ nav_order: 11
 
 # 11 — The Solo Loop: One Agent, Continuously
 
+> 🙂 **In plain English:** You can also run one agent alone overnight. It puts on each
+> hat in turn — build, test, review, ship — and keeps going until the list is done or it
+> hits a decision only a human can make.
+
 Fleet mode assumes a dispatcher and multiple runtimes. The solo loop is the other
 deployment shape: **one agent on one platform, running the whole SDLC continuously,
 unattended** — e.g. Grok grinding a backlog overnight on the flat-rate plan, or

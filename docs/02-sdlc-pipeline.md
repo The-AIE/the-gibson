@@ -6,6 +6,10 @@ nav_order: 2
 
 # 02 — The SDLC Pipeline
 
+> 🙂 **In plain English:** Building software here is like an assembly line with ten
+> stations. Every station takes something in, produces something out, and has a
+> checkpoint. You cannot skip a station just because you feel confident.
+
 Ten stages. Every stage has an **entry artifact**, an **exit artifact**, and a
 **gate**. Gates are sensors — deterministic where possible, inferential where
 necessary. No stage may be skipped on confidence; a stage may be skipped only when

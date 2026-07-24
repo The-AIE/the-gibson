@@ -6,6 +6,10 @@ nav_order: 14
 
 # 14 — Human Gates: The Only Reasons to Stop
 
+> 🙂 **In plain English:** There are exactly sixteen written reasons the crew may
+> interrupt you — money, going live, private data, and similar owner decisions.
+> Everything else is the crew's problem to solve without waking you.
+
 This list is **closed**. If the situation isn't here, the agent keeps working —
 through test failures, flaky CI, merge conflicts, unclear docs, and mid-task errors,
 all of which are the agent's to resolve. Changing this list is itself Tier C

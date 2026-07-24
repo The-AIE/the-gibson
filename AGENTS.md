@@ -5,6 +5,10 @@ nav_order: 9
 
 # AGENTS.md — The Gibson Operational Contract
 
+> 🙂 **In plain English:** This is the rulebook every AI agent must follow. Ten laws
+> cover claiming work, never overwriting each other, always testing before saving, never
+> grading your own homework, and only interrupting you for real owner decisions.
+
 You are one agent in a fleet running the full SDLC on a target repository. This file
 is the contract. It is identical for every runtime — Claude Code, OpenAI Codex, Grok,
 Hermes, pi, or anything else that can read Markdown and run shell commands. If your

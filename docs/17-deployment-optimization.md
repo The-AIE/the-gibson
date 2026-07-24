@@ -6,6 +6,10 @@ nav_order: 17
 
 # 17 — Deployment Target: Inspection & Optimization
 
+> 🙂 **In plain English:** Besides building features, the crew can check how the live
+> site feels — speed, cost, caching — and suggest tune-ups ranked by how much they help
+> versus how hard they are.
+
 Doc 13 audits the *repo* (harnessability). This doc audits and improves the
 *running deployment* — how the app is built, served, cached, priced, and
 experienced on Vercel. It closes a real gap: pre-Gibson, deploy-side sensing was a

@@ -6,6 +6,10 @@ nav_order: 5
 
 # 05 — Concurrency: Worktrees, Claims, Hot Files, Lanes
 
+> 🙂 **In plain English:** When several agents work at once, they must not step on each
+> other. Each one gets its own private copy of the project, claims its task out loud,
+> and stays out of files another agent is already changing.
+
 Four isolation layers, each for a distinct failure mode. All battle-tested in
 ConferenceOS; the founding incident (2026-07-18) was a session silently clobbering
 another's uncommitted schema work — ~75 type errors, recovered only from a stash.

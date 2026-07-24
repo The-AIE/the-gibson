@@ -5,6 +5,10 @@ nav_order: 4
 
 # QUICKSTART — clone to first adopted repo
 
+> 🙂 **In plain English:** The shortest honest path from "I just copied this project" to
+> "my first app is under the rules." Every step tells you what you are being asked, what
+> it does, why it matters, and what could go wrong.
+
 Fastest honest path. Every step uses the **Ask Contract**: what / does / why /
 risks. Technical terms are explained inline.
 

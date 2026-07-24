@@ -6,6 +6,10 @@ nav_order: 4
 
 # 04 — Plan → Issues (Decomposition Protocol)
 
+> 🙂 **In plain English:** A big plan becomes a list of small, finishable to-dos. Each
+> to-do is small enough to ship on its own, with a clear definition of "done," so the
+> crew never gets lost inside one giant project.
+
 The gap this closes: ConferenceOS normalizes *one committed ask at a time*
 (`cos-feature-request`) and keeps 80KB backlog docs as human-read design references —
 nothing turns a plan into a batch of well-scoped issues. The `decomposer` role does.

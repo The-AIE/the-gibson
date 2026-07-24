@@ -6,6 +6,10 @@ nav_order: 19
 
 # 19 — Productization: Chatterbuilt Foreman, CodeWright & the Guided-Setup MCP
 
+> 🙂 **In plain English:** This chapter explains the product names and how the free
+> open-source toolkit relates to the paid guided experience. It is the business and
+> product map, not day-to-day operator steps.
+
 *(Names confirmed 2026-07-24: **Foreman** and **CodeWright**.)*
 
 ## The naming system (the whole product in one story)

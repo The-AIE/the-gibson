@@ -6,6 +6,10 @@ nav_order: 8
 
 # 08 — The Security Testing System
 
+> 🙂 **In plain English:** Safety is eight layers of checks — from leaked passwords to
+> who can access what. Some failures hard-stop a release; others open a ticket to fix
+> later. Soft warnings are temporary, never a permanent resting place.
+
 Eight layers. Each is either **hard-fail** (blocks merge/release) or **report-only**
 (files issues). Report-only is a *transition state* with a written promotion
 condition, never a resting place — ConferenceOS's high-CVE layer sat report-only

@@ -6,6 +6,10 @@ nav_order: 13
 
 # 13 — Adoption: Pointing The Gibson at a Repo
 
+> 🙂 **In plain English:** Pointing this system at your project is itself a guided job:
+> check how ready the project is, install the rule files and safety nets, then run a
+> small practice task before trusting the full crew.
+
 Adoption is itself an agent task with a playbook
 ([playbooks/adopt.md](../playbooks/adopt.md) — audit checklist inline). Fast path:
 [QUICKSTART.md](../QUICKSTART.md). Target:

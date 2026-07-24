@@ -6,6 +6,10 @@ nav_order: 16
 
 # 16 — Operating Without a Terminal (Non-Technical Mode)
 
+> 🙂 **In plain English:** You should never need a black terminal window. The crew asks
+> you decisions in plain language — what they want, what it does, why it helps, and what
+> could go wrong — and you answer in ordinary words.
+
 The Gibson must be runnable by someone who has never opened a terminal and never
 will. The fleet's job is long-running autonomous delivery; the operator's job is
 answering a small number of plain-language questions. If the operator ever feels
