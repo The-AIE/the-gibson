@@ -8,12 +8,12 @@ inputs:
   - tier label (A/B/C); re-check if diff drifted into Tier C
 outputs:
   - PR review with file:line findings across six lenses
-  - final line exactly: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES
+  - "final line exactly: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES"
 gates:
   - never review own generation (Law 5)
   - cross-vendor when available (reviewer_platform ≠ builder)
-  - fail closed: missing/broken reviewer blocks merge
-  - Tier C: FAN-OUT + adversarial refutation pass
+  - "fail closed: missing/broken reviewer blocks merge"
+  - "Tier C: FAN-OUT + adversarial refutation pass"
 forbidden:
   - merging
   - rubber-stamp LGTM without per-lens clearance

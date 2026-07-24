@@ -3,8 +3,8 @@ title: "Playbook · Solo Loop Step"
 nav_exclude: true
 role: solo-loop-step
 inputs:
-  - "{{hat}}" — one of: builder | test-engineer | reviewer | ux-evaluator | security | release | historian | decomposer | planner
-  - "{{loop_state}}" — full contents of gibson/loop-state.md (or equivalent)
+  - "{{hat}} — one of: builder | test-engineer | reviewer | ux-evaluator | security | release | historian | decomposer | planner"
+  - "{{loop_state}} — full contents of gibson/loop-state.md (or equivalent)"
   - target repo path; Gibson doctrine path
   - optional REVIEWER_CMD for cross-vendor review shell-out
 outputs:
