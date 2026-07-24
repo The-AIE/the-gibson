@@ -68,3 +68,20 @@ prefer harness changes via PR + cross-runtime review (D-003) even when the
 operator allows direct main for speed.
 **Status:** fix-pending (process note; no code gate yet)
 **Tags:** #process #gibson #docs
+
+## L-007 · 2026-07-24 · grok-runner-frontmatter-arg-parsing
+**What happened:** `scripts/loop.sh`'s grok runner invoked `grok -p "$(cat "$prompt_file")"`.
+Rendered playbooks start with YAML frontmatter (`---`), which grok's clap-style
+arg parser mis-reads as an unrecognized flag when passed as a value string
+rather than a file path — every solo-loop iteration would have failed before
+doing any work. Same root cause hit manually during chatterbuilt adoption
+(`grok -p "$(cat adopt.md)..."` failed identically; fixed there with
+`--prompt-file`).
+**Root cause:** passing multi-line, dash-prefixed content as a `-p`/`--single`
+argument value instead of via `--prompt-file <path>`.
+**Harness fix:** `invoke_runner`'s grok branch now uses `grok --prompt-file
+"$prompt_file"`. Untested: whether `claude`/`codex`/`hermes` branches have the
+same exposure (same playbook content, different flag conventions) — worth a
+dry-run check before relying on them unattended.
+**Status:** fixed (grok branch only)
+**Tags:** #grok #cli #harness-bug
