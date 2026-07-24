@@ -1,6 +1,8 @@
 # 13 — Adoption: Pointing The Gibson at a Repo
 
-Adoption is itself an agent task with a playbook (`playbooks/adopt.md`). Target:
+Adoption is itself an agent task with a playbook
+([playbooks/adopt.md](../playbooks/adopt.md) — audit checklist inline). Fast path:
+[QUICKSTART.md](../QUICKSTART.md). Target:
 any repo, optimized for TypeScript/Next.js-on-Vercel, workable for anything with a
 typecheck, a test runner, and a build.
 

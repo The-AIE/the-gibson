@@ -80,6 +80,95 @@ Tier A issue flows end-to-end with zero touches from you.
 - **Interrogate:** every rule cites its incident or source. If a rule cites
   nothing, it's a candidate for deletion — say so.
 
+## 7. Worked walkthrough — brief → plan → issues → PR → merge → deploy
+
+Fictional product: **Northstar Clinic** booking site. Full artifacts also live in
+[docs/examples/](docs/examples/) (password-reset sample).
+
+### 7.1 Brief (you)
+
+> "Patients should reset their password by email; it has to work on phones."
+
+### 7.2 Plan (planner hat)
+
+```bash
+grok -p "$(cat playbooks/planner.md)
+
+Brief: Patients should reset their password by email; it has to work on phones.
+Target: ~/Code/clinic-web
+"
+# → writes PLAN.md with scope, risks, ACs, design language
+```
+
+You approve the plan (Stage 0). Highest leverage moment — wrong plan is cheap;
+wrong code is not ([docs/02](docs/02-sdlc-pipeline.md)).
+
+### 7.3 Issues (decomposer hat)
+
+```bash
+grok -p "$(cat playbooks/decomposer.md)
+
+PLAN: ~/Code/clinic-web/PLAN.md
+Repo: northstar/clinic-web
+"
+node scripts/decompose-lint.mjs --repo northstar/clinic-web --label gibson
+```
+
+Result shape: epic + schema issue (Tier C) → API → UI → a11y, with `Blocked by`
+edges. See [docs/examples/04-plan-to-issues-sample.md](docs/examples/04-plan-to-issues-sample.md).
+
+### 7.4 Build one issue (builder hat)
+
+```bash
+cd ~/Code/clinic-web
+~/Code/the-gibson/scripts/claim.sh 102 reset-api 'app/api/auth/reset/**' 'lib/email/**'
+cd ../wt-102-reset-api
+~/Code/the-gibson/scripts/gate-baseline.sh
+# implement…
+~/Code/the-gibson/scripts/gate.sh
+git commit -s -m "feat(#102): password reset request API"
+git push -u origin HEAD
+gh pr create --title "feat(#102): reset request API" --body "Closes #102 …"
+```
+
+### 7.5 Test → review → UX → security
+
+Different agents (or fresh solo-loop hats):
+
+| Stage | Playbook | Sensor |
+|---|---|---|
+| Test | `playbooks/test-engineer.md` | criterion → test map on PR |
+| Review | `playbooks/reviewer.md` | `VERDICT: APPROVE` / `REQUEST_CHANGES` |
+| UX (if UI) | `playbooks/ux-evaluator.md` | `BASE_URL=$(scripts/preview-url.sh N)` + Playwright |
+| Security | `playbooks/security.md` + CI | layers table on PR |
+
+You only intervene for Tier C / schema (G12) or other [human gates](docs/14-human-gates.md).
+
+### 7.6 Merge + deploy + cleanup (release hat)
+
+```bash
+# After APPROVE + CI green + (if Tier C) your approval comment:
+gh pr merge 88 --squash --delete-branch
+# verify Vercel READY for the merge commit; smoke happy path
+~/Code/the-gibson/scripts/release-claim.sh 102
+```
+
+### 7.7 Retro (historian hat)
+
+If anything failed twice or surprised the fleet → append `memory/LESSONS.md` and
+prefer a sensor fix ([docs/09](docs/09-memory-and-self-improvement.md)).
+
+### 7.8 Solo-loop alternative
+
+Same pipeline, one runner:
+
+```bash
+~/Code/the-gibson/scripts/loop.sh --runner grok --repo ~/Code/clinic-web
+# watch clinic-web/gibson/journal.md ; stop with touch clinic-web/gibson/HALT
+```
+
+---
+
 ## Quick reference
 
 | I want to… | Do |
@@ -91,4 +180,7 @@ Tier A issue flows end-to-end with zero touches from you.
 | Stop everything on a repo | `gibson-halt` label |
 | Overnight grind | `scripts/loop.sh --runner grok` |
 | Teach the fleet | PR a lesson to `memory/LESSONS.md` |
-| Add a repo | "adopt `<repo>`" |
+| Add a repo | "adopt `<repo>`" or [QUICKSTART.md](QUICKSTART.md) |
+| Vocabulary | [docs/00-glossary.md](docs/00-glossary.md) |
+| Reading map | [docs/00-INDEX.md](docs/00-INDEX.md) |
+| FAQ | [FAQ.md](FAQ.md) |
