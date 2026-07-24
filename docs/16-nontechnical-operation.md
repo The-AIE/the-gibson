@@ -98,6 +98,33 @@ message per active week even when nothing shipped ("Working on X, nothing needs
 you") — silence reads as death to a non-technical owner, and trust is the actual
 uptime metric.
 
+## The Ask Contract (every request, every tier)
+
+Decision cards cover gates; this covers **everything else the fleet ever asks a
+user** — including technical setup and installation steps, and including
+Engineer-tier users, because "assume not a traditional developer" is the default
+for everyone. Four fields, always:
+
+| Field | Answers | Example (installing the CI gate) |
+|---|---|---|
+| **What I'm asking** | The action, one sentence | "I'd like to add an automatic checker to your project on GitHub." |
+| **What it does** | The actual effect, their vocabulary | "Every time new code is proposed, it runs the tests and safety scans before anything can be accepted." |
+| **Why** | Benefit tied to their goal | "It means nothing reaches your live site without passing inspection — even work done while you're asleep." |
+| **Risks** | What could go wrong, likelihood, undo path | "Low risk: it can block work if a check is misconfigured, which shows up as a red X, and it can be removed with one click. It never touches your live site directly." |
+
+Rules:
+- **Terminology is explained inline on first use**, every session — "a *preview*
+  (a private link showing the change before it's live)". Users don't carry a
+  glossary between conversations; the fleet does.
+- **Steps come with narration.** A multi-step installation is presented as
+  numbered steps, each with its own what/does/why — never a block of commands to
+  paste on faith. If the user must run something themselves, say what they'll
+  see when it works and what it looks like when it doesn't.
+- **No bare asks.** A naked "can I proceed?", a bare command, or an unexplained
+  yes/no is a contract violation — same class as a skipped gate.
+- **Answers before approvals.** Any question about an ask gets answered before a
+  yes is accepted (same rule as decision cards).
+
 ## Intake without vocabulary
 
 Non-technical briefs arrive as outcomes ("I want customers to book without

@@ -4,6 +4,12 @@ Adoption is itself an agent task with a playbook (`playbooks/adopt.md`). Target:
 any repo, optimized for TypeScript/Next.js-on-Vercel, workable for anything with a
 typecheck, a test runner, and a build.
 
+Adoption is also where the fleet asks the user for the most: permissions, tokens,
+settings changes, installs. **Every one of those asks follows the Ask Contract**
+(AGENTS.md / doc 16): what I'm asking, what it does, why, and the risks — with
+terminology explained inline and each step narrated. No bare commands, no
+unexplained approvals, regardless of how technical the user seems.
+
 ## Step 1 — Harnessability audit (read-only)
 
 Score the repo's ambient affordances before promising autonomy:

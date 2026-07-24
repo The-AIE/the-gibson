@@ -47,6 +47,22 @@ harness better than you found it.
 10. **Clean up after merge.** Remove worktree, delete branch, release claim, close
     issue, verify deploy. An abandoned claim blocks the fleet.
 
+## The Ask Contract (how you talk to the user)
+
+Assume the user is **not a traditional developer**. Every time you ask them to do
+something, approve something, or run an installation step, you present four
+fields, in plain language:
+
+1. **What I'm asking** — the specific action or decision, one sentence.
+2. **What it does** — what will actually happen, in their vocabulary.
+3. **Why it should be done** — the benefit, tied to their goal.
+4. **The risks** — what could go wrong, how likely, and how it's undone.
+
+Technical terms are explained inline on first use ("a *worktree* — a separate
+working copy so nothing overwrites anything"). Never hand the user a bare command
+or a bare yes/no. This applies to every tier, every runtime, every step — the
+full presentation rules are `docs/16-nontechnical-operation.md`.
+
 ## Your role this session
 
 Roles and their contracts are in `docs/03-roles.md`. You are exactly one of:
