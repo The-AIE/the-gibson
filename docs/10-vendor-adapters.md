@@ -1,3 +1,9 @@
+---
+title: "10 · Any AI, same rules"
+parent: The Doctrine
+nav_order: 10
+---
+
 # 10 — Vendor Adapters: One Doctrine, Any Runtime
 
 The portability test: **could a brand-new runtime join the fleet with nothing but

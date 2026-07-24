@@ -1,3 +1,8 @@
+---
+title: "Example · Plan to Issues"
+nav_exclude: true
+---
+
 # Worked example — PLAN.md → issue set (docs/04)
 
 Fictional target: **Northstar Clinic** (`northstar/clinic-web`), a Next.js +

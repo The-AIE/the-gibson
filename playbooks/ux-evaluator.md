@@ -1,4 +1,6 @@
 ---
+title: "Playbook · UX Evaluator"
+nav_exclude: true
 role: ux-evaluator
 inputs:
   - PR with user-visible surface

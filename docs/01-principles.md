@@ -1,3 +1,9 @@
+---
+title: "01 · Why it's built this way"
+parent: The Doctrine
+nav_order: 1
+---
+
 # 01 — Design Principles
 
 Every rule in this repo traces to one of these principles, and every principle traces

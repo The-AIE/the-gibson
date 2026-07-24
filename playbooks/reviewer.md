@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Reviewer"
+nav_exclude: true
 role: reviewer
 inputs:
   - a green PR (CI / local gate already green)

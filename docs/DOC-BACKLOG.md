@@ -1,3 +1,8 @@
+---
+title: "Documentation Backlog"
+nav_exclude: true
+---
+
 # Documentation Backlog — status
 
 Design docs (01–19) are the spec and carry the *why*. This file tracks expansion

@@ -1,3 +1,9 @@
+---
+title: "16 · No terminal required"
+parent: The Doctrine
+nav_order: 16
+---
+
 # 16 — Operating Without a Terminal (Non-Technical Mode)
 
 The Gibson must be runnable by someone who has never opened a terminal and never

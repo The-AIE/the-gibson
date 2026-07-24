@@ -1,3 +1,8 @@
+---
+title: "Adapter · Codex"
+nav_exclude: true
+---
+
 # Adapter — OpenAI Codex
 
 Contract: [docs/10](../../docs/10-vendor-adapters.md). Ergonomics only — **zero private rules**.

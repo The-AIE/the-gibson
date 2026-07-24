@@ -1,3 +1,9 @@
+---
+title: "15 · Spending AI money wisely"
+parent: The Doctrine
+nav_order: 15
+---
+
 # 15 — Model Economics: Which Mind for Which Task
 
 Routing has two axes: **capability required** (can this model clear the quality bar

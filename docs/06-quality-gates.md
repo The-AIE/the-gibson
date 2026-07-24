@@ -1,3 +1,9 @@
+---
+title: "06 · Must-pass quality checks"
+parent: The Doctrine
+nav_order: 6
+---
+
 # 06 — Quality Gates: Green Gate, Tiers, Lenses
 
 ## The green gate (computational, every commit)

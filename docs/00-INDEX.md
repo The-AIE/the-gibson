@@ -1,3 +1,8 @@
+---
+title: Reading Order
+nav_order: 8
+---
+
 # Documentation index — reading order by audience
 
 If you only open one file, use the row that matches you. Glossary:

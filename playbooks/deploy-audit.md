@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Deploy Audit"
+nav_exclude: true
 role: deploy-audit
 inputs:
   - production or staging URL

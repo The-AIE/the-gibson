@@ -1,3 +1,9 @@
+---
+title: "11 · One agent, running all night"
+parent: The Doctrine
+nav_order: 11
+---
+
 # 11 — The Solo Loop: One Agent, Continuously
 
 Fleet mode assumes a dispatcher and multiple runtimes. The solo loop is the other

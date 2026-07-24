@@ -1,3 +1,9 @@
+---
+title: "03 · The crew's nine jobs"
+parent: The Doctrine
+nav_order: 3
+---
+
 # 03 — The Development Team (Roles)
 
 Nine roles. A role is a **contract** — inputs, outputs, forbidden actions — not a

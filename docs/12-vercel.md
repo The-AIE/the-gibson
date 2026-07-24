@@ -1,3 +1,9 @@
+---
+title: "12 · Shipping to Vercel safely"
+parent: The Doctrine
+nav_order: 12
+---
+
 # 12 — Vercel Deployment Doctrine
 
 The Gibson targets software deployed to Vercel. Vercel's model is also load-bearing

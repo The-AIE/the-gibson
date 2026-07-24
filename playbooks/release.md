@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Release"
+nav_exclude: true
 role: release
 inputs:
   - approved, all-gates-green PR

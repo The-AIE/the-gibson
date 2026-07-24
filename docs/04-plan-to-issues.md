@@ -1,3 +1,9 @@
+---
+title: "04 · From plan to to-do list"
+parent: The Doctrine
+nav_order: 4
+---
+
 # 04 — Plan → Issues (Decomposition Protocol)
 
 The gap this closes: ConferenceOS normalizes *one committed ask at a time*

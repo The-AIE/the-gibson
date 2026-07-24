@@ -1,3 +1,8 @@
+---
+title: "Fleet Lessons"
+nav_exclude: true
+---
+
 # Fleet Lessons (append-only)
 
 Format: see docs/09. Newest last. Filed by any agent per Law 9; swept weekly by the

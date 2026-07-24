@@ -1,3 +1,8 @@
+---
+title: Glossary
+nav_order: 7
+---
+
 # 00 — Glossary
 
 One-line definitions for Gibson terms. Plain language first; doc links second.

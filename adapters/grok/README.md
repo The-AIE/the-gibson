@@ -1,3 +1,8 @@
+---
+title: "Adapter · Grok"
+nav_exclude: true
+---
+
 # Adapter — Grok
 
 Contract: [docs/10](../../docs/10-vendor-adapters.md). Default **solo-loop grind** runner

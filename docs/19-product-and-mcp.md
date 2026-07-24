@@ -1,3 +1,9 @@
+---
+title: "19 · The Chatterbuilt product"
+parent: The Doctrine
+nav_order: 19
+---
+
 # 19 — Productization: Chatterbuilt Foreman, CodeWright & the Guided-Setup MCP
 
 *(Names confirmed 2026-07-24: **Foreman** and **CodeWright**.)*

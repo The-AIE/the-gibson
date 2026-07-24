@@ -1,3 +1,8 @@
+---
+title: FAQ
+nav_order: 6
+---
+
 # FAQ
 
 Seeded from questions that show up in the first month of operating The Gibson.

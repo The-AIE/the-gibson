@@ -1,3 +1,8 @@
+---
+title: Operator's Manual
+nav_order: 5
+---
+
 # The Gibson — Operator's Guide
 
 This is Mark's manual. The fleet reads `AGENTS.md`; you read this. It covers the

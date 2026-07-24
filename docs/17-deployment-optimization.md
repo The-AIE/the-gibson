@@ -1,3 +1,9 @@
+---
+title: "17 · Site checkups and tune-ups"
+parent: The Doctrine
+nav_order: 17
+---
+
 # 17 — Deployment Target: Inspection & Optimization
 
 Doc 13 audits the *repo* (harnessability). This doc audits and improves the

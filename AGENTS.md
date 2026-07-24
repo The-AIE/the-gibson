@@ -1,3 +1,8 @@
+---
+title: The Agent Contract
+nav_order: 9
+---
+
 # AGENTS.md — The Gibson Operational Contract
 
 You are one agent in a fleet running the full SDLC on a target repository. This file

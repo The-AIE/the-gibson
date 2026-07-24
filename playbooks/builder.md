@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Builder"
+nav_exclude: true
 role: builder
 inputs:
   - one unclaimed, unblocked GitHub issue with a sprint contract (docs/04)

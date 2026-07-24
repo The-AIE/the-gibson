@@ -1,3 +1,9 @@
+---
+title: "05 · How agents avoid collisions"
+parent: The Doctrine
+nav_order: 5
+---
+
 # 05 — Concurrency: Worktrees, Claims, Hot Files, Lanes
 
 Four isolation layers, each for a distinct failure mode. All battle-tested in

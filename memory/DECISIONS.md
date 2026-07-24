@@ -1,3 +1,8 @@
+---
+title: "Decisions"
+nav_exclude: true
+---
+
 # Decisions (ADR-lite, append-only)
 
 Format: what was decided · alternatives rejected · revisit condition.

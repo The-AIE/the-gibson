@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Decomposer"
+nav_exclude: true
 role: decomposer
 inputs:
   - approved PLAN.md

@@ -1,3 +1,9 @@
+---
+title: "13 · Adopting a project"
+parent: The Doctrine
+nav_order: 13
+---
+
 # 13 — Adoption: Pointing The Gibson at a Repo
 
 Adoption is itself an agent task with a playbook

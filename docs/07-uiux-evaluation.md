@@ -1,3 +1,9 @@
+---
+title: "07 · Testing the look and feel"
+parent: The Doctrine
+nav_order: 7
+---
+
 # 07 — UI/UX Evaluation: Playwright vs. Live Deployments
 
 **Rule zero: evaluate the deployment, not the diff.** The ux-evaluator drives the
