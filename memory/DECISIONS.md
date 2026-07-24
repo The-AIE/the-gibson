@@ -33,3 +33,13 @@ Rejected: best-model-for-everything (cost pathology, L-003); cheapest-for-everyt
 (Tier C evaluation floor is S-grade — bad review is more expensive than good
 tokens).
 Revisit when: pool pricing changes materially.
+
+## D-005 · 2026-07-24 · Foreman/CodeWright ship free inside the AIE subscription
+Decided: no standalone paywall — the Chatterbuilt product (CodeWright + Foreman)
+is a free add-on to the theaie.net membership; the MCP token is issued against
+the subscription; monetization is the AIE flywheel (users → subscribers →
+content → users).
+Rejected (for now): audit-free/Blueprint-free/Foreman-paid gradient; standalone
+suite pricing.
+Revisit when: Foreman usage meaningfully exceeds AIE conversion, or fleet
+compute costs per user demand direct pricing.

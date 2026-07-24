@@ -18,8 +18,6 @@
 
 The trade-craft register is deliberate: *millwright* is instantly legible to
 blue-collar owners — the person who installs and keeps the machinery running.
-Free/paid line in the same vocabulary: **talking to the CodeWright is free
-(interview, audit, Blueprint); hiring the Foreman is the product.**
 
 ## The open-core split
 
@@ -28,7 +26,7 @@ Free/paid line in the same vocabulary: **talking to the CodeWright is free
 | What | The open harness engine (this repo) | The productized tier in the Chatterbuilt suite |
 | Audience | Fork owners, technical operators | Non-technical business owners (doc 16 Operator tier) |
 | Distribution | GitHub fork (doc 18) | **MCP connection + managed onboarding** |
-| Revenue | none (it's the moat's foundation) | Suite tier — pairs with the Coordinator virtual-employee tier; Foreman runs the *software* side of the same promise |
+| Revenue | none (it's the moat's foundation) | Free add-on to the AIE subscription (flywheel monetization); pairs with the Coordinator virtual-employee tier — Foreman runs the *software* side of the same promise |
 
 The strategic fit: Chatterbuilt's thesis is agent-run software for SMBs. The
 Website Agent maintains the site; **Foreman is what maintains everything else** —
@@ -97,14 +95,20 @@ Design rules for every tool:
 Next.js + `mcp-handler` on Vercel (the Mission Control / chatterbuilt-mcp
 pattern), backed by the same store style: `users`, `projects`, `walk_state`
 (resumable onboarding), `decision_cards`, `skills` (or skills-from-repo at build
-time). Auth: per-user token issued at chatterbuilt.com signup — which is also the
-licensing hook for the suite tier. Fleet side unchanged: Foreman's server talks
+time). Auth: per-user token issued against the AIE (theaie.net) subscription — the
+membership *is* the license. Fleet side unchanged: Foreman's server talks
 to Mission Control for dispatch and reads the user's Gibson fork/config for
 doctrine.
 
-## What stays honest
+## Business model (decided 2026-07-24)
 
-The CodeWright without a Foreman attached is a very good guided auditor and
-planner — that alone is the free tier. The paid tier attaches the Foreman (the
-fleet: Mark's, or the user's own runtimes) to actually execute the Blueprint.
-The gradient: **audit free → Blueprint free → the Foreman is the product.**
+**Everything is free — as an add-on to the AIE (theaie.net) subscription.**
+CodeWright and Foreman don't carry their own paywall; they're value inside the
+AIE membership, and the monetization is the flywheel: Foreman/CodeWright users
+become AIE subscribers, support and education content routes to theaie.net, and
+the AIE content chain produces that content. The MCP auth token is issued
+against the AIE subscription — that's the whole licensing mechanism.
+
+This keeps a future gradient available (audit/Blueprint open to everyone as
+lead-gen, Foreman behind the subscription; or a standalone paid tier later),
+but that's a revisit condition, not the plan. Recorded in `memory/DECISIONS.md`.
