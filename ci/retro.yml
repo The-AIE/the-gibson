@@ -1,0 +1,74 @@
+# The Gibson — weekly historian sweep (docs/09)
+# Install as .github/workflows/retro.yml. Emits a markdown artifact of lesson
+# candidates; does not auto-commit to memory/ (historian agent or human applies).
+
+name: gibson-retro
+on:
+  schedule:
+    - cron: "0 14 * * 1" # Mondays 14:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  weekly-sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect exhaust (last 7 days)
+        id: exhaust
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          since=$(date -u -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-7d +%Y-%m-%d)
+          mkdir -p retro-out
+          {
+            echo "# Retro exhaust since $since"
+            echo ""
+            echo "## Merged PRs"
+            gh pr list --state merged --search "merged:>=$since" --limit 50 \
+              --json number,title,mergedAt,author,labels \
+              --jq '.[] | "- #\(.number) \(.title) (\(.mergedAt))"' || echo "(none or gh failed)"
+            echo ""
+            echo "## Open issues labeled gibson / harness-improvement"
+            gh issue list --label harness-improvement --limit 20 \
+              --json number,title --jq '.[] | "- #\(.number) \(.title)"' || true
+            gh issue list --label gibson --limit 20 \
+              --json number,title,labels --jq '.[] | "- #\(.number) \(.title)"' || true
+            echo ""
+            echo "## Recent workflow failures (manual follow-up)"
+            gh run list --status failure --limit 15 \
+              --json databaseId,name,conclusion,updatedAt,headBranch \
+              --jq '.[] | "- \(.name) #\(.databaseId) \(.updatedAt) \(.headBranch)"' || true
+            echo ""
+            echo "## Historian checklist"
+            echo "- [ ] Cluster recurring CI failures vs memory/LESSONS.md"
+            echo "- [ ] Twice-failed tasks → lesson + harness issue"
+            echo "- [ ] Cost ≥3× estimate → lesson (docs/09)"
+            echo "- [ ] Tag lessons local vs general for contribute-back (docs/18)"
+            echo "- [ ] Draft Hermes digest: learned / changed / cost trend"
+          } > retro-out/exhaust.md
+          cat retro-out/exhaust.md
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gibson-retro-exhaust
+          path: retro-out/
+          retention-days: 30
+
+      - name: Open tracking issue (optional)
+        if: ${{ vars.RETRO_OPEN_ISSUE == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          body=$(cat retro-out/exhaust.md)
+          gh issue create \
+            --title "retro: weekly sweep $(date -u +%Y-%m-%d)" \
+            --label "gibson,harness-improvement" \
+            --body "$body" || true

@@ -1,0 +1,141 @@
+# The Gibson — security layers 4, 5, 8 (+ nightly full DAST)
+# Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
+# Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub
+# integration or secrets.VERCEL_TOKEN.
+
+name: gibson-security
+on:
+  pull_request:
+  schedule:
+    # Nightly full DAST vs staging (never active-scan production)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  deployments: read
+
+jobs:
+  # Layer 4 — AuthZ matrix: new routes must appear in the inventory
+  authz-matrix:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Generate route inventory
+        run: |
+          # Copy Gibson script into path or vendor it at adoption:
+          # node .gibson/scripts/route-inventory.mjs --root . --out /tmp/routes.json
+          if [ -f scripts/route-inventory.mjs ]; then
+            node scripts/route-inventory.mjs --root . --out /tmp/routes-now.json
+          elif [ -f .gibson/scripts/route-inventory.mjs ]; then
+            node .gibson/scripts/route-inventory.mjs --root . --out /tmp/routes-now.json
+          else
+            echo "route-inventory.mjs not installed — skip structural check (adoption gap)"
+            exit 0
+          fi
+      - name: Fail if matrix missing for discovered routes
+        run: |
+          # Expected committed matrix at tests/authz/route-matrix.json (adoption)
+          if [ ! -f tests/authz/route-matrix.json ]; then
+            echo "No tests/authz/route-matrix.json yet — report-only until burn-down"
+            exit 0
+          fi
+          node -e '
+            const now=require("/tmp/routes-now.json");
+            const mat=require("./tests/authz/route-matrix.json");
+            const known=new Set((mat.routes||[]).map(r=>r.path+"|"+r.kind));
+            const missing=(now.routes||[]).filter(r=>!known.has(r.path+"|"+r.kind));
+            if(missing.length){
+              console.error("Routes missing from authz matrix:");
+              for(const m of missing) console.error(" -", m.kind, m.path, m.file);
+              process.exit(1);
+            }
+            const unfilled=(mat.routes||[]).filter(r=>r.expect && Object.values(r.expect).some(v=>v==null));
+            if(unfilled.length){
+              console.error("Matrix entries with null expect (fill or mark n/a):", unfilled.length);
+              process.exit(1);
+            }
+            console.log("authz matrix OK");
+          '
+
+  # Layer 5 — ZAP baseline vs. preview (PR only)
+  zap-baseline:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve preview URL
+        id: preview
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # Prefer Gibson script if vendored
+          if [ -x scripts/preview-url.sh ]; then
+            url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 180 || true)
+          else
+            url=""
+          fi
+          if [ -z "$url" ]; then
+            # Fallback: first vercel.app deployment status
+            url=$(gh api "repos/${{ github.repository }}/deployments?sha=${{ github.event.pull_request.head.sha }}" \
+              --jq '.[0].id' 2>/dev/null | head -1 | xargs -I{} gh api "repos/${{ github.repository }}/deployments/{}/statuses" --jq '.[0].environment_url // empty' || true)
+          fi
+          if [ -z "$url" ]; then
+            echo "No preview URL yet — skipping ZAP (not a silent pass on Tier C; annotate)"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "skip=0" >> "$GITHUB_OUTPUT"
+          echo "Preview: $url"
+      - name: ZAP baseline scan
+        if: steps.preview.outputs.skip != '1'
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ steps.preview.outputs.url }}
+          # fail_action true = hard-fail on high+ (docs/08)
+          fail_action: true
+          allow_issue_writing: false
+          cmd_options: "-a"
+
+  # Layer 8 — posture probe vs. preview
+  posture:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve preview + probe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if [ ! -x scripts/posture-probe.sh ]; then
+            echo "posture-probe.sh not vendored — skip"
+            exit 0
+          fi
+          url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 180 || true)
+          if [ -z "$url" ]; then
+            echo "No preview; skip posture"
+            exit 0
+          fi
+          ./scripts/posture-probe.sh "$url" --no-burst
+
+  # Nightly full DAST vs staging only
+  zap-full-staging:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Full scan against staging
+        uses: zaproxy/action-full-scan@v0.10.0
+        with:
+          # Set repo variable STAGING_URL — never production
+          target: ${{ vars.STAGING_URL }}
+          fail_action: true
+          allow_issue_writing: false
+        # Require STAGING_URL configured; otherwise the job should be disabled at adoption
