@@ -31,6 +31,12 @@ every claim traceable, every rule why-linked, examples runnable.
 5d. **VIBECODING.md hardening** — test the guide on 2–3 actual non-technical
    readers; every point of confusion is a lesson (doc 09) and a rewrite.
 
+5e. **scripts/upstream-sync.sh** — doc 18's sync loop: fetch upstream, merge
+   branch, override-shadow report (local/ overrides whose core files changed),
+   plain-language sync PR from CHANGELOG entries; Tier C card when doc 14 /
+   tiers / hard-fail thresholds changed. Plus the contribute-back pre-push grep
+   for fork identifiers.
+
 ## P1 — depth passes on existing docs
 
 6. **Per-doc worked examples**: doc 04 (a real PLAN.md → real issue set, full
