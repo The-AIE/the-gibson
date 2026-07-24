@@ -1,0 +1,61 @@
+# The Gibson — schema change without migration file fails (docs/12, L-002)
+# Install as .github/workflows/schema-guard.yml when the repo has Prisma (or
+# adapt paths for Drizzle/SQL migrations).
+
+name: gibson-schema-guard
+on:
+  pull_request:
+    paths:
+      - "prisma/**"
+      - "**/schema.prisma"
+      - "drizzle/**"
+      - "supabase/migrations/**"
+      - "migrations/**"
+
+jobs:
+  schema-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - name: Detect schema vs migration coherence
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only "$BASE"..."$HEAD" || true)
+          echo "Changed files:"
+          echo "$changed"
+
+          schema_hit=0
+          migration_hit=0
+
+          echo "$changed" | grep -E 'schema\.prisma$|prisma/schema' >/dev/null && schema_hit=1 || true
+          echo "$changed" | grep -E 'prisma/migrations/|drizzle/|supabase/migrations/|/migrations/.*\.sql$' >/dev/null && migration_hit=1 || true
+
+          # Drizzle schema files
+          echo "$changed" | grep -E 'drizzle/.*\.ts$' >/dev/null && schema_hit=1 || true
+
+          if [ "$schema_hit" -eq 1 ] && [ "$migration_hit" -eq 0 ]; then
+            echo "::error::Schema changed without a migration file (L-002 / docs/12)."
+            echo "Schema edits must ship with a replayable migration in the same PR."
+            echo "Additive-only; human gate on merge; one schema claimant fleet-wide."
+            exit 1
+          fi
+
+          if [ "$schema_hit" -eq 1 ]; then
+            echo "Schema + migration both present — OK (still subject to human merge gate)."
+          else
+            echo "No schema model change detected in path filter hit — OK"
+          fi
+
+      - name: Forbid destructive Prisma flags in scripts
+        run: |
+          set -e
+          if git grep -nE -- '--accept-data-loss|--force-reset' -- '*.json' '*.sh' '*.ts' '*.js' '*.yml' '*.yaml' 2>/dev/null; then
+            echo "::error::Destructive prisma/migrate flags are forbidden (docs/12)."
+            exit 1
+          fi
+          echo "No destructive migrate flags found."

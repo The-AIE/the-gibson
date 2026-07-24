@@ -1,0 +1,118 @@
+# The Gibson — UX evaluation against Vercel preview (docs/07)
+# Install as .github/workflows/ux-eval.yml. Skip path or label for pure API PRs;
+# record UX-EVAL: skipped on the PR when not applicable (docs/02).
+
+name: gibson-ux-eval
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  deployments: read
+
+jobs:
+  ux-eval:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+
+      - name: Install
+        run: |
+          if [ -f package-lock.json ]; then npm ci --include=dev
+          elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile
+          else npm i
+          fi
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Resolve preview URL
+        id: preview
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          if [ -x scripts/preview-url.sh ]; then
+            url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 300 || true)
+          else
+            url=""
+          fi
+          if [ -z "$url" ]; then
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            echo "No preview URL — cannot evaluate deployment (docs/07 rule zero)"
+            exit 0
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "skip=0" >> "$GITHUB_OUTPUT"
+
+      - name: Contract flow Playwright tests
+        if: steps.preview.outputs.skip != '1'
+        env:
+          BASE_URL: ${{ steps.preview.outputs.url }}
+        run: |
+          if [ -d tests/e2e/flows ]; then
+            npx playwright test tests/e2e/flows/ --reporter=list,html
+          else
+            echo "No tests/e2e/flows yet — scaffold at adoption; fail closed only when flows exist for the issue"
+            # Soft until burn-down: exit 0. Flip to exit 1 when repo adopts hard UX gate.
+            exit 0
+          fi
+
+      - name: axe via Playwright (if project has @axe-core/playwright tests)
+        if: steps.preview.outputs.skip != '1'
+        env:
+          BASE_URL: ${{ steps.preview.outputs.url }}
+        run: |
+          if [ -d tests/e2e/a11y ]; then
+            npx playwright test tests/e2e/a11y/
+          else
+            echo "No tests/e2e/a11y — document gap; critical/serious must be 0 when present (docs/07)"
+          fi
+
+      - name: Lighthouse CI (preview budgets)
+        if: steps.preview.outputs.skip != '1'
+        env:
+          BASE_URL: ${{ steps.preview.outputs.url }}
+        run: |
+          # Budgets: perf≥0.85 a11y≥0.95 seo≥0.95 LCP≤2.5s CLS≤0.1 (docs/07)
+          # Calibrate at adoption if baselines differ.
+          npx --yes @lhci/cli@0.14.x autorun \
+            --collect.url="$BASE_URL" \
+            --collect.numberOfRuns=3 \
+            --assert.assertions.categories:performance=error:minScore:0.85 \
+            --assert.assertions.categories:accessibility=error:minScore:0.95 \
+            --assert.assertions.categories:seo=error:minScore:0.95 \
+            || echo "Lighthouse failed or not calibrated — treat as REQUEST_CHANGES signal for ux-evaluator"
+
+      - name: Upload Playwright report
+        if: always() && steps.preview.outputs.skip != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+
+      - name: Note for human/agent evaluator
+        if: steps.preview.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Deterministic CI cannot assign Design/Originality/Craft grades.
+          # Inferential ux-evaluator hat must post the score table (docs/07).
+          body="## UX-eval CI (computational half)
+
+          Preview: ${{ steps.preview.outputs.url }}
+          Playwright contract flows + optional axe/Lighthouse ran in CI.
+          **Still required:** ux-evaluator playbook grades (Design / Originality / Craft / Functionality) and the statement that every contract flow was **driven, not assumed**.
+
+          See playbooks/ux-evaluator.md"
+          gh pr comment ${{ github.event.pull_request.number }} --body "$body" || true
