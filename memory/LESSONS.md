@@ -50,3 +50,16 @@ without anyone deciding that.
 **Harness fix:** Gibson rule — missing/broken reviewer blocks the merge (docs/06).
 **Status:** fix-pending (dispatcher patch — see ROADMAP Phase 2)
 **Tags:** #review #fail-closed
+
+## L-006 · 2026-07-24 · doc-backlog-handoff-scope
+**What happened:** DOC-BACKLOG P0–P2 handoff executed as focused commits on
+`main` per operator instruction, while Law 3 / target-repo rules still say
+mutation only in worktrees. Harness self-work on this repo is operator-gated.
+**Root cause:** operational contract for *target* repos vs. harness-authoring
+workflow were not spelled out as separate lanes.
+**Harness fix:** When editing The Gibson itself under an explicit human handoff
+to `main`, record it; for product target repos, Law 3 remains absolute. Future:
+prefer harness changes via PR + cross-runtime review (D-003) even when the
+operator allows direct main for speed.
+**Status:** fix-pending (process note; no code gate yet)
+**Tags:** #process #gibson #docs
