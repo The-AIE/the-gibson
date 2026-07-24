@@ -2,6 +2,20 @@
 
 **A portable, self-improving SDLC harness for agent fleets.**
 
+> **Start here, based on who you are:**
+> - 🙂 **"I'm not technical — I just want software built."** Read
+>   [VIBECODING.md](VIBECODING.md). It's the only page you need, and it has no jargon.
+> - 🔧 **"I run the fleet."** Read [GUIDE.md](GUIDE.md) — the operator's manual.
+> - 🍴 **"I want to fork this for my own team."** Read
+>   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
+>   `local/`, keep getting upstream improvements.
+> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md). That's your contract.
+>
+> Everything in this repo follows one interaction rule, the **Ask Contract**:
+> whenever the system asks a human for anything, it says *what it's asking, what
+> it does, why, and the risks* — in plain language, with every technical term
+> explained. If any doc here fails that standard, that's a bug: open an issue.
+
 Point it at any repo. Give it a well-scoped plan. The fleet decomposes the plan into
 issues, builds, tests, reviews, security-scans, UI/UX-grades against live deployments,
 and ships to Vercel — and does not stop unless a human gate requires it. Every failure
@@ -86,6 +100,7 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/16-nontechnical-operation.md](docs/16-nontechnical-operation.md) | Operator tier: chat-only interface, decision cards, the never-stuck ladder |
 | [docs/17-deployment-optimization.md](docs/17-deployment-optimization.md) | Inspecting & optimizing the deployment target: rendering, caching, cost, field vitals |
 | [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) | Fork it, customize in `local/`, keep receiving upstream updates; contribute back |
+| [docs/19-product-and-mcp.md](docs/19-product-and-mcp.md) | Chatterbuilt Foreman: the productized tier + the guided-setup MCP design |
 | [GUIDE.md](GUIDE.md) | **Mark's operator manual** — start work, approve gates, run the loop, tune the harness |
 | [VIBECODING.md](VIBECODING.md) | **The for-dummies guide** — vibecoding for non-technical owners, zero jargon |
 | [docs/DOC-BACKLOG.md](docs/DOC-BACKLOG.md) | Documentation build-out queue (Grok handoff) |
