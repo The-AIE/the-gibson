@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Security"
+nav_exclude: true
 role: security
 inputs:
   - every PR (light layers); Tier C / release (full layers)

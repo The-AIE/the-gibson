@@ -1,3 +1,9 @@
+---
+title: "14 · The sixteen interruptions"
+parent: The Doctrine
+nav_order: 14
+---
+
 # 14 — Human Gates: The Only Reasons to Stop
 
 This list is **closed**. If the situation isn't here, the agent keeps working —

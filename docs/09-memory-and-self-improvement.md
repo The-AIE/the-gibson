@@ -1,3 +1,9 @@
+---
+title: "09 · How it learns from mistakes"
+parent: The Doctrine
+nav_order: 9
+---
+
 # 09 — Memory and Self-Improvement
 
 The Gibson's memory answer is deliberately boring: **git is the memory substrate.**

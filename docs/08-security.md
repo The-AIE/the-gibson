@@ -1,3 +1,9 @@
+---
+title: "08 · The security system"
+parent: The Doctrine
+nav_order: 8
+---
+
 # 08 — The Security Testing System
 
 Eight layers. Each is either **hard-fail** (blocks merge/release) or **report-only**

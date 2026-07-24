@@ -1,3 +1,9 @@
+---
+title: "02 · The assembly line"
+parent: The Doctrine
+nav_order: 2
+---
+
 # 02 — The SDLC Pipeline
 
 Ten stages. Every stage has an **entry artifact**, an **exit artifact**, and a

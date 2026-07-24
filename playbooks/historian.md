@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Historian"
+nav_exclude: true
 role: historian
 inputs:
   - exhaust: merged PRs, CI failures, review verdicts, eval reports, costs, incidents

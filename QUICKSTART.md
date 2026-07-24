@@ -1,3 +1,8 @@
+---
+title: Quickstart
+nav_order: 4
+---
+
 # QUICKSTART — clone to first adopted repo
 
 Fastest honest path. Every step uses the **Ask Contract**: what / does / why /

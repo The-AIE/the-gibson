@@ -1,3 +1,8 @@
+---
+title: "Memory"
+nav_exclude: true
+---
+
 # memory/
 
 The fleet's durable memory. See docs/09 for the full doctrine.

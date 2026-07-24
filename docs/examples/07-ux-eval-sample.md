@@ -1,3 +1,8 @@
+---
+title: "Example · UX Eval"
+nav_exclude: true
+---
+
 # Worked example — Playwright flow + UX eval report (docs/07)
 
 Continues the Northstar Clinic password-reset story (issue #103 / #104).

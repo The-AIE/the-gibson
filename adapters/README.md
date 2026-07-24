@@ -1,3 +1,8 @@
+---
+title: "Adapters"
+nav_exclude: true
+---
+
 # adapters/ — vendor runtimes
 
 One directory per runtime. Contract and matrix: [docs/10](../docs/10-vendor-adapters.md).

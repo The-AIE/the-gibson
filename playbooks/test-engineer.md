@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Test Engineer"
+nav_exclude: true
 role: test-engineer
 inputs:
   - PR + its sprint contract

@@ -1,3 +1,8 @@
+---
+title: "Changelog"
+nav_exclude: true
+---
+
 # Changelog
 
 Written for fork owners deciding whether to take an update: what changed, why,

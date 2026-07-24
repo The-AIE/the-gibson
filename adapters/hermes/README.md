@@ -1,3 +1,8 @@
+---
+title: "Adapter · Hermes"
+nav_exclude: true
+---
+
 # Adapter — Hermes
 
 Contract: [docs/10](../../docs/10-vendor-adapters.md). Hermes is the fleet's **voice**

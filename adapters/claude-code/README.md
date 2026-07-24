@@ -1,3 +1,8 @@
+---
+title: "Adapter · Claude Code"
+nav_exclude: true
+---
+
 # Adapter — Claude Code
 
 Contract: [docs/10](../../docs/10-vendor-adapters.md). This adapter adds ergonomics only

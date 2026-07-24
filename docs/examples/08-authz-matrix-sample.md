@@ -1,3 +1,8 @@
+---
+title: "Example · AuthZ Matrix"
+nav_exclude: true
+---
+
 # Worked example — AuthZ matrix for a 3-role app (docs/08 layer 4)
 
 Fictional app: **Northstar Clinic** — roles `anon`, `patient`, `staff`.

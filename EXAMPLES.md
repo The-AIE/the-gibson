@@ -1,3 +1,8 @@
+---
+title: Five Real Examples
+nav_order: 3
+---
+
 # What Would You Build? Five Real-World Examples
 
 *Written for business owners, not developers. Each example shows exactly what

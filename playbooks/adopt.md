@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Adopt"
+nav_exclude: true
 role: adopt
 inputs:
   - target repository (local path and/or GitHub remote)

@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Planner"
+nav_exclude: true
 role: planner
 inputs:
   - brief from Mark / Operator (outcome language OK) or a standing goal

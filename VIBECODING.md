@@ -1,3 +1,8 @@
+---
+title: For Business Owners
+nav_order: 2
+---
+
 # Vibecoding for Absolutely Everyone
 
 *The no-experience-needed guide to getting software built by your AI team.*

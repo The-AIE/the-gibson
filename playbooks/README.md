@@ -1,3 +1,8 @@
+---
+title: "Playbooks"
+nav_exclude: true
+---
+
 # playbooks/ — the portable skill format
 
 One file per role ([docs/03](../docs/03-roles.md)) plus loop, adopt, and deploy-audit

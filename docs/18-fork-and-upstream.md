@@ -1,3 +1,9 @@
+---
+title: "18 · Fork it, stay updated"
+parent: The Doctrine
+nav_order: 18
+---
+
 # 18 — Fork & Upstream: Customize Without Losing Updates
 
 The Gibson is designed to be **forked**. You take a copy, adapt it to your fleet,

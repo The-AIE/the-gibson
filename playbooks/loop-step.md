@@ -1,4 +1,6 @@
 ---
+title: "Playbook · Solo Loop Step"
+nav_exclude: true
 role: solo-loop-step
 inputs:
   - "{{hat}}" — one of: builder | test-engineer | reviewer | ux-evaluator | security | release | historian | decomposer | planner
