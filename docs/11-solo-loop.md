@@ -122,3 +122,6 @@ deliberately left, from the major loop methodologies:
 The compressed claim: **Ralph's persistence + Spec Kit's front-loading + Anthropic's
 adversarial separation + TDD's executable contracts + GOAP's resume-don't-restart**,
 with every "am I done?" answered by a sensor instead of the model's own opinion.
+
+---
+[← 10 · Any AI, same rules](10-vendor-adapters.md) · [Home](../index.md) · [12 · Shipping to Vercel safely →](12-vercel.md)

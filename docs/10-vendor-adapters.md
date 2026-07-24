@@ -61,3 +61,6 @@ The queue's `reviewer_platform` field stays the mechanism: worker finishes →
 dispatcher runs the reviewer runtime read-only with the review playbook → verdict
 appended → REQUEST_CHANGES re-queues for the builder. Gibson hardening: reviewer
 unavailable = **block, don't skip** (doc 06).
+
+---
+[← 09 · How it learns from mistakes](09-memory-and-self-improvement.md) · [Home](../index.md) · [11 · One agent, running all night →](11-solo-loop.md)

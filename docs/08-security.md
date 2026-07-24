@@ -88,3 +88,6 @@ Scaffold: `scripts/route-inventory.mjs`. Posture: `scripts/posture-probe.sh`.
 - Vulnerability discovered in *production* (not a PR) → file privately, human decides
   disclosure/hotfix path.
 - Any active exploitation signal → stop everything, page Mark.
+
+---
+[← 07 · Testing the look and feel](07-uiux-evaluation.md) · [Home](../index.md) · [09 · How it learns from mistakes →](09-memory-and-self-improvement.md)

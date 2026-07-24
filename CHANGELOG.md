@@ -8,6 +8,19 @@ nav_exclude: true
 Written for fork owners deciding whether to take an update: what changed, why,
 and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
+## v0.1.3 — 2026-07-24
+
+Docs site: GitHub Pages + navigation + plain-English callouts.
+
+- **Navigation:** just-the-docs front matter on operator docs, AGENTS, glossary,
+  reading order; doctrine parent page with chapters 01–19 as children; secondary
+  pages (roadmap, changelog, playbooks, adapters, examples, memory) rendered but
+  `nav_exclude` so the sidebar stays clean.
+- **Plain English:** callouts after the H1 on docs 01–19, AGENTS.md, GUIDE.md, and
+  QUICKSTART.md for non-technical readers.
+- **Footers:** prev / Home / next links at the bottom of each doctrine chapter.
+- Migration: none. Forks that already published Pages will pick this up on sync.
+
 ## v0.1.0 — 2026-07-24
 
 Initial public doctrine.

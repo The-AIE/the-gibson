@@ -104,3 +104,6 @@ gates:
   autonomously; it may only loosen with Mark's sign-off.
 - The quarterly *downward* stress-test (principle 1): the historian proposes removing
   controls that stronger models have made into pure friction, with evidence.
+
+---
+[← 08 · The security system](08-security.md) · [Home](../index.md) · [10 · Any AI, same rules →](10-vendor-adapters.md)

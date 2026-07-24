@@ -104,3 +104,6 @@ issues. Tooling: Vercel API/MCP (deployments, analytics, runtime + build logs),
 Lighthouse, bundle analyzer, log queries — all scripted per `scripts/README.md`
 (`deploy-audit.sh`, DOC-BACKLOG P0). Vendor-neutral principle holds: the audit is
 a playbook + scripts, so any runtime can run it.
+
+---
+[← 16 · No terminal required](16-nontechnical-operation.md) · [Home](../index.md) · [18 · Fork it, stay updated →](18-fork-and-upstream.md)

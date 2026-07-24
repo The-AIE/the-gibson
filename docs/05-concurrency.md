@@ -82,3 +82,6 @@ Target repos list their specific hot files in their `AGENTS.md` Gibson section.
 Before push: `git fetch origin && git rebase origin/main`; resolve conflicts in
 *your* worktree. Merge small units fast — long-lived branches are where clobbering
 comes back. Never force-push main.
+
+---
+[← 04 · From plan to to-do list](04-plan-to-issues.md) · [Home](../index.md) · [06 · Must-pass quality checks →](06-quality-gates.md)

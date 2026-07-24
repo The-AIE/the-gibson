@@ -89,3 +89,6 @@ codebase when the burn-down completes.
 A Tier A issue can go plan→issue→build→test→review→eval→merge→deploy→verified with
 **zero human touches**, and a Tier C issue stops at exactly the human gates and
 nowhere else.
+
+---
+[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md)

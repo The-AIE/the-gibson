@@ -86,3 +86,6 @@ Run on schedule, not per-PR: dependency CVE watch, Lighthouse budgets on product
 flaky-test detector, merge-cadence report, unresolved-`test.todo` trend, claim-row
 staleness. Findings become issues, filed by `monitor`/`historian` — this is the
 "quality right" complement to keeping quality left.
+
+---
+[← 05 · How agents avoid collisions](05-concurrency.md) · [Home](../index.md) · [07 · Testing the look and feel →](07-uiux-evaluation.md)
