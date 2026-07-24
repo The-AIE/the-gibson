@@ -42,6 +42,8 @@ language first; runnable beats descriptive. Never contradict docs 01–19 silent
 | 10 | Architecture diagram in README | **done** |
 | 11 | FAQ.md | **done** |
 | 12 | Case study first adopted repo | **open** — needs real metrics after first production adoption |
+| 13 | Screenshots throughout docs | **open** — real captures, not mockups: a decision card arriving in chat, a PR with gates green, a UX-eval report + screenshot gallery, the solo-loop journal, the MC dashboard. Capture during the Phase 2 end-to-end demo so every image is an artifact of a real run. Store in `docs/assets/`, alt text mandatory, embed in VIBECODING / EXAMPLES / QUICKSTART / GUIDE |
+| 14 | Copy-paste prompts library | **open** — `docs/prompts.md` (nav title "Copy-Paste Prompts"): "say this to your agent" blocks for each common moment — start a plan, adopt a repo, claim an issue, request a review, run the solo loop, ask for a site audit. One fenced block per prompt, one when-to-use sentence above it; cross-link from QUICKSTART, GUIDE, and every playbook's How-to section |
 
 ## Also delivered (usage docs)
 
