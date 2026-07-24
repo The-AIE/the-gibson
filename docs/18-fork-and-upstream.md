@@ -6,6 +6,10 @@ nav_order: 18
 
 # 18 — Fork & Upstream: Customize Without Losing Updates
 
+> 🙂 **In plain English:** Make your own copy, customize it for your team, and still pull
+> in improvements from the original. Your local tweaks stay separate so updates do not
+> wipe them out.
+
 The Gibson is designed to be **forked**. You take a copy, adapt it to your fleet,
 your repos, and your rules — and you keep receiving upstream improvements (new
 gates, better playbooks, fresh lessons) with near-zero merge pain. The trick is

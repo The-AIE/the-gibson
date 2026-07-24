@@ -6,6 +6,10 @@ nav_order: 7
 
 # 07 — UI/UX Evaluation: Playwright vs. Live Deployments
 
+> 🙂 **In plain English:** Looking at code is not enough for screens people use. An agent
+> opens the real preview website, clicks through like a customer, and grades what it
+> actually sees and experiences — not what the builder claimed it would feel like.
+
 **Rule zero: evaluate the deployment, not the diff.** The ux-evaluator drives the
 PR's **Vercel preview URL** with Playwright — clicking, typing, scrolling like a
 user — and grades what it actually experiences. The builder's description of the UI

@@ -6,6 +6,10 @@ nav_order: 10
 
 # 10 — Vendor Adapters: One Doctrine, Any Runtime
 
+> 🙂 **In plain English:** The rules are the same no matter which AI brand you use.
+> Brand-specific folders only add convenience. They never invent private rules that
+> other tools would not know about.
+
 The portability test: **could a brand-new runtime join the fleet with nothing but
 git, a shell, and the ability to read Markdown?** Yes — because the core is
 `AGENTS.md` + `docs/` + `scripts/` + CI, all vendor-neutral. Adapters add ergonomics

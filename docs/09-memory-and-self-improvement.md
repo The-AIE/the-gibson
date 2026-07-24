@@ -6,6 +6,10 @@ nav_order: 9
 
 # 09 — Memory and Self-Improvement
 
+> 🙂 **In plain English:** The crew remembers mistakes in simple shared files, not in one
+> AI's private memory. When something fails twice, the lesson is written down so the
+> next agent does not repeat it.
+
 The Gibson's memory answer is deliberately boring: **git is the memory substrate.**
 Markdown files in `memory/`, versioned, reviewable, greppable, vendor-neutral, and
 carried to every runtime by `git pull`. Ruflo's lesson applies — hooks + memory

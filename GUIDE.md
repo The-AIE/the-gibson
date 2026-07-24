@@ -5,6 +5,10 @@ nav_order: 5
 
 # The Gibson — Operator's Guide
 
+> 🙂 **In plain English:** This is the human operator's manual. It covers the five things
+> you actually do: start work, approve important decisions, read the daily summary, run
+> the overnight loop, and tune the system when something keeps going wrong.
+
 This is Mark's manual. The fleet reads `AGENTS.md`; you read this. It covers the
 five things you actually do: start work, approve gates, read the digest, run the
 solo loop, and tune the harness. Everything here is *why-linked* — each step points

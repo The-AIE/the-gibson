@@ -6,6 +6,10 @@ nav_order: 15
 
 # 15 — Model Economics: Which Mind for Which Task
 
+> 🙂 **In plain English:** Different tasks need different AI strength and cost different
+> amounts. Use the cheaper option when it is good enough, and save the expensive models
+> for hard problems that truly need them.
+
 Routing has two axes: **capability required** (can this model clear the quality bar
 for this task class?) and **marginal cost** (what does the next token actually
 cost us?). The fleet's pricing reality makes the second axis sharp: flat-rate
