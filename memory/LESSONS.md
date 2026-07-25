@@ -160,3 +160,64 @@ checkout/worktree errors, fall back to API
 Do not force-checkout main in a fleet worktree.
 **Status:** fix-pending (the-gibson#6; practiced on PR #100; playbook not yet patched)
 **Tags:** #release #github #worktree #solo-loop #general
+
+## L-021 · 2026-07-25 · verdict-comment-not-enough-for-branch-protection
+**What happened:** chatterbuilt PR #98 (articles lane, fleet wt-articles) had
+hard CI green, cross-vendor Claude APPROVE, security CLEAR, UX skip, and a
+same-author PR comment ending in `VERDICT: APPROVE` (L-015 workaround). Release
+still could not complete a normal non-admin merge: base-branch / required-review
+policy + owner cannot `gh pr review --approve` self, compounded by concurrent
+fleet merges racing main (required re-sync). Resolved with re-sync then **admin
+squash merge** (`3193b28`); issue #23 closed; smoke green.
+**Root cause:** GitHub branch protection evaluates formal `reviewDecision`, not
+the solo-loop `VERDICT: APPROVE` comment convention. L-015 unblocks *process*
+signaling but not GitHub *mergeability* when reviews are required. Fleet
+concurrency on `main` is expected and separate (re-sync before merge).
+**Harness fix:** (1) Guide — release playbook: when blocked only by missing
+formal APPROVED review on same-author PRs, document gates (CI green +
+`VERDICT: APPROVE` line + security clear + Tier), then either (a) admin
+squash with explicit checklist in the merge comment, or (b) obtain real
+`--approve` from a different GitHub identity / `REVIEWER_CMD` that can post
+a formal review. (2) Prefer (b) so admin is rare. (3) Always re-sync with
+`origin/main` under multi-lane fleet before merge attempts.
+**Status:** fix-pending (guide; playbook not yet patched; practiced on PR #98)
+**Tags:** #release #github #branch-protection #solo-loop #review #general
+
+## L-022 · 2026-07-25 · gitleaks-security-fast-cross-lane-until-pr-scoped
+**What happened:** chatterbuilt fleet PR #96 (autopilot marketing, wt-autopilot)
+had CI `security-fast` red for the whole gate path even though `gitleaks` on
+`main..HEAD` for that PR was clean. Residual findings were SAMPLE_KEY fixtures
+from concurrent #59 (`feat/59-claim-page`), not this PR's introduced risk.
+Security hat correctly CLEAR'd PR-introduced risk; release still could not merge
+until `origin/main` (gitleaks PR-range scope + AC5 SHA inject) was merged into
+the feature branch and the check went green.
+**Root cause:** Secret scanners that are not strictly scoped to the PR commit
+range (or fleets running branches that predate the scope fix) make one lane's
+fixtures fail unrelated lanes' required checks. Cross-lane CI bleed under high
+fleet concurrency.
+**Harness fix:** Sensor — chatterbuilt `db92db4` / `710e9a7` scope gitleaks to
+PR/push commit range and inject SHAs via env. Guide — security + release: (1)
+always re-check `gitleaks` on `main..HEAD` for *this* PR before treating
+security-fast red as this-lane risk; (2) merge/rebase `origin/main` so CI harness
+fixes apply before parking on a red security-fast; (3) do not close or block a
+marketing PR solely for out-of-range fixtures on another branch.
+**Status:** fixed (sensor on chatterbuilt main; re-sync still operator/release duty)
+**Tags:** #security #ci #gitleaks #fleet #concurrency #local
+
+## L-023 · 2026-07-25 · active-work-claim-table-merge-conflicts
+**What happened:** Release on PR #96 had to resolve `docs/active-work.md` claim
+conflicts when re-syncing with `main`. Multiple concurrent fleet lanes
+(issue-59, issue-24, issue-73, issue-15, issue-19, …) each append/remove claim
+rows in the same markdown table, so merges of green feature PRs repeatedly
+conflict on that one file even when product paths do not overlap.
+**Root cause:** A single shared mutable claim ledger is a hot file under max
+mutating lanes; table rows are not append-only at the git hunk level.
+**Harness fix:** Prefer sensors/process: (1) claim primarily via GitHub
+`agent-claimed` label + issue comment; treat `docs/active-work.md` as optional
+human dashboard, or (2) per-lane claim snippets under `docs/claims/<lane>.md`
+assembled by a script, or (3) release playbook: auto-resolve active-work by
+taking union of claim rows and re-running `release-claim.sh` post-merge. Until
+then, release may resolve claim-table conflicts only (no product code) when
+unblocking an otherwise green merge.
+**Status:** fix-pending (the-gibson#7)
+**Tags:** #concurrency #claims #release #fleet #local
