@@ -221,3 +221,24 @@ then, release may resolve claim-table conflicts only (no product code) when
 unblocking an otherwise green merge.
 **Status:** fix-pending (the-gibson#7)
 **Tags:** #concurrency #claims #release #fleet #local
+
+## L-012 · 2026-07-24 · preview-url-ci-skip-under-vercel-protection
+**What happened:** On chatterbuilt (and fleet PRs generally), CI jobs
+`gibson-ux-eval` / `zap-baseline` / `posture` often SUCCESS via **skip** because
+`preview-url.sh` times out (default 180s) or cannot authenticate past Vercel
+Deployment Protection SSO — even when a READY branch deploy exists. Observed
+from early adoption PRs (#81/#82) through ongoing fleet work including PR #101
+security hat (L5/L8 CI skip; prod posture-probe compensated). Live agents
+recover with `vercel curl` + protection-bypass outside CI; hard-fail DAST/UX
+paths stay unproven in Actions.
+**Root cause:** Preview resolution + Deployment Protection not wired for CI
+(timeout race; missing `VERCEL_AUTOMATION_BYPASS_SECRET` path); workflows treat
+missing BASE_URL as soft skip (annotated) rather than non-pass when Tier B/C
+UI/security surface needs a live target.
+**Harness fix:** Sensor preferred (the-gibson#2): longer CI timeout; wait for
+READY; inject bypass secret; fail/annotate non-pass (not skip-as-green) when
+Tier B/C needs preview. Guide: security/ux hats must not claim L5/L8/UX CI
+skip as hard-fail pass; compensate with live preview or prod posture when
+appropriate. **Do not** loosen Tier C human gates.
+**Status:** fix-pending (the-gibson#2)
+**Tags:** #ci #preview #vercel #security #ux-eval #local
