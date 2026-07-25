@@ -242,3 +242,46 @@ skip as hard-fail pass; compensate with live preview or prod posture when
 appropriate. **Do not** loosen Tier C human gates.
 **Status:** fix-pending (the-gibson#2)
 **Tags:** #ci #preview #vercel #security #ux-eval #local
+
+## L-024 · 2026-07-25 · release-claim-wipes-residual-sibling-claims
+**What happened:** After chatterbuilt PR #113 (slice-9 magnet → preview-plan)
+merged as a Tier B PRE-LAUNCH partial ship, Law 10 cleanup via
+`release-claim.sh 15` would have stripped **all** `issue-15-*` claim rows,
+removed every `wt-15-*` worktree, and dropped `agent-claimed` from #15 —
+including the live residual F1 claim `issue-15-demo-stale-plan-clear`
+(PR #115) that another lane had already filed. Release correctly skipped
+re-running release-claim (merged slug already gone; residual protected).
+#15 stayed OPEN (L-013 Related-only; `closingIssuesReferences: []`).
+**Root cause:** `release-claim.sh` keys cleanup on issue number only
+(`grep issue-N-`, remove label on #N) and assumes one claim per issue end-of-life.
+Multi-slice issues keep residuals under new claim slugs while the parent issue
+stays open.
+**Harness fix:** (1) Sensor — add `--claim-id`/`--slug` so only that row +
+matching worktree/branch are removed; retain `agent-claimed` if any
+`issue-N-*` row remains. (2) Guide — release playbook: before cleanup, inspect
+`origin/main` claims for residual sibling rows; never blind-run full
+`release-claim.sh N` on partial ships. Related L-013 / L-023 / the-gibson#7.
+**Status:** fix-pending (the-gibson#9; guide practiced on PR #113; sensor not yet)
+**Tags:** #release #claims #partial-ship #solo-loop #local #process
+
+## L-025 · 2026-07-25 · conventional-commit-fix-title-autoclose
+**What happened:** chatterbuilt PR #115 (partial AC7 stale previewPlan clear)
+merged with intended Related-only residual body, but GitHub still populated
+`closingIssuesReferences: [#15]` and auto-closed multi-slice issue #15. Release
+reopened + residual comment (L-013 recovery path). Title was
+`fix(#15): clear stale previewPlan on magnet re-submit (F1)`.
+**Root cause:** Conventional-commit PR titles `fix(#N):` / `fixes(#N):` are
+GitHub closing keywords. Agents use them by habit for "bugfix" slices even
+when the parent issue is multi-phase and must stay open. Related-only body
+cannot override a closing-keyword title/link. L-013 already forbids
+fix/close/resolve near `#N` for partials; the `fix(#N):` title form is the
+highest-frequency miss.
+**Harness fix:** (1) Guide — for multi-slice / Related-only PRs never use
+`fix|close|resolve|closes|fixes|resolves` in title; prefer
+`feat(scope): … (related #N)` or `chore(…): …` without issue-closing keywords.
+(2) Sensor (extends the-gibson#4) — release preflight hard-fails when title
+matches closing-keyword+#N **or** `closingIssuesReferences` non-empty while
+body marks partial/Related-only. (3) Practice — reopen + residual already
+proven on #115.
+**Status:** fix-pending (the-gibson#4; L-025 evidence commented 2026-07-25)
+**Tags:** #github #release #partial-ship #process #local #conventional-commits
