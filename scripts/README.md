@@ -19,6 +19,7 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |
+| [`delivery-control/`](delivery-control/) | Doc 20: audit/harden branch protection + Production env; promote/hotfix (portable). **Never rotates secrets.** |
 
 ## How to use (quick path)
 

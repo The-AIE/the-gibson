@@ -21,9 +21,11 @@ forbidden:
 sources:
   - docs/13-adoption.md
   - docs/17-deployment-optimization.md (inspect alongside audit)
+  - docs/20-delivery-control.md
   - docs/16-nontechnical-operation.md
   - templates/target-repo/
   - ci/
+  - scripts/delivery-control/
 ---
 
 # Adopt — point The Gibson at a repository
@@ -71,8 +73,10 @@ Score ambient affordances **before** promising autonomy. Output
 - [ ] CI present; branch protection on
 - [ ] Vercel wiring: **Production Branch verified in project settings**, not docs
 - [ ] Preview deployments on
+- [ ] **Delivery control** (docs/20): `scripts/delivery-control/audit.sh --repo owner/name`
+      — P0 fix-list if production write path is unprotected
 - [ ] Schema/migration model documented (who applies to prod?)
-- [ ] Secrets hygiene (`.env*` ignored; gitleaks clean once)
+- [ ] Secrets hygiene (`.env*` ignored; gitleaks clean once; secret rotation = G4 only)
 
 ### Deployment audit (doc 17 inspect)
 

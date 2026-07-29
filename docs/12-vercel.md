@@ -29,6 +29,10 @@ adoption (doc 13), verify the Production Branch setting and write the true model
 into the target's AGENTS.md. If merge-to-main deploys prod, the merge gate IS the
 deploy gate and inherits its weight.
 
+**Delivery control:** locking the git/GitHub write path (protection, reviews,
+strict checks, Production env) is [docs/20-delivery-control.md](20-delivery-control.md).
+Run `scripts/delivery-control/audit.sh` at adoption and before promotes.
+
 ## Deploy verification (release role)
 
 1. Deployment exists for the expected commit SHA (`vercel inspect` / API).
@@ -69,4 +73,4 @@ failure-rate trend, and preview-deployment pileup (stale PRs holding previews op
 close or draft them).
 
 ---
-[← 11 · One agent, running all night](11-solo-loop.md) · [Home](../index.md) · [13 · Adopting a project →](13-adoption.md)
+[← 11 · One agent, running all night](11-solo-loop.md) · [Home](../index.md) · [13 · Adopting a project →](13-adoption.md) · [20 · Delivery control](20-delivery-control.md)

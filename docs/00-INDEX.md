@@ -65,6 +65,7 @@ If you only open one file, use the row that matches you. Glossary:
 | 17 | [deploy-opt](17-deployment-optimization.md) | Inspect/optimize |
 | 18 | [fork-upstream](18-fork-and-upstream.md) | Fork without pain |
 | 19 | [product-mcp](19-product-and-mcp.md) | Foreman / CodeWright |
+| 20 | [delivery-control](20-delivery-control.md) | Production write-path locks + promote |
 
 ## Worked examples & ops
 

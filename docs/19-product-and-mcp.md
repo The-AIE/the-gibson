@@ -124,4 +124,4 @@ lead-gen, Foreman behind the subscription; or a standalone paid tier later),
 but that's a revisit condition, not the plan. Recorded in `memory/DECISIONS.md`.
 
 ---
-[← 18 · Fork it, stay updated](18-fork-and-upstream.md) · [Home](../index.md)
+[← 18 · Fork it, stay updated](18-fork-and-upstream.md) · [Home](../index.md) · [20 · Delivery control →](20-delivery-control.md)

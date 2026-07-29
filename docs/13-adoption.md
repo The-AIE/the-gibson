@@ -34,6 +34,10 @@ Score the repo's ambient affordances before promising autonomy:
 - [ ] CI present; branch protection on
 - [ ] Vercel wiring: which branch is REALLY the Production Branch (verify in
       project settings, not docs); preview deployments on
+- [ ] **Delivery control** ([docs/20](20-delivery-control.md)): run
+      `scripts/delivery-control/audit.sh --repo owner/name` — fail or P0 the
+      fix-list if the production write path is unprotected (`enforce_admins`,
+      required reviews, strict checks, prod branch protection in model B)
 - [ ] Schema/migration model (Prisma? migration files? who applies to prod?)
 - [ ] Secrets hygiene (.env* ignored, no committed secrets — run gitleaks once)
 
@@ -66,6 +70,10 @@ From `ci/` and `templates/target-repo/`:
 3. Playwright config + `tests/e2e/flows/` scaffold with preview-URL wiring.
 4. Schema-guard workflow when a schema exists.
 5. DCO check if the repo signs commits.
+6. Optional `.gibson-delivery.json` from
+   `templates/target-repo/gibson-delivery.json` (branch model + required check
+   context names). Harden only with operator apply approval:
+   `scripts/delivery-control/apply-branch-protection.sh --apply`.
 
 Calibrate, don't transplant: budgets (Lighthouse, size) start at Gibson defaults and
 get tuned to the repo's reality in the adoption PR.
@@ -91,4 +99,4 @@ A Tier A issue can go plan→issue→build→test→review→eval→merge→depl
 nowhere else.
 
 ---
-[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md)
+[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](20-delivery-control.md)
