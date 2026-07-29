@@ -14,6 +14,8 @@ WHAT IT DOES
 WHY
   Two agents editing the same files silently destroyed each other's work
   (lesson L-001). Claims + worktrees make collisions physically hard.
+  Dual claims on the *same issue* under different slugs also happened (L-028);
+  this script now refuses them.
 
 RISKS
   - Pushes a small commit to main (claim row only). Undo: release-claim.sh.
@@ -78,6 +80,21 @@ if ! git diff --quiet -- docs/active-work.md 2>/dev/null; then
   die "docs/active-work.md has uncommitted local edits — resolve first"
 fi
 
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# --- L-028 / #11: refuse dual claims on the same issue ---
+# 1. Issue already has agent-claimed label?
+EXISTING_LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+if echo ",$EXISTING_LABELS," | grep -q ',agent-claimed,'; then
+  die "issue #$ISSUE already has agent-claimed label — dual claim refused (L-028). Coordinate or release the existing claim first."
+fi
+
+# 2. Any live claim row for this issue number?
+if grep -E "^\\| [^|]+ \\| issue-${ISSUE}-" "$ACTIVE" >/dev/null 2>&1; then
+  EXISTING_CLAIM=$(grep -E "^\\| [^|]+ \\| issue-${ISSUE}-" "$ACTIVE" | head -1 | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  die "issue #$ISSUE already has live claim row '$EXISTING_CLAIM' — dual claim refused (L-028). Coordinate or release the existing claim first."
+fi
+
 # Overlap check against live claims (any non-header row)
 if grep -E '^\| [0-9]{4}-' "$ACTIVE" >/dev/null 2>&1; then
   while IFS= read -r line; do
@@ -106,13 +123,12 @@ LABEL_ADDED=0
 undo_label() {
   if [[ "$LABEL_ADDED" -eq 1 ]]; then
     info "undo: removing agent-claimed from #$ISSUE"
-    gh issue edit "$ISSUE" --repo "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --remove-label agent-claimed 2>/dev/null || true
+    gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-claimed 2>/dev/null || true
   fi
 }
 trap undo_label ERR
 
 info "adding agent-claimed to #$ISSUE"
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 gh issue edit "$ISSUE" --repo "$REPO" --add-label agent-claimed
 LABEL_ADDED=1
 
