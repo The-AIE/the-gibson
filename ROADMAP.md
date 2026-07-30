@@ -50,6 +50,10 @@ portably. Migrated here from conference-os (originals closed with pointers):
 - **Fleet control plane** (was #699): issue dispatch, exact-SHA review binding,
   reconciliation — GitHub-native, repo-agnostic.
 
+- **Merge-queue controls** (was conference-os #774/#847): audit-derived
+  enforceable controls; serial integration queue (one head + Preview READY
+  before next). Control-plane hardening, repo-agnostic.
+
 Boundary rule proven in production 2026-07-29/30: repos keep only the thin
 ENFORCEMENT layer (CI gates with teeth: build/tests, schema guards, DCO,
 secrets, review-evidence until per-actor identity); all orchestration and
