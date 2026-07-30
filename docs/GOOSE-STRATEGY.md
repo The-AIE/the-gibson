@@ -58,3 +58,34 @@ thing businesses pay for on top of it.
   ConferenceOS**, packaged both as a Gibson command and as a Goose recipe/extension. Measure:
   plumbing saved vs. brand/control retained. If it holds, adopt option D; if re-brand or
   dependency terms fail, fall back to option B (borrow patterns, keep a thin own harness).
+
+
+---
+
+## metaharness vs Goose — foundation vs pattern library
+
+Both are meta-harness-class projects. Only one should be the substrate.
+
+- **Goose = the foundation.** Apache-2.0, LF / AAIF-governed, mature, tens of thousands of users,
+  a public security track record. Un-rug-pullable. Build Gibson's engine on this.
+- **metaharness (ruv) = the pattern library + thesis validation.** Its philosophy ("separate the
+  factory from the product; the model is replaceable, the harness is the product") *is* our
+  structure, and it targets Hermes. But it is effectively a single-maintainer project (Reuven
+  Cohen / rUv) with several overlapping meta-harness repos (metaharness, ruflo), young, with bold
+  unverified claims and an unconfirmed license -- too much single-point risk to be load-bearing.
+
+**Decision: build on Goose; mine metaharness for patterns; do not build on both.**
+
+Patterns to mine from metaharness (mostly Chatterbuilt / fleet-side):
+- **Cost-aware routing** (cheap -> frontier cascade) + Weight-EFT -- a Managed-tier margin lever
+  (ties to the source-of-truth panel finding on API metering; chatterbuilt#268).
+- **Default-deny governance + `mcp-scan`** ("npm audit for agent tools").
+- **Darwin-mode self-improvement** (frozen model; mutate -> sandbox-test -> keep only measurably
+  better) -- the discipline for the Crew's self-improving loop.
+- **Witness-signed releases** (Ed25519 / SLSA-style provenance) -- defense against poisoned
+  handbook updates (the-gibson#23, #26).
+- **RVM hardware isolation** for untrusted callers (the Answering agent).
+- **SBOM / threat-model subcommands** as a sellable trust signal for the Managed tier.
+
+`OPEN`: confirm metaharness's license before touching any of its code. Prefer engaging ruv
+(Reuven Cohen) directly -- compare notes / collaborate -- rather than depending on it.
