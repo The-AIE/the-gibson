@@ -24,9 +24,22 @@ grok --version
 | Why | Near-unlimited flat-rate pool makes overnight backlog grinding cheap. |
 | Risks | Can edit/push if permissions allow; use worktrees. Subscription limits still exist at extreme volume. |
 
-### 2. Auth
+### 2. Auth — subscription vs. API key (this is the bill)
 
-Follow CLI login. Confirm:
+Two paths, and they bill differently:
+
+| Path | How | Billing |
+|---|---|---|
+| Subscription | `grok login` (or `grok login --device-code` on a headless box) → token in `~/.grok/auth.json` | Your flat-rate plan — what the overnight loop should use |
+| API key | `export XAI_API_KEY=xai-…` from [console.x.ai](https://console.x.ai) | Metered per token |
+
+Per the CLI's own auth docs, **a live session token wins over `XAI_API_KEY`** — the
+key is only a fallback for environments with no browser login. So on a resident
+loop host: run `grok login` once, and do **not** export `XAI_API_KEY` in the
+launchd job. Set the key only on machines that cannot log in interactively (CI,
+cloud agents). `grok logout` is what forces the key path.
+
+Confirm:
 
 ```bash
 grok -p "Reply with pong only."
