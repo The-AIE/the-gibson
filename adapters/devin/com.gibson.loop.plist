@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Gibson solo loop, resident on macOS (docs/11 + docs/22).
+
+  1. Replace every CHANGEME and REPO_PATH below.
+  2. cp adapters/devin/com.gibson.loop.plist ~/Library/LaunchAgents/
+  3. launchctl load -w ~/Library/LaunchAgents/com.gibson.loop.plist
+  Stop it with `touch <repo>/gibson/HALT` (clean) or `launchctl unload` (hard).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.gibson.loop</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGEME/Code/the-gibson/scripts/loop.sh</string>
+    <string>--runner</string>
+    <string>grok</string>
+    <string>--repo</string>
+    <string>/Users/CHANGEME/Code/REPO_PATH</string>
+    <string>--escalate-after</string>
+    <string>2</string>
+    <string>--reviewers</string>
+    <string>codex,claude</string>
+    <string>--supervisor</string>
+    <string>devin</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/CHANGEME/.local/bin</string>
+    <key>DEVIN_API_KEY</key>
+    <string>CHANGEME</string>
+    <key>DEVIN_WEBHOOK_URL</key>
+    <string>CHANGEME</string>
+    <key>DEVIN_MAX_ACU</key>
+    <string>10</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/CHANGEME/Code/REPO_PATH</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGEME/Library/Logs/gibson-loop.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGEME/Library/Logs/gibson-loop.err.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
