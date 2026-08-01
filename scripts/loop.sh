@@ -167,17 +167,20 @@ invoke_runner() {
       # --permission-mode bypassPermissions: without it, grok has no TTY to
       # request tool-call approval in headless mode, so it silently narrates
       # instead of acting — every iteration exits in seconds with no real work.
-      grok --prompt-file "$prompt_file" --permission-mode bypassPermissions
+      # --cwd: bypassPermissions plus an inherited cwd would point the runner at
+      # whatever directory the operator launched from — often the canonical
+      # Gibson checkout, which AGENTS.md Law 3 says nothing may mutate.
+      grok --prompt-file "$prompt_file" --cwd "$REPO" --permission-mode bypassPermissions
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
       # stdin, for the same frontmatter reason as grok's --prompt-file above:
       # as a positional arg the leading "---" is parsed as an unknown option
-      claude -p --output-format text --permission-mode acceptEdits < "$prompt_file"
+      (cd "$REPO" && claude -p --output-format text --permission-mode acceptEdits) < "$prompt_file"
       ;;
     codex)
       command -v codex >/dev/null || die "codex CLI not found"
-      codex exec --full-auto - < "$prompt_file"
+      codex exec --full-auto --cd "$REPO" - < "$prompt_file"
       ;;
     hermes)
       # Hermes may be messaging-first; if CLI exists use it, else require HERMES_CMD
