@@ -153,7 +153,14 @@ run_reviewer() { # run_reviewer <name> <prompt-file>
   esac
 }
 
+# The CLIs stream the review on stdout and their own tracing on stderr. Merging
+# the two interleaves log lines mid-sentence and buries the verdict, so the noise
+# goes to a sidecar log the next hat can ignore. RUST_LOG trims it at the source.
+LOG="${OUT%.md}.log"
+export RUST_LOG="${RUST_LOG:-error}"
+
 : > "$OUT"
+: > "$LOG"
 reviewed=0
 IFS=',' read -ra NAMES <<< "$REVIEWERS"
 for name in "${NAMES[@]}"; do
@@ -165,21 +172,35 @@ for name in "${NAMES[@]}"; do
   fi
   info "dispatching $name (read-only)"
   verdict_file=$(mktemp)
-  if run_reviewer "$name" "$PROMPT_FILE" > "$verdict_file" 2>&1; then
+  err_file=$(mktemp)
+  if run_reviewer "$name" "$PROMPT_FILE" > "$verdict_file" 2>"$err_file"; then
     reviewed=$((reviewed + 1))
+    failed=0
   else
     info "$name returned non-zero — recording whatever it produced"
+    failed=1
   fi
+  { echo "----- $name -----"; cat "$err_file"; } >> "$LOG"
   {
     echo "## Second opinion — $name"
     echo ""
     cat "$verdict_file"
+    # A failed reviewer usually says why on stderr (auth, quota) and nothing on
+    # stdout — surface that here rather than leaving a silent empty section.
+    if [[ "$failed" -eq 1 ]]; then
+      echo ""
+      echo "> $name failed. Last lines of stderr (full log: $LOG):"
+      echo '```'
+      tail -n 20 "$err_file"
+      echo '```'
+    fi
     echo ""
   } >> "$OUT"
-  rm -f "$verdict_file"
+  rm -f "$verdict_file" "$err_file"
 done
 rm -f "$PROMPT_FILE"
 
 cat "$OUT"
+[[ ! -s "$LOG" ]] || info "reviewer stderr in $LOG"
 [[ "$reviewed" -gt 0 ]] || die "no reviewer ran — install a second vendor's CLI or pass --reviewers"
 info "wrote $OUT"
