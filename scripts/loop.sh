@@ -198,18 +198,22 @@ invoke_runner() {
 escalate() {
   local out="$STATE_DIR/second-opinion.md"
   info "escalating after $failures consecutive failures — reviewers: $REVIEWERS"
+  local note
   if "$SCRIPT_DIR/second-opinion.sh" \
       --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" \
       --gate-status "red: $failures consecutive runner failures" --out "$out" >/dev/null 2>&1; then
     info "second opinion written to $out"
-    {
-      echo ""
-      echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · escalation · reviewers=$REVIEWERS"
-      echo "Second opinion written to gibson/second-opinion.md — next hat must read it."
-    } >> "$JOURNAL"
+    note="Second opinion written to gibson/second-opinion.md — next hat must read it."
   else
     info "second opinion failed (non-fatal) — continuing"
+    note="No reviewer completed — see gibson/second-opinion.md for the raw attempts (Law 8)."
   fi
+  # Journal both outcomes: a failed escalation is the one most worth a trail.
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · escalation · reviewers=$REVIEWERS"
+    echo "$note"
+  } >> "$JOURNAL"
 }
 
 # File-handoff protocol: the agent writes `handoff: <branch>` into loop-state when
@@ -219,8 +223,13 @@ supervisor_handoff() {
   local branch
   branch=$(read_field handoff)
   [[ -n "$branch" ]] || return 0
-  local task
-  task="Issue: $(read_field issue). Next action: $(read_field next_action)"
+  local task issue next
+  issue=$(read_field issue)
+  next=$(read_field next_action)
+  task=""
+  [[ -z "$issue" ]] || task="Issue: $issue."
+  [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
+  [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
   # bash 3.2 (stock macOS) errors on an empty array under set -u, so branch instead
   local review="$STATE_DIR/second-opinion.md"
   [[ -f "$review" ]] || review="/dev/null"

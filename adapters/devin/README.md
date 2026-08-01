@@ -78,7 +78,9 @@ session URL is the ground truth for what it did.
 ### 6. Cost capture
 
 ACUs are reported per session in the Devin dashboard. Keep handoffs diff-scoped and
-set `DEVIN_MAX_ACU`; route bulk implementation to flat-rate runners
+set `DEVIN_MAX_ACU` — it is sent as `max_acu_limit` on session creation, but the API
+does not echo it back on `GET /v1/sessions/{id}`, so confirm the ceiling in the
+dashboard rather than trusting the request. Route bulk implementation to flat-rate runners
 ([docs/15](../../docs/15-model-economics.md)).
 
 ### 7. Running the local half 24/7 (macOS)
