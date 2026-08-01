@@ -66,6 +66,7 @@ If you only open one file, use the row that matches you. Glossary:
 | 18 | [fork-upstream](18-fork-and-upstream.md) | Fork without pain |
 | 19 | [product-mcp](19-product-and-mcp.md) | Foreman / CodeWright |
 | 20 | [multi-model](20-multi-model-orchestration.md) | Coordinator pattern |
+| — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
 
 ## Worked examples & ops
 
