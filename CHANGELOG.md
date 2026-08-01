@@ -10,6 +10,20 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+Target repos stop knowing about The Gibson.
+
+- **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
+  *Autonomous development contract*: the repo publishes gate commands, ground rules,
+  hot files, deploy truth, and its human-only action list, naming no harness and no
+  vendor. Any agent — this harness, a bare Claude Code or Codex session, something
+  not written yet — can read it and take over. The coupling now points one way.
+- **`templates/target-repo/gate.json`** → target's `.agents/gate.json`, the
+  machine-readable twin of the gate commands. `scripts/gate.sh` and
+  `scripts/gate-baseline.sh` read it first and accept a nested `gate` object so the
+  file can carry other agent config.
+- **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
+  repos adopted earlier keep working; move the file when convenient.
+
 Cloud supervisor + cross-vendor escalation for the solo loop.
 
 - **`scripts/devin-supervisor.sh`** — one persistent Devin cloud session per repo

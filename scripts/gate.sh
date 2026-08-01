@@ -57,11 +57,17 @@ resolve_cmd() {
   local npm_script="$3"
   local val="${!env_var:-}"
   if [[ -n "$val" ]]; then echo "$val"; return; fi
-  if [[ -f .gibson-gate.json ]] && command -v node >/dev/null; then
-    local from_json
-    from_json=$(node -e "try{const j=require('./.gibson-gate.json');if(j['$step'])process.stdout.write(j['$step'])}catch(e){}" 2>/dev/null || true)
-    if [[ -n "$from_json" ]]; then echo "$from_json"; return; fi
-  fi
+  # .agents/gate.json is the vendor-neutral contract (docs/13): the target repo
+  # publishes its gate, no harness named. .gibson-gate.json stays supported for
+  # repos adopted before the split.
+  local cfg
+  for cfg in .agents/gate.json .gibson-gate.json; do
+    if [[ -f "$cfg" ]] && command -v node >/dev/null; then
+      local from_json
+      from_json=$(node -e "try{const j=require('./$cfg');const g=j.gate||j;if(g['$step'])process.stdout.write(g['$step'])}catch(e){}" 2>/dev/null || true)
+      if [[ -n "$from_json" ]]; then echo "$from_json"; return; fi
+    fi
+  done
   if [[ -f "$BASELINE" ]] && command -v node >/dev/null; then
     local from_b
     from_b=$(node -e "try{const j=require('./$BASELINE');if(j.commands&&j.commands['$step'])process.stdout.write(j.commands['$step'])}catch(e){}" 2>/dev/null || true)
