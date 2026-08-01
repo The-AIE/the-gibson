@@ -8,6 +8,28 @@ nav_exclude: true
 Written for fork owners deciding whether to take an update: what changed, why,
 and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
+## Unreleased
+
+Cloud supervisor + cross-vendor escalation for the solo loop.
+
+- **`scripts/devin-supervisor.sh`** — one persistent Devin cloud session per repo
+  (`ensure` / `status` / `wake` / `handoff`) that reviews finished branches and owns
+  GitHub: PR, CI, and merge with `--merge`. Session id cached in
+  `<repo>/gibson/devin-session.json`; a session that ended is replaced through
+  `DEVIN_WEBHOOK_URL` (Devin webhook automation), falling back to the sessions API.
+- **`scripts/second-opinion.sh`** — cross-vendor read-only review of a diff that
+  refuses to let a runner review its own work (AGENTS.md Law 5, docs/20 rule 1).
+- **`scripts/loop.sh`** — new `--escalate-after N`, `--reviewers`, and
+  `--supervisor devin`. Escalation writes `gibson/second-opinion.md`; handoff is a
+  file protocol: the agent sets `handoff: <branch>` in loop-state, the driver
+  forwards it and clears the field.
+- **Docs:** `docs/22-devin-cloud-supervisor.md` (escalation ladder, cost routing,
+  merge authority), `adapters/devin/` including a launchd job for a resident
+  loop on macOS.
+- Migration: none — all new flags are off by default and the existing loop behaves
+  exactly as before. Forks that render loop-state themselves may want to add the
+  `handoff:` field.
+
 ## v0.1.3 — 2026-07-24
 
 Docs site: GitHub Pages + navigation + plain-English callouts.
