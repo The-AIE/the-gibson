@@ -141,7 +141,9 @@ run_reviewer() { # run_reviewer <name> <prompt-file>
       ;;
     claude)
       command -v claude >/dev/null || { info "claude CLI not found — skipping"; return 1; }
-      (cd "$REPO" && claude -p --output-format text --permission-mode plan "$(cat "$2")")
+      # stdin, not a positional arg: the rendered playbook starts with YAML
+      # frontmatter ("---"), which claude's parser reads as an unknown option
+      (cd "$REPO" && claude -p --output-format text --permission-mode plan < "$2")
       ;;
     grok)
       command -v grok >/dev/null || { info "grok CLI not found — skipping"; return 1; }

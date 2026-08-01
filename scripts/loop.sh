@@ -171,11 +171,13 @@ invoke_runner() {
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
-      claude -p --output-format text --permission-mode acceptEdits "$(cat "$prompt_file")"
+      # stdin, for the same frontmatter reason as grok's --prompt-file above:
+      # as a positional arg the leading "---" is parsed as an unknown option
+      claude -p --output-format text --permission-mode acceptEdits < "$prompt_file"
       ;;
     codex)
       command -v codex >/dev/null || die "codex CLI not found"
-      codex exec --full-auto "$(cat "$prompt_file")"
+      codex exec --full-auto - < "$prompt_file"
       ;;
     hermes)
       # Hermes may be messaging-first; if CLI exists use it, else require HERMES_CMD
