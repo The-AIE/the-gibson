@@ -28,6 +28,12 @@
     <string>devin</string>
   </array>
 
+  <!--
+    Deliberately no XAI_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY here: the
+    runner CLIs bill your flat-rate subscription when they use the login session
+    from `grok login` / `claude` / `codex login`, and meter per token when they
+    find an API key. Only set keys on hosts that cannot log in interactively.
+  -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
