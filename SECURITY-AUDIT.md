@@ -53,7 +53,7 @@ Additional non-layer controls:
 | Doctrine (docs/08, playbook) | Complete | Clear hard vs report-only |
 | CI template (ci/security.yml) | Present | Layers 4, 5, 8 + nightly; layers 1–3 expected from standard target CI |
 | Scripts (posture-probe, route-inventory, preview-url) | Present | Must be vendored at adoption |
-| AuthZ matrix example | Present | examples/08-authz-matrix-sample.md |
+| AuthZ matrix example | Present | docs/examples/08-authz-matrix-sample.md |
 | Custom Semgrep rules from lessons | Process defined | Ratchet produces them; inventory of live rules is per-target |
 | MCP / Foreman surface | In progress (Phase 6) | Tools must remain prepare-PR / decision-card only |
 | Production drift sensor | Designed | Posture vs prod |
