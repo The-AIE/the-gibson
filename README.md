@@ -157,6 +157,8 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/19-product-and-mcp.md](docs/19-product-and-mcp.md) | Chatterbuilt Foreman: the productized tier + the guided-setup MCP design |
 | [GUIDE.md](GUIDE.md) | **Mark's operator manual** — start work, approve gates, run the loop, tune the harness |
 | [VIBECODING.md](VIBECODING.md) | **The for-dummies guide** — vibecoding for non-technical owners, zero jargon |
+| [HOW-IT-WORKS.md](HOW-IT-WORKS.md) | **What it is & how it works** — readable by anyone, actionable for everyone |
+| [SECURITY-AUDIT.md](SECURITY-AUDIT.md) | Living security audit: threat model, eight-layer status, residual risks, checklists |
 | [docs/DOC-BACKLOG.md](docs/DOC-BACKLOG.md) | Documentation build-out queue |
 | [docs/examples/](docs/examples/) | Worked PLAN→issues, UX eval, authz matrix samples |
 | [docs/troubleshooting/](docs/troubleshooting/) | Loop, claims, preview URL, ZAP, visual flake |
