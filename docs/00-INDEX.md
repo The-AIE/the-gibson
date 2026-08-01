@@ -68,6 +68,7 @@ If you only open one file, use the row that matches you. Glossary:
 | 19 | [product-mcp](19-product-and-mcp.md) | Foreman / CodeWright |
 | 20 | [multi-model](20-multi-model-orchestration.md) | Coordinator pattern |
 | — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
+| — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 
 ## Worked examples & ops
 
