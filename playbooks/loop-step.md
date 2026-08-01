@@ -158,6 +158,13 @@ touch /path/to/target/gibson/HALT
 
 1. **Rewrite** `gibson/loop-state.md` with: issue, PR, hat completed, next hat,
    round, parked?, next action one-liner, timestamp UTC.
+   - If a branch is pushed and ready for review and the driver runs with
+     `--supervisor devin`, set `handoff: <branch>`. The driver forwards it to the
+     cloud supervisor (review → PR → CI → merge) and clears the field
+     ([docs/22](../docs/22-devin-cloud-supervisor.md)). Do not do the GitHub steps
+     yourself when a supervisor owns them.
+   - If `gibson/second-opinion.md` exists, read it before your next build hat: it
+     is a cross-vendor review of your own diff, dispatched because the loop stalled.
 2. **Append** `gibson/journal.md`:
    ```markdown
    ## <UTC> · hat={{hat}} · issue=#N · pr=#M
