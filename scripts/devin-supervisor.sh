@@ -284,7 +284,8 @@ case "$CMD" in
     echo "session: $id"
     echo "url:     $(json_get "$(cat "$STATE_FILE")" url)"
     echo "status:  $(session_status "$id")"
-    pr=$(session_pr "$id"); [[ -n "$pr" ]] && echo "pr:      $pr"
+    pr=$(session_pr "$id")
+    [[ -z "$pr" ]] || echo "pr:      $pr"
     ;;
 
   wake)
@@ -354,7 +355,8 @@ EOF
         [[ "$st" == "working" || "$st" == "resuming" || -z "$st" ]] || break
       done
       info "supervisor status: $st"
-      pr=$(session_pr "$id"); [[ -n "$pr" ]] && echo "$pr"
+      pr=$(session_pr "$id")
+      [[ -z "$pr" ]] || echo "$pr"
     fi
     ;;
 
