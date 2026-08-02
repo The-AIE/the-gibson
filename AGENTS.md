@@ -105,9 +105,16 @@ Complete list with rationale in `docs/14-human-gates.md`. Summary:
   messages/emails, creating public repos.
 - Scope: the plan is ambiguous, contradictory, or the work grew beyond the claim.
 - Access: credentials or approvals only a human holds.
+- Style commitments: a subjective product, UX, copy, brand/voice, visual-design,
+  or naming decision where reasonable people disagree. Technical correctness is an
+  agent + CI decision; taste is the owner's. Ship the technical change, but open a
+  decision item for the taste call rather than self-approving it. When unsure whether
+  a change carries a style commitment, stop and ask.
 
 Everything else — including test failures, flaky CI, merge conflicts, unclear docs,
-and mid-task errors — you resolve yourself and keep moving.
+and mid-task errors — you resolve yourself and keep moving. Purely technical,
+non-opinion changes need no owner click: a passing green gate plus an independent
+reviewer (Law 5 — never grade your own homework) is authorization to merge.
 
 ## Where things live
 
