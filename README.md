@@ -1,6 +1,10 @@
 # The Gibson
 
-**A portable, self-improving SDLC harness for agent fleets.**
+**The open source harness for vibecoders.**
+
+A portable, self-improving SDLC harness for agent fleets: describe what you want in
+plain language, and the fleet plans, builds, tests, reviews, and ships it under gates
+you can audit.
 
 > **Start here, based on who you are:**
 > - 🙂 **"I'm not technical — I just want software built."** Read
