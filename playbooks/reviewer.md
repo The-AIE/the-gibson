@@ -135,6 +135,26 @@ For each serious finding (or each risky surface if no findings yet):
 Every sprint-contract checkbox must map to evidence (test, behavior, or explicit N/A
 with reason). Missing criterion coverage → REQUEST_CHANGES.
 
+### 4b. Test-integrity waiver lens (issue #70)
+
+When gate/CI output surfaces a `test-integrity: WAIVER accepted` line — or the
+PR body contains a `Test-integrity:` marker — this is a **review lens**, not a
+formality:
+
+1. Confirm the waiver is **visible** in the PR body (not an HTML comment) and
+   uses the exact form from docs/06 (`removed <n> for <reason>` / `skip +<n> for
+   <reason>`), with deltas that match the sensor output.
+2. Verify the removed or newly skipped tests were **genuinely obsolete or
+   intentionally parked** — not inconvenient failures. Open the deleted/skipped
+   cases in the diff; if the reason is vague ("cleanup", "flaky") without
+   evidence, REQUEST_CHANGES.
+3. A baseline regeneration (`.gibson/test-integrity-journal.jsonl` or a noted
+   `--regenerate --reason`) is an explicit journaled act — treat the reason the
+   same way as a waiver.
+4. Absence of a waiver when totals drop or skips rise should already be red in
+   CI; if you see green without a surfaced waiver on a suite-shrinking diff,
+   treat that as a **sensor failure** and REQUEST_CHANGES.
+
 ### 5. Verdict (mandatory final line)
 
 Exactly one of:
@@ -176,6 +196,7 @@ hand the operator the checklist.
 - [ ] Six lenses explicitly cleared or finding-listed
 - [ ] file:line findings with failure scenarios
 - [ ] Contract coverage checked
+- [ ] Test-integrity waiver (if any) verified as intentional, not convenient
 - [ ] `VERDICT:` line present
 - [ ] No merge performed
 

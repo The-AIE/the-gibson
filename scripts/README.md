@@ -12,8 +12,9 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`claims-status.sh`](claims-status.sh) `[--issue n] [--markdown]` | The live claim table, rendered from `docs/claims/*.md` plus legacy `docs/active-work.md` rows. Flags claims older than 24h as STALE. |
 | [`release-claim.sh`](release-claim.sh) `<issue> [--claim-id id] [--prefix ns] [--repo owner/name]` | Post-merge cleanup: remove worktree, delete branch, delete the claim file and any legacy row (signed commit from a throwaway main worktree, so the canonical checkout never moves), remove label and **verify** it is gone. `--claim-id` releases one slice of a multi-slice issue and keeps the label while siblings remain. Exit 3 = ran but did not finish (claim or label still live). |
 | [`release-preflight.sh`](release-preflight.sh) `<pr> [--partial] [--launched] [--json]` | Read-only pre-merge verdict: READY (0) / BLOCKED (1) / ADMIN-CANDIDATE (4). Checks what GitHub will actually close (L-013), accepts a `VERDICT: APPROVE` comment when same-author blocks formal review (L-015/L-021), and separates GHA `startup_failure` infra from product red (L-033). Tier C and `--launched` have no admin path. |
-| [`gate-baseline.sh`](gate-baseline.sh) | Record branch-point failure counts to `.gibson-baseline.json`. |
-| [`gate.sh`](gate.sh) | Run target gate commands; fail on any **new** failure vs. baseline. |
+| [`gate-baseline.sh`](gate-baseline.sh) | Record branch-point failure counts **and** test metrics (`total` / `skipped` / `todo`) to `.gibson-baseline.json`. Intentional suite reductions require `--regenerate --reason` and append `.gibson/test-integrity-journal.jsonl`. |
+| [`gate.sh`](gate.sh) | Run target gate commands; fail on any **new** failure vs. baseline. Also hard-fails `test-integrity` when test total drops or skip/todo rises without an exact visible waiver (`GIBSON_TEST_INTEGRITY_TEXT` / `--waiver-text`). |
+| [`test-integrity.mjs`](test-integrity.mjs) | Count-based test-deletion / skip-inflation sensor (issue #70). `parse` / `compare` / `journal-append`. PR body is inert data. CI anchors to merge-base metrics, never a PR-local baseline. |
 | [`decompose-lint.mjs`](decompose-lint.mjs) | Validate issue set: contract / area / tier / dependencies; ≤10 criteria; schema standalone. |
 | [`route-inventory.mjs`](route-inventory.mjs) | Emit route×role authz matrix scaffold (Next.js App Router). [docs/08](../docs/08-security.md) layer 4. |
 | [`posture-probe.sh`](posture-probe.sh) `<url>` | Headers (CSP/HSTS/frame), cookie flags, optional POST burst → 429. Layer 8. |
@@ -27,6 +28,7 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
 | [`silent-noop.sh`](silent-noop.sh) `--help` | Sourceable L-008 progress sensor for solo-loop drivers: fingerprints `gibson/loop-state.md` between iterations so a runner that exits 0 and advances nothing trips `NOOP_BUDGET` (default 3) instead of burning the loop. Fingerprints the substantive state and **excludes** the `updated:` line — a clock is not progress, and hashing it would certify exactly the L-008 run this exists to stop. Missing, unreadable, or un-hashable state is a constant sentinel, never an empty string, so the streak keeps accruing — including when the hash binary itself exists but fails, which under the driver's `set -euo pipefail` must collapse to the sentinel rather than abort the caller. The only script here that is `source`d rather than run, so it carries the same Ask-Contract `--help` as its siblings and a direct run without `--help` is a loud usage error (exit 2) — a library that exits 0 having done nothing is the very failure it detects. Sourced/executed is decided by `return` legality, not `${BASH_SOURCE[0]} == $0`, which a caller's `$0` can spoof into misreading a real source. Not yet wired into `loop.sh` — that is a deliberate follow-up. |
 | [`check-active-work.mjs`](check-active-work.mjs) | Claim-isolation gate for CI `pull_request` runs ([docs/05](../docs/05-concurrency.md)): diffs the merge base against the head, so appending your own claim passes while touching a claim that already existed on the base fails. Renames are scored as delete + add, and deleting a live claim file is refused even for the branch that owns it — a claim is released on main with `release-claim.sh`. Changed paths are read NUL-separated and addressed as literal pathspecs, so a claim whose filename is non-ASCII or carries glob characters is checked like any other; legacy `docs/active-work.md` rows are protected on the same `issue-` shape `claims-status.sh` treats as live. A base ref it cannot resolve is a loud error, never a green "no changed files". |
+| [`tests/gate.test.sh`](tests/gate.test.sh) | Adversarial sensors for test-integrity (issue #70): deletion/no waiver, new skip/no waiver, exact visible delta-consistent waiver, hidden/near-match/wrong-delta waiver, malformed metrics, added tests/reduced skips, regeneration without flag/reason, auditable journal, gate.sh wiring, inert PR text. |
 | [`tests/injection-scan.test.sh`](tests/injection-scan.test.sh) | Pins each codepoint the scan must catch, and that ordinary prose stays quiet. |
 | [`tests/check-active-work.test.sh`](tests/check-active-work.test.sh) | Sensors for the claim-isolation gate in both directions: append/renew allowed, another lane's claim untouchable, rename-as-deletion caught, owner-side deletion refused, non-ASCII and glob-character claim filenames protected rather than skipped, underscore/dot legacy row ids protected, and an unresolvable or shallow base failing loudly. Temp git repos only — no network, no `gh`. |
 | [`tests/loop-handoff.test.sh`](tests/loop-handoff.test.sh) | Sensors for the Law 5 gate in front of a supervisor handoff: the ways it must fail closed (a missing, stale, or failed review; an unpublished branch; an unfetchable SHA or base) and the ways it may pass, plus the separation of the two review artifacts: an escalation `gibson/second-opinion.md` survives a routine pre-handoff review untouched, and a receipt whose `gibson/pre-handoff-review.md` is gone or empty does not pass. Drives the real `loop.sh` against stub reviewer/supervisor CLIs, plus `devin-supervisor.sh --dry-run` for the guard and message it renders itself — no Devin API is contacted. |
@@ -51,6 +53,11 @@ cd ../wt-42-password-reset
 $GIBSON/scripts/gate-baseline.sh
 # ... implement ...
 $GIBSON/scripts/gate.sh && git commit -s -m "feat(#42): reset tokens"
+
+# Intentional suite reduction (journaled; not a side effect of re-baseline):
+$GIBSON/scripts/gate-baseline.sh --regenerate --reason "removed obsolete flaky suite after #42"
+# And put a matching visible waiver on the PR:
+#   Test-integrity: removed N for <reason>
 
 # After merge
 cd ~/Code/acme-app
@@ -85,6 +92,23 @@ driven by any harness (docs/13):
   "build": "npm run build"
 }
 ```
+
+## Test-integrity summary contract (issue #70)
+
+Prefer an explicit machine line from the test suite (works with any runner):
+
+```
+GIBSON_TEST_METRICS total=42 skipped=2 todo=0
+```
+
+Also parsed: Vitest / Jest / node:test / TAP summary shapes. Unparseable,
+negative, or non-integer metrics **fail closed** (never become zero). Known
+limit: count-only comparison cannot detect equal-count swap of one test for
+another — see [docs/06](../docs/06-quality-gates.md).
+
+Local `gate.sh` uses `.gibson-baseline.json` (gitignored). CI must re-derive
+metrics at the merge base (`ci/gibson-gate.yml`); a PR-local baseline never
+authorizes itself.
 
 ## Design notes
 

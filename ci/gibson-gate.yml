@@ -35,8 +35,52 @@ jobs:
       - run: <generate>      # e.g. npx prisma generate
       - run: <typecheck>     # e.g. npx tsc --noEmit
       - run: <lint>          # e.g. npm run lint
-      - run: <test>          # e.g. npx vitest run
+      # Capture full test output so the integrity sensor can parse totals/skips.
+      # Prefer emitting `GIBSON_TEST_METRICS total=N skipped=M todo=K` from the
+      # suite, or a supported Vitest/Jest/node:test summary (docs/06).
+      - name: Test (head) + capture metrics
+        run: |
+          set -o pipefail
+          <test> 2>&1 | tee test-output-head.txt
+          # e.g. npx vitest run
+          node scripts/test-integrity.mjs parse \
+            --input test-output-head.txt \
+            --out .gibson-metrics-head.json
       - run: <build>         # e.g. npm run build
+
+      # Test-integrity (issue #70): hard-fail when the suite shrinks or skip/todo
+      # rises vs the merge base, unless the PR body carries an exact visible
+      # waiver. The local/gitignored .gibson-baseline.json is NOT consulted —
+      # a PR must not authorize its own baseline. Metrics are re-derived from
+      # a detached checkout of the PR base SHA (trusted base).
+      - name: Test integrity vs merge base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # Inert data only — test-integrity.mjs never evals this string.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          WT="${RUNNER_TEMP:-/tmp}/gibson-base-wt"
+          git worktree add --detach "$WT" "$BASE_SHA"
+          (
+            cd "$WT"
+            if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
+              npm ci --include=dev
+            fi
+            set -o pipefail
+            <test> 2>&1 | tee test-output-base.txt
+            node "$GITHUB_WORKSPACE/scripts/test-integrity.mjs" parse \
+              --input test-output-base.txt \
+              --out "$GITHUB_WORKSPACE/.gibson-metrics-base.json"
+          )
+          # Write PR body to a file so the shell never interpolates it into eval.
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.txt"
+          node scripts/test-integrity.mjs compare \
+            --base .gibson-metrics-base.json \
+            --head .gibson-metrics-head.json \
+            --waiver-file "$RUNNER_TEMP/pr-body.txt" \
+            --trusted-source "merge-base:${BASE_SHA}"
 
   # Layers 1–3 of docs/08 (hard-fail). Extend with authz/DAST/ux-eval jobs per
   # ci/README.md as adoption matures.

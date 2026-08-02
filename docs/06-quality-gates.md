@@ -32,6 +32,83 @@ The same gate runs in CI (`ci/gibson-gate.yml`) so it holds regardless of which
 runtime wrote the code. Local gate is a courtesy to your own iteration speed; CI
 gate is the law.
 
+## Test-integrity (count ratchet — issue #70)
+
+The green gate used to treat "deleted the failing test" the same as "fixed the
+failing test." That is the highest-leverage way a model optimizing for green
+goes legitimately green while reducing coverage. The **test-integrity** sensor
+closes that bypass:
+
+| Signal | Gate result |
+|---|---|
+| Test **total** drops vs trusted baseline | hard-fail `test-integrity` with exact delta (`N → M`) |
+| **skip + todo** rises vs trusted baseline | hard-fail `test-integrity` with exact delta |
+| Total rises / skips fall | pass (no waiver needed) |
+| Exact visible waiver covers the delta | pass, and the waiver is **surfaced** in gate/CI output for the reviewer |
+
+### Waiver (visible, exact, delta-consistent)
+
+PR body or commit text is **inert data** — matched as text, never evaluated as
+code. Accepted forms (optional leading `- `):
+
+```
+Test-integrity: removed <n> for <reason>
+Test-integrity: skip +<n> for <reason>
+Test-integrity: removed <n>, skip +<m> for <reason>
+```
+
+Fail closed (do **not** authorize):
+
+- Hidden in HTML comments (`<!-- ... -->`)
+- Near-matches (`test-integrity:`, `Test integrity:`, `removed three`, missing `for <reason>`)
+- Wrong delta (`removed 2` when 3 tests disappeared)
+- Malformed / zero-delta noise
+
+### Trusted baseline (CI vs local)
+
+| Context | Authority |
+|---|---|
+| Local `gate.sh` | `.gibson-baseline.json` from `gate-baseline.sh` (gitignored, worktree-local) |
+| CI `pull_request` | Metrics re-derived at the **merge-base / PR base SHA** — never the PR's local baseline |
+
+A locally replaceable or gitignored baseline must not let a PR authorize itself.
+`ci/gibson-gate.yml` re-runs the test command on a detached checkout of
+`pull_request.base.sha` and compares with `--trusted-source merge-base:<sha>`.
+
+### Baseline regeneration (journaled)
+
+An intentional suite reduction is not a side effect of re-recording the baseline:
+
+```bash
+gate-baseline.sh --regenerate --reason "removed obsolete flaky suite after #70"
+```
+
+Requires a nonempty `--reason`. Appends one JSON line to
+`.gibson/test-integrity-journal.jsonl` with timestamp, SHA, old/new metrics, and
+reason. Overwriting a reduced baseline without the flag hard-fails.
+
+### Summary contract (metric parsing)
+
+Prefer an explicit machine line from the suite (vendor-blind):
+
+```
+GIBSON_TEST_METRICS total=42 skipped=2 todo=0
+# or JSON:
+GIBSON_TEST_METRICS {"total":42,"skipped":2,"todo":0}
+```
+
+Also recognized: Vitest `Tests … (N)` summaries, Jest `Tests: … total`,
+node:test `# tests` / `# skip` / `# todo`, TAP `1..N` plans.
+
+**Fail closed:** unparseable, negative, non-integer, or skip+todo > total metrics
+never silently become zero — the sensor errors instead.
+
+**Known limit:** count-only comparison cannot detect "deleted A, added B of equal
+count." Prefer named test identities in product harnesses that can do that
+cheaply without ballooning scope; The Gibson's own gate stays count-based and
+vendor-blind on purpose. Sensors live in `scripts/test-integrity.mjs` and
+`scripts/tests/gate.test.sh`.
+
 ## Risk tiers
 
 | Tier | Definition | Treatment |
