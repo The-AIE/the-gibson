@@ -38,6 +38,11 @@ harness better than you found it.
    test → build, with **zero new failures vs. your branch point**. Record the baseline
    when you branch. Pre-existing failures are not yours to inherit or to hide behind.
    (`docs/06-quality-gates.md`)
+   **Exception — pure memory commits:** if the commit touches **only** files under
+   `memory/` (e.g. `LESSONS.md`, `DECISIONS.md`, `incidents/*`) and no product,
+   script, CI, or playbook code, skip the green gate and CI loop. Land the lesson
+   fast so the fleet can use it. Still never put secrets in memory files. A commit
+   that mixes memory with other paths follows Law 4 in full.
 5. **Never grade your own homework.** You may not review, approve, or evaluate work
    you generated. Review is a different agent; cross-vendor when available. Evaluation
    runs against deployed software, not your description of it.
@@ -54,6 +59,7 @@ harness better than you found it.
    same failure twice, you must file a lesson in `memory/LESSONS.md` — and where
    possible, PR the new guide or sensor yourself before ending your run.
    (`docs/09-memory-and-self-improvement.md`)
+   Pure `memory/`-only lesson commits do **not** need the CI loop (see Law 4 exception).
 10. **Clean up after merge.** Remove worktree, delete branch, release claim, close
     issue, verify deploy. An abandoned claim blocks the fleet.
 
@@ -127,6 +133,6 @@ reviewer (Law 5 — never grade your own homework) is authorization to merge.
 | Doctrine deep-dives | `docs/` |
 | Role playbooks (dispatch prompts) | `playbooks/` |
 | Deterministic gates / helper scripts | `scripts/`, `ci/` |
-| Fleet lessons, decisions, incidents | `memory/` |
+| Fleet lessons, decisions, incidents | `memory/` (pure updates skip CI) |
 | Vendor-specific setup | `adapters/<vendor>/` |
 | What to install in a target repo | `templates/target-repo/` |
