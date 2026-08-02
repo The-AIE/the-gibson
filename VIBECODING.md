@@ -29,6 +29,16 @@ They don't sleep, they don't wait for meetings, and they don't need you to
 supervise. They need you for exactly two things: **saying what you want** and
 **saying yes or no** when it's owner business.
 
+### One AI is enough
+
+You do **not** need a fleet of different AI brands. One strong model (the same
+one you already talk to) can plan, build, test, and ship under the rules. A
+second model is only an optional extra for double-checking sensitive work — never
+a requirement. If someone tells you that vibecoding needs three vendors, that is
+outdated advice for *this* system.
+
+---
+
 ## How to ask for things
 
 Just describe the outcome in your own words, like you'd tell a contractor:
@@ -108,6 +118,8 @@ slow to reply, and nothing ever approves itself while you're not looking.
   it gets fixed properly.
 - *"Pause everything."* / *"Okay, go again."* → exactly what they say.
 
+More ready-made lines: [docs/prompts.md](docs/prompts.md).
+
 ## When you're worried
 
 Software teams — human or AI — earn trust by being boring: small changes,
@@ -122,3 +134,5 @@ their rulebook (docs/16, docs/09 — but you never need to read those).
 *Under the hood this is The Gibson's Operator mode — the full machinery is
 documented in this repo for the technical folks. You're holding the only page
 you need.*
+
+**Related:** [Copy-paste prompts](docs/prompts.md) · [Operator readiness checklist](docs/21-operator-readiness.md) · [Quickstart for the technical setup](QUICKSTART.md)

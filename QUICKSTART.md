@@ -15,6 +15,15 @@ risks. Technical terms are explained inline.
 Assume you have: a GitHub account, a target app repo, and at least one agent CLI
 (Grok recommended for grind; Claude or Codex fine too).
 
+### Single-model is the primary path
+
+One frontier model is enough. Point `scripts/loop.sh --runner <one-cli>` at the
+repo and the solo loop cycles every role (build → test → review → ship) with file
+handoffs. A second vendor is an **optional upgrade** for Tier B/C review
+(`--reviewers` / `--supervisor`), not a requirement. Non-technical owners never
+configure multi-model routing — see [VIBECODING.md](VIBECODING.md) and
+[docs/21-operator-readiness.md](docs/21-operator-readiness.md).
+
 ---
 
 ## Step 0 — Clone The Gibson
@@ -48,6 +57,8 @@ then `git remote add upstream https://github.com/mrhinkle/the-gibson.git`.
 - Not technical? → [VIBECODING.md](VIBECODING.md) only.  
 - Run the fleet? → [GUIDE.md](GUIDE.md) §1–5.  
 - Agents? → [AGENTS.md](AGENTS.md).
+- Ready-made owner lines? → [docs/prompts.md](docs/prompts.md).
+- Definition of done for non-coder + one model? → [docs/21-operator-readiness.md](docs/21-operator-readiness.md).
 
 ---
 
@@ -143,10 +154,17 @@ git commit -s -m "docs: canary for Gibson adoption"
 ~/Code/the-gibson/scripts/release-claim.sh 1
 ```
 
-Or solo loop:
+Or **single-model** solo loop (primary path):
 
 ```bash
 ~/Code/the-gibson/scripts/loop.sh --runner grok --repo ~/Code/acme-app --max-iterations 20
+```
+
+Optional multi-model upgrade (not required):
+
+```bash
+~/Code/the-gibson/scripts/loop.sh --runner grok --repo ~/Code/acme-app \
+  --escalate-after 2 --reviewers codex,claude --supervisor devin
 ```
 
 ---
@@ -166,6 +184,8 @@ Or solo loop:
 
 - Full operator habits: [GUIDE.md](GUIDE.md)  
 - Overnight grind: [docs/11](docs/11-solo-loop.md)  
+- Owner-facing prompts: [docs/prompts.md](docs/prompts.md)  
+- End-goal checklist: [docs/21-operator-readiness.md](docs/21-operator-readiness.md)  
 - Second repo: repeat Steps 2–6  
 - Fork sync: `scripts/upstream-sync.sh`  
 - Reading map: [docs/00-INDEX.md](docs/00-INDEX.md)
