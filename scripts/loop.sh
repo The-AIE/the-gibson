@@ -135,8 +135,6 @@ halted() {
   if [[ -f "$HALT_FILE" ]]; then return 0; fi
   if [[ "${GIBSON_HALT:-}" == "1" ]]; then return 0; fi
   if command -v gh >/dev/null 2>&1; then
-    # Soft signal: any open issue with gibson-halt label. Best-effort; never
-    # fail the loop on network/label lookup errors.
     if gh issue list --repo "$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true)" \
          --label gibson-halt --state open --limit 1 --json number -q '.[0].number' 2>/dev/null | grep -q '[0-9]'; then
       info "gibson-halt label detected on an open issue — treating as soft halt (write gibson/HALT to make permanent)"
@@ -148,7 +146,8 @@ halted() {
 
 read_field() {
   local key="$1"
-  awk -F': ' -v k="$key" '$$1==k {sub(/^[^:]+: /,""); print; exit}' "$STATE_FILE"
+  # FS set so field 1 is the key
+  awk -v k="$key" -F': ' '{ if ($1 == k) { sub(/^[^:]+: /,""); print; exit } }' "$STATE_FILE"
 }
 
 render_prompt() {
