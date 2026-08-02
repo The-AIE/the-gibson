@@ -106,12 +106,18 @@ Canonical: /path/to/target
    (nanosecond precision); **10+ fractional digits are malformed** and never
    enter the stream (no silent truncate — truncating collapsed distinct
    instants past the ninth digit). `reviewDecision` is only a fail-closed
-   fallback when no usable event exists and no malformed formal evidence was
+   fallback when no usable event exists and no malformed relevant evidence was
    discarded — a newer `VERDICT: REQUEST_CHANGES` blocks even if an older
    formal approval remains. Incomplete/prefix-only timestamps, 10+ fractional
    digits, impossible calendar dates/times, and authorless `APPROVE` events
-   never clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. When
-   the verdict source binds a commit SHA, it must match the current PR head —
+   never clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. Any
+   comment (or non-dismissed body-VERDICT review) with a recognized terminal
+   `VERDICT` marker whose timestamp is missing, non-string, incomplete, invalid
+   civil time, or >9-digit precision is malformed relevant evidence and
+   hard-blocks before event selection or aggregate fallback — never
+   drop-then-recover via an older valid approval or `reviewDecision=APPROVED`.
+   Ordinary comments without a terminal `VERDICT` are not evidence. When the
+   verdict source binds a commit SHA, it must match the current PR head —
    stale or absent/null head fails closed. UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
 5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
@@ -155,8 +161,12 @@ If any item fails → do not merge; report the missing gate.
   nanosecond fractional precision (1–9 digits after the decimal; 10+ digits
   are malformed, never silently truncated into the chrono key); authorless
   `APPROVE` never counts as independent; equal timestamps prefer
-  `REQUEST_CHANGES`. Malformed formal `APPROVED`/`CHANGES_REQUESTED` evidence
-  blocks before any `reviewDecision` aggregate fallback (no drop-then-recover).
+  `REQUEST_CHANGES`. Malformed relevant evidence — formal
+  `APPROVED`/`CHANGES_REQUESTED` *or* a verdict-bearing comment/review-body
+  whose timestamp is unusable or whose `APPROVE` is authorless — blocks before
+  event selection recovery and before any `reviewDecision` aggregate fallback
+  (no drop-then-recover to an older valid approval or aggregate READY).
+  Ordinary comments without a recognized terminal `VERDICT` are not evidence.
   When the source carries a commit SHA, a verdict bound to any SHA other than
   the current head — or when head is absent/null — is fail closed — re-review
   the tip.

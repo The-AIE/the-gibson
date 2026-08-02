@@ -615,6 +615,106 @@ out=$(run "$f_comment_frac10"); rc=$?
 check "sole comment APPROVE with 10+ fractional digits is BLOCKED" "$rc" "1"
 if echo "$out" | grep -qF "READY"; then bad "comment 10+ frac must not READY"; else ok "comment 10+ frac is not READY"; fi
 
+echo "#61 P1 · malformed verdict-bearing comments hard-block (no drop-then-recover)"
+# Exact regression 1: valid formal APPROVED at .123456789Z, later comment
+# VERDICT: REQUEST_CHANGES at .1234567891Z (10+ frac = malformed). Must BLOCK
+# because later relevant evidence is malformed — never select the older approval.
+f_later_malformed_rc=$(fixture later_malformed_rc '.reviewDecision = "APPROVED" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .reviews = [{
+    "author": {"login": "formal-approver"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T12:00:00.123456789Z",
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }] |
+  .comments = [{
+    "author": {"login": "later-blocker"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T12:00:00.1234567891Z"
+  }]')
+out=$(run "$f_later_malformed_rc"); rc=$?
+check "valid formal APPROVED + later malformed RC comment is BLOCKED" "$rc" "1"
+contains "names later malformed RC as malformed evidence" "$out" "malformed"
+contains "names later 10+ frac RC stamp in evidence" "$out" "1234567891"
+contains "names REQUEST_CHANGES in malformed evidence" "$out" "VERDICT: REQUEST_CHANGES"
+if echo "$out" | grep -qF "READY"; then
+  bad "must not READY by selecting older formal APPROVED after dropping malformed later RC"
+else
+  ok "does not READY under older formal + later malformed RC"
+fi
+# Must not treat the older formal alone as a clear independent approval path.
+if echo "$out" | grep -qF "independent identity"; then
+  bad "older formal APPROVE must not be selected as gate-clearing when later RC is malformed"
+else
+  ok "older formal APPROVE is not selected as gate-clearing under later malformed RC"
+fi
+if echo "$out" | grep -qF "formal-approver"; then
+  bad "older formal-approver must not appear as selected winning event under later malformed RC"
+else
+  ok "older formal-approver is not the selected winning event"
+fi
+
+# Exact regression 2: reviews=[], reviewDecision=APPROVED, sole comment
+# VERDICT: APPROVE at .1234567890Z must BLOCK — never aggregate-fallback to READY.
+f_sole_malformed_approve_agg=$(fixture sole_malformed_approve_agg '.reviewDecision = "APPROVED" | .reviews = [] |
+  .comments = [{
+    "author": {"login": "comment-approver"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T12:00:00.1234567890Z"
+  }]')
+out=$(run "$f_sole_malformed_approve_agg"); rc=$?
+check "reviewDecision=APPROVED + sole malformed VERDICT: APPROVE comment is BLOCKED" "$rc" "1"
+contains "names sole malformed comment as malformed evidence" "$out" "malformed"
+contains "names 10+ frac APPROVE stamp in evidence" "$out" "1234567890"
+if echo "$out" | grep -qF "READY"; then
+  bad "must not READY via reviewDecision aggregate after dropping malformed APPROVE comment"
+else
+  ok "does not READY via reviewDecision after malformed APPROVE comment"
+fi
+if echo "$out" | grep -qF "formal GitHub approval present"; then
+  bad "must not use reviewDecision aggregate when malformed verdict comment was discarded"
+else
+  ok "no reviewDecision aggregate recovery after malformed verdict comment"
+fi
+
+# Authorless approval comments fail closed (not drop-then-recover via aggregate).
+f_authorless_comment_agg=$(fixture authorless_comment_agg '.reviewDecision = "APPROVED" | .reviews = [] |
+  .comments = [{
+    "author": null,
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T12:00:00.123456789Z"
+  }]')
+out=$(run "$f_authorless_comment_agg"); rc=$?
+check "reviewDecision=APPROVED + authorless VERDICT: APPROVE comment is BLOCKED" "$rc" "1"
+contains "names authorless comment as malformed evidence" "$out" "malformed"
+contains "names authorless in malformed evidence" "$out" "(authorless)"
+if echo "$out" | grep -qF "READY"; then
+  bad "authorless APPROVE comment must not READY via reviewDecision aggregate"
+else
+  ok "authorless APPROVE comment not recovered via reviewDecision"
+fi
+if echo "$out" | grep -qF "formal GitHub approval present"; then
+  bad "authorless APPROVE must not recover via reviewDecision aggregate"
+else
+  ok "no aggregate recovery after authorless APPROVE comment"
+fi
+
+# Ordinary comments without a recognized terminal VERDICT are never evidence.
+f_ordinary_bad_ts=$(fixture ordinary_bad_ts '.reviewDecision = "APPROVED" | .reviews = [] |
+  .comments = [{
+    "author": {"login": "chatter"},
+    "body": "looks fine to me, ship it",
+    "createdAt": "not-a-timestamp"
+  }]')
+out=$(run "$f_ordinary_bad_ts"); rc=$?
+check "ordinary non-verdict comment with bad timestamp does not block aggregate" "$rc" "0"
+if echo "$out" | grep -qF "malformed"; then
+  bad "ordinary comment must not be collected as malformed relevant evidence"
+else
+  ok "ordinary non-verdict comment is not malformed evidence"
+fi
+contains "uses reviewDecision fallback for ordinary noise" "$out" "reviewDecision fallback"
+
 echo "#61 P1 · formal review state precedes contradictory body VERDICT text"
 # CHANGES_REQUESTED with a body that ends VERDICT: APPROVE must still block.
 f_formal_vs_body=$(fixture formal_vs_body '.reviewDecision = "CHANGES_REQUESTED" | .headRefOid = "2222222222222222222222222222222222222222" |
