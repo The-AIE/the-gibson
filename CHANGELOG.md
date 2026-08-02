@@ -10,6 +10,20 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+Target repos stop knowing about The Gibson.
+
+- **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
+  *Autonomous development contract*: the repo publishes gate commands, ground rules,
+  hot files, deploy truth, and its human-only action list, naming no harness and no
+  vendor. Any agent — this harness, a bare Claude Code or Codex session, something
+  not written yet — can read it and take over. The coupling now points one way.
+- **`templates/target-repo/gate.json`** → target's `.agents/gate.json`, the
+  machine-readable twin of the gate commands. `scripts/gate.sh` and
+  `scripts/gate-baseline.sh` read it first and accept a nested `gate` object so the
+  file can carry other agent config.
+- **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
+  repos adopted earlier keep working; move the file when convenient.
+
 Claiming stops being the thing that conflicts.
 
 - **`scripts/claim.sh`** — a claim is now one file, `docs/claims/issue-<N>-<slug>.md`,
@@ -109,6 +123,25 @@ Cloud supervisor + cross-vendor escalation for the solo loop.
 - Migration: none — all new flags are off by default and the existing loop behaves
   exactly as before. Forks that render loop-state themselves may want to add the
   `handoff:` field.
+
+## v0.1.4 — 2026-07-29
+
+Delivery control (production write-path) as portable doctrine.
+
+- **Doctrine:** [docs/23-delivery-control.md](docs/23-delivery-control.md) — branch
+  models A/B/C, pass criteria, harden/promote/hotfix modes, explicit **no secret
+  rotation** (G4). Distills ConferenceOS release-manager lessons without COS-only
+  check names or Neon key handling.
+- **Playbook:** [playbooks/delivery-control.md](playbooks/delivery-control.md);
+  release + adopt playbooks preflight audit when merge ships Production.
+- **Scripts:** [scripts/delivery-control/](scripts/delivery-control/) — audit,
+  apply-branch-protection, apply-production-env, promote, hotfix-prep,
+  forward-port (dry-run default; `--apply` + confirm).
+- **Template:** `templates/target-repo/gibson-delivery.json` for target check
+  contexts and branch model.
+- Migration: optional. At next adoption or burn-down, run `audit.sh` on each
+  live target; harden only with operator apply. Forks sync doc 23 + scripts via
+  normal upstream-sync.
 
 ## v0.1.3 — 2026-07-24
 

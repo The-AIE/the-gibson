@@ -1,48 +1,75 @@
-# The Gibson — target-repo AGENTS.md section (template)
+# Target-repo AGENTS.md section (template)
 
 <!-- Append this section to the target repo's AGENTS.md at adoption (docs/13).
-     Fill every <angle> placeholder. Keep it to repo-SPECIFICS ONLY — doctrine
-     lives in the Gibson repo; this section points, it never copies. -->
+     Fill every <angle> placeholder.
 
-## The Gibson
+     Deliberately harness-neutral: it names no vendor and no harness. A repo
+     publishes the facts a machine needs to develop it safely; any harness —
+     The Gibson, a bare Claude Code or Codex session, something not written
+     yet — reads the same section and can take over. Repo-SPECIFICS ONLY:
+     doctrine lives in the harness, this section instantiates it. -->
 
-This repo is operated by The Gibson harness: <gibson-repo-url>. Load its AGENTS.md
-before working here. Repo-specifics below override nothing — they instantiate.
+## Autonomous development contract
 
-### Gate commands (the green gate here)
+This repo is developed by both humans and coding agents. Any agent or harness
+working here reads this section first and obeys it. It states repo facts, not
+process doctrine — your harness supplies the process.
+
+Machine-readable companion: `.agents/gate.json` (same commands, parseable).
+
+### Gate commands (the definition of "green" here)
 ```bash
-<generate>      # e.g. npx prisma generate
+<generate>      # e.g. npx prisma generate      — omit the line if N/A
 <typecheck>     # e.g. npx tsc --noEmit
 <lint>          # e.g. npm run lint
 <test>          # e.g. npx vitest run
 <build>         # e.g. npm run build
 ```
+All of these must pass before any commit, with **zero new failures versus the
+branch point**. Pre-existing failures are recorded, not inherited and not hidden.
 
-### Hot files
+### Ground rules for machine contributors
+1. **Never mutate the shared checkout.** One task = one branch = one git
+   worktree of your own.
+2. **Claim before you touch.** <claim mechanism — e.g. "one
+   `- Active-work claim: <slug>` line in an open PR body", or
+   "a row in `docs/active-work.md` plus the `agent-claimed` label">.
+   Overlapping claim ⇒ stop and coordinate, never race.
+3. **Never review or approve your own work.** An independent reviewer — ideally
+   a different model — inspects the exact committed head, read-only.
+4. **Acceptance criteria are the contract**, verified by a sensor (test, script,
+   check), never by assertion.
+5. **Report failures verbatim.** Never mark done what you did not verify.
+6. **Clean up:** remove the worktree, delete the branch, release the claim.
+
+### Hot files (single claimant, own PR)
 | File | Rule |
 |---|---|
-| <schema path> | additive-only, single claimant, models named in claim, own PR |
+| <schema path> | additive-only; name the models you touch in the claim |
 | package.json | no casual deps; own commit |
+| <generated barrels> | never hand-edit — run <generator command> |
 | <other> | <rule> |
 
 ### Framework warnings
-<!-- pinned-version gotchas, e.g.: "This is NOT the Next.js you know — read
-     node_modules/next/dist/docs before route/handler/config code; async
-     { params } in route handlers is only caught by next build." -->
+<!-- Pinned-version gotchas that training data gets wrong, e.g.: "This is NOT
+     the Next.js you know — read node_modules/next/dist/docs before touching
+     route handlers; async { params } is only caught by next build." -->
 
 ### Deployment truth (verified <date>)
-- Vercel project: <name> (team <team>)
-- Production Branch (VERIFIED in settings, not docs): <branch>
-- Merge to <branch> ⇒ <what actually happens, incl. schema apply behavior>
-- Preview deployments: <on/off, URL resolution method>
+- Host/project: <name> (<team>)
+- Production branch (VERIFIED in the host's settings, not in docs): <branch>
+- Merge to <branch> ⇒ <what actually happens, including schema-apply behaviour>
+- Preview deployments: <on/off, how the URL is resolved>
 
-### Tier C surface map
-<!-- The paths where Tier C treatment is automatic: -->
-- Money: <paths>
-- Auth: <paths, middleware>
-- PII/consent: <paths, models>
-- Schema: <path>
+### Stop and ask a human for
+<!-- The irreversible or human-only actions. Everything NOT listed here, the
+     agent resolves itself — including failing tests, flaky CI, and conflicts. -->
+- Money: <paths / actions>
+- Auth and authorization boundaries: <paths, middleware>
+- PII / consent: <paths, models>
+- Destructive or irreversible data and schema operations: <paths>
+- Secret values, public launches, legal commitments
 
-### Claims
-Claim table: `docs/active-work.md` · labels: `agent-claimed`, `blocked`,
-`gibson-halt` · max mutating lanes: 3
+### Commit and PR conventions
+<!-- e.g. "git commit -s (DCO enforced on every PR commit)"; branch naming;
+     required labels; whether agents may merge their own reviewed PRs. -->

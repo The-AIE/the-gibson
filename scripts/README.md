@@ -27,6 +27,7 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`tests/ux-surface.test.sh`](tests/ux-surface.test.sh) | Sensors for the UX path filter in both directions (L-034 skip vs. L-012 false skip). |
 | [`tests/release-claim.test.sh`](tests/release-claim.test.sh) | Sensors for the release-claim contract (L-009 / L-024 / L-027 / L-037). Temp git repos only — no network, no `gh`. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |
+| [`delivery-control/`](delivery-control/) | Doc 20: audit/harden branch protection + Production env; promote/hotfix (portable). **Never rotates secrets.** |
 
 ## How to use (quick path)
 
@@ -58,12 +59,13 @@ export BASE_URL="$($GIBSON/scripts/preview-url.sh 123)"
 Resolution order per step (`generate` / `typecheck` / `lint` / `test` / `build`):
 
 1. Env: `GIBSON_TYPECHECK`, etc.
-2. `.gibson-gate.json` in the target repo
+2. `.agents/gate.json` in the target repo (legacy fallback: `.gibson-gate.json`)
 3. Commands recorded in `.gibson-baseline.json`
 4. `package.json` scripts (`typecheck`, `lint`, `test`, `build`)
 5. Defaults (`npx tsc --noEmit`, `npm run lint`, …)
 
-Example `.gibson-gate.json`:
+Example `.agents/gate.json` — vendor-neutral on purpose, so a target repo can be
+driven by any harness (docs/13):
 
 ```json
 {
