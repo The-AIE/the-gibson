@@ -49,13 +49,14 @@ always mounts doctrine **explicitly** (never rely on ambient config alone):
 2. Role playbook from `playbooks/<role>.md`
 3. `memory/LESSONS.md` (relevant slice)
 
-The operator path is a Gibson recipe that embeds those files (see
-`playbooks/recipes/`). For ad-hoc sessions:
+The operator path is a Gibson recipe that references those files (and
+instructs Goose to read them from disk) — see `playbooks/recipes/`. For
+ad-hoc sessions:
 
 ```bash
 GIBSON=~/Code/the-gibson
 # Worktree path after claim (see §3) — never the target's canonical checkout
-REPO=~/Code/app-wt-42-feature-slug
+REPO=~/Code/wt-42-feature-slug
 
 goose run --recipe "$GIBSON/playbooks/recipes/builder.yaml" \
   --params "repo=$REPO" --params "issue=42" --params "gibson=$GIBSON"
