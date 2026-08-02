@@ -8,10 +8,12 @@
 #   warning before the handoff went out anyway. A gate that cannot say no is
 #   documentation, not a gate (issue #55, AGENTS.md Law 5).
 #
-#   These cases pin the four ways it must fail closed, and the one way it may
-#   pass. They drive the real scripts/loop.sh against stub reviewer/supervisor
-#   CLIs, so a regression in the driver — not in the stubs — is what turns them
-#   red.
+#   These cases pin the ways it must fail closed, and the ways it may pass. They
+#   drive the real scripts/loop.sh against stub reviewer/supervisor CLIs, so a
+#   regression in the driver — not in the stubs — is what turns them red. Two
+#   cases at the end drive the real scripts/devin-supervisor.sh with --dry-run
+#   instead, because the guard and the diffstat they sense live there: no Devin
+#   API is contacted.
 #
 # USAGE
 #   scripts/tests/loop-handoff.test.sh
@@ -20,6 +22,10 @@ set -uo pipefail
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 GIBSON=$(cd "$SCRIPT_DIR/../.." && pwd)
 LOOP="$GIBSON/scripts/loop.sh"
+# The real supervisor, driven with --dry-run only: it renders the handoff message
+# and never touches the Devin API, so its guards and its diffstat can be sensed
+# directly rather than through the driver's stub.
+SUPERVISOR="$GIBSON/scripts/devin-supervisor.sh"
 
 PASS=0
 FAIL=0
@@ -28,6 +34,8 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 
 command -v node >/dev/null || { echo "loop-handoff.test.sh: node is required"; exit 1; }
 command -v git  >/dev/null || { echo "loop-handoff.test.sh: git is required"; exit 1; }
+# devin-supervisor.sh checks for curl before it ever looks at --dry-run.
+command -v curl >/dev/null || { echo "loop-handoff.test.sh: curl is required"; exit 1; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-loop-handoff.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -84,7 +92,15 @@ export PATH
 GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
 
 # A target repo with one branch to hand off, and a bare remote it is pushed to.
-setup_repo() { # setup_repo [with-remote]
+# `with-remote` is the realistic default: a supervisor handoff only means anything
+# for a branch that exists on a remote, so every case that expects a review to run
+# or a handoff to complete uses it.
+#   (none)                   — no origin at all: a genuinely local-only repo, and
+#                              therefore a repo that can never hand off
+#   with-remote              — origin configured, main and the branch pushed
+#   with-remote-unpublished  — origin configured, only main pushed; the finished
+#                              branch exists in this checkout and nowhere else
+setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
   rm -rf "$REPO" "$REMOTE"
   mkdir -p "$REPO"
   $GIT init -q "$REPO"
@@ -96,10 +112,14 @@ setup_repo() { # setup_repo [with-remote]
   echo work >> "$REPO/README.md"
   $GIT -C "$REPO" commit -q -am "work"
   $GIT -C "$REPO" checkout -q main
-  if [[ "${1:-}" == "with-remote" ]]; then
+  if [[ "${1:-}" == "with-remote" || "${1:-}" == "with-remote-unpublished" ]]; then
     $GIT init -q --bare "$REMOTE"
     git -C "$REPO" remote add origin "$REMOTE"
-    git -C "$REPO" push -q origin main "$BRANCH"
+    if [[ "$1" == "with-remote" ]]; then
+      git -C "$REPO" push -q origin main "$BRANCH"
+    else
+      git -C "$REPO" push -q origin main
+    fi
     # Pinned explicitly so the machine's init.defaultBranch cannot decide what
     # the driver resolves as the base.
     git -C "$REMOTE" symbolic-ref HEAD refs/heads/main
@@ -190,7 +210,7 @@ review_invoked()  { [[ -s "$CALLS/second-opinion.count" ]]; }
 still_queued()    { grep -qx "handoff: $BRANCH" "$REPO/gibson/loop-state.md"; }
 
 echo "a reviewer that fails blocks the handoff"
-setup_repo
+setup_repo with-remote
 write_state "$BRANCH" ""
 STUB_SECOND_OPINION_RC=1 run_loop
 if handoff_invoked; then bad "reviewer failure must not reach devin-supervisor.sh handoff"
@@ -204,7 +224,7 @@ if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
 else ok "a failed review leaves no receipt"; fi
 
 echo "a stale second-opinion.md does not satisfy the gate"
-setup_repo
+setup_repo with-remote
 write_state "$BRANCH" ""
 mkdir -p "$REPO/gibson"
 cat > "$REPO/gibson/second-opinion.md" <<'STALE'
@@ -248,7 +268,9 @@ if still_queued; then ok "mismatched pin stays queued"
 else bad "mismatched pin was cleared from loop-state"; fi
 
 echo "a reviewer list with no distinct vendor blocks the handoff"
-setup_repo
+# Remote-backed on purpose: everything else about this handoff is in order, so
+# the ONLY thing that can block it is the Law 5 vendor check.
+setup_repo with-remote
 write_state "$BRANCH" ""
 run_loop --reviewers hermes
 if handoff_invoked; then bad "the runner must never be its own reviewer (Law 5)"
@@ -262,6 +284,99 @@ write_state "$BRANCH" "$(head_sha)"
 run_loop
 if handoff_invoked; then ok "a pin matching the remote tip hands off"
 else bad "a matching pin was wrongly blocked"; fi
+
+echo "a finished branch that was never pushed blocks the handoff"
+# The gate's premise is that the reviewer and the supervisor look at the same
+# commit. The supervisor opens the PR from the REMOTE branch, so a branch that
+# lives only in this checkout has no reviewable remote tip at all. The driver
+# used to fall back to refs/heads/<branch> here and review — and hand off — a
+# commit the supervisor could never see. Local refs never answer now: neither an
+# origin-less repo nor an unpublished branch is a valid Devin handoff, and each
+# is tested separately (the unpublished branch here, the origin-less repo below).
+setup_repo with-remote-unpublished
+write_state "$BRANCH" ""
+if [[ -n "$(git -C "$REPO" ls-remote origin "refs/heads/$BRANCH" 2>/dev/null)" ]]; then
+  bad "fixture bug: the finished branch is on the remote after all"
+else
+  ok "the finished branch exists only in the local checkout"
+fi
+run_loop
+if review_invoked; then bad "an unpublished branch must not be sent to a reviewer"
+else ok "an unpublished branch is refused before spending a reviewer"; fi
+if handoff_invoked; then bad "an unpublished branch must never reach the supervisor"
+else ok "an unpublished branch blocks the supervisor invocation"; fi
+if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+  bad "an unpublished branch must not leave a receipt"
+else ok "an unpublished branch leaves no receipt"; fi
+if still_queued; then ok "the branch stays queued until it is pushed"
+else bad "the handoff was cleared for a branch the supervisor cannot fetch"; fi
+
+echo "devin-supervisor.sh itself refuses a pinned handoff for an unpublished branch"
+# The driver is not the only caller (docs/22 documents a by-hand handoff), so the
+# same hole is sensed one layer down, with --dry-run: no Devin API is touched.
+sup_err="$ROOT/supervisor.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$(head_sha)" --task "unpublished-branch sensor" --dry-run 2>"$sup_err"); then
+  bad "a pinned handoff for an unpushed branch must fail, not render a message"
+else
+  ok "the pinned handoff failed closed for an unpushed branch"
+fi
+if grep -q "never pushed" "$sup_err"; then
+  ok "the failure names the real reason (no remote branch)"
+else
+  bad "the failure did not explain that origin has no such branch: $(cat "$sup_err")"
+fi
+if [[ -z "${sup_out:-}" ]]; then
+  ok "no handoff message was rendered for an unpublished branch"
+else
+  bad "a handoff message was rendered despite the missing remote branch"
+fi
+
+echo "a repo with no origin at all blocks the handoff before the review"
+# The other half of the same premise. supervisor_handoff runs only for the Devin
+# supervisor, and the supervisor opens the PR from a REMOTE branch — so a repo
+# with no remote has nothing to hand off, whatever its local refs say. The driver
+# used to resolve refs/heads/<branch> here, spend the distinct-vendor review on
+# it, and only then hit devin-supervisor.sh's own no-origin refusal. The review
+# is the expensive part; it must not be spent on a handoff that cannot succeed.
+setup_repo
+write_state "$BRANCH" ""
+if git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
+  bad "fixture bug: the local-only repo has an origin after all"
+else
+  ok "the fixture repo has no origin at all"
+fi
+run_loop
+if review_invoked; then bad "an origin-less repo must not spend a distinct-vendor review"
+else ok "an origin-less repo is refused before spending a reviewer"; fi
+if handoff_invoked; then bad "an origin-less repo must never reach the supervisor"
+else ok "an origin-less repo blocks the supervisor invocation"; fi
+if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+  bad "an origin-less repo must not leave a receipt"
+else ok "an origin-less repo leaves no receipt"; fi
+if still_queued; then ok "the branch stays queued until the repo has a remote"
+else bad "the handoff was cleared for a repo the supervisor cannot pull from"; fi
+
+echo "devin-supervisor.sh itself refuses a pinned handoff in a repo with no origin"
+# The layer below, again with --dry-run: this is the refusal the driver would
+# otherwise reach only after the review had already been spent.
+sup_err="$ROOT/supervisor-no-origin.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$(head_sha)" --task "no-origin sensor" --dry-run 2>"$sup_err"); then
+  bad "a pinned handoff in an origin-less repo must fail, not render a message"
+else
+  ok "the pinned handoff failed closed with no origin configured"
+fi
+if grep -q "no origin configured" "$sup_err"; then
+  ok "the failure names the real reason (no origin to confirm the pin against)"
+else
+  bad "the failure did not explain that the repo has no origin: $(cat "$sup_err")"
+fi
+if [[ -z "${sup_out:-}" ]]; then
+  ok "no handoff message was rendered without an origin"
+else
+  bad "a handoff message was rendered despite the missing origin"
+fi
 
 echo "a master-trunk repo is reviewed against master's exact tip and handed off to master"
 setup_repo_trunk master stale-local
@@ -279,6 +394,11 @@ if [[ "$devin_base" == "master" ]]; then
   ok "the supervisor handoff carried the base NAME master"
 else
   bad "handoff base was '${devin_base:-<none>}' — expected master"
+fi
+if [[ "$(arg_after "$CALLS/devin.args" --base-sha)" == "$master_tip" ]]; then
+  ok "the supervisor handoff also carried the exact base SHA $master_tip"
+else
+  bad "handoff --base-sha was '$(arg_after "$CALLS/devin.args" --base-sha)' — expected $master_tip"
 fi
 if grep -qxF "base: master" "$REPO/gibson/second-opinion.receipt" &&
    grep -qxF "base_sha: $master_tip" "$REPO/gibson/second-opinion.receipt"; then
@@ -418,6 +538,22 @@ if [[ "$(arg_after "$CALLS/devin.args" --base)" == "main" ]]; then
 else
   bad "handoff base was '$(arg_after "$CALLS/devin.args" --base)' — the supervisor needs the branch name"
 fi
+# The names are for PR targeting; the SHAs are what the diffstat must be built
+# from. Both endpoints handed to the supervisor must be the endpoints that were
+# actually reviewed — in this clone `refs/heads/main` still points at the old
+# base, so a supervisor given only names would describe a diff nobody reviewed.
+if [[ "$(arg_after "$CALLS/devin.args" --base-sha)" == "$(arg_after "$CALLS/second-opinion.args" --base)" &&
+      "$(arg_after "$CALLS/devin.args" --sha)" == "$(arg_after "$CALLS/second-opinion.args" --branch)" ]]; then
+  ok "the supervisor's --base-sha/--sha are exactly the reviewer's two endpoints"
+else
+  bad "supervisor endpoints ($(arg_after "$CALLS/devin.args" --base-sha)...$(arg_after "$CALLS/devin.args" --sha)) differ from the reviewed ones ($(arg_after "$CALLS/second-opinion.args" --base)...$(arg_after "$CALLS/second-opinion.args" --branch))"
+fi
+if [[ "$(arg_after "$CALLS/devin.args" --base-sha)" == "$ADVANCED_BASE" &&
+      "$(arg_after "$CALLS/devin.args" --sha)" == "$HEAD_SHA" ]]; then
+  ok "the handoff pinned the advanced base $ADVANCED_BASE and the head $HEAD_SHA"
+else
+  bad "the handoff did not pin $ADVANCED_BASE...$HEAD_SHA"
+fi
 if grep -qxF "base_sha: $ADVANCED_BASE" "$RECEIPT" && grep -qxF "base: main" "$RECEIPT"; then
   ok "the new receipt records the exact advanced base SHA"
 else
@@ -425,8 +561,24 @@ else
 fi
 
 echo "a pinned SHA that cannot be resolved locally blocks without a receipt"
-setup_repo
-write_state "$BRANCH" "0123456789abcdef0123456789abcdef01234567"
+# Remote-backed, but the advertised tip is unobtainable: origin still answers for
+# refs/heads/<branch> while the object behind it is gone, which is what a pruned
+# or garbage-collected tip looks like from here. The pin agrees with what the
+# remote advertises, so nothing upstream of the fetch objects — and the fetch
+# still cannot produce the commit, so there is no diff anyone could have
+# reviewed. Recording a receipt for an object nobody can read would record a
+# review that never happened.
+setup_repo with-remote
+DANGLING=0123456789abcdef0123456789abcdef01234567
+mkdir -p "$(dirname "$REMOTE/refs/heads/$BRANCH")"
+printf '%s\n' "$DANGLING" > "$REMOTE/refs/heads/$BRANCH"
+if [[ "$(git -C "$REPO" ls-remote origin "refs/heads/$BRANCH" | awk 'NR==1 {print $1}')" == "$DANGLING" ]] &&
+   ! git -C "$REPO" rev-parse --verify --quiet "$DANGLING^{commit}" >/dev/null 2>&1; then
+  ok "fixture: origin advertises $DANGLING and this clone cannot read it"
+else
+  bad "fixture bug: the dangling remote tip is not advertised, or is readable locally"
+fi
+write_state "$BRANCH" "$DANGLING"
 run_loop
 if review_invoked; then bad "an unfetchable SHA must not be sent to a reviewer"
 else ok "an unresolvable pin is refused before spending a reviewer"; fi
@@ -437,6 +589,76 @@ if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
 else ok "an unresolvable pin leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued when its pin is unresolvable"
 else bad "the handoff was cleared despite an unresolvable pin"; fi
+
+echo "the handoff diffstat is rendered from the exact reviewed SHAs, not from stale local refs"
+# The message the supervisor reads is the only description of the change it gets
+# before it looks for itself. Building the diffstat from `$BASE...$BRANCH` reads
+# whatever those NAMES point at in the handing-off clone — refs that go stale the
+# moment either side advances elsewhere, and that a local-only commit can make up
+# entirely. Here both remote endpoints have moved and the local refs disagree, so
+# a name-built diffstat describes a diff that exists nowhere.
+setup_repo with-remote
+DIFF_CLONE="$ROOT/diff-clone"
+rm -rf "$DIFF_CLONE"
+git clone -q "$REMOTE" "$DIFF_CLONE"
+git -C "$DIFF_CLONE" checkout -q -B "$BRANCH" "origin/$BRANCH"
+echo head > "$DIFF_CLONE/REMOTE-HEAD-ONLY.md"
+$GIT -C "$DIFF_CLONE" add REMOTE-HEAD-ONLY.md
+$GIT -C "$DIFF_CLONE" commit -q -m "advance the head on the remote"
+git -C "$DIFF_CLONE" push -q origin "$BRANCH"
+EXACT_HEAD=$(git -C "$DIFF_CLONE" rev-parse HEAD)
+git -C "$DIFF_CLONE" checkout -q main
+echo base > "$DIFF_CLONE/REMOTE-BASE-ONLY.md"
+$GIT -C "$DIFF_CLONE" add REMOTE-BASE-ONLY.md
+$GIT -C "$DIFF_CLONE" commit -q -m "advance the base on the remote"
+git -C "$DIFF_CLONE" push -q origin main
+EXACT_BASE=$(git -C "$DIFF_CLONE" rev-parse HEAD)
+
+# A local-only commit on the stale branch ref: `main...$BRANCH` in this clone now
+# names a diff that exists on no remote.
+$GIT -C "$REPO" checkout -q "$BRANCH"
+echo stale > "$REPO/STALE-LOCAL-ONLY.md"
+$GIT -C "$REPO" add STALE-LOCAL-ONLY.md
+$GIT -C "$REPO" commit -q -m "a local-only commit the remote never saw"
+$GIT -C "$REPO" checkout -q main
+# Fetch the objects without moving refs/heads/*: the clone can READ both reviewed
+# commits (as the driver guarantees before any review) while its branch names
+# still point somewhere else.
+git -C "$REPO" fetch -q origin main "$BRANCH"
+if git -C "$REPO" diff --stat "main...$BRANCH" | grep -q 'STALE-LOCAL-ONLY'; then
+  ok "fixture: the local branch names describe a diff of their own"
+else
+  bad "fixture bug: the local refs are not stale"
+fi
+
+sup_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+  --base-sha "$EXACT_BASE" --sha "$EXACT_HEAD" --task "diffstat sensor" --dry-run 2>/dev/null)
+sup_rc=$?
+if [[ "$sup_rc" -eq 0 ]]; then
+  ok "the pinned handoff rendered with both exact endpoints"
+else
+  bad "the pinned handoff failed (rc=$sup_rc) even though both objects are present"
+fi
+if grep -qF 'REMOTE-HEAD-ONLY.md' <<<"$sup_msg"; then
+  ok "the diffstat contains the path committed on the reviewed head $EXACT_HEAD"
+else
+  bad "the diffstat does not name REMOTE-HEAD-ONLY.md — it was not built from $EXACT_BASE...$EXACT_HEAD"
+fi
+if grep -qF 'STALE-LOCAL-ONLY.md' <<<"$sup_msg"; then
+  bad "the diffstat describes the stale local branch diff, not the reviewed one"
+else
+  ok "the stale local-only commit is absent from the diffstat"
+fi
+if grep -qF 'REMOTE-BASE-ONLY.md' <<<"$sup_msg"; then
+  bad "the diffstat leaked base-only changes — it is not a $EXACT_BASE...$EXACT_HEAD three-dot diff"
+else
+  ok "base-only changes are absent, as a three-dot diff of the reviewed endpoints requires"
+fi
+if grep -qF "Branch: \`$BRANCH\`" <<<"$sup_msg" && grep -qF 'Base: `main`' <<<"$sup_msg"; then
+  ok "the human message still names both branches, so the PR can be targeted"
+else
+  bad "the message lost the branch names the supervisor opens the PR between"
+fi
 
 echo
 echo "loop-handoff.test.sh: $PASS passed, $FAIL failed"

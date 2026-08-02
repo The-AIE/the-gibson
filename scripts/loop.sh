@@ -35,6 +35,14 @@ RISKS
     verified local main/master. The review is pinned to that base SHA as well as
     to the head SHA, so a base that advances invalidates the receipt. A repo whose
     base cannot be resolved or confirmed blocks the handoff rather than guessing.
+    Likewise a supervisor handoff requires the BRANCH to exist on the remote:
+    a repo with no origin, and a branch that was never pushed, are both blocked
+    before the review is spent — the supervisor opens the PR from the remote
+    branch, so a local-only ref is nothing it can act on.
+  - The review receipt is an operational control, not a security boundary. It is
+    a plain file under <repo>/gibson/, so anything running as the same user —
+    including the agents the gate constrains — can write it. Isolating it from
+    them is a separate hardening concern (docs/22).
 
 USAGE
   loop.sh --runner <grok|hermes|claude|codex> --repo <path> [options]
@@ -333,34 +341,44 @@ escalate() {
 resolve_handoff_sha() {
   local branch="$1" pinned remote="" ls_out sha
   pinned=$(read_field handoff_sha)
-  # Explicit, not errexit-suppressed: "no origin configured" and "origin is
-  # configured but unreachable" are different answers. The first is a local-only
-  # repo and falls through to local refs; the second means we cannot tell whether
-  # the tip moved, and handing off a tip we cannot confirm is exactly what the
-  # pin exists to prevent.
-  if git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
-    if ls_out=$(git -C "$REPO" ls-remote origin "refs/heads/$branch" 2>/dev/null); then
-      remote=$(printf '%s\n' "$ls_out" | awk 'NR==1 {print $1}')
-    else
-      info "git ls-remote origin refs/heads/$branch failed — cannot confirm the remote tip, refusing to hand off an unconfirmable branch"
-      return 1
-    fi
+  # No origin at all is fatal here, not a fall-through to local refs. This
+  # function is reached only from supervisor_handoff, i.e. only when the work is
+  # destined for the Devin supervisor — and the supervisor opens the PR from the
+  # REMOTE branch, so a repo with no remote has nothing it can be handed. The
+  # real devin-supervisor.sh already refuses a --sha handoff without an origin;
+  # resolving a local SHA here would only mean spending a distinct-vendor review
+  # first and hitting that same refusal afterwards. Fail before the review, not
+  # after it.
+  if ! git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
+    info "no origin configured in $REPO — the supervisor can only open a PR from a remote branch, so an origin-less repo has no handoff to make. Add a remote and push $branch, then re-queue the handoff."
+    return 1
   fi
-  if [[ -n "$pinned" && -n "$remote" && "$pinned" != "$remote" ]]; then
+  # Explicit, not errexit-suppressed: an unreachable origin means we cannot tell
+  # whether the tip moved, and handing off a tip we cannot confirm is exactly
+  # what the pin exists to prevent.
+  if ls_out=$(git -C "$REPO" ls-remote origin "refs/heads/$branch" 2>/dev/null); then
+    remote=$(printf '%s\n' "$ls_out" | awk 'NR==1 {print $1}')
+  else
+    info "git ls-remote origin refs/heads/$branch failed — cannot confirm the remote tip, refusing to hand off an unconfirmable branch"
+    return 1
+  fi
+  # Reachable origin, no such branch: the branch exists only in this checkout.
+  # Falling back to refs/heads/$branch here reviews a tip the supervisor cannot
+  # see — it opens a PR from the REMOTE branch, so it would review and merge
+  # something other than what was reviewed here, or nothing at all. An
+  # unpublished branch is a blocked handoff, not a local-ref handoff.
+  if [[ -z "$remote" ]]; then
+    info "origin has no refs/heads/$branch — the branch was never pushed, and the supervisor can only open a PR from the remote branch. Push it, then re-queue the handoff."
+    return 1
+  fi
+  if [[ -n "$pinned" && "$pinned" != "$remote" ]]; then
     info "loop-state pins $branch @ $pinned but the remote tip is $remote — refusing to hand off an unreviewed tip (issue #55)"
     return 1
   fi
+  # Never empty: $remote is non-empty by the time we get here, because every
+  # other path above returned 1. There is deliberately no local-ref fallback —
+  # a SHA only this clone can see is not a SHA the supervisor can act on.
   sha="${pinned:-$remote}"
-  if [[ -z "$sha" ]]; then
-    sha=$(git -C "$REPO" rev-parse --verify --quiet "refs/heads/$branch" || true)
-  fi
-  if [[ -z "$sha" ]]; then
-    sha=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$branch" || true)
-  fi
-  if [[ -z "$sha" ]]; then
-    info "could not resolve a SHA for handoff branch $branch — an unpinnable branch cannot be reviewed or handed off"
-    return 1
-  fi
   # The SHA may have come from `ls-remote` (or from a loop-state pin written by
   # an agent working in a different worktree), so the object is not necessarily
   # in THIS clone. A reviewer cannot diff a commit it cannot read, and writing a
@@ -389,6 +407,11 @@ resolve_handoff_sha() {
 # #55). Binding the base SHA as well as the head SHA closes the matching hole on
 # the base side — the same head reviewed against a base branch that has since
 # advanced is a different diff, so its receipt must not be reused.
+#
+# Scope of the guarantee: this is an operational control over what the driver
+# will do, not a tamper-proof one. The receipt is a same-user file in the target
+# repo, so a runner with write access there could forge one; keeping it out of
+# their reach is a separate hardening concern and is not solved here.
 review_receipt_ok() {
   local sha="$1" branch="$2" base="$3" base_sha="$4"
   [[ -f "$REVIEW_RECEIPT" ]] || return 1
@@ -502,11 +525,16 @@ supervisor_handoff() {
   [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
   [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
   local review="$STATE_DIR/second-opinion.md"
-  # The supervisor gets the human branch NAME — it opens a PR into a branch, not
-  # into a commit — while the review above was pinned to that branch's exact tip.
+  # The supervisor gets the human branch NAMES — it opens a PR from one branch
+  # into another, not from one commit into another — AND both exact SHAs, so the
+  # diffstat it is shown is built from the same two endpoints the reviewer saw.
+  # Passing only the names would let a stale local ref describe a different diff
+  # than the one that was reviewed. Both objects were fetched and verified by
+  # resolve_base_pin/resolve_handoff_sha above, so the exact-SHA diff is readable.
   info "handing $branch @$sha to the Devin supervisor (base $base @ $base_sha)"
   if "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
-      --base "$base" --sha "$sha" --task "$task" --gate-status "green locally" \
+      --base "$base" --base-sha "$base_sha" --sha "$sha" \
+      --task "$task" --gate-status "green locally" \
       --review-file "$review"; then
     node -e '
       const fs = require("fs");

@@ -15,10 +15,11 @@ WHAT IT DOES
   wake     force the webhook wake path (used by cron, CI, or the loop driver)
   handoff  send a branch to the supervisor: review this diff, open/refresh the
            PR, keep CI green, merge if --merge. When --sha is supplied the
-           supervisor is instructed to reject the handoff if the remote tip
-           no longer matches (issue #55 pin). --base defaults to main here;
-           loop.sh always passes the target repo's resolved default branch, so
-           a repo whose trunk is master is never diffed against a missing ref.
+           remote tip of --branch must exist and match it, and the supervisor is
+           instructed to reject the handoff if it moves afterwards (issue #55
+           pin). --base defaults to main here; loop.sh always passes the target
+           repo's resolved default branch, so a repo whose trunk is master is
+           never diffed against a missing ref.
 
 WHY
   Iteration is the expensive part and it runs on flat-rate local runners
@@ -40,9 +41,22 @@ USAGE
   devin-supervisor.sh status  --repo <path>
   devin-supervisor.sh wake    --repo <path> [--reason TEXT]
   devin-supervisor.sh handoff --repo <path> --branch NAME [--base main]
-                              [--sha SHA] [--task TEXT | --task-file PATH]
+                              [--sha SHA] [--base-sha SHA]
+                              [--task TEXT | --task-file PATH]
                               [--merge] [--gate-status TEXT] [--review-file PATH]
                               [--wait] [--dry-run]
+
+HANDOFF OPTIONS
+  --branch NAME   head branch, already pushed (required)
+  --base NAME     base branch the PR opens into (default: main)
+  --sha SHA       exact head commit. The remote tip of --branch must exist and
+                  still equal it, or the handoff fails (issue #55).
+  --base-sha SHA  exact base commit. Requires --sha. When both are given the
+                  diffstat is built from <base-sha>...<sha> — the same two
+                  endpoints that were reviewed — instead of from the branch
+                  names, whose local refs may have moved or gone stale. The
+                  branch NAMES are still what the supervisor is told to open the
+                  PR between.
 
 ENVIRONMENT
   DEVIN_API_KEY      required — https://app.devin.ai/settings/api-keys
@@ -67,6 +81,7 @@ REPO=""
 BRANCH=""
 BASE="main"
 SHA=""
+BASE_SHA=""
 TASK=""
 TASK_FILE=""
 REVIEW_FILE=""
@@ -83,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --sha) SHA="$2"; shift 2 ;;
+    --base-sha) BASE_SHA="$2"; shift 2 ;;
     --task) TASK="$2"; shift 2 ;;
     --task-file) TASK_FILE="$2"; shift 2 ;;
     --review-file) REVIEW_FILE="$2"; shift 2 ;;
@@ -313,32 +329,64 @@ case "$CMD" in
     REVIEWS=""
     [[ -n "$REVIEW_FILE" && -f "$REVIEW_FILE" ]] && REVIEWS=$(cat "$REVIEW_FILE")
 
-    # Issue #55: when a SHA is pinned, verify the remote tip still matches.
+    [[ -z "$BASE_SHA" || -n "$SHA" ]] || die "--base-sha requires --sha: half a pin describes half a diff"
+
+    # Issue #55: when a SHA is pinned, the remote tip must exist and match it.
+    # Every miss is fatal, not a warning. The supervisor opens the PR from the
+    # REMOTE branch, so "origin has no such branch" or "cannot reach origin"
+    # means the thing being handed off is not the thing that was reviewed — and
+    # proceeding on the pin alone would send the supervisor after a branch it
+    # cannot find, or one that has since been rewritten.
     if [[ -n "$SHA" ]]; then
+      git -C "$REPO" remote get-url origin >/dev/null 2>&1 ||
+        die "no origin configured in $REPO, so the pinned SHA $SHA cannot be confirmed against a remote branch. A pinned handoff needs a pushed branch."
       # NR==1: ls-remote for an exact ref should print one line, but a server
       # that also advertises a peeled tag or a same-named ref would append more.
       # Comparing a pin against a concatenation of SHAs always "mismatches".
-      remote_sha=$(git -C "$REPO" ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk 'NR==1 {print $1}' || true)
-      if [[ -n "$remote_sha" && "$remote_sha" != "$SHA" ]]; then
-        die "pinned SHA $SHA no longer matches remote tip of $BRANCH ($remote_sha). Re-review the new tip before handoff."
-      fi
+      ls_out=$(git -C "$REPO" ls-remote origin "refs/heads/$BRANCH" 2>/dev/null) ||
+        die "git ls-remote origin refs/heads/$BRANCH failed — cannot confirm the remote tip of $BRANCH against the pinned SHA $SHA."
+      remote_sha=$(printf '%s\n' "$ls_out" | awk 'NR==1 {print $1}')
       if [[ -z "$remote_sha" ]]; then
-        info "could not resolve remote tip for $BRANCH — proceeding with pinned SHA $SHA (supervisor will re-check)"
+        die "origin has no refs/heads/$BRANCH — the branch was never pushed, so there is nothing for the supervisor to open a PR from. Push it, then re-run the handoff."
+      fi
+      if [[ "$remote_sha" != "$SHA" ]]; then
+        die "pinned SHA $SHA no longer matches remote tip of $BRANCH ($remote_sha). Re-review the new tip before handoff."
       fi
     fi
 
-    DIFFSTAT=$(git -C "$REPO" diff --stat "$BASE...$BRANCH" 2>/dev/null || echo "n/a")
+    # The diffstat must describe the diff that was reviewed. Branch names are
+    # moving targets and this clone's copies of them may be stale, so when both
+    # exact endpoints are supplied the diffstat comes from those commits and
+    # never from a local ref. If either object is missing from this clone we say
+    # so plainly rather than substituting a different, readable diff — in the
+    # loop.sh path both were fetched and verified before the review ran.
+    if [[ -n "$BASE_SHA" && -n "$SHA" ]]; then
+      if git -C "$REPO" rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null 2>&1 &&
+         git -C "$REPO" rev-parse --verify --quiet "$SHA^{commit}" >/dev/null 2>&1; then
+        DIFFSTAT=$(git -C "$REPO" diff --stat "$BASE_SHA...$SHA" 2>/dev/null || echo "n/a")
+      else
+        info "commits $BASE_SHA and/or $SHA are not in $REPO — reporting the diffstat as n/a rather than substituting a local-branch diff"
+        DIFFSTAT="n/a — $BASE_SHA...$SHA is not readable in the handing-off clone; generate the diff yourself from the remote."
+      fi
+    else
+      DIFFSTAT=$(git -C "$REPO" diff --stat "$BASE...$BRANCH" 2>/dev/null || echo "n/a")
+    fi
     if [[ "$DRY" -eq 0 ]]; then id=$(ensure_session); else id="(dry-run)"; fi
 
+    # Concatenated rather than heredoc'd because the base line is conditional:
+    # the clause must start with a newline and end without one, exactly as the
+    # MESSAGE template below expects.
     SHA_CLAUSE=""
     if [[ -n "$SHA" ]]; then
-      SHA_CLAUSE=$(cat <<EOF
-
+      SHA_CLAUSE="
 ## Pinned head (issue #55)
-- Expected SHA: \`$SHA\`
-- Before opening or merging the PR, confirm that the tip of \`$BRANCH\` on the remote is still exactly this SHA. If it has moved, reject the handoff and report the mismatch — do not review or merge a different tip.
-EOF
-)
+- Expected SHA: \`$SHA\`"
+      if [[ -n "$BASE_SHA" ]]; then
+        SHA_CLAUSE="$SHA_CLAUSE
+- Reviewed against base commit: \`$BASE_SHA\` — the diffstat below is exactly \`$BASE_SHA...$SHA\`, the diff that was reviewed."
+      fi
+      SHA_CLAUSE="$SHA_CLAUSE
+- Before opening or merging the PR, confirm that the tip of \`$BRANCH\` on the remote is still exactly this SHA. If it has moved, reject the handoff and report the mismatch — do not review or merge a different tip."
     fi
 
     MESSAGE=$(cat <<EOF

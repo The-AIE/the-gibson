@@ -854,8 +854,30 @@ dies on an unresolvable base or branch instead of falling back to the working
 tree. Regressions in `scripts/tests/loop-handoff.test.sh` (non-main trunk, stale
 local origin/HEAD, missing local object, remote base advance, unresolvable
 base/pin) and `scripts/tests/second-opinion.test.sh`.
+A third review round found two survivors of the same species. (a) With an origin
+reachable but carrying no `refs/heads/<branch>`, `resolve_handoff_sha` fell back
+to the LOCAL branch ref — so a never-pushed branch was reviewed and handed to a
+supervisor that opens PRs from the remote and would never see that commit, and
+`devin-supervisor.sh` dies on an absent/unreachable remote branch when `--sha` is
+pinned. A fourth round found the last shard of that same fallback: keeping local
+refs "only for a repo with no origin at all" still let an origin-less queued
+handoff spend a distinct-vendor review and only *then* hit the supervisor's
+no-origin refusal. `resolve_handoff_sha` is reached only from the Devin handoff
+path, so it now has no local-ref fallback whatsoever — no origin is a block
+before the review, not a die() one script later, and the origin-less and
+never-pushed cases in `loop-handoff.test.sh` both assert "no review spent, no
+receipt, no supervisor call, still queued". (b) The
+handoff message's diffstat was still `git diff --stat "$BASE...$BRANCH"` — two
+NAMES, read in a clone whose refs may be stale or carry local-only commits — so
+the supervisor could be shown a diff nobody reviewed. `--base-sha` was added and
+the driver passes both exact endpoints; names remain in the prose for PR
+targeting, and an unreadable object yields an explicit `n/a`, never a substitute
+diff. Also recorded honestly: the receipt is an operational control, not a
+security boundary (same-user filesystem isolation is separate work).
 **Generalisation:** pinning one endpoint of a diff is not pinning the diff. A
 receipt must name every value the comparison depends on, or it certifies a
-comparison nobody performed.
+comparison nobody performed — and every remaining *name* in the path (a fallback
+ref, a diffstat range) is a place the certified comparison can quietly differ
+from the one actually shown.
 **Status:** fixed in harness
 **Tags:** #loop #law5 #gates #git #sensors #issue-55

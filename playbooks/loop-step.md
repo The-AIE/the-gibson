@@ -183,13 +183,15 @@ touch /path/to/target/gibson/HALT
      the driver resolves the SHA to hand off, fetches it if this clone does not
      have the object, and runs a mandatory review of *that exact SHA* by a vendor
      other than the runner, against the repo's resolved default branch. If the
-     pin disagrees with the remote tip, if the SHA cannot be resolved locally, if
-     the base branch cannot be resolved, if no distinct vendor is configured, or
-     if the reviewer does not complete, **nothing is handed off** and
-     `handoff`/`handoff_sha` stay queued in loop-state (Law 5). A leftover
-     `gibson/second-opinion.md` does not satisfy the gate — only a receipt naming
-     that SHA does. If your handoff keeps staying queued, read the journal: the
-     block reason is written there, and the fix is yours, not the owner's.
+     pin disagrees with the remote tip, if the branch is not on the remote at all
+     (push it — the supervisor opens the PR from the remote branch), if the SHA
+     cannot be resolved locally, if the base branch cannot be resolved, if no
+     distinct vendor is configured, or if the reviewer does not complete,
+     **nothing is handed off** and `handoff`/`handoff_sha` stay queued in
+     loop-state (Law 5). A leftover `gibson/second-opinion.md` does not satisfy
+     the gate — only a receipt naming that SHA does. If your handoff keeps staying
+     queued, read the journal: the block reason is written there, and the fix is
+     yours, not the owner's.
    - If `{{repo_path}}/gibson/second-opinion.md` exists, read it before your next
      build hat: it is a cross-vendor review of your own diff, dispatched because
      the loop stalled.
