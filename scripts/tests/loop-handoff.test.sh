@@ -10,10 +10,13 @@
 #
 #   These cases pin the ways it must fail closed, and the ways it may pass. They
 #   drive the real scripts/loop.sh against stub reviewer/supervisor CLIs, so a
-#   regression in the driver — not in the stubs — is what turns them red. Two
-#   cases at the end drive the real scripts/devin-supervisor.sh with --dry-run
-#   instead, because the guard and the diffstat they sense live there: no Devin
-#   API is contacted.
+#   regression in the driver — not in the stubs — is what turns them red. Cases
+#   that need the real scripts/devin-supervisor.sh drive it with --dry-run for
+#   handoff only (message/diffstat/kill-switch exit 75). The suite never invokes
+#   real ensure/status/wake: ensure ignores --dry-run and POSTs /v1/sessions
+#   (live ACU billing). A mid-cycle wrapper short-circuits ensure in-process and
+#   forwards only handoff. Fake gh + fake curl + scrubbed credentials keep every
+#   external path inert — no live GitHub, no live Devin.
 #
 # USAGE
 #   scripts/tests/loop-handoff.test.sh
@@ -22,9 +25,8 @@ set -uo pipefail
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 GIBSON=$(cd "$SCRIPT_DIR/../.." && pwd)
 LOOP="$GIBSON/scripts/loop.sh"
-# The real supervisor, driven with --dry-run only: it renders the handoff message
-# and never touches the Devin API, so its guards and its diffstat can be sensed
-# directly rather than through the driver's stub.
+# The real supervisor, driven with --dry-run only on handoff: it renders the
+# handoff message / kill-switch path and must never touch the Devin API.
 SUPERVISOR="$GIBSON/scripts/devin-supervisor.sh"
 
 PASS=0
@@ -34,8 +36,6 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 
 command -v node >/dev/null || { echo "loop-handoff.test.sh: node is required"; exit 1; }
 command -v git  >/dev/null || { echo "loop-handoff.test.sh: git is required"; exit 1; }
-# devin-supervisor.sh checks for curl before it ever looks at --dry-run.
-command -v curl >/dev/null || { echo "loop-handoff.test.sh: curl is required"; exit 1; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-loop-handoff.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -48,6 +48,29 @@ REMOTE="$ROOT/remote.git"
 BRANCH="feat/1-widget"
 
 mkdir -p "$CALLS" "$FAKE_SCRIPTS" "$BIN"
+
+# Hard no-live-API contract: credentials and API base must be inert for the
+# entire suite. Even if a future case regresses and reaches create_session, an
+# empty key plus blackhole base plus fake curl (below) cannot bill a session.
+unset DEVIN_API_KEY DEVIN_WEBHOOK_URL
+export DEVIN_API_BASE="http://127.0.0.1:9"
+
+# Inert curl: never reaches the network. Logs every invocation so sensors can
+# prove zero /v1/sessions creates and zero live Devin paths. Shadows any real
+# curl on PATH. devin-supervisor.sh only needs `command -v curl` to pass.
+: > "$CALLS/curl.log"
+cat > "$BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+log="${CURL_STUB_LOG:-}"
+if [[ -n "$log" ]]; then
+  # One argv record per call for post-run assertions.
+  printf '%s\n' "$*" >> "$log"
+fi
+echo "curl stub: live network forbidden in sensors: $*" >&2
+exit 55
+STUB
+chmod +x "$BIN/curl"
+export CURL_STUB_LOG="$CALLS/curl.log"
 
 # Controllable `gh` fake for remote halt paths (issue #71). Never reaches the
 # network. GH_STUB_BEHAVIOR selects the response:
@@ -235,9 +258,11 @@ exit "\${STUB_DEVIN_RC:-0}"
 STUB
 
 cp "$LOOP" "$FAKE_SCRIPTS/loop.sh"
-chmod +x "$BIN/gh" "$FAKE_SCRIPTS/second-opinion.sh" "$FAKE_SCRIPTS/devin-supervisor.sh" "$FAKE_SCRIPTS/loop.sh"
+chmod +x "$BIN/gh" "$BIN/curl" "$FAKE_SCRIPTS/second-opinion.sh" "$FAKE_SCRIPTS/devin-supervisor.sh" "$FAKE_SCRIPTS/loop.sh"
+# BIN first so gh + curl stubs shadow any live tooling for the whole suite.
 PATH="$BIN:$PATH"
 export PATH
+command -v curl >/dev/null || { echo "loop-handoff.test.sh: curl stub failed to install"; exit 1; }
 
 GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
 
@@ -282,7 +307,9 @@ setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
   : > "$CALLS/second-opinion.count"
   : > "$CALLS/devin.cmds"
   : > "$CALLS/devin.args"
+  : > "$CALLS/devin.shortcircuit"
   : > "$CALLS/gh.log"
+  # curl.log is cumulative for the whole suite (no-live-API proof). Do not wipe.
 }
 
 # Point origin at a specific GitHub-shaped URL while keeping the bare remote as
@@ -343,7 +370,9 @@ setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
   : > "$CALLS/second-opinion.count"
   : > "$CALLS/devin.cmds"
   : > "$CALLS/devin.args"
+  : > "$CALLS/devin.shortcircuit"
   : > "$CALLS/gh.log"
+  # curl.log is cumulative for the whole suite (no-live-API proof). Do not wipe.
 }
 
 head_sha() { git -C "$REPO" rev-parse --verify "refs/heads/$BRANCH"; }
@@ -1723,6 +1752,12 @@ echo "remote halt: mid-cycle child recheck journals halt (exit 75), never superv
 # Loop iteration-top sees clear (in-process cache warm). Real child supervisor
 # rechecks live, sees the label that landed mid-cadence, exits 75. The driver
 # must journal a halt, leave handoff queued, and never say "supervisor rejected".
+#
+# CRITICAL: do NOT forward every subcommand to real devin-supervisor.sh --dry-run.
+# loop.sh startup invokes `ensure`; supervisor ensure IGNORES dry-run and calls
+# create_session → POST /v1/sessions (live ACU billing when DEVIN_API_KEY is set).
+# Short-circuit ensure/status/wake in-process; invoke the real binary only for
+# handoff (the exit-75 path under test). Credentials/API base/curl stay inert.
 setup_repo with-remote
 SHA=$(head_sha)
 write_state "$BRANCH" "$SHA"
@@ -1731,13 +1766,37 @@ export GH_STUB_CLEAR_CALLS=2
 export GH_STUB_FLIP_FILE="$ROOT/gh-flip.count"
 printf '0\n' > "$GH_STUB_FLIP_FILE"
 : > "$CALLS/gh.log"
-# Real supervisor under --dry-run so kill-switch exit 75 is authentic.
-# Log the subcommand so handoff_invoked still works.
+: > "$CALLS/devin.shortcircuit"
+# Snapshot the cumulative curl log so mid-cycle can prove it added zero lines
+# (and zero /v1/sessions) without wiping suite-wide evidence.
+curl_before=$(wc -l < "$CALLS/curl.log" | tr -d ' ')
+curl_before=${curl_before:-0}
 cat > "$FAKE_SCRIPTS/devin-supervisor.sh" <<REALCHILD
 #!/usr/bin/env bash
+set -euo pipefail
 echo "\$1" >> "$CALLS/devin.cmds"
 printf '%s\n' "\$@" >> "$CALLS/devin.args"
-exec "$SUPERVISOR" "\$@" --dry-run
+case "\$1" in
+  ensure|status|wake)
+    # In-process only — never exec the real supervisor. ensure would POST
+    # /v1/sessions even under a mistaken --dry-run forward.
+    echo "\$1" >> "$CALLS/devin.shortcircuit"
+    exit 0
+    ;;
+  handoff)
+    # Authentic kill-switch exit 75. Scrub credentials and pin inert API base
+    # even though --dry-run skips ensure_session; fake curl is first on PATH.
+    exec env -u DEVIN_API_KEY -u DEVIN_WEBHOOK_URL \
+      DEVIN_API_BASE="http://127.0.0.1:9" \
+      CURL_STUB_LOG="$CALLS/curl.log" \
+      PATH="$BIN:\$PATH" \
+      "$SUPERVISOR" "\$@" --dry-run
+    ;;
+  *)
+    echo "mid-cycle wrapper: unexpected subcommand: \$1" >&2
+    exit 2
+    ;;
+esac
 REALCHILD
 chmod +x "$FAKE_SCRIPTS/devin-supervisor.sh"
 errf="$ROOT/halt-midcycle.err"
@@ -1770,11 +1829,23 @@ if grep -qi 'supervisor rejected' "$errf"; then
 else
   ok "mid-cycle halt: stderr has no 'supervisor rejected' text"
 fi
-# Child must have been invoked (fresh recheck path), not suppressed solely by cache.
+# Child handoff must have been invoked (fresh recheck path), not suppressed solely by cache.
 if handoff_invoked; then
   ok "mid-cycle halt: real child supervisor was invoked (fresh recheck)"
 else
   bad "mid-cycle halt: child supervisor never ran — cannot prove exit-75 handoff path"
+fi
+# Startup ensure must have been short-circuited (recorded, never real binary).
+if grep -qx ensure "$CALLS/devin.cmds" && grep -qx ensure "$CALLS/devin.shortcircuit"; then
+  ok "mid-cycle halt: ensure short-circuited in-process (no real supervisor)"
+else
+  bad "mid-cycle halt: ensure not short-circuited (cmds=$(tr '\n' '|' <"$CALLS/devin.cmds") short=$(tr '\n' '|' <"$CALLS/devin.shortcircuit"))"
+fi
+# handoff must NOT appear in the short-circuit log — only the real binary ran it.
+if grep -qx handoff "$CALLS/devin.shortcircuit" 2>/dev/null; then
+  bad "mid-cycle halt: handoff was short-circuited — cannot prove exit-75 path"
+else
+  ok "mid-cycle halt: handoff was not short-circuited (real supervisor path)"
 fi
 # At least one issue-list after the first clear pair proves the child's recheck.
 issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
@@ -1783,6 +1854,28 @@ if [[ "$issue_calls" -ge 2 ]]; then
   ok "mid-cycle halt: child spent a fresh label poll (issue-list calls=$issue_calls)"
 else
   bad "mid-cycle halt: expected >=2 issue-list polls (loop clear + child recheck), got $issue_calls"
+fi
+# Hard no-live-API: mid-cycle must add zero curl lines and zero session creates.
+curl_after=$(wc -l < "$CALLS/curl.log" | tr -d ' ')
+curl_after=${curl_after:-0}
+curl_delta=$((curl_after - curl_before))
+session_hits=$(grep -cE '/v1/sessions|api\.devin\.ai' "$CALLS/curl.log" 2>/dev/null || true)
+session_hits=${session_hits:-0}
+if [[ "$session_hits" -eq 0 ]]; then
+  ok "mid-cycle halt: zero /v1/sessions create attempts (fake curl)"
+else
+  bad "mid-cycle halt: live Devin session path attempted (curl.log=$(tr '\n' '|' <"$CALLS/curl.log"))"
+fi
+if [[ "$curl_delta" -eq 0 ]]; then
+  ok "mid-cycle halt: zero live network paths via curl (no new curl invocations)"
+else
+  bad "mid-cycle halt: unexpected curl invocation(s) delta=$curl_delta (curl.log=$(tr '\n' '|' <"$CALLS/curl.log"))"
+fi
+# Suite-wide credentials must still be inert after the child env scrub.
+if [[ -z "${DEVIN_API_KEY:-}" && "${DEVIN_API_BASE:-}" == "http://127.0.0.1:9" ]]; then
+  ok "mid-cycle halt: credentials/API base remain inert in the fixture"
+else
+  bad "mid-cycle halt: credentials leaked back into fixture (key_set=${DEVIN_API_KEY:+yes} base=${DEVIN_API_BASE:-})"
 fi
 # Restore stub supervisor for cleanliness.
 cat > "$FAKE_SCRIPTS/devin-supervisor.sh" <<STUB
@@ -1797,6 +1890,24 @@ unset GH_STUB_CLEAR_CALLS
 unset GH_STUB_FLIP_FILE
 unset GH_STUB_EXPECT_REPO
 unset GH_STUB_LOG
+
+# Final suite-wide proof: no Devin session create was attempted in any case
+# (curl.log is cumulative; every real-supervisor handoff and the mid-cycle
+# wrapper must stay on fake curl / inert credentials).
+suite_sessions=$(grep -cE '/v1/sessions|api\.devin\.ai' "$CALLS/curl.log" 2>/dev/null || true)
+suite_sessions=${suite_sessions:-0}
+suite_curl=$(wc -l < "$CALLS/curl.log" | tr -d ' ')
+suite_curl=${suite_curl:-0}
+if [[ "$suite_sessions" -eq 0 ]]; then
+  ok "suite: zero /v1/sessions or api.devin.ai paths via fake curl across all cases"
+else
+  bad "suite: live Devin path(s) observed (curl.log=$(tr '\n' '|' <"$CALLS/curl.log"))"
+fi
+if [[ "$suite_curl" -eq 0 ]]; then
+  ok "suite: zero live network paths via curl across all cases"
+else
+  bad "suite: unexpected curl invocation(s) (curl.log=$(tr '\n' '|' <"$CALLS/curl.log"))"
+fi
 
 echo
 echo "loop-handoff.test.sh: $PASS passed, $FAIL failed"
