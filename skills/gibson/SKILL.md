@@ -27,7 +27,9 @@ target repo's canonical checkout — worktrees only (Law 3).
    Devin supervisor wiring. Idempotent — safe to re-run.
 4. **`gibson-direct`** — if there's no well-scoped plan/backlog yet, turn the
    owner's product direction into a plan and decomposed issues before any
-   building starts. This is the ONLY step that needs the owner's time.
+   building starts. This is the only RECURRING owner step — but any step that
+   SPENDS money (e.g. creating a Devin cloud session, which bills ACUs) is also
+   an owner gate per docs/14: ask first, every time, Ask Contract format.
 5. **`gibson-run`** — start and supervise the loop (`scripts/loop.sh`) with the
    routing table from step 2. Devin (cloud supervisor, `docs/22`) owns
    review-of-finished-branches, PRs, and merges when wired; the loop hands off
@@ -41,14 +43,17 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
 |---|---|---|
 | **Grok** | flat ~$99/mo, near-unlimited | default implementer — bulk building, burn freely |
 | **Codex** | cheap subscription tier | second implementer + primary cross-vendor reviewer |
-| **Claude** | subscription w/ caps — reserve headroom | judgment only: specs, escalations, adversarial verdicts, hard debugging |
+| **Claude** | subscription w/ caps — reserve headroom | judgment (specs, escalations, adversarial verdicts, hard debugging) AND skilled feature work when the task's capability bar requires it (docs/15 routes by capability x marginal cost, not vendor dogma) |
 | **Devin** | ACU-metered cloud | merge captain only — reviews finished branches, owns GitHub, merges. Never bulk coding. Cap with `DEVIN_MAX_ACU`. |
 
 ## Rules that override everything
 
 - Law 5: no agent reviews or merges its own work. Cross-vendor always.
-- Law 7: Tier C (money/auth/consent/PII/security/prod-data) always ends at a
-  human merge gate — Devin does not override the owner.
+- Law 7: Tier C — money, auth, consent/PII, security boundaries, production
+  data — always ends at a human merge gate. Devin does not override the owner.
 - Owner interruptions: product direction and human gates (`docs/14`) only.
   Batch everything else into the digest.
-- Kill switch: `gibson/HALT` file or `gibson-halt` label stops everything.
+- Kill switch: the `gibson/HALT` file (or `GIBSON_HALT` env) stops the loop —
+  that is what `loop.sh` actually checks. A `gibson-halt` GitHub label is a
+  CONVENTION for humans to signal intent; it does nothing until wired to touch
+  the HALT file. Never tell the owner the label alone stopped anything.

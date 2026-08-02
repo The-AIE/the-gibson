@@ -17,7 +17,7 @@ report only what you confirmed this run.
 | **Codex CLI** | `codex --version`; confirm it runs inside a trusted git dir. Note: reviews need `-s read-only`. |
 | **Claude Code** | you're running in it — note model + whether `claude` CLI headless is available for dispatched lanes. |
 | **Hermes** | `hermes --version` if present. |
-| **Devin** | `DEVIN_API_KEY` set? `scripts/devin-supervisor.sh --help` from the Gibson clone; if key present, `ensure` can verify a session boots. ACU-metered — merge captain only. Check `DEVIN_MAX_ACU` cap is set before recommending live use. |
+| **Devin** | `DEVIN_API_KEY` set? `scripts/devin-supervisor.sh --help` from the Gibson clone. **NEVER run `ensure` as a probe — if no session exists it CREATES one, which bills ACUs (real money). Spend needs the owner's explicit OK first (docs/14), a cap is not approval.** Report key-present/absent + `DEVIN_MAX_ACU` state only. |
 | **GitHub** | `gh auth status`; which account; GraphQL vs REST budget state. Bot identities: check for GitHub App creds (e.g. `~/.claude/secrets/*.pem` + token-mint helpers) — distinct pusher/attester identities matter for review-gate integrity. |
 | **Satellite machines** | ssh reachability of known satellites (e.g. `ssh -o BatchMode=yes -o ConnectTimeout=5 <host> 'echo ok'`). Report auth state honestly (a reachable box with dead GitHub auth is relay-only). |
 | **MCPs** | note connected MCP servers relevant to the target (DB, Vercel, etc.). |
@@ -32,8 +32,11 @@ standing order (flat-rate absorbs volume; metered buys judgment):
   Codex is the author — Law 5 cross-vendor)
 - **judgment** → Claude (specs, escalation after N failures, adversarial
   verdicts, merge-bar calls) — spend sparingly, reserve cap headroom
-- **merge_captain** → Devin IF key + supervisor wiring verified, ELSE
-  "self-merge per repo rules, flag Devin as unwired"
+- **merge_captain** → Devin IF key + supervisor wiring verified. ELSE fail
+  CLOSED, per docs/11: the merge path becomes fresh-context adversarial
+  self-review (a different session, never the authoring one) + the repo's own
+  merge rules, with Tier C always parking at the human gate — and the routing
+  table must say plainly that Devin is unwired and what wiring it needs.
 - Per-resource: verified-at timestamp, failure notes, cost tier.
 
 Also report gaps as Ask Contract items when only the owner can fix them

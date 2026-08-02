@@ -26,8 +26,10 @@ a machine-usable gap list the `gibson-setup` skill consumes.
 4. **Backlog shape** — open issues: how many are well-scoped with acceptance
    criteria vs vague? Is there a plan doc? (No usable backlog → the pipeline
    must run `gibson-direct` before `gibson-run`.)
-5. **Risk surfaces** — grep for payment/auth/PII/schema code. These paths get
-   Tier-C treatment (Law 7) regardless of what the repo's own docs say.
+5. **Risk surfaces** — grep for ALL Law 7 categories: money/payments, auth,
+   consent/PII, security boundaries (headers, rate limits, sandboxing), and
+   anything touching production data. These paths get Tier-C treatment
+   regardless of what the repo's own docs say.
 6. **Deployment posture** — if a live/preview URL exists, run
    `scripts/posture-probe.sh <url>` from the Gibson clone for headers/cookies/
    rate-limit reality. Preview/staging only — never burst production.

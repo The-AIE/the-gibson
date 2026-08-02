@@ -22,8 +22,13 @@ skill's job is to invoke and SUPERVISE it — not to reimplement it.
   a cross-vendor second opinion BEFORE the error budget kills the lane —
   judgment tokens spent exactly when cheap volume has failed twice.
 - `--supervisor devin`: finished branches hand off to the cloud supervisor
-  (docs/22) via `handoff:` in loop-state — Devin reviews the exact head,
-  owns the PR, and merges (Tier C still parks at the human gate).
+  (docs/22) via `handoff:` in loop-state. **Default handoff = Devin reviews the
+  exact head and opens/owns the PR but leaves the merge to a human.** Automated
+  non-Tier-C merges require the `--merge` handoff mode per docs/22 — and note
+  honestly: `loop.sh` currently invokes handoff WITHOUT `--merge`, so full
+  auto-merge needs either that flag wired into the loop or a direct
+  `devin-supervisor.sh handoff --merge` call. Don't tell the owner merges are
+  automated until that's true. Tier C parks at the human gate in every mode.
 - No Devin wired? Drop the flag; the loop's own review path applies, and the
   digest tells the owner what wiring Devin would take.
 
@@ -49,11 +54,14 @@ show raw diffs or expect the owner to read code — describe behavior changes.
 
 ## Hard lines
 
-- Kill switch respected instantly: `gibson/HALT` file or `gibson-halt` label.
+- Kill switch respected instantly: the `gibson/HALT` file (or `GIBSON_HALT`
+  env) — what `loop.sh` actually checks. The `gibson-halt` label is only a
+  human signal; honoring it means translating it into the HALT file.
 - Law 5 always: reroute so no lane ever reviews its own work, even when a
   vendor is down.
-- Cost discipline (docs/15): if Grok saturates, overflow to Codex; Claude only
-  for judgment; NEVER quietly fall back to burning metered/judgment tokens on
-  volume work because it's convenient.
+- Cost discipline (docs/15): if Grok saturates, overflow to Codex. Claude's
+  pool buys judgment first and skilled feature work when the capability bar
+  genuinely requires it — what it never buys is VOLUME work a flat-rate pool
+  could grind, and never quietly out of convenience.
 - One repo, one loop: check `gibson/loop-state.md` for a live claim before
   starting a second driver against the same target.
