@@ -11,7 +11,7 @@ the full dispatch prompt + a **How to use this** section with copy-paste example
 
 Same file → every runtime ([docs/10](../docs/10-vendor-adapters.md)): Claude skill
 wrapper, Codex/Grok inline (`codex exec --full-auto "$(cat …)"` /
-`grok -p "$(cat …)"`), Hermes cron. One source, five runtimes. Anything expressible
+`grok -p "$(cat …)"`), Hermes cron. One source, multiple runtimes. Anything expressible
 only as a vendor skill is doctrine-debt.
 
 ## Inventory
@@ -32,6 +32,7 @@ only as a vendor skill is doctrine-debt.
 | [adopt.md](adopt.md) | Install Gibson on a target repo | 13, 17, 20 |
 | [deploy-audit.md](deploy-audit.md) | Doc 17 inspect scorecard | 17 |
 | [red-team/](red-team/) | Scheduled adversarial audit of a target app | 03, 08 |
+| [recipes/](recipes/) | Validation-only Goose recipe mirrors; live runs gated on #28 + #35 | 10, [GOOSE-STRATEGY](../docs/GOOSE-STRATEGY.md), [adapters/goose](../adapters/goose/), [recipes/README](recipes/README.md) |
 
 ## How to use any playbook
 

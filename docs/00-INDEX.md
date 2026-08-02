@@ -72,6 +72,8 @@ If you only open one file, use the row that matches you. Glossary:
 | 23 | [delivery-control](23-delivery-control.md) | Production write-path locks + promote |
 | — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
+| — | [goose-spike-findings](GOOSE-SPIKE-FINDINGS.md) | #28 paperwork pass only — no live runtime spike; scaffold permitted, runtime still gated |
+| — | [autonomy-modes](autonomy-modes.md) | Four modes + per-tool overrides mapped to Goose; no new Gibson session defaults |
 
 ## Worked examples & ops
 
