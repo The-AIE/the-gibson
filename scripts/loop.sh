@@ -19,8 +19,13 @@ WHY
 RISKS
   - Unattended runs spend tokens / subscription quota (Grok flat-rate preferred).
   - Can open PRs and push when the runner has write permission.
-  - Stop with gibson/HALT or the gibson-halt label.
+  - Stop with the gibson/HALT file (or GIBSON_HALT env). The gibson-halt
+    label is a human signal only — it does nothing until something translates
+    it into the HALT file.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
+  - --escalate-after dispatches other vendors: more tokens, other providers see
+    the diff. --supervisor devin sends finished branches to a cloud session that
+    can open PRs and (if configured) merge (docs/22).
 
 USAGE
   loop.sh --runner <grok|hermes|claude|codex> --repo <path> [options]
@@ -36,11 +41,18 @@ OPTIONS
   --error-budget N    consecutive failures before stop (default: 5)
   --hat HAT           force starting hat (default: from loop-state or builder)
   --dry-run           show actions without invoking runner
+  --escalate-after N  after N consecutive failures, get a cross-vendor second
+                      opinion before the error budget runs out (default: off)
+  --reviewers LIST    vendors for that second opinion (default: codex,claude)
+  --supervisor NAME   'devin' hands finished branches to the cloud supervisor
+                      whenever loop-state carries a `handoff:` field (docs/22)
 
 EXAMPLES
   ./scripts/loop.sh --runner grok --repo ~/Code/acme-app
   ./scripts/loop.sh --runner grok --repo ~/Code/acme-app --once --print-prompt
   ./scripts/loop.sh --runner claude --repo ~/Code/acme-app --hat reviewer --once
+  ./scripts/loop.sh --runner grok --repo ~/Code/acme-app \
+      --escalate-after 2 --reviewers codex,claude --supervisor devin
 EOF
 }
 
@@ -53,6 +65,9 @@ MAX=-1
 BUDGET=5
 FORCE_HAT=""
 DRY=0
+ESCALATE_AFTER=0
+REVIEWERS="codex,claude"
+SUPERVISOR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -66,6 +81,9 @@ while [[ $# -gt 0 ]]; do
     --error-budget) BUDGET="$2"; shift 2 ;;
     --hat) FORCE_HAT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    --escalate-after) ESCALATE_AFTER="$2"; shift 2 ;;
+    --reviewers) REVIEWERS="$2"; shift 2 ;;
+    --supervisor) SUPERVISOR="$2"; shift 2 ;;
     *) echo "unknown: $1" >&2; usage; exit 2 ;;
   esac
 done
@@ -98,10 +116,12 @@ hat: builder
 next_hat: builder
 round: 0
 parked: false
+handoff:
 next_action: triage highest-priority unblocked unclaimed issue
 notes: initialized by loop.sh
 EOF
 fi
+grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
 [[ -f "$JOURNAL" ]] || echo "# Gibson loop journal" > "$JOURNAL"
 
 halted() {
@@ -149,15 +169,20 @@ invoke_runner() {
       # --permission-mode bypassPermissions: without it, grok has no TTY to
       # request tool-call approval in headless mode, so it silently narrates
       # instead of acting — every iteration exits in seconds with no real work.
-      grok --prompt-file "$prompt_file" --permission-mode bypassPermissions
+      # --cwd: bypassPermissions plus an inherited cwd would point the runner at
+      # whatever directory the operator launched from — often the canonical
+      # Gibson checkout, which AGENTS.md Law 3 says nothing may mutate.
+      grok --prompt-file "$prompt_file" --cwd "$REPO" --permission-mode bypassPermissions
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
-      claude -p --output-format text --permission-mode acceptEdits "$(cat "$prompt_file")"
+      # stdin, for the same frontmatter reason as grok's --prompt-file above:
+      # as a positional arg the leading "---" is parsed as an unknown option
+      (cd "$REPO" && claude -p --output-format text --permission-mode acceptEdits) < "$prompt_file"
       ;;
     codex)
       command -v codex >/dev/null || die "codex CLI not found"
-      codex exec --full-auto "$(cat "$prompt_file")"
+      codex exec --full-auto --cd "$REPO" - < "$prompt_file"
       ;;
     hermes)
       # Hermes may be messaging-first; if CLI exists use it, else require HERMES_CMD
@@ -173,6 +198,59 @@ invoke_runner() {
   esac
 }
 
+# Cross-vendor second opinion before the error budget is spent (docs/20 rule 1).
+# Findings land in gibson/second-opinion.md, which the next hat reads from files.
+escalate() {
+  local out="$STATE_DIR/second-opinion.md"
+  info "escalating after $failures consecutive failures — reviewers: $REVIEWERS"
+  local note
+  if "$SCRIPT_DIR/second-opinion.sh" \
+      --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" \
+      --gate-status "red: $failures consecutive runner failures" --out "$out" >/dev/null 2>&1; then
+    info "second opinion written to $out"
+    note="Second opinion written to gibson/second-opinion.md — next hat must read it."
+  else
+    info "second opinion failed (non-fatal) — continuing"
+    note="No reviewer completed — see gibson/second-opinion.md for the raw attempts (Law 8)."
+  fi
+  # Journal both outcomes: a failed escalation is the one most worth a trail.
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · escalation · reviewers=$REVIEWERS"
+    echo "$note"
+  } >> "$JOURNAL"
+}
+
+# File-handoff protocol: the agent writes `handoff: <branch>` into loop-state when
+# a branch is pushed and ready for review; the driver forwards it, then clears it.
+supervisor_handoff() {
+  [[ "$SUPERVISOR" == "devin" ]] || return 0
+  local branch
+  branch=$(read_field handoff)
+  [[ -n "$branch" ]] || return 0
+  local task issue next
+  issue=$(read_field issue)
+  next=$(read_field next_action)
+  task=""
+  [[ -z "$issue" ]] || task="Issue: $issue."
+  [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
+  [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
+  # bash 3.2 (stock macOS) errors on an empty array under set -u, so branch instead
+  local review="$STATE_DIR/second-opinion.md"
+  [[ -f "$review" ]] || review="/dev/null"
+  info "handing $branch to the Devin supervisor"
+  if "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
+      --task "$task" --gate-status "green locally" --review-file "$review"; then
+    node -e '
+      const fs = require("fs");
+      const file = process.argv[1];
+      fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^handoff:.*$/m, "handoff:"));
+    ' "$STATE_FILE"
+  else
+    info "supervisor handoff failed (non-fatal) — branch stays queued in loop-state"
+  fi
+}
+
 heartbeat() {
   if [[ -n "${MC_HEARTBEAT_URL:-}" ]]; then
     curl -sS -X POST "$MC_HEARTBEAT_URL" \
@@ -184,6 +262,11 @@ heartbeat() {
 
 failures=0
 iter=0
+
+if [[ "$SUPERVISOR" == "devin" && "$DRY" -eq 0 && "$PRINT" -eq 0 ]]; then
+  "$SCRIPT_DIR/devin-supervisor.sh" ensure --repo "$REPO" || \
+    info "supervisor unavailable at startup (non-fatal) — handoffs will retry"
+fi
 
 while true; do
   if halted; then
@@ -218,11 +301,15 @@ while true; do
     if [[ $ec -ne 0 ]]; then
       failures=$((failures + 1))
       info "runner exit $ec (consecutive failures=$failures/$BUDGET)"
+      if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+        escalate
+      fi
       if [[ $failures -ge $BUDGET ]]; then
         die "error budget exhausted — likely harness bug, not retry fodder (docs/11)"
       fi
     else
       failures=0
+      supervisor_handoff
     fi
   fi
 

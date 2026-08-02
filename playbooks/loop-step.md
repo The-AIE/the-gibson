@@ -5,7 +5,8 @@ role: solo-loop-step
 inputs:
   - "{{hat}} — one of: builder | test-engineer | reviewer | ux-evaluator | security | release | historian | decomposer | planner"
   - "{{loop_state}} — full contents of gibson/loop-state.md (or equivalent)"
-  - target repo path; Gibson doctrine path
+  - "{{gibson_path}} — absolute path to the Gibson clone (doctrine, playbooks, memory)"
+  - "{{repo_path}} — absolute path to the target repo (your cwd)"
   - optional REVIEWER_CMD for cross-vendor review shell-out
 outputs:
   - hat-specific artifacts (PR, tests, verdict, eval, merge, lesson)
@@ -32,6 +33,12 @@ sources:
 You are running **one hat** of the solo loop in a **fresh context**. State lives in
 files only. Read `{{loop_state}}` and execute exactly the hat `{{hat}}`.
 
+**Your working directory is the target repo.** Gibson's own doctrine/playbooks
+live in a *different* directory — use these absolute paths, not relative ones:
+
+- Gibson clone: `{{gibson_path}}`
+- Target repo (your cwd): `{{repo_path}}`
+
 ## How to use this
 
 **Rendered by `scripts/loop.sh`** (preferred):
@@ -57,9 +64,10 @@ grok -p "$RENDERED_PROMPT"
 
 **Kill switch:**
 ```bash
-# GitHub label on any open issue/repo convention, or file:
+# The HALT file is what loop.sh actually checks:
 touch /path/to/target/gibson/HALT
-# or: gh label create gibson-halt  # checked by loop.sh
+# (the gibson-halt label is a human signal only — loop.sh does NOT check labels;
+#  honoring it means someone/something touching the HALT file)
 ```
 
 ---
@@ -68,13 +76,15 @@ touch /path/to/target/gibson/HALT
 
 1. **You have no prior conversation.** Trust files only.
 2. Read:
-   - Gibson `AGENTS.md` + `local/AGENTS.local.md` if present
-   - Target `AGENTS.md`
-   - `memory/LESSONS.md` (tag-filter to area)
+   - `{{gibson_path}}/AGENTS.md` + `{{gibson_path}}/local/AGENTS.local.md` if present
+   - `{{repo_path}}/AGENTS.md` (target repo's own contract, if present)
+   - `{{gibson_path}}/memory/LESSONS.md` (tag-filter to area)
    - **`{{loop_state}}`** (pasted below / provided by driver)
-3. Confirm kill switch is not set (if driver missed it: stop cleanly).
-4. Open the role playbook contract for **`{{hat}}`** (`playbooks/{{hat}}.md`) and
-   follow it. This file only sequences the loop; the role file owns the craft.
+3. Confirm kill switch is not set — check `{{repo_path}}/gibson/HALT` (if driver
+   missed it: stop cleanly).
+4. Open the role playbook contract for **`{{hat}}`** at
+   `{{gibson_path}}/playbooks/{{hat}}.md` and follow it. This file only
+   sequences the loop; the role file owns the craft.
 
 ### Loop state you were given
 
@@ -156,9 +166,19 @@ touch /path/to/target/gibson/HALT
 
 ## End-of-step obligations
 
-1. **Rewrite** `gibson/loop-state.md` with: issue, PR, hat completed, next hat,
-   round, parked?, next action one-liner, timestamp UTC.
-2. **Append** `gibson/journal.md`:
+1. **Rewrite** `{{repo_path}}/gibson/loop-state.md` with: issue, PR, hat
+   completed, next hat, round, parked?, next action one-liner, timestamp UTC.
+   - If a branch is pushed and ready for review and the driver runs with
+     `--supervisor devin`, set `handoff: <branch>`. The driver forwards it to the
+     cloud supervisor (review → PR → CI; merge only in explicit --merge handoff
+     mode, which the driver does not pass by default — otherwise a human
+     merges) and clears the field
+     ([docs/22](../docs/22-devin-cloud-supervisor.md)). Do not do the GitHub steps
+     yourself when a supervisor owns them.
+   - If `{{repo_path}}/gibson/second-opinion.md` exists, read it before your next
+     build hat: it is a cross-vendor review of your own diff, dispatched because
+     the loop stalled.
+2. **Append** `{{repo_path}}/gibson/journal.md`:
    ```markdown
    ## <UTC> · hat={{hat}} · issue=#N · pr=#M
    What: ...
@@ -174,7 +194,7 @@ touch /path/to/target/gibson/HALT
 |---|---|
 | Retries | 3 fix→review rounds → park + handoff |
 | Error budget | driver stops after N consecutive red gates (default 5) |
-| Kill switch | `gibson-halt` / `gibson/HALT` → exit cleanly |
+| Kill switch | `gibson/HALT` file (label `gibson-halt` = signal only) → exit cleanly |
 | Human gates | queue + move on; never auto-approve Tier C merge |
 | Fresh context | do not ask for prior chat; re-read artifacts |
 

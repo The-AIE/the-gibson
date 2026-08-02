@@ -37,3 +37,30 @@ Design docs 01–15, operator guide, memory seeds, templates, specs. ✅
   remaining portfolio repos
 - Adapter READMEs tested on the Mac Mini fleet; pi adapter experiment
 - Quarterly downward stress-test of controls; vector-memory decision revisit (D-001)
+
+**Adoption is a ladder, not a switch (D-006).** "Adopt" above means rung 2 —
+unattended loop. Rung 1 (target `AGENTS.md` + `ci/gibson-gate.yml`, coordinator
+still human-driven) is available to any repo at any phase and does not wait on
+Phase 4. ConferenceOS is on rung 1 as of 2026-08-01; it climbs to rung 2 only
+once the Phase 4 ratchet closes on chatterbuilt.
+
+## AQ externalization (from conference-os #694, 2026-07-30)
+
+Development-process machinery leaves product repos; the harness owns it
+portably. Migrated here from conference-os (originals closed with pointers):
+
+- **Worker return evidence** (was #697/#702): coordinator derives Git/GitHub
+  facts; a worker's PASS is never proof. Portable evidence collector.
+- **Harness write-back + refactor hotspots** (was #696): scheduled runs report
+  hotspots and reconcile state; they do not manufacture refactors.
+- **Fleet control plane** (was #699): issue dispatch, exact-SHA review binding,
+  reconciliation — GitHub-native, repo-agnostic.
+
+- **Merge-queue controls** (was conference-os #774/#847): audit-derived
+  enforceable controls; serial integration queue (one head + Preview READY
+  before next). Control-plane hardening, repo-agnostic.
+
+Boundary rule proven in production 2026-07-29/30: repos keep only the thin
+ENFORCEMENT layer (CI gates with teeth: build/tests, schema guards, DCO,
+secrets, review-evidence until per-actor identity); all orchestration and
+prescription lives here. See docs/20-multi-model-orchestration.md.

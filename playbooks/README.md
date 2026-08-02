@@ -25,10 +25,11 @@ only as a vendor skill is doctrine-debt.
 | [reviewer.md](reviewer.md) | Multi-lens verdict | 02§4, 03, 06 |
 | [ux-evaluator.md](ux-evaluator.md) | Playwright vs. preview | 02§5, 03, 07 |
 | [security.md](security.md) | Eight-layer security | 02§6, 03, 08 |
-| [release.md](release.md) | Merge, deploy, cleanup | 02§7–8, 03, 12 |
+| [release.md](release.md) | Merge, deploy, cleanup | 02§7–8, 03, 12, 20 |
+| [delivery-control.md](delivery-control.md) | Production write-path audit/harden/promote | 20, 12, 14 |
 | [historian.md](historian.md) | Lessons + ratchet | 02§9, 03, 09 |
 | [loop-step.md](loop-step.md) | Solo-loop one-hat step (`{{hat}}`, `{{loop_state}}`) | 11 |
-| [adopt.md](adopt.md) | Install Gibson on a target repo | 13, 17 |
+| [adopt.md](adopt.md) | Install Gibson on a target repo | 13, 17, 20 |
 | [deploy-audit.md](deploy-audit.md) | Doc 17 inspect scorecard | 17 |
 | [red-team/](red-team/) | Scheduled adversarial audit of a target app | 03, 08 |
 

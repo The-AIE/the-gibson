@@ -86,6 +86,30 @@ model A did, the orchestration has failed.
 | Every deploy failing drift check | worker edited an **already-applied migration** — migrate deploy skips applied names, so late edits silently never run. Fix: new guarded delta migration; never edit an applied one | rule 3 |
 | 15 latent P1s in production code path | unreviewed merges | rule 3 (retro review found them before traffic did) |
 
+## Shared-credential collisions — the rule learned last
+
+When every actor (coordinator, lanes, the human) operates under ONE account,
+two failure modes appear that solo operation never shows:
+
+- **The coordinator merges a lane mid-flight.** A PR that looks done may have a
+  driver mid-fix reacting to its own dispatched review. Before attesting or
+  merging anything: check commit/comment recency (younger than ~30 min = an
+  active lane — coordinate on the thread first) and look for in-flight review
+  signals. "CI complete" is not "lane complete."
+- **Legitimate actions read as attacks.** A lane that sees an attestation it
+  didn't post, under the shared identity, rationally files it as a forged
+  credential. Every automated actor must therefore SIGN its side-effects with a
+  provenance line naming its lane/session and authority — not to prevent
+  forgery (a shared token can't), but so honest actors can recognize each
+  other. The structural fix is per-actor identity (GitHub App / machine user
+  per lane); until then, provenance discipline is the mitigation.
+
+Both happened in one night on the same repo (conference-os #925/#927/#928):
+the coordinator merged a lane's PR 25 seconds after attesting it while the
+lane's Codex review — which had found two real defects — was still landing,
+and the lane filed the coordinator's attestation as a security incident.
+Two correct actors, one identity, zero provenance.
+
 ## Cost discipline
 
 Route to the cheapest vendor that clears the quality bar (see

@@ -10,6 +10,48 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+One command in, target repos harness-neutral out.
+
+- **`skills/`** (new) — a nested Claude Code skill layer: `/gibson <repo> [goal]`
+  runs audit → resources → setup → direct → run. It wraps the existing scripts,
+  playbooks, and doctrine rather than reimplementing them, so the harness keeps
+  one source of truth and the owner gets one command. Install by symlinking into
+  `~/.claude/skills` (`skills/README.md`). No script behaviour changed.
+  The skills disclose the `loop.sh`/supervisor gaps they cannot fix (#55) instead
+  of implying the loop merges on its own.
+
+- **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
+  *Autonomous development contract*: the repo publishes gate commands, ground rules,
+  hot files, deploy truth, and its human-only action list, naming no harness and no
+  vendor. Any agent — this harness, a bare Claude Code or Codex session, something
+  not written yet — can read it and take over. The coupling now points one way.
+- **`templates/target-repo/gate.json`** → target's `.agents/gate.json`, the
+  machine-readable twin of the gate commands. `scripts/gate.sh` and
+  `scripts/gate-baseline.sh` read it first and accept a nested `gate` object so the
+  file can carry other agent config.
+- **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
+  repos adopted earlier keep working; move the file when convenient.
+
+Cloud supervisor + cross-vendor escalation for the solo loop.
+
+- **`scripts/devin-supervisor.sh`** — one persistent Devin cloud session per repo
+  (`ensure` / `status` / `wake` / `handoff`) that reviews finished branches and owns
+  GitHub: PR, CI, and merge with `--merge`. Session id cached in
+  `<repo>/gibson/devin-session.json`; a session that ended is replaced through
+  `DEVIN_WEBHOOK_URL` (Devin webhook automation), falling back to the sessions API.
+- **`scripts/second-opinion.sh`** — cross-vendor read-only review of a diff that
+  refuses to let a runner review its own work (AGENTS.md Law 5, docs/20 rule 1).
+- **`scripts/loop.sh`** — new `--escalate-after N`, `--reviewers`, and
+  `--supervisor devin`. Escalation writes `gibson/second-opinion.md`; handoff is a
+  file protocol: the agent sets `handoff: <branch>` in loop-state, the driver
+  forwards it and clears the field.
+- **Docs:** `docs/22-devin-cloud-supervisor.md` (escalation ladder, cost routing,
+  merge authority), `adapters/devin/` including a launchd job for a resident
+  loop on macOS.
+- Migration: none — all new flags are off by default and the existing loop behaves
+  exactly as before. Forks that render loop-state themselves may want to add the
+  `handoff:` field.
+
 The red-team playbook learns the Pale Fire class.
 
 - **`scripts/injection-scan.sh`** (new) — flags zero-width, bidi-override, BOM and
