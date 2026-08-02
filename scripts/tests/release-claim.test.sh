@@ -13,7 +13,7 @@
 #   scripts/tests/release-claim.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 RC="$SCRIPT_DIR/../release-claim.sh"
 PASS=0
 FAIL=0
