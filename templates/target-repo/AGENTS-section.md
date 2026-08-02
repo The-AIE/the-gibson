@@ -7,7 +7,10 @@
      publishes the facts a machine needs to develop it safely; any harness —
      The Gibson, a bare Claude Code or Codex session, something not written
      yet — reads the same section and can take over. Repo-SPECIFICS ONLY:
-     doctrine lives in the harness, this section instantiates it. -->
+     doctrine lives in the harness, this section instantiates it.
+
+     Memory conventions: docs/24-agent-memory-conventions.md (Gibson doctrine).
+     Seed MEMORY.md from templates/target-repo/MEMORY.md at adoption. -->
 
 ## Autonomous development contract
 
@@ -17,6 +20,20 @@ process doctrine — your harness supplies the process.
 
 Machine-readable companion: `.agents/gate.json` (same commands, parseable).
 
+### Shared agent memory
+
+- **Read** root `<MEMORY.md or memory.md>` (and optional `memory/`) at session start
+  before mutating work.
+- **Dual-write:** durable lessons go in the repo memory file, not only in a local
+  runtime store.
+- **No CI loop for pure memory commits:** if a commit touches **only** shared
+  memory markdown (`<MEMORY.md or memory.md>`, optional `memory/**`, optional
+  `<fleet-memory path>`), do **not** run typecheck/lint/test/build and do **not**
+  wait on product CI or review gates. Land the lesson on the default branch
+  quickly. Mixed memory + product code uses the normal green gate.
+- **Append-only** by default; rebase/pull immediately before writing; on conflict
+  in dated sections keep both sides. No secrets in memory files.
+
 ### Gate commands (the definition of "green" here)
 ```bash
 <generate>      # e.g. npx prisma generate      — omit the line if N/A
@@ -25,8 +42,9 @@ Machine-readable companion: `.agents/gate.json` (same commands, parseable).
 <test>          # e.g. npx vitest run
 <build>         # e.g. npm run build
 ```
-All of these must pass before any commit, with **zero new failures versus the
+All of these must pass before any **product** commit, with **zero new failures versus the
 branch point**. Pre-existing failures are recorded, not inherited and not hidden.
+Pure memory-only commits are exempt (see Shared agent memory above).
 
 ### Ground rules for machine contributors
 1. **Never mutate the shared checkout.** One task = one branch = one git
@@ -48,6 +66,7 @@ branch point**. Pre-existing failures are recorded, not inherited and not hidden
 | <schema path> | additive-only; name the models you touch in the claim |
 | package.json | no casual deps; own commit |
 | <generated barrels> | never hand-edit — run <generator command> |
+| <MEMORY.md or memory.md> | append-only lessons; pure updates skip CI |
 | <other> | <rule> |
 
 ### Framework warnings
