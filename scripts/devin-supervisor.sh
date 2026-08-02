@@ -360,16 +360,37 @@ case "$CMD" in
     # never from a local ref. If either object is missing from this clone we say
     # so plainly rather than substituting a different, readable diff — in the
     # loop.sh path both were fetched and verified before the review ran.
+    # DIFFSTAT_EXACT records whether the exact-endpoint diffstat was actually
+    # produced, because the message below claims it was. Saying "the diffstat is
+    # exactly <base>...<head>" over the string "n/a" tells the supervisor the
+    # reviewed diff is right there when nothing was generated at all — and the
+    # supervisor is instructed to review what it is given. Verification of the
+    # objects is not the same event as generating the diff, so the flag is set
+    # only where the diff itself succeeds.
+    DIFFSTAT_EXACT=0
     if [[ -n "$BASE_SHA" && -n "$SHA" ]]; then
       if git -C "$REPO" rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null 2>&1 &&
          git -C "$REPO" rev-parse --verify --quiet "$SHA^{commit}" >/dev/null 2>&1; then
-        DIFFSTAT=$(git -C "$REPO" diff --stat "$BASE_SHA...$SHA" 2>/dev/null || echo "n/a")
+        # Assigned only on success: `$(git diff ... || echo n/a)` splices "n/a"
+        # onto whatever partial output git had already written, producing a
+        # diffstat that is neither the real one nor an honest refusal.
+        if diffstat_out=$(git -C "$REPO" diff --stat "$BASE_SHA...$SHA" 2>/dev/null); then
+          DIFFSTAT="$diffstat_out"
+          DIFFSTAT_EXACT=1
+        else
+          info "git diff --stat $BASE_SHA...$SHA failed in $REPO even though both objects verified — reporting the diffstat as n/a rather than shipping partial output"
+          DIFFSTAT="n/a — both endpoints are present in the handing-off clone but 'git diff --stat $BASE_SHA...$SHA' failed there; generate the diff yourself from the remote."
+        fi
       else
         info "commits $BASE_SHA and/or $SHA are not in $REPO — reporting the diffstat as n/a rather than substituting a local-branch diff"
         DIFFSTAT="n/a — $BASE_SHA...$SHA is not readable in the handing-off clone; generate the diff yourself from the remote."
       fi
     else
-      DIFFSTAT=$(git -C "$REPO" diff --stat "$BASE...$BRANCH" 2>/dev/null || echo "n/a")
+      if diffstat_out=$(git -C "$REPO" diff --stat "$BASE...$BRANCH" 2>/dev/null); then
+        DIFFSTAT="$diffstat_out"
+      else
+        DIFFSTAT="n/a — 'git diff --stat $BASE...$BRANCH' failed in the handing-off clone; generate the diff yourself from the remote."
+      fi
     fi
     if [[ "$DRY" -eq 0 ]]; then id=$(ensure_session); else id="(dry-run)"; fi
 
@@ -386,9 +407,12 @@ case "$CMD" in
       SHA_CLAUSE="
 ## Pinned head (issue #55)
 - Expected SHA: \`$SHA\`"
-      if [[ -n "$BASE_SHA" ]]; then
+      if [[ -n "$BASE_SHA" && "$DIFFSTAT_EXACT" -eq 1 ]]; then
         SHA_CLAUSE="$SHA_CLAUSE
 - Reviewed against base commit: \`$BASE_SHA\` — the diffstat below is exactly \`$BASE_SHA...$SHA\`, the diff that was reviewed."
+      elif [[ -n "$BASE_SHA" ]]; then
+        SHA_CLAUSE="$SHA_CLAUSE
+- Reviewed against base commit: \`$BASE_SHA\` — the reviewed diff is \`$BASE_SHA...$SHA\`, but the handing-off clone could not produce that diffstat (see the Diffstat section). Generate it yourself from the remote; do not treat what follows as the reviewed diff."
       fi
       SHA_CLAUSE="$SHA_CLAUSE
 - Before opening or merging the PR, confirm that the tip of \`$BRANCH\` on the remote is still exactly this SHA. If it has moved, reject the handoff and report the mismatch — do not review or merge a different tip.

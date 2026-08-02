@@ -209,6 +209,38 @@ handoff_invoked() { grep -qx handoff "$CALLS/devin.cmds"; }
 review_invoked()  { [[ -s "$CALLS/second-opinion.count" ]]; }
 still_queued()    { grep -qx "handoff: $BRANCH" "$REPO/gibson/loop-state.md"; }
 
+JOURNAL="$REPO/gibson/journal.md"
+
+# playbooks/loop-step.md sends the next fresh-context agent to the journal to
+# find out why a handoff is still queued. stderr does not survive the run, so a
+# refusal that only prints there leaves that agent with a stuck branch and no
+# reason — and every blocked path below is a path that used to do exactly that.
+# Each case asserts its OWN reason, not merely that something was written: a
+# generic "blocked" line would satisfy a blanket check while telling the reader
+# nothing they can act on.
+journal_says() { # journal_says <substring>
+  [[ -f "$JOURNAL" ]] && grep -qF -- "$1" "$JOURNAL"
+}
+journal_blocks() { # count of block entries — one failed attempt, one entry
+  [[ -f "$JOURNAL" ]] || { echo 0; return; }
+  grep -c '· handoff blocked' "$JOURNAL" || true
+}
+
+# check_block <reason-substring> <label>: the reason is in the journal AND the
+# branch is still queued, which is the pair the contract actually promises.
+check_block() {
+  if journal_says "$1"; then
+    ok "the journal records the actionable reason ($2)"
+  else
+    bad "the journal does not name the reason ($2). Journal: $([[ -f "$JOURNAL" ]] && cat "$JOURNAL" || echo '<absent>')"
+  fi
+  if still_queued; then
+    ok "the branch is still queued alongside that journal entry ($2)"
+  else
+    bad "the branch was cleared despite a blocked handoff ($2)"
+  fi
+}
+
 echo "a reviewer that fails blocks the handoff"
 setup_repo with-remote
 write_state "$BRANCH" ""
@@ -222,6 +254,14 @@ else bad "blocked handoff was cleared from loop-state"; fi
 if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
   bad "a failed review must not leave a receipt"
 else ok "a failed review leaves no receipt"; fi
+check_block "pre-handoff review failed" "reviewer did not complete"
+# One blocked attempt, one entry. A journal that repeats the same refusal per
+# resolve step is as unreadable as one that records nothing.
+if [[ "$(journal_blocks)" -eq 1 ]]; then
+  ok "a single failed attempt left exactly one block entry"
+else
+  bad "expected exactly 1 block entry, found $(journal_blocks)"
+fi
 
 echo "a stale second-opinion.md does not satisfy the gate"
 setup_repo with-remote
@@ -266,6 +306,12 @@ if review_invoked; then bad "a mismatched pin must not even spend a review"
 else ok "mismatched pin is refused before spending a reviewer"; fi
 if still_queued; then ok "mismatched pin stays queued"
 else bad "mismatched pin was cleared from loop-state"; fi
+check_block "pin mismatch" "loop-state pin disagrees with the remote tip"
+if [[ "$(journal_blocks)" -eq 1 ]]; then
+  ok "the mismatched pin left exactly one block entry"
+else
+  bad "expected exactly 1 block entry for the mismatched pin, found $(journal_blocks)"
+fi
 
 echo "a reviewer list with no distinct vendor blocks the handoff"
 # Remote-backed on purpose: everything else about this handoff is in order, so
@@ -277,6 +323,19 @@ if handoff_invoked; then bad "the runner must never be its own reviewer (Law 5)"
 else ok "same-vendor-only reviewer list blocks the handoff"; fi
 if review_invoked; then bad "no reviewer should have been dispatched"
 else ok "refused before dispatching the runner against itself"; fi
+check_block "no distinct vendor" "reviewer list names only the runner's vendor"
+
+echo "an empty reviewer list blocks the handoff and says so in the journal"
+# Distinct from the case above: there is no vendor at all, not merely no vendor
+# other than the runner. Both used to leave nothing behind but a stderr line.
+setup_repo with-remote
+write_state "$BRANCH" ""
+run_loop --reviewers ""
+if handoff_invoked; then bad "an empty reviewer list must not hand off (Law 5)"
+else ok "an empty reviewer list blocks the supervisor invocation"; fi
+if review_invoked; then bad "there was no reviewer to dispatch"
+else ok "refused before dispatching anyone"; fi
+check_block "no reviewers configured" "--reviewers is empty"
 
 echo "the pinned SHA is honoured when it matches the remote tip"
 setup_repo with-remote
@@ -310,6 +369,7 @@ if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
 else ok "an unpublished branch leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued until it is pushed"
 else bad "the handoff was cleared for a branch the supervisor cannot fetch"; fi
+check_block "branch not on the remote" "the finished branch was never pushed"
 
 echo "devin-supervisor.sh itself refuses a pinned handoff for an unpublished branch"
 # The driver is not the only caller (docs/22 documents a by-hand handoff), so the
@@ -356,6 +416,7 @@ if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
 else ok "an origin-less repo leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued until the repo has a remote"
 else bad "the handoff was cleared for a repo the supervisor cannot pull from"; fi
+check_block "no origin configured" "the repo has no remote at all"
 
 echo "devin-supervisor.sh itself refuses a pinned handoff in a repo with no origin"
 # The layer below, again with --dry-run: this is the refusal the driver would
@@ -431,6 +492,7 @@ if handoff_invoked; then bad "an unresolvable base must never reach the supervis
 else ok "an unresolvable base blocks the supervisor invocation"; fi
 if still_queued; then ok "the branch stays queued when the base is unresolvable"
 else bad "the handoff was cleared despite an unresolvable base"; fi
+check_block "base unresolvable" "no base branch could be resolved"
 
 echo "a remote tip missing from the local object database is fetched, not faked"
 setup_repo with-remote
@@ -589,6 +651,19 @@ if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
 else ok "an unresolvable pin leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued when its pin is unresolvable"
 else bad "the handoff was cleared despite an unresolvable pin"; fi
+check_block "head object unfetchable" "the pinned commit cannot be fetched"
+
+echo "a supervisor that rejects the handoff says so in the journal"
+# The end of the gate, and the one refusal the driver does not own: everything
+# passed, the review completed, and devin-supervisor.sh still said no. The
+# branch correctly stays queued — but the next agent has to be told why, or it
+# re-queues the same handoff into the same refusal forever.
+setup_repo with-remote
+write_state "$BRANCH" ""
+STUB_DEVIN_RC=1 run_loop
+if handoff_invoked; then ok "the supervisor was actually invoked"
+else bad "the supervisor was never invoked, so this is not the case under test"; fi
+check_block "supervisor rejected the handoff" "devin-supervisor.sh exited non-zero"
 
 echo "the handoff diffstat is rendered from the exact reviewed SHAs, not from stale local refs"
 # The message the supervisor reads is the only description of the change it gets
@@ -659,6 +734,58 @@ if grep -qF "Branch: \`$BRANCH\`" <<<"$sup_msg" && grep -qF 'Base: `main`' <<<"$
 else
   bad "the message lost the branch names the supervisor opens the PR between"
 fi
+# The claim of exactness is only true when the diffstat was actually generated
+# from those two commits — which it was here, so it must be made.
+if grep -qF "the diffstat below is exactly \`$EXACT_BASE...$EXACT_HEAD\`" <<<"$sup_msg"; then
+  ok "the message claims exactness for a diffstat it really did generate"
+else
+  bad "the message dropped the exactness claim for a diffstat built from $EXACT_BASE...$EXACT_HEAD"
+fi
+
+echo "an unavailable exact diffstat is never described as the reviewed diff"
+# The other half of the same sentence. The message used to say "the diffstat
+# below is exactly <base>...<head>, the diff that was reviewed" from the pinned
+# clause while the diffstat itself was the string "n/a" — the two halves are
+# built in different places and neither knew what the other did. A supervisor
+# reading that is told the reviewed diff is in front of it when nothing was
+# generated at all, and it is under instruction to review what it is given.
+# Here the base object is genuinely absent from the clone while the head pin
+# still matches the remote tip, so the guard passes and the diffstat cannot be
+# built.
+ABSENT_BASE=0123456789abcdef0123456789abcdef01234567
+if git -C "$REPO" rev-parse --verify --quiet "$ABSENT_BASE^{commit}" >/dev/null 2>&1; then
+  bad "fixture bug: the absent base commit is readable in the target clone"
+else
+  ok "fixture: the pinned base commit is absent from the handing-off clone"
+fi
+unavail_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+  --base-sha "$ABSENT_BASE" --sha "$EXACT_HEAD" --task "diffstat unavailable sensor" --dry-run 2>/dev/null)
+unavail_rc=$?
+if [[ "$unavail_rc" -eq 0 ]]; then
+  ok "the handoff still renders when the exact diffstat cannot be built"
+else
+  bad "the handoff failed (rc=$unavail_rc) instead of rendering an honest n/a"
+fi
+if grep -qF 'is exactly' <<<"$unavail_msg"; then
+  bad "the message claims the diffstat is exactly the reviewed diff when none was generated"
+else
+  ok "no false exactness claim when the diffstat is unavailable"
+fi
+if grep -qF 'n/a' <<<"$unavail_msg"; then
+  ok "the diffstat section says n/a outright"
+else
+  bad "the unavailable diffstat was not reported as n/a"
+fi
+if grep -qF "Reviewed against base commit: \`$ABSENT_BASE\`" <<<"$unavail_msg"; then
+  ok "the reviewed base commit is still named, so the supervisor can rebuild the diff"
+else
+  bad "the message dropped the reviewed base commit $ABSENT_BASE"
+fi
+if grep -qF "Branch: \`$BRANCH\`" <<<"$unavail_msg" && grep -qF 'Base: `main`' <<<"$unavail_msg"; then
+  ok "the unavailable-diffstat message still names both branches"
+else
+  bad "the unavailable-diffstat message lost the branch names"
+fi
 
 # The pinned-SHA clause is concatenated, not heredoc'd, so its trailing newline is
 # easy to drop — and without it the last bullet runs straight into `## Task`,
@@ -677,6 +804,16 @@ if [[ -n "$(task_prev_lines "$sup_msg" | tr -d '[:space:]')" ]]; then
   bad "no blank line before '## Task' in the pinned message — the heading is glued to the SHA clause"
 else
   ok "a real blank line separates the pinned-SHA clause from '## Task'"
+fi
+
+# The unavailable-diffstat rendering reaches '## Task' through a third branch of
+# the same concatenated clause, so it can lose the blank line on its own.
+if ! grep -q '^## Task$' <<<"$unavail_msg"; then
+  bad "the unavailable-diffstat message has no '## Task' heading to check the spacing of"
+elif [[ -n "$(task_prev_lines "$unavail_msg" | tr -d '[:space:]')" ]]; then
+  bad "no blank line before '## Task' in the unavailable-diffstat message"
+else
+  ok "the unavailable-diffstat message keeps its blank line before '## Task'"
 fi
 
 # Same render with no --sha: the template's own newline has to supply the blank

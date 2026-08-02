@@ -165,6 +165,39 @@ halted() {
   return 1
 }
 
+# Why a blocked handoff writes to the journal and not only to stderr.
+#
+# playbooks/loop-step.md tells the NEXT agent — a fresh context, minutes or hours
+# later, with none of this run's terminal — that when a handoff stays queued the
+# reason is in gibson/journal.md and the fix is theirs. A refusal that only
+# reaches stderr breaks that contract: the branch sits queued forever with no
+# recorded reason, which is exactly the silent-agent failure Law 8 names.
+#
+# BLOCK_CONTEXT names the branch the entry is about; BLOCK_JOURNAL is the switch
+# for callers that already write their own entry (escalate), so one failed
+# attempt never produces two overlapping records.
+BLOCK_CONTEXT=""
+BLOCK_JOURNAL=1
+
+# journal_block/block are called from resolve_base_pin and resolve_handoff_sha,
+# which the caller runs inside a command substitution. An append to $JOURNAL is a
+# filesystem write and survives that subshell; a shell variable set there would
+# not, which is why the reason is recorded here at the point of refusal rather
+# than reconstructed by the caller. Each refusal path calls block() exactly once
+# and the callers above them deliberately only info(), so a single failed attempt
+# leaves a single entry.
+journal_block() {
+  [[ "$BLOCK_JOURNAL" -eq 1 ]] || return 0
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · handoff blocked${BLOCK_CONTEXT:+ · branch=$BLOCK_CONTEXT}"
+    echo "$*"
+    echo "handoff/handoff_sha remain queued in loop-state; clear the reason above and the next iteration retries (Law 5, Law 8)."
+  } >> "$JOURNAL"
+}
+
+block() { info "$*"; journal_block "$*"; }
+
 read_field() {
   local key="$1"
   # FS set so field 1 is the key
@@ -251,22 +284,22 @@ resolve_base_pin() {
   local name="" sha="" symref ls_out
   if git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
     if ! symref=$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null); then
-      info "git ls-remote --symref origin HEAD failed in $REPO — cannot confirm the current default branch, and a stale local ref reviews the wrong diff"
+      block "base unresolvable: git ls-remote --symref origin HEAD failed in $REPO — cannot confirm the current default branch, and a stale local ref reviews the wrong diff. Check the remote is reachable and credentials are valid, then re-queue."
       return 1
     fi
     name=$(printf '%s\n' "$symref" |
       awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
     if [[ -z "$name" ]]; then
-      info "origin advertises no symbolic HEAD for $REPO — refusing to guess the base branch"
+      block "base unresolvable: origin advertises no symbolic HEAD for $REPO — refusing to guess the base branch. Set the remote's default branch (gh repo edit --default-branch NAME, or git remote set-head origin -a upstream-side), then re-queue."
       return 1
     fi
     if ! ls_out=$(git -C "$REPO" ls-remote origin "refs/heads/$name" 2>/dev/null); then
-      info "git ls-remote origin refs/heads/$name failed — cannot confirm the current base tip"
+      block "base unconfirmable: git ls-remote origin refs/heads/$name failed — cannot confirm the current base tip, and reviewing against a stale local copy of $name reviews a diff nobody will merge. Restore access to origin, then re-queue."
       return 1
     fi
     sha=$(printf '%s\n' "$ls_out" | awk 'NR==1 {print $1}')
     if [[ -z "$sha" ]]; then
-      info "origin advertises HEAD -> $name but has no refs/heads/$name — refusing to review against a base that does not exist"
+      block "base missing on the remote: origin advertises HEAD -> $name but has no refs/heads/$name — refusing to review against a base that does not exist. Push $name or repoint the remote's default branch, then re-queue."
       return 1
     fi
   else
@@ -276,7 +309,7 @@ resolve_base_pin() {
       name=""
     done
     if [[ -z "$name" || -z "$sha" ]]; then
-      info "could not resolve a base branch for $REPO (no origin configured, no local main/master)"
+      block "base unresolvable: no base branch for $REPO (no origin configured, and no local main/master to fall back to). Create the trunk branch or add a remote whose HEAD names it, then re-queue."
       return 1
     fi
   fi
@@ -292,7 +325,7 @@ resolve_base_pin() {
       git -C "$REPO" fetch --quiet origin "$sha" >/dev/null 2>&1 || true
     fi
     if ! git -C "$REPO" rev-parse --verify --quiet "$sha^{commit}" >/dev/null 2>&1; then
-      info "base commit $sha is still unresolvable locally after fetching $name — refusing to review against a base nobody here can read"
+      block "base object unfetchable: commit $sha ($name) is still missing from this clone after fetching refs/heads/$name and the exact SHA — refusing to review against a base nobody here can read. Check whether the tip was pruned or rewritten on the remote, then re-queue."
       return 1
     fi
     info "fetched base $sha into the local object database"
@@ -309,10 +342,16 @@ escalate() {
   local base="" base_sha="" pin note
   # Same exact base as the pre-handoff review: a failure-triage review of the
   # wrong diff is as misleading as a pre-handoff one.
+  #
+  # No handoff is queued here, and this function writes its own journal entry a
+  # few lines down, so resolve_base_pin's refusal stays on stderr: two records of
+  # one skipped escalation would be noise, not signal.
+  BLOCK_JOURNAL=0
   if pin=$(resolve_base_pin); then
     base=${pin%% *}
     base_sha=${pin##* }
   fi
+  BLOCK_JOURNAL=1
   if [[ -z "$base_sha" ]]; then
     info "escalation review skipped — no base branch resolved, and a guessed base reviews the wrong diff"
     note="Escalation review skipped: the target repo's base branch could not be resolved (Law 8)."
@@ -350,7 +389,7 @@ resolve_handoff_sha() {
   # first and hitting that same refusal afterwards. Fail before the review, not
   # after it.
   if ! git -C "$REPO" remote get-url origin >/dev/null 2>&1; then
-    info "no origin configured in $REPO — the supervisor can only open a PR from a remote branch, so an origin-less repo has no handoff to make. Add a remote and push $branch, then re-queue the handoff."
+    block "no origin configured in $REPO — the supervisor can only open a PR from a remote branch, so an origin-less repo has no handoff to make. Add a remote and push $branch, then re-queue the handoff."
     return 1
   fi
   # Explicit, not errexit-suppressed: an unreachable origin means we cannot tell
@@ -359,7 +398,7 @@ resolve_handoff_sha() {
   if ls_out=$(git -C "$REPO" ls-remote origin "refs/heads/$branch" 2>/dev/null); then
     remote=$(printf '%s\n' "$ls_out" | awk 'NR==1 {print $1}')
   else
-    info "git ls-remote origin refs/heads/$branch failed — cannot confirm the remote tip, refusing to hand off an unconfirmable branch"
+    block "origin unreachable: git ls-remote origin refs/heads/$branch failed — cannot confirm the remote tip, and handing off a tip we cannot confirm is exactly what the pin exists to prevent. Restore access to origin, then re-queue the handoff."
     return 1
   fi
   # Reachable origin, no such branch: the branch exists only in this checkout.
@@ -368,11 +407,11 @@ resolve_handoff_sha() {
   # something other than what was reviewed here, or nothing at all. An
   # unpublished branch is a blocked handoff, not a local-ref handoff.
   if [[ -z "$remote" ]]; then
-    info "origin has no refs/heads/$branch — the branch was never pushed, and the supervisor can only open a PR from the remote branch. Push it, then re-queue the handoff."
+    block "branch not on the remote: origin has no refs/heads/$branch — it was never pushed, and the supervisor can only open a PR from the remote branch. Run 'git -C $REPO push origin $branch', then re-queue the handoff."
     return 1
   fi
   if [[ -n "$pinned" && "$pinned" != "$remote" ]]; then
-    info "loop-state pins $branch @ $pinned but the remote tip is $remote — refusing to hand off an unreviewed tip (issue #55)"
+    block "pin mismatch: loop-state pins $branch @ $pinned but the remote tip is $remote — refusing to hand off an unreviewed tip (issue #55). Either push the pinned commit or set handoff_sha to $remote after re-reviewing that tip, then re-queue."
     return 1
   fi
   # Never empty: $remote is non-empty by the time we get here, because every
@@ -392,7 +431,7 @@ resolve_handoff_sha() {
       git -C "$REPO" fetch --quiet origin "$sha" >/dev/null 2>&1 || true
     fi
     if ! git -C "$REPO" rev-parse --verify --quiet "$sha^{commit}" >/dev/null 2>&1; then
-      info "commit $sha is still unresolvable locally after fetching $branch — refusing to record a review of an object nobody here can read"
+      block "head object unfetchable: commit $sha is still missing from this clone after fetching refs/heads/$branch and the exact SHA — refusing to record a review of an object nobody here can read. Check whether the tip was pruned or rewritten on the remote, then re-queue."
       return 1
     fi
     info "fetched $sha into the local object database"
@@ -440,7 +479,7 @@ ensure_cross_vendor_review() {
   fi
 
   if [[ -z "$REVIEWERS" ]]; then
-    info "--reviewers is empty — no distinct-vendor reviewer to run (Law 5)"
+    block "no reviewers configured: --reviewers is empty, so there is no distinct-vendor reviewer to run and nobody may approve $branch @ $sha (Law 5). Re-run the loop with --reviewers naming a vendor other than $RUNNER."
     return 1
   fi
   local distinct=0 name
@@ -453,7 +492,7 @@ ensure_cross_vendor_review() {
     fi
   done
   if [[ "$distinct" -eq 0 ]]; then
-    info "--reviewers '$REVIEWERS' contains no vendor other than the runner ($RUNNER) — nobody may review this (Law 5)"
+    block "no distinct vendor: --reviewers '$REVIEWERS' contains no vendor other than the runner ($RUNNER), and nobody grades their own homework (Law 5). Add a different vendor to --reviewers, then re-queue the handoff of $branch @ $sha."
     return 1
   fi
 
@@ -474,13 +513,9 @@ ensure_cross_vendor_review() {
     return 0
   fi
   rm -f "$REVIEW_RECEIPT"
-  info "distinct-vendor review of $branch @ $sha against $base @ $base_sha FAILED — handoff blocked, branch stays queued (Law 5)"
-  {
-    echo ""
-    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · pre-handoff review failed · reviewers=$REVIEWERS"
-    echo "Cross-vendor review of $branch @ $sha against $base @ $base_sha did not complete. Handoff BLOCKED;"
-    echo "handoff/handoff_sha remain queued in loop-state (Law 5, Law 8)."
-  } >> "$JOURNAL"
+  # The reviewer-failure entry that already existed, now emitted through the same
+  # helper as every other refusal so the journal reads in one format.
+  block "pre-handoff review failed: the distinct-vendor review of $branch @ $sha against $base @ $base_sha did not complete (reviewers=$REVIEWERS, author=$RUNNER). Read gibson/second-opinion.md for the raw attempts, fix what the reviewer choked on, then re-queue."
   return 1
 }
 
@@ -493,6 +528,11 @@ supervisor_handoff() {
   local branch
   branch=$(read_field handoff)
   [[ -n "$branch" ]] || return 0
+  # Names the branch in every journal entry written below this point, including
+  # the ones written from inside resolve_base_pin/resolve_handoff_sha's command
+  # substitutions — a reader with three queued branches needs to know which one
+  # each reason belongs to.
+  BLOCK_CONTEXT="$branch"
 
   # Resolved before anything is spent: a review against a guessed or stale base is
   # a review of the wrong diff, so a base that cannot be resolved AND confirmed
@@ -545,7 +585,7 @@ supervisor_handoff() {
       fs.writeFileSync(file, text);
     ' "$STATE_FILE"
   else
-    info "supervisor handoff failed (non-fatal) — branch stays queued in loop-state"
+    block "supervisor rejected the handoff: devin-supervisor.sh exited non-zero for $branch @ $sha into $base @ $base_sha. Re-run that command by hand to see its refusal (it prints the reason to stderr) — a moved remote tip, a missing DEVIN_API_KEY, and an unreachable Devin API all land here."
   fi
 }
 

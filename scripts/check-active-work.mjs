@@ -127,8 +127,26 @@ if (claimFiles.length === 0 && !touchesActiveWork) {
   process.exit(0);
 }
 
-/** File content at a commit, or null when the path does not exist there. */
-const fileAt = (ref, path) => git(["show", `${ref}:${path}`], { allowFail: true });
+/**
+ * File content at a commit, or null when the path genuinely does not exist there.
+ *
+ * Absence is established by asking the commit's tree, never by watching
+ * `git show` fail. `show` also fails on a path it cannot READ — a corrupt or
+ * pruned object, a partial clone that never fetched the blob, content past
+ * maxBuffer — and mapping every one of those to null makes a claim file the
+ * sensor cannot read indistinguishable from one that is not there. On the base
+ * side that reads as "new on this branch — allowed (Law 2)" and waves the PR
+ * through; on the head side it reads as a deletion and accuses the wrong lane.
+ * Both are silent, and both are wrong. ls-tree answers presence from a commit
+ * this sensor already resolved; any read failure after that dies loudly (Law 8).
+ */
+const fileAt = (ref, path) => {
+  // --full-tree so the pathspec is repo-root-relative like `git show ref:path`,
+  // rather than relative to wherever the gate job happened to be invoked from.
+  const entry = git(["ls-tree", "-z", "--full-tree", "--full-name", ref, "--", path]);
+  if (!entry.trim()) return null;
+  return git(["show", `${ref}:${path}`]);
+};
 
 const CLAIM_ID = /^issue-[a-z0-9][a-z0-9-]*$/i;
 

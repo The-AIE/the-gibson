@@ -180,6 +180,75 @@ rm "$REPO/docs/claims/issue-7-password-reset.md"
 commit_lane
 run_sensor 1 feat/7-password-reset main "the owning branch cannot delete its own claim" "release-claim.sh"
 
+echo "a claim file present in the tree but unreadable is an error, never a classification"
+# The sensor used to read claim content with `git show`, allowFail: true, and map
+# EVERY failure to null — the same value it uses for "this path is not in that
+# commit". A blob it cannot read then silently becomes an absence: on the base
+# side "new on this branch — allowed (Law 2)", on the head side a deletion
+# pinned on a lane that deleted nothing. The fixture removes the loose object
+# behind a path that is still listed in the commit's tree, which is what a
+# pruned object, a partial clone, or a corrupt objects/ directory looks like from
+# here — the tree entry is intact, the content is gone.
+blob_object_path() { # blob_object_path <ref> <path>
+  local oid
+  oid=$(git -C "$REPO" rev-parse "$1:$2") || return 1
+  printf '%s\n' "$REPO/.git/objects/${oid:0:2}/${oid:2}"
+}
+
+setup_repo
+echo "notes: renewed" >> "$REPO/docs/claims/issue-7-password-reset.md"
+commit_lane
+BASE_BLOB=$(blob_object_path main docs/claims/issue-7-password-reset.md)
+rm -f "$BASE_BLOB"
+if [[ -n "$(git -C "$REPO" ls-tree main -- docs/claims/issue-7-password-reset.md)" ]] &&
+   ! git -C "$REPO" show main:docs/claims/issue-7-password-reset.md >/dev/null 2>&1; then
+  ok "fixture: the base still lists the claim path but its blob is unreadable"
+else
+  bad "fixture bug: the base blob is either still readable or gone from the tree"
+fi
+out=$(cd "$REPO" && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main \
+      GITHUB_HEAD_REF=lane node "$SENSOR" 2>&1)
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  bad "an unreadable base-side claim blob must not pass (rc=0: $out)"
+elif grep -qi "new on this branch" <<< "$out"; then
+  bad "an unreadable base-side claim blob was classified as a new file (rc=$rc: $out)"
+elif grep -qi "git show" <<< "$out"; then
+  ok "an unreadable base-side claim blob dies loudly naming the failed read"
+else
+  bad "the failure did not name the unreadable read (rc=$rc: $out)"
+fi
+
+# The head side of the same confusion: here the base copy reads fine and it is
+# the branch's own blob that cannot be read. Absence on this side means deletion,
+# so the pre-fix sensor accused the lane of deleting a live claim — non-zero for
+# a reason that never happened, which sends the lane chasing a delete it did not
+# make. Assert the read failure, not merely the exit code.
+setup_repo
+echo "notes: renewed" >> "$REPO/docs/claims/issue-7-password-reset.md"
+commit_lane
+HEAD_BLOB=$(blob_object_path lane docs/claims/issue-7-password-reset.md)
+rm -f "$HEAD_BLOB"
+if [[ -n "$(git -C "$REPO" ls-tree lane -- docs/claims/issue-7-password-reset.md)" ]] &&
+   git -C "$REPO" show main:docs/claims/issue-7-password-reset.md >/dev/null 2>&1 &&
+   ! git -C "$REPO" show lane:docs/claims/issue-7-password-reset.md >/dev/null 2>&1; then
+  ok "fixture: the head lists the claim path, the base blob reads, the head blob does not"
+else
+  bad "fixture bug: the head-side unreadable-blob fixture is not in the expected state"
+fi
+out=$(cd "$REPO" && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main \
+      GITHUB_HEAD_REF=lane node "$SENSOR" 2>&1)
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  bad "an unreadable head-side claim blob must not pass (rc=0: $out)"
+elif grep -qi "deletes live claim file" <<< "$out"; then
+  bad "an unreadable head-side claim blob was reported as a deletion (rc=$rc: $out)"
+elif grep -qi "git show" <<< "$out"; then
+  ok "an unreadable head-side claim blob dies loudly instead of alleging a deletion"
+else
+  bad "the failure did not name the unreadable read (rc=$rc: $out)"
+fi
+
 echo "a diff the sensor cannot compute is an error, never a pass"
 setup_repo
 echo change > "$REPO/README.md"
