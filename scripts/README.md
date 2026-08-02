@@ -19,7 +19,9 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`second-opinion.sh`](second-opinion.sh) `--repo … [--author grok]` | Cross-vendor read-only review of a diff ([docs/20](../docs/20-multi-model-orchestration.md) rule 1). Refuses to let a runner review its own work; writes `gibson/second-opinion.md`. |
 | [`devin-supervisor.sh`](devin-supervisor.sh) `ensure\|status\|wake\|handoff` | Persistent Devin cloud supervisor ([docs/22](../docs/22-devin-cloud-supervisor.md)): reviews the diff and owns GitHub. Wakes a dead session via `DEVIN_WEBHOOK_URL`, falling back to the API. |
 | [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
+| [`injection-scan.sh`](injection-scan.sh) `[paths…] [--all]` | Invisible/deceptive Unicode (zero-width, bidi overrides, BOM, soft hyphen) in anything a model ingests — skills, prompts, recipes, shared config. Red-team Phase 2; exit 1 on a hit. The Pale Fire class: invisible in a diff, fully tokenized by the LLM. |
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
+| [`tests/injection-scan.test.sh`](tests/injection-scan.test.sh) | Pins each codepoint the scan must catch, and that ordinary prose stays quiet. |
 | [`tests/release-claim.test.sh`](tests/release-claim.test.sh) | Sensors for the release-claim contract (L-009 / L-024 / L-027 / L-037). Temp git repos only — no network, no `gh`. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |
 | [`delivery-control/`](delivery-control/) | Doc 20: audit/harden branch protection + Production env; promote/hotfix (portable). **Never rotates secrets.** |
