@@ -153,6 +153,72 @@ echo "$out" | grep -q SURVIVED \
   || bad "died under set -euo pipefail ($out)"
 
 echo
+echo "a hash command that exists but fails cannot take the driver down"
+# The digest assignments are the last place this sensor can fail OPEN in a way the
+# other cases miss. Under `set -euo pipefail` a hasher that exists but exits
+# non-zero makes the pipeline non-zero (pipefail), so a bare assignment would abort
+# the caller *before* the sentinel is printed: instead of failing closed the sensor
+# kills the loop it was supposed to measure. Shadow all three candidates so whichever
+# one this platform selects is the broken one.
+FAKEBIN="$ROOT/fakebin"
+mkdir -p "$FAKEBIN"
+for hasher in sha256sum shasum cksum; do
+  printf '#!/bin/sh\nexit 7\n' > "$FAKEBIN/$hasher"
+  chmod +x "$FAKEBIN/$hasher"
+done
+write_state "$ROOT/nohash.md" "2026-08-02T00:00:00Z"
+
+# Control: with a working hasher the same state fingerprints as a real digest, so a
+# `sentinel:unhashable` below is the shadow's doing and not some unrelated breakage.
+out=$(bash -c 'source "$0"; STATE_FILE="$1"; _silent_noop_fp' "$SENSOR" "$ROOT/nohash.md" 2>&1)
+[[ "$out" == state:* ]] \
+  && ok "control: a working hasher still yields state:<digest>" \
+  || bad "control case did not produce a digest (got '$out')"
+
+# Called directly rather than through `$(...)`: bash 3.2 swallows a `set -e` abort
+# raised inside a command substitution, so exercising this only through
+# silent_noop_check would pass on macOS and kill the driver on CI's bash 5.
+out=$(PATH="$FAKEBIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$0"
+  STATE_FILE="$1"
+  _silent_noop_fp
+  printf " SURVIVED"
+' "$SENSOR" "$ROOT/nohash.md" 2>&1)
+[[ "$out" == "sentinel:unhashable SURVIVED" ]] \
+  && ok "a failing hasher yields sentinel:unhashable and returns 0" \
+  || bad "failing hasher killed _silent_noop_fp or changed its output (got '$out')"
+
+out=$(PATH="$FAKEBIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$0"
+  STATE_FILE="$1"
+  silent_noop_init
+  silent_noop_check && printf SURVIVED
+' "$SENSOR" "$ROOT/nohash.md" 2>/dev/null)
+[[ "$out" == "SURVIVED" ]] \
+  && ok "init + check survive a failing hasher under set -euo pipefail" \
+  || bad "a failing hasher killed the driver mid-iteration (got '$out')"
+
+# The state file changes every iteration and the budget must still trip: an
+# un-hashable state is stagnation the sensor cannot see through, so it accrues
+# instead of re-seeding forever. This is also what pins the absence of a byte-count
+# or raw-content fallback — either would read these writes as progress and fail open.
+out=$(NOOP_BUDGET=2 PATH="$FAKEBIN:$PATH" bash -c '
+  set -uo pipefail
+  source "$0"
+  STATE_FILE="$1"
+  silent_noop_init
+  for i in 1 2 3; do
+    printf "hat: builder\nround: %s\n" "$i" > "$STATE_FILE"
+    if silent_noop_check 2>/dev/null; then echo PASS; else echo TRIP; fi
+  done
+' "$SENSOR" "$ROOT/nohash.md")
+[[ "$(echo "$out" | head -1)" == PASS && "$(echo "$out" | grep -c TRIP)" -ge 1 ]] \
+  && ok "repeated un-hashable state accrues and trips NOOP_BUDGET" \
+  || bad "un-hashable state never trips the budget ($(echo "$out" | tr '\n' ' '))"
+
+echo
 echo "it does not wire itself into the driver"
 # The wiring is a deliberate follow-up; this pins that the PR did not sneak it in.
 grep -q 'silent-noop' "$SCRIPT_DIR/../loop.sh" \

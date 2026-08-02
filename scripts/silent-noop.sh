@@ -63,14 +63,22 @@ _silent_noop_fp() {
   # Drop the `updated:` clock line; hash whatever the runner actually changed.
   body=$(awk '!/^updated:/' "$file" 2>/dev/null) || body=""
 
+  # Every digest assignment ends in `|| digest=""`. The driver sources this under
+  # `set -euo pipefail`, and a hash binary that *exists but fails* (broken install,
+  # sandbox denial, exhausted fd/memory) makes the pipeline non-zero under pipefail.
+  # A bare assignment would then abort the caller before the sentinel below is ever
+  # printed — the sensor would take the loop down instead of failing closed. Collapse
+  # to an empty digest and let `sentinel:unhashable` stand. Deliberately no byte-count
+  # fallback here: `wc -c` cannot see `round: 1` become `round: 2`, so it would report
+  # stagnation as progress — fail-open, the one thing this sensor may never do.
   if command -v sha256sum >/dev/null 2>&1; then
-    digest=$(printf '%s\n' "$body" | sha256sum 2>/dev/null | awk '{print $1}')
+    digest=$(printf '%s\n' "$body" | sha256sum 2>/dev/null | awk '{print $1}') || digest=""
   elif command -v shasum >/dev/null 2>&1; then
-    digest=$(printf '%s\n' "$body" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    digest=$(printf '%s\n' "$body" | shasum -a 256 2>/dev/null | awk '{print $1}') || digest=""
   else
     # POSIX fallback. Weaker than a digest but still content-sensitive, unlike a
     # byte count, which cannot see `round: 1` become `round: 2`.
-    digest=$(printf '%s\n' "$body" | cksum 2>/dev/null | awk '{print $1 "-" $2}')
+    digest=$(printf '%s\n' "$body" | cksum 2>/dev/null | awk '{print $1 "-" $2}') || digest=""
   fi
 
   if [[ -z "$digest" ]]; then
