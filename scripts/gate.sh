@@ -51,6 +51,8 @@ info() { echo "gate.sh: $*" >&2; }
 fail() { echo "gate.sh: FAIL: $*" >&2; FAILED=1; }
 FAILED=0
 
+SKIP_SENTINEL='__gate_step_not_applicable__'
+
 resolve_cmd() {
   local step="$1"
   local env_var="$2"
@@ -64,7 +66,11 @@ resolve_cmd() {
   for cfg in .agents/gate.json .gibson-gate.json; do
     if [[ -f "$cfg" ]] && command -v node >/dev/null; then
       local from_json
-      from_json=$(node -e "try{const j=require('./$cfg');const g=j.gate||j;if(g['$step'])process.stdout.write(g['$step'])}catch(e){}" 2>/dev/null || true)
+      # A present-but-empty key means "this step does not apply here" and must
+      # stop the chain — otherwise it would fall through to package.json or the
+      # defaults and run something the repo explicitly opted out of.
+      from_json=$(node -e "try{const j=require('./$cfg');const g=j.gate||j;if(Object.prototype.hasOwnProperty.call(g,'$step')){const v=String(g['$step']??'').trim();process.stdout.write(v===''?'$SKIP_SENTINEL':v)}}catch(e){}" 2>/dev/null || true)
+      if [[ "$from_json" == "$SKIP_SENTINEL" ]]; then echo ""; return; fi
       if [[ -n "$from_json" ]]; then echo "$from_json"; return; fi
     fi
   done
