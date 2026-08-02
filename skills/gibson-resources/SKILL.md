@@ -30,13 +30,18 @@ standing order (flat-rate absorbs volume; metered buys judgment):
 - **implementer.default** → Grok (if alive), else Codex
 - **implementer.second / reviewer.primary** → Codex (Grok reviews only when
   Codex is the author — Law 5 cross-vendor)
-- **judgment** → Claude (specs, escalation after N failures, adversarial
-  verdicts, merge-bar calls) — spend sparingly, reserve cap headroom
+- **judgment + capability-gated work** → Claude: specs, escalation after N
+  failures, adversarial verdicts, merge-bar calls — plus feature work whose
+  capability bar the flat-rate pools genuinely can't clear (docs/15 routes by
+  capability x marginal cost). Spend sparingly, reserve cap headroom.
 - **merge_captain** → Devin IF key + supervisor wiring verified. ELSE fail
-  CLOSED, per docs/11: the merge path becomes fresh-context adversarial
-  self-review (a different session, never the authoring one) + the repo's own
-  merge rules, with Tier C always parking at the human gate — and the routing
-  table must say plainly that Devin is unwired and what wiring it needs.
+  closed in this strict order: (1) cross-vendor review remains MANDATORY while
+  any second vendor is alive — Devin being unwired never relaxes Law 5; (2)
+  only if NO other vendor is reachable at all, docs/11's fresh-context
+  adversarial pass (different session, same platform) substitutes, flagged in
+  the digest as degraded mode; (3) Tier C parks at the human gate in every
+  mode. The routing table must say plainly that Devin is unwired and exactly
+  what wiring it needs.
 - Per-resource: verified-at timestamp, failure notes, cost tier.
 
 Also report gaps as Ask Contract items when only the owner can fix them

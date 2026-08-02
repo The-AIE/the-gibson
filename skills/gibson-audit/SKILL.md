@@ -19,7 +19,8 @@ a machine-usable gap list the `gibson-setup` skill consumes.
    - `AGENTS.md` (or section) with fleet rules?
    - CI running tests on PRs? Required checks configured?
    - Branch protection on the default branch?
-   - Risk classifier / Tier-C gating (money/auth/PII paths)?
+   - Risk classifier / Tier-C gating (money, auth, consent/PII, security
+     boundaries, production data)?
    - DCO or sign-off convention?
    - Secrets hygiene (gitleaks or equivalent)?
    - Kill switch (`gibson/HALT` support comes free with the loop)?
@@ -40,9 +41,12 @@ Two parts, always both:
 - **For the owner (plain English, Ask Contract style):** what the repo is, how
   healthy it is, what's missing before agents can safely run unattended, and
   anything that genuinely needs their decision. No jargon unexplained.
-- **`gibson/audit.md` gap list (machine part):** checkbox list of missing
-  guardrails with the exact `gibson-setup` action for each. Write it into the
-  target repo's `gibson/` dir only if asked to persist; otherwise return inline.
+- **Gap list (machine part):** checkbox list of missing guardrails with the
+  exact `gibson-setup` action for each. Return it inline by default. If asked
+  to persist it as `gibson/audit.md` in the target, that write goes through a
+  worktree + branch like any other mutation (Law 3) — persisting the audit is
+  the one thing that graduates this skill out of read-only mode, so it follows
+  the write rules.
 
 Truthfulness rule (Law 8): report what IS, including pre-existing test failures
 and scary findings. Never soften a gap because it's awkward.

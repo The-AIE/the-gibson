@@ -25,5 +25,7 @@ Symlinks keep the Gibson clone the single source of truth — `git pull` updates
 the skills everywhere at once.
 
 Cost doctrine the whole family enforces (docs/15): flat-rate pools absorb all
-volume work (Grok first, Codex second); metered/capped tokens buy only judgment
-(Claude); Devin is the ACU-metered merge captain, never a bulk coder.
+volume work (Grok first, Codex second); Claude's capped pool buys judgment and
+the feature work whose capability bar flat-rate pools can't clear — never
+volume for convenience; Devin is the ACU-metered merge captain, never a bulk
+coder.

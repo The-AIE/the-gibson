@@ -37,11 +37,12 @@ before working here. Repo-specifics below override nothing — they instantiate.
 - Preview deployments: <on/off, URL resolution method>
 
 ### Tier C surface map
-<!-- The paths where Tier C treatment is automatic: -->
+<!-- The paths where Tier C treatment is automatic (all Law 7 categories): -->
 - Money: <paths>
 - Auth: <paths, middleware>
 - PII/consent: <paths, models>
-- Schema: <path>
+- Security boundaries: <headers/CSP config, rate limiting, sandboxing, gate scripts>
+- Production data: <schema/migrations paths, prod-touching scripts, seed/backfill>
 
 ### Claims
 Claim table: `docs/active-work.md` · labels: `agent-claimed`, `blocked`,

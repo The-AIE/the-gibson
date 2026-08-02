@@ -22,18 +22,19 @@ target repo's canonical checkout — worktrees only (Law 3).
 2. **`gibson-resources`** — discover what's actually available on this machine
    and account: runners (grok/codex/claude/hermes CLIs), Devin API, GitHub
    auth + bot identities, MCPs, satellite machines. Output the routing table.
-3. **`gibson-setup`** — close the gaps audit found: GitHub labels, AGENTS
-   section, gate workflows from `templates/target-repo/`, branch protection,
-   Devin supervisor wiring. Idempotent — safe to re-run.
+3. **`gibson-setup`** — close the gaps audit found: GitHub labels, the AGENTS
+   section from `templates/target-repo/`, CI gate workflows from `ci/`, branch
+   protection, Devin supervisor wiring. Idempotent — safe to re-run.
 4. **`gibson-direct`** — if there's no well-scoped plan/backlog yet, turn the
    owner's product direction into a plan and decomposed issues before any
    building starts. This is the only RECURRING owner step — but any step that
    SPENDS money (e.g. creating a Devin cloud session, which bills ACUs) is also
    an owner gate per docs/14: ask first, every time, Ask Contract format.
 5. **`gibson-run`** — start and supervise the loop (`scripts/loop.sh`) with the
-   routing table from step 2. Devin (cloud supervisor, `docs/22`) owns
-   review-of-finished-branches, PRs, and merges when wired; the loop hands off
-   via `handoff:` in loop-state.
+   routing table from step 2. Devin (cloud supervisor, `docs/22`) reviews
+   finished branches and opens/owns PRs via the `handoff:` field in loop-state;
+   it MERGES only in the explicit `--merge` handoff mode — which `loop.sh` does
+   not pass yet, so today a human clicks the merge (gibson-run has the detail).
 
 ## Cost routing (docs/15 — the standing order)
 
@@ -48,7 +49,11 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
 
 ## Rules that override everything
 
-- Law 5: no agent reviews or merges its own work. Cross-vendor always.
+- Law 5: no agent reviews or merges its own work. Cross-vendor whenever any
+  second vendor is alive; if truly none is, the ONLY permitted fallback is
+  docs/11's fresh-context adversarial pass (a different session, never the
+  authoring one) with Tier C still parking at the human gate — and the digest
+  must say that degraded mode was used.
 - Law 7: Tier C — money, auth, consent/PII, security boundaries, production
   data — always ends at a human merge gate. Devin does not override the owner.
 - Owner interruptions: product direction and human gates (`docs/14`) only.

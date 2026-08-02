@@ -30,7 +30,14 @@ for free.
    merge; owner attestation path for humans; trusted-provider list for bots
    (Devin's App belongs here IF the owner approves — that file is a security
    boundary, adding to it is always an explicit owner decision, never implied).
-5. **Labels + kill switch** — `agent-claimed`, `gibson-halt`, tier labels.
+   **No local template for this exists yet** — port it from a proven external
+   implementation and contribute the generalized version back (rule below).
+   Until installed, say plainly the repo has no machine-checked review gate.
+5. **Labels + kill switch** — `agent-claimed`, tier labels, and `gibson-halt`.
+   The label is SIGNAL-ONLY: `loop.sh` checks the `gibson/HALT` file, not
+   labels. Either also install the small translation workflow (label applied →
+   touch `gibson/HALT`) or state plainly that the label is unwired and humans
+   must create the HALT file to actually stop the fleet.
 6. **Branch protection** — required checks + no force-push on the default
    branch. Needs owner-level auth; if unavailable, emit the exact settings as
    an Ask Contract item instead of failing silently.
@@ -39,8 +46,10 @@ for free.
    **creates a billed cloud session if none exists (ACUs = real money): this is
    an owner-gated step, always. Ask Contract first, run only on an explicit
    yes** (needs `DEVIN_API_KEY`; set `DEVIN_MAX_ACU` as the cap). Optional
-   webhook wake per `adapters/devin/README.md`. Devin = merge captain: reviews finished
-   branches, owns PRs/merges. Tier C still ends at the human gate (Law 7).
+   webhook wake per `adapters/devin/README.md`. Devin = merge captain: reviews
+   finished branches and owns PRs; it merges only in the explicit `--merge`
+   handoff mode (docs/22) — the default leaves every merge to a human. Tier C
+   ends at the human gate in every mode (Law 7).
 
 ## Rules
 
