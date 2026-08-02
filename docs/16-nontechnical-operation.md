@@ -165,10 +165,14 @@ needing the computer that is running it.
 
 **Risks:** Low. To start again, remove the `gibson-halt` label from that issue
 (or from every issue that has it) and launch the loop once more — a fresh launch
-runs normally. Nothing is deleted; queued work stays queued. If GitHub itself is
-down, the remote stop cannot see the label and the local machine keeps going
-until someone can set the on-box stop (`gibson/HALT`); that is intentional so a
-GitHub outage does not freeze every project at once.
+runs normally after GitHub confirms the stop is gone. Nothing is deleted; queued
+work stays queued. If GitHub itself is down **before** the stop was ever
+confirmed, the remote stop cannot see the label and the local machine keeps
+going until someone can set the on-box stop (`gibson/HALT`); that is intentional
+so a GitHub outage does not freeze every project at once. **After** the loop has
+already seen and recorded a remote stop, a later GitHub outage or rate limit
+keeps the crew stopped (so a phone halt is not undone by a flaky API) until a
+successful check confirms both remote stop paths are clear.
 
 Engineers can also commit an empty file named `.gibson-halt` on the project's
 default branch (usually `main`) — same effect, cleared by deleting the file.

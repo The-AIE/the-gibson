@@ -99,15 +99,28 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   exits **75** on kill-switch refusal so a mid-cadence stop is journaled as a
   halt, never as "supervisor rejected". There is **no** shared-cache elimination
   across processes.
-  On remote halt the driver **journals the reason**, leaves `loop-state`
+  On remote halt the driver **journals the reason once**, leaves `loop-state`
   untouched (no default state created or rewritten), and suppresses supervisor
-  handoffs.
-  GitHub/API failure on either remote path, a non-matching origin host (GitLab,
-  Bitbucket, unconfigured Enterprise, SSH host aliases), or an unparseable
-  origin **fails open** to the local file/env checks — the loop keeps running —
-  and logs an explicit `remote halt check degraded` / `disabled` warning (and
-  makes **zero** `gh` remote-halt queries against an unrelated same-named
-  github.com repo). The same paths suppress Devin supervisor handoffs
+  handoffs. A persistent runtime latch under the target repo's
+  `gibson/halt-latch` (not a tracked Gibson source file) records the source and
+  reason so **launchd KeepAlive relaunches** do not append duplicate journal
+  sections while the stop is still active. Removing `gibson/HALT` /
+  unsetting `GIBSON_HALT` clears the local side of the latch; a successful
+  remote recheck that positively clears **both** remote paths clears the remote
+  side and permits a fresh launch.
+  GitHub/API failure on either remote path:
+  - **First-ever** (no remote latch yet) **fails open** to the local file/env
+    checks — the loop keeps running — with an explicit
+    `remote halt check degraded` warning.
+  - **After a confirmed remote halt** has been latched, a later degraded /
+    unauthorized / rate-limited recheck **stays fail-closed** until a successful
+    check positively clears both remote paths. KeepAlive must not resume work
+    just because GitHub flaked.
+  A non-matching origin host (GitLab, Bitbucket, unconfigured Enterprise, SSH
+  host aliases), an unparseable origin, or path segments like `.` / `..` in the
+  origin URL **never** query `gh` against an unrelated same-named github.com
+  repo (explicit `disabled` warning; zero remote-halt `gh` calls). The same
+  paths suppress Devin supervisor handoffs
   ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
   `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
 - **Human-gate queue:** Tier C merges and other stops accumulate in a digest

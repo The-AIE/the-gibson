@@ -25,10 +25,13 @@ RISKS
     paths on a bounded cadence (every iteration with --once; every
     GIBSON_REMOTE_HALT_INTERVAL iterations in a hot loop, default 3): an open
     issue with the gibson-halt label, or a .gibson-halt sentinel on the remote
-    default branch. Either journals the halt, leaves loop-state untouched, and
-    suppresses supervisor handoffs. Non-GitHub/unparseable origins and
-    GitHub/API failures fail open to the local file/env checks with an explicit
-    degraded/disabled warning (no gh queries against unrelated same-slug repos).
+    default branch. Either journals the halt once (persistent latch under
+    gibson/halt-latch so launchd KeepAlive relaunches do not spam the journal),
+    leaves loop-state untouched, and suppresses supervisor handoffs. A
+    previously confirmed remote halt stays fail-closed across API outages until
+    a successful recheck positively clears both remote paths. First-ever API
+    failure (no latch yet) still fails open to local checks. Non-GitHub/
+    unparseable origins never query gh against unrelated same-slug repos.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
@@ -148,6 +151,12 @@ STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/loop-state.md"
 JOURNAL="$STATE_DIR/journal.md"
 HALT_FILE="$STATE_DIR/HALT"
+# Persistent runtime latch (issue #71 KeepAlive / relaunch safety). Not a tracked
+# Gibson source file — lives only under the target repo's gibson/ state dir.
+# Records source + reason so (a) journal halt sections are not duplicated on
+# every launchd relaunch while the stop is still active, and (b) a confirmed
+# remote halt remains fail-closed when a later GitHub recheck is degraded.
+HALT_LATCH_FILE="$STATE_DIR/halt-latch"
 # Two review artifacts, two meanings, two paths — they are not interchangeable.
 #
 #   gibson/second-opinion.md    the ESCALATION/stall artifact. Written by escalate()
@@ -220,16 +229,47 @@ fi
 # unrelated same-named github.com repo); they fail open with an explicit
 # disabled warning once per live check.
 #
-# Network/API failure fails OPEN to the local checks: the loop keeps running
-# rather than bricking on GitHub downtime, and a clear "degraded" warning is
-# logged so the operator knows the remote stop is temporarily blind.
+# Network/API failure:
+#   - First-ever (no remote latch yet): fails OPEN to the local checks so a
+#     GitHub outage does not brick every project, with a "degraded" warning.
+#   - After a confirmed remote halt has been latched under gibson/halt-latch:
+#     fails CLOSED until a successful recheck positively clears both remote
+#     paths. launchd KeepAlive must not resume work just because the recheck
+#     hit rate limiting.
 #
-# A remote halt journals the reason and leaves loop-state untouched (no default
-# state created, no rewrite of an existing one). Supervisor handoffs are
-# suppressed. The child devin-supervisor.sh deliberately rechecks live (by-hand
-# safety; may spend another pair of gh calls) and exits 75 on kill-switch
-# refusal so a mid-cadence halt is journaled as a halt, not "supervisor
-# rejected". That is the issue #71 contract.
+# Journaling is once-per-activation via the same latch: relaunches while the
+# stop is still active do not append duplicate "## … · halt" sections.
+#
+# A remote halt leaves loop-state untouched (no default state created, no
+# rewrite of an existing one). Supervisor handoffs are suppressed. The child
+# devin-supervisor.sh deliberately rechecks live (by-hand safety; may spend
+# another pair of gh calls) and exits 75 on kill-switch refusal so a mid-
+# cadence halt is journaled as a halt, not "supervisor rejected".
+
+# Conservative GitHub owner / repo segment validation before any gh/API path
+# interpolation. Rejects "." / ".." and anything outside a narrow character set
+# so a hostile remote.origin.url cannot walk relative path segments into
+# repos/${slug}/contents/... endpoints.
+origin_segment_ok() {
+  local kind="$1" seg="$2"
+  case "$seg" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  if [[ "$kind" == "owner" ]]; then
+    # Owners/orgs: alnum + hyphen only; no leading/trailing hyphen; no dots.
+    case "$seg" in
+      *.*|*_*|-*|*-) return 1 ;;
+    esac
+    [[ "$seg" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ || "$seg" =~ ^[A-Za-z0-9]$ ]]
+    return $?
+  fi
+  # Repos: alnum + . _ - but not "." / ".." (already rejected); no leading/trailing . or -
+  case "$seg" in
+    .*|*.) return 1 ;;
+  esac
+  [[ "$seg" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ || "$seg" =~ ^[A-Za-z0-9]$ ]]
+  return $?
+}
 
 # Parse host + owner/repo from a git remote URL. Supports:
 #   https://github.com/owner/repo.git
@@ -241,7 +281,7 @@ fi
 # Sets ORIGIN_PARSE_HOST and ORIGIN_PARSE_SLUG (empty when unparseable).
 # Does not gate on GH_HOST — callers that talk to gh must compare the host.
 origin_parse_url() {
-  local url="$1" rest host
+  local url="$1" rest host owner name
   ORIGIN_PARSE_HOST=""
   ORIGIN_PARSE_SLUG=""
   [[ -n "$url" ]] || return 0
@@ -277,12 +317,17 @@ origin_parse_url() {
       ;;
   esac
   # Exactly two path segments (owner/repo). Reject schemes that survived, ports,
-  # or deeper paths — a bad slug would silently blind both remote checks.
+  # deeper paths, or relative/dot segments — a bad slug would silently blind
+  # both remote checks or walk relative path segments into API paths.
   case "$rest" in
     ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
     */*)
+      owner="${rest%%/*}"
+      name="${rest#*/}"
+      origin_segment_ok owner "$owner" || return 0
+      origin_segment_ok repo "$name" || return 0
       ORIGIN_PARSE_HOST="$host"
-      ORIGIN_PARSE_SLUG="$rest"
+      ORIGIN_PARSE_SLUG="${owner}/${name}"
       ;;
   esac
 }
@@ -349,10 +394,166 @@ remote_default_branch() {
 _REMOTE_HALT_CACHE=""
 _REMOTE_HALT_CHECKED_AT=-999999
 HALT_REASON=""
+# Which latch side was observed this call (local|remote) and whether a fresh
+# journal section is needed (1) or this activation was already journaled (0).
+HALT_LATCH_SIDE=""
+HALT_SHOULD_JOURNAL=1
+# Live poll outcome when remote_halted_live returns nonzero:
+#   clear | degraded | disabled  (empty until a live poll runs)
+REMOTE_HALT_STATUS=""
+REMOTE_HALT_KIND=""
 
-# Live remote poll (no cache). Sets HALT_REASON on a positive hit. Fail-open.
+# --- Persistent halt latch (gibson/halt-latch) --------------------------------
+# local_kind=file|env, remote_kind=label|sentinel|confirmed
+# journaled flags suppress KeepAlive relaunch spam; remote kind keeps
+# fail-closed across degraded rechecks until a positive clear.
+
+halt_latch_field() {
+  local key="$1" line
+  [[ -f "$HALT_LATCH_FILE" ]] || return 0
+  line=$(grep -E "^${key}=" "$HALT_LATCH_FILE" 2>/dev/null | head -n 1) || true
+  [[ -n "$line" ]] || return 0
+  printf '%s' "${line#*=}"
+}
+
+halt_latch_load() {
+  LATCH_LOCAL_KIND=$(halt_latch_field local_kind)
+  LATCH_LOCAL_REASON=$(halt_latch_field local_reason)
+  LATCH_LOCAL_JOURNALED=$(halt_latch_field local_journaled)
+  LATCH_REMOTE_KIND=$(halt_latch_field remote_kind)
+  LATCH_REMOTE_REASON=$(halt_latch_field remote_reason)
+  LATCH_REMOTE_JOURNALED=$(halt_latch_field remote_journaled)
+  LATCH_LOCAL_KIND=${LATCH_LOCAL_KIND:-}
+  LATCH_LOCAL_REASON=${LATCH_LOCAL_REASON:-}
+  LATCH_LOCAL_JOURNALED=${LATCH_LOCAL_JOURNALED:-0}
+  LATCH_REMOTE_KIND=${LATCH_REMOTE_KIND:-}
+  LATCH_REMOTE_REASON=${LATCH_REMOTE_REASON:-}
+  LATCH_REMOTE_JOURNALED=${LATCH_REMOTE_JOURNALED:-0}
+}
+
+halt_latch_save() {
+  mkdir -p "$STATE_DIR"
+  if [[ -z "${LATCH_LOCAL_KIND:-}" && -z "${LATCH_REMOTE_KIND:-}" ]]; then
+    rm -f "$HALT_LATCH_FILE"
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp "${STATE_DIR}/halt-latch.XXXXXX")
+  {
+    printf 'local_kind=%s\n' "${LATCH_LOCAL_KIND:-}"
+    printf 'local_reason=%s\n' "${LATCH_LOCAL_REASON:-}"
+    printf 'local_journaled=%s\n' "${LATCH_LOCAL_JOURNALED:-0}"
+    printf 'remote_kind=%s\n' "${LATCH_REMOTE_KIND:-}"
+    printf 'remote_reason=%s\n' "${LATCH_REMOTE_REASON:-}"
+    printf 'remote_journaled=%s\n' "${LATCH_REMOTE_JOURNALED:-0}"
+    printf 'updated_at=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  } > "$tmp"
+  mv -f "$tmp" "$HALT_LATCH_FILE"
+}
+
+# Observe a still-active local stop. Sets HALT_REASON / HALT_SHOULD_JOURNAL /
+# HALT_LATCH_SIDE. Clears the local latch only when the stop is gone (callers
+# invoke halt_latch_clear_local when neither file nor env is active).
+halt_latch_observe_local() {
+  local kind="$1" reason="$2"
+  halt_latch_load
+  HALT_REASON="$reason"
+  HALT_LATCH_SIDE="local"
+  if [[ "$LATCH_LOCAL_KIND" == "$kind" && "$LATCH_LOCAL_JOURNALED" == "1" ]]; then
+    HALT_SHOULD_JOURNAL=0
+  else
+    HALT_SHOULD_JOURNAL=1
+    LATCH_LOCAL_KIND="$kind"
+    LATCH_LOCAL_REASON="$reason"
+    LATCH_LOCAL_JOURNALED=0
+    halt_latch_save
+  fi
+}
+
+halt_latch_clear_local() {
+  halt_latch_load
+  if [[ -z "$LATCH_LOCAL_KIND" ]]; then
+    return 0
+  fi
+  LATCH_LOCAL_KIND=""
+  LATCH_LOCAL_REASON=""
+  LATCH_LOCAL_JOURNALED=0
+  halt_latch_save
+}
+
+halt_latch_observe_remote() {
+  local kind="$1" reason="$2"
+  halt_latch_load
+  HALT_REASON="$reason"
+  HALT_LATCH_SIDE="remote"
+  if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+    # Still-active remote stop already journaled (same or any remote kind).
+    HALT_SHOULD_JOURNAL=0
+    # Refresh kind/reason when we have a fresher live observation.
+    if [[ -n "$kind" && "$kind" != "confirmed" ]]; then
+      LATCH_REMOTE_KIND="$kind"
+      LATCH_REMOTE_REASON="$reason"
+      halt_latch_save
+    fi
+  else
+    HALT_SHOULD_JOURNAL=1
+    LATCH_REMOTE_KIND="${kind:-confirmed}"
+    LATCH_REMOTE_REASON="$reason"
+    LATCH_REMOTE_JOURNALED=0
+    halt_latch_save
+  fi
+}
+
+halt_latch_clear_remote() {
+  halt_latch_load
+  if [[ -z "$LATCH_REMOTE_KIND" ]]; then
+    return 0
+  fi
+  LATCH_REMOTE_KIND=""
+  LATCH_REMOTE_REASON=""
+  LATCH_REMOTE_JOURNALED=0
+  halt_latch_save
+}
+
+# After a journal section is written, mark the observed side journaled so
+# KeepAlive relaunches skip the duplicate.
+halt_latch_mark_journaled() {
+  halt_latch_load
+  case "${HALT_LATCH_SIDE:-}" in
+    local)
+      LATCH_LOCAL_JOURNALED=1
+      halt_latch_save
+      ;;
+    remote)
+      LATCH_REMOTE_JOURNALED=1
+      halt_latch_save
+      ;;
+    *)
+      # Exit-75 / generic path: mark whichever sides are present and unjournaled.
+      local changed=0
+      if [[ -n "$LATCH_LOCAL_KIND" && "$LATCH_LOCAL_JOURNALED" != "1" ]]; then
+        LATCH_LOCAL_JOURNALED=1
+        changed=1
+      fi
+      if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" != "1" ]]; then
+        LATCH_REMOTE_JOURNALED=1
+        changed=1
+      fi
+      if [[ "$changed" -eq 1 ]]; then
+        halt_latch_save
+      fi
+      ;;
+  esac
+}
+
+# Live remote poll (no cache). Sets HALT_REASON + REMOTE_HALT_KIND on a positive
+# hit (return 0). On non-hit sets REMOTE_HALT_STATUS to clear|degraded|disabled
+# and returns 1. Callers combine this with the persistent remote latch.
 remote_halted_live() {
+  REMOTE_HALT_STATUS=""
+  REMOTE_HALT_KIND=""
   if ! command -v gh >/dev/null 2>&1; then
+    REMOTE_HALT_STATUS="degraded"
     return 1
   fi
   local slug out ec def_branch label_degraded=0
@@ -360,6 +561,7 @@ remote_halted_live() {
     # Once per live check (this function), not per helper call — unparseable or
     # non-GH_HOST origins must not silently disable the phone stop.
     info "remote halt check disabled: ${ORIGIN_HALT_SKIP_REASON} — continuing with local HALT/GIBSON_HALT only (zero gh remote-halt queries)"
+    REMOTE_HALT_STATUS="disabled"
     return 1
   fi
   slug="$ORIGIN_HALT_SLUG"
@@ -378,8 +580,10 @@ remote_halted_live() {
     label_degraded=1
     info "remote halt check degraded: gibson-halt label query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
   elif printf '%s' "$out" | grep -q '[0-9]'; then
+    REMOTE_HALT_KIND="label"
     HALT_REASON="remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
     info "$HALT_REASON"
+    REMOTE_HALT_STATUS="halted"
     return 0
   fi
 
@@ -390,6 +594,7 @@ remote_halted_live() {
   # and check the wrong ref or a truncated one).
   if ! def_branch=$(remote_default_branch); then
     info "remote halt check degraded: could not resolve origin default branch — continuing with local HALT/GIBSON_HALT only"
+    REMOTE_HALT_STATUS="degraded"
     return 1
   fi
   set +e
@@ -398,31 +603,51 @@ remote_halted_live() {
   ec=$?
   set -e
   if [[ $ec -eq 0 ]]; then
+    REMOTE_HALT_KIND="sentinel"
     HALT_REASON="remote halt: .gibson-halt sentinel on origin/${def_branch} — stopping (delete the file from the default branch to allow a fresh launch)"
     info "$HALT_REASON"
+    REMOTE_HALT_STATUS="halted"
     return 0
   fi
   # 404 Not Found = no sentinel only when the repo was already proven reachable
   # by a successful label query. If the label query was degraded, a 404 is not
-  # trustworthy clear (private/wrong/missing repo often 404s too) — keep the
-  # earlier degraded warning as the operator-facing evidence and stay fail-open.
+  # trustworthy clear (private/wrong/missing repo often 404s too).
   if printf '%s' "$out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
     if [[ "$label_degraded" -eq 1 ]]; then
+      REMOTE_HALT_STATUS="degraded"
       return 1
     fi
+    REMOTE_HALT_STATUS="clear"
     return 1
   fi
   info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
+  REMOTE_HALT_STATUS="degraded"
   return 1
 }
 
-# True when a remote halt path is active. Honors REMOTE_HALT_INTERVAL cache.
+# True when a remote halt path is active. Honors REMOTE_HALT_INTERVAL cache and
+# the persistent remote latch (fail-closed after a prior confirmation).
 remote_halted() {
   local age
   if [[ -n "$_REMOTE_HALT_CACHE" ]]; then
     age=$((iter - _REMOTE_HALT_CHECKED_AT))
     if [[ "$age" -ge 0 && "$age" -lt "$REMOTE_HALT_INTERVAL" ]]; then
       if [[ "$_REMOTE_HALT_CACHE" == "halted" ]]; then
+        if [[ -z "$HALT_REASON" ]]; then
+          halt_latch_load
+          if [[ -n "$LATCH_REMOTE_REASON" ]]; then
+            HALT_REASON="$LATCH_REMOTE_REASON"
+          else
+            HALT_REASON="remote halt: cached remote kill switch still active — stopping"
+          fi
+        fi
+        HALT_LATCH_SIDE="remote"
+        halt_latch_load
+        if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+          HALT_SHOULD_JOURNAL=0
+        else
+          HALT_SHOULD_JOURNAL=1
+        fi
         return 0
       fi
       return 1
@@ -431,24 +656,60 @@ remote_halted() {
   _REMOTE_HALT_CHECKED_AT=$iter
   if remote_halted_live; then
     _REMOTE_HALT_CACHE="halted"
+    halt_latch_observe_remote "${REMOTE_HALT_KIND:-confirmed}" "$HALT_REASON"
     return 0
   fi
-  _REMOTE_HALT_CACHE="clear"
-  return 1
+  case "${REMOTE_HALT_STATUS:-}" in
+    clear)
+      # Positive clear of both remote paths — drop the remote latch so a fresh
+      # launch is allowed. First-ever clear with no latch is a no-op.
+      halt_latch_clear_remote
+      _REMOTE_HALT_CACHE="clear"
+      return 1
+      ;;
+    degraded|disabled)
+      # Fail-closed only when a prior confirmation latched the remote stop.
+      # First-ever API failure (no latch) stays fail-open.
+      halt_latch_load
+      if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+        HALT_REASON="${LATCH_REMOTE_REASON:-remote halt: previously confirmed remote kill switch still latched — stopping (GitHub recheck degraded; remove latch only after a successful clear)}"
+        info "remote halt latch held closed after degraded/disabled recheck (source=${LATCH_REMOTE_KIND})"
+        HALT_LATCH_SIDE="remote"
+        if [[ "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+          HALT_SHOULD_JOURNAL=0
+        else
+          HALT_SHOULD_JOURNAL=1
+        fi
+        _REMOTE_HALT_CACHE="halted"
+        return 0
+      fi
+      _REMOTE_HALT_CACHE="clear"
+      return 1
+      ;;
+    *)
+      _REMOTE_HALT_CACHE="clear"
+      return 1
+      ;;
+  esac
 }
 
 halted() {
   HALT_REASON=""
+  HALT_LATCH_SIDE=""
+  HALT_SHOULD_JOURNAL=1
   if [[ -f "$HALT_FILE" ]]; then
-    HALT_REASON="kill switch: gibson/HALT is present — stopping"
+    halt_latch_observe_local "file" "kill switch: gibson/HALT is present — stopping"
     return 0
   fi
   if [[ "${GIBSON_HALT:-}" == "1" ]]; then
-    HALT_REASON="kill switch: GIBSON_HALT=1 — stopping"
+    halt_latch_observe_local "env" "kill switch: GIBSON_HALT=1 — stopping"
     return 0
   fi
+  # Neither local stop is active — drop any stale local latch so a fresh launch
+  # after removing HALT / unsetting GIBSON_HALT is not held by journal dedup.
+  halt_latch_clear_local
   if remote_halted; then
-    # HALT_REASON already set by remote_halted_live (or left from cache hit).
+    # HALT_REASON / HALT_SHOULD_JOURNAL already set by remote_halted / latch.
     if [[ -z "$HALT_REASON" && "$_REMOTE_HALT_CACHE" == "halted" ]]; then
       HALT_REASON="remote halt: cached remote kill switch still active — stopping"
     fi
@@ -459,6 +720,8 @@ halted() {
 
 # Journal a halt without creating or rewriting loop-state (issue #71).
 # May create gibson/ and journal.md only — never loop-state.md.
+# Callers that already know a duplicate is unwanted check HALT_SHOULD_JOURNAL
+# (stop_if_halted does); this helper always appends when invoked.
 journal_halt() {
   mkdir -p "$STATE_DIR"
   if [[ ! -f "$JOURNAL" ]]; then
@@ -470,13 +733,17 @@ journal_halt() {
     echo "${HALT_REASON:-kill switch active — stopping}"
     echo "loop-state left untouched; supervisor handoffs suppressed."
   } >> "$JOURNAL"
+  halt_latch_mark_journaled
 }
 
 # Exit cleanly on any active kill switch. Call before state init and at every
 # iteration top so a remote halt never materializes a default loop-state.
+# Journal at most once per latch activation (KeepAlive-safe).
 stop_if_halted() {
   if halted; then
-    journal_halt
+    if [[ "${HALT_SHOULD_JOURNAL:-1}" -eq 1 ]]; then
+      journal_halt
+    fi
     info "kill switch set — stopping cleanly"
     exit 0
   fi
@@ -958,9 +1225,17 @@ supervisor_handoff() {
     ' "$STATE_FILE"
   elif [[ "$sup_rc" -eq 75 ]]; then
     HALT_REASON="kill switch: supervisor refused handoff after a fresh remote/local check — handoff left queued (remove gibson-halt label / .gibson-halt / gibson/HALT / GIBSON_HALT to allow a fresh launch)"
+    # Child already wrote the appropriate latch side (local file present, or
+    # remote confirmation). Mark journaled after this section; only treat the
+    # in-process remote cache as halted when a remote latch actually exists so
+    # a pure local refuse does not poison later cache-hit messaging.
+    HALT_LATCH_SIDE=""
     journal_halt
-    _REMOTE_HALT_CACHE="halted"
-    _REMOTE_HALT_CHECKED_AT=$iter
+    halt_latch_load
+    if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+      _REMOTE_HALT_CACHE="halted"
+      _REMOTE_HALT_CHECKED_AT=$iter
+    fi
     info "kill switch active — supervisor refused handoff of $branch (handoff stays queued; not a supervisor rejection)"
   else
     block "supervisor rejected the handoff: devin-supervisor.sh exited $sup_rc for $branch @ $sha into $base @ $base_sha. Re-run that command by hand to see its refusal (it prints the reason to stderr) — a moved remote tip, a missing DEVIN_API_KEY, and an unreachable Devin API all land here."

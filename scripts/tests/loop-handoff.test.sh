@@ -436,6 +436,16 @@ journal_blocks() { # count of block entries — one failed attempt, one entry
   [[ -f "$JOURNAL" ]] || { echo 0; return; }
   grep -c '· handoff blocked' "$JOURNAL" || true
 }
+journal_halts() { # count of kill-switch halt sections (KeepAlive must not spam)
+  [[ -f "$JOURNAL" ]] || { echo 0; return; }
+  grep -c '· halt' "$JOURNAL" || true
+}
+# True only when the gh stub log is completely empty (not merely zero label
+# queries). Host mismatch / unparseable / dot-segment origins must never touch
+# gh at all — including accidental contents API calls.
+gh_log_empty() {
+  [[ ! -s "$CALLS/gh.log" ]]
+}
 
 # check_block <reason-substring> <label>: the reason is in the journal AND the
 # branch is still queued, which is the pair the contract actually promises.
@@ -1584,14 +1594,10 @@ if run_loop_err "$errf"; then
 else
   bad "GitLab same-slug origin must fail open (rc=$?)"
 fi
-issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
-api_calls=$(grep -c 'contents/.gibson-halt' "$CALLS/gh.log" 2>/dev/null || true)
-issue_calls=${issue_calls:-0}
-api_calls=${api_calls:-0}
-if [[ "$issue_calls" -eq 0 && "$api_calls" -eq 0 ]]; then
-  ok "GitLab same-slug origin makes zero gh remote-halt queries"
+if gh_log_empty; then
+  ok "GitLab same-slug origin leaves the entire gh-call log empty"
 else
-  bad "GitLab same-slug origin must not query gh (issue=$issue_calls api=$api_calls log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+  bad "GitLab same-slug origin must not touch gh at all (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
 fi
 if grep -q 'remote halt check disabled' "$errf"; then
   ok "GitLab same-slug origin logs an explicit disabled warning"
@@ -1602,6 +1608,7 @@ if handoff_invoked; then ok "GitLab same-slug origin still allows a local-clear 
 else bad "GitLab same-slug origin blocked handoff — fail-closed on host mismatch"; fi
 # Supervisor path: must not refuse via unrelated github.com halt.
 sup_err="$ROOT/supervisor-gitlab.err"
+: > "$CALLS/gh.log"
 set +e
 "$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
     --sha "$SHA" --task "should proceed under dry-run" --dry-run >/dev/null 2>"$sup_err"
@@ -1611,6 +1618,11 @@ if [[ "$sup_rc" -eq 0 ]]; then
   ok "supervisor does not refuse on GitLab origin via same-slug github halt"
 else
   bad "supervisor must fail open on GitLab origin (rc=$sup_rc stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+if gh_log_empty; then
+  ok "supervisor GitLab origin leaves the entire gh-call log empty"
+else
+  bad "supervisor GitLab origin must not touch gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
 fi
 if grep -q 'remote halt check disabled' "$sup_err"; then
   ok "supervisor logs disabled remote stop for GitLab origin"
@@ -1630,12 +1642,10 @@ errf="$ROOT/halt-bitbucket.err"
 if ! run_loop_err "$errf"; then
   bad "Bitbucket same-slug origin must fail open (rc=$?)"
 else
-  bb_issue=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
-  bb_issue=${bb_issue:-0}
-  if [[ "$bb_issue" -eq 0 ]]; then
-    ok "Bitbucket same-slug origin makes zero gh remote-halt queries and fails open"
+  if gh_log_empty; then
+    ok "Bitbucket same-slug origin leaves the entire gh-call log empty and fails open"
   else
-    bad "Bitbucket same-slug origin leaked a gh query (issue=$bb_issue log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+    bad "Bitbucket same-slug origin leaked a gh query (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
   fi
 fi
 if grep -q 'remote halt check disabled' "$errf"; then
@@ -1659,12 +1669,10 @@ if run_loop_err "$errf"; then
 else
   bad "unparseable host-alias origin must fail open (rc=$?)"
 fi
-issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
-issue_calls=${issue_calls:-0}
-if [[ "$issue_calls" -eq 0 ]]; then
-  ok "unparseable host-alias origin makes zero gh remote-halt queries"
+if gh_log_empty; then
+  ok "unparseable host-alias origin leaves the entire gh-call log empty"
 else
-  bad "unparseable host-alias origin queried gh ($issue_calls times)"
+  bad "unparseable host-alias origin queried gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
 fi
 if grep -q 'remote halt check disabled' "$errf"; then
   ok "unparseable host-alias origin logs an explicit disabled warning (not silent)"
@@ -1733,12 +1741,10 @@ if run_loop_err "$errf"; then
 else
   bad "github.com vs enterprise GH_HOST must fail open (rc=$?)"
 fi
-issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
-issue_calls=${issue_calls:-0}
-if [[ "$issue_calls" -eq 0 ]]; then
-  ok "github.com origin with enterprise GH_HOST makes zero gh remote-halt queries"
+if gh_log_empty; then
+  ok "github.com origin with enterprise GH_HOST leaves the entire gh-call log empty"
 else
-  bad "enterprise GH_HOST mismatch must not query gh (got $issue_calls)"
+  bad "enterprise GH_HOST mismatch must not touch gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
 fi
 if grep -q 'remote halt check disabled' "$errf"; then
   ok "enterprise GH_HOST mismatch logs disabled warning"
@@ -1746,6 +1752,289 @@ else
   bad "enterprise GH_HOST mismatch silent (stderr=$(tr '\n' ' ' <"$errf"))"
 fi
 unset GH_HOST
+unset GH_STUB_BEHAVIOR
+
+# ---------------------------------------------------------------------------
+# KeepAlive / relaunch latch + origin dot-segment rejection (issue #71 repair)
+# ---------------------------------------------------------------------------
+
+echo "halt latch: repeated local HALT launches journal once and leave loop-state pristine"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+state_before=$(cat "$REPO/gibson/loop-state.md")
+: > "$REPO/gibson/HALT"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-local-relaunch-1.err"
+if run_loop_err "$errf"; then
+  ok "local HALT first launch exits cleanly"
+else
+  bad "local HALT first launch must exit 0 (rc=$?)"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]]; then
+  ok "local HALT first launch writes gibson/halt-latch"
+else
+  bad "local HALT first launch left no halt-latch"
+fi
+halts1=$(journal_halts)
+if [[ "$halts1" -eq 1 ]] && journal_says "kill switch: gibson/HALT is present"; then
+  ok "local HALT first launch journals exactly one halt section"
+else
+  bad "local HALT first launch expected 1 halt journal, got $halts1 (journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+fi
+errf="$ROOT/halt-local-relaunch-2.err"
+if run_loop_err "$errf"; then
+  ok "local HALT second launch (KeepAlive) exits cleanly"
+else
+  bad "local HALT second launch must exit 0 (rc=$?)"
+fi
+halts2=$(journal_halts)
+if [[ "$halts2" -eq 1 ]]; then
+  ok "local HALT second launch does not duplicate the journal section"
+else
+  bad "local HALT second launch journaled again (halts=$halts2 journal=$(cat "$JOURNAL"))"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'local_kind=file' "$REPO/gibson/halt-latch"; then
+  ok "local HALT latch persists across relaunches"
+else
+  bad "local HALT latch missing after relaunch (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
+  ok "local HALT relaunches leave loop-state byte-identical"
+else
+  bad "local HALT relaunches rewrote loop-state"
+fi
+if still_queued; then
+  ok "local HALT relaunches leave handoff queued"
+else
+  bad "local HALT relaunches cleared handoff"
+fi
+# Clear: remove HALT → latch local side cleared → fresh launch hands off.
+rm -f "$REPO/gibson/HALT"
+export GH_STUB_BEHAVIOR=ok-clear
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/gh.log"
+if run_loop; then
+  ok "removing local HALT permits a fresh launch"
+else
+  bad "fresh launch after removing local HALT failed (rc=$?)"
+fi
+if handoff_invoked; then
+  ok "fresh launch after removing local HALT hands off"
+else
+  bad "fresh launch after removing local HALT never reached supervisor"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'local_kind=file' "$REPO/gibson/halt-latch" 2>/dev/null; then
+  bad "removing local HALT must clear local latch side"
+else
+  ok "removing local HALT clears local latch side"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "halt latch: confirmed remote halt + later degrade stays fail-closed; clear resumes"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+state_before=$(cat "$REPO/gibson/loop-state.md")
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-remote-latch-1.err"
+if run_loop_err "$errf"; then
+  ok "remote label first observation exits cleanly"
+else
+  bad "remote label first observation must exit 0 (rc=$?)"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'remote_kind=label' "$REPO/gibson/halt-latch"; then
+  ok "remote label first observation latches remote_kind=label"
+else
+  bad "remote label first observation missing remote latch (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+fi
+halts1=$(journal_halts)
+if [[ "$halts1" -eq 1 ]] && journal_says "remote halt: gibson-halt label"; then
+  ok "remote label first observation journals exactly once"
+else
+  bad "remote label first observation expected 1 halt journal, got $halts1"
+fi
+# Second launch while still halted: single journal entry.
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-remote-latch-2.err"
+if run_loop_err "$errf"; then
+  ok "remote label second launch exits cleanly"
+else
+  bad "remote label second launch must exit 0 (rc=$?)"
+fi
+halts2=$(journal_halts)
+if [[ "$halts2" -eq 1 ]]; then
+  ok "remote label second launch does not duplicate the journal"
+else
+  bad "remote label second launch journaled again (halts=$halts2)"
+fi
+# Degraded recheck after confirmed latch must remain stopped (not generic fail-open).
+export GH_STUB_BEHAVIOR=degrade
+: > "$CALLS/devin.cmds"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-remote-latch-degrade.err"
+if run_loop_err "$errf"; then
+  ok "degraded recheck after confirmed remote halt exits cleanly (still stopped)"
+else
+  bad "degraded recheck after confirmed remote halt must exit 0 (rc=$?)"
+fi
+if handoff_invoked; then
+  bad "degraded recheck after confirmed remote halt must NOT hand off (fail-open would resume work)"
+else
+  ok "degraded recheck after confirmed remote halt suppresses handoff (fail-closed)"
+fi
+if grep -q 'remote halt latch held closed' "$errf" || journal_says "previously confirmed" || journal_says "remote halt: gibson-halt label"; then
+  ok "degraded recheck after confirmed remote halt reports latched fail-closed"
+else
+  bad "degraded recheck after confirmed remote halt silent about latch (stderr=$(tr '\n' ' ' <"$errf"); journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+fi
+halts3=$(journal_halts)
+if [[ "$halts3" -eq 1 ]]; then
+  ok "degraded recheck after confirmed remote halt does not re-journal"
+else
+  bad "degraded recheck re-journaled (halts=$halts3)"
+fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
+  ok "remote latch path leaves loop-state byte-identical"
+else
+  bad "remote latch path rewrote loop-state"
+fi
+if still_queued; then
+  ok "remote latch path leaves handoff queued"
+else
+  bad "remote latch path cleared handoff"
+fi
+# Supervisor must also refuse under degrade + existing remote latch.
+sup_err="$ROOT/supervisor-remote-latch-degrade.err"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "must refuse under latched remote halt" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]]; then
+  ok "supervisor refuses handoff under degrade + remote latch (exit 75)"
+else
+  bad "supervisor must exit 75 under degrade + remote latch (rc=$sup_rc stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+# Positive clear removes remote latch and permits a fresh launch.
+export GH_STUB_BEHAVIOR=ok-clear
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/gh.log"
+if run_loop; then
+  ok "successful remote clear after latch permits a fresh launch"
+else
+  bad "successful remote clear after latch failed (rc=$?)"
+fi
+if handoff_invoked; then
+  ok "successful remote clear after latch hands off"
+else
+  bad "successful remote clear after latch never reached supervisor"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'remote_kind=label' "$REPO/gibson/halt-latch" 2>/dev/null; then
+  bad "successful remote clear must remove remote latch"
+else
+  ok "successful remote clear removes remote latch"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "halt latch: first-ever API failure (no prior remote latch) still fails open"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+rm -f "$REPO/gibson/halt-latch"
+export GH_STUB_BEHAVIOR=degrade
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-first-degrade.err"
+if run_loop_err "$errf"; then
+  ok "first-ever degrade without latch does not brick the loop"
+else
+  bad "first-ever degrade without latch must fail open (rc=$?)"
+fi
+if handoff_invoked; then
+  ok "first-ever degrade without latch still allows handoff (fail-open)"
+else
+  bad "first-ever degrade without latch blocked handoff — latch logic must not fail-closed on first sight"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'remote_kind=' "$REPO/gibson/halt-latch" && ! grep -q 'remote_kind=$' "$REPO/gibson/halt-latch"; then
+  # empty remote_kind= is fine; a non-empty remote_kind would be wrong
+  remote_kind_line=$(grep '^remote_kind=' "$REPO/gibson/halt-latch" || true)
+  if [[ "$remote_kind_line" != "remote_kind=" && -n "$remote_kind_line" ]]; then
+    bad "first-ever degrade must not create a remote latch (latch=$(cat "$REPO/gibson/halt-latch"))"
+  else
+    ok "first-ever degrade does not latch a remote confirmation"
+  fi
+else
+  ok "first-ever degrade does not latch a remote confirmation"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: origin path segments . / .. are rejected (entire gh log empty)"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+# Hostile/odd origin that a naive parser would turn into repos/owner/../contents/...
+set_origin_github_url "https://github.com/owner/.."
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-dotdot.err"
+if run_loop_err "$errf"; then
+  ok "origin owner/.. does not brick the loop"
+else
+  bad "origin owner/.. must fail open / disable remote stop (rc=$?)"
+fi
+if gh_log_empty; then
+  ok "origin owner/.. leaves the entire gh-call log empty"
+else
+  bad "origin owner/.. must never query gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+if grep -q 'remote halt check disabled' "$errf"; then
+  ok "origin owner/.. logs explicit disabled warning"
+else
+  bad "origin owner/.. silent about disabled remote stop (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if handoff_invoked; then
+  ok "origin owner/.. still allows local-clear handoff"
+else
+  bad "origin owner/.. blocked handoff"
+fi
+# Dot owner segment.
+set_origin_github_url "https://github.com/./widget"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-dot-owner.err"
+if run_loop_err "$errf" && gh_log_empty && grep -q 'remote halt check disabled' "$errf"; then
+  ok "origin ./widget is rejected with empty gh log + disabled warning"
+else
+  bad "origin ./widget rejection failed (stderr=$(tr '\n' ' ' <"$errf"); log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+# Supervisor mirror.
+set_origin_github_url "https://github.com/acme/.."
+: > "$CALLS/gh.log"
+sup_err="$ROOT/supervisor-dotdot.err"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should proceed; dotdot origin disables remote stop" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 0 ]] && gh_log_empty && grep -q 'remote halt check disabled' "$sup_err"; then
+  ok "supervisor rejects acme/.. origin (empty gh log, fail open, disabled warning)"
+else
+  bad "supervisor acme/.. handling failed (rc=$sup_rc stderr=$(tr '\n' ' ' <"$sup_err"); log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+# Valid forms remain green (regression guard next to the reject cases).
+set_origin_github_url "https://github.com/acme/widget.git"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-valid-after-dot.err"
+if run_loop_err "$errf" && grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "valid https origin still hits label halt after dot-segment cases"
+else
+  bad "valid https origin broken after dot-segment reject (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
 unset GH_STUB_BEHAVIOR
 
 echo "remote halt: mid-cycle child recheck journals halt (exit 75), never supervisor rejected"

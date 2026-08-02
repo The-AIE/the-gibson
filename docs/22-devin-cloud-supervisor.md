@@ -213,9 +213,13 @@ safety and a mid-cadence phone stop still win — which may spend another pair o
 `gh` calls. Kill-switch refusal exits **75** (not a generic error) so the loop
 journals a halt and leaves the branch queued rather than writing "supervisor
 rejected". Remote paths run only when origin's host matches `GH_HOST` (default
-`github.com`). GitHub/API errors and non-matching/unparseable origins fail open
-(with a degraded/disabled warning) so a GitHub outage or a GitLab/Bitbucket
-origin does not brick handoffs that are otherwise clear, and never queries an
+`github.com`). Both scripts share a persistent `gibson/halt-latch` under the
+target repo: the first observation journals once (KeepAlive relaunches do not
+spam the journal), and a **confirmed remote halt stays fail-closed** across
+later API outages until a successful recheck positively clears both remote
+paths. First-ever API failure (no latch yet) still fails open so a GitHub
+outage does not brick handoffs that were never stopped. Non-matching or
+unparseable origins (including path segments `.` / `..`) never query an
 unrelated same-named github.com repository.
 
 ---
