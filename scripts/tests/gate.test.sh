@@ -554,6 +554,101 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "blocker 1c: every native runner summary is collected (no first/last-only)"
+# ---------------------------------------------------------------------------
+# Untrusted output can print conflicting repeated summaries. First-match or
+# last-match parsers hide a real drop even under a future trusted grader.
+
+# Jest: fake 10 then honest 7 (first-match would accept 10)
+printf 'Tests: 10 passed, 10 total\nTests: 7 passed, 7 total\n' \
+  > "$ROOT/jest-multi-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/jest-multi-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+  ok "conflicting repeated Jest summaries fail closed (not first-match total=10)"
+else
+  bad "jest multi first-match bypass (rc=$rc): $out"
+fi
+
+# node:test: # tests 10 then # tests 7 (with pass/skip counters per block)
+printf '# tests 10\n# pass 10\n# skip 0\n# todo 0\n# tests 7\n# pass 7\n# skip 0\n# todo 0\n' \
+  > "$ROOT/node-multi-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/node-multi-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+  ok "conflicting repeated node:test counters fail closed (not first-match total=10)"
+else
+  bad "node:test multi first-match bypass (rc=$rc): $out"
+fi
+
+# node:test same total but different skip in second block — must not mix counters
+printf '# tests 10\n# skip 0\n# todo 0\n# tests 10\n# skip 5\n# todo 0\n' \
+  > "$ROOT/node-multi-skip-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/node-multi-skip-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+  ok "node:test repeated blocks with conflicting skip fail closed (no mixed counters)"
+else
+  bad "node:test mixed-skip fabrication (rc=$rc): $out"
+fi
+
+# TAP plans: 1..10 then 1..7
+printf '1..10\nok 1 - a\nok 2 - b\n1..7\nok 1 - c\n' \
+  > "$ROOT/tap-multi-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-multi-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+  ok "conflicting repeated TAP plans fail closed (not first-match 1..10)"
+else
+  bad "tap multi first-match bypass (rc=$rc): $out"
+fi
+
+# Vitest: honest 7 then fake-last 10 (last-match would accept 10)
+printf 'Tests  7 passed (7)\nTests  10 passed (10)\n' \
+  > "$ROOT/vitest-multi-honest-first.txt"
+out=$(node "$TI" parse --input "$ROOT/vitest-multi-honest-first.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+  ok "conflicting Vitest summaries fail closed (not last-match total=10)"
+else
+  bad "vitest last-match bypass (rc=$rc): $out"
+fi
+
+# Vitest reverse: fake 10 then honest 7 (must still fail; order irrelevant)
+printf 'Tests  10 passed (10)\nTests  7 passed (7)\n' \
+  > "$ROOT/vitest-multi-honest-last.txt"
+out=$(node "$TI" parse --input "$ROOT/vitest-multi-honest-last.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+  ok "conflicting Vitest summaries fail regardless of order"
+else
+  bad "vitest reverse-order bypass (rc=$rc): $out"
+fi
+
+# Identical repeated native summaries still agree
+printf 'Tests: 10 passed, 10 total\nTests: 10 passed, 10 total\n' \
+  > "$ROOT/jest-multi-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/jest-multi-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "identical repeated Jest summaries accepted" \
+  || bad "identical jest multi broken (rc=$rc): $out"
+
+printf '# tests 10\n# skip 0\n# tests 10\n# skip 0\n' \
+  > "$ROOT/node-multi-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/node-multi-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "identical repeated node:test counters accepted" \
+  || bad "identical node multi broken (rc=$rc): $out"
+
+printf '1..10\nok 1\n1..10\nok 2\n' \
+  > "$ROOT/tap-multi-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-multi-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "identical repeated TAP plans accepted" \
+  || bad "identical tap multi broken (rc=$rc): $out"
+
+printf 'Tests  10 passed (10)\nTests  10 passed (10)\n' \
+  > "$ROOT/vitest-multi-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/vitest-multi-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "identical repeated Vitest summaries accepted" \
+  || bad "identical vitest multi broken (rc=$rc): $out"
+
+# ---------------------------------------------------------------------------
 echo "blocker 4: waiver dimensions must equal max(actual_delta,0) on both axes"
 # ---------------------------------------------------------------------------
 # actual removed 1 + waiver claims removed 1 AND skip +999 → fail

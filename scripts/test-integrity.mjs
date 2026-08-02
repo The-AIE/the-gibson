@@ -17,12 +17,13 @@
  *   5. TAP plan:      1..T  plus  # skip / ok N # SKIP
  *
  * Explicit lines do **not** outrank runner summaries. Every explicit line
- * (KV or JSON) and every runner summary that matches is collected — never
- * first-match only. If any two sources disagree on total/skipped/todo the
- * parse fails closed so a test's stdout cannot self-authorize head metrics
- * (including fake total=N followed by honest total=M). A single source
- * (explicit alone or summary alone) is fine; identical multi-line metrics
- * agree and pass.
+ * (KV or JSON) and every matching native summary block/plan/counter is
+ * collected — never first-match or last-match only. If any two sources
+ * disagree on total/skipped/todo the parse fails closed so stdout cannot
+ * self-authorize head metrics (fake total=N then honest total=M; conflicting
+ * repeated Jest/Vitest/node:test/TAP summaries). Counters from different
+ * repeated native blocks are never mixed. A single source (explicit alone or
+ * summary alone) is fine; identical multi-line metrics agree and pass.
  *
  * Unparseable, negative, non-integer, or non-safe-integer metrics fail closed
  * (never become 0; values beyond Number.MAX_SAFE_INTEGER are rejected).
@@ -204,11 +205,14 @@ function parseExplicitMetricsBody(body, index) {
 
 /**
  * Parse every recognized metric source from runner output. **Every** explicit
- * GIBSON_TEST_METRICS line (KV or JSON) is collected alongside Vitest/Jest/
- * node:test/TAP summaries — none is privileged, and first-match is never used.
- * If two sources disagree on total/skipped/todo the parse fails closed so
- * stdout cannot self-authorize head metrics (e.g. fake total=10 followed by
- * honest total=7 must not parse as 10).
+ * GIBSON_TEST_METRICS line (KV or JSON) **and every** Vitest/Jest/node:test/TAP
+ * summary block/plan/counter is collected — none is privileged, and first/last
+ * match is never used for natives either. If two sources disagree on
+ * total/skipped/todo the parse fails closed so stdout cannot self-authorize
+ * head metrics (e.g. fake total=10 followed by honest total=7 must not parse
+ * as 10; repeated Jest/Vitest/node:test/TAP summaries that conflict likewise).
+ * Counters from different repeated native blocks are never mixed into one
+ * fabricated metric.
  *
  * @param {string} text
  * @returns {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }}
@@ -237,81 +241,120 @@ export function parseRunnerOutput(text) {
 
   // 2) Vitest: "Tests  40 passed | 2 skipped (42)" / with failed/todo variants
   //    Also: "Tests  2 failed | 40 passed (42)"
+  //    Collect every block (never last-only): a fake trailing summary must not
+  //    hide an honest earlier total, and vice versa.
   {
     const vitestBlocks = [
       ...text.matchAll(/Tests\s+([^\n]*?)\((\d+)\)/gi),
     ];
-    if (vitestBlocks.length > 0) {
-      const last = vitestBlocks[vitestBlocks.length - 1];
-      const body = last[1];
-      const total = parseNonNegInt(last[2], "vitest.total");
-      const num = (re) => {
+    let idx = 0;
+    for (const block of vitestBlocks) {
+      idx += 1;
+      const body = block[1];
+      const total = parseNonNegInt(block[2], `vitest#${idx}.total`);
+      const num = (re, field) => {
         const m = body.match(re);
-        return m ? parseNonNegInt(m[1], "vitest.part") : 0;
+        return m ? parseNonNegInt(m[1], field) : 0;
       };
-      const skipped = num(/(\d+)\s+skipped/i);
-      const todo = num(/(\d+)\s+todo/i);
-      const m = normalizeMetrics({ total, skipped, todo }, "vitest");
-      found.push({ ...m, source: "vitest-summary" });
+      const skipped = num(/(\d+)\s+skipped/i, `vitest#${idx}.skipped`);
+      const todo = num(/(\d+)\s+todo/i, `vitest#${idx}.todo`);
+      const m = normalizeMetrics({ total, skipped, todo }, `vitest#${idx}`);
+      found.push({
+        ...m,
+        source: vitestBlocks.length === 1 ? "vitest-summary" : `vitest-summary#${idx}`,
+      });
     }
   }
 
   // 3) Jest: "Tests:       2 skipped, 40 passed, 42 total"
+  //    Collect every summary line with a total (never first-only).
   {
-    const jest = text.match(/Tests:\s*([^\n]+)/i);
-    if (jest && /\btotal\b/i.test(jest[1])) {
+    const jestLines = [...text.matchAll(/Tests:\s*([^\n]+)/gi)].filter((j) =>
+      /\btotal\b/i.test(j[1])
+    );
+    let idx = 0;
+    for (const jest of jestLines) {
+      idx += 1;
       const body = jest[1];
+      const label = `jest#${idx}`;
       const num = (re, field) => {
         const m = body.match(re);
         if (!m) return null;
         return parseNonNegInt(m[1], field);
       };
-      const total = num(/(\d+)\s+total/i, "jest.total");
-      if (total !== null) {
-        const skipped = num(/(\d+)\s+skipped/i, "jest.skipped") ?? 0;
-        const todo = num(/(\d+)\s+todo/i, "jest.todo") ?? 0;
-        const m = normalizeMetrics({ total, skipped, todo }, "jest");
-        found.push({ ...m, source: "jest-summary" });
+      const total = num(/(\d+)\s+total/i, `${label}.total`);
+      if (total === null) continue;
+      const skipped = num(/(\d+)\s+skipped/i, `${label}.skipped`) ?? 0;
+      const todo = num(/(\d+)\s+todo/i, `${label}.todo`) ?? 0;
+      const m = normalizeMetrics({ total, skipped, todo }, label);
+      found.push({
+        ...m,
+        source:
+          jestLines.length === 1 ? "jest-summary" : `jest-summary#${idx}`,
+      });
+    }
+  }
+
+  // 4) node:test counters — every `# tests N` region, not first-only.
+  //    Associate `# skip` / `# todo` with the enclosing `# tests` block so
+  //    counters from different repeated blocks are never mixed into one metric.
+  {
+    const testsMatches = [
+      ...text.matchAll(/^\s*#\s*tests\s+(\d+)\s*$/gim),
+    ];
+    if (testsMatches.length > 0) {
+      for (let i = 0; i < testsMatches.length; i++) {
+        const testsM = testsMatches[i];
+        const blockStart = testsM.index ?? 0;
+        const blockEnd =
+          i + 1 < testsMatches.length
+            ? (testsMatches[i + 1].index ?? text.length)
+            : text.length;
+        const block = text.slice(blockStart, blockEnd);
+        const label = `node-test#${i + 1}`;
+        const total = parseNonNegInt(testsM[1], `${label}.tests`);
+        const skipM = block.match(/^\s*#\s*skip\s+(\d+)\s*$/im);
+        const todoM = block.match(/^\s*#\s*todo\s+(\d+)\s*$/im);
+        const skipped = skipM
+          ? parseNonNegInt(skipM[1], `${label}.skip`)
+          : 0;
+        const todo = todoM
+          ? parseNonNegInt(todoM[1], `${label}.todo`)
+          : 0;
+        const m = normalizeMetrics({ total, skipped, todo }, label);
+        found.push({
+          ...m,
+          source:
+            testsMatches.length === 1 ? "node-test" : `node-test#${i + 1}`,
+        });
       }
     }
   }
 
-  // 4) node:test / tap-ish counters
+  // 5) TAP plan "1..N" — every plan line, not first-only. SKIP/TODO counts come
+  //    from individual result lines in the whole stream (TAP has no per-plan
+  //    skip summary); conflicting plans still fail closed on total.
   {
-    const testsM = text.match(/^\s*#\s*tests\s+(\d+)\s*$/im);
-    if (testsM) {
-      const total = parseNonNegInt(testsM[1], "node-test.tests");
-      const skipM = text.match(/^\s*#\s*skip\s+(\d+)\s*$/im);
-      const todoM = text.match(/^\s*#\s*todo\s+(\d+)\s*$/im);
-      const skipped = skipM
-        ? parseNonNegInt(skipM[1], "node-test.skip")
-        : 0;
-      const todo = todoM ? parseNonNegInt(todoM[1], "node-test.todo") : 0;
-      const m = normalizeMetrics({ total, skipped, todo }, "node-test");
-      found.push({ ...m, source: "node-test" });
-    }
-  }
-
-  // 5) TAP plan "1..N"
-  {
-    const plan = text.match(/^\s*1\.\.(\d+)\s*$/m);
-    if (plan) {
-      const total = parseNonNegInt(plan[1], "tap.plan");
+    const plans = [...text.matchAll(/^\s*1\.\.(\d+)\s*$/gm)];
+    if (plans.length > 0) {
       const skipLines = [
         ...text.matchAll(/^\s*(?:ok|not ok)\s+\d+.*#\s*SKIP\b/gim),
       ];
       const todoLines = [
         ...text.matchAll(/^\s*(?:ok|not ok)\s+\d+.*#\s*TODO\b/gim),
       ];
-      const m = normalizeMetrics(
-        {
-          total,
-          skipped: skipLines.length,
-          todo: todoLines.length,
-        },
-        "tap"
-      );
-      found.push({ ...m, source: "tap-plan" });
+      const skipped = skipLines.length;
+      const todo = todoLines.length;
+      for (let i = 0; i < plans.length; i++) {
+        const plan = plans[i];
+        const label = `tap#${i + 1}`;
+        const total = parseNonNegInt(plan[1], `${label}.plan`);
+        const m = normalizeMetrics({ total, skipped, todo }, label);
+        found.push({
+          ...m,
+          source: plans.length === 1 ? "tap-plan" : `tap-plan#${i + 1}`,
+        });
+      }
     }
   }
 
@@ -324,7 +367,9 @@ export function parseRunnerOutput(text) {
   }
 
   // Multi-source agreement: a test's stdout must never self-authorize head
-  // metrics by printing a fake GIBSON_TEST_METRICS line next to a real summary.
+  // metrics by printing a fake GIBSON_TEST_METRICS line next to a real summary,
+  // or by repeating conflicting native runner summaries (first/last-only parsers
+  // would hide a real drop under a future trusted grader).
   const keys = new Map();
   for (const m of found) {
     const k = metricsKey(m);
@@ -340,7 +385,8 @@ export function parseRunnerOutput(text) {
       .join("; ");
     throw new Error(
       `${RESULT}: conflicting metric sources in runner output (fail closed; ` +
-        `untrusted explicit lines do not outrank runner summaries): ${detail}. ` +
+        `untrusted explicit lines do not outrank runner summaries; ` +
+        `repeated native summaries must agree): ${detail}. ` +
         `A test's stdout must not self-authorize head metrics.`
     );
   }

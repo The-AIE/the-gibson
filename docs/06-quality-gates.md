@@ -110,12 +110,16 @@ Also recognized: Vitest `Tests … (N)` summaries, Jest `Tests: … total`,
 node:test `# tests` / `# skip` / `# todo`, TAP `1..N` plans.
 
 **No self-authorization:** explicit `GIBSON_TEST_METRICS` lines do **not** outrank
-runner summaries. **Every** explicit KV/JSON line and every matching runner
-summary is collected (never first-match only); if any two sources disagree on
-total/skipped/todo the parse fails closed. A test's stdout must never
-self-authorize head metrics — e.g. honest `Tests 7 passed (7)` plus a fake
-`GIBSON_TEST_METRICS total=10`, or `total=10` followed by a later honest
-`total=7` on a second explicit line.
+runner summaries. **Every** explicit KV/JSON line and **every** matching native
+runner summary block (Vitest / Jest / node:test / TAP plan) is collected — never
+first-match or last-match only. If any two sources disagree on total/skipped/todo
+the parse fails closed; counters from different repeated native blocks are never
+mixed into one fabricated metric. A test's stdout must never self-authorize head
+metrics — e.g. honest `Tests 7 passed (7)` plus a fake `GIBSON_TEST_METRICS
+total=10`, multi-explicit `total=10` then `total=7`, or conflicting repeated
+native lines such as Jest `Tests: 10 … total` then `Tests: 7 … total`, node:test
+`# tests 10` then `# tests 7`, TAP `1..10` then `1..7`, or Vitest honest-then-fake
+/ fake-then-honest summary blocks.
 
 **Fail closed:** unparseable, negative, non-integer, non-`Number.isSafeInteger`,
 or skip+todo > total metrics never silently become zero — the sensor errors
