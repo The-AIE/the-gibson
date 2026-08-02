@@ -23,10 +23,11 @@ WHAT IT DOES
        was discarded. A newer VERDICT: REQUEST_CHANGES blocks even if an older
        formal approval remains. Timestamps must be a complete ISO-8601 instant
        with a real civil calendar (strict round-trip; impossible dates like
-       9999-02-31 never normalize into the stream); authorless APPROVE never
-       clears the gate; equal-time conflicts prefer REQUEST_CHANGES. A
-       SHA-bound verdict must match the current PR head — absent/null head
-       fails closed.
+       9999-02-31 never normalize into the stream) and at most 1–9 fractional
+       digits (nanoseconds; 10+ digits are malformed, never truncated);
+       authorless APPROVE never clears the gate; equal-time conflicts prefer
+       REQUEST_CHANGES. A SHA-bound verdict must match the current PR head —
+       absent/null head fails closed.
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
@@ -144,6 +145,11 @@ fi
 #   - timestamps must be a complete accepted ISO-8601 instant (not a prefix)
 #     with a real civil calendar (strict round-trip; jq fromdateiso8601 must
 #     never normalize Feb 31 / Apr 31 into a later day that sorts as "newest")
+#   - fractional seconds: 0 (none) or 1–9 digits only (nanosecond precision).
+#     10+ fractional digits are malformed everywhere this contract applies —
+#     never silently truncated into the chrono key (truncation collapsed
+#     distinct instants and let REQUEST_CHANGES tie-precedence pick an older
+#     event when only the 10th+ digit differed)
 #   - formal state (APPROVED / CHANGES_REQUESTED) precedes body VERDICT text
 #   - DISMISSED reviews never authorize via body VERDICT: APPROVE
 #   - authorless APPROVE never counts as independent
@@ -155,11 +161,14 @@ fi
 #     reviewDecision aggregate fallback (no drop-then-recover path)
 
 # Complete accepted GitHub-style instant: YYYY-MM-DDTHH:MM:SS[.frac](Z|±HH:MM)
+# Fractional policy (strict): optional frac is 1–9 digits only (nanoseconds).
+# 10+ digits fail the shape match → complete_at false → never enter the stream;
+# formal APPROVED/CHANGES_REQUESTED with 10+ digits is malformed formal.
 # Rejects prefix-only junk like "9999-99-99Tbogus" and missing-timezone forms.
-# Single-backslash fractional group: jq/Oniguruma sees (\.[0-9]+)? — a double
-# bash escape would require a literal backslash before the digits and reject
-# real fractional instants (over-rejection).
-ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
+# Single-backslash fractional group: jq/Oniguruma sees (\.[0-9]{1,9})? — a
+# double bash escape would require a literal backslash before the digits and
+# reject real fractional instants (over-rejection).
+ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
 
 # Shared jq helpers: shape match + strict civil-calendar round-trip + chrono key.
 # fromdateiso8601 normalizes impossible dates (9999-02-31 → 9999-03-03); that
@@ -169,7 +178,9 @@ ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3])
 # matches ISO_AT_RE — do not require fromdateiso8601 on ±HH:MM (jq often
 # rejects valid offsets and would over-reject GitHub-shaped stamps).
 # Chronological sort key: wall epoch minus offset seconds, plus fractional
-# padded to 9 digits so distinct sub-seconds order and .000 collapses with none.
+# padded to 9 digits so distinct accepted sub-seconds order and .000 collapses
+# with none. Only 1–9 frac digits reach this key (see ISO_AT_RE); pad is
+# not a silent truncate of 10+ (those never match complete_at).
 # shellcheck disable=SC2016
 JQ_ISO_DEFS='
   def strict_iso_instant:
@@ -179,7 +190,7 @@ JQ_ISO_DEFS='
   def complete_at:
     (. != null) and ((. | type) == "string") and (. | test($re)) and strict_iso_instant;
   def instant_sort_key:
-    (capture("(?<wall>^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<frac>\\.[0-9]+)?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$")) as $p |
+    (capture("(?<wall>^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<frac>\\.[0-9]{1,9})?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$")) as $p |
     ($p.wall + "Z" | fromdateiso8601) as $wall_epoch |
     (
       if $p.tz == "Z" then 0

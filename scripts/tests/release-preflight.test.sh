@@ -514,6 +514,107 @@ out=$(run "$f_frac_order"); rc=$?
 check "later fractional APPROVE beats earlier fractional REQUEST_CHANGES" "$rc" "0"
 contains "names late-frac-approver" "$out" "late-frac-approver"
 
+echo "#61 P1 · fractional precision policy: 1–9 digits accepted, 10+ malformed"
+# Full nanosecond (9 fractional digits) boundary must remain ordered: a later
+# 9-digit APPROVE beats an earlier 9-digit REQUEST_CHANGES (no pad-collapse).
+f_ns9_order=$(fixture ns9_order '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .comments = [
+    {
+      "author": {"login": "early-ns9-blocker"},
+      "body": "VERDICT: REQUEST_CHANGES",
+      "createdAt": "2026-08-02T12:00:00.123456788Z"
+    },
+    {
+      "author": {"login": "late-ns9-approver"},
+      "body": "VERDICT: APPROVE",
+      "createdAt": "2026-08-02T12:00:00.123456789Z"
+    }
+  ]')
+out=$(run "$f_ns9_order"); rc=$?
+check "later 9-digit fractional APPROVE beats earlier 9-digit REQUEST_CHANGES" "$rc" "0"
+contains "names late-ns9-approver" "$out" "late-ns9-approver"
+if echo "$out" | grep -qF "early-ns9-blocker"; then bad "earlier 9-digit RC must not win"; else ok "earlier 9-digit RC is not the winning event"; fi
+
+# Exact collapse reproducer: older RC .1234567890Z vs newer APPROVE .1234567891Z.
+# Accepting unlimited frac then truncating the chrono key to 9 digits made these
+# equal, so REQUEST_CHANGES tie-precedence selected the older event. Policy is
+# fail-closed: 10+ fractional digits are malformed and never enter the stream.
+f_frac10_collapse=$(fixture frac10_collapse '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .reviews = [
+    {
+      "author": {"login": "old-rc-10frac"},
+      "state": "CHANGES_REQUESTED",
+      "body": "",
+      "submittedAt": "2026-08-02T12:00:00.1234567890Z",
+      "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    },
+    {
+      "author": {"login": "new-appr-10frac"},
+      "state": "APPROVED",
+      "body": "lgtm",
+      "submittedAt": "2026-08-02T12:00:00.1234567891Z",
+      "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    }
+  ]')
+out=$(run "$f_frac10_collapse"); rc=$?
+check "10+ fractional digits formal pair is BLOCKED (malformed, not truncate-tie)" "$rc" "1"
+contains "names 10+ frac as malformed formal" "$out" "malformed"
+if echo "$out" | grep -qF "READY"; then bad "10+ frac formal pair must not READY"; else ok "10+ frac formal pair is not READY"; fi
+# Must not select either event as a usable chronological winner via truncate-tie.
+if echo "$out" | grep -qE 'VERDICT: (APPROVE|REQUEST_CHANGES).*(old-rc-10frac|new-appr-10frac)'; then
+  bad "10+ frac stamps must not enter the sortable event stream"
+else
+  ok "10+ frac stamps never enter the sortable event stream"
+fi
+
+# Sole formal APPROVED with 10 fractional digits: malformed formal, not READY
+# via reviewDecision aggregate fallback.
+f_only_frac10=$(fixture only_frac10 '.reviewDecision = "APPROVED" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .reviews = [{
+    "author": {"login": "overprecise-approver"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T12:00:00.12345678901Z",
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }]')
+out=$(run "$f_only_frac10"); rc=$?
+check "sole 10+ fractional formal APPROVED is BLOCKED" "$rc" "1"
+contains "names overprecise formal as malformed" "$out" "malformed"
+if echo "$out" | grep -qF "READY"; then bad "10+ frac sole formal must not READY via aggregate"; else ok "10+ frac sole formal not recovered via reviewDecision"; fi
+
+# Digits past the ninth never reorder the stream: a 10+ "later" APPROVE comment
+# cannot outrank a valid earlier REQUEST_CHANGES (it never enters the stream).
+f_frac10_vs_valid=$(fixture frac10_vs_valid '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .comments = [
+    {
+      "author": {"login": "valid-rc"},
+      "body": "VERDICT: REQUEST_CHANGES",
+      "createdAt": "2026-08-02T12:00:00.123456789Z"
+    },
+    {
+      "author": {"login": "overprecise-approver"},
+      "body": "VERDICT: APPROVE",
+      "createdAt": "2026-08-02T12:00:00.1234567891Z"
+    }
+  ]')
+out=$(run "$f_frac10_vs_valid"); rc=$?
+check "10+ frac APPROVE cannot outrank valid 9-digit REQUEST_CHANGES" "$rc" "1"
+contains "selects valid RC over 10+ frac APPROVE" "$out" "REQUEST_CHANGES"
+contains "names valid-rc reviewer" "$out" "valid-rc"
+if echo "$out" | grep -qF "overprecise-approver"; then bad "10+ frac APPROVE must not be selected"; else ok "10+ frac APPROVE is not the winning event"; fi
+if echo "$out" | grep -qF "READY"; then bad "must not READY when only valid event is REQUEST_CHANGES"; else ok "does not READY under 10+ frac APPROVE"; fi
+
+# Comment-only 10+ frac APPROVE (no formal): drop from stream, fail closed.
+f_comment_frac10=$(fixture comment_frac10 '.reviewDecision = "" |
+  .comments = [{
+    "author": {"login": "comment-10frac"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T12:00:00.1234567890Z"
+  }]')
+out=$(run "$f_comment_frac10"); rc=$?
+check "sole comment APPROVE with 10+ fractional digits is BLOCKED" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "comment 10+ frac must not READY"; else ok "comment 10+ frac is not READY"; fi
+
 echo "#61 P1 · formal review state precedes contradictory body VERDICT text"
 # CHANGES_REQUESTED with a body that ends VERDICT: APPROVE must still block.
 f_formal_vs_body=$(fixture formal_vs_body '.reviewDecision = "CHANGES_REQUESTED" | .headRefOid = "2222222222222222222222222222222222222222" |

@@ -102,14 +102,17 @@ Canonical: /path/to/target
    complete ISO-8601 timestamp with a real civil calendar (strict round-trip;
    impossible dates like `9999-02-31` never normalize into the stream) and
    always precede body `VERDICT` text on the same review; `DISMISSED` reviews
-   never authorize via body text. `reviewDecision` is only a fail-closed
+   never authorize via body text. Fractional seconds accept **1–9 digits only**
+   (nanosecond precision); **10+ fractional digits are malformed** and never
+   enter the stream (no silent truncate — truncating collapsed distinct
+   instants past the ninth digit). `reviewDecision` is only a fail-closed
    fallback when no usable event exists and no malformed formal evidence was
    discarded — a newer `VERDICT: REQUEST_CHANGES` blocks even if an older
-   formal approval remains. Incomplete/prefix-only timestamps, impossible
-   calendar dates/times, and authorless `APPROVE` events never clear the
-   gate; equal-time conflicts prefer `REQUEST_CHANGES`. When the verdict
-   source binds a commit SHA, it must match the current PR head — stale or
-   absent/null head fails closed. UX eval PASS when user-visible.
+   formal approval remains. Incomplete/prefix-only timestamps, 10+ fractional
+   digits, impossible calendar dates/times, and authorless `APPROVE` events
+   never clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. When
+   the verdict source binds a commit SHA, it must match the current PR head —
+   stale or absent/null head fails closed. UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
 5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
 6. Schema PRs: no other schema merge in flight; migration file present
@@ -148,7 +151,9 @@ If any item fails → do not merge; report the missing gate.
   Formal `CHANGES_REQUESTED` / `DISMISSED` state precedes contradictory body
   `VERDICT: APPROVE` text. Timestamps must be a complete ISO-8601 instant with
   a real civil calendar (not a prefix like `9999-99-99Tbogus`, and not an
-  impossible date like `9999-02-31` that jq would normalize); authorless
+  impossible date like `9999-02-31` that jq would normalize) and at most
+  nanosecond fractional precision (1–9 digits after the decimal; 10+ digits
+  are malformed, never silently truncated into the chrono key); authorless
   `APPROVE` never counts as independent; equal timestamps prefer
   `REQUEST_CHANGES`. Malformed formal `APPROVED`/`CHANGES_REQUESTED` evidence
   blocks before any `reviewDecision` aggregate fallback (no drop-then-recover).
