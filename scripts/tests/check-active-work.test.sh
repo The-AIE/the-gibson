@@ -133,11 +133,52 @@ rm "$REPO/docs/claims/issue-7-password-reset.md"
 commit_lane
 run_sensor 1 lane main "deleting another lane's claim file fails" "deletes live claim file"
 
-echo "the owning lane may touch its own claim file"
+echo "a rename cannot smuggle the deletion past the gate"
+# Git's rename detection reports a rename as the DESTINATION path only. Without
+# --no-renames the source deletion never appears in the changed-file list, so
+# each of these three moves reads as "a brand new claim file — allowed (Law 2)"
+# while a live claim quietly disappears from the ledger.
+setup_repo
+$GIT -C "$REPO" mv docs/claims/issue-7-password-reset.md docs/claims/issue-9-checkout.md
+commit_lane
+run_sensor 1 lane main "renaming another lane's claim to a different claim id fails" "deletes live claim file"
+
+setup_repo
+mkdir -p "$REPO/docs/archive"
+$GIT -C "$REPO" mv docs/claims/issue-7-password-reset.md docs/archive/issue-7-password-reset.md
+commit_lane
+run_sensor 1 lane main "renaming another lane's claim out of docs/claims fails" "deletes live claim file"
+
+# Same move, from the branch the claim itself names. The ownership exemption must
+# not reach it: a rename is a deletion of the claim at its ledger path.
+setup_repo
+$GIT -C "$REPO" mv docs/claims/issue-7-password-reset.md docs/claims/issue-7-password-reset-v2.md
+commit_lane
+run_sensor 1 feat/7-password-reset main "even the owning branch cannot rename its own claim away" "deletes live claim file"
+
+echo "the owning lane may renew its own claim but never delete it"
 setup_repo
 echo "notes: renewed" >> "$REPO/docs/claims/issue-7-password-reset.md"
 commit_lane
 run_sensor 0 feat/7-password-reset main "the branch named in the claim owns it" "owned by this PR's branch"
+
+# Renewal is the point of the exemption — refreshing the timestamp so
+# claims-status.sh stops calling the lane STALE must stay a green PR.
+setup_repo
+sed 's|^claimed: .*|claimed: 2026-08-02T11:00:00Z|' "$REPO/docs/claims/issue-7-password-reset.md" \
+  > "$REPO/docs/claims/issue-7-password-reset.md.tmp"
+mv "$REPO/docs/claims/issue-7-password-reset.md.tmp" "$REPO/docs/claims/issue-7-password-reset.md"
+commit_lane
+run_sensor 0 feat/7-password-reset main "the owning branch may renew its own claim timestamp" "owned by this PR's branch"
+
+# The rule the ordering exists for: deletion is checked before ownership, so the
+# lane that owns the claim still cannot release it through a PR. Doctrine puts
+# release on main (scripts/release-claim.sh, docs/05); a PR-side delete would
+# retire the claim on merge and hide it from overlap checks before then.
+setup_repo
+rm "$REPO/docs/claims/issue-7-password-reset.md"
+commit_lane
+run_sensor 1 feat/7-password-reset main "the owning branch cannot delete its own claim" "release-claim.sh"
 
 echo "a diff the sensor cannot compute is an error, never a pass"
 setup_repo

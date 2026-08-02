@@ -17,6 +17,9 @@
  * files" and hand the PR a green check it never earned (issue #55). Requires
  * enough history to reach the merge base — `fetch-depth: 0` in ci/gibson-gate.yml.
  *
+ * Renames are scored as delete + add, and deleting a live claim file is refused
+ * even for the lane that owns it: a claim is released on main, not in a PR.
+ *
  * Still deliberately tolerant of missing claim infrastructure: a repo with
  * neither docs/claims/ nor docs/active-work.md passes. Missing infrastructure is
  * not a gate failure; a conflicting edit of a live claim is.
@@ -103,7 +106,13 @@ if (!diffBase) {
   );
 }
 
-const changed = git(["diff", "--name-only", diffBase, headSha])
+// --no-renames on purpose. With rename detection on, moving
+// docs/claims/issue-7-*.md to any other path reports only the DESTINATION, so the
+// deletion of a protected base-side claim file never appears in `changed` and the
+// gate waves the rename through — whether it lands on another claim id or leaves
+// docs/claims/ entirely. Scored as delete + add, the source deletion is visible
+// and the destination is judged on its own as a new file.
+const changed = git(["diff", "--name-only", "--no-renames", diffBase, headSha])
   .split("\n")
   .map((f) => f.trim())
   .filter(Boolean);
@@ -160,18 +169,36 @@ for (const f of claimFiles) {
     continue;
   }
   const headContent = fileAt(headSha, f);
-  if (headContent === baseContent) continue; // renamed-into, mode change, etc.
+  if (headContent === baseContent) continue; // mode change, identical rewrite, etc.
 
   // The one precise ownership mechanism the doctrine gives us: the claim file
   // recorded on the BASE names the branch that owns it, so head cannot forge it.
   const owner = claimBranch(baseContent);
+
+  // Deletion is checked BEFORE the ownership exemption, deliberately. A claim is
+  // released on main with scripts/release-claim.sh (docs/05) so the ledger stops
+  // being authoritative only once the work has actually landed; allowing the
+  // delete here would let the product PR itself release the claim the moment it
+  // merges, bypassing that required release-claim.sh-on-main step. Owning the
+  // claim buys the right to renew it, never the right to drop it here. This also
+  // catches the delete half of a rename (see --no-renames above), so a lane
+  // cannot launder a deletion into a move of its own claim.
+  if (headContent === null) {
+    violations.push(
+      `PR deletes live claim file ${f}${owner ? ` (owned by branch ${owner})` : ""}. ` +
+        `A claim is released on main with scripts/release-claim.sh, never by deleting ` +
+        `or renaming the file in a PR — owning the claim does not authorize dropping ` +
+        `it here (docs/05).`
+    );
+    continue;
+  }
+
   if (owner && headRef && owner === headRef) {
     log(`${f} is owned by this PR's branch (${headRef}) per its own claim record — allowed`);
     continue;
   }
-  const verb = headContent === null ? "deletes" : "modifies";
   violations.push(
-    `PR ${verb} live claim file ${f}${owner ? ` (owned by branch ${owner})` : ""}. ` +
+    `PR modifies live claim file ${f}${owner ? ` (owned by branch ${owner})` : ""}. ` +
       `Only the lane that owns the claim may touch it; release it with ` +
       `scripts/release-claim.sh on main, not through this PR (docs/05).`
   );

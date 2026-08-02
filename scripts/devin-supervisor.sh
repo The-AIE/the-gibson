@@ -373,9 +373,14 @@ case "$CMD" in
     fi
     if [[ "$DRY" -eq 0 ]]; then id=$(ensure_session); else id="(dry-run)"; fi
 
-    # Concatenated rather than heredoc'd because the base line is conditional:
-    # the clause must start with a newline and end without one, exactly as the
-    # MESSAGE template below expects.
+    # Concatenated rather than heredoc'd because the base line is conditional.
+    # The clause starts with a newline and ends with one, so in the MESSAGE
+    # template below `$SHA_CLAUSE` renders a real blank line on both sides of it.
+    # Without the trailing newline the last bullet butts straight against the
+    # `## Task` heading, which is not a heading at all in Markdown — the pinned
+    # SHA and the task then arrive as one run-on line in the supervisor's inbox.
+    # When no SHA is pinned the clause is empty and the template's own newline
+    # supplies the same blank line. Sensed in scripts/tests/loop-handoff.test.sh.
     SHA_CLAUSE=""
     if [[ -n "$SHA" ]]; then
       SHA_CLAUSE="
@@ -386,7 +391,8 @@ case "$CMD" in
 - Reviewed against base commit: \`$BASE_SHA\` — the diffstat below is exactly \`$BASE_SHA...$SHA\`, the diff that was reviewed."
       fi
       SHA_CLAUSE="$SHA_CLAUSE
-- Before opening or merging the PR, confirm that the tip of \`$BRANCH\` on the remote is still exactly this SHA. If it has moved, reject the handoff and report the mismatch — do not review or merge a different tip."
+- Before opening or merging the PR, confirm that the tip of \`$BRANCH\` on the remote is still exactly this SHA. If it has moved, reject the handoff and report the mismatch — do not review or merge a different tip.
+"
     fi
 
     MESSAGE=$(cat <<EOF

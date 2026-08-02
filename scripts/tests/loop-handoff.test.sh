@@ -660,6 +660,37 @@ else
   bad "the message lost the branch names the supervisor opens the PR between"
 fi
 
+# The pinned-SHA clause is concatenated, not heredoc'd, so its trailing newline is
+# easy to drop — and without it the last bullet runs straight into `## Task`,
+# which stops being a Markdown heading. Assert the rendered blank line, not the
+# shell that produces it: `awk` reports the line before every `## Task`, and every
+# one of them must be empty. Checked for both the pinned and unpinned renderings,
+# since they reach the same heading by different paths.
+task_prev_lines() { awk '/^## Task$/ { print prev } { prev = $0 }' <<<"$1"; }
+
+if grep -q '^## Task$' <<<"$sup_msg"; then
+  ok "the pinned message still carries a '## Task' heading"
+else
+  bad "the pinned message has no '## Task' heading to check the spacing of"
+fi
+if [[ -n "$(task_prev_lines "$sup_msg" | tr -d '[:space:]')" ]]; then
+  bad "no blank line before '## Task' in the pinned message — the heading is glued to the SHA clause"
+else
+  ok "a real blank line separates the pinned-SHA clause from '## Task'"
+fi
+
+# Same render with no --sha: the template's own newline has to supply the blank
+# line, so this half regresses independently of the clause above.
+unpinned_msg=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+  --task "unpinned spacing sensor" --dry-run 2>/dev/null)
+if grep -q '^## Pinned head' <<<"$unpinned_msg"; then
+  bad "the unpinned message rendered a pinned-head clause anyway"
+elif [[ -n "$(task_prev_lines "$unpinned_msg" | tr -d '[:space:]')" ]]; then
+  bad "no blank line before '## Task' in the unpinned message"
+else
+  ok "the unpinned message keeps its blank line before '## Task' too"
+fi
+
 echo
 echo "loop-handoff.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
