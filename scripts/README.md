@@ -15,7 +15,9 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`decompose-lint.mjs`](decompose-lint.mjs) | Validate issue set: contract / area / tier / dependencies; ≤10 criteria; schema standalone. |
 | [`route-inventory.mjs`](route-inventory.mjs) | Emit route×role authz matrix scaffold (Next.js App Router). [docs/08](../docs/08-security.md) layer 4. |
 | [`posture-probe.sh`](posture-probe.sh) `<url>` | Headers (CSP/HSTS/frame), cookie flags, optional POST burst → 429. Layer 8. |
-| [`loop.sh`](loop.sh) `--runner … --repo …` | Solo-loop driver ([docs/11](../docs/11-solo-loop.md)): kill switch, hat dispatch, error budget, journal. |
+| [`loop.sh`](loop.sh) `--runner … --repo …` | Solo-loop driver ([docs/11](../docs/11-solo-loop.md)): kill switch, hat dispatch, error budget, journal. `--escalate-after N` gets a cross-vendor second opinion before the budget runs out; `--supervisor devin` forwards the branch named by loop-state's `handoff:` field. |
+| [`second-opinion.sh`](second-opinion.sh) `--repo … [--author grok]` | Cross-vendor read-only review of a diff ([docs/20](../docs/20-multi-model-orchestration.md) rule 1). Refuses to let a runner review its own work; writes `gibson/second-opinion.md`. |
+| [`devin-supervisor.sh`](devin-supervisor.sh) `ensure\|status\|wake\|handoff` | Persistent Devin cloud supervisor ([docs/22](../docs/22-devin-cloud-supervisor.md)): reviews the diff and owns GitHub. Wakes a dead session via `DEVIN_WEBHOOK_URL`, falling back to the API. |
 | [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |

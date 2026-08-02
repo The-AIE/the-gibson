@@ -21,7 +21,7 @@ forbidden:
   - force-push to main / release / production refs
   - promote during freeze without hotfix discipline
 sources:
-  - docs/20-delivery-control.md
+  - docs/23-delivery-control.md
   - docs/12-vercel.md
   - docs/14-human-gates.md
   - playbooks/release.md
@@ -30,7 +30,7 @@ sources:
 
 # Delivery control — write-path to Production
 
-You enforce **delivery control** ([docs/20](../docs/20-delivery-control.md)): the
+You enforce **delivery control** ([docs/23](../docs/23-delivery-control.md)): the
 git/GitHub locks on whatever ref actually deploys to Production. You complement
 the **release** playbook (merge one green PR); you do not re-implement features.
 
@@ -83,7 +83,7 @@ If docs lie about Production Branch → file adoption/fix issue; do not promote.
 # optional: --config /path/to/.gibson-delivery.json
 ```
 
-Report using the template in docs/20 / scripts output:
+Report using the template in docs/23 / scripts output:
 
 - Default branch + production branch protection  
 - `enforce_admins`, reviews, strict checks, contexts  

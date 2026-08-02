@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# delivery-control audit — read-only write-path health (docs/20).
+# delivery-control audit — read-only write-path health (docs/23).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -151,6 +151,6 @@ if [[ "${default_ok}" -eq 0 && "${prod_ok}" -eq 0 ]]; then
   exit 0
 else
   echo "  Branch protection: NEEDS HARDEN"
-  echo "  See docs/20-delivery-control.md"
+  echo "  See docs/23-delivery-control.md"
   exit 1
 fi

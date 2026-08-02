@@ -1,10 +1,10 @@
 ---
-title: "20 · Delivery control"
+title: "23 · Delivery control"
 parent: The Doctrine
-nav_order: 20
+nav_order: 23
 ---
 
-# 20 — Delivery Control: Who Can Write Production
+# 23 — Delivery Control: Who Can Write Production
 
 > 🙂 **In plain English:** Before the crew merges code that goes live, we check that
 > the *door to production* is locked the right way — reviews required, tests green,
@@ -175,4 +175,4 @@ re-point production branch to prior tag when schema remains additive.
    the portable contract here.
 
 ---
-[← 19 · The Chatterbuilt product](19-product-and-mcp.md) · [Home](../index.md)
+[← 22 · Devin cloud supervisor](22-devin-cloud-supervisor.md) · [Home](../index.md) · [Prompts →](prompts.md)

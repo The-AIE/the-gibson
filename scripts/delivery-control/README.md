@@ -1,6 +1,6 @@
 # scripts/delivery-control/
 
-Portable **delivery control** tooling for target repos ([docs/20](../../docs/20-delivery-control.md)).
+Portable **delivery control** tooling for target repos ([docs/23](../../docs/23-delivery-control.md)).
 
 | Script | Mode | Mutates? |
 |---|---|---|
@@ -18,7 +18,7 @@ or other credentials.
 
 ## Config
 
-Optional target file `.gibson-delivery.json` — see docs/20. Or pass `--repo owner/name`.
+Optional target file `.gibson-delivery.json` — see docs/23. Or pass `--repo owner/name`.
 
 ## Prerequisites
 

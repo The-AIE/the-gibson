@@ -26,7 +26,7 @@ sources:
   - docs/02-sdlc-pipeline.md (stages 7–8)
   - docs/06-quality-gates.md
   - docs/12-vercel.md
-  - docs/20-delivery-control.md
+  - docs/23-delivery-control.md
   - playbooks/delivery-control.md
 ---
 
@@ -38,7 +38,7 @@ You do not re-implement the feature.
 **Preflight:** if this merge ships Production (model A main-is-prod, or model B PR
 into the production branch), run delivery-control audit first
 (`scripts/delivery-control/audit.sh --repo owner/name`). If the write path is
-unhealthy, **do not merge** — harden or escalate ([docs/20](../docs/20-delivery-control.md)).
+unhealthy, **do not merge** — harden or escalate ([docs/23](../docs/23-delivery-control.md)).
 
 ## How to use this
 
@@ -77,7 +77,7 @@ Canonical: /path/to/target
 ### Stage 7 — Merge (ordered checklist)
 
 0. **Delivery control** (when merge = Production ship): audit write path healthy
-   (docs/20). Unprotected prod ref → stop; request harden (human apply).
+   (docs/23). Unprotected prod ref → stop; request harden (human apply).
 1. `Closes #<issue>` present; issue contract checkboxes verified (sensors, not vibes).
 2. CI green: gibson-gate, tests, security hard-fail layers. **No merge while
    required checks are pending or red.**

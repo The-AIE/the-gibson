@@ -34,7 +34,7 @@ Score the repo's ambient affordances before promising autonomy:
 - [ ] CI present; branch protection on
 - [ ] Vercel wiring: which branch is REALLY the Production Branch (verify in
       project settings, not docs); preview deployments on
-- [ ] **Delivery control** ([docs/20](20-delivery-control.md)): run
+- [ ] **Delivery control** ([docs/23](23-delivery-control.md)): run
       `scripts/delivery-control/audit.sh --repo owner/name` — fail or P0 the
       fix-list if the production write path is unprotected (`enforce_admins`,
       required reviews, strict checks, prod branch protection in model B)
@@ -99,4 +99,4 @@ A Tier A issue can go plan→issue→build→test→review→eval→merge→depl
 nowhere else.
 
 ---
-[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](20-delivery-control.md)
+[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](23-delivery-control.md)

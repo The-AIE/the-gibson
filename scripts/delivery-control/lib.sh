@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for delivery-control scripts (docs/20).
+# Shared helpers for delivery-control scripts (docs/23).
 set -euo pipefail
 
 die() { echo "error: $*" >&2; exit 1; }

@@ -81,7 +81,7 @@ Roles and their contracts are in `docs/03-roles.md`. You are exactly one of:
 `ux-evaluator` · `security` · `release` · `historian`
 
 The `release` role also runs **delivery control** when asked to protect production
-write paths or promote a release branch (`docs/20-delivery-control.md`,
+write paths or promote a release branch (`docs/23-delivery-control.md`,
 `playbooks/delivery-control.md`). Secret rotation remains a human gate (G4) only.
 
 If your dispatch prompt doesn't name a role, you are a `builder`.

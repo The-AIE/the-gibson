@@ -22,6 +22,11 @@ Adapters carry **zero rules of their own**.
 | OpenAI Codex | [codex/README.md](codex/README.md) |
 | Grok | [grok/README.md](grok/README.md) |
 | Hermes | [hermes/README.md](hermes/README.md) |
+| Devin (cloud supervisor) | [devin/README.md](devin/README.md) |
+
+Devin is the odd one out: it is wired as the persistent **cloud supervisor** that
+reviews finished branches and owns GitHub, not as a local runner
+([docs/22](../docs/22-devin-cloud-supervisor.md)).
 
 Mission Control's `agents/<vendor>/` docs remain the working reference for MC
 ingest wiring when that control plane is deployed.

@@ -11,8 +11,9 @@ If you only open one file, use the row that matches you. Glossary:
 ## 🙂 Non-technical owner (Operator)
 
 1. [VIBECODING.md](../VIBECODING.md) — the only page you need  
-2. Optionally: decision-card shape in [playbooks/templates/](../playbooks/templates/)  
-3. Stop. You do not need the rest of this repo.
+2. Optionally: [HOW-IT-WORKS.md](../HOW-IT-WORKS.md) — what The Gibson is and how it works, still jargon-free  
+3. Optionally: decision-card shape in [playbooks/templates/](../playbooks/templates/)  
+4. Stop. You do not need the rest of this repo.
 
 ## 🔧 Fleet operator (Mark / Engineer tier)
 
@@ -65,7 +66,12 @@ If you only open one file, use the row that matches you. Glossary:
 | 17 | [deploy-opt](17-deployment-optimization.md) | Inspect/optimize |
 | 18 | [fork-upstream](18-fork-and-upstream.md) | Fork without pain |
 | 19 | [product-mcp](19-product-and-mcp.md) | Foreman / CodeWright |
-| 20 | [delivery-control](20-delivery-control.md) | Production write-path locks + promote |
+| 20 | [multi-model](20-multi-model-orchestration.md) | Coordinator pattern |
+| 21 | [operator-readiness](21-operator-readiness.md) | Definition of done |
+| 22 | [devin-supervisor](22-devin-cloud-supervisor.md) | Cloud reviewer/merger + escalation ladder |
+| 23 | [delivery-control](23-delivery-control.md) | Production write-path locks + promote |
+| — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
+| — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 
 ## Worked examples & ops
 
@@ -74,6 +80,8 @@ If you only open one file, use the row that matches you. Glossary:
 | PLAN → issues sample | [examples/04-plan-to-issues-sample.md](examples/04-plan-to-issues-sample.md) |
 | UX eval sample | [examples/07-ux-eval-sample.md](examples/07-ux-eval-sample.md) |
 | AuthZ matrix sample | [examples/08-authz-matrix-sample.md](examples/08-authz-matrix-sample.md) |
+| What it is & how it works (any reader) | [../HOW-IT-WORKS.md](../HOW-IT-WORKS.md) |
+| Security audit: threat model, layer status, checklist | [../SECURITY-AUDIT.md](../SECURITY-AUDIT.md) |
 | Troubleshooting | [troubleshooting/](troubleshooting/) |
 | Doc build queue | [DOC-BACKLOG.md](DOC-BACKLOG.md) |
 | FAQ | [../FAQ.md](../FAQ.md) |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Forward-port a hotfix commit onto the default branch (docs/20).
+# Forward-port a hotfix commit onto the default branch (docs/23).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -53,5 +53,5 @@ git cherry-pick "${FULL}" || die "conflict — resolve manually on ${BRANCH}"
 git push -u origin "${BRANCH}"
 gh pr create --repo "${REPO}" --base "${DEFAULT_BRANCH}" --head "${BRANCH}" \
   --title "chore: forward-port hotfix ${SHORT}" \
-  --body "Forward-port of production hotfix \`${FULL}\` so it is not lost on the next promote. See docs/20-delivery-control.md."
+  --body "Forward-port of production hotfix \`${FULL}\` so it is not lost on the next promote. See docs/23-delivery-control.md."
 echo "PR opened."

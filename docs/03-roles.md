@@ -72,7 +72,7 @@ with destructive payloads (DAST runs against previews/staging).
 ## release
 **In:** an approved, all-gates-green PR. **Out:** merge, verified deploy, smoke pass,
 cleanup (worktree, branch, claim, issue).
-**Also owns delivery control** ([docs/20](20-delivery-control.md),
+**Also owns delivery control** ([docs/23](23-delivery-control.md),
 [playbooks/delivery-control.md](../playbooks/delivery-control.md)): audit/harden the
 production write path; model-B promote/hotfix/freeze. Secret rotation stays G4
 (owner only) — never part of this role.

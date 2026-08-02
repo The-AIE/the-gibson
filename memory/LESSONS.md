@@ -821,8 +821,8 @@ blocked production-readiness on delivery control, not only application bugs.
 **Root cause:** release playbook covered per-PR merge/verify; nothing audited or
 hardened the *infrastructure* write path to Production. Docs can claim model B
 while the prod branch stays mergeable by anyone with write.
-**Harness fix:** docs/20 delivery-control + `scripts/delivery-control/` audit/harden
+**Harness fix:** docs/23 delivery-control + `scripts/delivery-control/` audit/harden
 (portable); adoption + release preflight require audit; secret rotation stays G4
 (owner only — never agent-rotated Neon keys).
-**Status:** fixed in harness (doc 20 / scripts); targets re-audit at adoption
+**Status:** fixed in harness (doc 23 / scripts); targets re-audit at adoption
 **Tags:** #release #github #branch-protection #vercel #security #adoption

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply branch protection (docs/20 harden). Default dry-run; --apply writes.
+# Apply branch protection (docs/23 harden). Default dry-run; --apply writes.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
