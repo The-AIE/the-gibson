@@ -138,9 +138,61 @@ echo "claims-status.sh renders the lanes"
 status=$(cd "$ROOT/b/canon" && "$SCRIPT_DIR/../claims-status.sh" --issue 77)
 contains "shows slice one" "$status" "issue-77-server-side"
 contains "shows slice two" "$status" "issue-77-client-side"
-status=$(cd "$ROOT/e/canon" && "$SCRIPT_DIR/../claims-status.sh")
+# Date-only legacy row is 2026-08-01 → midnight UTC. Pin NOW to exactly 24h later
+# so STALE does not depend on the wall calendar or a second-boundary race (#62).
+# Epochs are fixed UTC constants (not derived via date(1)) so the sensor stays
+# portable across BSD and GNU hosts.
+#   2026-08-01T00:00:00Z = 1785542400
+#   2026-08-02T00:00:00Z = 1785628800  (exactly +24h)
+status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628800 "$SCRIPT_DIR/../claims-status.sh")
 contains "includes legacy rows" "$status" "issue-60-legacy"
 contains "flags a stale claim"  "$status" "STALE"
+
+echo "legacy date-only claim timestamps are midnight UTC at the 24h boundary (#62)"
+# Same fixture date (2026-08-01). One second before 24h must not be STALE; at
+# exactly 24h it must be. Both use the injectable clock — never the wall clock.
+# Assert STALE(24h) — not bare STALE — so a fixture-date edit that drifts the
+# age fails loudly instead of still matching an arbitrary stale marker.
+status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628799 "$SCRIPT_DIR/../claims-status.sh")
+contains "includes the legacy claim one second under 24h" "$status" "issue-60-legacy"
+lacks   "not STALE one second under 24h"                 "$status" "STALE"
+status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628800 "$SCRIPT_DIR/../claims-status.sh")
+contains "STALE at exactly 24h from date-only midnight UTC" "$status" "STALE(24h)"
+contains "STALE marks the legacy claim id"                  "$status" "issue-60-legacy"
+
+echo "digit-only GIBSON_CLAIMS_NOW_EPOCH with leading zeros is decimal (#62)"
+# 0086400 as base-10 is 86400 (exactly 24h). As octal it is invalid (digit 8)
+# and aborts bash arithmetic before claims print. A claim at Unix epoch 0 with
+# this NOW must report STALE(24h) and exit 0.
+new_repo "$ROOT/g"
+(
+  cd "$ROOT/g/canon" || exit 1
+  printf 'claim: issue-62-epoch-pad\nissue: 62\nclaimed: 1970-01-01T00:00:00Z\nscope: lib/**\nsession: pad-test\n' \
+    > docs/claims/issue-62-epoch-pad.md
+  git add -A && git commit -qm pad && git push -q origin main
+) >/dev/null 2>&1
+status=$(cd "$ROOT/g/canon" && GIBSON_CLAIMS_NOW_EPOCH=0086400 "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "leading-zero decimal epoch does not abort" "$rc" "0"
+contains "leading-zero epoch is base-10 STALE(24h)"  "$status" "STALE(24h)"
+contains "leading-zero epoch still lists the claim"  "$status" "issue-62-epoch-pad"
+
+echo "set-empty GIBSON_CLAIMS_NOW_EPOCH fails closed (#62)"
+# Explicit empty must not be treated as unset (wall-clock fallback). Repo has a
+# live claim so a silent success would either list it or falsely say none live.
+status=$(cd "$ROOT/g/canon" && GIBSON_CLAIMS_NOW_EPOCH='' "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "set-empty epoch exits 2"                       "$rc" "2"
+contains "set-empty epoch validation error"              "$status" "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds"
+lacks    "set-empty never pretends no live claims"       "$status" "no live claims"
+lacks    "set-empty never succeeds with a live table"    "$status" "live claims"
+
+echo "oversized GIBSON_CLAIMS_NOW_EPOCH fails closed (#62)"
+# 20-digit string wraps under bash $((10#...)) into a nonsense age and would
+# still exit 0. Bound check must reject before any claim rows are read/emitted.
+status=$(cd "$ROOT/g/canon" && GIBSON_CLAIMS_NOW_EPOCH=99999999999999999999 "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "oversized epoch exits 2"                       "$rc" "2"
+contains "oversized epoch validation error"              "$status" "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds"
+lacks    "oversized never pretends no live claims"       "$status" "no live claims"
+lacks    "oversized never succeeds with a live table"    "$status" "live claims"
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"
