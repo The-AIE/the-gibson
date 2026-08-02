@@ -174,10 +174,22 @@ invoke_runner() {
   case "$RUNNER" in
     grok)
       command -v grok >/dev/null || die "grok CLI not found"
+      # --prompt-file, not -p "$(cat ...)": rendered playbooks start with YAML
+      # frontmatter ("---"), which grok's arg parser mis-reads as a flag when
+      # passed as a positional/value string instead of a file path (L-007).
+      # --permission-mode bypassPermissions: without it, grok has no TTY to
+      # request tool-call approval in headless mode, so it silently narrates
+      # instead of acting — every iteration exits in seconds with no real work
+      # (L-008).
+      # --cwd: bypassPermissions plus an inherited cwd would point the runner at
+      # whatever directory the operator launched from — often the canonical
+      # Gibson checkout, which AGENTS.md Law 3 says nothing may mutate.
       grok --prompt-file "$prompt_file" --cwd "$REPO" --permission-mode bypassPermissions
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
+      # stdin, for the same frontmatter reason as grok's --prompt-file above:
+      # as a positional arg the leading "---" is parsed as an unknown option
       (cd "$REPO" && claude -p --output-format text --permission-mode acceptEdits) < "$prompt_file"
       ;;
     codex)
@@ -275,6 +287,7 @@ supervisor_handoff() {
   [[ -z "$issue" ]] || task="Issue: $issue."
   [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
   [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
+  # bash 3.2 (stock macOS) errors on an empty array under set -u, so branch instead
   local review="$STATE_DIR/second-opinion.md"
   [[ -f "$review" ]] || review="/dev/null"
   info "handing $branch${sha:+ @$sha} to the Devin supervisor"
