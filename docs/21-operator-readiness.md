@@ -6,17 +6,19 @@ nav_order: 21
 
 # 21 — Operator Readiness Checklist
 
-> 🙂 **In plain English:** This is the definition of done for “a non-coder can get software built with the same rigor as exceptional developers.”
+> 🙂 **In plain English:** This is the definition of done for "a non-coder can get software built with the same rigor as exceptional developers."
 
 The end goal is met when **all** of the following are true on at least one live Operator-tier product.
+
+**Primary path: one frontier model.** Multi-model review is optional for checking work, not required for shipping. See [VIBECODING.md](../VIBECODING.md), [prompts.md](prompts.md), and [QUICKSTART.md](../QUICKSTART.md).
 
 ## A. Owner experience (chat-only)
 
 - [ ] Owner never needs a terminal, diff, CI log, or stack trace.
 - [ ] All fleet→owner messages use only the four templates (status, decision-card, intake-question, incident-notice).
-- [ ] Decision cards always include recommendation + “if you wait” + safe silence.
+- [ ] Decision cards always include recommendation + "if you wait" + safe silence.
 - [ ] Heartbeat: at least one status message per active week even when nothing shipped.
-- [ ] “I don’t understand this” is treated as a harness defect and fixed.
+- [ ] "I don't understand this" is treated as a harness defect and fixed.
 - [ ] VIBECODING.md alone is sufficient onboarding for a new non-technical owner.
 
 ## B. Rigor without the owner coding
@@ -27,6 +29,7 @@ The end goal is met when **all** of the following are true on at least one live 
 - [ ] Security layers 1–3 hard-fail; Tier C surfaces get adversarial review + human gate.
 - [ ] Claims + worktrees prevent agents overwriting each other.
 - [ ] Ratchet: repeated failures become permanent guides or sensors.
+- [ ] Silent-noop detection (L-008): loop does not burn iterations while doing nothing.
 
 ## C. Autonomy & safety
 
@@ -42,16 +45,16 @@ The end goal is met when **all** of the following are true on at least one live 
 - [ ] At least one external non-technical reader successfully operates via VIBECODING for a real request.
 - [ ] Case study with metrics (cycle time, owner minutes per ship, defect escapes) published.
 
-## Current status (2026-07-29)
+## Current status (2026-08-02)
 
 | Area | Status |
 |------|--------|
-| A. Owner experience (docs + templates) | **Mostly ready** — VIBECODING, docs/16, four templates exist; live Hermes wiring still Phase 3 |
-| B. Rigor sensors | **In progress** — scripts/CI exist; several open harness issues from chatterbuilt dogfooding |
+| A. Owner experience (docs + templates) | **Mostly ready** — VIBECODING, prompts, docs/16, four templates; live Hermes wiring still Phase 3 |
+| B. Rigor sensors | **In progress** — scripts/CI exist; L-008 silent-noop sensor tracked with #18 |
 | C. Autonomy & safety | **Doctrine complete**; enforcement depends on B |
 | D. Real-world proof | **Not yet** — Phase 2/3 demos and external reader test still open |
 
 This checklist is the north star. Harness PRs should move at least one box. Closing the checklist is how we know the end goal is met.
 
 ---
-[← 19 · Product and MCP](19-product-and-mcp.md) · [Home](../index.md) · [Prompts →](prompts.md)
+[← 19 · Product and MCP](19-product-and-mcp.md) · [Home](../index.md) · [Prompts →](prompts.md) · [VIBECODING](../VIBECODING.md) · [QUICKSTART](../QUICKSTART.md)
