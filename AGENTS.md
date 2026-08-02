@@ -80,6 +80,10 @@ Roles and their contracts are in `docs/03-roles.md`. You are exactly one of:
 `planner` · `decomposer` · `builder` · `test-engineer` · `reviewer` ·
 `ux-evaluator` · `security` · `release` · `historian`
 
+The `release` role also runs **delivery control** when asked to protect production
+write paths or promote a release branch (`docs/23-delivery-control.md`,
+`playbooks/delivery-control.md`). Secret rotation remains a human gate (G4) only.
+
 If your dispatch prompt doesn't name a role, you are a `builder`.
 A solo/continuous session (one agent cycling through all roles, e.g. Grok running
 unattended) follows `docs/11-solo-loop.md` — the roles still apply, executed in

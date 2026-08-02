@@ -123,4 +123,4 @@ mini works well since Codex and Claude are already logged in there. See
 still apply: `gibson/HALT` stops everything, including handoffs.
 
 ---
-[← 21 · Operator readiness](21-operator-readiness.md) · [Home](../index.md) · [Prompts →](prompts.md)
+[← 21 · Operator readiness](21-operator-readiness.md) · [Home](../index.md) · [23 · Delivery control →](23-delivery-control.md)

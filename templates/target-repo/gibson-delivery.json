@@ -1,0 +1,16 @@
+{
+  "repo": "OWNER/REPO",
+  "model": "release-branch",
+  "defaultBranch": "main",
+  "productionBranch": "release",
+  "requiredContexts": [
+    "quality",
+    "DCO",
+    "secrets",
+    "dependencies",
+    "build-e2e-required",
+    "review-evidence"
+  ],
+  "productionEnvironment": "Production",
+  "reviewerLogin": "mrhinkle"
+}
