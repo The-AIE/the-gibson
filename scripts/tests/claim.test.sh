@@ -138,9 +138,25 @@ echo "claims-status.sh renders the lanes"
 status=$(cd "$ROOT/b/canon" && "$SCRIPT_DIR/../claims-status.sh" --issue 77)
 contains "shows slice one" "$status" "issue-77-server-side"
 contains "shows slice two" "$status" "issue-77-client-side"
-status=$(cd "$ROOT/e/canon" && "$SCRIPT_DIR/../claims-status.sh")
+# Date-only legacy row is 2026-08-01 → midnight UTC. Pin NOW to exactly 24h later
+# so STALE does not depend on the wall calendar or a second-boundary race (#62).
+# Epochs are fixed UTC constants (not derived via date(1)) so the sensor stays
+# portable across BSD and GNU hosts.
+#   2026-08-01T00:00:00Z = 1785542400
+#   2026-08-02T00:00:00Z = 1785628800  (exactly +24h)
+status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628800 "$SCRIPT_DIR/../claims-status.sh")
 contains "includes legacy rows" "$status" "issue-60-legacy"
 contains "flags a stale claim"  "$status" "STALE"
+
+echo "legacy date-only claim timestamps are midnight UTC at the 24h boundary (#62)"
+# Same fixture date (2026-08-01). One second before 24h must not be STALE; at
+# exactly 24h it must be. Both use the injectable clock — never the wall clock.
+status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628799 "$SCRIPT_DIR/../claims-status.sh")
+contains "includes the legacy claim one second under 24h" "$status" "issue-60-legacy"
+lacks   "not STALE one second under 24h"                 "$status" "STALE"
+status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628800 "$SCRIPT_DIR/../claims-status.sh")
+contains "STALE at exactly 24h from date-only midnight UTC" "$status" "STALE"
+contains "STALE marks the legacy claim id"                  "$status" "issue-60-legacy"
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

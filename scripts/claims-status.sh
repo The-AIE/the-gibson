@@ -27,6 +27,19 @@ USAGE
   --issue     only claims on this issue number, namespaced ones included
   --markdown  emit the docs/active-work.md table format
 
+CLOCK
+  GIBSON_CLAIMS_NOW_EPOCH  optional. When set to a decimal Unix epoch (UTC seconds),
+                           staleness is computed against this fixed "now" instead of
+                           the wall clock. Sensors use this so the exact 24-hour
+                           boundary is deterministic. Production leaves it unset.
+                           Scope is this script only — it is not a general test clock.
+
+DATE-ONLY SEMANTICS
+  A claim timestamp that is only a calendar day (YYYY-MM-DD, no time) is treated as
+  that day at 00:00:00 UTC. It must not inherit the current wall-clock hour/minute/
+  second. On BSD/macOS, bare `date -j -f %Y-%m-%d` fills missing fields from "now",
+  which can race the NOW snapshot and report 23 whole hours for a full calendar day.
+
 EXIT
   0  claims printed (or none live)
   2  usage error
@@ -59,8 +72,35 @@ if [[ -z "$REF" ]]; then
   git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
 fi
 
-NOW=$(date -u +%s)
+# Injectable clock for sensors (issue #62). Production: leave unset → wall clock.
+if [[ -n "${GIBSON_CLAIMS_NOW_EPOCH:-}" ]]; then
+  case "$GIBSON_CLAIMS_NOW_EPOCH" in
+    ''|*[!0-9]*)
+      echo "claims-status.sh: ERROR: GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds" >&2
+      exit 2
+      ;;
+  esac
+  NOW="$GIBSON_CLAIMS_NOW_EPOCH"
+else
+  NOW=$(date -u +%s)
+fi
 ROWS=""
+
+# Parse a claim timestamp to Unix epoch (UTC). Date-only YYYY-MM-DD → midnight UTC.
+# Never hand a bare date to BSD `date -j -f %Y-%m-%d` — it fills H:M:S from the
+# wall clock and can under-count age by one second across a boundary (issue #62).
+# Portable: GNU `date -d` first, then BSD `date -j -f` for ISO-Z.
+claim_to_epoch() {
+  local claimed="$1" normalized
+  if [[ "$claimed" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    normalized="${claimed}T00:00:00Z"
+  else
+    normalized="$claimed"
+  fi
+  date -u -d "$normalized" +%s 2>/dev/null ||
+    date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$normalized" +%s 2>/dev/null ||
+    echo ""
+}
 
 emit() { # claimed | claim-id | scope | session
   local claimed="$1" id="$2" scope="$3" session="$4"
@@ -68,10 +108,8 @@ emit() { # claimed | claim-id | scope | session
     echo "$id" | grep -qE "^issue-([A-Za-z][A-Za-z0-9]*-)?${ONLY_ISSUE}-" || return 0
   fi
   local age="" stamp
-  # date -d is GNU, -j -f is BSD; a claim with an unparseable date is still a claim.
-  stamp=$(date -u -d "$claimed" +%s 2>/dev/null ||
-          date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$claimed" +%s 2>/dev/null ||
-          date -u -j -f "%Y-%m-%d" "$claimed" +%s 2>/dev/null || echo "")
+  # A claim with an unparseable date is still a claim (no STALE marker).
+  stamp=$(claim_to_epoch "$claimed")
   if [[ -n "$stamp" ]]; then
     local hours=$(( (NOW - stamp) / 3600 ))
     [[ "$hours" -ge 24 ]] && age=" STALE(${hours}h)"
