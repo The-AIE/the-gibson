@@ -16,10 +16,13 @@
  *   4. node:test:     # tests T / # skip M / # todo K
  *   5. TAP plan:      1..T  plus  # skip / ok N # SKIP
  *
- * Explicit lines do **not** outrank runner summaries. Every source that
- * matches is collected; if two sources disagree on total/skipped/todo the
- * parse fails closed so a test's stdout cannot self-authorize head metrics.
- * A single source (explicit alone or summary alone) is fine.
+ * Explicit lines do **not** outrank runner summaries. Every explicit line
+ * (KV or JSON) and every runner summary that matches is collected — never
+ * first-match only. If any two sources disagree on total/skipped/todo the
+ * parse fails closed so a test's stdout cannot self-authorize head metrics
+ * (including fake total=N followed by honest total=M). A single source
+ * (explicit alone or summary alone) is fine; identical multi-line metrics
+ * agree and pass.
  *
  * Unparseable, negative, non-integer, or non-safe-integer metrics fail closed
  * (never become 0; values beyond Number.MAX_SAFE_INTEGER are rejected).
@@ -152,10 +155,60 @@ function metricsKey(m) {
 }
 
 /**
- * Parse every recognized metric source from runner output. Explicit
- * GIBSON_TEST_METRICS lines are collected alongside Vitest/Jest/node:test/TAP
- * summaries — they never outrank a real runner summary. If two sources
- * disagree, fail closed so stdout cannot self-authorize head metrics.
+ * Parse one explicit GIBSON_TEST_METRICS body (KV or JSON).
+ * @param {string} body
+ * @param {number} index 1-based line index among explicit lines
+ * @returns {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }}
+ */
+function parseExplicitMetricsBody(body, index) {
+  const label = `GIBSON_TEST_METRICS#${index}`;
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{")) {
+    let parsed;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      throw new Error(
+        `${RESULT}: GIBSON_TEST_METRICS JSON is malformed (fail closed)`
+      );
+    }
+    const m = normalizeMetrics(parsed, label);
+    return { ...m, source: `GIBSON_TEST_METRICS-json#${index}` };
+  }
+  /** @type {Record<string, string>} */
+  const fields = {};
+  for (const part of trimmed.split(/\s+/)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) {
+      throw new Error(
+        `${RESULT}: GIBSON_TEST_METRICS has malformed token ${JSON.stringify(part)}`
+      );
+    }
+    fields[part.slice(0, eq)] = part.slice(eq + 1);
+  }
+  if (fields.total === undefined) {
+    throw new Error(
+      `${RESULT}: GIBSON_TEST_METRICS missing required field total=`
+    );
+  }
+  const m = normalizeMetrics(
+    {
+      total: fields.total,
+      skipped: fields.skipped,
+      todo: fields.todo,
+    },
+    label
+  );
+  return { ...m, source: `GIBSON_TEST_METRICS-kv#${index}` };
+}
+
+/**
+ * Parse every recognized metric source from runner output. **Every** explicit
+ * GIBSON_TEST_METRICS line (KV or JSON) is collected alongside Vitest/Jest/
+ * node:test/TAP summaries — none is privileged, and first-match is never used.
+ * If two sources disagree on total/skipped/todo the parse fails closed so
+ * stdout cannot self-authorize head metrics (e.g. fake total=10 followed by
+ * honest total=7 must not parse as 10).
  *
  * @param {string} text
  * @returns {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }}
@@ -168,55 +221,17 @@ export function parseRunnerOutput(text) {
   /** @type {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }[]} */
   const found = [];
 
-  // 1) Explicit machine line(s) — vendor-blind contract, not privileged
-  const explicitJson = text.match(
-    /^\s*GIBSON_TEST_METRICS\s+(\{[\s\S]*?\})\s*$/m
-  );
-  if (explicitJson) {
-    let parsed;
-    try {
-      parsed = JSON.parse(explicitJson[1]);
-    } catch {
-      throw new Error(
-        `${RESULT}: GIBSON_TEST_METRICS JSON is malformed (fail closed)`
-      );
-    }
-    const m = normalizeMetrics(parsed, "GIBSON_TEST_METRICS");
-    found.push({ ...m, source: "GIBSON_TEST_METRICS-json" });
-  } else {
-    const explicitKv = text.match(/^\s*GIBSON_TEST_METRICS\s+(.+?)\s*$/m);
-    if (explicitKv) {
-      const body = explicitKv[1].trim();
-      if (body.startsWith("{")) {
-        throw new Error(
-          `${RESULT}: GIBSON_TEST_METRICS JSON is malformed (fail closed)`
-        );
-      }
-      /** @type {Record<string, string>} */
-      const fields = {};
-      for (const part of body.split(/\s+/)) {
-        const eq = part.indexOf("=");
-        if (eq <= 0) {
-          throw new Error(
-            `${RESULT}: GIBSON_TEST_METRICS has malformed token ${JSON.stringify(part)}`
-          );
-        }
-        fields[part.slice(0, eq)] = part.slice(eq + 1);
-      }
-      if (fields.total === undefined) {
-        throw new Error(
-          `${RESULT}: GIBSON_TEST_METRICS missing required field total=`
-        );
-      }
-      const m = normalizeMetrics(
-        {
-          total: fields.total,
-          skipped: fields.skipped,
-          todo: fields.todo,
-        },
-        "GIBSON_TEST_METRICS"
-      );
-      found.push({ ...m, source: "GIBSON_TEST_METRICS-kv" });
+  // 1) Every explicit machine line — vendor-blind contract, not privileged.
+  //    Collect all matches (never first-only): duplicate/conflicting lines are
+  //    reconciled by multi-source agreement below.
+  {
+    const explicitLines = [
+      ...text.matchAll(/^\s*GIBSON_TEST_METRICS\s+(.+?)\s*$/gm),
+    ];
+    let idx = 0;
+    for (const match of explicitLines) {
+      idx += 1;
+      found.push(parseExplicitMetricsBody(match[1], idx));
     }
   }
 

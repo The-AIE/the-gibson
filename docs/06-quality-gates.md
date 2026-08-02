@@ -44,7 +44,7 @@ closes that bypass:
 | Test **total** drops vs trusted baseline | hard-fail `test-integrity` with exact delta (`N → M`) |
 | **skip + todo** rises vs trusted baseline | hard-fail `test-integrity` with exact delta |
 | Total rises / skips fall | pass (no waiver needed) |
-| Exact visible waiver covers the delta | pass, and the waiver is **surfaced** in gate/CI output for the reviewer |
+| Exact visible waiver covers the delta | pass, and the waiver is **surfaced** in gate output for the reviewer |
 
 ### Waiver (visible, exact, delta-consistent)
 
@@ -64,27 +64,25 @@ Fail closed (do **not** authorize):
 - Wrong delta (`removed 2` when 3 tests disappeared)
 - Malformed / zero-delta noise
 
-### Trusted baseline (CI vs local)
+### Trusted baseline (local now; CI in phase 2)
 
 | Context | Authority |
 |---|---|
 | Local `gate.sh` | `.gibson-baseline.json` from `gate-baseline.sh` (gitignored, worktree-local) |
-| CI `pull_request` | Metrics re-derived at the **merge-base / PR base SHA** — never the PR's local baseline |
-| CI helper binary | `scripts/test-integrity.mjs` **copied from the merge-base worktree** (`TI_TRUSTED`) — the PR-head copy must never grade itself |
+| CI `pull_request` | **Not wired in this bootstrap PR.** Phase 2 (after this helper is on main) adds an isolated grading job that re-derives metrics at the PR base SHA using the **immutable merge-base copy** of `scripts/test-integrity.mjs` |
 
-A locally replaceable or gitignored baseline must not let a PR authorize itself.
-`ci/gibson-gate.yml` re-runs the test command on a detached checkout of
-`pull_request.base.sha` and compares with `--trusted-source merge-base:<sha>`.
+**Phase-1 bootstrap (this change):** ships the reviewed helper, local
+`gate.sh` / `gate-baseline.sh` integration, focused adversarial sensors, and
+reviewer guidance. It deliberately **does not** change `ci/gibson-gate.yml`.
+Wiring CI before main owns the helper would either (a) fall back to the PR-head
+copy and self-grade, or (b) use a fixed temp path that untrusted head steps can
+pre-poison. Do not treat the current CI template as protected for test-integrity.
 
-**Failing base suites still reach the sensor.** The base test command runs with
-errexit disabled; its exit code is captured as `base_test_rc` and reported
-separately. Metrics parse + compare always run so a "deleted the failing test"
-diff emits the exact total delta instead of dying generically under `set -e`.
-
-**Bootstrap:** if the merge-base lacks `scripts/test-integrity.mjs` (first
-introduction of the sensor), CI falls back to the workspace copy once and labels
-the source `workspace-bootstrap:<sha>`. After the sensor is on the default
-branch, every subsequent PR is graded only by the merge-base-owned helper.
+**Phase 2 (follow-up, after merge):** from a base that already contains
+`scripts/test-integrity.mjs`, wire an isolated CI job that copies the helper
+from the merge-base worktree, re-runs the base suite, and compares with
+`--trusted-source merge-base:<sha>`. That job must never load the PR-head helper
+or follow attacker-controlled symlinks for the trusted binary.
 
 ### Baseline regeneration (journaled)
 
@@ -112,10 +110,12 @@ Also recognized: Vitest `Tests … (N)` summaries, Jest `Tests: … total`,
 node:test `# tests` / `# skip` / `# todo`, TAP `1..N` plans.
 
 **No self-authorization:** explicit `GIBSON_TEST_METRICS` lines do **not** outrank
-runner summaries. Every matching source is collected; if two sources disagree on
+runner summaries. **Every** explicit KV/JSON line and every matching runner
+summary is collected (never first-match only); if any two sources disagree on
 total/skipped/todo the parse fails closed. A test's stdout must never
-self-authorize head metrics (e.g. honest `Tests 7 passed (7)` plus a fake
-`GIBSON_TEST_METRICS total=10`).
+self-authorize head metrics — e.g. honest `Tests 7 passed (7)` plus a fake
+`GIBSON_TEST_METRICS total=10`, or `total=10` followed by a later honest
+`total=7` on a second explicit line.
 
 **Fail closed:** unparseable, negative, non-integer, non-`Number.isSafeInteger`,
 or skip+todo > total metrics never silently become zero — the sensor errors

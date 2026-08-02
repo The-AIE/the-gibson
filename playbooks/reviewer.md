@@ -137,7 +137,7 @@ with reason). Missing criterion coverage → REQUEST_CHANGES.
 
 ### 4b. Test-integrity waiver lens (issue #70)
 
-When gate/CI output surfaces a `test-integrity: WAIVER accepted` line — or the
+When gate output surfaces a `test-integrity: WAIVER accepted` line — or the
 PR body contains a `Test-integrity:` marker — this is a **review lens**, not a
 formality:
 
@@ -151,9 +151,11 @@ formality:
 3. A baseline regeneration (`.gibson/test-integrity-journal.jsonl` or a noted
    `--regenerate --reason`) is an explicit journaled act — treat the reason the
    same way as a waiver.
-4. Absence of a waiver when totals drop or skips rise should already be red in
-   CI; if you see green without a surfaced waiver on a suite-shrinking diff,
-   treat that as a **sensor failure** and REQUEST_CHANGES.
+4. Phase-1 bootstrap: test-integrity is enforced **locally** via `gate.sh` and
+   the helper; CI does not yet grade it. On a suite-shrinking diff, require
+   local sensor evidence (or an exact visible waiver). After phase-2 wires the
+   isolated CI job, green-without-waiver on a shrinking suite is a **sensor
+   failure** → REQUEST_CHANGES.
 
 ### 5. Verdict (mandatory final line)
 

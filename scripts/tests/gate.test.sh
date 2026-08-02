@@ -9,7 +9,8 @@
 #   exact visible waiver may authorize a reduction; hidden/near/wrong-delta
 #   waivers fail closed; metric garbage never becomes zero; baseline
 #   regeneration is an explicit journaled act; a local/gitignored baseline
-#   cannot authorize a PR (CI uses a trusted source label).
+#   cannot authorize a PR. Phase-1 ships the helper + local sensors only;
+#   CI isolated grading is phase-2 after the helper is on main.
 #
 # USAGE
 #   scripts/tests/gate.test.sh
@@ -493,6 +494,66 @@ out=$(node "$TI" parse --input "$ROOT/agree.txt" 2>&1); rc=$?
   || bad "agreeing sources (rc=$rc): $out"
 
 # ---------------------------------------------------------------------------
+echo "blocker 1b: every explicit GIBSON_TEST_METRICS line is collected (no first-match)"
+# ---------------------------------------------------------------------------
+# Attack: fake total=10 first, then honest total=7. First-match parsers would
+# accept 10 and green-wash a deleted suite. Must fail closed on conflict.
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS total=7 skipped=0 todo=0\n' \
+  > "$ROOT/multi-kv-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/multi-kv-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+  ok "conflicting multi-explicit KV lines fail closed (not first-match total=10)"
+else
+  bad "multi-kv first-match bypass (rc=$rc): $out"
+fi
+
+# Same attack with JSON after KV
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS {"total":7,"skipped":0,"todo":0}\n' \
+  > "$ROOT/multi-kv-json-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/multi-kv-json-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+  ok "conflicting explicit KV then JSON fail closed"
+else
+  bad "kv+json first-match bypass (rc=$rc): $out"
+fi
+
+# Honest first, fake second (order must not matter)
+printf 'GIBSON_TEST_METRICS total=7 skipped=0 todo=0\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/multi-kv-conflict-rev.txt"
+out=$(node "$TI" parse --input "$ROOT/multi-kv-conflict-rev.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+  ok "conflicting multi-explicit lines fail regardless of order"
+else
+  bad "multi-kv reverse-order bypass (rc=$rc): $out"
+fi
+
+# Identical multi-explicit lines still agree and parse
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/multi-kv-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/multi-kv-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "identical multi-explicit KV lines accepted" \
+  || bad "identical multi-explicit broken (rc=$rc): $out"
+
+# Identical KV + JSON
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS {"total":10,"skipped":0,"todo":0}\n' \
+  > "$ROOT/multi-kv-json-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/multi-kv-json-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "identical explicit KV+JSON lines accepted" \
+  || bad "identical kv+json broken (rc=$rc): $out"
+
+# Three-way: two fake explicits + honest runner must still conflict
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nTests  7 passed (7)\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/multi-explicit-runner.txt"
+out=$(node "$TI" parse --input "$ROOT/multi-explicit-runner.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+  ok "duplicate fake explicit + honest runner fails closed"
+else
+  bad "multi-explicit+runner spoof (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
 echo "blocker 4: waiver dimensions must equal max(actual_delta,0) on both axes"
 # ---------------------------------------------------------------------------
 # actual removed 1 + waiver claims removed 1 AND skip +999 → fail
@@ -587,9 +648,10 @@ fi
 # ---------------------------------------------------------------------------
 echo "blocker 2: failing base suite still reaches integrity compare (errexit-safe)"
 # ---------------------------------------------------------------------------
-# Mirrors ci/gibson-gate.yml: capture base test rc with errexit off, always
-# parse + compare, preserve base rc separately. Deleted-failing-test scenario:
-# base prints 10 tests then exits 1; head prints 7 and exits 0.
+# Local simulation of the intended phase-2 CI pattern: capture base test rc
+# with errexit off, always parse + compare, preserve base rc separately.
+# Deleted-failing-test scenario: base prints 10 tests then exits 1; head
+# prints 7 and exits 0. (ci/gibson-gate.yml is deliberately unwired in phase 1.)
 BASE_SIM="$ROOT/base-sim"
 HEAD_SIM="$ROOT/head-sim"
 mkdir -p "$BASE_SIM" "$HEAD_SIM"
@@ -684,7 +746,7 @@ if (process.argv[2] === 'parse') {
 process.exit(0);
 HOSTILE
 
-# Policy under test: prefer merge-base helper when present (as ci/gibson-gate.yml)
+# Policy under test: prefer merge-base helper when present (phase-2 CI intent)
 WT_BASE="$ROOT/trusted-base-wt"
 mkdir -p "$WT_BASE/scripts"
 cp "$TI" "$WT_BASE/scripts/test-integrity.mjs"
@@ -708,28 +770,23 @@ else
   bad "hostile helper fixture broken (rc=$rc): $out"
 fi
 
-# Static pin: ci/gibson-gate.yml must reference the merge-base helper path
+# Phase-1 bootstrap pin: ci/gibson-gate.yml must NOT wire test-integrity yet.
+# Wiring CI before main owns the helper self-grades (workspace-bootstrap) or
+# races a fixed RUNNER_TEMP path. Phase 2 adds the isolated job after merge.
 CI_YML="$SCRIPT_DIR/../../ci/gibson-gate.yml"
 if [[ -f "$CI_YML" ]] \
-  && grep -q 'gibson-base-wt\|BASE_SHA\|merge-base' "$CI_YML" \
-  && grep -qE 'TI_TRUSTED|test-integrity\.mjs.*BASE|trusted.*test-integrity|cp .*test-integrity|WT.*test-integrity' "$CI_YML"; then
-  ok "ci/gibson-gate.yml loads test-integrity from trusted merge-base worktree"
+  && ! grep -q 'TI_TRUSTED\|test-integrity\.trusted\|test-integrity\.mjs\|GIBSON_TEST_METRICS\|workspace-bootstrap' "$CI_YML"; then
+  ok "ci/gibson-gate.yml unwired for test-integrity (phase-1 bootstrap; phase-2 after helper on main)"
 else
-  # Also accept explicit variable assignment patterns after the repair
-  if [[ -f "$CI_YML" ]] && grep -q 'TI_TRUSTED' "$CI_YML"; then
-    ok "ci/gibson-gate.yml defines TI_TRUSTED from merge-base"
-  else
-    bad "ci/gibson-gate.yml missing trusted-helper wiring (TI_TRUSTED / base worktree copy)"
-  fi
+  bad "ci/gibson-gate.yml has premature test-integrity CI wiring (phase-1 must leave template unchanged)"
 fi
 
-# Static pin: base test must capture rc with errexit disabled
+# Phase-1 also must not claim a fixed-path trusted binary in the CI template
 if [[ -f "$CI_YML" ]] \
-  && grep -q 'base_test_rc' "$CI_YML" \
-  && grep -qE 'set \+e' "$CI_YML"; then
-  ok "ci/gibson-gate.yml captures base_test_rc with errexit disabled"
+  && ! grep -qE 'RUNNER_TEMP.*test-integrity|test-integrity\.trusted' "$CI_YML"; then
+  ok "ci/gibson-gate.yml has no fixed-path test-integrity symlink target"
 else
-  bad "ci/gibson-gate.yml missing base_test_rc / set +e capture pattern"
+  bad "ci/gibson-gate.yml still references fixed-path trusted helper (symlink race class)"
 fi
 
 # ---------------------------------------------------------------------------

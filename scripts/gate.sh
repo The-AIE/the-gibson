@@ -26,9 +26,10 @@ WHY
 RISKS
   - Long runtime on large test suites.
   - Without a baseline file, any non-zero exit fails the gate (strict mode).
-  - Local .gibson-baseline.json is worktree-local and gitignored — CI must
-    anchor to the merge base / trusted base (see ci/gibson-gate.yml), never
-    to a baseline the PR can rewrite.
+  - Local .gibson-baseline.json is worktree-local and gitignored — it must
+    never authorize a PR merge. Phase-2 CI (after this helper is on main)
+    will re-derive metrics at the merge base with the base-owned helper;
+    phase-1 ships local enforcement only.
   - Does not modify source; may create caches/build artifacts.
 
 USAGE
