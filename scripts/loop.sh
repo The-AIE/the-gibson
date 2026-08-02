@@ -20,11 +20,13 @@ RISKS
   - Unattended runs spend tokens / subscription quota (Grok flat-rate preferred).
   - Can open PRs and push when the runner has write permission.
   - Stop with the gibson/HALT file or GIBSON_HALT=1 env (checked unconditionally).
-    When gh is available the driver also honors two remote kill paths every
-    iteration: an open issue with the gibson-halt label, or a .gibson-halt
-    sentinel file on the target repo's remote default branch. Either stops the
-    loop and suppresses supervisor handoffs. GitHub/API failures fail open to
-    the local file/env checks and log a degraded remote-check warning.
+    When gh is available the driver also honors two remote kill paths on a
+    bounded cadence (every iteration with --once; every GIBSON_REMOTE_HALT_INTERVAL
+    iterations in a hot loop, default 3): an open issue with the gibson-halt
+    label, or a .gibson-halt sentinel on the remote default branch. Either
+    journals the halt, leaves loop-state untouched, and suppresses supervisor
+    handoffs. GitHub/API failures fail open to the local file/env checks and log
+    a degraded remote-check warning.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
@@ -71,6 +73,13 @@ OPTIONS
                       whenever loop-state carries a `handoff:` field (docs/22).
                       Each handoff is gated on a fresh distinct-vendor review of
                       the exact SHA being handed off; a failed review blocks it.
+
+ENV
+  GIBSON_HALT=1                 local kill switch (always honored)
+  GIBSON_REMOTE_HALT_INTERVAL   re-check remote label/sentinel every N iterations
+                                (default: 1 with --once, 3 for hot loops). A halt
+                                is still detected within N iterations; results are
+                                cached so supervisor_handoff does not re-query.
 
 EXAMPLES
   ./scripts/loop.sh --runner grok --repo ~/Code/acme-app
@@ -152,26 +161,27 @@ PRE_HANDOFF_REVIEW="$STATE_DIR/pre-handoff-review.md"
 # filename says so: it has nothing to do with the escalation artifact above.
 REVIEW_RECEIPT="$STATE_DIR/pre-handoff-review.receipt"
 
-mkdir -p "$STATE_DIR"
-if [[ ! -f "$STATE_FILE" ]]; then
-  cat > "$STATE_FILE" <<EOF
-# Gibson loop state
-updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-issue:
-pr:
-hat: builder
-next_hat: builder
-round: 0
-parked: false
-handoff:
-handoff_sha:
-next_action: triage highest-priority unblocked unclaimed issue
-notes: initialized by loop.sh
-EOF
+# Iteration counter (also drives remote-halt cadence). Starts at 0 so the first
+# loop top and the pre-state startup check share the same "iteration 0" slot.
+iter=0
+failures=0
+
+# Remote halt cadence (issue #71). --once always re-checks every iteration;
+# hot loops default to every 3 so a phone label still lands within a few steps
+# without burning a pair of API calls on every single hat. Override with
+# GIBSON_REMOTE_HALT_INTERVAL. The cache is also what keeps supervisor_handoff
+# from duplicating the iteration-top query.
+if [[ -n "${GIBSON_REMOTE_HALT_INTERVAL:-}" ]]; then
+  REMOTE_HALT_INTERVAL="$GIBSON_REMOTE_HALT_INTERVAL"
+elif [[ "$ONCE" -eq 1 ]]; then
+  REMOTE_HALT_INTERVAL=1
+else
+  REMOTE_HALT_INTERVAL=3
 fi
-grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
-grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE"
-[[ -f "$JOURNAL" ]] || echo "# Gibson loop journal" > "$JOURNAL"
+# Non-positive values would disable the remote stop; clamp to at least 1.
+if ! [[ "$REMOTE_HALT_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$REMOTE_HALT_INTERVAL" -lt 1 ]]; then
+  REMOTE_HALT_INTERVAL=1
+fi
 
 # Kill switch (issue #55 local paths + issue #71 remote paths).
 #
@@ -179,16 +189,61 @@ grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE
 #   - gibson/HALT file
 #   - GIBSON_HALT=1
 #
-# Remote (read-only, every iteration top — and again before a supervisor handoff):
+# Remote (read-only, cached for REMOTE_HALT_INTERVAL iterations — checked at
+# iteration top and reused by supervisor_handoff so a handoff does not spend a
+# second pair of API calls):
 #   - open issue carrying the gibson-halt label
 #   - .gibson-halt sentinel committed on the remote default branch
 #
 # Network/API failure fails OPEN to the local checks: the loop keeps running
 # rather than bricking on GitHub downtime, and a clear "degraded" warning is
 # logged so the operator knows the remote stop is temporarily blind.
+#
+# A remote halt journals the reason and leaves loop-state untouched (no default
+# state created, no rewrite of an existing one). Supervisor handoffs are
+# suppressed. That is the issue #71 contract.
+
+# Parse owner/repo from a git remote URL. Supports the normal GitHub forms:
+#   https://github.com/owner/repo.git
+#   git@github.com:owner/repo.git
+#   ssh://git@github.com/owner/repo.git
+# Uses remote.origin.url (not get-url) so url.*.insteadOf rewrites used in tests
+# and some operators' SSH helpers do not hide the logical GitHub slug.
+# Empty on unparseable input — callers skip the remote check.
+origin_slug_from_url() {
+  local url="$1" rest
+  [[ -n "$url" ]] || return 0
+  url="${url%.git}"
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
+  case "$url" in
+    git@*:*)
+      # scp-like: git@host:owner/repo
+      rest="${url#*:}"
+      ;;
+    ssh://*|https://*|http://*|git://*)
+      # scheme://[userinfo@]host[:port]/owner/repo
+      rest="${url#*://}"
+      rest="${rest#*@}"
+      rest="${rest#*/}"
+      ;;
+    *)
+      rest="$url"
+      ;;
+  esac
+  # Exactly two path segments (owner/repo). Reject schemes that survived, ports,
+  # or deeper paths — a bad slug would silently blind both remote checks.
+  case "$rest" in
+    ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
+    */*) printf '%s\n' "$rest" ;;
+  esac
+}
+
 origin_slug() {
-  git -C "$REPO" remote get-url origin 2>/dev/null \
-    | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true
+  local url
+  url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || true
+  origin_slug_from_url "$url"
 }
 
 # Default branch name as origin currently advertises via symbolic HEAD.
@@ -205,8 +260,15 @@ remote_default_branch() {
   printf '%s\n' "$name"
 }
 
-# True when a remote halt path is active. Fail-open on API errors.
-remote_halted() {
+# Cache: empty = never checked; "halted" / "clear"; checked_at is the iter of
+# the last live poll. supervisor_handoff reuses the same cache so it does not
+# double the API cost of the iteration-top check.
+_REMOTE_HALT_CACHE=""
+_REMOTE_HALT_CHECKED_AT=-999999
+HALT_REASON=""
+
+# Live remote poll (no cache). Sets HALT_REASON on a positive hit. Fail-open.
+remote_halted_live() {
   if ! command -v gh >/dev/null 2>&1; then
     return 1
   fi
@@ -217,7 +279,7 @@ remote_halted() {
   fi
 
   # 1) gibson-halt label on any open issue (live poll; removal lets a fresh
-  #    launch run because this is re-checked every iteration, not once at start).
+  #    launch run because this is re-checked on cadence, not process-start-only).
   set +e
   out=$(gh issue list --repo "$slug" \
     --label gibson-halt --state open --limit 1 \
@@ -227,22 +289,28 @@ remote_halted() {
   if [[ $ec -ne 0 ]]; then
     info "remote halt check degraded: gibson-halt label query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
   elif printf '%s' "$out" | grep -q '[0-9]'; then
-    info "remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
+    HALT_REASON="remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
+    info "$HALT_REASON"
     return 0
   fi
 
   # 2) .gibson-halt sentinel on the remote default branch (phone-friendly:
   #    commit the empty file to main from any device with GitHub access).
+  # Pass the ref as an encoded request parameter — never interpolate into ?ref=
+  # (branch names may contain #, &, ?, etc. which would be treated as URL syntax
+  # and check the wrong ref or a truncated one).
   if ! def_branch=$(remote_default_branch); then
     info "remote halt check degraded: could not resolve origin default branch — continuing with local HALT/GIBSON_HALT only"
     return 1
   fi
   set +e
-  out=$(gh api "repos/${slug}/contents/.gibson-halt?ref=${def_branch}" 2>&1)
+  out=$(gh api --method GET "repos/${slug}/contents/.gibson-halt" \
+    -f "ref=${def_branch}" 2>&1)
   ec=$?
   set -e
   if [[ $ec -eq 0 ]]; then
-    info "remote halt: .gibson-halt sentinel on origin/${def_branch} — stopping (delete the file from the default branch to allow a fresh launch)"
+    HALT_REASON="remote halt: .gibson-halt sentinel on origin/${def_branch} — stopping (delete the file from the default branch to allow a fresh launch)"
+    info "$HALT_REASON"
     return 0
   fi
   # 404 Not Found = no sentinel (clear). Anything else is a degraded check.
@@ -253,11 +321,97 @@ remote_halted() {
   return 1
 }
 
-halted() {
-  if [[ -f "$HALT_FILE" ]]; then return 0; fi
-  if [[ "${GIBSON_HALT:-}" == "1" ]]; then return 0; fi
-  if remote_halted; then return 0; fi
+# True when a remote halt path is active. Honors REMOTE_HALT_INTERVAL cache.
+remote_halted() {
+  local age
+  if [[ -n "$_REMOTE_HALT_CACHE" ]]; then
+    age=$((iter - _REMOTE_HALT_CHECKED_AT))
+    if [[ "$age" -ge 0 && "$age" -lt "$REMOTE_HALT_INTERVAL" ]]; then
+      if [[ "$_REMOTE_HALT_CACHE" == "halted" ]]; then
+        return 0
+      fi
+      return 1
+    fi
+  fi
+  _REMOTE_HALT_CHECKED_AT=$iter
+  if remote_halted_live; then
+    _REMOTE_HALT_CACHE="halted"
+    return 0
+  fi
+  _REMOTE_HALT_CACHE="clear"
   return 1
+}
+
+halted() {
+  HALT_REASON=""
+  if [[ -f "$HALT_FILE" ]]; then
+    HALT_REASON="kill switch: gibson/HALT is present — stopping"
+    return 0
+  fi
+  if [[ "${GIBSON_HALT:-}" == "1" ]]; then
+    HALT_REASON="kill switch: GIBSON_HALT=1 — stopping"
+    return 0
+  fi
+  if remote_halted; then
+    # HALT_REASON already set by remote_halted_live (or left from cache hit).
+    if [[ -z "$HALT_REASON" && "$_REMOTE_HALT_CACHE" == "halted" ]]; then
+      HALT_REASON="remote halt: cached remote kill switch still active — stopping"
+    fi
+    return 0
+  fi
+  return 1
+}
+
+# Journal a halt without creating or rewriting loop-state (issue #71).
+# May create gibson/ and journal.md only — never loop-state.md.
+journal_halt() {
+  mkdir -p "$STATE_DIR"
+  if [[ ! -f "$JOURNAL" ]]; then
+    echo "# Gibson loop journal" > "$JOURNAL"
+  fi
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · halt"
+    echo "${HALT_REASON:-kill switch active — stopping}"
+    echo "loop-state left untouched; supervisor handoffs suppressed."
+  } >> "$JOURNAL"
+}
+
+# Exit cleanly on any active kill switch. Call before state init and at every
+# iteration top so a remote halt never materializes a default loop-state.
+stop_if_halted() {
+  if halted; then
+    journal_halt
+    info "kill switch set — stopping cleanly"
+    exit 0
+  fi
+}
+
+# Ensure loop-state exists (and has handoff fields) only AFTER a clean kill-
+# switch check. A remote halt on a cold start must not create or rewrite this.
+ensure_loop_state() {
+  mkdir -p "$STATE_DIR"
+  if [[ ! -f "$STATE_FILE" ]]; then
+    cat > "$STATE_FILE" <<EOF
+# Gibson loop state
+updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+issue:
+pr:
+hat: builder
+next_hat: builder
+round: 0
+parked: false
+handoff:
+handoff_sha:
+next_action: triage highest-priority unblocked unclaimed issue
+notes: initialized by loop.sh
+EOF
+  fi
+  grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
+  grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE"
+  if [[ ! -f "$JOURNAL" ]]; then
+    echo "# Gibson loop journal" > "$JOURNAL"
+  fi
 }
 
 # Why a blocked handoff writes to the journal and not only to stderr.
@@ -713,8 +867,11 @@ heartbeat() {
   fi
 }
 
-failures=0
-iter=0
+# Kill switch before any loop-state init or supervisor ensure: a remote halt on
+# a cold start must journal and exit without creating a default loop-state, and
+# must not wake the cloud supervisor (issue #71).
+stop_if_halted
+ensure_loop_state
 
 if [[ "$SUPERVISOR" == "devin" && "$DRY" -eq 0 && "$PRINT" -eq 0 ]]; then
   "$SCRIPT_DIR/devin-supervisor.sh" ensure --repo "$REPO" || \
@@ -722,10 +879,7 @@ if [[ "$SUPERVISOR" == "devin" && "$DRY" -eq 0 && "$PRINT" -eq 0 ]]; then
 fi
 
 while true; do
-  if halted; then
-    info "kill switch set — stopping cleanly"
-    exit 0
-  fi
+  stop_if_halted
 
   hat="${FORCE_HAT:-$(read_field next_hat)}"
   [[ -n "$hat" ]] || hat="builder"

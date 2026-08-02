@@ -206,7 +206,8 @@ still apply. The kill switch stops everything, including handoffs — and it is 
 - an open issue carrying the `gibson-halt` label
 - a `.gibson-halt` sentinel on the remote default branch
 
-`loop.sh` re-checks before every handoff; `devin-supervisor.sh handoff` also
+`loop.sh` reuses its remote-check cache before every handoff (no duplicate API
+call in the same cadence window); `devin-supervisor.sh handoff` also
 refuses when any of those are active, so a by-hand handoff cannot bypass a
 remote stop. GitHub/API errors on the remote checks fail open (with a degraded
 warning) so a GitHub outage does not brick handoffs that are otherwise clear.

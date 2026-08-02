@@ -57,9 +57,73 @@ mkdir -p "$CALLS" "$FAKE_SCRIPTS" "$BIN"
 #   ok-clear      — label absent, sentinel 404 Not Found (remote stop is clear)
 #   label-halt    — open issue carries gibson-halt
 #   sentinel-halt — .gibson-halt present on the default branch (label clear)
+#
+# GH_STUB_EXPECT_REPO / GH_STUB_EXPECT_REF tighten the fake: the exact --repo
+# slug and contents API target (and optional -f ref=) must match, or the stub
+# exits 99 so a silent blind parse cannot pass the suite. GH_STUB_LOG records
+# every argv line for cadence/call-count sensors. No live GitHub.
 cat > "$BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 behavior="${GH_STUB_BEHAVIOR:-fail}"
+expect_repo="${GH_STUB_EXPECT_REPO:-}"
+expect_ref="${GH_STUB_EXPECT_REF:-}"
+log="${GH_STUB_LOG:-}"
+
+if [[ -n "$log" ]]; then
+  # One argv record per call (NUL-safe enough for these flags).
+  printf '%s\n' "$*" >> "$log"
+fi
+
+# Validate the exact API target so a broken origin parser cannot pass.
+validate_repo_target() {
+  local kind="$1"   # issue | api
+  local got_repo="" got_path="" got_ref="" prev="" a
+  if [[ "$kind" == "issue" ]]; then
+    prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "--repo" ]]; then got_repo="$a"; fi
+      prev="$a"
+    done
+    if [[ -n "$expect_repo" && "$got_repo" != "$expect_repo" ]]; then
+      echo "gh stub: --repo mismatch got='${got_repo}' want='${expect_repo}'" >&2
+      exit 99
+    fi
+    return 0
+  fi
+  # api: require repos/<slug>/contents/.gibson-halt as a path arg, and -f ref=
+  # when expect_ref is set. Reject raw ?ref= interpolation (unencoded URL trap).
+  prev=""
+  for a in "$@"; do
+    case "$a" in
+      repos/*/contents/.gibson-halt)
+        got_path="$a"
+        got_repo="${a#repos/}"
+        got_repo="${got_repo%/contents/.gibson-halt}"
+        ;;
+      repos/*/contents/.gibson-halt\?*)
+        echo "gh stub: forbidden unencoded ?ref= in api path: $a" >&2
+        exit 99
+        ;;
+    esac
+    if [[ "$prev" == "-f" || "$prev" == "--raw-field" ]]; then
+      case "$a" in
+        ref=*) got_ref="${a#ref=}" ;;
+      esac
+    fi
+    prev="$a"
+  done
+  if [[ -n "$expect_repo" ]]; then
+    if [[ "$got_path" != "repos/${expect_repo}/contents/.gibson-halt" ]]; then
+      echo "gh stub: api path mismatch got='${got_path}' want='repos/${expect_repo}/contents/.gibson-halt'" >&2
+      exit 99
+    fi
+  fi
+  if [[ -n "$expect_ref" && "$got_ref" != "$expect_ref" ]]; then
+    echo "gh stub: -f ref= mismatch got='${got_ref}' want='${expect_ref}'" >&2
+    exit 99
+  fi
+}
+
 case "$behavior" in
   fail)
     exit 1
@@ -70,10 +134,12 @@ case "$behavior" in
     ;;
   ok-clear)
     if [[ "$1" == "issue" && "$2" == "list" ]]; then
+      validate_repo_target issue "$@"
       # empty list → -q '.[0].number' prints nothing
       exit 0
     fi
     if [[ "$1" == "api" ]]; then
+      validate_repo_target api "$@"
       echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}' >&2
       exit 1
     fi
@@ -81,10 +147,12 @@ case "$behavior" in
     ;;
   label-halt)
     if [[ "$1" == "issue" && "$2" == "list" ]]; then
+      validate_repo_target issue "$@"
       echo "71"
       exit 0
     fi
     if [[ "$1" == "api" ]]; then
+      validate_repo_target api "$@"
       echo '{"message":"Not Found","status":"404"}' >&2
       exit 1
     fi
@@ -92,9 +160,11 @@ case "$behavior" in
     ;;
   sentinel-halt)
     if [[ "$1" == "issue" && "$2" == "list" ]]; then
+      validate_repo_target issue "$@"
       exit 0
     fi
     if [[ "$1" == "api" ]]; then
+      validate_repo_target api "$@"
       # Presence is enough; the driver does not read file content.
       echo '{"name":".gibson-halt","path":".gibson-halt","type":"file","sha":"deadbeef"}'
       exit 0
@@ -166,7 +236,11 @@ setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
   $GIT -C "$REPO" checkout -q main
   if [[ "${1:-}" == "with-remote" || "${1:-}" == "with-remote-unpublished" ]]; then
     $GIT init -q --bare "$REMOTE"
-    git -C "$REPO" remote add origin "$REMOTE"
+    # Logical GitHub origin for slug parsing (https form by default). Transport
+    # hits the bare remote via insteadOf so ls-remote/push stay local and tests
+    # never touch the network. GH_STUB_EXPECT_REPO must match this slug.
+    git -C "$REPO" remote add origin "https://github.com/acme/widget.git"
+    git -C "$REPO" config --local "url.${REMOTE}.insteadOf" "https://github.com/acme/widget.git"
     if [[ "$1" == "with-remote" ]]; then
       git -C "$REPO" push -q origin main "$BRANCH"
     else
@@ -180,6 +254,22 @@ setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
   : > "$CALLS/second-opinion.count"
   : > "$CALLS/devin.cmds"
   : > "$CALLS/devin.args"
+  : > "$CALLS/gh.log"
+}
+
+# Point origin at a specific GitHub-shaped URL while keeping the bare remote as
+# the transport (for ssh:// / git@ regressions). Clears prior insteadOf keys.
+set_origin_github_url() { # set_origin_github_url <url>
+  local url="$1"
+  git -C "$REPO" remote set-url origin "$url"
+  # Drop any previous insteadOf rewrites for this bare remote, then rebind.
+  git -C "$REPO" config --local --unset-all "url.${REMOTE}.insteadOf" 2>/dev/null || true
+  # Also clear any other insteadOf that might still rewrite older forms.
+  local key
+  for key in $(git -C "$REPO" config --local --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '{print $1}' || true); do
+    git -C "$REPO" config --local --unset-all "$key" 2>/dev/null || true
+  done
+  git -C "$REPO" config --local "url.${REMOTE}.insteadOf" "$url"
 }
 
 # A target repo whose trunk is NOT `main`. The driver used to let
@@ -206,7 +296,8 @@ setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
   $GIT -C "$REPO" checkout -q "$trunk"
   if [[ "$origin_head" != "none" ]]; then
     $GIT init -q --bare "$REMOTE"
-    git -C "$REPO" remote add origin "$REMOTE"
+    git -C "$REPO" remote add origin "https://github.com/acme/widget.git"
+    git -C "$REPO" config --local "url.${REMOTE}.insteadOf" "https://github.com/acme/widget.git"
     git -C "$REPO" push -q origin "$trunk" "$BRANCH"
     git -C "$REMOTE" symbolic-ref HEAD "refs/heads/$trunk"
     if [[ "$origin_head" == "stale-local" ]]; then
@@ -224,6 +315,7 @@ setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
   : > "$CALLS/second-opinion.count"
   : > "$CALLS/devin.cmds"
   : > "$CALLS/devin.args"
+  : > "$CALLS/gh.log"
 }
 
 head_sha() { git -C "$REPO" rev-parse --verify "refs/heads/$BRANCH"; }
@@ -996,15 +1088,21 @@ fi
 # Remote kill switch (issue #71)
 # ---------------------------------------------------------------------------
 # These cases drive the real loop.sh / devin-supervisor.sh against the gh stub
-# above. No live GitHub. The remote check is at iteration top (and again before
-# a supervisor handoff); removing the label/sentinel must let a fresh launch run.
+# above. No live GitHub. The remote check is at iteration top (cached so a
+# supervisor handoff reuses it); removing the label/sentinel must let a fresh
+# launch run. The stub validates the exact --repo / contents API target.
+
+export GH_STUB_EXPECT_REPO="acme/widget"
+export GH_STUB_LOG="$CALLS/gh.log"
 
 echo
 echo "remote halt: gibson-halt label stops the loop at iteration top"
 setup_repo with-remote
 SHA=$(head_sha)
 write_state "$BRANCH" "$SHA"
+state_before=$(cat "$REPO/gibson/loop-state.md")
 export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
 errf="$ROOT/halt-label.err"
 if run_loop_err "$errf"; then
   ok "label halt exits cleanly (rc 0)"
@@ -1020,15 +1118,58 @@ if grep -q 'remote halt: gibson-halt label' "$errf"; then
 else
   bad "label halt did not log its reason (stderr=$(tr '\n' ' ' <"$errf"))"
 fi
+if journal_says "remote halt: gibson-halt label"; then
+  ok "label halt writes a journal entry"
+else
+  bad "label halt left no journal entry (journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+fi
+if journal_says "loop-state left untouched"; then
+  ok "label halt journal promises loop-state was left untouched"
+else
+  bad "label halt journal missing untouched-state promise"
+fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
+  ok "label halt leaves existing loop-state pristine (byte-identical)"
+else
+  bad "label halt rewrote loop-state"
+fi
 if still_queued; then ok "label halt leaves the queued handoff intact for a later launch"
 else bad "label halt cleared handoff/handoff_sha — a fresh launch after removal would have nothing to retry"; fi
 unset GH_STUB_BEHAVIOR
 
+echo "remote halt: cold-start remote halt journals and creates no loop-state"
+setup_repo with-remote
+# No write_state — loop-state must stay absent on remote halt.
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-cold.err"
+if run_loop_err "$errf"; then
+  ok "cold-start label halt exits cleanly"
+else
+  bad "cold-start label halt must exit 0 (rc=$?)"
+fi
+if [[ -e "$REPO/gibson/loop-state.md" ]]; then
+  bad "cold-start remote halt must not create loop-state.md"
+else
+  ok "cold-start remote halt leaves loop-state absent"
+fi
+if [[ -f "$JOURNAL" ]] && journal_says "remote halt: gibson-halt label"; then
+  ok "cold-start remote halt still journals the reason"
+else
+  bad "cold-start remote halt did not journal"
+fi
+if handoff_invoked; then bad "cold-start remote halt must not hand off"
+else ok "cold-start remote halt suppresses supervisor handoff"; fi
+unset GH_STUB_BEHAVIOR
+
 echo "remote halt: removing the label lets a freshly launched loop run"
-# Same fixture as above (handoff still queued). Clear the label and re-launch.
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
 export GH_STUB_BEHAVIOR=ok-clear
 : > "$CALLS/devin.cmds"
 : > "$CALLS/second-opinion.count"
+: > "$CALLS/gh.log"
 if run_loop; then
   ok "fresh launch after label removal exits cleanly"
 else
@@ -1043,6 +1184,8 @@ setup_repo with-remote
 SHA=$(head_sha)
 write_state "$BRANCH" "$SHA"
 export GH_STUB_BEHAVIOR=sentinel-halt
+export GH_STUB_EXPECT_REF="main"
+: > "$CALLS/gh.log"
 errf="$ROOT/halt-sentinel.err"
 if run_loop_err "$errf"; then
   ok "sentinel halt exits cleanly (rc 0)"
@@ -1056,6 +1199,12 @@ if grep -q 'remote halt: .gibson-halt sentinel' "$errf"; then
 else
   bad "sentinel halt did not log its reason (stderr=$(tr '\n' ' ' <"$errf"))"
 fi
+if journal_says "remote halt: .gibson-halt sentinel"; then
+  ok "sentinel halt writes a journal entry"
+else
+  bad "sentinel halt left no journal entry"
+fi
+unset GH_STUB_EXPECT_REF
 unset GH_STUB_BEHAVIOR
 
 echo "remote halt: API failure fails open with a degraded warning"
@@ -1063,6 +1212,7 @@ setup_repo with-remote
 SHA=$(head_sha)
 write_state "$BRANCH" "$SHA"
 export GH_STUB_BEHAVIOR=degrade
+: > "$CALLS/gh.log"
 errf="$ROOT/halt-degrade.err"
 if run_loop_err "$errf"; then
   ok "degraded remote check does not brick the loop"
@@ -1078,11 +1228,147 @@ if handoff_invoked; then ok "degraded remote check still allows a local-clear ha
 else bad "degraded remote check blocked the handoff — that is fail-closed, not fail-open"; fi
 unset GH_STUB_BEHAVIOR
 
+echo "remote halt: ssh:// origin parses to owner/repo (loop + supervisor)"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+set_origin_github_url "ssh://git@github.com/acme/widget.git"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-ssh.err"
+if run_loop_err "$errf"; then
+  ok "ssh:// origin label halt exits cleanly"
+else
+  bad "ssh:// origin label halt failed (rc=$?) — likely blind slug parse (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "ssh:// origin reaches the label check with a valid slug"
+else
+  bad "ssh:// origin never hit the label halt (stderr=$(tr '\n' ' ' <"$errf"); ghlog=$(tr '\n' ' ' <"$CALLS/gh.log"))"
+fi
+if handoff_invoked; then bad "ssh:// origin label halt must not hand off"
+else ok "ssh:// origin label halt suppresses handoff"; fi
+# Supervisor path with the same origin form.
+export GH_STUB_BEHAVIOR=label-halt
+sup_err="$ROOT/supervisor-ssh-halt.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
+  bad "supervisor must refuse under label halt with ssh:// origin"
+else
+  ok "supervisor refuses label halt with ssh:// origin"
+fi
+if grep -qi 'gibson-halt label' "$sup_err"; then
+  ok "supervisor names the label with ssh:// origin"
+else
+  bad "supervisor missed label with ssh:// origin (stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+# Also cover git@ and https forms quickly via the stub's --repo validation.
+set_origin_github_url "git@github.com:acme/widget.git"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-scp.err"
+if run_loop_err "$errf" && grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "git@github.com:owner/repo origin parses for label halt"
+else
+  bad "git@ scp-like origin failed label halt"
+fi
+set_origin_github_url "https://github.com/acme/widget.git"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-https.err"
+if run_loop_err "$errf" && grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "https://github.com/owner/repo.git origin parses for label halt"
+else
+  bad "https origin failed label halt"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: special-character default branch uses encoded -f ref= (not ?ref=)"
+# Branch names may contain # and &; interpolating them into ?ref= checks the
+# wrong ref. setup_repo_trunk with a non-main trunk that has those characters.
+SPECIAL_TRUNK='release/v1#hotfix&x'
+setup_repo_trunk "$SPECIAL_TRUNK" remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=sentinel-halt
+export GH_STUB_EXPECT_REF="$SPECIAL_TRUNK"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-special-ref.err"
+if run_loop_err "$errf"; then
+  ok "special-char default branch sentinel halt exits cleanly"
+else
+  bad "special-char default branch sentinel halt failed (rc=$? stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if grep -q 'remote halt: .gibson-halt sentinel' "$errf"; then
+  ok "special-char default branch sentinel was observed (encoded ref path)"
+else
+  bad "special-char ref never reached sentinel halt (stderr=$(tr '\n' ' ' <"$errf"); ghlog=$(tr '\n' ' ' <"$CALLS/gh.log"))"
+fi
+if grep -q 'forbidden unencoded' "$errf" "$CALLS/gh.log" 2>/dev/null; then
+  bad "driver still used unencoded ?ref= interpolation"
+else
+  ok "driver did not use raw ?ref= interpolation"
+fi
+# Supervisor path with the same special-char default branch.
+sup_err="$ROOT/supervisor-special-ref.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base "$SPECIAL_TRUNK" \
+    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
+  bad "supervisor must refuse sentinel halt on special-char default branch"
+else
+  ok "supervisor refuses sentinel halt on special-char default branch"
+fi
+unset GH_STUB_EXPECT_REF
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: cadence caches checks; supervisor_handoff does not double-call"
+setup_repo with-remote
+# No handoff queued — only iteration-top remote checks.
+export GH_STUB_BEHAVIOR=ok-clear
+export GIBSON_REMOTE_HALT_INTERVAL=3
+: > "$CALLS/gh.log"
+HERMES_CMD='cat >/dev/null' \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+    --max-iterations 6 >/dev/null 2>"$ROOT/cadence.err" || true
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
+# iters 0..5 with interval 3 → live polls at 0 and 3 only (2 polls).
+if [[ "$issue_calls" -eq 2 ]]; then
+  ok "hot-loop cadence polls twice over 6 iters with interval 3 (got $issue_calls)"
+else
+  bad "hot-loop cadence expected 2 issue-list polls over 6 iters, got $issue_calls (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+unset GIBSON_REMOTE_HALT_INTERVAL
+
+# --once defaults interval to 1: a single iteration does exactly one poll.
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=ok-clear
+: > "$CALLS/gh.log"
+if run_loop; then
+  ok "--once remote check completes"
+else
+  bad "--once remote check failed"
+fi
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
+api_calls=$(grep -c 'contents/.gibson-halt' "$CALLS/gh.log" 2>/dev/null || echo 0)
+# One live poll at iteration top; supervisor_handoff must reuse the cache (not
+# issue a second issue-list / contents pair).
+if [[ "$issue_calls" -eq 1 ]]; then
+  ok "--once + handoff issues exactly one label poll (no supervisor double-call)"
+else
+  bad "--once + handoff expected 1 issue-list poll, got $issue_calls (duplicate supervisor call?) log=$(tr '\n' '|' <"$CALLS/gh.log")"
+fi
+if [[ "$api_calls" -eq 1 ]]; then
+  ok "--once + handoff issues exactly one sentinel poll (cache shared)"
+else
+  bad "--once + handoff expected 1 sentinel poll, got $api_calls"
+fi
+unset GH_STUB_BEHAVIOR
+
 echo "remote halt: supervisor handoff itself refuses the same remote paths"
 setup_repo with-remote
 SHA=$(head_sha)
 # Direct by-hand handoff (docs/22) must honor the remote stop, not only the loop.
 export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
 sup_err="$ROOT/supervisor-label-halt.err"
 if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
     --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
@@ -1096,6 +1382,7 @@ else
   bad "supervisor refusal did not mention the label (stderr=$(tr '\n' ' ' <"$sup_err"))"
 fi
 export GH_STUB_BEHAVIOR=sentinel-halt
+export GH_STUB_EXPECT_REF="main"
 sup_err="$ROOT/supervisor-sentinel-halt.err"
 if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
     --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
@@ -1108,6 +1395,7 @@ if grep -qi '\.gibson-halt sentinel' "$sup_err"; then
 else
   bad "supervisor refusal did not mention the sentinel (stderr=$(tr '\n' ' ' <"$sup_err"))"
 fi
+unset GH_STUB_EXPECT_REF
 # Local HALT file is still the permanent switch for a by-hand handoff too.
 unset GH_STUB_BEHAVIOR
 export GH_STUB_BEHAVIOR=ok-clear
@@ -1122,6 +1410,8 @@ else
 fi
 rm -f "$REPO/gibson/HALT"
 unset GH_STUB_BEHAVIOR
+unset GH_STUB_EXPECT_REPO
+unset GH_STUB_LOG
 
 echo
 echo "loop-handoff.test.sh: $PASS passed, $FAIL failed"

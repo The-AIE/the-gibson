@@ -129,7 +129,36 @@ STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/devin-session.json"
 mkdir -p "$STATE_DIR"
 
-SLUG=$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true)
+# Parse owner/repo from normal GitHub remote forms (https, git@, ssh://).
+# Uses remote.origin.url so url.*.insteadOf rewrites do not hide the logical slug.
+# Must not leave a scheme prefix in place — that blinds --repo / contents API calls.
+origin_slug_from_url() {
+  local url="$1" rest
+  [[ -n "$url" ]] || return 0
+  url="${url%.git}"
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
+  case "$url" in
+    git@*:*)
+      rest="${url#*:}"
+      ;;
+    ssh://*|https://*|http://*|git://*)
+      rest="${url#*://}"
+      rest="${rest#*@}"
+      rest="${rest#*/}"
+      ;;
+    *)
+      rest="$url"
+      ;;
+  esac
+  case "$rest" in
+    ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
+    */*) printf '%s\n' "$rest" ;;
+  esac
+}
+_origin_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)
+SLUG=$(origin_slug_from_url "$_origin_url")
 [[ -n "$SLUG" ]] || SLUG="$(basename "$REPO")"
 
 json_get() {
@@ -345,8 +374,8 @@ case "$CMD" in
       die "kill switch: GIBSON_HALT=1 — refusing handoff"
     fi
     if command -v gh >/dev/null 2>&1; then
-      origin_url=$(git -C "$REPO" remote get-url origin 2>/dev/null || true)
-      halt_slug=$(printf '%s' "$origin_url" | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//')
+      origin_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)
+      halt_slug=$(origin_slug_from_url "$origin_url")
       if [[ -n "$halt_slug" ]]; then
         set +e
         halt_out=$(gh issue list --repo "$halt_slug" \
@@ -371,8 +400,10 @@ case "$CMD" in
           if [[ -z "$halt_def" ]]; then
             info "remote halt check degraded: origin advertises no symbolic HEAD — continuing with local HALT/GIBSON_HALT only"
           else
+            # Encode ref via -f, never raw ?ref= interpolation (branch may hold #/&).
             set +e
-            halt_out=$(gh api "repos/${halt_slug}/contents/.gibson-halt?ref=${halt_def}" 2>&1)
+            halt_out=$(gh api --method GET "repos/${halt_slug}/contents/.gibson-halt" \
+              -f "ref=${halt_def}" 2>&1)
             halt_ec=$?
             set -e
             if [[ $halt_ec -eq 0 ]]; then
