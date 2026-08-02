@@ -2448,7 +2448,262 @@ fi
 # Restore the suite cleanup trap (eval'd helpers installed halt_lock_release).
 trap 'rm -rf "$ROOT"' EXIT
 unset HALT_LOCK_FILE HALT_LOCK_HELD HALT_LOCK_OWNER HALT_LOCK_TMP
-unset _GIBSON_HALT_LOCK_TRAP
+unset HALT_LOCK_RECLAIM_GATE
+unset _GIBSON_HALT_LOCK_TRAP _GIBSON_HALT_LOCK_TRAP_DEPTH
+
+echo "halt lock: adversarial stale reclaim cannot admit concurrent CS or unlink a successor"
+# Independently reproduced race: two reclaimers classify the same stale record;
+# the first unlinks it, a successor publishes a valid lock, the second's late
+# rm -f steals the successor. Stress real halt_lock_acquire against alternating
+# malformed and dead-owner seeds with ≥30 contenders; fail on concurrent
+# critical-section entry, nonzero child rc, dirty stderr, temp leaks, or a
+# holder observing its published token disappear mid-hold.
+RECLAIM_STRESS_N=30
+RECLAIM_STRESS_ROUNDS=20
+setup_repo with-remote
+mkdir -p "$REPO/gibson"
+reclaim_stress_dir="$ROOT/reclaim-stress"
+rm -rf "$reclaim_stress_dir"
+mkdir -p "$reclaim_stress_dir"
+
+# Load real halt_lock_* helpers (same extract as release-successor sensor).
+# shellcheck disable=SC2034
+STATE_DIR="$REPO/gibson"
+# shellcheck disable=SC2034
+eval "$(
+  awk '
+    /^HALT_LOCK_FILE=/ {p=1}
+    /^halt_latch_field\(\)/ {exit}
+    p {print}
+  ' "$LOOP"
+)"
+
+# Dead-owner seeds must use a PID that is not live. Prefer a finished
+# subshell pid; fall back to a non-existent pid if reuse is visible.
+reclaim_dead_pid() {
+  local p
+  p=$(bash -c 'echo $$')
+  if kill -0 "$p" 2>/dev/null; then
+    p=999999999
+  fi
+  printf '%s' "$p"
+}
+
+reclaim_round=1
+reclaim_stress_fail=0
+while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
+  round_dir="$reclaim_stress_dir/r$reclaim_round"
+  rm -rf "$round_dir"
+  mkdir -p "$round_dir/started" "$round_dir/entered" "$round_dir/done" \
+    "$round_dir/rc" "$round_dir/err" "$round_dir/violations"
+  rm -f "$REPO/gibson/halt-lock"
+  rm -rf "$REPO/gibson/.halt-lock.reclaiming"
+  # shellcheck disable=SC2086
+  rm -f "$REPO/gibson"/.halt-lock.* 2>/dev/null || true
+
+  # Alternate malformed and dead-owner stale records (both reclaim paths).
+  if [[ $((reclaim_round % 2)) -eq 1 ]]; then
+    # Malformed: missing owner, non-numeric pid, or truncated body.
+    case $((reclaim_round % 6)) in
+      1) printf 'not-a-lock\n' > "$REPO/gibson/halt-lock" ;;
+      3) printf 'pid=notnum\nowner=malformed-token\n' > "$REPO/gibson/halt-lock" ;;
+      5) printf 'pid=1\n' > "$REPO/gibson/halt-lock" ;;
+    esac
+    seed_kind="malformed"
+  else
+    printf 'pid=%s\nowner=stale-dead-r%s-token\n' "$(reclaim_dead_pid)" "$reclaim_round" \
+      > "$REPO/gibson/halt-lock"
+    seed_kind="dead"
+  fi
+
+  # Deterministic start barrier: children wait until parent has forked all N.
+  rm -f "$round_dir/go" "$round_dir/may_release"
+  i=0
+  while [[ $i -lt $RECLAIM_STRESS_N ]]; do
+    (
+      set +e
+      # Per-child lock state (helpers use process-global vars; assigned for
+      # halt_lock_acquire / release — SC2034 false positive on indirect use).
+      # shellcheck disable=SC2034
+      HALT_LOCK_HELD=0
+      # shellcheck disable=SC2034
+      HALT_LOCK_OWNER=""
+      # shellcheck disable=SC2034
+      HALT_LOCK_TMP=""
+      errf="$round_dir/err/$i"
+      : > "$errf"
+      touch "$round_dir/started/$i"
+      # Wait for full contender set before first acquire (no fixed sleep).
+      while [[ ! -f "$round_dir/go" ]]; do
+        # Busy-yield: prefer fractional sleep when available.
+        sleep 0.01 2>/dev/null || true
+      done
+      if ! halt_lock_acquire 2>>"$errf"; then
+        echo "acquire-failed" >> "$round_dir/violations/acquire.$i"
+        echo 1 > "$round_dir/rc/$i"
+        exit 1
+      fi
+      my_owner="${HALT_LOCK_OWNER:-}"
+      # Mutual exclusion: only one holder may own the CS directory at a time.
+      if ! mkdir "$round_dir/cs_held" 2>/dev/null; then
+        echo "concurrent-cs owner=$my_owner" >> "$round_dir/violations/concurrent.$i"
+        halt_lock_release 2>>"$errf"
+        echo 2 > "$round_dir/rc/$i"
+        exit 2
+      fi
+      printf '%s\n' "$my_owner" > "$round_dir/cs_held/owner"
+      touch "$round_dir/entered/$i"
+      # While holding, the published lock must still carry our exact token.
+      # A late reclaim rm would clear or replace it — that is the successor bug.
+      stolen=0
+      while [[ ! -f "$round_dir/may_release" ]]; do
+        cur=$(halt_lock_field owner 2>/dev/null) || cur=""
+        if [[ "$cur" != "$my_owner" ]]; then
+          echo "successor-unlinked want=$my_owner got=${cur:-absent}" \
+            >> "$round_dir/violations/stolen.$i"
+          stolen=1
+          break
+        fi
+        sleep 0.01 2>/dev/null || true
+      done
+      # Final token check at release boundary.
+      cur=$(halt_lock_field owner 2>/dev/null) || cur=""
+      if [[ "$stolen" -eq 0 && "$cur" != "$my_owner" ]]; then
+        echo "successor-unlinked-at-release want=$my_owner got=${cur:-absent}" \
+          >> "$round_dir/violations/stolen.$i"
+        stolen=1
+      fi
+      rm -f "$round_dir/cs_held/owner"
+      rmdir "$round_dir/cs_held" 2>/dev/null || true
+      halt_lock_release 2>>"$errf"
+      if [[ "$stolen" -ne 0 ]]; then
+        echo 3 > "$round_dir/rc/$i"
+        exit 3
+      fi
+      echo 0 > "$round_dir/rc/$i"
+      touch "$round_dir/done/$i"
+      exit 0
+    ) &
+    i=$((i + 1))
+  done
+
+  # Wait until every contender has forked and reached the start barrier.
+  wait_spins=0
+  while [[ $wait_spins -lt 5000 ]]; do
+    started_n=$(find "$round_dir/started" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${started_n:-0}" -ge $RECLAIM_STRESS_N ]]; then
+      break
+    fi
+    sleep 0.01 2>/dev/null || true
+    wait_spins=$((wait_spins + 1))
+  done
+  if [[ "${started_n:-0}" -lt $RECLAIM_STRESS_N ]]; then
+    bad "reclaim-stress round $reclaim_round ($seed_kind): only $started_n/$RECLAIM_STRESS_N started"
+    reclaim_stress_fail=1
+    # shellcheck disable=SC2046
+    kill $(jobs -rp) 2>/dev/null || true
+    wait 2>/dev/null || true
+    reclaim_round=$((reclaim_round + 1))
+    continue
+  fi
+  # Release all contenders into acquire together (maximizes reclaim race).
+  touch "$round_dir/go"
+
+  # Hold the first critical section long enough that the other N-1 contenders
+  # are blocked in acquire/reclaim — deterministic: wait until all N have
+  # either entered once (serialized) or we have one holder and N started.
+  # Signal may_release once every child has finished (entered+released path
+  # uses may_release mid-hold). Wait for at least one entry, then for
+  # (entered + still-running acquire) to cover all children that will serialize
+  # through the lock: after one entry, allow release so the queue drains.
+  enter_spins=0
+  while [[ $enter_spins -lt 5000 ]]; do
+    entered_n=$(find "$round_dir/entered" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${entered_n:-0}" -ge 1 ]]; then
+      break
+    fi
+    # If any violation files already appeared, still let the pack finish.
+    if find "$round_dir/violations" -type f 2>/dev/null | grep -q .; then
+      break
+    fi
+    sleep 0.01 2>/dev/null || true
+    enter_spins=$((enter_spins + 1))
+  done
+  touch "$round_dir/may_release"
+
+  # Wait for children (bounded).
+  conc_waited=0
+  while [[ $conc_waited -lt 120 ]]; do
+    if ! jobs -rp 2>/dev/null | grep -q .; then
+      break
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+    conc_waited=$((conc_waited + 1))
+  done
+  if jobs -rp 2>/dev/null | grep -q .; then
+    bad "reclaim-stress round $reclaim_round ($seed_kind): children exceeded wait budget"
+    reclaim_stress_fail=1
+    # shellcheck disable=SC2046
+    kill $(jobs -rp) 2>/dev/null || true
+    wait 2>/dev/null || true
+  else
+    wait 2>/dev/null || true
+  fi
+
+  # Assert every child rc=0, clean stderr, no violations, no leftover temps.
+  round_bad=0
+  sample=""
+  i=0
+  while [[ $i -lt $RECLAIM_STRESS_N ]]; do
+    if [[ ! -f "$round_dir/rc/$i" ]]; then
+      round_bad=1
+      sample="${sample} missing-rc.$i;"
+    else
+      rc=$(tr -d ' \n' <"$round_dir/rc/$i")
+      if [[ "$rc" != "0" ]]; then
+        round_bad=1
+        sample="${sample} rc.$i=$rc;"
+      fi
+    fi
+    if [[ -f "$round_dir/err/$i" ]] && ! halt_lock_stderr_clean "$round_dir/err/$i"; then
+      round_bad=1
+      sample="${sample} err.$i=$(tr '\n' ' ' <"$round_dir/err/$i" | head -c 120);"
+    fi
+    i=$((i + 1))
+  done
+  if find "$round_dir/violations" -type f 2>/dev/null | grep -q .; then
+    round_bad=1
+    sample="${sample} violations=$(find "$round_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
+  fi
+  if [[ -e "$REPO/gibson/halt-lock" ]] || [[ -d "$REPO/gibson/.halt-lock.reclaiming" ]]; then
+    round_bad=1
+    sample="${sample} leftover-lock;"
+  fi
+  # shellcheck disable=SC2086
+  if compgen -G "$REPO/gibson/.halt-lock.*" >/dev/null 2>&1; then
+    round_bad=1
+    sample="${sample} leftover-temps;"
+  fi
+
+  if [[ "$round_bad" -eq 0 ]]; then
+    ok "reclaim-stress round $reclaim_round ($seed_kind): $RECLAIM_STRESS_N contenders mutual-exclusive, clean"
+  else
+    bad "reclaim-stress round $reclaim_round ($seed_kind): $sample"
+    reclaim_stress_fail=1
+  fi
+  reclaim_round=$((reclaim_round + 1))
+done
+
+if [[ "$reclaim_stress_fail" -eq 0 ]]; then
+  ok "reclaim-stress: $RECLAIM_STRESS_ROUNDS rounds x $RECLAIM_STRESS_N contenders successor-safe"
+else
+  bad "reclaim-stress: one or more rounds failed (see above)"
+fi
+# Restore suite trap after eval'd EXIT handler.
+trap 'rm -rf "$ROOT"' EXIT
+unset HALT_LOCK_FILE HALT_LOCK_HELD HALT_LOCK_OWNER HALT_LOCK_TMP
+unset HALT_LOCK_RECLAIM_GATE
+unset _GIBSON_HALT_LOCK_TRAP _GIBSON_HALT_LOCK_TRAP_DEPTH
 
 echo "halt latch: repeated 30-way local-HALT bursts → one journal, valid latch, zero work, clean children"
 LOCAL_BURST_N=30

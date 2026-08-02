@@ -422,20 +422,42 @@ REMOTE_HALT_KIND=""
 # (atomic hard-link publish on the same filesystem). Observers never see a lock
 # file without complete ownership data. Release removes the lock only when it
 # still carries this process's exact owner token, so a late EXIT from a former
-# owner cannot delete a successor's lock.
+# owner cannot delete a successor's lock. Stale reclaim is serialized through
+# an exclusive gate and re-classifies under that gate so a late unlink cannot
+# remove a successor that published after a peer already dropped the stale
+# record (see halt_lock_try_reclaim_stale).
 
 HALT_LOCK_FILE="$STATE_DIR/halt-lock"
 HALT_LOCK_HELD=0
 HALT_LOCK_OWNER=""
 HALT_LOCK_TMP=""
+# Exclusive reclaim gate (directory). Only one reclaimer may classify+unlink.
+HALT_LOCK_RECLAIM_GATE="${STATE_DIR}/.halt-lock.reclaiming"
 
 # Read a key=value field from the lock file. Returns 1 if missing/unreadable.
+# No pipelines: a pipeline runs in a subshell that would inherit the EXIT trap
+# and call halt_lock_release, unlinking a live lock held by this shell.
 halt_lock_field() {
   local key="$1" file="${2:-$HALT_LOCK_FILE}" line
   [[ -f "$file" ]] || return 1
-  line=$(grep -E "^${key}=" "$file" 2>/dev/null | head -n 1) || true
-  [[ -n "$line" ]] || return 1
-  printf '%s' "${line#*=}"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "${key}="*)
+        printf '%s' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+# Inode of a path (BSD stat first, GNU fallback). Empty/fail => return 1.
+halt_lock_inode() {
+  local f="$1" ino
+  [[ -e "$f" ]] || return 1
+  ino=$(stat -f %i "$f" 2>/dev/null) || ino=$(stat -c %i "$f" 2>/dev/null) || return 1
+  [[ -n "$ino" ]] || return 1
+  printf '%s' "$ino"
 }
 
 # Drop the lock only if we still own it (exact owner token match). Always
@@ -460,49 +482,111 @@ halt_lock_release() {
 }
 
 # Reclaim a dead or malformed lock without racing a live successor.
-# Removes only when the on-disk content still matches what we classified as
-# stale (token match for dead owners; full snapshot match for malformed).
+#
+# Two hazards:
+# 1) Check-then-rm on the public path: reclaimer A and B both classify the same
+#    stale record; B unlinks it; a successor publishes via ln; A's late rm steals
+#    the successor.
+# 2) Unlink must target the exact inode we classified, not whatever name now
+#    sits at the lock path.
+#
+# Protocol: hard-link pin the published inode → classify via the pin → take an
+# exclusive reclaim gate → unlink the public name only if it still refers to
+# the pinned inode and that inode is still stale → drop gate and pin. A second
+# reclaimer either fails the pin (gone), fails the gate (peer reclaiming), or
+# sees a different inode at the public path (successor already published).
 halt_lock_try_reclaim_stale() {
-  local owner pid snap cur_owner
+  local owner pid gate gpid pin ino cur_ino stale=0
+  gate="${HALT_LOCK_RECLAIM_GATE:-$STATE_DIR/.halt-lock.reclaiming}"
+
   # Legacy directory form from older builds: reclaim empty/dead dirs so an
   # upgraded process is not permanently blocked by a leftover halt-lock/.
+  # Serialized under the same gate as file reclaim.
   if [[ -d "$HALT_LOCK_FILE" ]]; then
-    if [[ -f "${HALT_LOCK_FILE}/pid" ]]; then
-      pid=$(cat "${HALT_LOCK_FILE}/pid" 2>/dev/null || true)
-      if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
-        rm -f "${HALT_LOCK_FILE}/pid" 2>/dev/null || true
+    if ! mkdir "$gate" 2>/dev/null; then
+      gpid=$(cat "${gate}/pid" 2>/dev/null || true)
+      if [[ -n "$gpid" && "$gpid" =~ ^[0-9]+$ ]] && ! kill -0 "$gpid" 2>/dev/null; then
+        rm -f "${gate}/pid" 2>/dev/null || true
+        rmdir "$gate" 2>/dev/null || true
+        mkdir "$gate" 2>/dev/null || return 0
+      else
+        return 0
+      fi
+    fi
+    printf '%s\n' "$$" > "${gate}/pid" 2>/dev/null || true
+    if [[ -d "$HALT_LOCK_FILE" ]]; then
+      if [[ -f "${HALT_LOCK_FILE}/pid" ]]; then
+        pid=$(cat "${HALT_LOCK_FILE}/pid" 2>/dev/null || true)
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+          rm -f "${HALT_LOCK_FILE}/pid" 2>/dev/null || true
+          rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
+        fi
+      else
         rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
       fi
-    else
-      rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
     fi
+    rm -f "${gate}/pid" 2>/dev/null || true
+    rmdir "$gate" 2>/dev/null || true
     return 0
   fi
+
   [[ -f "$HALT_LOCK_FILE" ]] || return 0
 
-  owner=$(halt_lock_field owner) || owner=""
-  pid=$(halt_lock_field pid) || pid=""
-
-  if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
-    # Malformed / incomplete: delete only if content is unchanged (no successor).
-    snap=$(cat "$HALT_LOCK_FILE" 2>/dev/null || true)
-    if [[ "$(cat "$HALT_LOCK_FILE" 2>/dev/null || true)" == "$snap" ]]; then
-      owner=$(halt_lock_field owner) || owner=""
-      pid=$(halt_lock_field pid) || pid=""
-      if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
-        rm -f "$HALT_LOCK_FILE"
-      fi
-    fi
+  # Pin the exact inode currently published as the lock.
+  pin=$(mktemp "${STATE_DIR}/.halt-lock.reclaim.XXXXXX") || return 0
+  rm -f "$pin"
+  if ! ln "$HALT_LOCK_FILE" "$pin" 2>/dev/null; then
     return 0
   fi
 
-  if ! kill -0 "$pid" 2>/dev/null; then
-    # Dead owner — remove only if the same owner token is still published.
-    cur_owner=$(halt_lock_field owner) || cur_owner=""
-    if [[ "$cur_owner" == "$owner" ]]; then
+  owner=$(halt_lock_field owner "$pin") || owner=""
+  pid=$(halt_lock_field pid "$pin") || pid=""
+  if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+    stale=1
+  elif ! kill -0 "$pid" 2>/dev/null; then
+    stale=1
+  fi
+  if [[ "$stale" -ne 1 ]]; then
+    rm -f "$pin"
+    return 0
+  fi
+
+  ino=$(halt_lock_inode "$pin") || { rm -f "$pin"; return 0; }
+
+  if ! mkdir "$gate" 2>/dev/null; then
+    # Peer reclaimer holds the gate. Steal only when that peer is dead so a
+    # crash mid-reclaim cannot permanently block acquire.
+    gpid=$(cat "${gate}/pid" 2>/dev/null || true)
+    if [[ -n "$gpid" && "$gpid" =~ ^[0-9]+$ ]] && ! kill -0 "$gpid" 2>/dev/null; then
+      rm -f "${gate}/pid" 2>/dev/null || true
+      rmdir "$gate" 2>/dev/null || true
+      if ! mkdir "$gate" 2>/dev/null; then
+        rm -f "$pin"
+        return 0
+      fi
+    else
+      rm -f "$pin"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$$" > "${gate}/pid" 2>/dev/null || true
+
+  # Unlink the public name only if it still names the inode we classified.
+  cur_ino=$(halt_lock_inode "$HALT_LOCK_FILE" 2>/dev/null || true)
+  if [[ -n "$cur_ino" && "$cur_ino" == "$ino" ]]; then
+    # Re-confirm the pinned inode is still a stale record (content is fixed for
+    # a given inode under our publish protocol; re-read is defensive).
+    owner=$(halt_lock_field owner "$pin") || owner=""
+    pid=$(halt_lock_field pid "$pin") || pid=""
+    if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]] \
+      || ! kill -0 "$pid" 2>/dev/null; then
       rm -f "$HALT_LOCK_FILE"
     fi
   fi
+
+  rm -f "${gate}/pid" 2>/dev/null || true
+  rmdir "$gate" 2>/dev/null || true
+  rm -f "$pin"
 }
 
 # Acquire exclusive halt transition lock. Wait for peers (ordinary launchd is
@@ -547,17 +631,28 @@ halt_lock_acquire() {
 }
 
 # Ensure lock is dropped on abnormal exit while held (token-checked release).
+# Only fire at the shell depth that installed the trap: pipeline/subshell
+# helpers inherit HALT_LOCK_HELD and must not unlink the parent's live lock.
 if [[ -z "${_GIBSON_HALT_LOCK_TRAP:-}" ]]; then
   _GIBSON_HALT_LOCK_TRAP=1
-  trap 'halt_lock_release' EXIT
+  _GIBSON_HALT_LOCK_TRAP_DEPTH=${BASH_SUBSHELL:-0}
+  trap '[[ "${BASH_SUBSHELL:-0}" -eq "${_GIBSON_HALT_LOCK_TRAP_DEPTH:-0}" ]] && halt_lock_release' EXIT
 fi
 
 halt_latch_field() {
   local key="$1" line
   [[ -f "$HALT_LATCH_FILE" ]] || return 0
-  line=$(grep -E "^${key}=" "$HALT_LATCH_FILE" 2>/dev/null | head -n 1) || true
-  [[ -n "$line" ]] || return 0
-  printf '%s' "${line#*=}"
+  # No pipelines — same EXIT-trap hazard as halt_lock_field (latch is read
+  # while the halt transition lock is held).
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "${key}="*)
+        printf '%s' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$HALT_LATCH_FILE"
+  return 0
 }
 
 halt_latch_load() {
