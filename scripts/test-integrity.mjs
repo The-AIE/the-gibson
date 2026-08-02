@@ -22,8 +22,14 @@
  * disagree on total/skipped/todo the parse fails closed so stdout cannot
  * self-authorize head metrics (fake total=N then honest total=M; conflicting
  * repeated Jest/Vitest/node:test/TAP summaries). Counters from different
- * repeated native blocks are never mixed. A single source (explicit alone or
- * summary alone) is fine; identical multi-line metrics agree and pass.
+ * repeated native blocks are never mixed. Within one node:test `# tests`
+ * region every `# skip` / `# todo` counter is collected (identical may agree;
+ * any disagreement fails closed — never first-match). TAP SKIP/TODO result
+ * lines bind to the owning plan region (plan-at-end: since previous plan
+ * through current plan; plan-at-start when no pre-plan results); ambiguous
+ * ownership fails closed rather than inventing a metric. A single source
+ * (explicit alone or summary alone) is fine; identical multi-line metrics
+ * agree and pass.
  *
  * Unparseable, negative, non-integer, or non-safe-integer metrics fail closed
  * (never become 0; values beyond Number.MAX_SAFE_INTEGER are rejected).
@@ -156,6 +162,65 @@ function metricsKey(m) {
 }
 
 /**
+ * Collect every counter match in a text region. Absent → 0. Identical values
+ * may agree; any disagreement fails closed (never first-match / last-match).
+ * @param {string} block
+ * @param {RegExp} re  must be global; capture group 1 is the integer
+ * @param {string} field  label for errors (e.g. node-test#1.skip)
+ * @returns {number}
+ */
+function collectAgreeingCounter(block, re, field) {
+  const matches = [...block.matchAll(re)];
+  if (matches.length === 0) return 0;
+  /** @type {number[]} */
+  const values = [];
+  for (let i = 0; i < matches.length; i++) {
+    values.push(parseNonNegInt(matches[i][1], `${field}#${i + 1}`));
+  }
+  const uniq = new Set(values);
+  if (uniq.size > 1) {
+    throw new Error(
+      `${RESULT}: conflicting ${field} counters in runner output (fail closed; ` +
+        `never first-match): ${[...uniq].join(" vs ")}. ` +
+        `Every counter in a summary region must agree.`
+    );
+  }
+  return values[0];
+}
+
+/** @param {{ index?: number, 0: string }} m */
+function matchEnd(m) {
+  return (m.index ?? 0) + m[0].length;
+}
+
+/**
+ * Count TAP result lines carrying # SKIP / # TODO inside [start, end).
+ * @param {string} text
+ * @param {number} start
+ * @param {number} end
+ * @param {'SKIP' | 'TODO'} kind
+ */
+function countTapDirectivesInRange(text, start, end, kind) {
+  const region = text.slice(start, end);
+  const re =
+    kind === "SKIP"
+      ? /^\s*(?:ok|not ok)\s+\d+.*#\s*SKIP\b/gim
+      : /^\s*(?:ok|not ok)\s+\d+.*#\s*TODO\b/gim;
+  return [...region.matchAll(re)].length;
+}
+
+/**
+ * True when any TAP result line (ok/not ok N) falls in [start, end).
+ * @param {string} text
+ * @param {number} start
+ * @param {number} end
+ */
+function hasTapResultInRange(text, start, end) {
+  const region = text.slice(start, end);
+  return /^\s*(?:ok|not ok)\s+\d+/im.test(region);
+}
+
+/**
  * Parse one explicit GIBSON_TEST_METRICS body (KV or JSON).
  * @param {string} body
  * @param {number} index 1-based line index among explicit lines
@@ -212,7 +277,8 @@ function parseExplicitMetricsBody(body, index) {
  * head metrics (e.g. fake total=10 followed by honest total=7 must not parse
  * as 10; repeated Jest/Vitest/node:test/TAP summaries that conflict likewise).
  * Counters from different repeated native blocks are never mixed into one
- * fabricated metric.
+ * fabricated metric. node:test regions collect every `# skip`/`# todo` (not
+ * first-match); TAP SKIP/TODO bind to the owning plan region.
  *
  * @param {string} text
  * @returns {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }}
@@ -298,6 +364,8 @@ export function parseRunnerOutput(text) {
   // 4) node:test counters — every `# tests N` region, not first-only.
   //    Associate `# skip` / `# todo` with the enclosing `# tests` block so
   //    counters from different repeated blocks are never mixed into one metric.
+  //    Within a region, collect *every* `# skip` / `# todo` line: identical
+  //    values may agree; any disagreement fails closed (never first-match).
   {
     const testsMatches = [
       ...text.matchAll(/^\s*#\s*tests\s+(\d+)\s*$/gim),
@@ -313,14 +381,16 @@ export function parseRunnerOutput(text) {
         const block = text.slice(blockStart, blockEnd);
         const label = `node-test#${i + 1}`;
         const total = parseNonNegInt(testsM[1], `${label}.tests`);
-        const skipM = block.match(/^\s*#\s*skip\s+(\d+)\s*$/im);
-        const todoM = block.match(/^\s*#\s*todo\s+(\d+)\s*$/im);
-        const skipped = skipM
-          ? parseNonNegInt(skipM[1], `${label}.skip`)
-          : 0;
-        const todo = todoM
-          ? parseNonNegInt(todoM[1], `${label}.todo`)
-          : 0;
+        const skipped = collectAgreeingCounter(
+          block,
+          /^\s*#\s*skip\s+(\d+)\s*$/gim,
+          `${label}.skip`
+        );
+        const todo = collectAgreeingCounter(
+          block,
+          /^\s*#\s*todo\s+(\d+)\s*$/gim,
+          `${label}.todo`
+        );
         const m = normalizeMetrics({ total, skipped, todo }, label);
         found.push({
           ...m,
@@ -331,24 +401,61 @@ export function parseRunnerOutput(text) {
     }
   }
 
-  // 5) TAP plan "1..N" — every plan line, not first-only. SKIP/TODO counts come
-  //    from individual result lines in the whole stream (TAP has no per-plan
-  //    skip summary); conflicting plans still fail closed on total.
+  // 5) TAP plan "1..N" — every plan line, not first-only. SKIP/TODO counts bind
+  //    to the owning plan region so repeated plans never reuse whole-stream
+  //    markers (two plan-at-end runs with one SKIP each → two skipped=1, not
+  //    skipped=2 each). Plan-at-end: lines since previous plan through current
+  //    plan. Plan-at-start: when no result lines precede the first plan.
+  //    Ambiguous ownership (results both before the first plan and after the
+  //    last) fails closed rather than inventing a metric. A single plan uses
+  //    the whole stream (unambiguous ownership).
   {
     const plans = [...text.matchAll(/^\s*1\.\.(\d+)\s*$/gm)];
     if (plans.length > 0) {
-      const skipLines = [
-        ...text.matchAll(/^\s*(?:ok|not ok)\s+\d+.*#\s*SKIP\b/gim),
-      ];
-      const todoLines = [
-        ...text.matchAll(/^\s*(?:ok|not ok)\s+\d+.*#\s*TODO\b/gim),
-      ];
-      const skipped = skipLines.length;
-      const todo = todoLines.length;
+      /** @type {{ start: number, end: number }[]} */
+      let regions;
+      if (plans.length === 1) {
+        regions = [{ start: 0, end: text.length }];
+      } else {
+        const firstStart = plans[0].index ?? 0;
+        const lastEnd = matchEnd(plans[plans.length - 1]);
+        const resultsBeforeFirst = hasTapResultInRange(text, 0, firstStart);
+        const resultsAfterLast = hasTapResultInRange(
+          text,
+          lastEnd,
+          text.length
+        );
+        if (resultsBeforeFirst && resultsAfterLast) {
+          throw new Error(
+            `${RESULT}: ambiguous TAP plan-region ownership (fail closed; ` +
+              `result lines both before the first plan and after the last). ` +
+              `Cannot bind SKIP/TODO without inventing a metric.`
+          );
+        }
+        // Plan-at-end when any result precedes the first plan; otherwise
+        // plan-at-start (results after each plan until the next / EOF).
+        const planAtEnd = resultsBeforeFirst;
+        regions = plans.map((plan, i) => {
+          if (planAtEnd) {
+            const start = i === 0 ? 0 : matchEnd(plans[i - 1]);
+            const end = matchEnd(plan);
+            return { start, end };
+          }
+          const start = plan.index ?? 0;
+          const end =
+            i + 1 < plans.length
+              ? (plans[i + 1].index ?? text.length)
+              : text.length;
+          return { start, end };
+        });
+      }
       for (let i = 0; i < plans.length; i++) {
         const plan = plans[i];
         const label = `tap#${i + 1}`;
         const total = parseNonNegInt(plan[1], `${label}.plan`);
+        const { start, end } = regions[i];
+        const skipped = countTapDirectivesInRange(text, start, end, "SKIP");
+        const todo = countTapDirectivesInRange(text, start, end, "TODO");
         const m = normalizeMetrics({ total, skipped, todo }, label);
         found.push({
           ...m,

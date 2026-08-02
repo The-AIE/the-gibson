@@ -114,12 +114,18 @@ runner summaries. **Every** explicit KV/JSON line and **every** matching native
 runner summary block (Vitest / Jest / node:test / TAP plan) is collected — never
 first-match or last-match only. If any two sources disagree on total/skipped/todo
 the parse fails closed; counters from different repeated native blocks are never
-mixed into one fabricated metric. A test's stdout must never self-authorize head
-metrics — e.g. honest `Tests 7 passed (7)` plus a fake `GIBSON_TEST_METRICS
-total=10`, multi-explicit `total=10` then `total=7`, or conflicting repeated
-native lines such as Jest `Tests: 10 … total` then `Tests: 7 … total`, node:test
-`# tests 10` then `# tests 7`, TAP `1..10` then `1..7`, or Vitest honest-then-fake
-/ fake-then-honest summary blocks.
+mixed into one fabricated metric. Within one node:test `# tests` region every
+`# skip` / `# todo` counter is collected (identical may agree; disagreement fails
+closed — never first-match on `# skip 0` then `# skip 2`). TAP SKIP/TODO result
+lines bind to the owning plan region (plan-at-end: since previous plan through
+current plan) so two repeated `1..10` runs with one SKIP each yield two agreeing
+`skipped=1` metrics, not whole-stream `skipped=2` on each; ambiguous plan-region
+ownership fails closed rather than inventing a metric. A test's stdout must never
+self-authorize head metrics — e.g. honest `Tests 7 passed (7)` plus a fake
+`GIBSON_TEST_METRICS total=10`, multi-explicit `total=10` then `total=7`, or
+conflicting repeated native lines such as Jest `Tests: 10 … total` then
+`Tests: 7 … total`, node:test `# tests 10` then `# tests 7`, TAP `1..10` then
+`1..7`, or Vitest honest-then-fake / fake-then-honest summary blocks.
 
 **Fail closed:** unparseable, negative, non-integer, non-`Number.isSafeInteger`,
 or skip+todo > total metrics never silently become zero — the sensor errors

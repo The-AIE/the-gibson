@@ -649,6 +649,147 @@ out=$(node "$TI" parse --input "$ROOT/vitest-multi-agree.txt" 2>&1); rc=$?
   || bad "identical vitest multi broken (rc=$rc): $out"
 
 # ---------------------------------------------------------------------------
+echo "blocker 1d: node:test collects every # skip/# todo in a tests region"
+# ---------------------------------------------------------------------------
+# First-match # skip 0 then # skip 2 would parse skipped=0 and green-wash.
+# Collect every counter in the region; identical may agree; disagreement fails.
+
+# Order A: # skip 0 then # skip 2 (first-match would accept 0)
+printf '# tests 10\n# pass 8\n# skip 0\n# skip 2\n# todo 0\n' \
+  > "$ROOT/node-skip-order-a.txt"
+out=$(node "$TI" parse --input "$ROOT/node-skip-order-a.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|skip'; then
+  ok "node:test # skip 0 then # skip 2 fails closed (not first-match skip=0)"
+else
+  bad "node skip order-a first-match bypass (rc=$rc): $out"
+fi
+
+# Order B: # skip 2 then # skip 0 (first-match would accept 2; still must fail)
+printf '# tests 10\n# pass 8\n# skip 2\n# skip 0\n# todo 0\n' \
+  > "$ROOT/node-skip-order-b.txt"
+out=$(node "$TI" parse --input "$ROOT/node-skip-order-b.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|skip'; then
+  ok "node:test # skip 2 then # skip 0 fails closed (not first-match skip=2)"
+else
+  bad "node skip order-b first-match bypass (rc=$rc): $out"
+fi
+
+# Identical repeated # skip inside one region may agree
+printf '# tests 10\n# pass 8\n# skip 2\n# skip 2\n# todo 0\n' \
+  > "$ROOT/node-skip-identical.txt"
+out=$(node "$TI" parse --input "$ROOT/node-skip-identical.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"skipped": 2' && echo "$out" | grep -q '"total": 10' \
+  && ok "node:test identical repeated # skip 2 accepted" \
+  || bad "node identical skip broken (rc=$rc): $out"
+
+# Order A todo: # todo 0 then # todo 2
+printf '# tests 10\n# pass 8\n# skip 0\n# todo 0\n# todo 2\n' \
+  > "$ROOT/node-todo-order-a.txt"
+out=$(node "$TI" parse --input "$ROOT/node-todo-order-a.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|todo'; then
+  ok "node:test # todo 0 then # todo 2 fails closed (not first-match todo=0)"
+else
+  bad "node todo order-a first-match bypass (rc=$rc): $out"
+fi
+
+# Order B todo: # todo 2 then # todo 0
+printf '# tests 10\n# pass 8\n# skip 0\n# todo 2\n# todo 0\n' \
+  > "$ROOT/node-todo-order-b.txt"
+out=$(node "$TI" parse --input "$ROOT/node-todo-order-b.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|todo'; then
+  ok "node:test # todo 2 then # todo 0 fails closed (not first-match todo=2)"
+else
+  bad "node todo order-b first-match bypass (rc=$rc): $out"
+fi
+
+# Identical repeated # todo inside one region may agree
+printf '# tests 10\n# pass 8\n# skip 0\n# todo 2\n# todo 2\n' \
+  > "$ROOT/node-todo-identical.txt"
+out=$(node "$TI" parse --input "$ROOT/node-todo-identical.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"todo": 2' && echo "$out" | grep -q '"total": 10' \
+  && ok "node:test identical repeated # todo 2 accepted" \
+  || bad "node identical todo broken (rc=$rc): $out"
+
+# ---------------------------------------------------------------------------
+echo "blocker 1e: TAP binds SKIP/TODO to the correct plan region"
+# ---------------------------------------------------------------------------
+# Whole-stream SKIP reuse fabricates skipped=2 for every plan when two
+# plan-at-end runs each have one SKIP. Bind result lines to the plan region
+# (lines since previous plan through current plan for plan-at-end).
+
+# Identical repeated plan-at-end: one SKIP each → both skipped=1 (not 2)
+printf 'ok 1 - a\nok 2 - b # SKIP reason-a\nok 3 - c\n1..10\nok 1 - d\nok 2 - e # SKIP reason-b\nok 3 - f\n1..10\n' \
+  > "$ROOT/tap-plan-end-skip-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-plan-end-skip-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' && echo "$out" | grep -q '"skipped": 1' \
+  && ok "TAP repeated plan-at-end with one SKIP each → skipped=1 (not whole-stream 2)" \
+  || bad "tap plan-region skip fabrication (rc=$rc): $out"
+
+# Conflicting repeated plan-at-end SKIP counts → fail closed
+printf 'ok 1 - a # SKIP only\n1..10\nok 1 - b # SKIP one\nok 2 - c # SKIP two\n1..10\n' \
+  > "$ROOT/tap-plan-end-skip-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-plan-end-skip-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|native|skip'; then
+  ok "TAP repeated plans with conflicting SKIP counts fail closed"
+else
+  bad "tap skip-conflict accepted (rc=$rc): $out"
+fi
+
+# Identical repeated plan-at-end TODO: one TODO each → todo=1
+printf 'ok 1 - a\nok 2 - b # TODO later-a\n1..10\nok 1 - c\nok 2 - d # TODO later-b\n1..10\n' \
+  > "$ROOT/tap-plan-end-todo-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-plan-end-todo-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' && echo "$out" | grep -q '"todo": 1' \
+  && ok "TAP repeated plan-at-end with one TODO each → todo=1 (not whole-stream 2)" \
+  || bad "tap plan-region todo fabrication (rc=$rc): $out"
+
+# Conflicting repeated plan-at-end TODO counts → fail closed
+printf 'ok 1 - a # TODO only\n1..10\nok 1 - b # TODO one\nok 2 - c # TODO two\n1..10\n' \
+  > "$ROOT/tap-plan-end-todo-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-plan-end-todo-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|native|todo'; then
+  ok "TAP repeated plans with conflicting TODO counts fail closed"
+else
+  bad "tap todo-conflict accepted (rc=$rc): $out"
+fi
+
+# Explicit-native agreement: GIBSON_TEST_METRICS matches plan-region skipped=1
+printf 'ok 1 - a\nok 2 - b # SKIP reason\n1..10\nok 1 - c\nok 2 - d # SKIP reason\n1..10\nGIBSON_TEST_METRICS total=10 skipped=1 todo=0\n' \
+  > "$ROOT/tap-explicit-native-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-explicit-native-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"skipped": 1' && echo "$out" | grep -q '"total": 10' \
+  && ok "TAP plan-region + agreeing explicit metrics accepted" \
+  || bad "tap explicit-native agree broken (rc=$rc): $out"
+
+# Explicit-native conflict: explicit claims skipped=0 while each plan has 1 SKIP
+printf 'ok 1 - a # SKIP x\n1..10\nok 1 - b # SKIP y\n1..10\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/tap-explicit-native-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/tap-explicit-native-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted'; then
+  ok "TAP plan-region + conflicting explicit metrics fail closed"
+else
+  bad "tap explicit-native conflict spoof (rc=$rc): $out"
+fi
+
+# node:test region counters + agreeing explicit
+printf '# tests 10\n# skip 2\n# skip 2\n# todo 0\nGIBSON_TEST_METRICS total=10 skipped=2 todo=0\n' \
+  > "$ROOT/node-explicit-native-agree.txt"
+out=$(node "$TI" parse --input "$ROOT/node-explicit-native-agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"skipped": 2' \
+  && ok "node:test multi-skip + agreeing explicit accepted" \
+  || bad "node explicit-native agree broken (rc=$rc): $out"
+
+# node:test region counters + conflicting explicit (first-match skip 0 would wrongly agree)
+printf '# tests 10\n# skip 0\n# skip 2\n# todo 0\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/node-explicit-native-conflict.txt"
+out=$(node "$TI" parse --input "$ROOT/node-explicit-native-conflict.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|skip'; then
+  ok "node:test multi-skip + conflicting explicit fails closed (no first-match agree)"
+else
+  bad "node explicit-native first-match spoof (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
 echo "blocker 4: waiver dimensions must equal max(actual_delta,0) on both axes"
 # ---------------------------------------------------------------------------
 # actual removed 1 + waiver claims removed 1 AND skip +999 → fail
