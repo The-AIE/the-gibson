@@ -89,13 +89,15 @@ always mounts doctrine **explicitly** (never rely on ambient config alone):
 1. Gibson `AGENTS.md`
 2. Optional Gibson `local/AGENTS.local.md` (fork overlay, if present)
 3. Target repo `AGENTS.md` (if present)
-4. Role playbook from `playbooks/<role>.md`
+4. Role playbook — **replacement, not additive** (Law 1 / docs/18): if
+   `local/playbooks/<role>.md` exists, mount **only** that file; otherwise mount
+   core `playbooks/<role>.md`. Never mount both.
 5. `memory/LESSONS.md` (relevant slice)
 
 The operator path is a Gibson recipe that **references** those files on disk —
 see `playbooks/recipes/`. The builder recipe's instructions list that load
-order; validating the recipe (smoke test) confirms the schema and template
-shape only.
+order (including the local-playbook replacement rule); validating the recipe
+(smoke test) confirms the schema and template shape only.
 
 **Not authorized on this PR:** a live `goose run` against a repository. That
 wait remains until #28 and #35 (see Scaffold boundary above).
@@ -103,9 +105,9 @@ wait remains until #28 and #35 (see Scaffold boundary above).
 ### 3. Planned session lifecycle (Laws 2, 3, 4, 10) — future sequence
 
 After #28 and #35 authorize live Goose builder sessions, the intended sequence
-is the same claim → worktree → gate → release path used by other adapters.
-Documented here as **planned sequence only** — not an executable Goose builder
-invocation.
+is the same claim → worktree → **baseline** → implement → gate → release path
+used by other adapters (`scripts/claim.sh`, `playbooks/builder.md`). Documented
+here as **planned sequence only** — not an executable Goose builder invocation.
 
 ```bash
 GIBSON=~/Code/the-gibson   # absolute path to the Gibson clone
@@ -116,10 +118,15 @@ cd ~/Code/app
 $GIBSON/scripts/claim.sh 42 feature-slug 'path/globs/**'
 cd ../wt-42-feature-slug   # sibling worktree created by claim.sh
 
+# Law 4: record branch-point baseline BEFORE any implementation/mutation
+# (required; same order as claim.sh next-steps and playbooks/builder.md)
+$GIBSON/scripts/gate-baseline.sh
+
 # --- future: authorized Goose builder session (blocked until #28 + #35) ---
 # Do not run goose run / recipe-driven mutation against the worktree yet.
 # Permission mode and in-session gate enforcement are not encoded in the
 # recipe; they land with #28 / #35, not this scaffold.
+# When authorized: implement only after gate-baseline.sh has succeeded.
 
 # Green gate before commit (Gibson scripts; independent of Goose)
 $GIBSON/scripts/gate.sh

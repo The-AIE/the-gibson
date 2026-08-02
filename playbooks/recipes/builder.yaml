@@ -35,10 +35,16 @@ instructions: |
   1. Read {{ gibson }}/AGENTS.md (the Ten Laws).
   2. Read {{ gibson }}/local/AGENTS.local.md if present (Gibson fork overlay).
   3. Read {{ repo }}/AGENTS.md if present (target overrides).
-  4. Read {{ gibson }}/playbooks/builder.md (your role contract).
+  4. Read the builder role contract — replacement, not additive (Law 1 / docs/18):
+     if {{ gibson }}/local/playbooks/builder.md exists, read only that file;
+     otherwise read {{ gibson }}/playbooks/builder.md. Never read both.
   5. Skim {{ gibson }}/memory/LESSONS.md for tags matching this work.
   6. Confirm you are inside a worktree claim for issue {{ issue }} — if not, stop
      and tell the operator to run scripts/claim.sh first (Law 2 / Law 3).
+  7. Immediately after worktree confirmation and before any implementation or
+     mutation, run {{ gibson }}/scripts/gate-baseline.sh and verify it succeeds
+     (records branch-point baseline; Law 4 / claim.sh / playbooks/builder.md).
+     Do not mutate without a verified baseline.
 
   Do the claimed work only. Before every commit, the operator (or you via shell)
   must run {{ gibson }}/scripts/gate.sh with zero new failures vs branch point (Law 4).
