@@ -10,7 +10,15 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
-Target repos stop knowing about The Gibson.
+One command in, target repos harness-neutral out.
+
+- **`skills/`** (new) — a nested Claude Code skill layer: `/gibson <repo> [goal]`
+  runs audit → resources → setup → direct → run. It wraps the existing scripts,
+  playbooks, and doctrine rather than reimplementing them, so the harness keeps
+  one source of truth and the owner gets one command. Install by symlinking into
+  `~/.claude/skills` (`skills/README.md`). No script behaviour changed.
+  The skills disclose the `loop.sh`/supervisor gaps they cannot fix (#55) instead
+  of implying the loop merges on its own.
 
 - **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
   *Autonomous development contract*: the repo publishes gate commands, ground rules,
@@ -43,16 +51,6 @@ Cloud supervisor + cross-vendor escalation for the solo loop.
 - Migration: none — all new flags are off by default and the existing loop behaves
   exactly as before. Forks that render loop-state themselves may want to add the
   `handoff:` field.
-
-## Unreleased
-
-- **`skills/`** (new) — a nested Claude Code skill layer: `/gibson <repo> [goal]`
-  runs audit → resources → setup → direct → run. It wraps the existing scripts,
-  playbooks, and doctrine rather than reimplementing them, so the harness keeps
-  one source of truth and the owner gets one command. Install by symlinking into
-  `~/.claude/skills` (`skills/README.md`). No script behaviour changed.
-  The skills disclose the `loop.sh`/supervisor gaps they cannot fix (#55) instead
-  of implying the loop merges on its own.
 
 ## v0.1.3 — 2026-07-24
 
