@@ -11,17 +11,42 @@ WHAT IT DOES
   first matching Vercel preview environment URL. Falls back to
   `vercel inspect` / `gh api` when available.
 
+  Only a deployment whose latest status is **success** counts. A queued, building,
+  or failed deployment has no URL worth testing, and returning its target_url is
+  how a UX run ends up grading a Vercel error page.
+
 WHY
   UX eval and DAST must target the live preview, never a guess (docs/07 rule zero).
+
+  Two failure modes this exists to prevent (L-012):
+    - Returning a URL before the deployment is READY, so the gate tests a 404.
+    - Returning a URL behind Vercel Deployment Protection, so every request is a
+      401 login page and the gate "passes" against nothing.
 
 RISKS
   - Needs gh auth and a PR that has a deployment.
   - May return empty if Vercel hasn't finished — retry, don't invent a URL.
   - Read-only.
 
+ENVIRONMENT
+  VERCEL_AUTOMATION_BYPASS_SECRET  with --bypass, appended as the protection
+                                   bypass query parameters so CI can actually
+                                   fetch a protected preview. The printed URL
+                                   then contains the secret — mask it before it
+                                   reaches a log (`::add-mask::` in Actions) and
+                                   never post it in a PR comment.
+  CI                               when set, the default timeout is 300s rather
+                                   than 120s — a cold Vercel build routinely
+                                   takes more than two minutes.
+
 USAGE
-  preview-url.sh <pr-number> [--repo org/name] [--timeout SEC]
+  preview-url.sh <pr-number> [--repo org/name] [--timeout SEC] [--bypass] [--probe]
   preview-url.sh --help
+
+  --bypass  append the Vercel automation bypass parameters (needs the secret)
+  --probe   fetch the URL once before printing it; a 401/403 is reported as
+            protection rather than returned, so the caller fails loudly instead
+            of grading a login page
 
 EXAMPLES
   export BASE_URL="$(./scripts/preview-url.sh 123)"
@@ -38,11 +63,16 @@ fi
 PR="$1"
 shift
 REPO=""
-TIMEOUT=120
+TIMEOUT=${CI:+300}
+TIMEOUT=${TIMEOUT:-120}
+BYPASS=0
+PROBE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
     --timeout) TIMEOUT="$2"; shift 2 ;;
+    --bypass) BYPASS=1; shift ;;
+    --probe) PROBE=1; shift ;;
     *) echo "unknown: $1" >&2; usage; exit 2 ;;
   esac
 done
@@ -98,7 +128,9 @@ try_deployments() {
       });
     ' | while read -r id; do
         [[ -z "$id" ]] && continue
-        url=$(gh api "repos/${full}/deployments/${id}/statuses" --jq '.[0].environment_url // .[0].target_url // empty' 2>/dev/null || true)
+        # Only a successful status has a URL worth testing.
+        url=$(gh api "repos/${full}/deployments/${id}/statuses" \
+          --jq '[.[] | select(.state == "success")] | .[0].environment_url // .[0].target_url // empty' 2>/dev/null || true)
         if [[ -n "$url" && "$url" != "null" ]]; then
           echo "$url"
           return 0
@@ -114,8 +146,26 @@ while [[ $(date +%s) -lt $deadline ]]; do
     url=$(try_deployments || true)
   fi
   if [[ -n "${url:-}" ]]; then
-    # Prefer clean vercel.app URL
-    echo "$url" | head -n1
+    url=$(echo "$url" | head -n1)
+    if [[ "$BYPASS" -eq 1 ]]; then
+      [[ -n "${VERCEL_AUTOMATION_BYPASS_SECRET:-}" ]] ||
+        die "--bypass needs VERCEL_AUTOMATION_BYPASS_SECRET (Vercel → Project → Settings → Deployment Protection)"
+      sep='?'
+      [[ "$url" == *\?* ]] && sep='&'
+      url="${url}${sep}x-vercel-protection-bypass=${VERCEL_AUTOMATION_BYPASS_SECRET}&x-vercel-set-bypass-cookie=true"
+    fi
+    if [[ "$PROBE" -eq 1 ]] && command -v curl >/dev/null; then
+      code=$(curl -s -o /dev/null -w '%{http_code}' -L --max-time 30 "$url" || echo 000)
+      case "$code" in
+        401|403)
+          die "preview is behind Vercel Deployment Protection (HTTP $code) — set VERCEL_AUTOMATION_BYPASS_SECRET and pass --bypass. A protected preview is a missing result, not a pass"
+          ;;
+        000)
+          die "preview did not respond within 30s — do not grade an unreachable target"
+          ;;
+      esac
+    fi
+    echo "$url"
     exit 0
   fi
   # vercel CLI fallback once
