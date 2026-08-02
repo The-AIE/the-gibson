@@ -26,8 +26,9 @@ RISKS
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. --supervisor devin sends finished branches to a cloud session that
     can open PRs and (if configured) merge (docs/22). When a supervisor is
-    configured, a distinct-vendor second opinion is required before handoff
-    (Law 5 gate).
+    configured, a distinct-vendor second opinion of the exact handed-off SHA is
+    required before handoff, and the gate fails closed: no review, no handoff.
+    The branch stays queued in loop-state instead (Law 5 gate).
 
 USAGE
   loop.sh --runner <grok|hermes|claude|codex> --repo <path> [options]
@@ -47,7 +48,9 @@ OPTIONS
                       opinion before the error budget runs out (default: off)
   --reviewers LIST    vendors for that second opinion (default: codex,claude)
   --supervisor NAME   'devin' hands finished branches to the cloud supervisor
-                      whenever loop-state carries a `handoff:` field (docs/22)
+                      whenever loop-state carries a `handoff:` field (docs/22).
+                      Each handoff is gated on a fresh distinct-vendor review of
+                      the exact SHA being handed off; a failed review blocks it.
 
 EXAMPLES
   ./scripts/loop.sh --runner grok --repo ~/Code/acme-app
@@ -106,6 +109,9 @@ STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/loop-state.md"
 JOURNAL="$STATE_DIR/journal.md"
 HALT_FILE="$STATE_DIR/HALT"
+# Written only by a successful pre-handoff review, and it names the SHA that was
+# reviewed — see ensure_cross_vendor_review.
+REVIEW_RECEIPT="$STATE_DIR/second-opinion.receipt"
 
 mkdir -p "$STATE_DIR"
 if [[ ! -f "$STATE_FILE" ]]; then
@@ -212,6 +218,9 @@ invoke_runner() {
 escalate() {
   local out="$STATE_DIR/second-opinion.md"
   info "escalating after $failures consecutive failures — reviewers: $REVIEWERS"
+  # This clobbers second-opinion.md with a failure-triage review, so the
+  # pre-handoff receipt that pointed at the old contents is no longer valid.
+  rm -f "$REVIEW_RECEIPT"
   local note
   if "$SCRIPT_DIR/second-opinion.sh" \
       --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" \
@@ -229,55 +238,125 @@ escalate() {
   } >> "$JOURNAL"
 }
 
-# Ensure a distinct-vendor second opinion exists before any supervisor handoff.
-# Law 5: never grade your own homework. When --supervisor is set we gate the
-# handoff on a prior cross-vendor review (issue #55).
-ensure_cross_vendor_review() {
-  local review="$STATE_DIR/second-opinion.md"
-  if [[ -f "$review" ]] && grep -q . "$review" 2>/dev/null; then
-    if grep -qi "author: *$RUNNER\|runner: *$RUNNER\|from: *$RUNNER" "$review" 2>/dev/null; then
-      info "second-opinion.md appears to be from the same vendor ($RUNNER) — forcing fresh cross-vendor pass"
-    else
-      return 0
-    fi
+# Resolve the SHA the supervisor will actually see, and refuse to hand off a tip
+# nobody reviewed. devin-supervisor.sh compares --sha against `ls-remote origin`
+# and dies on a mismatch, so the driver resolves the same way: a loop-state pin
+# that disagrees with the remote tip is a blocked handoff here, not a die() three
+# scripts later (issue #55). Prints the SHA on stdout; returns 1 when there is
+# none to pin.
+resolve_handoff_sha() {
+  local branch="$1" pinned remote sha
+  pinned=$(read_field handoff_sha)
+  remote=$(git -C "$REPO" ls-remote origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1 {print $1}')
+  if [[ -n "$pinned" && -n "$remote" && "$pinned" != "$remote" ]]; then
+    info "loop-state pins $branch @ $pinned but the remote tip is $remote — refusing to hand off an unreviewed tip (issue #55)"
+    return 1
   fi
-  info "no usable cross-vendor second opinion yet — running one before handoff (Law 5)"
+  sha="${pinned:-$remote}"
+  if [[ -z "$sha" ]]; then
+    sha=$(git -C "$REPO" rev-parse --verify --quiet "refs/heads/$branch" || true)
+  fi
+  if [[ -z "$sha" ]]; then
+    sha=$(git -C "$REPO" rev-parse --verify --quiet "refs/remotes/origin/$branch" || true)
+  fi
+  if [[ -z "$sha" ]]; then
+    info "could not resolve a SHA for handoff branch $branch — an unpinnable branch cannot be reviewed or handed off"
+    return 1
+  fi
+  printf '%s\n' "$sha"
+}
+
+# A receipt is written only when second-opinion.sh exited 0, and it names the
+# exact SHA that was reviewed. That is what makes a stale gibson/second-opinion.md
+# useless as a pass: the artifact alone proves nothing about which tip, which
+# vendor, or whether the reviewer even finished (issue #55).
+review_receipt_ok() {
+  local sha="$1"
+  [[ -f "$REVIEW_RECEIPT" ]] || return 1
+  [[ -s "$STATE_DIR/second-opinion.md" ]] || return 1
+  grep -qxF "status: ok" "$REVIEW_RECEIPT" || return 1
+  grep -qxF "sha: $sha" "$REVIEW_RECEIPT" || return 1
+  grep -qxF "author: $RUNNER" "$REVIEW_RECEIPT" || return 1
+  grep -qxF "reviewers: $REVIEWERS" "$REVIEW_RECEIPT" || return 1
+  return 0
+}
+
+# Law 5 gate: never grade your own homework. Returns 0 only when a reviewer from
+# a different vendor completed successfully against exactly $sha. Every other
+# outcome — no distinct vendor configured, reviewer CLI missing, reviewer
+# non-zero, empty diff — returns 1, and the caller must not hand off.
+ensure_cross_vendor_review() {
+  local branch="$1" sha="$2"
   local out="$STATE_DIR/second-opinion.md"
+
+  if review_receipt_ok "$sha"; then
+    info "distinct-vendor review already recorded for $branch @ $sha — reusing it"
+    return 0
+  fi
+
+  if [[ -z "$REVIEWERS" ]]; then
+    info "--reviewers is empty — no distinct-vendor reviewer to run (Law 5)"
+    return 1
+  fi
+  local distinct=0 name
+  local names=()
+  IFS=',' read -ra names <<< "$REVIEWERS"
+  for name in "${names[@]}"; do
+    name=$(echo "$name" | tr -d '[:space:]')
+    if [[ -n "$name" && "$name" != "$RUNNER" ]]; then
+      distinct=1
+    fi
+  done
+  if [[ "$distinct" -eq 0 ]]; then
+    info "--reviewers '$REVIEWERS' contains no vendor other than the runner ($RUNNER) — nobody may review this (Law 5)"
+    return 1
+  fi
+
+  # Remove first: a review that fails halfway must never leave a passing receipt.
+  rm -f "$REVIEW_RECEIPT"
+  info "running the mandatory distinct-vendor review of $branch @ $sha before handoff (Law 5)"
   if "$SCRIPT_DIR/second-opinion.sh" \
       --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" \
-      --gate-status "pre-handoff mandatory review" --out "$out" >/dev/null 2>&1; then
-    info "mandatory pre-handoff second opinion written to $out"
-  else
-    info "mandatory second opinion failed — handoff will still proceed but supervisor is warned"
-    {
-      echo ""
-      echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · pre-handoff review failed · reviewers=$REVIEWERS"
-      echo "Cross-vendor review did not complete; supervisor must treat this as unreviewed."
-    } >> "$JOURNAL"
+      --branch "$sha" \
+      --gate-status "pre-handoff mandatory review of $branch @ $sha" \
+      --out "$out" >/dev/null; then
+    printf 'sha: %s\nbranch: %s\nauthor: %s\nreviewers: %s\nreviewed: %s\nstatus: ok\n' \
+      "$sha" "$branch" "$RUNNER" "$REVIEWERS" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      > "$REVIEW_RECEIPT"
+    info "distinct-vendor review of $sha completed — receipt at $REVIEW_RECEIPT"
+    return 0
   fi
+  rm -f "$REVIEW_RECEIPT"
+  info "distinct-vendor review of $branch @ $sha FAILED — handoff blocked, branch stays queued (Law 5)"
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · pre-handoff review failed · reviewers=$REVIEWERS"
+    echo "Cross-vendor review of $branch @ $sha did not complete. Handoff BLOCKED;"
+    echo "handoff/handoff_sha remain queued in loop-state (Law 5, Law 8)."
+  } >> "$JOURNAL"
+  return 1
 }
 
 # File-handoff protocol: pin and pass the head SHA so a later push cannot
-# invalidate the review without the supervisor noticing (issue #55).
+# invalidate the review without the supervisor noticing (issue #55). The gate is
+# closed — every early return here leaves handoff/handoff_sha queued in
+# loop-state and never reaches devin-supervisor.sh.
 supervisor_handoff() {
   [[ "$SUPERVISOR" == "devin" ]] || return 0
   local branch
   branch=$(read_field handoff)
   [[ -n "$branch" ]] || return 0
 
-  ensure_cross_vendor_review
-
   local sha
-  sha=$(read_field handoff_sha)
-  if [[ -z "$sha" ]]; then
-    sha=$(git -C "$REPO" rev-parse --verify "refs/heads/$branch" 2>/dev/null \
-       || git -C "$REPO" rev-parse --verify "origin/$branch" 2>/dev/null \
-       || true)
+  if ! sha=$(resolve_handoff_sha "$branch"); then
+    info "handoff of $branch blocked: no reviewable SHA — branch stays queued in loop-state"
+    return 0
   fi
-  if [[ -z "$sha" ]]; then
-    info "could not resolve SHA for handoff branch $branch — supervisor will still receive branch name"
-  else
-    info "pinning handoff to $branch @ $sha"
+  info "pinning handoff to $branch @ $sha"
+
+  if ! ensure_cross_vendor_review "$branch" "$sha"; then
+    info "handoff of $branch @ $sha blocked: no completed distinct-vendor review — branch stays queued in loop-state"
+    return 0
   fi
 
   local task issue next
@@ -287,14 +366,11 @@ supervisor_handoff() {
   [[ -z "$issue" ]] || task="Issue: $issue."
   [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
   [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
-  # bash 3.2 (stock macOS) errors on an empty array under set -u, so branch instead
   local review="$STATE_DIR/second-opinion.md"
-  [[ -f "$review" ]] || review="/dev/null"
-  info "handing $branch${sha:+ @$sha} to the Devin supervisor"
-  local handoff_args=(handoff --repo "$REPO" --branch "$branch" \
-      --task "$task" --gate-status "green locally" --review-file "$review")
-  [[ -n "$sha" ]] && handoff_args+=(--sha "$sha")
-  if "$SCRIPT_DIR/devin-supervisor.sh" "${handoff_args[@]}"; then
+  info "handing $branch @$sha to the Devin supervisor"
+  if "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
+      --sha "$sha" --task "$task" --gate-status "green locally" \
+      --review-file "$review"; then
     node -e '
       const fs = require("fs");
       const file = process.argv[1];
