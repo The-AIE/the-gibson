@@ -1326,7 +1326,18 @@ export GIBSON_REMOTE_HALT_INTERVAL=3
 : > "$CALLS/gh.log"
 HERMES_CMD='cat >/dev/null' \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
-    --max-iterations 6 >/dev/null 2>"$ROOT/cadence.err" || true
+    --max-iterations 6 >/dev/null 2>"$ROOT/cadence.err"
+cadence_rc=$?
+if [[ "$cadence_rc" -eq 0 ]]; then
+  ok "hot-loop cadence driver exits 0 over 6 iters with interval 3"
+else
+  bad "hot-loop cadence driver must exit 0 (rc=$cadence_rc stderr=$(tr '\n' ' ' <"$ROOT/cadence.err"))"
+fi
+if grep -q 'max iterations 6 reached' "$ROOT/cadence.err"; then
+  ok "hot-loop cadence completed all 6 iterations"
+else
+  bad "hot-loop cadence expected 'max iterations 6 reached' (stderr=$(tr '\n' ' ' <"$ROOT/cadence.err"))"
+fi
 issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
 # iters 0..5 with interval 3 → live polls at 0 and 3 only (2 polls).
 if [[ "$issue_calls" -eq 2 ]]; then
@@ -1347,7 +1358,18 @@ export GIBSON_REMOTE_HALT_INTERVAL=08
 : > "$CALLS/gh.log"
 HERMES_CMD='cat >/dev/null' \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
-    --max-iterations 16 >/dev/null 2>"$ROOT/cadence-08.err" || true
+    --max-iterations 16 >/dev/null 2>"$ROOT/cadence-08.err"
+cadence_08_rc=$?
+if [[ "$cadence_08_rc" -eq 0 ]]; then
+  ok "interval 08 driver exits 0 over 16 iters"
+else
+  bad "interval 08 driver must exit 0 (rc=$cadence_08_rc stderr=$(tr '\n' ' ' <"$ROOT/cadence-08.err"))"
+fi
+if grep -q 'max iterations 16 reached' "$ROOT/cadence-08.err"; then
+  ok "interval 08 completed all 16 iterations"
+else
+  bad "interval 08 expected 'max iterations 16 reached' (stderr=$(tr '\n' ' ' <"$ROOT/cadence-08.err"))"
+fi
 issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
 # iters 0..15 with interval 8 → live polls at 0 and 8 only (2 polls).
 if [[ "$issue_calls" -eq 2 ]]; then
@@ -1369,7 +1391,18 @@ export GIBSON_REMOTE_HALT_INTERVAL=09
 : > "$CALLS/gh.log"
 HERMES_CMD='cat >/dev/null' \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
-    --max-iterations 18 >/dev/null 2>"$ROOT/cadence-09.err" || true
+    --max-iterations 18 >/dev/null 2>"$ROOT/cadence-09.err"
+cadence_09_rc=$?
+if [[ "$cadence_09_rc" -eq 0 ]]; then
+  ok "interval 09 driver exits 0 over 18 iters"
+else
+  bad "interval 09 driver must exit 0 (rc=$cadence_09_rc stderr=$(tr '\n' ' ' <"$ROOT/cadence-09.err"))"
+fi
+if grep -q 'max iterations 18 reached' "$ROOT/cadence-09.err"; then
+  ok "interval 09 completed all 18 iterations"
+else
+  bad "interval 09 expected 'max iterations 18 reached' (stderr=$(tr '\n' ' ' <"$ROOT/cadence-09.err"))"
+fi
 issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
 # iters 0..17 with interval 9 → live polls at 0 and 9 only (2 polls).
 if [[ "$issue_calls" -eq 2 ]]; then
