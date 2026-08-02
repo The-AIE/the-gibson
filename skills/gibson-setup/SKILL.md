@@ -20,6 +20,11 @@ for free.
    target's `AGENTS.md` (create if absent). Never overwrite existing content.
 2. **CI gates** — test/lint/typecheck/build on every PR, as required checks.
    Reuse the repo's existing CI if present; add the missing jobs only.
+   **Verify every referenced script actually exists before installing any
+   workflow from `ci/`** — e.g. `ci/gibson-gate.yml` currently references
+   `scripts/check-active-work.mjs`, which does not exist in the Gibson repo
+   (tracked issue): installed blind, every target PR fails module-not-found.
+   Vendor or stub each referenced script, or trim the job.
 3. **Risk classifier** — Tier-C auto-labeling for ALL Law 7 categories: money,
    auth, consent/PII, security boundaries, production data (schema/migrations
    included). Start from the Gibson's own `ci/` workflows; where a needed gate

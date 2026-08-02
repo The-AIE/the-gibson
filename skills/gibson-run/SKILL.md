@@ -12,10 +12,19 @@ skill's job is to invoke and SUPERVISE it — not to reimplement it.
 
 ```bash
 # default shape (routing table from gibson-resources):
-./scripts/loop.sh --runner grok --repo <target> \
-    --escalate-after 2 --reviewers codex,claude \
-    --supervisor devin
+./scripts/loop.sh --runner grok --repo <target-worktree> \
+    --escalate-after 2 --reviewers codex,claude
+# add ONLY after the owner's explicit ACU-spend OK (or a live session is
+# verified via devin-supervisor.sh status):  --supervisor devin
 ```
+
+**Two preconditions before the first invocation, no exceptions:**
+- `<target-worktree>` must be a dedicated worktree/clone — `loop.sh` writes
+  `gibson/loop-state.md` + journal into the repo it's pointed at, so pointing
+  it at the canonical checkout violates Law 3.
+- `--supervisor devin` makes `loop.sh` run `ensure`, which CREATES a billed
+  Devin session if none exists. That is spend: Ask Contract the owner first,
+  every time, unless `devin-supervisor.sh status` shows a session already live.
 
 - `--runner`: implementer from the routing table (Grok default — flat-rate).
 - `--escalate-after 2 --reviewers codex,claude`: two consecutive failures buys
@@ -58,7 +67,11 @@ show raw diffs or expect the owner to read code — describe behavior changes.
   env) — what `loop.sh` actually checks. The `gibson-halt` label is only a
   human signal; honoring it means translating it into the HALT file.
 - Law 5 always: reroute so no lane ever reviews its own work, even when a
-  vendor is down.
+  vendor is down. **Known harness gap (tracked in the Gibson's issues): the
+  loop's normal per-hat path does not machine-enforce cross-vendor review —
+  a same-vendor self-pass can reach merge if unsupervised. Until that's fixed
+  in `loop.sh`, the supervisor (you) enforces it manually: check the journal
+  each cadence for reviewer-hat entries by the authoring vendor and reroute.**
 - Cost discipline (docs/15): if Grok saturates, overflow to Codex. Claude's
   pool buys judgment first and skilled feature work when the capability bar
   genuinely requires it — what it never buys is VOLUME work a flat-rate pool

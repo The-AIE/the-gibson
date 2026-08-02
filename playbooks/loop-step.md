@@ -57,9 +57,10 @@ grok -p "$RENDERED_PROMPT"
 
 **Kill switch:**
 ```bash
-# GitHub label on any open issue/repo convention, or file:
+# The HALT file is what loop.sh actually checks:
 touch /path/to/target/gibson/HALT
-# or: gh label create gibson-halt  # checked by loop.sh
+# (the gibson-halt label is a human signal only — loop.sh does NOT check labels;
+#  honoring it means someone/something touching the HALT file)
 ```
 
 ---
@@ -181,7 +182,7 @@ touch /path/to/target/gibson/HALT
 |---|---|
 | Retries | 3 fix→review rounds → park + handoff |
 | Error budget | driver stops after N consecutive red gates (default 5) |
-| Kill switch | `gibson-halt` / `gibson/HALT` → exit cleanly |
+| Kill switch | `gibson/HALT` file (label `gibson-halt` = signal only) → exit cleanly |
 | Human gates | queue + move on; never auto-approve Tier C merge |
 | Fresh context | do not ask for prior chat; re-read artifacts |
 

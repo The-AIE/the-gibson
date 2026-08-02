@@ -1,6 +1,6 @@
 ---
 name: gibson-audit
-description: "Audit any repository for Gibson-readiness: what the product is, stack, test/CI/gate coverage, backlog shape, risk surfaces (money/auth/PII), and a plain-English readiness report with concrete gaps. First stage of the /gibson pipeline; also useful standalone ('audit this repo', 'is this repo ready for the fleet', 'gibson readiness check')."
+description: "Audit any repository for Gibson-readiness: what the product is, stack, test/CI/gate coverage, backlog shape, risk surfaces (money, auth, consent/PII, security boundaries, production data), and a plain-English readiness report with concrete gaps. First stage of the /gibson pipeline; also useful standalone ('audit this repo', 'is this repo ready for the fleet', 'gibson readiness check')."
 ---
 
 # gibson-audit — know the repo before touching it
@@ -9,7 +9,7 @@ Input: a repo path or GitHub URL (clone to a scratch location if URL-only).
 Output: a readiness report the owner can read without knowing how to code, plus
 a machine-usable gap list the `gibson-setup` skill consumes.
 
-## What to inspect (read-only — this skill NEVER mutates the target)
+## What to inspect (read-only by default — the ONLY write this skill may ever make is persisting the audit report, and that goes through a worktree per Law 3)
 
 1. **Product identity** — README, package.json/pyproject, deployed URLs. One
    paragraph: what this software does, for whom.

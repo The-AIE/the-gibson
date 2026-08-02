@@ -5,7 +5,7 @@ description: "The owner's product-direction interface to the Gibson: turn plain-
 
 # gibson-direct — where the human plugs in
 
-The owner's ONLY job in the Gibson model is product direction. This skill makes
+The owner's recurring job in the Gibson model is product direction (spend, credential, and Tier-C approvals still come to them as explicit gates). This skill makes
 that one job cheap and everything downstream of it automatic. Everything shown
 to the owner follows the Ask Contract; nothing assumes they read code.
 

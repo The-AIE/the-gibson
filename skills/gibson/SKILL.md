@@ -1,6 +1,6 @@
 ---
 name: gibson
-description: "Point The Gibson at any repo and run the full autonomous development loop — audit the repo, discover which AI runners/resources are available, set up GitHub guardrails, then drive continuous build/test/review/merge with cost-optimized routing (Grok for volume, Codex second, Claude for judgment, Devin as merge captain). The owner's only job is product direction, in plain English. Trigger on: 'gibson <repo>', 'run the gibson', 'point the gibson at', 'start autonomous development on', 'have the fleet build', or any ask to set up and run the agent-fleet SDLC loop against a repository."
+description: "Point The Gibson at any repo and run the full autonomous development loop — audit the repo, discover which AI runners/resources are available, set up GitHub guardrails, then drive continuous build/test/review/merge with cost-optimized routing (Grok for volume, Codex second, Claude for judgment, Devin as merge captain). The owner's recurring job is product direction in plain English; spend, credentials, and Tier-C merges always come back to them for explicit approval. Trigger on: 'gibson <repo>', 'run the gibson', 'point the gibson at', 'start autonomous development on', 'have the fleet build', or any ask to set up and run the agent-fleet SDLC loop against a repository."
 ---
 
 # /gibson — the one-command fleet experience
@@ -18,7 +18,8 @@ target repo's canonical checkout — worktrees only (Law 3).
 ## The pipeline (nested skills, run in order, skip what's already satisfied)
 
 1. **`gibson-audit`** — understand the repo: product, stack, tests/CI/gates
-   present, backlog shape, risk surfaces (money/auth/PII), readiness gaps.
+   present, backlog shape, risk surfaces (money, auth, consent/PII, security
+   boundaries, production data), readiness gaps.
 2. **`gibson-resources`** — discover what's actually available on this machine
    and account: runners (grok/codex/claude/hermes CLIs), Devin API, GitHub
    auth + bot identities, MCPs, satellite machines. Output the routing table.
@@ -45,7 +46,7 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
 | **Grok** | flat ~$99/mo, near-unlimited | default implementer — bulk building, burn freely |
 | **Codex** | cheap subscription tier | second implementer + primary cross-vendor reviewer |
 | **Claude** | subscription w/ caps — reserve headroom | judgment (specs, escalations, adversarial verdicts, hard debugging) AND skilled feature work when the task's capability bar requires it (docs/15 routes by capability x marginal cost, not vendor dogma) |
-| **Devin** | ACU-metered cloud | merge captain only — reviews finished branches, owns GitHub, merges. Never bulk coding. Cap with `DEVIN_MAX_ACU`. |
+| **Devin** | ACU-metered cloud | merge captain only — reviews finished branches, owns PRs; merges solely in explicit `--merge` handoff mode. Never bulk coding. Session creation bills ACUs: owner-gated. Cap with `DEVIN_MAX_ACU`. |
 
 ## Rules that override everything
 
