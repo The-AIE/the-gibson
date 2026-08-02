@@ -10,7 +10,15 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
-Target repos stop knowing about The Gibson.
+One command in, target repos harness-neutral out.
+
+- **`skills/`** (new) — a nested Claude Code skill layer: `/gibson <repo> [goal]`
+  runs audit → resources → setup → direct → run. It wraps the existing scripts,
+  playbooks, and doctrine rather than reimplementing them, so the harness keeps
+  one source of truth and the owner gets one command. Install by symlinking into
+  `~/.claude/skills` (`skills/README.md`). No script behaviour changed.
+  The skills disclose the `loop.sh`/supervisor gaps they cannot fix (#55) instead
+  of implying the loop merges on its own.
 
 - **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
   *Autonomous development contract*: the repo publishes gate commands, ground rules,
@@ -43,25 +51,6 @@ Cloud supervisor + cross-vendor escalation for the solo loop.
 - Migration: none — all new flags are off by default and the existing loop behaves
   exactly as before. Forks that render loop-state themselves may want to add the
   `handoff:` field.
-
-## v0.1.4 — 2026-07-29
-
-Delivery control (production write-path) as portable doctrine.
-
-- **Doctrine:** [docs/23-delivery-control.md](docs/23-delivery-control.md) — branch
-  models A/B/C, pass criteria, harden/promote/hotfix modes, explicit **no secret
-  rotation** (G4). Distills ConferenceOS release-manager lessons without COS-only
-  check names or Neon key handling.
-- **Playbook:** [playbooks/delivery-control.md](playbooks/delivery-control.md);
-  release + adopt playbooks preflight audit when merge ships Production.
-- **Scripts:** [scripts/delivery-control/](scripts/delivery-control/) — audit,
-  apply-branch-protection, apply-production-env, promote, hotfix-prep,
-  forward-port (dry-run default; `--apply` + confirm).
-- **Template:** `templates/target-repo/gibson-delivery.json` for target check
-  contexts and branch model.
-- Migration: optional. At next adoption or burn-down, run `audit.sh` on each
-  live target; harden only with operator apply. Forks sync doc 23 + scripts via
-  normal upstream-sync.
 
 ## v0.1.3 — 2026-07-24
 
