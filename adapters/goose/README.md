@@ -14,31 +14,51 @@ Goose-branded experience (Apache-2.0 §6 + CUSTOM_DISTROS.md upstream).
 
 ## How to use this
 
-### 1. Install Goose CLI (pinned v1.45.0, verify then run)
+### 1. Install Goose CLI (pinned v1.45.0, verify the release asset)
 
-Do **not** pipe a download straight into a shell. Download the pinned
-`download_cli.sh`, verify its SHA-256, then execute:
+Do **not** pipe a download straight into a shell. Do **not** execute
+upstream `download_cli.sh`: even when fetched from the v1.45.0 tag, that
+wrapper subsequently downloads an **unverified** second-stage payload and
+defaults to **stable** unless `GOOSE_VERSION` is set. Pin and verify the
+actual release binary asset for your OS/architecture instead.
+
+**Lab example — macOS arm64 only** (do not reuse this digest elsewhere):
 
 ```bash
-# Pinned Goose CLI installer for v1.45.0
-# Official asset digest (SHA-256 of download_cli.sh):
-# 54d64de9b10befba030d3fdc4f6c316de55557c203abeaa9525c04f450c34280
-ASSET_URL="https://github.com/aaif-goose/goose/releases/download/v1.45.0/download_cli.sh"
-EXPECTED_SHA256="54d64de9b10befba030d3fdc4f6c316de55557c203abeaa9525c04f450c34280"
-INSTALLER="$(mktemp "${TMPDIR:-/tmp}/goose-download_cli-v1.45.0.XXXXXX.sh")"
-trap 'rm -f "$INSTALLER"' EXIT
-curl -fsSL "$ASSET_URL" -o "$INSTALLER"
-echo "${EXPECTED_SHA256}  ${INSTALLER}" | shasum -a 256 -c -
-bash "$INSTALLER"
+# Lab example: macOS arm64 — Goose CLI v1.45.0 binary asset
+# Asset: goose-aarch64-apple-darwin.tar.gz
+# Official SHA-256:
+# 90c50d653d7fd978ec5d436b548eca8613dc2d26d028b486b7c52271267ec500
+# Other OS/architectures: pick the exact v1.45.0 asset and its published
+# digest from the release notes — do not reuse this macOS arm64 digest.
+set -eu
+ASSET_URL="https://github.com/aaif-goose/goose/releases/download/v1.45.0/goose-aarch64-apple-darwin.tar.gz"
+EXPECTED_SHA256="90c50d653d7fd978ec5d436b548eca8613dc2d26d028b486b7c52271267ec500"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/goose-install-v1.45.0.XXXXXX")"
+ARCHIVE="${WORKDIR}/goose-aarch64-apple-darwin.tar.gz"
+trap 'rm -rf "$WORKDIR"' EXIT
+curl -fsSL "$ASSET_URL" -o "$ARCHIVE"
+if command -v sha256sum >/dev/null 2>&1; then
+  echo "${EXPECTED_SHA256}  ${ARCHIVE}" | sha256sum -c -
+elif command -v shasum >/dev/null 2>&1; then
+  echo "${EXPECTED_SHA256}  ${ARCHIVE}" | shasum -a 256 -c -
+else
+  echo "error: need sha256sum or shasum to verify the Goose asset" >&2
+  exit 1
+fi
+tar -xzf "$ARCHIVE" -C "$WORKDIR"
+mkdir -p "${HOME}/.local/bin"
+install -m 755 "${WORKDIR}/goose" "${HOME}/.local/bin/goose"
+# Ensure ~/.local/bin is on PATH, then:
 goose --version
 ```
 
 | Field | Text |
 |---|---|
-| What I'm asking | Install a **pinned** Goose CLI after checking its installer digest. |
+| What I'm asking | Install a **pinned** Goose CLI after checking the release asset digest. |
 | What it does | Provides the agent loop, MCP extension host, and recipes. |
 | Why | Stops reinventing plumbing; Gibson owns brand + gates. |
-| Risks | Upstream CLI on PATH; pin the version (docs/GOOSE-LICENSE-VERIFICATION §3). A failed SHA check means stop — do not run the script. |
+| Risks | Upstream CLI on PATH; pin the version (docs/GOOSE-LICENSE-VERIFICATION §3). A failed SHA check means stop — do not install the binary. Other OS/architectures must use their own v1.45.0 asset + published digest. |
 
 ### 2. Doctrine mounting
 
@@ -119,8 +139,9 @@ posture:
 ## Smoke test
 
 ```bash
+GIBSON=~/Code/the-gibson   # or your Gibson clone path
 goose --version
-test -f playbooks/recipes/builder.yaml && echo recipe_ok
+test -f "$GIBSON/playbooks/recipes/builder.yaml" && echo recipe_ok
 ```
 
 ## Status (epic #30)
