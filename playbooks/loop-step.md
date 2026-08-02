@@ -170,7 +170,9 @@ touch /path/to/target/gibson/HALT
 ## End-of-step obligations
 
 1. **Rewrite** `{{repo_path}}/gibson/loop-state.md` with: issue, PR, hat
-   completed, next hat, round, parked?, next action one-liner, timestamp UTC.
+   completed, next hat, round, parked?, next action one-liner, and the
+   column-zero field `updated: <UTC timestamp>` (same key `scripts/loop.sh`
+   writes on init — not `timestamp:`, `updated_at:`, or an indented variant).
    - If a branch is pushed and ready for review and the driver runs with
      `--supervisor devin`, set **both** `handoff: <branch>` and
      `handoff_sha: <the exact head SHA you pushed>`. The driver forwards it to the

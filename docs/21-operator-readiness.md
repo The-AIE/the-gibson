@@ -29,7 +29,7 @@ The end goal is met when **all** of the following are true on at least one live 
 - [ ] Security layers 1–3 hard-fail; Tier C surfaces get adversarial review + human gate.
 - [ ] Claims + worktrees prevent agents overwriting each other.
 - [ ] Ratchet: repeated failures become permanent guides or sensors.
-- [ ] Silent-noop detection (L-008): loop does not burn iterations while doing nothing.
+- [ ] Silent-noop detection (L-008): loop does not burn iterations while doing nothing. *(Sensor `scripts/silent-noop.sh` exists and is tested; wiring it into `scripts/loop.sh` is still open, so the box stays unchecked.)*
 
 ## C. Autonomy & safety
 

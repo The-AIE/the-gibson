@@ -131,11 +131,11 @@ File burn-down issues for anything red you want fixed over time
 
 ---
 
-## Step 5 — Ship a canary Tier A issue
+## Step 5 — Ship a canary Tier A issue (single model)
 
 | | |
 |---|---|
-| **What I'm asking** | Let the fleet do one small, safe change end-to-end. |
+| **What I'm asking** | Let **one** runner do one small, safe change end-to-end. |
 | **What it does** | Proves claim → build → test → review → (eval if UI) → merge → deploy with **zero** touches from you. |
 | **Why** | "Adopted" is a behavior, not a checkbox ([docs/13](docs/13-adoption.md) definition). |
 | **Risks** | Low if Tier A (docs, copy, isolated component). Use a real but reversible task. |
