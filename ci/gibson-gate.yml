@@ -38,9 +38,12 @@ jobs:
       # Capture full test output so the integrity sensor can parse totals/skips.
       # Prefer emitting `GIBSON_TEST_METRICS total=N skipped=M todo=K` from the
       # suite, or a supported Vitest/Jest/node:test summary (docs/06).
+      # Metrics JSON written here is re-parsed by the merge-base-owned helper in
+      # the integrity step so the PR-head copy of test-integrity.mjs cannot
+      # redefine the gate (Law 5).
       - name: Test (head) + capture metrics
         run: |
-          set -o pipefail
+          set -euo pipefail
           <test> 2>&1 | tee test-output-head.txt
           # e.g. npx vitest run
           node scripts/test-integrity.mjs parse \
@@ -53,6 +56,12 @@ jobs:
       # waiver. The local/gitignored .gibson-baseline.json is NOT consulted —
       # a PR must not authorize its own baseline. Metrics are re-derived from
       # a detached checkout of the PR base SHA (trusted base).
+      #
+      # Trusted helper: copy scripts/test-integrity.mjs from the immutable
+      # merge-base worktree and use that binary for BOTH base parse and compare.
+      # The PR-head copy must never grade itself (Law 5 / never grade your own homework).
+      # Bootstrap: if the merge-base lacks the helper (first introduction of #70),
+      # fall back to the workspace copy once and label the source accordingly.
       - name: Test integrity vs merge base
         if: github.event_name == 'pull_request'
         env:
@@ -63,24 +72,66 @@ jobs:
           set -euo pipefail
           WT="${RUNNER_TEMP:-/tmp}/gibson-base-wt"
           git worktree add --detach "$WT" "$BASE_SHA"
+
+          # --- blocker 3: load helper from immutable merge-base, not PR head ---
+          TI_TRUSTED="${RUNNER_TEMP:-/tmp}/test-integrity.trusted.mjs"
+          if [[ -f "$WT/scripts/test-integrity.mjs" ]]; then
+            cp "$WT/scripts/test-integrity.mjs" "$TI_TRUSTED"
+            TI_SOURCE="merge-base:${BASE_SHA}"
+          else
+            echo "test-integrity: merge-base lacks scripts/test-integrity.mjs; using workspace copy (bootstrap only)" >&2
+            cp "$GITHUB_WORKSPACE/scripts/test-integrity.mjs" "$TI_TRUSTED"
+            TI_SOURCE="workspace-bootstrap:${BASE_SHA}"
+          fi
+
+          # --- blocker 2: base suite may fail (deleted-failing-test scenario) ---
+          # Capture base test rc with errexit disabled; always parse metrics and
+          # run compare so the exact integrity delta is reported, not a generic
+          # "set -e" death before the sensor.
+          base_test_rc=0
           (
             cd "$WT"
             if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
               npm ci --include=dev
             fi
+            set +e
             set -o pipefail
             <test> 2>&1 | tee test-output-base.txt
-            node "$GITHUB_WORKSPACE/scripts/test-integrity.mjs" parse \
+            base_test_rc=${PIPESTATUS[0]}
+            set -e
+            echo "base_test_rc=${base_test_rc}"
+            # Always parse base metrics with the trusted helper (even if tests failed).
+            node "$TI_TRUSTED" parse \
               --input test-output-base.txt \
               --out "$GITHUB_WORKSPACE/.gibson-metrics-base.json"
+            # Surface base rc into the parent via a file (subshell isolation).
+            echo "$base_test_rc" > "$RUNNER_TEMP/gibson-base-test.rc"
           )
+          base_test_rc=$(cat "$RUNNER_TEMP/gibson-base-test.rc")
+          echo "base_test_rc=${base_test_rc}" >> "$GITHUB_STEP_SUMMARY"
+
+          # Re-parse head with the trusted helper so a hostile head parse step
+          # cannot have written self-serving metrics JSON either.
+          node "$TI_TRUSTED" parse \
+            --input test-output-head.txt \
+            --out .gibson-metrics-head.json
+
           # Write PR body to a file so the shell never interpolates it into eval.
           printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.txt"
-          node scripts/test-integrity.mjs compare \
+          set +e
+          node "$TI_TRUSTED" compare \
             --base .gibson-metrics-base.json \
             --head .gibson-metrics-head.json \
             --waiver-file "$RUNNER_TEMP/pr-body.txt" \
-            --trusted-source "merge-base:${BASE_SHA}"
+            --trusted-source "${TI_SOURCE}"
+          ti_rc=$?
+          set -e
+          echo "test_integrity_rc=${ti_rc}" >> "$GITHUB_STEP_SUMMARY"
+          echo "BASE_TEST_RC=${base_test_rc} TEST_INTEGRITY_RC=${ti_rc}" >&2
+          # Integrity diagnosis is the primary gate; preserve base rc in the log.
+          # Fail the job if integrity failed. (Base test failures that remain on
+          # head are already caught by the head test step / green gate.)
+          exit "$ti_rc"
 
   # Layers 1–3 of docs/08 (hard-fail). Extend with authz/DAST/ux-eval jobs per
   # ci/README.md as adoption matures.

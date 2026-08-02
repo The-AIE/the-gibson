@@ -447,6 +447,291 @@ else
   bad "failure baseline weakened (rc=$rc): $out"
 fi
 
+# ===========================================================================
+# Tier-B review blockers (adversarial sensors — issue #70 repair)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+echo "blocker 1: explicit GIBSON_TEST_METRICS cannot spoof past a real runner summary"
+# ---------------------------------------------------------------------------
+# Honest vitest summary (7 tests) + fake explicit metrics (10). A head that
+# prints both must NOT self-authorize total=10 against a base of 10.
+printf 'Tests  7 passed (7)\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/spoof.txt"
+out=$(node "$TI" parse --input "$ROOT/spoof.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+  ok "conflicting explicit+runner metrics fail closed (no self-authorization)"
+else
+  bad "spoofed explicit metrics accepted or wrong error (rc=$rc): $out"
+fi
+
+# Same attack path through compare: if parse ever yielded 10, compare would pass
+write_metrics "$ROOT/spoof-base.json" 10 0 0
+# Force the only safe outcome: parse must reject, so we also pin that a
+# head metrics file of 7 fails integrity vs base 10 without waiver.
+write_metrics "$ROOT/spoof-head-honest.json" 7 0 0
+out=$(compare "$ROOT/spoof-base.json" "$ROOT/spoof-head-honest.json" ""); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3'; then
+  ok "honest head total=7 vs base=10 still hard-fails (delta 3)"
+else
+  bad "honest head compare (rc=$rc): $out"
+fi
+
+# Explicit alone (no runner summary) remains the vendor-blind contract
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' > "$ROOT/explicit-only.txt"
+out=$(node "$TI" parse --input "$ROOT/explicit-only.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "explicit-only GIBSON_TEST_METRICS still parses" \
+  || bad "explicit-only broken (rc=$rc): $out"
+
+# Agreeing sources are fine
+printf 'Tests  10 passed (10)\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
+  > "$ROOT/agree.txt"
+out=$(node "$TI" parse --input "$ROOT/agree.txt" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+  && ok "agreeing explicit+runner sources accepted" \
+  || bad "agreeing sources (rc=$rc): $out"
+
+# ---------------------------------------------------------------------------
+echo "blocker 4: waiver dimensions must equal max(actual_delta,0) on both axes"
+# ---------------------------------------------------------------------------
+# actual removed 1 + waiver claims removed 1 AND skip +999 → fail
+write_metrics "$ROOT/w-b1.json" 10 0 0
+write_metrics "$ROOT/w-h1.json" 9 0 0
+out=$(compare "$ROOT/w-b1.json" "$ROOT/w-h1.json" \
+  'Test-integrity: removed 1, skip +999 for overclaim'); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'wrong delta|skip'; then
+  ok "waiver overclaim skip +999 with actual skip 0 fails"
+else
+  bad "skip overclaim accepted (rc=$rc): $out"
+fi
+
+# actual skip +1 + waiver claims removed 999 AND skip +1 → fail
+write_metrics "$ROOT/w-b2.json" 10 0 0
+write_metrics "$ROOT/w-h2.json" 10 1 0
+out=$(compare "$ROOT/w-b2.json" "$ROOT/w-h2.json" \
+  'Test-integrity: removed 999, skip +1 for overclaim'); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'wrong delta|removed'; then
+  ok "waiver overclaim removed 999 with actual removed 0 fails"
+else
+  bad "removed overclaim accepted (rc=$rc): $out"
+fi
+
+# unchanged metrics + waiver removed 999 → fail (no integrity reduction)
+write_metrics "$ROOT/w-b3.json" 10 0 0
+write_metrics "$ROOT/w-h3.json" 10 0 0
+out=$(compare "$ROOT/w-b3.json" "$ROOT/w-h3.json" \
+  'Test-integrity: removed 999 for phantom'); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'no integrity reduction|unchanged|wrong delta'; then
+  ok "waiver with no integrity reduction fails"
+else
+  bad "phantom waiver accepted (rc=$rc): $out"
+fi
+
+# Exact match on both claimed dimensions still works (regression pin)
+write_metrics "$ROOT/w-b4.json" 10 1 0
+write_metrics "$ROOT/w-h4.json" 8 2 0
+out=$(compare "$ROOT/w-b4.json" "$ROOT/w-h4.json" \
+  'Test-integrity: removed 2, skip +1 for both intentional under #70'); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
+  && ok "exact dual-dimension waiver still accepted" \
+  || bad "exact dual waiver broken (rc=$rc): $out"
+
+# ---------------------------------------------------------------------------
+echo "blocker 5: metrics beyond Number.MAX_SAFE_INTEGER fail closed"
+# ---------------------------------------------------------------------------
+# 9007199254740993 is MAX_SAFE_INTEGER+1; JS Number loses precision to …992.
+# String form must be rejected before it can mask a real delta.
+printf 'GIBSON_TEST_METRICS total=9007199254740993 skipped=0 todo=0\n' \
+  > "$ROOT/unsafe-kv.txt"
+out=$(node "$TI" parse --input "$ROOT/unsafe-kv.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision'; then
+  ok "unsafe integer string total=9007199254740993 rejected"
+else
+  bad "unsafe kv total accepted (rc=$rc): $out"
+fi
+
+printf 'GIBSON_TEST_METRICS {"total":"9007199254740993","skipped":0,"todo":0}\n' \
+  > "$ROOT/unsafe-json.txt"
+out=$(node "$TI" parse --input "$ROOT/unsafe-json.txt" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision'; then
+  ok "unsafe integer JSON string total rejected"
+else
+  bad "unsafe json total accepted (rc=$rc): $out"
+fi
+
+# Bare metrics object with unsafe string field via load/compare path
+printf '%s\n' '{"total":"9007199254740993","skipped":0,"todo":0}' > "$ROOT/unsafe-head.json"
+write_metrics "$ROOT/safe-base.json" 10 0 0
+out=$(compare "$ROOT/safe-base.json" "$ROOT/unsafe-head.json" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision|test-integrity'; then
+  ok "compare rejects unsafe head total string (…993 vs safe base)"
+else
+  bad "unsafe compare accepted (rc=$rc): $out"
+fi
+
+# Precision-mask regression: MAX_SAFE_INTEGER (…991) is accepted; …993 is not.
+# JS Number would collapse 9007199254740993 → 9007199254740992, masking deltas.
+printf '%s\n' '{"total":"9007199254740991","skipped":0,"todo":0}' > "$ROOT/safe-max.json"
+printf '%s\n' '{"total":"9007199254740993","skipped":0,"todo":0}' > "$ROOT/unsafe-max1.json"
+out=$(compare "$ROOT/safe-max.json" "$ROOT/safe-max.json" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "MAX_SAFE_INTEGER 9007199254740991 accepted as metrics total" \
+  || bad "MAX_SAFE_INTEGER rejected (rc=$rc): $out"
+out=$(compare "$ROOT/safe-max.json" "$ROOT/unsafe-max1.json" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision'; then
+  ok "9007199254740993 vs 9007199254740991 does not silently collapse"
+else
+  bad "safe-integer collapse (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+echo "blocker 2: failing base suite still reaches integrity compare (errexit-safe)"
+# ---------------------------------------------------------------------------
+# Mirrors ci/gibson-gate.yml: capture base test rc with errexit off, always
+# parse + compare, preserve base rc separately. Deleted-failing-test scenario:
+# base prints 10 tests then exits 1; head prints 7 and exits 0.
+BASE_SIM="$ROOT/base-sim"
+HEAD_SIM="$ROOT/head-sim"
+mkdir -p "$BASE_SIM" "$HEAD_SIM"
+# base: metrics then fail (as a deleted-later failing test suite would)
+printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' > "$BASE_SIM/test-output-base.txt"
+# head: suite shrank
+printf 'GIBSON_TEST_METRICS total=7 skipped=0 todo=0\n' > "$HEAD_SIM/test-output-head.txt"
+
+# Simulate the CI capture pattern under set -euo pipefail
+CI_SIM_OUT="$ROOT/ci-sim.out"
+set +e
+(
+  set -euo pipefail
+  # --- trusted helper copy from "merge-base worktree" (blocker 3 pin) ---
+  WT_SIM="$ROOT/merge-base-wt"
+  mkdir -p "$WT_SIM/scripts"
+  cp "$TI" "$WT_SIM/scripts/test-integrity.mjs"
+  TI_TRUSTED="$WT_SIM/scripts/test-integrity.mjs"
+  # head must not be the grading authority when base helper exists
+  if [[ ! -f "$TI_TRUSTED" ]]; then
+    echo "missing trusted helper" >&2
+    exit 99
+  fi
+
+  # base test: capture rc without aborting the job
+  set +e
+  # pretend base suite failed (exit 1) after emitting metrics
+  ( cat "$BASE_SIM/test-output-base.txt"; exit 1 )
+  base_test_rc=$?
+  set -e
+  echo "base_test_rc=$base_test_rc"
+
+  node "$TI_TRUSTED" parse \
+    --input "$BASE_SIM/test-output-base.txt" \
+    --out "$ROOT/ci-metrics-base.json"
+  node "$TI_TRUSTED" parse \
+    --input "$HEAD_SIM/test-output-head.txt" \
+    --out "$ROOT/ci-metrics-head.json"
+  set +e
+  node "$TI_TRUSTED" compare \
+    --base "$ROOT/ci-metrics-base.json" \
+    --head "$ROOT/ci-metrics-head.json" \
+    --waiver-text "" \
+    --trusted-source "merge-base:sim" 2>&1
+  ti_rc=$?
+  set -e
+  echo "test_integrity_rc=$ti_rc"
+  # Preserve base rc for the job summary; integrity must still have fired.
+  echo "BASE_TEST_RC=$base_test_rc"
+  exit "$ti_rc"
+) >"$CI_SIM_OUT" 2>&1
+ci_rc=$?
+# Restore the harness default (no errexit) so later sensors can capture non-zero rcs.
+set +e
+set -uo pipefail
+
+if [[ "$ci_rc" -ne 0 ]] \
+  && grep -q 'base_test_rc=1' "$CI_SIM_OUT" \
+  && grep -qE 'dropped by 3|removed 3' "$CI_SIM_OUT" \
+  && grep -q 'test-integrity' "$CI_SIM_OUT" \
+  && grep -q 'test_integrity_rc=1' "$CI_SIM_OUT"; then
+  ok "failing base still reaches test-integrity with exact delta 10→7"
+else
+  bad "CI base-rc sim (rc=$ci_rc): $(cat "$CI_SIM_OUT")"
+fi
+
+# ---------------------------------------------------------------------------
+echo "blocker 3: CI grades with merge-base helper, not a PR-rewritten head copy"
+# ---------------------------------------------------------------------------
+# A hostile head helper that always PASS must not be used when base has a real helper.
+HOSTILE="$ROOT/hostile-head/scripts"
+mkdir -p "$HOSTILE"
+cat > "$HOSTILE/test-integrity.mjs" <<'HOSTILE'
+#!/usr/bin/env node
+// Hostile PR-head helper: always report PASS regardless of metrics.
+import { writeFileSync } from 'node:fs';
+if (process.argv[2] === 'compare') {
+  console.log('test-integrity: PASS (hostile always-green helper)');
+  process.exit(0);
+}
+if (process.argv[2] === 'parse') {
+  const out = process.argv.includes('--out')
+    ? process.argv[process.argv.indexOf('--out') + 1]
+    : null;
+  const payload = JSON.stringify({
+    total: 999, skipped: 0, todo: 0, skip_effective: 0, source: 'hostile'
+  }, null, 2) + '\n';
+  if (out) writeFileSync(out, payload);
+  else process.stdout.write(payload);
+  process.exit(0);
+}
+process.exit(0);
+HOSTILE
+
+# Policy under test: prefer merge-base helper when present (as ci/gibson-gate.yml)
+WT_BASE="$ROOT/trusted-base-wt"
+mkdir -p "$WT_BASE/scripts"
+cp "$TI" "$WT_BASE/scripts/test-integrity.mjs"
+write_metrics "$ROOT/t-base.json" 10 0 0
+write_metrics "$ROOT/t-head.json" 7 0 0
+# Using trusted helper → must FAIL with delta
+out=$(node "$WT_BASE/scripts/test-integrity.mjs" compare \
+  --base "$ROOT/t-base.json" --head "$ROOT/t-head.json" \
+  --trusted-source "merge-base:sim" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3'; then
+  ok "trusted merge-base helper reports deletion delta (not always-green)"
+else
+  bad "trusted helper failed to diagnose (rc=$rc): $out"
+fi
+# Hostile head helper → would PASS (proves why CI must not use it)
+out=$(node "$HOSTILE/test-integrity.mjs" compare \
+  --base "$ROOT/t-base.json" --head "$ROOT/t-head.json" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -qi 'hostile\|PASS'; then
+  ok "hostile head helper would self-approve (CI must load merge-base copy)"
+else
+  bad "hostile helper fixture broken (rc=$rc): $out"
+fi
+
+# Static pin: ci/gibson-gate.yml must reference the merge-base helper path
+CI_YML="$SCRIPT_DIR/../../ci/gibson-gate.yml"
+if [[ -f "$CI_YML" ]] \
+  && grep -q 'gibson-base-wt\|BASE_SHA\|merge-base' "$CI_YML" \
+  && grep -qE 'TI_TRUSTED|test-integrity\.mjs.*BASE|trusted.*test-integrity|cp .*test-integrity|WT.*test-integrity' "$CI_YML"; then
+  ok "ci/gibson-gate.yml loads test-integrity from trusted merge-base worktree"
+else
+  # Also accept explicit variable assignment patterns after the repair
+  if [[ -f "$CI_YML" ]] && grep -q 'TI_TRUSTED' "$CI_YML"; then
+    ok "ci/gibson-gate.yml defines TI_TRUSTED from merge-base"
+  else
+    bad "ci/gibson-gate.yml missing trusted-helper wiring (TI_TRUSTED / base worktree copy)"
+  fi
+fi
+
+# Static pin: base test must capture rc with errexit disabled
+if [[ -f "$CI_YML" ]] \
+  && grep -q 'base_test_rc' "$CI_YML" \
+  && grep -qE 'set \+e' "$CI_YML"; then
+  ok "ci/gibson-gate.yml captures base_test_rc with errexit disabled"
+else
+  bad "ci/gibson-gate.yml missing base_test_rc / set +e capture pattern"
+fi
+
 # ---------------------------------------------------------------------------
 echo
 echo "gate.test.sh: $PASS passed, $FAIL failed"

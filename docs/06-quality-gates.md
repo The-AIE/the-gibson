@@ -70,10 +70,21 @@ Fail closed (do **not** authorize):
 |---|---|
 | Local `gate.sh` | `.gibson-baseline.json` from `gate-baseline.sh` (gitignored, worktree-local) |
 | CI `pull_request` | Metrics re-derived at the **merge-base / PR base SHA** — never the PR's local baseline |
+| CI helper binary | `scripts/test-integrity.mjs` **copied from the merge-base worktree** (`TI_TRUSTED`) — the PR-head copy must never grade itself |
 
 A locally replaceable or gitignored baseline must not let a PR authorize itself.
 `ci/gibson-gate.yml` re-runs the test command on a detached checkout of
 `pull_request.base.sha` and compares with `--trusted-source merge-base:<sha>`.
+
+**Failing base suites still reach the sensor.** The base test command runs with
+errexit disabled; its exit code is captured as `base_test_rc` and reported
+separately. Metrics parse + compare always run so a "deleted the failing test"
+diff emits the exact total delta instead of dying generically under `set -e`.
+
+**Bootstrap:** if the merge-base lacks `scripts/test-integrity.mjs` (first
+introduction of the sensor), CI falls back to the workspace copy once and labels
+the source `workspace-bootstrap:<sha>`. After the sensor is on the default
+branch, every subsequent PR is graded only by the merge-base-owned helper.
 
 ### Baseline regeneration (journaled)
 
@@ -100,9 +111,20 @@ GIBSON_TEST_METRICS {"total":42,"skipped":2,"todo":0}
 Also recognized: Vitest `Tests … (N)` summaries, Jest `Tests: … total`,
 node:test `# tests` / `# skip` / `# todo`, TAP `1..N` plans.
 
-**Fail closed:** unparseable, negative, non-integer, or skip+todo > total metrics
-never silently become zero — the sensor errors instead.
+**No self-authorization:** explicit `GIBSON_TEST_METRICS` lines do **not** outrank
+runner summaries. Every matching source is collected; if two sources disagree on
+total/skipped/todo the parse fails closed. A test's stdout must never
+self-authorize head metrics (e.g. honest `Tests 7 passed (7)` plus a fake
+`GIBSON_TEST_METRICS total=10`).
 
+**Fail closed:** unparseable, negative, non-integer, non-`Number.isSafeInteger`,
+or skip+todo > total metrics never silently become zero — the sensor errors
+instead. Values beyond `Number.MAX_SAFE_INTEGER` (e.g. `9007199254740993`) are
+rejected so precision loss cannot mask a real delta.
+
+**Waiver both axes:** claimed `removed` and `skip` must each equal
+`max(actual_delta, 0)`. Overclaiming the unused axis, or a waiver with no
+integrity reduction, fails closed.
 **Known limit:** count-only comparison cannot detect "deleted A, added B of equal
 count." Prefer named test identities in product harnesses that can do that
 cheaply without ballooning scope; The Gibson's own gate stays count-based and

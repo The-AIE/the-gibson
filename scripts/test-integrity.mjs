@@ -7,7 +7,7 @@
  * diagnosis unless an exact, visible waiver line covers the delta. PR/commit
  * text is inert data: matched as text, never evaluated.
  *
- * Supported summary contract (first match wins when parsing runner output):
+ * Supported summary contract (runner output may carry several sources):
  *   1. Explicit line:
  *        GIBSON_TEST_METRICS total=<n> skipped=<n> todo=<n>
  *      or JSON: GIBSON_TEST_METRICS {"total":n,"skipped":n,"todo":n}
@@ -16,7 +16,13 @@
  *   4. node:test:     # tests T / # skip M / # todo K
  *   5. TAP plan:      1..T  plus  # skip / ok N # SKIP
  *
- * Unparseable, negative, or non-integer metrics fail closed (never become 0).
+ * Explicit lines do **not** outrank runner summaries. Every source that
+ * matches is collected; if two sources disagree on total/skipped/todo the
+ * parse fails closed so a test's stdout cannot self-authorize head metrics.
+ * A single source (explicit alone or summary alone) is fine.
+ *
+ * Unparseable, negative, non-integer, or non-safe-integer metrics fail closed
+ * (never become 0; values beyond Number.MAX_SAFE_INTEGER are rejected).
  *
  * Known limit: count-only comparison cannot detect "deleted A, added B of equal
  * count." Prefer named identities in product harnesses that can do that cheaply;
@@ -30,9 +36,24 @@
  *       --old FILE --new FILE --reason STR [--sha STR]
  */
 
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  appendFileSync,
+  mkdirSync,
+  realpathSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+/** Resolve symlinks so isMain works when the helper is copied into /tmp (macOS /var → /private/var). */
+function realpathOrResolve(p) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
 
 const RESULT = "test-integrity";
 
@@ -47,9 +68,12 @@ const RESULT = "test-integrity";
  */
 export function parseNonNegInt(value, field) {
   if (typeof value === "number") {
-    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    // Reject non-integers, negatives, and values outside the safe-integer range
+    // so precision loss cannot mask a real delta (e.g. 2^53+1 → 2^53).
+    if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(
-        `${RESULT}: unparseable metric '${field}': ${JSON.stringify(value)} (need non-negative integer)`
+        `${RESULT}: unparseable metric '${field}': ${JSON.stringify(value)} ` +
+          `(need non-negative Number.isSafeInteger; values beyond ±2^53-1 lose precision)`
       );
     }
     return value;
@@ -61,7 +85,23 @@ export function parseNonNegInt(value, field) {
         `${RESULT}: unparseable metric '${field}': ${JSON.stringify(value)} (need non-negative integer)`
       );
     }
-    return Number(t);
+    // BigInt round-trip rejects strings that JS Number cannot represent exactly
+    // (e.g. "9007199254740993" → Number would collapse to 9007199254740992).
+    let bi;
+    try {
+      bi = BigInt(t);
+    } catch {
+      throw new Error(
+        `${RESULT}: unparseable metric '${field}': ${JSON.stringify(value)} (need non-negative integer)`
+      );
+    }
+    if (bi < 0n || bi > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        `${RESULT}: unparseable metric '${field}': ${JSON.stringify(value)} ` +
+          `(exceeds Number.MAX_SAFE_INTEGER; safe integer required to avoid precision loss)`
+      );
+    }
+    return Number(bi);
   }
   throw new Error(
     `${RESULT}: unparseable metric '${field}': ${JSON.stringify(value)} (need non-negative integer)`
@@ -104,6 +144,19 @@ export function normalizeMetrics(raw, label = "metrics") {
 // ---------------------------------------------------------------------------
 
 /**
+ * Fingerprint metrics for multi-source agreement (total/skipped/todo only).
+ * @param {{ total: number, skipped: number, todo: number }} m
+ */
+function metricsKey(m) {
+  return `${m.total}|${m.skipped}|${m.todo}`;
+}
+
+/**
+ * Parse every recognized metric source from runner output. Explicit
+ * GIBSON_TEST_METRICS lines are collected alongside Vitest/Jest/node:test/TAP
+ * summaries — they never outrank a real runner summary. If two sources
+ * disagree, fail closed so stdout cannot self-authorize head metrics.
+ *
  * @param {string} text
  * @returns {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }}
  */
@@ -112,7 +165,10 @@ export function parseRunnerOutput(text) {
     throw new Error(`${RESULT}: runner output must be a string`);
   }
 
-  // 1) Explicit machine line — preferred contract
+  /** @type {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }[]} */
+  const found = [];
+
+  // 1) Explicit machine line(s) — vendor-blind contract, not privileged
   const explicitJson = text.match(
     /^\s*GIBSON_TEST_METRICS\s+(\{[\s\S]*?\})\s*$/m
   );
@@ -126,53 +182,49 @@ export function parseRunnerOutput(text) {
       );
     }
     const m = normalizeMetrics(parsed, "GIBSON_TEST_METRICS");
-    return { ...m, source: "GIBSON_TEST_METRICS-json" };
-  }
-
-  const explicitKv = text.match(
-    /^\s*GIBSON_TEST_METRICS\s+(.+?)\s*$/m
-  );
-  if (explicitKv) {
-    const body = explicitKv[1].trim();
-    if (body.startsWith("{")) {
-      throw new Error(
-        `${RESULT}: GIBSON_TEST_METRICS JSON is malformed (fail closed)`
-      );
-    }
-    /** @type {Record<string, string>} */
-    const fields = {};
-    for (const part of body.split(/\s+/)) {
-      const eq = part.indexOf("=");
-      if (eq <= 0) {
+    found.push({ ...m, source: "GIBSON_TEST_METRICS-json" });
+  } else {
+    const explicitKv = text.match(/^\s*GIBSON_TEST_METRICS\s+(.+?)\s*$/m);
+    if (explicitKv) {
+      const body = explicitKv[1].trim();
+      if (body.startsWith("{")) {
         throw new Error(
-          `${RESULT}: GIBSON_TEST_METRICS has malformed token ${JSON.stringify(part)}`
+          `${RESULT}: GIBSON_TEST_METRICS JSON is malformed (fail closed)`
         );
       }
-      fields[part.slice(0, eq)] = part.slice(eq + 1);
-    }
-    if (fields.total === undefined) {
-      throw new Error(
-        `${RESULT}: GIBSON_TEST_METRICS missing required field total=`
+      /** @type {Record<string, string>} */
+      const fields = {};
+      for (const part of body.split(/\s+/)) {
+        const eq = part.indexOf("=");
+        if (eq <= 0) {
+          throw new Error(
+            `${RESULT}: GIBSON_TEST_METRICS has malformed token ${JSON.stringify(part)}`
+          );
+        }
+        fields[part.slice(0, eq)] = part.slice(eq + 1);
+      }
+      if (fields.total === undefined) {
+        throw new Error(
+          `${RESULT}: GIBSON_TEST_METRICS missing required field total=`
+        );
+      }
+      const m = normalizeMetrics(
+        {
+          total: fields.total,
+          skipped: fields.skipped,
+          todo: fields.todo,
+        },
+        "GIBSON_TEST_METRICS"
       );
+      found.push({ ...m, source: "GIBSON_TEST_METRICS-kv" });
     }
-    const m = normalizeMetrics(
-      {
-        total: fields.total,
-        skipped: fields.skipped,
-        todo: fields.todo,
-      },
-      "GIBSON_TEST_METRICS"
-    );
-    return { ...m, source: "GIBSON_TEST_METRICS-kv" };
   }
 
   // 2) Vitest: "Tests  40 passed | 2 skipped (42)" / with failed/todo variants
   //    Also: "Tests  2 failed | 40 passed (42)"
   {
     const vitestBlocks = [
-      ...text.matchAll(
-        /Tests\s+([^\n]*?)\((\d+)\)/gi
-      ),
+      ...text.matchAll(/Tests\s+([^\n]*?)\((\d+)\)/gi),
     ];
     if (vitestBlocks.length > 0) {
       const last = vitestBlocks[vitestBlocks.length - 1];
@@ -185,15 +237,13 @@ export function parseRunnerOutput(text) {
       const skipped = num(/(\d+)\s+skipped/i);
       const todo = num(/(\d+)\s+todo/i);
       const m = normalizeMetrics({ total, skipped, todo }, "vitest");
-      return { ...m, source: "vitest-summary" };
+      found.push({ ...m, source: "vitest-summary" });
     }
   }
 
   // 3) Jest: "Tests:       2 skipped, 40 passed, 42 total"
   {
-    const jest = text.match(
-      /Tests:\s*([^\n]+)/i
-    );
+    const jest = text.match(/Tests:\s*([^\n]+)/i);
     if (jest && /\btotal\b/i.test(jest[1])) {
       const body = jest[1];
       const num = (re, field) => {
@@ -206,7 +256,7 @@ export function parseRunnerOutput(text) {
         const skipped = num(/(\d+)\s+skipped/i, "jest.skipped") ?? 0;
         const todo = num(/(\d+)\s+todo/i, "jest.todo") ?? 0;
         const m = normalizeMetrics({ total, skipped, todo }, "jest");
-        return { ...m, source: "jest-summary" };
+        found.push({ ...m, source: "jest-summary" });
       }
     }
   }
@@ -223,7 +273,7 @@ export function parseRunnerOutput(text) {
         : 0;
       const todo = todoM ? parseNonNegInt(todoM[1], "node-test.todo") : 0;
       const m = normalizeMetrics({ total, skipped, todo }, "node-test");
-      return { ...m, source: "node-test" };
+      found.push({ ...m, source: "node-test" });
     }
   }
 
@@ -246,15 +296,47 @@ export function parseRunnerOutput(text) {
         },
         "tap"
       );
-      return { ...m, source: "tap-plan" };
+      found.push({ ...m, source: "tap-plan" });
     }
   }
 
-  throw new Error(
-    `${RESULT}: could not parse test metrics from runner output (fail closed). ` +
-      `Emit 'GIBSON_TEST_METRICS total=N skipped=M todo=K' or a supported summary line. ` +
-      `See docs/06-quality-gates.md (test-integrity summary contract).`
-  );
+  if (found.length === 0) {
+    throw new Error(
+      `${RESULT}: could not parse test metrics from runner output (fail closed). ` +
+        `Emit 'GIBSON_TEST_METRICS total=N skipped=M todo=K' or a supported summary line. ` +
+        `See docs/06-quality-gates.md (test-integrity summary contract).`
+    );
+  }
+
+  // Multi-source agreement: a test's stdout must never self-authorize head
+  // metrics by printing a fake GIBSON_TEST_METRICS line next to a real summary.
+  const keys = new Map();
+  for (const m of found) {
+    const k = metricsKey(m);
+    if (!keys.has(k)) keys.set(k, []);
+    keys.get(k).push(m.source);
+  }
+  if (keys.size > 1) {
+    const detail = [...keys.entries()]
+      .map(([k, sources]) => {
+        const [total, skipped, todo] = k.split("|");
+        return `${sources.join("+")}→total=${total} skipped=${skipped} todo=${todo}`;
+      })
+      .join("; ");
+    throw new Error(
+      `${RESULT}: conflicting metric sources in runner output (fail closed; ` +
+        `untrusted explicit lines do not outrank runner summaries): ${detail}. ` +
+        `A test's stdout must not self-authorize head metrics.`
+    );
+  }
+
+  const primary = found[0];
+  if (found.length > 1) {
+    // Agreeing sources: label them so the audit trail shows multi-source consensus
+    const sources = found.map((m) => m.source).join("+");
+    return { ...primary, source: sources };
+  }
+  return primary;
 }
 
 /**
@@ -492,6 +574,10 @@ export function compareIntegrity({
 
   const removedDelta = b.total - h.total; // >0 means tests disappeared
   const skipDelta = h.skip_effective - b.skip_effective; // >0 means more hides
+  // Claimed waiver dimensions must equal max(actual_delta, 0) on BOTH axes.
+  // Overclaiming the unused axis (e.g. skip +999 when skip did not rise) fails.
+  const actualRemoved = Math.max(0, removedDelta);
+  const actualSkip = Math.max(0, skipDelta);
 
   const waivers = parseWaiver(waiverText);
   const waiver = mergeWaivers(waivers);
@@ -501,68 +587,85 @@ export function compareIntegrity({
   /** @type {string[]} */
   const notices = [];
 
-  if (removedDelta > 0) {
-    if (!waiver.valid || waiver.removed !== removedDelta) {
-      if (waiver.present && !waiver.valid) {
-        blockers.push(
-          `${RESULT}: test total dropped by ${removedDelta} ` +
-            `(${b.total} → ${h.total}) vs ${trustedSource}, but waiver is invalid: ${waiver.errors.join("; ")}`
-        );
-      } else if (waiver.valid && waiver.removed !== removedDelta) {
-        blockers.push(
-          `${RESULT}: test total dropped by ${removedDelta} ` +
-            `(${b.total} → ${h.total}) vs ${trustedSource}, but waiver covers removed=${waiver.removed} (wrong delta)`
-        );
-      } else {
-        blockers.push(
-          `${RESULT}: test total dropped by ${removedDelta} ` +
-            `(${b.total} → ${h.total}) vs ${trustedSource}. ` +
-            `Restore the tests or add a visible waiver: ` +
-            `'Test-integrity: removed ${removedDelta} for <reason>'`
-        );
-      }
-    } else {
+  if (actualRemoved === 0 && actualSkip === 0) {
+    // No integrity reduction (totals did not drop; skips did not rise).
+    // A waiver that claims a reduction is noise / gaming and fails closed.
+    if (waiver.present && !waiver.valid) {
+      blockers.push(
+        `${RESULT}: malformed waiver present (fail closed): ${waiver.errors.join("; ")}`
+      );
+    } else if (waiver.present && waiver.valid) {
+      blockers.push(
+        `${RESULT}: waiver claims removed=${waiver.removed}, skip=+${waiver.skipDelta} ` +
+          `but there is no integrity reduction (total ${b.total}→${h.total}, ` +
+          `skip_effective ${b.skip_effective}→${h.skip_effective}) ` +
+          `vs ${trustedSource} — waiver with no integrity reduction fails`
+      );
+    } else if (removedDelta === 0 && skipDelta === 0) {
       notices.push(
-        `${RESULT}: WAIVER accepted for removed ${removedDelta} ` +
+        `${RESULT}: metrics unchanged (total=${h.total}, skip_effective=${h.skip_effective}) vs ${trustedSource}`
+      );
+    }
+    // Improvements (added tests / reduced skips) are noticed below.
+  } else if (!waiver.present) {
+    if (actualRemoved > 0) {
+      blockers.push(
+        `${RESULT}: test total dropped by ${actualRemoved} ` +
+          `(${b.total} → ${h.total}) vs ${trustedSource}. ` +
+          `Restore the tests or add a visible waiver: ` +
+          `'Test-integrity: removed ${actualRemoved} for <reason>'`
+      );
+    }
+    if (actualSkip > 0) {
+      blockers.push(
+        `${RESULT}: skip/todo rose by ${actualSkip} ` +
+          `(${b.skip_effective} → ${h.skip_effective}) vs ${trustedSource}. ` +
+          `Unskip the tests or add a visible waiver: ` +
+          `'Test-integrity: skip +${actualSkip} for <reason>'`
+      );
+    }
+  } else if (!waiver.valid) {
+    if (actualRemoved > 0) {
+      blockers.push(
+        `${RESULT}: test total dropped by ${actualRemoved} ` +
+          `(${b.total} → ${h.total}) vs ${trustedSource}, but waiver is invalid: ${waiver.errors.join("; ")}`
+      );
+    }
+    if (actualSkip > 0) {
+      blockers.push(
+        `${RESULT}: skip/todo rose by ${actualSkip} ` +
+          `(${b.skip_effective} → ${h.skip_effective}) vs ${trustedSource}, but waiver is invalid: ${waiver.errors.join("; ")}`
+      );
+    }
+    if (blockers.length === 0) {
+      blockers.push(
+        `${RESULT}: malformed waiver present (fail closed): ${waiver.errors.join("; ")}`
+      );
+    }
+  } else {
+    // Valid waiver present: both claimed dimensions must equal max(actual, 0).
+    if (waiver.removed !== actualRemoved) {
+      blockers.push(
+        `${RESULT}: test total dropped by ${actualRemoved} ` +
+          `(${b.total} → ${h.total}) vs ${trustedSource}, but waiver covers removed=${waiver.removed} (wrong delta)`
+      );
+    } else if (actualRemoved > 0) {
+      notices.push(
+        `${RESULT}: WAIVER accepted for removed ${actualRemoved} ` +
           `(${b.total} → ${h.total}): ${waiver.reasons.join("; ")}`
       );
     }
-  }
-
-  if (skipDelta > 0) {
-    if (!waiver.valid || waiver.skipDelta !== skipDelta) {
-      if (waiver.present && !waiver.valid) {
-        blockers.push(
-          `${RESULT}: skip/todo rose by ${skipDelta} ` +
-            `(${b.skip_effective} → ${h.skip_effective}) vs ${trustedSource}, but waiver is invalid: ${waiver.errors.join("; ")}`
-        );
-      } else if (waiver.valid && waiver.skipDelta !== skipDelta) {
-        blockers.push(
-          `${RESULT}: skip/todo rose by ${skipDelta} ` +
-            `(${b.skip_effective} → ${h.skip_effective}) vs ${trustedSource}, but waiver covers skip=+${waiver.skipDelta} (wrong delta)`
-        );
-      } else {
-        blockers.push(
-          `${RESULT}: skip/todo rose by ${skipDelta} ` +
-            `(${b.skip_effective} → ${h.skip_effective}) vs ${trustedSource}. ` +
-            `Unskip the tests or add a visible waiver: ` +
-            `'Test-integrity: skip +${skipDelta} for <reason>'`
-        );
-      }
-    } else {
+    if (waiver.skipDelta !== actualSkip) {
+      blockers.push(
+        `${RESULT}: skip/todo rose by ${actualSkip} ` +
+          `(${b.skip_effective} → ${h.skip_effective}) vs ${trustedSource}, but waiver covers skip=+${waiver.skipDelta} (wrong delta)`
+      );
+    } else if (actualSkip > 0) {
       notices.push(
-        `${RESULT}: WAIVER accepted for skip +${skipDelta} ` +
+        `${RESULT}: WAIVER accepted for skip +${actualSkip} ` +
           `(${b.skip_effective} → ${h.skip_effective}): ${waiver.reasons.join("; ")}`
       );
     }
-  }
-
-  // Malformed waiver present even when no reduction — still fail closed so
-  // authors learn the format and cannot hide a future reduction behind noise.
-  if (waiver.present && !waiver.valid && blockers.length === 0) {
-    blockers.push(
-      `${RESULT}: malformed waiver present (fail closed): ${waiver.errors.join("; ")}`
-    );
   }
 
   // Improvements (added tests / reduced skips) always pass
@@ -576,11 +679,6 @@ export function compareIntegrity({
       `${RESULT}: skip/todo fell by ${-skipDelta} (${b.skip_effective} → ${h.skip_effective}) — ok`
     );
   }
-  if (removedDelta === 0 && skipDelta === 0 && blockers.length === 0) {
-    notices.push(
-      `${RESULT}: metrics unchanged (total=${h.total}, skip_effective=${h.skip_effective}) vs ${trustedSource}`
-    );
-  }
 
   const passed = blockers.length === 0;
   return {
@@ -588,8 +686,8 @@ export function compareIntegrity({
     passed,
     base: b,
     head: h,
-    removedDelta: Math.max(0, removedDelta),
-    skipDelta: Math.max(0, skipDelta),
+    removedDelta: actualRemoved,
+    skipDelta: actualSkip,
     rawRemovedDelta: removedDelta,
     rawSkipDelta: skipDelta,
     waiver,
@@ -803,7 +901,8 @@ function main(argv) {
 
 const isMain =
   Boolean(process.argv[1]) &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  realpathOrResolve(process.argv[1]) ===
+    realpathOrResolve(fileURLToPath(import.meta.url));
 
 if (isMain) {
   main(process.argv);
