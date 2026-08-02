@@ -1,6 +1,20 @@
 # The Gibson — UX evaluation against Vercel preview (docs/07)
-# Install as .github/workflows/ux-eval.yml. Skip path or label for pure API PRs;
-# record UX-EVAL: skipped on the PR when not applicable (docs/02).
+# Install as .github/workflows/ux-eval.yml.
+#
+# There are two reasons this job produces no Playwright result, and they are not
+# the same thing:
+#
+#   surface=none  nothing user-visible changed → skip, immediately, and pass.
+#                 Waiting five minutes on a preview a pure-library PR will never
+#                 use is pure latency on the release checklist (L-034).
+#   no preview    something user-visible changed but no READY preview resolved →
+#                 that is a MISSING RESULT. This job fails. Silently skipping it
+#                 is how two Tier-B PRs shipped with UX, posture, and ZAP all
+#                 skip=1 (L-012), including a hard-fail promotion whose hard-fail
+#                 path never once executed in CI (L-011).
+#
+# Teach the harness your layout with .gibson/ux-surface.conf; see scripts/ux-surface.sh.
+# Protected previews need VERCEL_AUTOMATION_BYPASS_SECRET in repo secrets.
 
 name: gibson-ux-eval
 on:
@@ -20,10 +34,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Does this PR touch a user-visible surface?
+        id: surface
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -x scripts/ux-surface.sh ]; then
+            # Not vendored yet: assume UI, because assuming "no UI" is the
+            # failure mode that silently disables this gate.
+            echo "surface=ui" >> "$GITHUB_OUTPUT"
+            echo "::notice::scripts/ux-surface.sh not vendored — treating this PR as UI-affecting"
+            exit 0
+          fi
+          if ./scripts/ux-surface.sh --pr "${{ github.event.pull_request.number }}"; then
+            echo "surface=none" >> "$GITHUB_OUTPUT"
+            echo "::notice::No user-visible paths changed — UX eval skipped by path filter (record UX-EVAL: skipped, docs/02)"
+          else
+            echo "surface=ui" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
+        if: steps.surface.outputs.surface == 'ui'
 
       - name: Install
+        if: steps.surface.outputs.surface == 'ui'
         run: |
           if [ -f package-lock.json ]; then npm ci --include=dev
           elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm i --frozen-lockfile
@@ -31,34 +66,40 @@ jobs:
           fi
 
       - name: Install Playwright browsers
+        if: steps.surface.outputs.surface == 'ui'
         run: npx playwright install --with-deps chromium
 
       - name: Resolve preview URL
         id: preview
+        if: steps.surface.outputs.surface == 'ui'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
           set -e
-          if [ -x scripts/preview-url.sh ]; then
-            url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 300 || true)
-          else
-            url=""
+          echo "::add-mask::${VERCEL_AUTOMATION_BYPASS_SECRET:-__unset__}"
+          if [ ! -x scripts/preview-url.sh ]; then
+            echo "::error::scripts/preview-url.sh is not vendored, but this PR changes user-visible files. Vendor it (templates/target-repo) — a UI change cannot be graded without a preview."
+            exit 1
           fi
-          if [ -z "$url" ]; then
-            echo "skip=1" >> "$GITHUB_OUTPUT"
-            echo "No preview URL — cannot evaluate deployment (docs/07 rule zero)"
-            exit 0
+          bypass=""
+          if [ -n "${VERCEL_AUTOMATION_BYPASS_SECRET:-}" ]; then bypass="--bypass"; fi
+          if ! url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 300 --probe $bypass 2>err.txt); then
+            echo "::error::No usable preview for a UI-affecting PR — this is a missing UX result, not a pass (L-012). $(cat err.txt)"
+            exit 1
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "skip=0" >> "$GITHUB_OUTPUT"
 
       - name: Contract flow Playwright tests
-        if: steps.preview.outputs.skip != '1'
+        id: flows
+        if: steps.surface.outputs.surface == 'ui'
         env:
           BASE_URL: ${{ steps.preview.outputs.url }}
         run: |
           if [ -d tests/e2e/flows ]; then
             npx playwright test tests/e2e/flows/ --reporter=list,html
+            echo "hard_fail_path_ran=1" >> "$GITHUB_OUTPUT"
           else
             echo "No tests/e2e/flows yet — scaffold at adoption; fail closed only when flows exist for the issue"
             # Soft until burn-down: exit 0. Flip to exit 1 when repo adopts hard UX gate.
@@ -66,7 +107,7 @@ jobs:
           fi
 
       - name: axe via Playwright (if project has @axe-core/playwright tests)
-        if: steps.preview.outputs.skip != '1'
+        if: steps.surface.outputs.surface == 'ui'
         env:
           BASE_URL: ${{ steps.preview.outputs.url }}
         run: |
@@ -77,7 +118,7 @@ jobs:
           fi
 
       - name: Lighthouse CI (preview budgets)
-        if: steps.preview.outputs.skip != '1'
+        if: steps.surface.outputs.surface == 'ui'
         env:
           BASE_URL: ${{ steps.preview.outputs.url }}
         run: |
@@ -91,8 +132,16 @@ jobs:
             --assert.assertions.categories:seo=error:minScore:0.95 \
             || echo "Lighthouse failed or not calibrated — treat as REQUEST_CHANGES signal for ux-evaluator"
 
+      # L-011: a promotion to hard-fail is unproven until the promoted path has
+      # actually executed once in CI. Say so on the run rather than letting a
+      # green check imply it did.
+      - name: Annotate unexercised hard-fail path
+        if: always() && steps.surface.outputs.surface == 'ui' && steps.flows.outputs.hard_fail_path_ran != '1'
+        run: |
+          echo "::warning::UX contract flows did not execute this run. If this PR promotes a flow to hard-fail, that promotion is unproven — do not close the burn-down issue until one CI run has executed it, or record an explicit documented deferral (L-011)."
+
       - name: Upload Playwright report
-        if: always() && steps.preview.outputs.skip != '1'
+        if: always() && steps.surface.outputs.surface == 'ui'
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
@@ -102,7 +151,7 @@ jobs:
           retention-days: 14
 
       - name: Note for human/agent evaluator
-        if: steps.preview.outputs.skip != '1'
+        if: steps.surface.outputs.surface == 'ui'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -110,7 +159,7 @@ jobs:
           # Inferential ux-evaluator hat must post the score table (docs/07).
           body="## UX-eval CI (computational half)
 
-          Preview: ${{ steps.preview.outputs.url }}
+          Preview resolved and READY (URL withheld: it may carry the protection-bypass secret).
           Playwright contract flows + optional axe/Lighthouse ran in CI.
           **Still required:** ux-evaluator playbook grades (Design / Originality / Craft / Functionality) and the statement that every contract flow was **driven, not assumed**.
 
