@@ -1,7 +1,7 @@
 ---
 title: "Goose spike findings"
 parent: The Doctrine
-nav_order: 25
+nav_order: 26
 ---
 
 # Goose spike findings (#28) — paperwork + architecture pass

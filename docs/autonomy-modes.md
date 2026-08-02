@@ -1,7 +1,7 @@
 ---
 title: "Autonomy modes"
 parent: The Doctrine
-nav_order: 24
+nav_order: 25
 ---
 
 # Autonomy modes — Crew Chief / downstream boundary
