@@ -52,12 +52,13 @@ export BASE_URL="$($GIBSON/scripts/preview-url.sh 123)"
 Resolution order per step (`generate` / `typecheck` / `lint` / `test` / `build`):
 
 1. Env: `GIBSON_TYPECHECK`, etc.
-2. `.gibson-gate.json` in the target repo
+2. `.agents/gate.json` in the target repo (legacy fallback: `.gibson-gate.json`)
 3. Commands recorded in `.gibson-baseline.json`
 4. `package.json` scripts (`typecheck`, `lint`, `test`, `build`)
 5. Defaults (`npx tsc --noEmit`, `npm run lint`, …)
 
-Example `.gibson-gate.json`:
+Example `.agents/gate.json` — vendor-neutral on purpose, so a target repo can be
+driven by any harness (docs/13):
 
 ```json
 {
