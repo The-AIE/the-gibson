@@ -32,45 +32,6 @@ One command in, target repos harness-neutral out.
 - **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
   repos adopted earlier keep working; move the file when convenient.
 
-Target repos stop knowing about The Gibson.
-
-- **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
-  *Autonomous development contract*: the repo publishes gate commands, ground rules,
-  hot files, deploy truth, and its human-only action list, naming no harness and no
-  vendor. Any agent — this harness, a bare Claude Code or Codex session, something
-  not written yet — can read it and take over. The coupling now points one way.
-- **`templates/target-repo/gate.json`** → target's `.agents/gate.json`, the
-  machine-readable twin of the gate commands. `scripts/gate.sh` and
-  `scripts/gate-baseline.sh` read it first and accept a nested `gate` object so the
-  file can carry other agent config.
-- **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
-  repos adopted earlier keep working; move the file when convenient.
-
-A skipped UX or DAST gate is now either earned or a failure.
-
-- **`scripts/ux-surface.sh`** (new) — classifies a diff as UI-affecting or not, so
-  `gibson-ux-eval` can skip a pure-library PR instantly instead of waiting five
-  minutes on a preview it will never use (L-034). Per-repo patterns live in
-  `.gibson/ux-surface.conf`; the defaults assume a conventional `app/`
-  `components/` `public/` layout. If the script is not vendored, CI assumes UI.
-- **`ci/ux-eval.yml`, `ci/security.yml`** — when a PR *does* touch a user-visible
-  surface and no preview resolves, the job now **fails** instead of setting
-  `skip=1` and reporting green. That silent skip took UX, ZAP, and the posture
-  probe out of two Tier-B merges (L-012). `ux-eval` also annotates any run where
-  the contract flows did not execute, so a hard-fail promotion cannot be closed on
-  a path CI never ran (L-011).
-- **`scripts/preview-url.sh`** — only accepts a deployment whose status is
-  `success` (no more grading a still-building deployment), defaults to a 300s
-  timeout under `CI`, and adds `--bypass` (uses `VERCEL_AUTOMATION_BYPASS_SECRET`
-  for protected previews) and `--probe` (a 401/403 is reported as protection, not
-  returned as a working URL).
-- **Docs:** `docs/13-adoption.md` gains the preview-access secrets and the rule that
-  a hard-fail promotion is unproven until the path has executed once.
-- **Migration:** repos with protected previews **must** add
-  `VERCEL_AUTOMATION_BYPASS_SECRET` or their UI PRs will now go red where they
-  previously went green-by-skipping. That is the intended change, but it is not
-  silent — set the secret and vendor `ux-surface.sh` in the same PR.
-
 The release hat stops re-diagnosing the same three merge calls.
 
 - **`scripts/release-preflight.sh`** — read-only pre-merge verdict, exit 0 READY /
@@ -141,6 +102,45 @@ The red-team playbook learns the Pale Fire class.
   check is now a NOT READY blocker on its own.
 - **`playbooks/red-team/targets/conference-os.md`** — speaker bios and session
   titles named as the prompt-injection entry points, not just the stored-XSS ones.
+
+Target repos stop knowing about The Gibson.
+
+- **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
+  *Autonomous development contract*: the repo publishes gate commands, ground rules,
+  hot files, deploy truth, and its human-only action list, naming no harness and no
+  vendor. Any agent — this harness, a bare Claude Code or Codex session, something
+  not written yet — can read it and take over. The coupling now points one way.
+- **`templates/target-repo/gate.json`** → target's `.agents/gate.json`, the
+  machine-readable twin of the gate commands. `scripts/gate.sh` and
+  `scripts/gate-baseline.sh` read it first and accept a nested `gate` object so the
+  file can carry other agent config.
+- **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
+  repos adopted earlier keep working; move the file when convenient.
+
+A skipped UX or DAST gate is now either earned or a failure.
+
+- **`scripts/ux-surface.sh`** (new) — classifies a diff as UI-affecting or not, so
+  `gibson-ux-eval` can skip a pure-library PR instantly instead of waiting five
+  minutes on a preview it will never use (L-034). Per-repo patterns live in
+  `.gibson/ux-surface.conf`; the defaults assume a conventional `app/`
+  `components/` `public/` layout. If the script is not vendored, CI assumes UI.
+- **`ci/ux-eval.yml`, `ci/security.yml`** — when a PR *does* touch a user-visible
+  surface and no preview resolves, the job now **fails** instead of setting
+  `skip=1` and reporting green. That silent skip took UX, ZAP, and the posture
+  probe out of two Tier-B merges (L-012). `ux-eval` also annotates any run where
+  the contract flows did not execute, so a hard-fail promotion cannot be closed on
+  a path CI never ran (L-011).
+- **`scripts/preview-url.sh`** — only accepts a deployment whose status is
+  `success` (no more grading a still-building deployment), defaults to a 300s
+  timeout under `CI`, and adds `--bypass` (uses `VERCEL_AUTOMATION_BYPASS_SECRET`
+  for protected previews) and `--probe` (a 401/403 is reported as protection, not
+  returned as a working URL).
+- **Docs:** `docs/13-adoption.md` gains the preview-access secrets and the rule that
+  a hard-fail promotion is unproven until the path has executed once.
+- **Migration:** repos with protected previews **must** add
+  `VERCEL_AUTOMATION_BYPASS_SECRET` or their UI PRs will now go red where they
+  previously went green-by-skipping. That is the intended change, but it is not
+  silent — set the secret and vendor `ux-surface.sh` in the same PR.
 
 ## v0.1.3 — 2026-07-24
 
