@@ -14,17 +14,18 @@ skill's job is to invoke and SUPERVISE it — not to reimplement it.
 # default shape (routing table from gibson-resources):
 ./scripts/loop.sh --runner grok --repo <target-worktree> \
     --escalate-after 2 --reviewers codex,claude
-# add ONLY after the owner's explicit ACU-spend OK (or a live session is
-# verified via devin-supervisor.sh status):  --supervisor devin
+# add ONLY after the owner's explicit ACU-spend OK for this run:  --supervisor devin
 ```
 
 **Two preconditions before the first invocation, no exceptions:**
 - `<target-worktree>` must be a dedicated worktree/clone — `loop.sh` writes
   `gibson/loop-state.md` + journal into the repo it's pointed at, so pointing
   it at the canonical checkout violates Law 3.
-- `--supervisor devin` makes `loop.sh` run `ensure`, which CREATES a billed
-  Devin session if none exists. That is spend: Ask Contract the owner first,
-  every time, unless `devin-supervisor.sh status` shows a session already live.
+- `--supervisor devin` makes `loop.sh` run `ensure` (creates a billed session
+  if none exists) AND every branch handoff spends ACUs even against a live
+  session. Both are spend: get the owner's explicit OK to enable the supervisor
+  for this run before passing the flag — a pre-existing live session does NOT
+  waive that, since the handoffs themselves bill.
 
 - `--runner`: implementer from the routing table (Grok default — flat-rate).
 - `--escalate-after 2 --reviewers codex,claude`: two consecutive failures buys
@@ -32,7 +33,11 @@ skill's job is to invoke and SUPERVISE it — not to reimplement it.
   judgment tokens spent exactly when cheap volume has failed twice.
 - `--supervisor devin`: finished branches hand off to the cloud supervisor
   (docs/22) via `handoff:` in loop-state. **Default handoff = Devin reviews the
-  exact head and opens/owns the PR but leaves the merge to a human.** Automated
+  handed-off branch and opens/owns the PR but leaves the merge to a human.**
+  (Known gap, tracked as issue #55: the handoff passes a mutable branch name + diffstat, not
+  a pinned head SHA, so a push after handoff isn't auto-invalidated — the
+  supervisor should confirm the reviewed SHA matches the merge SHA until
+  loop.sh pins it.) Automated
   non-Tier-C merges require the `--merge` handoff mode per docs/22 — and note
   honestly: `loop.sh` currently invokes handoff WITHOUT `--merge`, so full
   auto-merge needs either that flag wired into the loop or a direct
@@ -63,11 +68,12 @@ show raw diffs or expect the owner to read code — describe behavior changes.
 
 ## Hard lines
 
-- Kill switch respected instantly: the `gibson/HALT` file (or `GIBSON_HALT`
-  env) — what `loop.sh` actually checks. The `gibson-halt` label is only a
+- Kill switch respected instantly: the `gibson/HALT` file — the dependable
+  stop `loop.sh` checks every iteration (the `GIBSON_HALT` env is honored only
+  when `gh` is present, so prefer the file). The `gibson-halt` label is only a
   human signal; honoring it means translating it into the HALT file.
 - Law 5 always: reroute so no lane ever reviews its own work, even when a
-  vendor is down. **Known harness gap (tracked in the Gibson's issues): the
+  vendor is down. **Known harness gap (tracked as Gibson issue #55): the
   loop's normal per-hat path does not machine-enforce cross-vendor review —
   a same-vendor self-pass can reach merge if unsupervised. Until that's fixed
   in `loop.sh`, the supervisor (you) enforces it manually: check the journal

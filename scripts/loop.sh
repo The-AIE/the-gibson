@@ -20,8 +20,8 @@ RISKS
   - Unattended runs spend tokens / subscription quota (Grok flat-rate preferred).
   - Can open PRs and push when the runner has write permission.
   - Stop with the gibson/HALT file (or GIBSON_HALT env). The gibson-halt
-#    label is a human signal only — it does nothing until something translates
-#    it into the HALT file.
+    label is a human signal only — it does nothing until something translates
+    it into the HALT file.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. --supervisor devin sends finished branches to a cloud session that

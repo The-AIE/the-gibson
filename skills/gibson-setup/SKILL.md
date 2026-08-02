@@ -23,7 +23,7 @@ for free.
    **Verify every referenced script actually exists before installing any
    workflow from `ci/`** — e.g. `ci/gibson-gate.yml` currently references
    `scripts/check-active-work.mjs`, which does not exist in the Gibson repo
-   (tracked issue): installed blind, every target PR fails module-not-found.
+   (tracked as issue #55): installed blind, every target PR fails module-not-found.
    Vendor or stub each referenced script, or trim the job.
 3. **Risk classifier** — Tier-C auto-labeling for ALL Law 7 categories: money,
    auth, consent/PII, security boundaries, production data (schema/migrations

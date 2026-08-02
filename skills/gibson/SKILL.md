@@ -59,7 +59,8 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
   data — always ends at a human merge gate. Devin does not override the owner.
 - Owner interruptions: product direction and human gates (`docs/14`) only.
   Batch everything else into the digest.
-- Kill switch: the `gibson/HALT` file (or `GIBSON_HALT` env) stops the loop —
-  that is what `loop.sh` actually checks. A `gibson-halt` GitHub label is a
+- Kill switch: the `gibson/HALT` file is what `loop.sh` reliably checks every
+  iteration (the `GIBSON_HALT` env is also honored, but only on iterations
+  where `gh` is installed — so the FILE is the dependable stop). A `gibson-halt` GitHub label is a
   CONVENTION for humans to signal intent; it does nothing until wired to touch
   the HALT file. Never tell the owner the label alone stopped anything.

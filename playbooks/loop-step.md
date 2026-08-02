@@ -161,7 +161,9 @@ touch /path/to/target/gibson/HALT
    round, parked?, next action one-liner, timestamp UTC.
    - If a branch is pushed and ready for review and the driver runs with
      `--supervisor devin`, set `handoff: <branch>`. The driver forwards it to the
-     cloud supervisor (review → PR → CI → merge) and clears the field
+     cloud supervisor (review → PR → CI; merge only in explicit --merge handoff
+     mode, which the driver does not pass by default — otherwise a human
+     merges) and clears the field
      ([docs/22](../docs/22-devin-cloud-supervisor.md)). Do not do the GitHub steps
      yourself when a supervisor owns them.
    - If `gibson/second-opinion.md` exists, read it before your next build hat: it
