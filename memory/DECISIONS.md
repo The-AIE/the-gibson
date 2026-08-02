@@ -48,3 +48,31 @@ Rejected (for now): audit-free/Blueprint-free/Foreman-paid gradient; standalone
 suite pricing.
 Revisit when: Foreman usage meaningfully exceeds AIE conversion, or fleet
 compute costs per user demand direct pricing.
+
+## D-006 · 2026-08-01 · Adoption is a ladder: enforcement before orchestration
+Decided: a target repo adopts The Gibson in two separable steps, and the first one
+does not imply the second.
+
+- **Rung 1 — enforcement + doctrine.** Install `templates/target-repo/AGENTS-section.md`
+  and `ci/gibson-gate.yml` (plus `ci/security.yml` / `ci/ux-eval.yml` where the repo
+  has a preview deployment). Deterministic gates and a written agent contract. An
+  interactive coordinator still carves scope, dispatches, and drives the merge train.
+- **Rung 2 — orchestration.** Hand the repo to `scripts/loop.sh` / the solo loop
+  (`docs/11-solo-loop.md`) to run unattended against its backlog.
+
+A repo may sit on rung 1 indefinitely. Rung 2 requires all of: (a) the repo passes
+`playbooks/adopt.md` cleanly, (b) at least one *other* target has demonstrated the
+Phase 4 ratchet — an agent-authored harness PR merged through the pipeline, and
+(c) the repo's production write path is hardened per `docs/20-delivery-control.md`
+if merge ships to production.
+
+First application: **ConferenceOS takes rung 1 now, rung 2 not yet.** It is the
+largest target, carries a protected `release` branch and a live merge train, and
+chatterbuilt (Phase 3) has not yet closed Phase 4. Adopting both rungs at once
+would mean debugging the harness and the product in the same window.
+
+Rejected: all-or-nothing adoption (made ConferenceOS look like a Phase 5 blocker
+when its CI could benefit immediately); skipping the harness for big repos entirely
+(loses the gates, which are the cheap half).
+Revisit when: the Phase 4 ratchet closes on chatterbuilt — then re-evaluate each
+rung-1 target for promotion rather than adopting a new one.
