@@ -66,6 +66,6 @@ Each parameter **must** include `key`, `input_type`, `requirement`, and
 
 | Recipe | Mirrors (human playbook) | Goose schema | Gibson maturity |
 |---|---|---|---|
-| `builder.yml` | `playbooks/builder.md` | `1.0.0` | v0 |
-| `reviewer.yml` | `playbooks/reviewer.md` | (follow-up #34) | — |
-| `security.yml` | `playbooks/security.md` | (follow-up #34) | — |
+| `builder.yaml` | `playbooks/builder.md` | `1.0.0` | v0 |
+| `reviewer.yaml` | `playbooks/reviewer.md` | (follow-up #34) | — |
+| `security.yaml` | `playbooks/security.md` | (follow-up #34) | — |

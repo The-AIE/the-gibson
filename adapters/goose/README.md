@@ -25,9 +25,11 @@ Do **not** pipe a download straight into a shell. Download the pinned
 # 54d64de9b10befba030d3fdc4f6c316de55557c203abeaa9525c04f450c34280
 ASSET_URL="https://github.com/aaif-goose/goose/releases/download/v1.45.0/download_cli.sh"
 EXPECTED_SHA256="54d64de9b10befba030d3fdc4f6c316de55557c203abeaa9525c04f450c34280"
-curl -fsSL "$ASSET_URL" -o /tmp/goose-download_cli-v1.45.0.sh
-echo "${EXPECTED_SHA256}  /tmp/goose-download_cli-v1.45.0.sh" | shasum -a 256 -c -
-bash /tmp/goose-download_cli-v1.45.0.sh
+INSTALLER="$(mktemp "${TMPDIR:-/tmp}/goose-download_cli-v1.45.0.XXXXXX.sh")"
+trap 'rm -f "$INSTALLER"' EXIT
+curl -fsSL "$ASSET_URL" -o "$INSTALLER"
+echo "${EXPECTED_SHA256}  ${INSTALLER}" | shasum -a 256 -c -
+bash "$INSTALLER"
 goose --version
 ```
 
@@ -55,7 +57,7 @@ GIBSON=~/Code/the-gibson
 # Worktree path after claim (see §3) — never the target's canonical checkout
 REPO=~/Code/app-wt-42-feature-slug
 
-goose run --recipe "$GIBSON/playbooks/recipes/builder.yml" \
+goose run --recipe "$GIBSON/playbooks/recipes/builder.yaml" \
   --params "repo=$REPO" --params "issue=42" --params "gibson=$GIBSON"
 ```
 
@@ -74,7 +76,7 @@ $GIBSON/scripts/claim.sh 42 feature-slug 'path/globs/**'
 cd ../wt-42-feature-slug   # sibling worktree created by claim.sh
 
 # Run role on Goose (direct recipe — current scaffold path)
-goose run --recipe "$GIBSON/playbooks/recipes/builder.yml" \
+goose run --recipe "$GIBSON/playbooks/recipes/builder.yaml" \
   --params "repo=$(pwd)" --params "issue=42" --params "gibson=$GIBSON"
 
 # Green gate before commit
@@ -117,7 +119,7 @@ posture:
 
 ```bash
 goose --version
-test -f playbooks/recipes/builder.yml && echo recipe_ok
+test -f playbooks/recipes/builder.yaml && echo recipe_ok
 ```
 
 ## Status (epic #30)
