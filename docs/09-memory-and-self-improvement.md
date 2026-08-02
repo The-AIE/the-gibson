@@ -17,7 +17,13 @@ storage unlock most of the value — and its HNSW vector store needs ~1,000
 trajectories before beating grep. We are not there; when we are, a vector index is
 an *adapter over* these files, not a replacement.
 
-Two stores, two jobs:
+**Target repos** use the same idea: root `MEMORY.md` / `memory.md` (and optional
+`memory/`) plus an `AGENTS.md` block. Full target convention, dual-write, concurrent
+writers, and **no CI for pure memory commits**:
+[docs/24-agent-memory-conventions.md](24-agent-memory-conventions.md).
+Templates: `templates/target-repo/MEMORY.md`, `templates/target-repo/AGENTS-section.md`.
+
+Two stores, two jobs (harness side):
 
 | Store | Job | Medium |
 |---|---|---|
@@ -26,7 +32,8 @@ Two stores, two jobs:
 
 Rule of thumb: if it should still matter in a month, it's a Gibson memory; if it
 matters until the task closes, it's an MC memory. The historian promotes the former
-out of the latter.
+out of the latter. Product-specific scar tissue lives in the **target** `MEMORY.md`,
+not only here.
 
 ## The memory files
 
@@ -49,6 +56,10 @@ event): timeline, impact, resolution, lessons spawned.
 
 Agents **read** lessons at session start (Law 1) — tag-filtered to their role and
 target area, so it stays cheap. Agents **write** lessons per Law 9.
+
+**Pure `memory/`-only commits on this repo skip the green gate** (AGENTS.md Law 4
+exception) so lessons land without a full CI cycle. Same rule is required on
+adopted targets (doc 24).
 
 ## The ratchet (the self-correcting loop)
 
@@ -106,4 +117,4 @@ gates:
   controls that stronger models have made into pure friction, with evidence.
 
 ---
-[← 08 · The security system](08-security.md) · [Home](../index.md) · [10 · Any AI, same rules →](10-vendor-adapters.md)
+[← 08 · The security system](08-security.md) · [Home](../index.md) · [10 · Any AI, same rules →](10-vendor-adapters.md) · [24 · AGENTS + MEMORY conventions](24-agent-memory-conventions.md)
