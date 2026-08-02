@@ -433,6 +433,87 @@ out=$(run "$f_imposs_off"); rc=$?
 check "impossible calendar with +00:00 offset is BLOCKED" "$rc" "1"
 if echo "$out" | grep -qF "READY"; then bad "imposs+offset must not be READY"; else ok "imposs+offset is not READY"; fi
 
+echo "#61 P1 · chronological sort normalizes offsets and fractional spellings"
+# Raw .at text sort is a false-green: wall "17:00+05:30" sorts after "16:00Z"
+# even though 17:00+05:30 is 11:30Z (older). Normalize to true UTC instants.
+f_off_chrono=$(fixture off_chrono '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .reviews = [{
+    "author": {"login": "older-offset-approver"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T17:00:00+05:30",
+    "commit": {"oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  }] |
+  .comments = [{
+    "author": {"login": "newer-zulu-blocker"},
+    "body": "still blocked\n\nVERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T16:00:00Z"
+  }]')
+out=$(run "$f_off_chrono"); rc=$?
+check "older +05:30 APPROVE must not beat newer Z REQUEST_CHANGES" "$rc" "1"
+contains "names newer REQUEST_CHANGES under offset chrono" "$out" "REQUEST_CHANGES"
+contains "names newer-zulu-blocker" "$out" "newer-zulu-blocker"
+if echo "$out" | grep -qF "READY"; then bad "offset text-sort must not yield READY"; else ok "offset chrono is not READY"; fi
+if echo "$out" | grep -qF "older-offset-approver"; then bad "older offset APPROVE must not win"; else ok "older offset APPROVE is not the winning event"; fi
+
+# Equal true instants spelled with offset vs Z: REQUEST_CHANGES wins by tie precedence.
+f_off_tie=$(fixture off_tie '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .reviews = [{
+    "author": {"login": "offset-tie-approver"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T17:30:00+05:30",
+    "commit": {"oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  }] |
+  .comments = [{
+    "author": {"login": "zulu-tie-blocker"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T12:00:00Z"
+  }]')
+out=$(run "$f_off_tie"); rc=$?
+check "equal-instant +05:30 APPROVE vs Z REQUEST_CHANGES prefers REQUEST_CHANGES" "$rc" "1"
+contains "offset equal-instant prefers REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
+contains "names zulu-tie-blocker" "$out" "zulu-tie-blocker"
+if echo "$out" | grep -qF "READY"; then bad "equal-instant offset tie must not be READY"; else ok "equal-instant offset tie is not READY"; fi
+
+# Equal true instants with/without trailing .000 fraction spelling.
+f_frac_tie=$(fixture frac_tie '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .reviews = [{
+    "author": {"login": "frac-tie-approver"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T12:00:00Z",
+    "commit": {"oid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  }] |
+  .comments = [{
+    "author": {"login": "frac-tie-blocker"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T12:00:00.000Z"
+  }]')
+out=$(run "$f_frac_tie"); rc=$?
+check "equal-instant Z vs .000Z prefers REQUEST_CHANGES" "$rc" "1"
+contains "fraction spelling equal-instant prefers REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
+contains "names frac-tie-blocker" "$out" "frac-tie-blocker"
+if echo "$out" | grep -qF "READY"; then bad "fraction spelling tie must not be READY"; else ok "fraction spelling tie is not READY"; fi
+
+# Distinct sub-second fractions must order chronologically (not collapse to ties).
+f_frac_order=$(fixture frac_order '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .comments = [
+    {
+      "author": {"login": "early-frac-blocker"},
+      "body": "VERDICT: REQUEST_CHANGES",
+      "createdAt": "2026-08-02T12:00:00.001Z"
+    },
+    {
+      "author": {"login": "late-frac-approver"},
+      "body": "VERDICT: APPROVE",
+      "createdAt": "2026-08-02T12:00:00.002Z"
+    }
+  ]')
+out=$(run "$f_frac_order"); rc=$?
+check "later fractional APPROVE beats earlier fractional REQUEST_CHANGES" "$rc" "0"
+contains "names late-frac-approver" "$out" "late-frac-approver"
+
 echo "#61 P1 · formal review state precedes contradictory body VERDICT text"
 # CHANGES_REQUESTED with a body that ends VERDICT: APPROVE must still block.
 f_formal_vs_body=$(fixture formal_vs_body '.reviewDecision = "CHANGES_REQUESTED" | .headRefOid = "2222222222222222222222222222222222222222" |

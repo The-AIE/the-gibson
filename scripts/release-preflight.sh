@@ -147,7 +147,9 @@ fi
 #   - formal state (APPROVED / CHANGES_REQUESTED) precedes body VERDICT text
 #   - DISMISSED reviews never authorize via body VERDICT: APPROVE
 #   - authorless APPROVE never counts as independent
-#   - equal timestamps: REQUEST_CHANGES wins over APPROVE (source order ignored)
+#   - equal true instants: REQUEST_CHANGES wins over APPROVE (source order ignored)
+#   - sort by chronological UTC instant, never raw .at text (offsets / .000
+#     spellings must not reorder or miss equal-instant ties)
 #   - SHA-bound events must match the current PR head; missing head fails closed
 #   - malformed formal APPROVED/CHANGES_REQUESTED evidence blocks before any
 #     reviewDecision aggregate fallback (no drop-then-recover path)
@@ -159,13 +161,15 @@ fi
 # real fractional instants (over-rejection).
 ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
 
-# Shared jq helpers: shape match + strict civil-calendar round-trip.
+# Shared jq helpers: shape match + strict civil-calendar round-trip + chrono key.
 # fromdateiso8601 normalizes impossible dates (9999-02-31 → 9999-03-03); that
 # must never enter the stream. Validate by stripping frac, taking the wall
 # clock (drop Z/offset), parsing wall+Z, and requiring todateiso8601 to equal
 # wall+Z. Offset forms are accepted when the wall is real and the offset
 # matches ISO_AT_RE — do not require fromdateiso8601 on ±HH:MM (jq often
 # rejects valid offsets and would over-reject GitHub-shaped stamps).
+# Chronological sort key: wall epoch minus offset seconds, plus fractional
+# padded to 9 digits so distinct sub-seconds order and .000 collapses with none.
 # shellcheck disable=SC2016
 JQ_ISO_DEFS='
   def strict_iso_instant:
@@ -174,6 +178,20 @@ JQ_ISO_DEFS='
     (try (($wall + "Z") | fromdateiso8601 | todateiso8601) catch null) == ($wall + "Z");
   def complete_at:
     (. != null) and ((. | type) == "string") and (. | test($re)) and strict_iso_instant;
+  def instant_sort_key:
+    (capture("(?<wall>^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<frac>\\.[0-9]+)?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$")) as $p |
+    ($p.wall + "Z" | fromdateiso8601) as $wall_epoch |
+    (
+      if $p.tz == "Z" then 0
+      else
+        ($p.tz | capture("^(?<sign>[+-])(?<hh>[0-9]{2}):(?<mm>[0-9]{2})$")) as $o |
+        (($o.hh | tonumber) * 3600 + ($o.mm | tonumber) * 60) *
+          (if $o.sign == "+" then 1 else -1 end)
+      end
+    ) as $off |
+    ($wall_epoch - $off) as $utc |
+    (((($p.frac // ".") | ltrimstr(".")) + "000000000")[0:9] | tonumber) as $frac_ns |
+    [$utc, $frac_ns];
 '
 
 # Malformed formal reviews that would be relevant (APPROVED / CHANGES_REQUESTED)
@@ -240,8 +258,9 @@ VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
   # Authorless APPROVE is never independent and never clears the gate — drop it.
   # Authorless REQUEST_CHANGES still blocks (fail closed).
   | map(select(is_request_changes or ((.login != null) and (.login != ""))))
-  # Ascending time; on ties, REQUEST_CHANGES (1) after APPROVE (0) so last wins.
-  | sort_by([.at, (if is_request_changes then 1 else 0 end)])
+  # Ascending true UTC instant (offsets + fractions normalized). On equal
+  # instants only, REQUEST_CHANGES (1) after APPROVE (0) so last wins.
+  | sort_by((.at | instant_sort_key) + [if is_request_changes then 1 else 0 end])
   | last // empty
   | if . then
       [.login, .verdict, .source, .at, .sha] | @tsv
