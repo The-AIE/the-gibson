@@ -10,6 +10,27 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+Claiming stops being the thing that conflicts.
+
+- **`scripts/claim.sh`** — a claim is now one file, `docs/claims/issue-<N>-<slug>.md`,
+  instead of an appended row in the shared `docs/active-work.md` table. Every lane
+  was appending to the same last line, so the ledger meant to prevent collisions
+  became the collision — and blocked green product PRs touching none of those
+  issues (L-023). Separate paths cannot conflict.
+- **`scripts/claim.sh`** also refuses a second claim on an already-claimed issue
+  (L-028: two builders, same issue, different slugs, a wasted build each, twice).
+  A deliberate slice passes `--slice`; scope overlap is still refused either way.
+  It no longer moves your canonical checkout to commit the claim (L-009).
+- **`scripts/claims-status.sh`** (new) — the single view the table used to give,
+  generated rather than hand-maintained: `--issue`, `--markdown`, STALE after 24h.
+- **`scripts/release-claim.sh`** — releases claim files and legacy rows alike.
+- **`playbooks/release.md`** — when `gh pr merge` fails inside a pinned fleet
+  worktree, merge via the API rather than force-checking-out main under a running
+  lane (L-020).
+- **Migration:** none required. Legacy `docs/active-work.md` rows are still read as
+  live claims and still released, so existing lanes drain normally; new claims land
+  as files. The table can be deleted once it is empty.
+
 A skipped UX or DAST gate is now either earned or a failure.
 
 - **`scripts/ux-surface.sh`** (new) — classifies a diff as UI-affecting or not, so

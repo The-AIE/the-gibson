@@ -33,10 +33,39 @@ Two mechanisms, used together:
 
 1. **Atomic pre-claim:** `gh issue edit <N> --add-label agent-claimed` — one API
    call, closes the race window to ~zero.
-2. **Claim row:** append one line to the target repo's `docs/active-work.md`:
-   `| <UTC timestamp> | issue-<N>-<slug> | <files/areas, named schema models> | session:<who> |`
-   committed **directly to main** and pushed immediately (the single exception to
-   worktree isolation — claims must be visible instantly).
+2. **Claim file:** `scripts/claim.sh` writes **one file per claim** at
+   `docs/claims/issue-<N>-<slug>.md`, committed **directly to main** and pushed
+   immediately (the single exception to worktree isolation — claims must be visible
+   instantly):
+
+   ```
+   claim: issue-42-password-reset
+   issue: 42
+   claimed: 2026-08-02T10:14:07Z
+   scope: app/api/auth/** lib/email.ts
+   session: grok@fleet-2
+   branch: feat/42-password-reset
+   worktree: /Code/wt-42-password-reset
+   ```
+
+   It used to be an appended row in a shared `docs/active-work.md` table, and that
+   table became exactly the hot file this doc tells you to eliminate: every lane
+   appended to the same last line, so claiming and releasing conflicted with each
+   other and blocked green product PRs that touched none of those issues (L-023).
+   Separate paths cannot conflict. Legacy rows are still read and still released,
+   so a target repo mid-migration is safe.
+
+   Read the ledger with `scripts/claims-status.sh` (`--issue <n>`, `--markdown`),
+   which merges both forms and flags claims older than 24h. It reads `origin/main`,
+   not your working tree — a stale local checkout is how two lanes each conclude
+   they are alone.
+
+**One issue, one lane — unless you say otherwise.** `claim.sh` refuses an issue that
+already has a live claim: two builders took the same issue under different slugs and
+burned a full build each, twice (L-028). A big issue legitimately ships in slices
+(L-024), so a deliberate second lane passes `--slice` and must have non-overlapping
+scope. Release a slice with `release-claim.sh <issue> --claim-id <id>`, which keeps
+the siblings and keeps the label.
 
 Before claiming: read live claims. Overlap with your intended scope → stop and
 coordinate (different issue, or wait). Never race a live claim.

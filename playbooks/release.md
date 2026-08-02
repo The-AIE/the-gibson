@@ -48,14 +48,21 @@ gh pr checks 123
 # Merge (only when checklist green)
 gh pr merge 123 --squash --delete-branch
 
+# If that fails with a checkout/worktree error, DO NOT force-checkout main here:
+# you are probably inside a fleet worktree pinned to a feature branch, and
+# yanking it out from under a running lane is Law 3 (L-020). Merge server-side:
+gh api repos/{owner}/{repo}/pulls/123/merge -f merge_method=squash
+git fetch origin && git log --oneline -1 origin/main   # verify the merge commit
+
 # Verify deploy
 # (Vercel auto-deploy; then)
 vercel inspect <deployment-url>   # or API
 <path-to-gibson>/scripts/posture-probe.sh https://prod.example.com
 BASE_URL=https://prod.example.com npx playwright test tests/e2e/smoke/
 
-# Cleanup claim
+# Cleanup claim (one slice of a multi-lane issue? add --claim-id issue-42-<slug>)
 <path-to-gibson>/scripts/release-claim.sh 42
+<path-to-gibson>/scripts/claims-status.sh --issue 42   # expect: no live claims
 ```
 
 **Dispatch:**

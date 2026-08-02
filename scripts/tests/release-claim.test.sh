@@ -82,6 +82,29 @@ lacks    "merged slice stripped on origin/main" "$table" "issue-15-checkout-tota
 contains "sibling slice survives on origin/main" "$table" "issue-15-demo-stale-plan"
 contains "unrelated issue survives"              "$table" "issue-115-unrelated"
 
+echo "L-023 · per-lane claim files release the same way rows did"
+new_repo "$ROOT/d"
+(
+  cd "$ROOT/d/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  for id in issue-15-checkout-totals issue-15-demo-stale-plan issue-115-unrelated; do
+    printf 'claim: %s\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/%s\nsession: a\n' "$id" "$id" \
+      > "docs/claims/$id.md"
+  done
+  : > docs/active-work.md   # no legacy rows at all: files are the only ledger
+  git add -A && git commit -qm "claims as files" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/d/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
+contains "finds a claim with no table at all" "$out" "issue-15-checkout-totals"
+contains "sees the sibling file"              "$out" "KEEP sibling claim: issue-15-demo-stale-plan"
+(cd "$ROOT/d/canon" && "$RC" 15 --claim-id issue-15-checkout-totals) >/dev/null 2>&1
+files=$(cd "$ROOT/d/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+lacks    "released claim file deleted" "$files" "issue-15-checkout-totals"
+contains "sibling claim file survives" "$files" "issue-15-demo-stale-plan"
+contains "other issue untouched"       "$files" "issue-115-unrelated"
+
 echo "L-027 · unfinished cleanup exits 3 instead of claiming success"
 new_repo "$ROOT/c"
 # No GitHub remote here, so the label step cannot be verified.
