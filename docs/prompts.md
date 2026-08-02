@@ -9,6 +9,8 @@ nav_order: 4
 
 Use these with Hermes / chat / Mission Control. You do not need to remember special commands.
 
+**Start here if you are not technical:** [VIBECODING.md](../VIBECODING.md) — this page is the cheat sheet of *what to say*; that page is *how the whole thing works for you*.
+
 ## For the non-technical owner (Operator)
 
 | When you want… | Say this |
@@ -44,8 +46,8 @@ Rough priority: must-have / nice-to-have
 | Moment | Prompt |
 |---|---|
 | Adopt a repo | See playbooks/adopt.md — run the checklist, then: `Adopt [repo] as Operator-tier / Engineer-tier. Target: [url].` |
-| Run solo loop | `Run the solo loop on [repo] against open backlog. Digest via Hermes.` |
-| Request review | `Review PR #[n] as reviewer hat. Cross-vendor if available.` |
+| Run solo loop (single model) | `Run the solo loop on [repo] against open backlog with one runner only.` |
+| Optional cross-vendor review | `Review PR #[n] as reviewer hat. Cross-vendor if available.` |
 | Site audit | `Run deploy-audit on [preview or production URL]. Scorecard + top 3 fixes.` |
 | Harness improvement | `File a harness-improvement issue for: [failure]. Prefer sensor over guide.` |
 | Force a decision card | `Translate gate G[n] into an Operator decision card and send.` |
@@ -55,5 +57,6 @@ Rough priority: must-have / nice-to-have
 - Ask Contract is always on (docs/16).
 - Only the sixteen human gates interrupt the owner (docs/14).
 - Confusion from an Operator is treated as a failed test and fixed in the harness (docs/09).
+- **Single-model is enough** for the primary path; multi-model review is an upgrade (docs/21).
 
-Cross-links: [VIBECODING.md](../VIBECODING.md) · [EXAMPLES.md](../EXAMPLES.md) · [docs/16](16-nontechnical-operation.md) · [Operator Readiness](21-operator-readiness.md)
+Cross-links: [VIBECODING.md](../VIBECODING.md) · [EXAMPLES.md](../EXAMPLES.md) · [docs/16](16-nontechnical-operation.md) · [Operator Readiness](21-operator-readiness.md) · [QUICKSTART](../QUICKSTART.md)
