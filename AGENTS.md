@@ -80,6 +80,10 @@ Roles and their contracts are in `docs/03-roles.md`. You are exactly one of:
 `planner` · `decomposer` · `builder` · `test-engineer` · `reviewer` ·
 `ux-evaluator` · `security` · `release` · `historian`
 
+The `release` role also runs **delivery control** when asked to protect production
+write paths or promote a release branch (`docs/23-delivery-control.md`,
+`playbooks/delivery-control.md`). Secret rotation remains a human gate (G4) only.
+
 If your dispatch prompt doesn't name a role, you are a `builder`.
 A solo/continuous session (one agent cycling through all roles, e.g. Grok running
 unattended) follows `docs/11-solo-loop.md` — the roles still apply, executed in
@@ -105,9 +109,16 @@ Complete list with rationale in `docs/14-human-gates.md`. Summary:
   messages/emails, creating public repos.
 - Scope: the plan is ambiguous, contradictory, or the work grew beyond the claim.
 - Access: credentials or approvals only a human holds.
+- Style commitments: a subjective product, UX, copy, brand/voice, visual-design,
+  or naming decision where reasonable people disagree. Technical correctness is an
+  agent + CI decision; taste is the owner's. Ship the technical change, but open a
+  decision item for the taste call rather than self-approving it. When unsure whether
+  a change carries a style commitment, stop and ask.
 
 Everything else — including test failures, flaky CI, merge conflicts, unclear docs,
-and mid-task errors — you resolve yourself and keep moving.
+and mid-task errors — you resolve yourself and keep moving. Purely technical,
+non-opinion changes need no owner click: a passing green gate plus an independent
+reviewer (Law 5 — never grade your own homework) is authorization to merge.
 
 ## Where things live
 
