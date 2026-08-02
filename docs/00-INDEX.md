@@ -69,6 +69,7 @@ If you only open one file, use the row that matches you. Glossary:
 | 20 | [multi-model](20-multi-model-orchestration.md) | Coordinator pattern |
 | 21 | [operator-readiness](21-operator-readiness.md) | Definition of done |
 | 22 | [devin-supervisor](22-devin-cloud-supervisor.md) | Cloud reviewer/merger + escalation ladder |
+| 23 | [delivery-control](23-delivery-control.md) | Production write-path locks + promote |
 | — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 
