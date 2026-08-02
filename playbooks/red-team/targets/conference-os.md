@@ -26,10 +26,20 @@ weighted toward those two.
 3. **PII / consent** — API response over-fetch; PII in logs/errors; consent enforced before
    the gated action; attendee data export/erasure reach; CSV injection in exported attendee lists.
 4. **Injection** — any Prisma `$queryRaw`; stored XSS in speaker bios / session titles.
+   Those same fields are the **prompt-injection** entry points: speaker bios, session
+   titles and descriptions are attacker-authored, free-text, and land in front of any
+   agent that summarizes, moderates, or answers questions about the programme. Test
+   the classic payload and the patient one (text that only becomes an instruction once
+   another agent ingests the summary), and run `scripts/injection-scan.sh` over any
+   seeded/imported content — a zero-width payload in a bio survives every review that
+   reads rendered text (PROTOCOL Phase 3, "poisoned shared config").
 5. **Business logic** — capacity/waitlist bypass, duplicate registration, registering for a
    paid tier without paying, ticket-transfer abuse.
 
 ## Integration points to check
+- If any agent/LLM feature reads attendee-authored content, walk the five-layer
+  defense-in-depth table in PROTOCOL.md — bios reaching a prompt turns this from a
+  web-app audit into an agent-runtime audit.
 - Cross-reference existing `cos-review` (money/consent/PII lens) and `cos-testing` (Playwright
   e2e) — reuse their coverage; don't duplicate.
 - File Critical/High findings as issues on `mrhinkle/conference-os`, labeled `security` + severity.

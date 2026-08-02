@@ -8,6 +8,25 @@ nav_exclude: true
 Written for fork owners deciding whether to take an update: what changed, why,
 and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
+## Unreleased
+
+The red-team playbook learns the Pale Fire class.
+
+- **`scripts/injection-scan.sh`** (new) — flags zero-width, bidi-override, BOM and
+  soft-hyphen characters in anything a model ingests (skills, prompts, recipes,
+  shared config). Block's Goose disclosure hid U+200B/U+200C inside shared recipes:
+  invisible in a git diff, fully tokenized by the LLM. Review cannot catch this, so
+  the check has to be mechanical. Wired into red-team Phase 2.
+- **`playbooks/red-team/PROTOCOL.md`** — new Phase-3 subsection on prompt injection
+  and poisoned shared config (invisible payloads, untrusted content reaching a
+  prompt, fleet config with no integrity verification, and what the granted tool
+  surface lets an injected instruction actually do), plus a five-layer
+  defense-in-depth checklist for agent-runtime targets that separates what Gibson
+  audits from what the target must build. Fleet-distributed config with no integrity
+  check is now a NOT READY blocker on its own.
+- **`playbooks/red-team/targets/conference-os.md`** — speaker bios and session
+  titles named as the prompt-injection entry points, not just the stored-XSS ones.
+
 ## v0.1.3 — 2026-07-24
 
 Docs site: GitHub Pages + navigation + plain-English callouts.

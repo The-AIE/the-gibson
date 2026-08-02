@@ -17,7 +17,9 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`posture-probe.sh`](posture-probe.sh) `<url>` | Headers (CSP/HSTS/frame), cookie flags, optional POST burst → 429. Layer 8. |
 | [`loop.sh`](loop.sh) `--runner … --repo …` | Solo-loop driver ([docs/11](../docs/11-solo-loop.md)): kill switch, hat dispatch, error budget, journal. |
 | [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
+| [`injection-scan.sh`](injection-scan.sh) `[paths…] [--all]` | Invisible/deceptive Unicode (zero-width, bidi overrides, BOM, soft hyphen) in anything a model ingests — skills, prompts, recipes, shared config. Red-team Phase 2; exit 1 on a hit. The Pale Fire class: invisible in a diff, fully tokenized by the LLM. |
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
+| [`tests/injection-scan.test.sh`](tests/injection-scan.test.sh) | Pins each codepoint the scan must catch, and that ordinary prose stays quiet. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |
 
 ## How to use (quick path)
