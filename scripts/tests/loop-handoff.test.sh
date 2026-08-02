@@ -1336,6 +1336,55 @@ else
 fi
 unset GIBSON_REMOTE_HALT_INTERVAL
 
+# Zero-padded intervals (08/09) must parse as base-10, not invalid octal.
+# Bash [[ -lt ]] / $((...)) treat leading zeros as octal; without 10#
+# normalization, "08" emits "value too great for base" and the cache never
+# hits, so every iteration re-polls.
+echo "remote halt: zero-padded interval 08 is base-10 cadence (not invalid octal)"
+setup_repo with-remote
+export GH_STUB_BEHAVIOR=ok-clear
+export GIBSON_REMOTE_HALT_INTERVAL=08
+: > "$CALLS/gh.log"
+HERMES_CMD='cat >/dev/null' \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+    --max-iterations 16 >/dev/null 2>"$ROOT/cadence-08.err" || true
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
+# iters 0..15 with interval 8 → live polls at 0 and 8 only (2 polls).
+if [[ "$issue_calls" -eq 2 ]]; then
+  ok "interval 08 polls twice over 16 iters (base-10 eight; got $issue_calls)"
+else
+  bad "interval 08 expected 2 issue-list polls over 16 iters, got $issue_calls (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+if grep -q 'value too great for base' "$ROOT/cadence-08.err" 2>/dev/null; then
+  bad "interval 08 must not emit octal arithmetic diagnostic (stderr=$(tr '\n' ' ' <"$ROOT/cadence-08.err"))"
+else
+  ok "interval 08 emits no 'value too great for base' diagnostic"
+fi
+unset GIBSON_REMOTE_HALT_INTERVAL
+
+echo "remote halt: zero-padded interval 09 is base-10 cadence (not invalid octal)"
+setup_repo with-remote
+export GH_STUB_BEHAVIOR=ok-clear
+export GIBSON_REMOTE_HALT_INTERVAL=09
+: > "$CALLS/gh.log"
+HERMES_CMD='cat >/dev/null' \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+    --max-iterations 18 >/dev/null 2>"$ROOT/cadence-09.err" || true
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
+# iters 0..17 with interval 9 → live polls at 0 and 9 only (2 polls).
+if [[ "$issue_calls" -eq 2 ]]; then
+  ok "interval 09 polls twice over 18 iters (base-10 nine; got $issue_calls)"
+else
+  bad "interval 09 expected 2 issue-list polls over 18 iters, got $issue_calls (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+if grep -q 'value too great for base' "$ROOT/cadence-09.err" 2>/dev/null; then
+  bad "interval 09 must not emit octal arithmetic diagnostic (stderr=$(tr '\n' ' ' <"$ROOT/cadence-09.err"))"
+else
+  ok "interval 09 emits no 'value too great for base' diagnostic"
+fi
+unset GIBSON_REMOTE_HALT_INTERVAL
+unset GH_STUB_BEHAVIOR
+
 # --once defaults interval to 1: a single iteration does exactly one poll.
 setup_repo with-remote
 SHA=$(head_sha)

@@ -178,9 +178,19 @@ elif [[ "$ONCE" -eq 1 ]]; then
 else
   REMOTE_HALT_INTERVAL=3
 fi
-# Non-positive values would disable the remote stop; clamp to at least 1.
-if ! [[ "$REMOTE_HALT_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$REMOTE_HALT_INTERVAL" -lt 1 ]]; then
+# Accept digits only; non-numeric and non-positive values would disable the
+# remote stop, so clamp to at least 1. Normalize as base-10 before any
+# arithmetic/comparison: Bash treats leading-zero strings as octal, so a
+# value like 08 passes the digit check but then dies with "value too great
+# for base" at [[ -lt ]] / $((...)) and the cache never hits (polls every
+# iteration). 10# forces decimal so 08 → 8 and 09 → 9.
+if ! [[ "$REMOTE_HALT_INTERVAL" =~ ^[0-9]+$ ]]; then
   REMOTE_HALT_INTERVAL=1
+else
+  REMOTE_HALT_INTERVAL=$((10#$REMOTE_HALT_INTERVAL))
+  if [[ "$REMOTE_HALT_INTERVAL" -lt 1 ]]; then
+    REMOTE_HALT_INTERVAL=1
+  fi
 fi
 
 # Kill switch (issue #55 local paths + issue #71 remote paths).
