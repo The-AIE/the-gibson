@@ -70,7 +70,8 @@ emit() { # claimed | claim-id | scope | session
   local age="" stamp
   # date -d is GNU, -j -f is BSD; a claim with an unparseable date is still a claim.
   stamp=$(date -u -d "$claimed" +%s 2>/dev/null ||
-          date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$claimed" +%s 2>/dev/null || echo "")
+          date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$claimed" +%s 2>/dev/null ||
+          date -u -j -f "%Y-%m-%d" "$claimed" +%s 2>/dev/null || echo "")
   if [[ -n "$stamp" ]]; then
     local hours=$(( (NOW - stamp) / 3600 ))
     [[ "$hours" -ge 24 ]] && age=" STALE(${hours}h)"
