@@ -8,7 +8,7 @@ gate-baseline.sh — snapshot green-gate failure counts at branch point
 
 WHAT IT DOES
   Runs the target repo's generate/typecheck/lint/test/build commands (from
-  .gibson-gate.json, package.json scripts, or env overrides) and writes
+  .agents/gate.json, package.json scripts, or env overrides) and writes
   .gibson-baseline.json with failure counts / exit codes.
 
 WHY
@@ -26,8 +26,9 @@ USAGE
 
 ENV / config (first match wins per step)
   GIBSON_GENERATE, GIBSON_TYPECHECK, GIBSON_LINT, GIBSON_TEST, GIBSON_BUILD
-  or .gibson-gate.json:
+  or .agents/gate.json (legacy: .gibson-gate.json):
     { "generate": "...", "typecheck": "...", "lint": "...", "test": "...", "build": "..." }
+    (a top-level "gate" object is also read, so the file can carry other keys)
 
 EXAMPLES
   cd ../wt-42-password-reset
@@ -49,6 +50,8 @@ fi
 die() { echo "gate-baseline.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "gate-baseline.sh: $*" >&2; }
 
+SKIP_SENTINEL='__gate_step_not_applicable__'
+
 # Resolve command for a step
 resolve_cmd() {
   local step="$1"
@@ -59,14 +62,26 @@ resolve_cmd() {
     echo "$val"
     return
   fi
-  if [[ -f .gibson-gate.json ]] && command -v node >/dev/null; then
-    local from_json
-    from_json=$(node -e "try{const j=require('./.gibson-gate.json');if(j['$step'])process.stdout.write(j['$step'])}catch(e){}" 2>/dev/null || true)
-    if [[ -n "$from_json" ]]; then
-      echo "$from_json"
-      return
+  # .agents/gate.json first: the vendor-neutral contract the target repo
+  # publishes (docs/13). .gibson-gate.json stays supported for older adoptions.
+  local cfg
+  for cfg in .agents/gate.json .gibson-gate.json; do
+    if [[ -f "$cfg" ]] && command -v node >/dev/null; then
+      local from_json
+      # A present-but-empty key means "this step does not apply here" and must
+      # stop the chain — otherwise it would fall through to package.json or the
+      # defaults and run something the repo explicitly opted out of.
+      from_json=$(node -e "try{const j=require('./$cfg');const g=j.gate||j;if(Object.prototype.hasOwnProperty.call(g,'$step')){const v=String(g['$step']??'').trim();process.stdout.write(v===''?'$SKIP_SENTINEL':v)}}catch(e){}" 2>/dev/null || true)
+      if [[ "$from_json" == "$SKIP_SENTINEL" ]]; then
+        echo ""
+        return
+      fi
+      if [[ -n "$from_json" ]]; then
+        echo "$from_json"
+        return
+      fi
     fi
-  fi
+  done
   if [[ -f package.json ]] && command -v node >/dev/null; then
     local has
     has=$(node -e "const p=require('./package.json');process.exit(p.scripts&&p.scripts['$npm_script']?0:1)" 2>/dev/null && echo yes || echo no)

@@ -34,6 +34,10 @@ Score the repo's ambient affordances before promising autonomy:
 - [ ] CI present; branch protection on
 - [ ] Vercel wiring: which branch is REALLY the Production Branch (verify in
       project settings, not docs); preview deployments on
+- [ ] **Delivery control** ([docs/23](23-delivery-control.md)): run
+      `scripts/delivery-control/audit.sh --repo owner/name` — fail or P0 the
+      fix-list if the production write path is unprotected (`enforce_admins`,
+      required reviews, strict checks, prod branch protection in model B)
 - [ ] Schema/migration model (Prisma? migration files? who applies to prod?)
 - [ ] Secrets hygiene (.env* ignored, no committed secrets — run gitleaks once)
 
@@ -44,28 +48,56 @@ Output: an adoption report with a harnessability grade and a fix-list. Low-grade
 repos get affordance-improvement issues *first* — autonomy on an illegible codebase
 is how you buy incidents.
 
-## Step 2 — Install the contract
+## Step 2 — Install the contract (harness-neutral)
 
-1. Add the Gibson section to the target's `AGENTS.md` from
-   `templates/target-repo/AGENTS-section.md` — repo-specifics only: hot files,
-   gate commands, framework warnings (pinned-version gotchas), env/deploy truth,
-   tier-C surface map. Doctrine stays in The Gibson; the target file *points*, it
-   doesn't *copy*.
-2. `CLAUDE.md` → `@AGENTS.md` if not already.
-3. Create `docs/active-work.md` with the claim-table header.
-4. Labels: `gibson`, `tier-a/b/c`, `agent-claimed`, `blocked`, `gibson-halt`.
+The target repo does **not** become a Gibson repo. It publishes an *autonomous
+development contract* — the facts a machine needs to work here safely — and The
+Gibson is one of several harnesses that can read it. A bare Claude Code session,
+a Codex run, or a harness that does not exist yet gets the same affordances. The
+coupling points one way: Gibson knows about the repo, the repo knows nothing
+about Gibson.
+
+Why that way round: a target that names its harness rots the moment you change
+harnesses, and it teaches every passing agent a vocabulary it has no way to look
+up. Repo facts age with the repo; process doctrine ages with the harness. Keep
+them in separate files owned by separate repos.
+
+1. Add the *Autonomous development contract* section to the target's `AGENTS.md`
+   from `templates/target-repo/AGENTS-section.md` — repo-specifics only: gate
+   commands, ground rules, hot files, framework warnings (pinned-version
+   gotchas), deploy truth, the human-only action list, commit conventions. No
+   harness name, no vendor name, no link into this repo's doctrine.
+2. Copy `templates/target-repo/gate.json` to the target's `.agents/gate.json` —
+   the machine-readable twin of the gate commands. `scripts/gate.sh` and
+   `scripts/gate-baseline.sh` read it (falling back to the legacy
+   `.gibson-gate.json` for repos adopted before the split).
+3. `CLAUDE.md` → `@AGENTS.md` if not already.
+4. Give the repo a claim mechanism if it has none, and name it in the contract —
+   a `docs/active-work.md` table, or open-PR-body claims for repos that already
+   coordinate through GitHub. Whatever the repo already does wins.
+5. Labels: `tier-a/b/c`, `agent-claimed`, `blocked`, `halt`. Prefix them only if
+   the repo needs to distinguish fleets.
+
+Gibson-side state (`gibson/loop-state.md`, `gibson/journal.md`, `gibson/HALT`)
+is created by the loop at runtime and is the *harness's* footprint, not the
+repo's contract. Gitignore it in the target unless the team wants the journal.
 
 ## Step 3 — Install enforcement
 
 From `ci/` and `templates/target-repo/`:
 
 1. `gibson-gate.yml` — the green gate in CI (generate/typecheck/lint/test/build +
-   claim-isolation check).
+   claim-isolation check). Rename it on the way in if the target should stay
+   vendor-neutral in its Actions tab; nothing depends on the filename.
 2. `security.yml` — layers 1–3 hard-fail wiring (gitleaks, Semgrep, audit/OSV);
    layer 4 route-inventory scaffold; ZAP baseline job against preview URL.
 3. Playwright config + `tests/e2e/flows/` scaffold with preview-URL wiring.
 4. Schema-guard workflow when a schema exists.
 5. DCO check if the repo signs commits.
+6. Optional `.gibson-delivery.json` from
+   `templates/target-repo/gibson-delivery.json` (branch model + required check
+   context names). Harden only with operator apply approval:
+   `scripts/delivery-control/apply-branch-protection.sh --apply`.
 
 Calibrate, don't transplant: budgets (Lighthouse, size) start at Gibson defaults and
 get tuned to the repo's reality in the adoption PR.
@@ -91,4 +123,4 @@ A Tier A issue can go plan→issue→build→test→review→eval→merge→depl
 nowhere else.
 
 ---
-[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md)
+[← 12 · Shipping to Vercel safely](12-vercel.md) · [Home](../index.md) · [14 · The sixteen interruptions →](14-human-gates.md) · [20 · Delivery control](23-delivery-control.md)
