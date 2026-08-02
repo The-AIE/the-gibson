@@ -80,7 +80,10 @@ if [[ -n "${GIBSON_CLAIMS_NOW_EPOCH:-}" ]]; then
       exit 2
       ;;
   esac
-  NOW="$GIBSON_CLAIMS_NOW_EPOCH"
+  # Force base-10 so digit-only values with leading zeros (e.g. 0086400) stay
+  # decimal as documented — bare bash arithmetic would treat them as octal and
+  # abort on digits 8/9 under set -u before any claim rows print.
+  NOW=$((10#$GIBSON_CLAIMS_NOW_EPOCH))
 else
   NOW=$(date -u +%s)
 fi

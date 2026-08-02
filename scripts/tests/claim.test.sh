@@ -151,12 +151,30 @@ contains "flags a stale claim"  "$status" "STALE"
 echo "legacy date-only claim timestamps are midnight UTC at the 24h boundary (#62)"
 # Same fixture date (2026-08-01). One second before 24h must not be STALE; at
 # exactly 24h it must be. Both use the injectable clock — never the wall clock.
+# Assert STALE(24h) — not bare STALE — so a fixture-date edit that drifts the
+# age fails loudly instead of still matching an arbitrary stale marker.
 status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628799 "$SCRIPT_DIR/../claims-status.sh")
 contains "includes the legacy claim one second under 24h" "$status" "issue-60-legacy"
 lacks   "not STALE one second under 24h"                 "$status" "STALE"
 status=$(cd "$ROOT/e/canon" && GIBSON_CLAIMS_NOW_EPOCH=1785628800 "$SCRIPT_DIR/../claims-status.sh")
-contains "STALE at exactly 24h from date-only midnight UTC" "$status" "STALE"
+contains "STALE at exactly 24h from date-only midnight UTC" "$status" "STALE(24h)"
 contains "STALE marks the legacy claim id"                  "$status" "issue-60-legacy"
+
+echo "digit-only GIBSON_CLAIMS_NOW_EPOCH with leading zeros is decimal (#62)"
+# 0086400 as base-10 is 86400 (exactly 24h). As octal it is invalid (digit 8)
+# and aborts bash arithmetic before claims print. A claim at Unix epoch 0 with
+# this NOW must report STALE(24h) and exit 0.
+new_repo "$ROOT/g"
+(
+  cd "$ROOT/g/canon" || exit 1
+  printf 'claim: issue-62-epoch-pad\nissue: 62\nclaimed: 1970-01-01T00:00:00Z\nscope: lib/**\nsession: pad-test\n' \
+    > docs/claims/issue-62-epoch-pad.md
+  git add -A && git commit -qm pad && git push -q origin main
+) >/dev/null 2>&1
+status=$(cd "$ROOT/g/canon" && GIBSON_CLAIMS_NOW_EPOCH=0086400 "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "leading-zero decimal epoch does not abort" "$rc" "0"
+contains "leading-zero epoch is base-10 STALE(24h)"  "$status" "STALE(24h)"
+contains "leading-zero epoch still lists the claim"  "$status" "issue-62-epoch-pad"
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"
