@@ -176,6 +176,24 @@ check    "leading-zero decimal epoch does not abort" "$rc" "0"
 contains "leading-zero epoch is base-10 STALE(24h)"  "$status" "STALE(24h)"
 contains "leading-zero epoch still lists the claim"  "$status" "issue-62-epoch-pad"
 
+echo "set-empty GIBSON_CLAIMS_NOW_EPOCH fails closed (#62)"
+# Explicit empty must not be treated as unset (wall-clock fallback). Repo has a
+# live claim so a silent success would either list it or falsely say none live.
+status=$(cd "$ROOT/g/canon" && GIBSON_CLAIMS_NOW_EPOCH='' "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "set-empty epoch exits 2"                       "$rc" "2"
+contains "set-empty epoch validation error"              "$status" "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds"
+lacks    "set-empty never pretends no live claims"       "$status" "no live claims"
+lacks    "set-empty never succeeds with a live table"    "$status" "live claims"
+
+echo "oversized GIBSON_CLAIMS_NOW_EPOCH fails closed (#62)"
+# 20-digit string wraps under bash $((10#...)) into a nonsense age and would
+# still exit 0. Bound check must reject before any claim rows are read/emitted.
+status=$(cd "$ROOT/g/canon" && GIBSON_CLAIMS_NOW_EPOCH=99999999999999999999 "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "oversized epoch exits 2"                       "$rc" "2"
+contains "oversized epoch validation error"              "$status" "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds"
+lacks    "oversized never pretends no live claims"       "$status" "no live claims"
+lacks    "oversized never succeeds with a live table"    "$status" "live claims"
+
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

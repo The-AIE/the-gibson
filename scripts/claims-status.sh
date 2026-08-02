@@ -32,7 +32,11 @@ CLOCK
                            staleness is computed against this fixed "now" instead of
                            the wall clock. Sensors use this so the exact 24-hour
                            boundary is deterministic. Production leaves it unset.
-                           Scope is this script only — it is not a general test clock.
+                           Unset → wall clock. Explicitly empty, non-digit, or out of
+                           signed 64-bit range → exit 2 (fail closed; never silently
+                           fall back to the wall clock or invent ages). Leading zeros
+                           are decimal (0086400 = 86400). Scope is this script only —
+                           it is not a general test clock.
 
 DATE-ONLY SEMANTICS
   A claim timestamp that is only a calendar day (YYYY-MM-DD, no time) is treated as
@@ -73,17 +77,36 @@ if [[ -z "$REF" ]]; then
 fi
 
 # Injectable clock for sensors (issue #62). Production: leave unset → wall clock.
-if [[ -n "${GIBSON_CLAIMS_NOW_EPOCH:-}" ]]; then
-  case "$GIBSON_CLAIMS_NOW_EPOCH" in
+# Bash 3.2 portable set-vs-unset: ${var+x} expands to "x" when set (even empty).
+# Do not use [[ -n "${var:-}" ]] — that treats set-empty as unset and would
+# silently fall back to the wall clock, making the empty validation arm dead.
+if [[ ${GIBSON_CLAIMS_NOW_EPOCH+x} ]]; then
+  raw="$GIBSON_CLAIMS_NOW_EPOCH"
+  case "$raw" in
     ''|*[!0-9]*)
       echo "claims-status.sh: ERROR: GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds" >&2
       exit 2
       ;;
   esac
-  # Force base-10 so digit-only values with leading zeros (e.g. 0086400) stay
-  # decimal as documented — bare bash arithmetic would treat them as octal and
-  # abort on digits 8/9 under set -u before any claim rows print.
-  NOW=$((10#$GIBSON_CLAIMS_NOW_EPOCH))
+  # Normalize leading zeros as a string first. Never feed raw 0-prefixed digits
+  # to $((...)): bare arithmetic is octal; 10# still accepts huge strings that
+  # wrap or invent nonsense ages. Strip to a canonical no-leading-zero decimal,
+  # then enforce the signed 64-bit bound before any arithmetic.
+  canon="$raw"
+  while [[ "$canon" == 0* && ${#canon} -gt 1 ]]; do
+    canon="${canon#0}"
+  done
+  # 2^63-1 = 9223372036854775807 — bash signed integer max on 64-bit hosts.
+  # Equal-length digit strings compare lexicographically in the same order as
+  # numerically; use string order so the bound is enforced without $((...)).
+  max_epoch="9223372036854775807"
+  # shellcheck disable=SC2071 # intentional string order for equal-length digit bounds
+  if [[ ${#canon} -gt ${#max_epoch} ]] ||
+     { [[ ${#canon} -eq ${#max_epoch} ]] && [[ "$canon" > "$max_epoch" ]]; }; then
+    echo "claims-status.sh: ERROR: GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds" >&2
+    exit 2
+  fi
+  NOW=$((10#$canon))
 else
   NOW=$(date -u +%s)
 fi
