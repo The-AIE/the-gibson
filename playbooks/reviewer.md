@@ -147,6 +147,27 @@ VERDICT: APPROVE
 VERDICT: REQUEST_CHANGES
 ```
 
+**Recording it.** Prefer a formal review — `gh pr review <pr> --approve` or
+`--request-changes` — because it is an identity GitHub recognises and branch
+protection accepts. When `REVIEWER_CMD` is set, that cross-vendor reviewer's
+identity is the one to use.
+
+GitHub refuses to let an account approve its own PR, so in a solo loop
+`--approve` fails with a same-author error. Fall back to a comment whose **final
+line** is the verdict, exactly (L-015):
+
+```bash
+gh pr review <pr> --comment --body "…lens findings…
+
+VERDICT: APPROVE"
+```
+
+That comment is the review of record for the release hat, but it is not merge
+authorization: branch protection still blocks a same-author merge, which is why
+`release-preflight.sh` grades it ADMIN-CANDIDATE rather than READY (L-021). Do
+not paper over that by merging — either get a different identity to review, or
+hand the operator the checklist.
+
 - Rubber-stamp "LGTM" without per-lens clearance is a **contract violation**.
 - Missing reviewer = merge **blocked** (fail closed). Never silent-skip.
 
