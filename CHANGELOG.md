@@ -32,6 +32,23 @@ One command in, target repos harness-neutral out.
 - **Migration:** none required. `.gibson-gate.json` is still read as a fallback, so
   repos adopted earlier keep working; move the file when convenient.
 
+release-claim stops half-finishing cleanup.
+
+- **`scripts/release-claim.sh`** — commits the claim-row removal from a throwaway
+  worktree on main, so it no longer needs (or moves) the canonical checkout and no
+  longer strands rows when that checkout is on a feature branch or dirty (L-009).
+  `--claim-id` releases one slice of a multi-slice issue and keeps `agent-claimed`
+  while sibling rows remain (L-024). Label removal is re-read and verified instead
+  of assumed (L-027). `--prefix` matches namespaced ids (`issue-template-<N>-*`) and
+  `--repo` points the label call at a product repo that differs from the claim-table
+  repo (L-036 / L-037). Unfinished cleanup now exits **3** and names what is still
+  live rather than printing OK.
+- **`scripts/tests/release-claim.test.sh`** — first shell test in the repo; the four
+  lessons above are now sensors, not guide lines (Law 9).
+- **Migration:** none. Existing `release-claim.sh <issue>` calls behave the same,
+  except that a previously-silent partial cleanup is now a non-zero exit. Fleets
+  that treat any non-zero as fatal should special-case 3 as "finish by hand".
+
 Cloud supervisor + cross-vendor escalation for the solo loop.
 
 - **`scripts/devin-supervisor.sh`** — one persistent Devin cloud session per repo

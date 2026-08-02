@@ -11,24 +11,55 @@ WHAT IT DOES
   deletes the claim row with a signed commit on main, removes the agent-claimed
   label, and optionally deletes the remote feature branch.
 
+  It never moves the canonical checkout off its current branch: the claim-row
+  commit happens in a disposable worktree on main (L-009). Sibling claims on the
+  same issue survive unless you name them (L-024), and the label removal is
+  verified rather than assumed (L-027).
+
 WHY
   Abandoned claims block the fleet (Law 10). Cleanup must be as automatic as claim.
 
 RISKS
   - Deletes worktree directory (uncommitted work there is lost). Check first.
-  - Commits to main (claim-row removal only).
+  - Commits to main (claim-row removal only), from a temporary worktree.
   - Removes GitHub label. Low risk; re-claim if you still need the issue.
 
 USAGE
-  release-claim.sh <issue> [--keep-branch] [--dry-run]
+  release-claim.sh <issue> [--claim-id <id>] [--prefix <ns>] [--repo owner/name]
+                           [--keep-branch] [--dry-run]
   release-claim.sh --help
 
+  <issue>        issue number, e.g. 42
+  --claim-id     release exactly this claim id (e.g. issue-42-password-reset)
+                 and leave every sibling row for the issue alone (L-024)
+  --prefix       namespace for cross-repo claim ids: --prefix template matches
+                 issue-template-<N>-* as well as issue-<N>-* (L-036 / L-037)
+  --repo         product repo for the issue/label, when the issue does not live
+                 in the claim-table repo (L-037)
+  --keep-branch  do not delete the local/remote feature branch
+  --dry-run      print what would happen, touch nothing
+
+  Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
+
 ENV
-  GIBSON_CANONICAL   target repo path (default: cwd)
+  GIBSON_CANONICAL   claim-table repo path (default: cwd)
+
+EXIT
+  0  claim fully released
+  1  a hard precondition failed (nothing was cleaned)
+  3  cleanup ran but did not finish: the claim row or the agent-claimed label
+     is still live. The message names which. Never silent half-cleanup (L-009).
 
 EXAMPLES
   cd ~/Code/acme-app
   /path/to/the-gibson/scripts/release-claim.sh 42
+
+  # multi-slice issue: release only the merged slice, keep the residual lane
+  release-claim.sh 15 --claim-id issue-15-checkout-totals
+
+  # cross-repo template work: claim row in the monorepo, issue in the template repo
+  GIBSON_CANONICAL=~/Code/monorepo \
+    release-claim.sh 5 --prefix template --repo acme/acme-template
 
   GIBSON_CANONICAL=~/Code/acme-app release-claim.sh 42 --dry-run
 EOF
@@ -44,99 +75,225 @@ ISSUE="$1"
 shift || true
 KEEP_BRANCH=0
 DRY=0
-for a in "$@"; do
-  case "$a" in
+CLAIM_ID_ARG=""
+PREFIX=""
+REPO_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --keep-branch) KEEP_BRANCH=1 ;;
     --dry-run) DRY=1 ;;
-    *) echo "unknown arg: $a" >&2; usage; exit 2 ;;
+    --claim-id) CLAIM_ID_ARG="${2:-}"; shift ;;
+    --prefix) PREFIX="${2:-}"; shift ;;
+    --repo) REPO_ARG="${2:-}"; shift ;;
+    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
+  shift
 done
 
 CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
 ACTIVE="$CANONICAL/docs/active-work.md"
 die() { echo "release-claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "release-claim.sh: $*"; }
+warn() { echo "release-claim.sh: WARNING: $*" >&2; }
+
+[[ "$ISSUE" =~ ^[0-9]+$ ]] || die "issue must be a number, got '$ISSUE'"
+if [[ -n "$PREFIX" && ! "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
+  die "--prefix must start with a letter, got '$PREFIX'"
+fi
 
 cd "$CANONICAL"
 [[ -f "$ACTIVE" ]] || die "missing $ACTIVE"
 
-# Find claim rows matching issue-N-
-MAPFILE=()
-while IFS= read -r line; do
-  MAPFILE+=("$line")
-done < <(grep -E "issue-${ISSUE}-" "$ACTIVE" || true)
+# Claim ids we own. issue-<N>-…, plus issue-<ns>-<N>-… when --prefix is given.
+# The alpha namespace is what keeps issue-1<N>- from matching issue-<N>-.
+if [[ -n "$CLAIM_ID_ARG" ]]; then
+  MATCH_RE="(^|[^A-Za-z0-9-])${CLAIM_ID_ARG}([^A-Za-z0-9-]|$)"
+elif [[ -n "$PREFIX" ]]; then
+  MATCH_RE="issue-(${PREFIX}-)?${ISSUE}-"
+else
+  MATCH_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
+fi
 
-if [[ ${#MAPFILE[@]} -eq 0 ]]; then
+claim_ids_matching() {
+  grep -E "$1" "$ACTIVE" 2>/dev/null |
+    awk -F'|' '{print $3}' |
+    sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
+    grep -E '^issue-' || true
+}
+
+# Every live row for this issue, so we can tell "released the last one" from
+# "released one slice of several" (L-024).
+ALL_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
+ALL_IDS=$(claim_ids_matching "$ALL_RE")
+TARGET_IDS=$(claim_ids_matching "$MATCH_RE")
+
+if [[ -z "$TARGET_IDS" ]]; then
+  if [[ -n "$CLAIM_ID_ARG" ]]; then
+    die "no claim row for '$CLAIM_ID_ARG' in $ACTIVE"
+  fi
   info "no claim row for issue $ISSUE — will still try label/worktree cleanup"
 fi
 
-CLAIM_ID=""
-SLUG=""
-if [[ ${#MAPFILE[@]} -gt 0 ]]; then
-  CLAIM_ID=$(echo "${MAPFILE[0]}" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  SLUG="${CLAIM_ID#issue-${ISSUE}-}"
-fi
+WT_PARENT="$(cd "$CANONICAL/.." && pwd)"
 
-WT_DIR="$(cd "$CANONICAL/.." && pwd)/wt-${ISSUE}-${SLUG}"
-BRANCH="feat/${ISSUE}-${SLUG}"
+# Worktree/branch per released claim id, derived from the id rather than
+# assumed, so namespaced ids (issue-template-5-x) resolve correctly (L-037).
+wt_dir_for() { echo "$WT_PARENT/wt-${1#issue-}"; }
+branch_for() { echo "feat/${1#issue-}"; }
+
+residual_after_release() {
+  # ids in ALL_IDS that are not in TARGET_IDS
+  local id
+  echo "$ALL_IDS" | while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    echo "$TARGET_IDS" | grep -qxF "$id" || echo "$id"
+  done
+}
+RESIDUAL_IDS=$(residual_after_release)
 
 if [[ "$DRY" -eq 1 ]]; then
   echo "DRY RUN would:"
-  echo "  remove worktree: $WT_DIR"
-  echo "  delete branch:   $BRANCH"
-  echo "  strip claim rows matching issue-${ISSUE}-"
-  echo "  remove label agent-claimed from #$ISSUE"
+  echo "  claim-table repo: $CANONICAL (branch: $(git rev-parse --abbrev-ref HEAD), left untouched)"
+  echo "  product repo:     ${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '(gh default)')}"
+  if [[ -n "$TARGET_IDS" ]]; then
+    echo "$TARGET_IDS" | while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      echo "  release claim:   $id"
+      echo "    remove worktree: $(wt_dir_for "$id")"
+      echo "    delete branch:   $(branch_for "$id")"
+    done
+  else
+    echo "  release claim:   (none matched $MATCH_RE)"
+  fi
+  if [[ -n "$RESIDUAL_IDS" ]]; then
+    echo "$RESIDUAL_IDS" | while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      echo "  KEEP sibling claim: $id (and keep the agent-claimed label)"
+    done
+  else
+    echo "  remove label agent-claimed from #$ISSUE"
+  fi
   exit 0
 fi
 
-# Worktree remove
-if [[ -n "$SLUG" && -d "$WT_DIR" ]]; then
-  info "removing worktree $WT_DIR"
-  git worktree remove --force "$WT_DIR" 2>/dev/null || rm -rf "$WT_DIR"
+INCOMPLETE=0
+
+# --- worktrees + branches -------------------------------------------------
+if [[ -n "$TARGET_IDS" ]]; then
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    wt=$(wt_dir_for "$id")
+    if [[ -d "$wt" ]]; then
+      info "removing worktree $wt"
+      git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+    fi
+    if [[ "$KEEP_BRANCH" -eq 0 ]]; then
+      br=$(branch_for "$id")
+      git branch -D "$br" 2>/dev/null || true
+      git push origin --delete "$br" 2>/dev/null || true
+    fi
+  done <<EOF
+$TARGET_IDS
+EOF
   git worktree prune 2>/dev/null || true
 fi
 
-# Also catch any wt-<issue>-* dirs
-for d in "$(cd "$CANONICAL/.." && pwd)"/wt-${ISSUE}-*; do
-  [[ -e "$d" ]] || continue
-  info "removing leftover worktree $d"
-  git worktree remove --force "$d" 2>/dev/null || rm -rf "$d"
-done
+# --- claim rows, from a disposable main worktree --------------------------
+# L-009: never `git checkout main` in the caller's tree. It may be on a
+# long-lived branch or dirty, and aborting here used to strand the claim row.
+strip_claim_rows() {
+  local tmpwt
+  tmpwt=$(mktemp -d "${TMPDIR:-/tmp}/gibson-release-claim.XXXXXX") || return 1
+  rm -rf "$tmpwt"
 
-# Branch delete
-if [[ -n "$SLUG" && "$KEEP_BRANCH" -eq 0 ]]; then
-  git branch -D "$BRANCH" 2>/dev/null || true
-  git push origin --delete "$BRANCH" 2>/dev/null || true
-fi
+  local base
+  base=main
+  git show-ref --verify --quiet refs/heads/main || base=master
 
-# Strip claim rows on main
-CURRENT=$(git rev-parse --abbrev-ref HEAD)
-if [[ "$CURRENT" != "main" && "$CURRENT" != "master" ]]; then
-  git checkout main 2>/dev/null || git checkout master
-fi
-git pull --ff-only 2>/dev/null || true
+  git fetch origin "$base" >/dev/null 2>&1 || true
+  git worktree add --detach "$tmpwt" "origin/$base" >/dev/null 2>&1 ||
+    git worktree add --detach "$tmpwt" "$base" >/dev/null 2>&1 || return 1
 
-if grep -E "issue-${ISSUE}-" "$ACTIVE" >/dev/null 2>&1; then
-  tmp=$(mktemp)
-  grep -v -E "issue-${ISSUE}-" "$ACTIVE" > "$tmp"
-  mv "$tmp" "$ACTIVE"
-  git add docs/active-work.md
-  git commit -s -m "release-claim: issue-${ISSUE}
+  local rc=0
+  (
+    cd "$tmpwt" || exit 1
+    local active=docs/active-work.md
+    [[ -f "$active" ]] || exit 1
+    grep -E "$MATCH_RE" "$active" >/dev/null 2>&1 || exit 2  # nothing to strip
 
-Post-merge cleanup per Law 10 / docs/05."
-  git push origin HEAD
-  info "claim row removed"
+    local tmp
+    tmp=$(mktemp) || exit 1
+    grep -v -E "$MATCH_RE" "$active" > "$tmp"
+    mv "$tmp" "$active"
+
+    git add "$active" || exit 1
+    git commit -s -q -m "release-claim: ${CLAIM_ID_ARG:-issue-${ISSUE}}
+
+Post-merge cleanup per Law 10 / docs/05." || exit 1
+    git push origin "HEAD:$base" || exit 1
+  ) || rc=$?
+
+  git worktree remove --force "$tmpwt" >/dev/null 2>&1 || rm -rf "$tmpwt"
+  git worktree prune >/dev/null 2>&1 || true
+  return $rc
+}
+
+if [[ -n "$TARGET_IDS" ]]; then
+  set +e
+  strip_claim_rows
+  strip_rc=$?
+  set -e
+  case "$strip_rc" in
+    0) info "claim row removed" ;;
+    2) info "no claim row to remove on origin main" ;;
+    *)
+      warn "claim row NOT removed for issue $ISSUE — strip failed (rc=$strip_rc)."
+      warn "Fix by hand: edit docs/active-work.md on main, drop rows matching '$MATCH_RE', push."
+      INCOMPLETE=1
+      ;;
+  esac
 else
   info "no claim row to remove"
 fi
 
-# Label
+# --- label ----------------------------------------------------------------
+# L-027: the old code swallowed gh's stderr and logged success unconditionally.
 if command -v gh >/dev/null; then
-  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-  if [[ -n "${REPO:-}" ]]; then
-    gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-claimed 2>/dev/null || true
-    info "removed agent-claimed from #$ISSUE"
+  REPO="$REPO_ARG"
+  if [[ -z "$REPO" ]]; then
+    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
   fi
+  if [[ -z "${REPO:-}" ]]; then
+    warn "could not resolve the product repo — agent-claimed NOT removed from #$ISSUE (pass --repo owner/name)"
+    INCOMPLETE=1
+  elif [[ -n "$RESIDUAL_IDS" ]]; then
+    # L-024: siblings are still working this issue; the label is still true.
+    info "keeping agent-claimed on #$ISSUE — residual claims remain:"
+    echo "$RESIDUAL_IDS" | sed 's/^/  /'
+  else
+    if ! gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-claimed; then
+      warn "gh issue edit failed for #$ISSUE in $REPO"
+    fi
+    # Verify rather than assume.
+    LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
+    if [[ "$LABELS" == "?" ]]; then
+      warn "could not re-read labels on #$ISSUE — agent-claimed removal UNVERIFIED"
+      INCOMPLETE=1
+    elif echo ",$LABELS," | grep -q ',agent-claimed,'; then
+      warn "agent-claimed is STILL on $REPO#$ISSUE — remove it by hand before declaring Law 10 done"
+      INCOMPLETE=1
+    else
+      info "removed agent-claimed from $REPO#$ISSUE (verified)"
+    fi
+  fi
+else
+  warn "gh not found — agent-claimed NOT removed from #$ISSUE"
+  INCOMPLETE=1
+fi
+
+if [[ "$INCOMPLETE" -eq 1 ]]; then
+  echo "release-claim.sh: INCOMPLETE — cleanup did not finish for issue $ISSUE (see warnings above)" >&2
+  exit 3
 fi
 
 info "OK — claim released for issue $ISSUE"
