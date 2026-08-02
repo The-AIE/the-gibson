@@ -38,7 +38,7 @@ Each `adapters/<vendor>/` provides, in whatever form the runtime supports:
 | **Grok** | `AGENTS.md` via prompt preamble | `grok -p "<playbook prompt>"`; solo loop (doc 11) | MC MCP calls + curl heartbeat | near-unlimited flat-rate pool — see doc 15 |
 | **Hermes** | persona instruction + `AGENTS.md` | **first-class runner**: cron-driven role dispatch, solo loop driver, and messaging front-end (digests, escalations, "ping Mark") | MC MCP + cron heartbeat | model-agnostic (Nous/OpenRouter/Anthropic/OpenAI); the fleet's voice *and* a worker |
 | **pi** | `AGENTS.md` natively | extension wrapping playbook dispatch | extension → MC ingest | primitives-native; good experimentation host |
-| **Goose** | Recipe `instructions` mount Gibson + target `AGENTS.md` and role playbooks from disk | **Scaffold only:** `goose run --recipe playbooks/recipes/<role>.yaml` with required `parameters` (see `adapters/goose/`). **Not** a `loop.sh --runner` yet | none wired; follow-up with #33/#35 | Engine-under-the-hood for single-builder path ([GOOSE-STRATEGY](GOOSE-STRATEGY.md)); brand stays Gibson. Docs/config scaffold only until #28 live spike closes. Pin CLI (e.g. v1.45.0). |
+| **Goose** | Recipe `instructions` mount Gibson + target `AGENTS.md` and role playbooks from disk | **Scaffold / validation only:** `goose recipe validate "$GIBSON/playbooks/recipes/<role>.yaml"` (absolute Gibson path; see `adapters/goose/`). **No** `goose run` until #28 + #35. **Not** a `loop.sh --runner` yet | none wired; follow-up with #33/#35 | Engine-under-the-hood for single-builder path ([GOOSE-STRATEGY](GOOSE-STRATEGY.md)); brand stays Gibson. Docs/config scaffold only until #28 + #35. Pin CLI (e.g. v1.45.0). |
 
 ## Known asymmetries (managed, not hidden)
 
