@@ -2,8 +2,16 @@
 
 Gibson did not appear from nothing. Two open source projects shaped how we think about
 agent harnesses, and we have borrowed liberally from both. This file credits them, records
-exactly what we took, and explains why Gibson is still its own thing rather than a fork or a
-wholesale adoption.
+exactly what we took, and says — per item — whether we **build on** it or **borrow** the idea.
+
+At the harness level, **Goose and metaharness are peers, not inputs to a red-team tool.**
+They solve the same class of problem Gibson does. The comparisons below are harness-to-harness;
+nothing here says Gibson *is* the red-team playbook (see `README.md` — red-team is one playbook
+Gibson runs).
+
+**Build on vs. borrow.** *Build on* = we depend on their artifact at runtime (their code, their
+runtime, their protocol). *Borrow* = we reimplement the idea inside Gibson's own
+Markdown/shell/CI substrate and owe them the credit.
 
 ## Hat tips
 
@@ -48,37 +56,30 @@ What we learned and borrowed:
 - **"The model is replaceable, the harness is the product."** This validates our whole thesis:
   Gibson and Chatterbuilt are the durable IP, not any single model.
 
-## Why Gibson is its own thing (the problem we solve)
+## Where each project sits relative to Gibson
 
-Both projects are excellent, and neither is the thing we need:
-
-- **Goose is a doer; Gibson is an auditor.** Goose executes tasks. Gibson is an adversarial
-  *methodology* — a red-team discipline that runs on top of whatever agent we already have
-  (Cowork / Claude). We do not need another agent runtime; we need an opinionated protocol
-  that finds money, PII, and auth flaws before a paid pentest.
-- **metaharness is a factory; Gibson is a product with a single job.** metaharness *generates*
-  harnesses. We already have Gibson, scoped to one portfolio (AIE Network / Peripety Labs) and
-  weighted toward one worst case: payments plus attendee PII in ConferenceOS. We do not need a
-  generator or a distributable CLI — we need one auditable protocol that graduates into
-  Chatterbuilt's Employee Handbook skill pack.
-- **We already have orchestration.** Goose is deliberately single-agent (manual session
-  chaining); metaharness leaves orchestration to the host. Our workflow stack already fans out
-  and gates — that is our edge, so adopting a harness that assumes we lack it would be a step
-  backward.
-- **Narrowness is the feature.** A general harness has to serve every repo and every host.
-  Gibson serves a handful of known apps with a known worst case, which lets the protocol be
-  specific — Stripe test mode, no schema mutation against shared-prod Neon, IDOR on attendee
-  objects — where a general tool can only be generic.
+- **Goose — a peer runtime we intend to build *on*.** Goose executes tasks; Gibson governs how
+  work moves from plan to production. Those compose: Gibson's doctrine and gates can ride on
+  Goose's runtime rather than competing with it. That is the-gibson#30 (EPIC) and #33
+  (`adapters/goose`). Goose's autonomy model (#24) and recipes (#25) we *borrow* as specs.
+- **metaharness — a peer factory whose patterns we *borrow*.** metaharness generates branded
+  harnesses; Gibson is one opinionated harness. We reimplement its best patterns — default-deny
+  tool governance, `mcp-scan`-style tool auditing, threat-model/SBOM as artifacts,
+  witness-signed reproducible releases — in Gibson's own substrate. **The metaharness spike
+  applies to Gibson first**, not to Chatterbuilt: Gibson is the harness, so harness-shaped
+  patterns land here and only graduate downstream once proven.
+- **Orchestration is Gibson's differentiator.** Goose is deliberately single-agent (manual
+  session chaining); metaharness leaves orchestration to the host. Gibson's fleet, claims, and
+  staged gates are the part neither peer provides — which is exactly why building *on* Goose's
+  runtime costs us nothing we value.
 
 The short version: we took their best ideas — autonomy tiers, reproducible recipes,
-default-deny governance, injection hardening, provenance — and left behind the parts built for
-a generality we do not need. The model is replaceable; **Gibson, the red-team discipline, is
-the product.**
+default-deny governance, injection hardening, provenance — and kept the orchestration and
+enforcement that are ours. The model is replaceable; **the harness is the product.**
 
 ---
 
-**Note for the Chatterbuilt side.** metaharness maps far more directly onto Chatterbuilt — a
-branded harness product with a fleet, a learning loop, and MCP wiring — than onto Gibson.
-Several metaharness patterns (cost-aware model routing, sandboxed self-improvement within
+**Note for the Chatterbuilt side.** Once a metaharness pattern is proven in Gibson, several of
+them (cost-aware model routing, sandboxed self-improvement within
 safety bounds, hardware isolation for untrusted peers, witness-signed fleet releases) deserve
 their own evaluation there, tracked alongside chatterbuilt#268.

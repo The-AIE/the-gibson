@@ -30,6 +30,7 @@ only as a vendor skill is doctrine-debt.
 | [loop-step.md](loop-step.md) | Solo-loop one-hat step (`{{hat}}`, `{{loop_state}}`) | 11 |
 | [adopt.md](adopt.md) | Install Gibson on a target repo | 13, 17 |
 | [deploy-audit.md](deploy-audit.md) | Doc 17 inspect scorecard | 17 |
+| [red-team/](red-team/) | Scheduled adversarial audit of a target app | 03, 08 |
 
 ## How to use any playbook
 

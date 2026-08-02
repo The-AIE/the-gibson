@@ -1,21 +1,25 @@
 # Gibson — Red-Team Module
 
-Gibson is the security/red-team harness for the AIE Network / Peripety Labs portfolio.
-This module is the adversarial audit capability: a repeatable protocol you point at an app
-to find security, auth, payment, PII/consent, and business-logic flaws before they ship —
-and before you pay for a third-party review.
+Red-team is **one playbook on Gibson, not Gibson's identity**. Gibson is a portable SDLC
+harness; this playbook is the adversarial audit capability it can run: a repeatable protocol
+you point at an app to find security, auth, payment, PII/consent, and business-logic flaws
+before they ship — and before you pay for a third-party review.
 
 ## How it fits
 
 ```
 Gibson (harness)
-  └─ red-team/                      ← this module
+  └─ playbooks/red-team/            ← this playbook
        ├─ PROTOCOL.md               ← the six-phase adversarial protocol (app-agnostic)
        ├─ targets/                  ← one profile per app under test
        │    └─ conference-os.md     ← first target: the money + PII app
        └─ findings/                 ← dated findings ledgers, one per run
             └─ TEMPLATE.md
 ```
+
+It sits alongside the other role playbooks (`builder`, `reviewer`, `security`, …) and is
+dispatched the same way. It deepens the `security` role for a scheduled audit; it does not
+replace the pipeline's per-PR security gate.
 
 ## The three-stage path
 
