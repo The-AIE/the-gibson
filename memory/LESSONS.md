@@ -881,28 +881,3 @@ ref, a diffstat range) is a place the certified comparison can quietly differ
 from the one actually shown.
 **Status:** fixed in harness
 **Tags:** #loop #law5 #gates #git #sensors #issue-55
-
-## L-048 · 2026-08-02 · test-wrapper-forwarded-ensure-bypassed-dry-run
-**What happened:** The mid-cycle remote-halt sensor in `loop-handoff.test.sh`
-replaced the stub `devin-supervisor.sh` with a wrapper that `exec`'d the real
-supervisor for every subcommand under `--dry-run`. `loop.sh` startup always
-invokes `ensure`; supervisor `ensure` ignores dry-run and calls `create_session`
-→ `POST /v1/sessions`. Safe review with a fake curl captured that POST. With a
-real `DEVIN_API_KEY` the sensor suite could create and bill a live Devin
-session — a hard no-live-API violation that independent review blocked on PR #79.
-**Root cause:** Treating `--dry-run` as a global no-network shield for the whole
-CLI. Only `handoff` honors dry-run (skips `ensure_session`); `ensure`/`wake` are
-live API paths. A wrapper that forwards every subcommand inherits that hole.
-**Harness fix:** Mid-cycle wrapper short-circuits `ensure|status|wake` in-process
-(record, exit 0, never exec the real binary) and invokes the real supervisor
-only for `handoff` (the exit-75 path under test). Suite-wide inert credentials
-(`unset DEVIN_API_KEY` / blackhole `DEVIN_API_BASE`) plus a PATH-shadowed fake
-`curl` that logs and refuses every call; regressions assert zero `/v1/sessions`
-and zero curl lines across the focused suite. Production scripts unchanged.
-**Generalisation:** `--dry-run` is per-subcommand, not per-binary. When a test
-drives a real multi-command tool, whitelist the exact subcommands that are
-proven inert; short-circuit everything else in-process. Pair that with a fake
-network binary and scrubbed credentials so a future regression fails closed
-instead of billing.
-**Status:** fixed in harness
-**Tags:** #sensors #no-live-api #devin #cost #issue-71 #pr-79
