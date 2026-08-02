@@ -56,28 +56,107 @@ export DEVIN_WEBHOOK_URL=...        # optional, see "Waking it" below
 - `--escalate-after N` — after N consecutive runner failures the driver runs
   [`second-opinion.sh`](../scripts/second-opinion.sh) and writes the verdicts to
   `gibson/second-opinion.md`. The next hat reads that file (fresh context, file
-  handoff — [doc 11](11-solo-loop.md)).
+  handoff — [doc 11](11-solo-loop.md)). That path belongs to escalation alone: the
+  routine review in front of every handoff writes `gibson/pre-handoff-review.md`
+  instead, so a green handoff never overwrites the stall review the next hat was
+  sent to read.
 - `--supervisor devin` — the driver ensures a live supervisor at startup and, after
   any successful iteration, forwards whatever branch loop-state names.
 
 ### The handoff field
 
-The loop agent asks for review by writing one line into `gibson/loop-state.md`:
+The loop agent asks for review by writing two lines into `gibson/loop-state.md`:
 
 ```
 handoff: gibson/42-password-reset
+handoff_sha: 9f1c0b3e5a7d2c4f6081b3d5e7a9c1f3b5d7e9a1
 ```
 
-The driver forwards that branch (with the task, the diffstat, and any second
-opinion) to the supervisor and clears the field. This keeps the same discipline as
-the rest of the loop: **state lives in files, not in a conversation.**
+`handoff_sha` is the exact head the agent pushed. It is what makes the review
+mean something: a later push cannot invalidate a completed review without the
+driver and the supervisor both noticing.
 
-Handoffs can also be made by hand:
+The driver forwards that branch (with the task, the diffstat, and the
+cross-vendor second opinion) to the supervisor and clears both fields. This keeps
+the same discipline as the rest of the loop: **state lives in files, not in a
+conversation.**
+
+### The exact-SHA gate (issue #55)
+
+Before a single ACU is spent, the driver runs a gate that **fails closed** — every
+failure below leaves `handoff`/`handoff_sha` queued in loop-state and sends
+nothing:
+
+1. **Resolve and pin the base.** Reviews and handoffs use the target repo's own
+   default branch, resolved as *both* a name and an exact commit. When an origin
+   is configured, one live `ls-remote --symref` gives the current default branch
+   and its current tip; stale local metadata is not trusted, because
+   `refs/remotes/origin/HEAD` survives a rename and `refs/heads/main` can be many
+   commits behind `origin/main`. A repo with no origin at all falls back to a
+   verified local `main`/`master`. The supervisor gets the branch *name* (it opens
+   a PR into it); the reviewer gets the exact base SHA, for the same reason the
+   head side is pinned. A base that cannot be resolved or confirmed blocks the
+   handoff instead of falling back to a guessed `main`.
+2. **Resolve the SHA.** `handoff_sha` if pinned, otherwise the remote tip — and
+   there is no local-ref fallback on this side at all. The supervisor opens the PR
+   from the *remote* branch, so a tip only this checkout can see is not a tip it
+   can act on. All three misses are refused before a reviewer is spent: a pin that
+   disagrees with the remote tip, a branch the remote does not have, and a repo
+   with no origin configured at all. (A repo with no origin can still be *reviewed*
+   against a local base — step 1 — but it can never be handed off, so the driver
+   blocks it here rather than spending the review and hitting
+   `devin-supervisor.sh`'s own no-origin refusal afterwards.)
+3. **Make sure both objects are actually here.** Either tip may have been pushed
+   from another worktree, so the commit can be missing from this clone. The driver
+   fetches the exact branch (then the exact SHA) and verifies `<sha>^{commit}`
+   resolves locally — for the base as well as the head. A commit nobody here can
+   read cannot be reviewed, and is blocked instead of recorded.
+4. **Require a distinct-vendor review of that exact diff.** `second-opinion.sh` is
+   run with `--base <base sha> --branch <head sha>` — two exact commits, not two
+   moving names; the runner is excluded from its own review (Law 5). Its verdicts
+   go to `gibson/pre-handoff-review.md`, which is this review's own file and not
+   the escalation artifact above. Success writes `gibson/pre-handoff-review.receipt`
+   naming the head branch and SHA, the base branch and SHA, the author, and the
+   reviewers. Reuse requires all of them to match — and requires
+   `gibson/pre-handoff-review.md` to still be there and non-empty — so a base
+   branch that advances voids the receipt just as a new head commit does. A
+   leftover `gibson/pre-handoff-review.md` proves nothing on its own and does not
+   satisfy the gate; only a matching receipt does.
+5. **Hand off with the pin.** `devin-supervisor.sh handoff --base <base>
+   --base-sha <base sha> --sha <sha>` re-checks the remote tip — an absent or
+   unreachable remote branch is fatal there too — and instructs the supervisor to
+   reject the handoff if the tip has moved. The branch *names* target the PR; the
+   two exact SHAs are what the diffstat in the message is built from, so the
+   supervisor is shown the diff that was reviewed and not whatever this clone's
+   `main`/branch refs happen to point at.
+
+Handoffs can also be made by hand — note that the by-hand path skips the driver's
+Law 5 gate, so you own the cross-vendor review yourself:
 
 ```bash
 ./scripts/devin-supervisor.sh handoff --repo ~/Code/acme-app \
-  --branch gibson/42-password-reset --task-file gibson/issue-42.md --wait
+  --branch gibson/42-password-reset --base main \
+  --sha 9f1c0b3e5a7d2c4f6081b3d5e7a9c1f3b5d7e9a1 \
+  --base-sha 4c2e8a1d6b0f3957ae2c4d68b1f309e7d5a2c6b8 \
+  --task-file gibson/issue-42.md --wait
 ```
+
+### What the receipt is and is not
+
+`gibson/pre-handoff-review.receipt` is what the driver checks before it spends an ACU,
+and in normal operation it is enough: the driver writes one only after a
+distinct-vendor reviewer exits 0, binds it to both exact SHAs plus the author and
+reviewer list, and refuses to reuse it when any of those change.
+
+It is **not** a security boundary, and nothing here claims tamper-proofing. The
+receipt is an ordinary file in the target repo, owned by the same user as the
+agents the gate constrains — anything running as that user can write one, just as
+it could edit `loop.sh` itself. The gate defends against stale evidence and
+honest drift (a moved tip, a renamed trunk, a reviewer that quietly failed), not
+against a runner that decides to forge its own pass. Isolating the driver's state
+from the runners it supervises — separate users, a read-only mount, or evidence
+signed somewhere the runner cannot reach — is a real hardening problem and a
+separate piece of work.
 
 ## Waking it
 

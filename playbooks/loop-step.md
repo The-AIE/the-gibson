@@ -64,10 +64,13 @@ grok -p "$RENDERED_PROMPT"
 
 **Kill switch:**
 ```bash
-# The HALT file is what loop.sh actually checks:
+# The HALT file is the permanent stop, checked at the top of every iteration:
 touch /path/to/target/gibson/HALT
-# (the gibson-halt label is a human signal only — loop.sh does NOT check labels;
-#  honoring it means someone/something touching the HALT file)
+# GIBSON_HALT=1 is also checked unconditionally, on every iteration, whether or
+# not `gh` is installed.
+# The gibson-halt label is a SOFT cue: when `gh` happens to be available the
+# driver treats an open issue carrying it as a halt for that run. With no `gh`
+# it does nothing — so the file (or the env var) is the dependable stop.
 ```
 
 ---
@@ -169,15 +172,33 @@ touch /path/to/target/gibson/HALT
 1. **Rewrite** `{{repo_path}}/gibson/loop-state.md` with: issue, PR, hat
    completed, next hat, round, parked?, next action one-liner, timestamp UTC.
    - If a branch is pushed and ready for review and the driver runs with
-     `--supervisor devin`, set `handoff: <branch>`. The driver forwards it to the
+     `--supervisor devin`, set **both** `handoff: <branch>` and
+     `handoff_sha: <the exact head SHA you pushed>`. The driver forwards it to the
      cloud supervisor (review → PR → CI; merge only in explicit --merge handoff
      mode, which the driver does not pass by default — otherwise a human
-     merges) and clears the field
+     merges) and clears both fields
      ([docs/22](../docs/22-devin-cloud-supervisor.md)). Do not do the GitHub steps
      yourself when a supervisor owns them.
+   - **The handoff is gated, and the gate fails closed.** Before anything is sent,
+     the driver resolves the SHA to hand off, fetches it if this clone does not
+     have the object, and runs a mandatory review of *that exact SHA* by a vendor
+     other than the runner, against the repo's resolved default branch. If the
+     pin disagrees with the remote tip, if the branch is not on the remote at all
+     (push it — the supervisor opens the PR from the remote branch), if the SHA
+     cannot be resolved locally, if the base branch cannot be resolved, if no
+     distinct vendor is configured, or if the reviewer does not complete,
+     **nothing is handed off** and `handoff`/`handoff_sha` stay queued in
+     loop-state (Law 5). That review is written to
+     `{{repo_path}}/gibson/pre-handoff-review.md` and handed to the supervisor
+     with the branch. A leftover copy of it does not satisfy the gate — only a
+     receipt naming that SHA does. If your handoff keeps staying queued, read the
+     journal: the block reason is written there, and the fix is yours, not the
+     owner's.
    - If `{{repo_path}}/gibson/second-opinion.md` exists, read it before your next
      build hat: it is a cross-vendor review of your own diff, dispatched because
-     the loop stalled.
+     the loop stalled. It is only ever written by an escalation — the routine
+     review that runs before every supervisor handoff has its own file
+     (`gibson/pre-handoff-review.md`) and never overwrites this one.
 2. **Append** `{{repo_path}}/gibson/journal.md`:
    ```markdown
    ## <UTC> · hat={{hat}} · issue=#N · pr=#M
@@ -194,7 +215,7 @@ touch /path/to/target/gibson/HALT
 |---|---|
 | Retries | 3 fix→review rounds → park + handoff |
 | Error budget | driver stops after N consecutive red gates (default 5) |
-| Kill switch | `gibson/HALT` file (label `gibson-halt` = signal only) → exit cleanly |
+| Kill switch | `gibson/HALT` file or `GIBSON_HALT=1` (both unconditional); the `gibson-halt` label is a soft cue, only when `gh` is available → exit cleanly |
 | Human gates | queue + move on; never auto-approve Tier C merge |
 | Fresh context | do not ask for prior chat; re-read artifacts |
 

@@ -10,6 +10,69 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+The solo loop stops handing off work nobody reviewed (#55).
+
+- **`scripts/loop.sh`** — the cross-vendor review in front of a supervisor handoff
+  is now a gate rather than a notice. A **receipt** (`gibson/pre-handoff-review.receipt`)
+  is written only when `second-opinion.sh` exits 0, and it names the runner, the
+  reviewers, the head SHA, and the base branch *and* its exact tip. A stale
+  `gibson/second-opinion.md` no longer satisfies the gate, a review of a head that
+  has moved is not reused, and neither is a review of a base that has since
+  advanced — a different base is a different diff. Reviews and handoffs resolve the
+  target repo's own default branch from the remote instead of trusting stale local
+  refs. No receipt, no handoff: the branch stays queued in loop-state.
+  The routine pre-handoff review and the escalation review are now **two files with
+  two meanings**: `--escalate-after` still owns `gibson/second-opinion.md`, the stall
+  artifact `playbooks/loop-step.md` sends the next hat to read, while the mandatory
+  review before every handoff writes `gibson/pre-handoff-review.md` and hands that
+  file to the supervisor. They shared one path, so a green handoff silently
+  overwrote the stall review the next hat had been told to open. The receipt is
+  checked against the pre-handoff artifact, so a receipt whose review file has been
+  deleted or emptied no longer passes.
+  **Scope, stated plainly:** the receipt is an operational control over what the
+  driver will do, **not** a tamper-proof one. It is a same-user file under
+  `<repo>/gibson/`, so anything running as that user — including the agents the
+  gate constrains — can write one. Isolating it is separate hardening (docs/22),
+  and this change does not do it.
+- **`scripts/devin-supervisor.sh`** — a pinned handoff (`--sha`, plus `--base-sha`)
+  refuses to go out unless the branch exists on the remote and its tip still matches,
+  and it describes the change by those exact commits rather than by branch names this
+  clone may have stale copies of. The rendered message keeps a blank line before its
+  `## Task` heading, so the pinned-SHA clause and the task do not arrive as one
+  run-on line.
+- **`scripts/check-active-work.mjs`** (new) — claim-isolation gate for CI
+  `pull_request` runs. It diffs the merge base against the head, so appending your own
+  claim passes while touching a claim that already existed on the base fails. Renames
+  are scored as delete + add (`--no-renames`), because rename detection reports only
+  the destination and would let a claim file be moved — to another claim id, or out of
+  `docs/claims/` entirely — with its deletion invisible to the gate. Deleting a live
+  claim is refused **even for the branch that owns it**: the ownership exemption covers
+  renewing your own claim, not releasing it, which happens on main with
+  `release-claim.sh` (docs/05). A base ref it cannot resolve is a loud error, never a
+  green "no changed files".
+  Changed paths are read **NUL-separated** (`-z`) and never trimmed: without that,
+  git C-quotes every non-ASCII path, so `docs/claims/issue-7-café.md` arrived as
+  `"docs/claims/issue-7-caf\303\251.md"`, failed the `docs/claims/` prefix test, and
+  the whole non-ASCII half of the ledger went unchecked. The presence lookup
+  addresses each path as a **literal pathspec** (`:(literal)`), so a claim filename
+  containing `*`, `?`, `[…]` or a leading `:` is asked about as itself rather than as
+  a pattern. A path whose bytes are not valid UTF-8 cannot survive Node's argv
+  round-trip at all, so it is refused loudly instead of being classified as absent.
+  Legacy `docs/active-work.md` rows are protected on the same `^issue-` shape
+  `scripts/claims-status.sh` treats as live, instead of a narrower
+  `[a-z0-9-]` one — ids like `issue-7_password_reset` and `issue-7.1-followup` were
+  live to the fleet and invisible to the gate.
+- **Sensors:** `scripts/tests/loop-handoff.test.sh`, `scripts/tests/second-opinion.test.sh`,
+  and `scripts/tests/check-active-work.test.sh` pin the above in both directions —
+  the ways each gate must fail closed and the ways it must still pass. They drive the
+  real scripts against stubs and temp git repos; no network, no Devin API.
+- **Docs:** `docs/22-devin-cloud-supervisor.md` records the receipt's scope and the
+  isolation work it does not cover; `scripts/README.md` carries the new inventory rows.
+- **Migration:** none for existing flags, but a `--supervisor devin` loop that
+  previously handed off without a completed cross-vendor review will now hold the
+  branch in loop-state instead. That is the intended behaviour change; supply
+  `--reviewers` with a vendor distinct from `--runner` to let handoffs proceed.
+
 One command in, target repos harness-neutral out.
 
 - **`skills/`** (new) — a nested Claude Code skill layer: `/gibson <repo> [goal]`
@@ -17,8 +80,10 @@ One command in, target repos harness-neutral out.
   playbooks, and doctrine rather than reimplementing them, so the harness keeps
   one source of truth and the owner gets one command. Install by symlinking into
   `~/.claude/skills` (`skills/README.md`). No script behaviour changed.
-  The skills disclose the `loop.sh`/supervisor gaps they cannot fix (#55) instead
-  of implying the loop merges on its own.
+  The skills describe what the loop and supervisor actually do — including where a
+  human still has to act — instead of implying the loop merges on its own. The
+  `loop.sh`/supervisor gaps they were written against are the #55 gaps fixed in the
+  entry above; `gibson-setup` installs the claim-isolation sensor that came with it.
 
 - **`templates/target-repo/AGENTS-section.md`** — rewritten as a harness-neutral
   *Autonomous development contract*: the repo publishes gate commands, ground rules,

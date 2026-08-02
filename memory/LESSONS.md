@@ -826,3 +826,58 @@ while the prod branch stays mergeable by anyone with write.
 (owner only — never agent-rotated Neon keys).
 **Status:** fixed in harness (doc 23 / scripts); targets re-audit at adoption
 **Tags:** #release #github #branch-protection #vercel #security #adoption
+
+## L-047 · 2026-08-02 · a-gate-that-reviews-the-wrong-diff-manufactures-evidence
+**What happened:** The issue-#55 Law 5 gate in `loop.sh` shipped with two silent
+substitutions. It never passed `--base`, so `second-opinion.sh` defaulted to
+`main` — in a `master`/`develop` repo that ref does not exist, and the old
+`git diff "$BASE...$BRANCH" || git diff "$BASE"` fallback then reviewed the
+WORKING TREE instead. Separately, `resolve_handoff_sha` could return an
+`ls-remote` SHA whose object was absent from the local clone (pushed from another
+worktree), so the driver wrote a receipt naming a commit no reviewer could read.
+**Root cause:** the gate's sensors asserted "a review happened," never "a review
+of *this* diff happened." Defaults (`main`) and fallbacks (`git diff BASE`) are
+how a gate keeps returning success after its premise stops holding — and because
+it emits a receipt, the wrong answer is now documented as the right one.
+**Harness fix:** `loop.sh` resolves the target repo's real base and fails closed
+on every miss (branch stays queued). The first cut pinned only the head, and
+review caught the mirror-image hole: naming the base by branch let a receipt for
+the same head be reused after `main` advanced, which is a different diff. So the
+base is now pinned the same way the head is — when an origin exists, one live
+`ls-remote --symref` yields the current default branch *and* its current tip
+(stale `origin/HEAD` and stale `refs/heads/main` are not trusted); no origin at
+all falls back to a verified local main/master. `second-opinion.sh` gets the exact
+base SHA, `devin-supervisor.sh` gets the branch name it opens the PR into, both
+objects are fetched and verified locally before any review, and the receipt binds
+base name + base SHA + head branch + head SHA + author + reviewers. `second-opinion.sh`
+dies on an unresolvable base or branch instead of falling back to the working
+tree. Regressions in `scripts/tests/loop-handoff.test.sh` (non-main trunk, stale
+local origin/HEAD, missing local object, remote base advance, unresolvable
+base/pin) and `scripts/tests/second-opinion.test.sh`.
+A third review round found two survivors of the same species. (a) With an origin
+reachable but carrying no `refs/heads/<branch>`, `resolve_handoff_sha` fell back
+to the LOCAL branch ref — so a never-pushed branch was reviewed and handed to a
+supervisor that opens PRs from the remote and would never see that commit, and
+`devin-supervisor.sh` dies on an absent/unreachable remote branch when `--sha` is
+pinned. A fourth round found the last shard of that same fallback: keeping local
+refs "only for a repo with no origin at all" still let an origin-less queued
+handoff spend a distinct-vendor review and only *then* hit the supervisor's
+no-origin refusal. `resolve_handoff_sha` is reached only from the Devin handoff
+path, so it now has no local-ref fallback whatsoever — no origin is a block
+before the review, not a die() one script later, and the origin-less and
+never-pushed cases in `loop-handoff.test.sh` both assert "no review spent, no
+receipt, no supervisor call, still queued". (b) The
+handoff message's diffstat was still `git diff --stat "$BASE...$BRANCH"` — two
+NAMES, read in a clone whose refs may be stale or carry local-only commits — so
+the supervisor could be shown a diff nobody reviewed. `--base-sha` was added and
+the driver passes both exact endpoints; names remain in the prose for PR
+targeting, and an unreadable object yields an explicit `n/a`, never a substitute
+diff. Also recorded honestly: the receipt is an operational control, not a
+security boundary (same-user filesystem isolation is separate work).
+**Generalisation:** pinning one endpoint of a diff is not pinning the diff. A
+receipt must name every value the comparison depends on, or it certifies a
+comparison nobody performed — and every remaining *name* in the path (a fallback
+ref, a diffstat range) is a place the certified comparison can quietly differ
+from the one actually shown.
+**Status:** fixed in harness
+**Tags:** #loop #law5 #gates #git #sensors #issue-55

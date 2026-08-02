@@ -54,13 +54,17 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
   second vendor is alive; if truly none is, the ONLY permitted fallback is
   docs/11's fresh-context adversarial pass (a different session, never the
   authoring one) with Tier C still parking at the human gate — and the digest
-  must say that degraded mode was used.
+  must say that degraded mode was used. On the supervisor path this is
+  machine-enforced: `loop.sh` will not hand a branch to Devin without a completed
+  distinct-vendor review of the exact SHA being handed off, and a missing, stale,
+  or failed review blocks the handoff (the branch stays queued in loop-state).
 - Law 7: Tier C — money, auth, consent/PII, security boundaries, production
   data — always ends at a human merge gate. Devin does not override the owner.
 - Owner interruptions: product direction and human gates (`docs/14`) only.
   Batch everything else into the digest.
-- Kill switch: the `gibson/HALT` file is what `loop.sh` reliably checks every
-  iteration (the `GIBSON_HALT` env is also honored, but only on iterations
-  where `gh` is installed — so the FILE is the dependable stop). A `gibson-halt` GitHub label is a
-  CONVENTION for humans to signal intent; it does nothing until wired to touch
-  the HALT file. Never tell the owner the label alone stopped anything.
+- Kill switch: the `gibson/HALT` file is the permanent stop `loop.sh` checks
+  every iteration, and `GIBSON_HALT=1` is checked unconditionally alongside it —
+  neither needs `gh`. The `gibson-halt` GitHub label is a SOFT cue: `loop.sh`
+  honors it only on machines where `gh` is installed and authenticated, so it can
+  silently do nothing. Never tell the owner the label alone stopped anything —
+  the file is what makes a stop permanent.

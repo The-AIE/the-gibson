@@ -42,7 +42,7 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Historian** | Role that files lessons and harness improvements from exhaust. [docs/03](03-roles.md) |
 | **Hot file** | File many issues want (e.g. schema, package.json); special concurrency rules. [docs/05](05-concurrency.md) |
 | **Inferential sensor** | LLM judgment check (review, UX grade, exploit reasoning). [docs/01](01-principles.md) |
-| **Kill switch** | Halt the solo loop: the `gibson/HALT` file (the `gibson-halt` label is a human signal only, not checked by the loop). [docs/11](11-solo-loop.md) |
+| **Kill switch** | Halt the solo loop: the `gibson/HALT` file or `GIBSON_HALT=1`, both checked unconditionally every iteration. The `gibson-halt` label is a soft cue the driver honors only when `gh` is available, so the file is the dependable stop. [docs/11](11-solo-loop.md) |
 | **Lane** | Active mutating claim/worktree; max 3 per target repo. [docs/05](05-concurrency.md) |
 | **Lesson** | Append-only memory entry that turns a failure into harness improvement. [docs/09](09-memory-and-self-improvement.md) |
 | **Local overlay** | `local/**` in a fork — org overrides upstream never touches. [docs/18](18-fork-and-upstream.md) |

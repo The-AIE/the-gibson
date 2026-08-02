@@ -20,11 +20,14 @@ for free.
    target's `AGENTS.md` (create if absent). Never overwrite existing content.
 2. **CI gates** — test/lint/typecheck/build on every PR, as required checks.
    Reuse the repo's existing CI if present; add the missing jobs only.
-   **Verify every referenced script actually exists before installing any
-   workflow from `ci/`** — e.g. `ci/gibson-gate.yml` currently references
-   `scripts/check-active-work.mjs`, which does not exist in the Gibson repo
-   (tracked as issue #55): installed blind, every target PR fails module-not-found.
-   Vendor or stub each referenced script, or trim the job.
+   **Verify every referenced script actually exists in the TARGET repo before
+   installing any workflow from `ci/`.** `ci/gibson-gate.yml` runs
+   `node scripts/check-active-work.mjs`; that script now ships in the Gibson repo
+   (`scripts/check-active-work.mjs`, the claim-isolation sensor from issue #55),
+   so copy it into the target alongside the workflow. It needs `fetch-depth: 0`
+   to reach the merge base. Anything the workflow references that you have not
+   vendored into the target must be vendored, stubbed, or trimmed — a missing
+   script fails every PR with module-not-found.
 3. **Risk classifier** — Tier-C auto-labeling for ALL Law 7 categories: money,
    auth, consent/PII, security boundaries, production data (schema/migrations
    included). Start from the Gibson's own `ci/` workflows; where a needed gate
@@ -39,10 +42,13 @@ for free.
    implementation and contribute the generalized version back (rule below).
    Until installed, say plainly the repo has no machine-checked review gate.
 5. **Labels + kill switch** — `agent-claimed`, tier labels, and `gibson-halt`.
-   The label is SIGNAL-ONLY: `loop.sh` checks the `gibson/HALT` file, not
-   labels. Either also install the small translation workflow (label applied →
-   touch `gibson/HALT`) or state plainly that the label is unwired and humans
-   must create the HALT file to actually stop the fleet.
+   The permanent stop is the `gibson/HALT` file; `GIBSON_HALT=1` is also checked
+   unconditionally every iteration. The `gibson-halt` label is only a SOFT cue —
+   `loop.sh` honors it when `gh` is installed and authenticated on the machine
+   running the loop, and silently ignores it otherwise. Either also install the
+   small translation workflow (label applied → touch `gibson/HALT`) or state
+   plainly that on a box without `gh` the label stops nothing and humans must
+   create the HALT file to actually stop the fleet.
 6. **Branch protection** — required checks + no force-push on the default
    branch. Needs owner-level auth; if unavailable, emit the exact settings as
    an Ask Contract item instead of failing silently.
