@@ -74,10 +74,13 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   Parked ≠ failed; it's queued for a different mind (or Mark).
 - **Error budget:** N consecutive gate failures (default 5) → stop, report, wait.
   A loop that can't go green is burning tokens on a harness bug.
-- **Kill switch:** the loop checks the `gibson/HALT` file (or `GIBSON_HALT`
-  env) at the top of every iteration. The `gibson-halt` GitHub label is a
-  human convention for signaling intent — nothing acts on it until a workflow
-  or the supervisor translates it into the HALT file.
+- **Kill switch:** the loop checks the `gibson/HALT` file and `GIBSON_HALT=1` at
+  the top of every iteration, unconditionally — neither depends on `gh` or on a
+  network call. The `gibson-halt` GitHub label is a soft cue: when `gh` is
+  installed and authenticated, an open issue carrying that label halts the run
+  too, but with no `gh` nothing acts on it. Treat the file as the permanent kill
+  switch and the label as a request that still needs the file (or a workflow
+  that touches it) to be binding.
 - **Human-gate queue:** Tier C merges and other stops accumulate in a digest
   (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
   issue and circles back after approval.

@@ -13,12 +13,22 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — the claim sensor below diffs the merge base against
+      # HEAD. Under the default shallow checkout the base ref is unreachable and
+      # the sensor fails the job rather than silently passing (issue #55).
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci --include=dev
 
       # Claim isolation: PRs may not edit another session's claim row
+      - name: Fetch the PR base branch
+        if: github.event_name == 'pull_request'
+        # Via env, not ${{ }} inside the script: a branch name is attacker-controlled
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --prune origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
       - run: node scripts/check-active-work.mjs
         if: github.event_name == 'pull_request'
 

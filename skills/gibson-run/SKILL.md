@@ -34,10 +34,12 @@ skill's job is to invoke and SUPERVISE it — not to reimplement it.
 - `--supervisor devin`: finished branches hand off to the cloud supervisor
   (docs/22) via `handoff:` in loop-state. **Default handoff = Devin reviews the
   handed-off branch and opens/owns the PR but leaves the merge to a human.**
-  (Known gap, tracked as issue #55: the handoff passes a mutable branch name + diffstat, not
-  a pinned head SHA, so a push after handoff isn't auto-invalidated — the
-  supervisor should confirm the reviewed SHA matches the merge SHA until
-  loop.sh pins it.) Automated
+  The handoff now pins the exact head SHA (loop-state's `handoff_sha`, or the
+  remote tip): the driver fetches that commit if this clone lacks it, requires a
+  distinct-vendor review of that exact SHA against the repo's resolved default
+  branch, and passes `--sha` so the supervisor rejects the handoff if the tip has
+  moved. Any failure in that chain blocks the handoff and leaves the branch
+  queued in loop-state — no review, no handoff. Automated
   non-Tier-C merges require the `--merge` handoff mode per docs/22 — and note
   honestly: `loop.sh` currently invokes handoff WITHOUT `--merge`, so full
   auto-merge needs either that flag wired into the loop or a direct
@@ -68,16 +70,20 @@ show raw diffs or expect the owner to read code — describe behavior changes.
 
 ## Hard lines
 
-- Kill switch respected instantly: the `gibson/HALT` file — the dependable
-  stop `loop.sh` checks every iteration (the `GIBSON_HALT` env is honored only
-  when `gh` is present, so prefer the file). The `gibson-halt` label is only a
-  human signal; honoring it means translating it into the HALT file.
+- Kill switch respected instantly: the `gibson/HALT` file is the permanent stop
+  `loop.sh` checks every iteration, and `GIBSON_HALT=1` is checked
+  unconditionally beside it — neither depends on `gh`. The `gibson-halt` label
+  is only a soft cue, honored when `gh` happens to be available; making a stop
+  permanent still means the HALT file.
 - Law 5 always: reroute so no lane ever reviews its own work, even when a
-  vendor is down. **Known harness gap (tracked as Gibson issue #55): the
-  loop's normal per-hat path does not machine-enforce cross-vendor review —
-  a same-vendor self-pass can reach merge if unsupervised. Until that's fixed
-  in `loop.sh`, the supervisor (you) enforces it manually: check the journal
-  each cadence for reviewer-hat entries by the authoring vendor and reroute.**
+  vendor is down. **The supervisor handoff path is now machine-enforced:
+  `loop.sh` runs a mandatory distinct-vendor review of the exact SHA it is about
+  to hand off, and a missing, stale, or failed review blocks the handoff — the
+  branch stays queued in loop-state rather than reaching Devin. The remaining
+  gap is the loop's ordinary per-hat path (no supervisor configured): a
+  same-vendor self-pass there is still only caught by you, so keep checking the
+  journal each cadence for reviewer-hat entries by the authoring vendor and
+  reroute.**
 - Cost discipline (docs/15): if Grok saturates, overflow to Codex. Claude's
   pool buys judgment first and skilled feature work when the capability bar
   genuinely requires it — what it never buys is VOLUME work a flat-rate pool
