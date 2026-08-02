@@ -44,6 +44,16 @@ Cloud supervisor + cross-vendor escalation for the solo loop.
   exactly as before. Forks that render loop-state themselves may want to add the
   `handoff:` field.
 
+## Unreleased
+
+- **`skills/`** (new) — a nested Claude Code skill layer: `/gibson <repo> [goal]`
+  runs audit → resources → setup → direct → run. It wraps the existing scripts,
+  playbooks, and doctrine rather than reimplementing them, so the harness keeps
+  one source of truth and the owner gets one command. Install by symlinking into
+  `~/.claude/skills` (`skills/README.md`). No script behaviour changed.
+  The skills disclose the `loop.sh`/supervisor gaps they cannot fix (#55) instead
+  of implying the loop merges on its own.
+
 ## v0.1.3 — 2026-07-24
 
 Docs site: GitHub Pages + navigation + plain-English callouts.
