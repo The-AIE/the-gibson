@@ -2255,97 +2255,336 @@ fi
 unset GH_STUB_BEHAVIOR
 unset GH_STUB_EXPECT_REPO
 
-echo "halt latch: 20 concurrent local-HALT launches → one journal section, valid latch, zero work"
+# ---------------------------------------------------------------------------
+# Concurrent halt-lock sensors (#71 atomic lock)
+# ---------------------------------------------------------------------------
+# Every concurrent child must report its own rc and stderr. Ignoring child
+# status previously hid acquisition races (`halt-lock/pid: No such file`).
+
+# True when gibson/ has no halt-lock file/dir and no .halt-lock.* temps.
+halt_lock_artifacts_clean() {
+  local g="$REPO/gibson"
+  [[ ! -e "$g/halt-lock" ]] || return 1
+  # shellcheck disable=SC2086
+  if compgen -G "$g/.halt-lock.*" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# stderr must not show path/acquisition errors (the race signature).
+halt_lock_stderr_clean() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  # Common race/path failures from incomplete lock publication or bad reclaim.
+  if grep -Eiq 'No such file or directory|cannot create|Permission denied|halt-lock/pid|ln: ' "$f"; then
+    return 1
+  fi
+  return 0
+}
+
+# Run N concurrent loop launches. Captures err.$i and rc.$i for every child.
+# Sets: conc_dir, work_stamp, still_running. Caller prepares REPO/HALT/gh stub.
+run_concurrent_loop_burst() {
+  local n="$1" tag="$2"
+  local i conc_waited
+  work_stamp="$ROOT/concurrent-work-${tag}.stamp"
+  conc_dir="$ROOT/concurrent-${tag}"
+  rm -f "$work_stamp"
+  rm -rf "$conc_dir"
+  mkdir -p "$conc_dir"
+  i=0
+  while [[ $i -lt $n ]]; do
+    (
+      set +e
+      HERMES_CMD="touch '$work_stamp'; cat >/dev/null" \
+      "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+        --once --supervisor devin >/dev/null 2>"$conc_dir/err.$i"
+      echo $? > "$conc_dir/rc.$i"
+    ) &
+    i=$((i + 1))
+  done
+  conc_waited=0
+  while [[ $conc_waited -lt 90 ]]; do
+    # shellcheck disable=SC2009
+    if ! jobs -rp 2>/dev/null | grep -q .; then
+      break
+    fi
+    sleep 0.5
+    conc_waited=$((conc_waited + 1))
+  done
+  still_running=0
+  # shellcheck disable=SC2046
+  if jobs -rp 2>/dev/null | grep -q .; then
+    still_running=1
+    # shellcheck disable=SC2046
+    kill $(jobs -rp) 2>/dev/null || true
+    wait 2>/dev/null || true
+  else
+    wait 2>/dev/null || true
+  fi
+}
+
+# Assert every child finished with expected_rc and clean stderr.
+assert_concurrent_children_clean() {
+  local n="$1" expected_rc="$2" label="$3"
+  local i rc bad_rcs=0 bad_err=0 missing=0 sample=""
+  i=0
+  while [[ $i -lt $n ]]; do
+    if [[ ! -f "$conc_dir/rc.$i" ]]; then
+      missing=$((missing + 1))
+      sample="${sample} missing-rc.$i;"
+    else
+      rc=$(tr -d ' \n' <"$conc_dir/rc.$i")
+      if [[ "$rc" != "$expected_rc" ]]; then
+        bad_rcs=$((bad_rcs + 1))
+        sample="${sample} rc.$i=$rc;"
+      fi
+    fi
+    if [[ -f "$conc_dir/err.$i" ]] && ! halt_lock_stderr_clean "$conc_dir/err.$i"; then
+      bad_err=$((bad_err + 1))
+      sample="${sample} err.$i=$(tr '\n' ' ' <"$conc_dir/err.$i" | head -c 200);"
+    fi
+    i=$((i + 1))
+  done
+  if [[ "$missing" -eq 0 && "$bad_rcs" -eq 0 ]]; then
+    ok "$label: all $n children exit rc=$expected_rc"
+  else
+    bad "$label: child rc failures (missing=$missing bad_rc=$bad_rcs sample=$sample)"
+  fi
+  if [[ "$bad_err" -eq 0 ]]; then
+    ok "$label: all $n children have clean stderr (no path/acquisition errors)"
+  else
+    bad "$label: $bad_err children have path/acquisition errors in stderr (sample=$sample)"
+  fi
+}
+
+echo "halt lock: stale dead owner is reclaimed; loop halts cleanly"
 setup_repo with-remote
 SHA=$(head_sha)
 write_state "$BRANCH" "$SHA"
 state_before=$(cat "$REPO/gibson/loop-state.md")
 : > "$REPO/gibson/HALT"
+mkdir -p "$REPO/gibson"
+# Lock owned by a PID that is already dead. Use a finished command-substitution
+# subshell — do NOT kill a background job of this test shell: on macOS Bash 3.2
+# reaping a killed bg job can run the EXIT trap and wipe the suite temp root.
+dead_pid=$(bash -c 'echo $$')
+if kill -0 "$dead_pid" 2>/dev/null; then
+  # PID-reuse race (vanishingly rare); fall back to a non-existent pid.
+  dead_pid=999999999
+fi
+printf 'pid=%s\nowner=stale-dead-token\n' "$dead_pid" > "$REPO/gibson/halt-lock"
+errf="$ROOT/halt-stale-dead.err"
+if run_loop_err "$errf"; then
+  ok "stale-dead-owner: loop exits cleanly after reclaiming dead lock"
+else
+  bad "stale-dead-owner: loop failed (rc=$? stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if [[ "$(journal_halts)" -eq 1 ]]; then
+  ok "stale-dead-owner: exactly one journal halt section"
+else
+  bad "stale-dead-owner: journaled $(journal_halts) halt sections"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'local_kind=file' "$REPO/gibson/halt-latch"; then
+  ok "stale-dead-owner: valid local latch written"
+else
+  bad "stale-dead-owner: missing/invalid latch"
+fi
+if halt_lock_artifacts_clean; then
+  ok "stale-dead-owner: no leftover lock/temp artifacts"
+else
+  bad "stale-dead-owner: leftover lock artifacts ($(ls -la "$REPO/gibson"/halt-lock "$REPO/gibson"/.halt-lock.* 2>/dev/null | tr '\n' ' '))"
+fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
+  ok "stale-dead-owner: loop-state byte-identical"
+else
+  bad "stale-dead-owner: loop-state rewritten"
+fi
+rm -f "$REPO/gibson/HALT"
+
+echo "halt lock: release does not delete a successor's lock"
+# Load the real halt_lock_* helpers (not the whole loop) so we can assert the
+# token-checked release contract directly.
+setup_repo with-remote
+mkdir -p "$REPO/gibson"
+# STATE_DIR / HALT_LOCK_* are read by the eval'd helpers below (SC2034 false positive).
+# shellcheck disable=SC2034
+STATE_DIR="$REPO/gibson"
+# shellcheck disable=SC2034
+eval "$(
+  awk '
+    /^HALT_LOCK_FILE=/ {p=1}
+    /^halt_latch_field\(\)/ {exit}
+    p {print}
+  ' "$LOOP"
+)"
+# Successor holds the lock with a live pid (this shell) and its own token.
+printf 'pid=%s\nowner=successor-token-xyz\n' "$$" > "$HALT_LOCK_FILE"
+# shellcheck disable=SC2034
+HALT_LOCK_HELD=1
+# shellcheck disable=SC2034
+HALT_LOCK_OWNER="old-owner-token-abc"
+# shellcheck disable=SC2034
+HALT_LOCK_TMP=""
+halt_lock_release
+if [[ -f "$HALT_LOCK_FILE" ]] && grep -q 'owner=successor-token-xyz' "$HALT_LOCK_FILE" \
+    && grep -q "pid=$$" "$HALT_LOCK_FILE"; then
+  ok "release-does-not-delete-successor: old owner leaves successor lock intact"
+else
+  bad "release-does-not-delete-successor: lock missing or rewritten (content=$([[ -f $HALT_LOCK_FILE ]] && cat "$HALT_LOCK_FILE" || echo absent))"
+fi
+# Matching owner must still be able to release.
+# shellcheck disable=SC2034
+HALT_LOCK_HELD=1
+# shellcheck disable=SC2034
+HALT_LOCK_OWNER="successor-token-xyz"
+halt_lock_release
+if [[ ! -e "$HALT_LOCK_FILE" ]]; then
+  ok "release-does-not-delete-successor: matching owner token still releases"
+else
+  bad "release-does-not-delete-successor: matching owner failed to release"
+fi
+# Restore the suite cleanup trap (eval'd helpers installed halt_lock_release).
+trap 'rm -rf "$ROOT"' EXIT
+unset HALT_LOCK_FILE HALT_LOCK_HELD HALT_LOCK_OWNER HALT_LOCK_TMP
+unset _GIBSON_HALT_LOCK_TRAP
+
+echo "halt latch: repeated 30-way local-HALT bursts → one journal, valid latch, zero work, clean children"
+LOCAL_BURST_N=30
+LOCAL_BURST_ROUNDS=3
+local_round=1
+while [[ $local_round -le $LOCAL_BURST_ROUNDS ]]; do
+  setup_repo with-remote
+  SHA=$(head_sha)
+  write_state "$BRANCH" "$SHA"
+  state_before=$(cat "$REPO/gibson/loop-state.md")
+  : > "$REPO/gibson/HALT"
+  : > "$CALLS/gh.log"
+  : > "$CALLS/devin.cmds"
+  : > "$CALLS/second-opinion.count"
+  run_concurrent_loop_burst "$LOCAL_BURST_N" "local-$local_round"
+  label="${LOCAL_BURST_N}-way local HALT round $local_round"
+  if [[ "$still_running" -eq 0 ]]; then
+    ok "$label: completed without deadlock"
+  else
+    bad "$label: deadlocked or exceeded wait budget"
+  fi
+  assert_concurrent_children_clean "$LOCAL_BURST_N" 0 "$label"
+  halts_conc=$(journal_halts)
+  if [[ "$halts_conc" -eq 1 ]]; then
+    ok "$label: exactly one journal halt section"
+  else
+    bad "$label: journaled $halts_conc sections (want 1; journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+  fi
+  if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'local_kind=file' "$REPO/gibson/halt-latch"; then
+    ok "$label: valid local latch"
+  else
+    bad "$label: invalid/missing latch (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+  fi
+  if [[ -f "$work_stamp" ]]; then
+    bad "$label: must never start runner work"
+  else
+    ok "$label: zero runner work"
+  fi
+  if handoff_invoked || review_invoked; then
+    bad "$label: must not invoke review/handoff"
+  else
+    ok "$label: neither review nor handoff"
+  fi
+  if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
+    ok "$label: loop-state byte-identical"
+  else
+    bad "$label: rewrote loop-state"
+  fi
+  if halt_lock_artifacts_clean; then
+    ok "$label: no leftover lock/temp artifacts"
+  else
+    bad "$label: leftover lock artifacts"
+  fi
+  # Ordinary single launch after burst still fast-path (no stuck lock).
+  errf="$ROOT/halt-after-concurrent-local-$local_round.err"
+  if run_loop_err "$errf"; then
+    ok "$label: post-burst single HALT launch exits cleanly"
+  else
+    bad "$label: post-burst launch failed (rc=$? stderr=$(tr '\n' ' ' <"$errf"))"
+  fi
+  if halt_lock_artifacts_clean; then
+    ok "$label: lock clean after post-burst launch"
+  else
+    bad "$label: lock stuck after post-burst launch"
+  fi
+  rm -f "$REPO/gibson/HALT"
+  local_round=$((local_round + 1))
+done
+
+echo "halt latch: 30-way remote-label burst → one journal, valid remote latch, zero work, clean children"
+REMOTE_BURST_N=30
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+state_before=$(cat "$REPO/gibson/loop-state.md")
+rm -f "$REPO/gibson/HALT"
+export GH_STUB_BEHAVIOR=label-halt
 : > "$CALLS/gh.log"
 : > "$CALLS/devin.cmds"
 : > "$CALLS/second-opinion.count"
-# Record runner invocations via a unique stamp file the hermes stub would create
-# if work ever started (HERMES_CMD runs only after stop_if_halted allows).
-work_stamp="$ROOT/concurrent-work.stamp"
-rm -f "$work_stamp"
-conc_dir="$ROOT/concurrent-halts"
-rm -rf "$conc_dir"
-mkdir -p "$conc_dir"
-# Launch 20 simultaneous processes against the same repo/latch/journal.
-i=0
-while [[ $i -lt 20 ]]; do
-  (
-    HERMES_CMD="touch '$work_stamp'; cat >/dev/null" \
-    "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
-      --once --supervisor devin >/dev/null 2>"$conc_dir/err.$i" || true
-  ) &
-  i=$((i + 1))
-done
-# Bounded wait: lock + halt path should finish well under 30s; avoid deadlock hang.
-conc_waited=0
-while [[ $conc_waited -lt 60 ]]; do
-  # shellcheck disable=SC2009
-  if ! jobs -rp 2>/dev/null | grep -q .; then
-    break
-  fi
-  sleep 0.5
-  conc_waited=$((conc_waited + 1))
-done
-# Reap; if anything is still alive we have a deadlock.
-still_running=0
-# shellcheck disable=SC2046
-if jobs -rp 2>/dev/null | grep -q .; then
-  still_running=1
-  # shellcheck disable=SC2046
-  kill $(jobs -rp) 2>/dev/null || true
-  wait 2>/dev/null || true
-else
-  wait 2>/dev/null || true
-fi
+run_concurrent_loop_burst "$REMOTE_BURST_N" "remote-label"
+label="${REMOTE_BURST_N}-way remote-label"
 if [[ "$still_running" -eq 0 ]]; then
-  ok "20 concurrent HALT launches completed without deadlock"
+  ok "$label: completed without deadlock"
 else
-  bad "20 concurrent HALT launches deadlocked or exceeded wait budget"
+  bad "$label: deadlocked or exceeded wait budget"
 fi
+assert_concurrent_children_clean "$REMOTE_BURST_N" 0 "$label"
 halts_conc=$(journal_halts)
 if [[ "$halts_conc" -eq 1 ]]; then
-  ok "20 concurrent HALT launches produce exactly one journal halt section"
+  ok "$label: exactly one journal halt section"
 else
-  bad "20 concurrent HALT launches journaled $halts_conc sections (want 1; journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+  bad "$label: journaled $halts_conc sections (want 1; journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
 fi
-if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'local_kind=file' "$REPO/gibson/halt-latch"; then
-  ok "20 concurrent HALT launches leave a valid local latch"
+if journal_says "remote halt: gibson-halt label"; then
+  ok "$label: journal names gibson-halt label"
 else
-  bad "20 concurrent HALT launches left invalid/missing latch (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+  bad "$label: journal missing label reason"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'remote_kind=label' "$REPO/gibson/halt-latch"; then
+  ok "$label: valid remote latch (kind=label)"
+else
+  bad "$label: invalid/missing remote latch (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
 fi
 if [[ -f "$work_stamp" ]]; then
-  bad "20 concurrent HALT launches must never start runner work"
+  bad "$label: must never start runner work"
 else
-  ok "20 concurrent HALT launches start zero runner work"
+  ok "$label: zero runner work"
 fi
 if handoff_invoked || review_invoked; then
-  bad "20 concurrent HALT launches must not invoke review/handoff"
+  bad "$label: must not invoke review/handoff"
 else
-  ok "20 concurrent HALT launches invoke neither review nor handoff"
+  ok "$label: neither review nor handoff"
 fi
 if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
-  ok "20 concurrent HALT launches leave loop-state byte-identical"
+  ok "$label: loop-state byte-identical"
 else
-  bad "20 concurrent HALT launches rewrote loop-state"
+  bad "$label: rewrote loop-state"
 fi
-# Ordinary single launch after concurrent burst still fast-path (no stuck lock).
-errf="$ROOT/halt-after-concurrent.err"
+if halt_lock_artifacts_clean; then
+  ok "$label: no leftover lock/temp artifacts"
+else
+  bad "$label: leftover lock artifacts"
+fi
+errf="$ROOT/halt-after-concurrent-remote.err"
 if run_loop_err "$errf"; then
-  ok "post-concurrent single HALT launch still exits cleanly (lock released)"
+  ok "$label: post-burst single launch exits cleanly"
 else
-  bad "post-concurrent launch failed — lock may be stuck (rc=$? stderr=$(tr '\n' ' ' <"$errf"))"
+  bad "$label: post-burst launch failed (rc=$? stderr=$(tr '\n' ' ' <"$errf"))"
 fi
-if [[ -d "$REPO/gibson/halt-lock" ]]; then
-  bad "halt-lock dir must not remain after launches (stuck lock)"
+if halt_lock_artifacts_clean; then
+  ok "$label: lock clean after post-burst launch"
 else
-  ok "halt-lock dir cleaned up after concurrent launches"
+  bad "$label: lock stuck after post-burst launch"
 fi
-rm -f "$REPO/gibson/HALT"
+unset GH_STUB_BEHAVIOR
 
 echo "remote halt: mid-cycle child recheck journals halt (exit 75), never supervisor rejected"
 # Loop iteration-top sees clear (in-process cache warm). Real child supervisor

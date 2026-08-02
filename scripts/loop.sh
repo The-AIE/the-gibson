@@ -414,44 +414,131 @@ REMOTE_HALT_KIND=""
 # journaled flags suppress KeepAlive relaunch spam; remote kind keeps
 # fail-closed across degraded rechecks until a positive same-source clear.
 #
-# Cross-process lock (mkdir + owner PID) serializes read/decide/journal/latch
-# so concurrent launches cannot double-journal or race past a halt.
+# Cross-process lock serializes read/decide/journal/latch so concurrent launches
+# cannot double-journal or race past a halt.
+#
+# Ownership is published indivisibly: complete pid+owner token is written to a
+# process-unique temp file, then the lock path is acquired with `ln temp lock`
+# (atomic hard-link publish on the same filesystem). Observers never see a lock
+# file without complete ownership data. Release removes the lock only when it
+# still carries this process's exact owner token, so a late EXIT from a former
+# owner cannot delete a successor's lock.
 
-HALT_LOCK_DIR="$STATE_DIR/halt-lock"
+HALT_LOCK_FILE="$STATE_DIR/halt-lock"
 HALT_LOCK_HELD=0
+HALT_LOCK_OWNER=""
+HALT_LOCK_TMP=""
 
+# Read a key=value field from the lock file. Returns 1 if missing/unreadable.
+halt_lock_field() {
+  local key="$1" file="${2:-$HALT_LOCK_FILE}" line
+  [[ -f "$file" ]] || return 1
+  line=$(grep -E "^${key}=" "$file" 2>/dev/null | head -n 1) || true
+  [[ -n "$line" ]] || return 1
+  printf '%s' "${line#*=}"
+}
+
+# Drop the lock only if we still own it (exact owner token match). Always
+# scrubs this process's temp scratch. Safe to call when not held.
 halt_lock_release() {
+  local cur_owner
+  if [[ -n "${HALT_LOCK_TMP:-}" ]]; then
+    rm -f "$HALT_LOCK_TMP" 2>/dev/null || true
+    HALT_LOCK_TMP=""
+  fi
   if [[ "${HALT_LOCK_HELD:-0}" -ne 1 ]]; then
     return 0
   fi
   HALT_LOCK_HELD=0
-  rm -f "${HALT_LOCK_DIR}/pid" 2>/dev/null || true
-  rmdir "$HALT_LOCK_DIR" 2>/dev/null || true
+  if [[ -n "${HALT_LOCK_OWNER:-}" && -f "$HALT_LOCK_FILE" ]]; then
+    cur_owner=$(halt_lock_field owner) || cur_owner=""
+    if [[ "$cur_owner" == "$HALT_LOCK_OWNER" ]]; then
+      rm -f "$HALT_LOCK_FILE"
+    fi
+  fi
+  HALT_LOCK_OWNER=""
+}
+
+# Reclaim a dead or malformed lock without racing a live successor.
+# Removes only when the on-disk content still matches what we classified as
+# stale (token match for dead owners; full snapshot match for malformed).
+halt_lock_try_reclaim_stale() {
+  local owner pid snap cur_owner
+  # Legacy directory form from older builds: reclaim empty/dead dirs so an
+  # upgraded process is not permanently blocked by a leftover halt-lock/.
+  if [[ -d "$HALT_LOCK_FILE" ]]; then
+    if [[ -f "${HALT_LOCK_FILE}/pid" ]]; then
+      pid=$(cat "${HALT_LOCK_FILE}/pid" 2>/dev/null || true)
+      if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "${HALT_LOCK_FILE}/pid" 2>/dev/null || true
+        rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
+      fi
+    else
+      rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  [[ -f "$HALT_LOCK_FILE" ]] || return 0
+
+  owner=$(halt_lock_field owner) || owner=""
+  pid=$(halt_lock_field pid) || pid=""
+
+  if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+    # Malformed / incomplete: delete only if content is unchanged (no successor).
+    snap=$(cat "$HALT_LOCK_FILE" 2>/dev/null || true)
+    if [[ "$(cat "$HALT_LOCK_FILE" 2>/dev/null || true)" == "$snap" ]]; then
+      owner=$(halt_lock_field owner) || owner=""
+      pid=$(halt_lock_field pid) || pid=""
+      if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+        rm -f "$HALT_LOCK_FILE"
+      fi
+    fi
+    return 0
+  fi
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    # Dead owner — remove only if the same owner token is still published.
+    cur_owner=$(halt_lock_field owner) || cur_owner=""
+    if [[ "$cur_owner" == "$owner" ]]; then
+      rm -f "$HALT_LOCK_FILE"
+    fi
+  fi
 }
 
 # Acquire exclusive halt transition lock. Wait for peers (ordinary launchd is
-# uncontended and returns immediately). Steal only when the owner PID is dead.
-# Returns 1 after a bounded wait so a stuck lock fails closed (no work).
+# uncontended and returns immediately). Steal only when the owner is dead or
+# the lock is malformed. Returns 1 after a bounded wait so a stuck lock fails
+# closed (no work).
 halt_lock_acquire() {
-  local tries=0 max_tries=400 owner
-  mkdir -p "$STATE_DIR"
+  local tries=0 max_tries=400 tmp owner_token
+  mkdir -p "$STATE_DIR" || return 1
   while [[ $tries -lt $max_tries ]]; do
-    if mkdir "$HALT_LOCK_DIR" 2>/dev/null; then
-      printf '%s\n' "$$" > "${HALT_LOCK_DIR}/pid"
+    tmp=$(mktemp "${STATE_DIR}/.halt-lock.XXXXXX") || return 1
+    HALT_LOCK_TMP="$tmp"
+    # Unique per attempt: pid + mktemp basename (portable on Bash 3.2 / macOS).
+    owner_token="$$.${tmp##*/}"
+    # Write complete ownership BEFORE publication — never publish an empty lock.
+    if ! {
+      printf 'pid=%s\n' "$$"
+      printf 'owner=%s\n' "$owner_token"
+    } > "$tmp"; then
+      rm -f "$tmp"
+      HALT_LOCK_TMP=""
+      return 1
+    fi
+    # Atomic acquire: hard-link the complete temp onto the lock path. If the
+    # link succeeds, every observer sees full pid+owner data; if it fails, the
+    # lock already exists with someone else's complete record.
+    if ln "$tmp" "$HALT_LOCK_FILE" 2>/dev/null; then
+      rm -f "$tmp"
+      HALT_LOCK_TMP=""
+      HALT_LOCK_OWNER="$owner_token"
       HALT_LOCK_HELD=1
       return 0
     fi
-    if [[ -f "${HALT_LOCK_DIR}/pid" ]]; then
-      owner=$(cat "${HALT_LOCK_DIR}/pid" 2>/dev/null || true)
-      if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
-        # Stale lock: previous owner is gone.
-        rm -f "${HALT_LOCK_DIR}/pid" 2>/dev/null || true
-        rmdir "$HALT_LOCK_DIR" 2>/dev/null || true
-      fi
-    elif [[ -d "$HALT_LOCK_DIR" ]]; then
-      # Empty/corrupt lock dir without a live pid file — treat as stale.
-      rmdir "$HALT_LOCK_DIR" 2>/dev/null || true
-    fi
+    rm -f "$tmp"
+    HALT_LOCK_TMP=""
+    halt_lock_try_reclaim_stale
     # ~50ms; fall back to 1s if fractional sleep is unavailable.
     sleep 0.05 2>/dev/null || sleep 1
     tries=$((tries + 1))
@@ -459,7 +546,7 @@ halt_lock_acquire() {
   return 1
 }
 
-# Ensure lock is dropped on abnormal exit while held.
+# Ensure lock is dropped on abnormal exit while held (token-checked release).
 if [[ -z "${_GIBSON_HALT_LOCK_TRAP:-}" ]]; then
   _GIBSON_HALT_LOCK_TRAP=1
   trap 'halt_lock_release' EXIT

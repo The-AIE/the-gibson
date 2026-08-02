@@ -105,11 +105,12 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   `gibson/halt-latch` (not a tracked Gibson source file) records the source and
   reason so **launchd KeepAlive relaunches** do not append duplicate journal
   sections while the stop is still active. The read → decide → journal → latch
-  transition is serialized with a cross-process lock (`gibson/halt-lock`, mkdir
-  + owner PID, stale recovery, trap cleanup) so concurrent launches wait and
-  observe the first latch (or fail closed) rather than racing duplicate journal
-  sections or starting work; ordinary single-process launchd stays uncontended
-  and fast. Removing `gibson/HALT` / unsetting `GIBSON_HALT` clears the local
+  transition is serialized with a cross-process lock (`gibson/halt-lock`: complete
+  pid+owner token written to a temp file, then atomically published with
+  `ln temp lock`; token-checked release; dead/malformed stale recovery; trap
+  cleanup) so concurrent launches wait and observe the first latch (or fail
+  closed) rather than racing duplicate journal sections or starting work;
+  ordinary single-process launchd stays uncontended and fast. Removing `gibson/HALT` / unsetting `GIBSON_HALT` clears the local
   side of the latch; a successful remote recheck that positively clears **both**
   remote paths **on the same host+slug that was latched** clears the remote side
   and permits a fresh launch.
