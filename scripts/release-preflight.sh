@@ -21,10 +21,12 @@ WHAT IT DOES
        never authorize via body text. reviewDecision is only a fail-closed
        fallback when no usable event exists and no malformed formal evidence
        was discarded. A newer VERDICT: REQUEST_CHANGES blocks even if an older
-       formal approval remains. Timestamps must be a complete parseable ISO
-       instant (not a prefix); authorless APPROVE never clears the gate;
-       equal-time conflicts prefer REQUEST_CHANGES. A SHA-bound verdict must
-       match the current PR head — absent/null head fails closed.
+       formal approval remains. Timestamps must be a complete ISO-8601 instant
+       with a real civil calendar (strict round-trip; impossible dates like
+       9999-02-31 never normalize into the stream); authorless APPROVE never
+       clears the gate; equal-time conflicts prefer REQUEST_CHANGES. A
+       SHA-bound verdict must match the current PR head — absent/null head
+       fails closed.
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
@@ -140,7 +142,8 @@ fi
 #
 # Usability gates (fail closed):
 #   - timestamps must be a complete accepted ISO-8601 instant (not a prefix)
-#     and parseable; incomplete/bogus forms never outrank valid events
+#     with a real civil calendar (strict round-trip; jq fromdateiso8601 must
+#     never normalize Feb 31 / Apr 31 into a later day that sorts as "newest")
 #   - formal state (APPROVED / CHANGES_REQUESTED) precedes body VERDICT text
 #   - DISMISSED reviews never authorize via body VERDICT: APPROVE
 #   - authorless APPROVE never counts as independent
@@ -151,14 +154,31 @@ fi
 
 # Complete accepted GitHub-style instant: YYYY-MM-DDTHH:MM:SS[.frac](Z|±HH:MM)
 # Rejects prefix-only junk like "9999-99-99Tbogus" and missing-timezone forms.
-ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
+# Single-backslash fractional group: jq/Oniguruma sees (\.[0-9]+)? — a double
+# bash escape would require a literal backslash before the digits and reject
+# real fractional instants (over-rejection).
+ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
+
+# Shared jq helpers: shape match + strict civil-calendar round-trip.
+# fromdateiso8601 normalizes impossible dates (9999-02-31 → 9999-03-03); that
+# must never enter the stream. Validate by stripping frac, taking the wall
+# clock (drop Z/offset), parsing wall+Z, and requiring todateiso8601 to equal
+# wall+Z. Offset forms are accepted when the wall is real and the offset
+# matches ISO_AT_RE — do not require fromdateiso8601 on ±HH:MM (jq often
+# rejects valid offsets and would over-reject GitHub-shaped stamps).
+# shellcheck disable=SC2016
+JQ_ISO_DEFS='
+  def strict_iso_instant:
+    (. | sub("\\.\\d+"; "")) as $s |
+    ($s | sub("Z$"; "") | sub("[+-][0-9]{2}:[0-9]{2}$"; "")) as $wall |
+    (try (($wall + "Z") | fromdateiso8601 | todateiso8601) catch null) == ($wall + "Z");
+  def complete_at:
+    (. != null) and ((. | type) == "string") and (. | test($re)) and strict_iso_instant;
+'
 
 # Malformed formal reviews that would be relevant (APPROVED / CHANGES_REQUESTED)
 # but cannot enter the stream — must block before reviewDecision fallback.
-MALFORMED_FORMAL=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" '
-  def complete_at:
-    (. != null) and ((. | type) == "string") and (. | test($re)) and
-    ((try (. | sub("\\.\\d+"; "") | fromdateiso8601) catch null) != null);
+MALFORMED_FORMAL=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
   [
     .reviews[]? |
     select(.state == "APPROVED" or .state == "CHANGES_REQUESTED") |
@@ -173,7 +193,7 @@ MALFORMED_FORMAL=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" '
     ] | join(" ")
   ] | if length == 0 then empty else join("; ") end')
 
-VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" '
+VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
   def body_verdict:
     if .body == null then empty
     elif (.body | type) != "string" then empty
@@ -191,11 +211,10 @@ VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" '
     if .state == "APPROVED" or .state == "CHANGES_REQUESTED" then formal_verdict
     elif .state == "DISMISSED" then empty
     else body_verdict end;
-  # Full accepted ISO instant + parseability. Prefix-only matches
-  # ("9999-99-99Tbogus") must never sort above real evidence.
+  # Full accepted ISO instant + strict civil calendar. Prefix-only junk and
+  # impossible dates (9999-02-31) must never sort above real evidence.
   def valid_at:
-    (.at != null) and ((.at | type) == "string") and (.at | test($re)) and
-    ((try (.at | sub("\\.\\d+"; "") | fromdateiso8601) catch null) != null);
+    (.at != null) and ((.at | type) == "string") and (.at | complete_at);
   def is_request_changes:
     (.verdict | test("REQUEST_CHANGES"; "i"));
   [

@@ -360,6 +360,91 @@ check "corrupt tree dry-run hard-fails" "$rc" "1"
 contains "dry-run names corrupt tree too" "$out" "unreadable/corrupt tree"
 lacks    "dry-run does not invent empty-ledger plan" "$out" "none matched"
 
+echo "#61 P1 · tree entry with missing live blob is not an empty ledger"
+# Readable root/docs trees + a path that still exists in the tree, but whose
+# blob object is gone: cat-file -e ref:path fails. Treating that as path
+# absence declares an empty ledger, mutates the label, and returns 0 — a
+# false green. Inspect the tree entry first; unreadable/corrupt blob hard-fails
+# before any label mutation. True path absence remains a valid empty ledger.
+new_repo "$ROOT/missingblob"
+(
+  cd "$ROOT/missingblob/canon" || exit 1
+  git checkout -q main
+  # Confirm the tree still has the entry after we delete only the blob object.
+  blob=$(git rev-parse "origin/main:docs/active-work.md")
+  tree=$(git rev-parse "origin/main^{tree}")
+  docs_tree=$(git rev-parse "origin/main:docs")
+  rm_obj() {
+    local sha="$1" repo="$2"
+    local dir="$repo/objects/${sha:0:2}"
+    local file="$dir/${sha:2}"
+    rm -f "$file"
+  }
+  rm_obj "$blob" "$ROOT/missingblob/canon/.git"
+  rm_obj "$blob" "$ROOT/missingblob/origin"
+  git -C "$ROOT/missingblob/canon" prune --expire=now >/dev/null 2>&1 || true
+  git -C "$ROOT/missingblob/origin" prune --expire=now >/dev/null 2>&1 || true
+  # Shape: root tree + docs tree readable, path entry present, blob gone.
+  git cat-file -e "$tree"
+  git cat-file -e "$docs_tree"
+  git ls-tree "origin/main" -- docs/active-work.md | grep -q 'active-work.md'
+  if git cat-file -e "origin/main:docs/active-work.md" 2>/dev/null; then
+    echo "setup failed: blob still readable" >&2
+    exit 1
+  fi
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED" >&2
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/missingblob/canon" && "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "missing live blob hard-fails (exit 1)" "$rc" "1"
+contains "names unreadable/corrupt blob (not empty)" "$out" "unreadable/corrupt"
+lacks    "does not treat missing blob as empty ledger" "$out" "treating as no live claims"
+lacks    "does not mutate labels before blob hard-fail" "$out" "MUTATED"
+lacks    "does not claim OK on missing blob" "$out" "OK —"
+
+out=$(cd "$ROOT/missingblob/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
+rc=$?
+check "missing live blob dry-run hard-fails" "$rc" "1"
+contains "dry-run names unreadable blob too" "$out" "unreadable/corrupt"
+lacks    "dry-run does not invent empty-ledger plan on missing blob" "$out" "none matched"
+lacks    "dry-run does not plan label keep on corrupt blob" "$out" "KEEP label"
+
+# True absence of the path (no tree entry) remains a valid empty ledger — do
+# not over-reject after the blob hard-fail was added.
+new_repo "$ROOT/absentpath"
+(
+  cd "$ROOT/absentpath/canon" || exit 1
+  git checkout -q main
+  git rm -q docs/active-work.md
+  git commit -qm "no active-work path" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/absentpath/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
+rc=$?
+check "true missing path still valid empty ledger (exit 0)" "$rc" "0"
+contains "true absence still treated as empty" "$out" "treating as no live claims"
+lacks    "true absence is not hard-failed as corrupt blob" "$out" "unreadable/corrupt"
+
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

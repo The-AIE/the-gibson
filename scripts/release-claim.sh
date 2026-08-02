@@ -48,12 +48,15 @@ USAGE
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
 
   Empty ledger: when a *valid* ledger ref with a *readable* tree has no
-  docs/claims/* and no docs/active-work.md, that is a valid empty ledger (no
-  live claims), not a hard fail. A missing/unborn/invalid main|master ref, or
-  a commit whose referenced tree is unavailable/corrupt, is NOT an empty
-  ledger — the script fails hard before any label mutation. Cleanup of
-  worktrees/labels can still complete truthfully without inventing a row when
-  the ref is valid, the tree is readable, and the ledger is empty.
+  docs/claims/* and no docs/active-work.md tree entry, that is a valid empty
+  ledger (no live claims), not a hard fail. A missing/unborn/invalid
+  main|master ref, a commit whose referenced tree is unavailable/corrupt, or
+  a ledger path that still exists in the tree but whose blob/object is
+  unreadable/corrupt, is NOT an empty ledger — the script fails hard before
+  any label mutation. True path absence is allowed; unreadable live blobs are
+  not. Cleanup of worktrees/labels can still complete truthfully without
+  inventing a row when the ref is valid, the tree is readable, and the ledger
+  is empty.
 
 ENV
   GIBSON_CANONICAL   claim-table repo path (default: cwd)
@@ -172,9 +175,26 @@ fi
 # — not corruption. Treat it as zero live claims and continue label/worktree
 # cleanup. A named --claim-id that is not present still hard-fails below.
 # Tree-read failures above already exited; do not reclassify them as empty.
+#
+# Inspect tree entries first. git cat-file -e ref:path fails both when the
+# path is absent AND when the path exists but its blob is missing/corrupt.
+# Only true absence is an empty-ledger signal; an unreadable live blob must
+# hard-fail before any label mutation.
 HAS_ACTIVE=0
 HAS_CLAIMS_TREE=0
-if git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+ACTIVE_LS_ERR=""
+ACTIVE_LS=$(git ls-tree --name-only "$REF" -- docs/active-work.md 2>&1) || {
+  ACTIVE_LS_ERR=$?
+}
+if [[ -n "$ACTIVE_LS_ERR" ]]; then
+  die "cannot list docs/active-work.md at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+fi
+if [[ -n "$ACTIVE_LS" ]]; then
+  # Entry exists in the tree — the blob must be readable.
+  if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+    active_blob=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null | awk '{print $3; exit}')
+    die "docs/active-work.md exists in the ledger tree at $REF but its blob is unreadable/corrupt${active_blob:+ ($active_blob)} — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
   HAS_ACTIVE=1
 fi
 # ls-tree on a missing path exits 0 with empty output on a readable tree.
@@ -208,15 +228,25 @@ fi
 # Returns 1 if the ledger tree cannot be read (caller must hard-fail — never
 # treat a failed tree read as an empty match set).
 claim_ids_matching() {
-  local claims_out active_out
+  local claims_out active_out active_entry active_blob
   if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); then
     echo "release-claim.sh: ERROR: cannot list docs/claims/ at $REF — unreadable ledger tree is not an empty ledger" >&2
     return 1
   fi
   active_out=""
-  if git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+  # Tree entry first: absence is empty content; present-but-unreadable hard-fails.
+  if ! active_entry=$(git ls-tree --name-only "$REF" -- docs/active-work.md 2>/dev/null); then
+    echo "release-claim.sh: ERROR: cannot list docs/active-work.md at $REF — unreadable ledger tree is not an empty ledger" >&2
+    return 1
+  fi
+  if [[ -n "$active_entry" ]]; then
+    if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+      active_blob=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null | awk '{print $3; exit}')
+      echo "release-claim.sh: ERROR: docs/active-work.md exists in the ledger tree at $REF but its blob is unreadable/corrupt${active_blob:+ ($active_blob)} — not an empty ledger" >&2
+      return 1
+    fi
     if ! active_out=$(git show "$REF:docs/active-work.md" 2>/dev/null); then
-      echo "release-claim.sh: ERROR: cannot read docs/active-work.md at $REF — unreadable ledger tree is not an empty ledger" >&2
+      echo "release-claim.sh: ERROR: cannot read docs/active-work.md at $REF — unreadable/corrupt blob is not an empty ledger" >&2
       return 1
     fi
   elif ! git cat-file -e "$TREE_SHA" 2>/dev/null; then

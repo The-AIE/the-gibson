@@ -99,15 +99,17 @@ Canonical: /path/to/target
 3. Review: newest usable timestamped event across PR reviews **and** comments
    wins (source type does not reorder the stream). Formal review states
    (`APPROVED` / `CHANGES_REQUESTED`) are modeled as events when they carry a
-   complete parseable ISO timestamp and always precede body `VERDICT` text on
-   the same review; `DISMISSED` reviews never authorize via body text.
-   `reviewDecision` is only a fail-closed fallback when no usable event exists
-   and no malformed formal evidence was discarded — a newer
-   `VERDICT: REQUEST_CHANGES` blocks even if an older formal approval remains.
-   Incomplete/prefix-only timestamps and authorless `APPROVE` events never
-   clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. When the
-   verdict source binds a commit SHA, it must match the current PR head —
-   stale or absent/null head fails closed. UX eval PASS when user-visible.
+   complete ISO-8601 timestamp with a real civil calendar (strict round-trip;
+   impossible dates like `9999-02-31` never normalize into the stream) and
+   always precede body `VERDICT` text on the same review; `DISMISSED` reviews
+   never authorize via body text. `reviewDecision` is only a fail-closed
+   fallback when no usable event exists and no malformed formal evidence was
+   discarded — a newer `VERDICT: REQUEST_CHANGES` blocks even if an older
+   formal approval remains. Incomplete/prefix-only timestamps, impossible
+   calendar dates/times, and authorless `APPROVE` events never clear the
+   gate; equal-time conflicts prefer `REQUEST_CHANGES`. When the verdict
+   source binds a commit SHA, it must match the current PR head — stale or
+   absent/null head fails closed. UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
 5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
 6. Schema PRs: no other schema merge in flight; migration file present
@@ -144,13 +146,15 @@ If any item fails → do not merge; report the missing gate.
   `VERDICT: REQUEST_CHANGES`. An older comment `VERDICT: APPROVE` must not
   override a newer review `VERDICT: REQUEST_CHANGES` (PR #57 false-green).
   Formal `CHANGES_REQUESTED` / `DISMISSED` state precedes contradictory body
-  `VERDICT: APPROVE` text. Timestamps must be a complete parseable ISO
-  instant (not a prefix like `9999-99-99Tbogus`); authorless `APPROVE` never
-  counts as independent; equal timestamps prefer `REQUEST_CHANGES`. Malformed
-  formal `APPROVED`/`CHANGES_REQUESTED` evidence blocks before any
-  `reviewDecision` aggregate fallback (no drop-then-recover). When the source
-  carries a commit SHA, a verdict bound to any SHA other than the current head
-  — or when head is absent/null — is fail closed — re-review the tip.
+  `VERDICT: APPROVE` text. Timestamps must be a complete ISO-8601 instant with
+  a real civil calendar (not a prefix like `9999-99-99Tbogus`, and not an
+  impossible date like `9999-02-31` that jq would normalize); authorless
+  `APPROVE` never counts as independent; equal timestamps prefer
+  `REQUEST_CHANGES`. Malformed formal `APPROVED`/`CHANGES_REQUESTED` evidence
+  blocks before any `reviewDecision` aggregate fallback (no drop-then-recover).
+  When the source carries a commit SHA, a verdict bound to any SHA other than
+  the current head — or when head is absent/null — is fail closed — re-review
+  the tip.
 
 **ADMIN-CANDIDATE** — nothing about the product is wrong, but nothing has
 authorized the merge either. Two causes:
@@ -201,11 +205,13 @@ release-claim.sh <issue> --claim-id issue-<issue>-<merged-slug>
 the last claim file is gone, `docs/claims/` is untracked in git and
 `docs/active-work.md` may be absent — that is zero live claims on a valid
 `origin/main` (or main/master) whose tree objects are readable, not a corrupt
-ledger. A missing, unborn, or non-commit main/master ref — or a commit whose
-referenced tree is unavailable/corrupt — is **not** an empty ledger: the script
-fails hard **before** any label mutation. Cleanup must still complete without
-inventing a row when the ref is valid, the tree is readable, and the ledger is
-empty. Operator paths:
+ledger. A missing, unborn, or non-commit main/master ref — a commit whose
+referenced tree is unavailable/corrupt — or a ledger path that still exists in
+the tree but whose blob/object is unreadable/corrupt — is **not** an empty
+ledger: the script inspects tree entries first and fails hard **before** any
+label mutation. True path absence is allowed; missing live blobs are not.
+Cleanup must still complete without inventing a row when the ref is valid, the
+tree is readable, and the ledger is empty. Operator paths:
 
 ```bash
 # Live sibling still owns the issue, but no claim file is on origin/main

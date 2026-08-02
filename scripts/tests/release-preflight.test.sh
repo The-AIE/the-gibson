@@ -294,6 +294,145 @@ f_incomplete_iso=$(fixture incomplete_iso '.reviewDecision = "" |
 out=$(run "$f_incomplete_iso"); rc=$?
 check "ISO prefix without timezone is not a complete accepted timestamp" "$rc" "1"
 
+echo "#61 P1 · impossible calendar dates must not normalize under fromdateiso8601"
+# jq fromdateiso8601 turns 9999-02-31 into 9999-03-03. A regex+parse gate then
+# lets that "future" APPROVE sort above a real 2026 REQUEST_CHANGES → READY.
+# Strict civil round-trip must treat impossible dates as malformed.
+f_imposs_date=$(fixture imposs_date '.reviewDecision = "" | .headRefOid = "1111111111111111111111111111111111111111" |
+  .comments = [
+    {
+      "author": {"login": "good-reviewer"},
+      "body": "still blocked\n\nVERDICT: REQUEST_CHANGES",
+      "createdAt": "2026-08-02T17:00:00Z"
+    },
+    {
+      "author": {"login": "bogus-calendar"},
+      "body": "looks fine\n\nVERDICT: APPROVE",
+      "createdAt": "9999-02-31T17:00:00Z"
+    }
+  ]')
+out=$(run "$f_imposs_date"); rc=$?
+check "impossible calendar APPROVE does not outrank valid REQUEST_CHANGES" "$rc" "1"
+contains "selects valid REQUEST_CHANGES over imposs-date APPROVE" "$out" "REQUEST_CHANGES"
+contains "names the valid reviewer under imposs-date" "$out" "good-reviewer"
+if echo "$out" | grep -qF "READY"; then bad "must not report READY when only valid event is REQUEST_CHANGES"; else ok "does not report READY under imposs-date APPROVE"; fi
+if echo "$out" | grep -qF "bogus-calendar"; then bad "impossible-date APPROVE must not be selected as the winning event"; else ok "impossible-date author is not the winning event"; fi
+
+# Sole impossible-date formal APPROVED: malformed formal, not READY via fallback.
+f_only_imposs=$(fixture only_imposs '.reviewDecision = "APPROVED" | .headRefOid = "1111111111111111111111111111111111111111" |
+  .reviews = [{
+    "author": {"login": "bogus-calendar"},
+    "state": "APPROVED",
+    "body": "VERDICT: APPROVE",
+    "submittedAt": "9999-02-31T17:00:00Z",
+    "commit": {"oid": "1111111111111111111111111111111111111111"}
+  }]')
+out=$(run "$f_only_imposs"); rc=$?
+check "sole impossible calendar formal APPROVED is BLOCKED" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "impossible calendar formal must not yield READY"; else ok "impossible-date sole formal is not READY"; fi
+
+# Apr 31 / non-leap Feb 29 are also impossible (not merely "odd").
+f_apr31=$(fixture apr31 '.reviewDecision = "" |
+  .comments = [{
+    "author": {"login": "apr31"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-04-31T12:00:00Z"
+  }]')
+out=$(run "$f_apr31"); rc=$?
+check "April 31 is not a valid calendar date" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "Apr 31 APPROVE must not be READY"; else ok "Apr 31 APPROVE is not READY"; fi
+
+f_nonleap=$(fixture nonleap '.reviewDecision = "" |
+  .comments = [{
+    "author": {"login": "nonleap"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2023-02-29T12:00:00Z"
+  }]')
+out=$(run "$f_nonleap"); rc=$?
+check "non-leap Feb 29 is not a valid calendar date" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "2023-02-29 APPROVE must not be READY"; else ok "non-leap Feb 29 is not READY"; fi
+
+echo "#61 P1 · boundary-valid leap/date/offset instants must still be accepted"
+# Round-trip validation must not over-reject real GitHub-shaped instants.
+f_leap=$(fixture leap_day '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "leap-reviewer"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2024-02-29T12:00:00Z"
+  }]')
+out=$(run "$f_leap"); rc=$?
+check "leap day 2024-02-29T12:00:00Z APPROVE is READY" "$rc" "0"
+contains "names leap-day reviewer" "$out" "leap-reviewer"
+
+f_eom=$(fixture end_of_months '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "eom-reviewer"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-01-31T23:59:59Z"
+  }]')
+out=$(run "$f_eom"); rc=$?
+check "Jan 31 end-of-month Z instant is READY" "$rc" "0"
+
+f_apr30=$(fixture apr30 '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "apr30-reviewer"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-04-30T12:00:00Z"
+  }]')
+out=$(run "$f_apr30"); rc=$?
+check "Apr 30 valid end-of-month is READY" "$rc" "0"
+
+f_frac=$(fixture frac_z '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "frac-reviewer"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T17:00:00.123Z"
+  }]')
+out=$(run "$f_frac"); rc=$?
+check "fractional-second Z instant is READY" "$rc" "0"
+
+# Offset forms are accepted complete ISO instants (wall calendar + offset).
+# jq fromdateiso8601 often rejects ±HH:MM — must not over-reject on that alone.
+f_off_plus=$(fixture off_plus '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "offset-plus"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T12:00:00+05:30"
+  }]')
+out=$(run "$f_off_plus"); rc=$?
+check "valid +05:30 offset APPROVE is READY" "$rc" "0"
+contains "names +05:30 reviewer" "$out" "offset-plus"
+
+f_off_minus=$(fixture off_minus '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "offset-minus"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-02-28T23:59:59-05:00"
+  }]')
+out=$(run "$f_off_minus"); rc=$?
+check "valid -05:00 offset APPROVE is READY" "$rc" "0"
+contains "names -05:00 reviewer" "$out" "offset-minus"
+
+f_off_zulu=$(fixture off_zulu '.reviewDecision = "" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .comments = [{
+    "author": {"login": "offset-zulu"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T15:00:00+00:00"
+  }]')
+out=$(run "$f_off_zulu"); rc=$?
+check "valid +00:00 offset APPROVE is READY" "$rc" "0"
+
+# Impossible wall + otherwise-valid offset still blocks (no normalize-via-offset).
+f_imposs_off=$(fixture imposs_off '.reviewDecision = "" |
+  .comments = [{
+    "author": {"login": "imposs-off"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "9999-02-31T17:00:00+00:00"
+  }]')
+out=$(run "$f_imposs_off"); rc=$?
+check "impossible calendar with +00:00 offset is BLOCKED" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "imposs+offset must not be READY"; else ok "imposs+offset is not READY"; fi
+
 echo "#61 P1 · formal review state precedes contradictory body VERDICT text"
 # CHANGES_REQUESTED with a body that ends VERDICT: APPROVE must still block.
 f_formal_vs_body=$(fixture formal_vs_body '.reviewDecision = "CHANGES_REQUESTED" | .headRefOid = "2222222222222222222222222222222222222222" |
