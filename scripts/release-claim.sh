@@ -91,7 +91,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
-ACTIVE="$CANONICAL/docs/active-work.md"
 die() { echo "release-claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "release-claim.sh: $*"; }
 warn() { echo "release-claim.sh: WARNING: $*" >&2; }
@@ -102,7 +101,17 @@ if [[ -n "$PREFIX" && ! "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
 fi
 
 cd "$CANONICAL"
-[[ -f "$ACTIVE" ]] || die "missing $ACTIVE"
+git fetch origin >/dev/null 2>&1 || true
+
+BASE=main
+git show-ref --verify --quiet refs/heads/main || BASE=master
+REF="origin/$BASE"
+git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
+
+if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null &&
+   [[ -z "$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null)" ]]; then
+  die "no claim ledger at $REF (neither docs/claims/ nor docs/active-work.md)"
+fi
 
 # Claim ids we own. issue-<N>-…, plus issue-<ns>-<N>-… when --prefix is given.
 # The alpha namespace is what keeps issue-1<N>- from matching issue-<N>-.
@@ -114,11 +123,17 @@ else
   MATCH_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
 fi
 
+# Claims live one-per-file in docs/claims/ (L-023); rows in docs/active-work.md
+# are the legacy form and are still released.
 claim_ids_matching() {
-  grep -E "$1" "$ACTIVE" 2>/dev/null |
-    awk -F'|' '{print $3}' |
-    sed 's/^[[:space:]]*//;s/[[:space:]]*$//' |
-    grep -E '^issue-' || true
+  {
+    git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
+      sed 's|^docs/claims/||;s|\.md$||'
+    git show "$REF:docs/active-work.md" 2>/dev/null |
+      grep -E '^\| ' |
+      awk -F'|' '{print $3}' |
+      sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  } | grep -E '^issue-' | grep -E "$1" | sort -u || true
 }
 
 # Every live row for this issue, so we can tell "released the last one" from
@@ -129,9 +144,9 @@ TARGET_IDS=$(claim_ids_matching "$MATCH_RE")
 
 if [[ -z "$TARGET_IDS" ]]; then
   if [[ -n "$CLAIM_ID_ARG" ]]; then
-    die "no claim row for '$CLAIM_ID_ARG' in $ACTIVE"
+    die "no live claim '$CLAIM_ID_ARG' at $REF"
   fi
-  info "no claim row for issue $ISSUE — will still try label/worktree cleanup"
+  info "no live claim for issue $ISSUE — will still try label/worktree cleanup"
 fi
 
 WT_PARENT="$(cd "$CANONICAL/.." && pwd)"
@@ -217,16 +232,29 @@ strip_claim_rows() {
   local rc=0
   (
     cd "$tmpwt" || exit 1
+    local touched=0
+
+    # per-lane claim files (current form)
+    local id
+    for id in $TARGET_IDS; do
+      if [[ -f "docs/claims/$id.md" ]]; then
+        git rm -q "docs/claims/$id.md" || exit 1
+        touched=1
+      fi
+    done
+
+    # legacy shared table
     local active=docs/active-work.md
-    [[ -f "$active" ]] || exit 1
-    grep -E "$MATCH_RE" "$active" >/dev/null 2>&1 || exit 2  # nothing to strip
+    if [[ -f "$active" ]] && grep -E "$MATCH_RE" "$active" >/dev/null 2>&1; then
+      local tmp
+      tmp=$(mktemp) || exit 1
+      grep -v -E "$MATCH_RE" "$active" > "$tmp"
+      mv "$tmp" "$active"
+      git add "$active" || exit 1
+      touched=1
+    fi
 
-    local tmp
-    tmp=$(mktemp) || exit 1
-    grep -v -E "$MATCH_RE" "$active" > "$tmp"
-    mv "$tmp" "$active"
-
-    git add "$active" || exit 1
+    [[ "$touched" -eq 1 ]] || exit 2  # nothing to strip
     git commit -s -q -m "release-claim: ${CLAIM_ID_ARG:-issue-${ISSUE}}
 
 Post-merge cleanup per Law 10 / docs/05." || exit 1
@@ -244,16 +272,16 @@ if [[ -n "$TARGET_IDS" ]]; then
   strip_rc=$?
   set -e
   case "$strip_rc" in
-    0) info "claim row removed" ;;
-    2) info "no claim row to remove on origin main" ;;
+    0) info "claim removed" ;;
+    2) info "no claim to remove at $REF" ;;
     *)
-      warn "claim row NOT removed for issue $ISSUE — strip failed (rc=$strip_rc)."
-      warn "Fix by hand: edit docs/active-work.md on main, drop rows matching '$MATCH_RE', push."
+      warn "claim NOT removed for issue $ISSUE — strip failed (rc=$strip_rc)."
+      warn "Fix by hand on main: git rm the docs/claims/<id>.md files (or drop rows matching '$MATCH_RE' from docs/active-work.md), then push."
       INCOMPLETE=1
       ;;
   esac
 else
-  info "no claim row to remove"
+  info "no claim to remove"
 fi
 
 # --- label ----------------------------------------------------------------

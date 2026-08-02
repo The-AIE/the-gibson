@@ -7,37 +7,54 @@ usage() {
 claim.sh — claim a GitHub issue and open an isolated worktree
 
 WHAT IT DOES
-  Marks the issue as agent-claimed, checks that your scope does not overlap a
-  live claim, appends a claim row to docs/active-work.md on main (signed commit),
-  and creates a git worktree + branch for the work.
+  Marks the issue as agent-claimed, refuses to claim something already claimed,
+  writes ONE claim file at docs/claims/<claim-id>.md on main (signed commit), and
+  creates a git worktree + branch for the work.
+
+  One file per claim, never a shared table: two lanes claiming at the same moment
+  touch different paths, so their claim commits do not conflict. `docs/active-work.md`
+  is still read for claims made by older versions, and is now a rendered view
+  (`claims-status.sh`) rather than a file anyone appends to.
 
 WHY
-  Two agents editing the same files silently destroyed each other's work
-  (lesson L-001). Claims + worktrees make collisions physically hard.
+  Two agents editing the same files silently destroyed each other's work (L-001).
+  Two agents claiming the *same issue* under different slugs wasted a full build
+  each, twice (L-028). And the shared claim table itself became the merge conflict
+  — a green product PR blocked on a ledger hunk for issues it never touched
+  (L-023). Claims must be cheap enough that nobody is tempted to skip them.
 
 RISKS
-  - Pushes a small commit to main (claim row only). Undo: release-claim.sh.
+  - Pushes a small commit to main (claim file only). Undo: release-claim.sh.
   - Adds the agent-claimed label. Undo: gh issue edit --remove-label.
   - Creates ../wt-<issue>-<slug> next to the canonical checkout.
   - Exits non-zero and removes the label if a conflict is found.
+  - Does NOT move your canonical checkout: the claim commit is made in a throwaway
+    worktree, so a dirty feature branch is fine (L-009).
 
 USAGE
-  claim.sh <issue> <slug> <scope...>
+  claim.sh <issue> <slug> <scope...> [--slice]
   claim.sh --help
 
   issue   GitHub issue number
   slug    short branch slug (e.g. password-reset)
   scope   file globs/paths that become the claim scope (one or more)
+  --slice deliberate additional lane on an already-claimed issue. Required to get
+          past the dual-claim refusal, and it is not a formality: the scopes must
+          not overlap, and whoever releases a slice must use
+          `release-claim.sh <issue> --claim-id <id>` so the siblings survive.
 
 ENV
   GIBSON_CANONICAL   path to target repo canonical checkout (default: cwd)
-  GIBSON_SESSION     session id recorded in the claim row (default: $USER@host)
+  GIBSON_SESSION     session id recorded in the claim (default: $USER@host)
 
 EXAMPLES
   cd ~/Code/acme-app
   /path/to/the-gibson/scripts/claim.sh 42 password-reset 'app/api/auth/**' 'lib/email.ts'
 
   GIBSON_CANONICAL=~/Code/acme-app /path/to/the-gibson/scripts/claim.sh 7 nav-gen 'components/nav/**'
+
+  # second lane on a big issue, different files, eyes open
+  claim.sh 15 demo-page 'app/demo/**' --slice
 EOF
 }
 
@@ -50,14 +67,19 @@ fi
 ISSUE="$1"
 SLUG="$2"
 shift 2
-SCOPE="$*"
+SLICE=0
+SCOPE_PARTS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--slice" ]]; then SLICE=1; else SCOPE_PARTS+=("$arg"); fi
+done
+SCOPE="${SCOPE_PARTS[*]}"
+[[ -n "$SCOPE" ]] || { echo "claim.sh: ERROR: no scope given" >&2; exit 2; }
 
 CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
 SESSION="${GIBSON_SESSION:-${USER:-agent}@$(hostname -s 2>/dev/null || echo host)}"
 CLAIM_ID="issue-${ISSUE}-${SLUG}"
 BRANCH="feat/${ISSUE}-${SLUG}"
 WT_DIR="$(cd "$CANONICAL/.." && pwd)/wt-${ISSUE}-${SLUG}"
-ACTIVE="$CANONICAL/docs/active-work.md"
 UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
@@ -67,40 +89,80 @@ command -v git >/dev/null || die "git required"
 command -v gh >/dev/null || die "gh (GitHub CLI) required"
 
 [[ -d "$CANONICAL/.git" || -f "$CANONICAL/.git" ]] || die "not a git repo: $CANONICAL"
-[[ -f "$ACTIVE" ]] || die "missing $ACTIVE — create claim table first (docs/13)"
 
-# Ensure we operate claim commit on main in canonical
 cd "$CANONICAL"
 git fetch origin 2>/dev/null || true
 
-# Refuse dirty active-work in a way that would mix product edits (soft check)
-if ! git diff --quiet -- docs/active-work.md 2>/dev/null; then
-  die "docs/active-work.md has uncommitted local edits — resolve first"
+# Live claims are read from origin's tip, not the working tree: the canonical
+# checkout may be parked on an old branch, and a stale read is how two lanes end
+# up believing they are alone.
+BASE=main
+git show-ref --verify --quiet refs/heads/main || BASE=master
+REF="origin/$BASE"
+git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
+
+live_claim_ids() {
+  git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
+    sed 's|^docs/claims/||;s|\.md$||' | grep -E '^issue-' || true
+  git show "$REF:docs/active-work.md" 2>/dev/null |
+    grep -E '^\| ' | awk -F'|' '{print $3}' |
+    sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -E '^issue-' || true
+}
+
+claim_scope() {
+  git show "$REF:docs/claims/$1.md" 2>/dev/null | sed -n 's/^scope: //p' && return 0
+  git show "$REF:docs/active-work.md" 2>/dev/null |
+    grep -F "| $1 |" | head -1 | awk -F'|' '{print $4}' |
+    sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+LIVE_IDS=$(live_claim_ids | sort -u)
+
+# --- L-028 / #11: refuse an accidental second claim on the same issue ---
+# A deliberate second lane is legitimate (L-024 ships big issues in slices), so
+# --slice is the difference between "I meant this" and the duplicate builds that
+# happened twice.
+SAME_ISSUE=$(echo "$LIVE_IDS" | grep -E "^issue-${ISSUE}-" || true)
+if [[ -n "$SAME_ISSUE" && "$SLICE" -eq 0 ]]; then
+  die "issue #$ISSUE is already claimed: $(echo "$SAME_ISSUE" | tr '\n' ' ')
+  If someone else holds it, coordinate — do not race (L-028).
+  If this is a deliberate second slice with non-overlapping scope, re-run with --slice."
+fi
+if [[ -z "$SAME_ISSUE" ]]; then
+  EXISTING_LABELS=$(gh issue view "$ISSUE" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+  if echo ",$EXISTING_LABELS," | grep -q ',agent-claimed,'; then
+    die "issue #$ISSUE carries agent-claimed but no claim file exists.
+  Either a lane is mid-claim right now, or a previous release left the label behind.
+  Check, then remove the stale label by hand before claiming."
+  fi
+fi
+if [[ -n "$SAME_ISSUE" && "$SLICE" -eq 1 ]]; then
+  info "slice claim: #$ISSUE also held by $(echo "$SAME_ISSUE" | tr '\n' ' ')"
 fi
 
-# Overlap check against live claims (any non-header row)
-if grep -E '^\| [0-9]{4}-' "$ACTIVE" >/dev/null 2>&1; then
-  while IFS= read -r line; do
-    # columns: | utc | claim | scope | session |
-    row_scope=$(echo "$line" | awk -F'|' '{print $4}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    row_claim=$(echo "$line" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [[ -z "$row_scope" || "$row_scope" == "scope" ]] && continue
-    for s in $SCOPE; do
-      # crude path overlap: either side contains the other token
-      case " $row_scope " in
-        *" $s "*|*"${s%%\*}*"*) die "scope overlap with live claim $row_claim (scope: $row_scope). Coordinate; do not race." ;;
-      esac
-      case " $SCOPE " in
-        *)
-          # also check if our scope token appears in their scope string
-          if echo "$row_scope" | grep -F "${s%%\*}" >/dev/null 2>&1; then
-            die "scope overlap with live claim $row_claim (scope: $row_scope)"
-          fi
-          ;;
-      esac
-    done
-  done < <(grep -E '^\| ' "$ACTIVE" | grep -v 'UTC\|---\|utc')
+if echo "$LIVE_IDS" | grep -qx "$CLAIM_ID"; then
+  die "claim $CLAIM_ID already exists — pick another slug, or release it first"
 fi
+
+# --- scope overlap against every live claim ---
+for id in $LIVE_IDS; do
+  row_scope=$(claim_scope "$id")
+  [[ -z "$row_scope" ]] && continue
+  for s in $SCOPE; do
+    stem="${s%%\**}"
+    [[ -z "$stem" ]] && continue
+    if echo " $row_scope " | grep -F "$stem" >/dev/null 2>&1; then
+      die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
+    fi
+    for t in $row_scope; do
+      tstem="${t%%\**}"
+      [[ -z "$tstem" ]] && continue
+      if echo " $SCOPE " | grep -F "$tstem" >/dev/null 2>&1; then
+        die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
+      fi
+    done
+  done
+done
 
 LABEL_ADDED=0
 undo_label() {
@@ -116,24 +178,37 @@ REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 gh issue edit "$ISSUE" --repo "$REPO" --add-label agent-claimed
 LABEL_ADDED=1
 
-# Append claim row on main
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-if [[ "$CURRENT_BRANCH" != "main" && "$CURRENT_BRANCH" != "master" ]]; then
-  info "checking out main for claim commit (was $CURRENT_BRANCH)"
-  git checkout main 2>/dev/null || git checkout master
-fi
-git pull --ff-only 2>/dev/null || true
+# Commit the claim from a throwaway worktree — the canonical checkout is not
+# ours to move, and it may be dirty or on a long-lived branch (Law 3 / L-009).
+TMPWT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-claim.XXXXXX")
+rm -rf "$TMPWT"
+cleanup_wt() { git worktree remove --force "$TMPWT" >/dev/null 2>&1 || rm -rf "$TMPWT"; }
+git worktree add --detach "$TMPWT" "$REF" >/dev/null 2>&1 ||
+  die "could not create a temporary worktree at $REF for the claim commit"
 
-ROW="| $UTC | $CLAIM_ID | $SCOPE | session:$SESSION |"
-echo "$ROW" >> "$ACTIVE"
-git add docs/active-work.md
-git commit -s -m "claim: $CLAIM_ID
+(
+  cd "$TMPWT" || exit 1
+  mkdir -p docs/claims
+  cat > "docs/claims/${CLAIM_ID}.md" <<EOF
+claim: $CLAIM_ID
+issue: $ISSUE
+claimed: $UTC
+scope: $SCOPE
+session: $SESSION
+branch: $BRANCH
+worktree: $WT_DIR
+EOF
+  git add "docs/claims/${CLAIM_ID}.md"
+  git commit -s -q -m "claim: $CLAIM_ID
 
 Scope: $SCOPE
 Session: $SESSION
 
-Signed claim row per docs/05."
-git push origin HEAD
+Signed claim per docs/05. One file per claim so concurrent lanes never
+conflict on the ledger (L-023)."
+  git push -q origin "HEAD:$BASE"
+) || { cleanup_wt; die "claim commit failed — no claim was recorded; re-run after resolving"; }
+cleanup_wt
 
 # Worktree
 if [[ -d "$WT_DIR" ]]; then
