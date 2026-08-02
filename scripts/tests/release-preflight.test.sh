@@ -14,7 +14,7 @@
 #   scripts/tests/release-preflight.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 PREFLIGHT="$SCRIPT_DIR/../release-preflight.sh"
 PASS=0
 FAIL=0
