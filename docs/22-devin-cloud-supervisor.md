@@ -199,7 +199,17 @@ The local half is a resident process on whatever machine holds your runners — 
 mini works well since Codex and Claude are already logged in there. See
 [`adapters/devin/README.md`](../adapters/devin/README.md) for the launchd job, and
 [doc 11](11-solo-loop.md) for the loop's kill switch and error budget, both of which
-still apply: `gibson/HALT` stops everything, including handoffs.
+still apply. The kill switch stops everything, including handoffs — and it is the
+**same** set of paths the loop honors, not only the local file:
+
+- `gibson/HALT` on the target repo, or `GIBSON_HALT=1`
+- an open issue carrying the `gibson-halt` label
+- a `.gibson-halt` sentinel on the remote default branch
+
+`loop.sh` re-checks before every handoff; `devin-supervisor.sh handoff` also
+refuses when any of those are active, so a by-hand handoff cannot bypass a
+remote stop. GitHub/API errors on the remote checks fail open (with a degraded
+warning) so a GitHub outage does not brick handoffs that are otherwise clear.
 
 ---
 [← 21 · Operator readiness](21-operator-readiness.md) · [Home](../index.md) · [23 · Delivery control →](23-delivery-control.md)

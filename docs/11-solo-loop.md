@@ -74,13 +74,25 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   Parked ≠ failed; it's queued for a different mind (or Mark).
 - **Error budget:** N consecutive gate failures (default 5) → stop, report, wait.
   A loop that can't go green is burning tokens on a harness bug.
-- **Kill switch:** the loop checks the `gibson/HALT` file and `GIBSON_HALT=1` at
-  the top of every iteration, unconditionally — neither depends on `gh` or on a
-  network call. The `gibson-halt` GitHub label is a soft cue: when `gh` is
-  installed and authenticated, an open issue carrying that label halts the run
-  too, but with no `gh` nothing acts on it. Treat the file as the permanent kill
-  switch and the label as a request that still needs the file (or a workflow
-  that touches it) to be binding.
+- **Kill switch:** checked at the top of every iteration (and again before any
+  supervisor handoff). Three layers, all read-only:
+  1. **Local (always):** the `gibson/HALT` file, or `GIBSON_HALT=1` in the
+     environment. Neither needs `gh` or a network call. The file is the
+     permanent on-box stop.
+  2. **Remote label:** when `gh` is installed and authenticated, any open issue
+     on the target repo carrying the `gibson-halt` label stops the loop. Remove
+     the label and a freshly launched loop runs again — the check is per
+     iteration, not process-start-only. Phone workflow: [doc 16](16-nontechnical-operation.md).
+  3. **Remote sentinel:** a `.gibson-halt` file committed on the target repo's
+     **current remote default branch** (usually `main`) also stops the loop.
+     Delete the file from the default branch to clear it. Useful when labels are
+     awkward or when the operator can only push a file from another device.
+  GitHub/API failure on either remote path **fails open** to the local
+  file/env checks — the loop keeps running rather than bricking on GitHub
+  downtime — and logs a clear `remote halt check degraded` warning so the
+  operator knows the remote stop is temporarily blind. The same paths suppress
+  Devin supervisor handoffs ([doc 22](22-devin-cloud-supervisor.md)), not just
+  the local file/env path.
 - **Human-gate queue:** Tier C merges and other stops accumulate in a digest
   (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
   issue and circles back after approval.

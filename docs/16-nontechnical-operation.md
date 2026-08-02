@@ -146,6 +146,33 @@ fleet; the operator approves the translation, and the translation is contractual
 (if the plain summary and PLAN.md diverge, the summary wins and the divergence is
 a lesson).
 
+## Stop the crew from your phone (remote kill switch)
+
+The fleet can run for hours without you. If something looks wrong and you are
+away from the machine, you still have an off switch — no terminal, no SSH.
+
+**What I'm asking:** On the GitHub mobile app, open any issue on the project and
+add the label `gibson-halt`.
+
+**What it does:** Within about one work cycle the unattended loop notices the
+label, stops cleanly, and will not hand more work to the cloud supervisor. Your
+live site is not touched; only the automatic worker pauses.
+
+**Why:** So you can freeze the crew from another room or another city without
+needing the computer that is running it.
+
+**Risks:** Low. To start again, remove the `gibson-halt` label from that issue
+(or from every issue that has it) and launch the loop once more — a fresh launch
+runs normally. Nothing is deleted; queued work stays queued. If GitHub itself is
+down, the remote stop cannot see the label and the local machine keeps going
+until someone can set the on-box stop (`gibson/HALT`); that is intentional so a
+GitHub outage does not freeze every project at once.
+
+Engineers can also commit an empty file named `.gibson-halt` on the project's
+default branch (usually `main`) — same effect, cleared by deleting the file.
+The label path above is the one-line phone workflow; the file is the backup when
+labels are awkward. Details: [doc 11](11-solo-loop.md), [doc 22](22-devin-cloud-supervisor.md).
+
 ## Provenance
 
 This tier is the productized version of the Chatterbuilt thesis (agent-run

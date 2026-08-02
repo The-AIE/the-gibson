@@ -20,8 +20,11 @@ RISKS
   - Unattended runs spend tokens / subscription quota (Grok flat-rate preferred).
   - Can open PRs and push when the runner has write permission.
   - Stop with the gibson/HALT file or GIBSON_HALT=1 env (checked unconditionally).
-    The gibson-halt label is a human signal; when gh is available the driver
-    also treats an open issue carrying that label as a soft halt cue.
+    When gh is available the driver also honors two remote kill paths every
+    iteration: an open issue with the gibson-halt label, or a .gibson-halt
+    sentinel file on the target repo's remote default branch. Either stops the
+    loop and suppresses supervisor handoffs. GitHub/API failures fail open to
+    the local file/env checks and log a degraded remote-check warning.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
@@ -170,19 +173,90 @@ grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
 grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE"
 [[ -f "$JOURNAL" ]] || echo "# Gibson loop journal" > "$JOURNAL"
 
-# Kill switch: HALT file is primary. GIBSON_HALT=1 is checked unconditionally
-# (previously only when `gh` was present — issue #55). When gh is available we
-# also treat any open issue carrying the gibson-halt label as a soft signal.
+# Kill switch (issue #55 local paths + issue #71 remote paths).
+#
+# Local (always, no network):
+#   - gibson/HALT file
+#   - GIBSON_HALT=1
+#
+# Remote (read-only, every iteration top — and again before a supervisor handoff):
+#   - open issue carrying the gibson-halt label
+#   - .gibson-halt sentinel committed on the remote default branch
+#
+# Network/API failure fails OPEN to the local checks: the loop keeps running
+# rather than bricking on GitHub downtime, and a clear "degraded" warning is
+# logged so the operator knows the remote stop is temporarily blind.
+origin_slug() {
+  git -C "$REPO" remote get-url origin 2>/dev/null \
+    | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true
+}
+
+# Default branch name as origin currently advertises via symbolic HEAD.
+# Empty / non-zero when origin is missing or unreachable — callers treat that
+# as "remote check degraded", not as a halt.
+remote_default_branch() {
+  local symref name
+  if ! symref=$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null); then
+    return 1
+  fi
+  name=$(printf '%s\n' "$symref" |
+    awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+  [[ -n "$name" ]] || return 1
+  printf '%s\n' "$name"
+}
+
+# True when a remote halt path is active. Fail-open on API errors.
+remote_halted() {
+  if ! command -v gh >/dev/null 2>&1; then
+    return 1
+  fi
+  local slug out ec def_branch
+  slug=$(origin_slug)
+  if [[ -z "$slug" ]]; then
+    return 1
+  fi
+
+  # 1) gibson-halt label on any open issue (live poll; removal lets a fresh
+  #    launch run because this is re-checked every iteration, not once at start).
+  set +e
+  out=$(gh issue list --repo "$slug" \
+    --label gibson-halt --state open --limit 1 \
+    --json number -q '.[0].number' 2>&1)
+  ec=$?
+  set -e
+  if [[ $ec -ne 0 ]]; then
+    info "remote halt check degraded: gibson-halt label query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
+  elif printf '%s' "$out" | grep -q '[0-9]'; then
+    info "remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
+    return 0
+  fi
+
+  # 2) .gibson-halt sentinel on the remote default branch (phone-friendly:
+  #    commit the empty file to main from any device with GitHub access).
+  if ! def_branch=$(remote_default_branch); then
+    info "remote halt check degraded: could not resolve origin default branch — continuing with local HALT/GIBSON_HALT only"
+    return 1
+  fi
+  set +e
+  out=$(gh api "repos/${slug}/contents/.gibson-halt?ref=${def_branch}" 2>&1)
+  ec=$?
+  set -e
+  if [[ $ec -eq 0 ]]; then
+    info "remote halt: .gibson-halt sentinel on origin/${def_branch} — stopping (delete the file from the default branch to allow a fresh launch)"
+    return 0
+  fi
+  # 404 Not Found = no sentinel (clear). Anything else is a degraded check.
+  if printf '%s' "$out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+    return 1
+  fi
+  info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
+  return 1
+}
+
 halted() {
   if [[ -f "$HALT_FILE" ]]; then return 0; fi
   if [[ "${GIBSON_HALT:-}" == "1" ]]; then return 0; fi
-  if command -v gh >/dev/null 2>&1; then
-    if gh issue list --repo "$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true)" \
-         --label gibson-halt --state open --limit 1 --json number -q '.[0].number' 2>/dev/null | grep -q '[0-9]'; then
-      info "gibson-halt label detected on an open issue — treating as soft halt (write gibson/HALT to make permanent)"
-      return 0
-    fi
-  fi
+  if remote_halted; then return 0; fi
   return 1
 }
 
@@ -558,6 +632,14 @@ supervisor_handoff() {
   local branch
   branch=$(read_field handoff)
   [[ -n "$branch" ]] || return 0
+  # Same kill switch as the iteration top — including the remote label and
+  # .gibson-halt sentinel. A mid-iteration remote halt must not send a handoff
+  # just because the loop already started the step; leave handoff queued so a
+  # fresh launch after the operator clears the signal can retry (issue #71).
+  if halted; then
+    info "kill switch active — suppressing supervisor handoff of $branch (handoff stays queued)"
+    return 0
+  fi
   # Names the branch in every journal entry written below this point, including
   # the ones written from inside resolve_base_pin/resolve_handoff_sha's command
   # substitutions — a reader with three queued branches needs to know which one

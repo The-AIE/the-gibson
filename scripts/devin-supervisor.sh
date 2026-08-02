@@ -35,6 +35,9 @@ RISKS
   - Each handoff spends ACUs. Cap it with DEVIN_MAX_ACU (default 10).
   - The session state file lives in <repo>/gibson/devin-session.json; deleting
     it orphans the session rather than closing it.
+  - Kill switch: gibson/HALT, GIBSON_HALT=1, an open gibson-halt label, or a
+    .gibson-halt sentinel on the remote default branch all refuse handoff
+    (same paths as loop.sh; GitHub/API errors fail open with a degraded warning).
 
 USAGE
   devin-supervisor.sh ensure  --repo <path>
@@ -330,6 +333,57 @@ case "$CMD" in
     [[ -n "$REVIEW_FILE" && -f "$REVIEW_FILE" ]] && REVIEWS=$(cat "$REVIEW_FILE")
 
     [[ -z "$BASE_SHA" || -n "$SHA" ]] || die "--base-sha requires --sha: half a pin describes half a diff"
+
+    # Kill switch (issue #71): same local + remote paths as loop.sh. A by-hand
+    # handoff must not bypass the remote stop just because the loop is not the
+    # caller. Remote API failures fail open (do not brick handoff during GitHub
+    # downtime) after a degraded warning — matching the loop driver.
+    if [[ -f "$STATE_DIR/HALT" ]]; then
+      die "kill switch: gibson/HALT is present — refusing handoff (remove the file to resume)"
+    fi
+    if [[ "${GIBSON_HALT:-}" == "1" ]]; then
+      die "kill switch: GIBSON_HALT=1 — refusing handoff"
+    fi
+    if command -v gh >/dev/null 2>&1; then
+      origin_url=$(git -C "$REPO" remote get-url origin 2>/dev/null || true)
+      halt_slug=$(printf '%s' "$origin_url" | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//')
+      if [[ -n "$halt_slug" ]]; then
+        set +e
+        halt_out=$(gh issue list --repo "$halt_slug" \
+          --label gibson-halt --state open --limit 1 \
+          --json number -q '.[0].number' 2>&1)
+        halt_ec=$?
+        set -e
+        if [[ $halt_ec -ne 0 ]]; then
+          info "remote halt check degraded: gibson-halt label query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
+        elif printf '%s' "$halt_out" | grep -q '[0-9]'; then
+          die "kill switch: gibson-halt label on an open issue — refusing handoff (remove the label to allow a fresh launch)"
+        fi
+        set +e
+        halt_symref=$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null)
+        halt_sym_ec=$?
+        set -e
+        if [[ $halt_sym_ec -ne 0 || -z "$halt_symref" ]]; then
+          info "remote halt check degraded: could not resolve origin default branch — continuing with local HALT/GIBSON_HALT only"
+        else
+          halt_def=$(printf '%s\n' "$halt_symref" |
+            awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+          if [[ -z "$halt_def" ]]; then
+            info "remote halt check degraded: origin advertises no symbolic HEAD — continuing with local HALT/GIBSON_HALT only"
+          else
+            set +e
+            halt_out=$(gh api "repos/${halt_slug}/contents/.gibson-halt?ref=${halt_def}" 2>&1)
+            halt_ec=$?
+            set -e
+            if [[ $halt_ec -eq 0 ]]; then
+              die "kill switch: .gibson-halt sentinel on origin/${halt_def} — refusing handoff (delete the file from the default branch to allow a fresh launch)"
+            elif ! printf '%s' "$halt_out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+              info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
+            fi
+          fi
+        fi
+      fi
+    fi
 
     # Issue #55: when a SHA is pinned, the remote tip must exist and match it.
     # Every miss is fatal, not a warning. The supervisor opens the PR from the

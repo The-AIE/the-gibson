@@ -49,11 +49,63 @@ BRANCH="feat/1-widget"
 
 mkdir -p "$CALLS" "$FAKE_SCRIPTS" "$BIN"
 
-# `gh` would reach the network from halted(); the driver treats a non-zero gh as
-# "no halt label", which is what this stub returns instantly.
+# Controllable `gh` fake for remote halt paths (issue #71). Never reaches the
+# network. GH_STUB_BEHAVIOR selects the response:
+#   fail          — non-zero exit with no body (legacy default for non-halt cases;
+#                   the driver fail-opens and may log a degraded warning)
+#   degrade       — non-zero with a gateway error (must fail open + warn)
+#   ok-clear      — label absent, sentinel 404 Not Found (remote stop is clear)
+#   label-halt    — open issue carries gibson-halt
+#   sentinel-halt — .gibson-halt present on the default branch (label clear)
 cat > "$BIN/gh" <<'STUB'
 #!/usr/bin/env bash
-exit 1
+behavior="${GH_STUB_BEHAVIOR:-fail}"
+case "$behavior" in
+  fail)
+    exit 1
+    ;;
+  degrade)
+    echo "gh: HTTP 502 Bad Gateway from api.github.com" >&2
+    exit 1
+    ;;
+  ok-clear)
+    if [[ "$1" == "issue" && "$2" == "list" ]]; then
+      # empty list → -q '.[0].number' prints nothing
+      exit 0
+    fi
+    if [[ "$1" == "api" ]]; then
+      echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  label-halt)
+    if [[ "$1" == "issue" && "$2" == "list" ]]; then
+      echo "71"
+      exit 0
+    fi
+    if [[ "$1" == "api" ]]; then
+      echo '{"message":"Not Found","status":"404"}' >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  sentinel-halt)
+    if [[ "$1" == "issue" && "$2" == "list" ]]; then
+      exit 0
+    fi
+    if [[ "$1" == "api" ]]; then
+      # Presence is enough; the driver does not read file content.
+      echo '{"name":".gibson-halt","path":".gibson-halt","type":"file","sha":"deadbeef"}'
+      exit 0
+    fi
+    exit 0
+    ;;
+  *)
+    echo "gh stub: unknown GH_STUB_BEHAVIOR=$behavior" >&2
+    exit 2
+    ;;
+esac
 STUB
 
 # Stub reviewer. Records its argv, always writes the --out artifact (a failed
@@ -203,6 +255,16 @@ run_loop() { # run_loop [extra loop.sh args...]
   HERMES_CMD='cat >/dev/null' \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
     --once --supervisor devin "$@" >/dev/null 2>&1
+}
+
+# Same as run_loop but keeps stderr so remote-halt sensors can assert messages.
+run_loop_err() { # run_loop_err <stderr-file> [extra loop.sh args...]
+  local errf="$1"
+  shift
+  HERMES_CMD='cat >/dev/null' \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+    --once --supervisor devin "$@" >/dev/null 2>"$errf"
+  return $?
 }
 
 handoff_invoked() { grep -qx handoff "$CALLS/devin.cmds"; }
@@ -929,6 +991,137 @@ elif [[ -n "$(task_prev_lines "$unpinned_msg" | tr -d '[:space:]')" ]]; then
 else
   ok "the unpinned message keeps its blank line before '## Task' too"
 fi
+
+# ---------------------------------------------------------------------------
+# Remote kill switch (issue #71)
+# ---------------------------------------------------------------------------
+# These cases drive the real loop.sh / devin-supervisor.sh against the gh stub
+# above. No live GitHub. The remote check is at iteration top (and again before
+# a supervisor handoff); removing the label/sentinel must let a fresh launch run.
+
+echo
+echo "remote halt: gibson-halt label stops the loop at iteration top"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=label-halt
+errf="$ROOT/halt-label.err"
+if run_loop_err "$errf"; then
+  ok "label halt exits cleanly (rc 0)"
+else
+  bad "label halt must exit 0, not brick the driver (rc=$?)"
+fi
+if handoff_invoked; then bad "label halt must not reach the supervisor"
+else ok "label halt suppresses the supervisor handoff"; fi
+if review_invoked; then bad "label halt must not spend a pre-handoff review"
+else ok "label halt does not spend a pre-handoff review"; fi
+if grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "label halt logs the remote halt reason"
+else
+  bad "label halt did not log its reason (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if still_queued; then ok "label halt leaves the queued handoff intact for a later launch"
+else bad "label halt cleared handoff/handoff_sha — a fresh launch after removal would have nothing to retry"; fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: removing the label lets a freshly launched loop run"
+# Same fixture as above (handoff still queued). Clear the label and re-launch.
+export GH_STUB_BEHAVIOR=ok-clear
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+if run_loop; then
+  ok "fresh launch after label removal exits cleanly"
+else
+  bad "fresh launch after label removal failed (rc=$?)"
+fi
+if handoff_invoked; then ok "fresh launch after label removal hands off"
+else bad "fresh launch after label removal never reached the supervisor"; fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: .gibson-halt sentinel on the remote default branch stops the loop"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=sentinel-halt
+errf="$ROOT/halt-sentinel.err"
+if run_loop_err "$errf"; then
+  ok "sentinel halt exits cleanly (rc 0)"
+else
+  bad "sentinel halt must exit 0, not brick the driver (rc=$?)"
+fi
+if handoff_invoked; then bad "sentinel halt must not reach the supervisor"
+else ok "sentinel halt suppresses the supervisor handoff"; fi
+if grep -q 'remote halt: .gibson-halt sentinel' "$errf"; then
+  ok "sentinel halt logs the remote halt reason"
+else
+  bad "sentinel halt did not log its reason (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: API failure fails open with a degraded warning"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=degrade
+errf="$ROOT/halt-degrade.err"
+if run_loop_err "$errf"; then
+  ok "degraded remote check does not brick the loop"
+else
+  bad "degraded remote check must fail open (rc=$?)"
+fi
+if grep -q 'remote halt check degraded' "$errf"; then
+  ok "degraded remote check logs a clear warning"
+else
+  bad "degraded remote check was silent (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if handoff_invoked; then ok "degraded remote check still allows a local-clear handoff"
+else bad "degraded remote check blocked the handoff — that is fail-closed, not fail-open"; fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: supervisor handoff itself refuses the same remote paths"
+setup_repo with-remote
+SHA=$(head_sha)
+# Direct by-hand handoff (docs/22) must honor the remote stop, not only the loop.
+export GH_STUB_BEHAVIOR=label-halt
+sup_err="$ROOT/supervisor-label-halt.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
+  bad "devin-supervisor.sh handoff must refuse under gibson-halt label"
+else
+  ok "devin-supervisor.sh handoff refuses under gibson-halt label"
+fi
+if grep -qi 'gibson-halt label' "$sup_err"; then
+  ok "supervisor names the label halt in its refusal"
+else
+  bad "supervisor refusal did not mention the label (stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+export GH_STUB_BEHAVIOR=sentinel-halt
+sup_err="$ROOT/supervisor-sentinel-halt.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
+  bad "devin-supervisor.sh handoff must refuse under .gibson-halt sentinel"
+else
+  ok "devin-supervisor.sh handoff refuses under .gibson-halt sentinel"
+fi
+if grep -qi '\.gibson-halt sentinel' "$sup_err"; then
+  ok "supervisor names the sentinel halt in its refusal"
+else
+  bad "supervisor refusal did not mention the sentinel (stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+# Local HALT file is still the permanent switch for a by-hand handoff too.
+unset GH_STUB_BEHAVIOR
+export GH_STUB_BEHAVIOR=ok-clear
+mkdir -p "$REPO/gibson"
+: > "$REPO/gibson/HALT"
+sup_err="$ROOT/supervisor-file-halt.err"
+if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
+  bad "devin-supervisor.sh handoff must refuse when gibson/HALT is present"
+else
+  ok "devin-supervisor.sh handoff refuses when gibson/HALT is present"
+fi
+rm -f "$REPO/gibson/HALT"
+unset GH_STUB_BEHAVIOR
 
 echo
 echo "loop-handoff.test.sh: $PASS passed, $FAIL failed"
