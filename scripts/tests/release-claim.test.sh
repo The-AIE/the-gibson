@@ -107,12 +107,47 @@ contains "other issue untouched"       "$files" "issue-115-unrelated"
 
 echo "L-027 · unfinished cleanup exits 3 instead of claiming success"
 new_repo "$ROOT/c"
-# No GitHub remote here, so the label step cannot be verified.
-out=$(cd "$ROOT/c/canon" && "$RC" 15 --claim-id issue-15-checkout-totals 2>&1)
+# Final lane: strip every issue-15 claim so residual is empty and the label
+# must be removed. No GitHub remote → removal cannot be verified → exit 3.
+out=$(cd "$ROOT/c/canon" && "$RC" 15 2>&1)
 rc=$?
 check "exit code" "$rc" "3"
 contains "says what is unfinished" "$out" "agent-claimed NOT removed"
 lacks    "does not claim success"  "$out" "OK — claim released"
+
+echo "#61 · valid empty ledger is empty, not corrupt"
+new_repo "$ROOT/empty"
+(
+  cd "$ROOT/empty/canon" || exit 1
+  git checkout -q main
+  # No docs/claims/* and no active-work.md on origin/main — valid empty ledger.
+  git rm -q docs/active-work.md
+  git commit -qm "empty ledger" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+
+out=$(cd "$ROOT/empty/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
+rc=$?
+check "empty ledger + --keep-label dry-run exits 0" "$rc" "0"
+contains "does not invent a claim row" "$out" "none matched"
+contains "keeps the label for the live sibling" "$out" "KEEP label agent-claimed"
+lacks    "does not hard-fail as missing ledger" "$out" "no claim ledger"
+
+out=$(cd "$ROOT/empty/canon" && "$RC" 18 --keep-label 2>&1)
+rc=$?
+check "empty ledger + --keep-label completes" "$rc" "0"
+contains "keeps label without inventing a row" "$out" "--keep-label"
+contains "truthful no-claim OK" "$out" "no claim row to release"
+lacks    "does not claim a row was released" "$out" "OK — claim released for issue 18"
+
+# Final completed lane on an empty ledger: must remove agent-claimed. This
+# temp repo has no GitHub remote, so the product repo cannot be resolved and
+# label removal is incomplete → exit 3 (L-027 still holds).
+out=$(cd "$ROOT/empty/canon" && "$RC" 18 2>&1)
+rc=$?
+check "empty ledger final lane without --keep-label exits 3 when label unverified" "$rc" "3"
+contains "names unfinished label work" "$out" "agent-claimed"
+lacks    "does not claim success on incomplete label removal" "$out" "OK —"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"

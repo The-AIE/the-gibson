@@ -46,6 +46,7 @@ fixture() {
 {
   "number": 1, "title": "feat: thing", "isDraft": false, "mergeable": "MERGEABLE",
   "author": {"login": "builder-bot"}, "reviewDecision": "APPROVED",
+  "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "labels": [{"name": "tier-b"}], "closingIssuesReferences": [{"number": 28}],
   "statusCheckRollup": [
     {"__typename": "CheckRun", "name": "gate", "conclusion": "SUCCESS", "steps": [{"name": "lint"}]}
@@ -88,7 +89,7 @@ out=$(run "$f_other"); rc=$?
 check "independent VERDICT: APPROVE is READY" "$rc" "0"
 
 f_reject=$(fixture rejected '.reviewDecision = "" |
-  .comments = [{"author": {"login": "reviewer-bot"}, "body": "VERDICT: REQUEST_CHANGES"}]')
+  .comments = [{"author": {"login": "reviewer-bot"}, "body": "VERDICT: REQUEST_CHANGES", "createdAt": "2026-08-02T15:00:00Z"}]')
 out=$(run "$f_reject"); rc=$?
 check "REQUEST_CHANGES blocks" "$rc" "1"
 
@@ -96,6 +97,56 @@ f_none=$(fixture unreviewed '.reviewDecision = ""')
 out=$(run "$f_none"); rc=$?
 check "no review at all blocks (fail closed)" "$rc" "1"
 contains "cites Law 5" "$out" "Law 5"
+
+echo "#61 · chronological verdict stream — newest wins across reviews and comments"
+# Exact PR #57 shape: older comment APPROVE, newer review REQUEST_CHANGES on
+# the current head. Array order must not matter — timestamps do.
+f_chrono=$(fixture chrono_block '.reviewDecision = "" | .headRefOid = "4ae5b9d12073e8acfd43371ca8af001af4044ea7" |
+  .comments = [{
+    "author": {"login": "devin-ai-integration"},
+    "body": "six lenses clear\n\nVERDICT: APPROVE",
+    "createdAt": "2026-08-02T15:06:00Z"
+  }] |
+  .reviews = [{
+    "author": {"login": "codex-reviewer"},
+    "body": "blocking findings remain\n\nVERDICT: REQUEST_CHANGES",
+    "submittedAt": "2026-08-02T15:34:07Z",
+    "commit": {"oid": "4ae5b9d12073e8acfd43371ca8af001af4044ea7"}
+  }]')
+out=$(run "$f_chrono"); rc=$?
+check "older comment APPROVE + newer review REQUEST_CHANGES is BLOCKED" "$rc" "1"
+contains "names REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
+contains "names the newer reviewer" "$out" "codex-reviewer"
+
+# Inverse order in the JSON arrays: reviews first would have won under the old
+# concatenate-then-last logic; with timestamps the older review APPROVE loses.
+f_chrono_ready=$(fixture chrono_ready '.reviewDecision = "" | .headRefOid = "abc123head000000000000000000000000000001" |
+  .reviews = [{
+    "author": {"login": "old-reviewer"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "submittedAt": "2026-08-02T14:00:00Z",
+    "commit": {"oid": "abc123head000000000000000000000000000001"}
+  }] |
+  .comments = [{
+    "author": {"login": "reviewer-bot"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T16:00:00Z"
+  }]')
+out=$(run "$f_chrono_ready"); rc=$?
+check "newer comment APPROVE after older review REQUEST_CHANGES is READY" "$rc" "0"
+
+echo "#61 · stale-head verdict fails closed when source binds a commit SHA"
+f_stale=$(fixture stale_head '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
+  .reviews = [{
+    "author": {"login": "reviewer-bot"},
+    "body": "VERDICT: APPROVE",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }]')
+out=$(run "$f_stale"); rc=$?
+check "stale-head APPROVE is BLOCKED" "$rc" "1"
+contains "says fail closed / re-review" "$out" "stale head"
+contains "names current head prefix" "$out" "bbbbbbb"
 
 echo "L-033 · infra red is not product red"
 f_infra=$(fixture infra '.statusCheckRollup = [

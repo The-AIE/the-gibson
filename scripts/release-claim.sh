@@ -26,7 +26,7 @@ RISKS
 
 USAGE
   release-claim.sh <issue> [--claim-id <id>] [--prefix <ns>] [--repo owner/name]
-                           [--keep-branch] [--dry-run]
+                           [--keep-branch] [--keep-label] [--dry-run]
   release-claim.sh --help
 
   <issue>        issue number, e.g. 42
@@ -37,15 +37,23 @@ USAGE
   --repo         product repo for the issue/label, when the issue does not live
                  in the claim-table repo (L-037)
   --keep-branch  do not delete the local/remote feature branch
+  --keep-label   keep agent-claimed even when the ledger has no residual row
+                 for this issue (live sibling lane whose claim file is absent
+                 or lives elsewhere). Without this flag, a no-residual cleanup
+                 removes the label — the final completed lane path.
   --dry-run      print what would happen, touch nothing
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
+
+  Empty ledger: when origin has no docs/claims/* and no docs/active-work.md,
+  that is a valid empty ledger (no live claims), not a hard fail. Cleanup of
+  worktrees/labels can still complete truthfully without inventing a row.
 
 ENV
   GIBSON_CANONICAL   claim-table repo path (default: cwd)
 
 EXIT
-  0  claim fully released
+  0  claim fully released (or truthfully nothing to release + label policy done)
   1  a hard precondition failed (nothing was cleaned)
   3  cleanup ran but did not finish: the claim row or the agent-claimed label
      is still live. The message names which. Never silent half-cleanup (L-009).
@@ -56,6 +64,12 @@ EXAMPLES
 
   # multi-slice issue: release only the merged slice, keep the residual lane
   release-claim.sh 15 --claim-id issue-15-checkout-totals
+
+  # empty ledger + live sibling still working the issue (no claim file on main)
+  release-claim.sh 18 --repo acme/app --keep-label
+
+  # empty ledger + final lane done: remove agent-claimed (default)
+  release-claim.sh 18 --repo acme/app
 
   # cross-repo template work: claim row in the monorepo, issue in the template repo
   GIBSON_CANONICAL=~/Code/monorepo \
@@ -74,6 +88,7 @@ fi
 ISSUE="$1"
 shift || true
 KEEP_BRANCH=0
+KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
 PREFIX=""
@@ -81,6 +96,7 @@ REPO_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep-branch) KEEP_BRANCH=1 ;;
+    --keep-label) KEEP_LABEL=1 ;;
     --dry-run) DRY=1 ;;
     --claim-id) CLAIM_ID_ARG="${2:-}"; shift ;;
     --prefix) PREFIX="${2:-}"; shift ;;
@@ -108,9 +124,18 @@ git show-ref --verify --quiet refs/heads/main || BASE=master
 REF="origin/$BASE"
 git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
 
-if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null &&
-   [[ -z "$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null)" ]]; then
-  die "no claim ledger at $REF (neither docs/claims/ nor docs/active-work.md)"
+# A missing docs/claims tree and absent active-work.md is a valid *empty*
+# ledger (every claim already released, or never filed) — not corruption.
+# Treat it as zero live claims and continue label/worktree cleanup. A named
+# --claim-id that is not present still hard-fails below.
+HAS_ACTIVE=0
+HAS_CLAIMS_TREE=0
+git cat-file -e "$REF:docs/active-work.md" 2>/dev/null && HAS_ACTIVE=1
+if [[ -n "$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null)" ]]; then
+  HAS_CLAIMS_TREE=1
+fi
+if [[ "$HAS_ACTIVE" -eq 0 && "$HAS_CLAIMS_TREE" -eq 0 ]]; then
+  info "claim ledger at $REF is empty (no docs/claims/* and no docs/active-work.md) — treating as no live claims"
 fi
 
 # Claim ids we own. issue-<N>-…, plus issue-<ns>-<N>-… when --prefix is given.
@@ -185,6 +210,8 @@ if [[ "$DRY" -eq 1 ]]; then
       [[ -n "$id" ]] || continue
       echo "  KEEP sibling claim: $id (and keep the agent-claimed label)"
     done
+  elif [[ "$KEEP_LABEL" -eq 1 ]]; then
+    echo "  KEEP label agent-claimed on #$ISSUE (--keep-label: live sibling outside ledger)"
   else
     echo "  remove label agent-claimed from #$ISSUE"
   fi
@@ -291,13 +318,18 @@ if command -v gh >/dev/null; then
   if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
   fi
-  if [[ -z "${REPO:-}" ]]; then
-    warn "could not resolve the product repo — agent-claimed NOT removed from #$ISSUE (pass --repo owner/name)"
-    INCOMPLETE=1
-  elif [[ -n "$RESIDUAL_IDS" ]]; then
+  if [[ -n "$RESIDUAL_IDS" ]]; then
     # L-024: siblings are still working this issue; the label is still true.
+    # No GitHub call required — leaving the label is the complete policy.
     info "keeping agent-claimed on #$ISSUE — residual claims remain:"
     echo "$RESIDUAL_IDS" | sed 's/^/  /'
+  elif [[ "$KEEP_LABEL" -eq 1 ]]; then
+    # Empty ledger + live sibling whose claim is not on this ref (or was never
+    # filed). Explicit operator path — do not invent a row, do not strip the label.
+    info "keeping agent-claimed on #$ISSUE — --keep-label (live sibling outside ledger; no claim row invented)"
+  elif [[ -z "${REPO:-}" ]]; then
+    warn "could not resolve the product repo — agent-claimed NOT removed from #$ISSUE (pass --repo owner/name)"
+    INCOMPLETE=1
   else
     if ! gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-claimed; then
       warn "gh issue edit failed for #$ISSUE in $REPO"
@@ -315,8 +347,12 @@ if command -v gh >/dev/null; then
     fi
   fi
 else
-  warn "gh not found — agent-claimed NOT removed from #$ISSUE"
-  INCOMPLETE=1
+  if [[ -n "$RESIDUAL_IDS" || "$KEEP_LABEL" -eq 1 ]]; then
+    info "gh not found — agent-claimed left in place (residual/--keep-label)"
+  else
+    warn "gh not found — agent-claimed NOT removed from #$ISSUE"
+    INCOMPLETE=1
+  fi
 fi
 
 if [[ "$INCOMPLETE" -eq 1 ]]; then
@@ -324,4 +360,8 @@ if [[ "$INCOMPLETE" -eq 1 ]]; then
   exit 3
 fi
 
-info "OK — claim released for issue $ISSUE"
+if [[ -z "$TARGET_IDS" ]]; then
+  info "OK — no claim row to release for issue $ISSUE; label policy applied"
+else
+  info "OK — claim released for issue $ISSUE"
+fi

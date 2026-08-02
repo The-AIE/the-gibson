@@ -15,8 +15,10 @@ WHAT IT DOES
        ship whose body says "does not fully resolve #28" still closes #28.
        Reads closingIssuesReferences (what GitHub will actually do), not prose.
     2. Review. Same-account solo loops cannot self-approve, so an empty
-       reviewDecision is accepted when a review comment ends in
+       reviewDecision is accepted when a review or comment ends in
        VERDICT: APPROVE from someone other than a rubber-stamping author.
+       Reviews and comments form one timestamped stream (newest wins); a
+       verdict that binds a commit SHA must match the current PR head.
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
@@ -94,7 +96,7 @@ fi
 [[ -n "$REPO" ]] || die "could not resolve repo — pass --repo owner/name"
 
 PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
-  --json number,title,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments 2>/dev/null) ||
+  --json number,title,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
   die "could not read $REPO#$PR"
 
 jqr() { echo "$PR_JSON" | jq -r "$1"; }
@@ -104,6 +106,7 @@ AUTHOR=$(jqr '.author.login // ""')
 DRAFT=$(jqr '.isDraft')
 MERGEABLE=$(jqr '.mergeable // "UNKNOWN"')
 REVIEW_DECISION=$(jqr '.reviewDecision // ""')
+HEAD_OID=$(jqr '.headRefOid // ""')
 TIER=$(jqr '[.labels[].name] | map(select(startswith("tier-"))) | first // ""')
 CLOSES=$(jqr '[.closingIssuesReferences[].number] | map("#"+(.|tostring)) | join(", ")')
 
@@ -121,20 +124,63 @@ else
 fi
 
 # --- 2. review (L-015 / L-021) -------------------------------------------
-# The last VERDICT: line wins, and only from a login that is not the author —
-# unless the author is the only identity available, which is the solo-loop case
-# the lesson is about.
-VERDICT_LINE=$(echo "$PR_JSON" | jq -r '
-  [ (.reviews[]? | {login: .author.login, body: .body}),
-    (.comments[]? | {login: .author.login, body: .body}) ]
-  | map(select(.body != null and (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i"))))
-  | last // {}
-  | if .body then (.login + "\t" + ((.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v)) else "" end')
-VERDICT_LOGIN="${VERDICT_LINE%%	*}"
-VERDICT_TEXT="${VERDICT_LINE#*	}"
-[[ "$VERDICT_LINE" == "$VERDICT_TEXT" ]] && VERDICT_TEXT=""
+# Reviews and comments are one timestamped event stream. Newest VERDICT wins
+# regardless of source type (PR #57 false-green: older comment APPROVE beat a
+# newer review REQUEST_CHANGES because comments were concatenated after
+# reviews and `last` was taken without sorting). When a source carries a
+# commit SHA, that verdict is bound to the current PR head — a stale-head
+# verdict fails closed.
+VERDICT_EVENT=$(echo "$PR_JSON" | jq -r '
+  def verdict_of:
+    if .body == null then empty
+    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i")) then
+      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v
+    else empty end;
+  [
+    (.reviews[]? | {
+      source: "review",
+      login: (.author.login // ""),
+      at: (.submittedAt // ""),
+      sha: (.commit.oid // ""),
+      body: .body
+    }),
+    (.comments[]? | {
+      source: "comment",
+      login: (.author.login // ""),
+      at: (.createdAt // ""),
+      sha: "",
+      body: .body
+    })
+  ]
+  | map(. as $e | ($e | verdict_of) as $v | select($v != null) | $e + {verdict: $v})
+  | sort_by(.at)
+  | last // empty
+  | if . then
+      [.login, .verdict, .source, .at, .sha] | @tsv
+    else
+      empty
+    end')
+
+VERDICT_LOGIN=""
+VERDICT_TEXT=""
+VERDICT_SOURCE=""
+VERDICT_AT=""
+VERDICT_SHA=""
+if [[ -n "$VERDICT_EVENT" ]]; then
+  # TSV: login, verdict, source, at, sha (sha may be empty)
+  VERDICT_LOGIN=$(printf '%s\n' "$VERDICT_EVENT" | cut -f1)
+  VERDICT_TEXT=$(printf '%s\n' "$VERDICT_EVENT" | cut -f2)
+  VERDICT_SOURCE=$(printf '%s\n' "$VERDICT_EVENT" | cut -f3)
+  VERDICT_AT=$(printf '%s\n' "$VERDICT_EVENT" | cut -f4)
+  VERDICT_SHA=$(printf '%s\n' "$VERDICT_EVENT" | cut -f5)
+fi
 
 SAME_AUTHOR_REVIEW=0
+STALE_HEAD_VERDICT=0
+if [[ -n "$VERDICT_SHA" && -n "$HEAD_OID" && "$VERDICT_SHA" != "$HEAD_OID" ]]; then
+  STALE_HEAD_VERDICT=1
+fi
+
 case "$REVIEW_DECISION" in
   APPROVED)
     NOTES+=("formal GitHub approval present")
@@ -143,8 +189,14 @@ case "$REVIEW_DECISION" in
     BLOCKERS+=("reviewDecision is CHANGES_REQUESTED")
     ;;
   *)
-    if echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
-      BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN)")
+    # No formal reviewDecision: the newest timestamped VERDICT event is the
+    # gate. Source type (review vs comment) does not matter — only recency.
+    if [[ -z "$VERDICT_TEXT" ]]; then
+      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+    elif [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
+      BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
+    elif echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
+      BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
     elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
       if [[ -n "$AUTHOR" && "$VERDICT_LOGIN" == "$AUTHOR" ]]; then
         # L-015: GitHub refuses self-approval, so the comment is the only signal
@@ -152,7 +204,7 @@ case "$REVIEW_DECISION" in
         SAME_AUTHOR_REVIEW=1
         ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
       else
-        NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN (independent identity, no formal review)")
+        NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity, no formal review)")
       fi
     else
       BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
