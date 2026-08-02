@@ -11,7 +11,7 @@
 #   scripts/tests/ux-surface.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 UXS="$SCRIPT_DIR/../ux-surface.sh"
 PASS=0
 FAIL=0

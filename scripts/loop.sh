@@ -117,7 +117,7 @@ info() { echo "loop.sh: $*" >&2; }
 [[ -n "$REPO" ]] || { usage; exit 2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 GIBSON="${GIBSON:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PLAYBOOK="$GIBSON/playbooks/loop-step.md"
 [[ -f "$PLAYBOOK" ]] || die "missing $PLAYBOOK"

@@ -15,7 +15,7 @@
 #   scripts/tests/claim.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 CLAIM="$SCRIPT_DIR/../claim.sh"
 PASS=0
 FAIL=0
