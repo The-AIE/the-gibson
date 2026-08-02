@@ -9,7 +9,7 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | Script | Contract |
 |---|---|
 | [`claim.sh`](claim.sh) `<issue> <slug> <scope…>` | Atomic claim: `agent-claimed` label → verify no live-claim overlap in `docs/active-work.md` → append claim row, commit `-s` to main, push → create worktree `../wt-<issue>-<slug>` + branch. Exit non-zero (and undo label) on conflict. |
-| [`release-claim.sh`](release-claim.sh) `<issue>` | Post-merge cleanup: remove worktree, delete branch, delete claim row (signed commit), remove label. |
+| [`release-claim.sh`](release-claim.sh) `<issue> [--claim-id id] [--prefix ns] [--repo owner/name]` | Post-merge cleanup: remove worktree, delete branch, delete claim row (signed commit from a throwaway main worktree, so the canonical checkout never moves), remove label and **verify** it is gone. `--claim-id` releases one slice of a multi-slice issue and keeps the label while siblings remain. Exit 3 = ran but did not finish (row or label still live). |
 | [`gate-baseline.sh`](gate-baseline.sh) | Record branch-point failure counts to `.gibson-baseline.json`. |
 | [`gate.sh`](gate.sh) | Run target gate commands; fail on any **new** failure vs. baseline. |
 | [`decompose-lint.mjs`](decompose-lint.mjs) | Validate issue set: contract / area / tier / dependencies; ≤10 criteria; schema standalone. |
@@ -20,6 +20,7 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`devin-supervisor.sh`](devin-supervisor.sh) `ensure\|status\|wake\|handoff` | Persistent Devin cloud supervisor ([docs/22](../docs/22-devin-cloud-supervisor.md)): reviews the diff and owns GitHub. Wakes a dead session via `DEVIN_WEBHOOK_URL`, falling back to the API. |
 | [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
+| [`tests/release-claim.test.sh`](tests/release-claim.test.sh) | Sensors for the release-claim contract (L-009 / L-024 / L-027 / L-037). Temp git repos only — no network, no `gh`. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |
 
 ## How to use (quick path)

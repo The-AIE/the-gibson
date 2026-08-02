@@ -95,6 +95,35 @@ If any item fails → do not merge; report the missing gate.
 # removes worktree, deletes branch, drops claim row (signed commit), removes label
 ```
 
+Before you run it, check the claim table on `origin/main` for **sibling claims** on
+the same issue — multi-slice issues ship one slice at a time (L-024):
+
+```bash
+git show origin/main:docs/active-work.md | grep -E "issue-([a-z0-9]+-)?<issue>-"
+```
+
+If more than the merged claim is live, name the one you merged; the script then
+leaves the sibling rows and keeps `agent-claimed` on the issue:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<merged-slug>
+```
+
+Cross-repo template work records claim ids as `issue-template-<N>-<slug>` in the
+monorepo while the issue lives in the template repo (L-036 / L-037):
+
+```bash
+GIBSON_CANONICAL=~/Code/monorepo \
+  release-claim.sh 5 --prefix template --repo acme/acme-template
+```
+
+You do **not** need the canonical checkout on `main`, clean or otherwise — the
+claim-row commit happens in a throwaway worktree (L-009).
+
+**Exit 3 means cleanup did not finish** — the claim row or the `agent-claimed`
+label is still live and the message says which. Law 10 is not done until you fix
+it by hand; an unverified label removal is how #24 stayed claimed (L-027).
+
 Confirm issue closed by `Closes #` or close explicitly.
 
 ### Human-gated items
@@ -107,5 +136,5 @@ Mark**, move on (do not block unrelated work). Never force-push main (G3).
 - [ ] Merged only when checklist complete
 - [ ] Deploy verified READY for expected SHA
 - [ ] Smoke green
-- [ ] Claim / worktree / branch cleaned
+- [ ] Claim / worktree / branch cleaned — `release-claim.sh` exited **0**, not 3
 - [ ] Status reported to MC / digest
