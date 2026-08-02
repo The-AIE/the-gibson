@@ -3,8 +3,13 @@
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
-# maturity: this file is Gibson maturity v0 (scaffold only; #34 hardens
-# drift sensors and more role recipes).
+# maturity: this file is Gibson maturity v0 — validation-only scaffold.
+# #34 hardens drift sensors and more role recipes.
+#
+# Boundary: do NOT goose run this recipe against a target repository until
+# #28 (live runtime spike) and #35 (permission / gate enforcement). Recipe
+# settings cannot encode a permission mode; this scaffold does not set
+# GOOSE_MODE or adopt a preset. Authorized today: goose recipe validate.
 version: "1.0.0"
 title: Gibson Builder
 description: >

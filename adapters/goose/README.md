@@ -12,6 +12,27 @@ Goose is the **runtime engine**. The product identity remains **The Gibson**. Us
 should see Gibson doctrine, Gibson CLI entry points, and Gibson gates — not a
 Goose-branded experience (Apache-2.0 §6 + CUSTOM_DISTROS.md upstream).
 
+## Scaffold boundary (read first)
+
+This adapter is a **docs/config scaffold** for epic #30. The shipped
+`playbooks/recipes/builder.yaml` is **validation-only**: it proves the official
+Goose Recipe schema shape for pinned CLI **v1.45.0**. It is **not** an authorized
+operational builder session.
+
+**Do not** run `goose run` (or any other live Goose session) against a target
+repository with this recipe until:
+
+1. **#28** — live runtime / red-team spike has been completed, and
+2. **#35** — permission and gate enforcement for in-session work is in place.
+
+Recipe settings cannot encode a Goose permission mode. Pinned Goose v1.45.0's
+own defaults are autonomous. This scaffold deliberately does **not** choose or
+document a Gibson `GOOSE_MODE` / permission preset. That decision stays with
+#28 / #35 and any separate adoption of [docs/autonomy-modes.md](../../docs/autonomy-modes.md).
+
+**Authorized today:** install the pinned CLI (lab), and run
+`goose recipe validate` on the absolute Gibson recipe path (smoke test below).
+
 ## How to use this
 
 ### 1. Install Goose CLI (pinned v1.45.0, verify the release asset)
@@ -60,7 +81,7 @@ goose --version
 | Why | Stops reinventing plumbing; Gibson owns brand + gates. |
 | Risks | Upstream CLI on PATH; pin the version (docs/GOOSE-LICENSE-VERIFICATION §3). A failed SHA check means stop — do not install the binary. Other OS/architectures must use their own v1.45.0 asset + published digest. |
 
-### 2. Doctrine mounting
+### 2. Doctrine mounting (scaffold)
 
 Goose loads session instructions from recipes and optional project hints. Gibson
 always mounts doctrine **explicitly** (never rely on ambient config alone):
@@ -71,26 +92,23 @@ always mounts doctrine **explicitly** (never rely on ambient config alone):
 4. Role playbook from `playbooks/<role>.md`
 5. `memory/LESSONS.md` (relevant slice)
 
-The operator path is a Gibson recipe that references those files (and
-instructs Goose to read them from disk) — see `playbooks/recipes/`. For
-ad-hoc sessions:
+The operator path is a Gibson recipe that **references** those files on disk —
+see `playbooks/recipes/`. The builder recipe's instructions list that load
+order; validating the recipe (smoke test) confirms the schema and template
+shape only.
+
+**Not authorized on this PR:** a live `goose run` against a repository. That
+wait remains until #28 and #35 (see Scaffold boundary above).
+
+### 3. Planned session lifecycle (Laws 2, 3, 4, 10) — future sequence
+
+After #28 and #35 authorize live Goose builder sessions, the intended sequence
+is the same claim → worktree → gate → release path used by other adapters.
+Documented here as **planned sequence only** — not an executable Goose builder
+invocation.
 
 ```bash
-GIBSON=~/Code/the-gibson
-# Worktree path after claim (see §3) — never the target's canonical checkout
-REPO=~/Code/wt-42-feature-slug
-
-goose run --recipe "$GIBSON/playbooks/recipes/builder.yaml" \
-  --params "repo=$REPO" --params "issue=42" --params "gibson=$GIBSON"
-```
-
-### 3. Session lifecycle (Laws 2, 3, 4, 10)
-
-Claim from the **target repo's canonical checkout** (not from inside a worktree).
-The claim script creates a sibling worktree; all mutation happens there.
-
-```bash
-GIBSON=~/Code/the-gibson
+GIBSON=~/Code/the-gibson   # absolute path to the Gibson clone
 # Start in the target's canonical clone
 cd ~/Code/app
 
@@ -98,11 +116,12 @@ cd ~/Code/app
 $GIBSON/scripts/claim.sh 42 feature-slug 'path/globs/**'
 cd ../wt-42-feature-slug   # sibling worktree created by claim.sh
 
-# Run role on Goose (direct recipe — current scaffold path)
-goose run --recipe "$GIBSON/playbooks/recipes/builder.yaml" \
-  --params "repo=$(pwd)" --params "issue=42" --params "gibson=$GIBSON"
+# --- future: authorized Goose builder session (blocked until #28 + #35) ---
+# Do not run goose run / recipe-driven mutation against the worktree yet.
+# Permission mode and in-session gate enforcement are not encoded in the
+# recipe; they land with #28 / #35, not this scaffold.
 
-# Green gate before commit
+# Green gate before commit (Gibson scripts; independent of Goose)
 $GIBSON/scripts/gate.sh
 
 # After merge — return to the target's canonical checkout first
@@ -119,9 +138,9 @@ $GIBSON/scripts/release-claim.sh 42
 (epic #30 / adapter hardening after #28 runtime work) — do not document it as
 available today.
 
-**Current scaffold path:** invoke recipes directly with `goose run --recipe …`
-as in §2–§3 above. Prefer recipes for role-shaped work once the CLI is installed
-and the #28 live spike has been run.
+**Current authorized scaffold path:** `goose recipe validate` against the
+absolute Gibson recipe path (smoke test). Prefer that over any `goose run`
+until #28 and #35 clear live sessions.
 
 ### 5. Brand / re-brand notes
 
@@ -140,19 +159,23 @@ posture:
 - Disable upstream telemetry on fleet hosts: `export GOOSE_TELEMETRY_ENABLED=false`
 - Cost is the **LLM provider** bill (BYOK). Log wall time + iterations like Grok.
 
-## Smoke test
+## Smoke test (validation only)
+
+Use the absolute path to the Gibson clone. This checks recipe schema only; it
+does **not** authorize a live builder session.
 
 ```bash
-GIBSON=~/Code/the-gibson   # or your Gibson clone path
-goose --version
-test -f "$GIBSON/playbooks/recipes/builder.yaml" && echo recipe_ok
+GIBSON=~/Code/the-gibson   # absolute path to your Gibson clone
+goose --version            # expect 1.45.0 (pinned)
+goose recipe validate "$GIBSON/playbooks/recipes/builder.yaml"
 ```
 
 ## Status (epic #30)
 
 | Piece | State |
 |---|---|
-| Adapter README + recipe path | This PR (docs/config scaffold only) |
+| Adapter README + recipe path | This PR (docs/config scaffold only; validation-only) |
+| Live `goose run` against repositories | **Not authorized** until #28 + #35 |
 | End-to-end builder session transcript | #33 / #28 |
 | Gate enforcement inside session | #35 |
 | Funnel extension | #36 (publish Mark-gated) |
