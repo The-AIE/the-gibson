@@ -28,10 +28,11 @@ instructions: |
 
   Before any mutation:
   1. Read {{ gibson }}/AGENTS.md (the Ten Laws).
-  2. Read {{ repo }}/AGENTS.md if present (target overrides).
-  3. Read {{ gibson }}/playbooks/builder.md (your role contract).
-  4. Skim {{ gibson }}/memory/LESSONS.md for tags matching this work.
-  5. Confirm you are inside a worktree claim for issue {{ issue }} — if not, stop
+  2. Read {{ gibson }}/local/AGENTS.local.md if present (Gibson fork overlay).
+  3. Read {{ repo }}/AGENTS.md if present (target overrides).
+  4. Read {{ gibson }}/playbooks/builder.md (your role contract).
+  5. Skim {{ gibson }}/memory/LESSONS.md for tags matching this work.
+  6. Confirm you are inside a worktree claim for issue {{ issue }} — if not, stop
      and tell the operator to run scripts/claim.sh first (Law 2 / Law 3).
 
   Do the claimed work only. Before every commit, the operator (or you via shell)

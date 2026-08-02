@@ -65,9 +65,11 @@ goose --version
 Goose loads session instructions from recipes and optional project hints. Gibson
 always mounts doctrine **explicitly** (never rely on ambient config alone):
 
-1. `AGENTS.md` (target) + Gibson `AGENTS.md`
-2. Role playbook from `playbooks/<role>.md`
-3. `memory/LESSONS.md` (relevant slice)
+1. Gibson `AGENTS.md`
+2. Optional Gibson `local/AGENTS.local.md` (fork overlay, if present)
+3. Target repo `AGENTS.md` (if present)
+4. Role playbook from `playbooks/<role>.md`
+5. `memory/LESSONS.md` (relevant slice)
 
 The operator path is a Gibson recipe that references those files (and
 instructs Goose to read them from disk) — see `playbooks/recipes/`. For
@@ -103,7 +105,9 @@ goose run --recipe "$GIBSON/playbooks/recipes/builder.yaml" \
 # Green gate before commit
 $GIBSON/scripts/gate.sh
 
-# After merge
+# After merge — return to the target's canonical checkout first
+# (release-claim defaults GIBSON_CANONICAL to cwd; Law 10 / L-029)
+cd ~/Code/app
 $GIBSON/scripts/release-claim.sh 42
 ```
 
@@ -133,7 +137,7 @@ posture:
 
 ### 6. Telemetry & cost
 
-- Disable upstream telemetry on fleet hosts: `export GOOSE_DISABLE_TELEMETRY=1`
+- Disable upstream telemetry on fleet hosts: `export GOOSE_TELEMETRY_ENABLED=false`
 - Cost is the **LLM provider** bill (BYOK). Log wall time + iterations like Grok.
 
 ## Smoke test
