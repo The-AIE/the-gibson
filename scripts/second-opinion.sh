@@ -34,8 +34,10 @@ USAGE
 OPTIONS
   --reviewers LIST  comma-separated: codex, claude, grok (default: codex,claude)
   --author NAME     runner that wrote the diff; excluded from the reviewer list
-  --base REF        diff base (default: main)
-  --branch REF      diff head (default: HEAD)
+  --base REF        diff base (default: main; loop.sh passes the target repo's
+                    resolved default branch). Must resolve to a commit — an
+                    unresolvable base is an error, not a working-tree diff.
+  --branch REF      diff head (default: HEAD); same rule
   --gate-status S   what the local gate said, passed through to the reviewer
   --out PATH        write the combined report here (default: gibson/second-opinion.md)
 
@@ -86,7 +88,26 @@ PLAYBOOK="$GIBSON/playbooks/reviewer.md"
 OUT="${OUT:-$REPO/gibson/second-opinion.md}"
 mkdir -p "$(dirname "$OUT")"
 
-DIFF=$(git -C "$REPO" diff "$BASE...$BRANCH" 2>/dev/null || git -C "$REPO" diff "$BASE" || true)
+# Both endpoints must resolve to real commits in THIS repo. The old fallback
+# (`git diff BASE` when `BASE...BRANCH` failed) silently swapped the requested
+# review for a diff of the working tree against BASE — a different diff, usually
+# a much smaller one, reported as though the branch had been reviewed. A caller
+# that names refs which do not resolve gets an error, never a substitute.
+for ref in "$BASE" "$BRANCH"; do
+  git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || \
+    die "ref '$ref' does not resolve to a commit in $REPO — refusing to review a different diff (no working-tree fallback)"
+done
+
+# stderr kept out of $DIFF: a warning must never end up inside the diff the
+# reviewer is shown. `A...B` can still fail after both refs resolve — unrelated
+# histories have no merge base — and that is a hard error too.
+DIFF_ERR=$(mktemp)
+if ! DIFF=$(git -C "$REPO" diff "$BASE...$BRANCH" 2>"$DIFF_ERR"); then
+  reason=$(tail -n 3 "$DIFF_ERR")
+  rm -f "$DIFF_ERR"
+  die "git diff $BASE...$BRANCH failed in $REPO: ${reason:-no detail}"
+fi
+rm -f "$DIFF_ERR"
 [[ -n "$DIFF" ]] || die "empty diff for $BASE...$BRANCH — nothing to review"
 
 # 60k chars keeps the prompt inside every vendor's comfortable context window.

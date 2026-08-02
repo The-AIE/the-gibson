@@ -826,3 +826,25 @@ while the prod branch stays mergeable by anyone with write.
 (owner only — never agent-rotated Neon keys).
 **Status:** fixed in harness (doc 23 / scripts); targets re-audit at adoption
 **Tags:** #release #github #branch-protection #vercel #security #adoption
+
+## L-047 · 2026-08-02 · a-gate-that-reviews-the-wrong-diff-manufactures-evidence
+**What happened:** The issue-#55 Law 5 gate in `loop.sh` shipped with two silent
+substitutions. It never passed `--base`, so `second-opinion.sh` defaulted to
+`main` — in a `master`/`develop` repo that ref does not exist, and the old
+`git diff "$BASE...$BRANCH" || git diff "$BASE"` fallback then reviewed the
+WORKING TREE instead. Separately, `resolve_handoff_sha` could return an
+`ls-remote` SHA whose object was absent from the local clone (pushed from another
+worktree), so the driver wrote a receipt naming a commit no reviewer could read.
+**Root cause:** the gate's sensors asserted "a review happened," never "a review
+of *this* diff happened." Defaults (`main`) and fallbacks (`git diff BASE`) are
+how a gate keeps returning success after its premise stops holding — and because
+it emits a receipt, the wrong answer is now documented as the right one.
+**Harness fix:** `loop.sh` resolves the target repo's real base (origin/HEAD →
+remote HEAD → main/master), passes it to both `second-opinion.sh` and
+`devin-supervisor.sh`, fetches and verifies `<sha>^{commit}` locally before any
+review, and fails closed on every miss (branch stays queued). `second-opinion.sh`
+dies on an unresolvable base or branch instead of falling back to the working
+tree. Regressions in `scripts/tests/loop-handoff.test.sh` (non-main trunk,
+missing local object, unresolvable base/pin) and `scripts/tests/second-opinion.test.sh`.
+**Status:** fixed in harness
+**Tags:** #loop #law5 #gates #git #sensors #issue-55

@@ -99,7 +99,50 @@ setup_repo() { # setup_repo [with-remote]
   if [[ "${1:-}" == "with-remote" ]]; then
     $GIT init -q --bare "$REMOTE"
     git -C "$REPO" remote add origin "$REMOTE"
-    git -C "$REPO" push -q origin "$BRANCH"
+    git -C "$REPO" push -q origin main "$BRANCH"
+    # Pinned explicitly so the machine's init.defaultBranch cannot decide what
+    # the driver resolves as the base.
+    git -C "$REMOTE" symbolic-ref HEAD refs/heads/main
+  fi
+  : > "$CALLS/second-opinion.args"
+  : > "$CALLS/second-opinion.count"
+  : > "$CALLS/devin.cmds"
+  : > "$CALLS/devin.args"
+}
+
+# A target repo whose trunk is NOT `main`. The driver used to let
+# second-opinion.sh and devin-supervisor.sh fall back to their own `main`
+# default, so every non-main repo was reviewed against a ref that does not
+# exist. `origin_head` picks which metadata the driver has to read it from:
+#   local   — refs/remotes/origin/HEAD is set (the no-network path)
+#   remote  — only the bare remote's HEAD says so (ls-remote --symref fallback)
+#   none    — neither; resolution must fall through to the conventional names
+setup_repo_trunk() { # setup_repo_trunk <trunk> <local|remote|none>
+  local trunk="$1" origin_head="${2:-local}"
+  rm -rf "$REPO" "$REMOTE"
+  mkdir -p "$REPO"
+  $GIT init -q "$REPO"
+  git -C "$REPO" symbolic-ref HEAD "refs/heads/$trunk"
+  echo base > "$REPO/README.md"
+  $GIT -C "$REPO" add README.md
+  $GIT -C "$REPO" commit -q -m "base"
+  $GIT -C "$REPO" checkout -q -b "$BRANCH"
+  echo work >> "$REPO/README.md"
+  $GIT -C "$REPO" commit -q -am "work"
+  $GIT -C "$REPO" checkout -q "$trunk"
+  if [[ "$origin_head" != "none" ]]; then
+    $GIT init -q --bare "$REMOTE"
+    git -C "$REPO" remote add origin "$REMOTE"
+    git -C "$REPO" push -q origin "$trunk" "$BRANCH"
+    git -C "$REMOTE" symbolic-ref HEAD "refs/heads/$trunk"
+    if [[ "$origin_head" == "local" ]]; then
+      # Local metadata only — and point the remote's own HEAD somewhere else so
+      # a driver that ignored origin/HEAD would resolve a different answer.
+      git -C "$REPO" remote set-head origin "$trunk"
+      git -C "$REMOTE" symbolic-ref HEAD refs/heads/decoy
+    else
+      git -C "$REPO" remote set-head origin --delete 2>/dev/null || true
+    fi
   fi
   : > "$CALLS/second-opinion.args"
   : > "$CALLS/second-opinion.count"
@@ -108,6 +151,11 @@ setup_repo() { # setup_repo [with-remote]
 }
 
 head_sha() { git -C "$REPO" rev-parse --verify "refs/heads/$BRANCH"; }
+
+# The value passed to <flag> in a recorded argv (one argument per line).
+arg_after() { # arg_after <file> <flag>
+  awk -v flag="$2" 'prev == flag { print; exit } { prev = $0 }' "$1"
+}
 
 write_state() { # write_state <handoff-branch> <handoff-sha>
   mkdir -p "$REPO/gibson"
@@ -210,6 +258,94 @@ write_state "$BRANCH" "$(head_sha)"
 run_loop
 if handoff_invoked; then ok "a pin matching the remote tip hands off"
 else bad "a matching pin was wrongly blocked"; fi
+
+echo "a master-trunk repo is reviewed and handed off against master (origin/HEAD)"
+setup_repo_trunk master local
+write_state "$BRANCH" ""
+run_loop
+review_base=$(arg_after "$CALLS/second-opinion.args" --base)
+devin_base=$(arg_after "$CALLS/devin.args" --base)
+if [[ "$review_base" == "master" ]]; then
+  ok "the pre-handoff review diffed against master"
+else
+  bad "review base was '${review_base:-<none>}' — expected master, not the hardcoded default"
+fi
+if [[ "$devin_base" == "master" ]]; then
+  ok "the supervisor handoff carried base master"
+else
+  bad "handoff base was '${devin_base:-<none>}' — expected master"
+fi
+if handoff_invoked; then ok "the non-main handoff completed"
+else bad "a master-trunk repo could not hand off at all"; fi
+
+echo "a master-trunk repo with no local origin/HEAD falls back to the remote's HEAD"
+setup_repo_trunk master remote
+write_state "$BRANCH" ""
+run_loop
+review_base=$(arg_after "$CALLS/second-opinion.args" --base)
+if [[ "$review_base" == "master" ]]; then
+  ok "the remote's advertised HEAD resolved the base"
+else
+  bad "review base was '${review_base:-<none>}' — the ls-remote --symref fallback did not resolve master"
+fi
+
+echo "a repo whose base cannot be resolved blocks the handoff"
+setup_repo_trunk dev none
+write_state "$BRANCH" ""
+run_loop
+if review_invoked; then bad "no base means no reviewable diff — the reviewer must not be spent"
+else ok "an unresolvable base is refused before dispatching a reviewer"; fi
+if handoff_invoked; then bad "an unresolvable base must never reach the supervisor"
+else ok "an unresolvable base blocks the supervisor invocation"; fi
+if still_queued; then ok "the branch stays queued when the base is unresolvable"
+else bad "the handoff was cleared despite an unresolvable base"; fi
+
+echo "a remote tip missing from the local object database is fetched, not faked"
+setup_repo with-remote
+OTHER="$ROOT/other"
+rm -rf "$OTHER"
+git clone -q "$REMOTE" "$OTHER"
+git -C "$OTHER" checkout -q -B "$BRANCH" "origin/$BRANCH"
+echo advanced >> "$OTHER/README.md"
+$GIT -C "$OTHER" commit -q -am "advance the remote from a second clone"
+git -C "$OTHER" push -q origin "$BRANCH"
+ADVANCED=$(git -C "$OTHER" rev-parse HEAD)
+if git -C "$REPO" rev-parse --verify --quiet "$ADVANCED^{commit}" >/dev/null 2>&1; then
+  bad "fixture bug: the advanced commit is already in the target clone"
+else
+  ok "the advanced remote tip starts out absent from the target clone"
+fi
+write_state "$BRANCH" ""
+run_loop
+if [[ "$(arg_after "$CALLS/second-opinion.args" --branch)" == "$ADVANCED" ]]; then
+  ok "the reviewer was pinned to the real remote tip $ADVANCED"
+else
+  bad "the reviewer was not pointed at the remote tip $ADVANCED"
+fi
+if git -C "$REPO" rev-parse --verify --quiet "$ADVANCED^{commit}" >/dev/null 2>&1; then
+  ok "the driver fetched the missing object before reviewing it"
+else
+  bad "the driver recorded a review of a commit it never fetched"
+fi
+if grep -qxF -- "$ADVANCED" "$CALLS/devin.args"; then
+  ok "the handoff pinned the fetched remote tip"
+else
+  bad "the handoff did not pin $ADVANCED"
+fi
+
+echo "a pinned SHA that cannot be resolved locally blocks without a receipt"
+setup_repo
+write_state "$BRANCH" "0123456789abcdef0123456789abcdef01234567"
+run_loop
+if review_invoked; then bad "an unfetchable SHA must not be sent to a reviewer"
+else ok "an unresolvable pin is refused before spending a reviewer"; fi
+if handoff_invoked; then bad "an unfetchable SHA must never reach the supervisor"
+else ok "an unresolvable pin blocks the supervisor invocation"; fi
+if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+  bad "an unresolvable pin must not leave a receipt"
+else ok "an unresolvable pin leaves no receipt"; fi
+if still_queued; then ok "the branch stays queued when its pin is unresolvable"
+else bad "the handoff was cleared despite an unresolvable pin"; fi
 
 echo
 echo "loop-handoff.test.sh: $PASS passed, $FAIL failed"

@@ -62,21 +62,60 @@ export DEVIN_WEBHOOK_URL=...        # optional, see "Waking it" below
 
 ### The handoff field
 
-The loop agent asks for review by writing one line into `gibson/loop-state.md`:
+The loop agent asks for review by writing two lines into `gibson/loop-state.md`:
 
 ```
 handoff: gibson/42-password-reset
+handoff_sha: 9f1c0b3e5a7d2c4f6081b3d5e7a9c1f3b5d7e9a1
 ```
 
-The driver forwards that branch (with the task, the diffstat, and any second
-opinion) to the supervisor and clears the field. This keeps the same discipline as
-the rest of the loop: **state lives in files, not in a conversation.**
+`handoff_sha` is the exact head the agent pushed. It is what makes the review
+mean something: a later push cannot invalidate a completed review without the
+driver and the supervisor both noticing.
 
-Handoffs can also be made by hand:
+The driver forwards that branch (with the task, the diffstat, and the
+cross-vendor second opinion) to the supervisor and clears both fields. This keeps
+the same discipline as the rest of the loop: **state lives in files, not in a
+conversation.**
+
+### The exact-SHA gate (issue #55)
+
+Before a single ACU is spent, the driver runs a gate that **fails closed** — every
+failure below leaves `handoff`/`handoff_sha` queued in loop-state and sends
+nothing:
+
+1. **Resolve the base.** Reviews and handoffs use the target repo's own default
+   branch, resolved from `refs/remotes/origin/HEAD`, then the remote's advertised
+   `HEAD`, then `main`/`master`. The supervisor gets the branch *name* (it opens
+   a PR into it); the reviewer gets whichever form this checkout can actually
+   diff — `main` or `origin/main` — because a worktree parked on a feature branch
+   often has only the remote-tracking ref. A base that resolves to neither, or to
+   nothing at all, blocks the handoff instead of falling back to a guessed `main`.
+2. **Resolve the SHA.** `handoff_sha` if pinned, otherwise the remote tip. A pin
+   that disagrees with the remote tip is refused before a reviewer is spent.
+3. **Make sure the object is actually here.** The remote tip may have been pushed
+   from another worktree, so the commit can be missing from this clone. The driver
+   fetches the exact branch (then the exact SHA) and verifies `<sha>^{commit}`
+   resolves locally. A commit nobody here can read cannot be reviewed, and is
+   blocked instead of recorded.
+4. **Require a distinct-vendor review of that exact SHA.** `second-opinion.sh` is
+   run with `--base <resolved base> --branch <sha>`; the runner is excluded from
+   its own review (Law 5). Success writes
+   `gibson/second-opinion.receipt` naming the SHA, base, author, and reviewers.
+   A leftover `gibson/second-opinion.md` proves nothing and does not satisfy the
+   gate — only a matching receipt does.
+5. **Hand off with the pin.** `devin-supervisor.sh handoff --base <base> --sha
+   <sha>` re-checks the remote tip and instructs the supervisor to reject the
+   handoff if it has moved.
+
+Handoffs can also be made by hand — note that the by-hand path skips the driver's
+Law 5 gate, so you own the cross-vendor review yourself:
 
 ```bash
 ./scripts/devin-supervisor.sh handoff --repo ~/Code/acme-app \
-  --branch gibson/42-password-reset --task-file gibson/issue-42.md --wait
+  --branch gibson/42-password-reset --base main \
+  --sha 9f1c0b3e5a7d2c4f6081b3d5e7a9c1f3b5d7e9a1 \
+  --task-file gibson/issue-42.md --wait
 ```
 
 ## Waking it

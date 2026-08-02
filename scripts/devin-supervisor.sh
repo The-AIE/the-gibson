@@ -16,7 +16,9 @@ WHAT IT DOES
   handoff  send a branch to the supervisor: review this diff, open/refresh the
            PR, keep CI green, merge if --merge. When --sha is supplied the
            supervisor is instructed to reject the handoff if the remote tip
-           no longer matches (issue #55 pin).
+           no longer matches (issue #55 pin). --base defaults to main here;
+           loop.sh always passes the target repo's resolved default branch, so
+           a repo whose trunk is master is never diffed against a missing ref.
 
 WHY
   Iteration is the expensive part and it runs on flat-rate local runners
@@ -313,7 +315,10 @@ case "$CMD" in
 
     # Issue #55: when a SHA is pinned, verify the remote tip still matches.
     if [[ -n "$SHA" ]]; then
-      remote_sha=$(git -C "$REPO" ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk '{print $1}' || true)
+      # NR==1: ls-remote for an exact ref should print one line, but a server
+      # that also advertises a peeled tag or a same-named ref would append more.
+      # Comparing a pin against a concatenation of SHAs always "mismatches".
+      remote_sha=$(git -C "$REPO" ls-remote origin "refs/heads/$BRANCH" 2>/dev/null | awk 'NR==1 {print $1}' || true)
       if [[ -n "$remote_sha" && "$remote_sha" != "$SHA" ]]; then
         die "pinned SHA $SHA no longer matches remote tip of $BRANCH ($remote_sha). Re-review the new tip before handoff."
       fi
