@@ -151,7 +151,10 @@ runs it against the customer sites it maintains. The contract:
 - The crew runs **Phases 1–5** autonomously and **Phase 6 documentation** to a per-site ledger.
 - Any **Critical or High** finding is a **judgment-call escalation** — the crew texts the owner
   (per Crew Chief's approval-gate doctrine), it does not self-remediate money/PII/auth flaws
-  unattended.
+  unattended. Session-mode vocabulary for that gate lives in
+  [docs/autonomy-modes.md](../../docs/autonomy-modes.md) (issue
+  [#24](https://github.com/mrhinkle/the-gibson/issues/24)); this protocol does not change
+  which findings escalate.
 - **Rules of engagement are non-negotiable in the product context:** never runs destructive
   tests against a live customer site, never touches real customer PII — seeded records only.
 - Findings feed fleet-wide Employee Handbook updates: a real flaw found on one site becomes a

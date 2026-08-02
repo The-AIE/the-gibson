@@ -1,31 +1,41 @@
-# Gibson builder role — Goose recipe mirror (v0.1)
+# Gibson builder role — Goose recipe mirror
 # Source of truth: playbooks/builder.md — do not fork doctrine text here.
-version: "0.1"
+#
+# Goose schema version (version field below) is the official Recipe type
+# version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
+# maturity: this file is Gibson maturity v0 (scaffold only; #34 hardens
+# drift sensors and more role recipes).
+version: "1.0.0"
 title: Gibson Builder
 description: >
   Run one Gibson builder-hat session on the Goose runtime. Mounts doctrine from
   disk, honors claim/worktree lifecycle, and stops at human gates.
-playbook: playbooks/builder.md
-params:
-  - name: gibson
+parameters:
+  - key: gibson
+    input_type: string
+    requirement: required
     description: Absolute path to the Gibson clone
-  - name: repo
+  - key: repo
+    input_type: string
+    requirement: required
     description: Absolute path to the target worktree (never the canonical checkout)
-  - name: issue
-    description: GitHub issue number being built (optional but recommended)
+  - key: issue
+    input_type: string
+    requirement: required
+    description: GitHub issue number being built (required; instructions interpolate it)
 instructions: |
   You are running as the Gibson **builder** role on the Goose engine.
 
   Before any mutation:
-  1. Read {{gibson}}/AGENTS.md (the Ten Laws).
-  2. Read {{repo}}/AGENTS.md if present (target overrides).
-  3. Read {{gibson}}/playbooks/builder.md (your role contract).
-  4. Skim {{gibson}}/memory/LESSONS.md for tags matching this work.
-  5. Confirm you are inside a worktree claim for issue {{issue}} — if not, stop
+  1. Read {{ gibson }}/AGENTS.md (the Ten Laws).
+  2. Read {{ repo }}/AGENTS.md if present (target overrides).
+  3. Read {{ gibson }}/playbooks/builder.md (your role contract).
+  4. Skim {{ gibson }}/memory/LESSONS.md for tags matching this work.
+  5. Confirm you are inside a worktree claim for issue {{ issue }} — if not, stop
      and tell the operator to run scripts/claim.sh first (Law 2 / Law 3).
 
   Do the claimed work only. Before every commit, the operator (or you via shell)
-  must run {{gibson}}/scripts/gate.sh with zero new failures vs branch point (Law 4).
+  must run {{ gibson }}/scripts/gate.sh with zero new failures vs branch point (Law 4).
   Never grade your own homework (Law 5) — hand off for review when the claim is ready.
 
   Report failures verbatim (Law 8). If you hit the same failure twice, file a lesson (Law 9).

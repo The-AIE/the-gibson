@@ -7,14 +7,15 @@ nav_order: 24
 # Autonomy modes — Crew Chief / downstream boundary
 
 > 🙂 **In plain English:** four settings for how much the AI may do alone, plus
-> per-tool overrides for dangerous actions. Low-risk work can run while you sleep;
-> money, secrets, and irreversible actions still require a human.
+> per-tool overrides for dangerous actions. This page **defines and maps** the
+> modes so adapters and products share vocabulary. It does **not** adopt new
+> session defaults for Gibson; existing human gates remain authoritative.
 
 **Provenance:** adapted from Goose's four-mode + per-tool permission model for
 Gibson / Chatterbuilt Crew Chief (issue #24, epic #30). Vocabulary is Gibson's;
-mapping to Goose is recorded so the adapter can wire the same tiers.
+mapping to Goose is recorded so the adapter can wire the same tiers later.
 
-## Four session modes
+## Four session modes (definitions only)
 
 | Gibson mode | Meaning | Goose analogue |
 |---|---|---|
@@ -23,11 +24,19 @@ mapping to Goose is recorded so the adapter can wire the same tiers.
 | **Manual approval** | Ask before consequential tool calls | Manual Approval |
 | **Chat only** | Advise only; no tools that mutate | Chat-Only |
 
-Default for unattended solo-loop grind: **Autonomous** inside a claimed Tier A
-scope, with per-tool overrides below still hard-blocking gate classes.
+### Deployment defaults — not chosen here
 
-Default for Operator-tier (non-technical owner): **Smart approval**, so decision
-cards still fire for the closed human-gate list ([docs/14](14-human-gates.md)).
+This scaffold **does not** set new unattended or Operator session defaults for
+Gibson. Until a **separate adoption decision** (issue #24 acceptance / owner
+gate) records otherwise:
+
+- **Authoritative stops** remain the closed list in
+  [docs/14-human-gates.md](14-human-gates.md) and Law 7 (Tier C).
+- Existing solo-loop / operator docs keep whatever posture they already state;
+  do not read this page as changing unattended grind or Operator-tier defaults.
+- Products that map these modes (e.g. Chatterbuilt Crew Chief) choose their own
+  product defaults under their own decision process — still subject to docs/14
+  when operating as Gibson fleet work.
 
 ## Per-tool overrides
 
@@ -52,11 +61,12 @@ Regardless of mode, the following always require a human (docs/14, Law 7):
 Map Critical/High red-team findings → owner card; never self-remediate those classes
 unattended.
 
-## Adapter wiring (Goose)
+## Adapter wiring (Goose) — future
 
-When `adapters/goose` runs a session, map:
+When `adapters/goose` runs a live session (after #28 runtime work), map:
 
-- Session mode → Goose autonomy preset
+- Session mode → Goose autonomy preset (only after an adoption decision picks a
+  default or the operator sets one per session)
 - Gibson gate scripts → recipe-mandated shell steps or MCP tools with **Ask/Never**
   on mutate paths (#35)
 - Operator decision cards → stay on the Hermes / chat path; Goose does not auto-approve
@@ -66,4 +76,5 @@ When `adapters/goose` runs a session, map:
 - [docs/14-human-gates.md](14-human-gates.md)
 - [docs/08-security.md](08-security.md)
 - [docs/GOOSE-STRATEGY.md](GOOSE-STRATEGY.md)
+- [docs/GOOSE-SPIKE-FINDINGS.md](GOOSE-SPIKE-FINDINGS.md)
 - Chatterbuilt Crew Chief approval gate (downstream product)
