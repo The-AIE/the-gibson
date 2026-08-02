@@ -47,11 +47,13 @@ USAGE
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
 
-  Empty ledger: when a *valid* ledger ref has no docs/claims/* and no
-  docs/active-work.md, that is a valid empty ledger (no live claims), not a
-  hard fail. A missing/unborn/invalid main|master ref is NOT an empty ledger —
-  the script fails hard. Cleanup of worktrees/labels can still complete
-  truthfully without inventing a row when the ref is valid and empty.
+  Empty ledger: when a *valid* ledger ref with a *readable* tree has no
+  docs/claims/* and no docs/active-work.md, that is a valid empty ledger (no
+  live claims), not a hard fail. A missing/unborn/invalid main|master ref, or
+  a commit whose referenced tree is unavailable/corrupt, is NOT an empty
+  ledger — the script fails hard before any label mutation. Cleanup of
+  worktrees/labels can still complete truthfully without inventing a row when
+  the ref is valid, the tree is readable, and the ledger is empty.
 
 ENV
   GIBSON_CANONICAL   claim-table repo path (default: cwd)
@@ -143,16 +145,48 @@ if ! REF=$(resolve_ledger_ref); then
 fi
 info "ledger ref: $REF ($(git rev-parse --short "$REF" 2>/dev/null || echo '?'))"
 
-# A missing docs/claims tree and absent active-work.md on a *valid* commit is
-# a valid *empty* ledger (every claim already released, or never filed) — not
-# corruption. Treat it as zero live claims and continue label/worktree cleanup.
-# A named --claim-id that is not present still hard-fails below.
+# The commit object resolving is not enough: the referenced tree must be
+# readable. A missing/corrupt tree is NOT an empty ledger — hard-fail before
+# any label mutation or "no live claims" classification.
+if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
+  die "ledger ref $REF does not resolve to a commit object — not an empty ledger"
+fi
+# Prefer peeling ^{tree}; if the object store cannot peel (deleted tree object),
+# fall back to the commit's tree field so we can still name the missing SHA.
+TREE_SHA=$(git rev-parse --verify "${REF}^{tree}" 2>/dev/null || true)
+if [[ -z "$TREE_SHA" ]]; then
+  TREE_SHA=$(git cat-file -p "${REF}^{commit}" 2>/dev/null | awk '/^tree / {print $2; exit}')
+fi
+[[ -n "$TREE_SHA" ]] || \
+  die "ledger commit at $REF has no tree pointer — unreadable/corrupt tree is not an empty ledger; refuse label mutation"
+if ! git cat-file -e "$TREE_SHA" 2>/dev/null; then
+  die "ledger commit at $REF references an unreadable/corrupt tree ($TREE_SHA) — not an empty ledger; refuse label mutation until the object store is repaired"
+fi
+# Prove the tree is listable (cat-file -e alone is not enough on some stores).
+if ! git ls-tree "$TREE_SHA" >/dev/null 2>&1; then
+  die "cannot list tree for ledger commit $REF (unreadable/corrupt tree $TREE_SHA) — not an empty ledger; refuse label mutation"
+fi
+
+# A missing docs/claims path and absent active-work.md on a *valid, readable*
+# tree is a valid *empty* ledger (every claim already released, or never filed)
+# — not corruption. Treat it as zero live claims and continue label/worktree
+# cleanup. A named --claim-id that is not present still hard-fails below.
+# Tree-read failures above already exited; do not reclassify them as empty.
 HAS_ACTIVE=0
 HAS_CLAIMS_TREE=0
 if git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
   HAS_ACTIVE=1
 fi
-if [[ -n "$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null)" ]]; then
+# ls-tree on a missing path exits 0 with empty output on a readable tree.
+# Non-zero here is still a hard fail (tree became unreadable mid-run).
+CLAIMS_LS_ERR=""
+CLAIMS_LS=$(git ls-tree --name-only "$REF" docs/claims/ 2>&1) || {
+  CLAIMS_LS_ERR=$?
+}
+if [[ -n "$CLAIMS_LS_ERR" ]]; then
+  die "cannot read docs/claims/ at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+fi
+if [[ -n "$CLAIMS_LS" ]]; then
   HAS_CLAIMS_TREE=1
 fi
 if [[ "$HAS_ACTIVE" -eq 0 && "$HAS_CLAIMS_TREE" -eq 0 ]]; then
@@ -170,23 +204,43 @@ else
 fi
 
 # Claims live one-per-file in docs/claims/ (L-023); rows in docs/active-work.md
-# are the legacy form and are still released.
+# are the legacy form and are still released. Prints matching ids on stdout.
+# Returns 1 if the ledger tree cannot be read (caller must hard-fail — never
+# treat a failed tree read as an empty match set).
 claim_ids_matching() {
+  local claims_out active_out
+  if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); then
+    echo "release-claim.sh: ERROR: cannot list docs/claims/ at $REF — unreadable ledger tree is not an empty ledger" >&2
+    return 1
+  fi
+  active_out=""
+  if git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+    if ! active_out=$(git show "$REF:docs/active-work.md" 2>/dev/null); then
+      echo "release-claim.sh: ERROR: cannot read docs/active-work.md at $REF — unreadable ledger tree is not an empty ledger" >&2
+      return 1
+    fi
+  elif ! git cat-file -e "$TREE_SHA" 2>/dev/null; then
+    echo "release-claim.sh: ERROR: ledger tree $TREE_SHA became unreadable while matching claims — not an empty ledger" >&2
+    return 1
+  fi
   {
-    git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
+    printf '%s\n' "$claims_out" |
       sed 's|^docs/claims/||;s|\.md$||'
-    git show "$REF:docs/active-work.md" 2>/dev/null |
+    printf '%s\n' "$active_out" |
       grep -E '^\| ' |
       awk -F'|' '{print $3}' |
       sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
   } | grep -E '^issue-' | grep -E "$1" | sort -u || true
+  return 0
 }
 
 # Every live row for this issue, so we can tell "released the last one" from
 # "released one slice of several" (L-024).
 ALL_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
-ALL_IDS=$(claim_ids_matching "$ALL_RE")
-TARGET_IDS=$(claim_ids_matching "$MATCH_RE")
+ALL_IDS=$(claim_ids_matching "$ALL_RE") || \
+  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
+TARGET_IDS=$(claim_ids_matching "$MATCH_RE") || \
+  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
 
 if [[ -z "$TARGET_IDS" ]]; then
   if [[ -n "$CLAIM_ID_ARG" ]]; then

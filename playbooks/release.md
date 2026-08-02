@@ -99,13 +99,15 @@ Canonical: /path/to/target
 3. Review: newest usable timestamped event across PR reviews **and** comments
    wins (source type does not reorder the stream). Formal review states
    (`APPROVED` / `CHANGES_REQUESTED`) are modeled as events when they carry a
-   usable timestamp; `reviewDecision` is only a fail-closed fallback when no
-   usable event exists — a newer `VERDICT: REQUEST_CHANGES` blocks even if an
-   older formal approval remains. Null/malformed timestamps and authorless
-   `APPROVE` events never clear the gate; equal-time conflicts prefer
-   `REQUEST_CHANGES`. When the verdict source binds a commit SHA, it must
-   match the current PR head — stale-head verdicts fail closed. UX eval PASS
-   when user-visible.
+   complete parseable ISO timestamp and always precede body `VERDICT` text on
+   the same review; `DISMISSED` reviews never authorize via body text.
+   `reviewDecision` is only a fail-closed fallback when no usable event exists
+   and no malformed formal evidence was discarded — a newer
+   `VERDICT: REQUEST_CHANGES` blocks even if an older formal approval remains.
+   Incomplete/prefix-only timestamps and authorless `APPROVE` events never
+   clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. When the
+   verdict source binds a commit SHA, it must match the current PR head —
+   stale or absent/null head fails closed. UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
 5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
 6. Schema PRs: no other schema merge in flight; migration file present
@@ -141,10 +143,14 @@ If any item fails → do not merge; report the missing gate.
   `reviewDecision=APPROVED` must not short-circuit a newer comment
   `VERDICT: REQUEST_CHANGES`. An older comment `VERDICT: APPROVE` must not
   override a newer review `VERDICT: REQUEST_CHANGES` (PR #57 false-green).
-  Malformed/null timestamps are dropped; authorless `APPROVE` never counts as
-  independent; equal timestamps prefer `REQUEST_CHANGES`. When the source
+  Formal `CHANGES_REQUESTED` / `DISMISSED` state precedes contradictory body
+  `VERDICT: APPROVE` text. Timestamps must be a complete parseable ISO
+  instant (not a prefix like `9999-99-99Tbogus`); authorless `APPROVE` never
+  counts as independent; equal timestamps prefer `REQUEST_CHANGES`. Malformed
+  formal `APPROVED`/`CHANGES_REQUESTED` evidence blocks before any
+  `reviewDecision` aggregate fallback (no drop-then-recover). When the source
   carries a commit SHA, a verdict bound to any SHA other than the current head
-  is fail closed — re-review the tip.
+  — or when head is absent/null — is fail closed — re-review the tip.
 
 **ADMIN-CANDIDATE** — nothing about the product is wrong, but nothing has
 authorized the merge either. Two causes:
@@ -191,12 +197,15 @@ leaves the sibling rows and keeps `agent-claimed` on the issue:
 release-claim.sh <issue> --claim-id issue-<issue>-<merged-slug>
 ```
 
-**Empty ledger is valid only on a real commit ref.** After the last claim file
-is gone, `docs/claims/` is untracked in git and `docs/active-work.md` may be
-absent — that is zero live claims on a valid `origin/main` (or main/master),
-not a corrupt ledger. A missing, unborn, or non-commit main/master ref is
-**not** an empty ledger: the script fails hard. Cleanup must still complete
-without inventing a row when the ref is valid and empty. Operator paths:
+**Empty ledger is valid only on a real commit ref with a readable tree.** After
+the last claim file is gone, `docs/claims/` is untracked in git and
+`docs/active-work.md` may be absent — that is zero live claims on a valid
+`origin/main` (or main/master) whose tree objects are readable, not a corrupt
+ledger. A missing, unborn, or non-commit main/master ref — or a commit whose
+referenced tree is unavailable/corrupt — is **not** an empty ledger: the script
+fails hard **before** any label mutation. Cleanup must still complete without
+inventing a row when the ref is valid, the tree is readable, and the ledger is
+empty. Operator paths:
 
 ```bash
 # Live sibling still owns the issue, but no claim file is on origin/main

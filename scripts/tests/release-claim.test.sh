@@ -289,6 +289,77 @@ rc=$?
 check "deleted main/master hard-fails" "$rc" "1"
 contains "hard-fail message on missing ref" "$out" "cannot resolve a valid ledger commit ref"
 
+echo "#61 P1 · unreadable/corrupt ledger tree is not an empty ledger"
+# A valid commit object whose referenced tree is missing/corrupt must hard-fail
+# before any label mutation. Suppressing ls-tree failure and treating it as
+# "no claims" is a false-green empty-ledger path.
+new_repo "$ROOT/badtree"
+(
+  cd "$ROOT/badtree/canon" || exit 1
+  git checkout -q main
+  # Record tree SHA for origin/main, then delete the tree object from both the
+  # working clone and the bare origin so cat-file/ls-tree fail closed.
+  tree=$(git rev-parse "origin/main^{tree}")
+  commit=$(git rev-parse "origin/main^{commit}")
+  # Ensure resolve_ledger_ref still finds a *commit* (object remains).
+  git cat-file -t "$commit" >/dev/null
+  rm_obj() {
+    local sha="$1" repo="$2"
+    local dir="$repo/objects/${sha:0:2}"
+    local file="$dir/${sha:2}"
+    rm -f "$file"
+  }
+  rm_obj "$tree" "$ROOT/badtree/canon/.git"
+  rm_obj "$tree" "$ROOT/badtree/origin"
+  # Also drop any alternates / packed copy if present.
+  git -C "$ROOT/badtree/canon" prune --expire=now >/dev/null 2>&1 || true
+  git -C "$ROOT/badtree/origin" prune --expire=now >/dev/null 2>&1 || true
+  # Confirm the false-green shape: commit resolves, tree does not.
+  git rev-parse --verify "origin/main^{commit}" >/dev/null
+  if git cat-file -e "origin/main^{tree}" 2>/dev/null; then
+    # Some git layouts keep the tree elsewhere; force-delete again via cat-file path.
+    tree2=$(git rev-parse "origin/main^{tree}")
+    rm_obj "$tree2" "$ROOT/badtree/canon/.git"
+    rm_obj "$tree2" "$ROOT/badtree/origin"
+  fi
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+
+# Fake gh that would "succeed" label mutation if we incorrectly continue.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED" >&2
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/badtree/canon" && "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "corrupt tree hard-fails (exit 1)" "$rc" "1"
+contains "names unreadable/corrupt tree" "$out" "unreadable/corrupt tree"
+lacks    "does not treat corrupt tree as empty ledger" "$out" "treating as no live claims"
+lacks    "does not mutate labels before tree hard-fail" "$out" "MUTATED"
+lacks    "does not claim OK on corrupt tree" "$out" "OK —"
+
+# Dry-run must also refuse — no "would remove label" on unreadable ledger.
+out=$(cd "$ROOT/badtree/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
+rc=$?
+check "corrupt tree dry-run hard-fails" "$rc" "1"
+contains "dry-run names corrupt tree too" "$out" "unreadable/corrupt tree"
+lacks    "dry-run does not invent empty-ledger plan" "$out" "none matched"
+
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

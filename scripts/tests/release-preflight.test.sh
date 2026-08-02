@@ -250,6 +250,126 @@ f_formal_event=$(fixture formal_event '.reviewDecision = "" | .headRefOid = "fff
 out=$(run "$f_formal_event"); rc=$?
 check "formal state APPROVED on current head is READY" "$rc" "0"
 
+echo "#61 P1 · timestamp validation requires a complete parseable ISO instant"
+# Prefix-only validators accept "9999-99-99Tbogus" and can sort it above real
+# evidence — a READY false-green. Require a full accepted timestamp.
+f_bogus_ts=$(fixture bogus_ts '.reviewDecision = "" | .headRefOid = "1111111111111111111111111111111111111111" |
+  .reviews = [{
+    "author": {"login": "bogus-clock"},
+    "state": "APPROVED",
+    "body": "looks fine\n\nVERDICT: APPROVE",
+    "submittedAt": "9999-99-99Tbogus",
+    "commit": {"oid": "1111111111111111111111111111111111111111"}
+  }] |
+  .comments = [{
+    "author": {"login": "good-reviewer"},
+    "body": "still blocked\n\nVERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T17:00:00Z"
+  }]')
+out=$(run "$f_bogus_ts"); rc=$?
+check "bogus prefix timestamp APPROVE does not outrank valid REQUEST_CHANGES" "$rc" "1"
+contains "selects valid REQUEST_CHANGES over bogus-ts APPROVE" "$out" "REQUEST_CHANGES"
+contains "names the valid reviewer" "$out" "good-reviewer"
+if echo "$out" | grep -qF "READY"; then bad "must not report READY when only valid event is REQUEST_CHANGES"; else ok "does not report READY under bogus-ts APPROVE"; fi
+
+# Sole event is a prefix-looking but incomplete timestamp: fail closed, not READY.
+f_only_bogus=$(fixture only_bogus '.reviewDecision = "" | .headRefOid = "1111111111111111111111111111111111111111" |
+  .reviews = [{
+    "author": {"login": "bogus-clock"},
+    "body": "VERDICT: APPROVE",
+    "submittedAt": "9999-99-99Tbogus",
+    "commit": {"oid": "1111111111111111111111111111111111111111"}
+  }]')
+out=$(run "$f_only_bogus"); rc=$?
+check "sole incomplete timestamp APPROVE is BLOCKED (fail closed)" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "incomplete timestamp must not yield READY"; else ok "incomplete-ts sole APPROVE is not READY"; fi
+
+# Incomplete fractional / missing timezone forms are not accepted either.
+f_incomplete_iso=$(fixture incomplete_iso '.reviewDecision = "" |
+  .comments = [{
+    "author": {"login": "half-clock"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T15:00:00"
+  }]')
+out=$(run "$f_incomplete_iso"); rc=$?
+check "ISO prefix without timezone is not a complete accepted timestamp" "$rc" "1"
+
+echo "#61 P1 · formal review state precedes contradictory body VERDICT text"
+# CHANGES_REQUESTED with a body that ends VERDICT: APPROVE must still block.
+f_formal_vs_body=$(fixture formal_vs_body '.reviewDecision = "CHANGES_REQUESTED" | .headRefOid = "2222222222222222222222222222222222222222" |
+  .reviews = [{
+    "author": {"login": "strict-reviewer"},
+    "state": "CHANGES_REQUESTED",
+    "body": "blocking findings remain; please re-request review\n\nVERDICT: APPROVE",
+    "submittedAt": "2026-08-02T16:30:00Z",
+    "commit": {"oid": "2222222222222222222222222222222222222222"}
+  }]')
+out=$(run "$f_formal_vs_body"); rc=$?
+check "CHANGES_REQUESTED + body VERDICT: APPROVE is BLOCKED" "$rc" "1"
+contains "names REQUEST_CHANGES despite body APPROVE" "$out" "REQUEST_CHANGES"
+if echo "$out" | grep -qE 'READY|independent identity'; then
+  bad "body APPROVE must not authorize over formal CHANGES_REQUESTED"
+else
+  ok "body APPROVE does not authorize over formal CHANGES_REQUESTED"
+fi
+
+# DISMISSED formal review retaining VERDICT: APPROVE must not authorize.
+f_dismissed=$(fixture dismissed_approve '.reviewDecision = "" | .headRefOid = "3333333333333333333333333333333333333333" |
+  .reviews = [{
+    "author": {"login": "dismissed-bot"},
+    "state": "DISMISSED",
+    "body": "old approval left in body\n\nVERDICT: APPROVE",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "3333333333333333333333333333333333333333"}
+  }]')
+out=$(run "$f_dismissed"); rc=$?
+check "DISMISSED review with body VERDICT: APPROVE is BLOCKED" "$rc" "1"
+if echo "$out" | grep -qF "READY"; then bad "DISMISSED+APPROVE body must not be READY"; else ok "DISMISSED does not authorize via body APPROVE"; fi
+contains "fail closed without usable independent APPROVE" "$out" "Law 5"
+
+echo "#61 P1 · SHA-bound + malformed formal fail closed before aggregate fallback"
+# SHA-bound approval with null/absent current head must fail closed.
+f_null_head=$(fixture null_head '.reviewDecision = "APPROVED" | .headRefOid = null |
+  .reviews = [{
+    "author": {"login": "formal-bot"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }]')
+out=$(run "$f_null_head"); rc=$?
+check "SHA-bound APPROVE with null headRefOid is BLOCKED" "$rc" "1"
+contains "names missing/unverifiable head binding" "$out" "head"
+if echo "$out" | grep -qF "READY"; then bad "null head must not READY via formal or reviewDecision"; else ok "null head is not READY"; fi
+
+# Null-time formal APPROVED must not be dropped then recovered via reviewDecision.
+f_null_time_formal=$(fixture null_time_formal '.reviewDecision = "APPROVED" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .reviews = [{
+    "author": {"login": "ghost-clock"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": null,
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }]')
+out=$(run "$f_null_time_formal"); rc=$?
+check "null-time formal APPROVED is BLOCKED (not recovered via reviewDecision)" "$rc" "1"
+contains "names malformed formal evidence" "$out" "malformed"
+if echo "$out" | grep -qF "READY"; then bad "null-time formal must not READY via aggregate"; else ok "null-time formal not recovered via reviewDecision"; fi
+
+# Authorless formal APPROVED must not be dropped then recovered via reviewDecision.
+f_authorless_formal=$(fixture authorless_formal '.reviewDecision = "APPROVED" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
+  .reviews = [{
+    "author": null,
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }]')
+out=$(run "$f_authorless_formal"); rc=$?
+check "authorless formal APPROVED is BLOCKED (not recovered via reviewDecision)" "$rc" "1"
+contains "names malformed/authorless formal" "$out" "malformed"
+if echo "$out" | grep -qF "READY"; then bad "authorless formal must not READY via aggregate"; else ok "authorless formal not recovered via reviewDecision"; fi
+
 echo "#61 · stale-head verdict fails closed when source binds a commit SHA"
 f_stale=$(fixture stale_head '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
   .reviews = [{
