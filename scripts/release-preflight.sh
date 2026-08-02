@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# release-preflight.sh — decide whether a PR may merge, and say why not (docs/02 stage 7)
+set -uo pipefail
+
+usage() {
+  cat <<'EOF'
+release-preflight.sh — pre-merge verdict for the release hat
+
+WHAT IT DOES
+  Reads one pull request and prints a verdict — READY, BLOCKED, or
+  ADMIN-CANDIDATE — with the evidence behind it. It checks four things the
+  release hat used to re-diagnose by hand on every PR:
+
+    1. Close keywords. GitHub's linker does not parse negation, so a partial
+       ship whose body says "does not fully resolve #28" still closes #28.
+       Reads closingIssuesReferences (what GitHub will actually do), not prose.
+    2. Review. Same-account solo loops cannot self-approve, so an empty
+       reviewDecision is accepted when a review comment ends in
+       VERDICT: APPROVE from someone other than a rubber-stamping author.
+    3. Required checks. Distinguishes a product red (a step failed) from GitHub
+       Actions infrastructure (startup_failure / no steps / no runner), which
+       re-runs identically and is usually concurrent across open PRs.
+    4. Tier. tier-c never gets an admin path; that is a human gate.
+
+  Read-only. It never merges, never comments, never edits.
+
+WHY
+  L-013 auto-closed multi-phase issues four times. L-015 / L-021 deadlocked the
+  solo loop on reviews GitHub will not let it make. L-033 sent the release hat
+  round the same infra-vs-product diagnosis on every red check. Each of those is
+  cheap to check and expensive to get wrong, so a script checks them.
+
+RISKS
+  - Read-only: worst case is a wrong verdict, which the checklist it prints lets
+    you audit. It does not authorize anything by itself; a human still merges
+    Tier C, and ADMIN-CANDIDATE is a pre-launch operator decision, not a green light.
+
+USAGE
+  release-preflight.sh <pr> [--repo owner/name] [--partial] [--launched] [--json]
+  release-preflight.sh --help
+
+  <pr>         pull request number
+  --repo       defaults to the current repo (gh)
+  --partial    this PR ships a slice: it MUST NOT close its issue (L-013)
+  --launched   post-launch posture: no admin path on any red, ever (L-033)
+  --json       machine-readable verdict for a driver
+
+EXIT
+  0  READY — every gate passed
+  1  BLOCKED — a gate failed; the reason is printed
+  2  usage error
+  4  ADMIN-CANDIDATE — blocked only by infrastructure or by the same-author
+     review limit, pre-launch, Tier A/B. An operator may admin-merge after
+     posting the printed checklist. Never automatic.
+
+EXAMPLES
+  release-preflight.sh 123
+  release-preflight.sh 123 --partial          # slice of a multi-phase issue
+  release-preflight.sh 123 --repo acme/app --json
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || $# -lt 1 ]]; then
+  usage
+  [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && exit 0
+  exit 2
+fi
+
+PR="$1"
+shift || true
+REPO_ARG=""
+PARTIAL=0
+LAUNCHED=0
+JSON=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo) REPO_ARG="${2:-}"; shift ;;
+    --partial) PARTIAL=1 ;;
+    --launched) LAUNCHED=1 ;;
+    --json) JSON=1 ;;
+    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
+  esac
+  shift
+done
+
+die() { echo "release-preflight.sh: ERROR: $*" >&2; exit 2; }
+[[ "$PR" =~ ^[0-9]+$ ]] || die "pr must be a number, got '$PR'"
+command -v gh >/dev/null || die "gh is required"
+
+REPO="$REPO_ARG"
+if [[ -z "$REPO" ]]; then
+  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+fi
+[[ -n "$REPO" ]] || die "could not resolve repo — pass --repo owner/name"
+
+PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
+  --json number,title,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments 2>/dev/null) ||
+  die "could not read $REPO#$PR"
+
+jqr() { echo "$PR_JSON" | jq -r "$1"; }
+command -v jq >/dev/null || die "jq is required"
+
+AUTHOR=$(jqr '.author.login // ""')
+DRAFT=$(jqr '.isDraft')
+MERGEABLE=$(jqr '.mergeable // "UNKNOWN"')
+REVIEW_DECISION=$(jqr '.reviewDecision // ""')
+TIER=$(jqr '[.labels[].name] | map(select(startswith("tier-"))) | first // ""')
+CLOSES=$(jqr '[.closingIssuesReferences[].number] | map("#"+(.|tostring)) | join(", ")')
+
+BLOCKERS=()
+ADMIN_REASONS=()
+NOTES=()
+
+# --- 1. close keywords (L-013) -------------------------------------------
+if [[ "$PARTIAL" -eq 1 && -n "$CLOSES" ]]; then
+  BLOCKERS+=("L-013: --partial, but GitHub will close $CLOSES on merge. Prose like \"does not fully resolve #N\" does not stop the linker — remove the keyword from the squash subject/body and unlink it in the Development sidebar, then re-run.")
+elif [[ "$PARTIAL" -eq 0 && -z "$CLOSES" ]]; then
+  NOTES+=("no issue will be closed by this merge — intended only if the issue has further slices")
+else
+  NOTES+=("closes ${CLOSES:-(nothing)} on merge")
+fi
+
+# --- 2. review (L-015 / L-021) -------------------------------------------
+# The last VERDICT: line wins, and only from a login that is not the author —
+# unless the author is the only identity available, which is the solo-loop case
+# the lesson is about.
+VERDICT_LINE=$(echo "$PR_JSON" | jq -r '
+  [ (.reviews[]? | {login: .author.login, body: .body}),
+    (.comments[]? | {login: .author.login, body: .body}) ]
+  | map(select(.body != null and (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i"))))
+  | last // {}
+  | if .body then (.login + "\t" + ((.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v)) else "" end')
+VERDICT_LOGIN="${VERDICT_LINE%%	*}"
+VERDICT_TEXT="${VERDICT_LINE#*	}"
+[[ "$VERDICT_LINE" == "$VERDICT_TEXT" ]] && VERDICT_TEXT=""
+
+SAME_AUTHOR_REVIEW=0
+case "$REVIEW_DECISION" in
+  APPROVED)
+    NOTES+=("formal GitHub approval present")
+    ;;
+  CHANGES_REQUESTED)
+    BLOCKERS+=("reviewDecision is CHANGES_REQUESTED")
+    ;;
+  *)
+    if echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
+      BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN)")
+    elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
+      if [[ -n "$AUTHOR" && "$VERDICT_LOGIN" == "$AUTHOR" ]]; then
+        # L-015: GitHub refuses self-approval, so the comment is the only signal
+        # the solo loop can produce. Real, but it is not an independent identity.
+        SAME_AUTHOR_REVIEW=1
+        ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
+      else
+        NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN (independent identity, no formal review)")
+      fi
+    else
+      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+    fi
+    ;;
+esac
+
+# --- 3. required checks, product red vs GHA infra (L-033) ----------------
+CHECK_SUMMARY=$(echo "$PR_JSON" | jq -r '
+  [ .statusCheckRollup[]? | select(.__typename == "CheckRun" or .conclusion != null or .state != null) ]
+  | map({name: (.name // .context // "check"),
+         conclusion: ((.conclusion // .state // "") | ascii_upcase),
+         steps: ((.steps? // []) | length)})')
+FAILED=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.conclusion | test("FAIL|ERROR|TIMED_OUT|STARTUP_FAILURE|CANCELLED"))]')
+PENDING=$(echo "$CHECK_SUMMARY" | jq -r '[.[] | select(.conclusion == "" or .conclusion == "PENDING" or .conclusion == "IN_PROGRESS" or .conclusion == "QUEUED")] | length')
+FAILED_N=$(echo "$FAILED" | jq -r 'length')
+
+if [[ "$PENDING" -gt 0 ]]; then
+  BLOCKERS+=("$PENDING required check(s) still running — wait, do not merge into a pending gate")
+fi
+
+if [[ "$FAILED_N" -gt 0 ]]; then
+  # Infra signature: startup_failure, or a "failure" with zero steps — nothing
+  # ran, so there is no product signal in it (L-033).
+  INFRA_N=$(echo "$FAILED" | jq -r '[.[] | select(.conclusion == "STARTUP_FAILURE" or .steps == 0)] | length')
+  PRODUCT=$(echo "$FAILED" | jq -r '[.[] | select(.conclusion != "STARTUP_FAILURE" and .steps > 0) | .name] | join(", ")')
+  if [[ -n "$PRODUCT" ]]; then
+    BLOCKERS+=("product-red required check(s): $PRODUCT — a step actually failed; fix the code")
+  fi
+  if [[ "$INFRA_N" -gt 0 && -z "$PRODUCT" ]]; then
+    INFRA_NAMES=$(echo "$FAILED" | jq -r '[.[] | select(.conclusion == "STARTUP_FAILURE" or .steps == 0) | .name] | join(", ")')
+    ADMIN_REASONS+=("L-033: $INFRA_N required check(s) failed with the GitHub Actions infra signature (startup_failure / no steps / no runner): $INFRA_NAMES. Re-run once; if it repeats identically — especially concurrently on other open PRs — it is infra, not product. Never report it as remote green.")
+  fi
+fi
+
+# --- 4. tier and posture --------------------------------------------------
+if [[ "$DRAFT" == "true" ]]; then
+  BLOCKERS+=("PR is a draft")
+fi
+if [[ "$MERGEABLE" == "CONFLICTING" ]]; then
+  BLOCKERS+=("branch conflicts with the base — re-sync origin/main first (multi-lane fleet)")
+fi
+
+if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
+  if [[ "$TIER" == "tier-c" ]]; then
+    BLOCKERS+=("Tier C is a human merge gate (Law 7) — no admin path, whatever the CI is doing")
+    ADMIN_REASONS=()
+  elif [[ "$LAUNCHED" -eq 1 ]]; then
+    BLOCKERS+=("post-launch posture (--launched): no admin merge on any red — escalate to the owner")
+    ADMIN_REASONS=()
+  fi
+fi
+
+# --- verdict --------------------------------------------------------------
+if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
+  VERDICT=BLOCKED
+  CODE=1
+elif [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
+  VERDICT=ADMIN-CANDIDATE
+  CODE=4
+else
+  VERDICT=READY
+  CODE=0
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+  jq -n \
+    --arg verdict "$VERDICT" --arg repo "$REPO" --argjson pr "$PR" \
+    --arg tier "$TIER" --arg closes "$CLOSES" \
+    --argjson same_author_review "$SAME_AUTHOR_REVIEW" \
+    --argjson blockers "$(printf '%s\n' ${BLOCKERS[@]+"${BLOCKERS[@]}"} | jq -R . | jq -s 'map(select(. != ""))')" \
+    --argjson admin_reasons "$(printf '%s\n' ${ADMIN_REASONS[@]+"${ADMIN_REASONS[@]}"} | jq -R . | jq -s 'map(select(. != ""))')" \
+    '{verdict:$verdict, repo:$repo, pr:$pr, tier:$tier, closes:$closes,
+      same_author_review:($same_author_review == 1),
+      blockers:$blockers, admin_reasons:$admin_reasons}'
+  exit "$CODE"
+fi
+
+echo "release-preflight $REPO#$PR — $VERDICT"
+echo
+for n in ${NOTES[@]+"${NOTES[@]}"}; do echo "  · $n"; done
+if [[ ${#BLOCKERS[@]} -gt 0 ]]; then
+  echo
+  echo "BLOCKED by:"
+  for b in "${BLOCKERS[@]}"; do echo "  ✗ $b"; done
+fi
+if [[ ${#ADMIN_REASONS[@]} -gt 0 ]]; then
+  echo
+  echo "Not product-red, but not merge-authorized either:"
+  for a in "${ADMIN_REASONS[@]}"; do echo "  ! $a"; done
+  cat <<EOF
+
+Pre-launch admin merge is permitted only if you can post ALL of this on the PR:
+  [ ] local full gate green on the merge tip (name the commit)
+  [ ] VERDICT: APPROVE recorded (or a formal review)
+  [ ] security CLEAR
+  [ ] tier is A or B (this PR: ${TIER:-unlabelled})
+  [ ] the infra evidence above, quoted, not summarised
+Name the skip. Never claim remote CI was green when it was not (L-033).
+EOF
+fi
+exit "$CODE"
