@@ -67,7 +67,9 @@ branch point**. Pre-existing failures are recorded, not inherited and not hidden
 - Money: <paths / actions>
 - Auth and authorization boundaries: <paths, middleware>
 - PII / consent: <paths, models>
-- Destructive or irreversible data and schema operations: <paths>
+- Security boundaries: <headers/CSP config, rate limiting, sandboxing, gate scripts>
+- Destructive or irreversible data and schema operations: <schema/migrations paths,
+  prod-touching scripts, seed/backfill>
 - Secret values, public launches, legal commitments
 
 ### Commit and PR conventions
