@@ -84,26 +84,31 @@ Before a single ACU is spent, the driver runs a gate that **fails closed** — e
 failure below leaves `handoff`/`handoff_sha` queued in loop-state and sends
 nothing:
 
-1. **Resolve the base.** Reviews and handoffs use the target repo's own default
-   branch, resolved from `refs/remotes/origin/HEAD`, then the remote's advertised
-   `HEAD`, then `main`/`master`. The supervisor gets the branch *name* (it opens
-   a PR into it); the reviewer gets whichever form this checkout can actually
-   diff — `main` or `origin/main` — because a worktree parked on a feature branch
-   often has only the remote-tracking ref. A base that resolves to neither, or to
-   nothing at all, blocks the handoff instead of falling back to a guessed `main`.
+1. **Resolve and pin the base.** Reviews and handoffs use the target repo's own
+   default branch, resolved as *both* a name and an exact commit. When an origin
+   is configured, one live `ls-remote --symref` gives the current default branch
+   and its current tip; stale local metadata is not trusted, because
+   `refs/remotes/origin/HEAD` survives a rename and `refs/heads/main` can be many
+   commits behind `origin/main`. A repo with no origin at all falls back to a
+   verified local `main`/`master`. The supervisor gets the branch *name* (it opens
+   a PR into it); the reviewer gets the exact base SHA, for the same reason the
+   head side is pinned. A base that cannot be resolved or confirmed blocks the
+   handoff instead of falling back to a guessed `main`.
 2. **Resolve the SHA.** `handoff_sha` if pinned, otherwise the remote tip. A pin
    that disagrees with the remote tip is refused before a reviewer is spent.
-3. **Make sure the object is actually here.** The remote tip may have been pushed
+3. **Make sure both objects are actually here.** Either tip may have been pushed
    from another worktree, so the commit can be missing from this clone. The driver
    fetches the exact branch (then the exact SHA) and verifies `<sha>^{commit}`
-   resolves locally. A commit nobody here can read cannot be reviewed, and is
-   blocked instead of recorded.
-4. **Require a distinct-vendor review of that exact SHA.** `second-opinion.sh` is
-   run with `--base <resolved base> --branch <sha>`; the runner is excluded from
-   its own review (Law 5). Success writes
-   `gibson/second-opinion.receipt` naming the SHA, base, author, and reviewers.
-   A leftover `gibson/second-opinion.md` proves nothing and does not satisfy the
-   gate — only a matching receipt does.
+   resolves locally — for the base as well as the head. A commit nobody here can
+   read cannot be reviewed, and is blocked instead of recorded.
+4. **Require a distinct-vendor review of that exact diff.** `second-opinion.sh` is
+   run with `--base <base sha> --branch <head sha>` — two exact commits, not two
+   moving names; the runner is excluded from its own review (Law 5). Success
+   writes `gibson/second-opinion.receipt` naming the head branch and SHA, the base
+   branch and SHA, the author, and the reviewers. Reuse requires all of them to
+   match, so a base branch that advances voids the receipt just as a new head
+   commit does. A leftover `gibson/second-opinion.md` proves nothing and does not
+   satisfy the gate — only a matching receipt does.
 5. **Hand off with the pin.** `devin-supervisor.sh handoff --base <base> --sha
    <sha>` re-checks the remote tip and instructs the supervisor to reject the
    handoff if it has moved.

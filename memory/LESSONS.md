@@ -839,12 +839,23 @@ worktree), so the driver wrote a receipt naming a commit no reviewer could read.
 of *this* diff happened." Defaults (`main`) and fallbacks (`git diff BASE`) are
 how a gate keeps returning success after its premise stops holding — and because
 it emits a receipt, the wrong answer is now documented as the right one.
-**Harness fix:** `loop.sh` resolves the target repo's real base (origin/HEAD →
-remote HEAD → main/master), passes it to both `second-opinion.sh` and
-`devin-supervisor.sh`, fetches and verifies `<sha>^{commit}` locally before any
-review, and fails closed on every miss (branch stays queued). `second-opinion.sh`
+**Harness fix:** `loop.sh` resolves the target repo's real base and fails closed
+on every miss (branch stays queued). The first cut pinned only the head, and
+review caught the mirror-image hole: naming the base by branch let a receipt for
+the same head be reused after `main` advanced, which is a different diff. So the
+base is now pinned the same way the head is — when an origin exists, one live
+`ls-remote --symref` yields the current default branch *and* its current tip
+(stale `origin/HEAD` and stale `refs/heads/main` are not trusted); no origin at
+all falls back to a verified local main/master. `second-opinion.sh` gets the exact
+base SHA, `devin-supervisor.sh` gets the branch name it opens the PR into, both
+objects are fetched and verified locally before any review, and the receipt binds
+base name + base SHA + head branch + head SHA + author + reviewers. `second-opinion.sh`
 dies on an unresolvable base or branch instead of falling back to the working
-tree. Regressions in `scripts/tests/loop-handoff.test.sh` (non-main trunk,
-missing local object, unresolvable base/pin) and `scripts/tests/second-opinion.test.sh`.
+tree. Regressions in `scripts/tests/loop-handoff.test.sh` (non-main trunk, stale
+local origin/HEAD, missing local object, remote base advance, unresolvable
+base/pin) and `scripts/tests/second-opinion.test.sh`.
+**Generalisation:** pinning one endpoint of a diff is not pinning the diff. A
+receipt must name every value the comparison depends on, or it certifies a
+comparison nobody performed.
 **Status:** fixed in harness
 **Tags:** #loop #law5 #gates #git #sensors #issue-55

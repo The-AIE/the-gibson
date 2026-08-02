@@ -113,12 +113,14 @@ setup_repo() { # setup_repo [with-remote]
 # A target repo whose trunk is NOT `main`. The driver used to let
 # second-opinion.sh and devin-supervisor.sh fall back to their own `main`
 # default, so every non-main repo was reviewed against a ref that does not
-# exist. `origin_head` picks which metadata the driver has to read it from:
-#   local   — refs/remotes/origin/HEAD is set (the no-network path)
-#   remote  — only the bare remote's HEAD says so (ls-remote --symref fallback)
-#   none    — neither; resolution must fall through to the conventional names
-setup_repo_trunk() { # setup_repo_trunk <trunk> <local|remote|none>
-  local trunk="$1" origin_head="${2:-local}"
+# exist. `origin_head` picks what local metadata the driver must NOT be fooled by:
+#   stale-local — refs/remotes/origin/HEAD points at a decoy; only the remote's
+#                 advertised HEAD names the real trunk, and that is the answer
+#   remote      — no local origin/HEAD at all; same remote-derived answer
+#   none        — no origin; resolution falls back to a local main/master, and a
+#                 repo with neither cannot be reviewed
+setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
+  local trunk="$1" origin_head="${2:-stale-local}"
   rm -rf "$REPO" "$REMOTE"
   mkdir -p "$REPO"
   $GIT init -q "$REPO"
@@ -135,11 +137,13 @@ setup_repo_trunk() { # setup_repo_trunk <trunk> <local|remote|none>
     git -C "$REPO" remote add origin "$REMOTE"
     git -C "$REPO" push -q origin "$trunk" "$BRANCH"
     git -C "$REMOTE" symbolic-ref HEAD "refs/heads/$trunk"
-    if [[ "$origin_head" == "local" ]]; then
-      # Local metadata only — and point the remote's own HEAD somewhere else so
-      # a driver that ignored origin/HEAD would resolve a different answer.
-      git -C "$REPO" remote set-head origin "$trunk"
-      git -C "$REMOTE" symbolic-ref HEAD refs/heads/decoy
+    if [[ "$origin_head" == "stale-local" ]]; then
+      # Cached local metadata that disagrees with the remote — exactly what a
+      # default-branch rename leaves behind. A driver that trusts it resolves
+      # `decoy` and reviews the wrong diff.
+      git -C "$REPO" update-ref refs/remotes/origin/decoy \
+        "$(git -C "$REPO" rev-parse --verify "refs/heads/$trunk")"
+      git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/decoy
     else
       git -C "$REPO" remote set-head origin --delete 2>/dev/null || true
     fi
@@ -259,34 +263,42 @@ run_loop
 if handoff_invoked; then ok "a pin matching the remote tip hands off"
 else bad "a matching pin was wrongly blocked"; fi
 
-echo "a master-trunk repo is reviewed and handed off against master (origin/HEAD)"
-setup_repo_trunk master local
+echo "a master-trunk repo is reviewed against master's exact tip and handed off to master"
+setup_repo_trunk master stale-local
 write_state "$BRANCH" ""
 run_loop
+master_tip=$(git -C "$REPO" rev-parse --verify "refs/heads/master")
 review_base=$(arg_after "$CALLS/second-opinion.args" --base)
 devin_base=$(arg_after "$CALLS/devin.args" --base)
-if [[ "$review_base" == "master" ]]; then
-  ok "the pre-handoff review diffed against master"
+if [[ "$review_base" == "$master_tip" ]]; then
+  ok "the pre-handoff review diffed against master's exact tip $master_tip"
 else
-  bad "review base was '${review_base:-<none>}' — expected master, not the hardcoded default"
+  bad "review base was '${review_base:-<none>}' — expected master's tip $master_tip, not a decoy or the hardcoded default"
 fi
 if [[ "$devin_base" == "master" ]]; then
-  ok "the supervisor handoff carried base master"
+  ok "the supervisor handoff carried the base NAME master"
 else
   bad "handoff base was '${devin_base:-<none>}' — expected master"
+fi
+if grep -qxF "base: master" "$REPO/gibson/second-opinion.receipt" &&
+   grep -qxF "base_sha: $master_tip" "$REPO/gibson/second-opinion.receipt"; then
+  ok "the receipt recorded both the base name and the base SHA"
+else
+  bad "the receipt did not bind base master @ $master_tip"
 fi
 if handoff_invoked; then ok "the non-main handoff completed"
 else bad "a master-trunk repo could not hand off at all"; fi
 
-echo "a master-trunk repo with no local origin/HEAD falls back to the remote's HEAD"
+echo "a master-trunk repo with no local origin/HEAD resolves the base from the remote"
 setup_repo_trunk master remote
 write_state "$BRANCH" ""
 run_loop
+master_tip=$(git -C "$REPO" rev-parse --verify "refs/heads/master")
 review_base=$(arg_after "$CALLS/second-opinion.args" --base)
-if [[ "$review_base" == "master" ]]; then
-  ok "the remote's advertised HEAD resolved the base"
+if [[ "$review_base" == "$master_tip" ]]; then
+  ok "the remote's advertised HEAD resolved the base and its tip"
 else
-  bad "review base was '${review_base:-<none>}' — the ls-remote --symref fallback did not resolve master"
+  bad "review base was '${review_base:-<none>}' — the ls-remote --symref path did not resolve master @ $master_tip"
 fi
 
 echo "a repo whose base cannot be resolved blocks the handoff"
@@ -331,6 +343,85 @@ if grep -qxF -- "$ADVANCED" "$CALLS/devin.args"; then
   ok "the handoff pinned the fetched remote tip"
 else
   bad "the handoff did not pin $ADVANCED"
+fi
+
+echo "a base branch that advances on the remote re-pins the review and voids the receipt"
+# The head side has been pinned to an exact SHA since issue #55; the base side was
+# still a branch NAME. `main` moving under a branch changes the diff just as much
+# as the branch tip moving — and because the receipt only named the base by name,
+# the same head against a newer base looked already-reviewed.
+setup_repo with-remote
+write_state "$BRANCH" ""
+run_loop
+HEAD_SHA=$(head_sha)
+FIRST_BASE=$(git -C "$REPO" rev-parse --verify refs/heads/main)
+if [[ "$(arg_after "$CALLS/second-opinion.args" --base)" == "$FIRST_BASE" ]]; then
+  ok "the first review was pinned to the base tip $FIRST_BASE, not to the name main"
+else
+  bad "the first review base was '$(arg_after "$CALLS/second-opinion.args" --base)' — expected $FIRST_BASE"
+fi
+RECEIPT="$REPO/gibson/second-opinion.receipt"
+if grep -qxF "base_sha: $FIRST_BASE" "$RECEIPT" && grep -qxF "sha: $HEAD_SHA" "$RECEIPT" &&
+   grep -qxF "base: main" "$RECEIPT" && grep -qxF "branch: $BRANCH" "$RECEIPT"; then
+  ok "the receipt bound both endpoints: main @ $FIRST_BASE ... $BRANCH @ $HEAD_SHA"
+else
+  bad "the receipt did not bind both endpoints of the reviewed diff"
+fi
+
+# Advance ONLY the base, from a second clone, so this clone keeps a stale
+# refs/heads/main AND a stale refs/remotes/origin/main.
+BASE_CLONE="$ROOT/base-clone"
+rm -rf "$BASE_CLONE"
+git clone -q "$REMOTE" "$BASE_CLONE"
+git -C "$BASE_CLONE" checkout -q main
+echo "trunk moved" > "$BASE_CLONE/NOTES.md"
+$GIT -C "$BASE_CLONE" add NOTES.md
+$GIT -C "$BASE_CLONE" commit -q -m "advance the base from a second clone"
+git -C "$BASE_CLONE" push -q origin main
+ADVANCED_BASE=$(git -C "$BASE_CLONE" rev-parse HEAD)
+if [[ "$(git -C "$REPO" rev-parse --verify refs/heads/main)" == "$FIRST_BASE" &&
+      "$(git -C "$REPO" rev-parse --verify refs/remotes/origin/main)" == "$FIRST_BASE" ]]; then
+  ok "the target clone's local main and origin/main are both stale"
+else
+  bad "fixture bug: the target clone's base refs are not stale"
+fi
+if git -C "$REPO" rev-parse --verify --quiet "$ADVANCED_BASE^{commit}" >/dev/null 2>&1; then
+  bad "fixture bug: the advanced base commit is already in the target clone"
+else
+  ok "the advanced base tip starts out absent from the target clone"
+fi
+
+# Same head, same author, same reviewers, same base NAME — only the base tip moved.
+: > "$CALLS/second-opinion.args"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/devin.cmds"
+: > "$CALLS/devin.args"
+write_state "$BRANCH" ""
+run_loop
+if review_invoked; then
+  ok "a receipt naming the previous base SHA is not reused once the base advances"
+else
+  bad "the stale receipt was reused against a base that had moved"
+fi
+if [[ "$(arg_after "$CALLS/second-opinion.args" --base)" == "$ADVANCED_BASE" ]]; then
+  ok "the re-review was pinned to the new base tip $ADVANCED_BASE"
+else
+  bad "the re-review base was '$(arg_after "$CALLS/second-opinion.args" --base)' — expected $ADVANCED_BASE"
+fi
+if git -C "$REPO" rev-parse --verify --quiet "$ADVANCED_BASE^{commit}" >/dev/null 2>&1; then
+  ok "the driver fetched the new base object before reviewing against it"
+else
+  bad "the driver reviewed against a base commit it never fetched"
+fi
+if [[ "$(arg_after "$CALLS/devin.args" --base)" == "main" ]]; then
+  ok "the supervisor still received the base NAME main"
+else
+  bad "handoff base was '$(arg_after "$CALLS/devin.args" --base)' — the supervisor needs the branch name"
+fi
+if grep -qxF "base_sha: $ADVANCED_BASE" "$RECEIPT" && grep -qxF "base: main" "$RECEIPT"; then
+  ok "the new receipt records the exact advanced base SHA"
+else
+  bad "the receipt did not record base_sha $ADVANCED_BASE"
 fi
 
 echo "a pinned SHA that cannot be resolved locally blocks without a receipt"
