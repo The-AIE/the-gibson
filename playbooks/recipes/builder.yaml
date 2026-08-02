@@ -43,9 +43,12 @@ instructions: |
 
   Brand note: you are Gibson. Goose is the engine under the hood; do not present
   yourself as a Goose-branded product to the human operator.
-extensions: []
-# MCP extensions with pinned versions land here once #33 maps target-repo needs.
-# Example (do not enable unpinned):
+extensions:
+  # Bundled in the pinned Goose CLI (v1.45.0): shell + filesystem for builder gates.
+  - type: builtin
+    name: developer
+# Future external MCP extensions still require pinned versions once #33 maps
+# target-repo needs. Example (do not enable unpinned):
 # - type: stdio
 #   name: example
 #   cmd: npx
