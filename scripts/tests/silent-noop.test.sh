@@ -8,6 +8,15 @@
 #   still trip — a clock-only "update", an unreadable or missing state file, a
 #   garbage budget — and the one way it must stay quiet: real progress.
 #
+# A NOTE ON `bash -c '…' silent-noop-test "$SENSOR"`
+#   Every scenario below passes a LABEL as $0 and the sensor path as a positional
+#   argument. This is not decoration. `bash -c 'source "$0"' "$SENSOR"` — the
+#   obvious spelling — makes $0 and ${BASH_SOURCE[0]} the same path inside a
+#   genuine source, which is indistinguishable from a direct run to any guard
+#   written as `[[ ${BASH_SOURCE[0]} == $0 ]]`. Tests that lie about how the file
+#   is being loaded cannot pin how it behaves when loaded for real, so $0 stays a
+#   label here and the sensor arrives as data.
+#
 # USAGE
 #   scripts/tests/silent-noop.test.sh
 set -uo pipefail
@@ -45,15 +54,15 @@ EOF
 run_case() { # budget setup_body iteration_body iterations
   env NOOP_BUDGET="$1" bash -c '
     set -uo pipefail
-    source "$0"
-    STATE="$1"
-    eval "$2"
+    source "$1"
+    STATE="$2"
+    eval "$3"
     silent_noop_init
-    for i in $(seq 1 "$4"); do
-      eval "$3"
+    for i in $(seq 1 "$5"); do
+      eval "$4"
       if silent_noop_check 2>/dev/null; then echo PASS; else echo TRIP; fi
     done
-  ' "$SENSOR" "$ROOT/loop-state.md" "$2" "$3" "$4"
+  ' silent-noop-test "$SENSOR" "$ROOT/loop-state.md" "$2" "$3" "$4"
 }
 
 echo "the L-008 failure mode itself"
@@ -117,11 +126,11 @@ echo "the budget is a positive integer or it is the default"
 # warning quotes the offending value back, so the payload appears either way.
 rm -f "$ROOT/pwned"
 out=$(env NOOP_BUDGET="x[\$(touch '$ROOT/pwned')]" bash -c '
-  source "$0"
-  STATE_FILE="$1"; printf "hat: builder\n" > "$STATE_FILE"
+  source "$1"
+  STATE_FILE="$2"; printf "hat: builder\n" > "$STATE_FILE"
   silent_noop_init
   silent_noop_check; silent_noop_check; silent_noop_check; silent_noop_check
-  echo "budget=$NOOP_BUDGET"' "$SENSOR" "$ROOT/loop-state.md" 2>&1)
+  echo "budget=$NOOP_BUDGET"' silent-noop-test "$SENSOR" "$ROOT/loop-state.md" 2>&1)
 [[ -e "$ROOT/pwned" ]] \
   && bad "NOOP_BUDGET was evaluated as arithmetic — command substitution ran" \
   || ok "a command-substitution NOOP_BUDGET does not execute"
@@ -130,10 +139,10 @@ echo "$out" | grep -q 'budget=3' \
   || bad "invalid NOOP_BUDGET did not fall back ($out)"
 
 for badval in 0 -1 abc '2x' ' '; do
-  out=$(env NOOP_BUDGET="$badval" bash -c 'source "$0"; echo "$NOOP_BUDGET"' "$SENSOR" 2>/dev/null)
+  out=$(env NOOP_BUDGET="$badval" bash -c 'source "$1"; echo "$NOOP_BUDGET"' silent-noop-test "$SENSOR" 2>/dev/null)
   [[ "$out" == "3" ]] && ok "rejects NOOP_BUDGET='$badval'" || bad "accepted NOOP_BUDGET='$badval' (got $out)"
 done
-out=$(env NOOP_BUDGET=7 bash -c 'source "$0"; echo "$NOOP_BUDGET"' "$SENSOR" 2>/dev/null)
+out=$(env NOOP_BUDGET=7 bash -c 'source "$1"; echo "$NOOP_BUDGET"' silent-noop-test "$SENSOR" 2>/dev/null)
 [[ "$out" == "7" ]] && ok "honours a valid NOOP_BUDGET" || bad "mangled a valid NOOP_BUDGET (got $out)"
 
 echo
@@ -143,11 +152,11 @@ echo "it survives the driver's shell settings"
 write_state "$ROOT/strict.md" "2026-08-02T00:00:00Z"
 out=$(env -u NOOP_BUDGET bash -c '
   set -euo pipefail
-  source "$0"
-  STATE_FILE="$1"
+  source "$1"
+  STATE_FILE="$2"
   silent_noop_init
   silent_noop_check && echo SURVIVED
-' "$SENSOR" "$ROOT/strict.md" 2>&1)
+' silent-noop-test "$SENSOR" "$ROOT/strict.md" 2>&1)
 echo "$out" | grep -q SURVIVED \
   && ok "clean iteration under set -euo pipefail" \
   || bad "died under set -euo pipefail ($out)"
@@ -170,7 +179,7 @@ write_state "$ROOT/nohash.md" "2026-08-02T00:00:00Z"
 
 # Control: with a working hasher the same state fingerprints as a real digest, so a
 # `sentinel:unhashable` below is the shadow's doing and not some unrelated breakage.
-out=$(bash -c 'source "$0"; STATE_FILE="$1"; _silent_noop_fp' "$SENSOR" "$ROOT/nohash.md" 2>&1)
+out=$(bash -c 'source "$1"; STATE_FILE="$2"; _silent_noop_fp' silent-noop-test "$SENSOR" "$ROOT/nohash.md" 2>&1)
 [[ "$out" == state:* ]] \
   && ok "control: a working hasher still yields state:<digest>" \
   || bad "control case did not produce a digest (got '$out')"
@@ -180,22 +189,22 @@ out=$(bash -c 'source "$0"; STATE_FILE="$1"; _silent_noop_fp' "$SENSOR" "$ROOT/n
 # silent_noop_check would pass on macOS and kill the driver on CI's bash 5.
 out=$(PATH="$FAKEBIN:$PATH" bash -c '
   set -euo pipefail
-  source "$0"
-  STATE_FILE="$1"
+  source "$1"
+  STATE_FILE="$2"
   _silent_noop_fp
   printf " SURVIVED"
-' "$SENSOR" "$ROOT/nohash.md" 2>&1)
+' silent-noop-test "$SENSOR" "$ROOT/nohash.md" 2>&1)
 [[ "$out" == "sentinel:unhashable SURVIVED" ]] \
   && ok "a failing hasher yields sentinel:unhashable and returns 0" \
   || bad "failing hasher killed _silent_noop_fp or changed its output (got '$out')"
 
 out=$(PATH="$FAKEBIN:$PATH" bash -c '
   set -euo pipefail
-  source "$0"
-  STATE_FILE="$1"
+  source "$1"
+  STATE_FILE="$2"
   silent_noop_init
   silent_noop_check && printf SURVIVED
-' "$SENSOR" "$ROOT/nohash.md" 2>/dev/null)
+' silent-noop-test "$SENSOR" "$ROOT/nohash.md" 2>/dev/null)
 [[ "$out" == "SURVIVED" ]] \
   && ok "init + check survive a failing hasher under set -euo pipefail" \
   || bad "a failing hasher killed the driver mid-iteration (got '$out')"
@@ -206,17 +215,134 @@ out=$(PATH="$FAKEBIN:$PATH" bash -c '
 # or raw-content fallback — either would read these writes as progress and fail open.
 out=$(NOOP_BUDGET=2 PATH="$FAKEBIN:$PATH" bash -c '
   set -uo pipefail
-  source "$0"
-  STATE_FILE="$1"
+  source "$1"
+  STATE_FILE="$2"
   silent_noop_init
   for i in 1 2 3; do
     printf "hat: builder\nround: %s\n" "$i" > "$STATE_FILE"
     if silent_noop_check 2>/dev/null; then echo PASS; else echo TRIP; fi
   done
-' "$SENSOR" "$ROOT/nohash.md")
+' silent-noop-test "$SENSOR" "$ROOT/nohash.md")
 [[ "$(echo "$out" | head -1)" == PASS && "$(echo "$out" | grep -c TRIP)" -ge 1 ]] \
   && ok "repeated un-hashable state accrues and trips NOOP_BUDGET" \
   || bad "un-hashable state never trips the budget ($(echo "$out" | tr '\n' ' '))"
+
+echo
+echo "--help is an Ask-Contract answer, not a stub"
+# scripts/README.md: "Every script prints Ask-Contract style help via --help".
+# A sourceable library is the easiest place to skip that and the worst place to:
+# it is the one file in scripts/ whose correct direct invocation is *none*, so an
+# operator who runs it has no other way to find out what it wants from them.
+[[ -x "$SENSOR" ]] \
+  && ok "the sensor is executable, so --help is reachable without 'bash'" \
+  || bad "the sensor is not executable — 'scripts/silent-noop.sh --help' cannot run"
+
+help_out=$("$SENSOR" --help 2>"$ROOT/help.err"); help_rc=$?
+[[ $help_rc -eq 0 ]] \
+  && ok "direct --help exits 0" \
+  || bad "direct --help exited $help_rc"
+[[ ! -s "$ROOT/help.err" ]] \
+  && ok "direct --help writes nothing to stderr" \
+  || bad "direct --help polluted stderr ($(tr '\n' ' ' < "$ROOT/help.err"))"
+
+# Each field the Ask Contract owes a non-technical operator, plus the two facts
+# that are specific to this file: the budget knob, and that it is a library which
+# is not yet wired in. Missing any one of them turns help into decoration.
+for field in \
+  "WHAT I'M ASKING" \
+  "WHAT IT DOES" \
+  "WHY" \
+  "RISKS" \
+  "USAGE" \
+  "EXAMPLES" \
+  "NOOP_BUDGET"
+do
+  echo "$help_out" | grep -qF "$field" \
+    && ok "--help documents $field" \
+    || bad "--help is missing the $field section"
+done
+echo "$help_out" | grep -q 'source' \
+  && ok "--help says it must be sourced" \
+  || bad "--help never tells the operator to source it"
+echo "$help_out" | grep -qF 'NOT yet wired into scripts/loop.sh' \
+  && ok "--help states it is not yet wired into loop.sh" \
+  || bad "--help hides that the sensor is unwired — an operator would assume it is live"
+
+echo
+echo "a direct run without --help fails loudly"
+# The bug this guards: a library run by hand falls off the end having defined some
+# functions in a shell that is about to exit, and reports success. That is a
+# silent no-op — the exact failure class this file exists to detect — so the guard
+# has to be louder than the thing it is guarding against.
+for arg_case in "" "--bogus" "check"; do
+  if [[ -z "$arg_case" ]]; then
+    direct_out=$("$SENSOR" 2>"$ROOT/direct.err"); direct_rc=$?
+    label="no arguments"
+  else
+    direct_out=$("$SENSOR" "$arg_case" 2>"$ROOT/direct.err"); direct_rc=$?
+    label="'$arg_case'"
+  fi
+  [[ $direct_rc -ne 0 ]] \
+    && ok "direct run with $label exits non-zero (got $direct_rc)" \
+    || bad "direct run with $label exited 0 — a silent no-op certified as success"
+  [[ -z "$direct_out" ]] \
+    && ok "direct run with $label prints nothing to stdout" \
+    || bad "direct run with $label wrote usage to stdout instead of stderr ($direct_out)"
+  grep -q 'ERROR' "$ROOT/direct.err" && grep -qF 'USAGE' "$ROOT/direct.err" \
+    && ok "direct run with $label explains itself on stderr" \
+    || bad "direct run with $label failed without usage on stderr"
+done
+
+# -h is the other half of the documented spelling; it must behave like --help.
+"$SENSOR" -h >/dev/null 2>"$ROOT/h.err"
+[[ $? -eq 0 && ! -s "$ROOT/h.err" ]] \
+  && ok "-h behaves like --help" \
+  || bad "-h did not print help cleanly"
+
+echo
+echo "sourcing is silent and leaves the functions behind"
+# The guard must not fire on a source, and must not narrate one either: loop.sh
+# sources this at startup, and a library that greets its caller on stdout
+# corrupts any driver that pipes or captures output.
+src_out=$(env -u NOOP_BUDGET bash -c 'source "$1"' silent-noop-test "$SENSOR" 2>"$ROOT/src.err")
+[[ -z "$src_out" && ! -s "$ROOT/src.err" ]] \
+  && ok "sourcing prints nothing on stdout or stderr" \
+  || bad "sourcing was noisy (out='$src_out' err='$(tr '\n' ' ' < "$ROOT/src.err")')"
+
+# Silence is worthless if the guard exited before defining anything, so pin that
+# all three functions survive the source and that a real cycle still works.
+out=$(env -u NOOP_BUDGET bash -c '
+  set -euo pipefail
+  source "$1"
+  for fn in silent_noop_init silent_noop_check _silent_noop_fp; do
+    declare -f "$fn" >/dev/null || { echo "MISSING:$fn"; exit 1; }
+  done
+  STATE_FILE="$2"
+  printf "hat: builder\nround: 1\n" > "$STATE_FILE"
+  silent_noop_init
+  printf "hat: builder\nround: 2\n" > "$STATE_FILE"
+  silent_noop_check && echo FUNCTIONAL
+' silent-noop-test "$SENSOR" "$ROOT/sourced.md" 2>&1)
+[[ "$out" == "FUNCTIONAL" ]] \
+  && ok "a sourced sensor still defines all three functions and passes a real iteration" \
+  || bad "sourcing left the sensor unusable (got '$out')"
+
+# The hostile case for the guard, and the reason the rest of this file keeps $0 a
+# label: a caller is free to set $0 to this file's own path while genuinely
+# sourcing it. `[[ ${BASH_SOURCE[0]} == $0 ]]` cannot tell that apart from a
+# direct run and would exit 2 out of the middle of a driver. Deciding on `return`
+# legality instead is what makes the guard immune, so pin it — this is the only
+# case here that deliberately spells the invocation the wrong way.
+out=$(env -u NOOP_BUDGET bash -c '
+  set -euo pipefail
+  source "$0"
+  STATE_FILE="$1"
+  printf "hat: builder\n" > "$STATE_FILE"
+  silent_noop_init && echo SOURCED-NOT-EXECUTED
+' "$SENSOR" "$ROOT/spoof.md" 2>&1)
+[[ "$out" == "SOURCED-NOT-EXECUTED" ]] \
+  && ok "a source whose \$0 is the sensor's own path is not mistaken for a direct run" \
+  || bad "the guard misread a source as a direct run when \$0 was spoofed (got '$out')"
 
 echo
 echo "it does not wire itself into the driver"
