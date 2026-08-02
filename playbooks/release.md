@@ -90,14 +90,12 @@ Canonical: /path/to/target
 
 0. **Delivery control** (when merge = Production ship): audit write path healthy
    (docs/23). Unprotected prod ref → stop; request harden (human apply).
-1. `Closes #<issue>` present; issue contract checkboxes verified (sensors, not vibes).
-2. CI green: gibson-gate, tests, security hard-fail layers. **No merge while
-   required checks are pending or red.**
 0. `release-preflight.sh <pr>` — verdict READY, or an ADMIN-CANDIDATE you have
    explicitly authorized below. BLOCKED is never merged past.
 1. `Closes #<issue>` present; issue contract checkboxes verified (sensors, not
    vibes). **Partial ship?** Run with `--partial`: it must close *nothing*.
-2. CI green: gibson-gate, tests, security hard-fail layers.
+2. CI green: gibson-gate, tests, security hard-fail layers. **No merge while
+   required checks are pending or red.**
 3. Review `VERDICT: APPROVE`; UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
 5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
