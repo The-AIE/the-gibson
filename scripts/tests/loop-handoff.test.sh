@@ -1732,14 +1732,42 @@ if [[ "$sup_rc" -eq 75 ]]; then
 else
   bad "supervisor enterprise halt must exit 75 (got $sup_rc stderr=$(tr '\n' ' ' <"$sup_err"))"
 fi
-# github.com origin with enterprise GH_HOST must NOT query (host mismatch).
+# With the enterprise latch still present, switching origin to github.com must
+# stay fail-closed and never query github.com (source-bound latch).
 set_origin_github_url "https://github.com/acme/widget.git"
+: > "$CALLS/devin.cmds"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-enterprise-source-mismatch.err"
+if run_loop_err "$errf"; then
+  ok "enterprise latch + github.com origin exits cleanly (still stopped)"
+else
+  bad "enterprise latch + github.com origin must exit 0 (rc=$?)"
+fi
+if handoff_invoked; then
+  bad "enterprise latch + github.com origin must not hand off"
+else
+  ok "enterprise latch + github.com origin suppresses handoff (source-bound)"
+fi
+if gh_log_empty; then
+  ok "enterprise latch + github.com origin leaves the entire gh-call log empty"
+else
+  bad "enterprise latch + github.com origin must not touch gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+if grep -q 'without querying a different repo' "$errf" || grep -q 'still latched for' "$errf"; then
+  ok "enterprise latch + github.com origin prints source-mismatch recovery guidance"
+else
+  bad "enterprise latch + github.com origin silent (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+# First-ever host mismatch (no remote latch): fail open with disabled warning.
+rm -f "$REPO/gibson/halt-latch"
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
 : > "$CALLS/gh.log"
 errf="$ROOT/halt-enterprise-mismatch.err"
 if run_loop_err "$errf"; then
-  ok "github.com origin with GH_HOST=enterprise fails open"
+  ok "github.com origin with GH_HOST=enterprise fails open when no latch"
 else
-  bad "github.com vs enterprise GH_HOST must fail open (rc=$?)"
+  bad "github.com vs enterprise GH_HOST must fail open without latch (rc=$?)"
 fi
 if gh_log_empty; then
   ok "github.com origin with enterprise GH_HOST leaves the entire gh-call log empty"
@@ -1750,6 +1778,11 @@ if grep -q 'remote halt check disabled' "$errf"; then
   ok "enterprise GH_HOST mismatch logs disabled warning"
 else
   bad "enterprise GH_HOST mismatch silent (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if handoff_invoked; then
+  ok "enterprise GH_HOST mismatch without latch still allows handoff (fail-open)"
+else
+  bad "enterprise GH_HOST mismatch without latch blocked handoff"
 fi
 unset GH_HOST
 unset GH_STUB_BEHAVIOR
@@ -2036,6 +2069,283 @@ else
   bad "valid https origin broken after dot-segment reject (stderr=$(tr '\n' ' ' <"$errf"))"
 fi
 unset GH_STUB_BEHAVIOR
+
+# ---------------------------------------------------------------------------
+# Source-bound latch, .github allow, concurrent launch serialization (#71)
+# ---------------------------------------------------------------------------
+
+echo "halt latch: source-bound — changed origin must not clear/query a different repo"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+# Latch on acme/source-a via label halt.
+set_origin_github_url "https://github.com/acme/source-a.git"
+export GH_STUB_BEHAVIOR=label-halt
+export GH_STUB_EXPECT_REPO="acme/source-a"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-source-bind-1.err"
+if run_loop_err "$errf"; then
+  ok "source-a label halt exits cleanly"
+else
+  bad "source-a label halt must exit 0 (rc=$?)"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] \
+    && grep -q 'remote_kind=label' "$REPO/gibson/halt-latch" \
+    && grep -q 'remote_host=github.com' "$REPO/gibson/halt-latch" \
+    && grep -q 'remote_slug=acme/source-a' "$REPO/gibson/halt-latch"; then
+  ok "remote latch stores host+slug for source-a"
+else
+  bad "remote latch missing host/slug binding (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+fi
+halts_src1=$(journal_halts)
+# Point origin at a different, clear repo. Must stay fail-closed and never
+# query source-b (would wrongly clear the source-a latch).
+set_origin_github_url "https://github.com/acme/source-b.git"
+export GH_STUB_BEHAVIOR=ok-clear
+export GH_STUB_EXPECT_REPO="acme/source-b"
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-source-bind-mismatch.err"
+if run_loop_err "$errf"; then
+  ok "changed origin after remote latch exits cleanly (still stopped)"
+else
+  bad "changed origin after remote latch must exit 0 (rc=$?)"
+fi
+if handoff_invoked; then
+  bad "changed origin must NOT clear source-a latch via source-b (handoff ran)"
+else
+  ok "changed origin does not hand off (source-bound fail-closed)"
+fi
+if gh_log_empty; then
+  ok "changed origin makes zero gh calls against the new repo"
+else
+  bad "changed origin must not query source-b (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+if grep -q 'previously confirmed remote kill switch still latched' "$errf" \
+    || grep -q 'stopping without querying a different repo' "$errf" \
+    || journal_says "without querying a different repo"; then
+  ok "changed origin prints explicit recovery guidance"
+else
+  bad "changed origin silent about source mismatch (stderr=$(tr '\n' ' ' <"$errf"); journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'remote_slug=acme/source-a' "$REPO/gibson/halt-latch"; then
+  ok "source-a latch survives origin change to source-b"
+else
+  bad "source-a latch was cleared or rewritten by source-b origin (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+fi
+halts_src2=$(journal_halts)
+if [[ "$halts_src2" -eq "$halts_src1" ]]; then
+  ok "source mismatch relaunch does not re-journal (already journaled)"
+else
+  # First journal may or may not have marked journaled depending on path; either
+  # 1 total or same count is fine — never grow unboundedly.
+  if [[ "$halts_src2" -le 2 && "$halts_src1" -ge 1 ]]; then
+    ok "source mismatch keeps journal bounded (halts=$halts_src2)"
+  else
+    bad "source mismatch journal spam (before=$halts_src1 after=$halts_src2)"
+  fi
+fi
+# Supervisor mirror: must refuse without querying source-b.
+sup_err="$ROOT/supervisor-source-bind-mismatch.err"
+: > "$CALLS/gh.log"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "must refuse under mismatched source latch" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]] && gh_log_empty; then
+  ok "supervisor refuses mismatched-source latch (exit 75, zero gh)"
+else
+  bad "supervisor mismatched-source handling failed (rc=$sup_rc log=$(tr '\n' '|' <"$CALLS/gh.log") stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+if grep -q 'without querying a different repo' "$sup_err" || grep -q 'still latched for' "$sup_err"; then
+  ok "supervisor prints source-mismatch recovery guidance"
+else
+  bad "supervisor silent on source mismatch (stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+# Same-source positive clear still resumes.
+set_origin_github_url "https://github.com/acme/source-a.git"
+export GH_STUB_BEHAVIOR=ok-clear
+export GH_STUB_EXPECT_REPO="acme/source-a"
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/gh.log"
+if run_loop; then
+  ok "same-source positive clear after origin restore permits launch"
+else
+  bad "same-source positive clear failed (rc=$?)"
+fi
+if handoff_invoked; then
+  ok "same-source positive clear hands off"
+else
+  bad "same-source positive clear never reached supervisor"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'remote_kind=label' "$REPO/gibson/halt-latch" 2>/dev/null; then
+  bad "same-source clear must remove remote latch"
+else
+  ok "same-source clear removes remote latch"
+fi
+unset GH_STUB_BEHAVIOR
+unset GH_STUB_EXPECT_REPO
+
+echo "remote halt: valid owner/.github is accepted (HTTPS/scp/ssh) and executes gh paths"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=label-halt
+export GH_STUB_EXPECT_REPO="acme/.github"
+for form in \
+  "https://github.com/acme/.github.git" \
+  "git@github.com:acme/.github.git" \
+  "ssh://git@github.com/acme/.github.git"; do
+  set_origin_github_url "$form"
+  : > "$CALLS/gh.log"
+  errf="$ROOT/halt-dotgithub-$(printf '%s' "$form" | tr -c 'A-Za-z0-9' '_').err"
+  if run_loop_err "$errf" && grep -q 'remote halt: gibson-halt label' "$errf"; then
+    ok "owner/.github via $form hits label halt"
+  else
+    bad "owner/.github via $form must run remote stop (stderr=$(tr '\n' ' ' <"$errf"); log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+  fi
+  if grep -q 'issue list' "$CALLS/gh.log" && grep -q 'acme/.github' "$CALLS/gh.log"; then
+    ok "owner/.github via $form executes expected gh --repo path"
+  else
+    bad "owner/.github via $form did not query acme/.github (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+  fi
+  # Clear latch so the next form starts fresh (otherwise source-bound latch
+  # may hold closed if form parsing differed — all should be same slug).
+  rm -f "$REPO/gibson/halt-latch"
+  rm -f "$JOURNAL"
+done
+# Exact . / .. still rejected with zero gh (already covered above; pin owner/.).
+set_origin_github_url "https://github.com/owner/."
+export GH_STUB_BEHAVIOR=label-halt
+unset GH_STUB_EXPECT_REPO
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-dot-repo.err"
+if run_loop_err "$errf" && gh_log_empty && grep -q 'remote halt check disabled' "$errf"; then
+  ok "origin owner/. is rejected with empty gh log + disabled warning"
+else
+  bad "origin owner/. rejection failed (stderr=$(tr '\n' ' ' <"$errf"); log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+set_origin_github_url "https://github.com/owner/.."
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-dotdot-repo-again.err"
+if run_loop_err "$errf" && gh_log_empty; then
+  ok "origin owner/.. still executes zero gh paths next to .github allow"
+else
+  bad "origin owner/.. must stay empty-gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+# Supervisor accepts .github too.
+set_origin_github_url "https://github.com/acme/.github.git"
+export GH_STUB_BEHAVIOR=label-halt
+export GH_STUB_EXPECT_REPO="acme/.github"
+: > "$CALLS/gh.log"
+sup_err="$ROOT/supervisor-dotgithub.err"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "must refuse on .github label halt" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]] && grep -q 'acme/.github' "$CALLS/gh.log"; then
+  ok "supervisor queries acme/.github and exits 75 on label halt"
+else
+  bad "supervisor .github path failed (rc=$sup_rc log=$(tr '\n' '|' <"$CALLS/gh.log") stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+unset GH_STUB_BEHAVIOR
+unset GH_STUB_EXPECT_REPO
+
+echo "halt latch: 20 concurrent local-HALT launches → one journal section, valid latch, zero work"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+state_before=$(cat "$REPO/gibson/loop-state.md")
+: > "$REPO/gibson/HALT"
+: > "$CALLS/gh.log"
+: > "$CALLS/devin.cmds"
+: > "$CALLS/second-opinion.count"
+# Record runner invocations via a unique stamp file the hermes stub would create
+# if work ever started (HERMES_CMD runs only after stop_if_halted allows).
+work_stamp="$ROOT/concurrent-work.stamp"
+rm -f "$work_stamp"
+conc_dir="$ROOT/concurrent-halts"
+rm -rf "$conc_dir"
+mkdir -p "$conc_dir"
+# Launch 20 simultaneous processes against the same repo/latch/journal.
+i=0
+while [[ $i -lt 20 ]]; do
+  (
+    HERMES_CMD="touch '$work_stamp'; cat >/dev/null" \
+    "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+      --once --supervisor devin >/dev/null 2>"$conc_dir/err.$i" || true
+  ) &
+  i=$((i + 1))
+done
+# Bounded wait: lock + halt path should finish well under 30s; avoid deadlock hang.
+conc_waited=0
+while [[ $conc_waited -lt 60 ]]; do
+  # shellcheck disable=SC2009
+  if ! jobs -rp 2>/dev/null | grep -q .; then
+    break
+  fi
+  sleep 0.5
+  conc_waited=$((conc_waited + 1))
+done
+# Reap; if anything is still alive we have a deadlock.
+still_running=0
+# shellcheck disable=SC2046
+if jobs -rp 2>/dev/null | grep -q .; then
+  still_running=1
+  # shellcheck disable=SC2046
+  kill $(jobs -rp) 2>/dev/null || true
+  wait 2>/dev/null || true
+else
+  wait 2>/dev/null || true
+fi
+if [[ "$still_running" -eq 0 ]]; then
+  ok "20 concurrent HALT launches completed without deadlock"
+else
+  bad "20 concurrent HALT launches deadlocked or exceeded wait budget"
+fi
+halts_conc=$(journal_halts)
+if [[ "$halts_conc" -eq 1 ]]; then
+  ok "20 concurrent HALT launches produce exactly one journal halt section"
+else
+  bad "20 concurrent HALT launches journaled $halts_conc sections (want 1; journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+fi
+if [[ -f "$REPO/gibson/halt-latch" ]] && grep -q 'local_kind=file' "$REPO/gibson/halt-latch"; then
+  ok "20 concurrent HALT launches leave a valid local latch"
+else
+  bad "20 concurrent HALT launches left invalid/missing latch (latch=$([[ -f $REPO/gibson/halt-latch ]] && cat "$REPO/gibson/halt-latch" || echo absent))"
+fi
+if [[ -f "$work_stamp" ]]; then
+  bad "20 concurrent HALT launches must never start runner work"
+else
+  ok "20 concurrent HALT launches start zero runner work"
+fi
+if handoff_invoked || review_invoked; then
+  bad "20 concurrent HALT launches must not invoke review/handoff"
+else
+  ok "20 concurrent HALT launches invoke neither review nor handoff"
+fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$state_before" ]]; then
+  ok "20 concurrent HALT launches leave loop-state byte-identical"
+else
+  bad "20 concurrent HALT launches rewrote loop-state"
+fi
+# Ordinary single launch after concurrent burst still fast-path (no stuck lock).
+errf="$ROOT/halt-after-concurrent.err"
+if run_loop_err "$errf"; then
+  ok "post-concurrent single HALT launch still exits cleanly (lock released)"
+else
+  bad "post-concurrent launch failed — lock may be stuck (rc=$? stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if [[ -d "$REPO/gibson/halt-lock" ]]; then
+  bad "halt-lock dir must not remain after launches (stuck lock)"
+else
+  ok "halt-lock dir cleaned up after concurrent launches"
+fi
+rm -f "$REPO/gibson/HALT"
 
 echo "remote halt: mid-cycle child recheck journals halt (exit 75), never supervisor rejected"
 # Loop iteration-top sees clear (in-process cache warm). Real child supervisor

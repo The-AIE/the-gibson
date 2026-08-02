@@ -234,11 +234,14 @@ fi
 #     GitHub outage does not brick every project, with a "degraded" warning.
 #   - After a confirmed remote halt has been latched under gibson/halt-latch:
 #     fails CLOSED until a successful recheck positively clears both remote
-#     paths. launchd KeepAlive must not resume work just because the recheck
-#     hit rate limiting.
+#     paths on the SAME host+slug that was latched. launchd KeepAlive must
+#     not resume work just because the recheck hit rate limiting, and changing
+#     origin to a clear repo must not clear a latch from another source.
 #
 # Journaling is once-per-activation via the same latch: relaunches while the
-# stop is still active do not append duplicate "## … · halt" sections.
+# stop is still active do not append duplicate "## … · halt" sections. The
+# read/decide/journal/latch transition is cross-process locked so concurrent
+# launches wait and observe the first latch (or fail closed) rather than race.
 #
 # A remote halt leaves loop-state untouched (no default state created, no
 # rewrite of an existing one). Supervisor handoffs are suppressed. The child
@@ -247,9 +250,11 @@ fi
 # cadence halt is journaled as a halt, not "supervisor rejected".
 
 # Conservative GitHub owner / repo segment validation before any gh/API path
-# interpolation. Rejects "." / ".." and anything outside a narrow character set
-# so a hostile remote.origin.url cannot walk relative path segments into
-# repos/${slug}/contents/... endpoints.
+# interpolation. Rejects exact "." / ".." and anything outside a narrow character
+# set (including percent-encoding) so a hostile remote.origin.url cannot walk
+# relative path segments into repos/${slug}/contents/... endpoints.
+# Valid leading-dot repo names (notably owner/.github) are allowed; only the
+# exact dot segments are banned for repos.
 origin_segment_ok() {
   local kind="$1" seg="$2"
   case "$seg" in
@@ -263,11 +268,9 @@ origin_segment_ok() {
     [[ "$seg" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ || "$seg" =~ ^[A-Za-z0-9]$ ]]
     return $?
   fi
-  # Repos: alnum + . _ - but not "." / ".." (already rejected); no leading/trailing . or -
-  case "$seg" in
-    .*|*.) return 1 ;;
-  esac
-  [[ "$seg" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ || "$seg" =~ ^[A-Za-z0-9]$ ]]
+  # Repos: alnum + . _ - including leading-dot names like .github.
+  # Exact "." / ".." already rejected above.
+  [[ "$seg" =~ ^[A-Za-z0-9._-]+$ ]]
   return $?
 }
 
@@ -405,8 +408,62 @@ REMOTE_HALT_KIND=""
 
 # --- Persistent halt latch (gibson/halt-latch) --------------------------------
 # local_kind=file|env, remote_kind=label|sentinel|confirmed
+# remote_host + remote_slug bind a remote latch to the exact origin that
+# confirmed it — only that host+slug may positively clear; a changed/missing
+# source stays fail-closed and never queries a different repo.
 # journaled flags suppress KeepAlive relaunch spam; remote kind keeps
-# fail-closed across degraded rechecks until a positive clear.
+# fail-closed across degraded rechecks until a positive same-source clear.
+#
+# Cross-process lock (mkdir + owner PID) serializes read/decide/journal/latch
+# so concurrent launches cannot double-journal or race past a halt.
+
+HALT_LOCK_DIR="$STATE_DIR/halt-lock"
+HALT_LOCK_HELD=0
+
+halt_lock_release() {
+  if [[ "${HALT_LOCK_HELD:-0}" -ne 1 ]]; then
+    return 0
+  fi
+  HALT_LOCK_HELD=0
+  rm -f "${HALT_LOCK_DIR}/pid" 2>/dev/null || true
+  rmdir "$HALT_LOCK_DIR" 2>/dev/null || true
+}
+
+# Acquire exclusive halt transition lock. Wait for peers (ordinary launchd is
+# uncontended and returns immediately). Steal only when the owner PID is dead.
+# Returns 1 after a bounded wait so a stuck lock fails closed (no work).
+halt_lock_acquire() {
+  local tries=0 max_tries=400 owner
+  mkdir -p "$STATE_DIR"
+  while [[ $tries -lt $max_tries ]]; do
+    if mkdir "$HALT_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "${HALT_LOCK_DIR}/pid"
+      HALT_LOCK_HELD=1
+      return 0
+    fi
+    if [[ -f "${HALT_LOCK_DIR}/pid" ]]; then
+      owner=$(cat "${HALT_LOCK_DIR}/pid" 2>/dev/null || true)
+      if [[ -n "$owner" ]] && ! kill -0 "$owner" 2>/dev/null; then
+        # Stale lock: previous owner is gone.
+        rm -f "${HALT_LOCK_DIR}/pid" 2>/dev/null || true
+        rmdir "$HALT_LOCK_DIR" 2>/dev/null || true
+      fi
+    elif [[ -d "$HALT_LOCK_DIR" ]]; then
+      # Empty/corrupt lock dir without a live pid file — treat as stale.
+      rmdir "$HALT_LOCK_DIR" 2>/dev/null || true
+    fi
+    # ~50ms; fall back to 1s if fractional sleep is unavailable.
+    sleep 0.05 2>/dev/null || sleep 1
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+# Ensure lock is dropped on abnormal exit while held.
+if [[ -z "${_GIBSON_HALT_LOCK_TRAP:-}" ]]; then
+  _GIBSON_HALT_LOCK_TRAP=1
+  trap 'halt_lock_release' EXIT
+fi
 
 halt_latch_field() {
   local key="$1" line
@@ -423,12 +480,16 @@ halt_latch_load() {
   LATCH_REMOTE_KIND=$(halt_latch_field remote_kind)
   LATCH_REMOTE_REASON=$(halt_latch_field remote_reason)
   LATCH_REMOTE_JOURNALED=$(halt_latch_field remote_journaled)
+  LATCH_REMOTE_HOST=$(halt_latch_field remote_host)
+  LATCH_REMOTE_SLUG=$(halt_latch_field remote_slug)
   LATCH_LOCAL_KIND=${LATCH_LOCAL_KIND:-}
   LATCH_LOCAL_REASON=${LATCH_LOCAL_REASON:-}
   LATCH_LOCAL_JOURNALED=${LATCH_LOCAL_JOURNALED:-0}
   LATCH_REMOTE_KIND=${LATCH_REMOTE_KIND:-}
   LATCH_REMOTE_REASON=${LATCH_REMOTE_REASON:-}
   LATCH_REMOTE_JOURNALED=${LATCH_REMOTE_JOURNALED:-0}
+  LATCH_REMOTE_HOST=${LATCH_REMOTE_HOST:-}
+  LATCH_REMOTE_SLUG=${LATCH_REMOTE_SLUG:-}
 }
 
 halt_latch_save() {
@@ -446,9 +507,42 @@ halt_latch_save() {
     printf 'remote_kind=%s\n' "${LATCH_REMOTE_KIND:-}"
     printf 'remote_reason=%s\n' "${LATCH_REMOTE_REASON:-}"
     printf 'remote_journaled=%s\n' "${LATCH_REMOTE_JOURNALED:-0}"
+    printf 'remote_host=%s\n' "${LATCH_REMOTE_HOST:-}"
+    printf 'remote_slug=%s\n' "${LATCH_REMOTE_SLUG:-}"
     printf 'updated_at=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   } > "$tmp"
   mv -f "$tmp" "$HALT_LATCH_FILE"
+}
+
+# True when the current remote-halt origin (GH_HOST-validated host + slug)
+# exactly matches the host+slug stored on the remote latch. Missing latch
+# fields, unparseable/mismatched origins, or host changes all return false.
+remote_latch_source_matches() {
+  local cur_host cur_slug lat_host lat_slug
+  if [[ -z "${LATCH_REMOTE_HOST:-}" || -z "${LATCH_REMOTE_SLUG:-}" ]]; then
+    return 1
+  fi
+  if ! origin_remote_halt_slug; then
+    return 1
+  fi
+  cur_host=$(printf '%s' "${ORIGIN_PARSE_HOST:-}" | tr '[:upper:]' '[:lower:]')
+  cur_slug="${ORIGIN_HALT_SLUG:-}"
+  lat_host=$(printf '%s' "$LATCH_REMOTE_HOST" | tr '[:upper:]' '[:lower:]')
+  lat_slug="$LATCH_REMOTE_SLUG"
+  [[ -n "$cur_host" && -n "$cur_slug" && "$cur_host" == "$lat_host" && "$cur_slug" == "$lat_slug" ]]
+}
+
+# Fail-closed reason when a remote latch exists but current origin cannot
+# prove it is the same host+slug (changed, missing, unparseable, incomplete).
+remote_latch_source_mismatch_reason() {
+  local latched_src current_src
+  latched_src="${LATCH_REMOTE_HOST:-unknown}/${LATCH_REMOTE_SLUG:-unknown}"
+  if origin_remote_halt_slug 2>/dev/null; then
+    current_src="${ORIGIN_PARSE_HOST:-?}/${ORIGIN_HALT_SLUG:-?}"
+  else
+    current_src="missing/unparseable/non-matching (${ORIGIN_HALT_SKIP_REASON:-no detail})"
+  fi
+  printf '%s' "remote halt: previously confirmed remote kill switch still latched for ${latched_src}, but current origin is ${current_src} — stopping without querying a different repo. Restore origin to ${latched_src} and clear the remote stop successfully, or after operator verification explicitly remove gibson/halt-latch."
 }
 
 # Observe a still-active local stop. Sets HALT_REASON / HALT_SHOULD_JOURNAL /
@@ -481,27 +575,39 @@ halt_latch_clear_local() {
   halt_latch_save
 }
 
+# Observe a remote stop on the given host+slug (required). Only that source
+# may later positively clear this latch.
 halt_latch_observe_remote() {
-  local kind="$1" reason="$2"
+  local kind="$1" reason="$2" host="${3:-}" slug="${4:-}"
+  local lh ls nh
   halt_latch_load
   HALT_REASON="$reason"
   HALT_LATCH_SIDE="remote"
-  if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
-    # Still-active remote stop already journaled (same or any remote kind).
-    HALT_SHOULD_JOURNAL=0
-    # Refresh kind/reason when we have a fresher live observation.
-    if [[ -n "$kind" && "$kind" != "confirmed" ]]; then
-      LATCH_REMOTE_KIND="$kind"
-      LATCH_REMOTE_REASON="$reason"
-      halt_latch_save
+  if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" == "1" \
+        && -n "$LATCH_REMOTE_HOST" && -n "$LATCH_REMOTE_SLUG" \
+        && -n "$host" && -n "$slug" ]]; then
+    lh=$(printf '%s' "$LATCH_REMOTE_HOST" | tr '[:upper:]' '[:lower:]')
+    ls="$LATCH_REMOTE_SLUG"
+    nh=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+    if [[ "$lh" == "$nh" && "$ls" == "$slug" ]]; then
+      # Still-active same-source remote stop already journaled.
+      HALT_SHOULD_JOURNAL=0
+      # Refresh kind/reason when we have a fresher live observation.
+      if [[ -n "$kind" && "$kind" != "confirmed" ]]; then
+        LATCH_REMOTE_KIND="$kind"
+        LATCH_REMOTE_REASON="$reason"
+        halt_latch_save
+      fi
+      return 0
     fi
-  else
-    HALT_SHOULD_JOURNAL=1
-    LATCH_REMOTE_KIND="${kind:-confirmed}"
-    LATCH_REMOTE_REASON="$reason"
-    LATCH_REMOTE_JOURNALED=0
-    halt_latch_save
   fi
+  HALT_SHOULD_JOURNAL=1
+  LATCH_REMOTE_KIND="${kind:-confirmed}"
+  LATCH_REMOTE_REASON="$reason"
+  LATCH_REMOTE_JOURNALED=0
+  LATCH_REMOTE_HOST="$host"
+  LATCH_REMOTE_SLUG="$slug"
+  halt_latch_save
 }
 
 halt_latch_clear_remote() {
@@ -512,6 +618,8 @@ halt_latch_clear_remote() {
   LATCH_REMOTE_KIND=""
   LATCH_REMOTE_REASON=""
   LATCH_REMOTE_JOURNALED=0
+  LATCH_REMOTE_HOST=""
+  LATCH_REMOTE_SLUG=""
   halt_latch_save
 }
 
@@ -626,7 +734,8 @@ remote_halted_live() {
 }
 
 # True when a remote halt path is active. Honors REMOTE_HALT_INTERVAL cache and
-# the persistent remote latch (fail-closed after a prior confirmation).
+# the persistent remote latch (fail-closed after a prior confirmation; source-
+# bound so only the same host+slug may positively clear).
 remote_halted() {
   local age
   if [[ -n "$_REMOTE_HALT_CACHE" ]]; then
@@ -654,26 +763,47 @@ remote_halted() {
     fi
   fi
   _REMOTE_HALT_CHECKED_AT=$iter
+
+  # Source-bound gate: if a remote latch exists for a different/missing origin,
+  # stay fail-closed and never query or clear against the new repo.
+  halt_latch_load
+  if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+    if ! remote_latch_source_matches; then
+      HALT_REASON=$(remote_latch_source_mismatch_reason)
+      info "$HALT_REASON"
+      HALT_LATCH_SIDE="remote"
+      if [[ "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+        HALT_SHOULD_JOURNAL=0
+      else
+        HALT_SHOULD_JOURNAL=1
+      fi
+      _REMOTE_HALT_CACHE="halted"
+      return 0
+    fi
+  fi
+
   if remote_halted_live; then
     _REMOTE_HALT_CACHE="halted"
-    halt_latch_observe_remote "${REMOTE_HALT_KIND:-confirmed}" "$HALT_REASON"
+    halt_latch_observe_remote "${REMOTE_HALT_KIND:-confirmed}" "$HALT_REASON" \
+      "${ORIGIN_PARSE_HOST:-}" "${ORIGIN_HALT_SLUG:-}"
     return 0
   fi
   case "${REMOTE_HALT_STATUS:-}" in
     clear)
-      # Positive clear of both remote paths — drop the remote latch so a fresh
-      # launch is allowed. First-ever clear with no latch is a no-op.
+      # Positive clear of both remote paths on the SAME host+slug — drop the
+      # remote latch so a fresh launch is allowed. First-ever clear with no
+      # latch is a no-op. (Mismatched sources never reach here: gated above.)
       halt_latch_clear_remote
       _REMOTE_HALT_CACHE="clear"
       return 1
       ;;
     degraded|disabled)
-      # Fail-closed only when a prior confirmation latched the remote stop.
-      # First-ever API failure (no latch) stays fail-open.
+      # Fail-closed only when a prior confirmation latched the remote stop on
+      # this same source. First-ever API failure (no latch) stays fail-open.
       halt_latch_load
       if [[ -n "$LATCH_REMOTE_KIND" ]]; then
-        HALT_REASON="${LATCH_REMOTE_REASON:-remote halt: previously confirmed remote kill switch still latched — stopping (GitHub recheck degraded; remove latch only after a successful clear)}"
-        info "remote halt latch held closed after degraded/disabled recheck (source=${LATCH_REMOTE_KIND})"
+        HALT_REASON="${LATCH_REMOTE_REASON:-remote halt: previously confirmed remote kill switch still latched — stopping (GitHub recheck degraded; restore the original source and clear it successfully, or after operator verification remove gibson/halt-latch)}"
+        info "remote halt latch held closed after degraded/disabled recheck (source=${LATCH_REMOTE_KIND} host=${LATCH_REMOTE_HOST:-?} slug=${LATCH_REMOTE_SLUG:-?})"
         HALT_LATCH_SIDE="remote"
         if [[ "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
           HALT_SHOULD_JOURNAL=0
@@ -738,15 +868,23 @@ journal_halt() {
 
 # Exit cleanly on any active kill switch. Call before state init and at every
 # iteration top so a remote halt never materializes a default loop-state.
-# Journal at most once per latch activation (KeepAlive-safe).
+# Journal at most once per latch activation (KeepAlive-safe). Serialized with
+# a cross-process lock so concurrent launches wait and observe the first latch
+# (or fail closed) rather than racing duplicate journal sections or work.
 stop_if_halted() {
+  if ! halt_lock_acquire; then
+    info "kill switch transition lock unavailable — stopping fail-closed (concurrent launch still owning the lock, or stuck lock; no work started)"
+    exit 0
+  fi
   if halted; then
     if [[ "${HALT_SHOULD_JOURNAL:-1}" -eq 1 ]]; then
       journal_halt
     fi
+    halt_lock_release
     info "kill switch set — stopping cleanly"
     exit 0
   fi
+  halt_lock_release
 }
 
 # Ensure loop-state exists (and has handoff fields) only AFTER a clean kill-

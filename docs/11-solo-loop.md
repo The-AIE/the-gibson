@@ -104,22 +104,34 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   handoffs. A persistent runtime latch under the target repo's
   `gibson/halt-latch` (not a tracked Gibson source file) records the source and
   reason so **launchd KeepAlive relaunches** do not append duplicate journal
-  sections while the stop is still active. Removing `gibson/HALT` /
-  unsetting `GIBSON_HALT` clears the local side of the latch; a successful
-  remote recheck that positively clears **both** remote paths clears the remote
-  side and permits a fresh launch.
+  sections while the stop is still active. The read → decide → journal → latch
+  transition is serialized with a cross-process lock (`gibson/halt-lock`, mkdir
+  + owner PID, stale recovery, trap cleanup) so concurrent launches wait and
+  observe the first latch (or fail closed) rather than racing duplicate journal
+  sections or starting work; ordinary single-process launchd stays uncontended
+  and fast. Removing `gibson/HALT` / unsetting `GIBSON_HALT` clears the local
+  side of the latch; a successful remote recheck that positively clears **both**
+  remote paths **on the same host+slug that was latched** clears the remote side
+  and permits a fresh launch.
+  Remote latches store the exact configured GitHub host and validated
+  `owner/repo` slug that confirmed the stop. Changing origin to a different
+  (even clear) repository, or losing a parseable matching origin, **stays
+  fail-closed** and does **not** query or clear against the new repo — restore
+  the original source and clear it successfully, or after operator verification
+  explicitly remove `gibson/halt-latch`.
   GitHub/API failure on either remote path:
   - **First-ever** (no remote latch yet) **fails open** to the local file/env
     checks — the loop keeps running — with an explicit
     `remote halt check degraded` warning.
   - **After a confirmed remote halt** has been latched, a later degraded /
     unauthorized / rate-limited recheck **stays fail-closed** until a successful
-    check positively clears both remote paths. KeepAlive must not resume work
-    just because GitHub flaked.
+    same-source check positively clears both remote paths. KeepAlive must not
+    resume work just because GitHub flaked.
   A non-matching origin host (GitLab, Bitbucket, unconfigured Enterprise, SSH
-  host aliases), an unparseable origin, or path segments like `.` / `..` in the
+  host aliases), an unparseable origin, or exact path segments `.` / `..` in the
   origin URL **never** query `gh` against an unrelated same-named github.com
-  repo (explicit `disabled` warning; zero remote-halt `gh` calls). The same
+  repo (explicit `disabled` warning; zero remote-halt `gh` calls). Valid
+  leading-dot repository names such as `owner/.github` are accepted. The same
   paths suppress Devin supervisor handoffs
   ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
   `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
