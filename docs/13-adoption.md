@@ -66,6 +66,27 @@ From `ci/` and `templates/target-repo/`:
 3. Playwright config + `tests/e2e/flows/` scaffold with preview-URL wiring.
 4. Schema-guard workflow when a schema exists.
 5. DCO check if the repo signs commits.
+6. `scripts/preview-url.sh` **and** `scripts/ux-surface.sh` — the UX and DAST
+   jobs need both. Without the surface filter every PR is treated as
+   UI-affecting; without the preview resolver a UI PR fails closed.
+
+### Preview access (do this at adoption, not at the first red gate)
+
+UX eval, ZAP, and the posture probe all target the **preview deployment**. If the
+preview is unreachable, those jobs now fail rather than skipping green — a missing
+result is not a pass (L-012). Two settings decide whether they can reach it:
+
+| Setting | Where | Why |
+|---|---|---|
+| `VERCEL_AUTOMATION_BYPASS_SECRET` | repo secret; value from Vercel → Project → Settings → Deployment Protection | Without it, every CI request to a protected preview gets a 401 login page, and any gate that "passes" against it is lying |
+| Preview deployments enabled for PRs | Vercel project | No deployment, no target |
+
+**Which files count as user-visible** is a per-repo question. The defaults assume a
+conventional `app/` `components/` `public/` layout; a repo shaped differently adds
+`.gibson/ux-surface.conf` (one regex per line, `!` prefix for exceptions). Get this
+wrong in the permissive direction and you have silently switched the UX gate off for
+those paths — so verify with `scripts/ux-surface.sh --diff main` on a known UI PR
+before trusting it.
 
 Calibrate, don't transplant: budgets (Lighthouse, size) start at Gibson defaults and
 get tuned to the repo's reality in the adoption PR.
@@ -76,6 +97,20 @@ Run every gate once. Everything that fails becomes the **baseline** — recorded
 hidden. File burn-down issues (report-only → hard-fail promotion schedule per gate,
 doc 08). The gates go hard-fail on *new* regressions immediately; on the whole
 codebase when the burn-down completes.
+
+**A promotion to hard-fail is not done until the promoted path has run.** Static
+sensors — a test that greps the workflow yaml, a baseline file that says the flow is
+now required — go green whether or not the job ever executed. That is exactly how a
+Playwright suite was promoted to hard-fail and merged while CI skipped it every
+single run (L-011). Close a burn-down issue only when one of these is true, and say
+which on the issue:
+
+- one CI run executed the promoted path and was green (link the run), or
+- an explicit, dated deferral is recorded with the local/prod evidence standing in
+  for it.
+
+`gibson-ux-eval` now annotates every run where the contract flows did not execute,
+so "it looked green" stops being available as an answer.
 
 ## Step 5 — Wire the fleet
 

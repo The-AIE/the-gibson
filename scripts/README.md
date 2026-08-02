@@ -19,8 +19,10 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`loop.sh`](loop.sh) `--runner … --repo …` | Solo-loop driver ([docs/11](../docs/11-solo-loop.md)): kill switch, hat dispatch, error budget, journal. `--escalate-after N` gets a cross-vendor second opinion before the budget runs out; `--supervisor devin` forwards the branch named by loop-state's `handoff:` field. |
 | [`second-opinion.sh`](second-opinion.sh) `--repo … [--author grok]` | Cross-vendor read-only review of a diff ([docs/20](../docs/20-multi-model-orchestration.md) rule 1). Refuses to let a runner review its own work; writes `gibson/second-opinion.md`. |
 | [`devin-supervisor.sh`](devin-supervisor.sh) `ensure\|status\|wake\|handoff` | Persistent Devin cloud supervisor ([docs/22](../docs/22-devin-cloud-supervisor.md)): reviews the diff and owns GitHub. Wakes a dead session via `DEVIN_WEBHOOK_URL`, falling back to the API. |
-| [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
+| [`preview-url.sh`](preview-url.sh) `<pr> [--bypass] [--probe]` | Resolve PR Vercel preview URL from GitHub deployments — only from a **success** status, so a building deployment never gets graded. `--bypass` uses `VERCEL_AUTOMATION_BYPASS_SECRET` for protected previews; `--probe` turns a 401/403 into a loud error instead of a URL. Default timeout 300s under `CI`. |
+| [`ux-surface.sh`](ux-surface.sh) `--pr <n> \| --diff <base> \| --files …` | Does this change touch a user-visible surface? Exit 0 = none (the UX gate may skip), 1 = ui (it must run and produce a result). Per-repo patterns in `.gibson/ux-surface.conf`. |
 | [`deploy-audit.sh`](deploy-audit.sh) `--url …` | Doc 17 inspect: scorecard report + top-5 shell. |
+| [`tests/ux-surface.test.sh`](tests/ux-surface.test.sh) | Sensors for the UX path filter in both directions (L-034 skip vs. L-012 false skip). |
 | [`tests/release-claim.test.sh`](tests/release-claim.test.sh) | Sensors for the release-claim contract (L-009 / L-024 / L-027 / L-037). Temp git repos only — no network, no `gh`. |
 | [`upstream-sync.sh`](upstream-sync.sh) | Doc 18 sync: fetch upstream, merge branch, override-shadow report, sync PR; Tier C when gates change. |
 

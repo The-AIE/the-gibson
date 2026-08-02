@@ -10,6 +10,31 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+A skipped UX or DAST gate is now either earned or a failure.
+
+- **`scripts/ux-surface.sh`** (new) — classifies a diff as UI-affecting or not, so
+  `gibson-ux-eval` can skip a pure-library PR instantly instead of waiting five
+  minutes on a preview it will never use (L-034). Per-repo patterns live in
+  `.gibson/ux-surface.conf`; the defaults assume a conventional `app/`
+  `components/` `public/` layout. If the script is not vendored, CI assumes UI.
+- **`ci/ux-eval.yml`, `ci/security.yml`** — when a PR *does* touch a user-visible
+  surface and no preview resolves, the job now **fails** instead of setting
+  `skip=1` and reporting green. That silent skip took UX, ZAP, and the posture
+  probe out of two Tier-B merges (L-012). `ux-eval` also annotates any run where
+  the contract flows did not execute, so a hard-fail promotion cannot be closed on
+  a path CI never ran (L-011).
+- **`scripts/preview-url.sh`** — only accepts a deployment whose status is
+  `success` (no more grading a still-building deployment), defaults to a 300s
+  timeout under `CI`, and adds `--bypass` (uses `VERCEL_AUTOMATION_BYPASS_SECRET`
+  for protected previews) and `--probe` (a 401/403 is reported as protection, not
+  returned as a working URL).
+- **Docs:** `docs/13-adoption.md` gains the preview-access secrets and the rule that
+  a hard-fail promotion is unproven until the path has executed once.
+- **Migration:** repos with protected previews **must** add
+  `VERCEL_AUTOMATION_BYPASS_SECRET` or their UI PRs will now go red where they
+  previously went green-by-skipping. That is the intended change, but it is not
+  silent — set the secret and vendor `ux-surface.sh` in the same PR.
+
 The release hat stops re-diagnosing the same three merge calls.
 
 - **`scripts/release-preflight.sh`** — read-only pre-merge verdict, exit 0 READY /

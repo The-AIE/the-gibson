@@ -72,27 +72,25 @@ jobs:
         id: preview
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
           set -e
-          # Prefer Gibson script if vendored
-          if [ -x scripts/preview-url.sh ]; then
-            url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 180 || true)
-          else
-            url=""
+          echo "::add-mask::${VERCEL_AUTOMATION_BYPASS_SECRET:-__unset__}"
+          if [ ! -x scripts/preview-url.sh ]; then
+            echo "::error::scripts/preview-url.sh is not vendored — DAST cannot run and a skipped DAST is not a pass (docs/08)."
+            exit 1
           fi
-          if [ -z "$url" ]; then
-            # Fallback: first vercel.app deployment status
-            url=$(gh api "repos/${{ github.repository }}/deployments?sha=${{ github.event.pull_request.head.sha }}" \
-              --jq '.[0].id' 2>/dev/null | head -1 | xargs -I{} gh api "repos/${{ github.repository }}/deployments/{}/statuses" --jq '.[0].environment_url // empty' || true)
-          fi
-          if [ -z "$url" ]; then
-            echo "No preview URL yet — skipping ZAP (not a silent pass on Tier C; annotate)"
-            echo "skip=1" >> "$GITHUB_OUTPUT"
-            exit 0
+          bypass=""
+          if [ -n "${VERCEL_AUTOMATION_BYPASS_SECRET:-}" ]; then bypass="--bypass"; fi
+          # No preview means no DAST result. A missing result is not a green
+          # gate — the old skip=1 path let two Tier-B PRs merge with ZAP,
+          # posture, and UX all silently unrun (L-012).
+          if ! url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 300 --probe $bypass 2>err.txt); then
+            echo "::error::No usable preview — ZAP baseline did not run, so this check is a MISSING RESULT, not a pass. $(cat err.txt)"
+            exit 1
           fi
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "skip=0" >> "$GITHUB_OUTPUT"
-          echo "Preview: $url"
       - name: ZAP baseline scan
         if: steps.preview.outputs.skip != '1'
         uses: zaproxy/action-baseline@v0.12.0
@@ -112,16 +110,19 @@ jobs:
       - name: Resolve preview + probe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
         run: |
           set -e
+          echo "::add-mask::${VERCEL_AUTOMATION_BYPASS_SECRET:-__unset__}"
           if [ ! -x scripts/posture-probe.sh ]; then
             echo "posture-probe.sh not vendored — skip"
             exit 0
           fi
-          url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 180 || true)
-          if [ -z "$url" ]; then
-            echo "No preview; skip posture"
-            exit 0
+          bypass=""
+          if [ -n "${VERCEL_AUTOMATION_BYPASS_SECRET:-}" ]; then bypass="--bypass"; fi
+          if ! url=$(./scripts/preview-url.sh "${{ github.event.pull_request.number }}" --timeout 300 --probe $bypass 2>err.txt); then
+            echo "::error::No usable preview — posture probe did not run (missing result, not a pass; L-012). $(cat err.txt)"
+            exit 1
           fi
           ./scripts/posture-probe.sh "$url" --no-burst
 
