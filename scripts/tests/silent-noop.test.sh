@@ -345,6 +345,23 @@ out=$(env -u NOOP_BUDGET bash -c '
   || bad "the guard misread a source as a direct run when \$0 was spoofed (got '$out')"
 
 echo
+echo "doctrine pins the clock key the sensor excludes"
+# The sensor drops only a column-zero `updated:` line (`awk '!/^updated:/'`).
+# playbooks/loop-step.md is what hats actually follow; if it says a free-form
+# "timestamp UTC" and an agent writes `timestamp:` / `updated_at:` / an indented
+# line, the filter stops removing it and a clock-only bump looks like progress —
+# the L-008 failure this sensor exists to catch. Pin the canonical key name.
+PLAYBOOK="$SCRIPT_DIR/../../playbooks/loop-step.md"
+if [[ -f "$PLAYBOOK" ]] \
+  && grep -q 'updated: <UTC timestamp>' "$PLAYBOOK" \
+  && grep -q 'column-zero' "$PLAYBOOK"
+then
+  ok "loop-step end-of-step obligation pins column-zero updated:"
+else
+  bad "loop-step does not pin the canonical updated: field — sensor exclusion can drift"
+fi
+
+echo
 echo "it does not wire itself into the driver"
 # The wiring is a deliberate follow-up; this pins that the PR did not sneak it in.
 grep -q 'silent-noop' "$SCRIPT_DIR/../loop.sh" \
