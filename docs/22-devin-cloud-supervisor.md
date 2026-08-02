@@ -206,11 +206,17 @@ still apply. The kill switch stops everything, including handoffs — and it is 
 - an open issue carrying the `gibson-halt` label
 - a `.gibson-halt` sentinel on the remote default branch
 
-`loop.sh` reuses its remote-check cache before every handoff (no duplicate API
-call in the same cadence window); `devin-supervisor.sh handoff` also
-refuses when any of those are active, so a by-hand handoff cannot bypass a
-remote stop. GitHub/API errors on the remote checks fail open (with a degraded
-warning) so a GitHub outage does not brick handoffs that are otherwise clear.
+`loop.sh` reuses its **in-process** remote-check cache for its own pre-handoff
+gate (no duplicate poll inside the same cadence window). Separately,
+`devin-supervisor.sh handoff` always performs a **fresh live recheck** — by-hand
+safety and a mid-cadence phone stop still win — which may spend another pair of
+`gh` calls. Kill-switch refusal exits **75** (not a generic error) so the loop
+journals a halt and leaves the branch queued rather than writing "supervisor
+rejected". Remote paths run only when origin's host matches `GH_HOST` (default
+`github.com`). GitHub/API errors and non-matching/unparseable origins fail open
+(with a degraded/disabled warning) so a GitHub outage or a GitLab/Bitbucket
+origin does not brick handoffs that are otherwise clear, and never queries an
+unrelated same-named github.com repository.
 
 ---
 [← 21 · Operator readiness](21-operator-readiness.md) · [Home](../index.md) · [23 · Delivery control →](23-delivery-control.md)

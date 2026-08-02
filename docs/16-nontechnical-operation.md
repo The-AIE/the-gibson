@@ -154,9 +154,11 @@ away from the machine, you still have an off switch — no terminal, no SSH.
 **What I'm asking:** On the GitHub mobile app, open any issue on the project and
 add the label `gibson-halt`.
 
-**What it does:** Within about one work cycle the unattended loop notices the
-label, stops cleanly, and will not hand more work to the cloud supervisor. Your
-live site is not touched; only the automatic worker pauses.
+**What it does:** Within up to a few work cycles (default: up to three
+iterations of the hot loop; every iteration if the loop is in single-step mode)
+the unattended loop notices the label, stops cleanly, and will not hand more
+work to the cloud supervisor. Your live site is not touched; only the automatic
+worker pauses.
 
 **Why:** So you can freeze the crew from another room or another city without
 needing the computer that is running it.

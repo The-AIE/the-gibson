@@ -20,13 +20,15 @@ RISKS
   - Unattended runs spend tokens / subscription quota (Grok flat-rate preferred).
   - Can open PRs and push when the runner has write permission.
   - Stop with the gibson/HALT file or GIBSON_HALT=1 env (checked unconditionally).
-    When gh is available the driver also honors two remote kill paths on a
-    bounded cadence (every iteration with --once; every GIBSON_REMOTE_HALT_INTERVAL
-    iterations in a hot loop, default 3): an open issue with the gibson-halt
-    label, or a .gibson-halt sentinel on the remote default branch. Either
-    journals the halt, leaves loop-state untouched, and suppresses supervisor
-    handoffs. GitHub/API failures fail open to the local file/env checks and log
-    a degraded remote-check warning.
+    When gh is available and origin's host matches GH_HOST (default github.com;
+    set GH_HOST for GitHub Enterprise), the driver also honors two remote kill
+    paths on a bounded cadence (every iteration with --once; every
+    GIBSON_REMOTE_HALT_INTERVAL iterations in a hot loop, default 3): an open
+    issue with the gibson-halt label, or a .gibson-halt sentinel on the remote
+    default branch. Either journals the halt, leaves loop-state untouched, and
+    suppresses supervisor handoffs. Non-GitHub/unparseable origins and
+    GitHub/API failures fail open to the local file/env checks with an explicit
+    degraded/disabled warning (no gh queries against unrelated same-slug repos).
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
@@ -78,8 +80,16 @@ ENV
   GIBSON_HALT=1                 local kill switch (always honored)
   GIBSON_REMOTE_HALT_INTERVAL   re-check remote label/sentinel every N iterations
                                 (default: 1 with --once, 3 for hot loops). A halt
-                                is still detected within N iterations; results are
-                                cached so supervisor_handoff does not re-query.
+                                is still detected within N iterations. The loop
+                                process caches live results across its own
+                                iteration-top / pre-handoff checks; the child
+                                devin-supervisor.sh deliberately rechecks live
+                                (may spend another pair of gh calls) and exits 75
+                                on kill-switch refusal so the driver journals a
+                                halt, not a supervisor rejection.
+  GH_HOST                       GitHub host for remote halt (default github.com).
+                                Only origins on this host enable gh remote-halt
+                                queries (set for GitHub Enterprise).
 
 EXAMPLES
   ./scripts/loop.sh --runner grok --repo ~/Code/acme-app
@@ -169,8 +179,9 @@ failures=0
 # Remote halt cadence (issue #71). --once always re-checks every iteration;
 # hot loops default to every 3 so a phone label still lands within a few steps
 # without burning a pair of API calls on every single hat. Override with
-# GIBSON_REMOTE_HALT_INTERVAL. The cache is also what keeps supervisor_handoff
-# from duplicating the iteration-top query.
+# GIBSON_REMOTE_HALT_INTERVAL. The in-process cache is shared by iteration-top
+# and supervisor_handoff's pre-check; the child process still does its own
+# fresh live recheck (see kill-switch exit 75 below).
 if [[ -n "${GIBSON_REMOTE_HALT_INTERVAL:-}" ]]; then
   REMOTE_HALT_INTERVAL="$GIBSON_REMOTE_HALT_INTERVAL"
 elif [[ "$ONCE" -eq 1 ]]; then
@@ -199,11 +210,15 @@ fi
 #   - gibson/HALT file
 #   - GIBSON_HALT=1
 #
-# Remote (read-only, cached for REMOTE_HALT_INTERVAL iterations — checked at
-# iteration top and reused by supervisor_handoff so a handoff does not spend a
-# second pair of API calls):
+# Remote (read-only, cached for REMOTE_HALT_INTERVAL iterations within this
+# process — checked at iteration top and reused by the pre-handoff gate so the
+# loop itself does not double-poll in the same cadence window):
 #   - open issue carrying the gibson-halt label
 #   - .gibson-halt sentinel committed on the remote default branch
+# Only when origin's host matches GH_HOST (default github.com). GitLab/
+# Bitbucket/other hosts and unparseable origins never query gh (would hit an
+# unrelated same-named github.com repo); they fail open with an explicit
+# disabled warning once per live check.
 #
 # Network/API failure fails OPEN to the local checks: the loop keeps running
 # rather than bricking on GitHub downtime, and a clear "degraded" warning is
@@ -211,18 +226,30 @@ fi
 #
 # A remote halt journals the reason and leaves loop-state untouched (no default
 # state created, no rewrite of an existing one). Supervisor handoffs are
-# suppressed. That is the issue #71 contract.
+# suppressed. The child devin-supervisor.sh deliberately rechecks live (by-hand
+# safety; may spend another pair of gh calls) and exits 75 on kill-switch
+# refusal so a mid-cadence halt is journaled as a halt, not "supervisor
+# rejected". That is the issue #71 contract.
 
-# Parse owner/repo from a git remote URL. Supports the normal GitHub forms:
+# Parse host + owner/repo from a git remote URL. Supports:
 #   https://github.com/owner/repo.git
+#   https://github.com/owner/repo.git/   (trailing slash before/after .git)
 #   git@github.com:owner/repo.git
 #   ssh://git@github.com/owner/repo.git
 # Uses remote.origin.url (not get-url) so url.*.insteadOf rewrites used in tests
 # and some operators' SSH helpers do not hide the logical GitHub slug.
-# Empty on unparseable input — callers skip the remote check.
-origin_slug_from_url() {
-  local url="$1" rest
+# Sets ORIGIN_PARSE_HOST and ORIGIN_PARSE_SLUG (empty when unparseable).
+# Does not gate on GH_HOST — callers that talk to gh must compare the host.
+origin_parse_url() {
+  local url="$1" rest host
+  ORIGIN_PARSE_HOST=""
+  ORIGIN_PARSE_SLUG=""
   [[ -n "$url" ]] || return 0
+  # Trailing slashes first, then .git, then any slash left after stripping .git
+  # so …/repo.git/ becomes …/repo (not …/repo.git as a bogus two-segment slug).
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
   url="${url%.git}"
   while [[ "$url" == */ ]]; do
     url="${url%/}"
@@ -230,30 +257,76 @@ origin_slug_from_url() {
   case "$url" in
     git@*:*)
       # scp-like: git@host:owner/repo
-      rest="${url#*:}"
+      rest="${url#git@}"
+      host="${rest%%:*}"
+      rest="${rest#*:}"
       ;;
     ssh://*|https://*|http://*|git://*)
       # scheme://[userinfo@]host[:port]/owner/repo
       rest="${url#*://}"
-      rest="${rest#*@}"
+      if [[ "$rest" == *@* ]]; then
+        rest="${rest#*@}"
+      fi
+      host="${rest%%/*}"
       rest="${rest#*/}"
+      # Drop optional :port from host
+      host="${host%%:*}"
       ;;
     *)
-      rest="$url"
+      return 0
       ;;
   esac
   # Exactly two path segments (owner/repo). Reject schemes that survived, ports,
   # or deeper paths — a bad slug would silently blind both remote checks.
   case "$rest" in
     ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
-    */*) printf '%s\n' "$rest" ;;
+    */*)
+      ORIGIN_PARSE_HOST="$host"
+      ORIGIN_PARSE_SLUG="$rest"
+      ;;
   esac
+}
+
+# owner/repo only (any host). Empty when unparseable. Cosmetic callers may use
+# this; remote-halt callers must also validate the host against GH_HOST.
+origin_slug_from_url() {
+  origin_parse_url "$1"
+  [[ -n "$ORIGIN_PARSE_SLUG" ]] && printf '%s\n' "$ORIGIN_PARSE_SLUG"
+  return 0
 }
 
 origin_slug() {
   local url
   url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || true
   origin_slug_from_url "$url"
+}
+
+# Resolve the slug for remote-halt gh queries only when origin host matches
+# GH_HOST (default github.com). Sets ORIGIN_HALT_SLUG or ORIGIN_HALT_SKIP_REASON
+# (and leaves slug empty). Used by remote_halted_live so warnings fire once per
+# live check, not from pure helpers.
+origin_remote_halt_slug() {
+  local url expected got
+  ORIGIN_HALT_SLUG=""
+  ORIGIN_HALT_SKIP_REASON=""
+  url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || true
+  if [[ -z "$url" ]]; then
+    ORIGIN_HALT_SKIP_REASON="no origin remote URL configured"
+    return 1
+  fi
+  origin_parse_url "$url"
+  if [[ -z "$ORIGIN_PARSE_SLUG" || -z "$ORIGIN_PARSE_HOST" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin URL unparseable as host/owner/repo (got url=${url})"
+    return 1
+  fi
+  expected=$(printf '%s' "${GH_HOST:-github.com}" | tr '[:upper:]' '[:lower:]')
+  got=$(printf '%s' "$ORIGIN_PARSE_HOST" | tr '[:upper:]' '[:lower:]')
+  if [[ "$got" != "$expected" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin host '${ORIGIN_PARSE_HOST}' does not match GH_HOST (${GH_HOST:-github.com}); remote stop is GitHub-only"
+    return 1
+  fi
+  ORIGIN_HALT_SLUG="$ORIGIN_PARSE_SLUG"
+  return 0
 }
 
 # Default branch name as origin currently advertises via symbolic HEAD.
@@ -271,8 +344,8 @@ remote_default_branch() {
 }
 
 # Cache: empty = never checked; "halted" / "clear"; checked_at is the iter of
-# the last live poll. supervisor_handoff reuses the same cache so it does not
-# double the API cost of the iteration-top check.
+# the last live poll. In-process only: supervisor_handoff reuses it so the loop
+# does not double-poll, but the child process always rechecks live.
 _REMOTE_HALT_CACHE=""
 _REMOTE_HALT_CHECKED_AT=-999999
 HALT_REASON=""
@@ -282,11 +355,14 @@ remote_halted_live() {
   if ! command -v gh >/dev/null 2>&1; then
     return 1
   fi
-  local slug out ec def_branch
-  slug=$(origin_slug)
-  if [[ -z "$slug" ]]; then
+  local slug out ec def_branch label_degraded=0
+  if ! origin_remote_halt_slug; then
+    # Once per live check (this function), not per helper call — unparseable or
+    # non-GH_HOST origins must not silently disable the phone stop.
+    info "remote halt check disabled: ${ORIGIN_HALT_SKIP_REASON} — continuing with local HALT/GIBSON_HALT only (zero gh remote-halt queries)"
     return 1
   fi
+  slug="$ORIGIN_HALT_SLUG"
 
   # 1) gibson-halt label on any open issue (live poll; removal lets a fresh
   #    launch run because this is re-checked on cadence, not process-start-only).
@@ -297,6 +373,9 @@ remote_halted_live() {
   ec=$?
   set -e
   if [[ $ec -ne 0 ]]; then
+    # Missing/forbidden/wrong repo usually lands here. Preserve this degraded
+    # evidence; do not let a later sentinel 404 present a trustworthy "clear".
+    label_degraded=1
     info "remote halt check degraded: gibson-halt label query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
   elif printf '%s' "$out" | grep -q '[0-9]'; then
     HALT_REASON="remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
@@ -323,8 +402,14 @@ remote_halted_live() {
     info "$HALT_REASON"
     return 0
   fi
-  # 404 Not Found = no sentinel (clear). Anything else is a degraded check.
+  # 404 Not Found = no sentinel only when the repo was already proven reachable
+  # by a successful label query. If the label query was degraded, a 404 is not
+  # trustworthy clear (private/wrong/missing repo often 404s too) — keep the
+  # earlier degraded warning as the operator-facing evidence and stay fail-open.
   if printf '%s' "$out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+    if [[ "$label_degraded" -eq 1 ]]; then
+      return 1
+    fi
     return 1
   fi
   info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
@@ -796,10 +881,10 @@ supervisor_handoff() {
   local branch
   branch=$(read_field handoff)
   [[ -n "$branch" ]] || return 0
-  # Same kill switch as the iteration top — including the remote label and
-  # .gibson-halt sentinel. A mid-iteration remote halt must not send a handoff
-  # just because the loop already started the step; leave handoff queued so a
-  # fresh launch after the operator clears the signal can retry (issue #71).
+  # Local kill switch + in-process remote cache (age 0 within an iteration, so
+  # this mainly catches gibson/HALT / GIBSON_HALT that appeared after iteration
+  # top). A mid-cadence remote label/sentinel is caught by the child's fresh
+  # live recheck (exit 75 below), not by this cache hit.
   if halted; then
     info "kill switch active — suppressing supervisor handoff of $branch (handoff stays queued)"
     return 0
@@ -851,10 +936,18 @@ supervisor_handoff() {
   # than the one that was reviewed. Both objects were fetched and verified by
   # resolve_base_pin/resolve_handoff_sha above, so the exact-SHA diff is readable.
   info "handing $branch @$sha to the Devin supervisor (base $base @ $base_sha)"
-  if "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
+  # Capture rc: 75 is kill-switch refusal (remote/local) from the child's own
+  # fresh live recheck — journal a halt, leave handoff queued, never say
+  # "supervisor rejected". Any other nonzero is a real rejection/error path.
+  local sup_rc=0
+  set +e
+  "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
       --base "$base" --base-sha "$base_sha" --sha "$sha" \
       --task "$task" --gate-status "green locally" \
-      --review-file "$review"; then
+      --review-file "$review"
+  sup_rc=$?
+  set -e
+  if [[ "$sup_rc" -eq 0 ]]; then
     node -e '
       const fs = require("fs");
       const file = process.argv[1];
@@ -863,8 +956,14 @@ supervisor_handoff() {
       text = text.replace(/^handoff_sha:.*$/m, "handoff_sha:");
       fs.writeFileSync(file, text);
     ' "$STATE_FILE"
+  elif [[ "$sup_rc" -eq 75 ]]; then
+    HALT_REASON="kill switch: supervisor refused handoff after a fresh remote/local check — handoff left queued (remove gibson-halt label / .gibson-halt / gibson/HALT / GIBSON_HALT to allow a fresh launch)"
+    journal_halt
+    _REMOTE_HALT_CACHE="halted"
+    _REMOTE_HALT_CHECKED_AT=$iter
+    info "kill switch active — supervisor refused handoff of $branch (handoff stays queued; not a supervisor rejection)"
   else
-    block "supervisor rejected the handoff: devin-supervisor.sh exited non-zero for $branch @ $sha into $base @ $base_sha. Re-run that command by hand to see its refusal (it prints the reason to stderr) — a moved remote tip, a missing DEVIN_API_KEY, and an unreachable Devin API all land here."
+    block "supervisor rejected the handoff: devin-supervisor.sh exited $sup_rc for $branch @ $sha into $base @ $base_sha. Re-run that command by hand to see its refusal (it prints the reason to stderr) — a moved remote tip, a missing DEVIN_API_KEY, and an unreachable Devin API all land here."
   fi
 }
 

@@ -75,33 +75,41 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 - **Error budget:** N consecutive gate failures (default 5) → stop, report, wait.
   A loop that can't go green is burning tokens on a harness bug.
 - **Kill switch:** checked at the top of every iteration (and before any
-  supervisor handoff, which reuses the same result). Three layers, all read-only:
+  supervisor handoff). Three layers, all read-only:
   1. **Local (always):** the `gibson/HALT` file, or `GIBSON_HALT=1` in the
      environment. Neither needs `gh` or a network call. The file is the
      permanent on-box stop.
-  2. **Remote label:** when `gh` is installed and authenticated, any open issue
-     on the target repo carrying the `gibson-halt` label stops the loop. Remove
-     the label and a freshly launched loop runs again — the check is on a
-     bounded cadence (below), not process-start-only. Phone workflow:
-     [doc 16](16-nontechnical-operation.md).
+  2. **Remote label:** when `gh` is installed and authenticated **and** the
+     target origin host matches `GH_HOST` (default `github.com`; set for GitHub
+     Enterprise), any open issue on the target repo carrying the `gibson-halt`
+     label stops the loop. Remove the label and a freshly launched loop runs
+     again — the check is on a bounded cadence (below), not process-start-only.
+     Phone workflow: [doc 16](16-nontechnical-operation.md).
   3. **Remote sentinel:** a `.gibson-halt` file committed on the target repo's
      **current remote default branch** (usually `main`) also stops the loop.
      Delete the file from the default branch to clear it. Useful when labels are
      awkward or when the operator can only push a file from another device.
   **Cadence / cache:** remote paths are re-checked every iteration with
   `--once`, and every `GIBSON_REMOTE_HALT_INTERVAL` iterations in a hot loop
-  (default **3**). A halt is still detected within that many iterations; the
-  cached result is shared with the pre-handoff check so a handoff never spends a
-  second pair of API calls. On remote halt the driver **journals the reason**,
-  leaves `loop-state` untouched (no default state created or rewritten), and
-  suppresses supervisor handoffs.
-  GitHub/API failure on either remote path **fails open** to the local
-  file/env checks — the loop keeps running rather than bricking on GitHub
-  downtime — and logs a clear `remote halt check degraded` warning so the
-  operator knows the remote stop is temporarily blind. The same paths suppress
-  Devin supervisor handoffs ([doc 22](22-devin-cloud-supervisor.md)), not just
-  the local file/env path. Origin URLs may be `https://`, `git@host:`, or
-  `ssh://git@host/...`; the driver parses all three into `owner/repo`.
+  (default **3**). A phone label is honored within **up to K iterations**
+  (default three), not necessarily the very next hat. The loop process caches
+  live results across its own iteration-top and pre-handoff gates so it does not
+  double-poll inside one cadence window; the child `devin-supervisor.sh` still
+  **deliberately rechecks live** (may spend another pair of `gh` calls) and
+  exits **75** on kill-switch refusal so a mid-cadence stop is journaled as a
+  halt, never as "supervisor rejected". There is **no** shared-cache elimination
+  across processes.
+  On remote halt the driver **journals the reason**, leaves `loop-state`
+  untouched (no default state created or rewritten), and suppresses supervisor
+  handoffs.
+  GitHub/API failure on either remote path, a non-matching origin host (GitLab,
+  Bitbucket, unconfigured Enterprise, SSH host aliases), or an unparseable
+  origin **fails open** to the local file/env checks — the loop keeps running —
+  and logs an explicit `remote halt check degraded` / `disabled` warning (and
+  makes **zero** `gh` remote-halt queries against an unrelated same-named
+  github.com repo). The same paths suppress Devin supervisor handoffs
+  ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
+  `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
 - **Human-gate queue:** Tier C merges and other stops accumulate in a digest
   (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
   issue and circles back after approval.

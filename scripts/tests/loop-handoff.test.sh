@@ -57,6 +57,9 @@ mkdir -p "$CALLS" "$FAKE_SCRIPTS" "$BIN"
 #   ok-clear      — label absent, sentinel 404 Not Found (remote stop is clear)
 #   label-halt    — open issue carries gibson-halt
 #   sentinel-halt — .gibson-halt present on the default branch (label clear)
+#   clear-then-label-halt — first GH_STUB_CLEAR_CALLS (default 2) act as
+#                   ok-clear; later calls act as label-halt. Used to prove a
+#                   mid-cadence halt observed only by the child's fresh recheck.
 #
 # GH_STUB_EXPECT_REPO / GH_STUB_EXPECT_REF tighten the fake: the exact --repo
 # slug and contents API target (and optional -f ref=) must match, or the stub
@@ -68,6 +71,8 @@ behavior="${GH_STUB_BEHAVIOR:-fail}"
 expect_repo="${GH_STUB_EXPECT_REPO:-}"
 expect_ref="${GH_STUB_EXPECT_REF:-}"
 log="${GH_STUB_LOG:-}"
+flip_file="${GH_STUB_FLIP_FILE:-}"
+clear_calls="${GH_STUB_CLEAR_CALLS:-2}"
 
 if [[ -n "$log" ]]; then
   # One argv record per call (NUL-safe enough for these flags).
@@ -124,6 +129,33 @@ validate_repo_target() {
   fi
 }
 
+respond_ok_clear() {
+  if [[ "$1" == "issue" && "$2" == "list" ]]; then
+    validate_repo_target issue "$@"
+    exit 0
+  fi
+  if [[ "$1" == "api" ]]; then
+    validate_repo_target api "$@"
+    echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}' >&2
+    exit 1
+  fi
+  exit 0
+}
+
+respond_label_halt() {
+  if [[ "$1" == "issue" && "$2" == "list" ]]; then
+    validate_repo_target issue "$@"
+    echo "71"
+    exit 0
+  fi
+  if [[ "$1" == "api" ]]; then
+    validate_repo_target api "$@"
+    echo '{"message":"Not Found","status":"404"}' >&2
+    exit 1
+  fi
+  exit 0
+}
+
 case "$behavior" in
   fail)
     exit 1
@@ -133,30 +165,26 @@ case "$behavior" in
     exit 1
     ;;
   ok-clear)
-    if [[ "$1" == "issue" && "$2" == "list" ]]; then
-      validate_repo_target issue "$@"
-      # empty list → -q '.[0].number' prints nothing
-      exit 0
-    fi
-    if [[ "$1" == "api" ]]; then
-      validate_repo_target api "$@"
-      echo '{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}' >&2
-      exit 1
-    fi
-    exit 0
+    respond_ok_clear "$@"
     ;;
   label-halt)
-    if [[ "$1" == "issue" && "$2" == "list" ]]; then
-      validate_repo_target issue "$@"
-      echo "71"
-      exit 0
+    respond_label_halt "$@"
+    ;;
+  clear-then-label-halt)
+    n=0
+    if [[ -n "$flip_file" ]]; then
+      n=$(cat "$flip_file" 2>/dev/null || echo 0)
+      # digits only
+      if ! [[ "$n" =~ ^[0-9]+$ ]]; then n=0; fi
+      n=$((n + 1))
+      printf '%s\n' "$n" > "$flip_file"
     fi
-    if [[ "$1" == "api" ]]; then
-      validate_repo_target api "$@"
-      echo '{"message":"Not Found","status":"404"}' >&2
-      exit 1
+    if ! [[ "$clear_calls" =~ ^[0-9]+$ ]]; then clear_calls=2; fi
+    if [[ "$n" -le "$clear_calls" ]]; then
+      respond_ok_clear "$@"
+    else
+      respond_label_halt "$@"
     fi
-    exit 0
     ;;
   sentinel-halt)
     if [[ "$1" == "issue" && "$2" == "list" ]]; then
@@ -1088,9 +1116,10 @@ fi
 # Remote kill switch (issue #71)
 # ---------------------------------------------------------------------------
 # These cases drive the real loop.sh / devin-supervisor.sh against the gh stub
-# above. No live GitHub. The remote check is at iteration top (cached so a
-# supervisor handoff reuses it); removing the label/sentinel must let a fresh
-# launch run. The stub validates the exact --repo / contents API target.
+# above. No live GitHub. The remote check is at iteration top (in-process cache
+# shared with the loop's pre-handoff gate); the child process rechecks live.
+# Removing the label/sentinel must let a fresh launch run. The stub validates
+# the exact --repo / contents API target and host-gated skip paths.
 
 export GH_STUB_EXPECT_REPO="acme/widget"
 export GH_STUB_LOG="$CALLS/gh.log"
@@ -1318,9 +1347,9 @@ fi
 unset GH_STUB_EXPECT_REF
 unset GH_STUB_BEHAVIOR
 
-echo "remote halt: cadence caches checks; supervisor_handoff does not double-call"
+echo "remote halt: cadence caches checks in-process; loop pre-handoff does not double-call"
 setup_repo with-remote
-# No handoff queued — only iteration-top remote checks.
+# No handoff queued — only iteration-top remote checks (stub supervisor unused).
 export GH_STUB_BEHAVIOR=ok-clear
 export GIBSON_REMOTE_HALT_INTERVAL=3
 : > "$CALLS/gh.log"
@@ -1431,32 +1460,37 @@ else
 fi
 issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || echo 0)
 api_calls=$(grep -c 'contents/.gibson-halt' "$CALLS/gh.log" 2>/dev/null || echo 0)
-# One live poll at iteration top; supervisor_handoff must reuse the cache (not
-# issue a second issue-list / contents pair).
+# One live poll at iteration top; the loop's pre-handoff gate reuses the
+# in-process cache. The stub supervisor does not call gh — the real child
+# recheck is sensed separately in the mid-cycle test below.
 if [[ "$issue_calls" -eq 1 ]]; then
-  ok "--once + handoff issues exactly one label poll (no supervisor double-call)"
+  ok "--once + handoff: loop issues exactly one label poll (in-process cache)"
 else
-  bad "--once + handoff expected 1 issue-list poll, got $issue_calls (duplicate supervisor call?) log=$(tr '\n' '|' <"$CALLS/gh.log")"
+  bad "--once + handoff expected 1 issue-list poll from the loop, got $issue_calls log=$(tr '\n' '|' <"$CALLS/gh.log")"
 fi
 if [[ "$api_calls" -eq 1 ]]; then
-  ok "--once + handoff issues exactly one sentinel poll (cache shared)"
+  ok "--once + handoff: loop issues exactly one sentinel poll (in-process cache)"
 else
-  bad "--once + handoff expected 1 sentinel poll, got $api_calls"
+  bad "--once + handoff expected 1 sentinel poll from the loop, got $api_calls"
 fi
 unset GH_STUB_BEHAVIOR
 
-echo "remote halt: supervisor handoff itself refuses the same remote paths"
+echo "remote halt: supervisor handoff itself refuses the same remote paths (exit 75)"
 setup_repo with-remote
 SHA=$(head_sha)
 # Direct by-hand handoff (docs/22) must honor the remote stop, not only the loop.
 export GH_STUB_BEHAVIOR=label-halt
 : > "$CALLS/gh.log"
 sup_err="$ROOT/supervisor-label-halt.err"
-if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
-    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
-  bad "devin-supervisor.sh handoff must refuse under gibson-halt label"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]]; then
+  ok "devin-supervisor.sh handoff refuses under gibson-halt label with exit 75"
 else
-  ok "devin-supervisor.sh handoff refuses under gibson-halt label"
+  bad "devin-supervisor.sh label halt must exit 75 (got $sup_rc)"
 fi
 if grep -qi 'gibson-halt label' "$sup_err"; then
   ok "supervisor names the label halt in its refusal"
@@ -1466,11 +1500,15 @@ fi
 export GH_STUB_BEHAVIOR=sentinel-halt
 export GH_STUB_EXPECT_REF="main"
 sup_err="$ROOT/supervisor-sentinel-halt.err"
-if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
-    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
-  bad "devin-supervisor.sh handoff must refuse under .gibson-halt sentinel"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]]; then
+  ok "devin-supervisor.sh handoff refuses under .gibson-halt sentinel with exit 75"
 else
-  ok "devin-supervisor.sh handoff refuses under .gibson-halt sentinel"
+  bad "devin-supervisor.sh sentinel halt must exit 75 (got $sup_rc)"
 fi
 if grep -qi '\.gibson-halt sentinel' "$sup_err"; then
   ok "supervisor names the sentinel halt in its refusal"
@@ -1484,14 +1522,279 @@ export GH_STUB_BEHAVIOR=ok-clear
 mkdir -p "$REPO/gibson"
 : > "$REPO/gibson/HALT"
 sup_err="$ROOT/supervisor-file-halt.err"
-if sup_out=$("$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
-    --sha "$SHA" --task "should be refused" --dry-run 2>"$sup_err"); then
-  bad "devin-supervisor.sh handoff must refuse when gibson/HALT is present"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]]; then
+  ok "devin-supervisor.sh handoff refuses when gibson/HALT is present with exit 75"
 else
-  ok "devin-supervisor.sh handoff refuses when gibson/HALT is present"
+  bad "devin-supervisor.sh file halt must exit 75 (got $sup_rc)"
 fi
 rm -f "$REPO/gibson/HALT"
 unset GH_STUB_BEHAVIOR
+
+# ---------------------------------------------------------------------------
+# Host validation, trailing slash, unparseable origin, enterprise GH_HOST,
+# mid-cycle child recheck (issue #71 review repairs)
+# ---------------------------------------------------------------------------
+
+echo "remote halt: non-GitHub same-slug origin never queries gh (fail open + warn)"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+# Same owner/repo slug as the GitHub fixture, but hosted on GitLab — a blind
+# host-discarding parser would query github.com/acme/widget and halt.
+set_origin_github_url "https://gitlab.com/acme/widget.git"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-gitlab.err"
+if run_loop_err "$errf"; then
+  ok "GitLab same-slug origin does not brick the loop"
+else
+  bad "GitLab same-slug origin must fail open (rc=$?)"
+fi
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
+api_calls=$(grep -c 'contents/.gibson-halt' "$CALLS/gh.log" 2>/dev/null || true)
+issue_calls=${issue_calls:-0}
+api_calls=${api_calls:-0}
+if [[ "$issue_calls" -eq 0 && "$api_calls" -eq 0 ]]; then
+  ok "GitLab same-slug origin makes zero gh remote-halt queries"
+else
+  bad "GitLab same-slug origin must not query gh (issue=$issue_calls api=$api_calls log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+if grep -q 'remote halt check disabled' "$errf"; then
+  ok "GitLab same-slug origin logs an explicit disabled warning"
+else
+  bad "GitLab same-slug origin was silent about disabled remote stop (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if handoff_invoked; then ok "GitLab same-slug origin still allows a local-clear handoff"
+else bad "GitLab same-slug origin blocked handoff — fail-closed on host mismatch"; fi
+# Supervisor path: must not refuse via unrelated github.com halt.
+sup_err="$ROOT/supervisor-gitlab.err"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should proceed under dry-run" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 0 ]]; then
+  ok "supervisor does not refuse on GitLab origin via same-slug github halt"
+else
+  bad "supervisor must fail open on GitLab origin (rc=$sup_rc stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+if grep -q 'remote halt check disabled' "$sup_err"; then
+  ok "supervisor logs disabled remote stop for GitLab origin"
+else
+  bad "supervisor silent on GitLab origin (stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: Bitbucket same-slug origin never queries gh"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+set_origin_github_url "https://bitbucket.org/acme/widget.git"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-bitbucket.err"
+if ! run_loop_err "$errf"; then
+  bad "Bitbucket same-slug origin must fail open (rc=$?)"
+else
+  bb_issue=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
+  bb_issue=${bb_issue:-0}
+  if [[ "$bb_issue" -eq 0 ]]; then
+    ok "Bitbucket same-slug origin makes zero gh remote-halt queries and fails open"
+  else
+    bad "Bitbucket same-slug origin leaked a gh query (issue=$bb_issue log=$(tr '\n' '|' <"$CALLS/gh.log"))"
+  fi
+fi
+if grep -q 'remote halt check disabled' "$errf"; then
+  ok "Bitbucket origin logs disabled warning"
+else
+  bad "Bitbucket origin silent (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: unparseable SSH host-alias origin warns and makes zero gh queries"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+# Host alias form is not git@host: and not scheme:// — unparseable for remote halt.
+set_origin_github_url "gh-work:acme/widget"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-alias.err"
+if run_loop_err "$errf"; then
+  ok "unparseable host-alias origin does not brick the loop"
+else
+  bad "unparseable host-alias origin must fail open (rc=$?)"
+fi
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
+issue_calls=${issue_calls:-0}
+if [[ "$issue_calls" -eq 0 ]]; then
+  ok "unparseable host-alias origin makes zero gh remote-halt queries"
+else
+  bad "unparseable host-alias origin queried gh ($issue_calls times)"
+fi
+if grep -q 'remote halt check disabled' "$errf"; then
+  ok "unparseable host-alias origin logs an explicit disabled warning (not silent)"
+else
+  bad "unparseable origin disabled the phone stop silently (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: trailing slash before .git strip (…/widget.git/)"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+set_origin_github_url "https://github.com/acme/widget.git/"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-trailingslash.err"
+if run_loop_err "$errf" && grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "trailing-slash …/widget.git/ origin parses and hits label halt"
+else
+  bad "trailing-slash origin failed label halt (stderr=$(tr '\n' ' ' <"$errf"); ghlog=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+sup_err="$ROOT/supervisor-trailingslash.err"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]] && grep -qi 'gibson-halt label' "$sup_err"; then
+  ok "supervisor parses trailing-slash origin and refuses with exit 75"
+else
+  bad "supervisor trailing-slash refuse failed (rc=$sup_rc stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: configured GH_HOST enterprise origin enables remote halt"
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+set_origin_github_url "https://github.acme.corp/acme/widget.git"
+export GH_HOST="github.acme.corp"
+export GH_STUB_BEHAVIOR=label-halt
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-enterprise.err"
+if run_loop_err "$errf" && grep -q 'remote halt: gibson-halt label' "$errf"; then
+  ok "GH_HOST enterprise origin enables label halt"
+else
+  bad "GH_HOST enterprise origin failed label halt (stderr=$(tr '\n' ' ' <"$errf"); ghlog=$(tr '\n' '|' <"$CALLS/gh.log"))"
+fi
+sup_err="$ROOT/supervisor-enterprise.err"
+set +e
+"$SUPERVISOR" handoff --repo "$REPO" --branch "$BRANCH" --base main \
+    --sha "$SHA" --task "should be refused" --dry-run >/dev/null 2>"$sup_err"
+sup_rc=$?
+set -e
+if [[ "$sup_rc" -eq 75 ]]; then
+  ok "supervisor refuses under enterprise GH_HOST with exit 75"
+else
+  bad "supervisor enterprise halt must exit 75 (got $sup_rc stderr=$(tr '\n' ' ' <"$sup_err"))"
+fi
+# github.com origin with enterprise GH_HOST must NOT query (host mismatch).
+set_origin_github_url "https://github.com/acme/widget.git"
+: > "$CALLS/gh.log"
+errf="$ROOT/halt-enterprise-mismatch.err"
+if run_loop_err "$errf"; then
+  ok "github.com origin with GH_HOST=enterprise fails open"
+else
+  bad "github.com vs enterprise GH_HOST must fail open (rc=$?)"
+fi
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
+issue_calls=${issue_calls:-0}
+if [[ "$issue_calls" -eq 0 ]]; then
+  ok "github.com origin with enterprise GH_HOST makes zero gh remote-halt queries"
+else
+  bad "enterprise GH_HOST mismatch must not query gh (got $issue_calls)"
+fi
+if grep -q 'remote halt check disabled' "$errf"; then
+  ok "enterprise GH_HOST mismatch logs disabled warning"
+else
+  bad "enterprise GH_HOST mismatch silent (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+unset GH_HOST
+unset GH_STUB_BEHAVIOR
+
+echo "remote halt: mid-cycle child recheck journals halt (exit 75), never supervisor rejected"
+# Loop iteration-top sees clear (in-process cache warm). Real child supervisor
+# rechecks live, sees the label that landed mid-cadence, exits 75. The driver
+# must journal a halt, leave handoff queued, and never say "supervisor rejected".
+setup_repo with-remote
+SHA=$(head_sha)
+write_state "$BRANCH" "$SHA"
+export GH_STUB_BEHAVIOR=clear-then-label-halt
+export GH_STUB_CLEAR_CALLS=2
+export GH_STUB_FLIP_FILE="$ROOT/gh-flip.count"
+printf '0\n' > "$GH_STUB_FLIP_FILE"
+: > "$CALLS/gh.log"
+# Real supervisor under --dry-run so kill-switch exit 75 is authentic.
+# Log the subcommand so handoff_invoked still works.
+cat > "$FAKE_SCRIPTS/devin-supervisor.sh" <<REALCHILD
+#!/usr/bin/env bash
+echo "\$1" >> "$CALLS/devin.cmds"
+printf '%s\n' "\$@" >> "$CALLS/devin.args"
+exec "$SUPERVISOR" "\$@" --dry-run
+REALCHILD
+chmod +x "$FAKE_SCRIPTS/devin-supervisor.sh"
+errf="$ROOT/halt-midcycle.err"
+set +e
+run_loop_err "$errf"
+mid_rc=$?
+set -e
+if [[ "$mid_rc" -eq 0 ]]; then
+  ok "mid-cycle halt: loop exits cleanly (rc 0)"
+else
+  bad "mid-cycle halt: loop must exit 0 (rc=$mid_rc stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if journal_says "kill switch: supervisor refused handoff"; then
+  ok "mid-cycle halt: journal records kill-switch refusal (not a rejection)"
+else
+  bad "mid-cycle halt: journal missing kill-switch halt text (journal=$([[ -f $JOURNAL ]] && cat "$JOURNAL" || echo absent))"
+fi
+if journal_says "supervisor rejected"; then
+  bad "mid-cycle halt: journal must never say 'supervisor rejected' (journal=$(cat "$JOURNAL"))"
+else
+  ok "mid-cycle halt: journal has no 'supervisor rejected' text"
+fi
+if still_queued; then
+  ok "mid-cycle halt: handoff stays queued"
+else
+  bad "mid-cycle halt: handoff was cleared — retry after stop is cleared would be lost"
+fi
+if grep -qi 'supervisor rejected' "$errf"; then
+  bad "mid-cycle halt: stderr must not claim supervisor rejected (stderr=$(tr '\n' ' ' <"$errf"))"
+else
+  ok "mid-cycle halt: stderr has no 'supervisor rejected' text"
+fi
+# Child must have been invoked (fresh recheck path), not suppressed solely by cache.
+if handoff_invoked; then
+  ok "mid-cycle halt: real child supervisor was invoked (fresh recheck)"
+else
+  bad "mid-cycle halt: child supervisor never ran — cannot prove exit-75 handoff path"
+fi
+# At least one issue-list after the first clear pair proves the child's recheck.
+issue_calls=$(grep -c 'issue list' "$CALLS/gh.log" 2>/dev/null || true)
+issue_calls=${issue_calls:-0}
+if [[ "$issue_calls" -ge 2 ]]; then
+  ok "mid-cycle halt: child spent a fresh label poll (issue-list calls=$issue_calls)"
+else
+  bad "mid-cycle halt: expected >=2 issue-list polls (loop clear + child recheck), got $issue_calls"
+fi
+# Restore stub supervisor for cleanliness.
+cat > "$FAKE_SCRIPTS/devin-supervisor.sh" <<STUB
+#!/usr/bin/env bash
+echo "\$1" >> "$CALLS/devin.cmds"
+printf '%s\n' "\$@" >> "$CALLS/devin.args"
+exit "\${STUB_DEVIN_RC:-0}"
+STUB
+chmod +x "$FAKE_SCRIPTS/devin-supervisor.sh"
+unset GH_STUB_BEHAVIOR
+unset GH_STUB_CLEAR_CALLS
+unset GH_STUB_FLIP_FILE
 unset GH_STUB_EXPECT_REPO
 unset GH_STUB_LOG
 

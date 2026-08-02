@@ -36,8 +36,12 @@ RISKS
   - The session state file lives in <repo>/gibson/devin-session.json; deleting
     it orphans the session rather than closing it.
   - Kill switch: gibson/HALT, GIBSON_HALT=1, an open gibson-halt label, or a
-    .gibson-halt sentinel on the remote default branch all refuse handoff
-    (same paths as loop.sh; GitHub/API errors fail open with a degraded warning).
+    .gibson-halt sentinel on the remote default branch all refuse handoff with
+    exit 75 (distinct from other failures so loop.sh journals a halt, not a
+    rejection). Remote paths only when origin host matches GH_HOST (default
+    github.com). GitHub/API errors and non-matching hosts fail open with a
+    degraded/disabled warning. The child always rechecks live even when the
+    loop's in-process cache is still warm.
 
 USAGE
   devin-supervisor.sh ensure  --repo <path>
@@ -115,6 +119,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "devin-supervisor.sh: ERROR: $*" >&2; exit 1; }
+# Kill-switch refusal (local or remote). Distinct from die()'s exit 1 so
+# loop.sh can journal a halt and leave the handoff queued instead of recording
+# a false "supervisor rejected the handoff" (issue #71 mid-cadence halt).
+die_kill_switch() { echo "devin-supervisor.sh: ERROR: $*" >&2; exit 75; }
 info() { echo "devin-supervisor.sh: $*" >&2; }
 
 [[ -n "$REPO" ]] || { usage; exit 2; }
@@ -129,34 +137,83 @@ STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/devin-session.json"
 mkdir -p "$STATE_DIR"
 
-# Parse owner/repo from normal GitHub remote forms (https, git@, ssh://).
+# Parse host + owner/repo from normal remote forms (https, git@, ssh://).
+# Trailing slashes are normalized before stripping .git so …/repo.git/ works.
 # Uses remote.origin.url so url.*.insteadOf rewrites do not hide the logical slug.
 # Must not leave a scheme prefix in place — that blinds --repo / contents API calls.
-origin_slug_from_url() {
-  local url="$1" rest
+# Sets ORIGIN_PARSE_HOST / ORIGIN_PARSE_SLUG. Remote-halt callers also require
+# host == GH_HOST (default github.com); cosmetic SLUG may still use the slug
+# (or basename fallback) when the host does not match.
+origin_parse_url() {
+  local url="$1" rest host
+  ORIGIN_PARSE_HOST=""
+  ORIGIN_PARSE_SLUG=""
   [[ -n "$url" ]] || return 0
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
   url="${url%.git}"
   while [[ "$url" == */ ]]; do
     url="${url%/}"
   done
   case "$url" in
     git@*:*)
-      rest="${url#*:}"
+      rest="${url#git@}"
+      host="${rest%%:*}"
+      rest="${rest#*:}"
       ;;
     ssh://*|https://*|http://*|git://*)
       rest="${url#*://}"
-      rest="${rest#*@}"
+      if [[ "$rest" == *@* ]]; then
+        rest="${rest#*@}"
+      fi
+      host="${rest%%/*}"
       rest="${rest#*/}"
+      host="${host%%:*}"
       ;;
     *)
-      rest="$url"
+      return 0
       ;;
   esac
   case "$rest" in
     ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
-    */*) printf '%s\n' "$rest" ;;
+    */*)
+      ORIGIN_PARSE_HOST="$host"
+      ORIGIN_PARSE_SLUG="$rest"
+      ;;
   esac
 }
+
+origin_slug_from_url() {
+  origin_parse_url "$1"
+  [[ -n "$ORIGIN_PARSE_SLUG" ]] && printf '%s\n' "$ORIGIN_PARSE_SLUG"
+  return 0
+}
+
+# Remote-halt only: slug when origin host matches GH_HOST; else skip reason.
+origin_remote_halt_slug_from_url() {
+  local url="$1" expected got
+  ORIGIN_HALT_SLUG=""
+  ORIGIN_HALT_SKIP_REASON=""
+  if [[ -z "$url" ]]; then
+    ORIGIN_HALT_SKIP_REASON="no origin remote URL configured"
+    return 1
+  fi
+  origin_parse_url "$url"
+  if [[ -z "$ORIGIN_PARSE_SLUG" || -z "$ORIGIN_PARSE_HOST" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin URL unparseable as host/owner/repo (got url=${url})"
+    return 1
+  fi
+  expected=$(printf '%s' "${GH_HOST:-github.com}" | tr '[:upper:]' '[:lower:]')
+  got=$(printf '%s' "$ORIGIN_PARSE_HOST" | tr '[:upper:]' '[:lower:]')
+  if [[ "$got" != "$expected" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin host '${ORIGIN_PARSE_HOST}' does not match GH_HOST (${GH_HOST:-github.com}); remote stop is GitHub-only"
+    return 1
+  fi
+  ORIGIN_HALT_SLUG="$ORIGIN_PARSE_SLUG"
+  return 0
+}
+
 _origin_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)
 SLUG=$(origin_slug_from_url "$_origin_url")
 [[ -n "$SLUG" ]] || SLUG="$(basename "$REPO")"
@@ -363,20 +420,29 @@ case "$CMD" in
 
     [[ -z "$BASE_SHA" || -n "$SHA" ]] || die "--base-sha requires --sha: half a pin describes half a diff"
 
-    # Kill switch (issue #71): same local + remote paths as loop.sh. A by-hand
-    # handoff must not bypass the remote stop just because the loop is not the
-    # caller. Remote API failures fail open (do not brick handoff during GitHub
-    # downtime) after a degraded warning — matching the loop driver.
+    # Kill switch (issue #71): same local + remote paths as loop.sh. Always a
+    # fresh live recheck here (by-hand and child safety) — deliberately not a
+    # shared cache with the parent loop process, so a mid-cadence phone stop is
+    # still observed and may spend another pair of gh calls. Kill-switch hits
+    # exit 75 (die_kill_switch), not die()'s 1, so loop.sh journals a halt.
+    # Remote API failures and non-GH_HOST origins fail open after a warning.
     if [[ -f "$STATE_DIR/HALT" ]]; then
-      die "kill switch: gibson/HALT is present — refusing handoff (remove the file to resume)"
+      die_kill_switch "kill switch: gibson/HALT is present — refusing handoff (remove the file to resume)"
     fi
     if [[ "${GIBSON_HALT:-}" == "1" ]]; then
-      die "kill switch: GIBSON_HALT=1 — refusing handoff"
+      die_kill_switch "kill switch: GIBSON_HALT=1 — refusing handoff"
     fi
     if command -v gh >/dev/null 2>&1; then
       origin_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)
-      halt_slug=$(origin_slug_from_url "$origin_url")
-      if [[ -n "$halt_slug" ]]; then
+      if ! origin_remote_halt_slug_from_url "$origin_url"; then
+        info "remote halt check disabled: ${ORIGIN_HALT_SKIP_REASON} — continuing with local HALT/GIBSON_HALT only (zero gh remote-halt queries)"
+      else
+        halt_slug="$ORIGIN_HALT_SLUG"
+        # label_degraded: when the label query fails, preserve that warning as
+        # evidence. A later sentinel 404 is not a trustworthy "remote clear"
+        # for missing/forbidden repos (host validation already prevents
+        # unrelated same-slug queries; this keeps the fail-open story honest).
+        label_degraded=0
         set +e
         halt_out=$(gh issue list --repo "$halt_slug" \
           --label gibson-halt --state open --limit 1 \
@@ -384,9 +450,10 @@ case "$CMD" in
         halt_ec=$?
         set -e
         if [[ $halt_ec -ne 0 ]]; then
+          label_degraded=1
           info "remote halt check degraded: gibson-halt label query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
         elif printf '%s' "$halt_out" | grep -q '[0-9]'; then
-          die "kill switch: gibson-halt label on an open issue — refusing handoff (remove the label to allow a fresh launch)"
+          die_kill_switch "kill switch: gibson-halt label on an open issue — refusing handoff (remove the label to allow a fresh launch)"
         fi
         set +e
         halt_symref=$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null)
@@ -407,8 +474,13 @@ case "$CMD" in
             halt_ec=$?
             set -e
             if [[ $halt_ec -eq 0 ]]; then
-              die "kill switch: .gibson-halt sentinel on origin/${halt_def} — refusing handoff (delete the file from the default branch to allow a fresh launch)"
-            elif ! printf '%s' "$halt_out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+              die_kill_switch "kill switch: .gibson-halt sentinel on origin/${halt_def} — refusing handoff (delete the file from the default branch to allow a fresh launch)"
+            elif printf '%s' "$halt_out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+              if [[ "$label_degraded" -eq 1 ]]; then
+                # Label already warned; 404 is not additional clear evidence.
+                :
+              fi
+            else
               info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
             fi
           fi
