@@ -13,7 +13,7 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 The solo loop stops handing off work nobody reviewed (#55).
 
 - **`scripts/loop.sh`** — the cross-vendor review in front of a supervisor handoff
-  is now a gate rather than a notice. A **receipt** (`gibson/second-opinion.receipt`)
+  is now a gate rather than a notice. A **receipt** (`gibson/pre-handoff-review.receipt`)
   is written only when `second-opinion.sh` exits 0, and it names the runner, the
   reviewers, the head SHA, and the base branch *and* its exact tip. A stale
   `gibson/second-opinion.md` no longer satisfies the gate, a review of a head that
@@ -21,6 +21,14 @@ The solo loop stops handing off work nobody reviewed (#55).
   advanced — a different base is a different diff. Reviews and handoffs resolve the
   target repo's own default branch from the remote instead of trusting stale local
   refs. No receipt, no handoff: the branch stays queued in loop-state.
+  The routine pre-handoff review and the escalation review are now **two files with
+  two meanings**: `--escalate-after` still owns `gibson/second-opinion.md`, the stall
+  artifact `playbooks/loop-step.md` sends the next hat to read, while the mandatory
+  review before every handoff writes `gibson/pre-handoff-review.md` and hands that
+  file to the supervisor. They shared one path, so a green handoff silently
+  overwrote the stall review the next hat had been told to open. The receipt is
+  checked against the pre-handoff artifact, so a receipt whose review file has been
+  deleted or emptied no longer passes.
   **Scope, stated plainly:** the receipt is an operational control over what the
   driver will do, **not** a tamper-proof one. It is a same-user file under
   `<repo>/gibson/`, so anything running as that user — including the agents the
@@ -42,6 +50,18 @@ The solo loop stops handing off work nobody reviewed (#55).
   renewing your own claim, not releasing it, which happens on main with
   `release-claim.sh` (docs/05). A base ref it cannot resolve is a loud error, never a
   green "no changed files".
+  Changed paths are read **NUL-separated** (`-z`) and never trimmed: without that,
+  git C-quotes every non-ASCII path, so `docs/claims/issue-7-café.md` arrived as
+  `"docs/claims/issue-7-caf\303\251.md"`, failed the `docs/claims/` prefix test, and
+  the whole non-ASCII half of the ledger went unchecked. The presence lookup
+  addresses each path as a **literal pathspec** (`:(literal)`), so a claim filename
+  containing `*`, `?`, `[…]` or a leading `:` is asked about as itself rather than as
+  a pattern. A path whose bytes are not valid UTF-8 cannot survive Node's argv
+  round-trip at all, so it is refused loudly instead of being classified as absent.
+  Legacy `docs/active-work.md` rows are protected on the same `^issue-` shape
+  `scripts/claims-status.sh` treats as live, instead of a narrower
+  `[a-z0-9-]` one — ids like `issue-7_password_reset` and `issue-7.1-followup` were
+  live to the fleet and invisible to the gate.
 - **Sensors:** `scripts/tests/loop-handoff.test.sh`, `scripts/tests/second-opinion.test.sh`,
   and `scripts/tests/check-active-work.test.sh` pin the above in both directions —
   the ways each gate must fail closed and the ways it must still pass. They drive the

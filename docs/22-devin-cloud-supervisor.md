@@ -56,7 +56,10 @@ export DEVIN_WEBHOOK_URL=...        # optional, see "Waking it" below
 - `--escalate-after N` — after N consecutive runner failures the driver runs
   [`second-opinion.sh`](../scripts/second-opinion.sh) and writes the verdicts to
   `gibson/second-opinion.md`. The next hat reads that file (fresh context, file
-  handoff — [doc 11](11-solo-loop.md)).
+  handoff — [doc 11](11-solo-loop.md)). That path belongs to escalation alone: the
+  routine review in front of every handoff writes `gibson/pre-handoff-review.md`
+  instead, so a green handoff never overwrites the stall review the next hat was
+  sent to read.
 - `--supervisor devin` — the driver ensures a live supervisor at startup and, after
   any successful iteration, forwards whatever branch loop-state names.
 
@@ -110,12 +113,15 @@ nothing:
    read cannot be reviewed, and is blocked instead of recorded.
 4. **Require a distinct-vendor review of that exact diff.** `second-opinion.sh` is
    run with `--base <base sha> --branch <head sha>` — two exact commits, not two
-   moving names; the runner is excluded from its own review (Law 5). Success
-   writes `gibson/second-opinion.receipt` naming the head branch and SHA, the base
-   branch and SHA, the author, and the reviewers. Reuse requires all of them to
-   match, so a base branch that advances voids the receipt just as a new head
-   commit does. A leftover `gibson/second-opinion.md` proves nothing and does not
-   satisfy the gate — only a matching receipt does.
+   moving names; the runner is excluded from its own review (Law 5). Its verdicts
+   go to `gibson/pre-handoff-review.md`, which is this review's own file and not
+   the escalation artifact above. Success writes `gibson/pre-handoff-review.receipt`
+   naming the head branch and SHA, the base branch and SHA, the author, and the
+   reviewers. Reuse requires all of them to match — and requires
+   `gibson/pre-handoff-review.md` to still be there and non-empty — so a base
+   branch that advances voids the receipt just as a new head commit does. A
+   leftover `gibson/pre-handoff-review.md` proves nothing on its own and does not
+   satisfy the gate; only a matching receipt does.
 5. **Hand off with the pin.** `devin-supervisor.sh handoff --base <base>
    --base-sha <base sha> --sha <sha>` re-checks the remote tip — an absent or
    unreachable remote branch is fatal there too — and instructs the supervisor to
@@ -137,7 +143,7 @@ Law 5 gate, so you own the cross-vendor review yourself:
 
 ### What the receipt is and is not
 
-`gibson/second-opinion.receipt` is what the driver checks before it spends an ACU,
+`gibson/pre-handoff-review.receipt` is what the driver checks before it spends an ACU,
 and in normal operation it is enough: the driver writes one only after a
 distinct-vendor reviewer exits 0, binds it to both exact SHAs plus the author and
 reviewer list, and refuses to reuse it when any of those change.

@@ -188,13 +188,17 @@ touch /path/to/target/gibson/HALT
      cannot be resolved locally, if the base branch cannot be resolved, if no
      distinct vendor is configured, or if the reviewer does not complete,
      **nothing is handed off** and `handoff`/`handoff_sha` stay queued in
-     loop-state (Law 5). A leftover `gibson/second-opinion.md` does not satisfy
-     the gate — only a receipt naming that SHA does. If your handoff keeps staying
-     queued, read the journal: the block reason is written there, and the fix is
-     yours, not the owner's.
+     loop-state (Law 5). That review is written to
+     `{{repo_path}}/gibson/pre-handoff-review.md` and handed to the supervisor
+     with the branch. A leftover copy of it does not satisfy the gate — only a
+     receipt naming that SHA does. If your handoff keeps staying queued, read the
+     journal: the block reason is written there, and the fix is yours, not the
+     owner's.
    - If `{{repo_path}}/gibson/second-opinion.md` exists, read it before your next
      build hat: it is a cross-vendor review of your own diff, dispatched because
-     the loop stalled.
+     the loop stalled. It is only ever written by an escalation — the routine
+     review that runs before every supervisor handoff has its own file
+     (`gibson/pre-handoff-review.md`) and never overwrites this one.
 2. **Append** `{{repo_path}}/gibson/journal.md`:
    ```markdown
    ## <UTC> · hat={{hat}} · issue=#N · pr=#M

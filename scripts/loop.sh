@@ -24,11 +24,14 @@ RISKS
     also treats an open issue carrying that label as a soft halt cue.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
-    the diff. --supervisor devin sends finished branches to a cloud session that
-    can open PRs and (if configured) merge (docs/22). When a supervisor is
-    configured, a distinct-vendor second opinion of the exact handed-off SHA is
-    required before handoff, and the gate fails closed: no review, no handoff.
-    The branch stays queued in loop-state instead (Law 5 gate).
+    the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
+    artifact the next hat reads; the routine review before every supervisor
+    handoff is a separate file, gibson/pre-handoff-review.md, so neither
+    overwrites the other. --supervisor devin sends finished branches to a cloud
+    session that can open PRs and (if configured) merge (docs/22). When a
+    supervisor is configured, a distinct-vendor second opinion of the exact
+    handed-off SHA is required before handoff, and the gate fails closed: no
+    review, no handoff. The branch stays queued in loop-state instead (Law 5).
   - Reviews and handoffs diff against the target repo's own default branch. When
     an origin is configured, both the branch name and its exact tip come from the
     remote (stale local refs are not trusted); a local-only repo falls back to a
@@ -123,10 +126,28 @@ STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/loop-state.md"
 JOURNAL="$STATE_DIR/journal.md"
 HALT_FILE="$STATE_DIR/HALT"
+# Two review artifacts, two meanings, two paths — they are not interchangeable.
+#
+#   gibson/second-opinion.md    the ESCALATION/stall artifact. Written by escalate()
+#                               after N consecutive runner failures, and the file
+#                               playbooks/loop-step.md tells the next hat to read
+#                               before its build hat.
+#   gibson/pre-handoff-review.md
+#                               the ROUTINE mandatory pre-handoff review. Written by
+#                               ensure_cross_vendor_review before every supervisor
+#                               handoff, and the file handed to the supervisor.
+#
+# They shared one path, so a routine handoff review silently overwrote the stall
+# review the next hat had been sent to read: the agent opened the file expecting
+# "here is why your loop kept failing" and got a review of a green branch instead.
+# Both are second opinions; only one of them is the escalation.
+REVIEW_ARTIFACT="$STATE_DIR/second-opinion.md"
+PRE_HANDOFF_REVIEW="$STATE_DIR/pre-handoff-review.md"
 # Written only by a successful pre-handoff review, and it names both endpoints of
 # the diff that was reviewed — base branch/base SHA and head branch/head SHA — see
-# ensure_cross_vendor_review.
-REVIEW_RECEIPT="$STATE_DIR/second-opinion.receipt"
+# ensure_cross_vendor_review. The receipt attests to $PRE_HANDOFF_REVIEW, and its
+# filename says so: it has nothing to do with the escalation artifact above.
+REVIEW_RECEIPT="$STATE_DIR/pre-handoff-review.receipt"
 
 mkdir -p "$STATE_DIR"
 if [[ ! -f "$STATE_FILE" ]]; then
@@ -334,10 +355,13 @@ resolve_base_pin() {
 }
 
 escalate() {
-  local out="$STATE_DIR/second-opinion.md"
+  local out="$REVIEW_ARTIFACT"
   info "escalating after $failures consecutive failures — reviewers: $REVIEWERS"
-  # This clobbers second-opinion.md with a failure-triage review, so the
-  # pre-handoff receipt that pointed at the old contents is no longer valid.
+  # The receipt is dropped even though escalation no longer touches the pre-handoff
+  # artifact: reaching escalation means the loop has failed $failures times in a
+  # row, and a review taken before that stall is not evidence about the branch as it
+  # stands now. Dropping a receipt only ever costs one more review; keeping a stale
+  # one costs a handoff nobody checked. Fail closed.
   rm -f "$REVIEW_RECEIPT"
   local base="" base_sha="" pin note
   # Same exact base as the pre-handoff review: a failure-triage review of the
@@ -441,7 +465,7 @@ resolve_handoff_sha() {
 
 # A receipt is written only when second-opinion.sh exited 0, and it names BOTH
 # endpoints of the diff that was reviewed. That is what makes a stale
-# gibson/second-opinion.md useless as a pass: the artifact alone proves nothing
+# gibson/pre-handoff-review.md useless as a pass: the artifact alone proves nothing
 # about which tip, which vendor, or whether the reviewer even finished (issue
 # #55). Binding the base SHA as well as the head SHA closes the matching hole on
 # the base side — the same head reviewed against a base branch that has since
@@ -454,7 +478,11 @@ resolve_handoff_sha() {
 review_receipt_ok() {
   local sha="$1" branch="$2" base="$3" base_sha="$4"
   [[ -f "$REVIEW_RECEIPT" ]] || return 1
-  [[ -s "$STATE_DIR/second-opinion.md" ]] || return 1
+  # The receipt attests to the PRE-HANDOFF artifact, so that is the file whose
+  # existence it is checked against. Checking the escalation artifact here would
+  # let an unrelated stall review stand in for the review the receipt names, and
+  # would fail a perfectly good receipt in any repo that has never escalated.
+  [[ -s "$PRE_HANDOFF_REVIEW" ]] || return 1
   grep -qxF "status: ok" "$REVIEW_RECEIPT" || return 1
   grep -qxF "sha: $sha" "$REVIEW_RECEIPT" || return 1
   grep -qxF "branch: $branch" "$REVIEW_RECEIPT" || return 1
@@ -471,7 +499,9 @@ review_receipt_ok() {
 # reviewer non-zero, empty diff — returns 1, and the caller must not hand off.
 ensure_cross_vendor_review() {
   local branch="$1" sha="$2" base="$3" base_sha="$4"
-  local out="$STATE_DIR/second-opinion.md"
+  # Never $REVIEW_ARTIFACT: this review runs on every handoff, and writing it there
+  # would overwrite the escalation review the next hat was told to read.
+  local out="$PRE_HANDOFF_REVIEW"
 
   if review_receipt_ok "$sha" "$branch" "$base" "$base_sha"; then
     info "distinct-vendor review already recorded for $branch @ $sha against $base @ $base_sha — reusing it"
@@ -515,7 +545,7 @@ ensure_cross_vendor_review() {
   rm -f "$REVIEW_RECEIPT"
   # The reviewer-failure entry that already existed, now emitted through the same
   # helper as every other refusal so the journal reads in one format.
-  block "pre-handoff review failed: the distinct-vendor review of $branch @ $sha against $base @ $base_sha did not complete (reviewers=$REVIEWERS, author=$RUNNER). Read gibson/second-opinion.md for the raw attempts, fix what the reviewer choked on, then re-queue."
+  block "pre-handoff review failed: the distinct-vendor review of $branch @ $sha against $base @ $base_sha did not complete (reviewers=$REVIEWERS, author=$RUNNER). Read gibson/pre-handoff-review.md for the raw attempts, fix what the reviewer choked on, then re-queue."
   return 1
 }
 
@@ -564,7 +594,10 @@ supervisor_handoff() {
   [[ -z "$issue" ]] || task="Issue: $issue."
   [[ -z "$next" ]] || task="${task:+$task }Next action: $next"
   [[ -n "$task" ]] || task="See the branch diff; loop-state carried no task description."
-  local review="$STATE_DIR/second-opinion.md"
+  # The pre-handoff review, not the escalation artifact: the supervisor must be
+  # shown the review of the exact diff it is being handed, which is the one the
+  # receipt above binds.
+  local review="$PRE_HANDOFF_REVIEW"
   # The supervisor gets the human branch NAMES — it opens a PR from one branch
   # into another, not from one commit into another — AND both exact SHAs, so the
   # diffstat it is shown is built from the same two endpoints the reviewer saw.

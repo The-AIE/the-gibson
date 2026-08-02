@@ -112,12 +112,39 @@ if (!diffBase) {
 // gate waves the rename through — whether it lands on another claim id or leaves
 // docs/claims/ entirely. Scored as delete + add, the source deletion is visible
 // and the destination is judged on its own as a new file.
-const changed = git(["diff", "--name-only", "--no-renames", diffBase, headSha])
-  .split("\n")
-  .map((f) => f.trim())
-  .filter(Boolean);
+//
+// -z, and nothing is trimmed. Without -z, `git diff --name-only` C-quotes any path
+// git considers unusual: every non-ASCII byte under the default core.quotePath,
+// plus quotes, backslashes and control characters. `docs/claims/issue-7-café.md`
+// then arrives as `"docs/claims/issue-7-caf\303\251.md"`, which does not start with
+// `docs/claims/` — so the entire non-ASCII half of the ledger fell out of the
+// filter below and was never checked at all. -z emits the raw bytes with a NUL
+// terminator instead.
+//
+// Trimming is equally wrong: leading and trailing spaces, tabs and newlines are
+// valid bytes in a filename, and a trimmed path names a different file or no file.
+// Only the empty field after the final NUL terminator is dropped.
+const changed = git(["diff", "--name-only", "-z", "--no-renames", diffBase, headSha]).split("\0");
+if (changed.length > 0 && changed[changed.length - 1] === "") changed.pop();
 
 log(`comparing ${baseName} (${diffBase.slice(0, 12)}) → HEAD (${headSha.slice(0, 12)}): ${changed.length} changed file(s)`);
+
+// Node decodes git's output as UTF-8 and re-encodes every argument it passes back
+// as UTF-8, so a path whose bytes are not valid UTF-8 cannot survive the round
+// trip: it arrives carrying U+FFFD, and the lookup below then asks about a path
+// that is not the one that changed. That reads as "not present on the base — new
+// on this branch, allowed (Law 2)" and waves an edit of a live claim through.
+// There is no argv encoding this process can use to say otherwise, so the honest
+// answer is to refuse the diff rather than to mis-classify it (Law 8).
+const undecodable = changed.filter((f) => f.startsWith("docs/claims/") && f.includes("�"));
+if (undecodable.length > 0) {
+  die(
+    `${undecodable.length} changed path(s) under docs/claims/ are not valid UTF-8, so this sensor ` +
+      `cannot name them back to git and cannot tell whether they are live claims ` +
+      `(first: ${JSON.stringify(undecodable[0])}). Rename them to UTF-8 paths, then re-run. ` +
+      `Refusing to classify a claim path the gate cannot address.`
+  );
+}
 
 const claimFiles = changed.filter((f) => f.startsWith("docs/claims/") && f.endsWith(".md"));
 const touchesActiveWork = changed.includes("docs/active-work.md");
@@ -143,17 +170,44 @@ if (claimFiles.length === 0 && !touchesActiveWork) {
 const fileAt = (ref, path) => {
   // --full-tree so the pathspec is repo-root-relative like `git show ref:path`,
   // rather than relative to wherever the gate job happened to be invoked from.
-  const entry = git(["ls-tree", "-z", "--full-tree", "--full-name", ref, "--", path]);
+  //
+  // `:(literal)` because everything after `--` is a PATHSPEC, and a changed path
+  // is data, not a pattern. A claim file whose name contains `*`, `?`, `[…]` or a
+  // leading `:` would otherwise be matched as a glob or read as pathspec magic —
+  // it could answer for a different file, or fail to answer for itself, and a
+  // claim path that fails to answer for itself reads as "not on the base — new on
+  // this branch, allowed (Law 2)". The literal prefix also survives an inherited
+  // GIT_GLOB_PATHSPECS=1, which the `--literal-pathspecs` option does not (git
+  // rejects the combination outright).
+  const entry = git(["ls-tree", "-z", "--full-tree", "--full-name", ref, "--", `:(literal)${path}`]);
   if (!entry.trim()) return null;
+  // `<rev>:<path>` is an object name, not a pathspec — no glob, no magic.
   return git(["show", `${ref}:${path}`]);
 };
 
-const CLAIM_ID = /^issue-[a-z0-9][a-z0-9-]*$/i;
+/**
+ * What counts as a legacy claim id, and why it is only a prefix test.
+ *
+ * scripts/claims-status.sh is the authoritative reader of the legacy table: it
+ * trims a cell and keeps it if `grep -qE '^issue-'` matches — any suffix at all.
+ * This sensor used to demand /^issue-[a-z0-9][a-z0-9-]*$/, which is strictly
+ * narrower, so ids the fleet is told every day are LIVE — `issue-7_password_reset`,
+ * `issue-7.1-followup` — were live to claims-status and invisible to the gate.
+ * Another lane could rewrite or delete exactly those rows with a green check.
+ * The protected set must be a superset of the live set, so the shape matches the
+ * authoritative reader (the /i is deliberate over-coverage: claims-status is
+ * case-sensitive, and protecting a row it would not print costs nothing).
+ */
+const CLAIM_ID = /^issue-/i;
 
 /**
  * Claim rows keyed by claim id. The legacy table is `| UTC | claim | scope |
  * session |` (playbooks/adopt.md), but the id is located by shape rather than by
  * column index so a repo that added a column still gets checked.
+ *
+ * The key keeps the id's case. Folding it would let `issue-7` and `Issue-7` — two
+ * distinct rows to claims-status — collide on one map entry, and a collision hides
+ * whichever of the two the head rewrote.
  */
 function claimRows(text) {
   const rows = new Map();
@@ -163,7 +217,7 @@ function claimRows(text) {
     const cells = line.split("|").map((c) => c.trim());
     const id = cells.find((c) => CLAIM_ID.test(c));
     if (!id) continue;
-    rows.set(id.toLowerCase(), cells.join(" | "));
+    rows.set(id, cells.join(" | "));
   }
   return rows;
 }

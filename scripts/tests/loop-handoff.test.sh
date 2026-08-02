@@ -251,7 +251,7 @@ if review_invoked; then ok "the reviewer was actually attempted"
 else bad "the reviewer was never attempted"; fi
 if still_queued; then ok "blocked handoff stays queued in loop-state"
 else bad "blocked handoff was cleared from loop-state"; fi
-if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+if [[ -e "$REPO/gibson/pre-handoff-review.receipt" ]]; then
   bad "a failed review must not leave a receipt"
 else ok "a failed review leaves no receipt"; fi
 check_block "pre-handoff review failed" "reviewer did not complete"
@@ -364,7 +364,7 @@ if review_invoked; then bad "an unpublished branch must not be sent to a reviewe
 else ok "an unpublished branch is refused before spending a reviewer"; fi
 if handoff_invoked; then bad "an unpublished branch must never reach the supervisor"
 else ok "an unpublished branch blocks the supervisor invocation"; fi
-if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+if [[ -e "$REPO/gibson/pre-handoff-review.receipt" ]]; then
   bad "an unpublished branch must not leave a receipt"
 else ok "an unpublished branch leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued until it is pushed"
@@ -411,7 +411,7 @@ if review_invoked; then bad "an origin-less repo must not spend a distinct-vendo
 else ok "an origin-less repo is refused before spending a reviewer"; fi
 if handoff_invoked; then bad "an origin-less repo must never reach the supervisor"
 else ok "an origin-less repo blocks the supervisor invocation"; fi
-if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+if [[ -e "$REPO/gibson/pre-handoff-review.receipt" ]]; then
   bad "an origin-less repo must not leave a receipt"
 else ok "an origin-less repo leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued until the repo has a remote"
@@ -461,8 +461,8 @@ if [[ "$(arg_after "$CALLS/devin.args" --base-sha)" == "$master_tip" ]]; then
 else
   bad "handoff --base-sha was '$(arg_after "$CALLS/devin.args" --base-sha)' — expected $master_tip"
 fi
-if grep -qxF "base: master" "$REPO/gibson/second-opinion.receipt" &&
-   grep -qxF "base_sha: $master_tip" "$REPO/gibson/second-opinion.receipt"; then
+if grep -qxF "base: master" "$REPO/gibson/pre-handoff-review.receipt" &&
+   grep -qxF "base_sha: $master_tip" "$REPO/gibson/pre-handoff-review.receipt"; then
   ok "the receipt recorded both the base name and the base SHA"
 else
   bad "the receipt did not bind base master @ $master_tip"
@@ -542,7 +542,7 @@ if [[ "$(arg_after "$CALLS/second-opinion.args" --base)" == "$FIRST_BASE" ]]; th
 else
   bad "the first review base was '$(arg_after "$CALLS/second-opinion.args" --base)' — expected $FIRST_BASE"
 fi
-RECEIPT="$REPO/gibson/second-opinion.receipt"
+RECEIPT="$REPO/gibson/pre-handoff-review.receipt"
 if grep -qxF "base_sha: $FIRST_BASE" "$RECEIPT" && grep -qxF "sha: $HEAD_SHA" "$RECEIPT" &&
    grep -qxF "base: main" "$RECEIPT" && grep -qxF "branch: $BRANCH" "$RECEIPT"; then
   ok "the receipt bound both endpoints: main @ $FIRST_BASE ... $BRANCH @ $HEAD_SHA"
@@ -646,7 +646,7 @@ if review_invoked; then bad "an unfetchable SHA must not be sent to a reviewer"
 else ok "an unresolvable pin is refused before spending a reviewer"; fi
 if handoff_invoked; then bad "an unfetchable SHA must never reach the supervisor"
 else ok "an unresolvable pin blocks the supervisor invocation"; fi
-if [[ -e "$REPO/gibson/second-opinion.receipt" ]]; then
+if [[ -e "$REPO/gibson/pre-handoff-review.receipt" ]]; then
   bad "an unresolvable pin must not leave a receipt"
 else ok "an unresolvable pin leaves no receipt"; fi
 if still_queued; then ok "the branch stays queued when its pin is unresolvable"
@@ -664,6 +664,108 @@ STUB_DEVIN_RC=1 run_loop
 if handoff_invoked; then ok "the supervisor was actually invoked"
 else bad "the supervisor was never invoked, so this is not the case under test"; fi
 check_block "supervisor rejected the handoff" "devin-supervisor.sh exited non-zero"
+
+echo "the escalation artifact and the pre-handoff review are two different files"
+# gibson/second-opinion.md is the STALL artifact: playbooks/loop-step.md tells the
+# next fresh-context hat to open it before its build hat, because it is a
+# cross-vendor read of why the loop kept failing. The mandatory review in front of
+# every handoff wrote to that same path — so a perfectly ordinary green handoff
+# overwrote the stall review, and the next agent opened the file it was sent to and
+# found a review of a branch that had just passed. Two meanings, one path, and the
+# more frequent writer wins.
+reset_calls() {
+  : > "$CALLS/second-opinion.args"
+  : > "$CALLS/second-opinion.count"
+  : > "$CALLS/devin.cmds"
+  : > "$CALLS/devin.args"
+}
+ESCALATION="$REPO/gibson/second-opinion.md"
+PRE_HANDOFF="$REPO/gibson/pre-handoff-review.md"
+
+setup_repo with-remote
+mkdir -p "$REPO/gibson"
+cat > "$ESCALATION" <<'STALL'
+## Second opinion — codex (escalation after 2 consecutive failures)
+The runner keeps dying in the same place: read this before your next build hat.
+STALL
+ESCALATION_BEFORE=$(cksum < "$ESCALATION")
+write_state "$BRANCH" ""
+run_loop
+
+if handoff_invoked; then
+  ok "the handoff completed, so a routine pre-handoff review really did run"
+else
+  bad "the handoff never completed, so this is not the case under test"
+fi
+if [[ "$(cksum < "$ESCALATION")" == "$ESCALATION_BEFORE" ]]; then
+  ok "the escalation second-opinion.md survived the pre-handoff review byte for byte"
+else
+  bad "the pre-handoff review overwrote the escalation artifact the next hat was sent to read"
+fi
+if [[ -s "$PRE_HANDOFF" ]]; then
+  ok "the pre-handoff review was written to its own file"
+else
+  bad "gibson/pre-handoff-review.md is absent or empty after a completed review"
+fi
+if [[ "$(arg_after "$CALLS/second-opinion.args" --out)" == "$PRE_HANDOFF" ]]; then
+  ok "the reviewer was told to write to gibson/pre-handoff-review.md"
+else
+  bad "the reviewer --out was '$(arg_after "$CALLS/second-opinion.args" --out)' — expected $PRE_HANDOFF"
+fi
+if [[ "$(arg_after "$CALLS/devin.args" --review-file)" == "$PRE_HANDOFF" ]]; then
+  ok "the supervisor was handed the pre-handoff review of the diff it is receiving"
+else
+  bad "the supervisor --review-file was '$(arg_after "$CALLS/devin.args" --review-file)' — expected $PRE_HANDOFF"
+fi
+
+echo "a receipt does not pass without the pre-handoff artifact it attests to"
+# Negative control first, and it is the one that makes the rest mean anything: with
+# the artifact intact, the receipt IS reused and no reviewer is spent. A gate that
+# re-reviewed unconditionally would satisfy every case below while proving nothing.
+reset_calls
+write_state "$BRANCH" ""
+run_loop
+if review_invoked; then
+  bad "an intact receipt plus an intact review artifact must not re-run the reviewer"
+else
+  ok "an intact receipt is reused — no reviewer spent"
+fi
+if handoff_invoked; then ok "the reused receipt still hands off"
+else bad "the reused receipt blocked a handoff it should have allowed"; fi
+
+# Now remove ONLY the artifact. The receipt is untouched and still names the right
+# SHAs, author and reviewers — the one thing missing is the review itself.
+reset_calls
+rm -f "$PRE_HANDOFF"
+if [[ -f "$REPO/gibson/pre-handoff-review.receipt" && ! -e "$PRE_HANDOFF" && -s "$ESCALATION" ]]; then
+  ok "fixture: the receipt survives, the pre-handoff review is gone, the escalation file is still there"
+else
+  bad "fixture bug: expected an intact receipt, an absent pre-handoff review, and a present escalation file"
+fi
+write_state "$BRANCH" ""
+run_loop
+if review_invoked; then
+  ok "a receipt whose review artifact is missing forces a fresh review"
+else
+  bad "the receipt passed on its own — the escalation artifact stood in for the missing review"
+fi
+
+# Empty, not absent: second-opinion.sh truncates its --out before it starts, so a
+# reviewer killed mid-run leaves a zero-byte file behind. That is not a review.
+reset_calls
+: > "$PRE_HANDOFF"
+if [[ -f "$PRE_HANDOFF" && ! -s "$PRE_HANDOFF" ]]; then
+  ok "fixture: the pre-handoff review exists but is empty"
+else
+  bad "fixture bug: the pre-handoff review is not an empty existing file"
+fi
+write_state "$BRANCH" ""
+run_loop
+if review_invoked; then
+  ok "an empty pre-handoff review artifact does not satisfy the receipt"
+else
+  bad "a zero-byte review artifact was accepted as a completed review"
+fi
 
 echo "the handoff diffstat is rendered from the exact reviewed SHAs, not from stale local refs"
 # The message the supervisor reads is the only description of the change it gets

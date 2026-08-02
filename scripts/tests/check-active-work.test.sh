@@ -133,6 +133,70 @@ rm "$REPO/docs/claims/issue-7-password-reset.md"
 commit_lane
 run_sensor 1 lane main "deleting another lane's claim file fails" "deletes live claim file"
 
+echo "a legacy row is protected on the shape claims-status.sh calls live"
+# scripts/claims-status.sh is the authoritative reader of the legacy table: it
+# trims a cell and keeps it if it matches `^issue-`, any suffix. The sensor used to
+# demand /^issue-[a-z0-9][a-z0-9-]*$/, which is strictly narrower — so an id the
+# fleet is shown as LIVE every time it runs claims-status, but which carries an
+# underscore or a dot, could be rewritten or deleted by another lane with a green
+# check. The two readers now agree on what a claim id looks like.
+#
+# The reference implementation is asserted, not assumed: each id below is first run
+# through claims-status.sh's own filter, so if that script's shape ever changes
+# these cases say so instead of pinning a rule nobody follows any more.
+CLAIMS_STATUS="$SCRIPT_DIR/../claims-status.sh"
+legacy_row() { printf '| 2026-08-01T10:00:00Z | %s | app/legacy/** | grok@fleet-3 |\n' "$1"; }
+
+# The exact filter from claims-status.sh's legacy-row loop.
+claims_status_calls_live() { # claims_status_calls_live <table-line>
+  local id
+  id=$(echo "$1" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  echo "$id" | grep -qE '^issue-'
+}
+
+if grep -q "grep -qE '\^issue-'" "$CLAIMS_STATUS"; then
+  ok "claims-status.sh still selects legacy rows on the ^issue- prefix"
+else
+  bad "claims-status.sh no longer uses the ^issue- prefix — realign CLAIM_ID in the sensor"
+fi
+
+for legacy_id in issue-7_password_reset issue-7.1-followup issue-42; do
+  if claims_status_calls_live "$(legacy_row "$legacy_id")"; then
+    ok "claims-status.sh treats $legacy_id as a live claim"
+  else
+    bad "fixture bug: claims-status.sh does not consider $legacy_id live"
+  fi
+
+  setup_repo
+  legacy_row "$legacy_id" >> "$REPO/docs/active-work.md"
+  $GIT -C "$REPO" checkout -q main
+  $GIT -C "$REPO" commit -q -am "another lane's legacy row"
+  $GIT -C "$REPO" checkout -q -B lane
+  # Rewrite someone else's row in place.
+  sed 's|grok@fleet-3|claude@fleet-1|' "$REPO/docs/active-work.md" > "$REPO/docs/active-work.md.tmp"
+  mv "$REPO/docs/active-work.md.tmp" "$REPO/docs/active-work.md"
+  commit_lane
+  run_sensor 1 lane main "modifying the pre-existing $legacy_id row fails" "modifies pre-existing claim row"
+
+  setup_repo
+  legacy_row "$legacy_id" >> "$REPO/docs/active-work.md"
+  $GIT -C "$REPO" checkout -q main
+  $GIT -C "$REPO" commit -q -am "another lane's legacy row"
+  $GIT -C "$REPO" checkout -q -B lane
+  grep -vF "$legacy_id" "$REPO/docs/active-work.md" > "$REPO/docs/active-work.md.tmp"
+  mv "$REPO/docs/active-work.md.tmp" "$REPO/docs/active-work.md"
+  commit_lane
+  run_sensor 1 lane main "removing the pre-existing $legacy_id row fails" "removes pre-existing claim row"
+
+  # Negative control: appending an id of the same shape is the normal Law 2 move
+  # and must stay green. Over-broad protection that refused this would stop the
+  # fleet from claiming anything.
+  setup_repo
+  legacy_row "$legacy_id" >> "$REPO/docs/active-work.md"
+  commit_lane
+  run_sensor 0 lane main "appending a new $legacy_id row is still allowed" "allowed (Law 2)"
+done
+
 echo "a rename cannot smuggle the deletion past the gate"
 # Git's rename detection reports a rename as the DESTINATION path only. Without
 # --no-renames the source deletion never appears in the changed-file list, so
@@ -179,6 +243,173 @@ setup_repo
 rm "$REPO/docs/claims/issue-7-password-reset.md"
 commit_lane
 run_sensor 1 feat/7-password-reset main "the owning branch cannot delete its own claim" "release-claim.sh"
+
+echo "a claim filename git considers unusual is still a claim"
+# Two independent ways an unusual filename used to fall out of the gate entirely.
+#
+#   1. `git diff --name-only` without -z C-QUOTES any path git thinks is unusual —
+#      under the default core.quotePath that is every non-ASCII byte, plus quotes,
+#      backslashes and control characters. `docs/claims/issue-8-café.md` arrives as
+#      `"docs/claims/issue-8-caf\303\251.md"`, which does not start with
+#      `docs/claims/`, so the filter dropped it and the file was never checked.
+#   2. Everything after `--` is a PATHSPEC. A name containing `*`, `?` or `[…]` is
+#      data, not a pattern, and must be addressed as itself.
+#
+# Each case below is run twice: once proving the pre-existing claim cannot be
+# touched, and once — the negative control — proving a genuinely NEW claim with the
+# same class of name still lands (Law 2). A gate that refused both would look green
+# on the first half while blocking normal work.
+UNICODE_CLAIM='docs/claims/issue-8-café-ünïcøde.md'
+GLOB_CLAIM='docs/claims/issue-10-a[b]*.md'
+
+# add_base_claim <path> <id> <branch>: a second live claim ON MAIN, so the lane
+# branch is rebuilt on top of it and the file is genuinely pre-existing.
+add_base_claim() {
+  $GIT -C "$REPO" checkout -q main
+  printf 'claim: %s\nissue: 8\nclaimed: 2026-08-01T10:00:00Z\nscope: app/**\nsession: grok@fleet-2\nbranch: %s\n' \
+    "$2" "$3" > "$REPO/$1"
+  $GIT -C "$REPO" add -A
+  $GIT -C "$REPO" commit -q -m "another lane's claim"
+  $GIT -C "$REPO" checkout -q -B lane
+}
+
+for unusual in "$UNICODE_CLAIM" "$GLOB_CLAIM"; do
+  label=$([[ "$unusual" == "$UNICODE_CLAIM" ]] && echo "non-ASCII" || echo "glob-character")
+
+  # The sensor must SEE the path in the first place. Pinned separately from the
+  # verdict: a diff parser that drops the file reports "does not touch the claim
+  # ledger — ok", which is a pass for the wrong reason and would satisfy any check
+  # that only looked at the exit code.
+  setup_repo
+  add_base_claim "$unusual" "issue-8-unusual" "feat/8-other-lane"
+  printf 'notes: stamped by another lane\n' >> "$REPO/$unusual"
+  commit_lane
+  out=$(cd "$REPO" && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main \
+        GITHUB_HEAD_REF=lane node "$SENSOR" 2>&1)
+  rc=$?
+  if grep -qi "does not touch the claim ledger" <<< "$out"; then
+    bad "the $label claim path was dropped from the changed-file list entirely: $out"
+  elif [[ "$rc" -ne 1 ]]; then
+    bad "modifying a pre-existing $label claim must fail (rc=$rc: $out)"
+  elif grep -qi "new on this branch" <<< "$out"; then
+    bad "a pre-existing $label claim was misread as new on this branch: $out"
+  elif grep -qi "modifies live claim file" <<< "$out"; then
+    ok "modifying a pre-existing $label claim file fails"
+  else
+    bad "the refusal did not name the modification ($label, rc=$rc: $out)"
+  fi
+
+  setup_repo
+  add_base_claim "$unusual" "issue-8-unusual" "feat/8-other-lane"
+  rm "$REPO/$unusual"
+  commit_lane
+  run_sensor 1 lane main "deleting a pre-existing $label claim file fails" "deletes live claim file"
+
+  # Even the owning branch: the delete-before-ownership ordering must reach these
+  # paths too, or an unusual filename buys a lane the release-on-main bypass.
+  setup_repo
+  add_base_claim "$unusual" "issue-8-unusual" lane
+  rm "$REPO/$unusual"
+  commit_lane
+  run_sensor 1 lane main "the owning branch cannot delete its $label claim either" "release-claim.sh"
+
+  # Negative control: the same class of name, but genuinely new. Law 2 says claim
+  # before you touch, so this has to stay a green PR.
+  setup_repo
+  printf 'claim: issue-9-new\nissue: 9\nbranch: lane\n' > "$REPO/$unusual"
+  commit_lane
+  run_sensor 0 lane main "adding a NEW $label claim file is still allowed" "new on this branch"
+done
+
+# Negative control for the prefix filter itself: an unusual name OUTSIDE
+# docs/claims/ must not start tripping the gate now that quoting is gone.
+setup_repo
+printf 'notes\n' > "$REPO/docs/nøtes-[x].md"
+commit_lane
+run_sensor 0 lane main "an unusual filename outside docs/claims/ is not a claim" "does not touch the claim ledger"
+
+echo "a changed path is addressed as data, not as a pattern"
+# The lookup that decides whether a claim existed on the base passes the changed
+# path after `--`, which makes it a PATHSPEC. Pathspec interpretation is not a
+# property of the string alone — GIT_GLOB_PATHSPECS=1 in the environment turns
+# every pathspec in the process into a glob, and `git ls-tree` rejects glob magic
+# outright, so the plain form dies on the first claim file it looks at. A gate that
+# stops working because of an inherited environment variable is a gate that fails
+# on clean PRs and tells the lane nothing true about its own diff. `:(literal)`
+# pins the meaning at the call site, where it belongs.
+#
+# Both directions are pinned under that environment: the allowed case must still be
+# allowed (this is the half that regresses to a hard error without the fix), and the
+# refused case must still be refused for the right reason.
+run_sensor_env() { # run_sensor_env <expect-rc> <head> <base> <desc> <needle> [VAR=VAL...]
+  local want="$1" head="$2" base="$3" desc="$4" needle="$5"; shift 5
+  local out rc
+  out=$(cd "$REPO" && env "$@" GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF="$base" \
+        GITHUB_HEAD_REF="$head" node "$SENSOR" 2>&1)
+  rc=$?
+  if [[ "$rc" -ne "$want" ]]; then
+    bad "$desc (want rc=$want, got $rc: $out)"
+  elif ! grep -qi -- "$needle" <<< "$out"; then
+    bad "$desc (rc ok but message missing '$needle': $out)"
+  else
+    ok "$desc"
+  fi
+}
+
+setup_repo
+printf 'claim: issue-9-new\nissue: 9\nbranch: lane\n' > "$REPO/$GLOB_CLAIM"
+commit_lane
+run_sensor_env 0 lane main "a new claim still lands under GIT_GLOB_PATHSPECS=1" \
+  "new on this branch" GIT_GLOB_PATHSPECS=1
+
+setup_repo
+add_base_claim "$GLOB_CLAIM" "issue-8-unusual" "feat/8-other-lane"
+printf 'notes: stamped by another lane\n' >> "$REPO/$GLOB_CLAIM"
+commit_lane
+run_sensor_env 1 lane main "a live claim is still protected under GIT_GLOB_PATHSPECS=1" \
+  "modifies live claim file" GIT_GLOB_PATHSPECS=1
+
+echo "a claim path that cannot be named back to git is refused, not classified"
+# Node decodes git's output as UTF-8 and re-encodes every argv as UTF-8, so a path
+# whose bytes are not valid UTF-8 comes back carrying U+FFFD and no longer names the
+# file that changed. The lookup then reports absence, which reads as "new on this
+# branch — allowed (Law 2)" and waves an edit of a live claim through. The fixture
+# builds the commits through the index (`update-index --cacheinfo` + `commit-tree`),
+# because macOS refuses to create such a filename on disk at all.
+setup_repo
+BAD_PATH=$(printf 'docs/claims/issue-11-\377\376.md')
+BASE_BLOB_OID=$(printf 'claim: issue-11-raw\nbranch: feat/11-other-lane\n' | git -C "$REPO" hash-object -w --stdin)
+HEAD_BLOB_OID=$(printf 'claim: issue-11-raw\nbranch: feat/11-other-lane\nnotes: stamped\n' | git -C "$REPO" hash-object -w --stdin)
+build_raw_commit() { # build_raw_commit <blob-oid> <parent> -> commit sha
+  git -C "$REPO" read-tree "$2^{tree}"
+  git -C "$REPO" update-index --add --cacheinfo "100644,$1,$BAD_PATH"
+  local tree
+  tree=$(git -C "$REPO" write-tree)
+  $GIT -C "$REPO" commit-tree "$tree" -p "$2" -m "raw-byte claim"
+}
+MAIN_SHA=$(git -C "$REPO" rev-parse main)
+RAW_BASE=$(build_raw_commit "$BASE_BLOB_OID" "$MAIN_SHA")
+RAW_HEAD=$(build_raw_commit "$HEAD_BLOB_OID" "$RAW_BASE")
+git -C "$REPO" update-ref refs/heads/main "$RAW_BASE"
+git -C "$REPO" update-ref refs/heads/lane "$RAW_HEAD"
+git -C "$REPO" read-tree "$RAW_HEAD^{tree}"
+if [[ "$(git -C "$REPO" ls-tree -r --name-only main | LC_ALL=C grep -c 'issue-11-')" -eq 1 ]]; then
+  ok "fixture: main carries a claim file whose name is not valid UTF-8"
+else
+  bad "fixture bug: the raw-byte claim is not on main"
+fi
+out=$(cd "$REPO" && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=main \
+      GITHUB_HEAD_REF=lane node "$SENSOR" 2>&1)
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  bad "an undecodable claim path must not pass (rc=0: $out)"
+elif grep -qi "new on this branch" <<< "$out"; then
+  bad "an undecodable claim path was classified as a new file (rc=$rc: $out)"
+elif grep -qi "not valid UTF-8" <<< "$out"; then
+  ok "an undecodable claim path is refused loudly instead of classified"
+else
+  bad "the refusal did not name the undecodable path (rc=$rc: $out)"
+fi
 
 echo "a claim file present in the tree but unreadable is an error, never a classification"
 # The sensor used to read claim content with `git show`, allowFail: true, and map
