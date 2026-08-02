@@ -10,6 +10,23 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+The release hat stops re-diagnosing the same three merge calls.
+
+- **`scripts/release-preflight.sh`** — read-only pre-merge verdict, exit 0 READY /
+  1 BLOCKED / 4 ADMIN-CANDIDATE. Reads `closingIssuesReferences` so a partial ship
+  cannot silently close its issue on negated prose (L-013); accepts a
+  `VERDICT: APPROVE` comment as the review of record when GitHub's same-author rule
+  makes a formal approval impossible, and grades it ADMIN-CANDIDATE rather than
+  READY because branch protection still blocks the merge (L-015 / L-021); separates
+  GitHub Actions `startup_failure` / no-steps / no-runner infra red from a step that
+  actually failed (L-033). Tier C and `--launched` have no admin path at all.
+- **`scripts/tests/release-preflight.test.sh`** — fixture-driven, fake `gh` on PATH,
+  no network.
+- **Playbooks:** `release.md` runs preflight as step 0 of stage 7 and documents how
+  to read each verdict; `reviewer.md` documents the same-author `VERDICT:` fallback
+  and that it is a review signal, not merge authorization.
+- **Migration:** none. The script is additive; nothing calls it automatically.
+
 release-claim stops half-finishing cleanup.
 
 - **`scripts/release-claim.sh`** — commits the claim-row removal from a throwaway

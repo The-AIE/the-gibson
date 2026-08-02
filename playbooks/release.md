@@ -36,6 +36,11 @@ You do not re-implement the feature.
 ## How to use this
 
 ```bash
+# Pre-merge verdict (read-only) — run this first; it decides the three calls
+# that used to be re-diagnosed by hand on every PR (L-013, L-015/L-021, L-033)
+<path-to-gibson>/scripts/release-preflight.sh 123            # add --partial for a slice
+# exit 0 READY · 1 BLOCKED · 4 ADMIN-CANDIDATE (pre-launch operator decision)
+
 # Pre-merge checklist (read-only)
 gh pr view 123 --json title,body,mergeable,reviewDecision,statusCheckRollup,labels
 gh pr checks 123
@@ -69,7 +74,10 @@ Canonical: /path/to/target
 
 ### Stage 7 — Merge (ordered checklist)
 
-1. `Closes #<issue>` present; issue contract checkboxes verified (sensors, not vibes).
+0. `release-preflight.sh <pr>` — verdict READY, or an ADMIN-CANDIDATE you have
+   explicitly authorized below. BLOCKED is never merged past.
+1. `Closes #<issue>` present; issue contract checkboxes verified (sensors, not
+   vibes). **Partial ship?** Run with `--partial`: it must close *nothing*.
 2. CI green: gibson-gate, tests, security hard-fail layers.
 3. Review `VERDICT: APPROVE`; UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
@@ -87,6 +95,42 @@ If any item fails → do not merge; report the missing gate.
 4. Mechanical failure → retry/redeploy; judgment-shaped → escalate with logs.
 5. Rollback = promote previous READY deployment; diagnose in a worktree — never
    debug live in prod.
+
+### Reading the preflight verdict
+
+**READY** — merge.
+
+**BLOCKED** — the reason is printed. Three of them are worth knowing cold:
+
+- *"GitHub will close #N on merge"* on a `--partial` ship. Prose does not stop the
+  keyword linker: "does not fully resolve #28" closed #28 anyway, four times
+  (L-013). Fix the squash subject/body **and** unlink the issue in the PR's
+  Development sidebar — the sidebar link closes independently of the wording.
+- *"product-red required check"* — a step ran and failed. That is the code. Fix it.
+- *"no formal approval and no VERDICT: line"* — review is fail-closed (Law 5).
+  Never merge past this one.
+
+**ADMIN-CANDIDATE** — nothing about the product is wrong, but nothing has
+authorized the merge either. Two causes:
+
+1. **Same-author review** (L-015 / L-021). GitHub refuses self-approval, so a
+   solo loop's `VERDICT: APPROVE` comment is the only review signal it can
+   produce — real as process, but not an independent identity, and branch
+   protection still blocks the merge. Prefer setting `REVIEWER_CMD` to get a
+   cross-vendor reviewer with a different GitHub identity; admin merge is the
+   fallback, not the habit.
+2. **GitHub Actions infrastructure** (L-033). Required checks that fail in
+   seconds with `startup_failure`, no steps, and no runner name — usually
+   concurrently across several open PRs — carry no product signal. Re-run once.
+   If it repeats identically, it is infra.
+
+Either way, admin merge is **pre-launch only, Tier A/B only**, and only after you
+post the checklist the script prints (local gate green on the merge tip, VERDICT
+recorded, security CLEAR, tier, infra evidence quoted). Name the skip in that
+comment. Never report remote CI as green when it was not. Post-launch, run with
+`--launched`: there is no admin path, escalate to the owner instead.
+
+Always re-sync `origin/main` before a merge attempt under a multi-lane fleet.
 
 ### Cleanup (Law 10)
 
@@ -133,6 +177,8 @@ Mark**, move on (do not block unrelated work). Never force-push main (G3).
 
 ## Done means
 
+- [ ] `release-preflight.sh` verdict recorded on the PR (and the admin checklist
+      posted verbatim if the merge used the ADMIN-CANDIDATE path)
 - [ ] Merged only when checklist complete
 - [ ] Deploy verified READY for expected SHA
 - [ ] Smoke green
