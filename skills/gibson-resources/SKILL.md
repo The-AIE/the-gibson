@@ -6,15 +6,21 @@ description: "Discover which AI runners and infrastructure are actually availabl
 # gibson-resources — inventory before dispatch
 
 Probe, don't assume. Every prior session's notes about what works may be stale —
-tokens expire, CLIs update, machines go offline. Verify each resource LIVE and
-report only what you confirmed this run.
+tokens expire, CLIs update, machines go offline. Verify each resource this run.
+
+**A `--version` check proves the CLI is installed, NOT that it's authenticated
+or has quota.** Where a cheap auth check exists, run it and report auth state
+separately from install state — an installed-but-unauthenticated runner is NOT
+"alive" for routing. Where no cheap non-spending auth check exists (some CLIs
+only reveal auth by doing billable work), say so and mark it "install-confirmed,
+auth-unverified" rather than implying it's ready.
 
 ## The probe list
 
 | Resource | How to verify (cheap, non-destructive) |
 |---|---|
-| **Grok CLI** | `~/.grok/bin/grok --version` (also try `grok`). Flat-rate pool — the volume workhorse. |
-| **Codex CLI** | `codex --version`; confirm it runs inside a trusted git dir. Note: reviews need `-s read-only`. |
+| **Grok CLI** | `~/.grok/bin/grok --version` (install). Auth: only confirmable by a real call — mark auth-unverified unless a prior lane succeeded this session. Flat-rate pool — the volume workhorse. |
+| **Codex CLI** | `codex --version` (install); confirm it runs inside a trusted git dir. Auth surfaces on first real call — mark auth-unverified until one succeeds. Reviews need `-s read-only`. |
 | **Claude Code** | you're running in it — note model + whether `claude` CLI headless is available for dispatched lanes. |
 | **Hermes** | `hermes --version` if present. |
 | **Devin** | `DEVIN_API_KEY` set? `scripts/devin-supervisor.sh --help` from the Gibson clone. **NEVER run `ensure` as a probe — if no session exists it CREATES one, which bills ACUs (real money). Spend needs the owner's explicit OK first (docs/14), a cap is not approval.** Report key-present/absent + `DEVIN_MAX_ACU` state only. |

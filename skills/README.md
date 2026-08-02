@@ -16,6 +16,7 @@ entry point, not a second implementation.
 ## Install (personal, all sessions)
 
 ```bash
+mkdir -p ~/.claude/skills
 for s in gibson gibson-audit gibson-resources gibson-setup gibson-run gibson-direct; do
   ln -sfn ~/Code/the-gibson/skills/$s ~/.claude/skills/$s
 done
