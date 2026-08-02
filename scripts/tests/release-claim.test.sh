@@ -131,23 +131,163 @@ rc=$?
 check "empty ledger + --keep-label dry-run exits 0" "$rc" "0"
 contains "does not invent a claim row" "$out" "none matched"
 contains "keeps the label for the live sibling" "$out" "KEEP label agent-claimed"
-lacks    "does not hard-fail as missing ledger" "$out" "no claim ledger"
+lacks    "does not hard-fail as missing ledger" "$out" "cannot resolve a valid ledger"
 
-out=$(cd "$ROOT/empty/canon" && "$RC" 18 --keep-label 2>&1)
+# --keep-label happy path: fake gh reports agent-claimed present → verified 0.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+# Fake gh for --keep-label verification.
+# release-claim: gh issue view N --repo R --json labels -q '[.labels[].name] | join(",")'
+# Also handles repo view for default product-repo resolution.
+case "$1" in
+  repo)
+    echo "acme/app"
+    exit 0
+    ;;
+  issue)
+    shift
+    # find -q EXPR if present
+    q=""
+    prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "-q" ]]; then q="$a"; fi
+      prev="$a"
+    done
+    if [[ "$1" == "view" && -n "$q" ]]; then
+      case "${GH_LABELS:-agent-claimed,tier-b}" in
+        "?") exit 1 ;;  # unreadable
+        *) echo "${GH_LABELS:-agent-claimed,tier-b}" ;;
+      esac
+      exit 0
+    fi
+    if [[ "$1" == "edit" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/empty/canon" && GH_LABELS="agent-claimed,tier-b" "$RC" 18 --keep-label --repo acme/app 2>&1)
 rc=$?
-check "empty ledger + --keep-label completes" "$rc" "0"
+check "empty ledger + --keep-label verified present completes" "$rc" "0"
 contains "keeps label without inventing a row" "$out" "--keep-label"
+contains "verified preservation" "$out" "verified"
 contains "truthful no-claim OK" "$out" "no claim row to release"
 lacks    "does not claim a row was released" "$out" "OK — claim released for issue 18"
 
-# Final completed lane on an empty ledger: must remove agent-claimed. This
-# temp repo has no GitHub remote, so the product repo cannot be resolved and
-# label removal is incomplete → exit 3 (L-027 still holds).
-out=$(cd "$ROOT/empty/canon" && "$RC" 18 2>&1)
+echo "#61 · --keep-label fails closed when label missing or unreadable"
+out=$(cd "$ROOT/empty/canon" && GH_LABELS="tier-b" "$RC" 18 --keep-label --repo acme/app 2>&1)
 rc=$?
-check "empty ledger final lane without --keep-label exits 3 when label unverified" "$rc" "3"
-contains "names unfinished label work" "$out" "agent-claimed"
+check "keep-label with ABSENT agent-claimed exits 3" "$rc" "3"
+contains "names ABSENT label" "$out" "ABSENT"
+lacks    "does not claim success when label missing" "$out" "OK —"
+
+out=$(cd "$ROOT/empty/canon" && GH_LABELS="?" "$RC" 18 --keep-label --repo acme/app 2>&1)
+rc=$?
+check "keep-label with unreadable labels exits 3" "$rc" "3"
+contains "names UNVERIFIED preservation" "$out" "UNVERIFIED"
+
+# No --repo and gh repo view fails → cannot resolve product repo.
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+exit 1
+FAKE
+chmod +x "$ROOT/bin/gh"
+out=$(cd "$ROOT/empty/canon" && "$RC" 18 --keep-label 2>&1)
+rc=$?
+check "keep-label without resolvable repo exits 3" "$rc" "3"
+contains "cannot verify without product repo" "$out" "cannot verify"
+
+# Restore a working gh for subsequent tests that may need it.
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    shift
+    q=""; prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "-q" ]]; then q="$a"; fi
+      prev="$a"
+    done
+    if [[ "$1" == "view" && -n "$q" ]]; then
+      echo "${GH_LABELS:-}"
+      exit 0
+    fi
+    if [[ "$1" == "edit" ]]; then exit 0; fi
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+
+# Final completed lane on an empty ledger: must remove agent-claimed. With gh
+# that returns empty labels after a no-op edit, removal verifies and exits 0.
+# Without a working remove+verify path, exit 3 (L-027 still holds).
+out=$(cd "$ROOT/empty/canon" && GH_LABELS="" "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "empty ledger final lane removes label when verified gone" "$rc" "0"
+contains "removed label verified" "$out" "removed agent-claimed"
+
+# Unverifiable final lane: gh issue view fails after edit.
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then exit 0; fi
+    exit 1
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+out=$(cd "$ROOT/empty/canon" && "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "empty ledger final lane exits 3 when label removal UNVERIFIED" "$rc" "3"
+contains "names unfinished label work" "$out" "UNVERIFIED"
 lacks    "does not claim success on incomplete label removal" "$out" "OK —"
+
+echo "#61 · unborn/invalid ledger ref is not an empty ledger"
+# Bare repo with no commits: no origin/main, no main commit → hard fail.
+mkdir -p "$ROOT/unborn"
+git init -q "$ROOT/unborn/canon"
+# Ensure no main/master commit exists (unborn HEAD).
+out=$(cd "$ROOT/unborn/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
+rc=$?
+check "unborn main hard-fails (not empty ledger)" "$rc" "1"
+contains "names cannot resolve ledger ref" "$out" "cannot resolve a valid ledger commit ref"
+lacks    "does not treat unborn as empty ledger" "$out" "treating as no live claims"
+
+# Invalid ref: a repo whose HEAD points at a non-commit (corrupt) is not an empty ledger.
+# Simpler portable case: strip every main/master ref so resolve_ledger_ref finds none.
+new_repo "$ROOT/badref"
+(
+  cd "$ROOT/badref/canon" || exit 1
+  git checkout -q long-lived-feature
+  # Drop local main and all remote-tracking main/master refs. Also remove the
+  # bare origin's main so a later fetch cannot resurrect it.
+  git branch -D main >/dev/null 2>&1 || true
+  git branch -D master >/dev/null 2>&1 || true
+  git update-ref -d refs/remotes/origin/main 2>/dev/null || true
+  git update-ref -d refs/remotes/origin/master 2>/dev/null || true
+  # Prevent fetch from re-adding origin/main during the script.
+  git remote remove origin 2>/dev/null || true
+  # Also ensure no local main/master commit ref remains under any name we try.
+  for r in refs/heads/main refs/heads/master refs/remotes/origin/main refs/remotes/origin/master; do
+    git update-ref -d "$r" 2>/dev/null || true
+  done
+) >/dev/null 2>&1
+out=$(cd "$ROOT/badref/canon" && "$RC" 18 --keep-label 2>&1)
+rc=$?
+check "deleted main/master hard-fails" "$rc" "1"
+contains "hard-fail message on missing ref" "$out" "cannot resolve a valid ledger commit ref"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"

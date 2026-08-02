@@ -39,15 +39,19 @@ USAGE
   --keep-branch  do not delete the local/remote feature branch
   --keep-label   keep agent-claimed even when the ledger has no residual row
                  for this issue (live sibling lane whose claim file is absent
-                 or lives elsewhere). Without this flag, a no-residual cleanup
+                 or lives elsewhere). Verifies the live GitHub label is present
+                 (exit 3 if the product repo is unresolved or the label is
+                 absent/unreadable). Without this flag, a no-residual cleanup
                  removes the label — the final completed lane path.
   --dry-run      print what would happen, touch nothing
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
 
-  Empty ledger: when origin has no docs/claims/* and no docs/active-work.md,
-  that is a valid empty ledger (no live claims), not a hard fail. Cleanup of
-  worktrees/labels can still complete truthfully without inventing a row.
+  Empty ledger: when a *valid* ledger ref has no docs/claims/* and no
+  docs/active-work.md, that is a valid empty ledger (no live claims), not a
+  hard fail. A missing/unborn/invalid main|master ref is NOT an empty ledger —
+  the script fails hard. Cleanup of worktrees/labels can still complete
+  truthfully without inventing a row when the ref is valid and empty.
 
 ENV
   GIBSON_CANONICAL   claim-table repo path (default: cwd)
@@ -119,18 +123,35 @@ fi
 cd "$CANONICAL"
 git fetch origin >/dev/null 2>&1 || true
 
-BASE=main
-git show-ref --verify --quiet refs/heads/main || BASE=master
-REF="origin/$BASE"
-git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
+# Resolve the ledger ref. Prefer origin/main, then origin/master, then local
+# main/master. An unborn, missing, or non-commit ref is a hard fail — never
+# treat a failed ref read as an "empty ledger".
+resolve_ledger_ref() {
+  local candidate
+  for candidate in origin/main origin/master main master; do
+    if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
-# A missing docs/claims tree and absent active-work.md is a valid *empty*
-# ledger (every claim already released, or never filed) — not corruption.
-# Treat it as zero live claims and continue label/worktree cleanup. A named
-# --claim-id that is not present still hard-fails below.
+REF=""
+if ! REF=$(resolve_ledger_ref); then
+  die "cannot resolve a valid ledger commit ref (tried origin/main, origin/master, main, master). A missing/unborn/invalid ref is not an empty ledger — fix the remote or pass a claim-table checkout with a real main."
+fi
+info "ledger ref: $REF ($(git rev-parse --short "$REF" 2>/dev/null || echo '?'))"
+
+# A missing docs/claims tree and absent active-work.md on a *valid* commit is
+# a valid *empty* ledger (every claim already released, or never filed) — not
+# corruption. Treat it as zero live claims and continue label/worktree cleanup.
+# A named --claim-id that is not present still hard-fails below.
 HAS_ACTIVE=0
 HAS_CLAIMS_TREE=0
-git cat-file -e "$REF:docs/active-work.md" 2>/dev/null && HAS_ACTIVE=1
+if git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+  HAS_ACTIVE=1
+fi
 if [[ -n "$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null)" ]]; then
   HAS_CLAIMS_TREE=1
 fi
@@ -320,13 +341,30 @@ if command -v gh >/dev/null; then
   fi
   if [[ -n "$RESIDUAL_IDS" ]]; then
     # L-024: siblings are still working this issue; the label is still true.
-    # No GitHub call required — leaving the label is the complete policy.
+    # Residual rows on the ledger are themselves the verification — leaving
+    # the label is the complete policy without a GitHub round-trip.
     info "keeping agent-claimed on #$ISSUE — residual claims remain:"
     echo "$RESIDUAL_IDS" | sed 's/^/  /'
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     # Empty ledger + live sibling whose claim is not on this ref (or was never
-    # filed). Explicit operator path — do not invent a row, do not strip the label.
-    info "keeping agent-claimed on #$ISSUE — --keep-label (live sibling outside ledger; no claim row invented)"
+    # filed). Explicit operator path — do not invent a row, do not strip the
+    # label. Preservation is a postcondition that must be verified against
+    # GitHub; a blind "kept" log while the label is absent is a false green.
+    if [[ -z "${REPO:-}" ]]; then
+      warn "could not resolve the product repo — --keep-label cannot verify agent-claimed on #$ISSUE (pass --repo owner/name)"
+      INCOMPLETE=1
+    else
+      LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
+      if [[ "$LABELS" == "?" ]]; then
+        warn "could not read labels on $REPO#$ISSUE — --keep-label preservation UNVERIFIED"
+        INCOMPLETE=1
+      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+        warn "agent-claimed is ABSENT on $REPO#$ISSUE — --keep-label required the label to stay, but it is not present. Re-add it or re-claim before declaring Law 10 done."
+        INCOMPLETE=1
+      else
+        info "keeping agent-claimed on $REPO#$ISSUE — --keep-label verified (live sibling outside ledger; no claim row invented)"
+      fi
+    fi
   elif [[ -z "${REPO:-}" ]]; then
     warn "could not resolve the product repo — agent-claimed NOT removed from #$ISSUE (pass --repo owner/name)"
     INCOMPLETE=1
@@ -347,8 +385,11 @@ if command -v gh >/dev/null; then
     fi
   fi
 else
-  if [[ -n "$RESIDUAL_IDS" || "$KEEP_LABEL" -eq 1 ]]; then
-    info "gh not found — agent-claimed left in place (residual/--keep-label)"
+  if [[ -n "$RESIDUAL_IDS" ]]; then
+    info "gh not found — agent-claimed left in place (residual claims on ledger)"
+  elif [[ "$KEEP_LABEL" -eq 1 ]]; then
+    warn "gh not found — --keep-label cannot verify agent-claimed on #$ISSUE"
+    INCOMPLETE=1
   else
     warn "gh not found — agent-claimed NOT removed from #$ISSUE"
     INCOMPLETE=1

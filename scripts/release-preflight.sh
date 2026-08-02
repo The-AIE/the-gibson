@@ -14,11 +14,14 @@ WHAT IT DOES
     1. Close keywords. GitHub's linker does not parse negation, so a partial
        ship whose body says "does not fully resolve #28" still closes #28.
        Reads closingIssuesReferences (what GitHub will actually do), not prose.
-    2. Review. Same-account solo loops cannot self-approve, so an empty
-       reviewDecision is accepted when a review or comment ends in
-       VERDICT: APPROVE from someone other than a rubber-stamping author.
-       Reviews and comments form one timestamped stream (newest wins); a
-       verdict that binds a commit SHA must match the current PR head.
+    2. Review. Reviews and comments form one normalized timestamped stream
+       (newest wins, source type does not reorder). Formal review states
+       (APPROVED / CHANGES_REQUESTED) are modeled as events when usable;
+       reviewDecision is only a fail-closed fallback when no usable event
+       exists. A newer VERDICT: REQUEST_CHANGES blocks even if an older
+       formal approval remains. Null/malformed timestamps and authorless
+       APPROVE events never clear the gate; equal-time conflicts prefer
+       REQUEST_CHANGES. A SHA-bound verdict must match the current PR head.
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
@@ -124,36 +127,63 @@ else
 fi
 
 # --- 2. review (L-015 / L-021) -------------------------------------------
-# Reviews and comments are one timestamped event stream. Newest VERDICT wins
-# regardless of source type (PR #57 false-green: older comment APPROVE beat a
-# newer review REQUEST_CHANGES because comments were concatenated after
-# reviews and `last` was taken without sorting). When a source carries a
-# commit SHA, that verdict is bound to the current PR head — a stale-head
-# verdict fails closed.
+# Reviews and comments are one normalized timestamped event stream. Newest
+# usable event wins regardless of source type and regardless of
+# reviewDecision (false-green: formal APPROVED short-circuited a newer
+# VERDICT: REQUEST_CHANGES comment). Formal review states are modeled as
+# events when they carry a usable timestamp; reviewDecision is only a
+# fail-closed fallback when no usable event exists.
+#
+# Usability gates (fail closed):
+#   - null/empty/malformed timestamps are dropped (never outrank valid events)
+#   - authorless APPROVE never counts as independent
+#   - equal timestamps: REQUEST_CHANGES wins over APPROVE (source order ignored)
+#   - SHA-bound events must match the current PR head
 VERDICT_EVENT=$(echo "$PR_JSON" | jq -r '
-  def verdict_of:
+  def body_verdict:
     if .body == null then empty
+    elif (.body | type) != "string" then empty
     elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i")) then
       (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v
     else empty end;
+  def formal_verdict:
+    if .state == "APPROVED" then "VERDICT: APPROVE"
+    elif .state == "CHANGES_REQUESTED" then "VERDICT: REQUEST_CHANGES"
+    else empty end;
+  def event_verdict:
+    (body_verdict // formal_verdict // empty);
+  # ISO-8601-ish timestamps only; null/empty/"null"/garbage sort unpredictably
+  # and must never outrank a valid event.
+  def valid_at:
+    (.at != null) and ((.at | type) == "string") and
+    (.at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"));
+  def is_request_changes:
+    (.verdict | test("REQUEST_CHANGES"; "i"));
   [
     (.reviews[]? | {
       source: "review",
-      login: (.author.login // ""),
-      at: (.submittedAt // ""),
-      sha: (.commit.oid // ""),
-      body: .body
+      login: ((.author // {}) | .login // ""),
+      at: (.submittedAt // null),
+      sha: ((.commit // {}) | .oid // ""),
+      body: .body,
+      state: (.state // "")
     }),
     (.comments[]? | {
       source: "comment",
-      login: (.author.login // ""),
-      at: (.createdAt // ""),
+      login: ((.author // {}) | .login // ""),
+      at: (.createdAt // null),
       sha: "",
-      body: .body
+      body: .body,
+      state: ""
     })
   ]
-  | map(. as $e | ($e | verdict_of) as $v | select($v != null) | $e + {verdict: $v})
-  | sort_by(.at)
+  | map(. as $e | ($e | event_verdict) as $v | select($v != null and $v != "") | $e + {verdict: $v})
+  | map(select(valid_at))
+  # Authorless APPROVE is never independent and never clears the gate — drop it.
+  # Authorless REQUEST_CHANGES still blocks (fail closed).
+  | map(select(is_request_changes or ((.login != null) and (.login != ""))))
+  # Ascending time; on ties, REQUEST_CHANGES (1) after APPROVE (0) so last wins.
+  | sort_by([.at, (if is_request_changes then 1 else 0 end)])
   | last // empty
   | if . then
       [.login, .verdict, .source, .at, .sha] | @tsv
@@ -181,36 +211,41 @@ if [[ -n "$VERDICT_SHA" && -n "$HEAD_OID" && "$VERDICT_SHA" != "$HEAD_OID" ]]; t
   STALE_HEAD_VERDICT=1
 fi
 
-case "$REVIEW_DECISION" in
-  APPROVED)
-    NOTES+=("formal GitHub approval present")
-    ;;
-  CHANGES_REQUESTED)
-    BLOCKERS+=("reviewDecision is CHANGES_REQUESTED")
-    ;;
-  *)
-    # No formal reviewDecision: the newest timestamped VERDICT event is the
-    # gate. Source type (review vs comment) does not matter — only recency.
-    if [[ -z "$VERDICT_TEXT" ]]; then
-      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
-    elif [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
-      BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
-    elif echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
-      BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
-    elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
-      if [[ -n "$AUTHOR" && "$VERDICT_LOGIN" == "$AUTHOR" ]]; then
-        # L-015: GitHub refuses self-approval, so the comment is the only signal
-        # the solo loop can produce. Real, but it is not an independent identity.
-        SAME_AUTHOR_REVIEW=1
-        ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
-      else
-        NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity, no formal review)")
-      fi
+if [[ -n "$VERDICT_TEXT" ]]; then
+  # Usable chronological event is the gate — reviewDecision does not short-circuit.
+  if [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
+    BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
+  elif echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
+    BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
+  elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
+    if [[ -z "$VERDICT_LOGIN" ]]; then
+      # Defensive: authorless APPROVE is filtered above; still fail closed.
+      BLOCKERS+=("VERDICT: APPROVE has no author — fail closed (cannot count as independent)")
+    elif [[ -n "$AUTHOR" && "$VERDICT_LOGIN" == "$AUTHOR" ]]; then
+      # L-015: GitHub refuses self-approval, so the comment is the only signal
+      # the solo loop can produce. Real, but it is not an independent identity.
+      SAME_AUTHOR_REVIEW=1
+      ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
     else
-      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+      NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity)")
     fi
-    ;;
-esac
+  else
+    BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+  fi
+else
+  # No usable timestamped event: reviewDecision is a fail-closed fallback only.
+  case "$REVIEW_DECISION" in
+    APPROVED)
+      NOTES+=("formal GitHub approval present (reviewDecision fallback; no usable timestamped event)")
+      ;;
+    CHANGES_REQUESTED)
+      BLOCKERS+=("reviewDecision is CHANGES_REQUESTED")
+      ;;
+    *)
+      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+      ;;
+  esac
+fi
 
 # --- 3. required checks, product red vs GHA infra (L-033) ----------------
 CHECK_SUMMARY=$(echo "$PR_JSON" | jq -r '

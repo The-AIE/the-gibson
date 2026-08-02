@@ -76,7 +76,7 @@ check "partial that closes nothing is READY" "$rc" "0"
 
 echo "L-015 · same-author VERDICT: APPROVE is not a formal review"
 f_same=$(fixture same_author '.reviewDecision = "" |
-  .comments = [{"author": {"login": "builder-bot"}, "body": "six lenses clear\n\nVERDICT: APPROVE"}]')
+  .comments = [{"author": {"login": "builder-bot"}, "body": "six lenses clear\n\nVERDICT: APPROVE", "createdAt": "2026-08-02T15:00:00Z"}]')
 out=$(run "$f_same"); rc=$?
 check "exit 4 (ADMIN-CANDIDATE)" "$rc" "4"
 contains "explains self-approval block" "$out" "GitHub blocks self-approval"
@@ -84,7 +84,7 @@ contains "prefers a cross-vendor identity" "$out" "REVIEWER_CMD"
 contains "prints the checklist" "$out" "security CLEAR"
 
 f_other=$(fixture other_reviewer '.reviewDecision = "" |
-  .comments = [{"author": {"login": "reviewer-bot"}, "body": "VERDICT: APPROVE"}]')
+  .comments = [{"author": {"login": "reviewer-bot"}, "body": "VERDICT: APPROVE", "createdAt": "2026-08-02T15:00:00Z"}]')
 out=$(run "$f_other"); rc=$?
 check "independent VERDICT: APPROVE is READY" "$rc" "0"
 
@@ -134,6 +134,121 @@ f_chrono_ready=$(fixture chrono_ready '.reviewDecision = "" | .headRefOid = "abc
   }]')
 out=$(run "$f_chrono_ready"); rc=$?
 check "newer comment APPROVE after older review REQUEST_CHANGES is READY" "$rc" "0"
+
+echo "#61 · formal APPROVED must not short-circuit a newer REQUEST_CHANGES"
+# reviewDecision=APPROVED is the older formal signal; a newer comment
+# VERDICT: REQUEST_CHANGES must still block (release-blocking false-green).
+f_formal_stale=$(fixture formal_stale '.reviewDecision = "APPROVED" | .headRefOid = "cccccccccccccccccccccccccccccccccccccccc" |
+  .reviews = [{
+    "author": {"login": "old-approver"},
+    "state": "APPROVED",
+    "body": "looks good",
+    "submittedAt": "2026-08-02T12:00:00Z",
+    "commit": {"oid": "cccccccccccccccccccccccccccccccccccccccc"}
+  }] |
+  .comments = [{
+    "author": {"login": "codex-reviewer"},
+    "body": "new findings\n\nVERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T18:00:00Z"
+  }]')
+out=$(run "$f_formal_stale"); rc=$?
+check "reviewDecision=APPROVED + newer comment REQUEST_CHANGES is BLOCKED" "$rc" "1"
+contains "names REQUEST_CHANGES from stream" "$out" "REQUEST_CHANGES"
+contains "names the newer commenter" "$out" "codex-reviewer"
+# Must not claim READY just because formal approval exists.
+if echo "$out" | grep -qF "READY"; then bad "must not report READY when newer REQUEST_CHANGES exists"; else ok "does not report READY under stale formal approval"; fi
+
+echo "#61 · malformed/null timestamps and authorless events fail closed"
+# Null-time APPROVE must never outrank a valid REQUEST_CHANGES.
+f_null_time=$(fixture null_time '.reviewDecision = "" | .headRefOid = "dddddddddddddddddddddddddddddddddddddddd" |
+  .reviews = [{
+    "author": {"login": "bad-clock"},
+    "body": "VERDICT: APPROVE",
+    "submittedAt": null,
+    "commit": {"oid": "dddddddddddddddddddddddddddddddddddddddd"}
+  }] |
+  .comments = [{
+    "author": {"login": "good-reviewer"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T17:00:00Z"
+  }]')
+out=$(run "$f_null_time"); rc=$?
+check "null-time APPROVE does not outrank valid REQUEST_CHANGES" "$rc" "1"
+contains "selects the valid REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
+
+# Empty/malformed timestamps dropped entirely; only formal fallback remains.
+f_all_bad_time=$(fixture all_bad_time '.reviewDecision = "" |
+  .reviews = [{
+    "author": {"login": "ghost"},
+    "body": "VERDICT: APPROVE",
+    "submittedAt": "",
+    "commit": {"oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  }] |
+  .comments = [{
+    "author": {"login": "ghost2"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "not-a-timestamp"
+  }]')
+out=$(run "$f_all_bad_time"); rc=$?
+check "only malformed timestamps with empty reviewDecision is BLOCKED" "$rc" "1"
+contains "fail closed without usable event" "$out" "Law 5"
+
+# Authorless APPROVE never counts as independent.
+f_no_author=$(fixture no_author '.reviewDecision = "" |
+  .comments = [{
+    "author": null,
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T16:00:00Z"
+  }]')
+out=$(run "$f_no_author"); rc=$?
+check "authorless APPROVE is BLOCKED (not independent)" "$rc" "1"
+contains "fail closed without usable independent APPROVE" "$out" "Law 5"
+
+# Equal timestamps: REQUEST_CHANGES wins regardless of source array order.
+f_tie_rc=$(fixture tie_rc '.reviewDecision = "" | .headRefOid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" |
+  .comments = [{
+    "author": {"login": "commenter"},
+    "body": "VERDICT: APPROVE",
+    "createdAt": "2026-08-02T16:00:00Z"
+  }] |
+  .reviews = [{
+    "author": {"login": "reviewer"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+  }]')
+out=$(run "$f_tie_rc"); rc=$?
+check "equal-time REQUEST_CHANGES beats APPROVE (review after comment in arrays)" "$rc" "1"
+contains "tie prefers REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
+
+f_tie_rc2=$(fixture tie_rc2 '.reviewDecision = "" | .headRefOid = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" |
+  .reviews = [{
+    "author": {"login": "reviewer"},
+    "body": "VERDICT: APPROVE",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+  }] |
+  .comments = [{
+    "author": {"login": "commenter"},
+    "body": "VERDICT: REQUEST_CHANGES",
+    "createdAt": "2026-08-02T16:00:00Z"
+  }]')
+out=$(run "$f_tie_rc2"); rc=$?
+check "equal-time REQUEST_CHANGES beats APPROVE (comment after review in arrays)" "$rc" "1"
+contains "tie prefers REQUEST_CHANGES inverse order" "$out" "REQUEST_CHANGES"
+
+echo "#61 · formal review state modeled as timestamped event; head binding holds"
+# Formal state APPROVED with matching head and no body VERDICT is READY.
+f_formal_event=$(fixture formal_event '.reviewDecision = "" | .headRefOid = "ffffffffffffffffffffffffffffffffffffffff" |
+  .reviews = [{
+    "author": {"login": "formal-bot"},
+    "state": "APPROVED",
+    "body": "lgtm",
+    "submittedAt": "2026-08-02T16:00:00Z",
+    "commit": {"oid": "ffffffffffffffffffffffffffffffffffffffff"}
+  }]')
+out=$(run "$f_formal_event"); rc=$?
+check "formal state APPROVED on current head is READY" "$rc" "0"
 
 echo "#61 · stale-head verdict fails closed when source binds a commit SHA"
 f_stale=$(fixture stale_head '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
