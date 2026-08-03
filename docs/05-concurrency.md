@@ -87,9 +87,16 @@ from **evidence**, not assertion:
   (must agree with the id-derived issue number), branch, and worktree. Duplicate
   logical ids, filename/body mismatch, wrong object modes, and issue mismatches
   refuse before any plan/comment/mutation. Pre-mutation reparse must match.
+- Feature-branch liveness uses an **exact live remote query** (`ls-remote` +
+  fetch of `refs/heads/<branch>`), never a cached `origin/<feature>` tip.
+  Branch/ref syntax is validated before any Git command. Query/auth/network/
+  malformed/multiple-result failures **REFUSE**. A proven-absent remote branch
+  drops stale remote-tracking evidence rather than treating it as live. Plan
+  freezes the live remote SHA; apply re-checks live and refuses if SHA or
+  timestamp moved.
 - Last-active time is the maximum valid evidence among: claim timestamp, local
-  branch tip, remote branch tip, registered worktree tracked-file mtime, and
-  optional heartbeat files (`--heartbeat-dir/<id>` and
+  branch tip, **live** remote branch tip, registered worktree tracked-file mtime,
+  and optional heartbeat files (`--heartbeat-dir/<id>` and
   `--heartbeat-dir/<id>.heartbeat`). Nonempty malformed heartbeat content
   refuses (never mtime fallback). Future timestamps and oversized integers
   refuse; integers are validated lexically before any Bash arithmetic.
@@ -108,8 +115,12 @@ from **evidence**, not assertion:
   is idempotent only when remote evidence still proves the claim absent — a
   re-added live claim is re-evaluated, never silently skipped. Posts a
   deduplicated handoff comment (no absolute worktree paths). `--prune-worktrees`
-  may remove only the exact frozen registered worktree path (revalidated
-  immediately before removal; no default-path derivation; no `rm -rf` fallback).
+  may remove only the exact frozen registered worktree path, and only **after**
+  CAS validation, cleanup push, and authoritative post-mutation reread prove the
+  exact target claim is absent (revalidated immediately before removal; no
+  default-path derivation; no `rm -rf` fallback). Renewal, push rejection, OID
+  mismatch, or reread failure leave the registered worktree and branch
+  untouched. Final worktree-removal failure reports incomplete (no false OK).
 - Scheduling and Mission Control integration are follow-ups; this script is the
   standalone Tier B janitor.
 

@@ -7,9 +7,16 @@ usage() {
 release-claim.sh — release a claim after merge (cleanup)
 
 WHAT IT DOES
-  Finds the claim row for an issue, removes the git worktree and local branch,
-  deletes the claim row with a signed commit on main, removes the agent-claimed
-  label, and optionally deletes the remote feature branch.
+  Finds the claim row for an issue, deletes the claim row with a signed commit
+  on main, removes the agent-claimed label, and removes the git worktree and
+  local branch when requested.
+
+  With CAS flags or --worktree-path (claimed prune), worktree/branch removal is
+  deferred until path/blob CAS validation, the cleanup push, and an
+  authoritative post-mutation reread prove the exact target claim is absent.
+  A renewal race, push rejection, or OID mismatch leaves the registered
+  worktree and branch untouched and exits incomplete (rc=3). Ordinary non-CAS
+  cleanup without --worktree-path keeps historical early worktree removal.
 
   It never moves the canonical checkout off its current branch: the claim-row
   commit happens in a disposable worktree on main (L-009). Sibling claims on the
@@ -771,33 +778,22 @@ INCOMPLETE=0
 PRESERVE_LABEL_EARLY=0
 
 # --- worktrees + branches -------------------------------------------------
+# Ordering contract (#73):
+# - Claimed prune (--worktree-path) and CAS mode must NOT destructively remove
+#   worktrees/branches before expected-source/path/blob CAS validation, cleanup
+#   push, and authoritative post-mutation reread prove the exact target claim
+#   is absent. A renewal/push/OID/reread failure leaves worktree+branch intact.
+# - Ordinary non-CAS release (no --worktree-path) keeps historical early cleanup.
+# - --keep-worktree / --keep-branch never remove (reaper default).
+DEFER_WT_BRANCH=0
+if [[ -n "$WORKTREE_PATH_ARG" ]] || [[ "$CAS_MODE" -eq 1 ]]; then
+  DEFER_WT_BRANCH=1
+fi
+
 if [[ -n "$TARGET_IDS" ]]; then
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
-    if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
-      if [[ -n "$WORKTREE_PATH_ARG" ]]; then
-        # Claimed prune: exact path only, revalidate registration/branch, no rm -rf.
-        if ! remove_exact_worktree "$WORKTREE_PATH_ARG" "${EXPECTED_BRANCH:-}"; then
-          INCOMPLETE=1
-          PRESERVE_LABEL_EARLY=1
-        fi
-      else
-        wt=$(wt_dir_for "$id")
-        if [[ -d "$wt" ]]; then
-          info "removing worktree $wt"
-          # Default path: prefer git worktree remove; rm -rf only for unregistered
-          # leftover directories that are not claimed-prune targets.
-          if worktree_registered "$wt"; then
-            git worktree remove --force "$wt" 2>/dev/null || {
-              warn "git worktree remove failed for registered $wt — refuse rm -rf"
-              INCOMPLETE=1
-            }
-          else
-            rm -rf "$wt"
-          fi
-        fi
-      fi
-    else
+    if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
       if [[ -n "$WORKTREE_PATH_ARG" && -d "$WORKTREE_PATH_ARG" ]]; then
         info "keeping worktree $WORKTREE_PATH_ARG (--keep-worktree)"
       else
@@ -806,8 +802,42 @@ if [[ -n "$TARGET_IDS" ]]; then
           info "keeping worktree $wt (--keep-worktree)"
         fi
       fi
+    elif [[ "$DEFER_WT_BRANCH" -eq 1 ]]; then
+      # Non-destructive precheck only for claimed prune path.
+      if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+        if [[ -L "$WORKTREE_PATH_ARG" ]] || [[ ! -d "$WORKTREE_PATH_ARG" ]] || ! worktree_registered "$WORKTREE_PATH_ARG"; then
+          warn "claimed prune target unsafe/unregistered before CAS — will not remove; claim strip may still proceed with incomplete prune"
+          # Do not set INCOMPLETE yet: strip may succeed; final prune revalidates.
+        elif [[ -n "${EXPECTED_BRANCH:-}" ]]; then
+          _pre_br=$(worktree_branch "$WORKTREE_PATH_ARG" || true)
+          if [[ "$_pre_br" != "$EXPECTED_BRANCH" ]]; then
+            warn "claimed prune branch mismatch before CAS (want '$EXPECTED_BRANCH', got '${_pre_br:-detached}') — will revalidate after ledger removal"
+          fi
+        fi
+        info "deferring exact worktree removal until CAS + verified cleanup push succeed: $WORKTREE_PATH_ARG"
+      else
+        info "deferring worktree removal until CAS + verified cleanup succeed (CAS mode)"
+      fi
+    else
+      # Ordinary non-CAS path: historical early worktree removal.
+      wt=$(wt_dir_for "$id")
+      if [[ -d "$wt" ]]; then
+        info "removing worktree $wt"
+        if worktree_registered "$wt"; then
+          git worktree remove --force "$wt" 2>/dev/null || {
+            warn "git worktree remove failed for registered $wt — refuse rm -rf"
+            INCOMPLETE=1
+          }
+        else
+          rm -rf "$wt"
+        fi
+      fi
     fi
-    if [[ "$KEEP_BRANCH" -eq 0 ]]; then
+    if [[ "$KEEP_BRANCH" -eq 1 ]]; then
+      :
+    elif [[ "$DEFER_WT_BRANCH" -eq 1 ]]; then
+      info "deferring branch deletion until CAS + verified cleanup succeed"
+    else
       br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
       git branch -D "$br" 2>/dev/null || true
       git push origin --delete "$br" 2>/dev/null || true
@@ -815,7 +845,7 @@ if [[ -n "$TARGET_IDS" ]]; then
   done <<EOF
 $TARGET_IDS
 EOF
-  if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+  if [[ "$KEEP_WORKTREE" -eq 0 && "$DEFER_WT_BRANCH" -eq 0 ]]; then
     git worktree prune 2>/dev/null || true
   fi
 fi
@@ -1261,6 +1291,69 @@ if [[ -n "$TARGET_IDS" ]]; then
   fi
 else
   info "no claim to remove"
+fi
+
+# --- deferred worktree/branch removal (CAS / claimed prune) ---------------
+# Only after successful strip AND authoritative reread proves the exact target
+# claim is absent (no renewal/sibling identity confusion). Failures leave
+# worktree+branch untouched and report incomplete.
+if [[ -n "$TARGET_IDS" && "$DEFER_WT_BRANCH" -eq 1 ]]; then
+  deferred_ok=1
+  if [[ "$STRIP_OK" -ne 1 || "$INCOMPLETE" -eq 1 || "$PRESERVE_LABEL" -eq 1 ]]; then
+    # Renewal, push rejection, OID mismatch, reread failure, or target still live:
+    # leave worktree and branch untouched.
+    if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+      info "leaving worktree(s) untouched — cleanup incomplete or target still live"
+    fi
+    if [[ "$KEEP_BRANCH" -eq 0 ]]; then
+      info "leaving branch(es) untouched — cleanup incomplete or target still live"
+    fi
+    deferred_ok=0
+  fi
+
+  if [[ "$deferred_ok" -eq 1 ]]; then
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+        if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+          # Revalidate exact registered path/branch identity immediately before removal.
+          info "post-CAS: revalidating exact registered worktree before prune"
+          if ! remove_exact_worktree "$WORKTREE_PATH_ARG" "${EXPECTED_BRANCH:-}"; then
+            warn "final claimed worktree removal failed for $WORKTREE_PATH_ARG — incomplete (claim row already released; not claiming full success)"
+            INCOMPLETE=1
+            PRESERVE_LABEL=1
+            deferred_ok=0
+          fi
+        else
+          wt=$(wt_dir_for "$id")
+          if [[ -d "$wt" ]]; then
+            info "post-CAS: removing worktree $wt"
+            if worktree_registered "$wt"; then
+              if ! git worktree remove --force "$wt" 2>/dev/null; then
+                warn "git worktree remove failed for registered $wt — refuse rm -rf; incomplete"
+                INCOMPLETE=1
+                PRESERVE_LABEL=1
+                deferred_ok=0
+              fi
+            else
+              # Ordinary default-path leftover under CAS: rm only unregistered dir.
+              rm -rf "$wt"
+            fi
+          fi
+        fi
+      fi
+      if [[ "$KEEP_BRANCH" -eq 0 && "$deferred_ok" -eq 1 ]]; then
+        br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        git branch -D "$br" 2>/dev/null || true
+        git push origin --delete "$br" 2>/dev/null || true
+      fi
+    done <<EOF
+$TARGET_IDS
+EOF
+    if [[ "$KEEP_WORKTREE" -eq 0 && "$deferred_ok" -eq 1 ]]; then
+      git worktree prune 2>/dev/null || true
+    fi
+  fi
 fi
 
 # --- label ----------------------------------------------------------------

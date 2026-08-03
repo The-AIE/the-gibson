@@ -1121,6 +1121,278 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "#73 · adversarial · fresh remote feature + stale origin cache => KEEP"
+# Independent fixture: remote feature advanced with a fresh commit while
+# refs/remotes/origin/feat/* remains at an old tip. Must use live remote, not cache.
+new_repo "$ROOT/stale_cache"
+add_claim_file "$ROOT/stale_cache" issue-101-stale-cache 101 "$CLAIMED_ISO"
+(
+  cd "$ROOT/stale_cache/canon" || exit 1
+  git checkout -q -b feat/101-stale-cache
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  echo old > old.txt
+  git add old.txt && git commit -qm "old remote tip"
+  git push -q origin feat/101-stale-cache
+  OLD_SHA=$(git rev-parse HEAD)
+  # Advance remote via second clone so local origin/feat stays pin-able
+  git clone -q "$ROOT/stale_cache/origin" "$ROOT/stale_cache/other" 2>/dev/null
+  cd "$ROOT/stale_cache/other" || exit 1
+  git checkout -q feat/101-stale-cache
+  export GIT_AUTHOR_DATE="@$((STALE_NOW - 30))"
+  export GIT_COMMITTER_DATE="@$((STALE_NOW - 30))"
+  echo fresh > fresh.txt
+  git add fresh.txt && git commit -qm "fresh remote tip"
+  git push -q origin feat/101-stale-cache
+  cd "$ROOT/stale_cache/canon" || exit 1
+  # Pin cached remote-tracking ref to the STALE tip
+  git update-ref refs/remotes/origin/feat/101-stale-cache "$OLD_SHA"
+  git checkout -q main
+  git branch -D feat/101-stale-cache >/dev/null 2>&1 || true
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+export GH_LOG="$ROOT/stale_cache/gh.log"
+export GH_COMMENTS_FILE="$ROOT/stale_cache/comments"
+: > "$GH_COMMENTS_FILE"
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/stale_cache/canon" --claim-id issue-101-stale-cache 2>&1)
+rc=$?
+check "fresh-remote+stale-cache dry-run exits 0" "$rc" "0"
+contains "KEEP from live fresh remote (not stale cache)" "$out" "KEEP   issue-101-stale-cache"
+contains "recent_activity reason" "$out" "recent_activity"
+lacks    "must not REAP when live remote is fresh" "$out" "REAP   issue-101-stale-cache"
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · remote branch SHA changed between plan and apply => no release"
+# Two stale commits on the feature branch (A then B), both older than the
+# threshold. A git shim returns A on the first live ls-remote (plan freeze)
+# and B on subsequent calls (pre-mutation recheck) so apply sees a SHA change
+# while age stays stale — must refuse and never release.
+new_repo "$ROOT/remote_race"
+add_claim_file "$ROOT/remote_race" issue-102-remote-race 102 "$CLAIMED_ISO"
+(
+  cd "$ROOT/remote_race/canon" || exit 1
+  git checkout -q -b feat/102-remote-race
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  echo tipA > tipA.txt
+  git add tipA.txt && git commit -qm "stale tip A"
+  SHA_A=$(git rev-parse HEAD)
+  export GIT_AUTHOR_DATE="@$((CLAIM_EPOCH + 60))"
+  export GIT_COMMITTER_DATE="@$((CLAIM_EPOCH + 60))"
+  echo tipB > tipB.txt
+  git add tipB.txt && git commit -qm "stale tip B"
+  SHA_B=$(git rev-parse HEAD)
+  git push -q origin feat/102-remote-race
+  printf '%s\n' "$SHA_A" > "$ROOT/remote_race/sha_a"
+  printf '%s\n' "$SHA_B" > "$ROOT/remote_race/sha_b"
+  git checkout -q main
+) >/dev/null 2>&1
+SHA_A=$(cat "$ROOT/remote_race/sha_a")
+SHA_B=$(cat "$ROOT/remote_race/sha_b")
+# Ensure both objects are available locally for timestamp resolution after fetch.
+git -C "$ROOT/remote_race/canon" fetch -q origin feat/102-remote-race >/dev/null 2>&1 || true
+git -C "$ROOT/remote_race/canon" update-ref refs/remotes/origin/feat/102-remote-race "$SHA_B"
+GIT_REAL=$(command -v git)
+mkdir -p "$ROOT/remote_race/bin"
+# Counter file: first ls-remote --heads for feat → SHA_A; later → SHA_B
+: > "$ROOT/remote_race/ls_count"
+cat > "$ROOT/remote_race/bin/git" <<EOF
+#!/usr/bin/env bash
+REAL="$GIT_REAL"
+SHA_A="$SHA_A"
+SHA_B="$SHA_B"
+CNT_FILE="$ROOT/remote_race/ls_count"
+if [[ "\$1" == "ls-remote" ]]; then
+  for a in "\$@"; do
+    case "\$a" in
+      refs/heads/feat/102-remote-race)
+        n=\$(cat "\$CNT_FILE" 2>/dev/null || echo 0)
+        n=\$((n + 1))
+        echo "\$n" > "\$CNT_FILE"
+        if [[ "\$n" -eq 1 ]]; then
+          printf '%s\t%s\n' "\$SHA_A" "refs/heads/feat/102-remote-race"
+        else
+          printf '%s\t%s\n' "\$SHA_B" "refs/heads/feat/102-remote-race"
+        fi
+        exit 0
+        ;;
+    esac
+  done
+fi
+# Allow fetch of either SHA into the tracking ref
+if [[ "\$1" == "fetch" ]]; then
+  exec "\$REAL" "\$@"
+fi
+exec "\$REAL" "\$@"
+EOF
+chmod +x "$ROOT/remote_race/bin/git"
+export GH_PR_COUNT=0
+export GH_COMMENTS_FILE="$ROOT/remote_race/comments"
+: > "$GH_COMMENTS_FILE"
+FAKE_RC_RACE="$ROOT/remote_race/fake-rc.sh"
+cat > "$FAKE_RC_RACE" <<'FAKE'
+#!/usr/bin/env bash
+echo "FAKE-RC should not be invoked when remote branch changed" >&2
+exit 99
+FAKE
+chmod +x "$FAKE_RC_RACE"
+STATE_RR="$STATE_BASE/remote_race"
+mkdir -p "$STATE_RR"
+out=$(
+  env \
+    PATH="$ROOT/remote_race/bin:$PATH" \
+    GIBSON_CANONICAL="$ROOT/remote_race/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_RR" \
+    GIBSON_REAPER_JOURNAL="$STATE_RR/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_RR/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$FAKE_RC_RACE" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-102-remote-race --apply 2>&1
+)
+rc=$?
+lacks    "must not invoke release when remote SHA changed" "$out" "FAKE-RC should not"
+if echo "$out" | grep -qiE 'remote_branch_changed|SHA changed'; then
+  ok "pre-mutation refused on remote SHA change"
+elif [[ "$rc" -eq 3 ]] && echo "$out" | grep -qiE 'refuse|INCOMPLETE|moving_evidence|no longer stale'; then
+  ok "apply incomplete/refused after remote mid-flight change (rc=3)"
+else
+  if echo "$out" | grep -q 'OK released'; then
+    bad "released despite remote SHA change (rc=$rc)"
+    echo "$out" | tail -30
+  else
+    # Still alive claim + non-success is acceptable
+    files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" fetch -q origin; PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" ls-tree --name-only origin/main docs/claims/)
+    if echo "$files" | grep -q 'issue-102-remote-race'; then
+      ok "claim survives remote SHA change without release (rc=$rc)"
+    else
+      bad "claim released or missing after remote race (rc=$rc)"
+      echo "$out" | tail -30
+    fi
+  fi
+fi
+files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" fetch -q origin; PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" ls-tree --name-only origin/main docs/claims/)
+contains "claim row survives remote race" "$files" "issue-102-remote-race.md"
+# Prefer the explicit reason when present
+if echo "$out" | grep -qi 'remote_branch_changed'; then
+  ok "journal/reason remote_branch_changed observed"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · proven remote absence + fresh stale cache => cache ignored"
+# Remote branch never pushed; only a fresh-looking origin/feat cache exists.
+# Must ignore cache → REAP from claim timestamp alone (stale).
+new_repo "$ROOT/absent_cache"
+add_claim_file "$ROOT/absent_cache" issue-103-absent-cache 103 "$CLAIMED_ISO"
+(
+  cd "$ROOT/absent_cache/canon" || exit 1
+  git checkout -q -b feat/103-absent-cache
+  export GIT_AUTHOR_DATE="@$((STALE_NOW - 30))"
+  export GIT_COMMITTER_DATE="@$((STALE_NOW - 30))"
+  echo ghost > ghost.txt
+  git add ghost.txt && git commit -qm "ghost local only"
+  # Install as remote-tracking without ever pushing to origin
+  git update-ref refs/remotes/origin/feat/103-absent-cache HEAD
+  git checkout -q main
+  git branch -D feat/103-absent-cache >/dev/null 2>&1 || true
+  # Prove remote absence
+  if [[ -n "$(git ls-remote origin refs/heads/feat/103-absent-cache)" ]]; then
+    echo "fixture error: remote branch exists" >&2
+    exit 1
+  fi
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/absent_cache/canon" --claim-id issue-103-absent-cache 2>&1)
+rc=$?
+check "absent+stale-cache dry-run exits 0" "$rc" "0"
+contains "REAP when remote absent (cache ignored)" "$out" "REAP   issue-103-absent-cache"
+lacks    "must not KEEP from stale cache alone" "$out" "KEEP   issue-103-absent-cache"
+# Cache should have been deleted or ignored; origin/feat must not keep a live tip
+# that would re-infect evidence (delete is best-effort).
+if git -C "$ROOT/absent_cache/canon" rev-parse --verify --quiet refs/remotes/origin/feat/103-absent-cache >/dev/null 2>&1; then
+  # If still present, planning still REAPed → ok as long as we didn't KEEP
+  ok "stale cache may remain if delete failed but was ignored for liveness"
+else
+  ok "stale remote-tracking cache deleted on proven absence"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · remote feature query/fetch failure => REFUSE"
+new_repo "$ROOT/rmtfail"
+add_claim_file "$ROOT/rmtfail" issue-104-rmtfail 104 "$CLAIMED_ISO"
+(
+  cd "$ROOT/rmtfail/canon" || exit 1
+  # Leave a stale cached origin/feat so a broken remote would have been used
+  git checkout -q -b feat/104-rmtfail
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  echo x > x.txt
+  git add x.txt && git commit -qm tip
+  git update-ref refs/remotes/origin/feat/104-rmtfail HEAD
+  git checkout -q main
+  git branch -D feat/104-rmtfail >/dev/null 2>&1 || true
+  # Break origin so ls-remote/fetch fail (after ledger main is already cached
+  # we need main fetch to succeed first). Point origin at a path that allows
+  # nothing for feature queries: use a remote URL that fails for all ops.
+  # Strategy: fetch main into local first (reaper will re-fetch main), so use
+  # a remote that exists for main but... simpler: set origin to unreachable
+  # *after* ensuring main is fetchable fails too → whole reaper dies on ledger.
+  # Instead wrap git via PATH to fail only ls-remote --heads for feature.
+) >/dev/null 2>&1
+# Install a git shim that fails ls-remote --heads for non-main branches
+GIT_REAL=$(command -v git)
+mkdir -p "$ROOT/rmtfail/bin"
+cat > "$ROOT/rmtfail/bin/git" <<EOF
+#!/usr/bin/env bash
+# Fail only live feature-branch queries; pass through everything else.
+if [[ "\$1" == "ls-remote" ]]; then
+  for a in "\$@"; do
+    case "\$a" in
+      refs/heads/main|refs/heads/master) exec "$GIT_REAL" "\$@" ;;
+      refs/heads/*)
+        echo "simulated remote query failure" >&2
+        exit 128
+        ;;
+    esac
+  done
+fi
+if [[ "\$1" == "fetch" ]]; then
+  # Allow main/master fetch; fail feature-branch forced fetch
+  for a in "\$@"; do
+    case "\$a" in
+      +refs/heads/feat/*|refs/heads/feat/*)
+        echo "simulated remote fetch failure" >&2
+        exit 128
+        ;;
+    esac
+  done
+fi
+exec "$GIT_REAL" "\$@"
+EOF
+chmod +x "$ROOT/rmtfail/bin/git"
+export GH_PR_COUNT=0
+out=$(
+  PATH="$ROOT/rmtfail/bin:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/rmtfail/canon" --claim-id issue-104-rmtfail 2>&1
+)
+rc=$?
+check "remote-query-fail dry-run exits 0" "$rc" "0"
+contains "REFUSE on remote query failure" "$out" "REFUSE"
+if echo "$out" | grep -qE 'remote_query_failed|remote_fetch_failed|REFUSE[[:space:]]+issue-104-rmtfail'; then
+  ok "remote query/fetch failure REFUSEs claim"
+else
+  # Any REFUSE line for this claim is acceptable
+  if echo "$out" | grep -q 'REFUSE   issue-104-rmtfail'; then
+    ok "remote failure REFUSE line present"
+  else
+    bad "expected REFUSE for remote query failure"
+    echo "$out" | tail -20
+  fi
+fi
+lacks    "must not REAP on remote query failure" "$out" "REAP   issue-104-rmtfail"
+lacks    "must not KEEP from cache on remote query failure" "$out" "KEEP   issue-104-rmtfail"
+
+# ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

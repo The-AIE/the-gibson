@@ -1641,6 +1641,253 @@ br_def=$(git -C "$ROOT/kw73def/canon" branch --list 'feat/15-only-lane')
 table=$(cd "$ROOT/kw73def/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
 lacks    "default still released claim row" "$table" "issue-15-only-lane"
 
+# ---------------------------------------------------------------------------
+echo "#73 · claimed prune: renewal race leaves worktree+branch+label intact (rc=3)"
+# CAS frozen at old blob; remote claim renews before strip. Must not delete the
+# exact registered worktree (ordering: CAS before destructive prune).
+new_repo "$ROOT/renew_wt"
+WT_REG="$ROOT/renew_wt/wt-registered-exact"
+(
+  cd "$ROOT/renew_wt/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  cat > docs/claims/issue-103-renew-wt.md <<EOF
+claim: issue-103-renew-wt
+issue: 103
+claimed: 2026-08-01T00:00:00Z
+scope: x
+session: t
+branch: feat/103-renew-wt
+worktree: $WT_REG
+EOF
+  : > docs/active-work.md
+  git add -A && git commit -qm "claim for renew-wt" && git push -q origin main
+  git rev-parse HEAD:docs/claims/issue-103-renew-wt.md > "$ROOT/renew_wt/old_blob"
+  git worktree add -b feat/103-renew-wt "$WT_REG" HEAD >/dev/null 2>&1
+  echo survive > "$WT_REG/marker"
+  # Renew claim on remote (new blob) while caller still holds old CAS key
+  git clone -q "$ROOT/renew_wt/origin" "$ROOT/renew_wt/other" 2>/dev/null
+  cd "$ROOT/renew_wt/other" || exit 1
+  cat > docs/claims/issue-103-renew-wt.md <<EOF
+claim: issue-103-renew-wt
+issue: 103
+claimed: 2026-08-02T12:00:00Z
+scope: x
+session: t
+branch: feat/103-renew-wt
+worktree: $WT_REG
+EOF
+  git add -A && git commit -qm "renew claim" && git push -q origin main
+  cd "$ROOT/renew_wt/canon" || exit 1
+  git checkout -q long-lived-feature 2>/dev/null || git checkout -q -b long-lived-feature
+) >/dev/null 2>&1
+OLD_BLOB=$(cat "$ROOT/renew_wt/old_blob")
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "LABEL-MUTATION-SHOULD-NOT-HAPPEN" >&2
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(
+  cd "$ROOT/renew_wt/canon" && GIBSON_CANONICAL="$ROOT/renew_wt/canon" "$RC" 103 \
+    --claim-id issue-103-renew-wt \
+    --expected-claim-blob "$OLD_BLOB" \
+    --expected-source file \
+    --expected-claim-path docs/claims/issue-103-renew-wt.md \
+    --worktree-path "$WT_REG" \
+    --expected-branch feat/103-renew-wt \
+    --keep-branch \
+    --repo acme/app 2>&1
+)
+rc=$?
+check "renewal race exits 3 (incomplete)" "$rc" "3"
+contains "CAS blob mismatch / refuse" "$out" "CAS blob OID mismatch"
+contains "incomplete banner" "$out" "INCOMPLETE"
+[[ -f "$WT_REG/marker" ]] \
+  && ok "renewal race left registered worktree on disk" \
+  || bad "renewal race deleted registered worktree (ordering bug)"
+br=$(git -C "$ROOT/renew_wt/canon" branch --list 'feat/103-renew-wt')
+[[ -n "$br" ]] && ok "renewal race left feature branch" || bad "renewal race deleted feature branch"
+files=$(cd "$ROOT/renew_wt/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+contains "renewed claim row still live" "$files" "issue-103-renew-wt.md"
+# Label preserved (gh issue view still reports agent-claimed; no successful remove)
+contains "preserves agent-claimed on incomplete" "$out" "preserving agent-claimed"
+lacks    "must not claim full success" "$out" "OK — claim released"
+
+# ---------------------------------------------------------------------------
+echo "#73 · claimed prune: successful path removes worktree only after verified cleanup"
+new_repo "$ROOT/prune_order"
+WT_OK="$ROOT/prune_order/wt-exact-ok"
+(
+  cd "$ROOT/prune_order/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  cat > docs/claims/issue-104-prune-ok.md <<EOF
+claim: issue-104-prune-ok
+issue: 104
+claimed: 2026-08-01T00:00:00Z
+scope: x
+session: t
+branch: feat/104-prune-ok
+worktree: $WT_OK
+EOF
+  : > docs/active-work.md
+  git add -A && git commit -qm "claim prune ok" && git push -q origin main
+  git rev-parse HEAD:docs/claims/issue-104-prune-ok.md > "$ROOT/prune_order/blob"
+  git worktree add -b feat/104-prune-ok "$WT_OK" HEAD >/dev/null 2>&1
+  echo remove-me > "$WT_OK/marker"
+  git checkout -q long-lived-feature 2>/dev/null || git checkout -q -b long-lived-feature
+) >/dev/null 2>&1
+BLOB_OK=$(cat "$ROOT/prune_order/blob")
+export GH_STATE="$ROOT/prune_order/gh-state"
+rm -f "$GH_STATE"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      : > "${GH_STATE:-/tmp/gh-state-prune}"
+      exit 0
+    fi
+    if [[ -f "${GH_STATE:-/tmp/gh-state-prune}" ]]; then
+      echo ""
+    else
+      echo "agent-claimed,tier-b"
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+export GH_STATE="$ROOT/prune_order/gh-state"
+out=$(
+  cd "$ROOT/prune_order/canon" && GIBSON_CANONICAL="$ROOT/prune_order/canon" "$RC" 104 \
+    --claim-id issue-104-prune-ok \
+    --expected-claim-blob "$BLOB_OK" \
+    --expected-source file \
+    --expected-claim-path docs/claims/issue-104-prune-ok.md \
+    --worktree-path "$WT_OK" \
+    --expected-branch feat/104-prune-ok \
+    --keep-branch \
+    --repo acme/app 2>&1
+)
+rc=$?
+check "successful claimed prune exits 0" "$rc" "0"
+contains "defers removal until after CAS" "$out" "deferring exact worktree removal"
+contains "post-CAS revalidate" "$out" "post-CAS: revalidating exact registered worktree"
+contains "claims OK" "$out" "OK — claim released"
+[[ ! -d "$WT_OK" ]] \
+  && ok "successful claimed prune removed exact worktree after CAS" \
+  || bad "successful claimed prune left worktree"
+files=$(cd "$ROOT/prune_order/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+lacks    "claim gone after successful prune" "$files" "issue-104-prune-ok.md"
+br=$(git -C "$ROOT/prune_order/canon" branch --list 'feat/104-prune-ok')
+[[ -n "$br" ]] && ok "keep-branch preserved feature branch after prune" || bad "branch deleted despite --keep-branch"
+
+# ---------------------------------------------------------------------------
+echo "#73 · claimed prune: final worktree removal failure => incomplete (no false OK)"
+new_repo "$ROOT/prune_fail"
+WT_FAIL="$ROOT/prune_fail/wt-exact-fail"
+(
+  cd "$ROOT/prune_fail/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  cat > docs/claims/issue-105-prune-fail.md <<EOF
+claim: issue-105-prune-fail
+issue: 105
+claimed: 2026-08-01T00:00:00Z
+scope: x
+session: t
+branch: feat/105-prune-fail
+worktree: $WT_FAIL
+EOF
+  : > docs/active-work.md
+  git add -A && git commit -qm "claim prune fail" && git push -q origin main
+  git rev-parse HEAD:docs/claims/issue-105-prune-fail.md > "$ROOT/prune_fail/blob"
+  git worktree add -b feat/105-prune-fail "$WT_FAIL" HEAD >/dev/null 2>&1
+  echo stuck > "$WT_FAIL/marker"
+  git checkout -q long-lived-feature 2>/dev/null || git checkout -q -b long-lived-feature
+) >/dev/null 2>&1
+BLOB_FAIL=$(cat "$ROOT/prune_fail/blob")
+# Shim git worktree remove to fail only for this exact path after strip.
+GIT_REAL=$(command -v git)
+mkdir -p "$ROOT/prune_fail/bin"
+cat > "$ROOT/prune_fail/bin/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "worktree" && "\$2" == "remove" ]]; then
+  for a in "\$@"; do
+    if [[ "\$a" == "$WT_FAIL" || "\$a" == "${WT_FAIL}/" ]]; then
+      echo "simulated worktree remove failure" >&2
+      exit 1
+    fi
+  done
+fi
+exec "$GIT_REAL" "\$@"
+EOF
+chmod +x "$ROOT/prune_fail/bin/git"
+export GH_STATE="$ROOT/prune_fail/gh-state"
+rm -f "$GH_STATE"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      # Must not remove label on incomplete final prune
+      echo "LABEL-REMOVED-BUG" >&2
+      : > "${GH_STATE:-/tmp/gh-pf}"
+      exit 0
+    fi
+    if [[ -f "${GH_STATE:-/tmp/gh-pf}" ]]; then
+      echo ""
+    else
+      echo "agent-claimed,tier-b"
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/prune_fail/bin:$ROOT/bin:$PATH"
+export GH_STATE="$ROOT/prune_fail/gh-state"
+out=$(
+  cd "$ROOT/prune_fail/canon" && GIBSON_CANONICAL="$ROOT/prune_fail/canon" "$RC" 105 \
+    --claim-id issue-105-prune-fail \
+    --expected-claim-blob "$BLOB_FAIL" \
+    --expected-source file \
+    --expected-claim-path docs/claims/issue-105-prune-fail.md \
+    --worktree-path "$WT_FAIL" \
+    --expected-branch feat/105-prune-fail \
+    --keep-branch \
+    --repo acme/app 2>&1
+)
+rc=$?
+check "final removal failure exits 3" "$rc" "3"
+contains "incomplete on final removal failure" "$out" "INCOMPLETE"
+lacks    "must not claim full OK on final removal failure" "$out" "OK — claim released"
+# Claim row may already be gone (strip succeeded) — incomplete is about worktree/label
+contains "preserves label when final prune fails" "$out" "preserving agent-claimed"
+# Worktree should still exist (remove failed)
+[[ -d "$WT_FAIL" ]] \
+  && ok "worktree still present after failed final remove" \
+  || bad "worktree vanished despite simulated remove failure"
+
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

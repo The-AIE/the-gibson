@@ -11,15 +11,17 @@ claim-reaper.sh — expire dead lanes' claims from evidence
 
 WHAT IT DOES
   Reads the live remote claim ledger (never the caller's working tree), derives
-  liveness from evidence (claim timestamp, local/remote branch tips, registered
-  worktree tracked-file mtime, optional heartbeat file), and plans release of
-  claims stale beyond a threshold (default 14400 seconds / 4 hours).
+  liveness from evidence (claim timestamp, local branch tip, exact live remote
+  feature-branch tip, registered worktree tracked-file mtime, optional
+  heartbeat file), and plans release of claims stale beyond a threshold
+  (default 14400 seconds / 4 hours). Feature-branch activity is always resolved
+  with a live remote query (never a stale origin/<feature> cache).
 
   Dry-run by default: prints a reviewable plan with zero mutations. --apply
   releases exactly one claim id at a time via release-claim.sh, journals each
   operation, posts a deduplicated handoff comment, and preserves the feature
   branch and worktree by default. --prune-worktrees may remove only the exact
-  registered target worktree after the same safety checks.
+  registered target worktree after CAS + verified cleanup push succeed.
 
   An open PR always protects a claim. API/ref failures, malformed evidence,
   unreadable worktrees, unregistered or unsafe paths, symlink/device evidence,
@@ -593,7 +595,8 @@ worktree_tracked_mtime() {
   printf '%s\n' "$max_mt"
 }
 
-# Branch tip committer epoch for a ref name. Empty if missing. FAIL: on error.
+# Branch tip committer epoch for a local ref name. Empty if missing. FAIL: on error.
+# Never use this for origin/<feature> liveness — use live_remote_branch_evidence.
 branch_tip_epoch() {
   local ref="$1" ts
   if ! git rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1; then
@@ -605,6 +608,119 @@ branch_tip_epoch() {
     ''|*[!0-9]*) echo "FAIL:branch_tip_unreadable" ;;
     *) echo "$ts" ;;
   esac
+}
+
+# Safe feature-branch name for live remote queries (no shell/Git metachar injection).
+# Rejects empty, path tricks, @{, leading dash, double-dot, trailing .lock, etc.
+valid_feature_branch_name() {
+  local b="$1"
+  [[ -n "$b" ]] || return 1
+  # Same surface as plan-time branch check, plus reject leading '.' and '-' and '@'.
+  [[ "$b" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || return 1
+  case "$b" in
+    *..*|*@\{*|*//*|*/./*|*/.|.*) return 1 ;;
+  esac
+  case "$b" in
+    *.lock) return 1 ;;
+  esac
+  return 0
+}
+
+# Exact live remote feature-branch evidence — never trust cached origin/<branch>.
+# Validates branch syntax, then ls-remote + fetch of the exact heads ref.
+# stdout (single line):
+#   OK:<sha>:<epoch>   — live remote tip proven; tracking ref updated to that SHA
+#   ABSENT             — successful query proved the remote branch does not exist
+#                        (stale refs/remotes/origin/<branch> is deleted when possible)
+#   FAIL:<reason>      — query/auth/network/malformed/multiple-result/fetch failure
+live_remote_branch_evidence() {
+  local branch="$1" ls_out ls_rc n sha got ts fetch_ok=0
+  if ! valid_feature_branch_name "$branch"; then
+    echo "FAIL:malformed_branch"
+    return 0
+  fi
+
+  set +e
+  ls_out=$(git ls-remote --heads origin "refs/heads/${branch}" 2>/dev/null)
+  ls_rc=$?
+  set -e
+  if [[ "$ls_rc" -ne 0 ]]; then
+    echo "FAIL:remote_query_failed"
+    return 0
+  fi
+
+  n=$(printf '%s\n' "$ls_out" | awk 'NF { c++ } END { print c+0 }')
+  if [[ "$n" -eq 0 ]]; then
+    # Proven absent: drop stale cached remote-tracking evidence so it cannot KEEP.
+    git update-ref -d "refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
+    echo "ABSENT"
+    return 0
+  fi
+  if [[ "$n" -ne 1 ]]; then
+    echo "FAIL:remote_multiple_results"
+    return 0
+  fi
+
+  sha=$(printf '%s\n' "$ls_out" | awk 'NF { print $1; exit }')
+  if [[ ! "$sha" =~ ^[0-9a-f]{40,64}$ ]]; then
+    echo "FAIL:remote_sha_malformed"
+    return 0
+  fi
+
+  # Fetch the exact live heads ref into the remote-tracking ref (force update).
+  set +e
+  git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1
+  fetch_ok=$?
+  set -e
+  if [[ "$fetch_ok" -ne 0 ]]; then
+    # Retry as object fetch of the live SHA only.
+    set +e
+    git fetch -q origin "$sha" >/dev/null 2>&1
+    fetch_ok=$?
+    set -e
+    if [[ "$fetch_ok" -ne 0 ]]; then
+      echo "FAIL:remote_fetch_failed"
+      return 0
+    fi
+    if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+      echo "FAIL:remote_fetch_failed"
+      return 0
+    fi
+    git update-ref "refs/remotes/origin/${branch}" "$sha" >/dev/null 2>&1 || true
+  fi
+
+  got=$(git rev-parse --verify --quiet "refs/remotes/origin/${branch}^{commit}" 2>/dev/null || true)
+  if [[ -z "$got" ]]; then
+    # Tracking ref may be missing; accept the live SHA object if present.
+    got=$(git rev-parse --verify --quiet "${sha}^{commit}" 2>/dev/null || true)
+  fi
+  if [[ -z "$got" ]]; then
+    echo "FAIL:remote_fetch_failed"
+    return 0
+  fi
+  if [[ "$got" != "$sha" ]]; then
+    # Prefer the live ls-remote SHA when the object is available.
+    if git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+      git update-ref "refs/remotes/origin/${branch}" "$sha" >/dev/null 2>&1 || true
+      got="$sha"
+    else
+      echo "FAIL:remote_sha_mismatch"
+      return 0
+    fi
+  fi
+
+  ts=$(git log -1 --format=%ct "$sha" 2>/dev/null || true)
+  case "$ts" in
+    ''|*[!0-9]*)
+      echo "FAIL:branch_tip_unreadable"
+      return 0
+      ;;
+  esac
+  if ! parse_nonneg_int "$ts" >/dev/null; then
+    echo "FAIL:branch_tip_unreadable"
+    return 0
+  fi
+  echo "OK:${sha}:${ts}"
 }
 
 # Parse one heartbeat file → epoch or FAIL:reason.
@@ -1091,16 +1207,17 @@ info "ledger ref: $REF; scanning claims (stale>${STALE_SECONDS}s)"
 # --- evaluate each claim --------------------------------------------------
 : > "$PLAN_TMP"
 # plan columns:
-# action\tid\tissue\tbranch\tlast_active\tage\treason\tblob\twt\tclaimed_raw\tsource\tpath
+# action\tid\tissue\tbranch\tlast_active\tage\treason\tblob\twt\tclaimed_raw\tsource\tpath\tremote_sha
+# remote_sha is the frozen live remote tip SHA (empty when proven ABSENT or unused).
 
 REPO=$(resolve_repo 2>/dev/null || true)
 
-# Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw/source/path.
+# Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw/source/path/remote_sha.
 # Args: action reason last_active age worktree_path
 plan_row() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$1" "$id" "$issue" "$branch" "${3:-}" "${4:-}" "$2" "$blob" "${5:-}" "$claimed_raw" \
-    "${source:-}" "${claim_path:-}"
+    "${source:-}" "${claim_path:-}" "${remote_sha:-}"
 }
 
 # Identity refuses (filename/body mismatch, issue mismatch, duplicates, …)
@@ -1175,31 +1292,60 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   evidence_fail=""
   local_tip=""
   remote_tip=""
+  remote_sha=""
+  remote_ev=""
   wt_mt=""
   hb_ep=""
 
   if [[ -n "$branch" ]]; then
-    local_tip=$(branch_tip_epoch "$branch")
-    case "$local_tip" in
-      FAIL:*) evidence_fail="${local_tip#FAIL:}"; local_tip="" ;;
-      '') ;;
-      *)
-        if ! local_tip=$(parse_nonneg_int "$local_tip"); then
-          evidence_fail="branch_tip_unreadable"
-          local_tip=""
-        fi
-        ;;
-    esac
-    if [[ -z "$evidence_fail" ]]; then
-      remote_tip=$(branch_tip_epoch "origin/$branch")
-      case "$remote_tip" in
-        FAIL:*) evidence_fail="${remote_tip#FAIL:}"; remote_tip="" ;;
+    # Validate branch syntax before any Git command that interpolates it.
+    if ! valid_feature_branch_name "$branch"; then
+      evidence_fail="malformed_branch"
+    else
+      local_tip=$(branch_tip_epoch "$branch")
+      case "$local_tip" in
+        FAIL:*) evidence_fail="${local_tip#FAIL:}"; local_tip="" ;;
         '') ;;
         *)
-          if ! remote_tip=$(parse_nonneg_int "$remote_tip"); then
+          if ! local_tip=$(parse_nonneg_int "$local_tip"); then
+            evidence_fail="branch_tip_unreadable"
+            local_tip=""
+          fi
+          ;;
+      esac
+    fi
+    # Live remote feature-branch only — never cached origin/<branch>.
+    if [[ -z "$evidence_fail" ]]; then
+      remote_ev=$(live_remote_branch_evidence "$branch")
+      case "$remote_ev" in
+        FAIL:*)
+          evidence_fail="${remote_ev#FAIL:}"
+          remote_tip=""
+          remote_sha=""
+          ;;
+        ABSENT)
+          # Proven absent: ignore any prior stale cache (already deleted).
+          remote_tip=""
+          remote_sha=""
+          ;;
+        OK:*)
+          remote_sha="${remote_ev#OK:}"
+          remote_tip="${remote_sha#*:}"
+          remote_sha="${remote_sha%%:*}"
+          if [[ ! "$remote_sha" =~ ^[0-9a-f]{40,64}$ ]]; then
+            evidence_fail="remote_sha_malformed"
+            remote_tip=""
+            remote_sha=""
+          elif ! remote_tip=$(parse_nonneg_int "$remote_tip"); then
             evidence_fail="branch_tip_unreadable"
             remote_tip=""
+            remote_sha=""
           fi
+          ;;
+        *)
+          evidence_fail="remote_query_failed"
+          remote_tip=""
+          remote_sha=""
           ;;
       esac
     fi
@@ -1485,6 +1631,7 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   p_claimed=$(printf '%s\n' "$prow" | awk -F'\t' '{print $10}')
   p_source=$(printf '%s\n' "$prow" | awk -F'\t' '{print $11}')
   p_path=$(printf '%s\n' "$prow" | awk -F'\t' '{print $12}')
+  p_remote_sha=$(printf '%s\n' "$prow" | awk -F'\t' '{print $13}')
   [[ -n "$p_source" ]] || p_source="file"
   if [[ -z "$p_path" ]]; then
     if [[ "$p_source" == "legacy" ]]; then
@@ -1592,10 +1739,75 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     INCOMPLETE=1
     continue
   fi
-  local_tip=$(branch_tip_epoch "$p_branch")
-  case "$local_tip" in FAIL:*) warn "pre-mutation: $local_tip"; journal_append "INCOMPLETE op=${op} reason=branch_tip"; INCOMPLETE=1; continue ;; esac
-  remote_tip=$(branch_tip_epoch "origin/$p_branch")
-  case "$remote_tip" in FAIL:*) warn "pre-mutation: $remote_tip"; journal_append "INCOMPLETE op=${op} reason=remote_tip"; INCOMPLETE=1; continue ;; esac
+  local_tip=""
+  remote_tip=""
+  if [[ -n "$p_branch" ]]; then
+    if ! valid_feature_branch_name "$p_branch"; then
+      warn "pre-mutation: malformed branch for $p_id — refuse"
+      journal_append "INCOMPLETE op=${op} reason=malformed_branch"
+      INCOMPLETE=1
+      continue
+    fi
+    local_tip=$(branch_tip_epoch "$p_branch")
+    case "$local_tip" in
+      FAIL:*)
+        warn "pre-mutation: $local_tip"
+        journal_append "INCOMPLETE op=${op} reason=branch_tip"
+        INCOMPLETE=1
+        continue
+        ;;
+    esac
+    # Immediate re-check of the exact live remote feature branch (not cache).
+    remote_ev=$(live_remote_branch_evidence "$p_branch")
+    case "$remote_ev" in
+      FAIL:*)
+        warn "pre-mutation: live remote branch check failed for $p_id ($remote_ev) — refuse"
+        journal_append "INCOMPLETE op=${op} reason=remote_tip"
+        INCOMPLETE=1
+        continue
+        ;;
+      ABSENT)
+        # If plan froze a live SHA, the branch disappeared mid-flight — refuse.
+        if [[ -n "$p_remote_sha" ]]; then
+          warn "pre-mutation: live remote branch for $p_id gone (was $p_remote_sha) — refuse"
+          journal_append "INCOMPLETE op=${op} reason=remote_branch_disappeared"
+          INCOMPLETE=1
+          continue
+        fi
+        remote_tip=""
+        ;;
+      OK:*)
+        new_remote_sha="${remote_ev#OK:}"
+        remote_tip="${new_remote_sha#*:}"
+        new_remote_sha="${new_remote_sha%%:*}"
+        if [[ ! "$new_remote_sha" =~ ^[0-9a-f]{40,64}$ ]] || ! remote_tip=$(parse_nonneg_int "$remote_tip"); then
+          warn "pre-mutation: live remote tip unreadable for $p_id — refuse"
+          journal_append "INCOMPLETE op=${op} reason=remote_tip"
+          INCOMPLETE=1
+          continue
+        fi
+        # Frozen SHA/timestamp must still match; any change keeps/refuses.
+        if [[ -z "$p_remote_sha" ]]; then
+          warn "pre-mutation: live remote branch for $p_id appeared since plan — refuse"
+          journal_append "INCOMPLETE op=${op} reason=remote_branch_appeared"
+          INCOMPLETE=1
+          continue
+        fi
+        if [[ "$new_remote_sha" != "$p_remote_sha" ]]; then
+          warn "pre-mutation: live remote branch SHA changed for $p_id ($p_remote_sha -> $new_remote_sha) — refuse (no release)"
+          journal_append "INCOMPLETE op=${op} reason=remote_branch_changed"
+          INCOMPLETE=1
+          continue
+        fi
+        ;;
+      *)
+        warn "pre-mutation: unexpected live remote result for $p_id — refuse"
+        journal_append "INCOMPLETE op=${op} reason=remote_tip"
+        INCOMPLETE=1
+        continue
+        ;;
+    esac
+  fi
   wt_mt=""
   if [[ -n "$p_wt" ]]; then
     if [[ -L "$p_wt" ]] || [[ ! -d "$p_wt" ]] || ! worktree_registered "$p_wt"; then
