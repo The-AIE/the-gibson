@@ -702,14 +702,11 @@ live_remote_branch_evidence() {
     return 0
   fi
   if [[ "$got" != "$sha" ]]; then
-    # Prefer the live ls-remote SHA when the object is available.
-    if git cat-file -e "${sha}^{commit}" 2>/dev/null; then
-      git update-ref "refs/remotes/origin/${branch}" "$sha" >/dev/null 2>&1 || true
-      got="$sha"
-    else
-      echo "FAIL:remote_sha_mismatch"
-      return 0
-    fi
+    # Exact fetch proved a different tip than ls-remote reported (stale query,
+    # mid-flight advance, or race). Fail closed — never reset the tracking ref
+    # back to the earlier queried SHA and never treat that SHA as live evidence.
+    echo "FAIL:remote_branch_changed"
+    return 0
   fi
 
   ts=$(git log -1 --format=%ct "$sha" 2>/dev/null || true)
@@ -988,6 +985,28 @@ journal_has_completed() {
     grep -qE -- " COMPLETED op=${op}( |$)" "$JOURNAL" 2>/dev/null
 }
 
+# True if the journal proves a prior successful reaper cleanup for this exact
+# claim id whose official handoff comment failed (Law 8 recovery only).
+# Requires claim_released=1 + handoff_comment_failed on an op scoped to this id
+# (op=reap:<id>:...). Mere absence without that proof is not success evidence.
+journal_has_claim_released_handoff_failed() {
+  local id="$1" line
+  [[ -n "$id" ]] || return 1
+  [[ -f "$JOURNAL" && ! -L "$JOURNAL" ]] || return 1
+  # Fixed prefix after op=reap: so issue-1 never matches issue-10.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      *" INCOMPLETE op=reap:${id}:"*)
+        if printf '%s' "$line" | grep -qF 'reason=handoff_comment_failed' \
+          && printf '%s' "$line" | grep -qE '(^|[[:space:]])claim_released=1([[:space:]]|$)'; then
+          return 0
+        fi
+        ;;
+    esac
+  done < "$JOURNAL"
+  return 1
+}
+
 # Single-instance lock (mkdir atomic; macOS Bash 3.2).
 LOCK_HELD=0
 acquire_lock() {
@@ -1220,15 +1239,21 @@ if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
       fi
       info "no live claim '$CLAIM_ID_FILTER' at $REF — nothing to reap (idempotent)"
       ensure_journal
-      # Claim is gone; still must post the success handoff if a prior attempt
-      # released the row but failed to comment (Law 8 retry recovery).
-      _abs_repo=$(resolve_repo 2>/dev/null || true)
-      _abs_issue=$(issue_from_claim_id "$CLAIM_ID_FILTER")
-      _abs_branch=$(branch_for "$CLAIM_ID_FILTER")
-      if ! ensure_absent_handoff_comment "$_abs_issue" "$_abs_repo" "$CLAIM_ID_FILTER" "$_abs_branch" "unknown"; then
-        journal_append "INCOMPLETE op=reap:${CLAIM_ID_FILTER}:absent reason=handoff_comment_failed claim_absent=1"
-        warn "claim absent but handoff comment incomplete for $CLAIM_ID_FILTER — exit incomplete (retry can post once)"
-        exit 3
+      # Absence alone is a no-op. Only when the journal proves this exact claim
+      # was released by a prior reaper op whose official handoff comment failed
+      # (claim_released=1 + handoff_comment_failed) may we retry the success
+      # handoff. Never post a presumed-dead/released comment without that proof.
+      if journal_has_claim_released_handoff_failed "$CLAIM_ID_FILTER"; then
+        _abs_repo=$(resolve_repo 2>/dev/null || true)
+        _abs_issue=$(issue_from_claim_id "$CLAIM_ID_FILTER")
+        _abs_branch=$(branch_for "$CLAIM_ID_FILTER")
+        if ! ensure_absent_handoff_comment "$_abs_issue" "$_abs_repo" "$CLAIM_ID_FILTER" "$_abs_branch" "unknown"; then
+          journal_append "INCOMPLETE op=reap:${CLAIM_ID_FILTER}:absent reason=handoff_comment_failed claim_absent=1"
+          warn "claim absent but handoff comment incomplete for $CLAIM_ID_FILTER — exit incomplete (retry can post once)"
+          exit 3
+        fi
+        journal_append "COMPLETED op=reap:${CLAIM_ID_FILTER}:absent result=already_absent recovery_handoff=1"
+        exit 0
       fi
       journal_append "COMPLETED op=reap:${CLAIM_ID_FILTER}:absent result=already_absent"
       exit 0

@@ -998,7 +998,8 @@ br=$(git -C "$ROOT/cmtfail/canon" branch --list 'feat/105-cmtfail')
 [[ -n "$br" ]] && ok "branch preserved after comment-fail release" || bad "branch deleted after comment-fail release"
 [[ -f "$ROOT/cmtfail/wt-105-cmtfail/marker" ]] && ok "worktree path preserved (unregistered keep)" || bad "unexpected worktree loss"
 
-# Retry with comment API healthy: claim already absent → post exactly one success comment
+# Retry with comment API healthy: claim already absent + journal proves
+# claim_released=1 + handoff_comment_failed → post exactly one success comment
 export GH_COMMENT_FAIL=0
 out2=$(
   env \
@@ -1013,6 +1014,9 @@ out2=$(
 )
 rc2=$?
 check "retry after comment-fail exits 0" "$rc2" "0"
+contains "retry recovery mentions absent" "$out2" "nothing to reap"
+contains "retry recovery posts or confirms handoff" "$out2" "handoff"
+lacks    "retry recovery must not print OK released" "$out2" "OK released"
 comments=$(cat "$GH_COMMENTS_FILE")
 contains "retry posts success marker" "$comments" "<!-- gibson-claim-reaper:issue-105-cmtfail -->"
 contains "retry comment names branch" "$comments" "feat/105-cmtfail"
@@ -1024,7 +1028,7 @@ if [[ "$cmt_n" -eq 1 ]]; then
 else
   bad "retry comment count want 1 got $cmt_n"
 fi
-# Second retry must not duplicate
+# Second retry must not duplicate (once-only dedupe; may be pure no-op or recovery with marker present)
 out3=$(
   env \
     GIBSON_CANONICAL="$ROOT/cmtfail/canon" \
@@ -1037,6 +1041,8 @@ out3=$(
 )
 rc3=$?
 check "second retry exits 0" "$rc3" "0"
+contains "second retry mentions absent or handoff skip" "$out3" "nothing to reap"
+lacks    "second retry must not print OK released" "$out3" "OK released"
 cmt_n2=$(grep -c 'gibson-claim-reaper:issue-105-cmtfail' "$GH_COMMENTS_FILE" || true)
 if [[ "$cmt_n2" -eq 1 ]]; then
   ok "second retry does not duplicate success comment"
@@ -1046,6 +1052,41 @@ fi
 jcmt2=$(cat "$STATE_BASE/cmtfail/journal.md" 2>/dev/null || true)
 contains "retry journals already_absent COMPLETED" "$jcmt2" "already_absent"
 unset GH_COMMENT_FAIL
+
+# ---------------------------------------------------------------------------
+echo "#73 · Law 8 · already-absent with no claim_released journal is no-op (no handoff)"
+# Pure absence without proven reaper cleanup must not post presumed-dead success.
+new_repo "$ROOT/absnoop"
+# Never create a claim row — apply against a never-seen id with empty journal.
+export GH_PR_COUNT=0
+export GH_COMMENTS_FILE="$ROOT/absnoop/comments"
+export GH_LOG="$ROOT/absnoop/gh.log"
+: > "$GH_COMMENTS_FILE"
+STATE_ABS="$STATE_BASE/absnoop"
+mkdir -p "$STATE_ABS"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/absnoop/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_ABS" \
+    GIBSON_REAPER_JOURNAL="$STATE_ABS/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_ABS/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-106-never-existed --apply 2>&1
+)
+rc=$?
+check "already-absent no-proof exits 0" "$rc" "0"
+contains "already-absent no-proof mentions nothing to reap" "$out" "nothing to reap"
+lacks    "already-absent no-proof must not post handoff" "$(cat "$GH_COMMENTS_FILE" 2>/dev/null || true)" "gibson-claim-reaper:issue-106-never-existed"
+lacks    "already-absent no-proof no presumed-dead body" "$(cat "$GH_COMMENTS_FILE" 2>/dev/null || true)" "Lane presumed dead"
+if grep -qF 'gibson-claim-reaper:issue-106-never-existed' "$GH_COMMENTS_FILE" 2>/dev/null; then
+  bad "already-absent without claim_released must not post success handoff"
+else
+  ok "already-absent without claim_released posts no success handoff"
+fi
+jabs=$(cat "$STATE_ABS/journal.md" 2>/dev/null || true)
+contains "already-absent no-proof journals already_absent" "$jabs" "already_absent"
+lacks    "already-absent no-proof journal has no recovery_handoff" "$jabs" "recovery_handoff=1"
 
 # ---------------------------------------------------------------------------
 echo "#73 · adversarial · heartbeat malformed/overflow/future + both filenames"
@@ -1317,6 +1358,119 @@ check "fresh-remote+stale-cache dry-run exits 0" "$rc" "0"
 contains "KEEP from live fresh remote (not stale cache)" "$out" "KEEP   issue-101-stale-cache"
 contains "recent_activity reason" "$out" "recent_activity"
 lacks    "must not REAP when live remote is fresh" "$out" "REAP   issue-101-stale-cache"
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · stale ls-remote SHA vs fresher exact fetch => FAIL:remote_branch_changed"
+# Within a single live_remote_branch_evidence call: ls-remote reports stale tip A
+# while the immediately following exact fetch updates the tracking ref to fresh
+# tip B. Must fail closed (never prefer/reset to A). Plan REFUSE; apply refuses
+# and must not invoke release-claim.
+new_repo "$ROOT/ls_stale"
+add_claim_file "$ROOT/ls_stale" issue-107-ls-stale 107 "$CLAIMED_ISO"
+(
+  cd "$ROOT/ls_stale/canon" || exit 1
+  git checkout -q -b feat/107-ls-stale
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  echo tipA > tipA.txt
+  git add tipA.txt && git commit -qm "stale tip A"
+  SHA_A=$(git rev-parse HEAD)
+  # Fresh tip B — within the reaper threshold relative to STALE_NOW so preferring
+  # A would wrongly REAP while B is still live activity.
+  export GIT_AUTHOR_DATE="@$((STALE_NOW - 30))"
+  export GIT_COMMITTER_DATE="@$((STALE_NOW - 30))"
+  echo tipB > tipB.txt
+  git add tipB.txt && git commit -qm "fresh tip B"
+  SHA_B=$(git rev-parse HEAD)
+  git push -q origin feat/107-ls-stale
+  printf '%s\n' "$SHA_A" > "$ROOT/ls_stale/sha_a"
+  printf '%s\n' "$SHA_B" > "$ROOT/ls_stale/sha_b"
+  git checkout -q main
+  # Ensure A remains a local object (old buggy path preferred A when present).
+  git cat-file -e "${SHA_A}^{commit}"
+) >/dev/null 2>&1
+SHA_A=$(cat "$ROOT/ls_stale/sha_a")
+SHA_B=$(cat "$ROOT/ls_stale/sha_b")
+# Preload A into the object store / optional cache; real remote tip is B.
+git -C "$ROOT/ls_stale/canon" fetch -q origin feat/107-ls-stale >/dev/null 2>&1 || true
+git -C "$ROOT/ls_stale/canon" update-ref refs/remotes/origin/feat/107-ls-stale "$SHA_B"
+GIT_REAL=$(command -v git)
+mkdir -p "$ROOT/ls_stale/bin"
+# Always lie on ls-remote: return stale A. Exact fetch still gets live B.
+cat > "$ROOT/ls_stale/bin/git" <<EOF
+#!/usr/bin/env bash
+REAL="$GIT_REAL"
+SHA_A="$SHA_A"
+if [[ "\$1" == "ls-remote" ]]; then
+  for a in "\$@"; do
+    case "\$a" in
+      refs/heads/feat/107-ls-stale)
+        printf '%s\t%s\n' "\$SHA_A" "refs/heads/feat/107-ls-stale"
+        exit 0
+        ;;
+    esac
+  done
+fi
+exec "\$REAL" "\$@"
+EOF
+chmod +x "$ROOT/ls_stale/bin/git"
+export GH_PR_COUNT=0
+export GH_COMMENTS_FILE="$ROOT/ls_stale/comments"
+export GH_LOG="$ROOT/ls_stale/gh.log"
+: > "$GH_COMMENTS_FILE"
+FAKE_RC_LS="$ROOT/ls_stale/fake-rc.sh"
+cat > "$FAKE_RC_LS" <<'FAKE'
+#!/usr/bin/env bash
+echo "FAKE-RC must not run when ls-remote SHA disagrees with fetch tip" >&2
+exit 99
+FAKE
+chmod +x "$FAKE_RC_LS"
+STATE_LS="$STATE_BASE/ls_stale"
+mkdir -p "$STATE_LS"
+# Plan (dry-run): must REFUSE, never REAP/KEEP from the stale queried SHA.
+out=$(
+  env \
+    PATH="$ROOT/ls_stale/bin:$PATH" \
+    GIBSON_CANONICAL="$ROOT/ls_stale/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_LS" \
+    GIBSON_REAPER_JOURNAL="$STATE_LS/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_LS/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$FAKE_RC_LS" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-107-ls-stale 2>&1
+)
+rc=$?
+check "stale-ls-remote plan exits 0" "$rc" "0"
+contains "stale-ls-remote plan REFUSE remote_branch_changed" "$out" "remote_branch_changed"
+lacks    "stale-ls-remote plan must not REAP" "$out" "REAP   issue-107-ls-stale"
+lacks    "stale-ls-remote plan must not KEEP from A" "$out" "KEEP   issue-107-ls-stale"
+# Apply: refuse, no release-claim, claim survives.
+out=$(
+  env \
+    PATH="$ROOT/ls_stale/bin:$PATH" \
+    GIBSON_CANONICAL="$ROOT/ls_stale/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_LS" \
+    GIBSON_REAPER_JOURNAL="$STATE_LS/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_LS/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$FAKE_RC_LS" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-107-ls-stale --apply 2>&1
+)
+rc=$?
+lacks    "stale-ls-remote apply must not invoke release" "$out" "FAKE-RC must not run"
+lacks    "stale-ls-remote apply must not OK released" "$out" "OK released"
+if echo "$out" | grep -qiE 'remote_branch_changed|REFUSE|refuse|INCOMPLETE'; then
+  ok "stale-ls-remote apply refuses (rc=$rc)"
+else
+  bad "stale-ls-remote apply did not refuse (rc=$rc out=$(echo "$out" | tail -5 | tr '\n' ' '))"
+fi
+files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/ls_stale/canon" fetch -q origin; PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/ls_stale/canon" ls-tree --name-only origin/main docs/claims/)
+contains "claim survives stale-ls-remote mismatch" "$files" "issue-107-ls-stale.md"
+if grep -qF 'gibson-claim-reaper:issue-107-ls-stale' "$GH_COMMENTS_FILE" 2>/dev/null; then
+  bad "stale-ls-remote must not post success handoff"
+else
+  ok "stale-ls-remote posted no success handoff"
+fi
 
 # ---------------------------------------------------------------------------
 echo "#73 · adversarial · remote branch SHA changed between plan and apply => no release"
