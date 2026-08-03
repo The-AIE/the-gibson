@@ -113,14 +113,21 @@ from **evidence**, not assertion:
   mutation is incomplete; the claim row and label survive. Journals under an
   apply lock (never before lock; never through a symlink). A COMPLETED journal
   is idempotent only when remote evidence still proves the claim absent — a
-  re-added live claim is re-evaluated, never silently skipped. Posts a
-  deduplicated handoff comment (no absolute worktree paths). `--prune-worktrees`
-  may remove only the exact frozen registered worktree path, and only **after**
-  CAS validation, cleanup push, and authoritative post-mutation reread prove the
-  exact target claim is absent (revalidated immediately before removal; no
-  default-path derivation; no `rm -rf` fallback). Renewal, push rejection, OID
-  mismatch, or reread failure leave the registered worktree and branch
-  untouched. Final worktree-removal failure reports incomplete (no false OK).
+  re-added live claim is re-evaluated, never silently skipped. After
+  `release-claim` returns success **and** an authoritative post-release reread
+  proves the claim absent, posts exactly one deduplicated handoff comment with
+  an inert marker (no absolute worktree paths). A CAS mismatch, renewal,
+  fetch/query failure, push rejection, prune failure, or any incomplete release
+  must not leave a comment claiming release. If cleanup succeeds but the
+  comment post fails, the operation is incomplete (no overall success); a later
+  retry with the claim already absent posts the missing success comment exactly
+  once. `--prune-worktrees` may remove only the exact frozen registered
+  worktree path, and only **after** CAS validation, cleanup push, and
+  authoritative post-mutation reread prove the exact target claim is absent
+  (revalidated immediately before removal; no default-path derivation; no
+  `rm -rf` fallback). Renewal, push rejection, OID mismatch, or reread failure
+  leave the registered worktree and branch untouched. Final worktree-removal
+  failure reports incomplete (no false OK).
 - Scheduling and Mission Control integration are follow-ups; this script is the
   standalone Tier B janitor.
 

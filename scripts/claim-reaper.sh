@@ -19,9 +19,11 @@ WHAT IT DOES
 
   Dry-run by default: prints a reviewable plan with zero mutations. --apply
   releases exactly one claim id at a time via release-claim.sh, journals each
-  operation, posts a deduplicated handoff comment, and preserves the feature
-  branch and worktree by default. --prune-worktrees may remove only the exact
-  registered target worktree after CAS + verified cleanup push succeed.
+  operation, and only after release-claim returns success and authoritative
+  postconditions prove the claim absent posts a deduplicated handoff comment.
+  Feature branch and worktree are preserved by default. --prune-worktrees may
+  remove only the exact registered target worktree after CAS + verified cleanup
+  push succeed.
 
   An open PR always protects a claim. API/ref failures, malformed evidence,
   unreadable worktrees, unregistered or unsafe paths, symlink/device evidence,
@@ -36,7 +38,8 @@ WHY
 RISKS
   - Releases a claim row on main (via release-claim). Undo: re-claim the issue.
   - Optional worktree removal with --prune-worktrees (uncommitted work lost).
-  - Posts an issue comment. Deduplicated; no absolute worktree paths.
+  - Posts an issue comment only after verified release. Deduplicated; no
+    absolute worktree paths. Never claims release on CAS/renewal/incomplete.
   - Does NOT close issues. Does NOT delete branches by default.
 
 USAGE
@@ -840,10 +843,17 @@ comment_already_posted() {
 }
 
 # Post handoff comment. Never include absolute worktree paths.
+# Callers MUST invoke this only after release-claim success (or authoritative
+# claim absence on retry) — never before mutation, never on CAS/renewal failure.
+# Returns 0 when the inert marker is already present (dedupe) or freshly posted.
 post_handoff_comment() {
   local issue="$1" repo="$2" id="$3" branch="$4" last_active="$5"
   local marker body
   marker=$(comment_marker "$id")
+  # Sanitize fields for comment body (hostile claim data).
+  case "$last_active" in
+    ''|*[!0-9]*) last_active="unknown" ;;
+  esac
   body=$(cat <<EOF
 Lane presumed dead (no liveness evidence within the reaper threshold).
 
@@ -855,7 +865,8 @@ Lane presumed dead (no liveness evidence within the reaper threshold).
 ${marker}
 EOF
 )
-  # If already present, skip (dedupe).
+  # If already present, skip (dedupe). Marker only exists after a verified success
+  # under the Law 8 ordering contract — incomplete attempts never post.
   set +e
   local existing
   existing=$(gh api "repos/${repo}/issues/${issue}/comments" --paginate -q '.[].body' 2>/dev/null)
@@ -875,6 +886,18 @@ EOF
   fi
   info "posted handoff comment on $repo#$issue for $id"
   return 0
+}
+
+# Ensure the success handoff marker is present for a claim that is already
+# authoritatively absent (idempotent retry after cleanup-without-comment).
+# Returns 0 on success/already-present; 1 on failure (caller journals incomplete).
+ensure_absent_handoff_comment() {
+  local issue="$1" repo="$2" id="$3" branch="$4" last_active="${5:-unknown}"
+  if [[ -z "$repo" || -z "$issue" || -z "$id" ]]; then
+    warn "cannot post handoff for $id — repo/issue unresolved"
+    return 1
+  fi
+  post_handoff_comment "$issue" "$repo" "$id" "${branch:-$(branch_for "$id")}" "$last_active"
 }
 
 # Journal helpers — path-safe, never write through a symlink.
@@ -1186,8 +1209,27 @@ if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
       if git cat-file -e "$REF:docs/claims/${CLAIM_ID_FILTER}.md" 2>/dev/null; then
         die "claim '$CLAIM_ID_FILTER' reappeared during absence check — refuse already_absent"
       fi
+      # Also refuse if a legacy active-work row for this id is still live.
+      if git show "${REF}:docs/active-work.md" 2>/dev/null | awk -F'|' -v want="$CLAIM_ID_FILTER" '
+        /^\|/ {
+          cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
+          if (cid==want) found=1
+        }
+        END { exit !found }'; then
+        die "claim '$CLAIM_ID_FILTER' still live as legacy row — refuse already_absent"
+      fi
       info "no live claim '$CLAIM_ID_FILTER' at $REF — nothing to reap (idempotent)"
       ensure_journal
+      # Claim is gone; still must post the success handoff if a prior attempt
+      # released the row but failed to comment (Law 8 retry recovery).
+      _abs_repo=$(resolve_repo 2>/dev/null || true)
+      _abs_issue=$(issue_from_claim_id "$CLAIM_ID_FILTER")
+      _abs_branch=$(branch_for "$CLAIM_ID_FILTER")
+      if ! ensure_absent_handoff_comment "$_abs_issue" "$_abs_repo" "$CLAIM_ID_FILTER" "$_abs_branch" "unknown"; then
+        journal_append "INCOMPLETE op=reap:${CLAIM_ID_FILTER}:absent reason=handoff_comment_failed claim_absent=1"
+        warn "claim absent but handoff comment incomplete for $CLAIM_ID_FILTER — exit incomplete (retry can post once)"
+        exit 3
+      fi
       journal_append "COMPLETED op=reap:${CLAIM_ID_FILTER}:absent result=already_absent"
       exit 0
     fi
@@ -1664,6 +1706,15 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
       # Continue under a new operation identity so mutation can proceed after checks.
       op="reap:${p_id}:${p_blob}:revivify"
     else
+      # COMPLETED + absent: still ensure the success marker exists (covers an
+      # older incomplete path that wrote COMPLETED without a handoff, and is a
+      # no-op when the marker is already present).
+      if ! ensure_absent_handoff_comment "$p_issue" "$REPO" "$p_id" "$p_branch" "${p_last:-unknown}"; then
+        warn "COMPLETED journal for $p_id but handoff comment still missing — incomplete"
+        journal_append "INCOMPLETE op=${op} reason=handoff_comment_failed after=completed_skip"
+        INCOMPLETE=1
+        continue
+      fi
       info "skip $p_id — journal COMPLETED and claim absent at $REF (idempotent)"
       continue
     fi
@@ -1682,7 +1733,15 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   reparse_claim_fields "$REF" "$p_path" "$p_blob" "$p_id" "$p_source"
   case "$_rp_status" in
     FAIL:absent)
-      info "claim $p_id already absent at $REF — marking completed (idempotent)"
+      # Row already gone (e.g. prior release succeeded, comment failed). Post
+      # the missing success handoff exactly once; never claim COMPLETED without it.
+      info "claim $p_id already absent at $REF — ensuring handoff comment (idempotent)"
+      if ! ensure_absent_handoff_comment "$p_issue" "$REPO" "$p_id" "$p_branch" "${p_last:-unknown}"; then
+        journal_append "INCOMPLETE op=${op} reason=handoff_comment_failed claim_absent=1"
+        warn "claim absent but handoff comment incomplete for $p_id"
+        INCOMPLETE=1
+        continue
+      fi
       journal_append "COMPLETED op=${op} result=already_absent"
       continue
       ;;
@@ -1871,16 +1930,9 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     continue
   fi
 
-  # Handoff comment only after identity/CAS prechecks (never on issue mismatch).
-  if ! post_handoff_comment "$p_issue" "$REPO" "$p_id" "$p_branch" "$new_last"; then
-    warn "handoff comment failed for $p_id — refuse mutation (fail closed)"
-    journal_append "INCOMPLETE op=${op} reason=comment_failed"
-    INCOMPLETE=1
-    continue
-  fi
-
-  # release-claim: exact id + CAS blob/path + keep branch; keep worktree unless
-  # prune of the exact frozen registered path.
+  # release-claim FIRST. Handoff comment posts only after success + verified
+  # postconditions (Law 8). CAS mismatch, renewal, push rejection, prune
+  # failure, or any incomplete release must leave no "released" comment.
   rc_args=("$p_issue" --claim-id "$p_id" --keep-branch --repo "$REPO"
     --expected-claim-blob "$p_blob" --expected-source "$p_source")
   if [[ "$p_source" == "file" ]]; then
@@ -1912,18 +1964,43 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   printf '%s\n' "$release_out" | sed 's/^/  | /'
 
   if [[ "$release_rc" -eq 0 ]]; then
+    # Authoritative postcondition: claim must be absent before any success marker.
+    if ! REF=$(fetch_remote_ledger_ref); then
+      warn "release-claim rc=0 but cannot re-fetch ledger to prove absence for $p_id — incomplete (no success comment)"
+      journal_append "INCOMPLETE op=${op} reason=post_release_fetch_failed"
+      INCOMPLETE=1
+      applied=$((applied + 1))
+      continue
+    fi
+    if claim_live_on_ref "$REF" "$p_id" "$p_source" "$p_path" "$p_blob"; then
+      warn "release-claim rc=0 but claim still live at $REF for $p_id — incomplete (no success comment)"
+      journal_append "INCOMPLETE op=${op} reason=post_release_still_live"
+      INCOMPLETE=1
+      applied=$((applied + 1))
+      continue
+    fi
+    # Post handoff only after verified release. Comment failure leaves the
+    # operation incomplete so a later retry (claim absent) can post exactly once.
+    if ! post_handoff_comment "$p_issue" "$REPO" "$p_id" "$p_branch" "$new_last"; then
+      warn "release verified for $p_id but handoff comment failed — incomplete (no overall success; retry can post once)"
+      journal_append "INCOMPLETE op=${op} reason=handoff_comment_failed claim_released=1"
+      INCOMPLETE=1
+      applied=$((applied + 1))
+      continue
+    fi
     journal_append "COMPLETED op=${op} result=released rc=0"
     info "OK released $p_id"
     applied=$((applied + 1))
   elif [[ "$release_rc" -eq 3 ]]; then
-    # Incomplete cleanup in release-claim — journal incomplete; claim/label may survive
+    # Incomplete cleanup — claim/label/worktree may survive. Never post released comment.
     journal_append "INCOMPLETE op=${op} reason=release_claim_incomplete rc=3"
-    warn "release-claim incomplete for $p_id"
+    warn "release-claim incomplete for $p_id (no success handoff comment)"
     INCOMPLETE=1
     applied=$((applied + 1))
   else
+    # CAS mismatch, renewal, push rejection, etc. — never post released comment.
     journal_append "INCOMPLETE op=${op} reason=release_claim_failed rc=${release_rc}"
-    warn "release-claim failed for $p_id (rc=$release_rc)"
+    warn "release-claim failed for $p_id (rc=$release_rc; no success handoff comment)"
     INCOMPLETE=1
   fi
 done < "$PLAN_TMP"

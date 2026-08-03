@@ -77,6 +77,11 @@ case "$1" in
   issue)
     shift
     if [[ "${1:-}" == "comment" ]]; then
+      if [[ "${GH_COMMENT_FAIL:-0}" == "1" ]]; then
+        log "COMMENT_FAIL $*"
+        echo "FAKE-GH: comment post failed" >&2
+        exit 1
+      fi
       log "COMMENT $*"
       # capture body after --body
       body=""
@@ -825,6 +830,30 @@ if [[ "$rc" -eq 0 ]]; then
 else
   ok "renewal race fails closed (rc=$rc)"
 fi
+# Law 8: incomplete/CAS failure must never post a "released" handoff comment.
+if grep -qF 'gibson-claim-reaper:issue-92-renew' "$GH_COMMENTS_FILE" 2>/dev/null; then
+  bad "renewal CAS failure must not post released handoff marker"
+else
+  ok "renewal CAS failure posted no released handoff marker"
+fi
+if echo "$out" | grep -q 'OK released'; then
+  bad "renewal must not print overall success"
+else
+  ok "renewal prints no overall success"
+fi
+if grep -q -- '--remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "renewal must not remove agent-claimed label"
+else
+  ok "agent-claimed label survived renewal CAS failure"
+fi
+jrenew=$(cat "$STATE_BASE/renew/journal.md" 2>/dev/null || true)
+contains "renewal journals incomplete" "$jrenew" "INCOMPLETE"
+# Prefer exit 3 (apply incomplete) over hard die
+if [[ "$rc" -eq 3 ]]; then
+  ok "renewal exits incomplete (3)"
+else
+  ok "renewal fails closed (rc=$rc; 3 preferred)"
+fi
 
 # ---------------------------------------------------------------------------
 echo "#73 · adversarial · legacy row renewal survives OID recheck"
@@ -889,6 +918,134 @@ if [[ "$rc" -eq 0 ]]; then
 else
   ok "legacy renewal fails closed (rc=$rc)"
 fi
+if grep -qF 'gibson-claim-reaper:issue-93-legrenew' "$GH_COMMENTS_FILE" 2>/dev/null; then
+  bad "legacy renewal must not post released handoff marker"
+else
+  ok "legacy renewal posted no released handoff marker"
+fi
+if echo "$out" | grep -q 'OK released'; then
+  bad "legacy renewal must not print overall success"
+else
+  ok "legacy renewal prints no overall success"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · Law 8 · cleanup success + comment API failure is incomplete; retry posts once"
+# Backdate claim + branch tip (same as apply fixture): wall-clock tips under an
+# injected past NOW look like future_clock_evidence and refuse reaping.
+new_repo "$ROOT/cmtfail"
+(
+  cd "$ROOT/cmtfail/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  cat > docs/claims/issue-105-cmtfail.md <<EOF
+claim: issue-105-cmtfail
+issue: 105
+claimed: $CLAIMED_ISO
+scope: src/cmtfail
+session: t
+branch: feat/105-cmtfail
+EOF
+  : > docs/active-work.md
+  git add -A && git commit -qm "claim 105" && git push -q origin main
+  git branch -f feat/105-cmtfail HEAD
+) >/dev/null 2>&1
+mkdir -p "$ROOT/cmtfail/wt-105-cmtfail"
+echo keepme > "$ROOT/cmtfail/wt-105-cmtfail/marker"
+export GH_PR_COUNT=0
+export GH_LOG="$ROOT/cmtfail/gh.log"
+export GH_COMMENTS_FILE="$ROOT/cmtfail/comments"
+export GH_STATE="$ROOT/cmtfail/gh-state"
+export GH_COMMENT_FAIL=1
+rm -f "$GH_LOG" "$GH_STATE"
+: > "$GH_COMMENTS_FILE"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/cmtfail/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_BASE/cmtfail" \
+    GIBSON_REAPER_JOURNAL="$STATE_BASE/cmtfail/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_BASE/cmtfail/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    GH_COMMENT_FAIL=1 \
+    "$REAPER" --repo acme/app --claim-id issue-105-cmtfail --apply 2>&1
+)
+rc=$?
+files=$(git -C "$ROOT/cmtfail/canon" fetch -q origin 2>/dev/null; git -C "$ROOT/cmtfail/canon" ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+lacks    "claim released despite comment fail" "$files" "issue-105-cmtfail.md"
+if [[ "$rc" -eq 3 ]]; then
+  ok "comment-fail after release exits incomplete (3)"
+else
+  bad "comment-fail after release should exit 3 (got $rc)"
+fi
+if echo "$out" | grep -q 'OK released'; then
+  bad "comment-fail must not print overall success"
+else
+  ok "comment-fail prints no overall success"
+fi
+if grep -qF 'gibson-claim-reaper:issue-105-cmtfail' "$GH_COMMENTS_FILE" 2>/dev/null; then
+  bad "comment-fail must leave no released handoff marker"
+else
+  ok "comment-fail left no released handoff marker"
+fi
+jcmt=$(cat "$STATE_BASE/cmtfail/journal.md" 2>/dev/null || true)
+contains "comment-fail journals incomplete" "$jcmt" "handoff_comment_failed"
+contains "comment-fail journals claim_released" "$jcmt" "claim_released=1"
+# Branch + worktree still preserved by release defaults
+br=$(git -C "$ROOT/cmtfail/canon" branch --list 'feat/105-cmtfail')
+[[ -n "$br" ]] && ok "branch preserved after comment-fail release" || bad "branch deleted after comment-fail release"
+[[ -f "$ROOT/cmtfail/wt-105-cmtfail/marker" ]] && ok "worktree path preserved (unregistered keep)" || bad "unexpected worktree loss"
+
+# Retry with comment API healthy: claim already absent → post exactly one success comment
+export GH_COMMENT_FAIL=0
+out2=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/cmtfail/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_BASE/cmtfail" \
+    GIBSON_REAPER_JOURNAL="$STATE_BASE/cmtfail/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_BASE/cmtfail/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    GH_COMMENT_FAIL=0 \
+    "$REAPER" --repo acme/app --claim-id issue-105-cmtfail --apply 2>&1
+)
+rc2=$?
+check "retry after comment-fail exits 0" "$rc2" "0"
+comments=$(cat "$GH_COMMENTS_FILE")
+contains "retry posts success marker" "$comments" "<!-- gibson-claim-reaper:issue-105-cmtfail -->"
+contains "retry comment names branch" "$comments" "feat/105-cmtfail"
+lacks    "retry comment has no absolute path" "$comments" "/Users/"
+lacks    "retry comment has no /tmp/gibson path" "$comments" "/tmp/gibson"
+cmt_n=$(grep -c 'gibson-claim-reaper:issue-105-cmtfail' "$GH_COMMENTS_FILE" || true)
+if [[ "$cmt_n" -eq 1 ]]; then
+  ok "retry posts exactly one success comment"
+else
+  bad "retry comment count want 1 got $cmt_n"
+fi
+# Second retry must not duplicate
+out3=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/cmtfail/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_BASE/cmtfail" \
+    GIBSON_REAPER_JOURNAL="$STATE_BASE/cmtfail/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_BASE/cmtfail/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-105-cmtfail --apply 2>&1
+)
+rc3=$?
+check "second retry exits 0" "$rc3" "0"
+cmt_n2=$(grep -c 'gibson-claim-reaper:issue-105-cmtfail' "$GH_COMMENTS_FILE" || true)
+if [[ "$cmt_n2" -eq 1 ]]; then
+  ok "second retry does not duplicate success comment"
+else
+  bad "second retry duplicated comment (count=$cmt_n2)"
+fi
+jcmt2=$(cat "$STATE_BASE/cmtfail/journal.md" 2>/dev/null || true)
+contains "retry journals already_absent COMPLETED" "$jcmt2" "already_absent"
+unset GH_COMMENT_FAIL
 
 # ---------------------------------------------------------------------------
 echo "#73 · adversarial · heartbeat malformed/overflow/future + both filenames"
