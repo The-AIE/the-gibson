@@ -184,7 +184,7 @@ touch /path/to/target/gibson/HALT
 
    | Key | Rule |
    |---|---|
-   | `updated` | Column-zero field `updated: <UTC timestamp>` — strict UTC instant `YYYY-MM-DDTHH:MM:SSZ` (real calendar date; no fractions, no offsets). Stamp **now** (UTC) on **every** rewrite after a real runner invocation — must be ≥ the driver's `iteration_start`, even if no other field changed. An unchanged old stamp is `state-corrupt`. Not `timestamp:`, `updated_at:`, or an indented variant. |
+   | `updated` | Column-zero field `updated: <UTC timestamp>` — strict UTC instant `YYYY-MM-DDTHH:MM:SSZ` (real calendar date; no fractions, no offsets). Stamp **now** (UTC) on **every** rewrite after a real runner invocation — must be ≥ the driver's `iteration_start`, even if no other field changed. An unchanged old stamp is `state-corrupt` (#75 freshness). A **fresh** stamp with no other substantive field change is still **no-progress** under the L-008 sensor wired into `loop.sh` (issue #63 / `silent_noop_progressed`) — the clock is required for freshness but is not itself progress. Not `timestamp:`, `updated_at:`, or an indented variant. |
    | `issue` | Current issue id/ref (may be empty while triaging). |
    | `pr` | Current PR id/ref (may be empty). |
    | `hat` | Hat you just completed — one of: `builder`, `test-engineer`, `reviewer`, `ux-evaluator`, `security`, `release`, `historian`, `decomposer`, `planner`. |

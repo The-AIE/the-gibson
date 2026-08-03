@@ -1817,6 +1817,729 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Issue #63 — silent-noop wired into loop.sh (no-progress / --stale-budget)
+# ---------------------------------------------------------------------------
+echo
+echo "issue #63: no-progress / stale-budget / precedence"
+
+# Clock-only rewrite: fresh updated: stamp, every other field byte-identical.
+# Satisfies #75 freshness; must be classified as no-progress (not state-corrupt).
+make_runner_cmd() {
+  echo "${1:-noop}" > "$CALLS/runner.behavior"
+  cat > "$CALLS/fake-runner.sh" <<RUN
+#!/usr/bin/env bash
+set -euo pipefail
+echo call >> "$CALLS/runner.count"
+printf '%s\n' "\$@" >> "$CALLS/runner.args"
+echo ran >> "$CALLS/runner.executed"
+behavior=\$(cat "$CALLS/runner.behavior" 2>/dev/null || echo noop)
+state="$REPO/gibson/loop-state.md"
+now=\$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+write_valid() {
+  local nh="\${1:-test-engineer}" na="\${2:-run tests for the unit}" notes="\${3:-rewritten valid}" ec="\${4:-0}"
+  cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr:
+hat: builder
+next_hat: \$nh
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: \$na
+notes: \$notes
+EOF
+  exit "\$ec"
+}
+case "\$behavior" in
+  noop) exit 0 ;;
+  fail) write_valid test-engineer "runner failed" "runner-fail" 1 ;;
+  rewrite-valid) write_valid test-engineer "run tests for the unit" "rewritten valid" 0 ;;
+  rewrite-valid-then-fail) write_valid test-engineer "valid but runner fails" "runner-fail" 3 ;;
+  rewrite-missing-next)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr:
+hat: builder
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: oops dropped next_hat
+notes: corrupt
+EOF
+    exit 0
+    ;;
+  rewrite-typo-hat)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr:
+hat: builder
+next_hat: bulider
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: typo hat
+notes: corrupt
+EOF
+    exit 0
+    ;;
+  rewrite-stale)
+    stale=\$(python3 -c 'from datetime import datetime, timezone, timedelta; print((datetime.now(timezone.utc)-timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$stale
+issue: 75
+pr:
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: stale stamp
+notes: stale
+EOF
+    exit 0
+    ;;
+  rewrite-colons)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr: 12
+hat: builder
+next_hat: reviewer
+round: 2
+parked: false
+handoff:
+handoff_sha:
+next_action: ship:feat/x: after review: go
+notes: colons ok
+EOF
+    exit 0
+    ;;
+  rewrite-handoff)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr: 12
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff: feat/75-widget
+handoff_sha: abcdef0123456789abcdef0123456789abcdef01
+next_action: hand off the finished branch
+notes: handoff queued
+EOF
+    exit 0
+    ;;
+  rewrite-valid-nospace)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated:\$now
+issue:75
+pr:
+hat:builder
+next_hat:test-engineer
+round:1
+parked:false
+handoff:
+handoff_sha:
+next_action:run tests for the unit
+notes:rewritten valid nospace
+EOF
+    exit 0
+    ;;
+  rewrite-handoff-nospace)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated:\$now
+issue:75
+pr:12
+hat:builder
+next_hat:test-engineer
+round:1
+parked:false
+handoff:feat/75-widget
+handoff_sha:abcdef0123456789abcdef0123456789abcdef01
+next_action:hand off the finished branch
+notes:handoff queued nospace
+EOF
+    exit 0
+    ;;
+  rewrite-empty-updated)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated:
+issue: 75
+pr:
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: emptied updated stamp
+notes: empty-updated corrupt
+EOF
+    exit 0
+    ;;
+  rewrite-valid-symlink)
+    target="$CALLS/outside-valid-state.md"
+    cat > "\$target" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr:
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: via symlink target
+notes: fresh symlink rewrite
+EOF
+    rm -f "\$state"
+    ln -s "\$target" "\$state"
+    exit 0
+    ;;
+  # --- issue #63 behaviors ---
+  rewrite-clock-only)
+    # Fresh updated: only — L-008 no-progress under silent_noop_progressed.
+    if [[ -f "\$state" ]]; then
+      python3 - "\$state" "\$now" <<'PY'
+import re, sys
+path, now = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+text2, n = re.subn(r"(?m)^updated:.*\$", "updated: " + now, text, count=1)
+if n == 1:
+    open(path, "w", encoding="utf-8").write(text2)
+PY
+    fi
+    exit 0
+    ;;
+  rewrite-same-len)
+    # Same-length substantive edit (round: 0 → round: 1) + fresh stamp.
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue:
+pr:
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: triage highest-priority unblocked unclaimed issue
+notes: fixture
+EOF
+    exit 0
+    ;;
+  rewrite-handoff-sha-only)
+    # Only handoff_sha + updated change; every other field matches fixture.
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue:
+pr:
+hat: builder
+next_hat: builder
+round: 0
+parked: false
+handoff:
+handoff_sha: abcdef0123456789abcdef0123456789abcdef01
+next_action: triage highest-priority unblocked unclaimed issue
+notes: fixture
+EOF
+    exit 0
+    ;;
+  rewrite-clock-only-then-fail)
+    # Clock-only stamp + nonzero exit: runner-failure must win over no-progress
+    # only when state is valid+fresh. Clock-only with exit 1 is still valid
+    # state → runner-failure only (sensor not run).
+    if [[ -f "\$state" ]]; then
+      python3 - "\$state" "\$now" <<'PY'
+import re, sys
+path, now = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+text2, n = re.subn(r"(?m)^updated:.*\$", "updated: " + now, text, count=1)
+if n == 1:
+    open(path, "w", encoding="utf-8").write(text2)
+PY
+    fi
+    exit 1
+    ;;
+  *)
+    echo "fake-runner: unknown behavior \$behavior" >&2
+    exit 99
+    ;;
+esac
+RUN
+  chmod +x "$CALLS/fake-runner.sh"
+}
+
+journal_no_progress_count() {
+  local n=0 j="$REPO/gibson/journal.md"
+  if [[ -f "$j" ]]; then
+    n=$(grep -c '· no-progress' "$j" 2>/dev/null || true)
+  fi
+  echo "${n:-0}"
+}
+
+# --- fresh updated-only rewrites stop exactly at stale budget N ---
+echo "driver: clock-only rewrites stop at --stale-budget N with distinct no-progress"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 10 --error-budget 9 --stale-budget 3 \
+  >/dev/null 2>"$ROOT/stale3.err"
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]] && grep -q 'no-progress: stale budget exhausted' "$ROOT/stale3.err"; then
+  ok "stale-budget 3: dies with distinct no-progress diagnosis"
+else
+  bad "stale-budget 3: expected no-progress die (rc=$rc err=$(tr '\n' ' ' <"$ROOT/stale3.err"))"
+fi
+np=$(journal_no_progress_count)
+if [[ "$np" -eq 3 ]]; then
+  ok "stale-budget 3: exactly 3 distinct no-progress journal entries"
+else
+  bad "stale-budget 3: expected 3 no-progress journals, got $np"
+fi
+if [[ "$(runner_count)" -eq 3 ]]; then
+  ok "stale-budget 3: runner invoked exactly 3 times"
+else
+  bad "stale-budget 3: runner count=$(runner_count) want 3"
+fi
+# Match the journal section marker, not the phrase "not state-corrupt" in the
+# no-progress diagnosis body.
+if ! grep -q '· state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null && \
+   ! grep -q 'state-corrupt (consecutive' "$ROOT/stale3.err" 2>/dev/null; then
+  ok "stale-budget 3: not classified as state-corrupt"
+else
+  bad "stale-budget 3: wrongly state-corrupt"
+fi
+# Snapshot must still exist; no restore on no-progress (live may differ only by clock).
+if [[ -f "$REPO/gibson/.loop-state.prev" ]]; then
+  ok "stale-budget 3: snapshot retained (no restore path required)"
+else
+  bad "stale-budget 3: snapshot missing"
+fi
+
+# --- exact escalation threshold on no-progress ---
+echo "driver: escalate-after fires on shared failure from no-progress"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+: > "$CALLS/runner.count"
+: > "$CALLS/second-opinion.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 10 --error-budget 5 --stale-budget 5 --escalate-after 2 \
+  >/dev/null 2>"$ROOT/esc-np.err"
+set -e
+# At escalate-after 2, second-opinion should fire once when failures hits 2.
+so=$(wc -l < "$CALLS/second-opinion.count" | tr -d ' ')
+if [[ "${so:-0}" -ge 1 ]]; then
+  ok "escalate-after 2: second-opinion invoked on no-progress streak"
+else
+  bad "escalate-after 2: second-opinion never ran (err=$(tr '\n' ' ' <"$ROOT/esc-np.err"))"
+fi
+if grep -q 'no-progress' "$ROOT/esc-np.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "escalate path still journals no-progress"
+else
+  bad "escalate path lost no-progress diagnosis"
+fi
+
+# --- one shared failure unit per iteration; no double classification ---
+echo "driver: one no-progress unit per iteration (no double classification)"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/one-np.err"
+set -e
+np=$(journal_no_progress_count)
+sc=$(journal_state_corrupt_count)
+if [[ "$np" -eq 1 && "$sc" -eq 0 ]]; then
+  ok "single clock-only: exactly one no-progress, zero state-corrupt"
+else
+  bad "single clock-only: np=$np sc=$sc"
+fi
+if grep -q 'no-progress (stale=1/5, consecutive failures=1/5)' "$ROOT/one-np.err"; then
+  ok "single clock-only: one shared failure unit and one stale unit"
+else
+  bad "single clock-only: accounting missing (err=$(tr '\n' ' ' <"$ROOT/one-np.err"))"
+fi
+if ! grep -q 'runner exit' "$ROOT/one-np.err"; then
+  ok "single clock-only: not also labeled runner-failure"
+else
+  bad "single clock-only: double-classified as runner-failure"
+fi
+
+# --- state-corrupt precedence over no-progress ---
+echo "driver: state-corrupt (stale stamp) wins over no-progress"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-stale
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/sc-vs-np.err"
+set -e
+sc=$(journal_state_corrupt_count)
+np=$(journal_no_progress_count)
+if [[ "$sc" -eq 1 && "$np" -eq 0 ]]; then
+  ok "stale stamp: state-corrupt only (no-progress sensor not run)"
+else
+  bad "stale stamp: sc=$sc np=$np"
+fi
+
+# --- runner-failure precedence over no-progress ---
+echo "driver: valid state + nonzero exit is runner-failure only (not no-progress)"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only-then-fail
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/rf-vs-np.err"
+set -e
+if grep -q 'runner exit 1 (consecutive failures=1/5)' "$ROOT/rf-vs-np.err"; then
+  ok "clock-only + exit 1: runner-failure once"
+else
+  bad "clock-only + exit 1: missing runner-failure (err=$(tr '\n' ' ' <"$ROOT/rf-vs-np.err"))"
+fi
+np=$(journal_no_progress_count)
+if [[ "$np" -eq 0 ]]; then
+  ok "clock-only + exit 1: no-progress sensor not run"
+else
+  bad "clock-only + exit 1: also no-progress (np=$np)"
+fi
+
+# --- substantive same-length edit counts as progress and resets both counters ---
+echo "driver: same-length substantive edit is progress (resets failures+stale)"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture" "round=0"
+make_runner_cmd rewrite-clock-only
+: > "$CALLS/runner.count"
+# First: one no-progress so counters are non-zero
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/pre-progress.err"
+set -e
+if grep -q 'no-progress (stale=1/5, consecutive failures=1/5)' "$ROOT/pre-progress.err"; then
+  ok "pre-progress: seeded failures=1 stale=1"
+else
+  bad "pre-progress: seed failed (err=$(tr '\n' ' ' <"$ROOT/pre-progress.err"))"
+fi
+make_runner_cmd rewrite-same-len
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/same-len.err"
+set -e
+if ! grep -q 'no-progress' "$ROOT/same-len.err" && \
+   ! grep -q '· no-progress' "$REPO/gibson/journal.md" 2>/dev/null; then
+  # journal may still have the prior no-progress; check only this run's stderr
+  ok "same-len: no no-progress on stderr this run"
+else
+  # Prior journal entry is expected; stderr of this run must be clean of no-progress
+  if ! grep -q 'no-progress' "$ROOT/same-len.err"; then
+    ok "same-len: no no-progress on stderr this run"
+  else
+    bad "same-len: still no-progress (err=$(tr '\n' ' ' <"$ROOT/same-len.err"))"
+  fi
+fi
+# Next clock-only must start stale at 1 again (reset happened).
+make_runner_cmd rewrite-clock-only
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/after-reset.err"
+set -e
+if grep -q 'no-progress (stale=1/5, consecutive failures=1/5)' "$ROOT/after-reset.err"; then
+  ok "same-len: progress reset both counters (next no-progress is 1/5)"
+else
+  bad "same-len: counters not reset (err=$(tr '\n' ' ' <"$ROOT/after-reset.err"))"
+fi
+
+# --- handoff_sha / non-updated change counts as progress ---
+echo "driver: handoff_sha-only change counts as progress"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-handoff-sha-only
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 \
+  >/dev/null 2>"$ROOT/sha-only.err"
+set -e
+if ! grep -q 'no-progress' "$ROOT/sha-only.err" && \
+   ! grep -q 'state-corrupt' "$ROOT/sha-only.err"; then
+  ok "handoff_sha-only: progress (not no-progress / state-corrupt)"
+else
+  bad "handoff_sha-only: failed (err=$(tr '\n' ' ' <"$ROOT/sha-only.err"))"
+fi
+sha=$(test_read_field "$REPO/gibson/loop-state.md" handoff_sha)
+if [[ "$sha" == "abcdef0123456789abcdef0123456789abcdef01" ]]; then
+  ok "handoff_sha-only: live state retained the new sha"
+else
+  bad "handoff_sha-only: sha not retained (sha=[$sha])"
+fi
+
+# --- no reset, restoration, or handoff on no-progress ---
+echo "driver: no-progress does not restore or hand off"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+# Capture pre-run bytes of a field that clock-only leaves alone.
+pre_notes=$(test_read_field "$REPO/gibson/loop-state.md" notes)
+make_runner_cmd rewrite-clock-only
+: > "$CALLS/runner.count"
+: > "$CALLS/supervisor.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 5 --supervisor devin --reviewers codex \
+  >/dev/null 2>"$ROOT/np-nohand.err"
+set -e
+if [[ "$(supervisor_count)" -eq 0 ]]; then
+  ok "no-progress: supervisor handoff suppressed"
+else
+  bad "no-progress: supervisor was invoked"
+fi
+post_notes=$(test_read_field "$REPO/gibson/loop-state.md" notes)
+if [[ "$post_notes" == "$pre_notes" ]]; then
+  ok "no-progress: non-clock fields left as written (no restore wipe)"
+else
+  bad "no-progress: notes changed unexpectedly (pre=$pre_notes post=$post_notes)"
+fi
+# Live updated must be fresh (clock-only write kept), not restored to old stamp.
+post_up=$(test_read_field "$REPO/gibson/loop-state.md" updated)
+if [[ "$post_up" != "2026-08-02T00:00:00Z" && -n "$post_up" ]]; then
+  ok "no-progress: live clock stamp retained (no exact-byte restore)"
+else
+  bad "no-progress: looks restored to ancient stamp (updated=$post_up)"
+fi
+
+# --- --stale-budget CLI contract ---
+echo "driver: --stale-budget 1, override, omitted default, invalid values"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 5 --error-budget 9 --stale-budget 1 \
+  >/dev/null 2>"$ROOT/stale1.err"
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]] && grep -q 'stale budget exhausted (1/1)' "$ROOT/stale1.err"; then
+  ok "--stale-budget 1: stops on first no-progress"
+else
+  bad "--stale-budget 1: (rc=$rc err=$(tr '\n' ' ' <"$ROOT/stale1.err"))"
+fi
+
+# Explicit override distinct from error-budget: stale=2, error=9 → stop at 2.
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 10 --error-budget 9 --stale-budget 2 \
+  >/dev/null 2>"$ROOT/stale2.err"
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]] && grep -q 'stale budget exhausted (2/2)' "$ROOT/stale2.err" && \
+   [[ "$(journal_no_progress_count)" -eq 2 ]]; then
+  ok "--stale-budget 2 overrides error-budget 9"
+else
+  bad "--stale-budget 2 override failed (rc=$rc np=$(journal_no_progress_count) err=$(tr '\n' ' ' <"$ROOT/stale2.err"))"
+fi
+
+# Omitted --stale-budget resolves exactly to --error-budget.
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 10 --error-budget 2 \
+  >/dev/null 2>"$ROOT/stale-def.err"
+rc=$?
+set -e
+if [[ "$rc" -ne 0 ]] && grep -qE 'no-progress: (stale|error) budget exhausted' "$ROOT/stale-def.err" && \
+   [[ "$(journal_no_progress_count)" -eq 2 ]]; then
+  ok "omitted --stale-budget equals --error-budget 2"
+else
+  bad "omitted stale default failed (rc=$rc np=$(journal_no_progress_count) err=$(tr '\n' ' ' <"$ROOT/stale-def.err"))"
+fi
+
+# Invalid / zero / negative / overflow / injection-shaped values.
+for badval in 0 -1 abc '2x' '08' '9999999999' '1;rm' '$(touch x)' ' ' ''; do
+  set +e
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+    --once --stale-budget "$badval" >/dev/null 2>"$ROOT/bad-stale.err"
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]] && grep -qi 'invalid --stale-budget' "$ROOT/bad-stale.err"; then
+    ok "rejects --stale-budget '$badval'"
+  else
+    bad "accepted --stale-budget '$badval' (rc=$rc err=$(tr '\n' ' ' <"$ROOT/bad-stale.err"))"
+  fi
+done
+# Injection must not execute.
+rm -f "$ROOT/pwned-stale"
+set +e
+bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --stale-budget 'x[$(touch '"$ROOT"'/pwned-stale)]' \
+  >/dev/null 2>"$ROOT/inj-stale.err"
+set -e
+if [[ ! -e "$ROOT/pwned-stale" ]]; then
+  ok "--stale-budget injection payload does not execute"
+else
+  bad "--stale-budget injection executed"
+fi
+
+# --- dry-run / print-prompt / prequeued handoff / snapshot failure / halt inert ---
+echo "driver: dry-run / print-prompt / prequeued / snapshot-fail / halt stay inert for no-progress"
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --dry-run --error-budget 1 --stale-budget 1 \
+  >/dev/null 2>"$ROOT/np-dry.err"
+set -e
+if [[ "$(runner_count)" -eq 0 ]] && ! grep -q 'no-progress' "$ROOT/np-dry.err" && \
+   ! grep -q '· no-progress' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "dry-run: no runner, no no-progress journal"
+else
+  bad "dry-run: leaked no-progress or ran runner"
+fi
+
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+set +e
+bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --print-prompt --error-budget 1 --stale-budget 1 \
+  >/dev/null 2>"$ROOT/np-print.err"
+set -e
+if ! grep -q 'no-progress' "$ROOT/np-print.err" && \
+   ! grep -q '· no-progress' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "print-prompt: no no-progress accounting"
+else
+  bad "print-prompt: no-progress leaked"
+fi
+
+# Pre-queued handoff: no runner → no no-progress.
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" \
+  "handoff=feat/75-widget" \
+  "handoff_sha=abcdef0123456789abcdef0123456789abcdef01" \
+  "notes=prequeued"
+: > "$CALLS/runner.count"
+: > "$CALLS/supervisor.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 1 --supervisor devin --reviewers codex \
+  >/dev/null 2>"$ROOT/np-preq.err"
+set -e
+if [[ "$(runner_count)" -eq 0 ]] && ! grep -q 'no-progress' "$ROOT/np-preq.err"; then
+  ok "pre-queued handoff: no runner, no no-progress"
+else
+  bad "pre-queued handoff: runner or no-progress leaked (err=$(tr '\n' ' ' <"$ROOT/np-preq.err"))"
+fi
+
+# Snapshot failure remains state-corrupt (not no-progress).
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+mkdir -p "$REPO/gibson/.loop-state.prev"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 5 --stale-budget 1 \
+  >/dev/null 2>"$ROOT/np-snap.err"
+set -e
+if grep -q 'state-corrupt\|snapshot refused\|not a safe file destination' "$ROOT/np-snap.err" 2>/dev/null || \
+   grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  if ! grep -q 'no-progress' "$ROOT/np-snap.err" && [[ "$(journal_no_progress_count)" -eq 0 ]]; then
+    ok "snapshot failure: state-corrupt only (no no-progress)"
+  else
+    bad "snapshot failure: also no-progress"
+  fi
+else
+  bad "snapshot failure: missing state-corrupt (err=$(tr '\n' ' ' <"$ROOT/np-snap.err"))"
+fi
+
+# Halt path: no no-progress. Local HALT stops cleanly (exit 0) before any runner.
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+touch "$REPO/gibson/HALT"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  bash "$LOOP" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --once --error-budget 1 --stale-budget 1 \
+  >/dev/null 2>"$ROOT/np-halt.err"
+rc=$?
+set -e
+if [[ "$(runner_count)" -eq 0 ]] && \
+   grep -q 'kill switch' "$ROOT/np-halt.err" && \
+   ! grep -q 'no-progress' "$ROOT/np-halt.err" && \
+   [[ "$(journal_no_progress_count)" -eq 0 ]]; then
+  ok "halt: no runner, no no-progress (rc=$rc)"
+else
+  bad "halt: leaked work or no-progress (rc=$rc err=$(tr '\n' ' ' <"$ROOT/np-halt.err"))"
+fi
+
+# Help documents --stale-budget (GNU/BSD grep: -- ends options so the pattern
+# is not parsed as a flag).
+if bash "$LOOP" --help 2>/dev/null | grep -qF -- '--stale-budget'; then
+  ok "loop.sh --help documents --stale-budget"
+else
+  bad "loop.sh --help missing --stale-budget"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "loop-state.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

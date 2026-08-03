@@ -1386,10 +1386,22 @@ fi
 unset GH_STUB_EXPECT_REF
 unset GH_STUB_BEHAVIOR
 
-# Inert multi-iter runner that still stamps updated (issue #75). A pure
-# `cat >/dev/null` leaves loop-state byte-identical with a pre-iteration stamp,
-# which is state-corrupt under post-run freshness. Real agents rewrite
-# updated: every hat; cadence sensors only need the remote-halt side effects.
+# Multi-iter runner that satisfies post-run freshness (#75) AND substantive
+# progress (#63 / L-008) while still doing no real work. A pure
+# `cat >/dev/null` leaves loop-state byte-identical with a pre-iteration stamp
+# → state-corrupt under #75. Clock-only updated: rewrites pass freshness but
+# are deliberately no-progress under #63 (silent-noop excludes the clock).
+# Cadence sensors only need remote-halt side effects, so this fixture stamps
+# updated: (freshness) and a notes: cadence marker (substantive progress) so
+# multi-iter remote-halt tests are not stopped by the stale budget.
+#
+# notes MUST be unique every invocation even when wall clock is frozen to the
+# same whole second (strftime %SZ). Two fast calls in one second used to leave
+# every substantive byte unchanged and trip the stale budget before the
+# intended 6/16/18 cadence assertions. A fixture-local monotonic counter
+# (path.stamp-seq beside the state file) guarantees distinct notes without
+# sleep, randomness, PID, nanoseconds, or wall-clock advancement.
+# Optional GIBSON_STAMP_NOW=<strict UTC> freezes updated: for sensors only.
 # Written as a script (not a shell function): HERMES_CMD is eval'd inside loop.sh.
 cat > "$CALLS/stamp-and-noop.sh" <<'STAMP'
 #!/usr/bin/env bash
@@ -1398,22 +1410,119 @@ set -euo pipefail
 state="$GIBSON_STAMP_STATE"
 if [[ -n "${state:-}" && -f "$state" ]]; then
   python3 - "$state" <<'PY'
-import re, sys
+import os, re, sys
 from datetime import datetime, timezone
 path = sys.argv[1]
 try:
     text = open(path, encoding="utf-8").read()
 except OSError:
     sys.exit(0)
-now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+# Strict UTC whole-second timestamp (#75). Sensors may freeze via GIBSON_STAMP_NOW.
+frozen = os.environ.get("GIBSON_STAMP_NOW", "").strip()
+if frozen:
+    now = frozen
+else:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+# Fixture-local monotonic per-call counter (deterministic; not wall clock).
+seq_path = path + ".stamp-seq"
+seq = 0
+try:
+    with open(seq_path, encoding="utf-8") as fh:
+        seq = int(fh.read().strip() or "0")
+except (OSError, ValueError):
+    seq = 0
+seq += 1
+try:
+    with open(seq_path, "w", encoding="utf-8") as fh:
+        fh.write(str(seq))
+except OSError:
+    pass
 text2, n = re.subn(r"(?m)^updated:.*$", "updated: " + now, text, count=1)
-if n == 1:
-    open(path, "w", encoding="utf-8").write(text2)
+if n != 1:
+    sys.exit(0)
+# Distinct notes each invocation so silent_noop_progressed sees progress even
+# when updated: is identical (same frozen second). Clock-only updated: is
+# intentionally NOT enough (L-008 / issue #63).
+marker = "cadence-stamp n=%d" % seq
+text2, n2 = re.subn(r"(?m)^notes:.*$", "notes: " + marker, text2, count=1)
+if n2 != 1:
+    # Append notes if the fixture ever ships without one.
+    if not text2.endswith("\n"):
+        text2 += "\n"
+    text2 += "notes: " + marker + "\n"
+open(path, "w", encoding="utf-8").write(text2)
 PY
 fi
 cat >/dev/null
 STAMP
 chmod +x "$CALLS/stamp-and-noop.sh"
+
+# Regression: frozen-time stamp-and-noop — same updated: second, distinct notes.
+# Proves cadence markers do not depend on wall-clock advancement (#63 integrity).
+echo "stamp-and-noop: frozen updated second still yields monotonic distinct notes"
+setup_repo with-remote
+export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
+export GIBSON_STAMP_NOW="2026-08-03T12:34:56Z"
+rm -f "${GIBSON_STAMP_STATE}.stamp-seq"
+write_state "$BRANCH" "$(head_sha)"
+"$CALLS/stamp-and-noop.sh"
+notes1=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
+upd1=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
+"$CALLS/stamp-and-noop.sh"
+notes2=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
+upd2=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
+"$CALLS/stamp-and-noop.sh"
+notes3=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
+upd3=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
+strict_utc_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+if [[ "$upd1" == "$GIBSON_STAMP_NOW" && "$upd2" == "$GIBSON_STAMP_NOW" && "$upd3" == "$GIBSON_STAMP_NOW" ]]; then
+  ok "frozen stamp: updated stays exact frozen UTC second on every call"
+else
+  bad "frozen stamp: updated must stay $GIBSON_STAMP_NOW (got $upd1 / $upd2 / $upd3)"
+fi
+if [[ "$upd1" =~ $strict_utc_re && "$upd2" =~ $strict_utc_re && "$upd3" =~ $strict_utc_re ]]; then
+  ok "frozen stamp: updated matches strict UTC YYYY-MM-DDTHH:MM:SSZ"
+else
+  bad "frozen stamp: updated must be strict UTC (got $upd1 / $upd2 / $upd3)"
+fi
+if [[ "$notes1" == "cadence-stamp n=1" && "$notes2" == "cadence-stamp n=2" && "$notes3" == "cadence-stamp n=3" ]]; then
+  ok "frozen stamp: notes markers are monotonic n=1,2,3"
+else
+  bad "frozen stamp: expected notes n=1,2,3 (got '$notes1' / '$notes2' / '$notes3')"
+fi
+if [[ "$notes1" != "$notes2" && "$notes2" != "$notes3" && "$notes1" != "$notes3" ]]; then
+  ok "frozen stamp: substantive notes bytes differ on every call (same updated second)"
+else
+  bad "frozen stamp: notes must differ each call under frozen time (got '$notes1' / '$notes2' / '$notes3')"
+fi
+# Prove silent_noop_progressed sees the notes-only change with identical updated.
+cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-before.md"
+# Reset seq and rewrite once more so before/after differ only in notes + seq file.
+# Use a pair of sequential stamps with identical frozen updated for the sensor.
+write_state "$BRANCH" "$(head_sha)"
+rm -f "${GIBSON_STAMP_STATE}.stamp-seq"
+export GIBSON_STAMP_NOW="2026-08-03T12:34:56Z"
+"$CALLS/stamp-and-noop.sh"
+cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-snap-a.md"
+"$CALLS/stamp-and-noop.sh"
+cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-snap-b.md"
+# shellcheck disable=SC1091  # absolute path via $GIBSON; not relative to this file
+source "$GIBSON/scripts/silent-noop.sh"
+if silent_noop_progressed "$ROOT/frozen-snap-a.md" "$ROOT/frozen-snap-b.md"; then
+  ok "frozen stamp: silent_noop_progressed sees notes-only advance under identical updated"
+else
+  bad "frozen stamp: notes-only change under frozen updated must count as progress"
+fi
+a_upd=$(awk -F': ' '/^updated:/{print $2; exit}' "$ROOT/frozen-snap-a.md")
+b_upd=$(awk -F': ' '/^updated:/{print $2; exit}' "$ROOT/frozen-snap-b.md")
+a_notes=$(awk -F': ' '/^notes:/{print $2; exit}' "$ROOT/frozen-snap-a.md")
+b_notes=$(awk -F': ' '/^notes:/{print $2; exit}' "$ROOT/frozen-snap-b.md")
+if [[ "$a_upd" == "$b_upd" && "$a_notes" != "$b_notes" ]]; then
+  ok "frozen stamp: pair has identical updated and distinct notes ($a_notes → $b_notes)"
+else
+  bad "frozen stamp: pair must share updated and differ in notes (upd=$a_upd/$b_upd notes=$a_notes/$b_notes)"
+fi
+unset GIBSON_STAMP_NOW
 
 echo "remote halt: cadence caches checks in-process; loop pre-handoff does not double-call"
 setup_repo with-remote

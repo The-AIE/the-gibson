@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# silent-noop.sh — L-008 progress sensor for solo-loop drivers (issue #18)
+# silent-noop.sh — L-008 progress sensor for solo-loop drivers (issue #18 / #63)
 #
-# Source this from loop.sh (or any driver). It tracks whether gibson/loop-state.md
-# advances between iterations. Exit-code budgets only catch crashes; this catches
+# Source this from loop.sh (or any driver). It detects whether gibson/loop-state.md
+# advanced between iterations. Exit-code budgets only catch crashes; this catches
 # "runner exited 0 and did nothing" (L-008).
 #
 # WHY IT FINGERPRINTS WHAT IT DOES
@@ -12,24 +12,29 @@
 #   narrates its instructions and stamps the clock would reset the streak forever
 #   and the budget would never trip — the sensor would certify exactly the L-008
 #   run it was written to stop. So the fingerprint covers the *substantive* state
-#   (issue, pr, hat, next_hat, round, parked, handoff, next_action, notes) and
-#   deliberately excludes the `updated:` line.
+#   (issue, pr, hat, next_hat, round, parked, handoff, next_action, notes, …) and
+#   deliberately excludes only the column-zero `updated:` line.
 #
-#   Every other path fails closed. A state file that is missing, unreadable, or
-#   un-hashable yields a constant sentinel rather than an empty string, so the
-#   stagnation streak keeps accruing and the budget still trips. An empty
-#   fingerprint would silently disable the sensor for the rest of the run.
+#   Every other path fails closed. A state file that is missing, unreadable,
+#   a symlink/directory/device, or un-hashable yields a constant sentinel rather
+#   than an empty string, so stagnation still accrues. An empty fingerprint would
+#   silently disable the sensor for the rest of the run.
 #
-# Usage (inside the driver, after each successful or attempted iteration):
-#   STATE_FILE=...  # path to gibson/loop-state.md
+# Preferred driver API (stateless — issue #63):
 #   source "$SCRIPT_DIR/silent-noop.sh"
-#   silent_noop_init          # once at startup
-#   silent_noop_check         # each iteration after the runner returns
+#   if silent_noop_progressed "$STATE_SNAPSHOT" "$STATE_FILE"; then
+#     # substantive progress — reset budgets, may hand off
+#   else
+#     # no-progress (including clock-only updated: rewrites)
+#   fi
+#
+# Legacy streak API (stateful — still supported for out-of-tree drivers):
+#   STATE_FILE=... silent_noop_init ; silent_noop_check
 #
 # silent_noop_check returns 1 when the budget is exhausted; the driver decides how
 # loudly to die. It never exits on the caller's behalf.
 #
-# Env:
+# Env (legacy streak API only):
 #   NOOP_BUDGET   consecutive stagnant iterations before hard fail (default 3)
 
 # Named `silent_noop_usage`, not the sibling scripts' bare `usage`, because this
@@ -46,17 +51,26 @@ WHAT I'M ASKING
   iteration, "did the runner actually move gibson/loop-state.md?"
 
 WHAT IT DOES
-  Defines three shell functions in the caller's shell:
+  Defines shell functions in the caller's shell:
 
-    silent_noop_init    seed the fingerprint (once, at driver startup)
-    silent_noop_check   compare against the last fingerprint (once per iteration)
-    _silent_noop_fp     internal — print the current fingerprint
+    silent_noop_progressed BEFORE AFTER
+                            preferred, stateless API (issue #63 / loop.sh):
+                            return 0 if substantive state advanced between the
+                            two files, 1 if not (including fail-closed cases)
+    silent_noop_init        legacy streak seed (once, at driver startup)
+    silent_noop_check       legacy streak compare (once per iteration)
+    _silent_noop_fp [PATH]  internal — print a fingerprint of PATH (or $STATE_FILE)
 
-  The fingerprint covers the substantive loop state (issue, pr, hat, next_hat,
-  round, parked, handoff, next_action, notes) and deliberately EXCLUDES the
-  `updated:` line. `silent_noop_check` returns 1 once NOOP_BUDGET consecutive
-  iterations have changed nothing; it prints to stderr and never exits on the
-  driver's behalf, so the driver decides how loudly to die.
+  The fingerprint covers the substantive loop state and deliberately EXCLUDES
+  only the column-zero `updated:` line. Clock-only rewrites are no-progress.
+  Missing, unreadable, symlink, directory, device, or un-hashable inputs never
+  count as progress. A digest transition to `sentinel:unhashable` fails closed.
+
+  Wired into scripts/loop.sh (issue #63): after a valid post-run state and
+  runner exit 0, the driver compares the exact pre-run snapshot
+  (gibson/.loop-state.prev) to live loop-state via silent_noop_progressed.
+  No-progress journals once, increments the shared failure budget and the
+  --stale-budget counter once each, and does not reset, restore, or hand off.
 
 WHY
   Exit-code budgets only catch crashes. They cannot see the failure this exists
@@ -69,23 +83,30 @@ WHY
   that line would make this sensor certify exactly the run it was written to stop.
 
 RISKS
-  - Read-only. It reads $STATE_FILE and writes nothing but stderr warnings.
-  - It fails CLOSED, on purpose: a state file that is missing, unreadable, or
-    un-hashable yields a constant sentinel, so the streak keeps accruing and the
-    budget still trips. Expect a trip — not a silent pass — from a mis-set
-    STATE_FILE. That is the design; an empty fingerprint would disable the sensor
-    for the rest of the run.
+  - Read-only. It reads the given paths / $STATE_FILE and writes nothing but
+    stderr warnings.
+  - It fails CLOSED, on purpose: a state file that is missing, unreadable,
+    un-hashable, or an unsafe path shape yields a constant sentinel, so the
+    streak keeps accruing and silent_noop_progressed reports no progress.
+    Expect a trip — not a silent pass — from a mis-set path. That is the design;
+    an empty fingerprint would disable the sensor for the rest of the run.
   - A false trip stops a loop that was in fact working. The fix is to correct the
-    runner or its permissions. Do NOT raise NOOP_BUDGET to quiet it — that only
-    restores the fail-open behaviour this replaces.
-  - NOT yet wired into scripts/loop.sh. That wiring is a deliberate follow-up, so
-    sourcing this today changes no existing behaviour on its own.
+    runner or its permissions. Do NOT raise NOOP_BUDGET / --stale-budget to quiet
+    it — that only restores the fail-open behaviour this replaces.
   - Running this file directly does nothing and is therefore a usage error (exit
     2), never a quiet exit 0.
 
 USAGE
-  # in the driver, NOT on the command line:
+  # preferred (loop.sh / issue #63):
   source /path/to/the-gibson/scripts/silent-noop.sh
+  silent_noop_progressed /path/to/.loop-state.prev /path/to/loop-state.md
+
+  # legacy streak API:
+  source /path/to/the-gibson/scripts/silent-noop.sh
+  silent_noop_init
+  while run_one_iteration; do
+    silent_noop_check || { echo "runner is not advancing loop-state" >&2; exit 1; }
+  done
 
   silent-noop.sh --help      # this text (the only direct invocation that works)
 
@@ -95,21 +116,23 @@ ENV
                 is an arithmetic context, so anything else is both a nonsense
                 budget and a command-substitution surface. An invalid value is
                 rejected with a warning and replaced by 3.
-  STATE_FILE    path to gibson/loop-state.md. Read at every check, so the driver
-                may set it after sourcing.
+                (Not used by silent_noop_progressed — the driver owns budgets.)
+  STATE_FILE    path used by the legacy streak API when _silent_noop_fp is called
+                with no argument. Read at every check, so the driver may set it
+                after sourcing.
 
 EXAMPLES
-  # inside a driver
+  # inside a driver (issue #63 wiring)
   SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
-  STATE_FILE="$REPO/gibson/loop-state.md"
   source "$SCRIPT_DIR/silent-noop.sh"
+  if silent_noop_progressed "$STATE_SNAPSHOT" "$STATE_FILE"; then
+    failures=0; stale=0
+  else
+    # journal no-progress; increment failures and stale once each
+    :
+  fi
 
-  silent_noop_init
-  while run_one_iteration; do
-    silent_noop_check || { echo "runner is not advancing loop-state" >&2; exit 1; }
-  done
-
-  # a tighter budget for a short run
+  # legacy streak with a tighter budget
   NOOP_BUDGET=2 driver.sh
 
 EXIT (direct invocation only)
@@ -165,10 +188,39 @@ _silent_noop_ready=0
 
 # Print a fingerprint of the substantive loop state. Always prints something
 # non-empty, always returns 0.
+#
+# Optional path argument: _silent_noop_fp [PATH]
+#   When PATH is given, fingerprint that file (stateless API).
+#   When omitted, use $STATE_FILE (legacy streak API).
+#
+# Path hostility: treat symlink / directory / device / missing / unreadable as
+# distinct fail-closed sentinels. Never follow a symlink leaf (-L before -f).
 _silent_noop_fp() {
-  local file="${STATE_FILE:-}" body digest
-  if [[ -z "$file" || ! -f "$file" ]]; then
+  local file body digest
+  if [[ $# -ge 1 ]]; then
+    file="$1"
+  else
+    file="${STATE_FILE:-}"
+  fi
+  if [[ -z "$file" ]]; then
     printf 'sentinel:absent'
+    return 0
+  fi
+  # Symlink leaf: refuse without following (even if the target is a regular file).
+  if [[ -L "$file" ]]; then
+    printf 'sentinel:symlink'
+    return 0
+  fi
+  if [[ -d "$file" ]]; then
+    printf 'sentinel:directory'
+    return 0
+  fi
+  if [[ ! -f "$file" ]]; then
+    if [[ -e "$file" ]]; then
+      printf 'sentinel:special'
+    else
+      printf 'sentinel:absent'
+    fi
     return 0
   fi
   if [[ ! -r "$file" ]]; then
@@ -176,8 +228,16 @@ _silent_noop_fp() {
     return 0
   fi
 
-  # Drop the `updated:` clock line; hash whatever the runner actually changed.
-  body=$(awk '!/^updated:/' "$file" 2>/dev/null) || body=""
+  # Drop only the column-zero `updated:` clock line; hash everything else.
+  # Extraction/normalization failure is unhashable immediately: never fall back to
+  # an empty (or partial) body and mint a real `state:*` digest from it. That would
+  # fail open when only one side's awk failed (empty digest ≠ real digest → "progress"
+  # → budget reset / handoff on unhashable AFTER). A successful awk that yields a
+  # legitimately empty body (file is only clock lines) still hashes below.
+  if ! body=$(awk '!/^updated:/' "$file" 2>/dev/null); then
+    printf 'sentinel:unhashable'
+    return 0
+  fi
 
   # Every digest assignment ends in `|| digest=""`. The driver sources this under
   # `set -euo pipefail`, and a hash binary that *exists but fails* (broken install,
@@ -201,6 +261,39 @@ _silent_noop_fp() {
     printf 'sentinel:unhashable'
   else
     printf 'state:%s' "$digest"
+  fi
+  return 0
+}
+
+# Stateless progress check (issue #63). Return 0 if substantive state advanced
+# from BEFORE to AFTER; return 1 for no-progress and every fail-closed case.
+#
+# Progress requires BOTH paths to fingerprint as real digests (`state:…`) AND
+# those digests to differ. Any sentinel on either side — including a transition
+# from a working digest to `sentinel:unhashable` — is no-progress (never "changed").
+# Does not read or write library-private streak globals; loop.sh owns counters.
+silent_noop_progressed() {
+  local before after fb fa
+  if [[ $# -ne 2 ]]; then
+    echo "silent-noop: WARNING: silent_noop_progressed requires exactly two paths (BEFORE AFTER)" >&2
+    return 1
+  fi
+  before="$1"
+  after="$2"
+  fb=$(_silent_noop_fp "$before")
+  fa=$(_silent_noop_fp "$after")
+
+  case "$fb" in
+    state:*) ;;
+    *) return 1 ;;
+  esac
+  case "$fa" in
+    state:*) ;;
+    *) return 1 ;;
+  esac
+
+  if [[ "$fb" == "$fa" ]]; then
+    return 1
   fi
   return 0
 }
