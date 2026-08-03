@@ -273,7 +273,11 @@ printf '%s\n' "$((STALE_NOW - 10))" > "$HBDIR/issue-24-heartbeat"
 # look like future evidence under GIBSON_CLAIMS_NOW_EPOCH=STALE_NOW.
 touch -t 202608010400 "$HBDIR/issue-24-heartbeat" 2>/dev/null || true
 # Also rewrite content-only: if touch failed, set mtime via reference file.
-if [[ "$(stat -f %m "$HBDIR/issue-24-heartbeat" 2>/dev/null || stat -c %Y "$HBDIR/issue-24-heartbeat")" -gt "$STALE_NOW" ]]; then
+# GNU first: `stat -f` on Linux means *filesystem* status and succeeds, printing
+# a multi-line block that `-gt` then evaluates as arithmetic (#93, L-050).
+mtime=$(stat -c %Y "$HBDIR/issue-24-heartbeat" 2>/dev/null ||
+        stat -f %m "$HBDIR/issue-24-heartbeat" 2>/dev/null || echo 0)
+if [[ "$mtime" -gt "$STALE_NOW" ]]; then
   # Fall back: use content epoch only by matching mtime to content via a dated file
   printf '%s\n' "$((STALE_NOW - 10))" > "$HBDIR/issue-24-heartbeat"
   # macOS touch -t YYYYMMDDhhmm
