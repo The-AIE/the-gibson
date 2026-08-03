@@ -29,7 +29,7 @@ The end goal is met when **all** of the following are true on at least one live 
 - [ ] Security layers 1–3 hard-fail; Tier C surfaces get adversarial review + human gate.
 - [ ] Claims + worktrees prevent agents overwriting each other.
 - [ ] Ratchet: repeated failures become permanent guides or sensors.
-- [ ] Silent-noop detection (L-008): loop does not burn iterations while doing nothing. *(Sensor `scripts/silent-noop.sh` exists and is tested; wiring it into `scripts/loop.sh` is still open, so the box stays unchecked.)*
+- [x] Silent-noop detection (L-008): loop does not burn iterations while doing nothing. *(Sensor `scripts/silent-noop.sh` wired into `scripts/loop.sh` via `silent_noop_progressed` + `--stale-budget` — issue #63. Broader operator-readiness goal #18 remains open.)*
 
 ## C. Autonomy & safety
 
@@ -50,7 +50,7 @@ The end goal is met when **all** of the following are true on at least one live 
 | Area | Status |
 |------|--------|
 | A. Owner experience (docs + templates) | **Mostly ready** — VIBECODING, prompts, docs/16, four templates; live Hermes wiring still Phase 3 |
-| B. Rigor sensors | **In progress** — scripts/CI exist; L-008 silent-noop sensor tracked with #18 |
+| B. Rigor sensors | **In progress** — scripts/CI exist; L-008 silent-noop wired into loop.sh (#63); broader #18 operator path still open |
 | C. Autonomy & safety | **Doctrine complete**; enforcement depends on B |
 | D. Real-world proof | **Not yet** — Phase 2/3 demos and external reader test still open |
 

@@ -33,6 +33,15 @@ RISKS
     failure (no latch yet) still fails open to local checks. Non-GitHub/
     unparseable origins never query gh against unrelated same-slug repos.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
+  - Stale budget (default: same as --error-budget) stops the loop when a runner
+    exits 0 without substantive loop-state progress (L-008 / issue #63). Only the
+    column-zero updated: clock is ignored; clock-only rewrites are no-progress.
+    No-progress increments the shared failure counter and the stale counter once
+    each, journals a distinct no-progress diagnosis, and never resets, restores,
+    or hands off. Stop at the earlier of error-budget or stale-budget exhaustion.
+    state-corrupt and runner-failure take precedence and never run the no-progress
+    sensor. Escalation (--escalate-after) fires on the shared failure counter for
+    no-progress the same as for other failures.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
     artifact the next hat reads; the routine review before every supervisor
@@ -69,6 +78,11 @@ OPTIONS
   --print-prompt      render prompt only (no runner)
   --max-iterations N  cap iterations (default: unlimited until halt)
   --error-budget N    consecutive failures before stop (default: 5)
+  --stale-budget N    consecutive no-progress (exit 0, no substantive
+                      loop-state change) iterations before stop (default:
+                      same as --error-budget). Clock-only updated: rewrites
+                      are no-progress (L-008 / issue #63). N must be a
+                      positive safe decimal integer.
   --hat HAT           force starting hat (default: from loop-state or builder)
   --dry-run           show actions without invoking runner
   --escalate-after N  after N consecutive failures, get a cross-vendor second
@@ -110,6 +124,9 @@ ONCE=0
 PRINT=0
 MAX=-1
 BUDGET=5
+# Empty until after parse: omitted --stale-budget resolves exactly to --error-budget.
+STALE_BUDGET=""
+STALE_BUDGET_SET=0
 FORCE_HAT=""
 DRY=0
 ESCALATE_AFTER=0
@@ -126,6 +143,7 @@ while [[ $# -gt 0 ]]; do
     --print-prompt) PRINT=1; shift ;;
     --max-iterations) MAX="$2"; shift 2 ;;
     --error-budget) BUDGET="$2"; shift 2 ;;
+    --stale-budget) STALE_BUDGET="$2"; STALE_BUDGET_SET=1; shift 2 ;;
     --hat) FORCE_HAT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --escalate-after) ESCALATE_AFTER="$2"; shift 2 ;;
@@ -138,6 +156,20 @@ done
 die() { echo "loop.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "loop.sh: $*" >&2; }
 
+# Positive safe decimal integer: no leading zeros, no injection, no overflow.
+# Rejects 0, negative, empty, non-digits, leading-zero octal forms, and values
+# too large for portable signed 32-bit arithmetic (bash 3.2-safe comparisons).
+is_positive_safe_int() {
+  local n="${1-}"
+  [[ "$n" =~ ^[1-9][0-9]*$ ]] || return 1
+  # 9 digits max keeps us under 2^31-1 (2147483647) without overflow surprises.
+  [[ ${#n} -le 9 ]] || return 1
+  # Bound check via pure string/length already; force base-10 for the numeric cap.
+  n=$((10#$n))
+  [[ "$n" -ge 1 && "$n" -le 2147483647 ]] || return 1
+  return 0
+}
+
 [[ -n "$RUNNER" ]] || { usage; exit 2; }
 [[ -n "$REPO" ]] || { usage; exit 2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
@@ -146,6 +178,34 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 GIBSON="${GIBSON:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PLAYBOOK="$GIBSON/playbooks/loop-step.md"
 [[ -f "$PLAYBOOK" ]] || die "missing $PLAYBOOK"
+
+# L-008 / issue #63: stateless progress sensor (silent_noop_progressed).
+# shellcheck source=silent-noop.sh
+# Prefer $GIBSON/scripts so a test copy of this driver under a fake scripts/
+# dir still loads the real sensor (same pattern as validate-loop-state.sh).
+# Fall back to SCRIPT_DIR when the driver is invoked from a normal checkout.
+if [[ -f "$GIBSON/scripts/silent-noop.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$GIBSON/scripts/silent-noop.sh"
+elif [[ -f "$SCRIPT_DIR/silent-noop.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$SCRIPT_DIR/silent-noop.sh"
+else
+  die "missing silent-noop.sh (looked in $GIBSON/scripts and $SCRIPT_DIR)"
+fi
+if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
+  die "silent-noop.sh did not define silent_noop_progressed"
+fi
+
+# Resolve --stale-budget: omitted means exactly the (possibly custom) error-budget.
+if [[ "$STALE_BUDGET_SET" -eq 0 ]]; then
+  STALE_BUDGET="$BUDGET"
+else
+  if ! is_positive_safe_int "$STALE_BUDGET"; then
+    die "invalid --stale-budget '${STALE_BUDGET}' (want a positive safe decimal integer, no leading zeros)"
+  fi
+  STALE_BUDGET=$((10#$STALE_BUDGET))
+fi
 
 STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/loop-state.md"
@@ -190,6 +250,10 @@ REVIEW_RECEIPT="$STATE_DIR/pre-handoff-review.receipt"
 # loop top and the pre-state startup check share the same "iteration 0" slot.
 iter=0
 failures=0
+# Consecutive no-progress iterations (issue #63). Reset only on substantive
+# progress (valid state + exit 0 + silent_noop_progressed). Not touched by
+# state-corrupt, runner-failure, pre-queued handoff, dry-run, or halt paths.
+stale=0
 
 # Remote halt cadence (issue #71). --once always re-checks every iteration;
 # hot loops default to every 3 so a phone label still lands within a few steps
@@ -2247,8 +2311,9 @@ while true; do
         # state must pass schema AND updated >= iteration_start — including when
         # bytes are identical to the pre-iteration snapshot. A zero-exit no-op
         # that leaves a valid but old stamp is state-corrupt: one budget unit,
-        # no failure reset, no handoff. Issue #63 will add substantive
-        # no-progress classification later; do not weaken this freshness gate.
+        # no failure reset, no handoff. Do not weaken this freshness gate.
+        # Issue #63 no-progress (substantive fingerprint vs the exact pre-run
+        # snapshot) runs only after schema+freshness pass AND runner exit 0.
         # Pre-queued handoff retries are routed before runner/snapshot above so
         # they never depend on faking progress through a no-op runner.
         post_diag=$(mktemp "${TMPDIR:-/tmp}/gibson-post-val.XXXXXX")
@@ -2304,7 +2369,12 @@ while true; do
           fi
         else
           rm -f "$post_diag"
-          # Valid post-run state.
+          # Valid post-run state (schema + freshness). Precedence from here:
+          #   nonzero exit → runner-failure only (no no-progress sensor)
+          #   exit 0       → silent_noop_progressed(snapshot, live)
+          #                  progressed → reset failures+stale, may hand off
+          #                  no-progress → one shared failure + one stale unit,
+          #                                distinct journal, no reset/restore/handoff
           if [[ $ec -ne 0 ]]; then
             failures=$((failures + 1))
             info "runner exit $ec (consecutive failures=$failures/$BUDGET)"
@@ -2315,9 +2385,48 @@ while true; do
               die "error budget exhausted — likely harness bug, not retry fodder (docs/11)"
             fi
           else
-            # Only valid state + runner exit 0 resets the budget and may hand off.
-            failures=0
-            supervisor_handoff
+            # Reuse the exact pre-run snapshot from #75 so crashes/recovery never
+            # compare against a stale baseline. Stateless sensor API — no coupling
+            # to silent-noop private globals.
+            if silent_noop_progressed "$STATE_SNAPSHOT" "$STATE_FILE"; then
+              # Substantive progress (any non-updated field, including handoff_sha
+              # or same-length edits). Reset both counters; handoff may proceed.
+              failures=0
+              stale=0
+              supervisor_handoff
+            else
+              # No substantive change — including clock-only updated: rewrites.
+              # Count exactly once as no-progress (shared failure + stale); do not
+              # also classify as runner-failure or state-corrupt. Do not restore
+              # (state is schema-valid and fresh) and do not hand off.
+              journal_normal_completion=0
+              failures=$((failures + 1))
+              stale=$((stale + 1))
+              {
+                echo ""
+                echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · no-progress"
+                echo "diagnosis: runner exited 0 without substantive loop-state progress (L-008 / issue #63)."
+                echo "only the column-zero updated: clock is ignored; clock-only rewrites are no-progress."
+                echo "stale: $stale/$STALE_BUDGET"
+                echo "consecutive failures: $failures/$BUDGET"
+                echo "runner_exit: 0 (not a crash; not state-corrupt)"
+                echo "snapshot: $STATE_SNAPSHOT"
+                echo "live: $STATE_FILE"
+              } >> "$JOURNAL"
+              info "no-progress (stale=$stale/$STALE_BUDGET, consecutive failures=$failures/$BUDGET) — L-008"
+              if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+                escalate
+              fi
+              # Stop at the earlier of error-budget or stale-budget exhaustion,
+              # always with a distinct no-progress diagnosis when no-progress
+              # caused the stop (escalate happens before stop).
+              if [[ $stale -ge $STALE_BUDGET ]]; then
+                die "no-progress: stale budget exhausted ($stale/$STALE_BUDGET) — runner exited 0 without advancing substantive loop-state (L-008 / issue #63)"
+              fi
+              if [[ $failures -ge $BUDGET ]]; then
+                die "no-progress: error budget exhausted ($failures/$BUDGET) — runner exited 0 without advancing substantive loop-state (L-008 / issue #63)"
+              fi
+            fi
           fi
         fi
       fi

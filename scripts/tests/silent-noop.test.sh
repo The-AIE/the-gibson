@@ -245,9 +245,9 @@ help_out=$("$SENSOR" --help 2>"$ROOT/help.err"); help_rc=$?
   && ok "direct --help writes nothing to stderr" \
   || bad "direct --help polluted stderr ($(tr '\n' ' ' < "$ROOT/help.err"))"
 
-# Each field the Ask Contract owes a non-technical operator, plus the two facts
-# that are specific to this file: the budget knob, and that it is a library which
-# is not yet wired in. Missing any one of them turns help into decoration.
+# Each field the Ask Contract owes a non-technical operator, plus the facts
+# specific to this file: the budget knob, the preferred progressed API, and that
+# it is wired into loop.sh (issue #63). Missing any one turns help into decoration.
 for field in \
   "WHAT I'M ASKING" \
   "WHAT IT DOES" \
@@ -264,9 +264,12 @@ done
 echo "$help_out" | grep -q 'source' \
   && ok "--help says it must be sourced" \
   || bad "--help never tells the operator to source it"
-echo "$help_out" | grep -qF 'NOT yet wired into scripts/loop.sh' \
-  && ok "--help states it is not yet wired into loop.sh" \
-  || bad "--help hides that the sensor is unwired — an operator would assume it is live"
+echo "$help_out" | grep -qF 'silent_noop_progressed' \
+  && ok "--help documents silent_noop_progressed" \
+  || bad "--help is missing the preferred progressed API"
+echo "$help_out" | grep -qF 'Wired into scripts/loop.sh' \
+  && ok "--help states it is wired into loop.sh (issue #63)" \
+  || bad "--help still claims the sensor is unwired"
 
 echo
 echo "a direct run without --help fails loudly"
@@ -310,11 +313,11 @@ src_out=$(env -u NOOP_BUDGET bash -c 'source "$1"' silent-noop-test "$SENSOR" 2>
   || bad "sourcing was noisy (out='$src_out' err='$(tr '\n' ' ' < "$ROOT/src.err")')"
 
 # Silence is worthless if the guard exited before defining anything, so pin that
-# all three functions survive the source and that a real cycle still works.
+# the public + internal functions survive the source and that a real cycle still works.
 out=$(env -u NOOP_BUDGET bash -c '
   set -euo pipefail
   source "$1"
-  for fn in silent_noop_init silent_noop_check _silent_noop_fp; do
+  for fn in silent_noop_init silent_noop_check silent_noop_progressed _silent_noop_fp; do
     declare -f "$fn" >/dev/null || { echo "MISSING:$fn"; exit 1; }
   done
   STATE_FILE="$2"
@@ -324,7 +327,7 @@ out=$(env -u NOOP_BUDGET bash -c '
   silent_noop_check && echo FUNCTIONAL
 ' silent-noop-test "$SENSOR" "$ROOT/sourced.md" 2>&1)
 [[ "$out" == "FUNCTIONAL" ]] \
-  && ok "a sourced sensor still defines all three functions and passes a real iteration" \
+  && ok "a sourced sensor still defines all functions and passes a real iteration" \
   || bad "sourcing left the sensor unusable (got '$out')"
 
 # The hostile case for the guard, and the reason the rest of this file keeps $0 a
@@ -362,11 +365,265 @@ else
 fi
 
 echo
-echo "it does not wire itself into the driver"
-# The wiring is a deliberate follow-up; this pins that the PR did not sneak it in.
-grep -q 'silent-noop' "$SCRIPT_DIR/../loop.sh" \
-  && bad "loop.sh references silent-noop — wiring is a separate change" \
-  || ok "loop.sh is untouched by this sensor"
+echo "it is wired into the driver (issue #63)"
+# The preferred API is silent_noop_progressed; loop.sh must source the sensor
+# and call that function — not private streak globals.
+if grep -q 'silent-noop' "$SCRIPT_DIR/../loop.sh" \
+  && grep -q 'silent_noop_progressed' "$SCRIPT_DIR/../loop.sh"
+then
+  ok "loop.sh sources silent-noop and calls silent_noop_progressed"
+else
+  bad "loop.sh is not wired to silent_noop_progressed"
+fi
+if grep -qE '_silent_noop_(streak|last|ready)' "$SCRIPT_DIR/../loop.sh"; then
+  bad "loop.sh couples to silent-noop private streak globals"
+else
+  ok "loop.sh does not couple to silent-noop private globals"
+fi
+
+echo
+echo "silent_noop_progressed: stateless BEFORE/AFTER contract"
+# Prefer a small stateless API; do not require STATE_FILE or init.
+write_state "$ROOT/before.md" "2026-08-02T00:00:00Z"
+write_state "$ROOT/after-clock.md" "2026-08-02T00:00:01Z"
+write_state "$ROOT/after-round.md" "2026-08-02T00:00:01Z" "round moved"
+# Force a same-length substantive edit (round digit swap) on a copy.
+printf '%s\n' "# Gibson loop state" "updated: 2026-08-02T00:00:01Z" "issue:" "pr:" \
+  "hat: builder" "next_hat: builder" "round: 1" "parked: false" "handoff:" \
+  "handoff_sha:" "next_action: triage" "notes: initialized by loop.sh" > "$ROOT/before-r.md"
+printf '%s\n' "# Gibson loop state" "updated: 2026-08-02T00:00:02Z" "issue:" "pr:" \
+  "hat: builder" "next_hat: builder" "round: 2" "parked: false" "handoff:" \
+  "handoff_sha:" "next_action: triage" "notes: initialized by loop.sh" > "$ROOT/after-r.md"
+printf '%s\n' "# Gibson loop state" "updated: 2026-08-02T00:00:01Z" "issue:" "pr:" \
+  "hat: builder" "next_hat: builder" "round: 0" "parked: false" "handoff:" \
+  "handoff_sha: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
+  "next_action: triage" "notes: initialized by loop.sh" > "$ROOT/after-sha.md"
+
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before.md" "$ROOT/after-clock.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: clock-only updated: rewrite is no-progress" \
+  || bad "progressed: clock-only counted as progress (got '$out')"
+
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before-r.md" "$ROOT/after-r.md" 2>&1)
+[[ "$out" == "PROGRESS" ]] \
+  && ok "progressed: same-length round edit counts as progress" \
+  || bad "progressed: same-length edit missed (got '$out')"
+
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before-r.md" "$ROOT/after-sha.md" 2>&1)
+[[ "$out" == "PROGRESS" ]] \
+  && ok "progressed: handoff_sha change counts as progress" \
+  || bad "progressed: handoff_sha change missed (got '$out')"
+
+# Fail closed: missing / unreadable / symlink / directory never progress.
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before.md" "$ROOT/missing-after.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: missing AFTER is no-progress" \
+  || bad "progressed: missing AFTER looked like progress (got '$out')"
+
+mkdir -p "$ROOT/dir-after"
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before.md" "$ROOT/dir-after" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: directory AFTER is no-progress" \
+  || bad "progressed: directory AFTER looked like progress (got '$out')"
+
+ln -sf "$ROOT/before.md" "$ROOT/sym-after"
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before.md" "$ROOT/sym-after" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: symlink AFTER is no-progress (no follow)" \
+  || bad "progressed: symlink AFTER looked like progress (got '$out')"
+
+# Working digest → sentinel:unhashable must fail closed (never "changed").
+FAKEBIN2="$ROOT/fakebin2"
+mkdir -p "$FAKEBIN2"
+for hasher in sha256sum shasum cksum; do
+  printf '#!/bin/sh\nexit 7\n' > "$FAKEBIN2/$hasher"
+  chmod +x "$FAKEBIN2/$hasher"
+done
+# BEFORE hashed with a working PATH; AFTER hashed under the broken PATH by
+# calling the fp helper directly and feeding progressed via a subshell that
+# only breaks hashers for the second fingerprint — simulate by replacing AFTER
+# with a path that is unreadable after we chmod 000, or by shadowing for both
+# when BEFORE is already a sentinel. Stronger: call fp under broken PATH and
+# ensure progressed never returns 0 when AFTER is unhashable.
+out=$(PATH="$FAKEBIN2:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  # Both sides unhashable → same sentinel → no-progress
+  silent_noop_progressed "$2" "$2" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: unhashable/unhashable is no-progress" \
+  || bad "progressed: unhashable pair counted as progress (got '$out')"
+
+# Explicit: a real digest BEFORE vs unhashable AFTER fails closed.
+# Capture a real digest, then force AFTER through a broken hasher by writing a
+# tiny wrapper that uses _silent_noop_fp under PATH shadow for the second arg.
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  before="$2"
+  after="$3"
+  # Monkey-patch: fingerprint AFTER under broken hasher PATH.
+  real_fp=$(_silent_noop_fp "$before")
+  fa=$(PATH="'"$FAKEBIN2"':$PATH" bash -c "
+    set -euo pipefail
+    source \"\$1\"
+    _silent_noop_fp \"\$2\"
+  " silent-noop-test "$1" "$after")
+  case "$real_fp" in state:*) ;; *) echo "BAD_BEFORE:$real_fp"; exit 0 ;; esac
+  case "$fa" in sentinel:unhashable) ;; *) echo "BAD_AFTER:$fa"; exit 0 ;; esac
+  # Replicate progressed fail-closed rule without re-hashing AFTER with a good hasher.
+  case "$fa" in state:*) echo PROGRESS ;; *) echo NOOP ;; esac
+' silent-noop-test "$SENSOR" "$ROOT/before.md" "$ROOT/after-r.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: working digest → sentinel:unhashable fails closed" \
+  || bad "progressed: digest→unhashable did not fail closed (got '$out')"
+
+# Wrong arity fails closed under set -euo pipefail.
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" 2>/dev/null && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: wrong arity is no-progress (fail closed)" \
+  || bad "progressed: wrong arity did not fail closed (got '$out')"
+
+echo
+echo "content-normalization awk failure is unhashable (never empty-body digest)"
+# Independent merge-blocker repro: BEFORE normalization succeeds; only AFTER's
+# substantive-content awk fails. BEFORE/AFTER differ solely in ignored updated:.
+# A bug that does `body=$(awk ...) || body=""` then hashes the empty fallback
+# mints state:<empty-digest> for AFTER, which differs from BEFORE's real digest
+# → silent_noop_progressed returns progress → loop resets budgets / can hand off.
+# Fail closed: AFTER must be sentinel:unhashable; progressed must return 1.
+#
+# Wrapper keys on the content-normalization program + AFTER path only — not on
+# call count — so hash-pipeline awk '{print $1}' is never intercepted, and the
+# test cannot pass because both sides failed or because sha256sum's awk broke.
+write_state "$ROOT/before-awk-ok.md" "2026-08-02T00:00:00Z"
+write_state "$ROOT/after-awk-fail.md" "2026-08-02T00:00:01Z"
+FAKEAWK_BIN="$ROOT/fakeawk"
+mkdir -p "$FAKEAWK_BIN"
+REAL_AWK=$(command -v awk)
+# Exact AFTER path only (no call-count races; hash awk never sees this path).
+AFTER_AWK_PATH="$ROOT/after-awk-fail.md"
+{
+  printf '%s\n' '#!/bin/sh'
+  printf '%s\n' '# Fail only the substantive-content strip for the AFTER path.'
+  printf '%s\n' "# Hash extraction uses awk '{print \$1}' (different program) — pass."
+  printf '%s\n' "AFTER_TARGET=$(printf '%q' "$AFTER_AWK_PATH")"
+  printf '%s\n' "REAL_AWK=$(printf '%q' "$REAL_AWK")"
+  printf '%s\n' 'if [ "$#" -ge 2 ] && [ "$1" = '\''!/^updated:/'\'' ] && [ "$2" = "$AFTER_TARGET" ]; then'
+  printf '%s\n' '  echo "awk: forced AFTER content-normalization failure" >&2'
+  printf '%s\n' '  exit 1'
+  printf '%s\n' 'fi'
+  printf '%s\n' 'exec "$REAL_AWK" "$@"'
+} > "$FAKEAWK_BIN/awk"
+chmod +x "$FAKEAWK_BIN/awk"
+
+# Control A: BEFORE alone under the wrapper must still be a real digest (awk ok).
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$ROOT/before-awk-ok.md" 2>&1)
+case "$out" in
+  state:*) ok "control: BEFORE content-awk under wrapper still yields state:<digest>" ;;
+  *) bad "control: BEFORE under wrapper was not a digest (got '$out') — wrapper too broad?" ;;
+esac
+
+# Control B: AFTER alone must be sentinel:unhashable (not state: of empty body).
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+  printf " SURVIVED"
+' silent-noop-test "$SENSOR" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" == "sentinel:unhashable SURVIVED" ]] \
+  && ok "AFTER-only content-awk failure yields sentinel:unhashable (survives set -euo)" \
+  || bad "AFTER content-awk failure did not fail closed (got '$out')"
+
+# Empty-body digest must not appear as AFTER (would prove empty-fallback hashing).
+empty_digest=$(printf '%s\n' "" | {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+  else cksum | awk '{print $1 "-" $2}'
+  fi
+})
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" != "state:$empty_digest" ]] \
+  && ok "AFTER content-awk failure is not hashed empty-body state:<digest>" \
+  || bad "AFTER content-awk failure minted empty-body digest (got '$out')"
+
+# progressed: real BEFORE + unhashable AFTER → no-progress (fail closed).
+# Documented status: return 1 — loop must not treat this as progress (no budget
+# reset, no handoff). Same contract as digest→unhashable hasher path.
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  fb=$(_silent_noop_fp "$2")
+  fa=$(_silent_noop_fp "$3")
+  # Prove asymmetry inside the same progressed invocation environment.
+  case "$fb" in state:*) ;; *) echo "BOTH_OR_BEFORE_BAD:$fb:$fa"; exit 0 ;; esac
+  case "$fa" in sentinel:unhashable) ;; *) echo "AFTER_NOT_UNHASHABLE:$fb:$fa"; exit 0 ;; esac
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before-awk-ok.md" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: BEFORE digest + AFTER content-awk-fail is no-progress (fail closed)" \
+  || bad "progressed: AFTER content-awk-fail looked like progress or controls failed (got '$out')"
+
+# Clock-only pair under a clean PATH remains no-progress (sanity: files are equal
+# on substance; the wrapper is what makes AFTER unhashable above).
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before-awk-ok.md" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "control: same pair without awk-fail wrapper is clock-only no-progress" \
+  || bad "control: clock-only pair without wrapper misclassified (got '$out')"
+
+# Legitimate empty substantive content: extraction succeeds, body empty → still
+# a real state: digest (not unhashable). Pins "success + empty ≠ failure".
+printf '%s\n' "updated: 2026-08-02T00:00:00Z" > "$ROOT/only-clock.md"
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$ROOT/only-clock.md" 2>&1)
+case "$out" in
+  state:*) ok "legitimate empty substantive body (awk success) still hashes to state:<digest>" ;;
+  *) bad "legitimate empty body should hash, not sentinel (got '$out')" ;;
+esac
 
 echo
 echo "silent-noop.test.sh: $PASS passed, $FAIL failed"
