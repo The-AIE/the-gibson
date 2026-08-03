@@ -48,9 +48,16 @@ EOF
 QUARANTINE=$(cat <<'EOF'
 loop-handoff.test.sh	92	halt reclaim gate fails on Linux (22 failures)
 release-claim.test.sh	94	CAS mismatch, renewal race, label preservation (4 failures)
-release-preflight.test.sh	91	fails OPEN on malformed approval timestamps (32 failures)
 EOF
 )
+
+# Minimum jq. release-preflight validates approval timestamps through jq, and on
+# jq 1.6 an impossible calendar date parses instead of erroring — the merge gate
+# then returns READY on evidence it cannot verify (#91). Ubuntu 22.04 ships 1.6,
+# so this is not hypothetical. A gate that changes its verdict with the host's jq
+# is not a gate.
+JQ_MIN_MAJOR=1
+JQ_MIN_MINOR=7
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
@@ -109,6 +116,37 @@ run_limited() {
 }
 
 SH_FILES=$(find scripts -name '*.sh' -type f | sort)
+
+# --- 0. toolchain -----------------------------------------------------------
+echo "== toolchain"
+if command -v jq >/dev/null 2>&1; then
+  JQ_V=$(jq --version 2>/dev/null | sed 's/^jq-//')
+  JQ_MAJ=${JQ_V%%.*}; JQ_REST=${JQ_V#*.}; JQ_MIN=${JQ_REST%%.*}
+  case "$JQ_MAJ$JQ_MIN" in
+    *[!0-9]*|'') echo "${RED}  FAIL${OFF} — cannot read jq version ('$JQ_V')"; FAILED="$FAILED jq-version" ;;
+    *)
+      if [[ "$JQ_MAJ" -gt "$JQ_MIN_MAJOR" ]] ||
+         { [[ "$JQ_MAJ" -eq "$JQ_MIN_MAJOR" ]] && [[ "$JQ_MIN" -ge "$JQ_MIN_MINOR" ]]; }; then
+        echo "${GRN}  ok${OFF}   — jq $JQ_V"
+      else
+        echo "${RED}  FAIL${OFF} — jq $JQ_V is below ${JQ_MIN_MAJOR}.${JQ_MIN_MINOR}: release-preflight accepts"
+        echo "         unverifiable approval timestamps on this jq and returns READY (#91)"
+        FAILED="$FAILED jq-too-old"
+      fi ;;
+  esac
+else
+  echo "${RED}  FAIL${OFF} — jq not installed; preflight and several sensors need it"
+  FAILED="$FAILED jq-missing"
+fi
+
+# The claim suites build throwaway repos and commit into them, so they need an
+# identity. Inherit one if the host has it; otherwise supply a local one rather
+# than failing for a reason that has nothing to do with the code under test.
+if [[ -z "${GIT_AUTHOR_EMAIL:-}" ]] && ! git config user.email >/dev/null 2>&1; then
+  export GIT_AUTHOR_NAME="gibson-run-all" GIT_AUTHOR_EMAIL="run-all@gibson.invalid"
+  export GIT_COMMITTER_NAME="gibson-run-all" GIT_COMMITTER_EMAIL="run-all@gibson.invalid"
+  echo "${YEL}  NOTE${OFF} — no git identity on this host; using a throwaway one (#101)"
+fi
 
 # --- 1. shellcheck vs baseline ---------------------------------------------
 echo "== shellcheck (-S warning, vs baseline)"
