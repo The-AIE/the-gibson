@@ -35,6 +35,16 @@ RISKS
   - Each handoff spends ACUs. Cap it with DEVIN_MAX_ACU (default 10).
   - The session state file lives in <repo>/gibson/devin-session.json; deleting
     it orphans the session rather than closing it.
+  - Kill switch: gibson/HALT, GIBSON_HALT=1, an open gibson-halt label, or a
+    .gibson-halt sentinel on the remote default branch all refuse handoff with
+    exit 75 (distinct from other failures so loop.sh journals a halt, not a
+    rejection). Remote paths only when origin host matches GH_HOST (default
+    github.com). A previously confirmed remote halt latched under
+    gibson/halt-latch stays fail-closed across API outages until a successful
+    recheck positively clears both remote paths; first-ever API failure (no
+    latch) still fails open. Non-matching hosts never query gh against
+    unrelated same-slug repos. The child always rechecks live even when the
+    loop's in-process cache is still warm.
 
 USAGE
   devin-supervisor.sh ensure  --repo <path>
@@ -112,6 +122,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "devin-supervisor.sh: ERROR: $*" >&2; exit 1; }
+# Kill-switch refusal (local or remote). Distinct from die()'s exit 1 so
+# loop.sh can journal a halt and leave the handoff queued instead of recording
+# a false "supervisor rejected the handoff" (issue #71 mid-cadence halt).
+die_kill_switch() { echo "devin-supervisor.sh: ERROR: $*" >&2; exit 75; }
 info() { echo "devin-supervisor.sh: $*" >&2; }
 
 [[ -n "$REPO" ]] || { usage; exit 2; }
@@ -124,9 +138,237 @@ API="${DEVIN_API_BASE:-https://api.devin.ai}"
 MAX_ACU="${DEVIN_MAX_ACU:-10}"
 STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/devin-session.json"
+# Shared with loop.sh: persistent remote-halt fail-closed latch (KeepAlive-safe).
+HALT_LATCH_FILE="$STATE_DIR/halt-latch"
 mkdir -p "$STATE_DIR"
 
-SLUG=$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true)
+# Conservative GitHub owner/repo segment check (mirrors scripts/loop.sh). Reject
+# exact "." / ".." and non-GitHub characters (including percent-encoding) before
+# any gh/API path interpolation. Valid leading-dot repo names (e.g. .github)
+# are allowed.
+origin_segment_ok() {
+  local kind="$1" seg="$2"
+  case "$seg" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  if [[ "$kind" == "owner" ]]; then
+    case "$seg" in
+      *.*|*_*|-*|*-) return 1 ;;
+    esac
+    [[ "$seg" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ || "$seg" =~ ^[A-Za-z0-9]$ ]]
+    return $?
+  fi
+  # Repos: alnum + . _ - including leading-dot names like .github.
+  [[ "$seg" =~ ^[A-Za-z0-9._-]+$ ]]
+  return $?
+}
+
+# Parse host + owner/repo from normal remote forms (https, git@, ssh://).
+# Trailing slashes are normalized before stripping .git so …/repo.git/ works.
+# Uses remote.origin.url so url.*.insteadOf rewrites do not hide the logical slug.
+# Must not leave a scheme prefix in place — that blinds --repo / contents API calls.
+# Sets ORIGIN_PARSE_HOST / ORIGIN_PARSE_SLUG. Remote-halt callers also require
+# host == GH_HOST (default github.com); cosmetic SLUG may still use the slug
+# (or basename fallback) when the host does not match.
+origin_parse_url() {
+  local url="$1" rest host owner name
+  ORIGIN_PARSE_HOST=""
+  ORIGIN_PARSE_SLUG=""
+  [[ -n "$url" ]] || return 0
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
+  url="${url%.git}"
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
+  case "$url" in
+    git@*:*)
+      rest="${url#git@}"
+      host="${rest%%:*}"
+      rest="${rest#*:}"
+      ;;
+    ssh://*|https://*|http://*|git://*)
+      rest="${url#*://}"
+      if [[ "$rest" == *@* ]]; then
+        rest="${rest#*@}"
+      fi
+      host="${rest%%/*}"
+      rest="${rest#*/}"
+      host="${host%%:*}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  case "$rest" in
+    ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
+    */*)
+      owner="${rest%%/*}"
+      name="${rest#*/}"
+      origin_segment_ok owner "$owner" || return 0
+      origin_segment_ok repo "$name" || return 0
+      ORIGIN_PARSE_HOST="$host"
+      ORIGIN_PARSE_SLUG="${owner}/${name}"
+      ;;
+  esac
+}
+
+# Latch helpers (same on-disk format as loop.sh). Supervisor writes a remote
+# confirmation so KeepAlive relaunches of the parent stay fail-closed even when
+# a later recheck is rate-limited; it also honors an existing latch. Remote
+# latches store host+slug so only the confirming source may positively clear.
+halt_latch_field() {
+  local key="$1" line
+  [[ -f "$HALT_LATCH_FILE" ]] || return 0
+  line=$(grep -E "^${key}=" "$HALT_LATCH_FILE" 2>/dev/null | head -n 1) || true
+  [[ -n "$line" ]] || return 0
+  printf '%s' "${line#*=}"
+}
+
+halt_latch_load() {
+  LATCH_LOCAL_KIND=$(halt_latch_field local_kind)
+  LATCH_LOCAL_REASON=$(halt_latch_field local_reason)
+  LATCH_LOCAL_JOURNALED=$(halt_latch_field local_journaled)
+  LATCH_REMOTE_KIND=$(halt_latch_field remote_kind)
+  LATCH_REMOTE_REASON=$(halt_latch_field remote_reason)
+  LATCH_REMOTE_JOURNALED=$(halt_latch_field remote_journaled)
+  LATCH_REMOTE_HOST=$(halt_latch_field remote_host)
+  LATCH_REMOTE_SLUG=$(halt_latch_field remote_slug)
+  LATCH_LOCAL_KIND=${LATCH_LOCAL_KIND:-}
+  LATCH_LOCAL_REASON=${LATCH_LOCAL_REASON:-}
+  LATCH_LOCAL_JOURNALED=${LATCH_LOCAL_JOURNALED:-0}
+  LATCH_REMOTE_KIND=${LATCH_REMOTE_KIND:-}
+  LATCH_REMOTE_REASON=${LATCH_REMOTE_REASON:-}
+  LATCH_REMOTE_JOURNALED=${LATCH_REMOTE_JOURNALED:-0}
+  LATCH_REMOTE_HOST=${LATCH_REMOTE_HOST:-}
+  LATCH_REMOTE_SLUG=${LATCH_REMOTE_SLUG:-}
+}
+
+halt_latch_save() {
+  mkdir -p "$STATE_DIR"
+  if [[ -z "${LATCH_LOCAL_KIND:-}" && -z "${LATCH_REMOTE_KIND:-}" ]]; then
+    rm -f "$HALT_LATCH_FILE"
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp "${STATE_DIR}/halt-latch.XXXXXX")
+  {
+    printf 'local_kind=%s\n' "${LATCH_LOCAL_KIND:-}"
+    printf 'local_reason=%s\n' "${LATCH_LOCAL_REASON:-}"
+    printf 'local_journaled=%s\n' "${LATCH_LOCAL_JOURNALED:-0}"
+    printf 'remote_kind=%s\n' "${LATCH_REMOTE_KIND:-}"
+    printf 'remote_reason=%s\n' "${LATCH_REMOTE_REASON:-}"
+    printf 'remote_journaled=%s\n' "${LATCH_REMOTE_JOURNALED:-0}"
+    printf 'remote_host=%s\n' "${LATCH_REMOTE_HOST:-}"
+    printf 'remote_slug=%s\n' "${LATCH_REMOTE_SLUG:-}"
+    printf 'updated_at=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  } > "$tmp"
+  mv -f "$tmp" "$HALT_LATCH_FILE"
+}
+
+# host + slug bind this confirmation to the origin that produced it.
+halt_latch_set_remote() {
+  local kind="$1" reason="$2" host="${3:-}" slug="${4:-}"
+  halt_latch_load
+  LATCH_REMOTE_KIND="${kind:-confirmed}"
+  LATCH_REMOTE_REASON="$reason"
+  if [[ -n "$host" ]]; then
+    LATCH_REMOTE_HOST="$host"
+  fi
+  if [[ -n "$slug" ]]; then
+    LATCH_REMOTE_SLUG="$slug"
+  fi
+  # Do not reset journaled if already 1 — parent may have journaled already.
+  if [[ "$LATCH_REMOTE_JOURNALED" != "1" ]]; then
+    LATCH_REMOTE_JOURNALED=0
+  fi
+  halt_latch_save
+}
+
+halt_latch_clear_remote() {
+  halt_latch_load
+  if [[ -z "$LATCH_REMOTE_KIND" ]]; then
+    return 0
+  fi
+  LATCH_REMOTE_KIND=""
+  LATCH_REMOTE_REASON=""
+  LATCH_REMOTE_JOURNALED=0
+  LATCH_REMOTE_HOST=""
+  LATCH_REMOTE_SLUG=""
+  halt_latch_save
+}
+
+# True when current remote-halt origin matches the latched host+slug.
+remote_latch_source_matches_url() {
+  local url="$1" cur_host cur_slug lat_host lat_slug
+  if [[ -z "${LATCH_REMOTE_HOST:-}" || -z "${LATCH_REMOTE_SLUG:-}" ]]; then
+    return 1
+  fi
+  if ! origin_remote_halt_slug_from_url "$url"; then
+    return 1
+  fi
+  cur_host=$(printf '%s' "${ORIGIN_PARSE_HOST:-}" | tr '[:upper:]' '[:lower:]')
+  cur_slug="${ORIGIN_HALT_SLUG:-}"
+  lat_host=$(printf '%s' "$LATCH_REMOTE_HOST" | tr '[:upper:]' '[:lower:]')
+  lat_slug="$LATCH_REMOTE_SLUG"
+  [[ -n "$cur_host" && -n "$cur_slug" && "$cur_host" == "$lat_host" && "$cur_slug" == "$lat_slug" ]]
+}
+
+halt_latch_set_local() {
+  local kind="$1" reason="$2"
+  halt_latch_load
+  LATCH_LOCAL_KIND="$kind"
+  LATCH_LOCAL_REASON="$reason"
+  if [[ "$LATCH_LOCAL_JOURNALED" != "1" ]]; then
+    LATCH_LOCAL_JOURNALED=0
+  fi
+  halt_latch_save
+}
+
+halt_latch_clear_local() {
+  halt_latch_load
+  if [[ -z "$LATCH_LOCAL_KIND" ]]; then
+    return 0
+  fi
+  LATCH_LOCAL_KIND=""
+  LATCH_LOCAL_REASON=""
+  LATCH_LOCAL_JOURNALED=0
+  halt_latch_save
+}
+
+origin_slug_from_url() {
+  origin_parse_url "$1"
+  [[ -n "$ORIGIN_PARSE_SLUG" ]] && printf '%s\n' "$ORIGIN_PARSE_SLUG"
+  return 0
+}
+
+# Remote-halt only: slug when origin host matches GH_HOST; else skip reason.
+origin_remote_halt_slug_from_url() {
+  local url="$1" expected got
+  ORIGIN_HALT_SLUG=""
+  ORIGIN_HALT_SKIP_REASON=""
+  if [[ -z "$url" ]]; then
+    ORIGIN_HALT_SKIP_REASON="no origin remote URL configured"
+    return 1
+  fi
+  origin_parse_url "$url"
+  if [[ -z "$ORIGIN_PARSE_SLUG" || -z "$ORIGIN_PARSE_HOST" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin URL unparseable as host/owner/repo (got url=${url})"
+    return 1
+  fi
+  expected=$(printf '%s' "${GH_HOST:-github.com}" | tr '[:upper:]' '[:lower:]')
+  got=$(printf '%s' "$ORIGIN_PARSE_HOST" | tr '[:upper:]' '[:lower:]')
+  if [[ "$got" != "$expected" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin host '${ORIGIN_PARSE_HOST}' does not match GH_HOST (${GH_HOST:-github.com}); remote stop is GitHub-only"
+    return 1
+  fi
+  ORIGIN_HALT_SLUG="$ORIGIN_PARSE_SLUG"
+  return 0
+}
+
+_origin_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)
+SLUG=$(origin_slug_from_url "$_origin_url")
 [[ -n "$SLUG" ]] || SLUG="$(basename "$REPO")"
 
 json_get() {
@@ -330,6 +572,133 @@ case "$CMD" in
     [[ -n "$REVIEW_FILE" && -f "$REVIEW_FILE" ]] && REVIEWS=$(cat "$REVIEW_FILE")
 
     [[ -z "$BASE_SHA" || -n "$SHA" ]] || die "--base-sha requires --sha: half a pin describes half a diff"
+
+    # Kill switch (issue #71): same local + remote paths as loop.sh. Always a
+    # fresh live recheck here (by-hand and child safety) — deliberately not a
+    # shared cache with the parent loop process, so a mid-cadence phone stop is
+    # still observed and may spend another pair of gh calls. Kill-switch hits
+    # exit 75 (die_kill_switch), not die()'s 1, so loop.sh journals a halt.
+    # Remote API failures: first-ever fail open; after a confirmed remote latch
+    # under gibson/halt-latch, fail closed until a positive clear of both paths.
+    # Non-GH_HOST / unparseable origins never query gh (disabled warning).
+    if [[ -f "$STATE_DIR/HALT" ]]; then
+      halt_latch_set_local "file" "kill switch: gibson/HALT is present — refusing handoff (remove the file to resume)"
+      die_kill_switch "kill switch: gibson/HALT is present — refusing handoff (remove the file to resume)"
+    fi
+    if [[ "${GIBSON_HALT:-}" == "1" ]]; then
+      halt_latch_set_local "env" "kill switch: GIBSON_HALT=1 — refusing handoff"
+      die_kill_switch "kill switch: GIBSON_HALT=1 — refusing handoff"
+    fi
+    halt_latch_clear_local
+    remote_status="clear"
+    remote_kind=""
+    remote_reason=""
+    remote_host=""
+    remote_slug=""
+    origin_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null || true)
+    # Source-bound gate: an existing remote latch for a different/missing origin
+    # stays fail-closed and never queries or clears against a new repo.
+    halt_latch_load
+    if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+      if ! remote_latch_source_matches_url "$origin_url"; then
+        latched_src="${LATCH_REMOTE_HOST:-unknown}/${LATCH_REMOTE_SLUG:-unknown}"
+        if origin_remote_halt_slug_from_url "$origin_url" 2>/dev/null; then
+          current_src="${ORIGIN_PARSE_HOST:-?}/${ORIGIN_HALT_SLUG:-?}"
+        else
+          current_src="missing/unparseable/non-matching (${ORIGIN_HALT_SKIP_REASON:-no detail})"
+        fi
+        die_kill_switch "kill switch: previously confirmed remote halt still latched for ${latched_src}, but current origin is ${current_src} — refusing handoff without querying a different repo. Restore origin to ${latched_src} and clear the remote stop successfully, or after operator verification explicitly remove gibson/halt-latch."
+      fi
+    fi
+    if command -v gh >/dev/null 2>&1; then
+      if ! origin_remote_halt_slug_from_url "$origin_url"; then
+        info "remote halt check disabled: ${ORIGIN_HALT_SKIP_REASON} — continuing with local HALT/GIBSON_HALT only (zero gh remote-halt queries)"
+        remote_status="disabled"
+      else
+        halt_slug="$ORIGIN_HALT_SLUG"
+        remote_host="${ORIGIN_PARSE_HOST:-}"
+        remote_slug="$ORIGIN_HALT_SLUG"
+        # label_degraded: when the label query fails, preserve that warning as
+        # evidence. A later sentinel 404 is not a trustworthy "remote clear"
+        # for missing/forbidden repos (host validation already prevents
+        # unrelated same-slug queries; this keeps the fail-open story honest).
+        label_degraded=0
+        set +e
+        halt_out=$(gh issue list --repo "$halt_slug" \
+          --label gibson-halt --state open --limit 1 \
+          --json number -q '.[0].number' 2>&1)
+        halt_ec=$?
+        set -e
+        if [[ $halt_ec -ne 0 ]]; then
+          label_degraded=1
+          remote_status="degraded"
+          info "remote halt check degraded: gibson-halt label query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
+        elif printf '%s' "$halt_out" | grep -q '[0-9]'; then
+          remote_status="halted"
+          remote_kind="label"
+          remote_reason="kill switch: gibson-halt label on an open issue — refusing handoff (remove the label to allow a fresh launch)"
+        fi
+        if [[ "$remote_status" != "halted" ]]; then
+          set +e
+          halt_symref=$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null)
+          halt_sym_ec=$?
+          set -e
+          if [[ $halt_sym_ec -ne 0 || -z "$halt_symref" ]]; then
+            remote_status="degraded"
+            info "remote halt check degraded: could not resolve origin default branch — continuing with local HALT/GIBSON_HALT only"
+          else
+            halt_def=$(printf '%s\n' "$halt_symref" |
+              awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+            if [[ -z "$halt_def" ]]; then
+              remote_status="degraded"
+              info "remote halt check degraded: origin advertises no symbolic HEAD — continuing with local HALT/GIBSON_HALT only"
+            else
+              # Encode ref via -f, never raw ?ref= interpolation (branch may hold #/&).
+              set +e
+              halt_out=$(gh api --method GET "repos/${halt_slug}/contents/.gibson-halt" \
+                -f "ref=${halt_def}" 2>&1)
+              halt_ec=$?
+              set -e
+              if [[ $halt_ec -eq 0 ]]; then
+                remote_status="halted"
+                remote_kind="sentinel"
+                remote_reason="kill switch: .gibson-halt sentinel on origin/${halt_def} — refusing handoff (delete the file from the default branch to allow a fresh launch)"
+              elif printf '%s' "$halt_out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+                if [[ "$label_degraded" -eq 1 ]]; then
+                  remote_status="degraded"
+                else
+                  remote_status="clear"
+                fi
+              else
+                remote_status="degraded"
+                info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
+              fi
+            fi
+          fi
+        fi
+      fi
+    else
+      remote_status="degraded"
+    fi
+    case "$remote_status" in
+      halted)
+        halt_latch_set_remote "${remote_kind:-confirmed}" "$remote_reason" \
+          "$remote_host" "$remote_slug"
+        die_kill_switch "$remote_reason"
+        ;;
+      clear)
+        # Same-source positive clear only (mismatched sources die above).
+        halt_latch_clear_remote
+        ;;
+      degraded|disabled)
+        halt_latch_load
+        if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+          info "remote halt latch held closed after degraded/disabled recheck (source=${LATCH_REMOTE_KIND} host=${LATCH_REMOTE_HOST:-?} slug=${LATCH_REMOTE_SLUG:-?})"
+          die_kill_switch "${LATCH_REMOTE_REASON:-kill switch: previously confirmed remote halt still latched — refusing handoff. Restore the original source and clear it successfully, or after operator verification remove gibson/halt-latch.}"
+        fi
+        # First-ever API failure / host disable with no latch: fail open.
+        ;;
+    esac
 
     # Issue #55: when a SHA is pinned, the remote tip must exist and match it.
     # Every miss is fatal, not a warning. The supervisor opens the PR from the

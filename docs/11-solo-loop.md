@@ -74,13 +74,68 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   Parked ≠ failed; it's queued for a different mind (or Mark).
 - **Error budget:** N consecutive gate failures (default 5) → stop, report, wait.
   A loop that can't go green is burning tokens on a harness bug.
-- **Kill switch:** the loop checks the `gibson/HALT` file and `GIBSON_HALT=1` at
-  the top of every iteration, unconditionally — neither depends on `gh` or on a
-  network call. The `gibson-halt` GitHub label is a soft cue: when `gh` is
-  installed and authenticated, an open issue carrying that label halts the run
-  too, but with no `gh` nothing acts on it. Treat the file as the permanent kill
-  switch and the label as a request that still needs the file (or a workflow
-  that touches it) to be binding.
+- **Kill switch:** checked at the top of every iteration (and before any
+  supervisor handoff). Three layers, all read-only:
+  1. **Local (always):** the `gibson/HALT` file, or `GIBSON_HALT=1` in the
+     environment. Neither needs `gh` or a network call. The file is the
+     permanent on-box stop.
+  2. **Remote label:** when `gh` is installed and authenticated **and** the
+     target origin host matches `GH_HOST` (default `github.com`; set for GitHub
+     Enterprise), any open issue on the target repo carrying the `gibson-halt`
+     label stops the loop. Remove the label and a freshly launched loop runs
+     again — the check is on a bounded cadence (below), not process-start-only.
+     Phone workflow: [doc 16](16-nontechnical-operation.md).
+  3. **Remote sentinel:** a `.gibson-halt` file committed on the target repo's
+     **current remote default branch** (usually `main`) also stops the loop.
+     Delete the file from the default branch to clear it. Useful when labels are
+     awkward or when the operator can only push a file from another device.
+  **Cadence / cache:** remote paths are re-checked every iteration with
+  `--once`, and every `GIBSON_REMOTE_HALT_INTERVAL` iterations in a hot loop
+  (default **3**). A phone label is honored within **up to K iterations**
+  (default three), not necessarily the very next hat. The loop process caches
+  live results across its own iteration-top and pre-handoff gates so it does not
+  double-poll inside one cadence window; the child `devin-supervisor.sh` still
+  **deliberately rechecks live** (may spend another pair of `gh` calls) and
+  exits **75** on kill-switch refusal so a mid-cadence stop is journaled as a
+  halt, never as "supervisor rejected". There is **no** shared-cache elimination
+  across processes.
+  On remote halt the driver **journals the reason once**, leaves `loop-state`
+  untouched (no default state created or rewritten), and suppresses supervisor
+  handoffs. A persistent runtime latch under the target repo's
+  `gibson/halt-latch` (not a tracked Gibson source file) records the source and
+  reason so **launchd KeepAlive relaunches** do not append duplicate journal
+  sections while the stop is still active. The read → decide → journal → latch
+  transition is serialized with a cross-process lock (`gibson/halt-lock`: complete
+  pid+owner token written to a temp file, then atomically published with
+  `ln temp lock`; token-checked release; dead/malformed stale recovery; trap
+  cleanup) so concurrent launches wait and observe the first latch (or fail
+  closed) rather than racing duplicate journal sections or starting work;
+  ordinary single-process launchd stays uncontended and fast. Removing `gibson/HALT` / unsetting `GIBSON_HALT` clears the local
+  side of the latch; a successful remote recheck that positively clears **both**
+  remote paths **on the same host+slug that was latched** clears the remote side
+  and permits a fresh launch.
+  Remote latches store the exact configured GitHub host and validated
+  `owner/repo` slug that confirmed the stop. Changing origin to a different
+  (even clear) repository, or losing a parseable matching origin, **stays
+  fail-closed** and does **not** query or clear against the new repo — restore
+  the original source and clear it successfully, or after operator verification
+  explicitly remove `gibson/halt-latch`.
+  GitHub/API failure on either remote path:
+  - **First-ever** (no remote latch yet) **fails open** to the local file/env
+    checks — the loop keeps running — with an explicit
+    `remote halt check degraded` warning.
+  - **After a confirmed remote halt** has been latched, a later degraded /
+    unauthorized / rate-limited recheck **stays fail-closed** until a successful
+    same-source check positively clears both remote paths. KeepAlive must not
+    resume work just because GitHub flaked.
+  A non-matching origin host (GitLab, Bitbucket, unconfigured Enterprise, SSH
+  host aliases), an unparseable origin, or exact path segments `.` / `..` in the
+  origin URL **never** query `gh` against an unrelated same-named github.com
+  repo (explicit `disabled` warning; zero remote-halt `gh` calls). Valid
+  leading-dot repository names such as `owner/.github` are accepted. The same
+  paths suppress Devin supervisor handoffs
+  ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
+  `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
 - **Human-gate queue:** Tier C merges and other stops accumulate in a digest
   (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
   issue and circles back after approval.

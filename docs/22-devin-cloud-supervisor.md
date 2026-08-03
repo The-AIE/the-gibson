@@ -199,7 +199,32 @@ The local half is a resident process on whatever machine holds your runners — 
 mini works well since Codex and Claude are already logged in there. See
 [`adapters/devin/README.md`](../adapters/devin/README.md) for the launchd job, and
 [doc 11](11-solo-loop.md) for the loop's kill switch and error budget, both of which
-still apply: `gibson/HALT` stops everything, including handoffs.
+still apply. The kill switch stops everything, including handoffs — and it is the
+**same** set of paths the loop honors, not only the local file:
+
+- `gibson/HALT` on the target repo, or `GIBSON_HALT=1`
+- an open issue carrying the `gibson-halt` label
+- a `.gibson-halt` sentinel on the remote default branch
+
+`loop.sh` reuses its **in-process** remote-check cache for its own pre-handoff
+gate (no duplicate poll inside the same cadence window). Separately,
+`devin-supervisor.sh handoff` always performs a **fresh live recheck** — by-hand
+safety and a mid-cadence phone stop still win — which may spend another pair of
+`gh` calls. Kill-switch refusal exits **75** (not a generic error) so the loop
+journals a halt and leaves the branch queued rather than writing "supervisor
+rejected". Remote paths run only when origin's host matches `GH_HOST` (default
+`github.com`). Both scripts share a persistent `gibson/halt-latch` under the
+target repo: the first observation journals once (KeepAlive relaunches and
+concurrent launches do not spam the journal — the halt transition is
+cross-process locked), and a **confirmed remote halt stays fail-closed** across
+later API outages until a successful recheck positively clears both remote
+paths **on the same host+slug that was latched**. A changed or missing origin
+stays fail-closed without querying the new repository (restore the original
+source and clear it, or after operator verification remove `gibson/halt-latch`).
+First-ever API failure (no latch yet) still fails open so a GitHub outage does
+not brick handoffs that were never stopped. Non-matching or unparseable origins
+(including exact path segments `.` / `..`) never query an unrelated same-named
+github.com repository; valid `owner/.github` repos are accepted.
 
 ---
 [← 21 · Operator readiness](21-operator-readiness.md) · [Home](../index.md) · [23 · Delivery control →](23-delivery-control.md)

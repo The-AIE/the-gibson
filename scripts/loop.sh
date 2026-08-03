@@ -20,8 +20,18 @@ RISKS
   - Unattended runs spend tokens / subscription quota (Grok flat-rate preferred).
   - Can open PRs and push when the runner has write permission.
   - Stop with the gibson/HALT file or GIBSON_HALT=1 env (checked unconditionally).
-    The gibson-halt label is a human signal; when gh is available the driver
-    also treats an open issue carrying that label as a soft halt cue.
+    When gh is available and origin's host matches GH_HOST (default github.com;
+    set GH_HOST for GitHub Enterprise), the driver also honors two remote kill
+    paths on a bounded cadence (every iteration with --once; every
+    GIBSON_REMOTE_HALT_INTERVAL iterations in a hot loop, default 3): an open
+    issue with the gibson-halt label, or a .gibson-halt sentinel on the remote
+    default branch. Either journals the halt once (persistent latch under
+    gibson/halt-latch so launchd KeepAlive relaunches do not spam the journal),
+    leaves loop-state untouched, and suppresses supervisor handoffs. A
+    previously confirmed remote halt stays fail-closed across API outages until
+    a successful recheck positively clears both remote paths. First-ever API
+    failure (no latch yet) still fails open to local checks. Non-GitHub/
+    unparseable origins never query gh against unrelated same-slug repos.
   - Error budget (default 5 consecutive failures) stops the loop to avoid burn.
   - --escalate-after dispatches other vendors: more tokens, other providers see
     the diff. Its verdicts go to gibson/second-opinion.md, which is the stall
@@ -68,6 +78,21 @@ OPTIONS
                       whenever loop-state carries a `handoff:` field (docs/22).
                       Each handoff is gated on a fresh distinct-vendor review of
                       the exact SHA being handed off; a failed review blocks it.
+
+ENV
+  GIBSON_HALT=1                 local kill switch (always honored)
+  GIBSON_REMOTE_HALT_INTERVAL   re-check remote label/sentinel every N iterations
+                                (default: 1 with --once, 3 for hot loops). A halt
+                                is still detected within N iterations. The loop
+                                process caches live results across its own
+                                iteration-top / pre-handoff checks; the child
+                                devin-supervisor.sh deliberately rechecks live
+                                (may spend another pair of gh calls) and exits 75
+                                on kill-switch refusal so the driver journals a
+                                halt, not a supervisor rejection.
+  GH_HOST                       GitHub host for remote halt (default github.com).
+                                Only origins on this host enable gh remote-halt
+                                queries (set for GitHub Enterprise).
 
 EXAMPLES
   ./scripts/loop.sh --runner grok --repo ~/Code/acme-app
@@ -126,6 +151,12 @@ STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/loop-state.md"
 JOURNAL="$STATE_DIR/journal.md"
 HALT_FILE="$STATE_DIR/HALT"
+# Persistent runtime latch (issue #71 KeepAlive / relaunch safety). Not a tracked
+# Gibson source file — lives only under the target repo's gibson/ state dir.
+# Records source + reason so (a) journal halt sections are not duplicated on
+# every launchd relaunch while the stop is still active, and (b) a confirmed
+# remote halt remains fail-closed when a later GitHub recheck is degraded.
+HALT_LATCH_FILE="$STATE_DIR/halt-latch"
 # Two review artifacts, two meanings, two paths — they are not interchangeable.
 #
 #   gibson/second-opinion.md    the ESCALATION/stall artifact. Written by escalate()
@@ -149,9 +180,1190 @@ PRE_HANDOFF_REVIEW="$STATE_DIR/pre-handoff-review.md"
 # filename says so: it has nothing to do with the escalation artifact above.
 REVIEW_RECEIPT="$STATE_DIR/pre-handoff-review.receipt"
 
-mkdir -p "$STATE_DIR"
-if [[ ! -f "$STATE_FILE" ]]; then
-  cat > "$STATE_FILE" <<EOF
+# Iteration counter (also drives remote-halt cadence). Starts at 0 so the first
+# loop top and the pre-state startup check share the same "iteration 0" slot.
+iter=0
+failures=0
+
+# Remote halt cadence (issue #71). --once always re-checks every iteration;
+# hot loops default to every 3 so a phone label still lands within a few steps
+# without burning a pair of API calls on every single hat. Override with
+# GIBSON_REMOTE_HALT_INTERVAL. The in-process cache is shared by iteration-top
+# and supervisor_handoff's pre-check; the child process still does its own
+# fresh live recheck (see kill-switch exit 75 below).
+if [[ -n "${GIBSON_REMOTE_HALT_INTERVAL:-}" ]]; then
+  REMOTE_HALT_INTERVAL="$GIBSON_REMOTE_HALT_INTERVAL"
+elif [[ "$ONCE" -eq 1 ]]; then
+  REMOTE_HALT_INTERVAL=1
+else
+  REMOTE_HALT_INTERVAL=3
+fi
+# Accept digits only; non-numeric and non-positive values would disable the
+# remote stop, so clamp to at least 1. Normalize as base-10 before any
+# arithmetic/comparison: Bash treats leading-zero strings as octal, so a
+# value like 08 passes the digit check but then dies with "value too great
+# for base" at [[ -lt ]] / $((...)) and the cache never hits (polls every
+# iteration). 10# forces decimal so 08 → 8 and 09 → 9.
+if ! [[ "$REMOTE_HALT_INTERVAL" =~ ^[0-9]+$ ]]; then
+  REMOTE_HALT_INTERVAL=1
+else
+  REMOTE_HALT_INTERVAL=$((10#$REMOTE_HALT_INTERVAL))
+  if [[ "$REMOTE_HALT_INTERVAL" -lt 1 ]]; then
+    REMOTE_HALT_INTERVAL=1
+  fi
+fi
+
+# Kill switch (issue #55 local paths + issue #71 remote paths).
+#
+# Local (always, no network):
+#   - gibson/HALT file
+#   - GIBSON_HALT=1
+#
+# Remote (read-only, cached for REMOTE_HALT_INTERVAL iterations within this
+# process — checked at iteration top and reused by the pre-handoff gate so the
+# loop itself does not double-poll in the same cadence window):
+#   - open issue carrying the gibson-halt label
+#   - .gibson-halt sentinel committed on the remote default branch
+# Only when origin's host matches GH_HOST (default github.com). GitLab/
+# Bitbucket/other hosts and unparseable origins never query gh (would hit an
+# unrelated same-named github.com repo); they fail open with an explicit
+# disabled warning once per live check.
+#
+# Network/API failure:
+#   - First-ever (no remote latch yet): fails OPEN to the local checks so a
+#     GitHub outage does not brick every project, with a "degraded" warning.
+#   - After a confirmed remote halt has been latched under gibson/halt-latch:
+#     fails CLOSED until a successful recheck positively clears both remote
+#     paths on the SAME host+slug that was latched. launchd KeepAlive must
+#     not resume work just because the recheck hit rate limiting, and changing
+#     origin to a clear repo must not clear a latch from another source.
+#
+# Journaling is once-per-activation via the same latch: relaunches while the
+# stop is still active do not append duplicate "## … · halt" sections. The
+# read/decide/journal/latch transition is cross-process locked so concurrent
+# launches wait and observe the first latch (or fail closed) rather than race.
+#
+# A remote halt leaves loop-state untouched (no default state created, no
+# rewrite of an existing one). Supervisor handoffs are suppressed. The child
+# devin-supervisor.sh deliberately rechecks live (by-hand safety; may spend
+# another pair of gh calls) and exits 75 on kill-switch refusal so a mid-
+# cadence halt is journaled as a halt, not "supervisor rejected".
+
+# Conservative GitHub owner / repo segment validation before any gh/API path
+# interpolation. Rejects exact "." / ".." and anything outside a narrow character
+# set (including percent-encoding) so a hostile remote.origin.url cannot walk
+# relative path segments into repos/${slug}/contents/... endpoints.
+# Valid leading-dot repo names (notably owner/.github) are allowed; only the
+# exact dot segments are banned for repos.
+origin_segment_ok() {
+  local kind="$1" seg="$2"
+  case "$seg" in
+    ''|.|..|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  if [[ "$kind" == "owner" ]]; then
+    # Owners/orgs: alnum + hyphen only; no leading/trailing hyphen; no dots.
+    case "$seg" in
+      *.*|*_*|-*|*-) return 1 ;;
+    esac
+    [[ "$seg" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ || "$seg" =~ ^[A-Za-z0-9]$ ]]
+    return $?
+  fi
+  # Repos: alnum + . _ - including leading-dot names like .github.
+  # Exact "." / ".." already rejected above.
+  [[ "$seg" =~ ^[A-Za-z0-9._-]+$ ]]
+  return $?
+}
+
+# Parse host + owner/repo from a git remote URL. Supports:
+#   https://github.com/owner/repo.git
+#   https://github.com/owner/repo.git/   (trailing slash before/after .git)
+#   git@github.com:owner/repo.git
+#   ssh://git@github.com/owner/repo.git
+# Uses remote.origin.url (not get-url) so url.*.insteadOf rewrites used in tests
+# and some operators' SSH helpers do not hide the logical GitHub slug.
+# Sets ORIGIN_PARSE_HOST and ORIGIN_PARSE_SLUG (empty when unparseable).
+# Does not gate on GH_HOST — callers that talk to gh must compare the host.
+origin_parse_url() {
+  local url="$1" rest host owner name
+  ORIGIN_PARSE_HOST=""
+  ORIGIN_PARSE_SLUG=""
+  [[ -n "$url" ]] || return 0
+  # Trailing slashes first, then .git, then any slash left after stripping .git
+  # so …/repo.git/ becomes …/repo (not …/repo.git as a bogus two-segment slug).
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
+  url="${url%.git}"
+  while [[ "$url" == */ ]]; do
+    url="${url%/}"
+  done
+  case "$url" in
+    git@*:*)
+      # scp-like: git@host:owner/repo
+      rest="${url#git@}"
+      host="${rest%%:*}"
+      rest="${rest#*:}"
+      ;;
+    ssh://*|https://*|http://*|git://*)
+      # scheme://[userinfo@]host[:port]/owner/repo
+      rest="${url#*://}"
+      if [[ "$rest" == *@* ]]; then
+        rest="${rest#*@}"
+      fi
+      host="${rest%%/*}"
+      rest="${rest#*/}"
+      # Drop optional :port from host
+      host="${host%%:*}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+  # Exactly two path segments (owner/repo). Reject schemes that survived, ports,
+  # deeper paths, or relative/dot segments — a bad slug would silently blind
+  # both remote checks or walk relative path segments into API paths.
+  case "$rest" in
+    ''|*/*/*|*:*|*[[:space:]]*|/*) return 0 ;;
+    */*)
+      owner="${rest%%/*}"
+      name="${rest#*/}"
+      origin_segment_ok owner "$owner" || return 0
+      origin_segment_ok repo "$name" || return 0
+      ORIGIN_PARSE_HOST="$host"
+      ORIGIN_PARSE_SLUG="${owner}/${name}"
+      ;;
+  esac
+}
+
+# owner/repo only (any host). Empty when unparseable. Cosmetic callers may use
+# this; remote-halt callers must also validate the host against GH_HOST.
+origin_slug_from_url() {
+  origin_parse_url "$1"
+  [[ -n "$ORIGIN_PARSE_SLUG" ]] && printf '%s\n' "$ORIGIN_PARSE_SLUG"
+  return 0
+}
+
+origin_slug() {
+  local url
+  url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || true
+  origin_slug_from_url "$url"
+}
+
+# Resolve the slug for remote-halt gh queries only when origin host matches
+# GH_HOST (default github.com). Sets ORIGIN_HALT_SLUG or ORIGIN_HALT_SKIP_REASON
+# (and leaves slug empty). Used by remote_halted_live so warnings fire once per
+# live check, not from pure helpers.
+origin_remote_halt_slug() {
+  local url expected got
+  ORIGIN_HALT_SLUG=""
+  ORIGIN_HALT_SKIP_REASON=""
+  url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || true
+  if [[ -z "$url" ]]; then
+    ORIGIN_HALT_SKIP_REASON="no origin remote URL configured"
+    return 1
+  fi
+  origin_parse_url "$url"
+  if [[ -z "$ORIGIN_PARSE_SLUG" || -z "$ORIGIN_PARSE_HOST" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin URL unparseable as host/owner/repo (got url=${url})"
+    return 1
+  fi
+  expected=$(printf '%s' "${GH_HOST:-github.com}" | tr '[:upper:]' '[:lower:]')
+  got=$(printf '%s' "$ORIGIN_PARSE_HOST" | tr '[:upper:]' '[:lower:]')
+  if [[ "$got" != "$expected" ]]; then
+    ORIGIN_HALT_SKIP_REASON="origin host '${ORIGIN_PARSE_HOST}' does not match GH_HOST (${GH_HOST:-github.com}); remote stop is GitHub-only"
+    return 1
+  fi
+  ORIGIN_HALT_SLUG="$ORIGIN_PARSE_SLUG"
+  return 0
+}
+
+# Default branch name as origin currently advertises via symbolic HEAD.
+# Empty / non-zero when origin is missing or unreachable — callers treat that
+# as "remote check degraded", not as a halt.
+remote_default_branch() {
+  local symref name
+  if ! symref=$(git -C "$REPO" ls-remote --symref origin HEAD 2>/dev/null); then
+    return 1
+  fi
+  name=$(printf '%s\n' "$symref" |
+    awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+  [[ -n "$name" ]] || return 1
+  printf '%s\n' "$name"
+}
+
+# Cache: empty = never checked; "halted" / "clear"; checked_at is the iter of
+# the last live poll. In-process only: supervisor_handoff reuses it so the loop
+# does not double-poll, but the child process always rechecks live.
+_REMOTE_HALT_CACHE=""
+_REMOTE_HALT_CHECKED_AT=-999999
+HALT_REASON=""
+# Which latch side was observed this call (local|remote) and whether a fresh
+# journal section is needed (1) or this activation was already journaled (0).
+HALT_LATCH_SIDE=""
+HALT_SHOULD_JOURNAL=1
+# Live poll outcome when remote_halted_live returns nonzero:
+#   clear | degraded | disabled  (empty until a live poll runs)
+REMOTE_HALT_STATUS=""
+REMOTE_HALT_KIND=""
+
+# --- Persistent halt latch (gibson/halt-latch) --------------------------------
+# local_kind=file|env, remote_kind=label|sentinel|confirmed
+# remote_host + remote_slug bind a remote latch to the exact origin that
+# confirmed it — only that host+slug may positively clear; a changed/missing
+# source stays fail-closed and never queries a different repo.
+# journaled flags suppress KeepAlive relaunch spam; remote kind keeps
+# fail-closed across degraded rechecks until a positive same-source clear.
+#
+# Cross-process lock serializes read/decide/journal/latch so concurrent launches
+# cannot double-journal or race past a halt.
+#
+# Ownership is published indivisibly: complete pid+owner token is written to a
+# process-unique temp file, then the lock path is acquired with `ln temp lock`
+# (atomic hard-link publish on the same filesystem). Observers never see a lock
+# file without complete ownership data. Release removes the lock only when it
+# still carries this process's exact owner token, so a late EXIT from a former
+# owner cannot delete a successor's lock.
+#
+# Stale reclaim is serialized through a kernel-held advisory lock on a stable
+# regular gate file (never unlinked on acquire/release). macOS uses lockf(1)
+# on an inherited open fd; Linux uses flock(1) on the same pattern. Kernel
+# state vanishes on crash — no stale generation/ABA ownership pathname and no
+# check-then-rm gate protocol. If neither backend is available, reclaim fails
+# closed (see halt_lock_try_reclaim_stale / halt_lock_reclaim_gate_*).
+
+HALT_LOCK_FILE="$STATE_DIR/halt-lock"
+HALT_LOCK_HELD=0
+HALT_LOCK_OWNER=""
+HALT_LOCK_TMP=""
+# Stable regular reclaim-gate file (kernel advisory lock target). Never unlinked
+# during normal acquire/release; content is not ownership (empty is fine).
+HALT_LOCK_RECLAIM_GATE="${STATE_DIR}/.halt-lock.reclaiming"
+# Reclaim-gate open-file-description number. Bash 3.2 has no {fd} auto-
+# allocation and a fixed high fd (e.g. 201) collides when already inherited:
+# `exec 201>>gate` does not retarget an open descriptor. Leave empty until a
+# free fd in the bounded high range is successfully opened and locked; release
+# closes only that number. Never close, retarget, or mutate inherited fds.
+HALT_LOCK_RECLAIM_FD=""
+# Inclusive scan range for collision-free reclaim-gate fd allocation.
+HALT_LOCK_RECLAIM_FD_MIN="${HALT_LOCK_RECLAIM_FD_MIN:-200}"
+HALT_LOCK_RECLAIM_FD_MAX="${HALT_LOCK_RECLAIM_FD_MAX:-220}"
+HALT_LOCK_RECLAIM_HELD=0
+# Bounded seconds to wait for the kernel reclaim gate (fail closed after).
+HALT_LOCK_RECLAIM_TIMEOUT="${HALT_LOCK_RECLAIM_TIMEOUT:-2}"
+
+# Read a key=value field from the lock file. Returns 1 if missing/unreadable.
+# No pipelines: a pipeline runs in a subshell that would inherit the EXIT trap
+# and call halt_lock_release, unlinking a live lock held by this shell.
+halt_lock_field() {
+  local key="$1" file="${2:-$HALT_LOCK_FILE}" line
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "${key}="*)
+        printf '%s' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+# Inode of a path (BSD stat first, GNU fallback). Empty/fail => return 1.
+halt_lock_inode() {
+  local f="$1" ino
+  [[ -e "$f" ]] || return 1
+  ino=$(stat -f %i "$f" 2>/dev/null) || ino=$(stat -c %i "$f" 2>/dev/null) || return 1
+  [[ -n "$ino" ]] || return 1
+  printf '%s' "$ino"
+}
+
+# True if numeric fd is already open for read or write in this shell.
+# Bash 3.2 has no /dev/fd introspection helper for this; probe with a no-op
+# redirection. Invalid candidates are treated as busy (fail closed).
+halt_lock_fd_is_open() {
+  local fd="$1"
+  [[ "$fd" =~ ^[0-9]+$ ]] || return 0
+  # Read-open probe (also true for many r/w descriptors on macOS Bash 3.2).
+  if eval "true 2>/dev/null <&${fd}"; then
+    return 0
+  fi
+  # Write-open probe (catches write-only descriptors the read probe misses).
+  if eval "true 2>/dev/null >&${fd}"; then
+    return 0
+  fi
+  return 1
+}
+
+# Print one unused high fd in [MIN,MAX], or fail closed when the range is full.
+# Candidates are validated as pure digits before any eval. Does not open,
+# close, or retarget any descriptor — selection only.
+halt_lock_pick_reclaim_fd() {
+  local min="${HALT_LOCK_RECLAIM_FD_MIN:-200}"
+  local max="${HALT_LOCK_RECLAIM_FD_MAX:-220}"
+  local fd
+  [[ "$min" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]] || return 1
+  # Bound the scan so a corrupted env cannot walk the entire fd table.
+  [[ "$min" -ge 10 && "$max" -ge "$min" && "$max" -le 250 ]] || return 1
+  fd=$min
+  while [[ $fd -le $max ]]; do
+    if ! halt_lock_fd_is_open "$fd"; then
+      printf '%s' "$fd"
+      return 0
+    fi
+    fd=$((fd + 1))
+  done
+  return 1
+}
+
+# Select reclaim-gate backend: lockf (macOS/BSD) or flock (Linux util-linux).
+# HALT_LOCK_RECLAIM_BACKEND may force a choice for tests; otherwise prefer the
+# platform tool and fall back to whichever is on PATH. Prints the name or fails.
+halt_lock_reclaim_backend() {
+  local forced="${HALT_LOCK_RECLAIM_BACKEND:-}" os
+  if [[ -n "$forced" ]]; then
+    case "$forced" in
+      lockf|flock)
+        if command -v "$forced" >/dev/null 2>&1; then
+          printf '%s' "$forced"
+          return 0
+        fi
+        return 1
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  fi
+  os=$(uname -s 2>/dev/null || true)
+  case "$os" in
+    Darwin|FreeBSD|OpenBSD|NetBSD|DragonFly)
+      if command -v lockf >/dev/null 2>&1; then
+        printf 'lockf'
+        return 0
+      fi
+      if command -v flock >/dev/null 2>&1; then
+        printf 'flock'
+        return 0
+      fi
+      ;;
+    Linux)
+      if command -v flock >/dev/null 2>&1; then
+        printf 'flock'
+        return 0
+      fi
+      if command -v lockf >/dev/null 2>&1; then
+        printf 'lockf'
+        return 0
+      fi
+      ;;
+    *)
+      if command -v flock >/dev/null 2>&1; then
+        printf 'flock'
+        return 0
+      fi
+      if command -v lockf >/dev/null 2>&1; then
+        printf 'lockf'
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+# Drop the public halt lock only if we still own it (exact owner token match).
+# Always scrubs this process's temp scratch and any held reclaim gate. Safe
+# when not held.
+halt_lock_release() {
+  local cur_owner
+  # Always drop reclaim gate first so EXIT never leaves a kernel lock open
+  # while clearing public ownership state.
+  halt_lock_reclaim_gate_release
+  if [[ -n "${HALT_LOCK_TMP:-}" ]]; then
+    rm -f "$HALT_LOCK_TMP" 2>/dev/null || true
+    HALT_LOCK_TMP=""
+  fi
+  if [[ "${HALT_LOCK_HELD:-0}" -ne 1 ]]; then
+    return 0
+  fi
+  HALT_LOCK_HELD=0
+  if [[ -n "${HALT_LOCK_OWNER:-}" && -f "$HALT_LOCK_FILE" ]]; then
+    cur_owner=$(halt_lock_field owner) || cur_owner=""
+    if [[ "$cur_owner" == "$HALT_LOCK_OWNER" ]]; then
+      rm -f "$HALT_LOCK_FILE"
+    fi
+  fi
+  HALT_LOCK_OWNER=""
+}
+
+# Recover a legacy directory-form reclaim gate (older builds: mkdir + pid
+# write). Live numeric owners are left alone (return 1 — fail closed). Dead,
+# malformed, or ownerless dirs are removed with directory-only ops (rm pid
+# file + rmdir) so a delayed migrator can never delete a regular-file
+# successor that a peer already published at the same path. Returns 0 when
+# the path is no longer a directory (or never was).
+halt_lock_scrub_legacy_reclaim_dir() {
+  local gate="$1" gpid
+  [[ -d "$gate" ]] || return 0
+  gpid=$(cat "${gate}/pid" 2>/dev/null || true)
+  if [[ -n "$gpid" && "$gpid" =~ ^[0-9]+$ ]] && kill -0 "$gpid" 2>/dev/null; then
+    return 1
+  fi
+  # Directory-only: never `rm -rf "$gate"` (would remove a regular-file
+  # successor if a peer migrated between our checks). Also scrub hidden
+  # regular-file children (e.g. crash debris) before rmdir.
+  halt_lock_scrub_dir_file_children "$gate"
+  rmdir "$gate" 2>/dev/null || true
+  [[ ! -d "$gate" ]]
+}
+
+# Remove only direct regular-file/symlink children of a directory, including
+# hidden names (Bash default globs omit dotfiles). Never removes `.`/`..`,
+# never recurses into nested directories, never follows a nested dir to delete
+# its contents, and never `rm -rf`s the directory path itself (a regular-file
+# successor at that path must survive delayed cleanup). Nested directories are
+# left in place so a subsequent rmdir fails closed. Local shopt only — no
+# global dotglob/nullglob leakage.
+halt_lock_scrub_dir_file_children() {
+  local dir="$1" f base
+  local _dg_was_on=0 _ng_was_on=0
+  [[ -d "$dir" ]] || return 0
+  shopt -q dotglob && _dg_was_on=1
+  shopt -q nullglob && _ng_was_on=1
+  shopt -s dotglob nullglob
+  for f in "$dir"/*; do
+    base="${f##*/}"
+    # Bash globs never yield . / .., but reject explicitly if they appear.
+    if [[ "$base" == "." || "$base" == ".." ]]; then
+      continue
+    fi
+    # Symlinks first: -f follows links; we only want the direct child entry.
+    if [[ -L "$f" ]]; then
+      rm -f "$f" 2>/dev/null || true
+    elif [[ -f "$f" ]]; then
+      rm -f "$f" 2>/dev/null || true
+    fi
+    # Nested directories intentionally untouched (fail closed for rmdir).
+  done
+  if [[ "$_dg_was_on" -eq 0 ]]; then
+    shopt -u dotglob
+  fi
+  if [[ "$_ng_was_on" -eq 0 ]]; then
+    shopt -u nullglob
+  fi
+}
+
+# Acquire the exclusive reclaim gate via a kernel-held advisory lock on a
+# stable regular file. The gate file is never unlinked on success or release;
+# closing the open fd drops the lock (crash-safe, no ABA generation).
+# Returns 0 with HALT_LOCK_RECLAIM_HELD=1; 1 if a peer holds it, a live legacy
+# directory owner remains, no lockf/flock backend is available, no free fd in
+# the bounded high range, or the bounded wait expires.
+halt_lock_reclaim_gate_acquire() {
+  local gate backend timeout fd
+  gate="${HALT_LOCK_RECLAIM_GATE:-$STATE_DIR/.halt-lock.reclaiming}"
+  timeout="${HALT_LOCK_RECLAIM_TIMEOUT:-2}"
+  [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=2
+
+  if [[ "${HALT_LOCK_RECLAIM_HELD:-0}" -eq 1 ]]; then
+    return 0
+  fi
+
+  # Migrate legacy directory form before opening a regular gate file.
+  if [[ -d "$gate" ]]; then
+    if ! halt_lock_scrub_legacy_reclaim_dir "$gate"; then
+      return 1
+    fi
+  fi
+  if [[ -d "$gate" ]]; then
+    return 1
+  fi
+
+  # Ensure a stable regular gate file. Never remove an existing path here —
+  # once migrated, the regular file is permanent kernel-lock state.
+  if [[ ! -f "$gate" ]]; then
+    if [[ -e "$gate" ]]; then
+      return 1
+    fi
+    # Create empty file; content is irrelevant (no ownership protocol).
+    : >> "$gate" 2>/dev/null || return 1
+  fi
+  [[ -f "$gate" ]] || return 1
+
+  if ! backend=$(halt_lock_reclaim_backend); then
+    echo "warning: halt reclaim gate unavailable (need lockf on macOS or flock on Linux) — fail closed, no work" >&2
+    return 1
+  fi
+
+  # Collision-free fd: scan a bounded high range for a descriptor that is
+  # neither read-open nor write-open. Never retarget an inherited fd — on
+  # Bash 3.2 `exec N>>file` leaves N pointing at its prior target when N is
+  # already open. Store HALT_LOCK_RECLAIM_FD only after kernel lock success.
+  if ! fd=$(halt_lock_pick_reclaim_fd); then
+    echo "warning: halt reclaim gate: no free file descriptor in range — fail closed, no work" >&2
+    return 1
+  fi
+  [[ "$fd" =~ ^[0-9]+$ ]] || return 1
+
+  # Open the stable gate on the selected free fd (append: no truncate race).
+  eval "exec ${fd}>>\"\$gate\"" || return 1
+
+  case "$backend" in
+    lockf)
+      # lockf -t N <fd>: acquire on this open file description; -s silent.
+      if ! lockf -s -t "$timeout" "$fd"; then
+        eval "exec ${fd}>&-" 2>/dev/null || true
+        return 1
+      fi
+      ;;
+    flock)
+      # flock -w N <fd>: util-linux wait; exclusive by default.
+      if ! flock -w "$timeout" "$fd"; then
+        eval "exec ${fd}>&-" 2>/dev/null || true
+        return 1
+      fi
+      ;;
+    *)
+      eval "exec ${fd}>&-" 2>/dev/null || true
+      return 1
+      ;;
+  esac
+
+  # Publish selected fd only after successful kernel acquisition.
+  HALT_LOCK_RECLAIM_FD="$fd"
+  HALT_LOCK_RECLAIM_HELD=1
+  return 0
+}
+
+# Release the reclaim gate by closing the held fd. Kernel drops the advisory
+# lock. The regular gate file is intentionally left in place (never unlinked).
+# Closes only the fd we stored after a successful acquire — never an inherited
+# descriptor we did not open for the gate.
+halt_lock_reclaim_gate_release() {
+  local fd="${HALT_LOCK_RECLAIM_FD:-}"
+  if [[ "${HALT_LOCK_RECLAIM_HELD:-0}" -ne 1 ]]; then
+    return 0
+  fi
+  HALT_LOCK_RECLAIM_HELD=0
+  HALT_LOCK_RECLAIM_FD=""
+  if [[ -n "$fd" && "$fd" =~ ^[0-9]+$ ]]; then
+    eval "exec ${fd}>&-" 2>/dev/null || true
+  fi
+}
+
+# Reclaim a dead or malformed lock without racing a live successor.
+#
+# Two hazards:
+# 1) Check-then-rm on the public path without mutual exclusion: reclaimer A and
+#    B both classify the same stale record; B unlinks it; a successor publishes
+#    via ln; A's late rm steals the successor.
+# 2) Unlink must target the exact inode we classified, not whatever name now
+#    sits at the lock path.
+#
+# Protocol: hard-link pin the published inode → classify via the pin → take the
+# kernel-held reclaim gate (lockf/flock on a stable fd) → unlink the public name
+# only if it still refers to the pinned inode and that inode is still stale →
+# drop gate (close fd) and pin. A second reclaimer either fails the pin (gone),
+# fails the gate (peer reclaiming), or sees a different inode at the public
+# path (successor already published). The reclaim gate itself is never removed
+# by check-then-rm — only kernel lock state serializes reclaimers.
+halt_lock_try_reclaim_stale() {
+  local owner pid pin ino cur_ino stale=0 live_legacy=0
+
+  # Legacy directory form from older builds: reclaim empty/dead dirs so an
+  # upgraded process is not permanently blocked by a leftover halt-lock/.
+  # Serialized under the same kernel gate as file reclaim. Also scrub regular
+  # files left inside by a mistaken `ln temp dir` (ln links into directories),
+  # including hidden crash debris (`.halt-lock.*`) that plain `*` globs omit.
+  if [[ -d "$HALT_LOCK_FILE" ]]; then
+    if ! halt_lock_reclaim_gate_acquire; then
+      return 0
+    fi
+    if [[ -d "$HALT_LOCK_FILE" ]]; then
+      live_legacy=0
+      if [[ -f "${HALT_LOCK_FILE}/pid" ]]; then
+        pid=$(cat "${HALT_LOCK_FILE}/pid" 2>/dev/null || true)
+        if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+          live_legacy=1
+        fi
+      fi
+      if [[ "$live_legacy" -eq 0 ]]; then
+        # Direct regular-file/symlink children only (incl. hidden). Nested
+        # directories are left alone so rmdir fails closed. Never rm -rf the
+        # public path (would delete a regular-file successor).
+        halt_lock_scrub_dir_file_children "$HALT_LOCK_FILE"
+        rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
+      fi
+    fi
+    halt_lock_reclaim_gate_release
+    return 0
+  fi
+
+  [[ -f "$HALT_LOCK_FILE" ]] || return 0
+
+  # Pin the exact inode currently published as the lock.
+  pin=$(mktemp "${STATE_DIR}/.halt-lock.reclaim.XXXXXX") || return 0
+  rm -f "$pin"
+  if ! ln "$HALT_LOCK_FILE" "$pin" 2>/dev/null; then
+    return 0
+  fi
+
+  owner=$(halt_lock_field owner "$pin") || owner=""
+  pid=$(halt_lock_field pid "$pin") || pid=""
+  if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]]; then
+    stale=1
+  elif ! kill -0 "$pid" 2>/dev/null; then
+    stale=1
+  fi
+  if [[ "$stale" -ne 1 ]]; then
+    rm -f "$pin"
+    return 0
+  fi
+
+  ino=$(halt_lock_inode "$pin") || { rm -f "$pin"; return 0; }
+
+  if ! halt_lock_reclaim_gate_acquire; then
+    rm -f "$pin"
+    return 0
+  fi
+
+  # Unlink the public name only if it still names the inode we classified.
+  # Safe under the exclusive kernel reclaim gate: no peer reclaimer runs, and a
+  # successor cannot ln-publish while this inode still occupies the public name.
+  cur_ino=$(halt_lock_inode "$HALT_LOCK_FILE" 2>/dev/null || true)
+  if [[ -n "$cur_ino" && "$cur_ino" == "$ino" ]]; then
+    # Re-confirm the pinned inode is still a stale record (content is fixed for
+    # a given inode under our publish protocol; re-read is defensive).
+    owner=$(halt_lock_field owner "$pin") || owner=""
+    pid=$(halt_lock_field pid "$pin") || pid=""
+    if [[ -z "$owner" || -z "$pid" ]] || ! [[ "$pid" =~ ^[0-9]+$ ]] \
+      || ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$HALT_LOCK_FILE"
+    fi
+  fi
+
+  halt_lock_reclaim_gate_release
+  rm -f "$pin"
+}
+
+# Acquire exclusive halt transition lock. Wait for peers (ordinary launchd is
+# uncontended and returns immediately). Steal only when the owner is dead or
+# the lock is malformed. Returns 1 after a bounded wait so a stuck lock fails
+# closed (no work).
+halt_lock_acquire() {
+  local tries=0 max_tries=400 tmp owner_token tmp_ino pub_ino pub_owner
+  mkdir -p "$STATE_DIR" || return 1
+  while [[ $tries -lt $max_tries ]]; do
+    tmp=$(mktemp "${STATE_DIR}/.halt-lock.XXXXXX") || return 1
+    HALT_LOCK_TMP="$tmp"
+    # Unique per attempt: pid + mktemp basename (portable on Bash 3.2 / macOS).
+    owner_token="$$.${tmp##*/}"
+    # Write complete ownership BEFORE publication — never publish an empty lock.
+    if ! {
+      printf 'pid=%s\n' "$$"
+      printf 'owner=%s\n' "$owner_token"
+    } > "$tmp"; then
+      rm -f "$tmp"
+      HALT_LOCK_TMP=""
+      return 1
+    fi
+    # Atomic acquire: hard-link the complete temp onto the lock path. If the
+    # link succeeds, every observer sees full pid+owner data; if it fails, the
+    # lock already exists with someone else's complete record.
+    # NOTE: `ln temp existing-dir` succeeds by linking *into* the directory —
+    # that is not ownership of the public lock path. Reject directory results.
+    # Ownership race: after ln into a legacy dir, a peer can rmdir + publish a
+    # regular successor before our type checks; `-f public` alone must not
+    # claim that successor. Require same inode as still-present temp + exact
+    # owner token before setting HALT_LOCK_HELD.
+    if ln "$tmp" "$HALT_LOCK_FILE" 2>/dev/null; then
+      if [[ -d "$HALT_LOCK_FILE" ]]; then
+        # Mistaken link-into-directory: remove only this attempt's debris/temp
+        # and fall through to reclaim. Do not claim ownership.
+        rm -f "${HALT_LOCK_FILE}/${tmp##*/}" 2>/dev/null || true
+        rm -f "$tmp"
+        HALT_LOCK_TMP=""
+      elif [[ -f "$HALT_LOCK_FILE" ]]; then
+        tmp_ino=$(halt_lock_inode "$tmp" 2>/dev/null || true)
+        pub_ino=$(halt_lock_inode "$HALT_LOCK_FILE" 2>/dev/null || true)
+        pub_owner=$(halt_lock_field owner "$HALT_LOCK_FILE" 2>/dev/null || true)
+        if [[ -n "$tmp_ino" && -n "$pub_ino" && "$tmp_ino" == "$pub_ino" \
+          && -e "$tmp" && -n "$pub_owner" && "$pub_owner" == "$owner_token" ]]; then
+          rm -f "$tmp"
+          HALT_LOCK_TMP=""
+          HALT_LOCK_OWNER="$owner_token"
+          HALT_LOCK_HELD=1
+          return 0
+        fi
+        # Public path is not this attempt's inode/token (peer successor or
+        # lost temp). Remove only our known debris/temp; never unlink a
+        # successor at the public path.
+        if [[ -d "$HALT_LOCK_FILE" ]]; then
+          rm -f "${HALT_LOCK_FILE}/${tmp##*/}" 2>/dev/null || true
+        fi
+        rm -f "$tmp"
+        HALT_LOCK_TMP=""
+      else
+        rm -f "$tmp"
+        HALT_LOCK_TMP=""
+      fi
+    else
+      rm -f "$tmp"
+      HALT_LOCK_TMP=""
+    fi
+    halt_lock_try_reclaim_stale
+    # ~50ms; fall back to 1s if fractional sleep is unavailable.
+    sleep 0.05 2>/dev/null || sleep 1
+    tries=$((tries + 1))
+  done
+  return 1
+}
+
+# Ensure lock is dropped on abnormal exit while held (token-checked release).
+# Only fire at the shell depth that installed the trap: pipeline/subshell
+# helpers inherit HALT_LOCK_HELD and must not unlink the parent's live lock.
+# halt_lock_release also closes any held reclaim-gate fd.
+if [[ -z "${_GIBSON_HALT_LOCK_TRAP:-}" ]]; then
+  _GIBSON_HALT_LOCK_TRAP=1
+  _GIBSON_HALT_LOCK_TRAP_DEPTH=${BASH_SUBSHELL:-0}
+  trap '[[ "${BASH_SUBSHELL:-0}" -eq "${_GIBSON_HALT_LOCK_TRAP_DEPTH:-0}" ]] && halt_lock_release' EXIT
+fi
+
+halt_latch_field() {
+  local key="$1" line
+  [[ -f "$HALT_LATCH_FILE" ]] || return 0
+  # No pipelines — same EXIT-trap hazard as halt_lock_field (latch is read
+  # while the halt transition lock is held).
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "${key}="*)
+        printf '%s' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done < "$HALT_LATCH_FILE"
+  return 0
+}
+
+halt_latch_load() {
+  LATCH_LOCAL_KIND=$(halt_latch_field local_kind)
+  LATCH_LOCAL_REASON=$(halt_latch_field local_reason)
+  LATCH_LOCAL_JOURNALED=$(halt_latch_field local_journaled)
+  LATCH_REMOTE_KIND=$(halt_latch_field remote_kind)
+  LATCH_REMOTE_REASON=$(halt_latch_field remote_reason)
+  LATCH_REMOTE_JOURNALED=$(halt_latch_field remote_journaled)
+  LATCH_REMOTE_HOST=$(halt_latch_field remote_host)
+  LATCH_REMOTE_SLUG=$(halt_latch_field remote_slug)
+  LATCH_LOCAL_KIND=${LATCH_LOCAL_KIND:-}
+  LATCH_LOCAL_REASON=${LATCH_LOCAL_REASON:-}
+  LATCH_LOCAL_JOURNALED=${LATCH_LOCAL_JOURNALED:-0}
+  LATCH_REMOTE_KIND=${LATCH_REMOTE_KIND:-}
+  LATCH_REMOTE_REASON=${LATCH_REMOTE_REASON:-}
+  LATCH_REMOTE_JOURNALED=${LATCH_REMOTE_JOURNALED:-0}
+  LATCH_REMOTE_HOST=${LATCH_REMOTE_HOST:-}
+  LATCH_REMOTE_SLUG=${LATCH_REMOTE_SLUG:-}
+}
+
+halt_latch_save() {
+  mkdir -p "$STATE_DIR"
+  if [[ -z "${LATCH_LOCAL_KIND:-}" && -z "${LATCH_REMOTE_KIND:-}" ]]; then
+    rm -f "$HALT_LATCH_FILE"
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp "${STATE_DIR}/halt-latch.XXXXXX")
+  {
+    printf 'local_kind=%s\n' "${LATCH_LOCAL_KIND:-}"
+    printf 'local_reason=%s\n' "${LATCH_LOCAL_REASON:-}"
+    printf 'local_journaled=%s\n' "${LATCH_LOCAL_JOURNALED:-0}"
+    printf 'remote_kind=%s\n' "${LATCH_REMOTE_KIND:-}"
+    printf 'remote_reason=%s\n' "${LATCH_REMOTE_REASON:-}"
+    printf 'remote_journaled=%s\n' "${LATCH_REMOTE_JOURNALED:-0}"
+    printf 'remote_host=%s\n' "${LATCH_REMOTE_HOST:-}"
+    printf 'remote_slug=%s\n' "${LATCH_REMOTE_SLUG:-}"
+    printf 'updated_at=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  } > "$tmp"
+  mv -f "$tmp" "$HALT_LATCH_FILE"
+}
+
+# True when the current remote-halt origin (GH_HOST-validated host + slug)
+# exactly matches the host+slug stored on the remote latch. Missing latch
+# fields, unparseable/mismatched origins, or host changes all return false.
+remote_latch_source_matches() {
+  local cur_host cur_slug lat_host lat_slug
+  if [[ -z "${LATCH_REMOTE_HOST:-}" || -z "${LATCH_REMOTE_SLUG:-}" ]]; then
+    return 1
+  fi
+  if ! origin_remote_halt_slug; then
+    return 1
+  fi
+  cur_host=$(printf '%s' "${ORIGIN_PARSE_HOST:-}" | tr '[:upper:]' '[:lower:]')
+  cur_slug="${ORIGIN_HALT_SLUG:-}"
+  lat_host=$(printf '%s' "$LATCH_REMOTE_HOST" | tr '[:upper:]' '[:lower:]')
+  lat_slug="$LATCH_REMOTE_SLUG"
+  [[ -n "$cur_host" && -n "$cur_slug" && "$cur_host" == "$lat_host" && "$cur_slug" == "$lat_slug" ]]
+}
+
+# Fail-closed reason when a remote latch exists but current origin cannot
+# prove it is the same host+slug (changed, missing, unparseable, incomplete).
+remote_latch_source_mismatch_reason() {
+  local latched_src current_src
+  latched_src="${LATCH_REMOTE_HOST:-unknown}/${LATCH_REMOTE_SLUG:-unknown}"
+  if origin_remote_halt_slug 2>/dev/null; then
+    current_src="${ORIGIN_PARSE_HOST:-?}/${ORIGIN_HALT_SLUG:-?}"
+  else
+    current_src="missing/unparseable/non-matching (${ORIGIN_HALT_SKIP_REASON:-no detail})"
+  fi
+  printf '%s' "remote halt: previously confirmed remote kill switch still latched for ${latched_src}, but current origin is ${current_src} — stopping without querying a different repo. Restore origin to ${latched_src} and clear the remote stop successfully, or after operator verification explicitly remove gibson/halt-latch."
+}
+
+# Observe a still-active local stop. Sets HALT_REASON / HALT_SHOULD_JOURNAL /
+# HALT_LATCH_SIDE. Clears the local latch only when the stop is gone (callers
+# invoke halt_latch_clear_local when neither file nor env is active).
+halt_latch_observe_local() {
+  local kind="$1" reason="$2"
+  halt_latch_load
+  HALT_REASON="$reason"
+  HALT_LATCH_SIDE="local"
+  if [[ "$LATCH_LOCAL_KIND" == "$kind" && "$LATCH_LOCAL_JOURNALED" == "1" ]]; then
+    HALT_SHOULD_JOURNAL=0
+  else
+    HALT_SHOULD_JOURNAL=1
+    LATCH_LOCAL_KIND="$kind"
+    LATCH_LOCAL_REASON="$reason"
+    LATCH_LOCAL_JOURNALED=0
+    halt_latch_save
+  fi
+}
+
+halt_latch_clear_local() {
+  halt_latch_load
+  if [[ -z "$LATCH_LOCAL_KIND" ]]; then
+    return 0
+  fi
+  LATCH_LOCAL_KIND=""
+  LATCH_LOCAL_REASON=""
+  LATCH_LOCAL_JOURNALED=0
+  halt_latch_save
+}
+
+# Observe a remote stop on the given host+slug (required). Only that source
+# may later positively clear this latch.
+halt_latch_observe_remote() {
+  local kind="$1" reason="$2" host="${3:-}" slug="${4:-}"
+  local lh ls nh
+  halt_latch_load
+  HALT_REASON="$reason"
+  HALT_LATCH_SIDE="remote"
+  if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" == "1" \
+        && -n "$LATCH_REMOTE_HOST" && -n "$LATCH_REMOTE_SLUG" \
+        && -n "$host" && -n "$slug" ]]; then
+    lh=$(printf '%s' "$LATCH_REMOTE_HOST" | tr '[:upper:]' '[:lower:]')
+    ls="$LATCH_REMOTE_SLUG"
+    nh=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+    if [[ "$lh" == "$nh" && "$ls" == "$slug" ]]; then
+      # Still-active same-source remote stop already journaled.
+      HALT_SHOULD_JOURNAL=0
+      # Refresh kind/reason when we have a fresher live observation.
+      if [[ -n "$kind" && "$kind" != "confirmed" ]]; then
+        LATCH_REMOTE_KIND="$kind"
+        LATCH_REMOTE_REASON="$reason"
+        halt_latch_save
+      fi
+      return 0
+    fi
+  fi
+  HALT_SHOULD_JOURNAL=1
+  LATCH_REMOTE_KIND="${kind:-confirmed}"
+  LATCH_REMOTE_REASON="$reason"
+  LATCH_REMOTE_JOURNALED=0
+  LATCH_REMOTE_HOST="$host"
+  LATCH_REMOTE_SLUG="$slug"
+  halt_latch_save
+}
+
+halt_latch_clear_remote() {
+  halt_latch_load
+  if [[ -z "$LATCH_REMOTE_KIND" ]]; then
+    return 0
+  fi
+  LATCH_REMOTE_KIND=""
+  LATCH_REMOTE_REASON=""
+  LATCH_REMOTE_JOURNALED=0
+  LATCH_REMOTE_HOST=""
+  LATCH_REMOTE_SLUG=""
+  halt_latch_save
+}
+
+# After a journal section is written, mark the observed side journaled so
+# KeepAlive relaunches skip the duplicate.
+halt_latch_mark_journaled() {
+  halt_latch_load
+  case "${HALT_LATCH_SIDE:-}" in
+    local)
+      LATCH_LOCAL_JOURNALED=1
+      halt_latch_save
+      ;;
+    remote)
+      LATCH_REMOTE_JOURNALED=1
+      halt_latch_save
+      ;;
+    *)
+      # Exit-75 / generic path: mark whichever sides are present and unjournaled.
+      local changed=0
+      if [[ -n "$LATCH_LOCAL_KIND" && "$LATCH_LOCAL_JOURNALED" != "1" ]]; then
+        LATCH_LOCAL_JOURNALED=1
+        changed=1
+      fi
+      if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" != "1" ]]; then
+        LATCH_REMOTE_JOURNALED=1
+        changed=1
+      fi
+      if [[ "$changed" -eq 1 ]]; then
+        halt_latch_save
+      fi
+      ;;
+  esac
+}
+
+# Live remote poll (no cache). Sets HALT_REASON + REMOTE_HALT_KIND on a positive
+# hit (return 0). On non-hit sets REMOTE_HALT_STATUS to clear|degraded|disabled
+# and returns 1. Callers combine this with the persistent remote latch.
+remote_halted_live() {
+  REMOTE_HALT_STATUS=""
+  REMOTE_HALT_KIND=""
+  if ! command -v gh >/dev/null 2>&1; then
+    REMOTE_HALT_STATUS="degraded"
+    return 1
+  fi
+  local slug out ec def_branch label_degraded=0
+  if ! origin_remote_halt_slug; then
+    # Once per live check (this function), not per helper call — unparseable or
+    # non-GH_HOST origins must not silently disable the phone stop.
+    info "remote halt check disabled: ${ORIGIN_HALT_SKIP_REASON} — continuing with local HALT/GIBSON_HALT only (zero gh remote-halt queries)"
+    REMOTE_HALT_STATUS="disabled"
+    return 1
+  fi
+  slug="$ORIGIN_HALT_SLUG"
+
+  # 1) gibson-halt label on any open issue (live poll; removal lets a fresh
+  #    launch run because this is re-checked on cadence, not process-start-only).
+  set +e
+  out=$(gh issue list --repo "$slug" \
+    --label gibson-halt --state open --limit 1 \
+    --json number -q '.[0].number' 2>&1)
+  ec=$?
+  set -e
+  if [[ $ec -ne 0 ]]; then
+    # Missing/forbidden/wrong repo usually lands here. Preserve this degraded
+    # evidence; do not let a later sentinel 404 present a trustworthy "clear".
+    label_degraded=1
+    info "remote halt check degraded: gibson-halt label query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
+  elif printf '%s' "$out" | grep -q '[0-9]'; then
+    REMOTE_HALT_KIND="label"
+    HALT_REASON="remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
+    info "$HALT_REASON"
+    REMOTE_HALT_STATUS="halted"
+    return 0
+  fi
+
+  # 2) .gibson-halt sentinel on the remote default branch (phone-friendly:
+  #    commit the empty file to main from any device with GitHub access).
+  # Pass the ref as an encoded request parameter — never interpolate into ?ref=
+  # (branch names may contain #, &, ?, etc. which would be treated as URL syntax
+  # and check the wrong ref or a truncated one).
+  if ! def_branch=$(remote_default_branch); then
+    info "remote halt check degraded: could not resolve origin default branch — continuing with local HALT/GIBSON_HALT only"
+    REMOTE_HALT_STATUS="degraded"
+    return 1
+  fi
+  set +e
+  out=$(gh api --method GET "repos/${slug}/contents/.gibson-halt" \
+    -f "ref=${def_branch}" 2>&1)
+  ec=$?
+  set -e
+  if [[ $ec -eq 0 ]]; then
+    REMOTE_HALT_KIND="sentinel"
+    HALT_REASON="remote halt: .gibson-halt sentinel on origin/${def_branch} — stopping (delete the file from the default branch to allow a fresh launch)"
+    info "$HALT_REASON"
+    REMOTE_HALT_STATUS="halted"
+    return 0
+  fi
+  # 404 Not Found = no sentinel only when the repo was already proven reachable
+  # by a successful label query. If the label query was degraded, a 404 is not
+  # trustworthy clear (private/wrong/missing repo often 404s too).
+  if printf '%s' "$out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+    if [[ "$label_degraded" -eq 1 ]]; then
+      REMOTE_HALT_STATUS="degraded"
+      return 1
+    fi
+    REMOTE_HALT_STATUS="clear"
+    return 1
+  fi
+  info "remote halt check degraded: .gibson-halt sentinel query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
+  REMOTE_HALT_STATUS="degraded"
+  return 1
+}
+
+# True when a remote halt path is active. Honors REMOTE_HALT_INTERVAL cache and
+# the persistent remote latch (fail-closed after a prior confirmation; source-
+# bound so only the same host+slug may positively clear).
+remote_halted() {
+  local age
+  if [[ -n "$_REMOTE_HALT_CACHE" ]]; then
+    age=$((iter - _REMOTE_HALT_CHECKED_AT))
+    if [[ "$age" -ge 0 && "$age" -lt "$REMOTE_HALT_INTERVAL" ]]; then
+      if [[ "$_REMOTE_HALT_CACHE" == "halted" ]]; then
+        if [[ -z "$HALT_REASON" ]]; then
+          halt_latch_load
+          if [[ -n "$LATCH_REMOTE_REASON" ]]; then
+            HALT_REASON="$LATCH_REMOTE_REASON"
+          else
+            HALT_REASON="remote halt: cached remote kill switch still active — stopping"
+          fi
+        fi
+        HALT_LATCH_SIDE="remote"
+        halt_latch_load
+        if [[ -n "$LATCH_REMOTE_KIND" && "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+          HALT_SHOULD_JOURNAL=0
+        else
+          HALT_SHOULD_JOURNAL=1
+        fi
+        return 0
+      fi
+      return 1
+    fi
+  fi
+  _REMOTE_HALT_CHECKED_AT=$iter
+
+  # Source-bound gate: if a remote latch exists for a different/missing origin,
+  # stay fail-closed and never query or clear against the new repo.
+  halt_latch_load
+  if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+    if ! remote_latch_source_matches; then
+      HALT_REASON=$(remote_latch_source_mismatch_reason)
+      info "$HALT_REASON"
+      HALT_LATCH_SIDE="remote"
+      if [[ "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+        HALT_SHOULD_JOURNAL=0
+      else
+        HALT_SHOULD_JOURNAL=1
+      fi
+      _REMOTE_HALT_CACHE="halted"
+      return 0
+    fi
+  fi
+
+  if remote_halted_live; then
+    _REMOTE_HALT_CACHE="halted"
+    halt_latch_observe_remote "${REMOTE_HALT_KIND:-confirmed}" "$HALT_REASON" \
+      "${ORIGIN_PARSE_HOST:-}" "${ORIGIN_HALT_SLUG:-}"
+    return 0
+  fi
+  case "${REMOTE_HALT_STATUS:-}" in
+    clear)
+      # Positive clear of both remote paths on the SAME host+slug — drop the
+      # remote latch so a fresh launch is allowed. First-ever clear with no
+      # latch is a no-op. (Mismatched sources never reach here: gated above.)
+      halt_latch_clear_remote
+      _REMOTE_HALT_CACHE="clear"
+      return 1
+      ;;
+    degraded|disabled)
+      # Fail-closed only when a prior confirmation latched the remote stop on
+      # this same source. First-ever API failure (no latch) stays fail-open.
+      halt_latch_load
+      if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+        HALT_REASON="${LATCH_REMOTE_REASON:-remote halt: previously confirmed remote kill switch still latched — stopping (GitHub recheck degraded; restore the original source and clear it successfully, or after operator verification remove gibson/halt-latch)}"
+        info "remote halt latch held closed after degraded/disabled recheck (source=${LATCH_REMOTE_KIND} host=${LATCH_REMOTE_HOST:-?} slug=${LATCH_REMOTE_SLUG:-?})"
+        HALT_LATCH_SIDE="remote"
+        if [[ "$LATCH_REMOTE_JOURNALED" == "1" ]]; then
+          HALT_SHOULD_JOURNAL=0
+        else
+          HALT_SHOULD_JOURNAL=1
+        fi
+        _REMOTE_HALT_CACHE="halted"
+        return 0
+      fi
+      _REMOTE_HALT_CACHE="clear"
+      return 1
+      ;;
+    *)
+      _REMOTE_HALT_CACHE="clear"
+      return 1
+      ;;
+  esac
+}
+
+halted() {
+  HALT_REASON=""
+  HALT_LATCH_SIDE=""
+  HALT_SHOULD_JOURNAL=1
+  if [[ -f "$HALT_FILE" ]]; then
+    halt_latch_observe_local "file" "kill switch: gibson/HALT is present — stopping"
+    return 0
+  fi
+  if [[ "${GIBSON_HALT:-}" == "1" ]]; then
+    halt_latch_observe_local "env" "kill switch: GIBSON_HALT=1 — stopping"
+    return 0
+  fi
+  # Neither local stop is active — drop any stale local latch so a fresh launch
+  # after removing HALT / unsetting GIBSON_HALT is not held by journal dedup.
+  halt_latch_clear_local
+  if remote_halted; then
+    # HALT_REASON / HALT_SHOULD_JOURNAL already set by remote_halted / latch.
+    if [[ -z "$HALT_REASON" && "$_REMOTE_HALT_CACHE" == "halted" ]]; then
+      HALT_REASON="remote halt: cached remote kill switch still active — stopping"
+    fi
+    return 0
+  fi
+  return 1
+}
+
+# Journal a halt without creating or rewriting loop-state (issue #71).
+# May create gibson/ and journal.md only — never loop-state.md.
+# Callers that already know a duplicate is unwanted check HALT_SHOULD_JOURNAL
+# (stop_if_halted does); this helper always appends when invoked.
+journal_halt() {
+  mkdir -p "$STATE_DIR"
+  if [[ ! -f "$JOURNAL" ]]; then
+    echo "# Gibson loop journal" > "$JOURNAL"
+  fi
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · halt"
+    echo "${HALT_REASON:-kill switch active — stopping}"
+    echo "loop-state left untouched; supervisor handoffs suppressed."
+  } >> "$JOURNAL"
+  halt_latch_mark_journaled
+}
+
+# Exit cleanly on any active kill switch. Call before state init and at every
+# iteration top so a remote halt never materializes a default loop-state.
+# Journal at most once per latch activation (KeepAlive-safe). Serialized with
+# a cross-process lock so concurrent launches wait and observe the first latch
+# (or fail closed) rather than racing duplicate journal sections or work.
+stop_if_halted() {
+  if ! halt_lock_acquire; then
+    info "kill switch transition lock unavailable — stopping fail-closed (concurrent launch still owning the lock, or stuck lock; no work started)"
+    exit 0
+  fi
+  if halted; then
+    if [[ "${HALT_SHOULD_JOURNAL:-1}" -eq 1 ]]; then
+      journal_halt
+    fi
+    halt_lock_release
+    info "kill switch set — stopping cleanly"
+    exit 0
+  fi
+  halt_lock_release
+}
+
+# Ensure loop-state exists (and has handoff fields) only AFTER a clean kill-
+# switch check. A remote halt on a cold start must not create or rewrite this.
+ensure_loop_state() {
+  mkdir -p "$STATE_DIR"
+  if [[ ! -f "$STATE_FILE" ]]; then
+    cat > "$STATE_FILE" <<EOF
 # Gibson loop state
 updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 issue:
@@ -165,25 +1377,12 @@ handoff_sha:
 next_action: triage highest-priority unblocked unclaimed issue
 notes: initialized by loop.sh
 EOF
-fi
-grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
-grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE"
-[[ -f "$JOURNAL" ]] || echo "# Gibson loop journal" > "$JOURNAL"
-
-# Kill switch: HALT file is primary. GIBSON_HALT=1 is checked unconditionally
-# (previously only when `gh` was present — issue #55). When gh is available we
-# also treat any open issue carrying the gibson-halt label as a soft signal.
-halted() {
-  if [[ -f "$HALT_FILE" ]]; then return 0; fi
-  if [[ "${GIBSON_HALT:-}" == "1" ]]; then return 0; fi
-  if command -v gh >/dev/null 2>&1; then
-    if gh issue list --repo "$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#(git@[^:]+:|https?://[^/]+/)##; s/\.git$//' || true)" \
-         --label gibson-halt --state open --limit 1 --json number -q '.[0].number' 2>/dev/null | grep -q '[0-9]'; then
-      info "gibson-halt label detected on an open issue — treating as soft halt (write gibson/HALT to make permanent)"
-      return 0
-    fi
   fi
-  return 1
+  grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
+  grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE"
+  if [[ ! -f "$JOURNAL" ]]; then
+    echo "# Gibson loop journal" > "$JOURNAL"
+  fi
 }
 
 # Why a blocked handoff writes to the journal and not only to stderr.
@@ -558,6 +1757,14 @@ supervisor_handoff() {
   local branch
   branch=$(read_field handoff)
   [[ -n "$branch" ]] || return 0
+  # Local kill switch + in-process remote cache (age 0 within an iteration, so
+  # this mainly catches gibson/HALT / GIBSON_HALT that appeared after iteration
+  # top). A mid-cadence remote label/sentinel is caught by the child's fresh
+  # live recheck (exit 75 below), not by this cache hit.
+  if halted; then
+    info "kill switch active — suppressing supervisor handoff of $branch (handoff stays queued)"
+    return 0
+  fi
   # Names the branch in every journal entry written below this point, including
   # the ones written from inside resolve_base_pin/resolve_handoff_sha's command
   # substitutions — a reader with three queued branches needs to know which one
@@ -605,10 +1812,18 @@ supervisor_handoff() {
   # than the one that was reviewed. Both objects were fetched and verified by
   # resolve_base_pin/resolve_handoff_sha above, so the exact-SHA diff is readable.
   info "handing $branch @$sha to the Devin supervisor (base $base @ $base_sha)"
-  if "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
+  # Capture rc: 75 is kill-switch refusal (remote/local) from the child's own
+  # fresh live recheck — journal a halt, leave handoff queued, never say
+  # "supervisor rejected". Any other nonzero is a real rejection/error path.
+  local sup_rc=0
+  set +e
+  "$SCRIPT_DIR/devin-supervisor.sh" handoff --repo "$REPO" --branch "$branch" \
       --base "$base" --base-sha "$base_sha" --sha "$sha" \
       --task "$task" --gate-status "green locally" \
-      --review-file "$review"; then
+      --review-file "$review"
+  sup_rc=$?
+  set -e
+  if [[ "$sup_rc" -eq 0 ]]; then
     node -e '
       const fs = require("fs");
       const file = process.argv[1];
@@ -617,8 +1832,22 @@ supervisor_handoff() {
       text = text.replace(/^handoff_sha:.*$/m, "handoff_sha:");
       fs.writeFileSync(file, text);
     ' "$STATE_FILE"
+  elif [[ "$sup_rc" -eq 75 ]]; then
+    HALT_REASON="kill switch: supervisor refused handoff after a fresh remote/local check — handoff left queued (remove gibson-halt label / .gibson-halt / gibson/HALT / GIBSON_HALT to allow a fresh launch)"
+    # Child already wrote the appropriate latch side (local file present, or
+    # remote confirmation). Mark journaled after this section; only treat the
+    # in-process remote cache as halted when a remote latch actually exists so
+    # a pure local refuse does not poison later cache-hit messaging.
+    HALT_LATCH_SIDE=""
+    journal_halt
+    halt_latch_load
+    if [[ -n "$LATCH_REMOTE_KIND" ]]; then
+      _REMOTE_HALT_CACHE="halted"
+      _REMOTE_HALT_CHECKED_AT=$iter
+    fi
+    info "kill switch active — supervisor refused handoff of $branch (handoff stays queued; not a supervisor rejection)"
   else
-    block "supervisor rejected the handoff: devin-supervisor.sh exited non-zero for $branch @ $sha into $base @ $base_sha. Re-run that command by hand to see its refusal (it prints the reason to stderr) — a moved remote tip, a missing DEVIN_API_KEY, and an unreachable Devin API all land here."
+    block "supervisor rejected the handoff: devin-supervisor.sh exited $sup_rc for $branch @ $sha into $base @ $base_sha. Re-run that command by hand to see its refusal (it prints the reason to stderr) — a moved remote tip, a missing DEVIN_API_KEY, and an unreachable Devin API all land here."
   fi
 }
 
@@ -631,8 +1860,11 @@ heartbeat() {
   fi
 }
 
-failures=0
-iter=0
+# Kill switch before any loop-state init or supervisor ensure: a remote halt on
+# a cold start must journal and exit without creating a default loop-state, and
+# must not wake the cloud supervisor (issue #71).
+stop_if_halted
+ensure_loop_state
 
 if [[ "$SUPERVISOR" == "devin" && "$DRY" -eq 0 && "$PRINT" -eq 0 ]]; then
   "$SCRIPT_DIR/devin-supervisor.sh" ensure --repo "$REPO" || \
@@ -640,10 +1872,7 @@ if [[ "$SUPERVISOR" == "devin" && "$DRY" -eq 0 && "$PRINT" -eq 0 ]]; then
 fi
 
 while true; do
-  if halted; then
-    info "kill switch set — stopping cleanly"
-    exit 0
-  fi
+  stop_if_halted
 
   hat="${FORCE_HAT:-$(read_field next_hat)}"
   [[ -n "$hat" ]] || hat="builder"
