@@ -429,7 +429,8 @@ if data.get("schema") != "gibson.toolchain-lock/v1":
 EXACT_SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
-IMAGE_DIGEST = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
+# Registry/repository path required before @sha256 (digest-only is not a locator).
+IMAGE_DIGEST = re.compile(r"^.+/.+@sha256:[0-9a-f]{64}$")
 FLOAT_WORD = re.compile(r"^(latest|stable|main|master|\*|x)$", re.I)
 # Operators, wildcards, ranges, incomplete segments
 NONEXACT = re.compile(
@@ -609,104 +610,344 @@ if socket:
     if "token" not in notes and "credential" not in notes:
         errors.append("socket-cli must document owner-gated credential truth")
 
+def package_embeds_exact_version(pkg):
+    """True when package string embeds name + exact MAJOR.MINOR.PATCH."""
+    if not isinstance(pkg, str) or pkg != pkg.strip() or any(ch.isspace() for ch in pkg):
+        return False
+    if pkg.startswith("@"):
+        # scoped: @scope/name@version
+        if pkg.count("@") < 2:
+            return False
+        name, ver = pkg.rsplit("@", 1)
+        return bool(name) and is_exact_numeric_semver(ver)
+    if "==" in pkg:
+        name, ver = pkg.split("==", 1)
+        return bool(name) and is_exact_numeric_semver(ver)
+    if "@" in pkg:
+        name, ver = pkg.rsplit("@", 1)
+        return bool(name) and is_exact_numeric_semver(ver)
+    return False
+
+def is_package_at_identity(s):
+    """name@exact-semver package identity (not bare v1.2.3)."""
+    if not isinstance(s, str) or s != s.strip() or any(ch.isspace() for ch in s):
+        return False
+    if s.startswith("@"):
+        if s.count("@") < 2:
+            return False
+        name, ver = s.rsplit("@", 1)
+        return bool(name) and is_exact_numeric_semver(ver)
+    if "@" not in s:
+        return False
+    name, ver = s.rsplit("@", 1)
+    return bool(name) and is_exact_numeric_semver(ver)
+
+def parse_image_digest_hex(val):
+    """Return 64-hex digest from registry/repo@sha256:hex, else None."""
+    if not isinstance(val, str) or not IMAGE_DIGEST.fullmatch(val):
+        return None
+    return val.rsplit("@sha256:", 1)[1]
+
 def check_container_entry(c, where):
-    """Containers must be immutable digest refs (@sha256:64hex). Tags are not enough."""
-    image = c.get("image")
+    """Every container needs exactly one immutable image/artifact locator:
+    registry/repository identity + @sha256:<64hex>. A free-standing digest
+    (no repository identity) is not a locator. Tags/semver tags are not enough."""
+    if not isinstance(c, dict):
+        errors.append("%s not object" % where)
+        return
+
+    # Collect documented locator fields (image / artifact only — unknown keys do not pin).
+    locators = []  # (field, full_value, digest_hex)
+    for field in ("image", "artifact"):
+        if field not in c or c[field] in (None, ""):
+            continue
+        val = str(c[field])
+        dig_hex = parse_image_digest_hex(val)
+        if dig_hex is None:
+            errors.append(
+                "%s.%s must be immutable registry/repo@sha256:<64hex> "
+                "(tag-only/semver-tag/digest-only not enough): %r"
+                % (where, field, val)
+            )
+        else:
+            locators.append((field, val, dig_hex))
+
+    # Optional companion digest object/string — must not replace repository identity.
     dig = c.get("digest")
-    has_image_digest = isinstance(image, str) and bool(IMAGE_DIGEST.fullmatch(image))
-    has_digest_obj = False
+    dig_value = None
     if dig is not None:
         if isinstance(dig, dict):
             validate_digest_obj(dig, where + ".digest", allowed=("sha256",))
-            has_digest_obj = (
+            if (
                 str(dig.get("algorithm")) == "sha256"
                 and isinstance(dig.get("value"), str)
-                and bool(HEX64.fullmatch(str(dig.get("value"))))
-            )
+                and HEX64.fullmatch(str(dig.get("value")))
+            ):
+                dig_value = str(dig.get("value"))
         elif isinstance(dig, str):
-            if not re.fullmatch(r"sha256:[0-9a-f]{64}", dig):
-                errors.append("%s.digest string must be sha256:<64hex>, got %r" % (where, dig))
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", dig):
+                dig_value = dig[len("sha256:"):]
+            elif HEX64.fullmatch(dig):
+                dig_value = dig
             else:
-                has_digest_obj = True
+                errors.append("%s.digest string must be sha256:<64hex>, got %r" % (where, dig))
         else:
             errors.append("%s.digest bad shape" % where)
-    if not has_image_digest and not has_digest_obj:
-        # tag-only / floating image (latest, stable, semver tags, bare names)
-        if image is not None:
+
+    if len(locators) > 1:
+        digs = set(d for _, _, d in locators)
+        if len(digs) > 1:
             errors.append(
-                "%s image must be immutable @sha256:<64hex> (tag-only not enough): %r"
-                % (where, image)
+                "%s multiple conflicting image/artifact locators" % where
             )
+        else:
+            errors.append(
+                "%s multiple image/artifact locators; require exactly one" % where
+            )
+    elif len(locators) == 1:
+        loc_dig = locators[0][2]
+        if dig_value is not None and dig_value != loc_dig:
+            errors.append(
+                "%s conflicting digest vs image/artifact locator "
+                "(digest %s != locator %s)" % (where, dig_value, loc_dig)
+            )
+    else:
+        # No full image/artifact@sha256 locator.
+        if dig_value is not None:
+            errors.append(
+                "%s free-standing digest is not an immutable image locator "
+                "(need registry/repo@sha256:<64hex>; digest-only rejected)" % where
+            )
+        elif c.get("image") not in (None, "") or c.get("artifact") not in (None, ""):
+            # malformed image/artifact already reported above
+            pass
         elif c.get("tag") is not None or c.get("version") is not None:
             errors.append(
-                "%s tag/version without digest is not immutable: tag=%r version=%r"
+                "%s tag/version without immutable image locator: tag=%r version=%r"
                 % (where, c.get("tag"), c.get("version"))
             )
         else:
-            errors.append("%s missing immutable digest reference" % where)
-    else:
-        # even with digest, reject explicit floating tags/versions on the side
-        for field in ("tag", "version"):
-            if field in c and c[field] not in (None, ""):
-                val = str(c[field])
-                if FLOAT_WORD.fullmatch(val) or NONEXACT.search(val) or not is_exact_numeric_semver(val):
-                    # semver tags alone are also not preferred when image lacks @sha256
-                    if not has_image_digest:
-                        errors.append("%s.%s is not immutable digest pin: %r" % (where, field, val))
-                    elif FLOAT_WORD.fullmatch(val) or NONEXACT.search(val):
-                        errors.append("floating pin in %s.%s: %r" % (where, field, val))
-    for field in ("identity", "ref"):
-        if field in c and c[field] not in (None, ""):
-            val = str(c[field])
-            if field == "ref" or val.startswith("refs/"):
-                if not HEX40.fullmatch(val):
-                    errors.append("%s.%s must be full 40-char commit SHA, got %r" % (where, field, val))
-            elif not (IMAGE_DIGEST.fullmatch(val) or is_ok_identity(val) or re.fullmatch(r"sha256:[0-9a-f]{64}", val)):
-                errors.append("floating/non-exact pin in %s.%s: %r" % (where, field, val))
+            # id/name-only, empty, or unknown-key-only shapes
+            errors.append(
+                "%s missing immutable image locator "
+                "(registry/repo@sha256:<64hex>; id/name/tag/digest-only not enough)" % where
+            )
 
-def check_mcp_entry(c, where):
-    """MCP/git refs: full commit SHA or exact package version/digest only."""
-    for field in ("ref", "commit", "revision", "sha"):
+    # Floating side tags/versions never substitute for the locator.
+    for field in ("tag", "version"):
         if field in c and c[field] not in (None, ""):
             val = str(c[field])
-            if not HEX40.fullmatch(val):
+            if FLOAT_WORD.fullmatch(val) or NONEXACT.search(val):
+                errors.append("floating pin in %s.%s: %r" % (where, field, val))
+            elif not is_exact_numeric_semver(val) and len(locators) == 0:
+                errors.append("%s.%s is not immutable digest pin: %r" % (where, field, val))
+            elif is_exact_numeric_semver(val) and len(locators) == 0:
+                # exact-looking semver tag alone is not immutable
                 errors.append(
-                    "%s.%s must be exact immutable full commit SHA (40 hex), got %r"
+                    "%s.%s exact-looking semver tag is not an immutable image locator: %r"
                     % (where, field, val)
                 )
-    if "version" in c and c["version"] not in (None, ""):
-        reject_nonexact_semver(str(c["version"]), where + ".version")
-    if "identity" in c and c["identity"] not in (None, ""):
-        reject_identity(str(c["identity"]), where + ".identity")
-    if "package" in c and c["package"] not in (None, ""):
-        pkg = str(c["package"])
-        if "@" in pkg:
-            ver = pkg.rsplit("@", 1)[1]
-            if not is_exact_numeric_semver(ver):
-                errors.append("%s.package non-exact version: %r" % (where, pkg))
-        elif "==" in pkg:
-            ver = pkg.split("==", 1)[1]
-            if not is_exact_numeric_semver(ver):
-                errors.append("%s.package non-exact version: %r" % (where, pkg))
+
+    # Split fields that omit repository identity (e.g. digest + tag only) already
+    # fail above. Reject repository-less identity/ref side fields that claim pins.
+    for field in ("identity", "ref", "repository", "repo"):
+        if field not in c or c[field] in (None, ""):
+            continue
+        val = str(c[field])
+        if field in ("repository", "repo"):
+            # repository alone (without @sha256 on image/artifact) is incomplete
+            if len(locators) == 0:
+                errors.append(
+                    "%s.%s without @sha256 image/artifact locator is not immutable: %r"
+                    % (where, field, val)
+                )
+            continue
+        if field == "ref" or val.startswith("refs/"):
+            if not HEX40.fullmatch(val):
+                errors.append("%s.%s must be full 40-char commit SHA, got %r" % (where, field, val))
+        elif not (
+            IMAGE_DIGEST.fullmatch(val)
+            or is_ok_identity(val)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", val)
+        ):
+            errors.append("floating/non-exact pin in %s.%s: %r" % (where, field, val))
+
+def check_mcp_entry(c, where):
+    """Every MCP entry needs exactly one immutable executable/source locator:
+      (1) exact package identity + exact canonical version
+      (2) exact git/source identity + full 40-hex commit
+      (3) artifact identity + sha256 digest
+    Id/name-only, empty, incomplete, cross-wired, or unknown-key pins fail closed."""
+    if not isinstance(c, dict):
+        errors.append("%s not object" % where)
+        return
+
+    shapes = []  # completed locator shape names
+
+    # --- shape 1: package identity + exact version ---
+    package = c.get("package")
+    version = c.get("version")
+    identity = c.get("identity")
+    name = c.get("name")
+    has_package = package not in (None, "")
+    has_version = version not in (None, "")
+    has_identity = identity not in (None, "")
+    has_name = name not in (None, "")
+    pkg_complete = False
+
+    if has_package:
+        pkg = str(package)
+        if package_embeds_exact_version(pkg):
+            pkg_complete = True
         else:
             errors.append("%s.package missing exact version: %r" % (where, pkg))
-    if "digest" in c and c["digest"] is not None:
-        dig = c["digest"]
+
+    if has_version:
+        reject_nonexact_semver(str(version), where + ".version")
+
+    if has_identity:
+        idv = str(identity)
+        # identity may be name@ver (package pin) or weaker v-prefixed/semver — only
+        # name@exact completes a package locator by itself.
+        if is_package_at_identity(idv):
+            if not has_version or is_exact_numeric_semver(str(version)):
+                pkg_complete = True
+        else:
+            reject_identity(idv, where + ".identity")
+
+    # name + exact version is a package locator (name is the package identity)
+    if (
+        not pkg_complete
+        and has_name
+        and has_version
+        and is_exact_numeric_semver(str(version))
+    ):
+        pkg_complete = True
+
+    # version present without any package identity
+    if has_version and not (has_package or has_identity or has_name):
+        errors.append(
+            "%s version without package identity is not an immutable MCP locator"
+            % where
+        )
+
+    if pkg_complete:
+        shapes.append("package")
+
+    # --- shape 2: git/source identity + full 40-hex commit ---
+    SOURCE_KEYS = ("source", "repository", "repo", "url", "git", "source_url")
+    COMMIT_KEYS = ("ref", "commit", "revision", "sha")
+    source_val = None
+    source_key = None
+    for sk in SOURCE_KEYS:
+        if sk in c and c[sk] not in (None, ""):
+            if source_val is not None:
+                errors.append("%s multiple source identity fields" % where)
+            source_val = str(c[sk])
+            source_key = sk
+    commit_val = None
+    commit_key = None
+    commit_hex_ok = False
+    for ck in COMMIT_KEYS:
+        if ck in c and c[ck] not in (None, ""):
+            if commit_val is not None:
+                errors.append("%s multiple commit/ref fields" % where)
+            commit_val = str(c[ck])
+            commit_key = ck
+            if HEX40.fullmatch(commit_val):
+                commit_hex_ok = True
+            else:
+                errors.append(
+                    "%s.%s must be exact immutable full commit SHA (40 hex), got %r"
+                    % (where, ck, commit_val)
+                )
+
+    if source_val is not None and commit_hex_ok:
+        if (
+            FLOAT_WORD.fullmatch(source_val)
+            or source_val.startswith("refs/")
+            or NONEXACT.search(source_val)
+        ):
+            errors.append(
+                "%s.%s is not a fixed git/source identity: %r"
+                % (where, source_key, source_val)
+            )
+        else:
+            shapes.append("git")
+    elif commit_val is not None and source_val is None:
+        errors.append(
+            "%s %s without source identity is not an immutable MCP locator"
+            % (where, commit_key or "ref")
+        )
+    elif source_val is not None and commit_val is None:
+        errors.append(
+            "%s source without full commit SHA is not an immutable MCP locator"
+            % where
+        )
+
+    # --- shape 3: artifact identity + digest ---
+    ARTIFACT_KEYS = ("artifact", "asset", "artifact_url", "tarball")
+    art_val = None
+    art_key = None
+    for ak in ARTIFACT_KEYS:
+        if ak in c and c[ak] not in (None, ""):
+            if art_val is not None:
+                errors.append("%s multiple artifact identity fields" % where)
+            art_val = str(c[ak])
+            art_key = ak
+
+    dig = c.get("digest")
+    dig_ok = False
+    if dig is not None:
         if isinstance(dig, dict):
-            validate_digest_obj(dig, where + ".digest")
+            before = len(errors)
+            validate_digest_obj(dig, where + ".digest", allowed=("sha256", "sha512-integrity"))
+            dig_ok = len(errors) == before
         elif isinstance(dig, str):
             if dig.startswith("sha512-"):
-                validate_npm_integrity(dig, where + ".digest")
+                dig_ok = validate_npm_integrity(dig, where + ".digest")
             elif dig.startswith("sha256:"):
-                validate_sha256_value(dig[7:], where + ".digest")
+                dig_ok = validate_sha256_value(dig[7:], where + ".digest")
             elif HEX64.fullmatch(dig):
-                pass
+                dig_ok = True
             else:
                 errors.append("%s.digest malformed: %r" % (where, dig))
-    # Reject branch-like tags without commit
+                dig_ok = False
+        else:
+            errors.append("%s.digest bad shape" % where)
+
+    if art_val is not None and dig_ok:
+        shapes.append("artifact")
+    elif dig is not None and art_val is None:
+        errors.append(
+            "%s digest without artifact identity is not an immutable MCP locator"
+            % where
+        )
+    elif art_val is not None and not dig_ok:
+        errors.append(
+            "%s artifact without digest is not an immutable MCP locator"
+            % where
+        )
+
+    # Mutable git tags/branches never count as a locator.
     for field in ("tag", "branch"):
         if field in c and c[field] not in (None, ""):
-            errors.append("%s.%s is mutable; require full commit SHA instead: %r" % (where, field, c[field]))
+            errors.append(
+                "%s.%s is mutable; require full commit SHA or exact package pin instead: %r"
+                % (where, field, c[field])
+            )
+
+    # Exactly one completed shape. Unknown keys cannot form a locator.
+    if len(shapes) == 0:
+        errors.append(
+            "%s missing immutable MCP locator "
+            "(need package@version, source+40-hex commit, or artifact+digest; "
+            "id/name-only rejected)" % where
+        )
+    elif len(shapes) > 1:
+        errors.append(
+            "%s multiple conflicting locator shapes: %s" % (where, ",".join(shapes))
+        )
 
 for list_key in ("containers", "mcp_packages"):
     items = data.get(list_key)
@@ -2078,7 +2319,7 @@ for t in data["tools"]:
 out=$(check_lock_py "$ROOT/bad-lock-long-sha.json" 2>&1); rc=$?
 expect_fail "red: long sha256 digest fails" "$out" "$rc" "noncanonical"
 
-# Green: valid immutable container + MCP commit pin still passes lock checker
+# Green: valid immutable container + MCP package pin still passes lock checker
 lock_mutant "$ROOT/ok-lock-immutable.json" '
 data["containers"] = [{
     "id": "tool-image",
@@ -2087,13 +2328,294 @@ data["containers"] = [{
 data["mcp_packages"] = [{
     "id": "example-mcp",
     "name": "example-mcp",
-    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+    "package": "example-mcp@1.0.0",
     "version": "1.0.0",
     "identity": "example-mcp@1.0.0",
 }]
 '
 out=$(check_lock_py "$ROOT/ok-lock-immutable.json" 2>&1); rc=$?
 expect_pass "green: lock with digest image + full commit MCP ref" "$out" "$rc"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: container/MCP identity locator fail-opens (P2 repair)"
+# ---------------------------------------------------------------------------
+
+# Independent mutant 1: free-standing digest without image/artifact identity
+lock_mutant "$ROOT/bad-lock-container-digest-only.json" '
+data["containers"] = [{
+    "id": "probe",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-digest-only.json" 2>&1); rc=$?
+expect_fail "red: container digest-only without image fails" "$out" "$rc" "digest-only\|free-standing\|image locator"
+
+# Independent mutant 2: MCP id/name-only without immutable locator
+lock_mutant "$ROOT/bad-lock-mcp-name-only.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "name": "probe",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-name-only.json" 2>&1); rc=$?
+expect_fail "red: MCP id/name-only without locator fails" "$out" "$rc" "id/name-only\|missing immutable MCP locator"
+
+# --- Container negatives: incomplete / cross-wired / unknown shapes ---
+lock_mutant "$ROOT/bad-lock-container-id-only.json" '
+data["containers"] = [{"id": "probe"}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-id-only.json" 2>&1); rc=$?
+expect_fail "red: container id-only fails" "$out" "$rc" "missing immutable image locator"
+
+lock_mutant "$ROOT/bad-lock-container-tag-only.json" '
+data["containers"] = [{"id": "probe", "tag": "1.2.3", "version": "1.2.3"}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-tag-only.json" 2>&1); rc=$?
+expect_fail "red: container tag/semver-only fails" "$out" "$rc" "immutable\|locator\|tag"
+
+lock_mutant "$ROOT/bad-lock-container-split-no-repo.json" '
+data["containers"] = [{
+    "id": "probe",
+    "tag": "1.2.3",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-split-no-repo.json" 2>&1); rc=$?
+expect_fail "red: container split digest+tag without repository fails" "$out" "$rc" "free-standing\|digest-only\|image locator"
+
+lock_mutant "$ROOT/bad-lock-container-repo-no-digest.json" '
+data["containers"] = [{
+    "id": "probe",
+    "repository": "registry/tool",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-repo-no-digest.json" 2>&1); rc=$?
+expect_fail "red: container repository+digest split without image@sha256 fails" "$out" "$rc" "free-standing\|digest-only\|image locator\|without @sha256"
+
+lock_mutant "$ROOT/bad-lock-container-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-conflict.json" 2>&1); rc=$?
+expect_fail "red: container conflicting image vs digest fails" "$out" "$rc" "conflict"
+
+lock_mutant "$ROOT/bad-lock-container-multi-locator.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "artifact": "other/repo@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-multi-locator.json" 2>&1); rc=$?
+expect_fail "red: container multiple conflicting locators fails" "$out" "$rc" "multiple\|conflict"
+
+lock_mutant "$ROOT/bad-lock-container-unknown-key.json" '
+data["containers"] = [{
+    "id": "probe",
+    "oci_ref": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-unknown-key.json" 2>&1); rc=$?
+expect_fail "red: container unknown-key locator bypass fails" "$out" "$rc" "missing immutable image locator"
+
+lock_mutant "$ROOT/bad-lock-container-no-slash.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-no-slash.json" 2>&1); rc=$?
+expect_fail "red: container image without registry/repo path fails" "$out" "$rc" "immutable\|registry/repo"
+
+# --- MCP negatives: incomplete / cross-wired / unknown shapes ---
+lock_mutant "$ROOT/bad-lock-mcp-version-only.json" '
+data["mcp_packages"] = [{"id": "probe", "version": "1.2.3"}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-version-only.json" 2>&1); rc=$?
+expect_fail "red: MCP version without package identity fails" "$out" "$rc" "version without package\|missing immutable MCP locator"
+
+lock_mutant "$ROOT/bad-lock-mcp-ref-only.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-ref-only.json" 2>&1); rc=$?
+expect_fail "red: MCP ref without source fails" "$out" "$rc" "without source\|missing immutable MCP locator"
+
+lock_mutant "$ROOT/bad-lock-mcp-source-only.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "source": "https://github.com/example/mcp.git",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-source-only.json" 2>&1); rc=$?
+expect_fail "red: MCP source without commit fails" "$out" "$rc" "without full commit\|missing immutable MCP locator"
+
+lock_mutant "$ROOT/bad-lock-mcp-digest-only.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-digest-only.json" 2>&1); rc=$?
+expect_fail "red: MCP digest without artifact fails" "$out" "$rc" "digest without artifact\|missing immutable MCP locator"
+
+lock_mutant "$ROOT/bad-lock-mcp-artifact-only.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "artifact": "example-mcp-1.0.0.tgz",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-artifact-only.json" 2>&1); rc=$?
+expect_fail "red: MCP artifact without digest fails" "$out" "$rc" "artifact without digest\|missing immutable MCP locator"
+
+lock_mutant "$ROOT/bad-lock-mcp-multi-shape.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "name": "probe",
+    "package": "probe@1.0.0",
+    "version": "1.0.0",
+    "source": "https://github.com/example/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-multi-shape.json" 2>&1); rc=$?
+expect_fail "red: MCP multiple conflicting locator shapes fails" "$out" "$rc" "multiple conflicting locator"
+
+lock_mutant "$ROOT/bad-lock-mcp-unknown-key.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "pin": "probe@1.0.0",
+    "locator": "https://github.com/example/mcp.git@90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-unknown-key.json" 2>&1); rc=$?
+expect_fail "red: MCP unknown-key locator bypass fails" "$out" "$rc" "missing immutable MCP locator\|id/name-only"
+
+lock_mutant "$ROOT/bad-lock-mcp-mutable-tag.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "name": "probe",
+    "package": "probe@1.0.0",
+    "version": "1.0.0",
+    "tag": "v1.0.0",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-mutable-tag.json" 2>&1); rc=$?
+expect_fail "red: MCP mutable tag field fails" "$out" "$rc" "mutable"
+
+# --- Green: each supported locator shape ---
+lock_mutant "$ROOT/ok-lock-container-image.json" '
+data["containers"] = [{
+    "id": "tool-image",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-image.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 locator" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-container-artifact.json" '
+data["containers"] = [{
+    "id": "tool-image",
+    "artifact": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-artifact.json" 2>&1); rc=$?
+expect_pass "green: container artifact@sha256 locator" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-container-image-matching-digest.json" '
+data["containers"] = [{
+    "id": "tool-image",
+    "image": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-image-matching-digest.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 with matching digest object" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-mcp-package.json" '
+data["mcp_packages"] = [{
+    "id": "pkg-mcp",
+    "name": "pkg-mcp",
+    "package": "pkg-mcp@2.3.4",
+    "version": "2.3.4",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-package.json" 2>&1); rc=$?
+expect_pass "green: MCP package@version locator" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-mcp-package-eq.json" '
+data["mcp_packages"] = [{
+    "id": "pkg-mcp",
+    "package": "pkg-mcp==2.3.4",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-package-eq.json" 2>&1); rc=$?
+expect_pass "green: MCP package==version locator" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-mcp-git.json" '
+data["mcp_packages"] = [{
+    "id": "git-mcp",
+    "source": "https://github.com/example/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-git.json" 2>&1); rc=$?
+expect_pass "green: MCP source+full-commit locator" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-mcp-git-commit-key.json" '
+data["mcp_packages"] = [{
+    "id": "git-mcp",
+    "repository": "github.com/example/mcp",
+    "commit": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-git-commit-key.json" 2>&1); rc=$?
+expect_pass "green: MCP repository+commit locator" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-mcp-artifact.json" '
+data["mcp_packages"] = [{
+    "id": "art-mcp",
+    "artifact": "art-mcp-1.0.0.tgz",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-artifact.json" 2>&1); rc=$?
+expect_pass "green: MCP artifact+sha256 locator" "$out" "$rc"
+
+# Empty arrays remain valid (shipped lock shape)
+lock_mutant "$ROOT/ok-lock-empty-arrays.json" '
+data["containers"] = []
+data["mcp_packages"] = []
+'
+out=$(check_lock_py "$ROOT/ok-lock-empty-arrays.json" 2>&1); rc=$?
+expect_pass "green: empty containers and mcp_packages arrays valid" "$out" "$rc"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
