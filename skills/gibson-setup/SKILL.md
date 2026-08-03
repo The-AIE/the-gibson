@@ -40,12 +40,14 @@ for free.
    Contract items under #68 — never agent-applied. Merge queues stay off until
    equivalent `merge_group` support is implemented and canaried.
    **Sense before promising:** run
-   `scripts/git-configure.sh --audit --repo owner/name --path <target>` and
-   **stop setup on unresolved FAIL/OWNER_REQUIRED/UNKNOWN** (exit 1) or tool
-   failure (exit 3). Safe reversible adoption settings only:
+   `scripts/git-configure.sh --audit --repo owner/name --path <target>`
+   (default audit is stdout-only; no implicit report file). **Setup/adoption is
+   incomplete on unresolved FAIL/OWNER_REQUIRED/UNKNOWN** (exit 1) or tool
+   failure (exit 3): no READY claim and no protected autonomy activation; safe
+   unrelated planning may continue. Safe reversible adoption settings only:
    `git-configure.sh --dry-run` then `--apply` (labels, `gibson/` gitignore,
-   squash + delete-branch-on-merge). Static workflow strings never clear the
-   test-integrity canary to PASS.
+   squash + delete-branch-on-merge). Static workflow strings never clear DCO or
+   the test-integrity canary to PASS.
 3. **Risk classifier** — Tier-C auto-labeling for ALL Law 7 categories: money,
    auth, consent/PII, security boundaries, production data (schema/migrations
    included). Start from the Gibson's own `ci/` workflows; where a needed gate
@@ -76,8 +78,9 @@ for free.
    an Ask Contract item instead of failing silently. `git-configure.sh` **audits**
    protection and prints remediation; it never applies it (use
    `scripts/delivery-control/apply-branch-protection.sh` with Mark approval).
-7. **DCO/sign-off** convention if the repo wants it (audit via git-configure;
-   app install remains Mark-owned).
+7. **DCO/sign-off** convention if the repo wants it (audit via git-configure is
+   report-only; static workflow text is never live enforcement; app install and
+   observed-run attestation remain Mark-owned).
 8. **Devin supervisor wiring** — `scripts/devin-supervisor.sh ensure --repo <path>`
    **creates a billed cloud session if none exists (ACUs = real money): this is
    an owner-gated step, always. Ask Contract first, run only on an explicit
