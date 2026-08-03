@@ -96,10 +96,12 @@ CONFIG
 
 OBSERVED-RUN ATTESTATIONS (credential-free; never invent from YAML)
   GIBSON_VERCEL_PRODUCTION_BRANCH=<exact live Production Branch string>
-  GIBSON_TEST_INTEGRITY_OBSERVED_RUN=https://…/actions/runs/<digits>
-      or observed-run:<token> (min 8 chars after prefix; structured)
-  GIBSON_DCO_OBSERVED_RUN= same shape as test-integrity
-  Arbitrary nonempty strings do NOT clear DCO / test-integrity.
+  GIBSON_TEST_INTEGRITY_OBSERVED_RUN=https://github.com/<owner>/<repo>/actions/runs/<id>
+  GIBSON_DCO_OBSERVED_RUN= same exact URL shape for this repo only
+  URL must match REPO exactly (no other host/path/query). Before PASS the
+  script re-fetches the run via gh and requires completed/success plus the
+  exact configured check name (DCO / test-integrity) on that head SHA.
+  observed-run:<token> and arbitrary strings NEVER PASS.
 EOF
 }
 
@@ -446,23 +448,99 @@ validate_model_coherence() {
   esac
 }
 
-# Strict observed-run attestation (DCO / test-integrity). Arbitrary nonempty
-# strings are insufficient — must match documented URL or observed-run: shape.
-is_valid_observed_run() {
+# Exact Actions run URL for THIS repo only (DCO / test-integrity).
+# Accepts solely: https://github.com/${REPO}/actions/runs/<positive-id>
+# No query/fragment, no other host/path, no observed-run:<token> synthetic.
+# Prints run id on stdout; return 0 on shape match, 1 otherwise.
+parse_actions_run_url() {
   local v="$1"
-  [[ -n "$v" ]] || return 1
+  local prefix id
+  [[ -n "$v" && -n "$REPO" ]] || return 1
   case "$v" in
     *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
   esac
-  # https://…/actions/runs/<digits> optional query
-  if printf '%s' "$v" | grep -Eq '^https://[A-Za-z0-9._~:/#@!$&*+,;=%-]+/actions/runs/[0-9]{1,20}([?][A-Za-z0-9._~=&%-]*)?$'; then
-    return 0
-  fi
-  # observed-run:<structured-token> min 8 chars after prefix
-  if printf '%s' "$v" | grep -Eq '^observed-run:[A-Za-z0-9][A-Za-z0-9._/-]{7,127}$'; then
-    return 0
-  fi
+  prefix="https://github.com/${REPO}/actions/runs/"
+  case "$v" in
+    "$prefix"*)
+      id="${v#"$prefix"}"
+      # positive integer only — no trailing slash, query, or path
+      if printf '%s' "$id" | grep -Eq '^[1-9][0-9]{0,18}$'; then
+        printf '%s' "$id"
+        return 0
+      fi
+      ;;
+  esac
   return 1
+}
+
+# Live-validate an Actions run + exact check-run name for REPO.
+# $1=run_id  $2=exact check/context name (e.g. DCO, test-integrity)
+# Return: 0=PASS-worthy evidence, 1=invalid/incomplete evidence (UNKNOWN),
+#         2=API/schema failure (ERROR). Never prints secrets.
+verify_live_actions_check() {
+  local run_id="$1"
+  local want_name="$2"
+  local body head_sha full_name status conclusion rid n cr mstatus mconc
+
+  [[ -n "$run_id" && -n "$want_name" && -n "$REPO" ]] || return 2
+
+  if ! body=$(gh_api "repos/${REPO}/actions/runs/${run_id}" 2>/dev/null); then
+    return 2
+  fi
+  if ! printf '%s' "$body" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    return 2
+  fi
+
+  rid=$(printf '%s' "$body" | jq -r '.id | tostring' 2>/dev/null || echo "")
+  status=$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || echo "")
+  conclusion=$(printf '%s' "$body" | jq -r '.conclusion // empty' 2>/dev/null || echo "")
+  head_sha=$(printf '%s' "$body" | jq -r '.head_sha // empty' 2>/dev/null || echo "")
+  full_name=$(printf '%s' "$body" | jq -r '.repository.full_name // empty' 2>/dev/null || echo "")
+
+  # Numeric id must match requested run; repository.full_name exact REPO
+  if [[ "$rid" != "$run_id" ]]; then
+    return 1
+  fi
+  if [[ "$full_name" != "$REPO" ]]; then
+    return 1
+  fi
+  if [[ "$status" != "completed" ]]; then
+    return 1
+  fi
+  if [[ "$conclusion" != "success" ]]; then
+    return 1
+  fi
+  # 40-lowercase-hex head_sha only
+  if ! printf '%s' "$head_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+    return 1
+  fi
+
+  # Deterministic check-runs for this exact head (GitHub commits API)
+  if ! cr=$(gh_api "repos/${REPO}/commits/${head_sha}/check-runs" 2>/dev/null); then
+    return 2
+  fi
+  if ! printf '%s' "$cr" | jq -e 'type == "object" and (.check_runs | type == "array")' >/dev/null 2>&1; then
+    return 2
+  fi
+
+  n=$(printf '%s' "$cr" | jq --arg n "$want_name" \
+    '[.check_runs[] | select(.name == $n)] | length' 2>/dev/null || echo "0")
+  if [[ "$n" == "0" ]]; then
+    return 1
+  fi
+  if [[ "$n" != "1" ]]; then
+    # duplicate / ambiguous exact-name checks
+    return 1
+  fi
+
+  mstatus=$(printf '%s' "$cr" | jq -r --arg n "$want_name" \
+    '[.check_runs[] | select(.name == $n)][0].status // empty' 2>/dev/null || echo "")
+  mconc=$(printf '%s' "$cr" | jq -r --arg n "$want_name" \
+    '[.check_runs[] | select(.name == $n)][0].conclusion // empty' 2>/dev/null || echo "")
+  if [[ "$mstatus" != "completed" || "$mconc" != "success" ]]; then
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -571,13 +649,55 @@ physical_dir() {
   (CDPATH='' cd -P -- "$d" 2>/dev/null && pwd -P)
 }
 
+# Rewrite only fixed OS root aliases for macOS portability:
+#   /tmp → /private/tmp   and   /var → /private/var
+# Never follows any other symlink (planted bridge/leaf links are refused).
+canonicalize_trusted_root_alias() {
+  local p="$1"
+  local link
+
+  case "$p" in
+    /tmp|/tmp/*)
+      if [[ -L /tmp ]]; then
+        link=$(readlink /tmp 2>/dev/null || true)
+        case "$link" in
+          private/tmp|/private/tmp)
+            if [[ "$p" == "/tmp" ]]; then
+              printf '%s' "/private/tmp"
+            else
+              printf '%s' "/private/tmp${p#/tmp}"
+            fi
+            return 0
+            ;;
+        esac
+      fi
+      ;;
+    /var|/var/*)
+      if [[ -L /var ]]; then
+        link=$(readlink /var 2>/dev/null || true)
+        case "$link" in
+          private/var|/private/var)
+            if [[ "$p" == "/var" ]]; then
+              printf '%s' "/private/var"
+            else
+              printf '%s' "/private/var${p#/var}"
+            fi
+            return 0
+            ;;
+        esac
+      fi
+      ;;
+  esac
+  printf '%s' "$p"
+}
+
 # Validate ancestors; create missing dirs component-by-component with rechecks.
-# Existing platform symlinks (e.g. macOS /var → /private/var) may be traversed,
-# but the final parent must be a real directory and paths under LOCAL_PATH must
-# stay physically inside the checkout (blocks planted bridge→/tmp/victim).
+# After trusted root-alias rewrite, every subsequent component is lstat'd and
+# any symlink is rejected (never followed). Final parent must be a real dir;
+# paths under LOCAL_PATH must stay physically inside the checkout.
 prepare_report_dir() {
   local target_dir="$1"
-  local cur="" rest comp next link resolved local_phys dir_phys abs_local
+  local cur="" rest comp next local_phys dir_phys abs_local phys logical_in
 
   if path_has_dotdot_component "$target_dir"; then
     die_tool "report path rejects .. components: $target_dir"
@@ -587,6 +707,26 @@ prepare_report_dir() {
     *) die_tool "internal: report dir not absolute: $target_dir" ;;
   esac
 
+  if [[ "$target_dir" == "/" ]]; then
+    die_tool "refuse report directory /"
+  fi
+
+  # Remember whether the pre-rewrite absolute path is under LOCAL_PATH
+  # (containment still applies to in-checkout reports).
+  abs_local=$(report_abs_path "$LOCAL_PATH")
+  logical_in=0
+  case "$target_dir" in
+    "$abs_local"|"$abs_local"/*) logical_in=1 ;;
+  esac
+
+  target_dir=$(canonicalize_trusted_root_alias "$target_dir")
+  if path_has_dotdot_component "$target_dir"; then
+    die_tool "report path rejects .. components after alias rewrite: $target_dir"
+  fi
+  case "$target_dir" in
+    /*) ;;
+    *) die_tool "internal: report dir not absolute after alias rewrite: $target_dir" ;;
+  esac
   if [[ "$target_dir" == "/" ]]; then
     die_tool "refuse report directory /"
   fi
@@ -606,23 +746,9 @@ prepare_report_dir() {
     fi
     next="${cur}/${comp}"
 
+    # Reject every non-trusted ancestor symlink (aliases already rewritten).
     if [[ -L "$next" ]]; then
-      # Traverse existing symlink for location only — never mkdir through it.
-      link=$(readlink -- "$next" 2>/dev/null || readlink "$next" 2>/dev/null || true)
-      if [[ -z "$link" ]]; then
-        die_tool "report ancestor symlink unreadable: $next"
-      fi
-      case "$link" in
-        /*) resolved="$link" ;;
-        *) resolved="$(dirname -- "$next")/$link" ;;
-      esac
-      # Collapse //
-      resolved=$(printf '%s' "$resolved" | sed 's://*:/:g')
-      if [[ ! -d "$resolved" ]]; then
-        die_tool "report ancestor symlink does not resolve to a directory: $next"
-      fi
-      cur="$resolved"
-      continue
+      die_tool "report ancestor is a symlink (refuse; never follow planted links): $next"
     fi
 
     if [[ -e "$next" ]]; then
@@ -649,23 +775,20 @@ prepare_report_dir() {
     die_tool "report directory is not writable: $cur"
   fi
 
-  # Containment: logical path under LOCAL_PATH must stay inside physical checkout.
-  abs_local=$(report_abs_path "$LOCAL_PATH")
-  case "$target_dir" in
-    "$abs_local"|"$abs_local"/*)
-      local_phys=$(physical_dir "$abs_local" || true)
-      dir_phys=$(physical_dir "$cur" || true)
-      if [[ -z "$local_phys" || -z "$dir_phys" ]]; then
-        die_tool "cannot physically resolve report path under checkout: $target_dir"
-      fi
-      case "$dir_phys" in
-        "$local_phys"|"$local_phys"/*) ;;
-        *)
-          die_tool "report path escapes checkout via symlink (refuse): logical=$target_dir physical=$dir_phys"
-          ;;
-      esac
-      ;;
-  esac
+  # Containment: in-checkout report paths must stay inside physical checkout.
+  if [[ "$logical_in" -eq 1 ]]; then
+    local_phys=$(physical_dir "$abs_local" || true)
+    dir_phys=$(physical_dir "$cur" || true)
+    if [[ -z "$local_phys" || -z "$dir_phys" ]]; then
+      die_tool "cannot physically resolve report path under checkout: $target_dir"
+    fi
+    case "$dir_phys" in
+      "$local_phys"|"$local_phys"/*) ;;
+      *)
+        die_tool "report path escapes checkout via symlink (refuse): logical=$target_dir physical=$dir_phys"
+        ;;
+    esac
+  fi
 
   # Export physical parent for atomic write (same-dir temp + rename).
   REPORT_PARENT_PHYS="$cur"
@@ -1004,34 +1127,73 @@ audit_merge_settings() {
 
 apply_merge_settings() {
   echo "  apply: repository merge settings (squash on; merge-commit/rebase off; delete-branch-on-merge on)"
-  if ! gh_api --method PATCH "repos/${REPO}" \
-    -F allow_squash_merge=true \
-    -F allow_merge_commit=false \
-    -F allow_rebase_merge=false \
-    -F delete_branch_on_merge=true \
+  # Re-fetch and strictly validate live merge booleans immediately before mutation.
+  local body s m r d
+  if ! body=$(gh api "repos/${REPO}" 2>/dev/null); then
+    record ERROR "merge" "pre-apply re-fetch of repo settings failed"
+    HAD_APPLY_FAILURE=1
+    return 1
+  fi
+  if ! validate_repo_schema "$body"; then
+    record ERROR "merge" "pre-apply re-fetch schema invalid (exact boolean merge fields required)"
+    HAD_APPLY_FAILURE=1
+    return 1
+  fi
+  s=$(printf '%s' "$body" | jq -r '.allow_squash_merge | tostring')
+  m=$(printf '%s' "$body" | jq -r '.allow_merge_commit | tostring')
+  r=$(printf '%s' "$body" | jq -r '.allow_rebase_merge | tostring')
+  d=$(printf '%s' "$body" | jq -r '.delete_branch_on_merge | tostring')
+  LIVE_SQUASH="$s"
+  LIVE_MERGE_COMMIT="$m"
+  LIVE_REBASE="$r"
+  LIVE_DELETE_BRANCH="$d"
+
+  # Already converged → zero PATCH/POST/PUT/DELETE; preserve live state bytes.
+  if [[ "$s" == "true" && "$m" == "false" && "$r" == "false" && "$d" == "true" ]]; then
+    echo "  apply: merge settings already-converged (zero mutation)"
+    record PASS "merge" "already-converged (live merge booleans match desired; zero mutation)"
+    return 0
+  fi
+
+  # Diff-derived PATCH: only fields that still drift from desired values.
+  local -a patch_args=()
+  [[ "$s" != "true" ]] && patch_args+=(-F "allow_squash_merge=true")
+  [[ "$m" != "false" ]] && patch_args+=(-F "allow_merge_commit=false")
+  [[ "$r" != "false" ]] && patch_args+=(-F "allow_rebase_merge=false")
+  [[ "$d" != "true" ]] && patch_args+=(-F "delete_branch_on_merge=true")
+
+  if [[ ${#patch_args[@]} -eq 0 ]]; then
+    echo "  apply: merge settings already-converged (zero mutation)"
+    record PASS "merge" "already-converged (live merge booleans match desired; zero mutation)"
+    return 0
+  fi
+
+  if ! gh_api --method PATCH "repos/${REPO}" "${patch_args[@]}" \
     >/dev/null 2>&1; then
+    echo "  apply: merge settings PATCH failed"
     record ERROR "merge" "PATCH repos/${REPO} merge settings failed"
     HAD_APPLY_FAILURE=1
     return 1
   fi
-  # Read back exact postconditions with the same schema as fetch_repo_meta
-  local body
+  # Exact readback/postcondition with the same schema as fetch_repo_meta
   if ! body=$(gh api "repos/${REPO}" 2>/dev/null); then
+    echo "  apply: merge settings post-apply readback failed"
     record ERROR "merge" "post-apply readback of repo settings failed"
     HAD_APPLY_FAILURE=1
     return 1
   fi
   if ! validate_repo_schema "$body"; then
+    echo "  apply: merge settings post-apply readback schema invalid"
     record ERROR "merge" "post-apply readback schema invalid (exact boolean merge fields required)"
     HAD_APPLY_FAILURE=1
     return 1
   fi
-  local s m r d
   s=$(printf '%s' "$body" | jq -r '.allow_squash_merge | tostring')
   m=$(printf '%s' "$body" | jq -r '.allow_merge_commit | tostring')
   r=$(printf '%s' "$body" | jq -r '.allow_rebase_merge | tostring')
   d=$(printf '%s' "$body" | jq -r '.delete_branch_on_merge | tostring')
   if [[ "$s" != "true" || "$m" != "false" || "$r" != "false" || "$d" != "true" ]]; then
+    echo "  apply: merge settings post-apply postcondition failed: squash=${s} merge_commit=${m} rebase=${r} delete_branch=${d}"
     record ERROR "merge" "post-apply postcondition failed: squash=${s} merge_commit=${m} rebase=${r} delete_branch=${d}"
     HAD_APPLY_FAILURE=1
     return 1
@@ -1040,6 +1202,7 @@ apply_merge_settings() {
   LIVE_MERGE_COMMIT="$m"
   LIVE_REBASE="$r"
   LIVE_DELETE_BRANCH="$d"
+  echo "  apply: merge settings applied and verified"
   record PASS "merge" "merge settings applied and verified"
   return 0
 }
@@ -1334,8 +1497,8 @@ audit_environment() {
 
 audit_dco() {
   # Report-only. Static workflow names/text are static presence only — never
-  # live enforcement. PASS only with strict observed-run attestation.
-  # Never call or install the DCO app.
+  # live enforcement. PASS only after live Actions run + exact DCO check-run
+  # validation via gh (read-only). Never call or install the DCO app.
   local static=0
   if [[ -d "${LOCAL_PATH}/.github/workflows" ]]; then
     if grep -Rqi -- 'dco\|signed-off-by\|probot/dco' "${LOCAL_PATH}/.github/workflows" 2>/dev/null; then
@@ -1344,28 +1507,37 @@ audit_dco() {
   fi
 
   local observed="${GIBSON_DCO_OBSERVED_RUN:-}"
-  if is_valid_observed_run "$observed"; then
-    if [[ "$static" -eq 1 ]]; then
-      record PASS "dco" \
-        "operator-attested observed DCO run $(sq "$observed") (static workflow text alone never clears this; app install remains Mark-owned; never applied)"
-    else
-      record PASS "dco" \
-        "operator-attested observed DCO run $(sq "$observed") (no local static file required; app install remains Mark-owned; never applied)"
-    fi
-    return 0
-  fi
+  local run_id="" vr=0
 
   if [[ -n "$observed" ]]; then
+    if ! run_id=$(parse_actions_run_url "$observed"); then
+      record UNKNOWN "dco" \
+        "GIBSON_DCO_OBSERVED_RUN set but does not match strict observed-run contract (exact https://github.com/${REPO}/actions/runs/<id> only; observed-run: tokens and other hosts/paths/queries rejected) — arbitrary nonempty strings are insufficient"
+      plan_line "OWNER: export GIBSON_DCO_OBSERVED_RUN=https://github.com/${REPO}/actions/runs/<id> after a real completed DCO check"
+      return 0
+    fi
+    vr=0
+    verify_live_actions_check "$run_id" "DCO" || vr=$?
+    if [[ "$vr" -eq 0 ]]; then
+      record PASS "dco" \
+        "live Actions run ${run_id} completed/success with exact check DCO on head_sha (static workflow text alone never clears this; app install remains Mark-owned; never applied)"
+      return 0
+    fi
+    if [[ "$vr" -eq 2 ]]; then
+      record ERROR "dco" \
+        "failed to fetch/validate Actions run ${run_id} or its check-runs via gh (API/schema error) — never PASS on synthetic/static evidence"
+      return 0
+    fi
     record UNKNOWN "dco" \
-      "GIBSON_DCO_OBSERVED_RUN set but does not match strict observed-run contract (https://…/actions/runs/<id> or observed-run:<token>) — arbitrary nonempty strings are insufficient"
-    plan_line "OWNER: export GIBSON_DCO_OBSERVED_RUN with a real Actions run URL after DCO check executes, or install DCO app/required check"
+      "GIBSON_DCO_OBSERVED_RUN points at run ${run_id} but live evidence is not PASS-worthy (wrong repo/id/SHA/status/conclusion, missing/duplicate/unsuccessful exact check name DCO, or malformed payload) — never READY on synthetic attestation"
+    plan_line "OWNER: re-export GIBSON_DCO_OBSERVED_RUN after a completed successful Actions run where exact check DCO is completed/success"
     return 0
   fi
 
   if [[ "$static" -eq 1 ]]; then
     record OWNER_REQUIRED "dco" \
       "static DCO-related workflow text present only — static names/echo steps are never live enforcement; OWNER_REQUIRED until observed exact-run evidence (never applied by this script)"
-    plan_line "OWNER: install DCO app or required DCO check; export GIBSON_DCO_OBSERVED_RUN=https://…/actions/runs/<id> after a real run"
+    plan_line "OWNER: install DCO app or required DCO check; export GIBSON_DCO_OBSERVED_RUN=https://github.com/${REPO}/actions/runs/<id> after a real run"
   else
     record OWNER_REQUIRED "dco" \
       "no observed DCO run attestation and no static DCO workflow text — owner installs DCO app/check if org requires sign-off (not applied by this script)"
@@ -1402,17 +1574,31 @@ $REQUIRED_CONTEXTS_NL
 EOF
 
   # test-integrity canary: static evidence NEVER upgrades to executed PASS.
-  # Only a strict observed-run attestation (documented contract) may PASS.
+  # Only a live-validated Actions run + exact check name may PASS.
   if printf '%s\n' "$REQUIRED_CONTEXTS_NL" | grep -Fxq -- "test-integrity" \
     || printf '%s\n' "$installed_names" | grep -Fqi -- "test-integrity"; then
     local ti_obs="${GIBSON_TEST_INTEGRITY_OBSERVED_RUN:-}"
-    if is_valid_observed_run "$ti_obs"; then
-      record PASS "test-integrity-canary" \
-        "operator-attested observed run $(sq "$ti_obs") — static YAML alone never clears this gate"
-    elif [[ -n "$ti_obs" ]]; then
-      record UNKNOWN "test-integrity-canary" \
-        "GIBSON_TEST_INTEGRITY_OBSERVED_RUN present but fails strict observed-run contract (https://…/actions/runs/<id> or observed-run:<token>) — arbitrary nonempty strings are insufficient; static YAML never PASS"
-      plan_line "OWNER: re-export GIBSON_TEST_INTEGRITY_OBSERVED_RUN with a real Actions run URL after canaries; require check name test-integrity"
+    local ti_id="" ti_vr=0
+    if [[ -n "$ti_obs" ]]; then
+      if ! ti_id=$(parse_actions_run_url "$ti_obs"); then
+        record UNKNOWN "test-integrity-canary" \
+          "GIBSON_TEST_INTEGRITY_OBSERVED_RUN present but fails strict observed-run contract (exact https://github.com/${REPO}/actions/runs/<id> only; observed-run: tokens and other hosts/paths/queries rejected) — arbitrary nonempty strings are insufficient; static YAML never PASS"
+        plan_line "OWNER: re-export GIBSON_TEST_INTEGRITY_OBSERVED_RUN=https://github.com/${REPO}/actions/runs/<id> after canaries; require exact check name test-integrity"
+      else
+        ti_vr=0
+        verify_live_actions_check "$ti_id" "test-integrity" || ti_vr=$?
+        if [[ "$ti_vr" -eq 0 ]]; then
+          record PASS "test-integrity-canary" \
+            "live Actions run ${ti_id} completed/success with exact check test-integrity — static YAML alone never clears this gate"
+        elif [[ "$ti_vr" -eq 2 ]]; then
+          record ERROR "test-integrity-canary" \
+            "failed to fetch/validate Actions run ${ti_id} or its check-runs via gh (API/schema error) — never canary PASS from YAML or synthetic attestation"
+        else
+          record UNKNOWN "test-integrity-canary" \
+            "GIBSON_TEST_INTEGRITY_OBSERVED_RUN points at run ${ti_id} but live evidence is not PASS-worthy (wrong repo/id/SHA/status/conclusion, missing/duplicate/unsuccessful exact check name test-integrity, or malformed payload) — static YAML never PASS"
+          plan_line "OWNER: re-export GIBSON_TEST_INTEGRITY_OBSERVED_RUN after a completed successful run where exact check test-integrity is completed/success"
+        fi
+      fi
     else
       record UNKNOWN "test-integrity-canary" \
         "test-integrity remains FAIL/UNKNOWN until a real observed CI run proves the four-job path executed and the required check blocked deletions — static workflow YAML is never canary PASS (issue #70/#68)"
