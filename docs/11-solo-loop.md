@@ -65,8 +65,90 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 - **`gibson/loop-state.md`** (in the target repo, gitignored or branch-local):
   current issue, hat, round count, next action. The *only* thing a fresh context
   needs to resume — crash recovery is `git pull` + read this file.
+  **Schema (issue #75):** ten required column-zero keys, exactly once each —
+  `updated`, `issue`, `pr`, `hat`, `next_hat`, `round`, `parked`, `handoff`,
+  `handoff_sha`, `next_action`. Extra keys (e.g. `notes`) are allowed.
+  Early issue prose sometimes listed nine keys and omitted `handoff_sha`; the
+  operational contract is ten. Missing `handoff_sha` fails closed (add the key;
+  empty value is fine) — never a silent default. `hat` / `next_hat` are the
+  nine-hat enum; `round` is a non-negative base-10 integer; `parked` is exactly
+  `true` / `false`; `updated` is a real strict UTC `YYYY-MM-DDTHH:MM:SSZ`
+  instant. Shared checker: `scripts/validate-loop-state.sh` (quiet on success;
+  requires **python3** on PATH for calendar-real timestamps — absence fails
+  closed; state values are never shell-eval'd). Indentation and comments never
+  satisfy a required key.
+  **Field grammar (one contract for validator + driver):** after the first
+  colon, exactly one optional ASCII space may be stripped — `key:value` and
+  `key: value` are identical; empty values are allowed (`key:` / `key: `);
+  no further trim of meaningful value data; tabs after `:` are value bytes, not
+  the optional separator. Canonical writers emit `key: value`. The driver
+  `read_field` uses this same parse (never a stricter `key: value`-only form).
+  **Path safety:** validation and recovery refuse a symlink leaf without
+  following it (even when the target would otherwise be valid schema); live
+  directory/device shapes are quarantined or fail closed — never write through
+  them.
+- **`gibson/.loop-state.prev`**: last validated pre-iteration snapshot. The driver
+  copies loop-state here atomically (temp + rename) immediately before a real
+  runner invocation. Destination must be a regular non-symlink file (or
+  missing) — a pre-existing directory/symlink/device fails closed before the
+  runner and must not accumulate nested temp files. Recovery restores **exact
+  bytes** from this file; corrupt content must never overwrite it. A successful
+  later iteration may replace it with the next validated pre-state.
 - **`gibson/journal.md`**: append-only run log — one entry per loop iteration.
-  Feeds the historian and Mark's digest.
+  Feeds the historian and Mark's digest. `state-corrupt` sections are distinct
+  from runner-failure and halt entries.
+
+### Validation / snapshot / recovery order (issue #75)
+
+Every real iteration (not `--dry-run` / `--print-prompt`) follows this order:
+
+1. **Halt first** (issue #71): every kill-switch path runs before default-state
+   creation, validation, or snapshotting. A halted cold or existing repo leaves
+   both `loop-state.md` and `.loop-state.prev` byte-identical or absent, starts
+   no work, and queues no handoff.
+2. **Validate before reading `next_hat`:** never silently default a missing or
+   malformed `next_hat` to `builder`. If current state is corrupt → classify
+   exactly once as `state-corrupt`, journal diagnostics + unified diff, restore
+   exact bytes from the last valid snapshot **if that snapshot still validates**,
+   count one failure-budget unit, and do not run or hand off. Missing/unusable
+   snapshot → fail closed, journal, count once, never invent default content.
+   Unsafe live path shapes (directory/symlink/device) are quarantined by rename
+   in the same parent (contents preserved, never deleted) before exact restore,
+   or fail closed with an explicit recovery-incomplete diagnostic — never claim
+   exact restore when it did not occur.
+3. **Pre-queued handoff retry** (issue #71): when `--supervisor devin` is set
+   and `handoff` is already non-empty after a successful schema validate, retry
+   `supervisor_handoff` **without** invoking a runner, snapshot, or post-run
+   freshness path. Do not treat a zero-work command as successful progress
+   (no failure-budget reset). This preserves blocked-handoff retry without
+   faking state progress under the #75 freshness gate.
+4. **Snapshot** the validated pre-iteration state to `.loop-state.prev` (atomic)
+   immediately before the real runner. Snapshot failure starts no runner and
+   counts as a single `state-corrupt` / recovery-control failure. Success is
+   reported only when the exact destination path is a regular non-symlink file
+   byte-identical to the source.
+5. **Capture** a strict UTC `iteration_start` immediately before invoking the
+   runner. After **every** actual runner exit, re-validate schema **and**
+   require `updated >= iteration_start` before resetting failures or calling
+   `supervisor_handoff` — including when bytes are identical to the
+   pre-iteration snapshot. A zero-exit no-op that leaves a valid but old stamp
+   is `state-corrupt` (one budget unit, no reset, no handoff). Pure
+   no-progress classification beyond this freshness gate is issue #63; do not
+   weaken #75 freshness in anticipation of it.
+6. **Post-run corrupt/stale:** distinct `state-corrupt` journal section
+   (validator diagnostics + diff), exact-byte restore, exactly one failure,
+   suppress handoff. Precedence over runner-failure even when the runner also
+   exited nonzero — do not double-count or label it runner-failure / no-progress.
+7. **Valid state + runner nonzero:** existing runner-failure behavior, count
+   exactly one. **Valid state + runner exit 0:** reset the consecutive failure
+   budget and may hand off. Escalation / budget thresholds fire once at the
+   existing values.
+8. **`--dry-run` / `--print-prompt`:** inert for snapshot, recovery, and
+   state-corrupt journal mutations; no runner, no handoff.
+
+The future no-progress sensor (issue #63) will **reuse this timestamp parser**
+(`validate-loop-state.sh` / its strict UTC python3 implementation) rather than
+inventing another one. This issue does not implement #63's no-progress sensor.
 
 ## Safety rails (unattended ≠ unbounded)
 
