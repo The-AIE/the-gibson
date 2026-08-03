@@ -841,23 +841,61 @@ def check_container_entry(c, where):
 
     if "ref" in c and c["ref"] not in (None, ""):
         val = str(c["ref"])
-        if val.startswith("refs/") or not HEX40.fullmatch(val):
-            # container refs are not git commits; also reject mutable refs
+        # Container refs are not git commits. Any supplied ref that denotes a
+        # repository+digest or digest-only alias must normalize and exactly
+        # agree with the canonical image/artifact locator when one is present.
+        # Syntactically valid IMAGE_DIGEST / sha256 forms alone are not enough.
+        if val.startswith("refs/"):
+            errors.append(
+                "%s.ref must be full 40-char commit SHA or agree with image locator, got %r"
+                % (where, val)
+            )
+        elif HEX40.fullmatch(val):
+            # bare 40-hex on a container is an alternate pin form — reject with locator
+            if canon_repo is not None:
+                errors.append(
+                    "%s.ref alternate commit identity conflicts with image/artifact locator: %r"
+                    % (where, val)
+                )
+        elif canon_repo is None:
+            # No canonical locator yet: accept only forms that could still be
+            # identity-like; free-standing digests/refs still fail the locator
+            # gate above. Reject floating/mutable tags.
             if not (
                 IMAGE_DIGEST.fullmatch(val)
                 or re.fullmatch(r"sha256:[0-9a-f]{64}", val)
-                or (canon_repo is not None and normalize_repo_path(val) == canon_repo)
+                or HEX64.fullmatch(val)
             ):
                 errors.append(
                     "%s.ref must be full 40-char commit SHA or agree with image locator, got %r"
                     % (where, val)
                 )
-        # bare 40-hex on a container is an alternate pin form — reject unless no locator
-        elif canon_repo is not None:
-            errors.append(
-                "%s.ref alternate commit identity conflicts with image/artifact locator: %r"
-                % (where, val)
-            )
+        else:
+            ref_loc = parse_image_locator(val)
+            if ref_loc is not None:
+                ref_repo, ref_dig, _ = ref_loc
+                if ref_repo != canon_repo or ref_dig != canon_dig:
+                    errors.append(
+                        "%s conflicting ref vs image/artifact locator "
+                        "(ref %r != locator)" % (where, val)
+                    )
+            elif normalize_repo_path(val) == canon_repo:
+                pass  # redundant-equal repository path
+            elif re.fullmatch(r"sha256:[0-9a-f]{64}", val):
+                if val[len("sha256:"):] != canon_dig:
+                    errors.append(
+                        "%s conflicting ref digest vs locator: %r" % (where, val)
+                    )
+            elif HEX64.fullmatch(val):
+                if val != canon_dig:
+                    errors.append(
+                        "%s conflicting ref digest vs locator: %r" % (where, val)
+                    )
+            else:
+                errors.append(
+                    "%s.ref must be full 40-char commit SHA or agree with image locator, got %r"
+                    % (where, val)
+                )
 
 def check_mcp_entry(c, where):
     """Every MCP entry needs exactly one immutable executable/source locator:
@@ -3023,6 +3061,99 @@ data["containers"] = [{
 '
 out=$(check_lock_py "$ROOT/bad-lock-container-identity-conflict.json" 2>&1); rc=$?
 expect_fail "red: container image@sha256 + conflicting identity locator fails" "$out" "$rc" "conflict\|identity"
+
+# Container ref must prove equality to canon image locator (not mere syntactic validity).
+# Independent reviewer mutants: IMAGE_DIGEST ref and digest-only ref that disagree.
+lock_mutant "$ROOT/ok-lock-container-ref-equal-image.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "ref": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-ref-equal-image.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal ref IMAGE_DIGEST" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-container-ref-equal-sha256.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "ref": "sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-ref-equal-sha256.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal ref sha256 digest" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-container-ref-equal-hex64.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "ref": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-ref-equal-hex64.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal ref bare hex64 digest" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-container-ref-equal-repo.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "ref": "ghcr.io/org/tool",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-ref-equal-repo.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal ref repository path" "$out" "$rc"
+
+lock_mutant "$ROOT/bad-lock-container-ref-image-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ref": "ghcr.io/other/tool@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-ref-image-conflict.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 A + ref IMAGE_DIGEST B fails" "$out" "$rc" "conflict\|ref"
+
+lock_mutant "$ROOT/bad-lock-container-ref-sha256-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ref": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-ref-sha256-conflict.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 A + ref sha256 B fails" "$out" "$rc" "conflict\|ref\|digest"
+
+lock_mutant "$ROOT/bad-lock-container-ref-hex64-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ref": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-ref-hex64-conflict.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 A + ref bare hex64 B fails" "$out" "$rc" "conflict\|ref\|digest"
+
+# Adjacent identity alias: digest-only identity must also prove equality (parity with ref).
+lock_mutant "$ROOT/ok-lock-container-identity-equal-sha256.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "identity": "sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-identity-equal-sha256.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal identity sha256 digest" "$out" "$rc"
+
+lock_mutant "$ROOT/bad-lock-container-identity-sha256-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-identity-sha256-conflict.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 A + identity sha256 B fails" "$out" "$rc" "conflict\|identity\|digest"
 
 lock_mutant "$ROOT/bad-lock-container-repo-alt.json" '
 data["containers"] = [{
