@@ -73,6 +73,15 @@ Score ambient affordances **before** promising autonomy. Output
 - [ ] CI present; branch protection on
 - [ ] Vercel wiring: **Production Branch verified in project settings**, not docs
 - [ ] Preview deployments on
+- [ ] **Git/GitHub configure (required):**
+      `scripts/git-configure.sh --audit --repo owner/name [--path <checkout>]`
+      — **hard-stop adoption** while exit is non-zero (SAFE_DRIFT, OWNER_REQUIRED,
+      UNKNOWN, or tool ERROR). Optional safe fix: `--dry-run` then `--apply` for
+      labels / `gibson/` gitignore / squash + delete-branch-on-merge only.
+      Branch protection, required checks, Environments, DCO app, Vercel
+      Production Branch, secrets, and test-integrity live canaries are
+      **Mark-owned** (report-only remediation; never applied by this script).
+      Partial slice of issue #68 — does not close the issue alone.
 - [ ] **Delivery control** (docs/23): `scripts/delivery-control/audit.sh --repo owner/name`
       — P0 fix-list if production write path is unprotected
 - [ ] Schema/migration model documented (who applies to prod?)
@@ -111,17 +120,21 @@ Present each change as a PR (Ask Contract before merge).
    | UTC | claim | scope | session |
    |---|---|---|---|
    ```
-4. Labels: `gibson`, `tier-a`, `tier-b`, `tier-c`, `agent-claimed`, `blocked`,
-   `gibson-halt`.
+4. Labels + gitignore + merge settings via
+   `scripts/git-configure.sh --dry-run` then `--apply` when Mark approves the
+   safe set: `tier-a`/`tier-b`/`tier-c`, `agent-claimed`, `blocked`,
+   `gibson-halt`, `halt`; append `gibson/` to `.gitignore`; squash on,
+   merge-commit and rebase off, delete-branch-on-merge on. Re-run `--audit`
+   until exit 0 or only Mark-owned OWNER_REQUIRED items remain.
 
-**Ask Contract example (labels):**
+**Ask Contract example (labels / safe apply):**
 
 | Field | Text |
 |---|---|
-| What I'm asking | Add a few labels on your GitHub project so the AI team can mark work status. |
-| What it does | Labels like "claimed" and "blocked" show which task an agent is working on so two agents don't collide. |
+| What I'm asking | Add a few labels on your GitHub project and set safe merge defaults so the AI team can mark work status. |
+| What it does | Labels like "claimed" and "blocked" show which task an agent is working on so two agents don't collide; squash + delete-branch-on-merge keep history tidy. |
 | Why | Prevents two workers from editing the same files at once (that once cost a full day of broken code). |
-| Risks | Low. Labels are metadata only; removable any time; they never change your live site. |
+| Risks | Low. Labels are metadata only; merge-method toggles are reversible in GitHub settings; they never change your live site. Branch protection and Vercel stay Mark-owned. |
 
 ---
 

@@ -34,6 +34,15 @@ Score the repo's ambient affordances before promising autonomy:
 - [ ] CI present; branch protection on
 - [ ] Vercel wiring: which branch is REALLY the Production Branch (verify in
       project settings, not docs); preview deployments on
+- [ ] **Git/GitHub configure** ([issue #68](https://github.com/mrhinkle/the-gibson/issues/68)
+      first slice): run `scripts/git-configure.sh --audit --repo owner/name`
+      (optional `--path` to the target checkout). **Stop adoption on unresolved
+      FAIL / SAFE_DRIFT / OWNER_REQUIRED / UNKNOWN** (exit 1) or tool failure
+      (exit 3). Safe reversible fixes only via `--dry-run` then `--apply`
+      (labels, `gibson/` gitignore, squash + delete-branch-on-merge). Branch
+      protection, required checks, Environments, DCO app, Vercel Production
+      Branch, secrets, and test-integrity canaries are **Mark-owned** — audit
+      prints exact remediation; this script never applies them.
 - [ ] **Delivery control** ([docs/23](23-delivery-control.md)): run
       `scripts/delivery-control/audit.sh --repo owner/name` — fail or P0 the
       fix-list if the production write path is unprotected (`enforce_admins`,
@@ -75,12 +84,18 @@ them in separate files owned by separate repos.
 4. Give the repo a claim mechanism if it has none, and name it in the contract —
    a `docs/active-work.md` table, or open-PR-body claims for repos that already
    coordinate through GitHub. Whatever the repo already does wins.
-5. Labels: `tier-a/b/c`, `agent-claimed`, `blocked`, `halt`. Prefix them only if
-   the repo needs to distinguish fleets.
+5. Labels + gitignore + merge settings: prefer
+   `scripts/git-configure.sh --apply` (after `--audit` / `--dry-run`) so the
+   exact set converges idempotently: `tier-a`, `tier-b`, `tier-c`,
+   `agent-claimed`, `blocked`, `gibson-halt`, and `halt` (docs/playbook alias).
+   Prefix labels only if the repo needs to distinguish fleets. The script also
+   appends a single `gibson/` `.gitignore` entry when missing and sets squash
+   merge on, merge-commit/rebase off, delete-branch-on-merge on.
 
 Gibson-side state (`gibson/loop-state.md`, `gibson/journal.md`, `gibson/HALT`)
 is created by the loop at runtime and is the *harness's* footprint, not the
-repo's contract. Gitignore it in the target unless the team wants the journal.
+repo's contract. Gitignore it in the target (safe apply above) unless the team
+wants the journal committed.
 
 ## Step 3 — Install enforcement
 

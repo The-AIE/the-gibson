@@ -167,12 +167,37 @@ re-point production branch to prior tag when schema remains additive.
 
 ## Adoption and drift
 
-1. **Adoption (doc 13):** run `scripts/delivery-control/audit.sh`; grade fails if
-   prod write path is unprotected.
-2. **Monthly / historian:** re-audit; drift → issue, not silent.
+1. **Adoption (doc 13):** first run `scripts/git-configure.sh --audit` (issue #68
+   first slice). **Stop on unresolved SAFE_DRIFT / OWNER_REQUIRED / UNKNOWN**
+   (exit 1) or tool failure (exit 3). Safe reversible apply only:
+   `git-configure.sh --dry-run` then `--apply` for labels, `gibson/` gitignore,
+   and repository merge settings (squash on; merge-commit/rebase off;
+   delete-branch-on-merge on). **Never** applied by that script — Mark-owned:
+   branch protection + required contexts, Production Environment rules, DCO
+   app/check, Vercel Production Branch, secrets/auth, test-integrity required
+   check + live canaries. Then run `scripts/delivery-control/audit.sh`; grade
+   fails if prod write path is unprotected. Hardening still uses
+   `apply-branch-protection.sh` / `apply-production-env.sh` with Mark's apply
+   approval (dry-run first).
+2. **Monthly / historian:** re-run `git-configure.sh --audit` and
+   delivery-control `audit.sh`; drift → issue, not silent.
 3. **ConferenceOS reference implementation:** app-specific protocol and scripts may
    live in the target (`docs/runbooks/release-manager-protocol.md`); Gibson keeps
    the portable contract here.
+
+### `git-configure.sh` vs delivery-control harden
+
+| Concern | Tool | Mutates? |
+|---|---|---|
+| Labels, `gibson/` gitignore, squash / delete-branch-on-merge | `scripts/git-configure.sh --apply` | Yes (safe, idempotent, readback) |
+| Branch protection, required checks, enforce_admins | `delivery-control/apply-branch-protection.sh --apply` | Yes — Mark-owned |
+| Production Environment reviewers | `delivery-control/apply-production-env.sh --apply` | Yes — Mark-owned |
+| Vercel Production Branch | Vercel console (L-004) | Mark-owned; git-configure only audits |
+| test-integrity canary + required check | Live CI + protection contexts (#70/#68) | Mark-owned; static YAML ≠ PASS |
+
+Optional operator attestations for credential-free audits (not secrets):
+`GIBSON_VERCEL_PRODUCTION_BRANCH=<live console value>`,
+`GIBSON_TEST_INTEGRITY_OBSERVED_RUN=<url or run id>`.
 
 ---
 [← 22 · Devin cloud supervisor](22-devin-cloud-supervisor.md) · [Home](../index.md) · [Prompts →](prompts.md)
