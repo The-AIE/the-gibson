@@ -229,7 +229,15 @@ _silent_noop_fp() {
   fi
 
   # Drop only the column-zero `updated:` clock line; hash everything else.
-  body=$(awk '!/^updated:/' "$file" 2>/dev/null) || body=""
+  # Extraction/normalization failure is unhashable immediately: never fall back to
+  # an empty (or partial) body and mint a real `state:*` digest from it. That would
+  # fail open when only one side's awk failed (empty digest ≠ real digest → "progress"
+  # → budget reset / handoff on unhashable AFTER). A successful awk that yields a
+  # legitimately empty body (file is only clock lines) still hashes below.
+  if ! body=$(awk '!/^updated:/' "$file" 2>/dev/null); then
+    printf 'sentinel:unhashable'
+    return 0
+  fi
 
   # Every digest assignment ends in `|| digest=""`. The driver sources this under
   # `set -euo pipefail`, and a hash binary that *exists but fails* (broken install,

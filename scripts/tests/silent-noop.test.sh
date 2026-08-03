@@ -514,5 +514,118 @@ out=$(bash -c '
   || bad "progressed: wrong arity did not fail closed (got '$out')"
 
 echo
+echo "content-normalization awk failure is unhashable (never empty-body digest)"
+# Independent merge-blocker repro: BEFORE normalization succeeds; only AFTER's
+# substantive-content awk fails. BEFORE/AFTER differ solely in ignored updated:.
+# A bug that does `body=$(awk ...) || body=""` then hashes the empty fallback
+# mints state:<empty-digest> for AFTER, which differs from BEFORE's real digest
+# → silent_noop_progressed returns progress → loop resets budgets / can hand off.
+# Fail closed: AFTER must be sentinel:unhashable; progressed must return 1.
+#
+# Wrapper keys on the content-normalization program + AFTER path only — not on
+# call count — so hash-pipeline awk '{print $1}' is never intercepted, and the
+# test cannot pass because both sides failed or because sha256sum's awk broke.
+write_state "$ROOT/before-awk-ok.md" "2026-08-02T00:00:00Z"
+write_state "$ROOT/after-awk-fail.md" "2026-08-02T00:00:01Z"
+FAKEAWK_BIN="$ROOT/fakeawk"
+mkdir -p "$FAKEAWK_BIN"
+REAL_AWK=$(command -v awk)
+# Exact AFTER path only (no call-count races; hash awk never sees this path).
+AFTER_AWK_PATH="$ROOT/after-awk-fail.md"
+{
+  printf '%s\n' '#!/bin/sh'
+  printf '%s\n' '# Fail only the substantive-content strip for the AFTER path.'
+  printf '%s\n' "# Hash extraction uses awk '{print \$1}' (different program) — pass."
+  printf '%s\n' "AFTER_TARGET=$(printf '%q' "$AFTER_AWK_PATH")"
+  printf '%s\n' "REAL_AWK=$(printf '%q' "$REAL_AWK")"
+  printf '%s\n' 'if [ "$#" -ge 2 ] && [ "$1" = '\''!/^updated:/'\'' ] && [ "$2" = "$AFTER_TARGET" ]; then'
+  printf '%s\n' '  echo "awk: forced AFTER content-normalization failure" >&2'
+  printf '%s\n' '  exit 1'
+  printf '%s\n' 'fi'
+  printf '%s\n' 'exec "$REAL_AWK" "$@"'
+} > "$FAKEAWK_BIN/awk"
+chmod +x "$FAKEAWK_BIN/awk"
+
+# Control A: BEFORE alone under the wrapper must still be a real digest (awk ok).
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$ROOT/before-awk-ok.md" 2>&1)
+case "$out" in
+  state:*) ok "control: BEFORE content-awk under wrapper still yields state:<digest>" ;;
+  *) bad "control: BEFORE under wrapper was not a digest (got '$out') — wrapper too broad?" ;;
+esac
+before_fp=$out
+
+# Control B: AFTER alone must be sentinel:unhashable (not state: of empty body).
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+  printf " SURVIVED"
+' silent-noop-test "$SENSOR" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" == "sentinel:unhashable SURVIVED" ]] \
+  && ok "AFTER-only content-awk failure yields sentinel:unhashable (survives set -euo)" \
+  || bad "AFTER content-awk failure did not fail closed (got '$out')"
+
+# Empty-body digest must not appear as AFTER (would prove empty-fallback hashing).
+empty_digest=$(printf '%s\n' "" | {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+  else cksum | awk '{print $1 "-" $2}'
+  fi
+})
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" != "state:$empty_digest" ]] \
+  && ok "AFTER content-awk failure is not hashed empty-body state:<digest>" \
+  || bad "AFTER content-awk failure minted empty-body digest (got '$out')"
+
+# progressed: real BEFORE + unhashable AFTER → no-progress (fail closed).
+# Documented status: return 1 — loop must not treat this as progress (no budget
+# reset, no handoff). Same contract as digest→unhashable hasher path.
+out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
+  set -euo pipefail
+  source "$1"
+  fb=$(_silent_noop_fp "$2")
+  fa=$(_silent_noop_fp "$3")
+  # Prove asymmetry inside the same progressed invocation environment.
+  case "$fb" in state:*) ;; *) echo "BOTH_OR_BEFORE_BAD:$fb:$fa"; exit 0 ;; esac
+  case "$fa" in sentinel:unhashable) ;; *) echo "AFTER_NOT_UNHASHABLE:$fb:$fa"; exit 0 ;; esac
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before-awk-ok.md" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: BEFORE digest + AFTER content-awk-fail is no-progress (fail closed)" \
+  || bad "progressed: AFTER content-awk-fail looked like progress or controls failed (got '$out')"
+
+# Clock-only pair under a clean PATH remains no-progress (sanity: files are equal
+# on substance; the wrapper is what makes AFTER unhashable above).
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  silent_noop_progressed "$2" "$3" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$ROOT/before-awk-ok.md" "$ROOT/after-awk-fail.md" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "control: same pair without awk-fail wrapper is clock-only no-progress" \
+  || bad "control: clock-only pair without wrapper misclassified (got '$out')"
+
+# Legitimate empty substantive content: extraction succeeds, body empty → still
+# a real state: digest (not unhashable). Pins "success + empty ≠ failure".
+printf '%s\n' "updated: 2026-08-02T00:00:00Z" > "$ROOT/only-clock.md"
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$ROOT/only-clock.md" 2>&1)
+case "$out" in
+  state:*) ok "legitimate empty substantive body (awk success) still hashes to state:<digest>" ;;
+  *) bad "legitimate empty body should hash, not sentinel (got '$out')" ;;
+esac
+
+echo
 echo "silent-noop.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
