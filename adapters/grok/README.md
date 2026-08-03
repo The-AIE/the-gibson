@@ -92,6 +92,17 @@ export REVIEWER_CMD='claude -p --permission-mode plan'
 # loop-step / reviewer hat should honor REVIEWER_CMD when present
 ```
 
+**Three-way split:** set `RELEASE_CMD` too so the actual merge is performed by a
+third, distinct agent identity — neither the builder nor the reviewer:
+
+```bash
+export REVIEWER_CMD='codex exec -s read-only -'
+# Merge needs Bash + gh. acceptEdits only auto-approves file edits and blocks
+# gh (L-048 / chatterbuilt #311). Use bypassPermissions for RELEASE_CMD.
+export RELEASE_CMD='claude -p --permission-mode bypassPermissions'
+# release hat shells out to RELEASE_CMD when present instead of merging itself
+```
+
 ### 6. Telemetry
 
 - `MC_HEARTBEAT_URL` env for `loop.sh` curl heartbeat

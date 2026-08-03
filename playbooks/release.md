@@ -135,6 +135,30 @@ If any item fails → do not merge; report the missing gate.
 5. Rollback = promote previous READY deployment; diagnose in a worktree — never
    debug live in prod.
 
+**Docs-only / no product surface (Tier A docs or specs, no Vercel root change):**
+skip the READY deploy wait. Smoke is content verification on `origin/main`
+after the merge commit lands: `git fetch origin main` then `git show` / grep
+the contract tokens the PR claimed (runbook headings, README index entry,
+Released marker, etc.). Do not wait on marketing or MCP deploys for a pure
+`docs/**` / `specs/**` ship. Product-surface PRs still follow steps 1–5 above
+(L-049).
+
+### RELEASE_CMD (when set)
+
+Shell the actual merge to the configured release identity (third vendor —
+neither builder nor reviewer). The merge agent must be able to run **Bash and
+`gh`**. Claude `acceptEdits` only auto-approves file edits and **blocks**
+Bash/gh — that failed the first merge attempt on chatterbuilt #311/PR #346
+(L-048). Prefer:
+
+```bash
+export RELEASE_CMD='claude -p --output-format text --permission-mode bypassPermissions'
+```
+
+Always re-verify with `gh pr view <N> --json state,mergedAt,mergeCommit` after
+the shell-out returns; do not trust narration alone. Fall through to a direct
+merge only if `RELEASE_CMD` is unset.
+
 ### Reading the preflight verdict
 
 **READY** — merge.
