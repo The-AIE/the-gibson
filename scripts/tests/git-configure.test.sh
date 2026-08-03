@@ -344,12 +344,42 @@ case "$METHOD" in
         echo "patch failed" >&2
         exit 1
       fi
+      if [[ -f "$STATE/stale_patch" ]]; then
+        # Accept PATCH but leave live booleans wrong (stale readback fail-closed)
+        cat "$STATE/repo.json"
+        exit 0
+      fi
       if [[ -f "$STATE/repo.json" ]]; then
-        jq '.allow_squash_merge=true
+        # Apply only fields present in -F/-f flags (diff-derived PATCH support)
+        jqfilter='.'
+        i=1
+        while [[ $i -lt ${#REST[@]} ]]; do
+          tok="${REST[$i]}"
+          if [[ "$tok" == "-F" || "$tok" == "-f" ]]; then
+            i=$((i + 1))
+            kv="${REST[$i]:-}"
+            key="${kv%%=*}"
+            val="${kv#*=}"
+            case "$key" in
+              allow_squash_merge|allow_merge_commit|allow_rebase_merge|delete_branch_on_merge)
+                if [[ "$val" == "true" ]]; then
+                  jqfilter="$jqfilter | .${key}=true"
+                else
+                  jqfilter="$jqfilter | .${key}=false"
+                fi
+                ;;
+            esac
+          fi
+          i=$((i + 1))
+        done
+        # If no fields parsed, fall back to full desired defaults (compat)
+        if [[ "$jqfilter" == "." ]]; then
+          jqfilter='.allow_squash_merge=true
             | .allow_merge_commit=false
             | .allow_rebase_merge=false
-            | .delete_branch_on_merge=true' \
-          "$STATE/repo.json" >"$STATE/repo.json.tmp" \
+            | .delete_branch_on_merge=true'
+        fi
+        jq "$jqfilter" "$STATE/repo.json" >"$STATE/repo.json.tmp" \
           && mv "$STATE/repo.json.tmp" "$STATE/repo.json"
         cat "$STATE/repo.json"
         exit 0
@@ -419,6 +449,41 @@ if [[ "$EP" =~ /environments/ ]]; then
   fi
   if [[ -f "$STATE/environment.json" ]]; then
     cat "$STATE/environment.json"
+    exit 0
+  fi
+  echo "Not Found" >&2
+  exit 1
+fi
+
+# Actions run: repos/{owner}/{repo}/actions/runs/{id}
+if [[ "$EP" =~ ^repos/[^/]+/[^/]+/actions/runs/[0-9]+$ ]]; then
+  run_id="${EP##*/}"
+  if [[ -f "$STATE/actions_runs/${run_id}.fail" ]]; then
+    echo "actions run API fail" >&2
+    exit 1
+  fi
+  if [[ -f "$STATE/actions_runs/${run_id}.json" ]]; then
+    cat "$STATE/actions_runs/${run_id}.json"
+    exit 0
+  fi
+  echo "Not Found" >&2
+  exit 1
+fi
+
+# Check-runs for a commit: repos/{owner}/{repo}/commits/{sha}/check-runs
+if [[ "$EP" =~ ^repos/[^/]+/[^/]+/commits/[^/]+/check-runs$ ]]; then
+  rest=${EP#*commits/}
+  sha=${rest%/check-runs}
+  if [[ -f "$STATE/check_runs/${sha}.fail" ]]; then
+    echo "check-runs API fail" >&2
+    exit 1
+  fi
+  if [[ -f "$STATE/check_runs/${sha}.json" ]]; then
+    cat "$STATE/check_runs/${sha}.json"
+    exit 0
+  fi
+  if [[ -f "$STATE/check_runs/default.json" ]]; then
+    cat "$STATE/check_runs/default.json"
     exit 0
   fi
   echo "Not Found" >&2
@@ -543,11 +608,43 @@ YML
   "reviewerLogin": "reviewer-bot"
 }
 JSON
+  # Live Actions run + check-runs fixtures (exact DCO + test-integrity PASS path)
+  mkdir -p "$s/actions_runs" "$s/check_runs"
+  # 40-lowercase-hex head SHA shared by default green runs
+  GOOD_HEAD_SHA='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  cat >"$s/actions_runs/67890.json" <<JSON
+{
+  "id": 67890,
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "${GOOD_HEAD_SHA}",
+  "repository": {"full_name": "acme/app"}
+}
+JSON
+  cat >"$s/actions_runs/12345.json" <<JSON
+{
+  "id": 12345,
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "${GOOD_HEAD_SHA}",
+  "repository": {"full_name": "acme/app"}
+}
+JSON
+  cat >"$s/check_runs/${GOOD_HEAD_SHA}.json" <<'JSON'
+{
+  "total_count": 2,
+  "check_runs": [
+    {"id": 101, "name": "DCO", "status": "completed", "conclusion": "success"},
+    {"id": 102, "name": "test-integrity", "status": "completed", "conclusion": "success"}
+  ]
+}
+JSON
   echo "$s"
 }
 
 OBS_TI='https://github.com/acme/app/actions/runs/12345'
 OBS_DCO='https://github.com/acme/app/actions/runs/67890'
+GOOD_HEAD_SHA='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 run_gc() {
   # run_gc <state-dir> [extra args...]
@@ -718,6 +815,8 @@ out=$(run_gc_ready "$s" --apply); rc=$?
 # still may be exit 1 if owner items remain — but with ready env should be 0
 check "apply exit 0 when fully ready after fix" "$rc" "0"
 contains "safe mutations applied" "$out" "safe mutations applied"
+# capture first-apply mutations before idempotent re-run clears the log
+muts=$(cat "$MUTLOG")
 # labels include required + unrelated
 labs=$(jq -r '.[].name' "$s/labels.json" | sort | tr '\n' ' ')
 contains "has unrelated label" "$labs" "unrelated-keep-me"
@@ -743,8 +842,7 @@ check "squash on" "$sq" "true"
 check "merge commit off" "$mc" "false"
 check "rebase off" "$rb" "false"
 check "delete branch on" "$db" "true"
-# mutations were logged
-muts=$(cat "$MUTLOG")
+# mutations were logged on the first (drifting) apply
 contains "logged PATCH" "$muts" "PATCH"
 
 echo "=== apply readback failure → exit 3, not READY ==="
@@ -1340,6 +1438,270 @@ printf '[]' >"$s/labels.json"
 out=$(run_gc_ready "$s" --apply); rc=$?
 # labels missing → apply creates them; should ready if env ok
 check "apply fills labels exit 0" "$rc" "0"
+
+# ---------------------------------------------------------------------------
+# Independent review repair regressions (#68 REQUEST_CHANGES)
+# ---------------------------------------------------------------------------
+echo "=== outside-checkout ancestor symlink victim never written ==="
+s=$(new_state report-outside-bridge)
+victim=$(mktemp -d "${TMPDIR:-/tmp}/gibson-outside-victim.XXXXXX")
+bridge_root=$(mktemp -d "${TMPDIR:-/tmp}/gibson-outside-bridge.XXXXXX")
+printf 'sentinel-unchanged\n' >"$victim/marker.txt"
+ln -s "$victim" "$bridge_root/bridge"
+out=$(GIBSON_VERCEL_PRODUCTION_BRANCH=main \
+      GIBSON_TEST_INTEGRITY_OBSERVED_RUN="$OBS_TI" \
+      GIBSON_DCO_OBSERVED_RUN="$OBS_DCO" \
+      FAKE_GH_STATE="$s" GIBSON_GH_MUTATION_LOG="$MUTLOG" \
+      bash "$TARGET" --repo acme/app --path "$s/work" --config "$s/work/.gibson-delivery.json" \
+      --report "$bridge_root/bridge/report.md" --audit 2>&1); rc=$?
+check "outside-checkout bridge report exit 3" "$rc" "3"
+if [[ -e "$victim/report.md" ]]; then
+  bad "outside victim must not receive report file"
+else
+  ok "outside victim report not created"
+fi
+marker=$(cat "$victim/marker.txt")
+check "outside victim marker unchanged" "$marker" "sentinel-unchanged"
+vcount=$(find "$victim" -type f 2>/dev/null | wc -l | tr -d ' ')
+check "outside victim file count" "$vcount" "1"
+rm -rf "$victim" "$bridge_root"
+
+echo "=== trusted system-alias report green (portable /tmp) ==="
+s=$(new_state report-sysalias)
+sys_report_dir=$(mktemp -d "/tmp/gibson-sysalias.XXXXXX")
+sys_report="$sys_report_dir/report.md"
+out=$(GIBSON_VERCEL_PRODUCTION_BRANCH=main \
+      GIBSON_TEST_INTEGRITY_OBSERVED_RUN="$OBS_TI" \
+      GIBSON_DCO_OBSERVED_RUN="$OBS_DCO" \
+      FAKE_GH_STATE="$s" GIBSON_GH_MUTATION_LOG="$MUTLOG" \
+      bash "$TARGET" --repo acme/app --path "$s/work" --config "$s/work/.gibson-delivery.json" \
+      --report "$sys_report" --audit 2>&1); rc=$?
+check "trusted /tmp alias report exit 0" "$rc" "0"
+if [[ -f "$sys_report" ]]; then ok "trusted alias report file exists"; else bad "trusted alias report missing"; fi
+rm -rf "$sys_report_dir"
+
+echo "=== already-ready apply: first + repeated zero mutation ==="
+s=$(new_state ready-apply-noop)
+gi_before=$(cat "$s/work/.gitignore" | od -An -tx1 | tr -d ' \n')
+out=$(run_gc_ready "$s" --apply); rc=$?
+check "ready first apply exit 0" "$rc" "0"
+contains "ready first apply already-converged" "$out" "already-converged"
+muts=$(cat "$MUTLOG")
+check "ready first apply zero gh mutations" "${muts:-}" ""
+gi_after=$(cat "$s/work/.gitignore" | od -An -tx1 | tr -d ' \n')
+check "ready first apply gitignore bytes preserved" "$gi_before" "$gi_after"
+out2=$(run_gc_ready "$s" --apply); rc2=$?
+check "ready repeated apply exit 0" "$rc2" "0"
+muts2=$(cat "$MUTLOG")
+check "ready repeated apply zero gh mutations" "${muts2:-}" ""
+contains "ready repeated already-converged" "$out2" "already-converged"
+
+echo "=== partial-drift merge apply mutates only + readback ==="
+s=$(new_state partial-drift)
+# only merge_commit drifts; rest already desired
+jq '.allow_merge_commit=true' "$s/repo.json" >"$s/repo.json.tmp" && mv "$s/repo.json.tmp" "$s/repo.json"
+gi_before=$(cat "$s/work/.gitignore" | od -An -tx1 | tr -d ' \n')
+out=$(run_gc_ready "$s" --apply); rc=$?
+check "partial-drift apply exit 0" "$rc" "0"
+muts=$(cat "$MUTLOG")
+contains "partial-drift logged PATCH" "$muts" "PATCH"
+# ensure other mutate methods absent
+lacks "partial-drift no POST" "$muts" "POST"
+lacks "partial-drift no PUT" "$muts" "PUT"
+lacks "partial-drift no DELETE" "$muts" "DELETE"
+mc=$(jq -r .allow_merge_commit "$s/repo.json")
+sq=$(jq -r .allow_squash_merge "$s/repo.json")
+check "partial-drift merge_commit fixed" "$mc" "false"
+check "partial-drift squash still true" "$sq" "true"
+gi_after=$(cat "$s/work/.gitignore" | od -An -tx1 | tr -d ' \n')
+check "partial-drift gitignore unchanged" "$gi_before" "$gi_after"
+contains "partial-drift verified" "$out" "merge settings applied and verified"
+
+echo "=== stale-readback after PATCH remains fail-closed ==="
+s=$(new_state stale-readback)
+jq '.allow_squash_merge=false' "$s/repo.json" >"$s/repo.json.tmp" && mv "$s/repo.json.tmp" "$s/repo.json"
+printf '1' >"$s/stale_patch"
+out=$(run_gc_ready "$s" --apply); rc=$?
+check "stale-readback apply exit 3" "$rc" "3"
+contains "stale-readback postcondition" "$out" "post-apply postcondition failed"
+lacks "stale-readback not READY" "$out" "VERDICT: READY"
+
+echo "=== synthetic observed-run: cannot false-green DCO or test-integrity ==="
+s=$(new_state synth-obs)
+out=$(GIBSON_VERCEL_PRODUCTION_BRANCH=main \
+      GIBSON_TEST_INTEGRITY_OBSERVED_RUN='observed-run:synthetic-token-abc' \
+      GIBSON_DCO_OBSERVED_RUN='observed-run:synthetic-token-xyz' \
+      FAKE_GH_STATE="$s" GIBSON_GH_MUTATION_LOG="$MUTLOG" \
+      bash "$TARGET" --repo acme/app --path "$s/work" --config "$s/work/.gibson-delivery.json" --no-report --audit 2>&1); rc=$?
+check "synthetic observed-run exit 1" "$rc" "1"
+contains "synthetic dco strict contract" "$out" "strict observed-run contract"
+contains "synthetic ti strict contract" "$out" "strict observed-run contract"
+lacks "synthetic not READY" "$out" "VERDICT: READY"
+lacks "synthetic no DCO PASS" "$out" "[PASS] dco"
+lacks "synthetic no TI PASS" "$out" "[PASS] test-integrity-canary"
+
+echo "=== observed-run other host/repo rejected ==="
+s=$(new_state obs-other)
+out=$(GIBSON_VERCEL_PRODUCTION_BRANCH=main \
+      GIBSON_TEST_INTEGRITY_OBSERVED_RUN='https://github.com/other/repo/actions/runs/12345' \
+      GIBSON_DCO_OBSERVED_RUN='https://evil.example/acme/app/actions/runs/67890' \
+      FAKE_GH_STATE="$s" GIBSON_GH_MUTATION_LOG="$MUTLOG" \
+      bash "$TARGET" --repo acme/app --path "$s/work" --config "$s/work/.gibson-delivery.json" --no-report --audit 2>&1); rc=$?
+check "other host/repo observed-run exit 1" "$rc" "1"
+lacks "other host not READY" "$out" "VERDICT: READY"
+lacks "other host no DCO PASS" "$out" "[PASS] dco"
+
+echo "=== live run mutants: wrong id/repo/SHA/status/conclusion/check ==="
+# wrong repository.full_name
+s=$(new_state live-wrong-repo)
+cat >"$s/actions_runs/67890.json" <<JSON
+{
+  "id": 67890,
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "${GOOD_HEAD_SHA}",
+  "repository": {"full_name": "evil/other"}
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "wrong repo full_name exit 1" "$rc" "1"
+lacks "wrong repo not READY" "$out" "VERDICT: READY"
+contains "wrong repo evidence" "$out" "not PASS-worthy"
+
+# pending run status
+s=$(new_state live-pending)
+cat >"$s/actions_runs/67890.json" <<JSON
+{
+  "id": 67890,
+  "status": "in_progress",
+  "conclusion": null,
+  "head_sha": "${GOOD_HEAD_SHA}",
+  "repository": {"full_name": "acme/app"}
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "pending run exit 1" "$rc" "1"
+lacks "pending not READY" "$out" "VERDICT: READY"
+
+# failure conclusion
+s=$(new_state live-fail-conc)
+cat >"$s/actions_runs/67890.json" <<JSON
+{
+  "id": 67890,
+  "status": "completed",
+  "conclusion": "failure",
+  "head_sha": "${GOOD_HEAD_SHA}",
+  "repository": {"full_name": "acme/app"}
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "failure conclusion exit 1" "$rc" "1"
+lacks "failure conc not READY" "$out" "VERDICT: READY"
+
+# malformed / null head_sha
+s=$(new_state live-bad-sha)
+cat >"$s/actions_runs/67890.json" <<JSON
+{
+  "id": 67890,
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "NOTAHEXSHA",
+  "repository": {"full_name": "acme/app"}
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "bad head_sha exit 1" "$rc" "1"
+lacks "bad sha not READY" "$out" "VERDICT: READY"
+
+# API fail on actions run
+s=$(new_state live-api-fail)
+printf '1' >"$s/actions_runs/67890.fail"
+out=$(run_gc_ready "$s" --audit); rc=$?
+# ERROR tallies → exit 3
+check "actions run API fail exit 3" "$rc" "3"
+lacks "api fail not READY" "$out" "VERDICT: READY"
+
+# missing exact check name
+s=$(new_state live-missing-check)
+cat >"$s/check_runs/${GOOD_HEAD_SHA}.json" <<'JSON'
+{
+  "total_count": 1,
+  "check_runs": [
+    {"id": 1, "name": "not-dco", "status": "completed", "conclusion": "success"}
+  ]
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "missing exact check exit 1" "$rc" "1"
+lacks "missing check not READY" "$out" "VERDICT: READY"
+lacks "missing check no DCO PASS" "$out" "[PASS] dco"
+
+# duplicate exact check name
+s=$(new_state live-dup-check)
+cat >"$s/check_runs/${GOOD_HEAD_SHA}.json" <<'JSON'
+{
+  "total_count": 2,
+  "check_runs": [
+    {"id": 1, "name": "DCO", "status": "completed", "conclusion": "success"},
+    {"id": 2, "name": "DCO", "status": "completed", "conclusion": "success"},
+    {"id": 3, "name": "test-integrity", "status": "completed", "conclusion": "success"}
+  ]
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "duplicate DCO check exit 1" "$rc" "1"
+lacks "dup check not READY" "$out" "VERDICT: READY"
+lacks "dup check no DCO PASS" "$out" "[PASS] dco"
+
+# unsuccessful check conclusion
+s=$(new_state live-check-fail)
+cat >"$s/check_runs/${GOOD_HEAD_SHA}.json" <<'JSON'
+{
+  "total_count": 2,
+  "check_runs": [
+    {"id": 1, "name": "DCO", "status": "completed", "conclusion": "failure"},
+    {"id": 2, "name": "test-integrity", "status": "completed", "conclusion": "success"}
+  ]
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "unsuccessful DCO check exit 1" "$rc" "1"
+lacks "unsuccessful check not READY" "$out" "VERDICT: READY"
+lacks "unsuccessful no DCO PASS" "$out" "[PASS] dco"
+
+# wrong run id in payload vs URL
+s=$(new_state live-wrong-id)
+cat >"$s/actions_runs/67890.json" <<JSON
+{
+  "id": 99999,
+  "status": "completed",
+  "conclusion": "success",
+  "head_sha": "${GOOD_HEAD_SHA}",
+  "repository": {"full_name": "acme/app"}
+}
+JSON
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "wrong run id payload exit 1" "$rc" "1"
+lacks "wrong id not READY" "$out" "VERDICT: READY"
+
+# query string / trailing ambiguity rejected
+s=$(new_state live-query)
+out=$(GIBSON_VERCEL_PRODUCTION_BRANCH=main \
+      GIBSON_TEST_INTEGRITY_OBSERVED_RUN='https://github.com/acme/app/actions/runs/12345?x=1' \
+      GIBSON_DCO_OBSERVED_RUN='https://github.com/acme/app/actions/runs/67890/' \
+      FAKE_GH_STATE="$s" GIBSON_GH_MUTATION_LOG="$MUTLOG" \
+      bash "$TARGET" --repo acme/app --path "$s/work" --config "$s/work/.gibson-delivery.json" --no-report --audit 2>&1); rc=$?
+check "query/trailing URL exit 1" "$rc" "1"
+lacks "query URL not READY" "$out" "VERDICT: READY"
+contains "query URL strict contract" "$out" "strict observed-run contract"
+
+# green path still READY with live fixtures
+s=$(new_state live-green)
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "live green evidence READY exit 0" "$rc" "0"
+contains "live green DCO PASS" "$out" "[PASS] dco"
+contains "live green TI PASS" "$out" "[PASS] test-integrity-canary"
+contains "live green READY" "$out" "VERDICT: READY"
 
 echo ""
 echo "======================================"
