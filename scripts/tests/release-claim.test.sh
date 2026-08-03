@@ -57,12 +57,18 @@ trap 'rm -rf "$ROOT"' EXIT
 
 echo "L-037 · namespaced and numeric claim ids match safely"
 new_repo "$ROOT/a"
-out=$(cd "$ROOT/a/canon" && "$RC" 15 --dry-run 2>&1)
+# Bare multi-claim on issue 15 refuses (two live issue-15 rows). Scoped match
+# still sees issue-15 and never issue-115.
+out=$(cd "$ROOT/a/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
+rc=$?
+check "scoped dry-run exits 0" "$rc" "0"
 contains "issue-15-* matches" "$out" "issue-15-checkout-totals"
 lacks    "issue-115-* does not match issue 15" "$out" "issue-115-unrelated"
-out=$(cd "$ROOT/a/canon" && "$RC" 5 --prefix template --repo acme/tmpl --dry-run 2>&1)
+out=$(cd "$ROOT/a/canon" && "$RC" 5 --prefix template --claim-id issue-template-5-palette-tokens --repo acme/tmpl --dry-run 2>&1)
 contains "--prefix finds the namespaced id" "$out" "issue-template-5-palette-tokens"
 contains "--repo names the product repo" "$out" "acme/tmpl"
+contains "monorepo sibling kept under prefix release" "$out" "KEEP sibling claim: issue-5-monorepo-thing"
+lacks    "does not release monorepo under template claim-id" "$out" "release claim:   issue-5-monorepo-thing"
 
 echo "L-024 · --claim-id releases one slice and keeps the siblings"
 out=$(cd "$ROOT/a/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
@@ -107,8 +113,21 @@ contains "other issue untouched"       "$files" "issue-115-unrelated"
 
 echo "L-027 · unfinished cleanup exits 3 instead of claiming success"
 new_repo "$ROOT/c"
-# Final lane: strip every issue-15 claim so residual is empty and the label
-# must be removed. No GitHub remote → removal cannot be verified → exit 3.
+# Final single-claim lane: residual empty → label must be removed. Bare multi
+# refuse (#65) means we leave only one issue-15 row, then bare-release it.
+# No GitHub remote → removal cannot be verified → exit 3.
+(
+  cd "$ROOT/c/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-checkout-totals | src/checkout | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "single issue-15 claim" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
 out=$(cd "$ROOT/c/canon" && "$RC" 15 2>&1)
 rc=$?
 check "exit code" "$rc" "3"
@@ -597,6 +616,907 @@ rc=$?
 check "docs/claims blob (not tree) hard-fails" "$rc" "1"
 contains "claims path wants tree" "$out" "want 040000 tree"
 lacks    "does not mutate labels when claims is blob" "$out" "MUTATED-LABEL"
+
+echo "#65 · bare multi-claim refuse (legacy + per-file)"
+# Two live issue-15 claims + bare invocation must exit 1 before any dry-run
+# plan or mutation. Exact ids printed sorted; zero worktree/branch/ledger change.
+new_repo "$ROOT/m65"
+# Canaries that must not be touched on refuse.
+mkdir -p "$ROOT/m65/wt-15-checkout-totals" "$ROOT/m65/wt-15-demo-stale-plan"
+echo canary-a > "$ROOT/m65/wt-15-checkout-totals/marker"
+echo canary-b > "$ROOT/m65/wt-15-demo-stale-plan/marker"
+(
+  cd "$ROOT/m65/canon" || exit 1
+  git branch -f "feat/15-checkout-totals" HEAD
+  git branch -f "feat/15-demo-stale-plan" HEAD
+  printf '%s\n' "$(git rev-parse origin/main)" > "$ROOT/m65/origin-main.before"
+) >/dev/null 2>&1
+
+out=$(cd "$ROOT/m65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "bare multi-claim dry-run exits 1" "$rc" "1"
+contains "names multi-claim refuse" "$out" "has 2 live claims"
+contains "lists checkout-totals" "$out" "issue-15-checkout-totals"
+contains "lists demo-stale-plan" "$out" "issue-15-demo-stale-plan"
+# Sorted order: checkout-totals before demo-stale-plan (strip indent for compare)
+order=$(printf '%s\n' "$out" | grep -E '^[[:space:]]+issue-15-' | sed 's/^[[:space:]]*//' | tr '\n' '|')
+contains "ids printed in sorted order" "$order" "issue-15-checkout-totals|issue-15-demo-stale-plan|"
+lacks    "no dry-run plan on multi refuse" "$out" "DRY RUN would"
+lacks    "no release plan on multi refuse" "$out" "release claim:"
+lacks    "no label plan on multi refuse" "$out" "remove label"
+
+out=$(cd "$ROOT/m65/canon" && "$RC" 15 2>&1)
+rc=$?
+check "bare multi-claim real invoke exits 1" "$rc" "1"
+contains "real multi refuse names both ids" "$out" "issue-15-checkout-totals"
+contains "real multi refuse names sibling" "$out" "issue-15-demo-stale-plan"
+[[ -f "$ROOT/m65/wt-15-checkout-totals/marker" ]] \
+  && ok "multi refuse left target worktree" \
+  || bad "multi refuse removed target worktree"
+[[ -f "$ROOT/m65/wt-15-demo-stale-plan/marker" ]] \
+  && ok "multi refuse left sibling worktree" \
+  || bad "multi refuse removed sibling worktree"
+br_a=$(git -C "$ROOT/m65/canon" branch --list 'feat/15-checkout-totals')
+br_b=$(git -C "$ROOT/m65/canon" branch --list 'feat/15-demo-stale-plan')
+[[ -n "$br_a" ]] && ok "multi refuse left target branch" || bad "multi refuse deleted target branch"
+[[ -n "$br_b" ]] && ok "multi refuse left sibling branch" || bad "multi refuse deleted sibling branch"
+origin_before=$(cat "$ROOT/m65/origin-main.before")
+origin_after=$(git -C "$ROOT/m65/canon" rev-parse origin/main)
+check "multi refuse did not push ledger" "$origin_after" "$origin_before"
+
+# Per-file ledger multi-claim refuse (no legacy rows).
+new_repo "$ROOT/m65f"
+(
+  cd "$ROOT/m65f/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  for id in issue-15-checkout-totals issue-15-demo-stale-plan; do
+    printf 'claim: %s\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/%s\nsession: a\n' "$id" "$id" \
+      > "docs/claims/$id.md"
+  done
+  : > docs/active-work.md
+  git add -A && git commit -qm "two per-file claims" && git push -q origin main
+  git checkout -q long-lived-feature
+  printf '%s\n' "$(git rev-parse origin/main)" > "$ROOT/m65f/origin-main.before"
+) >/dev/null 2>&1
+out=$(cd "$ROOT/m65f/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "per-file bare multi-claim dry-run exits 1" "$rc" "1"
+contains "per-file multi lists both" "$out" "issue-15-checkout-totals"
+lacks    "per-file multi no dry-run plan" "$out" "DRY RUN would"
+origin_after=$(git -C "$ROOT/m65f/canon" rev-parse origin/main)
+check "per-file multi refuse no ledger push" "$origin_after" "$(cat "$ROOT/m65f/origin-main.before")"
+
+echo "#65 · bare single-claim freezes exact id"
+new_repo "$ROOT/s65"
+(
+  cd "$ROOT/s65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "single issue-15" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/s65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "bare single-claim dry-run exits 0" "$rc" "0"
+contains "freezes the only id" "$out" "issue-15-only-lane"
+contains "plans that one release" "$out" "release claim:   issue-15-only-lane"
+lacks    "does not plan issue-115" "$out" "issue-115-unrelated"
+
+# Per-file single bare green.
+new_repo "$ROOT/s65f"
+(
+  cd "$ROOT/s65f/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-15-only-lane\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/only\nsession: a\n' \
+    > docs/claims/issue-15-only-lane.md
+  : > docs/active-work.md
+  git add -A && git commit -qm "one per-file claim" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/s65f/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "per-file bare single dry-run exits 0" "$rc" "0"
+contains "per-file freezes only id" "$out" "issue-15-only-lane"
+
+echo "#65 · exact --claim-id literal; reject regex / wrong-issue"
+new_repo "$ROOT/x65"
+# Regex-looking id must fail before any plan/mutation (literal exact only).
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id 'issue-15-.*' --dry-run 2>&1)
+rc=$?
+check "regex-looking claim-id exits 1" "$rc" "1"
+contains "rejects non-literal claim-id" "$out" "literal exact claim id"
+lacks    "regex claim-id no dry-run plan" "$out" "DRY RUN would"
+lacks    "regex does not select both siblings" "$out" "release claim:   issue-15-checkout-totals"
+
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id 'issue-15-*' --dry-run 2>&1)
+rc=$?
+check "glob-looking claim-id exits 1" "$rc" "1"
+contains "rejects glob claim-id" "$out" "literal exact claim id"
+
+# Wrong issue: issue-5 id with positional 15.
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id issue-5-monorepo-thing --dry-run 2>&1)
+rc=$?
+check "wrong-issue claim-id exits 1" "$rc" "1"
+contains "wrong-issue rejected" "$out" "does not belong to issue 15"
+lacks    "wrong-issue no dry-run plan" "$out" "DRY RUN would"
+
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id issue-5-monorepo-thing 2>&1)
+rc=$?
+check "wrong-issue real invoke exits 1" "$rc" "1"
+table=$(cd "$ROOT/x65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "wrong-issue left all rows" "$table" "issue-5-monorepo-thing"
+contains "wrong-issue left issue-15 rows" "$table" "issue-15-checkout-totals"
+
+# Empty / absent claim-id.
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id '' --dry-run 2>&1)
+rc=$?
+check "empty claim-id exits 1" "$rc" "1"
+contains "empty claim-id named" "$out" "non-empty literal claim id"
+
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id issue-15-does-not-exist --dry-run 2>&1)
+rc=$?
+check "absent claim-id exits 1" "$rc" "1"
+contains "absent claim-id named" "$out" "no live claim"
+
+echo "#65 · legacy row: scope text mentioning target id is inert"
+new_repo "$ROOT/leg65"
+(
+  cd "$ROOT/leg65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-checkout-totals | src/checkout | session:a |
+| 2026-08-01 | issue-16-other | depends on issue-15-checkout-totals | session:x |
+| 2026-08-01 | issue-15-demo-stale-plan | src/demo | session:b |
+TABLE
+  git add -A && git commit -qm "scope mentions target id" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+(cd "$ROOT/leg65/canon" && "$RC" 15 --claim-id issue-15-checkout-totals) >/dev/null 2>&1
+table=$(cd "$ROOT/leg65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+# Scope text of issue-16-other still mentions the released id; only the claim-id
+# column row for the target must be gone (pipe-delimited first-column match).
+lacks    "target claim-id column row gone" "$table" "| issue-15-checkout-totals |"
+contains "unrelated row survives despite scope text" "$table" "issue-16-other"
+contains "sibling claim-id column survives" "$table" "| issue-15-demo-stale-plan |"
+contains "scope still mentions released id text" "$table" "depends on issue-15-checkout-totals"
+
+echo "#65 · mixed legacy+per-file duplicate counts as one"
+new_repo "$ROOT/dup65"
+(
+  cd "$ROOT/dup65/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-15-only-lane\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/only\nsession: a\n' \
+    > docs/claims/issue-15-only-lane.md
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "same id in both ledgers" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+# Bare must treat as single claim (not multi refuse).
+out=$(cd "$ROOT/dup65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "mixed duplicate bare dry-run exits 0" "$rc" "0"
+contains "mixed counts as one id" "$out" "issue-15-only-lane"
+lacks    "mixed not multi-refuse" "$out" "live claims"
+# Real release removes both representations.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then exit 0; fi
+    echo "${GH_LABELS:-}"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/dup65/canon" && GH_LABELS="" "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "mixed duplicate real release exits 0" "$rc" "0"
+files=$(cd "$ROOT/dup65/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+lacks    "per-file representation removed" "$files" "issue-15-only-lane"
+table=$(cd "$ROOT/dup65/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
+lacks    "legacy representation removed" "$table" "issue-15-only-lane"
+
+echo "#65 · prefixes/namespaces and issue 15 vs 115 remain safe"
+new_repo "$ROOT/ns65"
+out=$(cd "$ROOT/ns65/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
+lacks    "15 never selects 115" "$out" "issue-115-unrelated"
+out=$(cd "$ROOT/ns65/canon" && "$RC" 115 --claim-id issue-115-unrelated --dry-run 2>&1)
+rc=$?
+check "issue 115 exact dry-run exits 0" "$rc" "0"
+contains "115 releases its own id" "$out" "issue-115-unrelated"
+lacks    "115 does not select 15" "$out" "issue-15-checkout-totals"
+out=$(cd "$ROOT/ns65/canon" && "$RC" 5 --prefix template --claim-id issue-template-5-palette-tokens --dry-run 2>&1)
+contains "namespaced template id" "$out" "issue-template-5-palette-tokens"
+
+echo "#65 · sibling at mutation boundary keeps row and label"
+# Start with one claim. On the bare origin, a post-receive hook injects a
+# sibling claim *after* the cleanup push (plumbing, no worktree) so the
+# script's post-strip re-read keeps agent-claimed.
+new_repo "$ROOT/bound65"
+(
+  cd "$ROOT/bound65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single before race" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+# post-receive: append a sibling row via commit-tree/update-ref (portable on bare).
+cat > "$ROOT/bound65/origin/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+while read -r _old new ref; do
+  case "$ref" in
+    refs/heads/main|refs/heads/master) ;;
+    *) continue ;;
+  esac
+  content=$(git cat-file -p "$new:docs/active-work.md" 2>/dev/null || true)
+  [[ -n "$content" ]] || continue
+  printf '%s\n' "$content" | grep -qF 'issue-15-sibling-racer' && continue
+  newcontent=$(printf '%s\n' "$content" '| 2026-08-02 | issue-15-sibling-racer | src/race | session:z |')
+  newblob=$(printf '%s\n' "$newcontent" | git hash-object -w --stdin)
+  # Rebuild the root tree from $new, replacing docs/active-work.md.
+  export GIT_INDEX_FILE
+  GIT_INDEX_FILE=$(mktemp "${TMPDIR:-/tmp}/gibson-idx.XXXXXX")
+  git read-tree "$new"
+  git update-index --add --cacheinfo "100644,$newblob,docs/active-work.md"
+  tree=$(git write-tree)
+  commit=$(printf '%s\n' "race: sibling at mutation boundary" | git commit-tree "$tree" -p "$new")
+  git update-ref "$ref" "$commit"
+  rm -f "$GIT_INDEX_FILE"
+  unset GIT_INDEX_FILE
+done
+HOOK
+chmod +x "$ROOT/bound65/origin/hooks/post-receive"
+
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/bound65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+# Sibling re-read → keep label (no edit). Exit 0 complete.
+check "mutation-boundary release exits 0" "$rc" "0"
+contains "keeps label for boundary sibling" "$out" "residual claims remain"
+contains "names the raced sibling" "$out" "issue-15-sibling-racer"
+lacks    "does not remove label when sibling raced in" "$out" "MUTATED-LABEL"
+lacks    "does not claim label removed" "$out" "removed agent-claimed"
+table=$(cd "$ROOT/bound65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "raced sibling row survives" "$table" "issue-15-sibling-racer"
+lacks    "original target still released" "$table" "| issue-15-only-lane |"
+
+echo "#65 · scoped cleanup preserves sibling worktree/branch/label (legacy)"
+new_repo "$ROOT/sc65"
+mkdir -p "$ROOT/sc65/wt-15-checkout-totals" "$ROOT/sc65/wt-15-demo-stale-plan"
+echo target > "$ROOT/sc65/wt-15-checkout-totals/marker"
+echo sibling > "$ROOT/sc65/wt-15-demo-stale-plan/marker"
+(
+  cd "$ROOT/sc65/canon" || exit 1
+  git branch -f "feat/15-checkout-totals" HEAD
+  git branch -f "feat/15-demo-stale-plan" HEAD
+) >/dev/null 2>&1
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/sc65/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --repo acme/app 2>&1)
+rc=$?
+check "scoped legacy release exits 0" "$rc" "0"
+contains "keeps label for residual sibling" "$out" "residual claims remain"
+lacks    "scoped does not strip label" "$out" "MUTATED-LABEL"
+[[ ! -f "$ROOT/sc65/wt-15-checkout-totals/marker" ]] \
+  && ok "target worktree removed" \
+  || bad "target worktree still present"
+[[ -f "$ROOT/sc65/wt-15-demo-stale-plan/marker" ]] \
+  && ok "sibling worktree preserved" \
+  || bad "sibling worktree was removed"
+br_t=$(git -C "$ROOT/sc65/canon" branch --list 'feat/15-checkout-totals')
+br_s=$(git -C "$ROOT/sc65/canon" branch --list 'feat/15-demo-stale-plan')
+[[ -z "$br_t" ]] && ok "target branch deleted" || bad "target branch still present"
+[[ -n "$br_s" ]] && ok "sibling branch preserved" || bad "sibling branch was deleted"
+table=$(cd "$ROOT/sc65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+lacks    "target row gone" "$table" "issue-15-checkout-totals"
+contains "sibling row kept" "$table" "issue-15-demo-stale-plan"
+contains "unrelated 115 kept" "$table" "issue-115-unrelated"
+
+echo "#65 · push rejected: exit 3, target remains, no remove-label"
+# Authoritative main push rejected → target claim still live. Residual plan
+# must not authorize label removal (live-claim / no-label inconsistency).
+new_repo "$ROOT/pushrej65"
+(
+  cd "$ROOT/pushrej65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single claim for push reject" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+cat > "$ROOT/pushrej65/origin/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+echo "push rejected by fixture" >&2
+exit 1
+HOOK
+chmod +x "$ROOT/pushrej65/origin/hooks/pre-receive"
+mkdir -p "$ROOT/bin"
+GH_LOG="$ROOT/pushrej65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/pushrej65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "push-rejected release exits 3" "$rc" "3"
+contains "names strip failure" "$out" "claim NOT removed"
+contains "names target still live" "$out" "still live"
+contains "preserves label on incomplete" "$out" "preserving agent-claimed"
+contains "incomplete banner" "$out" "INCOMPLETE"
+lacks    "does not call remove-label (MUTATED)" "$out" "MUTATED-LABEL"
+lacks    "does not claim label removed" "$out" "removed agent-claimed"
+lacks    "does not claim OK on push reject" "$out" "OK —"
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label on push reject"
+else
+  ok "fake-gh contains no remove-label call"
+fi
+table=$(cd "$ROOT/pushrej65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "target claim remains on main" "$table" "issue-15-only-lane"
+
+echo "#65 · post-push reread fetch failure: preserve label, exit 3"
+# Push succeeds; a PATH git wrapper fails only the post-mutation `git fetch`
+# (startup + strip fetch already ran). Must not fall back to the pre-mutation
+# residual plan and remove the label.
+new_repo "$ROOT/rereadref65"
+(
+  cd "$ROOT/rereadref65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single claim for fetch fail" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+FETCH_COUNT="$ROOT/rereadref65/fetch.count"
+: > "$FETCH_COUNT"
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/git" <<FAKE
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "fetch" ]]; then
+  n=\$(cat "$FETCH_COUNT" 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "$FETCH_COUNT"
+  # 1=startup, 2=strip_claim_rows, 3=authoritative_post_mutation_reread
+  if [[ "\$n" -ge 3 ]]; then
+    echo "fetch failed by fixture" >&2
+    exit 1
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+FAKE
+chmod +x "$ROOT/bin/git"
+GH_LOG="$ROOT/rereadref65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadref65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push fetch failure exits 3" "$rc" "3"
+contains "names post-cleanup fetch failure" "$out" "post-cleanup fetch of origin failed"
+contains "preserves label on reread fail" "$out" "preserving agent-claimed"
+contains "incomplete on reread fail" "$out" "INCOMPLETE"
+lacks    "no MUTATED-LABEL on reread fail" "$out" "MUTATED-LABEL"
+lacks    "no removed claim on reread fail" "$out" "removed agent-claimed"
+lacks    "no false OK on reread fail" "$out" "OK —"
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label on post-push fetch failure"
+else
+  ok "fake-gh no remove-label on fetch failure"
+fi
+# Drop the git wrapper so later cases use the real git.
+rm -f "$ROOT/bin/git"
+
+echo "#65 · post-push missing claim blob: preserve label, exit 3, path/object diag"
+# After strip push, post-mutation fetch is wrapped: real fetch runs, then the
+# local origin/main tip is rewritten to include docs/claims/issue-15-ghost.md
+# whose blob object is immediately deleted from the client object store.
+# Reread must fail closed with path/object diagnostic (not a false green).
+new_repo "$ROOT/rereadblob65"
+(
+  cd "$ROOT/rereadblob65/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-15-only-lane\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/only\nsession: a\n' \
+    > docs/claims/issue-15-only-lane.md
+  : > docs/active-work.md
+  git add -A && git commit -qm "per-file single claim" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+FETCH_COUNT="$ROOT/rereadblob65/fetch.count"
+: > "$FETCH_COUNT"
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/git" <<FAKE
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "fetch" ]]; then
+  n=\$(cat "$FETCH_COUNT" 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "$FETCH_COUNT"
+  # 1=startup, 2=strip, 3=post-mutation authoritative reread
+  if [[ "\$n" -ge 3 ]]; then
+    "$REAL_GIT" "\$@" || exit \$?
+    # Rewrite origin/main tip with a claim leaf, then drop that blob object.
+    blob=\$(printf 'ghost claim payload\\n' | "$REAL_GIT" hash-object -w --stdin) || exit 1
+    export GIT_INDEX_FILE
+    GIT_INDEX_FILE=\$(mktemp "\${TMPDIR:-/tmp}/gibson-idx.XXXXXX") || exit 1
+    "$REAL_GIT" read-tree origin/main || exit 1
+    "$REAL_GIT" rm -r --cached -q docs/claims 2>/dev/null || true
+    "$REAL_GIT" update-index --add --cacheinfo "100644,\$blob,docs/claims/issue-15-ghost.md" || exit 1
+    tree=\$("$REAL_GIT" write-tree) || exit 1
+    parent=\$("$REAL_GIT" rev-parse origin/main) || exit 1
+    commit=\$(printf '%s\\n' "fixture: missing claim blob" | "$REAL_GIT" commit-tree "\$tree" -p "\$parent") || exit 1
+    "$REAL_GIT" update-ref refs/remotes/origin/main "\$commit" || exit 1
+    rm -f "\$GIT_INDEX_FILE"
+    unset GIT_INDEX_FILE
+    obj=\$("$REAL_GIT" rev-parse --git-path "objects/\${blob:0:2}/\${blob:2}")
+    rm -f "\$obj"
+    exit 0
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+FAKE
+chmod +x "$ROOT/bin/git"
+GH_LOG="$ROOT/rereadblob65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadblob65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push missing claim blob exits 3" "$rc" "3"
+contains "path/object diagnostic for claim blob" "$out" "docs/claims/issue-15-ghost.md"
+contains "names unreadable/corrupt blob post-push" "$out" "unreadable/corrupt"
+contains "preserves label on missing blob" "$out" "preserving agent-claimed"
+contains "incomplete on missing blob" "$out" "INCOMPLETE"
+lacks    "no MUTATED-LABEL on missing blob" "$out" "MUTATED-LABEL"
+lacks    "no removed claim on missing blob" "$out" "removed agent-claimed"
+lacks    "no false OK on missing blob" "$out" "OK —"
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label on post-push missing claim blob"
+else
+  ok "fake-gh no remove-label on missing claim blob"
+fi
+rm -f "$ROOT/bin/git"
+
+echo "#65 · post-push wrong claims object shape: preserve label, exit 3"
+# post-receive makes docs/claims a blob (not a tree) after a successful strip.
+new_repo "$ROOT/rereadshape65"
+(
+  cd "$ROOT/rereadshape65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "legacy single" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+cat > "$ROOT/rereadshape65/origin/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+while read -r _old new ref; do
+  case "$ref" in
+    refs/heads/main|refs/heads/master) ;;
+    *) continue ;;
+  esac
+  blob=$(printf 'claims path is a blob not a tree\n' | git hash-object -w --stdin)
+  export GIT_INDEX_FILE
+  GIT_INDEX_FILE=$(mktemp "${TMPDIR:-/tmp}/gibson-idx.XXXXXX")
+  git read-tree "$new"
+  git rm -r --cached -q docs/claims 2>/dev/null || true
+  git update-index --add --cacheinfo "100644,$blob,docs/claims"
+  tree=$(git write-tree)
+  commit=$(printf '%s\n' "docs/claims is a blob" | git commit-tree "$tree" -p "$new")
+  git update-ref "$ref" "$commit"
+  rm -f "$GIT_INDEX_FILE"
+  unset GIT_INDEX_FILE
+done
+HOOK
+chmod +x "$ROOT/rereadshape65/origin/hooks/post-receive"
+mkdir -p "$ROOT/bin"
+GH_LOG="$ROOT/rereadshape65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadshape65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push wrong claims shape exits 3" "$rc" "3"
+contains "names unexpected claims mode/type" "$out" "docs/claims"
+contains "names want tree" "$out" "040000 tree"
+contains "preserves label on shape fail" "$out" "preserving agent-claimed"
+lacks    "no MUTATED-LABEL on shape fail" "$out" "MUTATED-LABEL"
+lacks    "no false OK on shape fail" "$out" "OK —"
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label on wrong object shape"
+else
+  ok "fake-gh no remove-label on wrong object shape"
+fi
+
+echo "#65 · post-push origin/main gone + stale local empty: exit 3, no remove-label"
+# Remote starts with one claim. Local main is rewritten to a stale empty ledger
+# (not pushed). Cleanup push to origin/main succeeds. Post-mutation fetch then
+# makes origin/main unreadable. Reread must bind only to origin/main (the exact
+# remote branch that received the push) and fail closed — never fall back to
+# stale empty local main and authorize remove-label / OK.
+new_repo "$ROOT/rereadlocal65"
+(
+  cd "$ROOT/rereadlocal65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single claim on remote main" && git push -q origin main
+  # Stale empty local main (not pushed): would falsely look like "no residual"
+  # if post-mutation reread fell back past missing origin/main.
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+TABLE
+  git add -A && git commit -qm "stale empty local main"
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+FETCH_COUNT="$ROOT/rereadlocal65/fetch.count"
+: > "$FETCH_COUNT"
+PUSH_BASE_LOG="$ROOT/rereadlocal65/push-base.log"
+: > "$PUSH_BASE_LOG"
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/git" <<FAKE
+#!/usr/bin/env bash
+# Record the exact remote branch named in a successful cleanup push.
+if [[ "\${1:-}" == "push" && "\${2:-}" == "origin" ]]; then
+  for a in "\$@"; do
+    case "\$a" in
+      HEAD:main|HEAD:master)
+        printf '%s\n' "\$a" >> "$PUSH_BASE_LOG"
+        ;;
+    esac
+  done
+fi
+if [[ "\${1:-}" == "fetch" ]]; then
+  n=\$(cat "$FETCH_COUNT" 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "$FETCH_COUNT"
+  # 1=startup, 2=strip_claim_rows, 3=authoritative_post_mutation_reread
+  if [[ "\$n" -ge 3 ]]; then
+    "$REAL_GIT" "\$@" || exit \$?
+    # Drop the exact remote-tracking ref that received the cleanup push.
+    "$REAL_GIT" update-ref -d refs/remotes/origin/main 2>/dev/null || true
+    "$REAL_GIT" update-ref -d refs/remotes/origin/master 2>/dev/null || true
+    exit 0
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+FAKE
+chmod +x "$ROOT/bin/git"
+GH_LOG="$ROOT/rereadlocal65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadlocal65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push missing origin/main exits 3" "$rc" "3"
+contains "names exact remote ref origin/main" "$out" "origin/main"
+contains "names absent/unreadable remote ref" "$out" "absent/unreadable"
+contains "names no local fallback" "$out" "no local fallback"
+contains "preserves label when origin/main gone" "$out" "preserving agent-claimed"
+contains "incomplete when origin/main gone" "$out" "INCOMPLETE"
+lacks    "no MUTATED-LABEL when origin/main gone" "$out" "MUTATED-LABEL"
+lacks    "no removed claim when origin/main gone" "$out" "removed agent-claimed"
+lacks    "no false OK when origin/main gone" "$out" "OK —"
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label when origin/main gone after push"
+else
+  ok "fake-gh no remove-label when origin/main gone"
+fi
+# Pin: cleanup push targeted main (HEAD:main), so reread must require origin/main.
+if grep -qxF -- 'HEAD:main' "$PUSH_BASE_LOG" 2>/dev/null; then
+  ok "cleanup push pinned to remote branch main (HEAD:main)"
+else
+  bad "cleanup push must target HEAD:main (got: $(tr '\n' ' ' <"$PUSH_BASE_LOG" 2>/dev/null))"
+fi
+rm -f "$ROOT/bin/git"
+
+echo "#65 · post-push cleanup-SHA capture failure: preserve label, exit 3, no OK"
+# Cleanup push succeeds. Only the post-push capture
+#   git -C "$tmpwt" rev-parse HEAD
+# is forced to fail (empty CLEANUP_PUSHED_SHA). Earlier rev-parse and the push
+# itself must still succeed. Reread must treat missing capture as hard incomplete:
+# exit 3, preserve agent-claimed, never remove-label, never print OK.
+new_repo "$ROOT/rereadcap65"
+(
+  cd "$ROOT/rereadcap65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single claim for capture fail" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+PUSH_OK="$ROOT/rereadcap65/push.ok"
+: > "$PUSH_OK"
+rm -f "$PUSH_OK"
+CAPTURE_HIT="$ROOT/rereadcap65/capture.hit"
+: > "$CAPTURE_HIT"
+rm -f "$CAPTURE_HIT"
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/git" <<FAKE
+#!/usr/bin/env bash
+# After a successful cleanup push to origin, fail only the post-push capture:
+# git -C <disposable-worktree> rev-parse HEAD
+# Do not break earlier rev-parse, commit, or the push itself.
+if [[ "\${1:-}" == "push" && "\${2:-}" == "origin" ]]; then
+  "$REAL_GIT" "\$@"
+  rc=\$?
+  if [[ \$rc -eq 0 ]]; then
+    for a in "\$@"; do
+      case "\$a" in
+        HEAD:main|HEAD:master) : > "$PUSH_OK" ;;
+      esac
+    done
+  fi
+  exit \$rc
+fi
+if [[ -f "$PUSH_OK" && "\${1:-}" == "-C" && "\${3:-}" == "rev-parse" && "\${4:-}" == "HEAD" ]]; then
+  # disposable strip worktree only (not arbitrary -C rev-parse)
+  case "\${2:-}" in
+    *gibson-release-claim*)
+      : > "$CAPTURE_HIT"
+      echo "cleanup SHA capture failed by fixture" >&2
+      exit 1
+      ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+FAKE
+chmod +x "$ROOT/bin/git"
+GH_LOG="$ROOT/rereadcap65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadcap65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push cleanup-SHA capture failure exits 3" "$rc" "3"
+contains "names missing/unreadable cleanup-pushed SHA" "$out" "cleanup-pushed SHA"
+contains "names cannot prove lineage" "$out" "cannot prove lineage"
+contains "preserves label on capture fail" "$out" "preserving agent-claimed"
+contains "incomplete on capture fail" "$out" "INCOMPLETE"
+lacks    "no MUTATED-LABEL on capture fail" "$out" "MUTATED-LABEL"
+lacks    "no removed claim on capture fail" "$out" "removed agent-claimed"
+lacks    "no false OK on capture fail" "$out" "OK —"
+if [[ -f "$PUSH_OK" ]]; then
+  ok "cleanup push still succeeded before capture failure"
+else
+  bad "fixture must allow cleanup push to succeed before capture fails"
+fi
+if [[ -f "$CAPTURE_HIT" ]]; then
+  ok "fixture hit only the post-push cleanup-SHA capture"
+else
+  bad "fixture must force post-push git -C ... rev-parse HEAD to fail"
+fi
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label on cleanup-SHA capture failure"
+else
+  ok "fake-gh no remove-label on cleanup-SHA capture failure"
+fi
+# Claim row should still be gone on origin (push succeeded) even though label stays.
+table=$(cd "$ROOT/rereadcap65/canon" && "$REAL_GIT" fetch -q origin && "$REAL_GIT" show origin/main:docs/active-work.md)
+lacks    "target still stripped after capture-fail push" "$table" "issue-15-only-lane"
+rm -f "$ROOT/bin/git"
+
+echo "#65 · successful final target removal still removes/verifies label"
+new_repo "$ROOT/finalok65"
+(
+  cd "$ROOT/finalok65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "final lane" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+mkdir -p "$ROOT/bin"
+# After remove-label, view reports empty labels (verified gone).
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      # flip label state for subsequent view
+      echo "" > "${GH_STATE:-/tmp/gh-state}"
+      exit 0
+    fi
+    if [[ -f "${GH_STATE:-/tmp/gh-state}" ]]; then
+      echo ""
+    else
+      echo "agent-claimed,tier-b"
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+export GH_STATE="$ROOT/finalok65/gh-state"
+rm -f "$GH_STATE"
+out=$(cd "$ROOT/finalok65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "final successful removal exits 0" "$rc" "0"
+contains "removed label verified" "$out" "removed agent-claimed"
+contains "claims OK" "$out" "OK —"
+lacks    "not incomplete on success" "$out" "INCOMPLETE"
+table=$(cd "$ROOT/finalok65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+lacks    "target gone on success" "$table" "issue-15-only-lane"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
