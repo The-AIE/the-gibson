@@ -262,10 +262,17 @@ claim-row commit happens in a throwaway worktree (L-009).
 **Exit 3 means cleanup did not finish** — the claim row or the `agent-claimed`
 label postcondition failed and the message says which. Law 10 is not done until
 you fix it by hand; an unverified label removal is how #24 stayed claimed
-(L-027). `--keep-label` is the truthful "no row, sibling still live" path and
-must verify the label is still present — a blind success when the label is
-absent or unreadable is a false green. Do not invent a claim file just to
-satisfy cleanup.
+(L-027). **Label removal is gated (#65):** default removal runs only after every
+requested target was successfully removed **and** a fresh, fully validated
+`origin/main` reread (same strict ref/tree/blob proofs as #61) shows no target
+and no sibling remain. If strip/push fails, a target is still live, fetch or
+ref/tree/blob validation fails, or the parse is incomplete/ambiguous, the
+script preserves `agent-claimed`, never claims the label was removed, and exits
+3. Target absent + sibling present → keep/verify label; target absent + no
+sibling → remove/verify unless `--keep-label`. `--keep-label` is the truthful
+"no row, sibling still live" path and must verify the label is still present —
+a blind success when the label is absent or unreadable is a false green. Do not
+invent a claim file just to satisfy cleanup.
 
 Confirm issue closed by `Closes #` or close explicitly.
 

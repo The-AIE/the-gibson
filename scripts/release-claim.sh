@@ -72,8 +72,11 @@ ENV
 EXIT
   0  claim fully released (or truthfully nothing to release + label policy done)
   1  a hard precondition failed (nothing was cleaned)
-  3  cleanup ran but did not finish: the claim row or the agent-claimed label
-     is still live. The message names which. Never silent half-cleanup (L-009).
+  3  cleanup ran but did not finish: the claim row and/or the agent-claimed
+     label postcondition is incomplete. Strip/push failure, a target still
+     live after cleanup, or a failed/unreadable post-mutation reread preserves
+     agent-claimed and never claims the label was removed. The message names
+     which. Never silent half-cleanup (L-009).
 
 EXAMPLES
   cd ~/Code/acme-app
@@ -608,6 +611,151 @@ Post-merge cleanup per Law 10 / docs/05." || exit 1
   return $rc
 }
 
+# Soft-fail twin of require_readable_regular_blob for post-mutation reread.
+# Same predicates as #61 startup; returns 1 with an exact path/object reason
+# instead of dying (mutation already ran → incomplete is exit 3, not 1).
+soft_require_readable_regular_blob() {
+  local path="$1" mode="$2" typ="$3" obj="$4"
+  if [[ "$typ" != "blob" ]] || [[ "$mode" != "100644" && "$mode" != "100755" ]]; then
+    warn "$path at $REF has unexpected Git mode/type ($mode $typ${obj:+ $obj}) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  if [[ -z "$obj" ]]; then
+    warn "$path at $REF has no object id — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  if ! git cat-file -e "$obj" 2>/dev/null; then
+    warn "$path exists in the ledger tree at $REF but its blob is unreadable/corrupt/unfetchable ($obj) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  local got_type
+  got_type=$(git cat-file -t "$obj" 2>/dev/null || true)
+  if [[ "$got_type" != "blob" ]]; then
+    warn "$path at $REF object $obj has unexpected type '${got_type:-unreadable}' (want blob) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  if ! git cat-file blob "$obj" >/dev/null 2>&1; then
+    warn "$path exists in the ledger tree at $REF but its blob payload is unreadable/corrupt ($obj) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  return 0
+}
+
+# Authoritative post-mutation reread of origin/main. Reuses #61's strict
+# ref/tree/per-claim blob validation (fetch → resolve → tree → active-work →
+# claims tree → every claim leaf → claim_ids_all). On success updates REF,
+# TREE_SHA and sets POST_ISSUE_IDS to issue-scoped ids actually present.
+# On any failure: warn the exact reason and return 1. Never falls back to a
+# stale pre-mutation residual plan.
+authoritative_post_mutation_reread() {
+  POST_ISSUE_IDS=""
+  if ! git fetch origin >/dev/null 2>&1; then
+    warn "post-cleanup fetch of origin failed — cannot revalidate ledger for label decision; preserving agent-claimed"
+    return 1
+  fi
+  local new_ref
+  if ! new_ref=$(resolve_ledger_ref); then
+    warn "post-cleanup: cannot resolve a valid ledger commit ref after cleanup — preserving agent-claimed"
+    return 1
+  fi
+  REF="$new_ref"
+  if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
+    warn "post-cleanup: ledger ref $REF does not resolve to a commit — preserving agent-claimed"
+    return 1
+  fi
+  TREE_SHA=$(git rev-parse --verify "${REF}^{tree}" 2>/dev/null || true)
+  if [[ -z "$TREE_SHA" ]]; then
+    TREE_SHA=$(git cat-file -p "${REF}^{commit}" 2>/dev/null | awk '/^tree / {print $2; exit}')
+  fi
+  if [[ -z "$TREE_SHA" ]]; then
+    warn "post-cleanup: ledger commit at $REF has no tree pointer — preserving agent-claimed"
+    return 1
+  fi
+  if ! git cat-file -e "$TREE_SHA" 2>/dev/null; then
+    warn "post-cleanup: ledger commit at $REF references an unreadable/corrupt tree ($TREE_SHA) — preserving agent-claimed"
+    return 1
+  fi
+  if ! git ls-tree "$TREE_SHA" >/dev/null 2>&1; then
+    warn "post-cleanup: cannot list tree for ledger commit $REF (unreadable/corrupt tree $TREE_SHA) — preserving agent-claimed"
+    return 1
+  fi
+
+  local active_line active_ls_err="" claims_self claims_self_err="" claims_lines claims_ls_err=""
+  active_line=$(git ls-tree "$REF" -- docs/active-work.md 2>&1) || active_ls_err=$?
+  if [[ -n "$active_ls_err" ]]; then
+    warn "post-cleanup: cannot list docs/active-work.md at $REF — preserving agent-claimed"
+    return 1
+  fi
+  if [[ -n "$active_line" ]]; then
+    local amode atype ablob
+    amode=$(printf '%s\n' "$active_line" | awk '{print $1; exit}')
+    atype=$(printf '%s\n' "$active_line" | awk '{print $2; exit}')
+    ablob=$(printf '%s\n' "$active_line" | awk '{print $3; exit}')
+    soft_require_readable_regular_blob "docs/active-work.md" "$amode" "$atype" "$ablob" || return 1
+  fi
+
+  claims_self=$(git ls-tree "$REF" -- docs/claims 2>&1) || claims_self_err=$?
+  if [[ -n "$claims_self_err" ]]; then
+    warn "post-cleanup: cannot list docs/claims at $REF — preserving agent-claimed"
+    return 1
+  fi
+  if [[ -n "$claims_self" ]]; then
+    local csmode cstype csobj
+    csmode=$(printf '%s\n' "$claims_self" | awk '{print $1; exit}')
+    cstype=$(printf '%s\n' "$claims_self" | awk '{print $2; exit}')
+    csobj=$(printf '%s\n' "$claims_self" | awk '{print $3; exit}')
+    if [[ "$cstype" != "tree" ]] || [[ "$csmode" != "040000" ]]; then
+      warn "post-cleanup: docs/claims at $REF has unexpected Git mode/type ($csmode $cstype${csobj:+ $csobj}) — want 040000 tree; preserving agent-claimed"
+      return 1
+    fi
+    if [[ -z "$csobj" ]] || ! git cat-file -e "$csobj" 2>/dev/null; then
+      warn "post-cleanup: docs/claims tree at $REF is unreadable/corrupt${csobj:+ ($csobj)} — preserving agent-claimed"
+      return 1
+    fi
+    if ! git ls-tree "$csobj" >/dev/null 2>&1; then
+      warn "post-cleanup: cannot list docs/claims tree at $REF (unreadable/corrupt tree ${csobj}) — preserving agent-claimed"
+      return 1
+    fi
+    claims_lines=$(git ls-tree "$REF" docs/claims/ 2>&1) || claims_ls_err=$?
+    if [[ -n "$claims_ls_err" ]]; then
+      warn "post-cleanup: cannot read docs/claims/ at $REF — preserving agent-claimed"
+      return 1
+    fi
+    if [[ -n "$claims_lines" ]]; then
+      local claim_line claim_mode claim_type claim_obj claim_path
+      while IFS= read -r claim_line; do
+        [[ -n "$claim_line" ]] || continue
+        claim_mode=$(printf '%s\n' "$claim_line" | awk '{print $1; exit}')
+        claim_type=$(printf '%s\n' "$claim_line" | awk '{print $2; exit}')
+        claim_obj=$(printf '%s\n' "$claim_line" | awk '{print $3; exit}')
+        claim_path="${claim_line#*$'\t'}"
+        [[ -n "$claim_path" ]] || claim_path="docs/claims/<unknown>"
+        soft_require_readable_regular_blob "$claim_path" "$claim_mode" "$claim_type" "$claim_obj" || return 1
+      done <<EOF
+$claims_lines
+EOF
+    fi
+  fi
+
+  local post_live
+  if ! post_live=$(claim_ids_all); then
+    warn "post-cleanup: claim ledger parse incomplete/ambiguous at $REF — preserving agent-claimed"
+    return 1
+  fi
+  POST_ISSUE_IDS=$(issue_claim_ids_from "$post_live")
+  return 0
+}
+
+# Label removal is permitted only after BOTH:
+#   (a) every requested target representation was successfully removed and pushed
+#       (or was already absent — strip rc 2); and
+#   (b) a fresh, fully validated authoritative origin/main reread proves no
+#       target remains and no sibling for the issue remains.
+# Strip/push failure, target still live, fetch/ref/tree/blob failure, or
+# incomplete parse → incomplete, preserve label, never claim it was removed.
+PRESERVE_LABEL=0
+STRIP_OK=1
+
 if [[ -n "$TARGET_IDS" ]]; then
   set +e
   strip_claim_rows
@@ -620,24 +768,50 @@ if [[ -n "$TARGET_IDS" ]]; then
       warn "claim NOT removed for issue $ISSUE — strip failed (rc=$strip_rc)."
       warn "Fix by hand on main: git rm the docs/claims/<id>.md file(s) for exact id(s) '$TARGET_IDS' (or drop those claim-id column rows from docs/active-work.md), then push."
       INCOMPLETE=1
+      STRIP_OK=0
+      PRESERVE_LABEL=1
       ;;
   esac
 
-  # Re-read authoritative main after the cleanup commit before deciding label
-  # removal. A sibling introduced at the mutation boundary must keep
-  # agent-claimed (and its row/file must not be treated as gone).
-  git fetch origin >/dev/null 2>&1 || true
-  if REF=$(resolve_ledger_ref); then
-    TREE_SHA=$(git rev-parse --verify "${REF}^{tree}" 2>/dev/null || true)
-    if [[ -z "$TREE_SHA" ]]; then
-      TREE_SHA=$(git cat-file -p "${REF}^{commit}" 2>/dev/null | awk '/^tree / {print $2; exit}')
-    fi
-    if [[ -n "$TREE_SHA" ]] && git cat-file -e "$TREE_SHA" 2>/dev/null; then
-      post_live=""
-      if post_live=$(claim_ids_all); then
-        ALL_IDS=$(issue_claim_ids_from "$post_live")
-        RESIDUAL_IDS=$(residual_after_release)
-      fi
+  # Discard the pre-mutation residual plan. Only an authoritative reread of
+  # live ids may decide label policy — never subtract TARGET_IDS from stale state.
+  RESIDUAL_IDS=""
+  ALL_IDS=""
+  POST_ISSUE_IDS=""
+
+  if ! authoritative_post_mutation_reread; then
+    INCOMPLETE=1
+    PRESERVE_LABEL=1
+  else
+    ALL_IDS="$POST_ISSUE_IDS"
+    # Classify from ids actually present on the validated reread.
+    # Use if/then (not grep &&) so set -e cannot abort on a non-target id.
+    targets_remaining=$(
+      printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id"; then
+          printf '%s\n' "$id"
+        fi
+      done
+    )
+    RESIDUAL_IDS=$(
+      printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id"; then
+          :
+        else
+          printf '%s\n' "$id"
+        fi
+      done
+    )
+    if [[ -n "$targets_remaining" ]]; then
+      warn "target claim(s) still live on $REF after cleanup attempt:"
+      printf '%s\n' "$targets_remaining" | sed 's/^/  /' >&2
+      INCOMPLETE=1
+      PRESERVE_LABEL=1
+    elif [[ "$STRIP_OK" -eq 0 ]]; then
+      # Strip/push failed even if the reread looks empty — do not remove label.
+      PRESERVE_LABEL=1
     fi
   fi
 else
@@ -651,7 +825,11 @@ if command -v gh >/dev/null; then
   if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
   fi
-  if [[ -n "$RESIDUAL_IDS" ]]; then
+  if [[ "$PRESERVE_LABEL" -eq 1 ]]; then
+    # Incomplete cleanup (strip/push/reread/target still live): never call
+    # remove-label. A live claim with no agent-claimed label is the defect.
+    info "preserving agent-claimed on #$ISSUE — incomplete cleanup; not removing label"
+  elif [[ -n "$RESIDUAL_IDS" ]]; then
     # L-024: siblings are still working this issue; the label is still true.
     # Residual rows on the ledger are themselves the verification — leaving
     # the label is the complete policy without a GitHub round-trip.
@@ -697,7 +875,9 @@ if command -v gh >/dev/null; then
     fi
   fi
 else
-  if [[ -n "$RESIDUAL_IDS" ]]; then
+  if [[ "$PRESERVE_LABEL" -eq 1 ]]; then
+    info "gh not found — agent-claimed left in place (incomplete cleanup; not removing label)"
+  elif [[ -n "$RESIDUAL_IDS" ]]; then
     info "gh not found — agent-claimed left in place (residual claims on ledger)"
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     warn "gh not found — --keep-label cannot verify agent-claimed on #$ISSUE"
