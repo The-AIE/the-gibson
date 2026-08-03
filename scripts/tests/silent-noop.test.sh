@@ -556,7 +556,6 @@ case "$out" in
   state:*) ok "control: BEFORE content-awk under wrapper still yields state:<digest>" ;;
   *) bad "control: BEFORE under wrapper was not a digest (got '$out') — wrapper too broad?" ;;
 esac
-before_fp=$out
 
 # Control B: AFTER alone must be sentinel:unhashable (not state: of empty body).
 out=$(PATH="$FAKEAWK_BIN:$PATH" bash -c '
