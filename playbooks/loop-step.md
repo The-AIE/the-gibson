@@ -199,6 +199,13 @@ touch /path/to/target/gibson/HALT
    and `#` comments never satisfy a required key. Do not duplicate keys. Do not
    write `timestamp:`, `updated_at:`, or indented lookalikes for `updated`.
 
+   **Field grammar (validator + driver share one parse):** write `key: value`
+   (canonical). `key:value` (no space) is also accepted and yields the same
+   value — after the first colon, at most one optional ASCII space is stripped;
+   empty values are fine; colons inside values are fine; do not use a tab as the
+   separator. The live path must be a regular file, not a symlink the runner
+   replaced to point at a fresh target (the driver refuses symlink leaves).
+
    - If a branch is pushed and ready for review and the driver runs with
      `--supervisor devin`, set **both** `handoff: <branch>` and
      `handoff_sha: <the exact head SHA you pushed>`. The driver forwards it to the

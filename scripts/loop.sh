@@ -1677,10 +1677,29 @@ journal_block() {
 
 block() { info "$*"; journal_block "$*"; }
 
+# Read one column-zero key from loop-state using the SAME field grammar as
+# scripts/validate-loop-state.sh (issue #75): after the first colon, strip at
+# most one optional ASCII space; no further trim; empty values allowed.
+# Accepts `key:value` and `key: value` identically. Tabs after `:` stay in the
+# value. Does not invent defaults. Callers must only read after schema validate
+# on real iterations (pre-read gate), so a missing key is an internal error path.
 read_field() {
   local key="$1"
-  # FS set so field 1 is the key
-  awk -v k="$key" -F': ' '{ if ($1 == k) { sub(/^[^:]+: /,""); print; exit } }' "$STATE_FILE"
+  # shellcheck disable=SC2016
+  awk -v k="$key" '
+    # Column-zero keys only — same pattern as validate-loop-state.sh
+    /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      line = $0
+      key = line
+      sub(/:.*$/, "", key)
+      if (key != k) next
+      v = line
+      sub(/^[^:]*:/, "", v)
+      if (v ~ /^ /) v = substr(v, 2)
+      print v
+      exit
+    }
+  ' "$STATE_FILE"
 }
 
 render_prompt() {

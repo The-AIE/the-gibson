@@ -77,6 +77,16 @@ Two findings from Anthropic's long-running harness work carry the whole design:
   requires **python3** on PATH for calendar-real timestamps — absence fails
   closed; state values are never shell-eval'd). Indentation and comments never
   satisfy a required key.
+  **Field grammar (one contract for validator + driver):** after the first
+  colon, exactly one optional ASCII space may be stripped — `key:value` and
+  `key: value` are identical; empty values are allowed (`key:` / `key: `);
+  no further trim of meaningful value data; tabs after `:` are value bytes, not
+  the optional separator. Canonical writers emit `key: value`. The driver
+  `read_field` uses this same parse (never a stricter `key: value`-only form).
+  **Path safety:** validation and recovery refuse a symlink leaf without
+  following it (even when the target would otherwise be valid schema); live
+  directory/device shapes are quarantined or fail closed — never write through
+  them.
 - **`gibson/.loop-state.prev`**: last validated pre-iteration snapshot. The driver
   copies loop-state here atomically (temp + rename) immediately before a real
   runner invocation. Destination must be a regular non-symlink file (or

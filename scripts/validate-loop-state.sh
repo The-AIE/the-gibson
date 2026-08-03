@@ -50,8 +50,16 @@ CONTRACT (ten required keys, column zero, exactly once each)
   as schema corruption — migration is "add the key", never silent default.
 
   Extra keys (e.g. notes) are allowed. Indentation and # comments never satisfy
-  a required key. Duplicates fail. Values are everything after the first colon
-  (one optional leading space stripped); colons inside values are fine.
+  a required key. Duplicates fail.
+
+  FIELD GRAMMAR (shared with scripts/loop.sh read_field — one contract)
+    Column-zero keys only: ^[A-Za-z_][A-Za-z0-9_]*:
+    After the first colon, exactly one optional ASCII space is stripped from the
+    value; no further trim. So `key:value` and `key: value` are identical.
+    Empty values are permitted (`key:` and `key: `). Colons inside values are
+    fine. Tabs are NOT the optional separator (a tab after `:` is value data).
+    Leading-space keys, duplicate keys, and non-column-zero lookalikes fail or
+    do not satisfy a required key. Canonical writer form is `key: value`.
 
   hat / next_hat ∈ builder | test-engineer | reviewer | ux-evaluator | security
                    | release | historian | decomposer | planner
@@ -67,6 +75,8 @@ RUNTIME
 
 SAFETY
   Values are never evaluated as shell. Paths and timestamps are data only.
+  The path argument must be a regular non-symlink file leaf — a symlink is
+  refused without following (even when the target would otherwise validate).
 EOF
 }
 
@@ -109,6 +119,12 @@ if [[ -n "$MIN_UPDATED" ]]; then
   fi
 fi
 
+# Refuse symlink leaves before any read. -f follows links and would accept a
+# fresh valid target via a replaced loop-state.md symlink; never follow for
+# validation (issue #75 independent-review blocker).
+if [[ -L "$FILE" ]]; then
+  fail "refusing symlink leaf (will not follow for validation): $FILE"
+fi
 if [[ ! -e "$FILE" ]]; then
   fail "missing file: $FILE"
 fi

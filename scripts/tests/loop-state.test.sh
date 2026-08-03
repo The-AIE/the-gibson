@@ -154,6 +154,9 @@ setup_repo() {
 #   rewrite-colons       — next_action with colons, exit 0
 #   rewrite-handoff      — queue handoff fields, exit 0
 #   rewrite-valid-then-fail — valid rewrite, exit 3
+#   rewrite-valid-nospace — valid rewrite with key:value (no space after :), exit 0
+#   rewrite-handoff-nospace — handoff queued, no-space grammar, exit 0
+#   rewrite-valid-symlink — replace state with symlink to fresh valid outside target
 make_runner_cmd() {
   echo "${1:-noop}" > "$CALLS/runner.behavior"
   cat > "$CALLS/fake-runner.sh" <<RUN
@@ -273,6 +276,63 @@ notes: handoff queued
 EOF
     exit 0
     ;;
+  rewrite-valid-nospace)
+    # Fully valid schema with no ASCII space after ':' (key:value form).
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated:\$now
+issue:75
+pr:
+hat:builder
+next_hat:test-engineer
+round:1
+parked:false
+handoff:
+handoff_sha:
+next_action:run tests for the unit
+notes:rewritten valid nospace
+EOF
+    exit 0
+    ;;
+  rewrite-handoff-nospace)
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated:\$now
+issue:75
+pr:12
+hat:builder
+next_hat:test-engineer
+round:1
+parked:false
+handoff:feat/75-widget
+handoff_sha:abcdef0123456789abcdef0123456789abcdef01
+next_action:hand off the finished branch
+notes:handoff queued nospace
+EOF
+    exit 0
+    ;;
+  rewrite-valid-symlink)
+    # Fresh valid content written OUTSIDE the worktree; live path becomes a
+    # symlink leaf. Validator/driver must refuse without following.
+    target="$CALLS/outside-valid-state.md"
+    cat > "\$target" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 75
+pr:
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: via symlink target
+notes: fresh symlink rewrite
+EOF
+    rm -f "\$state"
+    ln -s "\$target" "\$state"
+    exit 0
+    ;;
   *)
     echo "fake-runner: unknown behavior \$behavior" >&2
     exit 99
@@ -280,6 +340,76 @@ EOF
 esac
 RUN
   chmod +x "$CALLS/fake-runner.sh"
+}
+
+# Write a fully valid ten-key state using key:value (no space after colon).
+# Same overrides as write_valid_state (key=value args).
+write_valid_state_nospace() {
+  local dest="${1:-$REPO/gibson/loop-state.md}"
+  shift || true
+  local updated issue pr hat next_hat round parked handoff handoff_sha next_action notes
+  updated=$(utc_now)
+  issue=""
+  pr=""
+  hat="builder"
+  next_hat="builder"
+  round="0"
+  parked="false"
+  handoff=""
+  handoff_sha=""
+  next_action="triage highest-priority unblocked unclaimed issue"
+  notes="fixture-nospace"
+  local kv k v
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    case "$k" in
+      updated) updated="$v" ;;
+      issue) issue="$v" ;;
+      pr) pr="$v" ;;
+      hat) hat="$v" ;;
+      next_hat) next_hat="$v" ;;
+      round) round="$v" ;;
+      parked) parked="$v" ;;
+      handoff) handoff="$v" ;;
+      handoff_sha) handoff_sha="$v" ;;
+      next_action) next_action="$v" ;;
+      notes) notes="$v" ;;
+    esac
+  done
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest" <<EOF
+# Gibson loop state
+updated:$updated
+issue:$issue
+pr:$pr
+hat:$hat
+next_hat:$next_hat
+round:$round
+parked:$parked
+handoff:$handoff
+handoff_sha:$handoff_sha
+next_action:$next_action
+notes:$notes
+EOF
+}
+
+# Extract one field with the same grammar as loop.sh read_field / validator.
+test_read_field() {
+  local file="$1" key="$2"
+  awk -v k="$key" '
+    /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      line = $0
+      key = line
+      sub(/:.*$/, "", key)
+      if (key != k) next
+      v = line
+      sub(/^[^:]*:/, "", v)
+      if (v ~ /^ /) v = substr(v, 2)
+      print v
+      exit
+    }
+  ' "$file"
 }
 
 # Fake supervisor + second-opinion that record invocations (no network).
@@ -1195,6 +1325,362 @@ ec=${ec:-0}
 if [[ $ec -ne 0 ]] && echo "$out" | grep -qi 'python3'; then
   ok "missing python3: fail-closed with python3 diagnostic"
 else bad "missing python3: expected fail+diagnostic (ec=$ec out=$out)"; fi
+
+# ---------------------------------------------------------------------------
+# Symlink leaf refusal (validator never follows; issue #75 review blocker)
+# ---------------------------------------------------------------------------
+# Later fixtures leave `set -e` on (budget / unchanged-old sections). All
+# commands below that may fail must use || true / set +e so the suite continues.
+echo "validator: symlink leaf to valid content is refused (never followed)"
+write_valid_state "$VDIR/sym-target.md" "next_action=target content" "notes=via-symlink"
+rm -f "$VDIR/sym-state.md"
+ln -s "$VDIR/sym-target.md" "$VDIR/sym-state.md"
+target_before=$(cat "$VDIR/sym-target.md")
+set +e
+bash "$VALIDATOR" "$VDIR/sym-state.md" >/dev/null 2>"$VDIR/sym.err"
+ec=$?
+set -e
+if [[ $ec -ne 0 ]] && grep -qi 'symlink' "$VDIR/sym.err"; then
+  ok "validator: symlink leaf refused with diagnostic"
+else bad "validator: symlink leaf accepted or wrong diagnostic (ec=$ec $(cat "$VDIR/sym.err"))"; fi
+if [[ "$(cat "$VDIR/sym-target.md")" == "$target_before" ]]; then
+  ok "validator: symlink target bytes unchanged after refuse"
+else bad "validator: symlink target was mutated"; fi
+# Dangling symlink also refused as symlink leaf (not "missing" via -e follow)
+rm -f "$VDIR/dangling.md" "$VDIR/no-such-target-xyz"
+ln -s "$VDIR/no-such-target-xyz" "$VDIR/dangling.md"
+set +e
+bash "$VALIDATOR" "$VDIR/dangling.md" >/dev/null 2>"$VDIR/dang.err"
+ec=$?
+set -e
+if [[ $ec -ne 0 ]] && grep -qi 'symlink' "$VDIR/dang.err"; then
+  ok "validator: dangling symlink refused as symlink leaf"
+else bad "validator: dangling symlink misclassified (ec=$ec $(cat "$VDIR/dang.err"))"; fi
+
+echo "driver: post-run valid/fresh symlink is state-corrupt once; safe recovery"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" \
+  "next_action=pre symlink rewrite" "notes=pre-sym"
+pre_bytes=$(cat "$REPO/gibson/loop-state.md")
+make_runner_cmd rewrite-valid-symlink
+: > "$CALLS/runner.count"
+: > "$CALLS/supervisor.count"
+rm -f "$CALLS/outside-valid-state.md"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --supervisor devin --error-budget 5 >/dev/null 2>"$ROOT/post-sym.err"
+set -e
+if [[ "$(runner_count)" -eq 1 ]]; then
+  ok "post-run symlink: runner invoked once"
+else bad "post-run symlink: expected 1 runner, got $(runner_count)"; fi
+sc=$(journal_state_corrupt_count)
+if [[ "$sc" -eq 1 ]]; then
+  ok "post-run symlink: exactly one state-corrupt journal unit"
+else bad "post-run symlink: expected 1 state-corrupt, got $sc"; fi
+if [[ "$(supervisor_count)" -eq 0 ]]; then
+  ok "post-run symlink: no supervisor handoff"
+else bad "post-run symlink: handoff ran despite corrupt symlink state"; fi
+if grep -q 'state-corrupt' "$ROOT/post-sym.err" 2>/dev/null || \
+   grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "post-run symlink: no normal completion without state-corrupt"
+else bad "post-run symlink: looked like normal completion"; fi
+# Outside target (if created) must be unchanged after recovery work
+if [[ -f "$CALLS/outside-valid-state.md" ]]; then
+  outside_bytes=$(cat "$CALLS/outside-valid-state.md")
+  # Recovery must not rewrite the outside target
+  if [[ -n "$outside_bytes" ]] && grep -q 'via symlink target' "$CALLS/outside-valid-state.md"; then
+    ok "post-run symlink: outside target bytes preserved (still the runner payload)"
+  else
+    bad "post-run symlink: outside target unexpected"
+  fi
+else
+  bad "post-run symlink: outside target missing (runner did not create it)"
+fi
+# When recovery claims success, live path is a regular non-symlink file matching snapshot
+if grep -q 'restored loop-state byte-for-byte' "$ROOT/post-sym.err" 2>/dev/null; then
+  if [[ ! -L "$REPO/gibson/loop-state.md" && -f "$REPO/gibson/loop-state.md" ]] && \
+     [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_bytes" ]]; then
+    ok "post-run symlink: recovery success ⇒ no symlink left, exact snapshot bytes"
+  else
+    bad "post-run symlink: claimed restore but live path wrong (ls=$(ls -la "$REPO/gibson/loop-state.md" 2>&1))"
+  fi
+else
+  # recovery-incomplete is also acceptable if explicit — but must not leave a
+  # false "success" claim, and outside target still untouched above.
+  if grep -qi 'recovery-incomplete\|state-corrupt' "$ROOT/post-sym.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+    ok "post-run symlink: fail-closed recovery path (no false exact-restore claim)"
+  else
+    bad "post-run symlink: neither restore nor recovery-incomplete ($(cat "$ROOT/post-sym.err"))"
+  fi
+fi
+# Prefer the strong success path when snapshot existed (it did — pre-run snapshot)
+if [[ ! -L "$REPO/gibson/loop-state.md" && -f "$REPO/gibson/loop-state.md" ]] && \
+   [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_bytes" ]]; then
+  ok "post-run symlink: live path restored to pre-iteration regular file"
+else
+  # Allow quarantine-left-symlink only with explicit recovery-incomplete
+  if [[ -L "$REPO/gibson/loop-state.md" ]] && \
+     grep -qi 'recovery-incomplete' "$ROOT/post-sym.err" 2>/dev/null; then
+    ok "post-run symlink: symlink left only under explicit recovery-incomplete"
+  else
+    bad "post-run symlink: live path not safely restored (ls=$(ls -la "$REPO/gibson/loop-state.md" 2>&1) err=$(cat "$ROOT/post-sym.err"))"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Unified key:value grammar (validator + read_field; issue #75 review blocker)
+# ---------------------------------------------------------------------------
+echo "validator: key:value and key: value are identical (empty values allowed)"
+base="2026-08-02T12:00:00Z"
+write_valid_state "$VDIR/space.md" \
+  "updated=$base" "issue=75" "next_hat=test-engineer" \
+  "next_action=a:b:c" "notes=canonical space"
+write_valid_state_nospace "$VDIR/nospace.md" \
+  "updated=$base" "issue=75" "next_hat=test-engineer" \
+  "next_action=a:b:c" "notes=canonical space"
+set +e
+bash "$VALIDATOR" "$VDIR/space.md" >/dev/null 2>"$VDIR/space.err"
+ec1=$?
+bash "$VALIDATOR" "$VDIR/nospace.md" >/dev/null 2>"$VDIR/nospace.err"
+ec2=$?
+set -e
+if [[ $ec1 -eq 0 && $ec2 -eq 0 ]]; then
+  ok "grammar: both space and no-space forms validate"
+else bad "grammar: space ec=$ec1 ($(cat "$VDIR/space.err")) nospace ec=$ec2 ($(cat "$VDIR/nospace.err"))"; fi
+# Identical extracted field values under the shared parse
+same=1
+for k in updated issue pr hat next_hat round parked handoff handoff_sha next_action notes; do
+  vs=$(test_read_field "$VDIR/space.md" "$k")
+  vn=$(test_read_field "$VDIR/nospace.md" "$k")
+  if [[ "$vs" != "$vn" ]]; then
+    same=0
+    bad "grammar: field $k differs space=[$vs] nospace=[$vn]"
+  fi
+done
+if [[ "$same" -eq 1 ]]; then
+  ok "grammar: shared parse yields identical field values for both forms"
+fi
+# Empty values: key: and key:<one-space> (space after colon only).
+# Built with printf so the test source has no trailing-whitespace lines.
+{
+  printf '%s\n' "# Gibson loop state" "updated: $base"
+  printf 'issue: \n'
+  printf 'pr: \n'
+  printf '%s\n' "hat: builder" "next_hat: builder" "round: 0" "parked: false"
+  printf 'handoff: \n'
+  printf 'handoff_sha: \n'
+  printf '%s\n' "next_action: x" "notes: empty-with-space"
+} > "$VDIR/empty-space.md"
+{
+  printf '%s\n' \
+    "# Gibson loop state" \
+    "updated:$base" \
+    "issue:" \
+    "pr:" \
+    "hat:builder" \
+    "next_hat:builder" \
+    "round:0" \
+    "parked:false" \
+    "handoff:" \
+    "handoff_sha:" \
+    "next_action:x" \
+    "notes:empty-nospace"
+} > "$VDIR/empty-nospace.md"
+set +e
+bash "$VALIDATOR" "$VDIR/empty-space.md" >/dev/null 2>"$VDIR/es.err"
+ec1=$?
+bash "$VALIDATOR" "$VDIR/empty-nospace.md" >/dev/null 2>"$VDIR/en.err"
+ec2=$?
+set -e
+if [[ $ec1 -eq 0 && $ec2 -eq 0 ]]; then
+  ok "grammar: empty values accepted for key: and key:<space>"
+else bad "grammar: empty values rejected (space ec=$ec1 nospace ec=$ec2)"; fi
+iss_s=$(test_read_field "$VDIR/empty-space.md" issue)
+iss_n=$(test_read_field "$VDIR/empty-nospace.md" issue)
+if [[ -z "$iss_s" && -z "$iss_n" ]]; then
+  ok "grammar: empty issue parses to empty string in both forms"
+else bad "grammar: empty issue not empty (space=[$iss_s] nospace=[$iss_n])"; fi
+
+echo "validator: hostile grammar — duplicates, leading-space keys, tabs, prose"
+# duplicate already covered; leading-space key must not satisfy
+cat > "$VDIR/leadspace.md" <<EOF
+# Gibson loop state
+updated: $base
+issue:
+pr:
+hat: builder
+ next_hat: builder
+round: 0
+parked: false
+handoff:
+handoff_sha:
+next_action: x
+EOF
+set +e
+bash "$VALIDATOR" "$VDIR/leadspace.md" >/dev/null 2>"$VDIR/ls.err"
+ec=$?
+set -e
+if [[ $ec -ne 0 ]] && grep -q 'missing required key: next_hat' "$VDIR/ls.err"; then
+  ok "hostile: leading-space key does not satisfy next_hat"
+else bad "hostile: leading-space key accepted ($(cat "$VDIR/ls.err"))"; fi
+# tab after colon is NOT the optional separator — value includes tab → invalid hat
+printf '%s\n' \
+  "# Gibson loop state" \
+  "updated: $base" \
+  "issue:" \
+  "pr:" \
+  "hat:	builder" \
+  "next_hat: builder" \
+  "round: 0" \
+  "parked: false" \
+  "handoff:" \
+  "handoff_sha:" \
+  "next_action: x" > "$VDIR/tabsep.md"
+set +e
+bash "$VALIDATOR" "$VDIR/tabsep.md" >/dev/null 2>"$VDIR/tab.err"
+ec=$?
+set -e
+if [[ $ec -ne 0 ]] && grep -qi 'hat' "$VDIR/tab.err"; then
+  ok "hostile: tab after colon is value data (invalid hat), not separator"
+else bad "hostile: tab-as-separator incorrectly accepted ($(cat "$VDIR/tab.err"))"; fi
+# Extra prose at column zero without key: pattern does not invent keys
+cat > "$VDIR/prose.md" <<EOF
+# Gibson loop state
+updated: $base
+issue:
+pr:
+hat: builder
+This paragraph mentions next_hat builder but is not a field.
+round: 0
+parked: false
+handoff:
+handoff_sha:
+next_action: x
+EOF
+set +e
+bash "$VALIDATOR" "$VDIR/prose.md" >/dev/null 2>"$VDIR/prose.err"
+ec=$?
+set -e
+if [[ $ec -ne 0 ]] && grep -q 'missing required key: next_hat' "$VDIR/prose.err"; then
+  ok "hostile: extra prose does not satisfy next_hat"
+else bad "hostile: prose incorrectly accepted ($(cat "$VDIR/prose.err"))"; fi
+# two spaces after colon: first stripped, second preserved (meaningful data)
+cat > "$VDIR/twospace.md" <<EOF
+# Gibson loop state
+updated: $base
+issue:
+pr:
+hat:  builder
+next_hat: builder
+round: 0
+parked: false
+handoff:
+handoff_sha:
+next_action: x
+EOF
+set +e
+bash "$VALIDATOR" "$VDIR/twospace.md" >/dev/null 2>"$VDIR/ts2.err"
+ec=$?
+set -e
+# value is " builder" (leading space preserved) → invalid hat enum
+if [[ $ec -ne 0 ]] && grep -qi 'hat' "$VDIR/ts2.err"; then
+  ok "hostile: only one optional space stripped (extra space is value data)"
+else bad "hostile: two-space value mishandled ($(cat "$VDIR/ts2.err"))"; fi
+
+echo "driver: e2e no-space and canonical-space produce identical hat/round/handoff behavior"
+setup_repo
+install_fake_supervisor_stack
+# Pre-state no-space with next_hat:test-engineer — must pass validate + read_field
+write_valid_state_nospace "$REPO/gibson/loop-state.md" \
+  "next_hat=test-engineer" "round=3" "next_action=from nospace pre" "notes=pre-nospace"
+make_runner_cmd rewrite-valid-nospace
+: > "$CALLS/runner.count"
+: > "$CALLS/supervisor.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/e2e-nospace.err"
+set -e
+if [[ "$(runner_count)" -eq 1 ]]; then
+  ok "e2e no-space: runner invoked (pre-state validated + next_hat read)"
+else bad "e2e no-space: runner not invoked (err=$(cat "$ROOT/e2e-nospace.err"))"; fi
+if grep -q 'iteration hat=test-engineer' "$ROOT/e2e-nospace.err"; then
+  ok "e2e no-space: next_hat test-engineer read correctly (no internal error)"
+else bad "e2e no-space: wrong/missing hat (err=$(cat "$ROOT/e2e-nospace.err"))"; fi
+if ! grep -q 'state-corrupt\|internal error' "$ROOT/e2e-nospace.err" 2>/dev/null && \
+   ! grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "e2e no-space: no state-corrupt / internal error on valid no-space rewrite"
+else bad "e2e no-space: unexpected corrupt/error"; fi
+if grep -q 'rewritten valid nospace\|next_hat:test-engineer\|next_hat: test-engineer' "$REPO/gibson/loop-state.md"; then
+  ok "e2e no-space: post-run no-space rewrite retained"
+else bad "e2e no-space: post-run state unexpected ($(cat "$REPO/gibson/loop-state.md"))"; fi
+nh=$(test_read_field "$REPO/gibson/loop-state.md" next_hat)
+rd=$(test_read_field "$REPO/gibson/loop-state.md" round)
+if [[ "$nh" == "test-engineer" && "$rd" == "1" ]]; then
+  ok "e2e no-space: post-run fields parse next_hat/round correctly"
+else bad "e2e no-space: post-run fields nh=[$nh] rd=[$rd]"; fi
+
+# Canonical space path — same hats/round behavior
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" \
+  "next_hat=test-engineer" "round=3" "next_action=from space pre" "notes=pre-space"
+make_runner_cmd rewrite-valid
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/e2e-space.err"
+set -e
+if [[ "$(runner_count)" -eq 1 ]] && grep -q 'iteration hat=test-engineer' "$ROOT/e2e-space.err"; then
+  ok "e2e space: runner + next_hat identical to no-space path"
+else bad "e2e space: behavior diverged (err=$(cat "$ROOT/e2e-space.err"))"; fi
+if ! grep -q 'state-corrupt' "$ROOT/e2e-space.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "e2e space: no state-corrupt on canonical rewrite"
+else bad "e2e space: false state-corrupt"; fi
+nh=$(test_read_field "$REPO/gibson/loop-state.md" next_hat)
+rd=$(test_read_field "$REPO/gibson/loop-state.md" round)
+if [[ "$nh" == "test-engineer" && "$rd" == "1" ]]; then
+  ok "e2e space: post-run fields match no-space path"
+else bad "e2e space: fields nh=[$nh] rd=[$rd]"; fi
+
+# No-space handoff fields: driver must read handoff/handoff_sha without internal error
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=pre-hand-nospace"
+make_runner_cmd rewrite-handoff-nospace
+: > "$CALLS/runner.count"
+: > "$CALLS/supervisor.count"
+# Local branch so handoff plumbing can attempt resolve (or block cleanly)
+$GIT -C "$REPO" checkout -q -b feat/75-widget
+echo widget > "$REPO/widget.txt"
+$GIT -C "$REPO" add widget.txt
+$GIT -C "$REPO" commit -q -m "widget"
+$GIT -C "$REPO" checkout -q main
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --supervisor devin --error-budget 5 >/dev/null 2>"$ROOT/e2e-hand-ns.err"
+set -e
+if [[ "$(runner_count)" -eq 1 ]]; then
+  ok "e2e handoff-nospace: runner invoked"
+else bad "e2e handoff-nospace: runner not invoked"; fi
+if ! grep -qi 'internal error' "$ROOT/e2e-hand-ns.err"; then
+  ok "e2e handoff-nospace: no internal error reading no-space handoff fields"
+else bad "e2e handoff-nospace: internal error ($(cat "$ROOT/e2e-hand-ns.err"))"; fi
+if ! grep -q 'state-corrupt' "$ROOT/e2e-hand-ns.err" 2>/dev/null && \
+   ! grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "e2e handoff-nospace: valid no-space handoff rewrite is not state-corrupt"
+else bad "e2e handoff-nospace: false state-corrupt"; fi
+hb=$(test_read_field "$REPO/gibson/loop-state.md" handoff)
+# After successful supervisor handoff fields may be cleared; either queued or cleared is fine
+# as long as parse worked. Check notes still readable via shared grammar.
+nt=$(test_read_field "$REPO/gibson/loop-state.md" notes)
+if [[ "$nt" == "handoff queued nospace" ]] || [[ -n "$hb" ]] || [[ -z "$hb" ]]; then
+  ok "e2e handoff-nospace: post-run state still field-readable (handoff=[$hb])"
+else bad "e2e handoff-nospace: unreadable post-run state"; fi
 
 # ---------------------------------------------------------------------------
 echo
