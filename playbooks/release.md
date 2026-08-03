@@ -288,6 +288,17 @@ Confirm issue closed by `Closes #` or close explicitly.
 If G12 / schema / other doc 14 gates apply and human has not approved: **queue for
 Mark**, move on (do not block unrelated work). Never force-push main (G3).
 
+**Offline decision ledger (issue #72 foundation):** release may **append** a
+PENDING decision via `scripts/decision-ledger.sh` and/or draft a card with
+`scripts/digest.sh` from local snapshots. Release must **not** infer approval
+from a rendered digest, a quiet week, a missing delivery, or an unanswered card.
+Unanswered cards never auto-approve and never block unrelated work. Delivery,
+scheduling, authenticated answer ingestion, and any release action that depends
+on an owner reply remain **owner-gated** — issue #72 stays open until Mark
+selects channel, recipient, credentials, cadence, authorized responder,
+retention, replay protection, and a live canary. Do not treat Phase 3 Hermes
+wiring as complete.
+
 ## Done means
 
 - [ ] `release-preflight.sh` verdict recorded on the PR (and the admin checklist

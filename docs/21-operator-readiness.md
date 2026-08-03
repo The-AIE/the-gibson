@@ -45,14 +45,16 @@ The end goal is met when **all** of the following are true on at least one live 
 - [ ] At least one external non-technical reader successfully operates via VIBECODING for a real request.
 - [ ] Case study with metrics (cycle time, owner minutes per ship, defect escapes) published.
 
-## Current status (2026-08-02)
+## Current status (2026-08-03)
 
 | Area | Status |
 |------|--------|
-| A. Owner experience (docs + templates) | **Mostly ready** — VIBECODING, prompts, docs/16, four templates; live Hermes wiring still Phase 3 |
+| A. Owner experience (docs + templates) | **Mostly ready** — VIBECODING, prompts, docs/16, four templates; offline decision ledger + local digest renderer exist (`scripts/decision-ledger.sh`, `scripts/digest.sh`, issue #72 foundation). **Live Hermes/email/iMessage/webhook delivery, scheduling, and authenticated answer ingestion still Phase 3 / owner-gated** — #72 remains open until Mark selects channel, recipient, credentials, cadence, authorized responder, retention, replay protection, and a live canary. Offline render ≠ delivered. |
 | B. Rigor sensors | **In progress** — scripts/CI exist; L-008 silent-noop wired into loop.sh (#63); broader #18 operator path still open |
-| C. Autonomy & safety | **Doctrine complete**; enforcement depends on B |
-| D. Real-world proof | **Not yet** — Phase 2/3 demos and external reader test still open |
+| C. Autonomy & safety | **Doctrine complete**; unanswered cards never auto-approve and never block unrelated work (restated on ledger/digest). Enforcement of live ingest still depends on owner channel. |
+| D. Real-world proof | **Not yet** — Phase 2/3 demos and external reader test still open; morning digest *delivery* is not complete |
+
+**#72 partial slice:** stable id + append-only PENDING ledger + deterministic local digest are offline artifacts for release/historian draft/queue — not a delivery channel and not merge authorization. Do not check off Phase 3 digests until a live canary is delivered on an owner-chosen channel.
 
 This checklist is the north star. Harness PRs should move at least one box. Closing the checklist is how we know the end goal is met.
 

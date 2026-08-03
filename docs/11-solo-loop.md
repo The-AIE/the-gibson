@@ -239,9 +239,17 @@ compare against a stale baseline.
   paths suppress Devin supervisor handoffs
   ([doc 22](22-devin-cloud-supervisor.md)). Origin forms: `https://`,
   `git@host:`, or `ssh://git@host/...` on the configured `GH_HOST`.
-- **Human-gate queue:** Tier C merges and other stops accumulate in a digest
-  (Hermes pings Mark) instead of blocking the loop — the loop moves to the next
-  issue and circles back after approval.
+- **Human-gate queue:** Tier C merges and other stops accumulate as PENDING
+  decisions instead of blocking the loop — the loop moves to the next issue and
+  circles back only after real owner approval. Offline foundation (issue #72
+  slice): `scripts/decision-ledger.sh` appends local PENDING events with stable
+  ids; `scripts/digest.sh` renders a local digest from explicit snapshots (never
+  live GitHub/Hermes discovery). The ledger and digest are **not** a delivery
+  channel and **must not** be read as approval. Unanswered cards never
+  auto-approve and never block unrelated work. Hermes (or email/iMessage/webhook)
+  delivery, scheduling, and authenticated answer ingestion remain owner-gated —
+  #72 stays open for channel, recipient, credentials, cadence, authorized
+  responder, retention, replay protection, and a live canary.
 - **Heartbeat:** every iteration reports to Mission Control; 15 minutes of silence
   = presumed dead, per fleet telemetry rules.
 
