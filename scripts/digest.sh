@@ -154,20 +154,115 @@ print(int(ts.timestamp()))
 PY
 }
 
+# Path safety: normalize trusted system prefix physically (macOS /tmp,/var),
+# then require remaining components are real non-symlink dirs/files.
+# Checks type via lstat BEFORE any open/cat/hash/redirection (FIFO-safe).
+# mode: file-required | file-missing-ok | dir-required
+# exit_class: corrupt (3) | write (4)
+assert_path_safe() {
+  local label="$1" path="$2" mode="$3" exit_class="${4:-corrupt}"
+  validate_path_arg "$label" "$path"
+  case "$path" in
+    /*) ;;
+    *) path="$(pwd)/$path" ;;
+  esac
+  python3 - "$label" "$path" "$mode" "$exit_class" <<'PY' || exit $?
+import os, stat, sys
+
+label, path, mode, exit_class = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+code = 4 if exit_class == "write" else 3
+
+def fail(msg):
+    sys.stderr.write(f"digest.sh: {label}: {msg}\n")
+    sys.exit(code)
+
+if not path or len(path) > 4096:
+    fail("path empty or too long")
+for ch in path:
+    if ord(ch) < 32 or ord(ch) == 127:
+        fail("path contains control characters")
+
+norm = os.path.normpath(path)
+if not os.path.isabs(norm):
+    fail(f"path is not absolute after normalize: {norm}")
+comps = [c for c in norm.split(os.sep) if c != ""]
+if any(c in (".", "..") for c in comps):
+    fail(f"path rejects . or .. components: {norm}")
+
+SYSTEM_ALIAS_ROOTS = {"/tmp", "/var"}
+physical = os.sep
+
+for idx, comp in enumerate(comps):
+    is_last = idx == len(comps) - 1
+    candidate = (os.sep + comp) if physical == os.sep else (physical + os.sep + comp)
+    try:
+        st = os.lstat(candidate)
+    except FileNotFoundError:
+        rest = comps[idx:]
+        for r in rest:
+            if r in ("", ".", "..") or "/" in r:
+                fail(f"unsafe missing component: {r!r}")
+        if is_last:
+            if mode != "file-missing-ok":
+                fail(f"missing: {candidate}")
+            sys.stdout.write(candidate)
+            sys.exit(0)
+        if mode != "file-missing-ok":
+            fail(f"missing ancestor: {candidate}")
+        out = physical
+        for r in rest:
+            out = out + os.sep + r if out != os.sep else os.sep + r
+        sys.stdout.write(out)
+        sys.exit(0)
+    except OSError as e:
+        fail(f"cannot lstat {candidate}: {e}")
+
+    if stat.S_ISLNK(st.st_mode):
+        if is_last:
+            fail(f"is a symlink (refuse): {candidate}")
+        if candidate not in SYSTEM_ALIAS_ROOTS:
+            fail(f"planted ancestor symlink (refuse): {candidate}")
+        try:
+            real = os.path.realpath(candidate)
+        except OSError as e:
+            fail(f"cannot resolve system alias {candidate}: {e}")
+        if os.path.islink(real) or not os.path.isdir(real):
+            fail(f"system alias unsafe: {real}")
+        physical = real
+        continue
+
+    if is_last:
+        if mode == "dir-required":
+            if not stat.S_ISDIR(st.st_mode):
+                fail(f"is not a directory: {candidate}")
+            sys.stdout.write(candidate)
+            sys.exit(0)
+        if stat.S_ISDIR(st.st_mode):
+            fail(f"is a directory (refuse): {candidate}")
+        if stat.S_ISFIFO(st.st_mode):
+            fail(f"is a FIFO (refuse; fail closed): {candidate}")
+        if stat.S_ISSOCK(st.st_mode):
+            fail(f"is a socket (refuse): {candidate}")
+        if stat.S_ISCHR(st.st_mode) or stat.S_ISBLK(st.st_mode):
+            fail(f"is a device (refuse): {candidate}")
+        if not stat.S_ISREG(st.st_mode):
+            fail(f"is not a regular file (refuse): {candidate}")
+        sys.stdout.write(candidate)
+        sys.exit(0)
+
+    if not stat.S_ISDIR(st.st_mode):
+        fail(f"ancestor is not a directory: {candidate}")
+    physical = candidate
+
+sys.stdout.write(physical)
+sys.exit(0)
+PY
+}
+
 refuse_unsafe_input() {
   local label="$1" path="$2"
-  if [[ -L "$path" ]]; then
-    die_corrupt "$label is a symlink (refuse): $path"
-  fi
-  if [[ ! -e "$path" ]]; then
-    die_corrupt "$label missing: $path"
-  fi
-  if [[ -d "$path" ]]; then
-    die_corrupt "$label is a directory (refuse): $path"
-  fi
-  if [[ ! -f "$path" ]]; then
-    die_corrupt "$label is not a regular file (refuse): $path"
-  fi
+  # Type check via lstat BEFORE any open/cat (FIFO open would block forever).
+  assert_path_safe "$label" "$path" "file-required" "corrupt" >/dev/null
   if [[ ! -r "$path" ]]; then
     die_corrupt "$label unreadable: $path"
   fi
@@ -175,19 +270,13 @@ refuse_unsafe_input() {
 
 refuse_unsafe_output() {
   local path="$1"
-  if [[ -L "$path" ]]; then
-    die_write "output path is a symlink (refuse): $path"
-  fi
-  if [[ -e "$path" ]]; then
-    if [[ -d "$path" ]]; then
-      die_write "output path is a directory (refuse): $path"
-    fi
-    if [[ ! -f "$path" ]]; then
-      die_write "output path is not a regular file (refuse): $path"
-    fi
-  fi
+  # Validate BEFORE any open/hash/cat/redirection (dry-run FIFO must not hang).
+  assert_path_safe "output" "$path" "file-missing-ok" "write" >/dev/null
   local dir
   dir=$(dirname -- "$path")
+  if [[ -L "$dir" ]]; then
+    die_write "output parent is a symlink (refuse): $dir"
+  fi
   if [[ ! -d "$dir" ]]; then
     die_write "output parent is not a directory: $dir"
   fi
@@ -352,10 +441,21 @@ with open(ledger_path, "r", encoding="utf-8") as f:
         if not line:
             continue
         e = json.loads(line)
+        # Future-created ledger decisions are corrupt/refused and never render.
+        created = e.get("created_at")
+        if not isinstance(created, str):
+            fail("ledger event missing created_at string")
+        try:
+            cdt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            fail(f"ledger event created_at invalid: {created}")
+        if cdt > now:
+            fail(f"ledger decision created_at is in the future relative to --now: {created}")
         if repo_filter and e.get("repo") != repo_filter:
             continue
         events.append(e)
 # Gate is G1..G16 — sort numerically so G6 precedes G12 (string sort would not).
+# Sort for display only — never persisted.
 events.sort(key=lambda e: (e["repo"], int(e["gate"][1:]), e["id"]))
 
 def load_optional_json(raw, label, status):
@@ -363,6 +463,8 @@ def load_optional_json(raw, label, status):
         return None, "missing"
     if status == "unknown":
         return None, "unknown"
+    if status == "stale":
+        return None, "stale"
     if not raw:
         return None, status
     try:
@@ -381,45 +483,64 @@ loop_summary = os.environ.get("DG_LOOP_STATE_SUMMARY") or ""
 journal_status = os.environ.get("DG_JOURNAL_STATUS", "missing")
 journal_summary = os.environ.get("DG_JOURNAL_SUMMARY") or ""
 
-# Validate merged snapshot shape when present
+def parse_utc(label, value):
+    if not isinstance(value, str) or not value:
+        fail(f"{label} must be a non-empty UTC timestamp string")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        fail(f"{label} is not valid strict UTC: {value}")
+
+# Validate merged snapshot shape when present.
+# A merge without valid merged_at, with future time, outside period, mismatched
+# repo/source/SHA, or malformed type fails closed or is skipped; it can NEVER
+# increment shipped count without a valid in-period merged_at.
 ships = []
 if merged is not None:
     if not isinstance(merged, dict) or merged.get("schema") != "digest-merged-since:v1":
         fail("merged-since snapshot must be object with schema digest-merged-since:v1")
-    # Optional source binding
-    if repo_filter and merged.get("repo") not in (None, "", repo_filter):
-        fail(f"merged-since repo mismatch: snapshot={merged.get('repo')} filter={repo_filter}")
-    # Future / period checks
+    # Source identity required when snapshot is present
+    snap_repo = merged.get("repo")
+    if snap_repo is not None and snap_repo != "" and not isinstance(snap_repo, str):
+        fail("merged-since repo must be a string")
+    if repo_filter and snap_repo not in (None, "", repo_filter):
+        fail(f"merged-since repo mismatch: snapshot={snap_repo} filter={repo_filter}")
     as_of = merged.get("as_of")
-    if as_of:
-        try:
-            as_of_dt = datetime.strptime(as_of, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        except ValueError:
-            fail("merged-since as_of is not valid UTC")
-        if as_of_dt > now:
-            fail("merged-since as_of is in the future relative to --now")
-    items = merged.get("merges")
-    if items is None:
-        items = []
-    if not isinstance(items, list):
-        fail("merged-since merges must be a list")
-    for m in items:
-        if not isinstance(m, dict):
-            fail("merged-since merge entry must be object")
-        if repo_filter and m.get("repo") not in (None, "", repo_filter):
-            fail("merged-since entry repo mismatch")
-        mt = m.get("merged_at")
-        if mt:
-            try:
-                mdt = datetime.strptime(mt, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            except ValueError:
-                fail("merged-since merge merged_at invalid")
+    if not as_of:
+        fail("merged-since snapshot missing required as_of UTC timestamp")
+    as_of_dt = parse_utc("merged-since as_of", as_of)
+    if as_of_dt > now:
+        fail("merged-since as_of is in the future relative to --now")
+    if as_of_dt < period_start:
+        # Snapshot itself is older than period: treat as stale/unknown, no ships.
+        merged_status = "stale"
+        ships = []
+    else:
+        items = merged.get("merges")
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            fail("merged-since merges must be a list")
+        for m in items:
+            if not isinstance(m, dict):
+                fail("merged-since merge entry must be object")
+            if repo_filter and m.get("repo") not in (None, "", repo_filter):
+                fail("merged-since entry repo mismatch")
+            if snap_repo and m.get("repo") not in (None, "", snap_repo):
+                fail("merged-since entry repo mismatches snapshot source identity")
+            mt = m.get("merged_at")
+            if not mt:
+                # Missing merged_at: fail closed — never count as shipped.
+                fail("merged-since merge missing required merged_at")
+            mdt = parse_utc("merged-since merge merged_at", mt)
             if mdt > now:
                 fail("merged-since contains future merge timestamp")
             if mdt < period_start:
-                # outside window — skip but do not fail
+                # outside window — skip; does not increment shipped count
                 continue
-        ships.append(m)
+            if mdt > as_of_dt:
+                fail("merged-since merge merged_at is after snapshot as_of")
+            ships.append(m)
 
 parked_items = []
 if parked is not None:
@@ -428,24 +549,26 @@ if parked is not None:
     if repo_filter and parked.get("repo") not in (None, "", repo_filter):
         fail(f"parked repo mismatch: snapshot={parked.get('repo')} filter={repo_filter}")
     as_of = parked.get("as_of")
-    if as_of:
-        try:
-            as_of_dt = datetime.strptime(as_of, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        except ValueError:
-            fail("parked as_of is not valid UTC")
-        if as_of_dt > now:
-            fail("parked as_of is in the future relative to --now")
-    items = parked.get("items")
-    if items is None:
-        items = []
-    if not isinstance(items, list):
-        fail("parked items must be a list")
-    for p in items:
-        if not isinstance(p, dict):
-            fail("parked item must be object")
-        if repo_filter and p.get("repo") not in (None, "", repo_filter):
-            fail("parked entry repo mismatch")
-        parked_items.append(p)
+    if not as_of:
+        fail("parked snapshot missing required as_of UTC timestamp")
+    as_of_dt = parse_utc("parked as_of", as_of)
+    if as_of_dt > now:
+        fail("parked as_of is in the future relative to --now")
+    if as_of_dt < period_start:
+        parked_status = "stale"
+        parked_items = []
+    else:
+        items = parked.get("items")
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            fail("parked items must be a list")
+        for p in items:
+            if not isinstance(p, dict):
+                fail("parked item must be object")
+            if repo_filter and p.get("repo") not in (None, "", repo_filter):
+                fail("parked entry repo mismatch")
+            parked_items.append(p)
 
 ship_count = len(ships)
 pending_count = len(events)
@@ -471,21 +594,27 @@ def status_lines():
             title = m.get("title") or m.get("pr") or m.get("ref") or "(untitled)"
             lines.append(f"  - {title}")
     lines.append(f"Pending owner decisions: {pending_count}")
-    # Loop health
+    # Loop health — stale/unknown never render as current healthy activity
     if loop_status == "missing":
         lines.append("Loop health: unknown (no loop-state snapshot supplied)")
     elif loop_status == "invalid":
         lines.append("Loop health: unknown (loop-state snapshot failed validation)")
+    elif loop_status == "stale":
+        lines.append(f"Loop health: unknown/stale ({loop_summary or 'updated before period-start'})")
     else:
         lines.append(f"Loop health: {loop_summary or 'present'}")
     if journal_status == "missing":
         lines.append("Journal: not supplied")
     elif journal_status == "invalid":
         lines.append("Journal: unknown (snapshot unreadable/invalid)")
+    elif journal_status == "stale":
+        lines.append(f"Journal: unknown/stale ({journal_summary or 'older than period-start'})")
     else:
         lines.append(f"Journal: {journal_summary or 'present'}")
     if parked_status == "missing":
         lines.append("Parked work: unknown (no parked snapshot supplied)")
+    elif parked_status == "stale":
+        lines.append("Parked work: unknown/stale (snapshot as_of before period-start)")
     elif parked_status == "empty":
         lines.append("Parked work: 0 items")
     else:
@@ -493,6 +622,8 @@ def status_lines():
         for p in parked_items[:20]:
             reason = p.get("reason") or p.get("title") or p.get("pr") or "(parked)"
             lines.append(f"  - {reason}")
+    if merged_status == "stale":
+        lines.append("Ships source: unknown/stale (merged-since as_of before period-start)")
     lines.append(
         "Delivery/ingest: not wired (offline foundation). "
         "Issue #72 remains open for channel, credentials, cadence, and canary."
@@ -591,7 +722,7 @@ load_loop_state() {
     LOOP_STATE_SUMMARY=""
     die_corrupt "loop-state snapshot is empty"
   fi
-  # Extract key fields as data (no eval)
+  # Extract key fields as data (no eval). Required: hat + strict UTC updated.
   local hat next_hat issue parked updated
   hat=$(grep -E '^hat:' "$LOOP_STATE" | head -1 | sed 's/^hat:[[:space:]]*//')
   next_hat=$(grep -E '^next_hat:' "$LOOP_STATE" | head -1 | sed 's/^next_hat:[[:space:]]*//')
@@ -601,14 +732,19 @@ load_loop_state() {
   if [[ -z "$hat" || -z "$updated" ]]; then
     die_corrupt "loop-state snapshot missing required hat/updated fields"
   fi
-  # Stale: if updated is parseable and older than period_start by > 7 days beyond period? 
-  # Label honestly if updated is before period-start as possibly stale.
+  # Facts older than period start are stale/unknown — never current healthy.
   if printf '%s' "$updated" | grep -Eq "$TS_RE"; then
-    local up_epoch now_epoch
+    local up_epoch now_epoch period_epoch
     up_epoch=$(ts_to_epoch "$updated")
     now_epoch=$(ts_to_epoch "$NOW_TS")
+    period_epoch=$(ts_to_epoch "$PERIOD_START")
     if [[ "$up_epoch" -gt "$now_epoch" ]]; then
       die_corrupt "loop-state updated is in the future relative to --now"
+    fi
+    if [[ "$up_epoch" -lt "$period_epoch" ]]; then
+      LOOP_STATE_STATUS="stale"
+      LOOP_STATE_SUMMARY="updated=${updated} before period-start=${PERIOD_START}"
+      return 0
     fi
     LOOP_STATE_STATUS="ok"
     LOOP_STATE_SUMMARY="hat=${hat} next_hat=${next_hat:-?} issue=${issue:-?} parked=${parked:-?} updated=${updated}"
@@ -666,27 +802,32 @@ write_output() {
     cat "$content_file"
     return 0
   fi
+  # Always validate output path type BEFORE any open/hash/cat of the target
+  # (digest --dry-run --output FIFO must return promptly).
+  refuse_unsafe_output "$OUTPUT"
   if [[ "$DRY_RUN" -eq 1 ]]; then
     info "dry-run: would write $(wc -c < "$content_file" | tr -d '[:space:]') bytes to $OUTPUT (target unchanged)"
     cat "$content_file"
     return 0
   fi
-  refuse_unsafe_output "$OUTPUT"
   local dir base tmp
   dir=$(dirname -- "$OUTPUT")
   base=$(basename -- "$OUTPUT")
+  if [[ -L "$dir" ]] || [[ ! -d "$dir" ]]; then
+    die_write "output parent is not a real directory: $dir"
+  fi
   tmp=$(mktemp "${dir}/.${base}.XXXXXX") || die_write "mktemp failed for output"
   if ! cat "$content_file" > "$tmp"; then
-    rm -f "$tmp"
+    rm -f -- "$tmp"
     die_write "failed writing temp output"
   fi
   if [[ -L "$tmp" ]] || [[ ! -f "$tmp" ]]; then
-    rm -f "$tmp"
+    rm -f -- "$tmp"
     die_write "temp output is not a regular file"
   fi
   refuse_unsafe_output "$OUTPUT"
-  if ! mv -f "$tmp" "$OUTPUT"; then
-    rm -f "$tmp"
+  if ! mv -f -- "$tmp" "$OUTPUT"; then
+    rm -f -- "$tmp"
     die_write "atomic rename failed for $OUTPUT"
   fi
   info "wrote digest to $OUTPUT"
@@ -743,7 +884,26 @@ PY
       /*) ;;
       *) OUTPUT="$(pwd)/$OUTPUT" ;;
     esac
+    # Type-check BEFORE any later open/hash (FIFO/device/symlink fail promptly).
+    OUTPUT=$(assert_path_safe "output" "$OUTPUT" "file-missing-ok" "write") || exit 4
   fi
+
+  # Validate optional snapshot paths before opening (FIFO-safe).
+  if [[ -n "$LOOP_STATE" ]]; then
+    LOOP_STATE=$(assert_path_safe "loop-state" "$LOOP_STATE" "file-required" "corrupt") || exit 3
+  fi
+  if [[ -n "$JOURNAL" ]]; then
+    JOURNAL=$(assert_path_safe "journal" "$JOURNAL" "file-required" "corrupt") || exit 3
+  fi
+  if [[ -n "$MERGED_SINCE" ]]; then
+    MERGED_SINCE=$(assert_path_safe "merged-since" "$MERGED_SINCE" "file-required" "corrupt") || exit 3
+  fi
+  if [[ -n "$PARKED" ]]; then
+    PARKED=$(assert_path_safe "parked" "$PARKED" "file-required" "corrupt") || exit 3
+  fi
+
+  # Validate ledger path type before decision-ledger opens it.
+  LEDGER=$(assert_path_safe "ledger" "$LEDGER" "file-required" "corrupt") || exit 3
 
   # Validate ledger via decision-ledger list (read-only path uses lock + validate)
   # Globals for EXIT trap (locals are gone when EXIT fires under set -u).
@@ -775,8 +935,9 @@ PY
     exit "${_dg_rc:-3}"
   fi
 
-  # Dry-run with output: prove target bytes preserved
-  if [[ "$DRY_RUN" -eq 1 && -n "$OUTPUT" && -e "$OUTPUT" ]]; then
+  # Dry-run with regular-file output: prove target bytes preserved.
+  # Path type already validated — never open FIFO/device for size/hash.
+  if [[ "$DRY_RUN" -eq 1 && -n "$OUTPUT" && -e "$OUTPUT" && -f "$OUTPUT" && ! -L "$OUTPUT" ]]; then
     local before after sum_before="" sum_after
     before=$(wc -c < "$OUTPUT" | tr -d '[:space:]')
     if command -v shasum >/dev/null 2>&1; then
