@@ -405,6 +405,7 @@ check_lock_py() {
   python3 - "$path" <<'PY'
 import base64
 import json
+import os
 import re
 import sys
 
@@ -422,7 +423,9 @@ if not isinstance(data, dict):
     print("lock root must be object")
     sys.exit(1)
 
-for req in ("schema", "version", "tools"):
+# recipe + goose_recipe_schema are identity claims bound to the shipped recipe
+# (not free-form metadata). Missing either is fail-closed.
+for req in ("schema", "version", "tools", "recipe", "goose_recipe_schema"):
     if req not in data:
         errors.append("lock missing field: %s" % req)
 
@@ -603,9 +606,97 @@ def validate_digest_obj(dig, where, allowed=None):
     elif algo == "sha512-integrity":
         validate_npm_integrity(val, where)
 
-# lock document version
+# lock document version — exact semver and pinned for gibson.toolchain-lock/v1
+# (adjacent top-level version claim; free 9.9.9 would otherwise pass shape checks)
 if "version" in data:
     reject_nonexact_semver(str(data.get("version")), "lock.version")
+    ver_s = str(data.get("version"))
+    if is_exact_numeric_semver(ver_s) and ver_s != "1.0.0":
+        errors.append(
+            "lock.version must be 1.0.0 for gibson.toolchain-lock/v1 (got %r)"
+            % data.get("version")
+        )
+
+# --- Fail-closed top-level recipe / goose_recipe_schema binding ---
+# Independent review: recipe→other.yaml and goose_recipe_schema→9.9.9 returned
+# rc=0 while only schema/version/tools were required. Bind identity claims to
+# the shipped red-team recipe reference and its Goose schema/version contract.
+CANON_RECIPE_REF = "red-team.yaml"
+recipe_ref = data.get("recipe")
+if recipe_ref is None or recipe_ref == "":
+    pass  # missing already reported
+elif not isinstance(recipe_ref, str):
+    errors.append(
+        "lock.recipe must be the canonical shipped recipe reference %r (got %r)"
+        % (CANON_RECIPE_REF, recipe_ref)
+    )
+elif recipe_ref != recipe_ref.strip() or any(ch.isspace() for ch in recipe_ref):
+    errors.append(
+        "lock.recipe must be exact basename %r without whitespace (got %r)"
+        % (CANON_RECIPE_REF, recipe_ref)
+    )
+elif recipe_ref != CANON_RECIPE_REF:
+    errors.append(
+        "lock.recipe must be the canonical shipped recipe reference %r (got %r)"
+        % (CANON_RECIPE_REF, recipe_ref)
+    )
+
+# Prefer schema/version derived from the resolvable recipe file when present
+# (shipped lock lives beside red-team.yaml). Temp lock fixtures keep the Goose
+# Recipe type contract 1.0.0 — same pin enforced by check_recipe_py.
+expected_goose_schema = "1.0.0"
+lock_dir = os.path.dirname(os.path.abspath(path))
+recipe_path = os.path.join(lock_dir, CANON_RECIPE_REF)
+if os.path.isfile(recipe_path):
+    try:
+        import yaml as _yaml  # optional; offline sensor may lack PyYAML
+        with open(recipe_path, "r", encoding="utf-8") as _rf:
+            _rdata = _yaml.safe_load(_rf.read())
+        if isinstance(_rdata, dict) and _rdata.get("version") not in (None, ""):
+            expected_goose_schema = str(_rdata.get("version")).strip()
+    except Exception:
+        pass
+
+grs = data.get("goose_recipe_schema")
+if grs is None or grs == "":
+    pass  # missing already reported
+else:
+    grs_s = str(grs)
+    if grs_s != grs_s.strip() or any(ch.isspace() for ch in grs_s):
+        errors.append(
+            "lock.goose_recipe_schema non-exact (whitespace): %r" % grs
+        )
+    elif not is_exact_numeric_semver(grs_s):
+        errors.append(
+            "lock.goose_recipe_schema non-exact semver: %r" % grs
+        )
+    elif grs_s != expected_goose_schema:
+        errors.append(
+            "lock.goose_recipe_schema must equal recipe schema/version "
+            "contract %r (got %r)" % (expected_goose_schema, grs)
+        )
+
+# Cross-bind digest_instructions recipe path basename when present so a
+# contradictory free-text digest command cannot disagree with lock.recipe.
+di_bind = data.get("digest_instructions") or {}
+if isinstance(di_bind, dict) and isinstance(recipe_ref, str) and recipe_ref:
+    for platform_key in ("macOS", "portable"):
+        plat = di_bind.get(platform_key) or {}
+        if not isinstance(plat, dict):
+            continue
+        cmd = plat.get("recipe_sha256") or ""
+        if not isinstance(cmd, str) or not cmd:
+            continue
+        m = re.search(r"([A-Za-z0-9._/-]+\.ya?ml)", cmd)
+        if not m:
+            continue
+        dig_base = os.path.basename(m.group(1))
+        if dig_base != recipe_ref and recipe_ref != m.group(1):
+            errors.append(
+                "lock.recipe %r conflicts with digest_instructions.%s."
+                "recipe_sha256 path basename %r"
+                % (recipe_ref, platform_key, dig_base)
+            )
 
 tools = data.get("tools") or []
 if not isinstance(tools, list) or not tools:
@@ -3595,6 +3686,48 @@ for t in data["tools"]:
 '
 out=$(check_lock_py "$ROOT/bad-lock-tool-package-name-conflict.json" 2>&1); rc=$?
 expect_fail "red: socket identity name vs package name fails" "$out" "$rc" "conflict\|identity\|package"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: top-level recipe / goose_recipe_schema binding"
+# ---------------------------------------------------------------------------
+# Independent review: on prior head both mutants returned rc=0 —
+#   recipe → other.yaml
+#   goose_recipe_schema → 9.9.9
+# while the lock validator only required schema/version/tools. Fail closed:
+# bind recipe to the canonical shipped reference and goose_recipe_schema to
+# the recipe schema/version contract (derived from sibling recipe when present).
+
+lock_mutant "$ROOT/bad-lock-recipe-other.json" '
+data["recipe"] = "other.yaml"
+'
+out=$(check_lock_py "$ROOT/bad-lock-recipe-other.json" 2>&1); rc=$?
+expect_fail "red: lock recipe other.yaml fails" "$out" "$rc" "recipe\|canonical\|other"
+
+lock_mutant "$ROOT/bad-lock-goose-recipe-schema-999.json" '
+data["goose_recipe_schema"] = "9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-goose-recipe-schema-999.json" 2>&1); rc=$?
+expect_fail "red: lock goose_recipe_schema 9.9.9 fails" "$out" "$rc" "goose_recipe_schema\|schema/version\|9\.9\.9"
+
+# Adjacent top-level version claim: lock.version free-form exact 9.9.9 must fail
+lock_mutant "$ROOT/bad-lock-doc-version-999.json" '
+data["version"] = "9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-doc-version-999.json" 2>&1); rc=$?
+expect_fail "red: lock.version 9.9.9 fails schema v1 pin" "$out" "$rc" "lock.version\|1\.0\.0"
+
+# Green: explicit equal re-bind of shipped top-level identity
+lock_mutant "$ROOT/ok-lock-recipe-schema-equal.json" '
+data["recipe"] = "red-team.yaml"
+data["goose_recipe_schema"] = "1.0.0"
+data["version"] = "1.0.0"
+'
+out=$(check_lock_py "$ROOT/ok-lock-recipe-schema-equal.json" 2>&1); rc=$?
+expect_pass "green: lock recipe + goose_recipe_schema + version match shipped contract" "$out" "$rc"
+
+# Green: shipped lock path (not a mutant) — reaffirm top-level binding end-to-end
+out=$(check_lock_py "$TOOLCHAIN_LOCK" 2>&1); rc=$?
+expect_pass "green: shipped lock top-level recipe/schema binding holds" "$out" "$rc"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
