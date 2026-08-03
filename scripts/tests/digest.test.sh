@@ -299,6 +299,124 @@ out=$("$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" --journal "$
 contains "journal present" "$out" "Journal: lines="
 
 echo
+echo "=== P1: future ledger decisions refused ==="
+LF="$ROOT/future-ledger.jsonl"
+# created_at after --now
+"$LEDGER_TOOL" add --ledger "$LF" --created-at "2026-12-01T00:00:00Z" \
+  --repo acme/app --gate G1 --source-type pr --source-id fut --source-sha "$SHA_A" \
+  --what "future decision" --why-you "y" --risk-level low --risk-consequence c --risk-undo u \
+  --recommend Wait --recommend-rationale r --if-you-wait i --source-ref s >/dev/null 2>&1
+rc=0
+out=$("$DIGEST" --ledger "$LF" --now "$NOW" --period-start "$PERIOD" 2>"$ROOT/fut.err") || rc=$?
+check "future created_at decision exits 3" "$rc" "3"
+if [[ -z "$out" ]]; then ok "future decision produces no render"; else bad "future decision partially rendered"; fi
+
+echo
+echo "=== P1: merge without merged_at never ships; period/stale mutants ==="
+cat > "$ROOT/merged-ghost.json" <<EOF
+{"schema":"digest-merged-since:v1","repo":"acme/app","as_of":"2026-08-02T00:00:00Z","merges":[{"repo":"acme/app","title":"ghost ship"}]}
+EOF
+rc=0
+"$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" \
+  --repo acme/app --merged-since "$ROOT/merged-ghost.json" >/dev/null 2>&1 || rc=$?
+check "merge missing merged_at exits 3" "$rc" "3"
+
+# Outside-period merge must not increment ship count
+cat > "$ROOT/merged-old.json" <<EOF
+{"schema":"digest-merged-since:v1","repo":"acme/app","as_of":"2026-08-02T00:00:00Z","merges":[{"repo":"acme/app","title":"ancient ship","merged_at":"2026-01-01T00:00:00Z"}]}
+EOF
+out=$("$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" \
+  --repo acme/app --merged-since "$ROOT/merged-old.json" 2>/dev/null)
+contains "outside-period merge not counted" "$out" "Ships this period: 0"
+contains "outside-period still quiet week" "$out" "quiet active week"
+
+# Stale merged snapshot as_of before period-start
+cat > "$ROOT/merged-stale.json" <<EOF
+{"schema":"digest-merged-since:v1","repo":"acme/app","as_of":"2026-07-01T00:00:00Z","merges":[{"repo":"acme/app","title":"should not ship","merged_at":"2026-06-15T00:00:00Z"}]}
+EOF
+out=$("$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" \
+  --repo acme/app --merged-since "$ROOT/merged-stale.json" 2>/dev/null)
+contains "stale merged ships 0" "$out" "Ships this period: 0"
+contains "stale merged labeled" "$out" "unknown/stale"
+
+# Missing as_of fails closed
+cat > "$ROOT/merged-no-asof.json" <<EOF
+{"schema":"digest-merged-since:v1","repo":"acme/app","merges":[]}
+EOF
+rc=0
+"$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" \
+  --merged-since "$ROOT/merged-no-asof.json" >/dev/null 2>&1 || rc=$?
+check "merged missing as_of exits 3" "$rc" "3"
+
+# Loop-state before period-start is stale/unknown not healthy
+cat > "$ROOT/loop-stale.md" <<'EOF'
+# Gibson loop state
+updated: 2026-07-01T00:00:00Z
+issue: 72
+pr:
+hat: release
+next_hat: historian
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: queue decision card
+notes: test
+EOF
+out=$("$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" \
+  --loop-state "$ROOT/loop-stale.md" 2>/dev/null)
+contains "stale loop not healthy" "$out" "unknown/stale"
+lacks "stale loop does not claim hat=release as healthy current" "$out" "Loop health: hat=release"
+
+echo
+echo "=== P1: FIFO dry-run no hang (bounded child PID kill) ==="
+if mkfifo "$ROOT/out.fifo" 2>/dev/null; then
+  # Victim bytes beside the FIFO must remain untouched.
+  printf 'VICTIM_UNTOUCHED\n' > "$ROOT/fifo-victim.txt"
+  pidfile="$ROOT/digest-fifo.pid"
+  (
+    "$DIGEST" --ledger "$L" --now "$NOW" --period-start "$PERIOD" \
+      --output "$ROOT/out.fifo" --dry-run >/dev/null 2>"$ROOT/fifo.err"
+    echo $? > "$ROOT/fifo.rc"
+  ) &
+  child=$!
+  echo "$child" > "$pidfile"
+  # Bound: wait up to ~3s for child to exit; kill only that captured PID.
+  waited=0
+  while [[ $waited -lt 30 ]]; do
+    if ! kill -0 "$child" 2>/dev/null; then
+      break
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+    waited=$((waited + 1))
+  done
+  if kill -0 "$child" 2>/dev/null; then
+    kill "$child" 2>/dev/null || true
+    wait "$child" 2>/dev/null || true
+    bad "FIFO dry-run hung (killed captured pid $child)"
+  else
+    wait "$child" 2>/dev/null || true
+    frc=$(cat "$ROOT/fifo.rc" 2>/dev/null || echo missing)
+    if [[ "$frc" == "4" || "$frc" == "3" ]]; then
+      ok "FIFO dry-run exits promptly rc=$frc"
+    else
+      bad "FIFO dry-run rc=$frc want 3 or 4"
+    fi
+  fi
+  v=$(cat "$ROOT/fifo-victim.txt" 2>/dev/null || echo gone)
+  check "FIFO dry-run left victim bytes" "$v" "VICTIM_UNTOUCHED"
+else
+  ok "FIFO skip (mkfifo unavailable)"
+fi
+
+echo
+echo "=== P1: digest input symlink/FIFO refuse without hang ==="
+ln -sfn "$L" "$ROOT/ledger-link.jsonl"
+rc=0
+"$DIGEST" --ledger "$ROOT/ledger-link.jsonl" --now "$NOW" >/dev/null 2>&1 || rc=$?
+if [[ "$rc" -eq 3 ]]; then ok "symlink ledger input exits 3"; else bad "symlink ledger rc=$rc"; fi
+
+echo
 echo "=== summary ==="
 echo "PASS=$PASS FAIL=$FAIL"
 if [[ -s "$FORBIDDEN_LOG" ]]; then

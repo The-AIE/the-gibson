@@ -42,7 +42,7 @@ SHA_B="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 NOW="2026-08-01T12:00:00Z"
 
 # Portable card flags (Bash 3.2 — no arrays of arrays). Call as:
-#   add_ok "$ledger" --repo … --gate … --source-type … --source-id … --source-sha … 
+#   add_ok "$ledger" --repo … --gate … --source-type … --source-id … --source-sha …
 # and card fields are appended by add_card unless ADD_NO_CARD=1.
 add_ok() {
   local ledger="$1"; shift
@@ -149,10 +149,12 @@ id_esc=$(ADD_NO_CARD=1 add_ok "$LE" --repo acme/app --gate G5 --source-type issu
   --risk-level low --risk-consequence "Money spent" --risk-undo "Cancel plan" \
   --recommend Decline --recommend-rationale "Wait for budget" \
   --if-you-wait "No spend occurs" --source-ref 'issue #7 "billing"' 2>/dev/null)
-python3 - "$LE" <<'PY' && ok "escaped JSON parses" || bad "escaped JSON broken"
+check "escaped event id length 64" "${#id_esc}" "64"
+python3 - "$LE" "$id_esc" <<'PY' && ok "escaped JSON parses with stable id" || bad "escaped JSON broken"
 import json,sys
 line=open(sys.argv[1]).read().strip()
 o=json.loads(line)
+assert o["id"] == sys.argv[2]
 assert '"hello"' in o["card"]["what"]
 assert "\\" in o["card"]["what"] or "backslash" in o["card"]["what"]
 print("ok")
@@ -345,6 +347,231 @@ for line in open(sys.argv[1]):
     assert o["status"]=="PENDING", o
 print("ok")
 PY
+
+echo
+echo "=== P1: forged id / G01 / control-in-top / noncanonical / recomputed id ==="
+# Forged 64-hex id that does not match identity tuple
+python3 - <<PY
+import json
+card={"what":"w","why_you":"y","risk_level":"low","risk_consequence":"c","risk_undo":"u",
+      "recommend":"Wait","recommend_rationale":"r","if_you_wait":"i","source_ref":"s"}
+obj={"schema":"decision-ledger:v1","id":"0"*64,"status":"PENDING","repo":"acme/app","gate":"G1",
+     "source_type":"pr","source_id":"1","source_sha":"a"*40,"created_at":"2026-08-01T00:00:00Z","card":card}
+open("$ROOT/forged.jsonl","w").write(json.dumps(obj,separators=(",",":"),sort_keys=True)+"\n")
+PY
+rc=0; "$TOOL" list --ledger "$ROOT/forged.jsonl" >/dev/null 2>&1 || rc=$?
+check "forged id exits 3" "$rc" "3"
+
+# G01 stored with matching forged-style id for G01 string — still reject gate form
+python3 - <<PY
+import hashlib, json
+def cid(repo,gate,st,sid,sha):
+    c=f"decision-ledger:v1\nrepo={repo}\ngate={gate}\nsource_type={st}\nsource_id={sid}\nsource_sha={sha}\n"
+    return hashlib.sha256(c.encode()).hexdigest()
+card={"what":"w","why_you":"y","risk_level":"low","risk_consequence":"c","risk_undo":"u",
+      "recommend":"Wait","recommend_rationale":"r","if_you_wait":"i","source_ref":"s"}
+gate="G01"
+obj={"schema":"decision-ledger:v1","id":cid("acme/app",gate,"pr","1","a"*40),"status":"PENDING",
+     "repo":"acme/app","gate":gate,"source_type":"pr","source_id":"1","source_sha":"a"*40,
+     "created_at":"2026-08-01T00:00:00Z","card":card}
+open("$ROOT/g01.jsonl","w").write(json.dumps(obj,separators=(",",":"),sort_keys=True)+"\n")
+PY
+rc=0; "$TOOL" list --ledger "$ROOT/g01.jsonl" >/dev/null 2>&1 || rc=$?
+check "stored G01 gate exits 3" "$rc" "3"
+
+# Control char in top-level source_id
+python3 - <<PY
+import hashlib, json
+def cid(repo,gate,st,sid,sha):
+    c=f"decision-ledger:v1\nrepo={repo}\ngate={gate}\nsource_type={st}\nsource_id={sid}\nsource_sha={sha}\n"
+    return hashlib.sha256(c.encode()).hexdigest()
+sid="x\x07y"
+card={"what":"w","why_you":"y","risk_level":"low","risk_consequence":"c","risk_undo":"u",
+      "recommend":"Wait","recommend_rationale":"r","if_you_wait":"i","source_ref":"s"}
+obj={"schema":"decision-ledger:v1","id":cid("acme/app","G1","pr",sid,"a"*40),"status":"PENDING",
+     "repo":"acme/app","gate":"G1","source_type":"pr","source_id":sid,"source_sha":"a"*40,
+     "created_at":"2026-08-01T00:00:00Z","card":card}
+# noncanonical may also fail; write raw with ensure_ascii escape then re-load would lose control —
+# write via json which escapes \u0007 so line is canonical but value has control
+open("$ROOT/ctrl_top.jsonl","w").write(json.dumps(obj,separators=(",",":"),sort_keys=True,ensure_ascii=False)+"\n")
+PY
+rc=0; "$TOOL" list --ledger "$ROOT/ctrl_top.jsonl" >/dev/null 2>&1 || rc=$?
+check "control in top-level source_id exits 3" "$rc" "3"
+
+# Noncanonical JSON (spaces after colon)
+python3 - <<PY
+import hashlib, json
+def cid(repo,gate,st,sid,sha):
+    c=f"decision-ledger:v1\nrepo={repo}\ngate={gate}\nsource_type={st}\nsource_id={sid}\nsource_sha={sha}\n"
+    return hashlib.sha256(c.encode()).hexdigest()
+card={"what":"w","why_you":"y","risk_level":"low","risk_consequence":"c","risk_undo":"u",
+      "recommend":"Wait","recommend_rationale":"r","if_you_wait":"i","source_ref":"s"}
+eid=cid("acme/app","G1","pr","1","a"*40)
+# deliberate spaces
+line='{"card": {"if_you_wait":"i","recommend":"Wait","recommend_rationale":"r","risk_consequence":"c","risk_level":"low","risk_undo":"u","source_ref":"s","what":"w","why_you":"y"},"created_at":"2026-08-01T00:00:00Z","gate":"G1","id":"%s","repo":"acme/app","schema":"decision-ledger:v1","source_id":"1","source_sha":"%s","source_type":"pr","status":"PENDING"}' % (eid, "a"*40)
+open("$ROOT/noncanon.jsonl","w").write(line+"\n")
+PY
+rc=0; "$TOOL" list --ledger "$ROOT/noncanon.jsonl" >/dev/null 2>&1 || rc=$?
+check "noncanonical JSON encoding exits 3" "$rc" "3"
+
+# Missing final newline on otherwise-valid event
+python3 - <<PY
+import hashlib, json
+def cid(repo,gate,st,sid,sha):
+    c=f"decision-ledger:v1\nrepo={repo}\ngate={gate}\nsource_type={st}\nsource_id={sid}\nsource_sha={sha}\n"
+    return hashlib.sha256(c.encode()).hexdigest()
+card={"what":"w","why_you":"y","risk_level":"low","risk_consequence":"c","risk_undo":"u",
+      "recommend":"Wait","recommend_rationale":"r","if_you_wait":"i","source_ref":"s"}
+obj={"schema":"decision-ledger:v1","id":cid("acme/app","G1","pr","1","a"*40),"status":"PENDING",
+     "repo":"acme/app","gate":"G1","source_type":"pr","source_id":"1","source_sha":"a"*40,
+     "created_at":"2026-08-01T00:00:00Z","card":card}
+open("$ROOT/nofinal.jsonl","wb").write(json.dumps(obj,separators=(",",":"),sort_keys=True).encode())
+PY
+rc=0; "$TOOL" list --ledger "$ROOT/nofinal.jsonl" >/dev/null 2>&1 || rc=$?
+check "valid event missing final newline exits 3" "$rc" "3"
+
+# Invalid UTF-8
+printf '\xff\xfe{"schema":"decision-ledger:v1"}\n' > "$ROOT/badutf.jsonl"
+rc=0; "$TOOL" list --ledger "$ROOT/badutf.jsonl" >/dev/null 2>&1 || rc=$?
+check "invalid UTF-8 exits 3" "$rc" "3"
+
+echo
+echo "=== P1: append-only prefix / order / hash fixtures (3+ events) ==="
+ORD="$ROOT/order.jsonl"
+# Choose source_ids whose ids sort opposite to insert order
+python3 - <<'PY' > "$ROOT/sid_order.txt"
+import hashlib
+sha="a"*40
+pairs=[]
+for i in range(80):
+    c=f"decision-ledger:v1\nrepo=r/r\ngate=G1\nsource_type=pr\nsource_id={i}\nsource_sha={sha}\n"
+    pairs.append((hashlib.sha256(c.encode()).hexdigest(), str(i)))
+pairs.sort()
+# insert high, mid, low hash order
+print(pairs[-1][1])
+print(pairs[40][1])
+print(pairs[0][1])
+PY
+s_hi=$(sed -n '1p' "$ROOT/sid_order.txt")
+s_mid=$(sed -n '2p' "$ROOT/sid_order.txt")
+s_lo=$(sed -n '3p' "$ROOT/sid_order.txt")
+# Capture progressive content hashes so prefix growth is independently measurable.
+prev_hash=""
+for sid in "$s_hi" "$s_mid" "$s_lo"; do
+  add_ok "$ORD" --repo r/r --gate G1 --source-type pr --source-id "$sid" --source-sha "$SHA_A" \
+    >/dev/null 2>&1
+  cur_hash=$(python3 - "$ORD" <<'PY'
+import hashlib,sys
+data=open(sys.argv[1],"rb").read()
+print(hashlib.sha256(data).hexdigest())
+PY
+)
+  if [[ -n "$prev_hash" && "$cur_hash" == "$prev_hash" ]]; then
+    bad "append did not change ledger content hash for source-id $sid"
+  fi
+  prev_hash="$cur_hash"
+done
+# On-disk order must be insert order (hi, mid, lo), NOT sorted by id
+python3 - "$ORD" "$s_hi" "$s_mid" "$s_lo" <<'PY' && ok "3-event append order preserved (not sorted by id)" || bad "append reordered events"
+import json,sys
+path, a,b,c = sys.argv[1:5]
+ids=[json.loads(l)["source_id"] for l in open(path) if l.strip()]
+assert ids == [a,b,c], ids
+# and id order is NOT ascending
+eids=[json.loads(l)["id"] for l in open(path) if l.strip()]
+assert eids != sorted(eids), "ids happened to sort in insert order; pick different sids"
+print("ok")
+PY
+# Prefix preservation: after each append, prior bytes are exact prefix
+python3 - "$ORD" <<'PY' && ok "3-event file is valid JSONL with final newline" || bad "order ledger shape"
+import sys
+raw=open(sys.argv[1],"rb").read()
+assert raw.endswith(b"\n") and not raw.endswith(b"\n\n")
+assert raw.count(b"\n")==3
+print("ok")
+PY
+# Fourth append: capture exact bytes before, verify prefix after
+cp "$ORD" "$ROOT/pre_bytes.bin"
+add_ok "$ORD" --repo r/r --gate G1 --source-type pr --source-id "prefix-check" --source-sha "$SHA_B" \
+  >/dev/null 2>&1
+python3 - "$ROOT/pre_bytes.bin" "$ORD" <<'PY' && ok "hash-prefix: old bytes exact prefix of new" || bad "hash-prefix failed"
+import sys
+old=open(sys.argv[1],"rb").read()
+new=open(sys.argv[2],"rb").read()
+assert new.startswith(old), (len(old), len(new))
+assert len(new) > len(old)
+print("ok")
+PY
+# Idempotent retry leaves bytes unchanged
+idemp_before=$(shasum -a 256 "$ORD" | awk '{print $1}')
+add_ok "$ORD" --repo r/r --gate G1 --source-type pr --source-id "prefix-check" --source-sha "$SHA_B" \
+  >/dev/null 2>&1
+idemp_after=$(shasum -a 256 "$ORD" | awk '{print $1}')
+check "idempotent retry leaves bytes unchanged" "$idemp_before" "$idemp_after"
+
+echo
+echo "=== P1: symlink lock never deletes victim pid/bytes ==="
+VL="$ROOT/vicledger.jsonl"
+add_ok "$VL" --repo acme/app --gate G2 --source-type pr --source-id 99 --source-sha "$SHA_A" \
+  >/dev/null 2>&1
+mkdir -p "$ROOT/lock_victim"
+printf '999999\n' > "$ROOT/lock_victim/pid"
+printf 'OWNED_BY_VICTIM\n' > "$ROOT/lock_victim/data"
+printf 'tok\n' > "$ROOT/lock_victim/owner"
+ln -sfn "$ROOT/lock_victim" "${VL}.lock"
+rc=0
+DECISION_LEDGER_LOCK_TRIES=3 "$TOOL" list --ledger "$VL" >/dev/null 2>&1 || rc=$?
+# Must fail (lock) and preserve every victim byte
+if [[ "$rc" -eq 4 || "$rc" -eq 3 ]]; then
+  ok "symlinked lock fails closed (rc=$rc)"
+else
+  bad "symlinked lock rc=$rc want 3 or 4"
+fi
+if [[ -f "$ROOT/lock_victim/pid" && -f "$ROOT/lock_victim/data" && -f "$ROOT/lock_victim/owner" ]]; then
+  vpid=$(cat "$ROOT/lock_victim/pid")
+  vdata=$(cat "$ROOT/lock_victim/data")
+  if [[ "$vpid" == "999999" && "$vdata" == "OWNED_BY_VICTIM" ]]; then
+    ok "symlinked lock did not delete victim pid/data"
+  else
+    bad "victim contents mutated: pid=$vpid data=$vdata"
+  fi
+else
+  bad "victim files missing after lock attempt"
+fi
+# list must not leave a real lock dir that replaced the symlink into the victim
+if [[ -L "${VL}.lock" ]]; then
+  ok "lock path still symlink (not replaced with real dir reclaim)"
+else
+  bad "lock path no longer symlink"
+fi
+rm -f "${VL}.lock"
+
+echo
+echo "=== P1: ancestor symlink / FIFO leaf refuse ==="
+mkdir -p "$ROOT/realdir"
+ln -sfn "$ROOT/realdir" "$ROOT/planted_anc"
+rc=0
+"$TOOL" list --ledger "$ROOT/planted_anc/ledger.jsonl" >/dev/null 2>&1 || rc=$?
+if [[ "$rc" -eq 3 || "$rc" -eq 2 ]]; then
+  ok "planted ancestor symlink refused (rc=$rc)"
+else
+  bad "planted ancestor rc=$rc"
+fi
+if mkfifo "$ROOT/fifo2.jsonl" 2>/dev/null; then
+  rc=0
+  "$TOOL" add --ledger "$ROOT/fifo2.jsonl" --repo acme/app --gate G1 --source-type pr \
+    --source-id fifo --source-sha "$SHA_A" --created-at "$NOW" \
+    --what w --why-you y --risk-level low --risk-consequence c --risk-undo u \
+    --recommend Wait --recommend-rationale r --if-you-wait i --source-ref s \
+    >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -eq 3 || "$rc" -eq 4 ]]; then
+    ok "FIFO ledger add refuses without hang (rc=$rc)"
+  else
+    bad "FIFO add rc=$rc"
+  fi
+else
+  ok "FIFO skip (mkfifo unavailable)"
+fi
 
 echo
 echo "=== summary ==="
