@@ -39,6 +39,13 @@ for free.
    rulesets, fork policy, merge-queue policy, and credentials are owner Ask
    Contract items under #68 — never agent-applied. Merge queues stay off until
    equivalent `merge_group` support is implemented and canaried.
+   **Sense before promising:** run
+   `scripts/git-configure.sh --audit --repo owner/name --path <target>` and
+   **stop setup on unresolved FAIL/OWNER_REQUIRED/UNKNOWN** (exit 1) or tool
+   failure (exit 3). Safe reversible adoption settings only:
+   `git-configure.sh --dry-run` then `--apply` (labels, `gibson/` gitignore,
+   squash + delete-branch-on-merge). Static workflow strings never clear the
+   test-integrity canary to PASS.
 3. **Risk classifier** — Tier-C auto-labeling for ALL Law 7 categories: money,
    auth, consent/PII, security boundaries, production data (schema/migrations
    included). Start from the Gibson's own `ci/` workflows; where a needed gate
@@ -52,18 +59,25 @@ for free.
    **No local template for this exists yet** — port it from a proven external
    implementation and contribute the generalized version back (rule below).
    Until installed, say plainly the repo has no machine-checked review gate.
-5. **Labels + kill switch** — `agent-claimed`, tier labels, and `gibson-halt`.
-   The permanent stop is the `gibson/HALT` file; `GIBSON_HALT=1` is also checked
-   unconditionally every iteration. The `gibson-halt` label is only a SOFT cue —
-   `loop.sh` honors it when `gh` is installed and authenticated on the machine
-   running the loop, and silently ignores it otherwise. Either also install the
-   small translation workflow (label applied → touch `gibson/HALT`) or state
-   plainly that on a box without `gh` the label stops nothing and humans must
-   create the HALT file to actually stop the fleet.
+5. **Labels + kill switch + safe git settings** — prefer
+   `scripts/git-configure.sh --apply` after audit/dry-run for
+   `tier-a`/`tier-b`/`tier-c`, `agent-claimed`, `blocked`, `gibson-halt`,
+   `halt`, a `gibson/` `.gitignore` entry, and merge defaults (squash on;
+   merge-commit/rebase off; delete-branch-on-merge on). The permanent stop is
+   the `gibson/HALT` file; `GIBSON_HALT=1` is also checked unconditionally every
+   iteration. The `gibson-halt` label is only a SOFT cue — `loop.sh` honors it
+   when `gh` is installed and authenticated on the machine running the loop, and
+   silently ignores it otherwise. Either also install the small translation
+   workflow (label applied → touch `gibson/HALT`) or state plainly that on a box
+   without `gh` the label stops nothing and humans must create the HALT file to
+   actually stop the fleet.
 6. **Branch protection** — required checks + no force-push on the default
    branch. Needs owner-level auth; if unavailable, emit the exact settings as
-   an Ask Contract item instead of failing silently.
-7. **DCO/sign-off** convention if the repo wants it.
+   an Ask Contract item instead of failing silently. `git-configure.sh` **audits**
+   protection and prints remediation; it never applies it (use
+   `scripts/delivery-control/apply-branch-protection.sh` with Mark approval).
+7. **DCO/sign-off** convention if the repo wants it (audit via git-configure;
+   app install remains Mark-owned).
 8. **Devin supervisor wiring** — `scripts/devin-supervisor.sh ensure --repo <path>`
    **creates a billed cloud session if none exists (ACUs = real money): this is
    an owner-gated step, always. Ask Contract first, run only on an explicit

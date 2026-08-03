@@ -10,6 +10,37 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+`git-configure.sh` — credential-free first slice of issue #68 (not the full issue).
+
+- **`scripts/git-configure.sh`** — portable Bash 3.2 auditor/configurator.
+  Default `--audit` is strictly read-only (live `gh` metadata only). `--dry-run`
+  prints the safe apply plan with zero mutation. `--apply` mutates only
+  reversible adoption settings: required Gibson labels (`tier-a`/`b`/`c`,
+  `agent-claimed`, `blocked`, `gibson-halt`, `halt`), a single `gibson/`
+  `.gitignore` entry (preserves existing bytes; no duplicate coverage), and
+  repository merge settings (squash on; merge-commit and rebase off;
+  delete-branch-on-merge on) with exact post-apply readback (exit 3 on failure).
+  **Never** applies branch protection, required review/status contexts, GitHub
+  Environment rules, DCO app/config, Vercel project settings, secrets, auth, or
+  production-branch remapping — those stay Mark-owned with printed remediation.
+  Static workflow YAML never upgrades test-integrity canary to PASS. Exit 0
+  READY / 1 drift or owner-required/unknown / 2 usage-config / 3 API-apply-report.
+  Optional atomic report (`--report` or default `gibson/git-config-report.md`;
+  runtime, do not commit). No secrets in output.
+- **`scripts/tests/git-configure.test.sh`** — offline fake-`gh`/filesystem sensors
+  covering audit purity, dry-run, apply idempotency, prohibited mutates under
+  `--apply`, hostile inputs, API failures, protection/reviewer/canary/Vercel
+  fail-closed, atomic report edge cases, exit codes, Bash 3.2 / ShellCheck.
+- **Docs / skill / template:** `docs/13-adoption.md`, `playbooks/adopt.md`,
+  `docs/23-delivery-control.md`, `scripts/README.md`, `skills/gibson-setup/SKILL.md`
+  require audit and stop on unresolved FAIL/owner-required; document the safe
+  `--apply` boundary and Mark-owned live settings.
+  `templates/target-repo/gibson-delivery.json` includes `test-integrity` in
+  default `requiredContexts`.
+- **Not claimed complete for #68:** live canaries, required-check activation,
+  protection apply, Vercel console verification, and remaining owner wiring
+  stay open under the parent issue.
+
 Protected test-integrity CI template (issue #70 phase 2) — repository-only, inert until #68.
 
 - **`ci/gibson-gate.yml`** — four isolated jobs on `pull_request` only:
