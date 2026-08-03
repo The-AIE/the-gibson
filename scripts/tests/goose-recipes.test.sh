@@ -423,6 +423,25 @@ if not isinstance(data, dict):
     print("lock root must be object")
     sys.exit(1)
 
+# Closed-world top-level schema for gibson.toolchain-lock/v1.
+# Exact allowed key set; reject unknown/extra top-level fields.
+LOCK_ALLOWED_TOP = {
+    "schema",
+    "version",
+    "recipe",
+    "goose_recipe_schema",
+    "retrieved_utc",
+    "notes",
+    "digest_instructions",
+    "tools",
+    "containers",
+    "mcp_packages",
+    "bundled_extensions",
+}
+for k in data.keys():
+    if k not in LOCK_ALLOWED_TOP:
+        errors.append("unsupported top-level lock key: %s" % k)
+
 # recipe + goose_recipe_schema are identity claims bound to the shipped recipe
 # (not free-form metadata). Missing either is fail-closed.
 for req in ("schema", "version", "tools", "recipe", "goose_recipe_schema"):
@@ -676,51 +695,142 @@ else:
             "contract %r (got %r)" % (expected_goose_schema, grs)
         )
 
-# Fail-closed digest_instructions.recipe_sha256 ↔ lock.recipe binding.
-# Require exactly one YAML path token whose basename equals lock.recipe.
-# Absence of any .yaml/.yml token, multiple distinct basenames, non-YAML
-# path-only commands (/tmp/other), or other.yaml ambiguity all fail.
-# (Independent review: recipe_sha256 with no .yaml token returned rc=0.)
-YAML_PATH_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9._-])((?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.ya?ml)\b"
+# Fail-closed digest_instructions: closed schema + exact shipped commands.
+# Recipe hashing must use exactly one canonical repository-relative operand
+# playbooks/recipes/red-team.yaml — never absolute paths, basename-only
+# matches, ambiguity, repeated operands, shell composition, or alternate files.
+# (Independent review residual fail-opens: portable deleted, /tmp/red-team.yaml
+# basename-only match, dual /tmp + playbooks operands with equal basenames.)
+CANON_RECIPE_REPO_PATH = "playbooks/recipes/red-team.yaml"
+CANON_LOCK_REPO_PATH = "playbooks/recipes/red-team.toolchain.json"
+CANON_DIGEST_INSTRUCTIONS = {
+    "macOS": {
+        "recipe_sha256": (
+            "shasum -a 256 playbooks/recipes/red-team.yaml | awk '{print $1}'"
+        ),
+        "toolchain_lock_sha256": (
+            "shasum -a 256 playbooks/recipes/red-team.toolchain.json"
+            " | awk '{print $1}'"
+        ),
+        "target_profile_sha256": (
+            "shasum -a 256 <target-profile-path> | awk '{print $1}'"
+        ),
+    },
+    "portable": {
+        "recipe_sha256": (
+            "sha256sum playbooks/recipes/red-team.yaml | awk '{print $1}'"
+        ),
+        "toolchain_lock_sha256": (
+            "sha256sum playbooks/recipes/red-team.toolchain.json"
+            " | awk '{print $1}'"
+        ),
+        "target_profile_sha256": (
+            "sha256sum <target-profile-path> | awk '{print $1}'"
+        ),
+    },
+    "commit_policy": (
+        "Do not commit generated run digests. Stamp digests into the dated "
+        "findings ledger at run time only."
+    ),
+}
+# Path tokens: absolute or relative paths ending in .yaml/.yml/.json
+PATH_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9._-])("
+    r"(?:/[A-Za-z0-9._-]+)+(?:\.ya?ml|\.json)"
+    r"|(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+(?:\.ya?ml|\.json)"
+    r")\b"
 )
-di_bind = data.get("digest_instructions") or {}
-if isinstance(di_bind, dict) and isinstance(recipe_ref, str) and recipe_ref:
+YAML_PATH_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9._-])((?:/?[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.ya?ml)\b"
+)
+
+di_bind = data.get("digest_instructions")
+if di_bind is None or di_bind == "":
+    errors.append("digest_instructions missing")
+elif not isinstance(di_bind, dict):
+    errors.append("digest_instructions must be an object")
+else:
+    di_keys = set(di_bind.keys())
+    expected_di_keys = {"macOS", "portable", "commit_policy"}
+    for extra in sorted(di_keys - expected_di_keys):
+        errors.append("digest_instructions unsupported key: %s" % extra)
+    for miss in sorted(expected_di_keys - di_keys):
+        errors.append("digest_instructions missing required key: %s" % miss)
+    # commit_policy exact
+    if "commit_policy" in di_bind:
+        if di_bind.get("commit_policy") != CANON_DIGEST_INSTRUCTIONS["commit_policy"]:
+            errors.append(
+                "digest_instructions.commit_policy must equal shipped canonical "
+                "policy text (got %r)" % di_bind.get("commit_policy")
+            )
     for platform_key in ("macOS", "portable"):
-        plat = di_bind.get(platform_key) or {}
+        if platform_key not in di_bind:
+            continue
+        plat = di_bind.get(platform_key)
+        where_plat = "digest_instructions.%s" % platform_key
         if not isinstance(plat, dict):
+            errors.append("%s must be an object" % where_plat)
             continue
-        if "recipe_sha256" not in plat:
-            continue  # required macOS field checked later
-        cmd = plat.get("recipe_sha256")
-        where_di = "digest_instructions.%s.recipe_sha256" % platform_key
-        if not isinstance(cmd, str) or not cmd.strip():
-            errors.append(
-                "%s must be a non-empty shasum/sha256sum command that "
-                "references lock.recipe %r exactly once" % (where_di, recipe_ref)
-            )
-            continue
-        yaml_tokens = YAML_PATH_TOKEN.findall(cmd)
-        if not yaml_tokens:
-            errors.append(
-                "%s must reference lock.recipe %r with exactly one .yaml/.yml "
-                "path token (got none; non-YAML/arbitrary path is not a recipe "
-                "locator)" % (where_di, recipe_ref)
-            )
-            continue
-        basenames = []
-        for tok in yaml_tokens:
-            basenames.append(os.path.basename(tok))
-        distinct = sorted(set(basenames))
-        if len(distinct) != 1 or distinct[0] != recipe_ref:
-            errors.append(
-                "lock.recipe %r conflicts with %s path basenames %r "
-                "(need exactly one distinct basename equal to lock.recipe)"
-                % (recipe_ref, where_di, basenames)
-            )
-            continue
-        # Exactly one distinct matching basename — still require at least one
-        # token (already) and disallow empty. Multiple identical refs OK.
+        expected_plat = CANON_DIGEST_INSTRUCTIONS[platform_key]
+        plat_keys = set(plat.keys())
+        exp_plat_keys = set(expected_plat.keys())
+        for extra in sorted(plat_keys - exp_plat_keys):
+            errors.append("%s unsupported key: %s" % (where_plat, extra))
+        for miss in sorted(exp_plat_keys - plat_keys):
+            errors.append("%s missing required key: %s" % (where_plat, miss))
+        for cmd_key, expected_cmd in expected_plat.items():
+            where_di = "%s.%s" % (where_plat, cmd_key)
+            if cmd_key not in plat:
+                continue
+            cmd = plat.get(cmd_key)
+            if not isinstance(cmd, str) or not cmd.strip():
+                errors.append(
+                    "%s must be the exact shipped digest command string" % where_di
+                )
+                continue
+            # Exact equality to shipped command (closed-world reproducibility lock)
+            if cmd != expected_cmd:
+                errors.append(
+                    "%s must equal exact shipped command %r (got %r)"
+                    % (where_di, expected_cmd, cmd)
+                )
+            # Structural path rules for recipe_sha256 (defense in depth / readable)
+            if cmd_key == "recipe_sha256":
+                yaml_tokens = YAML_PATH_TOKEN.findall(cmd)
+                if len(yaml_tokens) != 1:
+                    errors.append(
+                        "%s must contain exactly one .yaml/.yml path operand "
+                        "(got %r); no repeated/ambiguous/absolute dual paths"
+                        % (where_di, yaml_tokens)
+                    )
+                elif yaml_tokens[0] != CANON_RECIPE_REPO_PATH:
+                    errors.append(
+                        "%s recipe path must be exact repository-relative %r "
+                        "(got %r; basename-only/absolute/alternate paths rejected)"
+                        % (where_di, CANON_RECIPE_REPO_PATH, yaml_tokens[0])
+                    )
+                if recipe_ref and isinstance(recipe_ref, str):
+                    if os.path.basename(CANON_RECIPE_REPO_PATH) != recipe_ref:
+                        errors.append(
+                            "lock.recipe %r inconsistent with canonical recipe "
+                            "path %r" % (recipe_ref, CANON_RECIPE_REPO_PATH)
+                        )
+            if cmd_key == "toolchain_lock_sha256":
+                # Require exact repo-relative lock path; reject absolute/basename games
+                if CANON_LOCK_REPO_PATH not in cmd:
+                    errors.append(
+                        "%s must reference exact repository-relative lock path %r"
+                        % (where_di, CANON_LOCK_REPO_PATH)
+                    )
+                abs_like = re.findall(
+                    r"(?<![A-Za-z0-9._-])(/[A-Za-z0-9._/-]+\.json)\b", cmd
+                )
+                for ap in abs_like:
+                    if ap != CANON_LOCK_REPO_PATH:
+                        errors.append(
+                            "%s absolute/non-canonical lock path rejected: %r"
+                            % (where_di, ap)
+                        )
 
 tools = data.get("tools") or []
 if not isinstance(tools, list) or not tools:
@@ -730,15 +840,22 @@ ids = []
 required_ids = {"goose-cli", "gitleaks", "semgrep", "trufflehog", "socket-cli"}
 found = set()
 
-# Canonical supported-core-tool origin profiles (fixed lock set).
-# Identity is origin (github owner/repo | pypi/npm registry) + immutable
-# version pin + asset basename + source URL templates — not free text.
-# Version-token scanning alone is not identity binding.
+# Canonical supported-core-tool closed profiles (fixed lock set).
+# Exact name/kind/version/identity/execution/digest/origin/asset — not shape-only.
+# Version-token scanning alone is not identity binding; digest must match the
+# shipped accurate lock values, not merely well-formed hex/SRI.
 CORE_TOOL_PROFILES = {
     "goose-cli": {
+        "name": "Goose CLI",
+        "kind": "cli",
         "version": "1.45.0",
+        "identity": "v1.45.0",
         "platform": "darwin-arm64",
         "asset": "goose-aarch64-apple-darwin.tar.gz",
+        "digest_algorithm": "sha256",
+        "digest_value": (
+            "90c50d653d7fd978ec5d436b548eca8613dc2d26d028b486b7c52271267ec500"
+        ),
         "source_url": (
             "https://github.com/aaif-goose/goose/releases/download/"
             "v1.45.0/goose-aarch64-apple-darwin.tar.gz"
@@ -746,12 +863,20 @@ CORE_TOOL_PROFILES = {
         "source_meta_url": (
             "https://github.com/aaif-goose/goose/releases/tag/v1.45.0"
         ),
+        "execution": "offline-validate-only",
         "origin_stem": "aaif-goose/goose",
     },
     "gitleaks": {
+        "name": "gitleaks",
+        "kind": "cli",
         "version": "8.30.1",
+        "identity": "v8.30.1",
         "platform": "darwin-arm64",
         "asset": "gitleaks_8.30.1_darwin_arm64.tar.gz",
+        "digest_algorithm": "sha256",
+        "digest_value": (
+            "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+        ),
         "source_url": (
             "https://github.com/gitleaks/gitleaks/releases/download/"
             "v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz"
@@ -759,21 +884,37 @@ CORE_TOOL_PROFILES = {
         "source_meta_url": (
             "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1"
         ),
+        "execution": "pin-only",
         "origin_stem": "gitleaks/gitleaks",
     },
     "semgrep": {
+        "name": "Semgrep",
+        "kind": "cli",
         "version": "1.172.0",
+        "identity": "1.172.0",
         "package": "semgrep==1.172.0",
         "distribution": "pypi",
         "asset": "semgrep-1.172.0.tar.gz",
+        "digest_algorithm": "sha256",
+        "digest_value": (
+            "7377cc350c64c7b83de20090cb2843d875da1d806690fd604e446ed544b56d71"
+        ),
         "source_url": "https://pypi.org/project/semgrep/1.172.0/",
         "source_meta_url": "https://pypi.org/pypi/semgrep/1.172.0/json",
+        "execution": "pin-only",
         "origin_stem": "project/semgrep",
     },
     "trufflehog": {
+        "name": "TruffleHog",
+        "kind": "cli",
         "version": "3.96.0",
+        "identity": "v3.96.0",
         "platform": "darwin-arm64",
         "asset": "trufflehog_3.96.0_darwin_arm64.tar.gz",
+        "digest_algorithm": "sha256",
+        "digest_value": (
+            "87478306b95ca2420cfb844b7582383ac60b922e262350a0088e797f328d2e62"
+        ),
         "source_url": (
             "https://github.com/trufflesecurity/trufflehog/releases/download/"
             "v3.96.0/trufflehog_3.96.0_darwin_arm64.tar.gz"
@@ -781,20 +922,42 @@ CORE_TOOL_PROFILES = {
         "source_meta_url": (
             "https://github.com/trufflesecurity/trufflehog/releases/tag/v3.96.0"
         ),
+        "execution": "pin-only",
         "origin_stem": "trufflesecurity/trufflehog",
     },
     "socket-cli": {
+        "name": "Socket CLI",
+        "kind": "cli",
         "version": "1.1.147",
+        "identity": "socket@1.1.147",
         "package": "socket@1.1.147",
         "distribution": "npm",
         "asset": "socket-1.1.147.tgz",
+        "digest_algorithm": "sha512-integrity",
+        "digest_value": (
+            "sha512-TZWg3JQPuykBb1XKWVhmYQh+Zl1C0qU0nUxVzzPM5Q/"
+            "AbC0oQGC9yKDmGQhizy/KLT64I671UjTvrjQ9MBOvGQ=="
+        ),
         "source_url": (
             "https://registry.npmjs.org/socket/-/socket-1.1.147.tgz"
         ),
         "source_meta_url": "https://registry.npmjs.org/socket/1.1.147",
+        "execution": "owner-gated",
         "origin_stem": "socket",
     },
 }
+# Keys present on every shipped core tool entry.
+TOOL_REQUIRED_KEYS = {
+    "id", "name", "kind", "version", "identity", "asset", "digest",
+    "source_url", "source_meta_url", "retrieved_utc", "execution", "notes",
+}
+# Optional equal-only locator aliases (not in shipped entries; if present must
+# equal the canonical field). repository/ref are NOT allowed on tools[].
+TOOL_OPTIONAL_EQUAL_ALIASES = {
+    "artifact", "filename", "tarball", "source", "download_url", "url",
+    "integrity",
+}
+TOOL_FORBIDDEN_ALIASES = {"repository", "ref", "repo", "git", "commit", "tag"}
 
 for i, t in enumerate(tools):
     if not isinstance(t, dict):
@@ -930,21 +1093,111 @@ for i, t in enumerate(tools):
         # repository / ref without version tokens are allowed only as optional
         # non-version locators (no alternate pin).
 
-    # --- Fail-closed canonical origin / artifact identity for supported core tools ---
-    # The lock ships a fixed supported set. Version-token scanning alone is not
-    # identity binding: same-version wrong-repo URLs, versionless /latest sources,
-    # and mismatched artifact basenames previously returned rc=0. For each
-    # supported tool id, require the official origin, immutable version pin,
-    # source URL template, asset basename, and (when applicable) package pin.
-    # Optional source/asset aliases must equal the same canonical locators.
+    # --- Fail-closed exact canonical profile for supported core tools ---
+    # Closed-world: exact id set, name, kind, identity, execution, digest
+    # value (not merely well-formed), origin URLs, asset, package/platform.
+    # Unsupported tool aliases (repository/ref/…) are rejected; optional
+    # equal-only aliases must match the canonical field exactly (no substring).
     if tid in CORE_TOOL_PROFILES:
         prof = CORE_TOOL_PROFILES[tid]
-        # Immutable version pin for the supported set
+        # Closed key set for this tool entry
+        allowed_keys = set(TOOL_REQUIRED_KEYS) | set(TOOL_OPTIONAL_EQUAL_ALIASES)
+        if "platform" in prof:
+            allowed_keys.add("platform")
+        if "package" in prof:
+            allowed_keys.add("package")
+        if "distribution" in prof:
+            allowed_keys.add("distribution")
+        for k in t.keys():
+            if k in TOOL_FORBIDDEN_ALIASES:
+                errors.append(
+                    "%s (%s) unsupported tool alias %r (not in shipped schema; "
+                    "reject repository/ref/commit-style fields on tools[])"
+                    % (where, tid, k)
+                )
+            elif k not in allowed_keys:
+                errors.append(
+                    "%s (%s) unknown/extra tool field: %s" % (where, tid, k)
+                )
+        for rk in TOOL_REQUIRED_KEYS:
+            if rk == "id":
+                continue
+            if t.get(rk) in (None, ""):
+                errors.append(
+                    "%s (%s) missing required field %s" % (where, tid, rk)
+                )
+        # Exact name / kind / version / execution
+        if t.get("name") not in (None, "") and str(t.get("name")) != prof["name"]:
+            errors.append(
+                "%s (%s) name must be exact canonical %r (got %r)"
+                % (where, tid, prof["name"], t.get("name"))
+            )
+        if t.get("kind") in (None, ""):
+            errors.append(
+                "%s (%s) missing required kind %r" % (where, tid, prof["kind"])
+            )
+        elif str(t.get("kind")) != prof["kind"]:
+            errors.append(
+                "%s (%s) kind must be exact %r (got %r)"
+                % (where, tid, prof["kind"], t.get("kind"))
+            )
         if str(t.get("version") or "") != prof["version"]:
             errors.append(
                 "%s (%s) version must be supported core pin %r (got %r)"
                 % (where, tid, prof["version"], t.get("version"))
             )
+        # Exact identity: canonical profile identity, or for package tools a
+        # package-shaped pin that names the same package + version. Bare/v-
+        # prefixed version equal to the pin is also allowed. malware@pin and
+        # other wrong-name package identities are rejected.
+        ident_s = t.get("identity")
+        if ident_s not in (None, ""):
+            allowed_idents = {
+                prof["identity"],
+                prof["version"],
+                "v" + prof["version"],
+            }
+            if "package" in prof:
+                allowed_idents.add(prof["package"])
+                pkg_parsed = package_claimed_pin(prof["package"])
+                if pkg_parsed is not None:
+                    allowed_idents.add("%s@%s" % (pkg_parsed[0], prof["version"]))
+                    allowed_idents.add("%s==%s" % (pkg_parsed[0], prof["version"]))
+            if str(ident_s) not in allowed_idents:
+                errors.append(
+                    "%s (%s) identity must be exact canonical form for pin %r "
+                    "(got %r; wrong-name package identity rejected)"
+                    % (where, tid, prof["version"], ident_s)
+                )
+        # Exact execution mode per tool (enum shape alone is not enough)
+        if t.get("execution") not in (None, ""):
+            if str(t.get("execution")) != prof["execution"]:
+                errors.append(
+                    "%s (%s) execution must be exact %r (got %r)"
+                    % (where, tid, prof["execution"], t.get("execution"))
+                )
+        # Exact digest algorithm + value (shipped lock pins, not well-formed-only)
+        dig = t.get("digest")
+        if isinstance(dig, dict):
+            dig_algo = dig.get("algorithm")
+            dig_val = dig.get("value")
+            if dig_algo not in (None, "") and str(dig_algo) != prof["digest_algorithm"]:
+                errors.append(
+                    "%s (%s) digest.algorithm must be exact %r (got %r)"
+                    % (where, tid, prof["digest_algorithm"], dig_algo)
+                )
+            if dig_val not in (None, "") and str(dig_val) != prof["digest_value"]:
+                errors.append(
+                    "%s (%s) digest.value must equal exact shipped pin "
+                    "(got well-formed but non-canonical value)"
+                    % (where, tid)
+                )
+            # Digest object closed key set
+            for dk in dig.keys():
+                if dk not in ("algorithm", "value"):
+                    errors.append(
+                        "%s (%s) digest unknown key: %s" % (where, tid, dk)
+                    )
         # Required artifact basename (official supported platform package)
         asset_val = t.get("asset")
         if asset_val in (None, ""):
@@ -990,6 +1243,12 @@ for i, t in enumerate(tools):
                     "%s (%s) platform must be %r (got %r)"
                     % (where, tid, prof["platform"], plat_v)
                 )
+        else:
+            if t.get("platform") not in (None, ""):
+                errors.append(
+                    "%s (%s) unexpected platform field (registry-distributed tool)"
+                    % (where, tid)
+                )
         # Package pin when the tool is registry-distributed
         if "package" in prof:
             pkg_v = t.get("package")
@@ -1003,6 +1262,12 @@ for i, t in enumerate(tools):
                     "%s (%s) package must be canonical %r (got %r)"
                     % (where, tid, prof["package"], pkg_v)
                 )
+        else:
+            if t.get("package") not in (None, ""):
+                errors.append(
+                    "%s (%s) unexpected package field (binary-release tool)"
+                    % (where, tid)
+                )
         if "distribution" in prof:
             dist_v = t.get("distribution")
             if dist_v in (None, ""):
@@ -1015,7 +1280,12 @@ for i, t in enumerate(tools):
                     "%s (%s) distribution must be %r (got %r)"
                     % (where, tid, prof["distribution"], dist_v)
                 )
-        # Optional source/asset aliases — same origin/name identity, not free text
+        else:
+            if t.get("distribution") not in (None, ""):
+                errors.append(
+                    "%s (%s) unexpected distribution field" % (where, tid)
+                )
+        # Optional source/asset aliases — exact equality only, never substring
         for alias in ("artifact", "filename", "tarball"):
             if t.get(alias) not in (None, ""):
                 if str(t[alias]) != prof["asset"]:
@@ -1031,20 +1301,26 @@ for i, t in enumerate(tools):
                         "supported origin (got %r)"
                         % (where, tid, alias, t[alias])
                     )
-        # repository alias must identify the same canonical origin stem
-        if t.get("repository") not in (None, ""):
-            repo_v = str(t["repository"])
-            origin_stem = prof.get("origin_stem") or ""
-            repo_norm = repo_v.strip().rstrip("/").lower()
-            if origin_stem and origin_stem.lower() not in repo_norm:
+        if t.get("integrity") not in (None, ""):
+            if str(t["integrity"]) != prof["digest_value"]:
                 errors.append(
-                    "%s (%s) repository must identify canonical origin %r "
-                    "(got %r)" % (where, tid, origin_stem, repo_v)
+                    "%s (%s) integrity must equal exact shipped digest.value"
+                    % (where, tid)
                 )
 
+# Exact tool id set: no extras, no omissions, no duplicates (dupes checked above).
 missing = required_ids - found
 for m in sorted(missing):
     errors.append("required tool id missing: %s" % m)
+extra_ids = found - required_ids
+for e in sorted(extra_ids):
+    errors.append(
+        "unsupported extra tool id: %s (exact set is %s)"
+        % (e, ",".join(sorted(required_ids)))
+    )
+if isinstance(tools, list) and tools and found == required_ids and len(ids) != len(required_ids):
+    # Duplicate within required set already reported; count mismatch is extra signal
+    pass
 
 goose = next((t for t in tools if isinstance(t, dict) and t.get("id") == "goose-cli"), None)
 if goose:
@@ -1778,18 +2054,17 @@ for list_key in ("containers", "mcp_packages"):
         else:
             check_mcp_entry(c, where)
 
+# digest_instructions closed schema + exact commands already validated above
+# (macOS + portable + commit_policy). Keep a minimal presence cross-check so
+# older fixtures still report macOS/portable when DI is wholly absent.
 di = data.get("digest_instructions") or {}
-if not isinstance(di, dict) or "macOS" not in di:
-    errors.append("digest_instructions.macOS missing")
+if not isinstance(di, dict):
+    pass  # already reported
 else:
-    mac = di["macOS"]
-    for k in ("recipe_sha256", "toolchain_lock_sha256"):
-        if k not in mac:
-            errors.append("digest_instructions.macOS.%s missing" % k)
-        else:
-            cmd = mac[k]
-            if "shasum" not in cmd and "sha256sum" not in cmd:
-                errors.append("digest instruction must use shasum/sha256sum")
+    if "macOS" not in di:
+        errors.append("digest_instructions.macOS missing")
+    if "portable" not in di:
+        errors.append("digest_instructions.portable missing")
 
 def walk(obj, path=""):
     if isinstance(obj, dict):
@@ -4065,6 +4340,215 @@ data["recipe"] = "other.yaml"
 '
 out=$(check_lock_py "$ROOT/bad-lock-recipe-other-with-di.json" 2>&1); rc=$?
 expect_fail "red: lock.recipe other.yaml still fails under origin/di bind" "$out" "$rc" "recipe\|canonical\|other"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: closed-world exact tool/DI pins (comprehensive residual repair)"
+# ---------------------------------------------------------------------------
+# Independent 45-mutant review residual rc=0 fail-opens (12 probes):
+#   1. Extra sixth structurally valid tool accepted
+#   2. gitleaks name → malware accepted
+#   3. required kind deleted accepted
+#   4. gitleaks identity → malware@8.30.1 accepted (version-only compare)
+#   5. gitleaks SHA256 → different well-formed 64-hex accepted
+#   6. Socket SRI → different well-formed sha512 base64 accepted
+#   7. repository → https://evil.example/gitleaks/gitleaks substring accept
+#   8. ref → arbitrary full 40-hex accepted
+#   9. gitleaks execution pin-only → offline-validate-only accepted
+#  10. digest_instructions portable section deleted accepted
+#  11. digest command path → /tmp/red-team.yaml basename-only accept
+#  12. digest command dual /tmp + playbooks equal basenames accepted
+# Structural fix: closed-world exact tool profiles + exact DI commands +
+# reject unsupported tool aliases + exact tool id set.
+
+# 1) sixth structurally valid tool (clone of gitleaks with new id)
+lock_mutant "$ROOT/bad-lock-extra-sixth-tool.json" '
+import copy
+extra = copy.deepcopy(next(t for t in data["tools"] if t.get("id") == "gitleaks"))
+extra["id"] = "extra-scanner"
+data["tools"].append(extra)
+'
+out=$(check_lock_py "$ROOT/bad-lock-extra-sixth-tool.json" 2>&1); rc=$?
+expect_fail "red: extra sixth tool id fails" "$out" "$rc" "extra tool\|unsupported extra\|exact set"
+
+# 2) gitleaks name → malware
+lock_mutant "$ROOT/bad-lock-gitleaks-name-malware.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["name"] = "malware"
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-name-malware.json" 2>&1); rc=$?
+expect_fail "red: gitleaks name malware fails" "$out" "$rc" "name\|canonical\|malware"
+
+# 3) required kind deleted
+lock_mutant "$ROOT/bad-lock-gitleaks-kind-deleted.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        del t["kind"]
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-kind-deleted.json" 2>&1); rc=$?
+expect_fail "red: gitleaks kind deleted fails" "$out" "$rc" "kind\|missing"
+
+# 4) gitleaks identity → malware@8.30.1 (same version, wrong name)
+lock_mutant "$ROOT/bad-lock-gitleaks-identity-malware.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["identity"] = "malware@8.30.1"
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-identity-malware.json" 2>&1); rc=$?
+expect_fail "red: gitleaks identity malware@8.30.1 fails" "$out" "$rc" "identity\|canonical\|malware"
+
+# 5) gitleaks SHA256 → different well-formed 64-hex
+lock_mutant "$ROOT/bad-lock-gitleaks-digest-wrong-hex.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["digest"]["value"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-digest-wrong-hex.json" 2>&1); rc=$?
+expect_fail "red: gitleaks well-formed but non-canonical SHA256 fails" "$out" "$rc" "digest.value\|shipped pin\|non-canonical"
+
+# 6) Socket SRI → different well-formed sha512 base64 (64 decoded bytes)
+lock_mutant "$ROOT/bad-lock-socket-sri-wrong.json" '
+import base64
+for t in data["tools"]:
+    if t.get("id") == "socket-cli":
+        # 64 zero bytes → valid sha512-integrity shape, wrong pin
+        t["digest"]["value"] = "sha512-" + base64.b64encode(bytes(64)).decode("ascii")
+'
+out=$(check_lock_py "$ROOT/bad-lock-socket-sri-wrong.json" 2>&1); rc=$?
+expect_fail "red: socket well-formed but non-canonical SRI fails" "$out" "$rc" "digest.value\|shipped pin\|non-canonical"
+
+# 7) repository alias evil.example with substring gitleaks/gitleaks
+lock_mutant "$ROOT/bad-lock-gitleaks-repository-evil.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["repository"] = "https://evil.example/gitleaks/gitleaks"
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-repository-evil.json" 2>&1); rc=$?
+expect_fail "red: gitleaks repository evil.example alias fails" "$out" "$rc" "unsupported tool alias\|repository"
+
+# 8) ref alias arbitrary full 40-hex
+lock_mutant "$ROOT/bad-lock-gitleaks-ref-hex40.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["ref"] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-ref-hex40.json" 2>&1); rc=$?
+expect_fail "red: gitleaks ref 40-hex alias fails" "$out" "$rc" "unsupported tool alias\|ref"
+
+# 9) gitleaks execution pin-only → offline-validate-only
+lock_mutant "$ROOT/bad-lock-gitleaks-execution-offline.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["execution"] = "offline-validate-only"
+'
+out=$(check_lock_py "$ROOT/bad-lock-gitleaks-execution-offline.json" 2>&1); rc=$?
+expect_fail "red: gitleaks execution offline-validate-only fails" "$out" "$rc" "execution must be exact\|pin-only"
+
+# 10) digest_instructions portable section deleted
+lock_mutant "$ROOT/bad-lock-di-portable-deleted.json" '
+del data["digest_instructions"]["portable"]
+'
+out=$(check_lock_py "$ROOT/bad-lock-di-portable-deleted.json" 2>&1); rc=$?
+expect_fail "red: digest_instructions portable deleted fails" "$out" "$rc" "portable\|missing"
+
+# 11) digest command path → /tmp/red-team.yaml (basename-only prior fail-open)
+lock_mutant "$ROOT/bad-lock-di-recipe-tmp-path.json" '
+data["digest_instructions"]["macOS"]["recipe_sha256"] = "shasum -a 256 /tmp/red-team.yaml | awk '"'"'{print $1}'"'"'"
+'
+out=$(check_lock_py "$ROOT/bad-lock-di-recipe-tmp-path.json" 2>&1); rc=$?
+expect_fail "red: recipe_sha256 /tmp/red-team.yaml absolute path fails" "$out" "$rc" "exact shipped command\|repository-relative\|got\|must equal"
+
+# 12) dual operands /tmp/red-team.yaml + playbooks/recipes/red-team.yaml
+lock_mutant "$ROOT/bad-lock-di-recipe-dual-path.json" '
+data["digest_instructions"]["macOS"]["recipe_sha256"] = "shasum -a 256 /tmp/red-team.yaml playbooks/recipes/red-team.yaml | awk '"'"'{print $1}'"'"'"
+'
+out=$(check_lock_py "$ROOT/bad-lock-di-recipe-dual-path.json" 2>&1); rc=$?
+expect_fail "red: recipe_sha256 dual /tmp + playbooks paths fails" "$out" "$rc" "exact shipped command\|exactly one\|got\|must equal"
+# Adjacent closed-world sweeps (same class)
+lock_mutant "$ROOT/bad-lock-toplevel-unknown-key.json" '
+data["evil_extension"] = {"x": 1}
+'
+out=$(check_lock_py "$ROOT/bad-lock-toplevel-unknown-key.json" 2>&1); rc=$?
+expect_fail "red: unknown top-level lock key fails" "$out" "$rc" "unsupported top-level\|evil_extension"
+
+lock_mutant "$ROOT/bad-lock-tool-unknown-field.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["side_channel"] = "https://evil.example/payload"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-unknown-field.json" 2>&1); rc=$?
+expect_fail "red: unknown tool field side_channel fails" "$out" "$rc" "unknown/extra tool field\|side_channel"
+
+lock_mutant "$ROOT/bad-lock-goose-name-wrong.json" '
+for t in data["tools"]:
+    if t.get("id") == "goose-cli":
+        t["name"] = "Not Goose"
+'
+out=$(check_lock_py "$ROOT/bad-lock-goose-name-wrong.json" 2>&1); rc=$?
+expect_fail "red: goose-cli name Not Goose fails" "$out" "$rc" "name\|canonical"
+
+lock_mutant "$ROOT/bad-lock-semgrep-kind-wrong.json" '
+for t in data["tools"]:
+    if t.get("id") == "semgrep":
+        t["kind"] = "library"
+'
+out=$(check_lock_py "$ROOT/bad-lock-semgrep-kind-wrong.json" 2>&1); rc=$?
+expect_fail "red: semgrep kind library fails" "$out" "$rc" "kind must be exact\|cli"
+
+lock_mutant "$ROOT/bad-lock-trufflehog-digest-wrong.json" '
+for t in data["tools"]:
+    if t.get("id") == "trufflehog":
+        t["digest"]["value"] = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+'
+out=$(check_lock_py "$ROOT/bad-lock-trufflehog-digest-wrong.json" 2>&1); rc=$?
+expect_fail "red: trufflehog well-formed non-canonical SHA256 fails" "$out" "$rc" "digest.value\|shipped pin\|non-canonical"
+
+lock_mutant "$ROOT/bad-lock-di-unknown-platform.json" '
+data["digest_instructions"]["windows"] = dict(data["digest_instructions"]["portable"])
+'
+out=$(check_lock_py "$ROOT/bad-lock-di-unknown-platform.json" 2>&1); rc=$?
+expect_fail "red: digest_instructions unknown windows key fails" "$out" "$rc" "unsupported key\|windows"
+
+lock_mutant "$ROOT/bad-lock-di-portable-recipe-tmp.json" '
+data["digest_instructions"]["portable"]["recipe_sha256"] = "sha256sum /tmp/red-team.yaml | awk '"'"'{print $1}'"'"'"
+'
+out=$(check_lock_py "$ROOT/bad-lock-di-portable-recipe-tmp.json" 2>&1); rc=$?
+expect_fail "red: portable recipe_sha256 /tmp path fails" "$out" "$rc" "exact shipped command\|repository-relative\|got\|must equal"
+
+lock_mutant "$ROOT/bad-lock-tool-omit-required.json" '
+data["tools"] = [t for t in data["tools"] if t.get("id") != "trufflehog"]
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-omit-required.json" 2>&1); rc=$?
+expect_fail "red: omitting required trufflehog tool fails" "$out" "$rc" "required tool id missing\|trufflehog"
+
+# Green: exact shipped closed-world profile reaffirmations
+lock_mutant "$ROOT/ok-lock-closed-world-exact.json" '
+# no-op rebind of exact shipped pins
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["name"] = "gitleaks"
+        t["kind"] = "cli"
+        t["identity"] = "v8.30.1"
+        t["execution"] = "pin-only"
+        t["digest"] = {
+            "algorithm": "sha256",
+            "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+        }
+'
+out=$(check_lock_py "$ROOT/ok-lock-closed-world-exact.json" 2>&1); rc=$?
+expect_pass "green: gitleaks exact name/kind/identity/execution/digest" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-di-exact-portable.json" '
+# Reaffirm exact shipped DI commands (identity rebind, no path drift)
+di = data["digest_instructions"]
+di["portable"] = dict(di["portable"])
+di["macOS"] = dict(di["macOS"])
+'
+out=$(check_lock_py "$ROOT/ok-lock-di-exact-portable.json" 2>&1); rc=$?
+expect_pass "green: digest_instructions exact macOS+portable recipe commands" "$out" "$rc"
+
+out=$(check_lock_py "$TOOLCHAIN_LOCK" 2>&1); rc=$?
+expect_pass "green: shipped lock closed-world exact profile holds" "$out" "$rc"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
