@@ -1305,6 +1305,267 @@ else
 fi
 rm -f "$POISON/.gibson/test-integrity-journal.jsonl" 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+echo "blocker scratch-lifecycle: no discoverable scratch before configured command"
+# ---------------------------------------------------------------------------
+# Configured command scans for gibson-baseline.* scratch dirs and plants a
+# symlink at test.out → victim. Pre-command scratch creation allowed write-
+# through + silent test_metrics:null. Must keep victim bytes and emit correct
+# non-null metrics (or hard-fail). Never GREEN with null metrics after a test.
+SCRATCH_LIFE="$ROOT/scratch-lifecycle"
+mkdir -p "$SCRATCH_LIFE/.agents"
+$GITP init -q "$SCRATCH_LIFE"
+git -C "$SCRATCH_LIFE" symbolic-ref HEAD refs/heads/main
+echo base >"$SCRATCH_LIFE/README"
+$GITP -C "$SCRATCH_LIFE" add -A
+$GITP -C "$SCRATCH_LIFE" commit -q -m "base"
+
+VICTIM_SCRATCH="$ROOT/victim-scratch-lifecycle.bin"
+printf 'VICTIM_SCRATCH_LIFECYCLE_SENTINEL\n' >"$VICTIM_SCRATCH"
+# Hostile test: poison any discoverable pre-command scratch class.
+cat >"$SCRATCH_LIFE/.agents/gate.json" <<EOF
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "for d in ${TMPDIR:-/tmp}/gibson-baseline.*; do if [ -d \"\$d\" ]; then ln -sfn '$VICTIM_SCRATCH' \"\$d/test.out\"; ln -sfn '$VICTIM_SCRATCH' \"\$d/test.out.XXXXXX\" 2>/dev/null || true; fi; done; printf 'GIBSON_TEST_METRICS total=11 skipped=0 todo=0\\\\n'",
+  "build": ""
+}
+EOF
+out=$(cd "$SCRATCH_LIFE" && bash "$BASELINE_SH" --out "$SCRATCH_LIFE/.gibson-baseline.json" 2>&1); rc=$?
+victim_sl_after=$(cat "$VICTIM_SCRATCH" 2>/dev/null || echo MISSING)
+if [[ "$victim_sl_after" == "VICTIM_SCRATCH_LIFECYCLE_SENTINEL" ]]; then
+  ok "scratch-lifecycle pre-poison: victim bytes unchanged"
+else
+  bad "scratch-lifecycle pre-poison: victim truncated/changed: $victim_sl_after"
+fi
+if [[ "$rc" -eq 0 ]] \
+  && grep -qE '"total":[[:space:]]*11' "$SCRATCH_LIFE/.gibson-baseline.json" 2>/dev/null \
+  && ! grep -qE '"test_metrics":[[:space:]]*null' "$SCRATCH_LIFE/.gibson-baseline.json" 2>/dev/null; then
+  ok "scratch-lifecycle pre-poison: correct non-null metrics (total=11), no write-through"
+elif [[ "$rc" -ne 0 ]] && ! grep -qE '"test_metrics":[[:space:]]*null' "$SCRATCH_LIFE/.gibson-baseline.json" 2>/dev/null; then
+  ok "scratch-lifecycle pre-poison: gate fails closed without null-metrics bypass (rc=$rc)"
+else
+  bad "scratch-lifecycle pre-poison: unexpected (rc=$rc metrics=$(grep test_metrics "$SCRATCH_LIFE/.gibson-baseline.json" 2>/dev/null || echo none)): $out"
+fi
+
+# ---------------------------------------------------------------------------
+echo "blocker baseline-authority: deletion/replacement/content drift during gate.sh"
+# ---------------------------------------------------------------------------
+# gate.sh must snapshot baseline before any configured command and compare
+# against that snapshot only. Deletion, replacement, or byte change mid-run
+# with a lower total must RED — never GREEN.
+AUTH="$ROOT/baseline-auth"
+mkdir -p "$AUTH/.agents"
+$GITP init -q "$AUTH"
+git -C "$AUTH" symbolic-ref HEAD refs/heads/main
+echo base >"$AUTH/README"
+$GITP -C "$AUTH" add -A
+$GITP -C "$AUTH" commit -q -m "base"
+cat >"$AUTH/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+(cd "$AUTH" && bash "$BASELINE_SH" --out "$AUTH/.gibson-baseline.json") >/dev/null 2>&1
+
+# --- deletion during lower-total test ---
+cat >"$AUTH/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "rm -f .gibson-baseline.json; printf 'GIBSON_TEST_METRICS total=3 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$AUTH" && bash "$GATE" --baseline "$AUTH/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'authority drift|disappeared|baseline' \
+  && ! echo "$out" | grep -q 'GREEN'; then
+  ok "baseline authority: deletion during lower-total test is RED (no GREEN)"
+else
+  bad "baseline deletion allowed GREEN or wrong error (rc=$rc): $out"
+fi
+
+# Restore baseline for next attack
+cat >"$AUTH/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+(cd "$AUTH" && bash "$BASELINE_SH" --out "$AUTH/.gibson-baseline.json") >/dev/null 2>&1
+
+# --- replacement with matching lower metrics (would self-authorize on re-read) ---
+cat >"$AUTH/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "cat > .gibson-baseline.json <<'BL'\n{\"failures\":{\"typecheck\":0,\"lint\":0,\"test\":0,\"build\":0},\"exit_codes\":{\"typecheck\":0,\"lint\":0,\"test\":0,\"build\":0},\"test_metrics\":{\"total\":3,\"skipped\":0,\"todo\":0,\"skip_effective\":0,\"source\":\"hostile\"}}\nBL\nprintf 'GIBSON_TEST_METRICS total=3 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$AUTH" && bash "$GATE" --baseline "$AUTH/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'authority drift|content changed|replaced|leaf' \
+  && ! echo "$out" | grep -q 'GREEN'; then
+  ok "baseline authority: replacement during lower-total test is RED (no GREEN)"
+else
+  bad "baseline replacement allowed GREEN or wrong error (rc=$rc): $out"
+fi
+
+# Restore
+cat >"$AUTH/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+(cd "$AUTH" && bash "$BASELINE_SH" --out "$AUTH/.gibson-baseline.json") >/dev/null 2>&1
+
+# --- content byte change (append) during lower-total test ---
+cat >"$AUTH/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'x' >> .gibson-baseline.json; printf 'GIBSON_TEST_METRICS total=3 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$AUTH" && bash "$GATE" --baseline "$AUTH/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'authority drift|content changed' \
+  && ! echo "$out" | grep -q 'GREEN'; then
+  ok "baseline authority: content change during lower-total test is RED (no GREEN)"
+else
+  bad "baseline content change allowed GREEN or wrong error (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+echo "blocker parent-stability: OUT/JOURNAL parent replace fails closed"
+# ---------------------------------------------------------------------------
+# A configured command that replaces a parent directory must not let the final
+# atomic OUT write or JOURNAL append follow the new path. Victim bytes (if any)
+# unchanged; nonzero exit; no partial output in the evil parent; no temp leaks.
+
+PARENT_ATK="$ROOT/parent-attack"
+mkdir -p "$PARENT_ATK/.agents" "$PARENT_ATK/out nest/sub"
+$GITP init -q "$PARENT_ATK"
+git -C "$PARENT_ATK" symbolic-ref HEAD refs/heads/main
+echo base >"$PARENT_ATK/README"
+$GITP -C "$PARENT_ATK" add -A
+$GITP -C "$PARENT_ATK" commit -q -m "base"
+
+# Establish a real OUT under a nested parent (path with spaces)
+OUT_NEST="$PARENT_ATK/out nest/sub/base.json"
+cat >"$PARENT_ATK/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=8 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+(cd "$PARENT_ATK" && bash "$BASELINE_SH" --out "$OUT_NEST") >/dev/null 2>&1
+[[ -f "$OUT_NEST" ]] && ok "parent-stability setup: wrote baseline under path with spaces" \
+  || bad "parent-stability setup failed to write $OUT_NEST"
+
+# Replace immediate parent "out nest/sub" with symlink to evil during test
+EVIL_OUT="$ROOT/evil-out-parent"
+mkdir -p "$EVIL_OUT"
+VICTIM_PARENT="$ROOT/victim-parent-out.bin"
+printf 'VICTIM_PARENT_OUT_SENTINEL\n' >"$VICTIM_PARENT"
+cat >"$PARENT_ATK/.agents/gate.json" <<EOF
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "rm -rf '$PARENT_ATK/out nest/sub'; mkdir -p '$EVIL_OUT'; ln -sfn '$EVIL_OUT' '$PARENT_ATK/out nest/sub'; printf 'GIBSON_TEST_METRICS total=8 skipped=0 todo=0\\\\n'",
+  "build": ""
+}
+EOF
+out=$(cd "$PARENT_ATK" && bash "$BASELINE_SH" --out "$OUT_NEST" 2>&1); rc=$?
+evil_count=$(find "$EVIL_OUT" -type f 2>/dev/null | wc -l | tr -d ' ')
+# No new baseline/temp files should land in the evil parent
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'parent|symlink|authority drift|refuse' \
+  && [[ "$evil_count" -eq 0 ]]; then
+  ok "OUT parent replace: fails closed, no partial write into evil parent"
+else
+  bad "OUT parent replace (rc=$rc evil_files=$evil_count): $out"
+fi
+# No temp leaks under evil or the (now symlink) nest path as gate-owned regulars
+leaked_parent=0
+if find "$EVIL_OUT" -name '.base.json.*' 2>/dev/null | grep -q .; then
+  leaked_parent=1
+fi
+if [[ "$leaked_parent" -eq 0 ]]; then
+  ok "OUT parent replace: no temp leaks in evil parent"
+else
+  bad "OUT parent replace: temp leaks in evil parent"
+fi
+
+# --- JOURNAL parent replace during regenerate ---
+# Fresh repo so prior OUT state is clean
+JATK="$ROOT/journal-parent-attack"
+mkdir -p "$JATK/.agents" "$JATK/.gibson"
+$GITP init -q "$JATK"
+git -C "$JATK" symbolic-ref HEAD refs/heads/main
+echo base >"$JATK/README"
+$GITP -C "$JATK" add -A
+$GITP -C "$JATK" commit -q -m "base"
+cat >"$JATK/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=8 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+(cd "$JATK" && bash "$BASELINE_SH" --out "$JATK/.gibson-baseline.json") >/dev/null 2>&1
+EVIL_J="$ROOT/evil-journal-parent"
+mkdir -p "$EVIL_J"
+VICTIM_JPARENT="$ROOT/victim-journal-parent.bin"
+printf 'VICTIM_JOURNAL_PARENT_SENTINEL\n' >"$VICTIM_JPARENT"
+# Shrink + replace .gibson parent with symlink to evil during the test step
+cat >"$JATK/.agents/gate.json" <<EOF
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "rm -rf '$JATK/.gibson'; mkdir -p '$EVIL_J'; ln -sfn '$EVIL_J' '$JATK/.gibson'; printf 'GIBSON_TEST_METRICS total=2 skipped=0 todo=0\\\\n'",
+  "build": ""
+}
+EOF
+out=$(cd "$JATK" && bash "$BASELINE_SH" --out "$JATK/.gibson-baseline.json" \
+  --regenerate --reason 'intentional shrink parent-attack' \
+  --journal "$JATK/.gibson/test-integrity-journal.jsonl" 2>&1); rc=$?
+evil_j_count=$(find "$EVIL_J" -type f 2>/dev/null | wc -l | tr -d ' ')
+victim_jp_after=$(cat "$VICTIM_JPARENT" 2>/dev/null || echo MISSING)
+if [[ "$victim_jp_after" == "VICTIM_JOURNAL_PARENT_SENTINEL" ]]; then
+  ok "JOURNAL parent replace: victim bytes unchanged"
+else
+  bad "JOURNAL parent replace: victim changed: $victim_jp_after"
+fi
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'parent|symlink|authority drift|refuse|journal' \
+  && [[ "$evil_j_count" -eq 0 ]] \
+  && ! echo "$out" | grep -q 'GREEN'; then
+  ok "JOURNAL parent replace: fails closed, no journal partial in evil parent"
+else
+  bad "JOURNAL parent replace (rc=$rc evil_files=$evil_j_count): $out"
+fi
+
 # Phase-1 bootstrap pin: ci/gibson-gate.yml must NOT wire test-integrity yet.
 # Wiring CI before main owns the helper self-grades (workspace-bootstrap) or
 # races a fixed RUNNER_TEMP path. Phase 2 adds the isolated job after merge.

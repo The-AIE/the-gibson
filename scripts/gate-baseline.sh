@@ -76,19 +76,35 @@ TI="$SCRIPT_DIR/test-integrity.mjs"
 command -v node >/dev/null || die "node is required"
 
 # ---------------------------------------------------------------------------
-# Scratch + path safety
-# Untrusted gate steps must not be able to pre-poison predictable paths
-# (/tmp/gibson-ti-parse.err, .gibson-baseline.test.out, .gibson-baseline.*.ec)
-# as symlinks that redirect our writes into arbitrary user-writable files.
-# All intermediate artifacts use private mktemp names; OUT/JOURNAL refuse
-# symlinks and non-regular files; final baseline uses sibling temp + rename.
+# Path identity + parent-chain authority (Bash 3.2, macOS + Linux)
+# Untrusted gate steps must not pre-poison predictable paths, replace parent
+# directories with symlinks, or redirect OUT/JOURNAL writes. No discoverable
+# scratch is created until after configured commands return. Command output is
+# captured in-memory (strict size cap); parser scratch is private + cleaned.
 # ---------------------------------------------------------------------------
 
-# Private scratch directory (random name — not predictable across runs).
-SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/gibson-baseline.XXXXXX") \
-  || die "could not create private scratch directory"
-cleanup_scratch() { rm -rf "$SCRATCH"; }
+# Strict in-memory capture cap (characters; metrics output is ASCII-safe).
+MAX_CAPTURE_CHARS=$((8 * 1024 * 1024))
+
+# Private parser scratch — created ONLY after untrusted commands return.
+SCRATCH=""
+cleanup_scratch() {
+  if [[ -n "${SCRATCH:-}" && -d "$SCRATCH" ]]; then
+    rm -rf -- "$SCRATCH"
+  fi
+  SCRATCH=""
+}
 trap cleanup_scratch EXIT
+
+# Portable device:inode for a path (lstat; do not follow final symlink).
+# BSD stat first (macOS), GNU fallback (Linux).
+path_dev_ino() {
+  local p="$1" dev ino
+  dev=$(stat -f %d -- "$p" 2>/dev/null) || dev=$(stat -c %d -- "$p" 2>/dev/null) || return 1
+  ino=$(stat -f %i -- "$p" 2>/dev/null) || ino=$(stat -c %i -- "$p" 2>/dev/null) || return 1
+  [[ -n "$dev" && -n "$ino" ]] || return 1
+  printf '%s:%s' "$dev" "$ino"
+}
 
 # Refuse to read/write through a symlink or non-regular file (fail closed).
 # Missing path is OK (will be created). -e is false for broken symlinks on
@@ -104,25 +120,170 @@ refuse_symlink_or_nonfile() {
   fi
 }
 
-# Atomic write to dest via a sibling mktemp + rename. Never opens dest for
-# write (so a symlink dest is not followed/truncated). Refuses if dest is a
-# symlink or non-regular file before and after the temp write.
-atomic_write() {
+# Print parent path components from immediate parent up to / or . (one per line).
+# Supports relative/absolute paths and spaces (no pathname splitting).
+collect_parent_paths() {
+  local target="$1"
+  local cur next
+  cur=$(dirname -- "$target")
+  while true; do
+    printf '%s\n' "$cur"
+    if [[ "$cur" == "/" || "$cur" == "." ]]; then
+      break
+    fi
+    next=$(dirname -- "$cur")
+    if [[ "$next" == "$cur" ]]; then
+      break
+    fi
+    cur=$next
+  done
+}
+
+# Snapshot existing parents. Pre-existing directory *or* symlink parents are
+# allowed (macOS /tmp and /var are symlinks); we record lstat identity + kind.
+# Stores lines "path<TAB>dev:ino<TAB>kind" (kind = dir|symlink).
+snapshot_parent_chain() {
+  local target="$1"
+  local _snap="" p id kind
+  local plist
+  plist=$(collect_parent_paths "$target") || die "cannot walk parents of $target"
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    if [[ -L "$p" ]]; then
+      # Pre-existing symlink parent (e.g. macOS /var → /private/var): record it.
+      # A *new* symlink introduced after the snapshot is rejected on verify.
+      id=$(path_dev_ino "$p") || die "cannot identity symlink parent: $p"
+      kind="symlink"
+      _snap="${_snap}${p}"$'\t'"${id}"$'\t'"${kind}"$'\n'
+    elif [[ -e "$p" ]]; then
+      if [[ ! -d "$p" ]]; then
+        die "parent path is not a directory (refuse; fail closed): $p"
+      fi
+      id=$(path_dev_ino "$p") || die "cannot identity parent: $p"
+      kind="dir"
+      _snap="${_snap}${p}"$'\t'"${id}"$'\t'"${kind}"$'\n'
+    fi
+  done <<EOF
+$plist
+EOF
+  printf -v "$2" '%s' "$_snap"
+}
+
+# True if path appears in a parent snapshot (first TAB field).
+_parent_snap_has() {
+  local snap="$1"
+  local want="$2"
+  local line p
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    p=${line%%$'\t'*}
+    if [[ "$p" == "$want" ]]; then
+      return 0
+    fi
+  done <<EOF
+$snap
+EOF
+  return 1
+}
+
+# After untrusted work: every snapshotted parent must still exist with the same
+# lstat identity and kind. Parents that appear only after the snapshot must be
+# real directories (not symlinks) — that is the replace-with-symlink attack class.
+verify_parent_chain() {
+  local target="$1"
+  local snap="$2"
+  local label="$3"
+  local p id kind cur plist line rest
+
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    p=${line%%$'\t'*}
+    rest=${line#*$'\t'}
+    id=${rest%%$'\t'*}
+    kind=${rest#*$'\t'}
+    if [[ "$kind" == "dir" ]]; then
+      if [[ -L "$p" ]]; then
+        die "$label parent became a symlink (authority drift; fail closed): $p"
+      fi
+      if [[ ! -d "$p" ]]; then
+        die "$label parent missing or not a directory (authority drift; fail closed): $p"
+      fi
+    elif [[ "$kind" == "symlink" ]]; then
+      if [[ ! -L "$p" ]]; then
+        die "$label symlink parent changed kind (authority drift; fail closed): $p"
+      fi
+    else
+      die "$label corrupt parent snapshot for: $p"
+    fi
+    cur=$(path_dev_ino "$p") || die "$label cannot re-identity parent: $p"
+    if [[ "$cur" != "$id" ]]; then
+      die "$label parent replaced (authority drift; fail closed): $p"
+    fi
+  done <<EOF
+$snap
+EOF
+
+  plist=$(collect_parent_paths "$target") || die "cannot re-walk parents of $target"
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    if _parent_snap_has "$snap" "$p"; then
+      continue
+    fi
+    # Newly present parent component: must be a real directory, never a symlink.
+    if [[ -L "$p" ]]; then
+      die "$label parent is a new symlink (refuse; fail closed): $p"
+    fi
+    if [[ -e "$p" && ! -d "$p" ]]; then
+      die "$label parent is not a directory (refuse; fail closed): $p"
+    fi
+  done <<EOF
+$plist
+EOF
+}
+
+# Ensure immediate parent exists as a real directory after chain verification.
+ensure_real_parent() {
   local dest="$1"
-  local dir base tmp
-  refuse_symlink_or_nonfile "$dest" "output"
+  local label="$2"
+  local snap="$3"
+  local dir
+  verify_parent_chain "$dest" "$snap" "$label"
   dir=$(dirname -- "$dest")
-  base=$(basename -- "$dest")
   if [[ ! -d "$dir" ]]; then
     mkdir -p -- "$dir" || die "cannot create directory for $dest"
   fi
+  if [[ -L "$dir" ]]; then
+    die "$label parent is a symlink after mkdir (refuse; fail closed): $dir"
+  fi
+  if [[ ! -d "$dir" ]]; then
+    die "$label parent is not a directory after mkdir (refuse; fail closed): $dir"
+  fi
+  # Re-check full chain (new components must not be symlinks).
+  verify_parent_chain "$dest" "$snap" "$label"
+}
+
+# Atomic write via sibling mktemp + rename. Revalidates parent identity first.
+# Never opens dest for write (so a symlink dest is not followed/truncated).
+atomic_write() {
+  local dest="$1"
+  local parent_snap="$2"
+  local dir base tmp
+  ensure_real_parent "$dest" "output" "$parent_snap"
+  refuse_symlink_or_nonfile "$dest" "output"
+  dir=$(dirname -- "$dest")
+  base=$(basename -- "$dest")
   # Sibling temp in the same directory so rename stays on one filesystem.
   tmp=$(mktemp "${dir}/.${base}.XXXXXX") || die "mktemp failed for atomic write to $dest"
-  # Content from stdin
+  if [[ -L "$tmp" || ! -f "$tmp" ]]; then
+    rm -f -- "$tmp" 2>/dev/null || true
+    die "atomic-write temp is not a regular file (fail closed): $tmp"
+  fi
   if ! cat >"$tmp"; then
     rm -f -- "$tmp"
     die "failed writing temp for $dest"
   fi
+  # Revalidate parents + leaf after content write, before rename.
+  verify_parent_chain "$dest" "$parent_snap" "output"
   if [[ -L "$dest" ]]; then
     rm -f -- "$tmp"
     die "output path is a symlink (refuse; fail closed): $dest"
@@ -131,10 +292,50 @@ atomic_write() {
     rm -f -- "$tmp"
     die "output path is not a regular file (refuse; fail closed): $dest"
   fi
+  if [[ -L "$tmp" || ! -f "$tmp" ]]; then
+    rm -f -- "$tmp"
+    die "atomic-write temp became non-regular before rename (fail closed)"
+  fi
   if ! mv -f -- "$tmp" "$dest"; then
     rm -f -- "$tmp"
     die "atomic rename failed for $dest"
   fi
+  if [[ -L "$dest" || ! -f "$dest" ]]; then
+    die "output path is not a regular file after write (fail closed): $dest"
+  fi
+}
+
+# Append one journal line via test-integrity.mjs only after parent/leaf checks.
+journal_append_safe() {
+  local journal_path="$1"
+  local parent_snap="$2"
+  local old_file="$3"
+  local new_file="$4"
+  local reason="$5"
+  local sha="$6"
+  ensure_real_parent "$journal_path" "journal" "$parent_snap"
+  if [[ -e "$journal_path" || -L "$journal_path" ]]; then
+    refuse_symlink_or_nonfile "$journal_path" "journal"
+  fi
+  set +e
+  jout=$(node "$TI" journal-append \
+    --journal "$journal_path" \
+    --old "$old_file" \
+    --new "$new_file" \
+    --reason "$reason" \
+    --sha "$sha" 2>&1)
+  jrc=$?
+  set -e
+  if [[ $jrc -ne 0 ]]; then
+    die "journal-append failed: $jout"
+  fi
+  # Leaf must remain a regular file after append.
+  if [[ -L "$journal_path" || ! -f "$journal_path" ]]; then
+    die "journal path is not a regular file after append (fail closed): $journal_path"
+  fi
+  verify_parent_chain "$journal_path" "$parent_snap" "journal"
+  info "test-integrity journal: $jout"
+  info "appended journal entry → $journal_path"
 }
 
 SKIP_SENTINEL='__gate_step_not_applicable__'
@@ -187,18 +388,60 @@ resolve_cmd() {
   esac
 }
 
-# run_count_failures is invoked via $(...) (subshell). Persist ec/out into the
-# private SCRATCH dir (random mktemp path — not worktree-predictable) so the
-# parent shell can read them. Writes happen only after the untrusted command
-# returns; never to fixed names like .gibson-baseline.$step.ec.
+# ---------------------------------------------------------------------------
+# Pre-command authority: OUT / JOURNAL parents + prior baseline bytes/metrics.
+# No discoverable scratch directory exists yet.
+# ---------------------------------------------------------------------------
+
+refuse_symlink_or_nonfile "$OUT" "baseline --out"
+# JOURNAL may be missing; only refuse if present as symlink/nonfile.
+if [[ -e "$JOURNAL" || -L "$JOURNAL" ]]; then
+  refuse_symlink_or_nonfile "$JOURNAL" "journal --journal"
+fi
+
+OUT_PARENT_SNAP=""
+JOURNAL_PARENT_SNAP=""
+snapshot_parent_chain "$OUT" OUT_PARENT_SNAP
+snapshot_parent_chain "$JOURNAL" JOURNAL_PARENT_SNAP
+
+# Snapshot prior OUT content for regenerate comparison (never re-read after
+# untrusted commands — a hostile step could rewrite the prior baseline).
+PRIOR_OUT_PRESENT=0
+PRIOR_OUT_BYTES=""
+if [[ -f "$OUT" && ! -L "$OUT" ]]; then
+  PRIOR_OUT_PRESENT=1
+  # shellcheck disable=SC2002
+  PRIOR_OUT_BYTES=$(cat -- "$OUT") || die "cannot read prior baseline: $OUT"
+fi
+
+# In-memory step results (no pathname visible to configured commands).
+EC_TYPECHECK=0
+EC_LINT=0
+EC_TEST=0
+EC_BUILD=0
+FC_TYPECHECK=0
+FC_LINT=0
+FC_TEST=0
+FC_BUILD=0
+TEST_CAPTURE=""
+TEST_CAPTURED=0
+
+# run_count_failures: capture stdout+stderr and exit status in memory only.
+# NEVER invoke via $(...) — that would run in a subshell and drop TEST_CAPTURE
+# / EC_* / FC_* assignments. Call directly so globals persist in this shell.
+# Never creates files or directories the command can discover/pre-poison.
 run_count_failures() {
   local step="$1"
   local cmd="$2"
   local out ec fc
   if [[ -z "$cmd" ]]; then
-    printf '0\n' >"$SCRATCH/${step}.ec"
-    echo 0
-    return
+    case "$step" in
+      typecheck) EC_TYPECHECK=0; FC_TYPECHECK=0 ;;
+      lint) EC_LINT=0; FC_LINT=0 ;;
+      test) EC_TEST=0; FC_TEST=0 ;;
+      build) EC_BUILD=0; FC_BUILD=0 ;;
+    esac
+    return 0
   fi
   info "baseline $step: $cmd"
   set +e
@@ -206,21 +449,31 @@ run_count_failures() {
   out=$(eval "$cmd" 2>&1)
   ec=$?
   set -e
-  # After untrusted command returns: write private scratch only.
-  printf '%s\n' "$ec" >"$SCRATCH/${step}.ec"
-  if [[ "$step" == "test" ]]; then
-    printf '%s\n' "$out" >"$SCRATCH/test.out"
+  if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then
+    die "captured $step output exceeds size cap (${MAX_CAPTURE_CHARS} chars; fail closed)"
   fi
-  # Count error-ish lines as a rough fingerprint; also store exit code
-  # Prefer exit code as primary signal; failure_count is secondary detail
+  case "$step" in
+    typecheck) EC_TYPECHECK=$ec ;;
+    lint) EC_LINT=$ec ;;
+    test)
+      EC_TEST=$ec
+      TEST_CAPTURE=$out
+      TEST_CAPTURED=1
+      ;;
+    build) EC_BUILD=$ec ;;
+  esac
   if [[ $ec -ne 0 ]]; then
-    # count lines with error/fail patterns
     fc=$(printf '%s\n' "$out" | grep -ciE 'error TS|error:|FAIL|failed|✖|×' || true)
     [[ "$fc" -eq 0 ]] && fc=1
-    echo "$fc"
   else
-    echo 0
+    fc=0
   fi
+  case "$step" in
+    typecheck) FC_TYPECHECK=$fc ;;
+    lint) FC_LINT=$fc ;;
+    test) FC_TEST=$fc ;;
+    build) FC_BUILD=$fc ;;
+  esac
 }
 
 GEN=$(resolve_cmd generate GIBSON_GENERATE generate)
@@ -237,84 +490,126 @@ if [[ -n "$GEN" ]]; then
   set -e
 fi
 
-fc_tc=$(run_count_failures typecheck "$TC")
-ec_tc=$(cat "$SCRATCH/typecheck.ec" 2>/dev/null || echo 0)
-fc_li=$(run_count_failures lint "$LI")
-ec_li=$(cat "$SCRATCH/lint.ec" 2>/dev/null || echo 0)
-fc_te=$(run_count_failures test "$TE")
-ec_te=$(cat "$SCRATCH/test.ec" 2>/dev/null || echo 0)
-fc_bu=$(run_count_failures build "$BU")
-ec_bu=$(cat "$SCRATCH/build.ec" 2>/dev/null || echo 0)
+# Direct calls (not command-substitution) so in-memory capture globals stick.
+run_count_failures typecheck "$TC"
+run_count_failures lint "$LI"
+run_count_failures test "$TE"
+run_count_failures build "$BU"
+fc_tc=$FC_TYPECHECK
+fc_li=$FC_LINT
+fc_te=$FC_TEST
+fc_bu=$FC_BUILD
+ec_tc=$EC_TYPECHECK
+ec_li=$EC_LINT
+ec_te=$EC_TEST
+ec_bu=$EC_BUILD
+
+# ---------------------------------------------------------------------------
+# Post-command: revalidate OUT/JOURNAL parents, then private parser scratch.
+# ---------------------------------------------------------------------------
+
+verify_parent_chain "$OUT" "$OUT_PARENT_SNAP" "output"
+verify_parent_chain "$JOURNAL" "$JOURNAL_PARENT_SNAP" "journal"
+refuse_symlink_or_nonfile "$OUT" "baseline --out"
+if [[ -e "$JOURNAL" || -L "$JOURNAL" ]]; then
+  refuse_symlink_or_nonfile "$JOURNAL" "journal --journal"
+fi
 
 # --- test metrics (issue #70) -------------------------------------------------
+# When a test command was configured, metrics must parse successfully.
+# Never skip parsing and continue with test_metrics:null after a test step.
 TEST_METRICS_JSON='null'
 TEST_METRICS_PRESENT=0
-if [[ -n "$TE" && -f "$SCRATCH/test.out" && ! -L "$SCRATCH/test.out" ]]; then
-  # Parse artifacts live only under the private SCRATCH dir (created after the
-  # untrusted test command returned). Never /tmp/gibson-ti-parse.err or
-  # worktree-local .gibson-baseline.test.out.
+
+if [[ -n "$TE" ]]; then
+  if [[ "$TEST_CAPTURED" -ne 1 ]]; then
+    die "test step configured but output was not captured (fail closed)"
+  fi
+
+  # Create private parser scratch ONLY now (after untrusted commands returned).
+  SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/gibson-baseline.XXXXXX") \
+    || die "could not create private parser scratch directory"
+  chmod 700 "$SCRATCH" || die "could not set private permissions on parser scratch"
+
+  test_out_file=$(mktemp "${SCRATCH}/test.out.XXXXXX") \
+    || die "mktemp failed for captured test output"
+  if [[ -L "$test_out_file" || ! -f "$test_out_file" ]]; then
+    die "captured-output path is not a regular file (fail closed): $test_out_file"
+  fi
+  # Write in-memory capture; exclusive mktemp path is not pre-poisonable by
+  # the already-returned command.
+  if ! printf '%s\n' "$TEST_CAPTURE" >"$test_out_file"; then
+    die "failed writing captured test output (fail closed)"
+  fi
+  if [[ -L "$test_out_file" || ! -f "$test_out_file" || ! -r "$test_out_file" ]]; then
+    die "captured-output state is non-regular/symlink/unreadable (fail closed): $test_out_file"
+  fi
+
   parse_err_file=$(mktemp "${SCRATCH}/parse-err.XXXXXX") \
     || die "mktemp failed for parse stderr"
   if [[ -L "$parse_err_file" || ! -f "$parse_err_file" ]]; then
     die "scratch parse-err is not a regular file (fail closed)"
   fi
   set +e
-  parsed=$(node "$TI" parse --input "$SCRATCH/test.out" 2>"$parse_err_file")
+  parsed=$(node "$TI" parse --input "$test_out_file" 2>"$parse_err_file")
   parse_rc=$?
   set -e
   if [[ $parse_rc -ne 0 ]]; then
-    # Fail closed: a test step that produces no parseable metrics cannot
-    # establish a trustworthy baseline for the integrity sensor.
-    # Diagnostic: surface parser stderr (from private scratch, not a
-    # predictable /tmp path the test command could have poisoned).
     if [[ -f "$parse_err_file" && ! -L "$parse_err_file" ]]; then
       cat "$parse_err_file" >&2 || true
     fi
     die "test step produced unparseable metrics (fail closed). Emit GIBSON_TEST_METRICS or a supported summary (docs/06)."
   fi
+  # Re-check capture file was not swapped mid-parse (defensive).
+  if [[ -L "$test_out_file" || ! -f "$test_out_file" || ! -r "$test_out_file" ]]; then
+    die "captured-output state invalid after parse (fail closed): $test_out_file"
+  fi
   TEST_METRICS_JSON=$parsed
   TEST_METRICS_PRESENT=1
 fi
 
-# Integrity-reduction guard: lowering total or raising skip/todo requires an
-# explicit --regenerate --reason and a journal entry.
-if [[ -e "$OUT" || -L "$OUT" ]] && [[ "$TEST_METRICS_PRESENT" -eq 1 ]]; then
-  refuse_symlink_or_nonfile "$OUT" "baseline --out"
+# Integrity-reduction guard: compare against PRIOR snapshot (not a post-command
+# re-read of OUT). Lowering total or raising skip/todo requires --regenerate.
+if [[ "$PRIOR_OUT_PRESENT" -eq 1 && "$TEST_METRICS_PRESENT" -eq 1 ]]; then
+  # Ensure private scratch exists for comparison temps (may already from parse).
+  if [[ -z "$SCRATCH" || ! -d "$SCRATCH" ]]; then
+    SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/gibson-baseline.XXXXXX") \
+      || die "could not create private scratch for metrics compare"
+    chmod 700 "$SCRATCH" || die "could not set private permissions on scratch"
+  fi
   OLD_METRICS_FILE=$(mktemp "${SCRATCH}/old-metrics.XXXXXX") \
     || die "mktemp failed for old metrics"
   NEW_METRICS_FILE=$(mktemp "${SCRATCH}/new-metrics.XXXXXX") \
     || die "mktemp failed for new metrics"
+  PRIOR_OUT_FILE=$(mktemp "${SCRATCH}/prior-out.XXXXXX") \
+    || die "mktemp failed for prior baseline snapshot"
+  if [[ -L "$OLD_METRICS_FILE" || ! -f "$OLD_METRICS_FILE" ]] \
+    || [[ -L "$NEW_METRICS_FILE" || ! -f "$NEW_METRICS_FILE" ]] \
+    || [[ -L "$PRIOR_OUT_FILE" || ! -f "$PRIOR_OUT_FILE" ]]; then
+    die "metrics compare temps are not regular files (fail closed)"
+  fi
   printf '%s\n' "$TEST_METRICS_JSON" >"$NEW_METRICS_FILE"
-  # Extract prior test_metrics if present; missing metrics counts as needing regenerate
+  printf '%s' "$PRIOR_OUT_BYTES" >"$PRIOR_OUT_FILE"
+
   set +e
   node -e "
     const fs=require('fs');
     const b=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
     if(!b.test_metrics){process.exit(2)}
     fs.writeFileSync(process.argv[2], JSON.stringify(b.test_metrics));
-  " "$OUT" "$OLD_METRICS_FILE"
+  " "$PRIOR_OUT_FILE" "$OLD_METRICS_FILE"
   extract_rc=$?
   set -e
 
   needs=0
   if [[ $extract_rc -eq 2 ]]; then
-    needs=1
-    # Fabricate a high watermark so the journal has something to compare
-    echo '{"total":0,"skipped":0,"todo":0}' >"$OLD_METRICS_FILE"
-    # Re-read: if old had no metrics, overwriting with real metrics is an upgrade
-    # only when we can confirm no reduction — without old numbers, require regenerate
-    # when the operator is intentionally establishing integrity for the first time
-    # on top of a legacy baseline. Improvement path: still allow without flag when
-    # old metrics are absent? Fail closed per issue: establishing metrics on a
-    # legacy baseline is fine without --regenerate (not a reduction).
+    # Legacy baseline without metrics: establishing metrics is not a reduction.
     needs=0
+    echo '{"total":0,"skipped":0,"todo":0}' >"$OLD_METRICS_FILE"
   elif [[ $extract_rc -ne 0 ]]; then
     needs=1
     echo '{"total":0,"skipped":0,"todo":0}' >"$OLD_METRICS_FILE"
   else
-    # Compare totals/skips: reduction requires --regenerate (same rule as
-    # test-integrity.mjs needsRegenerateFlag — kept inline so we never shell
-    # out through a fragile dynamic import path).
     set +e
     node -e '
       const fs = require("fs");
@@ -347,36 +642,12 @@ if [[ -e "$OUT" || -L "$OUT" ]] && [[ "$TEST_METRICS_PRESENT" -eq 1 ]]; then
     if [[ "$REASON_SET" -ne 1 ]] || [[ -z "${REASON// }" ]]; then
       die "test-integrity: --regenerate requires a nonempty --reason"
     fi
-    # Journal path must not be a symlink (appendFileSync would follow it).
-    if [[ -e "$JOURNAL" || -L "$JOURNAL" ]]; then
-      refuse_symlink_or_nonfile "$JOURNAL" "journal --journal"
-    fi
-    # Ensure journal parent exists; refuse if parent path components are weird
-    # only when we need to create the file (journal-append mkdir's via node).
-    jdir=$(dirname -- "$JOURNAL")
-    if [[ ! -d "$jdir" ]]; then
-      mkdir -p -- "$jdir" || die "cannot create journal directory $jdir"
-    fi
     SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-    set +e
-    jout=$(node "$TI" journal-append \
-      --journal "$JOURNAL" \
-      --old "$OLD_METRICS_FILE" \
-      --new "$NEW_METRICS_FILE" \
-      --reason "$REASON" \
-      --sha "$SHA" 2>&1)
-    jrc=$?
-    set -e
-    if [[ $jrc -ne 0 ]]; then
-      die "journal-append failed: $jout"
-    fi
-    info "test-integrity journal: $jout"
-    info "appended journal entry → $JOURNAL"
+    journal_append_safe "$JOURNAL" "$JOURNAL_PARENT_SNAP" \
+      "$OLD_METRICS_FILE" "$NEW_METRICS_FILE" "$REASON" "$SHA"
   fi
 elif [[ "$REGENERATE" -eq 1 ]]; then
-  # Operator asked to regenerate but metrics did not worsen — still require reason
-  # only when they insist on journaling; if no reduction, --regenerate is a no-op flag.
-  if [[ "$REASON_SET" -eq 1 && -n "${REASON// }" && "$TEST_METRICS_PRESENT" -eq 1 && -f "$OUT" && ! -L "$OUT" ]]; then
+  if [[ "$REASON_SET" -eq 1 && -n "${REASON// }" && "$TEST_METRICS_PRESENT" -eq 1 && "$PRIOR_OUT_PRESENT" -eq 1 ]]; then
     info "--regenerate noted but metrics did not reduce integrity; no journal entry required"
   fi
 fi
@@ -389,12 +660,12 @@ BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 if [[ "$TEST_METRICS_PRESENT" -eq 1 ]]; then
   METRICS_EMBED=$(node -e "const m=JSON.parse(process.argv[1]);process.stdout.write(JSON.stringify({total:m.total,skipped:m.skipped,todo:m.todo,skip_effective:m.skip_effective,source:m.source}))" "$TEST_METRICS_JSON")
 else
+  # Only allowed when no test command was configured.
   METRICS_EMBED="null"
 fi
 
-# Write JSON without requiring jq — sibling temp + atomic rename; never
-# truncate through a pre-poisoned OUT symlink.
-atomic_write "$OUT" <<EOF
+# Final write: revalidate parents, sibling temp, atomic rename.
+atomic_write "$OUT" "$OUT_PARENT_SNAP" <<EOF
 {
   "recorded_at": "$UTC",
   "git_sha": "$SHA",
@@ -423,7 +694,6 @@ atomic_write "$OUT" <<EOF
 EOF
 
 info "wrote $OUT"
-# Refuse to cat through a symlink (should be impossible after atomic_write).
 if [[ -L "$OUT" ]]; then
   die "output path is a symlink after write (fail closed): $OUT"
 fi
