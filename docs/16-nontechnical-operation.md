@@ -69,6 +69,11 @@ Card rules:
   never blocks unrelated work (doc 14's queue rule) and never times out into
   auto-approval. Gates wait; the fleet re-asks on a gentle cadence and, after two
   re-asks, routes the card to the Engineer tier if one exists.
+- **Stable id + local ledger are offline artifacts**, not the chat channel.
+  `scripts/decision-ledger.sh` / `scripts/digest.sh` may draft and render cards
+  with a deterministic id for later delivery; they do not send messages, schedule
+  jobs, or record yes/no answers. Live owner-channel wiring (Hermes or fallback)
+  remains open under issue #72.
 - **Questions are answered, not deflected.** An operator asking "what does
   'undone' mean here?" gets a real answer on the card's thread before a yes/no is
   accepted.
@@ -101,12 +106,17 @@ The core promise is long-running processes that don't die quietly. Codified:
 4. **Digest visibility** (always) — parked and waiting items appear in the digest
    with plain reasons, so nothing is silently wedged. A card unanswered for 7
    days triggers a summary card: "Here's everything waiting on you, shortest
-   first."
+   first." Offline, `scripts/digest.sh` can render that picture from local
+   snapshots only; **shipping the digest to the owner is still owner-gated**
+   (issue #72). Silence on the owner channel is not success and is not proof the
+   fleet stopped — but silence also never means auto-approval.
 
 **Heartbeat guarantee:** an Operator-tier repo produces at least one status
 message per active week even when nothing shipped ("Working on X, nothing needs
 you") — silence reads as death to a non-technical owner, and trust is the actual
-uptime metric.
+uptime metric. The offline renderer enforces a **quiet active week** status line
+when a period has zero ships; live delivery of that heartbeat still depends on
+the owner-channel choices tracked in issue #72.
 
 ## The Ask Contract (every request, every tier)
 

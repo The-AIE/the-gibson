@@ -83,10 +83,18 @@ Prefer the agent that hit it ships the small fix in-session. Else file
 1. Pull exhaust: merged PRs, CI failures, REQUEST_CHANGES reasons, eval reports,
    MC `cost_usd`, twice-failed tasks, deploy incidents.
 2. Cluster recurring causes; dedup against LESSONS.md.
-3. File lessons + issues; draft digest for Hermes:
+3. File lessons + issues; draft digest material:
    - what the fleet learned
    - what it changed about itself
    - cost-per-merged-PR trend per pool
+   - queued PENDING owner decisions (via offline `scripts/decision-ledger.sh` +
+     local `scripts/digest.sh` render when useful)
+   Historian may **append/draft** pending decision cards and digest markdown from
+   local snapshots. Historian must **not** infer approval, consume answers, mark
+   decisions resolved, or claim delivery. Unanswered cards never auto-approve and
+   never block unrelated work. Live Hermes/email/iMessage/webhook delivery and
+   `--ingest` remain owner-gated under issue #72 (channel, credentials, cadence,
+   canary still open). Offline render ≠ delivered.
 4. Tag lessons `local` vs `general` for contribute-back (doc 18).
 
 ## Self-modification bounds
