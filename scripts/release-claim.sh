@@ -26,7 +26,8 @@ RISKS
 
 USAGE
   release-claim.sh <issue> [--claim-id <id>] [--prefix <ns>] [--repo owner/name]
-                           [--keep-branch] [--keep-label] [--dry-run]
+                           [--keep-branch] [--keep-worktree] [--keep-label]
+                           [--dry-run]
   release-claim.sh --help
 
   <issue>        issue number, e.g. 42
@@ -37,6 +38,10 @@ USAGE
   --repo         product repo for the issue/label, when the issue does not live
                  in the claim-table repo (L-037)
   --keep-branch  do not delete the local/remote feature branch
+  --keep-worktree
+                 do not remove the registered worktree directory (default still
+                 removes it). Used by claim-reaper so a dead lane's claim can be
+                 released while preserving the on-disk tree for recovery.
   --keep-label   keep agent-claimed even when the ledger has no residual row
                  for this issue (live sibling lane whose claim file is absent
                  or lives elsewhere). Verifies the live GitHub label is present
@@ -108,6 +113,7 @@ fi
 ISSUE="$1"
 shift || true
 KEEP_BRANCH=0
+KEEP_WORKTREE=0
 KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
@@ -117,6 +123,7 @@ REPO_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep-branch) KEEP_BRANCH=1 ;;
+    --keep-worktree) KEEP_WORKTREE=1 ;;
     --keep-label) KEEP_LABEL=1 ;;
     --dry-run) DRY=1 ;;
     --claim-id)
@@ -486,8 +493,16 @@ if [[ "$DRY" -eq 1 ]]; then
     printf '%s\n' "$TARGET_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  release claim:   $id"
-      echo "    remove worktree: $(wt_dir_for "$id")"
-      echo "    delete branch:   $(branch_for "$id")"
+      if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
+        echo "    KEEP worktree:   $(wt_dir_for "$id")"
+      else
+        echo "    remove worktree: $(wt_dir_for "$id")"
+      fi
+      if [[ "$KEEP_BRANCH" -eq 1 ]]; then
+        echo "    KEEP branch:     $(branch_for "$id")"
+      else
+        echo "    delete branch:   $(branch_for "$id")"
+      fi
     done
   else
     echo "  release claim:   (none matched for issue $ISSUE)"
@@ -512,9 +527,15 @@ if [[ -n "$TARGET_IDS" ]]; then
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
     wt=$(wt_dir_for "$id")
-    if [[ -d "$wt" ]]; then
-      info "removing worktree $wt"
-      git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+    if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+      if [[ -d "$wt" ]]; then
+        info "removing worktree $wt"
+        git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+      fi
+    else
+      if [[ -d "$wt" ]]; then
+        info "keeping worktree $wt (--keep-worktree)"
+      fi
     fi
     if [[ "$KEEP_BRANCH" -eq 0 ]]; then
       br=$(branch_for "$id")
@@ -524,7 +545,9 @@ if [[ -n "$TARGET_IDS" ]]; then
   done <<EOF
 $TARGET_IDS
 EOF
-  git worktree prune 2>/dev/null || true
+  if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+    git worktree prune 2>/dev/null || true
+  fi
 fi
 
 # --- claim rows, from a disposable main worktree --------------------------

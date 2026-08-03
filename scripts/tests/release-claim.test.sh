@@ -1518,6 +1518,129 @@ lacks    "not incomplete on success" "$out" "INCOMPLETE"
 table=$(cd "$ROOT/finalok65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
 lacks    "target gone on success" "$table" "issue-15-only-lane"
 
+echo "#73 · --keep-worktree preserves target worktree; default still removes it"
+# Narrow option for claim-reaper: release the claim row without deleting the
+# on-disk worktree. Default behaviour (no flag) must still remove the worktree.
+new_repo "$ROOT/kw73"
+mkdir -p "$ROOT/kw73/wt-15-only-lane"
+echo keep-me > "$ROOT/kw73/wt-15-only-lane/marker"
+(
+  cd "$ROOT/kw73/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "single lane for keep-worktree" && git push -q origin main
+  git branch -f "feat/15-only-lane" HEAD
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      # final lane: allow remove-label to succeed for completeness
+      exit 0
+    fi
+    # After edit, labels empty; before edit, agent-claimed present.
+    if [[ -f "${GH_STATE:-/tmp/gh-state-kw}" ]]; then
+      echo ""
+    else
+      echo "agent-claimed,tier-b"
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/kw73/canon" && "$RC" 15 --claim-id issue-15-only-lane --keep-worktree --keep-branch --dry-run 2>&1)
+rc=$?
+check "keep-worktree dry-run exits 0" "$rc" "0"
+contains "dry-run keeps worktree" "$out" "KEEP worktree:"
+contains "dry-run keeps branch" "$out" "KEEP branch:"
+lacks    "dry-run does not plan remove worktree" "$out" "remove worktree:"
+lacks    "dry-run does not plan delete branch" "$out" "delete branch:"
+
+# Apply with --keep-worktree: claim row gone, worktree remains, branch kept.
+export GH_STATE="$ROOT/kw73/gh-state"
+rm -f "$GH_STATE"
+# Make issue-view flip empty after remove so verified label removal can complete.
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo edited >> "${GH_LOG:-/dev/null}"
+      : > "${GH_STATE:-/tmp/gh-state-kw}"
+      exit 0
+    fi
+    if [[ -f "${GH_STATE:-/tmp/gh-state-kw}" ]]; then
+      echo ""
+    else
+      echo "agent-claimed,tier-b"
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export GH_LOG="$ROOT/kw73/gh.log"
+export GH_STATE="$ROOT/kw73/gh-state"
+rm -f "$GH_STATE" "$GH_LOG"
+out=$(cd "$ROOT/kw73/canon" && "$RC" 15 --claim-id issue-15-only-lane --keep-worktree --keep-branch --repo acme/app 2>&1)
+rc=$?
+check "keep-worktree apply exits 0" "$rc" "0"
+contains "says keeping worktree" "$out" "keeping worktree"
+[[ -f "$ROOT/kw73/wt-15-only-lane/marker" ]] \
+  && ok "keep-worktree left target worktree on disk" \
+  || bad "keep-worktree removed target worktree"
+br_keep=$(git -C "$ROOT/kw73/canon" branch --list 'feat/15-only-lane')
+[[ -n "$br_keep" ]] && ok "keep-branch left feature branch" || bad "keep-branch deleted feature branch"
+table=$(cd "$ROOT/kw73/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+lacks    "keep-worktree still released claim row" "$table" "issue-15-only-lane"
+contains "unrelated row survives keep-worktree" "$table" "issue-115-unrelated"
+
+# Default (no --keep-worktree) still removes the worktree.
+new_repo "$ROOT/kw73def"
+mkdir -p "$ROOT/kw73def/wt-15-only-lane"
+echo gone > "$ROOT/kw73def/wt-15-only-lane/marker"
+(
+  cd "$ROOT/kw73def/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "default removes worktree" && git push -q origin main
+  git branch -f "feat/15-only-lane" HEAD
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+export GH_STATE="$ROOT/kw73def/gh-state"
+export GH_LOG="$ROOT/kw73def/gh.log"
+rm -f "$GH_STATE" "$GH_LOG"
+out=$(cd "$ROOT/kw73def/canon" && "$RC" 15 --claim-id issue-15-only-lane --keep-branch --repo acme/app 2>&1)
+rc=$?
+check "default (no keep-worktree) still exits 0" "$rc" "0"
+[[ ! -f "$ROOT/kw73def/wt-15-only-lane/marker" ]] \
+  && ok "default still removes target worktree" \
+  || bad "default left target worktree (regression)"
+br_def=$(git -C "$ROOT/kw73def/canon" branch --list 'feat/15-only-lane')
+[[ -n "$br_def" ]] && ok "default+keep-branch left branch" || bad "default deleted branch despite --keep-branch"
+table=$(cd "$ROOT/kw73def/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+lacks    "default still released claim row" "$table" "issue-15-only-lane"
+
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -74,6 +74,27 @@ coordinate (different issue, or wait). Never race a live claim.
 activity?) before being renewed or released. Renew only the timestamp; never strip
 someone else's claim without verification.
 
+**Claim reaper (dead lanes):** when a lane crashes and never releases, the claim
+row, `agent-claimed` label, and worktree block the fleet indefinitely. Run
+`scripts/claim-reaper.sh` (dry-run by default; `--apply` to act) to expire claims
+from **evidence**, not assertion:
+
+- Last-active time is the maximum valid evidence among: claim timestamp, local
+  branch tip, remote branch tip, registered worktree tracked-file mtime, and an
+  optional heartbeat file (`--heartbeat-dir`).
+- Default threshold is **14400 seconds (4 hours)** — deliberately more
+  conservative than the 15-minute telemetry "presumed dead" line in docs/11.
+- An open PR always protects the claim (parked ≠ dead).
+- Fail closed on API/ref failures, malformed evidence, unregistered or unsafe
+  worktree paths, symlink/device evidence, future-clock evidence, or race-time
+  activity. Never closes the issue.
+- Default apply releases the exact claim id via `release-claim.sh --claim-id …
+  --keep-branch --keep-worktree`, journals the operation, and posts a
+  deduplicated handoff comment (no absolute worktree paths). `--prune-worktrees`
+  may remove only the exact target worktree after the same checks.
+- Scheduling and Mission Control integration are follow-ups; this script is the
+  standalone Tier B janitor.
+
 ## Layer 3 — Hot-file rules isolate merge conflicts
 
 Hot files are files many issues want to touch. Default rules:
