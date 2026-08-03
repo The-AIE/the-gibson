@@ -7,9 +7,16 @@ usage() {
 release-claim.sh — release a claim after merge (cleanup)
 
 WHAT IT DOES
-  Finds the claim row for an issue, removes the git worktree and local branch,
-  deletes the claim row with a signed commit on main, removes the agent-claimed
-  label, and optionally deletes the remote feature branch.
+  Finds the claim row for an issue, deletes the claim row with a signed commit
+  on main, removes the agent-claimed label, and removes the git worktree and
+  local branch when requested.
+
+  With CAS flags or --worktree-path (claimed prune), worktree/branch removal is
+  deferred until path/blob CAS validation, the cleanup push, and an
+  authoritative post-mutation reread prove the exact target claim is absent.
+  A renewal race, push rejection, or OID mismatch leaves the registered
+  worktree and branch untouched and exits incomplete (rc=3). Ordinary non-CAS
+  cleanup without --worktree-path keeps historical early worktree removal.
 
   It never moves the canonical checkout off its current branch: the claim-row
   commit happens in a disposable worktree on main (L-009). Sibling claims on the
@@ -26,7 +33,11 @@ RISKS
 
 USAGE
   release-claim.sh <issue> [--claim-id <id>] [--prefix <ns>] [--repo owner/name]
-                           [--keep-branch] [--keep-label] [--dry-run]
+                           [--keep-branch] [--keep-worktree] [--keep-label]
+                           [--expected-claim-path PATH] [--expected-claim-blob OID]
+                           [--expected-source file|legacy]
+                           [--worktree-path PATH] [--expected-branch BRANCH]
+                           [--dry-run]
   release-claim.sh --help
 
   <issue>        issue number, e.g. 42
@@ -37,12 +48,30 @@ USAGE
   --repo         product repo for the issue/label, when the issue does not live
                  in the claim-table repo (L-037)
   --keep-branch  do not delete the local/remote feature branch
+  --keep-worktree
+                 do not remove the registered worktree directory (default still
+                 removes it). Used by claim-reaper so a dead lane's claim can be
+                 released while preserving the on-disk tree for recovery.
   --keep-label   keep agent-claimed even when the ledger has no residual row
                  for this issue (live sibling lane whose claim file is absent
                  or lives elsewhere). Verifies the live GitHub label is present
                  (exit 3 if the product repo is unresolved or the label is
                  absent/unreadable). Without this flag, a no-residual cleanup
                  removes the label — the final completed lane path.
+  --expected-claim-path PATH
+                 CAS: exact ledger path of the claim blob (e.g.
+                 docs/claims/issue-42-x.md). Bound through fetch/cleanup/push.
+  --expected-claim-blob OID
+                 CAS: exact blob OID (or legacy "activeblob:claimid") that must
+                 still match on the authoritative remote before any strip/push.
+  --expected-source file|legacy
+                 CAS: claim representation form; required with --expected-claim-blob.
+  --worktree-path PATH
+                 remove only this exact absolute registered worktree path (no
+                 default-path derivation). Claimed prune from claim-reaper.
+  --expected-branch BRANCH
+                 when --worktree-path is set, the worktree must be checked out
+                 on this branch before removal.
   --dry-run      print what would happen, touch nothing
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
@@ -108,15 +137,22 @@ fi
 ISSUE="$1"
 shift || true
 KEEP_BRANCH=0
+KEEP_WORKTREE=0
 KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
 CLAIM_ID_SET=0
 PREFIX=""
 REPO_ARG=""
+EXPECTED_CLAIM_PATH=""
+EXPECTED_CLAIM_BLOB=""
+EXPECTED_SOURCE=""
+WORKTREE_PATH_ARG=""
+EXPECTED_BRANCH=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep-branch) KEEP_BRANCH=1 ;;
+    --keep-worktree) KEEP_WORKTREE=1 ;;
     --keep-label) KEEP_LABEL=1 ;;
     --dry-run) DRY=1 ;;
     --claim-id)
@@ -126,6 +162,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --prefix) PREFIX="${2:-}"; shift ;;
     --repo) REPO_ARG="${2:-}"; shift ;;
+    --expected-claim-path)
+      EXPECTED_CLAIM_PATH="${2:-}"
+      shift
+      ;;
+    --expected-claim-blob)
+      EXPECTED_CLAIM_BLOB="${2:-}"
+      shift
+      ;;
+    --expected-source)
+      EXPECTED_SOURCE="${2:-}"
+      shift
+      ;;
+    --worktree-path)
+      WORKTREE_PATH_ARG="${2:-}"
+      shift
+      ;;
+    --expected-branch)
+      EXPECTED_BRANCH="${2:-}"
+      shift
+      ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
   esac
   shift
@@ -143,15 +199,61 @@ fi
 if [[ "$CLAIM_ID_SET" -eq 1 && -z "$CLAIM_ID_ARG" ]]; then
   die "--claim-id requires a non-empty literal claim id"
 fi
+if [[ -n "$EXPECTED_CLAIM_BLOB" || -n "$EXPECTED_CLAIM_PATH" || -n "$EXPECTED_SOURCE" ]]; then
+  [[ -n "$EXPECTED_CLAIM_BLOB" ]] || die "--expected-claim-blob is required when CAS expected-* flags are set"
+  [[ -n "$EXPECTED_SOURCE" ]] || die "--expected-source is required with --expected-claim-blob"
+  case "$EXPECTED_SOURCE" in
+    file|legacy) ;;
+    *) die "--expected-source must be 'file' or 'legacy'" ;;
+  esac
+  if [[ "$EXPECTED_SOURCE" == "file" ]]; then
+    [[ -n "$EXPECTED_CLAIM_PATH" ]] || die "--expected-claim-path is required for --expected-source file"
+    case "$EXPECTED_CLAIM_PATH" in
+      docs/claims/*.md) ;;
+      *) die "--expected-claim-path must be docs/claims/<id>.md; got '$EXPECTED_CLAIM_PATH'" ;;
+    esac
+  fi
+  if [[ ! "$EXPECTED_CLAIM_BLOB" =~ ^[0-9a-f]{4,64}(:issue-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)?$ ]]; then
+    die "--expected-claim-blob must be a hex blob OID (optionally :claim-id for legacy)"
+  fi
+fi
+if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+  case "$WORKTREE_PATH_ARG" in
+    /*) ;;
+    *) die "--worktree-path must be an absolute path" ;;
+  esac
+  case "$WORKTREE_PATH_ARG" in
+    *..*) die "--worktree-path must not contain '..'" ;;
+  esac
+fi
+if [[ -n "$EXPECTED_BRANCH" && ! "$EXPECTED_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+  die "--expected-branch has unsafe characters"
+fi
 
 cd "$CANONICAL"
-git fetch origin >/dev/null 2>&1 || true
+
+# CAS mode (claim-reaper): require a successful fetch of the exact remote base
+# into origin/<base> and never fall back to local main/master or cached stale
+# state. Non-CAS mode keeps the historical local fallback for bare cleanup.
+CAS_MODE=0
+if [[ -n "$EXPECTED_CLAIM_BLOB" ]]; then
+  CAS_MODE=1
+fi
 
 # Resolve the ledger ref. Prefer origin/main, then origin/master, then local
-# main/master. An unborn, missing, or non-commit ref is a hard fail — never
-# treat a failed ref read as an "empty ledger".
+# main/master (non-CAS only). An unborn, missing, or non-commit ref is a hard
+# fail — never treat a failed ref read as an "empty ledger".
 resolve_ledger_ref() {
   local candidate
+  if [[ "$CAS_MODE" -eq 1 ]]; then
+    for candidate in origin/main origin/master; do
+      if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+    return 1
+  fi
   for candidate in origin/main origin/master main master; do
     if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
       printf '%s\n' "$candidate"
@@ -160,6 +262,30 @@ resolve_ledger_ref() {
   done
   return 1
 }
+
+# Successful fetch of exact remote base into its remote-tracking ref.
+# Prints base name (main|master). Fails closed on fetch failure.
+fetch_remote_base() {
+  local base
+  for base in main master; do
+    if git fetch origin "$base" >/dev/null 2>&1; then
+      if git rev-parse --verify --quiet "origin/${base}^{commit}" >/dev/null 2>&1; then
+        printf '%s\n' "$base"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+if [[ "$CAS_MODE" -eq 1 ]]; then
+  if ! CLEANUP_BASE_FETCH=$(fetch_remote_base); then
+    die "CAS mode: cannot fetch remote ledger base (origin main/master) — refuse mutation (no local/cached fallback)"
+  fi
+  info "CAS fetch ok: origin/${CLEANUP_BASE_FETCH}"
+else
+  git fetch origin >/dev/null 2>&1 || true
+fi
 
 REF=""
 if ! REF=$(resolve_ledger_ref); then
@@ -468,6 +594,133 @@ WT_PARENT="$(cd "$CANONICAL/.." && pwd)"
 wt_dir_for() { echo "$WT_PARENT/wt-${1#issue-}"; }
 branch_for() { echo "feat/${1#issue-}"; }
 
+# Physical path for comparison (macOS /var vs /private/var).
+phys_path() {
+  local p="$1" dir base
+  p="${p%/}"
+  [[ -n "$p" ]] || { echo ""; return 0; }
+  if [[ -d "$p" && ! -L "$p" ]]; then
+    (CDPATH='' cd "$p" 2>/dev/null && pwd -P) || printf '%s\n' "$p"
+    return 0
+  fi
+  dir=$(dirname -- "$p" 2>/dev/null || echo ".")
+  base=$(basename -- "$p" 2>/dev/null || echo "$p")
+  if [[ -d "$dir" ]]; then
+    printf '%s/%s\n' "$(CDPATH='' cd "$dir" 2>/dev/null && pwd -P)" "$base"
+  else
+    printf '%s\n' "$p"
+  fi
+}
+
+# Is path a registered git worktree of CANONICAL?
+worktree_registered() {
+  local want="$1" line cur="" want_phys cur_phys
+  want="${want%/}"
+  want_phys=$(phys_path "$want")
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      worktree\ *)
+        cur="${line#worktree }"
+        cur="${cur%/}"
+        if [[ "$cur" == "$want" ]]; then
+          return 0
+        fi
+        cur_phys=$(phys_path "$cur")
+        if [[ -n "$want_phys" && -n "$cur_phys" && "$cur_phys" == "$want_phys" ]]; then
+          return 0
+        fi
+        ;;
+    esac
+  done <<EOF
+$(git worktree list --porcelain 2>/dev/null || true)
+EOF
+  return 1
+}
+
+# Registered worktree path's checked-out branch (porcelain), empty if detached/unknown.
+worktree_branch() {
+  local want="$1" line cur="" branch="" want_phys cur_phys
+  want="${want%/}"
+  want_phys=$(phys_path "$want")
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      worktree\ *)
+        cur="${line#worktree }"
+        cur="${cur%/}"
+        branch=""
+        ;;
+      branch\ *)
+        branch="${line#branch }"
+        # refs/heads/foo → foo
+        branch="${branch#refs/heads/}"
+        ;;
+      "")
+        if [[ -n "$cur" ]]; then
+          if [[ "$cur" == "$want" ]]; then
+            printf '%s\n' "$branch"
+            return 0
+          fi
+          cur_phys=$(phys_path "$cur")
+          if [[ -n "$want_phys" && -n "$cur_phys" && "$cur_phys" == "$want_phys" ]]; then
+            printf '%s\n' "$branch"
+            return 0
+          fi
+        fi
+        cur=""
+        branch=""
+        ;;
+    esac
+  done <<EOF
+$(git worktree list --porcelain 2>/dev/null || true)
+EOF
+  # Final record may lack trailing blank line
+  if [[ -n "$cur" ]]; then
+    if [[ "$cur" == "$want" ]]; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+    cur_phys=$(phys_path "$cur")
+    if [[ -n "$want_phys" && -n "$cur_phys" && "$cur_phys" == "$want_phys" ]]; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
+  fi
+  echo ""
+  return 1
+}
+
+# Remove exactly one registered worktree path. No default-path derivation, no
+# rm -rf fallback. Fail closed on symlink/unregistered/branch mismatch.
+remove_exact_worktree() {
+  local wt="$1" expect_br="${2:-}" got_br
+  wt="${wt%/}"
+  if [[ -L "$wt" ]]; then
+    warn "worktree path is a symlink — refuse removal: $wt"
+    return 1
+  fi
+  if [[ ! -d "$wt" ]]; then
+    warn "worktree path missing or not a directory — refuse removal: $wt"
+    return 1
+  fi
+  if ! worktree_registered "$wt"; then
+    warn "worktree path is not a registered git worktree — refuse removal (no default-path fallback): $wt"
+    return 1
+  fi
+  if [[ -n "$expect_br" ]]; then
+    got_br=$(worktree_branch "$wt" || true)
+    if [[ "$got_br" != "$expect_br" ]]; then
+      warn "worktree branch mismatch at $wt (want '$expect_br', got '${got_br:-detached/unknown}') — refuse removal"
+      return 1
+    fi
+  fi
+  info "removing exact registered worktree $wt"
+  if ! git worktree remove --force "$wt" 2>/dev/null; then
+    warn "git worktree remove failed for $wt — refuse rm -rf fallback"
+    return 1
+  fi
+  return 0
+}
+
 residual_after_release() {
   # ids in ALL_IDS that are not in TARGET_IDS (exact id compare only)
   local id
@@ -486,8 +739,24 @@ if [[ "$DRY" -eq 1 ]]; then
     printf '%s\n' "$TARGET_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  release claim:   $id"
-      echo "    remove worktree: $(wt_dir_for "$id")"
-      echo "    delete branch:   $(branch_for "$id")"
+      if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
+        if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+          echo "    KEEP worktree:   $WORKTREE_PATH_ARG"
+        else
+          echo "    KEEP worktree:   $(wt_dir_for "$id")"
+        fi
+      else
+        if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+          echo "    remove worktree: $WORKTREE_PATH_ARG (exact registered path only)"
+        else
+          echo "    remove worktree: $(wt_dir_for "$id")"
+        fi
+      fi
+      if [[ "$KEEP_BRANCH" -eq 1 ]]; then
+        echo "    KEEP branch:     ${EXPECTED_BRANCH:-$(branch_for "$id")}"
+      else
+        echo "    delete branch:   ${EXPECTED_BRANCH:-$(branch_for "$id")}"
+      fi
     done
   else
     echo "  release claim:   (none matched for issue $ISSUE)"
@@ -506,25 +775,79 @@ if [[ "$DRY" -eq 1 ]]; then
 fi
 
 INCOMPLETE=0
+PRESERVE_LABEL_EARLY=0
 
 # --- worktrees + branches -------------------------------------------------
+# Ordering contract (#73):
+# - Claimed prune (--worktree-path) and CAS mode must NOT destructively remove
+#   worktrees/branches before expected-source/path/blob CAS validation, cleanup
+#   push, and authoritative post-mutation reread prove the exact target claim
+#   is absent. A renewal/push/OID/reread failure leaves worktree+branch intact.
+# - Ordinary non-CAS release (no --worktree-path) keeps historical early cleanup.
+# - --keep-worktree / --keep-branch never remove (reaper default).
+DEFER_WT_BRANCH=0
+if [[ -n "$WORKTREE_PATH_ARG" ]] || [[ "$CAS_MODE" -eq 1 ]]; then
+  DEFER_WT_BRANCH=1
+fi
+
 if [[ -n "$TARGET_IDS" ]]; then
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
-    wt=$(wt_dir_for "$id")
-    if [[ -d "$wt" ]]; then
-      info "removing worktree $wt"
-      git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+    if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
+      if [[ -n "$WORKTREE_PATH_ARG" && -d "$WORKTREE_PATH_ARG" ]]; then
+        info "keeping worktree $WORKTREE_PATH_ARG (--keep-worktree)"
+      else
+        wt=$(wt_dir_for "$id")
+        if [[ -d "$wt" ]]; then
+          info "keeping worktree $wt (--keep-worktree)"
+        fi
+      fi
+    elif [[ "$DEFER_WT_BRANCH" -eq 1 ]]; then
+      # Non-destructive precheck only for claimed prune path.
+      if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+        if [[ -L "$WORKTREE_PATH_ARG" ]] || [[ ! -d "$WORKTREE_PATH_ARG" ]] || ! worktree_registered "$WORKTREE_PATH_ARG"; then
+          warn "claimed prune target unsafe/unregistered before CAS — will not remove; claim strip may still proceed with incomplete prune"
+          # Do not set INCOMPLETE yet: strip may succeed; final prune revalidates.
+        elif [[ -n "${EXPECTED_BRANCH:-}" ]]; then
+          _pre_br=$(worktree_branch "$WORKTREE_PATH_ARG" || true)
+          if [[ "$_pre_br" != "$EXPECTED_BRANCH" ]]; then
+            warn "claimed prune branch mismatch before CAS (want '$EXPECTED_BRANCH', got '${_pre_br:-detached}') — will revalidate after ledger removal"
+          fi
+        fi
+        info "deferring exact worktree removal until CAS + verified cleanup push succeed: $WORKTREE_PATH_ARG"
+      else
+        info "deferring worktree removal until CAS + verified cleanup succeed (CAS mode)"
+      fi
+    else
+      # Ordinary non-CAS path: historical early worktree removal.
+      wt=$(wt_dir_for "$id")
+      if [[ -d "$wt" ]]; then
+        info "removing worktree $wt"
+        if worktree_registered "$wt"; then
+          git worktree remove --force "$wt" 2>/dev/null || {
+            warn "git worktree remove failed for registered $wt — refuse rm -rf"
+            INCOMPLETE=1
+          }
+        else
+          rm -rf "$wt"
+        fi
+      fi
     fi
-    if [[ "$KEEP_BRANCH" -eq 0 ]]; then
-      br=$(branch_for "$id")
+    if [[ "$KEEP_BRANCH" -eq 1 ]]; then
+      :
+    elif [[ "$DEFER_WT_BRANCH" -eq 1 ]]; then
+      info "deferring branch deletion until CAS + verified cleanup succeed"
+    else
+      br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
       git branch -D "$br" 2>/dev/null || true
       git push origin --delete "$br" 2>/dev/null || true
     fi
   done <<EOF
 $TARGET_IDS
 EOF
-  git worktree prune 2>/dev/null || true
+  if [[ "$KEEP_WORKTREE" -eq 0 && "$DEFER_WT_BRANCH" -eq 0 ]]; then
+    git worktree prune 2>/dev/null || true
+  fi
 fi
 
 # --- claim rows, from a disposable main worktree --------------------------
@@ -545,28 +868,105 @@ strip_claim_rows() {
   CLEANUP_PUSHED_SHA=""
   CLEANUP_DID_PUSH=0
   local base
-  base=main
-  git show-ref --verify --quiet refs/heads/main || base=master
+  if [[ "$CAS_MODE" -eq 1 ]]; then
+    # Bind to the exact remote base already fetched; re-fetch and require success.
+    if ! base=$(fetch_remote_base); then
+      warn "CAS strip: fetch of remote base failed — refuse cleanup (no local fallback)"
+      return 1
+    fi
+  else
+    base=main
+    git show-ref --verify --quiet refs/heads/main || base=master
+    git fetch origin "$base" >/dev/null 2>&1 || true
+  fi
   CLEANUP_BASE="$base"
 
   local tmpwt
   tmpwt=$(mktemp -d "${TMPDIR:-/tmp}/gibson-release-claim.XXXXXX") || return 1
   rm -rf "$tmpwt"
 
-  git fetch origin "$base" >/dev/null 2>&1 || true
-  git worktree add --detach "$tmpwt" "origin/$base" >/dev/null 2>&1 ||
+  # Always prefer origin/$base. CAS mode never falls back to local $base.
+  if ! git worktree add --detach "$tmpwt" "origin/$base" >/dev/null 2>&1; then
+    if [[ "$CAS_MODE" -eq 1 ]]; then
+      warn "CAS strip: cannot attach disposable worktree to origin/$base — refuse"
+      return 1
+    fi
     git worktree add --detach "$tmpwt" "$base" >/dev/null 2>&1 || return 1
+  fi
 
   local rc=0
   (
     cd "$tmpwt" || exit 1
     local touched=0
 
+    # CAS: re-verify exact frozen blob/path (or legacy active-work blob+row)
+    # before any mutation. If evidence changed, refuse — renewed claim survives.
+    if [[ "${CAS_MODE:-0}" -eq 1 ]]; then
+      local id cas_path cas_blob cur_blob active_blob exp_active exp_id
+      id=$(printf '%s\n' "$TARGET_IDS" | head -n1)
+      if [[ "$EXPECTED_SOURCE" == "file" ]]; then
+        cas_path="${EXPECTED_CLAIM_PATH}"
+        cas_blob="${EXPECTED_CLAIM_BLOB}"
+        if [[ ! -f "$cas_path" ]]; then
+          echo "release-claim.sh: ERROR: CAS expected path absent at origin/$base: $cas_path" >&2
+          exit 1
+        fi
+        cur_blob=$(git ls-files -s -- "$cas_path" 2>/dev/null | awk '{print $2; exit}')
+        if [[ -z "$cur_blob" ]]; then
+          cur_blob=$(git rev-parse "HEAD:$cas_path" 2>/dev/null || true)
+        fi
+        if [[ -z "$cur_blob" || "$cur_blob" != "$cas_blob" ]]; then
+          echo "release-claim.sh: ERROR: CAS blob OID mismatch for $cas_path (want $cas_blob, got ${cur_blob:-absent}) — refuse (renewed/changed claim survives)" >&2
+          exit 1
+        fi
+        # Path must match docs/claims/<claim-id>.md for the frozen id
+        if [[ "$cas_path" != "docs/claims/${id}.md" ]]; then
+          echo "release-claim.sh: ERROR: CAS path $cas_path does not match frozen claim id $id" >&2
+          exit 1
+        fi
+      elif [[ "$EXPECTED_SOURCE" == "legacy" ]]; then
+        # EXPECTED_CLAIM_BLOB = "<active-work-blob>:<claim-id>"
+        exp_active="${EXPECTED_CLAIM_BLOB%%:*}"
+        exp_id="${EXPECTED_CLAIM_BLOB#*:}"
+        if [[ "$exp_id" != "$id" ]]; then
+          echo "release-claim.sh: ERROR: CAS legacy blob key claim-id mismatch" >&2
+          exit 1
+        fi
+        if [[ ! -f docs/active-work.md ]]; then
+          echo "release-claim.sh: ERROR: CAS legacy active-work.md absent — refuse" >&2
+          exit 1
+        fi
+        active_blob=$(git rev-parse HEAD:docs/active-work.md 2>/dev/null || true)
+        if [[ -z "$active_blob" || "$active_blob" != "$exp_active" ]]; then
+          echo "release-claim.sh: ERROR: CAS legacy active-work blob mismatch (want $exp_active, got ${active_blob:-absent}) — refuse (renewed row survives)" >&2
+          exit 1
+        fi
+        if ! awk -F'|' -v want="$id" '
+          /^\|/ {
+            cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
+            if (cid==want) found=1
+          }
+          END { exit !found }
+        ' docs/active-work.md; then
+          echo "release-claim.sh: ERROR: CAS legacy row for $id absent after blob match — refuse" >&2
+          exit 1
+        fi
+      fi
+    fi
+
     # per-lane claim files (current form) — exact id only
     local id
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       if [[ -f "docs/claims/$id.md" ]]; then
+        # Re-check file OID immediately before rm when CAS
+        if [[ "${CAS_MODE:-0}" -eq 1 && "$EXPECTED_SOURCE" == "file" ]]; then
+          cur_blob=$(git rev-parse "HEAD:docs/claims/${id}.md" 2>/dev/null || true)
+          if [[ "$cur_blob" != "$EXPECTED_CLAIM_BLOB" ]]; then
+            echo "release-claim.sh: ERROR: CAS pre-rm blob race for $id" >&2
+            exit 1
+          fi
+        fi
         git rm -q "docs/claims/$id.md" || exit 1
         touched=1
       fi
@@ -605,6 +1005,16 @@ EOF
         fi
       done < "$active"
       if [[ "$touched_legacy" -eq 1 ]]; then
+        # CAS legacy: re-verify active-work blob still matches before replace
+        if [[ "${CAS_MODE:-0}" -eq 1 && "$EXPECTED_SOURCE" == "legacy" ]]; then
+          active_blob=$(git rev-parse HEAD:docs/active-work.md 2>/dev/null || true)
+          exp_active="${EXPECTED_CLAIM_BLOB%%:*}"
+          if [[ "$active_blob" != "$exp_active" ]]; then
+            rm -f "$tmp"
+            echo "release-claim.sh: ERROR: CAS legacy pre-write blob race — refuse" >&2
+            exit 1
+          fi
+        fi
         mv "$tmp" "$active"
         git add "$active" || exit 1
         touched=1
@@ -617,6 +1027,7 @@ EOF
     git commit -s -q -m "release-claim: ${TARGET_IDS:-issue-${ISSUE}}
 
 Post-merge cleanup per Law 10 / docs/05." || exit 1
+    # Normal push only (no force). If remote advanced (renewal) push fails → incomplete.
     git push origin "HEAD:$base" || exit 1
   ) || rc=$?
 
@@ -816,6 +1227,9 @@ EOF
 # claim it was removed.
 PRESERVE_LABEL=0
 STRIP_OK=1
+if [[ "${PRESERVE_LABEL_EARLY:-0}" -eq 1 ]]; then
+  PRESERVE_LABEL=1
+fi
 
 if [[ -n "$TARGET_IDS" ]]; then
   set +e
@@ -877,6 +1291,69 @@ if [[ -n "$TARGET_IDS" ]]; then
   fi
 else
   info "no claim to remove"
+fi
+
+# --- deferred worktree/branch removal (CAS / claimed prune) ---------------
+# Only after successful strip AND authoritative reread proves the exact target
+# claim is absent (no renewal/sibling identity confusion). Failures leave
+# worktree+branch untouched and report incomplete.
+if [[ -n "$TARGET_IDS" && "$DEFER_WT_BRANCH" -eq 1 ]]; then
+  deferred_ok=1
+  if [[ "$STRIP_OK" -ne 1 || "$INCOMPLETE" -eq 1 || "$PRESERVE_LABEL" -eq 1 ]]; then
+    # Renewal, push rejection, OID mismatch, reread failure, or target still live:
+    # leave worktree and branch untouched.
+    if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+      info "leaving worktree(s) untouched — cleanup incomplete or target still live"
+    fi
+    if [[ "$KEEP_BRANCH" -eq 0 ]]; then
+      info "leaving branch(es) untouched — cleanup incomplete or target still live"
+    fi
+    deferred_ok=0
+  fi
+
+  if [[ "$deferred_ok" -eq 1 ]]; then
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+        if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+          # Revalidate exact registered path/branch identity immediately before removal.
+          info "post-CAS: revalidating exact registered worktree before prune"
+          if ! remove_exact_worktree "$WORKTREE_PATH_ARG" "${EXPECTED_BRANCH:-}"; then
+            warn "final claimed worktree removal failed for $WORKTREE_PATH_ARG — incomplete (claim row already released; not claiming full success)"
+            INCOMPLETE=1
+            PRESERVE_LABEL=1
+            deferred_ok=0
+          fi
+        else
+          wt=$(wt_dir_for "$id")
+          if [[ -d "$wt" ]]; then
+            info "post-CAS: removing worktree $wt"
+            if worktree_registered "$wt"; then
+              if ! git worktree remove --force "$wt" 2>/dev/null; then
+                warn "git worktree remove failed for registered $wt — refuse rm -rf; incomplete"
+                INCOMPLETE=1
+                PRESERVE_LABEL=1
+                deferred_ok=0
+              fi
+            else
+              # Ordinary default-path leftover under CAS: rm only unregistered dir.
+              rm -rf "$wt"
+            fi
+          fi
+        fi
+      fi
+      if [[ "$KEEP_BRANCH" -eq 0 && "$deferred_ok" -eq 1 ]]; then
+        br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        git branch -D "$br" 2>/dev/null || true
+        git push origin --delete "$br" 2>/dev/null || true
+      fi
+    done <<EOF
+$TARGET_IDS
+EOF
+    if [[ "$KEEP_WORKTREE" -eq 0 && "$deferred_ok" -eq 1 ]]; then
+      git worktree prune 2>/dev/null || true
+    fi
+  fi
 fi
 
 # --- label ----------------------------------------------------------------

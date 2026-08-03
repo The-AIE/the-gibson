@@ -74,6 +74,63 @@ coordinate (different issue, or wait). Never race a live claim.
 activity?) before being renewed or released. Renew only the timestamp; never strip
 someone else's claim without verification.
 
+**Claim reaper (dead lanes):** when a lane crashes and never releases, the claim
+row, `agent-claimed` label, and worktree block the fleet indefinitely. Run
+`scripts/claim-reaper.sh` (dry-run by default; `--apply` to act) to expire claims
+from **evidence**, not assertion:
+
+- Ledger source is always a **successful fetch** of the exact remote base
+  (`origin/main` or `origin/master`). Failed fetch refuses — never fall back to
+  local main/master, cached stale refs, HEAD, or another branch.
+- Each claim freezes a canonical identity: actual path, regular-blob OID, body
+  claim id, filename (`docs/claims/<id>.md` must match body id), issue field
+  (must agree with the id-derived issue number), branch, and worktree. Duplicate
+  logical ids, filename/body mismatch, wrong object modes, and issue mismatches
+  refuse before any plan/comment/mutation. Pre-mutation reparse must match.
+- Feature-branch liveness uses an **exact live remote query** (`ls-remote` +
+  fetch of `refs/heads/<branch>`), never a cached `origin/<feature>` tip.
+  Branch/ref syntax is validated before any Git command. Query/auth/network/
+  malformed/multiple-result failures **REFUSE**. A proven-absent remote branch
+  drops stale remote-tracking evidence rather than treating it as live. Plan
+  freezes the live remote SHA; apply re-checks live and refuses if SHA or
+  timestamp moved.
+- Last-active time is the maximum valid evidence among: claim timestamp, local
+  branch tip, **live** remote branch tip, registered worktree tracked-file mtime,
+  and optional heartbeat files (`--heartbeat-dir/<id>` and
+  `--heartbeat-dir/<id>.heartbeat`). Nonempty malformed heartbeat content
+  refuses (never mtime fallback). Future timestamps and oversized integers
+  refuse; integers are validated lexically before any Bash arithmetic.
+- Default threshold is **14400 seconds (4 hours)** — deliberately more
+  conservative than the 15-minute telemetry "presumed dead" line in docs/11.
+- An open PR always protects the claim (parked ≠ dead).
+- Fail closed on API/ref failures, malformed evidence, unregistered or unsafe
+  worktree paths, symlink/device evidence, future-clock evidence, or race-time
+  activity. Never closes the issue.
+- Default apply releases the exact claim id via `release-claim.sh --claim-id …
+  --keep-branch --keep-worktree`, binding the frozen path/blob OID through
+  release-claim's authoritative fetch, cleanup commit, and normal push (CAS).
+  If evidence changes after the initial check, before release, or before push,
+  mutation is incomplete; the claim row and label survive. Journals under an
+  apply lock (never before lock; never through a symlink). A COMPLETED journal
+  is idempotent only when remote evidence still proves the claim absent — a
+  re-added live claim is re-evaluated, never silently skipped. After
+  `release-claim` returns success **and** an authoritative post-release reread
+  proves the claim absent, posts exactly one deduplicated handoff comment with
+  an inert marker (no absolute worktree paths). A CAS mismatch, renewal,
+  fetch/query failure, push rejection, prune failure, or any incomplete release
+  must not leave a comment claiming release. If cleanup succeeds but the
+  comment post fails, the operation is incomplete (no overall success); a later
+  retry with the claim already absent posts the missing success comment exactly
+  once. `--prune-worktrees` may remove only the exact frozen registered
+  worktree path, and only **after** CAS validation, cleanup push, and
+  authoritative post-mutation reread prove the exact target claim is absent
+  (revalidated immediately before removal; no default-path derivation; no
+  `rm -rf` fallback). Renewal, push rejection, OID mismatch, or reread failure
+  leave the registered worktree and branch untouched. Final worktree-removal
+  failure reports incomplete (no false OK).
+- Scheduling and Mission Control integration are follow-ups; this script is the
+  standalone Tier B janitor.
+
 ## Layer 3 — Hot-file rules isolate merge conflicts
 
 Hot files are files many issues want to touch. Default rules:
