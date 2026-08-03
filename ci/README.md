@@ -9,7 +9,7 @@ the code.
 
 | File | Job | Spec |
 |---|---|---|
-| [`gibson-gate.yml`](gibson-gate.yml) | Green gate + security layers 1–3 (gitleaks, Semgrep, npm audit) | [docs/06](../docs/06-quality-gates.md), [docs/08](../docs/08-security.md) |
+| [`gibson-gate.yml`](gibson-gate.yml) | Green gate + security layers 1–3 + **protected test-integrity** (four isolated jobs; unique required check `test-integrity`) | [docs/06](../docs/06-quality-gates.md), [docs/08](../docs/08-security.md), issue #70 |
 | [`security.yml`](security.yml) | Layers 4 (authz matrix), 5 (ZAP baseline vs. preview), 8 (posture); nightly full DAST vs. **staging** | docs/08 |
 | [`ux-eval.yml`](ux-eval.yml) | Playwright contract flows + axe + Lighthouse against PR preview URL | [docs/07](../docs/07-uiux-evaluation.md) |
 | [`schema-guard.yml`](schema-guard.yml) | Schema diff without migration file fails; bans destructive migrate flags | [docs/12](../docs/12-vercel.md), L-002 |
@@ -21,7 +21,12 @@ the code.
 # From target repo
 mkdir -p .github/workflows
 cp /path/to/the-gibson/ci/gibson-gate.yml .github/workflows/
-# Fill <angle> placeholders in gibson-gate.yml from target AGENTS.md gate commands
+# Calibrate gibson-gate.yml:
+#   1. Fill <generate>/<typecheck>/<lint>/<test>/<build> in the gate job
+#   2. Set TEST_COMMAND on BOTH test-integrity-base and test-integrity-head
+#      to the SAME literal as the gate job test step (e.g. npx vitest run).
+#      Never point TEST_COMMAND at .agents/gate.json — that path is PR-head controlled.
+#   3. Vendor scripts/test-integrity.mjs + scripts/check-active-work.mjs into the target
 cp /path/to/the-gibson/ci/security.yml .github/workflows/
 cp /path/to/the-gibson/ci/ux-eval.yml .github/workflows/
 # If schema exists:
@@ -31,7 +36,32 @@ cp /path/to/the-gibson/ci/retro.yml .github/workflows/
 
 **Also vendor scripts the workflows call** (or submodule / copy into `scripts/`):
 
+- `test-integrity.mjs` (required for protected test-integrity grading)
+- `check-active-work.mjs` (claim isolation on the green-gate job)
 - `preview-url.sh`, `posture-probe.sh`, `route-inventory.mjs`
+
+### Protected test-integrity (issue #70) — inert until #68 activates it
+
+`gibson-gate.yml` includes four jobs that never grade with PR-head code:
+
+| Job | Role |
+|---|---|
+| `test-integrity-resolve` | Exact SHAs + merge-base; prove helper is a regular blob at merge-base |
+| `test-integrity-base` | Capture suite output at merge-base (separate runner) |
+| `test-integrity-head` | Capture suite output at head SHA from head repo (forks included) |
+| `test-integrity` | Unique required-check name; `always()`; compare with merge-base helper + inert PR-body waiver file |
+
+**Installing the file is not protection.** Live required-check / branch-protection
+audit and apply are owner-owned under **issue #68**. Do not call a target
+protected until the #68 canaries pass (no-change pass, deletion fail, skip fail,
+exact waiver pass, hostile-helper fail, failing-base deletion fail,
+missing-artifact fail, workflow-file modification protection).
+
+**Out of scope for agents / this template:** enabling the required check, branch
+protection, rulesets, bypass actors, fork policy, merge-queue policy, credentials,
+and canaries — all Mark-owned under #68. **Merge queues:** do not enable a merge
+queue against this template until equivalent `merge_group` support is implemented
+and canaried.
 
 ### Repo variables / secrets
 

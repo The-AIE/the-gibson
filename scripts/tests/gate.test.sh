@@ -9,8 +9,9 @@
 #   exact visible waiver may authorize a reduction; hidden/near/wrong-delta
 #   waivers fail closed; metric garbage never becomes zero; baseline
 #   regeneration is an explicit journaled act; a local/gitignored baseline
-#   cannot authorize a PR. Phase-1 ships the helper + local sensors only;
-#   CI isolated grading is phase-2 after the helper is on main.
+#   cannot authorize a PR. Phase-2 wires the protected CI template in
+#   ci/gibson-gate.yml (four-job isolate: resolve/base/head/final) with offline
+#   adversarial sensors that pin the contract without claiming live activation.
 #
 # USAGE
 #   scripts/tests/gate.test.sh
@@ -1713,24 +1714,517 @@ else
   bad "gate-baseline child-isolation canary (rc=$rc): $out"
 fi
 
-# Phase-1 bootstrap pin: ci/gibson-gate.yml must NOT wire test-integrity yet.
-# Wiring CI before main owns the helper self-grades (workspace-bootstrap) or
-# races a fixed RUNNER_TEMP path. Phase 2 adds the isolated job after merge.
+# ===========================================================================
+# Phase-2 protected CI contract (ci/gibson-gate.yml) — offline sensors
+# These pin the repository template. They do NOT claim live activation,
+# required-check status, or branch protection (#68 / owner-owned).
+# ===========================================================================
 CI_YML="$SCRIPT_DIR/../../ci/gibson-gate.yml"
-if [[ -f "$CI_YML" ]] \
-  && ! grep -q 'TI_TRUSTED\|test-integrity\.trusted\|test-integrity\.mjs\|GIBSON_TEST_METRICS\|workspace-bootstrap' "$CI_YML"; then
-  ok "ci/gibson-gate.yml unwired for test-integrity (phase-1 bootstrap; phase-2 after helper on main)"
+[[ -f "$CI_YML" ]] || { bad "ci/gibson-gate.yml missing"; CI_YML=""; }
+
+# Helper: static YAML text checks (no network, no GHA).
+# Positive checks may match comments (documentation of the contract).
+# Negative / structural bans strip full-line comments so prose cannot trip them.
+ci_has() { [[ -n "$CI_YML" ]] && grep -qE "$1" "$CI_YML"; }
+ci_code() { grep -vE '^[[:space:]]*#' "$CI_YML" | sed 's/[[:space:]]#.*//'; }
+ci_has_not() { [[ -n "$CI_YML" ]] && ! ci_code | grep -qE "$1"; }
+
+echo "phase-2 CI: four jobs, unique required name, always() final"
+if ci_has 'test-integrity-resolve:' \
+  && ci_has 'test-integrity-base:' \
+  && ci_has 'test-integrity-head:' \
+  && ci_has '^  test-integrity:' \
+  && ci_has 'name: test-integrity' \
+  && ci_has 'if: \$\{\{ always\(\) \}\}'; then
+  ok "four test-integrity jobs present; final uniquely named test-integrity; always()"
 else
-  bad "ci/gibson-gate.yml has premature test-integrity CI wiring (phase-1 must leave template unchanged)"
+  bad "missing four-job architecture or always() final (see ci/gibson-gate.yml)"
 fi
 
-# Phase-1 also must not claim a fixed-path trusted binary in the CI template
-if [[ -f "$CI_YML" ]] \
-  && ! grep -qE 'RUNNER_TEMP.*test-integrity|test-integrity\.trusted' "$CI_YML"; then
-  ok "ci/gibson-gate.yml has no fixed-path test-integrity symlink target"
+# Final depends on all three priors
+if ci_has 'needs:' \
+  && grep -A6 '^  test-integrity:' "$CI_YML" | grep -q 'test-integrity-resolve' \
+  && grep -A6 '^  test-integrity:' "$CI_YML" | grep -q 'test-integrity-base' \
+  && grep -A6 '^  test-integrity:' "$CI_YML" | grep -q 'test-integrity-head'; then
+  ok "final test-integrity needs resolve + base + head"
 else
-  bad "ci/gibson-gate.yml still references fixed-path trusted helper (symlink race class)"
+  bad "final job does not depend on all three prior jobs"
 fi
+
+echo "phase-2 CI: pull_request only; no privileged triggers / path filters"
+if ci_has '^on:' \
+  && ci_has 'pull_request:' \
+  && ci_has_not 'pull_request_target' \
+  && ci_has_not 'workflow_run:' \
+  && ci_has_not 'workflow_dispatch:' \
+  && ci_has_not '^  push:' \
+  && ci_has_not 'paths:' \
+  && ci_has_not 'paths-ignore:'; then
+  ok "only pull_request trigger; no privileged trigger or path filter"
+else
+  bad "trigger surface not restricted to bare pull_request"
+fi
+
+echo "phase-2 CI: least permissions, no secrets/cache/env/OIDC/self-hosted/continue-on-error"
+if ci_has '^permissions: \{\}' \
+  && ci_has 'contents: read' \
+  && ci_has 'pull-requests: read' \
+  && ci_has_not 'secrets\.' \
+  && ci_has_not 'cache:' \
+  && ci_has_not 'environment:' \
+  && ci_has_not 'id-token:' \
+  && ci_has_not 'self-hosted' \
+  && ci_has_not 'continue-on-error:' \
+  && ci_has_not 'permissions:\s*write' \
+  && ci_has_not 'contents:\s*write' \
+  && ci_has_not 'pull-requests:\s*write'; then
+  ok "least permissions; no secrets/cache/environment/OIDC/self-hosted/continue-on-error"
+else
+  bad "permissions or banned workflow features present"
+fi
+
+# Job-level permission grant: final has pull-requests: read; capture jobs contents only
+if grep -A20 'test-integrity-resolve:' "$CI_YML" | grep -q 'contents: read' \
+  && grep -A30 'test-integrity-base:' "$CI_YML" | grep -q 'contents: read' \
+  && grep -A30 'test-integrity-head:' "$CI_YML" | grep -q 'contents: read' \
+  && grep -A25 '^  test-integrity:' "$CI_YML" | grep -q 'pull-requests: read'; then
+  ok "resolve/capture contents:read; final contents+pull-requests:read"
+else
+  bad "job-level permission grants incorrect"
+fi
+
+echo "phase-2 CI: persist-credentials false; immutable action SHAs"
+if ci_has 'persist-credentials: false' \
+  && ! grep -qE 'uses:[[:space:]]*[^@]+@(v[0-9]|main|master|latest)' "$CI_YML" \
+  && ! grep -qE 'uses:[[:space:]]*actions/checkout@v' "$CI_YML" \
+  && ! grep -qE 'uses:[[:space:]]*actions/setup-node@v' "$CI_YML" \
+  && ! grep -qE 'uses:[[:space:]]*actions/upload-artifact@v' "$CI_YML" \
+  && ! grep -qE 'uses:[[:space:]]*actions/download-artifact@v' "$CI_YML"; then
+  # Every uses: line must pin a 40-char hex SHA
+  bad_pin=0
+  while IFS= read -r line; do
+    case "$line" in
+      *uses:*)
+        sha=$(printf '%s\n' "$line" | sed -n 's/.*@\([0-9a-fA-F]*\).*/\1/p')
+        if ! printf '%s' "$sha" | grep -qE '^[0-9a-fA-F]{40}$'; then
+          bad_pin=1
+          bad "action not pinned to full SHA: $line"
+        fi
+        ;;
+    esac
+  done < "$CI_YML"
+  if [[ "$bad_pin" -eq 0 ]]; then
+    ok "persist-credentials false; all actions pinned to full immutable SHAs"
+  fi
+else
+  bad "persist-credentials or version-tag actions present"
+fi
+
+echo "phase-2 CI: separate base/head jobs; fork head repo + exact SHA; no gate.json"
+if ci_has 'test-integrity-base:' \
+  && ci_has 'test-integrity-head:' \
+  && ci_has 'head\.repo\.full_name' \
+  && ci_has 'head\.sha' \
+  && ci_has 'base\.sha' \
+  && ci_has 'merge_base' \
+  && ci_has_not '\.agents/gate\.json' \
+  && ci_has 'TEST_COMMAND' \
+  && ci_has '__GIBSON_TEST_COMMAND__'; then
+  ok "separate base/head jobs; fork head.repo + exact SHAs; no PR-head gate.json"
+else
+  bad "base/head isolation or fork/SHA wiring missing"
+fi
+
+echo "phase-2 CI: inert waiver file; trusted-source merge-base; 8 MiB; grader from merge-base"
+if ci_has 'waiver-file' \
+  && ci_has 'pr-body\.txt' \
+  && ci_has 'trusted-source' \
+  && ci_has 'merge-base:' \
+  && ci_has '8388608' \
+  && ci_has 'sparse-checkout' \
+  && ci_has 'scripts/test-integrity\.mjs' \
+  && ci_has_not 'waiver-text:.*\$\{\{' \
+  && ci_has_not '(^|[^a-zA-Z_-])eval[[:space:]]' \
+  && ci_has_not '(^|[^a-zA-Z_-])source[[:space:]]+[^s]'; then
+  ok "inert --waiver-file; merge-base trusted-source; 8 MiB; sparse helper; no eval"
+else
+  bad "final comparison contract incomplete"
+fi
+
+# No fixed-path RUNNER_TEMP trusted symlink race (phase-1 class) — grader is
+# copied from merge-base checkout after sparse checkout, not a pre-poisoned path.
+if ci_has_not 'test-integrity\.trusted' \
+  && ci_has 'ti-grader'; then
+  ok "no fixed-path test-integrity.trusted symlink target; grader isolated under ti-grader"
+else
+  bad "fixed-path trusted helper race class still present"
+fi
+
+echo "phase-2 CI: missing trusted helper yields explicit update/rebase failure"
+if grep -q 'update or rebase' "$CI_YML" \
+  && grep -q 'scripts/test-integrity.mjs missing' "$CI_YML" \
+  && grep -qE '100644\|100755|100644 or 100755' "$CI_YML" \
+  && grep -q 'symlink' "$CI_YML"; then
+  ok "resolve fails closed with update/rebase message; blob mode 100644/100755 only"
+else
+  bad "missing helper / blob-mode fail-closed messaging incomplete"
+fi
+
+echo "phase-2 CI: github-hosted only; ephemeral runners"
+if ci_has 'runs-on: ubuntu-latest' \
+  && ci_has_not 'self-hosted' \
+  && ci_has_not 'runs-on:.*\['; then
+  ok "GitHub-hosted ubuntu-latest only (no self-hosted matrix)"
+else
+  bad "runner configuration not github-hosted ephemeral only"
+fi
+
+# ---------------------------------------------------------------------------
+# Offline simulation of final-job artifact validation + integrity compare
+# ---------------------------------------------------------------------------
+echo "phase-2 offline: failing base total 10 vs passing head total 7 still compares and fails"
+MAX_BYTES=8388608
+ART="$ROOT/ti-art"
+mkdir -p "$ART/base" "$ART/head" "$ART/grader"
+cp "$TI" "$ART/grader/test-integrity.mjs"
+chmod 0555 "$ART/grader/test-integrity.mjs"
+
+# Shared offline validator mirroring ci/gibson-gate.yml final job (hostile inputs).
+# Usage: ti_validate_capture DIR EXPECT_ROLE EXPECT_SHA LABEL RUN_ID RUN_ATTEMPT
+ti_validate_capture() {
+  _dir="$1"; _role="$2"; _sha="$3"; _label="$4"; _rid="$5"; _att="$6"
+  _meta="$_dir/metadata.json"
+  _out="$_dir/test-output.txt"
+  _ec="$_dir/exit-code.txt"
+  for _f in "$_meta" "$_out" "$_ec"; do
+    [[ -e "$_f" ]] || { echo "missing $(basename "$_f")"; return 1; }
+    [[ ! -L "$_f" ]] || { echo "symlink $(basename "$_f")"; return 1; }
+    [[ -f "$_f" ]] || { echo "not-file $(basename "$_f")"; return 1; }
+    _sz=$(wc -c < "$_f" | tr -d ' ')
+    [[ "$_sz" -le "$MAX_BYTES" ]] || { echo "oversized $(basename "$_f")"; return 1; }
+  done
+  node -e '
+    const fs = require("fs");
+    const [path, er, es, rid, att, label] = process.argv.slice(1);
+    let data;
+    try { data = JSON.parse(fs.readFileSync(path, "utf8")); }
+    catch (e) { console.error("malformed metadata"); process.exit(1); }
+    if (!data || typeof data !== "object") process.exit(1);
+    if (data.role !== er) { console.error("wrong role"); process.exit(1); }
+    if (String(data.source_sha).toLowerCase() !== String(es).toLowerCase()) {
+      console.error("wrong sha"); process.exit(1);
+    }
+    if (String(data.run_id) !== String(rid)) { console.error("wrong run_id"); process.exit(1); }
+    if (String(data.run_attempt) !== String(att)) { console.error("wrong run_attempt"); process.exit(1); }
+  ' "$_meta" "$_role" "$_sha" "$_rid" "$_att" "$_label" || return 1
+  _ec_val=$(tr -d ' \t\r' < "$_ec")
+  [[ -n "$_ec_val" ]] || { echo "empty exit-code"; return 1; }
+  return 0
+}
+
+write_capture() { # dir role sha rid att total exit_code
+  _d="$1"; mkdir -p "$_d"
+  cat > "$_d/metadata.json" <<EOF
+{"role": "$2", "source_sha": "$3", "run_id": "$4", "run_attempt": "$5"}
+EOF
+  printf 'GIBSON_TEST_METRICS total=%s skipped=0 todo=0\n' "$6" > "$_d/test-output.txt"
+  printf '%s\n' "$7" > "$_d/exit-code.txt"
+}
+
+MB_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+HD_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+RID="99"; ATT="1"
+
+# Failing base (exit 1, total 10) vs passing head (exit 0, total 7)
+write_capture "$ART/base" base "$MB_SHA" "$RID" "$ATT" 10 1
+write_capture "$ART/head" head "$HD_SHA" "$RID" "$ATT" 7 0
+
+ti_validate_capture "$ART/base" base "$MB_SHA" base "$RID" "$ATT" \
+  && ti_validate_capture "$ART/head" head "$HD_SHA" head "$RID" "$ATT" \
+  && ok "artifact metadata role/SHA/run validation accepts well-formed base+head" \
+  || bad "well-formed capture validation failed"
+
+node "$ART/grader/test-integrity.mjs" parse \
+  --input "$ART/base/test-output.txt" --out "$ART/base-m.json"
+node "$ART/grader/test-integrity.mjs" parse \
+  --input "$ART/head/test-output.txt" --out "$ART/head-m.json"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --waiver-text "" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3' \
+  && echo "$out" | grep -q '10' && echo "$out" | grep -q '7' \
+  && echo "$out" | grep -q "merge-base:${MB_SHA}"; then
+  ok "failing base total 10 vs passing head total 7 still compares and fails 10→7"
+else
+  bad "failing-base compare (rc=$rc): $out"
+fi
+
+echo "phase-2 offline: hostile head replaces helper; trusted base helper still fails"
+HOSTILE2="$ROOT/hostile2/scripts"
+mkdir -p "$HOSTILE2"
+cat > "$HOSTILE2/test-integrity.mjs" <<'HOSTILE'
+#!/usr/bin/env node
+if (process.argv[2] === 'compare') {
+  console.log('test-integrity: PASS (hostile always-green helper)');
+  process.exit(0);
+}
+process.exit(0);
+HOSTILE
+# Final job uses grader copy from merge-base, never head tree.
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3'; then
+  ok "hostile head always-green helper ignored; trusted base helper still fails"
+else
+  bad "trusted grader did not fail deletion (rc=$rc): $out"
+fi
+# Prove the hostile helper would self-approve if used
+out=$(node "$HOSTILE2/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "hostile helper would self-approve (why final never runs head code)" \
+  || bad "hostile helper fixture broken"
+
+echo "phase-2 offline: head deletes helper; base helper still grades"
+# Simulate: head tree has no helper; final job still has grader from merge-base.
+rm -f "$HOSTILE2/test-integrity.mjs"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3' \
+  && ok "head deletes helper; base/merge-base helper still grades" \
+  || bad "grader without head helper (rc=$rc): $out"
+
+echo "phase-2 offline: exact visible waiver passes; hidden/malformed/wrong/phantom fail"
+waiver_ok='Test-integrity: removed 3 for obsolete suite under #70'
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --waiver-file <(printf '%s\n' "$waiver_ok") \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+# bash 3.2 may not support process substitution with --waiver-file on all platforms;
+# write a real file instead.
+printf '%s\n' "$waiver_ok" > "$ART/waiver-ok.txt"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --waiver-file "$ART/waiver-ok.txt" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
+  && echo "$out" | grep -q 'removed 3' && echo "$out" | grep -q 'obsolete suite'; then
+  ok "exact visible waiver passes and is surfaced (inert --waiver-file)"
+else
+  bad "exact waiver via file (rc=$rc): $out"
+fi
+
+printf '%s\n' '<!-- Test-integrity: removed 3 for secretly -->' > "$ART/waiver-hidden.txt"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --waiver-file "$ART/waiver-hidden.txt" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ! echo "$out" | grep -q 'WAIVER accepted' \
+  && ok "hidden HTML waiver via --waiver-file fails closed" \
+  || bad "hidden waiver accepted (rc=$rc): $out"
+
+printf '%s\n' 'Test-integrity: removed 2 for undercount' > "$ART/waiver-wrong.txt"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --waiver-file "$ART/waiver-wrong.txt" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'wrong delta' \
+  && ok "wrong-delta waiver via --waiver-file fails closed" \
+  || bad "wrong-delta waiver (rc=$rc): $out"
+
+# Phantom waiver on non-shrinking suite
+write_metrics "$ART/same-b.json" 10 0 0
+write_metrics "$ART/same-h.json" 10 0 0
+printf '%s\n' 'Test-integrity: removed 3 for phantom' > "$ART/waiver-phantom.txt"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/same-b.json" --head "$ART/same-h.json" \
+  --waiver-file "$ART/waiver-phantom.txt" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "phantom waiver (no integrity reduction) fails closed" \
+  || bad "phantom waiver accepted (rc=$rc): $out"
+
+printf '%s\n' 'test-integrity: removed 3 for near' > "$ART/waiver-malformed.txt"
+out=$(node "$ART/grader/test-integrity.mjs" compare \
+  --base "$ART/base-m.json" --head "$ART/head-m.json" \
+  --waiver-file "$ART/waiver-malformed.txt" \
+  --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "malformed waiver label via --waiver-file fails closed" \
+  || bad "malformed waiver accepted (rc=$rc): $out"
+
+echo "phase-2 offline: missing/empty/duplicate/wrong-SHA/wrong-role/symlink/malformed/oversized artifacts fail"
+# missing
+rm -rf "$ART/bad"; mkdir -p "$ART/bad"
+if ! ti_validate_capture "$ART/bad" base "$MB_SHA" bad "$RID" "$ATT" 2>/dev/null; then
+  ok "missing artifact files fail validation"
+else
+  bad "missing artifact wrongly accepted"
+fi
+
+# empty exit-code
+write_capture "$ART/empty" base "$MB_SHA" "$RID" "$ATT" 10 1
+: > "$ART/empty/exit-code.txt"
+if ! ti_validate_capture "$ART/empty" base "$MB_SHA" empty "$RID" "$ATT" 2>/dev/null; then
+  ok "empty exit-code.txt fails validation"
+else
+  bad "empty exit-code accepted"
+fi
+
+# wrong SHA
+write_capture "$ART/wsha" base "$MB_SHA" "$RID" "$ATT" 10 0
+# overwrite metadata with wrong sha
+printf '%s\n' '{"role":"base","source_sha":"cccccccccccccccccccccccccccccccccccccccc","run_id":"99","run_attempt":"1"}' \
+  > "$ART/wsha/metadata.json"
+if ! ti_validate_capture "$ART/wsha" base "$MB_SHA" wsha "$RID" "$ATT" 2>/dev/null; then
+  ok "wrong source_sha fails validation"
+else
+  bad "wrong SHA accepted"
+fi
+
+# wrong role
+write_capture "$ART/wrole" head "$MB_SHA" "$RID" "$ATT" 10 0
+if ! ti_validate_capture "$ART/wrole" base "$MB_SHA" wrole "$RID" "$ATT" 2>/dev/null; then
+  ok "wrong role fails validation"
+else
+  bad "wrong role accepted"
+fi
+
+# duplicate / swapped roles: head artifact claiming role=base
+write_capture "$ART/dup" base "$HD_SHA" "$RID" "$ATT" 7 0
+if ! ti_validate_capture "$ART/dup" head "$HD_SHA" dup "$RID" "$ATT" 2>/dev/null; then
+  ok "duplicate/wrong-role head-as-base fails validation"
+else
+  bad "duplicate role accepted"
+fi
+
+# malformed metadata
+write_capture "$ART/mal" base "$MB_SHA" "$RID" "$ATT" 10 0
+printf '%s\n' 'not-json{' > "$ART/mal/metadata.json"
+if ! ti_validate_capture "$ART/mal" base "$MB_SHA" mal "$RID" "$ATT" 2>/dev/null; then
+  ok "malformed metadata.json fails validation"
+else
+  bad "malformed metadata accepted"
+fi
+
+# symlink file refused
+write_capture "$ART/sym" base "$MB_SHA" "$RID" "$ATT" 10 0
+rm -f "$ART/sym/test-output.txt"
+ln -s /etc/passwd "$ART/sym/test-output.txt"
+if ! ti_validate_capture "$ART/sym" base "$MB_SHA" sym "$RID" "$ATT" 2>/dev/null; then
+  ok "symlink artifact file refused"
+else
+  bad "symlink artifact accepted"
+fi
+
+# oversized > 8 MiB
+write_capture "$ART/big" base "$MB_SHA" "$RID" "$ATT" 10 0
+# Create a file just over 8 MiB (portable: dd)
+dd if=/dev/zero of="$ART/big/test-output.txt" bs=1024 count=8193 2>/dev/null \
+  || dd if=/dev/zero of="$ART/big/test-output.txt" bs=8193 count=1024 2>/dev/null
+if ! ti_validate_capture "$ART/big" base "$MB_SHA" big "$RID" "$ATT" 2>/dev/null; then
+  ok "oversized >8 MiB artifact fails validation"
+else
+  bad "oversized artifact accepted"
+fi
+
+echo "phase-2 offline: resolve/capture failure still runs final job and fails"
+# Simulate always() final: if any prior result != success → exit 1.
+sim_final() {
+  _resolve="$1"; _base="$2"; _head="$3"
+  if [[ "$_resolve" != "success" || "$_base" != "success" || "$_head" != "success" ]]; then
+    echo "test-integrity: prior job failure (fail closed)."
+    echo "  resolve=${_resolve} base=${_base} head=${_head}"
+    return 1
+  fi
+  return 0
+}
+sim_final failure success success; rc=$?
+[[ "$rc" -ne 0 ]] && ok "resolve failure → final fails closed (always() path)" \
+  || bad "resolve failure did not fail final"
+sim_final success failure success; rc=$?
+[[ "$rc" -ne 0 ]] && ok "base capture failure → final fails closed" \
+  || bad "base failure did not fail final"
+sim_final success success failure; rc=$?
+[[ "$rc" -ne 0 ]] && ok "head capture/upload failure → final fails closed" \
+  || bad "head failure did not fail final"
+sim_final success success success; rc=$?
+[[ "$rc" -eq 0 ]] && ok "all priors success → final proceeds to compare" \
+  || bad "success path blocked"
+
+echo "phase-2 offline: missing trusted helper at merge-base → update/rebase failure"
+# Resolve simulation: ls-tree empty → fail with explicit message
+sim_resolve_helper() {
+  _entry="$1"
+  if [[ -z "$_entry" ]]; then
+    echo "test-integrity: resolve failed — scripts/test-integrity.mjs missing at merge-base"
+    echo "test-integrity: update or rebase this PR onto a base that contains scripts/test-integrity.mjs as a regular blob (mode 100644 or 100755) at the merge-base, with unambiguous ancestry."
+    return 1
+  fi
+  _mode=$(printf '%s\n' "$_entry" | awk '{print $1}')
+  _type=$(printf '%s\n' "$_entry" | awk '{print $2}')
+  [[ "$_type" = "blob" ]] || { echo "not blob"; return 1; }
+  case "$_mode" in
+    100644|100755) return 0 ;;
+    120000) echo "symlink refused"; return 1 ;;
+    160000) echo "gitlink refused"; return 1 ;;
+    *) echo "bad mode"; return 1 ;;
+  esac
+}
+out=$(sim_resolve_helper "" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'update or rebase' \
+  && echo "$out" | grep -q 'missing' \
+  && ok "missing trusted helper yields explicit update/rebase failure" \
+  || bad "missing helper message (rc=$rc): $out"
+out=$(sim_resolve_helper "120000 blob deadbeef\tscripts/test-integrity.mjs" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "symlink mode 120000 helper refused at resolve" \
+  || bad "symlink helper accepted"
+out=$(sim_resolve_helper "160000 blob deadbeef\tscripts/test-integrity.mjs" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "gitlink mode 160000 helper refused at resolve" \
+  || bad "gitlink helper accepted"
+out=$(sim_resolve_helper "100644 blob deadbeef\tscripts/test-integrity.mjs" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "regular blob mode 100644 helper accepted at resolve" \
+  || bad "regular blob refused"
+out=$(sim_resolve_helper "100755 blob deadbeef\tscripts/test-integrity.mjs" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "regular blob mode 100755 helper accepted at resolve" \
+  || bad "executable blob refused"
+
+echo "phase-2 offline: base/head use separate job/workspace definitions"
+# Distinct job keys and distinct artifact names in the template
+if grep -c 'test-integrity-base-' "$CI_YML" | grep -q '[1-9]' \
+  && grep -c 'test-integrity-head-' "$CI_YML" | grep -q '[1-9]' \
+  && ! grep -A2 'test-integrity-base:' "$CI_YML" | grep -q 'test-integrity-head' \
+  && grep -q 'ti-artifact' "$CI_YML"; then
+  ok "base/head separate job keys, artifact names, and workspace paths"
+else
+  bad "base/head workspace isolation not defined in template"
+fi
+
+echo "phase-2 offline: fork head repository wiring present"
+if grep -q 'head\.repo\.full_name' "$CI_YML" \
+  && grep -q 'head_repo' "$CI_YML" \
+  && grep -q 'repository: \${{ needs.test-integrity-resolve.outputs.head_repo }}' "$CI_YML" \
+  && grep -q 'ref: \${{ needs.test-integrity-resolve.outputs.head_sha }}' "$CI_YML"; then
+  ok "fork head repository + exact head SHA checkout wiring"
+else
+  bad "fork head repository wiring missing"
+fi
+
+# Phase-2 replaces the phase-1 "must remain unwired" assertion with the exact
+# new contract above (four jobs, always(), trusted merge-base grader, etc.).
+# Pin that the old phase-1 ok() message is gone and the new contract is required.
+# Construct the banned phase-1 string in pieces so this sensor does not match itself.
+_p1_ban="ci/gibson-gate.yml unwired"
+_p1_ban="${_p1_ban} for test-integrity (phase-1 bootstrap"
+if ! grep -qF "$_p1_ban" "$SCRIPT_DIR/gate.test.sh" \
+  && grep -q 'phase-2 protected CI contract' "$SCRIPT_DIR/gate.test.sh" \
+  && grep -q 'test-integrity-resolve' "$CI_YML" \
+  && grep -qF 'if: ${{ always() }}' "$CI_YML"; then
+  ok "phase-1 bootstrap pin replaced with exact phase-2 contract (not merely removed)"
+else
+  bad "phase-1 bootstrap pin still present or phase-2 contract absent"
+fi
+unset _p1_ban
 
 # ---------------------------------------------------------------------------
 echo

@@ -1,36 +1,58 @@
-# The Gibson — green gate workflow (template)
+# The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
-# Fill <angle> placeholders from the repo's gate commands. This is the CI half of
-# docs/06 — the law that holds no matter which runtime wrote the code.
+# Fill <angle> placeholders from the repo's gate commands.
+#
+# STATUS: repository-only template. Installing this file does NOT make a repo
+# "protected." Live required-check / branch-protection audit and apply are
+# owner-owned under issue #68. Do not claim enforcement until the #68 canaries
+# prove the unique required check `test-integrity` actually ran and blocked.
+#
+# Protected test-integrity architecture (issue #70 phase 2):
+#   test-integrity-resolve → test-integrity-base + test-integrity-head → test-integrity
+# Grading authority is always the merge-base copy of scripts/test-integrity.mjs.
+# PR head, PR body, artifacts, paths, refs, SHAs, and YAML metadata are hostile.
+#
+# Merge queues: activation is blocked until equivalent merge_group support is
+# implemented and canaried. Do not enable a merge queue against this template alone.
 
 name: gibson-gate
+
+# pull_request only. Never pull_request_target or workflow_run.
+# No path filters — integrity must run on every PR including workflow edits.
 on:
   pull_request:
-  push:
-    branches: [main]
+
+# Deny all by default. Jobs grant least privilege only.
+permissions: {}
 
 jobs:
+  # ===========================================================================
+  # Green gate (generate → typecheck → lint → test → build)
+  # Regular pass/fail for head is owned here; test-integrity owns count ratchet.
+  # ===========================================================================
   gate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      # fetch-depth: 0 — the claim sensor below diffs the merge base against
-      # HEAD. Under the default shallow checkout the base ref is unreachable and
-      # the sensor fails the job rather than silently passing (issue #55).
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci --include=dev
+      # fetch-depth: 0 — claim sensor diffs merge base vs HEAD (issue #55).
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci --include=dev
 
-      # Claim isolation: PRs may not edit another session's claim row
-      - name: Fetch the PR base branch
-        if: github.event_name == 'pull_request'
+      - name: Fetch the PR base branch (claim isolation)
         # Via env, not ${{ }} inside the script: a branch name is attacker-controlled
         env:
           BASE_REF: ${{ github.base_ref }}
-        run: git fetch --no-tags --prune origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
-      - run: node scripts/check-active-work.mjs
-        if: github.event_name == 'pull_request'
+        run: git fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - name: Claim isolation
+        run: node scripts/check-active-work.mjs
 
       - run: <generate>      # e.g. npx prisma generate
       - run: <typecheck>     # e.g. npx tsc --noEmit
@@ -38,16 +60,530 @@ jobs:
       - run: <test>          # e.g. npx vitest run
       - run: <build>         # e.g. npm run build
 
-  # Layers 1–3 of docs/08 (hard-fail). Extend with authz/DAST/ux-eval jobs per
-  # ci/README.md as adoption matures.
+  # Layers 1–3 of docs/08 (hard-fail). Extend with authz/DAST/ux-eval per ci/README.
   security-fast:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Secrets (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: SAST (semgrep)
         run: pipx run semgrep ci --config p/owasp-top-ten --config p/secrets
       - name: Supply chain
         run: npm audit --audit-level=critical
+
+  # ===========================================================================
+  # Protected test-integrity — resolve (job 1 of 4)
+  # Consumes exact event base.sha / head.sha / head.repo. No branch-name shell
+  # interpolation for the integrity SHAs. Fails closed on missing helper,
+  # malformed SHA, ambiguous ancestry, or ref failure.
+  # ===========================================================================
+  test-integrity-resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      merge_base: ${{ steps.resolve.outputs.merge_base }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
+      head_repo: ${{ steps.resolve.outputs.head_repo }}
+    steps:
+      - name: Resolve merge-base and prove trusted helper blob
+        id: resolve
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          fail_closed() {
+            echo "test-integrity: resolve failed — $1" >&2
+            echo "test-integrity: update or rebase this PR onto a base that contains scripts/test-integrity.mjs as a regular blob (mode 100644 or 100755) at the merge-base, with unambiguous ancestry." >&2
+            exit 1
+          }
+
+          is_full_sha() {
+            # Exact 40 lowercase/uppercase hex chars; no short SHAs, no refs.
+            case "$1" in
+              [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          is_full_sha "$BASE_SHA" || fail_closed "malformed base.sha (need full 40-char hex)"
+          is_full_sha "$HEAD_SHA" || fail_closed "malformed head.sha (need full 40-char hex)"
+          case "$HEAD_REPO" in
+            */*) ;;
+            *) fail_closed "malformed head repository name" ;;
+          esac
+          case "$BASE_REPO" in
+            */*) ;;
+            *) fail_closed "malformed base repository name" ;;
+          esac
+
+          # Fresh repo; never checkout PR-head code into the resolve workspace authority.
+          work=$(mktemp -d)
+          cd "$work"
+          git init -q
+          git config --local protocol.file.allow never
+          # Authenticated fetch for private bases; token never printed.
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${BASE_REPO}.git"
+
+          # Sufficient history for merge-base (unshallow if needed).
+          git fetch --no-tags --prune origin "$BASE_SHA" || fail_closed "could not fetch base commit"
+          # Head may be on a fork — fetch by exact SHA only (no branch names).
+          if [ "$HEAD_REPO" = "$BASE_REPO" ]; then
+            git fetch --no-tags --prune origin "$HEAD_SHA" || fail_closed "could not fetch head commit from base repository"
+          else
+            git remote add headfork "https://x-access-token:${GH_TOKEN}@github.com/${HEAD_REPO}.git"
+            git fetch --no-tags --prune headfork "$HEAD_SHA" || fail_closed "could not fetch head commit from fork repository ${HEAD_REPO}"
+          fi
+
+          # Deepen until merge-base is computable (cap prevents infinite loop).
+          deepen=32
+          merge_base=""
+          i=0
+          while [ "$i" -lt 12 ]; do
+            if merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null); then
+              break
+            fi
+            git fetch --no-tags --prune --deepen="$deepen" origin "$BASE_SHA" || true
+            if [ "$HEAD_REPO" = "$BASE_REPO" ]; then
+              git fetch --no-tags --prune --deepen="$deepen" origin "$HEAD_SHA" || true
+            else
+              git fetch --no-tags --prune --deepen="$deepen" headfork "$HEAD_SHA" || true
+            fi
+            deepen=$((deepen * 2))
+            i=$((i + 1))
+          done
+          [ -n "$merge_base" ] || fail_closed "ambiguous or uncomputable merge-base (ancestry incomplete)"
+          is_full_sha "$merge_base" || fail_closed "merge-base is not a full SHA"
+
+          # Prove merge-base is an ancestor of both commits.
+          git merge-base --is-ancestor "$merge_base" "$BASE_SHA" \
+            || fail_closed "merge-base is not an ancestor of base.sha"
+          git merge-base --is-ancestor "$merge_base" "$HEAD_SHA" \
+            || fail_closed "merge-base is not an ancestor of head.sha"
+
+          # Prove scripts/test-integrity.mjs at merge-base is a regular Git blob
+          # (mode 100644 or 100755) — never symlink (120000), gitlink (160000), or tree.
+          # NUL-safe single entry via git ls-tree -z.
+          entry=""
+          if ! entry=$(git ls-tree -z "$merge_base" -- scripts/test-integrity.mjs | tr '\0' '\n' | head -n 1); then
+            fail_closed "git ls-tree failed for scripts/test-integrity.mjs at merge-base"
+          fi
+          [ -n "$entry" ] || fail_closed "scripts/test-integrity.mjs missing at merge-base ${merge_base}"
+
+          # ls-tree line: <mode> <type> <object>\t<path>
+          mode=$(printf '%s\n' "$entry" | awk '{print $1}')
+          objtype=$(printf '%s\n' "$entry" | awk '{print $2}')
+          case "$objtype" in
+            blob) ;;
+            *) fail_closed "scripts/test-integrity.mjs at merge-base is type=${objtype} (need blob, not symlink/gitlink/tree)" ;;
+          esac
+          case "$mode" in
+            100644|100755) ;;
+            120000) fail_closed "scripts/test-integrity.mjs at merge-base is a symlink (mode 120000) — refused" ;;
+            160000) fail_closed "scripts/test-integrity.mjs at merge-base is a gitlink (mode 160000) — refused" ;;
+            *) fail_closed "scripts/test-integrity.mjs at merge-base has refused mode=${mode} (need 100644 or 100755)" ;;
+          esac
+
+          # Lowercase SHAs for stable metadata comparison.
+          merge_base=$(printf '%s' "$merge_base" | tr 'A-F' 'a-f')
+          base_sha=$(printf '%s' "$BASE_SHA" | tr 'A-F' 'a-f')
+          head_sha=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f')
+
+          echo "merge_base=${merge_base}"
+          echo "base_sha=${base_sha}"
+          echo "head_sha=${head_sha}"
+          echo "head_repo=${HEAD_REPO}"
+          echo "merge_base=${merge_base}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          echo "head_repo=${HEAD_REPO}" >> "$GITHUB_OUTPUT"
+
+  # ===========================================================================
+  # Capture base metrics (job 2 of 4) — separate runner from head.
+  # Checks out exact merge-base from the base repository only.
+  # Literal install + test command from this trusted template (never PR-head
+  # .agents/gate.json). Capture raw output + exit code even when tests fail.
+  # ===========================================================================
+  test-integrity-base:
+    needs: test-integrity-resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact merge-base (base repository only)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.test-integrity-resolve.outputs.merge_base }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies (literal template command)
+        run: npm ci --include=dev
+
+      - name: Capture base test output and exit code
+        env:
+          ROLE: base
+          SOURCE_SHA: ${{ needs.test-integrity-resolve.outputs.merge_base }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # Install-time only: same literal test command as the gate job.
+          # Never read .agents/gate.json (PR-head / worktree attacker-controlled).
+          # Token form avoids shell treating a bare <test> placeholder as a redirect.
+          TEST_COMMAND: "__GIBSON_TEST_COMMAND__"
+        run: |
+          set -uo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/ti-artifact"
+          out="${GITHUB_WORKSPACE}/ti-artifact/test-output.txt"
+          if [ "${TEST_COMMAND}" = "__GIBSON_TEST_COMMAND__" ]; then
+            echo "test-integrity: TEST_COMMAND not calibrated at install — fail closed." >&2
+            echo "test-integrity: set TEST_COMMAND in this workflow to the same literal as the gate job test step (e.g. npx vitest run)." >&2
+            exit 1
+          fi
+          # Trusted workflow-file command only (not PR body, not gate.json).
+          set +e
+          bash -c "${TEST_COMMAND}" >"${out}" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "${GITHUB_WORKSPACE}/ti-artifact/exit-code.txt"
+          # Metadata: role + exact source SHA + run identity. Hostile later.
+          {
+            printf '{\n'
+            printf '  "role": "%s",\n' "$ROLE"
+            printf '  "source_sha": "%s",\n' "$SOURCE_SHA"
+            printf '  "run_id": "%s",\n' "$RUN_ID"
+            printf '  "run_attempt": "%s"\n' "$RUN_ATTEMPT"
+            printf '}\n'
+          } > "${GITHUB_WORKSPACE}/ti-artifact/metadata.json"
+          echo "base_test_rc=${rc} (nonzero is diagnostic; comparison still required)"
+
+      - name: Upload base capture artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-integrity-base-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ti-artifact/
+          if-no-files-found: error
+          retention-days: 5
+          include-hidden-files: false
+
+  # ===========================================================================
+  # Capture head metrics (job 3 of 4) — separate runner/workspace from base.
+  # Exact head.sha from the named head repository (including forks).
+  # Same fixed runner, Node version, literal install, literal test command.
+  # ===========================================================================
+  test-integrity-head:
+    needs: test-integrity-resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact head SHA (named head repository, forks included)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ needs.test-integrity-resolve.outputs.head_repo }}
+          ref: ${{ needs.test-integrity-resolve.outputs.head_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install dependencies (literal template command)
+        run: npm ci --include=dev
+
+      - name: Capture head test output and exit code
+        env:
+          ROLE: head
+          SOURCE_SHA: ${{ needs.test-integrity-resolve.outputs.head_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # Install-time only: same literal as base capture and the gate job test step.
+          TEST_COMMAND: "__GIBSON_TEST_COMMAND__"
+        run: |
+          set -uo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/ti-artifact"
+          out="${GITHUB_WORKSPACE}/ti-artifact/test-output.txt"
+          if [ "${TEST_COMMAND}" = "__GIBSON_TEST_COMMAND__" ]; then
+            echo "test-integrity: TEST_COMMAND not calibrated at install — fail closed." >&2
+            echo "test-integrity: set TEST_COMMAND in this workflow to the same literal as the gate job test step (e.g. npx vitest run)." >&2
+            exit 1
+          fi
+          set +e
+          bash -c "${TEST_COMMAND}" >"${out}" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "${GITHUB_WORKSPACE}/ti-artifact/exit-code.txt"
+          {
+            printf '{\n'
+            printf '  "role": "%s",\n' "$ROLE"
+            printf '  "source_sha": "%s",\n' "$SOURCE_SHA"
+            printf '  "run_id": "%s",\n' "$RUN_ID"
+            printf '  "run_attempt": "%s"\n' "$RUN_ATTEMPT"
+            printf '}\n'
+          } > "${GITHUB_WORKSPACE}/ti-artifact/metadata.json"
+          echo "head_test_rc=${rc}"
+
+      - name: Upload head capture artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: test-integrity-head-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ti-artifact/
+          if-no-files-found: error
+          retention-days: 5
+          include-hidden-files: false
+
+  # ===========================================================================
+  # Final comparison (job 4 of 4) — unique required check name: test-integrity
+  # Fresh third runner. Never executes PR-head code. Grader is merge-base helper
+  # only. Artifacts and PR body are hostile data. always() + fail-closed.
+  # ===========================================================================
+  test-integrity:
+    name: test-integrity
+    needs:
+      - test-integrity-resolve
+      - test-integrity-base
+      - test-integrity-head
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Fail closed if resolve or capture jobs did not succeed
+        if: >-
+          needs.test-integrity-resolve.result != 'success' ||
+          needs.test-integrity-base.result != 'success' ||
+          needs.test-integrity-head.result != 'success'
+        env:
+          RESOLVE_RESULT: ${{ needs.test-integrity-resolve.result }}
+          BASE_RESULT: ${{ needs.test-integrity-base.result }}
+          HEAD_RESULT: ${{ needs.test-integrity-head.result }}
+        run: |
+          set -euo pipefail
+          echo "test-integrity: prior job failure (fail closed)." >&2
+          echo "  resolve=${RESOLVE_RESULT} base=${BASE_RESULT} head=${HEAD_RESULT}" >&2
+          echo "test-integrity: any resolve, checkout, install, capture, or upload failure fails this required check." >&2
+          exit 1
+
+      - name: Checkout merge-base only (trusted helper source)
+        if: needs.test-integrity-resolve.result == 'success'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ needs.test-integrity-resolve.outputs.merge_base }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/test-integrity.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Prove trusted helper is a regular non-symlink file
+        if: needs.test-integrity-resolve.result == 'success'
+        env:
+          MERGE_BASE: ${{ needs.test-integrity-resolve.outputs.merge_base }}
+        run: |
+          set -euo pipefail
+          helper="scripts/test-integrity.mjs"
+          if [ ! -e "$helper" ]; then
+            echo "test-integrity: trusted helper missing after merge-base checkout (${MERGE_BASE}). Rebase/update onto a base that contains scripts/test-integrity.mjs." >&2
+            exit 1
+          fi
+          if [ -L "$helper" ]; then
+            echo "test-integrity: trusted helper is a symlink — refused." >&2
+            exit 1
+          fi
+          if [ ! -f "$helper" ]; then
+            echo "test-integrity: trusted helper is not a regular file — refused." >&2
+            exit 1
+          fi
+          # Copy grader out of the workspace before any hostile paths are introduced.
+          mkdir -p "${RUNNER_TEMP}/ti-grader"
+          cp "$helper" "${RUNNER_TEMP}/ti-grader/test-integrity.mjs"
+          chmod 0555 "${RUNNER_TEMP}/ti-grader/test-integrity.mjs"
+
+      - name: Download base capture artifact (hostile data)
+        if: needs.test-integrity-resolve.result == 'success' && needs.test-integrity-base.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-integrity-base-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ti-in/base
+
+      - name: Download head capture artifact (hostile data)
+        if: needs.test-integrity-resolve.result == 'success' && needs.test-integrity-head.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-integrity-head-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ti-in/head
+
+      - name: Fetch PR body as inert file (never interpolate into run script)
+        if: needs.test-integrity-resolve.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # PR body is hostile. Write to a file; pass only via --waiver-file.
+          api="https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}"
+          code=$(curl -sS -o "${RUNNER_TEMP}/pr-api.json" -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api")
+          if [ "$code" != "200" ]; then
+            echo "test-integrity: failed to fetch PR body (HTTP ${code}) — fail closed." >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, sys
+          path = __import__("os").environ["RUNNER_TEMP"] + "/pr-api.json"
+          out = __import__("os").environ["RUNNER_TEMP"] + "/pr-body.txt"
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+          body = data.get("body")
+          if body is None:
+              body = ""
+          if not isinstance(body, str):
+              print("test-integrity: PR body is not a string — fail closed.", file=sys.stderr)
+              sys.exit(1)
+          with open(out, "w", encoding="utf-8") as f:
+              f.write(body)
+          PY
+
+      - name: Validate artifacts and compare with trusted merge-base helper
+        if: needs.test-integrity-resolve.result == 'success' && needs.test-integrity-base.result == 'success' && needs.test-integrity-head.result == 'success'
+        env:
+          MERGE_BASE: ${{ needs.test-integrity-resolve.outputs.merge_base }}
+          EXPECT_BASE_SHA: ${{ needs.test-integrity-resolve.outputs.merge_base }}
+          EXPECT_HEAD_SHA: ${{ needs.test-integrity-resolve.outputs.head_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          # 8 MiB hard cap on each artifact file (existing contract).
+          MAX_BYTES: "8388608"
+        run: |
+          set -euo pipefail
+
+          fail() { echo "test-integrity: $1" >&2; exit 1; }
+
+          GRADER="${RUNNER_TEMP}/ti-grader/test-integrity.mjs"
+          [ -f "$GRADER" ] || fail "grader missing"
+          [ ! -L "$GRADER" ] || fail "grader must not be a symlink"
+
+          # --- validate one capture directory (hostile) ---
+          # Args: dir expected_role expected_sha
+          validate_capture() {
+            dir="$1"
+            expect_role="$2"
+            expect_sha="$3"
+            label="$4"
+
+            [ -d "$dir" ] || fail "${label}: capture directory missing (download/upload failure)"
+
+            meta="${dir}/metadata.json"
+            out="${dir}/test-output.txt"
+            ec="${dir}/exit-code.txt"
+
+            for f in "$meta" "$out" "$ec"; do
+              [ -e "$f" ] || fail "${label}: missing file $(basename "$f")"
+              [ ! -L "$f" ] || fail "${label}: $(basename "$f") is a symlink — refused"
+              [ -f "$f" ] || fail "${label}: $(basename "$f") is not a regular file"
+              # Size cap (8 MiB) — apply to every hostile file.
+              sz=$(wc -c < "$f" | tr -d ' ')
+              if [ "$sz" -gt "$MAX_BYTES" ]; then
+                fail "${label}: $(basename "$f") exceeds 8 MiB limit (${sz} bytes)"
+              fi
+            done
+
+            # metadata.json must be unique-role / exact SHA / matching run identity
+            python3 - "$meta" "$expect_role" "$expect_sha" "$RUN_ID" "$RUN_ATTEMPT" "$label" <<'PY'
+          import json, sys
+          path, expect_role, expect_sha, run_id, run_attempt, label = sys.argv[1:7]
+          try:
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+          except Exception as e:
+              print(f"test-integrity: {label}: metadata.json malformed: {e}", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(data, dict):
+              print(f"test-integrity: {label}: metadata.json must be an object", file=sys.stderr)
+              sys.exit(1)
+          role = data.get("role")
+          sha = data.get("source_sha")
+          rid = str(data.get("run_id", ""))
+          att = str(data.get("run_attempt", ""))
+          if role != expect_role:
+              print(f"test-integrity: {label}: wrong role {role!r} (expected {expect_role!r})", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(sha, str) or sha.lower() != expect_sha.lower():
+              print(f"test-integrity: {label}: wrong source_sha {sha!r} (expected {expect_sha!r})", file=sys.stderr)
+              sys.exit(1)
+          if rid != str(run_id):
+              print(f"test-integrity: {label}: wrong run_id {rid!r} (expected {run_id!r})", file=sys.stderr)
+              sys.exit(1)
+          if att != str(run_attempt):
+              print(f"test-integrity: {label}: wrong run_attempt {att!r} (expected {run_attempt!r})", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+            # exit-code.txt: single integer line, nonempty
+            ec_val=$(tr -d ' \t\r' < "$ec")
+            [ -n "$ec_val" ] || fail "${label}: exit-code.txt empty"
+            case "$ec_val" in
+              *[!0-9-]* | "" ) fail "${label}: exit-code.txt malformed (${ec_val})" ;;
+            esac
+
+            # test-output may be empty only if the suite truly printed nothing —
+            # parse will fail closed on unparseable; require the file exist (done).
+            # Nonempty preferred; zero-byte output is allowed to reach parse (fails closed there).
+            :
+
+            echo "${label}_test_rc=${ec_val} (diagnostic; regular gate owns head pass/fail)"
+          }
+
+          BASE_DIR="${RUNNER_TEMP}/ti-in/base"
+          HEAD_DIR="${RUNNER_TEMP}/ti-in/head"
+
+          validate_capture "$BASE_DIR" "base" "$EXPECT_BASE_SHA" "base"
+          validate_capture "$HEAD_DIR" "head" "$EXPECT_HEAD_SHA" "head"
+
+          # Uniqueness: base and head roles must not be swapped / duplicated paths.
+          [ "$BASE_DIR" != "$HEAD_DIR" ] || fail "base and head capture paths must be distinct"
+
+          mkdir -p "${RUNNER_TEMP}/ti-metrics"
+          node "$GRADER" parse \
+            --input "${BASE_DIR}/test-output.txt" \
+            --out "${RUNNER_TEMP}/ti-metrics/base.json"
+          node "$GRADER" parse \
+            --input "${HEAD_DIR}/test-output.txt" \
+            --out "${RUNNER_TEMP}/ti-metrics/head.json"
+
+          set +e
+          node "$GRADER" compare \
+            --base "${RUNNER_TEMP}/ti-metrics/base.json" \
+            --head "${RUNNER_TEMP}/ti-metrics/head.json" \
+            --waiver-file "${RUNNER_TEMP}/pr-body.txt" \
+            --trusted-source "merge-base:${MERGE_BASE}"
+          ti_rc=$?
+          set -e
+
+          echo "test_integrity_rc=${ti_rc}"
+          exit "$ti_rc"
