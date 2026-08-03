@@ -1,0 +1,126 @@
+{
+  "schema": "gibson.toolchain-lock/v1",
+  "version": "1.0.0",
+  "recipe": "red-team.yaml",
+  "goose_recipe_schema": "1.0.0",
+  "retrieved_utc": "2026-08-03",
+  "notes": "Exact pins only. No latest/stable/main/master/*/^/~ tags or version ranges. Bundled Goose extensions may be named without an external version when documented as bundled with the pinned Goose binary. Paid/credential tools are pin-only and owner-gated for execution. Do not invent tokens or claim gated tools ran. Do not commit generated run digests — compute recipe/lock digests at stamp time with the instructions below.",
+  "digest_instructions": {
+    "macOS": {
+      "recipe_sha256": "shasum -a 256 playbooks/recipes/red-team.yaml | awk '{print $1}'",
+      "toolchain_lock_sha256": "shasum -a 256 playbooks/recipes/red-team.toolchain.json | awk '{print $1}'",
+      "target_profile_sha256": "shasum -a 256 <target-profile-path> | awk '{print $1}'"
+    },
+    "portable": {
+      "recipe_sha256": "sha256sum playbooks/recipes/red-team.yaml | awk '{print $1}'",
+      "toolchain_lock_sha256": "sha256sum playbooks/recipes/red-team.toolchain.json | awk '{print $1}'",
+      "target_profile_sha256": "sha256sum <target-profile-path> | awk '{print $1}'"
+    },
+    "commit_policy": "Do not commit generated run digests. Stamp digests into the dated findings ledger at run time only."
+  },
+  "tools": [
+    {
+      "id": "goose-cli",
+      "name": "Goose CLI",
+      "kind": "cli",
+      "version": "1.45.0",
+      "identity": "v1.45.0",
+      "platform": "darwin-arm64",
+      "asset": "goose-aarch64-apple-darwin.tar.gz",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "90c50d653d7fd978ec5d436b548eca8613dc2d26d028b486b7c52271267ec500"
+      },
+      "source_url": "https://github.com/aaif-goose/goose/releases/download/v1.45.0/goose-aarch64-apple-darwin.tar.gz",
+      "source_meta_url": "https://github.com/aaif-goose/goose/releases/tag/v1.45.0",
+      "retrieved_utc": "2026-08-03",
+      "execution": "offline-validate-only",
+      "notes": "Strategy-pinned in docs/GOOSE-STRATEGY.md and adapters/goose/README.md. Do not change without strategy update. Live goose run remains Mark-gated (#28)."
+    },
+    {
+      "id": "gitleaks",
+      "name": "gitleaks",
+      "kind": "cli",
+      "version": "8.30.1",
+      "identity": "v8.30.1",
+      "platform": "darwin-arm64",
+      "asset": "gitleaks_8.30.1_darwin_arm64.tar.gz",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+      },
+      "source_url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz",
+      "source_meta_url": "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1",
+      "retrieved_utc": "2026-08-03",
+      "execution": "pin-only",
+      "notes": "PROTOCOL Phase 2 secrets. CI also references gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 (v2.3.9); this entry pins the standalone CLI release used for a lab run."
+    },
+    {
+      "id": "semgrep",
+      "name": "Semgrep",
+      "kind": "cli",
+      "version": "1.172.0",
+      "identity": "1.172.0",
+      "package": "semgrep==1.172.0",
+      "distribution": "pypi",
+      "asset": "semgrep-1.172.0.tar.gz",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "7377cc350c64c7b83de20090cb2843d875da1d806690fd604e446ed544b56d71"
+      },
+      "source_url": "https://pypi.org/project/semgrep/1.172.0/",
+      "source_meta_url": "https://pypi.org/pypi/semgrep/1.172.0/json",
+      "retrieved_utc": "2026-08-03",
+      "execution": "pin-only",
+      "notes": "PROTOCOL Phase 2 SAST. Pin the PyPI release; do not use pipx run without an exact version."
+    },
+    {
+      "id": "trufflehog",
+      "name": "TruffleHog",
+      "kind": "cli",
+      "version": "3.96.0",
+      "identity": "v3.96.0",
+      "platform": "darwin-arm64",
+      "asset": "trufflehog_3.96.0_darwin_arm64.tar.gz",
+      "digest": {
+        "algorithm": "sha256",
+        "value": "87478306b95ca2420cfb844b7582383ac60b922e262350a0088e797f328d2e62"
+      },
+      "source_url": "https://github.com/trufflesecurity/trufflehog/releases/download/v3.96.0/trufflehog_3.96.0_darwin_arm64.tar.gz",
+      "source_meta_url": "https://github.com/trufflesecurity/trufflehog/releases/tag/v3.96.0",
+      "retrieved_utc": "2026-08-03",
+      "execution": "pin-only",
+      "notes": "PROTOCOL Phase 2 secrets (full git history)."
+    },
+    {
+      "id": "socket-cli",
+      "name": "Socket CLI",
+      "kind": "cli",
+      "version": "1.1.147",
+      "identity": "socket@1.1.147",
+      "package": "socket@1.1.147",
+      "distribution": "npm",
+      "asset": "socket-1.1.147.tgz",
+      "digest": {
+        "algorithm": "sha512-integrity",
+        "value": "sha512-TZWg3JQPuykBb1XKWVhmYQh+Zl1C0qU0nUxVzzPM5Q/AbC0oQGC9yKDmGQhizy/KLT64I671UjTvrjQ9MBOvGQ=="
+      },
+      "source_url": "https://registry.npmjs.org/socket/-/socket-1.1.147.tgz",
+      "source_meta_url": "https://registry.npmjs.org/socket/1.1.147",
+      "retrieved_utc": "2026-08-03",
+      "execution": "owner-gated",
+      "notes": "PROTOCOL Phase 2 dependencies (Socket.dev). Client is pinned; API use requires owner-supplied Socket credentials and cost approval. Do not invent a token. Do not claim this tool ran without an authorized #28 lab."
+    }
+  ],
+  "containers": [],
+  "mcp_packages": [],
+  "bundled_extensions": [
+    {
+      "id": "developer",
+      "name": "developer",
+      "type": "builtin",
+      "bundled_with": "goose-cli@1.45.0",
+      "notes": "Official Goose builtin bundled with the pinned CLI binary (shell + filesystem). No external package version required."
+    }
+  ]
+}
