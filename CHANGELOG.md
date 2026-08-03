@@ -10,6 +10,46 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+Protected test-integrity CI template (issue #70 phase 2) — repository-only, inert until #68.
+
+- **`ci/gibson-gate.yml`** — four isolated jobs on `pull_request` only:
+  `test-integrity-resolve` → `test-integrity-base` + `test-integrity-head` →
+  unique required-check name **`test-integrity`** (`if: ${{ always() }}`).
+  Grading authority is always the merge-base copy of `scripts/test-integrity.mjs`
+  (regular blob mode `100644`/`100755` only). Base and head capture run on
+  separate runners with literal install + `TEST_COMMAND` from the trusted
+  template (never PR-head `.agents/gate.json`). Artifacts carry role + exact
+  source SHA + run-id/run-attempt; the final job treats them as hostile data
+  (symlink / wrong role / wrong SHA / empty / malformed / >8 MiB fail closed).
+  PR body is fetched with `pull-requests: read`, written as an inert file, and
+  passed via `--waiver-file`. Workflow-level `permissions: {}`; jobs grant only
+  `contents: read` (final also `pull-requests: read`). Every third-party action
+  is pinned to a full immutable commit SHA; `persist-credentials: false`; no
+  caches, secrets, environments, OIDC, self-hosted runners, path filters, or
+  `continue-on-error`. Green gate + security-fast jobs remain, hardened the same
+  way. **Does not** enable required checks or branch protection.
+- **`scripts/tests/gate.test.sh`** — offline sensors for the phase-2 contract:
+  failing-base 10→7 still compares, hostile always-green head helper ignored,
+  head-deleted helper still graded by merge-base copy, exact/hidden/wrong/phantom
+  waivers via `--waiver-file`, artifact validation (missing/empty/duplicate/
+  wrong-SHA/wrong-role/symlink/malformed/oversized), prior-job failure still
+  fails the final check, fork head-repo + exact SHA wiring, missing trusted
+  helper → update/rebase message, least-permissions / immutable SHA / always()
+  static pins. Phase-1 “must remain unwired” assertion replaced with this
+  contract (not merely removed).
+- **Docs / install guidance:** `docs/06-quality-gates.md`, `ci/README.md`,
+  `scripts/README.md`, `playbooks/reviewer.md`, `skills/gibson-setup/SKILL.md`
+  separate **template install** from **live activation**. Issue **#68** owns
+  required-check / branch-protection audit and apply, canaries, CODEOWNERS /
+  rulesets / fork policy / merge-queue policy. No target is “protected” until
+  the exact live canaries prove the workflow ran and `test-integrity` is
+  required. Merge-queue activation is blocked until equivalent `merge_group`
+  support is implemented and canaried.
+- **Migration:** copy the updated `ci/gibson-gate.yml`, vendor
+  `scripts/test-integrity.mjs` (and `check-active-work.mjs`), calibrate gate
+  placeholders + `TEST_COMMAND` on both capture jobs. Owner still must activate
+  the required check under #68 — this release does not claim live enforcement.
+
 The solo loop stops handing off work nobody reviewed (#55).
 
 - **`scripts/loop.sh`** — the cross-vendor review in front of a supervisor handoff

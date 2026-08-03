@@ -22,12 +22,23 @@ for free.
    Reuse the repo's existing CI if present; add the missing jobs only.
    **Verify every referenced script actually exists in the TARGET repo before
    installing any workflow from `ci/`.** `ci/gibson-gate.yml` runs
-   `node scripts/check-active-work.mjs`; that script now ships in the Gibson repo
-   (`scripts/check-active-work.mjs`, the claim-isolation sensor from issue #55),
-   so copy it into the target alongside the workflow. It needs `fetch-depth: 0`
-   to reach the merge base. Anything the workflow references that you have not
-   vendored into the target must be vendored, stubbed, or trimmed — a missing
-   script fails every PR with module-not-found.
+   `node scripts/check-active-work.mjs` (claim isolation, issue #55) and the
+   protected **test-integrity** four-job path (issue #70) that grades with the
+   merge-base copy of `scripts/test-integrity.mjs` only. Vendor **both** scripts
+   into the target alongside the workflow. Calibrate `<generate>`/`<typecheck>`/
+   `<lint>`/`<test>`/`<build>` **and** set `TEST_COMMAND` on both
+   `test-integrity-base` and `test-integrity-head` to the same literal as the
+   gate test step — never read PR-head `.agents/gate.json` for capture.
+   Claim isolation needs `fetch-depth: 0` on the green-gate job.
+   Anything the workflow references that you have not vendored must be vendored,
+   stubbed, or trimmed — a missing script fails every PR with module-not-found.
+   **Install ≠ protect:** copying `gibson-gate.yml` is inert until the owner
+   makes `test-integrity` a required check and runs the #68 canaries (no-change
+   pass, deletion/skip/hostile-helper/failing-base/missing-artifact fails, exact
+   waiver pass, workflow-file modification protection). Branch protection,
+   rulesets, fork policy, merge-queue policy, and credentials are owner Ask
+   Contract items under #68 — never agent-applied. Merge queues stay off until
+   equivalent `merge_group` support is implemented and canaried.
 3. **Risk classifier** — Tier-C auto-labeling for ALL Law 7 categories: money,
    auth, consent/PII, security boundaries, production data (schema/migrations
    included). Start from the Gibson's own `ci/` workflows; where a needed gate
