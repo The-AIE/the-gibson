@@ -1146,28 +1146,18 @@ for i, t in enumerate(tools):
                 "%s (%s) version must be supported core pin %r (got %r)"
                 % (where, tid, prof["version"], t.get("version"))
             )
-        # Exact identity: canonical profile identity, or for package tools a
-        # package-shaped pin that names the same package + version. Bare/v-
-        # prefixed version equal to the pin is also allowed. malware@pin and
-        # other wrong-name package identities are rejected.
+        # Exact identity: profile identity string byte-for-byte after only
+        # documented normalization (str() of a non-empty field). Reject bare
+        # version, alternate v-prefix, and package-shaped shorthands even when
+        # version-equivalent (e.g. gitleaks 8.30.1 != v8.30.1; semgrep
+        # v1.172.0/semgrep@1.172.0 != 1.172.0; socket v1.1.147 != socket@1.1.147).
         ident_s = t.get("identity")
         if ident_s not in (None, ""):
-            allowed_idents = {
-                prof["identity"],
-                prof["version"],
-                "v" + prof["version"],
-            }
-            if "package" in prof:
-                allowed_idents.add(prof["package"])
-                pkg_parsed = package_claimed_pin(prof["package"])
-                if pkg_parsed is not None:
-                    allowed_idents.add("%s@%s" % (pkg_parsed[0], prof["version"]))
-                    allowed_idents.add("%s==%s" % (pkg_parsed[0], prof["version"]))
-            if str(ident_s) not in allowed_idents:
+            if str(ident_s) != prof["identity"]:
                 errors.append(
-                    "%s (%s) identity must be exact canonical form for pin %r "
-                    "(got %r; wrong-name package identity rejected)"
-                    % (where, tid, prof["version"], ident_s)
+                    "%s (%s) identity must equal exact profile identity %r "
+                    "(got %r; shorthand/alternate prefix/package forms rejected)"
+                    % (where, tid, prof["identity"], ident_s)
                 )
         # Exact execution mode per tool (enum shape alone is not enough)
         if t.get("execution") not in (None, ""):
@@ -1398,10 +1388,25 @@ def parse_image_digest_hex(val):
     parsed = parse_image_locator(val)
     return None if parsed is None else parsed[1]
 
+# Closed key set for every container entry shape. One supported closed shape
+# (image@sha256 or artifact@sha256) plus documented equal-only aliases only.
+# Unknown keys always fail — even when another valid locator is present.
+CONTAINER_ALLOWED_KEYS = {
+    "id", "name",
+    "image", "artifact",          # primary immutable locators (exactly one)
+    "digest",                     # equal companion digest object/string
+    "repository", "repo",         # equal-only repository path aliases
+    "identity", "ref",            # equal-only identity/locator aliases
+    "tag", "version",             # never sufficient alone; floating rejected
+}
+
 def check_container_entry(c, where):
     """Every container needs exactly one immutable image/artifact locator:
     registry/repository identity + @sha256:<64hex>. A free-standing digest
     (no repository identity) is not a locator. Tags/semver tags are not enough.
+
+    Closed-world: only CONTAINER_ALLOWED_KEYS. Unknown keys fail even if a
+    valid image/artifact locator is also present (no evil_locator adjacency).
 
     Cross-field consistency: any redundant repository/name/identity/digest/image/
     artifact claim must be absent or exactly agree with the single canonical
@@ -1409,6 +1414,14 @@ def check_container_entry(c, where):
     if not isinstance(c, dict):
         errors.append("%s not object" % where)
         return
+
+    for k in c.keys():
+        if k not in CONTAINER_ALLOWED_KEYS:
+            errors.append(
+                "%s unknown/extra container key: %s "
+                "(closed schema; unknown keys fail even with a valid locator)"
+                % (where, k)
+            )
 
     # Collect documented locator fields (image / artifact only — unknown keys do not pin).
     locators = []  # (field, full_value, repo_norm, digest_hex)
@@ -1625,12 +1638,32 @@ def check_container_entry(c, where):
                     % (where, val)
                 )
 
+# Closed key set for every MCP entry shape. Exactly one of package / git /
+# artifact completed shapes, plus documented equal-only aliases within that
+# shape. Unknown keys always fail even with another valid locator present.
+MCP_ALLOWED_KEYS = {
+    "id", "name",
+    # package shape
+    "package", "version", "identity",
+    # git/source shape
+    "source", "repository", "repo", "url", "git", "source_url",
+    "ref", "commit", "revision", "sha",
+    # artifact shape
+    "artifact", "asset", "artifact_url", "tarball",
+    "digest",
+    # mutable side fields (always rejected when present, but known keys)
+    "tag", "branch",
+}
+
 def check_mcp_entry(c, where):
     """Every MCP entry needs exactly one immutable executable/source locator:
       (1) exact package identity + exact canonical version
       (2) exact git/source identity + full 40-hex commit
       (3) artifact identity + sha256 digest
     Id/name-only, empty, incomplete, cross-wired, or unknown-key pins fail closed.
+
+    Closed-world: only MCP_ALLOWED_KEYS. Unknown keys fail even if a valid
+    package/git/artifact locator is also present (no evil_locator adjacency).
 
     Cross-field consistency: parse one canonical identity + immutable pin per
     shape. Any redundant name/package/version/identity/source/ref/artifact/digest
@@ -1639,6 +1672,14 @@ def check_mcp_entry(c, where):
     if not isinstance(c, dict):
         errors.append("%s not object" % where)
         return
+
+    for k in c.keys():
+        if k not in MCP_ALLOWED_KEYS:
+            errors.append(
+                "%s unknown/extra MCP key: %s "
+                "(closed schema; unknown keys fail even with a valid locator)"
+                % (where, k)
+            )
 
     shapes = []  # completed locator shape names
 
@@ -2053,6 +2094,127 @@ for list_key in ("containers", "mcp_packages"):
             check_container_entry(c, where)
         else:
             check_mcp_entry(c, where)
+
+# ---------------------------------------------------------------------------
+# bundled_extensions — required closed-world exact shipped structure.
+# Exact type/cardinality/entry key sets; order-insensitive content match to
+# the shipped developer builtin; cross-bind bundled_with to locked Goose
+# identity/version and to the recipe developer extension contract
+# (type=builtin, name=developer). No omissions/extras/unknown keys/duplicates.
+# ---------------------------------------------------------------------------
+BUNDLED_EXT_ALLOWED_KEYS = {"id", "name", "type", "bundled_with", "notes"}
+# Exact shipped entry fields (notes required non-empty; content may vary in
+# prose but key must be present). Identity fields are exact.
+BUNDLED_EXT_CANON = {
+    "id": "developer",
+    "name": "developer",
+    "type": "builtin",
+}
+# goose-cli pin used for bundled_with cross-bind (from CORE_TOOL_PROFILES).
+_goose_prof = CORE_TOOL_PROFILES.get("goose-cli") or {}
+_goose_ver = str(_goose_prof.get("version") or "1.45.0")
+BUNDLED_WITH_CANON = "goose-cli@%s" % _goose_ver
+
+if "bundled_extensions" not in data:
+    errors.append(
+        "lock missing required field: bundled_extensions "
+        "(exact shipped developer builtin contract)"
+    )
+else:
+    bexts = data.get("bundled_extensions")
+    if not isinstance(bexts, list):
+        errors.append("bundled_extensions must be a list")
+    else:
+        # Exact cardinality of the shipped lock (one developer builtin).
+        if len(bexts) != 1:
+            errors.append(
+                "bundled_extensions must contain exactly 1 entry "
+                "(shipped developer builtin; got %d; no extras/omissions)"
+                % len(bexts)
+            )
+        seen_bext_ids = set()
+        for j, be in enumerate(bexts):
+            where_b = "bundled_extensions[%d]" % j
+            if not isinstance(be, dict):
+                errors.append("%s not object" % where_b)
+                continue
+            for k in be.keys():
+                if k not in BUNDLED_EXT_ALLOWED_KEYS:
+                    errors.append(
+                        "%s unknown/extra key: %s "
+                        "(closed bundled_extensions schema)" % (where_b, k)
+                    )
+            for rk in BUNDLED_EXT_ALLOWED_KEYS:
+                if rk not in be or be.get(rk) in (None, ""):
+                    errors.append(
+                        "%s missing required field %s" % (where_b, rk)
+                    )
+            bid = be.get("id")
+            if bid not in (None, ""):
+                if bid in seen_bext_ids:
+                    errors.append(
+                        "duplicate bundled_extensions id: %s" % bid
+                    )
+                seen_bext_ids.add(bid)
+            # Exact identity fields for the shipped developer contract
+            for field, expected in BUNDLED_EXT_CANON.items():
+                val = be.get(field)
+                if val not in (None, "") and str(val) != expected:
+                    errors.append(
+                        "%s.%s must be exact shipped %r (got %r; "
+                        "recipe developer extension contract)"
+                        % (where_b, field, expected, val)
+                    )
+            # Cross-bind bundled_with to exact locked Goose CLI pin
+            bw = be.get("bundled_with")
+            if bw not in (None, ""):
+                if str(bw) != BUNDLED_WITH_CANON:
+                    errors.append(
+                        "%s.bundled_with must equal exact locked Goose "
+                        "identity %r (got %r; cross-bound to goose-cli "
+                        "version %r)"
+                        % (where_b, BUNDLED_WITH_CANON, bw, _goose_ver)
+                    )
+                # Also require goose-cli tool pin agrees when present
+                if goose is not None:
+                    gver = str(goose.get("version") or "")
+                    if gver and gver != _goose_ver:
+                        errors.append(
+                            "%s.bundled_with cross-bind: goose-cli version "
+                            "%r disagrees with profile pin %r"
+                            % (where_b, gver, _goose_ver)
+                        )
+                    expected_bw = "goose-cli@%s" % gver if gver else BUNDLED_WITH_CANON
+                    if str(bw) != expected_bw and str(bw) != BUNDLED_WITH_CANON:
+                        errors.append(
+                            "%s.bundled_with %r disagrees with goose-cli@%s"
+                            % (where_b, bw, gver)
+                        )
+            # type must remain builtin (recipe developer extension contract)
+            if be.get("type") not in (None, "") and str(be.get("type")) != "builtin":
+                errors.append(
+                    "%s.type must be 'builtin' (recipe developer extension)"
+                    % where_b
+                )
+            if be.get("name") not in (None, "") and str(be.get("name")) != "developer":
+                # already covered by CANON exact match; keep explicit signal
+                pass
+        # Order-insensitive content: required id set must be exactly {developer}
+        if isinstance(bexts, list) and len(bexts) >= 1:
+            expected_ids = {"developer"}
+            if seen_bext_ids and seen_bext_ids != expected_ids:
+                # only report when cardinality matched enough to inspect ids
+                missing_b = expected_ids - seen_bext_ids
+                extra_b = seen_bext_ids - expected_ids
+                for m in sorted(missing_b):
+                    errors.append(
+                        "bundled_extensions missing required id: %s" % m
+                    )
+                for e in sorted(extra_b):
+                    errors.append(
+                        "bundled_extensions unsupported extra id: %s "
+                        "(exact set is developer)" % e
+                    )
 
 # digest_instructions closed schema + exact commands already validated above
 # (macOS + portable + commit_policy). Keep a minimal presence cross-check so
@@ -4130,13 +4292,16 @@ for t in data["tools"]:
 out=$(check_lock_py "$ROOT/ok-lock-tool-socket-integrity-equal.json" 2>&1); rc=$?
 expect_pass "green: socket integrity equal digest.value" "$out" "$rc"
 
-lock_mutant "$ROOT/ok-lock-tool-semgrep-package-identity.json" '
+# Package-shaped identity is NOT an allowed alternate for core tools whose
+# profile identity is the bare pin (semgrep → "1.172.0"). Reject even when
+# version-equivalent to package/version fields.
+lock_mutant "$ROOT/bad-lock-tool-semgrep-package-identity.json" '
 for t in data["tools"]:
     if t.get("id") == "semgrep":
         t["identity"] = "semgrep@1.172.0"
 '
-out=$(check_lock_py "$ROOT/ok-lock-tool-semgrep-package-identity.json" 2>&1); rc=$?
-expect_pass "green: semgrep identity package@pin matching package/version" "$out" "$rc"
+out=$(check_lock_py "$ROOT/bad-lock-tool-semgrep-package-identity.json" 2>&1); rc=$?
+expect_fail "red: semgrep identity package@pin (not exact profile identity) fails" "$out" "$rc" "identity\|exact profile\|shorthand\|package"
 
 lock_mutant "$ROOT/ok-lock-tool-download-url-equal.json" '
 for t in data["tools"]:
@@ -4549,6 +4714,196 @@ expect_pass "green: digest_instructions exact macOS+portable recipe commands" "$
 
 out=$(check_lock_py "$TOOLCHAIN_LOCK" 2>&1); rc=$?
 expect_pass "green: shipped lock closed-world exact profile holds" "$out" "$rc"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: closed-schema bundled/container/MCP/identity residual (10 probes)"
+# ---------------------------------------------------------------------------
+# Fresh 29-probe closed-schema expansion found exactly 10 rc=0 fail-opens:
+#   bundled_extensions allowed top-level but never structurally validated:
+#     1. delete bundled_extensions
+#     2. add an extra evil builtin
+#     3. change bundled extension name to evil
+#     4. change bundled_with to goose-cli@9.9.9
+#     5. add unknown child key
+#   container/MCP not closed when a valid canonical locator remains:
+#     6. valid container locator + unknown evil_locator
+#     7. valid MCP locator + unknown evil_locator
+#   core exact identity still accepts shorthand variants:
+#     8. gitleaks identity 8.30.1 instead of exact v8.30.1
+#     9. semgrep identity v1.172.0 instead of exact 1.172.0
+#    10. socket identity v1.1.147 instead of exact socket@1.1.147
+# Plus one adjacency sweep over bundled/container/MCP unknown keys.
+
+# 1) delete bundled_extensions
+lock_mutant "$ROOT/bad-lock-bundled-ext-deleted.json" '
+del data["bundled_extensions"]
+'
+out=$(check_lock_py "$ROOT/bad-lock-bundled-ext-deleted.json" 2>&1); rc=$?
+expect_fail "red: deleting bundled_extensions fails" "$out" "$rc" "bundled_extensions\|missing required"
+
+# 2) extra evil builtin
+lock_mutant "$ROOT/bad-lock-bundled-ext-extra-evil.json" '
+data["bundled_extensions"] = list(data.get("bundled_extensions") or []) + [{
+    "id": "evil",
+    "name": "evil",
+    "type": "builtin",
+    "bundled_with": "goose-cli@1.45.0",
+    "notes": "unauthorized extra builtin",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-bundled-ext-extra-evil.json" 2>&1); rc=$?
+expect_fail "red: extra evil bundled_extensions builtin fails" "$out" "$rc" "bundled_extensions\|exactly 1\|extra\|evil"
+
+# 3) change bundled extension name to evil
+lock_mutant "$ROOT/bad-lock-bundled-ext-name-evil.json" '
+for be in data.get("bundled_extensions") or []:
+    be["name"] = "evil"
+'
+out=$(check_lock_py "$ROOT/bad-lock-bundled-ext-name-evil.json" 2>&1); rc=$?
+expect_fail "red: bundled_extensions name evil fails" "$out" "$rc" "bundled_extensions\|name\|developer\|evil"
+
+# 4) change bundled_with to goose-cli@9.9.9
+lock_mutant "$ROOT/bad-lock-bundled-ext-with-999.json" '
+for be in data.get("bundled_extensions") or []:
+    be["bundled_with"] = "goose-cli@9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-bundled-ext-with-999.json" 2>&1); rc=$?
+expect_fail "red: bundled_with goose-cli@9.9.9 fails" "$out" "$rc" "bundled_with\|goose-cli@1\.45\.0\|9\.9\.9"
+
+# 5) unknown child key on bundled extension
+lock_mutant "$ROOT/bad-lock-bundled-ext-unknown-key.json" '
+for be in data.get("bundled_extensions") or []:
+    be["evil_key"] = 1
+'
+out=$(check_lock_py "$ROOT/bad-lock-bundled-ext-unknown-key.json" 2>&1); rc=$?
+expect_fail "red: bundled_extensions unknown child key fails" "$out" "$rc" "unknown/extra key\|evil_key\|bundled_extensions"
+
+# 6) valid container locator + unknown evil_locator (adjacency fail-open)
+lock_mutant "$ROOT/bad-lock-container-evil-locator.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "evil_locator": "evil/repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-evil-locator.json" 2>&1); rc=$?
+expect_fail "red: container valid locator + evil_locator fails" "$out" "$rc" "unknown/extra container key\|evil_locator"
+
+# 7) valid MCP locator + unknown evil_locator (adjacency fail-open)
+lock_mutant "$ROOT/bad-lock-mcp-evil-locator.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "package": "probe@1.0.0",
+    "version": "1.0.0",
+    "evil_locator": "other@9.9.9",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-evil-locator.json" 2>&1); rc=$?
+expect_fail "red: MCP valid locator + evil_locator fails" "$out" "$rc" "unknown/extra MCP key\|evil_locator"
+
+# 8) gitleaks identity bare 8.30.1 (not exact v8.30.1)
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-identity-bare.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["identity"] = "8.30.1"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-identity-bare.json" 2>&1); rc=$?
+expect_fail "red: gitleaks identity bare 8.30.1 (not v8.30.1) fails" "$out" "$rc" "identity\|exact profile\|v8\.30\.1\|shorthand"
+
+# 9) semgrep identity v-prefixed (not exact 1.172.0)
+lock_mutant "$ROOT/bad-lock-tool-semgrep-identity-vprefix.json" '
+for t in data["tools"]:
+    if t.get("id") == "semgrep":
+        t["identity"] = "v1.172.0"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-semgrep-identity-vprefix.json" 2>&1); rc=$?
+expect_fail "red: semgrep identity v1.172.0 (not 1.172.0) fails" "$out" "$rc" "identity\|exact profile\|1\.172\.0\|shorthand"
+
+# 10) socket identity v-prefixed (not exact socket@1.1.147)
+lock_mutant "$ROOT/bad-lock-tool-socket-identity-vprefix.json" '
+for t in data["tools"]:
+    if t.get("id") == "socket-cli":
+        t["identity"] = "v1.1.147"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-socket-identity-vprefix.json" 2>&1); rc=$?
+expect_fail "red: socket identity v1.1.147 (not socket@1.1.147) fails" "$out" "$rc" "identity\|exact profile\|socket@1\.1\.147\|shorthand"
+
+# Adjacency sweep: unknown keys on bundled + container + MCP in one lock
+lock_mutant "$ROOT/bad-lock-unknown-key-adjacency.json" '
+for be in data.get("bundled_extensions") or []:
+    be["side_channel"] = True
+data["containers"] = [{
+    "id": "adj-c",
+    "image": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "oci_ref": "bypass",
+}]
+data["mcp_packages"] = [{
+    "id": "adj-m",
+    "package": "probe@1.0.0",
+    "locator": "bypass",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-unknown-key-adjacency.json" 2>&1); rc=$?
+expect_fail "red: bundled/container/MCP unknown-key adjacency fails" "$out" "$rc" "unknown/extra\|side_channel\|oci_ref\|locator"
+
+# --- Matching exact green fixtures ---
+
+# Green: exact shipped bundled_extensions (developer builtin + goose-cli@1.45.0)
+lock_mutant "$ROOT/ok-lock-bundled-ext-exact.json" '
+data["bundled_extensions"] = [{
+    "id": "developer",
+    "name": "developer",
+    "type": "builtin",
+    "bundled_with": "goose-cli@1.45.0",
+    "notes": "Official Goose builtin bundled with the pinned CLI binary (shell + filesystem). No external package version required.",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-bundled-ext-exact.json" 2>&1); rc=$?
+expect_pass "green: exact shipped bundled_extensions developer contract" "$out" "$rc"
+
+# Green: container closed shape — only allowed keys + valid image locator
+lock_mutant "$ROOT/ok-lock-container-closed-keys.json" '
+data["containers"] = [{
+    "id": "tool-image",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "repository": "ghcr.io/org/tool",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-closed-keys.json" 2>&1); rc=$?
+expect_pass "green: container closed key set + image@sha256 + equal aliases" "$out" "$rc"
+
+# Green: MCP closed package shape — only allowed keys
+lock_mutant "$ROOT/ok-lock-mcp-closed-keys.json" '
+data["mcp_packages"] = [{
+    "id": "pkg-mcp",
+    "name": "pkg-mcp",
+    "package": "pkg-mcp@2.3.4",
+    "version": "2.3.4",
+    "identity": "pkg-mcp@2.3.4",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-closed-keys.json" 2>&1); rc=$?
+expect_pass "green: MCP closed key set + package@version locator" "$out" "$rc"
+
+# Green: exact core identity strings byte-for-byte
+lock_mutant "$ROOT/ok-lock-tool-exact-identities.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["identity"] = "v8.30.1"
+    if t.get("id") == "semgrep":
+        t["identity"] = "1.172.0"
+    if t.get("id") == "socket-cli":
+        t["identity"] = "socket@1.1.147"
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-exact-identities.json" 2>&1); rc=$?
+expect_pass "green: gitleaks/semgrep/socket exact profile identities" "$out" "$rc"
+
+out=$(check_lock_py "$TOOLCHAIN_LOCK" 2>&1); rc=$?
+expect_pass "green: shipped lock closed-schema residual holds" "$out" "$rc"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
