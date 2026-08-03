@@ -530,14 +530,24 @@ fi
 # --- claim rows, from a disposable main worktree --------------------------
 # L-009: never `git checkout main` in the caller's tree. It may be on a
 # long-lived branch or dirty, and aborting here used to strand the claim row.
-strip_claim_rows() {
-  local tmpwt
-  tmpwt=$(mktemp -d "${TMPDIR:-/tmp}/gibson-release-claim.XXXXXX") || return 1
-  rm -rf "$tmpwt"
+#
+# CLEANUP_BASE / CLEANUP_PUSHED_SHA are written for the post-mutation reread:
+# that path must bind only to origin/$CLEANUP_BASE (the exact remote branch
+# that received the cleanup push) and prove it contains $CLEANUP_PUSHED_SHA.
+# Never fall back to local main|master after mutation.
+CLEANUP_BASE=""
+CLEANUP_PUSHED_SHA=""
 
+strip_claim_rows() {
+  CLEANUP_PUSHED_SHA=""
   local base
   base=main
   git show-ref --verify --quiet refs/heads/main || base=master
+  CLEANUP_BASE="$base"
+
+  local tmpwt
+  tmpwt=$(mktemp -d "${TMPDIR:-/tmp}/gibson-release-claim.XXXXXX") || return 1
+  rm -rf "$tmpwt"
 
   git fetch origin "$base" >/dev/null 2>&1 || true
   git worktree add --detach "$tmpwt" "origin/$base" >/dev/null 2>&1 ||
@@ -606,6 +616,12 @@ Post-merge cleanup per Law 10 / docs/05." || exit 1
     git push origin "HEAD:$base" || exit 1
   ) || rc=$?
 
+  # Capture the exact pushed cleanup commit while the disposable worktree still
+  # holds it — post-mutation reread must prove origin/$base contains this SHA.
+  if [[ $rc -eq 0 ]]; then
+    CLEANUP_PUSHED_SHA=$(git -C "$tmpwt" rev-parse HEAD 2>/dev/null || true)
+  fi
+
   git worktree remove --force "$tmpwt" >/dev/null 2>&1 || rm -rf "$tmpwt"
   git worktree prune >/dev/null 2>&1 || true
   return $rc
@@ -641,24 +657,50 @@ soft_require_readable_regular_blob() {
   return 0
 }
 
-# Authoritative post-mutation reread of origin/main. Reuses #61's strict
-# ref/tree/per-claim blob validation (fetch → resolve → tree → active-work →
-# claims tree → every claim leaf → claim_ids_all). On success updates REF,
-# TREE_SHA and sets POST_ISSUE_IDS to issue-scoped ids actually present.
-# On any failure: warn the exact reason and return 1. Never falls back to a
-# stale pre-mutation residual plan.
+# Authoritative post-mutation reread of the exact remote-tracking ref that
+# received the cleanup push (origin/$CLEANUP_BASE). Reuses #61's strict
+# ref/tree/per-claim blob validation (fetch that branch → resolve only that
+# origin ref → tree → active-work → claims tree → every claim leaf →
+# claim_ids_all) and proves the ref contains the just-pushed cleanup commit.
+# On success updates REF, TREE_SHA and sets POST_ISSUE_IDS to issue-scoped ids
+# actually present. On any failure: warn the exact reason and return 1.
+# NEVER falls back to local main|master, HEAD, a cached pre-mutation residual
+# plan, or any other branch — that is how a stale empty local main falsely
+# authorized remove-label after origin/$CLEANUP_BASE became unreadable.
 authoritative_post_mutation_reread() {
   POST_ISSUE_IDS=""
-  if ! git fetch origin >/dev/null 2>&1; then
-    warn "post-cleanup fetch of origin failed — cannot revalidate ledger for label decision; preserving agent-claimed"
+  local base="${CLEANUP_BASE:-}"
+  if [[ -z "$base" ]]; then
+    warn "post-cleanup: cleanup base branch unset — cannot bind reread to the pushed remote ref; preserving agent-claimed"
     return 1
   fi
-  local new_ref
-  if ! new_ref=$(resolve_ledger_ref); then
-    warn "post-cleanup: cannot resolve a valid ledger commit ref after cleanup — preserving agent-claimed"
+  local remote_ref="origin/${base}"
+
+  # Fetch only the exact branch that received the cleanup push.
+  if ! git fetch origin "$base" >/dev/null 2>&1; then
+    warn "post-cleanup fetch of origin failed — cannot revalidate ledger ref ${remote_ref} for label decision; preserving agent-claimed"
     return 1
   fi
-  REF="$new_ref"
+
+  # Strict: only origin/$base. No resolve_ledger_ref local main|master fallback.
+  if ! git rev-parse --verify --quiet "${remote_ref}^{commit}" >/dev/null 2>&1; then
+    warn "post-cleanup: exact remote ledger ref ${remote_ref} is absent/unreadable after fetch — preserving agent-claimed (no local fallback)"
+    return 1
+  fi
+
+  # Just-pushed cleanup must be on that remote-tracking ref (lineage check).
+  if [[ -n "${CLEANUP_PUSHED_SHA:-}" ]]; then
+    if ! git rev-parse --verify --quiet "${CLEANUP_PUSHED_SHA}^{commit}" >/dev/null 2>&1; then
+      warn "post-cleanup: just-pushed cleanup commit ${CLEANUP_PUSHED_SHA} is unreadable — preserving agent-claimed"
+      return 1
+    fi
+    if ! git merge-base --is-ancestor "$CLEANUP_PUSHED_SHA" "$remote_ref" 2>/dev/null; then
+      warn "post-cleanup: ${remote_ref} does not contain just-pushed cleanup commit ${CLEANUP_PUSHED_SHA} — preserving agent-claimed"
+      return 1
+    fi
+  fi
+
+  REF="$remote_ref"
   if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
     warn "post-cleanup: ledger ref $REF does not resolve to a commit — preserving agent-claimed"
     return 1
@@ -749,10 +791,13 @@ EOF
 # Label removal is permitted only after BOTH:
 #   (a) every requested target representation was successfully removed and pushed
 #       (or was already absent — strip rc 2); and
-#   (b) a fresh, fully validated authoritative origin/main reread proves no
-#       target remains and no sibling for the issue remains.
-# Strip/push failure, target still live, fetch/ref/tree/blob failure, or
-# incomplete parse → incomplete, preserve label, never claim it was removed.
+#   (b) a fresh, fully validated authoritative reread of the exact remote-
+#       tracking ref that received the cleanup push (origin/$CLEANUP_BASE)
+#       proves no target remains and no sibling for the issue remains. That
+#       path never falls back to local main|master.
+# Strip/push failure, target still live, fetch/ref/tree/blob failure, missing
+# cleanup lineage, or incomplete parse → incomplete, preserve label, never
+# claim it was removed.
 PRESERVE_LABEL=0
 STRIP_OK=1
 

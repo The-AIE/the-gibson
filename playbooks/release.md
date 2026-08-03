@@ -264,15 +264,20 @@ label postcondition failed and the message says which. Law 10 is not done until
 you fix it by hand; an unverified label removal is how #24 stayed claimed
 (L-027). **Label removal is gated (#65):** default removal runs only after every
 requested target was successfully removed **and** a fresh, fully validated
-`origin/main` reread (same strict ref/tree/blob proofs as #61) shows no target
-and no sibling remain. If strip/push fails, a target is still live, fetch or
-ref/tree/blob validation fails, or the parse is incomplete/ambiguous, the
-script preserves `agent-claimed`, never claims the label was removed, and exits
-3. Target absent + sibling present → keep/verify label; target absent + no
-sibling → remove/verify unless `--keep-label`. `--keep-label` is the truthful
-"no row, sibling still live" path and must verify the label is still present —
-a blind success when the label is absent or unreadable is a false green. Do not
-invent a claim file just to satisfy cleanup.
+reread of the **exact remote-tracking ref that received the cleanup push**
+(`origin/main` or `origin/master` — same branch the strip pushed to; same
+strict ref/tree/blob proofs as #61, plus cleanup-commit lineage) shows no
+target and no sibling remain. Post-mutation reread never falls back to local
+`main`/`master`, `HEAD`, or a pre-mutation residual plan: a missing or
+unreadable `origin/<base>` after a successful push is incomplete, not an empty
+ledger. If strip/push fails, a target is still live, fetch or ref/tree/blob
+validation fails, cleanup lineage is missing, or the parse is
+incomplete/ambiguous, the script preserves `agent-claimed`, never claims the
+label was removed, and exits 3. Target absent + sibling present → keep/verify
+label; target absent + no sibling → remove/verify unless `--keep-label`.
+`--keep-label` is the truthful "no row, sibling still live" path and must
+verify the label is still present — a blind success when the label is absent or
+unreadable is a false green. Do not invent a claim file just to satisfy cleanup.
 
 Confirm issue closed by `Closes #` or close explicitly.
 

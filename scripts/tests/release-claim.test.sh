@@ -1260,6 +1260,109 @@ else
   ok "fake-gh no remove-label on wrong object shape"
 fi
 
+echo "#65 · post-push origin/main gone + stale local empty: exit 3, no remove-label"
+# Remote starts with one claim. Local main is rewritten to a stale empty ledger
+# (not pushed). Cleanup push to origin/main succeeds. Post-mutation fetch then
+# makes origin/main unreadable. Reread must bind only to origin/main (the exact
+# remote branch that received the push) and fail closed — never fall back to
+# stale empty local main and authorize remove-label / OK.
+new_repo "$ROOT/rereadlocal65"
+(
+  cd "$ROOT/rereadlocal65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single claim on remote main" && git push -q origin main
+  # Stale empty local main (not pushed): would falsely look like "no residual"
+  # if post-mutation reread fell back past missing origin/main.
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+TABLE
+  git add -A && git commit -qm "stale empty local main"
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+FETCH_COUNT="$ROOT/rereadlocal65/fetch.count"
+: > "$FETCH_COUNT"
+PUSH_BASE_LOG="$ROOT/rereadlocal65/push-base.log"
+: > "$PUSH_BASE_LOG"
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/git" <<FAKE
+#!/usr/bin/env bash
+# Record the exact remote branch named in a successful cleanup push.
+if [[ "\${1:-}" == "push" && "\${2:-}" == "origin" ]]; then
+  for a in "\$@"; do
+    case "\$a" in
+      HEAD:main|HEAD:master)
+        printf '%s\n' "\$a" >> "$PUSH_BASE_LOG"
+        ;;
+    esac
+  done
+fi
+if [[ "\${1:-}" == "fetch" ]]; then
+  n=\$(cat "$FETCH_COUNT" 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "$FETCH_COUNT"
+  # 1=startup, 2=strip_claim_rows, 3=authoritative_post_mutation_reread
+  if [[ "\$n" -ge 3 ]]; then
+    "$REAL_GIT" "\$@" || exit \$?
+    # Drop the exact remote-tracking ref that received the cleanup push.
+    "$REAL_GIT" update-ref -d refs/remotes/origin/main 2>/dev/null || true
+    "$REAL_GIT" update-ref -d refs/remotes/origin/master 2>/dev/null || true
+    exit 0
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+FAKE
+chmod +x "$ROOT/bin/git"
+GH_LOG="$ROOT/rereadlocal65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadlocal65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push missing origin/main exits 3" "$rc" "3"
+contains "names exact remote ref origin/main" "$out" "origin/main"
+contains "names absent/unreadable remote ref" "$out" "absent/unreadable"
+contains "names no local fallback" "$out" "no local fallback"
+contains "preserves label when origin/main gone" "$out" "preserving agent-claimed"
+contains "incomplete when origin/main gone" "$out" "INCOMPLETE"
+lacks    "no MUTATED-LABEL when origin/main gone" "$out" "MUTATED-LABEL"
+lacks    "no removed claim when origin/main gone" "$out" "removed agent-claimed"
+lacks    "no false OK when origin/main gone" "$out" "OK —"
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label when origin/main gone after push"
+else
+  ok "fake-gh no remove-label when origin/main gone"
+fi
+# Pin: cleanup push targeted main (HEAD:main), so reread must require origin/main.
+if grep -qxF -- 'HEAD:main' "$PUSH_BASE_LOG" 2>/dev/null; then
+  ok "cleanup push pinned to remote branch main (HEAD:main)"
+else
+  bad "cleanup push must target HEAD:main (got: $(tr '\n' ' ' <"$PUSH_BASE_LOG" 2>/dev/null))"
+fi
+rm -f "$ROOT/bin/git"
+
 echo "#65 · successful final target removal still removes/verifies label"
 new_repo "$ROOT/finalok65"
 (
