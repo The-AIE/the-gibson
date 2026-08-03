@@ -46,7 +46,7 @@ cp /path/to/the-gibson/ci/retro.yml .github/workflows/
 
 | Job | Role |
 |---|---|
-| `test-integrity-resolve` | Exact SHAs + merge-base; prove helper is a regular blob at merge-base |
+| `test-integrity-resolve` | Exact SHAs + unique `merge-base --all` (fail closed on criss-cross); prove helper is a regular blob at merge-base |
 | `test-integrity-base` | Capture suite output at merge-base (separate runner) |
 | `test-integrity-head` | Capture suite output at head SHA from head repo (forks included) |
 | `test-integrity` | Unique required-check name; `always()`; compare with merge-base helper + inert PR-body waiver file |

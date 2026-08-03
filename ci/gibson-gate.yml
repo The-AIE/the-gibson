@@ -149,12 +149,16 @@ jobs:
             git fetch --no-tags --prune headfork "$HEAD_SHA" || fail_closed "could not fetch head commit from fork repository ${HEAD_REPO}"
           fi
 
-          # Deepen until merge-base is computable (cap prevents infinite loop).
+          # Deepen until merge-base --all is computable (cap prevents infinite loop).
+          # Never use single-result `git merge-base` alone: criss-cross history can
+          # yield multiple equally valid best bases; picking the first is forbidden.
           deepen=32
-          merge_base=""
+          mb_raw=""
+          mb_found=0
           i=0
           while [ "$i" -lt 12 ]; do
-            if merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA" 2>/dev/null); then
+            if mb_raw=$(git merge-base --all "$BASE_SHA" "$HEAD_SHA" 2>/dev/null); then
+              mb_found=1
               break
             fi
             git fetch --no-tags --prune --deepen="$deepen" origin "$BASE_SHA" || true
@@ -166,7 +170,35 @@ jobs:
             deepen=$((deepen * 2))
             i=$((i + 1))
           done
-          [ -n "$merge_base" ] || fail_closed "ambiguous or uncomputable merge-base (ancestry incomplete)"
+          [ "$mb_found" -eq 1 ] || fail_closed "uncomputable merge-base (git merge-base --all failed; ancestry incomplete)"
+          [ -n "$mb_raw" ] || fail_closed "zero best merge bases from git merge-base --all"
+
+          # Require exactly one best merge base. Zero (above), command failure (above),
+          # malformed/empty/duplicate lines, or more than one best base fail closed
+          # before any helper/capture job. Never sort/select/pick the first of many.
+          # Temp-file line iteration: bash 3.2 portable, YAML-safe, no pipeline subshell.
+          mb_count=0
+          merge_base=""
+          mb_seen=" "
+          mb_list=$(mktemp)
+          printf '%s\n' "$mb_raw" > "$mb_list"
+          while IFS= read -r mb_line || [ -n "$mb_line" ]; do
+            [ -n "$mb_line" ] || { rm -f "$mb_list"; fail_closed "malformed merge-base --all output (empty line)"; }
+            is_full_sha "$mb_line" || { rm -f "$mb_list"; fail_closed "merge-base is not a full SHA"; }
+            case "$mb_seen" in
+              *" $mb_line "*) rm -f "$mb_list"; fail_closed "duplicate merge-base lines from git merge-base --all" ;;
+            esac
+            mb_seen="${mb_seen}${mb_line} "
+            mb_count=$((mb_count + 1))
+            merge_base="$mb_line"
+          done < "$mb_list"
+          rm -f "$mb_list"
+          if [ "$mb_count" -eq 0 ]; then
+            fail_closed "zero best merge bases from git merge-base --all"
+          fi
+          if [ "$mb_count" -ne 1 ]; then
+            fail_closed "ambiguous/criss-cross history: git merge-base --all returned ${mb_count} best merge bases (need exactly one trusted base). Update or rebase this PR onto a history with a single unambiguous merge-base before grading."
+          fi
           is_full_sha "$merge_base" || fail_closed "merge-base is not a full SHA"
 
           # Prove merge-base is an ancestor of both commits.

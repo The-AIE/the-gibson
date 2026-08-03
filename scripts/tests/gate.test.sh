@@ -1870,6 +1870,23 @@ else
   bad "missing helper / blob-mode fail-closed messaging incomplete"
 fi
 
+echo "phase-2 CI: merge-base --all requires exactly one best base (no first-of-many)"
+# Contract pin: resolve must use --all and fail closed on multi-base/criss-cross.
+# Reject single-result-only resolution (git merge-base without --all as the
+# authority selector). Ancestor checks may still use merge-base --is-ancestor.
+# ls-tree may still use head -n 1 for a single path entry — that is unrelated.
+if grep -q 'git merge-base --all' "$CI_YML" \
+  && grep -q 'ambiguous/criss-cross' "$CI_YML" \
+  && grep -q 'exactly one' "$CI_YML" \
+  && grep -q 'mb_count' "$CI_YML" \
+  && grep -q 'Never sort/select/pick the first of many' "$CI_YML" \
+  && ! grep -qE 'git merge-base "\$BASE_SHA" "\$HEAD_SHA"' "$CI_YML" \
+  && ! grep -qE 'merge-base --all[^|]*\|[[:space:]]*head' "$CI_YML"; then
+  ok "merge-base --all uniqueness; criss-cross diagnostic; no single-result pick"
+else
+  bad "merge-base uniqueness fail-closed contract incomplete in ci/gibson-gate.yml"
+fi
+
 echo "phase-2 CI: github-hosted only; ephemeral runners"
 if ci_has 'runs-on: ubuntu-latest' \
   && ci_has_not 'self-hosted' \
@@ -2151,6 +2168,207 @@ sim_final success success failure; rc=$?
 sim_final success success success; rc=$?
 [[ "$rc" -eq 0 ]] && ok "all priors success → final proceeds to compare" \
   || bad "success path blocked"
+
+echo "phase-2 offline: criss-cross two best merge bases fail closed; unique base succeeds"
+# Canonical resolver snippet matching ci/gibson-gate.yml (merge-base --all uniqueness).
+# Must exercise real git graphs — a string-only "--all" assertion is insufficient.
+is_full_sha() {
+  case "$1" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# resolve_unique_merge_base BASE_SHA HEAD_SHA — prints sole full SHA or fails closed.
+# Mirrors the post-fetch uniqueness block in ci/gibson-gate.yml test-integrity-resolve.
+resolve_unique_merge_base() {
+  _base="$1"
+  _head="$2"
+  _mb_raw=""
+  if ! _mb_raw=$(git merge-base --all "$_base" "$_head" 2>/dev/null); then
+    echo "test-integrity: resolve failed — uncomputable merge-base (git merge-base --all failed; ancestry incomplete)" >&2
+    echo "test-integrity: update or rebase this PR onto a base that contains scripts/test-integrity.mjs as a regular blob (mode 100644 or 100755) at the merge-base, with unambiguous ancestry." >&2
+    return 1
+  fi
+  if [ -z "$_mb_raw" ]; then
+    echo "test-integrity: resolve failed — zero best merge bases from git merge-base --all" >&2
+    echo "test-integrity: update or rebase this PR onto a base that contains scripts/test-integrity.mjs as a regular blob (mode 100644 or 100755) at the merge-base, with unambiguous ancestry." >&2
+    return 1
+  fi
+  _mb_count=0
+  _merge_base=""
+  _mb_seen=" "
+  # Same temp-file iteration as ci/gibson-gate.yml (no first-of-many, no pipeline subshell).
+  _mb_list=$(mktemp)
+  printf '%s\n' "$_mb_raw" > "$_mb_list"
+  while IFS= read -r _mb_line || [ -n "$_mb_line" ]; do
+    if [ -z "$_mb_line" ]; then
+      rm -f "$_mb_list"
+      echo "test-integrity: resolve failed — malformed merge-base --all output (empty line)" >&2
+      return 1
+    fi
+    if ! is_full_sha "$_mb_line"; then
+      rm -f "$_mb_list"
+      echo "test-integrity: resolve failed — merge-base is not a full SHA" >&2
+      return 1
+    fi
+    case "$_mb_seen" in
+      *" $_mb_line "*)
+        rm -f "$_mb_list"
+        echo "test-integrity: resolve failed — duplicate merge-base lines from git merge-base --all" >&2
+        return 1
+        ;;
+    esac
+    _mb_seen="${_mb_seen}${_mb_line} "
+    _mb_count=$((_mb_count + 1))
+    _merge_base="$_mb_line"
+  done < "$_mb_list"
+  rm -f "$_mb_list"
+  if [ "$_mb_count" -eq 0 ]; then
+    echo "test-integrity: resolve failed — zero best merge bases from git merge-base --all" >&2
+    return 1
+  fi
+  if [ "$_mb_count" -ne 1 ]; then
+    echo "test-integrity: resolve failed — ambiguous/criss-cross history: git merge-base --all returned ${_mb_count} best merge bases (need exactly one trusted base). Update or rebase this PR onto a history with a single unambiguous merge-base before grading." >&2
+    echo "test-integrity: update or rebase this PR onto a base that contains scripts/test-integrity.mjs as a regular blob (mode 100644 or 100755) at the merge-base, with unambiguous ancestry." >&2
+    return 1
+  fi
+  if ! is_full_sha "$_merge_base"; then
+    echo "test-integrity: resolve failed — merge-base is not a full SHA" >&2
+    return 1
+  fi
+  # Ancestor checks (same as CI after uniqueness).
+  git merge-base --is-ancestor "$_merge_base" "$_base" \
+    || { echo "test-integrity: resolve failed — merge-base is not an ancestor of base.sha" >&2; return 1; }
+  git merge-base --is-ancestor "$_merge_base" "$_head" \
+    || { echo "test-integrity: resolve failed — merge-base is not an ancestor of head.sha" >&2; return 1; }
+  printf '%s\n' "$_merge_base"
+  return 0
+}
+
+# Build a deterministic criss-cross graph with two best merge bases and different
+# trusted helper contents at each base (proves arbitrary first-line pick is unsafe).
+CX="$ROOT/criss-cross"
+rm -rf "$CX"
+mkdir -p "$CX"
+(
+  cd "$CX"
+  git init -q
+  git config user.email "gate-test@example.com"
+  git config user.name "gate-test"
+  git config commit.gpgsign false
+  # Root O
+  mkdir -p scripts
+  printf '%s\n' 'root-helper' > scripts/test-integrity.mjs
+  git add scripts/test-integrity.mjs
+  git commit -qm O
+  O=$(git rev-parse HEAD)
+  # left: O - A (helper content "trusted-A")
+  git checkout -q -b left
+  printf '%s\n' 'trusted-A-helper-content-aaaaaaaa' > scripts/test-integrity.mjs
+  git add scripts/test-integrity.mjs
+  git commit -qm A
+  # right: O - B (helper content "trusted-B" — different from A)
+  git checkout -q -b right "$O"
+  printf '%s\n' 'trusted-B-helper-content-bbbbbbbb' > scripts/test-integrity.mjs
+  git add scripts/test-integrity.mjs
+  git commit -qm B
+  B=$(git rev-parse HEAD)
+  # Mr = merge left into right (parents B, A)
+  git merge -q -m Mr left -X ours
+  # Ml = on left, merge B (not Mr) — parents A, B → classic criss-cross
+  git checkout -q left
+  git merge -q -m Ml "$B" -X ours
+)
+# Resolve branch tips
+CX_LEFT=$(git -C "$CX" rev-parse left)
+CX_RIGHT=$(git -C "$CX" rev-parse right)
+# Prove the graph really has two best merge bases (fixture integrity)
+CX_ALL=$(git -C "$CX" merge-base --all "$CX_LEFT" "$CX_RIGHT")
+CX_ALL_N=$(printf '%s\n' "$CX_ALL" | grep -c . || true)
+CX_SINGLE=$(git -C "$CX" merge-base "$CX_LEFT" "$CX_RIGHT")
+if [ "$CX_ALL_N" -eq 2 ] && [ -n "$CX_SINGLE" ]; then
+  ok "criss-cross fixture: merge-base --all returns 2; single merge-base returns one arbitrary"
+else
+  bad "criss-cross fixture broken (all_n=$CX_ALL_N single=$CX_SINGLE all=$CX_ALL)"
+fi
+# Different trusted helper contents at the two best bases
+CX_B1=$(printf '%s\n' "$CX_ALL" | sed -n '1p')
+CX_B2=$(printf '%s\n' "$CX_ALL" | sed -n '2p')
+CX_H1=$(git -C "$CX" show "${CX_B1}:scripts/test-integrity.mjs" 2>/dev/null || true)
+CX_H2=$(git -C "$CX" show "${CX_B2}:scripts/test-integrity.mjs" 2>/dev/null || true)
+if [ -n "$CX_H1" ] && [ -n "$CX_H2" ] && [ "$CX_H1" != "$CX_H2" ]; then
+  ok "criss-cross fixture: two best bases carry different trusted helper contents"
+else
+  bad "criss-cross helpers not divergent (h1=$CX_H1 h2=$CX_H2)"
+fi
+# Resolver must fail closed — never accept arbitrary single merge-base authority
+(
+  cd "$CX"
+  out=$(resolve_unique_merge_base "$CX_LEFT" "$CX_RIGHT" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] \
+    && echo "$out" | grep -q 'ambiguous/criss-cross' \
+    && echo "$out" | grep -q 'exactly one' \
+    && echo "$out" | grep -qE 'returned 2|2 best' \
+    && ! echo "$out" | grep -qE '^[0-9a-fA-F]{40}$'; then
+    ok "criss-cross: resolve_unique_merge_base fails closed (no arbitrary grader authority)"
+  else
+    bad "criss-cross should fail closed (rc=$rc): $out"
+  fi
+)
+# Prove single-result git merge-base would have picked one base (unsafe path we refuse)
+if is_full_sha "$CX_SINGLE" \
+  && { [ "$CX_SINGLE" = "$CX_B1" ] || [ "$CX_SINGLE" = "$CX_B2" ]; }; then
+  ok "single git merge-base would pick one of two bases (why --all uniqueness is required)"
+else
+  bad "unexpected single merge-base $CX_SINGLE vs $CX_B1 / $CX_B2"
+fi
+
+# Unique merge-base path still succeeds (linear history)
+UX="$ROOT/unique-mb"
+rm -rf "$UX"
+mkdir -p "$UX"
+(
+  cd "$UX"
+  git init -q
+  git config user.email "gate-test@example.com"
+  git config user.name "gate-test"
+  git config commit.gpgsign false
+  mkdir -p scripts
+  printf '%s\n' 'unique-helper' > scripts/test-integrity.mjs
+  git add scripts/test-integrity.mjs
+  git commit -qm root
+  echo mid > mid.txt && git add mid.txt && git commit -qm mid
+  git branch base-tip
+  echo head > head.txt && git add head.txt && git commit -qm head
+)
+UX_BASE=$(git -C "$UX" rev-parse base-tip)
+UX_HEAD=$(git -C "$UX" rev-parse HEAD)
+UX_EXPECT=$(git -C "$UX" merge-base --all "$UX_BASE" "$UX_HEAD")
+(
+  cd "$UX"
+  out=$(resolve_unique_merge_base "$UX_BASE" "$UX_HEAD" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ] && [ "$out" = "$UX_EXPECT" ] && is_full_sha "$out"; then
+    ok "unique merge-base: resolve_unique_merge_base succeeds with sole full SHA"
+  else
+    bad "unique merge-base should succeed (rc=$rc out=$out expect=$UX_EXPECT)"
+  fi
+)
+# Malformed / zero / duplicate lines fail closed (unit of the snippet)
+(
+  cd "$UX"
+  # Zero: unrelated histories
+  git checkout -q --orphan other-root
+  git config commit.gpgsign false
+  echo other > other.txt && git add other.txt && git commit -qm other
+  OTHER=$(git rev-parse HEAD)
+  git checkout -q master 2>/dev/null || git checkout -q main 2>/dev/null || git checkout -q -
+  out=$(resolve_unique_merge_base "$UX_HEAD" "$OTHER" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    ok "unrelated histories: merge-base --all fails closed"
+  else
+    bad "unrelated histories should fail (out=$out)"
+  fi
+)
 
 echo "phase-2 offline: missing trusted helper at merge-base → update/rebase failure"
 # Resolve simulation: ls-tree empty → fail with explicit message

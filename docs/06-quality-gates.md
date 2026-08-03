@@ -78,10 +78,13 @@ integration, adversarial sensors, reviewer waiver lens.
 isolated grading architecture:
 
 1. **`test-integrity-resolve`** — exact `base.sha` / `head.sha` / head repo (forks
-   included); compute merge-base; prove it is an ancestor of both; prove
-   `scripts/test-integrity.mjs` at the merge-base is a regular blob
-   (`100644`/`100755`), never symlink/gitlink/tree. Missing helper → fail closed
-   with an explicit update/rebase message.
+   included); resolve with `git merge-base --all` and **require exactly one** best
+   merge base (zero, command failure, malformed/duplicate lines, or criss-cross
+   multi-base history fail closed — never pick the first of many); prove that sole
+   base is an ancestor of both; prove `scripts/test-integrity.mjs` at the
+   merge-base is a regular blob (`100644`/`100755`), never symlink/gitlink/tree.
+   Missing helper or ambiguous ancestry → fail closed with an explicit
+   update/rebase message.
 2. **`test-integrity-base`** / **`test-integrity-head`** — separate runners and
    workspaces so PR-head code cannot rewrite base output. Literal install + test
    command from the trusted template (never PR-head `.agents/gate.json`). Capture
