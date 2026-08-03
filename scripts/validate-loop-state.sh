@@ -5,6 +5,10 @@
 # The solo-loop driver (scripts/loop.sh) and the future no-progress sensor (#63) share
 # this primitive so there is exactly one timestamp parser and one key contract.
 #
+# Runtime dependency: python3 on PATH for strict UTC calendar validation and optional
+# --min-updated comparison. Absence fails closed with an explicit diagnostic; values
+# are never shell-eval'd (python3 argv only).
+#
 # Portable on macOS Bash 3.2 and Linux (no associative arrays).
 set -euo pipefail
 
@@ -34,11 +38,17 @@ OPTIONS
 
 EXIT
   0  valid (and fresh enough when --min-updated is set); zero stdout/stderr
-  1  invalid / stale / unreadable / missing; diagnostics on stderr
+  1  invalid / stale / unreadable / missing / missing python3; diagnostics on stderr
   2  bad invocation
 
 CONTRACT (ten required keys, column zero, exactly once each)
   updated, issue, pr, hat, next_hat, round, parked, handoff, handoff_sha, next_action
+
+  The operational contract is ten keys. Early issue prose sometimes enumerated
+  nine and omitted `handoff_sha`; the live schema and this validator always
+  require `handoff_sha` (empty value allowed). Missing `handoff_sha` fails closed
+  as schema corruption — migration is "add the key", never silent default.
+
   Extra keys (e.g. notes) are allowed. Indentation and # comments never satisfy
   a required key. Duplicates fail. Values are everything after the first colon
   (one optional leading space stripped); colons inside values are fine.
@@ -49,6 +59,11 @@ CONTRACT (ten required keys, column zero, exactly once each)
   parked         exactly true or false
   updated        real strict UTC YYYY-MM-DDTHH:MM:SSZ (no fractions, no offsets,
                  calendar-valid — not a Date.parse rollover)
+
+RUNTIME
+  python3 must be on PATH. It validates calendar-real timestamps and compares
+  --min-updated bounds. Timestamps and state values are passed as argv data only
+  — never interpolated into python source and never shell-eval'd.
 
 SAFETY
   Values are never evaluated as shell. Paths and timestamps are data only.
@@ -102,6 +117,12 @@ if [[ ! -f "$FILE" ]]; then
 fi
 if [[ ! -r "$FILE" ]]; then
   fail "unreadable file: $FILE"
+fi
+
+# python3 is required for strict UTC calendar checks and --min-updated compare.
+# Fail closed with a clear diagnostic; never skip the timestamp gate.
+if ! command -v python3 >/dev/null 2>&1; then
+  fail "python3 is required for strict UTC timestamp validation (issue #75); install python3 or put it on PATH"
 fi
 
 # Single-pass validation in awk (Bash 3.2-safe; values never shell-eval'd).

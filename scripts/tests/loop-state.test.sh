@@ -926,6 +926,277 @@ if [[ -f "$REPO/gibson/.loop-state.prev" ]]; then
 else bad "happy path: no snapshot"; fi
 
 # ---------------------------------------------------------------------------
+# Blocker fixtures (independent review): exact unchanged-old freshness and
+# unsafe snapshot/restore destinations (directory / symlink / special).
+# ---------------------------------------------------------------------------
+echo "driver: unchanged old state after runner is state-corrupt (exact #75 freshness)"
+setup_repo
+install_fake_supervisor_stack
+# Valid schema, but updated is 2000-era — byte-identical after a zero-exit no-op.
+# Single process, two iterations: first typo-hat (1 unit), then noop leaves the
+# restored 2000-era stamp untouched → second state-corrupt at 2/5 (no reset).
+write_valid_state "$REPO/gibson/loop-state.md" \
+  "updated=2000-01-01T00:00:00Z" \
+  "next_action=unchanged old stamp" \
+  "notes=exact-unchanged-old-fixture"
+pre_bytes=$(cat "$REPO/gibson/loop-state.md")
+# Behavior file is read each invocation; switch mid-run via a wrapper.
+cat > "$CALLS/runner.behavior.seq" <<'SEQ'
+rewrite-typo-hat
+noop
+SEQ
+cat > "$CALLS/seq-runner.sh" <<SEQRUN
+#!/usr/bin/env bash
+set -euo pipefail
+seqf="$CALLS/runner.behavior.seq"
+if [[ -s "\$seqf" ]]; then
+  beh=\$(head -n1 "\$seqf")
+  tail -n +2 "\$seqf" > "\$seqf.tmp" && mv "\$seqf.tmp" "\$seqf"
+  echo "\$beh" > "$CALLS/runner.behavior"
+else
+  echo noop > "$CALLS/runner.behavior"
+fi
+exec "$CALLS/fake-runner.sh" "\$@"
+SEQRUN
+chmod +x "$CALLS/seq-runner.sh"
+make_runner_cmd rewrite-typo-hat
+: > "$CALLS/supervisor.count"
+: > "$CALLS/runner.count"
+set +e
+HERMES_CMD="$CALLS/seq-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 2 --error-budget 5 --supervisor devin --reviewers codex \
+  >/dev/null 2>"$ROOT/unchanged-old.err"
+set -e
+if [[ "$(runner_count)" -eq 2 ]]; then
+  ok "unchanged-old: runner invoked twice (not pre-queued short-circuit)"
+else bad "unchanged-old: expected 2 runner calls, got $(runner_count)"; fi
+if grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "unchanged-old: zero-exit no-op with old stamp is state-corrupt"
+else bad "unchanged-old: not state-corrupt (err=$(cat "$ROOT/unchanged-old.err") j=$(cat "$REPO/gibson/journal.md" 2>/dev/null))"; fi
+# Second consecutive unit must be 2/5 — proves the no-op did not reset budget.
+if grep -q 'state-corrupt (consecutive failures=2/5)' "$ROOT/unchanged-old.err"; then
+  ok "unchanged-old: exactly one budget unit per event; no-op did not reset failures"
+else bad "unchanged-old: budget accounting wrong: $(cat "$ROOT/unchanged-old.err")"; fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_bytes" ]]; then
+  ok "unchanged-old: exact snapshot restored (byte-identical old state)"
+else bad "unchanged-old: state not restored exactly"; fi
+if [[ "$(supervisor_count)" -eq 0 ]]; then
+  ok "unchanged-old: never hands off after stale no-op"
+else bad "unchanged-old: supervisor handoff ran"; fi
+if ! grep -q 'runner exit' "$ROOT/unchanged-old.err"; then
+  ok "unchanged-old: not labeled runner-failure (state-corrupt precedence)"
+else bad "unchanged-old: also labeled runner-failure"; fi
+# Single-iteration exact fixture: pure noop + old stamp alone → 1 unit.
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" \
+  "updated=2000-01-01T00:00:00Z" \
+  "next_action=unchanged old stamp alone" \
+  "notes=exact-unchanged-old-once"
+pre_once=$(cat "$REPO/gibson/loop-state.md")
+make_runner_cmd noop
+: > "$CALLS/runner.count"
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/unchanged-once.err" || true
+if [[ "$(runner_count)" -eq 1 ]] && \
+   grep -q 'state-corrupt (consecutive failures=1/5)' "$ROOT/unchanged-once.err" && \
+   [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_once" ]]; then
+  ok "unchanged-old once: one runner, one state-corrupt unit, exact restore"
+else bad "unchanged-old once failed (rc=$(runner_count) err=$(cat "$ROOT/unchanged-once.err"))"; fi
+
+echo "driver: pre-queued handoff retries without runner (no fake progress)"
+setup_repo
+install_fake_supervisor_stack
+# Ancient but schema-valid state with handoff already queued — #71 retry path.
+write_valid_state "$REPO/gibson/loop-state.md" \
+  "updated=2000-01-01T00:00:00Z" \
+  "handoff=feat/75-queued" \
+  "handoff_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  "next_action=retry queued handoff"
+pre_q=$(cat "$REPO/gibson/loop-state.md")
+make_runner_cmd noop
+: > "$CALLS/runner.count"
+: > "$CALLS/supervisor.count"
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 --supervisor devin --reviewers codex \
+  >/dev/null 2>"$ROOT/preq.err" || true
+if [[ "$(runner_count)" -eq 0 ]]; then
+  ok "pre-queued handoff: runner not invoked"
+else bad "pre-queued handoff: runner ran (count=$(runner_count))"; fi
+if [[ ! -e "$REPO/gibson/.loop-state.prev" ]]; then
+  ok "pre-queued handoff: no snapshot written"
+else bad "pre-queued handoff: wrote snapshot"; fi
+if ! grep -q 'state-corrupt' "$ROOT/preq.err" 2>/dev/null; then
+  ok "pre-queued handoff: not state-corrupt (no fake progress path)"
+else bad "pre-queued handoff flagged state-corrupt: $(cat "$ROOT/preq.err")"; fi
+# Supervisor path may block (no remote) but must be attempted as handoff retry.
+if grep -q 'pre-queued handoff\|handoff blocked\|no origin\|not on the remote\|no reviewable\|pin mismatch\|supervisor' \
+     "$ROOT/preq.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "pre-queued handoff: supervisor handoff path exercised without runner"
+else bad "pre-queued handoff: no handoff accounting (err=$(cat "$ROOT/preq.err"))"; fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_q" ]] || \
+   grep -q 'feat/75-queued' "$REPO/gibson/loop-state.md"; then
+  ok "pre-queued handoff: loop-state not wiped by freshness false-positive"
+else bad "pre-queued handoff: state mangled"; fi
+
+echo "driver: .loop-state.prev directory fails before runner (no nested temps)"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=dir-prev-fixture"
+rm -f "$REPO/gibson/.loop-state.prev"
+mkdir -p "$REPO/gibson/.loop-state.prev"
+# Plant a marker so we can detect nested mv-into-dir debris.
+echo marker > "$REPO/gibson/.loop-state.prev/pre-existing-marker"
+make_runner_cmd rewrite-valid
+: > "$CALLS/runner.count"
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/dir-prev.err" || true
+if [[ "$(runner_count)" -eq 0 ]]; then
+  ok "dir .loop-state.prev: runner not started"
+else bad "dir .loop-state.prev: runner started"; fi
+if grep -q 'state-corrupt\|snapshot refused\|not a safe file destination' "$ROOT/dir-prev.err" 2>/dev/null || \
+   grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "dir .loop-state.prev: fails closed with diagnostic (no false success)"
+else bad "dir .loop-state.prev: missing failure diagnostic ($(cat "$ROOT/dir-prev.err"))"; fi
+# No nested temp artifacts from mktemp/mv-into-dir
+nested=$(find "$REPO/gibson/.loop-state.prev" -mindepth 1 ! -name 'pre-existing-marker' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$nested" -eq 0 ]]; then
+  ok "dir .loop-state.prev: no nested temp artifacts"
+else bad "dir .loop-state.prev: nested debris: $(find "$REPO/gibson/.loop-state.prev" -mindepth 1)"; fi
+if [[ -f "$REPO/gibson/.loop-state.prev/pre-existing-marker" ]]; then
+  ok "dir .loop-state.prev: pre-existing contents preserved"
+else bad "dir .loop-state.prev: pre-existing contents lost"; fi
+if [[ -d "$REPO/gibson/.loop-state.prev" ]]; then
+  ok "dir .loop-state.prev: destination remains a directory (not falsely replaced)"
+else bad "dir .loop-state.prev: shape changed unexpectedly"; fi
+# Stray temps in parent gibson/ matching snapshot pattern should not accumulate
+# as the only evidence of a botched mv-into-dir either.
+stray=$(find "$REPO/gibson" -maxdepth 1 -name '.loop-state.prev.*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$stray" -eq 0 ]]; then
+  ok "dir .loop-state.prev: no leftover .loop-state.prev.* temps in parent"
+else bad "dir .loop-state.prev: leftover temps: $(find "$REPO/gibson" -maxdepth 1 -name '.loop-state.prev.*')"; fi
+
+echo "driver: live loop-state directory is quarantined then exact-restored"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/.loop-state.prev" \
+  "next_action=restored from snapshot after dir live" \
+  "notes=snap-for-dir-live"
+snap_bytes=$(cat "$REPO/gibson/.loop-state.prev")
+rm -rf "$REPO/gibson/loop-state.md"
+mkdir -p "$REPO/gibson/loop-state.md"
+echo secret-unknown > "$REPO/gibson/loop-state.md/unknown-contents"
+make_runner_cmd rewrite-valid
+: > "$CALLS/runner.count"
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/dir-live.err" || true
+if [[ "$(runner_count)" -eq 0 ]]; then
+  ok "dir live loop-state: runner not started (pre-read corrupt)"
+else bad "dir live loop-state: runner started"; fi
+if [[ ! -L "$REPO/gibson/loop-state.md" && -f "$REPO/gibson/loop-state.md" ]] && \
+   [[ "$(cat "$REPO/gibson/loop-state.md")" == "$snap_bytes" ]]; then
+  ok "dir live loop-state: exact snapshot restored at the live path"
+else
+  # Accept recovery-incomplete fail-closed if quarantine cannot complete, but
+  # never a false success claiming restore while still a directory.
+  if [[ -d "$REPO/gibson/loop-state.md" ]]; then
+    if grep -qi 'recovery-incomplete\|state-corrupt' "$ROOT/dir-live.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+      ok "dir live loop-state: fail-closed recovery-incomplete (still a dir, no false success)"
+    else
+      bad "dir live loop-state: still a directory without recovery-incomplete diagnostic"
+    fi
+  else
+    bad "dir live loop-state: restore missing or wrong bytes (state=$(ls -la "$REPO/gibson/loop-state.md" 2>&1))"
+  fi
+fi
+# Unknown directory contents must never be deleted — either still in place or
+# under a same-parent quarantine name.
+if [[ -f "$REPO/gibson/loop-state.md/unknown-contents" ]] || \
+   find "$REPO/gibson" -name 'unknown-contents' 2>/dev/null | grep -q .; then
+  ok "dir live loop-state: unknown contents preserved (not deleted)"
+else bad "dir live loop-state: unknown contents were deleted"; fi
+if ! grep -q 'restored loop-state byte-for-byte' "$ROOT/dir-live.err" 2>/dev/null || \
+   { [[ ! -L "$REPO/gibson/loop-state.md" && -f "$REPO/gibson/loop-state.md" ]] && \
+     [[ "$(cat "$REPO/gibson/loop-state.md")" == "$snap_bytes" ]]; }; then
+  ok "dir live loop-state: no false exact-restore claim without matching bytes"
+else bad "dir live loop-state: claimed restore without exact bytes"; fi
+
+echo "driver: symlink snapshot destination fails before runner"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=symlink-prev-fixture"
+rm -f "$REPO/gibson/.loop-state.prev"
+echo decoy > "$REPO/gibson/decoy-snap"
+ln -s "$REPO/gibson/decoy-snap" "$REPO/gibson/.loop-state.prev"
+make_runner_cmd rewrite-valid
+: > "$CALLS/runner.count"
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/sym-prev.err" || true
+if [[ "$(runner_count)" -eq 0 ]]; then
+  ok "symlink .loop-state.prev: runner not started"
+else bad "symlink .loop-state.prev: runner started"; fi
+if [[ -L "$REPO/gibson/.loop-state.prev" ]]; then
+  ok "symlink .loop-state.prev: symlink left in place (not followed/replaced falsely)"
+else bad "symlink .loop-state.prev: shape changed"; fi
+if [[ "$(cat "$REPO/gibson/decoy-snap")" == "decoy" ]]; then
+  ok "symlink .loop-state.prev: link target not overwritten"
+else bad "symlink .loop-state.prev: target was overwritten"; fi
+if grep -q 'state-corrupt\|snapshot refused\|not a safe file destination' "$ROOT/sym-prev.err" 2>/dev/null || \
+   grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "symlink .loop-state.prev: fail-closed diagnostic"
+else bad "symlink .loop-state.prev: no diagnostic ($(cat "$ROOT/sym-prev.err"))"; fi
+# No nested temps beside the symlink
+stray=$(find "$REPO/gibson" -maxdepth 1 -name '.loop-state.prev.*' 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$stray" -eq 0 ]]; then
+  ok "symlink .loop-state.prev: no nested/leftover temps"
+else bad "symlink .loop-state.prev: leftover temps present"; fi
+
+echo "driver: symlink live loop-state fails closed / quarantines without following"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/.loop-state.prev" \
+  "next_action=restored after symlink live" "notes=snap-sym-live"
+snap_bytes=$(cat "$REPO/gibson/.loop-state.prev")
+echo target-bytes > "$REPO/gibson/live-target"
+rm -f "$REPO/gibson/loop-state.md"
+ln -s "$REPO/gibson/live-target" "$REPO/gibson/loop-state.md"
+make_runner_cmd rewrite-valid
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 >/dev/null 2>"$ROOT/sym-live.err" || true
+if [[ "$(cat "$REPO/gibson/live-target")" == "target-bytes" ]]; then
+  ok "symlink live: original link target bytes preserved"
+else bad "symlink live: target was mutated"; fi
+if { [[ ! -L "$REPO/gibson/loop-state.md" && -f "$REPO/gibson/loop-state.md" ]] && \
+     [[ "$(cat "$REPO/gibson/loop-state.md")" == "$snap_bytes" ]]; } || \
+   grep -qi 'recovery-incomplete\|state-corrupt\|quarantine' "$ROOT/sym-live.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "symlink live: exact restore after quarantine or explicit recovery-incomplete"
+else bad "symlink live: unexpected outcome (ls=$(ls -la "$REPO/gibson/loop-state.md" 2>&1) err=$(cat "$ROOT/sym-live.err"))"; fi
+
+echo "validator: missing python3 fails closed with clear diagnostic"
+# PATH without python3; keep other tools.
+NBIN="$ROOT/nopy-bin"
+mkdir -p "$NBIN"
+# Minimal stubs so the script can still be found/executed under bash.
+for t in bash awk grep cat mkdir mktemp; do
+  if command -v "$t" >/dev/null 2>&1; then
+    ln -sf "$(command -v "$t")" "$NBIN/$t" 2>/dev/null || true
+  fi
+done
+write_valid_state "$VDIR/nopy.md"
+out=$(PATH="$NBIN" /bin/bash "$VALIDATOR" "$VDIR/nopy.md" 2>&1) || ec=$?
+ec=${ec:-0}
+if [[ $ec -ne 0 ]] && echo "$out" | grep -qi 'python3'; then
+  ok "missing python3: fail-closed with python3 diagnostic"
+else bad "missing python3: expected fail+diagnostic (ec=$ec out=$out)"; fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "loop-state.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

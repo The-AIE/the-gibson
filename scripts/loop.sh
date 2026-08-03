@@ -1368,9 +1368,11 @@ stop_if_halted() {
 # on a cold start must not create or rewrite this (issue #71). Default content
 # is the full ten-key contract (issue #75); missing keys on an existing file are
 # NOT silently repaired — validate_loop_state fails closed instead.
+# Never write through an existing non-file path (directory/symlink/device): leave
+# it for pre-read validation + quarantine/restore (issue #75).
 ensure_loop_state() {
   mkdir -p "$STATE_DIR"
-  if [[ ! -f "$STATE_FILE" ]]; then
+  if [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
     cat > "$STATE_FILE" <<EOF
 # Gibson loop state
 updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -1386,7 +1388,7 @@ next_action: triage highest-priority unblocked unclaimed issue
 notes: initialized by loop.sh
 EOF
   fi
-  if [[ ! -f "$JOURNAL" ]]; then
+  if [[ ! -e "$JOURNAL" && ! -L "$JOURNAL" ]]; then
     echo "# Gibson loop journal" > "$JOURNAL"
   fi
 }
@@ -1415,19 +1417,69 @@ run_validate_loop_state() {
 }
 
 # Strict UTC now — same grammar the validator accepts. python3 argv-safe.
+# python3 is a hard runtime dependency for timestamp validation (issue #75).
+require_python3() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "python3 is required for loop-state timestamp validation (issue #75); install python3 or put it on PATH"
+  fi
+}
+
 strict_utc_now() {
+  require_python3
   python3 - <<'PY'
 from datetime import datetime, timezone
 print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 PY
 }
 
+# Path shape helpers for snapshot/restore destinations (issue #75).
+# Never follow symlinks; never treat a directory/device as a replaceable file.
+# `mv -f temp dir` would nest the temp inside dir and return 0 — that is not success.
+is_regular_nonsymlink_file() {
+  # Exists as a regular file and is not a symlink ( -f follows links; -L first).
+  [[ ! -L "$1" && -f "$1" ]]
+}
+
+dest_ok_for_atomic_file_replace() {
+  # Missing is OK (create). Existing must be a regular non-symlink file.
+  if [[ -L "$1" ]]; then return 1; fi
+  if [[ -e "$1" ]]; then
+    [[ -f "$1" ]] || return 1
+  fi
+  return 0
+}
+
+path_shape_label() {
+  if [[ -L "$1" ]]; then
+    printf '%s' "symlink"
+  elif [[ -d "$1" ]]; then
+    printf '%s' "directory"
+  elif [[ -f "$1" ]]; then
+    printf '%s' "file"
+  elif [[ -e "$1" ]]; then
+    printf '%s' "special"
+  else
+    printf '%s' "missing"
+  fi
+}
+
 # Atomic same-filesystem snapshot of the validated pre-iteration state.
 # Temp + rename so readers never see a partial .loop-state.prev.
+# Refuses unsafe destinations (directory/symlink/device) before creating temps
+# that could be nested into them. Claims success only when the exact destination
+# path is a regular non-symlink file byte-identical to the source.
 snapshot_loop_state() {
-  local tmp
+  local tmp shape
   mkdir -p "$STATE_DIR" || return 1
-  [[ -f "$STATE_FILE" ]] || return 1
+  if ! is_regular_nonsymlink_file "$STATE_FILE"; then
+    info "snapshot refused: live loop-state is not a regular non-symlink file (shape=$(path_shape_label "$STATE_FILE"))"
+    return 1
+  fi
+  if ! dest_ok_for_atomic_file_replace "$STATE_SNAPSHOT"; then
+    shape=$(path_shape_label "$STATE_SNAPSHOT")
+    info "snapshot refused: $STATE_SNAPSHOT is not a safe file destination (shape=$shape) — not nesting a temp inside it"
+    return 1
+  fi
   tmp=$(mktemp "${STATE_DIR}/.loop-state.prev.XXXXXX") || return 1
   if ! cp "$STATE_FILE" "$tmp"; then
     rm -f "$tmp"
@@ -1437,14 +1489,52 @@ snapshot_loop_state() {
     rm -f "$tmp"
     return 1
   fi
+  # Success only if the exact destination path is the intended regular file.
+  if ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+    info "snapshot incomplete: destination is not a regular non-symlink file after move"
+    return 1
+  fi
+  if ! cmp -s "$STATE_FILE" "$STATE_SNAPSHOT"; then
+    info "snapshot incomplete: destination bytes differ from live loop-state"
+    return 1
+  fi
   return 0
 }
 
 # Restore STATE_FILE byte-for-byte from the last valid snapshot. Never writes
-# through a partial file (temp + rename). Returns 0 on success.
+# through a partial file (temp + rename). Returns 0 only on exact restore.
+# Unsafe live destinations (directory/symlink/device) are quarantined by rename
+# in the same parent — never deleted — then the exact snapshot is installed.
+# If quarantine or install cannot make the exact path a regular file matching
+# the snapshot, fail closed (recovery-incomplete); never claim success.
 restore_loop_state_from_snapshot() {
-  local tmp
-  [[ -f "$STATE_SNAPSHOT" ]] || return 1
+  local tmp shape quarantine
+  if ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+    info "restore refused: snapshot is not a regular non-symlink file (shape=$(path_shape_label "$STATE_SNAPSHOT"))"
+    return 1
+  fi
+
+  if [[ -L "$STATE_FILE" || ( -e "$STATE_FILE" && ! -f "$STATE_FILE" ) ]]; then
+    shape=$(path_shape_label "$STATE_FILE")
+    quarantine="${STATE_DIR}/loop-state.md.corrupt-quarantine.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    # Refuse to clobber an existing quarantine name; fail closed instead.
+    if [[ -e "$quarantine" || -L "$quarantine" ]]; then
+      info "recovery-incomplete: quarantine target already exists ($quarantine); leaving unsafe live path untouched (shape=$shape)"
+      return 1
+    fi
+    if ! mv -f "$STATE_FILE" "$quarantine"; then
+      info "recovery-incomplete: could not quarantine unsafe loop-state (shape=$shape); leaving it untouched — exact restore did not occur"
+      return 1
+    fi
+    info "state-corrupt: quarantined unsafe loop-state ($shape) to $(basename "$quarantine") — contents preserved, not deleted"
+  fi
+
+  # Destination must now be missing or a regular non-symlink file.
+  if ! dest_ok_for_atomic_file_replace "$STATE_FILE"; then
+    info "recovery-incomplete: live loop-state destination still unsafe after quarantine (shape=$(path_shape_label "$STATE_FILE"))"
+    return 1
+  fi
+
   tmp=$(mktemp "${STATE_DIR}/.loop-state.restore.XXXXXX") || return 1
   if ! cp "$STATE_SNAPSHOT" "$tmp"; then
     rm -f "$tmp"
@@ -1452,6 +1542,15 @@ restore_loop_state_from_snapshot() {
   fi
   if ! mv -f "$tmp" "$STATE_FILE"; then
     rm -f "$tmp"
+    info "recovery-incomplete: atomic restore move failed"
+    return 1
+  fi
+  if ! is_regular_nonsymlink_file "$STATE_FILE"; then
+    info "recovery-incomplete: live path is not a regular non-symlink file after restore"
+    return 1
+  fi
+  if ! cmp -s "$STATE_SNAPSHOT" "$STATE_FILE"; then
+    info "recovery-incomplete: restored bytes do not match snapshot"
     return 1
   fi
   return 0
@@ -1476,11 +1575,11 @@ journal_state_corrupt() {
       echo "validator diagnostics:"
       cat "$diag_file"
     fi
-    if [[ -f "$STATE_SNAPSHOT" && -f "$STATE_FILE" ]]; then
+    if is_regular_nonsymlink_file "$STATE_SNAPSHOT" && is_regular_nonsymlink_file "$STATE_FILE"; then
       echo "unified diff (snapshot vs current state):"
       # diff returns 1 on differences — expected; never fail the journal write.
       diff -u "$STATE_SNAPSHOT" "$STATE_FILE" || true
-    elif [[ ! -f "$STATE_SNAPSHOT" ]]; then
+    elif ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
       echo "snapshot: missing or unusable (fail closed; no guessed repair)."
     fi
   } >> "$JOURNAL"
@@ -1512,14 +1611,16 @@ handle_state_corrupt() {
   journal_state_corrupt "$phase" "$diag_file"
   rm -f "$diag_file"
 
-  # Restore only when the snapshot exists AND still validates. A corrupt or
-  # missing snapshot fails closed without inventing default state.
-  if [[ -f "$STATE_SNAPSHOT" ]]; then
+  # Restore only when the snapshot is a regular non-symlink file AND still
+  # validates. A corrupt, missing, or unsafe-shape snapshot fails closed
+  # without inventing default state. Restore itself refuses directory/symlink
+  # destinations unless it can quarantine them first (exact path restored).
+  if is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
     if run_validate_loop_state "$STATE_SNAPSHOT" 2>/dev/null; then
       if restore_loop_state_from_snapshot; then
         info "state-corrupt: restored loop-state byte-for-byte from snapshot"
       else
-        info "state-corrupt: snapshot validated but restore failed — leaving state untouched"
+        info "state-corrupt: snapshot validated but restore failed (recovery-incomplete) — not claiming exact restore"
       fi
     else
       info "state-corrupt: snapshot present but unusable — fail closed, no restore"
@@ -1530,7 +1631,7 @@ handle_state_corrupt() {
       } >> "$JOURNAL"
     fi
   else
-    info "state-corrupt: no snapshot — fail closed, loop-state left as-is"
+    info "state-corrupt: no usable snapshot (shape=$(path_shape_label "$STATE_SNAPSHOT")) — fail closed, loop-state left as-is"
   fi
 
   failures=$((failures + 1))
@@ -2041,6 +2142,22 @@ while true; do
       # Capture diagnostics for the journal (validator was quieted above).
       handle_state_corrupt "pre-read"
       local_skip_runner=1
+    else
+      # Pre-queued handoff retry (issue #71 + #75): when a supervisor is
+      # configured and loop-state already carries a non-empty handoff field,
+      # retry that handoff WITHOUT invoking a runner / snapshot / post-run
+      # freshness path. A zero-work no-op must not be treated as successful
+      # iteration progress (would reset failures and fake freshness). Schema
+      # already passed above; do not reset the failure budget here.
+      if [[ "$SUPERVISOR" == "devin" ]]; then
+        _queued_handoff=$(read_field handoff)
+        if [[ -n "$_queued_handoff" ]]; then
+          info "pre-queued handoff: retrying supervisor handoff of $_queued_handoff without runner (issue #71/#75)"
+          supervisor_handoff
+          local_skip_runner=1
+        fi
+        unset _queued_handoff
+      fi
     fi
   fi
 
@@ -2101,19 +2218,16 @@ while true; do
         set -e
         rm -f "$PROMPT_FILE"
 
-        # Post-run validation (issue #75):
-        #   - Schema is always required.
-        #   - When the agent rewrote loop-state (bytes differ from the pre-
-        #     iteration snapshot), also require updated >= iteration_start so a
-        #     rewrite with a stale/rolled clock is state-corrupt.
-        #   - When bytes are identical to the snapshot, the agent did not rewrite;
-        #     schema-only check applies. Pure no-progress detection is issue #63
-        #     and reuses this same timestamp parser — not implemented here.
+        # Post-run validation (issue #75): after EVERY actual runner invocation,
+        # state must pass schema AND updated >= iteration_start — including when
+        # bytes are identical to the pre-iteration snapshot. A zero-exit no-op
+        # that leaves a valid but old stamp is state-corrupt: one budget unit,
+        # no failure reset, no handoff. Issue #63 will add substantive
+        # no-progress classification later; do not weaken this freshness gate.
+        # Pre-queued handoff retries are routed before runner/snapshot above so
+        # they never depend on faking progress through a no-op runner.
         post_diag=$(mktemp "${TMPDIR:-/tmp}/gibson-post-val.XXXXXX")
-        post_min=""
-        if [[ -f "$STATE_SNAPSHOT" ]] && ! cmp -s "$STATE_SNAPSHOT" "$STATE_FILE"; then
-          post_min="$iteration_start"
-        fi
+        post_min="$iteration_start"
         if ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
           # state-corrupt takes precedence over runner-failure even when ec != 0.
           # Count exactly once as state-corrupt; do not also count runner-failure.
@@ -2122,29 +2236,25 @@ while true; do
             echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · state-corrupt · phase=post-run"
             echo "diagnosis: post-run loop-state failed schema/freshness validation (issue #75)."
             echo "iteration_start: $iteration_start"
-            if [[ -n "$post_min" ]]; then
-              echo "freshness: updated must be >= $post_min (state differed from snapshot)."
-            else
-              echo "freshness: schema-only (state byte-identical to snapshot; no-progress is #63)."
-            fi
+            echo "freshness: updated must be >= $post_min after every real runner invocation (byte-identical state included)."
             echo "runner_exit: $ec (not counted separately; state-corrupt takes precedence)"
             echo "validator diagnostics:"
             cat "$post_diag"
-            if [[ -f "$STATE_SNAPSHOT" && -f "$STATE_FILE" ]]; then
+            if is_regular_nonsymlink_file "$STATE_SNAPSHOT" && is_regular_nonsymlink_file "$STATE_FILE"; then
               echo "unified diff (snapshot vs current state):"
               diff -u "$STATE_SNAPSHOT" "$STATE_FILE" || true
-            elif [[ ! -f "$STATE_SNAPSHOT" ]]; then
+            elif ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
               echo "snapshot: missing or unusable (fail closed; no guessed repair)."
             fi
           } >> "$JOURNAL"
           rm -f "$post_diag"
 
-          if [[ -f "$STATE_SNAPSHOT" ]]; then
+          if is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
             if run_validate_loop_state "$STATE_SNAPSHOT" 2>/dev/null; then
               if restore_loop_state_from_snapshot; then
                 info "state-corrupt: restored loop-state byte-for-byte from snapshot"
               else
-                info "state-corrupt: snapshot validated but restore failed — leaving state untouched"
+                info "state-corrupt: snapshot validated but restore failed (recovery-incomplete) — not claiming exact restore"
               fi
             else
               info "state-corrupt: snapshot present but unusable — fail closed, no restore"
@@ -2155,7 +2265,7 @@ while true; do
               } >> "$JOURNAL"
             fi
           else
-            info "state-corrupt: no snapshot — fail closed, loop-state left as-is"
+            info "state-corrupt: no usable snapshot (shape=$(path_shape_label "$STATE_SNAPSHOT")) — fail closed, loop-state left as-is"
           fi
 
           failures=$((failures + 1))

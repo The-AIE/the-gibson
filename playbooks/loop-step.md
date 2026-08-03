@@ -173,13 +173,18 @@ touch /path/to/target/gibson/HALT
    contract (issue #75). The driver validates this file with
    `scripts/validate-loop-state.sh` before the next hat runs and after every
    real runner exit — a malformed rewrite is `state-corrupt`, restored from
-   snapshot, and never silently defaulted to `builder`.
+   snapshot, and never silently defaulted to `builder`. The shared validator
+   needs **python3** on PATH for strict UTC checks (absence fails closed;
+   values are data only — never shell-eval'd).
 
-   **Required column-zero keys (exactly once each):**
+   **Required column-zero keys (exactly once each) — the operational contract
+   is ten keys.** Early issue prose sometimes enumerated nine and omitted
+   `handoff_sha`; missing `handoff_sha` fails closed (add the key; empty is
+   fine). Migration is "write the key", never a silent default.
 
    | Key | Rule |
    |---|---|
-   | `updated` | Column-zero field `updated: <UTC timestamp>` — strict UTC instant `YYYY-MM-DDTHH:MM:SSZ` (real calendar date; no fractions, no offsets). Stamp **now** (UTC) on every rewrite — must be ≥ the iteration start the driver captured when the rewrite changes state. Not `timestamp:`, `updated_at:`, or an indented variant. |
+   | `updated` | Column-zero field `updated: <UTC timestamp>` — strict UTC instant `YYYY-MM-DDTHH:MM:SSZ` (real calendar date; no fractions, no offsets). Stamp **now** (UTC) on **every** rewrite after a real runner invocation — must be ≥ the driver's `iteration_start`, even if no other field changed. An unchanged old stamp is `state-corrupt`. Not `timestamp:`, `updated_at:`, or an indented variant. |
    | `issue` | Current issue id/ref (may be empty while triaging). |
    | `pr` | Current PR id/ref (may be empty). |
    | `hat` | Hat you just completed — one of: `builder`, `test-engineer`, `reviewer`, `ux-evaluator`, `security`, `release`, `historian`, `decomposer`, `planner`. |
@@ -187,7 +192,7 @@ touch /path/to/target/gibson/HALT
    | `round` | Non-negative base-10 integer (fix→review rounds for this PR). |
    | `parked` | Exactly `true` or `false`. |
    | `handoff` | Branch name ready for supervisor, or empty. |
-   | `handoff_sha` | Exact head SHA for that branch, or empty. |
+   | `handoff_sha` | Exact head SHA for that branch, or empty. **Required key** (value may be empty). |
    | `next_action` | One-liner for the next context (colons inside the value are fine). |
 
    Extra keys (e.g. `notes:`) may remain. Keys must be at column zero — indentation
