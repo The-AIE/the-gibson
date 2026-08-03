@@ -1386,10 +1386,14 @@ fi
 unset GH_STUB_EXPECT_REF
 unset GH_STUB_BEHAVIOR
 
-# Inert multi-iter runner that still stamps updated (issue #75). A pure
-# `cat >/dev/null` leaves loop-state byte-identical with a pre-iteration stamp,
-# which is state-corrupt under post-run freshness. Real agents rewrite
-# updated: every hat; cadence sensors only need the remote-halt side effects.
+# Multi-iter runner that satisfies post-run freshness (#75) AND substantive
+# progress (#63 / L-008) while still doing no real work. A pure
+# `cat >/dev/null` leaves loop-state byte-identical with a pre-iteration stamp
+# → state-corrupt under #75. Clock-only updated: rewrites pass freshness but
+# are deliberately no-progress under #63 (silent-noop excludes the clock).
+# Cadence sensors only need remote-halt side effects, so this fixture stamps
+# updated: (freshness) and a notes: cadence marker (substantive progress) so
+# multi-iter remote-halt tests are not stopped by the stale budget.
 # Written as a script (not a shell function): HERMES_CMD is eval'd inside loop.sh.
 cat > "$CALLS/stamp-and-noop.sh" <<'STAMP'
 #!/usr/bin/env bash
@@ -1407,8 +1411,17 @@ except OSError:
     sys.exit(0)
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 text2, n = re.subn(r"(?m)^updated:.*$", "updated: " + now, text, count=1)
-if n == 1:
-    open(path, "w", encoding="utf-8").write(text2)
+if n != 1:
+    sys.exit(0)
+# Distinct notes each iteration so silent_noop_progressed sees progress.
+# Clock-only updated: is intentionally NOT enough (L-008 / issue #63).
+text2, n2 = re.subn(r"(?m)^notes:.*$", "notes: cadence-stamp " + now, text2, count=1)
+if n2 != 1:
+    # Append notes if the fixture ever ships without one.
+    if not text2.endswith("\n"):
+        text2 += "\n"
+    text2 += "notes: cadence-stamp " + now + "\n"
+open(path, "w", encoding="utf-8").write(text2)
 PY
 fi
 cat >/dev/null

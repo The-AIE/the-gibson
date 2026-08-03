@@ -100,11 +100,20 @@ had `--permission-mode acceptEdits`; `codex` had `--full-auto`; grok had
 neither.
 **Harness fix:** grok branch now passes `--permission-mode bypassPermissions`.
 **Detection gap this exposes:** exit-code-based error budgets don't catch
-"ran fine, did nothing" — only "crashed." Consider a stronger sensor: if
-`gibson/loop-state.md`'s `updated:` timestamp hasn't advanced after N
-iterations, treat that as a failure too, not just non-zero exit.
-**Status:** fixed (grok branch); detection-gap fix not yet implemented
-**Tags:** #grok #cli #harness-bug #permissions
+"ran fine, did nothing" — only "crashed." A stronger sensor is required: if
+`gibson/loop-state.md` has no *substantive* change after N exit-0 iterations
+(clock-only `updated:` rewrites do not count — a clock is not progress), treat
+that as failure too.
+**Detection-gap status (issue #63):** implemented. `scripts/silent-noop.sh`
+exposes `silent_noop_progressed BEFORE AFTER` (substantive fingerprint; excludes
+only column-zero `updated:`). `scripts/loop.sh` runs it after #75 schema +
+freshness pass and runner exit 0, comparing the exact pre-run snapshot to live
+state. No-progress journals once, increments shared failure and `--stale-budget`
+once each, never restores or hands off. state-corrupt and runner-failure take
+precedence and do not run the sensor. Stop at the earlier of error-budget or
+stale-budget with a distinct no-progress diagnosis.
+**Status:** fixed (grok branch + detection gap via #63)
+**Tags:** #grok #cli #harness-bug #permissions #L-008 #silent-noop
 
 ## L-013 · 2026-07-25 · partial-pr-autoclose-despite-related-only
 **What happened:** Multi-phase issues (esp. chatterbuilt #28) auto-close on

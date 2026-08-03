@@ -129,33 +129,54 @@ Every real iteration (not `--dry-run` / `--print-prompt`) follows this order:
    byte-identical to the source.
 5. **Capture** a strict UTC `iteration_start` immediately before invoking the
    runner. After **every** actual runner exit, re-validate schema **and**
-   require `updated >= iteration_start` before resetting failures or calling
-   `supervisor_handoff` — including when bytes are identical to the
-   pre-iteration snapshot. A zero-exit no-op that leaves a valid but old stamp
-   is `state-corrupt` (one budget unit, no reset, no handoff). Pure
-   no-progress classification beyond this freshness gate is issue #63; do not
-   weaken #75 freshness in anticipation of it.
+   require `updated >= iteration_start` before any success path — including when
+   bytes are identical to the pre-iteration snapshot. A zero-exit no-op that
+   leaves a valid but old stamp is `state-corrupt` (one budget unit, no reset,
+   no handoff). Do not weaken this freshness gate.
 6. **Post-run corrupt/stale:** distinct `state-corrupt` journal section
    (validator diagnostics + diff), exact-byte restore, exactly one failure,
-   suppress handoff. Precedence over runner-failure even when the runner also
-   exited nonzero — do not double-count or label it runner-failure / no-progress.
-7. **Valid state + runner nonzero:** existing runner-failure behavior, count
-   exactly one. **Valid state + runner exit 0:** reset the consecutive failure
-   budget and may hand off. Escalation / budget thresholds fire once at the
-   existing values.
-8. **`--dry-run` / `--print-prompt`:** inert for snapshot, recovery, and
-   state-corrupt journal mutations; no runner, no handoff.
+   suppress handoff. Precedence over runner-failure **and** no-progress even
+   when the runner also exited nonzero — do not double-count or label it
+   runner-failure / no-progress. The no-progress sensor is **not** run.
+7. **Valid state + runner nonzero:** runner-failure only, count exactly one;
+   do not classify no-progress.
+8. **Valid state + runner exit 0 (issue #63 / L-008):** compare the exact
+   pre-run snapshot (`gibson/.loop-state.prev`) to live state with
+   `silent_noop_progressed` from `scripts/silent-noop.sh`. Only the
+   column-zero `updated:` clock is ignored — clock-only rewrites are
+   **no-progress**. Substantive change (including same-length edits and
+   `handoff_sha` / any other non-updated field) resets **both** the shared
+   failure counter and the stale counter; handoff may proceed. No substantive
+   change journals exactly one `no-progress` section, increments shared
+   failure once and stale once, and does **not** reset, restore, or hand off.
+9. **Budgets / escalation:** `--stale-budget N` (positive safe decimal integer;
+   omitted resolves exactly to `--error-budget`) stops on consecutive
+   no-progress. Escalation (`--escalate-after`) uses the same shared failure
+   counter and fires **before** stop. Stop at the earlier of error-budget or
+   stale-budget exhaustion; when no-progress caused the stop, the diagnosis is
+   always the distinct no-progress form (never a bare "harness bug" crash line).
+10. **`--dry-run` / `--print-prompt`:** inert for snapshot, recovery,
+    state-corrupt, and no-progress journal mutations; no runner, no handoff.
 
-The future no-progress sensor (issue #63) will **reuse this timestamp parser**
-(`validate-loop-state.sh` / its strict UTC python3 implementation) rather than
-inventing another one. This issue does not implement #63's no-progress sensor.
+The #75 freshness gate and the #63 no-progress sensor are complementary:
+freshness requires a real `updated >= iteration_start` stamp (reuses
+`validate-loop-state.sh`); no-progress asks whether anything **other than**
+that clock moved, reusing the exact pre-run snapshot so recovery cannot
+compare against a stale baseline.
 
 ## Safety rails (unattended ≠ unbounded)
 
 - **Bounded retries:** 3 fix→review rounds per PR, then park with a handoff note.
   Parked ≠ failed; it's queued for a different mind (or Mark).
 - **Error budget:** N consecutive gate failures (default 5) → stop, report, wait.
-  A loop that can't go green is burning tokens on a harness bug.
+  A loop that can't go green is burning tokens on a harness bug. Shared with
+  no-progress (below): each no-progress iteration counts one failure unit.
+- **Stale budget (issue #63 / L-008):** N consecutive no-progress iterations
+  (default: same as `--error-budget`; override with `--stale-budget N`) → stop
+  with a distinct no-progress diagnosis. A runner that exits 0 and only rewrites
+  the `updated:` clock is no-progress — exit-code budgets alone cannot see it.
+  Sensor: `scripts/silent-noop.sh` (`silent_noop_progressed`), wired into
+  `scripts/loop.sh`.
 - **Kill switch:** checked at the top of every iteration (and before any
   supervisor handoff). Three layers, all read-only:
   1. **Local (always):** the `gibson/HALT` file, or `GIBSON_HALT=1` in the
