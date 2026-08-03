@@ -46,6 +46,14 @@ USAGE
   --dry-run      print what would happen, touch nothing
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
+  Bare multi-claim: if more than one live claim exists for the issue and you
+  did not pass --claim-id, the script refuses (exit 1) before any plan or
+  mutation and prints the exact ids so you can pick one. A single live claim
+  may still be released with the bare form; that exact id is frozen first.
+  --claim-id is always a *literal* exact id (never an ERE/glob). It must
+  belong to the positional issue (and --prefix when given). Legacy table
+  rows are matched on the claim-id column only — text in scope/session/notes
+  never selects or deletes a row.
 
   Empty ledger: when a *valid* ledger ref with a *readable* tree has no
   docs/claims/* and no docs/active-work.md tree entry, that is a valid empty
@@ -64,8 +72,11 @@ ENV
 EXIT
   0  claim fully released (or truthfully nothing to release + label policy done)
   1  a hard precondition failed (nothing was cleaned)
-  3  cleanup ran but did not finish: the claim row or the agent-claimed label
-     is still live. The message names which. Never silent half-cleanup (L-009).
+  3  cleanup ran but did not finish: the claim row and/or the agent-claimed
+     label postcondition is incomplete. Strip/push failure, a target still
+     live after cleanup, or a failed/unreadable post-mutation reread preserves
+     agent-claimed and never claims the label was removed. The message names
+     which. Never silent half-cleanup (L-009).
 
 EXAMPLES
   cd ~/Code/acme-app
@@ -100,6 +111,7 @@ KEEP_BRANCH=0
 KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
+CLAIM_ID_SET=0
 PREFIX=""
 REPO_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -107,7 +119,11 @@ while [[ $# -gt 0 ]]; do
     --keep-branch) KEEP_BRANCH=1 ;;
     --keep-label) KEEP_LABEL=1 ;;
     --dry-run) DRY=1 ;;
-    --claim-id) CLAIM_ID_ARG="${2:-}"; shift ;;
+    --claim-id)
+      CLAIM_ID_SET=1
+      CLAIM_ID_ARG="${2:-}"
+      shift
+      ;;
     --prefix) PREFIX="${2:-}"; shift ;;
     --repo) REPO_ARG="${2:-}"; shift ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
@@ -123,6 +139,9 @@ warn() { echo "release-claim.sh: WARNING: $*" >&2; }
 [[ "$ISSUE" =~ ^[0-9]+$ ]] || die "issue must be a number, got '$ISSUE'"
 if [[ -n "$PREFIX" && ! "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
   die "--prefix must start with a letter, got '$PREFIX'"
+fi
+if [[ "$CLAIM_ID_SET" -eq 1 && -z "$CLAIM_ID_ARG" ]]; then
+  die "--claim-id requires a non-empty literal claim id"
 fi
 
 cd "$CANONICAL"
@@ -283,24 +302,15 @@ if [[ "$HAS_ACTIVE" -eq 0 && "$HAS_CLAIMS_TREE" -eq 0 ]]; then
   info "claim ledger at $REF is empty (no docs/claims/* and no docs/active-work.md) — treating as no live claims"
 fi
 
-# Claim ids we own. issue-<N>-…, plus issue-<ns>-<N>-… when --prefix is given.
-# The alpha namespace is what keeps issue-1<N>- from matching issue-<N>-.
-if [[ -n "$CLAIM_ID_ARG" ]]; then
-  MATCH_RE="(^|[^A-Za-z0-9-])${CLAIM_ID_ARG}([^A-Za-z0-9-]|$)"
-elif [[ -n "$PREFIX" ]]; then
-  MATCH_RE="issue-(${PREFIX}-)?${ISSUE}-"
-else
-  MATCH_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
-fi
-
 # Claims live one-per-file in docs/claims/ (L-023); rows in docs/active-work.md
-# are the legacy form and are still released. Prints matching ids on stdout.
-# Returns 1 if the ledger tree cannot be read (caller must hard-fail — never
-# treat a failed tree read as an empty match set).
+# are the legacy form and are still released. Prints *all* live claim ids
+# (deduped, sorted) on stdout — never filters by ERE. Returns 1 if the ledger
+# tree cannot be read (caller must hard-fail — never treat a failed tree read
+# as an empty match set).
 # Startup already proved every live claims/* blob is a readable regular file;
 # re-check here so a mid-run object-store loss still fails closed instead of
 # inventing ids from pathnames alone.
-claim_ids_matching() {
+claim_ids_all() {
   local claims_out active_out active_entry active_blob claims_line
   local c_mode c_type c_obj
   claims_out=""
@@ -363,26 +373,91 @@ EOF
   {
     printf '%s\n' "$claims_out" |
       sed 's|^docs/claims/||;s|\.md$||'
+    # Legacy table: claim-id is column 3 only. Never scan scope/session/notes.
     printf '%s\n' "$active_out" |
       grep -E '^\| ' |
       awk -F'|' '{print $3}' |
       sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-  } | grep -E '^issue-' | grep -E "$1" | sort -u || true
+  } | grep -E '^issue-' | sort -u || true
   return 0
 }
 
-# Every live row for this issue, so we can tell "released the last one" from
-# "released one slice of several" (L-024).
-ALL_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
-ALL_IDS=$(claim_ids_matching "$ALL_RE") || \
-  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
-TARGET_IDS=$(claim_ids_matching "$MATCH_RE") || \
-  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
+# True when claim id $1 belongs to the positional issue (and --prefix when set).
+# issue-1<N>- never matches issue-<N>-. Alpha namespace is optional without --prefix.
+claim_id_for_issue() {
+  local id="$1"
+  [[ -n "$id" ]] || return 1
+  if [[ -n "$PREFIX" ]]; then
+    case "$id" in
+      "issue-${ISSUE}-"*) return 0 ;;
+      "issue-${PREFIX}-${ISSUE}-"*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  case "$id" in
+    "issue-${ISSUE}-"*) return 0 ;;
+  esac
+  # Optional alpha namespace: issue-<ns>-<N>-… (ns starts with a letter).
+  if [[ "$id" =~ ^issue-[A-Za-z][A-Za-z0-9]*-${ISSUE}- ]]; then
+    return 0
+  fi
+  return 1
+}
 
-if [[ -z "$TARGET_IDS" ]]; then
-  if [[ -n "$CLAIM_ID_ARG" ]]; then
+# Filter a newline list of ids down to those belonging to this issue.
+issue_claim_ids_from() {
+  local id
+  printf '%s\n' "$1" | while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if claim_id_for_issue "$id"; then
+      printf '%s\n' "$id"
+    fi
+  done | sort -u
+}
+
+ALL_LIVE_IDS=$(claim_ids_all) || \
+  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
+# Every live row for this issue (broad: any alpha-ns or bare issue-N), so we
+# can tell "released the last one" from "released one slice of several" (L-024).
+ALL_IDS=$(issue_claim_ids_from "$ALL_LIVE_IDS")
+TARGET_IDS=""
+
+if [[ "$CLAIM_ID_SET" -eq 1 ]]; then
+  # --claim-id is always a *literal* exact id. Reject empty, ERE/glob-looking,
+  # and malformed values before any mutation. Never pass the arg through grep -E.
+  if [[ ! "$CLAIM_ID_ARG" =~ ^issue-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+    die "--claim-id must be a literal exact claim id (no wildcards/regex); got '$CLAIM_ID_ARG'"
+  fi
+  if ! claim_id_for_issue "$CLAIM_ID_ARG"; then
+    die "--claim-id '$CLAIM_ID_ARG' does not belong to issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
+  fi
+  if ! printf '%s\n' "$ALL_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
+    if printf '%s\n' "$ALL_LIVE_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
+      die "--claim-id '$CLAIM_ID_ARG' is live but not a claim for issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
+    fi
     die "no live claim '$CLAIM_ID_ARG' at $REF"
   fi
+  # Exactly one logical match (legacy + per-file already deduped by sort -u).
+  TARGET_IDS="$CLAIM_ID_ARG"
+else
+  # Bare invocation: freeze zero or one exact id. Never carry a broad issue
+  # regex into cleanup. Multi-claim without --claim-id is a hard refuse.
+  n_issue=0
+  if [[ -n "$ALL_IDS" ]]; then
+    n_issue=$(printf '%s\n' "$ALL_IDS" | grep -c . || true)
+  fi
+  if [[ "$n_issue" -gt 1 ]]; then
+    echo "release-claim.sh: ERROR: issue $ISSUE has ${n_issue} live claims; pass --claim-id with exactly one of:" >&2
+    printf '%s\n' "$ALL_IDS" | sed 's/^/  /' >&2
+    exit 1
+  fi
+  if [[ "$n_issue" -eq 1 ]]; then
+    TARGET_IDS=$(printf '%s\n' "$ALL_IDS")
+    info "bare release freezes single claim id: $TARGET_IDS"
+  fi
+fi
+
+if [[ -z "$TARGET_IDS" ]]; then
   info "no live claim for issue $ISSUE — will still try label/worktree cleanup"
 fi
 
@@ -394,11 +469,11 @@ wt_dir_for() { echo "$WT_PARENT/wt-${1#issue-}"; }
 branch_for() { echo "feat/${1#issue-}"; }
 
 residual_after_release() {
-  # ids in ALL_IDS that are not in TARGET_IDS
+  # ids in ALL_IDS that are not in TARGET_IDS (exact id compare only)
   local id
-  echo "$ALL_IDS" | while IFS= read -r id; do
+  printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
     [[ -n "$id" ]] || continue
-    echo "$TARGET_IDS" | grep -qxF "$id" || echo "$id"
+    printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id" || printf '%s\n' "$id"
   done
 }
 RESIDUAL_IDS=$(residual_after_release)
@@ -408,17 +483,17 @@ if [[ "$DRY" -eq 1 ]]; then
   echo "  claim-table repo: $CANONICAL (branch: $(git rev-parse --abbrev-ref HEAD), left untouched)"
   echo "  product repo:     ${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '(gh default)')}"
   if [[ -n "$TARGET_IDS" ]]; then
-    echo "$TARGET_IDS" | while IFS= read -r id; do
+    printf '%s\n' "$TARGET_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  release claim:   $id"
       echo "    remove worktree: $(wt_dir_for "$id")"
       echo "    delete branch:   $(branch_for "$id")"
     done
   else
-    echo "  release claim:   (none matched $MATCH_RE)"
+    echo "  release claim:   (none matched for issue $ISSUE)"
   fi
   if [[ -n "$RESIDUAL_IDS" ]]; then
-    echo "$RESIDUAL_IDS" | while IFS= read -r id; do
+    printf '%s\n' "$RESIDUAL_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  KEEP sibling claim: $id (and keep the agent-claimed label)"
     done
@@ -455,14 +530,28 @@ fi
 # --- claim rows, from a disposable main worktree --------------------------
 # L-009: never `git checkout main` in the caller's tree. It may be on a
 # long-lived branch or dirty, and aborting here used to strand the claim row.
-strip_claim_rows() {
-  local tmpwt
-  tmpwt=$(mktemp -d "${TMPDIR:-/tmp}/gibson-release-claim.XXXXXX") || return 1
-  rm -rf "$tmpwt"
+#
+# CLEANUP_BASE / CLEANUP_PUSHED_SHA / CLEANUP_DID_PUSH are written for the
+# post-mutation reread: that path must bind only to origin/$CLEANUP_BASE (the
+# exact remote branch that received the cleanup push) and prove it contains
+# $CLEANUP_PUSHED_SHA. Never fall back to local main|master after mutation.
+# After a successful cleanup push, missing/unreadable CLEANUP_PUSHED_SHA is a
+# hard release failure — lineage proof is mandatory, never skippable.
+CLEANUP_BASE=""
+CLEANUP_PUSHED_SHA=""
+CLEANUP_DID_PUSH=0
 
+strip_claim_rows() {
+  CLEANUP_PUSHED_SHA=""
+  CLEANUP_DID_PUSH=0
   local base
   base=main
   git show-ref --verify --quiet refs/heads/main || base=master
+  CLEANUP_BASE="$base"
+
+  local tmpwt
+  tmpwt=$(mktemp -d "${TMPDIR:-/tmp}/gibson-release-claim.XXXXXX") || return 1
+  rm -rf "$tmpwt"
 
   git fetch origin "$base" >/dev/null 2>&1 || true
   git worktree add --detach "$tmpwt" "origin/$base" >/dev/null 2>&1 ||
@@ -473,37 +562,260 @@ strip_claim_rows() {
     cd "$tmpwt" || exit 1
     local touched=0
 
-    # per-lane claim files (current form)
+    # per-lane claim files (current form) — exact id only
     local id
-    for id in $TARGET_IDS; do
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
       if [[ -f "docs/claims/$id.md" ]]; then
         git rm -q "docs/claims/$id.md" || exit 1
         touched=1
       fi
-    done
+    done <<EOF
+$TARGET_IDS
+EOF
 
-    # legacy shared table
+    # legacy shared table — compare only the claim-id column (field 3). Text
+    # in scope/session/notes that mentions a target id must never delete a row.
     local active=docs/active-work.md
-    if [[ -f "$active" ]] && grep -E "$MATCH_RE" "$active" >/dev/null 2>&1; then
-      local tmp
+    if [[ -f "$active" ]]; then
+      local tmp line cid keep id touched_legacy
       tmp=$(mktemp) || exit 1
-      grep -v -E "$MATCH_RE" "$active" > "$tmp"
-      mv "$tmp" "$active"
-      git add "$active" || exit 1
-      touched=1
+      touched_legacy=0
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^\| ]]; then
+          cid=$(printf '%s\n' "$line" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          keep=1
+          if [[ -n "$cid" && "$cid" != "claim-id" && "$cid" != "---" && ! "$cid" =~ ^-+$ ]]; then
+            while IFS= read -r id; do
+              [[ -n "$id" ]] || continue
+              if [[ "$cid" == "$id" ]]; then
+                keep=0
+                touched_legacy=1
+                break
+              fi
+            done <<EOF
+$TARGET_IDS
+EOF
+          fi
+          if [[ "$keep" -eq 1 ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+          fi
+        else
+          printf '%s\n' "$line" >> "$tmp"
+        fi
+      done < "$active"
+      if [[ "$touched_legacy" -eq 1 ]]; then
+        mv "$tmp" "$active"
+        git add "$active" || exit 1
+        touched=1
+      else
+        rm -f "$tmp"
+      fi
     fi
 
     [[ "$touched" -eq 1 ]] || exit 2  # nothing to strip
-    git commit -s -q -m "release-claim: ${CLAIM_ID_ARG:-issue-${ISSUE}}
+    git commit -s -q -m "release-claim: ${TARGET_IDS:-issue-${ISSUE}}
 
 Post-merge cleanup per Law 10 / docs/05." || exit 1
     git push origin "HEAD:$base" || exit 1
   ) || rc=$?
 
+  # Capture the exact pushed cleanup commit while the disposable worktree still
+  # holds it — post-mutation reread must prove origin/$base contains this SHA.
+  # Push already succeeded: capture failure is incomplete (exit 3 path), not a
+  # re-run of strip — do not claim the row is still live, and do not skip lineage.
+  if [[ $rc -eq 0 ]]; then
+    CLEANUP_DID_PUSH=1
+    CLEANUP_PUSHED_SHA=$(git -C "$tmpwt" rev-parse HEAD 2>/dev/null || true)
+    if [[ -z "$CLEANUP_PUSHED_SHA" ]]; then
+      warn "cleanup push succeeded but cleanup-pushed SHA is missing/unreadable — cannot prove lineage; preserving agent-claimed"
+    fi
+  fi
+
   git worktree remove --force "$tmpwt" >/dev/null 2>&1 || rm -rf "$tmpwt"
   git worktree prune >/dev/null 2>&1 || true
   return $rc
 }
+
+# Soft-fail twin of require_readable_regular_blob for post-mutation reread.
+# Same predicates as #61 startup; returns 1 with an exact path/object reason
+# instead of dying (mutation already ran → incomplete is exit 3, not 1).
+soft_require_readable_regular_blob() {
+  local path="$1" mode="$2" typ="$3" obj="$4"
+  if [[ "$typ" != "blob" ]] || [[ "$mode" != "100644" && "$mode" != "100755" ]]; then
+    warn "$path at $REF has unexpected Git mode/type ($mode $typ${obj:+ $obj}) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  if [[ -z "$obj" ]]; then
+    warn "$path at $REF has no object id — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  if ! git cat-file -e "$obj" 2>/dev/null; then
+    warn "$path exists in the ledger tree at $REF but its blob is unreadable/corrupt/unfetchable ($obj) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  local got_type
+  got_type=$(git cat-file -t "$obj" 2>/dev/null || true)
+  if [[ "$got_type" != "blob" ]]; then
+    warn "$path at $REF object $obj has unexpected type '${got_type:-unreadable}' (want blob) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  if ! git cat-file blob "$obj" >/dev/null 2>&1; then
+    warn "$path exists in the ledger tree at $REF but its blob payload is unreadable/corrupt ($obj) — post-cleanup ledger unusable for label decision"
+    return 1
+  fi
+  return 0
+}
+
+# Authoritative post-mutation reread of the exact remote-tracking ref that
+# received the cleanup push (origin/$CLEANUP_BASE). Reuses #61's strict
+# ref/tree/per-claim blob validation (fetch that branch → resolve only that
+# origin ref → tree → active-work → claims tree → every claim leaf →
+# claim_ids_all) and proves the ref contains the just-pushed cleanup commit.
+# On success updates REF, TREE_SHA and sets POST_ISSUE_IDS to issue-scoped ids
+# actually present. On any failure: warn the exact reason and return 1.
+# NEVER falls back to local main|master, HEAD, a cached pre-mutation residual
+# plan, or any other branch — that is how a stale empty local main falsely
+# authorized remove-label after origin/$CLEANUP_BASE became unreadable.
+authoritative_post_mutation_reread() {
+  POST_ISSUE_IDS=""
+  local base="${CLEANUP_BASE:-}"
+  if [[ -z "$base" ]]; then
+    warn "post-cleanup: cleanup base branch unset — cannot bind reread to the pushed remote ref; preserving agent-claimed"
+    return 1
+  fi
+  local remote_ref="origin/${base}"
+
+  # Fetch only the exact branch that received the cleanup push.
+  if ! git fetch origin "$base" >/dev/null 2>&1; then
+    warn "post-cleanup fetch of origin failed — cannot revalidate ledger ref ${remote_ref} for label decision; preserving agent-claimed"
+    return 1
+  fi
+
+  # Strict: only origin/$base. No resolve_ledger_ref local main|master fallback.
+  if ! git rev-parse --verify --quiet "${remote_ref}^{commit}" >/dev/null 2>&1; then
+    warn "post-cleanup: exact remote ledger ref ${remote_ref} is absent/unreadable after fetch — preserving agent-claimed (no local fallback)"
+    return 1
+  fi
+
+  # Just-pushed cleanup must be on that remote-tracking ref. After a successful
+  # cleanup push, lineage proof is mandatory — never skip when the capture SHA
+  # is empty/unreadable (that used to authorize remove-label + OK).
+  if [[ "${CLEANUP_DID_PUSH:-0}" -eq 1 ]]; then
+    if [[ -z "${CLEANUP_PUSHED_SHA:-}" ]]; then
+      warn "post-cleanup: cleanup-pushed SHA missing/unreadable after successful push — cannot prove lineage on ${remote_ref}; preserving agent-claimed"
+      return 1
+    fi
+    if ! git rev-parse --verify --quiet "${CLEANUP_PUSHED_SHA}^{commit}" >/dev/null 2>&1; then
+      warn "post-cleanup: just-pushed cleanup commit ${CLEANUP_PUSHED_SHA} is unreadable — preserving agent-claimed"
+      return 1
+    fi
+    if ! git merge-base --is-ancestor "$CLEANUP_PUSHED_SHA" "$remote_ref" 2>/dev/null; then
+      warn "post-cleanup: ${remote_ref} does not contain just-pushed cleanup commit ${CLEANUP_PUSHED_SHA} — preserving agent-claimed"
+      return 1
+    fi
+  fi
+
+  REF="$remote_ref"
+  if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
+    warn "post-cleanup: ledger ref $REF does not resolve to a commit — preserving agent-claimed"
+    return 1
+  fi
+  TREE_SHA=$(git rev-parse --verify "${REF}^{tree}" 2>/dev/null || true)
+  if [[ -z "$TREE_SHA" ]]; then
+    TREE_SHA=$(git cat-file -p "${REF}^{commit}" 2>/dev/null | awk '/^tree / {print $2; exit}')
+  fi
+  if [[ -z "$TREE_SHA" ]]; then
+    warn "post-cleanup: ledger commit at $REF has no tree pointer — preserving agent-claimed"
+    return 1
+  fi
+  if ! git cat-file -e "$TREE_SHA" 2>/dev/null; then
+    warn "post-cleanup: ledger commit at $REF references an unreadable/corrupt tree ($TREE_SHA) — preserving agent-claimed"
+    return 1
+  fi
+  if ! git ls-tree "$TREE_SHA" >/dev/null 2>&1; then
+    warn "post-cleanup: cannot list tree for ledger commit $REF (unreadable/corrupt tree $TREE_SHA) — preserving agent-claimed"
+    return 1
+  fi
+
+  local active_line active_ls_err="" claims_self claims_self_err="" claims_lines claims_ls_err=""
+  active_line=$(git ls-tree "$REF" -- docs/active-work.md 2>&1) || active_ls_err=$?
+  if [[ -n "$active_ls_err" ]]; then
+    warn "post-cleanup: cannot list docs/active-work.md at $REF — preserving agent-claimed"
+    return 1
+  fi
+  if [[ -n "$active_line" ]]; then
+    local amode atype ablob
+    amode=$(printf '%s\n' "$active_line" | awk '{print $1; exit}')
+    atype=$(printf '%s\n' "$active_line" | awk '{print $2; exit}')
+    ablob=$(printf '%s\n' "$active_line" | awk '{print $3; exit}')
+    soft_require_readable_regular_blob "docs/active-work.md" "$amode" "$atype" "$ablob" || return 1
+  fi
+
+  claims_self=$(git ls-tree "$REF" -- docs/claims 2>&1) || claims_self_err=$?
+  if [[ -n "$claims_self_err" ]]; then
+    warn "post-cleanup: cannot list docs/claims at $REF — preserving agent-claimed"
+    return 1
+  fi
+  if [[ -n "$claims_self" ]]; then
+    local csmode cstype csobj
+    csmode=$(printf '%s\n' "$claims_self" | awk '{print $1; exit}')
+    cstype=$(printf '%s\n' "$claims_self" | awk '{print $2; exit}')
+    csobj=$(printf '%s\n' "$claims_self" | awk '{print $3; exit}')
+    if [[ "$cstype" != "tree" ]] || [[ "$csmode" != "040000" ]]; then
+      warn "post-cleanup: docs/claims at $REF has unexpected Git mode/type ($csmode $cstype${csobj:+ $csobj}) — want 040000 tree; preserving agent-claimed"
+      return 1
+    fi
+    if [[ -z "$csobj" ]] || ! git cat-file -e "$csobj" 2>/dev/null; then
+      warn "post-cleanup: docs/claims tree at $REF is unreadable/corrupt${csobj:+ ($csobj)} — preserving agent-claimed"
+      return 1
+    fi
+    if ! git ls-tree "$csobj" >/dev/null 2>&1; then
+      warn "post-cleanup: cannot list docs/claims tree at $REF (unreadable/corrupt tree ${csobj}) — preserving agent-claimed"
+      return 1
+    fi
+    claims_lines=$(git ls-tree "$REF" docs/claims/ 2>&1) || claims_ls_err=$?
+    if [[ -n "$claims_ls_err" ]]; then
+      warn "post-cleanup: cannot read docs/claims/ at $REF — preserving agent-claimed"
+      return 1
+    fi
+    if [[ -n "$claims_lines" ]]; then
+      local claim_line claim_mode claim_type claim_obj claim_path
+      while IFS= read -r claim_line; do
+        [[ -n "$claim_line" ]] || continue
+        claim_mode=$(printf '%s\n' "$claim_line" | awk '{print $1; exit}')
+        claim_type=$(printf '%s\n' "$claim_line" | awk '{print $2; exit}')
+        claim_obj=$(printf '%s\n' "$claim_line" | awk '{print $3; exit}')
+        claim_path="${claim_line#*$'\t'}"
+        [[ -n "$claim_path" ]] || claim_path="docs/claims/<unknown>"
+        soft_require_readable_regular_blob "$claim_path" "$claim_mode" "$claim_type" "$claim_obj" || return 1
+      done <<EOF
+$claims_lines
+EOF
+    fi
+  fi
+
+  local post_live
+  if ! post_live=$(claim_ids_all); then
+    warn "post-cleanup: claim ledger parse incomplete/ambiguous at $REF — preserving agent-claimed"
+    return 1
+  fi
+  POST_ISSUE_IDS=$(issue_claim_ids_from "$post_live")
+  return 0
+}
+
+# Label removal is permitted only after BOTH:
+#   (a) every requested target representation was successfully removed and pushed
+#       (or was already absent — strip rc 2); and
+#   (b) a fresh, fully validated authoritative reread of the exact remote-
+#       tracking ref that received the cleanup push (origin/$CLEANUP_BASE)
+#       proves no target remains and no sibling for the issue remains. That
+#       path never falls back to local main|master.
+# Strip/push failure, target still live, fetch/ref/tree/blob failure, missing
+# cleanup lineage, or incomplete parse → incomplete, preserve label, never
+# claim it was removed.
+PRESERVE_LABEL=0
+STRIP_OK=1
 
 if [[ -n "$TARGET_IDS" ]]; then
   set +e
@@ -515,10 +827,54 @@ if [[ -n "$TARGET_IDS" ]]; then
     2) info "no claim to remove at $REF" ;;
     *)
       warn "claim NOT removed for issue $ISSUE — strip failed (rc=$strip_rc)."
-      warn "Fix by hand on main: git rm the docs/claims/<id>.md files (or drop rows matching '$MATCH_RE' from docs/active-work.md), then push."
+      warn "Fix by hand on main: git rm the docs/claims/<id>.md file(s) for exact id(s) '$TARGET_IDS' (or drop those claim-id column rows from docs/active-work.md), then push."
       INCOMPLETE=1
+      STRIP_OK=0
+      PRESERVE_LABEL=1
       ;;
   esac
+
+  # Discard the pre-mutation residual plan. Only an authoritative reread of
+  # live ids may decide label policy — never subtract TARGET_IDS from stale state.
+  RESIDUAL_IDS=""
+  ALL_IDS=""
+  POST_ISSUE_IDS=""
+
+  if ! authoritative_post_mutation_reread; then
+    INCOMPLETE=1
+    PRESERVE_LABEL=1
+  else
+    ALL_IDS="$POST_ISSUE_IDS"
+    # Classify from ids actually present on the validated reread.
+    # Use if/then (not grep &&) so set -e cannot abort on a non-target id.
+    targets_remaining=$(
+      printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id"; then
+          printf '%s\n' "$id"
+        fi
+      done
+    )
+    RESIDUAL_IDS=$(
+      printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id"; then
+          :
+        else
+          printf '%s\n' "$id"
+        fi
+      done
+    )
+    if [[ -n "$targets_remaining" ]]; then
+      warn "target claim(s) still live on $REF after cleanup attempt:"
+      printf '%s\n' "$targets_remaining" | sed 's/^/  /' >&2
+      INCOMPLETE=1
+      PRESERVE_LABEL=1
+    elif [[ "$STRIP_OK" -eq 0 ]]; then
+      # Strip/push failed even if the reread looks empty — do not remove label.
+      PRESERVE_LABEL=1
+    fi
+  fi
 else
   info "no claim to remove"
 fi
@@ -530,12 +886,16 @@ if command -v gh >/dev/null; then
   if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
   fi
-  if [[ -n "$RESIDUAL_IDS" ]]; then
+  if [[ "$PRESERVE_LABEL" -eq 1 ]]; then
+    # Incomplete cleanup (strip/push/reread/target still live): never call
+    # remove-label. A live claim with no agent-claimed label is the defect.
+    info "preserving agent-claimed on #$ISSUE — incomplete cleanup; not removing label"
+  elif [[ -n "$RESIDUAL_IDS" ]]; then
     # L-024: siblings are still working this issue; the label is still true.
     # Residual rows on the ledger are themselves the verification — leaving
     # the label is the complete policy without a GitHub round-trip.
     info "keeping agent-claimed on #$ISSUE — residual claims remain:"
-    echo "$RESIDUAL_IDS" | sed 's/^/  /'
+    printf '%s\n' "$RESIDUAL_IDS" | sed 's/^/  /'
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     # Empty ledger + live sibling whose claim is not on this ref (or was never
     # filed). Explicit operator path — do not invent a row, do not strip the
@@ -576,7 +936,9 @@ if command -v gh >/dev/null; then
     fi
   fi
 else
-  if [[ -n "$RESIDUAL_IDS" ]]; then
+  if [[ "$PRESERVE_LABEL" -eq 1 ]]; then
+    info "gh not found — agent-claimed left in place (incomplete cleanup; not removing label)"
+  elif [[ -n "$RESIDUAL_IDS" ]]; then
     info "gh not found — agent-claimed left in place (residual claims on ledger)"
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     warn "gh not found — --keep-label cannot verify agent-claimed on #$ISSUE"
