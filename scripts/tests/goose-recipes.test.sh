@@ -612,65 +612,92 @@ if socket:
 
 def package_embeds_exact_version(pkg):
     """True when package string embeds name + exact MAJOR.MINOR.PATCH."""
-    if not isinstance(pkg, str) or pkg != pkg.strip() or any(ch.isspace() for ch in pkg):
-        return False
-    if pkg.startswith("@"):
-        # scoped: @scope/name@version
-        if pkg.count("@") < 2:
-            return False
-        name, ver = pkg.rsplit("@", 1)
-        return bool(name) and is_exact_numeric_semver(ver)
-    if "==" in pkg:
-        name, ver = pkg.split("==", 1)
-        return bool(name) and is_exact_numeric_semver(ver)
-    if "@" in pkg:
-        name, ver = pkg.rsplit("@", 1)
-        return bool(name) and is_exact_numeric_semver(ver)
-    return False
+    return split_package_pin(pkg) is not None
 
 def is_package_at_identity(s):
-    """name@exact-semver package identity (not bare v1.2.3)."""
+    """name@exact-semver package identity (not bare v1.2.3; not name==ver)."""
+    if not isinstance(s, str) or "==" in s:
+        return False
+    return split_package_pin(s) is not None
+
+def split_package_pin(s):
+    """Parse name + exact version from package/identity pin. Returns (name, ver) or None."""
     if not isinstance(s, str) or s != s.strip() or any(ch.isspace() for ch in s):
-        return False
+        return None
     if s.startswith("@"):
+        # scoped: @scope/name@version (not ==)
         if s.count("@") < 2:
-            return False
+            return None
         name, ver = s.rsplit("@", 1)
-        return bool(name) and is_exact_numeric_semver(ver)
-    if "@" not in s:
-        return False
-    name, ver = s.rsplit("@", 1)
-    return bool(name) and is_exact_numeric_semver(ver)
+        if name and is_exact_numeric_semver(ver):
+            return (name, ver)
+        return None
+    if "==" in s:
+        name, ver = s.split("==", 1)
+        if name and is_exact_numeric_semver(ver):
+            return (name, ver)
+        return None
+    if "@" in s:
+        name, ver = s.rsplit("@", 1)
+        if name and is_exact_numeric_semver(ver):
+            return (name, ver)
+        return None
+    return None
+
+def normalize_repo_path(s):
+    """Strict normalization for container registry/repository identity comparison."""
+    if not isinstance(s, str):
+        s = str(s)
+    s = s.strip()
+    for prefix in ("docker://", "oci://", "https://", "http://"):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+    # drop trailing slashes only
+    while s.endswith("/"):
+        s = s[:-1]
+    return s
+
+def parse_image_locator(val):
+    """Return (normalized_repo, dig_hex, raw) from registry/repo@sha256:hex, else None."""
+    if not isinstance(val, str) or not IMAGE_DIGEST.fullmatch(val):
+        return None
+    repo, dig = val.rsplit("@sha256:", 1)
+    return (normalize_repo_path(repo), dig, val)
 
 def parse_image_digest_hex(val):
     """Return 64-hex digest from registry/repo@sha256:hex, else None."""
-    if not isinstance(val, str) or not IMAGE_DIGEST.fullmatch(val):
-        return None
-    return val.rsplit("@sha256:", 1)[1]
+    parsed = parse_image_locator(val)
+    return None if parsed is None else parsed[1]
 
 def check_container_entry(c, where):
     """Every container needs exactly one immutable image/artifact locator:
     registry/repository identity + @sha256:<64hex>. A free-standing digest
-    (no repository identity) is not a locator. Tags/semver tags are not enough."""
+    (no repository identity) is not a locator. Tags/semver tags are not enough.
+
+    Cross-field consistency: any redundant repository/name/identity/digest/image/
+    artifact claim must be absent or exactly agree with the single canonical
+    locator after strict normalization. Contradiction is always a failure."""
     if not isinstance(c, dict):
         errors.append("%s not object" % where)
         return
 
     # Collect documented locator fields (image / artifact only — unknown keys do not pin).
-    locators = []  # (field, full_value, digest_hex)
+    locators = []  # (field, full_value, repo_norm, digest_hex)
     for field in ("image", "artifact"):
         if field not in c or c[field] in (None, ""):
             continue
         val = str(c[field])
-        dig_hex = parse_image_digest_hex(val)
-        if dig_hex is None:
+        parsed = parse_image_locator(val)
+        if parsed is None:
             errors.append(
                 "%s.%s must be immutable registry/repo@sha256:<64hex> "
                 "(tag-only/semver-tag/digest-only not enough): %r"
                 % (where, field, val)
             )
         else:
-            locators.append((field, val, dig_hex))
+            repo_norm, dig_hex, _raw = parsed
+            locators.append((field, val, repo_norm, dig_hex))
 
     # Optional companion digest object/string — must not replace repository identity.
     dig = c.get("digest")
@@ -694,9 +721,12 @@ def check_container_entry(c, where):
         else:
             errors.append("%s.digest bad shape" % where)
 
+    canon_repo = None
+    canon_dig = None
     if len(locators) > 1:
-        digs = set(d for _, _, d in locators)
-        if len(digs) > 1:
+        digs = set(d for _, _, _, d in locators)
+        repos = set(r for _, _, r, _ in locators)
+        if len(digs) > 1 or len(repos) > 1:
             errors.append(
                 "%s multiple conflicting image/artifact locators" % where
             )
@@ -704,12 +734,14 @@ def check_container_entry(c, where):
             errors.append(
                 "%s multiple image/artifact locators; require exactly one" % where
             )
+        # still bind first for further checks
+        canon_repo, canon_dig = locators[0][2], locators[0][3]
     elif len(locators) == 1:
-        loc_dig = locators[0][2]
-        if dig_value is not None and dig_value != loc_dig:
+        canon_repo, canon_dig = locators[0][2], locators[0][3]
+        if dig_value is not None and dig_value != canon_dig:
             errors.append(
                 "%s conflicting digest vs image/artifact locator "
-                "(digest %s != locator %s)" % (where, dig_value, loc_dig)
+                "(digest %s != locator %s)" % (where, dig_value, canon_dig)
             )
     else:
         # No full image/artifact@sha256 locator.
@@ -748,36 +780,96 @@ def check_container_entry(c, where):
                     % (where, field, val)
                 )
 
-    # Split fields that omit repository identity (e.g. digest + tag only) already
-    # fail above. Reject repository-less identity/ref side fields that claim pins.
-    for field in ("identity", "ref", "repository", "repo"):
+    # Redundant repository/repo/identity must agree with canonical locator.
+    # Without a locator these fields cannot form an immutable pin alone.
+    for field in ("repository", "repo"):
         if field not in c or c[field] in (None, ""):
             continue
         val = str(c[field])
-        if field in ("repository", "repo"):
-            # repository alone (without @sha256 on image/artifact) is incomplete
-            if len(locators) == 0:
+        val_norm = normalize_repo_path(val)
+        if canon_repo is None:
+            errors.append(
+                "%s.%s without @sha256 image/artifact locator is not immutable: %r"
+                % (where, field, val)
+            )
+        elif val_norm != canon_repo:
+            errors.append(
+                "%s conflicting repository vs image/artifact locator "
+                "(%s=%r != locator repo %r)" % (where, field, val, canon_repo)
+            )
+
+    if "identity" in c and c["identity"] not in (None, ""):
+        val = str(c["identity"])
+        if canon_repo is None:
+            if not (
+                IMAGE_DIGEST.fullmatch(val)
+                or is_ok_identity(val)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", val)
+            ):
+                errors.append("floating/non-exact pin in %s.identity: %r" % (where, val))
+            elif not IMAGE_DIGEST.fullmatch(val):
                 errors.append(
-                    "%s.%s without @sha256 image/artifact locator is not immutable: %r"
-                    % (where, field, val)
+                    "%s.identity without @sha256 image/artifact locator is not immutable: %r"
+                    % (where, val)
                 )
-            continue
-        if field == "ref" or val.startswith("refs/"):
-            if not HEX40.fullmatch(val):
-                errors.append("%s.%s must be full 40-char commit SHA, got %r" % (where, field, val))
-        elif not (
-            IMAGE_DIGEST.fullmatch(val)
-            or is_ok_identity(val)
-            or re.fullmatch(r"sha256:[0-9a-f]{64}", val)
-        ):
-            errors.append("floating/non-exact pin in %s.%s: %r" % (where, field, val))
+        else:
+            id_loc = parse_image_locator(val)
+            if id_loc is not None:
+                id_repo, id_dig, _ = id_loc
+                if id_repo != canon_repo or id_dig != canon_dig:
+                    errors.append(
+                        "%s conflicting identity vs image/artifact locator "
+                        "(identity %r != locator)" % (where, val)
+                    )
+            elif normalize_repo_path(val) == canon_repo:
+                pass  # redundant-equal repository identity
+            elif re.fullmatch(r"sha256:[0-9a-f]{64}", val):
+                if val[len("sha256:"):] != canon_dig:
+                    errors.append(
+                        "%s conflicting identity digest vs locator: %r" % (where, val)
+                    )
+            elif HEX64.fullmatch(val):
+                if val != canon_dig:
+                    errors.append(
+                        "%s conflicting identity digest vs locator: %r" % (where, val)
+                    )
+            else:
+                errors.append(
+                    "%s conflicting/alternate identity vs image/artifact locator: %r"
+                    % (where, val)
+                )
+
+    if "ref" in c and c["ref"] not in (None, ""):
+        val = str(c["ref"])
+        if val.startswith("refs/") or not HEX40.fullmatch(val):
+            # container refs are not git commits; also reject mutable refs
+            if not (
+                IMAGE_DIGEST.fullmatch(val)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", val)
+                or (canon_repo is not None and normalize_repo_path(val) == canon_repo)
+            ):
+                errors.append(
+                    "%s.ref must be full 40-char commit SHA or agree with image locator, got %r"
+                    % (where, val)
+                )
+        # bare 40-hex on a container is an alternate pin form — reject unless no locator
+        elif canon_repo is not None:
+            errors.append(
+                "%s.ref alternate commit identity conflicts with image/artifact locator: %r"
+                % (where, val)
+            )
 
 def check_mcp_entry(c, where):
     """Every MCP entry needs exactly one immutable executable/source locator:
       (1) exact package identity + exact canonical version
       (2) exact git/source identity + full 40-hex commit
       (3) artifact identity + sha256 digest
-    Id/name-only, empty, incomplete, cross-wired, or unknown-key pins fail closed."""
+    Id/name-only, empty, incomplete, cross-wired, or unknown-key pins fail closed.
+
+    Cross-field consistency: parse one canonical identity + immutable pin per
+    shape. Any redundant name/package/version/identity/source/ref/artifact/digest
+    must be absent or exactly agree after strict normalization. Contradiction,
+    ambiguous multiple identities, and cross-shape field mixtures always fail."""
     if not isinstance(c, dict):
         errors.append("%s not object" % where)
         return
@@ -793,43 +885,97 @@ def check_mcp_entry(c, where):
     has_version = version not in (None, "")
     has_identity = identity not in (None, "")
     has_name = name not in (None, "")
-    pkg_complete = False
+
+    # Collect every (name, version) claim from package / identity / name+version.
+    # All claims must agree; one agreed pair is the canonical package pin.
+    pkg_claims = []  # (source_field, name, version)
 
     if has_package:
         pkg = str(package)
-        if package_embeds_exact_version(pkg):
-            pkg_complete = True
-        else:
+        parsed = split_package_pin(pkg)
+        if parsed is None:
             errors.append("%s.package missing exact version: %r" % (where, pkg))
+        else:
+            pkg_claims.append(("package", parsed[0], parsed[1]))
 
     if has_version:
         reject_nonexact_semver(str(version), where + ".version")
 
     if has_identity:
         idv = str(identity)
-        # identity may be name@ver (package pin) or weaker v-prefixed/semver — only
-        # name@exact completes a package locator by itself.
-        if is_package_at_identity(idv):
-            if not has_version or is_exact_numeric_semver(str(version)):
-                pkg_complete = True
-        else:
-            reject_identity(idv, where + ".identity")
+        parsed = split_package_pin(idv)
+        if parsed is not None and "==" not in idv:
+            pkg_claims.append(("identity", parsed[0], parsed[1]))
+        elif is_exact_numeric_semver(idv) or re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", idv):
+            # version-only identity is a version claim, not a full package pin alone
+            ver_only = (
+                idv[1:]
+                if idv.startswith("v") and is_exact_numeric_semver(idv[1:])
+                else idv
+            )
+            if is_exact_numeric_semver(ver_only):
+                if has_version and is_exact_numeric_semver(str(version)) and str(version) != ver_only:
+                    errors.append(
+                        "%s conflicting identity version vs version field "
+                        "(identity %r != version %r)" % (where, idv, version)
+                    )
+            # else non-exact — reject_identity below after shape resolution
+        # else: non-package identity (artifact name, source URL, etc.) deferred
+        # to shape-specific cross-field checks so equal artifact/git aliases stay green.
 
-    # name + exact version is a package locator (name is the package identity)
-    if (
-        not pkg_complete
-        and has_name
-        and has_version
-        and is_exact_numeric_semver(str(version))
-    ):
-        pkg_complete = True
+    # name + exact version is a package locator claim
+    if has_name and has_version and is_exact_numeric_semver(str(version)):
+        n = str(name).strip()
+        if n and not FLOAT_WORD.fullmatch(n):
+            pkg_claims.append(("name+version", n, str(version)))
 
-    # version present without any package identity
+    # version present without any package identity field
     if has_version and not (has_package or has_identity or has_name):
         errors.append(
             "%s version without package identity is not an immutable MCP locator"
             % where
         )
+
+    # Cross-check all package claims for exact agreement
+    canon_pkg_name = None
+    canon_pkg_ver = None
+    pkg_complete = False
+    if pkg_claims:
+        names = set(n for _, n, _ in pkg_claims)
+        vers = set(v for _, _, v in pkg_claims)
+        if len(names) > 1 or len(vers) > 1:
+            errors.append(
+                "%s conflicting package identity claims: %s"
+                % (
+                    where,
+                    "; ".join("%s=%s@%s" % (src, n, v) for src, n, v in pkg_claims),
+                )
+            )
+        else:
+            canon_pkg_name = next(iter(names))
+            canon_pkg_ver = next(iter(vers))
+            pkg_complete = True
+            # Redundant split version must match embedded package version
+            if has_version and is_exact_numeric_semver(str(version)):
+                if str(version) != canon_pkg_ver:
+                    errors.append(
+                        "%s conflicting version vs package pin "
+                        "(version %r != package version %r)"
+                        % (where, version, canon_pkg_ver)
+                    )
+                    pkg_complete = False
+            # Redundant name must match package name (id is separate entry key)
+            if has_name:
+                if str(name).strip() != canon_pkg_name:
+                    # only when name was not the sole claim source, or always?
+                    # Always require name agree with package identity when both present.
+                    if has_package or (has_identity and split_package_pin(str(identity)) is not None):
+                        errors.append(
+                            "%s conflicting name vs package pin "
+                            "(name %r != package name %r)"
+                            % (where, name, canon_pkg_name)
+                        )
+                        pkg_complete = False
 
     if pkg_complete:
         shapes.append("package")
@@ -837,30 +983,64 @@ def check_mcp_entry(c, where):
     # --- shape 2: git/source identity + full 40-hex commit ---
     SOURCE_KEYS = ("source", "repository", "repo", "url", "git", "source_url")
     COMMIT_KEYS = ("ref", "commit", "revision", "sha")
-    source_val = None
-    source_key = None
+    source_vals = []  # (key, normalized_value)
     for sk in SOURCE_KEYS:
         if sk in c and c[sk] not in (None, ""):
-            if source_val is not None:
-                errors.append("%s multiple source identity fields" % where)
-            source_val = str(c[sk])
-            source_key = sk
+            source_vals.append((sk, str(c[sk]).strip()))
+    source_val = None
+    source_key = None
+    if len(source_vals) > 1:
+        norms = set(normalize_repo_path(v) for _, v in source_vals)
+        if len(norms) > 1:
+            errors.append(
+                "%s conflicting source identity fields: %s"
+                % (where, ",".join("%s=%r" % (k, v) for k, v in source_vals))
+            )
+        else:
+            # equal aliases: fail closed (ambiguous multiple canonical keys)
+            errors.append(
+                "%s multiple source identity aliases (use exactly one): %s"
+                % (where, ",".join(k for k, _ in source_vals))
+            )
+        source_key, source_val = source_vals[0]
+    elif len(source_vals) == 1:
+        source_key, source_val = source_vals[0]
+
+    commit_vals = []  # (key, value)
+    for ck in COMMIT_KEYS:
+        if ck in c and c[ck] not in (None, ""):
+            commit_vals.append((ck, str(c[ck])))
     commit_val = None
     commit_key = None
     commit_hex_ok = False
-    for ck in COMMIT_KEYS:
-        if ck in c and c[ck] not in (None, ""):
-            if commit_val is not None:
-                errors.append("%s multiple commit/ref fields" % where)
-            commit_val = str(c[ck])
-            commit_key = ck
-            if HEX40.fullmatch(commit_val):
-                commit_hex_ok = True
-            else:
-                errors.append(
-                    "%s.%s must be exact immutable full commit SHA (40 hex), got %r"
-                    % (where, ck, commit_val)
-                )
+    if len(commit_vals) > 1:
+        hexes = set(v for _, v in commit_vals)
+        if len(hexes) > 1:
+            errors.append(
+                "%s conflicting commit/ref fields: %s"
+                % (where, ",".join("%s=%r" % (k, v) for k, v in commit_vals))
+            )
+        else:
+            errors.append(
+                "%s multiple commit/ref aliases (use exactly one): %s"
+                % (where, ",".join(k for k, _ in commit_vals))
+            )
+        commit_key, commit_val = commit_vals[0]
+        commit_hex_ok = bool(HEX40.fullmatch(commit_val))
+        if not commit_hex_ok:
+            errors.append(
+                "%s.%s must be exact immutable full commit SHA (40 hex), got %r"
+                % (where, commit_key, commit_val)
+            )
+    elif len(commit_vals) == 1:
+        commit_key, commit_val = commit_vals[0]
+        if HEX40.fullmatch(commit_val):
+            commit_hex_ok = True
+        else:
+            errors.append(
+                "%s.%s must be exact immutable full commit SHA (40 hex), got %r"
+                % (where, commit_key, commit_val)
+            )
 
     if source_val is not None and commit_hex_ok:
         if (
@@ -887,29 +1067,55 @@ def check_mcp_entry(c, where):
 
     # --- shape 3: artifact identity + digest ---
     ARTIFACT_KEYS = ("artifact", "asset", "artifact_url", "tarball")
-    art_val = None
-    art_key = None
+    art_vals = []
     for ak in ARTIFACT_KEYS:
         if ak in c and c[ak] not in (None, ""):
-            if art_val is not None:
-                errors.append("%s multiple artifact identity fields" % where)
-            art_val = str(c[ak])
-            art_key = ak
+            art_vals.append((ak, str(c[ak]).strip()))
+    art_val = None
+    art_key = None
+    if len(art_vals) > 1:
+        norms = set(v for _, v in art_vals)
+        if len(norms) > 1:
+            errors.append(
+                "%s conflicting artifact identity fields: %s"
+                % (where, ",".join("%s=%r" % (k, v) for k, v in art_vals))
+            )
+        else:
+            errors.append(
+                "%s multiple artifact identity aliases (use exactly one): %s"
+                % (where, ",".join(k for k, _ in art_vals))
+            )
+        art_key, art_val = art_vals[0]
+    elif len(art_vals) == 1:
+        art_key, art_val = art_vals[0]
 
     dig = c.get("digest")
     dig_ok = False
+    dig_canon = None  # normalized digest string for comparison
     if dig is not None:
         if isinstance(dig, dict):
             before = len(errors)
             validate_digest_obj(dig, where + ".digest", allowed=("sha256", "sha512-integrity"))
             dig_ok = len(errors) == before
+            if dig_ok:
+                algo = str(dig.get("algorithm"))
+                val = str(dig.get("value"))
+                if algo == "sha256":
+                    dig_canon = "sha256:" + val
+                else:
+                    dig_canon = val
         elif isinstance(dig, str):
             if dig.startswith("sha512-"):
                 dig_ok = validate_npm_integrity(dig, where + ".digest")
+                if dig_ok:
+                    dig_canon = dig
             elif dig.startswith("sha256:"):
                 dig_ok = validate_sha256_value(dig[7:], where + ".digest")
+                if dig_ok:
+                    dig_canon = dig
             elif HEX64.fullmatch(dig):
                 dig_ok = True
+                dig_canon = "sha256:" + dig
             else:
                 errors.append("%s.digest malformed: %r" % (where, dig))
                 dig_ok = False
@@ -948,6 +1154,114 @@ def check_mcp_entry(c, where):
         errors.append(
             "%s multiple conflicting locator shapes: %s" % (where, ",".join(shapes))
         )
+    else:
+        # Cross-shape field mixtures: fields belonging to other shapes must be absent.
+        shape = shapes[0]
+        if shape == "package":
+            if source_val is not None or commit_val is not None:
+                errors.append(
+                    "%s package locator mixed with git/source fields (cross-shape)"
+                    % where
+                )
+            if art_val is not None or dig is not None:
+                errors.append(
+                    "%s package locator mixed with artifact/digest fields (cross-shape)"
+                    % where
+                )
+            # identity must be package-at matching canon, or version-only matching canon
+            if has_identity and canon_pkg_name is not None:
+                idv = str(identity)
+                parsed = split_package_pin(idv)
+                if parsed is not None and "==" not in idv:
+                    if parsed[0] != canon_pkg_name or parsed[1] != canon_pkg_ver:
+                        errors.append(
+                            "%s conflicting identity vs package pin: %r" % (where, idv)
+                        )
+                else:
+                    ver_only = (
+                        idv[1:]
+                        if idv.startswith("v") and is_exact_numeric_semver(idv[1:])
+                        else idv
+                    )
+                    if is_exact_numeric_semver(ver_only):
+                        if ver_only != canon_pkg_ver:
+                            errors.append(
+                                "%s conflicting identity version vs package pin: %r"
+                                % (where, idv)
+                            )
+                    else:
+                        errors.append(
+                            "%s non-agreeing identity vs package pin: %r" % (where, idv)
+                        )
+        elif shape == "git":
+            # package/version/identity package-claims are already multi-shape if complete.
+            # Incomplete package fields mixed into git still fail closed.
+            if has_package or (
+                has_identity and split_package_pin(str(identity)) is not None
+            ):
+                errors.append(
+                    "%s git locator mixed with package identity fields (cross-shape)"
+                    % where
+                )
+            if art_val is not None or dig is not None:
+                errors.append(
+                    "%s git locator mixed with artifact/digest fields (cross-shape)"
+                    % where
+                )
+            # Redundant identity (non-package) on git must agree with source or commit
+            if has_identity and split_package_pin(str(identity)) is None:
+                idv = str(identity)
+                if (
+                    normalize_repo_path(idv) == normalize_repo_path(source_val)
+                    or idv == commit_val
+                ):
+                    pass  # redundant-equal
+                elif is_exact_numeric_semver(idv) or re.fullmatch(
+                    r"v[0-9]+\.[0-9]+\.[0-9]+", idv
+                ):
+                    errors.append(
+                        "%s git locator mixed with package-version identity (cross-shape): %r"
+                        % (where, idv)
+                    )
+                else:
+                    errors.append(
+                        "%s conflicting identity vs git source: %r" % (where, idv)
+                    )
+        elif shape == "artifact":
+            if source_val is not None or commit_val is not None:
+                errors.append(
+                    "%s artifact locator mixed with git/source fields (cross-shape)"
+                    % where
+                )
+            if has_package or (
+                has_identity and split_package_pin(str(identity)) is not None
+            ):
+                errors.append(
+                    "%s artifact locator mixed with package identity fields (cross-shape)"
+                    % where
+                )
+            # identity agreeing with artifact name or digest is ok; contradiction fails
+            if has_identity and split_package_pin(str(identity)) is None:
+                idv = str(identity)
+                if idv == art_val:
+                    pass
+                elif dig_canon and (
+                    idv == dig_canon
+                    or idv == dig_canon.replace("sha256:", "")
+                    or (idv.startswith("sha256:") and idv == dig_canon)
+                ):
+                    pass
+                elif is_exact_numeric_semver(idv) or re.fullmatch(
+                    r"v[0-9]+\.[0-9]+\.[0-9]+", idv
+                ):
+                    errors.append(
+                        "%s artifact locator mixed with package-version identity (cross-shape): %r"
+                        % (where, idv)
+                    )
+                else:
+                    errors.append(
+                        "%s conflicting identity vs artifact: %r" % (where, idv)
+                    )
 
 for list_key in ("containers", "mcp_packages"):
     items = data.get(list_key)
@@ -1003,9 +1317,20 @@ def walk(obj, path=""):
             walk(v, "%s[%d]" % (path, idx))
     elif isinstance(obj, str):
         if path.endswith(".version"):
-            reject_nonexact_semver(obj, path)
+            # containers/mcp handlers own entry-level version cross-field rules
+            if ".containers[" in path or ".mcp_packages[" in path:
+                if FLOAT_WORD.fullmatch(obj.strip()) or NONEXACT.search(obj):
+                    errors.append("floating pin in %s: %r" % (path, obj))
+            else:
+                reject_nonexact_semver(obj, path)
         elif path.endswith(".identity"):
-            reject_identity(obj, path)
+            # tools[] use package-style identity; containers/mcp allow locator-equal
+            # aliases (image@sha256, artifact names, source URLs) validated in handlers.
+            if ".containers[" in path or ".mcp_packages[" in path:
+                if FLOAT_WORD.fullmatch(obj.strip()) or obj.startswith("refs/heads/"):
+                    errors.append("floating pin in %s: %r" % (path, obj))
+            else:
+                reject_identity(obj, path)
         elif path.endswith(".tag") or path.endswith(".image") or path.endswith(".ref"):
             # containers/mcp handlers already cover entries; still catch float words
             if FLOAT_WORD.fullmatch(obj.strip()) or obj.startswith("refs/heads/"):
@@ -2616,6 +2941,233 @@ data["mcp_packages"] = []
 '
 out=$(check_lock_py "$ROOT/ok-lock-empty-arrays.json" 2>&1); rc=$?
 expect_pass "green: empty containers and mcp_packages arrays valid" "$out" "$rc"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: cross-field identity consistency fail-opens (P3 repair)"
+# ---------------------------------------------------------------------------
+
+# Independent mutant 1: container image@sha256 + contradictory repository
+lock_mutant "$ROOT/bad-lock-container-repo-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "repository": "ghcr.io/other/different",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-repo-conflict.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 + conflicting repository fails" "$out" "$rc" "conflict\|repository"
+
+# Independent mutant 2: MCP package@version + contradictory version field
+lock_mutant "$ROOT/bad-lock-mcp-version-conflict.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "package": "probe@1.2.3",
+    "version": "9.9.9",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-version-conflict.json" 2>&1); rc=$?
+expect_fail "red: MCP package@1.2.3 + version 9.9.9 fails" "$out" "$rc" "conflict\|version"
+
+# Independent mutant 3: MCP package@version + contradictory identity
+lock_mutant "$ROOT/bad-lock-mcp-identity-conflict.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "package": "probe@1.2.3",
+    "identity": "other@4.5.6",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-identity-conflict.json" 2>&1); rc=$?
+expect_fail "red: MCP package@1.2.3 + identity other@4.5.6 fails" "$out" "$rc" "conflict\|identity"
+
+# --- Broader container equal-vs-conflicting ---
+lock_mutant "$ROOT/ok-lock-container-repo-equal.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "repository": "ghcr.io/org/tool",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-repo-equal.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal repository + equal digest" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-container-identity-equal.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "identity": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-container-identity-equal.json" 2>&1); rc=$?
+expect_pass "green: container image@sha256 + equal identity locator" "$out" "$rc"
+
+lock_mutant "$ROOT/bad-lock-container-digest-conflict2.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-digest-conflict2.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 + conflicting digest string fails" "$out" "$rc" "conflict"
+
+lock_mutant "$ROOT/bad-lock-container-identity-conflict.json" '
+data["containers"] = [{
+    "id": "probe",
+    "image": "ghcr.io/org/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "identity": "ghcr.io/other/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-identity-conflict.json" 2>&1); rc=$?
+expect_fail "red: container image@sha256 + conflicting identity locator fails" "$out" "$rc" "conflict\|identity"
+
+lock_mutant "$ROOT/bad-lock-container-repo-alt.json" '
+data["containers"] = [{
+    "id": "probe",
+    "artifact": "registry/tool@sha256:b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    "repo": "registry/other",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-container-repo-alt.json" 2>&1); rc=$?
+expect_fail "red: container artifact@sha256 + conflicting repo fails" "$out" "$rc" "conflict\|repository"
+
+# --- Broader MCP package equal-vs-conflicting ---
+lock_mutant "$ROOT/ok-lock-mcp-package-redundant-equal.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "name": "probe",
+    "package": "probe@1.2.3",
+    "version": "1.2.3",
+    "identity": "probe@1.2.3",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-package-redundant-equal.json" 2>&1); rc=$?
+expect_pass "green: MCP package + equal version + equal identity + equal name" "$out" "$rc"
+
+lock_mutant "$ROOT/bad-lock-mcp-name-conflict.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "name": "other",
+    "package": "probe@1.2.3",
+    "version": "1.2.3",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-name-conflict.json" 2>&1); rc=$?
+expect_fail "red: MCP package@probe + conflicting name fails" "$out" "$rc" "conflict\|name"
+
+lock_mutant "$ROOT/bad-lock-mcp-identity-version-conflict.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "package": "probe@1.2.3",
+    "version": "1.2.3",
+    "identity": "probe@9.9.9",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-identity-version-conflict.json" 2>&1); rc=$?
+expect_fail "red: MCP package@1.2.3 + identity probe@9.9.9 fails" "$out" "$rc" "conflict"
+
+# --- Broader MCP git/source equal-vs-conflicting ---
+lock_mutant "$ROOT/ok-lock-mcp-git-minimal.json" '
+data["mcp_packages"] = [{
+    "id": "git-mcp",
+    "source": "https://github.com/example/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-git-minimal.json" 2>&1); rc=$?
+expect_pass "green: MCP git source+ref (no redundant aliases)" "$out" "$rc"
+
+lock_mutant "$ROOT/bad-lock-mcp-git-dual-source.json" '
+data["mcp_packages"] = [{
+    "id": "git-mcp",
+    "source": "https://github.com/example/mcp.git",
+    "repository": "https://github.com/other/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-git-dual-source.json" 2>&1); rc=$?
+expect_fail "red: MCP conflicting source vs repository fails" "$out" "$rc" "conflict\|source\|multiple"
+
+lock_mutant "$ROOT/bad-lock-mcp-git-dual-source-equal.json" '
+data["mcp_packages"] = [{
+    "id": "git-mcp",
+    "source": "https://github.com/example/mcp.git",
+    "repository": "https://github.com/example/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-git-dual-source-equal.json" 2>&1); rc=$?
+expect_fail "red: MCP duplicate equal source aliases fail closed" "$out" "$rc" "multiple\|alias"
+
+lock_mutant "$ROOT/bad-lock-mcp-git-dual-commit.json" '
+data["mcp_packages"] = [{
+    "id": "git-mcp",
+    "source": "https://github.com/example/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-git-dual-commit.json" 2>&1); rc=$?
+expect_fail "red: MCP conflicting ref vs commit fails" "$out" "$rc" "conflict\|commit\|multiple"
+
+# --- Broader MCP artifact equal-vs-conflicting ---
+lock_mutant "$ROOT/ok-lock-mcp-artifact-equal-id.json" '
+data["mcp_packages"] = [{
+    "id": "art-mcp",
+    "artifact": "art-mcp-1.0.0.tgz",
+    "identity": "art-mcp-1.0.0.tgz",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/ok-lock-mcp-artifact-equal-id.json" 2>&1); rc=$?
+expect_pass "green: MCP artifact + equal identity string" "$out" "$rc"
+
+lock_mutant "$ROOT/bad-lock-mcp-artifact-dual.json" '
+data["mcp_packages"] = [{
+    "id": "art-mcp",
+    "artifact": "art-mcp-1.0.0.tgz",
+    "tarball": "other-1.0.0.tgz",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-artifact-dual.json" 2>&1); rc=$?
+expect_fail "red: MCP conflicting artifact vs tarball fails" "$out" "$rc" "conflict\|artifact\|multiple"
+
+lock_mutant "$ROOT/bad-lock-mcp-artifact-identity-conflict.json" '
+data["mcp_packages"] = [{
+    "id": "art-mcp",
+    "artifact": "art-mcp-1.0.0.tgz",
+    "identity": "other-artifact.tgz",
+    "digest": {
+        "algorithm": "sha256",
+        "value": "b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5",
+    },
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-artifact-identity-conflict.json" 2>&1); rc=$?
+expect_fail "red: MCP artifact + conflicting identity fails" "$out" "$rc" "conflict\|identity"
+
+# Cross-shape mixture still rejected (package fields + git)
+lock_mutant "$ROOT/bad-lock-mcp-cross-shape-pkg-git.json" '
+data["mcp_packages"] = [{
+    "id": "probe",
+    "package": "probe@1.2.3",
+    "version": "1.2.3",
+    "source": "https://github.com/example/mcp.git",
+    "ref": "90c50d653d7fd978ec5d436b548eca8613dc2d26",
+}]
+'
+out=$(check_lock_py "$ROOT/bad-lock-mcp-cross-shape-pkg-git.json" 2>&1); rc=$?
+expect_fail "red: MCP package+git cross-shape mixture fails" "$out" "$rc" "multiple conflicting locator\|cross-shape"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
