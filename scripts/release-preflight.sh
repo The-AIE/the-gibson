@@ -14,9 +14,26 @@ WHAT IT DOES
     1. Close keywords. GitHub's linker does not parse negation, so a partial
        ship whose body says "does not fully resolve #28" still closes #28.
        Reads closingIssuesReferences (what GitHub will actually do), not prose.
-    2. Review. Same-account solo loops cannot self-approve, so an empty
-       reviewDecision is accepted when a review comment ends in
-       VERDICT: APPROVE from someone other than a rubber-stamping author.
+    2. Review. Reviews and comments form one normalized timestamped stream
+       (newest wins, source type does not reorder). Formal review states
+       (APPROVED / CHANGES_REQUESTED) are modeled as events when usable and
+       always precede body VERDICT text on the same review; DISMISSED reviews
+       never authorize via body text. reviewDecision is only a fail-closed
+       fallback when no usable event exists and no malformed relevant evidence
+       was discarded. A newer VERDICT: REQUEST_CHANGES blocks even if an older
+       formal approval remains. Timestamps must be a complete ISO-8601 instant
+       with a real civil calendar (strict round-trip; impossible dates like
+       9999-02-31 never normalize into the stream) and at most 1–9 fractional
+       digits (nanoseconds; 10+ digits are malformed, never truncated);
+       authorless APPROVE never clears the gate; equal-time conflicts prefer
+       REQUEST_CHANGES. Any comment (or non-dismissed body-VERDICT review)
+       with a recognized terminal VERDICT marker whose timestamp is missing,
+       non-string, incomplete, invalid civil time, or >9-digit precision is
+       malformed relevant evidence and hard-blocks before event selection or
+       aggregate fallback — never drop-then-recover via an older valid approval
+       or reviewDecision=APPROVED. Ordinary comments without a terminal VERDICT
+       are not evidence. A SHA-bound verdict must match the current PR head —
+       absent/null head fails closed.
     3. Required checks. Distinguishes a product red (a step failed) from GitHub
        Actions infrastructure (startup_failure / no steps / no runner), which
        re-runs identically and is usually concurrent across open PRs.
@@ -94,7 +111,7 @@ fi
 [[ -n "$REPO" ]] || die "could not resolve repo — pass --repo owner/name"
 
 PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
-  --json number,title,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments 2>/dev/null) ||
+  --json number,title,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
   die "could not read $REPO#$PR"
 
 jqr() { echo "$PR_JSON" | jq -r "$1"; }
@@ -104,6 +121,7 @@ AUTHOR=$(jqr '.author.login // ""')
 DRAFT=$(jqr '.isDraft')
 MERGEABLE=$(jqr '.mergeable // "UNKNOWN"')
 REVIEW_DECISION=$(jqr '.reviewDecision // ""')
+HEAD_OID=$(jqr '.headRefOid // ""')
 TIER=$(jqr '[.labels[].name] | map(select(startswith("tier-"))) | first // ""')
 CLOSES=$(jqr '[.closingIssuesReferences[].number] | map("#"+(.|tostring)) | join(", ")')
 
@@ -121,44 +139,291 @@ else
 fi
 
 # --- 2. review (L-015 / L-021) -------------------------------------------
-# The last VERDICT: line wins, and only from a login that is not the author —
-# unless the author is the only identity available, which is the solo-loop case
-# the lesson is about.
-VERDICT_LINE=$(echo "$PR_JSON" | jq -r '
-  [ (.reviews[]? | {login: .author.login, body: .body}),
-    (.comments[]? | {login: .author.login, body: .body}) ]
-  | map(select(.body != null and (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i"))))
-  | last // {}
-  | if .body then (.login + "\t" + ((.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v)) else "" end')
-VERDICT_LOGIN="${VERDICT_LINE%%	*}"
-VERDICT_TEXT="${VERDICT_LINE#*	}"
-[[ "$VERDICT_LINE" == "$VERDICT_TEXT" ]] && VERDICT_TEXT=""
+# Reviews and comments are one normalized timestamped event stream. Newest
+# usable event wins regardless of source type and regardless of
+# reviewDecision (false-green: formal APPROVED short-circuited a newer
+# VERDICT: REQUEST_CHANGES comment). Formal review states are modeled as
+# events when they carry a usable timestamp; reviewDecision is only a
+# fail-closed fallback when no usable event exists AND no malformed relevant
+# evidence was discarded.
+#
+# Usability gates (fail closed):
+#   - timestamps must be a complete accepted ISO-8601 instant (not a prefix)
+#     with a real civil calendar (strict round-trip; jq fromdateiso8601 must
+#     never normalize Feb 31 / Apr 31 into a later day that sorts as "newest")
+#   - fractional seconds: 0 (none) or 1–9 digits only (nanosecond precision).
+#     10+ fractional digits are malformed everywhere this contract applies —
+#     never silently truncated into the chrono key (truncation collapsed
+#     distinct instants and let REQUEST_CHANGES tie-precedence pick an older
+#     event when only the 10th+ digit differed)
+#   - formal state (APPROVED / CHANGES_REQUESTED) precedes body VERDICT text
+#   - DISMISSED reviews never authorize via body VERDICT: APPROVE
+#   - authorless APPROVE never counts as independent
+#   - equal true instants: REQUEST_CHANGES wins over APPROVE (source order ignored)
+#   - sort by chronological UTC instant, never raw .at text (offsets / .000
+#     spellings must not reorder or miss equal-instant ties)
+#   - SHA-bound events must match the current PR head; missing head fails closed
+#   - malformed relevant evidence blocks before event selection recovery and
+#     before any reviewDecision aggregate fallback (no drop-then-recover path):
+#       * formal APPROVED/CHANGES_REQUESTED with unusable timestamp or
+#         authorless APPROVED
+#       * any comment (or non-dismissed body-VERDICT review) whose body has a
+#         recognized terminal VERDICT: APPROVE|REQUEST_CHANGES marker but
+#         whose timestamp is missing/non-string/incomplete/invalid/civil/
+#         >9-digit, or whose APPROVE is authorless
+#     Ordinary comments without a recognized terminal VERDICT are never
+#     evidence or blockers.
+
+# Complete accepted GitHub-style instant: YYYY-MM-DDTHH:MM:SS[.frac](Z|±HH:MM)
+# Fractional policy (strict): optional frac is 1–9 digits only (nanoseconds).
+# 10+ digits fail the shape match → complete_at false → never enter the stream;
+# formal APPROVED/CHANGES_REQUESTED with 10+ digits is malformed formal.
+# Rejects prefix-only junk like "9999-99-99Tbogus" and missing-timezone forms.
+# Single-backslash fractional group: jq/Oniguruma sees (\.[0-9]{1,9})? — a
+# double bash escape would require a literal backslash before the digits and
+# reject real fractional instants (over-rejection).
+ISO_AT_RE='^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,9})?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'
+
+# Shared jq helpers: shape match + strict civil-calendar round-trip + chrono key.
+# fromdateiso8601 normalizes impossible dates (9999-02-31 → 9999-03-03); that
+# must never enter the stream. Validate by stripping frac, taking the wall
+# clock (drop Z/offset), parsing wall+Z, and requiring todateiso8601 to equal
+# wall+Z. Offset forms are accepted when the wall is real and the offset
+# matches ISO_AT_RE — do not require fromdateiso8601 on ±HH:MM (jq often
+# rejects valid offsets and would over-reject GitHub-shaped stamps).
+# Chronological sort key: wall epoch minus offset seconds, plus fractional
+# padded to 9 digits so distinct accepted sub-seconds order and .000 collapses
+# with none. Only 1–9 frac digits reach this key (see ISO_AT_RE); pad is
+# not a silent truncate of 10+ (those never match complete_at).
+# shellcheck disable=SC2016
+JQ_ISO_DEFS='
+  def strict_iso_instant:
+    (. | sub("\\.\\d+"; "")) as $s |
+    ($s | sub("Z$"; "") | sub("[+-][0-9]{2}:[0-9]{2}$"; "")) as $wall |
+    (try (($wall + "Z") | fromdateiso8601 | todateiso8601) catch null) == ($wall + "Z");
+  def complete_at:
+    (. != null) and ((. | type) == "string") and (. | test($re)) and strict_iso_instant;
+  def instant_sort_key:
+    (capture("(?<wall>^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<frac>\\.[0-9]{1,9})?(?<tz>Z|[+-][0-9]{2}:[0-9]{2})$")) as $p |
+    ($p.wall + "Z" | fromdateiso8601) as $wall_epoch |
+    (
+      if $p.tz == "Z" then 0
+      else
+        ($p.tz | capture("^(?<sign>[+-])(?<hh>[0-9]{2}):(?<mm>[0-9]{2})$")) as $o |
+        (($o.hh | tonumber) * 3600 + ($o.mm | tonumber) * 60) *
+          (if $o.sign == "+" then 1 else -1 end)
+      end
+    ) as $off |
+    ($wall_epoch - $off) as $utc |
+    (((($p.frac // ".") | ltrimstr(".")) + "000000000")[0:9] | tonumber) as $frac_ns |
+    [$utc, $frac_ns];
+'
+
+# Malformed relevant evidence that would matter for the gate but cannot enter
+# the stream — must hard-block before older-event recovery or reviewDecision
+# aggregate fallback. Covers formal APPROVED/CHANGES_REQUESTED and any
+# comment / non-dismissed body-VERDICT review with a recognized terminal
+# VERDICT marker. Ordinary comments without a terminal VERDICT are ignored.
+MALFORMED_EVIDENCE=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
+  def body_verdict:
+    if .body == null then empty
+    elif (.body | type) != "string" then empty
+    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i")) then
+      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v
+    else empty end;
+  def login_of:
+    (((.author // {}) | .login // "") // "");
+  def is_approve_verdict:
+    test("APPROVE"; "i") and (test("REQUEST_CHANGES"; "i") | not);
+  # Format without author login: prior sensors assert discarded events are not
+  # "selected" by requiring their login never appear in the verdict text.
+  # Authorless is called out; otherwise kind + label + stamp identify the item.
+  def fmt($kind; $label; $who; $at):
+    (if $who == "" then "\( $label ) (authorless)" else $label end) as $lab |
+    [$kind, $lab, ($at // "null" | tostring)] | join(" ");
+  [
+    # Formal state that is relevant but unusable (bad time / authorless APPROVE).
+    (.reviews[]? |
+      select(.state == "APPROVED" or .state == "CHANGES_REQUESTED") |
+      select(
+        (.submittedAt | complete_at | not) or
+        (.state == "APPROVED" and (login_of == ""))
+      ) |
+      fmt("formal"; .state; login_of; .submittedAt)
+    ),
+    # Non-dismissed reviews whose only authorization path is a body VERDICT
+    # line (COMMENTED / empty state / etc.) — same timestamp + authorless rules.
+    (.reviews[]? |
+      select(.state != "APPROVED" and .state != "CHANGES_REQUESTED" and .state != "DISMISSED") |
+      (body_verdict // empty) as $v |
+      select($v != null and $v != "") |
+      select(
+        (.submittedAt | complete_at | not) or
+        (($v | is_approve_verdict) and (login_of == ""))
+      ) |
+      fmt("review-body"; $v; login_of; .submittedAt)
+    ),
+    # Comments with a recognized terminal VERDICT marker — fail closed on bad
+    # timestamps and authorless APPROVE (never drop-then-recover).
+    (.comments[]? |
+      (body_verdict // empty) as $v |
+      select($v != null and $v != "") |
+      select(
+        (.createdAt | complete_at | not) or
+        (($v | is_approve_verdict) and (login_of == ""))
+      ) |
+      fmt("comment"; $v; login_of; .createdAt)
+    )
+  ] | if length == 0 then empty else join("; ") end')
+
+VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
+  def body_verdict:
+    if .body == null then empty
+    elif (.body | type) != "string" then empty
+    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i")) then
+      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v
+    else empty end;
+  def formal_verdict:
+    if .state == "APPROVED" then "VERDICT: APPROVE"
+    elif .state == "CHANGES_REQUESTED" then "VERDICT: REQUEST_CHANGES"
+    else empty end;
+  # Formal blocking/approval state always wins over body text on the same
+  # review. DISMISSED (and other non-authorizing states) must not authorize
+  # via a retained body VERDICT: APPROVE.
+  def event_verdict:
+    if .state == "APPROVED" or .state == "CHANGES_REQUESTED" then formal_verdict
+    elif .state == "DISMISSED" then empty
+    else body_verdict end;
+  # Full accepted ISO instant + strict civil calendar. Prefix-only junk and
+  # impossible dates (9999-02-31) must never sort above real evidence.
+  def valid_at:
+    (.at != null) and ((.at | type) == "string") and (.at | complete_at);
+  def is_request_changes:
+    (.verdict | test("REQUEST_CHANGES"; "i"));
+  [
+    (.reviews[]? | {
+      source: "review",
+      login: ((.author // {}) | .login // ""),
+      at: (.submittedAt // null),
+      sha: ((.commit // {}) | .oid // ""),
+      body: .body,
+      state: (.state // "")
+    }),
+    (.comments[]? | {
+      source: "comment",
+      login: ((.author // {}) | .login // ""),
+      at: (.createdAt // null),
+      sha: "",
+      body: .body,
+      state: ""
+    })
+  ]
+  | map(. as $e | ($e | event_verdict) as $v | select($v != null and $v != "") | $e + {verdict: $v})
+  | map(select(valid_at))
+  # Authorless APPROVE is never independent and never clears the gate — drop it.
+  # Authorless REQUEST_CHANGES still blocks (fail closed).
+  | map(select(is_request_changes or ((.login != null) and (.login != ""))))
+  # Ascending true UTC instant (offsets + fractions normalized). On equal
+  # instants only, REQUEST_CHANGES (1) after APPROVE (0) so last wins.
+  | sort_by((.at | instant_sort_key) + [if is_request_changes then 1 else 0 end])
+  | last // empty
+  | if . then
+      [.login, .verdict, .source, .at, .sha] | @tsv
+    else
+      empty
+    end')
+
+VERDICT_LOGIN=""
+VERDICT_TEXT=""
+VERDICT_SOURCE=""
+VERDICT_AT=""
+VERDICT_SHA=""
+if [[ -n "$VERDICT_EVENT" ]]; then
+  # TSV: login, verdict, source, at, sha (sha may be empty)
+  VERDICT_LOGIN=$(printf '%s\n' "$VERDICT_EVENT" | cut -f1)
+  VERDICT_TEXT=$(printf '%s\n' "$VERDICT_EVENT" | cut -f2)
+  VERDICT_SOURCE=$(printf '%s\n' "$VERDICT_EVENT" | cut -f3)
+  VERDICT_AT=$(printf '%s\n' "$VERDICT_EVENT" | cut -f4)
+  VERDICT_SHA=$(printf '%s\n' "$VERDICT_EVENT" | cut -f5)
+fi
 
 SAME_AUTHOR_REVIEW=0
-case "$REVIEW_DECISION" in
-  APPROVED)
-    NOTES+=("formal GitHub approval present")
-    ;;
-  CHANGES_REQUESTED)
-    BLOCKERS+=("reviewDecision is CHANGES_REQUESTED")
-    ;;
-  *)
-    if echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
-      BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN)")
-    elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
-      if [[ -n "$AUTHOR" && "$VERDICT_LOGIN" == "$AUTHOR" ]]; then
-        # L-015: GitHub refuses self-approval, so the comment is the only signal
-        # the solo loop can produce. Real, but it is not an independent identity.
-        SAME_AUTHOR_REVIEW=1
-        ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
-      else
-        NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN (independent identity, no formal review)")
-      fi
+STALE_HEAD_VERDICT=0
+MISSING_HEAD_BINDING=0
+# SHA-bound evidence fails closed when current head is absent/null OR mismatches.
+if [[ -n "$VERDICT_SHA" ]]; then
+  if [[ -z "$HEAD_OID" ]]; then
+    MISSING_HEAD_BINDING=1
+  elif [[ "$VERDICT_SHA" != "$HEAD_OID" ]]; then
+    STALE_HEAD_VERDICT=1
+  fi
+fi
+
+if [[ -n "$MALFORMED_EVIDENCE" ]]; then
+  # Drop-then-recover via an older valid approval or reviewDecision=APPROVED is
+  # a false-green. Malformed relevant evidence is a hard blocker before any
+  # aggregate recovery (and prevents READY even if a usable older event exists).
+  BLOCKERS+=("malformed relevant review evidence cannot be used and hard-blocks (no drop-then-recover): $MALFORMED_EVIDENCE")
+fi
+
+if [[ -n "$VERDICT_TEXT" ]]; then
+  # Usable chronological event is the gate — reviewDecision does not short-circuit.
+  # Malformed relevant evidence (if any) already blocks above; a valid older
+  # APPROVE must never alone produce READY when later relevant evidence was
+  # discarded as malformed.
+  if [[ "$MISSING_HEAD_BINDING" -eq 1 ]]; then
+    BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is SHA-bound to ${VERDICT_SHA:0:7} but current head is absent/null — cannot verify binding (fail closed)")
+  elif [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
+    BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
+  elif echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
+    BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
+  elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
+    if [[ -z "$VERDICT_LOGIN" ]]; then
+      # Defensive: authorless APPROVE is filtered above; still fail closed.
+      BLOCKERS+=("VERDICT: APPROVE has no author — fail closed (cannot count as independent)")
+    elif [[ -n "$MALFORMED_EVIDENCE" ]]; then
+      # Never select an older/sibling valid APPROVE as gate-clearing when
+      # relevant evidence was discarded as malformed (false-green path).
+      :
+    elif [[ -n "$AUTHOR" && "$VERDICT_LOGIN" == "$AUTHOR" ]]; then
+      # L-015: GitHub refuses self-approval, so the comment is the only signal
+      # the solo loop can produce. Real, but it is not an independent identity.
+      SAME_AUTHOR_REVIEW=1
+      ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
     else
-      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+      NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity)")
     fi
-    ;;
-esac
+  else
+    BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+  fi
+elif [[ -z "$MALFORMED_EVIDENCE" ]]; then
+  # No usable timestamped event and no malformed relevant evidence discarded:
+  # reviewDecision is a fail-closed fallback only. Never use it to recover after
+  # dropping malformed formal or verdict-bearing comment evidence.
+  case "$REVIEW_DECISION" in
+    APPROVED)
+      NOTES+=("formal GitHub approval present (reviewDecision fallback; no usable timestamped event)")
+      ;;
+    CHANGES_REQUESTED)
+      BLOCKERS+=("reviewDecision is CHANGES_REQUESTED")
+      ;;
+    *)
+      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+      ;;
+  esac
+else
+  # Malformed relevant evidence already recorded as a blocker. Do not recover
+  # via reviewDecision=APPROVED. If reviewDecision is empty/other, still emit
+  # the Law 5 no-review line so prior sensors that require it keep passing.
+  case "$REVIEW_DECISION" in
+    APPROVED|CHANGES_REQUESTED)
+      # Aggregate already known; do not use it to authorize or double-count.
+      ;;
+    *)
+      BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
+      ;;
+  esac
+fi
 
 # --- 3. required checks, product red vs GHA infra (L-033) ----------------
 CHECK_SUMMARY=$(echo "$PR_JSON" | jq -r '

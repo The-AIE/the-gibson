@@ -96,7 +96,29 @@ Canonical: /path/to/target
    vibes). **Partial ship?** Run with `--partial`: it must close *nothing*.
 2. CI green: gibson-gate, tests, security hard-fail layers. **No merge while
    required checks are pending or red.**
-3. Review `VERDICT: APPROVE`; UX eval PASS when user-visible.
+3. Review: newest usable timestamped event across PR reviews **and** comments
+   wins (source type does not reorder the stream). Formal review states
+   (`APPROVED` / `CHANGES_REQUESTED`) are modeled as events when they carry a
+   complete ISO-8601 timestamp with a real civil calendar (strict round-trip;
+   impossible dates like `9999-02-31` never normalize into the stream) and
+   always precede body `VERDICT` text on the same review; `DISMISSED` reviews
+   never authorize via body text. Fractional seconds accept **1–9 digits only**
+   (nanosecond precision); **10+ fractional digits are malformed** and never
+   enter the stream (no silent truncate — truncating collapsed distinct
+   instants past the ninth digit). `reviewDecision` is only a fail-closed
+   fallback when no usable event exists and no malformed relevant evidence was
+   discarded — a newer `VERDICT: REQUEST_CHANGES` blocks even if an older
+   formal approval remains. Incomplete/prefix-only timestamps, 10+ fractional
+   digits, impossible calendar dates/times, and authorless `APPROVE` events
+   never clear the gate; equal-time conflicts prefer `REQUEST_CHANGES`. Any
+   comment (or non-dismissed body-VERDICT review) with a recognized terminal
+   `VERDICT` marker whose timestamp is missing, non-string, incomplete, invalid
+   civil time, or >9-digit precision is malformed relevant evidence and
+   hard-blocks before event selection or aggregate fallback — never
+   drop-then-recover via an older valid approval or `reviewDecision=APPROVED`.
+   Ordinary comments without a terminal `VERDICT` are not evidence. When the
+   verdict source binds a commit SHA, it must match the current PR head —
+   stale or absent/null head fails closed. UX eval PASS when user-visible.
 4. DCO / `Signed-off-by` intact through squash strategy.
 5. Tier C / schema → **human approval recorded** (PR comment/approval from owner).
 6. Schema PRs: no other schema merge in flight; migration file present
@@ -117,7 +139,7 @@ If any item fails → do not merge; report the missing gate.
 
 **READY** — merge.
 
-**BLOCKED** — the reason is printed. Three of them are worth knowing cold:
+**BLOCKED** — the reason is printed. Four of them are worth knowing cold:
 
 - *"GitHub will close #N on merge"* on a `--partial` ship. Prose does not stop the
   keyword linker: "does not fully resolve #28" closed #28 anyway, four times
@@ -126,6 +148,28 @@ If any item fails → do not merge; report the missing gate.
 - *"product-red required check"* — a step ran and failed. That is the code. Fix it.
 - *"no formal approval and no VERDICT: line"* — review is fail-closed (Law 5).
   Never merge past this one.
+- *Newest VERDICT is REQUEST_CHANGES / stale head* — reviews and comments are
+  one timestamped stream; the newest usable event wins regardless of source
+  type and regardless of `reviewDecision`. An older formal
+  `reviewDecision=APPROVED` must not short-circuit a newer comment
+  `VERDICT: REQUEST_CHANGES`. An older comment `VERDICT: APPROVE` must not
+  override a newer review `VERDICT: REQUEST_CHANGES` (PR #57 false-green).
+  Formal `CHANGES_REQUESTED` / `DISMISSED` state precedes contradictory body
+  `VERDICT: APPROVE` text. Timestamps must be a complete ISO-8601 instant with
+  a real civil calendar (not a prefix like `9999-99-99Tbogus`, and not an
+  impossible date like `9999-02-31` that jq would normalize) and at most
+  nanosecond fractional precision (1–9 digits after the decimal; 10+ digits
+  are malformed, never silently truncated into the chrono key); authorless
+  `APPROVE` never counts as independent; equal timestamps prefer
+  `REQUEST_CHANGES`. Malformed relevant evidence — formal
+  `APPROVED`/`CHANGES_REQUESTED` *or* a verdict-bearing comment/review-body
+  whose timestamp is unusable or whose `APPROVE` is authorless — blocks before
+  event selection recovery and before any `reviewDecision` aggregate fallback
+  (no drop-then-recover to an older valid approval or aggregate READY).
+  Ordinary comments without a recognized terminal `VERDICT` are not evidence.
+  When the source carries a commit SHA, a verdict bound to any SHA other than
+  the current head — or when head is absent/null — is fail closed — re-review
+  the tip.
 
 **ADMIN-CANDIDATE** — nothing about the product is wrong, but nothing has
 authorized the merge either. Two causes:
@@ -161,6 +205,8 @@ the same issue — multi-slice issues ship one slice at a time (L-024):
 
 ```bash
 git show origin/main:docs/active-work.md | grep -E "issue-([a-z0-9]+-)?<issue>-"
+# and/or:
+git ls-tree --name-only origin/main docs/claims/ | grep -E "issue-([a-z0-9]+-)?<issue>-"
 ```
 
 If more than the merged claim is live, name the one you merged; the script then
@@ -168,6 +214,30 @@ leaves the sibling rows and keeps `agent-claimed` on the issue:
 
 ```bash
 release-claim.sh <issue> --claim-id issue-<issue>-<merged-slug>
+```
+
+**Empty ledger is valid only on a real commit ref with a readable tree.** After
+the last claim file is gone, `docs/claims/` is untracked in git and
+`docs/active-work.md` may be absent — that is zero live claims on a valid
+`origin/main` (or main/master) whose tree objects are readable, not a corrupt
+ledger. A missing, unborn, or non-commit main/master ref — a commit whose
+referenced tree is unavailable/corrupt — or a ledger path that still exists in
+the tree but whose blob/object is unreadable/corrupt — is **not** an empty
+ledger: the script inspects tree entries first and fails hard **before** any
+label mutation. True path absence is allowed; missing live blobs are not.
+Cleanup must still complete without inventing a row when the ref is valid, the
+tree is readable, and the ledger is empty. Operator paths:
+
+```bash
+# Live sibling still owns the issue, but no claim file is on origin/main
+# (sibling lane elsewhere, or claim never filed): keep the label explicitly.
+# --keep-label verifies agent-claimed is still present on GitHub (exit 3 if
+# the product repo is unresolved or the label is absent/unreadable).
+release-claim.sh <issue> --repo owner/name --keep-label
+
+# Final completed lane: empty ledger and no live sibling → remove agent-claimed
+# (default). Exit 0 only when removal is verified; exit 3 if it is not.
+release-claim.sh <issue> --repo owner/name
 ```
 
 Cross-repo template work records claim ids as `issue-template-<N>-<slug>` in the
@@ -182,8 +252,12 @@ You do **not** need the canonical checkout on `main`, clean or otherwise — the
 claim-row commit happens in a throwaway worktree (L-009).
 
 **Exit 3 means cleanup did not finish** — the claim row or the `agent-claimed`
-label is still live and the message says which. Law 10 is not done until you fix
-it by hand; an unverified label removal is how #24 stayed claimed (L-027).
+label postcondition failed and the message says which. Law 10 is not done until
+you fix it by hand; an unverified label removal is how #24 stayed claimed
+(L-027). `--keep-label` is the truthful "no row, sibling still live" path and
+must verify the label is still present — a blind success when the label is
+absent or unreadable is a false green. Do not invent a claim file just to
+satisfy cleanup.
 
 Confirm issue closed by `Closes #` or close explicitly.
 

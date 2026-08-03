@@ -26,7 +26,7 @@ RISKS
 
 USAGE
   release-claim.sh <issue> [--claim-id <id>] [--prefix <ns>] [--repo owner/name]
-                           [--keep-branch] [--dry-run]
+                           [--keep-branch] [--keep-label] [--dry-run]
   release-claim.sh --help
 
   <issue>        issue number, e.g. 42
@@ -37,15 +37,32 @@ USAGE
   --repo         product repo for the issue/label, when the issue does not live
                  in the claim-table repo (L-037)
   --keep-branch  do not delete the local/remote feature branch
+  --keep-label   keep agent-claimed even when the ledger has no residual row
+                 for this issue (live sibling lane whose claim file is absent
+                 or lives elsewhere). Verifies the live GitHub label is present
+                 (exit 3 if the product repo is unresolved or the label is
+                 absent/unreadable). Without this flag, a no-residual cleanup
+                 removes the label — the final completed lane path.
   --dry-run      print what would happen, touch nothing
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
+
+  Empty ledger: when a *valid* ledger ref with a *readable* tree has no
+  docs/claims/* and no docs/active-work.md tree entry, that is a valid empty
+  ledger (no live claims), not a hard fail. A missing/unborn/invalid
+  main|master ref, a commit whose referenced tree is unavailable/corrupt, or
+  a ledger path that still exists in the tree but whose blob/object is
+  unreadable/corrupt, is NOT an empty ledger — the script fails hard before
+  any label mutation. True path absence is allowed; unreadable live blobs are
+  not. Cleanup of worktrees/labels can still complete truthfully without
+  inventing a row when the ref is valid, the tree is readable, and the ledger
+  is empty.
 
 ENV
   GIBSON_CANONICAL   claim-table repo path (default: cwd)
 
 EXIT
-  0  claim fully released
+  0  claim fully released (or truthfully nothing to release + label policy done)
   1  a hard precondition failed (nothing was cleaned)
   3  cleanup ran but did not finish: the claim row or the agent-claimed label
      is still live. The message names which. Never silent half-cleanup (L-009).
@@ -56,6 +73,12 @@ EXAMPLES
 
   # multi-slice issue: release only the merged slice, keep the residual lane
   release-claim.sh 15 --claim-id issue-15-checkout-totals
+
+  # empty ledger + live sibling still working the issue (no claim file on main)
+  release-claim.sh 18 --repo acme/app --keep-label
+
+  # empty ledger + final lane done: remove agent-claimed (default)
+  release-claim.sh 18 --repo acme/app
 
   # cross-repo template work: claim row in the monorepo, issue in the template repo
   GIBSON_CANONICAL=~/Code/monorepo \
@@ -74,6 +97,7 @@ fi
 ISSUE="$1"
 shift || true
 KEEP_BRANCH=0
+KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
 PREFIX=""
@@ -81,6 +105,7 @@ REPO_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep-branch) KEEP_BRANCH=1 ;;
+    --keep-label) KEEP_LABEL=1 ;;
     --dry-run) DRY=1 ;;
     --claim-id) CLAIM_ID_ARG="${2:-}"; shift ;;
     --prefix) PREFIX="${2:-}"; shift ;;
@@ -103,14 +128,159 @@ fi
 cd "$CANONICAL"
 git fetch origin >/dev/null 2>&1 || true
 
-BASE=main
-git show-ref --verify --quiet refs/heads/main || BASE=master
-REF="origin/$BASE"
-git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
+# Resolve the ledger ref. Prefer origin/main, then origin/master, then local
+# main/master. An unborn, missing, or non-commit ref is a hard fail — never
+# treat a failed ref read as an "empty ledger".
+resolve_ledger_ref() {
+  local candidate
+  for candidate in origin/main origin/master main master; do
+    if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
-if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null &&
-   [[ -z "$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null)" ]]; then
-  die "no claim ledger at $REF (neither docs/claims/ nor docs/active-work.md)"
+REF=""
+if ! REF=$(resolve_ledger_ref); then
+  die "cannot resolve a valid ledger commit ref (tried origin/main, origin/master, main, master). A missing/unborn/invalid ref is not an empty ledger — fix the remote or pass a claim-table checkout with a real main."
+fi
+info "ledger ref: $REF ($(git rev-parse --short "$REF" 2>/dev/null || echo '?'))"
+
+# The commit object resolving is not enough: the referenced tree must be
+# readable. A missing/corrupt tree is NOT an empty ledger — hard-fail before
+# any label mutation or "no live claims" classification.
+if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
+  die "ledger ref $REF does not resolve to a commit object — not an empty ledger"
+fi
+# Prefer peeling ^{tree}; if the object store cannot peel (deleted tree object),
+# fall back to the commit's tree field so we can still name the missing SHA.
+TREE_SHA=$(git rev-parse --verify "${REF}^{tree}" 2>/dev/null || true)
+if [[ -z "$TREE_SHA" ]]; then
+  TREE_SHA=$(git cat-file -p "${REF}^{commit}" 2>/dev/null | awk '/^tree / {print $2; exit}')
+fi
+[[ -n "$TREE_SHA" ]] || \
+  die "ledger commit at $REF has no tree pointer — unreadable/corrupt tree is not an empty ledger; refuse label mutation"
+if ! git cat-file -e "$TREE_SHA" 2>/dev/null; then
+  die "ledger commit at $REF references an unreadable/corrupt tree ($TREE_SHA) — not an empty ledger; refuse label mutation until the object store is repaired"
+fi
+# Prove the tree is listable (cat-file -e alone is not enough on some stores).
+if ! git ls-tree "$TREE_SHA" >/dev/null 2>&1; then
+  die "cannot list tree for ledger commit $REF (unreadable/corrupt tree $TREE_SHA) — not an empty ledger; refuse label mutation"
+fi
+
+# A missing docs/claims path and absent active-work.md on a *valid, readable*
+# tree is a valid *empty* ledger (every claim already released, or never filed)
+# — not corruption. Treat it as zero live claims and continue label/worktree
+# cleanup. A named --claim-id that is not present still hard-fails below.
+# Tree-read failures above already exited; do not reclassify them as empty.
+#
+# Inspect tree entries first. git cat-file -e ref:path fails both when the
+# path is absent AND when the path exists but its blob is missing/corrupt.
+# Only true absence is an empty-ledger signal; an unreadable live blob must
+# hard-fail before any label mutation.
+#
+# Fail-closed for the *per-file* ledger too: listing docs/claims/ by pathname
+# alone is not enough. Every live tree entry under docs/claims/ must be a
+# readable regular blob (mode 100644/100755) before any worktree, branch,
+# claim-row, or label cleanup proceeds. A missing/corrupt claim blob is not
+# an empty ledger (same contract as docs/active-work.md).
+HAS_ACTIVE=0
+HAS_CLAIMS_TREE=0
+
+# Prove a tree line is a readable regular blob (legacy table or per-claim file).
+# Args: path mode type object-sha
+require_readable_regular_blob() {
+  local path="$1" mode="$2" typ="$3" obj="$4"
+  if [[ "$typ" != "blob" ]] || [[ "$mode" != "100644" && "$mode" != "100755" ]]; then
+    die "$path at $REF has unexpected Git mode/type ($mode $typ${obj:+ $obj}) — refuse mutation until the ledger is repaired"
+  fi
+  if [[ -z "$obj" ]]; then
+    die "$path at $REF has no object id — unreadable/corrupt ledger entry; refuse mutation"
+  fi
+  if ! git cat-file -e "$obj" 2>/dev/null; then
+    die "$path exists in the ledger tree at $REF but its blob is unreadable/corrupt/unfetchable ($obj) — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
+  local got_type
+  got_type=$(git cat-file -t "$obj" 2>/dev/null || true)
+  if [[ "$got_type" != "blob" ]]; then
+    die "$path at $REF object $obj has unexpected type '${got_type:-unreadable}' (want blob) — refuse mutation until the object store is repaired"
+  fi
+  # Prove the payload is fetchable, not only that the object header exists.
+  if ! git cat-file blob "$obj" >/dev/null 2>&1; then
+    die "$path exists in the ledger tree at $REF but its blob payload is unreadable/corrupt ($obj) — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
+}
+
+ACTIVE_LS_ERR=""
+ACTIVE_LINE=$(git ls-tree "$REF" -- docs/active-work.md 2>&1) || {
+  ACTIVE_LS_ERR=$?
+}
+if [[ -n "$ACTIVE_LS_ERR" ]]; then
+  die "cannot list docs/active-work.md at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+fi
+if [[ -n "$ACTIVE_LINE" ]]; then
+  # Entry exists in the tree — mode/type + blob must be a readable regular file.
+  active_mode=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $1; exit}')
+  active_type=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $2; exit}')
+  active_blob=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $3; exit}')
+  require_readable_regular_blob "docs/active-work.md" "$active_mode" "$active_type" "$active_blob"
+  HAS_ACTIVE=1
+fi
+
+# docs/claims self-entry: absent is empty; present must be a tree (not a blob
+# /symlink/gitlink). Then every child must be a readable regular blob.
+CLAIMS_SELF_ERR=""
+CLAIMS_SELF=$(git ls-tree "$REF" -- docs/claims 2>&1) || {
+  CLAIMS_SELF_ERR=$?
+}
+if [[ -n "$CLAIMS_SELF_ERR" ]]; then
+  die "cannot list docs/claims at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+fi
+if [[ -n "$CLAIMS_SELF" ]]; then
+  claims_self_mode=$(printf '%s\n' "$CLAIMS_SELF" | awk '{print $1; exit}')
+  claims_self_type=$(printf '%s\n' "$CLAIMS_SELF" | awk '{print $2; exit}')
+  claims_self_obj=$(printf '%s\n' "$CLAIMS_SELF" | awk '{print $3; exit}')
+  if [[ "$claims_self_type" != "tree" ]] || [[ "$claims_self_mode" != "040000" ]]; then
+    die "docs/claims at $REF has unexpected Git mode/type ($claims_self_mode $claims_self_type${claims_self_obj:+ $claims_self_obj}) — want 040000 tree; refuse mutation until the ledger is repaired"
+  fi
+  if [[ -z "$claims_self_obj" ]] || ! git cat-file -e "$claims_self_obj" 2>/dev/null; then
+    die "docs/claims tree at $REF is unreadable/corrupt${claims_self_obj:+ ($claims_self_obj)} — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
+  if ! git ls-tree "$claims_self_obj" >/dev/null 2>&1; then
+    die "cannot list docs/claims tree at $REF (unreadable/corrupt tree ${claims_self_obj}) — not an empty ledger; refuse label mutation"
+  fi
+
+  # Enumerate *exact* live children from the authoritative ref. Pathname-only
+  # matching without blob proof is how a missing claim object slipped through
+  # to label/worktree mutation (issue #61).
+  CLAIMS_LS_ERR=""
+  CLAIMS_LINES=$(git ls-tree "$REF" docs/claims/ 2>&1) || {
+    CLAIMS_LS_ERR=$?
+  }
+  if [[ -n "$CLAIMS_LS_ERR" ]]; then
+    die "cannot read docs/claims/ at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+  fi
+  if [[ -n "$CLAIMS_LINES" ]]; then
+    HAS_CLAIMS_TREE=1
+    while IFS= read -r claim_line; do
+      [[ -n "$claim_line" ]] || continue
+      claim_mode=$(printf '%s\n' "$claim_line" | awk '{print $1; exit}')
+      claim_type=$(printf '%s\n' "$claim_line" | awk '{print $2; exit}')
+      claim_obj=$(printf '%s\n' "$claim_line" | awk '{print $3; exit}')
+      # Path is after the first tab (mode SP type SP object TAB path).
+      claim_path="${claim_line#*$'\t'}"
+      [[ -n "$claim_path" ]] || claim_path="docs/claims/<unknown>"
+      require_readable_regular_blob "$claim_path" "$claim_mode" "$claim_type" "$claim_obj"
+    done <<EOF
+$CLAIMS_LINES
+EOF
+  fi
+fi
+
+if [[ "$HAS_ACTIVE" -eq 0 && "$HAS_CLAIMS_TREE" -eq 0 ]]; then
+  info "claim ledger at $REF is empty (no docs/claims/* and no docs/active-work.md) — treating as no live claims"
 fi
 
 # Claim ids we own. issue-<N>-…, plus issue-<ns>-<N>-… when --prefix is given.
@@ -124,23 +294,90 @@ else
 fi
 
 # Claims live one-per-file in docs/claims/ (L-023); rows in docs/active-work.md
-# are the legacy form and are still released.
+# are the legacy form and are still released. Prints matching ids on stdout.
+# Returns 1 if the ledger tree cannot be read (caller must hard-fail — never
+# treat a failed tree read as an empty match set).
+# Startup already proved every live claims/* blob is a readable regular file;
+# re-check here so a mid-run object-store loss still fails closed instead of
+# inventing ids from pathnames alone.
 claim_ids_matching() {
+  local claims_out active_out active_entry active_blob claims_line
+  local c_mode c_type c_obj
+  claims_out=""
+  if ! claims_line=$(git ls-tree "$REF" -- docs/claims 2>/dev/null); then
+    echo "release-claim.sh: ERROR: cannot list docs/claims at $REF — unreadable ledger tree is not an empty ledger" >&2
+    return 1
+  fi
+  if [[ -n "$claims_line" ]]; then
+    c_mode=$(printf '%s\n' "$claims_line" | awk '{print $1; exit}')
+    c_type=$(printf '%s\n' "$claims_line" | awk '{print $2; exit}')
+    c_obj=$(printf '%s\n' "$claims_line" | awk '{print $3; exit}')
+    if [[ "$c_type" != "tree" ]] || [[ "$c_mode" != "040000" ]]; then
+      echo "release-claim.sh: ERROR: docs/claims at $REF has unexpected Git mode/type ($c_mode $c_type${c_obj:+ $c_obj}) — want 040000 tree" >&2
+      return 1
+    fi
+    if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); then
+      echo "release-claim.sh: ERROR: cannot list docs/claims/ at $REF — unreadable ledger tree is not an empty ledger" >&2
+      return 1
+    fi
+    # Pathname list is only valid when every listed object is still a readable blob.
+    local entry_line entry_mode entry_type entry_obj entry_path
+    while IFS= read -r entry_line; do
+      [[ -n "$entry_line" ]] || continue
+      entry_mode=$(printf '%s\n' "$entry_line" | awk '{print $1; exit}')
+      entry_type=$(printf '%s\n' "$entry_line" | awk '{print $2; exit}')
+      entry_obj=$(printf '%s\n' "$entry_line" | awk '{print $3; exit}')
+      entry_path="${entry_line#*$'\t'}"
+      if [[ "$entry_type" != "blob" ]] || [[ "$entry_mode" != "100644" && "$entry_mode" != "100755" ]]; then
+        echo "release-claim.sh: ERROR: ${entry_path:-docs/claims/<unknown>} at $REF has unexpected Git mode/type ($entry_mode $entry_type${entry_obj:+ $entry_obj})" >&2
+        return 1
+      fi
+      if [[ -z "$entry_obj" ]] || ! git cat-file -e "$entry_obj" 2>/dev/null; then
+        echo "release-claim.sh: ERROR: ${entry_path:-docs/claims/<unknown>} exists in the ledger tree at $REF but its blob is unreadable/corrupt${entry_obj:+ ($entry_obj)} — not an empty ledger" >&2
+        return 1
+      fi
+    done <<EOF
+$(git ls-tree "$REF" docs/claims/ 2>/dev/null || true)
+EOF
+  fi
+  active_out=""
+  # Tree entry first: absence is empty content; present-but-unreadable hard-fails.
+  if ! active_entry=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null); then
+    echo "release-claim.sh: ERROR: cannot list docs/active-work.md at $REF — unreadable ledger tree is not an empty ledger" >&2
+    return 1
+  fi
+  if [[ -n "$active_entry" ]]; then
+    active_blob=$(printf '%s\n' "$active_entry" | awk '{print $3; exit}')
+    if ! git cat-file -e "${active_blob:-$REF:docs/active-work.md}" 2>/dev/null; then
+      echo "release-claim.sh: ERROR: docs/active-work.md exists in the ledger tree at $REF but its blob is unreadable/corrupt${active_blob:+ ($active_blob)} — not an empty ledger" >&2
+      return 1
+    fi
+    if ! active_out=$(git show "$REF:docs/active-work.md" 2>/dev/null); then
+      echo "release-claim.sh: ERROR: cannot read docs/active-work.md at $REF — unreadable/corrupt blob is not an empty ledger" >&2
+      return 1
+    fi
+  elif ! git cat-file -e "$TREE_SHA" 2>/dev/null; then
+    echo "release-claim.sh: ERROR: ledger tree $TREE_SHA became unreadable while matching claims — not an empty ledger" >&2
+    return 1
+  fi
   {
-    git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
+    printf '%s\n' "$claims_out" |
       sed 's|^docs/claims/||;s|\.md$||'
-    git show "$REF:docs/active-work.md" 2>/dev/null |
+    printf '%s\n' "$active_out" |
       grep -E '^\| ' |
       awk -F'|' '{print $3}' |
       sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
   } | grep -E '^issue-' | grep -E "$1" | sort -u || true
+  return 0
 }
 
 # Every live row for this issue, so we can tell "released the last one" from
 # "released one slice of several" (L-024).
 ALL_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
-ALL_IDS=$(claim_ids_matching "$ALL_RE")
-TARGET_IDS=$(claim_ids_matching "$MATCH_RE")
+ALL_IDS=$(claim_ids_matching "$ALL_RE") || \
+  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
+TARGET_IDS=$(claim_ids_matching "$MATCH_RE") || \
+  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
 
 if [[ -z "$TARGET_IDS" ]]; then
   if [[ -n "$CLAIM_ID_ARG" ]]; then
@@ -185,6 +422,8 @@ if [[ "$DRY" -eq 1 ]]; then
       [[ -n "$id" ]] || continue
       echo "  KEEP sibling claim: $id (and keep the agent-claimed label)"
     done
+  elif [[ "$KEEP_LABEL" -eq 1 ]]; then
+    echo "  KEEP label agent-claimed on #$ISSUE (--keep-label: live sibling outside ledger)"
   else
     echo "  remove label agent-claimed from #$ISSUE"
   fi
@@ -291,13 +530,35 @@ if command -v gh >/dev/null; then
   if [[ -z "$REPO" ]]; then
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
   fi
-  if [[ -z "${REPO:-}" ]]; then
-    warn "could not resolve the product repo — agent-claimed NOT removed from #$ISSUE (pass --repo owner/name)"
-    INCOMPLETE=1
-  elif [[ -n "$RESIDUAL_IDS" ]]; then
+  if [[ -n "$RESIDUAL_IDS" ]]; then
     # L-024: siblings are still working this issue; the label is still true.
+    # Residual rows on the ledger are themselves the verification — leaving
+    # the label is the complete policy without a GitHub round-trip.
     info "keeping agent-claimed on #$ISSUE — residual claims remain:"
     echo "$RESIDUAL_IDS" | sed 's/^/  /'
+  elif [[ "$KEEP_LABEL" -eq 1 ]]; then
+    # Empty ledger + live sibling whose claim is not on this ref (or was never
+    # filed). Explicit operator path — do not invent a row, do not strip the
+    # label. Preservation is a postcondition that must be verified against
+    # GitHub; a blind "kept" log while the label is absent is a false green.
+    if [[ -z "${REPO:-}" ]]; then
+      warn "could not resolve the product repo — --keep-label cannot verify agent-claimed on #$ISSUE (pass --repo owner/name)"
+      INCOMPLETE=1
+    else
+      LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
+      if [[ "$LABELS" == "?" ]]; then
+        warn "could not read labels on $REPO#$ISSUE — --keep-label preservation UNVERIFIED"
+        INCOMPLETE=1
+      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+        warn "agent-claimed is ABSENT on $REPO#$ISSUE — --keep-label required the label to stay, but it is not present. Re-add it or re-claim before declaring Law 10 done."
+        INCOMPLETE=1
+      else
+        info "keeping agent-claimed on $REPO#$ISSUE — --keep-label verified (live sibling outside ledger; no claim row invented)"
+      fi
+    fi
+  elif [[ -z "${REPO:-}" ]]; then
+    warn "could not resolve the product repo — agent-claimed NOT removed from #$ISSUE (pass --repo owner/name)"
+    INCOMPLETE=1
   else
     if ! gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-claimed; then
       warn "gh issue edit failed for #$ISSUE in $REPO"
@@ -315,8 +576,15 @@ if command -v gh >/dev/null; then
     fi
   fi
 else
-  warn "gh not found — agent-claimed NOT removed from #$ISSUE"
-  INCOMPLETE=1
+  if [[ -n "$RESIDUAL_IDS" ]]; then
+    info "gh not found — agent-claimed left in place (residual claims on ledger)"
+  elif [[ "$KEEP_LABEL" -eq 1 ]]; then
+    warn "gh not found — --keep-label cannot verify agent-claimed on #$ISSUE"
+    INCOMPLETE=1
+  else
+    warn "gh not found — agent-claimed NOT removed from #$ISSUE"
+    INCOMPLETE=1
+  fi
 fi
 
 if [[ "$INCOMPLETE" -eq 1 ]]; then
@@ -324,4 +592,8 @@ if [[ "$INCOMPLETE" -eq 1 ]]; then
   exit 3
 fi
 
-info "OK — claim released for issue $ISSUE"
+if [[ -z "$TARGET_IDS" ]]; then
+  info "OK — no claim row to release for issue $ISSUE; label policy applied"
+else
+  info "OK — claim released for issue $ISSUE"
+fi
