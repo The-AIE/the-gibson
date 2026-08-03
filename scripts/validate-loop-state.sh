@@ -31,7 +31,9 @@ USAGE
   validate-loop-state.sh <file> --min-updated 'YYYY-MM-DDTHH:MM:SSZ'
 
   <file>              path to gibson/loop-state.md (or any candidate)
-  --min-updated TS    require updated >= TS (exact strict UTC instant; quote it)
+  --min-updated TS    require updated >= TS (exact strict UTC instant; quote it).
+                      TS must be nonempty valid strict UTC; an explicit empty
+                      argument is a usage error (never means "no bound").
 
 OPTIONS
   -h, --help          this text
@@ -66,7 +68,9 @@ CONTRACT (ten required keys, column zero, exactly once each)
   round          non-negative base-10 integer (digits only)
   parked         exactly true or false
   updated        real strict UTC YYYY-MM-DDTHH:MM:SSZ (no fractions, no offsets,
-                 calendar-valid — not a Date.parse rollover)
+                 calendar-valid — not a Date.parse rollover). Empty is invalid
+                 even without --min-updated; the ten-key schema always requires
+                 a real timestamp here.
 
 RUNTIME
   python3 must be on PATH. It validates calendar-real timestamps and compares
@@ -85,6 +89,9 @@ fail() { echo "validate-loop-state.sh: $*" >&2; exit 1; }
 
 FILE=""
 MIN_UPDATED=""
+# Distinguish "flag absent" from "flag present with empty value". An explicit
+# --min-updated '' must fail closed as usage error — never silently mean no bound.
+MIN_UPDATED_SET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --min-updated)
       [[ $# -ge 2 ]] || die_usage "--min-updated requires a UTC timestamp argument"
       MIN_UPDATED="$2"
+      MIN_UPDATED_SET=1
       shift 2
       ;;
     --)
@@ -113,7 +121,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$FILE" ]] || die_usage "missing <file>"
-if [[ -n "$MIN_UPDATED" ]]; then
+if [[ "$MIN_UPDATED_SET" -eq 1 ]]; then
+  if [[ -z "$MIN_UPDATED" ]]; then
+    die_usage "--min-updated requires a nonempty UTC timestamp (omit the flag for no bound; empty is never 'no bound')"
+  fi
   if ! printf '%s' "$MIN_UPDATED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
     fail "invalid --min-updated (want YYYY-MM-DDTHH:MM:SSZ): $MIN_UPDATED"
   fi
@@ -213,11 +224,14 @@ awk_rc=${awk_rc:-0}
 
 errors=0
 updated_value=""
+# 1 when awk emitted UPDATED_VALUE (key present exactly once, value may be empty).
+got_updated_value=0
 while IFS= read -r line || [[ -n "${line:-}" ]]; do
   [[ -n "$line" ]] || continue
   case "$line" in
     UPDATED_VALUE$'\t'*)
       updated_value="${line#*$'\t'}"
+      got_updated_value=1
       ;;
     *)
       echo "validate-loop-state.sh: $line" >&2
@@ -261,7 +275,9 @@ print(int(dt.timestamp()))
 PY
 }
 
-if [[ -n "$updated_value" ]]; then
+# updated is required to be a real strict UTC timestamp whenever the key is
+# present. Empty fails closed even without --min-updated (ten-key schema).
+if [[ "$got_updated_value" -eq 1 ]]; then
   case "$(strict_utc_check "$updated_value")" in
     ok) ;;
     *)
@@ -272,7 +288,7 @@ if [[ -n "$updated_value" ]]; then
   esac
 fi
 
-if [[ -n "$MIN_UPDATED" ]]; then
+if [[ "$MIN_UPDATED_SET" -eq 1 && -n "$MIN_UPDATED" ]]; then
   case "$(strict_utc_check "$MIN_UPDATED")" in
     ok) ;;
     *)

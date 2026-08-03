@@ -156,6 +156,7 @@ setup_repo() {
 #   rewrite-valid-then-fail — valid rewrite, exit 3
 #   rewrite-valid-nospace — valid rewrite with key:value (no space after :), exit 0
 #   rewrite-handoff-nospace — handoff queued, no-space grammar, exit 0
+#   rewrite-empty-updated — valid-looking schema but updated empty, exit 0
 #   rewrite-valid-symlink — replace state with symlink to fresh valid outside target
 make_runner_cmd() {
   echo "${1:-noop}" > "$CALLS/runner.behavior"
@@ -308,6 +309,24 @@ handoff:feat/75-widget
 handoff_sha:abcdef0123456789abcdef0123456789abcdef01
 next_action:hand off the finished branch
 notes:handoff queued nospace
+EOF
+    exit 0
+    ;;
+  rewrite-empty-updated)
+    # Ten keys present; updated deliberately empty (schema-invalid).
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated:
+issue: 75
+pr:
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: emptied updated stamp
+notes: empty-updated corrupt
 EOF
     exit 0
     ;;
@@ -579,6 +598,66 @@ for bad_ts in "2026-02-30T12:00:00Z" "2026-08-02T12:00:00.123Z" "2026-08-02T12:0
   else bad "bad timestamp accepted: $bad_ts"; fi
 done
 
+echo "validator: empty updated is always invalid (with and without --min-updated)"
+# Bare key: form (no space after colon) — value is empty after grammar strip.
+cat > "$VDIR/empty-up.md" <<'EOF'
+# Gibson loop state
+updated:
+issue: 75
+pr:
+hat: builder
+next_hat: builder
+round: 0
+parked: false
+handoff:
+handoff_sha:
+next_action: triage
+notes: empty-updated
+EOF
+bash "$VALIDATOR" "$VDIR/empty-up.md" >/dev/null 2>"$VDIR/empty-up.err"; ec=$?
+if [[ $ec -ne 0 ]] && grep -qi 'invalid updated\|updated' "$VDIR/empty-up.err"; then
+  ok "empty updated without --min-updated fails closed"
+else bad "empty updated accepted without min-updated (ec=$ec $(cat "$VDIR/empty-up.err"))"; fi
+bash "$VALIDATOR" "$VDIR/empty-up.md" --min-updated '2026-08-02T12:00:00Z' \
+  >/dev/null 2>"$VDIR/empty-up-min.err"; ec=$?
+if [[ $ec -ne 0 ]] && grep -qi 'invalid updated\|updated' "$VDIR/empty-up-min.err"; then
+  ok "empty updated with nonempty --min-updated fails closed (not fail-open)"
+else bad "empty updated + min-updated accepted (ec=$ec $(cat "$VDIR/empty-up-min.err"))"; fi
+# key: value form with only the optional separator space → still empty value.
+# Build via printf so the source file has no trailing whitespace (git diff --check).
+{
+  printf '%s\n' '# Gibson loop state'
+  printf 'updated: %s\n' ''
+  printf '%s\n' \
+    'issue: 75' \
+    'pr:' \
+    'hat: builder' \
+    'next_hat: builder' \
+    'round: 0' \
+    'parked: false' \
+    'handoff:' \
+    'handoff_sha:' \
+    'next_action: triage' \
+    'notes: empty-updated-space'
+} > "$VDIR/empty-up-sp.md"
+bash "$VALIDATOR" "$VDIR/empty-up-sp.md" --min-updated '2026-08-02T12:00:00Z' \
+  >/dev/null 2>"$VDIR/empty-up-sp.err"; ec=$?
+if [[ $ec -ne 0 ]]; then
+  ok "empty updated after optional space still fails with --min-updated"
+else bad "space-stripped empty updated accepted ($(cat "$VDIR/empty-up-sp.err"))"; fi
+
+echo "validator: explicit empty --min-updated is usage/validation error (never no-bound)"
+write_valid_state "$VDIR/ok-min.md" "updated=2026-08-02T12:00:00Z"
+bash "$VALIDATOR" "$VDIR/ok-min.md" --min-updated '' >/dev/null 2>"$VDIR/empty-min.err"; ec=$?
+if [[ $ec -ne 0 ]] && grep -qi 'min-updated\|nonempty\|empty\|usage\|requires' "$VDIR/empty-min.err"; then
+  ok "explicit --min-updated '' fails closed (does not disable freshness)"
+else bad "explicit empty --min-updated accepted (ec=$ec $(cat "$VDIR/empty-min.err"))"; fi
+# Flag omitted still means no bound — valid file must pass.
+bash "$VALIDATOR" "$VDIR/ok-min.md" >/dev/null 2>"$VDIR/no-min.err"; ec=$?
+if [[ $ec -eq 0 ]]; then
+  ok "omitting --min-updated still means no freshness bound"
+else bad "omit --min-updated wrongly failed ($(cat "$VDIR/no-min.err"))"; fi
+
 echo "validator: missing / unreadable files fail"
 bash "$VALIDATOR" "$VDIR/no-such-file.md" >/dev/null 2>"$VDIR/miss.err"; ec=$?
 if [[ $ec -ne 0 ]] && grep -qi 'missing' "$VDIR/miss.err"; then
@@ -836,6 +915,44 @@ else bad "stale did not restore"; fi
 if [[ "$(supervisor_count)" -eq 0 ]]; then
   ok "stale state suppresses supervisor handoff"
 else bad "supervisor ran on stale state"; fi
+
+echo "driver: empty updated after runner → state-corrupt, restore, no normal completion"
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=pre-empty-updated"
+pre_bytes=$(cat "$REPO/gibson/loop-state.md")
+make_runner_cmd rewrite-empty-updated
+: > "$CALLS/supervisor.count"
+: > "$CALLS/runner.count"
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
+  --error-budget 5 --supervisor devin --reviewers codex \
+  >/dev/null 2>"$ROOT/empty-up.err" || true
+if [[ "$(runner_count)" -eq 1 ]]; then
+  ok "empty-updated: runner invoked once before post-run detect"
+else bad "empty-updated: expected 1 runner, got $(runner_count)"; fi
+sc=$(journal_state_corrupt_count)
+if [[ "$sc" -eq 1 ]]; then
+  ok "empty-updated: exactly one state-corrupt journal unit"
+else bad "empty-updated: expected 1 state-corrupt, got $sc"; fi
+if grep -q 'state-corrupt (consecutive failures=1/5)' "$ROOT/empty-up.err"; then
+  ok "empty-updated: single failure-budget unit (precedence, not runner-failure)"
+else bad "empty-updated: budget labeling wrong: $(cat "$ROOT/empty-up.err")"; fi
+if ! grep -q 'runner exit' "$ROOT/empty-up.err"; then
+  ok "empty-updated: not also counted as runner-failure"
+else bad "empty-updated: double-counted runner-failure"; fi
+if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_bytes" ]]; then
+  ok "empty-updated: exact pre-state restored from snapshot"
+else bad "empty-updated: state not restored (got=$(cat "$REPO/gibson/loop-state.md"))"; fi
+if [[ "$(supervisor_count)" -eq 0 ]]; then
+  ok "empty-updated: suppresses supervisor handoff"
+else bad "empty-updated: supervisor ran despite corrupt empty stamp"; fi
+if ! grep -q 'Driver completed iteration' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "empty-updated: does not journal normal completion"
+else bad "empty-updated: journaled normal completion alongside state-corrupt"; fi
+if grep -q 'phase=post-run' "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "empty-updated: state-corrupt journal is post-run phase"
+else bad "empty-updated: missing post-run phase marker"; fi
 
 echo "driver: snapshot exact-byte restoration and atomic refresh after recovery"
 setup_repo
@@ -1674,13 +1791,32 @@ if ! grep -q 'state-corrupt' "$ROOT/e2e-hand-ns.err" 2>/dev/null && \
    ! grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
   ok "e2e handoff-nospace: valid no-space handoff rewrite is not state-corrupt"
 else bad "e2e handoff-nospace: false state-corrupt"; fi
-hb=$(test_read_field "$REPO/gibson/loop-state.md" handoff)
-# After successful supervisor handoff fields may be cleared; either queued or cleared is fine
-# as long as parse worked. Check notes still readable via shared grammar.
+# Meaningful consumption check (not a tautology): the driver must have read
+# no-space `handoff:feat/75-widget` into the handoff path. Evidence is the
+# branch name appearing in handoff-path logs/journal, supervisor args, or the
+# field still queued after a blocked handoff — never "present OR empty".
 nt=$(test_read_field "$REPO/gibson/loop-state.md" notes)
-if [[ "$nt" == "handoff queued nospace" ]] || [[ -n "$hb" ]] || [[ -z "$hb" ]]; then
-  ok "e2e handoff-nospace: post-run state still field-readable (handoff=[$hb])"
-else bad "e2e handoff-nospace: unreadable post-run state"; fi
+hb=$(test_read_field "$REPO/gibson/loop-state.md" handoff)
+if [[ "$nt" == "handoff queued nospace" ]]; then
+  ok "e2e handoff-nospace: no-space notes field parsed after post-run"
+else bad "e2e handoff-nospace: notes not parsed (nt=[$nt])"; fi
+consumed=0
+if grep -qE 'handoff of feat/75-widget|pinning handoff to feat/75-widget|branch=feat/75-widget' \
+     "$ROOT/e2e-hand-ns.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+  consumed=1
+fi
+if [[ -f "$CALLS/supervisor.args" ]] && grep -q 'feat/75-widget' "$CALLS/supervisor.args" 2>/dev/null; then
+  consumed=1
+fi
+# Queued field still present (handoff blocked before clear) also proves parse.
+if [[ "$hb" == "feat/75-widget" ]]; then
+  consumed=1
+fi
+if [[ "$consumed" -eq 1 ]]; then
+  ok "e2e handoff-nospace: driver consumed no-space handoff:feat/75-widget into handoff path"
+else
+  bad "e2e handoff-nospace: handoff field not consumed (hb=[$hb] err=$(cat "$ROOT/e2e-hand-ns.err") j=$(cat "$REPO/gibson/journal.md" 2>/dev/null))"
+fi
 
 # ---------------------------------------------------------------------------
 echo

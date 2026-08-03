@@ -2208,6 +2208,11 @@ while true; do
       exit 0
     fi
 
+    # Normal-completion journal only when the iteration did not land as
+    # state-corrupt (snapshot failure or post-run schema/freshness fail).
+    # Empty/malformed/stale updated after a real runner must never look like a
+    # successful iteration in the journal (issue #75 fail-closed contract).
+    journal_normal_completion=1
     if [[ "$DRY" -eq 1 ]]; then
       info "dry-run: would invoke $RUNNER with rendered loop-step ($hat)"
       rm -f "$PROMPT_FILE"
@@ -2216,6 +2221,7 @@ while true; do
       # runner. Snapshot failure is a single state-corrupt/recovery-control
       # failure — never a silent continuation into the runner.
       if ! snapshot_loop_state; then
+        journal_normal_completion=0
         info "state-corrupt: failed to snapshot pre-iteration loop-state"
         diag_snap=$(mktemp "${TMPDIR:-/tmp}/gibson-snap-fail.XXXXXX")
         echo "snapshot failed: could not atomically copy $STATE_FILE to $STATE_SNAPSHOT" > "$diag_snap"
@@ -2248,6 +2254,7 @@ while true; do
         post_diag=$(mktemp "${TMPDIR:-/tmp}/gibson-post-val.XXXXXX")
         post_min="$iteration_start"
         if ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
+          journal_normal_completion=0
           # state-corrupt takes precedence over runner-failure even when ec != 0.
           # Count exactly once as state-corrupt; do not also count runner-failure.
           {
@@ -2316,11 +2323,13 @@ while true; do
       fi
     fi
 
-    {
-      echo ""
-      echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · hat=$hat · runner=$RUNNER"
-      echo "Driver completed iteration; agent should have updated loop-state."
-    } >> "$JOURNAL"
+    if [[ "$journal_normal_completion" -eq 1 ]]; then
+      {
+        echo ""
+        echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · hat=$hat · runner=$RUNNER"
+        echo "Driver completed iteration; agent should have updated loop-state."
+      } >> "$JOURNAL"
+    fi
   fi
 
   heartbeat
