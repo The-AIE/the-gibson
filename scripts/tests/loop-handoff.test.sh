@@ -2261,14 +2261,25 @@ unset GH_STUB_EXPECT_REPO
 # Every concurrent child must report its own rc and stderr. Ignoring child
 # status previously hid acquisition races (`halt-lock/pid: No such file`).
 
-# True when gibson/ has no halt-lock file/dir and no .halt-lock.* temps.
+# True when gibson/ has no public halt-lock and no reclaim temps. The stable
+# regular reclaim-gate file (.halt-lock.reclaiming) may remain — it is a
+# kernel-lock target, never unlinked on release. A legacy directory-form gate
+# or any other .halt-lock.* temp is dirty.
 halt_lock_artifacts_clean() {
-  local g="$REPO/gibson"
+  local g="$REPO/gibson" f
   [[ ! -e "$g/halt-lock" ]] || return 1
-  # shellcheck disable=SC2086
-  if compgen -G "$g/.halt-lock.*" >/dev/null 2>&1; then
+  if [[ -d "$g/.halt-lock.reclaiming" ]]; then
     return 1
   fi
+  # shellcheck disable=SC2086
+  for f in "$g"/.halt-lock.*; do
+    [[ -e "$f" ]] || continue
+    # Stable regular gate file is expected to persist after reclaim.
+    if [[ "$f" == "$g/.halt-lock.reclaiming" && -f "$f" ]]; then
+      continue
+    fi
+    return 1
+  done
   return 0
 }
 
@@ -2448,7 +2459,694 @@ fi
 # Restore the suite cleanup trap (eval'd helpers installed halt_lock_release).
 trap 'rm -rf "$ROOT"' EXIT
 unset HALT_LOCK_FILE HALT_LOCK_HELD HALT_LOCK_OWNER HALT_LOCK_TMP
-unset HALT_LOCK_RECLAIM_GATE
+unset HALT_LOCK_RECLAIM_GATE HALT_LOCK_RECLAIM_HELD HALT_LOCK_RECLAIM_FD
+unset HALT_LOCK_RECLAIM_TIMEOUT HALT_LOCK_RECLAIM_BACKEND
+unset _GIBSON_HALT_LOCK_TRAP _GIBSON_HALT_LOCK_TRAP_DEPTH
+
+echo "halt lock: kernel reclaim gate (lockf/flock) serializes reclaim; gate file never check-then-rm'd"
+# Kernel-held advisory lock on a stable regular gate file:
+#   - macOS: lockf -t N <fd> on a persistent open file description
+#   - Linux: flock -w N <fd> (exercised here via a faithful fake when needed)
+# Gate file is never unlinked on acquire/release; crash closes the fd and the
+# kernel drops the lock with no manual cleanup. Legacy directory form migrates
+# with directory-only ops so a delayed rmdir cannot delete a regular-file successor.
+setup_repo with-remote
+mkdir -p "$REPO/gibson"
+# shellcheck disable=SC2034
+STATE_DIR="$REPO/gibson"
+# shellcheck disable=SC2034
+eval "$(
+  awk '
+    /^HALT_LOCK_FILE=/ {p=1}
+    /^halt_latch_field\(\)/ {exit}
+    p {print}
+  ' "$LOOP"
+)"
+reclaim_dead_pid() {
+  local p
+  p=$(bash -c 'echo $$')
+  if kill -0 "$p" 2>/dev/null; then
+    p=999999999
+  fi
+  printf '%s' "$p"
+}
+seed_dead_public_lock() {
+  printf 'pid=%s\nowner=stale-dead-seed\n' "$(reclaim_dead_pid)" > "$HALT_LOCK_FILE"
+}
+clear_reclaim_workspace() {
+  # Drop any held kernel gate in this shell before wiping paths.
+  HALT_LOCK_RECLAIM_HELD=0
+  eval "exec ${HALT_LOCK_RECLAIM_FD:-201}>&-" 2>/dev/null || true
+  HALT_LOCK_HELD=0
+  HALT_LOCK_OWNER=""
+  if [[ -n "${HALT_LOCK_TMP:-}" ]]; then
+    rm -f "$HALT_LOCK_TMP" 2>/dev/null || true
+    HALT_LOCK_TMP=""
+  fi
+  rm -rf "$HALT_LOCK_FILE" 2>/dev/null || true
+  rm -rf "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true
+  # shellcheck disable=SC2086
+  rm -f "$STATE_DIR"/.halt-lock.* 2>/dev/null || true
+}
+# shellcheck disable=SC2034
+HALT_LOCK_HELD=0
+# shellcheck disable=SC2034
+HALT_LOCK_OWNER=""
+# shellcheck disable=SC2034
+HALT_LOCK_TMP=""
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_HELD=0
+
+# --- Source contract: no check-then-rm gate protocol, backends present ---
+if grep -n 'halt_lock_unlink_if_inode' "$LOOP" >/dev/null 2>&1; then
+  bad "kernel-gate: loop.sh still defines halt_lock_unlink_if_inode (check-then-rm)"
+else
+  ok "kernel-gate: no halt_lock_unlink_if_inode check-then-rm helper"
+fi
+# Bare pathname rm of the gate itself is forbidden (pid path and rmdir only).
+# Ignore comment lines (grep -n prefixes N:; match that form too).
+if grep -nE 'rm -f "\$gate"|rm -f "\$HALT_LOCK_RECLAIM_GATE"|rm -rf "\$gate"|rm -rf "\$HALT_LOCK_RECLAIM_GATE"' "$LOOP" \
+    | grep -vE '^[0-9]+:[[:space:]]*#|^[[:space:]]*#' \
+    | grep -v '/pid' \
+    | grep -q .; then
+  bad "kernel-gate: loop.sh still rm's the reclaim gate pathname"
+else
+  ok "kernel-gate: no bare reclaim-gate pathname rm in loop.sh"
+fi
+if grep -q 'lockf -s -t' "$LOOP" && grep -q 'flock -w' "$LOOP"; then
+  ok "kernel-gate: loop.sh has macOS lockf and Linux flock branches"
+else
+  bad "kernel-gate: missing lockf/flock backend branches"
+fi
+
+# --- macOS lockf backend on this host ---
+clear_reclaim_workspace
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_BACKEND=lockf
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_TIMEOUT=1
+if ! command -v lockf >/dev/null 2>&1; then
+  bad "kernel-gate: lockf missing on this host — cannot verify kernel fd lock"
+else
+  ok "kernel-gate: lockf present on this host"
+fi
+errf="$ROOT/kernel-gate-lockf.err"
+: > "$errf"
+if halt_lock_reclaim_gate_acquire 2>>"$errf"; then
+  ok "kernel-gate: lockf acquire succeeded"
+else
+  bad "kernel-gate: lockf acquire failed (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: stable regular gate file present while held"
+else
+  bad "kernel-gate: gate file missing while held"
+fi
+# Competing acquire must use a fresh open-file-description (close any inherited
+# gate fd first). Forked children that keep the parent's OFD share the lock.
+comp_rc=0
+comp_err="$ROOT/kernel-gate-lockf-comp.err"
+: > "$comp_err"
+(
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_HELD=0
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_BACKEND=lockf
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_TIMEOUT=1
+  eval "exec ${HALT_LOCK_RECLAIM_FD:-201}>&-" 2>/dev/null || true
+  halt_lock_reclaim_gate_acquire 2>>"$comp_err"
+) || comp_rc=$?
+if [[ "$comp_rc" -ne 0 ]]; then
+  ok "kernel-gate: competing lockf acquire rejected while parent holds"
+else
+  bad "kernel-gate: competing lockf acquire succeeded while parent holds"
+fi
+gate_ino_before=$(halt_lock_inode "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true)
+halt_lock_reclaim_gate_release 2>>"$errf"
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: gate file remains after release (never unlinked)"
+else
+  bad "kernel-gate: gate file was removed on release"
+fi
+gate_ino_after=$(halt_lock_inode "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true)
+if [[ -n "$gate_ino_before" && "$gate_ino_before" == "$gate_ino_after" ]]; then
+  ok "kernel-gate: same gate inode after release (stable file)"
+else
+  bad "kernel-gate: gate inode changed across release ($gate_ino_before -> $gate_ino_after)"
+fi
+# After release, a competitor can acquire.
+(
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_HELD=0
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_BACKEND=lockf
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_TIMEOUT=1
+  eval "exec ${HALT_LOCK_RECLAIM_FD:-201}>&-" 2>/dev/null || true
+  halt_lock_reclaim_gate_acquire 2>>"$comp_err" && halt_lock_reclaim_gate_release 2>>"$comp_err"
+) && ok "kernel-gate: lockf re-acquire after parent release" \
+  || bad "kernel-gate: lockf re-acquire after release failed"
+if ! halt_lock_stderr_clean "$errf" || ! halt_lock_stderr_clean "$comp_err"; then
+  bad "kernel-gate: dirty stderr on lockf path"
+else
+  ok "kernel-gate: clean stderr on lockf path"
+fi
+unset HALT_LOCK_RECLAIM_BACKEND
+
+# --- Linux flock branch via faithful fake (maps to lockf on this host) ---
+clear_reclaim_workspace
+FAKE_FLOCK_BIN="$ROOT/fake-flock-bin"
+mkdir -p "$FAKE_FLOCK_BIN"
+cat > "$FAKE_FLOCK_BIN/flock" <<'FLOCKFAKE'
+#!/usr/bin/env bash
+# Faithful flock -w <sec> <fd> shim for macOS CI: same semantics via lockf.
+# Logs invocations so the sensor can prove the flock backend path ran.
+log="${FLOCK_FAKE_LOG:-}"
+wait_sec=""
+fd=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -w)
+      wait_sec="${2:-}"
+      shift 2
+      ;;
+    -n)
+      wait_sec=0
+      shift
+      ;;
+    -x|-s)
+      shift
+      ;;
+    *)
+      fd="$1"
+      shift
+      break
+      ;;
+  esac
+done
+if [[ -n "$log" ]]; then
+  printf 'flock wait=%s fd=%s\n' "${wait_sec:-}" "${fd:-}" >> "$log"
+fi
+if [[ -z "$fd" || ! "$fd" =~ ^[0-9]+$ ]]; then
+  echo "flock fake: expected numeric fd" >&2
+  exit 2
+fi
+if ! command -v lockf >/dev/null 2>&1; then
+  echo "flock fake: lockf required" >&2
+  exit 2
+fi
+# lockf -t 0 = non-blocking; otherwise bound the wait.
+t="${wait_sec:-2}"
+[[ "$t" =~ ^[0-9]+$ ]] || t=2
+exec lockf -s -t "$t" "$fd"
+FLOCKFAKE
+chmod +x "$FAKE_FLOCK_BIN/flock"
+: > "$ROOT/flock-fake.log"
+export FLOCK_FAKE_LOG="$ROOT/flock-fake.log"
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_BACKEND=flock
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_TIMEOUT=1
+# Prefer fake flock over any real flock on PATH.
+PATH="$FAKE_FLOCK_BIN:$PATH"
+export PATH
+errf="$ROOT/kernel-gate-flock.err"
+: > "$errf"
+if halt_lock_reclaim_gate_acquire 2>>"$errf"; then
+  ok "kernel-gate: flock-backend acquire succeeded via faithful fake"
+else
+  bad "kernel-gate: flock-backend acquire failed (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if grep -q 'flock wait=' "$ROOT/flock-fake.log"; then
+  ok "kernel-gate: flock backend invoked fake flock on open fd"
+else
+  bad "kernel-gate: flock backend never called flock (log empty)"
+fi
+# Competing flock-backend acquire must fail while held (fresh OFD).
+comp_rc=0
+(
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_HELD=0
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_BACKEND=flock
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_TIMEOUT=1
+  eval "exec ${HALT_LOCK_RECLAIM_FD:-201}>&-" 2>/dev/null || true
+  halt_lock_reclaim_gate_acquire 2>>"$errf"
+) || comp_rc=$?
+if [[ "$comp_rc" -ne 0 ]]; then
+  ok "kernel-gate: competing flock-backend acquire rejected while held"
+else
+  bad "kernel-gate: competing flock-backend acquire succeeded while held"
+fi
+halt_lock_reclaim_gate_release 2>>"$errf"
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: gate file remains after flock-backend release"
+else
+  bad "kernel-gate: gate file removed after flock-backend release"
+fi
+unset HALT_LOCK_RECLAIM_BACKEND
+# Leave fake flock off PATH for remaining cases (real lockf selection).
+case ":$PATH:" in
+  *":$FAKE_FLOCK_BIN:"*)
+    PATH=${PATH#"$FAKE_FLOCK_BIN:"}
+    PATH=${PATH//":$FAKE_FLOCK_BIN:"/:}
+    PATH=${PATH%":$FAKE_FLOCK_BIN"}
+    export PATH
+    ;;
+esac
+unset FLOCK_FAKE_LOG
+
+# --- Process crash releases kernel gate without manual cleanup ---
+clear_reclaim_workspace
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_BACKEND=lockf
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_TIMEOUT=1
+holder_log="$ROOT/kernel-gate-crash-holder.log"
+: > "$holder_log"
+(
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_HELD=0
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_BACKEND=lockf
+  # shellcheck disable=SC2034
+  HALT_LOCK_RECLAIM_TIMEOUT=1
+  halt_lock_reclaim_gate_acquire || exit 1
+  echo "held" > "$holder_log"
+  # Hold until killed — do not call release.
+  while true; do sleep 1; done
+) &
+holder_pid=$!
+# Wait until holder reports the gate is held.
+spins=0
+while [[ $spins -lt 200 ]]; do
+  if [[ -f "$holder_log" ]] && grep -q held "$holder_log"; then
+    break
+  fi
+  sleep 0.01 2>/dev/null || true
+  spins=$((spins + 1))
+done
+if [[ -f "$holder_log" ]] && grep -q held "$holder_log"; then
+  ok "kernel-gate: crash-holder acquired gate"
+else
+  bad "kernel-gate: crash-holder never acquired"
+fi
+# SIGKILL — no EXIT trap, no manual unlock.
+kill -9 "$holder_pid" 2>/dev/null || true
+wait "$holder_pid" 2>/dev/null || true
+# Gate file still present; competitor must acquire without scrubbing it.
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: gate file still present after holder SIGKILL"
+else
+  bad "kernel-gate: gate file vanished after holder SIGKILL"
+fi
+errf="$ROOT/kernel-gate-crash-comp.err"
+: > "$errf"
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_HELD=0
+if halt_lock_reclaim_gate_acquire 2>>"$errf"; then
+  ok "kernel-gate: acquire after crash without manual cleanup"
+  halt_lock_reclaim_gate_release 2>>"$errf"
+else
+  bad "kernel-gate: acquire after crash failed (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+
+# --- Pre-seeded empty regular gate file is harmless ---
+clear_reclaim_workspace
+: > "$HALT_LOCK_RECLAIM_GATE"
+seed_dead_public_lock
+errf="$ROOT/kernel-gate-empty-seed.err"
+: > "$errf"
+# shellcheck disable=SC2034
+HALT_LOCK_HELD=0
+# shellcheck disable=SC2034
+HALT_LOCK_OWNER=""
+# shellcheck disable=SC2034
+HALT_LOCK_TMP=""
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_HELD=0
+if halt_lock_acquire 2>>"$errf"; then
+  ok "kernel-gate: pre-seeded empty regular gate does not block acquire"
+  halt_lock_release 2>>"$errf"
+else
+  bad "kernel-gate: pre-seeded empty gate blocked acquire (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: pre-seeded gate remains after release"
+else
+  bad "kernel-gate: pre-seeded gate was deleted"
+fi
+if [[ -e "$HALT_LOCK_FILE" ]]; then
+  bad "kernel-gate: public lock leftover after empty-seed case"
+else
+  ok "kernel-gate: public lock clean after empty-seed case"
+fi
+
+# --- Legacy directory artifacts: recover dead/malformed/ownerless; live fails closed ---
+clear_reclaim_workspace
+seed_dead_public_lock
+mkdir "$HALT_LOCK_RECLAIM_GATE"
+# Ownerless (no pid) — recoverable.
+errf="$ROOT/kernel-gate-legacy-empty.err"
+: > "$errf"
+if halt_lock_acquire 2>>"$errf"; then
+  ok "kernel-gate: ownerless legacy gate dir does not block acquire"
+  halt_lock_release 2>>"$errf"
+else
+  bad "kernel-gate: ownerless legacy gate dir blocked acquire (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+if [[ -d "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  bad "kernel-gate: legacy dir still present after recovery"
+else
+  ok "kernel-gate: legacy dir migrated away (regular gate may remain)"
+fi
+
+clear_reclaim_workspace
+seed_dead_public_lock
+mkdir "$HALT_LOCK_RECLAIM_GATE"
+printf 'not-a-pid\n' > "${HALT_LOCK_RECLAIM_GATE}/pid"
+errf="$ROOT/kernel-gate-legacy-malformed.err"
+: > "$errf"
+if halt_lock_acquire 2>>"$errf"; then
+  ok "kernel-gate: malformed legacy gate dir does not block acquire"
+  halt_lock_release 2>>"$errf"
+else
+  bad "kernel-gate: malformed legacy gate blocked acquire (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+
+clear_reclaim_workspace
+seed_dead_public_lock
+mkdir "$HALT_LOCK_RECLAIM_GATE"
+printf '%s\n' "$(reclaim_dead_pid)" > "${HALT_LOCK_RECLAIM_GATE}/pid"
+errf="$ROOT/kernel-gate-legacy-dead.err"
+: > "$errf"
+if halt_lock_acquire 2>>"$errf"; then
+  ok "kernel-gate: dead-owner legacy gate dir does not block acquire"
+  halt_lock_release 2>>"$errf"
+else
+  bad "kernel-gate: dead-owner legacy gate blocked acquire (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+
+# Live legacy PID fails closed for gate scrub (reclaim path leaves lock alone).
+clear_reclaim_workspace
+mkdir "$HALT_LOCK_RECLAIM_GATE"
+printf '%s\n' "$$" > "${HALT_LOCK_RECLAIM_GATE}/pid"
+if halt_lock_scrub_legacy_reclaim_dir "$HALT_LOCK_RECLAIM_GATE"; then
+  bad "kernel-gate: live legacy owner scrub should fail closed"
+else
+  ok "kernel-gate: live legacy owner left alone (scrub fail-closed)"
+fi
+if [[ -d "$HALT_LOCK_RECLAIM_GATE" ]] && [[ -f "${HALT_LOCK_RECLAIM_GATE}/pid" ]]; then
+  ok "kernel-gate: live legacy directory artifacts preserved"
+else
+  bad "kernel-gate: live legacy directory was disturbed"
+fi
+# Gate acquire must fail closed against a live legacy directory owner (no work,
+# no destruction). Avoid full halt_lock_acquire spin (bounded multi-second wait).
+seed_dead_public_lock
+errf="$ROOT/kernel-gate-legacy-live.err"
+: > "$errf"
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_HELD=0
+if halt_lock_reclaim_gate_acquire 2>>"$errf"; then
+  bad "kernel-gate: reclaim gate acquire must fail closed on live legacy dir"
+  halt_lock_reclaim_gate_release 2>>"$errf"
+else
+  ok "kernel-gate: reclaim gate acquire fail-closed with live legacy dir"
+fi
+halt_lock_try_reclaim_stale 2>>"$errf" || true
+if [[ -d "$HALT_LOCK_RECLAIM_GATE" ]] && grep -q "^$$\$" "${HALT_LOCK_RECLAIM_GATE}/pid" 2>/dev/null; then
+  ok "kernel-gate: live legacy gate dir still owned by this pid after fail-closed"
+else
+  bad "kernel-gate: live legacy gate dir lost after fail-closed attempt"
+fi
+if [[ -f "$HALT_LOCK_FILE" ]]; then
+  ok "kernel-gate: dead public lock not reclaimed under live legacy gate"
+else
+  bad "kernel-gate: public lock vanished despite live legacy gate blocking reclaim"
+fi
+
+# Delayed directory cleanup cannot delete a regular-file successor.
+clear_reclaim_workspace
+mkdir "$HALT_LOCK_RECLAIM_GATE"
+printf '%s\n' "$(reclaim_dead_pid)" > "${HALT_LOCK_RECLAIM_GATE}/pid"
+# Contender B observes directory form (will try dir-only scrub later).
+# Contender A migrates now: scrub + create regular file + hold kernel lock briefly.
+if halt_lock_scrub_legacy_reclaim_dir "$HALT_LOCK_RECLAIM_GATE"; then
+  ok "kernel-gate: delayed-migrator seed scrubbed dead legacy dir"
+else
+  bad "kernel-gate: failed to scrub dead legacy dir for successor test"
+fi
+: >> "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: regular-file successor published at gate path"
+else
+  bad "kernel-gate: regular-file successor missing"
+fi
+# Delayed B: directory-only ops must not remove the regular file.
+# Simulate B still thinking path is a dir: rm pid (no-op on file/ENOTDIR) + rmdir.
+rm -f "${HALT_LOCK_RECLAIM_GATE}/pid" 2>/dev/null || true
+rmdir "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true
+if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  ok "kernel-gate: delayed dir cleanup cannot delete regular-file successor"
+else
+  bad "kernel-gate: delayed dir cleanup deleted regular-file successor"
+fi
+
+# Legacy empty/dead halt-lock/ directory recovers under kernel gate.
+clear_reclaim_workspace
+mkdir "$HALT_LOCK_FILE" || bad "kernel-gate: failed to seed empty legacy halt-lock/ dir"
+errf="$ROOT/kernel-gate-legacy-lock-empty.err"
+: > "$errf"
+# shellcheck disable=SC2034
+HALT_LOCK_HELD=0
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_HELD=0
+if halt_lock_acquire 2>>"$errf"; then
+  ok "kernel-gate: empty legacy halt-lock/ dir reclaimed"
+  halt_lock_release 2>>"$errf"
+else
+  bad "kernel-gate: empty legacy halt-lock/ blocked acquire (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+clear_reclaim_workspace
+if ! mkdir "$HALT_LOCK_FILE" 2>/dev/null; then
+  bad "kernel-gate: cannot seed dead legacy halt-lock/ (path=$(ls -la "$HALT_LOCK_FILE" 2>&1 || true))"
+else
+  printf '%s\n' "$(reclaim_dead_pid)" > "${HALT_LOCK_FILE}/pid"
+  mkdir "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true
+  # If gate path is already a regular file from prior release, that is fine —
+  # plant a legacy dir only when the path is free; otherwise seed ownerless dir
+  # is skipped (regular gate is the post-migration form).
+  if [[ ! -e "$HALT_LOCK_RECLAIM_GATE" ]]; then
+    mkdir "$HALT_LOCK_RECLAIM_GATE"
+  elif [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
+    rm -f "$HALT_LOCK_RECLAIM_GATE"
+    mkdir "$HALT_LOCK_RECLAIM_GATE"
+  fi
+  errf="$ROOT/kernel-gate-legacy-lock-dead.err"
+  : > "$errf"
+  if halt_lock_acquire 2>>"$errf"; then
+    ok "kernel-gate: dead legacy halt-lock/ + ownerless gate dir reclaimed"
+    halt_lock_release 2>>"$errf"
+  else
+    bad "kernel-gate: legacy dead lock+gate blocked acquire (stderr=$(tr '\n' ' ' <"$errf"))"
+  fi
+  if [[ -d "$HALT_LOCK_FILE" ]]; then
+    bad "kernel-gate: leftover legacy halt-lock/ after recovery"
+  else
+    ok "kernel-gate: legacy halt-lock/ path clean after recovery"
+  fi
+  if ! halt_lock_stderr_clean "$errf"; then
+    bad "kernel-gate: dirty stderr on legacy lock recovery"
+  else
+    ok "kernel-gate: clean stderr on legacy lock recovery"
+  fi
+fi
+
+# --- Two delayed reclaimers: kernel gate serializes; no CS overlap ---
+clear_reclaim_workspace
+aba_dir="$ROOT/reclaim-kernel-aba"
+rm -rf "$aba_dir"
+mkdir -p "$aba_dir/started" "$aba_dir/entered" "$aba_dir/rc" "$aba_dir/err" "$aba_dir/violations"
+printf 'pid=%s\nowner=aba-dead-lock\n' "$(reclaim_dead_pid)" > "$HALT_LOCK_FILE"
+# Pre-seed empty regular gate (harmless).
+: > "$HALT_LOCK_RECLAIM_GATE"
+aba_n=2
+rm -f "$aba_dir/go" "$aba_dir/may_release"
+i=0
+while [[ $i -lt $aba_n ]]; do
+  (
+    set +e
+    # shellcheck disable=SC2034
+    HALT_LOCK_HELD=0
+    # shellcheck disable=SC2034
+    HALT_LOCK_OWNER=""
+    # shellcheck disable=SC2034
+    HALT_LOCK_TMP=""
+    # shellcheck disable=SC2034
+    HALT_LOCK_RECLAIM_HELD=0
+    # shellcheck disable=SC2034
+    HALT_LOCK_RECLAIM_BACKEND=lockf
+    # shellcheck disable=SC2034
+    HALT_LOCK_RECLAIM_TIMEOUT=2
+    errf="$aba_dir/err/$i"
+    : > "$errf"
+    touch "$aba_dir/started/$i"
+    while [[ ! -f "$aba_dir/go" ]]; do
+      sleep 0.01 2>/dev/null || true
+    done
+    if [[ $i -eq 1 ]]; then
+      sleep 0.05 2>/dev/null || sleep 1
+    fi
+    if ! halt_lock_acquire 2>>"$errf"; then
+      echo "acquire-failed" >> "$aba_dir/violations/acquire.$i"
+      echo 1 > "$aba_dir/rc/$i"
+      exit 1
+    fi
+    my_owner="${HALT_LOCK_OWNER:-}"
+    if ! mkdir "$aba_dir/cs_held" 2>/dev/null; then
+      echo "concurrent-cs owner=$my_owner" >> "$aba_dir/violations/concurrent.$i"
+      halt_lock_release 2>>"$errf"
+      echo 2 > "$aba_dir/rc/$i"
+      exit 2
+    fi
+    printf '%s\n' "$my_owner" > "$aba_dir/cs_held/owner"
+    touch "$aba_dir/entered/$i"
+    stolen=0
+    while [[ ! -f "$aba_dir/may_release" ]]; do
+      cur=$(halt_lock_field owner 2>/dev/null) || cur=""
+      if [[ "$cur" != "$my_owner" ]]; then
+        echo "successor-unlinked want=$my_owner got=${cur:-absent}" \
+          >> "$aba_dir/violations/stolen.$i"
+        stolen=1
+        break
+      fi
+      sleep 0.01 2>/dev/null || true
+    done
+    rm -f "$aba_dir/cs_held/owner"
+    rmdir "$aba_dir/cs_held" 2>/dev/null || true
+    halt_lock_release 2>>"$errf"
+    if [[ "$stolen" -ne 0 ]]; then
+      echo 3 > "$aba_dir/rc/$i"
+      exit 3
+    fi
+    echo 0 > "$aba_dir/rc/$i"
+    exit 0
+  ) &
+  i=$((i + 1))
+done
+wait_spins=0
+while [[ $wait_spins -lt 2000 ]]; do
+  started_n=$(find "$aba_dir/started" -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "${started_n:-0}" -ge $aba_n ]]; then
+    break
+  fi
+  sleep 0.01 2>/dev/null || true
+  wait_spins=$((wait_spins + 1))
+done
+touch "$aba_dir/go"
+enter_spins=0
+while [[ $enter_spins -lt 2000 ]]; do
+  entered_n=$(find "$aba_dir/entered" -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "${entered_n:-0}" -ge 1 ]]; then
+    break
+  fi
+  sleep 0.01 2>/dev/null || true
+  enter_spins=$((enter_spins + 1))
+done
+sleep 0.1 2>/dev/null || sleep 1
+touch "$aba_dir/may_release"
+conc_waited=0
+while [[ $conc_waited -lt 60 ]]; do
+  if ! jobs -rp 2>/dev/null | grep -q .; then
+    break
+  fi
+  sleep 0.1 2>/dev/null || sleep 1
+  conc_waited=$((conc_waited + 1))
+done
+if jobs -rp 2>/dev/null | grep -q .; then
+  bad "kernel-gate-aba: concurrent children exceeded wait budget"
+  # shellcheck disable=SC2046
+  kill $(jobs -rp) 2>/dev/null || true
+  wait 2>/dev/null || true
+else
+  wait 2>/dev/null || true
+fi
+aba_bad=0
+aba_sample=""
+i=0
+while [[ $i -lt $aba_n ]]; do
+  if [[ ! -f "$aba_dir/rc/$i" ]]; then
+    aba_bad=1
+    aba_sample="${aba_sample} missing-rc.$i;"
+  else
+    rc=$(tr -d ' \n' <"$aba_dir/rc/$i")
+    if [[ "$rc" != "0" ]]; then
+      aba_bad=1
+      aba_sample="${aba_sample} rc.$i=$rc;"
+    fi
+  fi
+  if [[ -f "$aba_dir/err/$i" ]] && ! halt_lock_stderr_clean "$aba_dir/err/$i"; then
+    aba_bad=1
+    aba_sample="${aba_sample} err.$i=$(tr '\n' ' ' <"$aba_dir/err/$i" | head -c 120);"
+  fi
+  i=$((i + 1))
+done
+if find "$aba_dir/violations" -type f 2>/dev/null | grep -q .; then
+  aba_bad=1
+  aba_sample="${aba_sample} violations=$(find "$aba_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
+fi
+if [[ -e "$HALT_LOCK_FILE" ]]; then
+  aba_bad=1
+  aba_sample="${aba_sample} leftover-public-lock;"
+fi
+if [[ -d "$HALT_LOCK_RECLAIM_GATE" ]]; then
+  aba_bad=1
+  aba_sample="${aba_sample} leftover-legacy-gate-dir;"
+fi
+# Regular gate file may remain; temps must not.
+# shellcheck disable=SC2086
+for f in "$STATE_DIR"/.halt-lock.*; do
+  [[ -e "$f" ]] || continue
+  if [[ "$f" == "$HALT_LOCK_RECLAIM_GATE" && -f "$f" ]]; then
+    continue
+  fi
+  aba_bad=1
+  aba_sample="${aba_sample} leftover-temp=$f;"
+done
+if [[ "$aba_bad" -eq 0 ]]; then
+  ok "kernel-gate-aba: $aba_n delayed reclaimers mutual-exclusive, clean, gate file stable"
+else
+  bad "kernel-gate-aba: concurrent delayed reclaimers failed ($aba_sample)"
+fi
+
+# Missing backend fails closed with a clear warning (no work).
+clear_reclaim_workspace
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_BACKEND=not-a-real-backend
+errf="$ROOT/kernel-gate-missing-backend.err"
+: > "$errf"
+# shellcheck disable=SC2034
+HALT_LOCK_RECLAIM_HELD=0
+if halt_lock_reclaim_gate_acquire 2>>"$errf"; then
+  bad "kernel-gate: missing backend must fail closed"
+  halt_lock_reclaim_gate_release 2>/dev/null || true
+else
+  ok "kernel-gate: missing backend fails closed"
+fi
+if grep -Eiq 'unavailable|lockf|flock|fail closed' "$errf"; then
+  ok "kernel-gate: missing backend emits clear warning"
+else
+  bad "kernel-gate: missing backend warning unclear (stderr=$(tr '\n' ' ' <"$errf"))"
+fi
+unset HALT_LOCK_RECLAIM_BACKEND
+
+trap 'rm -rf "$ROOT"' EXIT
+unset HALT_LOCK_FILE HALT_LOCK_HELD HALT_LOCK_OWNER HALT_LOCK_TMP
+unset HALT_LOCK_RECLAIM_GATE HALT_LOCK_RECLAIM_HELD HALT_LOCK_RECLAIM_FD
+unset HALT_LOCK_RECLAIM_TIMEOUT HALT_LOCK_RECLAIM_BACKEND
 unset _GIBSON_HALT_LOCK_TRAP _GIBSON_HALT_LOCK_TRAP_DEPTH
 
 echo "halt lock: adversarial stale reclaim cannot admit concurrent CS or unlink a successor"
@@ -2500,9 +3198,14 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
   rm -rf "$REPO/gibson/.halt-lock.reclaiming"
   # shellcheck disable=SC2086
   rm -f "$REPO/gibson"/.halt-lock.* 2>/dev/null || true
+  # Alternate empty-start rounds (no seed) with malformed/dead-seed rounds so
+  # ordinary uncontended acquire and reclaim paths both stay clean under load.
 
-  # Alternate malformed and dead-owner stale records (both reclaim paths).
-  if [[ $((reclaim_round % 2)) -eq 1 ]]; then
+  # Seed kinds: empty-start, malformed public lock, dead public lock. Every
+  # third round is empty-start so ordinary acquire stays exercised.
+  if [[ $((reclaim_round % 3)) -eq 0 ]]; then
+    seed_kind="empty"
+  elif [[ $((reclaim_round % 2)) -eq 1 ]]; then
     # Malformed: missing owner, non-numeric pid, or truncated body.
     case $((reclaim_round % 6)) in
       1) printf 'not-a-lock\n' > "$REPO/gibson/halt-lock" ;;
@@ -2530,6 +3233,8 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
       HALT_LOCK_OWNER=""
       # shellcheck disable=SC2034
       HALT_LOCK_TMP=""
+      # shellcheck disable=SC2034
+      HALT_LOCK_RECLAIM_HELD=0
       errf="$round_dir/err/$i"
       : > "$errf"
       touch "$round_dir/started/$i"
@@ -2675,15 +3380,23 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
     round_bad=1
     sample="${sample} violations=$(find "$round_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
   fi
-  if [[ -e "$REPO/gibson/halt-lock" ]] || [[ -d "$REPO/gibson/.halt-lock.reclaiming" ]]; then
+  if [[ -e "$REPO/gibson/halt-lock" ]]; then
     round_bad=1
-    sample="${sample} leftover-lock;"
+    sample="${sample} leftover-public-lock;"
+  fi
+  if [[ -d "$REPO/gibson/.halt-lock.reclaiming" ]]; then
+    round_bad=1
+    sample="${sample} leftover-legacy-gate-dir;"
   fi
   # shellcheck disable=SC2086
-  if compgen -G "$REPO/gibson/.halt-lock.*" >/dev/null 2>&1; then
+  for f in "$REPO/gibson"/.halt-lock.*; do
+    [[ -e "$f" ]] || continue
+    if [[ "$f" == "$REPO/gibson/.halt-lock.reclaiming" && -f "$f" ]]; then
+      continue
+    fi
     round_bad=1
-    sample="${sample} leftover-temps;"
-  fi
+    sample="${sample} leftover-temp=$f;"
+  done
 
   if [[ "$round_bad" -eq 0 ]]; then
     ok "reclaim-stress round $reclaim_round ($seed_kind): $RECLAIM_STRESS_N contenders mutual-exclusive, clean"
@@ -2702,7 +3415,8 @@ fi
 # Restore suite trap after eval'd EXIT handler.
 trap 'rm -rf "$ROOT"' EXIT
 unset HALT_LOCK_FILE HALT_LOCK_HELD HALT_LOCK_OWNER HALT_LOCK_TMP
-unset HALT_LOCK_RECLAIM_GATE
+unset HALT_LOCK_RECLAIM_GATE HALT_LOCK_RECLAIM_HELD HALT_LOCK_RECLAIM_FD
+unset HALT_LOCK_RECLAIM_TIMEOUT HALT_LOCK_RECLAIM_BACKEND
 unset _GIBSON_HALT_LOCK_TRAP _GIBSON_HALT_LOCK_TRAP_DEPTH
 
 echo "halt latch: repeated 30-way local-HALT bursts → one journal, valid latch, zero work, clean children"
