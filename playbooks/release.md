@@ -209,6 +209,14 @@ git show origin/main:docs/active-work.md | grep -E "issue-([a-z0-9]+-)?<issue>-"
 git ls-tree --name-only origin/main docs/claims/ | grep -E "issue-([a-z0-9]+-)?<issue>-"
 ```
 
+**Bare multi-claim refuse (#65):** if more than one live claim exists for the
+issue and you omit `--claim-id`, `release-claim.sh` exits **1** before any
+dry-run plan or mutation and prints the exact matching ids (sorted). Pick one
+with a **literal** `--claim-id` (never an ERE/glob). A single live claim may
+still use the bare form; the script freezes that exact id before cleanup and
+never carries a broad issue regex into row deletion. Legacy rows are matched on
+the claim-id column only — text in scope/session/notes is inert.
+
 If more than the merged claim is live, name the one you merged; the script then
 leaves the sibling rows and keeps `agent-claimed` on the issue:
 

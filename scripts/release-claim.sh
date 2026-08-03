@@ -46,6 +46,14 @@ USAGE
   --dry-run      print what would happen, touch nothing
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
+  Bare multi-claim: if more than one live claim exists for the issue and you
+  did not pass --claim-id, the script refuses (exit 1) before any plan or
+  mutation and prints the exact ids so you can pick one. A single live claim
+  may still be released with the bare form; that exact id is frozen first.
+  --claim-id is always a *literal* exact id (never an ERE/glob). It must
+  belong to the positional issue (and --prefix when given). Legacy table
+  rows are matched on the claim-id column only — text in scope/session/notes
+  never selects or deletes a row.
 
   Empty ledger: when a *valid* ledger ref with a *readable* tree has no
   docs/claims/* and no docs/active-work.md tree entry, that is a valid empty
@@ -100,6 +108,7 @@ KEEP_BRANCH=0
 KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
+CLAIM_ID_SET=0
 PREFIX=""
 REPO_ARG=""
 while [[ $# -gt 0 ]]; do
@@ -107,7 +116,11 @@ while [[ $# -gt 0 ]]; do
     --keep-branch) KEEP_BRANCH=1 ;;
     --keep-label) KEEP_LABEL=1 ;;
     --dry-run) DRY=1 ;;
-    --claim-id) CLAIM_ID_ARG="${2:-}"; shift ;;
+    --claim-id)
+      CLAIM_ID_SET=1
+      CLAIM_ID_ARG="${2:-}"
+      shift
+      ;;
     --prefix) PREFIX="${2:-}"; shift ;;
     --repo) REPO_ARG="${2:-}"; shift ;;
     *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
@@ -123,6 +136,9 @@ warn() { echo "release-claim.sh: WARNING: $*" >&2; }
 [[ "$ISSUE" =~ ^[0-9]+$ ]] || die "issue must be a number, got '$ISSUE'"
 if [[ -n "$PREFIX" && ! "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
   die "--prefix must start with a letter, got '$PREFIX'"
+fi
+if [[ "$CLAIM_ID_SET" -eq 1 && -z "$CLAIM_ID_ARG" ]]; then
+  die "--claim-id requires a non-empty literal claim id"
 fi
 
 cd "$CANONICAL"
@@ -283,24 +299,15 @@ if [[ "$HAS_ACTIVE" -eq 0 && "$HAS_CLAIMS_TREE" -eq 0 ]]; then
   info "claim ledger at $REF is empty (no docs/claims/* and no docs/active-work.md) — treating as no live claims"
 fi
 
-# Claim ids we own. issue-<N>-…, plus issue-<ns>-<N>-… when --prefix is given.
-# The alpha namespace is what keeps issue-1<N>- from matching issue-<N>-.
-if [[ -n "$CLAIM_ID_ARG" ]]; then
-  MATCH_RE="(^|[^A-Za-z0-9-])${CLAIM_ID_ARG}([^A-Za-z0-9-]|$)"
-elif [[ -n "$PREFIX" ]]; then
-  MATCH_RE="issue-(${PREFIX}-)?${ISSUE}-"
-else
-  MATCH_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
-fi
-
 # Claims live one-per-file in docs/claims/ (L-023); rows in docs/active-work.md
-# are the legacy form and are still released. Prints matching ids on stdout.
-# Returns 1 if the ledger tree cannot be read (caller must hard-fail — never
-# treat a failed tree read as an empty match set).
+# are the legacy form and are still released. Prints *all* live claim ids
+# (deduped, sorted) on stdout — never filters by ERE. Returns 1 if the ledger
+# tree cannot be read (caller must hard-fail — never treat a failed tree read
+# as an empty match set).
 # Startup already proved every live claims/* blob is a readable regular file;
 # re-check here so a mid-run object-store loss still fails closed instead of
 # inventing ids from pathnames alone.
-claim_ids_matching() {
+claim_ids_all() {
   local claims_out active_out active_entry active_blob claims_line
   local c_mode c_type c_obj
   claims_out=""
@@ -363,26 +370,91 @@ EOF
   {
     printf '%s\n' "$claims_out" |
       sed 's|^docs/claims/||;s|\.md$||'
+    # Legacy table: claim-id is column 3 only. Never scan scope/session/notes.
     printf '%s\n' "$active_out" |
       grep -E '^\| ' |
       awk -F'|' '{print $3}' |
       sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-  } | grep -E '^issue-' | grep -E "$1" | sort -u || true
+  } | grep -E '^issue-' | sort -u || true
   return 0
 }
 
-# Every live row for this issue, so we can tell "released the last one" from
-# "released one slice of several" (L-024).
-ALL_RE="issue-([A-Za-z][A-Za-z0-9]*-)?${ISSUE}-"
-ALL_IDS=$(claim_ids_matching "$ALL_RE") || \
-  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
-TARGET_IDS=$(claim_ids_matching "$MATCH_RE") || \
-  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
+# True when claim id $1 belongs to the positional issue (and --prefix when set).
+# issue-1<N>- never matches issue-<N>-. Alpha namespace is optional without --prefix.
+claim_id_for_issue() {
+  local id="$1"
+  [[ -n "$id" ]] || return 1
+  if [[ -n "$PREFIX" ]]; then
+    case "$id" in
+      "issue-${ISSUE}-"*) return 0 ;;
+      "issue-${PREFIX}-${ISSUE}-"*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  case "$id" in
+    "issue-${ISSUE}-"*) return 0 ;;
+  esac
+  # Optional alpha namespace: issue-<ns>-<N>-… (ns starts with a letter).
+  if [[ "$id" =~ ^issue-[A-Za-z][A-Za-z0-9]*-${ISSUE}- ]]; then
+    return 0
+  fi
+  return 1
+}
 
-if [[ -z "$TARGET_IDS" ]]; then
-  if [[ -n "$CLAIM_ID_ARG" ]]; then
+# Filter a newline list of ids down to those belonging to this issue.
+issue_claim_ids_from() {
+  local id
+  printf '%s\n' "$1" | while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    if claim_id_for_issue "$id"; then
+      printf '%s\n' "$id"
+    fi
+  done | sort -u
+}
+
+ALL_LIVE_IDS=$(claim_ids_all) || \
+  die "cannot read claim ledger at $REF — unreadable tree is not an empty ledger"
+# Every live row for this issue (broad: any alpha-ns or bare issue-N), so we
+# can tell "released the last one" from "released one slice of several" (L-024).
+ALL_IDS=$(issue_claim_ids_from "$ALL_LIVE_IDS")
+TARGET_IDS=""
+
+if [[ "$CLAIM_ID_SET" -eq 1 ]]; then
+  # --claim-id is always a *literal* exact id. Reject empty, ERE/glob-looking,
+  # and malformed values before any mutation. Never pass the arg through grep -E.
+  if [[ ! "$CLAIM_ID_ARG" =~ ^issue-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+    die "--claim-id must be a literal exact claim id (no wildcards/regex); got '$CLAIM_ID_ARG'"
+  fi
+  if ! claim_id_for_issue "$CLAIM_ID_ARG"; then
+    die "--claim-id '$CLAIM_ID_ARG' does not belong to issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
+  fi
+  if ! printf '%s\n' "$ALL_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
+    if printf '%s\n' "$ALL_LIVE_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
+      die "--claim-id '$CLAIM_ID_ARG' is live but not a claim for issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
+    fi
     die "no live claim '$CLAIM_ID_ARG' at $REF"
   fi
+  # Exactly one logical match (legacy + per-file already deduped by sort -u).
+  TARGET_IDS="$CLAIM_ID_ARG"
+else
+  # Bare invocation: freeze zero or one exact id. Never carry a broad issue
+  # regex into cleanup. Multi-claim without --claim-id is a hard refuse.
+  n_issue=0
+  if [[ -n "$ALL_IDS" ]]; then
+    n_issue=$(printf '%s\n' "$ALL_IDS" | grep -c . || true)
+  fi
+  if [[ "$n_issue" -gt 1 ]]; then
+    echo "release-claim.sh: ERROR: issue $ISSUE has ${n_issue} live claims; pass --claim-id with exactly one of:" >&2
+    printf '%s\n' "$ALL_IDS" | sed 's/^/  /' >&2
+    exit 1
+  fi
+  if [[ "$n_issue" -eq 1 ]]; then
+    TARGET_IDS=$(printf '%s\n' "$ALL_IDS")
+    info "bare release freezes single claim id: $TARGET_IDS"
+  fi
+fi
+
+if [[ -z "$TARGET_IDS" ]]; then
   info "no live claim for issue $ISSUE — will still try label/worktree cleanup"
 fi
 
@@ -394,11 +466,11 @@ wt_dir_for() { echo "$WT_PARENT/wt-${1#issue-}"; }
 branch_for() { echo "feat/${1#issue-}"; }
 
 residual_after_release() {
-  # ids in ALL_IDS that are not in TARGET_IDS
+  # ids in ALL_IDS that are not in TARGET_IDS (exact id compare only)
   local id
-  echo "$ALL_IDS" | while IFS= read -r id; do
+  printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
     [[ -n "$id" ]] || continue
-    echo "$TARGET_IDS" | grep -qxF "$id" || echo "$id"
+    printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id" || printf '%s\n' "$id"
   done
 }
 RESIDUAL_IDS=$(residual_after_release)
@@ -408,17 +480,17 @@ if [[ "$DRY" -eq 1 ]]; then
   echo "  claim-table repo: $CANONICAL (branch: $(git rev-parse --abbrev-ref HEAD), left untouched)"
   echo "  product repo:     ${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '(gh default)')}"
   if [[ -n "$TARGET_IDS" ]]; then
-    echo "$TARGET_IDS" | while IFS= read -r id; do
+    printf '%s\n' "$TARGET_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  release claim:   $id"
       echo "    remove worktree: $(wt_dir_for "$id")"
       echo "    delete branch:   $(branch_for "$id")"
     done
   else
-    echo "  release claim:   (none matched $MATCH_RE)"
+    echo "  release claim:   (none matched for issue $ISSUE)"
   fi
   if [[ -n "$RESIDUAL_IDS" ]]; then
-    echo "$RESIDUAL_IDS" | while IFS= read -r id; do
+    printf '%s\n' "$RESIDUAL_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  KEEP sibling claim: $id (and keep the agent-claimed label)"
     done
@@ -473,28 +545,59 @@ strip_claim_rows() {
     cd "$tmpwt" || exit 1
     local touched=0
 
-    # per-lane claim files (current form)
+    # per-lane claim files (current form) — exact id only
     local id
-    for id in $TARGET_IDS; do
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
       if [[ -f "docs/claims/$id.md" ]]; then
         git rm -q "docs/claims/$id.md" || exit 1
         touched=1
       fi
-    done
+    done <<EOF
+$TARGET_IDS
+EOF
 
-    # legacy shared table
+    # legacy shared table — compare only the claim-id column (field 3). Text
+    # in scope/session/notes that mentions a target id must never delete a row.
     local active=docs/active-work.md
-    if [[ -f "$active" ]] && grep -E "$MATCH_RE" "$active" >/dev/null 2>&1; then
-      local tmp
+    if [[ -f "$active" ]]; then
+      local tmp line cid keep id touched_legacy
       tmp=$(mktemp) || exit 1
-      grep -v -E "$MATCH_RE" "$active" > "$tmp"
-      mv "$tmp" "$active"
-      git add "$active" || exit 1
-      touched=1
+      touched_legacy=0
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" =~ ^\| ]]; then
+          cid=$(printf '%s\n' "$line" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          keep=1
+          if [[ -n "$cid" && "$cid" != "claim-id" && "$cid" != "---" && ! "$cid" =~ ^-+$ ]]; then
+            while IFS= read -r id; do
+              [[ -n "$id" ]] || continue
+              if [[ "$cid" == "$id" ]]; then
+                keep=0
+                touched_legacy=1
+                break
+              fi
+            done <<EOF
+$TARGET_IDS
+EOF
+          fi
+          if [[ "$keep" -eq 1 ]]; then
+            printf '%s\n' "$line" >> "$tmp"
+          fi
+        else
+          printf '%s\n' "$line" >> "$tmp"
+        fi
+      done < "$active"
+      if [[ "$touched_legacy" -eq 1 ]]; then
+        mv "$tmp" "$active"
+        git add "$active" || exit 1
+        touched=1
+      else
+        rm -f "$tmp"
+      fi
     fi
 
     [[ "$touched" -eq 1 ]] || exit 2  # nothing to strip
-    git commit -s -q -m "release-claim: ${CLAIM_ID_ARG:-issue-${ISSUE}}
+    git commit -s -q -m "release-claim: ${TARGET_IDS:-issue-${ISSUE}}
 
 Post-merge cleanup per Law 10 / docs/05." || exit 1
     git push origin "HEAD:$base" || exit 1
@@ -515,10 +618,28 @@ if [[ -n "$TARGET_IDS" ]]; then
     2) info "no claim to remove at $REF" ;;
     *)
       warn "claim NOT removed for issue $ISSUE — strip failed (rc=$strip_rc)."
-      warn "Fix by hand on main: git rm the docs/claims/<id>.md files (or drop rows matching '$MATCH_RE' from docs/active-work.md), then push."
+      warn "Fix by hand on main: git rm the docs/claims/<id>.md file(s) for exact id(s) '$TARGET_IDS' (or drop those claim-id column rows from docs/active-work.md), then push."
       INCOMPLETE=1
       ;;
   esac
+
+  # Re-read authoritative main after the cleanup commit before deciding label
+  # removal. A sibling introduced at the mutation boundary must keep
+  # agent-claimed (and its row/file must not be treated as gone).
+  git fetch origin >/dev/null 2>&1 || true
+  if REF=$(resolve_ledger_ref); then
+    TREE_SHA=$(git rev-parse --verify "${REF}^{tree}" 2>/dev/null || true)
+    if [[ -z "$TREE_SHA" ]]; then
+      TREE_SHA=$(git cat-file -p "${REF}^{commit}" 2>/dev/null | awk '/^tree / {print $2; exit}')
+    fi
+    if [[ -n "$TREE_SHA" ]] && git cat-file -e "$TREE_SHA" 2>/dev/null; then
+      post_live=""
+      if post_live=$(claim_ids_all); then
+        ALL_IDS=$(issue_claim_ids_from "$post_live")
+        RESIDUAL_IDS=$(residual_after_release)
+      fi
+    fi
+  fi
 else
   info "no claim to remove"
 fi
@@ -535,7 +656,7 @@ if command -v gh >/dev/null; then
     # Residual rows on the ledger are themselves the verification — leaving
     # the label is the complete policy without a GitHub round-trip.
     info "keeping agent-claimed on #$ISSUE — residual claims remain:"
-    echo "$RESIDUAL_IDS" | sed 's/^/  /'
+    printf '%s\n' "$RESIDUAL_IDS" | sed 's/^/  /'
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     # Empty ledger + live sibling whose claim is not on this ref (or was never
     # filed). Explicit operator path — do not invent a row, do not strip the

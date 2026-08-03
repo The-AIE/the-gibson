@@ -57,12 +57,18 @@ trap 'rm -rf "$ROOT"' EXIT
 
 echo "L-037 · namespaced and numeric claim ids match safely"
 new_repo "$ROOT/a"
-out=$(cd "$ROOT/a/canon" && "$RC" 15 --dry-run 2>&1)
+# Bare multi-claim on issue 15 refuses (two live issue-15 rows). Scoped match
+# still sees issue-15 and never issue-115.
+out=$(cd "$ROOT/a/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
+rc=$?
+check "scoped dry-run exits 0" "$rc" "0"
 contains "issue-15-* matches" "$out" "issue-15-checkout-totals"
 lacks    "issue-115-* does not match issue 15" "$out" "issue-115-unrelated"
-out=$(cd "$ROOT/a/canon" && "$RC" 5 --prefix template --repo acme/tmpl --dry-run 2>&1)
+out=$(cd "$ROOT/a/canon" && "$RC" 5 --prefix template --claim-id issue-template-5-palette-tokens --repo acme/tmpl --dry-run 2>&1)
 contains "--prefix finds the namespaced id" "$out" "issue-template-5-palette-tokens"
 contains "--repo names the product repo" "$out" "acme/tmpl"
+contains "monorepo sibling kept under prefix release" "$out" "KEEP sibling claim: issue-5-monorepo-thing"
+lacks    "does not release monorepo under template claim-id" "$out" "release claim:   issue-5-monorepo-thing"
 
 echo "L-024 · --claim-id releases one slice and keeps the siblings"
 out=$(cd "$ROOT/a/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
@@ -107,8 +113,21 @@ contains "other issue untouched"       "$files" "issue-115-unrelated"
 
 echo "L-027 · unfinished cleanup exits 3 instead of claiming success"
 new_repo "$ROOT/c"
-# Final lane: strip every issue-15 claim so residual is empty and the label
-# must be removed. No GitHub remote → removal cannot be verified → exit 3.
+# Final single-claim lane: residual empty → label must be removed. Bare multi
+# refuse (#65) means we leave only one issue-15 row, then bare-release it.
+# No GitHub remote → removal cannot be verified → exit 3.
+(
+  cd "$ROOT/c/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-checkout-totals | src/checkout | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "single issue-15 claim" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
 out=$(cd "$ROOT/c/canon" && "$RC" 15 2>&1)
 rc=$?
 check "exit code" "$rc" "3"
@@ -597,6 +616,359 @@ rc=$?
 check "docs/claims blob (not tree) hard-fails" "$rc" "1"
 contains "claims path wants tree" "$out" "want 040000 tree"
 lacks    "does not mutate labels when claims is blob" "$out" "MUTATED-LABEL"
+
+echo "#65 · bare multi-claim refuse (legacy + per-file)"
+# Two live issue-15 claims + bare invocation must exit 1 before any dry-run
+# plan or mutation. Exact ids printed sorted; zero worktree/branch/ledger change.
+new_repo "$ROOT/m65"
+# Canaries that must not be touched on refuse.
+mkdir -p "$ROOT/m65/wt-15-checkout-totals" "$ROOT/m65/wt-15-demo-stale-plan"
+echo canary-a > "$ROOT/m65/wt-15-checkout-totals/marker"
+echo canary-b > "$ROOT/m65/wt-15-demo-stale-plan/marker"
+(
+  cd "$ROOT/m65/canon" || exit 1
+  git branch -f "feat/15-checkout-totals" HEAD
+  git branch -f "feat/15-demo-stale-plan" HEAD
+  printf '%s\n' "$(git rev-parse origin/main)" > "$ROOT/m65/origin-main.before"
+) >/dev/null 2>&1
+
+out=$(cd "$ROOT/m65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "bare multi-claim dry-run exits 1" "$rc" "1"
+contains "names multi-claim refuse" "$out" "has 2 live claims"
+contains "lists checkout-totals" "$out" "issue-15-checkout-totals"
+contains "lists demo-stale-plan" "$out" "issue-15-demo-stale-plan"
+# Sorted order: checkout-totals before demo-stale-plan (strip indent for compare)
+order=$(printf '%s\n' "$out" | grep -E '^[[:space:]]+issue-15-' | sed 's/^[[:space:]]*//' | tr '\n' '|')
+contains "ids printed in sorted order" "$order" "issue-15-checkout-totals|issue-15-demo-stale-plan|"
+lacks    "no dry-run plan on multi refuse" "$out" "DRY RUN would"
+lacks    "no release plan on multi refuse" "$out" "release claim:"
+lacks    "no label plan on multi refuse" "$out" "remove label"
+
+out=$(cd "$ROOT/m65/canon" && "$RC" 15 2>&1)
+rc=$?
+check "bare multi-claim real invoke exits 1" "$rc" "1"
+contains "real multi refuse names both ids" "$out" "issue-15-checkout-totals"
+contains "real multi refuse names sibling" "$out" "issue-15-demo-stale-plan"
+[[ -f "$ROOT/m65/wt-15-checkout-totals/marker" ]] \
+  && ok "multi refuse left target worktree" \
+  || bad "multi refuse removed target worktree"
+[[ -f "$ROOT/m65/wt-15-demo-stale-plan/marker" ]] \
+  && ok "multi refuse left sibling worktree" \
+  || bad "multi refuse removed sibling worktree"
+br_a=$(git -C "$ROOT/m65/canon" branch --list 'feat/15-checkout-totals')
+br_b=$(git -C "$ROOT/m65/canon" branch --list 'feat/15-demo-stale-plan')
+[[ -n "$br_a" ]] && ok "multi refuse left target branch" || bad "multi refuse deleted target branch"
+[[ -n "$br_b" ]] && ok "multi refuse left sibling branch" || bad "multi refuse deleted sibling branch"
+origin_before=$(cat "$ROOT/m65/origin-main.before")
+origin_after=$(git -C "$ROOT/m65/canon" rev-parse origin/main)
+check "multi refuse did not push ledger" "$origin_after" "$origin_before"
+
+# Per-file ledger multi-claim refuse (no legacy rows).
+new_repo "$ROOT/m65f"
+(
+  cd "$ROOT/m65f/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  for id in issue-15-checkout-totals issue-15-demo-stale-plan; do
+    printf 'claim: %s\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/%s\nsession: a\n' "$id" "$id" \
+      > "docs/claims/$id.md"
+  done
+  : > docs/active-work.md
+  git add -A && git commit -qm "two per-file claims" && git push -q origin main
+  git checkout -q long-lived-feature
+  printf '%s\n' "$(git rev-parse origin/main)" > "$ROOT/m65f/origin-main.before"
+) >/dev/null 2>&1
+out=$(cd "$ROOT/m65f/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "per-file bare multi-claim dry-run exits 1" "$rc" "1"
+contains "per-file multi lists both" "$out" "issue-15-checkout-totals"
+lacks    "per-file multi no dry-run plan" "$out" "DRY RUN would"
+origin_after=$(git -C "$ROOT/m65f/canon" rev-parse origin/main)
+check "per-file multi refuse no ledger push" "$origin_after" "$(cat "$ROOT/m65f/origin-main.before")"
+
+echo "#65 · bare single-claim freezes exact id"
+new_repo "$ROOT/s65"
+(
+  cd "$ROOT/s65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "single issue-15" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/s65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "bare single-claim dry-run exits 0" "$rc" "0"
+contains "freezes the only id" "$out" "issue-15-only-lane"
+contains "plans that one release" "$out" "release claim:   issue-15-only-lane"
+lacks    "does not plan issue-115" "$out" "issue-115-unrelated"
+
+# Per-file single bare green.
+new_repo "$ROOT/s65f"
+(
+  cd "$ROOT/s65f/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-15-only-lane\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/only\nsession: a\n' \
+    > docs/claims/issue-15-only-lane.md
+  : > docs/active-work.md
+  git add -A && git commit -qm "one per-file claim" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/s65f/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "per-file bare single dry-run exits 0" "$rc" "0"
+contains "per-file freezes only id" "$out" "issue-15-only-lane"
+
+echo "#65 · exact --claim-id literal; reject regex / wrong-issue"
+new_repo "$ROOT/x65"
+# Regex-looking id must fail before any plan/mutation (literal exact only).
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id 'issue-15-.*' --dry-run 2>&1)
+rc=$?
+check "regex-looking claim-id exits 1" "$rc" "1"
+contains "rejects non-literal claim-id" "$out" "literal exact claim id"
+lacks    "regex claim-id no dry-run plan" "$out" "DRY RUN would"
+lacks    "regex does not select both siblings" "$out" "release claim:   issue-15-checkout-totals"
+
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id 'issue-15-*' --dry-run 2>&1)
+rc=$?
+check "glob-looking claim-id exits 1" "$rc" "1"
+contains "rejects glob claim-id" "$out" "literal exact claim id"
+
+# Wrong issue: issue-5 id with positional 15.
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id issue-5-monorepo-thing --dry-run 2>&1)
+rc=$?
+check "wrong-issue claim-id exits 1" "$rc" "1"
+contains "wrong-issue rejected" "$out" "does not belong to issue 15"
+lacks    "wrong-issue no dry-run plan" "$out" "DRY RUN would"
+
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id issue-5-monorepo-thing 2>&1)
+rc=$?
+check "wrong-issue real invoke exits 1" "$rc" "1"
+table=$(cd "$ROOT/x65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "wrong-issue left all rows" "$table" "issue-5-monorepo-thing"
+contains "wrong-issue left issue-15 rows" "$table" "issue-15-checkout-totals"
+
+# Empty / absent claim-id.
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id '' --dry-run 2>&1)
+rc=$?
+check "empty claim-id exits 1" "$rc" "1"
+contains "empty claim-id named" "$out" "non-empty literal claim id"
+
+out=$(cd "$ROOT/x65/canon" && "$RC" 15 --claim-id issue-15-does-not-exist --dry-run 2>&1)
+rc=$?
+check "absent claim-id exits 1" "$rc" "1"
+contains "absent claim-id named" "$out" "no live claim"
+
+echo "#65 · legacy row: scope text mentioning target id is inert"
+new_repo "$ROOT/leg65"
+(
+  cd "$ROOT/leg65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-checkout-totals | src/checkout | session:a |
+| 2026-08-01 | issue-16-other | depends on issue-15-checkout-totals | session:x |
+| 2026-08-01 | issue-15-demo-stale-plan | src/demo | session:b |
+TABLE
+  git add -A && git commit -qm "scope mentions target id" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+(cd "$ROOT/leg65/canon" && "$RC" 15 --claim-id issue-15-checkout-totals) >/dev/null 2>&1
+table=$(cd "$ROOT/leg65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+# Scope text of issue-16-other still mentions the released id; only the claim-id
+# column row for the target must be gone (pipe-delimited first-column match).
+lacks    "target claim-id column row gone" "$table" "| issue-15-checkout-totals |"
+contains "unrelated row survives despite scope text" "$table" "issue-16-other"
+contains "sibling claim-id column survives" "$table" "| issue-15-demo-stale-plan |"
+contains "scope still mentions released id text" "$table" "depends on issue-15-checkout-totals"
+
+echo "#65 · mixed legacy+per-file duplicate counts as one"
+new_repo "$ROOT/dup65"
+(
+  cd "$ROOT/dup65/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-15-only-lane\nissue: 15\nclaimed: 2026-08-01T00:00:00Z\nscope: src/only\nsession: a\n' \
+    > docs/claims/issue-15-only-lane.md
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "same id in both ledgers" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+# Bare must treat as single claim (not multi refuse).
+out=$(cd "$ROOT/dup65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+check "mixed duplicate bare dry-run exits 0" "$rc" "0"
+contains "mixed counts as one id" "$out" "issue-15-only-lane"
+lacks    "mixed not multi-refuse" "$out" "live claims"
+# Real release removes both representations.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then exit 0; fi
+    echo "${GH_LABELS:-}"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/dup65/canon" && GH_LABELS="" "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "mixed duplicate real release exits 0" "$rc" "0"
+files=$(cd "$ROOT/dup65/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+lacks    "per-file representation removed" "$files" "issue-15-only-lane"
+table=$(cd "$ROOT/dup65/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
+lacks    "legacy representation removed" "$table" "issue-15-only-lane"
+
+echo "#65 · prefixes/namespaces and issue 15 vs 115 remain safe"
+new_repo "$ROOT/ns65"
+out=$(cd "$ROOT/ns65/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --dry-run 2>&1)
+lacks    "15 never selects 115" "$out" "issue-115-unrelated"
+out=$(cd "$ROOT/ns65/canon" && "$RC" 115 --claim-id issue-115-unrelated --dry-run 2>&1)
+rc=$?
+check "issue 115 exact dry-run exits 0" "$rc" "0"
+contains "115 releases its own id" "$out" "issue-115-unrelated"
+lacks    "115 does not select 15" "$out" "issue-15-checkout-totals"
+out=$(cd "$ROOT/ns65/canon" && "$RC" 5 --prefix template --claim-id issue-template-5-palette-tokens --dry-run 2>&1)
+contains "namespaced template id" "$out" "issue-template-5-palette-tokens"
+
+echo "#65 · sibling at mutation boundary keeps row and label"
+# Start with one claim. On the bare origin, a post-receive hook injects a
+# sibling claim *after* the cleanup push (plumbing, no worktree) so the
+# script's post-strip re-read keeps agent-claimed.
+new_repo "$ROOT/bound65"
+(
+  cd "$ROOT/bound65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single before race" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+# post-receive: append a sibling row via commit-tree/update-ref (portable on bare).
+cat > "$ROOT/bound65/origin/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+set -euo pipefail
+while read -r _old new ref; do
+  case "$ref" in
+    refs/heads/main|refs/heads/master) ;;
+    *) continue ;;
+  esac
+  content=$(git cat-file -p "$new:docs/active-work.md" 2>/dev/null || true)
+  [[ -n "$content" ]] || continue
+  printf '%s\n' "$content" | grep -qF 'issue-15-sibling-racer' && continue
+  newcontent=$(printf '%s\n' "$content" '| 2026-08-02 | issue-15-sibling-racer | src/race | session:z |')
+  newblob=$(printf '%s\n' "$newcontent" | git hash-object -w --stdin)
+  # Rebuild the root tree from $new, replacing docs/active-work.md.
+  export GIT_INDEX_FILE
+  GIT_INDEX_FILE=$(mktemp "${TMPDIR:-/tmp}/gibson-idx.XXXXXX")
+  git read-tree "$new"
+  git update-index --add --cacheinfo "100644,$newblob,docs/active-work.md"
+  tree=$(git write-tree)
+  commit=$(printf '%s\n' "race: sibling at mutation boundary" | git commit-tree "$tree" -p "$new")
+  git update-ref "$ref" "$commit"
+  rm -f "$GIT_INDEX_FILE"
+  unset GIT_INDEX_FILE
+done
+HOOK
+chmod +x "$ROOT/bound65/origin/hooks/post-receive"
+
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/bound65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+# Sibling re-read → keep label (no edit). Exit 0 complete.
+check "mutation-boundary release exits 0" "$rc" "0"
+contains "keeps label for boundary sibling" "$out" "residual claims remain"
+contains "names the raced sibling" "$out" "issue-15-sibling-racer"
+lacks    "does not remove label when sibling raced in" "$out" "MUTATED-LABEL"
+lacks    "does not claim label removed" "$out" "removed agent-claimed"
+table=$(cd "$ROOT/bound65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "raced sibling row survives" "$table" "issue-15-sibling-racer"
+lacks    "original target still released" "$table" "| issue-15-only-lane |"
+
+echo "#65 · scoped cleanup preserves sibling worktree/branch/label (legacy)"
+new_repo "$ROOT/sc65"
+mkdir -p "$ROOT/sc65/wt-15-checkout-totals" "$ROOT/sc65/wt-15-demo-stale-plan"
+echo target > "$ROOT/sc65/wt-15-checkout-totals/marker"
+echo sibling > "$ROOT/sc65/wt-15-demo-stale-plan/marker"
+(
+  cd "$ROOT/sc65/canon" || exit 1
+  git branch -f "feat/15-checkout-totals" HEAD
+  git branch -f "feat/15-demo-stale-plan" HEAD
+) >/dev/null 2>&1
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/sc65/canon" && "$RC" 15 --claim-id issue-15-checkout-totals --repo acme/app 2>&1)
+rc=$?
+check "scoped legacy release exits 0" "$rc" "0"
+contains "keeps label for residual sibling" "$out" "residual claims remain"
+lacks    "scoped does not strip label" "$out" "MUTATED-LABEL"
+[[ ! -f "$ROOT/sc65/wt-15-checkout-totals/marker" ]] \
+  && ok "target worktree removed" \
+  || bad "target worktree still present"
+[[ -f "$ROOT/sc65/wt-15-demo-stale-plan/marker" ]] \
+  && ok "sibling worktree preserved" \
+  || bad "sibling worktree was removed"
+br_t=$(git -C "$ROOT/sc65/canon" branch --list 'feat/15-checkout-totals')
+br_s=$(git -C "$ROOT/sc65/canon" branch --list 'feat/15-demo-stale-plan')
+[[ -z "$br_t" ]] && ok "target branch deleted" || bad "target branch still present"
+[[ -n "$br_s" ]] && ok "sibling branch preserved" || bad "sibling branch was deleted"
+table=$(cd "$ROOT/sc65/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+lacks    "target row gone" "$table" "issue-15-checkout-totals"
+contains "sibling row kept" "$table" "issue-15-demo-stale-plan"
+contains "unrelated 115 kept" "$table" "issue-115-unrelated"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
