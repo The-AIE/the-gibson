@@ -151,11 +151,14 @@ formality:
 3. A baseline regeneration (`.gibson/test-integrity-journal.jsonl` or a noted
    `--regenerate --reason`) is an explicit journaled act — treat the reason the
    same way as a waiver.
-4. Phase-1 bootstrap: test-integrity is enforced **locally** via `gate.sh` and
-   the helper; CI does not yet grade it. On a suite-shrinking diff, require
-   local sensor evidence (or an exact visible waiver). After phase-2 wires the
-   isolated CI job, green-without-waiver on a shrinking suite is a **sensor
-   failure** → REQUEST_CHANGES.
+4. **Where it is enforced:** local `gate.sh` always; protected CI via the unique
+   required check `test-integrity` in `ci/gibson-gate.yml` **only after** an
+   owner activates it under issue #68 (installing the template is not
+   protection). On a suite-shrinking diff: require the exact visible waiver (or
+   evidence the reduction is intentional). Green-without-waiver on a shrinking
+   suite when the check is required is a **sensor failure** → REQUEST_CHANGES.
+   Waivers surface from inert PR-body text (`--waiver-file`); never trust a
+   PR-head rewrite of the helper.
 
 ### 5. Verdict (mandatory final line)
 

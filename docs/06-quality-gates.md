@@ -64,25 +64,58 @@ Fail closed (do **not** authorize):
 - Wrong delta (`removed 2` when 3 tests disappeared)
 - Malformed / zero-delta noise
 
-### Trusted baseline (local now; CI in phase 2)
+### Trusted baseline (local + protected CI template)
 
 | Context | Authority |
 |---|---|
 | Local `gate.sh` | `.gibson-baseline.json` from `gate-baseline.sh` (gitignored, worktree-local) |
-| CI `pull_request` | **Not wired in this bootstrap PR.** Phase 2 (after this helper is on main) adds an isolated grading job that re-derives metrics at the PR base SHA using the **immutable merge-base copy** of `scripts/test-integrity.mjs` |
+| CI `pull_request` | **Immutable merge-base copy** of `scripts/test-integrity.mjs`, via the four-job template in `ci/gibson-gate.yml` (resolve → base capture → head capture → final `test-integrity`) |
 
-**Phase-1 bootstrap (this change):** ships the reviewed helper, local
-`gate.sh` / `gate-baseline.sh` integration, focused adversarial sensors, and
-reviewer guidance. It deliberately **does not** change `ci/gibson-gate.yml`.
-Wiring CI before main owns the helper would either (a) fall back to the PR-head
-copy and self-grade, or (b) use a fixed temp path that untrusted head steps can
-pre-poison. Do not treat the current CI template as protected for test-integrity.
+**Local (phase 1, already on main):** helper, `gate.sh` / `gate-baseline.sh`
+integration, adversarial sensors, reviewer waiver lens.
 
-**Phase 2 (follow-up, after merge):** from a base that already contains
-`scripts/test-integrity.mjs`, wire an isolated CI job that copies the helper
-from the merge-base worktree, re-runs the base suite, and compares with
-`--trusted-source merge-base:<sha>`. That job must never load the PR-head helper
-or follow attacker-controlled symlinks for the trusted binary.
+**Protected CI template (phase 2, this change):** `ci/gibson-gate.yml` ships the
+isolated grading architecture:
+
+1. **`test-integrity-resolve`** — exact `base.sha` / `head.sha` / head repo (forks
+   included); resolve with `git merge-base --all` and **require exactly one** best
+   merge base (zero, command failure, malformed/duplicate lines, or criss-cross
+   multi-base history fail closed — never pick the first of many); prove that sole
+   base is an ancestor of both; prove `scripts/test-integrity.mjs` at the
+   merge-base is a regular blob (`100644`/`100755`), never symlink/gitlink/tree.
+   Missing helper or ambiguous ancestry → fail closed with an explicit
+   update/rebase message.
+2. **`test-integrity-base`** / **`test-integrity-head`** — separate runners and
+   workspaces so PR-head code cannot rewrite base output. Literal install + test
+   command from the trusted template (never PR-head `.agents/gate.json`). Capture
+   raw output **and** exit code even when the suite is red. Distinct
+   run-id/run-attempt artifacts with role + exact source SHA metadata.
+3. **`test-integrity`** (unique required-check name) — fresh third runner;
+   `if: ${{ always() }}`; never executes PR-head code. Downloads artifacts as
+   hostile data (role/SHA/uniqueness/symlink/8 MiB checks). Fetches the PR body
+   with `pull-requests: read`, writes it as an inert file, passes
+   `--waiver-file`. Grades with `--trusted-source merge-base:<full-sha>`.
+   Nonzero base tests are diagnostic; the regular `gate` job owns head pass/fail;
+   `test-integrity` owns deletion/skip/todo integrity.
+
+**Inert until activated.** Copying this template into a target does **not** make
+the repo protected. Live required-check / branch-protection audit and apply are
+owner-owned under **issue #68**. Do **not** call a target protected until the
+exact live canaries prove the workflow ran and the unique `test-integrity`
+check is required:
+
+- no-change pass
+- deletion fail
+- skip fail
+- exact waiver pass
+- hostile-helper fail
+- failing-base deletion fail
+- missing-artifact fail
+- workflow-file modification protection
+
+Workflow CODEOWNERS / rulesets / fork policy / merge-queue policy are Mark-owned.
+**Merge queues:** activation is blocked until equivalent `merge_group` support is
+implemented and canaried — do not enable a merge queue against this template alone.
 
 ### Baseline regeneration (journaled)
 
