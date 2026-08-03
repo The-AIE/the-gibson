@@ -676,27 +676,51 @@ else:
             "contract %r (got %r)" % (expected_goose_schema, grs)
         )
 
-# Cross-bind digest_instructions recipe path basename when present so a
-# contradictory free-text digest command cannot disagree with lock.recipe.
+# Fail-closed digest_instructions.recipe_sha256 ↔ lock.recipe binding.
+# Require exactly one YAML path token whose basename equals lock.recipe.
+# Absence of any .yaml/.yml token, multiple distinct basenames, non-YAML
+# path-only commands (/tmp/other), or other.yaml ambiguity all fail.
+# (Independent review: recipe_sha256 with no .yaml token returned rc=0.)
+YAML_PATH_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9._-])((?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.ya?ml)\b"
+)
 di_bind = data.get("digest_instructions") or {}
 if isinstance(di_bind, dict) and isinstance(recipe_ref, str) and recipe_ref:
     for platform_key in ("macOS", "portable"):
         plat = di_bind.get(platform_key) or {}
         if not isinstance(plat, dict):
             continue
-        cmd = plat.get("recipe_sha256") or ""
-        if not isinstance(cmd, str) or not cmd:
-            continue
-        m = re.search(r"([A-Za-z0-9._/-]+\.ya?ml)", cmd)
-        if not m:
-            continue
-        dig_base = os.path.basename(m.group(1))
-        if dig_base != recipe_ref and recipe_ref != m.group(1):
+        if "recipe_sha256" not in plat:
+            continue  # required macOS field checked later
+        cmd = plat.get("recipe_sha256")
+        where_di = "digest_instructions.%s.recipe_sha256" % platform_key
+        if not isinstance(cmd, str) or not cmd.strip():
             errors.append(
-                "lock.recipe %r conflicts with digest_instructions.%s."
-                "recipe_sha256 path basename %r"
-                % (recipe_ref, platform_key, dig_base)
+                "%s must be a non-empty shasum/sha256sum command that "
+                "references lock.recipe %r exactly once" % (where_di, recipe_ref)
             )
+            continue
+        yaml_tokens = YAML_PATH_TOKEN.findall(cmd)
+        if not yaml_tokens:
+            errors.append(
+                "%s must reference lock.recipe %r with exactly one .yaml/.yml "
+                "path token (got none; non-YAML/arbitrary path is not a recipe "
+                "locator)" % (where_di, recipe_ref)
+            )
+            continue
+        basenames = []
+        for tok in yaml_tokens:
+            basenames.append(os.path.basename(tok))
+        distinct = sorted(set(basenames))
+        if len(distinct) != 1 or distinct[0] != recipe_ref:
+            errors.append(
+                "lock.recipe %r conflicts with %s path basenames %r "
+                "(need exactly one distinct basename equal to lock.recipe)"
+                % (recipe_ref, where_di, basenames)
+            )
+            continue
+        # Exactly one distinct matching basename — still require at least one
+        # token (already) and disallow empty. Multiple identical refs OK.
 
 tools = data.get("tools") or []
 if not isinstance(tools, list) or not tools:
@@ -705,6 +729,72 @@ if not isinstance(tools, list) or not tools:
 ids = []
 required_ids = {"goose-cli", "gitleaks", "semgrep", "trufflehog", "socket-cli"}
 found = set()
+
+# Canonical supported-core-tool origin profiles (fixed lock set).
+# Identity is origin (github owner/repo | pypi/npm registry) + immutable
+# version pin + asset basename + source URL templates — not free text.
+# Version-token scanning alone is not identity binding.
+CORE_TOOL_PROFILES = {
+    "goose-cli": {
+        "version": "1.45.0",
+        "platform": "darwin-arm64",
+        "asset": "goose-aarch64-apple-darwin.tar.gz",
+        "source_url": (
+            "https://github.com/aaif-goose/goose/releases/download/"
+            "v1.45.0/goose-aarch64-apple-darwin.tar.gz"
+        ),
+        "source_meta_url": (
+            "https://github.com/aaif-goose/goose/releases/tag/v1.45.0"
+        ),
+        "origin_stem": "aaif-goose/goose",
+    },
+    "gitleaks": {
+        "version": "8.30.1",
+        "platform": "darwin-arm64",
+        "asset": "gitleaks_8.30.1_darwin_arm64.tar.gz",
+        "source_url": (
+            "https://github.com/gitleaks/gitleaks/releases/download/"
+            "v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz"
+        ),
+        "source_meta_url": (
+            "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1"
+        ),
+        "origin_stem": "gitleaks/gitleaks",
+    },
+    "semgrep": {
+        "version": "1.172.0",
+        "package": "semgrep==1.172.0",
+        "distribution": "pypi",
+        "asset": "semgrep-1.172.0.tar.gz",
+        "source_url": "https://pypi.org/project/semgrep/1.172.0/",
+        "source_meta_url": "https://pypi.org/pypi/semgrep/1.172.0/json",
+        "origin_stem": "project/semgrep",
+    },
+    "trufflehog": {
+        "version": "3.96.0",
+        "platform": "darwin-arm64",
+        "asset": "trufflehog_3.96.0_darwin_arm64.tar.gz",
+        "source_url": (
+            "https://github.com/trufflesecurity/trufflehog/releases/download/"
+            "v3.96.0/trufflehog_3.96.0_darwin_arm64.tar.gz"
+        ),
+        "source_meta_url": (
+            "https://github.com/trufflesecurity/trufflehog/releases/tag/v3.96.0"
+        ),
+        "origin_stem": "trufflesecurity/trufflehog",
+    },
+    "socket-cli": {
+        "version": "1.1.147",
+        "package": "socket@1.1.147",
+        "distribution": "npm",
+        "asset": "socket-1.1.147.tgz",
+        "source_url": (
+            "https://registry.npmjs.org/socket/-/socket-1.1.147.tgz"
+        ),
+        "source_meta_url": "https://registry.npmjs.org/socket/1.1.147",
+        "origin_stem": "socket",
+    },
+}
 
 for i, t in enumerate(tools):
     if not isinstance(t, dict):
@@ -839,6 +929,118 @@ for i, t in enumerate(tools):
         # embed versions, the free-text scan already enforces pin agreement.
         # repository / ref without version tokens are allowed only as optional
         # non-version locators (no alternate pin).
+
+    # --- Fail-closed canonical origin / artifact identity for supported core tools ---
+    # The lock ships a fixed supported set. Version-token scanning alone is not
+    # identity binding: same-version wrong-repo URLs, versionless /latest sources,
+    # and mismatched artifact basenames previously returned rc=0. For each
+    # supported tool id, require the official origin, immutable version pin,
+    # source URL template, asset basename, and (when applicable) package pin.
+    # Optional source/asset aliases must equal the same canonical locators.
+    if tid in CORE_TOOL_PROFILES:
+        prof = CORE_TOOL_PROFILES[tid]
+        # Immutable version pin for the supported set
+        if str(t.get("version") or "") != prof["version"]:
+            errors.append(
+                "%s (%s) version must be supported core pin %r (got %r)"
+                % (where, tid, prof["version"], t.get("version"))
+            )
+        # Required artifact basename (official supported platform package)
+        asset_val = t.get("asset")
+        if asset_val in (None, ""):
+            errors.append(
+                "%s (%s) missing required asset (canonical supported artifact)"
+                % (where, tid)
+            )
+        elif str(asset_val) != prof["asset"]:
+            errors.append(
+                "%s (%s) asset must be canonical supported artifact %r (got %r)"
+                % (where, tid, prof["asset"], asset_val)
+            )
+        # Required source URL = official origin release/download locator
+        src = t.get("source_url")
+        if src in (None, ""):
+            pass  # already reported as missing required field
+        elif str(src) != prof["source_url"]:
+            errors.append(
+                "%s (%s) source_url must be canonical supported origin URL "
+                "for pin %r (got %r)"
+                % (where, tid, prof["version"], src)
+            )
+        # Required source metadata URL = official origin tag/registry meta
+        meta_u = t.get("source_meta_url")
+        if meta_u in (None, ""):
+            pass
+        elif str(meta_u) != prof["source_meta_url"]:
+            errors.append(
+                "%s (%s) source_meta_url must be canonical supported origin "
+                "metadata URL for pin %r (got %r)"
+                % (where, tid, prof["version"], meta_u)
+            )
+        # Platform when the supported artifact is platform-specific
+        if "platform" in prof:
+            plat_v = t.get("platform")
+            if plat_v in (None, ""):
+                errors.append(
+                    "%s (%s) missing required platform %r"
+                    % (where, tid, prof["platform"])
+                )
+            elif str(plat_v) != prof["platform"]:
+                errors.append(
+                    "%s (%s) platform must be %r (got %r)"
+                    % (where, tid, prof["platform"], plat_v)
+                )
+        # Package pin when the tool is registry-distributed
+        if "package" in prof:
+            pkg_v = t.get("package")
+            if pkg_v in (None, ""):
+                errors.append(
+                    "%s (%s) missing required package %r"
+                    % (where, tid, prof["package"])
+                )
+            elif str(pkg_v) != prof["package"]:
+                errors.append(
+                    "%s (%s) package must be canonical %r (got %r)"
+                    % (where, tid, prof["package"], pkg_v)
+                )
+        if "distribution" in prof:
+            dist_v = t.get("distribution")
+            if dist_v in (None, ""):
+                errors.append(
+                    "%s (%s) missing required distribution %r"
+                    % (where, tid, prof["distribution"])
+                )
+            elif str(dist_v) != prof["distribution"]:
+                errors.append(
+                    "%s (%s) distribution must be %r (got %r)"
+                    % (where, tid, prof["distribution"], dist_v)
+                )
+        # Optional source/asset aliases — same origin/name identity, not free text
+        for alias in ("artifact", "filename", "tarball"):
+            if t.get(alias) not in (None, ""):
+                if str(t[alias]) != prof["asset"]:
+                    errors.append(
+                        "%s (%s) %s must equal canonical asset %r (got %r)"
+                        % (where, tid, alias, prof["asset"], t[alias])
+                    )
+        for alias in ("source", "download_url", "url"):
+            if t.get(alias) not in (None, ""):
+                if str(t[alias]) != prof["source_url"]:
+                    errors.append(
+                        "%s (%s) %s must equal canonical source_url for "
+                        "supported origin (got %r)"
+                        % (where, tid, alias, t[alias])
+                    )
+        # repository alias must identify the same canonical origin stem
+        if t.get("repository") not in (None, ""):
+            repo_v = str(t["repository"])
+            origin_stem = prof.get("origin_stem") or ""
+            repo_norm = repo_v.strip().rstrip("/").lower()
+            if origin_stem and origin_stem.lower() not in repo_norm:
+                errors.append(
+                    "%s (%s) repository must identify canonical origin %r "
+                    "(got %r)" % (where, tid, origin_stem, repo_v)
+                )
 
 missing = required_ids - found
 for m in sorted(missing):
@@ -3728,6 +3930,141 @@ expect_pass "green: lock recipe + goose_recipe_schema + version match shipped co
 # Green: shipped lock path (not a mutant) — reaffirm top-level binding end-to-end
 out=$(check_lock_py "$TOOLCHAIN_LOCK" 2>&1); rc=$?
 expect_pass "green: shipped lock top-level recipe/schema binding holds" "$out" "$rc"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: core tools[] origin/artifact identity + digest recipe bind"
+# ---------------------------------------------------------------------------
+# Independent review residual fail-opens (all returned rc=0 on prior head):
+#   1. gitleaks source_url .../releases/latest/download/gitleaks_darwin_arm64.tar.gz
+#   2. gitleaks asset gitleaks_latest_darwin_arm64.tar.gz
+#   3. gitleaks versionless source_url https://example.com/download/tool.tar.gz
+#   4. gitleaks same-version wrong-repo source alias
+#   5. gitleaks same-version mismatched artifact malware_8.30.1_darwin_arm64.tar.gz
+#   6. recipe_sha256 with no .yaml token pointing at /tmp/other
+# Structural fix: canonical origin/asset/source profiles per supported core tool
+# + require exactly one lock.recipe YAML path token in digest instructions.
+
+# 1) floating /latest/ release download path (no semver token → prior fail-open)
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-source-latest.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["source_url"] = (
+            "https://github.com/gitleaks/gitleaks/releases/latest/download/"
+            "gitleaks_darwin_arm64.tar.gz"
+        )
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-source-latest.json" 2>&1); rc=$?
+expect_fail "red: gitleaks source_url releases/latest/download fails" "$out" "$rc" "source_url\|canonical\|origin"
+
+# 2) asset with latest token (no semver → prior fail-open)
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-asset-latest.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["asset"] = "gitleaks_latest_darwin_arm64.tar.gz"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-asset-latest.json" 2>&1); rc=$?
+expect_fail "red: gitleaks asset gitleaks_latest_darwin_arm64 fails" "$out" "$rc" "asset\|canonical"
+
+# 3) versionless unrelated origin source_url
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-source-versionless.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["source_url"] = "https://example.com/download/tool.tar.gz"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-source-versionless.json" 2>&1); rc=$?
+expect_fail "red: gitleaks versionless example.com source_url fails" "$out" "$rc" "source_url\|canonical\|origin"
+
+# 4) same version, wrong repository origin
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-source-wrong-repo.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["source_url"] = (
+            "https://github.com/other/project/releases/download/v8.30.1/other.tar.gz"
+        )
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-source-wrong-repo.json" 2>&1); rc=$?
+expect_fail "red: gitleaks same-version wrong-repo source_url fails" "$out" "$rc" "source_url\|canonical\|origin"
+
+# 5) same version, mismatched artifact/tool name
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-asset-malware.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["asset"] = "malware_8.30.1_darwin_arm64.tar.gz"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-asset-malware.json" 2>&1); rc=$?
+expect_fail "red: gitleaks same-version malware artifact name fails" "$out" "$rc" "asset\|canonical"
+
+# 6) digest instruction with no .yaml token (points at /tmp/other)
+lock_mutant "$ROOT/bad-lock-di-recipe-sha-nonyaml.json" '
+data["digest_instructions"]["macOS"]["recipe_sha256"] = "shasum -a 256 /tmp/other"
+'
+out=$(check_lock_py "$ROOT/bad-lock-di-recipe-sha-nonyaml.json" 2>&1); rc=$?
+expect_fail "red: recipe_sha256 /tmp/other without .yaml token fails" "$out" "$rc" "recipe\|yaml\|digest_instructions"
+
+# Adjacent alias origin/name bypass (same structural hole as source_url/asset)
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-download-url-wrong-origin.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["download_url"] = (
+            "https://github.com/other/project/releases/download/v8.30.1/"
+            "gitleaks_8.30.1_darwin_arm64.tar.gz"
+        )
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-download-url-wrong-origin.json" 2>&1); rc=$?
+expect_fail "red: gitleaks download_url wrong-origin alias fails" "$out" "$rc" "download_url\|canonical\|origin"
+
+lock_mutant "$ROOT/bad-lock-tool-goose-source-alias-latest.json" '
+for t in data["tools"]:
+    if t.get("id") == "goose-cli":
+        t["source"] = (
+            "https://github.com/aaif-goose/goose/releases/latest/download/"
+            "goose-aarch64-apple-darwin.tar.gz"
+        )
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-goose-source-alias-latest.json" 2>&1); rc=$?
+expect_fail "red: goose source alias releases/latest fails" "$out" "$rc" "source\|canonical\|origin"
+
+lock_mutant "$ROOT/bad-lock-tool-trufflehog-filename-mismatch.json" '
+for t in data["tools"]:
+    if t.get("id") == "trufflehog":
+        t["filename"] = "othertool_3.96.0_darwin_arm64.tar.gz"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-trufflehog-filename-mismatch.json" 2>&1); rc=$?
+expect_fail "red: trufflehog filename alias mismatched tool name fails" "$out" "$rc" "filename\|canonical\|asset"
+
+# Matching green: reaffirm canonical origin/asset + digest recipe binding
+lock_mutant "$ROOT/ok-lock-tool-gitleaks-canonical-origin.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["source_url"] = (
+            "https://github.com/gitleaks/gitleaks/releases/download/"
+            "v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz"
+        )
+        t["source_meta_url"] = (
+            "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1"
+        )
+        t["asset"] = "gitleaks_8.30.1_darwin_arm64.tar.gz"
+        t["artifact"] = "gitleaks_8.30.1_darwin_arm64.tar.gz"
+        t["source"] = t["source_url"]
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-gitleaks-canonical-origin.json" 2>&1); rc=$?
+expect_pass "green: gitleaks canonical origin/asset + equal aliases" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-di-recipe-sha-canonical.json" '
+# Reaffirm shipped digest instructions (canonical red-team.yaml path).
+di = data["digest_instructions"]
+di["macOS"]["recipe_sha256"] = di["macOS"]["recipe_sha256"]
+di["portable"]["recipe_sha256"] = di["portable"]["recipe_sha256"]
+'
+out=$(check_lock_py "$ROOT/ok-lock-di-recipe-sha-canonical.json" 2>&1); rc=$?
+expect_pass "green: digest_instructions recipe_sha256 matches lock.recipe" "$out" "$rc"
+
+# Prior other.yaml recipe mutant remains red (cross-bind with di still holds)
+lock_mutant "$ROOT/bad-lock-recipe-other-with-di.json" '
+data["recipe"] = "other.yaml"
+'
+out=$(check_lock_py "$ROOT/bad-lock-recipe-other-with-di.json" 2>&1); rc=$?
+expect_fail "red: lock.recipe other.yaml still fails under origin/di bind" "$out" "$rc" "recipe\|canonical\|other"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
