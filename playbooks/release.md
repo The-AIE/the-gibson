@@ -271,9 +271,11 @@ target and no sibling remain. Post-mutation reread never falls back to local
 `main`/`master`, `HEAD`, or a pre-mutation residual plan: a missing or
 unreadable `origin/<base>` after a successful push is incomplete, not an empty
 ledger. If strip/push fails, a target is still live, fetch or ref/tree/blob
-validation fails, cleanup lineage is missing, or the parse is
-incomplete/ambiguous, the script preserves `agent-claimed`, never claims the
-label was removed, and exits 3. Target absent + sibling present → keep/verify
+validation fails, the cleanup-pushed SHA is missing/unreadable after a
+successful push, cleanup lineage cannot be proven on the exact remote ref, or
+the parse is incomplete/ambiguous, the script preserves `agent-claimed`, never
+claims the label was removed, and exits 3. Lineage proof after a successful
+cleanup push is mandatory — never skippable when the capture SHA is empty. Target absent + sibling present → keep/verify
 label; target absent + no sibling → remove/verify unless `--keep-label`.
 `--keep-label` is the truthful "no row, sibling still live" path and must
 verify the label is still present — a blind success when the label is absent or

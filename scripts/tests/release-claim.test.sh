@@ -1363,6 +1363,112 @@ else
 fi
 rm -f "$ROOT/bin/git"
 
+echo "#65 · post-push cleanup-SHA capture failure: preserve label, exit 3, no OK"
+# Cleanup push succeeds. Only the post-push capture
+#   git -C "$tmpwt" rev-parse HEAD
+# is forced to fail (empty CLEANUP_PUSHED_SHA). Earlier rev-parse and the push
+# itself must still succeed. Reread must treat missing capture as hard incomplete:
+# exit 3, preserve agent-claimed, never remove-label, never print OK.
+new_repo "$ROOT/rereadcap65"
+(
+  cd "$ROOT/rereadcap65/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-15-only-lane | src/only | session:a |
+TABLE
+  git add -A && git commit -qm "single claim for capture fail" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+PUSH_OK="$ROOT/rereadcap65/push.ok"
+: > "$PUSH_OK"
+rm -f "$PUSH_OK"
+CAPTURE_HIT="$ROOT/rereadcap65/capture.hit"
+: > "$CAPTURE_HIT"
+rm -f "$CAPTURE_HIT"
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/git" <<FAKE
+#!/usr/bin/env bash
+# After a successful cleanup push to origin, fail only the post-push capture:
+# git -C <disposable-worktree> rev-parse HEAD
+# Do not break earlier rev-parse, commit, or the push itself.
+if [[ "\${1:-}" == "push" && "\${2:-}" == "origin" ]]; then
+  "$REAL_GIT" "\$@"
+  rc=\$?
+  if [[ \$rc -eq 0 ]]; then
+    for a in "\$@"; do
+      case "\$a" in
+        HEAD:main|HEAD:master) : > "$PUSH_OK" ;;
+      esac
+    done
+  fi
+  exit \$rc
+fi
+if [[ -f "$PUSH_OK" && "\${1:-}" == "-C" && "\${3:-}" == "rev-parse" && "\${4:-}" == "HEAD" ]]; then
+  # disposable strip worktree only (not arbitrary -C rev-parse)
+  case "\${2:-}" in
+    *gibson-release-claim*)
+      : > "$CAPTURE_HIT"
+      echo "cleanup SHA capture failed by fixture" >&2
+      exit 1
+      ;;
+  esac
+fi
+exec "$REAL_GIT" "\$@"
+FAKE
+chmod +x "$ROOT/bin/git"
+GH_LOG="$ROOT/rereadcap65/gh.log"
+: > "$GH_LOG"
+cat > "$ROOT/bin/gh" <<FAKE
+#!/usr/bin/env bash
+echo "CALL \$*" >> "$GH_LOG"
+case "\$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "\$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+out=$(cd "$ROOT/rereadcap65/canon" && "$RC" 15 --repo acme/app 2>&1)
+rc=$?
+check "post-push cleanup-SHA capture failure exits 3" "$rc" "3"
+contains "names missing/unreadable cleanup-pushed SHA" "$out" "cleanup-pushed SHA"
+contains "names cannot prove lineage" "$out" "cannot prove lineage"
+contains "preserves label on capture fail" "$out" "preserving agent-claimed"
+contains "incomplete on capture fail" "$out" "INCOMPLETE"
+lacks    "no MUTATED-LABEL on capture fail" "$out" "MUTATED-LABEL"
+lacks    "no removed claim on capture fail" "$out" "removed agent-claimed"
+lacks    "no false OK on capture fail" "$out" "OK —"
+if [[ -f "$PUSH_OK" ]]; then
+  ok "cleanup push still succeeded before capture failure"
+else
+  bad "fixture must allow cleanup push to succeed before capture fails"
+fi
+if [[ -f "$CAPTURE_HIT" ]]; then
+  ok "fixture hit only the post-push cleanup-SHA capture"
+else
+  bad "fixture must force post-push git -C ... rev-parse HEAD to fail"
+fi
+if grep -qF -- 'remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "fake-gh must not receive remove-label on cleanup-SHA capture failure"
+else
+  ok "fake-gh no remove-label on cleanup-SHA capture failure"
+fi
+# Claim row should still be gone on origin (push succeeded) even though label stays.
+table=$(cd "$ROOT/rereadcap65/canon" && "$REAL_GIT" fetch -q origin && "$REAL_GIT" show origin/main:docs/active-work.md)
+lacks    "target still stripped after capture-fail push" "$table" "issue-15-only-lane"
+rm -f "$ROOT/bin/git"
+
 echo "#65 · successful final target removal still removes/verifies label"
 new_repo "$ROOT/finalok65"
 (

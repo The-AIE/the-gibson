@@ -531,15 +531,19 @@ fi
 # L-009: never `git checkout main` in the caller's tree. It may be on a
 # long-lived branch or dirty, and aborting here used to strand the claim row.
 #
-# CLEANUP_BASE / CLEANUP_PUSHED_SHA are written for the post-mutation reread:
-# that path must bind only to origin/$CLEANUP_BASE (the exact remote branch
-# that received the cleanup push) and prove it contains $CLEANUP_PUSHED_SHA.
-# Never fall back to local main|master after mutation.
+# CLEANUP_BASE / CLEANUP_PUSHED_SHA / CLEANUP_DID_PUSH are written for the
+# post-mutation reread: that path must bind only to origin/$CLEANUP_BASE (the
+# exact remote branch that received the cleanup push) and prove it contains
+# $CLEANUP_PUSHED_SHA. Never fall back to local main|master after mutation.
+# After a successful cleanup push, missing/unreadable CLEANUP_PUSHED_SHA is a
+# hard release failure — lineage proof is mandatory, never skippable.
 CLEANUP_BASE=""
 CLEANUP_PUSHED_SHA=""
+CLEANUP_DID_PUSH=0
 
 strip_claim_rows() {
   CLEANUP_PUSHED_SHA=""
+  CLEANUP_DID_PUSH=0
   local base
   base=main
   git show-ref --verify --quiet refs/heads/main || base=master
@@ -618,8 +622,14 @@ Post-merge cleanup per Law 10 / docs/05." || exit 1
 
   # Capture the exact pushed cleanup commit while the disposable worktree still
   # holds it — post-mutation reread must prove origin/$base contains this SHA.
+  # Push already succeeded: capture failure is incomplete (exit 3 path), not a
+  # re-run of strip — do not claim the row is still live, and do not skip lineage.
   if [[ $rc -eq 0 ]]; then
+    CLEANUP_DID_PUSH=1
     CLEANUP_PUSHED_SHA=$(git -C "$tmpwt" rev-parse HEAD 2>/dev/null || true)
+    if [[ -z "$CLEANUP_PUSHED_SHA" ]]; then
+      warn "cleanup push succeeded but cleanup-pushed SHA is missing/unreadable — cannot prove lineage; preserving agent-claimed"
+    fi
   fi
 
   git worktree remove --force "$tmpwt" >/dev/null 2>&1 || rm -rf "$tmpwt"
@@ -688,8 +698,14 @@ authoritative_post_mutation_reread() {
     return 1
   fi
 
-  # Just-pushed cleanup must be on that remote-tracking ref (lineage check).
-  if [[ -n "${CLEANUP_PUSHED_SHA:-}" ]]; then
+  # Just-pushed cleanup must be on that remote-tracking ref. After a successful
+  # cleanup push, lineage proof is mandatory — never skip when the capture SHA
+  # is empty/unreadable (that used to authorize remove-label + OK).
+  if [[ "${CLEANUP_DID_PUSH:-0}" -eq 1 ]]; then
+    if [[ -z "${CLEANUP_PUSHED_SHA:-}" ]]; then
+      warn "post-cleanup: cleanup-pushed SHA missing/unreadable after successful push — cannot prove lineage on ${remote_ref}; preserving agent-claimed"
+      return 1
+    fi
     if ! git rev-parse --verify --quiet "${CLEANUP_PUSHED_SHA}^{commit}" >/dev/null 2>&1; then
       warn "post-cleanup: just-pushed cleanup commit ${CLEANUP_PUSHED_SHA} is unreadable — preserving agent-claimed"
       return 1
