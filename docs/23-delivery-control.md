@@ -168,17 +168,21 @@ re-point production branch to prior tag when schema remains additive.
 ## Adoption and drift
 
 1. **Adoption (doc 13):** first run `scripts/git-configure.sh --audit` (issue #68
-   first slice). **Stop on unresolved SAFE_DRIFT / OWNER_REQUIRED / UNKNOWN**
-   (exit 1) or tool failure (exit 3). Safe reversible apply only:
+   first slice; default is stdout-only, zero FS/GitHub mutations). **Adoption is
+   incomplete on unresolved SAFE_DRIFT / OWNER_REQUIRED / UNKNOWN** (exit 1) or
+   tool failure (exit 3) — no READY claim, no protected autonomy activation;
+   safe unrelated planning may continue. Safe reversible apply only:
    `git-configure.sh --dry-run` then `--apply` for labels, `gibson/` gitignore,
    and repository merge settings (squash on; merge-commit/rebase off;
    delete-branch-on-merge on). **Never** applied by that script — Mark-owned:
    branch protection + required contexts, Production Environment rules, DCO
    app/check, Vercel Production Branch, secrets/auth, test-integrity required
-   check + live canaries. Then run `scripts/delivery-control/audit.sh`; grade
-   fails if prod write path is unprotected. Hardening still uses
-   `apply-branch-protection.sh` / `apply-production-env.sh` with Mark's apply
-   approval (dry-run first).
+   check + live canaries. Model coherence is config-time (exit 2): `main-is-prod`
+   and `tag-pin` require `productionBranch == defaultBranch`; `release-branch`
+   requires a distinct production branch and audits both. Then run
+   `scripts/delivery-control/audit.sh`; grade fails if prod write path is
+   unprotected. Hardening still uses `apply-branch-protection.sh` /
+   `apply-production-env.sh` with Mark's apply approval (dry-run first).
 2. **Monthly / historian:** re-run `git-configure.sh --audit` and
    delivery-control `audit.sh`; drift → issue, not silent.
 3. **ConferenceOS reference implementation:** app-specific protocol and scripts may
@@ -194,10 +198,14 @@ re-point production branch to prior tag when schema remains additive.
 | Production Environment reviewers | `delivery-control/apply-production-env.sh --apply` | Yes — Mark-owned |
 | Vercel Production Branch | Vercel console (L-004) | Mark-owned; git-configure only audits |
 | test-integrity canary + required check | Live CI + protection contexts (#70/#68) | Mark-owned; static YAML ≠ PASS |
+| DCO live enforcement | App / required check + observed run | Mark-owned; static workflow text ≠ PASS |
 
-Optional operator attestations for credential-free audits (not secrets):
+Optional operator attestations for credential-free audits (not secrets; strict shapes):
 `GIBSON_VERCEL_PRODUCTION_BRANCH=<live console value>`,
-`GIBSON_TEST_INTEGRITY_OBSERVED_RUN=<url or run id>`.
+`GIBSON_TEST_INTEGRITY_OBSERVED_RUN=https://…/actions/runs/<digits>` or
+`observed-run:<token>`,
+`GIBSON_DCO_OBSERVED_RUN` (same shape). Arbitrary nonempty strings do not clear
+DCO or test-integrity.
 
 ---
 [← 22 · Devin cloud supervisor](22-devin-cloud-supervisor.md) · [Home](../index.md) · [Prompts →](prompts.md)

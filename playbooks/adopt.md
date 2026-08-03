@@ -75,13 +75,18 @@ Score ambient affordances **before** promising autonomy. Output
 - [ ] Preview deployments on
 - [ ] **Git/GitHub configure (required):**
       `scripts/git-configure.sh --audit --repo owner/name [--path <checkout>]`
-      — **hard-stop adoption** while exit is non-zero (SAFE_DRIFT, OWNER_REQUIRED,
-      UNKNOWN, or tool ERROR). Optional safe fix: `--dry-run` then `--apply` for
-      labels / `gibson/` gitignore / squash + delete-branch-on-merge only.
-      Branch protection, required checks, Environments, DCO app, Vercel
-      Production Branch, secrets, and test-integrity live canaries are
-      **Mark-owned** (report-only remediation; never applied by this script).
-      Partial slice of issue #68 — does not close the issue alone.
+      — default audit is **stdout-only** (zero filesystem / GitHub mutations;
+      write a report only with explicit `--report PATH`). **Adoption is not
+      complete** while exit is non-zero (SAFE_DRIFT, OWNER_REQUIRED, UNKNOWN, or
+      tool ERROR). Unresolved OWNER_REQUIRED means **no readiness claim and no
+      protected autonomy activation**; safe unrelated planning may continue.
+      Optional safe fix: `--dry-run` then `--apply` for labels / `gibson/`
+      gitignore / squash + delete-branch-on-merge only. Branch protection,
+      required checks, Environments, DCO app, Vercel Production Branch, secrets,
+      and test-integrity live canaries are **Mark-owned** (report-only
+      remediation; never applied by this script). Static workflow text never
+      proves DCO or test-integrity. Partial slice of issue #68 — does not close
+      the issue alone.
 - [ ] **Delivery control** (docs/23): `scripts/delivery-control/audit.sh --repo owner/name`
       — P0 fix-list if production write path is unprotected
 - [ ] Schema/migration model documented (who applies to prod?)
@@ -125,7 +130,10 @@ Present each change as a PR (Ask Contract before merge).
    safe set: `tier-a`/`tier-b`/`tier-c`, `agent-claimed`, `blocked`,
    `gibson-halt`, `halt`; append `gibson/` to `.gitignore`; squash on,
    merge-commit and rebase off, delete-branch-on-merge on. Re-run `--audit`
-   until exit 0 or only Mark-owned OWNER_REQUIRED items remain.
+   until **exit 0 (READY)**. If only Mark-owned OWNER_REQUIRED items remain,
+   adoption is **still incomplete** (exit 1): do not claim READY or activate
+   protected autonomy; continue safe unrelated planning and clear owner items
+   via delivery-control / console (docs/13, docs/23).
 
 **Ask Contract example (labels / safe apply):**
 

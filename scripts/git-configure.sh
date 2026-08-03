@@ -28,8 +28,10 @@ WHAT IT DOES
   test-integrity canary posture).
 
   Modes:
-    --audit     read-only report (DEFAULT). Zero mutations.
-    --dry-run   print the exact safe apply plan. Zero mutations.
+    --audit     read-only (DEFAULT). ZERO filesystem and GitHub mutations.
+                Findings and plan go to stdout only unless --report PATH.
+    --dry-run   print the exact safe apply plan. ZERO mutations. Even with
+                --report PATH, nothing is written (plan/report body on stdout).
     --apply     mutate ONLY reversible adoption settings:
                   • required Gibson labels (create if missing)
                   • narrow .gitignore entry for gibson/ runtime state
@@ -41,8 +43,8 @@ WHAT IT DOES
   NEVER applied by this script (audit + owner remediation only):
     branch protection, required review/status contexts, GitHub Environment
     rules, DCO app/config, Vercel project settings, secrets, auth, production
-    branch remapping. Static workflow YAML or config strings are NEVER
-    treated as proof that test-integrity / canaries executed.
+    branch remapping. Static workflow YAML, inert DCO files, or config strings
+    are NEVER treated as live enforcement of DCO / test-integrity / canaries.
 
 WHY
   Lessons L-004 (docs ≠ wiring), L-020/L-021 (merge + review reality), and
@@ -61,15 +63,15 @@ USAGE
                    [--repo owner/name]
                    [--config path/to/.gibson-delivery.json]
                    [--path DIR]            # local checkout for .gitignore / workflows
-                   [--report PATH]         # default: gibson/git-config-report.md
-                   [--no-report]
+                   [--report PATH]         # ONLY explicit local write (audit/apply)
+                   [--no-report]           # compat; default already writes no file
                    [--help]
 
 EXIT
   0  READY — every check PASS, no owner-required / unknown
   1  DRIFT — safe drift and/or owner-required / unknown remain
-  2  usage or config validation error
-  3  tool / API / apply / report failure
+  2  usage or config validation error (incl. incoherent delivery model)
+  3  tool / API schema / apply / report failure
 
 EXAMPLES
   ./scripts/git-configure.sh --repo acme/app
@@ -78,16 +80,26 @@ EXAMPLES
   ./scripts/git-configure.sh --audit --report /tmp/git-config-report.md
 
 REPORT
-  Written atomically (temp sibling + rename). Default path is
-  gibson/git-config-report.md under --path (or cwd). That path is runtime
-  state — do not commit it; --apply ensures gibson/ is gitignored. Use
-  --no-report to skip the file entirely. Never contains secrets.
+  Default audit writes NO report file (stdout only). The only audit filesystem
+  write is an explicit --report PATH. Written atomically (same-dir temp +
+  rename) after validating every path component (no symlink ancestors, no ..,
+  no FIFO/device/directory destinations). --dry-run never writes the report
+  even when --report is supplied. --no-report remains for compatibility.
+  Never contains secrets. Report paths are runtime artifacts — do not commit.
 
 CONFIG
   Optional .gibson-delivery.json (see templates/target-repo/gibson-delivery.json
   and docs/23). Supported fields only: repo, model, defaultBranch,
   productionBranch, requiredContexts, productionEnvironment, reviewerLogin.
-  No secrets. Malformed or unsupported model → exit 2.
+  No secrets. Malformed, unsupported model, or incoherent model/branch
+  pairing (e.g. main-is-prod with productionBranch != defaultBranch) → exit 2.
+
+OBSERVED-RUN ATTESTATIONS (credential-free; never invent from YAML)
+  GIBSON_VERCEL_PRODUCTION_BRANCH=<exact live Production Branch string>
+  GIBSON_TEST_INTEGRITY_OBSERVED_RUN=https://…/actions/runs/<digits>
+      or observed-run:<token> (min 8 chars after prefix; structured)
+  GIBSON_DCO_OBSERVED_RUN= same shape as test-integrity
+  Arbitrary nonempty strings do NOT clear DCO / test-integrity.
 EOF
 }
 
@@ -100,7 +112,8 @@ CONFIG_PATH=""
 LOCAL_PATH="."
 REPORT_PATH=""
 NO_REPORT=0
-ASSUME_DEFAULT_REPORT=1
+# No implicit report path: default audit writes zero files.
+REPORT_PARENT_PHYS=""
 
 # From config / live
 MODEL=""
@@ -212,12 +225,12 @@ parse_args() {
       --report)
         [[ $# -ge 2 ]] || die_usage "--report requires a path"
         REPORT_PATH="$2"
-        ASSUME_DEFAULT_REPORT=0
         shift 2
         ;;
       --no-report)
+        # Compat: default already writes no file; this clears any --report.
         NO_REPORT=1
-        ASSUME_DEFAULT_REPORT=0
+        REPORT_PATH=""
         shift
         ;;
       --version)
@@ -310,6 +323,7 @@ review-evidence
 test-integrity"
 
   if [[ -z "$path" ]]; then
+    validate_model_coherence
     return 0
   fi
 
@@ -397,6 +411,58 @@ test-integrity"
 $REQUIRED_CONTEXTS_NL
 EOF
   fi
+
+  # Model / branch coherence (docs/23). Incoherent config must not READY.
+  validate_model_coherence
+}
+
+# main-is-prod: productionBranch must equal defaultBranch (single live write path).
+# release-branch: distinct nonempty productionBranch; both branches are audited.
+# tag-pin: productionBranch must equal defaultBranch (tags cut from protected
+# default; must not skip the live production write path via a phantom branch).
+validate_model_coherence() {
+  case "$MODEL" in
+    main-is-prod)
+      if [[ "$PRODUCTION_BRANCH" != "$DEFAULT_BRANCH" ]]; then
+        die_usage "incoherent model main-is-prod: productionBranch ($(sq "$PRODUCTION_BRANCH")) must equal defaultBranch ($(sq "$DEFAULT_BRANCH"))"
+      fi
+      ;;
+    release-branch)
+      if [[ -z "$PRODUCTION_BRANCH" ]]; then
+        die_usage "incoherent model release-branch: productionBranch must be nonempty and distinct from defaultBranch"
+      fi
+      if [[ "$PRODUCTION_BRANCH" == "$DEFAULT_BRANCH" ]]; then
+        die_usage "incoherent model release-branch: productionBranch ($(sq "$PRODUCTION_BRANCH")) must differ from defaultBranch"
+      fi
+      ;;
+    tag-pin)
+      if [[ "$PRODUCTION_BRANCH" != "$DEFAULT_BRANCH" ]]; then
+        die_usage "incoherent model tag-pin: productionBranch ($(sq "$PRODUCTION_BRANCH")) must equal defaultBranch ($(sq "$DEFAULT_BRANCH")) — tag-pin may not skip the live production write path"
+      fi
+      ;;
+    *)
+      die_usage "unsupported model $(sq "$MODEL")"
+      ;;
+  esac
+}
+
+# Strict observed-run attestation (DCO / test-integrity). Arbitrary nonempty
+# strings are insufficient — must match documented URL or observed-run: shape.
+is_valid_observed_run() {
+  local v="$1"
+  [[ -n "$v" ]] || return 1
+  case "$v" in
+    *[[:space:]]*|*[[:cntrl:]]*) return 1 ;;
+  esac
+  # https://…/actions/runs/<digits> optional query
+  if printf '%s' "$v" | grep -Eq '^https://[A-Za-z0-9._~:/#@!$&*+,;=%-]+/actions/runs/[0-9]{1,20}([?][A-Za-z0-9._~=&%-]*)?$'; then
+    return 0
+  fi
+  # observed-run:<structured-token> min 8 chars after prefix
+  if printf '%s' "$v" | grep -Eq '^observed-run:[A-Za-z0-9][A-Za-z0-9._/-]{7,127}$'; then
+    return 0
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -438,55 +504,214 @@ gh_api() {
 }
 
 # ---------------------------------------------------------------------------
-# Atomic report write
+# Atomic report write (ancestor-safe; never follows planted symlinks)
 # ---------------------------------------------------------------------------
 report_dest_ok() {
   local dest="$1"
   if [[ -L "$dest" ]]; then
     return 1
   fi
-  if [[ -e "$dest" && ! -f "$dest" ]]; then
-    return 1
+  # Refuse FIFO, device, directory, socket — only missing or regular file.
+  if [[ -e "$dest" ]]; then
+    if [[ ! -f "$dest" ]]; then
+      return 1
+    fi
+    # -f is true for regular files; also refuse if somehow a dir slipped through
+    if [[ -d "$dest" ]]; then
+      return 1
+    fi
   fi
   return 0
+}
+
+# True if path string contains a .. component (not merely substring of a name).
+path_has_dotdot_component() {
+  local p="$1"
+  case "$p" in
+    '..'|../*|*/..|*/../*) return 0 ;;
+  esac
+  # Component-wise
+  local rest comp
+  rest="$p"
+  while [[ -n "$rest" ]]; do
+    case "$rest" in
+      /*) rest="${rest#/}" ;;
+    esac
+    comp="${rest%%/*}"
+    if [[ "$rest" == *"/"* ]]; then
+      rest="${rest#*/}"
+    else
+      rest=""
+    fi
+    [[ "$comp" == ".." ]] && return 0
+  done
+  return 1
+}
+
+# Make path absolute without resolving symlinks (preserve planted-link detection).
+report_abs_path() {
+  local p="$1"
+  case "$p" in
+    /*) printf '%s' "$p" ;;
+    *) printf '%s/%s' "$(pwd)" "$p" ;;
+  esac
+}
+
+# Physical directory of an existing path (no symlink leaf). Empty on failure.
+physical_dir() {
+  local d="$1"
+  if [[ ! -d "$d" ]]; then
+    return 1
+  fi
+  # cd -P resolves symlink ancestors; refuse if leaf itself is a symlink dir we
+  # cannot enter safely.
+  if [[ -L "$d" ]]; then
+    return 1
+  fi
+  (CDPATH='' cd -P -- "$d" 2>/dev/null && pwd -P)
+}
+
+# Validate ancestors; create missing dirs component-by-component with rechecks.
+# Existing platform symlinks (e.g. macOS /var → /private/var) may be traversed,
+# but the final parent must be a real directory and paths under LOCAL_PATH must
+# stay physically inside the checkout (blocks planted bridge→/tmp/victim).
+prepare_report_dir() {
+  local target_dir="$1"
+  local cur="" rest comp next link resolved local_phys dir_phys abs_local
+
+  if path_has_dotdot_component "$target_dir"; then
+    die_tool "report path rejects .. components: $target_dir"
+  fi
+  case "$target_dir" in
+    /*) ;;
+    *) die_tool "internal: report dir not absolute: $target_dir" ;;
+  esac
+
+  if [[ "$target_dir" == "/" ]]; then
+    die_tool "refuse report directory /"
+  fi
+
+  rest="${target_dir#/}"
+  cur=""
+  while [[ -n "$rest" ]]; do
+    comp="${rest%%/*}"
+    if [[ "$rest" == *"/"* ]]; then
+      rest="${rest#*/}"
+    else
+      rest=""
+    fi
+    [[ -z "$comp" ]] && continue
+    if [[ "$comp" == "." || "$comp" == ".." ]]; then
+      die_tool "report path component illegal: $comp"
+    fi
+    next="${cur}/${comp}"
+
+    if [[ -L "$next" ]]; then
+      # Traverse existing symlink for location only — never mkdir through it.
+      link=$(readlink -- "$next" 2>/dev/null || readlink "$next" 2>/dev/null || true)
+      if [[ -z "$link" ]]; then
+        die_tool "report ancestor symlink unreadable: $next"
+      fi
+      case "$link" in
+        /*) resolved="$link" ;;
+        *) resolved="$(dirname -- "$next")/$link" ;;
+      esac
+      # Collapse // 
+      resolved=$(printf '%s' "$resolved" | sed 's://*:/:g')
+      if [[ ! -d "$resolved" ]]; then
+        die_tool "report ancestor symlink does not resolve to a directory: $next"
+      fi
+      cur="$resolved"
+      continue
+    fi
+
+    if [[ -e "$next" ]]; then
+      if [[ ! -d "$next" ]]; then
+        die_tool "report ancestor is not a directory: $next"
+      fi
+      cur="$next"
+    else
+      if ! mkdir -- "$next" 2>/dev/null; then
+        die_tool "cannot create report directory component: $next"
+      fi
+      if [[ -L "$next" || ! -d "$next" ]]; then
+        die_tool "report directory component unsafe after create: $next"
+      fi
+      cur="$next"
+    fi
+  done
+
+  # Final parent must be a real (non-symlink) directory we can write.
+  if [[ -L "$cur" || ! -d "$cur" ]]; then
+    die_tool "report parent is not a real directory: $cur"
+  fi
+  if [[ ! -w "$cur" ]]; then
+    die_tool "report directory is not writable: $cur"
+  fi
+
+  # Containment: logical path under LOCAL_PATH must stay inside physical checkout.
+  abs_local=$(report_abs_path "$LOCAL_PATH")
+  case "$target_dir" in
+    "$abs_local"|"$abs_local"/*)
+      local_phys=$(physical_dir "$abs_local" || true)
+      dir_phys=$(physical_dir "$cur" || true)
+      if [[ -z "$local_phys" || -z "$dir_phys" ]]; then
+        die_tool "cannot physically resolve report path under checkout: $target_dir"
+      fi
+      case "$dir_phys" in
+        "$local_phys"|"$local_phys"/*) ;;
+        *)
+          die_tool "report path escapes checkout via symlink (refuse): logical=$target_dir physical=$dir_phys"
+          ;;
+      esac
+      ;;
+  esac
+
+  # Export physical parent for atomic write (same-dir temp + rename).
+  REPORT_PARENT_PHYS="$cur"
+  if phys=$(physical_dir "$cur" 2>/dev/null); then
+    REPORT_PARENT_PHYS="$phys"
+  fi
 }
 
 atomic_write_report() {
   local dest="$1"
   local content="$2"
-  local dir base tmp
+  local dir base tmp abs parent
 
   if [[ -z "$dest" ]]; then
     die_tool "empty report path"
   fi
-
-  # Hostile path components
-  case "$dest" in
-    "") die_tool "empty report path" ;;
-  esac
-
-  dir=$(dirname -- "$dest")
-  base=$(basename -- "$dest")
-
-  if [[ -L "$dir" ]]; then
-    die_tool "report parent is a symlink (refuse): $dir"
-  fi
-  if [[ ! -d "$dir" ]]; then
-    if ! mkdir -p -- "$dir" 2>/dev/null; then
-      die_tool "cannot create report directory: $dir"
-    fi
-  fi
-  if [[ -L "$dir" || ! -d "$dir" ]]; then
-    die_tool "report parent is not a real directory: $dir"
-  fi
-  if [[ ! -w "$dir" ]]; then
-    die_tool "report directory is not writable: $dir"
-  fi
-  if ! report_dest_ok "$dest"; then
-    die_tool "report path is not a safe regular-file destination: $dest"
+  if path_has_dotdot_component "$dest"; then
+    die_tool "report path rejects .. components: $dest"
   fi
 
-  tmp=$(mktemp "${dir}/.${base}.XXXXXX") || die_tool "mktemp failed for report: $dest"
+  abs=$(report_abs_path "$dest")
+  dir=$(dirname -- "$abs")
+  base=$(basename -- "$abs")
+
+  if [[ -z "$base" || "$base" == "." || "$base" == ".." || "$base" == "/" ]]; then
+    die_tool "invalid report basename: $dest"
+  fi
+
+  REPORT_PARENT_PHYS=""
+  prepare_report_dir "$dir"
+  parent="${REPORT_PARENT_PHYS:-$dir}"
+
+  # Final parent recheck (TOCTOU / component swap): real dir, not symlink
+  if [[ -L "$parent" || ! -d "$parent" ]]; then
+    die_tool "report parent is not a real directory: $parent"
+  fi
+  # Destination leaf on the logical path — also check physical sibling path
+  local phys_dest="${parent}/${base}"
+  if ! report_dest_ok "$phys_dest"; then
+    die_tool "report path is not a safe regular-file destination: $phys_dest"
+  fi
+  if [[ -e "$abs" ]] && ! report_dest_ok "$abs"; then
+    die_tool "report path is not a safe regular-file destination: $abs"
+  fi
+
+  tmp=$(mktemp "${parent}/.${base}.XXXXXX") || die_tool "mktemp failed for report: $phys_dest"
   if [[ -L "$tmp" || ! -f "$tmp" ]]; then
     rm -f -- "$tmp" 2>/dev/null || true
     die_tool "report temp is not a regular file: $tmp"
@@ -495,18 +720,27 @@ atomic_write_report() {
     rm -f -- "$tmp"
     die_tool "failed writing report temp: $tmp"
   fi
-  # Re-check dest before rename (symlink swap race → refuse)
-  if ! report_dest_ok "$dest"; then
+  if [[ -L "$parent" || ! -d "$parent" ]]; then
     rm -f -- "$tmp"
-    die_tool "report destination became unsafe before rename: $dest"
+    die_tool "report parent became unsafe before rename: $parent"
   fi
-  if ! mv -f -- "$tmp" "$dest"; then
+  if ! report_dest_ok "$phys_dest"; then
     rm -f -- "$tmp"
-    die_tool "atomic rename failed for report: $dest"
+    die_tool "report destination became unsafe before rename: $phys_dest"
   fi
-  if [[ -L "$dest" || ! -f "$dest" ]]; then
-    die_tool "report path is not a regular file after write: $dest"
+  if [[ -e "$phys_dest" && ! -f "$phys_dest" ]]; then
+    rm -f -- "$tmp"
+    die_tool "report destination is not a regular file: $phys_dest"
   fi
+  if ! mv -f -- "$tmp" "$phys_dest"; then
+    rm -f -- "$tmp"
+    die_tool "atomic rename failed for report: $phys_dest"
+  fi
+  if [[ -L "$phys_dest" || ! -f "$phys_dest" ]]; then
+    die_tool "report path is not a regular file after write: $phys_dest"
+  fi
+  # If logical abs differs from phys_dest but is not a symlink escape, best-effort
+  # note: writers always land on physical path; containment already enforced.
 }
 
 # ---------------------------------------------------------------------------
@@ -568,6 +802,42 @@ gitignore_covers_gibson() {
 # ---------------------------------------------------------------------------
 # Live fetch helpers
 # ---------------------------------------------------------------------------
+# Repo endpoint: object with nonempty owner.login + default_branch strings and
+# actual boolean merge/delete fields. Scalar/null/string-bool → ERROR (exit 3).
+validate_repo_schema() {
+  local body="$1"
+  printf '%s' "$body" | jq -e '
+    type == "object"
+    and (.owner | type == "object")
+    and (.owner.login | type == "string" and length > 0)
+    and (.default_branch | type == "string" and length > 0)
+    and (.allow_squash_merge | type == "boolean")
+    and (.allow_merge_commit | type == "boolean")
+    and (.allow_rebase_merge | type == "boolean")
+    and (.delete_branch_on_merge | type == "boolean")
+  ' >/dev/null
+}
+
+# Labels: documented array (or paginated array pages). Every item object with
+# nonempty name string. Scalar/null/object/wrong items → fail closed.
+normalize_labels_pages() {
+  # stdin → stdout single JSON array; nonzero if schema fails
+  jq -se '
+    if length == 0 then
+      error("labels: empty response")
+    elif all(.[]; type == "array") then
+      add
+      | if type != "array" then error("labels: pages did not concatenate to array")
+        elif any(.[]; type != "object") then error("labels: item is not an object")
+        elif any(.[]; (.name | type != "string") or (.name | length < 1)) then
+          error("labels: item.name must be a nonempty string")
+        else . end
+    else
+      error("labels: response must be JSON array page(s), not scalar/object/null")
+    end
+  '
+}
+
 fetch_repo_meta() {
   local body
   if ! body=$(gh api "repos/${REPO}" 2>/dev/null); then
@@ -578,25 +848,20 @@ fetch_repo_meta() {
     record ERROR "repo" "repos/${REPO} returned non-JSON"
     return 1
   fi
-
-  # Note: jq `//` treats false as missing — use tostring so false survives.
-  LIVE_DEFAULT_BRANCH=$(printf '%s' "$body" | jq -r '.default_branch // empty')
-  LIVE_OWNER_LOGIN=$(printf '%s' "$body" | jq -r '.owner.login // empty')
-  LIVE_SQUASH=$(printf '%s' "$body" | jq -r '.allow_squash_merge | if . == null then "empty" else tostring end')
-  LIVE_MERGE_COMMIT=$(printf '%s' "$body" | jq -r '.allow_merge_commit | if . == null then "empty" else tostring end')
-  LIVE_REBASE=$(printf '%s' "$body" | jq -r '.allow_rebase_merge | if . == null then "empty" else tostring end')
-  LIVE_DELETE_BRANCH=$(printf '%s' "$body" | jq -r '.delete_branch_on_merge | if . == null then "empty" else tostring end')
-
-  if [[ -z "$LIVE_DEFAULT_BRANCH" || "$LIVE_DEFAULT_BRANCH" == "null" ]]; then
-    record ERROR "repo" "default_branch missing/null in API response"
+  if ! validate_repo_schema "$body"; then
+    record ERROR "repo" \
+      "repos/${REPO} schema invalid — need object with owner.login string, default_branch string, and boolean allow_squash_merge/allow_merge_commit/allow_rebase_merge/delete_branch_on_merge"
     return 1
   fi
 
-  # Prefer live default branch when config left default
-  if [[ -z "$DEFAULT_BRANCH" || "$DEFAULT_BRANCH" == "main" ]]; then
-    # Keep config if explicit non-main; if config says main but live differs, note it
-    :
-  fi
+  LIVE_DEFAULT_BRANCH=$(printf '%s' "$body" | jq -r '.default_branch')
+  LIVE_OWNER_LOGIN=$(printf '%s' "$body" | jq -r '.owner.login')
+  # Exact booleans only (schema-enforced) — tostring yields "true"/"false"
+  LIVE_SQUASH=$(printf '%s' "$body" | jq -r '.allow_squash_merge | tostring')
+  LIVE_MERGE_COMMIT=$(printf '%s' "$body" | jq -r '.allow_merge_commit | tostring')
+  LIVE_REBASE=$(printf '%s' "$body" | jq -r '.allow_rebase_merge | tostring')
+  LIVE_DELETE_BRANCH=$(printf '%s' "$body" | jq -r '.delete_branch_on_merge | tostring')
+
   if [[ -n "$LIVE_DEFAULT_BRANCH" && "$DEFAULT_BRANCH" != "$LIVE_DEFAULT_BRANCH" ]]; then
     record OWNER_REQUIRED "default-branch" \
       "configured defaultBranch=$(sq "$DEFAULT_BRANCH") but live default_branch=$(sq "$LIVE_DEFAULT_BRANCH") — owner must align config or repo"
@@ -606,29 +871,42 @@ fetch_repo_meta() {
   return 0
 }
 
+# Label names cache (newline-separated). Populated by fetch_labels.
+# IMPORTANT: never capture fetch_labels in $(...) — record() must run in the
+# main shell so ERROR tallies/exit codes cannot be swallowed by a subshell.
+LABELS_CACHE=""
+
 fetch_labels() {
-  # stdout: label names, one per line
-  local body
+  # Sets LABELS_CACHE to label names, one per line. Fail closed on schema.
+  LABELS_CACHE=""
+  local body arr names
   if ! body=$(gh api --paginate "repos/${REPO}/labels" 2>/dev/null); then
     record ERROR "labels" "failed to list labels for ${REPO}"
     return 1
   fi
-  if ! printf '%s' "$body" | jq -e . >/dev/null 2>&1; then
-    record ERROR "labels" "labels API returned non-JSON"
+  # Redirect jq schema diagnostics — surfaced via record ERROR, not stderr noise.
+  if ! arr=$(printf '%s' "$body" | normalize_labels_pages 2>/dev/null); then
+    record ERROR "labels" \
+      "labels API schema invalid — need array page(s) of objects with nonempty string name (scalar/null/object/wrong items rejected)"
     return 1
   fi
-  printf '%s' "$body" | jq -r 'if type=="array" then .[].name else .name end' 2>/dev/null
+  if ! names=$(printf '%s' "$arr" | jq -r '.[].name'); then
+    record ERROR "labels" "failed to extract label names after schema validation"
+    return 1
+  fi
+  LABELS_CACHE="$names"
+  return 0
 }
 
 audit_labels() {
-  local existing missing name
-  if ! existing=$(fetch_labels); then
+  local missing name
+  if ! fetch_labels; then
     return 1
   fi
   missing=""
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    if ! printf '%s\n' "$existing" | grep -Fxq -- "$name"; then
+    if ! printf '%s\n' "$LABELS_CACHE" | grep -Fxq -- "$name"; then
       missing="${missing}${name}"$'\n'
     fi
   done <<EOF
@@ -653,14 +931,14 @@ EOF
 }
 
 apply_labels() {
-  local existing name color desc body
-  if ! existing=$(fetch_labels); then
+  local name color desc body
+  if ! fetch_labels; then
     HAD_APPLY_FAILURE=1
     return 1
   fi
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    if printf '%s\n' "$existing" | grep -Fxq -- "$name"; then
+    if printf '%s\n' "$LABELS_CACHE" | grep -Fxq -- "$name"; then
       continue
     fi
     color=$(label_color "$name")
@@ -678,13 +956,13 @@ $REQUIRED_LABELS
 EOF
 
   # Postcondition: every required label exists
-  if ! existing=$(fetch_labels); then
+  if ! fetch_labels; then
     HAD_APPLY_FAILURE=1
     return 1
   fi
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    if ! printf '%s\n' "$existing" | grep -Fxq -- "$name"; then
+    if ! printf '%s\n' "$LABELS_CACHE" | grep -Fxq -- "$name"; then
       record ERROR "labels" "post-apply readback missing label $(sq "$name")"
       HAD_APPLY_FAILURE=1
       return 1
@@ -736,18 +1014,23 @@ apply_merge_settings() {
     HAD_APPLY_FAILURE=1
     return 1
   fi
-  # Read back exact postconditions
+  # Read back exact postconditions with the same schema as fetch_repo_meta
   local body
   if ! body=$(gh api "repos/${REPO}" 2>/dev/null); then
     record ERROR "merge" "post-apply readback of repo settings failed"
     HAD_APPLY_FAILURE=1
     return 1
   fi
+  if ! validate_repo_schema "$body"; then
+    record ERROR "merge" "post-apply readback schema invalid (exact boolean merge fields required)"
+    HAD_APPLY_FAILURE=1
+    return 1
+  fi
   local s m r d
-  s=$(printf '%s' "$body" | jq -r '.allow_squash_merge | if . == null then "empty" else tostring end')
-  m=$(printf '%s' "$body" | jq -r '.allow_merge_commit | if . == null then "empty" else tostring end')
-  r=$(printf '%s' "$body" | jq -r '.allow_rebase_merge | if . == null then "empty" else tostring end')
-  d=$(printf '%s' "$body" | jq -r '.delete_branch_on_merge | if . == null then "empty" else tostring end')
+  s=$(printf '%s' "$body" | jq -r '.allow_squash_merge | tostring')
+  m=$(printf '%s' "$body" | jq -r '.allow_merge_commit | tostring')
+  r=$(printf '%s' "$body" | jq -r '.allow_rebase_merge | tostring')
+  d=$(printf '%s' "$body" | jq -r '.delete_branch_on_merge | tostring')
   if [[ "$s" != "true" || "$m" != "false" || "$r" != "false" || "$d" != "true" ]]; then
     record ERROR "merge" "post-apply postcondition failed: squash=${s} merge_commit=${m} rebase=${r} delete_branch=${d}"
     HAD_APPLY_FAILURE=1
@@ -864,17 +1147,42 @@ audit_branch_protection() {
     return 1
   fi
 
-  local enforce strict reviews force delete contexts_json
-  enforce=$(printf '%s' "$body" | jq -r '.enforce_admins.enabled // .enforce_admins // false' 2>/dev/null || echo false)
-  # enforce_admins can be bool or {enabled: bool}
-  if [[ "$enforce" != "true" && "$enforce" != "false" ]]; then
-    enforce=$(printf '%s' "$body" | jq -r 'if .enforce_admins|type=="object" then .enforce_admins.enabled elif .enforce_admins|type=="boolean" then .enforce_admins else false end')
+  # Fail closed on types: malformed schema is ERROR, never PASS/OWNER_REQUIRED.
+  if ! printf '%s' "$body" | jq -e '
+    type == "object"
+    and (
+      (.enforce_admins | type == "boolean")
+      or ((.enforce_admins | type == "object") and (.enforce_admins.enabled | type == "boolean"))
+    )
+    and (.required_status_checks | type == "object")
+    and (.required_status_checks.strict | type == "boolean")
+    and (.required_status_checks.contexts | type == "array")
+    and all(.required_status_checks.contexts[]; type == "string")
+    and (.required_pull_request_reviews | type == "object")
+    and (.required_pull_request_reviews.required_approving_review_count | type == "number")
+    and (
+      (.allow_force_pushes | type == "boolean")
+      or ((.allow_force_pushes | type == "object") and (.allow_force_pushes.enabled | type == "boolean"))
+      or (.allow_force_pushes == null)
+    )
+    and (
+      (.allow_deletions | type == "boolean")
+      or ((.allow_deletions | type == "object") and (.allow_deletions.enabled | type == "boolean"))
+      or (.allow_deletions == null)
+    )
+  ' >/dev/null; then
+    record ERROR "protection.${role}" \
+      "protection schema invalid for $(sq "$branch") — malformed types cannot contribute PASS/READY"
+    return 1
   fi
-  strict=$(printf '%s' "$body" | jq -r '.required_status_checks.strict // false')
-  reviews=$(printf '%s' "$body" | jq -r '.required_pull_request_reviews.required_approving_review_count // 0')
-  force=$(printf '%s' "$body" | jq -r 'if .allow_force_pushes|type=="object" then .allow_force_pushes.enabled elif .allow_force_pushes|type=="boolean" then .allow_force_pushes else false end')
-  delete=$(printf '%s' "$body" | jq -r 'if .allow_deletions|type=="object" then .allow_deletions.enabled elif .allow_deletions|type=="boolean" then .allow_deletions else false end')
-  contexts_json=$(printf '%s' "$body" | jq -c '.required_status_checks.contexts // []')
+
+  local enforce strict reviews force delete contexts_json
+  enforce=$(printf '%s' "$body" | jq -r 'if .enforce_admins|type=="object" then .enforce_admins.enabled|tostring else .enforce_admins|tostring end')
+  strict=$(printf '%s' "$body" | jq -r '.required_status_checks.strict|tostring')
+  reviews=$(printf '%s' "$body" | jq -r '.required_pull_request_reviews.required_approving_review_count|floor|tostring')
+  force=$(printf '%s' "$body" | jq -r 'if .allow_force_pushes == null then "false" elif .allow_force_pushes|type=="object" then .allow_force_pushes.enabled|tostring else .allow_force_pushes|tostring end')
+  delete=$(printf '%s' "$body" | jq -r 'if .allow_deletions == null then "false" elif .allow_deletions|type=="object" then .allow_deletions.enabled|tostring else .allow_deletions|tostring end')
+  contexts_json=$(printf '%s' "$body" | jq -c '.required_status_checks.contexts')
 
   local ok=1
   local problems=""
@@ -900,12 +1208,11 @@ audit_branch_protection() {
   fi
 
   # Compare requiredContexts (config) to live protection contexts
-  local ctx missing=0
+  local ctx
   while IFS= read -r ctx; do
     [[ -z "$ctx" ]] && continue
-    if ! printf '%s' "$contexts_json" | jq -e --arg c "$ctx" 'index($c) != null' >/dev/null 2>&1; then
+    if ! printf '%s' "$contexts_json" | jq -e --arg c "$ctx" 'index($c) != null' >/dev/null; then
       problems="${problems}missing context $(sq "$ctx"); "
-      missing=1
       ok=0
     fi
   done <<EOF
@@ -938,6 +1245,9 @@ audit_reviewer_identity() {
 }
 
 audit_environment() {
+  # Report-only. PASS requires exact required_reviewers rule with ≥1 valid
+  # reviewer AND can_admins_bypass exactly false. Wait-timer-only / bypassable
+  # / missing → OWNER_REQUIRED. Malformed types → ERROR (never PASS/READY).
   if [[ -z "$PROD_ENV" ]]; then
     record PASS "environment" "productionEnvironment null/skipped by config"
     return 0
@@ -945,8 +1255,6 @@ audit_environment() {
   local body errfile
   errfile=$(mktemp)
   if ! body=$(gh api "repos/${REPO}/environments/$(printf '%s' "$PROD_ENV" | sed 's/ /%20/g')" 2>"$errfile"); then
-    local err
-    err=$(cat "$errfile" 2>/dev/null || true)
     rm -f "$errfile"
     record OWNER_REQUIRED "environment" \
       "GitHub environment $(sq "$PROD_ENV") missing or inaccessible — owner must configure via delivery-control apply-production-env (never applied by this script)"
@@ -958,33 +1266,109 @@ audit_environment() {
     record ERROR "environment" "environment JSON malformed"
     return 1
   fi
-  local rules
-  rules=$(printf '%s' "$body" | jq -r '.protection_rules | length // 0')
-  if ! [[ "$rules" =~ ^[0-9]+$ ]] || [[ "$rules" -lt 1 ]]; then
+  if ! printf '%s' "$body" | jq -e '
+    type == "object"
+    and (.protection_rules | type == "array")
+    and (.can_admins_bypass | type == "boolean")
+  ' >/dev/null; then
+    record ERROR "environment" \
+      "environment schema invalid — need object with protection_rules array and boolean can_admins_bypass (malformed cannot PASS/READY)"
+    return 1
+  fi
+
+  # Validate each rule shape enough to refuse junk types contributing to PASS.
+  if ! printf '%s' "$body" | jq -e '
+    all(.protection_rules[]; type == "object" and (.type | type == "string"))
+  ' >/dev/null; then
+    record ERROR "environment" \
+      "environment protection_rules items must be objects with string type"
+    return 1
+  fi
+
+  local bypass has_rr rr_ok
+  bypass=$(printf '%s' "$body" | jq -r '.can_admins_bypass | tostring')
+  # required_reviewers with at least one valid reviewer (login string or id number)
+  has_rr=$(printf '%s' "$body" | jq -r '
+    [.protection_rules[] | select(.type == "required_reviewers")] | length | tostring
+  ')
+  rr_ok=$(printf '%s' "$body" | jq -r '
+    [
+      .protection_rules[]
+      | select(.type == "required_reviewers")
+      | select(
+          (.reviewers | type == "array")
+          and (.reviewers | length > 0)
+          and all(.reviewers[];
+            type == "object"
+            and (
+              ((.login | type == "string") and (.login | length > 0))
+              or (.id | type == "number")
+            )
+          )
+        )
+    ] | length | tostring
+  ')
+
+  if [[ "$has_rr" == "0" ]]; then
     record OWNER_REQUIRED "environment" \
-      "environment $(sq "$PROD_ENV") has no protection_rules — owner must add required reviewers (Mark-owned; not applied here)"
+      "environment $(sq "$PROD_ENV") lacks required_reviewers protection rule (wait-timer-only or empty rules are not enough) — Mark-owned; not applied here"
     plan_line "OWNER: scripts/delivery-control/apply-production-env.sh --repo $(sq "$REPO") --apply"
     return 0
   fi
-  record PASS "environment" "environment $(sq "$PROD_ENV") has ${rules} protection rule(s)"
+  if [[ "$rr_ok" == "0" ]]; then
+    record OWNER_REQUIRED "environment" \
+      "environment $(sq "$PROD_ENV") required_reviewers rule has no valid reviewer entries — owner must add ≥1 reviewer"
+    plan_line "OWNER: scripts/delivery-control/apply-production-env.sh --repo $(sq "$REPO") --apply"
+    return 0
+  fi
+  if [[ "$bypass" != "false" ]]; then
+    record OWNER_REQUIRED "environment" \
+      "environment $(sq "$PROD_ENV") can_admins_bypass=$(sq "$bypass") (want false) — admin bypass is not PASS"
+    plan_line "OWNER: scripts/delivery-control/apply-production-env.sh --repo $(sq "$REPO") --apply"
+    return 0
+  fi
+  record PASS "environment" \
+    "environment $(sq "$PROD_ENV") has required_reviewers (≥1 valid) and can_admins_bypass=false"
+  return 0
 }
 
 audit_dco() {
-  # Report-only: look for local workflow evidence of DCO; never install apps.
-  local found=0
+  # Report-only. Static workflow names/text are static presence only — never
+  # live enforcement. PASS only with strict observed-run attestation.
+  # Never call or install the DCO app.
+  local static=0
   if [[ -d "${LOCAL_PATH}/.github/workflows" ]]; then
     if grep -Rqi -- 'dco\|signed-off-by\|probot/dco' "${LOCAL_PATH}/.github/workflows" 2>/dev/null; then
-      found=1
+      static=1
     fi
   fi
-  if [[ "$found" -eq 1 ]]; then
-    # Local workflow evidence is enough for this slice's PASS; installing the
-    # GitHub DCO app remains Mark-owned and is never performed here.
-    record PASS "dco" \
-      "local DCO-related workflow evidence present (app install/config remains Mark-owned; never applied by this script)"
+
+  local observed="${GIBSON_DCO_OBSERVED_RUN:-}"
+  if is_valid_observed_run "$observed"; then
+    if [[ "$static" -eq 1 ]]; then
+      record PASS "dco" \
+        "operator-attested observed DCO run $(sq "$observed") (static workflow text alone never clears this; app install remains Mark-owned; never applied)"
+    else
+      record PASS "dco" \
+        "operator-attested observed DCO run $(sq "$observed") (no local static file required; app install remains Mark-owned; never applied)"
+    fi
+    return 0
+  fi
+
+  if [[ -n "$observed" ]]; then
+    record UNKNOWN "dco" \
+      "GIBSON_DCO_OBSERVED_RUN set but does not match strict observed-run contract (https://…/actions/runs/<id> or observed-run:<token>) — arbitrary nonempty strings are insufficient"
+    plan_line "OWNER: export GIBSON_DCO_OBSERVED_RUN with a real Actions run URL after DCO check executes, or install DCO app/required check"
+    return 0
+  fi
+
+  if [[ "$static" -eq 1 ]]; then
+    record OWNER_REQUIRED "dco" \
+      "static DCO-related workflow text present only — static names/echo steps are never live enforcement; OWNER_REQUIRED until observed exact-run evidence (never applied by this script)"
+    plan_line "OWNER: install DCO app or required DCO check; export GIBSON_DCO_OBSERVED_RUN=https://…/actions/runs/<id> after a real run"
   else
     record OWNER_REQUIRED "dco" \
-      "no local DCO workflow evidence — if the org requires Signed-off-by, owner installs DCO app/check (not applied by this script)"
+      "no observed DCO run attestation and no static DCO workflow text — owner installs DCO app/check if org requires sign-off (not applied by this script)"
     plan_line "OWNER: install DCO app or required DCO check if org policy requires sign-off"
   fi
 }
@@ -1018,13 +1402,17 @@ $REQUIRED_CONTEXTS_NL
 EOF
 
   # test-integrity canary: static evidence NEVER upgrades to executed PASS.
-  # Only an explicit observed-run attestation (operator-supplied env, never
-  # invented from YAML) may clear this to PASS.
+  # Only a strict observed-run attestation (documented contract) may PASS.
   if printf '%s\n' "$REQUIRED_CONTEXTS_NL" | grep -Fxq -- "test-integrity" \
     || printf '%s\n' "$installed_names" | grep -Fqi -- "test-integrity"; then
-    if [[ -n "${GIBSON_TEST_INTEGRITY_OBSERVED_RUN:-}" ]]; then
+    local ti_obs="${GIBSON_TEST_INTEGRITY_OBSERVED_RUN:-}"
+    if is_valid_observed_run "$ti_obs"; then
       record PASS "test-integrity-canary" \
-        "operator-attested observed run $(sq "$GIBSON_TEST_INTEGRITY_OBSERVED_RUN") — static YAML alone never clears this gate"
+        "operator-attested observed run $(sq "$ti_obs") — static YAML alone never clears this gate"
+    elif [[ -n "$ti_obs" ]]; then
+      record UNKNOWN "test-integrity-canary" \
+        "GIBSON_TEST_INTEGRITY_OBSERVED_RUN present but fails strict observed-run contract (https://…/actions/runs/<id> or observed-run:<token>) — arbitrary nonempty strings are insufficient; static YAML never PASS"
+      plan_line "OWNER: re-export GIBSON_TEST_INTEGRITY_OBSERVED_RUN with a real Actions run URL after canaries; require check name test-integrity"
     else
       record UNKNOWN "test-integrity-canary" \
         "test-integrity remains FAIL/UNKNOWN until a real observed CI run proves the four-job path executed and the required check blocked deletions — static workflow YAML is never canary PASS (issue #70/#68)"
@@ -1188,13 +1576,12 @@ main() {
   need_cmd grep
   need_cmd sed
 
-  # Validate local path early
+  # Validate local path early — refuse symlink checkout roots (report escape / purity).
+  if [[ -L "$LOCAL_PATH" ]]; then
+    die_usage "local --path must not be a symlink (refuse checkout root link): $LOCAL_PATH"
+  fi
   if [[ ! -d "$LOCAL_PATH" ]]; then
     die_usage "local --path is not a directory: $LOCAL_PATH"
-  fi
-  if [[ -L "$LOCAL_PATH" ]]; then
-    # Allow symlink dir only if it resolves to a directory; still ok for checkout roots.
-    :
   fi
 
   FINDINGS_FILE=$(mktemp)
@@ -1221,8 +1608,10 @@ main() {
   fi
   validate_repo_slug "$REPO" || die_usage "invalid --repo slug: $(sq "$REPO")"
 
-  if [[ -z "$REPORT_PATH" && "$NO_REPORT" -eq 0 && "$ASSUME_DEFAULT_REPORT" -eq 1 ]]; then
-    REPORT_PATH="${LOCAL_PATH}/gibson/git-config-report.md"
+  # No implicit report path. Default audit/default invocation write ZERO files.
+  # --report PATH is the only request for a local report write (not in dry-run).
+  if [[ "$NO_REPORT" -eq 1 ]]; then
+    REPORT_PATH=""
   fi
 
   # Auth probe (read-only)
@@ -1331,13 +1720,20 @@ main() {
     echo "  VERDICT: DRIFT (not READY)"
   fi
 
-  if [[ "$NO_REPORT" -eq 0 && -n "$REPORT_PATH" ]]; then
-    echo ""
-    echo "Writing report: ${REPORT_PATH}"
-    local report_body
-    report_body=$(build_report_body)
-    atomic_write_report "$REPORT_PATH" "$report_body"
-    echo "  report written."
+  # Report write: only explicit --report PATH, never in --dry-run, never default.
+  if [[ -n "$REPORT_PATH" ]]; then
+    if [[ "$MODE" == "dry-run" ]]; then
+      echo ""
+      echo "## Report (dry-run — not written; stdout/plan only; target bytes preserved)"
+      echo "  (skipped write of $(sq "$REPORT_PATH"))"
+    else
+      echo ""
+      echo "Writing report: ${REPORT_PATH}"
+      local report_body
+      report_body=$(build_report_body)
+      atomic_write_report "$REPORT_PATH" "$report_body"
+      echo "  report written."
+    fi
   fi
 
   # Compute exit without relying on set -e + function return alone.

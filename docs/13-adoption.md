@@ -36,13 +36,17 @@ Score the repo's ambient affordances before promising autonomy:
       project settings, not docs); preview deployments on
 - [ ] **Git/GitHub configure** ([issue #68](https://github.com/mrhinkle/the-gibson/issues/68)
       first slice): run `scripts/git-configure.sh --audit --repo owner/name`
-      (optional `--path` to the target checkout). **Stop adoption on unresolved
-      FAIL / SAFE_DRIFT / OWNER_REQUIRED / UNKNOWN** (exit 1) or tool failure
-      (exit 3). Safe reversible fixes only via `--dry-run` then `--apply`
-      (labels, `gibson/` gitignore, squash + delete-branch-on-merge). Branch
-      protection, required checks, Environments, DCO app, Vercel Production
-      Branch, secrets, and test-integrity canaries are **Mark-owned** — audit
-      prints exact remediation; this script never applies them.
+      (optional `--path` to the target checkout). Default audit writes **no
+      report file** (stdout only; use explicit `--report PATH` if you want a
+      local artifact). **Adoption is incomplete on unresolved FAIL / SAFE_DRIFT /
+      OWNER_REQUIRED / UNKNOWN** (exit 1) or tool failure (exit 3). Unresolved
+      OWNER_REQUIRED blocks readiness claims and protected autonomy activation;
+      safe unrelated planning may continue. Safe reversible fixes only via
+      `--dry-run` then `--apply` (labels, `gibson/` gitignore, squash +
+      delete-branch-on-merge). Branch protection, required checks, Environments,
+      DCO app, Vercel Production Branch, secrets, and test-integrity canaries are
+      **Mark-owned** — audit prints exact remediation; this script never applies
+      them. Static workflow YAML never proves live DCO or test-integrity.
 - [ ] **Delivery control** ([docs/23](23-delivery-control.md)): run
       `scripts/delivery-control/audit.sh --repo owner/name` — fail or P0 the
       fix-list if the production write path is unprotected (`enforce_admins`,
