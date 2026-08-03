@@ -426,9 +426,26 @@ FC_BUILD=0
 TEST_CAPTURE=""
 TEST_CAPTURED=0
 
+# ---------------------------------------------------------------------------
+# Configured-command isolation (issue #70)
+# Branch-controlled commands from .agents/gate.json / env MUST never run via
+# parent-shell eval. A hostile generate could redefine PRIOR_OUT_PRESENT,
+# neuter regenerate guards, replace a 10-test baseline with total=1, and
+# skip the journal. Every configured step runs in a throwaway child
+# subshell: intended cwd/environment and exit status are preserved; child
+# variables, functions, traps, options, aliases, cwd, umask, IFS, and FDs
+# are not imported back. Filesystem side effects still happen (and parent
+# authority / regenerate checks catch them).
+# ---------------------------------------------------------------------------
+run_configured_child() {
+  # Isolation boundary: eval only inside the subshell, never the parent.
+  ( eval "$1" )
+}
+
 # run_count_failures: capture stdout+stderr and exit status in memory only.
 # NEVER invoke via $(...) — that would run in a subshell and drop TEST_CAPTURE
 # / EC_* / FC_* assignments. Call directly so globals persist in this shell.
+# The *configured command itself* runs in a child via run_configured_child.
 # Never creates files or directories the command can discover/pre-poison.
 run_count_failures() {
   local step="$1"
@@ -445,8 +462,9 @@ run_count_failures() {
   fi
   info "baseline $step: $cmd"
   set +e
-  # shellcheck disable=SC2086
-  out=$(eval "$cmd" 2>&1)
+  # Command substitution is already a subshell; still route through the
+  # isolation helper so no branch-configured string is eval'd in parent.
+  out=$(run_configured_child "$cmd" 2>&1)
   ec=$?
   set -e
   if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then
@@ -482,11 +500,11 @@ LI=$(resolve_cmd lint GIBSON_LINT lint)
 TE=$(resolve_cmd test GIBSON_TEST test)
 BU=$(resolve_cmd build GIBSON_BUILD build)
 
-# Optional generate first (prisma etc.)
+# Optional generate first (prisma etc.) — isolated child, never parent eval.
 if [[ -n "$GEN" ]]; then
   info "running generate: $GEN"
   set +e
-  eval "$GEN" >/dev/null 2>&1
+  run_configured_child "$GEN" >/dev/null 2>&1
   set -e
 fi
 

@@ -428,11 +428,26 @@ baseline_ec() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# Configured-command isolation (issue #70)
+# Branch-controlled commands from .agents/gate.json / env MUST never run via
+# parent-shell eval. A hostile generate could redefine SNAP_PRESENT /
+# verify_baseline_authority, delete the baseline, emit total=1, and go GREEN.
+# Every configured step runs in a throwaway child subshell: intended
+# cwd/environment and exit status are preserved; child variables, functions,
+# traps, options, aliases, cwd, umask, IFS, and FDs are not imported back.
+# Filesystem side effects still happen (and authority re-checks catch them).
+# ---------------------------------------------------------------------------
+run_configured_child() {
+  # Isolation boundary: eval only inside the subshell, never the parent.
+  ( eval "$1" )
+}
+
 GEN=$(resolve_cmd generate GIBSON_GENERATE generate)
 if [[ -n "$GEN" ]]; then
   info "generate: $GEN"
   set +e
-  eval "$GEN"
+  run_configured_child "$GEN"
   gen_rc=$?
   set -e
   verify_baseline_authority "after generate" || true
@@ -452,7 +467,9 @@ run_step() {
   [[ -z "$cmd" ]] && return 0
   info "$step: $cmd"
   set +e
-  out=$(eval "$cmd" 2>&1)
+  # Command substitution is already a subshell; still route through the
+  # isolation helper so no branch-configured string is eval'd in parent.
+  out=$(run_configured_child "$cmd" 2>&1)
   ec=$?
   set -e
   if [[ ${#out} -gt $MAX_CAPTURE_CHARS ]]; then

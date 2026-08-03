@@ -1566,6 +1566,153 @@ else
   bad "JOURNAL parent replace (rc=$rc evil_files=$evil_j_count): $out"
 fi
 
+# ---------------------------------------------------------------------------
+echo "blocker generate-isolation: configured commands never parent-eval"
+# ---------------------------------------------------------------------------
+# Branch-controlled generate must run in a child subshell. A parent-shell
+# eval can redefine SNAP_PRESENT / PRIOR_OUT_PRESENT / verification helpers,
+# delete or replace a 10-test baseline, emit total=1, and receive GREEN or
+# overwrite without --regenerate / journal.
+
+# --- gate.sh: hostile generate redefines authority + deletes 10-test baseline ---
+GEN_ISO="$ROOT/generate-isolation-gate"
+mkdir -p "$GEN_ISO/.agents"
+$GITP init -q "$GEN_ISO"
+git -C "$GEN_ISO" symbolic-ref HEAD refs/heads/main
+echo base >"$GEN_ISO/README"
+$GITP -C "$GEN_ISO" add -A
+$GITP -C "$GEN_ISO" commit -q -m "base"
+cat >"$GEN_ISO/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+(cd "$GEN_ISO" && bash "$BASELINE_SH" --out "$GEN_ISO/.gibson-baseline.json") >/dev/null 2>&1
+[[ -f "$GEN_ISO/.gibson-baseline.json" ]] || bad "generate-isolation setup: missing baseline"
+# Hostile generate: try to zero SNAP_PRESENT, neuter verify/fail, delete baseline.
+# Test then emits total=1. Parent-eval would go GREEN; isolation must RED.
+cat >"$GEN_ISO/.agents/gate.json" <<'JSON'
+{
+  "generate": "SNAP_PRESENT=0; SNAP_BYTES=; SNAP_HAS_METRICS=0; SNAP_LEAF_ID=; verify_baseline_authority(){ return 0; }; fail(){ :; }; die(){ :; }; FAILED=0; rm -f .gibson-baseline.json",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=1 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$GEN_ISO" && bash "$GATE" --baseline "$GEN_ISO/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && ! echo "$out" | grep -q 'GREEN'; then
+  ok "gate.sh generate isolation: authority pollution + baseline delete + total=1 is RED (no GREEN)"
+else
+  bad "gate.sh generate isolation allowed GREEN or zero exit (rc=$rc): $out"
+fi
+
+# --- gate-baseline.sh: hostile generate zeros PRIOR_OUT_PRESENT, shrinks 10→1 ---
+GEN_BL="$ROOT/generate-isolation-baseline"
+mkdir -p "$GEN_BL/.agents" "$GEN_BL/.gibson"
+$GITP init -q "$GEN_BL"
+git -C "$GEN_BL" symbolic-ref HEAD refs/heads/main
+echo base >"$GEN_BL/README"
+$GITP -C "$GEN_BL" add -A
+$GITP -C "$GEN_BL" commit -q -m "base"
+cat >"$GEN_BL/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+(cd "$GEN_BL" && bash "$BASELINE_SH" --out "$GEN_BL/.gibson-baseline.json") >/dev/null 2>&1
+PRIOR_BYTES=$(cat -- "$GEN_BL/.gibson-baseline.json")
+printf '%s' "$PRIOR_BYTES" | grep -qE '"total":[[:space:]]*10' \
+  || bad "generate-isolation baseline setup: expected total=10"
+JOURNAL_PATH="$GEN_BL/.gibson/test-integrity-journal.jsonl"
+rm -f "$JOURNAL_PATH"
+# Without --regenerate: try to force PRIOR_OUT_PRESENT=0 / REGENERATE=1 in the
+# parent so a 10→1 shrink would be allowed and journaled. Isolation must keep
+# parent flags intact, refuse the shrink, preserve original bytes, and leave
+# the journal without an authority reduction record.
+cat >"$GEN_BL/.agents/gate.json" <<'JSON'
+{
+  "generate": "PRIOR_OUT_PRESENT=0; PRIOR_OUT_BYTES=; REGENERATE=1; REASON_SET=1; REASON=hostile-parent-eval",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=1 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$GEN_BL" && bash "$BASELINE_SH" --out "$GEN_BL/.gibson-baseline.json" \
+  --journal "$JOURNAL_PATH" 2>&1); rc=$?
+AFTER_BYTES=$(cat -- "$GEN_BL/.gibson-baseline.json" 2>/dev/null || echo MISSING)
+journal_after=$(cat -- "$JOURNAL_PATH" 2>/dev/null || echo "")
+if [[ "$rc" -ne 0 ]] \
+  && [[ "$AFTER_BYTES" == "$PRIOR_BYTES" ]] \
+  && [[ ! -f "$JOURNAL_PATH" || -z "${journal_after// }" ]] \
+  && ! echo "$journal_after" | grep -qiE 'hostile-parent-eval|regenerate|total' \
+  && echo "$out" | grep -qiE 'test-integrity|regenerate|reduce' \
+  && printf '%s' "$AFTER_BYTES" | grep -qE '"total":[[:space:]]*10'; then
+  ok "gate-baseline.sh generate isolation: PRIOR_OUT pollution + 10→1 without --regenerate refused; bytes preserved; no fake journal"
+else
+  bad "gate-baseline.sh generate isolation (rc=$rc journal=$(echo "$journal_after" | head -c 80) after_total=$(printf '%s' "$AFTER_BYTES" | grep -oE '\"total\":[ ]*[0-9]+' | head -1)): $out"
+fi
+
+# --- child-isolation canaries: cwd / umask / IFS / traps / options ---
+# Generate mutates shell state only (no baseline attack). If those mutations
+# leaked into the parent, later steps would not see the repo baseline and
+# would not stay GREEN at total=10.
+CANARY="$ROOT/generate-isolation-canary"
+mkdir -p "$CANARY/.agents"
+$GITP init -q "$CANARY"
+git -C "$CANARY" symbolic-ref HEAD refs/heads/main
+echo base >"$CANARY/README"
+$GITP -C "$CANARY" add -A
+$GITP -C "$CANARY" commit -q -m "base"
+cat >"$CANARY/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+(cd "$CANARY" && bash "$BASELINE_SH" --out "$CANARY/.gibson-baseline.json") >/dev/null 2>&1
+# Child tries to poison parent process state. test step asserts we still see
+# the repo-local baseline (cwd intact) and no world-writable umask leak on a
+# probe file created by the *test* step in the authority shell's cwd.
+cat >"$CANARY/.agents/gate.json" <<'JSON'
+{
+  "generate": "cd /tmp; umask 000; IFS='|'; trap 'printf %s\\n CANARY_TRAP_FIRED_ON_EXIT' EXIT; set +e; set +u; set +o pipefail 2>/dev/null || true; alias true=false 2>/dev/null || true",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "test -f .gibson-baseline.json && test -f .agents/gate.json && printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$CANARY" && bash "$GATE" --baseline "$CANARY/.gibson-baseline.json" 2>&1); rc=$?
+# Trap fire is a whole line only — do not match the generate command string.
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'GREEN' \
+  && ! echo "$out" | grep -qx 'CANARY_TRAP_FIRED_ON_EXIT'; then
+  ok "generate child-isolation canary: parent cwd/IFS/traps/options intact (GREEN total=10)"
+else
+  bad "generate child-isolation canary failed (rc=$rc): $out"
+fi
+# Same canary through gate-baseline.sh (capture path / run_count_failures)
+out=$(cd "$CANARY" && bash "$BASELINE_SH" --out "$CANARY/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] \
+  && grep -qE '"total":[[:space:]]*10' "$CANARY/.gibson-baseline.json" 2>/dev/null \
+  && ! echo "$out" | grep -qx 'CANARY_TRAP_FIRED_ON_EXIT'; then
+  ok "gate-baseline child-isolation canary: parent state intact; total=10 preserved"
+else
+  bad "gate-baseline child-isolation canary (rc=$rc): $out"
+fi
+
 # Phase-1 bootstrap pin: ci/gibson-gate.yml must NOT wire test-integrity yet.
 # Wiring CI before main owns the helper self-grades (workspace-bootstrap) or
 # races a fixed RUNNER_TEMP path. Phase 2 adds the isolated job after merge.
