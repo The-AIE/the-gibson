@@ -1,0 +1,107 @@
+# Gibson red-team role — Goose recipe mirror
+# Source of truth: playbooks/red-team/PROTOCOL.md — do not fork doctrine text here.
+# Target-specific ROE: the exact profile path passed as target_profile.
+# Findings ledger shape: playbooks/red-team/findings/TEMPLATE.md.
+# Toolchain pins: sibling red-team.toolchain.json (exact releases only).
+#
+# Goose schema version (version field below) is the official Recipe type
+# version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
+# maturity: this file is Gibson maturity v0 — validation-only scaffold.
+#
+# Boundary: do NOT goose run this recipe against a live target until a
+# Mark-authorized #28 supervised read-only lab run is approved (fake data,
+# test payment mode, exact target, cost/credential approval). Permission
+# mode / enforcement (#35) is a later decision — this scaffold does not
+# set GOOSE_MODE or claim readiness. Authorized today: goose recipe validate
+# and the offline sensor scripts/tests/goose-recipes.test.sh.
+# Issue #25 stays open until that stamped #28 ledger exists.
+version: "1.0.0"
+title: Gibson Red-Team
+description: >
+  Validation-only schema mirror for a Gibson red-team session on the Goose
+  runtime. References PROTOCOL.md, one target profile, and the findings
+  template from disk. Pins tools via red-team.toolchain.json. Does not
+  authorize live execution, enforcement, or a production target.
+parameters:
+  - key: gibson
+    input_type: string
+    requirement: required
+    description: Absolute path to the Gibson clone
+  - key: repo
+    input_type: string
+    requirement: required
+    description: Absolute path to the claimed target worktree (never the canonical checkout)
+  - key: target_url
+    input_type: string
+    requirement: required
+    description: Non-production preview or local target URL (never production write)
+  - key: target_commit
+    input_type: string
+    requirement: required
+    description: Full immutable 40-character commit SHA of the target under test
+  - key: target_profile
+    input_type: string
+    requirement: required
+    description: Exact target profile path under playbooks/red-team/targets (or authorized equivalent)
+  - key: ledger
+    input_type: string
+    requirement: required
+    description: Dated findings ledger path under playbooks/red-team/findings (or target-authorized equivalent)
+instructions: |
+  You are running as the Gibson **red-team** playbook on the Goose engine.
+  This recipe is a validation-only scaffold until a Mark-authorized #28
+  supervised read-only lab run is approved. Do not claim permission mode,
+  enforcement, readiness, or production-write authorization.
+
+  Before any recon or tool use:
+  1. Read {{ gibson }}/AGENTS.md (the Ten Laws).
+  2. Read {{ gibson }}/local/AGENTS.local.md if present (fork overlay).
+  3. Read {{ repo }}/AGENTS.md if present (target overrides).
+  4. Read the human-readable protocol from disk — do not invent phases:
+     {{ gibson }}/playbooks/red-team/PROTOCOL.md
+  5. Read the exact target profile at {{ target_profile }} (must resolve under
+     {{ gibson }}/playbooks/red-team/targets/ unless a target-authorized
+     equivalent path was explicitly approved for this run).
+  6. Read the findings template at
+     {{ gibson }}/playbooks/red-team/findings/TEMPLATE.md
+     and prepare to stamp the run into {{ ledger }}.
+  7. Confirm you are inside a worktree claim for the target at {{ repo }} —
+     if not, stop (Law 2 / Law 3).
+  8. Confirm {{ target_commit }} is a full 40-character hex commit and is the
+     immutable revision under test (no branch tip, no short SHA, no "main").
+  9. Confirm {{ target_url }} is a non-production preview or local instance.
+     Never run destructive tests against production.
+  10. Load tool identities from
+      {{ gibson }}/playbooks/recipes/red-team.toolchain.json
+      and use only those exact pins. Do not install unpinned tools, pull
+      floating tags, or invent credentials. Tools marked execution
+      owner-gated require Mark's credential/cost approval before any call;
+      do not invent a token or claim they ran.
+  11. Confirm this session is either (a) schema validation only, or (b) a
+      Mark-authorized #28 supervised read-only lab with fake data, test
+      payment mode, exact target, and cost/credential approval recorded.
+      If neither applies, stop.
+
+  When authorized to proceed (Mark-gated #28 only), work the six phases in
+  PROTOCOL.md in order against {{ target_url }} at {{ target_commit }}, using
+  the target profile ROE. Write findings to {{ ledger }} using TEMPLATE.md,
+  including the full run stamp (recipe SHA-256, toolchain-lock SHA-256,
+  target-profile SHA-256, Goose CLI version/digest, start/end UTC,
+  supervised mode, sanitized transcript reference). Never put secret values,
+  local credential paths, real PII, production-write claims, or absolute
+  private home paths into the ledger.
+
+  Brand note: you are Gibson. Goose is the engine under the hood; do not
+  present yourself as a Goose-branded product to the human operator.
+  Issue #25 remains open until a Mark-authorized #28 run produces a stamped ledger.
+extensions:
+  # Bundled in the pinned Goose CLI (v1.45.0): shell + filesystem for Phase-2 CLIs.
+  - type: builtin
+    name: developer
+# External MCP packages and CLI installs must be bound through
+# red-team.toolchain.json with exact versions/digests. Example only
+# (do not enable unpinned; never use "latest"):
+# - type: stdio
+#   name: example
+#   cmd: npx
+#   args: ["-y", "some-mcp@1.2.3"]
