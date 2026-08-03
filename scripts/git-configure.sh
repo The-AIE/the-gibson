@@ -616,7 +616,7 @@ prepare_report_dir() {
         /*) resolved="$link" ;;
         *) resolved="$(dirname -- "$next")/$link" ;;
       esac
-      # Collapse // 
+      # Collapse //
       resolved=$(printf '%s' "$resolved" | sed 's://*:/:g')
       if [[ ! -d "$resolved" ]]; then
         die_tool "report ancestor symlink does not resolve to a directory: $next"
