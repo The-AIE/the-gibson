@@ -148,8 +148,11 @@ if not data.get("instructions") and not data.get("prompt"):
 
 # Exact canonical numeric semver: MAJOR.MINOR.PATCH digits only.
 # Reject x/X/*, missing segments, prerelease/build, whitespace, operators,
-# ranges (|| , hyphen caret tilde), branch words.
-EXACT_SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# ranges (|| , hyphen caret tilde), branch words, and leading zeros
+# (except the single digit 0 as a complete numeric identifier).
+EXACT_SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
 FLOAT_WORDS = re.compile(
     r"(^|[@:=/\s-])(latest|stable|main|master)([@:=\s,\"']|$)|"
     r":(latest|stable|main|master)\b|"
@@ -426,7 +429,10 @@ for req in ("schema", "version", "tools"):
 if data.get("schema") != "gibson.toolchain-lock/v1":
     errors.append("unexpected schema: %r" % data.get("schema"))
 
-EXACT_SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# Exact MAJOR.MINOR.PATCH; leading zeros forbidden except sole digit 0.
+EXACT_SEMVER = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 # Registry/repository path required before @sha256 (digest-only is not a locator).
@@ -437,6 +443,11 @@ NONEXACT = re.compile(
     r"(\|\||>=|<=|[<>]|~|\^|,|\.x\b|\.X\b|\.\*|\bx\.|\bX\.|"
     r"refs/heads/|refs/tags/|(^|/)(main|master|latest|stable)(/|$))",
     re.I,
+)
+# Embedded version-like tokens in free-text locator fields (URLs, assets, …).
+# Captures optional v prefix + three numeric segments; used for cross-binding.
+EMBEDDED_VER = re.compile(
+    r"(?<![0-9])(v?)([0-9]+)\.([0-9]+)\.([0-9]+)(?![0-9])"
 )
 
 def is_exact_numeric_semver(s):
@@ -460,10 +471,18 @@ def is_ok_identity(s):
         return False
     if is_exact_numeric_semver(s):
         return True
-    if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", s):
+    if s.startswith("v") and is_exact_numeric_semver(s[1:]):
         return True
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*@[0-9]+\.[0-9]+\.[0-9]+", s):
-        return True
+    # name@exact or @scope/name@exact (not name==ver — that is package only)
+    if "==" in s:
+        return False
+    if "@" in s:
+        name, ver = s.rsplit("@", 1)
+        if name and is_exact_numeric_semver(ver):
+            if s.startswith("@"):
+                # scoped: @scope/name@version requires ≥2 @
+                return s.count("@") >= 2 and "/" in name
+            return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", name))
     return False
 
 def reject_identity(s, where):
@@ -473,6 +492,61 @@ def reject_identity(s, where):
     s = str(s)
     if not is_ok_identity(s):
         errors.append("non-exact identity pin in %s: %r" % (where, s))
+
+def identity_claimed_version(s):
+    """Return the exact version pin claimed by a tool identity, or None."""
+    if not isinstance(s, str) or s != s.strip() or any(ch.isspace() for ch in s):
+        return None
+    if is_exact_numeric_semver(s):
+        return s
+    if s.startswith("v") and is_exact_numeric_semver(s[1:]):
+        return s[1:]
+    if "==" in s:
+        return None
+    if "@" in s:
+        name, ver = s.rsplit("@", 1)
+        if name and is_exact_numeric_semver(ver):
+            return ver
+    return None
+
+def package_claimed_pin(pkg):
+    """Parse package pin → (name, exact-version) or None."""
+    if not isinstance(pkg, str) or pkg != pkg.strip() or any(ch.isspace() for ch in pkg):
+        return None
+    if "==" in pkg:
+        name, ver = pkg.split("==", 1)
+        if name and is_exact_numeric_semver(ver):
+            return (name, ver)
+        return None
+    if "@" in pkg:
+        name, ver = pkg.rsplit("@", 1)
+        if name and is_exact_numeric_semver(ver):
+            return (name, ver)
+    return None
+
+def identity_package_name(s):
+    """If identity is name@ver (or scoped), return name; else None."""
+    if not isinstance(s, str) or "==" in s or "@" not in s:
+        return None
+    if not is_ok_identity(s):
+        return None
+    name, ver = s.rsplit("@", 1)
+    if name and is_exact_numeric_semver(ver):
+        return name
+    return None
+
+def iter_embedded_version_claims(text):
+    """Yield (raw_token, normalized_or_None, leading_zero) from free text."""
+    if not isinstance(text, str):
+        return
+    for m in EMBEDDED_VER.finditer(text):
+        raw = m.group(0)
+        a, b, c = m.group(2), m.group(3), m.group(4)
+        leading = any((p.startswith("0") and p != "0") for p in (a, b, c))
+        if leading:
+            yield (raw, None, True)
+        else:
+            yield (raw, "%s.%s.%s" % (a, b, c), False)
 
 def validate_sha256_value(val, where):
     if not isinstance(val, str) or not HEX64.fullmatch(val):
@@ -546,8 +620,9 @@ for i, t in enumerate(tools):
         errors.append("tools[%d] not object" % i)
         continue
     tid = t.get("id")
+    where = "tools[%d]" % i
     if not tid:
-        errors.append("tools[%d] missing id" % i)
+        errors.append("%s missing id" % where)
     else:
         if tid in ids:
             errors.append("duplicate tool id: %s" % tid)
@@ -555,40 +630,124 @@ for i, t in enumerate(tools):
         found.add(tid)
     for f in ("name", "version", "identity", "source_url", "source_meta_url", "retrieved_utc", "execution"):
         if not t.get(f):
-            errors.append("tools[%d] (%s) missing %s" % (i, tid, f))
-    reject_nonexact_semver(t.get("version"), "tools[%d].version" % i)
-    reject_identity(t.get("identity"), "tools[%d].identity" % i)
+            errors.append("%s (%s) missing %s" % (where, tid, f))
+    reject_nonexact_semver(t.get("version"), "%s.version" % where)
+    reject_identity(t.get("identity"), "%s.identity" % where)
     if t.get("package") not in (None, ""):
         pkg = str(t["package"])
-        if "==" in pkg:
-            name, ver = pkg.split("==", 1)
-            if not name or not is_exact_numeric_semver(ver):
-                errors.append("tools[%d] package must be name==exact-semver, got %r" % (i, pkg))
-        elif "@" in pkg:
-            ver = pkg.rsplit("@", 1)[1]
-            if not is_exact_numeric_semver(ver):
-                errors.append("tools[%d] package must be name@exact-semver, got %r" % (i, pkg))
-        else:
-            errors.append("tools[%d] package missing exact version pin: %r" % (i, pkg))
+        parsed_pkg = package_claimed_pin(pkg)
+        if parsed_pkg is None:
+            if "==" in pkg or "@" in pkg:
+                errors.append(
+                    "%s package must be name==exact-semver or name@exact-semver, got %r"
+                    % (where, pkg)
+                )
+            else:
+                errors.append("%s package missing exact version pin: %r" % (where, pkg))
     dig = t.get("digest")
     if dig is None:
-        errors.append("tools[%d] (%s) missing digest algorithm/value" % (i, tid))
+        errors.append("%s (%s) missing digest algorithm/value" % (where, tid))
     else:
         # socket-cli uses npm integrity; others sha256
         if tid == "socket-cli":
-            validate_digest_obj(dig, "tools[%d]" % i, allowed=("sha512-integrity",))
+            validate_digest_obj(dig, where, allowed=("sha512-integrity",))
         else:
-            validate_digest_obj(dig, "tools[%d]" % i, allowed=("sha256",))
+            validate_digest_obj(dig, where, allowed=("sha256",))
     url = t.get("source_url") or ""
     meta = t.get("source_meta_url") or ""
     if not (url.startswith("https://") and meta.startswith("https://")):
-        errors.append("tools[%d] source URLs must be https" % i)
+        errors.append("%s source URLs must be https" % where)
     for u in (url, meta):
         if re.search(r"(medium\.com|blogspot\.|dev\.to|twitter\.|x\.com/)", u):
-            errors.append("tools[%d] non-authoritative source host: %s" % (i, u))
+            errors.append("%s non-authoritative source host: %s" % (where, u))
     ex = t.get("execution")
     if ex not in ("offline-validate-only", "pin-only", "owner-gated"):
-        errors.append("tools[%d] unexpected execution: %r" % (i, ex))
+        errors.append("%s unexpected execution: %r" % (where, ex))
+
+    # --- Fail-closed cross-field binding for core tools[] ---
+    # Canonical identity/pin: required exact tools[i].version.
+    # Every redundant locator claim (identity/package/asset/artifact/source*/
+    # repository/ref/url aliases/integrity) must be absent or normalize to
+    # exactly that pin (and package-shaped names must agree with each other).
+    # Independent syntactic validity of a field is not enough.
+    ver = t.get("version")
+    if isinstance(ver, str) and is_exact_numeric_semver(ver):
+        canon = ver
+        # Structured identity claim
+        ident = t.get("identity")
+        id_ver = None
+        if ident not in (None, ""):
+            id_ver = identity_claimed_version(str(ident))
+            if id_ver is not None and id_ver != canon:
+                errors.append(
+                    "%s conflicting identity vs version "
+                    "(identity %r != canonical pin %r)" % (where, ident, canon)
+                )
+        # Structured package claim
+        pkg_pin = None
+        if t.get("package") not in (None, ""):
+            pkg_pin = package_claimed_pin(str(t["package"]))
+            if pkg_pin is not None and pkg_pin[1] != canon:
+                errors.append(
+                    "%s conflicting package vs version "
+                    "(package %r != canonical pin %r)"
+                    % (where, t["package"], canon)
+                )
+        # Package-shaped identity must agree with package field when both present
+        if pkg_pin is not None and ident not in (None, ""):
+            iname = identity_package_name(str(ident))
+            if iname is not None and iname != pkg_pin[0]:
+                errors.append(
+                    "%s conflicting package identity name "
+                    "(identity %r vs package %r)" % (where, ident, t["package"])
+                )
+        # integrity alias must equal digest.value when both present
+        if t.get("integrity") not in (None, ""):
+            dval = None
+            if isinstance(t.get("digest"), dict):
+                dval = t["digest"].get("value")
+            if dval is None or str(t["integrity"]) != str(dval):
+                errors.append(
+                    "%s conflicting integrity vs digest.value" % where
+                )
+        # Free-text / filename / URL embedding: every version-like token must
+        # equal the canonical pin (no hard-coded mutant strings).
+        # notes/retrieved_utc are intentionally excluded (prose / dates).
+        locator_fields = (
+            "identity",
+            "package",
+            "asset",
+            "artifact",
+            "source_url",
+            "source_meta_url",
+            "source",
+            "repository",
+            "ref",
+            "tarball",
+            "filename",
+            "download_url",
+            "url",
+        )
+        for field in locator_fields:
+            if field not in t or t[field] in (None, ""):
+                continue
+            val = str(t[field])
+            for raw, norm, leading_zero in iter_embedded_version_claims(val):
+                if leading_zero:
+                    errors.append(
+                        "%s.%s embeds non-exact/leading-zero version %r"
+                        % (where, field, raw)
+                    )
+                elif norm != canon:
+                    errors.append(
+                        "%s conflicting %s version claim %r vs canonical pin %r"
+                        % (where, field, raw, canon)
+                    )
+        # Optional artifact must not contradict asset when both present as
+        # equal-shaped filenames without version tokens is fine; when both
+        # embed versions, the free-text scan already enforces pin agreement.
+        # repository / ref without version tokens are allowed only as optional
+        # non-version locators (no alternate pin).
 
 missing = required_ids - found
 for m in sorted(missing):
@@ -3299,6 +3458,143 @@ data["mcp_packages"] = [{
 '
 out=$(check_lock_py "$ROOT/bad-lock-mcp-cross-shape-pkg-git.json" 2>&1); rc=$?
 expect_fail "red: MCP package+git cross-shape mixture fails" "$out" "$rc" "multiple conflicting locator\|cross-shape"
+
+# ---------------------------------------------------------------------------
+echo "red fixtures: tools[] cross-field pin binding (Codex review repair)"
+# ---------------------------------------------------------------------------
+# Core tools[] must bind every redundant locator claim to one canonical pin.
+# Independent field syntax is not enough — contradictions fail closed.
+
+# Mutant: goose identity v9.9.9 with version still 1.45.0
+lock_mutant "$ROOT/bad-lock-tool-goose-identity-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "goose-cli":
+        t["identity"] = "v9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-goose-identity-conflict.json" 2>&1); rc=$?
+expect_fail "red: goose identity v9.9.9 vs version 1.45.0 fails" "$out" "$rc" "conflict\|identity"
+
+# Mutant: Goose source URL rewritten to v9.9.9, version still 1.45.0
+lock_mutant "$ROOT/bad-lock-tool-goose-source-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "goose-cli":
+        t["source_url"] = str(t.get("source_url") or "").replace("v1.45.0", "v9.9.9")
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-goose-source-conflict.json" 2>&1); rc=$?
+expect_fail "red: goose source_url v9.9.9 vs version 1.45.0 fails" "$out" "$rc" "conflict\|source_url"
+
+# Mutant: gitleaks version 9.9.9 against unchanged identity/asset/digest/source
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-version-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["version"] = "9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-version-conflict.json" 2>&1); rc=$?
+expect_fail "red: gitleaks version 9.9.9 vs identity/asset/source fails" "$out" "$rc" "conflict"
+
+# Mutant: gitleaks identity v9.9.9 against unchanged version/asset/digest/source
+lock_mutant "$ROOT/bad-lock-tool-gitleaks-identity-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["identity"] = "v9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-gitleaks-identity-conflict.json" 2>&1); rc=$?
+expect_fail "red: gitleaks identity v9.9.9 vs version 8.30.1 fails" "$out" "$rc" "conflict\|identity"
+
+# Mutant: semgrep package semgrep==9.9.9 against version 1.172.0
+lock_mutant "$ROOT/bad-lock-tool-semgrep-package-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "semgrep":
+        t["package"] = "semgrep==9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-semgrep-package-conflict.json" 2>&1); rc=$?
+expect_fail "red: semgrep package==9.9.9 vs version 1.172.0 fails" "$out" "$rc" "conflict\|package"
+
+# Mutant: semgrep asset filename containing 9.9.9 against version 1.172.0
+lock_mutant "$ROOT/bad-lock-tool-semgrep-asset-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "semgrep":
+        t["asset"] = "semgrep-9.9.9.tar.gz"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-semgrep-asset-conflict.json" 2>&1); rc=$?
+expect_fail "red: semgrep asset 9.9.9 vs version 1.172.0 fails" "$out" "$rc" "conflict\|asset"
+
+# Mutant: socket package socket@9.9.9 against version 1.1.147
+lock_mutant "$ROOT/bad-lock-tool-socket-package-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "socket-cli":
+        t["package"] = "socket@9.9.9"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-socket-package-conflict.json" 2>&1); rc=$?
+expect_fail "red: socket package@9.9.9 vs version 1.1.147 fails" "$out" "$rc" "conflict\|package"
+
+# Mutant: noncanonical leading-zero version 08.30.1
+lock_mutant "$ROOT/bad-lock-tool-leading-zero-version.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["version"] = "08.30.1"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-leading-zero-version.json" 2>&1); rc=$?
+expect_fail "red: leading-zero version 08.30.1 fails" "$out" "$rc" "semver"
+
+# Matching green: redundant locator aliases that exact-agree with the pin
+lock_mutant "$ROOT/ok-lock-tool-artifact-equal-asset.json" '
+for t in data["tools"]:
+    if t.get("id") == "gitleaks":
+        t["artifact"] = t["asset"]
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-artifact-equal-asset.json" 2>&1); rc=$?
+expect_pass "green: gitleaks artifact equal to asset (matching pin)" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-tool-source-equal-url.json" '
+for t in data["tools"]:
+    if t.get("id") == "goose-cli":
+        t["source"] = t["source_url"]
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-source-equal-url.json" 2>&1); rc=$?
+expect_pass "green: goose source equal to source_url (matching pin)" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-tool-socket-integrity-equal.json" '
+for t in data["tools"]:
+    if t.get("id") == "socket-cli":
+        t["integrity"] = t["digest"]["value"]
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-socket-integrity-equal.json" 2>&1); rc=$?
+expect_pass "green: socket integrity equal digest.value" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-tool-semgrep-package-identity.json" '
+for t in data["tools"]:
+    if t.get("id") == "semgrep":
+        t["identity"] = "semgrep@1.172.0"
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-semgrep-package-identity.json" 2>&1); rc=$?
+expect_pass "green: semgrep identity package@pin matching package/version" "$out" "$rc"
+
+lock_mutant "$ROOT/ok-lock-tool-download-url-equal.json" '
+for t in data["tools"]:
+    if t.get("id") == "trufflehog":
+        t["download_url"] = t["source_url"]
+'
+out=$(check_lock_py "$ROOT/ok-lock-tool-download-url-equal.json" 2>&1); rc=$?
+expect_pass "green: trufflehog download_url equal source_url" "$out" "$rc"
+
+# Red: integrity contradicts digest
+lock_mutant "$ROOT/bad-lock-tool-integrity-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "socket-cli":
+        t["integrity"] = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-integrity-conflict.json" 2>&1); rc=$?
+expect_fail "red: socket integrity vs digest.value conflict fails" "$out" "$rc" "conflict\|integrity"
+
+# Red: package-shaped identity name disagrees with package field
+lock_mutant "$ROOT/bad-lock-tool-package-name-conflict.json" '
+for t in data["tools"]:
+    if t.get("id") == "socket-cli":
+        t["identity"] = "other@1.1.147"
+'
+out=$(check_lock_py "$ROOT/bad-lock-tool-package-name-conflict.json" 2>&1); rc=$?
+expect_fail "red: socket identity name vs package name fails" "$out" "$rc" "conflict\|identity\|package"
 
 # ---------------------------------------------------------------------------
 echo "docs truth boundary (no readiness upgrade)"
