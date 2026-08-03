@@ -32,6 +32,115 @@ The same gate runs in CI (`ci/gibson-gate.yml`) so it holds regardless of which
 runtime wrote the code. Local gate is a courtesy to your own iteration speed; CI
 gate is the law.
 
+## Test-integrity (count ratchet — issue #70)
+
+The green gate used to treat "deleted the failing test" the same as "fixed the
+failing test." That is the highest-leverage way a model optimizing for green
+goes legitimately green while reducing coverage. The **test-integrity** sensor
+closes that bypass:
+
+| Signal | Gate result |
+|---|---|
+| Test **total** drops vs trusted baseline | hard-fail `test-integrity` with exact delta (`N → M`) |
+| **skip + todo** rises vs trusted baseline | hard-fail `test-integrity` with exact delta |
+| Total rises / skips fall | pass (no waiver needed) |
+| Exact visible waiver covers the delta | pass, and the waiver is **surfaced** in gate output for the reviewer |
+
+### Waiver (visible, exact, delta-consistent)
+
+PR body or commit text is **inert data** — matched as text, never evaluated as
+code. Accepted forms (optional leading `- `):
+
+```
+Test-integrity: removed <n> for <reason>
+Test-integrity: skip +<n> for <reason>
+Test-integrity: removed <n>, skip +<m> for <reason>
+```
+
+Fail closed (do **not** authorize):
+
+- Hidden in HTML comments (`<!-- ... -->`)
+- Near-matches (`test-integrity:`, `Test integrity:`, `removed three`, missing `for <reason>`)
+- Wrong delta (`removed 2` when 3 tests disappeared)
+- Malformed / zero-delta noise
+
+### Trusted baseline (local now; CI in phase 2)
+
+| Context | Authority |
+|---|---|
+| Local `gate.sh` | `.gibson-baseline.json` from `gate-baseline.sh` (gitignored, worktree-local) |
+| CI `pull_request` | **Not wired in this bootstrap PR.** Phase 2 (after this helper is on main) adds an isolated grading job that re-derives metrics at the PR base SHA using the **immutable merge-base copy** of `scripts/test-integrity.mjs` |
+
+**Phase-1 bootstrap (this change):** ships the reviewed helper, local
+`gate.sh` / `gate-baseline.sh` integration, focused adversarial sensors, and
+reviewer guidance. It deliberately **does not** change `ci/gibson-gate.yml`.
+Wiring CI before main owns the helper would either (a) fall back to the PR-head
+copy and self-grade, or (b) use a fixed temp path that untrusted head steps can
+pre-poison. Do not treat the current CI template as protected for test-integrity.
+
+**Phase 2 (follow-up, after merge):** from a base that already contains
+`scripts/test-integrity.mjs`, wire an isolated CI job that copies the helper
+from the merge-base worktree, re-runs the base suite, and compares with
+`--trusted-source merge-base:<sha>`. That job must never load the PR-head helper
+or follow attacker-controlled symlinks for the trusted binary.
+
+### Baseline regeneration (journaled)
+
+An intentional suite reduction is not a side effect of re-recording the baseline:
+
+```bash
+gate-baseline.sh --regenerate --reason "removed obsolete flaky suite after #70"
+```
+
+Requires a nonempty `--reason`. Appends one JSON line to
+`.gibson/test-integrity-journal.jsonl` with timestamp, SHA, old/new metrics, and
+reason. Overwriting a reduced baseline without the flag hard-fails.
+
+### Summary contract (metric parsing)
+
+Prefer an explicit machine line from the suite (vendor-blind):
+
+```
+GIBSON_TEST_METRICS total=42 skipped=2 todo=0
+# or JSON:
+GIBSON_TEST_METRICS {"total":42,"skipped":2,"todo":0}
+```
+
+Also recognized: Vitest `Tests … (N)` summaries, Jest `Tests: … total`,
+node:test `# tests` / `# skip` / `# todo`, TAP `1..N` plans.
+
+**No self-authorization:** explicit `GIBSON_TEST_METRICS` lines do **not** outrank
+runner summaries. **Every** explicit KV/JSON line and **every** matching native
+runner summary block (Vitest / Jest / node:test / TAP plan) is collected — never
+first-match or last-match only. If any two sources disagree on total/skipped/todo
+the parse fails closed; counters from different repeated native blocks are never
+mixed into one fabricated metric. Within one node:test `# tests` region every
+`# skip` / `# todo` counter is collected (identical may agree; disagreement fails
+closed — never first-match on `# skip 0` then `# skip 2`). TAP SKIP/TODO result
+lines bind to the owning plan region (plan-at-end: since previous plan through
+current plan) so two repeated `1..10` runs with one SKIP each yield two agreeing
+`skipped=1` metrics, not whole-stream `skipped=2` on each; ambiguous plan-region
+ownership fails closed rather than inventing a metric. A test's stdout must never
+self-authorize head metrics — e.g. honest `Tests 7 passed (7)` plus a fake
+`GIBSON_TEST_METRICS total=10`, multi-explicit `total=10` then `total=7`, or
+conflicting repeated native lines such as Jest `Tests: 10 … total` then
+`Tests: 7 … total`, node:test `# tests 10` then `# tests 7`, TAP `1..10` then
+`1..7`, or Vitest honest-then-fake / fake-then-honest summary blocks.
+
+**Fail closed:** unparseable, negative, non-integer, non-`Number.isSafeInteger`,
+or skip+todo > total metrics never silently become zero — the sensor errors
+instead. Values beyond `Number.MAX_SAFE_INTEGER` (e.g. `9007199254740993`) are
+rejected so precision loss cannot mask a real delta.
+
+**Waiver both axes:** claimed `removed` and `skip` must each equal
+`max(actual_delta, 0)`. Overclaiming the unused axis, or a waiver with no
+integrity reduction, fails closed.
+**Known limit:** count-only comparison cannot detect "deleted A, added B of equal
+count." Prefer named test identities in product harnesses that can do that
+cheaply without ballooning scope; The Gibson's own gate stays count-based and
+vendor-blind on purpose. Sensors live in `scripts/test-integrity.mjs` and
+`scripts/tests/gate.test.sh`.
+
 ## Risk tiers
 
 | Tier | Definition | Treatment |
