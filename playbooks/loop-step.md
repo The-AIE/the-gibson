@@ -169,10 +169,31 @@ touch /path/to/target/gibson/HALT
 
 ## End-of-step obligations
 
-1. **Rewrite** `{{repo_path}}/gibson/loop-state.md` with: issue, PR, hat
-   completed, next hat, round, parked?, next action one-liner, and the
-   column-zero field `updated: <UTC timestamp>` (same key `scripts/loop.sh`
-   writes on init — not `timestamp:`, `updated_at:`, or an indented variant).
+1. **Rewrite** `{{repo_path}}/gibson/loop-state.md` against the exact ten-key
+   contract (issue #75). The driver validates this file with
+   `scripts/validate-loop-state.sh` before the next hat runs and after every
+   real runner exit — a malformed rewrite is `state-corrupt`, restored from
+   snapshot, and never silently defaulted to `builder`.
+
+   **Required column-zero keys (exactly once each):**
+
+   | Key | Rule |
+   |---|---|
+   | `updated` | Column-zero field `updated: <UTC timestamp>` — strict UTC instant `YYYY-MM-DDTHH:MM:SSZ` (real calendar date; no fractions, no offsets). Stamp **now** (UTC) on every rewrite — must be ≥ the iteration start the driver captured when the rewrite changes state. Not `timestamp:`, `updated_at:`, or an indented variant. |
+   | `issue` | Current issue id/ref (may be empty while triaging). |
+   | `pr` | Current PR id/ref (may be empty). |
+   | `hat` | Hat you just completed — one of: `builder`, `test-engineer`, `reviewer`, `ux-evaluator`, `security`, `release`, `historian`, `decomposer`, `planner`. |
+   | `next_hat` | Hat the next fresh context must wear — same enum as `hat`. |
+   | `round` | Non-negative base-10 integer (fix→review rounds for this PR). |
+   | `parked` | Exactly `true` or `false`. |
+   | `handoff` | Branch name ready for supervisor, or empty. |
+   | `handoff_sha` | Exact head SHA for that branch, or empty. |
+   | `next_action` | One-liner for the next context (colons inside the value are fine). |
+
+   Extra keys (e.g. `notes:`) may remain. Keys must be at column zero — indentation
+   and `#` comments never satisfy a required key. Do not duplicate keys. Do not
+   write `timestamp:`, `updated_at:`, or indented lookalikes for `updated`.
+
    - If a branch is pushed and ready for review and the driver runs with
      `--supervisor devin`, set **both** `handoff: <branch>` and
      `handoff_sha: <the exact head SHA you pushed>`. The driver forwards it to the

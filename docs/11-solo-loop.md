@@ -65,8 +65,60 @@ Two findings from Anthropic's long-running harness work carry the whole design:
 - **`gibson/loop-state.md`** (in the target repo, gitignored or branch-local):
   current issue, hat, round count, next action. The *only* thing a fresh context
   needs to resume — crash recovery is `git pull` + read this file.
+  **Schema (issue #75):** ten required column-zero keys, exactly once each —
+  `updated`, `issue`, `pr`, `hat`, `next_hat`, `round`, `parked`, `handoff`,
+  `handoff_sha`, `next_action`. Extra keys (e.g. `notes`) are allowed.
+  `hat` / `next_hat` are the nine-hat enum; `round` is a non-negative base-10
+  integer; `parked` is exactly `true` / `false`; `updated` is a real strict UTC
+  `YYYY-MM-DDTHH:MM:SSZ` instant. Shared checker: `scripts/validate-loop-state.sh`
+  (quiet on success). Indentation and comments never satisfy a required key.
+- **`gibson/.loop-state.prev`**: last validated pre-iteration snapshot. The driver
+  copies loop-state here atomically (temp + rename) immediately before a real
+  runner invocation. Recovery restores **exact bytes** from this file; corrupt
+  content must never overwrite it. A successful later iteration may replace it
+  with the next validated pre-state.
 - **`gibson/journal.md`**: append-only run log — one entry per loop iteration.
-  Feeds the historian and Mark's digest.
+  Feeds the historian and Mark's digest. `state-corrupt` sections are distinct
+  from runner-failure and halt entries.
+
+### Validation / snapshot / recovery order (issue #75)
+
+Every real iteration (not `--dry-run` / `--print-prompt`) follows this order:
+
+1. **Halt first** (issue #71): every kill-switch path runs before default-state
+   creation, validation, or snapshotting. A halted cold or existing repo leaves
+   both `loop-state.md` and `.loop-state.prev` byte-identical or absent, starts
+   no work, and queues no handoff.
+2. **Validate before reading `next_hat`:** never silently default a missing or
+   malformed `next_hat` to `builder`. If current state is corrupt → classify
+   exactly once as `state-corrupt`, journal diagnostics + unified diff, restore
+   exact bytes from the last valid snapshot **if that snapshot still validates**,
+   count one failure-budget unit, and do not run or hand off. Missing/unusable
+   snapshot → fail closed, journal, count once, never invent default content.
+3. **Snapshot** the validated pre-iteration state to `.loop-state.prev` (atomic)
+   immediately before the real runner. Snapshot failure starts no runner and
+   counts as a single `state-corrupt` / recovery-control failure.
+4. **Capture** a strict UTC `iteration_start` immediately before invoking the
+   runner. After every real runner exit, re-validate schema before resetting
+   failures or calling `supervisor_handoff`. When the agent rewrote loop-state
+   (bytes differ from the pre-iteration snapshot), also require
+   `updated >= iteration_start` so a rewrite with a stale or rolled clock is
+   `state-corrupt`. When bytes are identical to the snapshot the agent did not
+   rewrite — schema-only applies; pure no-progress detection is issue #63.
+5. **Post-run corrupt/stale:** distinct `state-corrupt` journal section
+   (validator diagnostics + diff), exact-byte restore, exactly one failure,
+   suppress handoff. Precedence over runner-failure even when the runner also
+   exited nonzero — do not double-count or label it runner-failure / no-progress.
+6. **Valid state + runner nonzero:** existing runner-failure behavior, count
+   exactly one. **Valid state + runner exit 0:** reset the consecutive failure
+   budget and may hand off. Escalation / budget thresholds fire once at the
+   existing values.
+7. **`--dry-run` / `--print-prompt`:** inert for snapshot, recovery, and
+   state-corrupt journal mutations; no runner, no handoff.
+
+The future no-progress sensor (issue #63) will **reuse this timestamp parser**
+(`validate-loop-state.sh` / its strict UTC implementation) rather than inventing
+another one. This issue does not implement #63's no-progress sensor.
 
 ## Safety rails (unattended ≠ unbounded)
 
