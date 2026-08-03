@@ -1386,13 +1386,43 @@ fi
 unset GH_STUB_EXPECT_REF
 unset GH_STUB_BEHAVIOR
 
+# Inert multi-iter runner that still stamps updated (issue #75). A pure
+# `cat >/dev/null` leaves loop-state byte-identical with a pre-iteration stamp,
+# which is state-corrupt under post-run freshness. Real agents rewrite
+# updated: every hat; cadence sensors only need the remote-halt side effects.
+# Written as a script (not a shell function): HERMES_CMD is eval'd inside loop.sh.
+cat > "$CALLS/stamp-and-noop.sh" <<'STAMP'
+#!/usr/bin/env bash
+set -euo pipefail
+# REPO is expanded when the script is written by the suite (below).
+state="$GIBSON_STAMP_STATE"
+if [[ -n "${state:-}" && -f "$state" ]]; then
+  python3 - "$state" <<'PY'
+import re, sys
+from datetime import datetime, timezone
+path = sys.argv[1]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    sys.exit(0)
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+text2, n = re.subn(r"(?m)^updated:.*$", "updated: " + now, text, count=1)
+if n == 1:
+    open(path, "w", encoding="utf-8").write(text2)
+PY
+fi
+cat >/dev/null
+STAMP
+chmod +x "$CALLS/stamp-and-noop.sh"
+
 echo "remote halt: cadence caches checks in-process; loop pre-handoff does not double-call"
 setup_repo with-remote
 # No handoff queued — only iteration-top remote checks (stub supervisor unused).
 export GH_STUB_BEHAVIOR=ok-clear
 export GIBSON_REMOTE_HALT_INTERVAL=3
+export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 : > "$CALLS/gh.log"
-HERMES_CMD='cat >/dev/null' \
+HERMES_CMD="$CALLS/stamp-and-noop.sh" \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
     --max-iterations 6 >/dev/null 2>"$ROOT/cadence.err"
 cadence_rc=$?
@@ -1423,8 +1453,9 @@ echo "remote halt: zero-padded interval 08 is base-10 cadence (not invalid octal
 setup_repo with-remote
 export GH_STUB_BEHAVIOR=ok-clear
 export GIBSON_REMOTE_HALT_INTERVAL=08
+export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 : > "$CALLS/gh.log"
-HERMES_CMD='cat >/dev/null' \
+HERMES_CMD="$CALLS/stamp-and-noop.sh" \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
     --max-iterations 16 >/dev/null 2>"$ROOT/cadence-08.err"
 cadence_08_rc=$?
@@ -1456,8 +1487,9 @@ echo "remote halt: zero-padded interval 09 is base-10 cadence (not invalid octal
 setup_repo with-remote
 export GH_STUB_BEHAVIOR=ok-clear
 export GIBSON_REMOTE_HALT_INTERVAL=09
+export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 : > "$CALLS/gh.log"
-HERMES_CMD='cat >/dev/null' \
+HERMES_CMD="$CALLS/stamp-and-noop.sh" \
   "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
     --max-iterations 18 >/dev/null 2>"$ROOT/cadence-09.err"
 cadence_09_rc=$?

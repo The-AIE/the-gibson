@@ -149,8 +149,14 @@ PLAYBOOK="$GIBSON/playbooks/loop-step.md"
 
 STATE_DIR="$REPO/gibson"
 STATE_FILE="$STATE_DIR/loop-state.md"
+# Last validated pre-iteration snapshot (issue #75). Recovery restores exact
+# bytes from this file; corrupt content must never overwrite it.
+STATE_SNAPSHOT="$STATE_DIR/.loop-state.prev"
 JOURNAL="$STATE_DIR/journal.md"
 HALT_FILE="$STATE_DIR/HALT"
+# Shared schema + strict-UTC primitive (issue #75). Looked up via $GIBSON so a
+# test copy of this driver under a fake scripts/ dir still finds the real file.
+VALIDATE_LOOP_STATE=""
 # Persistent runtime latch (issue #71 KeepAlive / relaunch safety). Not a tracked
 # Gibson source file — lives only under the target repo's gibson/ state dir.
 # Records source + reason so (a) journal halt sections are not duplicated on
@@ -1358,11 +1364,15 @@ stop_if_halted() {
   halt_lock_release
 }
 
-# Ensure loop-state exists (and has handoff fields) only AFTER a clean kill-
-# switch check. A remote halt on a cold start must not create or rewrite this.
+# Ensure loop-state exists only AFTER a clean kill-switch check. A remote halt
+# on a cold start must not create or rewrite this (issue #71). Default content
+# is the full ten-key contract (issue #75); missing keys on an existing file are
+# NOT silently repaired — validate_loop_state fails closed instead.
+# Never write through an existing non-file path (directory/symlink/device): leave
+# it for pre-read validation + quarantine/restore (issue #75).
 ensure_loop_state() {
   mkdir -p "$STATE_DIR"
-  if [[ ! -f "$STATE_FILE" ]]; then
+  if [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
     cat > "$STATE_FILE" <<EOF
 # Gibson loop state
 updated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -1378,10 +1388,259 @@ next_action: triage highest-priority unblocked unclaimed issue
 notes: initialized by loop.sh
 EOF
   fi
-  grep -q '^handoff:' "$STATE_FILE" || printf 'handoff:\n' >> "$STATE_FILE"
-  grep -q '^handoff_sha:' "$STATE_FILE" || printf 'handoff_sha:\n' >> "$STATE_FILE"
+  if [[ ! -e "$JOURNAL" && ! -L "$JOURNAL" ]]; then
+    echo "# Gibson loop journal" > "$JOURNAL"
+  fi
+}
+
+# --- loop-state validation / snapshot / recovery (issue #75) -----------------
+
+validate_loop_state_bin() {
+  if [[ -z "$VALIDATE_LOOP_STATE" ]]; then
+    VALIDATE_LOOP_STATE="$GIBSON/scripts/validate-loop-state.sh"
+  fi
+  [[ -x "$VALIDATE_LOOP_STATE" || -f "$VALIDATE_LOOP_STATE" ]] \
+    || die "missing validate-loop-state.sh at $VALIDATE_LOOP_STATE"
+  printf '%s' "$VALIDATE_LOOP_STATE"
+}
+
+# Run the shared validator. Optional second arg is --min-updated bound.
+# Prints diagnostics on stderr (via the validator); returns 0/1.
+run_validate_loop_state() {
+  local file="$1" min="${2:-}" bin
+  bin=$(validate_loop_state_bin)
+  if [[ -n "$min" ]]; then
+    bash "$bin" "$file" --min-updated "$min"
+  else
+    bash "$bin" "$file"
+  fi
+}
+
+# Strict UTC now — same grammar the validator accepts. python3 argv-safe.
+# python3 is a hard runtime dependency for timestamp validation (issue #75).
+require_python3() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    die "python3 is required for loop-state timestamp validation (issue #75); install python3 or put it on PATH"
+  fi
+}
+
+strict_utc_now() {
+  require_python3
+  python3 - <<'PY'
+from datetime import datetime, timezone
+print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+}
+
+# Path shape helpers for snapshot/restore destinations (issue #75).
+# Never follow symlinks; never treat a directory/device as a replaceable file.
+# `mv -f temp dir` would nest the temp inside dir and return 0 — that is not success.
+is_regular_nonsymlink_file() {
+  # Exists as a regular file and is not a symlink ( -f follows links; -L first).
+  [[ ! -L "$1" && -f "$1" ]]
+}
+
+dest_ok_for_atomic_file_replace() {
+  # Missing is OK (create). Existing must be a regular non-symlink file.
+  if [[ -L "$1" ]]; then return 1; fi
+  if [[ -e "$1" ]]; then
+    [[ -f "$1" ]] || return 1
+  fi
+  return 0
+}
+
+path_shape_label() {
+  if [[ -L "$1" ]]; then
+    printf '%s' "symlink"
+  elif [[ -d "$1" ]]; then
+    printf '%s' "directory"
+  elif [[ -f "$1" ]]; then
+    printf '%s' "file"
+  elif [[ -e "$1" ]]; then
+    printf '%s' "special"
+  else
+    printf '%s' "missing"
+  fi
+}
+
+# Atomic same-filesystem snapshot of the validated pre-iteration state.
+# Temp + rename so readers never see a partial .loop-state.prev.
+# Refuses unsafe destinations (directory/symlink/device) before creating temps
+# that could be nested into them. Claims success only when the exact destination
+# path is a regular non-symlink file byte-identical to the source.
+snapshot_loop_state() {
+  local tmp shape
+  mkdir -p "$STATE_DIR" || return 1
+  if ! is_regular_nonsymlink_file "$STATE_FILE"; then
+    info "snapshot refused: live loop-state is not a regular non-symlink file (shape=$(path_shape_label "$STATE_FILE"))"
+    return 1
+  fi
+  if ! dest_ok_for_atomic_file_replace "$STATE_SNAPSHOT"; then
+    shape=$(path_shape_label "$STATE_SNAPSHOT")
+    info "snapshot refused: $STATE_SNAPSHOT is not a safe file destination (shape=$shape) — not nesting a temp inside it"
+    return 1
+  fi
+  tmp=$(mktemp "${STATE_DIR}/.loop-state.prev.XXXXXX") || return 1
+  if ! cp "$STATE_FILE" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$STATE_SNAPSHOT"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  # Success only if the exact destination path is the intended regular file.
+  if ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+    info "snapshot incomplete: destination is not a regular non-symlink file after move"
+    return 1
+  fi
+  if ! cmp -s "$STATE_FILE" "$STATE_SNAPSHOT"; then
+    info "snapshot incomplete: destination bytes differ from live loop-state"
+    return 1
+  fi
+  return 0
+}
+
+# Restore STATE_FILE byte-for-byte from the last valid snapshot. Never writes
+# through a partial file (temp + rename). Returns 0 only on exact restore.
+# Unsafe live destinations (directory/symlink/device) are quarantined by rename
+# in the same parent — never deleted — then the exact snapshot is installed.
+# If quarantine or install cannot make the exact path a regular file matching
+# the snapshot, fail closed (recovery-incomplete); never claim success.
+restore_loop_state_from_snapshot() {
+  local tmp shape quarantine
+  if ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+    info "restore refused: snapshot is not a regular non-symlink file (shape=$(path_shape_label "$STATE_SNAPSHOT"))"
+    return 1
+  fi
+
+  if [[ -L "$STATE_FILE" || ( -e "$STATE_FILE" && ! -f "$STATE_FILE" ) ]]; then
+    shape=$(path_shape_label "$STATE_FILE")
+    quarantine="${STATE_DIR}/loop-state.md.corrupt-quarantine.$(date -u +%Y%m%dT%H%M%SZ).$$"
+    # Refuse to clobber an existing quarantine name; fail closed instead.
+    if [[ -e "$quarantine" || -L "$quarantine" ]]; then
+      info "recovery-incomplete: quarantine target already exists ($quarantine); leaving unsafe live path untouched (shape=$shape)"
+      return 1
+    fi
+    if ! mv -f "$STATE_FILE" "$quarantine"; then
+      info "recovery-incomplete: could not quarantine unsafe loop-state (shape=$shape); leaving it untouched — exact restore did not occur"
+      return 1
+    fi
+    info "state-corrupt: quarantined unsafe loop-state ($shape) to $(basename "$quarantine") — contents preserved, not deleted"
+  fi
+
+  # Destination must now be missing or a regular non-symlink file.
+  if ! dest_ok_for_atomic_file_replace "$STATE_FILE"; then
+    info "recovery-incomplete: live loop-state destination still unsafe after quarantine (shape=$(path_shape_label "$STATE_FILE"))"
+    return 1
+  fi
+
+  tmp=$(mktemp "${STATE_DIR}/.loop-state.restore.XXXXXX") || return 1
+  if ! cp "$STATE_SNAPSHOT" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$STATE_FILE"; then
+    rm -f "$tmp"
+    info "recovery-incomplete: atomic restore move failed"
+    return 1
+  fi
+  if ! is_regular_nonsymlink_file "$STATE_FILE"; then
+    info "recovery-incomplete: live path is not a regular non-symlink file after restore"
+    return 1
+  fi
+  if ! cmp -s "$STATE_SNAPSHOT" "$STATE_FILE"; then
+    info "recovery-incomplete: restored bytes do not match snapshot"
+    return 1
+  fi
+  return 0
+}
+
+# Journal a distinct state-corrupt section with validator diagnostics and a
+# unified diff between snapshot (if any) and the corrupt state. Does not
+# modify either file itself.
+journal_state_corrupt() {
+  local phase="$1"   # pre-read | post-run | snapshot | snapshot-missing
+  local diag_file="$2"
+  mkdir -p "$STATE_DIR"
   if [[ ! -f "$JOURNAL" ]]; then
     echo "# Gibson loop journal" > "$JOURNAL"
+  fi
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · state-corrupt · phase=$phase"
+    echo "diagnosis: loop-state failed schema/freshness validation (issue #75)."
+    echo "runner was not started or handoff was suppressed; not counted as runner-failure."
+    if [[ -f "$diag_file" ]]; then
+      echo "validator diagnostics:"
+      cat "$diag_file"
+    fi
+    if is_regular_nonsymlink_file "$STATE_SNAPSHOT" && is_regular_nonsymlink_file "$STATE_FILE"; then
+      echo "unified diff (snapshot vs current state):"
+      # diff returns 1 on differences — expected; never fail the journal write.
+      diff -u "$STATE_SNAPSHOT" "$STATE_FILE" || true
+    elif ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+      echo "snapshot: missing or unusable (fail closed; no guessed repair)."
+    fi
+  } >> "$JOURNAL"
+}
+
+# Handle a state-corrupt event: journal, attempt exact-byte restore when the
+# snapshot itself still validates, count exactly one failure-budget unit.
+# Never overwrites the snapshot with corrupt content. Never starts a runner
+# or hands off. Returns after accounting; caller continues the loop or dies
+# on budget.
+handle_state_corrupt() {
+  local phase="$1"
+  local diag_file
+  diag_file=$(mktemp "${TMPDIR:-/tmp}/gibson-state-corrupt.XXXXXX")
+  # Re-run validator to capture diagnostics into the journal file (stderr).
+  # Best-effort: ignore its exit (we already know it failed or snapshot is bad).
+  case "$phase" in
+    post-run:*)
+      # phase encoded as post-run:<min-updated>
+      local min="${phase#post-run:}"
+      phase="post-run"
+      run_validate_loop_state "$STATE_FILE" "$min" 2>"$diag_file" || true
+      ;;
+    *)
+      run_validate_loop_state "$STATE_FILE" 2>"$diag_file" || true
+      ;;
+  esac
+
+  journal_state_corrupt "$phase" "$diag_file"
+  rm -f "$diag_file"
+
+  # Restore only when the snapshot is a regular non-symlink file AND still
+  # validates. A corrupt, missing, or unsafe-shape snapshot fails closed
+  # without inventing default state. Restore itself refuses directory/symlink
+  # destinations unless it can quarantine them first (exact path restored).
+  if is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+    if run_validate_loop_state "$STATE_SNAPSHOT" 2>/dev/null; then
+      if restore_loop_state_from_snapshot; then
+        info "state-corrupt: restored loop-state byte-for-byte from snapshot"
+      else
+        info "state-corrupt: snapshot validated but restore failed (recovery-incomplete) — not claiming exact restore"
+      fi
+    else
+      info "state-corrupt: snapshot present but unusable — fail closed, no restore"
+      {
+        echo ""
+        echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · state-corrupt · phase=snapshot-unusable"
+        echo "snapshot exists but failed validation; neither file was overwritten with guessed content."
+      } >> "$JOURNAL"
+    fi
+  else
+    info "state-corrupt: no usable snapshot (shape=$(path_shape_label "$STATE_SNAPSHOT")) — fail closed, loop-state left as-is"
+  fi
+
+  failures=$((failures + 1))
+  info "state-corrupt (consecutive failures=$failures/$BUDGET)"
+  if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+    escalate
+  fi
+  if [[ $failures -ge $BUDGET ]]; then
+    die "error budget exhausted — state-corrupt recovery could not stabilize (docs/11, issue #75)"
   fi
 }
 
@@ -1418,16 +1677,34 @@ journal_block() {
 
 block() { info "$*"; journal_block "$*"; }
 
+# Read one column-zero key from loop-state using the SAME field grammar as
+# scripts/validate-loop-state.sh (issue #75): after the first colon, strip at
+# most one optional ASCII space; no further trim; empty values allowed.
+# Accepts `key:value` and `key: value` identically. Tabs after `:` stay in the
+# value. Does not invent defaults. Callers must only read after schema validate
+# on real iterations (pre-read gate), so a missing key is an internal error path.
 read_field() {
   local key="$1"
-  # FS set so field 1 is the key
-  awk -v k="$key" -F': ' '{ if ($1 == k) { sub(/^[^:]+: /,""); print; exit } }' "$STATE_FILE"
+  # shellcheck disable=SC2016
+  awk -v k="$key" '
+    # Column-zero keys only — same pattern as validate-loop-state.sh
+    /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      line = $0
+      key = line
+      sub(/:.*$/, "", key)
+      if (key != k) next
+      v = line
+      sub(/^[^:]*:/, "", v)
+      if (v ~ /^ /) v = substr(v, 2)
+      print v
+      exit
+    }
+  ' "$STATE_FILE"
 }
 
 render_prompt() {
   local hat="$1"
-  local state
-  state=$(cat "$STATE_FILE")
+  # State is read by path inside node (process.argv[3]); no shell-side cat.
   node -e '
     const fs=require("fs");
     const pb=fs.readFileSync(process.argv[1],"utf8");
@@ -1874,50 +2151,186 @@ fi
 while true; do
   stop_if_halted
 
-  hat="${FORCE_HAT:-$(read_field next_hat)}"
-  [[ -n "$hat" ]] || hat="builder"
-  FORCE_HAT=""
-
-  info "iteration hat=$hat repo=$REPO"
-
-  PROMPT_FILE=$(mktemp)
-  render_prompt "$hat" > "$PROMPT_FILE"
-
-  if [[ "$PRINT" -eq 1 ]]; then
-    cat "$PROMPT_FILE"
-    rm -f "$PROMPT_FILE"
-    exit 0
-  fi
-
-  if [[ "$DRY" -eq 1 ]]; then
-    info "dry-run: would invoke $RUNNER with rendered loop-step ($hat)"
-    rm -f "$PROMPT_FILE"
-  else
-    set +e
-    invoke_runner "$PROMPT_FILE"
-    ec=$?
-    set -e
-    rm -f "$PROMPT_FILE"
-    if [[ $ec -ne 0 ]]; then
-      failures=$((failures + 1))
-      info "runner exit $ec (consecutive failures=$failures/$BUDGET)"
-      if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
-        escalate
-      fi
-      if [[ $failures -ge $BUDGET ]]; then
-        die "error budget exhausted — likely harness bug, not retry fodder (docs/11)"
-      fi
+  # --dry-run / --print-prompt stay inert w.r.t. snapshot/recovery/journal
+  # mutations introduced by #75 (no runner, no handoff, no .loop-state.prev).
+  # Real iterations: validate BEFORE reading next_hat — never silently default
+  # a missing/malformed next_hat to builder (issue #75).
+  local_skip_runner=0
+  if [[ "$PRINT" -eq 0 && "$DRY" -eq 0 ]]; then
+    if ! run_validate_loop_state "$STATE_FILE" 2>/dev/null; then
+      # Capture diagnostics for the journal (validator was quieted above).
+      handle_state_corrupt "pre-read"
+      local_skip_runner=1
     else
-      failures=0
-      supervisor_handoff
+      # Pre-queued handoff retry (issue #71 + #75): when a supervisor is
+      # configured and loop-state already carries a non-empty handoff field,
+      # retry that handoff WITHOUT invoking a runner / snapshot / post-run
+      # freshness path. A zero-work no-op must not be treated as successful
+      # iteration progress (would reset failures and fake freshness). Schema
+      # already passed above; do not reset the failure budget here.
+      if [[ "$SUPERVISOR" == "devin" ]]; then
+        _queued_handoff=$(read_field handoff)
+        if [[ -n "$_queued_handoff" ]]; then
+          info "pre-queued handoff: retrying supervisor handoff of $_queued_handoff without runner (issue #71/#75)"
+          supervisor_handoff
+          local_skip_runner=1
+        fi
+        unset _queued_handoff
+      fi
     fi
   fi
 
-  {
-    echo ""
-    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · hat=$hat · runner=$RUNNER"
-    echo "Driver completed iteration; agent should have updated loop-state."
-  } >> "$JOURNAL"
+  if [[ "$local_skip_runner" -eq 0 ]]; then
+    if [[ -n "$FORCE_HAT" ]]; then
+      hat="$FORCE_HAT"
+    else
+      hat=$(read_field next_hat)
+      # After a successful schema validate, next_hat is a real hat. For dry-run
+      # / print-prompt (no validate), refuse the old silent builder default when
+      # the field is empty — fail closed with a clear error instead.
+      if [[ -z "$hat" ]]; then
+        if [[ "$PRINT" -eq 1 || "$DRY" -eq 1 ]]; then
+          die "next_hat missing or empty in $STATE_FILE (refusing silent default to builder; issue #75)"
+        fi
+        die "next_hat empty after validation — internal error"
+      fi
+    fi
+    FORCE_HAT=""
+
+    info "iteration hat=$hat repo=$REPO"
+
+    PROMPT_FILE=$(mktemp)
+    render_prompt "$hat" > "$PROMPT_FILE"
+
+    if [[ "$PRINT" -eq 1 ]]; then
+      cat "$PROMPT_FILE"
+      rm -f "$PROMPT_FILE"
+      exit 0
+    fi
+
+    # Normal-completion journal only when the iteration did not land as
+    # state-corrupt (snapshot failure or post-run schema/freshness fail).
+    # Empty/malformed/stale updated after a real runner must never look like a
+    # successful iteration in the journal (issue #75 fail-closed contract).
+    journal_normal_completion=1
+    if [[ "$DRY" -eq 1 ]]; then
+      info "dry-run: would invoke $RUNNER with rendered loop-step ($hat)"
+      rm -f "$PROMPT_FILE"
+    else
+      # Snapshot the validated pre-iteration state immediately before the real
+      # runner. Snapshot failure is a single state-corrupt/recovery-control
+      # failure — never a silent continuation into the runner.
+      if ! snapshot_loop_state; then
+        journal_normal_completion=0
+        info "state-corrupt: failed to snapshot pre-iteration loop-state"
+        diag_snap=$(mktemp "${TMPDIR:-/tmp}/gibson-snap-fail.XXXXXX")
+        echo "snapshot failed: could not atomically copy $STATE_FILE to $STATE_SNAPSHOT" > "$diag_snap"
+        journal_state_corrupt "snapshot" "$diag_snap"
+        rm -f "$diag_snap" "$PROMPT_FILE"
+        failures=$((failures + 1))
+        info "state-corrupt (consecutive failures=$failures/$BUDGET)"
+        if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+          escalate
+        fi
+        if [[ $failures -ge $BUDGET ]]; then
+          die "error budget exhausted — state-corrupt recovery could not stabilize (docs/11, issue #75)"
+        fi
+      else
+        iteration_start=$(strict_utc_now)
+        set +e
+        invoke_runner "$PROMPT_FILE"
+        ec=$?
+        set -e
+        rm -f "$PROMPT_FILE"
+
+        # Post-run validation (issue #75): after EVERY actual runner invocation,
+        # state must pass schema AND updated >= iteration_start — including when
+        # bytes are identical to the pre-iteration snapshot. A zero-exit no-op
+        # that leaves a valid but old stamp is state-corrupt: one budget unit,
+        # no failure reset, no handoff. Issue #63 will add substantive
+        # no-progress classification later; do not weaken this freshness gate.
+        # Pre-queued handoff retries are routed before runner/snapshot above so
+        # they never depend on faking progress through a no-op runner.
+        post_diag=$(mktemp "${TMPDIR:-/tmp}/gibson-post-val.XXXXXX")
+        post_min="$iteration_start"
+        if ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
+          journal_normal_completion=0
+          # state-corrupt takes precedence over runner-failure even when ec != 0.
+          # Count exactly once as state-corrupt; do not also count runner-failure.
+          {
+            echo ""
+            echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · state-corrupt · phase=post-run"
+            echo "diagnosis: post-run loop-state failed schema/freshness validation (issue #75)."
+            echo "iteration_start: $iteration_start"
+            echo "freshness: updated must be >= $post_min after every real runner invocation (byte-identical state included)."
+            echo "runner_exit: $ec (not counted separately; state-corrupt takes precedence)"
+            echo "validator diagnostics:"
+            cat "$post_diag"
+            if is_regular_nonsymlink_file "$STATE_SNAPSHOT" && is_regular_nonsymlink_file "$STATE_FILE"; then
+              echo "unified diff (snapshot vs current state):"
+              diff -u "$STATE_SNAPSHOT" "$STATE_FILE" || true
+            elif ! is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+              echo "snapshot: missing or unusable (fail closed; no guessed repair)."
+            fi
+          } >> "$JOURNAL"
+          rm -f "$post_diag"
+
+          if is_regular_nonsymlink_file "$STATE_SNAPSHOT"; then
+            if run_validate_loop_state "$STATE_SNAPSHOT" 2>/dev/null; then
+              if restore_loop_state_from_snapshot; then
+                info "state-corrupt: restored loop-state byte-for-byte from snapshot"
+              else
+                info "state-corrupt: snapshot validated but restore failed (recovery-incomplete) — not claiming exact restore"
+              fi
+            else
+              info "state-corrupt: snapshot present but unusable — fail closed, no restore"
+              {
+                echo ""
+                echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · state-corrupt · phase=snapshot-unusable"
+                echo "snapshot exists but failed validation; neither file was overwritten with guessed content."
+              } >> "$JOURNAL"
+            fi
+          else
+            info "state-corrupt: no usable snapshot (shape=$(path_shape_label "$STATE_SNAPSHOT")) — fail closed, loop-state left as-is"
+          fi
+
+          failures=$((failures + 1))
+          info "state-corrupt (consecutive failures=$failures/$BUDGET)"
+          if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+            escalate
+          fi
+          if [[ $failures -ge $BUDGET ]]; then
+            die "error budget exhausted — state-corrupt recovery could not stabilize (docs/11, issue #75)"
+          fi
+        else
+          rm -f "$post_diag"
+          # Valid post-run state.
+          if [[ $ec -ne 0 ]]; then
+            failures=$((failures + 1))
+            info "runner exit $ec (consecutive failures=$failures/$BUDGET)"
+            if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+              escalate
+            fi
+            if [[ $failures -ge $BUDGET ]]; then
+              die "error budget exhausted — likely harness bug, not retry fodder (docs/11)"
+            fi
+          else
+            # Only valid state + runner exit 0 resets the budget and may hand off.
+            failures=0
+            supervisor_handoff
+          fi
+        fi
+      fi
+    fi
+
+    if [[ "$journal_normal_completion" -eq 1 ]]; then
+      {
+        echo ""
+        echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · hat=$hat · runner=$RUNNER"
+        echo "Driver completed iteration; agent should have updated loop-state."
+      } >> "$JOURNAL"
+    fi
+  fi
 
   heartbeat
   iter=$((iter + 1))
