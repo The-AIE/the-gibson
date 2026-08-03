@@ -438,13 +438,15 @@ HALT_LOCK_TMP=""
 # Stable regular reclaim-gate file (kernel advisory lock target). Never unlinked
 # during normal acquire/release; content is not ownership (empty is fine).
 HALT_LOCK_RECLAIM_GATE="${STATE_DIR}/.halt-lock.reclaiming"
-# Fixed fd for the reclaim gate open-file-description (Bash 3.2 has no {fd}
-# auto-allocation). High number avoids clobbering stdin/out/err and common
-# one-digit redirections. Synchronous children inherit the open fd for the
-# short reclaim critical section (they do not re-lock). A peer process must
-# open its own description — inheriting this OFD would share the holder's
-# lock. Closing this fd in the holder releases the kernel lock.
-HALT_LOCK_RECLAIM_FD=201
+# Reclaim-gate open-file-description number. Bash 3.2 has no {fd} auto-
+# allocation and a fixed high fd (e.g. 201) collides when already inherited:
+# `exec 201>>gate` does not retarget an open descriptor. Leave empty until a
+# free fd in the bounded high range is successfully opened and locked; release
+# closes only that number. Never close, retarget, or mutate inherited fds.
+HALT_LOCK_RECLAIM_FD=""
+# Inclusive scan range for collision-free reclaim-gate fd allocation.
+HALT_LOCK_RECLAIM_FD_MIN="${HALT_LOCK_RECLAIM_FD_MIN:-200}"
+HALT_LOCK_RECLAIM_FD_MAX="${HALT_LOCK_RECLAIM_FD_MAX:-220}"
 HALT_LOCK_RECLAIM_HELD=0
 # Bounded seconds to wait for the kernel reclaim gate (fail closed after).
 HALT_LOCK_RECLAIM_TIMEOUT="${HALT_LOCK_RECLAIM_TIMEOUT:-2}"
@@ -473,6 +475,44 @@ halt_lock_inode() {
   ino=$(stat -f %i "$f" 2>/dev/null) || ino=$(stat -c %i "$f" 2>/dev/null) || return 1
   [[ -n "$ino" ]] || return 1
   printf '%s' "$ino"
+}
+
+# True if numeric fd is already open for read or write in this shell.
+# Bash 3.2 has no /dev/fd introspection helper for this; probe with a no-op
+# redirection. Invalid candidates are treated as busy (fail closed).
+halt_lock_fd_is_open() {
+  local fd="$1"
+  [[ "$fd" =~ ^[0-9]+$ ]] || return 0
+  # Read-open probe (also true for many r/w descriptors on macOS Bash 3.2).
+  if eval "true 2>/dev/null <&${fd}"; then
+    return 0
+  fi
+  # Write-open probe (catches write-only descriptors the read probe misses).
+  if eval "true 2>/dev/null >&${fd}"; then
+    return 0
+  fi
+  return 1
+}
+
+# Print one unused high fd in [MIN,MAX], or fail closed when the range is full.
+# Candidates are validated as pure digits before any eval. Does not open,
+# close, or retarget any descriptor — selection only.
+halt_lock_pick_reclaim_fd() {
+  local min="${HALT_LOCK_RECLAIM_FD_MIN:-200}"
+  local max="${HALT_LOCK_RECLAIM_FD_MAX:-220}"
+  local fd
+  [[ "$min" =~ ^[0-9]+$ && "$max" =~ ^[0-9]+$ ]] || return 1
+  # Bound the scan so a corrupted env cannot walk the entire fd table.
+  [[ "$min" -ge 10 && "$max" -ge "$min" && "$max" -le 250 ]] || return 1
+  fd=$min
+  while [[ $fd -le $max ]]; do
+    if ! halt_lock_fd_is_open "$fd"; then
+      printf '%s' "$fd"
+      return 0
+    fi
+    fd=$((fd + 1))
+  done
+  return 1
 }
 
 # Select reclaim-gate backend: lockf (macOS/BSD) or flock (Linux util-linux).
@@ -569,22 +609,58 @@ halt_lock_scrub_legacy_reclaim_dir() {
     return 1
   fi
   # Directory-only: never `rm -rf "$gate"` (would remove a regular-file
-  # successor if a peer migrated between our checks).
-  rm -f "${gate}/pid" 2>/dev/null || true
+  # successor if a peer migrated between our checks). Also scrub hidden
+  # regular-file children (e.g. crash debris) before rmdir.
+  halt_lock_scrub_dir_file_children "$gate"
   rmdir "$gate" 2>/dev/null || true
   [[ ! -d "$gate" ]]
+}
+
+# Remove only direct regular-file/symlink children of a directory, including
+# hidden names (Bash default globs omit dotfiles). Never removes `.`/`..`,
+# never recurses into nested directories, never follows a nested dir to delete
+# its contents, and never `rm -rf`s the directory path itself (a regular-file
+# successor at that path must survive delayed cleanup). Nested directories are
+# left in place so a subsequent rmdir fails closed. Local shopt only — no
+# global dotglob/nullglob leakage.
+halt_lock_scrub_dir_file_children() {
+  local dir="$1" f base
+  local _dg_was_on=0 _ng_was_on=0
+  [[ -d "$dir" ]] || return 0
+  shopt -q dotglob && _dg_was_on=1
+  shopt -q nullglob && _ng_was_on=1
+  shopt -s dotglob nullglob
+  for f in "$dir"/*; do
+    base="${f##*/}"
+    # Bash globs never yield . / .., but reject explicitly if they appear.
+    if [[ "$base" == "." || "$base" == ".." ]]; then
+      continue
+    fi
+    # Symlinks first: -f follows links; we only want the direct child entry.
+    if [[ -L "$f" ]]; then
+      rm -f "$f" 2>/dev/null || true
+    elif [[ -f "$f" ]]; then
+      rm -f "$f" 2>/dev/null || true
+    fi
+    # Nested directories intentionally untouched (fail closed for rmdir).
+  done
+  if [[ "$_dg_was_on" -eq 0 ]]; then
+    shopt -u dotglob
+  fi
+  if [[ "$_ng_was_on" -eq 0 ]]; then
+    shopt -u nullglob
+  fi
 }
 
 # Acquire the exclusive reclaim gate via a kernel-held advisory lock on a
 # stable regular file. The gate file is never unlinked on success or release;
 # closing the open fd drops the lock (crash-safe, no ABA generation).
 # Returns 0 with HALT_LOCK_RECLAIM_HELD=1; 1 if a peer holds it, a live legacy
-# directory owner remains, no lockf/flock backend is available, or the
-# bounded wait expires.
+# directory owner remains, no lockf/flock backend is available, no free fd in
+# the bounded high range, or the bounded wait expires.
 halt_lock_reclaim_gate_acquire() {
   local gate backend timeout fd
   gate="${HALT_LOCK_RECLAIM_GATE:-$STATE_DIR/.halt-lock.reclaiming}"
-  fd="${HALT_LOCK_RECLAIM_FD:-201}"
   timeout="${HALT_LOCK_RECLAIM_TIMEOUT:-2}"
   [[ "$timeout" =~ ^[0-9]+$ ]] || timeout=2
 
@@ -618,13 +694,22 @@ halt_lock_reclaim_gate_acquire() {
     return 1
   fi
 
-  # Open (or reopen) the gate on the fixed fd. Append mode creates no truncate
-  # race with peers; the kernel lock is on the open file description.
+  # Collision-free fd: scan a bounded high range for a descriptor that is
+  # neither read-open nor write-open. Never retarget an inherited fd — on
+  # Bash 3.2 `exec N>>file` leaves N pointing at its prior target when N is
+  # already open. Store HALT_LOCK_RECLAIM_FD only after kernel lock success.
+  if ! fd=$(halt_lock_pick_reclaim_fd); then
+    echo "warning: halt reclaim gate: no free file descriptor in range — fail closed, no work" >&2
+    return 1
+  fi
+  [[ "$fd" =~ ^[0-9]+$ ]] || return 1
+
+  # Open the stable gate on the selected free fd (append: no truncate race).
   eval "exec ${fd}>>\"\$gate\"" || return 1
 
   case "$backend" in
     lockf)
-      # lockf -t N <fd>: acquire on inherited open file description; -s silent.
+      # lockf -t N <fd>: acquire on this open file description; -s silent.
       if ! lockf -s -t "$timeout" "$fd"; then
         eval "exec ${fd}>&-" 2>/dev/null || true
         return 1
@@ -643,19 +728,26 @@ halt_lock_reclaim_gate_acquire() {
       ;;
   esac
 
+  # Publish selected fd only after successful kernel acquisition.
+  HALT_LOCK_RECLAIM_FD="$fd"
   HALT_LOCK_RECLAIM_HELD=1
   return 0
 }
 
 # Release the reclaim gate by closing the held fd. Kernel drops the advisory
 # lock. The regular gate file is intentionally left in place (never unlinked).
+# Closes only the fd we stored after a successful acquire — never an inherited
+# descriptor we did not open for the gate.
 halt_lock_reclaim_gate_release() {
-  local fd="${HALT_LOCK_RECLAIM_FD:-201}"
+  local fd="${HALT_LOCK_RECLAIM_FD:-}"
   if [[ "${HALT_LOCK_RECLAIM_HELD:-0}" -ne 1 ]]; then
     return 0
   fi
   HALT_LOCK_RECLAIM_HELD=0
-  eval "exec ${fd}>&-" 2>/dev/null || true
+  HALT_LOCK_RECLAIM_FD=""
+  if [[ -n "$fd" && "$fd" =~ ^[0-9]+$ ]]; then
+    eval "exec ${fd}>&-" 2>/dev/null || true
+  fi
 }
 
 # Reclaim a dead or malformed lock without racing a live successor.
@@ -675,12 +767,13 @@ halt_lock_reclaim_gate_release() {
 # path (successor already published). The reclaim gate itself is never removed
 # by check-then-rm — only kernel lock state serializes reclaimers.
 halt_lock_try_reclaim_stale() {
-  local owner pid pin ino cur_ino stale=0 live_legacy=0 f
+  local owner pid pin ino cur_ino stale=0 live_legacy=0
 
   # Legacy directory form from older builds: reclaim empty/dead dirs so an
   # upgraded process is not permanently blocked by a leftover halt-lock/.
   # Serialized under the same kernel gate as file reclaim. Also scrub regular
-  # files left inside by a mistaken `ln temp dir` (ln links into directories).
+  # files left inside by a mistaken `ln temp dir` (ln links into directories),
+  # including hidden crash debris (`.halt-lock.*`) that plain `*` globs omit.
   if [[ -d "$HALT_LOCK_FILE" ]]; then
     if ! halt_lock_reclaim_gate_acquire; then
       return 0
@@ -694,15 +787,10 @@ halt_lock_try_reclaim_stale() {
         fi
       fi
       if [[ "$live_legacy" -eq 0 ]]; then
-        rm -f "${HALT_LOCK_FILE}/pid" 2>/dev/null || true
-        # Directory-only children: drop regular files (pid + accidental ln
-        # debris). Never rm -rf the directory path (regular-file successor).
-        for f in "$HALT_LOCK_FILE"/*; do
-          [[ -e "$f" || -L "$f" ]] || continue
-          if [[ -f "$f" || -L "$f" ]]; then
-            rm -f "$f" 2>/dev/null || true
-          fi
-        done
+        # Direct regular-file/symlink children only (incl. hidden). Nested
+        # directories are left alone so rmdir fails closed. Never rm -rf the
+        # public path (would delete a regular-file successor).
+        halt_lock_scrub_dir_file_children "$HALT_LOCK_FILE"
         rmdir "$HALT_LOCK_FILE" 2>/dev/null || true
       fi
     fi
@@ -762,7 +850,7 @@ halt_lock_try_reclaim_stale() {
 # the lock is malformed. Returns 1 after a bounded wait so a stuck lock fails
 # closed (no work).
 halt_lock_acquire() {
-  local tries=0 max_tries=400 tmp owner_token
+  local tries=0 max_tries=400 tmp owner_token tmp_ino pub_ino pub_owner
   mkdir -p "$STATE_DIR" || return 1
   while [[ $tries -lt $max_tries ]]; do
     tmp=$(mktemp "${STATE_DIR}/.halt-lock.XXXXXX") || return 1
@@ -783,18 +871,37 @@ halt_lock_acquire() {
     # lock already exists with someone else's complete record.
     # NOTE: `ln temp existing-dir` succeeds by linking *into* the directory —
     # that is not ownership of the public lock path. Reject directory results.
+    # Ownership race: after ln into a legacy dir, a peer can rmdir + publish a
+    # regular successor before our type checks; `-f public` alone must not
+    # claim that successor. Require same inode as still-present temp + exact
+    # owner token before setting HALT_LOCK_HELD.
     if ln "$tmp" "$HALT_LOCK_FILE" 2>/dev/null; then
       if [[ -d "$HALT_LOCK_FILE" ]]; then
-        # Mistaken link-into-directory: remove debris and fall through to reclaim.
+        # Mistaken link-into-directory: remove only this attempt's debris/temp
+        # and fall through to reclaim. Do not claim ownership.
         rm -f "${HALT_LOCK_FILE}/${tmp##*/}" 2>/dev/null || true
         rm -f "$tmp"
         HALT_LOCK_TMP=""
       elif [[ -f "$HALT_LOCK_FILE" ]]; then
+        tmp_ino=$(halt_lock_inode "$tmp" 2>/dev/null || true)
+        pub_ino=$(halt_lock_inode "$HALT_LOCK_FILE" 2>/dev/null || true)
+        pub_owner=$(halt_lock_field owner "$HALT_LOCK_FILE" 2>/dev/null || true)
+        if [[ -n "$tmp_ino" && -n "$pub_ino" && "$tmp_ino" == "$pub_ino" \
+          && -e "$tmp" && -n "$pub_owner" && "$pub_owner" == "$owner_token" ]]; then
+          rm -f "$tmp"
+          HALT_LOCK_TMP=""
+          HALT_LOCK_OWNER="$owner_token"
+          HALT_LOCK_HELD=1
+          return 0
+        fi
+        # Public path is not this attempt's inode/token (peer successor or
+        # lost temp). Remove only our known debris/temp; never unlink a
+        # successor at the public path.
+        if [[ -d "$HALT_LOCK_FILE" ]]; then
+          rm -f "${HALT_LOCK_FILE}/${tmp##*/}" 2>/dev/null || true
+        fi
         rm -f "$tmp"
         HALT_LOCK_TMP=""
-        HALT_LOCK_OWNER="$owner_token"
-        HALT_LOCK_HELD=1
-        return 0
       else
         rm -f "$tmp"
         HALT_LOCK_TMP=""
