@@ -1792,9 +1792,11 @@ if ! grep -q 'state-corrupt' "$ROOT/e2e-hand-ns.err" 2>/dev/null && \
   ok "e2e handoff-nospace: valid no-space handoff rewrite is not state-corrupt"
 else bad "e2e handoff-nospace: false state-corrupt"; fi
 # Meaningful consumption check (not a tautology): the driver must have read
-# no-space `handoff:feat/75-widget` into the handoff path. Evidence is the
-# branch name appearing in handoff-path logs/journal, supervisor args, or the
-# field still queued after a blocked handoff — never "present OR empty".
+# no-space `handoff:feat/75-widget` into the handoff path. Evidence must be an
+# observable branch-bearing consequence of the *driver* handoff path — journal
+# / stderr messages that name the branch, or captured supervisor argv — never
+# the independent test helper re-reading the queued field (that would still
+# pass if loop.sh stopped parsing no-space handoff and left the file untouched).
 nt=$(test_read_field "$REPO/gibson/loop-state.md" notes)
 hb=$(test_read_field "$REPO/gibson/loop-state.md" handoff)
 if [[ "$nt" == "handoff queued nospace" ]]; then
@@ -1806,10 +1808,6 @@ if grep -qE 'handoff of feat/75-widget|pinning handoff to feat/75-widget|branch=
   consumed=1
 fi
 if [[ -f "$CALLS/supervisor.args" ]] && grep -q 'feat/75-widget' "$CALLS/supervisor.args" 2>/dev/null; then
-  consumed=1
-fi
-# Queued field still present (handoff blocked before clear) also proves parse.
-if [[ "$hb" == "feat/75-widget" ]]; then
   consumed=1
 fi
 if [[ "$consumed" -eq 1 ]]; then
