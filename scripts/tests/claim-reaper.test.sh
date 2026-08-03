@@ -163,8 +163,9 @@ run_reaper() {
   # Export GIBSON_CLAIMS_NOW_EPOCH (and other env) in the caller; do not pass
   # KEY=val through this helper — env would treat later flags as the command.
   local canon="$1"
+  local state
   shift
-  local state="$STATE_BASE/$(basename "$(dirname "$canon")")"
+  state="$STATE_BASE/$(basename "$(dirname "$canon")")"
   mkdir -p "$state"
   GIBSON_CANONICAL="$canon" \
   GIBSON_REAPER_STATE_DIR="$state" \
@@ -471,31 +472,42 @@ fi
 
 # ---------------------------------------------------------------------------
 echo "#73 · repeated apply is idempotent and comment-deduplicated"
-out2=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/apply/canon" --claim-id issue-40-dead --apply 2>&1)
+out_repeat=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/apply/canon" --claim-id issue-40-dead --apply 2>&1)
 rc2=$?
 check "repeat apply exits 0" "$rc2" "0"
+if echo "$out_repeat" | grep -qiE 'absent|idempotent|nothing to reap|already'; then
+  ok "repeat apply mentions absent or skip"
+else
+  bad "repeat apply mentions absent or skip (got: $(echo "$out_repeat" | tail -3 | tr '\n' ' '))"
+fi
 # claim already gone → completed already_absent or skip
 comment_lines=$(grep -c 'gibson-claim-reaper:issue-40-dead' "$GH_COMMENTS_FILE" || true)
 # marker appears once in body; file may have one body line
-[[ "$comment_lines" -le 1 ]] && ok "comment not spammed on retry" || bad "comment duplicated ($comment_lines)"
+if [[ "$comment_lines" -le 1 ]]; then
+  ok "comment not spammed on retry"
+else
+  bad "comment duplicated ($comment_lines)"
+fi
 
 # ---------------------------------------------------------------------------
 echo "#73 · --prune-worktrees removes only exact registered target worktree"
 new_repo "$ROOT/prune"
-# release-claim removes the *default* path ../wt-<id-without-issue-prefix>, not an
-# arbitrary registered path. Place canaries on those exact default paths.
-WT_P="$ROOT/prune/wt-50-prune"
-WT_S="$ROOT/prune/wt-50-sib"
-mkdir -p "$WT_P" "$WT_S"
-echo target > "$WT_P/marker"
-echo sibling > "$WT_S/marker"
+# Registered non-default path is the only allowed prune target. Unregistered
+# default-path sibling and a decoy directory must survive (no default-path
+# derivation, no rm -rf of unregistered paths).
+WT_REG="$ROOT/prune/registered-nondefault-50"
+WT_DEFAULT="$ROOT/prune/wt-50-prune"
+WT_SIBLING="$ROOT/prune/wt-50-sib"
+mkdir -p "$WT_DEFAULT" "$WT_SIBLING"
+echo default-decoy > "$WT_DEFAULT/marker"
+echo sibling > "$WT_SIBLING/marker"
 (
   cd "$ROOT/prune/canon" || exit 1
   git checkout -q main
-  mkdir -p docs/claims
   export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
   export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
-  # No worktree: field — claim timestamp only; missing branch tips → pure stale.
+  mkdir -p docs/claims
+  # Commit claim first (backdated) so branch tips stay in the injected past.
   cat > docs/claims/issue-50-prune.md <<EOF
 claim: issue-50-prune
 issue: 50
@@ -503,6 +515,7 @@ claimed: $CLAIMED_ISO
 scope: a
 session: t
 branch: feat/50-prune
+worktree: $WT_REG
 EOF
   cat > docs/claims/issue-50-sib.md <<EOF
 claim: issue-50-sib
@@ -514,9 +527,25 @@ branch: feat/50-sib
 EOF
   : > docs/active-work.md
   git add -A && git commit -qm "prune fixtures" && git push -q origin main
-  git branch -f feat/50-prune HEAD
+  # Registered worktree at non-default path on expected branch (tip = claim epoch).
+  git worktree add -b feat/50-prune "$WT_REG" HEAD >/dev/null 2>&1
   git branch -f feat/50-sib HEAD
+  echo reg > "$WT_REG/marker"
 ) >/dev/null 2>&1
+# Force every file mtime to CLAIM_EPOCH so worktree evidence is stale under STALE_NOW
+# (wall-clock mtimes would KEEP the claim as recent_activity).
+if command -v python3 >/dev/null 2>&1; then
+  find "$WT_REG" -type f -print0 2>/dev/null | xargs -0 python3 -c '
+import os,sys
+ep=int(sys.argv[1])
+for p in sys.argv[2:]:
+  try: os.utime(p,(ep,ep))
+  except OSError: pass
+' "$CLAIM_EPOCH" 2>/dev/null || true
+else
+  ts=$(date -r "$CLAIM_EPOCH" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$CLAIM_EPOCH" +%Y%m%d%H%M.%S 2>/dev/null || echo 202608010000.00)
+  find "$WT_REG" -type f -exec touch -t "$ts" {} \; 2>/dev/null || true
+fi
 export GH_PR_COUNT=0
 export GH_LOG="$ROOT/prune/gh.log"
 export GH_COMMENTS_FILE="$ROOT/prune/comments"
@@ -528,8 +557,22 @@ out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/prune/canon" --clai
 rc=$?
 check "prune apply exits 0" "$rc" "0"
 contains "released pruned claim" "$out" "OK released issue-50-prune"
-[[ ! -f "$WT_P/marker" ]] && ok "prune removed target worktree" || bad "target worktree still present after prune"
-[[ -f "$WT_S/marker" ]] && ok "sibling worktree preserved" || bad "sibling worktree was removed"
+# Exact registered target removed; unregistered default + sibling survive.
+if [[ -d "$WT_REG" ]]; then
+  bad "registered prune target still present"
+else
+  ok "prune removed only exact registered target"
+fi
+if [[ -f "$WT_DEFAULT/marker" ]]; then
+  ok "unregistered default-path directory survived"
+else
+  bad "unregistered default-path directory was deleted"
+fi
+if [[ -f "$WT_SIBLING/marker" ]]; then
+  ok "sibling/unrelated directory survived"
+else
+  bad "sibling directory was removed"
+fi
 files=$(git -C "$ROOT/prune/canon" fetch -q origin && git -C "$ROOT/prune/canon" ls-tree --name-only origin/main docs/claims/)
 lacks    "pruned claim row gone" "$files" "issue-50-prune.md"
 contains "sibling claim row kept" "$files" "issue-50-sib.md"
@@ -692,6 +735,389 @@ if grep -q 'close' "$GH_LOG" 2>/dev/null; then
   bad "gh log shows close"
 else
   ok "apply did not close issue via gh"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · failed exact-remote fetch with stale cached claim => REFUSE"
+new_repo "$ROOT/fetchfail"
+add_claim_file "$ROOT/fetchfail" issue-91-fetchfail 91 "$CLAIMED_ISO"
+# Poison remote URL so fetch fails; leave origin/main cached from prior push.
+(
+  cd "$ROOT/fetchfail/canon" || exit 1
+  git remote set-url origin "/nonexistent/path/to/origin-for-fetch-fail"
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/fetchfail/canon" 2>&1)
+rc=$?
+# Must not plan REAP from cached ledger after fetch failure.
+if echo "$out" | grep -q 'REAP   issue-91-fetchfail'; then
+  bad "fetch failure must not REAP from cached claim"
+else
+  ok "fetch failure does not REAP cached claim"
+fi
+if [[ "$rc" -ne 0 ]] || echo "$out" | grep -qiE 'fetch|refuse|ERROR'; then
+  ok "fetch failure exits refuse/error path"
+else
+  bad "fetch failure should fail closed (rc=$rc)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · per-file renewal after OID check survives"
+new_repo "$ROOT/renew"
+add_claim_file "$ROOT/renew" issue-92-renew 92 "$CLAIMED_ISO"
+# Interpose release-claim: renew claim OID on origin before real release runs.
+FAKE_RC="$ROOT/renew/fake-release.sh"
+cat > "$FAKE_RC" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+# Args: issue --claim-id ID ... --expected-claim-blob OID ...
+canon="${GIBSON_CANONICAL:?}"
+id=""
+blob=""
+prev=""
+for a in "$@"; do
+  if [[ "$prev" == "--claim-id" ]]; then id="$a"; fi
+  if [[ "$prev" == "--expected-claim-blob" ]]; then blob="$a"; fi
+  prev="$a"
+done
+# Renew the claim on origin/main so OID no longer matches expected.
+(
+  cd "$canon" || exit 1
+  git fetch origin main >/dev/null 2>&1 || true
+  tmp=$(mktemp -d)
+  git worktree add --detach "$tmp" origin/main >/dev/null 2>&1
+  cd "$tmp" || exit 1
+  if [[ -f "docs/claims/${id}.md" ]]; then
+    echo "renewed: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "docs/claims/${id}.md"
+    git add "docs/claims/${id}.md"
+    git commit -s -q -m "renew $id"
+    git push origin "HEAD:main"
+  fi
+  cd "$canon" || exit 1
+  git worktree remove --force "$tmp" >/dev/null 2>&1 || rm -rf "$tmp"
+)
+# Invoke real release-claim with original args — must fail CAS.
+exec "$REAL_RC" "$@"
+FAKE
+chmod +x "$FAKE_RC"
+export GH_PR_COUNT=0
+export GH_LOG="$ROOT/renew/gh.log"
+export GH_COMMENTS_FILE="$ROOT/renew/comments"
+export GH_STATE="$ROOT/renew/gh-state"
+: > "$GH_COMMENTS_FILE"
+rm -f "$GH_STATE"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/renew/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_BASE/renew" \
+    GIBSON_REAPER_JOURNAL="$STATE_BASE/renew/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_BASE/renew/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$FAKE_RC" \
+    REAL_RC="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-92-renew --apply 2>&1
+)
+rc=$?
+files=$(git -C "$ROOT/renew/canon" fetch -q origin 2>/dev/null; git -C "$ROOT/renew/canon" ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+contains "renewed claim file still on ledger" "$files" "issue-92-renew.md"
+if [[ "$rc" -eq 0 ]]; then
+  bad "renewal race must not exit 0"
+else
+  ok "renewal race fails closed (rc=$rc)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · legacy row renewal survives OID recheck"
+new_repo "$ROOT/legrenew"
+(
+  cd "$ROOT/legrenew/canon" || exit 1
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  cat > docs/active-work.md <<EOF
+| when | claim-id | scope | who |
+|---|---|---|---|
+| $CLAIMED_ISO | issue-93-legrenew | x | t |
+EOF
+  rm -rf docs/claims
+  git add -A && git commit -qm "legacy claim" && git push -q origin main
+) >/dev/null 2>&1
+FAKE_RC2="$ROOT/legrenew/fake-release.sh"
+cat > "$FAKE_RC2" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+canon="${GIBSON_CANONICAL:?}"
+(
+  cd "$canon" || exit 1
+  git fetch origin main >/dev/null 2>&1 || true
+  tmp=$(mktemp -d)
+  git worktree add --detach "$tmp" origin/main >/dev/null 2>&1
+  cd "$tmp" || exit 1
+  if [[ -f docs/active-work.md ]]; then
+    # Renew: change the when column → new active-work blob OID
+    sed 's/2026-08-01T00:00:00Z/2026-08-01T00:00:01Z/' docs/active-work.md > docs/active-work.md.new
+    mv docs/active-work.md.new docs/active-work.md
+    git add docs/active-work.md
+    git commit -s -q -m "renew legacy row"
+    git push origin "HEAD:main"
+  fi
+  cd "$canon" || exit 1
+  git worktree remove --force "$tmp" >/dev/null 2>&1 || rm -rf "$tmp"
+)
+exec "$REAL_RC" "$@"
+FAKE
+chmod +x "$FAKE_RC2"
+export GH_PR_COUNT=0
+export GH_COMMENTS_FILE="$ROOT/legrenew/comments"
+: > "$GH_COMMENTS_FILE"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/legrenew/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_BASE/legrenew" \
+    GIBSON_REAPER_JOURNAL="$STATE_BASE/legrenew/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_BASE/legrenew/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$FAKE_RC2" \
+    REAL_RC="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-93-legrenew --apply 2>&1
+)
+rc=$?
+# Row must still exist on origin
+body=$(git -C "$ROOT/legrenew/canon" fetch -q origin 2>/dev/null; git -C "$ROOT/legrenew/canon" show origin/main:docs/active-work.md 2>/dev/null || true)
+contains "legacy row still present after refused release" "$body" "issue-93-legrenew"
+if [[ "$rc" -eq 0 ]]; then
+  bad "legacy renewal must not exit 0"
+else
+  ok "legacy renewal fails closed (rc=$rc)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · heartbeat malformed/overflow/future + both filenames"
+new_repo "$ROOT/hbadv"
+add_claim_file "$ROOT/hbadv" issue-94-hb 94 "$CLAIMED_ISO"
+HB="$ROOT/hbadv/hb"
+mkdir -p "$HB"
+# Nonempty malformed content must REFUSE (not mtime fallback to REAP).
+printf 'not-a-timestamp\n' > "$HB/issue-94-hb"
+touch -t 202608010000 "$HB/issue-94-hb" 2>/dev/null || true
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/hbadv/canon" --heartbeat-dir "$HB" --claim-id issue-94-hb 2>&1)
+contains "malformed heartbeat REFUSE" "$out" "heartbeat_malformed"
+lacks    "malformed heartbeat not REAP" "$out" "REAP   issue-94-hb"
+# Overflow integer
+printf '18446744073709551616\n' > "$HB/issue-94-hb"
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/hbadv/canon" --heartbeat-dir "$HB" --claim-id issue-94-hb 2>&1)
+contains "overflow heartbeat REFUSE" "$out" "heartbeat_malformed"
+lacks    "overflow not REAP" "$out" "REAP   issue-94-hb"
+# Future timestamp refuses
+printf '%s\n' "$((STALE_NOW + 99999))" > "$HB/issue-94-hb"
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/hbadv/canon" --heartbeat-dir "$HB" --claim-id issue-94-hb 2>&1)
+contains "future heartbeat REFUSE" "$out" "future_clock"
+# Both filenames: bare is stale, .heartbeat is fresh → KEEP via max
+printf '%s\n' "$((CLAIM_EPOCH))" > "$HB/issue-94-hb"
+printf '%s\n' "$((STALE_NOW - 5))" > "$HB/issue-94-hb.heartbeat"
+touch -t 202608010000 "$HB/issue-94-hb" "$HB/issue-94-hb.heartbeat" 2>/dev/null || true
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/hbadv/canon" --heartbeat-dir "$HB" --claim-id issue-94-hb 2>&1)
+contains "fresh .heartbeat considered (KEEP)" "$out" "recent_activity"
+lacks    "fresh .heartbeat not REAP" "$out" "REAP   issue-94-hb"
+# Oversized stale-seconds is usage failure
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/hbadv/canon" --stale-seconds 18446744073709551616 2>&1)
+rc=$?
+check "oversized stale-seconds exits 2" "$rc" "2"
+contains "oversized stale-seconds named" "$out" "stale-seconds"
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · journal symlink victim unchanged; no apply write before lock"
+new_repo "$ROOT/jsym"
+add_claim_file "$ROOT/jsym" issue-95-jsym 95 "$CLAIMED_ISO"
+VICTIM="$ROOT/jsym/victim.txt"
+echo "KEEPME" > "$VICTIM"
+STATEJ="$STATE_BASE/jsym"
+mkdir -p "$STATEJ"
+# Journal path is a symlink to victim
+ln -sf "$VICTIM" "$STATEJ/journal.md"
+export GH_PR_COUNT=0
+export GH_COMMENTS_FILE="$ROOT/jsym/comments"
+: > "$GH_COMMENTS_FILE"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/jsym/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATEJ" \
+    GIBSON_REAPER_JOURNAL="$STATEJ/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATEJ/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-95-jsym --apply 2>&1
+)
+rc=$?
+victim_body=$(cat "$VICTIM")
+check "journal symlink victim unchanged" "$victim_body" "KEEPME"
+if [[ "$rc" -eq 0 ]]; then
+  bad "symlink journal apply must not succeed"
+else
+  ok "symlink journal apply fails closed (rc=$rc)"
+fi
+# Already-absent apply: lock must be acquired (contention with live lock → exit 1)
+# Use a fresh state dir so the journal symlink is not the only failure mode.
+STATEJ2="$STATE_BASE/jsym2"
+mkdir -p "$STATEJ2/lock"
+echo "$$" > "$STATEJ2/lock/pid"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/jsym/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATEJ2" \
+    GIBSON_REAPER_JOURNAL="$STATEJ2/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATEJ2/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-95-absent-only --apply 2>&1
+)
+rc=$?
+check "already-absent with held lock exits 1" "$rc" "1"
+contains "already-absent respects lock" "$out" "lock"
+victim_body=$(cat "$VICTIM")
+check "victim still unchanged after locked absent" "$victim_body" "KEEPME"
+rm -rf "$STATEJ2/lock"
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · issue field mismatch produces no comment"
+new_repo "$ROOT/issmis"
+(
+  cd "$ROOT/issmis/canon" || exit 1
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  mkdir -p docs/claims
+  cat > docs/claims/issue-96-dead.md <<EOF
+claim: issue-96-dead
+issue: 999
+claimed: $CLAIMED_ISO
+scope: x
+session: t
+branch: feat/96-dead
+EOF
+  git add -A && git commit -qm mismatch && git push -q origin main
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+export GH_LOG="$ROOT/issmis/gh.log"
+export GH_COMMENTS_FILE="$ROOT/issmis/comments"
+: > "$GH_COMMENTS_FILE"
+rm -f "$GH_LOG"
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/issmis/canon" --claim-id issue-96-dead --apply 2>&1)
+contains "issue mismatch REFUSE" "$out" "issue_id_mismatch"
+if [[ -s "$GH_COMMENTS_FILE" ]]; then
+  bad "issue mismatch must not post comment"
+else
+  ok "issue mismatch produced no comment"
+fi
+if grep -q 'COMMENT' "$GH_LOG" 2>/dev/null; then
+  bad "gh log shows comment on issue mismatch"
+else
+  ok "no gh comment on issue mismatch"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · filename/body mismatch and duplicate body IDs refuse"
+new_repo "$ROOT/idcanon"
+(
+  cd "$ROOT/idcanon/canon" || exit 1
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  mkdir -p docs/claims
+  # Filename issue-97-a.md but body claims issue-97-b
+  cat > docs/claims/issue-97-a.md <<EOF
+claim: issue-97-b
+issue: 97
+claimed: $CLAIMED_ISO
+scope: x
+session: t
+branch: feat/97-b
+EOF
+  git add -A && git commit -qm mismatch-name && git push -q origin main
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/idcanon/canon" 2>&1)
+contains "filename/body mismatch REFUSE" "$out" "filename_body_mismatch"
+lacks    "filename mismatch not treated absent REAP" "$out" "REAP   issue-97-b"
+lacks    "filename mismatch not REAP under filename" "$out" "REAP   issue-97-a"
+# Duplicate body IDs via two files is hard without two paths for same id; simulate
+# two entries by also putting a second file with same body id under wrong name —
+# already covered by mismatch. Add two same-id via active-work+file dedupe is OK.
+# Create two claim files that both body-claim the same id by using a copy path:
+# Git can't have two files with same name; body-id duplicate requires two files
+# with different names and same body claim field — both refuse.
+new_repo "$ROOT/dupbody"
+(
+  cd "$ROOT/dupbody/canon" || exit 1
+  export GIT_AUTHOR_DATE="@${CLAIM_EPOCH}"
+  export GIT_COMMITTER_DATE="@${CLAIM_EPOCH}"
+  mkdir -p docs/claims
+  cat > docs/claims/issue-98-one.md <<EOF
+claim: issue-98-one
+issue: 98
+claimed: $CLAIMED_ISO
+scope: x
+session: t
+branch: feat/98-one
+EOF
+  # Second file: name matches its own body id, but we'll force duplicate by
+  # also having legacy row — that dedupes to one. For true duplicate body IDs
+  # across two files, use mismatched second file that claims same body id.
+  cat > docs/claims/issue-98-two.md <<EOF
+claim: issue-98-one
+issue: 98
+claimed: $CLAIMED_ISO
+scope: y
+session: t
+branch: feat/98-one
+EOF
+  git add -A && git commit -qm dupbody && git push -q origin main
+) >/dev/null 2>&1
+out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/dupbody/canon" 2>&1)
+contains "duplicate or mismatch refuse" "$out" "REFUSE"
+# Must not plan a successful REAP for the aliased id while duplicates exist
+if echo "$out" | grep -q 'REAP   issue-98-one'; then
+  bad "duplicate body IDs must not REAP"
+else
+  ok "duplicate body IDs do not REAP"
+fi
+
+# ---------------------------------------------------------------------------
+echo "#73 · adversarial · COMPLETED journal + live/re-added claim never silently skips"
+new_repo "$ROOT/readd"
+add_claim_file "$ROOT/readd" issue-99-readd 99 "$CLAIMED_ISO"
+STATE_R="$STATE_BASE/readd"
+mkdir -p "$STATE_R"
+# Pre-seed COMPLETED for the frozen op id (blob of current claim)
+blob=$(git -C "$ROOT/readd/canon" ls-tree origin/main -- docs/claims/issue-99-readd.md | awk '{print $3}')
+printf '2026-08-01T00:00:00Z COMPLETED op=reap:issue-99-readd:%s result=released rc=0\n' "$blob" > "$STATE_R/journal.md"
+export GH_PR_COUNT=0
+export GH_COMMENTS_FILE="$ROOT/readd/comments"
+: > "$GH_COMMENTS_FILE"
+out=$(
+  env \
+    GIBSON_CANONICAL="$ROOT/readd/canon" \
+    GIBSON_REAPER_STATE_DIR="$STATE_R" \
+    GIBSON_REAPER_JOURNAL="$STATE_R/journal.md" \
+    GIBSON_REAPER_LOCK_DIR="$STATE_R/lock" \
+    GIBSON_REAPER_RELEASE_CMD="$RC" \
+    GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+    "$REAPER" --repo acme/app --claim-id issue-99-readd --apply 2>&1
+)
+rc=$?
+# Must not silently skip: either re-evaluate/release or warn still_live
+if echo "$out" | grep -qiE 'still_live|revivify|re-evaluat|OK released issue-99-readd|completed_but_still_live'; then
+  ok "completed+live re-evaluates or releases"
+else
+  if echo "$out" | grep -qi 'skip' && echo "$out" | grep -qi 'idempotent' && ! echo "$out" | grep -qiE 'still_live|re-evaluat|revivify'; then
+    bad "silently skipped live claim after COMPLETED"
+  else
+    # If it released without the exact words, claim file gone is success
+    files=$(git -C "$ROOT/readd/canon" fetch -q origin; git -C "$ROOT/readd/canon" ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+    if echo "$files" | grep -q 'issue-99-readd'; then
+      bad "live claim after COMPLETED neither released nor warned (rc=$rc)"
+      echo "$out" | tail -20
+    else
+      ok "completed+live released claim"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------

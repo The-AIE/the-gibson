@@ -79,9 +79,20 @@ row, `agent-claimed` label, and worktree block the fleet indefinitely. Run
 `scripts/claim-reaper.sh` (dry-run by default; `--apply` to act) to expire claims
 from **evidence**, not assertion:
 
+- Ledger source is always a **successful fetch** of the exact remote base
+  (`origin/main` or `origin/master`). Failed fetch refuses — never fall back to
+  local main/master, cached stale refs, HEAD, or another branch.
+- Each claim freezes a canonical identity: actual path, regular-blob OID, body
+  claim id, filename (`docs/claims/<id>.md` must match body id), issue field
+  (must agree with the id-derived issue number), branch, and worktree. Duplicate
+  logical ids, filename/body mismatch, wrong object modes, and issue mismatches
+  refuse before any plan/comment/mutation. Pre-mutation reparse must match.
 - Last-active time is the maximum valid evidence among: claim timestamp, local
-  branch tip, remote branch tip, registered worktree tracked-file mtime, and an
-  optional heartbeat file (`--heartbeat-dir`).
+  branch tip, remote branch tip, registered worktree tracked-file mtime, and
+  optional heartbeat files (`--heartbeat-dir/<id>` and
+  `--heartbeat-dir/<id>.heartbeat`). Nonempty malformed heartbeat content
+  refuses (never mtime fallback). Future timestamps and oversized integers
+  refuse; integers are validated lexically before any Bash arithmetic.
 - Default threshold is **14400 seconds (4 hours)** — deliberately more
   conservative than the 15-minute telemetry "presumed dead" line in docs/11.
 - An open PR always protects the claim (parked ≠ dead).
@@ -89,9 +100,16 @@ from **evidence**, not assertion:
   worktree paths, symlink/device evidence, future-clock evidence, or race-time
   activity. Never closes the issue.
 - Default apply releases the exact claim id via `release-claim.sh --claim-id …
-  --keep-branch --keep-worktree`, journals the operation, and posts a
+  --keep-branch --keep-worktree`, binding the frozen path/blob OID through
+  release-claim's authoritative fetch, cleanup commit, and normal push (CAS).
+  If evidence changes after the initial check, before release, or before push,
+  mutation is incomplete; the claim row and label survive. Journals under an
+  apply lock (never before lock; never through a symlink). A COMPLETED journal
+  is idempotent only when remote evidence still proves the claim absent — a
+  re-added live claim is re-evaluated, never silently skipped. Posts a
   deduplicated handoff comment (no absolute worktree paths). `--prune-worktrees`
-  may remove only the exact target worktree after the same checks.
+  may remove only the exact frozen registered worktree path (revalidated
+  immediately before removal; no default-path derivation; no `rm -rf` fallback).
 - Scheduling and Mission Control integration are follow-ups; this script is the
   standalone Tier B janitor.
 

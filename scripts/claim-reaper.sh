@@ -119,19 +119,48 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "claim-reaper.sh: ERROR: $*" >&2; exit 1; }
+usage_die() { echo "claim-reaper.sh: ERROR: $*" >&2; exit 2; }
 info() { echo "claim-reaper.sh: $*"; }
 warn() { echo "claim-reaper.sh: WARNING: $*" >&2; }
 
+# Safe non-negative decimal integer parse. Lexical + bounded string compare
+# against signed 64-bit max BEFORE any Bash arithmetic. Never wrap/normalize
+# overflow into a smaller value. Prints canonical decimal on success.
+# Max safe: 9223372036854775807 (2^63-1).
+MAX_SAFE_INT="9223372036854775807"
+parse_nonneg_int() {
+  local raw="$1" canon
+  case "$raw" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  canon="$raw"
+  while [[ "$canon" == 0* && ${#canon} -gt 1 ]]; do
+    canon="${canon#0}"
+  done
+  # shellcheck disable=SC2071
+  if [[ ${#canon} -gt ${#MAX_SAFE_INT} ]] ||
+     { [[ ${#canon} -eq ${#MAX_SAFE_INT} ]] && [[ "$canon" > "$MAX_SAFE_INT" ]]; }; then
+    return 1
+  fi
+  printf '%s\n' "$canon"
+  return 0
+}
+
+# Safe numeric greater-than for two already-parsed non-negative decimals.
+int_gt() {
+  local a="$1" b="$2"
+  # Prefer string compare by length then lexical (both digit-only, no leading zeros except 0).
+  if [[ ${#a} -gt ${#b} ]]; then return 0; fi
+  if [[ ${#a} -lt ${#b} ]]; then return 1; fi
+  [[ "$a" > "$b" ]]
+}
+
 # --- arg validation (fail closed on hostile/malformed) --------------------
-case "$STALE_SECONDS" in
-  ''|*[!0-9]*) die "--stale-seconds must be a non-negative decimal integer" ;;
-esac
-# Normalize leading zeros without octal traps.
-_stale_canon="$STALE_SECONDS"
-while [[ "$_stale_canon" == 0* && ${#_stale_canon} -gt 1 ]]; do
-  _stale_canon="${_stale_canon#0}"
-done
-STALE_SECONDS=$((10#$_stale_canon))
+_stale_parsed=""
+if ! _stale_parsed=$(parse_nonneg_int "$STALE_SECONDS"); then
+  usage_die "--stale-seconds must be a non-negative decimal integer in safe range (0..${MAX_SAFE_INT}); got '$STALE_SECONDS'"
+fi
+STALE_SECONDS="$_stale_parsed"
 
 if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
   [[ -n "$CLAIM_ID_FILTER" ]] || die "--claim-id requires a non-empty literal claim id"
@@ -145,13 +174,15 @@ if [[ -n "$REPO_ARG" && ! "$REPO_ARG" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; t
 fi
 
 if [[ -n "$MAX_CLAIMS" ]]; then
-  case "$MAX_CLAIMS" in
-    ''|*[!0-9]*) die "--max-claims must be a positive decimal integer" ;;
-  esac
-  _mc="$MAX_CLAIMS"
-  while [[ "$_mc" == 0* && ${#_mc} -gt 1 ]]; do _mc="${_mc#0}"; done
-  MAX_CLAIMS=$((10#$_mc))
-  [[ "$MAX_CLAIMS" -ge 1 ]] || die "--max-claims must be >= 1"
+  _mc=""
+  if ! _mc=$(parse_nonneg_int "$MAX_CLAIMS"); then
+    usage_die "--max-claims must be a positive decimal integer in safe range; got '$MAX_CLAIMS'"
+  fi
+  MAX_CLAIMS="$_mc"
+  # Safe: already bounded; arithmetic only after parse_nonneg_int.
+  if [[ "$MAX_CLAIMS" -lt 1 ]]; then
+    usage_die "--max-claims must be >= 1"
+  fi
 fi
 
 if [[ -n "$HEARTBEAT_DIR" ]]; then
@@ -180,43 +211,35 @@ LOCK_DIR="${GIBSON_REAPER_LOCK_DIR:-$STATE_DIR/claim-reaper.lock}"
 # Injectable clock (same contract as claims-status #62).
 if [[ ${GIBSON_CLAIMS_NOW_EPOCH+x} ]]; then
   raw="$GIBSON_CLAIMS_NOW_EPOCH"
-  case "$raw" in
-    ''|*[!0-9]*)
-      die "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds"
-      ;;
-  esac
-  canon="$raw"
-  while [[ "$canon" == 0* && ${#canon} -gt 1 ]]; do
-    canon="${canon#0}"
-  done
-  max_epoch="9223372036854775807"
-  # shellcheck disable=SC2071
-  if [[ ${#canon} -gt ${#max_epoch} ]] ||
-     { [[ ${#canon} -eq ${#max_epoch} ]] && [[ "$canon" > "$max_epoch" ]]; }; then
-    die "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds"
+  canon=""
+  if ! canon=$(parse_nonneg_int "$raw"); then
+    die "GIBSON_CLAIMS_NOW_EPOCH must be decimal Unix epoch seconds in safe range"
   fi
   NOW=$((10#$canon))
 else
   NOW=$(date -u +%s)
 fi
 
-# --- ledger ref (remote tip; never caller's working tree) ------------------
-git fetch origin >/dev/null 2>&1 || true
-
-resolve_ledger_ref() {
-  local candidate
-  for candidate in origin/main origin/master main master; do
-    if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null 2>&1; then
-      printf '%s\n' "$candidate"
-      return 0
+# --- ledger ref: require successful fetch of exact remote base ------------
+# Never fall back to local main/master, cached stale origin refs after a
+# failed fetch, HEAD, or another branch.
+fetch_remote_ledger_ref() {
+  local base ref
+  for base in main master; do
+    if git fetch origin "$base" >/dev/null 2>&1; then
+      ref="origin/${base}"
+      if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+        printf '%s\n' "$ref"
+        return 0
+      fi
     fi
   done
   return 1
 }
 
 REF=""
-if ! REF=$(resolve_ledger_ref); then
-  die "cannot resolve a valid ledger commit ref (tried origin/main, origin/master, main, master)"
+if ! REF=$(fetch_remote_ledger_ref); then
+  die "cannot fetch exact remote ledger base (origin main/master) — refuse (no local/cached fallback)"
 fi
 
 if ! git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1; then
@@ -402,13 +425,18 @@ file_mtime_epoch() {
   esac
 }
 
-# Max of numeric args; empty if none.
+# Max of already-safe non-negative decimal args; empty if none.
+# Uses length+lexical compare — never Bash arithmetic on untrusted magnitudes.
 max_epoch() {
   local m="" x
   for x in "$@"; do
     [[ -n "$x" ]] || continue
     case "$x" in *[!0-9]*) continue ;; esac
-    if [[ -z "$m" ]] || [[ "$x" -gt "$m" ]]; then
+    # Reject overflow candidates that slipped past callers
+    if ! parse_nonneg_int "$x" >/dev/null; then
+      continue
+    fi
+    if [[ -z "$m" ]] || int_gt "$x" "$m"; then
       m="$x"
     fi
   done
@@ -579,19 +607,11 @@ branch_tip_epoch() {
   esac
 }
 
-# Heartbeat file for a claim id. Prints epoch or FAIL:reason or empty.
-heartbeat_epoch() {
-  local id="$1"
-  [[ -n "$HEARTBEAT_DIR" ]] || { echo ""; return 0; }
-  local f1="$HEARTBEAT_DIR/$id" f2="$HEARTBEAT_DIR/${id}.heartbeat" f=""
-  if [[ -e "$f1" || -L "$f1" ]]; then
-    f="$f1"
-  elif [[ -e "$f2" || -L "$f2" ]]; then
-    f="$f2"
-  else
-    echo ""
-    return 0
-  fi
+# Parse one heartbeat file → epoch or FAIL:reason.
+# Nonempty malformed content is FAIL (never mtime fallback). Empty content may
+# use regular-file mtime. Symlink/device/non-file always FAIL.
+heartbeat_file_epoch() {
+  local f="$1" first content_epoch mt
   if [[ -L "$f" ]]; then
     echo "FAIL:heartbeat_symlink"
     return 0
@@ -604,41 +624,84 @@ heartbeat_epoch() {
     echo "FAIL:heartbeat_not_file"
     return 0
   fi
-  # Prefer first-line content as epoch or ISO-Z (the heartbeat signal). Fall
-  # back to file mtime only when content is empty/unparseable — never mix a
-  # wall-clock mtime with an explicit content stamp (that would turn a valid
-  # past heartbeat into "future" under an injected test clock, and in
-  # production the content is the authoritative liveness proof).
-  local first content_epoch mt
   first=$(head -n 1 "$f" 2>/dev/null || true)
   first=$(printf '%s' "$first" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   if [[ -n "$first" ]]; then
+    # Nonempty content is authoritative — refuse if unparseable/overflow.
     case "$first" in
       *[!0-9]*)
         content_epoch=$(claim_to_epoch "$first")
+        if [[ -z "$content_epoch" ]]; then
+          echo "FAIL:heartbeat_malformed"
+          return 0
+        fi
+        if ! content_epoch=$(parse_nonneg_int "$content_epoch"); then
+          echo "FAIL:heartbeat_malformed"
+          return 0
+        fi
         ;;
       *)
-        content_epoch="$first"
-        while [[ "$content_epoch" == 0* && ${#content_epoch} -gt 1 ]]; do
-          content_epoch="${content_epoch#0}"
-        done
-        case "$content_epoch" in
-          ''|*[!0-9]*) content_epoch="" ;;
-        esac
+        if ! content_epoch=$(parse_nonneg_int "$first"); then
+          echo "FAIL:heartbeat_malformed"
+          return 0
+        fi
         ;;
     esac
-  fi
-  if [[ -n "${content_epoch:-}" ]]; then
     printf '%s\n' "$content_epoch"
     return 0
   fi
+  # Empty content: mtime only (regular file already proven).
   mt=$(file_mtime_epoch "$f")
   case "$mt" in
     SYMLINK) echo "FAIL:heartbeat_symlink"; return 0 ;;
     DEVICE) echo "FAIL:heartbeat_device"; return 0 ;;
     '') echo "FAIL:heartbeat_unreadable"; return 0 ;;
-    *) printf '%s\n' "$mt" ;;
+    *)
+      if ! mt=$(parse_nonneg_int "$mt"); then
+        echo "FAIL:heartbeat_malformed"
+        return 0
+      fi
+      printf '%s\n' "$mt"
+      ;;
   esac
+}
+
+# Heartbeat evidence for a claim id. Inspects EVERY supported name:
+#   <dir>/<id>  and  <dir>/<id>.heartbeat
+# Any present unsafe/malformed/symlink/device evidence refuses the claim.
+# Otherwise returns the maximum valid timestamp among present files.
+# Prints epoch, FAIL:reason, or empty (no heartbeat files).
+heartbeat_epoch() {
+  local id="$1"
+  [[ -n "$HEARTBEAT_DIR" ]] || { echo ""; return 0; }
+  local f1="$HEARTBEAT_DIR/$id" f2="$HEARTBEAT_DIR/${id}.heartbeat"
+  local f ep max="" any=0
+  for f in "$f1" "$f2"; do
+    if [[ -e "$f" || -L "$f" ]]; then
+      any=1
+      ep=$(heartbeat_file_epoch "$f")
+      case "$ep" in
+        FAIL:*)
+          printf '%s\n' "$ep"
+          return 0
+          ;;
+        '')
+          echo "FAIL:heartbeat_unreadable"
+          return 0
+          ;;
+        *)
+          if [[ -z "$max" ]] || int_gt "$ep" "$max"; then
+            max="$ep"
+          fi
+          ;;
+      esac
+    fi
+  done
+  if [[ "$any" -eq 0 ]]; then
+    echo ""
+    return 0
+  fi
+  printf '%s\n' "$max"
 }
 
 # Comment dedupe marker (inert HTML comment; no path secrets).
@@ -698,26 +761,90 @@ EOF
   return 0
 }
 
-# Journal helpers (append-only).
+# Journal helpers — path-safe, never write through a symlink.
+# The journal target and its immediate parent must not themselves be symlinks
+# (system path components like /var → /private/var on macOS are fine).
+# Uses same-directory temp + replace so append cannot write through a symlink
+# target: mv replaces a symlink inode, leaving any victim file unchanged.
 ensure_journal() {
-  mkdir -p "$(dirname "$JOURNAL")" 2>/dev/null || true
-  if [[ ! -f "$JOURNAL" ]]; then
-    printf '# claim-reaper journal\n\n' > "$JOURNAL"
+  local jparent tmp
+  jparent=$(dirname -- "$JOURNAL")
+  mkdir -p "$jparent" 2>/dev/null || die "cannot create journal parent: $jparent"
+  if [[ -L "$jparent" ]]; then
+    die "journal parent is a symlink — refuse write-through: $jparent"
+  fi
+  if [[ -e "$JOURNAL" ]]; then
+    if [[ -L "$JOURNAL" ]]; then
+      die "journal target is a symlink — refuse write-through: $JOURNAL"
+    fi
+    if [[ ! -f "$JOURNAL" ]]; then
+      die "journal target exists but is not a regular file: $JOURNAL"
+    fi
+    return 0
+  fi
+  # Create new regular file: write temp in parent then mv into place.
+  # If JOURNAL is already a symlink, refuse before any write that would
+  # follow it (never use > "$JOURNAL" which writes through).
+  if [[ -L "$JOURNAL" ]]; then
+    die "journal target is a symlink — refuse create write-through: $JOURNAL"
+  fi
+  tmp=$(mktemp "${jparent}/.claim-reaper-journal.XXXXXX") || die "cannot create journal temp"
+  printf '# claim-reaper journal\n\n' > "$tmp"
+  if [[ -L "$JOURNAL" ]]; then
+    rm -f "$tmp"
+    die "journal became a symlink during create — refuse"
+  fi
+  # mv replaces a symlink node at JOURNAL (if raced) without writing the victim.
+  mv -f "$tmp" "$JOURNAL" || { rm -f "$tmp"; die "cannot create journal at $JOURNAL"; }
+  if [[ -L "$JOURNAL" || ! -f "$JOURNAL" ]]; then
+    die "journal path not a regular file after create: $JOURNAL"
   fi
 }
 
 journal_append() {
-  local line="$1"
-  ensure_journal
+  local line="$1" jparent tmp
   # Single-line records only; strip newlines from hostile inputs.
   line=$(printf '%s' "$line" | tr '\n\r' '  ')
-  printf '%s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo ts)" "$line" >> "$JOURNAL"
+  jparent=$(dirname -- "$JOURNAL")
+  if [[ -L "$jparent" ]]; then
+    die "journal parent is a symlink — refuse append: $jparent"
+  fi
+  if [[ -L "$JOURNAL" ]]; then
+    die "journal is a symlink — refuse append (no write-through)"
+  fi
+  ensure_journal
+  if [[ -L "$JOURNAL" ]]; then
+    die "journal is a symlink — refuse append (no write-through)"
+  fi
+  if [[ ! -f "$JOURNAL" ]]; then
+    die "journal is not a regular file — refuse append"
+  fi
+  tmp=$(mktemp "${jparent}/.claim-reaper-journal.XXXXXX") || die "cannot create journal temp"
+  # Copy existing regular file only (cat would follow symlink — already refused -L).
+  cat "$JOURNAL" > "$tmp" || { rm -f "$tmp"; die "cannot read journal for append"; }
+  printf '%s %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo ts)" "$line" >> "$tmp"
+  if [[ -L "$JOURNAL" ]]; then
+    rm -f "$tmp"
+    die "journal became a symlink during append — refuse"
+  fi
+  # Replace journal path: if a symlink appeared, mv replaces the symlink node
+  # (victim file at old symlink target is unchanged). Prefer refusing if still
+  # a symlink before replace so we never claim a successful journal write
+  # that only swapped a symlink for a new file silently.
+  if [[ -L "$JOURNAL" ]]; then
+    rm -f "$tmp"
+    die "journal is a symlink — refuse append"
+  fi
+  mv -f "$tmp" "$JOURNAL" || { rm -f "$tmp"; die "cannot write journal"; }
+  if [[ -L "$JOURNAL" || ! -f "$JOURNAL" ]]; then
+    die "journal path not a regular file after append: $JOURNAL"
+  fi
 }
 
 # True if COMPLETED record exists for op id.
 journal_has_completed() {
   local op="$1"
-  [[ -f "$JOURNAL" ]] || return 1
+  [[ -f "$JOURNAL" && ! -L "$JOURNAL" ]] || return 1
   grep -qF -- " COMPLETED op=${op} " "$JOURNAL" 2>/dev/null || \
     grep -qE -- " COMPLETED op=${op}( |$)" "$JOURNAL" 2>/dev/null
 }
@@ -757,44 +884,119 @@ trap release_lock EXIT
 
 # --- enumerate live claims (dedupe legacy + per-file) ----------------------
 # Record format (tab-separated, one per logical claim id after dedupe):
-# id \t issue \t claimed_raw \t branch \t worktree \t blob_oid \t source
+# id \t issue \t claimed_raw \t branch \t worktree \t blob_oid \t source \t path \t identity_status
+# identity_status: ok | refuse:<reason>
+# path is the actual ledger path (docs/claims/<id>.md or docs/active-work.md).
 
 CLAIMS_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-claims.XXXXXX")
 PLAN_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-plan.XXXXXX")
-trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP"' EXIT
+IDENTITY_REFUSE_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-idref.XXXXXX")
+trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP"' EXIT
 
 # Collect raw rows into CLAIMS_TMP then dedupe by id (prefer per-file over legacy).
 : > "$CLAIMS_TMP"
+: > "$IDENTITY_REFUSE_TMP"
+# Track seen body claim ids for duplicate detection (file form).
+SEEN_IDS_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-seen.XXXXXX")
+: > "$SEEN_IDS_TMP"
+trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP"' EXIT
 
-# Per-file claims
+# Per-file claims — retain actual path; require path == docs/claims/<body-claim-id>.md
 if [[ "$HAS_CLAIMS_TREE" -eq 1 ]]; then
   while IFS= read -r claim_line; do
     [[ -n "$claim_line" ]] || continue
+    claim_mode=$(printf '%s\n' "$claim_line" | awk '{print $1; exit}')
+    claim_type=$(printf '%s\n' "$claim_line" | awk '{print $2; exit}')
     claim_obj=$(printf '%s\n' "$claim_line" | awk '{print $3; exit}')
     claim_path="${claim_line#*$'\t'}"
     case "$claim_path" in
       docs/claims/*.md) ;;
-      *) continue ;;
+      *)
+        printf 'REFUSE\t%s\t\t\t\t\tmalformed_claim_path\t%s\t\t\n' \
+          "${claim_path:-unknown}" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+        continue
+        ;;
     esac
+    if [[ "$claim_type" != "blob" ]] || [[ "$claim_mode" != "100644" && "$claim_mode" != "100755" ]]; then
+      printf 'REFUSE\t%s\t\t\t\t\twrong_object_mode\t%s\t\t\n' \
+        "$(basename "$claim_path" .md)" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
     body=$(git cat-file blob "$claim_obj" 2>/dev/null) || die "cannot read $claim_path blob $claim_obj"
-    id=$(field_from_body "$body" "claim")
-    [[ -n "$id" ]] || id=$(basename "$claim_path" .md)
+    body_id=$(field_from_body "$body" "claim")
+    fname_id=$(basename "$claim_path" .md)
+    if [[ -z "$body_id" ]]; then
+      printf 'REFUSE\t%s\t\t\t\t\tmissing_body_claim_id\t%s\t\t\n' \
+        "$fname_id" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+    # Duplicate logical body claim IDs (any path aliasing the same body id)
+    # refuse the new path and drop any earlier accepted row for that id.
+    if grep -qxF -- "$body_id" "$SEEN_IDS_TMP" 2>/dev/null; then
+      printf 'REFUSE\t%s\t\t\t\t\tduplicate_claim_id\t%s\t\t\n' \
+        "$body_id" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      awk -F'\t' -v id="$body_id" 'BEGIN{OFS="\t"} $1==id {next} {print}' "$CLAIMS_TMP" > "${CLAIMS_TMP}.x" \
+        && mv "${CLAIMS_TMP}.x" "$CLAIMS_TMP"
+      printf 'REFUSE\t%s\t\t\t\t\tduplicate_claim_id\t%s\t\t\n' \
+        "$body_id" "docs/claims/${body_id}.md" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+    printf '%s\n' "$body_id" >> "$SEEN_IDS_TMP"
+    if [[ "$body_id" != "$fname_id" ]]; then
+      # Filename/body mismatch: refuse; do NOT treat as already-absent under body id.
+      printf 'REFUSE\t%s\t\t\t\t\tfilename_body_mismatch\t%s\t\t\n' \
+        "$body_id" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+    if [[ "$claim_path" != "docs/claims/${body_id}.md" ]]; then
+      printf 'REFUSE\t%s\t\t\t\t\tpath_not_canonical\t%s\t\t\n' \
+        "$body_id" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+    if ! valid_claim_id "$body_id"; then
+      printf 'REFUSE\t%s\t\t\t\t\tmalformed_claim_id\t%s\t\t\n' \
+        "$body_id" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+
     claimed=$(field_from_body "$body" "claimed")
     issue=$(field_from_body "$body" "issue")
     branch=$(field_from_body "$body" "branch")
     worktree=$(field_from_body "$body" "worktree")
-    [[ -n "$issue" ]] || issue=$(issue_from_claim_id "$id")
-    [[ -n "$branch" ]] || branch=$(branch_for "$id")
-    printf '%s\t%s\t%s\t%s\t%s\t%s\tfile\n' \
-      "$id" "$issue" "$claimed" "$branch" "$worktree" "$claim_obj" >> "$CLAIMS_TMP"
+    derived_issue=$(issue_from_claim_id "$body_id")
+    # issue: field, derived-from-id, and canonical claim id must agree.
+    if [[ -z "$issue" ]]; then
+      issue="$derived_issue"
+    fi
+    if [[ -z "$issue" || ! "$issue" =~ ^[0-9]+$ ]]; then
+      printf 'REFUSE\t%s\t%s\t\t\t\tmalformed_issue\t%s\t\t\n' \
+        "$body_id" "${issue:-}" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+    if [[ -n "$derived_issue" && "$issue" != "$derived_issue" ]]; then
+      printf 'REFUSE\t%s\t%s\t\t\t\tissue_id_mismatch\t%s\t\t\n' \
+        "$body_id" "$issue" "$claim_path" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
+    [[ -n "$branch" ]] || branch=$(branch_for "$body_id")
+    # id issue claimed branch worktree blob source path status
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tfile\t%s\tok\n' \
+      "$body_id" "$issue" "$claimed" "$branch" "$worktree" "$claim_obj" "$claim_path" >> "$CLAIMS_TMP"
   done <<EOF
 $(git ls-tree "$REF" docs/claims/ 2>/dev/null || true)
 EOF
 fi
 
+# Drop any rows marked __DROP__ from duplicate handling
+if [[ -s "$CLAIMS_TMP" ]]; then
+  grep -v '^__DROP__$' "$CLAIMS_TMP" > "${CLAIMS_TMP}.y" || true
+  mv "${CLAIMS_TMP}.y" "$CLAIMS_TMP"
+fi
+
 # Legacy rows (column 3 = claim-id only)
 if [[ "$HAS_ACTIVE" -eq 1 ]]; then
   active_body=$(git show "$REF:docs/active-work.md" 2>/dev/null) || die "cannot read docs/active-work.md"
+  active_blob=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $3; exit}')
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^\| ]] || continue
     cid=$(printf '%s\n' "$line" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -802,14 +1004,23 @@ if [[ "$HAS_ACTIVE" -eq 1 ]]; then
     [[ "$cid" == "claim-id" || "$cid" == "---" ]] && continue
     [[ "$cid" =~ ^-+$ ]] && continue
     echo "$cid" | grep -qE '^issue-' || continue
+    if ! valid_claim_id "$cid"; then
+      printf 'REFUSE\t%s\t\t\t\t\tmalformed_claim_id\tdocs/active-work.md\t\t\n' \
+        "$cid" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
     claimed=$(printf '%s\n' "$line" | awk -F'|' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     issue=$(issue_from_claim_id "$cid")
+    if [[ -z "$issue" || ! "$issue" =~ ^[0-9]+$ ]]; then
+      printf 'REFUSE\t%s\t%s\t\t\t\tmalformed_issue\tdocs/active-work.md\t\t\n' \
+        "$cid" "${issue:-}" >> "$IDENTITY_REFUSE_TMP"
+      continue
+    fi
     branch=$(branch_for "$cid")
     worktree=""
-    # blob oid for legacy: use active-work blob + claim id as synthetic key
-    active_blob=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $3; exit}')
-    printf '%s\t%s\t%s\t%s\t%s\t%s\tlegacy\n' \
-      "$cid" "$issue" "$claimed" "$branch" "$worktree" "${active_blob:-legacy}:$cid" >> "$CLAIMS_TMP"
+    # blob oid for legacy: active-work blob + claim id (CAS key)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tlegacy\t%s\tok\n' \
+      "$cid" "$issue" "$claimed" "$branch" "$worktree" "${active_blob}:$cid" "docs/active-work.md" >> "$CLAIMS_TMP"
   done <<EOF
 $active_body
 EOF
@@ -817,25 +1028,19 @@ fi
 
 # Dedupe: for each id keep file over legacy, else first.
 DEDUP_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-dedup.XXXXXX")
-trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$DEDUP_TMP"' EXIT
+trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$DEDUP_TMP"' EXIT
 : > "$DEDUP_TMP"
-# Sort so "file" source sorts before "legacy" when we keep first after id group…
-# Actually: prefer file — process file rows first then legacy skip if id exists.
 while IFS= read -r row; do
   [[ -n "$row" ]] || continue
-  src="${row##*$'\t'}"
+  src=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
   [[ "$src" == "file" ]] || continue
   printf '%s\n' "$row" >> "$DEDUP_TMP"
 done < "$CLAIMS_TMP"
 while IFS= read -r row; do
   [[ -n "$row" ]] || continue
-  src="${row##*$'\t'}"
+  src=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
   [[ "$src" == "legacy" ]] || continue
   id="${row%%$'\t'*}"
-  if grep -q "^${id}$(printf '\t')" "$DEDUP_TMP" 2>/dev/null; then
-    continue
-  fi
-  # Also match id at start with tab
   if awk -F'\t' -v id="$id" '$1==id {found=1} END{exit !found}' "$DEDUP_TMP" 2>/dev/null; then
     continue
   fi
@@ -848,10 +1053,23 @@ DEDUP_TMP=""
 if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
   FILTERED=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-filt.XXXXXX")
   awk -F'\t' -v id="$CLAIM_ID_FILTER" '$1==id' "$CLAIMS_TMP" > "$FILTERED"
+  # Also keep identity refuses for this id so dry-run shows REFUSE not silent skip
+  awk -F'\t' -v id="$CLAIM_ID_FILTER" '$2==id' "$IDENTITY_REFUSE_TMP" > "${FILTERED}.ref" || true
   mv "$FILTERED" "$CLAIMS_TMP"
-  if [[ ! -s "$CLAIMS_TMP" ]]; then
+  if [[ ! -s "$CLAIMS_TMP" && ! -s "${FILTERED}.ref" ]]; then
     # Apply against an already-released id is a successful no-op (idempotent).
+    # Acquire lock BEFORE any journal write (including already-absent).
     if [[ "$APPLY" -eq 1 ]]; then
+      if ! acquire_lock; then
+        die "another claim-reaper apply holds the lock at $LOCK_DIR (concurrent applies serialize)"
+      fi
+      # Re-fetch and re-prove absence on authoritative remote before journaling.
+      if ! REF=$(fetch_remote_ledger_ref); then
+        die "cannot re-fetch remote ledger to prove absence of '$CLAIM_ID_FILTER'"
+      fi
+      if git cat-file -e "$REF:docs/claims/${CLAIM_ID_FILTER}.md" 2>/dev/null; then
+        die "claim '$CLAIM_ID_FILTER' reappeared during absence check — refuse already_absent"
+      fi
       info "no live claim '$CLAIM_ID_FILTER' at $REF — nothing to reap (idempotent)"
       ensure_journal
       journal_append "COMPLETED op=reap:${CLAIM_ID_FILTER}:absent result=already_absent"
@@ -859,22 +1077,46 @@ if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
     fi
     die "no live claim '$CLAIM_ID_FILTER' at $REF"
   fi
+  # Merge identity refuses for filtered id into plan later via IDENTITY_REFUSE_TMP
+  if [[ -s "${FILTERED}.ref" ]]; then
+    cat "${FILTERED}.ref" > "$IDENTITY_REFUSE_TMP"
+  else
+    : > "$IDENTITY_REFUSE_TMP"
+  fi
+  rm -f "${FILTERED}.ref"
 fi
 
 info "ledger ref: $REF; scanning claims (stale>${STALE_SECONDS}s)"
 
 # --- evaluate each claim --------------------------------------------------
 : > "$PLAN_TMP"
-# plan columns: action\tid\tissue\tbranch\tlast_active\tage\treason\tblob\twt\tclaimed_raw
+# plan columns:
+# action\tid\tissue\tbranch\tlast_active\tage\treason\tblob\twt\tclaimed_raw\tsource\tpath
 
 REPO=$(resolve_repo 2>/dev/null || true)
 
-# Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw.
+# Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw/source/path.
 # Args: action reason last_active age worktree_path
 plan_row() {
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$1" "$id" "$issue" "$branch" "${3:-}" "${4:-}" "$2" "$blob" "${5:-}" "$claimed_raw"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$1" "$id" "$issue" "$branch" "${3:-}" "${4:-}" "$2" "$blob" "${5:-}" "$claimed_raw" \
+    "${source:-}" "${claim_path:-}"
 }
+
+# Identity refuses (filename/body mismatch, issue mismatch, duplicates, …)
+while IFS= read -r irow || [[ -n "$irow" ]]; do
+  [[ -n "$irow" ]] || continue
+  # REFUSE \t id \t issue \t ... \t reason \t path
+  id=$(printf '%s\n' "$irow" | awk -F'\t' '{print $2}')
+  issue=$(printf '%s\n' "$irow" | awk -F'\t' '{print $3}')
+  reason=$(printf '%s\n' "$irow" | awk -F'\t' '{print $7}')
+  claim_path=$(printf '%s\n' "$irow" | awk -F'\t' '{print $8}')
+  branch=""
+  blob=""
+  claimed_raw=""
+  source=""
+  plan_row REFUSE "${reason:-identity_refuse}" "" "" "" >> "$PLAN_TMP"
+done < "$IDENTITY_REFUSE_TMP"
 
 while IFS= read -r row || [[ -n "$row" ]]; do
   [[ -n "$row" ]] || continue
@@ -885,7 +1127,8 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   branch=$(printf '%s\n' "$row" | awk -F'\t' '{print $4}')
   worktree=$(printf '%s\n' "$row" | awk -F'\t' '{print $5}')
   blob=$(printf '%s\n' "$row" | awk -F'\t' '{print $6}')
-  # source column ($7: file|legacy) retained in CLAIMS_TMP for audit; unused here.
+  source=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
+  claim_path=$(printf '%s\n' "$row" | awk -F'\t' '{print $8}')
 
   last_active=""
   age=""
@@ -898,10 +1141,26 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     plan_row REFUSE malformed_issue "" "" "$worktree" >> "$PLAN_TMP"
     continue
   fi
+  # Bind issue field / derived id / positional agreement again at plan time.
+  _derived=$(issue_from_claim_id "$id")
+  if [[ -n "$_derived" && "$issue" != "$_derived" ]]; then
+    plan_row REFUSE issue_id_mismatch "" "" "$worktree" >> "$PLAN_TMP"
+    continue
+  fi
+  if [[ "$source" == "file" ]]; then
+    if [[ "$claim_path" != "docs/claims/${id}.md" ]]; then
+      plan_row REFUSE path_not_canonical "" "" "$worktree" >> "$PLAN_TMP"
+      continue
+    fi
+  fi
 
   # Claim timestamp is required evidence base.
   claim_epoch=$(claim_to_epoch "$claimed_raw")
   if [[ -z "$claim_epoch" ]]; then
+    plan_row REFUSE malformed_timestamp "" "" "$worktree" >> "$PLAN_TMP"
+    continue
+  fi
+  if ! claim_epoch=$(parse_nonneg_int "$claim_epoch"); then
     plan_row REFUSE malformed_timestamp "" "" "$worktree" >> "$PLAN_TMP"
     continue
   fi
@@ -923,17 +1182,32 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     local_tip=$(branch_tip_epoch "$branch")
     case "$local_tip" in
       FAIL:*) evidence_fail="${local_tip#FAIL:}"; local_tip="" ;;
+      '') ;;
+      *)
+        if ! local_tip=$(parse_nonneg_int "$local_tip"); then
+          evidence_fail="branch_tip_unreadable"
+          local_tip=""
+        fi
+        ;;
     esac
     if [[ -z "$evidence_fail" ]]; then
       remote_tip=$(branch_tip_epoch "origin/$branch")
       case "$remote_tip" in
         FAIL:*) evidence_fail="${remote_tip#FAIL:}"; remote_tip="" ;;
+        '') ;;
+        *)
+          if ! remote_tip=$(parse_nonneg_int "$remote_tip"); then
+            evidence_fail="branch_tip_unreadable"
+            remote_tip=""
+          fi
+          ;;
       esac
     fi
   fi
 
   # Worktree: if listed in claim, must be absolute and safe; if absent, try default
-  # only when that path is a registered worktree. Unregistered listed path → refuse.
+  # only when that path is a registered worktree (evidence only — prune never
+  # derives a different path). Unregistered listed path → refuse.
   wt_path="$worktree"
   if [[ -z "$wt_path" ]]; then
     wt_path=$(default_wt_for "$id" 2>/dev/null || true)
@@ -964,12 +1238,26 @@ while IFS= read -r row || [[ -n "$row" ]]; do
         wt_mt=$(worktree_tracked_mtime "$wt_path")
         case "$wt_mt" in
           FAIL:*) evidence_fail="${wt_mt#FAIL:}"; wt_mt="" ;;
+          '') ;;
+          *)
+            if ! wt_mt=$(parse_nonneg_int "$wt_mt"); then
+              evidence_fail="worktree_mtime_unreadable"
+              wt_mt=""
+            fi
+            ;;
         esac
       fi
     else
       wt_mt=$(worktree_tracked_mtime "$wt_path")
       case "$wt_mt" in
         FAIL:*) evidence_fail="${wt_mt#FAIL:}"; wt_mt="" ;;
+        '') ;;
+        *)
+          if ! wt_mt=$(parse_nonneg_int "$wt_mt"); then
+            evidence_fail="worktree_mtime_unreadable"
+            wt_mt=""
+          fi
+          ;;
       esac
     fi
   fi
@@ -992,13 +1280,14 @@ while IFS= read -r row || [[ -n "$row" ]]; do
     continue
   fi
 
-  # Future-clock evidence fails closed.
-  if [[ "$last_active" -gt "$NOW" ]]; then
+  # Future-clock evidence fails closed (safe compare; both already bounded).
+  if int_gt "$last_active" "$NOW"; then
     plan_row REFUSE future_clock_evidence "$last_active" "" "${wt_path:-}" >> "$PLAN_TMP"
     continue
   fi
 
-  age=$((NOW - last_active))
+  # age = NOW - last_active; both safe → arithmetic is safe.
+  age=$((10#$NOW - 10#$last_active))
 
   # Open PR protects (successful query only).
   if [[ -z "$REPO" ]]; then
@@ -1067,6 +1356,7 @@ if [[ "$APPLY" -eq 0 ]]; then
 fi
 
 # --- apply ----------------------------------------------------------------
+# Acquire the single-instance lock BEFORE any journal/comment/release write.
 if ! acquire_lock; then
   die "another claim-reaper apply holds the lock at $LOCK_DIR (concurrent applies serialize)"
 fi
@@ -1074,6 +1364,112 @@ fi
 ensure_journal
 INCOMPLETE=0
 applied=0
+
+# Reparse frozen claim fields from authoritative remote path+blob and compare.
+# Sets globals: _rp_status (ok|FAIL:reason), _rp_issue, _rp_claimed, _rp_branch, _rp_wt.
+# Must NOT be run in a command-substitution subshell (would drop globals).
+_rp_status=""
+_rp_issue=""
+_rp_claimed=""
+_rp_branch=""
+_rp_wt=""
+reparse_claim_fields() {
+  local ref="$1" path="$2" expect_blob="$3" expect_id="$4" expect_source="$5"
+  local body cur_blob body_id body_issue body_claimed body_branch body_wt active_blob _derived
+  _rp_status=""
+  _rp_issue=""
+  _rp_claimed=""
+  _rp_branch=""
+  _rp_wt=""
+  if [[ "$expect_source" == "file" ]]; then
+    if ! git cat-file -e "${ref}:${path}" 2>/dev/null; then
+      _rp_status="FAIL:absent"
+      return 0
+    fi
+    cur_blob=$(git ls-tree "$ref" -- "$path" 2>/dev/null | awk '{print $3; exit}')
+    if [[ -z "$cur_blob" || "$cur_blob" != "$expect_blob" ]]; then
+      _rp_status="FAIL:blob_oid_changed"
+      return 0
+    fi
+    body=$(git cat-file blob "$cur_blob" 2>/dev/null) || { _rp_status="FAIL:blob_unreadable"; return 0; }
+    body_id=$(field_from_body "$body" "claim")
+    if [[ "$body_id" != "$expect_id" ]]; then
+      _rp_status="FAIL:body_id_mismatch"
+      return 0
+    fi
+    if [[ "$path" != "docs/claims/${expect_id}.md" ]]; then
+      _rp_status="FAIL:path_not_canonical"
+      return 0
+    fi
+    body_issue=$(field_from_body "$body" "issue")
+    body_claimed=$(field_from_body "$body" "claimed")
+    body_branch=$(field_from_body "$body" "branch")
+    body_wt=$(field_from_body "$body" "worktree")
+    [[ -n "$body_issue" ]] || body_issue=$(issue_from_claim_id "$expect_id")
+    [[ -n "$body_branch" ]] || body_branch=$(branch_for "$expect_id")
+    if [[ -z "$body_issue" || ! "$body_issue" =~ ^[0-9]+$ ]]; then
+      _rp_status="FAIL:malformed_issue"
+      return 0
+    fi
+    _derived=$(issue_from_claim_id "$expect_id")
+    if [[ -n "$_derived" && "$body_issue" != "$_derived" ]]; then
+      _rp_status="FAIL:issue_id_mismatch"
+      return 0
+    fi
+    _rp_issue="$body_issue"
+    _rp_claimed="$body_claimed"
+    _rp_branch="$body_branch"
+    _rp_wt="$body_wt"
+    _rp_status="ok"
+    return 0
+  fi
+  # legacy: expect_blob = activeblob:claimid
+  active_blob="${expect_blob%%:*}"
+  if ! git cat-file -e "${ref}:docs/active-work.md" 2>/dev/null; then
+    _rp_status="FAIL:absent"
+    return 0
+  fi
+  cur_blob=$(git ls-tree "$ref" -- docs/active-work.md 2>/dev/null | awk '{print $3; exit}')
+  if [[ -z "$cur_blob" || "$cur_blob" != "$active_blob" ]]; then
+    _rp_status="FAIL:blob_oid_changed"
+    return 0
+  fi
+  if ! git show "${ref}:docs/active-work.md" 2>/dev/null | awk -F'|' -v id="$expect_id" '
+    /^\|/ {
+      cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
+      if (cid==id) found=1
+    }
+    END { exit !found }'; then
+    _rp_status="FAIL:absent"
+    return 0
+  fi
+  _rp_issue=$(issue_from_claim_id "$expect_id")
+  _rp_claimed=$(git show "${ref}:docs/active-work.md" 2>/dev/null | awk -F'|' -v id="$expect_id" '
+    /^\|/ {
+      cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
+      if (cid==id) {
+        w=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",w); print w; exit
+      }
+    }')
+  _rp_branch=$(branch_for "$expect_id")
+  _rp_wt=""
+  _rp_status="ok"
+  return 0
+}
+
+claim_live_on_ref() {
+  local ref="$1" id="$2" source="$3" path="$4" blob="$5"
+  if [[ "$source" == "file" ]]; then
+    git cat-file -e "${ref}:${path}" 2>/dev/null && return 0
+    return 1
+  fi
+  git show "${ref}:docs/active-work.md" 2>/dev/null | awk -F'|' -v want="$id" '
+    /^\|/ {
+      cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
+      if (cid==want) found=1
+    }
+    END { exit !found }'
+}
 
 while IFS= read -r prow || [[ -n "$prow" ]]; do
   [[ -n "$prow" ]] || continue
@@ -1087,6 +1483,16 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   p_blob=$(printf '%s\n' "$prow" | awk -F'\t' '{print $8}')
   p_wt=$(printf '%s\n' "$prow" | awk -F'\t' '{print $9}')
   p_claimed=$(printf '%s\n' "$prow" | awk -F'\t' '{print $10}')
+  p_source=$(printf '%s\n' "$prow" | awk -F'\t' '{print $11}')
+  p_path=$(printf '%s\n' "$prow" | awk -F'\t' '{print $12}')
+  [[ -n "$p_source" ]] || p_source="file"
+  if [[ -z "$p_path" ]]; then
+    if [[ "$p_source" == "legacy" ]]; then
+      p_path="docs/active-work.md"
+    else
+      p_path="docs/claims/${p_id}.md"
+    fi
+  fi
 
   if [[ -n "$MAX_CLAIMS" && "$applied" -ge "$MAX_CLAIMS" ]]; then
     info "max-claims $MAX_CLAIMS reached — stopping"
@@ -1096,63 +1502,96 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   # Stable operation id from claim id + frozen blob oid.
   op="reap:${p_id}:${p_blob}"
 
+  # COMPLETED is idempotent only when authoritative remote proves the exact
+  # claim is still absent. A re-added/live claim must not be silently skipped.
   if journal_has_completed "$op"; then
-    info "skip $p_id — journal already COMPLETED op=$op (idempotent)"
-    # If claim already gone, fine; if still live, still skip mutation to avoid loops
-    # only when completed. Re-check: if still live after completed, warn.
-    continue
-  fi
-
-  journal_append "STARTED op=${op} claim=${p_id} issue=${p_issue} blob=${p_blob}"
-
-  # ---- pre-mutation recheck (race) ----
-  git fetch origin >/dev/null 2>&1 || true
-  if ! REF=$(resolve_ledger_ref); then
-    warn "pre-mutation: ledger ref lost — refuse $p_id"
-    journal_append "INCOMPLETE op=${op} reason=ledger_ref_lost"
-    INCOMPLETE=1
-    continue
-  fi
-
-  # Exact claim blob/OID recheck for per-file claims.
-  still_live=0
-  new_blob=""
-  if git cat-file -e "$REF:docs/claims/${p_id}.md" 2>/dev/null; then
-    still_live=1
-    new_blob=$(git ls-tree "$REF" -- "docs/claims/${p_id}.md" 2>/dev/null | awk '{print $3; exit}')
-  fi
-  # Legacy presence
-  if [[ "$still_live" -eq 0 ]]; then
-    if git show "$REF:docs/active-work.md" 2>/dev/null | awk -F'|' -v id="$p_id" '
-      /^\|/ {
-        cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
-        if (cid==id) found=1
-      }
-      END { exit !found }'; then
-      still_live=1
-      new_blob="$p_blob"
-    fi
-  fi
-
-  if [[ "$still_live" -eq 0 ]]; then
-    info "claim $p_id already absent at $REF — marking completed (idempotent)"
-    journal_append "COMPLETED op=${op} result=already_absent"
-    continue
-  fi
-
-  # Blob OID race (per-file): if changed, activity or rewrite → refuse.
-  if [[ "$p_blob" != *":"* ]]; then
-    # per-file blob oid
-    if [[ -n "$new_blob" && "$new_blob" != "$p_blob" ]]; then
-      warn "pre-mutation: claim blob OID changed for $p_id — refuse (race)"
-      journal_append "INCOMPLETE op=${op} reason=blob_oid_changed"
+    if ! REF=$(fetch_remote_ledger_ref); then
+      warn "COMPLETED op=$op but cannot re-fetch ledger — refuse skip (incomplete)"
+      journal_append "INCOMPLETE op=${op} reason=completed_but_fetch_failed"
       INCOMPLETE=1
+      continue
+    fi
+    if claim_live_on_ref "$REF" "$p_id" "$p_source" "$p_path" "$p_blob"; then
+      warn "COMPLETED journal for $p_id but claim is live/re-added at $REF — re-evaluating (never silently skip)"
+      journal_append "WARN op=${op} reason=completed_but_still_live reevaluate=1"
+      # Continue under a new operation identity so mutation can proceed after checks.
+      op="reap:${p_id}:${p_blob}:revivify"
+    else
+      info "skip $p_id — journal COMPLETED and claim absent at $REF (idempotent)"
       continue
     fi
   fi
 
+  journal_append "STARTED op=${op} claim=${p_id} issue=${p_issue} blob=${p_blob} path=${p_path} source=${p_source}"
+
+  # ---- pre-mutation recheck (race): require successful exact remote fetch ----
+  if ! REF=$(fetch_remote_ledger_ref); then
+    warn "pre-mutation: exact remote fetch failed — refuse $p_id (no local fallback)"
+    journal_append "INCOMPLETE op=${op} reason=ledger_fetch_failed"
+    INCOMPLETE=1
+    continue
+  fi
+
+  reparse_claim_fields "$REF" "$p_path" "$p_blob" "$p_id" "$p_source"
+  case "$_rp_status" in
+    FAIL:absent)
+      info "claim $p_id already absent at $REF — marking completed (idempotent)"
+      journal_append "COMPLETED op=${op} result=already_absent"
+      continue
+      ;;
+    FAIL:*)
+      warn "pre-mutation: reparse ${_rp_status} for $p_id — refuse (label/claim survive)"
+      journal_append "INCOMPLETE op=${op} reason=${_rp_status#FAIL:}"
+      INCOMPLETE=1
+      continue
+      ;;
+    ok)
+      # Frozen fields must still match what we planned against.
+      if [[ -n "$_rp_issue" && "$_rp_issue" != "$p_issue" ]]; then
+        warn "pre-mutation: issue field changed for $p_id — refuse"
+        journal_append "INCOMPLETE op=${op} reason=issue_field_changed"
+        INCOMPLETE=1
+        continue
+      fi
+      if [[ -n "$_rp_branch" && "$_rp_branch" != "$p_branch" ]]; then
+        warn "pre-mutation: branch field changed for $p_id — refuse"
+        journal_append "INCOMPLETE op=${op} reason=branch_field_changed"
+        INCOMPLETE=1
+        continue
+      fi
+      if [[ -n "$_rp_claimed" && "$_rp_claimed" != "$p_claimed" ]]; then
+        warn "pre-mutation: claimed timestamp changed for $p_id — refuse (renewal)"
+        journal_append "INCOMPLETE op=${op} reason=claimed_changed"
+        INCOMPLETE=1
+        continue
+      fi
+      # Worktree field change: only matter for prune path; refuse if planned wt drifted.
+      if [[ -n "$p_wt" && -n "$_rp_wt" && "$_rp_wt" != "$p_wt" ]]; then
+        warn "pre-mutation: worktree field changed for $p_id — refuse"
+        journal_append "INCOMPLETE op=${op} reason=worktree_field_changed"
+        INCOMPLETE=1
+        continue
+      fi
+      p_claimed="${_rp_claimed:-$p_claimed}"
+      p_branch="${_rp_branch:-$p_branch}"
+      p_issue="${_rp_issue:-$p_issue}"
+      ;;
+    *)
+      warn "pre-mutation: unexpected reparse result '${_rp_status}' for $p_id — refuse"
+      journal_append "INCOMPLETE op=${op} reason=reparse_unknown"
+      INCOMPLETE=1
+      continue
+      ;;
+  esac
+
   # Recompute last_active; refuse if fresher or fail.
   claim_epoch=$(claim_to_epoch "$p_claimed")
+  if [[ -z "$claim_epoch" ]] || ! claim_epoch=$(parse_nonneg_int "$claim_epoch"); then
+    warn "pre-mutation: claim timestamp unreadable for $p_id — refuse"
+    journal_append "INCOMPLETE op=${op} reason=malformed_timestamp"
+    INCOMPLETE=1
+    continue
+  fi
   local_tip=$(branch_tip_epoch "$p_branch")
   case "$local_tip" in FAIL:*) warn "pre-mutation: $local_tip"; journal_append "INCOMPLETE op=${op} reason=branch_tip"; INCOMPLETE=1; continue ;; esac
   remote_tip=$(branch_tip_epoch "origin/$p_branch")
@@ -1191,20 +1630,20 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     INCOMPLETE=1
     continue
   fi
-  if [[ "$new_last" -gt "$NOW" ]]; then
+  if int_gt "$new_last" "$NOW"; then
     warn "pre-mutation: future clock for $p_id — refuse"
     journal_append "INCOMPLETE op=${op} reason=future_clock"
     INCOMPLETE=1
     continue
   fi
   # Moving evidence / fresher activity: refuse if last_active advanced or age no longer stale.
-  if [[ "$new_last" -gt "$p_last" ]]; then
+  if int_gt "$new_last" "$p_last"; then
     warn "pre-mutation: evidence moved forward for $p_id ($p_last -> $new_last) — refuse"
     journal_append "INCOMPLETE op=${op} reason=moving_evidence"
     INCOMPLETE=1
     continue
   fi
-  new_age=$((NOW - new_last))
+  new_age=$((10#$NOW - 10#$new_last))
   if [[ "$new_age" -le "$STALE_SECONDS" ]]; then
     warn "pre-mutation: $p_id no longer stale (age=${new_age}s) — refuse"
     journal_append "INCOMPLETE op=${op} reason=no_longer_stale"
@@ -1220,7 +1659,7 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     continue
   fi
 
-  # Handoff comment (deduped; never absolute worktree path)
+  # Handoff comment only after identity/CAS prechecks (never on issue mismatch).
   if ! post_handoff_comment "$p_issue" "$REPO" "$p_id" "$p_branch" "$new_last"; then
     warn "handoff comment failed for $p_id — refuse mutation (fail closed)"
     journal_append "INCOMPLETE op=${op} reason=comment_failed"
@@ -1228,13 +1667,32 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     continue
   fi
 
-  # release-claim: exact id, keep branch, keep worktree unless prune
-  rc_args=("$p_issue" --claim-id "$p_id" --keep-branch --repo "$REPO")
+  # release-claim: exact id + CAS blob/path + keep branch; keep worktree unless
+  # prune of the exact frozen registered path.
+  rc_args=("$p_issue" --claim-id "$p_id" --keep-branch --repo "$REPO"
+    --expected-claim-blob "$p_blob" --expected-source "$p_source")
+  if [[ "$p_source" == "file" ]]; then
+    rc_args+=(--expected-claim-path "$p_path")
+  fi
   if [[ "$PRUNE_WORKTREES" -eq 0 ]]; then
     rc_args+=(--keep-worktree)
+  else
+    # Pass exact frozen registered worktree path only — never derive default.
+    if [[ -z "$p_wt" ]]; then
+      warn "prune requested but no frozen registered worktree for $p_id — refuse prune (claim still released with keep-worktree)"
+      rc_args+=(--keep-worktree)
+    else
+      if [[ -L "$p_wt" ]] || [[ ! -d "$p_wt" ]] || ! worktree_registered "$p_wt"; then
+        warn "pre-release: prune target unsafe/unregistered for $p_id — refuse mutation"
+        journal_append "INCOMPLETE op=${op} reason=prune_target_invalid"
+        INCOMPLETE=1
+        continue
+      fi
+      rc_args+=(--worktree-path "$p_wt" --expected-branch "$p_branch")
+    fi
   fi
 
-  info "releasing $p_id via release-claim ${rc_args[*]}"
+  info "releasing $p_id via release-claim (CAS blob=${p_blob} path=${p_path} source=${p_source})"
   set +e
   release_out=$(cd "$CANONICAL" && GIBSON_CANONICAL="$CANONICAL" "$RELEASE_CMD" "${rc_args[@]}" 2>&1)
   release_rc=$?
@@ -1246,7 +1704,7 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     info "OK released $p_id"
     applied=$((applied + 1))
   elif [[ "$release_rc" -eq 3 ]]; then
-    # Incomplete cleanup in release-claim — journal incomplete
+    # Incomplete cleanup in release-claim — journal incomplete; claim/label may survive
     journal_append "INCOMPLETE op=${op} reason=release_claim_incomplete rc=3"
     warn "release-claim incomplete for $p_id"
     INCOMPLETE=1
@@ -1259,7 +1717,7 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
 done < "$PLAN_TMP"
 
 release_lock
-trap 'rm -f "$CLAIMS_TMP" "$PLAN_TMP"' EXIT
+trap 'rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP"' EXIT
 
 info "apply finished: applied=$applied incomplete=$INCOMPLETE"
 if [[ "$INCOMPLETE" -eq 1 ]]; then
