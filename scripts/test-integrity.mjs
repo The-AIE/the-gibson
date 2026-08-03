@@ -13,8 +13,8 @@
  *      or JSON: GIBSON_TEST_METRICS {"total":n,"skipped":n,"todo":n}
  *   2. Vitest-style:  Tests  N passed | M skipped (T)
  *   3. Jest-style:    Tests:  M skipped, N passed, T total
- *   4. node:test:     # tests T / # skip M / # todo K
- *   5. TAP plan:      1..T  plus  # skip / ok N # SKIP
+ *   4. node:test:     # tests T / # skip M or # skipped M / # todo K
+ *   5. TAP plan:      1..T  (top-level only) plus ok N # SKIP / # TODO
  *
  * Explicit lines do **not** outrank runner summaries. Every explicit line
  * (KV or JSON) and every matching native summary block/plan/counter is
@@ -25,11 +25,13 @@
  * repeated native blocks are never mixed. Within one node:test `# tests`
  * region every `# skip` / `# todo` counter is collected (identical may agree;
  * any disagreement fails closed — never first-match). TAP SKIP/TODO result
- * lines bind to the owning plan region (plan-at-end: since previous plan
- * through current plan; plan-at-start when no pre-plan results); ambiguous
- * ownership fails closed rather than inventing a metric. A single source
- * (explicit alone or summary alone) is fine; identical multi-line metrics
- * agree and pass.
+ * lines bind to the owning **top-level** plan region (plan-at-end: since
+ * previous plan through current plan; plan-at-start when no pre-plan results);
+ * indented nested plans (node:test `describe` subtests) are not whole-run
+ * totals. Hierarchical TAP (any indented plan) skips TAP plan metrics so
+ * leaf counts come from `# tests` / explicit lines. Ambiguous ownership fails
+ * closed rather than inventing a metric. A single source (explicit alone or
+ * summary alone) is fine; identical multi-line metrics agree and pass.
  *
  * Unparseable, negative, non-integer, or non-safe-integer metrics fail closed
  * (never become 0; values beyond Number.MAX_SAFE_INTEGER are rejected).
@@ -278,7 +280,8 @@ function parseExplicitMetricsBody(body, index) {
  * as 10; repeated Jest/Vitest/node:test/TAP summaries that conflict likewise).
  * Counters from different repeated native blocks are never mixed into one
  * fabricated metric. node:test regions collect every `# skip`/`# todo` (not
- * first-match); TAP SKIP/TODO bind to the owning plan region.
+ * first-match); TAP SKIP/TODO bind to the owning top-level plan region.
+ * Indented nested TAP plans are never whole-run totals (node:test describe).
  *
  * @param {string} text
  * @returns {{ total: number, skipped: number, todo: number, skip_effective: number, source: string }}
@@ -381,9 +384,11 @@ export function parseRunnerOutput(text) {
         const block = text.slice(blockStart, blockEnd);
         const label = `node-test#${i + 1}`;
         const total = parseNonNegInt(testsM[1], `${label}.tests`);
+        // Node's TAP reporter prints `# skipped N`; fixtures may use `# skip N`.
+        // Use (?:ped)? — plain `skipped?` is only `skippe` + optional `d`.
         const skipped = collectAgreeingCounter(
           block,
-          /^\s*#\s*skip\s+(\d+)\s*$/gim,
+          /^\s*#\s*skip(?:ped)?\s+(\d+)\s*$/gim,
           `${label}.skip`
         );
         const todo = collectAgreeingCounter(
@@ -401,16 +406,23 @@ export function parseRunnerOutput(text) {
     }
   }
 
-  // 5) TAP plan "1..N" — every plan line, not first-only. SKIP/TODO counts bind
-  //    to the owning plan region so repeated plans never reuse whole-stream
-  //    markers (two plan-at-end runs with one SKIP each → two skipped=1, not
-  //    skipped=2 each). Plan-at-end: lines since previous plan through current
-  //    plan. Plan-at-start: when no result lines precede the first plan.
-  //    Ambiguous ownership (results both before the first plan and after the
-  //    last) fails closed rather than inventing a metric. A single plan uses
-  //    the whole stream (unambiguous ownership).
+  // 5) TAP plan "1..N" — only **top-level** plans (column 0; no leading
+  //    whitespace) are whole-run metrics. Indented nested plans (Node's
+  //    describe() subtests: `    1..2` under a suite) are structural and must
+  //    not be collected as run totals — otherwise nested `1..2` + top-level
+  //    `1..1` + node:test `# tests 2` falsely conflicts.
+  //
+  //    Hierarchical TAP (any indented plan present): skip TAP plan metrics
+  //    entirely. Leaf totals come from node:test `# tests` / `# skip` /
+  //    `# todo` (or explicit GIBSON_TEST_METRICS). Top-level-only streams
+  //    still collect every repeated top-level plan (identical agree; conflict
+  //    fail closed). SKIP/TODO bind to the owning top-level plan region
+  //    (plan-at-end / plan-at-start / ambiguous fails closed) as before.
   {
-    const plans = [...text.matchAll(/^\s*1\.\.(\d+)\s*$/gm)];
+    const hasNestedPlans = /^[ \t]+1\.\.\d+\s*$/m.test(text);
+    const plans = hasNestedPlans
+      ? []
+      : [...text.matchAll(/^1\.\.(\d+)\s*$/gm)];
     if (plans.length > 0) {
       /** @type {{ start: number, end: number }[]} */
       let regions;

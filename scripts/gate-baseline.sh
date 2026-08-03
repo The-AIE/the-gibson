@@ -75,6 +75,68 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 TI="$SCRIPT_DIR/test-integrity.mjs"
 command -v node >/dev/null || die "node is required"
 
+# ---------------------------------------------------------------------------
+# Scratch + path safety
+# Untrusted gate steps must not be able to pre-poison predictable paths
+# (/tmp/gibson-ti-parse.err, .gibson-baseline.test.out, .gibson-baseline.*.ec)
+# as symlinks that redirect our writes into arbitrary user-writable files.
+# All intermediate artifacts use private mktemp names; OUT/JOURNAL refuse
+# symlinks and non-regular files; final baseline uses sibling temp + rename.
+# ---------------------------------------------------------------------------
+
+# Private scratch directory (random name — not predictable across runs).
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/gibson-baseline.XXXXXX") \
+  || die "could not create private scratch directory"
+cleanup_scratch() { rm -rf "$SCRATCH"; }
+trap cleanup_scratch EXIT
+
+# Refuse to read/write through a symlink or non-regular file (fail closed).
+# Missing path is OK (will be created). -e is false for broken symlinks on
+# some systems, so also test -L explicitly.
+refuse_symlink_or_nonfile() {
+  local path="$1"
+  local label="$2"
+  if [[ -L "$path" ]]; then
+    die "$label path is a symlink (refuse; fail closed): $path"
+  fi
+  if [[ -e "$path" && ! -f "$path" ]]; then
+    die "$label path is not a regular file (refuse; fail closed): $path"
+  fi
+}
+
+# Atomic write to dest via a sibling mktemp + rename. Never opens dest for
+# write (so a symlink dest is not followed/truncated). Refuses if dest is a
+# symlink or non-regular file before and after the temp write.
+atomic_write() {
+  local dest="$1"
+  local dir base tmp
+  refuse_symlink_or_nonfile "$dest" "output"
+  dir=$(dirname -- "$dest")
+  base=$(basename -- "$dest")
+  if [[ ! -d "$dir" ]]; then
+    mkdir -p -- "$dir" || die "cannot create directory for $dest"
+  fi
+  # Sibling temp in the same directory so rename stays on one filesystem.
+  tmp=$(mktemp "${dir}/.${base}.XXXXXX") || die "mktemp failed for atomic write to $dest"
+  # Content from stdin
+  if ! cat >"$tmp"; then
+    rm -f -- "$tmp"
+    die "failed writing temp for $dest"
+  fi
+  if [[ -L "$dest" ]]; then
+    rm -f -- "$tmp"
+    die "output path is a symlink (refuse; fail closed): $dest"
+  fi
+  if [[ -e "$dest" && ! -f "$dest" ]]; then
+    rm -f -- "$tmp"
+    die "output path is not a regular file (refuse; fail closed): $dest"
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    die "atomic rename failed for $dest"
+  fi
+}
+
 SKIP_SENTINEL='__gate_step_not_applicable__'
 
 # Resolve command for a step
@@ -125,10 +187,16 @@ resolve_cmd() {
   esac
 }
 
+# run_count_failures is invoked via $(...) (subshell). Persist ec/out into the
+# private SCRATCH dir (random mktemp path — not worktree-predictable) so the
+# parent shell can read them. Writes happen only after the untrusted command
+# returns; never to fixed names like .gibson-baseline.$step.ec.
 run_count_failures() {
   local step="$1"
   local cmd="$2"
+  local out ec fc
   if [[ -z "$cmd" ]]; then
+    printf '0\n' >"$SCRATCH/${step}.ec"
     echo 0
     return
   fi
@@ -138,22 +206,21 @@ run_count_failures() {
   out=$(eval "$cmd" 2>&1)
   ec=$?
   set -e
-  # Stash full output for the test step (metrics parsing)
+  # After untrusted command returns: write private scratch only.
+  printf '%s\n' "$ec" >"$SCRATCH/${step}.ec"
   if [[ "$step" == "test" ]]; then
-    printf '%s\n' "$out" > ".gibson-baseline.test.out"
+    printf '%s\n' "$out" >"$SCRATCH/test.out"
   fi
   # Count error-ish lines as a rough fingerprint; also store exit code
   # Prefer exit code as primary signal; failure_count is secondary detail
   if [[ $ec -ne 0 ]]; then
     # count lines with error/fail patterns
-    fc=$(echo "$out" | grep -ciE 'error TS|error:|FAIL|failed|✖|×' || true)
+    fc=$(printf '%s\n' "$out" | grep -ciE 'error TS|error:|FAIL|failed|✖|×' || true)
     [[ "$fc" -eq 0 ]] && fc=1
     echo "$fc"
   else
     echo 0
   fi
-  # stash exit in global via files
-  echo "$ec" > ".gibson-baseline.$step.ec"
 }
 
 GEN=$(resolve_cmd generate GIBSON_GENERATE generate)
@@ -170,31 +237,39 @@ if [[ -n "$GEN" ]]; then
   set -e
 fi
 
-rm -f .gibson-baseline.test.out
-
 fc_tc=$(run_count_failures typecheck "$TC")
-ec_tc=$(cat .gibson-baseline.typecheck.ec 2>/dev/null || echo 0)
+ec_tc=$(cat "$SCRATCH/typecheck.ec" 2>/dev/null || echo 0)
 fc_li=$(run_count_failures lint "$LI")
-ec_li=$(cat .gibson-baseline.lint.ec 2>/dev/null || echo 0)
+ec_li=$(cat "$SCRATCH/lint.ec" 2>/dev/null || echo 0)
 fc_te=$(run_count_failures test "$TE")
-ec_te=$(cat .gibson-baseline.test.ec 2>/dev/null || echo 0)
+ec_te=$(cat "$SCRATCH/test.ec" 2>/dev/null || echo 0)
 fc_bu=$(run_count_failures build "$BU")
-ec_bu=$(cat .gibson-baseline.build.ec 2>/dev/null || echo 0)
+ec_bu=$(cat "$SCRATCH/build.ec" 2>/dev/null || echo 0)
 
 # --- test metrics (issue #70) -------------------------------------------------
 TEST_METRICS_JSON='null'
 TEST_METRICS_PRESENT=0
-if [[ -n "$TE" && -f .gibson-baseline.test.out ]]; then
+if [[ -n "$TE" && -f "$SCRATCH/test.out" && ! -L "$SCRATCH/test.out" ]]; then
+  # Parse artifacts live only under the private SCRATCH dir (created after the
+  # untrusted test command returned). Never /tmp/gibson-ti-parse.err or
+  # worktree-local .gibson-baseline.test.out.
+  parse_err_file=$(mktemp "${SCRATCH}/parse-err.XXXXXX") \
+    || die "mktemp failed for parse stderr"
+  if [[ -L "$parse_err_file" || ! -f "$parse_err_file" ]]; then
+    die "scratch parse-err is not a regular file (fail closed)"
+  fi
   set +e
-  parsed=$(node "$TI" parse --input .gibson-baseline.test.out 2>/tmp/gibson-ti-parse.err)
+  parsed=$(node "$TI" parse --input "$SCRATCH/test.out" 2>"$parse_err_file")
   parse_rc=$?
   set -e
   if [[ $parse_rc -ne 0 ]]; then
     # Fail closed: a test step that produces no parseable metrics cannot
     # establish a trustworthy baseline for the integrity sensor.
-    cat /tmp/gibson-ti-parse.err >&2 || true
-    rm -f .gibson-baseline.typecheck.ec .gibson-baseline.lint.ec \
-      .gibson-baseline.test.ec .gibson-baseline.build.ec .gibson-baseline.test.out
+    # Diagnostic: surface parser stderr (from private scratch, not a
+    # predictable /tmp path the test command could have poisoned).
+    if [[ -f "$parse_err_file" && ! -L "$parse_err_file" ]]; then
+      cat "$parse_err_file" >&2 || true
+    fi
     die "test step produced unparseable metrics (fail closed). Emit GIBSON_TEST_METRICS or a supported summary (docs/06)."
   fi
   TEST_METRICS_JSON=$parsed
@@ -203,10 +278,13 @@ fi
 
 # Integrity-reduction guard: lowering total or raising skip/todo requires an
 # explicit --regenerate --reason and a journal entry.
-if [[ -f "$OUT" && "$TEST_METRICS_PRESENT" -eq 1 ]]; then
-  OLD_METRICS_FILE=$(mktemp "${TMPDIR:-/tmp}/gibson-old-metrics.XXXXXX")
-  NEW_METRICS_FILE=$(mktemp "${TMPDIR:-/tmp}/gibson-new-metrics.XXXXXX")
-  printf '%s\n' "$TEST_METRICS_JSON" > "$NEW_METRICS_FILE"
+if [[ -e "$OUT" || -L "$OUT" ]] && [[ "$TEST_METRICS_PRESENT" -eq 1 ]]; then
+  refuse_symlink_or_nonfile "$OUT" "baseline --out"
+  OLD_METRICS_FILE=$(mktemp "${SCRATCH}/old-metrics.XXXXXX") \
+    || die "mktemp failed for old metrics"
+  NEW_METRICS_FILE=$(mktemp "${SCRATCH}/new-metrics.XXXXXX") \
+    || die "mktemp failed for new metrics"
+  printf '%s\n' "$TEST_METRICS_JSON" >"$NEW_METRICS_FILE"
   # Extract prior test_metrics if present; missing metrics counts as needing regenerate
   set +e
   node -e "
@@ -222,7 +300,7 @@ if [[ -f "$OUT" && "$TEST_METRICS_PRESENT" -eq 1 ]]; then
   if [[ $extract_rc -eq 2 ]]; then
     needs=1
     # Fabricate a high watermark so the journal has something to compare
-    echo '{"total":0,"skipped":0,"todo":0}' > "$OLD_METRICS_FILE"
+    echo '{"total":0,"skipped":0,"todo":0}' >"$OLD_METRICS_FILE"
     # Re-read: if old had no metrics, overwriting with real metrics is an upgrade
     # only when we can confirm no reduction — without old numbers, require regenerate
     # when the operator is intentionally establishing integrity for the first time
@@ -232,7 +310,7 @@ if [[ -f "$OUT" && "$TEST_METRICS_PRESENT" -eq 1 ]]; then
     needs=0
   elif [[ $extract_rc -ne 0 ]]; then
     needs=1
-    echo '{"total":0,"skipped":0,"todo":0}' > "$OLD_METRICS_FILE"
+    echo '{"total":0,"skipped":0,"todo":0}' >"$OLD_METRICS_FILE"
   else
     # Compare totals/skips: reduction requires --regenerate (same rule as
     # test-integrity.mjs needsRegenerateFlag — kept inline so we never shell
@@ -258,23 +336,26 @@ if [[ -f "$OUT" && "$TEST_METRICS_PRESENT" -eq 1 ]]; then
     if [[ $cmp_rc -eq 11 ]]; then
       needs=1
     elif [[ $cmp_rc -ne 0 ]]; then
-      rm -f "$OLD_METRICS_FILE" "$NEW_METRICS_FILE"
       die "could not compare prior baseline metrics"
     fi
   fi
 
   if [[ "$needs" -eq 1 ]]; then
     if [[ "$REGENERATE" -ne 1 ]]; then
-      rm -f "$OLD_METRICS_FILE" "$NEW_METRICS_FILE"
-      rm -f .gibson-baseline.typecheck.ec .gibson-baseline.lint.ec \
-        .gibson-baseline.test.ec .gibson-baseline.build.ec .gibson-baseline.test.out
       die "test-integrity: new metrics reduce the suite (lower total or higher skip/todo) vs $OUT. Re-run with --regenerate --reason \"...\" to journal an intentional reduction."
     fi
     if [[ "$REASON_SET" -ne 1 ]] || [[ -z "${REASON// }" ]]; then
-      rm -f "$OLD_METRICS_FILE" "$NEW_METRICS_FILE"
-      rm -f .gibson-baseline.typecheck.ec .gibson-baseline.lint.ec \
-        .gibson-baseline.test.ec .gibson-baseline.build.ec .gibson-baseline.test.out
       die "test-integrity: --regenerate requires a nonempty --reason"
+    fi
+    # Journal path must not be a symlink (appendFileSync would follow it).
+    if [[ -e "$JOURNAL" || -L "$JOURNAL" ]]; then
+      refuse_symlink_or_nonfile "$JOURNAL" "journal --journal"
+    fi
+    # Ensure journal parent exists; refuse if parent path components are weird
+    # only when we need to create the file (journal-append mkdir's via node).
+    jdir=$(dirname -- "$JOURNAL")
+    if [[ ! -d "$jdir" ]]; then
+      mkdir -p -- "$jdir" || die "cannot create journal directory $jdir"
     fi
     SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
     set +e
@@ -287,23 +368,18 @@ if [[ -f "$OUT" && "$TEST_METRICS_PRESENT" -eq 1 ]]; then
     jrc=$?
     set -e
     if [[ $jrc -ne 0 ]]; then
-      rm -f "$OLD_METRICS_FILE" "$NEW_METRICS_FILE"
       die "journal-append failed: $jout"
     fi
     info "test-integrity journal: $jout"
     info "appended journal entry → $JOURNAL"
   fi
-  rm -f "$OLD_METRICS_FILE" "$NEW_METRICS_FILE"
 elif [[ "$REGENERATE" -eq 1 ]]; then
   # Operator asked to regenerate but metrics did not worsen — still require reason
   # only when they insist on journaling; if no reduction, --regenerate is a no-op flag.
-  if [[ "$REASON_SET" -eq 1 && -n "${REASON// }" && "$TEST_METRICS_PRESENT" -eq 1 && -f "$OUT" ]]; then
+  if [[ "$REASON_SET" -eq 1 && -n "${REASON// }" && "$TEST_METRICS_PRESENT" -eq 1 && -f "$OUT" && ! -L "$OUT" ]]; then
     info "--regenerate noted but metrics did not reduce integrity; no journal entry required"
   fi
 fi
-
-rm -f .gibson-baseline.typecheck.ec .gibson-baseline.lint.ec \
-  .gibson-baseline.test.ec .gibson-baseline.build.ec .gibson-baseline.test.out
 
 UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -316,8 +392,9 @@ else
   METRICS_EMBED="null"
 fi
 
-# Write JSON without requiring jq
-cat > "$OUT" <<EOF
+# Write JSON without requiring jq — sibling temp + atomic rename; never
+# truncate through a pre-poisoned OUT symlink.
+atomic_write "$OUT" <<EOF
 {
   "recorded_at": "$UTC",
   "git_sha": "$SHA",
@@ -346,4 +423,8 @@ cat > "$OUT" <<EOF
 EOF
 
 info "wrote $OUT"
+# Refuse to cat through a symlink (should be impossible after atomic_write).
+if [[ -L "$OUT" ]]; then
+  die "output path is a symlink after write (fail closed): $OUT"
+fi
 cat "$OUT"

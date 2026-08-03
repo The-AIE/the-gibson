@@ -1006,6 +1006,305 @@ else
   bad "hostile helper fixture broken (rc=$rc): $out"
 fi
 
+# ---------------------------------------------------------------------------
+echo "blocker nested-TAP: real node:test describe() suites parse (top-level plans only)"
+# ---------------------------------------------------------------------------
+# Node 22 describe('outer') with two it() tests emits nested `    1..2`,
+# top-level `1..1`, and `# tests 2`. Treating indented plans as whole-run
+# totals falsely conflicts. Use actual runner output — not a handwaved fixture.
+
+NEST_DIR="$ROOT/node-nested-tap"
+mkdir -p "$NEST_DIR"
+cat > "$NEST_DIR/nested.test.mjs" <<'EOF'
+import { describe, it } from 'node:test';
+describe('outer', () => {
+  it('a', () => {});
+  it('b', () => {});
+});
+EOF
+# Capture real TAP (stdout); stderr may carry node warnings — ignore for parse input.
+node --test --test-reporter=tap "$NEST_DIR/nested.test.mjs" \
+  >"$NEST_DIR/nested.tap" 2>"$NEST_DIR/nested.err" || true
+# Sanity: fixture must contain nested plan + top-level plan + # tests
+if grep -qE '^[[:space:]]+1\.\.2[[:space:]]*$' "$NEST_DIR/nested.tap" \
+  && grep -qE '^1\.\.1[[:space:]]*$' "$NEST_DIR/nested.tap" \
+  && grep -qE '^# tests 2[[:space:]]*$' "$NEST_DIR/nested.tap"; then
+  ok "real node:test nested TAP fixture has indented 1..2, top-level 1..1, # tests 2"
+else
+  bad "nested TAP fixture missing expected plans/counters: $(cat "$NEST_DIR/nested.tap")"
+fi
+out=$(node "$TI" parse --input "$NEST_DIR/nested.tap" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 2' \
+  && echo "$out" | grep -q '"skipped": 0'; then
+  ok "real node:test nested describe suite parses total=2 (no false plan conflict)"
+else
+  bad "nested node:test TAP parse (rc=$rc): $out"
+fi
+
+# skip coverage via real runner (it.skip → # skipped N)
+cat > "$NEST_DIR/nested-skip.test.mjs" <<'EOF'
+import { describe, it } from 'node:test';
+describe('outer', () => {
+  it('a', () => {});
+  it.skip('b', () => {});
+});
+EOF
+node --test --test-reporter=tap "$NEST_DIR/nested-skip.test.mjs" \
+  >"$NEST_DIR/nested-skip.tap" 2>/dev/null || true
+out=$(node "$TI" parse --input "$NEST_DIR/nested-skip.tap" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 2' \
+  && echo "$out" | grep -q '"skipped": 1'; then
+  ok "real node:test nested suite with it.skip → skipped=1"
+else
+  bad "nested skip parse (rc=$rc): $out"
+fi
+
+# todo coverage via real runner
+cat > "$NEST_DIR/nested-todo.test.mjs" <<'EOF'
+import { describe, it } from 'node:test';
+describe('outer', () => {
+  it('a', () => {});
+  it('b', { todo: true }, () => {});
+});
+EOF
+node --test --test-reporter=tap "$NEST_DIR/nested-todo.test.mjs" \
+  >"$NEST_DIR/nested-todo.tap" 2>/dev/null || true
+out=$(node "$TI" parse --input "$NEST_DIR/nested-todo.tap" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 2' \
+  && echo "$out" | grep -q '"todo": 1'; then
+  ok "real node:test nested suite with todo → todo=1"
+else
+  bad "nested todo parse (rc=$rc): $out"
+fi
+
+# Genuinely repeated top-level TAP plans still conflict (not weakened)
+printf '1..10\nok 1 - a\n1..7\nok 1 - b\n' >"$NEST_DIR/top-conflict.tap"
+out=$(node "$TI" parse --input "$NEST_DIR/top-conflict.tap" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted'; then
+  ok "repeated top-level TAP plans still fail closed after nested-plan fix"
+else
+  bad "top-level TAP conflict weakened (rc=$rc): $out"
+fi
+
+# Hierarchical TAP alone (indented plans, no # tests / explicit) fails closed
+printf '# Subtest: outer\n    ok 1 - a\n    ok 2 - b\n    1..2\nok 1 - outer\n1..1\n' \
+  >"$NEST_DIR/hierarchical-only.tap"
+out=$(node "$TI" parse --input "$NEST_DIR/hierarchical-only.tap" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'could not parse|fail closed|unparseable'; then
+  ok "hierarchical TAP without # tests / explicit fails closed (no invented total)"
+else
+  bad "hierarchical-only TAP should fail closed (rc=$rc): $out"
+fi
+
+# ---------------------------------------------------------------------------
+echo "blocker temp-poison: predictable scratch/symlink targets fail closed"
+# ---------------------------------------------------------------------------
+# Pre-poison fixed /tmp/gibson-ti-parse.err and worktree-local
+# .gibson-baseline.test.out / .gibson-baseline.*.ec as symlinks to a victim
+# file. Gate must fail closed without truncating victim bytes, and leave no
+# leaked predictable temps.
+
+POISON="$ROOT/poison-repo"
+mkdir -p "$POISON/.agents"
+GITP="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
+$GITP init -q "$POISON"
+git -C "$POISON" symbolic-ref HEAD refs/heads/main
+echo base >"$POISON/README"
+$GITP -C "$POISON" add -A
+$GITP -C "$POISON" commit -q -m "base"
+
+# --- parser-stderr class: /tmp/gibson-ti-parse.err as symlink ----------------
+VICTIM_PARSE="$ROOT/victim-parse-bytes.bin"
+printf 'VICTIM_PARSE_SENTINEL_DO_NOT_TRUNCATE\n' >"$VICTIM_PARSE"
+# Best-effort: remove any leftover fixed path from prior runs, then plant symlink.
+rm -f /tmp/gibson-ti-parse.err 2>/dev/null || true
+ln -sf "$VICTIM_PARSE" /tmp/gibson-ti-parse.err
+# Untrusted test command: try to keep the poison in place; emit valid metrics
+# so a vulnerable parser-stderr redirect would truncate the victim on parse.
+cat >"$POISON/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=3 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+out=$(cd "$POISON" && bash "$BASELINE_SH" --out "$POISON/.gibson-baseline.json" 2>&1); rc=$?
+victim_parse_after=$(cat "$VICTIM_PARSE" 2>/dev/null || echo MISSING)
+if [[ "$victim_parse_after" == "VICTIM_PARSE_SENTINEL_DO_NOT_TRUNCATE" ]]; then
+  ok "parser-stderr pre-poison: victim bytes unchanged"
+else
+  bad "parser-stderr pre-poison: victim truncated/changed: $victim_parse_after"
+fi
+# Gate should succeed (valid metrics) without using the fixed path — or fail
+# closed if it somehow still depends on it. Either way victim must stay intact.
+# Prefer success path: private mktemp means baseline writes OK.
+if [[ "$rc" -eq 0 ]] && grep -qE '"total":[[:space:]]*3' "$POISON/.gibson-baseline.json" 2>/dev/null; then
+  ok "parser-stderr pre-poison: gate succeeds via private scratch (not fixed /tmp path)"
+elif [[ "$rc" -ne 0 ]]; then
+  ok "parser-stderr pre-poison: gate fails closed (rc=$rc) without victim damage"
+else
+  bad "parser-stderr pre-poison: unexpected gate outcome (rc=$rc): $out"
+fi
+# Cleanup planted symlink so later tests are clean
+rm -f /tmp/gibson-ti-parse.err 2>/dev/null || true
+# No predictable worktree temps left behind
+if [[ ! -e "$POISON/.gibson-baseline.test.out" \
+   && ! -e "$POISON/.gibson-baseline.test.ec" \
+   && ! -L "$POISON/.gibson-baseline.test.out" \
+   && ! -L "$POISON/.gibson-baseline.test.ec" ]]; then
+  ok "parser-stderr pre-poison: no worktree-local temp leaks"
+else
+  bad "parser-stderr pre-poison: leaked worktree temps"
+fi
+
+# --- worktree-local artifact class: .gibson-baseline.test.out as symlink ----
+VICTIM_OUT="$ROOT/victim-test-out-bytes.bin"
+printf 'VICTIM_TEST_OUT_SENTINEL_DO_NOT_TRUNCATE\n' >"$VICTIM_OUT"
+rm -f "$POISON/.gibson-baseline.test.out" "$POISON/.gibson-baseline.test.ec" \
+  "$POISON/.gibson-baseline.typecheck.ec" "$POISON/.gibson-baseline.lint.ec" \
+  "$POISON/.gibson-baseline.build.ec" 2>/dev/null || true
+ln -sf "$VICTIM_OUT" "$POISON/.gibson-baseline.test.out"
+# Hostile test also re-plants the symlink mid-run (in case gate rm's first)
+cat >"$POISON/.agents/gate.json" <<JSON
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "ln -sfn '$VICTIM_OUT' .gibson-baseline.test.out; printf 'GIBSON_TEST_METRICS total=4 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+out=$(cd "$POISON" && bash "$BASELINE_SH" --out "$POISON/.gibson-baseline.json" 2>&1); rc=$?
+victim_out_after=$(cat "$VICTIM_OUT" 2>/dev/null || echo MISSING)
+if [[ "$victim_out_after" == "VICTIM_TEST_OUT_SENTINEL_DO_NOT_TRUNCATE" ]]; then
+  ok "worktree test.out pre-poison: victim bytes unchanged"
+else
+  bad "worktree test.out pre-poison: victim truncated/changed: $victim_out_after"
+fi
+if [[ "$rc" -eq 0 ]] && grep -qE '"total":[[:space:]]*4' "$POISON/.gibson-baseline.json" 2>/dev/null; then
+  ok "worktree test.out pre-poison: gate succeeds without writing through symlink"
+elif [[ "$rc" -ne 0 ]]; then
+  ok "worktree test.out pre-poison: gate fails closed (rc=$rc) without victim damage"
+else
+  bad "worktree test.out pre-poison: unexpected (rc=$rc): $out"
+fi
+# Predictable temps must not remain as regular files we created (symlink the
+# hostile command planted may still exist — that is the attacker's file, not
+# our leak). We must not leave our own .ec scratch files.
+leaked=0
+for f in .gibson-baseline.typecheck.ec .gibson-baseline.lint.ec \
+         .gibson-baseline.test.ec .gibson-baseline.build.ec; do
+  if [[ -f "$POISON/$f" && ! -L "$POISON/$f" ]]; then
+    leaked=1
+  fi
+done
+if [[ "$leaked" -eq 0 ]]; then
+  ok "worktree pre-poison: no gate-owned .ec temp leaks"
+else
+  bad "worktree pre-poison: gate-owned .ec temps leaked"
+fi
+rm -f "$POISON/.gibson-baseline.test.out" 2>/dev/null || true
+
+# --- .ec class: pre-poison exit-code path as symlink ------------------------
+VICTIM_EC="$ROOT/victim-ec-bytes.bin"
+printf 'VICTIM_EC_SENTINEL_DO_NOT_TRUNCATE\n' >"$VICTIM_EC"
+ln -sf "$VICTIM_EC" "$POISON/.gibson-baseline.test.ec"
+cat >"$POISON/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=5 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+out=$(cd "$POISON" && bash "$BASELINE_SH" --out "$POISON/.gibson-baseline.json" 2>&1); rc=$?
+victim_ec_after=$(cat "$VICTIM_EC" 2>/dev/null || echo MISSING)
+if [[ "$victim_ec_after" == "VICTIM_EC_SENTINEL_DO_NOT_TRUNCATE" ]]; then
+  ok "worktree .ec pre-poison: victim bytes unchanged"
+else
+  bad "worktree .ec pre-poison: victim truncated/changed: $victim_ec_after"
+fi
+if [[ "$rc" -eq 0 ]] && grep -qE '"total":[[:space:]]*5' "$POISON/.gibson-baseline.json" 2>/dev/null; then
+  ok "worktree .ec pre-poison: gate succeeds via in-memory exit codes"
+elif [[ "$rc" -ne 0 ]]; then
+  ok "worktree .ec pre-poison: gate fails closed without victim damage"
+else
+  bad "worktree .ec pre-poison: unexpected (rc=$rc): $out"
+fi
+rm -f "$POISON/.gibson-baseline.test.ec" 2>/dev/null || true
+
+# --- OUT path as symlink: must fail closed, victim untouched ----------------
+VICTIM_BASELINE="$ROOT/victim-baseline-bytes.bin"
+printf 'VICTIM_BASELINE_SENTINEL_DO_NOT_TRUNCATE\n' >"$VICTIM_BASELINE"
+rm -f "$POISON/out-link.json" 2>/dev/null || true
+ln -sf "$VICTIM_BASELINE" "$POISON/out-link.json"
+cat >"$POISON/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=6 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+out=$(cd "$POISON" && bash "$BASELINE_SH" --out "$POISON/out-link.json" 2>&1); rc=$?
+victim_bl_after=$(cat "$VICTIM_BASELINE" 2>/dev/null || echo MISSING)
+if [[ "$victim_bl_after" == "VICTIM_BASELINE_SENTINEL_DO_NOT_TRUNCATE" ]]; then
+  ok "OUT symlink pre-poison: victim bytes unchanged"
+else
+  bad "OUT symlink pre-poison: victim truncated/changed: $victim_bl_after"
+fi
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'symlink|refuse|fail closed'; then
+  ok "OUT symlink pre-poison: gate fails closed"
+else
+  bad "OUT symlink pre-poison: expected fail closed (rc=$rc): $out"
+fi
+
+# --- JOURNAL path as symlink during regenerate ------------------------------
+VICTIM_JOURNAL="$ROOT/victim-journal-bytes.bin"
+printf 'VICTIM_JOURNAL_SENTINEL_DO_NOT_TRUNCATE\n' >"$VICTIM_JOURNAL"
+# Establish a real baseline first
+cat >"$POISON/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=8 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+(cd "$POISON" && bash "$BASELINE_SH" --out "$POISON/.gibson-baseline.json") >/dev/null 2>&1 || true
+mkdir -p "$POISON/.gibson"
+rm -f "$POISON/.gibson/test-integrity-journal.jsonl" 2>/dev/null || true
+ln -sf "$VICTIM_JOURNAL" "$POISON/.gibson/test-integrity-journal.jsonl"
+# Shrink suite to force journal append
+cat >"$POISON/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=2 skipped=0 todo=0\\n'",
+  "build": ""
+}
+JSON
+out=$(cd "$POISON" && bash "$BASELINE_SH" --out "$POISON/.gibson-baseline.json" \
+  --regenerate --reason 'intentional shrink for poison test' 2>&1); rc=$?
+victim_j_after=$(cat "$VICTIM_JOURNAL" 2>/dev/null || echo MISSING)
+if [[ "$victim_j_after" == "VICTIM_JOURNAL_SENTINEL_DO_NOT_TRUNCATE" ]]; then
+  ok "JOURNAL symlink pre-poison: victim bytes unchanged"
+else
+  bad "JOURNAL symlink pre-poison: victim truncated/changed: $victim_j_after"
+fi
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'symlink|refuse|fail closed|journal'; then
+  ok "JOURNAL symlink pre-poison: gate fails closed"
+else
+  bad "JOURNAL symlink pre-poison: expected fail closed (rc=$rc): $out"
+fi
+rm -f "$POISON/.gibson/test-integrity-journal.jsonl" 2>/dev/null || true
+
 # Phase-1 bootstrap pin: ci/gibson-gate.yml must NOT wire test-integrity yet.
 # Wiring CI before main owns the helper self-grades (workspace-bootstrap) or
 # races a fixed RUNNER_TEMP path. Phase 2 adds the isolated job after merge.
