@@ -180,35 +180,105 @@ fi
 # path is absent AND when the path exists but its blob is missing/corrupt.
 # Only true absence is an empty-ledger signal; an unreadable live blob must
 # hard-fail before any label mutation.
+#
+# Fail-closed for the *per-file* ledger too: listing docs/claims/ by pathname
+# alone is not enough. Every live tree entry under docs/claims/ must be a
+# readable regular blob (mode 100644/100755) before any worktree, branch,
+# claim-row, or label cleanup proceeds. A missing/corrupt claim blob is not
+# an empty ledger (same contract as docs/active-work.md).
 HAS_ACTIVE=0
 HAS_CLAIMS_TREE=0
+
+# Prove a tree line is a readable regular blob (legacy table or per-claim file).
+# Args: path mode type object-sha
+require_readable_regular_blob() {
+  local path="$1" mode="$2" typ="$3" obj="$4"
+  if [[ "$typ" != "blob" ]] || [[ "$mode" != "100644" && "$mode" != "100755" ]]; then
+    die "$path at $REF has unexpected Git mode/type ($mode $typ${obj:+ $obj}) — refuse mutation until the ledger is repaired"
+  fi
+  if [[ -z "$obj" ]]; then
+    die "$path at $REF has no object id — unreadable/corrupt ledger entry; refuse mutation"
+  fi
+  if ! git cat-file -e "$obj" 2>/dev/null; then
+    die "$path exists in the ledger tree at $REF but its blob is unreadable/corrupt/unfetchable ($obj) — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
+  local got_type
+  got_type=$(git cat-file -t "$obj" 2>/dev/null || true)
+  if [[ "$got_type" != "blob" ]]; then
+    die "$path at $REF object $obj has unexpected type '${got_type:-unreadable}' (want blob) — refuse mutation until the object store is repaired"
+  fi
+  # Prove the payload is fetchable, not only that the object header exists.
+  if ! git cat-file blob "$obj" >/dev/null 2>&1; then
+    die "$path exists in the ledger tree at $REF but its blob payload is unreadable/corrupt ($obj) — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
+}
+
 ACTIVE_LS_ERR=""
-ACTIVE_LS=$(git ls-tree --name-only "$REF" -- docs/active-work.md 2>&1) || {
+ACTIVE_LINE=$(git ls-tree "$REF" -- docs/active-work.md 2>&1) || {
   ACTIVE_LS_ERR=$?
 }
 if [[ -n "$ACTIVE_LS_ERR" ]]; then
   die "cannot list docs/active-work.md at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
 fi
-if [[ -n "$ACTIVE_LS" ]]; then
-  # Entry exists in the tree — the blob must be readable.
-  if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
-    active_blob=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null | awk '{print $3; exit}')
-    die "docs/active-work.md exists in the ledger tree at $REF but its blob is unreadable/corrupt${active_blob:+ ($active_blob)} — not an empty ledger; refuse label mutation until the object store is repaired"
-  fi
+if [[ -n "$ACTIVE_LINE" ]]; then
+  # Entry exists in the tree — mode/type + blob must be a readable regular file.
+  active_mode=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $1; exit}')
+  active_type=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $2; exit}')
+  active_blob=$(printf '%s\n' "$ACTIVE_LINE" | awk '{print $3; exit}')
+  require_readable_regular_blob "docs/active-work.md" "$active_mode" "$active_type" "$active_blob"
   HAS_ACTIVE=1
 fi
-# ls-tree on a missing path exits 0 with empty output on a readable tree.
-# Non-zero here is still a hard fail (tree became unreadable mid-run).
-CLAIMS_LS_ERR=""
-CLAIMS_LS=$(git ls-tree --name-only "$REF" docs/claims/ 2>&1) || {
-  CLAIMS_LS_ERR=$?
+
+# docs/claims self-entry: absent is empty; present must be a tree (not a blob
+# /symlink/gitlink). Then every child must be a readable regular blob.
+CLAIMS_SELF_ERR=""
+CLAIMS_SELF=$(git ls-tree "$REF" -- docs/claims 2>&1) || {
+  CLAIMS_SELF_ERR=$?
 }
-if [[ -n "$CLAIMS_LS_ERR" ]]; then
-  die "cannot read docs/claims/ at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+if [[ -n "$CLAIMS_SELF_ERR" ]]; then
+  die "cannot list docs/claims at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
 fi
-if [[ -n "$CLAIMS_LS" ]]; then
-  HAS_CLAIMS_TREE=1
+if [[ -n "$CLAIMS_SELF" ]]; then
+  claims_self_mode=$(printf '%s\n' "$CLAIMS_SELF" | awk '{print $1; exit}')
+  claims_self_type=$(printf '%s\n' "$CLAIMS_SELF" | awk '{print $2; exit}')
+  claims_self_obj=$(printf '%s\n' "$CLAIMS_SELF" | awk '{print $3; exit}')
+  if [[ "$claims_self_type" != "tree" ]] || [[ "$claims_self_mode" != "040000" ]]; then
+    die "docs/claims at $REF has unexpected Git mode/type ($claims_self_mode $claims_self_type${claims_self_obj:+ $claims_self_obj}) — want 040000 tree; refuse mutation until the ledger is repaired"
+  fi
+  if [[ -z "$claims_self_obj" ]] || ! git cat-file -e "$claims_self_obj" 2>/dev/null; then
+    die "docs/claims tree at $REF is unreadable/corrupt${claims_self_obj:+ ($claims_self_obj)} — not an empty ledger; refuse label mutation until the object store is repaired"
+  fi
+  if ! git ls-tree "$claims_self_obj" >/dev/null 2>&1; then
+    die "cannot list docs/claims tree at $REF (unreadable/corrupt tree ${claims_self_obj}) — not an empty ledger; refuse label mutation"
+  fi
+
+  # Enumerate *exact* live children from the authoritative ref. Pathname-only
+  # matching without blob proof is how a missing claim object slipped through
+  # to label/worktree mutation (issue #61).
+  CLAIMS_LS_ERR=""
+  CLAIMS_LINES=$(git ls-tree "$REF" docs/claims/ 2>&1) || {
+    CLAIMS_LS_ERR=$?
+  }
+  if [[ -n "$CLAIMS_LS_ERR" ]]; then
+    die "cannot read docs/claims/ at $REF (git ls-tree failed) — unreadable ledger tree is not an empty ledger"
+  fi
+  if [[ -n "$CLAIMS_LINES" ]]; then
+    HAS_CLAIMS_TREE=1
+    while IFS= read -r claim_line; do
+      [[ -n "$claim_line" ]] || continue
+      claim_mode=$(printf '%s\n' "$claim_line" | awk '{print $1; exit}')
+      claim_type=$(printf '%s\n' "$claim_line" | awk '{print $2; exit}')
+      claim_obj=$(printf '%s\n' "$claim_line" | awk '{print $3; exit}')
+      # Path is after the first tab (mode SP type SP object TAB path).
+      claim_path="${claim_line#*$'\t'}"
+      [[ -n "$claim_path" ]] || claim_path="docs/claims/<unknown>"
+      require_readable_regular_blob "$claim_path" "$claim_mode" "$claim_type" "$claim_obj"
+    done <<EOF
+$CLAIMS_LINES
+EOF
+  fi
 fi
+
 if [[ "$HAS_ACTIVE" -eq 0 && "$HAS_CLAIMS_TREE" -eq 0 ]]; then
   info "claim ledger at $REF is empty (no docs/claims/* and no docs/active-work.md) — treating as no live claims"
 fi
@@ -227,21 +297,58 @@ fi
 # are the legacy form and are still released. Prints matching ids on stdout.
 # Returns 1 if the ledger tree cannot be read (caller must hard-fail — never
 # treat a failed tree read as an empty match set).
+# Startup already proved every live claims/* blob is a readable regular file;
+# re-check here so a mid-run object-store loss still fails closed instead of
+# inventing ids from pathnames alone.
 claim_ids_matching() {
-  local claims_out active_out active_entry active_blob
-  if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); then
-    echo "release-claim.sh: ERROR: cannot list docs/claims/ at $REF — unreadable ledger tree is not an empty ledger" >&2
+  local claims_out active_out active_entry active_blob claims_line
+  local c_mode c_type c_obj
+  claims_out=""
+  if ! claims_line=$(git ls-tree "$REF" -- docs/claims 2>/dev/null); then
+    echo "release-claim.sh: ERROR: cannot list docs/claims at $REF — unreadable ledger tree is not an empty ledger" >&2
     return 1
+  fi
+  if [[ -n "$claims_line" ]]; then
+    c_mode=$(printf '%s\n' "$claims_line" | awk '{print $1; exit}')
+    c_type=$(printf '%s\n' "$claims_line" | awk '{print $2; exit}')
+    c_obj=$(printf '%s\n' "$claims_line" | awk '{print $3; exit}')
+    if [[ "$c_type" != "tree" ]] || [[ "$c_mode" != "040000" ]]; then
+      echo "release-claim.sh: ERROR: docs/claims at $REF has unexpected Git mode/type ($c_mode $c_type${c_obj:+ $c_obj}) — want 040000 tree" >&2
+      return 1
+    fi
+    if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); then
+      echo "release-claim.sh: ERROR: cannot list docs/claims/ at $REF — unreadable ledger tree is not an empty ledger" >&2
+      return 1
+    fi
+    # Pathname list is only valid when every listed object is still a readable blob.
+    local entry_line entry_mode entry_type entry_obj entry_path
+    while IFS= read -r entry_line; do
+      [[ -n "$entry_line" ]] || continue
+      entry_mode=$(printf '%s\n' "$entry_line" | awk '{print $1; exit}')
+      entry_type=$(printf '%s\n' "$entry_line" | awk '{print $2; exit}')
+      entry_obj=$(printf '%s\n' "$entry_line" | awk '{print $3; exit}')
+      entry_path="${entry_line#*$'\t'}"
+      if [[ "$entry_type" != "blob" ]] || [[ "$entry_mode" != "100644" && "$entry_mode" != "100755" ]]; then
+        echo "release-claim.sh: ERROR: ${entry_path:-docs/claims/<unknown>} at $REF has unexpected Git mode/type ($entry_mode $entry_type${entry_obj:+ $entry_obj})" >&2
+        return 1
+      fi
+      if [[ -z "$entry_obj" ]] || ! git cat-file -e "$entry_obj" 2>/dev/null; then
+        echo "release-claim.sh: ERROR: ${entry_path:-docs/claims/<unknown>} exists in the ledger tree at $REF but its blob is unreadable/corrupt${entry_obj:+ ($entry_obj)} — not an empty ledger" >&2
+        return 1
+      fi
+    done <<EOF
+$(git ls-tree "$REF" docs/claims/ 2>/dev/null || true)
+EOF
   fi
   active_out=""
   # Tree entry first: absence is empty content; present-but-unreadable hard-fails.
-  if ! active_entry=$(git ls-tree --name-only "$REF" -- docs/active-work.md 2>/dev/null); then
+  if ! active_entry=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null); then
     echo "release-claim.sh: ERROR: cannot list docs/active-work.md at $REF — unreadable ledger tree is not an empty ledger" >&2
     return 1
   fi
   if [[ -n "$active_entry" ]]; then
-    if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
-      active_blob=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null | awk '{print $3; exit}')
+    active_blob=$(printf '%s\n' "$active_entry" | awk '{print $3; exit}')
+    if ! git cat-file -e "${active_blob:-$REF:docs/active-work.md}" 2>/dev/null; then
       echo "release-claim.sh: ERROR: docs/active-work.md exists in the ledger tree at $REF but its blob is unreadable/corrupt${active_blob:+ ($active_blob)} — not an empty ledger" >&2
       return 1
     fi

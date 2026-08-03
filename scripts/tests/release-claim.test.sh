@@ -445,6 +445,159 @@ check "true missing path still valid empty ledger (exit 0)" "$rc" "0"
 contains "true absence still treated as empty" "$out" "treating as no live claims"
 lacks    "true absence is not hard-failed as corrupt blob" "$out" "unreadable/corrupt"
 
+echo "#61 P1 · missing per-claim leaf blob fails closed before any mutation"
+# Exact independent-review fixture: readable root/docs/claims trees + listed
+# tree entry docs/claims/issue-18-live-slice.md + that leaf blob removed from
+# both the working clone and bare origin. Pathname-only matching must NOT
+# proceed to gh label edit, worktree removal, branch deletion, or ledger
+# commit/push. Output must never claim label removal.
+new_repo "$ROOT/missingclaimblob"
+(
+  cd "$ROOT/missingclaimblob/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-18-live-slice\nissue: 18\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-18-live-slice.md
+  : > docs/active-work.md
+  git add -A && git commit -qm "per-file claim for issue 18" && git push -q origin main
+  blob=$(git rev-parse "origin/main:docs/claims/issue-18-live-slice.md")
+  root_tree=$(git rev-parse "origin/main^{tree}")
+  docs_tree=$(git rev-parse "origin/main:docs")
+  claims_tree=$(git rev-parse "origin/main:docs/claims")
+  rm_obj() {
+    local sha="$1" repo="$2"
+    local dir="$repo/objects/${sha:0:2}"
+    local file="$dir/${sha:2}"
+    rm -f "$file"
+  }
+  # Delete *only* the claim leaf blob — keep every parent tree readable.
+  rm_obj "$blob" "$ROOT/missingclaimblob/canon/.git"
+  rm_obj "$blob" "$ROOT/missingclaimblob/origin"
+  git -C "$ROOT/missingclaimblob/canon" prune --expire=now >/dev/null 2>&1 || true
+  git -C "$ROOT/missingclaimblob/origin" prune --expire=now >/dev/null 2>&1 || true
+  git cat-file -e "$root_tree"
+  git cat-file -e "$docs_tree"
+  git cat-file -e "$claims_tree"
+  git ls-tree "origin/main" docs/claims/ | grep -q 'issue-18-live-slice.md'
+  if git cat-file -e "origin/main:docs/claims/issue-18-live-slice.md" 2>/dev/null; then
+    echo "setup failed: claim blob still readable" >&2
+    exit 1
+  fi
+  # Mutation canaries: worktree + branch that would be cleaned if we continued.
+  git branch -f "feat/18-live-slice" HEAD
+  mkdir -p "$ROOT/missingclaimblob/wt-18-live-slice"
+  echo canary > "$ROOT/missingclaimblob/wt-18-live-slice/marker"
+  origin_main_before=$(git rev-parse origin/main)
+  printf '%s\n' "$origin_main_before" > "$ROOT/missingclaimblob/origin-main.before"
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    # view: pretend agent-claimed is present so a buggy removal path "verifies".
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/missingclaimblob/canon" && "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "missing claim leaf blob hard-fails (exit 1)" "$rc" "1"
+contains "names unreadable/corrupt claim blob" "$out" "unreadable/corrupt"
+contains "names the claim path" "$out" "docs/claims/issue-18-live-slice.md"
+lacks    "does not treat missing claim blob as empty ledger" "$out" "treating as no live claims"
+lacks    "does not call fake-gh issue edit" "$out" "MUTATED-LABEL"
+lacks    "does not claim label removed" "$out" "removed agent-claimed"
+lacks    "does not claim OK" "$out" "OK —"
+lacks    "does not claim incomplete half-cleanup" "$out" "INCOMPLETE"
+# Worktree / branch / ledger must be untouched.
+[[ -f "$ROOT/missingclaimblob/wt-18-live-slice/marker" ]] \
+  && ok "worktree canary not removed" \
+  || bad "worktree canary was removed"
+br_still=$(git -C "$ROOT/missingclaimblob/canon" branch --list 'feat/18-live-slice')
+[[ -n "$br_still" ]] && ok "feature branch not deleted" || bad "feature branch was deleted"
+origin_before=$(cat "$ROOT/missingclaimblob/origin-main.before")
+origin_after=$(git -C "$ROOT/missingclaimblob/canon" rev-parse origin/main)
+check "ledger origin/main not pushed" "$origin_after" "$origin_before"
+
+out=$(cd "$ROOT/missingclaimblob/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
+rc=$?
+check "missing claim leaf blob dry-run hard-fails" "$rc" "1"
+contains "dry-run names claim blob too" "$out" "unreadable/corrupt"
+lacks    "dry-run does not plan label remove on missing claim blob" "$out" "remove label"
+lacks    "dry-run does not invent empty-ledger plan on missing claim blob" "$out" "none matched"
+
+echo "#61 P1 · unexpected docs/claims entry type/mode fails closed"
+# Nested tree or symlink under docs/claims/ is not a claim file. Fail closed
+# before mutation; do not treat as a readable claim id.
+new_repo "$ROOT/badclaimmode"
+(
+  cd "$ROOT/badclaimmode/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims/nested
+  printf 'claim: issue-18-ok\nissue: 18\n' > docs/claims/issue-18-ok.md
+  printf 'nested\n' > docs/claims/nested/extra.md
+  ln -s "issue-18-ok.md" docs/claims/issue-18-link.md
+  : > docs/active-work.md
+  git add -A && git commit -qm "claims with nested tree + symlink" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  issue)
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL"
+      exit 0
+    fi
+    echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+out=$(cd "$ROOT/badclaimmode/canon" && "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "unexpected claims entry mode/type hard-fails (exit 1)" "$rc" "1"
+contains "names unexpected mode/type" "$out" "unexpected Git mode/type"
+lacks    "does not mutate labels on bad claims mode" "$out" "MUTATED-LABEL"
+lacks    "does not claim OK on bad claims mode" "$out" "OK —"
+
+# docs/claims as a blob (not a tree) is also refuse.
+new_repo "$ROOT/claimsasblob"
+(
+  cd "$ROOT/claimsasblob/canon" || exit 1
+  git checkout -q main
+  rm -rf docs/claims
+  printf 'not a tree\n' > docs/claims
+  : > docs/active-work.md
+  git add -A && git commit -qm "claims path is a blob" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+out=$(cd "$ROOT/claimsasblob/canon" && "$RC" 18 --repo acme/app 2>&1)
+rc=$?
+check "docs/claims blob (not tree) hard-fails" "$rc" "1"
+contains "claims path wants tree" "$out" "want 040000 tree"
+lacks    "does not mutate labels when claims is blob" "$out" "MUTATED-LABEL"
+
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
