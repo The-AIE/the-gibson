@@ -104,8 +104,11 @@ REF="origin/$BASE"
 git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
 
 live_claim_ids() {
-  "$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null |
-    awk -F '\t' '{print $2}' || true
+  PR_CLAIM_IDS=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null |
+    awk -F '\t' '{print $2}' || true)
+  if [[ -n "$PR_CLAIM_IDS" ]]; then
+    printf '%s\n' "$PR_CLAIM_IDS"
+  fi
   git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
     sed 's|^docs/claims/||;s|\.md$||' | grep -E '^issue-' || true
   git show "$REF:docs/active-work.md" 2>/dev/null |
@@ -114,9 +117,18 @@ live_claim_ids() {
 }
 
 claim_scope() {
-  "$SCRIPT_DIR/pr-claims.sh" find "$REPO" "$1" 2>/dev/null |
-    awk -F '\t' '{print $3}' && return 0
-  git show "$REF:docs/claims/$1.md" 2>/dev/null | sed -n 's/^scope: //p' && return 0
+  PR_CLAIM_SCOPE=$("$SCRIPT_DIR/pr-claims.sh" find "$REPO" "$1" 2>/dev/null |
+    awk -F '\t' '{print $3}' || true)
+  if [[ -n "$PR_CLAIM_SCOPE" ]]; then
+    printf '%s\n' "$PR_CLAIM_SCOPE"
+    return 0
+  fi
+  LEGACY_CLAIM_SCOPE=$(git show "$REF:docs/claims/$1.md" 2>/dev/null |
+    sed -n 's/^scope: //p')
+  if [[ -n "$LEGACY_CLAIM_SCOPE" ]]; then
+    printf '%s\n' "$LEGACY_CLAIM_SCOPE"
+    return 0
+  fi
   git show "$REF:docs/active-work.md" 2>/dev/null |
     grep -F "| $1 |" | head -1 | awk -F'|' '{print $4}' |
     sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
@@ -171,13 +183,30 @@ for id in $LIVE_IDS; do
 done
 
 LABEL_ADDED=0
-undo_label() {
+WORKTREE_CREATED=0
+BRANCH_PUSHED=0
+PR_NUMBER=""
+CLAIM_COMPLETE=0
+cleanup_claim() {
+  if [[ "$CLAIM_COMPLETE" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ -n "$PR_NUMBER" && "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+    gh pr close "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1 || true
+  fi
+  if [[ "$WORKTREE_CREATED" -eq 1 ]]; then
+    git worktree remove --force "$WT_DIR" >/dev/null 2>&1 || true
+  fi
+  if [[ "$BRANCH_PUSHED" -eq 1 ]]; then
+    git push -q origin --delete "$BRANCH" >/dev/null 2>&1 || true
+  fi
+  git branch -D "$BRANCH" >/dev/null 2>&1 || true
   if [[ "$LABEL_ADDED" -eq 1 ]]; then
     info "undo: removing agent-claimed from #$ISSUE"
     gh issue edit "$ISSUE" --repo "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --remove-label agent-claimed 2>/dev/null || true
   fi
 }
-trap undo_label ERR
+trap cleanup_claim EXIT
 
 info "adding agent-claimed to #$ISSUE"
 gh issue edit "$ISSUE" --repo "$REPO" --add-label agent-claimed
@@ -191,12 +220,14 @@ git rev-parse "$DEFAULT_REMOTE_BRANCH" >/dev/null 2>&1 || DEFAULT_REMOTE_BRANCH=
 
 info "creating worktree $WT_DIR branch $BRANCH"
 git worktree add "$WT_DIR" -b "$BRANCH" "$DEFAULT_REMOTE_BRANCH"
+WORKTREE_CREATED=1
 
 (
   cd "$WT_DIR" || exit 1
   git commit --allow-empty -s -q -m "chore: reserve issue #$ISSUE for $CLAIM_ID"
   git push -q -u origin "$BRANCH"
 ) || die "claim branch push failed — no PR claim was recorded; re-run after resolving"
+BRANCH_PUSHED=1
 
 BODY=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-body.XXXXXX")
 cat > "$BODY" <<EOF
@@ -220,7 +251,8 @@ rm -f "$BODY"
   die "draft PR creation failed — no PR claim was recorded; re-run after resolving"
 
 LABEL_ADDED=0  # success — do not undo label
-trap - ERR
+CLAIM_COMPLETE=1
+trap - EXIT
 
 cat <<EOF
 claim.sh: OK
