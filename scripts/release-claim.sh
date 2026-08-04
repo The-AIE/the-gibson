@@ -263,6 +263,44 @@ resolve_ledger_ref() {
   return 1
 }
 
+# GitHub-native claims live in open PR bodies. Close the owning PR to release
+# them; the legacy ledger path below remains for back-compat.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PR_REPO="${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+  PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>/dev/null || true)
+  PR_MATCHES=""
+  # shellcheck disable=SC2034
+  while IFS=$'\t' read -r pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated; do
+    [[ -n "$pr_id" ]] || continue
+    echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue
+    if [[ "$CLAIM_ID_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_ARG" ]]; then
+      continue
+    fi
+    PR_MATCHES="${PR_MATCHES}${pr_number}"$'\t'"${pr_id}"$'\n'
+  done <<EOF
+$PR_ROWS
+EOF
+  PR_COUNT=$(printf '%s' "$PR_MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')
+  if [[ "$PR_COUNT" -gt 1 && "$CLAIM_ID_SET" -eq 0 ]]; then
+    die "issue #$ISSUE has multiple live PR claims; pass --claim-id"
+  fi
+  if [[ "$PR_COUNT" -eq 1 ]]; then
+    PR_NUMBER=$(printf '%s' "$PR_MATCHES" | sed -n '1s/\t.*//p')
+    if [[ "$DRY" -eq 1 ]]; then
+      info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim"
+      exit 0
+    fi
+    info "closing PR #$PR_NUMBER to release the PR-body claim"
+    gh pr close "$PR_NUMBER" --repo "$PR_REPO" >/dev/null
+    if [[ "$KEEP_LABEL" -eq 0 ]]; then
+      gh issue edit "$ISSUE" --repo "$PR_REPO" --remove-label agent-claimed >/dev/null 2>&1 || true
+    fi
+    info "released PR-body claim for #$ISSUE"
+    exit 0
+  fi
+fi
+
 # Successful fetch of exact remote base into its remote-tracking ref.
 # Prints base name (main|master). Fails closed on fetch failure.
 fetch_remote_base() {
