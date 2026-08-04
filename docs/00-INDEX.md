@@ -70,6 +70,8 @@ If you only open one file, use the row that matches you. Glossary:
 | 21 | [operator-readiness](21-operator-readiness.md) | Definition of done |
 | 22 | [devin-supervisor](22-devin-cloud-supervisor.md) | Cloud reviewer/merger + escalation ladder |
 | 23 | [delivery-control](23-delivery-control.md) | Production write-path locks + promote |
+| 24 | [agent-memory](24-agent-memory-conventions.md) | AGENTS.md + MEMORY conventions |
+| 25 | [trust-governance](25-trust-and-governance.md) | Trust for vibecoding; graph boundary; agent-gov interop |
 | — | [goose-strategy](GOOSE-STRATEGY.md) | Build on Goose's engine: engine / brand / interop / funnel |
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 | — | [goose-spike-findings](GOOSE-SPIKE-FINDINGS.md) | #28 paperwork pass only — no live runtime spike; scaffold permitted, runtime still gated |
