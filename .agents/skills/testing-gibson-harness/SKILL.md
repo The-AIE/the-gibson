@@ -111,11 +111,57 @@ string) without spending anything, copy `scripts/loop.sh` to `/tmp/gib/scripts/`
 a stub `devin-supervisor.sh` that appends `"$@"` to a file, and run it with
 `--gibson /path/to/the-gibson` so playbooks still resolve.
 
+## Claim harness (claim.sh / pr-claims.sh / claims-status.sh / claim-reaper.sh / release-claim.sh)
+
+Claims live in **open draft-PR bodies** (`- Active-work claim: <id>`, `- Isolation: dedicated
+worktree`, `- Issue:`, `- Claim scope:`, `- Session:`, `- Claimed:`), with the legacy
+`docs/claims/*.md` and `docs/active-work.md` ledgers still read as a fallback. Testing this needs
+two fakes, because the Devin bot token normally **cannot create GitHub repos**
+(`gh repo create` → `Resource not accessible by integration (createRepository)`) and may have zero
+permissions on the target repo — check that first, and expect to fake GitHub rather than use it.
+
+- **Fake branch protection with a real git hook.** `git init --bare` a scratch remote and drop a
+  `pre-receive` hook that rejects `refs/heads/main` (echo GitHub's `GH006 Protected branch update
+  failed` wording) and appends every attempted ref to `$GIT_DIR/push-attempts.log`. Rejection then
+  happens in real push machinery, and that log is independent proof of what the harness *tried* to
+  push — much stronger than only diffing the branch SHA. Seed `main` with the hook renamed away.
+- **Fake `gh` with a JSON store, not with `true`.** A PATH shim backed by `prs.json` / `labels.json`
+  where `pr create` stores the exact `--body-file` bytes and `pr list --json … --jq …` pipes real PR
+  objects through **the real jq program from `pr-claims.sh`**. Make any unimplemented subcommand
+  `exit 3` so an unexpected call is loud. Useful knobs: `GH_FAIL_PR_CREATE=1` (injected failure for
+  the atomicity test), a variant that prints junk instead of a `…/pull/N` URL, and `GH_NOW` to pin
+  `createdAt`/`updatedAt` so reaper staleness is deterministic together with
+  `GIBSON_CLAIMS_NOW_EPOCH`.
+- **Legacy-fallback tests must be mutation-checked.** "claim.sh refused" does not tell you *which*
+  source refused. Prove the test has teeth by deleting the legacy branch of `claim_scope` in a
+  throwaway copy of `scripts/` and confirming the same command then wrongly exits 0.
+- **Beware pipefail when reasoning about `cmd | awk … && return 0`.** `awk` exits 0 after printing
+  nothing, but these scripts run `set -euo pipefail`, so the pipeline still inherits the *left*
+  command's failure and does not short-circuit. A mutation reintroducing that form may look fine;
+  the robust form is capturing the output and testing `[[ -n … ]]`.
+- Regression baselining is cheap here: `git worktree add /tmp/gib-main origin/main` and run the same
+  scenario with the old scripts. That is how you separate "PR broke it" from pre-existing failures
+  (e.g. `release-claim.test.sh`'s renewal-race fixture, and `claim-reaper.test.sh` aborting at
+  `line 276: File: unbound variable` on GNU `stat` — both reproduce on unmodified `main`).
+- Watch for teardown gaps: releasing a claim may close the PR and `exit 0` **before** the worktree /
+  local branch / remote branch cleanup, which then makes re-claiming the same issue+slug die on
+  `worktree path already exists`. Always assert post-release state *and* an immediate re-claim.
+
 ## macOS bash 3.2 portability (the user runs a Mac mini)
 
 ```bash
 docker run --rm -v $PWD:/g:ro bash:3.2 bash -n /g/scripts/loop.sh
 ```
+
+`bash:3.2` is Alpine-based and has **no git/jq**, so `bash -n` is all you get out of the box. For a
+real end-to-end 3.2 run, build a one-line image first — this is worth doing, not just syntax checks:
+
+```Dockerfile
+FROM bash:3.2
+RUN apk add --no-cache git jq coreutils
+```
+Inside the container set `git config --global --add safe.directory '*'` and
+`commit.gpgsign false`, or git operations on mounted scratch repos fail for unrelated reasons.
 Also run the scripts end-to-end under 3.2 with tiny `sh` stubs for `git`, `node` and
 `curl` on PATH — `devin-supervisor.sh` hard-requires `curl` and `node` to exist even
 for `--dry-run`. Watch for `declare -A`, `mapfile`, `${var^^}`, and empty-array
