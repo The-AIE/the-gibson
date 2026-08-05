@@ -1,7 +1,13 @@
-# The Gibson — security layers 4, 5, 8 (+ nightly full DAST)
+# The Gibson — security layers 2, 3 (partial), 4, 5, 8 (+ nightly full DAST)
 # Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
 # Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub
 # integration or secrets.VERCEL_TOKEN.
+#
+# 2026-08: Semgrep (Layer 2 SAST) + Trivy (Layer 3 / fs SCA) added as report-only
+# (continue-on-error) so adopters can baseline without breaking green gates.
+# Promote to hard-fail after triage — same path ConferenceOS #1074 is taking.
+# Layers 1 (gitleaks) and remaining Layer 3 (npm audit / OSV) usually live in the
+# target's gibson-gate.yml or security-gate workflow.
 
 name: gibson-security
 on:
@@ -13,10 +19,48 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
   deployments: read
 
 jobs:
+  # Layer 2 — SAST (Semgrep). Report-only until target has a clean board.
+  sast-semgrep:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Semgrep SAST (report)
+        continue-on-error: true
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/typescript
+            p/nextjs
+            p/react
+            p/security-audit
+            p/secrets
+            p/owasp-top-ten
+
+  # Layer 3 (partial) — Trivy filesystem / supply-chain complementary scan.
+  trivy-fs:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Trivy filesystem scan (report)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
   # Layer 4 — AuthZ matrix: new routes must appear in the inventory
   authz-matrix:
     if: github.event_name == 'pull_request'

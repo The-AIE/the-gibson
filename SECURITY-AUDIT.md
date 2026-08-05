@@ -1,7 +1,7 @@
 # Security Audit Report — The Gibson
 
 **Audience:** Operators, adopters, security reviewers, and anyone who needs to know how The Gibson protects the software it builds and ships.
-**Status:** Living document. Update after every major harness change or after a production incident. Last structured review: 2026-07-29.
+**Status:** Living document. Update after every major harness change or after a production incident. Last structured review: 2026-07-29; free-tool baseline update 2026-08-05.
 **Related doctrine:** [docs/08-security.md](docs/08-security.md), [playbooks/security.md](playbooks/security.md), [ci/security.yml](ci/security.yml), [docs/14-human-gates.md](docs/14-human-gates.md).
 
 ## 1. Scope
@@ -25,19 +25,19 @@ Out of scope for this document (covered by separate runbooks):
 | **Information disclosure** | Secrets in code/URLs; error leakage; cross-tenant data | gitleaks hard-fail; posture probe (headers); AuthZ matrix + IDOR; AI-surface rules treat model output as tainted |
 | **Denial of service** | Runaway agents / cost; rate-limit abuse | Model-economics grades; claim limits; spending gates (G5); posture rate-limit checks |
 | **Elevation of privilege** | Agent gains production write or secret access | Human gates for destructive/spend/go-live; least-privilege tokens; no irreversible MCP actions |
-| **AI-specific** | Prompt injection, tool misuse, hallucinated “secure” code | Layer 7 AI-surface review; adversarial review (layer 6); “never grade your own homework”; untrusted content rules |
+| **AI-specific** | Prompt injection, tool misuse, hallucinated “secure” code | Layer 7 AI-surface review; adversarial review (layer 6); “never grade your own homework”; untrusted content rules; prodlint on AI-generated surfaces |
 
 ## 3. Controls Mapped to the Eight Layers
 
 | Layer | Control | Enforcement | Hard-fail? |
 |---|---|---|---|
 | 1 Secrets | gitleaks + .env gitignore verification | every PR + push | Yes |
-| 2 SAST | Semgrep (OWASP + custom) / CodeQL | every PR | High+ |
-| 3 Supply chain | npm audit, OSV, dependency-review, lockfile-lint | PR + nightly | Critical (high on schedule) |
+| 2 SAST | Semgrep (OWASP + custom + framework rulesets) / CodeQL | every PR | High+ (after baseline) |
+| 3 Supply chain | npm audit, OSV, Trivy, dependency-review, lockfile-lint | PR + nightly | Critical (high on schedule) |
 | 4 AuthZ + IDOR | Generated route matrix + cross-tenant probes | route-touching PRs + nightly | Yes |
 | 5 DAST | ZAP baseline vs **preview**; full vs staging only | PR / nightly | High+ on baseline |
 | 6 Adversarial | Security-lens reviewer + refutation | Tier B/C | Via review verdict |
-| 7 AI-surface | Prompt-injection / untrusted-content checklist | PRs with LLM features | Yes |
+| 7 AI-surface | Prompt-injection / untrusted-content checklist + prodlint signals | PRs with LLM features | Yes |
 | 8 Runtime posture | Headers, cookies, rate limits, TLS probe | PR vs preview + prod drift | Regression |
 
 Additional non-layer controls:
@@ -50,19 +50,21 @@ Additional non-layer controls:
 
 | Area | Status | Notes |
 |---|---|---|
-| Doctrine (docs/08, playbook) | Complete | Clear hard vs report-only |
-| CI template (ci/security.yml) | Present | Layers 4, 5, 8 + nightly; layers 1–3 expected from standard target CI |
+| Doctrine (docs/08, playbook) | Complete | Clear hard vs report-only; free-tool baseline named 2026-08 |
+| CI template (ci/security.yml) | Present | Layers 2 (Semgrep report-only), 3 (Trivy report-only), 4, 5, 8 + nightly; layers 1 + remaining 3 expected from standard target CI / gibson-gate |
 | Scripts (posture-probe, route-inventory, preview-url) | Present | Must be vendored at adoption |
 | AuthZ matrix example | Present | docs/examples/08-authz-matrix-sample.md |
 | Custom Semgrep rules from lessons | Process defined | Ratchet produces them; inventory of live rules is per-target |
+| Quality sensors (prodlint / fallow) | Documented | Recommended for AI/vibe path; not yet required CI |
 | MCP / Foreman surface | In progress (Phase 6) | Tools must remain prepare-PR / decision-card only |
 | Production drift sensor | Designed | Posture vs prod |
 | Formal threat-model document | This file | Living |
+| Dogfood | ConferenceOS #1074 | First target running the Semgrep + Trivy + prodlint/fallow scripts |
 
 ## 5. Residual Risks & Gaps
 
 1. **Adoption gap** — target repos that have not yet vendored the scripts / matrix / CI still run only partial layers. Mitigation: adoption playbook + gate-baseline.
-2. **Report-only → hard-fail promotions** — high CVEs or soft findings need explicit issues with owners and dates (doctrine requires this; process must be followed).
+2. **Report-only → hard-fail promotions** — high CVEs or soft findings need explicit issues with owners and dates (doctrine requires this; process must be followed). Semgrep/Trivy start report-only by design.
 3. **Model-provider compromise** — if a frontier model provider is compromised, generated code could be malicious. Mitigations: multi-vendor review, never single-agent grade own work, security layers still run on output.
 4. **Preview environment fidelity** — DAST/posture only as good as the preview config. Require prod-like env vars on previews.
 5. **Human gate fatigue** — too many cards can train operators to click yes. Mitigated by strict list in doc 14 and “do-nothing is safe”.
@@ -71,15 +73,17 @@ Additional non-layer controls:
 ## 6. Actionable Recommendations
 
 ### Immediate (this week)
-- [ ] Ensure every adopted repo has the security.yml + gitleaks + Semgrep (or equivalent) as hard-fail.
+- [ ] Ensure every adopted repo has the security.yml + gitleaks + Semgrep (or equivalent) as the Layer 2 path (report-only → hard-fail).
 - [ ] Vendor `posture-probe.sh` and `route-inventory.mjs` into targets that lack them.
 - [ ] Create promotion issues for any remaining report-only high findings with owners + target dates.
 - [ ] Confirm MCP tools (when landed) never perform irreversible acts.
+- [ ] Track ConferenceOS #1074 findings → Gibson lessons / custom Semgrep rules.
 
 ### Short-term
 - [ ] Run a full adversarial + ZAP baseline pass on the next Tier C release of an adopted product.
 - [ ] Add or update Semgrep rules from any new LESSONS.md security entries.
 - [ ] Document the exact token scopes used by agents and by the MCP server.
+- [ ] Optionally promote prodlint/fallow into a lightweight quality CI job for vibe-coded targets.
 
 ### Ongoing
 - [ ] Historian weekly sweep includes security findings.
