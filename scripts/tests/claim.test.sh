@@ -64,7 +64,15 @@ case "$1 $2" in
     cat "$body_file" > "${GH_PR_FILE}.body"
     echo "https://github.com/acme/app/pull/$number"
     ;;
-  "pr close") ;;
+  "pr close")
+    number="$3"
+    tmp="${GH_PR_FILE}.tmp"
+    : > "$tmp"
+    while IFS='|' read -r pr_number rest; do
+      [[ "$pr_number" == "$number" ]] || printf '%s|%s\n' "$pr_number" "$rest" >> "$tmp"
+    done < "${GH_PR_FILE:-/dev/null}"
+    mv "$tmp" "$GH_PR_FILE"
+    ;;
 esac
 exit 0
 GH
@@ -115,6 +123,20 @@ head_before=$(cd "$ROOT/a/canon" && git rev-parse origin/main)
 git -C "$ROOT/a/canon" fetch -q origin
 head_after=$(cd "$ROOT/a/canon" && git rev-parse origin/main)
 check "claim never mutates default branch" "$head_after" "$head_before"
+
+echo "release then reclaim removes the PR claim's worktree and branch"
+out=$(cd "$ROOT/a/canon" && "$SCRIPT_DIR/../release-claim.sh" 42 --repo acme/app 2>&1)
+rc=$?
+check "PR-body release succeeds" "$rc" "0"
+test ! -e "$ROOT/a/wt-42-password-reset" &&
+  ok "release removes the PR claim worktree" ||
+  bad "release removes the PR claim worktree"
+test ! -e "$ROOT/a/canon/.git/refs/heads/feat/42-password-reset" &&
+  ok "release removes the local PR claim branch" ||
+  bad "release removes the local PR claim branch"
+out=$(cd "$ROOT/a/canon" && "$CLAIM" 42 password-reset 'app/api/auth/**' 2>&1)
+rc=$?
+check "same claim can be reclaimed after release" "$rc" "0"
 
 echo "claim failure is atomic and retryable"
 new_repo "$ROOT/cleanup"
