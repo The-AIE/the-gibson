@@ -43,6 +43,7 @@ expect none "server-side data access" server/db/queries.ts prisma/schema.prisma
 echo "anything a user can see must run the gate"
 expect ui "app router page" src/app/pricing/page.tsx
 expect ui "a component" components/Nav.tsx
+expect ui "featured talk widget (demo for #60)" components/FeaturedTalkWidget.tsx
 expect ui "a stylesheet" src/styles/globals.css
 expect ui "a static asset" public/og.png
 expect ui "tailwind config" tailwind.config.ts

@@ -1,0 +1,8 @@
+{
+  "$comment": "Vendor-neutral gate contract for The Gibson harness itself (docs/13-adoption). Empty steps are skipped. Test step emits explicit GIBSON_TEST_METRICS for test-integrity sensor (issue #70).",
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "printf 'GIBSON_TEST_METRICS total=42 skipped=0 todo=0\\n'",
+  "build": ""
+}
