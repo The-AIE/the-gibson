@@ -1176,7 +1176,7 @@ else bad "happy path: no snapshot"; fi
 # Blocker fixtures (independent review): exact unchanged-old freshness and
 # unsafe snapshot/restore destinations (directory / symlink / special).
 # ---------------------------------------------------------------------------
-echo "driver: unchanged old state after runner is state-corrupt (exact #75 freshness)"
+echo "driver: unchanged old state after runner is no-progress (not schema corruption)"
 setup_repo
 install_fake_supervisor_stack
 # Valid schema, but updated is 2000-era — byte-identical after a zero-exit no-op.
@@ -1218,21 +1218,23 @@ set -e
 if [[ "$(runner_count)" -eq 2 ]]; then
   ok "unchanged-old: runner invoked twice (not pre-queued short-circuit)"
 else bad "unchanged-old: expected 2 runner calls, got $(runner_count)"; fi
-if grep -q 'state-corrupt' "$REPO/gibson/journal.md" 2>/dev/null; then
-  ok "unchanged-old: zero-exit no-op with old stamp is state-corrupt"
-else bad "unchanged-old: not state-corrupt (err=$(cat "$ROOT/unchanged-old.err") j=$(cat "$REPO/gibson/journal.md" 2>/dev/null))"; fi
-# Second consecutive unit must be 2/5 — proves the no-op did not reset budget.
-if grep -q 'state-corrupt (consecutive failures=2/5)' "$ROOT/unchanged-old.err"; then
-  ok "unchanged-old: exactly one budget unit per event; no-op did not reset failures"
+if grep -q '· no-progress' "$REPO/gibson/journal.md" 2>/dev/null && \
+   [[ "$(journal_state_corrupt_count)" -eq 1 ]]; then
+  ok "unchanged-old: zero-exit no-op with old stamp is no-progress"
+else bad "unchanged-old: wrong classification (err=$(cat "$ROOT/unchanged-old.err") j=$(cat "$REPO/gibson/journal.md" 2>/dev/null))"; fi
+# Second consecutive unit must be 2/5 — proves the no-op has its own
+# no-progress accounting without resetting the shared failure budget.
+if grep -q 'no-progress (stale=1/5, consecutive failures=2/5)' "$ROOT/unchanged-old.err"; then
+  ok "unchanged-old: exactly one no-progress budget unit per event"
 else bad "unchanged-old: budget accounting wrong: $(cat "$ROOT/unchanged-old.err")"; fi
 if [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_bytes" ]]; then
-  ok "unchanged-old: exact snapshot restored (byte-identical old state)"
-else bad "unchanged-old: state not restored exactly"; fi
+  ok "unchanged-old: unchanged state retained without corruption restore"
+else bad "unchanged-old: state unexpectedly changed"; fi
 if [[ "$(supervisor_count)" -eq 0 ]]; then
   ok "unchanged-old: never hands off after stale no-op"
 else bad "unchanged-old: supervisor handoff ran"; fi
 if ! grep -q 'runner exit' "$ROOT/unchanged-old.err"; then
-  ok "unchanged-old: not labeled runner-failure (state-corrupt precedence)"
+  ok "unchanged-old: not labeled runner-failure"
 else bad "unchanged-old: also labeled runner-failure"; fi
 # Single-iteration exact fixture: pure noop + old stamp alone → 1 unit.
 setup_repo
@@ -1248,10 +1250,10 @@ HERMES_CMD="$CALLS/fake-runner.sh" \
   "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" --once \
   --error-budget 5 >/dev/null 2>"$ROOT/unchanged-once.err" || true
 if [[ "$(runner_count)" -eq 1 ]] && \
-   grep -q 'state-corrupt (consecutive failures=1/5)' "$ROOT/unchanged-once.err" && \
+   grep -q 'no-progress (stale=1/5, consecutive failures=1/5)' "$ROOT/unchanged-once.err" && \
    [[ "$(cat "$REPO/gibson/loop-state.md")" == "$pre_once" ]]; then
-  ok "unchanged-old once: one runner, one state-corrupt unit, exact restore"
-else bad "unchanged-old once failed (rc=$(runner_count) err=$(cat "$ROOT/unchanged-once.err"))"; fi
+  ok "unchanged-old once: one runner, one no-progress unit, state retained"
+else bad "unchanged-old once failed (runner_count=$(runner_count) err=$(cat "$ROOT/unchanged-once.err"))"; fi
 
 echo "driver: pre-queued handoff retries without runner (no fake progress)"
 setup_repo

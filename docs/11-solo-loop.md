@@ -129,10 +129,12 @@ Every real iteration (not `--dry-run` / `--print-prompt`) follows this order:
    byte-identical to the source.
 5. **Capture** a strict UTC `iteration_start` immediately before invoking the
    runner. After **every** actual runner exit, re-validate schema **and**
-   require `updated >= iteration_start` before any success path — including when
-   bytes are identical to the pre-iteration snapshot. A zero-exit no-op that
-   leaves a valid but old stamp is `state-corrupt` (one budget unit, no reset,
-   no handoff). Do not weaken this freshness gate.
+   require `updated >= iteration_start` before any success path. The one
+   exception is a runner that exits 0 and leaves `loop-state.md` byte-for-byte
+   unchanged: the pre-run state already passed schema validation, so this is
+   the distinct no-progress condition below, not schema corruption. Any changed
+   state with an old stamp remains `state-corrupt`; do not weaken that freshness
+   gate.
 6. **Post-run corrupt/stale:** distinct `state-corrupt` journal section
    (validator diagnostics + diff), exact-byte restore, exactly one failure,
    suppress handoff. Precedence over runner-failure **and** no-progress even
@@ -144,7 +146,8 @@ Every real iteration (not `--dry-run` / `--print-prompt`) follows this order:
    pre-run snapshot (`gibson/.loop-state.prev`) to live state with
    `silent_noop_progressed` from `scripts/silent-noop.sh`. Only the
    column-zero `updated:` clock is ignored — clock-only rewrites are
-   **no-progress**. Substantive change (including same-length edits and
+   **no-progress**, as is a byte-identical state even when its `updated:` stamp
+   is old. Substantive change (including same-length edits and
    `handoff_sha` / any other non-updated field) resets **both** the shared
    failure counter and the stale counter; handoff may proceed. No substantive
    change journals exactly one `no-progress` section, increments shared
