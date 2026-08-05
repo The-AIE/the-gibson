@@ -2308,17 +2308,25 @@ while true; do
         rm -f "$PROMPT_FILE"
 
         # Post-run validation (issue #75): after EVERY actual runner invocation,
-        # state must pass schema AND updated >= iteration_start — including when
-        # bytes are identical to the pre-iteration snapshot. A zero-exit no-op
-        # that leaves a valid but old stamp is state-corrupt: one budget unit,
-        # no failure reset, no handoff. Do not weaken this freshness gate.
-        # Issue #63 no-progress (substantive fingerprint vs the exact pre-run
-        # snapshot) runs only after schema+freshness pass AND runner exit 0.
+        # state must pass schema AND updated >= iteration_start before any
+        # success path. The one deliberate exception is an exit-0 runner that
+        # leaves loop-state byte-for-byte unchanged: the pre-run state already
+        # passed schema validation, and this is the distinct no-progress event
+        # described by L-008, not schema corruption. Any changed state that is
+        # stale or malformed remains state-corrupt.
         # Pre-queued handoff retries are routed before runner/snapshot above so
         # they never depend on faking progress through a no-op runner.
         post_diag=$(mktemp "${TMPDIR:-/tmp}/gibson-post-val.XXXXXX")
         post_min="$iteration_start"
-        if ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
+        unchanged_zero=0
+        if [[ "$ec" -eq 0 ]] &&
+          is_regular_nonsymlink_file "$STATE_SNAPSHOT" &&
+          is_regular_nonsymlink_file "$STATE_FILE" &&
+          cmp -s "$STATE_SNAPSHOT" "$STATE_FILE"; then
+          unchanged_zero=1
+        fi
+        if [[ "$unchanged_zero" -eq 0 ]] &&
+          ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
           journal_normal_completion=0
           # state-corrupt takes precedence over runner-failure even when ec != 0.
           # Count exactly once as state-corrupt; do not also count runner-failure.
@@ -2369,7 +2377,8 @@ while true; do
           fi
         else
           rm -f "$post_diag"
-          # Valid post-run state (schema + freshness). Precedence from here:
+          # Valid post-run state (schema + freshness), or the explicit
+          # byte-identical exit-0 no-progress case above. Precedence from here:
           #   nonzero exit → runner-failure only (no no-progress sensor)
           #   exit 0       → silent_noop_progressed(snapshot, live)
           #                  progressed → reset failures+stale, may hand off
