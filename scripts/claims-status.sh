@@ -67,6 +67,11 @@ done
 command -v git >/dev/null || { echo "claims-status.sh: ERROR: git required" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
   { echo "claims-status.sh: ERROR: not a git repo" >&2; exit 2; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO=""
+if command -v gh >/dev/null 2>&1; then
+  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+fi
 
 if [[ -z "$REF" ]]; then
   BASE=main
@@ -142,6 +147,27 @@ emit() { # claimed | claim-id | scope | session
   fi
   ROWS="${ROWS}| ${claimed} | ${id} | ${scope} | ${session}${age} |"$'\n'
 }
+
+emit_pr() { # number | claim-id | scope | head | url | created | updated
+  local number="$1" id="$2" scope="$3" head="$4" url="$5" created="$6" updated="$7"
+  if [[ -n "$ONLY_ISSUE" ]]; then
+    echo "$id" | grep -qE "^issue-([A-Za-z][A-Za-z0-9]*-)?${ONLY_ISSUE}-" || return 0
+  fi
+  local stamp age="" claimed="$created"
+  stamp=$(claim_to_epoch "$claimed")
+  if [[ -n "$stamp" ]]; then
+    local hours=$(( (NOW - stamp) / 3600 ))
+    [[ "$hours" -ge 24 ]] && age=" STALE(${hours}h)"
+  fi
+  ROWS="${ROWS}| ${claimed} | ${id} | ${scope} | PR #${number} (${head})${age} |"$'\n'
+}
+
+if [[ -n "$REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+  while IFS=$'\t' read -r number id scope head url created updated; do
+    [[ -n "$id" ]] || continue
+    emit_pr "$number" "$id" "$scope" "$head" "$url" "$created" "$updated"
+  done < <("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null || true)
+fi
 
 for path in $(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); do
   case "$path" in *.md) ;; *) continue ;; esac

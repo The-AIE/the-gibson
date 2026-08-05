@@ -67,12 +67,13 @@ RISKS
     them is a separate hardening concern (docs/22).
 
 USAGE
-  loop.sh --runner <grok|hermes|claude|codex> --repo <path> [options]
+  loop.sh --runner <grok|hermes|claude|codex> --repo <path> --repo-slug <owner/repo> [options]
   loop.sh --help
 
 OPTIONS
   --runner NAME       runtime CLI (required)
   --repo PATH         target repository path (required)
+  --repo-slug SLUG    expected canonical origin repository (required)
   --gibson PATH       Gibson clone (default: parent of this script)
   --once              single iteration then exit
   --print-prompt      render prompt only (no runner)
@@ -119,6 +120,7 @@ EOF
 
 RUNNER=""
 REPO=""
+EXPECTED_REPO_SLUG=""
 GIBSON=""
 ONCE=0
 PRINT=0
@@ -138,6 +140,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --runner) RUNNER="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
+    --repo-slug) EXPECTED_REPO_SLUG="$2"; shift 2 ;;
     --gibson) GIBSON="$2"; shift 2 ;;
     --once) ONCE=1; shift ;;
     --print-prompt) PRINT=1; shift ;;
@@ -172,6 +175,7 @@ is_positive_safe_int() {
 
 [[ -n "$RUNNER" ]] || { usage; exit 2; }
 [[ -n "$REPO" ]] || { usage; exit 2; }
+[[ -n "$EXPECTED_REPO_SLUG" ]] || { usage; exit 2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
@@ -417,6 +421,48 @@ origin_slug() {
   local url
   url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || true
   origin_slug_from_url "$url"
+}
+
+TARGET_REPO_REALPATH=$(CDPATH='' cd "$REPO" && pwd -P)
+ORIGIN_SLUG=$(origin_slug)
+[[ "$ORIGIN_SLUG" == "$EXPECTED_REPO_SLUG" ]] ||
+  die "repository identity mismatch: --repo-slug '$EXPECTED_REPO_SLUG' does not match origin '${ORIGIN_SLUG:-unparseable or absent}'"
+
+GUARD_REAL_GIT=$(command -v git)
+GUARD_BIN=""
+GUARD_PATH=""
+prepare_repo_boundary_guard() {
+  GUARD_BIN=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard.XXXXXX")
+  ln -s "$GIBSON/scripts/repo-boundary-guard.sh" "$GUARD_BIN/git"
+  GUARD_PATH="$GUARD_BIN:${PATH}"
+}
+
+clear_repo_boundary_guard() {
+  if [[ -n "$GUARD_BIN" ]]; then
+    rm -rf "$GUARD_BIN"
+    GUARD_BIN=""
+    GUARD_PATH=""
+  fi
+}
+
+guard_control_plane_clean() {
+  local path
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      .agents/gate.json|.gibson-gate.json|.agents/gate.*|.agents/*sensor*.json|.agents/*sensor*.yaml|.agents/*sensor*.yml)
+        info "repo-boundary guard: runner modified harness control-plane file '$path'"
+        return 1
+        ;;
+    esac
+  done < <(
+    {
+      git -C "$REPO" diff --name-only
+      git -C "$REPO" diff --cached --name-only
+      git -C "$REPO" ls-files --others --exclude-standard
+    } | sort -u
+  )
+  return 0
 }
 
 # Resolve the slug for remote-halt gh queries only when origin host matches
@@ -2301,24 +2347,43 @@ while true; do
         fi
       else
         iteration_start=$(strict_utc_now)
+        prepare_repo_boundary_guard
         set +e
-        invoke_runner "$PROMPT_FILE"
+        PATH="$GUARD_PATH" \
+          GIBSON_REAL_GIT="$GUARD_REAL_GIT" \
+          GIBSON_TARGET_REPO="$TARGET_REPO_REALPATH" \
+          GIBSON_EXPECTED_REPO_SLUG="$EXPECTED_REPO_SLUG" \
+          invoke_runner "$PROMPT_FILE"
         ec=$?
         set -e
+        clear_repo_boundary_guard
         rm -f "$PROMPT_FILE"
 
+        if ! guard_control_plane_clean; then
+          journal_normal_completion=0
+          die "repo-boundary guard rejected runner iteration: harness control-plane was created or modified"
+        fi
+
         # Post-run validation (issue #75): after EVERY actual runner invocation,
-        # state must pass schema AND updated >= iteration_start — including when
-        # bytes are identical to the pre-iteration snapshot. A zero-exit no-op
-        # that leaves a valid but old stamp is state-corrupt: one budget unit,
-        # no failure reset, no handoff. Do not weaken this freshness gate.
-        # Issue #63 no-progress (substantive fingerprint vs the exact pre-run
-        # snapshot) runs only after schema+freshness pass AND runner exit 0.
+        # state must pass schema AND updated >= iteration_start before any
+        # success path. The one deliberate exception is an exit-0 runner that
+        # leaves loop-state byte-for-byte unchanged: the pre-run state already
+        # passed schema validation, and this is the distinct no-progress event
+        # described by L-008, not schema corruption. Any changed state that is
+        # stale or malformed remains state-corrupt.
         # Pre-queued handoff retries are routed before runner/snapshot above so
         # they never depend on faking progress through a no-op runner.
         post_diag=$(mktemp "${TMPDIR:-/tmp}/gibson-post-val.XXXXXX")
         post_min="$iteration_start"
-        if ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
+        unchanged_zero=0
+        if [[ "$ec" -eq 0 ]] &&
+          is_regular_nonsymlink_file "$STATE_SNAPSHOT" &&
+          is_regular_nonsymlink_file "$STATE_FILE" &&
+          cmp -s "$STATE_SNAPSHOT" "$STATE_FILE"; then
+          unchanged_zero=1
+        fi
+        if [[ "$unchanged_zero" -eq 0 ]] &&
+          ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
           journal_normal_completion=0
           # state-corrupt takes precedence over runner-failure even when ec != 0.
           # Count exactly once as state-corrupt; do not also count runner-failure.
@@ -2369,7 +2434,8 @@ while true; do
           fi
         else
           rm -f "$post_diag"
-          # Valid post-run state (schema + freshness). Precedence from here:
+          # Valid post-run state (schema + freshness), or the explicit
+          # byte-identical exit-0 no-progress case above. Precedence from here:
           #   nonzero exit → runner-failure only (no no-progress sensor)
           #   exit 0       → silent_noop_progressed(snapshot, live)
           #                  progressed → reset failures+stale, may hand off

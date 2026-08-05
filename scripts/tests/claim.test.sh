@@ -37,6 +37,42 @@ case "$1 $2" in
   "repo view") echo "acme/app" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+  "pr list")
+    while IFS='|' read -r number claim scope branch url created updated; do
+      [[ -n "$claim" ]] || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
+    done < "${GH_PR_FILE:-/dev/null}"
+    ;;
+  "pr create")
+    [[ "${GH_FAIL_PR_CREATE:-0}" == 1 ]] && exit 1
+    body_file=""
+    branch=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --body-file) body_file="$2"; shift 2 ;;
+        --head) branch="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    number="${GH_PR_NEXT:-1}"
+    export GH_PR_NEXT=$((number + 1))
+    claim=$(sed -n 's/^- Active-work claim: //p' "$body_file")
+    scope=$(sed -n 's/^- Claim scope: //p' "$body_file")
+    printf '%s|%s|%s|%s|https://github.com/acme/app/pull/%s|2026-08-04T00:00:00Z|2026-08-04T00:00:00Z\n' \
+      "$number" "$claim" "$scope" "$branch" "$number" >> "${GH_PR_FILE:-/dev/null}"
+    cat "$body_file" > "${GH_PR_FILE}.body"
+    echo "https://github.com/acme/app/pull/$number"
+    ;;
+  "pr close")
+    number="$3"
+    tmp="${GH_PR_FILE}.tmp"
+    : > "$tmp"
+    while IFS='|' read -r pr_number rest; do
+      [[ "$pr_number" == "$number" ]] || printf '%s|%s\n' "$pr_number" "$rest" >> "$tmp"
+    done < "${GH_PR_FILE:-/dev/null}"
+    mv "$tmp" "$GH_PR_FILE"
+    ;;
 esac
 exit 0
 GH
@@ -48,6 +84,9 @@ new_repo() {
   local root="$1"
   rm -rf "$root"
   mkdir -p "$root"
+  export GH_PR_FILE="$root/prs"
+  : > "$GH_PR_FILE"
+  export GH_PR_NEXT=1
   git init -q --bare "$root/origin"
   git clone -q "$root/origin" "$root/canon" 2>/dev/null
   (
@@ -74,14 +113,45 @@ new_repo "$ROOT/a"
 out=$(cd "$ROOT/a/canon" && "$CLAIM" 42 password-reset 'app/api/auth/**' 2>&1); rc=$?
 check "claim succeeds" "$rc" "0"
 files=$(cd "$ROOT/a/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
-contains "wrote docs/claims/issue-42-password-reset.md" "$files" "issue-42-password-reset.md"
-body=$(cd "$ROOT/a/canon" && git show origin/main:docs/claims/issue-42-password-reset.md)
-contains "records the scope"   "$body" "scope: app/api/auth/**"
-contains "records the session" "$body" "session: tester@box"
+contains "creates a PR-body claim" "$(cat "$GH_PR_FILE")" "issue-42-password-reset"
+body=$(cat "$GH_PR_FILE")
+contains "records the scope"   "$body" "app/api/auth/**"
+contains "records the session" "$(cat "${GH_PR_FILE}.body")" "- Session: tester@box"
 table=$(cd "$ROOT/a/canon" && git show origin/main:docs/active-work.md)
 lacks "does not append to the shared table" "$table" "issue-42"
-touched=$(cd "$ROOT/a/canon" && git show --stat --oneline origin/main | tail -n +2)
-lacks "the claim commit touches nothing else" "$touched" "active-work.md"
+head_before=$(cd "$ROOT/a/canon" && git rev-parse origin/main)
+git -C "$ROOT/a/canon" fetch -q origin
+head_after=$(cd "$ROOT/a/canon" && git rev-parse origin/main)
+check "claim never mutates default branch" "$head_after" "$head_before"
+
+echo "release then reclaim removes the PR claim's worktree and branch"
+out=$(cd "$ROOT/a/canon" && "$SCRIPT_DIR/../release-claim.sh" 42 --repo acme/app 2>&1)
+rc=$?
+check "PR-body release succeeds" "$rc" "0"
+test ! -e "$ROOT/a/wt-42-password-reset" &&
+  ok "release removes the PR claim worktree" ||
+  bad "release removes the PR claim worktree"
+test ! -e "$ROOT/a/canon/.git/refs/heads/feat/42-password-reset" &&
+  ok "release removes the local PR claim branch" ||
+  bad "release removes the local PR claim branch"
+out=$(cd "$ROOT/a/canon" && "$CLAIM" 42 password-reset 'app/api/auth/**' 2>&1)
+rc=$?
+check "same claim can be reclaimed after release" "$rc" "0"
+
+echo "claim failure is atomic and retryable"
+new_repo "$ROOT/cleanup"
+export GH_FAIL_PR_CREATE=1
+out=$(cd "$ROOT/cleanup/canon" && "$CLAIM" 43 cleanup 'lib/cleanup.ts' 2>&1); rc=$?
+check "draft PR failure exits nonzero" "$rc" "1"
+test ! -e "$ROOT/cleanup/wt-43-cleanup" &&
+  ok "failed claim removes its worktree" ||
+  bad "failed claim removes its worktree"
+test ! -e "$ROOT/cleanup/canon/.git/refs/heads/feat/43-cleanup" &&
+  ok "failed claim removes its local branch" ||
+  bad "failed claim removes its local branch"
+unset GH_FAIL_PR_CREATE
+out=$(cd "$ROOT/cleanup/canon" && "$CLAIM" 43 cleanup 'lib/cleanup.ts' 2>&1); rc=$?
+check "retry after failed claim succeeds" "$rc" "0"
 
 echo "L-028 · a second claim on a claimed issue is refused unless it is deliberate"
 new_repo "$ROOT/b"
@@ -90,16 +160,18 @@ out=$(cd "$ROOT/b/canon" && "$CLAIM" 77 client-side 'app/**' 2>&1); rc=$?
 check    "refuses"          "$rc" "1"
 contains "names the holder" "$out" "issue-77-server-side"
 contains "points at --slice" "$out" "--slice"
-files=$(cd "$ROOT/b/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
-lacks "no claim was written" "$files" "issue-77-client-side"
+claims=$(cat "$GH_PR_FILE")
+lacks "no duplicate claim was written" "$claims" "issue-77-client-side"
 
 echo "L-024 · --slice allows a deliberate second lane with separate scope"
 out=$(cd "$ROOT/b/canon" && "$CLAIM" 77 client-side 'app/**' --slice 2>&1); rc=$?
 check    "allowed"            "$rc" "0"
 contains "says it is a slice" "$out" "slice claim"
-files=$(cd "$ROOT/b/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
-contains "both slices live" "$files" "issue-77-client-side.md"
-contains "sibling untouched" "$files" "issue-77-server-side.md"
+claims=$(cat "$GH_PR_FILE")
+contains "both slices live" "$claims" "issue-77-client-side"
+test -f "$ROOT/b/canon/docs/claims/issue-77-server-side.md" &&
+  ok "sibling untouched" ||
+  bad "sibling untouched"
 
 echo "scope overlap is refused whichever side is broader"
 new_repo "$ROOT/c"
@@ -131,10 +203,10 @@ new_repo "$ROOT/f"
 branch=$(cd "$ROOT/f/canon" && git rev-parse --abbrev-ref HEAD)
 check "still on its branch" "$branch" "long-lived"
 check "uncommitted work untouched" "$(cd "$ROOT/f/canon" && git status --porcelain)" "?? wip.txt"
-files=$(cd "$ROOT/f/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
-contains "claim still landed on main" "$files" "issue-12-thing.md"
+contains "claim still has a PR body" "$(cat "$GH_PR_FILE")" "issue-12-thing"
 
 echo "claims-status.sh renders the lanes"
+export GH_PR_FILE="$ROOT/b/prs"
 status=$(cd "$ROOT/b/canon" && "$SCRIPT_DIR/../claims-status.sh" --issue 77)
 contains "shows slice one" "$status" "issue-77-server-side"
 contains "shows slice two" "$status" "issue-77-client-side"

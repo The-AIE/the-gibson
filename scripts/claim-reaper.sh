@@ -225,6 +225,56 @@ else
   NOW=$(date -u +%s)
 fi
 
+# GitHub-native claims are authoritative for migrated repositories. Keep the
+# legacy ledger scan below intact, but reap stale open-PR claims from the same
+# source that claims-status and claim.sh use.
+PR_REPO="${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+PR_CLAIMS_FOUND=0
+if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+  PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>/dev/null || true)
+  # shellcheck disable=SC2034
+  while IFS=$'\t' read -r pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated; do
+    [[ -n "$pr_id" ]] || continue
+    PR_CLAIMS_FOUND=1
+    if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_FILTER" ]]; then
+      continue
+    fi
+    if [[ ! "$pr_id" =~ ^issue-([0-9]+)- ]]; then
+      warn "refusing malformed PR claim id '$pr_id' on PR #$pr_number"
+      continue
+    fi
+    pr_issue="${BASH_REMATCH[1]}"
+    stamp="$pr_updated"
+    [[ -n "$stamp" ]] || stamp="$pr_created"
+    epoch=$(date -u -d "$stamp" +%s 2>/dev/null ||
+      date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$stamp" +%s 2>/dev/null || echo "")
+    if [[ -z "$epoch" || ! "$epoch" =~ ^[0-9]+$ ]]; then
+      warn "refusing PR #$pr_number claim '$pr_id' with unreadable activity timestamp"
+      continue
+    fi
+    age=$((NOW - epoch))
+    if [[ "$age" -lt "$STALE_SECONDS" ]]; then
+      info "PR #$pr_number claim $pr_id is protected (activity ${age}s ago)"
+      continue
+    fi
+    info "STALE PR #$pr_number claim $pr_id (activity ${age}s ago)"
+    if [[ "$APPLY" -eq 1 ]]; then
+      "$RELEASE_CMD" "$pr_issue" --claim-id "$pr_id" --repo "$PR_REPO" \
+        --keep-branch --keep-worktree
+    fi
+  done <<EOF
+$PR_ROWS
+EOF
+  # A migrated repository can have no legacy tree at all. Do not misclassify
+  # that valid state as an unreadable ledger after processing PR claims.
+  if [[ "$PR_CLAIMS_FOUND" -eq 1 ]]; then
+    legacy_entries=$(git ls-tree --name-only HEAD docs/claims/ docs/active-work.md 2>/dev/null || true)
+    if [[ -z "$legacy_entries" ]]; then
+      exit 0
+    fi
+  fi
+fi
+
 # --- ledger ref: require successful fetch of exact remote base ------------
 # Never fall back to local main/master, cached stale origin refs after a
 # failed fetch, HEAD, or another branch.
