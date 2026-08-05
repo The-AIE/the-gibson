@@ -18,6 +18,7 @@ set -uo pipefail
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 GIBSON=$(cd "$SCRIPT_DIR/../.." && pwd)
 LOOP="$GIBSON/scripts/loop.sh"
+SOURCE_LOOP="$LOOP"
 VALIDATOR="$GIBSON/scripts/validate-loop-state.sh"
 
 PASS=0
@@ -36,6 +37,7 @@ trap 'chmod -R u+rwX "$ROOT" 2>/dev/null; rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"
 CALLS="$ROOT/calls"
 REPO="$ROOT/repo"
+REMOTE="$ROOT/remote.git"
 mkdir -p "$BIN" "$CALLS"
 
 # Inert network stubs — never reach the wire.
@@ -126,13 +128,18 @@ EOF
 }
 
 setup_repo() {
-  rm -rf "$REPO"
+  rm -rf "$REPO" "$REMOTE"
   mkdir -p "$REPO"
   $GIT init -q "$REPO"
   git -C "$REPO" symbolic-ref HEAD refs/heads/main
   echo base > "$REPO/README.md"
   $GIT -C "$REPO" add README.md
   $GIT -C "$REPO" commit -q -m "base"
+  $GIT -C "$REPO" remote add origin https://github.com/acme/app.git
+  $GIT init -q --bare "$REMOTE"
+  git -C "$REPO" config --local "url.$REMOTE.insteadOf" "https://github.com/acme/app.git"
+  git -C "$REPO" push -q origin main
+  git -C "$REMOTE" symbolic-ref HEAD refs/heads/main
   mkdir -p "$REPO/gibson"
   : > "$CALLS/runner.count"
   : > "$CALLS/runner.args"
@@ -434,8 +441,12 @@ test_read_field() {
 # Fake supervisor + second-opinion that record invocations (no network).
 install_fake_supervisor_stack() {
   mkdir -p "$ROOT/fake/scripts"
-  cp "$LOOP" "$ROOT/fake/scripts/loop.sh"
-  chmod +x "$ROOT/fake/scripts/loop.sh"
+  cp "$SOURCE_LOOP" "$ROOT/fake/scripts/loop-real.sh"
+  cat > "$ROOT/fake/scripts/loop.sh" <<'STUB'
+#!/usr/bin/env bash
+exec "$(dirname "$0")/loop-real.sh" "$@" --repo-slug acme/app
+STUB
+  chmod +x "$ROOT/fake/scripts/loop-real.sh" "$ROOT/fake/scripts/loop.sh"
   cat > "$ROOT/fake/scripts/second-opinion.sh" <<STUB
 #!/usr/bin/env bash
 echo call >> "$CALLS/second-opinion.count"
@@ -462,6 +473,7 @@ exit 0
 STUB
   chmod +x "$ROOT/fake/scripts/second-opinion.sh" "$ROOT/fake/scripts/devin-supervisor.sh"
   LOOP_BIN="$ROOT/fake/scripts/loop.sh"
+  LOOP="$LOOP_BIN"
 }
 
 runner_count() {
