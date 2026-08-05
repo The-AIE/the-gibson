@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claim.sh — atomic issue claim + worktree (docs/05)
+# claim.sh — atomic issue claim + worktree (GitHub PR-body claims)
 set -euo pipefail
 
 usage() {
@@ -8,8 +8,8 @@ claim.sh — claim a GitHub issue and open an isolated worktree
 
 WHAT IT DOES
   Marks the issue as agent-claimed, refuses to claim something already claimed,
-  writes ONE claim file at docs/claims/<claim-id>.md on main (signed commit), and
-  creates a git worktree + branch for the work.
+  opens a draft pull request whose body carries the active-work claim, and creates
+  a git worktree + branch for the work. The default branch is never mutated.
 
   One file per claim, never a shared table: two lanes claiming at the same moment
   touch different paths, so their claim commits do not conflict. `docs/active-work.md`
@@ -24,7 +24,7 @@ WHY
   (L-023). Claims must be cheap enough that nobody is tempted to skip them.
 
 RISKS
-  - Pushes a small commit to main (claim file only). Undo: release-claim.sh.
+  - Pushes an empty claim commit to a feature branch and opens a draft PR.
   - Adds the agent-claimed label. Undo: gh issue edit --remove-label.
   - Creates ../wt-<issue>-<slug> next to the canonical checkout.
   - Exits non-zero and removes the label if a conflict is found.
@@ -81,6 +81,7 @@ CLAIM_ID="issue-${ISSUE}-${SLUG}"
 BRANCH="feat/${ISSUE}-${SLUG}"
 WT_DIR="$(cd "$CANONICAL/.." && pwd)/wt-${ISSUE}-${SLUG}"
 UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "claim.sh: $*"; }
@@ -92,6 +93,7 @@ command -v gh >/dev/null || die "gh (GitHub CLI) required"
 
 cd "$CANONICAL"
 git fetch origin 2>/dev/null || true
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
 # Live claims are read from origin's tip, not the working tree: the canonical
 # checkout may be parked on an old branch, and a stale read is how two lanes end
@@ -102,6 +104,11 @@ REF="origin/$BASE"
 git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
 
 live_claim_ids() {
+  PR_CLAIM_IDS=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null |
+    awk -F '\t' '{print $2}' || true)
+  if [[ -n "$PR_CLAIM_IDS" ]]; then
+    printf '%s\n' "$PR_CLAIM_IDS"
+  fi
   git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
     sed 's|^docs/claims/||;s|\.md$||' | grep -E '^issue-' || true
   git show "$REF:docs/active-work.md" 2>/dev/null |
@@ -110,7 +117,18 @@ live_claim_ids() {
 }
 
 claim_scope() {
-  git show "$REF:docs/claims/$1.md" 2>/dev/null | sed -n 's/^scope: //p' && return 0
+  PR_CLAIM_SCOPE=$("$SCRIPT_DIR/pr-claims.sh" find "$REPO" "$1" 2>/dev/null |
+    awk -F '\t' '{print $3}' || true)
+  if [[ -n "$PR_CLAIM_SCOPE" ]]; then
+    printf '%s\n' "$PR_CLAIM_SCOPE"
+    return 0
+  fi
+  LEGACY_CLAIM_SCOPE=$(git show "$REF:docs/claims/$1.md" 2>/dev/null |
+    sed -n 's/^scope: //p')
+  if [[ -n "$LEGACY_CLAIM_SCOPE" ]]; then
+    printf '%s\n' "$LEGACY_CLAIM_SCOPE"
+    return 0
+  fi
   git show "$REF:docs/active-work.md" 2>/dev/null |
     grep -F "| $1 |" | head -1 | awk -F'|' '{print $4}' |
     sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
@@ -165,52 +183,35 @@ for id in $LIVE_IDS; do
 done
 
 LABEL_ADDED=0
-undo_label() {
+WORKTREE_CREATED=0
+BRANCH_PUSHED=0
+PR_NUMBER=""
+CLAIM_COMPLETE=0
+cleanup_claim() {
+  if [[ "$CLAIM_COMPLETE" -eq 1 ]]; then
+    return 0
+  fi
+  if [[ -n "$PR_NUMBER" && "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+    gh pr close "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1 || true
+  fi
+  if [[ "$WORKTREE_CREATED" -eq 1 ]]; then
+    git worktree remove --force "$WT_DIR" >/dev/null 2>&1 || true
+  fi
+  if [[ "$BRANCH_PUSHED" -eq 1 ]]; then
+    git push -q origin --delete "$BRANCH" >/dev/null 2>&1 || true
+  fi
+  git branch -D "$BRANCH" >/dev/null 2>&1 || true
   if [[ "$LABEL_ADDED" -eq 1 ]]; then
     info "undo: removing agent-claimed from #$ISSUE"
     gh issue edit "$ISSUE" --repo "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --remove-label agent-claimed 2>/dev/null || true
   fi
 }
-trap undo_label ERR
+trap cleanup_claim EXIT
 
 info "adding agent-claimed to #$ISSUE"
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 gh issue edit "$ISSUE" --repo "$REPO" --add-label agent-claimed
 LABEL_ADDED=1
 
-# Commit the claim from a throwaway worktree — the canonical checkout is not
-# ours to move, and it may be dirty or on a long-lived branch (Law 3 / L-009).
-TMPWT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-claim.XXXXXX")
-rm -rf "$TMPWT"
-cleanup_wt() { git worktree remove --force "$TMPWT" >/dev/null 2>&1 || rm -rf "$TMPWT"; }
-git worktree add --detach "$TMPWT" "$REF" >/dev/null 2>&1 ||
-  die "could not create a temporary worktree at $REF for the claim commit"
-
-(
-  cd "$TMPWT" || exit 1
-  mkdir -p docs/claims
-  cat > "docs/claims/${CLAIM_ID}.md" <<EOF
-claim: $CLAIM_ID
-issue: $ISSUE
-claimed: $UTC
-scope: $SCOPE
-session: $SESSION
-branch: $BRANCH
-worktree: $WT_DIR
-EOF
-  git add "docs/claims/${CLAIM_ID}.md"
-  git commit -s -q -m "claim: $CLAIM_ID
-
-Scope: $SCOPE
-Session: $SESSION
-
-Signed claim per docs/05. One file per claim so concurrent lanes never
-conflict on the ledger (L-023)."
-  git push -q origin "HEAD:$BASE"
-) || { cleanup_wt; die "claim commit failed — no claim was recorded; re-run after resolving"; }
-cleanup_wt
-
-# Worktree
 if [[ -d "$WT_DIR" ]]; then
   die "worktree path already exists: $WT_DIR"
 fi
@@ -219,14 +220,45 @@ git rev-parse "$DEFAULT_REMOTE_BRANCH" >/dev/null 2>&1 || DEFAULT_REMOTE_BRANCH=
 
 info "creating worktree $WT_DIR branch $BRANCH"
 git worktree add "$WT_DIR" -b "$BRANCH" "$DEFAULT_REMOTE_BRANCH"
+WORKTREE_CREATED=1
+
+(
+  cd "$WT_DIR" || exit 1
+  git commit --allow-empty -s -q -m "chore: reserve issue #$ISSUE for $CLAIM_ID"
+  git push -q -u origin "$BRANCH"
+) || die "claim branch push failed — no PR claim was recorded; re-run after resolving"
+BRANCH_PUSHED=1
+
+BODY=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-body.XXXXXX")
+cat > "$BODY" <<EOF
+## Active work
+
+- Active-work claim: $CLAIM_ID
+- Isolation: dedicated worktree
+- Issue: #$ISSUE
+- Claim scope: $SCOPE
+- Session: $SESSION
+- Claimed: $UTC
+
+This draft PR reserves the issue before implementation. The claim is released
+when this PR closes or merges.
+EOF
+PR_NUMBER=$(gh pr create --repo "$REPO" --draft --base "$BASE" --head "$BRANCH" \
+  --title "WIP: claim #$ISSUE — $SLUG" --body-file "$BODY" |
+  sed -n 's|.*/pull/||p')
+rm -f "$BODY"
+[[ "$PR_NUMBER" =~ ^[0-9]+$ ]] ||
+  die "draft PR creation failed — no PR claim was recorded; re-run after resolving"
 
 LABEL_ADDED=0  # success — do not undo label
-trap - ERR
+CLAIM_COMPLETE=1
+trap - EXIT
 
 cat <<EOF
 claim.sh: OK
   issue:    #$ISSUE
   claim:    $CLAIM_ID
+  pr:       #$PR_NUMBER
   branch:   $BRANCH
   worktree: $WT_DIR
   scope:    $SCOPE
