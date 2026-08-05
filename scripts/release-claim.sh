@@ -231,6 +231,19 @@ if [[ -n "$EXPECTED_BRANCH" && ! "$EXPECTED_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; th
 fi
 
 cd "$CANONICAL"
+WT_PARENT="$(cd "$CANONICAL/.." && pwd)"
+pr_wt_dir_for() { echo "$WT_PARENT/wt-${1#issue-}"; }
+pr_worktree_registered() {
+  local wanted="$1" line
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree $wanted") return 0 ;;
+    esac
+  done <<EOF
+$(git worktree list --porcelain 2>/dev/null || true)
+EOF
+  return 1
+}
 
 # CAS mode (claim-reaper): require a successful fetch of the exact remote base
 # into origin/<base> and never fall back to local main/master or cached stale
@@ -277,7 +290,7 @@ if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     if [[ "$CLAIM_ID_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_ARG" ]]; then
       continue
     fi
-    PR_MATCHES="${PR_MATCHES}${pr_number}"$'\t'"${pr_id}"$'\n'
+    PR_MATCHES="${PR_MATCHES}${pr_number}"$'\t'"${pr_id}"$'\t'"${pr_head}"$'\n'
   done <<EOF
 $PR_ROWS
 EOF
@@ -293,6 +306,28 @@ EOF
     fi
     info "closing PR #$PR_NUMBER to release the PR-body claim"
     gh pr close "$PR_NUMBER" --repo "$PR_REPO" >/dev/null
+    PR_CLAIM_ID=$(printf '%s\n' "$PR_MATCHES" | cut -f2)
+    PR_HEAD_BRANCH=$(printf '%s\n' "$PR_MATCHES" | cut -f3)
+    if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
+      PR_WORKTREE=$(pr_wt_dir_for "$PR_CLAIM_ID")
+      if [[ -d "$PR_WORKTREE" ]]; then
+        if pr_worktree_registered "$PR_WORKTREE"; then
+          git worktree remove --force "$PR_WORKTREE" 2>/dev/null || {
+            warn "worktree removal failed for $PR_WORKTREE"
+            exit 1
+          }
+        else
+          rm -rf "$PR_WORKTREE"
+        fi
+      fi
+      git worktree prune 2>/dev/null || true
+    fi
+    if [[ "$KEEP_BRANCH" -eq 0 ]]; then
+      [[ "$PR_HEAD_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] ||
+        die "owning PR #$PR_NUMBER has an unsafe head branch"
+      git branch -D "$PR_HEAD_BRANCH" 2>/dev/null || true
+      git push origin --delete "$PR_HEAD_BRANCH" 2>/dev/null || true
+    fi
     if [[ "$KEEP_LABEL" -eq 0 ]]; then
       gh issue edit "$ISSUE" --repo "$PR_REPO" --remove-label agent-claimed >/dev/null 2>&1 || true
     fi
@@ -624,8 +659,6 @@ fi
 if [[ -z "$TARGET_IDS" ]]; then
   info "no live claim for issue $ISSUE — will still try label/worktree cleanup"
 fi
-
-WT_PARENT="$(cd "$CANONICAL/.." && pwd)"
 
 # Worktree/branch per released claim id, derived from the id rather than
 # assumed, so namespaced ids (issue-template-5-x) resolve correctly (L-037).
