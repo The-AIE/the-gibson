@@ -24,6 +24,7 @@ prints Ask-Contract style help via `--help` (what / why / risks / examples).
 | [`git-configure.sh`](git-configure.sh) `[--audit\|--apply]` | Audit (default) or safely apply Git/GitHub adoption settings (labels, merge methods, gibson/ gitignore). Never applies branch protection. |
 | [`preview-url.sh`](preview-url.sh) `<pr>` | Resolve PR Vercel preview URL from GitHub deployments. |
 | [`injection-scan.sh`](injection-scan.sh) `[paths…] [--all]` | Invisible/deceptive Unicode (zero-width, bidi overrides, BOM, soft hyphen) in anything a model ingests — skills, prompts, recipes, shared config. Red-team Phase 2; exit 1 on a hit. The Pale Fire class: invisible in a diff, fully tokenized by the LLM. |
+| [`recipe-stamp.sh`](recipe-stamp.sh) `--role … --recipe PATH` | Append a Goose recipe-run audit row to `memory/recipe-runs.md` (role, schema, playbook-sha256 pin, issue). No secrets or home paths. |
 | [`decision-ledger.sh`](decision-ledger.sh) | Offline owner decision-card ledger (append-only JSONL). |
 | [`digest.sh`](digest.sh) | Render morning digest from ledger + loop/PR signals (Hermes-ready markdown). |
 | [`preview-url.sh`](preview-url.sh) `<pr> [--bypass] [--probe]` | Resolve PR Vercel preview URL from GitHub deployments — only from a **success** status, so a building deployment never gets graded. `--bypass` uses `VERCEL_AUTOMATION_BYPASS_SECRET` for protected previews; `--probe` turns a 401/403 into a loud error instead of a URL. Default timeout 300s under `CI`. |
