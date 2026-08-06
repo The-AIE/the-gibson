@@ -113,6 +113,7 @@ new_repo "$ROOT/a"
 out=$(cd "$ROOT/a/canon" && "$CLAIM" 42 password-reset 'app/api/auth/**' 2>&1); rc=$?
 check "claim succeeds" "$rc" "0"
 files=$(cd "$ROOT/a/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+lacks "does not write a ledger claim file under docs/claims" "$files" "issue-42"
 contains "creates a PR-body claim" "$(cat "$GH_PR_FILE")" "issue-42-password-reset"
 body=$(cat "$GH_PR_FILE")
 contains "records the scope"   "$body" "app/api/auth/**"
