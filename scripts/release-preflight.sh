@@ -13,7 +13,9 @@ WHAT IT DOES
 
     1. Close keywords. GitHub's linker does not parse negation, so a partial
        ship whose body says "does not fully resolve #28" still closes #28.
-       Reads closingIssuesReferences (what GitHub will actually do), not prose.
+       Detects partial via --partial, a body partial marker, or Related-only
+       body; hard-fails on closingIssuesReferences OR a fix/close/resolve(#N)
+       title (L-013 / L-025).
     2. Review. Reviews and comments form one normalized timestamped stream
        (newest wins, source type does not reorder). Formal review states
        (APPROVED / CHANGES_REQUESTED) are modeled as events when usable and
@@ -58,7 +60,8 @@ USAGE
 
   <pr>         pull request number
   --repo       defaults to the current repo (gh)
-  --partial    this PR ships a slice: it MUST NOT close its issue (L-013)
+  --partial    this PR ships a slice: it MUST NOT close its issue (L-013).
+               Also auto-detected from Related-only body or a partial marker.
   --launched   post-launch posture: no admin path on any red, ever (L-033)
   --json       machine-readable verdict for a driver
 
@@ -111,7 +114,7 @@ fi
 [[ -n "$REPO" ]] || die "could not resolve repo — pass --repo owner/name"
 
 PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
-  --json number,title,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
+  --json number,title,body,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
   die "could not read $REPO#$PR"
 
 jqr() { echo "$PR_JSON" | jq -r "$1"; }
@@ -129,10 +132,50 @@ BLOCKERS=()
 ADMIN_REASONS=()
 NOTES=()
 
-# --- 1. close keywords (L-013) -------------------------------------------
-if [[ "$PARTIAL" -eq 1 && -n "$CLOSES" ]]; then
-  BLOCKERS+=("L-013: --partial, but GitHub will close $CLOSES on merge. Prose like \"does not fully resolve #N\" does not stop the linker — remove the keyword from the squash subject/body and unlink it in the Development sidebar, then re-run.")
-elif [[ "$PARTIAL" -eq 0 && -z "$CLOSES" ]]; then
+# --- 1. close keywords (L-013 / L-025) ------------------------------------
+# Partial ships must not auto-close issues. Sources of "this is a partial":
+#   - explicit --partial flag
+#   - body marker: "partial ship", "[partial]", "partial:" (case-insensitive)
+#   - Related-only body: has Related: #N (or Related #N) and no Closes/Fixes/Resolves
+# Close evidence that hard-fails a partial:
+#   - closingIssuesReferences non-empty (what GitHub will actually do)
+#   - title matches Fix/Close/Resolve(#N) even when the Development sidebar
+#     has not linked yet (L-025 — agents default to fix(#N): titles)
+TITLE=$(jqr '.title // ""')
+BODY=$(jqr '.body // ""')
+
+title_has_close_kw=0
+if printf '%s' "$TITLE" | grep -Eiq \
+  '(^|[^A-Za-z])(fix|close|resolve|closes|fixes|resolves)[[:space:]]*\(?#[[:digit:]]+'; then
+  title_has_close_kw=1
+fi
+
+auto_partial=0
+if [[ "$PARTIAL" -eq 1 ]]; then
+  auto_partial=1
+elif printf '%s' "$BODY" | grep -Eiq \
+  '(^|[[:space:][:punct:]])(\[partial\]|partial[[:space:]]+ship|partial:)'; then
+  auto_partial=1
+else
+  # Related-only: Related #N present, no closing keyword for any issue.
+  if printf '%s' "$BODY" | grep -Eiq \
+    '(^|[[:space:]])related:[[:space:]]*#?[[:digit:]]+|(^|[[:space:]])related[[:space:]]+#[[:digit:]]+'; then
+    if ! printf '%s' "$BODY" | grep -Eiq \
+      '(^|[[:space:]])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*\(?#[[:digit:]]+'; then
+      auto_partial=1
+    fi
+  fi
+fi
+
+if [[ "$auto_partial" -eq 1 ]]; then
+  if [[ -n "$CLOSES" ]]; then
+    BLOCKERS+=("L-013: partial ship, but GitHub will close $CLOSES on merge. Retitle to feat(scope): … (related #N), remove close keywords from the squash subject/body, and unlink the issue in the Development sidebar, then re-run.")
+  elif [[ "$title_has_close_kw" -eq 1 ]]; then
+    BLOCKERS+=("L-025: partial ship title still has a close keyword ($TITLE). GitHub's linker ignores negations — retitle to feat(scope): … (related #N) with no fix/close/resolve near #N, then re-run.")
+  else
+    NOTES+=("partial ship — will not close an issue on merge")
+  fi
+elif [[ -z "$CLOSES" ]]; then
   NOTES+=("no issue will be closed by this merge — intended only if the issue has further slices")
 else
   NOTES+=("closes ${CLOSES:-(nothing)} on merge")

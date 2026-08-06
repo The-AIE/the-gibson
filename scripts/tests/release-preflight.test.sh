@@ -45,6 +45,7 @@ fixture() {
   jq "$@" > "$f" <<'BASE'
 {
   "number": 1, "title": "feat: thing", "isDraft": false, "mergeable": "MERGEABLE",
+  "body": "Closes #28",
   "author": {"login": "builder-bot"}, "reviewDecision": "APPROVED",
   "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "labels": [{"name": "tier-b"}], "closingIssuesReferences": [{"number": 28}],
@@ -69,10 +70,29 @@ echo "L-013 · a partial ship that still closes its issue is BLOCKED"
 out=$(run "$f" --partial); rc=$?
 check "exit 1" "$rc" "1"
 contains "names the issue GitHub will close" "$out" "close #28"
-contains "explains the linker" "$out" "does not stop the linker"
-f_open=$(fixture nonclosing '.closingIssuesReferences = []')
+contains "remediation mentions retitle" "$out" "Retitle"
+f_open=$(fixture nonclosing '.closingIssuesReferences = [] | .body = "Related: #28 — slice one" | .title = "feat: slice (related #28)"')
 out=$(run "$f_open" --partial); rc=$?
 check "partial that closes nothing is READY" "$rc" "0"
+
+echo "L-013/L-025 · Related-only body + fix(#N) title auto-detected without --partial"
+f_rel=$(fixture related_fix '.title = "fix(#28): slice one" | .body = "Related: #28\n\nShips the first slice only." | .closingIssuesReferences = [{"number": 28}]')
+out=$(run "$f_rel"); rc=$?
+check "Related-only + close refs exits 1 without --partial" "$rc" "1"
+contains "names close target" "$out" "close #28"
+
+echo "L-025 · Related-only + fix title, no closingIssuesReferences yet"
+f_title=$(fixture related_title_only '.title = "fix(#28): slice one" | .body = "Related: #28" | .closingIssuesReferences = []')
+out=$(run "$f_title"); rc=$?
+check "title close keyword alone blocks partial" "$rc" "1"
+contains "cites L-025" "$out" "L-025"
+contains "mentions retitle" "$out" "retitle"
+
+echo "L-013 · genuine Closes #N full ship passes untouched"
+f_full=$(fixture full_close '.title = "fix(#28): done" | .body = "Closes #28" | .closingIssuesReferences = [{"number": 28}]')
+out=$(run "$f_full"); rc=$?
+check "full-close PR is READY" "$rc" "0"
+contains "verdict READY" "$out" "READY"
 
 echo "L-015 · same-author VERDICT: APPROVE is not a formal review"
 f_same=$(fixture same_author '.reviewDecision = "" |
