@@ -291,3 +291,11 @@ with every "am I done?" answered by a sensor instead of the model's own opinion.
 
 ---
 [← 10 · Any AI, same rules](10-vendor-adapters.md) · [Home](../index.md) · [12 · Shipping to Vercel safely →](12-vercel.md)
+
+## Owner digest (issue #72)
+
+`scripts/digest.sh` renders a morning digest from the offline decision ledger
+(`scripts/decision-ledger.sh`) plus loop/PR signals. Delivery is via `DIGEST_CMD`
+(Hermes when present) — same env-hook pattern as `HERMES_CMD`. The loop remains
+correct without delivery; gated work is visible once the channel is wired.
+

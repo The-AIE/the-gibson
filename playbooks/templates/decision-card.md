@@ -14,10 +14,36 @@ IF YOU WAIT: {{what_happens_if_silent — always safe; other work continues}}
 REPLY:       "yes" / "no" / any question you have.
 ```
 
-## How to use this
+## Offline ledger (stable id — not a delivery channel)
+
+Pending owner decisions may be recorded offline with
+`scripts/decision-ledger.sh` (schema `decision-ledger:v1`). Each event gets a
+**stable full-strength id** from the identity tuple (repo, gate G1–G16, source
+type, source id, exact 40-hex source SHA). The local ledger and id are **offline
+artifacts for draft/queue/render only** — they are not a delivery channel, not
+merge authorization, and not answer ingestion.
+
+- **One decision per card.** Never batch multiple approvals on one card.
+- **PENDING only.** The ledger never records approval, denial, choice selection,
+  or merge authorization.
+- **Unanswered cards** never auto-approve and never block unrelated work.
+- **Delivery + ingest remain owner-gated** (issue #72): channel, recipient,
+  credentials, cadence, authorized responder, retention, replay protection, and a
+  live canary are Mark's decisions. Do not treat a rendered card as delivered.
 
 ```bash
-# Hermes / agent: fill and send as a single message. Never batch multiple cards.
+# Record a PENDING decision locally (runtime ledger under gibson/ by default):
+scripts/decision-ledger.sh add --repo owner/name --gate G12 \
+  --source-type pr --source-id 123 --source-sha <40-hex> \
+  --what "..." --why-you "..." --risk-level medium \
+  --risk-consequence "..." --risk-undo "..." \
+  --recommend Approve --recommend-rationale "..." \
+  --if-you-wait "..." --source-ref "PR #123"
+
+# Render a local digest (no send, no ingest):
+scripts/digest.sh --ledger gibson/decision-ledger.jsonl
+
+# Fill and (later, when channel is chosen) send as a single message. Never batch.
 cat playbooks/templates/decision-card.md
 ```
 
