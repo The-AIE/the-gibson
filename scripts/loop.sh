@@ -209,6 +209,15 @@ fi
 
 
 # L-008 / issue #63: stateless progress sensor (silent_noop_progressed).
+  # Cost meter (#74): record wall time when GIBSON_COST_LEDGER is set
+  if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
+    _cl_wall="${ITERATION_WALL_MS:-0}"
+    if [[ -z "${ITERATION_WALL_MS:-}" && -n "${ITERATION_STARTED_AT:-}" ]]; then
+      _cl_now=$(date -u +%s 2>/dev/null || echo 0)
+      _cl_wall=$(( (_cl_now - ITERATION_STARTED_AT) * 1000 ))
+    fi
+    cost_ledger_record_iteration "${_cl_wall}" "${next_hat:-loop-step}"
+  fi
 # shellcheck source=silent-noop.sh
 # Prefer $GIBSON/scripts so a test copy of this driver under a fake scripts/
 # dir still loads the real sensor (same pattern as validate-loop-state.sh).
@@ -219,6 +228,28 @@ if [[ -f "$GIBSON/scripts/silent-noop.sh" ]]; then
 elif [[ -f "$SCRIPT_DIR/silent-noop.sh" ]]; then
   # shellcheck disable=SC1090,SC1091
   source "$SCRIPT_DIR/silent-noop.sh"
+
+# Cost telemetry (#74 / L-003). Opt-in via GIBSON_COST_LEDGER path. Never invents
+# zeros for missing token/ACU signals — append only what the driver measured.
+cost_ledger_record_iteration() {
+  local wall_ms="${1:-0}" hat="${2:-loop-step}" 
+  local ledger="${GIBSON_COST_LEDGER:-}"
+  [[ -n "$ledger" ]] || return 0
+  [[ -x "$SCRIPT_DIR/cost-ledger.sh" || -f "$SCRIPT_DIR/cost-ledger.sh" ]] || return 0
+  local pool="${GIBSON_COST_POOL:-unknown}"
+  local tokens_args=() acus_args=() flat_args=()
+  if [[ -n "${GIBSON_COST_TOKENS:-}" ]]; then
+    tokens_args=(--tokens "$GIBSON_COST_TOKENS")
+  fi
+  if [[ -n "${GIBSON_COST_ACUS:-}" ]]; then
+    acus_args=(--acus "$GIBSON_COST_ACUS")
+  fi
+  if [[ -n "${GIBSON_COST_FLAT_RATE:-}" ]]; then
+    flat_args=(--flat-rate "$GIBSON_COST_FLAT_RATE")
+  fi
+  "$SCRIPT_DIR/cost-ledger.sh" append     --ledger "$ledger"     --runner "${RUNNER:-unknown}"     --pool "$pool"     --hat "$hat"     --wall-ms "$wall_ms"     ${ISSUE:+--issue "$ISSUE"}     ${PR_NUMBER:+--pr "$PR_NUMBER"}     ${ITERATION:+--iteration "$ITERATION"}     ${REPO_SLUG:+--repo "$REPO_SLUG"}     "${tokens_args[@]}" "${acus_args[@]}" "${flat_args[@]}"     >/dev/null 2>&1 || true
+}
+
 else
   die "missing silent-noop.sh (looked in $GIBSON/scripts and $SCRIPT_DIR)"
 fi
