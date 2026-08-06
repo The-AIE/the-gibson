@@ -209,15 +209,6 @@ fi
 
 
 # L-008 / issue #63: stateless progress sensor (silent_noop_progressed).
-  # Cost meter (#74): record wall time when GIBSON_COST_LEDGER is set
-  if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
-    _cl_wall="${ITERATION_WALL_MS:-0}"
-    if [[ -z "${ITERATION_WALL_MS:-}" && -n "${ITERATION_STARTED_AT:-}" ]]; then
-      _cl_now=$(date -u +%s 2>/dev/null || echo 0)
-      _cl_wall=$(( (_cl_now - ITERATION_STARTED_AT) * 1000 ))
-    fi
-    cost_ledger_record_iteration "${_cl_wall}" "${next_hat:-loop-step}"
-  fi
 # shellcheck source=silent-noop.sh
 # Prefer $GIBSON/scripts so a test copy of this driver under a fake scripts/
 # dir still loads the real sensor (same pattern as validate-loop-state.sh).
@@ -228,11 +219,19 @@ if [[ -f "$GIBSON/scripts/silent-noop.sh" ]]; then
 elif [[ -f "$SCRIPT_DIR/silent-noop.sh" ]]; then
   # shellcheck disable=SC1090,SC1091
   source "$SCRIPT_DIR/silent-noop.sh"
+else
+  die "missing silent-noop.sh (looked in $GIBSON/scripts and $SCRIPT_DIR)"
+fi
+if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
+  die "silent-noop.sh did not define silent_noop_progressed"
+fi
 
 # Cost telemetry (#74 / L-003). Opt-in via GIBSON_COST_LEDGER path. Never invents
 # zeros for missing token/ACU signals — append only what the driver measured.
+# Defined at top level (not inside the silent-noop if/elif) so the normal
+# $GIBSON/scripts path still registers the function.
 cost_ledger_record_iteration() {
-  local wall_ms="${1:-0}" hat="${2:-loop-step}" 
+  local wall_ms="${1:-0}" hat="${2:-loop-step}"
   local ledger="${GIBSON_COST_LEDGER:-}"
   [[ -n "$ledger" ]] || return 0
   [[ -x "$SCRIPT_DIR/cost-ledger.sh" || -f "$SCRIPT_DIR/cost-ledger.sh" ]] || return 0
@@ -249,13 +248,6 @@ cost_ledger_record_iteration() {
   fi
   "$SCRIPT_DIR/cost-ledger.sh" append     --ledger "$ledger"     --runner "${RUNNER:-unknown}"     --pool "$pool"     --hat "$hat"     --wall-ms "$wall_ms"     ${ISSUE:+--issue "$ISSUE"}     ${PR_NUMBER:+--pr "$PR_NUMBER"}     ${ITERATION:+--iteration "$ITERATION"}     ${REPO_SLUG:+--repo "$REPO_SLUG"}     "${tokens_args[@]}" "${acus_args[@]}" "${flat_args[@]}"     >/dev/null 2>&1 || true
 }
-
-else
-  die "missing silent-noop.sh (looked in $GIBSON/scripts and $SCRIPT_DIR)"
-fi
-if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
-  die "silent-noop.sh did not define silent_noop_progressed"
-fi
 
 # Resolve --stale-budget: omitted means exactly the (possibly custom) error-budget.
 if [[ "$STALE_BUDGET_SET" -eq 0 ]]; then
@@ -2437,6 +2429,24 @@ while true; do
         set -e
         clear_repo_boundary_guard
         rm -f "$PROMPT_FILE"
+
+        # Cost meter (#74): record wall time after every real runner invocation.
+        # Uses iteration_start (strict UTC) when wall ms are not pre-set.
+        if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
+          _cl_wall="${ITERATION_WALL_MS:-0}"
+          if [[ -z "${ITERATION_WALL_MS:-}" && -n "${iteration_start:-}" ]]; then
+            _cl_now=$(date -u +%s 2>/dev/null || echo 0)
+            # iteration_start is ISO-8601; best-effort epoch via date -d when available
+            if _cl_start_epoch=$(date -u -d "$iteration_start" +%s 2>/dev/null); then
+              _cl_wall=$(( (_cl_now - _cl_start_epoch) * 1000 ))
+            elif _cl_start_epoch=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iteration_start" +%s 2>/dev/null); then
+              _cl_wall=$(( (_cl_now - _cl_start_epoch) * 1000 ))
+            fi
+            # clamp negative (clock skew) to 0
+            [[ "$_cl_wall" -lt 0 ]] && _cl_wall=0
+          fi
+          cost_ledger_record_iteration "${_cl_wall}" "${hat:-loop-step}"
+        fi
 
         if ! guard_control_plane_clean; then
           journal_normal_completion=0
