@@ -1996,15 +1996,19 @@ escalate() {
   if [[ -z "$base_sha" ]]; then
     info "escalation review skipped — no base branch resolved, and a guessed base reviews the wrong diff"
     note="Escalation review skipped: the target repo's base branch could not be resolved (Law 8)."
-  elif "$SCRIPT_DIR/second-opinion.sh" \
-      --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" --base "$base_sha" \
-      --gate-status "red: $failures consecutive runner failures" --out "$out" \
-      $([ "$SOLO_PLATFORM" -eq 1 ] && echo --solo-platform) >/dev/null 2>&1; then
-    info "second opinion written to $out (base $base @ $base_sha)"
-    note="Second opinion against \`$base\` @ \`$base_sha\` written to gibson/second-opinion.md — next hat must read it."
   else
-    info "second opinion failed (non-fatal) — continuing"
-    note="No reviewer completed — see gibson/second-opinion.md for the raw attempts (Law 8)."
+    local esc_extra=()
+    [[ "$SOLO_PLATFORM" -eq 1 ]] && esc_extra+=(--solo-platform)
+    if "$SCRIPT_DIR/second-opinion.sh" \
+        --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" --base "$base_sha" \
+        --gate-status "red: $failures consecutive runner failures" --out "$out" \
+        "${esc_extra[@]}" >/dev/null 2>&1; then
+      info "second opinion written to $out (base $base @ $base_sha)"
+      note="Second opinion against \`$base\` @ \`$base_sha\` written to gibson/second-opinion.md — next hat must read it."
+    else
+      info "second opinion failed (non-fatal) — continuing"
+      note="No reviewer completed — see gibson/second-opinion.md for the raw attempts (Law 8)."
+    fi
   fi
   {
     echo ""
@@ -2130,16 +2134,16 @@ ensure_cross_vendor_review() {
     block "no reviewers configured: --reviewers is empty, so there is no reviewer to run and nobody may approve $branch @ $sha (Law 5). Re-run with --reviewers, or --solo-platform for single-vendor mode (#69)."
     return 1
   fi
-  local distinct=0 name vendor model
+  local distinct=0 name vendor
   local names=()
   IFS=',' read -ra names <<< "$REVIEWERS"
   for name in "${names[@]}"; do
     name=$(echo "$name" | tr -d '[:space:]')
     [[ -n "$name" ]] || continue
     if [[ "$name" == *:* ]]; then
-      vendor="${name%%:*}"; model="${name#*:}"
+      vendor="${name%%:*}"
     else
-      vendor="$name"; model=""
+      vendor="$name"
     fi
     if [[ "$vendor" != "$RUNNER" ]]; then
       distinct=1
