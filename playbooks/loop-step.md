@@ -8,6 +8,8 @@ inputs:
   - "{{gibson_path}} — absolute path to the Gibson clone (doctrine, playbooks, memory)"
   - "{{repo_path}} — absolute path to the target repo (your cwd)"
   - optional REVIEWER_CMD for cross-vendor review shell-out
+  - optional RELEASE_CMD for cross-vendor merge shell-out (Bash+gh capable;
+    Claude: bypassPermissions, not acceptEdits — L-048)
 outputs:
   - hat-specific artifacts (PR, tests, verdict, eval, merge, lesson)
   - updated gibson/loop-state.md (next hat / next action / round count)
@@ -156,7 +158,15 @@ touch /path/to/target/gibson/HALT
 - Entry: all gates green.
 - If human-gated (Tier C/schema): queue for Mark, set next issue triage, **do not
   merge**.
+- If `RELEASE_CMD` is set: shell out to it for the actual merge, passing the PR
+  number and repo path — the runner that built and/or reviewed this PR must not
+  also be the one that merges it when a distinct release identity is configured.
+  `RELEASE_CMD` must allow Bash + `gh` (Claude: use `bypassPermissions`, not
+  `acceptEdits` — L-048). Read the shelled-out agent's result before trusting it
+  merged; verify with `gh pr view <N> --json state,mergedAt` afterward. Fall
+  through to a direct merge only if `RELEASE_CMD` is unset.
 - Else: merge → verify deploy → smoke → `release-claim.sh` cleanup.
+  Docs-only ships: content smoke on `origin/main` tokens, not Vercel READY (L-049).
 - Set next: `historian`.
 
 ### If `{{hat}}` = historian

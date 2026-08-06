@@ -11,6 +11,14 @@
 #   scripts/tests/claim-reaper.test.sh
 set -uo pipefail
 
+# Hermetic git identity (#101): suites that commit must not read ambient global
+# user.name/email. Pass with HOME pointed at an empty directory.
+export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-gibson-sensor}"
+export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-sensor@gibson.invalid}"
+export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
+export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
+
+
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REAPER="$SCRIPT_DIR/../claim-reaper.sh"
 RC="$SCRIPT_DIR/../release-claim.sh"

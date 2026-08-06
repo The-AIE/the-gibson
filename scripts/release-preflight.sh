@@ -238,8 +238,8 @@ MALFORMED_EVIDENCE=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS
   # Format without author login: prior sensors assert discarded events are not
   # "selected" by requiring their login never appear in the verdict text.
   # Authorless is called out; otherwise kind + label + stamp identify the item.
-  def fmt($kind; $label; $who; $at):
-    (if $who == "" then "\( $label ) (authorless)" else $label end) as $lab |
+  def fmt($kind; $lab_name; $who; $at):
+    (if $who == "" then "\( $lab_name ) (authorless)" else $lab_name end) as $lab |
     [$kind, $lab, ($at // "null" | tostring)] | join(" ");
   [
     # Formal state that is relevant but unusable (bad time / authorless APPROVE).
@@ -274,7 +274,7 @@ MALFORMED_EVIDENCE=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS
       ) |
       fmt("comment"; $v; login_of; .createdAt)
     )
-  ] | if length == 0 then empty else join("; ") end')
+  ] | if length == 0 then empty else join("; ") end') || die "jq failed extracting malformed review evidence (fail closed)"
 
 VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
   def body_verdict:
@@ -331,7 +331,7 @@ VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
       [.login, .verdict, .source, .at, .sha] | @tsv
     else
       empty
-    end')
+    end') || die "jq failed extracting verdict event stream (fail closed)"
 
 VERDICT_LOGIN=""
 VERDICT_TEXT=""

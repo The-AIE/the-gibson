@@ -17,6 +17,14 @@
 #   validation success. The offline checks below remain the required gate.
 set -uo pipefail
 
+# Hermetic git identity (#101): suites that commit must not read ambient global
+# user.name/email. Pass with HOME pointed at an empty directory.
+export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-gibson-sensor}"
+export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-sensor@gibson.invalid}"
+export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
+export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
+
+
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 RECIPES_DIR="$REPO_ROOT/playbooks/recipes"
@@ -4945,8 +4953,10 @@ if command -v goose >/dev/null 2>&1; then
     GOOSE_VALIDATE_STATUS="RAN (fail)"
   fi
 else
-  echo "  note — goose binary absent: official recipe validate NOT RUN (not counted as success)"
-  ok "goose absence reported as NOT RUN (offline sensor remains the gate)"
+  # Law 8 / #95: optional external validate absent is NOT a pass. Offline
+  # structural checks above remain the required gate; this line must not look
+  # like a green validate in greps of "ok —" alone.
+  echo "  skip — goose binary absent: official recipe validate NOT RUN (offline structural sensors remain the gate)"
   GOOSE_VALIDATE_STATUS="NOT RUN"
 fi
 
@@ -4960,6 +4970,8 @@ else
 fi
 
 echo
-echo "goose-recipes.test.sh: $PASS passed, $FAIL failed"
+# Tally line includes optional-validate disposition so run-all / greps cannot
+# treat "exit 0 + N passed" as "goose validated" when status is NOT RUN (#95).
+echo "goose-recipes.test.sh: $PASS passed, $FAIL failed, goose-validate: $GOOSE_VALIDATE_STATUS"
 echo "goose recipe validate status: $GOOSE_VALIDATE_STATUS"
 [[ "$FAIL" -eq 0 ]]
