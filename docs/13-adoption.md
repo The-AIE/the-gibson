@@ -24,6 +24,12 @@ unexplained approvals, regardless of how technical the user seems.
 
 ## Step 1 — Harnessability audit (read-only)
 
+Required sensor: `scripts/git-configure.sh --audit --repo owner/name --path <checkout>`
+(issue #68). Reports live Git/GitHub/Vercel wiring vs Gibson contract. `--apply`
+only mutates reversible settings (labels, `.gitignore` gibson/ state, squash +
+delete-branch-on-merge). Protection / production-branch / DCO remain owner gates.
+
+
 Score the repo's ambient affordances before promising autonomy:
 
 - [ ] Typed language / strict mode on

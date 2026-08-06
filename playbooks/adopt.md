@@ -60,6 +60,24 @@ Runtimes: grok, claude-code
 
 ## Step 1 — Harnessability audit (read-only)
 
+### Git/GitHub wiring (required)
+
+Run the configurator **before** claiming the repo is adopted. It senses live settings
+(not prose) — L-004 class:
+
+```bash
+<path-to-gibson>/scripts/git-configure.sh --audit --repo owner/name --path /path/to/checkout
+# fix safe drift when ready:
+<path-to-gibson>/scripts/git-configure.sh --dry-run --repo owner/name --path /path/to/checkout
+<path-to-gibson>/scripts/git-configure.sh --apply  --repo owner/name --path /path/to/checkout
+```
+
+Hard-stop adoption on unresolved FAILs (missing labels, wrong merge methods,
+gitignore without `gibson/` runtime state, required-check name drift, Vercel
+production-branch contradiction). Branch protection changes are owner-only
+(printed remediation; never auto-applied).
+
+
 Score ambient affordances **before** promising autonomy. Output
 `reports/adoption-<repo>-<date>.md`.
 
