@@ -9,7 +9,8 @@
     "secrets",
     "dependencies",
     "build-e2e-required",
-    "review-evidence"
+    "review-evidence",
+    "test-integrity"
   ],
   "productionEnvironment": "Production",
   "reviewerLogin": "mrhinkle"
