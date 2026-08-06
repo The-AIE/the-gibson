@@ -71,10 +71,8 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --repo) REPO="$2"; shift 2 ;;
     --reviewers) REVIEWERS="$2"; shift 2 ;;
-PR_NUMBER=""
-REPO_SLUG=""
     --pr) PR_NUMBER="$2"; shift 2 ;;
-    --repo) REPO_SLUG="$2"; shift 2 ;;
+    --github-repo) REPO_SLUG="$2"; shift 2 ;;
     --author) AUTHOR="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
