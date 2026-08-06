@@ -45,7 +45,9 @@ unhealthy, **do not merge** — harden or escalate ([docs/23](../docs/23-deliver
 ```bash
 # Pre-merge verdict (read-only) — run this first; it decides the three calls
 # that used to be re-diagnosed by hand on every PR (L-013, L-015/L-021, L-033)
-<path-to-gibson>/scripts/release-preflight.sh 123            # add --partial for a slice
+<path-to-gibson>/scripts/release-preflight.sh 123
+# Required pre-merge: hard-fails partial ships that would still close #N (L-013/L-025).
+# Partial is auto-detected from Related-only body or a partial marker; or pass --partial.
 # exit 0 READY · 1 BLOCKED · 4 ADMIN-CANDIDATE (pre-launch operator decision)
 
 # Pre-merge checklist (read-only)
