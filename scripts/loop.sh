@@ -584,11 +584,12 @@ halt_lock_field() {
   return 1
 }
 
-# Inode of a path (BSD stat first, GNU fallback). Empty/fail => return 1.
+# Inode of a path (GNU first, BSD fallback). Empty/fail => return 1.
+# L-050 / #99: never probe `stat -f` first on a dual-meaning flag.
 halt_lock_inode() {
   local f="$1" ino
   [[ -e "$f" ]] || return 1
-  ino=$(stat -f %i "$f" 2>/dev/null) || ino=$(stat -c %i "$f" 2>/dev/null) || return 1
+  ino=$(stat -c %i -- "$f" 2>/dev/null || stat -f %i -- "$f" 2>/dev/null) || return 1
   [[ -n "$ino" ]] || return 1
   printf '%s' "$ino"
 }
