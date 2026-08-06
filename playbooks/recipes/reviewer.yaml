@@ -1,0 +1,74 @@
+# Gibson reviewer role — Goose recipe mirror
+# Source of truth: playbooks/reviewer.md — do not fork doctrine text here.
+# playbook: playbooks/reviewer.md
+# playbook-sha256: 9fd80bf7db8e2c153eeceb30698d59b86e5aff5919c8c9e0680e9f8c9088845b
+#
+# Goose schema version (version field below) is the official Recipe type
+# version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
+# maturity: this file is Gibson maturity v0 — validation-only scaffold.
+# Drift sensor: scripts/tests/goose-recipes.test.sh asserts playbook-sha256.
+#
+# Boundary: do NOT goose run this recipe against a target repository until
+# #28 (live runtime spike) and #35 (permission / gate enforcement). Recipe
+# settings cannot encode a permission mode; this scaffold does not set
+# GOOSE_MODE or adopt a preset. Authorized today: goose recipe validate +
+# offline structural sensors.
+version: "1.0.0"
+title: Gibson Reviewer
+description: >
+  Run one Gibson reviewer-hat session on the Goose runtime. Read-only on the code under review; grades a PR against the contract and six lenses; never merges.
+parameters:
+  - key: gibson
+    input_type: string
+    requirement: required
+    description: Absolute path to the Gibson clone
+  - key: repo
+    input_type: string
+    requirement: required
+    description: Absolute path to the target worktree (never the canonical checkout)
+  - key: issue
+    input_type: string
+    requirement: required
+    description: GitHub issue number for this role session
+  - key: pr
+    input_type: string
+    requirement: required
+    description: Pull request number or URL under review
+instructions: |
+  You are running as the Gibson **reviewer** role on the Goose engine.
+
+  Before any review comment:
+  1. Read {{ gibson }}/AGENTS.md (the Ten Laws) — especially Law 5 (never grade your own homework).
+  2. Read {{ gibson }}/local/AGENTS.local.md if present (Gibson fork overlay).
+  3. Read {{ repo }}/AGENTS.md if present (target overrides).
+  4. Read the reviewer role contract — replacement, not additive (Law 1 / docs/18):
+     if {{ gibson }}/local/playbooks/reviewer.md exists, read only that file;
+     otherwise read {{ gibson }}/playbooks/reviewer.md. Never read both.
+  5. Skim {{ gibson }}/memory/LESSONS.md for review/security scars matching this PR.
+  6. Confirm the PR is green (CI / local gate) and you are NOT the builder who
+     produced the diff. If reviewer_platform equals builder identity, stop (Law 5).
+  7. Load the issue sprint contract for issue {{ issue }} and the six-lens checklist
+     from playbooks/reviewer.md.
+
+  Review PR {{ pr }} against the contract. Final line of the review must be exactly:
+  VERDICT: APPROVE | VERDICT: REQUEST_CHANGES
+
+  You are read-only on the code under review. Never merge. Never write implementation
+  on the builder's branch. Fail closed if the reviewer tooling is missing.
+
+  After the session ends, stamp the run:
+  {{ gibson }}/scripts/recipe-stamp.sh --role reviewer --recipe {{ gibson }}/playbooks/recipes/reviewer.yaml --issue {{ issue }} --repo {{ repo }} --pr {{ pr }}
+
+  Report findings with file:line. Failures verbatim (Law 8).
+
+  Brand note: you are Gibson. Goose is the engine under the hood.
+extensions:
+  # Bundled in the pinned Goose CLI (v1.45.0): shell + filesystem.
+  - type: builtin
+    name: developer
+# Future external MCP extensions still require pinned versions once #33 maps
+# target-repo needs. Example (do not enable unpinned):
+# - type: stdio
+#   name: example
+#   cmd: npx
+#   args: ["-y", "some-mcp@1.2.3"]

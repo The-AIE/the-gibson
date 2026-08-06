@@ -32,6 +32,10 @@ FINDINGS_TEMPLATE="$REPO_ROOT/playbooks/red-team/findings/TEMPLATE.md"
 RED_TEAM_RECIPE="$RECIPES_DIR/red-team.yaml"
 TOOLCHAIN_LOCK="$RECIPES_DIR/red-team.toolchain.json"
 BUILDER_RECIPE="$RECIPES_DIR/builder.yaml"
+REVIEWER_RECIPE="$RECIPES_DIR/reviewer.yaml"
+SECURITY_RECIPE="$RECIPES_DIR/security.yaml"
+# Core role mirrors (#34) — prose playbook is source of truth; recipe pins its sha256.
+ROLE_RECIPES=(builder reviewer security)
 
 PASS=0
 FAIL=0
@@ -2321,6 +2325,16 @@ if [[ -f "$BUILDER_RECIPE" ]]; then
 else
   bad "builder.yaml missing"
 fi
+if [[ -f "$REVIEWER_RECIPE" ]]; then
+  ok "reviewer.yaml present"
+else
+  bad "reviewer.yaml missing"
+fi
+if [[ -f "$SECURITY_RECIPE" ]]; then
+  ok "security.yaml present"
+else
+  bad "security.yaml missing"
+fi
 if [[ -f "$RED_TEAM_RECIPE" ]]; then
   ok "red-team.yaml present"
 else
@@ -2340,10 +2354,10 @@ for f in "$RECIPES_DIR"/*.yaml "$RECIPES_DIR"/*.yml; do
   RECIPE_FILES+=("$f")
 done
 
-if [[ "${#RECIPE_FILES[@]}" -ge 2 ]]; then
+if [[ "${#RECIPE_FILES[@]}" -ge 4 ]]; then
   ok "discovered ${#RECIPE_FILES[@]} recipe yaml/yml files"
 else
-  bad "expected >=2 recipe files, found ${#RECIPE_FILES[@]}"
+  bad "expected >=4 recipe files (builder/reviewer/security/red-team), found ${#RECIPE_FILES[@]}"
 fi
 
 for f in "${RECIPE_FILES[@]}"; do
@@ -2354,6 +2368,113 @@ for f in "${RECIPE_FILES[@]}"; do
     out=$(check_recipe_py "$f" 2>&1); rc=$?
   fi
   expect_pass "structural pass: $base" "$out" "$rc"
+done
+
+
+# ---------------------------------------------------------------------------
+echo "core role playbook↔recipe drift (#34)"
+# ---------------------------------------------------------------------------
+sha256_file() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  else
+    echo ""
+  fi
+}
+
+for role in "${ROLE_RECIPES[@]}"; do
+  recipe="$RECIPES_DIR/${role}.yaml"
+  playbook="$REPO_ROOT/playbooks/${role}.md"
+  if [[ ! -f "$recipe" ]]; then
+    bad "role recipe missing: ${role}.yaml"
+    continue
+  fi
+  if [[ ! -f "$playbook" ]]; then
+    bad "role playbook missing: playbooks/${role}.md"
+    continue
+  fi
+  # Recipe must name the prose source (reference, not fork)
+  if grep -qF "playbooks/${role}.md" "$recipe"; then
+    ok "${role}.yaml references playbooks/${role}.md"
+  else
+    bad "${role}.yaml does not reference playbooks/${role}.md"
+  fi
+  # Instructions must use replacement-not-additive local playbook rule
+  if grep -qE "local/playbooks/${role}\\.md" "$recipe"; then
+    ok "${role}.yaml mounts local playbook replacement rule"
+  else
+    bad "${role}.yaml missing local/playbooks/${role}.md replacement rule"
+  fi
+  # playbook-sha256 pin must match current playbook bytes
+  pinned=$(awk '/^# playbook-sha256:/{print $3; exit}' "$recipe" || true)
+  actual=$(sha256_file "$playbook")
+  if [[ -z "$pinned" ]]; then
+    bad "${role}.yaml missing # playbook-sha256: pin"
+  elif [[ -z "$actual" ]]; then
+    bad "cannot hash playbooks/${role}.md (need sha256sum or shasum)"
+  elif [[ "$pinned" == "$actual" ]]; then
+    ok "${role}.yaml playbook-sha256 matches playbooks/${role}.md"
+  else
+    bad "${role}.yaml playbook-sha256 drift (pin=${pinned:0:12}… actual=${actual:0:12}…) — recompute after playbook edit"
+  fi
+  # No @latest in role recipes (belt + suspenders; structural checker also enforces)
+  if grep -nE '@latest|[[:space:]]latest[[:space:]]*$' "$recipe" | grep -vE '^\s*#' | grep -vqE 'do not|never|not |unpinned|comment'; then
+    # Allow only comment mentions of latest
+    if grep -nE '@latest' "$recipe" | grep -vE '#|do not|never|unpinned|Example'; then
+      bad "${role}.yaml contains @latest pin"
+    else
+      ok "${role}.yaml has no executable @latest pin"
+    fi
+  else
+    ok "${role}.yaml has no executable @latest pin"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+echo "recipe-stamp audit helper (#34)"
+# ---------------------------------------------------------------------------
+STAMP="$REPO_ROOT/scripts/recipe-stamp.sh"
+LEDGER="$REPO_ROOT/memory/recipe-runs.md"
+if [[ -x "$STAMP" ]]; then
+  ok "recipe-stamp.sh is executable"
+else
+  bad "recipe-stamp.sh missing or not executable"
+fi
+if [[ -f "$LEDGER" ]] && grep -qE '^\| UTC \|' "$LEDGER"; then
+  ok "memory/recipe-runs.md ledger header present"
+else
+  bad "memory/recipe-runs.md missing table header"
+fi
+# Dry-run stamp into a temp copy of the ledger layout (do not pollute real ledger in CI)
+stamp_root=$(mktemp -d "${TMPDIR:-/tmp}/gibson-recipe-stamp.XXXXXX")
+mkdir -p "$stamp_root/memory" "$stamp_root/scripts" "$stamp_root/playbooks/recipes"
+cp "$STAMP" "$stamp_root/scripts/recipe-stamp.sh"
+chmod +x "$stamp_root/scripts/recipe-stamp.sh"
+cp "$BUILDER_RECIPE" "$stamp_root/playbooks/recipes/builder.yaml"
+# Point stamp at temp gibson root by invoking from a fake tree: rewrite GIBSON_ROOT via path
+# recipe-stamp resolves GIBSON_ROOT from script location — so run the copy under stamp_root.
+out=$("$stamp_root/scripts/recipe-stamp.sh" \
+  --role builder \
+  --recipe "$stamp_root/playbooks/recipes/builder.yaml" \
+  --issue 34 \
+  --repo "$stamp_root/fake-wt" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'builder' "$stamp_root/memory/recipe-runs.md" && grep -q '34' "$stamp_root/memory/recipe-runs.md"; then
+  ok "recipe-stamp.sh appends audit row (role+issue)"
+else
+  bad "recipe-stamp.sh dry run failed (rc=$rc): $out"
+fi
+rm -rf "$stamp_root"
+
+# Role recipes must instruct stamping
+for role in "${ROLE_RECIPES[@]}"; do
+  if grep -qF "recipe-stamp.sh" "$RECIPES_DIR/${role}.yaml"; then
+    ok "${role}.yaml instructs recipe-stamp.sh"
+  else
+    bad "${role}.yaml missing recipe-stamp.sh instruction"
+  fi
 done
 
 # ---------------------------------------------------------------------------

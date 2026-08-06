@@ -40,7 +40,43 @@ findings ledger. This slice is partial (`Related: #25` only — never a closing 
 | Axis | What it is | This scaffold |
 |---|---|---|
 | **Goose Recipe schema `version`** | Official Recipe type field (Goose v1.45.0 → `1.0.0`) | Set on each YAML as `version: "1.0.0"` |
-| **Gibson recipe maturity** | How far Gibson has hardened recipes as fleet artifacts | **v0** — validation-only scaffold; drift sensor + more roles in #34; live run only after #28 + #35 |
+| **Gibson recipe maturity** | How far Gibson has hardened recipes as fleet artifacts | **v0** — validation-only scaffold; role mirrors + playbook-sha256 drift sensor (#34); live run only after #28 + #35 |
+
+## Core role recipes (#34)
+
+| Recipe | Prose source of truth | Notes |
+|---|---|---|
+| `builder.yaml` | `playbooks/builder.md` | claim → baseline → implement → gate |
+| `reviewer.yaml` | `playbooks/reviewer.md` | read-only six-lens review; never merges |
+| `security.yaml` | `playbooks/security.md` | eight-layer interpretation + filing |
+| `red-team.yaml` | `playbooks/red-team/PROTOCOL.md` | toolchain pins in sibling lock |
+
+Each role recipe carries:
+
+```text
+# playbook: playbooks/<role>.md
+# playbook-sha256: <sha256 of the prose playbook file>
+```
+
+`scripts/tests/goose-recipes.test.sh` fails when the playbook bytes change without
+updating the pin (drift). When you edit a playbook, recompute:
+
+```bash
+sha256sum playbooks/reviewer.md   # or builder.md / security.md
+# paste into the matching recipe's # playbook-sha256: line
+```
+
+### Audit stamp
+
+Live or dry-run sessions end by calling:
+
+```bash
+scripts/recipe-stamp.sh --role reviewer \
+  --recipe playbooks/recipes/reviewer.yaml \
+  --issue 42 --repo /path/to/worktree --pr 123
+```
+
+Rows append to `memory/recipe-runs.md` (no secrets / home paths).
 
 ## Format (Goose Recipe type `1.0.0`)
 

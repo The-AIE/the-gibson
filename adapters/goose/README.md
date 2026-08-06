@@ -15,7 +15,7 @@ Goose-branded experience (Apache-2.0 §6 + CUSTOM_DISTROS.md upstream).
 ## Scaffold boundary (read first)
 
 This adapter is a **docs/config scaffold** for epic #30. The shipped
-`playbooks/recipes/builder.yaml` is **validation-only**: it proves the official
+`playbooks/recipes/builder.yaml` (and the #34 role mirrors `reviewer.yaml` / `security.yaml`) is **validation-only**: it proves the official
 Goose Recipe schema shape for pinned CLI **v1.45.0**. It is **not** an authorized
 operational builder session.
 
