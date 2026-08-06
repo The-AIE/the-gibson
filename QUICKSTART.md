@@ -17,12 +17,10 @@ Assume you have: a GitHub account, a target app repo, and at least one agent CLI
 
 ### Single-model is the primary path
 
-One frontier model is enough. Point `scripts/loop.sh --runner <one-cli>` at the
-repo and the solo loop cycles every role (build → test → review → ship) with file
-handoffs. A second vendor is an **optional upgrade** for Tier B/C review
-(`--reviewers` / `--supervisor`), not a requirement. Non-technical owners never
-configure multi-model routing — see [VIBECODING.md](VIBECODING.md) and
-[docs/21-operator-readiness.md](docs/21-operator-readiness.md).
+**One model is enough** — full statement:
+[VIBECODING.md § One AI is enough](VIBECODING.md#one-model-is-enough).
+Point `scripts/loop.sh --runner <one-cli>` at the repo; optional
+`--reviewers` / `--supervisor` is an upgrade, not a requirement.
 
 ---
 
@@ -58,7 +56,7 @@ then `git remote add upstream https://github.com/mrhinkle/the-gibson.git`.
 - Run the fleet? → [GUIDE.md](GUIDE.md) §1–5.  
 - Agents? → [AGENTS.md](AGENTS.md).
 - Ready-made owner lines? → [docs/prompts.md](docs/prompts.md).
-- Definition of done for non-coder + one model? → [docs/21-operator-readiness.md](docs/21-operator-readiness.md).
+- One model is enough? → [VIBECODING.md](VIBECODING.md#one-model-is-enough). Definition of done? → [docs/21](docs/21-operator-readiness.md).
 
 ---
 
