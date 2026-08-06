@@ -284,6 +284,8 @@ GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gp
 #   with-remote-unpublished  — origin configured, only main pushed; the finished
 #                              branch exists in this checkout and nowhere else
 setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
+  # Default slug matches https://github.com/acme/widget.git origin (#113).
+  REPO_SLUG="acme/widget"
   rm -rf "$REPO" "$REMOTE"
   mkdir -p "$REPO"
   $GIT init -q "$REPO"
@@ -333,6 +335,17 @@ set_origin_github_url() { # set_origin_github_url <url>
     git -C "$REPO" config --local --unset-all "$key" 2>/dev/null || true
   done
   git -C "$REPO" config --local "url.${REMOTE}.insteadOf" "$url"
+  # Keep --repo-slug in sync for parseable GitHub-shaped origins (#113 / #92).
+  case "$url" in
+    *github.com[:/]*|*github.*/[A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*)
+      REPO_SLUG=$(printf '%s' "$url" | sed -E \
+        -e 's#^git@[^:]+:##' \
+        -e 's#^ssh://[^/]+/##' \
+        -e 's#^https?://[^/]+/##' \
+        -e 's#\.git/*$##' \
+        -e 's#/*$##')
+      ;;
+  esac
 }
 
 # A target repo whose trunk is NOT `main`. The driver used to let
@@ -346,6 +359,7 @@ set_origin_github_url() { # set_origin_github_url <url>
 #                 repo with neither cannot be reviewed
 setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
   local trunk="$1" origin_head="${2:-stale-local}"
+  REPO_SLUG="acme/widget"
   rm -rf "$REPO" "$REMOTE"
   mkdir -p "$REPO"
   $GIT init -q "$REPO"
@@ -408,10 +422,14 @@ notes: fixture
 EOF
 }
 
+# --repo-slug is required since #113 (repo-boundary-guard). setup_repo pins
+# origin to https://github.com/acme/widget.git → slug acme/widget.
+REPO_SLUG="${REPO_SLUG:-acme/widget}"
+
 run_loop() { # run_loop [extra loop.sh args...]
   HERMES_CMD='cat >/dev/null' \
-  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
-    --once --supervisor devin "$@" >/dev/null 2>&1
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --repo-slug "$REPO_SLUG" \
+    --gibson "$GIBSON" --once --supervisor devin "$@" >/dev/null 2>&1
 }
 
 # Same as run_loop but keeps stderr so remote-halt sensors can assert messages.
@@ -419,8 +437,8 @@ run_loop_err() { # run_loop_err <stderr-file> [extra loop.sh args...]
   local errf="$1"
   shift
   HERMES_CMD='cat >/dev/null' \
-  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
-    --once --supervisor devin "$@" >/dev/null 2>"$errf"
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --repo-slug "$REPO_SLUG" \
+    --gibson "$GIBSON" --once --supervisor devin "$@" >/dev/null 2>"$errf"
   return $?
 }
 
@@ -1540,7 +1558,7 @@ export GIBSON_REMOTE_HALT_INTERVAL=3
 export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 : > "$CALLS/gh.log"
 HERMES_CMD="$CALLS/stamp-and-noop.sh" \
-  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --repo-slug "$REPO_SLUG" --gibson "$GIBSON" \
     --max-iterations 6 >/dev/null 2>"$ROOT/cadence.err"
 cadence_rc=$?
 if [[ "$cadence_rc" -eq 0 ]]; then
@@ -1573,7 +1591,7 @@ export GIBSON_REMOTE_HALT_INTERVAL=08
 export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 : > "$CALLS/gh.log"
 HERMES_CMD="$CALLS/stamp-and-noop.sh" \
-  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --repo-slug "$REPO_SLUG" --gibson "$GIBSON" \
     --max-iterations 16 >/dev/null 2>"$ROOT/cadence-08.err"
 cadence_08_rc=$?
 if [[ "$cadence_08_rc" -eq 0 ]]; then
@@ -1607,7 +1625,7 @@ export GIBSON_REMOTE_HALT_INTERVAL=09
 export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 : > "$CALLS/gh.log"
 HERMES_CMD="$CALLS/stamp-and-noop.sh" \
-  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --repo-slug "$REPO_SLUG" --gibson "$GIBSON" \
     --max-iterations 18 >/dev/null 2>"$ROOT/cadence-09.err"
 cadence_09_rc=$?
 if [[ "$cadence_09_rc" -eq 0 ]]; then
@@ -2458,7 +2476,7 @@ run_concurrent_loop_burst() {
     (
       set +e
       HERMES_CMD="touch '$work_stamp'; cat >/dev/null" \
-      "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+      "$FAKE_SCRIPTS/loop.sh" --runner hermes --repo "$REPO" --repo-slug "$REPO_SLUG" --gibson "$GIBSON" \
         --once --supervisor devin >/dev/null 2>"$conc_dir/err.$i"
       echo $? > "$conc_dir/rc.$i"
     ) &
