@@ -58,6 +58,59 @@ For repos where deploys apply schema (Prisma + Neon/Postgres pattern):
 - Migration history: production uses replayable migrations (`migrate deploy`), and
   the migration-replay diff check keeps history ⇄ schema honest.
 
+
+## Preview database isolation (Neon branch per Vercel preview)
+
+> Target-side doctrine (from ConferenceOS #934/#678, tracked as Gibson #108).
+> Mechanism is generic; first target was `mrhinkle/conference-os`.
+
+### Problem
+
+Shared nonprod databases serialize schema PRs, contaminate previews, and make
+`prisma migrate deploy` on a preview a fleet-wide footgun. A green preview that
+shared state with another PR is not evidence.
+
+### Pattern
+
+1. **Neon branch per Vercel preview** — Neon’s native Vercel integration (or
+   equivalent) creates an ephemeral database branch from the parent (prod or
+   staging schema) for each preview deployment.
+2. **`DATABASE_URL` is preview-scoped** — injected by the integration; never a
+   shared nonprod URL in the Preview environment.
+3. **Migrate on the branch** — preview build runs `prisma migrate deploy` (or
+   equivalent) against *that* branch only. Schema PRs prove real migrate deploy
+   before merge.
+4. **Lifecycle** — branch deleted when the Vercel preview / PR is closed (Neon
+   integration default, or a cleanup workflow). Stale preview pileup includes
+   DB cost — reaper previews and branches together.
+5. **Prod is never the parent for experimental data** — parent is a staging
+   snapshot or a schema-only baseline when PII is in scope.
+
+### Adoption checklist (target repo)
+
+- [ ] Neon project linked to the Vercel project (Preview env).
+- [ ] Preview env has no long-lived shared `DATABASE_URL`.
+- [ ] Build/install command runs migrate against the preview branch URL.
+- [ ] Schema-guard CI still hard-fails schema-without-migration (L-002).
+- [ ] Documented in the target `AGENTS.md` under Deploy / Preview DB.
+- [ ] Cost note: ephemeral branches are metered — close stale PRs (preview
+      pileup sensor if present).
+
+### What stays in Gibson vs the target
+
+| Layer | Owner |
+|-------|--------|
+| Doctrine + checklist (this section) | Gibson |
+| Neon↔Vercel integration wiring | Target (per project) |
+| Schema-guard workflow | Target CI (template in `ci/`) |
+| Merge-queue serialization | Optional; isolation removes the *need* to serialize on DB |
+
+### Non-goals
+
+- Gibson does not host Neon credentials or create branches itself.
+- Not a substitute for Tier C human review of money/auth/PII schema.
+
+
 ## Env vars & secrets
 
 - Set via Vercel envs (or `vercel env`), never committed; preview envs get
