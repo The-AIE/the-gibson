@@ -25,7 +25,7 @@ GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gp
 # Bare origin + clone (mirrors claim fixtures)
 setup_repo() {
   local name="$1"
-  rm -rf "$ROOT/$name"
+  rm -rf -- "${ROOT:?}/${name:?}"
   mkdir -p "$ROOT/$name"
   $GIT init -q --bare "$ROOT/$name/origin"
   git -C "$ROOT/$name/origin" symbolic-ref HEAD refs/heads/main

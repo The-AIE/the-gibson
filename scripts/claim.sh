@@ -203,8 +203,6 @@ else
     done
   done
 fi
-  done
-done
 
 LABEL_ADDED=0
 WORKTREE_CREATED=0
