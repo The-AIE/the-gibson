@@ -50,13 +50,12 @@ loop-handoff.test.sh	92	halt reclaim gate fails on Linux (kernel-gate burn-down 
 EOF
 )
 
-# Minimum jq. release-preflight validates approval timestamps through jq, and on
-# jq 1.6 an impossible calendar date parses instead of erroring — the merge gate
-# then returns READY on evidence it cannot verify (#91). Ubuntu 22.04 ships 1.6,
-# so this is not hypothetical. A gate that changes its verdict with the host's jq
-# is not a gate.
+# Minimum jq. release-preflight uses strict civil-calendar round-trips and must
+# not fail-open on older jq (#91 fixed: never use `$label` as a jq param — it is
+# a keyword on jq 1.6 and the compile error left MALFORMED empty → READY).
+# Floor stays at 1.6 (Ubuntu 22.04 default); raise only with a failing sensor.
 JQ_MIN_MAJOR=1
-JQ_MIN_MINOR=7
+JQ_MIN_MINOR=6
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
@@ -239,7 +238,8 @@ for suite in scripts/tests/*.test.sh; do
   out=$(run_limited "$suite" 2>&1); ec=$?
   # grep -o, not a greedy sed capture: `.*([0-9]+ passed` eats all but the last
   # digit and turns "42 passed" into "2 passed".
-  tally=$(echo "$out" | grep -oE '[0-9]+ passed, [0-9]+ failed' | tail -1)
+  # Prefer extended tally (goose-validate disposition, #95); fall back to plain.
+  tally=$(echo "$out" | grep -oE '[0-9]+ passed, [0-9]+ failed(, goose-validate: [^[:space:]]+)?' | tail -1)
   [[ -n "$tally" ]] || tally="no tally line"
   [[ "$ec" -eq 124 ]] && tally="timed out after ${TIMEOUT}s"
 
