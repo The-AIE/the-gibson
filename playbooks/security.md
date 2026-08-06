@@ -30,6 +30,25 @@ You are the **security** role. You run and interpret the eight-layer system.
 CI owns most deterministic layers; you own interpretation, adversarial reasoning,
 AI-surface review, and filing.
 
+## Free tool baseline (expected)
+
+Targets should have (or be adopting) the ConferenceOS-dogfooded stack:
+
+- **Layer 1:** gitleaks (hard-fail)
+- **Layer 2:** Semgrep (`p/typescript`, `p/nextjs`, `p/react`, `p/security-audit`, `p/secrets`, `p/owasp-top-ten`) — report-only until clean, then hard on high+
+- **Layer 3:** npm audit / OSV + **Trivy** fs scan
+- **Quality sensors (AI / vibe path):** `npx prodlint`, `npx fallow` — useful before review and for Layer 7 adjacent checks
+
+Local scripts (recommended in target `package.json`):
+```
+npm run security:semgrep
+npm run security:trivy
+npm run quality:prodlint
+npm run quality:fallow
+```
+
+See docs/08-security.md "Recommended free tool baseline".
+
 ## How to use this
 
 ```bash
@@ -62,7 +81,7 @@ Mode: full
 |---|---|---|---|
 | 1 | Secrets (gitleaks) | every PR + push | **hard** |
 | 2 | SAST (Semgrep/CodeQL) | every PR | **hard** on high+ |
-| 3 | Supply chain (audit/OSV/dep-review) | every PR + nightly | **hard** on critical |
+| 3 | Supply chain (audit/OSV/Trivy/dep-review) | every PR + nightly | **hard** on critical |
 | 4 | AuthZ matrix + IDOR | route-touching PRs; nightly full | **hard** |
 | 5 | DAST ZAP baseline vs. **preview** | per-PR; full vs. staging nightly | **hard** on high+ (baseline) |
 | 6 | Adversarial inferential review | Tier B/C | **hard** via review verdict |
@@ -73,8 +92,8 @@ Mode: full
 
 ### 1. Light (every PR)
 
-Confirm CI layers 1–3 green. Skim diff for secrets-in-URLs, new deps, auth surface
-drift. Note any report-only findings that need promotion issues.
+Confirm CI layers 1–3 green (or report-only findings are tracked). Skim diff for secrets-in-URLs, new deps, auth surface
+drift. Note any report-only findings that need promotion issues. For AI-heavy changes, glance at prodlint/fallow output if available.
 
 ### 2. Full (Tier C / release / route or AI surface)
 
@@ -83,7 +102,7 @@ drift. Note any report-only findings that need promotion issues.
 3. **DAST:** ZAP baseline against preview only. Never active-scan prod.
 4. **Adversarial:** construct exploit paths; refute pass; survivors filed with severity.
 5. **AI-surface:** untrusted retrieval/user content; no instruction-following from data;
-   tainted output at sinks; minimal tool scope.
+   tainted output at sinks; minimal tool scope. prodlint often surfaces missing auth on server actions.
 6. **Posture:** `posture-probe.sh` vs. preview; compare to baseline if present.
 
 ### 3. Report format on PR

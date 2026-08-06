@@ -71,6 +71,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO=""
 if command -v gh >/dev/null 2>&1; then
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+  # Fall back when gh is a test shim that only prints owner/name (no --json).
+  if [[ -z "$REPO" ]]; then
+    REPO=$(gh repo view 2>/dev/null | head -1 | tr -d "[:space:]" || true)
+  fi
 fi
 
 if [[ -z "$REF" ]]; then
@@ -163,10 +167,16 @@ emit_pr() { # number | claim-id | scope | head | url | created | updated
 }
 
 if [[ -n "$REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+  # Avoid process substitution (< <(...)) — some sandboxes have no /dev/fd
+  # (bash still implements it via /dev/fd/N). Capture then read.
+  _pr_claims_out=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null || true)
   while IFS=$'\t' read -r number id scope head url created updated; do
     [[ -n "$id" ]] || continue
     emit_pr "$number" "$id" "$scope" "$head" "$url" "$created" "$updated"
-  done < <("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null || true)
+  done <<EOF
+${_pr_claims_out}
+EOF
+  unset _pr_claims_out
 fi
 
 for path in $(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); do
