@@ -97,11 +97,13 @@ cleanup_scratch() {
 trap cleanup_scratch EXIT
 
 # Portable device:inode for a path (lstat; do not follow final symlink).
-# BSD stat first (macOS), GNU fallback (Linux).
+# GNU first (Linux), BSD fallback (macOS). L-050 / #99 — never probe
+# `stat -f` first: on GNU coreutils it means --file-system and can succeed
+# for the wrong reason (same identity for every file on a mount).
 path_dev_ino() {
   local p="$1" dev ino
-  dev=$(stat -f %d -- "$p" 2>/dev/null) || dev=$(stat -c %d -- "$p" 2>/dev/null) || return 1
-  ino=$(stat -f %i -- "$p" 2>/dev/null) || ino=$(stat -c %i -- "$p" 2>/dev/null) || return 1
+  dev=$(stat -c %d -- "$p" 2>/dev/null || stat -f %d -- "$p" 2>/dev/null) || return 1
+  ino=$(stat -c %i -- "$p" 2>/dev/null || stat -f %i -- "$p" 2>/dev/null) || return 1
   [[ -n "$dev" && -n "$ino" ]] || return 1
   printf '%s:%s' "$dev" "$ino"
 }
