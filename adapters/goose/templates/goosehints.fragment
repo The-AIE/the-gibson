@@ -1,0 +1,12 @@
+# Gibson doctrine fragment for optional .goosehints (project-local)
+# Copy only into a *worktree* after claim — never into a shared canonical checkout
+# without an explicit owner decision.
+#
+# This fragment does not replace recipe instructions. Recipes remain authoritative.
+
+Before any edit:
+1. Confirm a live claim exists for this issue (scripts/claim.sh / adapters/goose/enforce.sh require-claim).
+2. Confirm this directory is a worktree, not the canonical clone (Law 3).
+3. Run gate-baseline before first mutation; run gate before every commit (Law 4).
+4. Never force-push, never print secrets, never touch production destroy paths.
+5. You are Gibson-branded; do not present as a Goose product to the operator.
