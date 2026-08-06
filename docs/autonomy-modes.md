@@ -61,15 +61,19 @@ Regardless of mode, the following always require a human (docs/14, Law 7):
 Map Critical/High red-team findings → owner card; never self-remediate those classes
 unattended.
 
-## Adapter wiring (Goose) — future
+## Adapter wiring (Goose)
 
-When `adapters/goose` runs a live session (after #28 runtime work), map:
+Offline wiring lives in [`adapters/goose/permission-map.yaml`](../adapters/goose/permission-map.yaml)
+and is enforced by [`adapters/goose/enforce.sh`](../adapters/goose/enforce.sh) (#35):
 
-- Session mode → Goose autonomy preset (only after an adoption decision picks a
-  default or the operator sets one per session)
-- Gibson gate scripts → recipe-mandated shell steps or MCP tools with **Ask/Never**
-  on mutate paths (#35)
-- Operator decision cards → stay on the Hermes / chat path; Goose does not auto-approve
+- Session mode → Goose autonomy analogue (table above); **defaults still not forced**
+  unattended — docs/14 remains authoritative until a separate adoption decision
+- Gibson gate/claim/release → recipe-mandated shell steps via `enforce.sh`
+  (`pre-edit`, `pre-commit`, `release`); green-gate tools are **Always allow** so
+  permission prompts cannot skip the gate
+- Destructive classes (force-push, secrets, prod destroy, money, PII) → **Never allow**
+- Operator decision cards → Hermes / chat path; Goose does not auto-approve
+- Live `goose run` still waits on **#28**; enforcement does not require the Goose binary
 
 ## Cross-links
 
