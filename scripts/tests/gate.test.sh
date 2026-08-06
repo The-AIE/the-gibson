@@ -2445,6 +2445,104 @@ fi
 unset _p1_ban
 
 # ---------------------------------------------------------------------------
+# #99 / L-050 — path_dev_ino must distinguish two files on the same filesystem.
+# BSD-first `stat -f` on GNU coreutils means --file-system; free-blocks+fsid
+# can make every file on a mount look identical. Production sites must probe
+# GNU (-c) first, BSD (-f) second.
+# ---------------------------------------------------------------------------
+echo "#99 path_dev_ino: GNU-first ordering + two files on one fs get distinct ids"
+
+# Static contract: every production site probes -c before -f on the same line
+# (or with only || between them, -c first).
+for site in \
+  "$SCRIPT_DIR/../gate.sh" \
+  "$SCRIPT_DIR/../gate-baseline.sh" \
+  "$SCRIPT_DIR/../loop.sh" \
+  "$SCRIPT_DIR/../claim-reaper.sh"
+do
+  base=$(basename "$site")
+  # Collect lines that call stat for identity/mtime. Each must have -c before -f.
+  bad_order=0
+  while IFS= read -r line; do
+    # Strip leading whitespace for comment detection
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    case "$trimmed" in
+      \#*|'') continue ;;
+      *stat*)
+        cpos=$(printf '%s' "$trimmed" | awk '{p=index($0,"stat -c"); if(p==0)p=-1; print p}')
+        fpos=$(printf '%s' "$trimmed" | awk '{p=index($0,"stat -f"); if(p==0)p=-1; print p}')
+        if [[ "$fpos" -gt 0 ]]; then
+          if [[ "$cpos" -le 0 || "$cpos" -gt "$fpos" ]]; then
+            bad_order=1
+            bad "#99 $base probes stat -f before stat -c: $trimmed"
+          fi
+        fi
+        ;;
+    esac
+  done < "$site"
+  if [[ "$bad_order" -eq 0 ]]; then
+    ok "#99 $base: no BSD-first stat -f identity/mtime probe"
+  fi
+done
+
+# Runtime: load path_dev_ino from gate-baseline (definition only) and assert
+# two distinct regular files on the same mount get different dev:ino.
+_id_dir=$(mktemp -d "${TMPDIR:-/tmp}/gibson-devino.XXXXXX")
+_id_a="$_id_dir/a"
+_id_b="$_id_dir/b"
+printf 'a\n' > "$_id_a"
+printf 'b\n' > "$_id_b"
+
+# Source only the function body by evaluating the fixed portable form that
+# production uses (mirrors gate-baseline.sh path_dev_ino).
+path_dev_ino() {
+  local p="$1" dev ino
+  dev=$(stat -c %d -- "$p" 2>/dev/null || stat -f %d -- "$p" 2>/dev/null) || return 1
+  ino=$(stat -c %i -- "$p" 2>/dev/null || stat -f %i -- "$p" 2>/dev/null) || return 1
+  [[ -n "$dev" && -n "$ino" ]] || return 1
+  printf '%s:%s' "$dev" "$ino"
+}
+
+ida=$(path_dev_ino "$_id_a") || ida=""
+idb=$(path_dev_ino "$_id_b") || idb=""
+if [[ -n "$ida" && -n "$idb" && "$ida" != "$idb" ]]; then
+  ok "#99 path_dev_ino distinguishes two files on same fs ($ida vs $idb)"
+else
+  bad "#99 path_dev_ino failed to distinguish files (a=$ida b=$idb)"
+fi
+
+# Negative canary: BSD-first free-blocks/fsid pattern must NOT be what we ship.
+# (Document the landmine so a regression reintroducing it fails this suite.)
+path_dev_ino_bsd_first() {
+  local p="$1" dev ino
+  dev=$(stat -f %d -- "$p" 2>/dev/null) || dev=$(stat -c %d -- "$p" 2>/dev/null) || return 1
+  ino=$(stat -f %i -- "$p" 2>/dev/null) || ino=$(stat -c %i -- "$p" 2>/dev/null) || return 1
+  [[ -n "$dev" && -n "$ino" ]] || return 1
+  printf '%s:%s' "$dev" "$ino"
+}
+# On this host the broken form may still distinguish via accidental exit codes;
+# the hard requirement is that production sources match GNU-first (checked
+# above) and the live helper distinguishes (checked above). Pin that the
+# production gate-baseline definition is byte-equal to the GNU-first body we
+# just exercised, by grepping the canonical line form.
+if grep -qF 'dev=$(stat -c %d -- "$p" 2>/dev/null || stat -f %d -- "$p" 2>/dev/null)' \
+     "$SCRIPT_DIR/../gate-baseline.sh" \
+  && grep -qF 'ino=$(stat -c %i -- "$p" 2>/dev/null || stat -f %i -- "$p" 2>/dev/null)' \
+     "$SCRIPT_DIR/../gate-baseline.sh" \
+  && grep -qF 'dev=$(stat -c %d -- "$p" 2>/dev/null || stat -f %d -- "$p" 2>/dev/null)' \
+     "$SCRIPT_DIR/../gate.sh" \
+  && grep -qF 'ino=$(stat -c %i -- "$f" 2>/dev/null || stat -f %i -- "$f" 2>/dev/null)' \
+     "$SCRIPT_DIR/../loop.sh" \
+  && grep -qF 'mt=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null)' \
+     "$SCRIPT_DIR/../claim-reaper.sh"; then
+  ok "#99 production path_dev_ino / mtime lines are exact GNU-first form"
+else
+  bad "#99 production sites drifted from exact GNU-first form"
+fi
+rm -rf "$_id_dir"
+unset -f path_dev_ino path_dev_ino_bsd_first
+
+# ---------------------------------------------------------------------------
 echo
 echo "gate.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

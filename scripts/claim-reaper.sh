@@ -473,7 +473,9 @@ file_mtime_epoch() {
     echo ""
     return 0
   fi
-  mt=$(stat -f %m "$f" 2>/dev/null) || mt=$(stat -c %Y "$f" 2>/dev/null) || mt=""
+  # GNU first: `stat -f %m` on Linux is --file-system (mount point / garbage),
+  # not mtime. L-050 / #99.
+  mt=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null) || mt=""
   case "$mt" in
     ''|*[!0-9]*) echo "" ;;
     *) echo "$mt" ;;
