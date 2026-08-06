@@ -67,8 +67,7 @@ echo "cost_ledger_record_iteration is top-level (not only on SCRIPT_DIR silent-n
 # normal $GIBSON/scripts path never defined it. Structure probe: the function
 # definition must appear AFTER the silent-noop fi, not before it.
 fn_line=$(grep -n '^cost_ledger_record_iteration()' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
-fi_after_silent=$(awk '/missing silent-noop/{p=NR} /silent_noop_progressed/{if(p&&NR>p){print NR; exit}}' "$SCRIPT_DIR/../loop.sh")
-# Simpler: function def line > line of "die missing silent-noop"
+# function def line must be after "die missing silent-noop"
 die_line=$(grep -n 'missing silent-noop.sh' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
 call_line=$(grep -n 'cost_ledger_record_iteration "' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
 if [[ -n "$fn_line" && -n "$die_line" && "$fn_line" -gt "$die_line" ]]; then
