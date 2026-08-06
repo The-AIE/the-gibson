@@ -157,6 +157,31 @@ so "it looked green" stops being available as an answer.
    issue per runtime (a real but Tier A task) proves the loop end-to-end.
 3. Seed `memory/`: adoption report becomes the repo's first DECISIONS entries.
 
+
+
+## Dedicated reviewer identity (G14 setup — once per org)
+
+Solo loops cannot satisfy GitHub branch-protection "required review" when the
+builder and reviewer share one account (L-015 / L-021 / issue #67). Setup once:
+
+1. Create a **machine user** or **GitHub App** with `pull-requests: write` on
+   the target repo (no admin). Name it something like `gibson-reviewer`.
+2. Store its PAT (or App installation token) as **`GH_REVIEWER_TOKEN`** in the
+   *reviewer* shell only — never as the builder's `GH_TOKEN`.
+3. Post formal reviews with:
+
+   ```bash
+   GH_REVIEWER_TOKEN=… ./scripts/formal-review.sh \
+     --pr 42 --repo owner/name --event approve --body-file gibson/second-opinion.md
+   ```
+
+4. Or set `GIBSON_FORMAL_REVIEW=1` and pass `--pr` / `--repo` to
+   `second-opinion.sh` so a `VERDICT: approve` becomes a formal review under the
+   reviewer identity.
+
+Tier C still stops for Mark (G12). Formal review unblocks Tier A/B mergeability;
+it does not replace human gates.
+
 ## Definition of adopted
 
 A Tier A issue can go plan→issue→build→test→review→eval→merge→deploy→verified with
