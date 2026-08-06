@@ -2674,6 +2674,23 @@ HALT_LOCK_TMP=""
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_HELD=0
 
+# Host-native reclaim backend (#92). Primary kernel-gate cases must use a tool
+# that actually exists: lockf on macOS/BSD, util-linux flock on Linux. Hardcoding
+# lockf made the suite fail closed on every Linux runner ("need lockf on macOS
+# or flock on Linux") even though production backend selection is correct.
+if command -v lockf >/dev/null 2>&1; then
+  KG_NATIVE_BACKEND=lockf
+elif command -v flock >/dev/null 2>&1; then
+  KG_NATIVE_BACKEND=flock
+else
+  KG_NATIVE_BACKEND=""
+fi
+if [[ -z "$KG_NATIVE_BACKEND" ]]; then
+  bad "kernel-gate: neither lockf nor flock on PATH — cannot exercise reclaim"
+else
+  ok "kernel-gate: native reclaim backend is $KG_NATIVE_BACKEND"
+fi
+
 # --- Source contract: no check-then-rm gate protocol, backends present ---
 if grep -n 'halt_lock_unlink_if_inode' "$LOOP" >/dev/null 2>&1; then
   bad "kernel-gate: loop.sh still defines halt_lock_unlink_if_inode (check-then-rm)"
@@ -2696,23 +2713,23 @@ else
   bad "kernel-gate: missing lockf/flock backend branches"
 fi
 
-# --- macOS lockf backend on this host ---
+# --- Native backend (lockf on macOS, flock on Linux) on this host ---
 clear_reclaim_workspace
 # shellcheck disable=SC2034
-HALT_LOCK_RECLAIM_BACKEND=lockf
+HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_TIMEOUT=1
-if ! command -v lockf >/dev/null 2>&1; then
-  bad "kernel-gate: lockf missing on this host — cannot verify kernel fd lock"
+if [[ -z "$KG_NATIVE_BACKEND" ]] || ! command -v "$KG_NATIVE_BACKEND" >/dev/null 2>&1; then
+  bad "kernel-gate: native backend missing on this host — cannot verify kernel fd lock"
 else
-  ok "kernel-gate: lockf present on this host"
+  ok "kernel-gate: $KG_NATIVE_BACKEND present on this host"
 fi
-errf="$ROOT/kernel-gate-lockf.err"
+errf="$ROOT/kernel-gate-native.err"
 : > "$errf"
 if halt_lock_reclaim_gate_acquire 2>>"$errf"; then
-  ok "kernel-gate: lockf acquire succeeded"
+  ok "kernel-gate: native ($KG_NATIVE_BACKEND) acquire succeeded"
 else
-  bad "kernel-gate: lockf acquire failed (stderr=$(tr '\n' ' ' <"$errf"))"
+  bad "kernel-gate: native ($KG_NATIVE_BACKEND) acquire failed (stderr=$(tr '\n' ' ' <"$errf"))"
 fi
 if [[ -f "$HALT_LOCK_RECLAIM_GATE" ]]; then
   ok "kernel-gate: stable regular gate file present while held"
@@ -2726,22 +2743,22 @@ comp_err="$ROOT/kernel-gate-lockf-comp.err"
 : > "$comp_err"
 (
   # shellcheck disable=SC2034
-  HALT_LOCK_RECLAIM_BACKEND=lockf
+  HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
   # shellcheck disable=SC2034
   HALT_LOCK_RECLAIM_TIMEOUT=1
   close_inherited_reclaim_fd
   halt_lock_reclaim_gate_acquire 2>>"$comp_err"
 ) || comp_rc=$?
 if [[ "$comp_rc" -ne 0 ]]; then
-  ok "kernel-gate: competing lockf acquire rejected while parent holds"
+  ok "kernel-gate: competing native acquire rejected while parent holds"
 else
-  bad "kernel-gate: competing lockf acquire succeeded while parent holds"
+  bad "kernel-gate: competing native acquire succeeded while parent holds"
 fi
 # Parent must have stored a concrete allocated fd after success.
 if [[ -n "${HALT_LOCK_RECLAIM_FD:-}" && "${HALT_LOCK_RECLAIM_FD}" =~ ^[0-9]+$ ]]; then
-  ok "kernel-gate: lockf acquire stored allocated fd=${HALT_LOCK_RECLAIM_FD}"
+  ok "kernel-gate: native acquire stored allocated fd=${HALT_LOCK_RECLAIM_FD}"
 else
-  bad "kernel-gate: lockf acquire did not store a numeric reclaim fd"
+  bad "kernel-gate: native acquire did not store a numeric reclaim fd"
 fi
 gate_ino_before=$(halt_lock_inode "$HALT_LOCK_RECLAIM_GATE" 2>/dev/null || true)
 halt_lock_reclaim_gate_release 2>>"$errf"
@@ -2764,28 +2781,79 @@ fi
 # After release, a competitor can acquire.
 (
   # shellcheck disable=SC2034
-  HALT_LOCK_RECLAIM_BACKEND=lockf
+  HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
   # shellcheck disable=SC2034
   HALT_LOCK_RECLAIM_TIMEOUT=1
   close_inherited_reclaim_fd
   halt_lock_reclaim_gate_acquire 2>>"$comp_err" && halt_lock_reclaim_gate_release 2>>"$comp_err"
-) && ok "kernel-gate: lockf re-acquire after parent release" \
-  || bad "kernel-gate: lockf re-acquire after release failed"
+) && ok "kernel-gate: native re-acquire after parent release" \
+  || bad "kernel-gate: native re-acquire after release failed"
 if ! halt_lock_stderr_clean "$errf" || ! halt_lock_stderr_clean "$comp_err"; then
-  bad "kernel-gate: dirty stderr on lockf path"
+  bad "kernel-gate: dirty stderr on native path"
 else
-  ok "kernel-gate: clean stderr on lockf path"
+  ok "kernel-gate: clean stderr on native path"
 fi
 unset HALT_LOCK_RECLAIM_BACKEND
 
-# --- Linux flock branch via faithful fake (maps to lockf on this host) ---
+# --- flock backend: real util-linux flock on Linux; lockf-backed fake on macOS ---
+# On macOS CI there is no util-linux flock, so a faithful fake maps flock -w N fd
+# onto lockf. On Linux the native tool IS flock — use a logging wrapper around
+# the real binary so we still prove the flock backend path ran (#92).
 clear_reclaim_workspace
 FAKE_FLOCK_BIN="$ROOT/fake-flock-bin"
 mkdir -p "$FAKE_FLOCK_BIN"
-cat > "$FAKE_FLOCK_BIN/flock" <<'FLOCKFAKE'
+REAL_FLOCK_BIN=$(command -v flock 2>/dev/null || true)
+# Prefer a non-fake absolute path if one is already on PATH.
+if [[ -n "$REAL_FLOCK_BIN" && "$REAL_FLOCK_BIN" != "$FAKE_FLOCK_BIN/flock" ]]; then
+  REAL_FLOCK_ABS=$(cd "$(dirname "$REAL_FLOCK_BIN")" && pwd)/$(basename "$REAL_FLOCK_BIN")
+else
+  REAL_FLOCK_ABS=""
+  for cand in /usr/bin/flock /bin/flock /usr/local/bin/flock; do
+    if [[ -x "$cand" ]]; then
+      REAL_FLOCK_ABS="$cand"
+      break
+    fi
+  done
+fi
+if [[ -n "$REAL_FLOCK_ABS" ]]; then
+  cat > "$FAKE_FLOCK_BIN/flock" <<FLOCKWRAP
+#!/usr/bin/env bash
+# Logging wrapper around real util-linux flock (Linux CI / #92).
+log="\${FLOCK_FAKE_LOG:-}"
+args=("\$@")
+wait_sec=""
+fd=""
+i=0
+while [[ \$i -lt \${#args[@]} ]]; do
+  case "\${args[\$i]}" in
+    -w)
+      wait_sec="\${args[\$((i+1))]:-}"
+      i=\$((i+2))
+      ;;
+    -n)
+      wait_sec=0
+      i=\$((i+1))
+      ;;
+    -x|-s)
+      i=\$((i+1))
+      ;;
+    *)
+      fd="\${args[\$i]}"
+      break
+      ;;
+  esac
+done
+if [[ -n "\$log" ]]; then
+  printf 'flock wait=%s fd=%s\n' "\${wait_sec:-}" "\${fd:-}" >> "\$log"
+fi
+exec "$REAL_FLOCK_ABS" "\$@"
+FLOCKWRAP
+  chmod +x "$FAKE_FLOCK_BIN/flock"
+  ok "kernel-gate: flock path uses logging wrapper over $REAL_FLOCK_ABS"
+elif command -v lockf >/dev/null 2>&1; then
+  cat > "$FAKE_FLOCK_BIN/flock" <<'FLOCKFAKE'
 #!/usr/bin/env bash
 # Faithful flock -w <sec> <fd> shim for macOS CI: same semantics via lockf.
-# Logs invocations so the sensor can prove the flock backend path ran.
 log="${FLOCK_FAKE_LOG:-}"
 wait_sec=""
 fd=""
@@ -2820,19 +2888,22 @@ if ! command -v lockf >/dev/null 2>&1; then
   echo "flock fake: lockf required" >&2
   exit 2
 fi
-# lockf -t 0 = non-blocking; otherwise bound the wait.
 t="${wait_sec:-2}"
 [[ "$t" =~ ^[0-9]+$ ]] || t=2
 exec lockf -s -t "$t" "$fd"
 FLOCKFAKE
-chmod +x "$FAKE_FLOCK_BIN/flock"
+  chmod +x "$FAKE_FLOCK_BIN/flock"
+  ok "kernel-gate: flock path uses lockf-backed fake (no real flock on host)"
+else
+  bad "kernel-gate: cannot build flock backend path (no real flock, no lockf)"
+fi
 : > "$ROOT/flock-fake.log"
 export FLOCK_FAKE_LOG="$ROOT/flock-fake.log"
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_BACKEND=flock
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_TIMEOUT=1
-# Prefer fake flock over any real flock on PATH.
+# Prefer wrapper/fake flock over any other flock on PATH.
 PATH="$FAKE_FLOCK_BIN:$PATH"
 export PATH
 errf="$ROOT/kernel-gate-flock.err"
@@ -2869,7 +2940,7 @@ else
   bad "kernel-gate: gate file removed after flock-backend release"
 fi
 unset HALT_LOCK_RECLAIM_BACKEND
-# Leave fake flock off PATH for remaining cases (real lockf selection).
+# Leave wrapper/fake flock off PATH for remaining cases (native backend).
 case ":$PATH:" in
   *":$FAKE_FLOCK_BIN:"*)
     PATH=${PATH#"$FAKE_FLOCK_BIN:"}
@@ -2883,7 +2954,7 @@ unset FLOCK_FAKE_LOG
 # --- Collision-free reclaim fd: inherited markers preserved (incl. 201) ---
 clear_reclaim_workspace
 # shellcheck disable=SC2034
-HALT_LOCK_RECLAIM_BACKEND=lockf
+HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_TIMEOUT=1
 # shellcheck disable=SC2034
@@ -2932,7 +3003,7 @@ fi
 comp_rc=0
 (
   # shellcheck disable=SC2034
-  HALT_LOCK_RECLAIM_BACKEND=lockf
+  HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
   # shellcheck disable=SC2034
   HALT_LOCK_RECLAIM_TIMEOUT=1
   # shellcheck disable=SC2034
@@ -2971,7 +3042,7 @@ fi
 # Exhaust the range: every candidate open → fail closed.
 clear_reclaim_workspace
 # shellcheck disable=SC2034
-HALT_LOCK_RECLAIM_BACKEND=lockf
+HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_TIMEOUT=1
 # shellcheck disable=SC2034
@@ -3090,7 +3161,7 @@ HALT_LOCK_RECLAIM_FD_MAX=220
 # --- Process crash releases kernel gate without manual cleanup ---
 clear_reclaim_workspace
 # shellcheck disable=SC2034
-HALT_LOCK_RECLAIM_BACKEND=lockf
+HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_TIMEOUT=1
 holder_log="$ROOT/kernel-gate-crash-holder.log"
@@ -3099,7 +3170,7 @@ holder_log="$ROOT/kernel-gate-crash-holder.log"
   # shellcheck disable=SC2034
   HALT_LOCK_RECLAIM_HELD=0
   # shellcheck disable=SC2034
-  HALT_LOCK_RECLAIM_BACKEND=lockf
+  HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
   # shellcheck disable=SC2034
   HALT_LOCK_RECLAIM_TIMEOUT=1
   halt_lock_reclaim_gate_acquire || exit 1
@@ -3367,7 +3438,7 @@ HALT_LOCK_HELD=0
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_HELD=0
 # shellcheck disable=SC2034
-HALT_LOCK_RECLAIM_BACKEND=lockf
+HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
 # shellcheck disable=SC2034
 HALT_LOCK_RECLAIM_TIMEOUT=2
 _start_ts=$(date +%s 2>/dev/null || echo 0)
@@ -3660,7 +3731,7 @@ while [[ $i -lt $aba_n ]]; do
     # shellcheck disable=SC2034
     HALT_LOCK_RECLAIM_HELD=0
     # shellcheck disable=SC2034
-    HALT_LOCK_RECLAIM_BACKEND=lockf
+    HALT_LOCK_RECLAIM_BACKEND=$KG_NATIVE_BACKEND
     # shellcheck disable=SC2034
     HALT_LOCK_RECLAIM_TIMEOUT=2
     errf="$aba_dir/err/$i"
