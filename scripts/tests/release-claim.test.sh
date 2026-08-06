@@ -47,6 +47,10 @@ TABLE
     git commit -qm "init"
     git branch -M main
     git push -q -u origin main
+    # Bare origins default HEAD to master; point it at main so later clones
+    # actually check out a tree (renewal-race CAS depends on a second clone
+    # that can edit docs/claims/* — #94).
+    git -C "$root/origin" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
     git checkout -q -b long-lived-feature
     echo dirty > uncommitted.txt
   ) >/dev/null 2>&1
@@ -1665,9 +1669,13 @@ EOF
   git rev-parse HEAD:docs/claims/issue-103-renew-wt.md > "$ROOT/renew_wt/old_blob"
   git worktree add -b feat/103-renew-wt "$WT_REG" HEAD >/dev/null 2>&1
   echo survive > "$WT_REG/marker"
-  # Renew claim on remote (new blob) while caller still holds old CAS key
-  git clone -q "$ROOT/renew_wt/origin" "$ROOT/renew_wt/other" 2>/dev/null
+  # Renew claim on remote (new blob) while caller still holds old CAS key.
+  # Clone with explicit -b main: a bare origin whose HEAD still points at the
+  # nonexistent master ref leaves the clone with no working tree, so the renew
+  # never lands and CAS never sees a mismatch (#94).
+  git clone -q -b main "$ROOT/renew_wt/origin" "$ROOT/renew_wt/other" 2>/dev/null
   cd "$ROOT/renew_wt/other" || exit 1
+  mkdir -p docs/claims
   cat > docs/claims/issue-103-renew-wt.md <<EOF
 claim: issue-103-renew-wt
 issue: 103
