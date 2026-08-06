@@ -425,8 +425,13 @@ origin_slug() {
 
 TARGET_REPO_REALPATH=$(CDPATH='' cd "$REPO" && pwd -P)
 ORIGIN_SLUG=$(origin_slug)
-[[ "$ORIGIN_SLUG" == "$EXPECTED_REPO_SLUG" ]] ||
-  die "repository identity mismatch: --repo-slug '$EXPECTED_REPO_SLUG' does not match origin '${ORIGIN_SLUG:-unparseable or absent}'"
+# Enforce only when origin is parseable. Unparseable/absent origin cannot be
+# verified against --repo-slug; remote-halt already fail-opens with a warning,
+# and a blank origin_slug must not brick local-only / host-alias fixtures (#92
+# residual after #113).
+if [[ -n "$ORIGIN_SLUG" && "$ORIGIN_SLUG" != "$EXPECTED_REPO_SLUG" ]]; then
+  die "repository identity mismatch: --repo-slug '$EXPECTED_REPO_SLUG' does not match origin '$ORIGIN_SLUG'"
+fi
 
 GUARD_REAL_GIT=$(command -v git)
 GUARD_BIN=""
