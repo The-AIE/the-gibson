@@ -57,6 +57,6 @@ Rough priority: must-have / nice-to-have
 - Ask Contract is always on (docs/16).
 - Only the sixteen human gates interrupt the owner (docs/14).
 - Confusion from an Operator is treated as a failed test and fixed in the harness (docs/09).
-- **Single-model is enough** for the primary path; multi-model review is an upgrade (docs/21).
+- **Single-model is enough** — [VIBECODING.md § One AI is enough](../VIBECODING.md#one-model-is-enough); multi-model review is an upgrade.
 
 Cross-links: [VIBECODING.md](../VIBECODING.md) · [EXAMPLES.md](../EXAMPLES.md) · [docs/16](16-nontechnical-operation.md) · [Operator Readiness](21-operator-readiness.md) · [QUICKSTART](../QUICKSTART.md)

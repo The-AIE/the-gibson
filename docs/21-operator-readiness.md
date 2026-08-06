@@ -10,7 +10,7 @@ nav_order: 21
 
 The end goal is met when **all** of the following are true on at least one live Operator-tier product.
 
-**Primary path: one frontier model.** Multi-model review is optional for checking work, not required for shipping. See [VIBECODING.md](../VIBECODING.md), [prompts.md](prompts.md), and [QUICKSTART.md](../QUICKSTART.md).
+**Primary path: one frontier model** — see the canonical statement in [VIBECODING.md § One AI is enough](../VIBECODING.md#one-model-is-enough). Operator checklist: this page. How-to: [QUICKSTART.md](../QUICKSTART.md). Prompts: [prompts.md](prompts.md).
 
 ## A. Owner experience (chat-only)
 
