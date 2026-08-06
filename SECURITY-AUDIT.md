@@ -2,7 +2,7 @@
 
 **Audience:** Operators, adopters, security reviewers, and anyone who needs to know how The Gibson protects the software it builds and ships.
 **Status:** Living document. Update after every major harness change or after a production incident. Last structured review: 2026-07-29; free-tool baseline update 2026-08-05.
-**Related doctrine:** [docs/08-security.md](docs/08-security.md), [playbooks/security.md](playbooks/security.md), [ci/security.yml](ci/security.yml), [docs/14-human-gates.md](docs/14-human-gates.md).
+**Related doctrine:** [docs/08-security.md](docs/08-security.md), [docs/26-owasp-agentic-mapping.md](docs/26-owasp-agentic-mapping.md) (OWASP Agentic Top 10 map), [playbooks/security.md](playbooks/security.md), [ci/security.yml](ci/security.yml), [docs/14-human-gates.md](docs/14-human-gates.md), [docs/25-trust-and-governance.md](docs/25-trust-and-governance.md) §4 / D-008.
 
 ## 1. Scope
 
@@ -45,6 +45,14 @@ Additional non-layer controls:
 - Ask Contract: every human ask explains what / does / why / risks.
 - Scope claims + worktrees: agents cannot freely edit outside their claim.
 - Release gate: security-gate is a hard `needs:` of any release workflow.
+
+## 3a. OWASP Agentic Top 10 (build-time map)
+
+Buyers who already speak OWASP Agentic vocabulary: see the honest coverage table in
+[docs/26-owasp-agentic-mapping.md](docs/26-owasp-agentic-mapping.md). Short version —
+two categories are **covered** at build time (supply-chain code path, human-agent trust
+gates); eight are **partial** for harness-built software; product-runtime agent risk is
+**out of core** (D-008). Do not claim "implements the Agentic Top 10."
 
 ## 4. Current Implementation Status
 
