@@ -46,7 +46,7 @@ EOF
 # suite<TAB>issue<TAB>one-line reason. Shrink this; never grow it without a PR
 # that says why in the body.
 QUARANTINE=$(cat <<'EOF'
-loop-handoff.test.sh	92	halt reclaim gate fails on Linux (22 failures)
+loop-handoff.test.sh	92	halt reclaim gate fails on Linux (kernel-gate burn-down in progress)
 release-claim.test.sh	94	CAS mismatch, renewal race, label preservation (4 failures)
 EOF
 )
