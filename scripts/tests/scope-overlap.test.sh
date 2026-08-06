@@ -19,7 +19,7 @@ command -v node >/dev/null || { echo "scope-overlap.test.sh: node required"; exi
 command -v git  >/dev/null || { echo "scope-overlap.test.sh: git required"; exit 1; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-scope-overlap.XXXXXX")
-trap 'rm -rf "$ROOT"' EXIT
+trap 'rm -rf -- "${ROOT:?}"' EXIT
 GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
 
 # Bare origin + clone (mirrors claim fixtures)
