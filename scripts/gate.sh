@@ -95,8 +95,10 @@ MAX_CAPTURE_CHARS=$((8 * 1024 * 1024))
 
 path_dev_ino() {
   local p="$1" dev ino
-  dev=$(stat -f %d -- "$p" 2>/dev/null) || dev=$(stat -c %d -- "$p" 2>/dev/null) || return 1
-  ino=$(stat -f %i -- "$p" 2>/dev/null) || ino=$(stat -c %i -- "$p" 2>/dev/null) || return 1
+  # GNU first: on Linux `stat -f` is --file-system (succeeds for the wrong
+  # meaning / can collide on format-looking paths). L-050 / #99.
+  dev=$(stat -c %d -- "$p" 2>/dev/null || stat -f %d -- "$p" 2>/dev/null) || return 1
+  ino=$(stat -c %i -- "$p" 2>/dev/null || stat -f %i -- "$p" 2>/dev/null) || return 1
   [[ -n "$dev" && -n "$ino" ]] || return 1
   printf '%s:%s' "$dev" "$ino"
 }

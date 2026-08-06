@@ -910,5 +910,8 @@ ordering rule as the `date -u -d` / `date -u -j -f` shim in `claims-status.sh`.
 **Rule of thumb:** a cross-platform fallback is only safe when the wrong branch
 *errors*. If a flag exists on both platforms with different meanings, order by
 which one you can detect, and give the chain a terminating default.
-**Status:** fixed in the test (#93); production call sites tracked in #99
+**Status:** fixed in the test (#93) and production call sites (#99: gate.sh,
+gate-baseline.sh, loop.sh, claim-reaper.sh) with a gate.test.sh sensor that
+asserts two files on one filesystem get distinct path_dev_ino identities and
+that every production site is exact GNU-first form.
 **Tags:** #portability #shell #sensors
