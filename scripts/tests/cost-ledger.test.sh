@@ -62,6 +62,37 @@ else
   bad "loop.sh missing cost hook"
 fi
 
+echo "cost_ledger_record_iteration is top-level (not only on SCRIPT_DIR silent-noop branch)"
+# Regression: #74 left the function body inside the silent-noop elif, so the
+# normal $GIBSON/scripts path never defined it. Structure probe: the function
+# definition must appear AFTER the silent-noop fi, not before it.
+fn_line=$(grep -n '^cost_ledger_record_iteration()' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
+# function def line must be after "die missing silent-noop"
+die_line=$(grep -n 'missing silent-noop.sh' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
+call_line=$(grep -n 'cost_ledger_record_iteration "' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
+if [[ -n "$fn_line" && -n "$die_line" && "$fn_line" -gt "$die_line" ]]; then
+  ok "function defined after silent-noop load ($fn_line > $die_line)"
+else
+  bad "function nested or missing (fn=$fn_line die=$die_line)"
+fi
+if [[ -n "$call_line" && -n "$fn_line" && "$call_line" -gt "$fn_line" ]]; then
+  ok "call site after definition ($call_line > $fn_line)"
+else
+  bad "call site missing or before def (call=$call_line fn=$fn_line)"
+fi
+# Call must not sit under L-008 startup before the main loop
+if grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | grep -q .; then
+  meter_line=$(grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
+  loop_line=$(grep -n '^while true; do' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
+  if [[ -n "$meter_line" && -n "$loop_line" && "$meter_line" -gt "$loop_line" ]]; then
+    ok "cost meter runs inside main loop ($meter_line > $loop_line)"
+  else
+    bad "cost meter outside main loop (meter=$meter_line loop=$loop_line)"
+  fi
+else
+  bad "Cost meter comment missing"
+fi
+
 echo
 echo "cost-ledger.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
