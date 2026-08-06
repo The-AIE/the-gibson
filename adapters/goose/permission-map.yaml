@@ -1,0 +1,85 @@
+# Gibson → Goose per-tool permission map (#35 / docs/autonomy-modes.md)
+# Source of vocabulary: docs/autonomy-modes.md. This file WIRES the map for
+# the Goose adapter; it does not change Gibson human gates (docs/14).
+#
+# No floating pins. No unpinned package installs. Destructive classes are Never allow.
+
+version: "1"
+gibson_doc: docs/autonomy-modes.md
+goose_cli_pin: "1.45.0"
+
+# Session modes (definitions only — default not forced unattended)
+session_modes:
+  autonomous:
+    goose_analogue: completely_autonomous
+    notes: Only inside claimed scope; still subject to mandatory escalations
+  smart_approval:
+    goose_analogue: smart_approval
+    notes: Routine steps auto; judgment asks
+  manual_approval:
+    goose_analogue: manual_approval
+    notes: Consequential tools always prompt
+  chat_only:
+    goose_analogue: chat_only
+    notes: No mutating tools
+
+# Per-tool overrides supersede session mode
+tool_overrides:
+  # Always allow — reads / pure checks
+  - class: read_files
+    goose: always_allow
+    examples: [list_dir, read_file, git_status, git_diff, typecheck_readonly]
+  - class: green_gate_scripts
+    goose: always_allow
+    examples:
+      - adapters/goose/enforce.sh require-claim
+      - adapters/goose/enforce.sh gate
+      - scripts/gate.sh
+      - scripts/gate-baseline.sh
+    notes: Enforcement must never be blocked by permission prompts
+
+  # Ask before — consequential but routine fleet ops
+  - class: git_push_feature
+    goose: ask_before
+    examples: [git_push_non_force, gh_pr_create, npm_install_pinned]
+  - class: claim_lifecycle
+    goose: ask_before
+    examples: [scripts/claim.sh, scripts/release-claim.sh]
+    notes: Prefer operator/orchestrator invoke outside the model when possible
+
+  # Never allow — hard block (Law 7 / docs/14)
+  - class: force_push
+    goose: never_allow
+    examples: [git_push_force, git_push_--force_with_lease_to_main]
+  - class: secrets
+    goose: never_allow
+    examples: [printenv_secrets, cat_credentials, write_dotenv_with_keys]
+  - class: production_destroy
+    goose: never_allow
+    examples: [drop_production_db, delete_prod_bucket, terraform_destroy_prod]
+  - class: money_billing
+    goose: never_allow
+    examples: [edit_pricing_without_tier_c_gate, charge_customers]
+  - class: pii_consent
+    goose: never_allow
+    examples: [export_customer_pii, disable_consent_checks]
+
+mandatory_escalations:
+  # Always human regardless of mode
+  - money_pricing_billing_merges
+  - production_launch_user_visible
+  - schema_destructive_or_data_deletion
+  - force_push
+  - secret_rotation
+  - customer_pii_consent_boundary
+
+# How recipes mandate enforcement (in-session shell steps)
+recipe_mandated_steps:
+  before_any_mutation:
+    - adapters/goose/enforce.sh pre-edit --repo {{repo}} --issue {{issue}} --canonical {{canonical}}
+  before_every_commit:
+    - adapters/goose/enforce.sh pre-commit --repo {{repo}} --issue {{issue}} --canonical {{canonical}}
+  after_merge:
+    - adapters/goose/enforce.sh release {{issue}}
+  after_session:
+    - scripts/recipe-stamp.sh --role {{role}} --recipe playbooks/recipes/{{role}}.yaml --issue {{issue}}

@@ -12,26 +12,26 @@ Goose is the **runtime engine**. The product identity remains **The Gibson**. Us
 should see Gibson doctrine, Gibson CLI entry points, and Gibson gates — not a
 Goose-branded experience (Apache-2.0 §6 + CUSTOM_DISTROS.md upstream).
 
-## Scaffold boundary (read first)
+## Boundary (read first)
 
-This adapter is a **docs/config scaffold** for epic #30. The shipped
-`playbooks/recipes/builder.yaml` (and the #34 role mirrors `reviewer.yaml` / `security.yaml`) is **validation-only**: it proves the official
-Goose Recipe schema shape for pinned CLI **v1.45.0**. It is **not** an authorized
-operational builder session.
+| Layer | State |
+|---|---|
+| Recipes (`playbooks/recipes/*.yaml`) | Validation-only schema mirrors (Goose CLI **v1.45.0**) |
+| **Enforcement** (`enforce.sh`, `session.sh`, `permission-map.yaml`) | **Landed (#35)** — pure bash; no Goose binary required |
+| Live `goose run` against a target repo | **Blocked until #28** live spike |
+| `loop.sh --runner goose` | Not wired (follow-up) |
 
-**Do not** run `goose run` (or any other live Goose session) against a target
-repository with this recipe until:
+**Do not** run `goose run` against a target repository until **#28** completes.
+Enforcement (claim / worktree / gate / release) is invocable **today** via
+`adapters/goose/enforce.sh` — same fail-closed exit codes as `scripts/*.sh`.
 
-1. **#28** — live runtime / red-team spike has been completed, and
-2. **#35** — permission and gate enforcement for in-session work is in place.
+Permission tiers: [permission-map.yaml](permission-map.yaml) maps
+[docs/autonomy-modes.md](../../docs/autonomy-modes.md) Always/Ask/Never classes.
+Session defaults are still not forced unattended (docs/14 remains authoritative).
 
-Recipe settings cannot encode a Goose permission mode. Pinned Goose v1.45.0's
-own defaults are autonomous. This scaffold deliberately does **not** choose or
-document a Gibson `GOOSE_MODE` / permission preset. That decision stays with
-#28 / #35 and any separate adoption of [docs/autonomy-modes.md](../../docs/autonomy-modes.md).
-
-**Authorized today:** install the pinned CLI (lab), and run
-`goose recipe validate` on the absolute Gibson recipe path (smoke test below).
+**Authorized today:**
+- `adapters/goose/enforce.sh` / `session.sh` lifecycle (offline sensors in CI)
+- `goose recipe validate` on absolute Gibson recipe paths (if CLI installed)
 
 ## How to use this
 
@@ -99,43 +99,51 @@ see `playbooks/recipes/`. The builder recipe's instructions list that load
 order (including the local-playbook replacement rule); validating the recipe
 (smoke test) confirms the schema and template shape only.
 
-**Not authorized on this PR:** a live `goose run` against a repository. That
-wait remains until #28 and #35 (see Scaffold boundary above).
+**Not authorized:** a live `goose run` against a repository until **#28**.
+Enforcement helpers above do **not** require Goose and are authorized today.
 
-### 3. Planned session lifecycle (Laws 2, 3, 4, 10) — future sequence
+### 3. Session lifecycle (Laws 2, 3, 4, 10) — executable today
 
-After #28 and #35 authorize live Goose builder sessions, the intended sequence
-is the same claim → worktree → **baseline** → implement → gate → release path
-used by other adapters (`scripts/claim.sh`, `playbooks/builder.md`). Documented
-here as **planned sequence only** — not an executable Goose builder invocation.
+Operator / orchestrator path. Enforcement is Gibson-branded (`enforce.sh`);
+Goose is only the optional engine for agent turns after **#28**.
 
 ```bash
 GIBSON=~/Code/the-gibson   # absolute path to the Gibson clone
-# Start in the target's canonical clone
-cd ~/Code/app
+CANON=~/Code/app
+cd "$CANON"
 
 # Claim + worktree (never edit canonical)
 $GIBSON/scripts/claim.sh 42 feature-slug 'path/globs/**'
-cd ../wt-42-feature-slug   # sibling worktree created by claim.sh
+cd ../wt-42-feature-slug
+WT=$(pwd)
 
-# Law 4: record branch-point baseline BEFORE any implementation/mutation
-# (required; same order as claim.sh next-steps and playbooks/builder.md)
-$GIBSON/scripts/gate-baseline.sh
+# Fail-closed prepare: claim present + not canonical + baseline
+$GIBSON/adapters/goose/session.sh prepare \
+  --repo "$WT" --issue 42 --canonical "$CANON"
 
-# --- future: authorized Goose builder session (blocked until #28 + #35) ---
-# Do not run goose run / recipe-driven mutation against the worktree yet.
-# Permission mode and in-session gate enforcement are not encoded in the
-# recipe; they land with #28 / #35, not this scaffold.
-# When authorized: implement only after gate-baseline.sh has succeeded.
+# --- agent work (live goose run still blocked until #28) ---
+# When #28 authorizes: goose run with playbooks/recipes/builder.yaml
+# Until then: any runtime may edit only after prepare succeeded.
 
-# Green gate before commit (Gibson scripts; independent of Goose)
-$GIBSON/scripts/gate.sh
+# Before every commit — claim + green gate (exit codes match gate.sh)
+$GIBSON/adapters/goose/session.sh pre-commit \
+  --repo "$WT" --issue 42 --canonical "$CANON"
 
-# After merge — return to the target's canonical checkout first
-# (release-claim defaults GIBSON_CANONICAL to cwd; Law 10 / L-029)
-cd ~/Code/app
-$GIBSON/scripts/release-claim.sh 42
+# After merge — Law 10 cleanup from canonical
+cd "$CANON"
+$GIBSON/adapters/goose/enforce.sh release 42
+$GIBSON/adapters/goose/session.sh stamp --role builder --issue 42 --repo "$WT"
 ```
+
+Offline proof of red-gate block (no network, no goose binary):
+
+```bash
+$GIBSON/adapters/goose/session.sh dry-run-lifecycle
+```
+
+Config templates: [templates/doctrine-mount.md](templates/doctrine-mount.md),
+[templates/goosehints.fragment](templates/goosehints.fragment),
+[permission-map.yaml](permission-map.yaml).
 
 ### 4. loop.sh integration (follow-up — not wired yet)
 
@@ -181,9 +189,10 @@ goose recipe validate "$GIBSON/playbooks/recipes/builder.yaml"
 
 | Piece | State |
 |---|---|
-| Adapter README + recipe path | This PR (docs/config scaffold only; validation-only) |
-| Live `goose run` against repositories | **Not authorized** until #28 + #35 |
-| End-to-end builder session transcript | #33 / #28 |
-| Gate enforcement inside session | #35 |
+| Adapter README + recipes + templates | Landed |
+| Gate/claim/release enforcement (`enforce.sh`) | **Landed (#35)** — offline sensors green |
+| Permission map (autonomy-modes wiring) | **Landed** — `permission-map.yaml` |
+| Session lifecycle driver (`session.sh`) | **Landed (#33 half)** |
+| Live `goose run` / E2E agent transcript on Goose | **#28** (still open) |
 | Funnel extension | #36 (publish Mark-gated) |
 | `loop.sh --runner goose` | Not implemented — follow-up |

@@ -52,6 +52,11 @@ instructions: |
   must run {{ gibson }}/scripts/gate.sh with zero new failures vs branch point (Law 4).
   Never grade your own homework (Law 5) — hand off for review when the claim is ready.
 
+  Enforcement (Laws 2/3/4 — #35; no Goose binary required):
+  - Before any mutation: {{ gibson }}/adapters/goose/enforce.sh pre-edit --repo {{ repo }} --issue {{ issue }}
+  - Before every commit: {{ gibson }}/adapters/goose/enforce.sh pre-commit --repo {{ repo }} --issue {{ issue }}
+  - Permission tiers: {{ gibson }}/adapters/goose/permission-map.yaml (Never allow force-push/secrets/prod destroy)
+
   After the session ends (success or halt), stamp the run for the audit trail:
   {{ gibson }}/scripts/recipe-stamp.sh --role builder --recipe {{ gibson }}/playbooks/recipes/builder.yaml --issue {{ issue }} --repo {{ repo }}
 
