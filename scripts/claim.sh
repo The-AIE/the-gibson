@@ -92,16 +92,22 @@ command -v gh >/dev/null || die "gh (GitHub CLI) required"
 [[ -d "$CANONICAL/.git" || -f "$CANONICAL/.git" ]] || die "not a git repo: $CANONICAL"
 
 cd "$CANONICAL"
-git fetch origin 2>/dev/null || true
+# #106 AC3: claim path refuses when origin cannot be fetched — never a silent
+# local fallback for the ledger tip (stale local main is how two lanes clobber).
+BASE=main
+git show-ref --verify --quiet refs/heads/main || BASE=master
+if ! git fetch origin "$BASE" >/dev/null 2>&1; then
+  die "cannot fetch origin/$BASE — refuse claim (no local/stale ledger fallback; #106)"
+fi
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
 # Live claims are read from origin's tip, not the working tree: the canonical
 # checkout may be parked on an old branch, and a stale read is how two lanes end
 # up believing they are alone.
-BASE=main
-git show-ref --verify --quiet refs/heads/main || BASE=master
 REF="origin/$BASE"
-git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
+if ! git rev-parse --verify --quiet "$REF" >/dev/null; then
+  die "cannot resolve $REF after fetch — refuse claim (fail closed; #106)"
+fi
 
 live_claim_ids() {
   PR_CLAIM_IDS=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null |
@@ -162,25 +168,41 @@ if echo "$LIVE_IDS" | grep -qx "$CLAIM_ID"; then
   die "claim $CLAIM_ID already exists — pick another slug, or release it first"
 fi
 
-# --- scope overlap against every live claim ---
-for id in $LIVE_IDS; do
-  row_scope=$(claim_scope "$id")
-  [[ -z "$row_scope" ]] && continue
+# --- scope overlap against every live claim (#106 independent-set sensor) ---
+# Prefer the dedicated sensor (origin fetch already proven above). Fall back to
+# the historical stem check only if node is unavailable (should not happen on
+# fleet hosts; still fail closed on overlap).
+if command -v node >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]]; then
+  _so_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID")
   for s in $SCOPE; do
-    stem="${s%%\**}"
-    [[ -z "$stem" ]] && continue
-    if echo " $row_scope " | grep -F "$stem" >/dev/null 2>&1; then
-      die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
-    fi
-    for t in $row_scope; do
-      tstem="${t%%\**}"
-      [[ -z "$tstem" ]] && continue
-      if echo " $SCOPE " | grep -F "$tstem" >/dev/null 2>&1; then
+    _so_args+=(--scope "$s")
+  done
+  if [[ "$SLICE" -eq 1 ]]; then
+    _so_args+=(--slice --issue "$ISSUE")
+  fi
+  if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_so_args[@]}"; then
+    die "scope overlap (or ledger unreadable) — coordinate; do not race (#106)"
+  fi
+else
+  for id in $LIVE_IDS; do
+    row_scope=$(claim_scope "$id")
+    [[ -z "$row_scope" ]] && continue
+    for s in $SCOPE; do
+      stem="${s%%\**}"
+      [[ -z "$stem" ]] && continue
+      if echo " $row_scope " | grep -F "$stem" >/dev/null 2>&1; then
         die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
       fi
+      for t in $row_scope; do
+        tstem="${t%%\**}"
+        [[ -z "$tstem" ]] && continue
+        if echo " $SCOPE " | grep -F "$tstem" >/dev/null 2>&1; then
+          die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
+        fi
+      done
     done
   done
-done
+fi
 
 LABEL_ADDED=0
 WORKTREE_CREATED=0
