@@ -55,6 +55,8 @@ EOF
 
 REPO=""
 REVIEWERS="codex,claude"
+PR_NUMBER=""
+REPO_SLUG=""
 AUTHOR=""
 BASE="main"
 BRANCH="HEAD"
@@ -69,6 +71,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --repo) REPO="$2"; shift 2 ;;
     --reviewers) REVIEWERS="$2"; shift 2 ;;
+PR_NUMBER=""
+REPO_SLUG=""
+    --pr) PR_NUMBER="$2"; shift 2 ;;
+    --repo) REPO_SLUG="$2"; shift 2 ;;
     --author) AUTHOR="$2"; shift 2 ;;
     --base) BASE="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
@@ -276,3 +282,20 @@ cat "$OUT"
 [[ ! -s "$LOG" ]] || info "reviewer stderr in $LOG"
 [[ "$reviewed" -gt 0 ]] || die "no reviewer ran — install a second vendor's CLI, pass --reviewers, or use --solo-platform with a vendor:model reviewer (#69)"
 info "wrote $OUT"
+
+# Optional formal GitHub review (#67). When GIBSON_FORMAL_REVIEW=1 and a
+# reviewer token is configured, map the first VERDICT line to a formal review
+# under the dedicated identity. Builder GH_TOKEN is never used.
+if [[ "${GIBSON_FORMAL_REVIEW:-0}" == "1" && -n "${PR_NUMBER:-}" && -n "${REPO_SLUG:-${GITHUB_REPOSITORY:-}}" ]]; then
+  _fr_event=""
+  if grep -qiE 'VERDICT:[[:space:]]*approve' "$OUT" 2>/dev/null; then
+    _fr_event=approve
+  elif grep -qiE 'VERDICT:[[:space:]]*(changes-requested|request.changes)' "$OUT" 2>/dev/null; then
+    _fr_event=request-changes
+  fi
+  if [[ -n "$_fr_event" && -f "$SCRIPT_DIR/formal-review.sh" ]]; then
+    _fr_repo="${REPO_SLUG:-$GITHUB_REPOSITORY}"
+    "$SCRIPT_DIR/formal-review.sh" --pr "$PR_NUMBER" --repo "$_fr_repo"       --event "$_fr_event" --body-file "$OUT" ||       info "formal-review.sh failed — second-opinion.md still written (Law 8)"
+  fi
+fi
+
