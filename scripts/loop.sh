@@ -88,7 +88,11 @@ OPTIONS
   --dry-run           show actions without invoking runner
   --escalate-after N  after N consecutive failures, get a cross-vendor second
                       opinion before the error budget runs out (default: off)
-  --reviewers LIST    vendors for that second opinion (default: codex,claude)
+  --reviewers LIST    vendors for second opinion (default: codex,claude).
+                      With --solo-platform use vendor:model (e.g. grok:review).
+  --solo-platform     single-vendor mode (#69): same platform supplies the
+                      pre-handoff review via different model / fresh context.
+                      No second CLI required. Tier C still human-gated.
   --supervisor NAME   'devin' hands finished branches to the cloud supervisor
                       whenever loop-state carries a `handoff:` field (docs/22).
                       Each handoff is gated on a fresh distinct-vendor review of
@@ -133,6 +137,8 @@ FORCE_HAT=""
 DRY=0
 ESCALATE_AFTER=0
 REVIEWERS="codex,claude"
+REVIEWERS_SET=0
+SOLO_PLATFORM=0
 SUPERVISOR=""
 
 while [[ $# -gt 0 ]]; do
@@ -150,7 +156,8 @@ while [[ $# -gt 0 ]]; do
     --hat) FORCE_HAT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --escalate-after) ESCALATE_AFTER="$2"; shift 2 ;;
-    --reviewers) REVIEWERS="$2"; shift 2 ;;
+    --reviewers) REVIEWERS="$2"; REVIEWERS_SET=1; shift 2 ;;
+    --solo-platform) SOLO_PLATFORM=1; shift ;;
     --supervisor) SUPERVISOR="$2"; shift 2 ;;
     *) echo "unknown: $1" >&2; usage; exit 2 ;;
   esac
@@ -182,6 +189,24 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 GIBSON="${GIBSON:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PLAYBOOK="$GIBSON/playbooks/loop-step.md"
 [[ -f "$PLAYBOOK" ]] || die "missing $PLAYBOOK"
+
+# --solo-platform (#69): when the operator has one vendor only, the mandatory
+# pre-handoff review uses the same platform with an alternate model tag so
+# Law 5 is satisfied by fresh-context + different model, not a second CLI.
+if [[ "$SOLO_PLATFORM" -eq 1 ]]; then
+  info "solo-platform mode: same-vendor review allowed (fresh context + alt model)"
+  if [[ "$REVIEWERS_SET" -eq 0 ]]; then
+    case "$RUNNER" in
+      claude) REVIEWERS="claude:sonnet" ;;
+      grok)   REVIEWERS="grok:review" ;;
+      codex)  REVIEWERS="codex:review" ;;
+      hermes) REVIEWERS="hermes:review" ;;
+      *)      REVIEWERS="${RUNNER}:review" ;;
+    esac
+    info "solo-platform default reviewers=$REVIEWERS"
+  fi
+fi
+
 
 # L-008 / issue #63: stateless progress sensor (silent_noop_progressed).
 # shellcheck source=silent-noop.sh
@@ -1973,7 +1998,8 @@ escalate() {
     note="Escalation review skipped: the target repo's base branch could not be resolved (Law 8)."
   elif "$SCRIPT_DIR/second-opinion.sh" \
       --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" --base "$base_sha" \
-      --gate-status "red: $failures consecutive runner failures" --out "$out" >/dev/null 2>&1; then
+      --gate-status "red: $failures consecutive runner failures" --out "$out" \
+      $([ "$SOLO_PLATFORM" -eq 1 ] && echo --solo-platform) >/dev/null 2>&1; then
     info "second opinion written to $out (base $base @ $base_sha)"
     note="Second opinion against \`$base\` @ \`$base_sha\` written to gibson/second-opinion.md — next hat must read it."
   else
@@ -2101,20 +2127,30 @@ ensure_cross_vendor_review() {
   fi
 
   if [[ -z "$REVIEWERS" ]]; then
-    block "no reviewers configured: --reviewers is empty, so there is no distinct-vendor reviewer to run and nobody may approve $branch @ $sha (Law 5). Re-run the loop with --reviewers naming a vendor other than $RUNNER."
+    block "no reviewers configured: --reviewers is empty, so there is no reviewer to run and nobody may approve $branch @ $sha (Law 5). Re-run with --reviewers, or --solo-platform for single-vendor mode (#69)."
     return 1
   fi
-  local distinct=0 name
+  local distinct=0 name vendor model
   local names=()
   IFS=',' read -ra names <<< "$REVIEWERS"
   for name in "${names[@]}"; do
     name=$(echo "$name" | tr -d '[:space:]')
-    if [[ -n "$name" && "$name" != "$RUNNER" ]]; then
+    [[ -n "$name" ]] || continue
+    if [[ "$name" == *:* ]]; then
+      vendor="${name%%:*}"; model="${name#*:}"
+    else
+      vendor="$name"; model=""
+    fi
+    if [[ "$vendor" != "$RUNNER" ]]; then
+      distinct=1
+    elif [[ "$SOLO_PLATFORM" -eq 1 ]]; then
+      # Same vendor + solo-platform counts as a present reviewer (fresh context /
+      # alt model). Issue #69: no-deadlock rule for single-platform installs.
       distinct=1
     fi
   done
   if [[ "$distinct" -eq 0 ]]; then
-    block "no distinct vendor: --reviewers '$REVIEWERS' contains no vendor other than the runner ($RUNNER), and nobody grades their own homework (Law 5). Add a different vendor to --reviewers, then re-queue the handoff of $branch @ $sha."
+    block "no distinct vendor: --reviewers '$REVIEWERS' contains no vendor other than the runner ($RUNNER), and nobody grades their own homework (Law 5). Add a different vendor to --reviewers, or re-run with --solo-platform (#69)."
     return 1
   fi
 
@@ -2123,14 +2159,16 @@ ensure_cross_vendor_review() {
   info "running the mandatory distinct-vendor review of $branch @ $sha against $base @ $base_sha before handoff (Law 5)"
   # --base is the exact base SHA, not the branch name: the reviewer must see the
   # same two endpoints the receipt records.
+  local so_extra=()
+  [[ "$SOLO_PLATFORM" -eq 1 ]] && so_extra+=(--solo-platform)
   if "$SCRIPT_DIR/second-opinion.sh" \
       --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" \
       --base "$base_sha" --branch "$sha" \
       --gate-status "pre-handoff mandatory review of $branch @ $sha against $base @ $base_sha" \
-      --out "$out" >/dev/null; then
-    printf 'sha: %s\nbranch: %s\nbase: %s\nbase_sha: %s\nauthor: %s\nreviewers: %s\nreviewed: %s\nstatus: ok\n' \
+      --out "$out" "${so_extra[@]}" >/dev/null; then
+    printf 'sha: %s\nbranch: %s\nbase: %s\nbase_sha: %s\nauthor: %s\nreviewers: %s\nreviewed: %s\nstatus: ok\nsolo_platform: %s\n' \
       "$sha" "$branch" "$base" "$base_sha" "$RUNNER" "$REVIEWERS" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-      > "$REVIEW_RECEIPT"
+      "$SOLO_PLATFORM" > "$REVIEW_RECEIPT"
     info "distinct-vendor review of $sha against $base @ $base_sha completed — receipt at $REVIEW_RECEIPT"
     return 0
   fi
