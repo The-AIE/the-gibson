@@ -29,13 +29,18 @@ They don't sleep, they don't wait for meetings, and they don't need you to
 supervise. They need you for exactly two things: **saying what you want** and
 **saying yes or no** when it's owner business.
 
-### One AI is enough
+### One AI is enough {#one-model-is-enough}
+
+> **Canonical statement.** Other Gibson docs link here; they do not restate this.
 
 You do **not** need a fleet of different AI brands. One strong model (the same
 one you already talk to) can plan, build, test, and ship under the rules. A
 second model is only an optional extra for double-checking sensitive work — never
 a requirement. If someone tells you that vibecoding needs three vendors, that is
 outdated advice for *this* system.
+
+Multi-model review is an **upgrade path**, not a prerequisite for shipping. The
+solo loop primary path is `scripts/loop.sh --runner <one-cli>` against one vendor.
 
 ---
 
