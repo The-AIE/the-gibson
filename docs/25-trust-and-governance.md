@@ -79,9 +79,9 @@ explicitly *runtime-only* and do not touch the SDLC.
 Doctrine ([D-008](../memory/DECISIONS.md)): **borrow the vocabulary and standards;
 take no runtime dependency into the core.**
 
-- **Map our gates to the OWASP Agentic Top 10.** The eight security layers already
-  cover much of the agent-produces-code surface; publishing the mapping turns
-  build-time discipline into a governance claim buyers already understand.
+- **Map our gates to the OWASP Agentic Top 10.** Published as
+  [docs/26-owasp-agentic-mapping.md](26-owasp-agentic-mapping.md) — honest covered / partial /
+  runtime-only marks so we never over-claim.
 - **Close the shared-credential seam with per-actor identity.** One token across
   lanes means an honest action can read as forgery
   ([docs/20](20-multi-model-orchestration.md)); the fix is a GitHub App / machine
