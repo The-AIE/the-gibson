@@ -890,3 +890,25 @@ ref, a diffstat range) is a place the certified comparison can quietly differ
 from the one actually shown.
 **Status:** fixed in harness
 **Tags:** #loop #law5 #gates #git #sensors #issue-55
+
+## L-050 · 2026-08-03 · portability-shim-that-succeeds-for-the-wrong-reason
+**What happened:** `claim-reaper.test.sh` died mid-run on Linux with
+`line 276: File: unbound variable`. The line was a normal-looking BSD/GNU shim:
+`stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"`. On Linux `stat -f` means
+*filesystem* status, so the first branch **succeeded** — printing a multi-line
+block starting `  File: "/tmp"` — and `[[ ... -gt ... ]]` evaluated that text as
+arithmetic, where the bare word `File` is an unset variable under `set -u`.
+**Root cause:** an `A || B` fallback assumes A *fails* on the platform B is for.
+`stat -f` doesn't fail on Linux; it means something else. The fallback never
+fired, and the wrong answer flowed on silently — the crash was luck. The same
+pattern is live in `claim-reaper.sh` (`%m` → mount point), `loop.sh` and
+`gate.sh`/`gate-baseline.sh` (`%d`/`%i` → free blocks / filesystem ID), where
+there is no `set -u` crash to give it away (#99).
+**Harness fix:** probe GNU first, BSD second, and terminate with an explicit
+default: `stat -c %Y f 2>/dev/null || stat -f %m f 2>/dev/null || echo 0`. Same
+ordering rule as the `date -u -d` / `date -u -j -f` shim in `claims-status.sh`.
+**Rule of thumb:** a cross-platform fallback is only safe when the wrong branch
+*errors*. If a flag exists on both platforms with different meanings, order by
+which one you can detect, and give the chain a terminating default.
+**Status:** fixed in the test (#93); production call sites tracked in #99
+**Tags:** #portability #shell #sensors
