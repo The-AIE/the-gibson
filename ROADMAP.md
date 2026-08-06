@@ -19,6 +19,17 @@ Design docs 01–15, operator guide, memory seeds, templates, specs. ✅
   the claim protocol (docs/05 seam)
 - **Demo:** one Tier A issue flows end-to-end on the sandbox, zero human touches.
 
+
+## Dogfood status (issue #96)
+
+- **Prep (this harness):** `scripts/dogfood-prep.sh` + `playbooks/dogfood-overnight.md` +
+  `memory/dogfood/` evidence home — preflight and launch contract, offline sensors green.
+- **Run (operator host):** overnight `loop.sh` still needs a machine with a runner CLI
+  and Mark's confirm; not blocked on more code in this repo.
+- **Parked (do not include in dogfood backlog):** live Goose path #28 / #33 / #36 and
+  Mark-gated publish — operator deferred testing. Offline Goose enforce/session already
+  landed (#35 / #134).
+
 ## Phase 3 — First real adoption
 - Adopt one production repo (candidate: chatterbuilt — small, Vercel, active)
 - Playwright ux-eval job vs. preview deployments; authz matrix + ZAP baseline
