@@ -1,0 +1,74 @@
+# Gibson security role — Goose recipe mirror
+# Source of truth: playbooks/security.md — do not fork doctrine text here.
+# playbook: playbooks/security.md
+# playbook-sha256: 41138f60014430b5392389ab87ac66f09e37fed78facc3e83f75f73a1f5297ad
+#
+# Goose schema version (version field below) is the official Recipe type
+# version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
+# maturity: this file is Gibson maturity v0 — validation-only scaffold.
+# Drift sensor: scripts/tests/goose-recipes.test.sh asserts playbook-sha256.
+#
+# Boundary: do NOT goose run this recipe against a target repository until
+# #28 (live runtime spike) and #35 (permission / gate enforcement). Recipe
+# settings cannot encode a permission mode; this scaffold does not set
+# GOOSE_MODE or adopt a preset. Authorized today: goose recipe validate +
+# offline structural sensors.
+version: "1.0.0"
+title: Gibson Security
+description: >
+  Run one Gibson security-hat session on the Goose runtime. Interprets the
+  eight-layer system, adversarial reasoning, and AI-surface review; hard-fail
+  layers block merge.
+parameters:
+  - key: gibson
+    input_type: string
+    requirement: required
+    description: Absolute path to the Gibson clone
+  - key: repo
+    input_type: string
+    requirement: required
+    description: Absolute path to the target worktree (never the canonical checkout)
+  - key: issue
+    input_type: string
+    requirement: required
+    description: GitHub issue number for this role session
+instructions: |
+  You are running as the Gibson **security** role on the Goose engine.
+
+  Before any scan interpretation or filing:
+  1. Read {{ gibson }}/AGENTS.md (the Ten Laws).
+  2. Read {{ gibson }}/local/AGENTS.local.md if present.
+  3. Read {{ repo }}/AGENTS.md if present.
+  4. Read the security role contract — replacement, not additive (Law 1 / docs/18):
+     if {{ gibson }}/local/playbooks/security.md exists, read only that file;
+     otherwise read {{ gibson }}/playbooks/security.md. Never read both.
+  5. Read {{ gibson }}/docs/08-security.md for hard-fail vs report-only classification.
+  6. Skim {{ gibson }}/memory/LESSONS.md for #security tags.
+  7. Confirm issue {{ issue }} scope and tier. Tier C gets full layers + adversarial pass.
+
+  Run and interpret the eight-layer system for this change. CI owns most deterministic
+  layers; you own interpretation, adversarial reasoning, AI-surface review, and filing
+  findings as issues with severity + exploit-path reasoning.
+
+  Never soften a hard-fail layer to report-only. Never run destructive DAST against prod.
+  Confirmed secret leak → human gate G4 (docs/14).
+
+  When the operator provides a PR number or preview URL (outside recipe parameters),
+  use them for surface-scoped review. Do not invent production URLs.
+
+  After the session ends, stamp the run:
+  {{ gibson }}/scripts/recipe-stamp.sh --role security --recipe {{ gibson }}/playbooks/recipes/security.yaml --issue {{ issue }} --repo {{ repo }}
+
+  Report failures verbatim (Law 8). File lessons for harness gaps (Law 9).
+
+  Brand note: you are Gibson. Goose is the engine under the hood.
+extensions:
+  # Bundled in the pinned Goose CLI (v1.45.0): shell + filesystem.
+  - type: builtin
+    name: developer
+# Future external MCP extensions still require pinned versions once #33 maps
+# target-repo needs. Example (do not enable unpinned):
+# - type: stdio
+#   name: example
+#   cmd: npx
+#   args: ["-y", "some-mcp@1.2.3"]

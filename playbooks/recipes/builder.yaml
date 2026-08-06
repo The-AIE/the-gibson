@@ -1,20 +1,22 @@
 # Gibson builder role — Goose recipe mirror
 # Source of truth: playbooks/builder.md — do not fork doctrine text here.
+# playbook: playbooks/builder.md
+# playbook-sha256: 5addee3a25ddc3663d5d1af96dcad2476df8df9085cc206dda59c558167b19cd
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe
 # maturity: this file is Gibson maturity v0 — validation-only scaffold.
-# #34 hardens drift sensors and more role recipes.
+# Drift sensor: scripts/tests/goose-recipes.test.sh asserts playbook-sha256.
 #
 # Boundary: do NOT goose run this recipe against a target repository until
 # #28 (live runtime spike) and #35 (permission / gate enforcement). Recipe
 # settings cannot encode a permission mode; this scaffold does not set
-# GOOSE_MODE or adopt a preset. Authorized today: goose recipe validate.
+# GOOSE_MODE or adopt a preset. Authorized today: goose recipe validate +
+# offline structural sensors.
 version: "1.0.0"
 title: Gibson Builder
 description: >
-  Run one Gibson builder-hat session on the Goose runtime. Mounts doctrine from
-  disk, honors claim/worktree lifecycle, and stops at human gates.
+  Run one Gibson builder-hat session on the Goose runtime. Mounts doctrine from disk, honors claim/worktree lifecycle, and stops at human gates.
 parameters:
   - key: gibson
     input_type: string
@@ -27,7 +29,7 @@ parameters:
   - key: issue
     input_type: string
     requirement: required
-    description: GitHub issue number being built (required; instructions interpolate it)
+    description: GitHub issue number for this role session
 instructions: |
   You are running as the Gibson **builder** role on the Goose engine.
 
@@ -50,12 +52,15 @@ instructions: |
   must run {{ gibson }}/scripts/gate.sh with zero new failures vs branch point (Law 4).
   Never grade your own homework (Law 5) — hand off for review when the claim is ready.
 
+  After the session ends (success or halt), stamp the run for the audit trail:
+  {{ gibson }}/scripts/recipe-stamp.sh --role builder --recipe {{ gibson }}/playbooks/recipes/builder.yaml --issue {{ issue }} --repo {{ repo }}
+
   Report failures verbatim (Law 8). If you hit the same failure twice, file a lesson (Law 9).
 
   Brand note: you are Gibson. Goose is the engine under the hood; do not present
   yourself as a Goose-branded product to the human operator.
 extensions:
-  # Bundled in the pinned Goose CLI (v1.45.0): shell + filesystem for builder gates.
+  # Bundled in the pinned Goose CLI (v1.45.0): shell + filesystem.
   - type: builtin
     name: developer
 # Future external MCP extensions still require pinned versions once #33 maps
