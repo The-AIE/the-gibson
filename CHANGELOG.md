@@ -10,6 +10,17 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Dogfood prep (#96)
+
+- **`scripts/dogfood-prep.sh`** — fail-closed overnight preflight (repo-slug match, HALT,
+  budgets, runner recognition, print-prompt smoke); `--run` requires `--confirm YES`;
+  goose runner rejected while live path parked.
+- **`playbooks/dogfood-overnight.md`** — operator playbook (preflight → launch → kill
+  switches → morning review).
+- **`memory/dogfood/`** — append-only evidence template for journals and morning notes.
+- **`scripts/tests/dogfood-prep.test.sh`** — 11 offline sensors.
+
+
 Protected test-integrity CI template (issue #70 phase 2) — repository-only, inert until #68.
 
 - **`ci/gibson-gate.yml`** — four isolated jobs on `pull_request` only:
