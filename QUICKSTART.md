@@ -155,8 +155,12 @@ git commit -s -m "docs: canary for Gibson adoption"
 Or **single-model** solo loop (primary path):
 
 ```bash
-~/Code/the-gibson/scripts/loop.sh --runner grok --repo ~/Code/acme-app --max-iterations 20
+~/Code/the-gibson/scripts/loop.sh --runner grok --repo ~/Code/acme-app --repo-slug acme/app \
+  --solo-platform --max-iterations 20
 ```
+
+`--solo-platform` (#69) keeps review non-deadlocking when only one vendor CLI is
+installed — see [docs/11](docs/11-solo-loop.md).
 
 Optional multi-model upgrade (not required):
 

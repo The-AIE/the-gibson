@@ -299,3 +299,31 @@ with every "am I done?" answered by a sensor instead of the model's own opinion.
 (Hermes when present) — same env-hook pattern as `HERMES_CMD`. The loop remains
 correct without delivery; gated work is visible once the channel is wired.
 
+## Single-platform mode (`--solo-platform`, issue #69)
+
+Cross-vendor review is preferred (docs/20). When **exactly one** AI vendor CLI is
+installed and no second vendor is available, run:
+
+```bash
+./scripts/loop.sh --runner grok --repo ~/Code/acme --repo-slug owner/acme \
+  --solo-platform --escalate-after 2
+```
+
+### Contract
+
+| Concern | Multi-vendor (default) | Single-platform (`--solo-platform`) |
+|---|---|---|
+| Pre-handoff review | Distinct vendor CLI required | Same vendor, **different model** / fresh-context plan pass (`vendor:model`) |
+| Law 5 | Different vendor | Fresh context + alt model counts as present reviewer |
+| Escalation | `--reviewers codex,claude` | Same-vendor alt-model second opinion (no deadlock) |
+| Tier B | One independent APPROVE | Prefer **two** independent fresh-context APPROVE verdicts when available |
+| Tier C | Human gate (docs/14 G12) | **Unchanged** — still human-gated |
+| Missing review path | Fail closed (block handoff) | Fail closed only if the configured solo review path itself breaks |
+
+Default `--reviewers` under `--solo-platform` becomes `<runner>:review` (e.g.
+`grok:review`, `claude:sonnet`) when the operator does not pass `--reviewers`.
+
+This is a **documented degraded mode**, not a silent skip. Pair with a dedicated
+reviewer GitHub identity (#67) so branch protection remains satisfiable under
+L-015/L-021.
+

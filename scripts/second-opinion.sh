@@ -32,8 +32,14 @@ USAGE
                     [--out PATH] [--task TEXT | --task-file PATH]
 
 OPTIONS
-  --reviewers LIST  comma-separated: codex, claude, grok (default: codex,claude)
-  --author NAME     runner that wrote the diff; excluded from the reviewer list
+  --reviewers LIST  comma-separated vendors, optional :model suffix
+                    (e.g. claude:opus, grok, codex). Default: codex,claude
+  --author NAME     runner that wrote the diff; excluded unless --solo-platform
+  --solo-platform   single-vendor mode (#69): same platform may review when a
+                    different model is requested (vendor:model) or when the only
+                    available CLI is the author — fresh-context plan mode still
+                    applies. Compensating control for Tier B: two independent
+                    passes (caller enforces).
   --base REF        diff base (default: main; loop.sh passes the target repo's
                     resolved default branch). Must resolve to a commit — an
                     unresolvable base is an error, not a working-tree diff.
@@ -56,6 +62,7 @@ GATE_STATUS=""
 OUT=""
 TASK=""
 TASK_FILE=""
+SOLO_PLATFORM=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -69,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --out) OUT="$2"; shift 2 ;;
     --task) TASK="$2"; shift 2 ;;
     --task-file) TASK_FILE="$2"; shift 2 ;;
+    --solo-platform) SOLO_PLATFORM=1; shift ;;
     *) echo "unknown: $1" >&2; usage; exit 2 ;;
   esac
 done
@@ -154,23 +162,49 @@ not safety (docs/20 rule 3). Do not invent nits; if the diff is sound, say so.
 EOF
 } > "$PROMPT_FILE"
 
-run_reviewer() { # run_reviewer <name> <prompt-file>
-  case "$1" in
+# Split "vendor:model" → vendor + optional model. vendor alone keeps model empty.
+split_reviewer() { # sets _rv_vendor _rv_model from $1
+  local spec="$1"
+  if [[ "$spec" == *:* ]]; then
+    _rv_vendor="${spec%%:*}"
+    _rv_model="${spec#*:}"
+  else
+    _rv_vendor="$spec"
+    _rv_model=""
+  fi
+}
+
+run_reviewer() { # run_reviewer <vendor:model|vendor> <prompt-file>
+  split_reviewer "$1"
+  local vendor="$_rv_vendor" model="$_rv_model"
+  case "$vendor" in
     codex)
       command -v codex >/dev/null || { info "codex CLI not found — skipping"; return 1; }
-      codex exec --sandbox read-only --cd "$REPO" - < "$2"
+      if [[ -n "$model" ]]; then
+        codex exec --sandbox read-only --cd "$REPO" -m "$model" - < "$2"
+      else
+        codex exec --sandbox read-only --cd "$REPO" - < "$2"
+      fi
       ;;
     claude)
       command -v claude >/dev/null || { info "claude CLI not found — skipping"; return 1; }
       # stdin, not a positional arg: the rendered playbook starts with YAML
       # frontmatter ("---"), which claude's parser reads as an unknown option
-      (cd "$REPO" && claude -p --output-format text --permission-mode plan < "$2")
+      if [[ -n "$model" ]]; then
+        (cd "$REPO" && claude -p --model "$model" --output-format text --permission-mode plan < "$2")
+      else
+        (cd "$REPO" && claude -p --output-format text --permission-mode plan < "$2")
+      fi
       ;;
     grok)
       command -v grok >/dev/null || { info "grok CLI not found — skipping"; return 1; }
-      grok --prompt-file "$2" --cwd "$REPO" --permission-mode plan
+      if [[ -n "$model" ]]; then
+        grok --prompt-file "$2" --cwd "$REPO" --permission-mode plan --model "$model"
+      else
+        grok --prompt-file "$2" --cwd "$REPO" --permission-mode plan
+      fi
       ;;
-    *) info "unknown reviewer: $1 — skipping"; return 1 ;;
+    *) info "unknown reviewer: $vendor — skipping"; return 1 ;;
   esac
 }
 
@@ -187,9 +221,26 @@ IFS=',' read -ra NAMES <<< "$REVIEWERS"
 for name in "${NAMES[@]}"; do
   name=$(echo "$name" | tr -d '[:space:]')
   [[ -n "$name" ]] || continue
-  if [[ -n "$AUTHOR" && "$name" == "$AUTHOR" ]]; then
-    info "skipping $name — it wrote this diff (AGENTS.md Law 5)"
-    continue
+  split_reviewer "$name"
+  vendor="$_rv_vendor"
+  model="$_rv_model"
+  # Law 5: never same vendor unless solo-platform with an explicit different model
+  # (fresh-context plan mode) — issue #69 degraded mode.
+  if [[ -n "$AUTHOR" && "$vendor" == "$AUTHOR" ]]; then
+    if [[ "$SOLO_PLATFORM" -eq 1 && -n "$model" ]]; then
+      info "solo-platform: allowing same-vendor review $name (different model, fresh context)"
+    elif [[ "$SOLO_PLATFORM" -eq 1 && -z "$model" ]]; then
+      # Auto-pick a review model tag so the receipt shows a distinct model lane.
+      case "$vendor" in
+        claude) name="claude:sonnet"; info "solo-platform: rewriting reviewer to $name (fresh-context alt model)" ;;
+        grok)   name="grok:review";  info "solo-platform: rewriting reviewer to $name (fresh-context alt model)" ;;
+        codex)  name="codex:review"; info "solo-platform: rewriting reviewer to $name (fresh-context alt model)" ;;
+        *) info "solo-platform: same-vendor $vendor with no model suffix — still dispatching plan-mode fresh context"; ;;
+      esac
+    else
+      info "skipping $name — it wrote this diff (AGENTS.md Law 5)"
+      continue
+    fi
   fi
   info "dispatching $name (read-only)"
   verdict_file=$(mktemp)
@@ -223,5 +274,5 @@ rm -f "$PROMPT_FILE"
 
 cat "$OUT"
 [[ ! -s "$LOG" ]] || info "reviewer stderr in $LOG"
-[[ "$reviewed" -gt 0 ]] || die "no reviewer ran — install a second vendor's CLI or pass --reviewers"
+[[ "$reviewed" -gt 0 ]] || die "no reviewer ran — install a second vendor's CLI, pass --reviewers, or use --solo-platform with a vendor:model reviewer (#69)"
 info "wrote $OUT"

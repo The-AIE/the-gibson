@@ -141,6 +141,53 @@ fi
 if reviewer_ran; then bad "a reviewer was spent on an empty diff"
 else ok "no reviewer was dispatched for an empty diff"; fi
 
+# --- #69 solo-platform: same-vendor alt-model may review ---
+echo "#69 · solo-platform allows same-vendor:model review"
+setup_repo
+# stub claude as author-matching reviewer
+cat > "$BIN/claude" <<STUB
+#!/usr/bin/env bash
+# record args + stdin
+echo "\$@" > "$CALLS/claude.args"
+cat > "$CALLS/claude.prompt"
+echo call >> "$CALLS/claude.count"
+echo "VERDICT: APPROVE (solo-platform alt model)"
+STUB
+chmod +x "$BIN/claude"
+: > "$CALLS/claude.count"
+# author=claude, reviewer=claude:sonnet with --solo-platform
+if "$SECOND_OPINION" --repo "$REPO" --reviewers claude:sonnet --author claude \
+    --solo-platform --base main --branch "$BRANCH" --out "$OUT" >/dev/null 2>"$ROOT/so69.err"; then
+  if [[ -s "$CALLS/claude.count" ]]; then
+    ok "solo-platform same-vendor:model dispatched"
+  else
+    bad "solo-platform did not dispatch claude"
+  fi
+  if grep -q 'solo-platform' "$ROOT/so69.err" || [[ -s "$OUT" ]]; then
+    ok "solo-platform produced a report"
+  else
+    bad "solo-platform empty report"
+  fi
+else
+  bad "solo-platform same-vendor review failed: $(cat "$ROOT/so69.err")"
+fi
+
+# without --solo-platform, same vendor is skipped → no reviewer ran → die
+setup_repo
+cat > "$BIN/claude" <<STUB
+#!/usr/bin/env bash
+echo call >> "$CALLS/claude.count"
+echo "VERDICT: APPROVE"
+STUB
+chmod +x "$BIN/claude"
+: > "$CALLS/claude.count"
+if "$SECOND_OPINION" --repo "$REPO" --reviewers claude --author claude \
+    --base main --branch "$BRANCH" --out "$OUT" >/dev/null 2>"$ROOT/so69b.err"; then
+  bad "same-vendor without solo-platform should die"
+else
+  ok "same-vendor without solo-platform fails closed"
+fi
+
 echo
 echo "second-opinion.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
