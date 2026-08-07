@@ -113,14 +113,23 @@ Two correct actors, one identity, zero provenance.
 ## Variant: lean coordinator (implementer + coordinator only)
 
 The shape above assumes three roles live on every task (implementer, reviewer,
-coordinator). That's the ceiling, not the floor. A lean variant — one
-implementer vendor plus the coordinator, no separate reviewer worker — is a
-legitimate deployment pattern when the coordinator's own independent
-re-verification (rule 2: re-run the checks, read the actual diff) is done for
-real and not rubber-stamped, and when nothing in the batch triggers rule 1's
-"no exceptions" (the coordinator authoring a fix itself, or genuinely
-high-stakes surface — auth, PII, secrets, schema, money). Below that bar, add
-a second-vendor reviewer before merging, not after.
+coordinator). That's the ceiling, not the floor. Rule 1 stays absolute in
+every variant — no exceptions, ever. What the lean variant drops is only the
+*dedicated reviewer worker*: when the implementer is already a different
+vendor than the coordinator, and the coordinator's own re-verification (rule
+2: re-run the checks, read the actual diff) is done for real and not
+rubber-stamped, the coordinator's re-verification *is* the cross-vendor check
+— a third worker is redundant, not required. This only holds while:
+
+- implementer vendor ≠ coordinator vendor (same-vendor implementer +
+  coordinator is not cross-vendor anything — that's rule 1 with no reviewer
+  at all, never legitimate), and
+- nothing in the batch triggers rule 1's high-stakes carve-out (the
+  coordinator authoring a fix itself, or genuinely high-stakes surface — auth,
+  PII, secrets, schema, money) — that always gets a dedicated second-vendor
+  reviewer, full stop.
+
+Below that bar, add the reviewer worker back before merging, not after.
 
 ### Worked example: Chatterbuilt, 2026-08-06
 
@@ -128,16 +137,17 @@ Shape: Grok implements (dispatched per-task via `grok-cc:grok-rescue`, cold
 start, one spec each), Claude coordinates — dispatches, independently
 re-verifies every diff and the actual CI gate result, merges. No separate
 reviewer vendor this run; a deliberate operator scope choice for a repo
-already on Gibson's rung-1 adoption (gate + claims ledger, human/coordinator-
-driven, not the unattended `loop.sh` driver — see doc 13).
+already on Gibson's rung 1 (`memory/DECISIONS.md` D-006: gate + agent
+contract installed, interactive coordinator drives the merge train — not yet
+handed to the unattended `loop.sh` / solo loop of rung 2, doc 11).
 
 Four PRs landed (#401, #393, #400, #394) plus one redundant one caught before
 merge. Three things surfaced worth folding back into doctrine:
 
 | Failure caught | Cause | Doctrine that caught it |
 |---|---|---|
-| Would-be silent merge on broken quality signal | A GitHub-wide Actions outage throttled webhooks; third-party checks (Snyk, CodeRabbit, Devin, Vercel) kept reporting green because they don't depend on GH Actions, but the actual required `gibson-gate`/`security`/`ux-eval` workflows never ran for the pushed SHA — `gh pr checks` showed all-pass regardless | Extends rule 2: **a missing check is not a passed check.** Cross-check `gh api repos/OWNER/REPO/actions/runs?head_sha=<sha>` returns a non-empty run list for the exact head SHA before trusting "green." Fix once the outage clears: an empty commit reliably re-triggers a dropped webhook event. |
-| A rebase-resolved PR failed real CI after passing the worker's local gate run | `docs/active-work.md`'s claim-isolation check (`check-active-work.mjs`) fails on any *reordering* of another session's claim row, not just content edits — a plain 3-way merge of that file can silently reorder rows even though every row's content survives | New sub-rule for doc 05 (concurrency): when a merge touches a shared append-only ledger file, take the base branch's copy of that file verbatim and insert only your own row as a pure addition; verify with a scoped diff (`git diff base...HEAD -- <file>`) before trusting a local test run |
+| Would-be silent merge on broken quality signal | A GitHub-wide Actions outage throttled webhooks; third-party checks (Snyk, CodeRabbit, Devin, Vercel) kept reporting green because they don't depend on GH Actions, but the actual required `gibson-gate`/`security`/`ux-eval` workflows never ran for the pushed SHA — `gh pr checks` showed all-pass regardless | Extends rule 2: **a missing check is not a passed check.** Cross-check `gh api repos/OWNER/REPO/actions/runs?head_sha=<sha>` returns a non-empty run list for the exact head SHA before trusting "green." Once the outage clears, an empty commit (`git commit --allow-empty`) worked to re-trigger a dropped webhook event in this instance — treat as a thing to try, not a guarantee. |
+| A rebase-resolved PR failed real CI after passing the worker's local gate run | Chatterbuilt predates this harness's per-file claims layout and still runs a legacy single-table `docs/active-work.md` + `check-active-work.mjs`, which fails a PR on any *reordering* of another session's claim row (diffs the file line-by-line) — not just content edits. A plain 3-way merge of that table can silently reorder rows even though every row's content survives. **This is specific to that legacy table sensor, not Gibson's own claim mechanism** — this harness's `scripts/check-active-work.mjs` (doc 05, issue #55) tracks claims as one file per `docs/claims/issue-N-*.md`, so a rename/reorder doesn't produce the same false positive | Operational lesson, not yet a doc 05 rule: on a repo still running the legacy table (pending its own migration to per-file claims), take the base branch's copy of the ledger file verbatim and insert only your own row as a pure addition; verify with a scoped diff (`git diff base...HEAD -- <file>`) before trusting a local test run |
 | A dispatched "finish this issue" task would have opened a merge-worthy-looking PR for work already shipped | The worktree handed to the worker was a stale pre-merge copy of a branch whose feature had already landed on main via a *different* PR the worker had no way to know about (cold start, no shared memory) | Rule 2, applied before merge rather than after: the coordinator diffed the PR against current main and found the "feature" was a no-op (one stray `.gitignore` line) — closed the PR and the underlying issue instead of merging a duplicate |
 
 ## Extending the pattern: adding Codex and Hermes
