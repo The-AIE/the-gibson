@@ -123,9 +123,10 @@ Before any `loop.sh` start the driver checks:
 - Canonical checkout is clean (`git status --porcelain` must succeed; a failed
   probe is **not** treated as clean)
 - Builder / reviewer / release three-role separation
-- Open-PR inventory is parsed fail-closed (only a literal empty JSON array is
-  zero-pair success; malformed output, missing fields, duplicates, or hitting
-  the list limit all refuse)
+- Open-PR inventory is parsed fail-closed (`gh pr list` via built-in
+  `--template` emits strict metadata-only TSV of `number<TAB>headRefName`;
+  only empty TSV output is zero-pair success; malformed output, missing
+  fields, duplicates, or hitting the list limit all refuse)
 
 #### Unstarted and future queue items (strict)
 
