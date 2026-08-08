@@ -456,6 +456,13 @@ _parser_expect_no "--squash separate" commit --squash HEAD
 _parser_expect_no "--squash=equals" commit --squash=HEAD
 # -sm msg: s boolean + m value in next argv (skip_next), not worktree.
 _parser_expect_no "combined -sm with separate message" commit -sm msg
+# Optional attached-value shorts: payload may contain a/i/o/p but is not flags.
+_parser_expect_no "attached -Ssigning-key (value not flags)" commit -Ssigning-key -m msg
+_parser_expect_no "attached -uno (value not flags)" commit -uno -m msg
+_parser_expect_no "attached -Sa (S payload a not flag)" commit -Sa -m msg
+# Actual worktree flags and combined forms still fail closed.
+_parser_expect_yes "plain -a still worktree" commit -a -m msg
+_parser_expect_yes "combined -am still worktree" commit -am msg
 
 # --- e2e: non-interactive pathspec-from-file protected worktree bypass ------
 # Must not hang (no editor / patch UI). Dirty protected tracked path + equals
@@ -658,6 +665,23 @@ else
   # Drop the fixup commit; keep tree clean for later sensors.
   git -C "$ROOT" reset -q --hard "$pre_fixup" 2>/dev/null || true
 fi
+# -uno: optional attached-value short; no external signing config required.
+# Dirty protected path must NOT cause exit 86 (payload letters are not flags).
+printf 'dirty protected for -uno\n' > "$ROOT/.agents/gate.json"
+printf 'uno body\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README for -uno safe-control sensor (rc=$rc)"
+else
+  run_guard commit -uno -m 'safe uno commit' >/dev/null 2>"$ROOT/err"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "safe-control commit -uno with dirty protected succeeds"
+  else
+    bad "safe-control -uno false positive (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+  fi
+fi
 git -C "$ROOT" checkout -q HEAD -- .agents/gate.json README.md 2>/dev/null || true
 git -C "$ROOT" reset -q 2>/dev/null || true
 
@@ -774,6 +798,154 @@ fi
 rm -f "$ROOT/.agents/gate."$'*''.json' "$ROOT/.agents/gate.[x].json"
 git -C "$ROOT" reset -q 2>/dev/null || true
 git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
+
+# --- enumeration failure fail-closed: staged + unstaged fake-git sensors ----
+# Process substitution used to drop `git diff` status, so a failed enumeration
+# looked like a clean index/worktree. Owned shims prove commit/push/add exit 86
+# with a bounded diagnostic and never delegate the protected op (except add,
+# which always runs real add first then fails closed on the post-add scan).
+REAL_GIT_BIN=$(command -v git)
+DELEGATE_LOG="$ROOT/fake-git-delegated.log"
+
+# Helper: fail only the staged name-only enumeration the guard issues.
+write_fake_git_staged_diff_fail() {
+  local dest="$1"
+  cat > "$dest" <<EOF
+#!/usr/bin/env bash
+# Fail staged path enumeration; log any delegated add/commit/push.
+_is_staged_enum=0
+_has_cached=0
+_has_name_only=0
+for _a in "\$@"; do
+  case "\$_a" in
+    --cached) _has_cached=1 ;;
+    --name-only) _has_name_only=1 ;;
+  esac
+done
+if [[ "\$_has_cached" -eq 1 && "\$_has_name_only" -eq 1 ]]; then
+  echo "fake-git: staged enumeration forced failure" >&2
+  exit 17
+fi
+case "\${1-}" in
+  add|commit|push)
+    printf '%s\n' "\$*" >> "$DELEGATE_LOG"
+    ;;
+esac
+exec "$REAL_GIT_BIN" "\$@"
+EOF
+  chmod +x "$dest"
+}
+
+# Helper: fail only the unstaged name-only enumeration (no --cached).
+write_fake_git_unstaged_diff_fail() {
+  local dest="$1"
+  cat > "$dest" <<EOF
+#!/usr/bin/env bash
+_has_cached=0
+_has_name_only=0
+for _a in "\$@"; do
+  case "\$_a" in
+    --cached) _has_cached=1 ;;
+    --name-only) _has_name_only=1 ;;
+  esac
+done
+if [[ "\$_has_cached" -eq 0 && "\$_has_name_only" -eq 1 ]]; then
+  echo "fake-git: unstaged enumeration forced failure" >&2
+  exit 19
+fi
+case "\${1-}" in
+  add|commit|push)
+    printf '%s\n' "\$*" >> "$DELEGATE_LOG"
+    ;;
+esac
+exec "$REAL_GIT_BIN" "\$@"
+EOF
+  chmod +x "$dest"
+}
+
+run_guard_with_fake() {
+  local fake="$1"
+  shift
+  rm -f "$DELEGATE_LOG"
+  (cd "$ROOT" &&
+    GIBSON_REAL_GIT="$fake" \
+    GIBSON_TARGET_REPO="$ROOT" \
+    GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+    "$GUARD" "$@")
+}
+
+# Staged enum fail → commit: exit 86, diagnostic, no real commit delegated.
+FAKE_STAGED="$ROOT/fake-git-staged-diff-fail.sh"
+write_fake_git_staged_diff_fail "$FAKE_STAGED"
+run_guard_with_fake "$FAKE_STAGED" commit -m 'enum fail commit' \
+  >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "failed to enumerate staged paths" "$ROOT/err"; then
+  ok "staged enum failure: commit exits 86 with diagnostic"
+else
+  bad "staged enum failure commit (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+if [[ ! -f "$DELEGATE_LOG" ]] || ! grep -q '^commit' "$DELEGATE_LOG" 2>/dev/null; then
+  ok "staged enum failure: commit not delegated to real git"
+else
+  bad "staged enum failure: commit was delegated ($(tr '\n' ' ' <"$DELEGATE_LOG"))"
+fi
+
+# Staged enum fail → push: exit 86, no real push.
+run_guard_with_fake "$FAKE_STAGED" push origin main \
+  >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "failed to enumerate staged paths" "$ROOT/err"; then
+  ok "staged enum failure: push exits 86 with diagnostic"
+else
+  bad "staged enum failure push (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+if [[ ! -f "$DELEGATE_LOG" ]] || ! grep -q '^push' "$DELEGATE_LOG" 2>/dev/null; then
+  ok "staged enum failure: push not delegated to real git"
+else
+  bad "staged enum failure: push was delegated ($(tr '\n' ' ' <"$DELEGATE_LOG"))"
+fi
+
+# Staged enum fail → add: real add may run first; post-add scan fails closed 86.
+printf 'enum-fail-add-body\n' > "$ROOT/README.md"
+run_guard_with_fake "$FAKE_STAGED" add README.md \
+  >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "failed to enumerate staged paths" "$ROOT/err"; then
+  ok "staged enum failure: add exits 86 with diagnostic (fail closed)"
+else
+  bad "staged enum failure add (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+# Cleanup any staged README from the pre-scan add.
+git -C "$ROOT" reset -q 2>/dev/null || true
+git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
+
+# Unstaged enum fail → worktree-including commit form: exit 86, no real commit.
+# Staged scan must succeed (passthrough); only unstaged name-only fails.
+FAKE_UNSTAGED="$ROOT/fake-git-unstaged-diff-fail.sh"
+write_fake_git_unstaged_diff_fail "$FAKE_UNSTAGED"
+printf 'seed-unstaged-enum\n' > "$ROOT/.agents/gate.json"
+git -C "$ROOT" add .agents/gate.json
+git -C "$ROOT" commit -qm 'seed for unstaged enum fail'
+printf 'dirty for unstaged enum fail\n' > "$ROOT/.agents/gate.json"
+printf 'unstaged-enum-readme\n' > "$ROOT/README.md"
+git -C "$ROOT" add README.md
+run_guard_with_fake "$FAKE_UNSTAGED" commit -am 'enum fail -am' \
+  >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "failed to enumerate unstaged paths" "$ROOT/err"; then
+  ok "unstaged enum failure: commit -am exits 86 with diagnostic"
+else
+  bad "unstaged enum failure commit -am (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+if [[ ! -f "$DELEGATE_LOG" ]] || ! grep -q '^commit' "$DELEGATE_LOG" 2>/dev/null; then
+  ok "unstaged enum failure: commit -am not delegated to real git"
+else
+  bad "unstaged enum failure: commit was delegated ($(tr '\n' ' ' <"$DELEGATE_LOG"))"
+fi
+rm -f "$FAKE_STAGED" "$FAKE_UNSTAGED" "$DELEGATE_LOG"
+git -C "$ROOT" checkout -q HEAD -- .agents/gate.json README.md 2>/dev/null || true
+git -C "$ROOT" reset -q 2>/dev/null || true
 
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
