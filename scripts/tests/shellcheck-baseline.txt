@@ -2,6 +2,11 @@
 # One "file<TAB>code" pair per line. run-all.sh fails on anything not listed
 # here, and also fails when a listed pair stops being reported — delete the
 # line in the same PR that fixes it. This list only shrinks.
+#
+# Exact ShellCheck version for this ratchet lives in scripts/tests/run-all.sh
+# (SHELLCHECK_REQUIRED_VERSION) — that file is the machine source of the pin.
+# CI installs a matching official release asset (gibson-self-gate.yml). run-all
+# verifies equality before comparing findings to this list. Do not restate the
+# version number here; a bump updates run-all.sh + the CI pin together.
 scripts/deploy-audit.sh	SC2034
 scripts/posture-probe.sh	SC2034
-scripts/tests/loop-state.test.sh	SC2218
