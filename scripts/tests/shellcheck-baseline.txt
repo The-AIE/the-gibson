@@ -3,8 +3,10 @@
 # here, and also fails when a listed pair stops being reported — delete the
 # line in the same PR that fixes it. This list only shrinks.
 #
-# Semantics assume ShellCheck exactly $SHELLCHECK_REQUIRED_VERSION in
-# scripts/tests/run-all.sh (currently 0.11.0). CI installs that same pin from
-# the official koalaman release asset (.github/workflows/gibson-self-gate.yml).
+# Exact ShellCheck version for this ratchet lives in scripts/tests/run-all.sh
+# (SHELLCHECK_REQUIRED_VERSION) — that file is the machine source of the pin.
+# CI installs a matching official release asset (gibson-self-gate.yml). run-all
+# verifies equality before comparing findings to this list. Do not restate the
+# version number here; a bump updates run-all.sh + the CI pin together.
 scripts/deploy-audit.sh	SC2034
 scripts/posture-probe.sh	SC2034

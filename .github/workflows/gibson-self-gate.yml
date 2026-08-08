@@ -43,6 +43,16 @@ jobs:
           SC_URL: "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz"
         run: |
           set -euo pipefail
+          # This pin is the official linux.x86_64 asset only. Refuse other
+          # architectures so we never silently install a binary that cannot run.
+          arch="$(uname -m)"
+          if [ "$arch" != "x86_64" ]; then
+            echo "error: ShellCheck pin is shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+            echo "       This runner reports uname -m = '${arch}'."
+            echo "       Refusing to install the wrong binary. Use an x86_64 runner"
+            echo "       or extend the pin with a matching official asset + digest."
+            exit 1
+          fi
           cd "${RUNNER_TEMP}"
           curl -fsSL -o "shellcheck.tar.xz" "$SC_URL"
           echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -

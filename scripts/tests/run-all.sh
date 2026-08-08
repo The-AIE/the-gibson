@@ -82,6 +82,47 @@ parse_shellcheck_version() {
   printf '%s' "$v"
 }
 
+# True when a parsed version equals the exact pin (used by SC_OK gating).
+shellcheck_version_matches_pin() {
+  local got="${1:-}"
+  [[ -n "$got" && "$got" == "$SHELLCHECK_REQUIRED_VERSION" ]]
+}
+
+# Plain-language install path to the official pinned release assets (no package
+# manager "latest"). Digests are the published GitHub asset metadata for the
+# current pin; verify before putting the binary on PATH.
+print_shellcheck_install_remediation() {
+  local v="$SHELLCHECK_REQUIRED_VERSION"
+  cat <<EOF
+         Install official ShellCheck ${v} from the koalaman release assets
+         (exact pin — package-manager "latest" is not durable for this gate):
+
+           Release page:
+             https://github.com/koalaman/shellcheck/releases/tag/v${v}
+
+           Assets (download the one for your OS/CPU):
+             • macOS Apple Silicon:
+                 shellcheck-v${v}.darwin.aarch64.tar.xz
+                 SHA-256: 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+             • macOS Intel:
+                 shellcheck-v${v}.darwin.x86_64.tar.xz
+                 SHA-256: 3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+             • Linux x86_64:
+                 shellcheck-v${v}.linux.x86_64.tar.xz
+                 SHA-256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+
+           Then:
+             1. Verify the downloaded file's SHA-256 matches the digest above
+                (or the digest published on that release page).
+             2. Extract the shellcheck binary and put it on your PATH
+                (e.g. install -m 0755 shellcheck /usr/local/bin/shellcheck).
+             3. Confirm: shellcheck --version  →  version: ${v}
+
+         CI installs the same Linux x86_64 pin
+         (see .github/workflows/gibson-self-gate.yml).
+EOF
+}
+
 # Offline deterministic checks for version parsing / mismatch (no network).
 # Invoked via --self-test-toolchain; not part of the sensor suite.
 self_test_toolchain() {
@@ -109,6 +150,22 @@ self_test_toolchain() {
     echo "  ok   — mismatch detected (got $got, need $SHELLCHECK_REQUIRED_VERSION)"
   else
     echo "  FAIL — mismatch self-test unexpectedly matched"; fail=1
+  fi
+  # SC_OK gating uses shellcheck_version_matches_pin once; exercise that helper.
+  if shellcheck_version_matches_pin "$SHELLCHECK_REQUIRED_VERSION"; then
+    echo "  ok   — pin matches helper accepts required version"
+  else
+    echo "  FAIL — pin matches helper rejected required version"; fail=1
+  fi
+  if shellcheck_version_matches_pin "0.9.0"; then
+    echo "  FAIL — pin matches helper accepted wrong version"; fail=1
+  else
+    echo "  ok   — pin matches helper rejects other version"
+  fi
+  if shellcheck_version_matches_pin ""; then
+    echo "  FAIL — pin matches helper accepted empty"; fail=1
+  else
+    echo "  ok   — pin matches helper rejects empty"
   fi
   if [[ "$fail" -eq 0 ]]; then
     echo "run-all: toolchain self-test GREEN"
@@ -199,6 +256,10 @@ else
 fi
 
 # Exact ShellCheck version (same pin as .github/workflows/gibson-self-gate.yml).
+# Probe once: SC_OK=1 only when the parsed version equals the pin; baseline
+# compare reuses this flag and never re-runs shellcheck --version.
+SC_OK=0
+SC_V=""
 if command -v shellcheck >/dev/null 2>&1; then
   SC_RAW=$(shellcheck --version 2>/dev/null || true)
   SC_V=$(parse_shellcheck_version "$SC_RAW")
@@ -206,27 +267,21 @@ if command -v shellcheck >/dev/null 2>&1; then
     echo "${RED}  FAIL${OFF} — cannot read shellcheck version from:"
     echo "$SC_RAW" | sed 's/^/         /'
     FAILED="$FAILED shellcheck-version"
-  elif [[ "$SC_V" == "$SHELLCHECK_REQUIRED_VERSION" ]]; then
+  elif shellcheck_version_matches_pin "$SC_V"; then
+    SC_OK=1
     echo "${GRN}  ok${OFF}   — shellcheck $SC_V (exact pin for baseline semantics)"
   else
     echo "${RED}  FAIL${OFF} — shellcheck $SC_V is not the pinned $SHELLCHECK_REQUIRED_VERSION"
     echo "         The ShellCheck baseline is an exact-set ratchet: different tool"
     echo "         versions report different findings, so local and CI must match."
+    echo "         There is no version override — a wrong tool is a red gate by design."
     echo
-    echo "         How to fix (pick one):"
-    echo "           • macOS (Homebrew):  brew install shellcheck"
-    echo "             then confirm:     shellcheck --version  → version: $SHELLCHECK_REQUIRED_VERSION"
-    echo "           • Linux (official): download the v$SHELLCHECK_REQUIRED_VERSION release asset"
-    echo "             from https://github.com/koalaman/shellcheck/releases/tag/v$SHELLCHECK_REQUIRED_VERSION"
-    echo "             (linux.x86_64 tar.xz on Ubuntu CI; verify the published SHA-256)"
-    echo "           • Or use the same install step as .github/workflows/gibson-self-gate.yml"
+    print_shellcheck_install_remediation
     FAILED="$FAILED shellcheck-version-mismatch"
   fi
 else
   echo "${RED}  FAIL${OFF} — shellcheck not installed; the gate cannot vouch for these scripts"
-  echo "         Install ShellCheck $SHELLCHECK_REQUIRED_VERSION (exact), then re-run."
-  echo "         macOS: brew install shellcheck"
-  echo "         Linux: see .github/workflows/gibson-self-gate.yml (pinned official release)"
+  print_shellcheck_install_remediation
   FAILED="$FAILED shellcheck-missing"
 fi
 
@@ -240,9 +295,9 @@ if [[ -z "${GIT_AUTHOR_EMAIL:-}" ]] && ! git config user.email >/dev/null 2>&1; 
 fi
 
 # --- 1. shellcheck vs baseline ---------------------------------------------
+# Gated on SC_OK from the single toolchain probe above (no second --version).
 echo "== shellcheck (-S warning, vs baseline)"
-if command -v shellcheck >/dev/null 2>&1 &&
-   [[ "$(parse_shellcheck_version "$(shellcheck --version 2>/dev/null || true)")" == "$SHELLCHECK_REQUIRED_VERSION" ]]; then
+if [[ "$SC_OK" -eq 1 ]]; then
   # shellcheck disable=SC2086
   # awk, not sed: "\t" in a sed replacement is a literal t on BSD sed (#93 is
   # the same lesson one layer down — portability shims that work by accident).
@@ -267,7 +322,7 @@ if command -v shellcheck >/dev/null 2>&1 &&
     echo "$GONE" | sed 's/^/         /'
     FAILED="$FAILED shellcheck-baseline-stale"
   else
-    echo "${GRN}  ok${OFF}   — no findings outside the baseline (shellcheck $SHELLCHECK_REQUIRED_VERSION)"
+    echo "${GRN}  ok${OFF}   — no findings outside the baseline (shellcheck $SC_V)"
   fi
 elif command -v shellcheck >/dev/null 2>&1; then
   echo "${YEL}  SKIP${OFF} — shellcheck baseline compare requires $SHELLCHECK_REQUIRED_VERSION"
