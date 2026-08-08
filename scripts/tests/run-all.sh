@@ -148,16 +148,19 @@ EOF
 #   - extract_strict SHELLCHECK_REQUIRED_VERSION
 #   - extract_strict SHELLCHECK_SHA256_LINUX_X86_64
 #   - both version=${version} and digest=${digest} actively emitted to
-#     GITHUB_OUTPUT inside one `{ ... } >> GITHUB_OUTPUT` brace group
-#     whose closer owns the redirect. Inside that group, only exact plain
-#     active lines are credited: `echo "version=${version}"` and
-#     `echo "digest=${digest}"` (surrounding whitespace allowed; no
-#     prefix/suffix command, redirect, separator, condition, or pipeline).
+#     GITHUB_OUTPUT via one exact plain brace-group grammar (surrounding
+#     whitespace allowed on each line; no prefix/suffix command, redirect,
+#     separator, condition, or pipeline on any accepted line):
+#       opener:  {
+#       body:    echo "version=${version}"
+#                echo "digest=${digest}"
+#       closer:  } >> "$GITHUB_OUTPUT"
 #     So `echo "version=${version}" >/dev/null` does not credit a pin key —
-#     the block redirect would only capture remaining stdout. Direct
-#     same-line emits are also not accepted: `echo "version=..." && echo
-#     "other=x" >> "$GITHUB_OUTPUT"` would otherwise false-green. Independent
-#     greps are NOT enough; log-only echos of the correct values fail closed.
+#     the block redirect would only capture remaining stdout. A conditional
+#     closer such as `} && echo "unrelated=x" >> "$GITHUB_OUTPUT"` is also
+#     rejected: brace stdout is not redirected to GITHUB_OUTPUT. Direct
+#     same-line emits are not accepted either. Independent greps are NOT
+#     enough; log-only echos of the correct values fail closed.
 #   - install step consumes steps.sc_pin.outputs.version and .digest
 # Forbidden (raw file, including comments):
 #   - any fixed-string restatement of the pinned version or digests
@@ -191,13 +194,14 @@ assert_workflow_shellcheck_pin_wiring() {
   if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_SHA256_LINUX_X86_64([[:space:]]|$)' "$filtered"; then
     reasons="${reasons}missing extract_strict SHELLCHECK_SHA256_LINUX_X86_64; "
   fi
-  # Coupled emit check: prove exact plain pin-key echos both appear inside
-  # one brace group whose closer redirects to GITHUB_OUTPUT. Credit only
-  # lines that are exactly `echo "version=${version}"` / `echo "digest=
-  # ${digest}"` (trimmed whitespace only) — no inner redirect, separator,
-  # condition, or pipeline. Fail closed on same-line forms and on pin text
-  # silenced with >/dev/null inside the block. Deterministic awk over the
-  # already comment-filtered stream (macOS / Bash 3.2 / POSIX awk).
+  # Coupled emit check: exact four-line brace-group grammar only. Accept
+  # trimmed opener `{`, body lines exactly `echo "version=${version}"` and
+  # `echo "digest=${digest}"`, and trimmed closer `} >> "$GITHUB_OUTPUT"`.
+  # No prefix/suffix command, redirect, separator, condition, or pipeline on
+  # any accepted line. Fail closed on same-line forms, >/dev/null pin echos,
+  # and conditional closers that merely co-locate >> and GITHUB_OUTPUT.
+  # Deterministic awk over the already comment-filtered stream
+  # (macOS / Bash 3.2 / POSIX awk).
   # shellcheck disable=SC2016 # intentional literal ${version}/${digest} pins
   awk '
     function trim(s) {
@@ -207,23 +211,27 @@ assert_workflow_shellcheck_pin_wiring() {
     }
     function is_plain_v(s) { return trim(s) == "echo \"version=${version}\"" }
     function is_plain_d(s) { return trim(s) == "echo \"digest=${digest}\"" }
-    function has_go(s) { return index(s, "GITHUB_OUTPUT") > 0 }
-    function has_redir(s) { return index(s, ">>") > 0 }
+    function is_plain_opener(s) { return trim(s) == "{" }
+    function is_plain_closer(s) { return trim(s) == "} >> \"$GITHUB_OUTPUT\"" }
     {
       line = $0
-      # Brace group only: credit only exact plain pin echos in the body
-      # when the closer owns >> GITHUB_OUTPUT.
-      if (line ~ /\{[[:space:]]*$/) {
+      # Exact brace-group grammar only.
+      if (is_plain_opener(line)) {
         in_block = 1
         saw_v = 0
         saw_d = 0
         next
       }
       if (in_block) {
-        if (line ~ /^[[:space:]]*\}/) {
-          if (has_redir(line) && has_go(line) && saw_v && saw_d) {
+        if (is_plain_closer(line)) {
+          if (saw_v && saw_d) {
             ok = 1
           }
+          in_block = 0
+          saw_v = 0
+          saw_d = 0
+        } else if (line ~ /^[[:space:]]*\}/) {
+          # Non-exact closer (e.g. conditional/pipeline) — end block, no credit.
           in_block = 0
           saw_v = 0
           saw_d = 0
@@ -240,7 +248,7 @@ assert_workflow_shellcheck_pin_wiring() {
   ' "$filtered"
   emit_rc=$?
   if [[ "$emit_rc" -ne 0 ]]; then
-    reasons="${reasons}version=\${version} and digest=\${digest} not both actively emitted inside one { ... } >> GITHUB_OUTPUT brace group; "
+    reasons="${reasons}version=\${version} and digest=\${digest} not both actively emitted inside one exact { ... } >> \"\$GITHUB_OUTPUT\" brace group; "
   fi
   # Install step must consume the pin step outputs.
   if ! grep -Fq 'steps.sc_pin.outputs.version' "$filtered"; then
@@ -546,6 +554,33 @@ EOF
       echo "  FAIL — mutation brace-inner-dev-null unexpectedly passed"; fail=1
     else
       echo "  ok   — mutation: brace-group pin echos with inner >/dev/null fails closed"
+    fi
+
+    # Conditional closer: exact plain pin echos inside braces, but the closer
+    # is `} && echo "unrelated=x" >> "$GITHUB_OUTPUT"`. Brace-group stdout is
+    # not redirected to GITHUB_OUTPUT; token co-location of >> and
+    # GITHUB_OUTPUT on the closer must not false-green.
+    mut_wf="$mut_dir/conditional-closer.yml"
+    cat >"$mut_wf" <<'EOF'
+- name: Resolve ShellCheck pin from run-all.sh
+  id: sc_pin
+  run: |
+    pin_file="scripts/tests/run-all.sh"
+    version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+    digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+    {
+      echo "version=${version}"
+      echo "digest=${digest}"
+    } && echo "unrelated=x" >> "$GITHUB_OUTPUT"
+- name: Install ShellCheck
+  run: |
+    SC_VERSION="${{ steps.sc_pin.outputs.version }}"
+    SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation conditional-closer unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: conditional closer (} && … >> GITHUB_OUTPUT) fails closed"
     fi
 
     # Version restatement forms: colon env, equals, alternate key, URL, comment.
