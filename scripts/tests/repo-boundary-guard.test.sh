@@ -405,6 +405,81 @@ fi
 git -C "$ROOT" checkout -q HEAD -- .agents/gate.json README.md 2>/dev/null || true
 git -C "$ROOT" reset -q 2>/dev/null || true
 
+# --- commit_form_includes_worktree: deterministic parser sensors ------------
+# Extract the classifier without executing the guard body (script runs on load).
+# Pure function tests — no git, no hang risk for interactive forms.
+eval "$(sed -n '/^commit_form_includes_worktree()/,/^}/p' "$GUARD")"
+_parser_expect_yes() {
+  local label="$1"
+  shift
+  if commit_form_includes_worktree "$@"; then
+    ok "parser: $label includes worktree"
+  else
+    bad "parser: $label should include worktree"
+  fi
+}
+_parser_expect_no() {
+  local label="$1"
+  shift
+  if commit_form_includes_worktree "$@"; then
+    bad "parser: $label should NOT include worktree"
+  else
+    ok "parser: $label does not include worktree"
+  fi
+}
+_parser_expect_yes "-p" commit -p -m msg
+_parser_expect_yes "--patch" commit --patch -m msg
+_parser_expect_yes "--interactive" commit --interactive -m msg
+_parser_expect_yes "combined -ip" commit -ip -m msg
+_parser_expect_yes "combined -po" commit -po -m msg
+_parser_expect_yes "combined -am (a)" commit -am msg
+_parser_expect_yes "--pathspec-from-file=FILE" commit -m msg --pathspec-from-file=pathlist.txt
+_parser_expect_yes "--pathspec-from-file FILE" commit -m msg --pathspec-from-file pathlist.txt
+_parser_expect_yes "--pathspec-from-file + --pathspec-file-nul" \
+  commit -m msg --pathspec-from-file=pathlist.txt --pathspec-file-nul
+_parser_expect_no "ordinary -m only" commit -m msg
+_parser_expect_no "--pathspec-file-nul alone" commit -m msg --pathspec-file-nul
+# -s (signoff) has none of a/i/o/p; use separate -m so msg is not a bare pathspec
+_parser_expect_no "signoff -s -m (no worktree flags)" commit -s -m msg
+
+# --- e2e: non-interactive pathspec-from-file protected worktree bypass ------
+# Must not hang (no editor / patch UI). Dirty protected tracked path + equals
+# form forces fail-closed before real git runs.
+printf 'dirty protected for pathspec-from-file\n' > "$ROOT/.agents/gate.json"
+printf '%s\n' '.agents/gate.json' > "$ROOT/pathlist.txt"
+run_guard commit -m 'bypass via pathspec-from-file' \
+  --pathspec-from-file=pathlist.txt >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+  ok "commit --pathspec-from-file with dirty protected path rejected (exit $rc)"
+else
+  bad "commit --pathspec-from-file bypass (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+# Separate-value form (non-interactive) + --pathspec-file-nul must also fail closed.
+printf 'dirty protected for pathspec-from-file sep\n' > "$ROOT/.agents/gate.json"
+run_guard commit -m 'bypass via pathspec-from-file sep' \
+  --pathspec-from-file pathlist.txt --pathspec-file-nul \
+  >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+  ok "commit --pathspec-from-file FILE --pathspec-file-nul rejected (exit $rc)"
+else
+  bad "commit --pathspec-from-file sep+nul bypass (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+# Non-interactive -p form: classifier + unstaged scan must exit 86 before git
+# opens the patch selector (would hang waiting for TTY input).
+printf 'dirty protected for -p\n' > "$ROOT/.agents/gate.json"
+run_guard commit -p -m 'bypass via -p' >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+  ok "commit -p with dirty protected path rejected without hang (exit $rc)"
+else
+  bad "commit -p bypass (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+rm -f "$ROOT/pathlist.txt"
+git -C "$ROOT" checkout -q HEAD -- .agents/gate.json 2>/dev/null || true
+git -C "$ROOT" reset -q 2>/dev/null || true
+
 # --- direct commit/push with real-git staged protected path -----------------
 # Stage protected via real git (not the guard); guarded commit and push both
 # exit 86, emit control-plane diagnostic, and leave the index unchanged.

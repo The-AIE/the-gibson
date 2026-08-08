@@ -93,7 +93,11 @@ check_staged_control_plane() {
 
 # True (0) when `git commit` argv can include working-tree content that is not
 # already in the index: -a/--all (incl. combined short opts like -am),
-# --include/--only, bare pathspecs, or pathspecs after `--`.
+# -i/--include, -o/--only, -p/--patch, --interactive, --pathspec-from-file
+# (equals or separate-value), bare pathspecs, or pathspecs after `--`.
+# Combined short forms fail closed if any of a/i/o/p appear (e.g. -ip, -po).
+# --pathspec-file-nul only affects pathspec-file encoding; classifying
+# --pathspec-from-file itself is enough so a pathspec-file commit cannot evade.
 # Conservative: not a full git option parser; prefers fail-closed on ambiguity.
 # $1 is the subcommand ("commit"); remaining args are commit options/operands.
 commit_form_includes_worktree() {
@@ -109,7 +113,9 @@ commit_form_includes_worktree() {
     fi
     case "$arg" in
       --) saw_dd=1 ;;
-      -a|--all|--include|-i|--only|-o) return 0 ;;
+      -a|--all|--include|-i|--only|-o|-p|--patch|--interactive|--pathspec-from-file|--pathspec-from-file=*)
+        return 0
+        ;;
       -m|--message|-F|--file|-t|--template|--author|--date|--cleanup|--fix-trailer|-c|--reedit-message|-C|--reuse-message)
         skip_next=1
         ;;
@@ -118,9 +124,10 @@ commit_form_includes_worktree() {
       --*)
         ;;
       -*)
-        # Combined short options (e.g. -am, -amm, -an). Long options already handled.
+        # Combined short options (e.g. -am, -ip, -po). Long options already handled.
+        # Fail closed if any worktree-including short flag letter is present.
         chars="${arg#-}"
-        if [[ "$chars" == *a* ]]; then
+        if [[ "$chars" == *[aiop]* ]]; then
           return 0
         fi
         # Attached-value short forms (-mMSG, -Ffile): not pathspecs.
