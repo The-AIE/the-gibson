@@ -35,6 +35,13 @@ executes it.
 | `deadline_seconds` | no | Watchdog sleep before graceful `--halt` |
 | `lane` | 1–3 | One lane record per line (see below). Fleet WIP doctrine caps concurrent lanes at **3**; a fourth lane fails closed with zero launches. |
 
+### Scalar uniqueness
+
+Each scalar key (`version`, `name`, `repo`, `slug`, and the optional path /
+runner / budget keys) may appear **at most once**. A second assignment is
+malformed and fails closed (no last-wins). Repeated `lane=` records are
+required and allowed (subject to unique lane ids and disjoint issues/scopes).
+
 ### Lane records
 
 ```text
@@ -63,7 +70,7 @@ runner launches.
    # or: local/fleet-my-target.profile  (if local/ is gitignored in your fork)
    ```
 2. Set `repo=` and `slug=` to **your** absolute checkout and GitHub slug.
-3. Fill `lane=` lines from **open, non-gated** issues only.
+3. Fill `lane=` lines from **open, non-gated** issues only (see preflight rules).
 4. Keep credentials out of the file (auth stays in CLI logins / env).
 
 Migrating Chatterbuilt: copy your current `LANES=(...)` entries into a **local**
@@ -110,15 +117,70 @@ to the same identity as the builder.
 
 Before any `loop.sh` start the driver checks:
 
-- Profile parse / version / required fields / absolute safe paths
+- Profile parse / version / required fields / absolute safe paths / **no duplicate scalars**
 - Inter-lane scope overlap and duplicate issue ids
 - `origin` slug matches profile `slug`
-- Canonical checkout is clean
-- Every queued issue exists, is **open**, and lacks gated labels:
-  `needs-mark`, `decision`, `blocked`, `tier-c`, `gibson-halt`
-- No `agent-claimed` label (claim conflict)
-- No open PR whose head branch is `feat/<issue>-*` / `fix/<issue>-*`
+- Canonical checkout is clean (`git status --porcelain` must succeed; a failed
+  probe is **not** treated as clean)
 - Builder / reviewer / release three-role separation
+- Open-PR inventory is parsed fail-closed (only a literal empty JSON array is
+  zero-pair success; malformed output, missing fields, duplicates, or hitting
+  the list limit all refuse)
+
+#### Unstarted and future queue items (strict)
+
+For issues the lane has **not** already recorded as current work:
+
+- Issue must exist and be **OPEN**
+- Must not carry gated labels: `needs-mark`, `decision`, `blocked`, `tier-c`,
+  `gibson-halt`
+- Must not carry `agent-claimed`
+- Must not have an open PR whose head is `feat/<issue>-*` or `fix/<issue>-*`
+  (or the bare `feat/<issue>` / `fix/<issue>` forms)
+
+#### State-bound dead-lane resumption (exception)
+
+When a lane worktree already has a valid `gibson/loop-state.md` whose `issue:`
+is still in the configured queue and the lane is **not** running, the driver
+treats that recorded issue as **own** work:
+
+- Prior queue items before the recorded issue may be **CLOSED** (the lane
+  advanced). Any still-**OPEN** prior item fails closed (no skip/park policy).
+- The recorded issue may carry `agent-claimed` **only if** loop-state binds
+  ownership via `pr:` and/or `handoff:` and that binding matches a single open
+  PR (number and/or head branch).
+- The matching PR body must contain **exactly one** machine-readable line:
+  `- Active-work claim: issue-<issue>-<slug>`
+  where `<slug>` is consistent with the bound head branch
+  (`feat/<issue>-<slug>` or `fix/<issue>-<slug>`). Missing, duplicate,
+  malformed, foreign-issue, or foreign-slug claims fail closed.
+- Future queue items after the recorded issue stay under the **strict** rules
+  above.
+
+Healthy (still-running) lanes are left alone only after the per-lane
+`.fleet-identity` marker matches, loop-state is valid, and the recorded issue
+is in the configured queue. A live PID with missing/invalid state fails closed.
+
+### Fingerprinted default namespaces
+
+When `fleet_dir` / `log_dir` are omitted, defaults are namespaced by profile
+**name** and a portable fingerprint of `profile_path` + physical `repo` +
+`slug`. Two profiles that share a short `name=` but target different repos or
+paths therefore get **distinct** lane bases, pidfiles, logs, and watchdogs.
+Explicit `fleet_dir=` / `log_dir=` (or env `FLEET_DIR` / `LOG_DIR`) still win.
+
+### `.fleet-identity` reuse checks
+
+On first use the driver writes `.fleet-identity` under the fleet dir, log dir,
+and each lane worktree (`name`, `profile_path`, `repo`, `slug`, and `lane=` for
+per-lane markers). Before reusing any existing namespace, `--start`,
+`--status`, and `--halt` validate those markers against the currently loaded
+profile. A foreign or mismatched marker fails closed and does **not** mutate
+pidfiles, HALT files, or loop-state. Per-lane identity is checked **before**
+any pid helper that might delete a stale pidfile.
+
+`--status` also reads `hat:` through the same space / no-space field grammar as
+`loop.sh` (`hat: reviewer` and `hat:reviewer` both display).
 
 ## Related
 
