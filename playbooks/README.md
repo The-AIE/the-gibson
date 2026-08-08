@@ -31,6 +31,7 @@ only as a vendor skill is doctrine-debt.
 | [loop-step.md](loop-step.md) | Solo-loop one-hat step (`{{hat}}`, `{{loop_state}}`) | 11 |
 | [adopt.md](adopt.md) | Install Gibson on a target repo | 13, 17, 20 |
 | [deploy-audit.md](deploy-audit.md) | Doc 17 inspect scorecard | 17 |
+| [token-efficiency.md](token-efficiency.md) | Route / bound / measure AI spend without cutting quality | 15, 20, 11, 05, 06, 16 |
 | [red-team/](red-team/) | Scheduled adversarial audit of a target app | 03, 08 |
 | [recipes/](recipes/) | Validation-only Goose recipe mirrors; live runs gated on #28 + #35 | 10, [GOOSE-STRATEGY](../docs/GOOSE-STRATEGY.md), [adapters/goose](../adapters/goose/), [recipes/README](recipes/README.md) |
 
