@@ -54,7 +54,7 @@ target_root="$(resolve_target_root || true)"
 
 current_root="$(resolve_current_root || true)"
 [[ -n "$current_root" && "$current_root" == "$target_root" ]] ||
-  fail "git command ran outside target repo: expected '$TARGET_REPO', observed '${current_root:-unresolved}'"
+  fail "git command ran outside target repo: expected '$TARGET_REPO' (resolved '${target_root:-unresolved}'), observed '${current_root:-unresolved}'"
 
 protected_path() {
   case "$1" in
@@ -65,18 +65,29 @@ protected_path() {
   return 1
 }
 
-# Print a control-plane diagnostic and return non-zero (do not exit) so callers
-# such as `git add` can roll back the index before exiting 86.
-check_staged_control_plane() {
+# Scan the index for staged harness control-plane paths.
+# - Prints one diagnostic per offender on stderr.
+# - Fills global array _protected_staged with every offender (NUL-safe via git -z).
+# - Returns 0 if none, 1 if any. Does not exit (callers may selective-reset).
+# Bash 3.2: no namerefs; callers read _protected_staged after a failed return.
+_protected_staged=()
+scan_staged_control_plane() {
+  _protected_staged=()
   local path
-  while IFS= read -r path; do
+  # -z / read -d '': paths with spaces/newlines cannot split the list.
+  while IFS= read -r -d '' path; do
     [[ -n "$path" ]] || continue
     if protected_path "$path"; then
       echo "gibson repo-boundary guard: runner cannot stage harness control-plane file '$path'" >&2
-      return 1
+      _protected_staged+=("$path")
     fi
-  done < <("$REAL_GIT" diff --cached --name-only --diff-filter=ACMR)
-  return 0
+  done < <("$REAL_GIT" diff --cached --name-only -z --diff-filter=ACMR)
+  [[ ${#_protected_staged[@]} -eq 0 ]]
+}
+
+# Return non-zero if any control-plane path is staged (diagnostics already printed).
+check_staged_control_plane() {
+  scan_staged_control_plane
 }
 
 branch_from_push_args() {
@@ -148,9 +159,13 @@ case "${1-}" in
       check_staged_control_plane || exit 86
       "$REAL_GIT" "$@"
     else
+      # Run the real add first, then reject protected paths. On rejection, roll
+      # back *only* the offending pathspecs so legitimate prior staging survives.
       "$REAL_GIT" "$@"
-      if ! check_staged_control_plane; then
-        "$REAL_GIT" reset -q
+      if ! scan_staged_control_plane; then
+        # Diagnostics already printed per offender. Selective reset — never the
+        # whole index (Devin #146 review: full `git reset -q` unstaged unrelated work).
+        "$REAL_GIT" reset -q -- "${_protected_staged[@]}"
         exit 86
       fi
     fi
