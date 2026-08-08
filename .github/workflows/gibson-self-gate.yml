@@ -28,8 +28,107 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
 
-      - name: Install shellcheck
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      # Exact ShellCheck pin — machine source is scripts/tests/run-all.sh
+      # (SHELLCHECK_REQUIRED_VERSION + SHELLCHECK_SHA256_LINUX_X86_64). Do not
+      # restate version/digest here; extract strict assignment lines only.
+      # Unpinned apt shellcheck on ubuntu-latest has been 0.9.x/0.10.x and
+      # reports different findings than the baseline ratchet (#138 / #142).
+      # Architecture: ubuntu-latest → linux x86_64 (GitHub-hosted runners).
+      - name: Resolve ShellCheck pin from run-all.sh
+        id: sc_pin
+        run: |
+          set -euo pipefail
+          pin_file="scripts/tests/run-all.sh"
+          if [ ! -f "$pin_file" ]; then
+            echo "error: missing pin source ${pin_file}" >&2
+            exit 1
+          fi
+          # Extract one strict assignment: NAME=value (no quotes, no spaces).
+          # re is the value shape; empty or multi-match fails closed.
+          extract_strict() {
+            local key="$1" re="$2" matches count val
+            matches=$(grep -E "^${key}=${re}$" "$pin_file" || true)
+            count=$(printf '%s\n' "$matches" | grep -c . || true)
+            if [ "$count" -ne 1 ]; then
+              echo "error: expected exactly one strict ${key}=<${re}> line in ${pin_file}, found ${count}" >&2
+              exit 1
+            fi
+            val="${matches#${key}=}"
+            if [ -z "$val" ]; then
+              echo "error: empty ${key} in ${pin_file}" >&2
+              exit 1
+            fi
+            printf '%s' "$val"
+          }
+          version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+          digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+          # Re-validate shapes/non-emptiness after extract (fail closed).
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: bad version shape after extract: '${version}'" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "error: bad digest shape after extract (want 64 lowercase hex): '${digest}'" >&2
+            exit 1
+          fi
+          {
+            echo "version=${version}"
+            echo "digest=${digest}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved ShellCheck pin from ${pin_file}: version=${version}"
+          echo "linux.x86_64 digest=${digest}"
+
+      - name: Install ShellCheck (official release, single-source pin)
+        env:
+          PIN_VERSION: ${{ steps.sc_pin.outputs.version }}
+          PIN_DIGEST: ${{ steps.sc_pin.outputs.digest }}
+        run: |
+          set -euo pipefail
+          SC_VERSION="${PIN_VERSION}"
+          SC_SHA256="${PIN_DIGEST}"
+          if [ -z "${SC_VERSION}" ] || [ -z "${SC_SHA256}" ]; then
+            echo "error: empty pin step outputs (version='${SC_VERSION}' digest length=${#SC_SHA256})" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$SC_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: bad SC_VERSION shape: '${SC_VERSION}'" >&2
+            exit 1
+          fi
+          if ! printf '%s' "$SC_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "error: bad SC_SHA256 shape (want 64 lowercase hex)" >&2
+            exit 1
+          fi
+          # Official linux.x86_64 asset only. Refuse other arches before download.
+          arch="$(uname -m)"
+          if [ "$arch" != "x86_64" ]; then
+            echo "error: ShellCheck pin is shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+            echo "       This runner reports uname -m = '${arch}'."
+            echo "       Refusing to install the wrong binary. Use an x86_64 runner"
+            echo "       or extend the pin with a matching official asset + digest."
+            exit 1
+          fi
+          SC_URL="https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+          cd "${RUNNER_TEMP}"
+          # Bounded retries for transient GitHub download failures; sha256sum still mandatory.
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+            -o "shellcheck.tar.xz" "$SC_URL"
+          echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz
+          sudo install -m 0755 "shellcheck-v${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          # Capture the complete --version banner first, print it, then parse.
+          # Avoid shellcheck | early-exiting reader under set -o pipefail (SIGPIPE).
+          # Print expected vs observed only on mismatch — do not dump full PATH or env.
+          sc_banner="$(shellcheck --version)"
+          printf '%s\n' "$sc_banner"
+          observed="$(printf '%s\n' "$sc_banner" | awk '/^version:/{print $2}')"
+          if [ "$observed" != "$SC_VERSION" ]; then
+            echo "error: ShellCheck version mismatch after install" >&2
+            echo "       expected: ${SC_VERSION}" >&2
+            echo "       observed: ${observed:-<empty>}" >&2
+            echo "       likely cause: /usr/local/bin (or another earlier PATH" >&2
+            echo "       entry) is not selected over a distro shellcheck binary." >&2
+            exit 1
+          fi
 
       # The claim suites commit into throwaway repos and a runner has no global
       # git identity, so without this they fail 24 assertions for a reason that

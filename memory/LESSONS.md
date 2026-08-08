@@ -951,3 +951,30 @@ wait and posture probe for pure docs/specs. Product-surface PRs keep full
 deploy+smoke. Practiced on #311.
 **Status:** fixed (guide this session)
 **Tags:** #release #docs #smoke #solo-loop #general
+
+## L-051 · 2026-08-08 · unpinned-shellcheck-makes-exact-set-ratchet-nondeterministic
+**What happened:** PR #142 removed `scripts/tests/loop-state.test.sh SC2218` from
+the ShellCheck baseline after a late `make_runner_cmd` redefinition. Locally
+(ShellCheck 0.11.0) the baseline-only change was green; shared CI (unpinned apt
+ShellCheck 0.9.x/0.10.x) failed with `NEWF` containing SC2218 (reproduced 31×).
+Issue #138 / PR #147 had to repair the structural cause *and* make the analyzer
+contract deterministic so the same ratchet could not disagree across hosts.
+**Root cause:** an exact-set finding ratchet is nondeterministic when the
+analyzer version is not part of the contract. SC2218 accuracy changed between
+ShellCheck ≤0.10 and 0.11.0; treating a tool-version delta as source debt (or
+as a baseline-only green) was false.
+**Harness fix:** (1) Structurally de-duplicate `make_runner_cmd` — one early
+definition with issue-#63 behaviors, no late redefinition, no suppressions.
+(2) Pin official ShellCheck version + platform digests in
+`scripts/tests/run-all.sh` (`SHELLCHECK_REQUIRED_VERSION` + named SHA-256
+constants). (3) CI (`.github/workflows/gibson-self-gate.yml`) extracts the one
+machine source via strict assignment lines, verifies shapes, installs the
+official linux.x86_64 asset with digest check, asserts version equality, and
+fails closed if PATH does not select the pin. (4) Offline mutation-backed
+`self_test_toolchain` (ordinary `run-all.sh` path + `--self-test-toolchain`)
+proves extract/wiring/mutations fail closed without network.
+**General rule / Rule of thumb:** pin the analyzer and its acquisition path
+before comparing exact findings; do not treat a tool-version delta as source
+debt or as a baseline-only green.
+**Status:** fixed in #138 / PR #147
+**Tags:** #toolchain #ci #ratchet #shellcheck #sensors #issue-138 #pr-147
