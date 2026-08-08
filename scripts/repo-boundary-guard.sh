@@ -9,8 +9,38 @@ REAL_GIT="${GIBSON_REAL_GIT:?}"
 TARGET_REPO="${GIBSON_TARGET_REPO:?}"
 EXPECTED_SLUG="${GIBSON_EXPECTED_REPO_SLUG:?}"
 
+# Physical path of an existing directory (macOS /var vs /private/var, symlinks).
+# Stock Bash 3.2 / macOS: no GNU realpath or readlink -f.
+physical_dir() {
+  local path="$1"
+  [[ -n "$path" && -d "$path" ]] || return 1
+  (CDPATH='' cd -- "$path" && pwd -P) 2>/dev/null || return 1
+}
+
 repo_root() {
   "$REAL_GIT" -C "$1" rev-parse --show-toplevel 2>/dev/null
+}
+
+# Resolve configured target to a physical git repository root. Fail closed if
+# the path is missing/unreadable, not a git repo, or not the repo root itself.
+resolve_target_root() {
+  local phys git_root root
+  phys=$(physical_dir "$TARGET_REPO") || return 1
+  git_root=$(repo_root "$phys") || return 1
+  [[ -n "$git_root" ]] || return 1
+  root=$(physical_dir "$git_root") || return 1
+  # Configured path must *be* the repository root (after physicalization), not
+  # a nested directory inside some other checkout.
+  [[ "$phys" == "$root" ]] || return 1
+  printf '%s\n' "$root"
+}
+
+# Resolve the observed cwd to a physical git repository root.
+resolve_current_root() {
+  local git_root
+  git_root=$(repo_root "$PWD") || return 1
+  [[ -n "$git_root" ]] || return 1
+  physical_dir "$git_root"
 }
 
 fail() {
@@ -18,9 +48,13 @@ fail() {
   exit 86
 }
 
-current_root="$(repo_root "$PWD" || true)"
-[[ "$current_root" == "$TARGET_REPO" ]] ||
-  fail "git command ran outside target repo: expected '$TARGET_REPO', observed '${current_root:-unresolved}'"
+target_root="$(resolve_target_root || true)"
+[[ -n "$target_root" ]] ||
+  fail "configured target repo could not be resolved: '$TARGET_REPO'"
+
+current_root="$(resolve_current_root || true)"
+[[ -n "$current_root" && "$current_root" == "$target_root" ]] ||
+  fail "git command ran outside target repo: expected '$TARGET_REPO' (resolved '${target_root:-unresolved}'), observed '${current_root:-unresolved}'"
 
 protected_path() {
   case "$1" in
@@ -31,13 +65,206 @@ protected_path() {
   return 1
 }
 
-check_staged_control_plane() {
-  local path
-  while IFS= read -r path; do
+# Scan the index for staged harness control-plane paths.
+# - Prints one diagnostic per offender on stderr.
+# - Fills global array _protected_staged with every offender (NUL-safe via git -z).
+# - Returns 0 if none, 1 if any (or if enumeration fails). Does not exit
+#   (callers fail closed with 86 / selective-reset).
+# - No --diff-filter: must match production guard_control_plane_clean (includes D, T).
+# - Always enumerate from the resolved repo root with --no-relative so
+#   diff.relative=true (or a subdirectory cwd) cannot hide/rename offenders.
+# - Captures git's NUL stream in an owned temp file so a failed `git diff` is
+#   not misread as an empty clean index (process substitution drops status).
+# Bash 3.2: no namerefs; callers read _protected_staged after a failed return.
+_protected_staged=()
+scan_staged_control_plane() {
+  _protected_staged=()
+  local path tmp list_rc=0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/gibson-staged-scan.XXXXXX") || {
+    echo "gibson repo-boundary guard: cannot create temp file for staged path enumeration" >&2
+    return 1
+  }
+  # Capture status explicitly; do not parse until git succeeds. Bound stderr to
+  # our one-line diagnostic (do not dump unbounded git output).
+  "$REAL_GIT" -C "$current_root" diff --no-relative --cached --name-only -z \
+    >"$tmp" 2>/dev/null || list_rc=$?
+  if [[ "$list_rc" -ne 0 ]]; then
+    rm -f -- "$tmp"
+    echo "gibson repo-boundary guard: failed to enumerate staged paths (git exit $list_rc)" >&2
+    return 1
+  fi
+  # -z / read -d '': paths with spaces/newlines cannot split the list.
+  while IFS= read -r -d '' path; do
     [[ -n "$path" ]] || continue
-    protected_path "$path" &&
-      fail "runner cannot stage harness control-plane file '$path'"
-  done < <("$REAL_GIT" diff --cached --name-only --diff-filter=ACMR)
+    if protected_path "$path"; then
+      echo "gibson repo-boundary guard: runner cannot stage harness control-plane file '$path'" >&2
+      _protected_staged+=("$path")
+    fi
+  done <"$tmp"
+  rm -f -- "$tmp"
+  [[ ${#_protected_staged[@]} -eq 0 ]]
+}
+
+# Return non-zero if any control-plane path is staged (diagnostics already printed).
+# Also non-zero when staged enumeration itself fails (fail closed).
+check_staged_control_plane() {
+  scan_staged_control_plane
+}
+
+# True (0) when `git commit` argv can include working-tree content that is not
+# already in the index: -a/--all (incl. combined short opts like -am),
+# -i/--include, -o/--only, -p/--patch, --interactive, --pathspec-from-file
+# (equals or separate-value), bare pathspecs, or pathspecs after `--`.
+# Combined short forms fail closed if any of a/i/o/p appear as *flag letters*
+# (e.g. -ip, -po, -am). Attached-value shorts such as -mabc, -Skeyid, -uno are
+# NOT combined flags: the value payload is not scanned for a/i/o/p.
+# Separate-value options consume the next argv (--message, --trailer, --fixup,
+# --squash, …). Non-existent --fix-trailer is not recognized.
+# --pathspec-file-nul only affects pathspec-file encoding; classifying
+# --pathspec-from-file itself is enough so a pathspec-file commit cannot evade.
+# Conservative: not a full git option parser; prefers fail-closed on ambiguity.
+# $1 is the subcommand ("commit"); remaining args are commit options/operands.
+commit_form_includes_worktree() {
+  local arg skip_next=0 saw_dd=0 chars i c rest
+  shift # drop "commit"
+  for arg in "$@"; do
+    if [[ "$skip_next" -eq 1 ]]; then
+      skip_next=0
+      continue
+    fi
+    if [[ "$saw_dd" -eq 1 ]]; then
+      return 0
+    fi
+    case "$arg" in
+      --) saw_dd=1 ;;
+      -a|--all|--include|-i|--only|-o|-p|--patch|--interactive|--pathspec-from-file|--pathspec-from-file=*)
+        return 0
+        ;;
+      # Separate-value options: consume the next argv (real git spellings only).
+      -m|--message|-F|--file|-t|--template|--author|--date|--cleanup|--trailer|-c|--reedit-message|-C|--reuse-message|--fixup|--squash)
+        skip_next=1
+        ;;
+      --message=*|--file=*|--template=*|--author=*|--date=*|--cleanup=*|--trailer=*|--reedit-message=*|--reuse-message=*|--fixup=*|--squash=*)
+        ;;
+      # Optional-value long forms; equals payload is not a worktree flag.
+      --gpg-sign|--gpg-sign=*|--untracked-files|--untracked-files=*)
+        ;;
+      --*)
+        ;;
+      -*)
+        # Short cluster: walk flag letters. Worktree booleans a/i/o/p fail closed.
+        # Required-value letters (m/F/t/c/C) consume an attached remainder as the
+        # value (e.g. -mabc) or mark skip_next when the value is the next argv
+        # (e.g. -sm msg). Optional-value letters (S/u) consume an attached
+        # remainder only (-Skeyid, -uno) and never skip_next. Do not scan value
+        # payloads for a/i/o/p.
+        chars="${arg#-}"
+        i=0
+        while [[ "$i" -lt ${#chars} ]]; do
+          c="${chars:$i:1}"
+          case "$c" in
+            a|i|o|p)
+              return 0
+              ;;
+            m|F|t|c|C)
+              rest="${chars:$((i + 1))}"
+              if [[ -z "$rest" ]]; then
+                skip_next=1
+              fi
+              break
+              ;;
+            S|u)
+              # Optional attached value; remainder is payload, not flag letters.
+              break
+              ;;
+          esac
+          i=$((i + 1))
+        done
+        ;;
+      *)
+        # Bare non-option operand: pathspec form (e.g. git commit -m msg PATH).
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Print diagnostics and return 1 if any protected tracked path has unstaged
+# working-tree changes (the set -a / pathspec commits can pull into a commit).
+# Enumerates from the resolved repo root with --no-relative (see scan_staged).
+# Returns 1 on enumeration failure as well (fail closed; do not treat a failed
+# git diff as a clean worktree).
+check_unstaged_protected_tracked() {
+  local path found=0 tmp list_rc=0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/gibson-unstaged-scan.XXXXXX") || {
+    echo "gibson repo-boundary guard: cannot create temp file for unstaged path enumeration" >&2
+    return 1
+  }
+  "$REAL_GIT" -C "$current_root" diff --no-relative --name-only -z \
+    >"$tmp" 2>/dev/null || list_rc=$?
+  if [[ "$list_rc" -ne 0 ]]; then
+    rm -f -- "$tmp"
+    echo "gibson repo-boundary guard: failed to enumerate unstaged paths (git exit $list_rc)" >&2
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    [[ -n "$path" ]] || continue
+    if protected_path "$path"; then
+      echo "gibson repo-boundary guard: runner cannot commit harness control-plane file '$path' via -a/pathspec" >&2
+      found=1
+    fi
+  done <"$tmp"
+  rm -f -- "$tmp"
+  [[ "$found" -eq 0 ]]
+}
+
+# Unstage every path in _protected_staged using literal pathspecs so glob or
+# pathspec-magic characters in a protected filename cannot match other paths.
+# Runs at the repository root (root-relative names from the staged scan).
+# set -e safe: one failed reset must never abort the loop or later offenders.
+# On reset failure (e.g. unborn HEAD, transient index lock), fall back to an
+# index-only `rm --cached --ignore-unmatch` of the exact literal path — never
+# touches working-tree content or unrelated staging. Always returns normally so
+# the guarded-add caller can finish with exit 86 after a protected finding.
+# Emits one bounded diagnostic per offender that remains staged; never dumps
+# raw git/environment output.
+rollback_protected_staged() {
+  local path still
+  # Bash 3.2 + set -u: "${arr[@]}" is unbound when arr is empty — guard first.
+  # Empty _protected_staged is a no-op (also covers enumeration-failure path).
+  [[ ${#_protected_staged[@]} -eq 0 ]] && return 0
+  # One attempt per offender with :(literal) so glob/pathspec-magic characters
+  # in a protected filename never match another index path (Bash 3.2-safe).
+  for path in "${_protected_staged[@]}"; do
+    if ! "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}" 2>/dev/null; then
+      # Index-only fallback; --ignore-unmatch keeps a missing entry non-fatal.
+      "$REAL_GIT" -C "$current_root" rm -q --cached --ignore-unmatch -- \
+        ":(literal)${path}" 2>/dev/null || true
+    fi
+    # still != 0: staged difference remains (1) or git could not check (e.g. 128).
+    still=0
+    "$REAL_GIT" -C "$current_root" diff --cached --quiet -- ":(literal)${path}" \
+      2>/dev/null || still=$?
+    if [[ "$still" -ne 0 ]]; then
+      echo "gibson repo-boundary guard: could not unstage '$path'" >&2
+    fi
+  done
+  return 0
+}
+
+# Run real `git add`, always scan the index afterward (including after a
+# nonzero/partial add), selective-rollback protected entries → exit 86, else
+# propagate the real add status. Under set -e a bare `"$REAL_GIT" "$@"` would
+# abort before the scan on failure.
+guarded_git_add() {
+  local add_rc=0
+  "$REAL_GIT" "$@" || add_rc=$?
+  if ! scan_staged_control_plane; then
+    rollback_protected_staged
+    exit 86
+  fi
+  return "$add_rc"
 }
 
 branch_from_push_args() {
@@ -106,20 +333,22 @@ origin_slug_from_url() {
 case "${1-}" in
   add|commit)
     if [[ "$1" == "commit" ]]; then
-      check_staged_control_plane
-    else
-      "$REAL_GIT" "$@"
-      if ! check_staged_control_plane; then
-        "$REAL_GIT" reset -q
-        exit 86
+      check_staged_control_plane || exit 86
+      # -a/-am and pathspec commits can include unstaged tracked mods after the
+      # index scan. Fail closed when those forms could pull in protected paths.
+      if commit_form_includes_worktree "$@"; then
+        check_unstaged_protected_tracked || exit 86
       fi
-    fi
-    if [[ "$1" == "commit" ]]; then
       "$REAL_GIT" "$@"
+    else
+      # Real add first (status captured), then always scan; selective literal
+      # rollback of protected paths → 86, else propagate real add status.
+      # See guarded_git_add / rollback_protected_staged.
+      guarded_git_add "$@"
     fi
     ;;
   push)
-    check_staged_control_plane
+    check_staged_control_plane || exit 86
     check_push "${@:2}"
     ;;
   *)
