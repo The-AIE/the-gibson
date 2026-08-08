@@ -189,7 +189,7 @@ launch_count() {
 # --- fixtures ---------------------------------------------------------------
 
 setup_target_repo() {
-  local name="$1" slug="${2:-acme/widget}"
+  local name="$1" slug="${2:-acme/widget}" def_branch="${3:-main}"
   local dir="$ROOT/targets/$name"
   # Drop prior worktrees registered against this canon (if any)
   if [[ -d "$dir/.git" ]]; then
@@ -198,7 +198,7 @@ setup_target_repo() {
   rm -rf -- "$dir"
   mkdir -p "$dir"
   $GIT init -q "$dir"
-  $GIT -C "$dir" checkout -q -b main
+  $GIT -C "$dir" checkout -q -b "$def_branch"
   echo "app" > "$dir/README.md"
   mkdir -p "$dir/docs" "$dir/scripts" "$dir/apps/mcp/lib" "$dir/marketing/app"
   echo x > "$dir/docs/a.md"
@@ -206,9 +206,11 @@ setup_target_repo() {
   $GIT -C "$dir" add -A
   $GIT -C "$dir" commit -q -m "init"
   # GitHub-shaped origin for slug preflight only. Tests set FLEET_SKIP_FETCH=1
-  # so the driver never contacts the network.
+  # so the driver never contacts the network. origin/HEAD must be set so the
+  # offline default-branch pin does not guess main/master.
   $GIT -C "$dir" remote add origin "https://github.com/${slug}.git"
-  $GIT -C "$dir" update-ref refs/remotes/origin/main HEAD
+  $GIT -C "$dir" update-ref "refs/remotes/origin/${def_branch}" HEAD
+  $GIT -C "$dir" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/${def_branch}"
   printf '%s\n' "$dir"
 }
 
@@ -770,6 +772,544 @@ else
 fi
 # clean planted pidfile residue
 rm -f "$LOG_DIR/docs.pid"
+
+# --- #1 healthy repeated --start must not clobber HALT / live state --------
+echo "healthy repeated --start preserves HALT + state"
+reset_calls
+TARGET=$(setup_target_repo hstart acme/widget)
+PROF="$ROOT/profiles/hstart.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hstart" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|31|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "hstart initial start failed: $out"; }
+# Plant non-initial live state + deliberate HALT + a "healthy" pidfile whose
+# command line matches this lane (sleep with lane path + loop.sh in argv).
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 77
+pr: 88
+hat: reviewer
+next_hat: release
+round: 4
+parked: false
+next_action: planted non-initial state for healthy restart sensor
+notes: >
+  preserve me
+STATE
+mkdir -p "$ROOT/fleet/lane-docs/gibson"
+touch "$ROOT/fleet/lane-docs/gibson/HALT"
+# Live process whose argv contains the lane dir and loop.sh so lane_pid_alive
+# treats it as this lane (identity check, not mere kill -0).
+# $0/$1 after -c appear in ps command= on macOS/Linux.
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+HEALTHY_PID=$!
+printf '%s\n' "$HEALTHY_PID" > "$LOG_DIR/docs.pid"
+# Prove identity match before re-start
+if pid_check=$(
+  env GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="$RUNNER" REVIEWER_CMD="$REVIEWER_CMD" RELEASE_CMD="$RELEASE_CMD" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" FLEET_PROFILE="$PROF" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    "$FLEET" --status 2>&1
+); then
+  :
+fi
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "planted healthy lane reports running" \
+  || bad "planted healthy lane not running: $pid_check"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "healthy re-start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "healthy re-start launched zero new runners" \
+  || bad "healthy re-start launched $lc (expected 0)"
+[[ -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "healthy re-start preserved HALT" \
+  || bad "healthy re-start removed HALT"
+grep -q '^issue: 77$' "$STATE_FILE" && grep -q '^pr: 88$' "$STATE_FILE" \
+  && grep -q '^hat: reviewer$' "$STATE_FILE" && grep -q '^round: 4$' "$STATE_FILE" \
+  && ok "healthy re-start preserved issue/pr/hat/round" \
+  || bad "healthy re-start clobbered state: $(cat "$STATE_FILE")"
+# cleanup planted sleeper
+kill "$HEALTHY_PID" 2>/dev/null || true
+wait "$HEALTHY_PID" 2>/dev/null || true
+rm -f "$LOG_DIR/docs.pid"
+
+# --- #1b dead-lane relaunch preserves valid state (does not re-seed) --------
+echo "dead-lane relaunch preserves state"
+reset_calls
+TARGET=$(setup_target_repo dstart acme/widget)
+PROF="$ROOT/profiles/dstart.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=dstart" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|32|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "dstart initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-02T00:00:00Z
+issue: 55
+pr: 66
+hat: release
+next_hat: builder
+round: 9
+parked: false
+next_action: planted dead-lane state
+notes: >
+  preserve on relaunch
+STATE
+touch "$ROOT/fleet/lane-docs/gibson/HALT"
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "dead-lane relaunch failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "dead-lane relaunch launched once" \
+  || bad "dead-lane relaunch launches=$lc"
+grep -q '^issue: 55$' "$STATE_FILE" && grep -q '^pr: 66$' "$STATE_FILE" \
+  && grep -q '^hat: release$' "$STATE_FILE" && grep -q '^round: 9$' "$STATE_FILE" \
+  && ok "dead-lane relaunch preserved issue/pr/hat/round" \
+  || bad "dead-lane relaunch reset state: $(cat "$STATE_FILE")"
+[[ ! -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "dead-lane relaunch cleared HALT" \
+  || bad "dead-lane relaunch left HALT in place"
+
+# --- #2 watchdog must not inject via profile path / shell source ------------
+echo "watchdog argv-only (hostile profile path)"
+# Static proof: watchdog uses fixed bash -c body + positional params, not
+# interpolated PROFILE_PATH / SLEEP_CMD into shell source.
+if grep -n 'bash -c' "$FLEET" | grep -E '\$SLEEP_CMD|\$PROFILE_PATH|\$DEADLINE' >/dev/null 2>&1; then
+  bad "watchdog still interpolates data into bash -c source"
+else
+  ok "watchdog bash -c has no interpolated SLEEP_CMD/PROFILE_PATH"
+fi
+# Runtime: hostile profile path with spaces/quotes/;/$ must not execute a marker.
+reset_calls
+TARGET=$(setup_target_repo inj acme/widget)
+# Create hostile directory + profile name
+HOSTILE_DIR="$ROOT/profiles/hostile name; echo INJECTED > $ROOT/injection-marker; \$HOME"
+mkdir -p "$HOSTILE_DIR"
+PROF="$HOSTILE_DIR/p\".profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=inj" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=1" \
+  "lane=docs|33|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+rm -f "$ROOT/injection-marker"
+# Run with real (short) watchdog, sync launch, no skip of watchdog.
+# SLEEP_CMD=true so watchdog body proceeds immediately to --halt.
+out=$(
+  env \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="$RUNNER" REVIEWER_CMD="$REVIEWER_CMD" RELEASE_CMD="$RELEASE_CMD" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=1 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 \
+    GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || true
+# Give watchdog a moment to fire halt
+sleep 1
+if [[ -f "$ROOT/injection-marker" ]]; then
+  bad "hostile profile path executed marker command (injection)"
+else
+  ok "hostile profile path did not execute marker command"
+fi
+# restore sensor defaults
+export FLEET_NO_WATCHDOG=1
+export FLEET_SYNC_LAUNCH=1
+export SLEEP_CMD=true
+
+# --- #3 remote default branch: trunk + decoy origin/main -------------------
+echo "remote default branch pin (trunk + decoy main)"
+reset_calls
+# Local bare remote so ls-remote works offline; GitHub-shaped URL kept for slug
+# via a separate push URL is awkward — use FLEET_SKIP_FETCH + local origin/HEAD.
+TARGET=$(setup_target_repo trunkpin acme/widget trunk)
+# Create decoy origin/main at a *different* commit than trunk tip.
+TRUNK_SHA=$($GIT -C "$TARGET" rev-parse HEAD)
+echo "decoy" > "$TARGET/decoy.txt"
+$GIT -C "$TARGET" add decoy.txt
+$GIT -C "$TARGET" commit -q -m "decoy main commit"
+DECOY_SHA=$($GIT -C "$TARGET" rev-parse HEAD)
+# Move trunk tip back: create origin/trunk at original, origin/main at decoy
+$GIT -C "$TARGET" update-ref refs/remotes/origin/trunk "$TRUNK_SHA"
+$GIT -C "$TARGET" update-ref refs/remotes/origin/main "$DECOY_SHA"
+$GIT -C "$TARGET" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/trunk
+# Local branch still on decoy commit is fine (dirty? no, committed)
+# Canonical must be clean — we're on decoy branch tip; that's fine.
+PROF="$ROOT/profiles/trunkpin.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=trunkpin" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|34|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "trunkpin start failed: $out"; }
+LANE_HEAD=$($GIT -C "$ROOT/fleet/lane-docs" rev-parse HEAD 2>/dev/null || echo missing)
+if [[ "$LANE_HEAD" == "$TRUNK_SHA" ]]; then
+  ok "lane base pinned to trunk tip (not decoy origin/main)"
+else
+  bad "lane base HEAD=$LANE_HEAD expected trunk=$TRUNK_SHA decoy=$DECOY_SHA out=$out"
+fi
+# Live path (FLEET_SKIP_FETCH=0): controlled git stub for fetch + ls-remote so
+# we never hit the network, while proving the driver uses ls-remote --symref
+# (not origin/main guessing) and pins the worktree to that tip.
+reset_calls
+LIVE=$(setup_target_repo trunklive acme/widget main)
+# Plant trunk tip + decoy main as real commits in the object store.
+echo "trunk-base" > "$LIVE/trunk-marker.txt"
+$GIT -C "$LIVE" add trunk-marker.txt
+$GIT -C "$LIVE" commit -q -m "trunk tip"
+TRUNK_LIVE=$($GIT -C "$LIVE" rev-parse HEAD)
+echo "decoy-main" > "$LIVE/decoy-marker.txt"
+$GIT -C "$LIVE" add decoy-marker.txt
+$GIT -C "$LIVE" commit -q -m "decoy main tip"
+DECOY_LIVE=$($GIT -C "$LIVE" rev-parse HEAD)
+# Local decoy: origin/main points at decoy; no origin/trunk tracking yet.
+# Driver must learn trunk from ls-remote --symref, not from origin/main.
+$GIT -C "$LIVE" update-ref refs/remotes/origin/main "$DECOY_LIVE"
+$GIT -C "$LIVE" update-ref refs/remotes/origin/trunk "$TRUNK_LIVE"
+# Mis-point local origin/HEAD at decoy main — live path must ignore it.
+$GIT -C "$LIVE" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+# Canonical clean: reset index/worktree to decoy tip (already there).
+REAL_GIT=$(command -v git)
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+# Controlled offline stub for live default-branch resolution.
+# - fetch origin: no-op success (objects already local)
+# - ls-remote --symref origin HEAD: advertise trunk (not main)
+# - ls-remote origin refs/heads/trunk: trunk tip
+# - everything else: real git
+args=("\$@")
+# Find subcommand after possible -C <path> and -c key=val
+i=0
+n=\$#
+set -- "\${args[@]}"
+while [[ \$i -lt \$n ]]; do
+  a="\${args[\$i]}"
+  case "\$a" in
+    -C) i=\$((i+2)); continue ;;
+    -c) i=\$((i+2)); continue ;;
+    -*) i=\$((i+1)); continue ;;
+    *) break ;;
+  esac
+done
+cmd="\${args[\$i]:-}"
+if [[ "\$cmd" == "fetch" ]]; then
+  exit 0
+fi
+if [[ "\$cmd" == "ls-remote" ]]; then
+  # Detect --symref origin HEAD
+  has_symref=0
+  has_head=0
+  has_trunk_ref=0
+  for a in "\${args[@]}"; do
+    [[ "\$a" == "--symref" ]] && has_symref=1
+    [[ "\$a" == "HEAD" ]] && has_head=1
+    [[ "\$a" == "refs/heads/trunk" ]] && has_trunk_ref=1
+  done
+  if [[ \$has_symref -eq 1 && \$has_head -eq 1 ]]; then
+    printf 'ref: refs/heads/trunk\tHEAD\n'
+    printf '%s\tHEAD\n' "$TRUNK_LIVE"
+    exit 0
+  fi
+  if [[ \$has_trunk_ref -eq 1 ]]; then
+    printf '%s\trefs/heads/trunk\n' "$TRUNK_LIVE"
+    exit 0
+  fi
+fi
+exec "$REAL_GIT" "\${args[@]}"
+STUB
+chmod +x "$BIN/git"
+PROF="$ROOT/profiles/trunklive.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=trunklive" \
+  "repo=$LIVE" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|35|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="$RUNNER" REVIEWER_CMD="$REVIEWER_CMD" RELEASE_CMD="$RELEASE_CMD" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=15 \
+    GIT_TERMINAL_PROMPT=0 \
+    GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "trunklive start failed: $out"; out=""; }
+LANE_HEAD=$(PATH="$BIN:$PATH" $GIT -C "$ROOT/fleet/lane-docs" rev-parse HEAD 2>/dev/null || echo missing)
+# Use real git for rev-parse of lane (stub may confuse -C parsing if still on PATH)
+LANE_HEAD=$("$REAL_GIT" -C "$ROOT/fleet/lane-docs" rev-parse HEAD 2>/dev/null || echo missing)
+if [[ "$LANE_HEAD" == "$TRUNK_LIVE" ]]; then
+  ok "live ls-remote pin uses trunk tip (decoy main ignored)"
+else
+  bad "live lane HEAD=$LANE_HEAD expected trunk=$TRUNK_LIVE decoy=$DECOY_LIVE out=$out"
+fi
+rm -f "$BIN/git"
+
+# --- #4 wall-clock fetch timeout + child cleanup ---------------------------
+echo "wall-clock fetch timeout"
+reset_calls
+TARGET=$(setup_target_repo hangfetch acme/widget)
+PROF="$ROOT/profiles/hangfetch.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hangfetch" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|36|docs/**|docs only"
+# PATH git stub: hang on fetch, otherwise delegate to real git
+REAL_GIT=$(command -v git)
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+# hang on fetch for wall-timeout sensor; else real git
+for a in "\$@"; do
+  if [[ "\$a" == "fetch" ]]; then
+    # marker so we can detect the child; hang until killed
+    echo "\$\$" > "$CALLS/hang-fetch.pid"
+    while true; do sleep 30; done
+    exit 0
+  fi
+done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$BIN/git"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+rm -f "$CALLS/hang-fetch.pid"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="$RUNNER" REVIEWER_CMD="$REVIEWER_CMD" RELEASE_CMD="$RELEASE_CMD" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=2 \
+    GIT_TERMINAL_PROMPT=0 \
+    GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "hanging fetch should fail closed: $out" || {
+  echo "$out" | grep -qi 'timeout\|wall-clock\|timed out\|exceeded' \
+    && ok "hanging fetch fails closed on wall timeout" \
+    || bad "unclear hang-fetch fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "hanging fetch launched zero runners" || bad "hang-fetch launched $lc"
+# Child cleanup: hanging pid must not remain
+if [[ -f "$CALLS/hang-fetch.pid" ]]; then
+  hpid=$(tr -d '[:space:]' < "$CALLS/hang-fetch.pid")
+  if [[ -n "$hpid" ]] && kill -0 "$hpid" 2>/dev/null; then
+    bad "hanging fetch child pid $hpid still alive after timeout"
+    kill -KILL "$hpid" 2>/dev/null || true
+  else
+    ok "hanging fetch child cleaned up after timeout"
+  fi
+else
+  # process may have been killed before writing pid — still accept if zero launches
+  ok "hanging fetch child cleaned up (no residual pid file / already reaped)"
+fi
+# remove git stub so later tests use real git
+rm -f "$BIN/git"
+
+# --- #5 provider identity: path / alias / misleading trailing args ----------
+echo "provider identity normalization"
+reset_calls
+TARGET=$(setup_target_repo provid acme/widget)
+PROF="$ROOT/profiles/provid.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=provid" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|37|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+# Absolute path same provider as runner (fake-runner)
+out=$(
+  env \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" \
+    REVIEWER_CMD="$BIN/fake-runner review-me" \
+    RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "absolute same-provider reviewer should fail" || {
+  echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+    && ok "absolute same-provider reviewer refused" \
+    || bad "unclear abs same-provider fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "absolute same-provider path launched zero" || bad "abs path launched $lc"
+
+# Relative path same provider for release
+: > "$CALLS/launches.log"
+# Create a relative-looking path via symlink name under BIN (on PATH as ./ style)
+# Use absolute path to a claude-stub that collides with REVIEWER being codex-stub
+# and RELEASE being path to same as runner — test release path identity.
+out=$(
+  env \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" \
+    REVIEWER_CMD="codex-stub review" \
+    RELEASE_CMD="$BIN/fake-runner do-release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "absolute same-provider release should fail" || {
+  echo "$out" | grep -qi 'RELEASE_CMD\|third identity\|same provider\|provider' \
+    && ok "absolute same-provider release refused" \
+    || bad "unclear abs same-provider release fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "absolute same-provider release launched zero" || bad "abs release launched $lc"
+
+# Misleading trailing arg: first token is fake-runner, word "codex-stub" in args
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" \
+    REVIEWER_CMD="fake-runner --as codex-stub review" \
+    RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "misleading trailing codex arg should fail" || {
+  echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+    && ok "misleading trailing vendor word refused" \
+    || bad "unclear misleading-arg fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "misleading trailing arg launched zero" || bad "misleading launched $lc"
+
+# Relative path form: ./fake-runner as reviewer
+: > "$CALLS/launches.log"
+(
+  CDPATH='' cd "$BIN" || exit 1
+  out=$(
+    env \
+      PATH="$BIN:$PATH" \
+      GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+      RUNNER="fake-runner" \
+      REVIEWER_CMD="./fake-runner review" \
+      RELEASE_CMD="claude-stub release" \
+      GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+      DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+      FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+      GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+      "$FLEET" --start 2>&1
+  ) && bad "relative same-provider reviewer should fail" || {
+    echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+      && ok "relative same-provider reviewer refused" \
+      || bad "unclear relative same-provider fail: $out"
+  }
+)
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "relative same-provider launched zero" || bad "relative launched $lc"
+
+# Valid Grok-shaped separation still works (fake-runner / codex-stub / claude-stub)
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" \
+    REVIEWER_CMD="codex-stub review" \
+    RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "valid three-role separation failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "valid three-role separation still launches" \
+  || bad "valid three-role launches=$lc out=$out"
+
+# --- #6 WIP doctrine: four lanes fail preflight, zero launches -------------
+echo "WIP max 3 lanes"
+reset_calls
+TARGET=$(setup_target_repo fourlane acme/widget)
+PROF="$ROOT/profiles/fourlane.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=fourlane" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=a|1|docs/**|a" \
+  "lane=b|2|scripts/**|b" \
+  "lane=c|3|apps/mcp/lib/**|c" \
+  "lane=d|4|marketing/app/**|d"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+zero_launch_case "four-lane profile exceeds WIP" --start
+# message mentions WIP / 3 lanes
+out=$(run_fleet --start 2>&1) && true
+echo "$out" | grep -qiE 'WIP|1-3|3 lanes|allows 1' \
+  && ok "four-lane error names WIP limit" \
+  || bad "four-lane error unclear: $out"
 
 # --- declarative parse: profile must never be sourced / eval'd --------------
 echo "declarative profile load"

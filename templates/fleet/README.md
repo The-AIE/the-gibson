@@ -33,7 +33,7 @@ executes it.
 | `runner` | no | Global builder CLI name (default `grok` / env `RUNNER`) |
 | `error_budget` | no | Passed to `loop.sh` |
 | `deadline_seconds` | no | Watchdog sleep before graceful `--halt` |
-| `lane` | ≥1 | One lane record per line (see below) |
+| `lane` | 1–3 | One lane record per line (see below). Fleet WIP doctrine caps concurrent lanes at **3**; a fourth lane fails closed with zero launches. |
 
 ### Lane records
 

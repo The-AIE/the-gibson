@@ -65,9 +65,18 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}" # tests can set to true / no-op
 # Test hooks (unset in production):
 #   FLEET_SYNC_LAUNCH=1  — run loop.sh in-foreground (no nohup); deterministic sensors
 #   FLEET_NO_WATCHDOG=1  — skip deadline watchdog process
+#   FLEET_SKIP_FETCH=1   — skip network fetch; resolve default branch from local origin/*
+#   FLEET_FETCH_TIMEOUT  — wall-clock seconds for git fetch (default 30)
 FLEET_SYNC_LAUNCH="${FLEET_SYNC_LAUNCH:-0}"
 FLEET_NO_WATCHDOG="${FLEET_NO_WATCHDOG:-0}"
 FLEET_SKIP_FETCH="${FLEET_SKIP_FETCH:-0}"
+FLEET_FETCH_TIMEOUT="${FLEET_FETCH_TIMEOUT:-30}"
+
+# Fleet WIP doctrine: 1–3 concurrent lanes (docs/25, DECISIONS: ≤ 3 lanes).
+FLEET_MAX_LANES=3
+
+# Absolute path to this driver (watchdog argv must not depend on $0 cwd).
+DRIVER_SELF="$SCRIPT_DIR/$(basename "$0")"
 
 CMD="--start"
 
@@ -478,6 +487,10 @@ load_profile() {
   [[ -n "$RUNNER" ]] || die "runner is empty"
 
   [[ ${#LANE_IDS[@]} -ge 1 ]] || die "profile has no lane= records"
+  # Fleet WIP doctrine: 1–3 lanes only. Four or more fails closed before launch.
+  if [[ ${#LANE_IDS[@]} -gt $FLEET_MAX_LANES ]]; then
+    die "profile has ${#LANE_IDS[@]} lanes; fleet WIP doctrine allows 1-${FLEET_MAX_LANES} lanes only (zero launches)"
+  fi
 
   # duplicate issue across lanes (hard collision on claim)
   local i j qi qj qi_list qj_list
@@ -639,43 +652,106 @@ check_pr_conflicts() {
   done <<<"$branches"
 }
 
+# First whitespace-separated token of a command string (no eval / no shell parse).
+cmd_first_token() {
+  local raw="$1"
+  raw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//')
+  [[ -n "$raw" ]] || { printf '\n'; return 1; }
+  # awk FS is whitespace — trailing args (including misleading vendor names) are ignored.
+  printf '%s\n' "$raw" | awk '{ print $1; exit }'
+}
+
+# Map an executable basename to a provider family id (grok|codex|claude|hermes|other).
+# Trailing arguments never participate — "grok … codex …" is still provider "grok".
+provider_family_from_basename() {
+  local base
+  base=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+  case "$base" in
+    '') printf '\n'; return 1 ;;
+    grok|grok-*) printf 'grok\n' ;;
+    codex|codex-*) printf 'codex\n' ;;
+    claude|claude-*) printf 'claude\n' ;;
+    hermes|hermes-*) printf 'hermes\n' ;;
+    *) printf '%s\n' "$base" ;;
+  esac
+}
+
+# Resolve the provider identity of a role command from its first executable only.
+# Discovers PATH hits and one-level symlinks when present so aliases/paths cannot
+# mask the same provider under a different spelling.
+cmd_provider_id() {
+  local raw="$1" first base resolved target dir
+  first=$(cmd_first_token "$raw") || true
+  [[ -n "$first" ]] || { printf '\n'; return 1; }
+
+  base=$(basename "$first")
+
+  if [[ "$first" == */* ]]; then
+    # Absolute or relative path form.
+    if [[ -L "$first" ]]; then
+      target=$(readlink "$first" 2>/dev/null || true)
+      if [[ -n "$target" ]]; then
+        if [[ "$target" != /* ]]; then
+          dir=$(dirname "$first")
+          target="$dir/$target"
+        fi
+        base=$(basename "$target")
+      fi
+    elif [[ -e "$first" ]]; then
+      dir=$(dirname "$first")
+      if [[ -d "$dir" ]]; then
+        resolved=$(CDPATH='' cd "$dir" 2>/dev/null && pwd -P)/$(basename "$first")
+        base=$(basename "$resolved")
+      fi
+    fi
+  else
+    # Bare name — resolve via PATH when discoverable.
+    if resolved=$(command -v "$first" 2>/dev/null); then
+      if [[ -L "$resolved" ]]; then
+        target=$(readlink "$resolved" 2>/dev/null || true)
+        if [[ -n "$target" ]]; then
+          if [[ "$target" != /* ]]; then
+            dir=$(dirname "$resolved")
+            target="$dir/$target"
+          fi
+          base=$(basename "$target")
+        else
+          base=$(basename "$resolved")
+        fi
+      else
+        base=$(basename "$resolved")
+      fi
+    fi
+  fi
+
+  provider_family_from_basename "$base"
+}
+
 assert_three_role_separation() {
   # Never allow the implementation runner to grade or release its own work.
-  local r rev rel
-  r=$(printf '%s' "$RUNNER" | tr '[:upper:]' '[:lower:]')
-  rev=$(printf '%s' "${REVIEWER_CMD:-}" | tr '[:upper:]' '[:lower:]')
-  rel=$(printf '%s' "${RELEASE_CMD:-}" | tr '[:upper:]' '[:lower:]')
+  # Compare normalized first-executable provider identities only — never substring
+  # match on the full command (a Grok argv containing the word "codex" is still Grok).
+  local r_id rev_id rel_id
+  [[ -n "${RUNNER:-}" ]] || die "RUNNER is empty — builder identity required"
   [[ -n "${REVIEWER_CMD:-}" ]] || die "REVIEWER_CMD is empty — cross-vendor review required (Law 5)"
   [[ -n "${RELEASE_CMD:-}" ]] || die "RELEASE_CMD is empty — third-identity release required (three-role split)"
-  # If REVIEWER_CMD is just the same binary as RUNNER with no other vendor, refuse.
-  case "$rev" in
-    "$r"| "$r"\ *|"$r"-*)
-      # allow if reviewer clearly different tool (codex/claude/hermes) even when runner substring appears in flags
-      case "$rev" in
-        *codex*|*claude*|*hermes*|*second-opinion*) ;;
-        *) die "REVIEWER_CMD must not be the implementation runner grading its own work (RUNNER=$RUNNER REVIEWER_CMD=$REVIEWER_CMD)" ;;
-      esac
-      ;;
-  esac
-  case "$rel" in
-    "$r"| "$r"\ *|"$r"-*)
-      case "$rel" in
-        *codex*|*claude*|*hermes*)
-          # runner is grok and release is claude — ok; if release is same family as runner without third party:
-          if [[ "$r" == "claude" ]] && [[ "$rel" == *claude* ]]; then
-            die "RELEASE_CMD must be a third identity distinct from the builder (RUNNER=$RUNNER)"
-          fi
-          if [[ "$r" == "codex" ]] && [[ "$rel" == *codex* ]] && [[ "$rel" != *claude* ]]; then
-            die "RELEASE_CMD must be a third identity distinct from the builder (RUNNER=$RUNNER)"
-          fi
-          if [[ "$r" == "grok" ]] && [[ "$rel" == *grok* ]] && [[ "$rel" != *claude* ]] && [[ "$rel" != *codex* ]]; then
-            die "RELEASE_CMD must be a third identity distinct from the builder (RUNNER=$RUNNER)"
-          fi
-          ;;
-        *) die "RELEASE_CMD must not collapse into the implementation runner (RUNNER=$RUNNER RELEASE_CMD=$RELEASE_CMD)" ;;
-      esac
-      ;;
-  esac
+
+  r_id=$(cmd_provider_id "$RUNNER") || true
+  rev_id=$(cmd_provider_id "$REVIEWER_CMD") || true
+  rel_id=$(cmd_provider_id "$RELEASE_CMD") || true
+  [[ -n "$r_id" ]] || die "cannot resolve builder provider identity from RUNNER='$RUNNER'"
+  [[ -n "$rev_id" ]] || die "cannot resolve reviewer provider identity from REVIEWER_CMD='$REVIEWER_CMD'"
+  [[ -n "$rel_id" ]] || die "cannot resolve release provider identity from RELEASE_CMD='$RELEASE_CMD'"
+
+  if [[ "$r_id" == "$rev_id" ]]; then
+    die "REVIEWER_CMD must not be the same provider as the builder (provider=$r_id RUNNER=$RUNNER REVIEWER_CMD=$REVIEWER_CMD)"
+  fi
+  if [[ "$r_id" == "$rel_id" ]]; then
+    die "RELEASE_CMD must be a third identity distinct from the builder (provider=$r_id RUNNER=$RUNNER RELEASE_CMD=$RELEASE_CMD)"
+  fi
+  if [[ "$rev_id" == "$rel_id" ]]; then
+    die "RELEASE_CMD must be a third identity distinct from the reviewer (provider=$rev_id REVIEWER_CMD=$REVIEWER_CMD RELEASE_CMD=$RELEASE_CMD)"
+  fi
 }
 
 preflight_for_start() {
@@ -770,6 +846,14 @@ do_status() {
   fi
 }
 
+# True when lane base has a usable loop-state (issue: field present).
+lane_state_is_valid() {
+  local id="$1" sf
+  sf=$(lane_state "$id")
+  [[ -f "$sf" ]] || return 1
+  grep -qE '^issue:[[:space:]]*[1-9][0-9]*' "$sf" 2>/dev/null
+}
+
 seed_lane_state() {
   local id="$1" queue="$2" scope="$3" intent="$4" d issue
   d=$(lane_dir "$id")
@@ -823,6 +907,163 @@ EOF
   [[ -f "$d/gibson/journal.md" ]] || echo "# Gibson loop journal (lane $id)" > "$d/gibson/journal.md"
 }
 
+# Ensure sentinel + journal exist without rewriting issue/pr/hat/round.
+ensure_lane_markers() {
+  local id="$1" d
+  d=$(lane_dir "$id")
+  mkdir -p "$d/gibson"
+  if [[ ! -f "$d/.fleet-lane" ]]; then
+    cat > "$d/.fleet-lane" <<EOF
+This directory is a long-lived FLEET LANE BASE (lane: $id).
+It is the loop driver's --repo. Deleting it kills the lane.
+It is NOT the per-issue worktree that Gibson's release hat cleans up.
+Do not run "git worktree remove" or rm -rf against this path.
+EOF
+  fi
+  [[ -f "$d/gibson/journal.md" ]] || echo "# Gibson loop journal (lane $id)" > "$d/gibson/journal.md"
+}
+
+# Run a command as its own process group leader, with a wall-clock bound.
+# Works on stock macOS (no GNU timeout). Captures only the launched PID/group;
+# on expiry TERM then KILL that group only — never pkill/killall/pattern kill.
+# Returns 0 on success, 124 on wall-clock timeout, else the child's exit status.
+run_with_wall_timeout() {
+  local limit="$1"
+  shift
+  local pid watcher rc=0 status_file timed_out=0
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "fleet: bad wall timeout: $limit" >&2; return 1; }
+
+  status_file=$(mktemp "${TMPDIR:-/tmp}/fleet-wall.XXXXXX") || return 1
+
+  # Become process-group leader so we can terminate only this tree.
+  if command -v perl >/dev/null 2>&1; then
+    perl -e 'setpgrp(0,0); exec { $ARGV[0] } @ARGV or exit 127' "$@" &
+    pid=$!
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
+    pid=$!
+  else
+    # Fallback: bare child (kill by PID only). Prefer perl/python paths.
+    "$@" &
+    pid=$!
+  fi
+
+  (
+    elapsed=0
+    while [[ $elapsed -lt $limit ]]; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        exit 0
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+    done
+    # Still alive after wall clock — terminate only this process group.
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'timeout\n' > "$status_file"
+      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    fi
+  ) &
+  watcher=$!
+
+  wait "$pid" 2>/dev/null
+  rc=$?
+
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+
+  if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+    timed_out=1
+  fi
+  rm -f "$status_file"
+
+  # Reap any residual of the group (best-effort; no pattern kill).
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+
+  if [[ $timed_out -eq 1 ]]; then
+    return 124
+  fi
+  return "$rc"
+}
+
+fetch_origin_bounded() {
+  # Wall-clock bound + lowSpeed guard. Fail closed; leave no hung child.
+  local limit="${FLEET_FETCH_TIMEOUT:-30}" rc
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || die "FLEET_FETCH_TIMEOUT must be a positive integer (got: $limit)"
+  info "git fetch origin (wall timeout ${limit}s)"
+  set +e
+  run_with_wall_timeout "$limit" \
+    env GIT_TERMINAL_PROMPT=0 \
+    git -C "$BASE_REPO" \
+      -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
+      -c transfer.fsckObjects=false \
+      fetch origin --quiet
+  rc=$?
+  set -e
+  if [[ $rc -eq 124 ]]; then
+    die "git fetch origin exceeded wall-clock timeout (${limit}s) — refuse to launch; set FLEET_SKIP_FETCH=1 only for offline sensors"
+  fi
+  if [[ $rc -ne 0 ]]; then
+    die "git fetch origin failed (exit $rc) — refuse to launch; set FLEET_SKIP_FETCH=1 only for offline sensors"
+  fi
+}
+
+# Resolve remote default branch name + exact tip SHA.
+# Live: git ls-remote --symref origin HEAD after fetch (authoritative).
+# Offline (FLEET_SKIP_FETCH=1): local refs/remotes/origin/HEAD only — never
+# guess main/master and never prefer a decoy origin/main over the symref.
+# Prints: "<name> <sha>"
+resolve_remote_default_pin() {
+  local name="" sha="" symref ls_out line
+
+  if [[ "$FLEET_SKIP_FETCH" == "1" ]]; then
+    # Offline fixtures must set refs/remotes/origin/HEAD (local remote / stub).
+    if name=$(git -C "$BASE_REPO" symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null); then
+      name=${name#refs/remotes/origin/}
+    fi
+    if [[ -z "$name" ]]; then
+      # Some fixtures point origin/HEAD at a commit directly
+      if sha=$(git -C "$BASE_REPO" rev-parse --verify --quiet refs/remotes/origin/HEAD 2>/dev/null); then
+        die "origin/HEAD is detached at $sha without a branch name — set symbolic refs/remotes/origin/HEAD (offline fixture)"
+      fi
+      die "cannot resolve remote default branch offline: refs/remotes/origin/HEAD missing in $BASE_REPO (fixtures must set it; do not guess main/master)"
+    fi
+    sha=$(git -C "$BASE_REPO" rev-parse --verify --quiet "refs/remotes/origin/$name" 2>/dev/null || true)
+    [[ -n "$sha" ]] || die "offline origin/$name has no tip object in $BASE_REPO"
+    printf '%s %s\n' "$name" "$sha"
+    return 0
+  fi
+
+  if ! symref=$(git -C "$BASE_REPO" ls-remote --symref origin HEAD 2>/dev/null); then
+    die "cannot resolve remote default branch: git ls-remote --symref origin HEAD failed for $BASE_REPO"
+  fi
+  name=$(printf '%s\n' "$symref" |
+    awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+  [[ -n "$name" ]] || die "origin advertises no symbolic HEAD — refusing to guess main/master"
+
+  # Prefer the OID from the same ls-remote payload (HEAD line); fall back to
+  # explicit refs/heads/<name> listing; finally the just-fetched remote-tracking ref.
+  sha=$(printf '%s\n' "$symref" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
+  if [[ -z "$sha" ]]; then
+    if ls_out=$(git -C "$BASE_REPO" ls-remote origin "refs/heads/$name" 2>/dev/null); then
+      sha=$(printf '%s\n' "$ls_out" | awk 'NR==1 { print $1; exit }')
+    fi
+  fi
+  if [[ -z "$sha" ]]; then
+    sha=$(git -C "$BASE_REPO" rev-parse --verify --quiet "refs/remotes/origin/$name" 2>/dev/null || true)
+  fi
+  [[ -n "$sha" ]] || die "cannot pin tip of remote default branch '$name'"
+  # Verify object is present locally (fetch should have brought it in).
+  git -C "$BASE_REPO" cat-file -e "$sha^{commit}" 2>/dev/null \
+    || die "remote default tip $sha ($name) not present locally after fetch"
+
+  printf '%s %s\n' "$name" "$sha"
+}
+
 do_start() {
   print_identity
   # Complete preflight BEFORE any worktree mutation or runner launch.
@@ -832,20 +1073,19 @@ do_start() {
   if [[ "$FLEET_SKIP_FETCH" == "1" ]]; then
     info "skip git fetch (FLEET_SKIP_FETCH=1)"
   else
-    # Bound network so a wedged remote cannot hang fleet start forever.
-    # Offline sensors set FLEET_SKIP_FETCH=1. Fail closed on failure/timeout —
-    # do not launch lanes against a checkout that could not refresh origin.
-    # Portable bound (macOS has no `timeout`): git http.lowSpeed* aborts a
-    # stalled transfer; GIT_TERMINAL_PROMPT=0 blocks credential prompts.
-    if ! GIT_TERMINAL_PROMPT=0 git -C "$BASE_REPO" \
-        -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 \
-        -c transfer.fsckObjects=false \
-        fetch origin --quiet 2>/dev/null; then
-      die "git fetch origin failed or timed out (lowSpeedTime=15s) — refuse to launch; set FLEET_SKIP_FETCH=1 only for offline sensors"
-    fi
+    fetch_origin_bounded
   fi
 
-  local i id queue scope intent d issue
+  local pin_line default_name default_sha
+  pin_line=$(resolve_remote_default_pin) \
+    || die "failed to resolve remote default branch pin"
+  default_name=${pin_line%% *}
+  default_sha=${pin_line#* }
+  [[ -n "$default_name" && -n "$default_sha" && "$default_name" != "$default_sha" ]] \
+    || die "invalid remote default pin: $pin_line"
+  info "lane base pin: origin/$default_name @ $default_sha"
+
+  local i id queue scope intent d issue pid
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
     id="${LANE_IDS[$i]}"
@@ -855,44 +1095,48 @@ do_start() {
     issue="${queue%%,*}"
     d=$(lane_dir "$id")
 
+    # Identity check BEFORE any mutation: healthy lane keeps HALT + state intact.
+    if pid=$(lane_pid_alive "$id"); then
+      info "lane $id already running (pid $pid) — leaving state/HALT untouched, skip launch"
+      i=$((i + 1))
+      continue
+    fi
+
     if [[ ! -d "$d" ]]; then
-      info "worktree for lane $id (issue #$issue)"
-      # Detached at origin/main (or origin/master): builder creates issue branch.
+      info "worktree for lane $id (issue #$issue) from origin/$default_name @ $default_sha"
       # If a prior base was deleted out of band, prune the stale registration
       # so `worktree add` does not die with "missing but already registered".
       git -C "$BASE_REPO" worktree prune --expire now >/dev/null 2>&1 || true
-      local ref=""
-      if git -C "$BASE_REPO" rev-parse --verify --quiet origin/main >/dev/null; then
-        ref="origin/main"
-      elif git -C "$BASE_REPO" rev-parse --verify --quiet origin/master >/dev/null; then
-        ref="origin/master"
-      else
-        die "cannot resolve origin/main or origin/master in $BASE_REPO"
-      fi
-      if ! git -C "$BASE_REPO" worktree add --detach "$d" "$ref" --quiet; then
+      # Pin to the exact fetched remote-default tip — never guess main/master.
+      if ! git -C "$BASE_REPO" worktree add --detach "$d" "$default_sha" --quiet; then
         git -C "$BASE_REPO" worktree remove --force "$d" >/dev/null 2>&1 || true
         git -C "$BASE_REPO" worktree prune --expire now >/dev/null 2>&1 || true
-        git -C "$BASE_REPO" worktree add --detach "$d" "$ref" --quiet \
-          || die "cannot create lane worktree at $d from $ref"
+        git -C "$BASE_REPO" worktree add --detach "$d" "$default_sha" --quiet \
+          || die "cannot create lane worktree at $d from $default_sha (origin/$default_name)"
       fi
+      seed_lane_state "$id" "$queue" "$scope" "$intent"
     else
       info "reusing worktree $d"
-    fi
-
-    seed_lane_state "$id" "$queue" "$scope" "$intent"
-
-    if pid=$(lane_pid_alive "$id"); then
-      info "lane $id already running (pid $pid) — skipping launch"
-      i=$((i + 1))
-      continue
+      if lane_state_is_valid "$id"; then
+        # Dead (or never-launched-this-session) lane with valid state: preserve
+        # issue/pr/hat/round. Clear HALT so a deliberate relaunch can proceed.
+        ensure_lane_markers "$id"
+        if [[ -f "$d/gibson/HALT" ]]; then
+          rm -f "$d/gibson/HALT"
+          info "lane $id: cleared HALT for relaunch; preserved loop-state"
+        else
+          info "lane $id: preserving existing loop-state"
+        fi
+      else
+        # Truly missing / unusable state — initialize.
+        seed_lane_state "$id" "$queue" "$scope" "$intent"
+      fi
     fi
 
     info "launch lane $id → issue #$issue"
     # Export three-role cmds so loop.sh hats can shell out.
     if [[ "$FLEET_SYNC_LAUNCH" == "1" ]]; then
       # Deterministic offline path: no background jobs (sensors / CI).
-      # Record a synthetic "ran" marker so status can see a completed sync launch
-      # without leaving a live pid (loop already exited).
       env \
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
@@ -923,10 +1167,19 @@ do_start() {
   done
 
   # Deadline watchdog: stop the fleet cleanly even if nobody is watching.
+  # Fixed shell source + positional argv only — never interpolate profile path
+  # or sleep command into executable shell source (injection surface).
   if [[ "$FLEET_NO_WATCHDOG" == "1" ]]; then
     info "watchdog skipped (FLEET_NO_WATCHDOG=1)"
   else
-    nohup bash -c "$SLEEP_CMD $DEADLINE_SECONDS; \"$0\" --profile \"$PROFILE_PATH\" --halt" \
+    nohup bash -c '
+      sleep_bin=$1
+      secs=$2
+      driver=$3
+      profile=$4
+      "$sleep_bin" "$secs"
+      exec "$driver" --profile "$profile" --halt
+    ' bash "$SLEEP_CMD" "$DEADLINE_SECONDS" "$DRIVER_SELF" "$PROFILE_PATH" \
       >> "$LOG_DIR/watchdog.log" 2>&1 &
     info "watchdog armed: HALT in $((DEADLINE_SECONDS / 3600))h (${DEADLINE_SECONDS}s)"
   fi
