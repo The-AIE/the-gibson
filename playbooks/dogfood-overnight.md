@@ -94,3 +94,34 @@ when only one vendor CLI is installed.
 - [ ] Overnight run completed or halted under budget (not a silent hang)
 - [ ] Journal committed under `memory/dogfood/`
 - [ ] ≥1 PR merged with no human keyboard between start and PR review
+
+## Multi-lane fleet (optional — issue #139)
+
+When one serial loop is not enough throughput, use a **local fleet profile**
+with `scripts/loop-fleet.sh` instead of hard-coding queues into a laptop
+wrapper. The profile carries target repo, expected GitHub slug, and per-lane
+issue queues / exclusive scopes / intent. Copy
+`templates/fleet/profile.v1.example` to a machine-local path (never commit
+home directories or a live product queue into the generic tree).
+
+```bash
+# Local profile — absolute path required
+export FLEET_PROFILE=$HOME/.config/gibson/profiles/gibson-dogfood.profile
+# Edit: repo=, slug=mrhinkle/the-gibson, lane= lines for open non-gated issues
+
+$GIBSON/scripts/loop-fleet.sh --status   # prints profile name, target, slug
+$GIBSON/scripts/loop-fleet.sh --start    # full preflight, then lane-* workers
+$GIBSON/scripts/loop-fleet.sh --halt     # graceful stop after current hat
+```
+
+Preflight is fail-closed: wrong origin slug, dirty canonical checkout, closed
+or gated issues (`needs-mark` / `decision` / `blocked` / `tier-c` /
+`gibson-halt`), claim/PR conflicts, and overlapping lane scopes all refuse
+with **zero** runner launches. Three-role defaults stay in force
+(`RUNNER` / `REVIEWER_CMD` / `RELEASE_CMD`). Per-lane runner pools are
+follow-up #141.
+
+For Gibson Autonomy Readiness dogfood, seed a two-lane local profile from the
+example (`docs` + `harness`) and only queue open issues that are not in the
+parked table above. Single-lane overnight runs can keep using `dogfood-prep.sh`
+above; multi-lane is additive, not a replacement for the kill-switch contract.
