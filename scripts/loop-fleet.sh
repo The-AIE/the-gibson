@@ -237,18 +237,24 @@ scope_tokens_overlap() {
 
 scopes_lists_overlap() {
   # Args: two space-separated scope lists. Prints colliding pair on stdout if any.
-  local list_a="$1" list_b="$2" ta tb
-  # shellcheck disable=SC2086
-  for ta in $list_a; do
+  # Tokenize with pathname expansion disabled so declared tokens like docs/**
+  # stay literal even when matching paths exist in the invocation cwd.
+  # Subshell isolates set -f so glob state is restored on every exit path.
+  local list_a="$1" list_b="$2"
+  (
+    set -f
     # shellcheck disable=SC2086
-    for tb in $list_b; do
-      if scope_tokens_overlap "$ta" "$tb"; then
-        printf '%s ↔ %s\n' "$ta" "$tb"
-        return 0
-      fi
+    for ta in $list_a; do
+      # shellcheck disable=SC2086
+      for tb in $list_b; do
+        if scope_tokens_overlap "$ta" "$tb"; then
+          printf '%s ↔ %s\n' "$ta" "$tb"
+          exit 0
+        fi
+      done
     done
-  done
-  return 1
+    exit 1
+  )
 }
 
 check_inter_lane_scope_overlap() {
@@ -287,12 +293,16 @@ validate_lane_id() {
 
 parse_lane_line() {
   # Fields: id|queue|scope|intent[|runner_reserved]
+  # Exactly 4 or 5 pipe-separated fields. A sixth field fails closed.
   local raw="$1"
   local id queue scope intent runner_r rest
   # Do not eval. Split on | with read.
   IFS='|' read -r id queue scope intent rest <<<"$raw" || true
-  # rest may contain runner and further ignored forwards-compatible fields
-  runner_r="${rest%%|*}"
+  # rest is the optional 5th field only — any further | is a sixth+ field.
+  if [[ "$rest" == *"|"* ]]; then
+    die "lane line has more than 5 fields (v1 allows id|queue|scope|intent[|runner_reserved]): $raw"
+  fi
+  runner_r="$rest"
 
   id=$(printf '%s' "$id" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   queue=$(printf '%s' "$queue" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -304,6 +314,20 @@ parse_lane_line() {
   [[ -n "$queue" ]] || die "lane $id: empty issue queue"
   [[ -n "$scope" ]] || die "lane $id: empty exclusive scope"
   [[ -n "$intent" ]] || die "lane $id: empty intent"
+
+  # Optional 5th field: reserved for #141 routing. Accept as inert declarative
+  # data only — no shell syntax / control characters (never eval'd / sourced).
+  if [[ -n "$runner_r" ]]; then
+    case "$runner_r" in
+      *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\]*|*$'\n'*|*$'\r'*|*$'\t'*)
+        die "lane $id: reserved runner field must be safe inert data (no shell syntax/control chars): $runner_r"
+        ;;
+    esac
+    # Printable-ish token only (letters, digits, common path/name punctuation).
+    if [[ ! "$runner_r" =~ ^[A-Za-z0-9._/@+=:,-]+$ ]]; then
+      die "lane $id: reserved runner field has disallowed characters: $runner_r"
+    fi
+  fi
 
   local qitem first=1 qclean="" seen="" queue_work
   # bash 3.2: portable comma-split without mapfile / read -a
@@ -452,13 +476,16 @@ load_profile() {
     GIBSON="$DEFAULT_GIBSON"
   fi
 
+  # fleet/log defaults are namespaced by the validated profile name so two
+  # profiles cannot collide on lane worktrees, pidfiles, or the watchdog.
+  # Explicit profile fleet_dir=/log_dir= and env FLEET_DIR/LOG_DIR still win.
   if [[ -n "$prof_fleet" ]]; then
     assert_safe_abs_path "fleet_dir" "$prof_fleet"
     FLEET_DIR="$prof_fleet"
   elif [[ -n "${FLEET_DIR}" ]]; then
     assert_safe_abs_path "FLEET_DIR" "$FLEET_DIR"
   else
-    FLEET_DIR="${HOME}/Code/fleet"
+    FLEET_DIR="${HOME}/Code/fleet/${PROFILE_NAME}"
   fi
   assert_safe_abs_path "fleet_dir" "$FLEET_DIR"
 
@@ -468,7 +495,7 @@ load_profile() {
   elif [[ -n "${LOG_DIR}" ]]; then
     assert_safe_abs_path "LOG_DIR" "$LOG_DIR"
   else
-    LOG_DIR="${HOME}/.claude/fleet/logs"
+    LOG_DIR="${HOME}/.claude/fleet/logs/${PROFILE_NAME}"
   fi
   assert_safe_abs_path "log_dir" "$LOG_DIR"
 
@@ -669,8 +696,37 @@ json_field() {
   printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -1
 }
 
+# Read the current issue id from a lane's loop-state (empty if unreadable).
+lane_state_issue() {
+  local id="$1" sf val
+  sf=$(lane_state "$id")
+  [[ -f "$sf" ]] || return 1
+  val=$(awk -F': ' '$1=="issue"{print $2; exit}' "$sf" 2>/dev/null || true)
+  val=$(printf '%s' "$val" | tr -d '[:space:]')
+  [[ -n "$val" ]] || return 1
+  printf '%s\n' "$val"
+  return 0
+}
+
+# True when positive issue id appears in a comma-separated lane queue.
+issue_in_queue() {
+  local issue="$1" queue="$2" qitem queue_work
+  queue_work=$(printf '%s' "$queue" | tr ',' ' ')
+  # shellcheck disable=SC2086
+  for qitem in $queue_work; do
+    qitem=$(printf '%s' "$qitem" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ "$qitem" == "$issue" ]] && return 0
+  done
+  return 1
+}
+
+# mode:
+#   strict — unstarted / future work: OPEN, no gated, no agent-claimed
+#   own    — lane's recorded current issue: OPEN, no gated; agent-claimed OK
+#   prior  — queue items before recorded issue: CLOSED is OK (state advanced);
+#            OPEN falls through to strict rules
 check_issue_preflight() {
-  local issue="$1" lane="$2"
+  local issue="$1" lane="$2" mode="${3:-strict}"
   local out state labels lab
 
   if ! out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>&1); then
@@ -680,6 +736,12 @@ check_issue_preflight() {
   state=$(json_field "$out" "state")
   # normalize
   state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
+
+  if [[ "$mode" == "prior" && "$state" == "CLOSED" ]]; then
+    # Closed prior queue item after the lane advanced past it — not a conflict.
+    return 0
+  fi
+
   [[ "$state" == "OPEN" ]] || die "lane $lane: issue #$issue is not open (state=$state)"
 
   labels=$(json_label_names "$out")
@@ -689,6 +751,10 @@ check_issue_preflight() {
       die "lane $lane: issue #$issue carries gated label '$lab' (needs-mark|decision|blocked|tier-c|gibson-halt)"
     fi
     if [[ "$lab" == "agent-claimed" ]]; then
+      if [[ "$mode" == "own" ]]; then
+        # Resumable/healthy lane may own its recorded issue's claim.
+        continue
+      fi
       die "lane $lane: issue #$issue already agent-claimed (claims conflict — release or reaper first)"
     fi
   done <<<"$labels"
@@ -696,7 +762,8 @@ check_issue_preflight() {
 
 check_pr_conflicts() {
   # Fail closed if an open PR head branch looks like it already owns this issue.
-  local issue="$1" lane="$2"
+  # When allow_own=1 the lane's recorded current issue may already have an open PR.
+  local issue="$1" lane="$2" allow_own="${3:-0}"
   local out branch branches
   if ! out=$("$GH_BIN" pr list --repo "$EXPECTED_SLUG" --state open --json number,headRefName --limit 100 2>&1); then
     die "lane $lane: cannot list open PRs for claims/PR conflict check: $out"
@@ -711,10 +778,85 @@ check_pr_conflicts() {
     [[ -n "$branch" ]] || continue
     case "$branch" in
       feat/"$issue"-*|fix/"$issue"-*|feat/"$issue"|fix/"$issue")
+        if [[ "$allow_own" == "1" ]]; then
+          continue
+        fi
         die "lane $lane: open PR branch '$branch' conflicts with issue #$issue"
         ;;
     esac
   done <<<"$branches"
+}
+
+# True when gh reports the issue CLOSED (missing/unreadable → false).
+issue_is_closed() {
+  local issue="$1" out state
+  out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>/dev/null) || return 1
+  state=$(json_field "$out" "state")
+  state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
+  [[ "$state" == "CLOSED" ]]
+}
+
+# Lane-state-aware queue preflight for one lane. Healthy identity is validated
+# before any claim/PR check. Dead resumable lanes may own claim/PR for the
+# recorded issue only when that issue is in the configured queue.
+preflight_lane_queue() {
+  local lane="$1" queue="$2"
+  local issue current seen_current=0 queue_work pid
+
+  # Identity-validated healthy lane: skip queue conflicts (idempotent re-start).
+  if pid=$(lane_pid_alive "$lane"); then
+    info "lane $lane already running (pid $pid) — skip queue conflict preflight"
+    return 0
+  fi
+
+  current=""
+  if lane_state_is_valid "$lane"; then
+    current=$(lane_state_issue "$lane" || true)
+    if [[ -z "$current" || ! "$current" =~ ^[1-9][0-9]*$ ]]; then
+      die "lane $lane: ambiguous loop-state issue field (got: '${current:-}') — fail closed"
+    fi
+    if ! issue_in_queue "$current" "$queue"; then
+      die "lane $lane: recorded issue #$current is not in configured queue ($queue) — foreign ownership, refuse to resume"
+    fi
+  fi
+
+  queue_work=$(printf '%s' "$queue" | tr ',' ' ')
+  if [[ -z "$current" ]]; then
+    # Unstarted: every queue item is strict future work.
+    # shellcheck disable=SC2086
+    for issue in $queue_work; do
+      issue=$(printf '%s' "$issue" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [[ -n "$issue" ]] || continue
+      check_issue_preflight "$issue" "$lane" "strict"
+      check_pr_conflicts "$issue" "$lane" "0"
+    done
+    return 0
+  fi
+
+  # Dead resumable: prior / current / future treated differently.
+  # shellcheck disable=SC2086
+  for issue in $queue_work; do
+    issue=$(printf '%s' "$issue" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -n "$issue" ]] || continue
+    if [[ "$issue" == "$current" ]]; then
+      seen_current=1
+      # Own recorded issue may already be agent-claimed with an open PR.
+      check_issue_preflight "$issue" "$lane" "own"
+      check_pr_conflicts "$issue" "$lane" "1"
+      continue
+    fi
+    if [[ $seen_current -eq 0 ]]; then
+      # Prior to recorded issue — closed is OK after state advanced.
+      check_issue_preflight "$issue" "$lane" "prior"
+      if ! issue_is_closed "$issue"; then
+        check_pr_conflicts "$issue" "$lane" "0"
+      fi
+    else
+      # Future queue work — still strict.
+      check_issue_preflight "$issue" "$lane" "strict"
+      check_pr_conflicts "$issue" "$lane" "0"
+    fi
+  done
 }
 
 # True if a command string cannot be safely whitespace-tokenized (fail closed).
@@ -886,7 +1028,7 @@ assert_three_role_separation() {
 }
 
 preflight_for_start() {
-  local i issue q
+  local i
 
   [[ -f "$LOOP_SH" ]] || die "missing loop driver: $LOOP_SH"
   [[ -x "$LOOP_SH" || -f "$LOOP_SH" ]] || die "loop driver not usable: $LOOP_SH"
@@ -910,14 +1052,11 @@ preflight_for_start() {
   # scopes already checked at load; re-check here so --start always enforces
   check_inter_lane_scope_overlap
 
+  # Per-lane queue preflight is state-aware: healthy identity first, then
+  # resumable own claim/PR, then strict unstarted/future work.
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
-    q=$(printf '%s' "${LANE_QUEUES[$i]}" | tr ',' ' ')
-    # shellcheck disable=SC2086
-    for issue in $q; do
-      check_issue_preflight "$issue" "${LANE_IDS[$i]}"
-      check_pr_conflicts "$issue" "${LANE_IDS[$i]}"
-    done
+    preflight_lane_queue "${LANE_IDS[$i]}" "${LANE_QUEUES[$i]}"
     i=$((i + 1))
   done
 
@@ -1064,6 +1203,13 @@ run_with_wall_timeout() {
   local pid watcher rc=0 status_file timed_out=0
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "fleet: bad wall timeout: $limit" >&2; return 1; }
 
+  # Fail closed BEFORE launch if we cannot establish a process group.
+  # A bare-child fallback cannot guarantee descendant cleanup on expiry.
+  if ! command -v perl >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    echo "fleet: wall-timeout requires perl or python3 to establish a process group (no bare-child fallback)" >&2
+    return 1
+  fi
+
   status_file=$(mktemp "${TMPDIR:-/tmp}/fleet-wall.XXXXXX") || return 1
 
   # Become process-group leader so we can terminate only this tree.
@@ -1074,9 +1220,10 @@ run_with_wall_timeout() {
     python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
     pid=$!
   else
-    # Fallback: bare child (kill by PID only). Prefer perl/python paths.
-    "$@" &
-    pid=$!
+    # Unreachable: guarded above. Keep as hard fail-closed, never bare child.
+    echo "fleet: wall-timeout process-group mechanism vanished before launch" >&2
+    rm -f "$status_file"
+    return 1
   fi
 
   (

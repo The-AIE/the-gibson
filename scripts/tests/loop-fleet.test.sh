@@ -113,6 +113,15 @@ if [[ "$1" == "issue" && "$2" == "view" ]]; then
 fi
 
 if [[ "$1" == "pr" && "$2" == "list" ]]; then
+  # Optional full override (claimed+open-PR restart sensors).
+  if [[ -n "${GH_STUB_PR_JSON:-}" ]]; then
+    printf '%s\n' "$GH_STUB_PR_JSON"
+    exit 0
+  fi
+  if [[ -n "${GH_STUB_PR_FILE:-}" && -f "${GH_STUB_PR_FILE}" ]]; then
+    cat "${GH_STUB_PR_FILE}"
+    exit 0
+  fi
   case "$mode" in
     pr-conflict)
       # Emit a conflicting branch for issue 42 (used by conflict test)
@@ -243,6 +252,8 @@ run_fleet() {
     GH_STUB_MODE="${GH_STUB_MODE:-ok}" \
     GH_STUB_LOG="$GH_STUB_LOG" \
     GH_STUB_ISSUE_DIR="${GH_STUB_ISSUE_DIR:-}" \
+    GH_STUB_PR_JSON="${GH_STUB_PR_JSON:-}" \
+    GH_STUB_PR_FILE="${GH_STUB_PR_FILE:-}" \
     FLEET_PROFILE="${FLEET_PROFILE:-}" \
     "$FLEET" "$@" 2>&1
 }
@@ -793,11 +804,12 @@ export GH_STUB_MODE=ok
 out=$(run_fleet --start) || { bad "hstart initial start failed: $out"; }
 # Plant non-initial live state + deliberate HALT + a "healthy" pidfile whose
 # command line matches this lane (sleep with lane path + loop.sh in argv).
+# Recorded issue stays in the configured queue (31) for ownership coherence.
 STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
 cat > "$STATE_FILE" <<'STATE'
 # Gibson loop state
 updated: 2026-01-01T00:00:00Z
-issue: 77
+issue: 31
 pr: 88
 hat: reviewer
 next_hat: release
@@ -837,7 +849,7 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
   || bad "healthy re-start launched $lc (expected 0)"
 [[ -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "healthy re-start preserved HALT" \
   || bad "healthy re-start removed HALT"
-grep -q '^issue: 77$' "$STATE_FILE" && grep -q '^pr: 88$' "$STATE_FILE" \
+grep -q '^issue: 31$' "$STATE_FILE" && grep -q '^pr: 88$' "$STATE_FILE" \
   && grep -q '^hat: reviewer$' "$STATE_FILE" && grep -q '^round: 4$' "$STATE_FILE" \
   && ok "healthy re-start preserved issue/pr/hat/round" \
   || bad "healthy re-start clobbered state: $(cat "$STATE_FILE")"
@@ -865,10 +877,11 @@ export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
 out=$(run_fleet --start) || { bad "dstart initial start failed: $out"; }
 STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+# Recorded issue must belong to the configured queue (32) — foreign ids fail closed.
 cat > "$STATE_FILE" <<'STATE'
 # Gibson loop state
 updated: 2026-01-02T00:00:00Z
-issue: 55
+issue: 32
 pr: 66
 hat: release
 next_hat: builder
@@ -885,7 +898,7 @@ out=$(run_fleet --start) || { bad "dead-lane relaunch failed: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "dead-lane relaunch launched once" \
   || bad "dead-lane relaunch launches=$lc"
-grep -q '^issue: 55$' "$STATE_FILE" && grep -q '^pr: 66$' "$STATE_FILE" \
+grep -q '^issue: 32$' "$STATE_FILE" && grep -q '^pr: 66$' "$STATE_FILE" \
   && grep -q '^hat: release$' "$STATE_FILE" && grep -q '^round: 9$' "$STATE_FILE" \
   && ok "dead-lane relaunch preserved issue/pr/hat/round" \
   || bad "dead-lane relaunch reset state: $(cat "$STATE_FILE")"
@@ -1624,6 +1637,587 @@ if grep -E 'source[[:space:]]+.*PROFILE|source[[:space:]]+"\$path"|eval[[:space:
 else
   ok "profile load has no source/eval of profile path"
 fi
+
+# ============================================================================
+# Codex #143 blockers — lane-state preflight, wall-timeout, noglob, isolation,
+# reserved-field validation
+# ============================================================================
+
+# --- B1: healthy claimed+open-PR restart (idempotent, zero launches) --------
+echo "healthy claimed+open-PR restart"
+reset_calls
+TARGET=$(setup_target_repo hclaim acme/widget)
+PROF="$ROOT/profiles/hclaim.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hclaim" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|201|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "hclaim initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-01T00:00:00Z
+issue: 201
+pr: 301
+hat: builder
+next_hat: reviewer
+round: 2
+parked: false
+next_action: mid-flight claimed work
+notes: >
+  healthy claimed+open-PR restart
+STATE
+mkdir -p "$ROOT/fleet/lane-docs/gibson"
+touch "$ROOT/fleet/lane-docs/gibson/HALT"
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+HCLAIM_PID=$!
+printf '%s\n' "$HCLAIM_PID" > "$LOG_DIR/docs.pid"
+# Issue is agent-claimed and has an open PR — unstarted preflight would reject.
+ISSUEDIR="$ROOT/gh-issues-hclaim"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/201.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":301,"headRefName":"feat/201-docs-slice"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "healthy claimed+open-PR re-start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "healthy claimed+open-PR re-start launched zero" \
+  || bad "healthy claimed+open-PR launched $lc out=$out"
+[[ -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "healthy claimed+open-PR preserved HALT" \
+  || bad "healthy claimed+open-PR removed HALT"
+grep -q '^issue: 201$' "$STATE_FILE" && grep -q '^pr: 301$' "$STATE_FILE" \
+  && ok "healthy claimed+open-PR preserved state" \
+  || bad "healthy claimed+open-PR clobbered state: $(cat "$STATE_FILE")"
+kill "$HCLAIM_PID" 2>/dev/null || true
+wait "$HCLAIM_PID" 2>/dev/null || true
+rm -f "$LOG_DIR/docs.pid"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B1b: dead resumable claimed+open-PR restart ----------------------------
+echo "dead resumable claimed+open-PR restart"
+reset_calls
+TARGET=$(setup_target_repo dclaim acme/widget)
+PROF="$ROOT/profiles/dclaim.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=dclaim" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|202|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "dclaim initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-02T00:00:00Z
+issue: 202
+pr: 302
+hat: reviewer
+next_hat: release
+round: 3
+parked: false
+next_action: dead lane with own claim+PR
+notes: >
+  resume me
+STATE
+touch "$ROOT/fleet/lane-docs/gibson/HALT"
+rm -f "$LOG_DIR/docs.pid"
+ISSUEDIR="$ROOT/gh-issues-dclaim"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/202.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":302,"headRefName":"feat/202-docs-resume"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "dead claimed+open-PR relaunch failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "dead claimed+open-PR relaunch launched once" \
+  || bad "dead claimed+open-PR launches=$lc out=$out"
+grep -q '^issue: 202$' "$STATE_FILE" && grep -q '^pr: 302$' "$STATE_FILE" \
+  && grep -q '^hat: reviewer$' "$STATE_FILE" && grep -q '^round: 3$' "$STATE_FILE" \
+  && ok "dead claimed+open-PR preserved issue/pr/hat/round" \
+  || bad "dead claimed+open-PR reset state: $(cat "$STATE_FILE")"
+[[ ! -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "dead claimed+open-PR cleared HALT" \
+  || bad "dead claimed+open-PR left HALT"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B1c: closed prior queue item after state advanced ----------------------
+echo "closed prior queue item after state advanced"
+reset_calls
+TARGET=$(setup_target_repo advq acme/widget)
+PROF="$ROOT/profiles/advq.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=advq" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|210,211|docs/**|queue advance"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "advq initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-03T00:00:00Z
+issue: 211
+pr: 311
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: advanced past closed 210
+notes: >
+  prior closed
+STATE
+rm -f "$LOG_DIR/docs.pid"
+ISSUEDIR="$ROOT/gh-issues-advq"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"CLOSED","labels":[{"name":"tier-a"}]}' > "$ISSUEDIR/210.json"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/211.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":311,"headRefName":"feat/211-next"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "closed-prior advanced restart failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "closed prior after advance relaunches current" \
+  || bad "closed-prior launches=$lc out=$out"
+grep -q '^issue: 211$' "$STATE_FILE" && ok "closed-prior preserved advanced issue" \
+  || bad "closed-prior clobbered state: $(cat "$STATE_FILE")"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B1d: foreign / ambiguous ownership fails closed ------------------------
+echo "foreign and ambiguous ownership fail closed"
+reset_calls
+TARGET=$(setup_target_repo foreign acme/widget)
+PROF="$ROOT/profiles/foreign.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=foreign" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|220|docs/**|own queue only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "foreign initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+# Recorded issue is NOT in this lane's queue — foreign ownership.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-04T00:00:00Z
+issue: 999
+pr: 1
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: foreign issue
+notes: >
+  not ours
+STATE
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "foreign ownership should fail: $out" || {
+  echo "$out" | grep -qiE 'foreign|not in configured queue|refuse to resume' \
+    && ok "foreign ownership refused" \
+    || bad "unclear foreign fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "foreign ownership launched zero" || bad "foreign launched $lc"
+
+# Future queue work stays strict: own current may be claimed, future may not.
+write_profile "$PROF" \
+  "version=1" \
+  "name=foreign" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|220,221|docs/**|own queue only"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-04T00:00:00Z
+issue: 220
+pr: 1
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: current own; future foreign-claimed
+notes: >
+  future strict
+STATE
+ISSUEDIR="$ROOT/gh-issues-foreign"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/220.json"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/221.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":1,"headRefName":"feat/220-ok"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "future claimed issue should fail: $out" || {
+  echo "$out" | grep -qiE 'agent-claimed|221' \
+    && ok "future queue claim still strict" \
+    || bad "unclear future-claim fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "future claimed launched zero" || bad "future claimed launched $lc"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B2: no perl / no python3 → fail before any network child --------------
+echo "no-perl/no-python wall-timeout fail-closed"
+reset_calls
+TARGET=$(setup_target_repo nopp acme/widget)
+PROF="$ROOT/profiles/nopp.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=nopp" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|230|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+# Minimal PATH without perl/python3. Network child would be git fetch.
+NOPP_BIN="$ROOT/nopp-bin"
+rm -rf "$NOPP_BIN"
+mkdir -p "$NOPP_BIN"
+REAL_GIT=$(command -v git)
+# git wrapper records any invocation that looks like network work
+cat > "$NOPP_BIN/git" <<STUB
+#!/usr/bin/env bash
+echo "GIT \$*" >> "$CALLS/nopp-git.log"
+for a in "\$@"; do
+  if [[ "\$a" == "fetch" || "\$a" == "ls-remote" ]]; then
+    echo "NETWORK_CHILD \$a" >> "$CALLS/nopp-network.log"
+  fi
+done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$NOPP_BIN/git"
+# Link common tools the driver needs; deliberately omit perl and python3.
+for c in bash sh env sed tr awk cat printf mkdir rm chmod date basename dirname \
+         head tail grep cut nohup sleep true kill ps wait mktemp uname pwd ln \
+         touch mv cp ls wc sort uniq xargs which; do
+  p=$(command -v "$c" 2>/dev/null) || continue
+  [[ -e "$NOPP_BIN/$c" ]] && continue
+  ln -sf "$p" "$NOPP_BIN/$c"
+done
+cp "$BIN/gh" "$NOPP_BIN/gh"
+cp "$BIN/fake-runner" "$NOPP_BIN/fake-runner"
+# Also need real git for non-network preflight? wrapper delegates.
+rm -f "$CALLS/nopp-git.log" "$CALLS/nopp-network.log"
+: > "$CALLS/nopp-git.log"
+: > "$CALLS/nopp-network.log"
+: > "$CALLS/launches.log"
+out=$(
+  env -i \
+    PATH="$NOPP_BIN" \
+    HOME="$HOME" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    USER="${USER:-sensor}" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$NOPP_BIN/gh" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=5 \
+    GIT_TERMINAL_PROMPT=0 \
+    GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "no-perl/no-python should fail closed: $out" || {
+  echo "$out" | grep -qiE 'perl|python3|process group|wall-timeout' \
+    && ok "no-perl/no-python fails closed before bare child" \
+    || bad "unclear no-pp fail: $out"
+}
+if [[ -f "$CALLS/nopp-network.log" ]] && grep -q 'NETWORK_CHILD' "$CALLS/nopp-network.log" 2>/dev/null; then
+  bad "no-perl/no-python still launched network child: $(cat "$CALLS/nopp-network.log")"
+else
+  ok "no-perl/no-python launched zero network children"
+fi
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "no-perl/no-python launched zero runners" || bad "no-pp launched $lc"
+
+# --- B3: scope split noglob — literal docs/** despite cwd matches ----------
+echo "scope list noglob (cwd docs/** matches)"
+reset_calls
+TARGET=$(setup_target_repo scopenoglob acme/widget)
+# Ensure invocation cwd has paths that would expand docs/**
+# Target already has docs/a.md. Run fleet from TARGET so docs/** expands if globs on.
+PROF="$ROOT/profiles/scopenoglob.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=scopenoglob" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|240|docs/**|docs" \
+  "lane=nested|241|docs/nested/**|nested under docs"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+# From TARGET cwd, docs/** would expand to docs/a.md without noglob, which can
+# miss containment overlap with literal docs/nested/**.
+out=$(
+  CDPATH='' cd "$TARGET" && \
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="$RUNNER" REVIEWER_CMD="$REVIEWER_CMD" RELEASE_CMD="$RELEASE_CMD" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "docs/** vs docs/nested/** should overlap (literal tokens): $out" || {
+  echo "$out" | grep -qiE 'scope overlap|docs/\*\*.*docs/nested|docs/nested.*docs/\*\*' \
+    && ok "literal docs/** overlaps docs/nested/** despite cwd matches" \
+    || bad "noglob overlap miss or unclear: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "scope noglob overlap launched zero" || bad "scope noglob launched $lc"
+
+# --- B4: concurrent two-profile isolation (default fleet/log namespace) ----
+echo "two-profile default isolation"
+reset_calls
+# Isolate HOME so defaults land under the temp tree, not the real home.
+ISO_HOME="$ROOT/iso-home"
+mkdir -p "$ISO_HOME"
+TARGET_A=$(setup_target_repo isoA acme/widget)
+TARGET_B=$(setup_target_repo isoB acme/widget)
+PROF_A="$ROOT/profiles/isoA.profile"
+PROF_B="$ROOT/profiles/isoB.profile"
+# No fleet_dir/log_dir — defaults must namespace by profile name.
+write_profile "$PROF_A" \
+  "version=1" \
+  "name=isoAlpha" \
+  "repo=$TARGET_A" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "runner=fake-runner" \
+  "deadline_seconds=90" \
+  "lane=docs|250|docs/**|alpha docs"
+write_profile "$PROF_B" \
+  "version=1" \
+  "name=isoBeta" \
+  "repo=$TARGET_B" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "runner=fake-runner" \
+  "deadline_seconds=91" \
+  "lane=docs|251|docs/**|beta docs"
+export GH_STUB_MODE=ok
+run_iso() {
+  local prof="$1" cmd="$2"
+  # Intentionally omit FLEET_DIR/LOG_DIR so profile-name defaults apply.
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" \
+    HOME="$ISO_HOME" \
+    GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$prof" \
+    "$FLEET" --profile "$prof" "$cmd" 2>&1
+}
+# Unset FLEET_DIR/LOG_DIR so defaults apply
+outA=$(run_iso "$PROF_A" --start) || { bad "isoAlpha start failed: $outA"; }
+outB=$(run_iso "$PROF_B" --start) || { bad "isoBeta start failed: $outB"; }
+FLEET_A="$ISO_HOME/Code/fleet/isoAlpha"
+FLEET_B="$ISO_HOME/Code/fleet/isoBeta"
+LOG_A="$ISO_HOME/.claude/fleet/logs/isoAlpha"
+LOG_B="$ISO_HOME/.claude/fleet/logs/isoBeta"
+[[ -d "$FLEET_A/lane-docs" ]] && ok "isoAlpha fleet dir namespaced" \
+  || bad "isoAlpha fleet missing: $FLEET_A"
+[[ -d "$FLEET_B/lane-docs" ]] && ok "isoBeta fleet dir namespaced" \
+  || bad "isoBeta fleet missing: $FLEET_B"
+[[ "$FLEET_A" != "$FLEET_B" ]] && ok "profiles use distinct fleet dirs" \
+  || bad "profiles share fleet dir"
+[[ -d "$LOG_A" && -d "$LOG_B" && "$LOG_A" != "$LOG_B" ]] \
+  && ok "profiles use distinct log dirs" \
+  || bad "log dirs not isolated: $LOG_A vs $LOG_B"
+WD_A="$LOG_A/watchdog.pid"
+WD_B="$LOG_B/watchdog.pid"
+[[ -f "$WD_A" && -f "$WD_B" ]] || bad "watchdog pidfiles missing A=$WD_A B=$WD_B"
+wda=$(tr -d '[:space:]' < "$WD_A")
+wdb=$(tr -d '[:space:]' < "$WD_B")
+[[ "$wda" =~ ^[1-9][0-9]*$ && "$wdb" =~ ^[1-9][0-9]*$ && "$wda" != "$wdb" ]] \
+  && ok "distinct watchdog PIDs ($wda vs $wdb)" \
+  || bad "watchdog PID collision/invalid: $wda $wdb"
+# Status identity
+stA=$(run_iso "$PROF_A" --status) || true
+stB=$(run_iso "$PROF_B" --status) || true
+echo "$stA" | grep -q 'profile=isoAlpha' && echo "$stA" | grep -qE 'docs' \
+  && ok "isoAlpha status identity" || bad "isoAlpha status: $stA"
+echo "$stB" | grep -q 'profile=isoBeta' && echo "$stB" | grep -qE 'docs' \
+  && ok "isoBeta status identity" || bad "isoBeta status: $stB"
+# Halt only Alpha — Beta HALT must not appear
+outH=$(run_iso "$PROF_A" --halt) || { bad "isoAlpha halt failed: $outH"; }
+[[ -f "$FLEET_A/lane-docs/gibson/HALT" ]] && ok "isoAlpha halt wrote own HALT" \
+  || bad "isoAlpha HALT missing"
+[[ ! -f "$FLEET_B/lane-docs/gibson/HALT" ]] && ok "isoAlpha halt did not touch isoBeta" \
+  || bad "isoAlpha halt polluted isoBeta HALT"
+# Explicit paths still win over namespaced defaults
+EX_FLEET="$ROOT/explicit-fleet"
+EX_LOG="$ROOT/explicit-logs"
+mkdir -p "$EX_FLEET" "$EX_LOG"
+PROF_E="$ROOT/profiles/isoExplicit.profile"
+write_profile "$PROF_E" \
+  "version=1" \
+  "name=isoExplicit" \
+  "repo=$TARGET_A" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$EX_FLEET" \
+  "log_dir=$EX_LOG" \
+  "runner=fake-runner" \
+  "lane=docs|252|docs/**|explicit"
+outE=$(
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" \
+    HOME="$ISO_HOME" \
+    GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_E" \
+    "$FLEET" --profile "$PROF_E" --start 2>&1
+) || { bad "explicit path profile failed: $outE"; }
+[[ -d "$EX_FLEET/lane-docs" ]] && ok "explicit fleet_dir preserved" \
+  || bad "explicit fleet_dir ignored"
+[[ -f "$EX_LOG/docs.log" || -d "$EX_LOG" ]] && ok "explicit log_dir preserved" \
+  || bad "explicit log_dir ignored"
+# Cleanup watchdogs by exact PID only
+for wd in "$wda" "$wdb"; do
+  if [[ -n "$wd" ]] && kill -0 "$wd" 2>/dev/null; then
+    kill -TERM -"$wd" 2>/dev/null || kill -TERM "$wd" 2>/dev/null || true
+    sleep 0.2 2>/dev/null || sleep 1
+    kill -KILL -"$wd" 2>/dev/null || kill -KILL "$wd" 2>/dev/null || true
+  fi
+done
+rm -f "$WD_A" "$WD_B"
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# --- B5: sixth lane field rejected; hostile reserved runner -----------------
+echo "sixth field and reserved-runner validation"
+reset_calls
+TARGET=$(setup_target_repo sixfield acme/widget)
+PROF="$ROOT/profiles/sixfield.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=sixfield" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|260|docs/**|intent|hermes|EXTRA"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "sixth field should fail: $out" || {
+  echo "$out" | grep -qiE 'more than 5 fields|5 fields|too many fields|sixth|extra' \
+    && ok "sixth lane field rejected" \
+    || bad "unclear sixth-field fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "sixth field launched zero" || bad "sixth field launched $lc"
+
+# Hostile reserved runner (shell metacharacters)
+PROF="$ROOT/profiles/badrunner.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=badrunner" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  'lane=docs|261|docs/**|intent|evil$(reboot)'
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "hostile reserved runner should fail: $out" || {
+  echo "$out" | grep -qiE 'reserved runner|safe inert|shell syntax|disallowed' \
+    && ok "hostile reserved runner rejected" \
+    || bad "unclear reserved-runner fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "hostile reserved runner launched zero" \
+  || bad "hostile reserved runner launched $lc"
+
+# Semicolon injection in reserved field
+PROF="$ROOT/profiles/badrunner2.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=badrunner2" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  'lane=docs|262|docs/**|intent|codex;rm -rf /'
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "semicolon reserved runner should fail: $out" || {
+  echo "$out" | grep -qiE 'reserved runner|safe inert|shell syntax|disallowed' \
+    && ok "semicolon reserved runner rejected" \
+    || bad "unclear semicolon-runner fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "semicolon reserved runner launched zero" \
+  || bad "semicolon reserved runner launched $lc"
+
+# Safe reserved runner still accepted (regression of existing property)
+PROF="$ROOT/profiles/saferunner.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=saferunner" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|263|docs/**|intent|hermes-pool-a"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "safe reserved runner rejected: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "safe reserved runner still accepted" \
+  || bad "safe reserved runner launches=$lc out=$out"
 
 echo
 echo "loop-fleet.test.sh: $PASS passed, $FAIL failed"
