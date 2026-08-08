@@ -147,7 +147,11 @@ EOF
 # Required executable wiring (active / non-comment content only):
 #   - extract_strict SHELLCHECK_REQUIRED_VERSION
 #   - extract_strict SHELLCHECK_SHA256_LINUX_X86_64
-#   - both values emitted to GITHUB_OUTPUT (version= / digest=)
+#   - both version=${version} and digest=${digest} actively emitted to
+#     GITHUB_OUTPUT — either together in one `{ ... } >> GITHUB_OUTPUT`
+#     block, or each on a line that itself redirects to GITHUB_OUTPUT.
+#     Independent greps (value present + unrelated GITHUB_OUTPUT write)
+#     are NOT enough; log-only echos of the correct values fail closed.
 #   - install step consumes steps.sc_pin.outputs.version and .digest
 # Forbidden (raw file, including comments):
 #   - any fixed-string restatement of the pinned version or digests
@@ -158,6 +162,7 @@ assert_workflow_shellcheck_pin_wiring() {
   local wf="$1"
   local reasons=""
   local filtered=""
+  local emit_rc=0
   if [[ ! -f "$wf" ]]; then
     printf '%s' "missing workflow file"
     return 1
@@ -180,15 +185,48 @@ assert_workflow_shellcheck_pin_wiring() {
   if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_SHA256_LINUX_X86_64([[:space:]]|$)' "$filtered"; then
     reasons="${reasons}missing extract_strict SHELLCHECK_SHA256_LINUX_X86_64; "
   fi
-  # Both values written to GITHUB_OUTPUT.
-  if ! grep -Fq 'version=${version}' "$filtered"; then
-    reasons="${reasons}missing version=\${version} GITHUB_OUTPUT emit; "
-  fi
-  if ! grep -Fq 'digest=${digest}' "$filtered"; then
-    reasons="${reasons}missing digest=\${digest} GITHUB_OUTPUT emit; "
-  fi
-  if ! grep -Fq 'GITHUB_OUTPUT' "$filtered"; then
-    reasons="${reasons}missing GITHUB_OUTPUT write; "
+  # Coupled emit check: prove version=${version} and digest=${digest} are
+  # each written via an active GITHUB_OUTPUT redirection — same brace block
+  # or a direct >> on the emit line. Deterministic awk over the already
+  # comment-filtered stream (macOS / Bash 3.2 / POSIX awk).
+  # shellcheck disable=SC2016 # intentional literal ${version}/${digest} pins
+  awk '
+    function has_v(s) { return index(s, "version=${version}") > 0 }
+    function has_d(s) { return index(s, "digest=${digest}") > 0 }
+    function has_go(s) { return index(s, "GITHUB_OUTPUT") > 0 }
+    function has_redir(s) { return index(s, ">>") > 0 }
+    {
+      line = $0
+      # Direct: emit key and GITHUB_OUTPUT redirect on the same active line.
+      if (has_v(line) && has_redir(line) && has_go(line)) v_ok = 1
+      if (has_d(line) && has_redir(line) && has_go(line)) d_ok = 1
+      # Brace group: collect body, credit only if closer redirects to GITHUB_OUTPUT.
+      if (line ~ /\{[[:space:]]*$/) {
+        in_block = 1
+        block = ""
+        next
+      }
+      if (in_block) {
+        if (line ~ /^[[:space:]]*\}/) {
+          if (has_redir(line) && has_go(line)) {
+            if (has_v(block)) v_ok = 1
+            if (has_d(block)) d_ok = 1
+          }
+          in_block = 0
+          block = ""
+        } else {
+          block = block "\n" line
+        }
+      }
+    }
+    END {
+      if (v_ok && d_ok) exit 0
+      exit 1
+    }
+  ' "$filtered"
+  emit_rc=$?
+  if [[ "$emit_rc" -ne 0 ]]; then
+    reasons="${reasons}version=\${version} and digest=\${digest} not both actively emitted to GITHUB_OUTPUT (same redirect block or direct >>); "
   fi
   # Install step must consume the pin step outputs.
   if ! grep -Fq 'steps.sc_pin.outputs.version' "$filtered"; then
@@ -418,6 +456,31 @@ EOF
       echo "  FAIL — mutation missing-GITHUB_OUTPUT unexpectedly passed"; fail=1
     else
       echo "  ok   — mutation: missing GITHUB_OUTPUT emit fails closed"
+    fi
+
+    # Active log echos of the correct version=/digest= values PLUS an active
+    # unrelated GITHUB_OUTPUT write must fail closed. Independent greps would
+    # pass this fixture; the coupled emit check must not.
+    mut_wf="$mut_dir/log-only-unrelated-github-output.yml"
+    cat >"$mut_wf" <<'EOF'
+- name: Resolve ShellCheck pin from run-all.sh
+  id: sc_pin
+  run: |
+    pin_file="scripts/tests/run-all.sh"
+    version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+    digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+    echo "version=${version}"
+    echo "digest=${digest}"
+    echo "unrelated=not-the-pin" >> "$GITHUB_OUTPUT"
+- name: Install ShellCheck
+  run: |
+    SC_VERSION="${{ steps.sc_pin.outputs.version }}"
+    SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation log-only+unrelated-GITHUB_OUTPUT unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: log-only correct values + unrelated GITHUB_OUTPUT fails closed"
     fi
 
     # Version restatement forms: colon env, equals, alternate key, URL, comment.

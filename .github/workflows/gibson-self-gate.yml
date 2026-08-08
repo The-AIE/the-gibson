@@ -115,10 +115,12 @@ jobs:
           echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
           tar -xJf shellcheck.tar.xz
           sudo install -m 0755 "shellcheck-v${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
-          shellcheck --version
-          # Fail closed if /usr/local/bin does not win PATH over distro shellcheck.
-          # Print expected vs observed only — do not dump full PATH or env.
-          observed="$(shellcheck --version | awk '/^version:/{print $2; exit}')"
+          # Capture the complete --version banner first, print it, then parse.
+          # Avoid shellcheck | early-exiting reader under set -o pipefail (SIGPIPE).
+          # Print expected vs observed only on mismatch — do not dump full PATH or env.
+          sc_banner="$(shellcheck --version)"
+          printf '%s\n' "$sc_banner"
+          observed="$(printf '%s\n' "$sc_banner" | awk '/^version:/{print $2}')"
           if [ "$observed" != "$SC_VERSION" ]; then
             echo "error: ShellCheck version mismatch after install" >&2
             echo "       expected: ${SC_VERSION}" >&2
