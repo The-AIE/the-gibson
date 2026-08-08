@@ -137,15 +137,19 @@ EOF
 
 # Assert executable single-source ShellCheck pin wiring in a workflow file.
 # Comments that merely mention the constant names must NOT satisfy this.
+# Full-line comments are stripped before required executable-wiring greps so
+# commented-out command text (extract_strict, GITHUB_OUTPUT emit, sc_pin
+# consumers) cannot satisfy the check. Forbidden version/digest restatements
+# still scan the raw file, including comments.
 # Prints a short reason on stdout and returns 1 on failure; silent return 0
 # when wiring is correct.
 #
-# Required executable wiring:
+# Required executable wiring (active / non-comment content only):
 #   - extract_strict SHELLCHECK_REQUIRED_VERSION
 #   - extract_strict SHELLCHECK_SHA256_LINUX_X86_64
 #   - both values emitted to GITHUB_OUTPUT (version= / digest=)
 #   - install step consumes steps.sc_pin.outputs.version and .digest
-# Forbidden:
+# Forbidden (raw file, including comments):
 #   - any fixed-string restatement of the pinned version or digests
 #     (URL literals, alternate keys, colon/equals assignments, comments).
 # Version/digest matches are always fixed-string (grep -F) — never interpolate
@@ -153,35 +157,48 @@ EOF
 assert_workflow_shellcheck_pin_wiring() {
   local wf="$1"
   local reasons=""
+  local filtered=""
   if [[ ! -f "$wf" ]]; then
     printf '%s' "missing workflow file"
     return 1
   fi
+  # Strip full-line comments (optional leading whitespace + #) for required
+  # executable-wiring checks only. Inline trailing comments remain.
+  filtered=$(mktemp "${TMPDIR:-/tmp}/sc-pin-active.XXXXXX") || {
+    printf '%s' "mktemp failed for active-wiring filter"
+    return 1
+  }
+  if ! sed '/^[[:space:]]*#/d' "$wf" >"$filtered"; then
+    rm -f "$filtered"
+    printf '%s' "failed to strip full-line comments"
+    return 1
+  fi
   # Strict extract_strict calls for both keys (not bare identifier mentions).
-  if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_REQUIRED_VERSION([[:space:]]|$)' "$wf"; then
+  if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_REQUIRED_VERSION([[:space:]]|$)' "$filtered"; then
     reasons="${reasons}missing extract_strict SHELLCHECK_REQUIRED_VERSION; "
   fi
-  if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_SHA256_LINUX_X86_64([[:space:]]|$)' "$wf"; then
+  if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_SHA256_LINUX_X86_64([[:space:]]|$)' "$filtered"; then
     reasons="${reasons}missing extract_strict SHELLCHECK_SHA256_LINUX_X86_64; "
   fi
   # Both values written to GITHUB_OUTPUT.
-  if ! grep -Fq 'version=${version}' "$wf"; then
+  if ! grep -Fq 'version=${version}' "$filtered"; then
     reasons="${reasons}missing version=\${version} GITHUB_OUTPUT emit; "
   fi
-  if ! grep -Fq 'digest=${digest}' "$wf"; then
+  if ! grep -Fq 'digest=${digest}' "$filtered"; then
     reasons="${reasons}missing digest=\${digest} GITHUB_OUTPUT emit; "
   fi
-  if ! grep -Fq 'GITHUB_OUTPUT' "$wf"; then
+  if ! grep -Fq 'GITHUB_OUTPUT' "$filtered"; then
     reasons="${reasons}missing GITHUB_OUTPUT write; "
   fi
   # Install step must consume the pin step outputs.
-  if ! grep -Fq 'steps.sc_pin.outputs.version' "$wf"; then
+  if ! grep -Fq 'steps.sc_pin.outputs.version' "$filtered"; then
     reasons="${reasons}missing steps.sc_pin.outputs.version consumer; "
   fi
-  if ! grep -Fq 'steps.sc_pin.outputs.digest' "$wf"; then
+  if ! grep -Fq 'steps.sc_pin.outputs.digest' "$filtered"; then
     reasons="${reasons}missing steps.sc_pin.outputs.digest consumer; "
   fi
-  # Literal-safe: no restated digests anywhere.
+  rm -f "$filtered"
+  # Literal-safe: no restated digests anywhere (raw file, including comments).
   if grep -Fq "$SHELLCHECK_SHA256_LINUX_X86_64" "$wf" 2>/dev/null ||
      grep -Fq "$SHELLCHECK_SHA256_DARWIN_AARCH64" "$wf" 2>/dev/null ||
      grep -Fq "$SHELLCHECK_SHA256_DARWIN_X86_64" "$wf" 2>/dev/null; then
@@ -340,6 +357,23 @@ EOF
       echo "  FAIL — mutation comments-only unexpectedly passed wiring check"; fail=1
     else
       echo "  ok   — mutation: comments-only wiring fails closed"
+    fi
+
+    # Exact accepted wiring operations, every line a full-line comment — must
+    # fail closed. Proves greps cannot be satisfied by commented-out command text.
+    mut_wf="$mut_dir/commented-out-wiring.yml"
+    cat >"$mut_wf" <<'EOF'
+# version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+# digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+# echo "version=${version}" >> "$GITHUB_OUTPUT"
+# echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+# SC_VERSION="${{ steps.sc_pin.outputs.version }}"
+# SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation commented-out-wiring unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: commented-out exact wiring fails closed"
     fi
 
     # Extract + GITHUB_OUTPUT present but install does not consume sc_pin outputs.
