@@ -149,11 +149,15 @@ EOF
 #   - extract_strict SHELLCHECK_SHA256_LINUX_X86_64
 #   - both version=${version} and digest=${digest} actively emitted to
 #     GITHUB_OUTPUT inside one `{ ... } >> GITHUB_OUTPUT` brace group
-#     whose closer owns the redirect. Direct same-line emits are not
-#     accepted: `echo "version=..." && echo "other=x" >> "$GITHUB_OUTPUT"`
-#     would otherwise false-green (pin text + unrelated redirect share a
-#     line via &&/;/||/|). Independent greps are NOT enough; log-only
-#     echos of the correct values fail closed.
+#     whose closer owns the redirect. Inside that group, only exact plain
+#     active lines are credited: `echo "version=${version}"` and
+#     `echo "digest=${digest}"` (surrounding whitespace allowed; no
+#     prefix/suffix command, redirect, separator, condition, or pipeline).
+#     So `echo "version=${version}" >/dev/null` does not credit a pin key —
+#     the block redirect would only capture remaining stdout. Direct
+#     same-line emits are also not accepted: `echo "version=..." && echo
+#     "other=x" >> "$GITHUB_OUTPUT"` would otherwise false-green. Independent
+#     greps are NOT enough; log-only echos of the correct values fail closed.
 #   - install step consumes steps.sc_pin.outputs.version and .digest
 # Forbidden (raw file, including comments):
 #   - any fixed-string restatement of the pinned version or digests
@@ -187,35 +191,45 @@ assert_workflow_shellcheck_pin_wiring() {
   if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_SHA256_LINUX_X86_64([[:space:]]|$)' "$filtered"; then
     reasons="${reasons}missing extract_strict SHELLCHECK_SHA256_LINUX_X86_64; "
   fi
-  # Coupled emit check: prove version=${version} and digest=${digest} both
-  # appear inside one brace group whose closer redirects to GITHUB_OUTPUT.
-  # Fail closed on direct same-line forms so command separators/pipelines
-  # cannot couple log-only pin text to an unrelated redirect. Deterministic
-  # awk over the already comment-filtered stream (macOS / Bash 3.2 / POSIX awk).
+  # Coupled emit check: prove exact plain pin-key echos both appear inside
+  # one brace group whose closer redirects to GITHUB_OUTPUT. Credit only
+  # lines that are exactly `echo "version=${version}"` / `echo "digest=
+  # ${digest}"` (trimmed whitespace only) — no inner redirect, separator,
+  # condition, or pipeline. Fail closed on same-line forms and on pin text
+  # silenced with >/dev/null inside the block. Deterministic awk over the
+  # already comment-filtered stream (macOS / Bash 3.2 / POSIX awk).
   # shellcheck disable=SC2016 # intentional literal ${version}/${digest} pins
   awk '
-    function has_v(s) { return index(s, "version=${version}") > 0 }
-    function has_d(s) { return index(s, "digest=${digest}") > 0 }
+    function trim(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function is_plain_v(s) { return trim(s) == "echo \"version=${version}\"" }
+    function is_plain_d(s) { return trim(s) == "echo \"digest=${digest}\"" }
     function has_go(s) { return index(s, "GITHUB_OUTPUT") > 0 }
     function has_redir(s) { return index(s, ">>") > 0 }
     {
       line = $0
-      # Brace group only: collect body, credit only if both pin keys are in
-      # the body and the closer owns >> GITHUB_OUTPUT.
+      # Brace group only: credit only exact plain pin echos in the body
+      # when the closer owns >> GITHUB_OUTPUT.
       if (line ~ /\{[[:space:]]*$/) {
         in_block = 1
-        block = ""
+        saw_v = 0
+        saw_d = 0
         next
       }
       if (in_block) {
         if (line ~ /^[[:space:]]*\}/) {
-          if (has_redir(line) && has_go(line) && has_v(block) && has_d(block)) {
+          if (has_redir(line) && has_go(line) && saw_v && saw_d) {
             ok = 1
           }
           in_block = 0
-          block = ""
+          saw_v = 0
+          saw_d = 0
         } else {
-          block = block "\n" line
+          if (is_plain_v(line)) saw_v = 1
+          if (is_plain_d(line)) saw_d = 1
         }
       }
     }
@@ -505,6 +519,33 @@ EOF
       echo "  FAIL — mutation same-line log-only+unrelated-GITHUB_OUTPUT unexpectedly passed"; fail=1
     else
       echo "  ok   — mutation: same-line log-only pin text + unrelated GITHUB_OUTPUT fails closed"
+    fi
+
+    # Brace group with closer >> GITHUB_OUTPUT but pin echos silenced via
+    # inner >/dev/null — only remaining stdout reaches GITHUB_OUTPUT. Must
+    # fail closed; substring pin-text credit would false-green this.
+    mut_wf="$mut_dir/brace-inner-dev-null.yml"
+    cat >"$mut_wf" <<'EOF'
+- name: Resolve ShellCheck pin from run-all.sh
+  id: sc_pin
+  run: |
+    pin_file="scripts/tests/run-all.sh"
+    version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+    digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+    {
+      echo "version=${version}" >/dev/null
+      echo "digest=${digest}" >/dev/null
+      echo "unrelated=x"
+    } >> "$GITHUB_OUTPUT"
+- name: Install ShellCheck
+  run: |
+    SC_VERSION="${{ steps.sc_pin.outputs.version }}"
+    SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation brace-inner-dev-null unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: brace-group pin echos with inner >/dev/null fails closed"
     fi
 
     # Version restatement forms: colon env, equals, alternate key, URL, comment.
