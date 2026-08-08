@@ -103,6 +103,35 @@ export RELEASE_CMD='claude -p --permission-mode bypassPermissions'
 # release hat shells out to RELEASE_CMD when present instead of merging itself
 ```
 
+### 5b. Multi-lane fleet (profiles — issue #139)
+
+For parallel overnight grind across **disjoint file scopes**, use
+`scripts/loop-fleet.sh` with an explicit local profile — not a hard-coded
+product queue inside the driver:
+
+```bash
+# Copy templates/fleet/profile.v1.example → a local absolute path, then:
+export FLEET_PROFILE=/absolute/path/to/local.profile
+export REVIEWER_CMD='codex exec -s read-only -'
+export RELEASE_CMD='claude -p --output-format text --permission-mode bypassPermissions'
+
+$GIBSON/scripts/loop-fleet.sh --status
+$GIBSON/scripts/loop-fleet.sh --start
+$GIBSON/scripts/loop-fleet.sh --halt
+```
+
+The profile declares `repo`, expected `slug`, and `lane=` records (id, ordered
+issue queue, exclusive scope, intent). Status/start/halt always print the
+resolved profile name, absolute target repo, and slug. Preflight fail-closes
+before any Grok launch on gated labels, dirty checkout, scope overlap, or
+slug mismatch. Lane worktrees are long-lived `lane-*` bases (never `wt-*`).
+
+**Three-role rule still holds:** this adapter is the default **builder**
+(`RUNNER=grok`). Review and release stay on `REVIEWER_CMD` / `RELEASE_CMD` —
+Grok must not grade or merge its own work. Per-lane runner/pool routing is
+issue **#141** (profile reserves an optional lane `runner` field; not wired
+yet). Full format: [`templates/fleet/README.md`](../../templates/fleet/README.md).
+
 ### 6. Telemetry
 
 - `MC_HEARTBEAT_URL` env for `loop.sh` curl heartbeat
