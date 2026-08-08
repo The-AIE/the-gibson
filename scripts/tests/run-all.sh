@@ -135,11 +135,98 @@ print_shellcheck_install_remediation() {
 EOF
 }
 
+# Assert executable single-source ShellCheck pin wiring in a workflow file.
+# Comments that merely mention the constant names must NOT satisfy this.
+# Prints a short reason on stdout and returns 1 on failure; silent return 0
+# when wiring is correct.
+#
+# Required executable wiring:
+#   - extract_strict SHELLCHECK_REQUIRED_VERSION
+#   - extract_strict SHELLCHECK_SHA256_LINUX_X86_64
+#   - both values emitted to GITHUB_OUTPUT (version= / digest=)
+#   - install step consumes steps.sc_pin.outputs.version and .digest
+# Forbidden:
+#   - any fixed-string restatement of the pinned version or digests
+#     (URL literals, alternate keys, colon/equals assignments, comments).
+# Version/digest matches are always fixed-string (grep -F) — never interpolate
+# the pin into an unescaped ERE.
+assert_workflow_shellcheck_pin_wiring() {
+  local wf="$1"
+  local reasons=""
+  if [[ ! -f "$wf" ]]; then
+    printf '%s' "missing workflow file"
+    return 1
+  fi
+  # Strict extract_strict calls for both keys (not bare identifier mentions).
+  if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_REQUIRED_VERSION([[:space:]]|$)' "$wf"; then
+    reasons="${reasons}missing extract_strict SHELLCHECK_REQUIRED_VERSION; "
+  fi
+  if ! grep -Eq 'extract_strict[[:space:]]+SHELLCHECK_SHA256_LINUX_X86_64([[:space:]]|$)' "$wf"; then
+    reasons="${reasons}missing extract_strict SHELLCHECK_SHA256_LINUX_X86_64; "
+  fi
+  # Both values written to GITHUB_OUTPUT.
+  if ! grep -Fq 'version=${version}' "$wf"; then
+    reasons="${reasons}missing version=\${version} GITHUB_OUTPUT emit; "
+  fi
+  if ! grep -Fq 'digest=${digest}' "$wf"; then
+    reasons="${reasons}missing digest=\${digest} GITHUB_OUTPUT emit; "
+  fi
+  if ! grep -Fq 'GITHUB_OUTPUT' "$wf"; then
+    reasons="${reasons}missing GITHUB_OUTPUT write; "
+  fi
+  # Install step must consume the pin step outputs.
+  if ! grep -Fq 'steps.sc_pin.outputs.version' "$wf"; then
+    reasons="${reasons}missing steps.sc_pin.outputs.version consumer; "
+  fi
+  if ! grep -Fq 'steps.sc_pin.outputs.digest' "$wf"; then
+    reasons="${reasons}missing steps.sc_pin.outputs.digest consumer; "
+  fi
+  # Literal-safe: no restated digests anywhere.
+  if grep -Fq "$SHELLCHECK_SHA256_LINUX_X86_64" "$wf" 2>/dev/null ||
+     grep -Fq "$SHELLCHECK_SHA256_DARWIN_AARCH64" "$wf" 2>/dev/null ||
+     grep -Fq "$SHELLCHECK_SHA256_DARWIN_X86_64" "$wf" 2>/dev/null; then
+    reasons="${reasons}restates a pin digest; "
+  fi
+  # Literal-safe: reject the exact pinned version anywhere (URL, keys, =/:,
+  # comments). Fixed-string only — do not interpolate into unescaped ERE.
+  if grep -Fq "$SHELLCHECK_REQUIRED_VERSION" "$wf" 2>/dev/null; then
+    reasons="${reasons}restates pinned version literal ${SHELLCHECK_REQUIRED_VERSION}; "
+  fi
+  if [[ -n "$reasons" ]]; then
+    printf '%s' "$reasons"
+    return 1
+  fi
+  return 0
+}
+
+# Minimal executable wiring that should PASS the assertion (control fixture).
+# Intentionally omits any restated version/digest literal.
+_write_good_pin_wiring_fixture() {
+  cat >"$1" <<'EOF'
+# Resolve ShellCheck pin from run-all.sh
+- name: Resolve ShellCheck pin from run-all.sh
+  id: sc_pin
+  run: |
+    pin_file="scripts/tests/run-all.sh"
+    version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+    digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+    {
+      echo "version=${version}"
+      echo "digest=${digest}"
+    } >> "$GITHUB_OUTPUT"
+- name: Install ShellCheck (official release, single-source pin)
+  run: |
+    SC_VERSION="${{ steps.sc_pin.outputs.version }}"
+    SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+    curl -fsSL -o shellcheck.tar.xz "https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+EOF
+}
+
 # Offline deterministic checks for version parsing / mismatch / single-source
 # wiring (no network). Invoked by the ordinary run-all path (CI) and by the
 # focused entry point --self-test-toolchain.
 self_test_toolchain() {
-  local fail=0 got mismatch wf
+  local fail=0 got mismatch wf reason mut_dir mut_wf
   # Parse expectations track the pin constant so a future bump cannot leave a
   # hardcoded "0.11.0" expectation that contradicts the new pin.
   got=$(parse_shellcheck_version $'ShellCheck - shell script analysis tool\nversion: '"${SHELLCHECK_REQUIRED_VERSION}"$'\nlicense: GNU')
@@ -205,31 +292,132 @@ self_test_toolchain() {
   if [[ "$digests_ok" -eq 1 ]]; then
     echo "  ok   — digest constants are 64 lowercase hex (darwin aarch64/x86_64, linux x86_64)"
   fi
-  # Workflow must consume these constants and must not restate version/digests.
+  # Workflow must have executable single-source pin wiring and must not restate
+  # version/digests. Bare constant names in comments alone are not enough.
   wf="$WORKFLOW_SELF_GATE"
   if [[ ! -f "$wf" ]]; then
     echo "  FAIL — missing workflow $wf"; fail=1
   else
-    if grep -q 'SHELLCHECK_REQUIRED_VERSION' "$wf" &&
-       grep -q 'SHELLCHECK_SHA256_LINUX_X86_64' "$wf" &&
-       grep -q 'scripts/tests/run-all.sh' "$wf"; then
-      echo "  ok   — workflow references single-source constants in run-all.sh"
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$wf"); then
+      echo "  ok   — workflow has executable extract_strict + GITHUB_OUTPUT + sc_pin consumer wiring"
+      echo "  ok   — workflow does not restate pin version/digest literals (fixed-string)"
     else
-      echo "  FAIL — workflow does not extract pin constants from run-all.sh"; fail=1
+      echo "  FAIL — workflow pin wiring: ${reason}"; fail=1
     fi
-    if grep -F "$SHELLCHECK_SHA256_LINUX_X86_64" "$wf" >/dev/null 2>&1 ||
-       grep -F "$SHELLCHECK_SHA256_DARWIN_AARCH64" "$wf" >/dev/null 2>&1 ||
-       grep -F "$SHELLCHECK_SHA256_DARWIN_X86_64" "$wf" >/dev/null 2>&1; then
-      echo "  FAIL — workflow restates a pin digest (must extract from run-all.sh)"; fail=1
+    if ! grep -Fq 'scripts/tests/run-all.sh' "$wf"; then
+      echo "  FAIL — workflow does not reference pin source scripts/tests/run-all.sh"; fail=1
     else
-      echo "  ok   — workflow does not restate pin digests"
+      echo "  ok   — workflow references pin source scripts/tests/run-all.sh"
     fi
-    # No env-style restatement of the version (SC_VERSION: "0.11.0" / SC_VERSION: 0.11.0).
-    if grep -E 'SC_VERSION:[[:space:]]*["'\'']?'"$SHELLCHECK_REQUIRED_VERSION" "$wf" >/dev/null 2>&1; then
-      echo "  FAIL — workflow restates SC_VERSION: ${SHELLCHECK_REQUIRED_VERSION}"; fail=1
+  fi
+  # Deterministic mutation fixtures: comments-only / missing consumer / restated
+  # version forms must fail closed; a minimal good fixture must pass.
+  mut_dir=$(mktemp -d "${TMPDIR:-/tmp}/sc-pin-mut.XXXXXX") || {
+    echo "  FAIL — mktemp for pin-wiring mutation fixtures"; fail=1; mut_dir=""
+  }
+  if [[ -n "$mut_dir" ]]; then
+    # Control: good wiring passes.
+    mut_wf="$mut_dir/good.yml"
+    _write_good_pin_wiring_fixture "$mut_wf"
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  ok   — mutation control: good extract+output+consume wiring passes"
     else
-      echo "  ok   — workflow does not restate SC_VERSION env literal"
+      echo "  FAIL — mutation control: good wiring rejected: ${reason}"; fail=1
     fi
+
+    # Comments alone (same bare strings as the old weak check) must fail.
+    mut_wf="$mut_dir/comments-only.yml"
+    cat >"$mut_wf" <<'EOF'
+# Exact ShellCheck pin — machine source is scripts/tests/run-all.sh
+# (SHELLCHECK_REQUIRED_VERSION + SHELLCHECK_SHA256_LINUX_X86_64). Do not
+# restate version/digest here; extract strict assignment lines only.
+- name: Install ShellCheck
+  run: |
+    # hardcoded install — no extract_strict, no GITHUB_OUTPUT, no sc_pin
+    curl -fsSL -o shellcheck.tar.xz "https://example.invalid/shellcheck.tar.xz"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation comments-only unexpectedly passed wiring check"; fail=1
+    else
+      echo "  ok   — mutation: comments-only wiring fails closed"
+    fi
+
+    # Extract + GITHUB_OUTPUT present but install does not consume sc_pin outputs.
+    mut_wf="$mut_dir/missing-consumer.yml"
+    cat >"$mut_wf" <<'EOF'
+- name: Resolve ShellCheck pin from run-all.sh
+  id: sc_pin
+  run: |
+    pin_file="scripts/tests/run-all.sh"
+    version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+    digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+    {
+      echo "version=${version}"
+      echo "digest=${digest}"
+    } >> "$GITHUB_OUTPUT"
+- name: Install ShellCheck
+  run: |
+    SC_VERSION="hardcoded-not-from-sc-pin"
+    SC_SHA256="also-hardcoded"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation missing-consumer unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: missing steps.sc_pin.outputs consumer fails closed"
+    fi
+
+    # Extract present but neither value written to GITHUB_OUTPUT.
+    mut_wf="$mut_dir/missing-github-output.yml"
+    cat >"$mut_wf" <<'EOF'
+- name: Resolve ShellCheck pin from run-all.sh
+  id: sc_pin
+  run: |
+    version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
+    digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
+    echo "resolved but not emitted"
+- name: Install ShellCheck
+  run: |
+    SC_VERSION="${{ steps.sc_pin.outputs.version }}"
+    SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+EOF
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation missing-GITHUB_OUTPUT unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: missing GITHUB_OUTPUT emit fails closed"
+    fi
+
+    # Version restatement forms: colon env, equals, alternate key, URL, comment.
+    # Each starts from good wiring then injects the exact pin literal.
+    local form body
+    for form in \
+      "colon:SC_VERSION: ${SHELLCHECK_REQUIRED_VERSION}" \
+      "equals:SC_VERSION=${SHELLCHECK_REQUIRED_VERSION}" \
+      "altkey:PIN_VERSION: ${SHELLCHECK_REQUIRED_VERSION}" \
+      "url:https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_REQUIRED_VERSION}/shellcheck-v${SHELLCHECK_REQUIRED_VERSION}.linux.x86_64.tar.xz" \
+      "comment:# pinned ShellCheck is ${SHELLCHECK_REQUIRED_VERSION}"; do
+      body="${form#*:}"
+      form="${form%%:*}"
+      mut_wf="$mut_dir/version-${form}.yml"
+      _write_good_pin_wiring_fixture "$mut_wf"
+      printf '\n# mutation inject\n%s\n' "$body" >>"$mut_wf"
+      if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+        echo "  FAIL — mutation version-${form} restatement unexpectedly passed"; fail=1
+      else
+        echo "  ok   — mutation: version restatement (${form}) fails closed"
+      fi
+    done
+
+    # Digest restatement (literal-safe, same family as version).
+    mut_wf="$mut_dir/digest-restate.yml"
+    _write_good_pin_wiring_fixture "$mut_wf"
+    printf '\nSC_SHA256: %s\n' "$SHELLCHECK_SHA256_LINUX_X86_64" >>"$mut_wf"
+    if reason=$(assert_workflow_shellcheck_pin_wiring "$mut_wf"); then
+      echo "  FAIL — mutation digest restatement unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: digest restatement fails closed"
+    fi
+
+    rm -rf "$mut_dir"
   fi
   if [[ "$fail" -eq 0 ]]; then
     echo "run-all: toolchain self-test GREEN"
