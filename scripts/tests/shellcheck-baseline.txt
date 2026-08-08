@@ -4,4 +4,3 @@
 # line in the same PR that fixes it. This list only shrinks.
 scripts/deploy-audit.sh	SC2034
 scripts/posture-probe.sh	SC2034
-scripts/tests/loop-state.test.sh	SC2218
