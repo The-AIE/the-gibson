@@ -66,7 +66,7 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}" # tests can set to true / no-op
 #   FLEET_SYNC_LAUNCH=1  — run loop.sh in-foreground (no nohup); deterministic sensors
 #   FLEET_NO_WATCHDOG=1  — skip deadline watchdog process
 #   FLEET_SKIP_FETCH=1   — skip network fetch; resolve default branch from local origin/*
-#   FLEET_FETCH_TIMEOUT  — wall-clock seconds for git fetch (default 30)
+#   FLEET_FETCH_TIMEOUT  — wall-clock seconds for git fetch AND ls-remote (default 30)
 FLEET_SYNC_LAUNCH="${FLEET_SYNC_LAUNCH:-0}"
 FLEET_NO_WATCHDOG="${FLEET_NO_WATCHDOG:-0}"
 FLEET_SKIP_FETCH="${FLEET_SKIP_FETCH:-0}"
@@ -527,6 +527,7 @@ lane_dir()   { echo "$FLEET_DIR/lane-$1"; }
 lane_log()   { echo "$LOG_DIR/$1.log"; }
 lane_state() { echo "$(lane_dir "$1")/gibson/loop-state.md"; }
 lane_pidfile() { echo "$LOG_DIR/$1.pid"; }
+watchdog_pidfile() { echo "$LOG_DIR/watchdog.pid"; }
 
 # Prefer pidfiles over pgrep -f: scanning the process table matches huge
 # agent CLI argvs (and can hang or false-positive). Pidfile is written at
@@ -569,6 +570,70 @@ lane_pid_alive() {
   esac
   printf '%s\n' "$pid"
   return 0
+}
+
+# Watchdog identity: live PID + command line still references this driver and
+# this profile path. Unrelated reused PIDs are not treated as our watchdog.
+watchdog_pid_alive() {
+  local pf pid cmdline driver_base
+  pf=$(watchdog_pidfile)
+  [[ -f "$pf" ]] || return 1
+  pid=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] || { rm -f "$pf"; return 1; }
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pf"
+    return 1
+  fi
+  cmdline=$(ps -p "$pid" -o command= 2>/dev/null || true)
+  if [[ -z "$cmdline" ]]; then
+    cmdline=$(ps -p "$pid" -o args= 2>/dev/null || true)
+  fi
+  if [[ -z "$cmdline" ]]; then
+    rm -f "$pf"
+    return 1
+  fi
+  driver_base=$(basename "$DRIVER_SELF")
+  case "$cmdline" in
+    *"$DRIVER_SELF"*|*"$driver_base"*) ;;
+    *) rm -f "$pf"; return 1 ;;
+  esac
+  case "$cmdline" in
+    *"$PROFILE_PATH"*) ;;
+    *) rm -f "$pf"; return 1 ;;
+  esac
+  printf '%s\n' "$pid"
+  return 0
+}
+
+# Arm deadline watchdog once per profile/log directory. Healthy re-start keeps
+# the original PID and deadline; only a stale/unrelated pidfile is replaced.
+ensure_watchdog() {
+  local wd_pid wd_pf
+  if [[ "$FLEET_NO_WATCHDOG" == "1" ]]; then
+    info "watchdog skipped (FLEET_NO_WATCHDOG=1)"
+    return 0
+  fi
+  if wd_pid=$(watchdog_pid_alive); then
+    info "watchdog already running (pid $wd_pid) — leaving deadline untouched"
+    return 0
+  fi
+  wd_pf=$(watchdog_pidfile)
+  # Fixed shell source + positional argv only — never interpolate profile path
+  # or sleep command into executable shell source (injection surface).
+  # Pidfile is cleaned when the sleep completes (before --halt) where practical.
+  nohup bash -c '
+    sleep_bin=$1
+    secs=$2
+    driver=$3
+    profile=$4
+    pidfile=$5
+    "$sleep_bin" "$secs"
+    rm -f "$pidfile"
+    exec "$driver" --profile "$profile" --halt
+  ' bash "$SLEEP_CMD" "$DEADLINE_SECONDS" "$DRIVER_SELF" "$PROFILE_PATH" "$wd_pf" \
+    >> "$LOG_DIR/watchdog.log" 2>&1 &
+  echo $! > "$wd_pf"
+  info "watchdog armed: HALT in $((DEADLINE_SECONDS / 3600))h (${DEADLINE_SECONDS}s) pid $!"
 }
 
 # --- preflight (fail closed before any runner launch) -----------------------
@@ -652,13 +717,79 @@ check_pr_conflicts() {
   done <<<"$branches"
 }
 
-# First whitespace-separated token of a command string (no eval / no shell parse).
-cmd_first_token() {
+# True if a command string cannot be safely whitespace-tokenized (fail closed).
+# Quotes, expansions, and shell metacharacters make first-token identity unreliable
+# and must not become a distinct fake provider.
+cmd_has_unsafe_syntax() {
   local raw="$1"
-  raw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//')
+  case "$raw" in
+    *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\]*|*$'\n'*|*$'\r'*|*$'\t'*) return 0 ;;
+  esac
+  return 1
+}
+
+# Resolve the real executable token of a role command (no eval / no shell parse).
+# - Fail closed on quotes/metacharacters (ambiguous tokenization).
+# - Safely unwrap only well-defined `env` forms: bare flags (-i/-0/-v), -u NAME,
+#   -P DIR, and NAME=VALUE assignments. Reject -S and unknown options.
+# - Trailing args (including misleading vendor words) are ignored after the utility.
+# Returns the utility path/name on stdout, or empty + status 1 on failure.
+cmd_executable_token() {
+  local raw="$1" tok base ename
+  raw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   [[ -n "$raw" ]] || { printf '\n'; return 1; }
-  # awk FS is whitespace — trailing args (including misleading vendor names) are ignored.
-  printf '%s\n' "$raw" | awk '{ print $1; exit }'
+  if cmd_has_unsafe_syntax "$raw"; then
+    printf '\n'
+    return 1
+  fi
+
+  # Whitespace tokenize with noglob — never eval/source the string.
+  # shellcheck disable=SC2086
+  set -f
+  set -- $raw
+  set +f
+  [[ $# -ge 1 ]] || { printf '\n'; return 1; }
+
+  base=$(basename "$1")
+  if [[ "$base" == "env" ]]; then
+    shift
+    while [[ $# -gt 0 ]]; do
+      tok="$1"
+      case "$tok" in
+        --) shift; break ;;
+        -i|-0|-v) shift; continue ;;
+        -u|-P)
+          [[ $# -ge 2 ]] || { printf '\n'; return 1; }
+          # NAME / DIR must themselves be free of metacharacters (already true of tokens).
+          shift 2
+          continue
+          ;;
+        -S*|-s*)
+          # env -S embeds shell-like strings — refuse.
+          printf '\n'
+          return 1
+          ;;
+        -*)
+          # Unknown / combined env options — fail closed (require a simple wrapper).
+          printf '\n'
+          return 1
+          ;;
+        *=*)
+          # NAME=VALUE — require a legal env name; value is one whitespace token only.
+          ename="${tok%%=*}"
+          [[ "$ename" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { printf '\n'; return 1; }
+          shift
+          continue
+          ;;
+        *)
+          break
+          ;;
+      esac
+    done
+    [[ $# -ge 1 ]] || { printf '\n'; return 1; }
+  fi
+
+  printf '%s\n' "$1"
 }
 
 # Map an executable basename to a provider family id (grok|codex|claude|hermes|other).
@@ -676,12 +807,12 @@ provider_family_from_basename() {
   esac
 }
 
-# Resolve the provider identity of a role command from its first executable only.
-# Discovers PATH hits and one-level symlinks when present so aliases/paths cannot
-# mask the same provider under a different spelling.
+# Resolve the provider identity of a role command from its real executable only
+# (after safe env unwrap). Discovers PATH hits and one-level symlinks when present
+# so aliases/paths cannot mask the same provider under a different spelling.
 cmd_provider_id() {
   local raw="$1" first base resolved target dir
-  first=$(cmd_first_token "$raw") || true
+  first=$(cmd_executable_token "$raw") || true
   [[ -n "$first" ]] || { printf '\n'; return 1; }
 
   base=$(basename "$first")
@@ -1012,13 +1143,43 @@ fetch_origin_bounded() {
   fi
 }
 
+# Bounded git ls-remote --symref origin HEAD. Same wall-clock process-group
+# primitive as fetch; stdout captured via file redirect (no shell interpolation
+# of remote output into command strings). Fail closed on timeout / non-zero.
+# Prints the raw ls-remote payload on stdout.
+ls_remote_symref_bounded() {
+  local limit="${FLEET_FETCH_TIMEOUT:-30}" rc out_file
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || die "FLEET_FETCH_TIMEOUT must be a positive integer (got: $limit)"
+  out_file=$(mktemp "${TMPDIR:-/tmp}/fleet-lsremote.XXXXXX") || die "cannot create temp file for ls-remote capture"
+  info "git ls-remote --symref origin HEAD (wall timeout ${limit}s)"
+  set +e
+  # Redirect captures only the child tree's stdout; argv is fixed (no interpolation).
+  run_with_wall_timeout "$limit" \
+    env GIT_TERMINAL_PROMPT=0 \
+    git -C "$BASE_REPO" ls-remote --symref origin HEAD >"$out_file"
+  rc=$?
+  set -e
+  if [[ $rc -eq 124 ]]; then
+    rm -f "$out_file"
+    die "git ls-remote --symref origin HEAD exceeded wall-clock timeout (${limit}s) — refuse to launch; set FLEET_SKIP_FETCH=1 only for offline sensors"
+  fi
+  if [[ $rc -ne 0 ]]; then
+    rm -f "$out_file"
+    die "git ls-remote --symref origin HEAD failed (exit $rc) — refuse to launch; set FLEET_SKIP_FETCH=1 only for offline sensors"
+  fi
+  # Emit payload; caller parses. Never eval/source this content.
+  cat "$out_file"
+  rm -f "$out_file"
+}
+
 # Resolve remote default branch name + exact tip SHA.
-# Live: git ls-remote --symref origin HEAD after fetch (authoritative).
-# Offline (FLEET_SKIP_FETCH=1): local refs/remotes/origin/HEAD only — never
-# guess main/master and never prefer a decoy origin/main over the symref.
+# Live: single bounded git ls-remote --symref origin HEAD (authoritative).
+# Both the symbolic ref name AND the HEAD OID must come from that one payload —
+# no second network call and no local main/master guess.
+# Offline (FLEET_SKIP_FETCH=1): local refs/remotes/origin/HEAD only.
 # Prints: "<name> <sha>"
 resolve_remote_default_pin() {
-  local name="" sha="" symref ls_out line
+  local name="" sha="" symref
 
   if [[ "$FLEET_SKIP_FETCH" == "1" ]]; then
     # Offline fixtures must set refs/remotes/origin/HEAD (local remote / stub).
@@ -1038,25 +1199,20 @@ resolve_remote_default_pin() {
     return 0
   fi
 
-  if ! symref=$(git -C "$BASE_REPO" ls-remote --symref origin HEAD 2>/dev/null); then
-    die "cannot resolve remote default branch: git ls-remote --symref origin HEAD failed for $BASE_REPO"
-  fi
+  symref=$(ls_remote_symref_bounded) \
+    || die "cannot resolve remote default branch: bounded ls-remote failed for $BASE_REPO"
+  [[ -n "$symref" ]] || die "git ls-remote --symref origin HEAD returned empty payload — refuse to guess main/master"
+
   name=$(printf '%s\n' "$symref" |
     awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2; exit }')
-  [[ -n "$name" ]] || die "origin advertises no symbolic HEAD — refusing to guess main/master"
+  [[ -n "$name" ]] || die "origin advertises no symbolic HEAD in ls-remote payload — refusing to guess main/master"
 
-  # Prefer the OID from the same ls-remote payload (HEAD line); fall back to
-  # explicit refs/heads/<name> listing; finally the just-fetched remote-tracking ref.
+  # HEAD OID must come from the same single payload (line: <oid> HEAD). No
+  # second ls-remote and no local origin/* fallback on the live path.
   sha=$(printf '%s\n' "$symref" | awk '$2 == "HEAD" && $1 != "ref:" { print $1; exit }')
-  if [[ -z "$sha" ]]; then
-    if ls_out=$(git -C "$BASE_REPO" ls-remote origin "refs/heads/$name" 2>/dev/null); then
-      sha=$(printf '%s\n' "$ls_out" | awk 'NR==1 { print $1; exit }')
-    fi
-  fi
-  if [[ -z "$sha" ]]; then
-    sha=$(git -C "$BASE_REPO" rev-parse --verify --quiet "refs/remotes/origin/$name" 2>/dev/null || true)
-  fi
-  [[ -n "$sha" ]] || die "cannot pin tip of remote default branch '$name'"
+  [[ -n "$sha" ]] || die "ls-remote --symref payload missing HEAD OID for branch '$name' — refuse to launch"
+  [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]] || die "ls-remote HEAD OID malformed: $sha"
+
   # Verify object is present locally (fetch should have brought it in).
   git -C "$BASE_REPO" cat-file -e "$sha^{commit}" 2>/dev/null \
     || die "remote default tip $sha ($name) not present locally after fetch"
@@ -1166,23 +1322,9 @@ do_start() {
     i=$((i + 1))
   done
 
-  # Deadline watchdog: stop the fleet cleanly even if nobody is watching.
-  # Fixed shell source + positional argv only — never interpolate profile path
-  # or sleep command into executable shell source (injection surface).
-  if [[ "$FLEET_NO_WATCHDOG" == "1" ]]; then
-    info "watchdog skipped (FLEET_NO_WATCHDOG=1)"
-  else
-    nohup bash -c '
-      sleep_bin=$1
-      secs=$2
-      driver=$3
-      profile=$4
-      "$sleep_bin" "$secs"
-      exec "$driver" --profile "$profile" --halt
-    ' bash "$SLEEP_CMD" "$DEADLINE_SECONDS" "$DRIVER_SELF" "$PROFILE_PATH" \
-      >> "$LOG_DIR/watchdog.log" 2>&1 &
-    info "watchdog armed: HALT in $((DEADLINE_SECONDS / 3600))h (${DEADLINE_SECONDS}s)"
-  fi
+  # Deadline watchdog: one identity-validated process per profile/log dir.
+  # Healthy repeated --start keeps the original PID and deadline.
+  ensure_watchdog
   info "fleet up. status: $0 --profile $PROFILE_PATH --status"
 }
 

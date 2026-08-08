@@ -1105,16 +1105,19 @@ write_profile "$PROF" \
   "log_dir=$ROOT/logs" \
   "runner=fake-runner" \
   "lane=docs|36|docs/**|docs only"
-# PATH git stub: hang on fetch, otherwise delegate to real git
+# PATH git stub: hang on fetch, spawn a descendant, otherwise delegate to real git
 REAL_GIT=$(command -v git)
 cat > "$BIN/git" <<STUB
 #!/usr/bin/env bash
 # hang on fetch for wall-timeout sensor; else real git
+# Record leader PID (this process) AND a spawned descendant so cleanup
+# evidence cannot pass while an orphaned sleep remains.
 for a in "\$@"; do
   if [[ "\$a" == "fetch" ]]; then
-    # marker so we can detect the child; hang until killed
     echo "\$\$" > "$CALLS/hang-fetch.pid"
-    while true; do sleep 30; done
+    sleep 100 &
+    echo "\$!" > "$CALLS/hang-fetch-desc.pid"
+    wait
     exit 0
   fi
 done
@@ -1123,7 +1126,7 @@ STUB
 chmod +x "$BIN/git"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-rm -f "$CALLS/hang-fetch.pid"
+rm -f "$CALLS/hang-fetch.pid" "$CALLS/hang-fetch-desc.pid"
 out=$(
   env \
     PATH="$BIN:$PATH" \
@@ -1143,20 +1146,108 @@ out=$(
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "hanging fetch launched zero runners" || bad "hang-fetch launched $lc"
-# Child cleanup: hanging pid must not remain
-if [[ -f "$CALLS/hang-fetch.pid" ]]; then
-  hpid=$(tr -d '[:space:]' < "$CALLS/hang-fetch.pid")
-  if [[ -n "$hpid" ]] && kill -0 "$hpid" 2>/dev/null; then
-    bad "hanging fetch child pid $hpid still alive after timeout"
-    kill -KILL "$hpid" 2>/dev/null || true
-  else
-    ok "hanging fetch child cleaned up after timeout"
+# Cleanup: leader AND descendant must both be gone (no pkill/killall — exact PIDs only).
+assert_pid_gone() {
+  local label="$1" pidfile="$2" pid
+  if [[ ! -f "$pidfile" ]]; then
+    bad "$label pid file missing — stub may not have started"
+    return
   fi
-else
-  # process may have been killed before writing pid — still accept if zero launches
-  ok "hanging fetch child cleaned up (no residual pid file / already reaped)"
-fi
+  pid=$(tr -d '[:space:]' < "$pidfile")
+  if [[ -z "$pid" || ! "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    bad "$label pid unreadable: $(cat "$pidfile" 2>/dev/null || true)"
+    return
+  fi
+  # Brief grace for reaping after KILL
+  local i=0
+  while [[ $i -lt 10 ]]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      ok "$label pid $pid cleaned up after timeout"
+      return
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  bad "$label pid $pid still alive after timeout"
+  # Best-effort exact-PID cleanup for the test harness only (not pattern kill)
+  kill -KILL "$pid" 2>/dev/null || true
+}
+assert_pid_gone "hanging fetch leader" "$CALLS/hang-fetch.pid"
+assert_pid_gone "hanging fetch descendant" "$CALLS/hang-fetch-desc.pid"
 # remove git stub so later tests use real git
+rm -f "$BIN/git"
+
+# --- #4b wall-clock ls-remote timeout + leader/descendant cleanup ----------
+echo "wall-clock ls-remote timeout"
+reset_calls
+TARGET=$(setup_target_repo hangls acme/widget)
+PROF="$ROOT/profiles/hangls.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hangls" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|360|docs/**|docs only"
+REAL_GIT=$(command -v git)
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+# fetch succeeds; hang on ls-remote to prove that path is also wall-bounded
+args=("\$@")
+i=0
+n=\$#
+set -- "\${args[@]}"
+while [[ \$i -lt \$n ]]; do
+  a="\${args[\$i]}"
+  case "\$a" in
+    -C) i=\$((i+2)); continue ;;
+    -c) i=\$((i+2)); continue ;;
+    -*) i=\$((i+1)); continue ;;
+    *) break ;;
+  esac
+done
+cmd="\${args[\$i]:-}"
+if [[ "\$cmd" == "fetch" ]]; then
+  exit 0
+fi
+if [[ "\$cmd" == "ls-remote" ]]; then
+  echo "\$\$" > "$CALLS/hang-lsremote.pid"
+  sleep 100 &
+  echo "\$!" > "$CALLS/hang-lsremote-desc.pid"
+  wait
+  exit 0
+fi
+exec "$REAL_GIT" "\${args[@]}"
+STUB
+chmod +x "$BIN/git"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+rm -f "$CALLS/hang-lsremote.pid" "$CALLS/hang-lsremote-desc.pid"
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="$RUNNER" REVIEWER_CMD="$REVIEWER_CMD" RELEASE_CMD="$RELEASE_CMD" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=2 \
+    GIT_TERMINAL_PROMPT=0 \
+    GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "hanging ls-remote should fail closed: $out" || {
+  echo "$out" | grep -qi 'timeout\|wall-clock\|timed out\|exceeded\|ls-remote' \
+    && ok "hanging ls-remote fails closed on wall timeout" \
+    || bad "unclear hang-ls-remote fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "hanging ls-remote launched zero runners" || bad "hang-ls-remote launched $lc"
+assert_pid_gone "hanging ls-remote leader" "$CALLS/hang-lsremote.pid"
+assert_pid_gone "hanging ls-remote descendant" "$CALLS/hang-lsremote-desc.pid"
 rm -f "$BIN/git"
 
 # --- #5 provider identity: path / alias / misleading trailing args ----------
@@ -1283,6 +1374,220 @@ out=$(
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "valid three-role separation still launches" \
   || bad "valid three-role launches=$lc out=$out"
+
+# --- #5b env-wrapper / quoting provider bypasses ---------------------------
+echo "provider env-wrapper + quoting bypass"
+reset_calls
+TARGET=$(setup_target_repo envwrap acme/widget)
+PROF="$ROOT/profiles/envwrap.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=envwrap" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=grok" \
+  "lane=docs|38|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+# Put vendor binaries on PATH. Profile runner=grok wins over env RUNNER, so
+# builder identity is grok for these bypass cases.
+cat > "$BIN/grok" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$BIN/grok"
+cat > "$BIN/codex" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$BIN/codex"
+cat > "$BIN/claude" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$BIN/claude"
+
+# runner=grok + REVIEWER_CMD="env grok -p codex" must reject (same provider after unwrap)
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="grok" \
+    REVIEWER_CMD="env grok -p codex" \
+    RELEASE_CMD="claude -p release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "env grok reviewer bypass should fail" || {
+  echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+    && ok "env grok reviewer bypass refused" \
+    || bad "unclear env-grok reviewer fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "env grok reviewer launched zero" || bad "env-grok review launched $lc"
+
+# Equivalent release bypass: RELEASE_CMD="env grok ..." with builder grok
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="grok" \
+    REVIEWER_CMD="codex exec -s read-only -" \
+    RELEASE_CMD="env FOO=1 grok -p release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "env grok release bypass should fail" || {
+  echo "$out" | grep -qi 'RELEASE_CMD\|third identity\|same provider\|provider' \
+    && ok "env grok release bypass refused" \
+    || bad "unclear env-grok release fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "env grok release launched zero" || bad "env-grok release launched $lc"
+
+# Quoted executable must fail closed (not become a distinct fake provider)
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="grok" \
+    REVIEWER_CMD="\"$BIN/codex\" review" \
+    RELEASE_CMD="claude -p release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "quoted reviewer path should fail closed" || {
+  echo "$out" | grep -qi 'provider\|REVIEWER_CMD\|cannot resolve\|identity' \
+    && ok "quoted reviewer path fail-closed" \
+    || bad "unclear quoted-path fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "quoted reviewer launched zero" || bad "quoted review launched $lc"
+
+# Valid Grok -> Codex -> Claude still launches (plain names, no wrapper needed)
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="grok" \
+    REVIEWER_CMD="codex exec -s read-only -" \
+    RELEASE_CMD="claude -p --permission-mode bypassPermissions" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "valid Grok->Codex->Claude failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "valid Grok->Codex->Claude still launches" \
+  || bad "valid Grok->Codex->Claude launches=$lc out=$out"
+
+# env with well-defined assignment wrapping a *distinct* provider still works
+: > "$CALLS/launches.log"
+out=$(
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="grok" \
+    REVIEWER_CMD="env FOO=bar codex exec -s read-only -" \
+    RELEASE_CMD="claude -p release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "valid env-wrapped distinct reviewer failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "valid env-wrapped distinct provider launches" \
+  || bad "valid env-wrap launches=$lc out=$out"
+
+# --- #5c watchdog start idempotent per profile/log dir ---------------------
+echo "watchdog start idempotent"
+reset_calls
+TARGET=$(setup_target_repo wdidem acme/widget)
+PROF="$ROOT/profiles/wdidem.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdidem" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=45" \
+  "lane=docs|39|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+WD_PF="$ROOT/logs/watchdog.pid"
+rm -f "$WD_PF"
+# Real sleep so the watchdog stays alive across two --start calls.
+# Sync launch so loop stubs finish immediately; only the watchdog remains.
+run_wd_start() {
+  env \
+    PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=45 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+}
+out1=$(run_wd_start) || { bad "watchdog first start failed: $out1"; }
+[[ -f "$WD_PF" ]] || bad "watchdog pidfile missing after first start"
+wd1=$(tr -d '[:space:]' < "$WD_PF")
+[[ "$wd1" =~ ^[1-9][0-9]*$ ]] && kill -0 "$wd1" 2>/dev/null \
+  && ok "watchdog first start armed pid $wd1" \
+  || bad "watchdog first pid invalid/dead: $wd1"
+cmd1=$(ps -p "$wd1" -o command= 2>/dev/null || ps -p "$wd1" -o args= 2>/dev/null || true)
+echo "$cmd1" | grep -q '45' \
+  && ok "watchdog cmdline carries original deadline 45" \
+  || bad "watchdog cmdline missing deadline: $cmd1"
+
+# Second start: all lanes healthy (no loop left with sync, but re-start reuses bases).
+# Must keep the *same* watchdog PID and not re-arm a new deadline.
+out2=$(run_wd_start) || { bad "watchdog second start failed: $out2"; }
+wd2=$(tr -d '[:space:]' < "$WD_PF" 2>/dev/null || true)
+[[ "$wd1" == "$wd2" ]] && ok "repeated start kept same watchdog pid $wd1" \
+  || bad "watchdog pid changed: first=$wd1 second=$wd2 out2=$out2"
+echo "$out2" | grep -qi 'already running\|leaving deadline' \
+  && ok "second start reports existing watchdog" \
+  || bad "second start did not report existing watchdog: $out2"
+cmd2=$(ps -p "$wd1" -o command= 2>/dev/null || ps -p "$wd1" -o args= 2>/dev/null || true)
+[[ "$cmd1" == "$cmd2" ]] && ok "watchdog identity/cmdline unchanged after re-start" \
+  || bad "watchdog cmdline changed: before=[$cmd1] after=[$cmd2]"
+
+# Clean only this exact PID/group — no pkill/killall/pattern kill.
+if kill -0 "$wd1" 2>/dev/null; then
+  kill -TERM -"$wd1" 2>/dev/null || kill -TERM "$wd1" 2>/dev/null || true
+  sleep 0.3 2>/dev/null || sleep 1
+  kill -KILL -"$wd1" 2>/dev/null || kill -KILL "$wd1" 2>/dev/null || true
+fi
+# Reap and drop pidfile (driver would clean on natural completion)
+rm -f "$WD_PF"
+if kill -0 "$wd1" 2>/dev/null; then
+  bad "watchdog pid $wd1 still alive after exact-PID cleanup"
+  kill -KILL "$wd1" 2>/dev/null || true
+else
+  ok "watchdog exact PID cleaned after test"
+fi
+# Restore sensor defaults
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
 
 # --- #6 WIP doctrine: four lanes fail preflight, zero launches -------------
 echo "WIP max 3 lanes"
