@@ -112,7 +112,16 @@ jobs:
           sudo install -m 0755 "shellcheck-v${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
           # Fail closed if /usr/local/bin does not win PATH over distro shellcheck.
-          test "$(shellcheck --version | awk '/^version:/{print $2}')" = "$SC_VERSION"
+          # Print expected vs observed only — do not dump full PATH or env.
+          observed="$(shellcheck --version | awk '/^version:/{print $2; exit}')"
+          if [ "$observed" != "$SC_VERSION" ]; then
+            echo "error: ShellCheck version mismatch after install" >&2
+            echo "       expected: ${SC_VERSION}" >&2
+            echo "       observed: ${observed:-<empty>}" >&2
+            echo "       likely cause: /usr/local/bin (or another earlier PATH" >&2
+            echo "       entry) is not selected over a distro shellcheck binary." >&2
+            exit 1
+          fi
 
       # The claim suites commit into throwaway repos and a runner has no global
       # git identity, so without this they fail 24 assertions for a reason that
