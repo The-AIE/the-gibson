@@ -70,6 +70,8 @@ protected_path() {
 # - Fills global array _protected_staged with every offender (NUL-safe via git -z).
 # - Returns 0 if none, 1 if any. Does not exit (callers may selective-reset).
 # - No --diff-filter: must match production guard_control_plane_clean (includes D, T).
+# - Always enumerate from the resolved repo root with --no-relative so
+#   diff.relative=true (or a subdirectory cwd) cannot hide/rename offenders.
 # Bash 3.2: no namerefs; callers read _protected_staged after a failed return.
 _protected_staged=()
 scan_staged_control_plane() {
@@ -82,7 +84,7 @@ scan_staged_control_plane() {
       echo "gibson repo-boundary guard: runner cannot stage harness control-plane file '$path'" >&2
       _protected_staged+=("$path")
     fi
-  done < <("$REAL_GIT" diff --cached --name-only -z)
+  done < <("$REAL_GIT" -C "$current_root" diff --no-relative --cached --name-only -z)
   [[ ${#_protected_staged[@]} -eq 0 ]]
 }
 
@@ -95,13 +97,17 @@ check_staged_control_plane() {
 # already in the index: -a/--all (incl. combined short opts like -am),
 # -i/--include, -o/--only, -p/--patch, --interactive, --pathspec-from-file
 # (equals or separate-value), bare pathspecs, or pathspecs after `--`.
-# Combined short forms fail closed if any of a/i/o/p appear (e.g. -ip, -po).
+# Combined short forms fail closed if any of a/i/o/p appear as *flag letters*
+# (e.g. -ip, -po, -am). Attached-value shorts such as -mabc are NOT combined
+# flags: the value payload is not scanned for a/i/o/p.
+# Separate-value options consume the next argv (--message, --trailer, --fixup,
+# --squash, …). Non-existent --fix-trailer is not recognized.
 # --pathspec-file-nul only affects pathspec-file encoding; classifying
 # --pathspec-from-file itself is enough so a pathspec-file commit cannot evade.
 # Conservative: not a full git option parser; prefers fail-closed on ambiguity.
 # $1 is the subcommand ("commit"); remaining args are commit options/operands.
 commit_form_includes_worktree() {
-  local arg skip_next=0 saw_dd=0 chars
+  local arg skip_next=0 saw_dd=0 chars i c rest
   shift # drop "commit"
   for arg in "$@"; do
     if [[ "$skip_next" -eq 1 ]]; then
@@ -116,21 +122,37 @@ commit_form_includes_worktree() {
       -a|--all|--include|-i|--only|-o|-p|--patch|--interactive|--pathspec-from-file|--pathspec-from-file=*)
         return 0
         ;;
-      -m|--message|-F|--file|-t|--template|--author|--date|--cleanup|--fix-trailer|-c|--reedit-message|-C|--reuse-message)
+      # Separate-value options: consume the next argv (real git spellings only).
+      -m|--message|-F|--file|-t|--template|--author|--date|--cleanup|--trailer|-c|--reedit-message|-C|--reuse-message|--fixup|--squash)
         skip_next=1
         ;;
-      --message=*|--file=*|--template=*|--author=*|--date=*|--cleanup=*|--fix-trailer=*|--reedit-message=*|--reuse-message=*)
+      --message=*|--file=*|--template=*|--author=*|--date=*|--cleanup=*|--trailer=*|--reedit-message=*|--reuse-message=*|--fixup=*|--squash=*)
         ;;
       --*)
         ;;
       -*)
-        # Combined short options (e.g. -am, -ip, -po). Long options already handled.
-        # Fail closed if any worktree-including short flag letter is present.
+        # Short cluster: walk flag letters. Worktree booleans a/i/o/p fail closed.
+        # Value-taking letters (m/F/t/c/C) consume an attached remainder as the
+        # value (e.g. -mabc) or mark skip_next when the value is the next argv
+        # (e.g. -sm msg). Do not scan value payloads for a/i/o/p.
         chars="${arg#-}"
-        if [[ "$chars" == *[aiop]* ]]; then
-          return 0
-        fi
-        # Attached-value short forms (-mMSG, -Ffile): not pathspecs.
+        i=0
+        while [[ "$i" -lt ${#chars} ]]; do
+          c="${chars:$i:1}"
+          case "$c" in
+            a|i|o|p)
+              return 0
+              ;;
+            m|F|t|c|C)
+              rest="${chars:$((i + 1))}"
+              if [[ -z "$rest" ]]; then
+                skip_next=1
+              fi
+              break
+              ;;
+          esac
+          i=$((i + 1))
+        done
         ;;
       *)
         # Bare non-option operand: pathspec form (e.g. git commit -m msg PATH).
@@ -143,6 +165,7 @@ commit_form_includes_worktree() {
 
 # Print diagnostics and return 1 if any protected tracked path has unstaged
 # working-tree changes (the set -a / pathspec commits can pull into a commit).
+# Enumerates from the resolved repo root with --no-relative (see scan_staged).
 check_unstaged_protected_tracked() {
   local path found=0
   while IFS= read -r -d '' path; do
@@ -151,8 +174,35 @@ check_unstaged_protected_tracked() {
       echo "gibson repo-boundary guard: runner cannot commit harness control-plane file '$path' via -a/pathspec" >&2
       found=1
     fi
-  done < <("$REAL_GIT" diff --name-only -z)
+  done < <("$REAL_GIT" -C "$current_root" diff --no-relative --name-only -z)
   [[ "$found" -eq 0 ]]
+}
+
+# Unstage every path in _protected_staged using literal pathspecs so glob or
+# pathspec-magic characters in a protected filename cannot match other paths.
+# Runs at the repository root (root-relative names from the staged scan).
+rollback_protected_staged() {
+  local path
+  # One reset per offender with :(literal) so glob/pathspec-magic characters in
+  # a protected filename never match another index path (Bash 3.2-safe; no
+  # local arrays). Empty _protected_staged is a no-op.
+  for path in "${_protected_staged[@]}"; do
+    "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}"
+  done
+}
+
+# Run real `git add`, always scan the index afterward (including after a
+# nonzero/partial add), selective-rollback protected entries → exit 86, else
+# propagate the real add status. Under set -e a bare `"$REAL_GIT" "$@"` would
+# abort before the scan on failure.
+guarded_git_add() {
+  local add_rc=0
+  "$REAL_GIT" "$@" || add_rc=$?
+  if ! scan_staged_control_plane; then
+    rollback_protected_staged
+    exit 86
+  fi
+  return "$add_rc"
 }
 
 branch_from_push_args() {
@@ -229,19 +279,10 @@ case "${1-}" in
       fi
       "$REAL_GIT" "$@"
     else
-      # Run the real add first, then reject protected paths. On rejection, roll
-      # back *only* the offending pathspecs so legitimate prior staging survives.
-      # Under set -e, a failed real add (e.g. unmatched pathspec) exits with the
-      # real git status before the scan — no extra status plumbing required.
-      "$REAL_GIT" "$@"
-      if ! scan_staged_control_plane; then
-        # Diagnostics already printed per offender. Selective reset — never the
-        # whole index (Devin #146 review: full `git reset -q` unstaged unrelated work).
-        # Paths from diff --cached are root-relative; reset must run at the repo
-        # root so a protected add from a subdirectory still unstages offenders.
-        "$REAL_GIT" -C "$current_root" reset -q -- "${_protected_staged[@]}"
-        exit 86
-      fi
+      # Real add first (status captured), then always scan; selective literal
+      # rollback of protected paths → 86, else propagate real add status.
+      # See guarded_git_add / rollback_protected_staged.
+      guarded_git_add "$@"
     fi
     ;;
   push)

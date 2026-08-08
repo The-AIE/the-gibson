@@ -433,6 +433,9 @@ _parser_expect_yes "--interactive" commit --interactive -m msg
 _parser_expect_yes "combined -ip" commit -ip -m msg
 _parser_expect_yes "combined -po" commit -po -m msg
 _parser_expect_yes "combined -am (a)" commit -am msg
+_parser_expect_yes "-a" commit -a -m msg
+_parser_expect_yes "-i" commit -i -m msg
+_parser_expect_yes "-o" commit -o -m msg
 _parser_expect_yes "--pathspec-from-file=FILE" commit -m msg --pathspec-from-file=pathlist.txt
 _parser_expect_yes "--pathspec-from-file FILE" commit -m msg --pathspec-from-file pathlist.txt
 _parser_expect_yes "--pathspec-from-file + --pathspec-file-nul" \
@@ -441,6 +444,18 @@ _parser_expect_no "ordinary -m only" commit -m msg
 _parser_expect_no "--pathspec-file-nul alone" commit -m msg --pathspec-file-nul
 # -s (signoff) has none of a/i/o/p; use separate -m so msg is not a bare pathspec
 _parser_expect_no "signoff -s -m (no worktree flags)" commit -s -m msg
+# Attached-value -mabc: payload contains a/i/o/p letters but is NOT a combined flag.
+_parser_expect_no "attached -mabc (value not flags)" commit -mabc
+_parser_expect_no "attached -m with a/i/o/p in payload" commit -mpatchmsg
+# Real separate/equals value grammar (not worktree-including).
+_parser_expect_no "--trailer separate" commit -m msg --trailer "Bug: 1"
+_parser_expect_no "--trailer=equals" commit -m msg --trailer="Bug: 1"
+_parser_expect_no "--fixup separate" commit --fixup HEAD
+_parser_expect_no "--fixup=equals" commit --fixup=HEAD
+_parser_expect_no "--squash separate" commit --squash HEAD
+_parser_expect_no "--squash=equals" commit --squash=HEAD
+# -sm msg: s boolean + m value in next argv (skip_next), not worktree.
+_parser_expect_no "combined -sm with separate message" commit -sm msg
 
 # --- e2e: non-interactive pathspec-from-file protected worktree bypass ------
 # Must not hang (no editor / patch UI). Dirty protected tracked path + equals
@@ -518,9 +533,10 @@ fi
 git -C "$ROOT" reset -q 2>/dev/null || true
 git -C "$ROOT" checkout -q HEAD -- .agents/gate.json 2>/dev/null || true
 
-# --- unmatched pathspec: real nonzero status propagates (set -e) ------------
-# CodeRabbit claimed failed real `git add` is discarded. Under set -e the failed
-# add aborts before the scan; sensor proves no false success.
+# --- unmatched pathspec: real nonzero status propagates --------------------
+# Failed real `git add` must still surface the real status (not 86, not 0).
+# After the control-flow repair, the scan always runs; with nothing protected
+# staged the real nonzero status propagates.
 run_guard add "no-such-path-$$-unmatched" >/dev/null 2>"$ROOT/err"
 rc=$?
 if [[ "$rc" -ne 0 && "$rc" -ne 86 ]]; then
@@ -535,6 +551,229 @@ if [[ -z "$staged" ]]; then
 else
   bad "unmatched pathspec left staged: $staged"
 fi
+
+# --- diff.relative=true: subdir staged + unstaged scans see root paths ------
+# Repo config that hides out-of-subdir changes must not let protected paths
+# evade detection. Sensors run the guard from a nested cwd.
+git -C "$ROOT" config diff.relative true
+mkdir -p "$ROOT/work/rel-sub"
+printf 'forbidden-rel-staged\n' > "$ROOT/.agents/gate.json"
+run_guard_in "$ROOT/work/rel-sub" "$ROOT" add ../../.agents/gate.json \
+  >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+  ok "diff.relative=true subdir staged protected add rejected (exit $rc)"
+else
+  bad "diff.relative=true subdir staged (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+staged=$(git -C "$ROOT" diff --cached --name-only)
+if [[ -z "$staged" ]]; then
+  ok "diff.relative=true subdir staged protected rolled back"
+else
+  bad "diff.relative=true subdir staged rollback (still staged: $staged)"
+fi
+rm -f "$ROOT/.agents/gate.json"
+git -C "$ROOT" reset -q 2>/dev/null || true
+# Unstaged: tracked protected dirty outside cwd; worktree-including commit
+# form must still fail closed with root-relative scan.
+printf 'seed-rel\n' > "$ROOT/.agents/gate.json"
+git -C "$ROOT" add .agents/gate.json
+git -C "$ROOT" commit -qm 'seed for diff.relative unstaged'
+printf 'dirty-rel-unstaged\n' > "$ROOT/.agents/gate.json"
+printf 'rel-readme\n' > "$ROOT/README.md"
+run_guard_in "$ROOT/work/rel-sub" "$ROOT" add ../../README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "diff.relative=true stage README before unstaged probe (rc=$rc)"
+else
+  run_guard_in "$ROOT/work/rel-sub" "$ROOT" commit -am 'rel unstaged probe' \
+    >/dev/null 2>"$ROOT/err"
+  rc=$?
+  if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+    ok "diff.relative=true subdir unstaged protected -am rejected (exit $rc)"
+  else
+    bad "diff.relative=true subdir unstaged (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+  fi
+fi
+git -C "$ROOT" checkout -q HEAD -- .agents/gate.json README.md 2>/dev/null || true
+git -C "$ROOT" reset -q 2>/dev/null || true
+# Restore default relative config for later sensors.
+git -C "$ROOT" config --unset diff.relative 2>/dev/null || true
+
+# --- safe-control metadata: not rejected with dirty unstaged protected ------
+# Deterministic non-TTY forms: attached -mabc, --trailer, --fixup.
+# Dirty protected path must NOT cause exit 86 for ordinary metadata-only commits.
+printf 'seed-safe-meta\n' > "$ROOT/.agents/gate.json"
+git -C "$ROOT" add .agents/gate.json
+git -C "$ROOT" commit -qm 'seed safe-meta control-plane'
+printf 'dirty protected for safe-meta\n' > "$ROOT/.agents/gate.json"
+printf 'safe-meta body\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README for safe-meta sensors (rc=$rc)"
+else
+  # Attached message value containing a/i/o/p letters.
+  run_guard commit -mabc >/dev/null 2>"$ROOT/err"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "safe-control commit -mabc with dirty protected succeeds"
+  else
+    bad "safe-control -mabc false positive (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+  fi
+fi
+# Re-stage README + dirty protected for trailer (prior commit consumed README).
+printf 'dirty protected for trailer\n' > "$ROOT/.agents/gate.json"
+printf 'trailer body\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README for --trailer sensor (rc=$rc)"
+else
+  run_guard commit -m 'safe trailer commit' --trailer 'Reviewed-by: sensor <s@gibson.invalid>' \
+    >/dev/null 2>"$ROOT/err"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "safe-control commit --trailer with dirty protected succeeds"
+  else
+    bad "safe-control --trailer false positive (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+  fi
+fi
+# --fixup HEAD: non-interactive; creates a fixup commit we immediately drop.
+printf 'dirty protected for fixup\n' > "$ROOT/.agents/gate.json"
+printf 'fixup body\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README for --fixup sensor (rc=$rc)"
+else
+  pre_fixup=$(git -C "$ROOT" rev-parse HEAD)
+  run_guard commit --fixup HEAD >/dev/null 2>"$ROOT/err"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "safe-control commit --fixup HEAD with dirty protected succeeds"
+  else
+    bad "safe-control --fixup false positive (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+  fi
+  # Drop the fixup commit; keep tree clean for later sensors.
+  git -C "$ROOT" reset -q --hard "$pre_fixup" 2>/dev/null || true
+fi
+git -C "$ROOT" checkout -q HEAD -- .agents/gate.json README.md 2>/dev/null || true
+git -C "$ROOT" reset -q 2>/dev/null || true
+
+# --- partial-nonzero add: always scan + selective rollback (fake git shim) ---
+# Portable real-git partial add (stage some, fail) is not reliable across git
+# versions (unmatched pathspec stages nothing). Sensor the control-flow with an
+# owned shim that stages a protected path then returns nonzero; guard must still
+# scan, roll back the protected entry, and exit 86 (not propagate the shim rc).
+printf 'partial-shim-protected\n' > "$ROOT/.agents/gate.json"
+printf 'partial-shim-legit\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README before partial-nonzero shim (rc=$rc)"
+  legit_blob_partial=""
+else
+  legit_blob_partial=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+fi
+REAL_GIT_BIN=$(command -v git)
+FAKE_GIT="$ROOT/fake-git-partial-add.sh"
+cat > "$FAKE_GIT" <<EOF
+#!/usr/bin/env bash
+# Passthrough except add: stage protected via real git, then fail nonzero.
+if [[ "\${1-}" == "add" ]]; then
+  "$REAL_GIT_BIN" -C "$ROOT" add -- .agents/gate.json
+  exit 1
+fi
+exec "$REAL_GIT_BIN" "\$@"
+EOF
+chmod +x "$FAKE_GIT"
+# Invoke guard with shim as REAL_GIT; cwd/target still the fixture root.
+(cd "$ROOT" &&
+  GIBSON_REAL_GIT="$FAKE_GIT" \
+  GIBSON_TARGET_REPO="$ROOT" \
+  GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+  "$GUARD" add .agents/gate.json) >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+  ok "partial-nonzero add still scans and exits 86 (not shim rc)"
+else
+  bad "partial-nonzero add control-flow (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+still_protected=$(git -C "$ROOT" diff --cached --name-only | grep -E '^\.agents/gate\.json$' || true)
+if [[ -z "$still_protected" ]]; then
+  ok "partial-nonzero: protected path rolled back after failed add"
+else
+  bad "partial-nonzero: protected still staged: $still_protected"
+fi
+after_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+staged_names=$(git -C "$ROOT" diff --cached --name-only)
+if [[ -n "$legit_blob_partial" && "$after_blob" == "$legit_blob_partial" && "$staged_names" == "README.md" ]]; then
+  ok "partial-nonzero: legitimate README remains staged after rollback"
+else
+  bad "partial-nonzero: README survival (blob before=$legit_blob_partial after=$after_blob staged=$(echo "$staged_names" | tr '\n' ' '))"
+fi
+rm -f "$FAKE_GIT" "$ROOT/.agents/gate.json"
+git -C "$ROOT" reset -q 2>/dev/null || true
+git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
+
+# --- protected filename with glob chars: literal pathspec rollback ----------
+# Protected names matching `.agents/gate.*` that contain pathspec magic:
+#   .agents/gate.*.json  (literal asterisk)
+#   .agents/gate.[x].json (brackets)
+# Without :(literal), reset of '.agents/gate.*.json' also unstages the bracket
+# name (* matches [x]). Helper must unstage only the listed offender.
+STAR_NAME='.agents/gate.*.json'
+BRACKET_NAME='.agents/gate.[x].json'
+printf 'star-protected\n' > "$ROOT/.agents/gate."$'*''.json'
+printf 'bracket-protected\n' > "$ROOT/.agents/gate.[x].json"
+printf 'legit-star\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README before wildcard-name add (rc=$rc)"
+  star_legit_blob=""
+else
+  star_legit_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+fi
+# Stage both magic-named protected files with real git (literal pathspecs).
+git -C "$ROOT" add -- ":(literal)$STAR_NAME" ":(literal)$BRACKET_NAME"
+# Extract rollback helper; env matches guard runtime (REAL_GIT + current_root).
+# Both are read inside the eval'd function body (shellcheck cannot see that).
+# shellcheck disable=SC2034
+REAL_GIT=$(command -v git)
+# shellcheck disable=SC2034
+current_root="$ROOT_PHYS"
+_protected_staged=("$STAR_NAME")
+eval "$(sed -n '/^rollback_protected_staged()/,/^}/p' "$GUARD")"
+rollback_protected_staged
+still_star=$(git -C "$ROOT" diff --cached --name-only | grep -F "$STAR_NAME" || true)
+still_bracket=$(git -C "$ROOT" diff --cached --name-only | grep -F "$BRACKET_NAME" || true)
+if [[ -z "$still_star" && -n "$still_bracket" ]]; then
+  ok "literal rollback unstages only star-named protected path"
+else
+  bad "literal rollback selectivity (star='$still_star' bracket='$still_bracket' staged=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' '))"
+fi
+# Full guarded add of star-named path alone: reject + unstage that path.
+git -C "$ROOT" reset -q 2>/dev/null || true
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+run_guard add -- ":(literal)$STAR_NAME" >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane" "$ROOT/err"; then
+  ok "guarded add of star-named protected path rejected (exit $rc)"
+else
+  bad "star-named protected add (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+still_star=$(git -C "$ROOT" diff --cached --name-only | grep -F "$STAR_NAME" || true)
+after_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+if [[ -z "$still_star" && -n "$star_legit_blob" && "$after_blob" == "$star_legit_blob" ]]; then
+  ok "star-named add: protected unstaged, README blob preserved"
+else
+  bad "star-named add rollback (star='$still_star' blob before=$star_legit_blob after=$after_blob)"
+fi
+rm -f "$ROOT/.agents/gate."$'*''.json' "$ROOT/.agents/gate.[x].json"
+git -C "$ROOT" reset -q 2>/dev/null || true
+git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
 
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
