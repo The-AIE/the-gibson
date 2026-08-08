@@ -9,8 +9,38 @@ REAL_GIT="${GIBSON_REAL_GIT:?}"
 TARGET_REPO="${GIBSON_TARGET_REPO:?}"
 EXPECTED_SLUG="${GIBSON_EXPECTED_REPO_SLUG:?}"
 
+# Physical path of an existing directory (macOS /var vs /private/var, symlinks).
+# Stock Bash 3.2 / macOS: no GNU realpath or readlink -f.
+physical_dir() {
+  local path="$1"
+  [[ -n "$path" && -d "$path" ]] || return 1
+  (CDPATH='' cd -- "$path" && pwd -P) 2>/dev/null || return 1
+}
+
 repo_root() {
   "$REAL_GIT" -C "$1" rev-parse --show-toplevel 2>/dev/null
+}
+
+# Resolve configured target to a physical git repository root. Fail closed if
+# the path is missing/unreadable, not a git repo, or not the repo root itself.
+resolve_target_root() {
+  local phys git_root root
+  phys=$(physical_dir "$TARGET_REPO") || return 1
+  git_root=$(repo_root "$phys") || return 1
+  [[ -n "$git_root" ]] || return 1
+  root=$(physical_dir "$git_root") || return 1
+  # Configured path must *be* the repository root (after physicalization), not
+  # a nested directory inside some other checkout.
+  [[ "$phys" == "$root" ]] || return 1
+  printf '%s\n' "$root"
+}
+
+# Resolve the observed cwd to a physical git repository root.
+resolve_current_root() {
+  local git_root
+  git_root=$(repo_root "$PWD") || return 1
+  [[ -n "$git_root" ]] || return 1
+  physical_dir "$git_root"
 }
 
 fail() {
@@ -18,8 +48,12 @@ fail() {
   exit 86
 }
 
-current_root="$(repo_root "$PWD" || true)"
-[[ "$current_root" == "$TARGET_REPO" ]] ||
+target_root="$(resolve_target_root || true)"
+[[ -n "$target_root" ]] ||
+  fail "configured target repo could not be resolved: '$TARGET_REPO'"
+
+current_root="$(resolve_current_root || true)"
+[[ -n "$current_root" && "$current_root" == "$target_root" ]] ||
   fail "git command ran outside target repo: expected '$TARGET_REPO', observed '${current_root:-unresolved}'"
 
 protected_path() {
@@ -31,13 +65,18 @@ protected_path() {
   return 1
 }
 
+# Print a control-plane diagnostic and return non-zero (do not exit) so callers
+# such as `git add` can roll back the index before exiting 86.
 check_staged_control_plane() {
   local path
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
-    protected_path "$path" &&
-      fail "runner cannot stage harness control-plane file '$path'"
+    if protected_path "$path"; then
+      echo "gibson repo-boundary guard: runner cannot stage harness control-plane file '$path'" >&2
+      return 1
+    fi
   done < <("$REAL_GIT" diff --cached --name-only --diff-filter=ACMR)
+  return 0
 }
 
 branch_from_push_args() {
@@ -106,7 +145,8 @@ origin_slug_from_url() {
 case "${1-}" in
   add|commit)
     if [[ "$1" == "commit" ]]; then
-      check_staged_control_plane
+      check_staged_control_plane || exit 86
+      "$REAL_GIT" "$@"
     else
       "$REAL_GIT" "$@"
       if ! check_staged_control_plane; then
@@ -114,12 +154,9 @@ case "${1-}" in
         exit 86
       fi
     fi
-    if [[ "$1" == "commit" ]]; then
-      "$REAL_GIT" "$@"
-    fi
     ;;
   push)
-    check_staged_control_plane
+    check_staged_control_plane || exit 86
     check_push "${@:2}"
     ;;
   *)
