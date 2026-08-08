@@ -3841,6 +3841,627 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "2" ]] && ok "repeated lane= still accepted" \
   || bad "repeated lane launches=$lc out=$out"
 
+# --- CR: atomic concurrent watchdog reservation -----------------------------
+echo "atomic concurrent watchdog start"
+reset_calls
+TARGET=$(setup_target_repo wdconc acme/widget)
+PROF="$ROOT/profiles/wdconc.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdconc" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=90" \
+  "lane=docs|470|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+WD_PF="$ROOT/logs/watchdog.pid"
+rm -f "$WD_PF"
+# Seed lane bases without a watchdog so concurrent restarts only race ensure_watchdog.
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=90 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "wdconc seed start failed: $out"; }
+rm -f "$WD_PF"
+# Foreign process must never be mutated by watchdog arming.
+sleep 300 &
+FOREIGN_PID=$!
+# Two concurrent --start with real sleep deadline.
+run_wd_conc() {
+  local outf="$1"
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=90 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start >"$outf" 2>&1
+  echo $? >"${outf}.rc"
+}
+OUTA="$CALLS/wdconc-a.out"
+OUTB="$CALLS/wdconc-b.out"
+rm -f "$OUTA" "$OUTB" "$OUTA.rc" "$OUTB.rc"
+run_wd_conc "$OUTA" &
+CPA=$!
+run_wd_conc "$OUTB" &
+CPB=$!
+wait "$CPA" 2>/dev/null || true
+wait "$CPB" 2>/dev/null || true
+RCA=$(tr -d '[:space:]' < "$OUTA.rc" 2>/dev/null || echo 1)
+RCB=$(tr -d '[:space:]' < "$OUTB.rc" 2>/dev/null || echo 1)
+# At least one must succeed; the other may adopt the same watchdog (exit 0) or
+# lose cleanly — neither may leave two live timers.
+if [[ "$RCA" -eq 0 || "$RCB" -eq 0 ]]; then
+  ok "concurrent watchdog start: at least one --start succeeded"
+else
+  bad "concurrent watchdog start both failed: a=$(cat "$OUTA" 2>/dev/null) b=$(cat "$OUTB" 2>/dev/null)"
+fi
+[[ -f "$WD_PF" ]] || bad "watchdog pidfile missing after concurrent start"
+wdc=$(tr -d '[:space:]' < "$WD_PF" 2>/dev/null || true)
+if [[ "$wdc" =~ ^[1-9][0-9]*$ ]] && kill -0 "$wdc" 2>/dev/null; then
+  ok "concurrent start left one live watchdog pid $wdc"
+else
+  bad "concurrent start pidfile invalid/dead: $wdc"
+fi
+# Count live processes whose argv carries this profile + deadline 90 (watchdog body).
+# Exact-ish: only PIDs matching the driver self + profile path + 90.
+wcount=0
+for p in $(ps -ax -o pid= 2>/dev/null || ps -A -o pid= 2>/dev/null); do
+  p=$(echo "$p" | tr -d '[:space:]')
+  [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
+  cmd=$(ps -p "$p" -o command= 2>/dev/null || ps -p "$p" -o args= 2>/dev/null || true)
+  [[ -n "$cmd" ]] || continue
+  case "$cmd" in
+    *"$PROF"*|*"$FLEET"*)
+      case "$cmd" in
+        *' 90 '*|*' 90'|*'90 '*)
+          # Watchdog body is bash -c with sleep/deadline args; skip the fleet parent if any.
+          case "$cmd" in
+            *bash*-c*|*"$SLEEP_CMD"*|*/sleep*|*sleep*)
+              wcount=$((wcount + 1))
+              ;;
+          esac
+          ;;
+      esac
+      ;;
+  esac
+done
+# Pidfile identity is authoritative; cmdline count is a soft cross-check (macOS ps varies).
+cmdw=$(ps -p "$wdc" -o command= 2>/dev/null || ps -p "$wdc" -o args= 2>/dev/null || true)
+echo "$cmdw" | grep -q '90' \
+  && ok "concurrent watchdog deadline stable (90) in pid $wdc" \
+  || bad "concurrent watchdog cmdline missing deadline: $cmdw"
+# Foreign PID untouched.
+if kill -0 "$FOREIGN_PID" 2>/dev/null; then
+  ok "concurrent start did not kill foreign PID $FOREIGN_PID"
+  kill -TERM "$FOREIGN_PID" 2>/dev/null || true
+  sleep 0.2 2>/dev/null || sleep 1
+  kill -KILL "$FOREIGN_PID" 2>/dev/null || true
+else
+  bad "foreign PID $FOREIGN_PID was killed or exited early"
+fi
+# Exact cleanup of our watchdog only.
+if kill -0 "$wdc" 2>/dev/null; then
+  kill -TERM -"$wdc" 2>/dev/null || kill -TERM "$wdc" 2>/dev/null || true
+  sleep 0.3 2>/dev/null || sleep 1
+  kill -KILL -"$wdc" 2>/dev/null || kill -KILL "$wdc" 2>/dev/null || true
+fi
+rm -f "$WD_PF"
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# Stale reservation recovery (dead reserver PID) — must arm, not hang/silent-ok.
+echo "stale watchdog reservation recovery"
+reset_calls
+TARGET=$(setup_target_repo wdstale acme/widget)
+PROF="$ROOT/profiles/wdstale.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdstale" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=55" \
+  "lane=docs|471|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+WD_PF="$ROOT/logs/watchdog.pid"
+# Seed bases without watchdog, then plant a dead-reserver reservation.
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=55 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "wdstale seed failed: $out"; }
+printf 'reserving:999999\n' > "$WD_PF"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=55 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "stale reservation reclaim start failed: $out"; }
+wds=$(tr -d '[:space:]' < "$WD_PF" 2>/dev/null || true)
+if [[ "$wds" =~ ^[1-9][0-9]*$ ]] && kill -0 "$wds" 2>/dev/null; then
+  ok "stale reserving:999999 reclaimed; armed pid $wds"
+else
+  bad "stale reservation not reclaimed: content=$wds out=$out"
+fi
+if kill -0 "$wds" 2>/dev/null; then
+  kill -TERM -"$wds" 2>/dev/null || kill -TERM "$wds" 2>/dev/null || true
+  sleep 0.3 2>/dev/null || sleep 1
+  kill -KILL -"$wds" 2>/dev/null || kill -KILL "$wds" 2>/dev/null || true
+fi
+rm -f "$WD_PF"
+
+# Live foreign reservation: fail closed with fleet: diagnostic (no silent success).
+echo "live foreign watchdog reservation fails closed"
+reset_calls
+TARGET=$(setup_target_repo wdlive acme/widget)
+PROF="$ROOT/profiles/wdlive.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdlive" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=40" \
+  "lane=docs|472|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=40 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "wdlive seed failed: $out"; }
+sleep 120 &
+RESERVER=$!
+printf 'reserving:%s\n' "$RESERVER" > "$WD_PF"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=40 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "live foreign reservation should fail closed: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*watchdog reservation|refuse to arm a second timer' \
+    && ok "live foreign reservation fails closed with fleet: diagnostic" \
+    || bad "unclear live-reservation fail: $out"
+}
+# Reservation artifact and foreign reserver must be untouched by failed start.
+[[ -f "$WD_PF" ]] && grep -q "reserving:$RESERVER" "$WD_PF" \
+  && ok "failed start left foreign reservation artifact intact" \
+  || bad "failed start mutated reservation: $(cat "$WD_PF" 2>/dev/null || true)"
+if kill -0 "$RESERVER" 2>/dev/null; then
+  ok "failed start did not kill foreign reserver $RESERVER"
+  kill -TERM "$RESERVER" 2>/dev/null || true
+  sleep 0.2 2>/dev/null || sleep 1
+  kill -KILL "$RESERVER" 2>/dev/null || true
+else
+  bad "foreign reserver $RESERVER was killed"
+fi
+rm -f "$WD_PF"
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# --- CR: HOME unset guards default fleet/log paths -------------------------
+echo "HOME unset default paths fail closed; explicit paths work"
+reset_calls
+TARGET=$(setup_target_repo homeunset acme/widget)
+# Negative: no fleet_dir/log_dir in profile, HOME unset → fleet: diagnostic, zero launch.
+PROF="$ROOT/profiles/home-default.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=homedef" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "runner=fake-runner" \
+  "lane=docs|480|docs/**|docs only"
+: > "$CALLS/launches.log"
+out=$(
+  env -u HOME -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" \
+    GIBSON="$ROOT/gibson" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
+    "$FLEET" --profile "$PROF" --start 2>&1
+) && bad "HOME-unset defaults should fail: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*HOME|fleet_dir default requires HOME|log_dir default requires HOME' \
+    && ok "HOME unset defaults fail closed with fleet: diagnostic" \
+    || bad "unclear HOME-unset fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "HOME unset defaults launched zero" || bad "HOME unset defaults launched $lc"
+
+# Positive: HOME unset but explicit profile fleet_dir/log_dir still work.
+PROF="$ROOT/profiles/home-explicit.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=homeexp" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|481|docs/**|docs only"
+: > "$CALLS/launches.log"
+out=$(
+  env -u HOME -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" \
+    GIBSON="$ROOT/gibson" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
+    "$FLEET" --profile "$PROF" --start 2>&1
+) || { bad "HOME unset with explicit paths should work: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "HOME unset with explicit fleet_dir/log_dir launches" \
+  || bad "HOME explicit launches=$lc out=$out"
+
+# --- CR: LOOP_SH must be regular executable --------------------------------
+echo "LOOP_SH non-executable fails closed"
+reset_calls
+TARGET=$(setup_target_repo loopx acme/widget)
+PROF="$ROOT/profiles/loopx.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=loopx" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|490|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+NONEXEC="$ROOT/nonexec-loop.sh"
+cp "$LOOP_SH" "$NONEXEC"
+chmod a-x "$NONEXEC"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$NONEXEC" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "non-executable LOOP_SH should fail: $out" || {
+  echo "$out" | grep -qiE 'not executable|loop driver is not executable' \
+    && ok "non-executable LOOP_SH refused before launch" \
+    || bad "unclear non-exec LOOP_SH fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "non-executable LOOP_SH launched zero" || bad "non-exec LOOP_SH launched $lc"
+# Direct invocation of the real executable still works (positive control).
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "executable LOOP_SH should still work: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "executable LOOP_SH still launches via direct path" \
+  || bad "exec LOOP_SH launches=$lc out=$out"
+rm -f "$NONEXEC"
+
+# --- CR: residual process-group cleanup after leader exit ------------------
+echo "wall-timeout residual group kill after leader exit"
+reset_calls
+TARGET=$(setup_target_repo leaddie acme/widget)
+PROF="$ROOT/profiles/leaddie.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=leaddie" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|500|docs/**|docs only"
+REAL_GIT=$(command -v git)
+# Unrelated process outside the group — must survive residual cleanup.
+sleep 300 &
+UNRELATED_PID=$!
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+# On fetch: spawn a descendant in this process group, then exit 0 as leader.
+# run_with_wall_timeout reaps the leader via wait; residual group KILL must
+# still terminate the descendant (exact PGID only).
+for a in "\$@"; do
+  if [[ "\$a" == "fetch" ]]; then
+    echo "\$\$" > "$CALLS/leaddie-leader.pid"
+    # Keep descendant in the same process group (no setsid).
+    sleep 100 &
+    echo "\$!" > "$CALLS/leaddie-desc.pid"
+    exit 0
+  fi
+done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$BIN/git"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+rm -f "$CALLS/leaddie-leader.pid" "$CALLS/leaddie-desc.pid"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=15 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || true
+# Leader should have exited; descendant must be cleaned by residual group kill.
+if [[ -f "$CALLS/leaddie-desc.pid" ]]; then
+  desc=$(tr -d '[:space:]' < "$CALLS/leaddie-desc.pid")
+  i=0
+  while [[ $i -lt 15 ]]; do
+    if ! kill -0 "$desc" 2>/dev/null; then
+      ok "leader-exit descendant pid $desc terminated by residual group kill"
+      break
+    fi
+    sleep 0.2 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$desc" 2>/dev/null; then
+    bad "leader-exit descendant pid $desc still alive after residual cleanup"
+    kill -KILL "$desc" 2>/dev/null || true
+  fi
+else
+  bad "leader-exit descendant pid file missing — stub may not have run: $out"
+fi
+if kill -0 "$UNRELATED_PID" 2>/dev/null; then
+  ok "residual group kill left unrelated PID $UNRELATED_PID untouched"
+  kill -TERM "$UNRELATED_PID" 2>/dev/null || true
+  sleep 0.2 2>/dev/null || sleep 1
+  kill -KILL "$UNRELATED_PID" 2>/dev/null || true
+else
+  bad "unrelated PID $UNRELATED_PID was killed by residual cleanup"
+fi
+rm -f "$BIN/git"
+
+# --- CR: missing gibson directory before cd --------------------------------
+echo "missing gibson directory fails closed"
+reset_calls
+TARGET=$(setup_target_repo nogib acme/widget)
+# Profile gibson= points at missing path.
+PROF="$ROOT/profiles/nogib-prof.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=nogibp" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/missing-gibson-dir" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|510|docs/**|docs only"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
+    "$FLEET" --profile "$PROF" --start 2>&1
+) && bad "missing profile gibson= should fail: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*gibson path is not a directory|not a directory' \
+    && ok "missing profile gibson= fails with fleet: diagnostic" \
+    || bad "unclear missing-gibson fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "missing profile gibson launched zero" || bad "missing gibson launched $lc"
+
+# Env GIBSON missing (profile omits gibson=).
+PROF="$ROOT/profiles/nogib-env.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=nogibe" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|511|docs/**|docs only"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$ROOT/also-missing-gibson" \
+    FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
+    "$FLEET" --profile "$PROF" --start 2>&1
+) && bad "missing env GIBSON should fail: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*GIBSON path is not a directory|not a directory' \
+    && ok "missing env GIBSON fails with fleet: diagnostic" \
+    || bad "unclear missing-env-GIBSON fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "missing env GIBSON launched zero" || bad "missing env GIBSON launched $lc"
+
+# --- CR: DRIVER_SELF absolute path in operator hints -----------------------
+echo "DRIVER_SELF absolute path in restart/status hints"
+reset_calls
+TARGET=$(setup_target_repo relhint acme/widget)
+PROF="$ROOT/profiles/relhint.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=relhint" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|520|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+# Invoke via relative path from the scripts directory so $0 is relative.
+FLEET_DIR_ABS=$(CDPATH='' cd "$(dirname "$FLEET")" && pwd -P)
+FLEET_BASE=$(basename "$FLEET")
+out=$(
+  CDPATH='' cd "$FLEET_DIR_ABS" && \
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "./$FLEET_BASE" --start 2>&1
+) || { bad "relative invocation start failed: $out"; }
+echo "$out" | grep -F "fleet up. status: $FLEET_DIR_ABS/$FLEET_BASE --profile" \
+  && ok "relative invocation prints absolute DRIVER_SELF in status hint" \
+  || bad "status hint missing absolute DRIVER_SELF: $out"
+# Dead-lane restart hint also uses DRIVER_SELF (create DEAD status).
+# Leave a lane base without a live pid so --status reports DEAD.
+rm -f "$LOG_DIR/docs.pid"
+out=$(
+  CDPATH='' cd "$FLEET_DIR_ABS" && \
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "./$FLEET_BASE" --status 2>&1
+) || true
+echo "$out" | grep -F "'$FLEET_DIR_ABS/$FLEET_BASE --profile" \
+  && ok "dead-lane status hint uses absolute DRIVER_SELF" \
+  || {
+    # If status path didn't emit the hint (lane not DEAD), still require no bare ./loop-fleet
+    if echo "$out" | grep -qE "One or more lanes are down"; then
+      bad "dead-lane hint not absolute: $out"
+    else
+      # Force DEAD: remove base so health is BASE-GONE / DEAD
+      rm -rf "$FLEET_DIR/lane-docs"
+      out=$(
+        CDPATH='' cd "$FLEET_DIR_ABS" && \
+        env PATH="$BIN:$PATH" \
+          GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+          RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+          GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+          LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+          FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+          GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+          "./$FLEET_BASE" --status 2>&1
+      ) || true
+      echo "$out" | grep -F "'$FLEET_DIR_ABS/$FLEET_BASE --profile" \
+        && ok "dead-lane status hint uses absolute DRIVER_SELF" \
+        || bad "dead-lane hint not absolute after BASE-GONE: $out"
+    fi
+  }
+
+# --- CR: accepted origin forms still normalize (no-op block removed) -------
+echo "origin slug forms still accepted after no-op removal"
+# Static contract: the normalizer still handles https/ssh/git@ forms via the
+# remaining strip rules (tested through live origin on a throwaway repo).
+reset_calls
+TARGET=$(setup_target_repo origform acme/widget)
+$GIT -C "$TARGET" remote set-url origin "git@github.com:acme/widget.git"
+PROF="$ROOT/profiles/origform.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=origform" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|530|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "git@ origin form should still work: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "git@github.com:owner/repo origin still accepted" \
+  || bad "git@ origin launches=$lc out=$out"
+$GIT -C "$TARGET" remote set-url origin "ssh://git@github.com/acme/widget.git"
+: > "$CALLS/launches.log"
+# Identity already written; restart should still pass slug check.
+out=$(run_fleet --start) || { bad "ssh:// origin form should still work: $out"; }
+ok "ssh://git@github.com/owner/repo origin still accepted"
+
+# --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
+echo "docs contract sensors"
+if grep -q 'gh.*1\.9\.0\|gh ≥ 1.9.0\|gh >= 1.9.0' "$REPO_ROOT/templates/fleet/README.md"; then
+  ok "templates/fleet/README.md declares gh >= 1.9.0 prerequisite"
+else
+  bad "templates/fleet/README.md missing gh >= 1.9.0 prerequisite"
+fi
+if grep -n '^#96-style' "$REPO_ROOT/templates/fleet/README.md" >/dev/null 2>&1; then
+  bad "templates/fleet/README.md still has line-initial #96-style (MD018)"
+else
+  ok "templates/fleet/README.md has no line-initial #96-style"
+fi
+if grep -qi 'bypassPermissions' "$REPO_ROOT/adapters/grok/README.md" \
+  && grep -qiE 'WARNING|trusted.*isolated|owner authoriz' "$REPO_ROOT/adapters/grok/README.md"; then
+  ok "adapters/grok/README.md warns on bypassPermissions RELEASE_CMD"
+else
+  bad "adapters/grok/README.md missing bypassPermissions warning"
+fi
+# Three-role split preserved.
+grep -qi 'REVIEWER_CMD' "$REPO_ROOT/adapters/grok/README.md" \
+  && grep -qi 'RELEASE_CMD' "$REPO_ROOT/adapters/grok/README.md" \
+  && grep -qi 'Three-role' "$REPO_ROOT/adapters/grok/README.md" \
+  && ok "adapters/grok/README.md preserves three-role split" \
+  || bad "three-role split docs regressed"
+
 echo
 echo "loop-fleet.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

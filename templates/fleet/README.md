@@ -79,8 +79,8 @@ the generic template.
 
 ### Gibson self-dogfood sketch (#96 / Autonomy Readiness)
 
-The example file shows a two-lane Gibson shape (`docs` + `harness`) seeded with
-#96-style intent. Before overnight:
+The example file shows a two-lane Gibson shape (`docs` + `harness`) seeded
+with `#96-style` intent. Before overnight:
 
 - Prefer issues that pass `scripts/dogfood-prep.sh` / are not parked (#28/#33/#36).
 - Single-lane dogfood can still use `scripts/dogfood-prep.sh` + `loop.sh`.
@@ -101,6 +101,18 @@ $GIBSON/scripts/loop-fleet.sh --profile "$PROFILE" --halt
 export FLEET_PROFILE="$PROFILE"
 $GIBSON/scripts/loop-fleet.sh --status
 ```
+
+### Operator prerequisites
+
+- **Bash 3.2+** (macOS stock `/bin/bash` is fine)
+- **Git** on `PATH`
+- **GitHub CLI `gh` ≥ 1.9.0** — required for the built-in `--json`, `--jq`,
+  and `--template` flows used by open-PR inventory (`gh pr list`) and
+  claim/body re-verification (`gh pr view`). Older `gh` lacks those flags and
+  will fail closed at preflight. No external `jq`, Python, or Perl is required
+  on the production PR-ownership path (optional tools may still be used when
+  present for wall-timeout process groups or label pretty-printing).
+- Builder / reviewer / release CLIs for the three-role split (see below)
 
 ### Three-role defaults (preserved)
 

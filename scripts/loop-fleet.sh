@@ -180,11 +180,6 @@ origin_slug_from_url() {
     norm=${norm#github.com:}
   fi
   # ssh://git@github.com/owner/repo already stripped host prefix above
-  # Drop any remaining user@host: or scheme leftovers that leave owner/repo
-  if [[ "$norm" == *"/"*"/"* ]]; then
-    # path with extra segments — take last two when looks like .../owner/repo
-    :
-  fi
   printf '%s\n' "$norm"
 }
 
@@ -482,14 +477,18 @@ load_profile() {
   BASE_REPO=$(CDPATH='' cd "$BASE_REPO" && pwd -P)
 
   # gibson: env GIBSON (if pre-set and non-empty) wins only when profile omits it;
-  # profile gibson= is authoritative when present.
+  # profile gibson= is authoritative when present. Validate existence before cd
+  # so a missing path yields a bounded fleet: diagnostic (not a bare set -e exit).
   if [[ -n "$prof_gibson" ]]; then
     assert_safe_abs_path "gibson" "$prof_gibson"
+    [[ -d "$prof_gibson" ]] || die "gibson path is not a directory: $prof_gibson"
     GIBSON=$(CDPATH='' cd "$prof_gibson" && pwd -P)
   elif [[ -n "${GIBSON}" ]]; then
     assert_safe_abs_path "GIBSON" "$GIBSON"
+    [[ -d "$GIBSON" ]] || die "GIBSON path is not a directory: $GIBSON"
     GIBSON=$(CDPATH='' cd "$GIBSON" && pwd -P)
   else
+    [[ -d "$DEFAULT_GIBSON" ]] || die "default gibson path is not a directory: $DEFAULT_GIBSON"
     GIBSON="$DEFAULT_GIBSON"
   fi
 
@@ -497,6 +496,8 @@ load_profile() {
   # of profile path + physical repo + slug so same-name different targets cannot
   # collide on lane worktrees, pidfiles, logs, or the watchdog.
   # Explicit profile fleet_dir=/log_dir= and env FLEET_DIR/LOG_DIR still win.
+  # Defaults expand $HOME under set -u — guard so missing HOME fails closed with
+  # a fleet: diagnostic (cron/launchd can omit HOME).
   local default_ns
   default_ns=$(profile_default_ns)
   if [[ -n "$prof_fleet" ]]; then
@@ -505,6 +506,7 @@ load_profile() {
   elif [[ -n "${FLEET_DIR}" ]]; then
     assert_safe_abs_path "FLEET_DIR" "$FLEET_DIR"
   else
+    [[ -n "${HOME:-}" ]] || die "fleet_dir default requires HOME; set fleet_dir= in the profile or FLEET_DIR"
     FLEET_DIR="${HOME}/Code/fleet/${PROFILE_NAME}-${default_ns}"
   fi
   assert_safe_abs_path "fleet_dir" "$FLEET_DIR"
@@ -515,6 +517,7 @@ load_profile() {
   elif [[ -n "${LOG_DIR}" ]]; then
     assert_safe_abs_path "LOG_DIR" "$LOG_DIR"
   else
+    [[ -n "${HOME:-}" ]] || die "log_dir default requires HOME; set log_dir= in the profile or LOG_DIR"
     LOG_DIR="${HOME}/.claude/fleet/logs/${PROFILE_NAME}-${default_ns}"
   fi
   assert_safe_abs_path "log_dir" "$LOG_DIR"
@@ -744,11 +747,24 @@ lane_pid_alive() {
 
 # Watchdog identity: live PID + command line still references this driver and
 # this profile path. Unrelated reused PIDs are not treated as our watchdog.
+# Active exclusive reservations use content "reserving:<pid>" and must not be
+# deleted while the reserver process is still alive (concurrent --start).
 watchdog_pid_alive() {
-  local pf pid cmdline driver_base
+  local pf pid cmdline driver_base reserver content
   pf=$(watchdog_pidfile)
   [[ -f "$pf" ]] || return 1
-  pid=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  content=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  # Exclusive start reservation — not a real watchdog; leave for the reserver.
+  if [[ "$content" == reserving:* ]]; then
+    reserver=${content#reserving:}
+    if [[ "$reserver" =~ ^[1-9][0-9]*$ ]] && kill -0 "$reserver" 2>/dev/null; then
+      return 1
+    fi
+    # Stale reservation (reserver dead) — reclaimable.
+    rm -f "$pf"
+    return 1
+  fi
+  pid="$content"
   [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] || { rm -f "$pf"; return 1; }
   if ! kill -0 "$pid" 2>/dev/null; then
     rm -f "$pf"
@@ -775,10 +791,24 @@ watchdog_pid_alive() {
   return 0
 }
 
+# True when pidfile holds a live exclusive reservation from another process.
+watchdog_reservation_active() {
+  local pf content reserver
+  pf=$(watchdog_pidfile)
+  [[ -f "$pf" ]] || return 1
+  content=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  [[ "$content" == reserving:* ]] || return 1
+  reserver=${content#reserving:}
+  [[ "$reserver" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$reserver" 2>/dev/null
+}
+
 # Arm deadline watchdog once per profile/log directory. Healthy re-start keeps
-# the original PID and deadline; only a stale/unrelated pidfile is replaced.
+# the original PID and deadline. Concurrent --start uses an exclusive
+# noclobber reservation so only one process arms a timer; losers re-check and
+# either adopt the winner's watchdog or fail closed with a fleet: diagnostic.
 ensure_watchdog() {
-  local wd_pid wd_pf
+  local wd_pid wd_pf reserved=0 i content
   if [[ "$FLEET_NO_WATCHDOG" == "1" ]]; then
     info "watchdog skipped (FLEET_NO_WATCHDOG=1)"
     return 0
@@ -788,6 +818,55 @@ ensure_watchdog() {
     return 0
   fi
   wd_pf=$(watchdog_pidfile)
+  mkdir -p "$LOG_DIR"
+
+  # Exclusive reservation (Bash 3.2 / macOS portable): noclobber create with
+  # reserving:<self-pid>. Concurrent starters lose the race and must not arm
+  # a second timer. Clean only this exact reservation on launch failure.
+  if ( set -C; umask 077; printf 'reserving:%s\n' "$$" > "$wd_pf" ) 2>/dev/null; then
+    reserved=1
+  else
+    # Lost the race or leftover file. Wait briefly for a concurrent arm, then
+    # recover only a stale (dead-reserver) reservation.
+    i=0
+    while [[ $i -lt 20 ]]; do
+      if wd_pid=$(watchdog_pid_alive); then
+        info "watchdog already running (pid $wd_pid) — leaving deadline untouched"
+        return 0
+      fi
+      if watchdog_reservation_active; then
+        sleep 0.1 2>/dev/null || sleep 1
+        i=$((i + 1))
+        continue
+      fi
+      # No live watchdog and no live reservation — try reclaim once.
+      content=$(tr -d '[:space:]' < "$wd_pf" 2>/dev/null || true)
+      if [[ -z "$content" || "$content" == reserving:* ]]; then
+        rm -f "$wd_pf"
+      fi
+      if ( set -C; umask 077; printf 'reserving:%s\n' "$$" > "$wd_pf" ) 2>/dev/null; then
+        reserved=1
+        break
+      fi
+      sleep 0.1 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+    if [[ $reserved -ne 1 ]]; then
+      if wd_pid=$(watchdog_pid_alive); then
+        info "watchdog already running (pid $wd_pid) — leaving deadline untouched"
+        return 0
+      fi
+      die "watchdog reservation busy and no healthy watchdog at $wd_pf — refuse to arm a second timer (zero silent success)"
+    fi
+  fi
+
+  # Hold exclusive reservation. Re-check health before launch (should be clear).
+  if wd_pid=$(watchdog_pid_alive); then
+    # Unexpected: a real pid appeared under our reserved file — keep it.
+    info "watchdog already running (pid $wd_pid) — leaving deadline untouched"
+    return 0
+  fi
+
   # Fixed shell source + positional argv only — never interpolate profile path
   # or sleep command into executable shell source (injection surface).
   # Pidfile is cleaned when the sleep completes (before --halt) where practical.
@@ -802,8 +881,20 @@ ensure_watchdog() {
     exec "$driver" --profile "$profile" --halt
   ' bash "$SLEEP_CMD" "$DEADLINE_SECONDS" "$DRIVER_SELF" "$PROFILE_PATH" "$wd_pf" \
     >> "$LOG_DIR/watchdog.log" 2>&1 &
-  echo $! > "$wd_pf"
-  info "watchdog armed: HALT in $((DEADLINE_SECONDS / 3600))h (${DEADLINE_SECONDS}s) pid $!"
+  wd_pid=$!
+
+  if ! kill -0 "$wd_pid" 2>/dev/null; then
+    # Launch failed — remove only our exact reservation artifact.
+    content=$(tr -d '[:space:]' < "$wd_pf" 2>/dev/null || true)
+    if [[ "$content" == "reserving:$$" ]]; then
+      rm -f "$wd_pf"
+    fi
+    die "watchdog failed to start (no process for reserved pidfile $wd_pf)"
+  fi
+
+  # Publish real PID only after a live process exists (still under reservation).
+  printf '%s\n' "$wd_pid" > "$wd_pf"
+  info "watchdog armed: HALT in $((DEADLINE_SECONDS / 3600))h (${DEADLINE_SECONDS}s) pid $wd_pid"
 }
 
 # --- preflight (fail closed before any runner launch) -----------------------
@@ -1521,7 +1612,9 @@ preflight_for_start() {
   local i
 
   [[ -f "$LOOP_SH" ]] || die "missing loop driver: $LOOP_SH"
-  [[ -x "$LOOP_SH" || -f "$LOOP_SH" ]] || die "loop driver not usable: $LOOP_SH"
+  # Direct invocation in do_start requires a regular executable file; -f alone
+  # is not enough (a non-executable loop would pass preflight and fail at launch).
+  [[ -x "$LOOP_SH" ]] || die "loop driver is not executable: $LOOP_SH"
   command -v "$RUNNER" >/dev/null 2>&1 || die "runner '$RUNNER' not found on PATH"
   command -v "$GH_BIN" >/dev/null 2>&1 || die "gh binary '$GH_BIN' not found"
 
@@ -1618,7 +1711,7 @@ do_status() {
   done
   if [[ $dead -eq 1 ]]; then
     echo
-    echo "One or more lanes are down. '$0 --profile $PROFILE_PATH --start' is idempotent —"
+    echo "One or more lanes are down. '$DRIVER_SELF --profile $PROFILE_PATH --start' is idempotent —"
     echo "it recreates a missing base, leaves healthy lanes alone, and relaunches only what died."
   fi
 }
@@ -1775,11 +1868,10 @@ run_with_wall_timeout() {
   fi
   rm -f "$status_file"
 
-  # Reap any residual of the group (best-effort; no pattern kill).
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  fi
+  # Reap residual of the known process group after the leader is reaped.
+  # Do not gate on kill -0 of the leader (wait already reaped it); signal the
+  # group id only — exact-PGID, never pattern/pkill/killall.
+  kill -KILL -"$pid" 2>/dev/null || true
 
   if [[ $timed_out -eq 1 ]]; then
     return 124
@@ -1999,7 +2091,7 @@ do_start() {
   # Deadline watchdog: one identity-validated process per profile/log dir.
   # Healthy repeated --start keeps the original PID and deadline.
   ensure_watchdog
-  info "fleet up. status: $0 --profile $PROFILE_PATH --status"
+  info "fleet up. status: $DRIVER_SELF --profile $PROFILE_PATH --status"
 }
 
 # --- argv -------------------------------------------------------------------

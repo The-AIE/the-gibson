@@ -99,6 +99,11 @@ third, distinct agent identity — neither the builder nor the reviewer:
 export REVIEWER_CMD='codex exec -s read-only -'
 # Merge needs Bash + gh. acceptEdits only auto-approves file edits and blocks
 # gh (L-048 / chatterbuilt #311). Use bypassPermissions for RELEASE_CMD.
+#
+# WARNING: bypassPermissions permits unattended shell commands and file
+# mutation. Use it only on a trusted, isolated host or container after the
+# owner authorizes unattended release. It is not an unqualified default for
+# shared machines or production write paths.
 export RELEASE_CMD='claude -p --permission-mode bypassPermissions'
 # release hat shells out to RELEASE_CMD when present instead of merging itself
 ```
@@ -113,6 +118,8 @@ product queue inside the driver:
 # Copy templates/fleet/profile.v1.example → a local absolute path, then:
 export FLEET_PROFILE=/absolute/path/to/local.profile
 export REVIEWER_CMD='codex exec -s read-only -'
+# Same bypassPermissions WARNING as above — trusted isolated host only,
+# after owner authorization; not an unqualified default.
 export RELEASE_CMD='claude -p --output-format text --permission-mode bypassPermissions'
 
 $GIBSON/scripts/loop-fleet.sh --status
