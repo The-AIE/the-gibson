@@ -3914,21 +3914,25 @@ if [[ "$wdc" =~ ^[1-9][0-9]*$ ]] && kill -0 "$wdc" 2>/dev/null; then
 else
   bad "concurrent start pidfile invalid/dead: $wdc"
 fi
-# Count live processes whose argv carries this profile + deadline 90 (watchdog body).
-# Exact-ish: only PIDs matching the driver self + profile path + 90.
+# Count live watchdog *parents* for this profile/deadline. Match bash -c wrappers
+# whose argv carries the profile basename and deadline token. Do NOT match the
+# child sleep alone (no profile name) — that would double-count one watchdog.
+# Use basename (not full path) so /var vs /private/var symlink skew cannot hide a
+# second timer. Must fail if two watchdog parents launched even when one pidfile remains.
 wcount=0
+prof_base=$(basename "$PROF")
 for p in $(ps -ax -o pid= 2>/dev/null || ps -A -o pid= 2>/dev/null); do
   p=$(echo "$p" | tr -d '[:space:]')
   [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
   cmd=$(ps -p "$p" -o command= 2>/dev/null || ps -p "$p" -o args= 2>/dev/null || true)
   [[ -n "$cmd" ]] || continue
   case "$cmd" in
-    *"$PROF"*|*"$FLEET"*)
+    *"$prof_base"*)
+      # Watchdog parent is `bash -c '...' bash SLEEP DEADLINE DRIVER PROFILE PIDFILE`.
       case "$cmd" in
-        *' 90 '*|*' 90'|*'90 '*)
-          # Watchdog body is bash -c with sleep/deadline args; skip the fleet parent if any.
-          case "$cmd" in
-            *bash*-c*|*"$SLEEP_CMD"*|*/sleep*|*sleep*)
+        *bash*-c*)
+          case " $cmd " in
+            *" 90 "*)
               wcount=$((wcount + 1))
               ;;
           esac
@@ -3937,7 +3941,9 @@ for p in $(ps -ax -o pid= 2>/dev/null || ps -A -o pid= 2>/dev/null); do
       ;;
   esac
 done
-# Pidfile identity is authoritative; cmdline count is a soft cross-check (macOS ps varies).
+[[ "$wcount" -eq 1 ]] \
+  && ok "concurrent start exactly one watchdog parent (wcount=$wcount)" \
+  || bad "concurrent start watchdog parent count=$wcount (want 1; two timers or none)"
 cmdw=$(ps -p "$wdc" -o command= 2>/dev/null || ps -p "$wdc" -o args= 2>/dev/null || true)
 echo "$cmdw" | grep -q '90' \
   && ok "concurrent watchdog deadline stable (90) in pid $wdc" \
@@ -4075,6 +4081,296 @@ rm -f "$WD_PF"
 export FLEET_NO_WATCHDOG=1
 export SLEEP_CMD=true
 
+# --- CR: stale-reservation TOCTOU — fresh competitor never unlinked --------
+echo "stale reservation reclaim TOCTOU (fresh competitor preserved)"
+reset_calls
+TARGET=$(setup_target_repo wdtoctou acme/widget)
+PROF="$ROOT/profiles/wdtoctou.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdtoctou" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=70" \
+  "lane=docs|473|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+WD_PF="$ROOT/logs/watchdog.pid"
+PAUSE_FILE="$CALLS/wd-reclaim-pause"
+# Seed bases without watchdog.
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=70 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) || { bad "wdtoctou seed failed: $out"; }
+rm -f "$WD_PF"
+# Dead reserver marker + live competitor that will install during reclaim pause.
+printf 'reserving:999999\n' > "$WD_PF"
+sleep 120 &
+COMP_PID=$!
+: > "$PAUSE_FILE"
+# Background --start pauses inside reclaim between observe and unlink.
+(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=70 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    FLEET_WATCHDOG_TEST_RECLAIM_PAUSE="$PAUSE_FILE" \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start >"$CALLS/wdtoctou.out" 2>&1
+  echo $? >"$CALLS/wdtoctou.rc"
+) &
+STARTER=$!
+# Wait until starter is blocked in reclaim pause (or finished early).
+i=0
+while [[ $i -lt 50 ]]; do
+  if ! kill -0 "$STARTER" 2>/dev/null; then
+    break
+  fi
+  # Starter should still see the pause file and be waiting.
+  if [[ -e "$PAUSE_FILE" ]]; then
+    # Install a fresh competing live reservation while reclaim is paused.
+    printf 'reserving:%s\n' "$COMP_PID" > "$WD_PF"
+    break
+  fi
+  sleep 0.05 2>/dev/null || sleep 1
+  i=$((i + 1))
+done
+[[ -f "$WD_PF" ]] && grep -q "reserving:$COMP_PID" "$WD_PF" \
+  || bad "failed to install competing reservation during pause: $(cat "$WD_PF" 2>/dev/null || true)"
+# Release reclaim; starter must NOT delete the fresh competing reservation.
+rm -f "$PAUSE_FILE"
+wait "$STARTER" 2>/dev/null || true
+SRC=$(tr -d '[:space:]' < "$CALLS/wdtoctou.rc" 2>/dev/null || echo 1)
+OUTT=$(cat "$CALLS/wdtoctou.out" 2>/dev/null || true)
+# Competing live reservation must still be intact (never unlinked by reclaim).
+if [[ -f "$WD_PF" ]] && grep -q "reserving:$COMP_PID" "$WD_PF"; then
+  ok "TOCTOU reclaim left fresh competing reservation intact"
+else
+  bad "TOCTOU reclaim deleted/mutated competing reservation: $(cat "$WD_PF" 2>/dev/null || echo missing) out=$OUTT"
+fi
+# Starter must not have armed a second timer over the competitor.
+if echo "$OUTT" | grep -q 'watchdog armed'; then
+  bad "TOCTOU starter falsely armed over competing reservation: $OUTT"
+else
+  ok "TOCTOU starter did not arm a second timer (rc=$SRC)"
+fi
+# At most zero live watchdog parents for this profile (competitor holds reservation only).
+twc=0
+for p in $(ps -ax -o pid= 2>/dev/null || ps -A -o pid= 2>/dev/null); do
+  p=$(echo "$p" | tr -d '[:space:]')
+  [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
+  cmd=$(ps -p "$p" -o command= 2>/dev/null || true)
+  case "$cmd" in
+    *"$PROF"*bash*-c*|*"$PROF"*"bash -c"*) twc=$((twc + 1)) ;;
+  esac
+done
+[[ "$twc" -eq 0 ]] \
+  && ok "TOCTOU interleaving armed zero watchdog parents (twc=$twc)" \
+  || bad "TOCTOU interleaving armed $twc watchdog parents (want 0)"
+if kill -0 "$COMP_PID" 2>/dev/null; then
+  ok "TOCTOU competitor reserver $COMP_PID still alive"
+  kill -TERM "$COMP_PID" 2>/dev/null || true
+  sleep 0.2 2>/dev/null || sleep 1
+  kill -KILL "$COMP_PID" 2>/dev/null || true
+else
+  bad "TOCTOU competitor reserver $COMP_PID was killed"
+fi
+rm -f "$WD_PF" "$PAUSE_FILE"
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# --- CR: immediate-exit / zombie watchdog never logs armed -----------------
+echo "immediate-exit watchdog no false armed"
+reset_calls
+TARGET=$(setup_target_repo wdzombie acme/widget)
+PROF="$ROOT/profiles/wdzombie.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdzombie" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=60" \
+  "lane=docs|474|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+WD_PF="$ROOT/logs/watchdog.pid"
+# Deterministic: SIGKILL the exact spawned child before settle/publish (may remain
+# zombie until reaped). kill -0 can pass; ps-backed non-zombie check must refuse arm.
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=60 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    FLEET_WATCHDOG_TEST_IMMEDIATE_EXIT=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "immediate-exit watchdog should fail closed: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*watchdog failed to start|no live non-zombie|exited before arm' \
+    && ok "immediate-exit watchdog fails closed with fleet: diagnostic" \
+    || bad "unclear immediate-exit fail: $out"
+}
+if echo "$out" | grep -q 'watchdog armed'; then
+  bad "immediate-exit produced false armed evidence: $out"
+else
+  ok "immediate-exit produced zero false armed evidence"
+fi
+# No published live numeric watchdog pid left merge-capable.
+if [[ -f "$WD_PF" ]]; then
+  wdz=$(tr -d '[:space:]' < "$WD_PF" 2>/dev/null || true)
+  if [[ "$wdz" =~ ^[1-9][0-9]*$ ]] && kill -0 "$wdz" 2>/dev/null; then
+    st=$(ps -p "$wdz" -o state= 2>/dev/null | tr -d '[:space:]' || true)
+    case "$st" in
+      Z*)
+        # Zombie without "armed" is fail-closed residue being reaped; still not merge-capable.
+        ok "immediate-exit left only unreaped zombie residue (pid $wdz state=Z, not armed)"
+        ;;
+      *)
+        bad "immediate-exit left live published watchdog pid $wdz state=$st"
+        kill -KILL "$wdz" 2>/dev/null || true
+        ;;
+    esac
+  else
+    ok "immediate-exit left no live published watchdog pid (content=${wdz:-empty})"
+  fi
+  # Clear only our exact fixture artifact if it is still reserving: or numeric dead.
+  rm -f "$WD_PF"
+else
+  ok "immediate-exit cleared pidfile (no untracked timer artifact)"
+fi
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# --- CR: pidfile publish failure leaves no untracked timer -----------------
+echo "watchdog publish failure cleans reservation and child"
+reset_calls
+TARGET=$(setup_target_repo wdpublish acme/widget)
+PROF="$ROOT/profiles/wdpublish.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdpublish" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=65" \
+  "lane=docs|475|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+WD_PF="$ROOT/logs/watchdog.pid"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+    DEADLINE_SECONDS=65 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    FLEET_WATCHDOG_TEST_FAIL_PUBLISH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "publish-fail watchdog should fail closed: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*publish failed|untracked timer|pidfile publish' \
+    && ok "publish-fail watchdog fails closed with fleet: diagnostic" \
+    || bad "unclear publish-fail: $out"
+}
+if echo "$out" | grep -q 'watchdog armed'; then
+  bad "publish-fail produced false armed evidence: $out"
+else
+  ok "publish-fail produced zero false armed evidence"
+fi
+# Pidfile must not hold a live merge-capable watchdog PID.
+if [[ -f "$WD_PF" ]]; then
+  wdp=$(tr -d '[:space:]' < "$WD_PF" 2>/dev/null || true)
+  if [[ "$wdp" =~ ^[1-9][0-9]*$ ]] && kill -0 "$wdp" 2>/dev/null; then
+    bad "publish-fail left live published watchdog $wdp"
+    kill -KILL "$wdp" 2>/dev/null || true
+  else
+    ok "publish-fail left no live published watchdog (content=${wdp:-empty/dir})"
+  fi
+elif [[ -d "$WD_PF" ]]; then
+  rmdir "$WD_PF" 2>/dev/null || rm -rf "$WD_PF"
+  ok "publish-fail cleaned test directory artifact at pidfile path"
+else
+  ok "publish-fail left no pidfile (no untracked timer)"
+fi
+# No stray bash -c watchdog parents for this profile.
+pwc=0
+for p in $(ps -ax -o pid= 2>/dev/null || ps -A -o pid= 2>/dev/null); do
+  p=$(echo "$p" | tr -d '[:space:]')
+  [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
+  cmd=$(ps -p "$p" -o command= 2>/dev/null || true)
+  case "$cmd" in
+    *"$PROF"*bash*-c*|*"$PROF"*"bash -c"*) pwc=$((pwc + 1)) ;;
+  esac
+done
+[[ "$pwc" -eq 0 ]] \
+  && ok "publish-fail left zero untracked watchdog parents (pwc=$pwc)" \
+  || bad "publish-fail left $pwc untracked watchdog parents"
+rm -f "$WD_PF"
+[[ -d "$WD_PF" ]] && rmdir "$WD_PF" 2>/dev/null || true
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# --- CR: missing SLEEP_CMD fails before launch -----------------------------
+echo "missing SLEEP_CMD fails closed before arm"
+reset_calls
+TARGET=$(setup_target_repo wdsleep acme/widget)
+PROF="$ROOT/profiles/wdsleep.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wdsleep" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "deadline_seconds=50" \
+  "lane=docs|476|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+WD_PF="$ROOT/logs/watchdog.pid"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD="/nonexistent/fleet-sleep-binary-$$" \
+    DEADLINE_SECONDS=50 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "missing SLEEP_CMD should fail closed: $out" || {
+  echo "$out" | grep -qiE 'fleet:.*SLEEP_CMD|not executable|not found' \
+    && ok "missing SLEEP_CMD fails closed before arm" \
+    || bad "unclear SLEEP_CMD fail: $out"
+}
+if echo "$out" | grep -q 'watchdog armed'; then
+  bad "missing SLEEP_CMD produced false armed: $out"
+else
+  ok "missing SLEEP_CMD produced zero armed evidence"
+fi
+[[ ! -f "$WD_PF" ]] || ! grep -Eq '^[0-9]+$' "$WD_PF" 2>/dev/null \
+  && ok "missing SLEEP_CMD left no numeric watchdog pidfile" \
+  || bad "missing SLEEP_CMD left pidfile: $(cat "$WD_PF" 2>/dev/null || true)"
+rm -f "$WD_PF"
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
 # --- CR: HOME unset guards default fleet/log paths -------------------------
 echo "HOME unset default paths fail closed; explicit paths work"
 reset_calls
@@ -4208,17 +4504,21 @@ REAL_GIT=$(command -v git)
 # Unrelated process outside the group — must survive residual cleanup.
 sleep 300 &
 UNRELATED_PID=$!
+# Sequencing marker: residual cleanup must run while leader identity is held
+# (pre-reap). The stub records leader PID; we assert descendant dies and the
+# unrelated PID is untouched (no post-wait recycled-PGID kill).
 cat > "$BIN/git" <<STUB
 #!/usr/bin/env bash
 # On fetch: spawn a descendant in this process group, then exit 0 as leader.
-# run_with_wall_timeout reaps the leader via wait; residual group KILL must
-# still terminate the descendant (exact PGID only).
+# run_with_wall_timeout must residual-KILL the exact PGID before reaping the
+# leader so the numeric PID/PGID cannot be recycled into an unrelated target.
 for a in "\$@"; do
   if [[ "\$a" == "fetch" ]]; then
     echo "\$\$" > "$CALLS/leaddie-leader.pid"
     # Keep descendant in the same process group (no setsid).
     sleep 100 &
     echo "\$!" > "$CALLS/leaddie-desc.pid"
+    # Natural leader exit 0 — residual path (not wall-clock timeout).
     exit 0
   fi
 done
@@ -4240,7 +4540,14 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) || true
-# Leader should have exited; descendant must be cleaned by residual group kill.
+# Leader should have exited; descendant must be cleaned by pre-reap residual group kill.
+if [[ -f "$CALLS/leaddie-leader.pid" ]]; then
+  leader=$(tr -d '[:space:]' < "$CALLS/leaddie-leader.pid")
+  ok "leader-exit recorded leader pid $leader for sequencing pin"
+else
+  bad "leader-exit leader pid file missing — stub may not have run: $out"
+  leader=""
+fi
 if [[ -f "$CALLS/leaddie-desc.pid" ]]; then
   desc=$(tr -d '[:space:]' < "$CALLS/leaddie-desc.pid")
   i=0
@@ -4256,6 +4563,18 @@ if [[ -f "$CALLS/leaddie-desc.pid" ]]; then
     bad "leader-exit descendant pid $desc still alive after residual cleanup"
     kill -KILL "$desc" 2>/dev/null || true
   fi
+  # Sequencing pin: leader is reaped (not live non-zombie) after residual path.
+  if [[ -n "$leader" ]]; then
+    if kill -0 "$leader" 2>/dev/null; then
+      st=$(ps -p "$leader" -o state= 2>/dev/null | tr -d '[:space:]' || true)
+      case "$st" in
+        Z*) ok "leader-exit leader $leader is zombie/reapable after residual (pre-recycle)" ;;
+        *) bad "leader-exit leader $leader still running after residual (state=$st)" ;;
+      esac
+    else
+      ok "leader-exit leader $leader reaped after pre-wait residual cleanup"
+    fi
+  fi
 else
   bad "leader-exit descendant pid file missing — stub may not have run: $out"
 fi
@@ -4266,6 +4585,12 @@ if kill -0 "$UNRELATED_PID" 2>/dev/null; then
   kill -KILL "$UNRELATED_PID" 2>/dev/null || true
 else
   bad "unrelated PID $UNRELATED_PID was killed by residual cleanup"
+fi
+# Natural exit must not be reported as wall-clock timeout (preserve exit status path).
+if echo "$out" | grep -qiE 'exceeded wall-clock timeout'; then
+  bad "leader-exit path incorrectly reported wall-clock timeout: $out"
+else
+  ok "leader-exit path preserved non-timeout status sequencing"
 fi
 rm -f "$BIN/git"
 

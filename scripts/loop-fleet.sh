@@ -67,6 +67,13 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}" # tests can set to true / no-op
 #   FLEET_NO_WATCHDOG=1  — skip deadline watchdog process
 #   FLEET_SKIP_FETCH=1   — skip network fetch; resolve default branch from local origin/*
 #   FLEET_FETCH_TIMEOUT  — wall-clock seconds for git fetch AND ls-remote (default 30)
+#   FLEET_WATCHDOG_TEST_RECLAIM_PAUSE — if set to a path, reclaim waits (bounded) while
+#     that path exists between observing stale content and the compare-and-unlink.
+#     Sensors only: deterministic TOCTOU interleaving. Unset in production.
+#   FLEET_WATCHDOG_TEST_FAIL_PUBLISH=1 — after a live child exists, force pidfile
+#     publish to fail so sensors prove reservation+child cleanup. Unset in production.
+#   FLEET_WATCHDOG_TEST_IMMEDIATE_EXIT=1 — after spawn, SIGKILL the child and leave
+#     it unreaped so sensors prove zombie/immediate-exit never logs armed. Unset in production.
 FLEET_SYNC_LAUNCH="${FLEET_SYNC_LAUNCH:-0}"
 FLEET_NO_WATCHDOG="${FLEET_NO_WATCHDOG:-0}"
 FLEET_SKIP_FETCH="${FLEET_SKIP_FETCH:-0}"
@@ -745,8 +752,98 @@ lane_pid_alive() {
   return 0
 }
 
-# Watchdog identity: live PID + command line still references this driver and
-# this profile path. Unrelated reused PIDs are not treated as our watchdog.
+# True when PID is signalable and not a zombie. kill -0 alone is insufficient:
+# a just-exited child remains kill -0-able until wait reaps it, but is not a
+# live watchdog. Bash 3.2 / macOS: ps -o state= yields Z for zombies.
+pid_is_live_non_zombie() {
+  local pid="$1" st
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  st=$(ps -p "$pid" -o state= 2>/dev/null || true)
+  if [[ -z "$st" ]]; then
+    st=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  fi
+  st=$(printf '%s' "$st" | tr -d '[:space:]')
+  [[ -n "$st" ]] || return 1
+  case "$st" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
+# Compare-and-unlink a stale exclusive reservation. Deletes $pf only when the
+# on-disk value still equals the exact observed stale content and is still
+# stale immediately before unlink. Never removes a fresh competing reservation.
+# Returns 0 if file is gone or was reclaimed; 1 if still present / not reclaimable.
+watchdog_reclaim_stale_reservation() {
+  local pf="$1" observed recheck reserver i pause="${FLEET_WATCHDOG_TEST_RECLAIM_PAUSE:-}"
+  [[ -n "$pf" && -f "$pf" ]] || return 0
+  observed=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  # Only empty or reserving:* markers are reclaim candidates.
+  if [[ -n "$observed" && "$observed" != reserving:* ]]; then
+    return 1
+  fi
+  if [[ "$observed" == reserving:* ]]; then
+    reserver=${observed#reserving:}
+    if [[ "$reserver" =~ ^[1-9][0-9]*$ ]] && kill -0 "$reserver" 2>/dev/null; then
+      return 1
+    fi
+  fi
+  # Sensors only: deterministic interleaving between observe and unlink.
+  if [[ -n "$pause" ]]; then
+    i=0
+    while [[ -e "$pause" && $i -lt 100 ]]; do
+      sleep 0.05 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+  fi
+  # Re-read: abort if a competitor installed a different value.
+  recheck=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  [[ "$recheck" == "$observed" ]] || return 1
+  if [[ "$recheck" == reserving:* ]]; then
+    reserver=${recheck#reserving:}
+    if [[ "$reserver" =~ ^[1-9][0-9]*$ ]] && kill -0 "$reserver" 2>/dev/null; then
+      return 1
+    fi
+  elif [[ -n "$recheck" ]]; then
+    return 1
+  fi
+  # Final same-value confirm immediately before deletion (narrow TOCTOU window).
+  recheck=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  [[ "$recheck" == "$observed" ]] || return 1
+  if [[ "$recheck" == reserving:* ]]; then
+    reserver=${recheck#reserving:}
+    if [[ "$reserver" =~ ^[1-9][0-9]*$ ]] && kill -0 "$reserver" 2>/dev/null; then
+      return 1
+    fi
+  fi
+  rm -f "$pf"
+  return 0
+}
+
+# Drop only this process's exact reservation artifact (reserving:$$).
+watchdog_clear_own_reservation() {
+  local pf="$1" content
+  content=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
+  if [[ "$content" == "reserving:$$" ]]; then
+    rm -f "$pf"
+  fi
+}
+
+# Terminate and reap only the exact child we spawned (never pattern kill).
+watchdog_terminate_exact_child() {
+  local pid="$1"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 0.05 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+# Watchdog identity: live non-zombie PID + command line still references this
+# driver and this profile path. Unrelated reused PIDs are not our watchdog.
 # Active exclusive reservations use content "reserving:<pid>" and must not be
 # deleted while the reserver process is still alive (concurrent --start).
 watchdog_pid_alive() {
@@ -760,13 +857,13 @@ watchdog_pid_alive() {
     if [[ "$reserver" =~ ^[1-9][0-9]*$ ]] && kill -0 "$reserver" 2>/dev/null; then
       return 1
     fi
-    # Stale reservation (reserver dead) — reclaimable.
-    rm -f "$pf"
+    # Stale reservation (reserver dead) — reclaim only the exact observed value.
+    watchdog_reclaim_stale_reservation "$pf" || true
     return 1
   fi
   pid="$content"
   [[ -n "$pid" && "$pid" =~ ^[1-9][0-9]*$ ]] || { rm -f "$pf"; return 1; }
-  if ! kill -0 "$pid" 2>/dev/null; then
+  if ! pid_is_live_non_zombie "$pid"; then
     rm -f "$pf"
     return 1
   fi
@@ -808,7 +905,7 @@ watchdog_reservation_active() {
 # noclobber reservation so only one process arms a timer; losers re-check and
 # either adopt the winner's watchdog or fail closed with a fleet: diagnostic.
 ensure_watchdog() {
-  local wd_pid wd_pf reserved=0 i content
+  local wd_pid wd_pf reserved=0 i content published settle live_hits
   if [[ "$FLEET_NO_WATCHDOG" == "1" ]]; then
     info "watchdog skipped (FLEET_NO_WATCHDOG=1)"
     return 0
@@ -820,6 +917,17 @@ ensure_watchdog() {
   wd_pf=$(watchdog_pidfile)
   mkdir -p "$LOG_DIR"
 
+  # Fail closed on unusable SLEEP_CMD before taking a reservation or spawning.
+  if [[ -z "${SLEEP_CMD:-}" ]]; then
+    die "SLEEP_CMD is empty — refuse to arm watchdog"
+  fi
+  if [[ "$SLEEP_CMD" == */* ]]; then
+    [[ -x "$SLEEP_CMD" ]] || die "SLEEP_CMD not executable: $SLEEP_CMD — refuse to arm watchdog"
+  else
+    command -v "$SLEEP_CMD" >/dev/null 2>&1 \
+      || die "SLEEP_CMD not found on PATH: $SLEEP_CMD — refuse to arm watchdog"
+  fi
+
   # Exclusive reservation (Bash 3.2 / macOS portable): noclobber create with
   # reserving:<self-pid>. Concurrent starters lose the race and must not arm
   # a second timer. Clean only this exact reservation on launch failure.
@@ -827,7 +935,7 @@ ensure_watchdog() {
     reserved=1
   else
     # Lost the race or leftover file. Wait briefly for a concurrent arm, then
-    # recover only a stale (dead-reserver) reservation.
+    # recover only a stale (dead-reserver) reservation via compare-and-unlink.
     i=0
     while [[ $i -lt 20 ]]; do
       if wd_pid=$(watchdog_pid_alive); then
@@ -839,11 +947,8 @@ ensure_watchdog() {
         i=$((i + 1))
         continue
       fi
-      # No live watchdog and no live reservation — try reclaim once.
-      content=$(tr -d '[:space:]' < "$wd_pf" 2>/dev/null || true)
-      if [[ -z "$content" || "$content" == reserving:* ]]; then
-        rm -f "$wd_pf"
-      fi
+      # No live watchdog and no live reservation — reclaim only exact stale value.
+      watchdog_reclaim_stale_reservation "$wd_pf" || true
       if ( set -C; umask 077; printf 'reserving:%s\n' "$$" > "$wd_pf" ) 2>/dev/null; then
         reserved=1
         break
@@ -883,17 +988,74 @@ ensure_watchdog() {
     >> "$LOG_DIR/watchdog.log" 2>&1 &
   wd_pid=$!
 
-  if ! kill -0 "$wd_pid" 2>/dev/null; then
-    # Launch failed — remove only our exact reservation artifact.
-    content=$(tr -d '[:space:]' < "$wd_pf" 2>/dev/null || true)
-    if [[ "$content" == "reserving:$$" ]]; then
-      rm -f "$wd_pf"
-    fi
-    die "watchdog failed to start (no process for reserved pidfile $wd_pf)"
+  # Sensors only: force immediate-exit/zombie of the exact child we spawned.
+  # Leave unreaped so kill -0 may still pass while state=Z — production settle
+  # must reject that before publishing or logging "armed".
+  if [[ "${FLEET_WATCHDOG_TEST_IMMEDIATE_EXIT:-0}" == "1" ]]; then
+    kill -KILL "$wd_pid" 2>/dev/null || true
   fi
 
-  # Publish real PID only after a live process exists (still under reservation).
-  printf '%s\n' "$wd_pid" > "$wd_pf"
+  # Bounded post-launch settle + ps-backed live/non-zombie check. kill -0 alone
+  # can pass for an already-exited/zombie child and would falsely publish "armed".
+  # Require several consecutive live samples so exec-fail/zombie races can surface
+  # before we publish the PID or log success.
+  settle=0
+  live_hits=0
+  while [[ $settle -lt 20 ]]; do
+    if pid_is_live_non_zombie "$wd_pid"; then
+      live_hits=$((live_hits + 1))
+      # ~5 × 50ms ≈ 250ms stable live window (or 5s if only integer sleep exists).
+      if [[ $live_hits -ge 5 ]]; then
+        break
+      fi
+    else
+      live_hits=0
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+    settle=$((settle + 1))
+  done
+
+  if ! pid_is_live_non_zombie "$wd_pid"; then
+    watchdog_clear_own_reservation "$wd_pf"
+    watchdog_terminate_exact_child "$wd_pid"
+    die "watchdog failed to start (no live non-zombie process for reserved pidfile $wd_pf)"
+  fi
+
+  # Sensors only: force publish failure after a live child exists.
+  if [[ "${FLEET_WATCHDOG_TEST_FAIL_PUBLISH:-0}" == "1" ]]; then
+    watchdog_clear_own_reservation "$wd_pf"
+    # Directory at pidfile path makes the subsequent write fail deterministically.
+    mkdir -p "$wd_pf" 2>/dev/null || true
+  fi
+
+  # Publish real PID only after a live non-zombie process exists (still reserved).
+  if ! printf '%s\n' "$wd_pid" > "$wd_pf" 2>/dev/null; then
+    watchdog_clear_own_reservation "$wd_pf"
+    # If test hook left a directory, remove only that exact artifact when empty-ish.
+    if [[ -d "$wd_pf" ]]; then
+      rmdir "$wd_pf" 2>/dev/null || true
+    fi
+    watchdog_terminate_exact_child "$wd_pid"
+    die "watchdog pidfile publish failed at $wd_pf — refuse to leave an untracked timer"
+  fi
+
+  published=$(tr -d '[:space:]' < "$wd_pf" 2>/dev/null || true)
+  if [[ "$published" != "$wd_pid" ]]; then
+    # Do not unlink a foreign value; only kill the child we created.
+    watchdog_terminate_exact_child "$wd_pid"
+    die "watchdog pidfile publish mismatch at $wd_pf (got ${published:-empty}, want $wd_pid)"
+  fi
+
+  # Final identity check before operator-visible "armed" (no false success).
+  if ! pid_is_live_non_zombie "$wd_pid"; then
+    content=$(tr -d '[:space:]' < "$wd_pf" 2>/dev/null || true)
+    if [[ "$content" == "$wd_pid" ]]; then
+      rm -f "$wd_pf"
+    fi
+    watchdog_terminate_exact_child "$wd_pid"
+    die "watchdog exited before arm complete (pid $wd_pid) — refuse false armed"
+  fi
+
   info "watchdog armed: HALT in $((DEADLINE_SECONDS / 3600))h (${DEADLINE_SECONDS}s) pid $wd_pid"
 }
 
@@ -1809,10 +1971,14 @@ EOF
 # Works on stock macOS (no GNU timeout). Captures only the launched PID/group;
 # on expiry TERM then KILL that group only — never pkill/killall/pattern kill.
 # Returns 0 on success, 124 on wall-clock timeout, else the child's exit status.
+#
+# Residual process-group cleanup runs while the original leader identity is still
+# retained (live or zombie, not yet reaped). A post-wait group kill is unsafe:
+# after wait reaps the leader, the numeric PID/PGID can be recycled.
 run_with_wall_timeout() {
   local limit="$1"
   shift
-  local pid watcher rc=0 status_file timed_out=0
+  local pid watcher rc=0 status_file timed_out=0 st poll
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "fleet: bad wall timeout: $limit" >&2; return 1; }
 
   # Fail closed BEFORE launch if we cannot establish a process group.
@@ -1838,12 +2004,29 @@ run_with_wall_timeout() {
     return 1
   fi
 
+  # Watcher: wall-clock bound + residual group sweep while leader PID is held.
+  # On natural leader exit the leader becomes a zombie until we wait; the
+  # watcher (and parent pre-wait path) may still signal the exact PGID safely.
   (
     elapsed=0
     while [[ $elapsed -lt $limit ]]; do
       if ! kill -0 "$pid" 2>/dev/null; then
+        # Leader fully gone (already reaped elsewhere) — nothing safe to signal.
         exit 0
       fi
+      st=$(ps -p "$pid" -o state= 2>/dev/null || true)
+      if [[ -z "$st" ]]; then
+        st=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+      fi
+      st=$(printf '%s' "$st" | tr -d '[:space:]')
+      case "$st" in
+        Z*)
+          # Leader zombie: PID still reserved. Sweep exact process group for
+          # residual descendants, then exit so parent can reap.
+          kill -KILL -"$pid" 2>/dev/null || true
+          exit 0
+          ;;
+      esac
       sleep 1
       elapsed=$((elapsed + 1))
     done
@@ -1857,6 +2040,41 @@ run_with_wall_timeout() {
   ) &
   watcher=$!
 
+  # Poll until leader is reaped-ready (zombie/gone) or timeout is flagged.
+  # Do NOT wait/reap yet — residual group cleanup must run while the original
+  # leader PID cannot be recycled by the kernel. Bound by wall clock + grace
+  # so parent sequencing never exceeds the child's budget indefinitely.
+  poll=$(date +%s 2>/dev/null || echo 0)
+  while true; do
+    if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+      break
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      break
+    fi
+    st=$(ps -p "$pid" -o state= 2>/dev/null || true)
+    if [[ -z "$st" ]]; then
+      st=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+    fi
+    st=$(printf '%s' "$st" | tr -d '[:space:]')
+    case "$st" in
+      Z*|'') break ;;
+    esac
+    now=$(date +%s 2>/dev/null || echo 0)
+    if [[ "$poll" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && "$now" -gt 0 && "$poll" -gt 0 ]]; then
+      if [[ $((now - poll)) -ge $((limit + 3)) ]]; then
+        break
+      fi
+    fi
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+
+  # Exact-PGID residual cleanup while leader identity is still retained when
+  # possible (zombie or still live after timeout kills). Never after wait.
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL -"$pid" 2>/dev/null || true
+  fi
+
   wait "$pid" 2>/dev/null
   rc=$?
 
@@ -1868,10 +2086,7 @@ run_with_wall_timeout() {
   fi
   rm -f "$status_file"
 
-  # Reap residual of the known process group after the leader is reaped.
-  # Do not gate on kill -0 of the leader (wait already reaped it); signal the
-  # group id only — exact-PGID, never pattern/pkill/killall.
-  kill -KILL -"$pid" 2>/dev/null || true
+  # No post-wait group kill: the leader PID/PGID may already be recycled.
 
   if [[ $timed_out -eq 1 ]]; then
     return 124
