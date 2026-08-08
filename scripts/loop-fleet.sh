@@ -921,45 +921,6 @@ branch_matches_issue() {
 # (more pages may exist) and fails closed so conflicts cannot hide past the page.
 OPEN_PR_LIST_LIMIT=1000
 
-# Encode PR body for single-line TSV transport (decode with pr_body_decode).
-pr_body_encode() {
-  # Order matters: backslash first, then control whitespace.
-  printf '%s' "${1:-}" | sed -e 's/\\/\\\\/g' -e 's/	/\\t/g' -e 's//\\r/g' | awk '
-    BEGIN { ORS="" }
-    {
-      if (NR > 1) print "\\n"
-      print $0
-    }
-    END { if (NR == 0) print "" }
-  '
-}
-
-pr_body_decode() {
-  # Interpret only the escapes we emit in pr_body_encode.
-  printf '%s' "${1:-}" | awk '
-    BEGIN { ORS="" }
-    {
-      s = $0
-      out = ""
-      while (length(s) > 0) {
-        if (substr(s, 1, 1) == "\\" && length(s) >= 2) {
-          c = substr(s, 2, 1)
-          if (c == "n") { out = out "\n"; s = substr(s, 3); continue }
-          if (c == "t") { out = out "\t"; s = substr(s, 3); continue }
-          if (c == "r") { out = out "\r"; s = substr(s, 3); continue }
-          if (c == "\\") { out = out "\\"; s = substr(s, 3); continue }
-          out = out substr(s, 1, 2)
-          s = substr(s, 3)
-          continue
-        }
-        out = out substr(s, 1, 1)
-        s = substr(s, 2)
-      }
-      print out
-    }
-  '
-}
-
 # Expected claim id for a bound branch: issue-<issue>-<slug> when branch is
 # feat|fix/<issue>-<slug>. Branches without a non-empty slug fail closed.
 claim_id_for_branch() {
@@ -981,9 +942,23 @@ claim_id_for_branch() {
   return 0
 }
 
+# Conservative validation for PR head refs received through formatter output.
+# Every fleet-owned branch fits this subset; unusual or malformed refs fail
+# closed rather than entering ownership matching as attacker-controlled text.
+is_valid_pr_head_ref() {
+  local head="$1"
+  [[ "$head" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || return 1
+  case "$head" in
+    /*|*/|*..*|*.lock|*//*) return 1 ;;
+  esac
+  return 0
+}
+
 # Validate machine-readable active-work claim lines in a PR body for own resumption.
-# Requires exactly one "- Active-work claim: issue-<issue>-<slug>" line whose id
-# matches the bound head branch (feat|fix/<issue>-<slug>).
+# Requires exactly one column-zero line:
+#   - Active-work claim: <exact-claim-id>
+# The remainder after the colon must be surrounding-whitespace + exactly the
+# expected claim id (no trailing notes/explanatory text).
 assert_pr_active_work_claim() {
   local issue="$1" lane="$2" pr_num="$3" head="$4" body="$5"
   local expected line token count=0 got_id
@@ -997,8 +972,8 @@ assert_pr_active_work_claim() {
       '- Active-work claim:'*)
         count=$((count + 1))
         token=${line#- Active-work claim:}
-        # First whitespace-delimited token is the claim id (trailing notes ignored).
-        token=$(printf '%s' "$token" | awk '{print $1}')
+        # Surrounding whitespace only — any trailing text is a mismatch.
+        token=$(printf '%s' "$token" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         got_id="$token"
         ;;
     esac
@@ -1027,61 +1002,31 @@ assert_pr_active_work_claim() {
   fi
 }
 
-# Decode a JSON string literal body (no surrounding quotes) into raw text.
-# Supports \\ \" \/ \n \r \t and fails closed on other escapes / raw controls.
-json_string_unescape() {
-  local s="$1"
-  printf '%s' "$s" | awk '
-    BEGIN { ORS="" }
-    {
-      s = $0
-      out = ""
-      while (length(s) > 0) {
-        ch = substr(s, 1, 1)
-        if (ch == "\\") {
-          if (length(s) < 2) { exit 2 }
-          c = substr(s, 2, 1)
-          if (c == "n") { out = out "\n"; s = substr(s, 3); continue }
-          if (c == "r") { out = out "\r"; s = substr(s, 3); continue }
-          if (c == "t") { out = out "\t"; s = substr(s, 3); continue }
-          if (c == "\\" || c == "\"" || c == "/") { out = out c; s = substr(s, 3); continue }
-          # Unsupported escape (unicode \\u, etc.) — fail closed.
-          exit 2
-        }
-        if (ch == "\n" || ch == "\r") exit 2
-        out = out ch
-        s = substr(s, 2)
-      }
-      print out
-      exit 0
-    }
-  '
-}
-
-# Validate and print unique "number<TAB>head<TAB>encoded-body" lines.
-# Fails closed on bad shape, duplicates, or conflicting number/head pairs.
-_finalize_pr_pair_lines() {
+# Validate unique "number<TAB>headRefName" rows from gh's built-in formatter.
+# Fails closed on bad shape, empty fields, duplicates, or truncation risk.
+_finalize_pr_meta_lines() {
   local raw="$1"
-  local line num head body rest
+  local line num head
   local seen_nums="" seen_heads=""
   local out_lines="" count=0
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -n "$line" ]] || continue
-    # Exactly number, head, body (body may be empty) separated by TABs.
+    # Exactly one TAB: number, head. Extra tabs (or none) fail closed.
+    case "$line" in
+      *$'\t'*$'\t'*)
+        die "open PR list row has extra TAB fields (want number\\thead only): $line"
+        ;;
+      *$'\t'*) ;;
+      *)
+        die "open PR list row missing TAB (want number\\thead): $line"
+        ;;
+    esac
     num=${line%%$'\t'*}
-    rest=${line#*$'\t'}
-    if [[ "$rest" == "$line" ]]; then
-      die "open PR list entry missing TAB fields: $line"
-    fi
-    head=${rest%%$'\t'*}
-    if [[ "$head" == "$rest" ]]; then
-      # Only one tab — body field missing entirely.
-      die "open PR list entry missing body field (number/head/body required): $line"
-    fi
-    body=${rest#*$'\t'}
+    head=${line#*$'\t'}
     [[ "$num" =~ ^[1-9][0-9]*$ ]] || die "open PR list has invalid number '$num'"
-    [[ -n "$head" ]] || die "open PR list has empty headRefName for #$num"
+    is_valid_pr_head_ref "$head" \
+      || die "open PR list has empty/invalid headRefName for #$num (got: '$head')"
     case ",$seen_nums," in
       *",$num,"*) die "open PR list has duplicate PR number #$num — refuse ambiguous inventory" ;;
     esac
@@ -1092,9 +1037,9 @@ _finalize_pr_pair_lines() {
     seen_heads="${seen_heads:+$seen_heads,}$head"
     count=$((count + 1))
     if [[ -n "$out_lines" ]]; then
-      out_lines="${out_lines}"$'\n'"${num}"$'\t'"${head}"$'\t'"${body}"
+      out_lines="${out_lines}"$'\n'"${num}"$'\t'"${head}"
     else
-      out_lines="${num}"$'\t'"${head}"$'\t'"${body}"
+      out_lines="${num}"$'\t'"${head}"
     fi
   done <<<"$raw"
 
@@ -1106,171 +1051,80 @@ _finalize_pr_pair_lines() {
   fi
 }
 
-# List open PRs as "number<TAB>headRefName<TAB>encoded-body" lines.
-# Fail closed on: gh error, jq parse error, malformed non-empty no-jq JSON,
-# missing/invalid fields, duplicate/conflicting records, truncation risk.
-# A literal valid empty JSON array is the only zero-pair success.
+# List open PRs as "number<TAB>headRefName" lines (metadata only — never bodies).
+# Uses gh's built-in --json + --template formatter (no external jq/python/perl).
+# Fail closed on: gh error, malformed formatter output, missing/invalid fields,
+# duplicate/conflicting records, truncation risk. Empty output is zero-pair success.
 list_open_pr_pairs() {
-  local out parsed frag num head body_raw body_enc rest compact
-  local obj_count=0 extracted=0
+  local out
 
+  # gh --template is built into the CLI (Go templates); it does not require the
+  # external jq binary. Only number + headRefName are fetched — never body.
   if ! out=$("$GH_BIN" pr list --repo "$EXPECTED_SLUG" --state open \
-      --json number,headRefName,body --limit "$OPEN_PR_LIST_LIMIT" 2>&1); then
+      --json number,headRefName --limit "$OPEN_PR_LIST_LIMIT" \
+      --template '{{range .}}{{printf "%v\t%s\n" .number .headRefName}}{{end}}' 2>&1); then
     die "cannot list open PRs for claims/PR conflict check: $out"
   fi
 
-  # Fast path: literal empty list (optional surrounding whitespace only).
-  compact=$(printf '%s' "$out" | tr -d '[:space:]')
-  if [[ "$compact" == "[]" ]]; then
-    return 0
-  fi
-  if [[ -z "$compact" ]]; then
-    die "open PR list response is empty (want JSON array; only literal [] is zero-pair success)"
+  _finalize_pr_meta_lines "$out"
+}
+
+# Fetch a single candidate PR body, then immediately re-verify its
+# number/head/OPEN state before trusting that body. Closes list/view/body races
+# and metadata mismatches.
+# Prints the raw PR body on success.
+fetch_bound_pr_body() {
+  local pr_num="$1" expect_head="$2" lane="$3" issue="$4"
+  local meta body got_num got_head got_state rest
+
+  [[ "$pr_num" =~ ^[1-9][0-9]*$ ]] \
+    || die "lane $lane: bound PR number '$pr_num' is not a positive integer"
+  [[ -n "$expect_head" ]] \
+    || die "lane $lane: bound PR #$pr_num has empty expected head"
+
+  # Fetch only the state-bound candidate body. It remains untrusted until the
+  # metadata call immediately below confirms that the same PR is still open on
+  # the expected head.
+  if ! body=$("$GH_BIN" pr view "$pr_num" --repo "$EXPECTED_SLUG" \
+      --json body --jq '.body // ""' 2>&1); then
+    die "lane $lane: cannot fetch body of state-bound PR #$pr_num for issue #$issue: $body"
   fi
 
-  if command -v jq >/dev/null 2>&1; then
-    if ! parsed=$(printf '%s' "$out" | jq -e -r '
-      if type != "array" then
-        error("open PR list is not a JSON array")
-      elif length >= '"$OPEN_PR_LIST_LIMIT"' then
-        error("open PR list hit limit '"$OPEN_PR_LIST_LIMIT"' — truncation risk")
-      else . end
-      | .[]
-      | (if (.number | type) == "number" then (.number | floor | tostring)
-         elif (.number | type) == "string" and (.number | test("^[1-9][0-9]*$")) then .number
-         else error("invalid or missing PR number") end) as $n
-      | (if (.headRefName | type) == "string" and .headRefName != "" then .headRefName
-         else error("invalid or missing headRefName") end) as $h
-      | ((.body // "") | if type == "string" then .
-         elif type == "null" then ""
-         else error("PR body must be string or null") end) as $b
-      | ($b
-         | gsub("\\\\"; "\\\\")
-         | gsub("\t"; "\\t")
-         | gsub("\r"; "\\r")
-         | gsub("\n"; "\\n")) as $be
-      | "\($n)\t\($h)\t\($be)"
-    ' 2>&1); then
-      die "cannot parse open PR list (jq): $parsed"
-    fi
-    _finalize_pr_pair_lines "$parsed"
-    return 0
+  # Immediate metadata re-verify via gh built-in formatter (no external jq).
+  if ! meta=$("$GH_BIN" pr view "$pr_num" --repo "$EXPECTED_SLUG" \
+      --json number,headRefName,state \
+      --template '{{.number}}{{"\t"}}{{.headRefName}}{{"\t"}}{{.state}}{{"\n"}}' 2>&1); then
+    die "lane $lane: cannot view state-bound PR #$pr_num for issue #$issue (re-verify failed): $meta"
   fi
-
-  # no-jq path: parse a JSON array of objects without eval/python/perl.
-  # Pretty-printed arrays are accepted when fields use JSON string escapes
-  # (no raw newlines inside string values). Malformed non-empty output fails closed.
-  case "$compact" in
-    \[*\]) ;;
-    *) die "open PR list is not a JSON array (no-jq parse) — refuse to treat as empty" ;;
+  meta=${meta%$'\n'}
+  meta=${meta%$'\r'}
+  # Exactly number TAB head TAB state.
+  case "$meta" in
+    *$'\t'*$'\t'*$'\t'*)
+      die "lane $lane: PR #$pr_num re-verify metadata has extra TAB fields: $meta"
+      ;;
+    *$'\t'*$'\t'*) ;;
+    *)
+      die "lane $lane: PR #$pr_num re-verify metadata is malformed (want number\\thead\\tstate): $meta"
+      ;;
   esac
+  got_num=${meta%%$'\t'*}
+  rest=${meta#*$'\t'}
+  got_head=${rest%%$'\t'*}
+  got_state=${rest#*$'\t'}
+  got_state=$(printf '%s' "$got_state" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
 
-  local core frag_lines
-  # Collapse pretty-print newlines between tokens; keep content inside strings
-  # by only joining when the newline is outside quotes (fail closed if ambiguous).
-  core=$(printf '%s' "$out" | awk '
-    BEGIN { ORS=""; in_str=0; esc=0 }
-    {
-      for (i = 1; i <= length($0); i++) {
-        c = substr($0, i, 1)
-        if (in_str) {
-          out = out c
-          if (esc) { esc = 0; continue }
-          if (c == "\\") { esc = 1; continue }
-          if (c == "\"") { in_str = 0; continue }
-          continue
-        }
-        if (c == "\"") { in_str = 1; out = out c; continue }
-        if (c == "\n" || c == "\r" || c == "\t") continue
-        out = out c
-      }
-    }
-    END {
-      if (in_str || esc) exit 2
-      print out
-    }
-  ') || die "open PR list has unterminated string or raw control ambiguity (no-jq) — refuse"
-
-  case "$core" in
-    \[*\]) ;;
-    *) die "open PR list collapsed form is not a JSON array (no-jq)" ;;
-  esac
-  core=${core#\[}
-  core=${core%\]}
-  if [[ -z "$core" ]]; then
-    return 0
-  fi
-
-  # Split objects on },{ only at top level (bodies must not contain that exact sequence unescaped).
-  frag_lines=$(printf '%s' "$core" | sed 's/},{/}\n{/g')
-  parsed=""
-  while IFS= read -r frag || [[ -n "$frag" ]]; do
-    [[ -n "$frag" ]] || continue
-    obj_count=$((obj_count + 1))
-    case "$frag" in
-      \{*\}) ;;
-      *) die "open PR list has malformed object (no-jq): $frag" ;;
-    esac
-    num=$(printf '%s' "$frag" | sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
-    head=$(printf '%s' "$frag" | sed -n 's/.*"headRefName"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' | head -1)
-    [[ -n "$num" && "$num" =~ ^[1-9][0-9]*$ ]] \
-      || die "open PR list object missing/invalid number (no-jq): $frag"
-    [[ -n "$head" ]] \
-      || die "open PR list object missing/invalid headRefName (no-jq) for #$num"
-
-    body_raw=""
-    if printf '%s' "$frag" | grep -q '"body"[[:space:]]*:[[:space:]]*null'; then
-      body_raw=""
-    elif printf '%s' "$frag" | grep -q '"body"[[:space:]]*:[[:space:]]*"'; then
-      body_raw=$(printf '%s' "$frag" | awk '
-        {
-          line = $0
-          idx = index(line, "\"body\"")
-          if (idx == 0) exit 1
-          rest = substr(line, idx + 6)
-          sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
-          if (rest ~ /^null/) { print ""; exit 0 }
-          if (substr(rest, 1, 1) != "\"") exit 1
-          rest = substr(rest, 2)
-          out = ""
-          while (length(rest) > 0) {
-            ch = substr(rest, 1, 1)
-            if (ch == "\"") { print out; exit 0 }
-            if (ch == "\\") {
-              if (length(rest) < 2) exit 1
-              out = out substr(rest, 1, 2)
-              rest = substr(rest, 3)
-              continue
-            }
-            out = out ch
-            rest = substr(rest, 2)
-          }
-          exit 1
-        }
-      ') || die "open PR list object has unparseable body string (no-jq) for #$num"
-      if ! body_raw=$(json_string_unescape "$body_raw"); then
-        die "open PR list object has invalid body escapes (no-jq) for #$num"
-      fi
-    elif printf '%s' "$frag" | grep -q '"body"'; then
-      die "open PR list object has invalid body field (no-jq) for #$num"
-    fi
-
-    body_enc=$(pr_body_encode "$body_raw")
-    if [[ -n "$parsed" ]]; then
-      parsed="${parsed}"$'\n'"${num}"$'\t'"${head}"$'\t'"${body_enc}"
-    else
-      parsed="${num}"$'\t'"${head}"$'\t'"${body_enc}"
-    fi
-    extracted=$((extracted + 1))
-  done <<<"$frag_lines"
-
-  if [[ $obj_count -eq 0 ]]; then
-    die "open PR list is non-empty but no objects parsed (no-jq) — refuse to treat as empty"
-  fi
-  if [[ $extracted -ne $obj_count ]]; then
-    die "open PR list parse incomplete (no-jq: objects=$obj_count extracted=$extracted) — refuse"
-  fi
-  _finalize_pr_pair_lines "$parsed"
+  [[ "$got_num" =~ ^[1-9][0-9]*$ ]] \
+    || die "lane $lane: PR #$pr_num re-verify returned invalid number '$got_num'"
+  [[ "$got_num" == "$pr_num" ]] \
+    || die "lane $lane: PR re-verify number mismatch (list/bound #$pr_num view #$got_num) — refuse list/view race"
+  [[ -n "$got_head" ]] \
+    || die "lane $lane: PR #$pr_num re-verify returned empty headRefName"
+  [[ "$got_head" == "$expect_head" ]] \
+    || die "lane $lane: PR #$pr_num re-verify head mismatch (list/bound '$expect_head' view '$got_head') — refuse list/view race"
+  [[ "$got_state" == "OPEN" ]] \
+    || die "lane $lane: state-bound PR #$pr_num is not OPEN on re-verify (state=$got_state) — refuse closed-state race"
+  printf '%s' "$body"
 }
 
 # mode:
@@ -1321,9 +1175,9 @@ check_issue_preflight() {
 check_pr_conflicts() {
   # Fail closed if an open PR head branch looks like it already owns this issue.
   local issue="$1" lane="$2"
-  local pairs num head body
+  local pairs num head
   pairs=$(list_open_pr_pairs) || return 1
-  while IFS="$(printf '\t')" read -r num head body || [[ -n "${num:-}" ]]; do
+  while IFS="$(printf '\t')" read -r num head || [[ -n "${num:-}" ]]; do
     [[ -n "${num:-}" ]] || continue
     if branch_matches_issue "$head" "$issue"; then
       die "lane $lane: open PR #$num branch '$head' conflicts with issue #$issue"
@@ -1332,15 +1186,16 @@ check_pr_conflicts() {
 }
 
 # Bind dead-lane "own" resumption to recorded pr: and/or handoff: state.
-# Verifies the actual open PR number, head branch, and machine-readable
-# active-work claim in the matching PR body. A claimed issue with no matching
+# Matches candidate open PR number/head from metadata list, fetches only that
+# single PR body, then immediately re-verifies number/head/OPEN before reading
+# the body for the machine-readable active-work claim. A claimed issue with no matching
 # state-bound PR (or claim) fails closed.
 check_own_resumption() {
   local issue="$1" lane="$2"
   local out labels lab claimed=0
-  local bound_pr bound_handoff pairs num head body body_raw
+  local bound_pr bound_handoff pairs num head body_raw
   local matched=0 issue_pr_seen=0
-  local match_num="" match_head="" match_body=""
+  local match_num="" match_head=""
 
   if ! out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>&1); then
     die "lane $lane: issue #$issue missing or unreadable via gh (repo $EXPECTED_SLUG): $out"
@@ -1366,7 +1221,7 @@ check_own_resumption() {
   fi
 
   pairs=$(list_open_pr_pairs) || return 1
-  while IFS="$(printf '\t')" read -r num head body || [[ -n "${num:-}" ]]; do
+  while IFS="$(printf '\t')" read -r num head || [[ -n "${num:-}" ]]; do
     [[ -n "${num:-}" ]] || continue
     if ! branch_matches_issue "$head" "$issue"; then
       continue
@@ -1380,14 +1235,12 @@ check_own_resumption() {
       matched=1
       match_num="$num"
       match_head="$head"
-      match_body="$body"
       continue
     fi
     if [[ -z "$bound_pr" && -n "$bound_handoff" && "$head" == "$bound_handoff" ]]; then
       matched=1
       match_num="$num"
       match_head="$head"
-      match_body="$body"
       continue
     fi
     # Open PR for this issue that is not the lane's recorded ownership.
@@ -1406,10 +1259,11 @@ check_own_resumption() {
     die "lane $lane: open PR exists for issue #$issue without a matching state-bound pr:/handoff: — refuse to resume"
   fi
 
-  # State-bound own resumption requires exactly one machine-readable active-work
-  # claim line in the matching PR body, consistent with feat|fix/<issue>-<slug>.
+  # State-bound own resumption: fetch only the single candidate body, re-verify
+  # its metadata immediately, then require exactly one machine-readable claim.
   if [[ $matched -eq 1 ]]; then
-    body_raw=$(pr_body_decode "$match_body")
+    body_raw=$(fetch_bound_pr_body "$match_num" "$match_head" "$lane" "$issue") \
+      || return 1
     assert_pr_active_work_claim "$issue" "$lane" "$match_num" "$match_head" "$body_raw"
   fi
 }

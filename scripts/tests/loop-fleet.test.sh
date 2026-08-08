@@ -52,15 +52,126 @@ exit 0
 STUB
 chmod +x "$BIN/fake-runner"
 
-# gh stub — behavior via GH_STUB_MODE and optional per-issue files
+# gh stub — behavior via GH_STUB_MODE and optional per-issue / PR fixtures.
+# Mirrors production: pr list emits number<TAB>head TSV (gh --template shape);
+# pr view serves one raw body, then re-verifies its metadata before body trust.
 cat > "$BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 mode="${GH_STUB_MODE:-ok}"
 log="${GH_STUB_LOG:-}"
 [[ -n "$log" ]] && printf '%s\n' "$*" >> "$log"
 
+# --- helpers (test fixtures only; production never parses JSON bodies) -------
+# Unescape the simple JSON string escapes our fixtures use (\n \t \r \\ \").
+_stub_json_unescape() {
+  printf '%s' "${1:-}" | awk '
+    BEGIN { ORS="" }
+    {
+      s = $0
+      out = ""
+      while (length(s) > 0) {
+        ch = substr(s, 1, 1)
+        if (ch == "\\" && length(s) >= 2) {
+          c = substr(s, 2, 1)
+          if (c == "n") { out = out "\n"; s = substr(s, 3); continue }
+          if (c == "t") { out = out "\t"; s = substr(s, 3); continue }
+          if (c == "r") { out = out "\r"; s = substr(s, 3); continue }
+          if (c == "\\" || c == "\"") { out = out c; s = substr(s, 3); continue }
+          out = out substr(s, 1, 2)
+          s = substr(s, 3)
+          continue
+        }
+        out = out ch
+        s = substr(s, 2)
+      }
+      print out
+    }
+  '
+}
+
+# Emit number<TAB>head lines from GH_STUB_PR_JSON compact fixtures.
+# Do NOT strip interior whitespace — body strings must stay intact for view.
+_stub_emit_pr_list_tsv() {
+  local json="$1" core frag num head
+  case "$(printf '%s' "$json" | tr -d '[:space:]')" in
+    ''|'[]') return 0 ;;
+  esac
+  # Controlled single-line fixtures only — split on },{ is fine for tests.
+  core=$(printf '%s' "$json" | sed -e 's/^[[:space:]]*\[//' -e 's/\][[:space:]]*$//')
+  [[ -n "$core" ]] || return 0
+  printf '%s\n' "$core" | sed 's/},{/}\n{/g' | while IFS= read -r frag || [[ -n "$frag" ]]; do
+    [[ -n "$frag" ]] || continue
+    num=$(printf '%s' "$frag" | sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    head=$(printf '%s' "$frag" | sed -n 's/.*"headRefName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    if [[ -n "$num" && -n "$head" ]]; then
+      printf '%s\t%s\n' "$num" "$head"
+    fi
+  done
+}
+
+# Look up one PR object fragment by number from GH_STUB_PR_JSON.
+# Preserves body string whitespace/escapes for later unescape.
+_stub_pr_frag() {
+  local want="$1" json="${2:-}" core frag num
+  case "$(printf '%s' "$json" | tr -d '[:space:]')" in
+    ''|'[]') return 1 ;;
+  esac
+  core=$(printf '%s' "$json" | sed -e 's/^[[:space:]]*\[//' -e 's/\][[:space:]]*$//')
+  [[ -n "$core" ]] || return 1
+  printf '%s\n' "$core" | sed 's/},{/}\n{/g' | while IFS= read -r frag || [[ -n "$frag" ]]; do
+    [[ -n "$frag" ]] || continue
+    num=$(printf '%s' "$frag" | sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    if [[ "$num" == "$want" ]]; then
+      printf '%s\n' "$frag"
+      return 0
+    fi
+  done
+  return 1
+}
+
+_stub_pr_field_string() {
+  # Extract "field":"…" JSON string value (first match) and unescape.
+  local frag="$1" field="$2" raw
+  raw=$(printf '%s' "$frag" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\(.*\\)\".*/\\1/p" | head -1)
+  # sed above is greedy to last quote — for body with escaped quotes in fixtures
+  # we only use simple bodies. Prefer explicit body extraction below for body.
+  if [[ "$field" == "body" ]]; then
+    raw=$(printf '%s' "$frag" | awk '
+      {
+        line = $0
+        idx = index(line, "\"body\"")
+        if (idx == 0) { print ""; exit 0 }
+        rest = substr(line, idx + 6)
+        sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
+        if (rest ~ /^null/) { print ""; exit 0 }
+        if (substr(rest, 1, 1) != "\"") { print ""; exit 0 }
+        rest = substr(rest, 2)
+        out = ""
+        while (length(rest) > 0) {
+          ch = substr(rest, 1, 1)
+          if (ch == "\"") { print out; exit 0 }
+          if (ch == "\\") {
+            if (length(rest) < 2) { print out; exit 0 }
+            out = out substr(rest, 1, 2)
+            rest = substr(rest, 3)
+            continue
+          }
+          out = out ch
+          rest = substr(rest, 2)
+        }
+        print out
+      }
+    ')
+    _stub_json_unescape "$raw"
+    return 0
+  fi
+  _stub_json_unescape "$raw"
+}
+
 # Parse: gh issue view N --repo SLUG --json state,labels
-#        gh pr list --repo SLUG --state open --json number,headRefName --limit N
+#        gh pr list --repo SLUG --state open --json number,headRefName --limit N --template …
+#        gh pr view N --repo SLUG --json number,headRefName,state --template …
+#        gh pr view N --repo SLUG --json body --jq …
 if [[ "$1" == "issue" && "$2" == "view" ]]; then
   issue="$3"
   case "$mode" in
@@ -113,27 +224,157 @@ if [[ "$1" == "issue" && "$2" == "view" ]]; then
 fi
 
 if [[ "$1" == "pr" && "$2" == "list" ]]; then
-  # Optional full override (claimed+open-PR restart sensors).
-  # Must include number, headRefName, and body when exercising own-resumption.
-  if [[ -n "${GH_STUB_PR_JSON:-}" ]]; then
-    printf '%s\n' "$GH_STUB_PR_JSON"
+  # Force-fail the list command (formatter/transport failure).
+  if [[ "${GH_STUB_PR_LIST_FAIL:-0}" == "1" ]]; then
+    echo "gh stub: simulated pr list failure" >&2
+    exit 1
+  fi
+  # Raw override of formatter stdout (malformed metadata / garbage).
+  if [[ -n "${GH_STUB_PR_LIST_RAW+x}" ]]; then
+    printf '%s' "$GH_STUB_PR_LIST_RAW"
+    # Ensure trailing newline only when non-empty content lacks one.
+    if [[ -n "$GH_STUB_PR_LIST_RAW" && "$GH_STUB_PR_LIST_RAW" != *$'\n' ]]; then
+      printf '\n'
+    fi
+    exit 0
+  fi
+  if [[ -n "${GH_STUB_PR_TSV:-}" ]]; then
+    printf '%s\n' "$GH_STUB_PR_TSV"
     exit 0
   fi
   if [[ -n "${GH_STUB_PR_FILE:-}" && -f "${GH_STUB_PR_FILE}" ]]; then
-    cat "${GH_STUB_PR_FILE}"
+    # File may be legacy JSON array or pre-rendered TSV.
+    if head -c 1 "${GH_STUB_PR_FILE}" | grep -q '\['; then
+      _stub_emit_pr_list_tsv "$(cat "${GH_STUB_PR_FILE}")"
+    else
+      cat "${GH_STUB_PR_FILE}"
+    fi
+    exit 0
+  fi
+  if [[ -n "${GH_STUB_PR_JSON:-}" ]]; then
+    _stub_emit_pr_list_tsv "$GH_STUB_PR_JSON"
     exit 0
   fi
   case "$mode" in
     pr-conflict)
       # Emit a conflicting branch for issue 42 (used by conflict test)
-      echo '[{"number":9,"headRefName":"feat/42-password-reset","body":""}]'
+      printf '%s\t%s\n' "9" "feat/42-password-reset"
       exit 0
       ;;
     *)
-      echo '[]'
+      # Empty list — production treats empty formatter output as zero pairs.
       exit 0
       ;;
   esac
+fi
+
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+  prn="$3"
+  # Detect requested shape from remaining argv.
+  want_body=0
+  want_meta=0
+  local_args=("$@")
+  i=0
+  while [[ $i -lt ${#local_args[@]} ]]; do
+    a="${local_args[$i]}"
+    case "$a" in
+      --json)
+        i=$((i + 1))
+        fields="${local_args[$i]:-}"
+        case ",$fields," in
+          *,body,*) want_body=1 ;;
+        esac
+        case ",$fields," in
+          *,number,*|*,headRefName,*|*,state,*) want_meta=1 ;;
+        esac
+        ;;
+      --jq)
+        i=$((i + 1))
+        jqexpr="${local_args[$i]:-}"
+        case "$jqexpr" in
+          *body*) want_body=1 ;;
+        esac
+        ;;
+      --template)
+        i=$((i + 1))
+        tmpl="${local_args[$i]:-}"
+        case "$tmpl" in
+          *body*) want_body=1 ;;
+          *number*|*headRefName*|*state*) want_meta=1 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  if [[ $want_meta -eq 1 ]]; then
+    if [[ "${GH_STUB_PR_VIEW_FAIL:-0}" == "1" ]]; then
+      echo "gh stub: simulated pr view failure" >&2
+      exit 1
+    fi
+    # Override: "number<TAB>head<TAB>state" for race sensors.
+    if [[ -n "${GH_STUB_PR_VIEW_META:-}" ]]; then
+      printf '%s\n' "$GH_STUB_PR_VIEW_META"
+      exit 0
+    fi
+    if [[ -n "${GH_STUB_PR_VIEW_META_FILE:-}" && -f "${GH_STUB_PR_VIEW_META_FILE}" ]]; then
+      cat "${GH_STUB_PR_VIEW_META_FILE}"
+      exit 0
+    fi
+    # Resolve from GH_STUB_PR_JSON fixture.
+    frag=""
+    if [[ -n "${GH_STUB_PR_JSON:-}" ]]; then
+      frag=$(_stub_pr_frag "$prn" "$GH_STUB_PR_JSON" || true)
+    fi
+    if [[ -z "$frag" && -n "${GH_STUB_PR_FILE:-}" && -f "${GH_STUB_PR_FILE}" ]]; then
+      frag=$(_stub_pr_frag "$prn" "$(cat "${GH_STUB_PR_FILE}")" || true)
+    fi
+    if [[ -z "$frag" ]]; then
+      echo "gh stub: pr view #$prn not found in fixtures" >&2
+      exit 1
+    fi
+    num=$(printf '%s' "$frag" | sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    head=$(printf '%s' "$frag" | sed -n 's/.*"headRefName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    state="OPEN"
+    # Optional "state" in fixture.
+    if printf '%s' "$frag" | grep -q '"state"[[:space:]]*:'; then
+      state=$(printf '%s' "$frag" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    fi
+    printf '%s\t%s\t%s\n' "$num" "$head" "$state"
+    exit 0
+  fi
+
+  if [[ $want_body -eq 1 ]]; then
+    if [[ "${GH_STUB_PR_VIEW_BODY_FAIL:-0}" == "1" ]]; then
+      echo "gh stub: simulated pr body fetch failure" >&2
+      exit 1
+    fi
+    if [[ -n "${GH_STUB_PR_VIEW_BODY+x}" ]]; then
+      # Explicit raw body override (may be empty).
+      printf '%s' "$GH_STUB_PR_VIEW_BODY"
+      exit 0
+    fi
+    if [[ -n "${GH_STUB_PR_BODY_DIR:-}" && -f "${GH_STUB_PR_BODY_DIR}/${prn}.body" ]]; then
+      cat "${GH_STUB_PR_BODY_DIR}/${prn}.body"
+      exit 0
+    fi
+    frag=""
+    if [[ -n "${GH_STUB_PR_JSON:-}" ]]; then
+      frag=$(_stub_pr_frag "$prn" "$GH_STUB_PR_JSON" || true)
+    fi
+    if [[ -z "$frag" && -n "${GH_STUB_PR_FILE:-}" && -f "${GH_STUB_PR_FILE}" ]]; then
+      frag=$(_stub_pr_frag "$prn" "$(cat "${GH_STUB_PR_FILE}")" || true)
+    fi
+    if [[ -z "$frag" ]]; then
+      echo "gh stub: pr body #$prn not found in fixtures" >&2
+      exit 1
+    fi
+    _stub_pr_field_string "$frag" "body"
+    exit 0
+  fi
+
+  echo "gh stub: pr view unhandled shape: $*" >&2
+  exit 2
 fi
 
 echo "gh stub: unhandled: $*" >&2
@@ -255,7 +496,15 @@ run_fleet() {
     GH_STUB_ISSUE_DIR="${GH_STUB_ISSUE_DIR:-}" \
     GH_STUB_PR_JSON="${GH_STUB_PR_JSON:-}" \
     GH_STUB_PR_FILE="${GH_STUB_PR_FILE:-}" \
+    GH_STUB_PR_TSV="${GH_STUB_PR_TSV:-}" \
+    GH_STUB_PR_LIST_FAIL="${GH_STUB_PR_LIST_FAIL:-0}" \
+    GH_STUB_PR_VIEW_FAIL="${GH_STUB_PR_VIEW_FAIL:-0}" \
+    GH_STUB_PR_VIEW_BODY_FAIL="${GH_STUB_PR_VIEW_BODY_FAIL:-0}" \
+    GH_STUB_PR_VIEW_META="${GH_STUB_PR_VIEW_META:-}" \
+    GH_STUB_PR_BODY_DIR="${GH_STUB_PR_BODY_DIR:-}" \
     FLEET_PROFILE="${FLEET_PROFILE:-}" \
+    ${GH_STUB_PR_LIST_RAW+GH_STUB_PR_LIST_RAW="$GH_STUB_PR_LIST_RAW"} \
+    ${GH_STUB_PR_VIEW_BODY+GH_STUB_PR_VIEW_BODY="$GH_STUB_PR_VIEW_BODY"} \
     "$FLEET" "$@" 2>&1
 }
 
@@ -2847,10 +3096,22 @@ out=$(run_fleet --start) || { bad "fix/ branch claim should relaunch: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "fix/ branch active-work claim relaunches" \
   || bad "fix claim launches=$lc out=$out"
+
+# Trailing explanatory text after claim id must fail (exact id only).
+export GH_STUB_PR_JSON='[{"number":511,"headRefName":"fix/410-hotfix-lane","body":"- Active-work claim: issue-410-hotfix-lane (see notes)\n"}]'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "trailing claim text should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed|does not match head|foreign slug|refuse to resume' \
+    && ok "trailing claim text refused" \
+    || bad "unclear trailing-claim-text fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "trailing claim text launched zero" || bad "trailing claim text launched $lc"
 unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
 
-# --- C1b: no-jq positive + negative PR list parse --------------------------
-echo "no-jq open-PR list parse (pos + malform)"
+# --- C1b: no-external-jq (gh built-in formatter only) ----------------------
+echo "no-external-jq PR list/view (gh formatter only)"
 reset_calls
 TARGET=$(setup_target_repo nojqpr acme/widget)
 PROF="$ROOT/profiles/nojqpr.profile"
@@ -2866,7 +3127,7 @@ write_profile "$PROF" \
   "lane=docs|420|docs/**|no jq pr"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-# Hide system jq so the no-jq parser path is exercised.
+# Hide system jq/python/perl so production cannot fall back to external parsers.
 NOJQ_BIN="$ROOT/nojq-bin"
 rm -rf "$NOJQ_BIN"
 mkdir -p "$NOJQ_BIN"
@@ -2890,6 +3151,13 @@ run_nojq() {
     GH_STUB_MODE="${GH_STUB_MODE:-ok}" \
     GH_STUB_ISSUE_DIR="${GH_STUB_ISSUE_DIR:-}" \
     GH_STUB_PR_JSON="${GH_STUB_PR_JSON:-}" \
+    GH_STUB_PR_TSV="${GH_STUB_PR_TSV:-}" \
+    GH_STUB_PR_LIST_FAIL="${GH_STUB_PR_LIST_FAIL:-0}" \
+    GH_STUB_PR_VIEW_FAIL="${GH_STUB_PR_VIEW_FAIL:-0}" \
+    GH_STUB_PR_VIEW_META="${GH_STUB_PR_VIEW_META:-}" \
+    GH_STUB_PR_BODY_DIR="${GH_STUB_PR_BODY_DIR:-}" \
+    ${GH_STUB_PR_LIST_RAW+GH_STUB_PR_LIST_RAW="$GH_STUB_PR_LIST_RAW"} \
+    ${GH_STUB_PR_VIEW_BODY+GH_STUB_PR_VIEW_BODY="$GH_STUB_PR_VIEW_BODY"} \
     FLEET_PROFILE="$PROF" \
     "$FLEET" --profile "$PROF" "$@" 2>&1
 }
@@ -2917,36 +3185,39 @@ export GH_STUB_PR_JSON='[{"number":520,"headRefName":"feat/420-nojq","body":"- A
 : > "$CALLS/launches.log"
 out=$(run_nojq --start) || { bad "no-jq positive claim resume failed: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "1" ]] && ok "no-jq positive PR list + claim resumes" \
-  || bad "no-jq positive launches=$lc out=$out"
+[[ "$lc" == "1" ]] && ok "no-external-jq positive PR list + claim resumes" \
+  || bad "no-external-jq positive launches=$lc out=$out"
 
-# Malformed non-empty JSON fails closed (not treated as empty).
-export GH_STUB_PR_JSON='{"not":"an-array"}'
+# Malformed formatter stdout (not TSV) fails closed — never treated as empty.
+unset GH_STUB_PR_JSON
+export GH_STUB_PR_LIST_RAW='{"not":"an-array"}'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
-out=$(run_nojq --start 2>&1) && bad "no-jq malformed should fail: $out" || {
-  echo "$out" | grep -qiE 'not a JSON array|cannot parse|malformed|refuse' \
-    && ok "no-jq malformed PR list refused" \
-    || bad "unclear no-jq malformed fail: $out"
+out=$(run_nojq --start 2>&1) && bad "malformed list formatter output should fail: $out" || {
+  echo "$out" | grep -qiE 'missing TAB|invalid number|malformed|refuse|cannot list' \
+    && ok "malformed PR list formatter output refused" \
+    || bad "unclear malformed-list fail: $out"
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "0" ]] && ok "no-jq malformed launched zero" || bad "no-jq malformed launched $lc"
+[[ "$lc" == "0" ]] && ok "malformed list formatter launched zero" || bad "malformed list formatter launched $lc"
+unset GH_STUB_PR_LIST_RAW
 
-# Missing number field fails closed.
-export GH_STUB_PR_JSON='[{"headRefName":"feat/420-nojq","body":""}]'
+# Row with head only (missing number field shape) fails closed.
+export GH_STUB_PR_LIST_RAW=$'\tfeat/420-nojq\n'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
-out=$(run_nojq --start 2>&1) && bad "no-jq missing number should fail: $out" || {
-  echo "$out" | grep -qiE 'missing/invalid number|invalid or missing|refuse' \
-    && ok "no-jq missing number refused" \
-    || bad "unclear no-jq missing-number fail: $out"
+out=$(run_nojq --start 2>&1) && bad "missing number row should fail: $out" || {
+  echo "$out" | grep -qiE 'invalid number|missing TAB|refuse' \
+    && ok "missing number row refused" \
+    || bad "unclear missing-number-row fail: $out"
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "0" ]] && ok "no-jq missing number launched zero" || bad "no-jq missing number launched $lc"
+[[ "$lc" == "0" ]] && ok "missing number row launched zero" || bad "missing number row launched $lc"
+unset GH_STUB_PR_LIST_RAW
 unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
 
-# --- C1c: jq parse error fails closed (not empty list) ---------------------
-echo "jq PR list parse error fails closed"
+# --- C1c: list formatter failure + metadata validation fail-closed ----------
+echo "PR list formatter failure + metadata validation"
 reset_calls
 TARGET=$(setup_target_repo jqerr acme/widget)
 PROF="$ROOT/profiles/jqerr.profile"
@@ -2959,10 +3230,10 @@ write_profile "$PROF" \
   "fleet_dir=$ROOT/fleet" \
   "log_dir=$ROOT/logs" \
   "runner=fake-runner" \
-  "lane=docs|421|docs/**|jq err"
+  "lane=docs|421|docs/**|list fail"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-out=$(run_fleet --start) || { bad "jqerr initial start failed: $out"; }
+out=$(run_fleet --start) || { bad "listfail initial start failed: $out"; }
 STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
 ISSUEDIR="$ROOT/gh-issues-jqerr"
 mkdir -p "$ISSUEDIR"
@@ -2977,21 +3248,305 @@ hat: builder
 next_hat: builder
 round: 1
 parked: false
-next_action: jq err
+next_action: list fail
 notes: >
-  bad json
+  formatter down
 STATE
 rm -f "$LOG_DIR/docs.pid"
-export GH_STUB_PR_JSON='this is not json at all'
+export GH_STUB_PR_LIST_FAIL=1
 : > "$CALLS/launches.log"
-out=$(run_fleet --start 2>&1) && bad "jq parse error should fail: $out" || {
-  echo "$out" | grep -qiE 'cannot parse open PR list|jq:|parse' \
-    && ok "jq PR list parse error refused" \
-    || bad "unclear jq-parse fail: $out"
+out=$(run_fleet --start 2>&1) && bad "list formatter failure should fail: $out" || {
+  echo "$out" | grep -qiE 'cannot list open PRs|pr list failure|simulated pr list' \
+    && ok "PR list formatter failure refused" \
+    || bad "unclear list-formatter-fail: $out"
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "0" ]] && ok "jq parse error launched zero" || bad "jq parse error launched $lc"
+[[ "$lc" == "0" ]] && ok "list formatter failure launched zero" || bad "list formatter failure launched $lc"
+unset GH_STUB_PR_LIST_FAIL
+
+# Garbage non-TSV list output fails closed (not empty inventory).
+export GH_STUB_PR_LIST_RAW='this is not tsv metadata at all'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "garbage list metadata should fail: $out" || {
+  echo "$out" | grep -qiE 'missing TAB|invalid number|refuse|cannot list' \
+    && ok "garbage list metadata refused" \
+    || bad "unclear garbage-list fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "garbage list metadata launched zero" || bad "garbage list metadata launched $lc"
+unset GH_STUB_PR_LIST_RAW
 unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- C1d: hostile bodies cannot confuse ownership metadata ------------------
+echo "hostile PR bodies cannot alter ownership metadata"
+reset_calls
+TARGET=$(setup_target_repo hostile acme/widget)
+PROF="$ROOT/profiles/hostile.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hostilebody" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|422|docs/**|hostile body"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "hostile initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+ISSUEDIR="$ROOT/gh-issues-hostile"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/422.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-10T12:00:00Z
+issue: 422
+pr: 522
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: hostile body
+notes: >
+  body may look like JSON
+STATE
+BODYDIR="$ROOT/gh-pr-bodies-hostile"
+mkdir -p "$BODYDIR"
+# List metadata stays clean; body alone carries every hostile token.
+export GH_STUB_PR_TSV=$'522\tfeat/422-hostile-body'
+export GH_STUB_PR_VIEW_META=$'522\tfeat/422-hostile-body\tOPEN'
+# Hostile body: escaped field-like strings, literal },{, unicode, tabs, newlines,
+# fake number/head text — must not manufacture ownership or a claim.
+cat > "$BODYDIR/522.body" <<'BODY'
+## Summary
+
+Hostile content that must never be parsed as PR metadata:
+
+- fake JSON fragment: {"number":999,"headRefName":"feat/999-pwned","body":"nope"}
+- escaped field-like: \"number\": 888 and \"headRefName\": \"feat/888-evil\"
+- literal object split bait: },{
+- unicode: café — 日本語 — emoji 🚀
+- tabs and newlines mixed:
+	indented-with-tab
+line two after real newline
+- fake claim-shaped prose (not column-zero machine line):
+  Active-work claim: issue-422-hostile-body
+  - Active-work claim: issue-999-pwned
+  number: 522 headRefName: feat/422-hostile-body
+
+Real claim is exact and alone on its line:
+
+- Active-work claim: issue-422-hostile-body
+BODY
+export GH_STUB_PR_BODY_DIR="$BODYDIR"
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "hostile body with valid claim should resume: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "hostile body with exact claim resumes" \
+  || bad "hostile body launches=$lc out=$out"
+
+# Same hostile body WITHOUT the exact claim line → refuse (fake prose is not enough).
+cat > "$BODYDIR/522.body" <<'BODY'
+## Summary
+
+{"number":999,"headRefName":"feat/999-pwned"}
+},{
+\"number\": 888
+- Active-work claim: issue-999-pwned
+  - Active-work claim: issue-422-hostile-body
+tabs:	here
+unicode: 日本語
+BODY
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "hostile body without exact claim should fail: $out" || {
+  echo "$out" | grep -qiE 'Active-work claim|no .*claim|refuse to resume|foreign' \
+    && ok "hostile body without exact claim refused" \
+    || bad "unclear hostile-no-claim fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "hostile body without claim launched zero" || bad "hostile no-claim launched $lc"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_TSV GH_STUB_PR_BODY_DIR GH_STUB_PR_VIEW_META GH_STUB_PR_JSON
+
+# --- C1e: view failure, list/view races, closed-state, duplicates, truncation -
+echo "PR view failure, races, closed-state, duplicates, truncation"
+reset_calls
+TARGET=$(setup_target_repo races acme/widget)
+PROF="$ROOT/profiles/races.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=races" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|423|docs/**|race sensors"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "races initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+ISSUEDIR="$ROOT/gh-issues-races"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/423.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-11T00:00:00Z
+issue: 423
+pr: 523
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: race sensors
+notes: >
+  re-verify
+STATE
+export GH_STUB_PR_JSON='[{"number":523,"headRefName":"feat/423-race","body":"- Active-work claim: issue-423-race\n"}]'
+
+# Body fetch failure fails closed before metadata can authorize stale content.
+export GH_STUB_PR_VIEW_BODY_FAIL=1
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+: > "$GH_STUB_LOG"
+out=$(run_fleet --start 2>&1) && bad "body fetch failure should fail: $out" || {
+  echo "$out" | grep -qiE 'cannot fetch body|simulated pr body' \
+    && ok "PR body fetch failure refused" \
+    || bad "unclear body-fetch-failure: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "body fetch failure launched zero" || bad "body fetch failure launched $lc"
+if grep -q '^pr view 523 .*--json body ' "$GH_STUB_LOG" &&
+   ! grep -q '^pr view 523 .*--json number,headRefName,state ' "$GH_STUB_LOG"; then
+  ok "body fetch failure never reached metadata authorization"
+else
+  bad "body fetch failure command order/log: $(tr '\n' ' ' < "$GH_STUB_LOG")"
+fi
+unset GH_STUB_PR_VIEW_BODY_FAIL
+
+# Metadata view failure after body fetch fails closed.
+export GH_STUB_PR_VIEW_FAIL=1
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+: > "$GH_STUB_LOG"
+out=$(run_fleet --start 2>&1) && bad "view failure should fail: $out" || {
+  echo "$out" | grep -qiE 'cannot view state-bound PR|re-verify failed|simulated pr view' \
+    && ok "PR view failure refused" \
+    || bad "unclear view-failure fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "PR view failure launched zero" || bad "PR view failure launched $lc"
+body_line=$(grep -n '^pr view 523 .*--json body ' "$GH_STUB_LOG" | tail -1 | cut -d: -f1)
+meta_line=$(grep -n '^pr view 523 .*--json number,headRefName,state ' "$GH_STUB_LOG" | tail -1 | cut -d: -f1)
+if [[ -n "$body_line" && -n "$meta_line" && "$body_line" -lt "$meta_line" ]]; then
+  ok "candidate body fetch precedes immediate metadata re-verify"
+else
+  bad "body/re-verify command order: $(tr '\n' ' ' < "$GH_STUB_LOG")"
+fi
+unset GH_STUB_PR_VIEW_FAIL
+
+# List/view number mismatch (race) fails closed.
+export GH_STUB_PR_VIEW_META=$'999\tfeat/423-race\tOPEN'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "number mismatch race should fail: $out" || {
+  echo "$out" | grep -qiE 'number mismatch|list/view race|refuse' \
+    && ok "list/view number mismatch refused" \
+    || bad "unclear number-mismatch fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "number mismatch launched zero" || bad "number mismatch launched $lc"
+
+# List/view head mismatch fails closed.
+export GH_STUB_PR_VIEW_META=$'523\tfeat/423-other-head\tOPEN'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "head mismatch race should fail: $out" || {
+  echo "$out" | grep -qiE 'head mismatch|list/view race|refuse' \
+    && ok "list/view head mismatch refused" \
+    || bad "unclear head-mismatch fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "head mismatch launched zero" || bad "head mismatch launched $lc"
+
+# Closed-state race fails closed.
+export GH_STUB_PR_VIEW_META=$'523\tfeat/423-race\tCLOSED'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "closed-state race should fail: $out" || {
+  echo "$out" | grep -qiE 'not OPEN|closed-state race|state=CLOSED' \
+    && ok "closed-state race refused" \
+    || bad "unclear closed-state fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "closed-state race launched zero" || bad "closed-state race launched $lc"
+unset GH_STUB_PR_VIEW_META
+
+# Malformed re-verify metadata fails closed.
+export GH_STUB_PR_VIEW_META='not-meta-at-all'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "malformed view metadata should fail: $out" || {
+  echo "$out" | grep -qiE 're-verify metadata is malformed|malformed|refuse' \
+    && ok "malformed view metadata refused" \
+    || bad "unclear malformed-view-meta fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "malformed view metadata launched zero" || bad "malformed view metadata launched $lc"
+unset GH_STUB_PR_VIEW_META
+
+# Duplicate PR numbers in list fail closed.
+unset GH_STUB_PR_JSON
+export GH_STUB_PR_LIST_RAW=$'523\tfeat/423-race\n523\tfeat/423-dup\n'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "duplicate PR numbers should fail: $out" || {
+  echo "$out" | grep -qiE 'duplicate PR number|ambiguous inventory|refuse' \
+    && ok "duplicate PR numbers refused" \
+    || bad "unclear dup-number fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "duplicate PR numbers launched zero" || bad "duplicate PR numbers launched $lc"
+
+# Duplicate heads fail closed.
+export GH_STUB_PR_LIST_RAW=$'523\tfeat/423-race\n524\tfeat/423-race\n'
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "duplicate heads should fail: $out" || {
+  echo "$out" | grep -qiE 'duplicate/conflicting headRefName|ambiguous inventory|refuse' \
+    && ok "duplicate heads refused" \
+    || bad "unclear dup-head fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "duplicate heads launched zero" || bad "duplicate heads launched $lc"
+
+# Truncation: exactly OPEN_PR_LIST_LIMIT rows fails closed (via file fixture).
+TRUNC_FILE="$ROOT/trunc-pr.tsv"
+: > "$TRUNC_FILE"
+i=1
+while [[ $i -le 1000 ]]; do
+  printf '%s\tfeat/trunc-%s\n' "$i" "$i" >> "$TRUNC_FILE"
+  i=$((i + 1))
+done
+unset GH_STUB_PR_JSON GH_STUB_PR_TSV GH_STUB_PR_LIST_RAW
+export GH_STUB_PR_FILE="$TRUNC_FILE"
+rm -f "$LOG_DIR/docs.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "truncation limit should fail: $out" || {
+  echo "$out" | grep -qiE 'truncation risk|limit 1000|refuse to hide conflicts' \
+    && ok "truncation at limit refused" \
+    || bad "unclear truncation fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "truncation launched zero" || bad "truncation launched $lc"
+unset GH_STUB_PR_FILE GH_STUB_ISSUE_DIR GH_STUB_PR_JSON GH_STUB_PR_TSV GH_STUB_PR_VIEW_META GH_STUB_PR_LIST_RAW
 
 # --- C2: healthy missing state fails closed; foreign marker + stale pid -----
 echo "healthy missing-state + foreign-marker stale pid non-mutating"
