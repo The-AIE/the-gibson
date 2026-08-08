@@ -222,17 +222,35 @@ check_unstaged_protected_tracked() {
 # Unstage every path in _protected_staged using literal pathspecs so glob or
 # pathspec-magic characters in a protected filename cannot match other paths.
 # Runs at the repository root (root-relative names from the staged scan).
+# set -e safe: one failed reset must never abort the loop or later offenders.
+# On reset failure (e.g. unborn HEAD, transient index lock), fall back to an
+# index-only `rm --cached --ignore-unmatch` of the exact literal path — never
+# touches working-tree content or unrelated staging. Always returns normally so
+# the guarded-add caller can finish with exit 86 after a protected finding.
+# Emits one bounded diagnostic per offender that remains staged; never dumps
+# raw git/environment output.
 rollback_protected_staged() {
-  local path
+  local path still
   # Bash 3.2 + set -u: "${arr[@]}" is unbound when arr is empty — guard first.
   # Empty _protected_staged is a no-op (also covers enumeration-failure path).
   [[ ${#_protected_staged[@]} -eq 0 ]] && return 0
-  # One reset per offender with :(literal) so glob/pathspec-magic characters in
-  # a protected filename never match another index path (Bash 3.2-safe; no
-  # local arrays).
+  # One attempt per offender with :(literal) so glob/pathspec-magic characters
+  # in a protected filename never match another index path (Bash 3.2-safe).
   for path in "${_protected_staged[@]}"; do
-    "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}"
+    if ! "$REAL_GIT" -C "$current_root" reset -q -- ":(literal)${path}" 2>/dev/null; then
+      # Index-only fallback; --ignore-unmatch keeps a missing entry non-fatal.
+      "$REAL_GIT" -C "$current_root" rm -q --cached --ignore-unmatch -- \
+        ":(literal)${path}" 2>/dev/null || true
+    fi
+    # still != 0: staged difference remains (1) or git could not check (e.g. 128).
+    still=0
+    "$REAL_GIT" -C "$current_root" diff --cached --quiet -- ":(literal)${path}" \
+      2>/dev/null || still=$?
+    if [[ "$still" -ne 0 ]]; then
+      echo "gibson repo-boundary guard: could not unstage '$path'" >&2
+    fi
   done
+  return 0
 }
 
 # Run real `git add`, always scan the index afterward (including after a

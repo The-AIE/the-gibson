@@ -408,7 +408,13 @@ git -C "$ROOT" reset -q 2>/dev/null || true
 # --- commit_form_includes_worktree: deterministic parser sensors ------------
 # Extract the classifier without executing the guard body (script runs on load).
 # Pure function tests — no git, no hang risk for interactive forms.
+# Repository-owned source only (not external input); assert the function is
+# defined after eval so a renamed/empty extraction cannot false-green the
+# _parser_expect_no sensors (undefined → nonzero → "does not include worktree").
 eval "$(sed -n '/^commit_form_includes_worktree()/,/^}/p' "$GUARD")"
+if ! declare -f commit_form_includes_worktree >/dev/null 2>&1; then
+  bad "parser: could not extract commit_form_includes_worktree from $GUARD"
+else
 _parser_expect_yes() {
   local label="$1"
   shift
@@ -463,6 +469,7 @@ _parser_expect_no "attached -Sa (S payload a not flag)" commit -Sa -m msg
 # Actual worktree flags and combined forms still fail closed.
 _parser_expect_yes "plain -a still worktree" commit -a -m msg
 _parser_expect_yes "combined -am still worktree" commit -am msg
+fi
 
 # --- e2e: non-interactive pathspec-from-file protected worktree bypass ------
 # Must not hang (no editor / patch UI). Dirty protected tracked path + equals
@@ -769,14 +776,20 @@ REAL_GIT=$(command -v git)
 # shellcheck disable=SC2034
 current_root="$ROOT_PHYS"
 _protected_staged=("$STAR_NAME")
+# Repository-owned source only; assert the function is defined after eval so an
+# empty extraction cannot leave prior suite state or skip the selectivity probe.
 eval "$(sed -n '/^rollback_protected_staged()/,/^}/p' "$GUARD")"
-rollback_protected_staged
-still_star=$(git -C "$ROOT" diff --cached --name-only | grep -F "$STAR_NAME" || true)
-still_bracket=$(git -C "$ROOT" diff --cached --name-only | grep -F "$BRACKET_NAME" || true)
-if [[ -z "$still_star" && -n "$still_bracket" ]]; then
-  ok "literal rollback unstages only star-named protected path"
+if ! declare -f rollback_protected_staged >/dev/null 2>&1; then
+  bad "literal rollback: could not extract rollback_protected_staged from $GUARD"
 else
-  bad "literal rollback selectivity (star='$still_star' bracket='$still_bracket' staged=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' '))"
+  rollback_protected_staged
+  still_star=$(git -C "$ROOT" diff --cached --name-only | grep -F "$STAR_NAME" || true)
+  still_bracket=$(git -C "$ROOT" diff --cached --name-only | grep -F "$BRACKET_NAME" || true)
+  if [[ -z "$still_star" && -n "$still_bracket" ]]; then
+    ok "literal rollback unstages only star-named protected path"
+  else
+    bad "literal rollback selectivity (star='$still_star' bracket='$still_bracket' staged=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' '))"
+  fi
 fi
 # Full guarded add of star-named path alone: reject + unstage that path.
 git -C "$ROOT" reset -q 2>/dev/null || true
@@ -946,6 +959,173 @@ fi
 rm -f "$FAKE_STAGED" "$FAKE_UNSTAGED" "$DELEGATE_LOG"
 git -C "$ROOT" checkout -q HEAD -- .agents/gate.json README.md 2>/dev/null || true
 git -C "$ROOT" reset -q 2>/dev/null || true
+
+# --- unborn HEAD: real-git selective rollback of protected add --------------
+# Repository with zero commits (unborn HEAD). Protected add must exit 86,
+# unstage the offender (reset and/or index-only fallback), leave legitimate
+# staged work, and not wipe working-tree content of the protected path.
+UNBORN=$(mktemp -d "${TMPDIR:-/tmp}/gibson-repo-guard-unborn.XXXXXX")
+trap 'rm -rf "$ROOT" "$ALIAS_DIR" "$OTHER" "$UNBORN"' EXIT
+git -C "$UNBORN" init -q -b main
+git -C "$UNBORN" config user.email test@gibson.invalid
+git -C "$UNBORN" config user.name gibson-test
+mkdir -p "$UNBORN/.agents"
+printf 'unborn-legit\n' > "$UNBORN/README.md"
+printf 'unborn-forbidden\n' > "$UNBORN/.agents/gate.json"
+# Stage legitimate path first (no prior HEAD/commit required for add).
+run_guard_in "$UNBORN" "$UNBORN" add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "unborn HEAD: legitimate README add (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+  unborn_legit_blob=""
+else
+  unborn_legit_blob=$(git -C "$UNBORN" rev-parse :README.md 2>/dev/null || true)
+  if [[ -n "$unborn_legit_blob" ]]; then
+    ok "unborn HEAD: legitimate README staged before protected add"
+  else
+    bad "unborn HEAD: legitimate README staged before protected add (no index blob)"
+  fi
+fi
+run_guard_in "$UNBORN" "$UNBORN" add .agents/gate.json >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -eq 86 ]] && grep -q "control-plane file '.agents/gate.json'" "$ROOT/err"; then
+  ok "unborn HEAD: protected add rejected with diagnostic (exit $rc)"
+else
+  bad "unborn HEAD: protected add (rc=$rc err=$(tr '\n' ' ' <"$ROOT/err"))"
+fi
+still_protected=$(git -C "$UNBORN" diff --cached --name-only | grep -E '^\.agents/gate\.json$' || true)
+if [[ -z "$still_protected" ]]; then
+  ok "unborn HEAD: protected path unstaged after rollback"
+else
+  bad "unborn HEAD: protected still staged: $still_protected"
+fi
+after_blob=$(git -C "$UNBORN" rev-parse :README.md 2>/dev/null || true)
+staged_names=$(git -C "$UNBORN" diff --cached --name-only)
+if [[ -n "$unborn_legit_blob" && "$after_blob" == "$unborn_legit_blob" && "$staged_names" == "README.md" ]]; then
+  ok "unborn HEAD: legitimate README remains staged byte-for-byte"
+else
+  bad "unborn HEAD: README survival (blob before=$unborn_legit_blob after=$after_blob staged=$(echo "$staged_names" | tr '\n' ' '))"
+fi
+# Working-tree content of the protected path must still exist (index-only ops).
+if [[ -f "$UNBORN/.agents/gate.json" ]] && grep -q 'unborn-forbidden' "$UNBORN/.agents/gate.json"; then
+  ok "unborn HEAD: protected working-tree content left intact"
+else
+  bad "unborn HEAD: protected working-tree content missing or altered"
+fi
+
+# --- fake-git: reset+fallback fail on first offender; later still attempted --
+# Deterministic shim: first protected path's reset and rm --cached both fail;
+# second path's reset succeeds via real git. Guarded add must still exit 86,
+# attempt both offenders, leave the second unstaged, preserve legitimate README,
+# and emit a bounded "could not unstage" diagnostic for the first path only.
+printf 'rollback-fail-legit\n' > "$ROOT/README.md"
+run_guard add README.md >/dev/null 2>"$ROOT/err"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  bad "stage README before rollback-fail shim (rc=$rc)"
+  rb_legit_blob=""
+else
+  rb_legit_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+fi
+printf 'rollback-fail-a\n' > "$ROOT/.agents/gate.json"
+printf 'rollback-fail-b\n' > "$ROOT/.gibson-gate.json"
+REAL_GIT_BIN=$(command -v git)
+RB_ATTEMPT_LOG="$ROOT/fake-git-rollback-attempts.log"
+FAKE_RB="$ROOT/fake-git-rollback-fail.sh"
+rm -f "$RB_ATTEMPT_LOG"
+cat > "$FAKE_RB" <<EOF
+#!/usr/bin/env bash
+# Passthrough except: on add stage both protected paths via real git; on
+# reset/rm of .agents/gate.json force failure; log reset/rm attempts.
+# Skip leading -C <dir> to find the subcommand (guard always uses -C).
+_args=("\$@")
+_sub=""
+_i=0
+while [[ "\$_i" -lt \${#_args[@]} ]]; do
+  if [[ "\${_args[\$_i]}" == "-C" ]]; then
+    _i=\$((_i + 2))
+    continue
+  fi
+  _sub="\${_args[\$_i]}"
+  break
+done
+if [[ "\$_sub" == "add" ]]; then
+  "$REAL_GIT_BIN" -C "$ROOT" add -- .agents/gate.json .gibson-gate.json
+  exit 0
+fi
+if [[ "\$_sub" == "reset" || "\$_sub" == "rm" ]]; then
+  _target=""
+  for _a in "\${_args[@]}"; do
+    # Exact literal pathspecs from rollback_protected_staged.
+    if [[ "\$_a" == ":(literal).agents/gate.json" || "\$_a" == ".agents/gate.json" ]]; then
+      _target="gate.json"
+    elif [[ "\$_a" == ":(literal).gibson-gate.json" || "\$_a" == ".gibson-gate.json" ]]; then
+      _target="gibson-gate.json"
+    fi
+  done
+  if [[ -n "\$_target" ]]; then
+    printf '%s %s\n' "\$_sub" "\$_target" >> "$RB_ATTEMPT_LOG"
+  fi
+  if [[ "\$_target" == "gate.json" ]]; then
+    # Force failure for the first offender (reset and fallback both fail).
+    exit 128
+  fi
+  exec "$REAL_GIT_BIN" "\$@"
+fi
+exec "$REAL_GIT_BIN" "\$@"
+EOF
+chmod +x "$FAKE_RB"
+(cd "$ROOT" &&
+  GIBSON_REAL_GIT="$FAKE_RB" \
+  GIBSON_TARGET_REPO="$ROOT" \
+  GIBSON_EXPECTED_REPO_SLUG="acme/app" \
+  "$GUARD" add .agents/gate.json .gibson-gate.json) >/dev/null 2>"$ROOT/err"
+rc=$?
+err_txt=$(tr '\n' ' ' <"$ROOT/err")
+if [[ "$rc" -eq 86 ]] &&
+   grep -q "control-plane file '.agents/gate.json'" "$ROOT/err" &&
+   grep -q "control-plane file '.gibson-gate.json'" "$ROOT/err"; then
+  ok "rollback-fail shim: guarded add exits 86 with per-path diagnostics"
+else
+  bad "rollback-fail shim: exit/diagnostics (rc=$rc err=$err_txt)"
+fi
+if grep -q "could not unstage '.agents/gate.json'" "$ROOT/err"; then
+  ok "rollback-fail shim: bounded could-not-unstage diagnostic for first offender"
+else
+  bad "rollback-fail shim: missing could-not-unstage diagnostic (err=$err_txt)"
+fi
+# Attempt log: both reset (and fallback rm) for gate.json, plus later gibson path.
+if grep -q '^reset gate.json$' "$RB_ATTEMPT_LOG" 2>/dev/null &&
+   grep -q '^rm gate.json$' "$RB_ATTEMPT_LOG" 2>/dev/null &&
+   grep -qE '^(reset|rm) gibson-gate.json$' "$RB_ATTEMPT_LOG" 2>/dev/null; then
+  ok "rollback-fail shim: later offender attempted after first reset/fallback failure"
+else
+  bad "rollback-fail shim: attempt order (log=$(tr '\n' ' ' <"$RB_ATTEMPT_LOG" 2>/dev/null))"
+fi
+still_first=$(git -C "$ROOT" diff --cached --name-only | grep -E '^\.agents/gate\.json$' || true)
+still_second=$(git -C "$ROOT" diff --cached --name-only | grep -E '^\.gibson-gate\.json$' || true)
+if [[ -n "$still_first" && -z "$still_second" ]]; then
+  ok "rollback-fail shim: first remains staged, second unstaged"
+else
+  bad "rollback-fail shim: staged state first='$still_first' second='$still_second' all=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' ')"
+fi
+after_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
+# README must remain staged; first protected may still be staged alongside it.
+if [[ -n "$rb_legit_blob" && "$after_blob" == "$rb_legit_blob" ]] &&
+   git -C "$ROOT" diff --cached --name-only | grep -qx 'README.md'; then
+  ok "rollback-fail shim: legitimate README remains staged byte-for-byte"
+else
+  bad "rollback-fail shim: README survival (blob before=$rb_legit_blob after=$after_blob staged=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' '))"
+fi
+# Working tree of both protected paths intact (no worktree wipe on failure path).
+if [[ -f "$ROOT/.agents/gate.json" && -f "$ROOT/.gibson-gate.json" ]]; then
+  ok "rollback-fail shim: protected working-tree files left intact"
+else
+  bad "rollback-fail shim: protected working-tree files missing"
+fi
+rm -f "$FAKE_RB" "$RB_ATTEMPT_LOG" "$ROOT/.agents/gate.json" "$ROOT/.gibson-gate.json"
+git -C "$ROOT" reset -q 2>/dev/null || true
+git -C "$ROOT" checkout -q -- README.md 2>/dev/null || true
 
 if [[ "$FAIL" -eq 0 ]]; then
   echo "$PASS passed, $FAIL failed, $SKIP skipped"
