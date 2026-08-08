@@ -194,6 +194,27 @@ print_identity() {
   info "target_repo=$BASE_REPO"
   info "expected_slug=$EXPECTED_SLUG"
   info "gibson=$GIBSON"
+  info "fleet_dir=$FLEET_DIR"
+  info "log_dir=$LOG_DIR"
+}
+
+# Portable fingerprint for default fleet/log namespaces.
+# Pure bash (no python/perl/jq/cksum/awk) so minimal-PATH fail-closed paths
+# still resolve defaults. Same profile name with different path, physical repo,
+# or slug must not share worktrees, logs, pidfiles, or watchdogs.
+profile_default_ns() {
+  local data h=5381 i=0 n ord
+  # Identity lines — order and labels are part of the contract.
+  data="profile_path=${PROFILE_PATH}"$'\n'"repo=${BASE_REPO}"$'\n'"slug=${EXPECTED_SLUG}"$'\n'"name=${PROFILE_NAME}"
+  n=${#data}
+  while [[ $i -lt $n ]]; do
+    # bash 3.2: single-byte ordinal via printf '%d' "'char"
+    ord=$(printf '%d' "'${data:$i:1}")
+    # djb2 mod a large prime → stable decimal token
+    h=$(( (h * 33 + ord) % 1000000007 ))
+    i=$((i + 1))
+  done
+  printf '%s\n' "$h"
 }
 
 # --- scope overlap (ported from scripts/scope-overlap.mjs tokensOverlap) ----
@@ -373,7 +394,11 @@ load_profile() {
   [[ -f "$path" ]] || die "profile not found: $path"
   [[ -r "$path" ]] || die "profile not readable: $path"
 
-  PROFILE_PATH="$path"
+  # Normalize profile path to a physical absolute path for stable identity.
+  local prof_dir prof_base
+  prof_dir=$(CDPATH='' cd "$(dirname "$path")" && pwd -P)
+  prof_base=$(basename "$path")
+  PROFILE_PATH="${prof_dir}/${prof_base}"
   PROFILE_NAME=""
   PROFILE_VERSION=""
   BASE_REPO=""
@@ -387,6 +412,7 @@ load_profile() {
 
   local line lineno=0 key val
   # Read without sourcing. Strip CR for Windows-edited profiles.
+  # Always read via the original path argument (same inode as PROFILE_PATH).
   while IFS= read -r line || [[ -n "$line" ]]; do
     lineno=$((lineno + 1))
     line=${line%$'\r'}
@@ -476,16 +502,19 @@ load_profile() {
     GIBSON="$DEFAULT_GIBSON"
   fi
 
-  # fleet/log defaults are namespaced by the validated profile name so two
-  # profiles cannot collide on lane worktrees, pidfiles, or the watchdog.
+  # fleet/log defaults are namespaced by profile name AND a portable fingerprint
+  # of profile path + physical repo + slug so same-name different targets cannot
+  # collide on lane worktrees, pidfiles, logs, or the watchdog.
   # Explicit profile fleet_dir=/log_dir= and env FLEET_DIR/LOG_DIR still win.
+  local default_ns
+  default_ns=$(profile_default_ns)
   if [[ -n "$prof_fleet" ]]; then
     assert_safe_abs_path "fleet_dir" "$prof_fleet"
     FLEET_DIR="$prof_fleet"
   elif [[ -n "${FLEET_DIR}" ]]; then
     assert_safe_abs_path "FLEET_DIR" "$FLEET_DIR"
   else
-    FLEET_DIR="${HOME}/Code/fleet/${PROFILE_NAME}"
+    FLEET_DIR="${HOME}/Code/fleet/${PROFILE_NAME}-${default_ns}"
   fi
   assert_safe_abs_path "fleet_dir" "$FLEET_DIR"
 
@@ -495,7 +524,7 @@ load_profile() {
   elif [[ -n "${LOG_DIR}" ]]; then
     assert_safe_abs_path "LOG_DIR" "$LOG_DIR"
   else
-    LOG_DIR="${HOME}/.claude/fleet/logs/${PROFILE_NAME}"
+    LOG_DIR="${HOME}/.claude/fleet/logs/${PROFILE_NAME}-${default_ns}"
   fi
   assert_safe_abs_path "log_dir" "$LOG_DIR"
 
@@ -555,6 +584,129 @@ lane_log()   { echo "$LOG_DIR/$1.log"; }
 lane_state() { echo "$(lane_dir "$1")/gibson/loop-state.md"; }
 lane_pidfile() { echo "$LOG_DIR/$1.pid"; }
 watchdog_pidfile() { echo "$LOG_DIR/watchdog.pid"; }
+fleet_identity_file() { echo "$FLEET_DIR/.fleet-identity"; }
+log_identity_file()   { echo "$LOG_DIR/.fleet-identity"; }
+lane_identity_file()  { echo "$(lane_dir "$1")/.fleet-identity"; }
+
+# Machine-readable identity for fail-closed reuse of fleet/log/lane state.
+# Human-readable .fleet-lane remains separate (warning text only).
+write_identity_file() {
+  local path="$1" lane="${2:-}"
+  mkdir -p "$(dirname "$path")"
+  {
+    printf 'name=%s\n' "$PROFILE_NAME"
+    printf 'profile_path=%s\n' "$PROFILE_PATH"
+    printf 'repo=%s\n' "$BASE_REPO"
+    printf 'slug=%s\n' "$EXPECTED_SLUG"
+    if [[ -n "$lane" ]]; then
+      printf 'lane=%s\n' "$lane"
+    fi
+  } > "$path"
+}
+
+# Validate a persisted identity marker against the currently loaded profile.
+# expect_lane: empty for fleet/log markers; lane id for per-lane markers.
+validate_identity_file() {
+  local path="$1" context="$2" expect_lane="${3:-}"
+  local got_name="" got_path="" got_repo="" got_slug="" got_lane="" line key val
+
+  [[ -f "$path" ]] || die "$context: missing identity marker at $path — refuse to reuse state"
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$'\r'}
+    case "$line" in
+      ''|\#*) continue ;;
+      *=*) ;;
+      *) continue ;;
+    esac
+    key=${line%%=*}
+    val=${line#*=}
+    case "$key" in
+      name) got_name="$val" ;;
+      profile_path) got_path="$val" ;;
+      repo) got_repo="$val" ;;
+      slug) got_slug="$val" ;;
+      lane) got_lane="$val" ;;
+    esac
+  done < "$path"
+
+  [[ "$got_name" == "$PROFILE_NAME" ]] \
+    || die "$context: identity name mismatch (marker='$got_name' profile='$PROFILE_NAME') at $path"
+  [[ "$got_path" == "$PROFILE_PATH" ]] \
+    || die "$context: identity profile_path mismatch (marker='$got_path' profile='$PROFILE_PATH') at $path"
+  [[ "$got_repo" == "$BASE_REPO" ]] \
+    || die "$context: identity repo mismatch (marker='$got_repo' profile='$BASE_REPO') at $path"
+  [[ "$got_slug" == "$EXPECTED_SLUG" ]] \
+    || die "$context: identity slug mismatch (marker='$got_slug' profile='$EXPECTED_SLUG') at $path"
+  if [[ -n "$expect_lane" ]]; then
+    [[ "$got_lane" == "$expect_lane" ]] \
+      || die "$context: identity lane mismatch (marker='$got_lane' expected='$expect_lane') at $path"
+  fi
+}
+
+fleet_dir_has_lanes() {
+  local d
+  [[ -d "$FLEET_DIR" ]] || return 1
+  for d in "$FLEET_DIR"/lane-*; do
+    [[ -e "$d" ]] && return 0
+  done
+  return 1
+}
+
+log_dir_has_state() {
+  local f
+  [[ -d "$LOG_DIR" ]] || return 1
+  for f in "$LOG_DIR"/*.pid "$LOG_DIR"/*.log "$LOG_DIR"/watchdog.pid; do
+    [[ -e "$f" ]] && return 0
+  done
+  return 1
+}
+
+# Fail closed when reusing existing fleet/log state that is missing or foreign.
+assert_profile_identity_for_reuse() {
+  local fleet_id_path log_id_path
+  fleet_id_path=$(fleet_identity_file)
+  log_id_path=$(log_identity_file)
+
+  if [[ -f "$fleet_id_path" ]]; then
+    validate_identity_file "$fleet_id_path" "fleet_dir"
+  elif fleet_dir_has_lanes; then
+    die "fleet_dir $FLEET_DIR has lane-* state without .fleet-identity marker — refuse to reuse"
+  fi
+
+  if [[ -f "$log_id_path" ]]; then
+    validate_identity_file "$log_id_path" "log_dir"
+  elif log_dir_has_state; then
+    die "log_dir $LOG_DIR has pid/log state without .fleet-identity marker — refuse to reuse"
+  fi
+}
+
+# Create fleet/log dirs and persist identity markers (start path only).
+ensure_profile_runtime_dirs() {
+  mkdir -p "$FLEET_DIR" "$LOG_DIR"
+  assert_profile_identity_for_reuse
+  # Write markers when absent (first use of this namespace).
+  [[ -f "$(fleet_identity_file)" ]] || write_identity_file "$(fleet_identity_file)"
+  [[ -f "$(log_identity_file)" ]] || write_identity_file "$(log_identity_file)"
+}
+
+assert_lane_identity() {
+  local id="$1" d path
+  d=$(lane_dir "$id")
+  path=$(lane_identity_file "$id")
+  [[ -d "$d" ]] || return 0
+  if [[ -f "$path" ]]; then
+    validate_identity_file "$path" "lane $id" "$id"
+  else
+    # Legacy / foreign lane base without a marker — fail closed on reuse.
+    die "lane $id: worktree $d has no .fleet-identity marker — refuse to reuse"
+  fi
+}
+
+write_lane_identity() {
+  local id="$1"
+  write_identity_file "$(lane_identity_file "$id")" "$id"
+}
 
 # Prefer pidfiles over pgrep -f: scanning the process table matches huge
 # agent CLI argvs (and can hang or false-positive). Pidfile is written at
@@ -696,14 +848,58 @@ json_field() {
   printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -1
 }
 
-# Read the current issue id from a lane's loop-state (empty if unreadable).
-lane_state_issue() {
-  local id="$1" sf val
+# Read a column-zero loop-state field with the same grammar as
+# scripts/loop.sh read_field / scripts/validate-loop-state.sh:
+# after the first colon, exactly one optional ASCII space is stripped.
+# Accepts both `issue: 123` and `issue:123`. Empty value is success with empty stdout.
+lane_state_field() {
+  local id="$1" key="$2" sf val
   sf=$(lane_state "$id")
   [[ -f "$sf" ]] || return 1
-  val=$(awk -F': ' '$1=="issue"{print $2; exit}' "$sf" 2>/dev/null || true)
+  # shellcheck disable=SC2016
+  val=$(awk -v k="$key" '
+    /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      line = $0
+      key = line
+      sub(/:.*$/, "", key)
+      if (key != k) next
+      v = line
+      sub(/^[^:]*:/, "", v)
+      if (v ~ /^ /) v = substr(v, 2)
+      print v
+      exit
+    }
+  ' "$sf" 2>/dev/null || true)
+  printf '%s\n' "$val"
+  return 0
+}
+
+# Read the current issue id from a lane's loop-state (empty if unreadable).
+lane_state_issue() {
+  local id="$1" val
+  val=$(lane_state_field "$id" "issue") || return 1
+  # Issue ids are digits only; strip incidental CR/space that writers should not emit.
   val=$(printf '%s' "$val" | tr -d '[:space:]')
   [[ -n "$val" ]] || return 1
+  printf '%s\n' "$val"
+  return 0
+}
+
+lane_state_pr() {
+  local id="$1" val
+  val=$(lane_state_field "$id" "pr") || return 1
+  val=$(printf '%s' "$val" | tr -d '[:space:]')
+  printf '%s\n' "$val"
+  return 0
+}
+
+lane_state_handoff() {
+  local id="$1" val
+  val=$(lane_state_field "$id" "handoff") || return 1
+  # Branch names: trim only trailing CR; keep internal characters.
+  val=$(printf '%s' "$val" | tr -d '\r')
+  # Strip a single trailing newline already removed by command sub; trim ends.
+  val=$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   printf '%s\n' "$val"
   return 0
 }
@@ -720,11 +916,45 @@ issue_in_queue() {
   return 1
 }
 
+# True when a head branch name looks like it owns the given issue number.
+branch_matches_issue() {
+  local branch="$1" issue="$2"
+  case "$branch" in
+    feat/"$issue"-*|fix/"$issue"-*|feat/"$issue"|fix/"$issue") return 0 ;;
+  esac
+  return 1
+}
+
+# List open PRs as "number<TAB>headRefName" lines (no jq required).
+list_open_pr_pairs() {
+  local out frag num head
+  if ! out=$("$GH_BIN" pr list --repo "$EXPECTED_SLUG" --state open --json number,headRefName --limit 100 2>&1); then
+    die "cannot list open PRs for claims/PR conflict check: $out"
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$out" | jq -r '.[] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true
+    return 0
+  fi
+  # Fallback: split JSON objects and extract both fields per fragment.
+  printf '%s' "$out" | tr '{}' '\n' | while IFS= read -r frag || [[ -n "$frag" ]]; do
+    case "$frag" in
+      *\"number\"*)
+        num=$(printf '%s' "$frag" | sed -n 's/.*"number"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+        head=$(printf '%s' "$frag" | sed -n 's/.*"headRefName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        if [[ -n "$num" && -n "$head" ]]; then
+          printf '%s\t%s\n' "$num" "$head"
+        fi
+        ;;
+    esac
+  done
+}
+
 # mode:
 #   strict — unstarted / future work: OPEN, no gated, no agent-claimed
 #   own    — lane's recorded current issue: OPEN, no gated; agent-claimed OK
+#            (ownership of claim/PR is enforced separately via state binding)
 #   prior  — queue items before recorded issue: CLOSED is OK (state advanced);
-#            OPEN falls through to strict rules
+#            OPEN fails closed (no skip/park policy is recorded yet)
 check_issue_preflight() {
   local issue="$1" lane="$2" mode="${3:-strict}"
   local out state labels lab
@@ -737,9 +967,13 @@ check_issue_preflight() {
   # normalize
   state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
 
-  if [[ "$mode" == "prior" && "$state" == "CLOSED" ]]; then
-    # Closed prior queue item after the lane advanced past it — not a conflict.
-    return 0
+  if [[ "$mode" == "prior" ]]; then
+    if [[ "$state" == "CLOSED" ]]; then
+      # Closed prior queue item after the lane advanced past it — not a conflict.
+      return 0
+    fi
+    # No explicit skip/park policy exists yet — fail closed on every OPEN prior.
+    die "lane $lane: prior queue item #$issue is still OPEN (state=$state) — refuse to advance past unfinished work (no skip/park policy recorded)"
   fi
 
   [[ "$state" == "OPEN" ]] || die "lane $lane: issue #$issue is not open (state=$state)"
@@ -752,7 +986,7 @@ check_issue_preflight() {
     fi
     if [[ "$lab" == "agent-claimed" ]]; then
       if [[ "$mode" == "own" ]]; then
-        # Resumable/healthy lane may own its recorded issue's claim.
+        # Resumable lane may carry agent-claimed only when state-bound (checked next).
         continue
       fi
       die "lane $lane: issue #$issue already agent-claimed (claims conflict — release or reaper first)"
@@ -762,62 +996,132 @@ check_issue_preflight() {
 
 check_pr_conflicts() {
   # Fail closed if an open PR head branch looks like it already owns this issue.
-  # When allow_own=1 the lane's recorded current issue may already have an open PR.
-  local issue="$1" lane="$2" allow_own="${3:-0}"
-  local out branch branches
-  if ! out=$("$GH_BIN" pr list --repo "$EXPECTED_SLUG" --state open --json number,headRefName --limit 100 2>&1); then
-    die "lane $lane: cannot list open PRs for claims/PR conflict check: $out"
-  fi
-  branches=""
-  if command -v jq >/dev/null 2>&1; then
-    branches=$(printf '%s' "$out" | jq -r '.[].headRefName' 2>/dev/null || true)
-  else
-    branches=$(printf '%s' "$out" | tr ',' '\n' | sed -n 's/.*"headRefName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  fi
-  while IFS= read -r branch || [[ -n "$branch" ]]; do
-    [[ -n "$branch" ]] || continue
-    case "$branch" in
-      feat/"$issue"-*|fix/"$issue"-*|feat/"$issue"|fix/"$issue")
-        if [[ "$allow_own" == "1" ]]; then
-          continue
-        fi
-        die "lane $lane: open PR branch '$branch' conflicts with issue #$issue"
-        ;;
-    esac
-  done <<<"$branches"
+  local issue="$1" lane="$2"
+  local pairs num head
+  pairs=$(list_open_pr_pairs) || return 1
+  while IFS="$(printf '\t')" read -r num head || [[ -n "${num:-}" ]]; do
+    [[ -n "${num:-}" ]] || continue
+    if branch_matches_issue "$head" "$issue"; then
+      die "lane $lane: open PR #$num branch '$head' conflicts with issue #$issue"
+    fi
+  done <<<"$pairs"
 }
 
-# True when gh reports the issue CLOSED (missing/unreadable → false).
-issue_is_closed() {
-  local issue="$1" out state
-  out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>/dev/null) || return 1
-  state=$(json_field "$out" "state")
-  state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
-  [[ "$state" == "CLOSED" ]]
+# Bind dead-lane "own" resumption to recorded pr: and/or handoff: state.
+# Verifies the actual open PR number, head branch, and agent-claimed claim.
+# A claimed issue with no matching state-bound PR fails closed.
+check_own_resumption() {
+  local issue="$1" lane="$2"
+  local out labels lab claimed=0
+  local bound_pr bound_handoff pairs num head
+  local matched=0 issue_pr_seen=0
+
+  if ! out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>&1); then
+    die "lane $lane: issue #$issue missing or unreadable via gh (repo $EXPECTED_SLUG): $out"
+  fi
+  labels=$(json_label_names "$out")
+  while IFS= read -r lab || [[ -n "$lab" ]]; do
+    [[ -n "$lab" ]] || continue
+    [[ "$lab" == "agent-claimed" ]] && claimed=1
+  done <<<"$labels"
+
+  bound_pr=$(lane_state_pr "$lane" 2>/dev/null || true)
+  bound_handoff=$(lane_state_handoff "$lane" 2>/dev/null || true)
+  bound_pr=$(printf '%s' "${bound_pr:-}" | tr -d '[:space:]')
+  bound_handoff=$(printf '%s' "${bound_handoff:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  if [[ $claimed -eq 1 ]]; then
+    if [[ -z "$bound_pr" && -z "$bound_handoff" ]]; then
+      die "lane $lane: issue #$issue is agent-claimed but loop-state has no pr: or handoff: binding — refuse to resume unbound/foreign claim"
+    fi
+    if [[ -n "$bound_pr" && ! "$bound_pr" =~ ^[1-9][0-9]*$ ]]; then
+      die "lane $lane: loop-state pr: field is not a positive PR number (got: '$bound_pr')"
+    fi
+  fi
+
+  pairs=$(list_open_pr_pairs) || return 1
+  while IFS="$(printf '\t')" read -r num head || [[ -n "${num:-}" ]]; do
+    [[ -n "${num:-}" ]] || continue
+    if ! branch_matches_issue "$head" "$issue"; then
+      continue
+    fi
+    issue_pr_seen=1
+    # State-bound match: PR number and/or handoff branch.
+    if [[ -n "$bound_pr" && "$num" == "$bound_pr" ]]; then
+      if [[ -n "$bound_handoff" && "$head" != "$bound_handoff" ]]; then
+        die "lane $lane: state-bound pr:#$bound_pr head '$head' does not match handoff:'$bound_handoff' for issue #$issue"
+      fi
+      matched=1
+      continue
+    fi
+    if [[ -z "$bound_pr" && -n "$bound_handoff" && "$head" == "$bound_handoff" ]]; then
+      matched=1
+      continue
+    fi
+    # Open PR for this issue that is not the lane's recorded ownership.
+    die "lane $lane: open PR #$num branch '$head' for issue #$issue is not bound to loop-state pr:'${bound_pr:-}' handoff:'${bound_handoff:-}' — refuse foreign/mismatched ownership"
+  done <<<"$pairs"
+
+  if [[ $claimed -eq 1 ]]; then
+    if [[ -n "$bound_pr" && $matched -eq 0 ]]; then
+      die "lane $lane: state-bound pr:#$bound_pr not found open with a matching head for issue #$issue — refuse to resume"
+    fi
+    if [[ -z "$bound_pr" && -n "$bound_handoff" && $matched -eq 0 ]]; then
+      die "lane $lane: state-bound handoff:'$bound_handoff' has no matching open PR head for issue #$issue — refuse to resume"
+    fi
+  elif [[ $issue_pr_seen -eq 1 && $matched -eq 0 ]]; then
+    # Unclaimed recorded issue but someone already has an open PR — conflict.
+    die "lane $lane: open PR exists for issue #$issue without a matching state-bound pr:/handoff: — refuse to resume"
+  fi
+}
+
+# Validate recorded issue belongs to the configured queue (shared by healthy + dead paths).
+assert_recorded_issue_in_queue() {
+  local lane="$1" queue="$2" current
+  current=$(lane_state_issue "$lane" || true)
+  if [[ -z "$current" || ! "$current" =~ ^[1-9][0-9]*$ ]]; then
+    die "lane $lane: ambiguous loop-state issue field (got: '${current:-}') — fail closed"
+  fi
+  if ! issue_in_queue "$current" "$queue"; then
+    die "lane $lane: recorded issue #$current is not in configured queue ($queue) — foreign ownership, refuse to resume"
+  fi
+  printf '%s\n' "$current"
 }
 
 # Lane-state-aware queue preflight for one lane. Healthy identity is validated
-# before any claim/PR check. Dead resumable lanes may own claim/PR for the
-# recorded issue only when that issue is in the configured queue.
+# (queue membership + profile/lane markers) before the idempotent return.
+# Dead resumable lanes may own claim/PR for the recorded issue only when that
+# issue is in the configured queue AND state-bound pr:/handoff: matches.
 preflight_lane_queue() {
   local lane="$1" queue="$2"
-  local issue current seen_current=0 queue_work pid
+  local issue current seen_current=0 queue_work pid d
 
-  # Identity-validated healthy lane: skip queue conflicts (idempotent re-start).
+  d=$(lane_dir "$lane")
+
+  # Identity-validated healthy lane: still verify markers + queue membership
+  # (non-mutating). Skip claim/PR conflict scans only after that passes.
   if pid=$(lane_pid_alive "$lane"); then
-    info "lane $lane already running (pid $pid) — skip queue conflict preflight"
+    if [[ -d "$d" ]]; then
+      assert_lane_identity "$lane"
+    fi
+    if [[ -f "$(lane_state "$lane")" ]]; then
+      if ! lane_state_is_valid "$lane"; then
+        die "lane $lane: healthy pid but loop-state is missing/invalid issue field — fail closed"
+      fi
+      current=$(assert_recorded_issue_in_queue "$lane" "$queue") || return 1
+    fi
+    info "lane $lane already running (pid $pid) — skip queue conflict preflight (identity+queue validated)"
     return 0
+  fi
+
+  # Dead / not running: require lane identity when reusing an existing base.
+  if [[ -d "$d" ]]; then
+    assert_lane_identity "$lane"
   fi
 
   current=""
   if lane_state_is_valid "$lane"; then
-    current=$(lane_state_issue "$lane" || true)
-    if [[ -z "$current" || ! "$current" =~ ^[1-9][0-9]*$ ]]; then
-      die "lane $lane: ambiguous loop-state issue field (got: '${current:-}') — fail closed"
-    fi
-    if ! issue_in_queue "$current" "$queue"; then
-      die "lane $lane: recorded issue #$current is not in configured queue ($queue) — foreign ownership, refuse to resume"
-    fi
+    current=$(assert_recorded_issue_in_queue "$lane" "$queue") || return 1
   fi
 
   queue_work=$(printf '%s' "$queue" | tr ',' ' ')
@@ -828,7 +1132,7 @@ preflight_lane_queue() {
       issue=$(printf '%s' "$issue" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       [[ -n "$issue" ]] || continue
       check_issue_preflight "$issue" "$lane" "strict"
-      check_pr_conflicts "$issue" "$lane" "0"
+      check_pr_conflicts "$issue" "$lane"
     done
     return 0
   fi
@@ -840,21 +1144,18 @@ preflight_lane_queue() {
     [[ -n "$issue" ]] || continue
     if [[ "$issue" == "$current" ]]; then
       seen_current=1
-      # Own recorded issue may already be agent-claimed with an open PR.
+      # Own recorded issue may be agent-claimed only with matching state-bound PR.
       check_issue_preflight "$issue" "$lane" "own"
-      check_pr_conflicts "$issue" "$lane" "1"
+      check_own_resumption "$issue" "$lane"
       continue
     fi
     if [[ $seen_current -eq 0 ]]; then
-      # Prior to recorded issue — closed is OK after state advanced.
+      # Prior to recorded issue — CLOSED only (OPEN fails closed above).
       check_issue_preflight "$issue" "$lane" "prior"
-      if ! issue_is_closed "$issue"; then
-        check_pr_conflicts "$issue" "$lane" "0"
-      fi
     else
       # Future queue work — still strict.
       check_issue_preflight "$issue" "$lane" "strict"
-      check_pr_conflicts "$issue" "$lane" "0"
+      check_pr_conflicts "$issue" "$lane"
     fi
   done
 }
@@ -1068,11 +1369,14 @@ preflight_for_start() {
 do_halt() {
   local n=0 i id d
   print_identity
+  # Refuse to write HALT into a foreign fleet/log namespace.
+  assert_profile_identity_for_reuse
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
     id="${LANE_IDS[$i]}"
     d=$(lane_dir "$id")
     if [[ -d "$d" ]]; then
+      assert_lane_identity "$id"
       mkdir -p "$d/gibson"
       touch "$d/gibson/HALT"
       n=$((n + 1))
@@ -1084,6 +1388,8 @@ do_halt() {
 
 do_status() {
   print_identity
+  # Refuse to report status for a foreign fleet/log namespace.
+  assert_profile_identity_for_reuse
   printf '%-12s %-14s %-6s %-8s %-11s %s\n' LANE QUEUE PID HAT HEALTH LAST
   local dead=0 i id queue d pid hat last health
   i=0
@@ -1137,6 +1443,7 @@ It is the loop driver's --repo. Deleting it kills the lane.
 It is NOT the per-issue worktree that Gibson's release hat cleans up.
 Do not run "git worktree remove" or rm -rf against this path.
 EOF
+  write_lane_identity "$id"
 
   cat > "$(lane_state "$id")" <<EOF
 # Gibson loop state
@@ -1177,9 +1484,9 @@ EOF
   [[ -f "$d/gibson/journal.md" ]] || echo "# Gibson loop journal (lane $id)" > "$d/gibson/journal.md"
 }
 
-# Ensure sentinel + journal exist without rewriting issue/pr/hat/round.
+# Ensure sentinel + journal + identity exist without rewriting issue/pr/hat/round.
 ensure_lane_markers() {
-  local id="$1" d
+  local id="$1" d path
   d=$(lane_dir "$id")
   mkdir -p "$d/gibson"
   if [[ ! -f "$d/.fleet-lane" ]]; then
@@ -1189,6 +1496,17 @@ It is the loop driver's --repo. Deleting it kills the lane.
 It is NOT the per-issue worktree that Gibson's release hat cleans up.
 Do not run "git worktree remove" or rm -rf against this path.
 EOF
+  fi
+  path=$(lane_identity_file "$id")
+  if [[ -f "$path" ]]; then
+    validate_identity_file "$path" "lane $id" "$id"
+  else
+    # First ensure after upgrade: write only when no foreign content conflict.
+    # Fail closed if a loop-state already exists without a marker (reuse risk).
+    if [[ -f "$(lane_state "$id")" ]]; then
+      die "lane $id: existing loop-state without .fleet-identity marker — refuse to reuse"
+    fi
+    write_lane_identity "$id"
   fi
   [[ -f "$d/gibson/journal.md" ]] || echo "# Gibson loop journal (lane $id)" > "$d/gibson/journal.md"
 }
@@ -1369,10 +1687,12 @@ resolve_remote_default_pin() {
 
 do_start() {
   print_identity
+  # Persist/validate fleet+log identity before preflight reads lane state.
+  # preflight_lane_queue asserts per-lane markers when reusing bases.
+  ensure_profile_runtime_dirs
   # Complete preflight BEFORE any worktree mutation or runner launch.
   preflight_for_start
 
-  mkdir -p "$FLEET_DIR" "$LOG_DIR"
   if [[ "$FLEET_SKIP_FETCH" == "1" ]]; then
     info "skip git fetch (FLEET_SKIP_FETCH=1)"
   else
@@ -1400,6 +1720,7 @@ do_start() {
 
     # Identity check BEFORE any mutation: healthy lane keeps HALT + state intact.
     if pid=$(lane_pid_alive "$id"); then
+      # Markers + queue membership already validated in preflight (non-mutating).
       info "lane $id already running (pid $pid) — leaving state/HALT untouched, skip launch"
       i=$((i + 1))
       continue
@@ -1420,6 +1741,7 @@ do_start() {
       seed_lane_state "$id" "$queue" "$scope" "$intent"
     else
       info "reusing worktree $d"
+      # Identity already asserted in preflight when the dir existed.
       if lane_state_is_valid "$id"; then
         # Dead (or never-launched-this-session) lane with valid state: preserve
         # issue/pr/hat/round. Clear HALT so a deliberate relaunch can proceed.
@@ -1431,7 +1753,7 @@ do_start() {
           info "lane $id: preserving existing loop-state"
         fi
       else
-        # Truly missing / unusable state — initialize.
+        # Truly missing / unusable state — initialize (rewrite identity too).
         seed_lane_state "$id" "$queue" "$scope" "$intent"
       fi
     fi

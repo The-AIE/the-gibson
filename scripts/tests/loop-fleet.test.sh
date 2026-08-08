@@ -1886,6 +1886,338 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "future claimed launched zero" || bad "future claimed launched $lc"
 unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
 
+# --- B1e: own claim requires state-bound pr:/handoff: (positive + negatives) -
+echo "own claim state-bound PR ownership"
+reset_calls
+TARGET=$(setup_target_repo ownbind acme/widget)
+PROF="$ROOT/profiles/ownbind.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=ownbind" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|270|docs/**|own bind"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "ownbind initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+ISSUEDIR="$ROOT/gh-issues-ownbind"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/270.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+
+# Positive: matching pr number + head branch relaunches.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-05T00:00:00Z
+issue: 270
+pr: 370
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: own bound pr
+notes: >
+  positive own
+STATE
+rm -f "$LOG_DIR/docs.pid"
+export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-own-slice"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "positive own bound PR should relaunch: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "positive own state-bound PR relaunches" \
+  || bad "positive own launches=$lc out=$out"
+grep -q '^pr: 370$' "$STATE_FILE" && ok "positive own preserved pr binding" \
+  || bad "positive own clobbered pr: $(cat "$STATE_FILE")"
+
+# Claimed with no pr:/handoff: fails closed.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-05T00:00:00Z
+issue: 270
+pr:
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: claimed unbound
+notes: >
+  no binding
+STATE
+rm -f "$LOG_DIR/docs.pid"
+export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-own-slice"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "unbound claimed should fail: $out" || {
+  echo "$out" | grep -qiE 'no pr: or handoff:|unbound|refuse to resume' \
+    && ok "claimed without pr/handoff refused" \
+    || bad "unclear unbound-claim fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "unbound claimed launched zero" || bad "unbound claimed launched $lc"
+
+# Foreign same-issue PR (state pr does not match open PR) fails closed.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-05T00:00:00Z
+issue: 270
+pr: 999
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: foreign pr number
+notes: >
+  mismatched pr
+STATE
+rm -f "$LOG_DIR/docs.pid"
+export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-foreign-agent"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "mismatched PR number should fail: $out" || {
+  echo "$out" | grep -qiE 'pr:#?999|not found open|not bound|mismatched|refuse' \
+    && ok "mismatched PR number refused" \
+    || bad "unclear mismatched-PR fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "mismatched PR launched zero" || bad "mismatched PR launched $lc"
+
+# handoff branch mismatch against state-bound pr fails closed.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-05T00:00:00Z
+issue: 270
+pr: 370
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+handoff: feat/270-expected
+handoff_sha:
+next_action: branch mismatch
+notes: >
+  handoff vs head
+STATE
+rm -f "$LOG_DIR/docs.pid"
+export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-other-branch"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "mismatched branch should fail: $out" || {
+  echo "$out" | grep -qiE 'handoff|does not match|branch' \
+    && ok "mismatched handoff branch refused" \
+    || bad "unclear mismatched-branch fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "mismatched branch launched zero" || bad "mismatched branch launched $lc"
+
+# Foreign open PR for same issue while state points at a different binding.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-05T00:00:00Z
+issue: 270
+pr: 370
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: two prs one foreign
+notes: >
+  foreign sibling
+STATE
+rm -f "$LOG_DIR/docs.pid"
+export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-own"},{"number":371,"headRefName":"feat/270-foreign"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "foreign sibling PR should fail: $out" || {
+  echo "$out" | grep -qiE '371|foreign|not bound|refuse' \
+    && ok "foreign same-issue sibling PR refused" \
+    || bad "unclear foreign-sibling fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "foreign sibling launched zero" || bad "foreign sibling launched $lc"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B1f: healthy restart validates queue membership (non-mutating) --------
+echo "healthy restart validates queue + identity"
+reset_calls
+TARGET=$(setup_target_repo hval acme/widget)
+PROF="$ROOT/profiles/hval.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hval" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|280|docs/**|healthy validate"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "hval initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+# Plant healthy pid + valid in-queue state.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-06T00:00:00Z
+issue: 280
+pr: 380
+hat: builder
+next_hat: builder
+round: 2
+parked: false
+next_action: healthy in queue
+notes: >
+  ok
+STATE
+mkdir -p "$ROOT/fleet/lane-docs/gibson"
+touch "$ROOT/fleet/lane-docs/gibson/HALT"
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+HVAL_PID=$!
+printf '%s\n' "$HVAL_PID" > "$LOG_DIR/docs.pid"
+ISSUEDIR="$ROOT/gh-issues-hval"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/280.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":380,"headRefName":"feat/280-healthy"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "healthy in-queue restart failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "healthy in-queue restart launched zero" \
+  || bad "healthy in-queue launched $lc out=$out"
+[[ -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "healthy validate preserved HALT" \
+  || bad "healthy validate removed HALT"
+grep -q '^issue: 280$' "$STATE_FILE" && ok "healthy validate preserved state" \
+  || bad "healthy validate clobbered state"
+
+# Same healthy pid but recorded issue outside queue → fail closed, no mutation.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-06T00:00:00Z
+issue: 999
+pr: 1
+hat: builder
+next_hat: builder
+round: 2
+parked: false
+next_action: foreign while healthy
+notes: >
+  bad
+STATE
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "healthy foreign issue should fail: $out" || {
+  echo "$out" | grep -qiE 'not in configured queue|foreign|refuse' \
+    && ok "healthy foreign-issue refused" \
+    || bad "unclear healthy-foreign fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "healthy foreign launched zero" || bad "healthy foreign launched $lc"
+[[ -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "healthy foreign left HALT untouched" \
+  || bad "healthy foreign cleared HALT"
+kill "$HVAL_PID" 2>/dev/null || true
+wait "$HVAL_PID" 2>/dev/null || true
+rm -f "$LOG_DIR/docs.pid"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B1g: OPEN prior queue item fails closed -------------------------------
+echo "open prior queue item fails closed"
+reset_calls
+TARGET=$(setup_target_repo openprior acme/widget)
+PROF="$ROOT/profiles/openprior.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=openprior" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|290,291|docs/**|prior open"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "openprior initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-07T00:00:00Z
+issue: 291
+pr: 391
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: advanced past still-open 290
+notes: >
+  open prior
+STATE
+rm -f "$LOG_DIR/docs.pid"
+ISSUEDIR="$ROOT/gh-issues-openprior"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"tier-a"}]}' > "$ISSUEDIR/290.json"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/291.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":391,"headRefName":"feat/291-current"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "open prior should fail: $out" || {
+  echo "$out" | grep -qiE 'prior queue item #290|still OPEN|refuse to advance|no skip/park' \
+    && ok "open prior refused" \
+    || bad "unclear open-prior fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "open prior launched zero" || bad "open prior launched $lc"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
+# --- B1h: issue:123 (no space) parses like issue: 123 ----------------------
+echo "issue: no-space state syntax"
+reset_calls
+TARGET=$(setup_target_repo nospace acme/widget)
+PROF="$ROOT/profiles/nospace.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=nospace" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|300|docs/**|no space issue"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+out=$(run_fleet --start) || { bad "nospace initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+# Deliberate no-space grammar accepted by validate-loop-state / loop.sh read_field.
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-03-08T00:00:00Z
+issue:300
+pr:400
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+next_action: no-space issue key
+notes: >
+  issue:300 form
+STATE
+rm -f "$LOG_DIR/docs.pid"
+ISSUEDIR="$ROOT/gh-issues-nospace"
+mkdir -p "$ISSUEDIR"
+printf '%s\n' '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}' > "$ISSUEDIR/300.json"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+export GH_STUB_PR_JSON='[{"number":400,"headRefName":"feat/300-nospace"}]'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "no-space issue:300 should resume: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "issue:300 no-space syntax resumes" \
+  || bad "no-space launches=$lc out=$out"
+grep -qE '^issue:[[:space:]]*300$' "$STATE_FILE" && ok "no-space issue preserved" \
+  || bad "no-space state clobbered: $(cat "$STATE_FILE")"
+unset GH_STUB_ISSUE_DIR GH_STUB_PR_JSON
+
 # --- B2: no perl / no python3 → fail before any network child --------------
 echo "no-perl/no-python wall-timeout fail-closed"
 reset_calls
@@ -2014,7 +2346,7 @@ TARGET_A=$(setup_target_repo isoA acme/widget)
 TARGET_B=$(setup_target_repo isoB acme/widget)
 PROF_A="$ROOT/profiles/isoA.profile"
 PROF_B="$ROOT/profiles/isoB.profile"
-# No fleet_dir/log_dir — defaults must namespace by profile name.
+# No fleet_dir/log_dir — defaults must namespace by name + target fingerprint.
 write_profile "$PROF_A" \
   "version=1" \
   "name=isoAlpha" \
@@ -2051,17 +2383,26 @@ run_iso() {
 # Unset FLEET_DIR/LOG_DIR so defaults apply
 outA=$(run_iso "$PROF_A" --start) || { bad "isoAlpha start failed: $outA"; }
 outB=$(run_iso "$PROF_B" --start) || { bad "isoBeta start failed: $outB"; }
-FLEET_A="$ISO_HOME/Code/fleet/isoAlpha"
-FLEET_B="$ISO_HOME/Code/fleet/isoBeta"
-LOG_A="$ISO_HOME/.claude/fleet/logs/isoAlpha"
-LOG_B="$ISO_HOME/.claude/fleet/logs/isoBeta"
-[[ -d "$FLEET_A/lane-docs" ]] && ok "isoAlpha fleet dir namespaced" \
-  || bad "isoAlpha fleet missing: $FLEET_A"
-[[ -d "$FLEET_B/lane-docs" ]] && ok "isoBeta fleet dir namespaced" \
-  || bad "isoBeta fleet missing: $FLEET_B"
+# Extract resolved fleet_dir/log_dir from driver identity lines (include fingerprint).
+FLEET_A=$(printf '%s\n' "$outA" | sed -n 's/^fleet: fleet_dir=//p' | head -1)
+FLEET_B=$(printf '%s\n' "$outB" | sed -n 's/^fleet: fleet_dir=//p' | head -1)
+LOG_A=$(printf '%s\n' "$outA" | sed -n 's/^fleet: log_dir=//p' | head -1)
+LOG_B=$(printf '%s\n' "$outB" | sed -n 's/^fleet: log_dir=//p' | head -1)
+[[ -n "$FLEET_A" && -d "$FLEET_A/lane-docs" ]] && ok "isoAlpha fleet dir namespaced" \
+  || bad "isoAlpha fleet missing: '$FLEET_A' out=$outA"
+[[ -n "$FLEET_B" && -d "$FLEET_B/lane-docs" ]] && ok "isoBeta fleet dir namespaced" \
+  || bad "isoBeta fleet missing: '$FLEET_B' out=$outB"
 [[ "$FLEET_A" != "$FLEET_B" ]] && ok "profiles use distinct fleet dirs" \
   || bad "profiles share fleet dir"
-[[ -d "$LOG_A" && -d "$LOG_B" && "$LOG_A" != "$LOG_B" ]] \
+case "$FLEET_A" in
+  */Code/fleet/isoAlpha-*) ok "isoAlpha default includes name+fingerprint" ;;
+  *) bad "isoAlpha fleet dir not fingerprinted: $FLEET_A" ;;
+esac
+case "$FLEET_B" in
+  */Code/fleet/isoBeta-*) ok "isoBeta default includes name+fingerprint" ;;
+  *) bad "isoBeta fleet dir not fingerprinted: $FLEET_B" ;;
+esac
+[[ -n "$LOG_A" && -n "$LOG_B" && -d "$LOG_A" && -d "$LOG_B" && "$LOG_A" != "$LOG_B" ]] \
   && ok "profiles use distinct log dirs" \
   || bad "log dirs not isolated: $LOG_A vs $LOG_B"
 WD_A="$LOG_A/watchdog.pid"
@@ -2116,6 +2457,8 @@ outE=$(
   || bad "explicit fleet_dir ignored"
 [[ -f "$EX_LOG/docs.log" || -d "$EX_LOG" ]] && ok "explicit log_dir preserved" \
   || bad "explicit log_dir ignored"
+[[ -f "$EX_FLEET/.fleet-identity" ]] && ok "explicit fleet_dir has identity marker" \
+  || bad "explicit fleet_dir missing .fleet-identity"
 # Cleanup watchdogs by exact PID only
 for wd in "$wda" "$wdb"; do
   if [[ -n "$wd" ]] && kill -0 "$wd" 2>/dev/null; then
@@ -2127,6 +2470,158 @@ done
 rm -f "$WD_A" "$WD_B"
 export FLEET_NO_WATCHDOG=1
 export SLEEP_CMD=true
+
+# --- B4b: same name, different profile path / target → isolated defaults ----
+echo "same-name different profile/target isolation"
+reset_calls
+ISO2_HOME="$ROOT/iso2-home"
+mkdir -p "$ISO2_HOME"
+TARGET_S1=$(setup_target_repo same1 acme/widget)
+TARGET_S2=$(setup_target_repo same2 acme/gadget)
+# Two profile files, identical name=, different paths and targets.
+PROF_S1="$ROOT/profiles/same-name-a.profile"
+PROF_S2="$ROOT/profiles/same-name-b.profile"
+write_profile "$PROF_S1" \
+  "version=1" \
+  "name=sharedName" \
+  "repo=$TARGET_S1" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "runner=fake-runner" \
+  "lane=docs|350|docs/**|same name a"
+write_profile "$PROF_S2" \
+  "version=1" \
+  "name=sharedName" \
+  "repo=$TARGET_S2" \
+  "slug=acme/gadget" \
+  "gibson=$ROOT/gibson" \
+  "runner=fake-runner" \
+  "lane=docs|351|docs/**|same name b"
+run_same() {
+  local prof="$1" cmd="$2"
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" \
+    HOME="$ISO2_HOME" \
+    GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$prof" \
+    "$FLEET" --profile "$prof" "$cmd" 2>&1
+}
+outS1=$(run_same "$PROF_S1" --start) || { bad "same-name A start failed: $outS1"; }
+outS2=$(run_same "$PROF_S2" --start) || { bad "same-name B start failed: $outS2"; }
+FLEET_S1=$(printf '%s\n' "$outS1" | sed -n 's/^fleet: fleet_dir=//p' | head -1)
+FLEET_S2=$(printf '%s\n' "$outS2" | sed -n 's/^fleet: fleet_dir=//p' | head -1)
+LOG_S1=$(printf '%s\n' "$outS1" | sed -n 's/^fleet: log_dir=//p' | head -1)
+LOG_S2=$(printf '%s\n' "$outS2" | sed -n 's/^fleet: log_dir=//p' | head -1)
+[[ -n "$FLEET_S1" && -n "$FLEET_S2" && "$FLEET_S1" != "$FLEET_S2" ]] \
+  && ok "same name different targets use distinct fleet dirs" \
+  || bad "same-name fleet collision: $FLEET_S1 vs $FLEET_S2"
+[[ -n "$LOG_S1" && -n "$LOG_S2" && "$LOG_S1" != "$LOG_S2" ]] \
+  && ok "same name different targets use distinct log dirs" \
+  || bad "same-name log collision: $LOG_S1 vs $LOG_S2"
+[[ -d "$FLEET_S1/lane-docs" && -d "$FLEET_S2/lane-docs" ]] \
+  && ok "same-name both lanes materialised" \
+  || bad "same-name lane missing"
+# Identity markers encode distinct repos / slugs (profile_path is physical).
+[[ -f "$FLEET_S1/.fleet-identity" && -f "$FLEET_S2/.fleet-identity" ]] \
+  && ok "same-name fleet identity markers present" \
+  || bad "same-name identity missing"
+grep -q 'slug=acme/widget' "$FLEET_S1/.fleet-identity" \
+  && grep -q 'slug=acme/gadget' "$FLEET_S2/.fleet-identity" \
+  && ok "same-name markers record distinct slugs" \
+  || bad "same-name markers wrong: $(cat "$FLEET_S1/.fleet-identity") // $(cat "$FLEET_S2/.fleet-identity")"
+grep -q "name=sharedName" "$FLEET_S1/.fleet-identity" \
+  && grep -q "name=sharedName" "$FLEET_S2/.fleet-identity" \
+  && ok "same-name markers share profile name" \
+  || bad "same-name markers missing name="
+
+# Explicit shared fleet_dir: second profile with different identity must fail closed.
+COLLIDE_FLEET="$ROOT/collide-fleet"
+COLLIDE_LOG="$ROOT/collide-logs"
+mkdir -p "$COLLIDE_FLEET" "$COLLIDE_LOG"
+PROF_C1="$ROOT/profiles/collide-a.profile"
+PROF_C2="$ROOT/profiles/collide-b.profile"
+write_profile "$PROF_C1" \
+  "version=1" \
+  "name=collide" \
+  "repo=$TARGET_S1" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$COLLIDE_FLEET" \
+  "log_dir=$COLLIDE_LOG" \
+  "runner=fake-runner" \
+  "lane=docs|360|docs/**|collide a"
+write_profile "$PROF_C2" \
+  "version=1" \
+  "name=collide" \
+  "repo=$TARGET_S2" \
+  "slug=acme/gadget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$COLLIDE_FLEET" \
+  "log_dir=$COLLIDE_LOG" \
+  "runner=fake-runner" \
+  "lane=docs|361|docs/**|collide b"
+outC1=$(
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" HOME="$ISO2_HOME" GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C1" \
+    "$FLEET" --profile "$PROF_C1" --start 2>&1
+) || { bad "collide A start failed: $outC1"; }
+: > "$CALLS/launches.log"
+outC2=$(
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" HOME="$ISO2_HOME" GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C2" \
+    "$FLEET" --profile "$PROF_C2" --start 2>&1
+) && bad "same-name different target shared fleet_dir should fail: $outC2" || {
+  echo "$outC2" | grep -qiE 'identity|mismatch|refuse to reuse' \
+    && ok "same-name different-target shared fleet_dir refused" \
+    || bad "unclear collide fail: $outC2"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "collide B launched zero" || bad "collide B launched $lc"
+
+# Status/halt on foreign identity also fail closed.
+outCS=$(
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" HOME="$ISO2_HOME" GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C2" \
+    "$FLEET" --profile "$PROF_C2" --status 2>&1
+) && bad "status on foreign identity should fail: $outCS" || {
+  echo "$outCS" | grep -qiE 'identity|mismatch|refuse' \
+    && ok "status refuses foreign shared fleet_dir" \
+    || bad "unclear status-collide fail: $outCS"
+}
+outCH=$(
+  env -u FLEET_DIR -u LOG_DIR \
+    PATH="$BIN:$PATH" HOME="$ISO2_HOME" GIBSON="$GIBSON" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C2" \
+    "$FLEET" --profile "$PROF_C2" --halt 2>&1
+) && bad "halt on foreign identity should fail: $outCH" || {
+  echo "$outCH" | grep -qiE 'identity|mismatch|refuse' \
+    && ok "halt refuses foreign shared fleet_dir" \
+    || bad "unclear halt-collide fail: $outCH"
+}
+[[ ! -f "$COLLIDE_FLEET/lane-docs/gibson/HALT" ]] \
+  && ok "foreign halt did not write HALT into collide fleet" \
+  || bad "foreign halt polluted collide fleet"
 
 # --- B5: sixth lane field rejected; hostile reserved runner -----------------
 echo "sixth field and reserved-runner validation"
