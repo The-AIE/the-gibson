@@ -2,6 +2,9 @@
 # One "file<TAB>code" pair per line. run-all.sh fails on anything not listed
 # here, and also fails when a listed pair stops being reported — delete the
 # line in the same PR that fixes it. This list only shrinks.
+#
+# Semantics assume ShellCheck exactly $SHELLCHECK_REQUIRED_VERSION in
+# scripts/tests/run-all.sh (currently 0.11.0). CI installs that same pin from
+# the official koalaman release asset (.github/workflows/gibson-self-gate.yml).
 scripts/deploy-audit.sh	SC2034
 scripts/posture-probe.sh	SC2034
-scripts/tests/loop-state.test.sh	SC2218

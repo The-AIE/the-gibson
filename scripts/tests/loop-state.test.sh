@@ -173,6 +173,13 @@ setup_repo() {
 #   rewrite-handoff-nospace — handoff queued, no-space grammar, exit 0
 #   rewrite-empty-updated — valid-looking schema but updated empty, exit 0
 #   rewrite-valid-symlink — replace state with symlink to fresh valid outside target
+#   rewrite-clock-only    — fresh updated: only (no-progress), exit 0  (#63)
+#   rewrite-same-len      — same-length field edit + fresh stamp, exit 0 (#63)
+#   rewrite-handoff-sha-only — only handoff_sha + updated change, exit 0 (#63)
+#   rewrite-clock-only-then-fail — clock-only stamp + exit 1 (#63)
+#
+# Single definition, above every call site. A second late redefinition (issue
+# #63 block) caused SC2218 on ShellCheck ≤0.10; keep one body only (#138).
 make_runner_cmd() {
   echo "${1:-noop}" > "$CALLS/runner.behavior"
   cat > "$CALLS/fake-runner.sh" <<RUN
@@ -366,6 +373,73 @@ EOF
     rm -f "\$state"
     ln -s "\$target" "\$state"
     exit 0
+    ;;
+  # --- issue #63 behaviors ---
+  rewrite-clock-only)
+    # Fresh updated: only — L-008 no-progress under silent_noop_progressed.
+    if [[ -f "\$state" ]]; then
+      python3 - "\$state" "\$now" <<'PY'
+import re, sys
+path, now = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+text2, n = re.subn(r"(?m)^updated:.*\$", "updated: " + now, text, count=1)
+if n == 1:
+    open(path, "w", encoding="utf-8").write(text2)
+PY
+    fi
+    exit 0
+    ;;
+  rewrite-same-len)
+    # Same-length substantive edit (round: 0 → round: 1) + fresh stamp.
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue:
+pr:
+hat: builder
+next_hat: builder
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: triage highest-priority unblocked unclaimed issue
+notes: fixture
+EOF
+    exit 0
+    ;;
+  rewrite-handoff-sha-only)
+    # Only handoff_sha + updated change; every other field matches fixture.
+    cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue:
+pr:
+hat: builder
+next_hat: builder
+round: 0
+parked: false
+handoff:
+handoff_sha: abcdef0123456789abcdef0123456789abcdef01
+next_action: triage highest-priority unblocked unclaimed issue
+notes: fixture
+EOF
+    exit 0
+    ;;
+  rewrite-clock-only-then-fail)
+    # Clock-only stamp + nonzero exit: runner-failure must win over no-progress
+    # only when state is valid+fresh. Clock-only with exit 1 is still valid
+    # state → runner-failure only (sensor not run).
+    if [[ -f "\$state" ]]; then
+      python3 - "\$state" "\$now" <<'PY'
+import re, sys
+path, now = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8").read()
+text2, n = re.subn(r"(?m)^updated:.*\$", "updated: " + now, text, count=1)
+if n == 1:
+    open(path, "w", encoding="utf-8").write(text2)
+PY
+    fi
+    exit 1
     ;;
   *)
     echo "fake-runner: unknown behavior \$behavior" >&2
@@ -1844,273 +1918,9 @@ fi
 echo
 echo "issue #63: no-progress / stale-budget / precedence"
 
-# Clock-only rewrite: fresh updated: stamp, every other field byte-identical.
-# Satisfies #75 freshness; must be classified as no-progress (not state-corrupt).
-make_runner_cmd() {
-  echo "${1:-noop}" > "$CALLS/runner.behavior"
-  cat > "$CALLS/fake-runner.sh" <<RUN
-#!/usr/bin/env bash
-set -euo pipefail
-echo call >> "$CALLS/runner.count"
-printf '%s\n' "\$@" >> "$CALLS/runner.args"
-echo ran >> "$CALLS/runner.executed"
-behavior=\$(cat "$CALLS/runner.behavior" 2>/dev/null || echo noop)
-state="$REPO/gibson/loop-state.md"
-now=\$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
-write_valid() {
-  local nh="\${1:-test-engineer}" na="\${2:-run tests for the unit}" notes="\${3:-rewritten valid}" ec="\${4:-0}"
-  cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue: 75
-pr:
-hat: builder
-next_hat: \$nh
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: \$na
-notes: \$notes
-EOF
-  exit "\$ec"
-}
-case "\$behavior" in
-  noop) exit 0 ;;
-  fail) write_valid test-engineer "runner failed" "runner-fail" 1 ;;
-  rewrite-valid) write_valid test-engineer "run tests for the unit" "rewritten valid" 0 ;;
-  rewrite-valid-then-fail) write_valid test-engineer "valid but runner fails" "runner-fail" 3 ;;
-  rewrite-missing-next)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue: 75
-pr:
-hat: builder
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: oops dropped next_hat
-notes: corrupt
-EOF
-    exit 0
-    ;;
-  rewrite-typo-hat)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue: 75
-pr:
-hat: builder
-next_hat: bulider
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: typo hat
-notes: corrupt
-EOF
-    exit 0
-    ;;
-  rewrite-stale)
-    stale=\$(python3 -c 'from datetime import datetime, timezone, timedelta; print((datetime.now(timezone.utc)-timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$stale
-issue: 75
-pr:
-hat: builder
-next_hat: test-engineer
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: stale stamp
-notes: stale
-EOF
-    exit 0
-    ;;
-  rewrite-colons)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue: 75
-pr: 12
-hat: builder
-next_hat: reviewer
-round: 2
-parked: false
-handoff:
-handoff_sha:
-next_action: ship:feat/x: after review: go
-notes: colons ok
-EOF
-    exit 0
-    ;;
-  rewrite-handoff)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue: 75
-pr: 12
-hat: builder
-next_hat: test-engineer
-round: 1
-parked: false
-handoff: feat/75-widget
-handoff_sha: abcdef0123456789abcdef0123456789abcdef01
-next_action: hand off the finished branch
-notes: handoff queued
-EOF
-    exit 0
-    ;;
-  rewrite-valid-nospace)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated:\$now
-issue:75
-pr:
-hat:builder
-next_hat:test-engineer
-round:1
-parked:false
-handoff:
-handoff_sha:
-next_action:run tests for the unit
-notes:rewritten valid nospace
-EOF
-    exit 0
-    ;;
-  rewrite-handoff-nospace)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated:\$now
-issue:75
-pr:12
-hat:builder
-next_hat:test-engineer
-round:1
-parked:false
-handoff:feat/75-widget
-handoff_sha:abcdef0123456789abcdef0123456789abcdef01
-next_action:hand off the finished branch
-notes:handoff queued nospace
-EOF
-    exit 0
-    ;;
-  rewrite-empty-updated)
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated:
-issue: 75
-pr:
-hat: builder
-next_hat: test-engineer
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: emptied updated stamp
-notes: empty-updated corrupt
-EOF
-    exit 0
-    ;;
-  rewrite-valid-symlink)
-    target="$CALLS/outside-valid-state.md"
-    cat > "\$target" <<EOF
-# Gibson loop state
-updated: \$now
-issue: 75
-pr:
-hat: builder
-next_hat: test-engineer
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: via symlink target
-notes: fresh symlink rewrite
-EOF
-    rm -f "\$state"
-    ln -s "\$target" "\$state"
-    exit 0
-    ;;
-  # --- issue #63 behaviors ---
-  rewrite-clock-only)
-    # Fresh updated: only — L-008 no-progress under silent_noop_progressed.
-    if [[ -f "\$state" ]]; then
-      python3 - "\$state" "\$now" <<'PY'
-import re, sys
-path, now = sys.argv[1], sys.argv[2]
-text = open(path, encoding="utf-8").read()
-text2, n = re.subn(r"(?m)^updated:.*\$", "updated: " + now, text, count=1)
-if n == 1:
-    open(path, "w", encoding="utf-8").write(text2)
-PY
-    fi
-    exit 0
-    ;;
-  rewrite-same-len)
-    # Same-length substantive edit (round: 0 → round: 1) + fresh stamp.
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue:
-pr:
-hat: builder
-next_hat: builder
-round: 1
-parked: false
-handoff:
-handoff_sha:
-next_action: triage highest-priority unblocked unclaimed issue
-notes: fixture
-EOF
-    exit 0
-    ;;
-  rewrite-handoff-sha-only)
-    # Only handoff_sha + updated change; every other field matches fixture.
-    cat > "\$state" <<EOF
-# Gibson loop state
-updated: \$now
-issue:
-pr:
-hat: builder
-next_hat: builder
-round: 0
-parked: false
-handoff:
-handoff_sha: abcdef0123456789abcdef0123456789abcdef01
-next_action: triage highest-priority unblocked unclaimed issue
-notes: fixture
-EOF
-    exit 0
-    ;;
-  rewrite-clock-only-then-fail)
-    # Clock-only stamp + nonzero exit: runner-failure must win over no-progress
-    # only when state is valid+fresh. Clock-only with exit 1 is still valid
-    # state → runner-failure only (sensor not run).
-    if [[ -f "\$state" ]]; then
-      python3 - "\$state" "\$now" <<'PY'
-import re, sys
-path, now = sys.argv[1], sys.argv[2]
-text = open(path, encoding="utf-8").read()
-text2, n = re.subn(r"(?m)^updated:.*\$", "updated: " + now, text, count=1)
-if n == 1:
-    open(path, "w", encoding="utf-8").write(text2)
-PY
-    fi
-    exit 1
-    ;;
-  *)
-    echo "fake-runner: unknown behavior \$behavior" >&2
-    exit 99
-    ;;
-esac
-RUN
-  chmod +x "$CALLS/fake-runner.sh"
-}
+# make_runner_cmd is defined once near the top of this file (includes the
+# issue #63 clock-only / same-len / handoff-sha-only behaviors). Do not
+# reintroduce a late redefinition — ShellCheck ≤0.10 reports SC2218 (#138).
 
 journal_no_progress_count() {
   local n=0 j="$REPO/gibson/journal.md"

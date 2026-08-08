@@ -27,13 +27,16 @@ WHY
 USAGE
   scripts/tests/run-all.sh [--only PATTERN] [--timeout SECONDS]
                            [--no-quarantine] [--list-quarantine] [--quiet]
+  scripts/tests/run-all.sh --self-test-toolchain
   scripts/tests/run-all.sh --help
 
-  --only PATTERN     run only suites whose filename matches PATTERN
-  --timeout SECONDS  per-suite timeout (default 600; 0 disables)
-  --no-quarantine    treat quarantined suites as required — the burn-down view
-  --list-quarantine  print the quarantine list with issue links and exit
-  --quiet            suite summary lines only, no per-assertion output
+  --only PATTERN          run only suites whose filename matches PATTERN
+  --timeout SECONDS       per-suite timeout (default 600; 0 disables)
+  --no-quarantine         treat quarantined suites as required — the burn-down view
+  --list-quarantine       print the quarantine list with issue links and exit
+  --quiet                 suite summary lines only, no per-assertion output
+  --self-test-toolchain   offline checks for ShellCheck version parsing/mismatch
+                          (no network, no sensors)
 
 EXIT
   0  everything required is green
@@ -56,9 +59,64 @@ EOF
 JQ_MIN_MAJOR=1
 JQ_MIN_MINOR=6
 
+# Exact ShellCheck pin (#138). The baseline is an exact-set ratchet: findings
+# differ across tool versions (SC2218 accuracy changed in 0.11.0). CI installs
+# this same version from the official koalaman release asset; local operators
+# must match or the gate fails with a plain remediation message below.
+SHELLCHECK_REQUIRED_VERSION=0.11.0
+
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 BASELINE="$SCRIPT_DIR/shellcheck-baseline.txt"
+
+# Parse "ShellCheck … version: X.Y.Z" (or a bare X.Y.Z) → X.Y.Z, else empty.
+# Pure string logic — no PATH lookup — so offline self-tests can exercise it.
+parse_shellcheck_version() {
+  local raw="${1:-}" v
+  v=$(printf '%s\n' "$raw" | awk '
+    /^version:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+/ {
+      sub(/^version:[[:space:]]*/, ""); print; exit
+    }
+    /^[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }
+  ')
+  printf '%s' "$v"
+}
+
+# Offline deterministic checks for version parsing / mismatch (no network).
+# Invoked via --self-test-toolchain; not part of the sensor suite.
+self_test_toolchain() {
+  local fail=0 got
+  got=$(parse_shellcheck_version $'ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: GNU')
+  if [[ "$got" == "0.11.0" ]]; then
+    echo "  ok   — parse full --version banner → 0.11.0"
+  else
+    echo "  FAIL — parse full banner expected 0.11.0 got '$got'"; fail=1
+  fi
+  got=$(parse_shellcheck_version "0.10.0")
+  if [[ "$got" == "0.10.0" ]]; then
+    echo "  ok   — parse bare version → 0.10.0"
+  else
+    echo "  FAIL — parse bare expected 0.10.0 got '$got'"; fail=1
+  fi
+  got=$(parse_shellcheck_version "not-a-version")
+  if [[ -z "$got" ]]; then
+    echo "  ok   — parse garbage → empty"
+  else
+    echo "  FAIL — parse garbage expected empty got '$got'"; fail=1
+  fi
+  got=$(parse_shellcheck_version "version: 0.9.0")
+  if [[ "$got" != "$SHELLCHECK_REQUIRED_VERSION" ]]; then
+    echo "  ok   — mismatch detected (got $got, need $SHELLCHECK_REQUIRED_VERSION)"
+  else
+    echo "  FAIL — mismatch self-test unexpectedly matched"; fail=1
+  fi
+  if [[ "$fail" -eq 0 ]]; then
+    echo "run-all: toolchain self-test GREEN"
+    return 0
+  fi
+  echo "run-all: toolchain self-test RED"
+  return 1
+}
 
 ONLY=""
 TIMEOUT=600
@@ -77,6 +135,10 @@ while [[ $# -gt 0 ]]; do
         printf '%-28s #%-4s %s\n' "$s" "$i" "$r"
       done
       exit 0 ;;
+    --self-test-toolchain)
+      self_test_toolchain
+      exit $?
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "run-all.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -136,6 +198,38 @@ else
   FAILED="$FAILED jq-missing"
 fi
 
+# Exact ShellCheck version (same pin as .github/workflows/gibson-self-gate.yml).
+if command -v shellcheck >/dev/null 2>&1; then
+  SC_RAW=$(shellcheck --version 2>/dev/null || true)
+  SC_V=$(parse_shellcheck_version "$SC_RAW")
+  if [[ -z "$SC_V" ]]; then
+    echo "${RED}  FAIL${OFF} — cannot read shellcheck version from:"
+    echo "$SC_RAW" | sed 's/^/         /'
+    FAILED="$FAILED shellcheck-version"
+  elif [[ "$SC_V" == "$SHELLCHECK_REQUIRED_VERSION" ]]; then
+    echo "${GRN}  ok${OFF}   — shellcheck $SC_V (exact pin for baseline semantics)"
+  else
+    echo "${RED}  FAIL${OFF} — shellcheck $SC_V is not the pinned $SHELLCHECK_REQUIRED_VERSION"
+    echo "         The ShellCheck baseline is an exact-set ratchet: different tool"
+    echo "         versions report different findings, so local and CI must match."
+    echo
+    echo "         How to fix (pick one):"
+    echo "           • macOS (Homebrew):  brew install shellcheck"
+    echo "             then confirm:     shellcheck --version  → version: $SHELLCHECK_REQUIRED_VERSION"
+    echo "           • Linux (official): download the v$SHELLCHECK_REQUIRED_VERSION release asset"
+    echo "             from https://github.com/koalaman/shellcheck/releases/tag/v$SHELLCHECK_REQUIRED_VERSION"
+    echo "             (linux.x86_64 tar.xz on Ubuntu CI; verify the published SHA-256)"
+    echo "           • Or use the same install step as .github/workflows/gibson-self-gate.yml"
+    FAILED="$FAILED shellcheck-version-mismatch"
+  fi
+else
+  echo "${RED}  FAIL${OFF} — shellcheck not installed; the gate cannot vouch for these scripts"
+  echo "         Install ShellCheck $SHELLCHECK_REQUIRED_VERSION (exact), then re-run."
+  echo "         macOS: brew install shellcheck"
+  echo "         Linux: see .github/workflows/gibson-self-gate.yml (pinned official release)"
+  FAILED="$FAILED shellcheck-missing"
+fi
+
 # The claim suites build throwaway repos and commit into them, so they need an
 # identity. Inherit one if the host has it; otherwise supply a local one rather
 # than failing for a reason that has nothing to do with the code under test.
@@ -147,7 +241,8 @@ fi
 
 # --- 1. shellcheck vs baseline ---------------------------------------------
 echo "== shellcheck (-S warning, vs baseline)"
-if command -v shellcheck >/dev/null 2>&1; then
+if command -v shellcheck >/dev/null 2>&1 &&
+   [[ "$(parse_shellcheck_version "$(shellcheck --version 2>/dev/null || true)")" == "$SHELLCHECK_REQUIRED_VERSION" ]]; then
   # shellcheck disable=SC2086
   # awk, not sed: "\t" in a sed replacement is a literal t on BSD sed (#93 is
   # the same lesson one layer down — portability shims that work by accident).
@@ -172,11 +267,13 @@ if command -v shellcheck >/dev/null 2>&1; then
     echo "$GONE" | sed 's/^/         /'
     FAILED="$FAILED shellcheck-baseline-stale"
   else
-    echo "${GRN}  ok${OFF}   — no findings outside the baseline"
+    echo "${GRN}  ok${OFF}   — no findings outside the baseline (shellcheck $SHELLCHECK_REQUIRED_VERSION)"
   fi
+elif command -v shellcheck >/dev/null 2>&1; then
+  echo "${YEL}  SKIP${OFF} — shellcheck baseline compare requires $SHELLCHECK_REQUIRED_VERSION"
+  echo "         (version check already failed above; not comparing against a wrong tool)"
 else
-  echo "${RED}  FAIL${OFF} — shellcheck not installed; the gate cannot vouch for these scripts"
-  FAILED="$FAILED shellcheck-missing"
+  echo "${YEL}  SKIP${OFF} — shellcheck missing (already failed in toolchain)"
 fi
 
 # --- 2. syntax --------------------------------------------------------------
