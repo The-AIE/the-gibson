@@ -79,10 +79,13 @@ jobs:
           echo "linux.x86_64 digest=${digest}"
 
       - name: Install ShellCheck (official release, single-source pin)
+        env:
+          PIN_VERSION: ${{ steps.sc_pin.outputs.version }}
+          PIN_DIGEST: ${{ steps.sc_pin.outputs.digest }}
         run: |
           set -euo pipefail
-          SC_VERSION="${{ steps.sc_pin.outputs.version }}"
-          SC_SHA256="${{ steps.sc_pin.outputs.digest }}"
+          SC_VERSION="${PIN_VERSION}"
+          SC_SHA256="${PIN_DIGEST}"
           if [ -z "${SC_VERSION}" ] || [ -z "${SC_SHA256}" ]; then
             echo "error: empty pin step outputs (version='${SC_VERSION}' digest length=${#SC_SHA256})" >&2
             exit 1
@@ -106,7 +109,9 @@ jobs:
           fi
           SC_URL="https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
           cd "${RUNNER_TEMP}"
-          curl -fsSL -o "shellcheck.tar.xz" "$SC_URL"
+          # Bounded retries for transient GitHub download failures; sha256sum still mandatory.
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+            -o "shellcheck.tar.xz" "$SC_URL"
           echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
           tar -xJf shellcheck.tar.xz
           sudo install -m 0755 "shellcheck-v${SC_VERSION}/shellcheck" /usr/local/bin/shellcheck

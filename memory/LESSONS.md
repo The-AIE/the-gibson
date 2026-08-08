@@ -957,7 +957,7 @@ deploy+smoke. Practiced on #311.
 the ShellCheck baseline after a late `make_runner_cmd` redefinition. Locally
 (ShellCheck 0.11.0) the baseline-only change was green; shared CI (unpinned apt
 ShellCheck 0.9.x/0.10.x) failed with `NEWF` containing SC2218 (reproduced 31×).
-#138 / PR #147 had to repair the structural cause *and* make the analyzer
+Issue #138 / PR #147 had to repair the structural cause *and* make the analyzer
 contract deterministic so the same ratchet could not disagree across hosts.
 **Root cause:** an exact-set finding ratchet is nondeterministic when the
 analyzer version is not part of the contract. SC2218 accuracy changed between
