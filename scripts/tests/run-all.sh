@@ -36,7 +36,9 @@ USAGE
   --list-quarantine       print the quarantine list with issue links and exit
   --quiet                 suite summary lines only, no per-assertion output
   --self-test-toolchain   offline checks for ShellCheck version parsing/mismatch
-                          (no network, no sensors)
+                          and single-source pin wiring (no network, no sensors).
+                          The ordinary path also runs these checks and fails the
+                          gate if they go red.
 
 EXIT
   0  everything required is green
@@ -63,14 +65,25 @@ JQ_MIN_MINOR=6
 # differ across tool versions (SC2218 accuracy changed in 0.11.0). CI installs
 # this same version from the official koalaman release asset; local operators
 # must match or the gate fails with a plain remediation message below.
+#
+# MACHINE SOURCE OF TRUTH for version + official asset digests. Strict
+# assignment lines (name=value, no quotes/spaces) so .github/workflows/
+# gibson-self-gate.yml can extract the Linux pin without restating it.
+# A version bump updates these constants only; the workflow reads them.
 SHELLCHECK_REQUIRED_VERSION=0.11.0
+SHELLCHECK_SHA256_DARWIN_AARCH64=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+SHELLCHECK_SHA256_DARWIN_X86_64=3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+SHELLCHECK_SHA256_LINUX_X86_64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
 
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 BASELINE="$SCRIPT_DIR/shellcheck-baseline.txt"
+WORKFLOW_SELF_GATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
 
 # Parse "ShellCheck … version: X.Y.Z" (or a bare X.Y.Z) → X.Y.Z, else empty.
 # Pure string logic — no PATH lookup — so offline self-tests can exercise it.
+# Distro revision suffixes (e.g. 0.11.0-1) are NOT normalized: the full remainder
+# is returned and fails the exact pin match (official binaries print bare X.Y.Z).
 parse_shellcheck_version() {
   local raw="${1:-}" v
   v=$(printf '%s\n' "$raw" | awk '
@@ -89,8 +102,7 @@ shellcheck_version_matches_pin() {
 }
 
 # Plain-language install path to the official pinned release assets (no package
-# manager "latest"). Digests are the published GitHub asset metadata for the
-# current pin; verify before putting the binary on PATH.
+# manager "latest"). Digests come from the single-source constants above.
 print_shellcheck_install_remediation() {
   local v="$SHELLCHECK_REQUIRED_VERSION"
   cat <<EOF
@@ -103,13 +115,13 @@ print_shellcheck_install_remediation() {
            Assets (download the one for your OS/CPU):
              • macOS Apple Silicon:
                  shellcheck-v${v}.darwin.aarch64.tar.xz
-                 SHA-256: 56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+                 SHA-256: ${SHELLCHECK_SHA256_DARWIN_AARCH64}
              • macOS Intel:
                  shellcheck-v${v}.darwin.x86_64.tar.xz
-                 SHA-256: 3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+                 SHA-256: ${SHELLCHECK_SHA256_DARWIN_X86_64}
              • Linux x86_64:
                  shellcheck-v${v}.linux.x86_64.tar.xz
-                 SHA-256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+                 SHA-256: ${SHELLCHECK_SHA256_LINUX_X86_64}
 
            Then:
              1. Verify the downloaded file's SHA-256 matches the digest above
@@ -118,26 +130,29 @@ print_shellcheck_install_remediation() {
                 (e.g. install -m 0755 shellcheck /usr/local/bin/shellcheck).
              3. Confirm: shellcheck --version  →  version: ${v}
 
-         CI installs the same Linux x86_64 pin
-         (see .github/workflows/gibson-self-gate.yml).
+         CI extracts the Linux version + digest from these same constants
+         (see .github/workflows/gibson-self-gate.yml) — do not restate them there.
 EOF
 }
 
-# Offline deterministic checks for version parsing / mismatch (no network).
-# Invoked via --self-test-toolchain; not part of the sensor suite.
+# Offline deterministic checks for version parsing / mismatch / single-source
+# wiring (no network). Invoked by the ordinary run-all path (CI) and by the
+# focused entry point --self-test-toolchain.
 self_test_toolchain() {
-  local fail=0 got
-  got=$(parse_shellcheck_version $'ShellCheck - shell script analysis tool\nversion: 0.11.0\nlicense: GNU')
-  if [[ "$got" == "0.11.0" ]]; then
-    echo "  ok   — parse full --version banner → 0.11.0"
+  local fail=0 got mismatch wf
+  # Parse expectations track the pin constant so a future bump cannot leave a
+  # hardcoded "0.11.0" expectation that contradicts the new pin.
+  got=$(parse_shellcheck_version $'ShellCheck - shell script analysis tool\nversion: '"${SHELLCHECK_REQUIRED_VERSION}"$'\nlicense: GNU')
+  if [[ "$got" == "$SHELLCHECK_REQUIRED_VERSION" ]]; then
+    echo "  ok   — parse full --version banner → ${SHELLCHECK_REQUIRED_VERSION}"
   else
-    echo "  FAIL — parse full banner expected 0.11.0 got '$got'"; fail=1
+    echo "  FAIL — parse full banner expected ${SHELLCHECK_REQUIRED_VERSION} got '$got'"; fail=1
   fi
-  got=$(parse_shellcheck_version "0.10.0")
-  if [[ "$got" == "0.10.0" ]]; then
-    echo "  ok   — parse bare version → 0.10.0"
+  got=$(parse_shellcheck_version "1.2.3")
+  if [[ "$got" == "1.2.3" ]]; then
+    echo "  ok   — parse bare version → 1.2.3"
   else
-    echo "  FAIL — parse bare expected 0.10.0 got '$got'"; fail=1
+    echo "  FAIL — parse bare expected 1.2.3 got '$got'"; fail=1
   fi
   got=$(parse_shellcheck_version "not-a-version")
   if [[ -z "$got" ]]; then
@@ -145,7 +160,13 @@ self_test_toolchain() {
   else
     echo "  FAIL — parse garbage expected empty got '$got'"; fail=1
   fi
-  got=$(parse_shellcheck_version "version: 0.9.0")
+  # Dynamic mismatch: never equal the pin, even if a later pin happens to equal
+  # a formerly hardcoded wrong sample (e.g. 0.9.0).
+  mismatch="0.0.0"
+  if [[ "$mismatch" == "$SHELLCHECK_REQUIRED_VERSION" ]]; then
+    mismatch="0.0.1"
+  fi
+  got=$(parse_shellcheck_version "version: ${mismatch}")
   if [[ "$got" != "$SHELLCHECK_REQUIRED_VERSION" ]]; then
     echo "  ok   — mismatch detected (got $got, need $SHELLCHECK_REQUIRED_VERSION)"
   else
@@ -157,15 +178,58 @@ self_test_toolchain() {
   else
     echo "  FAIL — pin matches helper rejected required version"; fail=1
   fi
-  if shellcheck_version_matches_pin "0.9.0"; then
-    echo "  FAIL — pin matches helper accepted wrong version"; fail=1
+  if shellcheck_version_matches_pin "$mismatch"; then
+    echo "  FAIL — pin matches helper accepted wrong version ($mismatch)"; fail=1
   else
-    echo "  ok   — pin matches helper rejects other version"
+    echo "  ok   — pin matches helper rejects other version ($mismatch)"
   fi
   if shellcheck_version_matches_pin ""; then
     echo "  FAIL — pin matches helper accepted empty"; fail=1
   else
     echo "  ok   — pin matches helper rejects empty"
+  fi
+  # Digest constants: non-empty, 64 lowercase hex (official GitHub asset shape).
+  local digests_ok=1
+  for got in \
+      "$SHELLCHECK_SHA256_DARWIN_AARCH64" \
+      "$SHELLCHECK_SHA256_DARWIN_X86_64" \
+      "$SHELLCHECK_SHA256_LINUX_X86_64"; do
+    if [[ "$got" =~ ^[0-9a-f]{64}$ ]]; then
+      : # ok
+    else
+      echo "  FAIL — digest constant bad shape (want 64 lowercase hex): '$got'"
+      fail=1
+      digests_ok=0
+    fi
+  done
+  if [[ "$digests_ok" -eq 1 ]]; then
+    echo "  ok   — digest constants are 64 lowercase hex (darwin aarch64/x86_64, linux x86_64)"
+  fi
+  # Workflow must consume these constants and must not restate version/digests.
+  wf="$WORKFLOW_SELF_GATE"
+  if [[ ! -f "$wf" ]]; then
+    echo "  FAIL — missing workflow $wf"; fail=1
+  else
+    if grep -q 'SHELLCHECK_REQUIRED_VERSION' "$wf" &&
+       grep -q 'SHELLCHECK_SHA256_LINUX_X86_64' "$wf" &&
+       grep -q 'scripts/tests/run-all.sh' "$wf"; then
+      echo "  ok   — workflow references single-source constants in run-all.sh"
+    else
+      echo "  FAIL — workflow does not extract pin constants from run-all.sh"; fail=1
+    fi
+    if grep -F "$SHELLCHECK_SHA256_LINUX_X86_64" "$wf" >/dev/null 2>&1 ||
+       grep -F "$SHELLCHECK_SHA256_DARWIN_AARCH64" "$wf" >/dev/null 2>&1 ||
+       grep -F "$SHELLCHECK_SHA256_DARWIN_X86_64" "$wf" >/dev/null 2>&1; then
+      echo "  FAIL — workflow restates a pin digest (must extract from run-all.sh)"; fail=1
+    else
+      echo "  ok   — workflow does not restate pin digests"
+    fi
+    # No env-style restatement of the version (SC_VERSION: "0.11.0" / SC_VERSION: 0.11.0).
+    if grep -E 'SC_VERSION:[[:space:]]*["'\'']?'"$SHELLCHECK_REQUIRED_VERSION" "$wf" >/dev/null 2>&1; then
+      echo "  FAIL — workflow restates SC_VERSION: ${SHELLCHECK_REQUIRED_VERSION}"; fail=1
+    else
+      echo "  ok   — workflow does not restate SC_VERSION env literal"
+    fi
   fi
   if [[ "$fail" -eq 0 ]]; then
     echo "run-all: toolchain self-test GREEN"
@@ -235,6 +299,14 @@ SH_FILES=$(find scripts -name '*.sh' -type f | sort)
 
 # --- 0. toolchain -----------------------------------------------------------
 echo "== toolchain"
+# Offline self-test runs in the ordinary path CI invokes (not only via the
+# focused --self-test-toolchain entry point). A red self-test fails the gate.
+echo "  — offline toolchain self-test"
+if self_test_toolchain; then
+  :
+else
+  FAILED="$FAILED toolchain-self-test"
+fi
 if command -v jq >/dev/null 2>&1; then
   JQ_V=$(jq --version 2>/dev/null | sed 's/^jq-//')
   JQ_MAJ=${JQ_V%%.*}; JQ_REST=${JQ_V#*.}; JQ_MIN=${JQ_REST%%.*}
