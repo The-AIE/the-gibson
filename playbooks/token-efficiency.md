@@ -15,7 +15,7 @@ outputs:
 gates:
   - flat-rate-first for volume; metered only for judgment that needs it (docs/15)
   - never grade below the task's minimum capability floor
-  - green gate, exact-head CI, and cross-vendor review stay absolute (docs/06, docs/20)
+  - green gate, exact-head CI, cross-vendor review, and deploy/runtime verification stay absolute (docs/06, docs/12, docs/20)
   - no-model checks stay no-model (scripts/*, ci/*)
   - missing usage stays unknown — never invent tokens or dollars
 forbidden:
@@ -23,6 +23,7 @@ forbidden:
   - routing Tier B/C evaluation below S, or Tier C adversarial below F
   - changing billing, plan settings, keys, env secrets, or provider routing config
   - inventing fixed dollar prices or assuming a vendor's current plan rate
+  - treating flat-rate / subscription usage as free or unlimited
   - unbounded coordinators / infinite retry on the same failure
 sources:
   - docs/15-model-economics.md
@@ -30,13 +31,18 @@ sources:
   - docs/11-solo-loop.md
   - docs/05-concurrency.md
   - docs/06-quality-gates.md
+  - docs/12-vercel.md
+  - docs/08-security.md
   - docs/16-nontechnical-operation.md
-  - memory/LESSONS.md (L-003)
+  - memory/LESSONS.md (L-003, L-007)
+  - playbooks/release.md
   - scripts/cost-ledger.sh
   - scripts/loop.sh
   - scripts/second-opinion.sh
   - scripts/claims-status.sh
   - scripts/gate.sh
+  - scripts/gate-baseline.sh
+  - scripts/posture-probe.sh
 ---
 
 # Token efficiency — route, bound, measure, preserve quality
@@ -75,14 +81,18 @@ debt. (L-003 fixed unbounded spend; L-005 forbids fail-open review skip.)
 ```bash
 GIBSON=~/Code/the-gibson   # or this clone
 REPO=~/Code/acme-app       # target checkout or worktree
+REPO_SLUG=owner/name       # safe placeholder — replace with the target's origin slug
 
-# 0) No-model: who holds what (WIP)
-"$GIBSON/scripts/claims-status.sh" --markdown
+# 0) No-model: who holds what (WIP). claims-status.sh reads docs/claims from the
+#    *current* git working tree — run it inside the target, not Gibson's clone.
+(cd "$REPO" && "$GIBSON/scripts/claims-status.sh" --markdown)
 
-# 1) Solo grind on a flat-rate runner (default budgets: error 5; stale = error)
+# 1) Solo grind on a flat-rate runner (default budgets: error 5; stale = error).
+#    --repo-slug is required (see loop.sh --help) and must match origin.
 "$GIBSON/scripts/loop.sh" \
   --runner grok \
   --repo "$REPO" \
+  --repo-slug "$REPO_SLUG" \
   --max-iterations 20 \
   --error-budget 5 \
   --stale-budget 5 \
@@ -95,10 +105,12 @@ REPO=~/Code/acme-app       # target checkout or worktree
   --reviewers codex,claude \
   --out "$REPO/gibson/second-opinion.md"
 
-# 3) Green gate in the worktree (deterministic)
-"$GIBSON/scripts/gate.sh"
+# 3) Green gate in the *target* worktree (gate scripts read/write CWD baseline).
+#    Record baseline once at branch point; then gate before each commit.
+(cd "$REPO" && "$GIBSON/scripts/gate-baseline.sh")   # once at branch point
+(cd "$REPO" && "$GIBSON/scripts/gate.sh")
 
-# 4) Record one measured iteration (tokens optional — omit if unknown)
+# 4) Record one measured iteration (aggregate tokens optional — omit if unknown)
 "$GIBSON/scripts/cost-ledger.sh" append \
   --ledger "$REPO/gibson/cost-ledger.jsonl" \
   --runner grok \
@@ -109,8 +121,9 @@ REPO=~/Code/acme-app       # target checkout or worktree
   --issue 42 \
   --pr 123 \
   --iteration 1 \
-  --repo owner/name
-# optional when the runtime reports them: --tokens N
+  --repo "$REPO_SLUG"
+# optional when the runtime reports an aggregate count: --tokens N
+# (no --input-tokens / --output-tokens / --cache-tokens flags today — see §9)
 
 # 5) Roll up (optional merged-PR list is a JSON array file you already have)
 "$GIBSON/scripts/cost-ledger.sh" summarize \
@@ -120,19 +133,37 @@ REPO=~/Code/acme-app       # target checkout or worktree
 
 **Headless agent dispatch (load this playbook, then grade the next unit):**
 
-```bash
-grok -p "$(cat playbooks/token-efficiency.md)
+Do **not** pass this playbook through `grok -p "$(cat …)"`. Playbooks begin with
+YAML frontmatter (`---`), which Grok's arg parser mis-reads as a flag when the
+body is inlined as a `-p` value (L-007). Gibson's loop uses `--prompt-file`;
+mirror that. Put target/issue/work metadata in the same prompt file (or a short
+brief that points at this playbook) so nothing is lost and nothing starts with
+an unquoted `---` CLI value.
 
-Target repo: ~/Code/acme-app
-Issue / PR: #42 / #123
-Work type: Tier A builder hat
-Installed runners: grok, codex
-Mode: grade + bound + measure (no billing changes)
-"
+```bash
+GIBSON=~/Code/the-gibson
+REPO=~/Code/acme-app
+REPO_SLUG=owner/name
+PROMPT_FILE="$(mktemp -t te-dispatch.XXXXXX.md)"
+{
+  cat "$GIBSON/playbooks/token-efficiency.md"
+  printf '\n\n## Dispatch context\n\n'
+  printf 'Target repo: %s\n' "$REPO"
+  printf 'Repo slug: %s\n' "$REPO_SLUG"
+  printf 'Issue / PR: #42 / #123\n'
+  printf 'Work type: Tier A builder hat\n'
+  printf 'Installed runners: grok, codex\n'
+  printf 'Mode: grade + bound + measure (no billing changes)\n'
+} > "$PROMPT_FILE"
+# plan = read-only grade; use bypassPermissions only when the agent must act
+grok --prompt-file "$PROMPT_FILE" --cwd "$REPO" --permission-mode plan
+rm -f "$PROMPT_FILE"
 ```
 
-**Claude Code / Codex:** same pattern — paste this file, then the target path and
-issue. Local override: `local/playbooks/token-efficiency.md` if present
+**Claude Code / Codex:** load this playbook by path or paste, then the target
+path, slug, and issue. Prefer file/stdin paths over dash-prefixed CLI values when
+the body starts with YAML frontmatter. Local override:
+`local/playbooks/token-efficiency.md` if present
 ([docs/18](../docs/18-fork-and-upstream.md)).
 
 **Operator (chat only):** you never run the shell. Ask the fleet:
@@ -193,10 +224,11 @@ reroute implement work only when another pool still clears the grade floor.
 
 ## 3. WIP and concurrency
 
-Live inventory (no model):
+Live inventory (no model). The script inspects the **current working directory's**
+git tree (`docs/claims/`), so enter the target first:
 
 ```bash
-"$GIBSON/scripts/claims-status.sh" --markdown
+(cd "$REPO" && "$GIBSON/scripts/claims-status.sh" --markdown)
 ```
 
 | Rule | Why |
@@ -253,14 +285,15 @@ These are scripts and CI — not prompts ([docs/15](../docs/15-model-economics.m
 
 | Check | Command / location |
 |---|---|
-| Claims / WIP | `scripts/claims-status.sh` |
-| Green gate | `scripts/gate-baseline.sh` then `scripts/gate.sh` |
-| Loop state schema | `scripts/validate-loop-state.sh` |
+| Claims / WIP | `(cd "$REPO" && scripts/claims-status.sh)` — CWD must be the target |
+| Green gate | `(cd "$REPO" && scripts/gate-baseline.sh)` once at branch point, then `(cd "$REPO" && scripts/gate.sh)` before commits |
+| Loop state schema | `scripts/validate-loop-state.sh` (target `gibson/loop-state.md`) |
 | Injection / deceptive Unicode | `scripts/injection-scan.sh` |
-| Cross-vendor review dispatch | `scripts/second-opinion.sh` (still a model, but **read-only** and not self) |
-| Cost append / summarize | `scripts/cost-ledger.sh` |
+| Cross-vendor review dispatch | `scripts/second-opinion.sh --repo "$REPO"` (still a model, but **read-only** and not self) |
+| Cost append / summarize | `scripts/cost-ledger.sh` (`--ledger` under `$REPO/gibson/`) |
 | Delivery-control audit | `scripts/delivery-control/audit.sh` |
 | CI on exact head | Required checks on the PR head SHA — see §8 |
+| Deploy / runtime | READY + smoke / posture-probe after merge or vs preview — see §8 (not the same as CI green) |
 
 Run no-model sensors before spending a skilled/frontier call on something a
 script already answers.
@@ -279,7 +312,9 @@ Cache hits never replace **exact-head** verification after new commits.
 
 ## 8. Quality invariants (non-negotiable)
 
-1. **Green gate** before every commit ([docs/06](../docs/06-quality-gates.md)).
+1. **Green gate** before every commit, run from the **target worktree** after a
+   branch-point baseline (`gate-baseline.sh` then `gate.sh` —
+   [docs/06](../docs/06-quality-gates.md)).
 2. **Exact-head CI:** required checks must run on the PR's current head SHA.
    A missing check is not a pass ([docs/20](../docs/20-multi-model-orchestration.md)
    Chatterbuilt lesson). Cross-check when status looks too green:
@@ -289,6 +324,17 @@ Cache hits never replace **exact-head** verification after new commits.
 4. **A worker PASS is a claim** — re-run checks; read the actual diff.
 5. **Owner / human gates** unchanged ([docs/14](../docs/14-human-gates.md)).
 6. **No secrets in capsules** — blind pipe for credentials (docs/20 rule 6).
+7. **Deployment / runtime verification** — green CI and a green local gate prove
+   the *commit*, not the *running system*. For product surfaces after merge (or
+   against a PR preview when evaluating UX/security): confirm the deployment is
+   for the expected commit SHA and reaches **READY**
+   ([docs/12](../docs/12-vercel.md), [playbooks/release.md](release.md)); run
+   post-deploy smoke (`BASE_URL=… npx playwright test …` contract happy-paths)
+   and, when applicable, `"$GIBSON/scripts/posture-probe.sh" <url>`
+   ([docs/08](../docs/08-security.md)). Docs-only / no product surface: content
+   verification on `origin/main` after the merge commit lands — not a Vercel
+   READY wait (release playbook). **Never treat "CI green" as "deployed runtime
+   verified."**
 
 Token savings that violate any row above are forbidden by this playbook's
 frontmatter.
@@ -296,19 +342,55 @@ frontmatter.
 ## 9. Measurement and telemetry
 
 Use `scripts/cost-ledger.sh` (schema `gibson.cost.v1`). Record what you know;
-**never coerce missing fields to zero.**
+**never coerce missing fields to zero.** Flat-rate / subscription usage is
+**not free** — it saturates and still burns wall time; metered usage bills per
+use. Never invent dollar prices.
 
-| Signal | How |
-|---|---|
-| Runner / pool | `--runner`, `--pool`, `--flat-rate true\|false` |
-| Hat | `--hat` (builder, reviewer, …) |
-| Wall time | `--wall-ms` (required on append) |
-| Tokens | `--tokens N` only when the runtime reported them |
-| ACUs / vendor units | `--acus` when applicable |
-| Issue / PR / iteration | `--issue`, `--pr`, `--iteration` |
-| Outcome | PR merge state via GitHub; journal + cost note; optional `--merged-since` JSON for rollup |
-| Attempts / rework | iteration count, escalate events, REQUEST_CHANGES rounds in journal / loop-state |
-| Cost USD | Only if the runtime or operator supplies it elsewhere — this script does **not** invent prices |
+### What the ledger persists today
+
+`cost-ledger.sh append` accepts only the flags in `cost-ledger.sh --help`.
+Issue #149 asks for input / output / cache token measurement **when available**;
+today the script stores at most one optional aggregate token count, not a
+typed breakout:
+
+| Signal | Ledger field / flag | Notes |
+|---|---|---|
+| Runner / pool | `--runner`, `--pool`, `--flat-rate true\|false` | Pool shape, not a price |
+| Hat | `--hat` (builder, reviewer, …) | |
+| Wall time | `--wall-ms` (required on append) | Always known |
+| Tokens (aggregate) | `--tokens N` | **Only** when a runtime reports a total. Loop may pass this via `GIBSON_COST_TOKENS` when set. Omit when unknown — never `0` as a stand-in |
+| ACUs / vendor units | `--acus` | When applicable |
+| Issue / PR / iteration / repo | `--issue`, `--pr`, `--iteration`, `--repo` | |
+| Free-text note | `--note` | Single line; no secrets |
+| Outcome | Not a ledger dollar field | PR merge state via GitHub; journal; optional `summarize --merged-since` JSON for cost-or-effort per merged PR |
+| Attempts / rework | Outside the event schema | Iteration count, escalate events, REQUEST_CHANGES rounds in journal / loop-state |
+| Cost USD | **Not invented by this script** | Record only if a runtime or operator supplies a real figure elsewhere |
+
+There are **no** `--input-tokens`, `--output-tokens`, or `--cache-tokens` flags
+and no separate JSON keys for those breakouts in `gibson.cost.v1` today. Do not
+document or call flags the script does not implement.
+
+### Richer runtime breakouts (when the CLI prints them)
+
+Some runtimes print input / output / cache (or prompt / completion) counts in
+their own UI, logs, or session summaries. When those numbers are real:
+
+1. Prefer the runtime's own record as the source of truth for the breakout.
+2. Copy the breakout into the iteration **journal**, loop-state note, or PR
+   status comment so the fleet can read it later.
+3. If you also have a trustworthy **aggregate** total, you may pass that single
+   total as `--tokens` on the ledger event. If you only have a partial
+   breakout, leave ledger `tokens` omitted rather than summing invented parts.
+4. Never fabricate cache hits, input, or output to "complete" a row.
+
+### Coordination with runner routing (#141)
+
+This playbook describes the **measurement and routing contract** operators
+follow (flat-rate-first grades, pool shape, what to record). Per-lane primary /
+fallback runner selection and failover implementation live in issue **#141** —
+do not implement routing machinery in documentation. When #141 lands, ledger
+rows should still record selected runner, pool, and (when known) aggregate
+tokens without inventing usage.
 
 ```bash
 # After a run window
@@ -317,9 +399,10 @@ Use `scripts/cost-ledger.sh` (schema `gibson.cost.v1`). Record what you know;
   --format text
 ```
 
-Weekly retro question: **cost (or wall-time/tokens) per merged PR per pool** —
-the number [docs/15](../docs/15-model-economics.md) exists to push down — without
-lowering the merge quality bar.
+Weekly retro question: **cost (or wall-time / known tokens) per merged PR per
+pool** — the number [docs/15](../docs/15-model-economics.md) exists to push down
+— without lowering the merge quality bar. Summarize reports tokens only from
+events that recorded them; missing stays unknown, not zero.
 
 Never log credentials, raw `.env`, or full metered invoices into the ledger.
 
@@ -350,27 +433,33 @@ plus one sentence of evidence.
 - [ ] Is this ordinary (A), careful (B), or high-stakes money/auth/privacy (C)?
 - [ ] Is the crew using the bulk/cheaper pool for bulk work, and a stronger
       different reviewer when stakes need judgment?
-- [ ] Are we under about three active lanes, with no two people on the same files?
-- [ ] Is there a kill switch and a retry limit so this cannot spin all night for free?
+- [ ] Are we under **≤ 3** active lanes, with no two people on the same files?
+- [ ] Is there a kill switch and a retry limit so this cannot spin all night on
+      open-ended quota or spend? (Flat-rate pools are **not free** — they
+      saturate and still burn wall time.)
 
 ### During / after
 
 - [ ] Did the automatic tests and build run on the **latest** version of the change?
 - [ ] Did a **different** AI (or person) review than the one that wrote it?
-- [ ] Did we record how long it took and, when known, how much attention it used —
-      without guessing numbers?
+- [ ] Did we record how long it took and, when known, how much attention it used
+      (including input/output/cache breakouts in the journal when the runtime
+      printed them — without guessing numbers or inventing ledger fields)?
 - [ ] If something failed twice the same way, did we change approach or stop —
       not hammer the same button?
+- [ ] For product surfaces: was the **deployed** URL checked (expected commit,
+      READY, smoke / posture) — not only "CI said green"?
 - [ ] Did anyone skip a safety check "to save cost"? If yes → **not done**.
 
 ### Decide
 
 | You see… | You say… |
 |---|---|
-| Tests green, other-vendor review, clear summary | **Continue / ship** (or approve the human gate card) |
+| Tests green, other-vendor review, deploy/runtime verified when needed, clear summary | **Continue / ship** (or approve the human gate card) |
 | Same failure repeating, no new info | **Stop and park**; ask for a plain handoff |
 | Only the author said it is fine | **Reroute** to an independent review |
 | High-stakes work on the weakest pool only | **Reroute** up a grade before merge |
+| CI green but no one checked the live/preview app | **Not done** for product surfaces — demand deploy/runtime verification |
 | Numbers look "too cheap" and evidence is thin | **Do not celebrate** — demand the checklist above |
 
 ---
@@ -379,13 +468,16 @@ plus one sentence of evidence.
 
 ### A — Overnight Tier A backlog (efficient)
 
-1. `claims-status.sh` → fewer than three live lanes; no overlap.
-2. `loop.sh --runner grok --max-iterations 20 --error-budget 5 --escalate-after 2`
-   on a flat-rate pool.
+1. `(cd "$REPO" && claims-status.sh --markdown)` → **≤ 3** live lanes; no overlap.
+2. `loop.sh --runner grok --repo "$REPO" --repo-slug "$REPO_SLUG" --max-iterations 20
+   --error-budget 5 --stale-budget 5 --escalate-after 2` on a flat-rate pool
+   (quota/saturation still real — not free).
 3. Each hat gets a fresh context; state in `gibson/loop-state.md`.
-4. On stall, `second-opinion.sh` writes `gibson/second-opinion.md` for another vendor.
-5. Morning: journal + `cost-ledger.sh summarize`; merge only with exact-head green
-   and independent review.
+4. On stall, `second-opinion.sh --repo "$REPO"` writes `gibson/second-opinion.md`
+   for another vendor.
+5. Morning: journal (include any runtime I/O/cache breakouts when printed) +
+   `cost-ledger.sh summarize`; merge only with exact-head green, independent
+   review, and deploy/runtime verification when the change has a product surface.
 
 ### B — False economy (forbidden)
 
@@ -405,11 +497,12 @@ minimization, not efficiency.
 ## Done means
 
 - [ ] Next unit graded G/S/F with a pool shape, not a memorized price list
-- [ ] Budgets and escalate path stated (or loop flags set)
+- [ ] Budgets and escalate path stated (or loop flags set, including `--repo-slug`)
 - [ ] Capsule is minimal; fresh context per hat
-- [ ] No-model checks run where they apply
-- [ ] Quality invariants intact (gate, exact-head CI, cross-vendor)
-- [ ] Ledger/journal updated without invented usage
+- [ ] No-model checks run in the **target** tree where they apply
+- [ ] Quality invariants intact (gate, exact-head CI, cross-vendor, deploy/runtime)
+- [ ] Ledger holds only supported fields; richer token breakouts live in journal
+      when available — no invented usage
 - [ ] Continue / reroute / stop decided with evidence
 
 ## Relationship to other docs
