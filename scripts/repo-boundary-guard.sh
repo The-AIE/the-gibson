@@ -69,6 +69,7 @@ protected_path() {
 # - Prints one diagnostic per offender on stderr.
 # - Fills global array _protected_staged with every offender (NUL-safe via git -z).
 # - Returns 0 if none, 1 if any. Does not exit (callers may selective-reset).
+# - No --diff-filter: must match production guard_control_plane_clean (includes D, T).
 # Bash 3.2: no namerefs; callers read _protected_staged after a failed return.
 _protected_staged=()
 scan_staged_control_plane() {
@@ -81,13 +82,70 @@ scan_staged_control_plane() {
       echo "gibson repo-boundary guard: runner cannot stage harness control-plane file '$path'" >&2
       _protected_staged+=("$path")
     fi
-  done < <("$REAL_GIT" diff --cached --name-only -z --diff-filter=ACMR)
+  done < <("$REAL_GIT" diff --cached --name-only -z)
   [[ ${#_protected_staged[@]} -eq 0 ]]
 }
 
 # Return non-zero if any control-plane path is staged (diagnostics already printed).
 check_staged_control_plane() {
   scan_staged_control_plane
+}
+
+# True (0) when `git commit` argv can include working-tree content that is not
+# already in the index: -a/--all (incl. combined short opts like -am),
+# --include/--only, bare pathspecs, or pathspecs after `--`.
+# Conservative: not a full git option parser; prefers fail-closed on ambiguity.
+# $1 is the subcommand ("commit"); remaining args are commit options/operands.
+commit_form_includes_worktree() {
+  local arg skip_next=0 saw_dd=0 chars
+  shift # drop "commit"
+  for arg in "$@"; do
+    if [[ "$skip_next" -eq 1 ]]; then
+      skip_next=0
+      continue
+    fi
+    if [[ "$saw_dd" -eq 1 ]]; then
+      return 0
+    fi
+    case "$arg" in
+      --) saw_dd=1 ;;
+      -a|--all|--include|-i|--only|-o) return 0 ;;
+      -m|--message|-F|--file|-t|--template|--author|--date|--cleanup|--fix-trailer|-c|--reedit-message|-C|--reuse-message)
+        skip_next=1
+        ;;
+      --message=*|--file=*|--template=*|--author=*|--date=*|--cleanup=*|--fix-trailer=*|--reedit-message=*|--reuse-message=*)
+        ;;
+      --*)
+        ;;
+      -*)
+        # Combined short options (e.g. -am, -amm, -an). Long options already handled.
+        chars="${arg#-}"
+        if [[ "$chars" == *a* ]]; then
+          return 0
+        fi
+        # Attached-value short forms (-mMSG, -Ffile): not pathspecs.
+        ;;
+      *)
+        # Bare non-option operand: pathspec form (e.g. git commit -m msg PATH).
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Print diagnostics and return 1 if any protected tracked path has unstaged
+# working-tree changes (the set -a / pathspec commits can pull into a commit).
+check_unstaged_protected_tracked() {
+  local path found=0
+  while IFS= read -r -d '' path; do
+    [[ -n "$path" ]] || continue
+    if protected_path "$path"; then
+      echo "gibson repo-boundary guard: runner cannot commit harness control-plane file '$path' via -a/pathspec" >&2
+      found=1
+    fi
+  done < <("$REAL_GIT" diff --name-only -z)
+  [[ "$found" -eq 0 ]]
 }
 
 branch_from_push_args() {
@@ -157,15 +215,24 @@ case "${1-}" in
   add|commit)
     if [[ "$1" == "commit" ]]; then
       check_staged_control_plane || exit 86
+      # -a/-am and pathspec commits can include unstaged tracked mods after the
+      # index scan. Fail closed when those forms could pull in protected paths.
+      if commit_form_includes_worktree "$@"; then
+        check_unstaged_protected_tracked || exit 86
+      fi
       "$REAL_GIT" "$@"
     else
       # Run the real add first, then reject protected paths. On rejection, roll
       # back *only* the offending pathspecs so legitimate prior staging survives.
+      # Under set -e, a failed real add (e.g. unmatched pathspec) exits with the
+      # real git status before the scan — no extra status plumbing required.
       "$REAL_GIT" "$@"
       if ! scan_staged_control_plane; then
         # Diagnostics already printed per offender. Selective reset — never the
         # whole index (Devin #146 review: full `git reset -q` unstaged unrelated work).
-        "$REAL_GIT" reset -q -- "${_protected_staged[@]}"
+        # Paths from diff --cached are root-relative; reset must run at the repo
+        # root so a protected add from a subdirectory still unstages offenders.
+        "$REAL_GIT" -C "$current_root" reset -q -- "${_protected_staged[@]}"
         exit 86
       fi
     fi
