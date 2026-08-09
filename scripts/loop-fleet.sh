@@ -20,7 +20,9 @@
 #     declarative route (primary first, fallbacks after). Only declared runners
 #     may be selected. Bounded readiness preflight before launch; fail over only
 #     on classified readiness failure; three-role re-check against the *actual*
-#     selected runner. Selection telemetry lives in the profile log namespace.
+#     selected runner. Selection telemetry lives in the profile log namespace
+#     (runner-selection.jsonl + gibson.cost.v1 join rows) and is propagated
+#     into loop.sh via GIBSON_COST_* env for iteration association.
 #
 # PROFILE
 #   FLEET_PROFILE=/absolute/path/to/profile
@@ -1867,13 +1869,42 @@ read_runner_status_field() {
   return 1
 }
 
+# Fleet-local cost ledger path (join target for selection + loop iterations).
+# Prefer explicit GIBSON_COST_LEDGER; otherwise LOG_DIR/cost-ledger.jsonl.
+fleet_cost_ledger_path() {
+  if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
+    printf '%s\n' "$GIBSON_COST_LEDGER"
+  else
+    printf '%s\n' "$LOG_DIR/cost-ledger.jsonl"
+  fi
+}
+
+# Resolve cost-ledger.sh without relying on the (often stubbed) test GIBSON tree.
+resolve_cost_ledger_sh() {
+  if [[ -n "${COST_LEDGER_SH:-}" && -f "$COST_LEDGER_SH" ]]; then
+    printf '%s\n' "$COST_LEDGER_SH"
+    return 0
+  fi
+  if [[ -f "$SCRIPT_DIR/cost-ledger.sh" ]]; then
+    printf '%s\n' "$SCRIPT_DIR/cost-ledger.sh"
+    return 0
+  fi
+  if [[ -n "${GIBSON:-}" && -f "$GIBSON/scripts/cost-ledger.sh" ]]; then
+    printf '%s\n' "$GIBSON/scripts/cost-ledger.sh"
+    return 0
+  fi
+  return 1
+}
+
 # Append one runner-selection telemetry record into the profile log namespace.
-# Schema is fleet-local (gibson.fleet.runner_selection.v1). The existing
-# cost-ledger (gibson.cost.v1) does not consume fallback_reason / join_key /
-# merged outcome — do not pretend it does (see issue #141 follow-up).
+# Schema is fleet-local (gibson.fleet.runner_selection.v1). Also appends a
+# gibson.cost.v1 selection row (same join_key) so cost-ledger summarize can
+# attribute merged outcomes without inventing token/cost numbers (#141).
+# Args: id requested selected health reason pool join route wall_ms [issue]
 write_runner_selection_telemetry() {
   local id="$1" requested="$2" selected="$3" health="$4" reason="$5" pool="$6" join="$7" route="$8" wall_ms="$9"
-  local path ts provider
+  local issue="${10:-}"
+  local path ts provider ledger cl_sh flat_flag flat_val
   path=$(runner_selection_log)
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   provider=$(cmd_provider_id "$selected" 2>/dev/null || printf '%s' "$selected")
@@ -1907,6 +1938,37 @@ line = json.dumps(ev, separators=(",", ":"), sort_keys=True) + "\n"
 with open(path, "a", encoding="utf-8") as f:
     f.write(line)
 ' || die "failed to write runner-selection telemetry for lane $id"
+
+  # Mirror selection into gibson.cost.v1 (no fabricated tokens/costs).
+  if cl_sh=$(resolve_cost_ledger_sh); then
+    ledger=$(fleet_cost_ledger_path)
+    # Bash 3.2 + set -u: never expand an empty array with "${arr[@]}".
+    flat_flag=""
+    flat_val=""
+    case "$pool" in
+      flat-rate*|subscription-*) flat_flag="--flat-rate"; flat_val="true" ;;
+      metered*|frontier*) flat_flag="--flat-rate"; flat_val="false" ;;
+    esac
+    set -- \
+      --ledger "$ledger" \
+      --runner "$selected" \
+      --pool "$pool" \
+      --hat "runner-selection" \
+      --wall-ms "${wall_ms:-0}" \
+      --join-key "$join" \
+      --requested-runner "$requested" \
+      --provider "$provider" \
+      --fallback-reason "$reason" \
+      --event-kind selection \
+      --repo "$EXPECTED_SLUG" \
+      --now "$ts"
+    if [[ -n "$issue" ]]; then set -- "$@" --issue "$issue"; fi
+    if [[ -n "$flat_flag" ]]; then set -- "$@" "$flat_flag" "$flat_val"; fi
+    "$cl_sh" append "$@" >/dev/null 2>&1 \
+      || die "failed to append cost-ledger selection row for lane $id"
+  else
+    info "lane $id: cost-ledger.sh not found — selection join row skipped"
+  fi
 }
 
 # Redact readiness probe output: never surface tokens/keys/env/credential material.
@@ -2168,8 +2230,13 @@ select_lane_runner() {
   LANE_SELECT_POOL[$idx]="$pool"
   LANE_SELECT_JOIN[$idx]="$join"
 
+  # First queue issue is known at selection time; PR is not yet.
+  local issue_hint=""
+  issue_hint="${LANE_QUEUES[$idx]%%,*}"
+  [[ "$issue_hint" =~ ^[0-9]+$ ]] || issue_hint=""
+
   write_lane_runner_status "$id" "$requested" "$selected" "$health" "$reason" "$pool" "$join" "$route"
-  write_runner_selection_telemetry "$id" "$requested" "$selected" "$health" "$reason" "$pool" "$join" "$route" "$wall_ms"
+  write_runner_selection_telemetry "$id" "$requested" "$selected" "$health" "$reason" "$pool" "$join" "$route" "$wall_ms" "$issue_hint"
   info "lane $id runner: requested=$requested actual=$selected health=$health reason=$reason pool=$pool"
 }
 
@@ -2782,12 +2849,27 @@ do_start() {
     fi
 
     info "launch lane $id → issue #$issue"
+    # Propagate selection join into loop.sh cost-ledger appends (#141).
+    # Local ledger only; no secrets, no fabricated tokens/costs.
+    local sel_join sel_pool sel_reason sel_req sel_provider sel_ledger
+    sel_join="${LANE_SELECT_JOIN[$i]:-}"
+    sel_pool="${LANE_SELECT_POOL[$i]:-unknown}"
+    sel_reason="${LANE_SELECT_REASON[$i]:-}"
+    sel_req="${LANE_REQUESTED[$i]:-}"
+    sel_provider=$(cmd_provider_id "$lane_runner" 2>/dev/null || printf '%s' "$lane_runner")
+    sel_ledger=$(fleet_cost_ledger_path)
     # Export three-role cmds so loop.sh hats can shell out.
     if [[ "$FLEET_SYNC_LAUNCH" == "1" ]]; then
       # Deterministic offline path: no background jobs (sensors / CI).
       env \
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
+        GIBSON_COST_LEDGER="$sel_ledger" \
+        GIBSON_COST_POOL="$sel_pool" \
+        GIBSON_COST_JOIN_KEY="$sel_join" \
+        GIBSON_COST_REQUESTED_RUNNER="$sel_req" \
+        GIBSON_COST_FALLBACK_REASON="$sel_reason" \
+        GIBSON_COST_PROVIDER="$sel_provider" \
         "$LOOP_SH" \
         --runner "$lane_runner" \
         --repo "$d" \
@@ -2800,6 +2882,12 @@ do_start() {
       nohup env \
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
+        GIBSON_COST_LEDGER="$sel_ledger" \
+        GIBSON_COST_POOL="$sel_pool" \
+        GIBSON_COST_JOIN_KEY="$sel_join" \
+        GIBSON_COST_REQUESTED_RUNNER="$sel_req" \
+        GIBSON_COST_FALLBACK_REASON="$sel_reason" \
+        GIBSON_COST_PROVIDER="$sel_provider" \
         "$LOOP_SH" \
         --runner "$lane_runner" \
         --repo "$d" \

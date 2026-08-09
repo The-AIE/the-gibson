@@ -35,12 +35,21 @@ GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gp
 # preflight must leave this file empty / missing.
 cat > "$ROOT/gibson/scripts/loop.sh" <<'STUB'
 #!/usr/bin/env bash
-# stub loop — records launch; never calls a model
+# stub loop — records launch + cost-join env; never calls a model
 log="${LOOP_LAUNCH_LOG:-/dev/null}"
 printf 'LAUNCH runner=%s repo=%s slug=%s\n' \
   "${2:-}" "${4:-}" "${6:-}" >> "$log"
 # also dump full argv for assertions
 printf '%s\n' "$@" >> "${LOOP_LAUNCH_LOG}.argv"
+# #141 join propagation (fleet → loop cost ledger)
+printf 'JOIN key=%s pool=%s req=%s reason=%s provider=%s ledger=%s\n' \
+  "${GIBSON_COST_JOIN_KEY:-}" \
+  "${GIBSON_COST_POOL:-}" \
+  "${GIBSON_COST_REQUESTED_RUNNER:-}" \
+  "${GIBSON_COST_FALLBACK_REASON:-}" \
+  "${GIBSON_COST_PROVIDER:-}" \
+  "${GIBSON_COST_LEDGER:-}" \
+  >> "${LOOP_LAUNCH_LOG}.join"
 exit 0
 STUB
 chmod +x "$ROOT/gibson/scripts/loop.sh"
@@ -404,8 +413,9 @@ export FLEET_SKIP_FETCH=1
 export GIT_TERMINAL_PROMPT=0
 
 reset_calls() {
-  rm -f "$CALLS/launches.log" "$CALLS/launches.log.argv" "$CALLS/gh.log"
+  rm -f "$CALLS/launches.log" "$CALLS/launches.log.argv" "$CALLS/launches.log.join" "$CALLS/gh.log"
   : > "$CALLS/launches.log"
+  : > "$CALLS/launches.log.join"
   # Force-remove lane worktrees from any target that registered them
   if [[ -d "$ROOT/targets" ]]; then
     for t in "$ROOT/targets"/*; do
@@ -4886,6 +4896,46 @@ echo "$TEL_LINE" | grep -q '"selected_pool":' \
 echo "$TEL_LINE" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
   && bad "telemetry leaked credential-like material" \
   || ok "telemetry has no credential material"
+# Cost-ledger join row for primary selection (#141)
+[[ -f "$ROOT/logs/cost-ledger.jsonl" ]] && ok "cost-ledger.jsonl created on selection" \
+  || bad "missing cost-ledger.jsonl after primary selection"
+CL_LINE=$(tail -1 "$ROOT/logs/cost-ledger.jsonl")
+echo "$CL_LINE" | grep -q 'gibson.cost.v1' \
+  && ok "cost-ledger schema gibson.cost.v1" || bad "cost-ledger schema: $CL_LINE"
+echo "$CL_LINE" | grep -q '"event_kind":"selection"' \
+  && ok "cost-ledger event_kind=selection" || bad "cost-ledger kind: $CL_LINE"
+echo "$CL_LINE" | grep -q '"join_key":' \
+  && ok "cost-ledger join_key present" || bad "cost-ledger missing join_key: $CL_LINE"
+echo "$CL_LINE" | grep -q '"requested_runner":"grind-a"' \
+  && ok "cost-ledger requested_runner" || bad "cost-ledger req: $CL_LINE"
+echo "$CL_LINE" | grep -q '"runner":"grind-a"' \
+  && ok "cost-ledger actual runner" || bad "cost-ledger runner: $CL_LINE"
+echo "$CL_LINE" | grep -q '"fallback_reason":"primary_ready"' \
+  && ok "cost-ledger fallback_reason primary_ready" || bad "cost-ledger reason: $CL_LINE"
+echo "$CL_LINE" | grep -q '"issue":501' \
+  && ok "cost-ledger issue from queue" || bad "cost-ledger issue: $CL_LINE"
+# Must not invent tokens/costs
+echo "$CL_LINE" | grep -qE '"tokens"|"acus"|"cost"' \
+  && bad "cost-ledger fabricated usage fields: $CL_LINE" \
+  || ok "cost-ledger has no fabricated tokens/costs"
+# Join env propagated into loop.sh
+[[ -f "$CALLS/launches.log.join" ]] || bad "missing join env log"
+JOIN_ENV=$(tail -1 "$CALLS/launches.log.join")
+echo "$JOIN_ENV" | grep -q 'key=fleet-sel:v1:' \
+  && ok "loop env received join key" || bad "join env key: $JOIN_ENV"
+echo "$JOIN_ENV" | grep -q 'req=grind-a' \
+  && ok "loop env received requested runner" || bad "join env req: $JOIN_ENV"
+echo "$JOIN_ENV" | grep -q 'reason=primary_ready' \
+  && ok "loop env received fallback reason" || bad "join env reason: $JOIN_ENV"
+echo "$JOIN_ENV" | grep -q "ledger=$ROOT/logs/cost-ledger.jsonl" \
+  && ok "loop env received ledger path" || bad "join env ledger: $JOIN_ENV"
+# join_key matches across selection telemetry + cost ledger + env
+TEL_JOIN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["join_key"])' "$TEL_LINE")
+CL_JOIN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["join_key"])' "$CL_LINE")
+ENV_JOIN=$(printf '%s' "$JOIN_ENV" | sed -n 's/.*key=\([^ ]*\).*/\1/p')
+[[ -n "$TEL_JOIN" && "$TEL_JOIN" == "$CL_JOIN" && "$CL_JOIN" == "$ENV_JOIN" ]] \
+  && ok "join_key identical across telemetry, cost-ledger, and loop env" \
+  || bad "join mismatch tel=$TEL_JOIN cl=$CL_JOIN env=$ENV_JOIN"
 
 echo "declared fallback on readiness failure"
 reset_calls
@@ -4927,6 +4977,19 @@ if grep -qE 'LAUNCH runner=(fake-runner|grok|codex|claude)$' "$CALLS/launches.lo
 else
   ok "no undeclared provider selected"
 fi
+# Fallback selection joins into cost-ledger + loop env
+CL_FB=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
+echo "$CL_FB" | grep -q '"runner":"fallback-y"' \
+  && ok "fallback cost-ledger actual runner" || bad "fallback cl runner: $CL_FB"
+echo "$CL_FB" | grep -q '"requested_runner":"primary-x"' \
+  && ok "fallback cost-ledger requested primary" || bad "fallback cl req: $CL_FB"
+echo "$CL_FB" | grep -q 'primary_not_ready' \
+  && ok "fallback cost-ledger reason" || bad "fallback cl reason: $CL_FB"
+JOIN_FB=$(tail -1 "$CALLS/launches.log.join" 2>/dev/null || true)
+echo "$JOIN_FB" | grep -q 'req=primary-x' \
+  && ok "fallback loop env requested primary" || bad "fallback join env: $JOIN_FB"
+echo "$JOIN_FB" | grep -q 'reason=primary_not_ready' \
+  && ok "fallback loop env reason" || bad "fallback join env reason: $JOIN_FB"
 
 echo "all-unavailable fail closed"
 reset_calls
@@ -4964,6 +5027,12 @@ echo "$out" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
   || ok "diagnostic has no credential material"
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "all-unavailable launched zero" || bad "all-unavailable launched $lc"
+# Fail-closed readiness: no selection → no cost-ledger selection row for this profile name
+if [[ -f "$ROOT/logs/cost-ledger.jsonl" ]] && grep -q 'r141-none' "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null; then
+  bad "all-unavailable should not write selection cost rows for r141-none"
+else
+  ok "all-unavailable wrote no selection cost row"
+fi
 
 echo "actual-runner three-role conflict"
 reset_calls
@@ -5199,6 +5268,42 @@ out=$(run_fleet --start 2>&1) && bad "space token should fail: $out" || {
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "space token launched zero" || bad "space token launched $lc"
+
+echo "cost-ledger path with spaces"
+reset_calls
+unset FLEET_READINESS_DIR || true
+SPACED_LOG="$ROOT/logs with spaces"
+mkdir -p "$SPACED_LOG"
+FLEET_READINESS_DIR="$ROOT/readiness-space-path"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grind-a" ready
+ensure_runner_bin "grind-a"
+TARGET=$(setup_target_repo r141space acme/widget)
+PROF="$ROOT/profiles/r141-space-log.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-space-log" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$SPACED_LOG" \
+  "runner=fake-runner" \
+  "lane=docs|512|docs/**|space log path|grind-a"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+: > "$CALLS/launches.log.join"
+out=$(run_fleet --start) || { bad "space log_dir start failed: $out"; }
+[[ -f "$SPACED_LOG/cost-ledger.jsonl" ]] \
+  && ok "cost-ledger written under log_dir with spaces" \
+  || bad "missing cost-ledger in spaced log_dir"
+SPACE_CL=$(tail -1 "$SPACED_LOG/cost-ledger.jsonl")
+echo "$SPACE_CL" | grep -q '"join_key":' \
+  && ok "spaced cost-ledger has join_key" || bad "spaced cl: $SPACE_CL"
+JOIN_SP=$(tail -1 "$CALLS/launches.log.join")
+echo "$JOIN_SP" | grep -q "ledger=$SPACED_LOG/cost-ledger.jsonl" \
+  && ok "loop env ledger path preserves spaces" || bad "spaced join env: $JOIN_SP"
 
 echo "routing path has no external network"
 ok "routing sensors stay offline (FLEET_SKIP_FETCH + FLEET_READINESS_DIR)"

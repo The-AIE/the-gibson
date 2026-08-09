@@ -80,20 +80,30 @@ Before any new lane launch the driver:
 6. Passes the selected runner to `loop.sh --runner`. Status shows
    requested primary, actual runner, and healthy/degraded/fallback reason
    (persisted under the profile log namespace for idempotent restart).
-7. Appends a fleet-local telemetry record
-   (`gibson.fleet.runner_selection.v1` JSONL in `LOG_DIR/runner-selection.jsonl`)
-   with selected provider/pool, fallback reason, selection wall time, and a
-   stable `join_key` for later merged-PR outcome enrichment.
+7. Appends fleet-local telemetry:
+   - `gibson.fleet.runner_selection.v1` JSONL in `LOG_DIR/runner-selection.jsonl`
+   - a matching `gibson.cost.v1` selection row in `LOG_DIR/cost-ledger.jsonl`
+     (or `GIBSON_COST_LEDGER` when set)
+   Both carry the same stable `join_key`, selected provider/pool, fallback
+   reason, selection wall time, and issue when known. No token counts or
+   dollar costs are fabricated.
+8. Propagates `GIBSON_COST_JOIN_KEY`, `GIBSON_COST_POOL`,
+   `GIBSON_COST_PROVIDER`, `GIBSON_COST_REQUESTED_RUNNER`,
+   `GIBSON_COST_FALLBACK_REASON`, and `GIBSON_COST_LEDGER` into each lane's
+   `loop.sh` so later iteration rows share the join key.
 
 **Flat-rate-first (docs/15):** grind lanes should list flat-rate pools first
 (e.g. `grok`) and metered/frontier providers only at escalation positions.
 The driver does **not** inspect billing, plans, keys, or paid settings and
 does **not** reorder the route.
 
-**Cost-ledger boundary:** selection telemetry is intentionally separate from
-`scripts/cost-ledger.sh` (`gibson.cost.v1`), which has no fields for
-`fallback_reason`, `join_key`, or merged-PR outcome join. Wiring those into
-the cost ledger is a follow-up outside the #141 file claim.
+**Cost-ledger join (#141):** selection and iteration events share
+`join_key`. `scripts/cost-ledger.sh summarize --merged-json PATH` attributes
+an event as merged only when its own `pr`, or a same-`join_key` event's
+`pr`, appears in the merged JSON. Merged PRs with no attributed events are
+reported as lacking cost data — never as zero-cost success. Ambiguous
+join→PR maps and corrupt merged input fail closed. Telemetry stays local
+and redacted (no secrets, no billing policy, no provider-plan mutation).
 
 Unknown keys, duplicate lane ids, empty queue/scope/intent, non-absolute or
 `..`-bearing paths, and overlapping scopes all **fail closed** before any

@@ -226,27 +226,39 @@ if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
   die "silent-noop.sh did not define silent_noop_progressed"
 fi
 
-# Cost telemetry (#74 / L-003). Opt-in via GIBSON_COST_LEDGER path. Never invents
-# zeros for missing token/ACU signals — append only what the driver measured.
-# Defined at top level (not inside the silent-noop if/elif) so the normal
-# $GIBSON/scripts path still registers the function.
+# Cost telemetry (#74 / L-003 / #141). Opt-in via GIBSON_COST_LEDGER path. Never
+# invents zeros for missing token/ACU signals — append only what the driver
+# measured. Optional fleet join fields (GIBSON_COST_JOIN_KEY / pool / provider /
+# requested runner / fallback reason) associate iterations with loop-fleet
+# selection rows. Defined at top level (not inside the silent-noop if/elif) so
+# the normal $GIBSON/scripts path still registers the function.
 cost_ledger_record_iteration() {
   local wall_ms="${1:-0}" hat="${2:-loop-step}"
   local ledger="${GIBSON_COST_LEDGER:-}"
   [[ -n "$ledger" ]] || return 0
   [[ -x "$SCRIPT_DIR/cost-ledger.sh" || -f "$SCRIPT_DIR/cost-ledger.sh" ]] || return 0
   local pool="${GIBSON_COST_POOL:-unknown}"
-  local tokens_args=() acus_args=() flat_args=()
-  if [[ -n "${GIBSON_COST_TOKENS:-}" ]]; then
-    tokens_args=(--tokens "$GIBSON_COST_TOKENS")
-  fi
-  if [[ -n "${GIBSON_COST_ACUS:-}" ]]; then
-    acus_args=(--acus "$GIBSON_COST_ACUS")
-  fi
-  if [[ -n "${GIBSON_COST_FLAT_RATE:-}" ]]; then
-    flat_args=(--flat-rate "$GIBSON_COST_FLAT_RATE")
-  fi
-  "$SCRIPT_DIR/cost-ledger.sh" append     --ledger "$ledger"     --runner "${RUNNER:-unknown}"     --pool "$pool"     --hat "$hat"     --wall-ms "$wall_ms"     ${ISSUE:+--issue "$ISSUE"}     ${PR_NUMBER:+--pr "$PR_NUMBER"}     ${ITERATION:+--iteration "$ITERATION"}     ${REPO_SLUG:+--repo "$REPO_SLUG"}     "${tokens_args[@]}" "${acus_args[@]}" "${flat_args[@]}"     >/dev/null 2>&1 || true
+  # Bash 3.2 + set -u: build argv as a string of carefully-quoted optional
+  # flags via positional rebuild — never expand empty arrays with "${arr[@]}".
+  set -- \
+    --ledger "$ledger" \
+    --runner "${RUNNER:-unknown}" \
+    --pool "$pool" \
+    --hat "$hat" \
+    --wall-ms "$wall_ms" \
+    --event-kind iteration
+  if [[ -n "${ISSUE:-}" ]]; then set -- "$@" --issue "$ISSUE"; fi
+  if [[ -n "${PR_NUMBER:-}" ]]; then set -- "$@" --pr "$PR_NUMBER"; fi
+  if [[ -n "${ITERATION:-}" ]]; then set -- "$@" --iteration "$ITERATION"; fi
+  if [[ -n "${REPO_SLUG:-}" ]]; then set -- "$@" --repo "$REPO_SLUG"; fi
+  if [[ -n "${GIBSON_COST_TOKENS:-}" ]]; then set -- "$@" --tokens "$GIBSON_COST_TOKENS"; fi
+  if [[ -n "${GIBSON_COST_ACUS:-}" ]]; then set -- "$@" --acus "$GIBSON_COST_ACUS"; fi
+  if [[ -n "${GIBSON_COST_FLAT_RATE:-}" ]]; then set -- "$@" --flat-rate "$GIBSON_COST_FLAT_RATE"; fi
+  if [[ -n "${GIBSON_COST_JOIN_KEY:-}" ]]; then set -- "$@" --join-key "$GIBSON_COST_JOIN_KEY"; fi
+  if [[ -n "${GIBSON_COST_REQUESTED_RUNNER:-}" ]]; then set -- "$@" --requested-runner "$GIBSON_COST_REQUESTED_RUNNER"; fi
+  if [[ -n "${GIBSON_COST_PROVIDER:-}" ]]; then set -- "$@" --provider "$GIBSON_COST_PROVIDER"; fi
+  if [[ -n "${GIBSON_COST_FALLBACK_REASON:-}" ]]; then set -- "$@" --fallback-reason "$GIBSON_COST_FALLBACK_REASON"; fi
+  "$SCRIPT_DIR/cost-ledger.sh" append "$@" >/dev/null 2>&1 || true
 }
 
 # Resolve --stale-budget: omitted means exactly the (possibly custom) error-budget.
