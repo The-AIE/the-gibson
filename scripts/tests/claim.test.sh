@@ -2121,7 +2121,7 @@ new_repo "$ROOT/statusempty"
   git add -A && git commit -qm "empty" && git push -q origin main
 ) >/dev/null 2>&1
 mkdir -p "$ROOT/statusempty/bin"
-# Recognise inventory GraphQL only; unknown routes fail closed.
+# Full pr-claims pagination contract only; keyword alone fails closed (#153 r7).
 cat > "$ROOT/statusempty/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
@@ -2131,13 +2131,17 @@ case "$1" in
       echo "fake gh: expected graphql, got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL: gh $*" >&2
+    exit 64
     ;;
   *)
     echo "fake gh: unmodelled: gh $*" >&2
@@ -2150,6 +2154,121 @@ status=$(cd "$ROOT/statusempty/canon" && PATH="$ROOT/statusempty/bin:$PATH" \
   "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
 check    "genuine empty inventory exits 0" "$rc" "0"
 contains "announces no live claims only after a successful read" "$status" "no live claims"
+
+# ===========================================================================
+# #153 review round 7 — claim.sh preserves scope argv end-to-end (no flatten
+# + re-split / pathname expansion). Repositories CONTAIN matching paths so a
+# buggy `for s in $SCOPE` would expand before the validator saw the token.
+# ===========================================================================
+# Product-tree snapshot (ignore .git metadata such as FETCH_HEAD that a
+# read-only ledger fetch may rewrite). Proves claim.sh refused before any
+# claim-shaped mutation.
+product_tree_snap() {
+  (cd "$1" && find . -type f -not -path './.git/*' | LC_ALL=C sort)
+}
+
+echo "#153 round 7 · claim.sh refuses literal '*' before mutation (no pathname expansion)"
+new_repo "$ROOT/scope_star"
+(
+  cd "$ROOT/scope_star/canon" || exit 1
+  # A real path that matches the glob `*` — the bug expands against this.
+  printf 'x\n' > '*'
+  printf 'y\n' > 'star-marker-file'
+  git add -A && git commit -qm 'literal star path' && git push -q origin main
+) >/dev/null 2>&1
+_before_files=$(product_tree_snap "$ROOT/scope_star/canon")
+_before_branches=$(cd "$ROOT/scope_star/canon" && git branch -a | sort)
+_before_head=$(cd "$ROOT/scope_star/canon" && git rev-parse HEAD)
+out=$(cd "$ROOT/scope_star/canon" && "$CLAIM" 701 star-scope '*' 2>&1); rc=$?
+check    "literal '*' scope exits nonzero" "$rc" "1"
+# Sensor must have seen the token (invalid grammar), not an expanded path list.
+if echo "$out" | grep -qiE 'invalid claim-scope|no literal path segment|scope overlap|refusing|ERROR'; then
+  ok "literal '*' refused with a scope/validator diagnostic"
+else
+  bad "literal '*' did not produce a scope refusal: $out"
+fi
+_after_files=$(product_tree_snap "$ROOT/scope_star/canon")
+_after_branches=$(cd "$ROOT/scope_star/canon" && git branch -a | sort)
+_after_head=$(cd "$ROOT/scope_star/canon" && git rev-parse HEAD)
+check "literal '*' made no product-tree mutations" "$_before_files" "$_after_files"
+check "literal '*' made no branch mutations" "$_before_branches" "$_after_branches"
+check "literal '*' left HEAD unchanged" "$_before_head" "$_after_head"
+# Prove the token was not pathname-expanded into star-marker-file etc.
+lacks "did not expand '*' into star-marker-file in the error" "$out" "star-marker-file"
+# No draft PR / label mutation.
+if [[ -s "${GH_PR_FILE:-/dev/null}" ]]; then
+  bad "literal '*' created a PR row (mutation before refuse)"
+else
+  ok "literal '*' created no PR row"
+fi
+# No worktree created for this lane.
+if [[ -d "$ROOT/wt-701-star-scope" ]] || [[ -d "$(cd "$ROOT/scope_star/canon/.." && pwd)/wt-701-star-scope" ]]; then
+  bad "literal '*' created a worktree before refuse"
+else
+  ok "literal '*' created no worktree"
+fi
+
+echo "#153 round 7 · claim.sh refuses literal 'a/**/b' before mutation"
+new_repo "$ROOT/scope_mid"
+(
+  cd "$ROOT/scope_mid/canon" || exit 1
+  mkdir -p a/x/b a/y/b
+  printf 'x\n' > a/x/b/f.txt
+  printf 'y\n' > a/y/b/f.txt
+  git add -A && git commit -qm 'mid-glob paths' && git push -q origin main
+) >/dev/null 2>&1
+_before_files=$(product_tree_snap "$ROOT/scope_mid/canon")
+_before_head=$(cd "$ROOT/scope_mid/canon" && git rev-parse HEAD)
+out=$(cd "$ROOT/scope_mid/canon" && "$CLAIM" 702 mid-glob 'a/**/b' 2>&1); rc=$?
+check    "literal 'a/**/b' scope exits nonzero" "$rc" "1"
+if echo "$out" | grep -qiE 'invalid claim-scope|ambiguous|refusing|ERROR|scope'; then
+  ok "literal 'a/**/b' refused with a scope/validator diagnostic"
+else
+  bad "literal 'a/**/b' did not produce a scope refusal: $out"
+fi
+_after_files=$(product_tree_snap "$ROOT/scope_mid/canon")
+_after_head=$(cd "$ROOT/scope_mid/canon" && git rev-parse HEAD)
+check "literal 'a/**/b' made no product-tree mutations" "$_before_files" "$_after_files"
+check "literal 'a/**/b' left HEAD unchanged" "$_before_head" "$_after_head"
+if [[ -s "${GH_PR_FILE:-/dev/null}" ]]; then
+  bad "literal 'a/**/b' created a PR row"
+else
+  ok "literal 'a/**/b' created no PR row"
+fi
+
+echo "#153 round 7 · claim.sh keeps literal '**' as one root-wide token"
+new_repo "$ROOT/scope_root"
+# Live claim on a narrow path; proposing '**' must overlap it (root-wide).
+add_claim "$ROOT/scope_root" issue-703-narrow 'lib/email.ts'
+(
+  cd "$ROOT/scope_root/canon" || exit 1
+  # Paths that a flatten/re-split bug could confuse with multiple tokens.
+  mkdir -p '**' other
+  printf 'x\n' > '**/should-not-be-a-token'
+  printf 'y\n' > other/file.ts
+  git add -A && git commit -qm 'root-wide fixture paths' && git push -q origin main
+) >/dev/null 2>&1
+_before_files=$(product_tree_snap "$ROOT/scope_root/canon")
+_before_head=$(cd "$ROOT/scope_root/canon" && git rev-parse HEAD)
+out=$(cd "$ROOT/scope_root/canon" && "$CLAIM" 704 root-wide '**' 2>&1); rc=$?
+check    "literal '**' against live narrow claim exits nonzero" "$rc" "1"
+# Root-wide must collide with the live narrow claim — not expand into the
+# directory named '**' or otherwise lose the token.
+if echo "$out" | grep -qiE 'overlap|collid|refusing|ERROR|issue-703-narrow'; then
+  ok "literal '**' treated as root-wide and blocked unrelated live scope"
+else
+  bad "literal '**' did not block as root-wide overlap: $out"
+fi
+lacks "did not expand '**' into should-not-be-a-token" "$out" "should-not-be-a-token"
+_after_files=$(product_tree_snap "$ROOT/scope_root/canon")
+_after_head=$(cd "$ROOT/scope_root/canon" && git rev-parse HEAD)
+check "literal '**' made no product-tree mutations" "$_before_files" "$_after_files"
+check "literal '**' left HEAD unchanged" "$_before_head" "$_after_head"
+if [[ -s "${GH_PR_FILE:-/dev/null}" ]]; then
+  bad "literal '**' created a PR row"
+else
+  ok "literal '**' created no PR row"
+fi
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

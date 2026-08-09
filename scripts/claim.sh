@@ -187,8 +187,11 @@ SCOPE_PARTS=()
 for arg in "$@"; do
   if [[ "$arg" == "--slice" ]]; then SLICE=1; else SCOPE_PARTS+=("$arg"); fi
 done
+# Joined form is display / PR-body metadata ONLY. Execution and validation
+# always iterate SCOPE_PARTS unflattened so a quoted literal `*`, `**`, or
+# `a/**/b` reaches the sensor byte-for-byte (#153 review round 7).
 SCOPE="${SCOPE_PARTS[*]}"
-[[ -n "$SCOPE" ]] || { echo "claim.sh: ERROR: no scope given" >&2; exit 2; }
+[[ ${#SCOPE_PARTS[@]} -gt 0 ]] || { echo "claim.sh: ERROR: no scope given" >&2; exit 2; }
 
 CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
 SESSION="${GIBSON_SESSION:-${USER:-agent}@$(hostname -s 2>/dev/null || echo host)}"
@@ -466,8 +469,11 @@ fi
 
 # --- scope overlap against every live claim (#106 independent-set sensor) ---
 # The dedicated sensor is the ONLY implementation (node was proven above).
+# Build argv from the original SCOPE_PARTS array — never flatten+re-split, or a
+# quoted literal `*` undergoes pathname expansion against matching paths in
+# the working tree and the validator never sees the real token (#153 r7).
 _so_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO" --issue "$ISSUE")
-for s in $SCOPE; do
+for s in "${SCOPE_PARTS[@]}"; do
   _so_args+=(--scope "$s")
 done
 if [[ "$SLICE" -eq 1 ]]; then
@@ -1001,7 +1007,9 @@ fi
 # worktree, branch and label only once that PR is proven closed — and exits
 # nonzero.
 _adm_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO" --issue "$ISSUE" --admit-pr "$PR_NUMBER")
-for s in $SCOPE; do
+# Same unflattened SCOPE_PARTS as pre-create — admission must see the exact
+# tokens the operator typed, including literal `*` / `**` / `a/**/b` (#153 r7).
+for s in "${SCOPE_PARTS[@]}"; do
   _adm_args+=(--scope "$s")
 done
 if [[ "$SLICE" -eq 1 ]]; then

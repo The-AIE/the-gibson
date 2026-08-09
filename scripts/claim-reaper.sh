@@ -228,10 +228,81 @@ fi
 # GitHub-native claims are authoritative for migrated repositories. Keep the
 # legacy ledger scan below intact, but reap stale open-PR claims from the same
 # source that claims-status and claim.sh use.
-PR_REPO="${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+#
+# Resolve PR repository identity: explicit --repo, then gh, then a GitHub
+# origin URL. When GitHub-native claims are applicable, a failed/malformed
+# pr-claims.sh list is a hard refusal — never an empty plan or "nothing to
+# reap" (#153 review round 7). A successful empty inventory may continue to
+# the legacy ledger.
+normalize_github_repo_url() {
+  local url="$1" rest hostport host path owner name
+  [[ -n "$url" ]] || return 1
+  case "$url" in
+    https://*|http://*)  rest="${url#*://}"; rest="${rest#*@}" ;;
+    ssh://*)             rest="${url#ssh://}"; rest="${rest#*@}" ;;
+    git://*)             rest="${url#git://}"; rest="${rest#*@}" ;;
+    */*:*)               return 1 ;;
+    *:*)
+      rest="${url#*@}"
+      rest="${rest%%:*}/${rest#*:}"
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$rest" == */* ]] || return 1
+  hostport="${rest%%/*}"
+  path="${rest#*/}"
+  host="${hostport%%:*}"
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  case "$host" in
+    github.com|www.github.com|ssh.github.com) ;;
+    *) return 1 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  path="${path%/}"
+  [[ "$path" == */* ]] || return 1
+  owner="${path%%/*}"
+  name="${path#*/}"
+  [[ "$name" != */* ]] || return 1
+  [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+
+PR_REPO="${REPO_ARG:-}"
+if [[ -z "$PR_REPO" ]]; then
+  PR_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+fi
+if [[ -z "$PR_REPO" || ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  _origin_url=$(git config --get remote.origin.url 2>/dev/null || true)
+  if [[ -n "$_origin_url" ]]; then
+    if _from_origin=$(normalize_github_repo_url "$_origin_url"); then
+      PR_REPO="$_from_origin"
+    else
+      PR_REPO=""
+    fi
+  else
+    PR_REPO=""
+  fi
+  unset _origin_url _from_origin
+fi
+if [[ -n "$PR_REPO" && ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  PR_REPO=""
+fi
+
 PR_CLAIMS_FOUND=0
-if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
-  PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>/dev/null || true)
+if [[ -n "$PR_REPO" ]]; then
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    die "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot inventory live claims for $PR_REPO; refuse rather than plan 'nothing to reap' on an unread inventory"
+  fi
+  # Keep stderr so a failed/malformed inventory names the real cause. Never
+  # `|| true` this into an empty plan (#153 review round 7).
+  _pr_list_err=""
+  if ! PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>&1); then
+    _pr_list_err="$PR_ROWS"
+    die "live claim inventory for $PR_REPO is unreadable — ${_pr_list_err}"
+  fi
+  unset _pr_list_err
   # shellcheck disable=SC2034
   # 8 fields since #153 review round 5: the last is the PR's repository
   # identity (`true`/`false`). It is read so the timestamp column is not

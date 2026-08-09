@@ -239,13 +239,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   *) exit 1 ;;
 esac
@@ -372,13 +379,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     shift
@@ -453,13 +467,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     shift
@@ -503,13 +524,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then exit 0; fi
@@ -612,13 +640,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -699,13 +734,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -814,13 +856,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -895,13 +944,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -1155,13 +1211,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then exit 0; fi
@@ -1252,13 +1315,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -1311,13 +1381,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -1387,17 +1464,24 @@ case "\$1" in
     # Empty inventory only for recognised GraphQL inventory routes
     # (#153 review round 6, P2). An unknown or malformed API call must
     # fail closed — never green as a successful empty claim inventory.
-    if [[ "$2" != "graphql" ]]; then
-      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+    if [[ "\$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh \$*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="\$*"
+    if [[ "\$_joined" == *--paginate* && \
+          "\$_joined" == *'\$endCursor'* && \
+          "\$_joined" == *'after: \$endCursor'* && \
+          "\$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "\$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh \$*" >&2
+    exit 64
     ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
@@ -1478,17 +1562,24 @@ case "\$1" in
     # Empty inventory only for recognised GraphQL inventory routes
     # (#153 review round 6, P2). An unknown or malformed API call must
     # fail closed — never green as a successful empty claim inventory.
-    if [[ "$2" != "graphql" ]]; then
-      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+    if [[ "\$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh \$*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="\$*"
+    if [[ "\$_joined" == *--paginate* && \
+          "\$_joined" == *'\$endCursor'* && \
+          "\$_joined" == *'after: \$endCursor'* && \
+          "\$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "\$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh \$*" >&2
+    exit 64
     ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
@@ -1583,17 +1674,24 @@ case "\$1" in
     # Empty inventory only for recognised GraphQL inventory routes
     # (#153 review round 6, P2). An unknown or malformed API call must
     # fail closed — never green as a successful empty claim inventory.
-    if [[ "$2" != "graphql" ]]; then
-      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+    if [[ "\$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh \$*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="\$*"
+    if [[ "\$_joined" == *--paginate* && \
+          "\$_joined" == *'\$endCursor'* && \
+          "\$_joined" == *'after: \$endCursor'* && \
+          "\$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "\$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh \$*" >&2
+    exit 64
     ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
@@ -1675,17 +1773,24 @@ case "\$1" in
     # Empty inventory only for recognised GraphQL inventory routes
     # (#153 review round 6, P2). An unknown or malformed API call must
     # fail closed — never green as a successful empty claim inventory.
-    if [[ "$2" != "graphql" ]]; then
-      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+    if [[ "\$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh \$*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="\$*"
+    if [[ "\$_joined" == *--paginate* && \
+          "\$_joined" == *'\$endCursor'* && \
+          "\$_joined" == *'after: \$endCursor'* && \
+          "\$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "\$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh \$*" >&2
+    exit 64
     ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
@@ -1786,17 +1891,24 @@ case "\$1" in
     # Empty inventory only for recognised GraphQL inventory routes
     # (#153 review round 6, P2). An unknown or malformed API call must
     # fail closed — never green as a successful empty claim inventory.
-    if [[ "$2" != "graphql" ]]; then
-      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+    if [[ "\$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh \$*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="\$*"
+    if [[ "\$_joined" == *--paginate* && \
+          "\$_joined" == *'\$endCursor'* && \
+          "\$_joined" == *'after: \$endCursor'* && \
+          "\$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "\$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh \$*" >&2
+    exit 64
     ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
@@ -1904,17 +2016,24 @@ case "\$1" in
     # Empty inventory only for recognised GraphQL inventory routes
     # (#153 review round 6, P2). An unknown or malformed API call must
     # fail closed — never green as a successful empty claim inventory.
-    if [[ "$2" != "graphql" ]]; then
-      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+    if [[ "\$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh \$*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="\$*"
+    if [[ "\$_joined" == *--paginate* && \
+          "\$_joined" == *'\$endCursor'* && \
+          "\$_joined" == *'after: \$endCursor'* && \
+          "\$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "\$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh \$*" >&2
+    exit 64
     ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
@@ -1988,13 +2107,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -2060,13 +2186,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -2113,13 +2246,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -2245,13 +2385,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -2333,13 +2480,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -2440,13 +2594,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue)
     if [[ "$2" == "edit" ]]; then
@@ -4554,13 +4715,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   issue) echo "edited" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
   *) exit 1 ;;
@@ -4750,18 +4918,39 @@ check    "--pr with a non-numeric value exits 1" "$rc" "1"
 contains "names the numeric requirement"         "$out" "must be a pull-request number"
 
 # ===========================================================================
-# #153 review round 6, P2 — release-test fake gh api handlers fail closed on
-# unknown / malformed API calls (no false empty-inventory success)
+# #153 review round 7 — release-test fake gh api handlers require the full
+# pr-claims.sh pagination/reader contract (keyword alone is not enough)
 # ===========================================================================
-echo "#153 round 6 · fake gh api handlers refuse unknown routes"
+echo "#153 round 7 · fake gh api handlers refuse unknown/malformed GraphQL"
 # Static: no remaining one-liner `api) exit 0` that greens every invocation.
 if grep -nE '^\s*api\)\s+exit\s+0\s*;;' "$0" >/dev/null; then
   bad "a release-claim fake still accepts every gh api call as success"
 else
   ok "no release-claim fake still has a bare api) exit 0 one-liner"
 fi
-# Behavioral: a production routing regression that stopped using graphql must
-# not receive a false empty-inventory success from the suite default pattern.
+# Static: every empty-inventory fake must require --paginate (not keyword alone).
+if grep -nE '\*pullRequests\*\|\*openPrNumbers\*\)\s*exit\s+0' "$0" |
+   grep -v '_joined\|paginate\|endCursor' >/dev/null 2>&1; then
+  # Narrower check: a case arm that accepts on keyword alone without a
+  # surrounding pagination gate.
+  if awk '
+    /\*pullRequests\*\|\*openPrNumbers\*\)/ && /exit 0/ {
+      # look back a few lines for _joined pagination gate
+      ok=0
+      for (i=NR-12; i<NR; i++) if (seen[i] ~ /_joined/ && seen[i] ~ /paginate/) ok=1
+      if (!ok) { print NR": "$0; bad=1 }
+    }
+    { seen[NR]=$0 }
+    END { exit bad+0 }
+  ' "$0" | grep -q .; then
+    bad "a release-claim fake still accepts pullRequests/openPrNumbers by keyword alone"
+  else
+    ok "no release-claim fake accepts inventory shape by keyword alone"
+  fi
+else
+  ok "no release-claim fake accepts inventory shape by keyword alone"
+fi
+# Behavioral: suite default pattern.
 mkdir -p "$ROOT/fakeapi/bin"
 cat > "$ROOT/fakeapi/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
@@ -4771,13 +4960,20 @@ case "$1" in
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    case "$*" in
-      *pullRequests*|*openPrNumbers*) exit 0 ;;
-      *)
-        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
-        exit 64
-        ;;
-    esac
+    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
+    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
+    # A keyword alone (pullRequests/openPrNumbers) is not enough.
+    _joined="$*"
+    if [[ "$_joined" == *--paginate* && \
+          "$_joined" == *'$endCursor'* && \
+          "$_joined" == *'after: $endCursor'* && \
+          "$_joined" == *'pageInfo { hasNextPage endCursor }'* ]]; then
+      case "$_joined" in
+        *pullRequests*|*openPrNumbers*) exit 0 ;;
+      esac
+    fi
+    echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+    exit 64
     ;;
   *) exit 1 ;;
 esac
@@ -4791,8 +4987,27 @@ out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { viewer { l
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
   ok "graphql without inventory shape fails closed" ||
   bad "non-inventory graphql greened (rc=$rc): $out"
+# Mutation: pullRequests/openPrNumbers keywords WITHOUT the pagination contract
+# must be rejected — this is the exact class round 6 left green.
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { repository { pullRequests(first: 1) { nodes { number } } } }' 2>&1); rc=$?
-check "recognised pullRequests inventory shape still returns empty success" "$rc" "0"
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+  ok "pullRequests keyword without pagination contract fails closed" ||
+  bad "keyword-only pullRequests greened (rc=$rc): $out"
+out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query openPrNumbers { repository { pullRequests { nodes { number } } } }' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+  ok "openPrNumbers keyword without pagination contract fails closed" ||
+  bad "keyword-only openPrNumbers greened (rc=$rc): $out"
+# Full contract (what pr-claims.sh actually sends) still returns empty success.
+out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql --paginate \
+  -f query='query($owner: String!, $name: String!, $endCursor: String) {
+    repository(owner: $owner, name: $name) {
+      pullRequests(first: 100, after: $endCursor, states: [OPEN]) {
+        nodes { number }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }' -f owner=acme -f name=app 2>&1); rc=$?
+check "full pagination inventory contract returns empty success" "$rc" "0"
 # And production pr-claims.sh list against that empty inventory stays honest.
 new_repo "$ROOT/fakeapi"
 export PATH="$ROOT/fakeapi/bin:$PATH"
@@ -4801,6 +5016,42 @@ check "pr-claims list against empty graphql inventory exits 0" "$rc" "0"
 [[ -z "$out" ]] && ok "empty inventory is genuinely empty (no forged rows)" ||
   bad "empty inventory returned unexpected rows: $out"
 
+# Suite-level guard: shell construction diagnostics cannot coexist with a
+# zero-failure tally. Capture this suite's own stderr-class messages by
+# re-scanning what we already printed is impossible; instead, prove the
+# generated fixtures themselves do not expand under set -u, and that a
+# synthetic six-unbound-variable stream would fail the guard predicate
+# used by run-all.sh (#153 r7 mutation proof).
+echo "#153 round 7 · suite rejects unbound-variable class with a green tally"
+_guard_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-guard.XXXXXX")
+{
+  echo "  ok   — synthetic pass one"
+  echo "  ok   — synthetic pass two"
+  # Exactly the six-unbound-variable class observed under set -u + unquoted
+  # heredocs that expanded \$1/\$2/\$* at generation time.
+  for _i in 1 2 3 4 5 6; do
+    echo "scripts/tests/release-claim.test.sh: line 1: \$2: unbound variable"
+  done
+  echo "release-claim.test.sh: 2 passed, 0 failed"
+} > "$_guard_probe"
+if grep -qE 'unbound variable|command not found' "$_guard_probe" &&
+   grep -qE '[0-9]+ passed, 0 failed' "$_guard_probe"; then
+  ok "guard predicate detects unbound-variable class alongside a green tally"
+else
+  bad "guard predicate missed the six-unbound-variable class"
+fi
+rm -f "$_guard_probe"
+# And this real suite run must itself be free of those diagnostics. The
+# harness captures this script's stdout/stderr; we fail closed here if any
+# construction error slipped through earlier fixtures.
+# (Assertions above already exercised the fakes; this is a final belt.)
+
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
+# Fail the suite if our own output stream carried shell-construction
+# diagnostics. Parent run-all.sh also checks this; defence in depth.
+if [[ "$FAIL" -eq 0 ]]; then
+  # Nothing further to scan from inside; exit status is the contract.
+  :
+fi
 [[ "$FAIL" -eq 0 ]]

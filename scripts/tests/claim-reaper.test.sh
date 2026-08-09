@@ -1752,6 +1752,46 @@ fi
 lacks    "must not REAP on remote query failure" "$out" "REAP   issue-104-rmtfail"
 lacks    "must not KEEP from cache on remote query failure" "$out" "KEEP   issue-104-rmtfail"
 
+# ===========================================================================
+# #153 review round 7 — failed PR inventory is not an empty plan
+# ===========================================================================
+echo "#153 r7 · failed GraphQL on empty ledger must not report nothing to reap"
+new_repo "$ROOT/prfail"
+(
+  cd "$ROOT/prfail/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm 'empty ledger' && git push -q origin main
+) >/dev/null 2>&1
+export GH_GRAPHQL_FAIL=1
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/prfail/canon" 2>&1
+)
+rc=$?
+unset GH_GRAPHQL_FAIL
+[[ "$rc" -ne 0 ]] && ok "failed GraphQL exits nonzero" || bad "failed GraphQL exited 0: $out"
+contains "names unreadable inventory" "$out" "unreadable"
+lacks    "must not say nothing to reap on failed inventory" "$out" "nothing to reap"
+lacks    "must not emit empty dry-run plan on failed inventory" "$out" "empty ledger — zero mutations"
+
+echo "#153 r7 · successful empty GraphQL on empty ledger may report nothing to reap"
+new_repo "$ROOT/prempty"
+(
+  cd "$ROOT/prempty/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm 'empty ledger' && git push -q origin main
+) >/dev/null 2>&1
+# Default fake gh answers graphql with exit 0 (successful empty inventory).
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/prempty/canon" 2>&1
+)
+rc=$?
+check    "successful empty GraphQL + empty ledger exits 0" "$rc" "0"
+contains "may report nothing to reap after successful empty inventory" "$out" "nothing to reap"
+
 # ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"
