@@ -2617,6 +2617,14 @@ if grep -qiE 'cost-ledger: iteration append failed|cost-ledger: append skipped|a
 else
   bad "telemetry fail silent (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-fail.err"))"
 fi
+# Valid cost-ledger.sh + unwritable ledger path: append fails with non-126/127
+# rc → class=append_error (not not_runnable).
+if grep -q 'class=append_error' "$ROOT/cost-fail.err" \
+  && ! grep -q 'class=not_runnable' "$ROOT/cost-fail.err"; then
+  ok "valid-script append failure classifies as append_error"
+else
+  bad "valid-script append failure class wrong (want append_error): $(tr '\n' ' ' <"$ROOT/cost-fail.err")"
+fi
 # Must not dump secrets/env/ledger body
 if grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}|GIBSON_COST_JOIN_KEY=' "$ROOT/cost-fail.err"; then
   bad "telemetry diagnostic leaked credential-like material"
@@ -2632,8 +2640,9 @@ fi
 
 # Non-executable cost-ledger.sh: invoke via bash — lost +x must not become
 # class=append_error / budget failure (rc 126 from direct exec).
-# Drive a private SCRIPT_DIR that holds a mode-000 copy of cost-ledger next to
-# a loop driver; other helpers load from --gibson (real tree).
+# Drive a private SCRIPT_DIR that holds a non-executable but still-readable
+# copy of cost-ledger next to a loop driver; other helpers load from --gibson
+# (real tree). Readable + no +x must still succeed via `bash "$cl_sh"`.
 setup_repo
 write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=nonexec-ledger"
 make_runner_cmd rewrite-valid
@@ -2664,6 +2673,68 @@ else
   else
     bad "non-exec cost-ledger path failed (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-nonexec.err") ledger=$(ls -la "$LEDGER_NEX" 2>/dev/null || echo missing))"
   fi
+fi
+
+# Unreadable regular cost-ledger.sh: bash "$cl_sh" returns 126 (Permission
+# denied). Must classify as not_runnable — never append_error — and never
+# leak the resolved path or script body in the sanitized diagnostic.
+# Bash 3.2 / macOS portable: chmod a-r on a regular file (not a directory).
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=unreadable-ledger"
+make_runner_cmd rewrite-valid
+UNR_DIR="$ROOT/unreadable-gibson"
+mkdir -p "$UNR_DIR/scripts"
+cp "$SOURCE_LOOP" "$UNR_DIR/scripts/loop.sh"
+# Distinct marker body so a body leak is detectable without relying on real
+# cost-ledger contents (which must never appear in stderr either).
+cat > "$UNR_DIR/scripts/cost-ledger.sh" <<'UNR_BODY'
+#!/usr/bin/env bash
+# SECRET_COST_LEDGER_BODY_MARKER_SHOULD_NEVER_LEAK
+echo "cost-ledger unreadable fixture should never run" >&2
+exit 0
+UNR_BODY
+cp "$GIBSON/scripts/silent-noop.sh" "$UNR_DIR/scripts/silent-noop.sh"
+chmod +x "$UNR_DIR/scripts/loop.sh"
+# Keep a regular file; strip read so bash invocation fails with rc 126.
+chmod a-r "$UNR_DIR/scripts/cost-ledger.sh"
+UNR_PATH="$UNR_DIR/scripts/cost-ledger.sh"
+LEDGER_UNR="$ROOT/cost-unreadable.jsonl"
+rm -f "$LEDGER_UNR"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  GIBSON_COST_LEDGER="$LEDGER_UNR" \
+  GIBSON_COST_JOIN_KEY="join-unreadable" \
+  ITERATION_WALL_MS=10 \
+  bash "$UNR_DIR/scripts/loop.sh" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 \
+    >/dev/null 2>"$ROOT/cost-unreadable.err"
+rc=$?
+set -e
+# Restore read so trap/cleanup and later fixtures can inspect/remove the tree.
+chmod u+r "$UNR_DIR/scripts/cost-ledger.sh" 2>/dev/null || true
+if grep -q 'rc=126 class=not_runnable' "$ROOT/cost-unreadable.err" \
+  && ! grep -q 'class=append_error' "$ROOT/cost-unreadable.err"; then
+  ok "unreadable cost-ledger.sh classifies as not_runnable (rc=126)"
+else
+  bad "unreadable cost-ledger class wrong (want rc=126 class=not_runnable): $(tr '\n' ' ' <"$ROOT/cost-unreadable.err")"
+fi
+# Path and body must never appear in the sanitized diagnostic.
+if grep -F "$UNR_PATH" "$ROOT/cost-unreadable.err" \
+  || grep -F 'SECRET_COST_LEDGER_BODY_MARKER_SHOULD_NEVER_LEAK' "$ROOT/cost-unreadable.err" \
+  || grep -F 'cost-ledger unreadable fixture should never run' "$ROOT/cost-unreadable.err"; then
+  bad "unreadable cost-ledger diagnostic leaked path or body: $(tr '\n' ' ' <"$ROOT/cost-unreadable.err")"
+else
+  ok "unreadable cost-ledger diagnostic leaks neither path nor body"
+fi
+if [[ -f "$LEDGER_UNR" ]]; then
+  bad "unreadable cost-ledger must not produce a ledger row"
+else
+  ok "unreadable cost-ledger produced no ledger row"
+fi
+if [[ "$rc" -eq 0 ]]; then
+  ok "standalone continues after unreadable cost-ledger (optional telemetry)"
+else
+  bad "standalone must exit 0 when only optional unreadable ledger fails (rc=$rc)"
 fi
 
 # Fleet-required: unwritable ledger marks degraded (journal entry) and must

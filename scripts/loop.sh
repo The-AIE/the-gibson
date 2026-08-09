@@ -301,9 +301,12 @@ cost_ledger_record_iteration() {
   if [[ "$rc" -ne 0 ]]; then
     # Sanitized diagnostic only — never dump ledger contents, env, or err body
     # (may echo paths). Class + rc are enough for operators. bash-invocation
-    # means rc 126/127 are real interpreter/script problems, not mode bits.
+    # means rc 126/127 are real interpreter/script problems, not mode bits:
+    #   126 = found but not executable / unreadable by the interpreter
+    #   127 = command/script not found
+    # Other nonzero codes stay append_error (e.g. ledger path unwritable).
     cl_class="append_error"
-    if [[ "$rc" -eq 127 ]]; then
+    if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
       cl_class="not_runnable"
     fi
     info "cost-ledger: iteration append failed (rc=$rc class=$cl_class) — outcome telemetry missing for this step; check ledger path writability and cost-ledger.sh (no secrets printed)"
