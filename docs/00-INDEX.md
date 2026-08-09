@@ -17,14 +17,15 @@ If you only open one file, use the row that matches you. Glossary:
 
 ## 🔧 Fleet operator (Mark / Engineer tier)
 
-1. [QUICKSTART.md](../QUICKSTART.md) — clone → first adopted repo  
-2. [GUIDE.md](../GUIDE.md) — day-to-day: briefs, gates, loop, adopt  
-3. [AGENTS.md](../AGENTS.md) — the contract agents load  
-4. [docs/14-human-gates.md](14-human-gates.md) — closed list of stops  
-5. [docs/15-model-economics.md](15-model-economics.md) — who runs what  
-6. [docs/16-nontechnical-operation.md](16-nontechnical-operation.md) — how to talk to Operators  
-7. [docs/13-adoption.md](13-adoption.md) + [playbooks/adopt.md](../playbooks/adopt.md)  
-8. [scripts/README.md](../scripts/README.md) + [ci/README.md](../ci/README.md)
+1. [QUICKSTART.md](../QUICKSTART.md) — clone → first adopted repo
+2. [GUIDE.md](../GUIDE.md) — day-to-day: briefs, gates, loop, adopt
+3. [AGENTS.md](../AGENTS.md) — the contract agents load
+4. [docs/14-human-gates.md](14-human-gates.md) — closed list of stops
+5. [docs/15-model-economics.md](15-model-economics.md) — who runs what (doctrine)
+6. [playbooks/token-efficiency.md](../playbooks/token-efficiency.md) — route, bound, measure, keep quality
+7. [docs/16-nontechnical-operation.md](16-nontechnical-operation.md) — how to talk to Operators
+8. [docs/13-adoption.md](13-adoption.md) + [playbooks/adopt.md](../playbooks/adopt.md)
+9. [scripts/README.md](../scripts/README.md) + [ci/README.md](../ci/README.md)
 
 ## 🍴 Fork owner
 
@@ -61,7 +62,8 @@ If you only open one file, use the row that matches you. Glossary:
 | 12 | [vercel](12-vercel.md) | Deploy doctrine |
 | 13 | [adoption](13-adoption.md) | Install on a repo |
 | 14 | [human-gates](14-human-gates.md) | Only reasons to stop |
-| 15 | [model-economics](15-model-economics.md) | G/S/F routing |
+| 15 | [model-economics](15-model-economics.md) | G/S/F routing (doctrine; no fixed prices) |
+| — | [token-efficiency playbook](../playbooks/token-efficiency.md) | Operator procedure: route, bound, measure, preserve quality |
 | 16 | [nontechnical-op](16-nontechnical-operation.md) | Operator mode |
 | 17 | [deploy-opt](17-deployment-optimization.md) | Inspect/optimize |
 | 18 | [fork-upstream](18-fork-and-upstream.md) | Fork without pain |

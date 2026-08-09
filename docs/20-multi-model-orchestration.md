@@ -174,9 +174,16 @@ or volume rise, per [15-model-economics](15-model-economics.md):
 
 ## Cost discipline
 
-Route to the cheapest vendor that clears the quality bar (see
-[15-model-economics](15-model-economics.md)): mechanical implementation and
-bulk lanes → cheap/fast workers; adversarial review and judgment calls → the
+Route to the cheapest **capability grade** that clears the quality bar (see
+[15-model-economics](15-model-economics.md) for doctrine and
+[playbooks/token-efficiency.md](../playbooks/token-efficiency.md) for the
+operator procedure: flat-rate-first routing, WIP, budgets, capsules, telemetry,
+and the efficiency≠minimization rule). Mechanical implementation and bulk
+lanes → low-marginal-cost workers; adversarial review and judgment calls → the
 strongest reviewer available *from a different vendor than the author*.
 Separate vendor quota pools are the point — parallel throughput without a
 single provider's rate ceiling.
+
+Do not weaken exact-head CI, cross-vendor review (rule 1), or owner gates to
+"save tokens." Missing usage stays unknown; never invent dollar prices in the
+orchestration layer.
