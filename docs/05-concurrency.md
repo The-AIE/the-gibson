@@ -33,32 +33,121 @@ Two mechanisms, used together:
 
 1. **Atomic pre-claim:** `gh issue edit <N> --add-label agent-claimed` — one API
    call, closes the race window to ~zero.
-2. **Claim file:** `scripts/claim.sh` writes **one file per claim** at
-   `docs/claims/issue-<N>-<slug>.md`, committed **directly to main** and pushed
-   immediately (the single exception to worktree isolation — claims must be visible
-   instantly):
+2. **PR-body claim (current form):** `scripts/claim.sh` opens an empty-commit
+   draft pull request whose **body** carries the claim:
 
    ```
-   claim: issue-42-password-reset
-   issue: 42
-   claimed: 2026-08-02T10:14:07Z
-   scope: app/api/auth/** lib/email.ts
-   session: grok@fleet-2
-   branch: feat/42-password-reset
-   worktree: /Code/wt-42-password-reset
+   ## Active work
+
+   - Active-work claim: issue-42-password-reset
+   - Isolation: dedicated worktree
+   - Issue: #42
+   - Claim scope: app/api/auth/** lib/email.ts
+   - Session: grok@fleet-2
+   - Claimed: 2026-08-02T10:14:07Z
    ```
 
-   It used to be an appended row in a shared `docs/active-work.md` table, and that
-   table became exactly the hot file this doc tells you to eliminate: every lane
-   appended to the same last line, so claiming and releasing conflicted with each
-   other and blocked green product PRs that touched none of those issues (L-023).
-   Separate paths cannot conflict. Legacy rows are still read and still released,
-   so a target repo mid-migration is safe.
+   No file anyone edits, so two lanes claiming at the same moment never conflict on
+   a shared path (the old `docs/active-work.md` table *was* exactly the hot file
+   this doc tells you to eliminate — every lane appended to the same last line,
+   so claiming and releasing conflicted with each other and blocked green product
+   PRs that touched none of those issues, L-023). The claim is released the moment
+   that PR reaches a **terminal state** — merged or closed
+   (`release-claim.sh <issue> --claim-id <id>`, issue #153) — never by hand-editing
+   a row.
 
-   Read the ledger with `scripts/claims-status.sh` (`--issue <n>`, `--markdown`),
-   which merges both forms and flags claims older than 24h. It reads `origin/main`,
-   not your working tree — a stale local checkout is how two lanes each conclude
-   they are alone.
+   Per-file (`docs/claims/issue-<N>-<slug>.md`) and table
+   (`docs/active-work.md`) ledger rows are the **legacy** form: still read, still
+   released, kept for backward compatibility with claims made by older tooling —
+   but `claim.sh` never writes one anymore.
+
+   **One authoritative live-claim view (#153):** every consumer — claim-time
+   overlap enforcement, release-time sibling protection, `claims-status.sh` — reads
+   the **validated union** of live *open* PR-body claims and legacy ledger rows,
+   not either alone. "Validated" is load-bearing: every PR-body row is checked for
+   a non-empty scope, a safe head branch, and a PR URL whose own repository
+   matches the repo being queried — a missing scope must never silently become an
+   empty (non-overlapping) scope, and repository identity is never inferred from
+   the query argument alone. A **terminal** (merged/closed) PR is *not* part of
+   this live view — it is **release authorization**: evidence that a PR-body
+   claim is done and safe to clean up, not a claim still in flight. Once
+   released, that claim must be absent/removed from the post-release live view.
+
+   Precedence when releasing one exact claim id: a live *open* PR-body claim is
+   released by closing that PR; otherwise a live ledger row is released by
+   removing it; otherwise — PR already merged/closed and no ledger row was ever
+   written — `release-claim.sh --claim-id <id>` verifies the exact issue, claim
+   id, PR number, head branch, exact head SHA, base repository (re-derived from
+   the PR's own URL, not the query argument), cross-repository=false, and
+   terminal state directly against that finished PR, then proves the *registered*
+   worktree at the exact expected path is on that exact branch, clean, and at
+   that exact head SHA (or, for a real merge, safely contained in the merge
+   commit) before removing anything — never a `rm -rf` of an unregistered or
+   default-path directory, never a force-remove of a dirty worktree. No ledger
+   row is ever invented. An **open** PR is never accepted as terminal evidence;
+   ambiguous, foreign (cross-repository/fork), mismatched, malformed, or
+   unreadable PR evidence refuses before any mutation. A CLOSED-but-unmerged PR
+   is only cleaned up when that same exact-branch/exact-SHA safety proof holds —
+   it is never described as "merged".
+
+   **Terminal lookup is candidate-first (#153):** `pr-claims.sh list` is an
+   *inventory* of live work, so it validates every open PR carrying a claim
+   marker — a malformed **live** claim is a current defect and poisoning the
+   inventory is the right fail-closed answer. `find-terminal <claim-id>` is a
+   *lookup for one exact id* across everything the repository has ever merged
+   or closed, so it selects the PRs whose body carries that exact claim id
+   **first** and validates only those. Otherwise one unrelated historical PR
+   whose body predates the marker format (mrhinkle/the-gibson#114 has an
+   Active-work claim line and no Claim scope line) permanently blocks every
+   future release for every other claim — a fail-closed answer to a question
+   nobody asked. Narrowing *which* PRs are inspected never softens the checks
+   on the ones that match: duplicate or malformed markers on a candidate, two
+   PRs carrying the same exact id, evidence that disagrees with the PR's own
+   state, and any gh/jq/pagination failure all still fail the whole command.
+
+   **Legacy terminal-claim schema (#153):** claims that shipped before the
+   machine markers existed carry the claim marker and nothing else
+   machine-readable — mrhinkle/the-gibson#143, the real motivating case, has
+   exactly one `- Active-work claim: issue-139-fleet-profiles`, an exact
+   `Closes #139.`, and a `## Cumulative scope` section of backticked path
+   bullets, but no `- Claim scope:` and no `- Issue: #`. Refusing those
+   forever would mean a claim that genuinely shipped can never be released,
+   so `find-terminal` (and only `find-terminal`) accepts a second, strictly
+   defined body schema and **parses that body's own evidence** — it never
+   invents, defaults, or infers scope or issue data.
+
+   A candidate qualifies as legacy only when **both** current markers are
+   entirely absent; a body carrying one of the two is a current-format claim
+   missing a required field and still fails on that. Legacy is not a fallback
+   for a malformed current claim. A legacy candidate must then carry exactly
+   one `Closes #<n>.` line — that is the issue binding, and the claim id must
+   agree with `<n>` under the same rule the current format uses — and exactly
+   one `## Cumulative scope` heading whose section (up to the next Markdown
+   heading) contains only single backticked path bullets. Those parsed paths,
+   space-joined, *are* the claim scope, in the same shape `- Claim scope:`
+   carries. A marker-only body, arbitrary prose, a bare un-backticked bullet,
+   a missing or duplicated closing/scope section, an empty section, an
+   absolute/`..`-bearing/unsafe/repeated path, or duplicate claim markers all
+   refuse. `list` is deliberately **not** given this schema: an open claim is
+   current work, is written by today's `claim.sh`, and must carry today's
+   markers.
+
+   **Fail-closed boundary (#153 AC5):** GitHub reads that gate a *mutation*
+   decision — the terminal-evidence check above, and the post-mutation reread
+   that decides whether to remove `agent-claimed` after a GitHub-native (PR-body)
+   release — never swallow a query failure. A failed or malformed read there
+   preserves the label and exits incomplete (`3`), not `0`. The ledger-only path
+   (a caller that never asked for GitHub-native evidence) keeps its historical
+   best-effort `2>/dev/null || true` sibling lookup — a `gh` hiccup there falls
+   back to ledger-only residual rather than blocking a plain ledger release, per
+   the same legacy back-compat contract `claims-status.sh` and `scope-overlap.mjs`
+   already followed before PR-body claims existed.
+
+   Read live claims with `scripts/pr-claims.sh list <owner/repo>` (PR-body) or
+   `scripts/claims-status.sh` (`--issue <n>`, `--markdown`, merges PR-body **and**
+   legacy forms, flags claims older than 24h). Both read `origin/main`/live GitHub
+   state, not your working tree — a stale local checkout is how two lanes each
+   conclude they are alone.
 
 **One issue, one lane — unless you say otherwise.** `claim.sh` refuses an issue that
 already has a live claim: two builders took the same issue under different slugs and

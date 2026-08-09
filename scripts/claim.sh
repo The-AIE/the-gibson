@@ -173,7 +173,7 @@ fi
 # the historical stem check only if node is unavailable (should not happen on
 # fleet hosts; still fail closed on overlap).
 if command -v node >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]]; then
-  _so_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID")
+  _so_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO")
   for s in $SCOPE; do
     _so_args+=(--scope "$s")
   done

@@ -33,7 +33,10 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function help() {
   console.log(`scope-overlap.mjs — claim scope independent-set check (#106)
@@ -49,10 +52,17 @@ WHY
 RISKS
   Prefix/stem glob heuristics — not a full gitignore matcher.
   Failed origin fetch refuses (fail closed). Read-only.
+  --repo also pulls live open PR-body claims via pr-claims.sh (gh). Malformed,
+  truncated, duplicate, foreign-repo, or unreadable PR-claim evidence refuses
+  (#153) — never silently falls back to ledger-only when --repo was given.
+  A missing/empty claim scope, a missing/unsafe head branch, or a PR URL whose
+  own repository does not match --repo also refuses — a missing scope must
+  never silently become an empty (non-overlapping) scope.
 
 USAGE
   node scripts/scope-overlap.mjs --scope 'app/api/**' --repo-path .
   node scripts/scope-overlap.mjs --scope 'a/**' --scope 'b.ts' --json
+  node scripts/scope-overlap.mjs --scope 'a/**' --repo owner/name
   node scripts/scope-overlap.mjs --help
 
 FLAGS
@@ -62,6 +72,8 @@ FLAGS
   --slice         allow same-issue sibling only when scopes are disjoint
   --claim-id ID   claim being created (excluded from overlap with itself)
   --issue N       issue number (for same-issue detection with --slice)
+  --repo O/N      GitHub owner/name — also checks live open PR-body claims
+                  (#153). Omit to check the ledger only (legacy behavior).
   --json          machine-readable result
 `);
 }
@@ -81,6 +93,7 @@ function parseArgs(a) {
     claimId: null,
     issue: null,
     json: false,
+    repo: null,
   };
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
@@ -93,6 +106,7 @@ function parseArgs(a) {
     else if (x === "--slice") out.slice = true;
     else if (x === "--claim-id") out.claimId = a[++i];
     else if (x === "--issue") out.issue = String(a[++i] || "");
+    else if (x === "--repo") out.repo = a[++i];
     else if (x === "--json") out.json = true;
     else dieUsage(`unknown argument: ${x}`);
   }
@@ -106,6 +120,11 @@ function dieUsage(msg) {
 
 const opt = parseArgs(argv);
 if (!opt.scopes.length) dieUsage("at least one --scope is required");
+// owner/name only — a malformed --repo is untrusted/foreign-repo evidence,
+// never silently ignored (#153 AC2).
+if (opt.repo != null && !/^[^\s/]+\/[^\s/]+$/.test(opt.repo)) {
+  dieUsage(`--repo must be 'owner/name', got '${opt.repo}'`);
+}
 
 function git(args, { allowFail = false } = {}) {
   try {
@@ -250,7 +269,93 @@ function loadClaims() {
   return claims;
 }
 
-const live = loadClaims().filter((c) => c.id !== opt.claimId);
+// --- load live open PR-body claims (#153 AC2) ------------------------------
+// Reuses pr-claims.sh (the single gh-facing reader) rather than reimplementing
+// gh JSON parsing here, so claim.sh, this sensor, and release-claim.sh see the
+// exact same live PR-body claim rows. Only runs when --repo was given; a
+// caller that omits --repo gets ledger-only behavior (legacy/back-compat).
+function loadPrClaims() {
+  if (!opt.repo) return [];
+  const prClaimsScript = resolve(__dirname, "pr-claims.sh");
+  if (!existsSync(prClaimsScript)) {
+    fail(`--repo given but pr-claims.sh is missing at ${prClaimsScript} — refuse`);
+  }
+  let out;
+  try {
+    out = execFileSync(prClaimsScript, ["list", opt.repo], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 16 * 1024 * 1024,
+    });
+  } catch (e) {
+    fail(
+      `cannot read live PR-body claims for ${opt.repo} (pr-claims.sh failed) — refuse (#153 AC2 fail-closed): ${
+        (e && e.message) || e
+      }`
+    );
+  }
+  const seen = new Map(); // claim id -> PR number, to catch duplicates
+  const claims = [];
+  for (const line of out.split("\n")) {
+    if (!line.trim()) continue;
+    const cols = line.split("\t");
+    if (cols.length !== 7) {
+      fail(
+        `malformed/truncated PR-body claim row from pr-claims.sh (want 7 tab-separated fields, got ${cols.length}): ${JSON.stringify(
+          line
+        )}`
+      );
+    }
+    const number = cols[0];
+    const id = cols[1];
+    const scopeStr = cols[2];
+    const headBranch = cols[3];
+    const url = cols[4];
+    if (!/^\d+$/.test(number)) {
+      fail(`malformed PR-body claim row — PR number not numeric: ${JSON.stringify(line)}`);
+    }
+    if (!id || !/^issue-/.test(id)) {
+      fail(`malformed/truncated PR-body claim row — unreadable claim id: ${JSON.stringify(line)}`);
+    }
+    // A missing scope must never silently become an empty (non-overlapping)
+    // scope — that would let a real live claim's files collide undetected.
+    if (!scopeStr || !scopeStr.trim()) {
+      fail(
+        `live PR-body claim '${id}' (PR #${number}) has a missing/empty claim scope — refuse (#153 AC6 fail-closed)`
+      );
+    }
+    if (!headBranch || !/^[A-Za-z0-9._/-]+$/.test(headBranch)) {
+      fail(
+        `live PR-body claim '${id}' (PR #${number}) has a missing/unsafe head branch '${headBranch}' — refuse (#153 AC6)`
+      );
+    }
+    const urlMatch = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+$/.exec(url || "");
+    if (!urlMatch) {
+      fail(
+        `live PR-body claim '${id}' (PR #${number}) has an unreadable/malformed PR URL '${url}' — refuse (#153 AC6)`
+      );
+    }
+    if (urlMatch[1] !== opt.repo) {
+      fail(
+        `live PR-body claim '${id}' (PR #${number}) URL repository '${urlMatch[1]}' does not match the requested repo '${opt.repo}' — refuse (unexpected repository identity, #153 AC3)`
+      );
+    }
+    if (seen.has(id)) {
+      fail(
+        `duplicate live PR-body claim id '${id}' on PR #${seen.get(id)} and #${number} — refuse (#153 AC2 fail-closed)`
+      );
+    }
+    seen.set(id, number);
+    const scope = scopeStr.trim().split(/\s+/).filter(Boolean);
+    const issueM = id.match(/^issue-(\d+)-/);
+    claims.push({ id, scope, issue: issueM ? issueM[1] : null, source: "pr" });
+  }
+  return claims;
+}
+
+const live = [...loadClaims(), ...loadPrClaims()].filter(
+  (c) => c.id !== opt.claimId
+);
 
 /** Normalize a scope token for comparison. */
 function stem(token) {

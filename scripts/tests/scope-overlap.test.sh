@@ -135,6 +135,128 @@ else
   bad "claim.sh missing #106 wire-in"
 fi
 
+# --- #153 AC2: live open PR-body claims join the overlap check via --repo ---
+# Fake gh stands in for pr-claims.sh's `gh api graphql --paginate -f query=...
+# --jq ...` call: it prints whatever TSV the test staged, ignoring the real
+# flags, so the fixture controls exactly what pr-claims.sh (and thus this
+# sensor) sees.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "api graphql")
+    cat "${GH_PR_TSV:-/dev/null}" 2>/dev/null
+    exit "${GH_PR_EXIT:-0}"
+    ;;
+esac
+exit 1
+GH
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
+setup_repo d
+GH_PR_TSV="$ROOT/pr-open.tsv"
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+export GH_PR_TSV
+unset GH_PR_EXIT
+
+echo "cross-issue live PR-body claim is refused (#153)"
+out=$(run_so "$ROOT/d/canon" --scope 'components/nav/Item.tsx' --repo acme/app --claim-id issue-21-nav-tweak --issue 21); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-20-nav-shell' && ok "cross-issue PR-body overlap refused" \
+  || bad "cross-issue PR-body overlap (rc=$rc): $out"
+
+echo "disjoint scope coexists with a live PR-body claim on a different issue (#153)"
+out=$(run_so "$ROOT/d/canon" --scope 'app/billing/**' --repo acme/app --claim-id issue-22-billing --issue 22); rc=$?
+[[ "$rc" -eq 0 ]] && ok "disjoint PR-body claim coexists" || bad "disjoint PR-body (rc=$rc): $out"
+
+echo "no --repo => PR-body claims are not consulted (back-compat)"
+out=$(run_so "$ROOT/d/canon" --scope 'components/nav/Item.tsx'); rc=$?
+[[ "$rc" -eq 0 ]] && ok "omitting --repo keeps ledger-only behavior" || bad "no --repo (rc=$rc): $out"
+
+echo "malformed/truncated PR-claim row fails closed (#153)"
+printf '502\tissue-31-broken\tsrc/x/**\n' > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-32-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'malformed|truncated' && ok "malformed PR row refuses" \
+  || bad "malformed PR row (rc=$rc): $out"
+
+echo "duplicate PR-claim id across two PRs fails closed (#153)"
+{
+  printf '601\tissue-33-dup\tsrc/a/**\tfeat/33-dup\thttps://github.com/acme/app/pull/601\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '602\tissue-33-dup\tsrc/b/**\tfeat/33-dup-2\thttps://github.com/acme/app/pull/602\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+} > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-34-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'duplicate' && ok "duplicate PR-claim id refuses" \
+  || bad "duplicate PR-claim id (rc=$rc): $out"
+
+echo "gh/pr-claims failure fails closed when --repo was given (#153)"
+export GH_PR_EXIT=1
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-35-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'cannot read live PR-body claims|refuse' && ok "gh failure refuses" \
+  || bad "gh failure (rc=$rc): $out"
+unset GH_PR_EXIT
+
+echo "malformed --repo shape is rejected before any query (#153)"
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo 'not-a-repo'); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi "owner/name" && ok "malformed --repo rejected" \
+  || bad "malformed --repo (rc=$rc): $out"
+
+echo "missing/empty claim scope on a live PR-body claim fails closed (#153 AC6)"
+printf '701\tissue-40-empty-scope\t\tfeat/40-empty-scope\thttps://github.com/acme/app/pull/701\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-41-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'missing/empty claim scope' && ok "missing scope refuses (never silently empty)" \
+  || bad "missing scope (rc=$rc): $out"
+
+echo "missing/unsafe head branch on a live PR-body claim fails closed (#153 AC6)"
+printf '702\tissue-42-bad-branch\tsrc/a/**\t\thttps://github.com/acme/app/pull/702\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-43-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'missing/unsafe head branch' && ok "missing branch refuses" \
+  || bad "missing branch (rc=$rc): $out"
+
+echo "PR URL repository mismatch vs --repo fails closed (#153 AC3)"
+printf '703\tissue-44-wrong-repo\tsrc/a/**\tfeat/44-wrong-repo\thttps://github.com/other-org/other-app/pull/703\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-45-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'unexpected repository identity' && ok "URL-repo mismatch refuses" \
+  || bad "URL-repo mismatch (rc=$rc): $out"
+# Reset fixture for anything appended after this block.
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+
+# --- #153 blocker 6: exercise pr-claims.sh's OWN jq validation, not just its
+# output-row shape. The fake gh above bypasses jq entirely (it hands
+# scope-overlap.mjs pre-baked TSV as if pr-claims.sh already emitted it), so
+# it can never catch a duplicate marker *inside* a PR body. This fake gh
+# instead returns real PR JSON and lets the real jq inside pr-claims.sh run.
+echo "duplicate Active-work claim marker inside one PR body propagates through the real pr-claims.sh jq pipeline (#153 blocker 6)"
+mkdir -p "$ROOT/bin-json"
+cat > "$ROOT/bin-json/gh" <<'GHJSON'
+#!/usr/bin/env bash
+if [[ "$1" == "api" && "$2" == "graphql" ]]; then
+  shift 2
+  jqexpr=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --jq) jqexpr="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  jq -r "$jqexpr" < "${GH_JSON:?GH_JSON not set}"
+  exit $?
+fi
+exit 1
+GHJSON
+chmod +x "$ROOT/bin-json/gh"
+GH_JSON="$ROOT/dupbody.json"
+printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":950,"body":"- Active-work claim: issue-50-dup-body\\n- Active-work claim: issue-50-dup-body\\n- Claim scope: unrelated/dup/**\\n- Issue: #50","headRefName":"feat/50-dup-body","url":"https://github.com/acme/app/pull/950","createdAt":"2026-08-05T00:00:00Z","updatedAt":"2026-08-06T00:00:00Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' \
+  > "$GH_JSON"
+out=$(PATH="$ROOT/bin-json:$PATH" GH_JSON="$GH_JSON" run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-51-x); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'duplicate|cannot read live PR-body claims|refuse' \
+  && ok "duplicate-in-body propagates to scope-overlap.mjs fail-closed" \
+  || bad "duplicate-in-body (rc=$rc): $out"
+
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

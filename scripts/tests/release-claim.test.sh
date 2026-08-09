@@ -67,6 +67,25 @@ TABLE
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-rc-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 
+# Suite-wide hermetic `gh`. Individual fixtures overwrite $ROOT/bin/gh with
+# their own richer fake; this default guarantees that a test running before
+# (or between) those fixtures can never reach the network. Everything is
+# unresolvable — exactly what a real gh does in these throwaway repos, whose
+# origin is a local bare path — except pr-claims.sh's paginated GraphQL read,
+# which succeeds with an empty inventory. That distinction matters since
+# #153: release-claim.sh now treats an unreadable live-claim inventory as a
+# hard refusal, so "no fake gh at all" is no longer a silent no-op.
+mkdir -p "$ROOT/bin"
+cat > "$ROOT/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  api) exit 0 ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/bin/gh"
+export PATH="$ROOT/bin:$PATH"
+
 echo "L-037 · namespaced and numeric claim ids match safely"
 new_repo "$ROOT/a"
 # Bare multi-claim on issue 15 refuses (two live issue-15 rows). Scoped match
@@ -176,6 +195,9 @@ case "$1" in
     echo "acme/app"
     exit 0
     ;;
+  # No live open PR-body claims here: an empty but successfully read
+  # GraphQL inventory (#153).
+  api) exit 0 ;;
   issue)
     shift
     # find -q EXPR if present
@@ -239,6 +261,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     shift
     q=""; prev=""
@@ -271,6 +296,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then exit 0; fi
     exit 1
@@ -362,6 +390,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED" >&2
@@ -431,6 +462,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED" >&2
@@ -528,6 +562,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -591,12 +628,19 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
       exit 0
     fi
     echo "agent-claimed,tier-b"
+    exit 0
+    ;;
+  pr)
+    # No open or terminal PR-body claims in this fixture (#153).
     exit 0
     ;;
   *) exit 1 ;;
@@ -829,6 +873,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then exit 0; fi
     echo "${GH_LABELS:-}"
@@ -908,6 +955,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -949,6 +999,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1011,6 +1064,9 @@ cat > "$ROOT/bin/gh" <<FAKE
 echo "CALL \$*" >> "$GH_LOG"
 case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1084,6 +1140,9 @@ cat > "$ROOT/bin/gh" <<FAKE
 echo "CALL \$*" >> "$GH_LOG"
 case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1171,6 +1230,9 @@ cat > "$ROOT/bin/gh" <<FAKE
 echo "CALL \$*" >> "$GH_LOG"
 case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1245,6 +1307,9 @@ cat > "$ROOT/bin/gh" <<FAKE
 echo "CALL \$*" >> "$GH_LOG"
 case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1338,6 +1403,9 @@ cat > "$ROOT/bin/gh" <<FAKE
 echo "CALL \$*" >> "$GH_LOG"
 case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1438,6 +1506,9 @@ cat > "$ROOT/bin/gh" <<FAKE
 echo "CALL \$*" >> "$GH_LOG"
 case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1500,6 +1571,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1554,6 +1628,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       # final lane: allow remove-label to succeed for completeness
@@ -1589,6 +1666,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo edited >> "${GH_LOG:-/dev/null}"
@@ -1703,6 +1783,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "LABEL-MUTATION-SHOULD-NOT-HAPPEN" >&2
@@ -1773,6 +1856,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       : > "${GH_STATE:-/tmp/gh-state-prune}"
@@ -1862,6 +1948,9 @@ cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
+  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
+  # GraphQL read returns an empty (but successfully read) inventory.
+  api) exit 0 ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       # Must not remove label on incomplete final prune
@@ -1903,6 +1992,1325 @@ contains "preserves label when final prune fails" "$out" "preserving agent-claim
 [[ -d "$WT_FAIL" ]] \
   && ok "worktree still present after failed final remove" \
   || bad "worktree vanished despite simulated remove failure"
+
+# Shared helper for #153 terminal-cleanup fixtures: build a fresh repo, a
+# registered worktree at the exact path release-claim.sh derives from the
+# claim id, and a pushed branch with one empty reservation commit — mirrors
+# claim.sh's real shape. Echoes the worktree's real HEAD SHA so callers can
+# feed GitHub's own reported head SHA back into the fake gh fixture, since
+# terminal cleanup now proves worktree safety against real git state, not
+# just against claimed metadata.
+# Args: dir issue slug
+term_fixture() {
+  local dir="$1" issue="$2" slug="$3"
+  local id="issue-${issue}-${slug}" branch="feat/${issue}-${slug}"
+  new_repo "$ROOT/$dir"
+  git -C "$ROOT/$dir/canon" worktree add -q "$ROOT/$dir/wt-${issue}-${slug}" \
+    -b "$branch" origin/main
+  (
+    cd "$ROOT/$dir/wt-${issue}-${slug}" || exit 1
+    git commit --allow-empty -qs -m "chore: reserve issue #$issue for $id"
+    git push -q -u origin "$branch"
+  ) >/dev/null 2>&1
+  git -C "$ROOT/$dir/wt-${issue}-${slug}" rev-parse HEAD
+}
+
+# A syntactically valid but not-necessarily-real 40-hex placeholder, used
+# wherever a field must merely look like a SHA (merge-commit SHA when the
+# exact head-SHA match already proves safety, so the merge SHA is never
+# actually consulted).
+HEX40="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+echo "#153 · exact-ID release of a terminal PR-body claim with no ledger row"
+# Simulates the real #139 failure: current claim.sh never writes a ledger row
+# at all, and by the time release runs the reservation PR has already merged
+# (or closed) — it is no longer in pr-claims.sh's OPEN listing either.
+TERM_HEAD_SHA=$(term_fixture term 200 payments-retry)
+
+mkdir -p "$ROOT/term/bin"
+cat > "$ROOT/term/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  api)
+    # pr-claims.sh reads GitHub through `gh api graphql --paginate -f query=…
+    # --jq …` (cursor pagination, #153 follow-up). This fake hands back the
+    # TSV the fixture staged, as if pr-claims.sh's own jq had already emitted
+    # it. Two distinct queries have to be told apart: `list` restricts to
+    # `states: [OPEN]`, `find-terminal` walks every state.
+    [[ "$2" == "graphql" ]] || exit 1
+    want_open=0
+    for arg in "$@"; do
+      case "$arg" in *"states: [OPEN]"*) want_open=1 ;; esac
+    done
+    if [[ "$want_open" -eq 1 ]]; then
+      # Count OPEN-inventory reads so a fixture can make the post-mutation
+      # reread differ from the authoritative pre-mutation read — which is
+      # exactly what a real repository does when the mutation in between
+      # actually changed something. Without this, a fixture that wants a
+      # broken *reread* would also break the pre-mutation read and never
+      # reach the code under test.
+      calls=1
+      if [[ -n "${GH_OPEN_CALLS:-}" ]]; then
+        calls=$(( $(cat "$GH_OPEN_CALLS" 2>/dev/null || echo 0) + 1 ))
+        echo "$calls" > "$GH_OPEN_CALLS"
+      fi
+      if [[ "$calls" -ge 2 && -n "${GH_PR_OPEN_TSV2:-}" ]]; then
+        cat "$GH_PR_OPEN_TSV2" 2>/dev/null
+        exit "${GH_PR_OPEN_EXIT2:-0}"
+      fi
+      cat "${GH_PR_OPEN_TSV:-/dev/null}" 2>/dev/null
+      exit "${GH_PR_OPEN_EXIT:-${GH_PR_LIST_EXIT:-0}}"
+    fi
+    cat "${GH_PR_ALL_TSV:-/dev/null}" 2>/dev/null
+    exit "${GH_PR_ALL_EXIT:-${GH_PR_LIST_EXIT:-0}}"
+    ;;
+  pr)
+    shift
+    if [[ "$1" == "close" ]]; then
+      # Deliberately a DIFFERENT log from GH_LOG (which records label edits):
+      # several assertions read GH_LOG to prove the label was never touched.
+      echo "pr close $2" >> "${GH_PR_CLOSE_LOG:-/dev/null}"
+      exit "${GH_PR_CLOSE_EXIT:-0}"
+    fi
+    exit 1
+    ;;
+  issue)
+    shift
+    if [[ "$1" == "edit" ]]; then
+      echo edited >> "${GH_LOG:-/dev/null}"
+      : > "${GH_STATE:-/tmp/gh-state-term}"
+      exit 0
+    fi
+    if [[ -f "${GH_STATE:-/tmp/gh-state-term}" ]]; then
+      echo ""
+    else
+      echo "${GH_LABELS:-agent-claimed,tier-b}"
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/term/bin/gh"
+export PATH="$ROOT/term/bin:$PATH"
+export GH_PR_OPEN_TSV="$ROOT/term/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_PR_ALL_TSV="$ROOT/term/all.tsv"
+export GH_STATE="$ROOT/term/gh-state"
+export GH_LOG="$ROOT/term/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
+rm -f "$GH_STATE" "$GH_LOG"
+
+# Row layout (13 tab-separated fields, matches pr-claims.sh find-terminal):
+#   number claim scope issue head_branch head_sha url state is_cross
+#   merge_sha base_repo created_at updated_at
+valid_row() {
+  printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+    "$TERM_HEAD_SHA" "$HEX40"
+}
+
+echo "OPEN evidence fails closed (not yet terminal)"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tOPEN\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "OPEN terminal evidence exits 1" "$rc" "1"
+contains "names still OPEN"               "$out" "still OPEN"
+[[ -d "$ROOT/term/wt-200-payments-retry" ]] && ok "OPEN case: worktree untouched" || bad "OPEN case removed worktree"
+
+echo "ambiguous terminal evidence fails closed"
+{ valid_row; printf '778\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry-2\t%s\thttps://github.com/acme/app/pull/778\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' "$TERM_HEAD_SHA"; } \
+  > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "ambiguous terminal evidence exits 1" "$rc" "1"
+contains "names ambiguous"                     "$out" "ambiguous"
+[[ -d "$ROOT/term/wt-200-payments-retry" ]] && ok "ambiguous case: worktree untouched" || bad "ambiguous case removed worktree"
+
+echo "cross-repository (fork) evidence fails closed (foreign-repo)"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tMERGED\ttrue\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "cross-repository evidence exits 1" "$rc" "1"
+contains "names foreign-repo evidence"       "$out" "foreign-repo"
+[[ -d "$ROOT/term/wt-200-payments-retry" ]] && ok "foreign-repo case: worktree untouched" || bad "foreign-repo case removed worktree"
+
+echo "head-branch mismatch fails closed"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-some-other-branch\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "head-branch mismatch exits 1" "$rc" "1"
+contains "names branch mismatch"        "$out" "head branch mismatch"
+
+echo "issue-number mismatch fails closed"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t201\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "issue mismatch exits 1" "$rc" "1"
+contains "names issue mismatch"   "$out" "issue mismatch"
+
+echo "base-repository mismatch fails closed (#153 AC3)"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tother-org/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "base-repository mismatch exits 1" "$rc" "1"
+contains "names base-repository mismatch"   "$out" "base-repository mismatch"
+[[ -d "$ROOT/term/wt-200-payments-retry" ]] && ok "base-repo mismatch case: worktree untouched" || bad "base-repo mismatch case removed worktree"
+
+echo "malformed head SHA fails closed"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\tnot-a-sha\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "malformed head SHA exits 1" "$rc" "1"
+contains "names malformed head SHA"   "$out" "head SHA"
+
+echo "MERGED with missing/malformed merge-commit SHA fails closed"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "MERGED without merge SHA exits 1" "$rc" "1"
+contains "names missing merge-commit SHA"   "$out" "merge-commit SHA"
+
+echo "CLOSED carrying a merge-commit SHA fails closed (never call unmerged code merged)"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tCLOSED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "CLOSED with merge SHA exits 1"  "$rc" "1"
+contains "names state/evidence mismatch"  "$out" "never call unmerged code merged"
+
+echo "missing claim scope fails closed"
+printf '777\tissue-200-payments-retry\t\t200\tfeat/200-payments-retry\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "missing scope exits 1"         "$rc" "1"
+contains "names malformed/truncated evidence" "$out" "malformed/truncated"
+
+echo "unsafe head branch fails closed"
+printf '777\tissue-200-payments-retry\tlib/payments/**\t200\tfeat 200 bad branch\t%s\thttps://github.com/acme/app/pull/777\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_HEAD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "unsafe head branch exits 1"    "$rc" "1"
+contains "names unsafe head branch"      "$out" "unsafe/unreadable head branch"
+
+echo "truncated row fails closed"
+printf '777\tissue-200-payments-retry\n' > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "truncated row exits 1"         "$rc" "1"
+contains "names malformed/truncated evidence (truncated row)" "$out" "malformed/truncated"
+
+echo "gh query failure fails closed (cannot verify)"
+valid_row > "$GH_PR_ALL_TSV"
+# GH_PR_ALL_EXIT, not GH_PR_LIST_EXIT: only the terminal (all-states) query
+# fails here. The open-inventory read still succeeds, so the run reaches the
+# terminal-evidence verification this test is about. The open-inventory read
+# failing is its own refusal, covered in the open-PR section below (#153).
+export GH_PR_ALL_EXIT=1
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "gh query failure exits 1" "$rc" "1"
+contains "names cannot verify"      "$out" "cannot verify"
+unset GH_PR_ALL_EXIT
+
+echo "verified exact-ID release after MERGED, no ledger row required"
+valid_row > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/term/canon" && "$RC" 200 --claim-id issue-200-payments-retry --repo acme/app 2>&1); rc=$?
+check    "terminal release exits 0"        "$rc" "0"
+contains "reports the released claim"      "$out" "OK — claim released for issue 200"
+contains "names the terminal PR"           "$out" "PR #777"
+[[ ! -d "$ROOT/term/wt-200-payments-retry" ]] &&
+  ok "terminal release removed the worktree" || bad "terminal release left the worktree"
+br=$(git -C "$ROOT/term/canon" branch --list 'feat/200-payments-retry')
+[[ -z "$br" ]] && ok "terminal release removed the local branch" || bad "terminal release left the local branch"
+remote_br=$(git -C "$ROOT/term/canon" ls-remote --heads origin 'feat/200-payments-retry')
+[[ -z "$remote_br" ]] && ok "terminal release removed the remote branch" || bad "terminal release left the remote branch"
+table=$(cd "$ROOT/term/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+lacks    "no ledger row was ever invented for the terminal claim" "$table" "issue-200-payments-retry"
+contains "no live claim label removal did not wipe the ledger" "$table" "issue-115-unrelated"
+contains "verified label removal"          "$out" "removed agent-claimed"
+
+echo "#153 · terminal cleanup git-level safety proof (never trust metadata alone)"
+
+echo "dirty exact worktree refuses before deletion"
+DIRTY_SHA=$(term_fixture dirty1 301 dirty-case)
+echo scratch > "$ROOT/dirty1/wt-301-dirty-case/scratch.txt"
+export GH_PR_ALL_TSV="$ROOT/dirty1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/dirty1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/dirty1/gh-state"
+export GH_LOG="$ROOT/dirty1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '801\tissue-301-dirty-case\tlib/x/**\t301\tfeat/301-dirty-case\t%s\thttps://github.com/acme/app/pull/801\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$DIRTY_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/dirty1/canon" && "$RC" 301 --claim-id issue-301-dirty-case --repo acme/app 2>&1); rc=$?
+check    "dirty worktree release exits 3"        "$rc" "3"
+contains "names dirty worktree refusal"          "$out" "uncommitted or untracked changes"
+lacks    "does not claim success on dirty refuse" "$out" "OK —"
+[[ -f "$ROOT/dirty1/wt-301-dirty-case/scratch.txt" ]] &&
+  ok "dirty worktree left untouched" || bad "dirty worktree was removed despite untracked changes"
+br=$(git -C "$ROOT/dirty1/canon" branch --list 'feat/301-dirty-case')
+[[ -n "$br" ]] && ok "dirty case: branch left untouched" || bad "dirty case: branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "dirty case: label was never touched" || bad "dirty case: label edit was attempted"
+
+echo "unregistered default-path directory refuses and is preserved (no rm -rf)"
+new_repo "$ROOT/unreg1"
+mkdir -p "$ROOT/unreg1/wt-302-unreg-case"
+echo marker > "$ROOT/unreg1/wt-302-unreg-case/marker.txt"
+export GH_PR_ALL_TSV="$ROOT/unreg1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/unreg1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/unreg1/gh-state"
+export GH_LOG="$ROOT/unreg1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '802\tissue-302-unreg-case\tlib/x/**\t302\tfeat/302-unreg-case\t%s\thttps://github.com/acme/app/pull/802\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$HEX40" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/unreg1/canon" && "$RC" 302 --claim-id issue-302-unreg-case --repo acme/app 2>&1); rc=$?
+check    "unregistered dir release exits 3"          "$rc" "3"
+contains "names unregistered/no-fallback refusal"    "$out" "not a registered git worktree"
+lacks    "does not claim success on unregistered dir" "$out" "OK —"
+[[ -f "$ROOT/unreg1/wt-302-unreg-case/marker.txt" ]] &&
+  ok "unregistered directory preserved (no rm -rf)" || bad "unregistered directory was deleted"
+
+echo "worktree checked out on wrong branch refuses"
+WRONGBR_SHA=$(term_fixture wrongbr1 303 wrong-branch-case)
+git -C "$ROOT/wrongbr1/wt-303-wrong-branch-case" checkout -qb some-other-local-branch
+export GH_PR_ALL_TSV="$ROOT/wrongbr1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/wrongbr1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/wrongbr1/gh-state"
+export GH_LOG="$ROOT/wrongbr1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '803\tissue-303-wrong-branch-case\tlib/x/**\t303\tfeat/303-wrong-branch-case\t%s\thttps://github.com/acme/app/pull/803\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$WRONGBR_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/wrongbr1/canon" && "$RC" 303 --claim-id issue-303-wrong-branch-case --repo acme/app 2>&1); rc=$?
+check    "wrong-branch worktree exits 3"     "$rc" "3"
+contains "names branch mismatch refusal"     "$out" "expected the exact PR head branch"
+[[ -d "$ROOT/wrongbr1/wt-303-wrong-branch-case" ]] &&
+  ok "wrong-branch worktree preserved" || bad "wrong-branch worktree was removed"
+
+echo "head SHA mismatch refuses (worktree HEAD diverged from recorded evidence)"
+SHAMISMATCH_ORIG_SHA=$(term_fixture shamismatch1 304 sha-mismatch-case)
+git -C "$ROOT/shamismatch1/wt-304-sha-mismatch-case" commit --allow-empty -qs -m "local-only drift, never reported to GitHub"
+export GH_PR_ALL_TSV="$ROOT/shamismatch1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/shamismatch1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/shamismatch1/gh-state"
+export GH_LOG="$ROOT/shamismatch1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '804\tissue-304-sha-mismatch-case\tlib/x/**\t304\tfeat/304-sha-mismatch-case\t%s\thttps://github.com/acme/app/pull/804\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SHAMISMATCH_ORIG_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/shamismatch1/canon" && "$RC" 304 --claim-id issue-304-sha-mismatch-case --repo acme/app 2>&1); rc=$?
+check    "head SHA mismatch exits 3"        "$rc" "3"
+contains "names SHA-mismatch refusal"       "$out" "nor provably contained in the merged result"
+[[ -d "$ROOT/shamismatch1/wt-304-sha-mismatch-case" ]] &&
+  ok "SHA-mismatch worktree preserved" || bad "SHA-mismatch worktree was removed"
+
+echo "#153 · terminal cleanup mutation failures never claim success"
+
+echo "remote branch deletion failure yields rc=3, no success claim"
+REMFAIL_SHA=$(term_fixture remfail1 305 remote-fail-case)
+cat > "$ROOT/remfail1/origin/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero="0000000000000000000000000000000000000000"
+while read -r _old new ref; do
+  if [[ "$new" == "$zero" && "$ref" == "refs/heads/feat/305-remote-fail-case" ]]; then
+    echo "reject branch delete by fixture" >&2
+    exit 1
+  fi
+done
+exit 0
+HOOK
+chmod +x "$ROOT/remfail1/origin/hooks/pre-receive"
+export GH_PR_ALL_TSV="$ROOT/remfail1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/remfail1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/remfail1/gh-state"
+export GH_LOG="$ROOT/remfail1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '805\tissue-305-remote-fail-case\tlib/x/**\t305\tfeat/305-remote-fail-case\t%s\thttps://github.com/acme/app/pull/805\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$REMFAIL_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/remfail1/canon" && "$RC" 305 --claim-id issue-305-remote-fail-case --repo acme/app 2>&1); rc=$?
+check    "remote branch delete failure exits 3"     "$rc" "3"
+contains "names remote branch delete failure"        "$out" "remote branch CAS delete refused"
+lacks    "does not claim success on remote delete failure" "$out" "OK —"
+[[ ! -d "$ROOT/remfail1/wt-305-remote-fail-case" ]] &&
+  ok "remote-delete-failure case: worktree still removed (independent step)" || bad "remote-delete-failure case: worktree survived"
+remote_br=$(git -C "$ROOT/remfail1/canon" ls-remote --heads origin 'feat/305-remote-fail-case')
+[[ -n "$remote_br" ]] && ok "remote branch survived the rejected delete" || bad "remote branch vanished despite rejected delete"
+
+echo "local branch deletion failure yields rc=3"
+LOCALFAIL_SHA=$(term_fixture localfail1 306 local-fail-case)
+# A stale ref-lock file (as a concurrent git process would leave behind)
+# makes `git branch -D` fail deterministically without needing a second
+# worktree on the same branch — which would now correctly trip the
+# ambiguous-registration guard (#153 blocker 1) before mutation is ever
+# attempted, never reaching this specific failure mode.
+LOCALFAIL_LOCK="$ROOT/localfail1/canon/.git/refs/heads/feat/306-local-fail-case.lock"
+mkdir -p "$(dirname "$LOCALFAIL_LOCK")"
+: > "$LOCALFAIL_LOCK"
+export GH_PR_ALL_TSV="$ROOT/localfail1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/localfail1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/localfail1/gh-state"
+export GH_LOG="$ROOT/localfail1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '806\tissue-306-local-fail-case\tlib/x/**\t306\tfeat/306-local-fail-case\t%s\thttps://github.com/acme/app/pull/806\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$LOCALFAIL_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/localfail1/canon" && "$RC" 306 --claim-id issue-306-local-fail-case --repo acme/app 2>&1); rc=$?
+rm -f "$LOCALFAIL_LOCK"
+check    "local branch delete failure exits 3"    "$rc" "3"
+contains "names local branch delete failure"      "$out" "local branch CAS delete refused"
+lacks    "does not claim success on local delete failure" "$out" "OK —"
+br=$(git -C "$ROOT/localfail1/canon" branch --list 'feat/306-local-fail-case')
+[[ -n "$br" ]] && ok "local branch survived the failed delete (ref lock held)" || bad "local branch vanished despite failed delete"
+
+echo "two worktrees registered on the exact PR head branch is ambiguous, refuse (#153 blocker 1)"
+AMBIG_SHA=$(term_fixture ambig1 309 ambiguous-branch-case)
+git -C "$ROOT/ambig1/canon" worktree add -q --force "$ROOT/ambig1/wt-decoy-ambiguous" feat/309-ambiguous-branch-case
+export GH_PR_ALL_TSV="$ROOT/ambig1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/ambig1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/ambig1/gh-state"
+export GH_LOG="$ROOT/ambig1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '809\tissue-309-ambiguous-branch-case\tlib/x/**\t309\tfeat/309-ambiguous-branch-case\t%s\thttps://github.com/acme/app/pull/809\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$AMBIG_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/ambig1/canon" && "$RC" 309 --claim-id issue-309-ambiguous-branch-case --repo acme/app 2>&1); rc=$?
+check    "ambiguous branch registration exits 3"             "$rc" "3"
+contains "names ambiguous registration"                      "$out" "ambiguous"
+lacks    "does not claim success on ambiguous registration"  "$out" "OK —"
+[[ -d "$ROOT/ambig1/wt-309-ambiguous-branch-case" ]] &&
+  ok "ambiguous case: original worktree untouched" || bad "ambiguous case: original worktree removed"
+[[ -d "$ROOT/ambig1/wt-decoy-ambiguous" ]] &&
+  ok "ambiguous case: decoy worktree untouched" || bad "ambiguous case: decoy worktree removed"
+br=$(git -C "$ROOT/ambig1/canon" branch --list 'feat/309-ambiguous-branch-case')
+[[ -n "$br" ]] && ok "ambiguous case: branch left untouched" || bad "ambiguous case: branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "ambiguous case: label was never touched" || bad "ambiguous case: label edit was attempted"
+
+echo "#153 blocker 1: exact branch registered at a non-default path — operate on it, never a decoy default-path directory"
+new_repo "$ROOT/nondef1"
+git -C "$ROOT/nondef1/canon" worktree add -q "$ROOT/nondef1/actual-nondefault-location" \
+  -b feat/310-nondefault-path origin/main
+(
+  cd "$ROOT/nondef1/actual-nondefault-location" || exit 1
+  git commit --allow-empty -qs -m "chore: reserve issue #310 for issue-310-nondefault-path"
+  git push -q -u origin feat/310-nondefault-path
+) >/dev/null 2>&1
+NONDEF_SHA=$(git -C "$ROOT/nondef1/actual-nondefault-location" rev-parse HEAD)
+# Decoy at the historical default-derived path: unrelated content that must
+# never be inspected or touched now that removal binds to the exact
+# registered path via `git worktree list --porcelain`, never a guess.
+mkdir -p "$ROOT/nondef1/wt-310-nondefault-path"
+echo decoy-marker > "$ROOT/nondef1/wt-310-nondefault-path/decoy.txt"
+export GH_PR_ALL_TSV="$ROOT/nondef1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/nondef1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/nondef1/gh-state"
+export GH_LOG="$ROOT/nondef1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '810\tissue-310-nondefault-path\tlib/x/**\t310\tfeat/310-nondefault-path\t%s\thttps://github.com/acme/app/pull/810\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NONDEF_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/nondef1/canon" && "$RC" 310 --claim-id issue-310-nondefault-path --repo acme/app 2>&1); rc=$?
+check "non-default worktree path release exits 0" "$rc" "0"
+[[ ! -d "$ROOT/nondef1/actual-nondefault-location" ]] &&
+  ok "the actual registered non-default worktree was removed" || bad "the actual registered non-default worktree survived"
+[[ -f "$ROOT/nondef1/wt-310-nondefault-path/decoy.txt" ]] &&
+  ok "decoy default-path directory was never touched" || bad "decoy default-path directory was touched/removed"
+br=$(git -C "$ROOT/nondef1/canon" branch --list 'feat/310-nondefault-path')
+[[ -z "$br" ]] && ok "non-default-path branch removed" || bad "non-default-path branch survived"
+
+echo "#153 blocker 2: TOCTOU — worktree dirtied between the safety check and removal refuses (rc=3)"
+TOCTOU_SHA=$(term_fixture toctou1 311 toctou-case)
+cat > "$ROOT/toctou1/dirty-hook.sh" <<'HOOK'
+#!/usr/bin/env bash
+echo "raced-in-content" > "$1/raced.txt"
+HOOK
+chmod +x "$ROOT/toctou1/dirty-hook.sh"
+export RELEASE_CLAIM_TEST_DIRTY_HOOK="$ROOT/toctou1/dirty-hook.sh"
+export GH_PR_ALL_TSV="$ROOT/toctou1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/toctou1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/toctou1/gh-state"
+export GH_LOG="$ROOT/toctou1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '811\tissue-311-toctou-case\tlib/x/**\t311\tfeat/311-toctou-case\t%s\thttps://github.com/acme/app/pull/811\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TOCTOU_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/toctou1/canon" && "$RC" 311 --claim-id issue-311-toctou-case --repo acme/app 2>&1); rc=$?
+unset RELEASE_CLAIM_TEST_DIRTY_HOOK
+check    "TOCTOU dirty-between-check-and-removal exits 3" "$rc" "3"
+contains "names the TOCTOU refusal"                       "$out" "became dirty between the safety proof and removal"
+lacks    "does not claim success on TOCTOU race"          "$out" "OK —"
+[[ -f "$ROOT/toctou1/wt-311-toctou-case/raced.txt" ]] &&
+  ok "TOCTOU: worktree preserved with the raced-in file intact" || bad "TOCTOU: worktree was removed despite the race"
+br=$(git -C "$ROOT/toctou1/canon" branch --list 'feat/311-toctou-case')
+[[ -n "$br" ]] && ok "TOCTOU: branch left untouched" || bad "TOCTOU: branch was deleted"
+# (second Codex review) a dirty-worktree race must never fall through to
+# branch deletion — the local AND the remote branch both survive, not just
+# the local one. This is exactly the shape that let the remote branch get
+# deleted while a dirty worktree and its local branch survived.
+toctou_remote_br=$(git -C "$ROOT/toctou1/canon" ls-remote --heads origin 'feat/311-toctou-case')
+[[ -n "$toctou_remote_br" ]] && ok "TOCTOU: remote branch left untouched" || bad "TOCTOU: remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "TOCTOU: label was never touched" || bad "TOCTOU: label edit was attempted"
+
+echo "#153 blocker 3: no worktree does not make an advanced/reused local branch safe"
+ADVLOCAL_SHA=$(term_fixture advlocal1 312 advanced-local-case)
+git -C "$ROOT/advlocal1/canon" worktree remove --force "$ROOT/advlocal1/wt-312-advanced-local-case"
+git -C "$ROOT/advlocal1/canon" update-ref "refs/heads/feat/312-advanced-local-case" HEAD
+export GH_PR_ALL_TSV="$ROOT/advlocal1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/advlocal1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/advlocal1/gh-state"
+export GH_LOG="$ROOT/advlocal1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '812\tissue-312-advanced-local-case\tlib/x/**\t312\tfeat/312-advanced-local-case\t%s\thttps://github.com/acme/app/pull/812\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$ADVLOCAL_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/advlocal1/canon" && "$RC" 312 --claim-id issue-312-advanced-local-case --repo acme/app 2>&1); rc=$?
+check    "advanced local branch (no worktree) exits 3" "$rc" "3"
+contains "names advanced/reused local branch"           "$out" "advanced/reused branch"
+lacks    "does not claim success"                        "$out" "OK —"
+br=$(git -C "$ROOT/advlocal1/canon" branch --list 'feat/312-advanced-local-case')
+[[ -n "$br" ]] && ok "advanced local branch preserved" || bad "advanced local branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "advanced local branch case: label was never touched" || bad "advanced local branch case: label edit was attempted"
+
+echo "#153 blocker 3: no worktree, no local branch does not make an advanced/reused remote branch safe"
+ADVREMOTE_SHA=$(term_fixture advremote1 313 advanced-remote-case)
+git -C "$ROOT/advremote1/canon" worktree remove --force "$ROOT/advremote1/wt-313-advanced-remote-case"
+git -C "$ROOT/advremote1/canon" branch -D feat/313-advanced-remote-case >/dev/null 2>&1
+git clone -q "$ROOT/advremote1/origin" "$ROOT/advremote1/second-clone" >/dev/null 2>&1
+(
+  cd "$ROOT/advremote1/second-clone" || exit 1
+  git checkout -q feat/313-advanced-remote-case
+  git commit --allow-empty -qm "reused after reservation"
+  git push -q origin feat/313-advanced-remote-case
+) >/dev/null 2>&1
+export GH_PR_ALL_TSV="$ROOT/advremote1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/advremote1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/advremote1/gh-state"
+export GH_LOG="$ROOT/advremote1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '813\tissue-313-advanced-remote-case\tlib/x/**\t313\tfeat/313-advanced-remote-case\t%s\thttps://github.com/acme/app/pull/813\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$ADVREMOTE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/advremote1/canon" && "$RC" 313 --claim-id issue-313-advanced-remote-case --repo acme/app 2>&1); rc=$?
+check    "advanced remote branch (no worktree, no local branch) exits 3" "$rc" "3"
+contains "names advanced/reused remote branch"                          "$out" "advanced/reused branch"
+lacks    "does not claim success"                                        "$out" "OK —"
+remote_br=$(git -C "$ROOT/advremote1/canon" ls-remote --heads origin 'feat/313-advanced-remote-case')
+[[ -n "$remote_br" ]] && ok "advanced remote branch preserved" || bad "advanced remote branch was deleted"
+
+echo "#153 blocker 4: remote branch query failure (pre-mutation) is unreadable evidence, never absence"
+LSPRE_SHA=$(term_fixture lsrepre1 314 lsremote-prefail-case)
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/lsrepre1/gitwrap"
+cat > "$ROOT/lsrepre1/gitwrap/git" <<WRAP
+#!/usr/bin/env bash
+if [[ "\$1" == "ls-remote" && "\$*" == *"--heads origin refs/heads/feat/314-lsremote-prefail-case"* ]]; then
+  echo "fatal: unable to access remote (simulated pre-mutation failure)" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+WRAP
+chmod +x "$ROOT/lsrepre1/gitwrap/git"
+export GH_PR_ALL_TSV="$ROOT/lsrepre1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/lsrepre1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/lsrepre1/gh-state"
+export GH_LOG="$ROOT/lsrepre1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '814\tissue-314-lsremote-prefail-case\tlib/x/**\t314\tfeat/314-lsremote-prefail-case\t%s\thttps://github.com/acme/app/pull/814\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$LSPRE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/lsrepre1/canon" && PATH="$ROOT/lsrepre1/gitwrap:$PATH" "$RC" 314 --claim-id issue-314-lsremote-prefail-case --repo acme/app 2>&1); rc=$?
+check    "pre-mutation ls-remote query failure exits 3" "$rc" "3"
+contains "names the query failure"                      "$out" "git ls-remote --heads origin failed"
+lacks    "does not claim success on query failure"       "$out" "OK —"
+[[ -d "$ROOT/lsrepre1/wt-314-lsremote-prefail-case" ]] &&
+  ok "pre-mutation query failure: worktree untouched" || bad "pre-mutation query failure: worktree removed"
+br=$(git -C "$ROOT/lsrepre1/canon" branch --list 'feat/314-lsremote-prefail-case')
+[[ -n "$br" ]] && ok "pre-mutation query failure: local branch untouched" || bad "pre-mutation query failure: local branch deleted"
+remote_br=$(git -C "$ROOT/lsrepre1/canon" ls-remote --heads origin 'feat/314-lsremote-prefail-case')
+[[ -n "$remote_br" ]] && ok "pre-mutation query failure: remote branch untouched" || bad "pre-mutation query failure: remote branch deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "pre-mutation query failure: label was never touched" || bad "pre-mutation query failure: label edit was attempted"
+
+echo "#153 blocker 4: remote branch query failure (post-mutation) refuses success even though mutation already succeeded"
+LSPOST_SHA=$(term_fixture lsrepost1 315 lsremote-postfail-case)
+mkdir -p "$ROOT/lsrepost1/gitwrap"
+cat > "$ROOT/lsrepost1/gitwrap/git" <<WRAP
+#!/usr/bin/env bash
+if [[ "\$1" == "ls-remote" && "\$*" == *"--heads origin refs/heads/feat/315-lsremote-postfail-case"* ]]; then
+  counter_file="$ROOT/lsrepost1/lsremote-count"
+  count=0
+  [[ -f "\$counter_file" ]] && count=\$(cat "\$counter_file")
+  count=\$((count + 1))
+  echo "\$count" > "\$counter_file"
+  # First two calls (pre-mutation identity proof, mutation-time delete
+  # decision) pass through to the real git so the worktree/branch actually
+  # get removed; only the third call (postcondition) is simulated as an
+  # unreadable query — proving a query failure AFTER a successful mutation
+  # still refuses to claim success (#153 blocker 4).
+  if [[ "\$count" -ge 3 ]]; then
+    echo "fatal: unable to access remote (simulated post-mutation failure)" >&2
+    exit 128
+  fi
+fi
+exec "$REAL_GIT" "\$@"
+WRAP
+chmod +x "$ROOT/lsrepost1/gitwrap/git"
+export GH_PR_ALL_TSV="$ROOT/lsrepost1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/lsrepost1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/lsrepost1/gh-state"
+export GH_LOG="$ROOT/lsrepost1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '815\tissue-315-lsremote-postfail-case\tlib/x/**\t315\tfeat/315-lsremote-postfail-case\t%s\thttps://github.com/acme/app/pull/815\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$LSPOST_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/lsrepost1/canon" && PATH="$ROOT/lsrepost1/gitwrap:$PATH" "$RC" 315 --claim-id issue-315-lsremote-postfail-case --repo acme/app 2>&1); rc=$?
+check    "post-mutation ls-remote query failure exits 3" "$rc" "3"
+contains "names the postcondition query failure"         "$out" "cannot verify remote branch"
+lacks    "does not claim success on postcondition query failure" "$out" "OK —"
+[[ ! -d "$ROOT/lsrepost1/wt-315-lsremote-postfail-case" ]] &&
+  ok "post-mutation query failure: worktree mutation still completed" || bad "post-mutation query failure: worktree mutation was skipped"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "post-mutation query failure: label was never removed" || bad "post-mutation query failure: label removal was attempted"
+
+echo "second Codex review: local branch advances after the safety proof but before the CAS delete — refuse, never carry a fresh reread as the CAS expectation, never fall through to the remote delete"
+LOCALADV_SHA=$(term_fixture localadv1 320 local-advance-race-case)
+cat > "$ROOT/localadv1/local-advance-hook.sh" <<'HOOK'
+#!/usr/bin/env bash
+# Simulates a concurrent process advancing the local branch AFTER
+# terminal_cleanup_release's identity proof already accepted its old tip, but
+# BEFORE the CAS delete runs. By this point in the run the worktree for this
+# branch has already been removed, so the ref is safe to move directly. If
+# the CAS delete used a fresh `git rev-parse` read taken after this hook (the
+# original bug) it would trivially match itself and delete the advanced
+# branch; carrying the proof-time OID forward must refuse instead.
+git update-ref "refs/heads/$1" HEAD
+HOOK
+chmod +x "$ROOT/localadv1/local-advance-hook.sh"
+export RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK="$ROOT/localadv1/local-advance-hook.sh"
+export GH_PR_ALL_TSV="$ROOT/localadv1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/localadv1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/localadv1/gh-state"
+export GH_LOG="$ROOT/localadv1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '820\tissue-320-local-advance-race-case\tlib/x/**\t320\tfeat/320-local-advance-race-case\t%s\thttps://github.com/acme/app/pull/820\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$LOCALADV_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/localadv1/canon" && "$RC" 320 --claim-id issue-320-local-advance-race-case --repo acme/app 2>&1); rc=$?
+unset RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK
+check    "local-advance race exits 3"                    "$rc" "3"
+contains "names the local CAS refusal"                   "$out" "local branch CAS delete refused"
+contains "names why the remote delete was skipped"       "$out" "skipping remote branch CAS delete"
+lacks    "does not claim success on local-advance race"  "$out" "OK —"
+[[ ! -d "$ROOT/localadv1/wt-320-local-advance-race-case" ]] &&
+  ok "local-advance race: worktree removal (independent step) still completed" || bad "local-advance race: worktree removal was skipped"
+br=$(git -C "$ROOT/localadv1/canon" branch --list 'feat/320-local-advance-race-case')
+[[ -n "$br" ]] && ok "local-advance race: advanced local branch preserved" || bad "local-advance race: local branch was deleted despite the race"
+remote_br=$(git -C "$ROOT/localadv1/canon" ls-remote --heads origin 'feat/320-local-advance-race-case')
+[[ -n "$remote_br" ]] && ok "local-advance race: remote branch preserved (no delete after a local CAS refusal)" || bad "local-advance race: remote branch was deleted despite the local CAS refusal"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "local-advance race: label was never touched" || bad "local-advance race: label edit was attempted"
+
+echo "second Codex review: remote branch advances after the safety proof but before the CAS delete — refuse, the lease stays bound to the verified terminal head SHA"
+REMOTEADV_SHA=$(term_fixture remoteadv1 321 remote-advance-race-case)
+cat > "$ROOT/remoteadv1/remote-advance-hook.sh" <<HOOK
+#!/usr/bin/env bash
+set -e
+clone_dir=\$(mktemp -d)
+git clone -q "$ROOT/remoteadv1/origin" "\$clone_dir" >/dev/null 2>&1
+git -C "\$clone_dir" fetch -q origin "\$1" >/dev/null 2>&1
+git -C "\$clone_dir" checkout -q "\$1" >/dev/null 2>&1
+git -C "\$clone_dir" commit --allow-empty -qm "raced advance" >/dev/null 2>&1
+git -C "\$clone_dir" push -q origin "\$1" >/dev/null 2>&1
+rm -rf "\$clone_dir"
+HOOK
+chmod +x "$ROOT/remoteadv1/remote-advance-hook.sh"
+export RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK="$ROOT/remoteadv1/remote-advance-hook.sh"
+export GH_PR_ALL_TSV="$ROOT/remoteadv1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/remoteadv1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/remoteadv1/gh-state"
+export GH_LOG="$ROOT/remoteadv1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '821\tissue-321-remote-advance-race-case\tlib/x/**\t321\tfeat/321-remote-advance-race-case\t%s\thttps://github.com/acme/app/pull/821\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$REMOTEADV_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/remoteadv1/canon" && "$RC" 321 --claim-id issue-321-remote-advance-race-case --repo acme/app 2>&1); rc=$?
+unset RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK
+check    "remote-advance race exits 3"                    "$rc" "3"
+contains "names the remote CAS refusal"                   "$out" "remote branch CAS delete refused"
+lacks    "does not claim success on remote-advance race"  "$out" "OK —"
+remote_br=$(git -C "$ROOT/remoteadv1/canon" ls-remote --heads origin 'feat/321-remote-advance-race-case')
+[[ -n "$remote_br" ]] && ok "remote-advance race: advanced remote branch preserved" || bad "remote-advance race: remote branch was deleted despite the race"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "remote-advance race: label was never touched" || bad "remote-advance race: label edit was attempted"
+
+echo "third Codex review: worktree cleanly switches to another branch between the safety proof and removal — refuse (rc=3), never a substitute for the dirty-file hook"
+SWITCHRACE_SHA=$(term_fixture switchrace1 322 branch-switch-race-case)
+cat > "$ROOT/switchrace1/switch-hook.sh" <<'HOOK'
+#!/usr/bin/env bash
+# Simulates a concurrent process cleanly switching the registered worktree to
+# an unrelated branch in the exact window between terminal_cleanup_release's
+# safety proof (which already validated the worktree's original branch/HEAD)
+# and the non-force `git worktree remove` call. The switch is clean — no
+# uncommitted changes — so `git status --porcelain` alone stays silent; only
+# the dedicated post-proof branch re-check catches it.
+git -C "$1" checkout -q -b decoy-branch-322
+HOOK
+chmod +x "$ROOT/switchrace1/switch-hook.sh"
+export RELEASE_CLAIM_TEST_DIRTY_HOOK="$ROOT/switchrace1/switch-hook.sh"
+export GH_PR_ALL_TSV="$ROOT/switchrace1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/switchrace1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/switchrace1/gh-state"
+export GH_LOG="$ROOT/switchrace1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '822\tissue-322-branch-switch-race-case\tlib/x/**\t322\tfeat/322-branch-switch-race-case\t%s\thttps://github.com/acme/app/pull/822\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SWITCHRACE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/switchrace1/canon" && "$RC" 322 --claim-id issue-322-branch-switch-race-case --repo acme/app 2>&1); rc=$?
+unset RELEASE_CLAIM_TEST_DIRTY_HOOK
+check    "branch-switch race exits 3"                  "$rc" "3"
+contains "names the branch-switch TOCTOU refusal"       "$out" "switched off branch"
+lacks    "does not claim success on branch-switch race" "$out" "OK —"
+[[ -d "$ROOT/switchrace1/wt-322-branch-switch-race-case" ]] &&
+  ok "branch-switch race: worktree preserved" || bad "branch-switch race: worktree was removed despite the race"
+br=$(git -C "$ROOT/switchrace1/canon" branch --list 'feat/322-branch-switch-race-case')
+[[ -n "$br" ]] && ok "branch-switch race: original local branch left untouched" || bad "branch-switch race: original local branch was deleted"
+decoy_br=$(git -C "$ROOT/switchrace1/wt-322-branch-switch-race-case" rev-parse --abbrev-ref HEAD)
+[[ "$decoy_br" == "decoy-branch-322" ]] &&
+  ok "branch-switch race: worktree still checked out on the raced-in branch" || bad "branch-switch race: worktree branch was reverted/lost"
+remote_br=$(git -C "$ROOT/switchrace1/canon" ls-remote --heads origin 'feat/322-branch-switch-race-case')
+[[ -n "$remote_br" ]] && ok "branch-switch race: remote PR-head branch left untouched" || bad "branch-switch race: remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "branch-switch race: label was never touched" || bad "branch-switch race: label edit was attempted"
+
+echo "third Codex review: worktree gets a clean commit (HEAD move) on the same branch between the safety proof and removal — refuse (rc=3)"
+HEADMOVE_SHA=$(term_fixture headmove1 323 head-move-race-case)
+cat > "$ROOT/headmove1/headmove-hook.sh" <<'HOOK'
+#!/usr/bin/env bash
+# Simulates a concurrent process landing a clean commit on the *same* branch
+# in the window between the safety proof and removal. Status stays clean and
+# the branch name is unchanged — only the HEAD re-check catches this, not the
+# dirty-status check and not the branch-identity check.
+git -C "$1" commit --allow-empty -qm "raced commit, still on the same branch"
+HOOK
+chmod +x "$ROOT/headmove1/headmove-hook.sh"
+export RELEASE_CLAIM_TEST_DIRTY_HOOK="$ROOT/headmove1/headmove-hook.sh"
+export GH_PR_ALL_TSV="$ROOT/headmove1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/headmove1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/headmove1/gh-state"
+export GH_LOG="$ROOT/headmove1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '823\tissue-323-head-move-race-case\tlib/x/**\t323\tfeat/323-head-move-race-case\t%s\thttps://github.com/acme/app/pull/823\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$HEADMOVE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/headmove1/canon" && "$RC" 323 --claim-id issue-323-head-move-race-case --repo acme/app 2>&1); rc=$?
+unset RELEASE_CLAIM_TEST_DIRTY_HOOK
+check    "head-move race exits 3"                   "$rc" "3"
+contains "names the HEAD-move TOCTOU refusal"        "$out" "HEAD moved"
+lacks    "does not claim success on head-move race"  "$out" "OK —"
+[[ -d "$ROOT/headmove1/wt-323-head-move-race-case" ]] &&
+  ok "head-move race: worktree preserved" || bad "head-move race: worktree was removed despite the race"
+br=$(git -C "$ROOT/headmove1/canon" branch --list 'feat/323-head-move-race-case')
+[[ -n "$br" ]] && ok "head-move race: local branch left untouched" || bad "head-move race: local branch was deleted"
+raced_head=$(git -C "$ROOT/headmove1/wt-323-head-move-race-case" rev-parse HEAD)
+[[ "$raced_head" != "$HEADMOVE_SHA" ]] &&
+  ok "head-move race: worktree HEAD still reflects the raced-in commit" || bad "head-move race: raced commit was lost"
+remote_br=$(git -C "$ROOT/headmove1/canon" ls-remote --heads origin 'feat/323-head-move-race-case')
+[[ -n "$remote_br" ]] && ok "head-move race: remote PR-head branch left untouched" || bad "head-move race: remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "head-move race: label was never touched" || bad "head-move race: label edit was attempted"
+
+echo "#153 blocker 4: --keep-worktree without --keep-branch must refuse branch deletion (rc=3) rather than leave a retained worktree without its branch"
+KWNB_SHA=$(term_fixture kwnb1 324 keep-worktree-no-keep-branch-case)
+export GH_PR_ALL_TSV="$ROOT/kwnb1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/kwnb1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/kwnb1/gh-state"
+export GH_LOG="$ROOT/kwnb1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '824\tissue-324-keep-worktree-no-keep-branch-case\tlib/x/**\t324\tfeat/324-keep-worktree-no-keep-branch-case\t%s\thttps://github.com/acme/app/pull/824\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$KWNB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/kwnb1/canon" && "$RC" 324 --claim-id issue-324-keep-worktree-no-keep-branch-case --repo acme/app --keep-worktree 2>&1); rc=$?
+check    "--keep-worktree without --keep-branch exits 3"     "$rc" "3"
+contains "names the retained-worktree-loses-branch refusal"  "$out" "a retained worktree must not lose its branch"
+lacks    "does not claim success"                             "$out" "OK —"
+[[ -d "$ROOT/kwnb1/wt-324-keep-worktree-no-keep-branch-case" ]] &&
+  ok "--keep-worktree/no-keep-branch: worktree retained" || bad "--keep-worktree/no-keep-branch: worktree was removed"
+br=$(git -C "$ROOT/kwnb1/canon" branch --list 'feat/324-keep-worktree-no-keep-branch-case')
+[[ -n "$br" ]] && ok "--keep-worktree/no-keep-branch: local branch preserved" || bad "--keep-worktree/no-keep-branch: local branch was deleted"
+remote_br=$(git -C "$ROOT/kwnb1/canon" ls-remote --heads origin 'feat/324-keep-worktree-no-keep-branch-case')
+[[ -n "$remote_br" ]] && ok "--keep-worktree/no-keep-branch: remote PR-head branch preserved" || bad "--keep-worktree/no-keep-branch: remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "--keep-worktree/no-keep-branch: label was never touched" || bad "--keep-worktree/no-keep-branch: label edit was attempted"
+
+echo "#153 blocker 5: sibling claim remains but agent-claimed is actually absent — refuse success (rc=3)"
+new_repo "$ROOT/termsibmissing"
+git -C "$ROOT/termsibmissing/canon" worktree add -q "$ROOT/termsibmissing/wt-220-checkout-a" \
+  -b feat/220-checkout-a origin/main
+(
+  cd "$ROOT/termsibmissing/wt-220-checkout-a" || exit 1
+  git commit --allow-empty -qs -m "chore: reserve issue #220 for issue-220-checkout-a"
+  git push -q -u origin feat/220-checkout-a
+) >/dev/null 2>&1
+TERMSIBMISS_SHA=$(git -C "$ROOT/termsibmissing/wt-220-checkout-a" rev-parse HEAD)
+export PATH="$ROOT/term/bin:$PATH"
+export GH_PR_OPEN_TSV="$ROOT/termsibmissing/open.tsv"
+printf '901\tissue-220-checkout-b\tlib/checkout/b/**\tfeat/220-checkout-b\thttps://github.com/acme/app/pull/901\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  > "$GH_PR_OPEN_TSV"
+export GH_PR_ALL_TSV="$ROOT/termsibmissing/all.tsv"
+printf '902\tissue-220-checkout-a\tlib/checkout/a/**\t220\tfeat/220-checkout-a\t%s\thttps://github.com/acme/app/pull/902\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERMSIBMISS_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+export GH_STATE="$ROOT/termsibmissing/gh-state"
+export GH_LOG="$ROOT/termsibmissing/gh.log"
+export GH_LABELS="tier-b"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
+rm -f "$GH_STATE" "$GH_LOG"
+out=$(cd "$ROOT/termsibmissing/canon" && "$RC" 220 --claim-id issue-220-checkout-a --repo acme/app 2>&1); rc=$?
+check    "sibling remains but label actually absent exits 3" "$rc" "3"
+contains "names the missing label"                            "$out" "agent-claimed is ABSENT"
+lacks    "does not falsely claim keeping the label"            "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "missing-label case: no edit attempted (removal is not what's wrong)" || bad "missing-label case: unexpected label edit attempted"
+[[ ! -d "$ROOT/termsibmissing/wt-220-checkout-a" ]] &&
+  ok "missing-label case: the claim's own worktree mutation still completed" || bad "missing-label case: worktree mutation was skipped"
+
+echo "#153 · post-mutation reread is fail-closed (never best-effort for terminal evidence)"
+
+echo "post-mutation open-claim reread failure yields rc=3, preserves label"
+REREADFAIL_SHA=$(term_fixture rereadfail1 307 reread-fail-case)
+export GH_PR_ALL_TSV="$ROOT/rereadfail1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/rereadfail1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/rereadfail1/gh-state"
+export GH_LOG="$ROOT/rereadfail1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '807\tissue-307-reread-fail-case\tlib/x/**\t307\tfeat/307-reread-fail-case\t%s\thttps://github.com/acme/app/pull/807\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$REREADFAIL_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+# Only the SECOND open-inventory read fails. The first one is the fail-closed
+# pre-mutation authoritative read the open-PR path now performs (#153); if it
+# failed too, the run would refuse up front and never exercise the terminal
+# post-mutation reread this test is about.
+export GH_OPEN_CALLS="$ROOT/rereadfail1/open-calls"
+: > "$GH_OPEN_CALLS"
+export GH_PR_OPEN_TSV2="$ROOT/rereadfail1/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+export GH_PR_OPEN_EXIT2=1
+out=$(cd "$ROOT/rereadfail1/canon" && "$RC" 307 --claim-id issue-307-reread-fail-case --repo acme/app 2>&1); rc=$?
+unset GH_OPEN_CALLS GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2
+check    "post-mutation reread failure exits 3"   "$rc" "3"
+contains "names reread failure"                   "$out" "post-mutation reread of live PR-body claims failed"
+lacks    "does not claim success on reread failure" "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "reread-failure case: label was never removed" || bad "reread-failure case: label removal was attempted"
+# The claim's own worktree/branch mutation already ran safely (it is the
+# GitHub reread afterward that failed) — that is exactly why label policy
+# must not trust an unreadable postcondition.
+[[ ! -d "$ROOT/rereadfail1/wt-307-reread-fail-case" ]] &&
+  ok "reread-failure case: worktree mutation still completed" || bad "reread-failure case: worktree mutation was skipped"
+
+echo "post-mutation malformed open-claim row yields rc=3, preserves label"
+MALFORMED_SHA=$(term_fixture malformedreread1 308 malformed-reread-case)
+export GH_PR_ALL_TSV="$ROOT/malformedreread1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/malformedreread1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/malformedreread1/gh-state"
+export GH_LOG="$ROOT/malformedreread1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '808\tissue-308-malformed-reread-case\tlib/x/**\t308\tfeat/308-malformed-reread-case\t%s\thttps://github.com/acme/app/pull/808\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$MALFORMED_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+# Malformed only on the post-mutation reread, for the same reason as above.
+export GH_OPEN_CALLS="$ROOT/malformedreread1/open-calls"
+: > "$GH_OPEN_CALLS"
+export GH_PR_OPEN_TSV2="$ROOT/malformedreread1/open2.tsv"
+printf 'not-enough-fields\n' > "$GH_PR_OPEN_TSV2"
+out=$(cd "$ROOT/malformedreread1/canon" && "$RC" 308 --claim-id issue-308-malformed-reread-case --repo acme/app 2>&1); rc=$?
+unset GH_OPEN_CALLS GH_PR_OPEN_TSV2
+check    "malformed reread row exits 3"          "$rc" "3"
+contains "names malformed reread row"            "$out" "malformed/truncated row"
+lacks    "does not claim success on malformed reread" "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "malformed-reread case: label was never removed" || bad "malformed-reread case: label removal was attempted"
+
+echo "#153 · multi-slice: releasing a terminal claim keeps a live open sibling"
+new_repo "$ROOT/termsib"
+git -C "$ROOT/termsib/canon" worktree add -q "$ROOT/termsib/wt-210-checkout-a" \
+  -b feat/210-checkout-a origin/main
+(
+  cd "$ROOT/termsib/wt-210-checkout-a" || exit 1
+  git commit --allow-empty -qs -m "chore: reserve issue #210 for issue-210-checkout-a"
+  git push -q -u origin feat/210-checkout-a
+) >/dev/null 2>&1
+TERMSIB_SHA=$(git -C "$ROOT/termsib/wt-210-checkout-a" rev-parse HEAD)
+export PATH="$ROOT/term/bin:$PATH"
+export GH_PR_OPEN_TSV="$ROOT/termsib/open.tsv"
+# The sibling PR-body claim (issue-210-checkout-b) exists only in this
+# post-mutation OPEN listing — release-claim.sh never saw it during the
+# identity check (which only queries --state all for the target id), so the
+# label decision below can only be correct if terminal_cleanup_release()
+# performs a fresh GitHub read after mutation rather than reusing any earlier
+# snapshot (#153 AC4/AC8).
+printf '900\tissue-210-checkout-b\tlib/checkout/b/**\tfeat/210-checkout-b\thttps://github.com/acme/app/pull/900\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  > "$GH_PR_OPEN_TSV"
+export GH_PR_ALL_TSV="$ROOT/termsib/all.tsv"
+printf '899\tissue-210-checkout-a\tlib/checkout/a/**\t210\tfeat/210-checkout-a\t%s\thttps://github.com/acme/app/pull/899\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERMSIB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+export GH_STATE="$ROOT/termsib/gh-state"
+export GH_LOG="$ROOT/termsib/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
+rm -f "$GH_STATE" "$GH_LOG"
+out=$(cd "$ROOT/termsib/canon" && "$RC" 210 --claim-id issue-210-checkout-a --repo acme/app 2>&1); rc=$?
+check    "releasing one terminal slice exits 0"     "$rc" "0"
+contains "keeps agent-claimed for the live sibling" "$out" "issue-210-checkout-b"
+lacks    "does not claim the label was removed"     "$out" "removed agent-claimed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "sibling case: label was never removed" || bad "sibling case: label removal was attempted"
+[[ ! -d "$ROOT/termsib/wt-210-checkout-a" ]] &&
+  ok "released slice's worktree is gone" || bad "released slice's worktree survived"
+
+echo "#153 blocker 6: URL pull-number mismatch inside a terminal PR body propagates through the real pr-claims.sh jq pipeline to release-claim.sh (fail closed)"
+# The "term" fake gh above bypasses jq entirely (it hands release-claim.sh
+# pre-baked TSV rows as if pr-claims.sh already emitted them), so it can
+# never catch a PR whose own URL disagrees with its number. This fake gh
+# instead returns real GraphQL PR JSON (branching on the query's
+# `states: [OPEN]` restriction exactly like the real API would) and lets the
+# real jq inside pr-claims.sh run.
+URLNUM_SHA=$(term_fixture urlnum1 320 urlnum-case)
+mkdir -p "$ROOT/urlnum1/bin-json"
+cat > "$ROOT/urlnum1/bin-json/gh" <<'GHJSON'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  api)
+    [[ "$2" == "graphql" ]] || exit 1
+    shift 2
+    jqexpr=""
+    want_open=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --jq) jqexpr="$2"; shift 2 ;;
+        *) case "$1" in *"states: [OPEN]"*) want_open=1 ;; esac; shift ;;
+      esac
+    done
+    if [[ "$want_open" -eq 1 ]]; then
+      jq -r "$jqexpr" < "${GH_JSON_OPEN:?GH_JSON_OPEN not set}"
+    else
+      jq -r "$jqexpr" < "${GH_JSON_ALL:?GH_JSON_ALL not set}"
+    fi
+    exit $?
+    ;;
+  issue) exit 1 ;;
+  *) exit 1 ;;
+esac
+GHJSON
+chmod +x "$ROOT/urlnum1/bin-json/gh"
+# Full GraphQL response envelopes: pr-claims.sh's --jq starts at
+# .data.repository.pullRequests.nodes[].
+export GH_JSON_OPEN="$ROOT/urlnum1/open.json"
+printf '{"data":{"repository":{"pullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' > "$GH_JSON_OPEN"
+export GH_JSON_ALL="$ROOT/urlnum1/all.json"
+printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":820,"state":"MERGED","body":"- Active-work claim: issue-320-urlnum-case\\n- Claim scope: lib/x/**\\n- Issue: #320","headRefName":"feat/320-urlnum-case","headRefOid":"%s","url":"https://github.com/acme/app/pull/9999","createdAt":"2026-08-05T00:00:00Z","updatedAt":"2026-08-06T00:00:00Z","isCrossRepository":false,"mergeCommit":{"oid":"%s"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' \
+  "$URLNUM_SHA" "$HEX40" > "$GH_JSON_ALL"
+out=$(cd "$ROOT/urlnum1/canon" && PATH="$ROOT/urlnum1/bin-json:$PATH" GH_JSON_OPEN="$GH_JSON_OPEN" GH_JSON_ALL="$GH_JSON_ALL" "$RC" 320 --claim-id issue-320-urlnum-case --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "URL pull-number mismatch propagates and refuses (rc=$rc)" \
+  || bad "URL pull-number mismatch did not refuse (rc=$rc): $out"
+echo "$out" | grep -qiE 'pull-number|cannot verify terminal PR-body claim evidence' \
+  && ok "names the propagated pr-claims.sh failure" \
+  || bad "missing propagated failure detail: $out"
+[[ -d "$ROOT/urlnum1/wt-320-urlnum-case" ]] &&
+  ok "URL mismatch case: worktree untouched" || bad "URL mismatch case: worktree removed"
+
+# =========================================================================
+# #153 · the OPEN-PR release path: authoritative inventory + honest reporting
+# =========================================================================
+# Two defects this section pins down:
+#
+#  1. The path used to read the live claim inventory as
+#     `$(pr-claims.sh list "$PR_REPO" 2>/dev/null || true)`. A missing
+#     reader, an expired token, a rate limit, or a mid-pagination API failure
+#     all became "no live PR claims" — and the run then went on to close PRs,
+#     delete branches, strip the ledger, and remove agent-claimed on the
+#     strength of a view it never actually read. Every one of those failures
+#     must now refuse BEFORE any mutation.
+#
+#  2. It closed the PR, then best-effort removed a GUESSED worktree path and
+#     `|| true`'d both branch deletes, and printed "released PR-body claim"
+#     regardless. It is now close-only: it closes, re-reads to PROVE the
+#     claim is gone, names anything it did not clean up, and returns
+#     INCOMPLETE (3) rather than reporting success it cannot support.
+#
+# All of it is offline: the fake gh above serves the staged inventory, and
+# GH_PR_OPEN_TSV2 lets the post-close read differ from the pre-close one.
+echo "#153 · open-PR release: the live claim inventory is authoritative, not best-effort"
+
+open_fixture() {
+  # Build a repo with a registered worktree + local/remote branch for an open
+  # PR-body claim, and point the fake gh's state files at it. Echoes nothing;
+  # sets the GH_* fixture env for the caller.
+  local dir="$1" issue="$2" slug="$3"
+  new_repo "$ROOT/$dir"
+  git -C "$ROOT/$dir/canon" worktree add -q "$ROOT/$dir/wt-${issue}-${slug}" \
+    -b "feat/${issue}-${slug}" origin/main
+  (
+    cd "$ROOT/$dir/wt-${issue}-${slug}" || exit 1
+    git commit --allow-empty -qs -m "chore: reserve issue #$issue for issue-${issue}-${slug}"
+    git push -q -u origin "feat/${issue}-${slug}"
+  ) >/dev/null 2>&1
+  export GH_PR_OPEN_TSV="$ROOT/$dir/open.tsv"
+  export GH_PR_ALL_TSV="$ROOT/$dir/all.tsv"
+  : > "$GH_PR_ALL_TSV"
+  export GH_STATE="$ROOT/$dir/gh-state"
+  export GH_LOG="$ROOT/$dir/gh.log"
+  export GH_PR_CLOSE_LOG="$ROOT/$dir/close.log"
+  export GH_LABELS="agent-claimed,tier-b"
+  export GH_OPEN_CALLS="$ROOT/$dir/open-calls"
+  : > "$GH_OPEN_CALLS"
+  rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
+  unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
+}
+
+# One 7-field `pr-claims.sh list` row: number, claim, scope, head branch,
+# url, created, updated.
+open_row() {
+  printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+    "$1" "$2" "$3" "$4" "$1"
+}
+
+export PATH="$ROOT/term/bin:$PATH"
+
+echo "an unreadable inventory (API/pagination failure) refuses before ANY mutation"
+open_fixture openfail 400 inventory-fail
+open_row 901 issue-400-inventory-fail 'lib/x/**' feat/400-inventory-fail > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_EXIT=1
+out=$(cd "$ROOT/openfail/canon" && "$RC" 400 --claim-id issue-400-inventory-fail --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_EXIT
+[[ "$rc" -ne 0 ]] && ok "unreadable inventory exits nonzero" || bad "unreadable inventory exits 0: $out"
+contains "names the unreadable inventory" "$out" "unreadable claim inventory is not an empty one"
+lacks    "does not claim success"         "$out" "OK —"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "unreadable inventory: no PR was closed" || bad "unreadable inventory: a PR was closed anyway"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unreadable inventory: no label edit" || bad "unreadable inventory: label was edited"
+[[ -d "$ROOT/openfail/wt-400-inventory-fail" ]] &&
+  ok "unreadable inventory: worktree untouched" || bad "unreadable inventory: worktree removed"
+[[ -n "$(git -C "$ROOT/openfail/canon" branch --list 'feat/400-inventory-fail')" ]] &&
+  ok "unreadable inventory: local branch untouched" || bad "unreadable inventory: local branch deleted"
+[[ -n "$(git -C "$ROOT/openfail/canon" ls-remote --heads origin 'feat/400-inventory-fail')" ]] &&
+  ok "unreadable inventory: remote branch untouched" || bad "unreadable inventory: remote branch deleted"
+table=$(git -C "$ROOT/openfail/canon" show origin/main:docs/active-work.md)
+contains "unreadable inventory: ledger untouched" "$table" "issue-15-checkout-totals"
+
+echo "a malformed/truncated inventory row refuses before ANY mutation"
+open_fixture openmalformed 401 malformed-row
+printf 'not-enough-fields\n' > "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/openmalformed/canon" && "$RC" 401 --claim-id issue-401-malformed-row --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "malformed inventory exits nonzero" || bad "malformed inventory exits 0: $out"
+contains "names the malformed row" "$out" "malformed/truncated row"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "malformed inventory: no PR was closed" || bad "malformed inventory: a PR was closed anyway"
+[[ -d "$ROOT/openmalformed/wt-401-malformed-row" ]] &&
+  ok "malformed inventory: worktree untouched" || bad "malformed inventory: worktree removed"
+
+echo "a missing/unexecutable pr-claims.sh reader refuses before ANY mutation"
+open_fixture openreader 402 missing-reader
+open_row 903 issue-402-missing-reader 'lib/x/**' feat/402-missing-reader > "$GH_PR_OPEN_TSV"
+# Copy release-claim.sh somewhere WITHOUT its reader alongside it: SCRIPT_DIR
+# is derived from the script's own location, so this is the real "the
+# authoritative reader is not installed" shape, not a mocked one.
+mkdir -p "$ROOT/openreader/lonely"
+cp "$RC" "$ROOT/openreader/lonely/release-claim.sh"
+chmod +x "$ROOT/openreader/lonely/release-claim.sh"
+out=$(cd "$ROOT/openreader/canon" && "$ROOT/openreader/lonely/release-claim.sh" 402 --claim-id issue-402-missing-reader --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing reader exits nonzero" || bad "missing reader exits 0: $out"
+contains "names the missing reader" "$out" "missing or not executable"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "missing reader: no PR was closed" || bad "missing reader: a PR was closed anyway"
+[[ -d "$ROOT/openreader/wt-402-missing-reader" ]] &&
+  ok "missing reader: worktree untouched" || bad "missing reader: worktree removed"
+
+echo "the happy path hands the closed PR to the SHARED exact cleanup machinery"
+open_fixture openroute 411 routed
+ROUTE_SHA=$(git -C "$ROOT/openroute/wt-411-routed" rev-parse HEAD)
+open_row 914 issue-411-routed 'lib/x/**' feat/411-routed > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openroute/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+# Once closed, the PR is terminal evidence: CLOSED, exact head SHA, no merge
+# commit, this repository, not a fork.
+printf '914\tissue-411-routed\tlib/x/**\t411\tfeat/411-routed\t%s\thttps://github.com/acme/app/pull/914\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$ROUTE_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/openroute/canon" && "$RC" 411 --claim-id issue-411-routed --repo acme/app 2>&1); rc=$?
+check    "routed release exits 0"                "$rc" "0"
+contains "closed the owning PR"                  "$out" "closing PR #914"
+contains "used the shared terminal verification" "$out" "verified terminal PR-body claim #914"
+contains "removed the EXACT registered worktree" "$out" "removing exact registered worktree"
+contains "reports the release"                   "$out" "OK — claim released for issue 411"
+[[ ! -d "$ROOT/openroute/wt-411-routed" ]] &&
+  ok "routed release removed the worktree" || bad "routed release left the worktree"
+[[ -z "$(git -C "$ROOT/openroute/canon" branch --list 'feat/411-routed')" ]] &&
+  ok "routed release removed the local branch" || bad "routed release left the local branch"
+[[ -z "$(git -C "$ROOT/openroute/canon" ls-remote --heads origin 'feat/411-routed')" ]] &&
+  ok "routed release removed the remote branch" || bad "routed release left the remote branch"
+
+echo "the handover refuses (rather than guesses) when the head branch is not the one the claim id derives"
+open_fixture openodd 412 odd-branch
+# PR head branch deliberately not feat/412-odd-branch: identity cannot be
+# bound to the claim id, so nothing may be removed on it.
+open_row 915 issue-412-odd-branch 'lib/x/**' hotfix/unrelated-branch > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openodd/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+out=$(cd "$ROOT/openodd/canon" && "$RC" 412 --claim-id issue-412-odd-branch --repo acme/app 2>&1); rc=$?
+check    "unbindable head branch exits 3"    "$rc" "3"
+contains "names the unbindable head branch" "$out" "is not the branch claim id"
+lacks    "never reports success"             "$out" "OK —"
+[[ -d "$ROOT/openodd/wt-412-odd-branch" ]] &&
+  ok "unbindable branch: worktree untouched" || bad "unbindable branch: worktree removed"
+
+echo "close-only: leftover worktree/branch are NAMED and returned INCOMPLETE, never reported as success"
+open_fixture openleft 403 leftovers
+open_row 904 issue-403-leftovers 'lib/x/**' feat/403-leftovers > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openleft/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"   # post-close: the claim is gone from the live view
+out=$(cd "$ROOT/openleft/canon" && "$RC" 403 --claim-id issue-403-leftovers --repo acme/app 2>&1); rc=$?
+check    "leftover cleanup exits 3 (INCOMPLETE)" "$rc" "3"
+contains "closed the owning PR"                  "$out" "closing PR #904"
+contains "names the leftover worktree"           "$out" "registered worktree on branch 'feat/403-leftovers'"
+contains "names the leftover local branch"       "$out" "local branch 'feat/403-leftovers'"
+contains "names the leftover remote branch"      "$out" "remote branch 'feat/403-leftovers'"
+contains "tells the operator how to finish"      "$out" "--claim-id issue-403-leftovers"
+contains "reports INCOMPLETE"                    "$out" "INCOMPLETE"
+lacks    "never reports success"                 "$out" "OK —"
+contains "preserves the label"                   "$out" "preserving agent-claimed"
+[[ -n "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "leftover case: the PR really was closed" || bad "leftover case: PR was not closed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "leftover case: label was never removed" || bad "leftover case: label removal was attempted"
+# The old path force-removed a guessed worktree and '|| true'd both branch
+# deletes. Close-only touches neither, so the exact verified terminal cleanup
+# can still prove them safe on the follow-up run.
+[[ -d "$ROOT/openleft/wt-403-leftovers" ]] &&
+  ok "leftover case: worktree not force-removed" || bad "leftover case: worktree was force-removed"
+[[ -n "$(git -C "$ROOT/openleft/canon" branch --list 'feat/403-leftovers')" ]] &&
+  ok "leftover case: local branch not deleted" || bad "leftover case: local branch was deleted"
+[[ -n "$(git -C "$ROOT/openleft/canon" ls-remote --heads origin 'feat/403-leftovers')" ]] &&
+  ok "leftover case: remote branch not deleted" || bad "leftover case: remote branch was deleted"
+
+echo "close-only: with nothing left to clean up, it completes and the label removal is verified"
+open_fixture openclean 404 nothing-left
+open_row 905 issue-404-nothing-left 'lib/x/**' feat/404-nothing-left > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openclean/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+# Worktree and branches already gone (e.g. an earlier terminal cleanup).
+git -C "$ROOT/openclean/canon" worktree remove --force "$ROOT/openclean/wt-404-nothing-left" >/dev/null 2>&1
+git -C "$ROOT/openclean/canon" branch -D feat/404-nothing-left >/dev/null 2>&1
+git -C "$ROOT/openclean/canon" push -q origin --delete feat/404-nothing-left >/dev/null 2>&1
+out=$(cd "$ROOT/openclean/canon" && "$RC" 404 --claim-id issue-404-nothing-left --repo acme/app 2>&1); rc=$?
+check    "nothing-left release exits 0"      "$rc" "0"
+contains "reports the verified release"      "$out" "OK — released PR-body claim for #404"
+contains "verified label removal"            "$out" "removed agent-claimed from acme/app#404 (verified)"
+lacks    "no INCOMPLETE banner"              "$out" "INCOMPLETE"
+
+echo "a claim still live on the post-close reread refuses success"
+open_fixture openstill 405 still-live
+open_row 906 issue-405-still-live 'lib/x/**' feat/405-still-live > "$GH_PR_OPEN_TSV"
+git -C "$ROOT/openstill/canon" worktree remove --force "$ROOT/openstill/wt-405-still-live" >/dev/null 2>&1
+git -C "$ROOT/openstill/canon" branch -D feat/405-still-live >/dev/null 2>&1
+git -C "$ROOT/openstill/canon" push -q origin --delete feat/405-still-live >/dev/null 2>&1
+# No GH_PR_OPEN_TSV2: the post-close read still reports the claim as live —
+# gh said the close worked, GitHub says otherwise. Believe the reread.
+out=$(cd "$ROOT/openstill/canon" && "$RC" 405 --claim-id issue-405-still-live --repo acme/app 2>&1); rc=$?
+check    "still-live claim exits 3"       "$rc" "3"
+contains "names the still-live claim"     "$out" "is STILL a live open PR-body claim"
+lacks    "does not claim success"         "$out" "OK —"
+contains "preserves the label"            "$out" "preserving agent-claimed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "still-live case: label was never removed" || bad "still-live case: label removal was attempted"
+
+echo "a failed post-close reread refuses success (never assumes the close worked)"
+open_fixture openrrfail 406 reread-fail
+open_row 907 issue-406-reread-fail 'lib/x/**' feat/406-reread-fail > "$GH_PR_OPEN_TSV"
+git -C "$ROOT/openrrfail/canon" worktree remove --force "$ROOT/openrrfail/wt-406-reread-fail" >/dev/null 2>&1
+git -C "$ROOT/openrrfail/canon" branch -D feat/406-reread-fail >/dev/null 2>&1
+git -C "$ROOT/openrrfail/canon" push -q origin --delete feat/406-reread-fail >/dev/null 2>&1
+export GH_PR_OPEN_TSV2="$ROOT/openrrfail/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+export GH_PR_OPEN_EXIT2=1
+out=$(cd "$ROOT/openrrfail/canon" && "$RC" 406 --claim-id issue-406-reread-fail --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_EXIT2
+check    "post-close reread failure exits 3" "$rc" "3"
+contains "names the reread failure"          "$out" "post-close reread of live PR-body claims failed"
+lacks    "does not claim success"            "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "reread-failure case: label was never removed" || bad "reread-failure case: label removal was attempted"
+
+echo "sibling policy is preserved and verified: a surviving live slice keeps agent-claimed"
+open_fixture opensib 407 slice-a
+open_row 908 issue-407-slice-a 'lib/a/**' feat/407-slice-a  > "$GH_PR_OPEN_TSV"
+open_row 909 issue-407-slice-b 'lib/b/**' feat/407-slice-b >> "$GH_PR_OPEN_TSV"
+git -C "$ROOT/opensib/canon" worktree remove --force "$ROOT/opensib/wt-407-slice-a" >/dev/null 2>&1
+git -C "$ROOT/opensib/canon" branch -D feat/407-slice-a >/dev/null 2>&1
+git -C "$ROOT/opensib/canon" push -q origin --delete feat/407-slice-a >/dev/null 2>&1
+# Post-close: slice-a is gone, slice-b is still working the same issue.
+export GH_PR_OPEN_TSV2="$ROOT/opensib/open2.tsv"
+open_row 909 issue-407-slice-b 'lib/b/**' feat/407-slice-b > "$GH_PR_OPEN_TSV2"
+out=$(cd "$ROOT/opensib/canon" && "$RC" 407 --claim-id issue-407-slice-a --repo acme/app 2>&1); rc=$?
+check    "sibling-preserving release exits 0" "$rc" "0"
+contains "keeps the label for the sibling"    "$out" "keeping agent-claimed on #407"
+contains "names the surviving sibling"        "$out" "issue-407-slice-b"
+contains "says the preservation was verified" "$out" "verified"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "sibling case: label was never removed" || bad "sibling case: label removal was attempted"
+
+echo "multiple live slices without --claim-id still refuse"
+open_fixture openambig 408 slice-a
+open_row 910 issue-408-slice-a 'lib/a/**' feat/408-slice-a  > "$GH_PR_OPEN_TSV"
+open_row 911 issue-408-slice-b 'lib/b/**' feat/408-slice-b >> "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/openambig/canon" && "$RC" 408 --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "multi-slice bare release refuses" || bad "multi-slice bare release exits 0: $out"
+contains "names the ambiguity" "$out" "multiple live PR claims"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "multi-slice case: no PR was closed" || bad "multi-slice case: a PR was closed anyway"
+
+echo "dry-run closes nothing and says plainly that it will not clean up"
+open_fixture opendry 409 dry-case
+open_row 912 issue-409-dry-case 'lib/x/**' feat/409-dry-case > "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/opendry/canon" && "$RC" 409 --claim-id issue-409-dry-case --repo acme/app --dry-run 2>&1); rc=$?
+check    "dry-run exits 0"                  "$rc" "0"
+contains "dry-run names the close"          "$out" "would close PR #912"
+contains "dry-run names the exact cleanup"  "$out" "run the exact cleanup"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "dry-run closed nothing" || bad "dry-run closed a PR"
+[[ -d "$ROOT/opendry/wt-409-dry-case" ]] &&
+  ok "dry-run left the worktree" || bad "dry-run removed the worktree"
+
+echo "a failed gh pr close refuses — the claim is still live and nothing else moved"
+open_fixture openclosefail 410 close-fail
+open_row 913 issue-410-close-fail 'lib/x/**' feat/410-close-fail > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSE_EXIT=1
+out=$(cd "$ROOT/openclosefail/canon" && "$RC" 410 --claim-id issue-410-close-fail --repo acme/app 2>&1); rc=$?
+unset GH_PR_CLOSE_EXIT
+[[ "$rc" -ne 0 ]] && ok "failed close exits nonzero" || bad "failed close exits 0: $out"
+contains "names the failed close"  "$out" "gh pr close failed"
+lacks    "does not claim success"  "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "failed close: label was never removed" || bad "failed close: label removal was attempted"
+[[ -d "$ROOT/openclosefail/wt-410-close-fail" ]] &&
+  ok "failed close: worktree untouched" || bad "failed close: worktree removed"
+
+unset GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS GH_PR_CLOSE_LOG GH_PR_CLOSE_EXIT
+
+echo "#153 · full lifecycle fixture: reservation -> draft PR-body claim -> terminal PR -> exact-ID release -> verified cleanup"
+CLAIM="$SCRIPT_DIR/../claim.sh"
+new_repo "$ROOT/e2e"
+mkdir -p "$ROOT/e2e/bin"
+export GH_PR_FILE="$ROOT/e2e/prs"
+: > "$GH_PR_FILE"
+cat > "$ROOT/e2e/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/e2e" ;;
+  "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
+  "issue edit")
+    if echo "$*" | grep -q -- '--add-label'; then
+      echo "agent-claimed" > "${GH_LABELS_FILE:-/dev/null}"
+    elif echo "$*" | grep -q -- '--remove-label'; then
+      : > "${GH_LABELS_FILE:-/dev/null}"
+    fi
+    ;;
+  "api graphql")
+    # pr-claims.sh's paginated GraphQL read. `list` restricts to
+    # `states: [OPEN]`; `find-terminal` walks every state.
+    for arg in "$@"; do
+      case "$arg" in
+        *"states: [OPEN]"*)
+          # open state: nothing — the reservation PR is terminal, not live-open.
+          exit 0
+          ;;
+      esac
+    done
+    # Reservation PR has already merged: absent from OPEN, present as MERGED,
+    # with GitHub's own reported head SHA — the real tip of the pushed branch.
+    while IFS='|' read -r number claim scope branch url created updated headsha; do
+      [[ -n "$claim" ]] || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$number" "$claim" "$scope" "200" "$branch" "$headsha" "$url" \
+        "MERGED" "false" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "acme/e2e" "$created" "$updated"
+    done < "${GH_PR_FILE:-/dev/null}"
+    ;;
+  "pr create")
+    body_file=""; branch=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --body-file) body_file="$2"; shift 2 ;;
+        --head) branch="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    number="${GH_PR_NEXT:-1}"
+    export GH_PR_NEXT=$((number + 1))
+    claim=$(sed -n 's/^- Active-work claim: //p' "$body_file")
+    scope=$(sed -n 's/^- Claim scope: //p' "$body_file")
+    headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+    printf '%s|%s|%s|%s|https://github.com/acme/e2e/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z|%s\n' \
+      "$number" "$claim" "$scope" "$branch" "$number" "$headsha" >> "${GH_PR_FILE:-/dev/null}"
+    echo "https://github.com/acme/e2e/pull/$number"
+    ;;
+esac
+exit 0
+FAKE
+chmod +x "$ROOT/e2e/bin/gh"
+export PATH="$ROOT/e2e/bin:$PATH"
+export GH_PR_NEXT=1
+export GH_LABELS_FILE="$ROOT/e2e/labels"
+: > "$GH_LABELS_FILE"
+
+# Step 1+2: empty reservation commit + draft PR-body claim, via the real claim.sh.
+out=$(cd "$ROOT/e2e/canon" && GIBSON_CANONICAL="$ROOT/e2e/canon" "$CLAIM" 200 checkout-fix 'lib/checkout/**' 2>&1); rc=$?
+check    "e2e: claim.sh reserves the issue and opens the draft PR" "$rc" "0"
+contains "e2e: claim label added"     "$(cat "$GH_LABELS_FILE")" "agent-claimed"
+contains "e2e: draft PR carries the claim" "$(cat "$GH_PR_FILE")" "issue-200-checkout-fix"
+[[ -d "$ROOT/e2e/wt-200-checkout-fix" ]] && ok "e2e: worktree created" || bad "e2e: worktree missing"
+
+# Step 3: reservation PR reaches a terminal state (merged) — nothing more to
+# simulate here: the fake gh's --state all branch already reports MERGED for
+# every row still in GH_PR_FILE (with the real pushed head SHA), and pr list
+# --state open only lists PRs this fixture never puts there, matching a real
+# merged/closed PR falling out of the open listing.
+
+# Step 4: exact-ID release after the terminal PR, with no ledger row at all.
+out=$(cd "$ROOT/e2e/canon" && "$RC" 200 --claim-id issue-200-checkout-fix --repo acme/e2e 2>&1); rc=$?
+check    "e2e: exact-ID release exits 0"        "$rc" "0"
+contains "e2e: release used the terminal claim" "$out" "verified terminal PR-body claim"
+
+# Step 5: verified cleanup — exact worktree, exact local/remote branch, label.
+[[ ! -d "$ROOT/e2e/wt-200-checkout-fix" ]] &&
+  ok "e2e: worktree removed" || bad "e2e: worktree survived release"
+br=$(git -C "$ROOT/e2e/canon" branch --list 'feat/200-checkout-fix')
+[[ -z "$br" ]] && ok "e2e: local branch removed" || bad "e2e: local branch survived release"
+remote_br=$(git -C "$ROOT/e2e/canon" ls-remote --heads origin 'feat/200-checkout-fix')
+[[ -z "$remote_br" ]] && ok "e2e: remote branch removed" || bad "e2e: remote branch survived release"
+lacks "e2e: label file no longer carries agent-claimed" "$(cat "$GH_LABELS_FILE")" "agent-claimed"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"

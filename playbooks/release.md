@@ -250,6 +250,62 @@ leaves the sibling rows and keeps `agent-claimed` on the issue:
 release-claim.sh <issue> --claim-id issue-<issue>-<merged-slug>
 ```
 
+**Claim already merged/closed and no ledger row exists at all (#153).** Current
+`claim.sh` records the claim only in the draft PR's body, never in a ledger
+row — that PR *is* the claim, from reservation through review to merge or
+close. If the ledger genuinely has nothing for this exact id (a plain
+`release-claim.sh <issue>` finding nothing to strip is expected here, not a
+bug), name the exact claim id and repo and `release-claim.sh` verifies it
+directly against that finished PR instead:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<slug> --repo owner/name
+```
+
+This binds the release to the exact issue, claim id, PR number, head branch,
+exact head SHA, base repository (re-derived from the PR's own URL, never
+trusted from `--repo` alone), cross-repository=false, and terminal state
+(MERGED or CLOSED) before touching anything — an **open** PR, ambiguous
+matches, a cross-repository/fork PR, a mismatched issue/branch/scope, a
+malformed or truncated evidence row, or a `gh` query failure all refuse before
+any worktree, branch, or label mutation. A CLOSED PR is never described as
+"merged" — MERGED requires a real merge-commit SHA, CLOSED requires the
+opposite (no merge-commit SHA at all); either/neither is refused as a
+state/evidence mismatch.
+
+Two compatibility rules make this usable on a repository that has real
+history. First, the terminal lookup is **candidate-first**: it inspects only
+the PRs whose body carries your exact claim id, so one unrelated historical PR
+using a pre-#153 body format cannot permanently block every future release.
+Second, an exact candidate that *itself* predates the machine markers is read
+under a strict **legacy terminal-claim schema**: when both `- Claim scope:`
+and `- Issue: #` are entirely absent, the issue comes from exactly one
+`Closes #<n>.` line and the scope from exactly one `## Cumulative scope`
+section of backticked path bullets. Nothing is invented. A marker-only body,
+prose instead of bullets, a missing/duplicated closing line or scope section,
+an unsafe path, or a *current*-format body missing one required field all
+still refuse — as does a candidate whose `Closes` number disagrees with its
+claim id. If your release stops here, fix the PR body; do not weaken the
+check.
+
+Only after every identity check above passes does the script prove the
+*registered* worktree at the exact expected path (never a default-path guess)
+is on that exact branch, is clean (no uncommitted or untracked changes), and
+is at that exact head SHA — or, for a real merge, safely contained in the
+merge commit. Any failure there — dirty, wrong branch, unregistered directory,
+SHA mismatch — leaves the worktree and branch untouched and exits incomplete;
+it never `rm -rf`s an unregistered/default-path directory and never
+force-removes a dirty worktree. No ledger row is ever invented to make this
+work.
+
+Sibling protection still applies, verified with a **fresh** GitHub read taken
+after mutation, not a snapshot from before it: a live sibling claim — ledger
+row **or** another open PR-body claim for the same issue — keeps
+`agent-claimed` until the last one is verified gone. That post-mutation
+GitHub read is **fail-closed**: a query failure or a malformed row there
+preserves `agent-claimed` and reports incomplete (exit 3) rather than
+guessing the claim is gone.
+
 **Empty ledger is valid only on a real commit ref with a readable tree.** After
 the last claim file is gone, `docs/claims/` is untracked in git and
 `docs/active-work.md` may be absent — that is zero live claims on a valid

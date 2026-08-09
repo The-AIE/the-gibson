@@ -45,12 +45,35 @@ case "$1 $2" in
   "repo view") echo "acme/app" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
-  "pr list")
-    while IFS='|' read -r number claim scope branch url created updated; do
-      [[ -n "$claim" ]] || continue
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
-    done < "${GH_PR_FILE:-/dev/null}"
+  "api graphql")
+    # pr-claims.sh's paginated GraphQL read. `list` restricts the query to
+    # `states: [OPEN]` and wants 7 fields; `find-terminal` walks every state
+    # and wants 13, including the exact head SHA that release-claim.sh's
+    # cleanup proof is anchored to. Closed PRs move to GH_PR_FILE.closed, so
+    # this fixture models the real lifecycle: a released claim leaves the
+    # open listing and becomes terminal evidence in the same breath.
+    want_open=0
+    for a in "$@"; do
+      case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac
+    done
+    if [[ "$want_open" -eq 1 ]]; then
+      while IFS='|' read -r number claim scope branch url created updated; do
+        [[ -n "$claim" ]] || continue
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
+      done < "${GH_PR_FILE:-/dev/null}"
+    else
+      while IFS='|' read -r number claim scope branch url created updated; do
+        [[ -n "$claim" ]] || continue
+        rest="${claim#issue-}"
+        issue="${rest%%-*}"
+        headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+        # CLOSED, so the merge-commit column is empty by contract.
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
+          "CLOSED" "false" "" "acme/app" "$created" "$updated"
+      done < "${GH_PR_FILE}.closed" 2>/dev/null
+    fi
     ;;
   "pr create")
     [[ "${GH_FAIL_PR_CREATE:-0}" == 1 ]] && exit 1
@@ -77,7 +100,12 @@ case "$1 $2" in
     tmp="${GH_PR_FILE}.tmp"
     : > "$tmp"
     while IFS='|' read -r pr_number rest; do
-      [[ "$pr_number" == "$number" ]] || printf '%s|%s\n' "$pr_number" "$rest" >> "$tmp"
+      if [[ "$pr_number" == "$number" ]]; then
+        # Closing does not delete the PR — it becomes terminal evidence.
+        printf '%s|%s\n' "$pr_number" "$rest" >> "${GH_PR_FILE}.closed"
+      else
+        printf '%s|%s\n' "$pr_number" "$rest" >> "$tmp"
+      fi
     done < "${GH_PR_FILE:-/dev/null}"
     mv "$tmp" "$GH_PR_FILE"
     ;;
@@ -94,6 +122,7 @@ new_repo() {
   mkdir -p "$root"
   export GH_PR_FILE="$root/prs"
   : > "$GH_PR_FILE"
+  : > "${GH_PR_FILE}.closed"   # terminal (closed) PR evidence for this fixture
   export GH_PR_NEXT=1
   git init -q --bare "$root/origin"
   git clone -q "$root/origin" "$root/canon" 2>/dev/null
@@ -192,6 +221,15 @@ out=$(cd "$ROOT/c/canon" && "$CLAIM" 92 nav-rewrite 'components/**' 2>&1); rc=$?
 check "broad claim over a live narrow claim is refused" "$rc" "1"
 out=$(cd "$ROOT/c/canon" && "$CLAIM" 93 billing 'app/billing/**' 2>&1); rc=$?
 check "unrelated scope is allowed" "$rc" "0"
+
+echo "cross-issue PR-body claim overlap is refused end-to-end (#153)"
+out=$(cd "$ROOT/c/canon" && "$CLAIM" 94 payments-core 'lib/payments/**' 2>&1); rc=$?
+check "PR-body claim for issue 94 succeeds" "$rc" "0"
+out=$(cd "$ROOT/c/canon" && "$CLAIM" 95 payments-retry 'lib/payments/retry.ts' 2>&1); rc=$?
+check    "different issue overlapping a live PR-body claim is refused" "$rc" "1"
+contains "names the conflicting PR-body claim" "$out" "issue-94-payments-core"
+out=$(cd "$ROOT/c/canon" && "$CLAIM" 96 shipping 'lib/shipping/**' 2>&1); rc=$?
+check "different issue with disjoint scope coexists with the live PR-body claim" "$rc" "0"
 
 echo "legacy rows still count as live claims"
 new_repo "$ROOT/e"
