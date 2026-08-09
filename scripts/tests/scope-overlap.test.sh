@@ -310,6 +310,52 @@ out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --admit-pr 810); rc=
 [[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --claim-id' && ok "--admit-pr without --claim-id rejected" \
   || bad "--admit-pr without --claim-id (rc=$rc): $out"
 
+echo "--pr-claims-file · decides on the caller's settled inventory, not a fresh read"
+# claim.sh's admission barrier waits for the live inventory to go quiet and then
+# hands that exact sample here. A re-read would throw the barrier away, so this
+# flag must genuinely drive the decision — and must validate the sample exactly
+# as a live read is validated (#153 review P1 0A).
+SETTLED="$ROOT/settled.tsv"
+# The stub pr-claims.sh output the sensor would have read is DELIBERATELY empty,
+# so a run that passes only proves the file was ignored.
+: > "$GH_PR_TSV"
+{
+  # The rival holds the lower number, so it wins the tie-break; this lane's own
+  # row is present too, exactly as the barrier requires before it will decide.
+  printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+} > "$SETTLED"
+out=$(run_so "$ROOT/d/canon" --scope 'app/api/auth/**' --repo acme/app --claim-id issue-66-late \
+  --issue 66 --admit-pr 700 --pr-claims-file "$SETTLED"); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
+  && ok "a rival present only in the settled inventory still refuses" \
+  || bad "the settled inventory was ignored (rc=$rc): $out"
+
+printf '640\tissue-67-self\tapp/api/auth/**\tfeat/67-self\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$SETTLED"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app --claim-id issue-67-self \
+  --issue 67 --admit-pr 640 --pr-claims-file "$SETTLED"); rc=$?
+[[ "$rc" -eq 0 ]] && ok "a settled inventory containing only this lane admits it" \
+  || bad "settled self-only inventory refused (rc=$rc): $out"
+
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-68-x \
+  --issue 68 --admit-pr 641 --pr-claims-file "$ROOT/no-such-inventory.tsv"); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'cannot read the pre-read' \
+  && ok "an unreadable settled inventory refuses (fail closed)" \
+  || bad "unreadable settled inventory did not refuse (rc=$rc): $out"
+
+printf 'garbage-row-with-two-fields\tonly\n' > "$SETTLED"
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-69-x \
+  --issue 69 --admit-pr 642 --pr-claims-file "$SETTLED"); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'malformed/truncated' \
+  && ok "a malformed row in the settled inventory still refuses" \
+  || bad "malformed settled row accepted (rc=$rc): $out"
+
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --claim-id issue-70-x --pr-claims-file "$SETTLED"); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --repo' \
+  && ok "--pr-claims-file without --repo rejected" \
+  || bad "--pr-claims-file without --repo (rc=$rc): $out"
+
 # Reset the fixture for anything appended after this block.
 printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
   > "$GH_PR_TSV"

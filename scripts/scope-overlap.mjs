@@ -49,7 +49,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -95,6 +95,12 @@ FLAGS
                   requires --repo and --claim-id, requires this claim to be
                   visible in the live inventory, and lets only LOWER-numbered
                   overlapping PR claims refuse it (deterministic race winner).
+  --pr-claims-file P
+                  decide against this already-read 'pr-claims.sh list' output
+                  instead of taking a fresh read. Requires --repo. Rows are
+                  validated exactly as a live read's are; this only fixes WHICH
+                  sample is used, so a caller that settled on a quiescent
+                  inventory does not lose it to a re-read (#153 review P1).
   --json          machine-readable result
 `);
 }
@@ -116,6 +122,7 @@ function parseArgs(a) {
     json: false,
     repo: null,
     admitPr: null,
+    prClaimsFile: null,
   };
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
@@ -130,6 +137,7 @@ function parseArgs(a) {
     else if (x === "--issue") out.issue = String(a[++i] || "");
     else if (x === "--repo") out.repo = a[++i];
     else if (x === "--admit-pr") out.admitPr = String(a[++i] || "");
+    else if (x === "--pr-claims-file") out.prClaimsFile = a[++i] || "";
     else if (x === "--json") out.json = true;
     else dieUsage(`unknown argument: ${x}`);
   }
@@ -155,6 +163,11 @@ if (opt.admitPr != null) {
   if (!opt.repo) dieUsage("--admit-pr requires --repo owner/name");
   if (!opt.claimId) dieUsage("--admit-pr requires --claim-id");
   opt.admitPr = Number(opt.admitPr);
+}
+// A pre-read inventory is only meaningful for a repo-scoped run: every row is
+// still validated against --repo below exactly as a live read would be.
+if (opt.prClaimsFile != null && !opt.repo) {
+  dieUsage("--pr-claims-file requires --repo owner/name");
 }
 
 function git(args, { allowFail = false } = {}) {
@@ -307,23 +320,41 @@ function loadClaims() {
 // caller that omits --repo gets ledger-only behavior (legacy/back-compat).
 function loadPrClaims() {
   if (!opt.repo) return [];
-  const prClaimsScript = resolve(__dirname, "pr-claims.sh");
-  if (!existsSync(prClaimsScript)) {
-    fail(`--repo given but pr-claims.sh is missing at ${prClaimsScript} — refuse`);
-  }
   let out;
-  try {
-    out = execFileSync(prClaimsScript, ["list", opt.repo], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 16 * 1024 * 1024,
-    });
-  } catch (e) {
-    fail(
-      `cannot read live PR-body claims for ${opt.repo} (pr-claims.sh failed) — refuse (#153 AC2 fail-closed): ${
-        (e && e.message) || e
-      }`
-    );
+  if (opt.prClaimsFile != null) {
+    // Decide on the inventory the CALLER already settled on (claim.sh's
+    // quiescent admission barrier, #153 review P1 0A). Taking a fresh read
+    // here would discard that barrier: this process could be served a view in
+    // which a rival that the barrier had just seen is briefly missing again.
+    // Every row still runs the full validation below — a pre-read inventory is
+    // a fixed sample, not a trusted one.
+    try {
+      out = readFileSync(opt.prClaimsFile, "utf8");
+    } catch (e) {
+      fail(
+        `cannot read the pre-read PR-body claim inventory at ${opt.prClaimsFile} — refuse (fail closed): ${
+          (e && e.message) || e
+        }`
+      );
+    }
+  } else {
+    const prClaimsScript = resolve(__dirname, "pr-claims.sh");
+    if (!existsSync(prClaimsScript)) {
+      fail(`--repo given but pr-claims.sh is missing at ${prClaimsScript} — refuse`);
+    }
+    try {
+      out = execFileSync(prClaimsScript, ["list", opt.repo], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 16 * 1024 * 1024,
+      });
+    } catch (e) {
+      fail(
+        `cannot read live PR-body claims for ${opt.repo} (pr-claims.sh failed) — refuse (#153 AC2 fail-closed): ${
+          (e && e.message) || e
+        }`
+      );
+    }
   }
   const seen = new Map(); // claim id -> PR number, to catch duplicates
   const claims = [];

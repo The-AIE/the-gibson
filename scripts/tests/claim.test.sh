@@ -259,6 +259,25 @@ unset GH_FAIL_PR_CREATE
 out=$(cd "$ROOT/cleanup/canon" && "$CLAIM" 43 cleanup 'lib/cleanup.ts' 2>&1); rc=$?
 check "retry after failed claim succeeds" "$rc" "0"
 
+echo "a claim that cannot push still cleans up after itself and stays retryable"
+# The rollback anchor is pinned to the claim commit BEFORE the push, so a push
+# that fails does not look like a branch that advanced behind this lane's back.
+# Pinned after the push instead, this rollback would refuse its own worktree and
+# the retry below would hit "worktree path already exists" forever.
+new_repo "$ROOT/pushfail"
+chmod -R a-w "$ROOT/pushfail/origin"
+out=$(cd "$ROOT/pushfail/canon" && "$CLAIM" 44 pushfail 'lib/pushfail.ts' 2>&1); rc=$?
+chmod -R u+w "$ROOT/pushfail/origin"
+check    "an unpushable claim exits nonzero" "$rc" "1"
+contains "names the failed push"             "$out" "claim branch push failed"
+lacks    "a retryable failure is not INCOMPLETE" "$out" "INCOMPLETE"
+test ! -e "$ROOT/pushfail/wt-44-pushfail" \
+  && ok "the unpushed claim removed its own worktree" || bad "the unpushed claim left its worktree"
+test -z "$(git -C "$ROOT/pushfail/canon" branch --list 'feat/44-pushfail')" \
+  && ok "the unpushed claim removed its own local branch" || bad "the unpushed claim left its local branch"
+out=$(cd "$ROOT/pushfail/canon" && "$CLAIM" 44 pushfail 'lib/pushfail.ts' 2>&1); rc=$?
+check "retry after an unpushable claim succeeds" "$rc" "0"
+
 echo "L-028 · a second claim on a claimed issue is refused unless it is deliberate"
 new_repo "$ROOT/b"
 add_claim "$ROOT/b" issue-77-server-side 'server/**'
@@ -396,11 +415,18 @@ echo "#153 · two GENUINELY concurrent lanes with overlapping scope: exactly one
 RACE_DIR="$ROOT/race"
 mkdir -p "$RACE_DIR/bin"
 export RACE_DIR
+export RACE_REPO="acme/race"
 echo 1 > "$RACE_DIR/next"
 : > "$RACE_DIR/prs"
 : > "$RACE_DIR/prs.closed"
 
-cat > "$RACE_DIR/bin/gh" <<'RACEGH'
+# Written once, used by every concurrency fixture below (#153 review P1 0B
+# reuses the exact fake the cross-issue race is already proven against, so a
+# same-issue race cannot pass for some accidental difference in its harness).
+write_race_gh() {
+  local dest="$1"
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest" <<'RACEGH'
 #!/usr/bin/env bash
 # Shared, lock-protected fake GitHub for the concurrency fixture.
 lock() {
@@ -412,8 +438,9 @@ lock() {
   done
 }
 unlock() { rmdir "$RACE_DIR/lock" 2>/dev/null || true; }
+RACE_REPO="${RACE_REPO:-acme/race}"
 case "$1 $2" in
-  "repo view") echo "acme/race" ;;
+  "repo view") echo "$RACE_REPO" ;;
   "issue view") cat "$RACE_DIR/labels-$3" 2>/dev/null || echo "" ;;
   "issue edit")
     issue="$3"
@@ -463,10 +490,10 @@ case "$1 $2" in
     lock
     number=$(cat "$RACE_DIR/next" 2>/dev/null || echo 1)
     echo $((number + 1)) > "$RACE_DIR/next"
-    printf '%s|%s|%s|%s|https://github.com/acme/race/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z\n' \
-      "$number" "$claim" "$scope" "$branch" "$number" >> "$RACE_DIR/prs"
+    printf '%s|%s|%s|%s|https://github.com/%s/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z\n' \
+      "$number" "$claim" "$scope" "$branch" "$RACE_REPO" "$number" >> "$RACE_DIR/prs"
     unlock
-    echo "https://github.com/acme/race/pull/$number"
+    echo "https://github.com/$RACE_REPO/pull/$number"
     ;;
   "pr close")
     number="$3"
@@ -486,25 +513,38 @@ case "$1 $2" in
 esac
 exit 0
 RACEGH
-chmod +x "$RACE_DIR/bin/gh"
+  chmod +x "$dest"
+}
 
-# One bare origin, two independent lane checkouts — the real fleet shape (one
+# One bare origin, N independent lane checkouts — the real fleet shape (one
 # working directory per agent), and it keeps the race at the claim layer
 # instead of at git's own index locks.
-git init -q --bare "$RACE_DIR/origin"
-git clone -q "$RACE_DIR/origin" "$RACE_DIR/seed" 2>/dev/null
-(
-  cd "$RACE_DIR/seed" || exit 1
-  mkdir -p docs/claims
-  printf '| when | claim-id | scope | who |\n|---|---|---|---|\n' > docs/active-work.md
-  git add -A && git commit -qm init && git branch -M main && git push -q -u origin main
-) >/dev/null 2>&1
-for lane in A B; do
-  mkdir -p "$RACE_DIR/lane$lane"
-  git clone -q "$RACE_DIR/origin" "$RACE_DIR/lane$lane/canon" 2>/dev/null
-  git -C "$RACE_DIR/lane$lane/canon" config "url.$RACE_DIR/origin.insteadOf" https://github.com/acme/race.git
-  git -C "$RACE_DIR/lane$lane/canon" remote set-url origin https://github.com/acme/race.git
-done
+setup_race_repo() { # dir repo lane…
+  local dir="$1" repo="$2"
+  shift 2
+  local lane
+  mkdir -p "$dir/bin"
+  echo 1 > "$dir/next"
+  : > "$dir/prs"
+  : > "$dir/prs.closed"
+  git init -q --bare "$dir/origin"
+  git clone -q "$dir/origin" "$dir/seed" 2>/dev/null
+  (
+    cd "$dir/seed" || exit 1
+    mkdir -p docs/claims
+    printf '| when | claim-id | scope | who |\n|---|---|---|---|\n' > docs/active-work.md
+    git add -A && git commit -qm init && git branch -M main && git push -q -u origin main
+  ) >/dev/null 2>&1
+  for lane in "$@"; do
+    mkdir -p "$dir/lane$lane"
+    git clone -q "$dir/origin" "$dir/lane$lane/canon" 2>/dev/null
+    git -C "$dir/lane$lane/canon" config "url.$dir/origin.insteadOf" "https://github.com/$repo.git"
+    git -C "$dir/lane$lane/canon" remote set-url origin "https://github.com/$repo.git"
+  done
+  write_race_gh "$dir/bin/gh"
+}
+
+setup_race_repo "$RACE_DIR" "$RACE_REPO" A B
 
 RACE_OLD_PATH="$PATH"
 export PATH="$RACE_DIR/bin:$PATH"
@@ -598,7 +638,7 @@ export GH_CLOSE_LOG="$ROOT/admitblind/close.log"
 out=$(cd "$ROOT/admitblind/canon" && PATH="$BLIND_BIN:$PATH" GIBSON_CLAIM_ADMIT_ATTEMPTS=2 \
   GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 77 blind 'lib/blind/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "an inventory blind to this claim refuses it" || bad "blind inventory admitted the claim (rc=$rc): $out"
-contains "names the unprovable registration" "$out" "not readable in the authoritative live-claim inventory"
+contains "names the unprovable registration" "$out" "could not obtain a stable live-claim inventory"
 test ! -e "$ROOT/admitblind/wt-77-blind" \
   && ok "blind admission rolled back its worktree" || bad "blind admission left its worktree"
 test -z "$(git -C "$ROOT/admitblind/canon" branch --list 'feat/77-blind')" \
@@ -607,6 +647,436 @@ test -z "$(git -C "$ROOT/admitblind/canon" ls-remote --heads origin 'feat/77-bli
   && ok "blind admission rolled back its remote branch" || bad "blind admission left its remote branch"
 contains "blind admission closed its own PR" "$(cat "$GH_CLOSE_LOG")" "closed 4242"
 unset GH_CLOSE_LOG
+
+# ---------------------------------------------------------------------------
+# #153 review P1 0A — the publication barrier
+# ---------------------------------------------------------------------------
+# Seeing your OWN claim in the inventory does not prove you can see everyone
+# else's. GitHub's PR listing is eventually consistent, so a rival created
+# moments earlier can still be missing from the page served to this lane after
+# its own row has appeared. A fake that publishes everything instantly cannot
+# express that at all, so this one is sequenced: the rival becomes visible
+# only some reads AFTER this lane's own claim is already there.
+lag_fixture() { # dir self-pr rival-row
+  local dir="$1" self_pr="$2" rival_row="$3"
+  new_repo "$ROOT/$dir"
+  export LAG_STATE="$ROOT/$dir/state"
+  mkdir -p "$LAG_STATE"
+  : > "$LAG_STATE/labels"
+  : > "$LAG_STATE/label.log"
+  : > "$LAG_STATE/close.log"
+  rm -f "$LAG_STATE/self" "$LAG_STATE/reads"
+  printf '%s\n' "$rival_row" > "$LAG_STATE/rival"
+  export LAG_SELF_PR="$self_pr"
+  mkdir -p "$ROOT/$dir/bin"
+  cat > "$ROOT/$dir/bin/gh" <<'LAGGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") cat "$LAG_STATE/labels" 2>/dev/null || echo "" ;;
+  "issue edit")
+    echo "$*" >> "$LAG_STATE/label.log"
+    if echo "$*" | grep -q -- '--add-label'; then
+      echo "agent-claimed" > "$LAG_STATE/labels"
+    elif echo "$*" | grep -q -- '--remove-label'; then
+      : > "$LAG_STATE/labels"
+    fi
+    ;;
+  "api graphql")
+    want_open=0
+    for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
+    [[ "$want_open" -eq 1 ]] || exit 0
+    # Before this lane publishes, the inventory is genuinely empty — the same
+    # window the real cross-issue race opens.
+    [[ -f "$LAG_STATE/self" ]] || exit 0
+    n=$(cat "$LAG_STATE/reads" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$LAG_STATE/reads"
+    if [[ -n "${LAG_CHURN:-}" ]]; then
+      # Never settles: every read returns a different inventory.
+      cat "$LAG_STATE/self"
+      printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+        "$((900 + n))" "$((800 + n))" "$n" "$((800 + n))" "$((900 + n))"
+      exit 0
+    fi
+    if [[ -n "${LAG_BAD_AFTER_CLOSE:-}" && -f "$LAG_STATE/closed" ]]; then
+      case "${LAG_BAD_AFTER_CLOSE}" in
+        unreadable) echo "gh: API rate limit exceeded" >&2; exit 1 ;;
+        malformed)  printf 'not-a-row\twith-two-fields\n' ; exit 0 ;;
+      esac
+    fi
+    cat "$LAG_STATE/self"
+    [[ "$n" -ge "${LAG_RIVAL_AFTER:-3}" ]] && cat "$LAG_STATE/rival"
+    exit 0
+    ;;
+  "pr create")
+    body_file=""; branch=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --body-file) body_file="$2"; shift 2 ;;
+        --head) branch="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    claim=$(sed -n 's/^- Active-work claim: //p' "$body_file")
+    scope=$(sed -n 's/^- Claim scope: //p' "$body_file")
+    printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+      "$LAG_SELF_PR" "$claim" "$scope" "$branch" "$LAG_SELF_PR" > "$LAG_STATE/self"
+    echo "https://github.com/acme/app/pull/$LAG_SELF_PR"
+    ;;
+  "pr close")
+    echo "closed $3" >> "$LAG_STATE/close.log"
+    : > "$LAG_STATE/closed"
+    ;;
+esac
+exit 0
+LAGGH
+  chmod +x "$ROOT/$dir/bin/gh"
+}
+
+# PR #89 is a rival claim on a DIFFERENT issue with OVERLAPPING scope, and it
+# holds the lower number, so the deterministic tie-break says this lane loses —
+# if it ever manages to see it.
+LAG_RIVAL_ROW=$'89\tissue-88-rival\tlib/lag/**\tfeat/88-rival\thttps://github.com/acme/app/pull/89\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z'
+
+echo "#153 · a rival visible only AFTER this lane's own claim is still caught"
+lag_fixture lagcatch 90 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/lagcatch/canon" && PATH="$ROOT/lagcatch/bin:$PATH" \
+  LAG_RIVAL_AFTER=3 GIBSON_CLAIM_ADMIT_STABLE_READS=3 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a late-publishing rival still refuses this lane" \
+  || bad "the lane admitted itself against a rival it had not yet seen (rc=$rc): $out"
+contains "names the rival it eventually saw" "$out" "issue-88-rival"
+contains "reports the inventory settled first" "$out" "inventory quiescent"
+test ! -e "$ROOT/lagcatch/wt-87-lagged" \
+  && ok "late-rival refusal rolled back its worktree" || bad "late-rival refusal left its worktree"
+test -z "$(git -C "$ROOT/lagcatch/canon" branch --list 'feat/87-lagged')" \
+  && ok "late-rival refusal rolled back its local branch" || bad "late-rival refusal left its local branch"
+test -z "$(git -C "$ROOT/lagcatch/canon" ls-remote --heads origin 'feat/87-lagged')" \
+  && ok "late-rival refusal rolled back its remote branch" || bad "late-rival refusal left its remote branch"
+lacks "late-rival refusal released its own label" "$(cat "$ROOT/lagcatch/state/labels")" "agent-claimed"
+
+echo "#153 · that refusal is the barrier's doing, not the fixture's"
+# The mechanism sensor: the SAME fixture, with the barrier turned down to a
+# single sample, admits the claim — which is exactly the pre-repair behaviour.
+# If the publication barrier is ever removed from claim.sh, this pair stops
+# disagreeing and the sensor above stops meaning anything.
+lag_fixture lagctl 90 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/lagctl/canon" && PATH="$ROOT/lagctl/bin:$PATH" \
+  LAG_RIVAL_AFTER=3 GIBSON_CLAIM_ADMIT_STABLE_READS=1 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+check "one-sample admission accepts the same lane (barrier disabled)" "$rc" "0"
+lacks "one-sample admission never saw the rival" "$out" "issue-88-rival"
+
+echo "#153 · an inventory that never settles refuses rather than guesses"
+lag_fixture lagchurn 90 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/lagchurn/canon" && PATH="$ROOT/lagchurn/bin:$PATH" \
+  LAG_CHURN=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 churned 'lib/churned/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a never-quiescent inventory refuses the claim" \
+  || bad "an unsettled inventory admitted the claim (rc=$rc): $out"
+contains "says the inventory never settled" "$out" "could not obtain a stable live-claim inventory"
+test ! -e "$ROOT/lagchurn/wt-87-churned" \
+  && ok "unsettled refusal rolled back its worktree" || bad "unsettled refusal left its worktree"
+test -z "$(git -C "$ROOT/lagchurn/canon" ls-remote --heads origin 'feat/87-churned')" \
+  && ok "unsettled refusal rolled back its remote branch" || bad "unsettled refusal left its remote branch"
+
+# ---------------------------------------------------------------------------
+# #153 review P1 0B — same-issue exclusivity survives publication
+# ---------------------------------------------------------------------------
+echo "#153 · two GENUINELY concurrent lanes on the SAME issue, disjoint scope, no --slice"
+# Both lanes pass the pre-create duplicate-issue check (neither is published
+# yet) and both pass a scope-only re-check, because their scopes really are
+# disjoint. Only a same-issue re-check against the post-publication inventory
+# can stop the second build of one issue (L-028).
+SAME_DIR="$ROOT/samerace"
+RACE_DIR="$SAME_DIR"; export RACE_DIR
+RACE_REPO="acme/samerace"; export RACE_REPO
+setup_race_repo "$SAME_DIR" "$RACE_REPO" A B
+SAME_OLD_PATH="$PATH"
+export PATH="$SAME_DIR/bin:$PATH"
+(cd "$SAME_DIR/laneA/canon" && GIBSON_CANONICAL="$SAME_DIR/laneA/canon" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 601 alpha 'lib/alpha/**' >"$SAME_DIR/outA" 2>&1) &
+same_pid_a=$!
+(cd "$SAME_DIR/laneB/canon" && GIBSON_CANONICAL="$SAME_DIR/laneB/canon" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 601 beta 'lib/beta/**' >"$SAME_DIR/outB" 2>&1) &
+same_pid_b=$!
+wait "$same_pid_a"; same_rc_a=$?
+wait "$same_pid_b"; same_rc_b=$?
+export PATH="$SAME_OLD_PATH"
+
+same_winners=0
+[[ "$same_rc_a" -eq 0 ]] && same_winners=$((same_winners + 1))
+[[ "$same_rc_b" -eq 0 ]] && same_winners=$((same_winners + 1))
+check "exactly one same-issue lane succeeds" "$same_winners" "1"
+[[ -f "$SAME_DIR/ready-issue-601-alpha" && -f "$SAME_DIR/ready-issue-601-beta" ]] \
+  && ok "both same-issue lanes reached PR creation (the window was really open)" \
+  || bad "the same-issue lanes did not both reach the rendezvous"
+check "exactly one live claim on the issue survives" "$(grep -c . "$SAME_DIR/prs" || true)" "1"
+same_survivor_id=$(cut -d'|' -f2 "$SAME_DIR/prs" | head -1)
+if [[ "$same_rc_a" -eq 0 ]]; then
+  same_win=A; same_win_id=issue-601-alpha; same_win_br=feat/601-alpha
+  same_lose=B; same_lose_id=issue-601-beta; same_lose_br=feat/601-beta
+else
+  same_win=B; same_win_id=issue-601-beta; same_win_br=feat/601-beta
+  same_lose=A; same_lose_id=issue-601-alpha; same_lose_br=feat/601-alpha
+fi
+check "the surviving claim belongs to the winning lane" "$same_survivor_id" "$same_win_id"
+lacks "the losing claim id is not live anywhere" "$(cat "$SAME_DIR/prs")" "$same_lose_id"
+contains "the loser names same-issue exclusivity" "$(cat "$SAME_DIR/out$same_lose")" "issue #601 is already held"
+contains "the loser points at --slice"            "$(cat "$SAME_DIR/out$same_lose")" "--slice"
+test -z "$(find "$SAME_DIR/lane$same_lose" -maxdepth 1 -name 'wt-*' 2>/dev/null)" \
+  && ok "the same-issue loser removed its own worktree" || bad "the same-issue loser left its worktree"
+test -z "$(git -C "$SAME_DIR/lane$same_lose/canon" ls-remote --heads origin "$same_lose_br")" \
+  && ok "the same-issue loser removed its own remote branch" || bad "the same-issue loser left its remote branch"
+test -n "$(find "$SAME_DIR/lane$same_win" -maxdepth 1 -name 'wt-*' 2>/dev/null)" \
+  && ok "the same-issue winner's worktree is intact" || bad "the same-issue winner's worktree was destroyed"
+test -n "$(git -C "$SAME_DIR/lane$same_win/canon" ls-remote --heads origin "$same_win_br")" \
+  && ok "the same-issue winner's remote branch is intact" || bad "the same-issue winner's remote branch was deleted"
+# 0C, proven concurrently: agent-claimed is issue-wide, so the loser must not
+# strip it off the winner just because it also added it.
+contains "the loser left agent-claimed for the surviving sibling" \
+  "$(cat "$SAME_DIR/labels-601" 2>/dev/null || echo '')" "agent-claimed"
+contains "the loser says it left the label for a sibling" \
+  "$(cat "$SAME_DIR/out$same_lose")" "surviving sibling claim(s)"
+
+echo "#153 · the same race WITH --slice lets both disjoint lanes live"
+SLICE_DIR="$ROOT/slicerace"
+RACE_DIR="$SLICE_DIR"; export RACE_DIR
+RACE_REPO="acme/slicerace"; export RACE_REPO
+setup_race_repo "$SLICE_DIR" "$RACE_REPO" A B
+SLICE_OLD_PATH="$PATH"
+export PATH="$SLICE_DIR/bin:$PATH"
+(cd "$SLICE_DIR/laneA/canon" && GIBSON_CANONICAL="$SLICE_DIR/laneA/canon" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 602 alpha 'lib/alpha/**' --slice >"$SLICE_DIR/outA" 2>&1) &
+slice_pid_a=$!
+(cd "$SLICE_DIR/laneB/canon" && GIBSON_CANONICAL="$SLICE_DIR/laneB/canon" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 602 beta 'lib/beta/**' --slice >"$SLICE_DIR/outB" 2>&1) &
+slice_pid_b=$!
+wait "$slice_pid_a"; slice_rc_a=$?
+wait "$slice_pid_b"; slice_rc_b=$?
+export PATH="$SLICE_OLD_PATH"
+check "slice lane A survives" "$slice_rc_a" "0"
+check "slice lane B survives" "$slice_rc_b" "0"
+check "both slice claims are live" "$(grep -c . "$SLICE_DIR/prs" || true)" "2"
+contains "the issue keeps agent-claimed" "$(cat "$SLICE_DIR/labels-602" 2>/dev/null || echo '')" "agent-claimed"
+
+echo "#153 · --slice does NOT license overlapping scope, concurrently or not"
+OVER_DIR="$ROOT/sliceover"
+RACE_DIR="$OVER_DIR"; export RACE_DIR
+RACE_REPO="acme/sliceover"; export RACE_REPO
+setup_race_repo "$OVER_DIR" "$RACE_REPO" A B
+OVER_OLD_PATH="$PATH"
+export PATH="$OVER_DIR/bin:$PATH"
+(cd "$OVER_DIR/laneA/canon" && GIBSON_CANONICAL="$OVER_DIR/laneA/canon" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 603 alpha 'lib/pay/**' --slice >"$OVER_DIR/outA" 2>&1) &
+over_pid_a=$!
+(cd "$OVER_DIR/laneB/canon" && GIBSON_CANONICAL="$OVER_DIR/laneB/canon" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 603 beta 'lib/pay/api.ts' --slice >"$OVER_DIR/outB" 2>&1) &
+over_pid_b=$!
+wait "$over_pid_a"; over_rc_a=$?
+wait "$over_pid_b"; over_rc_b=$?
+export PATH="$OVER_OLD_PATH"
+over_winners=0
+[[ "$over_rc_a" -eq 0 ]] && over_winners=$((over_winners + 1))
+[[ "$over_rc_b" -eq 0 ]] && over_winners=$((over_winners + 1))
+check "exactly one overlapping slice lane survives" "$over_winners" "1"
+check "exactly one overlapping slice claim is live" "$(grep -c . "$OVER_DIR/prs" || true)" "1"
+# And sequentially, a --slice with overlapping scope never gets in at all.
+new_repo "$ROOT/sliceseq"
+out=$(cd "$ROOT/sliceseq/canon" && "$CLAIM" 604 first 'lib/pay/**' 2>&1); rc=$?
+check "the first slice claim lands" "$rc" "0"
+out=$(cd "$ROOT/sliceseq/canon" && "$CLAIM" 604 second 'lib/pay/api.ts' --slice 2>&1); rc=$?
+check    "a later --slice over the same files is refused" "$rc" "1"
+contains "names the sibling it overlaps"                  "$out" "issue-604-first"
+
+# ---------------------------------------------------------------------------
+# #153 review P1 0C — label ownership and fail-closed reads
+# ---------------------------------------------------------------------------
+echo "#153 · an unreadable label state refuses BEFORE any mutation"
+new_repo "$ROOT/labelfail"
+mkdir -p "$ROOT/labelfail/bin"
+cat > "$ROOT/labelfail/bin/gh" <<'LBLGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") echo "gh: could not read labels (503)" >&2; exit 1 ;;
+  "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+  "api graphql") : ;;
+  "pr create") echo "https://github.com/acme/app/pull/5150" ;;
+  "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+esac
+exit 0
+LBLGH
+chmod +x "$ROOT/labelfail/bin/gh"
+export GH_LOG="$ROOT/labelfail/label.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/labelfail/canon" && PATH="$ROOT/labelfail/bin:$PATH" \
+  "$CLAIM" 78 unreadable 'lib/unreadable/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unreadable label read refuses the claim" \
+  || bad "an unreadable label read was treated as 'no labels' (rc=$rc): $out"
+contains "says the label state was never read" "$out" "unread label state"
+check "no label was edited on an unread state" "$(grep -c . "$GH_LOG" || true)" "0"
+test ! -e "$ROOT/labelfail/wt-78-unreadable" \
+  && ok "unreadable label state created no worktree" || bad "unreadable label state created a worktree"
+unset GH_LOG
+
+echo "#153 · rollback keeps agent-claimed when the sibling inventory is unreadable"
+lag_fixture labelunread 91 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/labelunread/canon" && PATH="$ROOT/labelunread/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_BAD_AFTER_CLOSE=unreadable \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 unreadinv 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "the refused lane still exits nonzero" || bad "refused lane exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "names the label it kept"        "$out" "agent-claimed on #87"
+contains "says the inventory was unreadable" "$out" "cannot be ruled out"
+contains "the label really is still there" "$(cat "$ROOT/labelunread/state/labels")" "agent-claimed"
+
+echo "#153 · rollback keeps agent-claimed when the sibling inventory is malformed"
+lag_fixture labelbad 92 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/labelbad/canon" && PATH="$ROOT/labelbad/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_BAD_AFTER_CLOSE=malformed \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 badinv 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "the malformed-inventory lane exits nonzero" || bad "malformed inventory exited 0: $out"
+contains "reports an incomplete rollback"  "$out" "INCOMPLETE"
+contains "names the malformed evidence"    "$out" "malformed row"
+contains "the label survives the malformed read" "$(cat "$ROOT/labelbad/state/labels")" "agent-claimed"
+
+echo "#153 · rollback reports an already-absent label instead of failing on it"
+lag_fixture labelgone 93 "$LAG_RIVAL_ROW"
+# The label edit is accepted but never actually lands (the issue is edited by
+# someone else in the same breath); rollback must notice and say so, not treat
+# a missing label as an error or as work still to do.
+: > "$ROOT/labelgone/state/labels"
+cat > "$ROOT/labelgone/bin/gh.wrap" <<'WRAPGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "issue edit")
+    # Swallow the add: the label never appears.
+    echo "$*" >> "$LAG_STATE/label.log"
+    exit 0
+    ;;
+esac
+exec "$LAG_REAL_GH" "$@"
+WRAPGH
+chmod +x "$ROOT/labelgone/bin/gh.wrap"
+mv "$ROOT/labelgone/bin/gh" "$ROOT/labelgone/bin/gh.real"
+mv "$ROOT/labelgone/bin/gh.wrap" "$ROOT/labelgone/bin/gh"
+export LAG_REAL_GH="$ROOT/labelgone/bin/gh.real"
+out=$(cd "$ROOT/labelgone/canon" && PATH="$ROOT/labelgone/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 labelgone 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "the refused lane exits nonzero with no label to remove" || bad "exited 0: $out"
+contains "says the label was already absent" "$out" "already absent"
+lacks "an absent label is not an incomplete rollback" "$out" "INCOMPLETE"
+unset LAG_REAL_GH
+
+# ---------------------------------------------------------------------------
+# #153 review P1 0D — rollback never destroys work it cannot prove is its own
+# ---------------------------------------------------------------------------
+# Every case below runs against the blind-inventory fake, so the lane is
+# guaranteed to reach rollback, and a hook mutates the worktree or a branch in
+# exactly the window the admission delay leaves open.
+rollback_fixture() { # dir issue slug hook-body
+  local dir="$1" hook="$4"
+  new_repo "$ROOT/$dir"
+  mkdir -p "$ROOT/$dir/bin"
+  cat > "$ROOT/$dir/bin/gh" <<'RBGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
+  "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+  "api graphql") : ;;
+  "pr create") echo "https://github.com/acme/app/pull/7777" ;;
+  "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+esac
+exit 0
+RBGH
+  chmod +x "$ROOT/$dir/bin/gh"
+  printf '#!/usr/bin/env bash\nWT="$1"\nBR="$2"\nOID="$3"\nCANON="%s"\n%s\n' \
+    "$ROOT/$dir/canon" "$hook" > "$ROOT/$dir/hook.sh"
+  chmod +x "$ROOT/$dir/hook.sh"
+}
+
+run_rollback_case() { # dir issue slug
+  (cd "$ROOT/$1/canon" && PATH="$ROOT/$1/bin:$PATH" \
+    GIBSON_CLAIM_TEST_ROLLBACK_HOOK="$ROOT/$1/hook.sh" \
+    GIBSON_CLAIM_ADMIT_ATTEMPTS=1 GIBSON_CLAIM_ADMIT_STABLE_READS=1 \
+    GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" "$2" "$3" "lib/$3/**" 2>&1)
+}
+
+echo "#153 · rollback refuses to destroy a worktree that went dirty"
+rollback_fixture rbdirty 81 dirty 'echo "uncommitted" > "$WT/NOTES.md"'
+out=$(run_rollback_case rbdirty 81 dirty); rc=$?
+[[ "$rc" -ne 0 ]] && ok "dirty-worktree rollback exits nonzero" || bad "dirty rollback exited 0: $out"
+contains "reports an incomplete rollback"    "$out" "INCOMPLETE"
+contains "names the uncommitted work"        "$out" "uncommitted or untracked work"
+test -e "$ROOT/rbdirty/wt-81-dirty/NOTES.md" \
+  && ok "the dirty worktree and its file survive" || bad "the dirty worktree was destroyed"
+test -n "$(git -C "$ROOT/rbdirty/canon" branch --list 'feat/81-dirty')" \
+  && ok "a kept worktree keeps its local branch" || bad "the local branch was deleted under a kept worktree"
+test -n "$(git -C "$ROOT/rbdirty/canon" ls-remote --heads origin 'feat/81-dirty')" \
+  && ok "a kept worktree keeps its remote branch" || bad "the remote branch was deleted under a kept worktree"
+contains "names the branches it kept" "$out" "the worktree could not be proven safe to remove"
+
+echo "#153 · rollback refuses to delete a local branch that advanced"
+rollback_fixture rbladv 82 localadv '
+git -C "$CANON" worktree remove "$WT" >/dev/null 2>&1
+git -C "$CANON" update-ref "refs/heads/$BR" "$(git -C "$CANON" rev-parse origin/main)"
+'
+out=$(run_rollback_case rbladv 82 localadv); rc=$?
+[[ "$rc" -ne 0 ]] && ok "advanced-local rollback exits nonzero" || bad "advanced-local rollback exited 0: $out"
+contains "reports an incomplete rollback"        "$out" "INCOMPLETE"
+contains "names the advanced local branch"       "$out" "local branch feat/82-localadv"
+test -n "$(git -C "$ROOT/rbladv/canon" branch --list 'feat/82-localadv')" \
+  && ok "the advanced local branch survives" || bad "the advanced local branch was deleted"
+contains "the remote branch was left alone too"  "$out" "the local branch delete was refused first"
+test -n "$(git -C "$ROOT/rbladv/canon" ls-remote --heads origin 'feat/82-localadv')" \
+  && ok "the remote branch survives an advanced local branch" || bad "publish-deleted over surviving local work"
+
+echo "#153 · rollback refuses to delete a remote branch that advanced"
+rollback_fixture rbradv 83 remoteadv '
+git -C "$CANON" push -q -f origin "$(git -C "$CANON" rev-parse origin/main):refs/heads/$BR"
+'
+out=$(run_rollback_case rbradv 83 remoteadv); rc=$?
+[[ "$rc" -ne 0 ]] && ok "advanced-remote rollback exits nonzero" || bad "advanced-remote rollback exited 0: $out"
+contains "reports an incomplete rollback"   "$out" "INCOMPLETE"
+contains "names the advanced remote branch" "$out" "remote branch feat/83-remoteadv"
+test -n "$(git -C "$ROOT/rbradv/canon" ls-remote --heads origin 'feat/83-remoteadv')" \
+  && ok "the advanced remote branch survives" || bad "the advanced remote branch was deleted"
+
+echo "#153 · rollback refuses a worktree that is no longer on this lane's branch"
+rollback_fixture rbswitch 84 switched 'git -C "$WT" checkout -q -b someone-elses-work'
+out=$(run_rollback_case rbswitch 84 switched); rc=$?
+[[ "$rc" -ne 0 ]] && ok "re-branched-worktree rollback exits nonzero" || bad "re-branched rollback exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "says git no longer vouches for it" "$out" "no longer a registered worktree on branch"
+test -d "$ROOT/rbswitch/wt-84-switched" \
+  && ok "the re-branched worktree survives" || bad "the re-branched worktree was destroyed"
+test -n "$(git -C "$ROOT/rbswitch/canon" branch --list 'feat/84-switched')" \
+  && ok "the re-branched worktree keeps its branch" || bad "the branch was deleted under a re-branched worktree"
+
+echo "#153 · rollback names a remote it cannot even verify, rather than assuming"
+rollback_fixture rbunreach 85 unreachable 'git -C "$CANON" remote set-url origin "$CANON/../no-such-origin"'
+out=$(run_rollback_case rbunreach 85 unreachable); rc=$?
+[[ "$rc" -ne 0 ]] && ok "unverifiable-remote rollback exits nonzero" || bad "unverifiable-remote rollback exited 0: $out"
+contains "reports an incomplete rollback"    "$out" "INCOMPLETE"
+contains "names the remote it could not verify" "$out" "cannot verify it before deletion"
+
+echo "#153 · a clean rollback still reports no leftovers"
+rollback_fixture rbclean 86 cleanroll ':'
+out=$(run_rollback_case rbclean 86 cleanroll); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a clean rollback still exits nonzero" || bad "clean rollback exited 0: $out"
+lacks "a clean rollback is not INCOMPLETE" "$out" "INCOMPLETE"
+test ! -e "$ROOT/rbclean/wt-86-cleanroll" \
+  && ok "a clean rollback removes its own worktree" || bad "clean rollback left its worktree"
+test -z "$(git -C "$ROOT/rbclean/canon" branch --list 'feat/86-cleanroll')" \
+  && ok "a clean rollback deletes its own local branch" || bad "clean rollback left its local branch"
+test -z "$(git -C "$ROOT/rbclean/canon" ls-remote --heads origin 'feat/86-cleanroll')" \
+  && ok "a clean rollback deletes its own remote branch" || bad "clean rollback left its remote branch"
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

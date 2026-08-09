@@ -223,6 +223,15 @@ die() { echo "release-claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "release-claim.sh: $*"; }
 warn() { echo "release-claim.sh: WARNING: $*" >&2; }
 
+# Shared cleanup guards (#153 review P1 0D). The worktree enumeration and the
+# exact remote-branch query below are the same code claim.sh's admission
+# rollback runs, deliberately: when each path carried its own copy, a
+# protection added to one silently did not exist in the other.
+RELEASE_LIB_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib"
+# shellcheck source=lib/claim-guards.sh
+. "$RELEASE_LIB_DIR/claim-guards.sh" ||
+  die "cannot source $RELEASE_LIB_DIR/claim-guards.sh — refusing to run cleanup without its safety guards"
+
 [[ "$ISSUE" =~ ^[0-9]+$ ]] || die "issue must be a number, got '$ISSUE'"
 if [[ -n "$PREFIX" && ! "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
   die "--prefix must start with a letter, got '$PREFIX'"
@@ -838,44 +847,21 @@ try_terminal_pr_body_release() {
 # branched worktree, is refused rather than silently ignored.
 resolve_registered_worktree_for_branch() {
   local br="$1" id="$2"
-  local porcelain line cur="" cur_branch="" matches="" match_count=0
+  local matches="" match_count=0
   local canon_root wt_phys guess
   TERM_WT_PATH=""
   TERM_WT_REASON=""
 
-  if ! porcelain=$(git worktree list --porcelain 2>&1); then
-    TERM_WT_REASON="cannot enumerate registered worktrees (git worktree list --porcelain failed): $porcelain"
+  # Enumeration itself comes from the shared guard library so claim.sh's
+  # rollback and this cleanup can never disagree about which worktree is on a
+  # branch; the policy on top of that answer stays release-specific.
+  if ! guard_worktree_paths_for_branch "$br"; then
+    TERM_WT_REASON="$GUARD_WT_REASON"
     return 1
   fi
+  matches="$GUARD_WT_PATHS"
+  match_count="$GUARD_WT_COUNT"
   canon_root=$(phys_path "$CANONICAL")
-
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    case "$line" in
-      worktree\ *)
-        cur="${line#worktree }"
-        cur="${cur%/}"
-        cur_branch=""
-        ;;
-      branch\ *)
-        cur_branch="${line#branch }"
-        cur_branch="${cur_branch#refs/heads/}"
-        ;;
-      "")
-        if [[ -n "$cur" && "$cur_branch" == "$br" ]]; then
-          matches="${matches}${cur}"$'\n'
-          match_count=$((match_count + 1))
-        fi
-        cur=""
-        cur_branch=""
-        ;;
-    esac
-  done <<EOF
-$porcelain
-EOF
-  if [[ -n "$cur" && "$cur_branch" == "$br" ]]; then
-    matches="${matches}${cur}"$'\n'
-    match_count=$((match_count + 1))
-  fi
 
   if [[ "$match_count" -gt 1 ]]; then
     TERM_WT_REASON="branch '$br' is registered at more than one worktree path — ambiguous, refuse: $(printf '%s' "$matches" | tr '\n' ' ')"
@@ -934,33 +920,21 @@ EOF
 # Sets on failure (return 1):
 #   REMOTE_BRANCH_REASON  why the query is unreadable evidence (query
 #                         failure, or multiple/malformed rows)
+#
+# The query itself now lives in lib/claim-guards.sh (#153 review P1 0D) so
+# claim.sh's admission rollback runs the exact same read; this wrapper keeps
+# release-claim.sh's own variable names and call sites unchanged.
 query_remote_branch_exact() {
-  local br="$1" out line count oid ref
+  local br="$1"
   REMOTE_BRANCH_STATUS=""
   REMOTE_BRANCH_OID=""
   REMOTE_BRANCH_REASON=""
-  if ! out=$(git ls-remote --heads origin "refs/heads/$br" 2>&1); then
-    REMOTE_BRANCH_REASON="git ls-remote --heads origin failed for '$br': $out"
+  if ! guard_remote_branch_exact "$br"; then
+    REMOTE_BRANCH_REASON="$GUARD_REMOTE_REASON"
     return 1
   fi
-  if [[ -z "$out" ]]; then
-    REMOTE_BRANCH_STATUS="absent"
-    return 0
-  fi
-  count=$(printf '%s\n' "$out" | grep -c . || true)
-  if [[ "$count" -ne 1 ]]; then
-    REMOTE_BRANCH_REASON="git ls-remote --heads origin returned multiple/malformed rows for '$br': $out"
-    return 1
-  fi
-  line=$(printf '%s\n' "$out")
-  oid=$(awk '{print $1}' <<<"$line")
-  ref=$(awk '{print $2}' <<<"$line")
-  if [[ ! "$oid" =~ ^[0-9a-f]{40}$ || "$ref" != "refs/heads/$br" ]]; then
-    REMOTE_BRANCH_REASON="git ls-remote --heads origin returned a malformed row for '$br': $line"
-    return 1
-  fi
-  REMOTE_BRANCH_STATUS="present"
-  REMOTE_BRANCH_OID="$oid"
+  REMOTE_BRANCH_STATUS="$GUARD_REMOTE_STATUS"
+  REMOTE_BRANCH_OID="$GUARD_REMOTE_OID"
   return 0
 }
 

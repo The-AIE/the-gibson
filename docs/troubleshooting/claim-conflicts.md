@@ -150,17 +150,68 @@ the base repository, cross-repository=false, and a terminal state.
 
 ## A concurrent lane's claim was refused after its PR was created
 
-Output contains `post-create admission refused` (or `admission: ... not readable
-in the authoritative live-claim inventory`), and the lane rolled back its own PR,
-branch, worktree, and label.
+Output contains `post-create admission refused`, and the lane rolled back its own
+PR, branch, worktree, and label.
 
-This is the cross-issue race resolving itself. Two lanes claiming *different*
-issues with overlapping scope can both pass the pre-create overlap check, because
-at the moment each of them looked, neither claim existed yet. `claim.sh` therefore
-re-checks after publishing its claim and stands down if an overlapping claim holds
-a lower PR number — deterministically, so exactly one lane survives.
+This is a race resolving itself, and there are two shapes of it.
 
-Nothing is left behind: the refused lane closed its own PR, deleted its own local
-and remote branch, removed its own worktree, and removed `agent-claimed` only if
-it was the one that added it. Re-run the claim once the winning lane releases, or
-claim a disjoint scope.
+**Overlapping scope, different issues.** Two lanes can both pass the pre-create
+overlap check, because at the moment each of them looked, neither claim existed
+yet. `claim.sh` re-checks after publishing its claim and stands down if an
+overlapping claim holds a lower PR number — deterministically, so exactly one lane
+survives.
+
+**Same issue, disjoint scopes.** Two lanes on one issue under different slugs also
+both pass the pre-create duplicate check, and a scope-only re-check clears them
+because their files genuinely do not touch. That is one issue being built twice
+(L-028). Without `--slice` the same-issue rule is re-applied after publication and
+exactly one lane survives; the loser's message says `issue #<n> is already held`.
+If a second lane really is what you want, it needs `--slice` **and** a
+non-overlapping scope.
+
+Nothing of the winner's is touched: the refused lane closed its own PR, deleted its
+own local and remote branch, removed its own worktree, and left `agent-claimed`
+alone whenever a sibling claim on that issue survives. Re-run the claim once the
+winning lane releases, or claim a disjoint scope.
+
+## "could not obtain a stable live-claim inventory"
+
+The claim was refused because the live-claim inventory never went quiet. Admission
+will not decide from a single read: GitHub's PR listing is eventually consistent, so
+a rival created moments before yours can be missing from the page you are served
+even after your own claim shows up in it. `claim.sh` re-reads until the inventory
+comes back identical on `GIBSON_CLAIM_ADMIT_STABLE_READS` (default 2) consecutive
+reads, spaced by `GIBSON_CLAIM_ADMIT_DELAY` (default 2s), giving up after
+`GIBSON_CLAIM_ADMIT_ATTEMPTS` (default 6).
+
+You see this when the API is failing, or when the repository is claiming and
+releasing fast enough that the view keeps changing under the barrier. It is a
+**fail-closed refusal**: the lane rolled back and nothing was admitted on a view it
+could not stabilise. Just re-run the claim. If a busy repository trips it
+repeatedly, widen the window (more attempts, longer delay) rather than lowering
+`GIBSON_CLAIM_ADMIT_STABLE_READS` to 1 — that setting turns the publication barrier
+off entirely and brings back the both-lanes-survive race.
+
+## `claim.sh: INCOMPLETE` — a rollback left something behind
+
+A refused claim rolls itself back, but it will not destroy work it cannot prove is
+its own and untouched. If, during the admission window, its worktree picked up
+uncommitted or untracked files, its branch advanced, the worktree was moved or
+switched to another branch, or the remote could not be read, the rollback **keeps**
+that artifact, prints `INCOMPLETE` with every leftover named, and exits non-zero.
+
+That output is the work list. For each named item:
+
+```bash
+git -C <canonical> worktree list --porcelain        # what is actually registered
+git -C <worktree> status --porcelain                # what is in there that you'd lose
+git -C <canonical> log --oneline <branch> -3        # what the branch advanced to
+git ls-remote --heads origin <branch>               # what origin still has
+```
+
+Decide deliberately: keep the work (move the branch somewhere safe, or let the lane
+own it again), or remove the artifact by hand once you have looked at it. Never
+`rm -rf` a listed worktree without reading its status first — the whole point of the
+refusal is that something in there was not accounted for. Note that a kept worktree
+also keeps its branches on purpose: a retained tree must not be orphaned from its
+own history.

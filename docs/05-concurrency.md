@@ -181,6 +181,61 @@ PR, branch, worktree, and the `agent-claimed` label if it was the one that added
 no lock file and no repo-global state, so a lane that is killed mid-claim leaves
 nothing behind for the next one to trip over.
 
+**Seeing yourself is not seeing everyone — so admission waits for the inventory to
+go quiet.** GitHub's pull-request listing is eventually consistent. A rival claim PR
+created moments *before* this one can still be missing from the page served to this
+lane after its own row has appeared, so a lane that decides on the first read
+containing itself can admit itself against a rival it simply has not been shown yet
+— and the rival, reading a view that does contain this lane, yields to it. Both
+survive. Admission therefore does not decide on one sample. It re-reads the
+inventory, spaced by `GIBSON_CLAIM_ADMIT_DELAY`, until the claim-relevant projection
+of it (PR number, claim id, scope) comes back **identical on
+`GIBSON_CLAIM_ADMIT_STABLE_READS` consecutive reads that all contain this lane's own
+claim**, and decides on that settled view — the same one handed to
+`scope-overlap.mjs` via `--pr-claims-file`, so the barrier is not thrown away by a
+re-read one line later.
+
+> **Invariant:** the verdict is computed from a *quiescent* inventory — one that
+> stopped changing across a window of at least `(STABLE_READS - 1) x DELAY`
+> seconds — never from a single sample.
+>
+> **Bounded failure, stated plainly:** quiescence bounds the race, it does not
+> abolish it. Correctness holds when a rival created before this lane becomes
+> visible within that window. A replica lagging longer than the whole window can
+> still hide it, and no client-side read can fix that — closing it completely
+> needs a strongly-consistent reservation GitHub does not offer. Everything
+> outside the window fails **closed**: an inventory that never settles, or reads
+> that keep failing, exhaust `GIBSON_CLAIM_ADMIT_ATTEMPTS` and the claim is
+> refused and rolled back rather than admitted on evidence it could not stabilise.
+> Refusing is safe and re-runnable; admitting on a partial view is neither.
+
+**Same-issue exclusivity is re-decided after publication too.** Two lanes on the
+*same* issue with different slugs and **disjoint** scopes both pass the pre-create
+duplicate check (neither is published yet) and both pass a scope-only re-check,
+because their scopes really do not touch — which is L-028 (one issue, two builds)
+happening again through a different door. So the same-issue rule is re-applied
+against the quiescent inventory, with the same lower-PR-number tie-break: without
+`--slice` exactly one lane survives and the other rolls back; with `--slice`,
+same-issue siblings remain legal and the scope check is what keeps them disjoint. A
+live claim id whose issue number cannot be parsed is ambiguous evidence about
+siblinghood and refuses rather than being assumed to be a different issue.
+
+**A losing lane preserves work it cannot prove is its own.** Rollback runs the same
+protections as terminal cleanup — shared as `scripts/lib/claim-guards.sh`, not
+copied, so a fix to one is a fix to both. The worktree is the one `git worktree
+list --porcelain` says is on this branch (never assumed from its path), and it must
+be the exact path this lane created, clean, and still at the exact commit this lane
+made; local and remote branch deletion are compare-and-swap against that same
+commit. During the admission window a worktree can go dirty and a branch can
+advance, so anything unprovable is **kept, named, and reported**: the lane closes
+its own PR, prints `INCOMPLETE` with every leftover listed, and exits non-zero
+rather than force-removing a dirty worktree or deleting a branch that moved. The
+`agent-claimed` label is issue-wide, not this lane's property just because this lane
+added it — two racers on one issue can both read it as absent and both add it — so
+it is removed only after a fresh authoritative sibling inventory proves no surviving
+sibling needs it **and** a fresh label read proves what is actually there. An
+unreadable or malformed inventory, or an unreadable label, keeps the label.
+
 **Repository identity is proven, not assumed (release side).** A claim's PR-body
 evidence authorizes deleting a worktree, a branch, and a label. Before acting on
 it, `release-claim.sh` proves that `GIBSON_CANONICAL`'s own origin remote **is** the

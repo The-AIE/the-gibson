@@ -3075,9 +3075,12 @@ open_fixture openreader 402 missing-reader
 open_row 903 issue-402-missing-reader 'lib/x/**' feat/402-missing-reader > "$GH_PR_OPEN_TSV"
 # Copy release-claim.sh somewhere WITHOUT its reader alongside it: SCRIPT_DIR
 # is derived from the script's own location, so this is the real "the
-# authoritative reader is not installed" shape, not a mocked one.
-mkdir -p "$ROOT/openreader/lonely"
+# authoritative reader is not installed" shape, not a mocked one. The shared
+# cleanup guard library DOES travel with it — this scenario is about the
+# missing reader, and the separate scenario below covers a missing library.
+mkdir -p "$ROOT/openreader/lonely/lib"
 cp "$RC" "$ROOT/openreader/lonely/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/openreader/lonely/lib/claim-guards.sh"
 chmod +x "$ROOT/openreader/lonely/release-claim.sh"
 out=$(cd "$ROOT/openreader/canon" && "$ROOT/openreader/lonely/release-claim.sh" 402 --claim-id issue-402-missing-reader --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "missing reader exits nonzero" || bad "missing reader exits 0: $out"
@@ -3086,6 +3089,24 @@ contains "names the missing reader" "$out" "missing or not executable"
   ok "missing reader: no PR was closed" || bad "missing reader: a PR was closed anyway"
 [[ -d "$ROOT/openreader/wt-402-missing-reader" ]] &&
   ok "missing reader: worktree untouched" || bad "missing reader: worktree removed"
+
+echo "a missing shared cleanup-guard library refuses before ANY mutation (#153 review P1 0D)"
+# The guards are what stand between this script and an rm -rf of a dirty
+# worktree. A copy deployed without them must refuse to run at all, not fall
+# back to the unguarded behaviour they replaced.
+open_fixture openguards 404 missing-guards
+open_row 905 issue-404-missing-guards 'lib/x/**' feat/404-missing-guards > "$GH_PR_OPEN_TSV"
+mkdir -p "$ROOT/openguards/lonely"
+cp "$RC" "$ROOT/openguards/lonely/release-claim.sh"
+cp "$SCRIPT_DIR/../pr-claims.sh" "$ROOT/openguards/lonely/pr-claims.sh"
+chmod +x "$ROOT/openguards/lonely/release-claim.sh" "$ROOT/openguards/lonely/pr-claims.sh"
+out=$(cd "$ROOT/openguards/canon" && "$ROOT/openguards/lonely/release-claim.sh" 404 --claim-id issue-404-missing-guards --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing guard library exits nonzero" || bad "missing guard library exits 0: $out"
+contains "names the missing guard library" "$out" "claim-guards.sh"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "missing guard library: no PR was closed" || bad "missing guard library: a PR was closed anyway"
+[[ -d "$ROOT/openguards/wt-404-missing-guards" ]] &&
+  ok "missing guard library: worktree untouched" || bad "missing guard library: worktree removed"
 
 echo "the happy path hands the closed PR to the SHARED exact cleanup machinery"
 open_fixture openroute 411 routed
