@@ -19,7 +19,9 @@ another's uncommitted schema work — ~75 type errors, recovered only from a sta
 - The canonical checkout of a target repo is **read-only**. Always.
 - Every mutating session cuts its own worktree:
   ```bash
-  git -C <canonical> worktree add ../wt-<issue>-<slug> -b feat/<issue>-<slug> origin/main
+  git -C <canonical> worktree add ../wt-<issue>-<slug> -b feat/<issue>-<slug> origin/<default-branch>
+  # claim.sh uses the already-proven remote base end-to-end (origin/$BASE after
+  # ls-remote + fetch). It does not independently prefer a cached origin/main.
   cd ../wt-<issue>-<slug> && npm ci --include=dev   # node_modules never shared
   ```
 - Two sessions physically cannot clobber each other — they're never in the same
@@ -68,10 +70,15 @@ Two mechanisms, used together:
    a non-empty scope, a safe head branch, and a PR URL whose own repository
    matches the repo being queried — a missing scope must never silently become an
    empty (non-overlapping) scope, and repository identity is never inferred from
-   the query argument alone. A **terminal** (merged/closed) PR is *not* part of
-   this live view — it is **release authorization**: evidence that a PR-body
-   claim is done and safe to clean up, not a claim still in flight. Once
-   released, that claim must be absent/removed from the post-release live view.
+   the query argument alone. Every scope token — PR-body, per-file ledger,
+   legacy table row, and operator `--scope` — must also parse under one safe
+   grammar (`**` for the whole repository, or plain path segments with an
+   optional trailing `*`/`**`); tokens like `*`, `/`, or `a/**/b` refuse rather
+   than disappearing from overlap admission. Deliberate root-wide `**` overlaps
+   every path. A **terminal** (merged/closed) PR is *not* part of this live
+   view — it is **release authorization**: evidence that a PR-body claim is done
+   and safe to clean up, not a claim still in flight. Once released, that claim
+   must be absent/removed from the post-release live view.
 
    Precedence when releasing one exact claim id: a live *open* PR-body claim is
    released by closing that PR; otherwise a live ledger row is released by
@@ -145,7 +152,9 @@ Two mechanisms, used together:
 
    Read live claims with `scripts/pr-claims.sh list <owner/repo>` (PR-body) or
    `scripts/claims-status.sh` (`--issue <n>`, `--markdown`, merges PR-body **and**
-   legacy forms, flags claims older than 24h). Both read `origin/main`/live GitHub
+   legacy forms, flags claims older than 24h; a failed live PR-body inventory
+   read exits nonzero with a diagnostic — it never prints "no live claims" on
+   an unread view). Both read `origin/main`/live GitHub
    state, not your working tree — a stale local checkout is how two lanes each
    conclude they are alone.
 

@@ -1209,6 +1209,125 @@ else
   ok "every ls-tree/show ledger read uses the fail-closed gitResult() helper"
 fi
 
+# ===========================================================================
+# #153 review round 6, P1 — one safe grammar for EVERY authoritative source
+# ===========================================================================
+# Round 5 validated PR-body scopes only. A live per-file or table-ledger claim
+# scoped `a/**/b` versus proposed `a/x/b` returned OK because nonempty was
+# enough for ledger admission. Invalid tokens must refuse for every source and
+# never disappear from overlap admission. Deliberate root-wide `**` still
+# overlaps every proposed scope. Valid legacy claims keep working.
+echo "#153 round 6 · per-file ledger scopes use the same safe grammar"
+_LEG_N=0
+legacy_file_scope_case() { # label scope expect(refuse|admit) [needle]
+  local label="$1" scope="$2" expect="$3" needle="${4:-}" out rc name root
+  _LEG_N=$((_LEG_N + 1))
+  name="legfile_${_LEG_N}"
+  setup_repo "$name"
+  root="$ROOT/$name"
+  (
+    cd "$root/canon" || exit 1
+    rm -f docs/claims/*.md
+    printf 'claim: issue-90-legfile\nissue: 90\nscope: %s\nsession: grok@fleet\n' "$scope" \
+      > docs/claims/issue-90-legfile.md
+    $GIT add -A && $GIT commit -q -m "per-file legacy scope" && $GIT push -q origin main
+  ) >/dev/null 2>&1
+  out=$(run_so "$root/canon" --scope 'a/x/b' --claim-id issue-91-new); rc=$?
+  if [[ "$expect" == "refuse" ]]; then
+    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -qF "$needle"; }; then
+      ok "$label"
+    else
+      bad "$label (rc=$rc): $out"
+    fi
+  else
+    if [[ "$rc" -eq 0 ]]; then ok "$label"; else bad "$label (rc=$rc): $out"; fi
+  fi
+}
+
+legacy_file_scope_case "per-file scope a/**/b refuses (mid-path double-star)" \
+  'a/**/b' refuse "invalid claim-scope token"
+legacy_file_scope_case "per-file scope * refuses" \
+  '*' refuse "invalid claim-scope token"
+legacy_file_scope_case "per-file scope / refuses" \
+  '/' refuse "empty path segment"
+legacy_file_scope_case "per-file mixed valid/invalid refuses the whole claim" \
+  'lib/ok/** a/**/b' refuse "invalid claim-scope token"
+legacy_file_scope_case "per-file deliberate ** overlaps every proposed scope" \
+  '**' refuse "issue-90-legfile"
+legacy_file_scope_case "per-file valid lib/ok/** still admits a disjoint path" \
+  'lib/ok/**' admit
+
+echo "#153 round 6 · legacy table-ledger scopes use the same safe grammar"
+legacy_table_scope_case() { # label scope expect(refuse|admit) [needle]
+  local label="$1" scope="$2" expect="$3" needle="${4:-}" out rc name root
+  _LEG_N=$((_LEG_N + 1))
+  name="legtable_${_LEG_N}"
+  setup_repo "$name"
+  root="$ROOT/$name"
+  (
+    cd "$root/canon" || exit 1
+    rm -f docs/claims/*.md
+    printf '| UTC | claim-id | scope | session |\n|---|---|---|---|\n| 2026-08-01T10:00:00Z | issue-92-legtable | %s | grok@fleet |\n' \
+      "$scope" > docs/active-work.md
+    $GIT add -A && $GIT commit -q -m "table legacy scope" && $GIT push -q origin main
+  ) >/dev/null 2>&1
+  out=$(run_so "$root/canon" --scope 'a/x/b' --claim-id issue-93-new); rc=$?
+  if [[ "$expect" == "refuse" ]]; then
+    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -qF "$needle"; }; then
+      ok "$label"
+    else
+      bad "$label (rc=$rc): $out"
+    fi
+  else
+    if [[ "$rc" -eq 0 ]]; then ok "$label"; else bad "$label (rc=$rc): $out"; fi
+  fi
+}
+
+legacy_table_scope_case "table scope a/**/b refuses (mid-path double-star)" \
+  'a/**/b' refuse "invalid claim-scope token"
+legacy_table_scope_case "table scope * refuses" \
+  '*' refuse "invalid claim-scope token"
+legacy_table_scope_case "table scope / refuses" \
+  '/' refuse "empty path segment"
+legacy_table_scope_case "table mixed valid/invalid refuses the whole claim" \
+  'lib/ok/** a/**/b' refuse "invalid claim-scope token"
+legacy_table_scope_case "table deliberate ** overlaps every proposed scope" \
+  '**' refuse "issue-92-legtable"
+legacy_table_scope_case "table valid src/legacy/** still admits a disjoint path" \
+  'src/legacy/**' admit
+
+echo "#153 round 6 · operator --scope uses the same safe grammar"
+setup_repo opscope
+out=$(run_so "$ROOT/opscope/canon" --scope 'a/**/b'); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "invalid claim-scope token" &&
+  ok "operator --scope a/**/b refuses" ||
+  bad "operator a/**/b was not refused (rc=$rc): $out"
+out=$(run_so "$ROOT/opscope/canon" --scope '*'); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "invalid claim-scope token" &&
+  ok "operator --scope * refuses" ||
+  bad "operator * was not refused (rc=$rc): $out"
+out=$(run_so "$ROOT/opscope/canon" --scope '/'); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'empty path segment|invalid claim-scope token' &&
+  ok "operator --scope / refuses" ||
+  bad "operator / was not refused (rc=$rc): $out"
+out=$(run_so "$ROOT/opscope/canon" --scope 'lib/ok/**' --scope 'a/**/b'); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "invalid claim-scope token" &&
+  ok "operator mixed valid/invalid refuses" ||
+  bad "operator mixed scopes were not refused (rc=$rc): $out"
+# Deliberate root-wide ** from the operator collides with any live claim that
+# would otherwise be disjoint — prove it against the seeded fixture claim.
+setup_repo oproot
+(
+  cd "$ROOT/oproot/canon" || exit 1
+  printf 'claim: issue-94-seed\nissue: 94\nscope: components/nav/**\nsession: grok@fleet\n' \
+    > docs/claims/issue-94-seed.md
+  $GIT add -A && $GIT commit -q -m "seed" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/oproot/canon" --scope '**' --claim-id issue-95-root); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-94-seed' &&
+  ok "operator --scope ** overlaps every live claim" ||
+  bad "operator ** did not collide with a live claim (rc=$rc): $out"
+
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

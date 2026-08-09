@@ -918,8 +918,18 @@ LABEL_ADDED=1
 if [[ -d "$WT_DIR" ]]; then
   die "worktree path already exists: $WT_DIR"
 fi
-DEFAULT_REMOTE_BRANCH="origin/main"
-git rev-parse "$DEFAULT_REMOTE_BRANCH" >/dev/null 2>&1 || DEFAULT_REMOTE_BRANCH="origin/master"
+# Use the already-proven remote base end-to-end (#153 review round 6, P1).
+# $BASE was selected from the live remote via ls-remote and fetched above;
+# $REF is origin/$BASE and was verified after fetch. Independently preferring
+# a cached origin/main (or falling back to a different branch) can create a
+# worktree from the wrong history when the remote only has master but a stale
+# origin/main remains cached at a different OID — and the PR --base, claim
+# metadata, and branch ancestry would then disagree. Fail closed if the exact
+# proven ref is unavailable; never substitute another branch.
+DEFAULT_REMOTE_BRANCH="origin/$BASE"
+if ! git rev-parse --verify --quiet "$DEFAULT_REMOTE_BRANCH^{commit}" >/dev/null; then
+  die "cannot resolve $DEFAULT_REMOTE_BRANCH after fetch — refuse claim (the selected remote base must be available; no fallback to a different branch; #153)"
+fi
 
 # Pin the branch point BEFORE creating anything, so a rollback that has to run
 # between `worktree add` and the claim commit still knows the exact OID this

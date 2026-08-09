@@ -153,18 +153,18 @@ RISKS
   repository-identity column, or a PR URL whose own repository does not match
   --repo also refuses — a missing scope must never silently become an empty
   (non-overlapping) scope.
-  Every current-format claim-scope TOKEN must parse under the documented
-  grammar: '**' (the whole repository) or a path of plain segments with an
-  optional trailing '*'/'**' — 'lib/email.ts', 'app/api/auth/**'. Tokens like
-  '*', '/', '../x' or 'a//b' normalise to nothing, so they used to collide
-  with nothing; they now refuse. '**' is honoured as a real root-wide scope
-  and overlaps EVERY path. A token this tool cannot normalise (from a ledger
-  row or from --scope) is treated as overlapping rather than as disjoint.
+  Every claim-scope TOKEN — PR-body, per-file ledger, legacy table row, and
+  operator-supplied --scope — must parse under the ONE documented grammar:
+  '**' (the whole repository) or a path of plain segments with an optional
+  trailing '*'/'**' — 'lib/email.ts', 'app/api/auth/**'. Tokens like '*', '/',
+  '../x', 'a//b', or 'a/**/b' are ambiguous evidence and refuse; they never
+  disappear from overlap admission and never silently become non-overlapping.
+  '**' is honoured as a real root-wide scope and overlaps EVERY path.
   The LEDGER reads fail closed the same way: a failed ls-tree/show over
   docs/claims/ or docs/active-work.md refuses rather than becoming an empty
   ledger, and a live per-file claim or legacy row whose scope is missing,
-  empty, duplicated, or truncated poisons the decision rather than becoming a
-  scope that collides with nothing.
+  empty, duplicated, truncated, or grammatically invalid poisons the decision
+  rather than becoming a scope that collides with nothing.
 
 USAGE
   node scripts/scope-overlap.mjs --scope 'app/api/**' --repo-path .
@@ -515,6 +515,13 @@ function loadClaims() {
         `claim file ${ref}:${path} has an empty 'scope:' value — a live claim with no readable scope must poison the decision, never become a non-overlapping empty scope; refuse`
       );
     }
+    // Same safe grammar as PR-body and operator scopes (#153 review round 6,
+    // P1). A nonempty but unparseable token used to skip validation and then
+    // quietly protect nothing (e.g. a/**/b vs a/x/b returned OK).
+    assertScopeTokens(
+      scope,
+      `live per-file claim '${id}' (${ref}:${path})`
+    );
     const issueM = body.out.match(/^issue:\s*(\d+)/m);
     claims.push({
       id,
@@ -583,6 +590,12 @@ function loadClaims() {
           `legacy claim row for '${id}' in ${ref}:docs/active-work.md has an empty scope column — a live claim with no readable scope must poison the decision, never become a non-overlapping empty scope; refuse`
         );
       }
+      // Same safe grammar as PR-body, per-file, and operator scopes (#153
+      // review round 6, P1). Invalid legacy tokens must refuse, never skip.
+      assertScopeTokens(
+        scope,
+        `legacy claim row for '${id}' in ${ref}:docs/active-work.md`
+      );
       const im = id.match(/^issue-(\d+)-/);
       claims.push({
         id,
@@ -747,20 +760,23 @@ function spaceReads(seconds) {
 }
 
 /**
- * THE CURRENT-FORMAT SCOPE GRAMMAR (#153 review round 5, P1)
+ * THE AUTHORITATIVE SCOPE GRAMMAR (#153 review rounds 5–6, P1)
  *
- * A live PR-body claim's `- Claim scope:` value is space-separated tokens, and
- * every token has to survive `stem()` into something the overlap comparison
- * can actually reason about. It did not: `*`, `**`, `/`, `///` and friends all
- * stem to the empty string, and `tokensOverlap` answered "no overlap" for an
- * empty stem. A live claim whose scope was any of those therefore collided
- * with nothing at all — the single most dangerous wrong answer this tool can
- * give, arrived at from a claim that looked perfectly well-formed to
- * pr-claims.sh (nonempty scope marker, valid id, valid branch, valid URL).
+ * Every authoritative scope source uses this grammar: live PR-body claim
+ * scopes, per-file ledger claims, legacy table-ledger rows, and operator
+ * `--scope` tokens. A token that does not parse is ambiguous evidence and
+ * refuses — it never disappears from overlap admission, and never becomes a
+ * non-overlapping empty stem.
  *
- * The grammar below is deliberately narrow and matches the scopes this repo
- * actually issues (`app/api/auth/**`, `lib/email.ts`, `docs/05-concurrency.md`,
- * `components/nav/**`):
+ * Round 5 applied this only to PR-body rows. Round 6 closed the bypass for
+ * ledger and operator sources: a live legacy claim scoped with a mid-path
+ * double-star (a / ** / b) versus a proposed a/x/b was returning OK because
+ * nonempty was enough for ledger admission while only PR-body tokens were
+ * grammar-checked.
+ *
+ * The grammar is deliberately narrow and matches the scopes this repo
+ * actually issues (app/api/auth/** , lib/email.ts, docs/05-concurrency.md,
+ * components/nav/** ):
  *
  *   token    := ROOT | path
  *   ROOT     := "**"                       the whole repository
@@ -772,8 +788,8 @@ function spaceReads(seconds) {
  * trailing "/" and no "//"), no parent-directory escapes, and a wildcard only
  * as a whole trailing segment. A bare "*", a bare "/", a leading double-star
  * segment, "a//b", "../x", "*.ts" and a double-star in the middle of a path
- * are all rejected as ambiguous rather than normalised into something that
- * quietly protects less than it says.
+ * (including a / ** / b) are all rejected as ambiguous rather than normalised
+ * into something that quietly protects less than it says.
  *
  * ROOT ("**") is the one deliberate root-wide scope, and it is SUPPORTED: it
  * overlaps every path rather than overlapping nothing (see tokensOverlap).
@@ -811,6 +827,24 @@ function currentScopeTokenProblem(token) {
     return "no literal path segment — it normalises to nothing and would collide with nothing";
   }
   return null;
+}
+
+/**
+ * Fail closed when any token is outside the safe grammar. `origin` names the
+ * evidence source in the error (PR body, per-file ledger, legacy table, or
+ * proposed --scope) so the operator can find the bad claim without guessing.
+ */
+function assertScopeTokens(tokens, origin) {
+  for (const token of tokens) {
+    const problem = currentScopeTokenProblem(token);
+    if (problem) {
+      fail(
+        `${origin} has an invalid claim-scope token ${JSON.stringify(
+          token
+        )}: ${problem}. A scope this tool cannot compare must poison the decision, never become a scope that collides with nothing — refuse (#153 AC6 fail-closed). Valid tokens are '${ROOT_SCOPE}' (the whole repository) or a path like 'lib/email.ts' / 'app/api/auth/**'.`
+      );
+    }
+  }
 }
 
 function parsePrClaims(out) {
@@ -878,21 +912,15 @@ function parsePrClaims(out) {
     seen.set(id, number);
     const scope = scopeStr.trim().split(/\s+/).filter(Boolean);
     // Every token must be a scope the overlap comparison can actually reason
-    // about, BEFORE it is compared (#153 review round 5, P1). A token that
+    // about, BEFORE it is compared (#153 review rounds 5–6, P1). A token that
     // normalises to nothing used to be silently non-overlapping, so a live
     // claim scoped `*` or `/` protected none of its files while looking
     // entirely well-formed. Invalid or ambiguous evidence refuses; it is never
     // dropped, and never quietly narrowed to the tokens that did parse.
-    for (const token of scope) {
-      const problem = currentScopeTokenProblem(token);
-      if (problem) {
-        fail(
-          `live PR-body claim '${id}' (PR #${number}) has an invalid claim-scope token ${JSON.stringify(
-            token
-          )}: ${problem}. A scope this tool cannot compare must poison the decision, never become a scope that collides with nothing — refuse (#153 AC6 fail-closed). Valid tokens are '${ROOT_SCOPE}' (the whole repository) or a path like 'lib/email.ts' / 'app/api/auth/**'.`
-        );
-      }
-    }
+    assertScopeTokens(
+      scope,
+      `live PR-body claim '${id}' (PR #${number})`
+    );
     claims.push({
       id,
       scope,
@@ -1060,6 +1088,11 @@ if (opt.admitPr != null && !opt.slice) {
   }
 }
 
+// Operator-supplied scopes use the same grammar as every live source
+// (#153 review round 6, P1). Validate before comparison so an invalid
+// --scope never quietly becomes a non-overlapping empty stem.
+assertScopeTokens(opt.scopes, "proposed --scope");
+
 const live = [...loadClaims(), ...prClaims].filter((c) => c.id !== opt.claimId);
 
 /** Normalize a scope token for comparison. */
@@ -1075,6 +1108,10 @@ function stem(token) {
  * - exact match
  * - either is prefix of the other (after stem)
  * - shared path prefix of at least one directory segment
+ *
+ * By the time this runs, every authoritative source has already been through
+ * assertScopeTokens, so empty stems are a last-ditch fail-closed belt rather
+ * than the primary validation path.
  */
 function tokensOverlap(a, b) {
   if (!a || !b) return false;
@@ -1086,12 +1123,9 @@ function tokensOverlap(a, b) {
   if (a === b) return true;
   const sa = stem(a);
   const sb = stem(b);
-  // An empty stem means this comparison has no idea what the token covers.
-  // Current-format PR claim scopes can no longer get here (they are validated
-  // in parsePrClaims), but ledger rows and operator-supplied --scope tokens
-  // are not under that grammar, and "I cannot tell" must never be answered as
-  // "they do not touch" on a path that decides whether two lanes may run at
-  // once. Fail closed: assume they collide.
+  // Belt-and-suspenders: every authoritative token is grammar-validated
+  // before comparison, but "I cannot tell" must never be answered as "they
+  // do not touch" on a path that decides whether two lanes may run at once.
   if (!sa || !sb) return true;
   if (sa === sb) return true;
   // prefix: app/api vs app/api/auth/**

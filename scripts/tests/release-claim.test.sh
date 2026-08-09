@@ -231,7 +231,22 @@ mkdir -p "$ROOT/bin"
 cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 FAKE
@@ -349,7 +364,22 @@ case "$1" in
     ;;
   # No live open PR-body claims here: an empty but successfully read
   # GraphQL inventory (#153).
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     shift
     # find -q EXPR if present
@@ -415,7 +445,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     shift
     q=""; prev=""
@@ -450,7 +495,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then exit 0; fi
     exit 1
@@ -544,7 +604,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED" >&2
@@ -616,7 +691,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED" >&2
@@ -716,7 +806,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -782,7 +887,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1027,7 +1147,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then exit 0; fi
     echo "${GH_LABELS:-}"
@@ -1109,7 +1244,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1153,7 +1303,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1218,7 +1383,22 @@ case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1294,7 +1474,22 @@ case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1384,7 +1579,22 @@ case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1461,7 +1671,22 @@ case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1557,7 +1782,22 @@ case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1660,7 +1900,22 @@ case "\$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "\$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1725,7 +1980,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "MUTATED-LABEL"
@@ -1782,7 +2052,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       # final lane: allow remove-label to succeed for completeness
@@ -1820,7 +2105,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo edited >> "${GH_LOG:-/dev/null}"
@@ -1937,7 +2237,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       echo "LABEL-MUTATION-SHOULD-NOT-HAPPEN" >&2
@@ -2010,7 +2325,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       : > "${GH_STATE:-/tmp/gh-state-prune}"
@@ -2102,7 +2432,22 @@ case "$1" in
   repo) echo "acme/app"; exit 0 ;;
   # No live open PR-body claims in this fixture: pr-claims.sh's paginated
   # GraphQL read returns an empty (but successfully read) inventory.
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue)
     if [[ "$2" == "edit" ]]; then
       # Must not remove label on incomplete final prune
@@ -4201,7 +4546,22 @@ cat > "$ROOT/unresolved/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) exit 1 ;;
-  api) exit 0 ;;
+  api)
+    # Empty inventory only for recognised GraphQL inventory routes
+    # (#153 review round 6, P2). An unknown or malformed API call must
+    # fail closed — never green as a successful empty claim inventory.
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
   issue) echo "edited" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
   *) exit 1 ;;
 esac
@@ -4388,6 +4748,58 @@ contains "names the --claim-id requirement" "$out" "pass --claim-id too"
 out=$(cd "$ROOT/twogen2/canon" && "$RC" 821 --claim-id issue-821-wrong-pr --pr abc --repo acme/app 2>&1); rc=$?
 check    "--pr with a non-numeric value exits 1" "$rc" "1"
 contains "names the numeric requirement"         "$out" "must be a pull-request number"
+
+# ===========================================================================
+# #153 review round 6, P2 — release-test fake gh api handlers fail closed on
+# unknown / malformed API calls (no false empty-inventory success)
+# ===========================================================================
+echo "#153 round 6 · fake gh api handlers refuse unknown routes"
+# Static: no remaining one-liner `api) exit 0` that greens every invocation.
+if grep -nE '^\s*api\)\s+exit\s+0\s*;;' "$0" >/dev/null; then
+  bad "a release-claim fake still accepts every gh api call as success"
+else
+  ok "no release-claim fake still has a bare api) exit 0 one-liner"
+fi
+# Behavioral: a production routing regression that stopped using graphql must
+# not receive a false empty-inventory success from the suite default pattern.
+mkdir -p "$ROOT/fakeapi/bin"
+cat > "$ROOT/fakeapi/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  api)
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected 'api graphql …', got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL query shape: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/fakeapi/bin/gh"
+out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api user 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "expected 'api graphql" &&
+  ok "unknown REST gh api user fails closed (not empty inventory)" ||
+  bad "unknown REST gh api greened (rc=$rc): $out"
+out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { viewer { login } }' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+  ok "graphql without inventory shape fails closed" ||
+  bad "non-inventory graphql greened (rc=$rc): $out"
+out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { repository { pullRequests(first: 1) { nodes { number } } } }' 2>&1); rc=$?
+check "recognised pullRequests inventory shape still returns empty success" "$rc" "0"
+# And production pr-claims.sh list against that empty inventory stays honest.
+new_repo "$ROOT/fakeapi"
+export PATH="$ROOT/fakeapi/bin:$PATH"
+out=$(cd "$ROOT/fakeapi/canon" && "$SCRIPT_DIR/../pr-claims.sh" list acme/app 2>&1); rc=$?
+check "pr-claims list against empty graphql inventory exits 0" "$rc" "0"
+[[ -z "$out" ]] && ok "empty inventory is genuinely empty (no forged rows)" ||
+  bad "empty inventory returned unexpected rows: $out"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"

@@ -185,7 +185,7 @@ exit 0
 GH
 chmod +x "$BIN/gh"
 
-# HOSTILE `sleep` sentinel (#153 review round 4, P1).
+# HOSTILE `sleep` sentinel (#153 review rounds 4 + 6, P1/P3).
 #
 # The publication barrier used to space its reads with `execFileSync("sleep")`
 # — an executable resolved through PATH, which meant anyone able to prepend a
@@ -195,9 +195,11 @@ chmod +x "$BIN/gh"
 # to interpose on.
 #
 # So this `sleep` is no longer a helpful shim. It is a TRIPWIRE that records
-# every invocation, and the assertion below requires it to stay empty for the
-# whole suite. Every later fixture prepends its own bin to $PATH, which still
-# contains this one, so the tripwire covers everything.
+# every PATH-resolved invocation for the whole suite lifetime. Assertions at
+# the end require it to stay empty — and they must NOT erase earlier hits
+# first (round 6). Concurrency fixtures pause via absolute /bin/sleep so their
+# ready-file rendezvous does not pollute this receipt. Every later fixture
+# prepends its own bin to $PATH, which still contains this one.
 export SLEEP_SENTINEL="$ROOT/sleep-sentinel"
 rm -f "$SLEEP_SENTINEL"
 cat > "$BIN/sleep" <<'SLEEP'
@@ -594,12 +596,24 @@ write_race_gh() {
   cat > "$dest" <<'RACEGH'
 #!/usr/bin/env bash
 # Shared, lock-protected fake GitHub for the concurrency fixture.
+#
+# Pause without resolving the bare name `sleep` through PATH (#153 review
+# round 6, P3). The suite plants a hostile PATH `sleep` as a tripwire for
+# production barrier bypass; harness polling must not pollute that receipt.
+# Ready-files remain the real rendezvous proof — this only yields the spin.
+race_pause() {
+  if [[ -x /bin/sleep ]]; then
+    /bin/sleep 0.05
+  elif [[ -x /usr/bin/sleep ]]; then
+    /usr/bin/sleep 0.05
+  fi
+}
 lock() {
   local i=0
   while ! mkdir "$RACE_DIR/lock" 2>/dev/null; do
     i=$((i + 1))
     [[ "$i" -gt 600 ]] && { echo "fake gh: lock timeout" >&2; exit 1; }
-    sleep 0.05
+    race_pause
   done
 }
 unlock() { rmdir "$RACE_DIR/lock" 2>/dev/null || true; }
@@ -656,7 +670,7 @@ case "$1 $2" in
     while [[ "$(find "$RACE_DIR" -maxdepth 1 -name 'ready-*' | wc -l | tr -d ' ')" -lt "${RACE_LANES:-2}" ]]; do
       waited=$((waited + 1))
       [[ "$waited" -gt 400 ]] && break    # bounded: never hang the suite
-      sleep 0.05
+      race_pause
     done
     # Number assignment and publication in ONE critical section: whoever gets
     # the lower number is already visible when the higher-numbered lane looks.
@@ -1932,7 +1946,14 @@ echo "#153 round 4 · the shipped claim.sh pays the real barrier and never execu
 new_repo "$ROOT/prodbar"
 export GH_LOG="$ROOT/prodbar/gh.log"
 : > "$GH_LOG"
-rm -f "$SLEEP_SENTINEL"
+# Do NOT erase the suite-lifetime sentinel here (#153 review round 6, P3).
+# Earlier fixtures must remain attributable; wiping before the only assertions
+# made the tripwire untruthful. Snapshot the suite receipt, then assert this
+# production run adds nothing, then assert the whole suite receipt is empty.
+sleep_hits_before=0
+if [[ -f "$SLEEP_SENTINEL" ]]; then
+  sleep_hits_before=$(wc -l < "$SLEEP_SENTINEL" | tr -d ' ')
+fi
 prodbar_start=$(date +%s)
 out=$(cd "$ROOT/prodbar/canon" && \
   GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
@@ -1943,17 +1964,21 @@ check "the shipped claim.sh completes a claim" "$rc" "0"
 [[ "$prodbar_elapsed" -ge 1 ]] &&
   ok "a 2-read/1s barrier cost at least 1s of real time (${prodbar_elapsed}s)" ||
   bad "the shipped barrier finished in ${prodbar_elapsed}s — the wait did not happen"
-if [[ -s "$SLEEP_SENTINEL" ]]; then
-  bad "the shipped claim.sh executed the hostile PATH sleep $(wc -l < "$SLEEP_SENTINEL" | tr -d ' ') time(s) — the barrier is externally controllable"
+sleep_hits_after=0
+if [[ -f "$SLEEP_SENTINEL" ]]; then
+  sleep_hits_after=$(wc -l < "$SLEEP_SENTINEL" | tr -d ' ')
+fi
+if [[ "$sleep_hits_after" -ne "$sleep_hits_before" ]]; then
+  bad "the shipped claim.sh executed the hostile PATH sleep $((sleep_hits_after - sleep_hits_before)) time(s) during the production barrier — the barrier is externally controllable"
 else
-  ok "the shipped claim.sh executed the hostile PATH sleep ZERO times"
+  ok "the shipped claim.sh executed the hostile PATH sleep ZERO times during the production barrier"
 fi
 unset GH_LOG
 
 echo "#153 round 4 · nothing in this whole suite ever executed the hostile PATH sleep"
-# The tripwire has been first on $PATH for every fixture above. If any of them
-# — production or patched copy — had reached for a `sleep` executable, it
-# would be recorded here.
+# Suite-lifetime evidence: the tripwire has been first on $PATH since the top
+# of this file. If any fixture — production or patched copy — reached for a
+# `sleep` executable, it is still recorded here (we never erase earlier hits).
 if [[ -s "$SLEEP_SENTINEL" ]]; then
   bad "a PATH sleep was executed during the suite: $(tr '\n' ' ' < "$SLEEP_SENTINEL")"
 else
@@ -1974,6 +1999,157 @@ for prod in "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh" \
     ok "$name carries no test-hook execution path"
   fi
 done
+
+# ===========================================================================
+# #153 review round 6, P1 — worktree uses the proven remote base, not a stale
+# cached origin/main (or the inverse)
+# ===========================================================================
+echo "#153 round 6 · remote with only master + stale origin/main uses origin/master OID"
+# The live remote selects BASE=master. Independently preferring a cached
+# origin/main at a DIFFERENT OID is the bug. Assert ancestry by OID, not
+# command text.
+new_repo "$ROOT/basemaster"
+(
+  cd "$ROOT/basemaster/canon" || exit 1
+  # Convert the remote to master-only.
+  git checkout -q -b master
+  git push -q -u origin master
+  git push -q origin --delete main 2>/dev/null || true
+  git -C "$ROOT/basemaster/origin" update-ref -d refs/heads/main 2>/dev/null || true
+  git -C "$ROOT/basemaster/origin" symbolic-ref HEAD refs/heads/master
+  # Plant a STALE origin/main at a different OID that must never become the
+  # branch point.
+  git checkout -q --orphan stale-main-tree
+  git rm -rf --quiet . >/dev/null 2>&1 || true
+  printf 'stale-main decoy\n' > STALE_MAIN
+  git add STALE_MAIN
+  git commit -qm "stale origin/main decoy"
+  STALE_MAIN_OID=$(git rev-parse HEAD)
+  git update-ref refs/remotes/origin/main "$STALE_MAIN_OID"
+  git checkout -q master
+  echo "$STALE_MAIN_OID" > "$ROOT/basemaster/stale-main.oid"
+) >/dev/null 2>&1
+MASTER_OID=$(git -C "$ROOT/basemaster/canon" rev-parse origin/master)
+STALE_MAIN_OID=$(cat "$ROOT/basemaster/stale-main.oid")
+[[ "$MASTER_OID" != "$STALE_MAIN_OID" ]] || bad "fixture bug: master and stale main share an OID"
+# Confirm the remote really has only master.
+if git -C "$ROOT/basemaster/canon" ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+  bad "fixture bug: origin still has main"
+else
+  ok "fixture: remote has no main (only master)"
+fi
+out=$(cd "$ROOT/basemaster/canon" && "$CLAIM" 901 only-master 'lib/only-master/**' 2>&1); rc=$?
+check "claim on master-only remote succeeds" "$rc" "0"
+# Branch parent must be the proven master OID, not the stale main.
+BRANCH_PARENT=$(git -C "$ROOT/basemaster/canon" rev-parse "feat/901-only-master^" 2>/dev/null || true)
+check "worktree ancestry is origin/master OID" "$BRANCH_PARENT" "$MASTER_OID"
+[[ "$BRANCH_PARENT" != "$STALE_MAIN_OID" ]] &&
+  ok "worktree ancestry is NOT the stale origin/main OID" ||
+  bad "worktree branched from stale origin/main ($BRANCH_PARENT)"
+# PR --base must match the selected base (captured from the claim body / branch).
+contains "PR body names the claim" "$(cat "$GH_PR_FILE")" "issue-901-only-master"
+
+echo "#153 round 6 · remote with only main + stale origin/master uses origin/main OID"
+new_repo "$ROOT/basemain"
+(
+  cd "$ROOT/basemain/canon" || exit 1
+  MAIN_OID=$(git rev-parse origin/main)
+  # Plant a STALE origin/master at a different OID.
+  git checkout -q --orphan stale-master-tree
+  git rm -rf --quiet . >/dev/null 2>&1 || true
+  printf 'stale-master decoy\n' > STALE_MASTER
+  git add STALE_MASTER
+  git commit -qm "stale origin/master decoy"
+  STALE_MASTER_OID=$(git rev-parse HEAD)
+  git update-ref refs/remotes/origin/master "$STALE_MASTER_OID"
+  git checkout -q main
+  echo "$MAIN_OID" > "$ROOT/basemain/main.oid"
+  echo "$STALE_MASTER_OID" > "$ROOT/basemain/stale-master.oid"
+) >/dev/null 2>&1
+MAIN_OID=$(cat "$ROOT/basemain/main.oid")
+STALE_MASTER_OID=$(cat "$ROOT/basemain/stale-master.oid")
+[[ "$MAIN_OID" != "$STALE_MASTER_OID" ]] || bad "fixture bug: main and stale master share an OID"
+# Remote still has main (and must prefer it over any local master cache).
+git -C "$ROOT/basemain/canon" ls-remote --exit-code --heads origin main >/dev/null 2>&1 &&
+  ok "fixture: remote has main" || bad "fixture bug: remote has no main"
+out=$(cd "$ROOT/basemain/canon" && "$CLAIM" 902 only-main 'lib/only-main/**' 2>&1); rc=$?
+check "claim on main-preferring remote succeeds" "$rc" "0"
+BRANCH_PARENT=$(git -C "$ROOT/basemain/canon" rev-parse "feat/902-only-main^" 2>/dev/null || true)
+check "worktree ancestry is origin/main OID" "$BRANCH_PARENT" "$MAIN_OID"
+[[ "$BRANCH_PARENT" != "$STALE_MASTER_OID" ]] &&
+  ok "worktree ancestry is NOT the stale origin/master OID" ||
+  bad "worktree branched from stale origin/master ($BRANCH_PARENT)"
+
+# ===========================================================================
+# #153 review round 6, P2 — claims-status.sh fails closed on reader failure
+# ===========================================================================
+echo "#153 round 6 · claims-status fails closed when pr-claims.sh list fails"
+new_repo "$ROOT/statusfail"
+mkdir -p "$ROOT/statusfail/bin"
+# Shadow pr-claims.sh with a failing reader next to claims-status via PATH? No —
+# claims-status invokes $SCRIPT_DIR/pr-claims.sh by absolute path. Stage a
+# temporary wrapper by pointing SCRIPT via a copy of claims-status that calls
+# our failing reader — simpler: put a non-executable placeholder is hard.
+# Instead, use a gh that makes pr-claims.sh's graphql fail.
+cat > "$ROOT/statusfail/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  api)
+    echo "simulated auth failure: HTTP 401" >&2
+    exit 1
+    ;;
+  *)
+    echo "fake gh: unmodelled: gh $*" >&2
+    exit 64
+    ;;
+esac
+FAKE
+chmod +x "$ROOT/statusfail/bin/gh"
+status=$(cd "$ROOT/statusfail/canon" && PATH="$ROOT/statusfail/bin:$PATH" \
+  "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "claims-status exits 1 on reader failure" "$rc" "1"
+contains "names the unreadable inventory"          "$status" "unreadable"
+lacks    "never announces no live claims on failure" "$status" "no live claims"
+
+echo "#153 round 6 · claims-status reports genuine empty inventory successfully"
+new_repo "$ROOT/statusempty"
+# Empty PR inventory (suite fake gh empty graphql) + empty ledger.
+(
+  cd "$ROOT/statusempty/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm "empty" && git push -q origin main
+) >/dev/null 2>&1
+mkdir -p "$ROOT/statusempty/bin"
+# Recognise inventory GraphQL only; unknown routes fail closed.
+cat > "$ROOT/statusempty/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) echo "acme/app"; exit 0 ;;
+  api)
+    if [[ "$2" != "graphql" ]]; then
+      echo "fake gh: expected graphql, got: gh $*" >&2
+      exit 64
+    fi
+    case "$*" in
+      *pullRequests*|*openPrNumbers*) exit 0 ;;
+      *)
+        echo "fake gh: unmodelled GraphQL: gh $*" >&2
+        exit 64
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake gh: unmodelled: gh $*" >&2
+    exit 64
+    ;;
+esac
+FAKE
+chmod +x "$ROOT/statusempty/bin/gh"
+status=$(cd "$ROOT/statusempty/canon" && PATH="$ROOT/statusempty/bin:$PATH" \
+  "$SCRIPT_DIR/../claims-status.sh" 2>&1); rc=$?
+check    "genuine empty inventory exits 0" "$rc" "0"
+contains "announces no live claims only after a successful read" "$status" "no live claims"
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

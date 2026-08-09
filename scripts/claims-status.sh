@@ -45,7 +45,9 @@ DATE-ONLY SEMANTICS
   which can race the NOW snapshot and report 23 whole hours for a full calendar day.
 
 EXIT
-  0  claims printed (or none live)
+  0  claims printed (or none live — after a successful inventory read)
+  1  live PR-body claim inventory unreadable (auth, pagination, malformed
+     evidence, or missing reader) — never reported as "no live claims"
   2  usage error
 EOF
 }
@@ -166,10 +168,25 @@ emit_pr() { # number | claim-id | scope | head | url | created | updated
   ROWS="${ROWS}| ${claimed} | ${id} | ${scope} | PR #${number} (${head})${age} |"$'\n'
 }
 
-if [[ -n "$REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+# Live PR-body claims are authoritative (#153 review round 6, P2). When we
+# can name a repository, the reader must succeed: authentication, pagination,
+# malformed evidence, or a missing reader are "I could not find out", never
+# "no live claims". Suppressing a failed `pr-claims.sh list` and then printing
+# absence is a false green.
+if [[ -n "$REPO" ]]; then
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    echo "claims-status.sh: ERROR: the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot read live claims for $REPO; refuse rather than report 'no live claims' on an unread inventory" >&2
+    exit 1
+  fi
   # Avoid process substitution (< <(...)) — some sandboxes have no /dev/fd
-  # (bash still implements it via /dev/fd/N). Capture then read.
-  _pr_claims_out=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null || true)
+  # (bash still implements it via /dev/fd/N). Capture then read. Keep stderr
+  # on failure so the diagnostic names the real cause.
+  _pr_claims_err=""
+  if ! _pr_claims_out=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>&1); then
+    _pr_claims_err="$_pr_claims_out"
+    echo "claims-status.sh: ERROR: live claim inventory for $REPO is unreadable — ${_pr_claims_err}" >&2
+    exit 1
+  fi
   # 8 fields since #153 review round 5 — the trailing column is the PR's
   # repository identity. Read it explicitly so it cannot be absorbed into
   # $updated, which drives the age column below. Prefixed `_` because this
@@ -181,7 +198,7 @@ if [[ -n "$REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
   done <<EOF
 ${_pr_claims_out}
 EOF
-  unset _pr_claims_out
+  unset _pr_claims_out _pr_claims_err
 fi
 
 for path in $(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); do
