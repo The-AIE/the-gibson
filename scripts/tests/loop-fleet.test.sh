@@ -4849,11 +4849,46 @@ if grep -q 'python3 is required for fleet runner-selection telemetry' "$FLEET" \
 else
   bad "#141 structure: missing python3 preflight or launch fail-closed"
 fi
-# Production readiness probes (exe + family argv) must all use stdin /dev/null
-if ! grep -E 'run_with_wall_timeout "\$limit" "\$exe"' "$FLEET" | grep -v '/dev/null' >/dev/null; then
+# Production readiness probes (exe + family argv) must all use stdin /dev/null.
+# Capture first: empty match must fail (old `! grep | grep -v` false-greened on zero hits).
+# Shared helper so the meta-sensor exercises the same assertion, not a dead copy.
+assert_readiness_probes_stdin_devnull() {
+  # $1 = file to scan. stdout: bounded offenders when return 2.
+  # return 0 = all probes redirect from /dev/null
+  # return 1 = no probes found
+  # return 2 = at least one probe lacks /dev/null
+  local file="$1" probes missing
+  probes=$(grep -E 'run_with_wall_timeout "\$limit" "\$exe"' "$file" 2>/dev/null || true)
+  if [[ -z "$probes" ]]; then
+    return 1
+  fi
+  missing=$(printf '%s\n' "$probes" | grep -v '/dev/null' || true)
+  if [[ -n "$missing" ]]; then
+    printf '%s\n' "$missing" | head -3
+    return 2
+  fi
+  return 0
+}
+_rp_rc=0
+_rp_diag=$(assert_readiness_probes_stdin_devnull "$FLEET") || _rp_rc=$?
+if [[ "$_rp_rc" -eq 0 ]]; then
   ok "#141 structure: readiness probes redirect stdin from /dev/null"
+elif [[ "$_rp_rc" -eq 1 ]]; then
+  bad "#141 structure: readiness probes not found"
 else
-  bad "#141 structure: readiness probe missing </dev/null: $(grep -E 'run_with_wall_timeout "\$limit" "\$exe"' "$FLEET" | grep -v '/dev/null' | head -3)"
+  bad "#141 structure: readiness probe missing </dev/null: ${_rp_diag}"
+fi
+# Meta-sensor: empty match set must fail closed (same helper; fixture must not
+# contain the probe pattern even in comments — that would be a non-empty match).
+_meta_empty="$ROOT/meta-readiness-empty.fixture"
+printf '%s\n' '# empty-match fixture: no wall-timeout readiness lines at all' \
+  'echo not_a_probe' > "$_meta_empty"
+_rp_rc=0
+_rp_diag=$(assert_readiness_probes_stdin_devnull "$_meta_empty") || _rp_rc=$?
+if [[ "$_rp_rc" -eq 1 ]]; then
+  ok "#141 meta: empty readiness probe set fails closed"
+else
+  bad "#141 meta: empty readiness probe set should fail closed (rc=${_rp_rc} diag=${_rp_diag})"
 fi
 # Unknown-family comment + --version; no bare second probe (historical line shape)
 if grep -A4 'Unknown family:' "$FLEET" | grep -q -- '--version' \
