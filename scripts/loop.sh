@@ -247,12 +247,14 @@ fi
 cost_ledger_record_iteration() {
   local wall_ms="${1:-0}" hat="${2:-loop-step}" state_ok="${3:-0}"
   local ledger="${GIBSON_COST_LEDGER:-}"
-  local cl_sh issue_v pr_v pool rc cl_err
+  local cl_sh issue_v pr_v pool rc cl_class
   [[ -n "$ledger" ]] || return 0
   cl_sh=""
-  if [[ -x "$SCRIPT_DIR/cost-ledger.sh" || -f "$SCRIPT_DIR/cost-ledger.sh" ]]; then
+  # Accept a regular file even without +x; always invoke via bash so a lost
+  # executable bit is not misclassified as append_error / budget failure (rc 126).
+  if [[ -f "$SCRIPT_DIR/cost-ledger.sh" && ! -d "$SCRIPT_DIR/cost-ledger.sh" ]]; then
     cl_sh="$SCRIPT_DIR/cost-ledger.sh"
-  elif [[ -n "${GIBSON:-}" && ( -x "$GIBSON/scripts/cost-ledger.sh" || -f "$GIBSON/scripts/cost-ledger.sh" ) ]]; then
+  elif [[ -n "${GIBSON:-}" && -f "$GIBSON/scripts/cost-ledger.sh" && ! -d "$GIBSON/scripts/cost-ledger.sh" ]]; then
     cl_sh="$GIBSON/scripts/cost-ledger.sh"
   else
     info "cost-ledger: append skipped — cost-ledger.sh not found (ledger configured; no path/secret printed)"
@@ -292,27 +294,24 @@ cost_ledger_record_iteration() {
   if [[ -n "${GIBSON_COST_REQUESTED_RUNNER:-}" ]]; then set -- "$@" --requested-runner "$GIBSON_COST_REQUESTED_RUNNER"; fi
   if [[ -n "${GIBSON_COST_PROVIDER:-}" ]]; then set -- "$@" --provider "$GIBSON_COST_PROVIDER"; fi
   if [[ -n "${GIBSON_COST_FALLBACK_REASON:-}" ]]; then set -- "$@" --fallback-reason "$GIBSON_COST_FALLBACK_REASON"; fi
-  cl_err=$(mktemp "${TMPDIR:-/tmp}/gibson-cost-err.XXXXXX" 2>/dev/null || echo "")
   set +e
-  if [[ -n "$cl_err" ]]; then
-    "$cl_sh" append "$@" >/dev/null 2>"$cl_err"
-    rc=$?
-  else
-    "$cl_sh" append "$@" >/dev/null 2>&1
-    rc=$?
-  fi
+  bash "$cl_sh" append "$@" >/dev/null 2>&1
+  rc=$?
   set -e
   if [[ "$rc" -ne 0 ]]; then
     # Sanitized diagnostic only — never dump ledger contents, env, or err body
-    # (may echo paths). Class + rc are enough for operators.
-    info "cost-ledger: iteration append failed (rc=$rc class=append_error) — outcome telemetry missing for this step; check ledger path writability and cost-ledger.sh (no secrets printed)"
-    rm -f "$cl_err" 2>/dev/null || true
+    # (may echo paths). Class + rc are enough for operators. bash-invocation
+    # means rc 126/127 are real interpreter/script problems, not mode bits.
+    cl_class="append_error"
+    if [[ "$rc" -eq 127 ]]; then
+      cl_class="not_runnable"
+    fi
+    info "cost-ledger: iteration append failed (rc=$rc class=$cl_class) — outcome telemetry missing for this step; check ledger path writability and cost-ledger.sh (no secrets printed)"
     if [[ "${GIBSON_COST_TELEMETRY_REQUIRED:-0}" == "1" ]]; then
       return 1
     fi
     return 0
   fi
-  rm -f "$cl_err" 2>/dev/null || true
   return 0
 }
 
@@ -2617,10 +2616,11 @@ while true; do
                 echo "secrets: none printed; check ledger path writability only."
               } >> "$JOURNAL"
               info "cost-ledger: fleet-required telemetry degraded (valid iteration recorded without durable cost row)"
+              # Count against the error budget so status is not silent, but do
+              # NOT escalate to a cross-vendor second opinion: a ledger write
+              # failure is local FS/permission, not a runner-diff that other
+              # vendors can usefully review (would spend tokens for nothing).
               failures=$((failures + 1))
-              if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
-                escalate
-              fi
               if [[ $failures -ge $BUDGET ]]; then
                 die "error budget exhausted — fleet-required cost telemetry could not append (docs/11, issue #141)"
               fi

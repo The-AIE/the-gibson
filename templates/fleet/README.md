@@ -70,16 +70,18 @@ Before any new lane launch the driver:
    lane declares an explicit ordered route.
 2. Preflights each configured CLI with a **bounded, noninteractive,
    credential-safe** readiness probe (process-group wall timeout; hung checks
-   kill only the exact captured group). Probe stdout/stderr is discarded —
-   never logged (no tokens, keys, env, or raw credential material).
+   kill only the exact captured group). Every probe redirects **stdin from
+   `/dev/null`**. Probe stdout/stderr is discarded — never logged (no tokens,
+   keys, env, or raw credential material).
 3. **Auth / usability policy:** only a *positive* provider-specific result may
    select a runner. Codex uses `login status`, Claude `auth status`, Hermes
    `status`, Grok `models` — exit 0 only. Auth/status/models nonzero is
    `auth_fail` and **never** falls back to `--version` (a logged-out but
    installed CLI is not ready; Grok `--version` only proves the binary exists).
    Probe stdout/stderr is discarded — never inspected for classification.
-   Unknown families without a stable noninteractive auth probe use one
-   bounded minimal non-mutating usability probe (`--version`). Timeout remains
+   Unknown families without a stable noninteractive auth probe use **exactly
+   one** bounded minimal non-mutating usability probe (`--version`); there is
+   **no** bare interactive invocation if `--version` fails. Timeout remains
    exit **124** with process-group cleanup of the exact captured group only.
 4. Selects the **first ready** runner in declared order. Fail over **only** on
    a classified readiness failure (`not_found`, `timeout`, `not_ready`,
@@ -183,12 +185,18 @@ $GIBSON/scripts/loop-fleet.sh --status
 
 - **Bash 3.2+** (macOS stock `/bin/bash` is fine)
 - **Git** on `PATH`
+- **python3** — required end-to-end for fleet `--start` (runner-selection
+  telemetry JSON serialization) and for `loop.sh` loop-state timestamp
+  validation. Preflight refuses before readiness when `python3` is missing so
+  selection cannot pass probes then die at telemetry write. Process-group
+  wall-timeout may use **perl or python3**; with `python3` required, either
+  covers readiness hung-check cleanup.
 - **GitHub CLI `gh` ≥ 1.9.0** — required for the built-in `--json`, `--jq`,
   and `--template` flows used by open-PR inventory (`gh pr list`) and
   claim/body re-verification (`gh pr view`). Older `gh` lacks those flags and
-  will fail closed at preflight. No external `jq`, Python, or Perl is required
-  on the production PR-ownership path (optional tools may still be used when
-  present for wall-timeout process groups or label pretty-printing).
+  will fail closed at preflight. The production **PR-ownership metadata path
+  itself** uses no external `jq`, Python, or Perl (gh built-in formatter only);
+  fleet runner routing still requires `python3` as above.
 - Builder / reviewer / release CLIs for the three-role split (see below)
 
 ### Three-role defaults (preserved)

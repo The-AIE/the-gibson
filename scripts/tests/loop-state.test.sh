@@ -2483,7 +2483,6 @@ JOIN_KEY="fleet-sel:v1:test:docs:grind-a:grind-a:20260806T100000Z:deadbeef"
 LEDGER="$ROOT/cost-outcome.jsonl"
 rm -f "$LEDGER"
 # Selection row (fleet shape): issue known, no PR, same join_key.
-bash "$SOURCE_LOOP" >/dev/null 2>&1 || true  # warm nothing
 "$GIBSON/scripts/cost-ledger.sh" append \
   --ledger "$LEDGER" \
   --runner grind-a \
@@ -2557,6 +2556,7 @@ exit 0
 RUN
 chmod +x "$CALLS/fake-runner.sh"
 LEDGER2="$ROOT/cost-hostile.jsonl"
+rm -f "$LEDGER2"
 JOIN2="fleet-sel:v1:test:docs:x:x:20260806T100000Z:cafebabe"
 "$GIBSON/scripts/cost-ledger.sh" append \
   --ledger "$LEDGER2" --runner x --pool p --hat runner-selection \
@@ -2624,21 +2624,64 @@ else
   ok "telemetry diagnostic has no credential material"
 fi
 # Standalone continues (does not hard-fail solely on optional telemetry)
-[[ "$rc" -eq 0 ]] && ok "standalone loop continues after optional telemetry failure" \
-  || ok "standalone loop exited non-zero but diagnostic was emitted (rc=$rc)"
+if [[ "$rc" -eq 0 ]]; then
+  ok "standalone loop continues after optional telemetry failure"
+else
+  bad "standalone loop must exit 0 when only optional telemetry fails (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-fail.err"))"
+fi
 
-# Fleet-required: unwritable ledger marks degraded (journal entry)
+# Non-executable cost-ledger.sh: invoke via bash — lost +x must not become
+# class=append_error / budget failure (rc 126 from direct exec).
+# Drive a private SCRIPT_DIR that holds a mode-000 copy of cost-ledger next to
+# a loop driver; other helpers load from --gibson (real tree).
 setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=nonexec-ledger"
+make_runner_cmd rewrite-valid
+NEX_DIR="$ROOT/nonexec-gibson"
+mkdir -p "$NEX_DIR/scripts"
+cp "$SOURCE_LOOP" "$NEX_DIR/scripts/loop.sh"
+cp "$GIBSON/scripts/cost-ledger.sh" "$NEX_DIR/scripts/cost-ledger.sh"
+cp "$GIBSON/scripts/silent-noop.sh" "$NEX_DIR/scripts/silent-noop.sh"
+chmod +x "$NEX_DIR/scripts/loop.sh"
+chmod a-x "$NEX_DIR/scripts/cost-ledger.sh"
+LEDGER_NEX="$ROOT/cost-nonexec.jsonl"
+rm -f "$LEDGER_NEX"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  GIBSON_COST_LEDGER="$LEDGER_NEX" \
+  GIBSON_COST_JOIN_KEY="join-nonexec" \
+  ITERATION_WALL_MS=10 \
+  bash "$NEX_DIR/scripts/loop.sh" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 \
+    >/dev/null 2>"$ROOT/cost-nonexec.err"
+rc=$?
+set -e
+if [[ "$rc" -eq 0 ]] && [[ -f "$LEDGER_NEX" ]] && grep -q '"event_kind":"iteration"' "$LEDGER_NEX"; then
+  ok "non-executable cost-ledger.sh still appends via bash (rc=0)"
+else
+  if grep -q 'class=append_error' "$ROOT/cost-nonexec.err" && ! [[ -f "$LEDGER_NEX" ]]; then
+    bad "non-exec cost-ledger treated as append_error (should invoke via bash): $(tr '\n' ' ' <"$ROOT/cost-nonexec.err")"
+  else
+    bad "non-exec cost-ledger path failed (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-nonexec.err") ledger=$(ls -la "$LEDGER_NEX" 2>/dev/null || echo missing))"
+  fi
+fi
+
+# Fleet-required: unwritable ledger marks degraded (journal entry) and must
+# NOT escalate to cross-vendor second-opinion (local FS problem, not a diff).
+setup_repo
+install_fake_supervisor_stack
 write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=fleet-required"
 make_runner_cmd rewrite-valid
+: > "$CALLS/second-opinion.count"
 set +e
 HERMES_CMD="$CALLS/fake-runner.sh" \
   GIBSON_COST_LEDGER="$BAD_PARENT/cost2.jsonl" \
   GIBSON_COST_JOIN_KEY="join-fleet-req" \
   GIBSON_COST_TELEMETRY_REQUIRED=1 \
   ITERATION_WALL_MS=10 \
-  bash "$SOURCE_LOOP" --runner hermes --repo "$REPO" --repo-slug acme/app \
-    --gibson "$GIBSON" --once --error-budget 5 \
+  bash "$LOOP_BIN" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 --escalate-after 1 \
+    --reviewers codex \
     >/dev/null 2>"$ROOT/cost-fleet-req.err"
 rc=$?
 set -e
@@ -2647,6 +2690,13 @@ if grep -q 'cost-telemetry-degraded\|fleet-required telemetry\|append failed (rc
   ok "fleet-required telemetry failure marks degraded"
 else
   bad "fleet-required policy missing (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-fleet-req.err") j=$(tr '\n' ' ' <"$REPO/gibson/journal.md" 2>/dev/null))"
+fi
+so_tel=$(wc -l < "$CALLS/second-opinion.count" 2>/dev/null | tr -d ' ')
+so_tel=${so_tel:-0}
+if [[ "$so_tel" -eq 0 ]]; then
+  ok "fleet-required telemetry failure does not escalate to second-opinion"
+else
+  bad "telemetry failure escalated second-opinion ${so_tel}x (must not spend tokens)"
 fi
 
 # ---------------------------------------------------------------------------

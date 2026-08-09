@@ -53,6 +53,17 @@ out=$("$CL" summarize --ledger "$LEDGER" --merged-json "$ROOT/merged.json" --for
 echo "$out" | grep -q '"tokens_known_events": 1' && ok "tokens_known_events=1" || bad "known: $out"
 echo "$out" | grep -q '"merged_prs_with_cost": 1' && ok "json merged_prs_with_cost=1" || bad "mwc: $out"
 echo "$out" | grep -q '"merged_events": 2' && ok "json merged_events=2" || bad "me: $out"
+# Incomplete coverage: total_tokens must be null (not a partial sum presented as total)
+py_tt=$(python3 -c '
+import json,sys
+s=json.loads(sys.argv[1])
+assert s.get("tokens_coverage_complete") is False, s
+assert s.get("total_tokens") is None, s
+assert s.get("tokens_known_sum") == 4000, s
+assert s.get("tokens_known_events") == 1 and s.get("tokens_total_events") == 2, s
+print("ok")
+' "$out" 2>&1) || true
+[[ "$py_tt" == "ok" ]] && ok "json total_tokens null on incomplete coverage" || bad "total_tokens honesty: $py_tt out=$out"
 # --merged-since alias still works
 out=$("$CL" summarize --ledger "$LEDGER" --merged-since "$ROOT/merged.json" --format text 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'cost-per-merged-PR' && ok "merged-since alias" || bad "alias: $out"
@@ -151,6 +162,11 @@ J
 out=$("$CL" summarize --ledger "$AMB" --merged-json "$ROOT/merged-amb.json" 2>&1); rc=$?
 [[ "$rc" -eq 3 ]] && echo "$out" | grep -qi ambiguous \
   && ok "ambiguous join_key → exit 3" || bad "amb rc=$rc: $out"
+
+# Direct-PR vs join-map: any same join_key with two different PRs is caught
+# at map-build time as "ambiguous join_key" (above). A separate resolved_pr
+# conflict branch is unreachable once the map is consistent — removed in
+# cost-ledger.sh; the ambiguous sensor is the sole contract for this case.
 
 # Newline in join-key refused
 out=$("$CL" append --ledger "$LEDGER" --runner x --hat y --wall-ms 1 \
@@ -379,18 +395,32 @@ if grep -q 'state_ok' "$SCRIPT_DIR/../loop.sh" \
 else
   bad "loop.sh missing outcome/telemetry policy structure"
 fi
-if grep -q 'make_selection_join_key\|make_join_discriminator' "$SCRIPT_DIR/../loop-fleet.sh" \
+if grep -q 'make_selection_join_key' "$SCRIPT_DIR/../loop-fleet.sh" \
+  && grep -q 'make_join_discriminator' "$SCRIPT_DIR/../loop-fleet.sh" \
   && grep -q 'pool_map' "$SCRIPT_DIR/../loop-fleet.sh" \
-  && grep -q 'provider-%s\|provider-' "$SCRIPT_DIR/../loop-fleet.sh"; then
+  && grep -q "printf 'provider-%s" "$SCRIPT_DIR/../loop-fleet.sh"; then
   ok "loop-fleet join discriminator + truthful pool default present"
 else
   bad "loop-fleet missing join/pool honesty structure"
 fi
-# Must not invent flat-rate/subscription from vendor identity in pool_for_provider
-if grep -A20 '^pool_for_provider()' "$SCRIPT_DIR/../loop-fleet.sh" | grep -qE 'flat-rate-grok|subscription-codex'; then
-  bad "pool_for_provider still invents plan shape from vendor"
+# Must not invent flat-rate/subscription from vendor identity in pool_for_provider.
+# Assert the function exists first (fail closed if renamed) before scanning body.
+pool_fn=$(grep -n '^pool_for_provider()' "$SCRIPT_DIR/../loop-fleet.sh" || true)
+if [[ -z "$pool_fn" ]]; then
+  bad "pool_for_provider() definition missing (sensor cannot verify plan-shape honesty)"
 else
-  ok "pool_for_provider does not invent plan shape from vendor"
+  # Extract function body until the next top-level function/assignment at column 0
+  # (broader than a fixed 20-line window so a reintroduced vendor literal is caught).
+  pool_body=$(awk '
+    /^pool_for_provider\(\)/ {grab=1}
+    grab {print}
+    grab && /^\}$/ {exit}
+  ' "$SCRIPT_DIR/../loop-fleet.sh")
+  if printf '%s\n' "$pool_body" | grep -qE 'flat-rate-grok|subscription-codex'; then
+    bad "pool_for_provider still invents plan shape from vendor"
+  else
+    ok "pool_for_provider does not invent plan shape from vendor"
+  fi
 fi
 
 echo

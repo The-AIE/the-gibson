@@ -3146,13 +3146,18 @@ write_profile "$PROF" \
   "lane=docs|420|docs/**|no jq pr"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-# Hide system jq/python/perl so production cannot fall back to external parsers.
+# Hide system jq so PR-ownership cannot fall back to an external JSON parser.
+# python3 is a declared fleet preflight requirement (selection telemetry + loop
+# timestamps); perl may be used for process-group wall-timeout. Grant both so
+# the positive path exercises PR list/view via gh formatter only — not "no
+# python/perl anywhere". A separate restricted fixture below asserts missing
+# python3 fails closed at preflight (not late inside telemetry).
 NOJQ_BIN="$ROOT/nojq-bin"
 rm -rf "$NOJQ_BIN"
 mkdir -p "$NOJQ_BIN"
 for c in bash sh env sed tr awk cat printf mkdir rm chmod date basename dirname \
          head tail grep cut nohup sleep true kill ps wait mktemp uname pwd ln \
-         touch mv cp ls wc sort uniq xargs which git cmp perl python3; do
+         touch mv cp ls wc sort uniq xargs which git cmp od perl python3; do
   p=$(command -v "$c" 2>/dev/null) || continue
   [[ -e "$NOJQ_BIN/$c" ]] && continue
   ln -sf "$p" "$NOJQ_BIN/$c"
@@ -3206,6 +3211,57 @@ out=$(run_nojq --start) || { bad "no-jq positive claim resume failed: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "no-external-jq positive PR list + claim resumes" \
   || bad "no-external-jq positive launches=$lc out=$out"
+
+# Restricted fixture: no python3 on PATH → preflight must refuse with a clear
+# diagnostic (honest contract), not a late failure inside selection telemetry.
+# Use a dedicated fleet_dir/log_dir so identity markers do not collide with the
+# prior no-jq profile that shares $ROOT/fleet.
+echo "no-python3 preflight fail-closed (selection telemetry contract)"
+NOPY_BIN="$ROOT/nopy-bin"
+rm -rf "$NOPY_BIN"
+mkdir -p "$NOPY_BIN"
+for c in bash sh env sed tr awk cat printf mkdir rm chmod date basename dirname \
+         head tail grep cut nohup sleep true kill ps wait mktemp uname pwd ln \
+         touch mv cp ls wc sort uniq xargs which git cmp od perl; do
+  p=$(command -v "$c" 2>/dev/null) || continue
+  [[ -e "$NOPY_BIN/$c" ]] && continue
+  ln -sf "$p" "$NOPY_BIN/$c"
+done
+cp "$BIN/gh" "$NOPY_BIN/gh"
+cp "$BIN/fake-runner" "$NOPY_BIN/fake-runner"
+TARGET_NOPY=$(setup_target_repo nopy3 acme/nopy)
+NOPY_FLEET="$ROOT/fleet-nopy3"
+NOPY_LOGS="$ROOT/logs-nopy3"
+mkdir -p "$NOPY_FLEET" "$NOPY_LOGS"
+PROF_NOPY="$ROOT/profiles/nopy3.profile"
+write_profile "$PROF_NOPY" \
+  "version=1" \
+  "name=nopy3" \
+  "repo=$TARGET_NOPY" \
+  "slug=acme/nopy" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$NOPY_FLEET" \
+  "log_dir=$NOPY_LOGS" \
+  "runner=fake-runner" \
+  "lane=docs|421|docs/**|no python3"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$NOPY_BIN" \
+    GIBSON="$GIBSON" FLEET_DIR="$NOPY_FLEET" LOG_DIR="$NOPY_LOGS" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$NOPY_BIN/gh" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
+    FLEET_PROFILE="$PROF_NOPY" \
+    "$FLEET" --profile "$PROF_NOPY" --start 2>&1
+) && bad "no-python3 should fail preflight: $out" || {
+  echo "$out" | grep -qi 'python3' \
+    && ok "no-python3 fails closed at preflight with python3 diagnostic" \
+    || bad "no-python3 unclear fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "no-python3 launched zero" || bad "no-python3 launched $lc"
 
 # Malformed formatter stdout (not TSV) fails closed — never treated as empty.
 unset GH_STUB_PR_JSON
@@ -4786,6 +4842,44 @@ ok "ssh://git@github.com/owner/repo origin still accepted"
 # ============================================================================
 echo "#141 runner routing"
 
+# Structural sensors for CodeRabbit #154 review contract
+if grep -q 'python3 is required for fleet runner-selection telemetry' "$FLEET" \
+  && grep -q 'no selected runner recorded before launch' "$FLEET"; then
+  ok "#141 structure: python3 preflight + fail-closed missing LANE_SELECTED"
+else
+  bad "#141 structure: missing python3 preflight or launch fail-closed"
+fi
+# Production readiness probes (exe + family argv) must all use stdin /dev/null
+if ! grep -E 'run_with_wall_timeout "\$limit" "\$exe"' "$FLEET" | grep -v '/dev/null' >/dev/null; then
+  ok "#141 structure: readiness probes redirect stdin from /dev/null"
+else
+  bad "#141 structure: readiness probe missing </dev/null: $(grep -E 'run_with_wall_timeout "\$limit" "\$exe"' "$FLEET" | grep -v '/dev/null' | head -3)"
+fi
+# Unknown-family comment + --version; no bare second probe (historical line shape)
+if grep -A4 'Unknown family:' "$FLEET" | grep -q -- '--version' \
+  && ! grep -nE 'run_with_wall_timeout "\$limit" "\$exe"\s*(</dev/null\s*)?>"\$outf"' "$FLEET" >/dev/null; then
+  ok "#141 structure: unknown family uses --version only (no bare invoke)"
+else
+  bad "#141 structure: unknown-family --version-only contract broken"
+fi
+if ! grep -q 'redact_readiness_output' "$FLEET"; then
+  ok "#141 structure: dead redact_readiness_output removed"
+else
+  bad "#141 structure: redact_readiness_output still present"
+fi
+if grep -q 'bash "$cl_sh" append' "$FLEET" \
+  && grep -q 'bash "$cl_sh" append' "$REPO_ROOT/scripts/loop.sh"; then
+  ok "#141 structure: cost-ledger invoked via bash"
+else
+  bad "#141 structure: cost-ledger not invoked via bash in fleet/loop"
+fi
+# Example route must not use codex fallback (default reviewer identity)
+if grep -E 'lane=.*\|grok,codex|,codex' "$REPO_ROOT/templates/fleet/profile.v1.example" >/dev/null 2>&1; then
+  bad "#141 example profile uses codex builder fallback (collides with REVIEWER_CMD)"
+else
+  ok "#141 example profile fallback is not default reviewer identity"
+fi
+
 write_ready_probe() {
   local name="$1" mode="${2:-ready}"
   mkdir -p "$FLEET_READINESS_DIR"
@@ -5456,30 +5550,8 @@ nseg=$(python3 -c 'print(len("'"$KEY1"'".split(":")))')
 [[ "$nseg" -ge 8 ]] && ok "join key includes per-launch discriminator segment" \
   || bad "join key too few segments ($nseg): $KEY1"
 unset FLEET_TEST_JOIN_TS || true
-
-# Also prove make_join_discriminator alone yields distinct values (frozen-time sensor helper)
-DISC1=$(bash -c '
-  source /dev/null
-  # Extract just the function by running a mini harness
-  FLEET_TEST_JOIN_TS=20260806T100000Z
-  make_join_discriminator() {
-    local disc=""
-    if [[ -r /dev/urandom ]]; then
-      disc=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d " \n")
-    fi
-    if [[ -z "$disc" || ! "$disc" =~ ^[0-9a-fA-F]+$ ]]; then
-      disc="$(printf "%s%04x%s" "$$" "${RANDOM:-0}" "$(date +%s 2>/dev/null || echo 0)")"
-    fi
-    printf "%s\n" "$disc"
-  }
-  make_join_discriminator
-  make_join_discriminator
-')
-d1=$(printf '%s\n' "$DISC1" | sed -n '1p')
-d2=$(printf '%s\n' "$DISC1" | sed -n '2p')
-[[ -n "$d1" && -n "$d2" && "$d1" != "$d2" ]] \
-  && ok "discriminator helper yields distinct same-process values" \
-  || bad "discriminator not distinct d1=$d1 d2=$d2"
+# (Distinct join keys above already exercise production make_join_discriminator
+# end-to-end; do not re-test an inline copy of the helper.)
 
 # ---------------------------------------------------------------------------
 # #141 repair: auth-fail must not be masked by --version (production families)
@@ -5544,9 +5616,15 @@ P
   chmod +x "$BIN/$name"
 }
 
-# Ready fallback on production path (other family; --version or bare exit 0).
+# Ready fallback on production path (unknown family: bounded --version only).
 cat > "$BIN/grind-ok-fb" <<'P'
 #!/usr/bin/env bash
+# Unknown-family readiness probes --version only (never bare interactive).
+if [[ "${1:-}" == "--version" ]]; then
+  echo "grind-ok-fb 0.0.0"
+  exit 0
+fi
+# Launch path (loop runner) accepts any argv.
 exit 0
 P
 chmod +x "$BIN/grind-ok-fb"
@@ -5632,7 +5710,7 @@ unset FLEET_READINESS_DIR || true
 export GROK_PROBE_LOG="$CALLS/grok-probe-fail.log"
 : > "$GROK_PROBE_LOG"
 write_grok_models_stub "grok" 1 0
-# Ready other-family fallback (production path uses --version/bare exit 0).
+# Ready other-family fallback (production path: unknown family uses --version only).
 cat > "$BIN/grind-ok-fb" <<'P'
 #!/usr/bin/env bash
 exit 0

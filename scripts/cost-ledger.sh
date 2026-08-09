@@ -329,16 +329,20 @@ def event_pr(ev, idx):
     return as_nonneg_int(ev["pr"], "pr", idx, required=False)
 
 def resolved_pr(ev, idx):
+    # Prefer the event own pr; otherwise the join_key -> pr map.
+    # A join_key that maps to two different PRs already fails closed while
+    # building join_to_pr (ambiguous join_key). Once the map is consistent,
+    # own != mapped cannot occur for an event that contributed its own pr, so
+    # no separate conflict branch is needed (unreachable / redundant).
     own = event_pr(ev, idx)
+    if own is not None:
+        return own
     jk = ev.get("join_key") or ""
     if not isinstance(jk, str):
         fail("event %d: join_key must be a string" % idx)
-    mapped = join_to_pr.get(jk) if jk else None
-    if own is not None and mapped is not None and own != mapped:
-        fail("event %d: pr %s conflicts with join_key map %s" % (idx, own, mapped))
-    if own is not None:
-        return own
-    return mapped
+    if not jk:
+        return None
+    return join_to_pr.get(jk)
 
 def empty_pool():
     return {
@@ -500,14 +504,18 @@ if merged_numbers:
         "events": merged_events,
     }
 
-# Global total_tokens: expose sum only with coverage metadata; keep sum of known
-# for diagnostics but mark incomplete when any event lacks tokens.
+# Global total_tokens: null unless every event recorded tokens (same honesty
+# rule as text output and per-pool / per-hat / per-merged-PR metrics). A partial
+# known sum is exposed separately as tokens_known_sum for diagnostics only —
+# never as total_tokens (a consumer that ignores coverage must not treat a
+# partial sum as complete).
 global_tokens_complete = (len(events) > 0 and tokens_known == len(events))
 summary = {
     "schema": "gibson.cost.summary.v1",
     "events": len(events),
     "total_wall_ms": total_wall,
-    "total_tokens": total_tokens if tokens_known else None,
+    "total_tokens": total_tokens if global_tokens_complete else None,
+    "tokens_known_sum": total_tokens if tokens_known else None,
     "tokens_known_events": tokens_known,
     "tokens_total_events": len(events),
     "tokens_coverage_complete": global_tokens_complete,

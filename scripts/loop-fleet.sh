@@ -2010,16 +2010,18 @@ fleet_cost_ledger_path() {
 }
 
 # Resolve cost-ledger.sh without relying on the (often stubbed) test GIBSON tree.
+# Accepts a regular file (-f) even when the executable bit is missing; callers
+# must invoke via `bash` so a lost +x is not misclassified as a budget failure.
 resolve_cost_ledger_sh() {
-  if [[ -n "${COST_LEDGER_SH:-}" && -f "$COST_LEDGER_SH" ]]; then
+  if [[ -n "${COST_LEDGER_SH:-}" && -f "$COST_LEDGER_SH" && ! -d "$COST_LEDGER_SH" ]]; then
     printf '%s\n' "$COST_LEDGER_SH"
     return 0
   fi
-  if [[ -f "$SCRIPT_DIR/cost-ledger.sh" ]]; then
+  if [[ -f "$SCRIPT_DIR/cost-ledger.sh" && ! -d "$SCRIPT_DIR/cost-ledger.sh" ]]; then
     printf '%s\n' "$SCRIPT_DIR/cost-ledger.sh"
     return 0
   fi
-  if [[ -n "${GIBSON:-}" && -f "$GIBSON/scripts/cost-ledger.sh" ]]; then
+  if [[ -n "${GIBSON:-}" && -f "$GIBSON/scripts/cost-ledger.sh" && ! -d "$GIBSON/scripts/cost-ledger.sh" ]]; then
     printf '%s\n' "$GIBSON/scripts/cost-ledger.sh"
     return 0
   fi
@@ -2030,6 +2032,7 @@ resolve_cost_ledger_sh() {
 # Schema is fleet-local (gibson.fleet.runner_selection.v1). Also appends a
 # gibson.cost.v1 selection row (same join_key) so cost-ledger summarize can
 # attribute merged outcomes without inventing token/cost numbers (#141).
+# Requires python3 (preflight-enforced; same runtime contract as loop.sh).
 # Args: id requested selected health reason pool join route wall_ms [issue]
 write_runner_selection_telemetry() {
   local id="$1" requested="$2" selected="$3" health="$4" reason="$5" pool="$6" join="$7" route="$8" wall_ms="$9"
@@ -2038,8 +2041,11 @@ write_runner_selection_telemetry() {
   path=$(runner_selection_log)
   ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   provider=$(cmd_provider_id "$selected" 2>/dev/null || printf '%s' "$selected")
-  # JSON via python for safe escaping; fields are already validated tokens.
-  # Never include probe stdout, env, tokens, or credential material.
+  # JSON via python3 for safe escaping; fields are already validated tokens.
+  # python3 is required at preflight — do not fall back to a late hard die after
+  # readiness already passed. Never include probe stdout, env, tokens, or creds.
+  command -v python3 >/dev/null 2>&1 \
+    || die "lane $id: python3 required for runner-selection telemetry (preflight should have refused)"
   RUN_SEL_PATH="$path" RUN_SEL_TS="$ts" RUN_SEL_LANE="$id" \
   RUN_SEL_REQ="$requested" RUN_SEL_SEL="$selected" RUN_SEL_PROV="$provider" \
   RUN_SEL_POOL="$pool" RUN_SEL_HEALTH="$health" RUN_SEL_REASON="$reason" \
@@ -2097,26 +2103,13 @@ with open(path, "a", encoding="utf-8") as f:
       --now "$ts"
     if [[ -n "$issue" ]]; then set -- "$@" --issue "$issue"; fi
     if [[ -n "$flat_flag" ]]; then set -- "$@" "$flat_flag" "$flat_val"; fi
-    if ! "$cl_sh" append "$@" >/dev/null 2>&1; then
+    # Invoke via bash so a lost executable bit is not a false budget failure.
+    if ! bash "$cl_sh" append "$@" >/dev/null 2>&1; then
       # Selection telemetry is fleet-required when a cost ledger path is in use.
       die "lane $id: cost-ledger selection append failed (fleet-required telemetry; check ledger path writability — no secrets printed)"
     fi
   else
     info "lane $id: cost-ledger.sh not found — selection join row skipped"
-  fi
-}
-
-# Redact readiness probe output: never surface tokens/keys/env/credential material.
-# Returns a short classification-safe diagnostic fragment only.
-redact_readiness_output() {
-  local raw="$1"
-  # Drop everything; callers only get classified reasons. Keep length hint only.
-  local n
-  n=$(printf '%s' "$raw" | wc -c | tr -d '[:space:]')
-  if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]]; then
-    printf 'output_redacted_bytes=%s' "$n"
-  else
-    printf 'output_empty'
   fi
 }
 
@@ -2143,8 +2136,10 @@ any_lane_uses_global_runner() {
 # on nonzero exit (that would mark a logged-out but installed CLI as ready).
 # Unsupported-command is never inferred from stderr text (output may contain
 # sensitive material and is discarded). Families without a stable noninteractive
-# auth probe use one bounded minimal non-mutating usability probe (exit 0 proves
-# the configured CLI can accept work); otherwise fail closed.
+# auth probe use exactly one bounded minimal non-mutating usability probe
+# (`--version`); never a bare interactive invocation. Every probe redirects
+# stdin from /dev/null so a CLI that waits on stdin cannot hang the wall timer
+# beyond the process-group timeout for interactive reasons alone.
 # Grok: fixed argv `models` (bounded, non-mutating) — exit 0 only when the
 # configured account/provider can accept work. Never inspect/log models output.
 check_runner_readiness() {
@@ -2174,7 +2169,7 @@ check_runner_readiness() {
     fi
     outf=$(mktemp "${TMPDIR:-/tmp}/fleet-ready.XXXXXX") || { printf 'not_ready\n'; return 1; }
     set +e
-    run_with_wall_timeout "$limit" "$probe" >"$outf" 2>&1
+    run_with_wall_timeout "$limit" "$probe" </dev/null >"$outf" 2>&1
     rc=$?
     set -e
     rm -f "$outf"
@@ -2225,39 +2220,37 @@ check_runner_readiness() {
   set +e
   # Fixed argv tables only — never eval, never interpolate profile strings into shell.
   # Never read probe stdout/stderr for classification (discarded after exit status).
+  # Every probe: stdin from /dev/null (no interactive hang on inherited terminal).
   case "$family" in
     grok)
       # Bounded non-mutating auth/readiness: fixed argv `models` only.
       # Exit 0 = configured primary can accept work. Never --version (install-only).
       # Never inspect or log models stdout/stderr.
-      run_with_wall_timeout "$limit" "$exe" models >"$outf" 2>&1
+      run_with_wall_timeout "$limit" "$exe" models </dev/null >"$outf" 2>&1
       rc=$?
       ;;
     codex)
       # Positive login-status only. Nonzero (incl. logged-out) is auth_fail —
       # never mask with a successful --version.
-      run_with_wall_timeout "$limit" "$exe" login status >"$outf" 2>&1
+      run_with_wall_timeout "$limit" "$exe" login status </dev/null >"$outf" 2>&1
       rc=$?
       ;;
     claude)
       # Positive auth-status only. Nonzero is auth_fail — no --version fallback.
-      run_with_wall_timeout "$limit" "$exe" auth status >"$outf" 2>&1
+      run_with_wall_timeout "$limit" "$exe" auth status </dev/null >"$outf" 2>&1
       rc=$?
       ;;
     hermes)
       # Positive status only. Nonzero is auth_fail — no --version fallback.
-      run_with_wall_timeout "$limit" "$exe" status >"$outf" 2>&1
+      run_with_wall_timeout "$limit" "$exe" status </dev/null >"$outf" 2>&1
       rc=$?
       ;;
     *)
-      # Unknown family: one bounded minimal non-mutating usability probe.
-      # Exit 0 proves the configured CLI can accept work; no auth claim.
-      run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+      # Unknown family: exactly one bounded minimal non-mutating usability probe.
+      # Exit 0 proves --version works; no auth claim. Never bare-invoke the CLI
+      # (agent CLIs may start interactive sessions or real work with no args).
+      run_with_wall_timeout "$limit" "$exe" --version </dev/null >"$outf" 2>&1
       rc=$?
-      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
-        run_with_wall_timeout "$limit" "$exe" >"$outf" 2>&1
-        rc=$?
-      fi
       ;;
   esac
   set -e
@@ -2512,6 +2505,12 @@ preflight_for_start() {
   # Direct invocation in do_start requires a regular executable file; -f alone
   # is not enough (a non-executable loop would pass preflight and fail at launch).
   [[ -x "$LOOP_SH" ]] || die "loop driver is not executable: $LOOP_SH"
+  # Honest end-to-end contract: selection telemetry JSON serialization and
+  # loop.sh timestamp validation both require python3. Refuse before readiness
+  # so a missing interpreter cannot pass probes then die at telemetry write.
+  # (Process-group wall-timeout may use perl *or* python3; python3 alone covers both.)
+  command -v python3 >/dev/null 2>&1 \
+    || die "python3 is required for fleet runner-selection telemetry and loop-state timestamps (same runtime contract as loop.sh); install python3 or put it on PATH"
   # Global RUNNER is only the default for lanes that omit field 5. When every
   # lane declares an explicit route, do not require the default executable and
   # do not role-check it (builder separation is against actual selected runners).
@@ -2992,7 +2991,12 @@ do_start() {
     queue="${LANE_QUEUES[$i]}"
     scope="${LANE_SCOPES[$i]}"
     intent="${LANE_INTENTS[$i]}"
-    lane_runner="${LANE_SELECTED[$i]:-$RUNNER}"
+    # select_all_lane_runners fills LANE_SELECTED for every lane or dies.
+    # Never fall back to the global RUNNER here — that path was neither
+    # readiness-probed nor three-role checked when every lane declares a route.
+    lane_runner="${LANE_SELECTED[$i]:-}"
+    [[ -n "$lane_runner" ]] \
+      || die "lane $id: internal — no selected runner recorded before launch (refuse to fall back to the global default)"
     issue="${queue%%,*}"
     d=$(lane_dir "$id")
 
