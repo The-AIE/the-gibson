@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loop-fleet.sh — portable multi-lane Gibson fleet driver (issue #139)
+# loop-fleet.sh — portable multi-lane Gibson fleet driver (issues #139 / #141)
 #
 # WHY
 #   scripts/loop.sh is serial: one hat, one issue, one runner at a time. This
@@ -16,8 +16,11 @@
 #     missing/closed/gated issues, claim/PR conflicts, malformed profile).
 #   - REVIEWER_CMD is cross-vendor by default; RELEASE_CMD is a third identity.
 #     The implementation runner never grades or merges its own work.
-#   - Per-lane runner/pool routing is reserved (lane runner field) for #141
-#     and is NOT implemented here — global RUNNER only.
+#   - Per-lane runner routing (#141): optional 5th lane field is an ordered
+#     declarative route (primary first, fallbacks after). Only declared runners
+#     may be selected. Bounded readiness preflight before launch; fail over only
+#     on classified readiness failure; three-role re-check against the *actual*
+#     selected runner. Selection telemetry lives in the profile log namespace.
 #
 # PROFILE
 #   FLEET_PROFILE=/absolute/path/to/profile
@@ -56,7 +59,14 @@ LANE_IDS=()
 LANE_QUEUES=()
 LANE_SCOPES=()
 LANE_INTENTS=()
-LANE_RUNNERS=()   # reserved for #141; accepted, not used for routing
+LANE_RUNNERS=()   # optional 5th field: ordered route "primary,fallback,..." (#141)
+# Parallel selection results (filled by select_all_lane_runners before launch).
+LANE_REQUESTED=()          # primary (first declared or global RUNNER)
+LANE_SELECTED=()           # actual selected runner token
+LANE_SELECT_HEALTH=()      # healthy | degraded
+LANE_SELECT_REASON=()      # primary_ready | primary_not_ready:<class> | ...
+LANE_SELECT_POOL=()        # pool label for telemetry
+LANE_SELECT_JOIN=()        # stable join key for later outcome enrichment
 
 # Test / ops hooks (PATH stubs preferred; these override when set).
 GH_BIN="${GH_BIN:-gh}"
@@ -78,6 +88,13 @@ FLEET_SYNC_LAUNCH="${FLEET_SYNC_LAUNCH:-0}"
 FLEET_NO_WATCHDOG="${FLEET_NO_WATCHDOG:-0}"
 FLEET_SKIP_FETCH="${FLEET_SKIP_FETCH:-0}"
 FLEET_FETCH_TIMEOUT="${FLEET_FETCH_TIMEOUT:-30}"
+# Runner readiness (#141): wall-clock seconds for each CLI auth/readiness probe.
+FLEET_READINESS_TIMEOUT="${FLEET_READINESS_TIMEOUT:-8}"
+# Test hook (unset in production): directory of per-token readiness probe
+# executables named exactly as the route token basename. When set, production
+# provider probes are skipped and only these probes run (bounded + process-group
+# cleaned). Missing probe → not_found readiness failure.
+FLEET_READINESS_DIR="${FLEET_READINESS_DIR:-}"
 
 # Fleet WIP doctrine: 1–3 concurrent lanes (docs/25, DECISIONS: ≤ 3 lanes).
 FLEET_MAX_LANES=3
@@ -100,7 +117,7 @@ WHAT IT DOES
 WHY
   Embedding queues/scopes for one product repo and only swapping BASE_REPO aims
   the wrong issues at another target. An explicit profile makes the fleet
-  portable (issue #139). Per-lane runner pools are follow-up #141.
+  portable (issue #139). Per-lane ordered runner routes + readiness are #141.
 
 USAGE
   FLEET_PROFILE=/absolute/path/to/profile loop-fleet.sh [--start|--halt|--status]
@@ -111,7 +128,7 @@ OPTIONS
   --profile PATH   absolute path to a fleet profile (or set FLEET_PROFILE)
   --start          preflight + create/reuse lane bases + launch (default)
   --halt           write gibson/HALT into every lane (graceful stop)
-  --status         show profile identity and per-lane pid/hat/health
+  --status         show profile identity and per-lane pid/hat/health/runner
   --help           this help
 
 ENV (optional overrides after profile load)
@@ -119,7 +136,8 @@ ENV (optional overrides after profile load)
   GIBSON           Gibson clone (default: parent of scripts/, or profile gibson=)
   FLEET_DIR        directory for lane-* worktrees (must be absolute)
   LOG_DIR          per-lane logs (must be absolute)
-  RUNNER           builder CLI name (default: grok) — global until #141
+  RUNNER           default builder when a lane omits the route field (default: grok)
+  FLEET_READINESS_TIMEOUT  wall seconds per runner readiness probe (default: 8)
   ERROR_BUDGET     passed to loop.sh (default: 4)
   DEADLINE_SECONDS watchdog sleep before --halt (default: 79200 = 22h)
   REVIEWER_CMD     cross-vendor reviewer (default: codex exec -s read-only -)
@@ -315,15 +333,17 @@ validate_lane_id() {
 }
 
 parse_lane_line() {
-  # Fields: id|queue|scope|intent[|runner_reserved]
-  # Exactly 4 or 5 pipe-separated fields. A sixth field fails closed.
+  # Fields: id|queue|scope|intent[|ordered-route]
+  # Exactly 4 or 5 pipe-separated fields. A sixth field fails closed (#139 contract).
+  # 5th field (#141): ordered declarative route — primary first, comma-separated
+  # fallbacks after. Empty 5th field → global RUNNER only. Never source/eval.
   local raw="$1"
   local id queue scope intent runner_r rest
   # Do not eval. Split on | with read.
   IFS='|' read -r id queue scope intent rest <<<"$raw" || true
   # rest is the optional 5th field only — any further | is a sixth+ field.
   if [[ "$rest" == *"|"* ]]; then
-    die "lane line has more than 5 fields (v1 allows id|queue|scope|intent[|runner_reserved]): $raw"
+    die "lane line has more than 5 fields (v1 allows id|queue|scope|intent[|ordered-route]): $raw"
   fi
   runner_r="$rest"
 
@@ -338,18 +358,58 @@ parse_lane_line() {
   [[ -n "$scope" ]] || die "lane $id: empty exclusive scope"
   [[ -n "$intent" ]] || die "lane $id: empty intent"
 
-  # Optional 5th field: reserved for #141 routing. Accept as inert declarative
-  # data only — no shell syntax / control characters (never eval'd / sourced).
+  # Optional 5th field: ordered runner route. Hostile-data rules — no shell
+  # syntax / control characters (never eval'd / sourced / interpolated).
   if [[ -n "$runner_r" ]]; then
     case "$runner_r" in
       *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\]*|*$'\n'*|*$'\r'*|*$'\t'*)
-        die "lane $id: reserved runner field must be safe inert data (no shell syntax/control chars): $runner_r"
+        die "lane $id: runner route field must be safe inert data (no shell syntax/control chars): $runner_r"
         ;;
     esac
-    # Printable-ish token only (letters, digits, common path/name punctuation).
+    # Letters, digits, common path/name punctuation, and commas as separators.
     if [[ ! "$runner_r" =~ ^[A-Za-z0-9._/@+=:,-]+$ ]]; then
-      die "lane $id: reserved runner field has disallowed characters: $runner_r"
+      die "lane $id: runner route field has disallowed characters: $runner_r"
     fi
+    # Reject empty tokens (leading/trailing/double commas) before word-split
+    # collapse can hide them.
+    case "$runner_r" in
+      ,*|*,|*,,*)
+        die "lane $id: empty token in runner route: $runner_r"
+        ;;
+    esac
+    # Validate each comma-separated token (no empty entries, no duplicates).
+    local route_work tok seen_toks="" first_tok=1 cleaned_route=""
+    route_work=$(printf '%s' "$runner_r" | tr ',' ' ')
+    # shellcheck disable=SC2086
+    set -f
+    # intentional noglob word-split of validated token list only
+    for tok in $route_work; do
+      set +f
+      tok=$(printf '%s' "$tok" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [[ -n "$tok" ]] || die "lane $id: empty token in runner route: $runner_r"
+      case "$tok" in
+        *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\,/]*|*$'\n'*|*$'\r'*|*$'\t'*)
+          die "lane $id: hostile runner route token: $tok"
+          ;;
+      esac
+      if [[ ! "$tok" =~ ^[A-Za-z0-9._/@+=:-]+$ ]]; then
+        die "lane $id: runner route token has disallowed characters: $tok"
+      fi
+      case ",$seen_toks," in
+        *",$tok,"*) die "lane $id: duplicate runner in route: $tok" ;;
+      esac
+      seen_toks="${seen_toks},${tok}"
+      if [[ $first_tok -eq 1 ]]; then
+        cleaned_route="$tok"
+        first_tok=0
+      else
+        cleaned_route="${cleaned_route},${tok}"
+      fi
+      set -f
+    done
+    set +f
+    [[ -n "$cleaned_route" ]] || die "lane $id: empty runner route after parse"
+    runner_r="$cleaned_route"
   fi
 
   local qitem first=1 qclean="" seen="" queue_work
@@ -411,6 +471,12 @@ load_profile() {
   LANE_SCOPES=()
   LANE_INTENTS=()
   LANE_RUNNERS=()
+  LANE_REQUESTED=()
+  LANE_SELECTED=()
+  LANE_SELECT_HEALTH=()
+  LANE_SELECT_REASON=()
+  LANE_SELECT_POOL=()
+  LANE_SELECT_JOIN=()
 
   local line lineno=0 key val
   local seen_scalar_keys=""
@@ -1743,7 +1809,427 @@ cmd_provider_id() {
   provider_family_from_basename "$base"
 }
 
+# --- #141 runner routing: readiness, ordered selection, telemetry -----------
+
+# Map provider family → pool label for selection telemetry only.
+# Does not inspect billing, plans, keys, or paid settings. Flat-rate-first
+# policy is expressed by operator order in the profile route (grind lanes list
+# flat-rate pools first; metered/frontier only at escalation positions).
+pool_for_provider() {
+  local fam
+  fam=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+  case "$fam" in
+    grok)   printf 'flat-rate-grok\n' ;;
+    hermes) printf 'flat-rate-hermes\n' ;;
+    codex)  printf 'subscription-codex\n' ;;
+    claude) printf 'subscription-claude\n' ;;
+    '')     printf 'unknown\n' ;;
+    *)      printf 'other-%s\n' "$fam" ;;
+  esac
+}
+
+lane_runner_status_file() { echo "$LOG_DIR/$1.runner-status"; }
+runner_selection_log() { echo "$LOG_DIR/runner-selection.jsonl"; }
+
+# Write machine-readable per-lane selection status (status / restart durable).
+write_lane_runner_status() {
+  local id="$1" requested="$2" selected="$3" health="$4" reason="$5" pool="$6" join="$7" route="$8"
+  local path
+  path=$(lane_runner_status_file "$id")
+  # LOG_DIR already identity-validated on start; refuse path traversal via id.
+  [[ "$id" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || die "internal: bad lane id for runner status: $id"
+  cat > "$path" <<EOF
+requested_primary=$requested
+selected_runner=$selected
+selected_provider=$(cmd_provider_id "$selected" 2>/dev/null || printf '%s' "$selected")
+selected_pool=$pool
+health=$health
+reason=$reason
+route=$route
+join_key=$join
+updated=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EOF
+}
+
+# Read a key=value line from a runner-status file (no source/eval).
+read_runner_status_field() {
+  local file="$1" key="$2" line val
+  [[ -f "$file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      "${key}="*)
+        val="${line#${key}=}"
+        printf '%s\n' "$val"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  return 1
+}
+
+# Append one runner-selection telemetry record into the profile log namespace.
+# Schema is fleet-local (gibson.fleet.runner_selection.v1). The existing
+# cost-ledger (gibson.cost.v1) does not consume fallback_reason / join_key /
+# merged outcome — do not pretend it does (see issue #141 follow-up).
+write_runner_selection_telemetry() {
+  local id="$1" requested="$2" selected="$3" health="$4" reason="$5" pool="$6" join="$7" route="$8" wall_ms="$9"
+  local path ts provider
+  path=$(runner_selection_log)
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  provider=$(cmd_provider_id "$selected" 2>/dev/null || printf '%s' "$selected")
+  # JSON via python for safe escaping; fields are already validated tokens.
+  # Never include probe stdout, env, tokens, or credential material.
+  RUN_SEL_PATH="$path" RUN_SEL_TS="$ts" RUN_SEL_LANE="$id" \
+  RUN_SEL_REQ="$requested" RUN_SEL_SEL="$selected" RUN_SEL_PROV="$provider" \
+  RUN_SEL_POOL="$pool" RUN_SEL_HEALTH="$health" RUN_SEL_REASON="$reason" \
+  RUN_SEL_JOIN="$join" RUN_SEL_ROUTE="$route" RUN_SEL_WALL="$wall_ms" \
+  RUN_SEL_PROFILE="$PROFILE_NAME" RUN_SEL_SLUG="$EXPECTED_SLUG" \
+  python3 -c '
+import json, os, sys
+ev = {
+  "schema": "gibson.fleet.runner_selection.v1",
+  "ts": os.environ["RUN_SEL_TS"],
+  "profile": os.environ["RUN_SEL_PROFILE"],
+  "slug": os.environ["RUN_SEL_SLUG"],
+  "lane": os.environ["RUN_SEL_LANE"],
+  "requested_primary": os.environ["RUN_SEL_REQ"],
+  "selected_runner": os.environ["RUN_SEL_SEL"],
+  "selected_provider": os.environ["RUN_SEL_PROV"],
+  "selected_pool": os.environ["RUN_SEL_POOL"],
+  "health": os.environ["RUN_SEL_HEALTH"],
+  "fallback_reason": os.environ["RUN_SEL_REASON"],
+  "route": os.environ["RUN_SEL_ROUTE"],
+  "wall_ms": int(os.environ["RUN_SEL_WALL"] or "0"),
+  "join_key": os.environ["RUN_SEL_JOIN"],
+}
+path = os.environ["RUN_SEL_PATH"]
+line = json.dumps(ev, separators=(",", ":"), sort_keys=True) + "\n"
+with open(path, "a", encoding="utf-8") as f:
+    f.write(line)
+' || die "failed to write runner-selection telemetry for lane $id"
+}
+
+# Redact readiness probe output: never surface tokens/keys/env/credential material.
+# Returns a short classification-safe diagnostic fragment only.
+redact_readiness_output() {
+  local raw="$1"
+  # Drop everything; callers only get classified reasons. Keep length hint only.
+  local n
+  n=$(printf '%s' "$raw" | wc -c | tr -d '[:space:]')
+  if [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]]; then
+    printf 'output_redacted_bytes=%s' "$n"
+  else
+    printf 'output_empty'
+  fi
+}
+
+# Bounded, noninteractive, credential-safe readiness probe for one runner token.
+# Prints a classification on stdout: ready | not_found | timeout | not_ready | auth_fail
+# Exit 0 only when ready. Hung checks terminate only the exact captured process group.
+# Probe stdout/stderr is never logged — only the classification.
+check_runner_readiness() {
+  local token="$1"
+  local limit="${FLEET_READINESS_TIMEOUT:-8}"
+  local exe family outf rc probe base
+
+  [[ "$limit" =~ ^[1-9][0-9]*$ ]] || die "FLEET_READINESS_TIMEOUT must be a positive integer (got: $limit)"
+  [[ -n "$token" ]] || { printf 'not_found\n'; return 1; }
+
+  # Test hook: per-token probe executable in FLEET_READINESS_DIR (basename only).
+  if [[ -n "${FLEET_READINESS_DIR:-}" ]]; then
+    if ! command -v perl >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+      printf 'infra_no_pgrp\n'
+      return 1
+    fi
+    base=$(basename "$token")
+    # basename of validated token only — never path-join hostile segments.
+    if [[ ! "$base" =~ ^[A-Za-z0-9._@+=:-]+$ ]]; then
+      printf 'not_found\n'
+      return 1
+    fi
+    probe="${FLEET_READINESS_DIR}/${base}"
+    if [[ ! -x "$probe" || -d "$probe" ]]; then
+      printf 'not_found\n'
+      return 1
+    fi
+    outf=$(mktemp "${TMPDIR:-/tmp}/fleet-ready.XXXXXX") || { printf 'not_ready\n'; return 1; }
+    set +e
+    run_with_wall_timeout "$limit" "$probe" >"$outf" 2>&1
+    rc=$?
+    set -e
+    rm -f "$outf"
+    if [[ $rc -eq 124 ]]; then
+      printf 'timeout\n'
+      return 1
+    fi
+    if [[ $rc -eq 0 ]]; then
+      printf 'ready\n'
+      return 0
+    fi
+    # Convention for test probes: exit 3 => auth_fail; else not_ready.
+    if [[ $rc -eq 3 ]]; then
+      printf 'auth_fail\n'
+      return 1
+    fi
+    printf 'not_ready\n'
+    return 1
+  fi
+
+  # Production path: resolve executable, run fixed family probe (no profile interpolation).
+  # Hung-check cleanup requires process-group leadership (perl or python3).
+  if ! command -v perl >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    printf 'infra_no_pgrp\n'
+    return 1
+  fi
+  if [[ "$token" == /* ]]; then
+    # Absolute path tokens only — never resolve relative/hostile paths.
+    case "$token" in
+      *..*) printf 'not_found\n'; return 1 ;;
+    esac
+    if [[ ! -x "$token" || -d "$token" ]]; then
+      printf 'not_found\n'
+      return 1
+    fi
+    exe="$token"
+  else
+    if ! exe=$(command -v "$token" 2>/dev/null); then
+      printf 'not_found\n'
+      return 1
+    fi
+  fi
+
+  family=$(provider_family_from_basename "$(basename "$exe")") || family="other"
+  outf=$(mktemp "${TMPDIR:-/tmp}/fleet-ready.XXXXXX") || { printf 'not_ready\n'; return 1; }
+  set +e
+  # Fixed argv tables only — never eval, never interpolate profile strings into shell.
+  case "$family" in
+    grok)
+      run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+      rc=$?
+      ;;
+    codex)
+      # Prefer noninteractive auth status; fall back to --version if status unsupported.
+      run_with_wall_timeout "$limit" "$exe" login status >"$outf" 2>&1
+      rc=$?
+      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
+        run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+        rc=$?
+      fi
+      ;;
+    claude)
+      run_with_wall_timeout "$limit" "$exe" auth status >"$outf" 2>&1
+      rc=$?
+      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
+        run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+        rc=$?
+      fi
+      ;;
+    hermes)
+      run_with_wall_timeout "$limit" "$exe" status >"$outf" 2>&1
+      rc=$?
+      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
+        run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+        rc=$?
+      fi
+      ;;
+    *)
+      # Unknown / test stubs: noninteractive --version or bare exit 0.
+      run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+      rc=$?
+      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
+        run_with_wall_timeout "$limit" "$exe" >"$outf" 2>&1
+        rc=$?
+      fi
+      ;;
+  esac
+  set -e
+  # Destroy probe output immediately — never log raw content (credentials risk).
+  rm -f "$outf"
+
+  if [[ $rc -eq 124 ]]; then
+    printf 'timeout\n'
+    return 1
+  fi
+  if [[ $rc -eq 0 ]]; then
+    printf 'ready\n'
+    return 0
+  fi
+  # Non-zero from auth-ish probes → auth_fail; bare version failures → not_ready.
+  case "$family" in
+    codex|claude|hermes)
+      printf 'auth_fail\n'
+      ;;
+    *)
+      printf 'not_ready\n'
+      ;;
+  esac
+  return 1
+}
+
+# True when builder provider collides with reviewer or release identity.
+builder_conflicts_three_role() {
+  local builder="$1"
+  local b_id rev_id rel_id
+  b_id=$(cmd_provider_id "$builder") || return 0
+  rev_id=$(cmd_provider_id "$REVIEWER_CMD") || return 0
+  rel_id=$(cmd_provider_id "$RELEASE_CMD") || return 0
+  [[ -n "$b_id" && -n "$rev_id" && -n "$rel_id" ]] || return 0
+  if [[ "$b_id" == "$rev_id" || "$b_id" == "$rel_id" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Select runner for one lane from its declared ordered route.
+# Fail over only on classified readiness failure. A ready runner that collides
+# with reviewer/release is refused (cannot bypass three-role via fallback).
+# Prints nothing; sets LANE_* selection arrays via caller index or writes status.
+# On total failure: die with actionable diagnostic (provider names, no credentials).
+select_lane_runner() {
+  local idx="$1"
+  local id route requested selected health reason pool join
+  local tok class wall_start wall_end wall_ms tried=""
+  local route_work
+
+  id="${LANE_IDS[$idx]}"
+  route="${LANE_RUNNERS[$idx]}"
+  if [[ -z "$route" ]]; then
+    route="$RUNNER"
+  fi
+  requested="${route%%,*}"
+  [[ -n "$requested" ]] || die "lane $id: empty requested primary runner"
+
+  wall_start=$(date +%s 2>/dev/null || echo 0)
+  selected=""
+  health="healthy"
+  reason="primary_ready"
+  # shellcheck disable=SC2086
+  route_work=$(printf '%s' "$route" | tr ',' ' ')
+  set -f
+  for tok in $route_work; do
+    set +f
+    tok=$(printf '%s' "$tok" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [[ -n "$tok" ]] || continue
+    class=$(check_runner_readiness "$tok") || true
+    case "$class" in
+      ready)
+        # Three-role against the *actual* candidate. Ready + role conflict
+        # fails closed immediately — failover is only for readiness failures,
+        # and fallback cannot bypass the three-role rule by skipping past a
+        # ready-but-illegal candidate.
+        if builder_conflicts_three_role "$tok"; then
+          die "lane $id: selected runner '$tok' collides with reviewer/release identity (provider=$(cmd_provider_id "$tok" 2>/dev/null || echo unresolved)). Fallback cannot bypass the three-role rule. route=$route tried=${tried:-none}"
+        fi
+        selected="$tok"
+        if [[ "$tok" == "$requested" ]]; then
+          health="healthy"
+          reason="primary_ready"
+        else
+          health="degraded"
+          reason="primary_not_ready:${tried:-unknown};selected_fallback"
+        fi
+        break
+        ;;
+      infra_no_pgrp)
+        die "lane $id: runner readiness requires perl or python3 to establish a process group for wall-timeout (no bare-child fallback); route token=$tok"
+        ;;
+      timeout|not_found|not_ready|auth_fail)
+        tried="${tried}${tried:+;}${tok}=${class}"
+        set -f
+        continue
+        ;;
+      *)
+        tried="${tried}${tried:+;}${tok}=not_ready"
+        set -f
+        continue
+        ;;
+    esac
+  done
+  set +f
+
+  wall_end=$(date +%s 2>/dev/null || echo 0)
+  wall_ms=0
+  if [[ "$wall_start" =~ ^[0-9]+$ && "$wall_end" =~ ^[0-9]+$ && "$wall_end" -ge "$wall_start" ]]; then
+    wall_ms=$(( (wall_end - wall_start) * 1000 ))
+  fi
+
+  if [[ -z "$selected" ]]; then
+    die "lane $id: no declared runner is ready (route=$route tried=${tried:-none}). Fail closed with zero new lane launches. Check CLI install/auth for named providers only — no credentials are printed."
+  fi
+
+  pool=$(pool_for_provider "$(cmd_provider_id "$selected" 2>/dev/null || echo other)")
+  # Stable join key for later merged-PR outcome enrichment (fleet-local).
+  join="fleet-sel:v1:${PROFILE_NAME}:${id}:${requested}:${selected}:$(date -u +"%Y%m%dT%H%M%SZ")"
+
+  LANE_REQUESTED[$idx]="$requested"
+  LANE_SELECTED[$idx]="$selected"
+  LANE_SELECT_HEALTH[$idx]="$health"
+  LANE_SELECT_REASON[$idx]="$reason"
+  LANE_SELECT_POOL[$idx]="$pool"
+  LANE_SELECT_JOIN[$idx]="$join"
+
+  write_lane_runner_status "$id" "$requested" "$selected" "$health" "$reason" "$pool" "$join" "$route"
+  write_runner_selection_telemetry "$id" "$requested" "$selected" "$health" "$reason" "$pool" "$join" "$route" "$wall_ms"
+  info "lane $id runner: requested=$requested actual=$selected health=$health reason=$reason pool=$pool"
+}
+
+# Select runners for every lane before any new launch. Already-running healthy
+# lanes keep their persisted status. Any selection failure dies before launch.
+select_all_lane_runners() {
+  local i id pid statusf
+  LANE_REQUESTED=()
+  LANE_SELECTED=()
+  LANE_SELECT_HEALTH=()
+  LANE_SELECT_REASON=()
+  LANE_SELECT_POOL=()
+  LANE_SELECT_JOIN=()
+  # Pre-size arrays for bash 3.2 index assignment.
+  i=0
+  while [[ $i -lt ${#LANE_IDS[@]} ]]; do
+    LANE_REQUESTED+=("")
+    LANE_SELECTED+=("")
+    LANE_SELECT_HEALTH+=("")
+    LANE_SELECT_REASON+=("")
+    LANE_SELECT_POOL+=("")
+    LANE_SELECT_JOIN+=("")
+    i=$((i + 1))
+  done
+
+  i=0
+  while [[ $i -lt ${#LANE_IDS[@]} ]]; do
+    id="${LANE_IDS[$i]}"
+    if [[ -d "$(lane_dir "$id")" ]]; then
+      assert_lane_identity "$id" 2>/dev/null || true
+    fi
+    if pid=$(lane_pid_alive "$id" 2>/dev/null); then
+      # Healthy lane: reload persisted selection for status continuity.
+      statusf=$(lane_runner_status_file "$id")
+      if [[ -f "$statusf" ]]; then
+        LANE_REQUESTED[$i]=$(read_runner_status_field "$statusf" "requested_primary" || echo "?")
+        LANE_SELECTED[$i]=$(read_runner_status_field "$statusf" "selected_runner" || echo "?")
+        LANE_SELECT_HEALTH[$i]=$(read_runner_status_field "$statusf" "health" || echo "healthy")
+        LANE_SELECT_REASON[$i]=$(read_runner_status_field "$statusf" "reason" || echo "already_running")
+        LANE_SELECT_POOL[$i]=$(read_runner_status_field "$statusf" "selected_pool" || echo "unknown")
+        LANE_SELECT_JOIN[$i]=$(read_runner_status_field "$statusf" "join_key" || echo "")
+      else
+        LANE_REQUESTED[$i]="${LANE_RUNNERS[$i]:-$RUNNER}"
+        LANE_REQUESTED[$i]="${LANE_REQUESTED[$i]%%,*}"
+        LANE_SELECTED[$i]="${LANE_REQUESTED[$i]}"
+        LANE_SELECT_HEALTH[$i]="healthy"
+        LANE_SELECT_REASON[$i]="already_running_no_status"
+        LANE_SELECT_POOL[$i]=$(pool_for_provider "$(cmd_provider_id "${LANE_SELECTED[$i]}" 2>/dev/null || echo other)")
+        LANE_SELECT_JOIN[$i]=""
+      fi
+      info "lane $id already running (pid $pid) — keep runner selection status"
+    else
+      select_lane_runner "$i"
+    fi
+    i=$((i + 1))
+  done
+}
+
 assert_three_role_separation() {
+
   # Never allow the implementation runner to grade or release its own work.
   # Compare normalized first-executable provider identities only — never substring
   # match on the full command (a Grok argv containing the word "codex" is still Grok).
@@ -1839,8 +2325,10 @@ do_status() {
   print_identity
   # Refuse to report status for a foreign fleet/log namespace.
   assert_profile_identity_for_reuse
-  printf '%-12s %-14s %-6s %-8s %-11s %s\n' LANE QUEUE PID HAT HEALTH LAST
+  printf '%-10s %-12s %-6s %-8s %-9s %-10s %-10s %-12s %s\n' \
+    LANE QUEUE PID HAT HEALTH REQUESTED ACTUAL REASON LAST
   local dead=0 i id queue d pid hat last health
+  local req act rreason rhealth statusf route_field
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
     id="${LANE_IDS[$i]}"
@@ -1855,7 +2343,7 @@ do_status() {
     # Shared space/no-space field grammar (lane_state_field / loop.sh read_field).
     hat=$(lane_state_field "$id" "hat" 2>/dev/null || true)
     hat=$(printf '%s' "${hat:-}" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    last=$(tail -1 "$(lane_log "$id")" 2>/dev/null | cut -c1-50 || true)
+    last=$(tail -1 "$(lane_log "$id")" 2>/dev/null | cut -c1-40 || true)
 
     if [[ ! -d "$d" ]]; then
       health="BASE-GONE"; dead=1
@@ -1867,8 +2355,27 @@ do_status() {
       health="DEAD"; dead=1
     fi
 
-    printf '%-12s %-14s %-6s %-8s %-11s %s\n' \
-      "$id" "$queue" "${pid:-—}" "${hat:-—}" "$health" "${last:-—}"
+    # Runner selection status (persisted under log namespace).
+    statusf=$(lane_runner_status_file "$id")
+    route_field="${LANE_RUNNERS[$i]}"
+    if [[ -z "$route_field" ]]; then
+      req="$RUNNER"
+    else
+      req="${route_field%%,*}"
+    fi
+    act="—"
+    rreason="—"
+    rhealth="—"
+    if [[ -f "$statusf" ]]; then
+      req=$(read_runner_status_field "$statusf" "requested_primary" || echo "$req")
+      act=$(read_runner_status_field "$statusf" "selected_runner" || echo "—")
+      rreason=$(read_runner_status_field "$statusf" "reason" || echo "—")
+      rhealth=$(read_runner_status_field "$statusf" "health" || echo "—")
+    fi
+
+    printf '%-10s %-12s %-6s %-8s %-9s %-10s %-10s %-12s %s\n' \
+      "$id" "$queue" "${pid:-—}" "${hat:-—}" "$health" \
+      "${req:-—}" "${act:-—}" "${rhealth:-—}/${rreason:-—}" "${last:-—}"
     i=$((i + 1))
   done
   if [[ $dead -eq 1 ]]; then
@@ -2200,6 +2707,9 @@ do_start() {
   ensure_profile_runtime_dirs
   # Complete preflight BEFORE any worktree mutation or runner launch.
   preflight_for_start
+  # #141: ordered readiness + selection for every lane before any new launch.
+  # Fail closed here ⇒ zero new launches (running lanes left untouched).
+  select_all_lane_runners
 
   if [[ "$FLEET_SKIP_FETCH" == "1" ]]; then
     info "skip git fetch (FLEET_SKIP_FETCH=1)"
@@ -2216,13 +2726,14 @@ do_start() {
     || die "invalid remote default pin: $pin_line"
   info "lane base pin: origin/$default_name @ $default_sha"
 
-  local i id queue scope intent d issue pid
+  local i id queue scope intent d issue pid lane_runner
   i=0
   while [[ $i -lt ${#LANE_IDS[@]} ]]; do
     id="${LANE_IDS[$i]}"
     queue="${LANE_QUEUES[$i]}"
     scope="${LANE_SCOPES[$i]}"
     intent="${LANE_INTENTS[$i]}"
+    lane_runner="${LANE_SELECTED[$i]:-$RUNNER}"
     issue="${queue%%,*}"
     d=$(lane_dir "$id")
 
@@ -2278,7 +2789,7 @@ do_start() {
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
         "$LOOP_SH" \
-        --runner "$RUNNER" \
+        --runner "$lane_runner" \
         --repo "$d" \
         --repo-slug "$EXPECTED_SLUG" \
         --gibson "$GIBSON" \
@@ -2290,7 +2801,7 @@ do_start() {
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
         "$LOOP_SH" \
-        --runner "$RUNNER" \
+        --runner "$lane_runner" \
         --repo "$d" \
         --repo-slug "$EXPECTED_SLUG" \
         --gibson "$GIBSON" \

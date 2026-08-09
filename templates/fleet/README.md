@@ -12,9 +12,8 @@ The legacy laptop driver (`~/.claude/fleet/loop-fleet.sh`) exposed `BASE_REPO`
 but embedded Chatterbuilt issue queues, scopes, and intent. Pointing
 `BASE_REPO` at Gibson (or any other checkout) could open the wrong issue
 numbers against the wrong tree. Issue **#139** moves target / queue / scope /
-intent into an **explicit versioned profile**. Per-lane runner and pool
-balancing is **#141** (not implemented here); the optional lane `runner` field
-is accepted so profiles stay forwards-compatible.
+intent into an **explicit versioned profile**. Per-lane ordered runner routes,
+bounded readiness, and selection telemetry are **#141** (this release).
 
 ## Format version 1
 
@@ -30,7 +29,7 @@ executes it.
 | `gibson` | no | Absolute path to The Gibson clone |
 | `fleet_dir` | no | Absolute dir for long-lived `lane-*` worktrees |
 | `log_dir` | no | Absolute dir for per-lane logs |
-| `runner` | no | Global builder CLI name (default `grok` / env `RUNNER`) |
+| `runner` | no | Default builder when a lane omits its route field (default `grok` / env `RUNNER`) |
 | `error_budget` | no | Passed to `loop.sh` |
 | `deadline_seconds` | no | Watchdog sleep before graceful `--halt` |
 | `lane` | 1–3 | One lane record per line (see below). Fleet WIP doctrine caps concurrent lanes at **3**; a fourth lane fails closed with zero launches. |
@@ -46,7 +45,8 @@ required and allowed (subject to unique lane ids and disjoint issues/scopes).
 
 ```text
 lane=ID|QUEUE|SCOPE|INTENT
-lane=ID|QUEUE|SCOPE|INTENT|RUNNER_RESERVED
+lane=ID|QUEUE|SCOPE|INTENT|PRIMARY
+lane=ID|QUEUE|SCOPE|INTENT|PRIMARY,FALLBACK1,FALLBACK2
 ```
 
 - **ID** — unique; letters/digits/`_`/`-`; must not start with `wt-` (release
@@ -55,8 +55,45 @@ lane=ID|QUEUE|SCOPE|INTENT|RUNNER_RESERVED
 - **SCOPE** — space-separated path/glob tokens; **disjoint across lanes**
   (prefix/containment check, not string-equality alone).
 - **INTENT** — free text the builder re-reads each hat.
-- **RUNNER_RESERVED** — optional 5th field for **#141**; accepted, ignored for
-  routing in this release (global `runner` / `RUNNER` still applies).
+- **ORDERED-RUNNER-ROUTE** — optional 5th field (**#141**): comma-separated CLI
+  names, **primary first**, explicit fallbacks after. Empty (or omitted) →
+  global `runner` / `RUNNER` only. Only declared tokens may be selected. A
+  sixth pipe field still fails closed (forwards-compatible with #139).
+
+### Runner routing (#141)
+
+Before any new lane launch the driver:
+
+1. Builds each lane's declared route (5th field, or global `runner`).
+2. Preflights each configured CLI with a **bounded, noninteractive,
+   credential-safe** readiness probe (process-group wall timeout; hung checks
+   kill only the exact captured group). Probe stdout/stderr is discarded —
+   never logged (no tokens, keys, env, or raw credential material).
+3. Selects the **first ready** runner in declared order. Fail over **only** on
+   a classified readiness failure (`not_found`, `timeout`, `not_ready`,
+   `auth_fail`). Operator order is preserved (no automatic reordering).
+4. Re-checks three-role separation against the **actual selected** builder.
+   A ready candidate that collides with reviewer or release **fails closed**
+   (fallback cannot bypass Law 5).
+5. If no declared runner is ready/selectable → **fail closed, zero new
+   launches**, with a diagnostic naming providers only.
+6. Passes the selected runner to `loop.sh --runner`. Status shows
+   requested primary, actual runner, and healthy/degraded/fallback reason
+   (persisted under the profile log namespace for idempotent restart).
+7. Appends a fleet-local telemetry record
+   (`gibson.fleet.runner_selection.v1` JSONL in `LOG_DIR/runner-selection.jsonl`)
+   with selected provider/pool, fallback reason, selection wall time, and a
+   stable `join_key` for later merged-PR outcome enrichment.
+
+**Flat-rate-first (docs/15):** grind lanes should list flat-rate pools first
+(e.g. `grok`) and metered/frontier providers only at escalation positions.
+The driver does **not** inspect billing, plans, keys, or paid settings and
+does **not** reorder the route.
+
+**Cost-ledger boundary:** selection telemetry is intentionally separate from
+`scripts/cost-ledger.sh` (`gibson.cost.v1`), which has no fields for
+`fallback_reason`, `join_key`, or merged-PR outcome join. Wiring those into
+the cost ledger is a follow-up outside the #141 file claim.
 
 Unknown keys, duplicate lane ids, empty queue/scope/intent, non-absolute or
 `..`-bearing paths, and overlapping scopes all **fail closed** before any
@@ -202,4 +239,4 @@ any pid helper that might delete a stale pidfile.
 - Solo loop doctrine: [`docs/11-solo-loop.md`](../../docs/11-solo-loop.md)
 - Concurrency / scopes: [`docs/05-concurrency.md`](../../docs/05-concurrency.md)
 - Overnight single-loop dogfood: [`playbooks/dogfood-overnight.md`](../../playbooks/dogfood-overnight.md)
-- Follow-up: issue **#141** (per-lane runner / pool routing)
+- Runner routing: issue **#141** (ordered routes, readiness, selection telemetry)

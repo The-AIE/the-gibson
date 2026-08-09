@@ -8,8 +8,7 @@
 #   # or:
 #   /absolute/path/to/the-gibson/scripts/loop-fleet.sh --profile /absolute/path/to/this-file --status
 #
-# Spec: templates/fleet/README.md  ·  driver: scripts/loop-fleet.sh  ·  issue #139
-# Per-lane runner / pool routing is reserved for issue #141 (runner field below).
+# Spec: templates/fleet/README.md  ·  driver: scripts/loop-fleet.sh  ·  issues #139 / #141
 
 version=1
 name=example-target
@@ -28,30 +27,38 @@ slug=owner/your-target-repo
 # fleet_dir=/absolute/path/to/fleet-worktrees
 # log_dir=/absolute/path/to/fleet-logs
 
-# Optional global builder (until #141 per-lane routing).
+# Optional global default builder when a lane omits its route field.
 # runner=grok
 # error_budget=4
 # deadline_seconds=79200
 
 # ---------------------------------------------------------------------------
 # Lanes — one `lane=` line each. Pipe-separated fields:
-#   id|ordered-issue-queue|exclusive-scope|intent[|runner-reserved-for-141]
+#   id|ordered-issue-queue|exclusive-scope|intent[|ordered-runner-route]
 #
 # - id: unique, [A-Za-z][A-Za-z0-9_-]*  (never wt-* — those names are disposable)
 # - queue: comma-separated positive issue numbers, work order left → right
 # - scope: space-separated path/glob tokens; must be disjoint across lanes
 # - intent: free text the builder re-reads every hat
-# - runner: optional 5th field accepted and ignored for routing until #141
+# - ordered-runner-route (#141): optional 5th field — comma-separated runner
+#   CLIs, primary first, explicit fallbacks after. Empty → global runner=.
+#   Only declared runners may be selected. Fail over only on readiness failure.
+#
+# Flat-rate-first (docs/15): grind lanes should list flat-rate pools first
+# (e.g. grok) and metered/frontier providers only at escalation positions.
+# The driver preserves operator order; it does not reorder by price or inspect
+# billing/plans/keys.
 # ---------------------------------------------------------------------------
 
 # Example: Gibson self-dogfood / Autonomy Readiness (issue #96 and friends).
 # Replace issue numbers with open, non-gated items from the live backlog.
-lane=docs|96|docs/** playbooks/** memory/dogfood/**|Overnight dogfood + operator playbooks (Autonomy Readiness / #96). Stay out of scripts/**.
-lane=harness|89|scripts/**|Self-gate and harness sensors only. Do not edit docs/** or playbooks/**.
+# Grind lane: flat-rate primary, subscription fallback only if primary is not ready.
+lane=docs|96|docs/** playbooks/** memory/dogfood/**|Overnight dogfood + operator playbooks (Autonomy Readiness / #96). Stay out of scripts/**.|grok,codex
+lane=harness|89|scripts/**|Self-gate and harness sensors only. Do not edit docs/** or playbooks/**.|grok
 
 # Chatterbuilt-shaped illustration (synthetic issue ids — NOT a live queue).
 # Migrate your real Chatterbuilt LANES into a local profile that is never
 # committed to the generic Gibson tree. Scopes show the disjoint-lane idea:
-#   lane=mcpcore|1001,1002|apps/mcp/lib/** apps/mcp/app/**|MCP server work
-#   lane=growth|1003|marketing/app/** marketing/components/**|Marketing surface
-#   lane=docs|1004|docs/**|Docs only
+#   lane=mcpcore|1001,1002|apps/mcp/lib/** apps/mcp/app/**|MCP server work|grok,codex
+#   lane=growth|1003|marketing/app/** marketing/components/**|Marketing surface|grok
+#   lane=docs|1004|docs/**|Docs only|grok
