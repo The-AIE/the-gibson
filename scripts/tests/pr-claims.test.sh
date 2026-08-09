@@ -164,12 +164,17 @@ stage_pages() {
 }
 
 open_pr() {
-  # number body headRefName url createdAt updatedAt. Defaults use ${N-x}, not
-  # ${N:-x}: a caller that explicitly passes '' (to test a missing timestamp)
-  # must get an empty field, not the default — ${N:-x} would silently
-  # substitute the default for an empty string too and defeat that fixture.
-  printf '{"number":%s,"body":"%s","headRefName":"%s","url":"%s","createdAt":"%s","updatedAt":"%s"}' \
-    "$1" "$2" "$3" "$4" "${5-2026-08-01T00:00:00Z}" "${6-2026-08-02T00:00:00Z}"
+  # number body headRefName url createdAt updatedAt isCrossRepository.
+  # Defaults use ${N-x}, not ${N:-x}: a caller that explicitly passes '' (to
+  # test a missing timestamp) must get an empty field, not the default —
+  # ${N:-x} would silently substitute the default for an empty string too and
+  # defeat that fixture.
+  #
+  # $7 is a raw JSON literal so a fixture can stage `true` (a fork PR),
+  # `null`, or a wrong-typed value like `"false"` (#153 review round 5).
+  printf '{"number":%s,"body":"%s","headRefName":"%s","url":"%s","createdAt":"%s","updatedAt":"%s","isCrossRepository":%s}' \
+    "$1" "$2" "$3" "$4" "${5-2026-08-01T00:00:00Z}" "${6-2026-08-02T00:00:00Z}" \
+    "${7-false}"
 }
 
 term_pr() {

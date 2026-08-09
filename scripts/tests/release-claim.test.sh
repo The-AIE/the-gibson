@@ -31,6 +31,71 @@ bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
 lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+# A typo'd assertion must never be a silent no-op (#153 review round 5): bash
+# calls this hook when a command name does not resolve, so an undefined helper
+# is a COUNTED failure instead of a stderr line under a green tally. Returning
+# 127 preserves the original exit status. (bash 4+; a no-op on bash 3.2.)
+command_not_found_handle() {
+  bad "the suite invoked an undefined command '$1' — a shell error may never coexist with a green tally"
+  return 127
+}
+
+# --- a fake `gh` may never read stdin (#153 review round 5) -----------------
+# The `list-open-numbers` branch of the terminal fixture's fake gh used to end
+# in `cut … | grep -vxF -f … || cat >/dev/null`. `A | B || C` is `(A | B) || C`
+# and grep exits 1 when it selects nothing — the ORDINARY case, since most
+# fixtures stage an empty open inventory — so the fallback `cat` ran with the
+# fake's inherited stdin and blocked forever. The suite did not fail; it hung,
+# which is strictly worse, because a hang produces no receipt at all.
+#
+# This probe is the sensor for that class. It runs the fake with a stdin that
+# is open and will never deliver a byte, and requires it to finish anyway.
+# Bounded by construction: it kills the probe and FAILS rather than inheriting
+# the very hang it is testing for.
+assert_gh_never_reads_stdin() { # fake-path label
+  local fake="$1" label="$2" fifo pid waited=0
+  fifo="$ROOT/gh-stdin-probe.$$"
+  rm -f "$fifo"
+  mkfifo "$fifo" 2>/dev/null || { bad "$label: could not create the stdin probe fifo"; return; }
+  # Opened read-write from this shell so the reader never sees EOF and the
+  # open() itself never blocks.
+  exec 9<>"$fifo"
+  "$fake" api graphql -f query='query openPrNumbers($owner: String!, $name: String!)' \
+    >/dev/null 2>&1 <&9 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [[ "$waited" -gt 100 ]]; then   # ~5s
+      kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      exec 9>&-
+      rm -f "$fifo"
+      bad "$label: the fake gh blocked on stdin answering list-open-numbers (it must never read stdin)"
+      return
+    fi
+    sleep 0.05
+  done
+  wait "$pid" 2>/dev/null
+  exec 9>&-
+  rm -f "$fifo"
+  ok "$label: answers list-open-numbers without ever reading stdin"
+}
+
+# One 8-field `pr-claims.sh list` row: number, claim, scope, head branch, url,
+# created, updated, is_cross_repository (#153 review round 5). $5 overrides the
+# identity column so a fixture can stage a fork PR.
+#
+# Defined HERE, with the other helpers, rather than beside the fixtures that
+# happen to use it most. It was previously declared two thirds of the way down
+# the file, below three round-5 fixtures that already called it: those calls
+# resolved to nothing, their `> "$GH_PR_OPEN_TSV"` redirections still truncated
+# the file, and the fixtures then ran against an EMPTY open inventory — which
+# is a different scenario from the one they are named for, and which they
+# quietly failed. Helpers go above every caller.
+open_row() {
+  printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\t%s\n' \
+    "$1" "$2" "$3" "$4" "$1" "${5:-false}"
+}
 
 # --- harness-owned `git` command shim (#153 review round 3, P1) -------------
 # The TOCTOU sensors below need a mutation to land inside a specific window
@@ -2148,11 +2213,32 @@ case "$1" in
       if [[ -n "${GH_OPEN_CALLS:-}" ]]; then
         calls=$(cat "$GH_OPEN_CALLS" 2>/dev/null || echo 0)
       fi
+      open_src="${GH_PR_OPEN_TSV:-/dev/null}"
       if [[ "$calls" -ge 2 && -n "${GH_PR_OPEN_TSV2:-}" ]]; then
-        cut -f1 "$GH_PR_OPEN_TSV2" 2>/dev/null
-      else
-        cut -f1 "${GH_PR_OPEN_TSV:-/dev/null}" 2>/dev/null
+        open_src="$GH_PR_OPEN_TSV2"
       fi
+      # A PR this fixture already CLOSED is no longer open — the whole point of
+      # the body-agnostic inventory is that it is keyed on the number, so it
+      # has to move when the number's state moves (#153 review round 5). A
+      # fixture that wants a LYING close (gh reports success, the PR is still
+      # open) states that explicitly with GH_PR_OPEN_NUMBERS above.
+      #
+      # Written as ONE awk pass, deliberately (#153 review round 5). This was
+      # `cut … | grep -vxF -f … || cat >/dev/null`, which had two defects that
+      # between them hung the whole suite:
+      #   * `A | B || C` is `(A | B) || C`, and grep exits 1 when it selects no
+      #     lines — the ordinary case here, since most fixtures stage an EMPTY
+      #     open inventory. The fallback `cat` then ran with the fake's own
+      #     inherited stdin and blocked forever. A fake gh may never read stdin.
+      #   * `grep -f` on an empty pattern file is not portable: GNU grep treats
+      #     it as "no patterns" (so -v passes everything through) while other
+      #     greps have historically matched nothing at all.
+      # awk reads only the files it is given, cannot block, and behaves the
+      # same on GNU and BSD userlands.
+      awk -F '\t' -v closed="${GH_PR_CLOSED_NUMBERS:-/dev/null}" '
+        BEGIN { while ((getline n < closed) > 0) if (n != "") shut[n] = 1 }
+        $1 != "" && !($1 in shut) { print $1 }
+      ' "$open_src" 2>/dev/null
       exit "${GH_PR_OPEN_NUMBERS_EXIT:-0}"
     fi
     want_open=0
@@ -2204,6 +2290,9 @@ case "$1" in
       # Deliberately a DIFFERENT log from GH_LOG (which records label edits):
       # several assertions read GH_LOG to prove the label was never touched.
       echo "pr close $2" >> "${GH_PR_CLOSE_LOG:-/dev/null}"
+      if [[ "${GH_PR_CLOSE_EXIT:-0}" -eq 0 && -n "${GH_PR_CLOSED_NUMBERS:-}" ]]; then
+        echo "$2" >> "$GH_PR_CLOSED_NUMBERS"
+      fi
       exit "${GH_PR_CLOSE_EXIT:-0}"
     fi
     exit 1
@@ -2222,13 +2311,23 @@ case "$1" in
     fi
     exit 0
     ;;
-  *) exit 1 ;;
+  # Loud and BOUNDED (#153 review round 5). An unmodelled gh subcommand is a
+  # gap in this fixture, not a success: say so on stderr — which release-claim
+  # folds into its own error text, so the receipt names the real cause — and
+  # exit nonzero so the caller fails closed. Never `exit 0`, and never read
+  # stdin.
+  *)
+    echo "fake gh (term fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+    exit 64
+    ;;
 esac
 FAKE
 chmod +x "$ROOT/term/bin/gh"
 export PATH="$ROOT/term/bin:$PATH"
 export GH_PR_OPEN_TSV="$ROOT/term/open.tsv"
 : > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSED_NUMBERS="$ROOT/term/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
 export GH_PR_ALL_TSV="$ROOT/term/all.tsv"
 export GH_STATE="$ROOT/term/gh-state"
 export GH_LOG="$ROOT/term/gh.log"
@@ -2236,6 +2335,11 @@ export GH_LABELS="agent-claimed,tier-b"
 unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
 unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 rm -f "$GH_STATE" "$GH_LOG"
+
+# Probed in EXACTLY the configuration that used to hang the whole suite: an
+# empty open inventory and an empty closed-numbers file, which is what made
+# the body-agnostic filter select no lines at all.
+assert_gh_never_reads_stdin "$ROOT/term/bin/gh" "terminal fixture"
 
 # Row layout (13 tab-separated fields, matches pr-claims.sh find-terminal):
 #   number claim scope issue head_branch head_sha url state is_cross
@@ -2360,6 +2464,178 @@ table=$(cd "$ROOT/term/canon" && git fetch -q origin && git show origin/main:doc
 lacks    "no ledger row was ever invented for the terminal claim" "$table" "issue-200-payments-retry"
 contains "no live claim label removal did not wipe the ledger" "$table" "issue-115-unrelated"
 contains "verified label removal"          "$out" "removed agent-claimed"
+
+# ===========================================================================
+# #153 review round 5, P1 — the exact-PR-number proof is a GATE, not a report
+# ===========================================================================
+# The proof that PR #N really left the open set used to run only AFTER the
+# worktree had been removed and both branch refs deleted. By the time it
+# said "still open", the work behind the still-open PR was already gone.
+# These fixtures keep the REAL worktree and branches term_fixture created —
+# nothing is pre-deleted — and prove that a still-open number, or an
+# inventory that could not be read, removes nothing at all.
+echo "#153 round 5 · terminal evidence + a still-OPEN exact number destroys NOTHING"
+GATE1_SHA=$(term_fixture numgate1 330 open-number-gate)
+export GH_PR_ALL_TSV="$ROOT/numgate1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/numgate1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSED_NUMBERS="$ROOT/numgate1/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/numgate1/gh-state"
+export GH_LOG="$ROOT/numgate1/gh.log"
+export GH_PR_CLOSE_LOG="$ROOT/numgate1/close.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+: > "$GH_PR_CLOSE_LOG"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_OPEN_CALLS
+# Terminal evidence that would otherwise authorize the full cleanup: MERGED,
+# this repository, not a fork, exact head SHA, matching branch and issue.
+printf '830\tissue-330-open-number-gate\tlib/x/**\t330\tfeat/330-open-number-gate\t%s\thttps://github.com/acme/app/pull/830\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$GATE1_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+# …and the body-agnostic inventory says #830 is still OPEN. Marker evidence
+# and state evidence both come from the PR body/row; the NUMBER cannot be
+# forged from a body, so this is the one that has to win.
+export GH_PR_OPEN_NUMBERS="830"
+out=$(cd "$ROOT/numgate1/canon" && "$RC" 330 --claim-id issue-330-open-number-gate --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_NUMBERS
+check    "a still-open exact number exits 3"  "$rc" "3"
+contains "names the still-open PR"            "$out" "PR #830 is STILL OPEN in acme/app"
+contains "refuses before touching anything"   "$out" "worktree and branch left untouched"
+contains "reports INCOMPLETE"                 "$out" "INCOMPLETE"
+lacks    "never reports success"              "$out" "OK —"
+[[ -d "$ROOT/numgate1/wt-330-open-number-gate" ]] &&
+  ok "still-open number: the worktree survived" || bad "still-open number: the worktree was removed"
+[[ -n "$(git -C "$ROOT/numgate1/canon" branch --list 'feat/330-open-number-gate')" ]] &&
+  ok "still-open number: the local branch survived" || bad "still-open number: the local branch was deleted"
+[[ -n "$(git -C "$ROOT/numgate1/canon" ls-remote --heads origin 'feat/330-open-number-gate')" ]] &&
+  ok "still-open number: the remote branch survived" || bad "still-open number: the remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "still-open number: the label was never edited" || bad "still-open number: a label edit was attempted"
+gate_table=$(cd "$ROOT/numgate1/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "still-open number: the ledger is untouched" "$gate_table" "issue-115-unrelated"
+
+echo "#153 round 5 · an UNREADABLE exact-number inventory destroys NOTHING either"
+GATE2_SHA=$(term_fixture numgate2 331 unreadable-number-gate)
+export GH_PR_ALL_TSV="$ROOT/numgate2/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/numgate2/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSED_NUMBERS="$ROOT/numgate2/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/numgate2/gh-state"
+export GH_LOG="$ROOT/numgate2/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '831\tissue-331-unreadable-number-gate\tlib/x/**\t331\tfeat/331-unreadable-number-gate\t%s\thttps://github.com/acme/app/pull/831\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$GATE2_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+export GH_PR_OPEN_NUMBERS=""
+export GH_PR_OPEN_NUMBERS_EXIT=1
+out=$(cd "$ROOT/numgate2/canon" && "$RC" 331 --claim-id issue-331-unreadable-number-gate --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
+check    "an unreadable exact-number inventory exits 3" "$rc" "3"
+contains "names the unreadable inventory" "$out" "cannot read the body-agnostic open pull-request inventory"
+contains "refuses before touching anything" "$out" "worktree and branch left untouched"
+lacks    "never reports success"          "$out" "OK —"
+[[ -d "$ROOT/numgate2/wt-331-unreadable-number-gate" ]] &&
+  ok "unreadable numbers: the worktree survived" || bad "unreadable numbers: the worktree was removed"
+[[ -n "$(git -C "$ROOT/numgate2/canon" branch --list 'feat/331-unreadable-number-gate')" ]] &&
+  ok "unreadable numbers: the local branch survived" || bad "unreadable numbers: the local branch was deleted"
+[[ -n "$(git -C "$ROOT/numgate2/canon" ls-remote --heads origin 'feat/331-unreadable-number-gate')" ]] &&
+  ok "unreadable numbers: the remote branch survived" || bad "unreadable numbers: the remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unreadable numbers: the label was never edited" || bad "unreadable numbers: a label edit was attempted"
+
+echo "#153 round 5 · a LYING close on the OPEN path destroys NOTHING (artifacts live)"
+# The whole open-claim lifecycle, with the real worktree and branches in place:
+# release closes the PR, gh reports success, and the body-agnostic inventory
+# says #832 never left the open set. Nothing may be removed.
+GATE3_SHA=$(term_fixture numgate3 332 open-path-lying-close)
+export GH_PR_ALL_TSV="$ROOT/numgate3/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/numgate3/open.tsv"
+export GH_PR_CLOSED_NUMBERS="$ROOT/numgate3/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/numgate3/gh-state"
+export GH_LOG="$ROOT/numgate3/gh.log"
+export GH_PR_CLOSE_LOG="$ROOT/numgate3/close.log"
+export GH_LABELS="agent-claimed,tier-b"
+export GH_OPEN_CALLS="$ROOT/numgate3/open-calls"
+: > "$GH_OPEN_CALLS"
+rm -f "$GH_STATE" "$GH_LOG"
+: > "$GH_PR_CLOSE_LOG"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
+open_row 832 issue-332-open-path-lying-close 'lib/x/**' feat/332-open-path-lying-close > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/numgate3/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+printf '832\tissue-332-open-path-lying-close\tlib/x/**\t332\tfeat/332-open-path-lying-close\t%s\thttps://github.com/acme/app/pull/832\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$GATE3_SHA" > "$GH_PR_ALL_TSV"
+export GH_PR_OPEN_NUMBERS="832"
+out=$(cd "$ROOT/numgate3/canon" && "$RC" 332 --claim-id issue-332-open-path-lying-close --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_TSV2
+check    "a lying close on the open path exits 3" "$rc" "3"
+contains "the PR was closed"               "$out" "closing PR #832"
+contains "names the still-open PR"         "$out" "PR #832 is STILL OPEN in acme/app"
+contains "reports INCOMPLETE"              "$out" "INCOMPLETE"
+lacks    "never reports success"           "$out" "OK —"
+[[ -d "$ROOT/numgate3/wt-332-open-path-lying-close" ]] &&
+  ok "lying close: the worktree survived" || bad "lying close: the worktree was removed"
+[[ -n "$(git -C "$ROOT/numgate3/canon" branch --list 'feat/332-open-path-lying-close')" ]] &&
+  ok "lying close: the local branch survived" || bad "lying close: the local branch was deleted"
+[[ -n "$(git -C "$ROOT/numgate3/canon" ls-remote --heads origin 'feat/332-open-path-lying-close')" ]] &&
+  ok "lying close: the remote branch survived" || bad "lying close: the remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "lying close: the label was never edited" || bad "lying close: a label edit was attempted"
+
+# ===========================================================================
+# #153 review round 5, P1 — fork PRs are refused BEFORE `gh pr close`
+# ===========================================================================
+# A fork PR can carry an exact claim marker AND a head branch named exactly
+# like the one the claim id derives — branch names are not namespaced across
+# repositories. Marker + branch is therefore not repository identity, and
+# `gh pr close` is irreversible.
+echo "#153 round 5 · an open FORK claim PR is never closed"
+# term_fixture stages the worktree and returns the head SHA; this fixture
+# stages its own TSV rows (with a synthetic SHA) so the return value is unused.
+term_fixture forkopen 340 fork-open-claim >/dev/null
+export GH_PR_ALL_TSV="$ROOT/forkopen/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/forkopen/open.tsv"
+export GH_PR_CLOSED_NUMBERS="$ROOT/forkopen/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/forkopen/gh-state"
+export GH_LOG="$ROOT/forkopen/gh.log"
+export GH_PR_CLOSE_LOG="$ROOT/forkopen/close.log"
+export GH_LABELS="agent-claimed,tier-b"
+export GH_OPEN_CALLS="$ROOT/forkopen/open-calls"
+: > "$GH_OPEN_CALLS"
+rm -f "$GH_STATE" "$GH_LOG"
+: > "$GH_PR_CLOSE_LOG"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
+: > "$GH_PR_ALL_TSV"
+# Everything about this row looks right except the one thing that matters.
+open_row 840 issue-340-fork-open-claim 'lib/x/**' feat/340-fork-open-claim true > "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/forkopen/canon" && "$RC" 340 --claim-id issue-340-fork-open-claim --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an open fork claim PR exits nonzero" || bad "open fork claim PR exited 0: $out"
+contains "names the unproven repository identity" "$out" "not provably a same-repository pull request"
+check "the fork PR was never closed" "$(grep -c . "$ROOT/forkopen/close.log" 2>/dev/null || true)" "0"
+[[ -d "$ROOT/forkopen/wt-340-fork-open-claim" ]] &&
+  ok "fork PR: the worktree survived" || bad "fork PR: the worktree was removed"
+[[ -n "$(git -C "$ROOT/forkopen/canon" ls-remote --heads origin 'feat/340-fork-open-claim')" ]] &&
+  ok "fork PR: the remote branch survived" || bad "fork PR: the remote branch was deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "fork PR: the label was never edited" || bad "fork PR: a label edit was attempted"
+fork_table=$(cd "$ROOT/forkopen/canon" && git fetch -q origin && git show origin/main:docs/active-work.md)
+contains "fork PR: the ledger is untouched" "$fork_table" "issue-115-unrelated"
+
+echo "#153 round 5 · a fork claim PR is refused under --dry-run too"
+out=$(cd "$ROOT/forkopen/canon" && "$RC" 340 --claim-id issue-340-fork-open-claim --repo acme/app --dry-run 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "dry-run refuses the fork claim PR" || bad "dry-run accepted the fork claim PR: $out"
+lacks "dry-run plans no close for a fork PR" "$out" "would close PR"
+
+echo "#153 round 5 · an UNREADABLE repository-identity column is unsafe, not same-repo"
+open_row 841 issue-341-bad-identity 'lib/x/**' feat/341-bad-identity 'maybe' > "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/forkopen/canon" && "$RC" 341 --claim-id issue-341-bad-identity --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unreadable identity column exits nonzero" || bad "unreadable identity exited 0: $out"
+contains "names the malformed inventory row" "$out" "malformed/truncated row"
+check "no PR was closed on unreadable identity" "$(grep -c . "$ROOT/forkopen/close.log" 2>/dev/null || true)" "0"
 
 echo "#153 · terminal cleanup git-level safety proof (never trust metadata alone)"
 
@@ -2922,7 +3198,7 @@ git -C "$ROOT/termsibmissing/canon" worktree add -q "$ROOT/termsibmissing/wt-220
 TERMSIBMISS_SHA=$(git -C "$ROOT/termsibmissing/wt-220-checkout-a" rev-parse HEAD)
 export PATH="$ROOT/term/bin:$PATH"
 export GH_PR_OPEN_TSV="$ROOT/termsibmissing/open.tsv"
-printf '901\tissue-220-checkout-b\tlib/checkout/b/**\tfeat/220-checkout-b\thttps://github.com/acme/app/pull/901\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+printf '901\tissue-220-checkout-b\tlib/checkout/b/**\tfeat/220-checkout-b\thttps://github.com/acme/app/pull/901\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\tfalse\n' \
   > "$GH_PR_OPEN_TSV"
 export GH_PR_ALL_TSV="$ROOT/termsibmissing/all.tsv"
 printf '902\tissue-220-checkout-a\tlib/checkout/a/**\t220\tfeat/220-checkout-a\t%s\thttps://github.com/acme/app/pull/902\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
@@ -3019,7 +3295,7 @@ export GH_PR_OPEN_TSV="$ROOT/termsib/open.tsv"
 # label decision below can only be correct if terminal_cleanup_release()
 # performs a fresh GitHub read after mutation rather than reusing any earlier
 # snapshot (#153 AC4/AC8).
-printf '900\tissue-210-checkout-b\tlib/checkout/b/**\tfeat/210-checkout-b\thttps://github.com/acme/app/pull/900\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+printf '900\tissue-210-checkout-b\tlib/checkout/b/**\tfeat/210-checkout-b\thttps://github.com/acme/app/pull/900\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\tfalse\n' \
   > "$GH_PR_OPEN_TSV"
 export GH_PR_ALL_TSV="$ROOT/termsib/all.tsv"
 printf '899\tissue-210-checkout-a\tlib/checkout/a/**\t210\tfeat/210-checkout-a\t%s\thttps://github.com/acme/app/pull/899\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
@@ -3136,16 +3412,11 @@ open_fixture() {
   export GH_LABELS="agent-claimed,tier-b"
   export GH_OPEN_CALLS="$ROOT/$dir/open-calls"
   : > "$GH_OPEN_CALLS"
+  export GH_PR_CLOSED_NUMBERS="$ROOT/$dir/closed-numbers"
+  : > "$GH_PR_CLOSED_NUMBERS"
   rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
   unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
   unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
-}
-
-# One 7-field `pr-claims.sh list` row: number, claim, scope, head branch,
-# url, created, updated.
-open_row() {
-  printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
-    "$1" "$2" "$3" "$4" "$1"
 }
 
 export PATH="$ROOT/term/bin:$PATH"
@@ -3473,7 +3744,13 @@ printf '926\tissue-425-marker-rewritten\tlib/x/**\t425\tfeat/425-marker-rewritte
 # there, still open, now carrying somebody else's claim id.
 export GH_PR_OPEN_TSV2="$ROOT/opennum1/open2.tsv"
 open_row 926 issue-888-rewritten-marker 'lib/z/**' feat/888-rewritten-marker > "$GH_PR_OPEN_TSV2"
+# gh reported the close as a success and it was a LIE: #926 never left the
+# open set. The fake's default open-number derivation removes a number once
+# `gh pr close` succeeds on it, so a fixture modelling a lying close has to say
+# so outright (#153 review round 5).
+export GH_PR_OPEN_NUMBERS="926"
 out=$(cd "$ROOT/opennum1/canon" && "$RC" 425 --claim-id issue-425-marker-rewritten --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_NUMBERS
 check    "a rewritten marker on a still-open PR exits 3" "$rc" "3"
 contains "names the PR that is still open"   "$out" "#926 is STILL OPEN"
 contains "reports INCOMPLETE"                "$out" "INCOMPLETE"
@@ -3643,6 +3920,17 @@ case "$1 $2" in
   "api graphql")
     # pr-claims.sh's paginated GraphQL read. `list` restricts to
     # `states: [OPEN]`; `find-terminal` walks every state.
+    # `list-open-numbers` (body-agnostic open PR numbers) also carries
+    # `states: [OPEN]`, so it has to be matched FIRST by its named operation.
+    for arg in "$@"; do
+      case "$arg" in
+        *"openPrNumbers"*)
+          [[ "${GH_PR_MERGED:-0}" == 1 ]] && exit 0
+          cut -d'|' -f1 "${GH_PR_FILE:-/dev/null}" 2>/dev/null | grep -E '^[0-9]+$' || true
+          exit 0
+          ;;
+      esac
+    done
     for arg in "$@"; do
       case "$arg" in
         *"states: [OPEN]"*)
@@ -3654,7 +3942,7 @@ case "$1 $2" in
           [[ "${GH_PR_MERGED:-0}" == 1 ]] && exit 0
           while IFS='|' read -r number claim scope branch url created updated headsha; do
             [[ -n "$claim" ]] || continue
-            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tfalse\n' \
               "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
           done < "${GH_PR_FILE:-/dev/null}"
           exit 0
@@ -3687,6 +3975,10 @@ case "$1 $2" in
     printf '%s|%s|%s|%s|https://github.com/acme/e2e/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z|%s\n' \
       "$number" "$claim" "$scope" "$branch" "$number" "$headsha" >> "${GH_PR_FILE:-/dev/null}"
     echo "https://github.com/acme/e2e/pull/$number"
+    ;;
+  *)
+    echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+    exit 64
     ;;
 esac
 exit 0
@@ -3740,6 +4032,8 @@ bind_fixture() { # dir issue slug [https|ssh]
   export GH_PR_ALL_TSV="$ROOT/$dir/all.tsv"
   export GH_PR_OPEN_TSV="$ROOT/$dir/open.tsv"
   : > "$GH_PR_OPEN_TSV"
+  export GH_PR_CLOSED_NUMBERS="$ROOT/$dir/closed-numbers"
+  : > "$GH_PR_CLOSED_NUMBERS"
   export GH_STATE="$ROOT/$dir/gh-state"
   export GH_LOG="$ROOT/$dir/gh.log"
   export GH_PR_CLOSE_LOG="$ROOT/$dir/close.log"
@@ -3957,6 +4251,8 @@ sib_fixture() { # dir issue target-id sibling-row?
   export GH_PR_ALL_TSV="$ROOT/$dir/all.tsv"
   : > "$GH_PR_OPEN_TSV"
   : > "$GH_PR_ALL_TSV"
+  export GH_PR_CLOSED_NUMBERS="$ROOT/$dir/closed-numbers"
+  : > "$GH_PR_CLOSED_NUMBERS"
   export GH_STATE="$ROOT/$dir/gh-state"
   export GH_LOG="$ROOT/$dir/gh.log"
   export GH_LABELS="agent-claimed,tier-b"

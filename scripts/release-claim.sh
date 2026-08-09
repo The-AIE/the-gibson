@@ -40,14 +40,24 @@ REPOSITORY BINDING (#153 review)
   unreadable too, the run fails BEFORE any worktree, branch, ledger, or label
   mutation rather than silently skipping the authoritative PR inventory.
 
-CLOSING AN OPEN CLAIM PR (#153 review round 4)
+CLOSING AN OPEN CLAIM PR (#153 review round 4/5)
   `gh pr close` is the first and only irreversible mutation on the open-claim
   path, so every identity check that authorizes it runs BEFORE it: the
-  repository binding above, and the head branch. The PR's head branch must be
-  exactly the branch its claim id derives (feat/<issue>-<slug>). An exact claim
-  marker in the body of a PR on an unrelated branch is not authority to close
-  that PR — the mismatch exits 1 with nothing mutated, including under
-  --dry-run.
+  repository binding above, the head branch, and the PR's own repository
+  identity. The PR's head branch must be exactly the branch its claim id
+  derives (feat/<issue>-<slug>). An exact claim marker in the body of a PR on
+  an unrelated branch is not authority to close that PR — the mismatch exits 1
+  with nothing mutated, including under --dry-run.
+
+  The claim inventory now carries `isCrossRepository` for every open claim, and
+  the PR must be provably same-repository (`false`) before it is closed. Branch
+  names are not namespaced across repositories, so a FORK PR can carry both an
+  exact claim marker and a head branch named exactly like ours; marker plus
+  branch is therefore not repository identity. `true`, an unreadable column, or
+  a row that cannot say all count as UNSAFE and exit 1 with nothing mutated —
+  absence of proof of a fork is not proof it is not one. (The terminal-evidence
+  path has always refused cross-repository rows; this closes the OPEN path,
+  which used to meet that refusal only after the PR was already closed.)
 
   After the close, the claim is released but nothing else is proven. The run
   re-reads that exact PR's own terminal evidence and hands over to the exact
@@ -60,12 +70,20 @@ CLOSING AN OPEN CLAIM PR (#153 review round 4)
   agent-claimed; the only route to a verified label removal after a close is
   the terminal cleanup that proved the artifacts first.
 
-  The post-close proof binds the PR NUMBER as well as the claim id. The claim
-  inventory only lists a PR while that PR carries a well-formed claim marker,
-  so a PR that is still OPEN with its marker removed or rewritten drops out of
-  that view and is indistinguishable from one that closed. A body-agnostic
-  open-PR inventory (pr-claims.sh list-open-numbers) is consulted for the exact
-  number; still-open, or an unreadable answer, refuses success and exits 3.
+  The proof binds the PR NUMBER as well as the claim id. The claim inventory
+  only lists a PR while that PR carries a well-formed claim marker, so a PR
+  that is still OPEN with its marker removed or rewritten drops out of that
+  view and is indistinguishable from one that closed. A body-agnostic open-PR
+  inventory (pr-claims.sh list-open-numbers) is consulted for the exact number.
+
+  That proof is taken TWICE, and the first one is a GATE (#153 review round 5).
+  Terminal cleanup asks it after the terminal evidence is bound and BEFORE the
+  first destructive mutation: a still-open number, or an inventory it could not
+  read, preserves the worktree, both branch refs, every ledger row and
+  agent-claimed, and exits 3 — nothing is removed. The second, after cleanup,
+  is the TOCTOU/postcondition half. The pre-mutation copy exists because the
+  post-mutation one alone was a report rather than a gate: by the time it said
+  "PR #N is still open", the work behind the still-open PR was already gone.
 
 WHY
   Abandoned claims block the fleet (Law 10). Cleanup must be as automatic as claim.
@@ -1099,6 +1117,36 @@ terminal_cleanup_release() {
     fi
   fi
 
+  # --- exact-PR-number proof, BEFORE the first destructive mutation ---------
+  # (#153 review round 5, P1) The identity proofs above all come from the CLAIM
+  # inventory or from git. The claim inventory only contains a PR while that PR
+  # carries a well-formed claim marker, and `find-terminal[-pr]` reports the
+  # state GitHub attached to the row it served — neither can distinguish "this
+  # PR reached a terminal state" from "this PR is still wide open and its
+  # marker/state evidence is stale, rewritten, or served from a replica that
+  # has not caught up". The body-agnostic open-PR inventory can: it is keyed on
+  # the PR NUMBER, which nothing in a PR body can forge.
+  #
+  # That proof used to run only AFTER the worktree was removed and both branch
+  # refs were deleted, which made it a report rather than a gate: by the time
+  # it said "PR #N is still open", the work behind the still-open PR was
+  # already gone. It runs here instead, after the terminal evidence has been
+  # bound and before the first irreversible removal, and it fails the ordinary
+  # safety path — so an unreadable inventory or a still-open number preserves
+  # the worktree, both branches, every ledger row and agent-claimed, exactly
+  # like any other failed safety proof. The post-cleanup copy is retained below
+  # as the TOCTOU/postcondition half: this one licenses the mutation, that one
+  # proves the mutation did not race a reopen.
+  if [[ "$safe" -eq 1 && -n "$TERMINAL_PR_NUMBER" ]]; then
+    if ! read_open_pr_numbers "$PR_REPO"; then
+      safe=0
+      reason="cannot read the body-agnostic open pull-request inventory for $PR_REPO to prove PR #$TERMINAL_PR_NUMBER is no longer open — $OPEN_NUMBERS_ERR; an unreadable inventory is not proof a PR closed"
+    elif open_pr_number_present "$TERMINAL_PR_NUMBER"; then
+      safe=0
+      reason="PR #$TERMINAL_PR_NUMBER is STILL OPEN in $PR_REPO even though its evidence says $TERMINAL_STATE — a removed, rewritten or stale claim marker is not a terminal PR, and the worktree/branches behind an open claim must not be destroyed"
+    fi
+  fi
+
   if [[ "$safe" -ne 1 ]]; then
     warn "refusing terminal cleanup for '$id' (PR #$TERMINAL_PR_NUMBER, $TERMINAL_STATE): ${reason:-unknown safety failure}"
     warn "worktree and branch left untouched"
@@ -1250,21 +1298,13 @@ terminal_cleanup_release() {
     incomplete=1
     preserve_label=1
   else
-    # Every non-empty row must have exactly 7 tab-separated fields (pr-claims.sh
+    # Every non-empty row must have exactly 8 tab-separated fields (pr-claims.sh
     # list's contract) and a non-empty issue-* claim id. A malformed/truncated
     # row is unreadable evidence, not proof the claim is gone — refuse rather
     # than silently skip it.
-    while IFS= read -r _row; do
-      [[ -n "$_row" ]] || continue
-      _field_count=$(awk -F'\t' '{print NF}' <<<"$_row")
-      _row_id=$(awk -F'\t' '{print $2}' <<<"$_row")
-      if [[ "$_field_count" -ne 7 || -z "$_row_id" || ! "$_row_id" =~ ^issue- ]]; then
-        malformed_row="$_row"
-        break
-      fi
-    done <<EOF
-$open_rows
-EOF
+    if ! open_pr_rows_valid "$open_rows"; then
+      malformed_row="$OPEN_PR_BAD_ROW"
+    fi
     if [[ -n "$malformed_row" ]]; then
       warn "post-mutation reread of live PR-body claims returned a malformed/truncated row for $PR_REPO — cannot verify postcondition: $malformed_row"
       incomplete=1
@@ -1274,7 +1314,7 @@ EOF
       incomplete=1
       preserve_label=1
     else
-      while IFS=$'\t' read -r _n _cid _sc _hb _u _c _up; do
+      while IFS=$'\t' read -r _n _cid _sc _hb _u _c _up _cross; do
         [[ -n "$_cid" ]] || continue
         [[ "$_cid" == "$id" ]] && continue
         claim_id_for_issue "$_cid" || continue
@@ -1293,6 +1333,13 @@ EOF
   # from a PR that reached a terminal state, and the difference is exactly
   # whether the issue is still held. Ask the body-agnostic open-PR inventory
   # about this claim's exact PR number too.
+  #
+  # This is the SECOND of the two exact-number proofs (#153 review round 5).
+  # The first ran before the first destructive mutation and is what licensed
+  # the cleanup at all; this one is the TOCTOU/postcondition half — it catches
+  # a PR that was reopened, or an inventory that changed its mind, during the
+  # mutation window. Keeping both is deliberate: a gate that only runs after
+  # the removal cannot prevent the removal.
   if [[ -n "$TERMINAL_PR_NUMBER" ]]; then
     if ! read_open_pr_numbers "$PR_REPO"; then
       warn "cannot verify that PR #$TERMINAL_PR_NUMBER is absent from the open pull-request inventory for $PR_REPO — $OPEN_NUMBERS_ERR; refuse to report success"
@@ -1619,18 +1666,29 @@ if [[ -n "$PR_REPO" && ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; the
 fi
 
 # Shape contract for `pr-claims.sh list` output: every non-empty row carries
-# exactly 7 tab-separated fields and a non-empty issue-* claim id. A truncated
-# or otherwise malformed row is unreadable evidence about who holds this
-# issue — never proof that nobody does. Sets OPEN_PR_BAD_ROW and returns 1.
+# exactly 8 tab-separated fields, a non-empty issue-* claim id, and a
+# cross-repository column that is literally `true` or `false`. A truncated or
+# otherwise malformed row is unreadable evidence about who holds this issue —
+# never proof that nobody does. Sets OPEN_PR_BAD_ROW and returns 1.
+#
+# The 8th column is repository identity (#153 review round 5, P1). It is
+# shape-checked here rather than only where it is consumed, so a row that
+# cannot say which repository its PR lives in never reaches a mutation
+# decision at all.
 OPEN_PR_BAD_ROW=""
 open_pr_rows_valid() {
-  local rows="$1" row fields id
+  local rows="$1" row fields id cross
   OPEN_PR_BAD_ROW=""
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
     fields=$(awk -F'\t' '{print NF}' <<<"$row")
     id=$(awk -F'\t' '{print $2}' <<<"$row")
-    if [[ "$fields" -ne 7 || -z "$id" || ! "$id" =~ ^issue- ]]; then
+    cross=$(awk -F'\t' '{print $8}' <<<"$row")
+    if [[ "$fields" -ne 8 || -z "$id" || ! "$id" =~ ^issue- ]]; then
+      OPEN_PR_BAD_ROW="$row"
+      return 1
+    fi
+    if [[ "$cross" != "true" && "$cross" != "false" ]]; then
       OPEN_PR_BAD_ROW="$row"
       return 1
     fi
@@ -1714,12 +1772,13 @@ if [[ -n "$PR_REPO" && "$CAS_MODE" -eq 0 ]]; then
     pr_number=$(cut -f1 <<<"$pr_row")
     pr_id=$(cut -f2 <<<"$pr_row")
     pr_head=$(cut -f4 <<<"$pr_row")
+    pr_cross=$(cut -f8 <<<"$pr_row")
     [[ -n "$pr_id" ]] || continue
     echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue
     if [[ "$CLAIM_ID_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_ARG" ]]; then
       continue
     fi
-    PR_MATCHES="${PR_MATCHES}${pr_number}"$'\t'"${pr_id}"$'\t'"${pr_head}"$'\n'
+    PR_MATCHES="${PR_MATCHES}${pr_number}"$'\t'"${pr_id}"$'\t'"${pr_head}"$'\t'"${pr_cross}"$'\n'
   done <<EOF
 $PR_ROWS
 EOF
@@ -1731,12 +1790,13 @@ EOF
     PR_NUMBER=$(printf '%s' "$PR_MATCHES" | sed -n '1s/\t.*//p')
     PR_CLAIM_ID=$(printf '%s\n' "$PR_MATCHES" | cut -f2)
     PR_HEAD_BRANCH=$(printf '%s\n' "$PR_MATCHES" | cut -f3)
+    PR_IS_CROSS_REPO=$(printf '%s\n' "$PR_MATCHES" | cut -f4)
     # sibling check (#153 AC1/AC4): other live open PR-body claims for this
     # issue keep agent-claimed, same as a ledger sibling does below. current
     # claim.sh never writes a ledger row, so this is the only sibling source
     # for a pure PR-body multi-slice issue.
     PR_SIBLINGS=""
-    while IFS=$'\t' read -r _s_n _s_id _s_scope _s_head _s_url _s_created _s_updated; do
+    while IFS=$'\t' read -r _s_n _s_id _s_scope _s_head _s_url _s_created _s_updated _s_cross; do
       [[ -n "$_s_id" ]] || continue
       [[ "$_s_id" == "$PR_CLAIM_ID" ]] && continue
       echo "$_s_id" | grep -qE "^issue-${ISSUE}-" || continue
@@ -1767,6 +1827,21 @@ EOF
     # real, not after.
     if [[ "$PR_HEAD_BRANCH" != "$PR_EXPECT_BRANCH" ]]; then
       die "open PR-body claim release for '$PR_CLAIM_ID': PR #$PR_NUMBER head branch '$PR_HEAD_BRANCH' is not the branch this claim id derives ('$PR_EXPECT_BRANCH') — the PR's identity cannot be bound to the claim, so it must not be closed. Refuse (nothing was mutated: the PR is still open, no label was touched, no worktree or branch was removed). An exact claim marker in the body of a PR on an unrelated branch is not authority to close that PR."
+    fi
+    # (#153 review round 5, P1) Repository identity, before the irreversible
+    # mutation. A fork PR can carry a perfectly well-formed claim marker AND a
+    # head branch whose name is exactly the one this claim id derives — branch
+    # names are not namespaced across repositories, so neither of the two
+    # checks above can tell a fork apart from this repository's own PR. The
+    # terminal-evidence path has always refused cross-repository rows; the OPEN
+    # path closed the PR first and only met that refusal afterwards, by which
+    # point a pull request in somebody else's repository had already been
+    # closed. Anything other than a literal `false` — `true`, an empty column,
+    # a truncated row, a field the reader could not prove is a boolean — is
+    # UNSAFE, never "probably ours": absence of proof of a fork is not proof it
+    # is not one.
+    if [[ "$PR_IS_CROSS_REPO" != "false" ]]; then
+      die "open PR-body claim release for '$PR_CLAIM_ID': PR #$PR_NUMBER is not provably a same-repository pull request (isCrossRepository='${PR_IS_CROSS_REPO:-<missing>}', want 'false') — refuse to close it. Nothing was mutated: the PR is still open, no label was touched, no worktree, branch or ledger row was removed. A claim marker and a matching head-branch name are not repository identity; a fork can carry both."
     fi
     if [[ "$DRY" -eq 1 ]]; then
       info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim"
@@ -2671,7 +2746,7 @@ if [[ -n "$TARGET_IDS" ]]; then
       PRESERVE_LABEL=1
     else
       _open_pr_siblings=""
-      while IFS=$'\t' read -r _pr_n _pr_id _pr_s _pr_h _pr_u _pr_c _pr_up; do
+      while IFS=$'\t' read -r _pr_n _pr_id _pr_s _pr_h _pr_u _pr_c _pr_up _pr_x; do
         [[ -n "$_pr_id" ]] || continue
         claim_id_for_issue "$_pr_id" || continue
         printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pr_id" && continue

@@ -170,7 +170,12 @@ if [[ -n "$REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
   # Avoid process substitution (< <(...)) — some sandboxes have no /dev/fd
   # (bash still implements it via /dev/fd/N). Capture then read.
   _pr_claims_out=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null || true)
-  while IFS=$'\t' read -r number id scope head url created updated; do
+  # 8 fields since #153 review round 5 — the trailing column is the PR's
+  # repository identity. Read it explicitly so it cannot be absorbed into
+  # $updated, which drives the age column below. Prefixed `_` because this
+  # status view does not surface repository identity (release-claim.sh and
+  # claim.sh enforce it before any mutation).
+  while IFS=$'\t' read -r number id scope head url created updated _cross; do
     [[ -n "$id" ]] || continue
     emit_pr "$number" "$id" "$scope" "$head" "$url" "$created" "$updated"
   done <<EOF

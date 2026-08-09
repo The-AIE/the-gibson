@@ -149,9 +149,17 @@ RISKS
   --repo also pulls live open PR-body claims via pr-claims.sh (gh). Malformed,
   truncated, duplicate, foreign-repo, or unreadable PR-claim evidence refuses
   (#153) — never silently falls back to ledger-only when --repo was given.
-  A missing/empty claim scope, a missing/unsafe head branch, or a PR URL whose
-  own repository does not match --repo also refuses — a missing scope must
-  never silently become an empty (non-overlapping) scope.
+  A missing/empty claim scope, a missing/unsafe head branch, an unreadable
+  repository-identity column, or a PR URL whose own repository does not match
+  --repo also refuses — a missing scope must never silently become an empty
+  (non-overlapping) scope.
+  Every current-format claim-scope TOKEN must parse under the documented
+  grammar: '**' (the whole repository) or a path of plain segments with an
+  optional trailing '*'/'**' — 'lib/email.ts', 'app/api/auth/**'. Tokens like
+  '*', '/', '../x' or 'a//b' normalise to nothing, so they used to collide
+  with nothing; they now refuse. '**' is honoured as a real root-wide scope
+  and overlaps EVERY path. A token this tool cannot normalise (from a ledger
+  row or from --scope) is treated as overlapping rather than as disjoint.
   The LEDGER reads fail closed the same way: a failed ls-tree/show over
   docs/claims/ or docs/active-work.md refuses rather than becoming an empty
   ledger, and a live per-file claim or legacy row whose scope is missing,
@@ -196,7 +204,13 @@ ENV (admission mode only — these may RAISE the barrier, never lower it)
   (attempts - 1) x delay, i.e. ${(ADMIT_MAX.attempts - 1) * ADMIT_MAX.delaySeconds}s at the extremes. Running out of
   attempts refuses the claim; it never admits it on an unsettled view.
   The spacing between reads is an internal timer, not a PATH-resolved 'sleep'
-  command — there is nothing in the environment that can shorten or skip it.
+  command, and the wait is MEASURED against the monotonic clock rather than
+  trusted: a blocking primitive that returns without blocking (e.g. via an
+  inherited NODE_OPTIONS '--import' payload) fails the barrier closed instead
+  of collapsing it. claim.sh additionally strips NODE_OPTIONS from this
+  process. Neither defends against an operator who can edit this file or
+  replace node; both stop INHERITED runtime configuration from turning a
+  configured fail-closed barrier into a successful immediate read.
 `);
 }
 
@@ -637,7 +651,67 @@ function readPrClaimsOnce() {
  *
  * A delay we could not take is a barrier we did not apply, so anything other
  * than a full-length wait refuses rather than deciding on unspaced samples.
+ *
+ * TRUSTING THE RETURN VALUE IS NOT ENOUGH (#153 review round 5, P1)
+ * `Atomics.wait` has no PATH entry and no env var, but it is still a property
+ * on a mutable global, and Node hands the environment a documented way to run
+ * code before this file's first line:
+ *
+ *   NODE_OPTIONS='--import=data:text/javascript,Atomics.wait%3D()%3D%3E"timed-out"'
+ *
+ * That payload leaves every structural check intact — the floor, the maxima,
+ * the quiescence streak, the self-visibility requirement all still run — while
+ * the barrier's only actual guarantee, that two reads are separated in TIME,
+ * silently becomes free. A configured fail-closed spacing barrier turns into a
+ * successful immediate read, which is exactly the pre-barrier behaviour a
+ * rival publishing a moment later defeats.
+ *
+ * So the wait is MEASURED, not trusted: elapsed time is read from the
+ * monotonic clock on both sides of the call and the barrier refuses unless the
+ * full delay really passed. A single early return is re-waited for the
+ * remainder (a legitimate spurious wakeup is allowed to be retried); a
+ * primitive that returns instantly exhausts the bounded round budget without
+ * accumulating time and fails closed.
+ *
+ * The honest limit: this does not resist a fully malicious local operator.
+ * Anyone who can set NODE_OPTIONS can usually also patch `process.hrtime`,
+ * edit this file, or replace `node`. The invariant it does buy is the one that
+ * was missing — INHERITED runtime configuration cannot silently turn a
+ * configured fail-closed spacing barrier into a successful immediate read. It
+ * pairs with claim.sh, which strips NODE_OPTIONS from the sensor process
+ * entirely, so production never hands the payload in to begin with.
  */
+const WAIT_MAX_ROUNDS = 8;
+
+/**
+ * Block for at least `ms` milliseconds and return the monotonic milliseconds
+ * actually spent. Never returns early on its own; a caller must still check
+ * the returned figure, because a neutered `Atomics.wait` makes every round
+ * free and this returns (truthfully) that almost no time passed.
+ */
+function blockAtLeast(ms) {
+  /* GIBSON_BARRIER_WAIT_BEGIN */
+  // A fresh 4-byte shared buffer per call, never observable by anything else,
+  // so the wait can only ever time out — nothing holds a reference to notify
+  // it early.
+  const cell = new Int32Array(new SharedArrayBuffer(4));
+  const startNs = process.hrtime.bigint();
+  let elapsedMs = 0;
+  for (let round = 0; round < WAIT_MAX_ROUNDS; round++) {
+    const remaining = Math.ceil(ms - elapsedMs);
+    if (remaining <= 0) break;
+    const verdict = Atomics.wait(cell, 0, 0, remaining);
+    if (verdict !== "timed-out") {
+      throw new Error(
+        `Atomics.wait returned '${verdict}' instead of 'timed-out' — the shared cell this process just allocated cannot legitimately be notified or found already-changed`
+      );
+    }
+    elapsedMs = Number(process.hrtime.bigint() - startNs) / 1e6;
+  }
+  return elapsedMs;
+  /* GIBSON_BARRIER_WAIT_END */
+}
+
 function spaceReads(seconds) {
   const ms = seconds * 1000;
   if (!Number.isSafeInteger(ms) || ms <= 0) {
@@ -645,17 +719,9 @@ function spaceReads(seconds) {
       `cannot space the admission reads ${seconds}s apart (unusable delay) — refuse rather than decide on unspaced samples`
     );
   }
+  let waitedMs;
   try {
-    // A fresh 4-byte shared buffer per call, never observable by anything
-    // else, so the wait can only ever time out — nothing holds a reference to
-    // notify it early.
-    const cell = new Int32Array(new SharedArrayBuffer(4));
-    const verdict = Atomics.wait(cell, 0, 0, ms);
-    if (verdict !== "timed-out") {
-      fail(
-        `the admission read spacing did not run to completion (Atomics.wait returned '${verdict}' instead of 'timed-out') — refuse rather than decide on unspaced samples`
-      );
-    }
+    waitedMs = blockAtLeast(ms);
   } catch (e) {
     fail(
       `cannot space the admission reads ${seconds}s apart — refuse rather than decide on unspaced samples: ${
@@ -663,6 +729,88 @@ function spaceReads(seconds) {
       }`
     );
   }
+  // Sub-millisecond slack only, for clock quantisation — never enough to hide
+  // a wait that did not happen.
+  if (!(waitedMs >= ms - 1)) {
+    fail(
+      `the admission read spacing did not actually elapse: ${waitedMs.toFixed(
+        3
+      )}ms of monotonic time passed where ${ms}ms was required, across ${WAIT_MAX_ROUNDS} wait round(s). The blocking primitive returned without blocking${
+        process.env.NODE_OPTIONS
+          ? ` (NODE_OPTIONS is set in this process: ${JSON.stringify(
+              process.env.NODE_OPTIONS
+            )} — inherited Node runtime configuration can execute code before this file loads)`
+          : ""
+      }. Refuse rather than decide on unspaced samples.`
+    );
+  }
+}
+
+/**
+ * THE CURRENT-FORMAT SCOPE GRAMMAR (#153 review round 5, P1)
+ *
+ * A live PR-body claim's `- Claim scope:` value is space-separated tokens, and
+ * every token has to survive `stem()` into something the overlap comparison
+ * can actually reason about. It did not: `*`, `**`, `/`, `///` and friends all
+ * stem to the empty string, and `tokensOverlap` answered "no overlap" for an
+ * empty stem. A live claim whose scope was any of those therefore collided
+ * with nothing at all — the single most dangerous wrong answer this tool can
+ * give, arrived at from a claim that looked perfectly well-formed to
+ * pr-claims.sh (nonempty scope marker, valid id, valid branch, valid URL).
+ *
+ * The grammar below is deliberately narrow and matches the scopes this repo
+ * actually issues (`app/api/auth/**`, `lib/email.ts`, `docs/05-concurrency.md`,
+ * `components/nav/**`):
+ *
+ *   token    := ROOT | path
+ *   ROOT     := "**"                       the whole repository
+ *   path     := literal ("/" literal)* ("/" wild)?
+ *   literal  := [A-Za-z0-9_.-]+  and not "." and not ".."
+ *   wild     := "*" | "**"
+ *
+ * i.e. at least one literal segment, no empty segments (so no leading or
+ * trailing "/" and no "//"), no parent-directory escapes, and a wildcard only
+ * as a whole trailing segment. A bare "*", a bare "/", a leading double-star
+ * segment, "a//b", "../x", "*.ts" and a double-star in the middle of a path
+ * are all rejected as ambiguous rather than normalised into something that
+ * quietly protects less than it says.
+ *
+ * ROOT ("**") is the one deliberate root-wide scope, and it is SUPPORTED: it
+ * overlaps every path rather than overlapping nothing (see tokensOverlap).
+ * Refusing it outright would be defensible too, but silently treating "I claim
+ * the whole repository" as "I claim nothing" is not.
+ */
+const ROOT_SCOPE = "**";
+const SCOPE_LITERAL = /^[A-Za-z0-9_.-]+$/;
+
+/** null when the token is valid; otherwise the reason it is not. */
+function currentScopeTokenProblem(token) {
+  if (typeof token !== "string" || token === "") return "empty token";
+  if (token === ROOT_SCOPE) return null;
+  const segments = token.split("/");
+  let literals = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const last = i === segments.length - 1;
+    if (seg === "") {
+      return "empty path segment (a leading '/', a trailing '/', or '//')";
+    }
+    if (seg === "*" || seg === "**") {
+      if (!last) return `wildcard segment '${seg}' is only allowed as the final segment`;
+      continue;
+    }
+    if (!SCOPE_LITERAL.test(seg)) {
+      return `segment '${seg}' is not a plain path segment ([A-Za-z0-9_.-]+) or a trailing '*'/'**'`;
+    }
+    if (seg === "." || seg === "..") {
+      return `segment '${seg}' is a relative-path escape`;
+    }
+    literals++;
+  }
+  if (literals === 0) {
+    return "no literal path segment — it normalises to nothing and would collide with nothing";
+  }
+  return null;
 }
 
 function parsePrClaims(out) {
@@ -671,9 +819,9 @@ function parsePrClaims(out) {
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
     const cols = line.split("\t");
-    if (cols.length !== 7) {
+    if (cols.length !== 8) {
       fail(
-        `malformed/truncated PR-body claim row from pr-claims.sh (want 7 tab-separated fields, got ${cols.length}): ${JSON.stringify(
+        `malformed/truncated PR-body claim row from pr-claims.sh (want 8 tab-separated fields, got ${cols.length}): ${JSON.stringify(
           line
         )}`
       );
@@ -683,6 +831,7 @@ function parsePrClaims(out) {
     const scopeStr = cols[2];
     const headBranch = cols[3];
     const url = cols[4];
+    const isCrossRepo = cols[7];
     if (!/^\d+$/.test(number)) {
       fail(`malformed PR-body claim row — PR number not numeric: ${JSON.stringify(line)}`);
     }
@@ -712,6 +861,15 @@ function parsePrClaims(out) {
         `live PR-body claim '${id}' (PR #${number}) URL repository '${urlMatch[1]}' does not match the requested repo '${opt.repo}' — refuse (unexpected repository identity, #153 AC3)`
       );
     }
+    // Repository identity, strictly (#153 review round 5, P1). pr-claims.sh
+    // already refuses a row whose isCrossRepository is not a real boolean;
+    // this is the row-shape half of the same contract, so a truncated or
+    // rewritten column cannot reach the decision as "same repository".
+    if (isCrossRepo !== "true" && isCrossRepo !== "false") {
+      fail(
+        `live PR-body claim '${id}' (PR #${number}) has an unreadable repository-identity column '${isCrossRepo}' (want 'true' or 'false') — refuse (#153 AC3)`
+      );
+    }
     if (seen.has(id)) {
       fail(
         `duplicate live PR-body claim id '${id}' on PR #${seen.get(id)} and #${number} — refuse (#153 AC2 fail-closed)`
@@ -719,12 +877,29 @@ function parsePrClaims(out) {
     }
     seen.set(id, number);
     const scope = scopeStr.trim().split(/\s+/).filter(Boolean);
+    // Every token must be a scope the overlap comparison can actually reason
+    // about, BEFORE it is compared (#153 review round 5, P1). A token that
+    // normalises to nothing used to be silently non-overlapping, so a live
+    // claim scoped `*` or `/` protected none of its files while looking
+    // entirely well-formed. Invalid or ambiguous evidence refuses; it is never
+    // dropped, and never quietly narrowed to the tokens that did parse.
+    for (const token of scope) {
+      const problem = currentScopeTokenProblem(token);
+      if (problem) {
+        fail(
+          `live PR-body claim '${id}' (PR #${number}) has an invalid claim-scope token ${JSON.stringify(
+            token
+          )}: ${problem}. A scope this tool cannot compare must poison the decision, never become a scope that collides with nothing — refuse (#153 AC6 fail-closed). Valid tokens are '${ROOT_SCOPE}' (the whole repository) or a path like 'lib/email.ts' / 'app/api/auth/**'.`
+        );
+      }
+    }
     claims.push({
       id,
       scope,
       issue: claimIssueNumber(id),
       source: "pr",
       number: Number(number),
+      isCrossRepository: isCrossRepo === "true",
     });
   }
   return claims;
@@ -802,6 +977,17 @@ function settleAdmissionInventory() {
         `scope-overlap: admission: PR #${opt.admitPr} is not in the live claim inventory yet (attempt ${attempt}/${attempts})`
       );
       continue;
+    }
+    // The lane being admitted pushed its own branch into --repo, so its own
+    // claim PR is same-repository by construction (#153 review round 5, P1).
+    // A row that says otherwise is not this lane's PR however well its marker
+    // and branch name match, and admitting on it would hand this lane a claim
+    // registered against somebody else's repository.
+    if (self.isCrossRepository) {
+      fail(
+        `admission refused for PR #${opt.admitPr}: the inventory row carrying claim '${opt.claimId}' is a cross-repository (fork) pull request, but this lane pushed its branch into ${opt.repo} itself — that row is not this lane's PR. Refuse rather than admit a claim on foreign-repository evidence.`,
+        { admitPr: opt.admitPr, claimId: opt.claimId }
+      );
     }
     const fp = admitFingerprint(claims);
     streak = streak > 0 && fp === prevFp ? streak + 1 : 1;
@@ -884,16 +1070,29 @@ function stem(token) {
 
 /**
  * True when two scope tokens collide.
+ * - either side is the root-wide scope (`**`) — it contains every path
+ * - either side normalises to nothing — unreadable, so assume collision
  * - exact match
  * - either is prefix of the other (after stem)
  * - shared path prefix of at least one directory segment
  */
 function tokensOverlap(a, b) {
   if (!a || !b) return false;
+  // The deliberate root-wide scope (#153 review round 5, P1). `**` stems to
+  // the empty string, so it used to fall through to "no overlap": a claim on
+  // the entire repository protected nothing. It contains every path, so it
+  // overlaps every token — including another `**`.
+  if (a === ROOT_SCOPE || b === ROOT_SCOPE) return true;
   if (a === b) return true;
   const sa = stem(a);
   const sb = stem(b);
-  if (!sa || !sb) return false;
+  // An empty stem means this comparison has no idea what the token covers.
+  // Current-format PR claim scopes can no longer get here (they are validated
+  // in parsePrClaims), but ledger rows and operator-supplied --scope tokens
+  // are not under that grammar, and "I cannot tell" must never be answered as
+  // "they do not touch" on a path that decides whether two lanes may run at
+  // once. Fail closed: assume they collide.
+  if (!sa || !sb) return true;
   if (sa === sb) return true;
   // prefix: app/api vs app/api/auth/**
   if (sa.startsWith(sb + "/") || sb.startsWith(sa + "/")) return true;

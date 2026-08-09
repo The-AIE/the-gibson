@@ -72,10 +72,15 @@ case "$1 $2" in
       case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac
     done
     if [[ "$want_open" -eq 1 ]]; then
-      while IFS='|' read -r number claim scope branch url created updated; do
+      while IFS='|' read -r number claim scope branch url created updated cross; do
         [[ -n "$claim" ]] || continue
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-          "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
+        # Column 8 is the PR's repository identity (#153 review round 5). The
+        # fixture store keeps it in the record so a test can stage a FORK row
+        # by writing `true`; anything the store leaves blank is this
+        # repository's own PR, which is what claim.sh creates.
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated" \
+          "${cross:-false}"
       done < "${GH_PR_FILE:-/dev/null}"
     else
       # find-terminal-pr narrows the real query with `select(.number == N)`.
@@ -90,7 +95,7 @@ case "$1 $2" in
             ;;
         esac
       done
-      while IFS='|' read -r number claim scope branch url created updated; do
+      while IFS='|' read -r number claim scope branch url created updated cross; do
         [[ -n "$claim" ]] || continue
         [[ -z "$want_num" || "$number" == "$want_num" ]] || continue
         rest="${claim#issue-}"
@@ -99,7 +104,7 @@ case "$1 $2" in
         # CLOSED, so the merge-commit column is empty by contract.
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
           "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
-          "CLOSED" "false" "" "acme/app" "$created" "$updated"
+          "CLOSED" "${cross:-false}" "" "acme/app" "$created" "$updated"
       done < "${GH_PR_FILE}.closed" 2>/dev/null
     fi
     ;;
@@ -147,8 +152,11 @@ case "$1 $2" in
     echo $((number + 1)) > "$counter"
     claim=$(sed -n 's/^- Active-work claim: //p' "$body_file")
     scope=$(sed -n 's/^- Claim scope: //p' "$body_file")
-    printf '%s|%s|%s|%s|https://github.com/acme/app/pull/%s|2026-08-04T00:00:00Z|2026-08-04T00:00:00Z\n' \
-      "$number" "$claim" "$scope" "$branch" "$number" >> "${GH_PR_FILE:-/dev/null}"
+    # 8th field: the PR's repository identity, so a fixture can stage a FORK
+    # row for this lane's own claim id (#153 review round 5).
+    printf '%s|%s|%s|%s|https://github.com/acme/app/pull/%s|2026-08-04T00:00:00Z|2026-08-04T00:00:00Z|%s\n' \
+      "$number" "$claim" "$scope" "$branch" "$number" "${GH_PR_CROSS:-false}" \
+      >> "${GH_PR_FILE:-/dev/null}"
     cat "$body_file" > "${GH_PR_FILE}.body"
     echo "https://github.com/acme/app/pull/$number"
     ;;
@@ -165,6 +173,12 @@ case "$1 $2" in
       fi
     done < "${GH_PR_FILE:-/dev/null}"
     mv "$tmp" "$GH_PR_FILE"
+    ;;
+  *)
+    # Loud and bounded (#153 review round 5). Never fall through to a silent
+    # success, and never read stdin — an unmodelled query is a fixture gap.
+    echo "fake gh (claim fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+    exit 64
     ;;
 esac
 exit 0
@@ -219,11 +233,20 @@ mkdir -p "$FASTDIR/lib"
 cp "$SCRIPT_DIR/../claim.sh"            "$FASTDIR/claim.sh"
 cp "$SCRIPT_DIR/../pr-claims.sh"        "$FASTDIR/pr-claims.sh"
 cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$FASTDIR/lib/claim-guards.sh"
-sed 's|const verdict = Atomics\.wait(cell, 0, 0, ms);|const verdict = "timed-out"; void cell; void ms;  /* TEST COPY: blocking removed */|' \
-  "$SCRIPT_DIR/../scope-overlap.mjs" > "$FASTDIR/scope-overlap.mjs"
+# The marked region is the wait AND the monotonic measurement that verifies
+# it (#153 review round 5) — both have to go, because spaceReads now refuses
+# unless the measured elapsed time reaches the configured delay, so removing
+# only the blocking call would make every fast fixture fail the barrier rather
+# than skip it.
+awk '
+  /GIBSON_BARRIER_WAIT_BEGIN/ { print "  return ms;  /* TEST COPY: blocking removed */"; skip = 1; next }
+  /GIBSON_BARRIER_WAIT_END/   { skip = 0; next }
+  !skip                       { print }
+' "$SCRIPT_DIR/../scope-overlap.mjs" > "$FASTDIR/scope-overlap.mjs"
 chmod +x "$FASTDIR/claim.sh" "$FASTDIR/pr-claims.sh"
 if grep -q 'TEST COPY: blocking removed' "$FASTDIR/scope-overlap.mjs" &&
    ! grep -q 'Atomics\.wait(cell' "$FASTDIR/scope-overlap.mjs" &&
+   ! grep -q 'hrtime\.bigint(' "$FASTDIR/scope-overlap.mjs" &&
    node --check "$FASTDIR/scope-overlap.mjs" 2>/dev/null; then
   ok "the test copy patched out exactly the blocking wait (production shape unchanged)"
 else
@@ -593,15 +616,23 @@ case "$1 $2" in
     fi
     ;;
   "api graphql")
+    # `list-open-numbers` is named openPrNumbers and its query also carries
+    # `states: [OPEN]`, so match it first.
+    want_numbers=0
+    for a in "$@"; do
+      case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac
+    done
     want_open=0
     for a in "$@"; do
       case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac
     done
     lock
-    if [[ "$want_open" -eq 1 ]]; then
+    if [[ "$want_numbers" -eq 1 ]]; then
+      cut -d'|' -f1 "$RACE_DIR/prs" 2>/dev/null | grep -E '^[0-9]+$' || true
+    elif [[ "$want_open" -eq 1 ]]; then
       while IFS='|' read -r number claim scope branch url created updated; do
         [[ -n "$claim" ]] || continue
-        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tfalse\n' \
           "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
       done < "$RACE_DIR/prs"
     fi
@@ -652,6 +683,12 @@ case "$1 $2" in
     mv "$RACE_DIR/prs.tmp" "$RACE_DIR/prs"
     unlock
     ;;
+  *)
+    # Loud and bounded (#153 review round 5). An unmodelled gh subcommand is a
+    # gap in this fixture, not a success — and never a stdin-reading fallthrough.
+    echo "fake gh (race fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+    exit 64
+    ;;
 esac
 exit 0
 RACEGH
@@ -670,6 +707,13 @@ setup_race_repo() { # dir repo lane…
   : > "$dir/prs"
   : > "$dir/prs.closed"
   git init -q --bare "$dir/origin"
+  # Ubuntu/`git init --bare` defaults HEAD to refs/heads/master when
+  # init.defaultBranch is unset. Pin it to main BEFORE the seed push so a
+  # second clone actually checks main out (and so this fixture matches a real
+  # GitHub repository, whose default branch is main). Without this, Linux CI
+  # got "remote HEAD refers to nonexistent ref, unable to checkout", no local
+  # main, and both concurrent lanes died on `git fetch origin master` (#153).
+  git --git-dir="$dir/origin" symbolic-ref HEAD refs/heads/main
   git clone -q "$dir/origin" "$dir/seed" 2>/dev/null
   (
     cd "$dir/seed" || exit 1
@@ -677,13 +721,35 @@ setup_race_repo() { # dir repo lane…
     printf '| when | claim-id | scope | who |\n|---|---|---|---|\n' > docs/active-work.md
     git add -A && git commit -qm init && git branch -M main && git push -q -u origin main
   ) >/dev/null 2>&1
+  # Re-assert after the push: some git versions leave bare HEAD alone when the
+  # first branch is pushed under a different name than the previous HEAD.
+  git --git-dir="$dir/origin" symbolic-ref HEAD refs/heads/main
   for lane in "$@"; do
     mkdir -p "$dir/lane$lane"
-    git clone -q "$dir/origin" "$dir/lane$lane/canon" 2>/dev/null
+    # -b main: never depend on remote HEAD resolution for the lane checkout.
+    git clone -q -b main "$dir/origin" "$dir/lane$lane/canon" 2>/dev/null
     git -C "$dir/lane$lane/canon" config "url.$dir/origin.insteadOf" "https://github.com/$repo.git"
     git -C "$dir/lane$lane/canon" remote set-url origin "https://github.com/$repo.git"
   done
   write_race_gh "$dir/bin/gh"
+}
+
+# Dump every concurrent lane's captured stdout/stderr when the fixture fails
+# its structural assertions. CI on Ubuntu previously reported "0 winners /
+# never reached the rendezvous" with no receipt of WHY; the next failure must
+# carry the claim.sh output that produced it (#153 Linux diagnosis).
+dump_race_lane_outputs() { # dir label
+  local dir="$1" label="$2" f
+  echo "  --- $label: captured lane outputs (printed because the fixture failed) ---"
+  for f in "$dir"/outA "$dir"/outB; do
+    if [[ -f "$f" ]]; then
+      echo "  --- $(basename "$f") ---"
+      sed 's/^/  | /' "$f"
+    else
+      echo "  --- $(basename "$f") missing ---"
+    fi
+  done
+  echo "  --- end $label lane outputs ---"
 }
 
 setup_race_repo "$RACE_DIR" "$RACE_REPO" A B
@@ -709,9 +775,17 @@ check "exactly one concurrent lane succeeds" "$winners" "1"
 [[ "$rc_a" -ne 0 || "$rc_b" -ne 0 ]] && ok "the losing lane exits nonzero" \
   || bad "no lane refused (rcA=$rc_a rcB=$rc_b)"
 # Both really did race: each lane's pre-create read saw no claim at all.
-[[ -f "$RACE_DIR/ready-issue-501-alpha" && -f "$RACE_DIR/ready-issue-502-beta" ]] \
-  && ok "both lanes reached PR creation (the TOCTOU window was really open)" \
-  || bad "the lanes did not both reach the rendezvous"
+if [[ -f "$RACE_DIR/ready-issue-501-alpha" && -f "$RACE_DIR/ready-issue-502-beta" ]]; then
+  ok "both lanes reached PR creation (the TOCTOU window was really open)"
+else
+  bad "the lanes did not both reach the rendezvous"
+  dump_race_lane_outputs "$RACE_DIR" "cross-issue race (rcA=$rc_a rcB=$rc_b)"
+fi
+# Also dump when the winner count is wrong — that is the other way this
+# fixture fails closed without explaining itself on CI.
+if [[ "$winners" -ne 1 ]]; then
+  dump_race_lane_outputs "$RACE_DIR" "cross-issue race winners=$winners (rcA=$rc_a rcB=$rc_b)"
+fi
 
 live_rows=$(grep -c . "$RACE_DIR/prs" || true)
 check "exactly one live PR-body claim survives" "$live_rows" "1"
@@ -766,11 +840,25 @@ case "$1 $2" in
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
   # The open inventory never shows the PR this fixture just created.
-  "api graphql") : ;;
+  # list-open-numbers (openPrNumbers) is body-agnostic and also empty here:
+  # this fixture never published a PR that claim.sh can re-find by number.
+  "api graphql")
+    for a in "$@"; do
+      case "$a" in
+        *"openPrNumbers"*|*"states: [OPEN]"*) exit 0 ;;
+      esac
+    done
+    echo "fake gh (admitblind): unmodelled graphql query 'gh $*' — refusing" >&2
+    exit 64
+    ;;
   "pr create")
     echo "https://github.com/acme/app/pull/4242"
     ;;
   "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+  *)
+    echo "fake gh (admitblind): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
+    ;;
 esac
 exit 0
 BLINDGH
@@ -825,6 +913,25 @@ case "$1 $2" in
     fi
     ;;
   "api graphql")
+    # `list-open-numbers` (operation openPrNumbers) also carries
+    # `states: [OPEN]`, so match it first. It is body-agnostic: this lane's own
+    # PR stays in it until `pr close` actually removes it.
+    want_numbers=0
+    for a in "$@"; do case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac; done
+    if [[ "$want_numbers" -eq 1 ]]; then
+      if [[ -n "${LAG_STILL_OPEN_AFTER_CLOSE:-}" ]]; then
+        # A LYING close: gh reported success, the PR never left the open set.
+        printf '%s\n' "$LAG_SELF_PR"
+        exit 0
+      fi
+      [[ "${LAG_OPEN_NUMBERS_EXIT:-0}" -eq 0 ]] || {
+        echo "gh: API rate limit exceeded" >&2
+        exit 1
+      }
+      [[ -f "$LAG_STATE/closed" ]] || printf '%s\n' "$LAG_SELF_PR"
+      [[ -f "$LAG_STATE/rival" ]] && cut -f1 "$LAG_STATE/rival"
+      exit 0
+    fi
     want_open=0
     for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
     [[ "$want_open" -eq 1 ]] || exit 0
@@ -846,7 +953,7 @@ case "$1 $2" in
     if [[ -n "${LAG_CHURN:-}" ]]; then
       # Never settles: every read returns a different inventory.
       cat "$LAG_STATE/self"
-      printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+      printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse\n' \
         "$((900 + n))" "$((800 + n))" "$n" "$((800 + n))" "$((900 + n))"
       exit 0
     fi
@@ -865,8 +972,9 @@ case "$1 $2" in
     done
     claim=$(sed -n 's/^- Active-work claim: //p' "$body_file")
     scope=$(sed -n 's/^- Claim scope: //p' "$body_file")
-    printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
-      "$LAG_SELF_PR" "$claim" "$scope" "$branch" "$LAG_SELF_PR" > "$LAG_STATE/self"
+    printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\t%s\n' \
+      "$LAG_SELF_PR" "$claim" "$scope" "$branch" "$LAG_SELF_PR" \
+      "${LAG_SELF_CROSS:-false}" > "$LAG_STATE/self"
     echo "https://github.com/acme/app/pull/$LAG_SELF_PR"
     ;;
   "pr close")
@@ -874,7 +982,20 @@ case "$1 $2" in
     : > "$LAG_STATE/closed"
     # A closed PR stops being a live claim. Modelling that is what lets the
     # rollback's post-close proof ("is this still live?") mean anything.
-    rm -f "$LAG_STATE/self"
+    if [[ -n "${LAG_CLOSE_REWRITES:-}" ]]; then
+      # The marker was REWRITTEN rather than removed: the claim inventory is
+      # readable and well formed, it simply no longer mentions this lane's
+      # claim id OR its PR number. Every marker-derived check therefore says
+      # "the claim is gone" while the PR itself may be untouched.
+      printf '4242\tissue-777-rewritten\tlib/elsewhere/**\tfeat/777-rewritten\thttps://github.com/acme/app/pull/4242\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse\n' \
+        > "$LAG_STATE/self"
+    else
+      rm -f "$LAG_STATE/self"
+    fi
+    ;;
+  *)
+    echo "fake gh (lag fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+    exit 64
     ;;
 esac
 exit 0
@@ -885,7 +1006,7 @@ LAGGH
 # PR #89 is a rival claim on a DIFFERENT issue with OVERLAPPING scope, and it
 # holds the lower number, so the deterministic tie-break says this lane loses —
 # if it ever manages to see it.
-LAG_RIVAL_ROW=$'89\tissue-88-rival\tlib/lag/**\tfeat/88-rival\thttps://github.com/acme/app/pull/89\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z'
+LAG_RIVAL_ROW=$'89\tissue-88-rival\tlib/lag/**\tfeat/88-rival\thttps://github.com/acme/app/pull/89\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse'
 
 echo "#153 · a rival visible only AFTER this lane's own claim is still caught"
 lag_fixture lagcatch 90 "$LAG_RIVAL_ROW"
@@ -988,9 +1109,15 @@ same_winners=0
 [[ "$same_rc_a" -eq 0 ]] && same_winners=$((same_winners + 1))
 [[ "$same_rc_b" -eq 0 ]] && same_winners=$((same_winners + 1))
 check "exactly one same-issue lane succeeds" "$same_winners" "1"
-[[ -f "$SAME_DIR/ready-issue-601-alpha" && -f "$SAME_DIR/ready-issue-601-beta" ]] \
-  && ok "both same-issue lanes reached PR creation (the window was really open)" \
-  || bad "the same-issue lanes did not both reach the rendezvous"
+if [[ -f "$SAME_DIR/ready-issue-601-alpha" && -f "$SAME_DIR/ready-issue-601-beta" ]]; then
+  ok "both same-issue lanes reached PR creation (the window was really open)"
+else
+  bad "the same-issue lanes did not both reach the rendezvous"
+  dump_race_lane_outputs "$SAME_DIR" "same-issue race (rcA=$same_rc_a rcB=$same_rc_b)"
+fi
+if [[ "$same_winners" -ne 1 ]]; then
+  dump_race_lane_outputs "$SAME_DIR" "same-issue race winners=$same_winners (rcA=$same_rc_a rcB=$same_rc_b)"
+fi
 check "exactly one live claim on the issue survives" "$(grep -c . "$SAME_DIR/prs" || true)" "1"
 same_survivor_id=$(cut -d'|' -f2 "$SAME_DIR/prs" | head -1)
 if [[ "$same_rc_a" -eq 0 ]]; then
@@ -1081,9 +1208,16 @@ case "$1 $2" in
   "repo view") echo "acme/app" ;;
   "issue view") echo "gh: could not read labels (503)" >&2; exit 1 ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
-  "api graphql") : ;;
+  "api graphql")
+    # Empty answers for both list and list-open-numbers; never fall through.
+    exit 0
+    ;;
   "pr create") echo "https://github.com/acme/app/pull/5150" ;;
   "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+  *)
+    echo "fake gh (labelfail): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
+    ;;
 esac
 exit 0
 LBLGH
@@ -1182,6 +1316,97 @@ test -n "$(git -C "$ROOT/closelies/canon" ls-remote --heads origin 'feat/87-clos
   && ok "a lying close keeps the remote branch" || bad "a lying close deleted the remote branch"
 contains "a lying close keeps agent-claimed" "$(cat "$ROOT/closelies/state/labels")" "agent-claimed"
 
+# ---------------------------------------------------------------------------
+# #153 review round 5, P1 — rollback proves the close with the PR NUMBER
+# ---------------------------------------------------------------------------
+# `pr-claims.sh list` only lists a PR while that PR carries a well-formed claim
+# marker, so "this lane's claim row is gone" is satisfied by a real close AND
+# by a still-open PR whose marker was deleted or rewritten. rollback_pr used to
+# accept that and go straight on to destroy the worktree, both branch refs and
+# the issue-wide label behind a pull request that may still hold the issue.
+# Every fixture below keeps the REAL artifacts claim.sh created (nothing is
+# pre-deleted) and proves not one of them is touched.
+echo "#153 round 5 · close succeeds, marker REMOVED, PR still open: retain everything"
+lag_fixture numremoved 95 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/numremoved/canon" && PATH="$ROOT/numremoved/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_STILL_OPEN_AFTER_CLOSE=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 numremoved 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a removed marker on a still-open PR exits nonzero" \
+  || bad "removed marker exited 0: $out"
+contains "reports an incomplete rollback"      "$out" "INCOMPLETE"
+contains "names the PR that is still open"     "$out" "PR #95 (kept: it is STILL OPEN in acme/app"
+contains "names the removed/rewritten marker"  "$out" "a removed or rewritten marker is not a closed PR"
+test -d "$ROOT/numremoved/wt-87-numremoved" \
+  && ok "removed marker keeps the worktree" || bad "removed marker destroyed the worktree"
+test -n "$(git -C "$ROOT/numremoved/canon" branch --list 'feat/87-numremoved')" \
+  && ok "removed marker keeps the local branch" || bad "removed marker deleted the local branch"
+test -n "$(git -C "$ROOT/numremoved/canon" ls-remote --heads origin 'feat/87-numremoved')" \
+  && ok "removed marker keeps the remote branch" || bad "removed marker deleted the remote branch"
+contains "removed marker keeps agent-claimed" "$(cat "$ROOT/numremoved/state/labels")" "agent-claimed"
+lacks "removed marker never edits the issue-wide label away" \
+  "$(cat "$ROOT/numremoved/state/label.log")" "--remove-label"
+
+echo "#153 round 5 · close succeeds, marker REWRITTEN to another claim, PR still open"
+lag_fixture numrewritten 96 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/numrewritten/canon" && PATH="$ROOT/numrewritten/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_STILL_OPEN_AFTER_CLOSE=1 LAG_CLOSE_REWRITES=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 numrewritten 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a rewritten marker on a still-open PR exits nonzero" \
+  || bad "rewritten marker exited 0: $out"
+contains "reports an incomplete rollback"  "$out" "INCOMPLETE"
+contains "names the PR that is still open" "$out" "PR #96 (kept: it is STILL OPEN in acme/app"
+test -d "$ROOT/numrewritten/wt-87-numrewritten" \
+  && ok "rewritten marker keeps the worktree" || bad "rewritten marker destroyed the worktree"
+test -n "$(git -C "$ROOT/numrewritten/canon" branch --list 'feat/87-numrewritten')" \
+  && ok "rewritten marker keeps the local branch" || bad "rewritten marker deleted the local branch"
+test -n "$(git -C "$ROOT/numrewritten/canon" ls-remote --heads origin 'feat/87-numrewritten')" \
+  && ok "rewritten marker keeps the remote branch" || bad "rewritten marker deleted the remote branch"
+contains "rewritten marker keeps agent-claimed" "$(cat "$ROOT/numrewritten/state/labels")" "agent-claimed"
+lacks "rewritten marker never edits the issue-wide label away" \
+  "$(cat "$ROOT/numrewritten/state/label.log")" "--remove-label"
+
+echo "#153 round 5 · an UNREADABLE open-PR inventory is not proof the close worked"
+lag_fixture numunread 97 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/numunread/canon" && PATH="$ROOT/numunread/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_OPEN_NUMBERS_EXIT=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 numunread 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unreadable open-PR inventory exits nonzero" \
+  || bad "unreadable open-PR inventory exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "names the unreadable inventory" "$out" "open pull-request inventory for acme/app is unreadable"
+test -d "$ROOT/numunread/wt-87-numunread" \
+  && ok "an unreadable open-PR inventory keeps the worktree" \
+  || bad "unreadable open-PR inventory destroyed the worktree"
+test -n "$(git -C "$ROOT/numunread/canon" ls-remote --heads origin 'feat/87-numunread')" \
+  && ok "an unreadable open-PR inventory keeps the remote branch" \
+  || bad "unreadable open-PR inventory deleted the remote branch"
+contains "an unreadable open-PR inventory keeps agent-claimed" \
+  "$(cat "$ROOT/numunread/state/labels")" "agent-claimed"
+
+echo "#153 round 5 · a FORK row carrying this lane's claim is never closed"
+# This lane pushed feat/87-forkrow into acme/app itself, so its own claim PR is
+# same-repository by construction. A row that says isCrossRepository=true is
+# not this lane's PR however well its marker and branch name match — and
+# `gh pr close` is irreversible.
+lag_fixture forkrow 98 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/forkrow/canon" && PATH="$ROOT/forkrow/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_SELF_CROSS=true \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 forkrow 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a fork row for this lane's claim exits nonzero" \
+  || bad "fork row exited 0: $out"
+contains "admission refuses the foreign-repository row" "$out" "cross-repository (fork) pull request"
+contains "rollback refuses to close it"                 "$out" "not provably a same-repository pull request"
+check "the fork row's PR was never closed" "$(grep -c . "$ROOT/forkrow/state/close.log" || true)" "0"
+test -d "$ROOT/forkrow/wt-87-forkrow" \
+  && ok "a fork row keeps the worktree" || bad "fork row destroyed the worktree"
+test -n "$(git -C "$ROOT/forkrow/canon" ls-remote --heads origin 'feat/87-forkrow')" \
+  && ok "a fork row keeps the remote branch" || bad "fork row deleted the remote branch"
+contains "a fork row keeps agent-claimed" "$(cat "$ROOT/forkrow/state/labels")" "agent-claimed"
+
 echo "#153 · a successful create whose output is UNPARSEABLE never destroys anything"
 # gh exits 0 and prints something this cannot parse into a PR number, and the
 # PR is not (yet) visible in the live inventory. The claim may exist and be
@@ -1195,9 +1420,14 @@ case "$1 $2" in
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
   # The PR is created but is not published to the open inventory yet.
-  "api graphql") : ;;
+  # Empty for list and list-open-numbers alike; never read stdin.
+  "api graphql") exit 0 ;;
   "pr create") echo "Warning: 1 uncommitted change"; echo "Creating draft pull request for feat/x into main in acme/app" ;;
   "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+  *)
+    echo "fake gh (prgarbage): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
+    ;;
 esac
 exit 0
 PGGH
@@ -1239,6 +1469,15 @@ case "$1 $2" in
     elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
+    # `list-open-numbers` (operation openPrNumbers) also carries
+    # `states: [OPEN]`, so match it first. It is body-agnostic and derived
+    # from the same store, so a PR that `pr close` removed is gone from it too.
+    want_numbers=0
+    for a in "$@"; do case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac; done
+    if [[ "$want_numbers" -eq 1 ]]; then
+      cut -f1 "$STATE/open" 2>/dev/null | grep -E '^[0-9]+$' || true
+      exit 0
+    fi
     want_open=0
     for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
     [[ "$want_open" -eq 1 ]] || exit 0
@@ -1248,13 +1487,17 @@ case "$1 $2" in
   "pr create")
     branch=""
     while [[ $# -gt 0 ]]; do case "$1" in --head) branch="$2"; shift 2 ;; *) shift ;; esac; done
-    printf '4242\tissue-97-found\tlib/found/**\t%s\thttps://github.com/acme/app/pull/4242\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+    printf '4242\tissue-97-found\tlib/found/**\t%s\thttps://github.com/acme/app/pull/4242\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse\n' \
       "$branch" > "$STATE/open"
     echo "the pull request was created, somewhere"
     ;;
   "pr close")
     echo "closed $3" >> "$STATE/close.log"
     : > "$STATE/open"
+    ;;
+  *)
+    echo "fake gh (prfound): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
     ;;
 esac
 exit 0
@@ -1290,6 +1533,15 @@ case "$1 $2" in
     elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
+    # `list-open-numbers` (operation openPrNumbers) also carries
+    # `states: [OPEN]`, so match it first. It is body-agnostic and derived
+    # from the same store, so a PR that `pr close` removed is gone from it too.
+    want_numbers=0
+    for a in "$@"; do case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac; done
+    if [[ "$want_numbers" -eq 1 ]]; then
+      cut -f1 "$STATE/open" 2>/dev/null | grep -E '^[0-9]+$' || true
+      exit 0
+    fi
     want_open=0
     for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
     [[ "$want_open" -eq 1 ]] || exit 0
@@ -1298,11 +1550,15 @@ case "$1 $2" in
     ;;
   "pr create")
     # Someone else's PR happens to hold the number this lane is told it got.
-    printf '5150\tissue-98-someone-else\tlib/other/**\tfeat/98-someone-else\thttps://github.com/acme/app/pull/5150\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+    printf '5150\tissue-98-someone-else\tlib/other/**\tfeat/98-someone-else\thttps://github.com/acme/app/pull/5150\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse\n' \
       > "$STATE/open"
     echo "https://github.com/acme/app/pull/5150"
     ;;
   "pr close") echo "closed $3" >> "$STATE/close.log" ;;
+  *)
+    echo "fake gh (prforeign): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
+    ;;
 esac
 exit 0
 XFGH
@@ -1524,9 +1780,13 @@ case "$1 $2" in
   "repo view") echo "acme/app" ;;
   "issue view") echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
-  "api graphql") : ;;
+  "api graphql") exit 0 ;;
   "pr create") echo "$*" >> "${GH_LOG:-/dev/null}"; echo "https://github.com/acme/app/pull/1234" ;;
   "pr close") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+  *)
+    echo "fake gh (nonode): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
+    ;;
 esac
 exit 0
 NNGH

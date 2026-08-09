@@ -14,6 +14,23 @@ PASS=0
 FAIL=0
 ok()  { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
+# Negative assertion, ACCOUNTED (#153 review round 5). The suite previously
+# called an undefined `lacks` here: bash printed "lacks: command not found",
+# the assertion never ran, and neither PASS nor FAIL moved — a shell error
+# sitting quietly underneath a green tally. Same signature and semantics as
+# the `lacks` in claim.test.sh and release-claim.test.sh, so a reader moving
+# between the three suites does not have to check which one this is.
+lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+# …and the ratchet for the class, not just the instance. bash calls this hook
+# when a command name does not resolve, so a mistyped or not-yet-written
+# assertion becomes a COUNTED failure instead of a stderr line the tally never
+# hears about. Returning 127 keeps the original exit status, so nothing that
+# already reasons about "command not found" changes behaviour. (bash 4+; on
+# bash 3.2 the hook simply never fires, which is no worse than before.)
+command_not_found_handle() {
+  bad "the suite invoked an undefined command '$1' — a shell error may never coexist with a green tally"
+  return 127
+}
 
 command -v node >/dev/null || { echo "scope-overlap.test.sh: node required"; exit 1; }
 command -v git  >/dev/null || { echo "scope-overlap.test.sh: git required"; exit 1; }
@@ -42,12 +59,26 @@ SENSOR_FAST="$FASTDIR/scope-overlap.mjs"
 # trust boundary), so the copy needs its own reader alongside it.
 cp "$SCRIPT_DIR/../pr-claims.sh" "$FASTDIR/pr-claims.sh"
 chmod +x "$FASTDIR/pr-claims.sh"
-sed 's|const verdict = Atomics\.wait(cell, 0, 0, ms);|const verdict = "timed-out"; void cell; void ms;  /* TEST COPY: blocking removed */|' \
-  "$SENSOR" > "$SENSOR_FAST"
+# The substitution replaces the marked body of blockAtLeast() — the wait AND
+# the monotonic measurement that verifies it (#153 review round 5) — with an
+# honest "the full delay elapsed". It has to take both: spaceReads now refuses
+# unless the measured elapsed time really reaches the configured delay, so
+# removing only the blocking call would make every fast fixture fail the
+# barrier instead of skipping it. Everything outside the markers — the
+# safe-integer test, the floor, the maxima, the quiescence streak, the
+# self-visibility requirement, the elapsed comparison in spaceReads itself —
+# is still the production code path.
+awk '
+  /GIBSON_BARRIER_WAIT_BEGIN/ { print "  return ms;  /* TEST COPY: blocking removed */"; skip = 1; next }
+  /GIBSON_BARRIER_WAIT_END/   { skip = 0; next }
+  !skip                       { print }
+' "$SENSOR" > "$SENSOR_FAST"
 # The CALL must be gone, not merely the word: the surrounding comments name
 # Atomics.wait several times and would otherwise mask a failed substitution.
+# The monotonic read has to be gone from the copy too, for the same reason.
 if grep -q 'TEST COPY: blocking removed' "$SENSOR_FAST" &&
-   ! grep -q 'Atomics\.wait(cell' "$SENSOR_FAST"; then
+   ! grep -q 'Atomics\.wait(cell' "$SENSOR_FAST" &&
+   ! grep -q 'hrtime\.bigint(' "$SENSOR_FAST"; then
   ok "the test copy patched out exactly the blocking wait (production shape unchanged)"
 else
   bad "could not patch the test copy — production spaceReads no longer matches the expected shape; refusing to pretend these fixtures exercise the barrier"
@@ -223,7 +254,7 @@ export PATH="$ROOT/bin:$PATH"
 
 setup_repo d
 GH_PR_TSV="$ROOT/pr-open.tsv"
-printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 export GH_PR_TSV
 unset GH_PR_EXIT
@@ -249,8 +280,8 @@ out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id i
 
 echo "duplicate PR-claim id across two PRs fails closed (#153)"
 {
-  printf '601\tissue-33-dup\tsrc/a/**\tfeat/33-dup\thttps://github.com/acme/app/pull/601\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-  printf '602\tissue-33-dup\tsrc/b/**\tfeat/33-dup-2\thttps://github.com/acme/app/pull/602\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '601\tissue-33-dup\tsrc/a/**\tfeat/33-dup\thttps://github.com/acme/app/pull/601\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
+  printf '602\tissue-33-dup\tsrc/b/**\tfeat/33-dup-2\thttps://github.com/acme/app/pull/602\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 } > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-34-x); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'duplicate' && ok "duplicate PR-claim id refuses" \
@@ -269,27 +300,27 @@ out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo 'not-a-repo'); rc=$?
   || bad "malformed --repo (rc=$rc): $out"
 
 echo "missing/empty claim scope on a live PR-body claim fails closed (#153 AC6)"
-printf '701\tissue-40-empty-scope\t\tfeat/40-empty-scope\thttps://github.com/acme/app/pull/701\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '701\tissue-40-empty-scope\t\tfeat/40-empty-scope\thttps://github.com/acme/app/pull/701\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-41-x); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'missing/empty claim scope' && ok "missing scope refuses (never silently empty)" \
   || bad "missing scope (rc=$rc): $out"
 
 echo "missing/unsafe head branch on a live PR-body claim fails closed (#153 AC6)"
-printf '702\tissue-42-bad-branch\tsrc/a/**\t\thttps://github.com/acme/app/pull/702\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '702\tissue-42-bad-branch\tsrc/a/**\t\thttps://github.com/acme/app/pull/702\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-43-x); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'missing/unsafe head branch' && ok "missing branch refuses" \
   || bad "missing branch (rc=$rc): $out"
 
 echo "PR URL repository mismatch vs --repo fails closed (#153 AC3)"
-printf '703\tissue-44-wrong-repo\tsrc/a/**\tfeat/44-wrong-repo\thttps://github.com/other-org/other-app/pull/703\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '703\tissue-44-wrong-repo\tsrc/a/**\tfeat/44-wrong-repo\thttps://github.com/other-org/other-app/pull/703\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-45-x); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'unexpected repository identity' && ok "URL-repo mismatch refuses" \
   || bad "URL-repo mismatch (rc=$rc): $out"
 # Reset fixture for anything appended after this block.
-printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 
 # --- #153 blocker 6: exercise pr-claims.sh's OWN jq validation, not just its
@@ -331,8 +362,8 @@ out=$(PATH="$ROOT/bin-json:$PATH" GH_JSON="$GH_JSON" run_so "$ROOT/d/canon" --sc
 # same evidence always agree on who survives.
 echo "--admit-pr · a LOWER-numbered overlapping PR claim refuses this lane"
 {
-  printf '800\tissue-60-shared-lib\tlib/shared/**\tfeat/60-shared-lib\thttps://github.com/acme/app/pull/800\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-  printf '801\tissue-61-shared-util\tlib/shared/util.ts\tfeat/61-shared-util\thttps://github.com/acme/app/pull/801\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '800\tissue-60-shared-lib\tlib/shared/**\tfeat/60-shared-lib\thttps://github.com/acme/app/pull/800\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
+  printf '801\tissue-61-shared-util\tlib/shared/util.ts\tfeat/61-shared-util\thttps://github.com/acme/app/pull/801\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 } > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/util.ts' --repo acme/app --claim-id issue-61-shared-util --issue 61 --admit-pr 801); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-60-shared-lib' && ok "later lane stands down for the lower PR number" \
@@ -362,7 +393,7 @@ out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id 
   || bad "invisible own claim admitted (rc=$rc): $out"
 
 echo "--admit-pr · a LEDGER claim always beats an admission candidate"
-printf '810\tissue-63-ledger-race\tapp/api/auth/**\tfeat/63-ledger-race\thttps://github.com/acme/app/pull/810\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '810\tissue-63-ledger-race\tapp/api/auth/**\tfeat/63-ledger-race\thttps://github.com/acme/app/pull/810\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'app/api/auth/**' --repo acme/app --claim-id issue-63-ledger-race --issue 63 --admit-pr 810); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-7-password-reset' && ok "ledger claim beats the admission candidate" \
@@ -394,15 +425,15 @@ echo "#153 · a forged inventory cannot bypass a live conflicting claim"
 # a green result can only mean the forged inventory replaced the live read —
 # a ledger overlap would refuse for the wrong reason and prove nothing.
 {
-  printf '640\tissue-65-settled\tlib/gate/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-  printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '640\tissue-65-settled\tlib/gate/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
+  printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 } > "$GH_PR_TSV"
 
 # The forgeries: an empty inventory, and one containing only this lane.
 FORGED_EMPTY="$ROOT/forged-empty.tsv"
 : > "$FORGED_EMPTY"
 FORGED_SELF="$ROOT/forged-self.tsv"
-printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$FORGED_SELF"
 
 for forged in "$FORGED_EMPTY" "$FORGED_SELF"; do
@@ -432,7 +463,7 @@ out=$(run_so "$ROOT/d/canon" --scope 'lib/gate/handlers.ts' --repo acme/app \
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
   && ok "the live inventory alone decides admission" \
   || bad "live admission verdict wrong (rc=$rc): $out"
-printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
   --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
@@ -462,7 +493,7 @@ fi
 
 # --- #153 review round 3, P1: the barrier has a production floor ------------
 echo "#153 · the publication barrier cannot be weakened from the environment"
-printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 floor_case() { # label VAR=value expect-substring
   local label="$1" assign="$2" want="$3" out rc
@@ -515,14 +546,14 @@ n=$(cat "$LAG_READS" 2>/dev/null || echo 0)
 n=$((n + 1)); echo "$n" > "$LAG_READS"
 if [[ -n "${LAG_CHURN:-}" ]]; then
   # Never settles: every read differs.
-  printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-  printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
+  printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
     "$((900 + n))" "$((800 + n))" "$n" "$((800 + n))" "$((900 + n))"
   exit 0
 fi
-printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 if [[ "$n" -ge "${LAG_RIVAL_AFTER:-3}" ]]; then
-  printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 fi
 exit 0
 LAGGH
@@ -549,8 +580,8 @@ unset LAG_READS
 
 echo "#153 · admission refuses a second lane on the SAME issue without --slice"
 {
-  printf '640\tissue-65-settled\tlib/one/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-  printf '700\tissue-65-other\tlib/two/**\tfeat/65-other\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '640\tissue-65-settled\tlib/one/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
+  printf '700\tissue-65-other\tlib/two/**\tfeat/65-other\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 } > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/two/**' --repo acme/app \
   --claim-id issue-65-other --issue 65 --admit-pr 700); rc=$?
@@ -570,7 +601,7 @@ out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-65-
   && ok "--admit-pr without --issue is refused" || bad "--admit-pr without --issue (rc=$rc): $out"
 
 # Reset the fixture for anything appended after this block.
-printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 
 # ===========================================================================
@@ -613,7 +644,7 @@ echo "#153 round 4 · a HOSTILE 'sleep' on PATH is never executed by production"
 # above: it would catch a re-introduction under any name that still ends up
 # executing `sleep`.
 setup_repo s
-printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 rm -f "$SLEEP_SENTINEL"
 # Real production sensor, real minimum barrier: 2 stable reads, 1s apart.
@@ -653,6 +684,284 @@ raise_elapsed=$(( $(date +%s) - raise_start ))
 [[ -s "$SLEEP_SENTINEL" ]] &&
   bad "the raised-delay run executed the hostile PATH sleep" ||
   ok "the raised-delay run executed the hostile PATH sleep ZERO times"
+
+# ===========================================================================
+# #153 review round 5, P1 — current-format scope tokens are validated
+# ===========================================================================
+# stem() strips trailing "/", "*" and "**", so `*`, `**`, `/` and friends all
+# normalised to the empty string — and tokensOverlap answered "no overlap" for
+# an empty stem. A live claim whose scope was any of those therefore collided
+# with NOTHING while looking perfectly well formed to pr-claims.sh: nonempty
+# scope marker, valid id, valid head branch, valid URL. That is a real live
+# claim silently protecting none of its files.
+#
+# The grammar is now explicit: "**" (the whole repository) or a path of plain
+# [A-Za-z0-9_.-] segments with an optional trailing "*"/"**". Anything else is
+# ambiguous evidence and refuses. "**" is honoured as a real root-wide scope
+# and overlaps every path rather than nothing.
+setup_repo v
+
+# One live PR-body claim with the given scope string; the proposed claim below
+# is on a DIFFERENT issue with a scope that must never be waved through.
+live_scope_case() { # label scope-string expect(refuse|admit) [needle]
+  local label="$1" scope="$2" expect="$3" needle="${4:-}" out rc
+  printf '501\tissue-20-nav-shell\t%s\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+    "$scope" > "$GH_PR_TSV"
+  out=$(run_so "$ROOT/v/canon" --scope 'components/nav/Item.tsx' --repo acme/app \
+    --claim-id issue-21-nav-tweak --issue 21); rc=$?
+  if [[ "$expect" == "refuse" ]]; then
+    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -qF "$needle"; }; then
+      ok "$label"
+    else
+      bad "$label (rc=$rc): $out"
+    fi
+  else
+    if [[ "$rc" -eq 0 ]]; then ok "$label"; else bad "$label (rc=$rc): $out"; fi
+  fi
+}
+
+echo "#153 round 5 · a live claim whose scope normalises to nothing is never ignored"
+live_scope_case "a live claim scoped '*' refuses (invalid token)" \
+  '*' refuse "invalid claim-scope token"
+live_scope_case "a live claim scoped '/' refuses (invalid token)" \
+  '/' refuse "empty path segment"
+live_scope_case "a live claim scoped '.' refuses (relative-path escape)" \
+  '.' refuse "invalid claim-scope token"
+live_scope_case "a live claim scoped '..' refuses (relative-path escape)" \
+  '..' refuse "invalid claim-scope token"
+live_scope_case "a live claim scoped '../secrets' refuses" \
+  '../secrets' refuse "relative-path escape"
+live_scope_case "a live claim scoped 'a//b' refuses (empty segment)" \
+  'a//b' refuse "empty path segment"
+live_scope_case "a live claim scoped 'lib/' refuses (trailing slash)" \
+  'lib/' refuse "empty path segment"
+live_scope_case "a live claim scoped '*.ts' refuses (wildcard inside a segment)" \
+  '*.ts' refuse "not a plain path segment"
+live_scope_case "a live claim with a leading double-star segment refuses" \
+  '**/nav' refuse "only allowed as the final segment"
+live_scope_case "a live claim with a double-star in the middle refuses" \
+  'lib/**/deep' refuse "only allowed as the final segment"
+
+echo "#153 round 5 · a MIXED valid/invalid scope refuses on the invalid token"
+# The dangerous shape: one good token makes the row look fine while the bad
+# one silently drops out of the comparison. Refuse the whole row.
+live_scope_case "one invalid token among valid ones refuses the whole claim" \
+  'lib/unrelated/** *' refuse "invalid claim-scope token"
+live_scope_case "an invalid token first refuses the whole claim" \
+  '/ lib/unrelated/**' refuse "invalid claim-scope token"
+
+echo "#153 round 5 · a deliberate root-wide scope overlaps EVERY path"
+live_scope_case "a live claim scoped '**' collides with an unrelated path" \
+  '**' refuse "issue-20-nav-shell"
+# …and it really is the ROOT-WIDE rule doing it, not the path happening to
+# match: a scope that shares no prefix at all with the proposal still collides.
+printf '501\tissue-20-nav-shell\t**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/v/canon" --scope 'totally/unrelated/elsewhere.md' --repo acme/app \
+  --claim-id issue-22-elsewhere --issue 22); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-20-nav-shell' &&
+  ok "the root-wide scope also collides with a path sharing no prefix" ||
+  bad "a root-wide live claim was treated as non-overlapping (rc=$rc): $out"
+
+echo "#153 round 5 · legitimate existing scope forms keep working"
+live_scope_case "'components/nav/**' still collides with a file inside it" \
+  'components/nav/**' refuse "issue-20-nav-shell"
+live_scope_case "'components/nav/Item.tsx' still collides with itself" \
+  'components/nav/Item.tsx' refuse "issue-20-nav-shell"
+live_scope_case "'components/nav/*' is a valid trailing wildcard and collides" \
+  'components/nav/*' refuse "issue-20-nav-shell"
+live_scope_case "'app/api/auth/** lib/email.ts' (the documented example) is valid and disjoint" \
+  'app/api/auth/** lib/email.ts' admit
+live_scope_case "'docs/05-concurrency.md' is a valid disjoint scope" \
+  'docs/05-concurrency.md' admit
+live_scope_case "'scripts/lib/claim-guards.sh' is a valid disjoint scope" \
+  'scripts/lib/claim-guards.sh' admit
+live_scope_case "'lib/checkout/**' is a valid disjoint scope" \
+  'lib/checkout/**' admit
+
+echo "#153 round 5 · an unnormalisable token is treated as overlapping, never as disjoint"
+# The live PR-claim grammar cannot reach tokensOverlap with an empty stem any
+# more, but LEDGER rows and operator-supplied --scope tokens are not under it.
+# "I cannot tell what this covers" must never be answered as "they do not
+# touch": the proposal below is garbage, and it must not be waved through past
+# a real live claim.
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/v/canon" --scope '*' --repo acme/app \
+  --claim-id issue-23-star --issue 23); rc=$?
+[[ "$rc" -ne 0 ]] &&
+  ok "a proposed scope that normalises to nothing collides with a live claim" ||
+  bad "a proposed '*' scope was admitted alongside a live claim (rc=$rc): $out"
+out=$(run_so "$ROOT/v/canon" --scope 'src/legacy/**' --claim-id issue-24-legacy-star); rc=$?
+[[ "$rc" -ne 0 ]] &&
+  ok "the ledger claim is still detected normally alongside the new rule" ||
+  bad "the ledger overlap check regressed (rc=$rc): $out"
+
+# Reset the shared inventory for the barrier fixtures that follow.
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+  > "$GH_PR_TSV"
+
+# ===========================================================================
+# #153 review round 5, P1 — repository identity travels with the live claim
+# ===========================================================================
+echo "#153 round 5 · an unreadable repository-identity column refuses"
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tmaybe\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/v/canon" --scope 'app/billing/**' --repo acme/app \
+  --claim-id issue-25-billing --issue 25); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'repository-identity column' &&
+  ok "a non-boolean identity column refuses" || bad "non-boolean identity accepted (rc=$rc): $out"
+
+echo "#153 round 5 · a truncated 7-field row refuses (the identity column is required)"
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/v/canon" --scope 'app/billing/**' --repo acme/app \
+  --claim-id issue-25-billing --issue 25); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'want 8 tab-separated fields' &&
+  ok "a pre-#153-round-5 seven-field row refuses" || bad "seven-field row accepted (rc=$rc): $out"
+
+echo "#153 round 5 · this lane's own admission row may not be a FORK"
+printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\ttrue\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/v/canon" --scope 'lib/sentinel/other.ts' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'cross-repository (fork) pull request' &&
+  ok "an admission row that is a fork refuses" || bad "a fork admission row was accepted (rc=$rc): $out"
+
+# Reset the shared inventory for the barrier fixtures that follow.
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+  > "$GH_PR_TSV"
+
+# ===========================================================================
+# #153 review round 5, P1 — an inherited NODE_OPTIONS cannot free the wait
+# ===========================================================================
+# Removing the PATH-resolved `sleep` closed one door and left another open.
+# Node runs whatever `--import` names BEFORE this file's first line, so
+#
+#   NODE_OPTIONS='--import=data:text/javascript,Atomics.wait%3D()%3D%3E"timed-out"'
+#
+# replaced the barrier's blocking primitive with a function that returns the
+# expected verdict instantly. Every structural check still passed — the floor,
+# the maxima, the quiescence streak, the self-visibility requirement — while
+# the only guarantee the barrier actually makes, that two reads are separated
+# in TIME, became free. That is a configured fail-closed spacing barrier
+# turning into a successful immediate read.
+#
+# The repair measures the wait against the monotonic clock instead of trusting
+# its return value. This is the EXACT payload, run against the REAL production
+# file, and admission must not succeed early.
+echo "#153 round 5 · the exact Atomics.wait preload payload cannot free the barrier"
+setup_repo n
+printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+  > "$GH_PR_TSV"
+NODE_OPTIONS_PAYLOAD='--import=data:text/javascript,Atomics.wait%3D()%3D%3E%22timed-out%22'
+# First: prove the payload really does neuter Atomics.wait on this Node, so a
+# green result below can never be "the attack silently stopped working".
+cat > "$ROOT/atomics-probe.mjs" <<'PROBE'
+const cell = new Int32Array(new SharedArrayBuffer(4));
+const t0 = process.hrtime.bigint();
+Atomics.wait(cell, 0, 0, 300);
+process.stdout.write(String(Math.round(Number(process.hrtime.bigint() - t0) / 1e6)));
+PROBE
+probe_clean=$(node "$ROOT/atomics-probe.mjs" 2>/dev/null || echo -1)
+probe_hostile=$(NODE_OPTIONS="$NODE_OPTIONS_PAYLOAD" node "$ROOT/atomics-probe.mjs" 2>/dev/null || echo -1)
+if [[ "$probe_clean" -ge 250 && "$probe_hostile" -lt 100 ]]; then
+  ok "the preload payload really does neuter Atomics.wait (${probe_clean}ms -> ${probe_hostile}ms)"
+else
+  bad "the preload payload no longer neuters Atomics.wait (${probe_clean}ms -> ${probe_hostile}ms) — this sensor would pass for the wrong reason"
+fi
+
+payload_start=$(date +%s)
+out=$(NODE_OPTIONS="$NODE_OPTIONS_PAYLOAD" \
+  GIBSON_CLAIM_ADMIT_DELAY=2 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  run_so_prod "$ROOT/n/canon" --scope 'lib/sentinel/other.ts' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+payload_elapsed=$(( $(date +%s) - payload_start ))
+# The required invariant, stated exactly: admission may NOT succeed early. It
+# is allowed to fail closed (what this implementation does) or to succeed
+# having actually paid the spacing. It may not succeed in no time at all.
+if [[ "$rc" -ne 0 || "$payload_elapsed" -ge 2 ]]; then
+  ok "the preload payload cannot buy an early admission (rc=$rc, ${payload_elapsed}s)"
+else
+  bad "the preload payload bought a successful immediate admission (rc=$rc, ${payload_elapsed}s): $out"
+fi
+echo "$out" | grep -q 'did not actually elapse' &&
+  ok "the refusal names the spacing that never happened" ||
+  bad "the refusal does not name the unspaced barrier: $out"
+echo "$out" | grep -q 'NODE_OPTIONS is set in this process' &&
+  ok "the refusal names the inherited runtime configuration" ||
+  bad "the refusal does not mention NODE_OPTIONS: $out"
+lacks "the payload run never reports admission" "$out" "scope-overlap: OK"
+
+echo "#153 round 5 · the barrier measures the wait rather than trusting its verdict (static)"
+if grep -q 'hrtime\.bigint()' "$SENSOR_CODE"; then
+  ok "the barrier reads a monotonic clock around the wait"
+else
+  bad "the barrier no longer measures elapsed time — a patched wait would be trusted again"
+fi
+if grep -q 'waitedMs >= ms' "$SENSOR_CODE"; then
+  ok "the barrier refuses when the measured wait is short"
+else
+  bad "the barrier no longer compares the measured wait against the configured delay"
+fi
+
+echo "#153 round 5 · a clean run with an UNRELATED NODE_OPTIONS still pays the spacing"
+# The guard must not be "NODE_OPTIONS is set, therefore refuse": a benign
+# inherited value has to keep working, and it keeps working precisely because
+# the wait is measured rather than assumed.
+benign_start=$(date +%s)
+out=$(NODE_OPTIONS='--max-old-space-size=512' \
+  GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  run_so_prod "$ROOT/n/canon" --scope 'lib/sentinel/other.ts' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+benign_elapsed=$(( $(date +%s) - benign_start ))
+[[ "$rc" -eq 0 && "$benign_elapsed" -ge 1 ]] &&
+  ok "a benign NODE_OPTIONS admits normally and still waits (${benign_elapsed}s)" ||
+  bad "a benign NODE_OPTIONS broke admission (rc=$rc, ${benign_elapsed}s): $out"
+
+echo "#153 round 5 · production claim.sh does not hand NODE_OPTIONS to the sensor"
+if grep -qE 'env -u NODE_OPTIONS' "$SCRIPT_DIR/../claim.sh" &&
+   ! grep -qE '^[[:space:]]*if ! node "\$SCRIPT_DIR/scope-overlap\.mjs"' "$SCRIPT_DIR/../claim.sh"; then
+  ok "claim.sh runs the sensor through an env that strips NODE_OPTIONS"
+else
+  bad "claim.sh invokes the sensor with the caller's NODE_OPTIONS inherited"
+fi
+# …and prove it at RUNTIME, not just by reading the source: a payload that
+# writes a file when it loads must never run inside the sensor claim.sh spawns.
+NODE_SENTINEL="$ROOT/node-options-sentinel"
+rm -f "$NODE_SENTINEL"
+cat > "$ROOT/nodeopt-payload.mjs" <<'PAYLOAD'
+import { appendFileSync } from "node:fs";
+appendFileSync(process.env.GIBSON_NODE_SENTINEL, "loaded\n");
+PAYLOAD
+# Discard stdout/stderr: the proof is whether the sentinel file appears, not
+# the help text the sensor prints.
+(cd "$ROOT/n/canon" && GIBSON_NODE_SENTINEL="$NODE_SENTINEL" \
+  NODE_OPTIONS="--import=file://$ROOT/nodeopt-payload.mjs" \
+  bash -c 'run_sensor() { env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$@"; }; run_sensor '"$SENSOR"' --help' >/dev/null 2>&1) || true
+if [[ ! -e "$NODE_SENTINEL" ]]; then
+  ok "the sensor spawned the way claim.sh spawns it never loaded the inherited payload"
+else
+  bad "the inherited NODE_OPTIONS payload ran inside the sensor process"
+fi
+# Control: without the stripping, the same payload DOES load — otherwise the
+# assertion above would pass even if NODE_OPTIONS had stopped working at all.
+rm -f "$NODE_SENTINEL"
+GIBSON_NODE_SENTINEL="$NODE_SENTINEL" NODE_OPTIONS="--import=file://$ROOT/nodeopt-payload.mjs" \
+  node "$SENSOR" --help >/dev/null 2>&1 || true
+if [[ -e "$NODE_SENTINEL" ]]; then
+  ok "control: an un-stripped NODE_OPTIONS does load the payload (the sensor above was really protected)"
+else
+  bad "control failed: the payload never loads even without stripping, so the check above proves nothing"
+fi
+rm -f "$NODE_SENTINEL"
+
+# Restore the inventory the bounds fixtures below read (they run against
+# $ROOT/s/canon as claim issue-65-settled on PR #640).
+printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
+  > "$GH_PR_TSV"
 
 # ===========================================================================
 # #153 review round 4, P2 — barrier integers are finite, safe and bounded

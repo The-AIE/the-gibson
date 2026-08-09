@@ -233,7 +233,11 @@ PR_CLAIMS_FOUND=0
 if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
   PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>/dev/null || true)
   # shellcheck disable=SC2034
-  while IFS=$'\t' read -r pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated; do
+  # 8 fields since #153 review round 5: the last is the PR's repository
+  # identity (`true`/`false`). It is read so the timestamp column is not
+  # silently absorbed into it; this reaper only proposes a release, and
+  # release-claim.sh re-reads and enforces identity itself before any mutation.
+  while IFS=$'\t' read -r pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated pr_cross; do
     [[ -n "$pr_id" ]] || continue
     PR_CLAIMS_FOUND=1
     if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_FILTER" ]]; then

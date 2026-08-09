@@ -15,7 +15,19 @@ USAGE
   pr-claims.sh close <owner/repo> <pull-request-number>
 
 `list`/`find` cover live (open) claims. The list output is tab-separated:
-  number, claim id, scope, head branch, URL, created_at, updated_at
+  number, claim id, scope, head branch, URL, created_at, updated_at,
+  is_cross_repository
+
+`is_cross_repository` (#153 review round 5, P1) is the LIVE inventory's
+repository identity, carried for the same reason `find-terminal` has always
+carried it: `release-claim.sh` closes an open PR on the strength of this row,
+and `gh pr close` is irreversible. A fork PR can legitimately carry a
+well-formed claim marker and a head branch name identical to the one the claim
+id derives, so marker + branch alone cannot prove the PR belongs to this
+repository. The column is `true` or `false` and nothing else — GraphQL's
+`isCrossRepository` is validated as a real boolean before it is stringified, so
+a null/missing/renamed field poisons the whole command instead of being read as
+"same repository".
 
 `list-open-numbers` answers a DIFFERENT question from `list`, and the
 difference is the whole point (#153 review round 4). `list` is the claim
@@ -52,9 +64,10 @@ VALIDATION (#153 blocker 6)
   scope marker, exactly one well-formed issue marker whose number is
   consistent with the claim id, a safe nonempty head branch, a numeric PR
   number, a canonical PR URL whose repository matches the queried repo and
-  whose pull-number matches the row, and (for find-terminal) a real head SHA
-  plus a merge-commit SHA that agrees with the PR's own state (present only
-  when MERGED). A PR with no claim marker at all is unclaimed and silently
+  whose pull-number matches the row, a boolean `isCrossRepository`, and (for
+  find-terminal) a real head SHA plus a merge-commit SHA that agrees with the
+  PR's own state (present only when MERGED). A PR with no claim marker at all
+  is unclaimed and silently
   ignored — this validation only applies once a PR claims to be a claim.
   Duplicate markers, missing/empty fields, malformed claim/issue ids, a
   truncated body, a URL/number mismatch, or a gh/jq failure make the whole
@@ -177,6 +190,7 @@ list_claims() {
               url
               createdAt
               updatedAt
+              isCrossRepository
             }
             pageInfo { hasNextPage endCursor }
           }
@@ -230,6 +244,14 @@ list_claims() {
         | (if ((.updatedAt // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$") | not) then
              error("PR #\(.number): updated timestamp is not ISO-8601 UTC '"'"'\(.updatedAt // "")'"'"'")
            else . end)
+        # Repository identity, checked as a TYPE not a truthiness (#153 review
+        # round 5, P1). `.isCrossRepository // false` would read a null (field
+        # removed, schema drift, a partial error payload) as "same repository"
+        # — the one answer that licenses closing the PR. Only a real boolean is
+        # evidence; anything else poisons the command.
+        | (if (.isCrossRepository | type) != "boolean" then
+             error("PR #\(.number): isCrossRepository is missing or not a boolean '"'"'\(.isCrossRepository // "null")'"'"' — cannot prove repository identity")
+           else . end)
         | [
             (.number | tostring),
             $claim,
@@ -237,7 +259,8 @@ list_claims() {
             .headRefName,
             .url,
             .createdAt,
-            .updatedAt
+            .updatedAt,
+            (.isCrossRepository | tostring)
           ]
         | @tsv
       end'
@@ -418,6 +441,9 @@ list_terminal_candidates() {
            else . end)
         | (if ((.updatedAt // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$") | not) then
              error("PR #\(.number): updated timestamp is not ISO-8601 UTC '"'"'\(.updatedAt // "")'"'"'")
+           else . end)
+        | (if (.isCrossRepository | type) != "boolean" then
+             error("PR #\(.number): isCrossRepository is missing or not a boolean '"'"'\(.isCrossRepository // "null")'"'"' — cannot prove repository identity")
            else . end)
         | (if (.state == "MERGED") and (((.mergeCommit.oid // "") | test("^[0-9a-f]{40}$")) | not) then
              error("PR #\(.number): MERGED but missing/malformed merge-commit SHA")

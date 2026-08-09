@@ -217,6 +217,28 @@ command -v gh >/dev/null || die "gh (GitHub CLI) required"
 # that cannot run the real check must not claim at all.
 command -v node >/dev/null ||
   die "node required — scope-overlap.mjs is the authoritative claim-overlap and admission check and there is no weaker fallback; refusing to claim on a host that cannot run it"
+
+# --- run the sensor without inherited Node runtime configuration ------------
+# (#153 review round 5, P1) NODE_OPTIONS is code injection with a boring name:
+# `NODE_OPTIONS='--import=data:text/javascript,<js>'` runs arbitrary JavaScript
+# inside the sensor process before its first line, which is enough to replace
+# the publication barrier's blocking primitive and turn a configured
+# fail-closed spacing barrier into a successful immediate read. The sensor
+# defends itself too (it measures the wait rather than trusting it), but
+# production must not be the thing that hands the payload in: an environment
+# variable that names code to execute IS an execution path, exactly like the
+# PATH-resolved `sleep` this replaced.
+#
+# `env -u` (POSIX, present on macOS's bash 3.2) unsets the variable for the
+# child only; the caller's environment is untouched. NODE_REPL_EXTERNAL_MODULE
+# goes with it — it is the same class of "load this module for me" knob.
+#
+# This is defence in depth, not a claim to resist a hostile local operator:
+# anyone who can set NODE_OPTIONS can usually also edit the sensor or replace
+# `node`. What it does buy is that inherited runtime configuration — a stray
+# export in a shell profile, a CI job template, a wrapper script — cannot
+# silently weaken the barrier.
+run_sensor() { env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$@"; }
 [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]] ||
   die "cannot find $SCRIPT_DIR/scope-overlap.mjs — refusing to claim without the authoritative overlap/admission sensor"
 [[ -x "$SCRIPT_DIR/pr-claims.sh" ]] ||
@@ -259,8 +281,22 @@ claim_issue_number() {
 cd "$CANONICAL"
 # #106 AC3: claim path refuses when origin cannot be fetched — never a silent
 # local fallback for the ledger tip (stale local main is how two lanes clobber).
-BASE=main
-git show-ref --verify --quiet refs/heads/main || BASE=master
+#
+# Discover the default branch from ORIGIN, not from the local checkout (#153
+# Linux CI / race fixtures). A bare origin whose HEAD still points at a
+# nonexistent `master` (Ubuntu `git init --bare` default when
+# init.defaultBranch is unset) leaves a second clone with only
+# `refs/remotes/origin/main` and no local `main`. Inferring BASE from the local
+# branch name then tried `git fetch origin master`, which does not exist, and
+# both concurrent lanes died before PR creation — a real portability bug that
+# never reproduced on macOS hosts whose init.defaultBranch is already `main`.
+if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+  BASE=main
+elif git ls-remote --exit-code --heads origin master >/dev/null 2>&1; then
+  BASE=master
+else
+  die "cannot find origin/main or origin/master — refuse claim (no local/stale ledger fallback; #106)"
+fi
 if ! git fetch origin "$BASE" >/dev/null 2>&1; then
   die "cannot fetch origin/$BASE — refuse claim (no local/stale ledger fallback; #106)"
 fi
@@ -282,7 +318,7 @@ fi
 INVENTORY_ROWS=""
 INVENTORY_ERR=""
 read_live_inventory() {
-  local rows row fields id num
+  local rows row fields id num cross
   INVENTORY_ROWS=""
   INVENTORY_ERR=""
   if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>&1); then
@@ -294,8 +330,16 @@ read_live_inventory() {
     fields=$(awk -F'\t' '{print NF}' <<<"$row")
     num=$(awk -F'\t' '{print $1}' <<<"$row")
     id=$(awk -F'\t' '{print $2}' <<<"$row")
-    if [[ "$fields" -ne 7 || -z "$id" || "$id" != issue-* || ! "$num" =~ ^[0-9]+$ ]]; then
+    # Column 8 is repository identity (#153 review round 5, P1). It is
+    # `true`/`false` and nothing else; an absent or unparseable value is
+    # unreadable evidence, not "same repository".
+    cross=$(awk -F'\t' '{print $8}' <<<"$row")
+    if [[ "$fields" -ne 8 || -z "$id" || "$id" != issue-* || ! "$num" =~ ^[0-9]+$ ]]; then
       INVENTORY_ERR="the live claim inventory for $REPO returned a malformed/truncated row — $row"
+      return 1
+    fi
+    if [[ "$cross" != "true" && "$cross" != "false" ]]; then
+      INVENTORY_ERR="the live claim inventory for $REPO returned a row whose repository identity is neither 'true' nor 'false' ('${cross:-<empty>}') — $row"
       return 1
     fi
   done <<EOF
@@ -303,6 +347,47 @@ $rows
 EOF
   INVENTORY_ROWS="$rows"
   return 0
+}
+
+# --- body-agnostic open-PR inventory (#153 review round 5, P1) --------------
+# `pr-claims.sh list` only lists a PR while that PR carries a well-formed claim
+# marker, so "our claim id is gone from the inventory" is satisfied BOTH by a
+# PR that really closed and by a PR that is wide open with its marker deleted
+# or rewritten. rollback_pr used to accept the first reading and then destroy
+# the worktree, both branches and the issue-wide label behind a PR that may
+# still be holding the issue. `list-open-numbers` is keyed on the PR NUMBER,
+# which no body edit can change, so it can tell the two apart.
+#
+# Sets OPEN_NUMBERS on success (possibly empty). Sets OPEN_NUMBERS_ERR and
+# returns 1 when the read failed or returned a non-decimal row — an unreadable
+# inventory is not proof that a PR closed.
+OPEN_NUMBERS=""
+OPEN_NUMBERS_ERR=""
+read_open_pr_numbers() {
+  local out line
+  OPEN_NUMBERS=""
+  OPEN_NUMBERS_ERR=""
+  if ! out=$("$SCRIPT_DIR/pr-claims.sh" list-open-numbers "$REPO" 2>&1); then
+    OPEN_NUMBERS_ERR="the open pull-request inventory for $REPO is unreadable — $out"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ ! "$line" =~ ^[0-9]+$ ]]; then
+      OPEN_NUMBERS_ERR="the open pull-request inventory for $REPO returned a non-numeric row '$line'"
+      return 1
+    fi
+  done <<EOF
+$out
+EOF
+  OPEN_NUMBERS="$out"
+  return 0
+}
+
+# True when PR number $1 is still listed as open. Callers must have proven the
+# read itself succeeded via read_open_pr_numbers first.
+open_pr_number_present() {
+  printf '%s\n' "$OPEN_NUMBERS" | grep -qxF -- "$1"
 }
 
 # Every live claim id: PR-body claims (authoritative) plus the legacy ledger
@@ -388,7 +473,7 @@ done
 if [[ "$SLICE" -eq 1 ]]; then
   _so_args+=(--slice)
 fi
-if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_so_args[@]}"; then
+if ! run_sensor "$SCRIPT_DIR/scope-overlap.mjs" "${_so_args[@]}"; then
   die "scope overlap (or ledger unreadable) — coordinate; do not race (#106)"
 fi
 
@@ -431,7 +516,7 @@ leftover() { ROLLBACK_LEFTOVERS="${ROLLBACK_LEFTOVERS}  - $1"$'\n'; }
 # create whose output could not be parsed all land here.
 ROLLBACK_INVENTORY_FRESH=0
 rollback_pr() {
-  local matches="" count row num id head
+  local matches="" count row num id head cross
   ROLLBACK_INVENTORY_FRESH=0
   if [[ "$PR_CREATE_ATTEMPTED" -ne 1 ]]; then
     return 0
@@ -447,8 +532,9 @@ rollback_pr() {
     num=$(awk -F'\t' '{print $1}' <<<"$row")
     id=$(awk -F'\t' '{print $2}' <<<"$row")
     head=$(awk -F'\t' '{print $4}' <<<"$row")
+    cross=$(awk -F'\t' '{print $8}' <<<"$row")
     if [[ "$id" == "$CLAIM_ID" ]] || { [[ -n "$PR_NUMBER" ]] && [[ "$num" == "$PR_NUMBER" ]]; }; then
-      matches="${matches}${num}"$'\t'"${id}"$'\t'"${head}"$'\n'
+      matches="${matches}${num}"$'\t'"${id}"$'\t'"${head}"$'\t'"${cross}"$'\n'
     fi
   done <<EOF
 $INVENTORY_ROWS
@@ -464,8 +550,17 @@ EOF
     num=$(printf '%s' "$matches" | cut -f1)
     id=$(printf '%s' "$matches" | cut -f2)
     head=$(printf '%s' "$matches" | cut -f3)
+    cross=$(printf '%s' "$matches" | cut -f4)
     if [[ "$id" != "$CLAIM_ID" || "$head" != "$BRANCH" ]]; then
       leftover "PR #$num (kept: it matched by number but carries claim '$id' on head branch '$head', not this lane's '$CLAIM_ID' on '$BRANCH' — refusing to close a PR that is not provably this lane's)"
+      return 1
+    fi
+    # (#153 review round 5, P1) This lane pushed its branch into $REPO itself,
+    # so its own claim PR is same-repository by construction. A row that says
+    # otherwise — or that cannot say — is not this lane's PR, whatever its
+    # marker and branch name claim, and `gh pr close` is irreversible.
+    if [[ "$cross" != "false" ]]; then
+      leftover "PR #$num (kept: it is not provably a same-repository pull request (isCrossRepository='${cross:-<missing>}', want 'false') — this lane pushed $BRANCH into $REPO itself, so a fork PR carrying its claim marker is unexplained evidence and must not be closed)"
       return 1
     fi
     if [[ -n "$PR_NUMBER" && "$num" != "$PR_NUMBER" ]]; then
@@ -525,6 +620,22 @@ EOF
   if printf '%s\n' "$INVENTORY_ROWS" |
      awk -F'\t' -v c="$CLAIM_ID" -v n="$PR_NUMBER" 'NF>0 && ($2==c || $1==n) {f=1} END{exit !f}'; then
     leftover "PR #$PR_NUMBER (kept: it is STILL a live claim after gh pr close reported success — refusing to destroy anything while the claim may be held)"
+    return 1
+  fi
+  # (#153 review round 5, P1) The reread above is the CLAIM inventory, and a PR
+  # drops out of it the moment its claim marker is deleted or rewritten —
+  # whether or not the PR closed. So "our row is gone" is satisfied by a lying
+  # close just as well as by a real one, and everything phase 2 destroys (the
+  # worktree, both branch refs, the issue-wide label) is the live work behind
+  # that possibly-still-open PR. Bind the proof to the exact PR NUMBER, which
+  # no body edit can forge, using the body-agnostic open-PR inventory. An
+  # unreadable inventory or a number that is still open retains EVERYTHING.
+  if ! read_open_pr_numbers; then
+    leftover "PR #$PR_NUMBER (kept: gh pr close reported success and this lane's claim row is gone, but the body-agnostic open pull-request inventory could not be read to prove PR #$PR_NUMBER is actually closed — $OPEN_NUMBERS_ERR. A claim row can disappear because the marker was edited, not because the PR closed)"
+    return 1
+  fi
+  if open_pr_number_present "$PR_NUMBER"; then
+    leftover "PR #$PR_NUMBER (kept: it is STILL OPEN in $REPO although its claim marker no longer appears in the claim inventory — a removed or rewritten marker is not a closed PR. Refusing to destroy the worktree, branches or label behind a pull request that may still hold issue #$ISSUE)"
     return 1
   fi
   # This same freshly-read, post-close inventory is what the label step below
@@ -886,7 +997,7 @@ done
 if [[ "$SLICE" -eq 1 ]]; then
   _adm_args+=(--slice)
 fi
-if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
+if ! run_sensor "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
   die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER) — see the reason above.
   Either a live claim with a stronger prior holds this issue or overlapping scope (the race resolving deterministically: the lower PR number wins), or the live inventory could not be settled and read, which is refused rather than guessed.
   This lane's PR is being closed and its branch, worktree and label rolled back only once that close is proven; re-run once the other lane releases, claim a disjoint scope, or pass --slice if a deliberate second lane with non-overlapping scope on this issue is really what you want."
