@@ -9,10 +9,12 @@ One file per role ([docs/03](../docs/03-roles.md)) plus loop, adopt, and deploy-
 helpers. A playbook = YAML frontmatter (role, inputs, outputs, gates, forbidden) +
 the full dispatch prompt + a **How to use this** section with copy-paste examples.
 
-Same file → every runtime ([docs/10](../docs/10-vendor-adapters.md)): Claude skill
-wrapper, Codex/Grok inline (`codex exec --full-auto "$(cat …)"` /
-`grok -p "$(cat …)"`), Hermes cron. One source, multiple runtimes. Anything expressible
-only as a vendor skill is doctrine-debt.
+Same file → every runtime ([docs/10](../docs/10-vendor-adapters.md)): vendor
+adapter, prompt file, or stdin as that CLI actually supports — Claude skill
+wrapper, Codex (`codex exec --full-auto` with a prompt path/body per its
+adapter), Grok via **`--prompt-file`** (never `grok -p "$(cat …)"` for
+YAML-frontmatter playbooks; L-007), Hermes cron. One source, multiple runtimes.
+Anything expressible only as a vendor skill is doctrine-debt.
 
 ## Inventory
 
@@ -31,20 +33,37 @@ only as a vendor skill is doctrine-debt.
 | [loop-step.md](loop-step.md) | Solo-loop one-hat step (`{{hat}}`, `{{loop_state}}`) | 11 |
 | [adopt.md](adopt.md) | Install Gibson on a target repo | 13, 17, 20 |
 | [deploy-audit.md](deploy-audit.md) | Doc 17 inspect scorecard | 17 |
+| [token-efficiency.md](token-efficiency.md) | Route / bound / measure AI spend without cutting quality | 15, 20, 11, 05, 06, 16 |
 | [red-team/](red-team/) | Scheduled adversarial audit of a target app | 03, 08 |
 | [recipes/](recipes/) | Validation-only Goose recipe mirrors; live runs gated on #28 + #35 | 10, [GOOSE-STRATEGY](../docs/GOOSE-STRATEGY.md), [adapters/goose](../adapters/goose/), [recipes/README](recipes/README.md) |
 
 ## How to use any playbook
 
-```bash
-# Generic pattern
-RUNTIME=grok   # or: claude -p / codex exec --full-auto
-$RUNTIME "$(cat playbooks/<role>.md)
+Playbooks start with YAML frontmatter (`---`). Do **not** inline that body into
+Grok as `grok -p "$(cat …)"` — the dash-prefixed frontmatter is misparsed as a
+flag (L-007). Prefer the vendor adapter or a prompt file; for Grok use
+`--prompt-file`. Put issue/PR and target-repo context in the same file (or a
+short brief that loads the playbook).
 
-# Arguments the prompt expects:
-Issue/PR: …
-Target repo: …
-"
+```bash
+# Grok (portable, L-007-safe) — replace ROLE / issue / paths
+GIBSON=~/Code/the-gibson
+REPO=~/Code/acme-app
+ROLE=builder   # e.g. builder, reviewer, token-efficiency
+PROMPT_FILE="$(mktemp -t gibson-dispatch.XXXXXX.md)"
+{
+  cat "$GIBSON/playbooks/${ROLE}.md"
+  printf '\n\n## Dispatch context\n\n'
+  printf 'Issue/PR: #149 / #150\n'
+  printf 'Target repo: %s\n' "$REPO"
+} > "$PROMPT_FILE"
+grok --prompt-file "$PROMPT_FILE" --cwd "$REPO" --permission-mode plan
+rm -f "$PROMPT_FILE"
+
+# Codex (adapter may accept a body string; prefer file/path when available)
+# codex exec --full-auto "$(cat "$GIBSON/playbooks/${ROLE}.md")"   # see adapters/codex
+
+# Claude: load via skill wrapper or paste path — see adapters/claude-code
 ```
 
 **Local override:** `local/playbooks/<same-filename>.md` replaces the core file at
