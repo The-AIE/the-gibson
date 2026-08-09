@@ -2679,6 +2679,8 @@ fi
 # denied). Must classify as not_runnable — never append_error — and never
 # leak the resolved path or script body in the sanitized diagnostic.
 # Bash 3.2 / macOS portable: chmod a-r on a regular file (not a directory).
+# Privileged/elevated effective users may still satisfy [[ -r ]] after a-r;
+# that is an environment capability limit, not a product failure — skip then.
 setup_repo
 write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=unreadable-ledger"
 make_runner_cmd rewrite-valid
@@ -2700,42 +2702,49 @@ chmod a-r "$UNR_DIR/scripts/cost-ledger.sh"
 UNR_PATH="$UNR_DIR/scripts/cost-ledger.sh"
 LEDGER_UNR="$ROOT/cost-unreadable.jsonl"
 rm -f "$LEDGER_UNR"
-set +e
-HERMES_CMD="$CALLS/fake-runner.sh" \
-  GIBSON_COST_LEDGER="$LEDGER_UNR" \
-  GIBSON_COST_JOIN_KEY="join-unreadable" \
-  ITERATION_WALL_MS=10 \
-  bash "$UNR_DIR/scripts/loop.sh" --runner hermes --repo "$REPO" --repo-slug acme/app \
-    --gibson "$GIBSON" --once --error-budget 5 \
-    >/dev/null 2>"$ROOT/cost-unreadable.err"
-rc=$?
-set -e
-# Restore read so trap/cleanup and later fixtures can inspect/remove the tree.
-chmod u+r "$UNR_DIR/scripts/cost-ledger.sh" 2>/dev/null || true
-if grep -q 'rc=126 class=not_runnable' "$ROOT/cost-unreadable.err" \
-  && ! grep -q 'class=append_error' "$ROOT/cost-unreadable.err"; then
-  ok "unreadable cost-ledger.sh classifies as not_runnable (rc=126)"
+if [[ -r "$UNR_PATH" ]]; then
+  # Suite has no native skip counter; truthful ok/skip diagnostic (decision-ledger style).
+  ok "skip unreadable cost-ledger test: effective user still reads after chmod a-r"
 else
-  bad "unreadable cost-ledger class wrong (want rc=126 class=not_runnable): $(tr '\n' ' ' <"$ROOT/cost-unreadable.err")"
+  set +e
+  HERMES_CMD="$CALLS/fake-runner.sh" \
+    GIBSON_COST_LEDGER="$LEDGER_UNR" \
+    GIBSON_COST_JOIN_KEY="join-unreadable" \
+    ITERATION_WALL_MS=10 \
+    bash "$UNR_DIR/scripts/loop.sh" --runner hermes --repo "$REPO" --repo-slug acme/app \
+      --gibson "$GIBSON" --once --error-budget 5 \
+      >/dev/null 2>"$ROOT/cost-unreadable.err"
+  rc=$?
+  set -e
+  # Restore read before asserts so cleanup cannot leave the tree unreadable.
+  chmod u+r "$UNR_PATH" 2>/dev/null || true
+  if grep -q 'rc=126 class=not_runnable' "$ROOT/cost-unreadable.err" \
+    && ! grep -q 'class=append_error' "$ROOT/cost-unreadable.err"; then
+    ok "unreadable cost-ledger.sh classifies as not_runnable (rc=126)"
+  else
+    bad "unreadable cost-ledger class wrong (want rc=126 class=not_runnable): $(tr '\n' ' ' <"$ROOT/cost-unreadable.err")"
+  fi
+  # Path and body must never appear in the sanitized diagnostic.
+  if grep -F "$UNR_PATH" "$ROOT/cost-unreadable.err" \
+    || grep -F 'SECRET_COST_LEDGER_BODY_MARKER_SHOULD_NEVER_LEAK' "$ROOT/cost-unreadable.err" \
+    || grep -F 'cost-ledger unreadable fixture should never run' "$ROOT/cost-unreadable.err"; then
+    bad "unreadable cost-ledger diagnostic leaked path or body: $(tr '\n' ' ' <"$ROOT/cost-unreadable.err")"
+  else
+    ok "unreadable cost-ledger diagnostic leaks neither path nor body"
+  fi
+  if [[ -f "$LEDGER_UNR" ]]; then
+    bad "unreadable cost-ledger must not produce a ledger row"
+  else
+    ok "unreadable cost-ledger produced no ledger row"
+  fi
+  if [[ "$rc" -eq 0 ]]; then
+    ok "standalone continues after unreadable cost-ledger (optional telemetry)"
+  else
+    bad "standalone must exit 0 when only optional unreadable ledger fails (rc=$rc)"
+  fi
 fi
-# Path and body must never appear in the sanitized diagnostic.
-if grep -F "$UNR_PATH" "$ROOT/cost-unreadable.err" \
-  || grep -F 'SECRET_COST_LEDGER_BODY_MARKER_SHOULD_NEVER_LEAK' "$ROOT/cost-unreadable.err" \
-  || grep -F 'cost-ledger unreadable fixture should never run' "$ROOT/cost-unreadable.err"; then
-  bad "unreadable cost-ledger diagnostic leaked path or body: $(tr '\n' ' ' <"$ROOT/cost-unreadable.err")"
-else
-  ok "unreadable cost-ledger diagnostic leaks neither path nor body"
-fi
-if [[ -f "$LEDGER_UNR" ]]; then
-  bad "unreadable cost-ledger must not produce a ledger row"
-else
-  ok "unreadable cost-ledger produced no ledger row"
-fi
-if [[ "$rc" -eq 0 ]]; then
-  ok "standalone continues after unreadable cost-ledger (optional telemetry)"
-else
-  bad "standalone must exit 0 when only optional unreadable ledger fails (rc=$rc)"
-fi
+# Always restore readability (skip path + belt for trap/later fixtures).
+chmod u+r "$UNR_PATH" 2>/dev/null || true
 
 # Fleet-required: unwritable ledger marks degraded (journal entry) and must
 # NOT escalate to cross-vendor second-opinion (local FS problem, not a diff).
