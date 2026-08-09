@@ -12,9 +12,8 @@ The legacy laptop driver (`~/.claude/fleet/loop-fleet.sh`) exposed `BASE_REPO`
 but embedded Chatterbuilt issue queues, scopes, and intent. Pointing
 `BASE_REPO` at Gibson (or any other checkout) could open the wrong issue
 numbers against the wrong tree. Issue **#139** moves target / queue / scope /
-intent into an **explicit versioned profile**. Per-lane runner and pool
-balancing is **#141** (not implemented here); the optional lane `runner` field
-is accepted so profiles stay forwards-compatible.
+intent into an **explicit versioned profile**. Per-lane ordered runner routes,
+bounded readiness, and selection telemetry are **#141** (this release).
 
 ## Format version 1
 
@@ -30,9 +29,10 @@ executes it.
 | `gibson` | no | Absolute path to The Gibson clone |
 | `fleet_dir` | no | Absolute dir for long-lived `lane-*` worktrees |
 | `log_dir` | no | Absolute dir for per-lane logs |
-| `runner` | no | Global builder CLI name (default `grok` / env `RUNNER`) |
+| `runner` | no | Default builder when a lane omits its route field (default `grok` / env `RUNNER`) |
 | `error_budget` | no | Passed to `loop.sh` |
 | `deadline_seconds` | no | Watchdog sleep before graceful `--halt` |
+| `pool_map` | no | Optional, **repeatable**: `provider:pool-label` (e.g. `grok:flat-rate-grok`). Declares plan shape for cost telemetry. Default without a map is truthful `provider-<family>` — **no** invented flat-rate/subscription label from vendor identity. |
 | `lane` | 1–3 | One lane record per line (see below). Fleet WIP doctrine caps concurrent lanes at **3**; a fourth lane fails closed with zero launches. |
 
 ### Scalar uniqueness
@@ -46,7 +46,8 @@ required and allowed (subject to unique lane ids and disjoint issues/scopes).
 
 ```text
 lane=ID|QUEUE|SCOPE|INTENT
-lane=ID|QUEUE|SCOPE|INTENT|RUNNER_RESERVED
+lane=ID|QUEUE|SCOPE|INTENT|PRIMARY
+lane=ID|QUEUE|SCOPE|INTENT|PRIMARY,FALLBACK1,FALLBACK2
 ```
 
 - **ID** — unique; letters/digits/`_`/`-`; must not start with `wt-` (release
@@ -55,8 +56,86 @@ lane=ID|QUEUE|SCOPE|INTENT|RUNNER_RESERVED
 - **SCOPE** — space-separated path/glob tokens; **disjoint across lanes**
   (prefix/containment check, not string-equality alone).
 - **INTENT** — free text the builder re-reads each hat.
-- **RUNNER_RESERVED** — optional 5th field for **#141**; accepted, ignored for
-  routing in this release (global `runner` / `RUNNER` still applies).
+- **ORDERED-RUNNER-ROUTE** — optional 5th field (**#141**): comma-separated CLI
+  names, **primary first**, explicit fallbacks after. Empty (or omitted) →
+  global `runner` / `RUNNER` only. Only declared tokens may be selected. A
+  sixth pipe field still fails closed (forwards-compatible with #139).
+
+### Runner routing (#141)
+
+Before any new lane launch the driver:
+
+1. Builds each lane's declared route (5th field, or global `runner` **only when
+   field 5 is omitted**). Global `runner` / `RUNNER` is not required when every
+   lane declares an explicit ordered route.
+2. Preflights each configured CLI with a **bounded, noninteractive,
+   credential-safe** readiness probe (process-group wall timeout; hung checks
+   kill only the exact captured group). Every probe redirects **stdin from
+   `/dev/null`**. Probe stdout/stderr is discarded — never logged (no tokens,
+   keys, env, or raw credential material).
+3. **Auth / usability policy:** only a *positive* provider-specific result may
+   select a runner. Codex uses `login status`, Claude `auth status`, Hermes
+   `status`, Grok `models` — exit 0 only. Auth/status/models nonzero is
+   `auth_fail` and **never** falls back to `--version` (a logged-out but
+   installed CLI is not ready; Grok `--version` only proves the binary exists).
+   Probe stdout/stderr is discarded — never inspected for classification.
+   Unknown families without a stable noninteractive auth probe use **exactly
+   one** bounded minimal non-mutating usability probe (`--version`); there is
+   **no** bare interactive invocation if `--version` fails. Timeout remains
+   exit **124** with process-group cleanup of the exact captured group only.
+4. Selects the **first ready** runner in declared order. Fail over **only** on
+   a classified readiness failure (`not_found`, `timeout`, `not_ready`,
+   `auth_fail`). Operator order is preserved (no automatic reordering).
+5. Re-checks three-role separation against the **actual selected** builder
+   (not an unused global default). A ready candidate that collides with
+   reviewer or release **fails closed** (fallback cannot bypass Law 5).
+   Reviewer and release identities are validated nonempty and distinct
+   globally at preflight. On `--start` against an already-running lane, the
+   driver reloads the persisted `selected_runner`, validates it is nonempty
+   and safe, and re-checks three-role separation against the *current*
+   reviewer/releaser — identity revalidation only (no readiness re-probe).
+   A live lane with **missing** `*.runner-status` fails closed (zero new
+   launches; live process left untouched): current profile/route is not
+   evidence of which executable launched the process. Halt/restart the lane
+   or restore verified status before `--start`.
+6. If no declared runner is ready/selectable → **fail closed, zero new
+   launches**, with a diagnostic naming providers only.
+7. Passes the selected runner to `loop.sh --runner`. Status shows
+   requested primary, actual runner, and healthy/degraded/fallback reason
+   (persisted under the profile log namespace for idempotent restart).
+8. Appends fleet-local telemetry:
+   - `gibson.fleet.runner_selection.v1` JSONL in `LOG_DIR/runner-selection.jsonl`
+   - a matching `gibson.cost.v1` selection row in `LOG_DIR/cost-ledger.jsonl`
+     (or `GIBSON_COST_LEDGER` when set)
+   Both carry the same stable collision-resistant `join_key`
+   (`fleet-sel:v1:…:UTC:discriminator`), selected provider/pool, fallback
+   reason, selection wall time, and issue when known. No token counts or
+   dollar costs are fabricated. Selection append failure fails closed
+   (fleet-required telemetry).
+9. Propagates `GIBSON_COST_JOIN_KEY`, `GIBSON_COST_POOL`,
+   `GIBSON_COST_PROVIDER`, `GIBSON_COST_REQUESTED_RUNNER`,
+   `GIBSON_COST_FALLBACK_REASON`, `GIBSON_COST_LEDGER`, and
+   `GIBSON_COST_TELEMETRY_REQUIRED=1` into each lane's `loop.sh` so later
+   iteration rows share the join key. `loop.sh` reads `issue:` / `pr:` only
+   from **validated** loop-state after the runner (never unvalidated state).
+
+**Flat-rate-first (docs/15):** grind lanes should list preferred flat-rate
+runners first and metered/frontier providers only at escalation positions.
+The driver does **not** inspect billing, plans, keys, or paid settings and
+does **not** reorder the route. Pool labels default to `provider-<family>`
+unless the operator declares `pool_map=provider:label` (plan shape is not a
+permanent vendor property).
+
+**Cost-ledger join (#141):** selection and iteration events share
+`join_key`. `scripts/cost-ledger.sh summarize --merged-json PATH` attributes
+an event as merged only when its own `pr`, or a same-`join_key` event's
+`pr`, appears in the merged JSON. Merged PRs with no attributed events are
+reported as lacking cost data — never as zero-cost success. Per-pool
+merged/unmerged counts and per-merged-PR metrics support load balancing.
+Token averages are null unless coverage is complete for every event in that
+metric. Ambiguous join→PR maps and corrupt merged input fail closed.
+Telemetry stays local and redacted (no secrets, no billing policy, no
+provider-plan mutation).
 
 Unknown keys, duplicate lane ids, empty queue/scope/intent, non-absolute or
 `..`-bearing paths, and overlapping scopes all **fail closed** before any
@@ -106,12 +185,18 @@ $GIBSON/scripts/loop-fleet.sh --status
 
 - **Bash 3.2+** (macOS stock `/bin/bash` is fine)
 - **Git** on `PATH`
+- **python3** — required end-to-end for fleet `--start` (runner-selection
+  telemetry JSON serialization) and for `loop.sh` loop-state timestamp
+  validation. Preflight refuses before readiness when `python3` is missing so
+  selection cannot pass probes then die at telemetry write. Process-group
+  wall-timeout may use **perl or python3**; with `python3` required, either
+  covers readiness hung-check cleanup.
 - **GitHub CLI `gh` ≥ 1.9.0** — required for the built-in `--json`, `--jq`,
   and `--template` flows used by open-PR inventory (`gh pr list`) and
   claim/body re-verification (`gh pr view`). Older `gh` lacks those flags and
-  will fail closed at preflight. No external `jq`, Python, or Perl is required
-  on the production PR-ownership path (optional tools may still be used when
-  present for wall-timeout process groups or label pretty-printing).
+  will fail closed at preflight. The production **PR-ownership metadata path
+  itself** uses no external `jq`, Python, or Perl (gh built-in formatter only);
+  fleet runner routing still requires `python3` as above.
 - Builder / reviewer / release CLIs for the three-role split (see below)
 
 ### Three-role defaults (preserved)
@@ -134,7 +219,10 @@ Before any `loop.sh` start the driver checks:
 - `origin` slug matches profile `slug`
 - Canonical checkout is clean (`git status --porcelain` must succeed; a failed
   probe is **not** treated as clean)
-- Builder / reviewer / release three-role separation
+- Reviewer / release identities nonempty and distinct; global `runner` is
+  required/on-PATH **only** when a lane omits field 5. Builder separation is
+  enforced against each **actual selected** runner after readiness (an unused
+  global default is not role-checked and need not exist)
 - Open-PR inventory is parsed fail-closed (`gh pr list` via built-in
   `--template` emits strict metadata-only TSV of `number<TAB>headRefName`;
   only empty TSV output is zero-pair success; malformed output, missing
@@ -202,4 +290,4 @@ any pid helper that might delete a stale pidfile.
 - Solo loop doctrine: [`docs/11-solo-loop.md`](../../docs/11-solo-loop.md)
 - Concurrency / scopes: [`docs/05-concurrency.md`](../../docs/05-concurrency.md)
 - Overnight single-loop dogfood: [`playbooks/dogfood-overnight.md`](../../playbooks/dogfood-overnight.md)
-- Follow-up: issue **#141** (per-lane runner / pool routing)
+- Runner routing: issue **#141** (ordered routes, readiness, selection telemetry)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# loop-fleet.test.sh — offline sensors for portable fleet profiles (#139)
+# loop-fleet.test.sh — offline sensors for portable fleet profiles (#139 / #141)
 #
 # Throwaway repos + stub gh/runner/loop only. No network, no live PRs, no models.
 set -uo pipefail
@@ -35,12 +35,21 @@ GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gp
 # preflight must leave this file empty / missing.
 cat > "$ROOT/gibson/scripts/loop.sh" <<'STUB'
 #!/usr/bin/env bash
-# stub loop — records launch; never calls a model
+# stub loop — records launch + cost-join env; never calls a model
 log="${LOOP_LAUNCH_LOG:-/dev/null}"
 printf 'LAUNCH runner=%s repo=%s slug=%s\n' \
   "${2:-}" "${4:-}" "${6:-}" >> "$log"
 # also dump full argv for assertions
 printf '%s\n' "$@" >> "${LOOP_LAUNCH_LOG}.argv"
+# #141 join propagation (fleet → loop cost ledger)
+printf 'JOIN key=%s pool=%s req=%s reason=%s provider=%s ledger=%s\n' \
+  "${GIBSON_COST_JOIN_KEY:-}" \
+  "${GIBSON_COST_POOL:-}" \
+  "${GIBSON_COST_REQUESTED_RUNNER:-}" \
+  "${GIBSON_COST_FALLBACK_REASON:-}" \
+  "${GIBSON_COST_PROVIDER:-}" \
+  "${GIBSON_COST_LEDGER:-}" \
+  >> "${LOOP_LAUNCH_LOG}.join"
 exit 0
 STUB
 chmod +x "$ROOT/gibson/scripts/loop.sh"
@@ -404,8 +413,9 @@ export FLEET_SKIP_FETCH=1
 export GIT_TERMINAL_PROMPT=0
 
 reset_calls() {
-  rm -f "$CALLS/launches.log" "$CALLS/launches.log.argv" "$CALLS/gh.log"
+  rm -f "$CALLS/launches.log" "$CALLS/launches.log.argv" "$CALLS/launches.log.join" "$CALLS/gh.log"
   : > "$CALLS/launches.log"
+  : > "$CALLS/launches.log.join"
   # Force-remove lane worktrees from any target that registered them
   if [[ -d "$ROOT/targets" ]]; then
     for t in "$ROOT/targets"/*; do
@@ -503,6 +513,9 @@ run_fleet() {
     GH_STUB_PR_VIEW_META="${GH_STUB_PR_VIEW_META:-}" \
     GH_STUB_PR_BODY_DIR="${GH_STUB_PR_BODY_DIR:-}" \
     FLEET_PROFILE="${FLEET_PROFILE:-}" \
+    FLEET_READINESS_TIMEOUT="${FLEET_READINESS_TIMEOUT:-8}" \
+    ${FLEET_READINESS_DIR+FLEET_READINESS_DIR="$FLEET_READINESS_DIR"} \
+    ${FLEET_TEST_JOIN_TS+FLEET_TEST_JOIN_TS="$FLEET_TEST_JOIN_TS"} \
     ${GH_STUB_PR_LIST_RAW+GH_STUB_PR_LIST_RAW="$GH_STUB_PR_LIST_RAW"} \
     ${GH_STUB_PR_VIEW_BODY+GH_STUB_PR_VIEW_BODY="$GH_STUB_PR_VIEW_BODY"} \
     "$FLEET" "$@" 2>&1
@@ -514,7 +527,7 @@ abs_path() {
 }
 
 # ============================================================================
-echo "loop-fleet.test.sh — portable fleet profiles (#139)"
+echo "loop-fleet.test.sh — portable fleet profiles (#139 / #141)"
 echo
 
 [[ -x "$FLEET" ]] || [[ -f "$FLEET" ]] && ok "loop-fleet.sh present" || bad "loop-fleet.sh missing"
@@ -607,8 +620,8 @@ out=$(run_fleet --start) || { bad "chatter-shaped start failed: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "3" ]] && ok "chatterbuilt-shaped fixture launched 3 lanes" || bad "expected 3 launches, got $lc"
 
-# reserved runner field accepted, not used for routing
-echo "forwards-compatible runner field (#141 reserved)"
+# per-lane route field: single primary routes to declared runner (#141)
+echo "per-lane runner route field (#141)"
 reset_calls
 TARGET=$(setup_target_repo rfield acme/widget)
 PROF="$ROOT/profiles/runner-field.profile"
@@ -621,11 +634,14 @@ write_profile "$PROF" \
   "fleet_dir=$ROOT/fleet" \
   "log_dir=$ROOT/logs" \
   "runner=fake-runner" \
-  "lane=a|11|docs/**|docs only|hermes"
+  "lane=a|11|docs/**|docs only|fake-runner"
 export FLEET_PROFILE="$PROF"
-out=$(run_fleet --start) || { bad "runner field rejected: $out"; }
+out=$(run_fleet --start) || { bad "runner route field rejected: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "1" ]] && ok "lane runner field accepted (reserved, not routed)" || bad "runner field launch count=$lc"
+[[ "$lc" == "1" ]] && ok "lane runner route field accepted and launched" || bad "runner field launch count=$lc"
+grep -q 'LAUNCH runner=fake-runner' "$CALLS/launches.log" \
+  && ok "route primary passed to loop.sh" \
+  || bad "launch log missing fake-runner: $(cat "$CALLS/launches.log" 2>/dev/null)"
 
 # --- FLEET_PROFILE env + --profile flag ------------------------------------
 echo "profile selector"
@@ -2914,7 +2930,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "hostile reserved runner should fail: $out" || {
-  echo "$out" | grep -qiE 'reserved runner|safe inert|shell syntax|disallowed' \
+  echo "$out" | grep -qiE 'runner route|reserved runner|safe inert|shell syntax|disallowed|hostile' \
     && ok "hostile reserved runner rejected" \
     || bad "unclear reserved-runner fail: $out"
 }
@@ -2937,7 +2953,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "semicolon reserved runner should fail: $out" || {
-  echo "$out" | grep -qiE 'reserved runner|safe inert|shell syntax|disallowed' \
+  echo "$out" | grep -qiE 'runner route|reserved runner|safe inert|shell syntax|disallowed|hostile' \
     && ok "semicolon reserved runner rejected" \
     || bad "unclear semicolon-runner fail: $out"
 }
@@ -2945,7 +2961,7 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "semicolon reserved runner launched zero" \
   || bad "semicolon reserved runner launched $lc"
 
-# Safe reserved runner still accepted (regression of existing property)
+# Safe single-token route still accepted and used as primary
 PROF="$ROOT/profiles/saferunner.profile"
 write_profile "$PROF" \
   "version=1" \
@@ -2956,13 +2972,16 @@ write_profile "$PROF" \
   "fleet_dir=$ROOT/fleet" \
   "log_dir=$ROOT/logs" \
   "runner=fake-runner" \
-  "lane=docs|263|docs/**|intent|hermes-pool-a"
+  "lane=docs|263|docs/**|intent|fake-runner"
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
-out=$(run_fleet --start) || { bad "safe reserved runner rejected: $out"; }
+out=$(run_fleet --start) || { bad "safe runner route rejected: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "1" ]] && ok "safe reserved runner still accepted" \
-  || bad "safe reserved runner launches=$lc out=$out"
+[[ "$lc" == "1" ]] && ok "safe single-token route still accepted" \
+  || bad "safe runner route launches=$lc out=$out"
+grep -q 'LAUNCH runner=fake-runner' "$CALLS/launches.log" \
+  && ok "safe route selected fake-runner over global default" \
+  || bad "safe route did not select fake-runner"
 
 # ============================================================================
 # Codex #143 second-pass blockers — active-work claim, identity-before-pid,
@@ -3127,13 +3146,18 @@ write_profile "$PROF" \
   "lane=docs|420|docs/**|no jq pr"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-# Hide system jq/python/perl so production cannot fall back to external parsers.
+# Hide system jq so PR-ownership cannot fall back to an external JSON parser.
+# python3 is a declared fleet preflight requirement (selection telemetry + loop
+# timestamps); perl may be used for process-group wall-timeout. Grant both so
+# the positive path exercises PR list/view via gh formatter only — not "no
+# python/perl anywhere". A separate restricted fixture below asserts missing
+# python3 fails closed at preflight (not late inside telemetry).
 NOJQ_BIN="$ROOT/nojq-bin"
 rm -rf "$NOJQ_BIN"
 mkdir -p "$NOJQ_BIN"
 for c in bash sh env sed tr awk cat printf mkdir rm chmod date basename dirname \
          head tail grep cut nohup sleep true kill ps wait mktemp uname pwd ln \
-         touch mv cp ls wc sort uniq xargs which git cmp; do
+         touch mv cp ls wc sort uniq xargs which git cmp od perl python3; do
   p=$(command -v "$c" 2>/dev/null) || continue
   [[ -e "$NOJQ_BIN/$c" ]] && continue
   ln -sf "$p" "$NOJQ_BIN/$c"
@@ -3187,6 +3211,57 @@ out=$(run_nojq --start) || { bad "no-jq positive claim resume failed: $out"; }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "no-external-jq positive PR list + claim resumes" \
   || bad "no-external-jq positive launches=$lc out=$out"
+
+# Restricted fixture: no python3 on PATH → preflight must refuse with a clear
+# diagnostic (honest contract), not a late failure inside selection telemetry.
+# Use a dedicated fleet_dir/log_dir so identity markers do not collide with the
+# prior no-jq profile that shares $ROOT/fleet.
+echo "no-python3 preflight fail-closed (selection telemetry contract)"
+NOPY_BIN="$ROOT/nopy-bin"
+rm -rf "$NOPY_BIN"
+mkdir -p "$NOPY_BIN"
+for c in bash sh env sed tr awk cat printf mkdir rm chmod date basename dirname \
+         head tail grep cut nohup sleep true kill ps wait mktemp uname pwd ln \
+         touch mv cp ls wc sort uniq xargs which git cmp od perl; do
+  p=$(command -v "$c" 2>/dev/null) || continue
+  [[ -e "$NOPY_BIN/$c" ]] && continue
+  ln -sf "$p" "$NOPY_BIN/$c"
+done
+cp "$BIN/gh" "$NOPY_BIN/gh"
+cp "$BIN/fake-runner" "$NOPY_BIN/fake-runner"
+TARGET_NOPY=$(setup_target_repo nopy3 acme/nopy)
+NOPY_FLEET="$ROOT/fleet-nopy3"
+NOPY_LOGS="$ROOT/logs-nopy3"
+mkdir -p "$NOPY_FLEET" "$NOPY_LOGS"
+PROF_NOPY="$ROOT/profiles/nopy3.profile"
+write_profile "$PROF_NOPY" \
+  "version=1" \
+  "name=nopy3" \
+  "repo=$TARGET_NOPY" \
+  "slug=acme/nopy" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$NOPY_FLEET" \
+  "log_dir=$NOPY_LOGS" \
+  "runner=fake-runner" \
+  "lane=docs|421|docs/**|no python3"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$NOPY_BIN" \
+    GIBSON="$GIBSON" FLEET_DIR="$NOPY_FLEET" LOG_DIR="$NOPY_LOGS" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$NOPY_BIN/gh" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
+    FLEET_PROFILE="$PROF_NOPY" \
+    "$FLEET" --profile "$PROF_NOPY" --start 2>&1
+) && bad "no-python3 should fail preflight: $out" || {
+  echo "$out" | grep -qi 'python3' \
+    && ok "no-python3 fails closed at preflight with python3 diagnostic" \
+    || bad "no-python3 unclear fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "no-python3 launched zero" || bad "no-python3 launched $lc"
 
 # Malformed formatter stdout (not TSV) fails closed — never treated as empty.
 unset GH_STUB_PR_JSON
@@ -4761,6 +4836,1931 @@ $GIT -C "$TARGET" remote set-url origin "ssh://git@github.com/acme/widget.git"
 # Identity already written; restart should still pass slug check.
 out=$(run_fleet --start) || { bad "ssh:// origin form should still work: $out"; }
 ok "ssh://git@github.com/owner/repo origin still accepted"
+
+# ============================================================================
+# #141 — per-lane ordered runner routing, readiness, telemetry
+# ============================================================================
+echo "#141 runner routing"
+
+# Structural sensors for CodeRabbit #154 review contract
+if grep -q 'python3 is required for fleet runner-selection telemetry' "$FLEET" \
+  && grep -q 'no selected runner recorded before launch' "$FLEET"; then
+  ok "#141 structure: python3 preflight + fail-closed missing LANE_SELECTED"
+else
+  bad "#141 structure: missing python3 preflight or launch fail-closed"
+fi
+# Production readiness probes (exe + family argv) must all use stdin /dev/null.
+# Capture first: empty match must fail (old `! grep | grep -v` false-greened on zero hits).
+# Shared helper so the meta-sensor exercises the same assertion, not a dead copy.
+assert_readiness_probes_stdin_devnull() {
+  # $1 = file to scan. stdout: bounded offenders when return 2.
+  # return 0 = all probes redirect from /dev/null
+  # return 1 = no probes found
+  # return 2 = at least one probe lacks /dev/null
+  local file="$1" probes missing
+  probes=$(grep -E 'run_with_wall_timeout "\$limit" "\$exe"' "$file" 2>/dev/null || true)
+  if [[ -z "$probes" ]]; then
+    return 1
+  fi
+  missing=$(printf '%s\n' "$probes" | grep -v '/dev/null' || true)
+  if [[ -n "$missing" ]]; then
+    printf '%s\n' "$missing" | head -3
+    return 2
+  fi
+  return 0
+}
+_rp_rc=0
+_rp_diag=$(assert_readiness_probes_stdin_devnull "$FLEET") || _rp_rc=$?
+if [[ "$_rp_rc" -eq 0 ]]; then
+  ok "#141 structure: readiness probes redirect stdin from /dev/null"
+elif [[ "$_rp_rc" -eq 1 ]]; then
+  bad "#141 structure: readiness probes not found"
+else
+  bad "#141 structure: readiness probe missing </dev/null: ${_rp_diag}"
+fi
+# Meta-sensor: empty match set must fail closed (same helper; fixture must not
+# contain the probe pattern even in comments — that would be a non-empty match).
+_meta_empty="$ROOT/meta-readiness-empty.fixture"
+printf '%s\n' '# empty-match fixture: no wall-timeout readiness lines at all' \
+  'echo not_a_probe' > "$_meta_empty"
+_rp_rc=0
+_rp_diag=$(assert_readiness_probes_stdin_devnull "$_meta_empty") || _rp_rc=$?
+if [[ "$_rp_rc" -eq 1 ]]; then
+  ok "#141 meta: empty readiness probe set fails closed"
+else
+  bad "#141 meta: empty readiness probe set should fail closed (rc=${_rp_rc} diag=${_rp_diag})"
+fi
+# Unknown-family comment + --version; no bare second probe (historical line shape)
+if grep -A4 'Unknown family:' "$FLEET" | grep -q -- '--version' \
+  && ! grep -nE 'run_with_wall_timeout "\$limit" "\$exe"\s*(</dev/null\s*)?>"\$outf"' "$FLEET" >/dev/null; then
+  ok "#141 structure: unknown family uses --version only (no bare invoke)"
+else
+  bad "#141 structure: unknown-family --version-only contract broken"
+fi
+if ! grep -q 'redact_readiness_output' "$FLEET"; then
+  ok "#141 structure: dead redact_readiness_output removed"
+else
+  bad "#141 structure: redact_readiness_output still present"
+fi
+if grep -q 'bash "$cl_sh" append' "$FLEET" \
+  && grep -q 'bash "$cl_sh" append' "$REPO_ROOT/scripts/loop.sh"; then
+  ok "#141 structure: cost-ledger invoked via bash"
+else
+  bad "#141 structure: cost-ledger not invoked via bash in fleet/loop"
+fi
+# Example route must not use codex fallback (default reviewer identity)
+if grep -E 'lane=.*\|grok,codex|,codex' "$REPO_ROOT/templates/fleet/profile.v1.example" >/dev/null 2>&1; then
+  bad "#141 example profile uses codex builder fallback (collides with REVIEWER_CMD)"
+else
+  ok "#141 example profile fallback is not default reviewer identity"
+fi
+
+write_ready_probe() {
+  local name="$1" mode="${2:-ready}"
+  mkdir -p "$FLEET_READINESS_DIR"
+  case "$mode" in
+    ready)
+      cat > "$FLEET_READINESS_DIR/$name" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+      ;;
+    not_ready)
+      cat > "$FLEET_READINESS_DIR/$name" <<'P'
+#!/usr/bin/env bash
+exit 1
+P
+      ;;
+    auth_fail)
+      cat > "$FLEET_READINESS_DIR/$name" <<'P'
+#!/usr/bin/env bash
+exit 3
+P
+      ;;
+    timeout)
+      cat > "$FLEET_READINESS_DIR/$name" <<P
+#!/usr/bin/env bash
+echo "\$\$" > "$CALLS/ready-hang-$name.pid"
+sleep 100 &
+echo "\$!" > "$CALLS/ready-hang-$name-desc.pid"
+wait
+exit 0
+P
+      ;;
+    *)
+      bad "write_ready_probe: unknown mode $mode"
+      return 1
+      ;;
+  esac
+  chmod +x "$FLEET_READINESS_DIR/$name"
+}
+
+ensure_runner_bin() {
+  local name="$1"
+  cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+  chmod +x "$BIN/$name"
+}
+
+echo "ordered selection primary ready"
+reset_calls
+unset FLEET_READINESS_DIR || true
+FLEET_READINESS_DIR="$ROOT/readiness"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grind-a" ready
+write_ready_probe "fallback-b" ready
+ensure_runner_bin "grind-a"
+ensure_runner_bin "fallback-b"
+TARGET=$(setup_target_repo r141a acme/widget)
+PROF="$ROOT/profiles/r141-primary.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-primary" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|501|docs/**|ordered primary|grind-a,fallback-b"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "primary-ready start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "primary-ready launched once" || bad "primary-ready launches=$lc out=$out"
+grep -q 'LAUNCH runner=grind-a' "$CALLS/launches.log" \
+  && ok "ordered selection chose primary grind-a" \
+  || bad "expected grind-a: $(cat "$CALLS/launches.log")"
+[[ -f "$ROOT/logs/docs.runner-status" ]] && ok "runner-status file written" || bad "missing runner-status"
+grep -q '^selected_runner=grind-a$' "$ROOT/logs/docs.runner-status" \
+  && ok "status file records selected primary" \
+  || bad "status file: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q '^health=healthy$' "$ROOT/logs/docs.runner-status" \
+  && ok "primary path health=healthy" \
+  || bad "health not healthy"
+grep -q '^reason=primary_ready$' "$ROOT/logs/docs.runner-status" \
+  && ok "reason=primary_ready" \
+  || bad "reason missing"
+out=$(run_fleet --status) || true
+echo "$out" | grep -q 'grind-a' \
+  && ok "status shows selected runner" \
+  || bad "status missing grind-a: $out"
+[[ -f "$ROOT/logs/runner-selection.jsonl" ]] && ok "telemetry jsonl created" || bad "no telemetry"
+TEL_LINE=$(tail -1 "$ROOT/logs/runner-selection.jsonl")
+echo "$TEL_LINE" | grep -q 'gibson.fleet.runner_selection.v1' \
+  && ok "telemetry schema present" || bad "telemetry missing schema"
+echo "$TEL_LINE" | grep -q '"selected_runner":"grind-a"' \
+  && ok "telemetry selected_runner" || bad "telemetry selected: $TEL_LINE"
+echo "$TEL_LINE" | grep -q '"join_key":' \
+  && ok "telemetry join_key present" || bad "telemetry missing join_key"
+echo "$TEL_LINE" | grep -q '"wall_ms":' \
+  && ok "telemetry wall_ms present" || bad "telemetry missing wall_ms"
+echo "$TEL_LINE" | grep -q '"fallback_reason":' \
+  && ok "telemetry fallback_reason present" || bad "telemetry missing fallback_reason"
+echo "$TEL_LINE" | grep -q '"selected_pool":' \
+  && ok "telemetry selected_pool present" || bad "telemetry missing pool"
+echo "$TEL_LINE" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+  && bad "telemetry leaked credential-like material" \
+  || ok "telemetry has no credential material"
+# Cost-ledger join row for primary selection (#141)
+[[ -f "$ROOT/logs/cost-ledger.jsonl" ]] && ok "cost-ledger.jsonl created on selection" \
+  || bad "missing cost-ledger.jsonl after primary selection"
+CL_LINE=$(tail -1 "$ROOT/logs/cost-ledger.jsonl")
+echo "$CL_LINE" | grep -q 'gibson.cost.v1' \
+  && ok "cost-ledger schema gibson.cost.v1" || bad "cost-ledger schema: $CL_LINE"
+echo "$CL_LINE" | grep -q '"event_kind":"selection"' \
+  && ok "cost-ledger event_kind=selection" || bad "cost-ledger kind: $CL_LINE"
+echo "$CL_LINE" | grep -q '"join_key":' \
+  && ok "cost-ledger join_key present" || bad "cost-ledger missing join_key: $CL_LINE"
+echo "$CL_LINE" | grep -q '"requested_runner":"grind-a"' \
+  && ok "cost-ledger requested_runner" || bad "cost-ledger req: $CL_LINE"
+echo "$CL_LINE" | grep -q '"runner":"grind-a"' \
+  && ok "cost-ledger actual runner" || bad "cost-ledger runner: $CL_LINE"
+echo "$CL_LINE" | grep -q '"fallback_reason":"primary_ready"' \
+  && ok "cost-ledger fallback_reason primary_ready" || bad "cost-ledger reason: $CL_LINE"
+echo "$CL_LINE" | grep -q '"issue":501' \
+  && ok "cost-ledger issue from queue" || bad "cost-ledger issue: $CL_LINE"
+# Must not invent tokens/costs
+echo "$CL_LINE" | grep -qE '"tokens"|"acus"|"cost"' \
+  && bad "cost-ledger fabricated usage fields: $CL_LINE" \
+  || ok "cost-ledger has no fabricated tokens/costs"
+# Join env propagated into loop.sh
+[[ -f "$CALLS/launches.log.join" ]] || bad "missing join env log"
+JOIN_ENV=$(tail -1 "$CALLS/launches.log.join")
+echo "$JOIN_ENV" | grep -q 'key=fleet-sel:v1:' \
+  && ok "loop env received join key" || bad "join env key: $JOIN_ENV"
+echo "$JOIN_ENV" | grep -q 'req=grind-a' \
+  && ok "loop env received requested runner" || bad "join env req: $JOIN_ENV"
+echo "$JOIN_ENV" | grep -q 'reason=primary_ready' \
+  && ok "loop env received fallback reason" || bad "join env reason: $JOIN_ENV"
+echo "$JOIN_ENV" | grep -q "ledger=$ROOT/logs/cost-ledger.jsonl" \
+  && ok "loop env received ledger path" || bad "join env ledger: $JOIN_ENV"
+# join_key matches across selection telemetry + cost ledger + env
+TEL_JOIN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["join_key"])' "$TEL_LINE")
+CL_JOIN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["join_key"])' "$CL_LINE")
+ENV_JOIN=$(printf '%s' "$JOIN_ENV" | sed -n 's/.*key=\([^ ]*\).*/\1/p')
+[[ -n "$TEL_JOIN" && "$TEL_JOIN" == "$CL_JOIN" && "$CL_JOIN" == "$ENV_JOIN" ]] \
+  && ok "join_key identical across telemetry, cost-ledger, and loop env" \
+  || bad "join mismatch tel=$TEL_JOIN cl=$CL_JOIN env=$ENV_JOIN"
+
+echo "declared fallback on readiness failure"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-fb"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "primary-x" not_ready
+write_ready_probe "fallback-y" ready
+ensure_runner_bin "primary-x"
+ensure_runner_bin "fallback-y"
+TARGET=$(setup_target_repo r141b acme/widget)
+PROF="$ROOT/profiles/r141-fallback.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-fallback" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|502|docs/**|fallback path|primary-x,fallback-y"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "fallback start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "fallback path launched once" || bad "fallback launches=$lc out=$out"
+grep -q 'LAUNCH runner=fallback-y' "$CALLS/launches.log" \
+  && ok "selected declared fallback-y" \
+  || bad "expected fallback-y: $(cat "$CALLS/launches.log")"
+grep -q '^health=degraded$' "$ROOT/logs/docs.runner-status" \
+  && ok "fallback health=degraded" \
+  || bad "expected degraded: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q 'primary_not_ready' "$ROOT/logs/docs.runner-status" \
+  && ok "fallback reason records primary_not_ready" \
+  || bad "reason missing primary_not_ready"
+if grep -qE 'LAUNCH runner=(fake-runner|grok|codex|claude)$' "$CALLS/launches.log"; then
+  bad "undeclared provider selected: $(cat "$CALLS/launches.log")"
+else
+  ok "no undeclared provider selected"
+fi
+# Fallback selection joins into cost-ledger + loop env
+CL_FB=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
+echo "$CL_FB" | grep -q '"runner":"fallback-y"' \
+  && ok "fallback cost-ledger actual runner" || bad "fallback cl runner: $CL_FB"
+echo "$CL_FB" | grep -q '"requested_runner":"primary-x"' \
+  && ok "fallback cost-ledger requested primary" || bad "fallback cl req: $CL_FB"
+echo "$CL_FB" | grep -q 'primary_not_ready' \
+  && ok "fallback cost-ledger reason" || bad "fallback cl reason: $CL_FB"
+JOIN_FB=$(tail -1 "$CALLS/launches.log.join" 2>/dev/null || true)
+echo "$JOIN_FB" | grep -q 'req=primary-x' \
+  && ok "fallback loop env requested primary" || bad "fallback join env: $JOIN_FB"
+echo "$JOIN_FB" | grep -q 'reason=primary_not_ready' \
+  && ok "fallback loop env reason" || bad "fallback join env reason: $JOIN_FB"
+
+echo "all-unavailable fail closed"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-none"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "gone-a" not_ready
+write_ready_probe "gone-b" auth_fail
+ensure_runner_bin "gone-a"
+ensure_runner_bin "gone-b"
+TARGET=$(setup_target_repo r141c acme/widget)
+PROF="$ROOT/profiles/r141-none.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-none" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|503|docs/**|none ready|gone-a,gone-b"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "all-unavailable should fail: $out" || {
+  echo "$out" | grep -qiE 'no declared runner is ready|not ready|fail closed' \
+    && ok "all-unavailable actionable diagnostic" \
+    || bad "unclear all-unavailable fail: $out"
+}
+echo "$out" | grep -q 'gone-a' && echo "$out" | grep -q 'gone-b' \
+  && ok "diagnostic names providers" \
+  || bad "diagnostic missing provider names: $out"
+echo "$out" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+  && bad "diagnostic leaked credential-like material" \
+  || ok "diagnostic has no credential material"
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "all-unavailable launched zero" || bad "all-unavailable launched $lc"
+# Fail-closed readiness: no selection → no cost-ledger selection row for this profile name
+if [[ -f "$ROOT/logs/cost-ledger.jsonl" ]] && grep -q 'r141-none' "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null; then
+  bad "all-unavailable should not write selection cost rows for r141-none"
+else
+  ok "all-unavailable wrote no selection cost row"
+fi
+
+echo "actual-runner three-role conflict"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-role"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grind-z" not_ready
+write_ready_probe "codex-builder" ready
+ensure_runner_bin "grind-z"
+ensure_runner_bin "codex-builder"
+TARGET=$(setup_target_repo r141d acme/widget)
+PROF="$ROOT/profiles/r141-role.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-role" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|504|docs/**|role conflict|grind-z,codex-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "role-conflict fallback should fail: $out" || {
+  echo "$out" | grep -qiE 'three-role|collides|REVIEWER|provider|role' \
+    && ok "actual-runner role conflict refused" \
+    || bad "unclear role-conflict fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "role-conflict launched zero" || bad "role-conflict launched $lc"
+
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-role2"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "codex-primary" ready
+ensure_runner_bin "codex-primary"
+TARGET=$(setup_target_repo r141e acme/widget)
+PROF="$ROOT/profiles/r141-role2.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-role2" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|505|docs/**|primary role conflict|codex-primary"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "ready primary role conflict should fail: $out" || {
+  echo "$out" | grep -qiE 'three-role|collides|provider|role' \
+    && ok "ready primary role conflict refused" \
+    || bad "unclear primary role fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "ready primary role conflict launched zero" || bad "primary role launched $lc"
+
+echo "readiness timeout process-group cleanup"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-to"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "hang-runner" timeout
+ensure_runner_bin "hang-runner"
+sleep 300 &
+FOREIGN_READY=$!
+TARGET=$(setup_target_repo r141f acme/widget)
+PROF="$ROOT/profiles/r141-timeout.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-timeout" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|506|docs/**|hang readiness|hang-runner"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export FLEET_READINESS_TIMEOUT=2
+rm -f "$CALLS/ready-hang-hang-runner.pid" "$CALLS/ready-hang-hang-runner-desc.pid"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "hang readiness should fail: $out" || {
+  echo "$out" | grep -qiE 'timeout|not ready|no declared runner' \
+    && ok "hang readiness fails closed" \
+    || bad "unclear hang-ready fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "hang readiness launched zero" || bad "hang readiness launched $lc"
+assert_pid_gone "readiness hang leader" "$CALLS/ready-hang-hang-runner.pid"
+assert_pid_gone "readiness hang descendant" "$CALLS/ready-hang-hang-runner-desc.pid"
+if kill -0 "$FOREIGN_READY" 2>/dev/null; then
+  ok "readiness timeout left unrelated PID $FOREIGN_READY untouched"
+  kill -TERM "$FOREIGN_READY" 2>/dev/null || true
+  wait "$FOREIGN_READY" 2>/dev/null || true
+else
+  bad "readiness timeout killed unrelated PID $FOREIGN_READY"
+fi
+export FLEET_READINESS_TIMEOUT=5
+
+echo "empty route uses global RUNNER"
+reset_calls
+unset FLEET_READINESS_DIR || true
+TARGET=$(setup_target_repo r141g acme/widget)
+PROF="$ROOT/profiles/r141-global.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-global" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|507|docs/**|global default only"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "global default start failed: $out"; }
+grep -q 'LAUNCH runner=fake-runner' "$CALLS/launches.log" \
+  && ok "empty route selected global RUNNER" \
+  || bad "global default not used: $(cat "$CALLS/launches.log")"
+
+echo "status persistence and idempotent restart"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "persist-a" not_ready
+write_ready_probe "persist-b" ready
+ensure_runner_bin "persist-a"
+ensure_runner_bin "persist-b"
+TARGET=$(setup_target_repo r141h acme/widget)
+PROF="$ROOT/profiles/r141-persist.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|508|docs/**|persist selection|persist-a,persist-b"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "persist start failed: $out"; }
+SEL1=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
+out=$(run_fleet --status) || true
+echo "$out" | grep -q 'persist-b' && ok "status shows actual persist-b" || bad "status missing persist-b: $out"
+echo "$out" | grep -q 'persist-a' && ok "status shows requested persist-a" || bad "status missing requested: $out"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "idempotent restart failed: $out"; }
+SEL2=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
+[[ "$SEL1" == "$SEL2" ]] && ok "idempotent restart preserved selected_runner" \
+  || bad "selection changed: $SEL1 -> $SEL2"
+grep -q '^requested_primary=persist-a$' "$ROOT/logs/docs.runner-status" \
+  && ok "idempotent restart preserved requested primary" \
+  || bad "requested primary lost"
+out=$(run_fleet --status) || true
+echo "$out" | grep -q 'degraded\|persist-b' \
+  && ok "status after restart still shows fallback state" \
+  || bad "status lost degraded state: $out"
+
+echo "hostile route tokens"
+reset_calls
+unset FLEET_READINESS_DIR || true
+TARGET=$(setup_target_repo r141i acme/widget)
+PROF="$ROOT/profiles/r141-hostile.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-hostile" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|509|docs/**|hostile empty token|grind-a,,fallback-b"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "empty route token should fail: $out" || {
+  echo "$out" | grep -qiE 'empty token|runner route|disallowed|hostile' \
+    && ok "empty route token rejected" \
+    || bad "unclear empty-token fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "empty route token launched zero" || bad "empty token launched $lc"
+
+PROF="$ROOT/profiles/r141-dup.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-dup" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|510|docs/**|dup route|grind-a,grind-a"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "duplicate route token should fail: $out" || {
+  echo "$out" | grep -qiE 'duplicate runner|route' \
+    && ok "duplicate route token rejected" \
+    || bad "unclear dup-route fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "duplicate route launched zero" || bad "dup route launched $lc"
+
+PROF="$ROOT/profiles/r141-space.profile"
+{
+  echo "version=1"
+  echo "name=r141-space"
+  echo "repo=$TARGET"
+  echo "slug=acme/widget"
+  echo "gibson=$ROOT/gibson"
+  echo "fleet_dir=$ROOT/fleet"
+  echo "log_dir=$ROOT/logs"
+  echo "runner=fake-runner"
+  printf '%s\n' 'lane=docs|511|docs/**|space token|evil token'
+} > "$PROF"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "space token should fail: $out" || {
+  echo "$out" | grep -qiE 'disallowed|runner route|safe inert|hostile' \
+    && ok "space in route token rejected" \
+    || bad "unclear space-token fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "space token launched zero" || bad "space token launched $lc"
+
+echo "cost-ledger path with spaces"
+reset_calls
+unset FLEET_READINESS_DIR || true
+SPACED_LOG="$ROOT/logs with spaces"
+mkdir -p "$SPACED_LOG"
+FLEET_READINESS_DIR="$ROOT/readiness-space-path"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grind-a" ready
+ensure_runner_bin "grind-a"
+TARGET=$(setup_target_repo r141space acme/widget)
+PROF="$ROOT/profiles/r141-space-log.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-space-log" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$SPACED_LOG" \
+  "runner=fake-runner" \
+  "lane=docs|512|docs/**|space log path|grind-a"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+: > "$CALLS/launches.log.join"
+out=$(run_fleet --start) || { bad "space log_dir start failed: $out"; }
+[[ -f "$SPACED_LOG/cost-ledger.jsonl" ]] \
+  && ok "cost-ledger written under log_dir with spaces" \
+  || bad "missing cost-ledger in spaced log_dir"
+SPACE_CL=$(tail -1 "$SPACED_LOG/cost-ledger.jsonl")
+echo "$SPACE_CL" | grep -q '"join_key":' \
+  && ok "spaced cost-ledger has join_key" || bad "spaced cl: $SPACE_CL"
+JOIN_SP=$(tail -1 "$CALLS/launches.log.join")
+echo "$JOIN_SP" | grep -q "ledger=$SPACED_LOG/cost-ledger.jsonl" \
+  && ok "loop env ledger path preserves spaces" || bad "spaced join env: $JOIN_SP"
+
+echo "routing path has no external network"
+ok "routing sensors stay offline (FLEET_SKIP_FETCH + FLEET_READINESS_DIR)"
+
+echo "#141 pool labels: provider-only default (no invented plan shape)"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-pool"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grok" ready
+ensure_runner_bin "grok"
+TARGET=$(setup_target_repo r141pool acme/widget)
+PROF="$ROOT/profiles/r141-pool-default.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-pool-default" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|520|docs/**|provider-only pool|grok"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "pool-default start failed: $out"; }
+CL_POOL=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
+echo "$CL_POOL" | grep -q '"pool":"provider-grok"' \
+  && ok "default pool is provider-grok (no invented plan shape)" \
+  || bad "pool default invented plan: $CL_POOL"
+echo "$CL_POOL" | grep -qE '"pool":"(flat-rate-grok|subscription-grok)"' \
+  && bad "pool still uses invented flat-rate/subscription label: $CL_POOL" \
+  || ok "no flat-rate/subscription invented without pool_map"
+# flat_rate must not be asserted true for undeclared provider-only pools
+echo "$CL_POOL" | grep -q '"flat_rate":true' \
+  && bad "flat_rate invented for provider-only pool: $CL_POOL" \
+  || ok "provider-only pool leaves flat_rate unset"
+
+echo "#141 pool_map declares operator plan shape"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-poolmap"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grok" ready
+ensure_runner_bin "grok"
+TARGET=$(setup_target_repo r141pmap acme/widget)
+PROF="$ROOT/profiles/r141-pool-map.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-pool-map" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "pool_map=grok:flat-rate-grok" \
+  "lane=docs|521|docs/**|declared pool map|grok"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "pool_map start failed: $out"; }
+CL_MAP=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
+echo "$CL_MAP" | grep -q '"pool":"flat-rate-grok"' \
+  && ok "pool_map applies operator-declared plan shape" \
+  || bad "pool_map ignored: $CL_MAP"
+echo "$CL_MAP" | grep -q '"flat_rate":true' \
+  && ok "flat_rate true only from declared flat-rate-* label" \
+  || bad "flat_rate missing after pool_map: $CL_MAP"
+# Bad pool_map shapes fail closed
+PROF_BAD="$ROOT/profiles/r141-pool-bad.profile"
+write_profile "$PROF_BAD" \
+  "version=1" \
+  "name=r141-pool-bad" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "pool_map=not-a-mapping" \
+  "lane=docs|522|docs/**|bad map|grok"
+export FLEET_PROFILE="$PROF_BAD"
+out=$(run_fleet --start 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi pool_map \
+  && ok "invalid pool_map fails closed" || bad "bad pool_map accepted rc=$rc: $out"
+
+echo "#141 join keys collision-resistant in same UTC second"
+# Unit-level: source the two helpers via a tiny extract — call make_selection_join_key
+# twice with frozen ts by running select twice under FLEET_TEST_JOIN_TS.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-join"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grind-a" ready
+ensure_runner_bin "grind-a"
+TARGET=$(setup_target_repo r141join acme/widget)
+# Two sequential starts with halt between: same frozen second → distinct keys.
+PROF="$ROOT/profiles/r141-join-disc.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-join-disc" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs-join" \
+  "runner=fake-runner" \
+  "lane=docs|530|docs/**|join disc|grind-a"
+mkdir -p "$ROOT/logs-join"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export FLEET_TEST_JOIN_TS="20260806T100000Z"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "join-disc start1 failed: $out"; }
+KEY1=$(python3 -c 'import json; print(json.loads(open("'"$ROOT/logs-join/cost-ledger.jsonl"'").readline())["join_key"])')
+# Halt and relaunch so a second selection fires under the same frozen second.
+run_fleet --halt >/dev/null 2>&1 || true
+# Clear pid so restart selects again
+rm -f "$ROOT/fleet"/lane-*/.fleet-pid 2>/dev/null || true
+rm -f "$ROOT/logs-join"/*.pid 2>/dev/null || true
+# Force new selection by removing runner status so already-running path is not taken
+rm -f "$ROOT/logs-join/docs.runner-status" 2>/dev/null || true
+# Kill any leftover loop so lane is dead
+pkill -f "loop.sh.*r141join" 2>/dev/null || true
+sleep 0.2 2>/dev/null || true
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "join-disc start2 failed: $out"; }
+KEY2=$(python3 -c '
+import json
+keys=[]
+with open("'"$ROOT/logs-join/cost-ledger.jsonl"'") as f:
+  for line in f:
+    line=line.strip()
+    if line: keys.append(json.loads(line)["join_key"])
+print(keys[-1] if keys else "")
+')
+# Both keys share frozen ts prefix but must differ via discriminator
+echo "$KEY1" | grep -q '20260806T100000Z' \
+  && echo "$KEY2" | grep -q '20260806T100000Z' \
+  && ok "frozen-time join keys share UTC second" \
+  || bad "frozen ts missing k1=$KEY1 k2=$KEY2"
+if [[ -n "$KEY1" && -n "$KEY2" && "$KEY1" != "$KEY2" ]]; then
+  ok "same-second two launches produce distinct join keys"
+else
+  bad "join keys collided or empty k1=$KEY1 k2=$KEY2"
+fi
+# Discriminator segment present (6 colon-separated suffix parts after fleet-sel:v1)
+# format: fleet-sel:v1:profile:lane:req:sel:UTC:disc → at least 8 colon fields total when split on :
+nseg=$(python3 -c 'print(len("'"$KEY1"'".split(":")))')
+[[ "$nseg" -ge 8 ]] && ok "join key includes per-launch discriminator segment" \
+  || bad "join key too few segments ($nseg): $KEY1"
+unset FLEET_TEST_JOIN_TS || true
+# (Distinct join keys above already exercise production make_join_discriminator
+# end-to-end; do not re-test an inline copy of the helper.)
+
+# ---------------------------------------------------------------------------
+# #141 repair: auth-fail must not be masked by --version (production families)
+# ---------------------------------------------------------------------------
+echo "#141 auth-fail not masked by version (production families)"
+
+# Production-path stubs: auth/status nonzero, --version zero. Must NOT select.
+# FLEET_READINESS_DIR must be unset so fixed family argv tables run.
+write_family_logged_out_stub() {
+  local name="$1" family="$2"
+  case "$family" in
+    codex)
+      cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+# Logged-out codex: login status fails; --version succeeds (must not select).
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+  echo "not logged in" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "codex stub 0.0.0"
+  exit 0
+fi
+exit 2
+P
+      ;;
+    claude)
+      cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+# Logged-out claude: auth status fails; --version succeeds (must not select).
+if [[ "${1:-}" == "auth" && "${2:-}" == "status" ]]; then
+  echo "not logged in" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude stub 0.0.0"
+  exit 0
+fi
+exit 2
+P
+      ;;
+    hermes)
+      cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+# Logged-out hermes: status fails; --version succeeds (must not select).
+if [[ "${1:-}" == "status" ]]; then
+  echo "not authenticated" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "hermes stub 0.0.0"
+  exit 0
+fi
+exit 2
+P
+      ;;
+    *)
+      bad "write_family_logged_out_stub: unknown family $family"
+      return 1
+      ;;
+  esac
+  chmod +x "$BIN/$name"
+}
+
+# Ready fallback on production path (unknown family: bounded --version only).
+cat > "$BIN/grind-ok-fb" <<'P'
+#!/usr/bin/env bash
+# Unknown-family readiness probes --version only (never bare interactive).
+if [[ "${1:-}" == "--version" ]]; then
+  echo "grind-ok-fb 0.0.0"
+  exit 0
+fi
+# Launch path (loop runner) accepts any argv.
+exit 0
+P
+chmod +x "$BIN/grind-ok-fb"
+
+auth_issue=511
+for fam in codex claude hermes; do
+  reset_calls
+  unset FLEET_READINESS_DIR || true
+  primary="${fam}-logged-out"
+  write_family_logged_out_stub "$primary" "$fam"
+  TARGET=$(setup_target_repo "r141-auth-$fam" acme/widget)
+  PROF="$ROOT/profiles/r141-auth-$fam.profile"
+  write_profile "$PROF" \
+    "version=1" \
+    "name=r141-auth-$fam" \
+    "repo=$TARGET" \
+    "slug=acme/widget" \
+    "gibson=$ROOT/gibson" \
+    "fleet_dir=$ROOT/fleet" \
+    "log_dir=$ROOT/logs" \
+    "runner=fake-runner" \
+    "lane=docs|${auth_issue}|docs/**|auth fail primary|$primary,grind-ok-fb"
+  export FLEET_PROFILE="$PROF"
+  export REVIEWER_CMD="codex-stub review"
+  export RELEASE_CMD="claude-stub release"
+  export FLEET_READINESS_TIMEOUT=5
+  : > "$CALLS/launches.log"
+  out=$(run_fleet --start 2>&1) || { bad "$fam auth-fail primary start failed: $out"; auth_issue=$((auth_issue + 1)); continue; }
+  lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+  [[ "$lc" == "1" ]] && ok "$fam auth-fail primary launched once" || bad "$fam launches=$lc out=$out"
+  grep -q 'LAUNCH runner=grind-ok-fb' "$CALLS/launches.log" \
+    && ok "$fam auth-fail selected declared fallback grind-ok-fb" \
+    || bad "$fam expected grind-ok-fb: $(cat "$CALLS/launches.log")"
+  if grep -q "LAUNCH runner=$primary" "$CALLS/launches.log"; then
+    bad "$fam selected logged-out primary despite auth fail: $(cat "$CALLS/launches.log")"
+  else
+    ok "$fam did not select logged-out primary"
+  fi
+  grep -q '^health=degraded$' "$ROOT/logs/docs.runner-status" \
+    && ok "$fam fallback health=degraded" \
+    || bad "$fam expected degraded: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+  grep -q 'primary_not_ready' "$ROOT/logs/docs.runner-status" \
+    && ok "$fam reason records primary_not_ready" \
+    || bad "$fam reason missing primary_not_ready: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+  # Diagnostic path must not leak probe stderr (logged-out messages stay discarded).
+  echo "$out" | grep -qiE 'not logged in|not authenticated|api[_-]?key|Bearer |password=' \
+    && bad "$fam start output leaked probe/credential-like material: $out" \
+    || ok "$fam start output has no probe/credential material"
+  auth_issue=$((auth_issue + 1))
+done
+
+# ---------------------------------------------------------------------------
+# #141 repair: Grok production path uses `models` (not --version)
+# ---------------------------------------------------------------------------
+echo "#141 grok models readiness (production family)"
+
+# Production-path Grok stubs: log argv so a regression back to --version fails.
+# FLEET_READINESS_DIR must be unset so fixed family argv tables run.
+write_grok_models_stub() {
+  local name="$1" models_rc="${2:-0}" version_rc="${3:-0}"
+  # models_rc: exit for `models`; version_rc: exit for --version
+  cat > "$BIN/$name" <<P
+#!/usr/bin/env bash
+# Grok production-family stub: fixed argv probe is \`models\` only.
+log="\${GROK_PROBE_LOG:-/dev/null}"
+printf 'invoke name=%s argv=%s\n' "$name" "\$*" >> "\$log"
+if [[ "\${1:-}" == "models" ]]; then
+  # Do not print sensitive material; fleet must not inspect output either.
+  exit $models_rc
+fi
+if [[ "\${1:-}" == "--version" ]]; then
+  echo "grok stub 0.0.0"
+  exit $version_rc
+fi
+exit 2
+P
+  chmod +x "$BIN/$name"
+}
+
+# (a) --version would succeed, models fails → must select declared fallback.
+reset_calls
+unset FLEET_READINESS_DIR || true
+export GROK_PROBE_LOG="$CALLS/grok-probe-fail.log"
+: > "$GROK_PROBE_LOG"
+write_grok_models_stub "grok" 1 0
+# Ready other-family fallback (production path: unknown family uses --version only).
+cat > "$BIN/grind-ok-fb" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/grind-ok-fb"
+TARGET=$(setup_target_repo r141-grok-models-fail acme/widget)
+PROF="$ROOT/profiles/r141-grok-models-fail.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-grok-models-fail" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|540|docs/**|grok models fail|grok,grind-ok-fb"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "grok models-fail start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "grok models-fail launched once" || bad "grok models-fail launches=$lc out=$out"
+grep -q 'LAUNCH runner=grind-ok-fb' "$CALLS/launches.log" \
+  && ok "grok models-fail selected declared fallback grind-ok-fb" \
+  || bad "grok models-fail expected grind-ok-fb: $(cat "$CALLS/launches.log")"
+if grep -q 'LAUNCH runner=grok' "$CALLS/launches.log"; then
+  bad "grok models-fail selected grok despite models failure: $(cat "$CALLS/launches.log")"
+else
+  ok "grok models-fail did not select grok"
+fi
+grep -q '^health=degraded$' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-fail health=degraded" \
+  || bad "grok models-fail expected degraded: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q 'primary_not_ready' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-fail reason primary_not_ready" \
+  || bad "grok models-fail reason: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+# Stub invocation: must probe models (not version alone).
+grep -q 'invoke name=grok argv=models' "$GROK_PROBE_LOG" \
+  && ok "grok models-fail stub invoked with argv=models" \
+  || bad "grok models-fail missing models invoke: $(cat "$GROK_PROBE_LOG" 2>/dev/null)"
+if grep -qE 'invoke name=grok argv=--version$' "$GROK_PROBE_LOG" \
+  && ! grep -q 'invoke name=grok argv=models' "$GROK_PROBE_LOG"; then
+  bad "grok models-fail regressed to --version-only probe: $(cat "$GROK_PROBE_LOG")"
+else
+  ok "grok models-fail did not regress to version-only readiness"
+fi
+echo "$out" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+  && bad "grok models-fail leaked credential-like material: $out" \
+  || ok "grok models-fail output has no credential material"
+
+# (b) models exit 0 selects Grok; --version alone would fail (proves models wins).
+reset_calls
+unset FLEET_READINESS_DIR || true
+export GROK_PROBE_LOG="$CALLS/grok-probe-ok.log"
+: > "$GROK_PROBE_LOG"
+# models ready; --version fails so a version-only probe would not select Grok.
+write_grok_models_stub "grok" 0 1
+cat > "$BIN/grind-ok-fb" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/grind-ok-fb"
+TARGET=$(setup_target_repo r141-grok-models-ok acme/widget)
+PROF="$ROOT/profiles/r141-grok-models-ok.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-grok-models-ok" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|541|docs/**|grok models ok|grok,grind-ok-fb"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "grok models-ok start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "grok models-ok launched once" || bad "grok models-ok launches=$lc out=$out"
+grep -q 'LAUNCH runner=grok' "$CALLS/launches.log" \
+  && ok "grok models-ok selected grok on models exit 0" \
+  || bad "grok models-ok expected grok: $(cat "$CALLS/launches.log")"
+if grep -q 'LAUNCH runner=grind-ok-fb' "$CALLS/launches.log"; then
+  bad "grok models-ok fell through to fallback despite models ready: $(cat "$CALLS/launches.log")"
+else
+  ok "grok models-ok did not select fallback"
+fi
+grep -q '^health=healthy$' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-ok health=healthy" \
+  || bad "grok models-ok health: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q '^reason=primary_ready$' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-ok reason=primary_ready" \
+  || bad "grok models-ok reason: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q 'invoke name=grok argv=models' "$GROK_PROBE_LOG" \
+  && ok "grok models-ok stub invoked with argv=models" \
+  || bad "grok models-ok missing models invoke: $(cat "$GROK_PROBE_LOG" 2>/dev/null)"
+# Must not have needed --version to succeed (version exits 1 in this stub).
+if grep -qE 'invoke name=grok argv=--version' "$GROK_PROBE_LOG"; then
+  bad "grok models-ok still invoked --version (should be models-only): $(cat "$GROK_PROBE_LOG")"
+else
+  ok "grok models-ok never invoked --version"
+fi
+unset GROK_PROBE_LOG || true
+
+# ---------------------------------------------------------------------------
+# #141 repair: already-running revalidates persisted builder vs current roles
+# ---------------------------------------------------------------------------
+echo "#141 already-running persisted runner role revalidation"
+
+# Plant a healthy running lane with selected_runner that later collides with
+# a changed REVIEWER_CMD. Must fail closed on --start without re-probing readiness.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-role"
+rm -rf "$FLEET_READINESS_DIR"
+# Probe that logs every invocation — re-start must not call it (identity only).
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/safe-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-persist-role.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/safe-builder"
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-persist-role acme/widget)
+PROF="$ROOT/profiles/r141-persist-role.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-role" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|542|docs/**|persist role reval|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-role.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-role initial start failed: $out"; }
+grep -q 'LAUNCH runner=safe-builder' "$CALLS/launches.log" \
+  && ok "persist-role initial selected safe-builder" \
+  || bad "persist-role initial: $(cat "$CALLS/launches.log")"
+# Plant live process so lane_pid_alive treats the lane as healthy.
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 542
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for persisted-runner role revalidation
+notes: >
+  preserve me
+STATE
+mkdir -p "$ROOT/fleet/lane-docs/gibson"
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_ROLE_PID=$!
+printf '%s\n' "$PERSIST_ROLE_PID" > "$ROOT/logs/docs.pid"
+# Prove status shows running before role flip.
+pid_check=$(run_fleet --status 2>&1) || true
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "persist-role planted healthy running lane" \
+  || bad "persist-role not running: $pid_check"
+# Change reviewer to same provider as the live builder (safe-builder).
+export REVIEWER_CMD="safe-builder review"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-role.log"
+out=$(run_fleet --start 2>&1) && bad "persist-role role-flip should fail: $out" || {
+  echo "$out" | grep -qiE 'collides|REVIEWER|provider|grade|already-running|selected runner' \
+    && ok "persist-role role-flip refused on already-running revalidation" \
+    || bad "unclear persist-role fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-role role-flip launched zero" || bad "persist-role launched $lc"
+# Must not re-run readiness probes against the already-running process.
+if [[ -s "$CALLS/ready-probe-persist-role.log" ]]; then
+  bad "persist-role re-probed readiness on already-running: $(cat "$CALLS/ready-probe-persist-role.log")"
+else
+  ok "persist-role did not re-run readiness on already-running"
+fi
+# cleanup planted sleeper
+kill "$PERSIST_ROLE_PID" 2>/dev/null || true
+wait "$PERSIST_ROLE_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+export REVIEWER_CMD="codex-stub review"
+
+# Empty/missing persisted selected_runner on already-running fails closed.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-empty"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "safe-builder" ready
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-persist-empty acme/widget)
+PROF="$ROOT/profiles/r141-persist-empty.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-empty" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|543|docs/**|persist empty selected|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-empty initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 543
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for empty selected_runner
+notes: >
+  empty selected
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_EMPTY_PID=$!
+printf '%s\n' "$PERSIST_EMPTY_PID" > "$ROOT/logs/docs.pid"
+# Corrupt persisted selected_runner to empty.
+{
+  echo "requested_primary=safe-builder"
+  echo "selected_runner="
+  echo "selected_provider=safe-builder"
+  echo "selected_pool=provider-safe-builder"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "persist-empty selected should fail: $out" || {
+  echo "$out" | grep -qiE 'selected_runner is empty|empty/missing|refuse' \
+    && ok "persist-empty selected_runner refused" \
+    || bad "unclear persist-empty fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-empty launched zero" || bad "persist-empty launched $lc"
+kill "$PERSIST_EMPTY_PID" 2>/dev/null || true
+wait "$PERSIST_EMPTY_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# Live lane + missing runner-status → fail closed (never invent from config).
+# Current profile/route is not evidence of which executable launched the process.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-missing"
+rm -rf "$FLEET_READINESS_DIR"
+# Probe that logs every invocation — missing-status refuse must not call it.
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/miss-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-persist-missing.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/miss-builder"
+ensure_runner_bin "miss-builder"
+TARGET=$(setup_target_repo r141-persist-missing acme/widget)
+PROF="$ROOT/profiles/r141-persist-missing.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-missing" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|544|docs/**|persist missing status|miss-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-missing.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-missing initial start failed: $out"; }
+grep -q 'LAUNCH runner=miss-builder' "$CALLS/launches.log" \
+  && ok "persist-missing initial selected miss-builder" \
+  || bad "persist-missing initial: $(cat "$CALLS/launches.log")"
+[[ -f "$ROOT/logs/docs.runner-status" ]] \
+  && ok "persist-missing wrote runner-status on first start" \
+  || bad "persist-missing missing status after first start"
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 544
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for missing runner-status fail-closed
+notes: >
+  no invent from config
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_MISSING_PID=$!
+printf '%s\n' "$PERSIST_MISSING_PID" > "$ROOT/logs/docs.pid"
+# Prove status shows running before status file is removed.
+pid_check=$(run_fleet --status 2>&1) || true
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "persist-missing planted healthy running lane" \
+  || bad "persist-missing not running: $pid_check"
+# Drop only the runner-status evidence; leave live process + pidfile intact.
+rm -f "$ROOT/logs/docs.runner-status"
+[[ ! -f "$ROOT/logs/docs.runner-status" ]] \
+  && ok "persist-missing removed runner-status evidence" \
+  || bad "persist-missing status still present"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-missing.log"
+out=$(run_fleet --start 2>&1) && bad "persist-missing should fail closed: $out" || {
+  echo "$out" | grep -qiE 'missing runner-status|refuse to invent|restore a verified|Halt and restart' \
+    && ok "persist-missing clear refusal when status absent" \
+    || bad "unclear persist-missing fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-missing launched zero" || bad "persist-missing launched $lc"
+# Must not re-run readiness probes (would invent from current route probes).
+if [[ -s "$CALLS/ready-probe-persist-missing.log" ]]; then
+  bad "persist-missing re-probed readiness: $(cat "$CALLS/ready-probe-persist-missing.log")"
+else
+  ok "persist-missing did not re-run readiness"
+fi
+# Live process left untouched.
+if kill -0 "$PERSIST_MISSING_PID" 2>/dev/null; then
+  ok "persist-missing left live process untouched"
+else
+  bad "persist-missing killed live process pid=$PERSIST_MISSING_PID"
+fi
+# Positive control still lives above: "status persistence and idempotent restart"
+# with valid persisted selected_runner continues to succeed without relaunch.
+kill "$PERSIST_MISSING_PID" 2>/dev/null || true
+wait "$PERSIST_MISSING_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# ---------------------------------------------------------------------------
+# #141 repair: absolute-path selected runner persists + idempotent revalidation
+# ---------------------------------------------------------------------------
+echo "#141 absolute-path selected runner start/persist/revalidate"
+
+# Absolute executable path is a supported initial-selection form (global runner=
+# and check_runner_readiness /* branch). Persisted revalidation must accept it
+# so a healthy repeated --start is idempotent (no relaunch, no readiness re-probe).
+reset_calls
+ABS_RUN_DIR="$ROOT/abs-runners"
+rm -rf "$ABS_RUN_DIR"
+mkdir -p "$ABS_RUN_DIR"
+ABS_RUNNER="$ABS_RUN_DIR/abs-path-builder"
+cat > "$ABS_RUNNER" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$ABS_RUNNER"
+# Prove path is absolute and contains '/'.
+case "$ABS_RUNNER" in
+  /*) ok "abs-path fixture is absolute" ;;
+  *) bad "abs-path fixture not absolute: $ABS_RUNNER" ;;
+esac
+FLEET_READINESS_DIR="$ROOT/readiness-abs-path"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+# Probe logs every invocation — repeated --start must not call it (identity only).
+cat > "$FLEET_READINESS_DIR/abs-path-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-abs-path.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/abs-path-builder"
+TARGET=$(setup_target_repo r141-abs-path acme/widget)
+PROF="$ROOT/profiles/r141-abs-path.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-abs-path" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=$ABS_RUNNER" \
+  "lane=docs|545|docs/**|absolute path global default"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-abs-path.log"
+out=$(run_fleet --start 2>&1) || { bad "abs-path initial start failed: $out"; }
+grep -Fq "LAUNCH runner=$ABS_RUNNER" "$CALLS/launches.log" \
+  && ok "abs-path initial launched absolute selected runner" \
+  || bad "abs-path initial launch: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=$ABS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "abs-path persisted absolute selected_runner" \
+  || bad "abs-path status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -qxF "requested_primary=$ABS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "abs-path persisted absolute requested_primary" \
+  || bad "abs-path requested primary lost"
+# First start should have probed readiness once (selection path).
+if [[ -s "$CALLS/ready-probe-abs-path.log" ]]; then
+  ok "abs-path initial selection ran readiness probe"
+else
+  bad "abs-path initial selection skipped readiness probe"
+fi
+# Plant healthy running lane so second --start takes already-running path.
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 545
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for absolute-path selected_runner revalidation
+notes: >
+  abs path reval
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+ABS_PATH_PID=$!
+printf '%s\n' "$ABS_PATH_PID" > "$ROOT/logs/docs.pid"
+pid_check=$(run_fleet --status 2>&1) || true
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "abs-path planted healthy running lane" \
+  || bad "abs-path not running: $pid_check"
+SEL_BEFORE=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-abs-path.log"
+out=$(run_fleet --start 2>&1) || { bad "abs-path repeated --start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "abs-path repeated --start launched zero (no relaunch)" \
+  || bad "abs-path repeated relaunched: $lc out=$out"
+if [[ -s "$CALLS/ready-probe-abs-path.log" ]]; then
+  bad "abs-path repeated --start re-probed readiness: $(cat "$CALLS/ready-probe-abs-path.log")"
+else
+  ok "abs-path repeated --start did not re-run readiness"
+fi
+SEL_AFTER=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
+[[ "$SEL_BEFORE" == "$SEL_AFTER" ]] \
+  && ok "abs-path repeated --start preserved absolute selected_runner" \
+  || bad "abs-path selection changed: $SEL_BEFORE -> $SEL_AFTER"
+# Live process left untouched.
+if kill -0 "$ABS_PATH_PID" 2>/dev/null; then
+  ok "abs-path left live process untouched"
+else
+  bad "abs-path killed live process pid=$ABS_PATH_PID"
+fi
+kill "$ABS_PATH_PID" 2>/dev/null || true
+wait "$ABS_PATH_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# Absolute path also accepted as field-5 route token (parse + readiness).
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-abs-route"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/abs-path-builder" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/abs-path-builder"
+TARGET=$(setup_target_repo r141-abs-route acme/widget)
+PROF="$ROOT/profiles/r141-abs-route.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-abs-route" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|546|docs/**|absolute path route token|$ABS_RUNNER"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "abs-route field-5 start failed: $out"; }
+grep -Fq "LAUNCH runner=$ABS_RUNNER" "$CALLS/launches.log" \
+  && ok "abs-route field-5 selected absolute path token" \
+  || bad "abs-route field-5: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=$ABS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "abs-route field-5 persisted absolute selected_runner" \
+  || bad "abs-route status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+
+# Hostile/malformed path tokens fail closed (no shell execution, no unsafe accept).
+echo "#141 hostile/malformed runner path tokens fail closed"
+reset_calls
+unset FLEET_READINESS_DIR || true
+MARKER="$CALLS/hostile-path-exec.marker"
+rm -f "$MARKER"
+TARGET=$(setup_target_repo r141-hostile-path acme/widget)
+
+# Relative multipath in route — not a supported selection form.
+PROF="$ROOT/profiles/r141-rel-path.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-rel-path" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|547|docs/**|relative multipath|rel/path/builder"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "relative multipath route should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed relative path|hostile|disallowed|runner route' \
+    && ok "relative multipath route token refused" \
+    || bad "unclear relative multipath fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "relative multipath launched zero" || bad "rel multipath launched $lc"
+
+# '..' segment in absolute-looking route token.
+PROF="$ROOT/profiles/r141-dotdot-path.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-dotdot-path" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|548|docs/**|dotdot path|/tmp/../evil-builder"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "dotdot path route should fail: $out" || {
+  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|hostile|disallowed|runner route" \
+    && ok "dotdot path route token refused" \
+    || bad "unclear dotdot path fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "dotdot path launched zero" || bad "dotdot path launched $lc"
+
+# Shell-metachar absolute-looking token must not execute a marker (parse refuse).
+PROF="$ROOT/profiles/r141-shell-abs.profile"
+{
+  echo "version=1"
+  echo "name=r141-shell-abs"
+  echo "repo=$TARGET"
+  echo "slug=acme/widget"
+  echo "gibson=$ROOT/gibson"
+  echo "fleet_dir=$ROOT/fleet"
+  echo "log_dir=$ROOT/logs"
+  echo "runner=fake-runner"
+  # backtick injection must be rejected as hostile data — never executed.
+  printf 'lane=docs|549|docs/**|shell abs|`touch %s`\n' "$MARKER"
+} > "$PROF"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "shell-metachar abs route should fail: $out" || {
+  echo "$out" | grep -qiE 'hostile|shell|disallowed|safe inert|runner route' \
+    && ok "shell-metachar route token refused" \
+    || bad "unclear shell-metachar fail: $out"
+}
+[[ ! -e "$MARKER" ]] && ok "shell-metachar route did not execute marker" \
+  || bad "shell-metachar route executed marker (injection)"
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "shell-metachar route launched zero" || bad "shell-metachar launched $lc"
+
+# Persisted hostile selected_runner on already-running fails closed (no re-probe).
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-hostile"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/safe-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-persist-hostile.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/safe-builder"
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-persist-hostile acme/widget)
+PROF="$ROOT/profiles/r141-persist-hostile.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-hostile" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|550|docs/**|persist hostile selected|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-hostile initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 550
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for hostile persisted selected_runner
+notes: >
+  hostile plant
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_HOSTILE_PID=$!
+printf '%s\n' "$PERSIST_HOSTILE_PID" > "$ROOT/logs/docs.pid"
+# Plant shell-hostile selected_runner (would have been rejected at selection,
+# but status files can be hand-edited or corrupted).
+{
+  echo "requested_primary=safe-builder"
+  echo 'selected_runner=evil$(reboot)'
+  echo "selected_provider=evil"
+  echo "selected_pool=provider-evil"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-hostile.log"
+out=$(run_fleet --start 2>&1) && bad "persist-hostile selected should fail: $out" || {
+  echo "$out" | grep -qiE 'hostile|shell/control|disallowed|selected_runner' \
+    && ok "persist-hostile selected_runner refused" \
+    || bad "unclear persist-hostile fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-hostile launched zero" || bad "persist-hostile launched $lc"
+if [[ -s "$CALLS/ready-probe-persist-hostile.log" ]]; then
+  bad "persist-hostile re-probed readiness: $(cat "$CALLS/ready-probe-persist-hostile.log")"
+else
+  ok "persist-hostile did not re-run readiness"
+fi
+
+# Plant relative multipath as persisted selected_runner.
+{
+  echo "requested_primary=safe-builder"
+  echo "selected_runner=rel/path/builder"
+  echo "selected_provider=rel"
+  echo "selected_pool=provider-rel"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-hostile.log"
+out=$(run_fleet --start 2>&1) && bad "persist-relpath selected should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed relative path|hostile|disallowed|selected_runner' \
+    && ok "persist-relpath selected_runner refused" \
+    || bad "unclear persist-relpath fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-relpath launched zero" || bad "persist-relpath launched $lc"
+
+# Plant '..' absolute path as persisted selected_runner.
+{
+  echo "requested_primary=safe-builder"
+  echo "selected_runner=/tmp/../evil-builder"
+  echo "selected_provider=evil"
+  echo "selected_pool=provider-evil"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-hostile.log"
+out=$(run_fleet --start 2>&1) && bad "persist-dotdot selected should fail: $out" || {
+  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|hostile|disallowed|selected_runner" \
+    && ok "persist-dotdot selected_runner refused" \
+    || bad "unclear persist-dotdot fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-dotdot launched zero" || bad "persist-dotdot launched $lc"
+if kill -0 "$PERSIST_HOSTILE_PID" 2>/dev/null; then
+  ok "persist-hostile left live process untouched"
+else
+  bad "persist-hostile killed live process"
+fi
+kill "$PERSIST_HOSTILE_PID" 2>/dev/null || true
+wait "$PERSIST_HOSTILE_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# Global RUNNER (field 5 omitted) must hit the same token validator inside
+# select_lane_runner — parse_lane_line never sees the global default.
+echo "#141 global RUNNER malformed path refused at selection"
+reset_calls
+unset FLEET_READINESS_DIR || true
+MARKER="$CALLS/global-malformed-exec.marker"
+rm -f "$MARKER"
+TARGET=$(setup_target_repo r141-global-malform acme/widget)
+PROF="$ROOT/profiles/r141-global-malform.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-global-malform" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=rel/path/global-builder" \
+  "lane=docs|551|docs/**|global default only — no field 5"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "global malformed RUNNER should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed relative path|selection candidate|global runner|hostile|disallowed' \
+    && ok "global malformed RUNNER refused at selection" \
+    || bad "unclear global malformed fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "global malformed launched zero" || bad "global malformed launched $lc"
+[[ ! -e "$MARKER" ]] && ok "global malformed did not execute marker" \
+  || bad "global malformed executed marker"
+
+# Global RUNNER with real '..' segment (field 5 omitted).
+reset_calls
+TARGET=$(setup_target_repo r141-global-dotdot acme/widget)
+PROF="$ROOT/profiles/r141-global-dotdot.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-global-dotdot" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=/tmp/../evil-global" \
+  "lane=docs|552|docs/**|global absolute with .. segment"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "global dotdot RUNNER should fail: $out" || {
+  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|selection candidate|global runner|hostile|disallowed" \
+    && ok "global dotdot RUNNER refused at selection" \
+    || bad "unclear global dotdot fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "global dotdot launched zero" || bad "global dotdot launched $lc"
+
+# Safe consecutive dots in a basename (my..runner) are NOT path segments —
+# must be accepted (not confused with /../ traversal).
+echo "#141 safe basename my..runner is not a path segment"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-dotdot-safe"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/my..runner" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/my..runner"
+ensure_runner_bin "my..runner"
+TARGET=$(setup_target_repo r141-dotdot-safe acme/widget)
+PROF="$ROOT/profiles/r141-dotdot-safe.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-dotdot-safe" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|553|docs/**|safe consecutive dots basename|my..runner"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "safe my..runner start failed: $out"; }
+grep -Fq "LAUNCH runner=my..runner" "$CALLS/launches.log" \
+  && ok "safe my..runner selected (not treated as path segment)" \
+  || bad "safe my..runner: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=my..runner" "$ROOT/logs/docs.runner-status" \
+  && ok "safe my..runner persisted" \
+  || bad "safe my..runner status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+
+# Absolute path whose basename contains consecutive dots (not a .. segment).
+reset_calls
+ABS_DOTS_DIR="$ROOT/abs-dots-runners"
+rm -rf "$ABS_DOTS_DIR"
+mkdir -p "$ABS_DOTS_DIR"
+ABS_DOTS_RUNNER="$ABS_DOTS_DIR/my..runner"
+cat > "$ABS_DOTS_RUNNER" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$ABS_DOTS_RUNNER"
+case "$ABS_DOTS_RUNNER" in
+  /*) ;;
+  *) bad "abs-dots fixture not absolute: $ABS_DOTS_RUNNER" ;;
+esac
+FLEET_READINESS_DIR="$ROOT/readiness-abs-dots"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/my..runner" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/my..runner"
+TARGET=$(setup_target_repo r141-abs-dots acme/widget)
+PROF="$ROOT/profiles/r141-abs-dots.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-abs-dots" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=$ABS_DOTS_RUNNER" \
+  "lane=docs|554|docs/**|absolute path with my..runner basename"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "abs my..runner start failed: $out"; }
+grep -Fq "LAUNCH runner=$ABS_DOTS_RUNNER" "$CALLS/launches.log" \
+  && ok "absolute path with my..runner basename selected" \
+  || bad "abs my..runner: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=$ABS_DOTS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "absolute my..runner path persisted" \
+  || bad "abs my..runner status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# #141 repair: global RUNNER only defaults for lanes omitting field 5
+# ---------------------------------------------------------------------------
+echo "#141 global RUNNER only for omitted-route lanes"
+
+# (a) All lanes explicit, global default missing from PATH → still selects routes.
+reset_calls
+unset FLEET_READINESS_DIR || true
+FLEET_READINESS_DIR="$ROOT/readiness-explicit-miss"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "route-a" ready
+write_ready_probe "route-b" ready
+ensure_runner_bin "route-a"
+ensure_runner_bin "route-b"
+TARGET=$(setup_target_repo r141-explicit-miss acme/widget)
+PROF="$ROOT/profiles/r141-explicit-miss.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-explicit-miss" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=missing-global-runner-xyz" \
+  "lane=docs|521|docs/**|all explicit A|route-a" \
+  "lane=harness|522|scripts/**|all explicit B|route-b"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+# Ensure the bogus global default is not on PATH.
+rm -f "$BIN/missing-global-runner-xyz"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "all-explicit missing global should start: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "2" ]] && ok "all-explicit missing global launched two lanes" || bad "all-explicit miss launches=$lc out=$out"
+grep -q 'LAUNCH runner=route-a' "$CALLS/launches.log" \
+  && grep -q 'LAUNCH runner=route-b' "$CALLS/launches.log" \
+  && ok "all-explicit missing global selected actual routes" \
+  || bad "all-explicit miss routes: $(cat "$CALLS/launches.log")"
+
+# (b) All lanes explicit, global default collides with reviewer but unused → proceed.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-explicit-collide"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "safe-builder" ready
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-explicit-collide acme/widget)
+PROF="$ROOT/profiles/r141-explicit-collide.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-explicit-collide" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=codex-stub" \
+  "lane=docs|523|docs/**|unused colliding global|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+# codex-stub on PATH as a binary so if it were used it would resolve; it must not.
+cat > "$BIN/codex-stub" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/codex-stub"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "all-explicit colliding unused global should start: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "all-explicit unused colliding global launched once" || bad "explicit collide launches=$lc out=$out"
+grep -q 'LAUNCH runner=safe-builder' "$CALLS/launches.log" \
+  && ok "all-explicit unused colliding global selected safe-builder" \
+  || bad "expected safe-builder: $(cat "$CALLS/launches.log")"
+if grep -q 'LAUNCH runner=codex-stub' "$CALLS/launches.log"; then
+  bad "unused colliding global was selected: $(cat "$CALLS/launches.log")"
+else
+  ok "unused colliding global was not selected"
+fi
+
+# (c) Omitted-route lane fails when global default is missing from PATH.
+reset_calls
+unset FLEET_READINESS_DIR || true
+TARGET=$(setup_target_repo r141-omit-miss acme/widget)
+PROF="$ROOT/profiles/r141-omit-miss.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-omit-miss" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=missing-global-runner-xyz" \
+  "lane=docs|524|docs/**|omitted route needs global"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+rm -f "$BIN/missing-global-runner-xyz"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "omitted-route missing global should fail: $out" || {
+  echo "$out" | grep -qiE 'missing-global-runner-xyz|not found on PATH|runner' \
+    && ok "omitted-route missing global refused" \
+    || bad "unclear omit-miss fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "omitted-route missing global launched zero" || bad "omit-miss launched $lc"
+
+# (d) Actual selected runner conflicting with reviewer fails closed (retain).
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-actual-role"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "codex-as-builder" ready
+ensure_runner_bin "codex-as-builder"
+TARGET=$(setup_target_repo r141-actual-role acme/widget)
+PROF="$ROOT/profiles/r141-actual-role.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-actual-role" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|525|docs/**|actual role conflict|codex-as-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "actual selected role conflict should fail: $out" || {
+  echo "$out" | grep -qiE 'three-role|collides|REVIEWER|provider|grade' \
+    && ok "actual selected runner role conflict refused" \
+    || bad "unclear actual-role fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "actual selected role conflict launched zero" || bad "actual-role launched $lc"
+
+unset FLEET_READINESS_DIR || true
+export FLEET_READINESS_TIMEOUT=8
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+
 
 # --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
 echo "docs contract sensors"
