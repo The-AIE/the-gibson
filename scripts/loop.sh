@@ -2020,12 +2020,15 @@ escalate() {
     info "escalation review skipped — no base branch resolved, and a guessed base reviews the wrong diff"
     note="Escalation review skipped: the target repo's base branch could not be resolved (Law 8)."
   else
+    # Optional reviewer args (e.g. --solo-platform). Bash 3.2 + set -u treats
+    # "${empty[@]}" as unbound; ${arr[@]+"${arr[@]}"} expands to nothing when
+    # empty and to the real elements when populated — no fabricated "" argv (#144).
     local esc_extra=()
     [[ "$SOLO_PLATFORM" -eq 1 ]] && esc_extra+=(--solo-platform)
     if "$SCRIPT_DIR/second-opinion.sh" \
         --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" --base "$base_sha" \
         --gate-status "red: $failures consecutive runner failures" --out "$out" \
-        "${esc_extra[@]}" >/dev/null 2>&1; then
+        ${esc_extra[@]+"${esc_extra[@]}"} >/dev/null 2>&1; then
       info "second opinion written to $out (base $base @ $base_sha)"
       note="Second opinion against \`$base\` @ \`$base_sha\` written to gibson/second-opinion.md — next hat must read it."
     else
@@ -2186,13 +2189,14 @@ ensure_cross_vendor_review() {
   info "running the mandatory distinct-vendor review of $branch @ $sha against $base @ $base_sha before handoff (Law 5)"
   # --base is the exact base SHA, not the branch name: the reviewer must see the
   # same two endpoints the receipt records.
+  # Same Bash 3.2 + set -u empty-array rule as escalate() (#144).
   local so_extra=()
   [[ "$SOLO_PLATFORM" -eq 1 ]] && so_extra+=(--solo-platform)
   if "$SCRIPT_DIR/second-opinion.sh" \
       --repo "$REPO" --reviewers "$REVIEWERS" --author "$RUNNER" \
       --base "$base_sha" --branch "$sha" \
       --gate-status "pre-handoff mandatory review of $branch @ $sha against $base @ $base_sha" \
-      --out "$out" "${so_extra[@]}" >/dev/null; then
+      --out "$out" ${so_extra[@]+"${so_extra[@]}"} >/dev/null; then
     printf 'sha: %s\nbranch: %s\nbase: %s\nbase_sha: %s\nauthor: %s\nreviewers: %s\nreviewed: %s\nstatus: ok\nsolo_platform: %s\n' \
       "$sha" "$branch" "$base" "$base_sha" "$RUNNER" "$REVIEWERS" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
       "$SOLO_PLATFORM" > "$REVIEW_RECEIPT"

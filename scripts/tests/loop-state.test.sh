@@ -153,6 +153,7 @@ setup_repo() {
   : > "$CALLS/runner.args"
   : > "$CALLS/supervisor.count"
   : > "$CALLS/second-opinion.count"
+  : > "$CALLS/second-opinion.args"
   rm -f "$REPO/gibson/loop-state.md" "$REPO/gibson/.loop-state.prev" \
         "$REPO/gibson/journal.md" "$REPO/gibson/HALT" "$REPO/gibson/halt-latch"
 }
@@ -532,6 +533,8 @@ STUB
   cat > "$ROOT/fake/scripts/second-opinion.sh" <<STUB
 #!/usr/bin/env bash
 echo call >> "$CALLS/second-opinion.count"
+# One argv element per line so empty vs populated optional flags are exact.
+printf '%s\n' "\$@" >> "$CALLS/second-opinion.args"
 out=""
 prev=""
 for a in "\$@"; do
@@ -1982,6 +1985,7 @@ write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
 make_runner_cmd rewrite-clock-only
 : > "$CALLS/runner.count"
 : > "$CALLS/second-opinion.count"
+: > "$CALLS/second-opinion.args"
 set +e
 HERMES_CMD="$CALLS/fake-runner.sh" \
   "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
@@ -1999,6 +2003,75 @@ if grep -q 'no-progress' "$ROOT/esc-np.err" "$REPO/gibson/journal.md" 2>/dev/nul
   ok "escalate path still journals no-progress"
 else
   bad "escalate path lost no-progress diagnosis"
+fi
+# #144: empty optional reviewer args must not crash Bash 3.2 nounset, and must
+# not fabricate a blank argv element for second-opinion.sh.
+if ! grep -q 'unbound variable' "$ROOT/esc-np.err" 2>/dev/null; then
+  ok "escalate empty optional args: no nounset unbound-variable crash"
+else
+  bad "escalate empty optional args: nounset crash (err=$(tr '\n' ' ' <"$ROOT/esc-np.err"))"
+fi
+if [[ -s "$CALLS/second-opinion.args" ]] && \
+   ! grep -qx -- '--solo-platform' "$CALLS/second-opinion.args" && \
+   ! grep -qx '' "$CALLS/second-opinion.args"; then
+  ok "escalate empty optional args: second-opinion argv has no --solo-platform and no empty element"
+else
+  bad "escalate empty optional args: unexpected argv ($(tr '\n' '|' <"$CALLS/second-opinion.args"))"
+fi
+
+# ---------------------------------------------------------------------------
+# Issue #144 — empty vs populated optional reviewer args under Bash 3.2 + set -u
+# ---------------------------------------------------------------------------
+echo
+echo "issue #144: optional reviewer args (empty + populated) under nounset"
+
+# Value after <flag> in a recorded argv file (one argument per line).
+arg_after_so() { # arg_after_so <flag>
+  awk -v flag="$1" 'prev == flag { print; exit } { prev = $0 }' "$CALLS/second-opinion.args"
+}
+
+# --- empty optional list (default: no --solo-platform) ---
+# Covered above on the escalate-after path; also pin argv shape for required flags.
+if grep -qx -- '--repo' "$CALLS/second-opinion.args" && \
+   grep -qx -- '--reviewers' "$CALLS/second-opinion.args" && \
+   grep -qx -- '--out' "$CALLS/second-opinion.args" && \
+   [[ -n "$(arg_after_so --out)" ]]; then
+  ok "escalate empty optional args: required flags present with non-empty --out"
+else
+  bad "escalate empty optional args: missing required flags (args=$(tr '\n' '|' <"$CALLS/second-opinion.args"))"
+fi
+
+# --- populated optional list (--solo-platform once) ---
+setup_repo
+install_fake_supervisor_stack
+write_valid_state "$REPO/gibson/loop-state.md" "notes=fixture"
+make_runner_cmd rewrite-clock-only
+: > "$CALLS/runner.count"
+: > "$CALLS/second-opinion.count"
+: > "$CALLS/second-opinion.args"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  "$LOOP_BIN" --runner hermes --repo "$REPO" --gibson "$GIBSON" \
+  --max-iterations 10 --error-budget 5 --stale-budget 5 --escalate-after 2 \
+  --solo-platform --reviewers hermes:review \
+  >/dev/null 2>"$ROOT/esc-solo.err"
+set -e
+so=$(wc -l < "$CALLS/second-opinion.count" | tr -d ' ')
+if [[ "${so:-0}" -ge 1 ]] && ! grep -q 'unbound variable' "$ROOT/esc-solo.err" 2>/dev/null; then
+  ok "escalate populated optional args: second-opinion ran without nounset crash"
+else
+  bad "escalate populated optional args: so=$so err=$(tr '\n' ' ' <"$ROOT/esc-solo.err")"
+fi
+solo_n=$(grep -cx -- '--solo-platform' "$CALLS/second-opinion.args" 2>/dev/null || true)
+if [[ "${solo_n:-0}" -eq 1 ]]; then
+  ok "escalate populated optional args: second-opinion received exactly one --solo-platform"
+else
+  bad "escalate populated optional args: --solo-platform count=${solo_n:-0} argv=$(tr '\n' '|' <"$CALLS/second-opinion.args")"
+fi
+if ! grep -qx '' "$CALLS/second-opinion.args" 2>/dev/null; then
+  ok "escalate populated optional args: no fabricated empty argv element"
+else
+  bad "escalate populated optional args: empty argv element present"
 fi
 
 # --- one shared failure unit per iteration; no double classification ---
