@@ -22,6 +22,40 @@ ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-scope-overlap.XXXXXX")
 trap 'rm -rf -- "${ROOT:?}"' EXIT
 GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false"
 
+# --- the patched TEST COPY (#153 review round 4, P1) ------------------------
+# Production's read spacing is an internal, un-interposable wait, which means
+# a sensor can no longer make it free from the outside — and it should not be
+# able to. Broad fixtures whose subject is the DECISION (which claim wins, what
+# refuses, what a malformed row does) run against an explicitly patched copy
+# instead: one surgical substitution that removes the blocking call and
+# nothing else, so every other check in the barrier — the safe-integer test,
+# the floor, the quiescence streak, the self-visibility requirement — is the
+# production code path.
+#
+# The substitution is VERIFIED. If production stops looking like this, the
+# patch stops matching and the suite fails loudly here rather than silently
+# reverting to testing a copy that no longer resembles the real thing.
+FASTDIR="$ROOT/fast"
+mkdir -p "$FASTDIR"
+SENSOR_FAST="$FASTDIR/scope-overlap.mjs"
+# pr-claims.sh is resolved next to the sensor on purpose (that binding is its
+# trust boundary), so the copy needs its own reader alongside it.
+cp "$SCRIPT_DIR/../pr-claims.sh" "$FASTDIR/pr-claims.sh"
+chmod +x "$FASTDIR/pr-claims.sh"
+sed 's|const verdict = Atomics\.wait(cell, 0, 0, ms);|const verdict = "timed-out"; void cell; void ms;  /* TEST COPY: blocking removed */|' \
+  "$SENSOR" > "$SENSOR_FAST"
+# The CALL must be gone, not merely the word: the surrounding comments name
+# Atomics.wait several times and would otherwise mask a failed substitution.
+if grep -q 'TEST COPY: blocking removed' "$SENSOR_FAST" &&
+   ! grep -q 'Atomics\.wait(cell' "$SENSOR_FAST"; then
+  ok "the test copy patched out exactly the blocking wait (production shape unchanged)"
+else
+  bad "could not patch the test copy — production spaceReads no longer matches the expected shape; refusing to pretend these fixtures exercise the barrier"
+fi
+node --check "$SENSOR_FAST" 2>/dev/null &&
+  ok "the patched test copy is still valid JavaScript" ||
+  bad "the patched test copy does not parse"
+
 # Bare origin + clone (mirrors claim fixtures)
 setup_repo() {
   local name="$1"
@@ -76,7 +110,19 @@ T
   ) >/dev/null 2>&1
 }
 
+# Broad fixtures: the patched test copy. Their subject is the admission
+# DECISION, and paying the real barrier wait once per case would add minutes
+# to the suite while proving nothing the focused barrier sensors below do not
+# already prove. Non-admission runs never wait at all, so they are unaffected
+# either way.
 run_so() {
+  local repo="$1"; shift
+  node "$SENSOR_FAST" --repo-path "$repo" --base main "$@" 2>&1
+}
+
+# Focused barrier sensors: the REAL production file, paying the REAL minimum
+# wait. Nothing here is accelerated, because what these assert is the wait.
+run_so_prod() {
   local repo="$1"; shift
   node "$SENSOR" --repo-path "$repo" --base main "$@" 2>&1
 }
@@ -152,15 +198,24 @@ esac
 exit 1
 GH
 chmod +x "$ROOT/bin/gh"
-# Fake `sleep`: the publication barrier spaces its reads with the PATH command
-# `sleep`, so shimming that command is how a sensor accelerates the WAIT
-# without touching what the barrier REQUIRES. The floor on consecutive
-# matching reads is untouched here and is asserted separately below. This is a
-# command shim, not a production hook: an ordinary inherited environment does
-# not carry a fake `sleep`, and nothing in scope-overlap.mjs reads a variable
-# that names an executable.
+# HOSTILE `sleep` sentinel (#153 review round 4, P1).
+#
+# The barrier used to space its reads with `execFileSync("sleep", …)`, which
+# resolves an executable through PATH — so anyone able to put a directory in
+# front of PATH could collapse the whole publication barrier to back-to-back
+# samples taken in the same instant. That is not a test seam, it is an
+# execution path chosen by the environment.
+#
+# So this is no longer a helpful shim that makes the wait free. It is a
+# TRIPWIRE: if production ever executes a PATH `sleep` again, this records the
+# call and the assertions below fail. It deliberately exits 0 immediately, so
+# a regression would *also* show up as the suite getting suspiciously fast
+# while the sentinel file fills up.
+export SLEEP_SENTINEL="$ROOT/sleep-sentinel"
+rm -f "$SLEEP_SENTINEL"
 cat > "$ROOT/bin/sleep" <<'SLEEP'
 #!/usr/bin/env bash
+echo "sleep $*" >> "${SLEEP_SENTINEL:-/dev/null}"
 exit 0
 SLEEP
 chmod +x "$ROOT/bin/sleep"
@@ -517,6 +572,333 @@ out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-65-
 # Reset the fixture for anything appended after this block.
 printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
   > "$GH_PR_TSV"
+
+# ===========================================================================
+# #153 review round 4, P1 — the barrier's spacing is INTERNAL
+# ===========================================================================
+# The wait used to be `execFileSync("sleep", …)`, i.e. an executable resolved
+# through the caller's PATH. That made the publication barrier — the whole
+# reason admission is not decided on one sample — switchable off by anyone who
+# could prepend a directory to PATH. These sensors pin that it is gone: a
+# static contract check on the source, a hostile PATH sentinel that must never
+# fire, and a wall-clock measurement that the real wait really is taken.
+
+echo "#153 round 4 · production never resolves a 'sleep' executable through PATH"
+# Comments in the file explain the removed `execFileSync("sleep", …)` by name,
+# so the static check has to look at CODE. Strip line and block comment lines
+# first; what is left is what actually runs.
+SENSOR_CODE="$ROOT/sensor-code-only.js"
+grep -vE '^[[:space:]]*(\*|//|/\*)' "$SENSOR" > "$SENSOR_CODE"
+if grep -nE 'execFileSync\([[:space:]]*"sleep"|spawnSync\([[:space:]]*"sleep"|"/bin/sleep"|execSync\(.*sleep' "$SENSOR_CODE"; then
+  bad "scope-overlap.mjs executes a 'sleep' command — the barrier is PATH-controllable again"
+else
+  ok "scope-overlap.mjs executes no 'sleep' command at all"
+fi
+if grep -q 'Atomics\.wait(cell' "$SENSOR_CODE"; then
+  ok "the barrier blocks on an internal Atomics.wait, not an external process"
+else
+  bad "scope-overlap.mjs no longer uses the internal wait — check what replaced it"
+fi
+# The wait must not be reachable from an env var naming an executable either.
+if grep -nE 'process\.env\[[^]]*\][[:space:]]*\|\|[[:space:]]*"sleep"|env\.[A-Z_]*SLEEP|GIBSON_[A-Z_]*SLEEP' "$SENSOR_CODE"; then
+  bad "scope-overlap.mjs reads an environment variable that names a wait command"
+else
+  ok "no environment variable names the wait command"
+fi
+
+echo "#153 round 4 · a HOSTILE 'sleep' on PATH is never executed by production"
+# $ROOT/bin (first on PATH for this whole suite) holds a `sleep` that records
+# every invocation. A real admission run through the production sensor must
+# leave it untouched. This is the runtime counterpart to the static check
+# above: it would catch a re-introduction under any name that still ends up
+# executing `sleep`.
+setup_repo s
+printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+rm -f "$SLEEP_SENTINEL"
+# Real production sensor, real minimum barrier: 2 stable reads, 1s apart.
+sentinel_start=$(date +%s)
+out=$(GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  run_so_prod "$ROOT/s/canon" --scope 'lib/sentinel/other.ts' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+sentinel_elapsed=$(( $(date +%s) - sentinel_start ))
+[[ "$rc" -eq 0 ]] && ok "the production admission run completed" \
+  || bad "production admission run failed (rc=$rc): $out"
+if [[ -s "$SLEEP_SENTINEL" ]]; then
+  bad "production executed the hostile PATH sleep $(wc -l < "$SLEEP_SENTINEL" | tr -d ' ') time(s) — the barrier is externally controllable"
+else
+  ok "production executed the hostile PATH sleep ZERO times"
+fi
+
+echo "#153 round 4 · the barrier really waits (wall clock, production file)"
+# (stableReads - 1) x delay = 1s minimum. Measured against the real file with
+# a hostile no-op sleep sitting first on PATH: if production could still be
+# accelerated through PATH this would come back under a second.
+[[ "$sentinel_elapsed" -ge 1 ]] &&
+  ok "a 2-read/1s barrier took at least 1s of real time (${sentinel_elapsed}s)" ||
+  bad "a 2-read/1s barrier finished in ${sentinel_elapsed}s — the wait did not happen"
+
+echo "#153 round 4 · raising the delay lengthens the real wait"
+rm -f "$SLEEP_SENTINEL"
+raise_start=$(date +%s)
+out=$(GIBSON_CLAIM_ADMIT_DELAY=3 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  run_so_prod "$ROOT/s/canon" --scope 'lib/sentinel/other.ts' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+raise_elapsed=$(( $(date +%s) - raise_start ))
+[[ "$rc" -eq 0 && "$raise_elapsed" -ge 3 ]] &&
+  ok "a 2-read/3s barrier took at least 3s of real time (${raise_elapsed}s)" ||
+  bad "a 2-read/3s barrier finished in ${raise_elapsed}s (rc=$rc) — spacing is not honoured"
+[[ -s "$SLEEP_SENTINEL" ]] &&
+  bad "the raised-delay run executed the hostile PATH sleep" ||
+  ok "the raised-delay run executed the hostile PATH sleep ZERO times"
+
+# ===========================================================================
+# #153 review round 4, P2 — barrier integers are finite, safe and bounded
+# ===========================================================================
+# `^[0-9]+$` plus `Number()` accepted a 400-digit literal (-> Infinity) and
+# MAX_SAFE_INTEGER + 1 (-> a rounded neighbour). Either produces a barrier
+# whose arithmetic does not mean what the operator typed, and an unbounded
+# one wedges a lane inside its own admission check while it holds a live
+# claim PR. Every case below must be a usage error (exit 2) BEFORE any read.
+echo "#153 round 4 · barrier integers must be finite safe integers with practical bounds"
+bound_case() { # label VAR=value expect-substring
+  local label="$1" assign="$2" want="$3" out rc
+  out=$(env "$assign" node "$SENSOR" --repo-path "$ROOT/s/canon" --base main \
+    --scope 'lib/sentinel/other.ts' --repo acme/app --claim-id issue-65-settled \
+    --issue 65 --admit-pr 640 2>&1); rc=$?
+  if [[ "$rc" -eq 2 ]] && echo "$out" | grep -qF "$want"; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc): $out"
+  fi
+}
+HUGE400=$(printf '9%.0s' $(seq 1 400))
+# MAX_SAFE_INTEGER + 1 = 9007199254740992 — passes ^[0-9]+$, is not a safe integer.
+bound_case "attempts = MAX_SAFE_INTEGER+1 is refused" \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=9007199254740992 "not a finite safe integer"
+bound_case "stable reads = MAX_SAFE_INTEGER+1 is refused" \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=9007199254740992 "not a finite safe integer"
+bound_case "delay = MAX_SAFE_INTEGER+1 is refused" \
+  GIBSON_CLAIM_ADMIT_DELAY=9007199254740992 "not a finite safe integer"
+bound_case "a 400-digit attempts value is refused (would be Infinity)" \
+  "GIBSON_CLAIM_ADMIT_ATTEMPTS=$HUGE400" "not a finite safe integer"
+bound_case "a 400-digit stable-reads value is refused" \
+  "GIBSON_CLAIM_ADMIT_STABLE_READS=$HUGE400" "not a finite safe integer"
+bound_case "a 400-digit delay value is refused" \
+  "GIBSON_CLAIM_ADMIT_DELAY=$HUGE400" "not a finite safe integer"
+bound_case "attempts above the documented maximum is refused" \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=61 "above the documented maximum of 60"
+bound_case "stable reads above the documented maximum is refused" \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=31 "above the documented maximum of 30"
+bound_case "delay above the documented maximum is refused" \
+  GIBSON_CLAIM_ADMIT_DELAY=61 "above the documented maximum of 60"
+bound_case "attempts = 0 is refused (below the floor)" \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=0 "below the production minimum of 2"
+bound_case "stable reads = 0 is refused (below the floor)" \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=0 "below the production minimum of 2"
+bound_case "delay = 0 is refused (below the floor)" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "below the production minimum of 1"
+# The documented maxima themselves are accepted as configuration (the usage
+# check must pass; the run then proceeds to read normally).
+out=$(GIBSON_CLAIM_ADMIT_ATTEMPTS=60 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
+  GIBSON_CLAIM_ADMIT_DELAY=1 run_so "$ROOT/s/canon" --scope 'lib/sentinel/other.ts' \
+  --repo acme/app --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+[[ "$rc" -eq 0 ]] && ok "the documented maxima are accepted, not refused" \
+  || bad "a value at the documented maximum was refused (rc=$rc): $out"
+# Defaults are unchanged by the new bounds.
+if grep -q 'attempts: 6,' "$SENSOR" && grep -q 'stableReads: 2,' "$SENSOR" &&
+   grep -q 'delaySeconds: 2,' "$SENSOR"; then
+  ok "the shipped defaults (6 / 2 / 2) are unchanged"
+else
+  bad "the shipped barrier defaults changed — they must stay 6 / 2 / 2"
+fi
+# The maxima are documented where an operator will look.
+if node "$SENSOR" --help 2>&1 | grep -q 'max 60' &&
+   node "$SENSOR" --help 2>&1 | grep -q 'max 30'; then
+  ok "--help documents the maxima"
+else
+  bad "--help does not document the barrier maxima"
+fi
+
+# ===========================================================================
+# #153 review round 4, P1 — the LEGACY LEDGER reads fail closed
+# ===========================================================================
+# `git()` returned null both when a command FAILED and when it succeeded with
+# no output, and loadClaims() treated that null as "the ledger is empty". A
+# broken object store, an unreadable blob, or a git that refuses to run
+# therefore read as "nobody has claimed anything" — the single most dangerous
+# wrong answer this sensor can give, because it admits a lane straight over
+# someone else's live claim. A claim whose scope metadata is missing was the
+# same bug one level down: an unseen scope became an EMPTY scope, which
+# collides with nothing.
+echo "#153 round 4 · a failed ledger enumeration refuses (it is not an empty ledger)"
+
+# A git shim that lets fetch/rev-parse through (so the run reaches the ledger)
+# and fails exactly one ledger query. Deterministic, no corrupt-repo tricks
+# needed, and it names precisely which read is being broken.
+mkdir -p "$ROOT/bin-gitshim"
+cat > "$ROOT/bin-gitshim/git" <<'GITSHIM'
+#!/usr/bin/env bash
+# FAIL_ON: a substring of the joined arguments. When it matches, this read
+# fails the way a broken object store fails: nonzero, with a message.
+joined="$*"
+if [[ -n "${FAIL_ON:-}" && "$joined" == *"$FAIL_ON"* ]]; then
+  echo "fatal: simulated unreadable object (${FAIL_ON})" >&2
+  exit 128
+fi
+exec /usr/bin/env -u FAIL_ON "$REAL_GIT" "$@"
+GITSHIM
+chmod +x "$ROOT/bin-gitshim/git"
+REAL_GIT=$(command -v git)
+export REAL_GIT
+
+setup_repo led
+# Confidence check: with the shim installed and nothing to fail on, an
+# overlapping scope is still detected. If this went green-on-nothing the
+# fail-closed assertions below would be meaningless.
+out=$(PATH="$ROOT/bin-gitshim:$PATH" run_so "$ROOT/led/canon" --scope 'app/api/auth/login.ts'); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-7-password-reset' \
+  && ok "control: the git shim passes ordinary reads through" \
+  || bad "control: the git shim broke the baseline (rc=$rc): $out"
+
+ledger_fail_case() { # label FAIL_ON expect-substring
+  local label="$1" failon="$2" want="$3" out rc
+  out=$(PATH="$ROOT/bin-gitshim:$PATH" FAIL_ON="$failon" \
+    node "$SENSOR" --repo-path "$ROOT/led/canon" --base main \
+    --scope 'components/totally-unrelated/**' 2>&1); rc=$?
+  # The scope is deliberately DISJOINT from every ledger claim: a green run
+  # here means the failed read silently became an empty ledger.
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -qF "$want"; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc): $out"
+  fi
+}
+ledger_fail_case "a failed docs/claims/ enumeration refuses" \
+  "ls-tree --name-only origin/main docs/claims/" \
+  "an unreadable ledger tree is not an empty ledger"
+ledger_fail_case "an unreadable per-claim blob refuses" \
+  "show origin/main:docs/claims/issue-7-password-reset.md" \
+  "must not become an empty scope"
+ledger_fail_case "a failed docs/active-work.md lookup refuses" \
+  "ls-tree --name-only origin/main -- docs/active-work.md" \
+  "is not an absent legacy table"
+ledger_fail_case "an unreadable docs/active-work.md blob refuses" \
+  "show origin/main:docs/active-work.md" \
+  "an unreadable table is not an empty one"
+
+echo "#153 round 4 · missing/malformed scope metadata poisons the decision"
+# Per-file claim with NO scope: line at all.
+setup_repo noscope
+(
+  cd "$ROOT/noscope/canon" || exit 1
+  cat > docs/claims/issue-31-no-scope.md <<'C'
+claim: issue-31-no-scope
+issue: 31
+claimed: 2026-08-01T10:00:00Z
+session: grok@fleet
+C
+  $GIT add -A && $GIT commit -q -m "claim without scope" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/noscope/canon" --scope 'components/totally-unrelated/**'); rc=$?
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -q "has 0 'scope:' lines" \
+  && ok "a per-file claim with no scope: line refuses" \
+  || bad "missing scope line did not poison the decision (rc=$rc): $out"
+
+# Per-file claim whose scope: line is EMPTY.
+setup_repo emptyscope
+(
+  cd "$ROOT/emptyscope/canon" || exit 1
+  printf 'claim: issue-32-empty-scope\nissue: 32\nscope:   \nsession: grok@fleet\n' \
+    > docs/claims/issue-32-empty-scope.md
+  $GIT add -A && $GIT commit -q -m "claim with empty scope" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/emptyscope/canon" --scope 'components/totally-unrelated/**'); rc=$?
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -q "empty 'scope:' value" \
+  && ok "a per-file claim with an empty scope refuses" \
+  || bad "empty scope did not poison the decision (rc=$rc): $out"
+
+# Per-file claim with TWO scope: lines — ambiguous, not "take the first".
+setup_repo dupscope
+(
+  cd "$ROOT/dupscope/canon" || exit 1
+  printf 'claim: issue-33-dup-scope\nissue: 33\nscope: lib/a/**\nscope: lib/b/**\n' \
+    > docs/claims/issue-33-dup-scope.md
+  $GIT add -A && $GIT commit -q -m "claim with two scopes" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/dupscope/canon" --scope 'components/totally-unrelated/**'); rc=$?
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -q "2 'scope:' lines" \
+  && ok "a per-file claim with duplicate scope lines refuses" \
+  || bad "duplicate scope lines did not poison the decision (rc=$rc): $out"
+
+# Legacy row TRUNCATED so the claim id is the last real cell — no scope
+# column. A well-formed Markdown row still ends in '|', so this lands on the
+# empty-cell branch; a row with no trailing pipe at all lands on the
+# no-column branch. Both must refuse, and neither may become an empty scope.
+setup_repo truncrow
+(
+  cd "$ROOT/truncrow/canon" || exit 1
+  rm -f docs/claims/*.md
+  printf '| UTC | claim-id |\n|---|---|\n| 2026-08-01T10:00:00Z | issue-34-truncated |\n' \
+    > docs/active-work.md
+  $GIT add -A && $GIT commit -q -m "truncated legacy row" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/truncrow/canon" --scope 'components/totally-unrelated/**'); rc=$?
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -qE 'is truncated|empty scope column' \
+  && ok "a legacy row with no scope column refuses" \
+  || bad "truncated legacy row did not poison the decision (rc=$rc): $out"
+
+# …and the same row without a trailing pipe, so the claim id really is the
+# last element of the split and the no-column branch is the one that fires.
+setup_repo truncrow2
+(
+  cd "$ROOT/truncrow2/canon" || exit 1
+  rm -f docs/claims/*.md
+  printf '| UTC | claim-id |\n|---|---|\n| 2026-08-01T10:00:00Z | issue-36-no-pipe\n' \
+    > docs/active-work.md
+  $GIT add -A && $GIT commit -q -m "legacy row with no trailing pipe" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/truncrow2/canon" --scope 'components/totally-unrelated/**'); rc=$?
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'is truncated' \
+  && ok "a legacy row whose claim id is the last cell refuses" \
+  || bad "no-trailing-pipe legacy row did not poison the decision (rc=$rc): $out"
+
+# Legacy row whose scope cell is present but EMPTY.
+setup_repo emptyrow
+(
+  cd "$ROOT/emptyrow/canon" || exit 1
+  rm -f docs/claims/*.md
+  printf '| UTC | claim-id | scope | session |\n|---|---|---|---|\n| 2026-08-01T10:00:00Z | issue-35-empty-cell |  | grok@fleet |\n' \
+    > docs/active-work.md
+  $GIT add -A && $GIT commit -q -m "legacy row with empty scope" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/emptyrow/canon" --scope 'components/totally-unrelated/**'); rc=$?
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'empty scope column' \
+  && ok "a legacy row with an empty scope column refuses" \
+  || bad "empty legacy scope cell did not poison the decision (rc=$rc): $out"
+
+echo "#153 round 4 · a genuinely ABSENT ledger is still a valid empty ledger"
+# The whole point of separating failure from absence: absence must still work.
+setup_repo emptyledger
+(
+  cd "$ROOT/emptyledger/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  $GIT add -A && $GIT commit -q -m "no ledger at all" && $GIT push -q origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/emptyledger/canon" --scope 'anything/at/all/**'); rc=$?
+[[ "$rc" -eq 0 ]] && ok "an absent docs/claims + absent active-work.md admits normally" \
+  || bad "a genuinely empty ledger was refused (rc=$rc): $out"
+
+# The failure/absence split must be visible in the source too: a ledger read
+# that goes through the null-collapsing helper is the bug coming back.
+echo "#153 round 4 · the source keeps ledger reads on the fail-closed helper (static)"
+if grep -nE 'git\(\["(ls-tree|show)"' "$SENSOR"; then
+  bad "a ledger read still uses the null-collapsing git() helper"
+else
+  ok "every ls-tree/show ledger read uses the fail-closed gitResult() helper"
+fi
 
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"

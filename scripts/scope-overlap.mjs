@@ -18,6 +18,12 @@
  *   - Glob matching is prefix/stem based, not a full gitignore engine.
  *   - Failed fetch of origin refuses (fail closed); never uses a stale local ref.
  *   - Read-only against the ledger; never mutates claims.
+ *   - Every ledger read fails CLOSED and keeps "the query failed" apart from
+ *     "the path is absent": a failed ls-tree/show over docs/claims/ or
+ *     docs/active-work.md refuses the decision instead of becoming an empty
+ *     ledger, and a live claim (per-file or legacy row) whose scope metadata is
+ *     missing, empty, duplicated, or truncated poisons the decision instead of
+ *     becoming a scope that collides with nothing.
  *
  * USAGE
  *   node scripts/scope-overlap.mjs --scope 'app/api/**' [--scope 'lib/x.ts'] \
@@ -39,8 +45,14 @@
  *       one claim, even when the two scopes never touch);
  *     - an overlapping live PR-body claim on a LOWER PR number wins — PR
  *       numbers are assigned by GitHub, unique and monotonic, so both racers
- *       compute the same winner from the same evidence, with no lock, no
- *       shared file, and nothing left behind if a lane dies;
+ *       compute the same winner from the same evidence, with no lock and no
+ *       shared file to leak. That is the tie-break, not a durability claim:
+ *       this sensor is read-only and leaves nothing behind itself, but a lane
+ *       that dies still leaves ITS OWN artifacts — an open draft claim PR, the
+ *       agent-claimed label, a pushed branch, a worktree. claim.sh rolls those
+ *       back from an EXIT trap, which does not run under SIGKILL or power
+ *       loss; claim-reaper.sh and docs/troubleshooting/claim-conflicts.md are
+ *       how a killed lane's leftovers actually get cleared;
  *     - an overlapping claim on a HIGHER PR number yields to us (that lane
  *       refuses itself on its own admission pass);
  *     - an overlapping ledger claim always wins (it is not part of this race).
@@ -84,10 +96,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // and `delaySeconds: 0` would take that sample twice in the same instant,
 // which proves nothing about whether a rival has finished publishing.
 //
-// Sensors do not lower these. They accelerate the WAIT through the `sleep`
-// dependency (a PATH command shim), which changes how long the barrier takes
-// and not what it requires, or they run an explicitly patched TEST COPY of
-// this file. Neither is reachable from an ordinary inherited environment.
+// The wait itself is INTERNAL (see spaceReads): production does not execute a
+// `sleep` binary resolved through the caller's PATH, so there is no command
+// shim that can accelerate or neutralise the barrier from the environment. A
+// sensor that needs the wait to be free runs an explicitly patched TEST COPY
+// of this file; a sensor that tests the barrier itself pays the real minimum.
 const ADMIT_FLOOR = {
   attempts: 2,
   stableReads: 2,
@@ -97,6 +110,26 @@ const ADMIT_DEFAULT = {
   attempts: 6,
   stableReads: 2,
   delaySeconds: 2,
+};
+// --- documented upper bounds (#153 review round 4, P2) ---------------------
+// A floor alone leaves the other end open, and "as large as you like" is not
+// a real contract for a value that drives a bounded wait and a bounded loop.
+// `Number("1".repeat(400))` is Infinity and `MAX_SAFE_INTEGER + 1` silently
+// loses precision, so both would have produced an unbounded or nonsensical
+// barrier: an admission pass that never finishes is a claim attempt that
+// never finishes, and a lane wedged forever inside its own admission check is
+// worse than a refusal — it holds a live claim PR while making no progress.
+//
+// These maxima are deliberately conservative and chosen so that the WORST
+// case stays operationally bounded: the barrier waits at most
+// (attempts - 1) x delaySeconds, i.e. 59 x 60 = 3540s (59 minutes) at the
+// extremes. Anything past that is a configuration mistake, not a patience
+// setting, and is refused as a usage error the same way a below-floor value
+// is. The defaults (6 / 2 / 2) are unchanged and sit far inside this range.
+const ADMIT_MAX = {
+  attempts: 60,
+  stableReads: 30,
+  delaySeconds: 60,
 };
 
 function help() {
@@ -119,6 +152,11 @@ RISKS
   A missing/empty claim scope, a missing/unsafe head branch, or a PR URL whose
   own repository does not match --repo also refuses — a missing scope must
   never silently become an empty (non-overlapping) scope.
+  The LEDGER reads fail closed the same way: a failed ls-tree/show over
+  docs/claims/ or docs/active-work.md refuses rather than becoming an empty
+  ledger, and a live per-file claim or legacy row whose scope is missing,
+  empty, duplicated, or truncated poisons the decision rather than becoming a
+  scope that collides with nothing.
 
 USAGE
   node scripts/scope-overlap.mjs --scope 'app/api/**' --repo-path .
@@ -146,12 +184,19 @@ FLAGS
   --json          machine-readable result
 
 ENV (admission mode only — these may RAISE the barrier, never lower it)
-  GIBSON_CLAIM_ADMIT_ATTEMPTS       most reads before giving up (default ${ADMIT_DEFAULT.attempts}, min ${ADMIT_FLOOR.attempts})
+  GIBSON_CLAIM_ADMIT_ATTEMPTS       most reads before giving up
+                                    (default ${ADMIT_DEFAULT.attempts}, min ${ADMIT_FLOOR.attempts}, max ${ADMIT_MAX.attempts})
   GIBSON_CLAIM_ADMIT_STABLE_READS   consecutive identical reads required
-                                    (default ${ADMIT_DEFAULT.stableReads}, min ${ADMIT_FLOOR.stableReads})
-  GIBSON_CLAIM_ADMIT_DELAY          seconds between reads (default ${ADMIT_DEFAULT.delaySeconds}, min ${ADMIT_FLOOR.delaySeconds})
-  A value below the floor is a usage error, not a silent clamp. Running out of
+                                    (default ${ADMIT_DEFAULT.stableReads}, min ${ADMIT_FLOOR.stableReads}, max ${ADMIT_MAX.stableReads})
+  GIBSON_CLAIM_ADMIT_DELAY          seconds between reads
+                                    (default ${ADMIT_DEFAULT.delaySeconds}, min ${ADMIT_FLOOR.delaySeconds}, max ${ADMIT_MAX.delaySeconds})
+  A value below the floor or above the maximum is a usage error, not a silent
+  clamp, and so is anything that is not a finite safe integer. The maxima keep
+  a claim attempt operationally bounded: the barrier waits at most
+  (attempts - 1) x delay, i.e. ${(ADMIT_MAX.attempts - 1) * ADMIT_MAX.delaySeconds}s at the extremes. Running out of
   attempts refuses the claim; it never admits it on an unsettled view.
+  The spacing between reads is an internal timer, not a PATH-resolved 'sleep'
+  command — there is nothing in the environment that can shorten or skip it.
 `);
 }
 
@@ -228,16 +273,31 @@ if (opt.admitPr != null) {
  * silently honouring it would actually switch it off.
  */
 function readAdmitBarrier() {
-  const read = (name, def, floor) => {
+  const read = (name, def, floor, max) => {
     const raw = process.env[name];
     if (raw == null || raw === "") return def;
+    // Shape first. `^[0-9]+$` alone is not enough: it happily accepts a
+    // 400-digit literal, which Number() turns into Infinity, and it accepts
+    // MAX_SAFE_INTEGER + 1, which Number() rounds to a neighbouring value.
+    // Either would give a barrier whose arithmetic no longer means what the
+    // operator typed (#153 review round 4, P2).
     if (!/^[0-9]+$/.test(raw)) {
       dieUsage(`${name} must be a non-negative integer, got '${raw}'`);
     }
     const v = Number(raw);
+    if (!Number.isSafeInteger(v)) {
+      dieUsage(
+        `${name}='${raw}' is not a finite safe integer (values above ${Number.MAX_SAFE_INTEGER} lose precision or become Infinity) — refuse rather than run the publication barrier on a number that does not mean what it says.`
+      );
+    }
     if (v < floor) {
       dieUsage(
         `${name}=${v} is below the production minimum of ${floor} — the publication barrier cannot be weakened or switched off from the environment (#153). Raise it, or leave it unset.`
+      );
+    }
+    if (v > max) {
+      dieUsage(
+        `${name}=${v} is above the documented maximum of ${max} — the publication barrier must stay operationally bounded (a claim attempt that never finishes holds a live claim PR while making no progress). Lower it, or leave it unset.`
       );
     }
     return v;
@@ -245,17 +305,20 @@ function readAdmitBarrier() {
   const stableReads = read(
     "GIBSON_CLAIM_ADMIT_STABLE_READS",
     ADMIT_DEFAULT.stableReads,
-    ADMIT_FLOOR.stableReads
+    ADMIT_FLOOR.stableReads,
+    ADMIT_MAX.stableReads
   );
   const delaySeconds = read(
     "GIBSON_CLAIM_ADMIT_DELAY",
     ADMIT_DEFAULT.delaySeconds,
-    ADMIT_FLOOR.delaySeconds
+    ADMIT_FLOOR.delaySeconds,
+    ADMIT_MAX.delaySeconds
   );
   const attempts = read(
     "GIBSON_CLAIM_ADMIT_ATTEMPTS",
     ADMIT_DEFAULT.attempts,
-    ADMIT_FLOOR.attempts
+    ADMIT_FLOOR.attempts,
+    ADMIT_MAX.attempts
   );
   if (attempts < stableReads) {
     dieUsage(
@@ -265,7 +328,13 @@ function readAdmitBarrier() {
   return { attempts, stableReads, delaySeconds };
 }
 
-function git(args, { allowFail = false } = {}) {
+/**
+ * git for the queries where a failure and an empty answer mean the same thing
+ * to the caller — `rev-parse --verify --quiet`, `show-ref --quiet` — so null
+ * is an honest "no". Never use this for a LEDGER read: use gitResult below,
+ * which keeps the two apart.
+ */
+function git(args) {
   try {
     return execFileSync("git", args, {
       cwd: opt.repoPath,
@@ -273,9 +342,43 @@ function git(args, { allowFail = false } = {}) {
       stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 16 * 1024 * 1024,
     });
-  } catch (e) {
-    if (allowFail) return null;
+  } catch {
     return null;
+  }
+}
+
+/**
+ * git, with the FAILURE kept distinguishable from the ANSWER (#153 review
+ * round 4, P1).
+ *
+ * `git()` above collapses "the command failed" and "the command succeeded and
+ * printed nothing" into the same `null`. For the ledger reads that decide
+ * whether anyone else already holds these paths, that collapse is the whole
+ * bug: a broken object store, a bad ref, a permissions failure, or a git that
+ * is not there at all all produced `null`, `null` was falsy, and the sensor
+ * carried on with an EMPTY ledger — i.e. "nobody has claimed anything", which
+ * is the single most dangerous wrong answer this tool can give. An unreadable
+ * ledger is not an empty one; it must refuse the admission decision outright.
+ *
+ * Returns { ok: true, out } or { ok: false, err }.
+ */
+function gitResult(args) {
+  try {
+    return {
+      ok: true,
+      out: execFileSync("git", args, {
+        cwd: opt.repoPath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 16 * 1024 * 1024,
+      }),
+    };
+  } catch (e) {
+    const stderr = e && e.stderr ? String(e.stderr).trim() : "";
+    return {
+      ok: false,
+      err: stderr || (e && e.message) || String(e),
+    };
   }
 }
 
@@ -303,15 +406,15 @@ function ok(payload) {
 if (!existsSync(resolve(opt.repoPath, ".git")) && !existsSync(resolve(opt.repoPath, ".git"))) {
   // worktree .git may be a file
 }
-const gitDir = git(["rev-parse", "--git-dir"], { allowFail: true });
+const gitDir = git(["rev-parse", "--git-dir"]);
 if (!gitDir) fail(`not a git repo: ${opt.repoPath}`);
 
 let base = opt.base;
 if (!base) {
-  if (git(["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"], { allowFail: true }) !== null ||
-      git(["rev-parse", "--verify", "--quiet", "origin/main"], { allowFail: true })) {
+  if (git(["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"]) !== null ||
+      git(["rev-parse", "--verify", "--quiet", "origin/main"])) {
     base = "main";
-  } else if (git(["rev-parse", "--verify", "--quiet", "origin/master"], { allowFail: true })) {
+  } else if (git(["rev-parse", "--verify", "--quiet", "origin/master"])) {
     base = "master";
   } else {
     base = "main";
@@ -338,63 +441,134 @@ if (!fetch) {
 }
 
 const ref = `origin/${base}`;
-const tip = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], {
-  allowFail: true,
-});
+const tip = git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
 if (!tip) {
   fail(`cannot resolve ${ref} after fetch — refuse (fail closed)`);
 }
 
-// --- load live claims ---
+// --- load live claims (fail closed, #153 review round 4, P1) ---------------
+// Every read below distinguishes three outcomes, because only one of them
+// licenses a claim:
+//   * the query FAILED           → unreadable ledger → refuse the decision
+//   * the path is genuinely ABSENT → a real empty ledger → continue
+//   * the path is present         → its content must then parse as a claim
+// The previous version could not tell the first two apart (`git()` returns
+// null for both) and treated failure as absence, so a broken object store read
+// as "no live claims" and admitted a lane straight over someone else's work.
 function loadClaims() {
   const claims = []; // { id, scope: string[], issue?: string }
 
-  // docs/claims/*.md
-  const tree = git(["ls-tree", "--name-only", ref, "docs/claims/"], {
-    allowFail: true,
-  });
-  if (tree) {
-    for (const path of tree.split("\n").filter(Boolean)) {
-      if (!path.endsWith(".md")) continue;
-      const id = path.replace(/^docs\/claims\//, "").replace(/\.md$/, "");
-      if (!/^issue-/.test(id)) continue;
-      const body = git(["show", `${ref}:${path}`], { allowFail: true });
-      if (body == null) {
-        fail(`unreadable claim blob ${ref}:${path} — refuse`);
-      }
-      const scopeLine = (body.match(/^scope:\s*(.+)$/m) || [])[1] || "";
-      const scope = scopeLine.trim().split(/\s+/).filter(Boolean);
-      const issueM = body.match(/^issue:\s*(\d+)/m);
-      claims.push({
-        id,
-        scope,
-        issue: issueM ? issueM[1] : null,
-        source: "file",
-      });
+  // --- docs/claims/*.md -----------------------------------------------------
+  // `git ls-tree --name-only <ref> docs/claims/` exits 0 with empty output
+  // when the directory simply is not in the tree, and nonzero when the ref or
+  // the tree cannot be read. That distinction is the whole point of using
+  // gitResult here.
+  const tree = gitResult(["ls-tree", "--name-only", ref, "docs/claims/"]);
+  if (!tree.ok) {
+    fail(
+      `cannot enumerate ${ref}:docs/claims/ — an unreadable ledger tree is not an empty ledger; refuse the claim decision: ${tree.err}`
+    );
+  }
+  for (const path of tree.out.split("\n").filter(Boolean)) {
+    if (!path.endsWith(".md")) continue;
+    const id = path.replace(/^docs\/claims\//, "").replace(/\.md$/, "");
+    if (!/^issue-/.test(id)) continue;
+    // A claim FILE that is present must be readable and must carry real scope
+    // metadata. Anything else is a live claim whose scope we cannot see, and
+    // an unseen scope silently becomes a non-overlapping one — the exact way
+    // a real claim stops protecting its own files.
+    const body = gitResult(["show", `${ref}:${path}`]);
+    if (!body.ok) {
+      fail(
+        `unreadable claim blob ${ref}:${path} — a live claim whose scope cannot be read must not become an empty scope; refuse: ${body.err}`
+      );
     }
+    const scopeLines = body.out
+      .split("\n")
+      .filter((l) => /^scope:/.test(l));
+    if (scopeLines.length !== 1) {
+      fail(
+        `claim file ${ref}:${path} has ${scopeLines.length} 'scope:' lines (want exactly 1) — malformed claim metadata must poison the decision, never become an empty scope; refuse`
+      );
+    }
+    const scope = scopeLines[0]
+      .replace(/^scope:\s*/, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (!scope.length) {
+      fail(
+        `claim file ${ref}:${path} has an empty 'scope:' value — a live claim with no readable scope must poison the decision, never become a non-overlapping empty scope; refuse`
+      );
+    }
+    const issueM = body.out.match(/^issue:\s*(\d+)/m);
+    claims.push({
+      id,
+      scope,
+      issue: issueM ? issueM[1] : null,
+      source: "file",
+    });
   }
 
-  // legacy active-work.md
-  const table = git(["show", `${ref}:docs/active-work.md`], { allowFail: true });
-  if (table) {
-    for (const line of table.split("\n")) {
+  // --- legacy docs/active-work.md ------------------------------------------
+  // Presence first, then content. `git show <ref>:docs/active-work.md` fails
+  // both when the path is absent and when its blob is unreadable, so the
+  // tree entry is checked separately: absent is a legitimately empty legacy
+  // ledger, unreadable is a refusal.
+  const tableEntry = gitResult([
+    "ls-tree",
+    "--name-only",
+    ref,
+    "--",
+    "docs/active-work.md",
+  ]);
+  if (!tableEntry.ok) {
+    fail(
+      `cannot look up ${ref}:docs/active-work.md — an unreadable ledger tree is not an absent legacy table; refuse the claim decision: ${tableEntry.err}`
+    );
+  }
+  if (tableEntry.out.trim()) {
+    const table = gitResult(["show", `${ref}:docs/active-work.md`]);
+    if (!table.ok) {
+      fail(
+        `cannot read the legacy claim table ${ref}:docs/active-work.md — it exists in the tree but its blob is unreadable; an unreadable table is not an empty one; refuse: ${table.err}`
+      );
+    }
+    for (const line of table.out.split("\n")) {
       if (!/^\|/.test(line)) continue;
       const cols = line.split("|").map((c) => c.trim());
       // | UTC | claim-id | scope | session |  OR older shapes
       // find claim-id column
       let id = null;
-      let scopeStr = "";
+      let idIndex = -1;
       for (let i = 0; i < cols.length; i++) {
         if (/^issue-/.test(cols[i])) {
           id = cols[i];
-          // scope often next non-empty
-          scopeStr = cols[i + 1] || "";
+          idIndex = i;
           break;
         }
       }
       if (!id || id === "claim-id" || id === "claim") continue;
       if (claims.some((c) => c.id === id)) continue; // file form wins
-      const scope = scopeStr.split(/\s+/).filter(Boolean);
+      // This row IS a live claim. Validate the shape overlap actually uses:
+      // a scope column must exist and must carry at least one token. The old
+      // `cols[i + 1] || ""` turned a truncated row — a row where the claim id
+      // is the LAST cell — into a claim with an empty scope, which collides
+      // with nothing and therefore protects nothing.
+      if (idIndex + 1 >= cols.length) {
+        fail(
+          `legacy claim row for '${id}' in ${ref}:docs/active-work.md is truncated — it has no scope column at all; a live claim with no readable scope must poison the decision, never become an empty scope; refuse`
+        );
+      }
+      const scope = String(cols[idIndex + 1] || "")
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      if (!scope.length) {
+        fail(
+          `legacy claim row for '${id}' in ${ref}:docs/active-work.md has an empty scope column — a live claim with no readable scope must poison the decision, never become a non-overlapping empty scope; refuse`
+        );
+      }
       const im = id.match(/^issue-(\d+)-/);
       claims.push({
         id,
@@ -439,18 +613,52 @@ function readPrClaimsOnce() {
   }
 }
 
-/** Space two reads apart. A delay we could not take is a barrier we did not
- *  apply, so a failed sleep refuses rather than busy-looping. `sleep` is a PATH
- *  command, which is exactly the seam sensors shim to accelerate the wait
- *  without touching what the barrier requires. */
+/**
+ * Space two reads apart, using a wait that CANNOT be resolved through the
+ * caller's environment (#153 review round 4, P1).
+ *
+ * This used to `execFileSync("sleep", …)`. That resolves an executable named
+ * `sleep` through PATH, which means the barrier's entire spacing — the thing
+ * that makes a quiescent inventory quiescent — was replaceable by anyone who
+ * could put a directory in front of PATH. An executable chosen by the
+ * environment IS an execution path, however it is documented, and "sensors
+ * shim it" is not a safety property: a hostile or merely careless PATH
+ * silently turns the publication barrier into `stableReads` back-to-back
+ * samples taken in the same instant, which is exactly the pre-barrier
+ * behaviour a rival publishing a moment later defeats.
+ *
+ * The replacement is `Atomics.wait` on a private SharedArrayBuffer this
+ * process just allocated. It is synchronous (this tool has no async path to
+ * hand the wait to), dependency-free, blocks the thread for real, and there is
+ * no name for anything to interpose on: no PATH lookup, no env var, no child
+ * process. Node has permitted Atomics.wait on the main thread since
+ * SharedArrayBuffer/Atomics shipped, so it is portable across every Node this
+ * repo supports.
+ *
+ * A delay we could not take is a barrier we did not apply, so anything other
+ * than a full-length wait refuses rather than deciding on unspaced samples.
+ */
 function spaceReads(seconds) {
+  const ms = seconds * 1000;
+  if (!Number.isSafeInteger(ms) || ms <= 0) {
+    fail(
+      `cannot space the admission reads ${seconds}s apart (unusable delay) — refuse rather than decide on unspaced samples`
+    );
+  }
   try {
-    execFileSync("sleep", [String(seconds)], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
+    // A fresh 4-byte shared buffer per call, never observable by anything
+    // else, so the wait can only ever time out — nothing holds a reference to
+    // notify it early.
+    const cell = new Int32Array(new SharedArrayBuffer(4));
+    const verdict = Atomics.wait(cell, 0, 0, ms);
+    if (verdict !== "timed-out") {
+      fail(
+        `the admission read spacing did not run to completion (Atomics.wait returned '${verdict}' instead of 'timed-out') — refuse rather than decide on unspaced samples`
+      );
+    }
   } catch (e) {
     fail(
-      `cannot space the admission reads ${seconds}s apart (sleep failed) — refuse rather than decide on unspaced samples: ${
+      `cannot space the admission reads ${seconds}s apart — refuse rather than decide on unspaced samples: ${
         (e && e.message) || e
       }`
     );

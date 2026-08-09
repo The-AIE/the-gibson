@@ -86,6 +86,15 @@ WHAT IT DOES
   that went dirty, deleting a branch that moved, or stripping an issue-wide
   label while this lane's PR may still be open.
 
+  From the instant `gh pr create` is INVOKED, a PR may exist no matter what
+  the command reports. A nonzero exit is the client's view of the call, not
+  authoritative evidence about server-side state: GitHub can create the PR and
+  then lose the response, and the eventually consistent PR list can be empty
+  for a while afterwards. So a failed create plus an inventory that does not
+  show the claim retains EVERYTHING — worktree, both branches, agent-claimed —
+  names the PR that may exist unpublished, and exits INCOMPLETE. Close it by
+  hand before re-claiming. Nothing is destroyed on one negative read.
+
   WHAT A KILLED LANE LEAVES BEHIND (be honest about this)
   Rollback runs from an EXIT trap, so it protects a lane that fails or refuses
   — not one that is destroyed. SIGKILL, a power loss, or a terminated shell
@@ -465,10 +474,32 @@ EOF
     fi
     PR_NUMBER="$num"
   elif [[ -z "$PR_NUMBER" ]]; then
+    # (#153 review round 4, P1) `gh pr create` was invoked and this lane has
+    # no PR number, and the live inventory shows no claim of ours. That is
+    # TWO different worlds, and the command's exit status cannot tell them
+    # apart:
+    #
+    #   * the request never reached GitHub, or was rejected before the PR was
+    #     created — there is genuinely nothing to close; or
+    #   * GitHub created the PR and the response or the network died on the
+    #     way back, or the create succeeded and its output was unparseable.
+    #     The PR exists, it is a LIVE claim, and the eventually-consistent
+    #     list simply has not published it yet.
+    #
+    # A nonzero exit is evidence about the CLIENT's view of the call, never
+    # authoritative evidence about server-side state, and one negative read of
+    # an eventually consistent inventory is not proof of absence either. The
+    # old code treated `rc != 0` plus one empty read as proof there was no PR
+    # and returned 0 — which let PHASE 2 delete the worktree, both branches,
+    # and the issue-wide label out from under a PR that may be open right now.
+    #
+    # There is no authoritative pre-creation proof available here, so this
+    # fails closed the only honest way: retain every artifact, keep
+    # agent-claimed, name the PR that may exist, and exit INCOMPLETE. Refusal
+    # is recoverable by hand; a destroyed branch behind an open claim is not.
     if [[ "$PR_CREATE_RC" -ne 0 ]]; then
-      # gh pr create reported failure AND a readable, well-formed inventory
-      # carries no claim of ours: proven there is no claim PR to close.
-      return 0
+      leftover "a possible draft claim PR for $CLAIM_ID (kept: gh pr create exited $PR_CREATE_RC and the live inventory does not show the claim — but a nonzero exit is the client's view of the call, not proof GitHub created nothing, and one read of an eventually consistent inventory is not proof of absence. The PR may exist and be unpublished. Find and close it by hand before re-claiming this issue)"
+      return 1
     fi
     # gh pr create reported SUCCESS but its output could not be parsed into a
     # number. The PR may exist and simply not be published to this view yet —

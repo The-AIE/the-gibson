@@ -222,10 +222,21 @@ given".
 The barrier also has a **production floor**: at least 2 consecutive matching reads,
 spaced at least 1 second apart. `GIBSON_CLAIM_ADMIT_STABLE_READS`,
 `GIBSON_CLAIM_ADMIT_DELAY` and `GIBSON_CLAIM_ADMIT_ATTEMPTS` may only *raise* it; a
-value below the floor is a usage error, not a silent clamp. There is no supported
-way to switch the barrier off, and no `*_TEST_*` variable that production reads.
-Sensors accelerate the *wait* with a `sleep` command shim, or run an explicitly
-patched test copy — neither is reachable from an ordinary inherited environment.
+value below the floor is a usage error, not a silent clamp. It also has documented
+**maxima** (60 attempts, 30 stable reads, 60s delay) so a claim attempt stays
+operationally bounded, and a value that is not a finite safe integer — a 400-digit
+literal, anything past `Number.MAX_SAFE_INTEGER` — is refused rather than silently
+becoming `Infinity` or a rounded neighbour. There is no supported way to switch the
+barrier off, and no `*_TEST_*` variable that production reads.
+
+The spacing itself is an **internal timer**, not a `PATH`-resolved `sleep` command.
+An executable chosen by the environment is an execution path however it is
+documented, so a `sleep` shim on `PATH` used to be able to collapse the whole
+barrier to back-to-back samples taken in the same instant — the pre-barrier
+behaviour. Production now blocks on a private in-process wait with no name to
+interpose on. Sensors that exercise the barrier pay the real minimum; sensors that
+only need the wait to be free run an explicitly patched **test copy** of the file,
+and a hostile `sleep` sentinel on `PATH` asserts production never executes one.
 
 > **Invariant:** the verdict is computed from a *quiescent* inventory — one that
 > stopped changing across a window of at least `(STABLE_READS - 1) x DELAY`
@@ -305,19 +316,45 @@ refused for those paths too, and if repository identity cannot be resolved at al
 any mutation rather than skipping the authoritative inventory and cleaning up on a
 view it never read.
 
+**The PR's identity is bound before it is closed, not after.** `gh pr close` is an
+irreversible mutation on someone's pull request, so every identity check that
+authorizes it runs first: the repository binding, and the fact that the PR's head
+branch is exactly the branch this claim id derives (`feat/<issue>-<slug>`). An
+exact claim marker sitting in the body of a PR on some unrelated branch is *not*
+authority to close that PR — that mismatch is now a plain pre-mutation refusal
+(**exit 1**, PR still open, no label touched, no worktree or branch removed),
+including under `--dry-run`. It used to be checked only after the close had
+already fired.
+
 **Closing the PR is the release; proving it is a separate step (release side).**
-`release-claim.sh` closes the owning open PR first, then re-reads the closed PR's
-own terminal evidence to bind an exact head SHA before removing anything. If that
-terminal read fails, is ambiguous, or contradicts the PR's own state, the run is a
-**partial mutation**: the claim is released but nothing about the worktree or the
-branches was proven. It therefore takes the documented close-only path — worktree,
-both branch refs and `agent-claimed` preserved, `INCOMPLETE`, **exit 3**, and a
-`RECOVERY` line naming the bound re-run
+`release-claim.sh` closes the owning open PR, then re-reads that closed PR's own
+terminal evidence to bind an exact head SHA before removing anything. If that
+terminal read fails, is ambiguous, contradicts the PR's own state, **or simply
+comes back with no row for the claim**, the run is a **partial mutation**: the
+claim is released but nothing about the worktree or the branches was proven. An
+absent terminal row after a close is not evidence that everything is clean — it is
+evidence that this run cannot see the PR it just mutated, so the identity it would
+clean up on is unproven, and absence of proof is never proof of absence on a
+mutation path. Every one of those outcomes takes the documented close-only path —
+worktree, both branch refs and `agent-claimed` preserved, `INCOMPLETE`, **exit 3**,
+and a `RECOVERY` line naming the bound re-run
 (`release-claim.sh <issue> --claim-id <id> --repo <owner/name> --pr <number>`) that
-runs the exact verified cleanup once the evidence reads cleanly. The same evidence
-failure *before* any mutation is still a plain refusal (exit 1) that names which
-binding failed. Exit 1 means "refused, nothing done"; exit 3 means "did part of the
-work, here is what is left".
+runs the exact verified cleanup once the evidence reads cleanly. The close-only
+path therefore never removes `agent-claimed`: the only route to a verified label
+removal after a close is the exact terminal cleanup that proved the artifacts
+first. The same evidence failure *before* any mutation is still a plain refusal
+(exit 1) that names which binding failed. Exit 1 means "refused, nothing done";
+exit 3 means "did part of the work, here is what is left".
+
+**The post-close proof binds the PR number, not just the claim id.** The claim
+inventory only contains a PR while that PR carries a well-formed claim marker, so
+"the claim id is gone from the inventory" is satisfied both by a PR that genuinely
+closed *and* by a PR that is still wide open with its marker deleted or rewritten.
+That second case is a silent false success: the issue is still held by a live PR
+while the run reports the claim released. So after the close, `release-claim.sh`
+also asks a body-agnostic open-PR inventory (`pr-claims.sh list-open-numbers`)
+whether that exact PR number is still open, and refuses success — preserving the
+label and every artifact, exit 3 — if it is, or if that read cannot be completed.
 
 **A released claim id may be reused — and that makes the id ambiguous forever
 after.** Once a claim's PR is terminal the id is free again, so a second generation

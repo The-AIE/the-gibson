@@ -98,7 +98,13 @@ ls docs/claims/
 
 A release that reports `INCOMPLETE` (exit 3) means the label or the finished
 PR's evidence didn't verify cleanly — fix by hand and re-run rather than
-assuming it worked.
+assuming it worked. Releasing a still-**open** claim is normally two steps: the
+first run closes the PR (that IS the release) and reports `INCOMPLETE` with a
+`RECOVERY:` line, because the just-closed PR's terminal evidence is what binds
+the worktree and branches it would remove. Re-run the bound form it prints
+(`--claim-id <id> --repo owner/name --pr <number>`) to finish the cleanup.
+Exit **1** means "refused, nothing done"; exit **3** means "did part of the work,
+here is exactly what is left".
 
 ## Human gate
 
@@ -129,6 +135,58 @@ git -C "$GIBSON_CANONICAL" config --get-all remote.origin.url
   single repository identity. Fix the remote before releasing.
 - **A non-GitHub origin** (a bare path, a mirror) — there can be no PR-body
   claim for that checkout, so the release falls back to the ledger and says so.
+
+## "is not the branch this claim id derives" on release
+
+`release-claim.sh` refused **before closing anything**: the open PR carrying this
+claim marker has a head branch that is not `feat/<issue>-<slug>`.
+
+`gh pr close` is irreversible, so the PR's identity has to be bound before it, not
+discovered afterwards. An exact claim marker in the body of a PR on an unrelated
+branch is not authority to close that PR — someone may have copied a marker, or the
+lane may have been re-branched by hand. Nothing was mutated: the PR is still open,
+the label untouched, the worktree and both branch refs untouched.
+
+Look at the PR before doing anything else. If it really is the claim's PR and the
+branch was renamed deliberately, close it by hand and then release the claim
+against the now-terminal PR with `--pr <number>`.
+
+## "PR #N is STILL OPEN ... a removed or rewritten marker is not a released claim"
+
+The close reported success and the claim id vanished from the claim inventory —
+but the PR itself is still open. The claim inventory only lists a PR while it
+carries a well-formed claim marker, so a marker that was deleted or rewritten makes
+a live PR *look* closed. `release-claim.sh` cross-checks the exact PR number against
+a body-agnostic open-PR inventory and refuses success on the mismatch, preserving
+`agent-claimed`, the worktree and both branches.
+
+```bash
+gh pr view <number> --repo owner/name --json state,headRefName,body
+scripts/pr-claims.sh list-open-numbers owner/name    # is it really still open?
+```
+
+Find out why the marker changed before cleaning anything up: either the PR is
+genuinely still holding the issue, or somebody edited a claim body by hand.
+
+## "no exact terminal PR-body evidence came back" after a close
+
+The PR was closed — so the claim **is** released — but the run could not read that
+PR's own terminal evidence back, so it could not prove the identity of the worktree
+or branches it would have removed. It preserved all of them plus `agent-claimed`
+and exited 3 with a `RECOVERY:` line. This is the normal two-step shape when the
+PR list lags behind the close; it is not an error you have to fix.
+
+Re-run the bound form once the evidence reads cleanly:
+
+```bash
+scripts/pr-claims.sh find-terminal-pr owner/name issue-<n>-<slug> <number>   # look first
+release-claim.sh <n> --claim-id issue-<n>-<slug> --repo owner/name --pr <number>
+```
+
+That path runs the exact verified cleanup and removes the label only after proving
+it. The close-only path never removes `agent-claimed` — an absent terminal row is
+not evidence that there is nothing left, it is evidence the run cannot see the PR
+it just closed.
 
 ## "ambiguous terminal PR-body evidence" for a claim id
 
@@ -235,6 +293,7 @@ are all backing a claim that may still be open. Those messages name what happene
 | `STILL a live claim after gh pr close reported success` | GitHub accepted the close but still lists the claim. | Re-check the PR on GitHub; it may be lag, or the close may not have stuck. |
 | `could not be re-read to prove the claim is gone` | The close probably worked; the proving read failed. | Re-read `pr-claims.sh list <owner/repo>` yourself, then clean up by hand. |
 | `could not be parsed into a PR number ... may exist and be unpublished` | `gh pr create` exited 0 but printed something unparseable. **A PR may exist that nothing here knows the number of.** | Look for an open draft PR on the claim's head branch, close it, then re-run. |
+| `gh pr create exited N ... not proof GitHub created nothing` | The create call FAILED and the live inventory shows no claim — but a nonzero exit is only the client's view of the call. GitHub can create the PR and lose the response, and the PR list is eventually consistent, so one empty read proves nothing either. **A real, open claim PR may exist.** | Look for an open draft PR on the claim's head branch (`gh pr list --head feat/<issue>-<slug>`), close it if it is there, then remove the retained worktree/branch by hand and re-claim. Nothing was destroyed on your behalf. |
 | `not provably this lane's` | A live PR matched by number but carries someone else's claim id or head branch. | Investigate before touching anything — this lane refused to close a PR it could not prove was its own. |
 
 That output is the work list. For each named item:

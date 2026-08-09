@@ -8,6 +8,7 @@ pr-claims.sh — inspect active-work claims in pull requests
 
 USAGE
   pr-claims.sh list <owner/repo>
+  pr-claims.sh list-open-numbers <owner/repo>
   pr-claims.sh find <owner/repo> <claim-id>
   pr-claims.sh find-terminal <owner/repo> <claim-id>
   pr-claims.sh find-terminal-pr <owner/repo> <claim-id> <pull-request-number>
@@ -15,6 +16,19 @@ USAGE
 
 `list`/`find` cover live (open) claims. The list output is tab-separated:
   number, claim id, scope, head branch, URL, created_at, updated_at
+
+`list-open-numbers` answers a DIFFERENT question from `list`, and the
+difference is the whole point (#153 review round 4). `list` is the claim
+inventory: it only sees a PR once that PR carries a well-formed claim marker.
+So "this claim id is absent from `list`" is satisfied both by a PR that
+genuinely closed AND by a PR that is still wide open with its marker deleted
+or rewritten. A caller that just closed a PR and wants to prove it is no
+longer holding the issue cannot tell those apart from `list` alone.
+`list-open-numbers` prints the number of EVERY open pull request in the
+repository, one per line, regardless of body content, so that caller can bind
+its proof to the exact PR number as well as the exact claim id. It validates
+that every number is numeric and refuses the whole command otherwise; a
+gh/jq/pagination failure exits nonzero exactly as `list` does.
 
 `find-terminal` searches every PR state and returns only claims whose PR has
 reached a terminal state (MERGED or CLOSED) — used by release-claim.sh to
@@ -229,6 +243,35 @@ list_claims() {
       end'
 }
 
+# Every OPEN pull-request number in the repository, body-agnostic (#153 review
+# round 4, P1). This deliberately does NOT filter on a claim marker: its job is
+# to answer "is PR #N still open?" for a caller that has just closed #N, and a
+# marker-filtered view answers "no" for an open PR whose marker was removed or
+# rewritten — the exact hostile case this closes. The GraphQL operation is
+# NAMED (openPrNumbers) so the query is distinguishable from list_claims' own
+# `states: [OPEN]` query by anything inspecting the request.
+list_open_pr_numbers() {
+  gh api graphql --paginate \
+    -f query='
+      query openPrNumbers($owner: String!, $name: String!, $endCursor: String) {
+        repository(owner: $owner, name: $name) {
+          pullRequests(first: 100, after: $endCursor, states: [OPEN]) {
+            nodes {
+              number
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }' \
+    -f owner="$REPO_OWNER" -f name="$REPO_NAME" \
+    --jq '
+      .data.repository.pullRequests.nodes[]
+      | (if (.number | type) != "number" then
+           error("open pull-request number is not numeric")
+         else . end)
+      | (.number | tostring)'
+}
+
 # Terminal (non-OPEN) PRs whose body carries a claim marker whose id is
 # EXACTLY $1, fully validated. $1 must already have passed the literal-id
 # shape check in the find-terminal case below: it is interpolated straight
@@ -410,6 +453,29 @@ case "$COMMAND" in
     # all pages or none.
     rows=$(list_claims) || exit 1
     [[ -z "$rows" ]] || printf '%s\n' "$rows"
+    ;;
+  list-open-numbers)
+    [[ $# -eq 0 ]] || { usage >&2; exit 2; }
+    # Buffered for the same reason `list` is: a partial page-1 answer on
+    # stdout alongside a nonzero exit is a truncated inventory, and a caller
+    # proving "PR #N is no longer open" from a truncated inventory proves
+    # nothing. Emit all pages or none.
+    numbers=$(list_open_pr_numbers) || exit 1
+    if [[ -n "$numbers" ]]; then
+      # Re-validate the shape here too: jq already refused a non-numeric
+      # node, but this command's whole value to release-claim.sh is that a
+      # line it prints IS an open PR number. Anything else poisons it.
+      while IFS= read -r n; do
+        [[ -n "$n" ]] || continue
+        [[ "$n" =~ ^[0-9]+$ ]] || {
+          echo "pr-claims.sh: ERROR: open pull-request inventory for $REPO returned a non-numeric row '$n' — refuse" >&2
+          exit 1
+        }
+      done <<EOF
+$numbers
+EOF
+      printf '%s\n' "$numbers"
+    fi
     ;;
   find)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }

@@ -306,14 +306,24 @@ GitHub read is **fail-closed**: a query failure or a malformed row there
 preserves `agent-claimed` and reports incomplete (exit 3) rather than
 guessing the claim is gone.
 
+**The PR's identity is bound before it is closed.** `gh pr close` is the first
+mutation on this path, so the repository binding *and* the head-branch binding run
+before it: the PR's head branch must be exactly the branch this claim id derives
+(`feat/<issue>-<slug>`). An exact claim marker in the body of a PR on an unrelated
+branch is not authority to close that PR, and that mismatch is a plain refusal —
+**exit 1**, PR still open, no label edit, no worktree or branch touched — including
+under `--dry-run`.
+
 **Closing the PR is the release; proving it is a separate step.** When the claim is
-still an open PR, `release-claim.sh` closes it first and then re-reads that closed
-PR's own terminal evidence to bind an exact head SHA before removing anything. If
-that terminal read fails, comes back ambiguous, or contradicts the PR's own state,
-the run is a **partial mutation** — the claim is released, but nothing about the
-worktree or the branches was proven. It therefore takes the close-only path:
-worktree, both branch refs and `agent-claimed` all preserved, `INCOMPLETE`, **exit
-3**, and a `RECOVERY:` line naming the bound re-run to finish the job:
+still an open PR, `release-claim.sh` closes it and then re-reads that closed PR's
+own terminal evidence to bind an exact head SHA before removing anything. If that
+terminal read fails, comes back ambiguous, contradicts the PR's own state, **or
+returns no row at all**, the run is a **partial mutation** — the claim is released,
+but nothing about the worktree or the branches was proven. An absent terminal row
+after a close does not mean there is nothing left; it means this run cannot see the
+PR it just closed. All of those take the close-only path: worktree, both branch
+refs and `agent-claimed` all preserved, `INCOMPLETE`, **exit 3**, and a `RECOVERY:`
+line naming the bound re-run to finish the job:
 
 ```bash
 release-claim.sh <issue> --claim-id issue-<issue>-<slug> --repo owner/name --pr <pr-number>
@@ -321,10 +331,21 @@ release-claim.sh <issue> --claim-id issue-<issue>-<slug> --repo owner/name --pr 
 
 Run that once the evidence reads cleanly and the exact verified cleanup
 (registered-worktree proof, head-SHA containment, compare-and-swap branch deletes)
-takes over. The same evidence failure **before** any mutation is a plain refusal —
-exit **1**, nothing done — and it names which binding failed instead of collapsing
-into "no live claim". Read the exit code as: **1 = refused, nothing done; 3 = did
-part of the work, here is exactly what is left.**
+takes over. Because every close-only outcome is `INCOMPLETE`, that path never
+removes `agent-claimed` — the only route to a verified label removal after a close
+is the exact terminal cleanup that proved the artifacts first. The same evidence
+failure **before** any mutation is a plain refusal — exit **1**, nothing done — and
+it names which binding failed instead of collapsing into "no live claim". Read the
+exit code as: **1 = refused, nothing done; 3 = did part of the work, here is
+exactly what is left.**
+
+**A closed PR must really be closed.** The claim inventory only lists a PR while it
+carries a well-formed claim marker, so a PR that is still open with its marker
+removed or rewritten vanishes from that view and looks exactly like a PR that
+closed. After the close, `release-claim.sh` therefore also asks a body-agnostic
+open-PR inventory (`pr-claims.sh list-open-numbers`) whether that exact PR number
+is still open. If it is — or if that read cannot be completed — the run refuses
+success, preserves the label and every artifact, and exits 3.
 
 **The repository has to be the same repository.** All of the above authorizes
 deleting a worktree, a branch, and a label, so before any of it runs

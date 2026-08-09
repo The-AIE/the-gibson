@@ -40,6 +40,33 @@ REPOSITORY BINDING (#153 review)
   unreadable too, the run fails BEFORE any worktree, branch, ledger, or label
   mutation rather than silently skipping the authoritative PR inventory.
 
+CLOSING AN OPEN CLAIM PR (#153 review round 4)
+  `gh pr close` is the first and only irreversible mutation on the open-claim
+  path, so every identity check that authorizes it runs BEFORE it: the
+  repository binding above, and the head branch. The PR's head branch must be
+  exactly the branch its claim id derives (feat/<issue>-<slug>). An exact claim
+  marker in the body of a PR on an unrelated branch is not authority to close
+  that PR — the mismatch exits 1 with nothing mutated, including under
+  --dry-run.
+
+  After the close, the claim is released but nothing else is proven. The run
+  re-reads that exact PR's own terminal evidence and hands over to the exact
+  verified cleanup only if it binds. If the terminal evidence is unreadable,
+  ambiguous, contradictory, or simply ABSENT, the run is close-only: worktree,
+  both branch refs and agent-claimed all preserved, INCOMPLETE, exit 3, with a
+  RECOVERY line naming the bound re-run. An absent terminal row after a close
+  is not evidence that there is nothing left — it is evidence this run cannot
+  see the PR it just closed. The close-only path therefore never removes
+  agent-claimed; the only route to a verified label removal after a close is
+  the terminal cleanup that proved the artifacts first.
+
+  The post-close proof binds the PR NUMBER as well as the claim id. The claim
+  inventory only lists a PR while that PR carries a well-formed claim marker,
+  so a PR that is still OPEN with its marker removed or rewritten drops out of
+  that view and is indistinguishable from one that closed. A body-agnostic
+  open-PR inventory (pr-claims.sh list-open-numbers) is consulted for the exact
+  number; still-open, or an unreadable answer, refuses success and exits 3.
+
 WHY
   Abandoned claims block the fleet (Law 10). Cleanup must be as automatic as claim.
 
@@ -1259,6 +1286,25 @@ EOF
     fi
   fi
 
+  # --- the same postcondition, bound to the PR NUMBER (#153 review round 4)
+  # The reread above asks the CLAIM inventory, which only contains a PR while
+  # that PR carries a well-formed claim marker. A PR whose marker was removed
+  # or rewritten drops out of it while staying wide open — indistinguishable
+  # from a PR that reached a terminal state, and the difference is exactly
+  # whether the issue is still held. Ask the body-agnostic open-PR inventory
+  # about this claim's exact PR number too.
+  if [[ -n "$TERMINAL_PR_NUMBER" ]]; then
+    if ! read_open_pr_numbers "$PR_REPO"; then
+      warn "cannot verify that PR #$TERMINAL_PR_NUMBER is absent from the open pull-request inventory for $PR_REPO — $OPEN_NUMBERS_ERR; refuse to report success"
+      incomplete=1
+      preserve_label=1
+    elif open_pr_number_present "$TERMINAL_PR_NUMBER"; then
+      warn "PR #$TERMINAL_PR_NUMBER is STILL OPEN in $PR_REPO although its claim marker no longer appears in the claim inventory — a removed or rewritten marker is not a terminal PR. Refuse to report success"
+      incomplete=1
+      preserve_label=1
+    fi
+  fi
+
   if git fetch origin >/dev/null 2>&1 && fresh_ref=$(resolve_ledger_ref); then
     REF="$fresh_ref"
     if fresh_live=$(claim_ids_all); then
@@ -1594,6 +1640,54 @@ EOF
   return 0
 }
 
+# --- open-PR-number binding for the post-close proof (#153 review round 4) ---
+# `pr-claims.sh list` only sees a PR once that PR carries a well-formed claim
+# marker, so "the claim id is gone from the inventory" is satisfied by BOTH of
+# these:
+#   * the PR really did close (what we want to prove), and
+#   * the PR is still wide open and someone removed or rewrote its marker.
+# The second is a hostile, silent false success: the issue is still held by a
+# live PR while this run reports the claim released and strips agent-claimed.
+# So the post-close proof binds to the exact PR NUMBER as well as the exact
+# claim id, using a body-agnostic open-PR inventory.
+#
+# Sets OPEN_NUMBERS on success (possibly empty). Sets OPEN_NUMBERS_ERR and
+# returns 1 when the read failed or returned anything that is not a bare
+# decimal — an unreadable or malformed open-PR inventory is not proof that a
+# PR closed, and every caller treats it as refuse-to-succeed.
+OPEN_NUMBERS=""
+OPEN_NUMBERS_ERR=""
+read_open_pr_numbers() {
+  local repo="$1" out line
+  OPEN_NUMBERS=""
+  OPEN_NUMBERS_ERR=""
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    OPEN_NUMBERS_ERR="the authoritative PR reader $SCRIPT_DIR/pr-claims.sh is missing or not executable"
+    return 1
+  fi
+  if ! out=$("$SCRIPT_DIR/pr-claims.sh" list-open-numbers "$repo" 2>&1); then
+    OPEN_NUMBERS_ERR="cannot read the open pull-request inventory for $repo: $out"
+    return 1
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ ! "$line" =~ ^[0-9]+$ ]]; then
+      OPEN_NUMBERS_ERR="the open pull-request inventory for $repo returned a non-numeric row '$line'"
+      return 1
+    fi
+  done <<EOF
+$out
+EOF
+  OPEN_NUMBERS="$out"
+  return 0
+}
+
+# True when PR number $1 is still listed as open. Callers must have already
+# proven the read itself succeeded via read_open_pr_numbers.
+open_pr_number_present() {
+  printf '%s\n' "$OPEN_NUMBERS" | grep -qxF -- "$1"
+}
+
 # CAS mode (claim-reaper) is ledger-only by contract — the same reason
 # try_terminal_pr_body_release() is gated on CAS_MODE -eq 0. A reaper run
 # must never close someone's live PR.
@@ -1660,13 +1754,23 @@ EOF
     # real (#153 review P1).
     require_canonical_repo_binding "$PR_REPO" "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER)"
     PR_EXPECT_BRANCH=$(branch_for "$PR_CLAIM_ID")
+    # (#153 review round 4, P1) The head branch this claim id DERIVES is part
+    # of the claim's identity, not a detail discovered afterwards. This check
+    # used to run only after `gh pr close` had already fired, so an exact claim
+    # marker sitting in the body of a PR on some unrelated branch was enough to
+    # close that PR — an irreversible mutation on a PR whose identity was never
+    # bound to the claim. `gh pr close` is the FIRST mutation on this path, so
+    # the binding has to be complete before it, and a mismatch has to be a
+    # plain pre-mutation refusal (exit 1) rather than a partial run reported as
+    # INCOMPLETE. Dry-run refuses here too, for the same reason the repository
+    # binding above does: an operator must see the failure before trying it for
+    # real, not after.
+    if [[ "$PR_HEAD_BRANCH" != "$PR_EXPECT_BRANCH" ]]; then
+      die "open PR-body claim release for '$PR_CLAIM_ID': PR #$PR_NUMBER head branch '$PR_HEAD_BRANCH' is not the branch this claim id derives ('$PR_EXPECT_BRANCH') — the PR's identity cannot be bound to the claim, so it must not be closed. Refuse (nothing was mutated: the PR is still open, no label was touched, no worktree or branch was removed). An exact claim marker in the body of a PR on an unrelated branch is not authority to close that PR."
+    fi
     if [[ "$DRY" -eq 1 ]]; then
       info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim"
-      if [[ "$PR_HEAD_BRANCH" == "$PR_EXPECT_BRANCH" ]]; then
-        info "dry-run: would then verify the now-terminal PR and run the exact cleanup for worktree/branch '$PR_HEAD_BRANCH'"
-      else
-        info "dry-run: PR #$PR_NUMBER head branch '$PR_HEAD_BRANCH' is not the branch this claim id derives ('$PR_EXPECT_BRANCH'), so the release would be close-only and report INCOMPLETE for anything it could not prove cleaned up"
-      fi
+      info "dry-run: would then verify the now-terminal PR and run the exact cleanup for worktree/branch '$PR_HEAD_BRANCH'"
       if [[ -n "$PR_SIBLINGS" ]]; then
         info "dry-run: would keep agent-claimed — sibling PR-body claim(s) remain: $(printf '%s' "$PR_SIBLINGS" | tr '\n' ' ')"
       fi
@@ -1705,26 +1809,28 @@ EOF
     OPEN_INCOMPLETE=0
     OPEN_SIBLINGS=""
     OPEN_TERMINAL_FATAL=""
-    if [[ "$PR_HEAD_BRANCH" == "$PR_EXPECT_BRANCH" ]]; then
-      try_terminal_pr_body_release "$PR_CLAIM_ID" "$PR_NUMBER" || TERMINAL_RC=$?
-      if [[ "$TERMINAL_RC" -eq 0 ]]; then
-        terminal_cleanup_release "$PR_CLAIM_ID"
-      fi
+    # The head-branch binding was proven BEFORE the close (#153 review round
+    # 4), so this handover is unconditional now: every PR this path closes is
+    # one whose derived branch already matched.
+    try_terminal_pr_body_release "$PR_CLAIM_ID" "$PR_NUMBER" || TERMINAL_RC=$?
+    if [[ "$TERMINAL_RC" -eq 0 ]]; then
+      terminal_cleanup_release "$PR_CLAIM_ID"
     fi
 
     # --- close-only fallback ----------------------------------------------
-    # Reached when the closed PR's own terminal evidence is not (yet)
-    # readable, is fatally unusable, or its head branch is not the one this
-    # claim id derives. The claim IS released — the PR is closed — but nothing
+    # Reached when the closed PR's own terminal evidence is not readable or is
+    # fatally unusable. The claim IS released — the PR is closed — but nothing
     # may be removed on unproven identity, so say exactly that.
-    if [[ "$PR_HEAD_BRANCH" != "$PR_EXPECT_BRANCH" ]]; then
-      warn "PR #$PR_NUMBER head branch '$PR_HEAD_BRANCH' is not the branch claim id '$PR_CLAIM_ID' derives ('$PR_EXPECT_BRANCH') — refusing to clean up a worktree/branch whose identity cannot be bound to this claim"
-      # The exact cleanup never ran, so no worktree/branch state was proven
-      # either way. Scanning the PR's own head branch for leftovers below
-      # cannot substitute for that proof — say INCOMPLETE and let a human
-      # decide what the odd branch was.
-      OPEN_INCOMPLETE=1
-    elif [[ "$TERMINAL_RC" -eq 2 ]]; then
+    #
+    # (#153 review round 4, P1) BOTH remaining outcomes are INCOMPLETE. A
+    # not-found verdict used to warn and fall through, which meant an empty
+    # terminal view after a successful close could still reach the success
+    # message and strip agent-claimed. That is backwards: after the PR was
+    # closed, the absence of its exact terminal row is not evidence that
+    # everything is clean — it is evidence that this run cannot see the PR it
+    # just mutated, so the identity it would clean up on is UNPROVEN. Absence
+    # of proof is never proof of absence on a mutation path.
+    if [[ "$TERMINAL_RC" -eq 2 ]]; then
       # Evidence exists for the PR we just closed, and it is FATALLY unusable:
       # unreadable query, ambiguous, mismatched, or contradicting the PR's own
       # state. The exact checks are unchanged — what changed is that this no
@@ -1735,7 +1841,9 @@ EOF
       warn "the claim was released by closing PR #$PR_NUMBER; the worktree, both branch refs and agent-claimed are being PRESERVED because nothing about their identity was proven"
       OPEN_INCOMPLETE=1
     else
-      warn "PR #$PR_NUMBER is closed but its terminal evidence is not readable yet — refusing to clean up on unproven identity"
+      warn "PR #$PR_NUMBER is closed, but no exact terminal PR-body evidence for '$PR_CLAIM_ID' came back — its identity is UNPROVEN, so nothing is being cleaned up"
+      warn "the worktree, both branch refs and agent-claimed are being PRESERVED: an absent terminal row after a close is not proof that there is nothing left, it is proof this run cannot see the PR it just closed"
+      OPEN_INCOMPLETE=1
     fi
 
     # --- fail-closed post-close reread ------------------------------------
@@ -1753,6 +1861,9 @@ EOF
     elif printf '%s\n' "$POST_PR_ROWS" | awk -F'\t' -v want="$PR_CLAIM_ID" '$2 == want { f = 1 } END { exit !f }'; then
       warn "claim '$PR_CLAIM_ID' is STILL a live open PR-body claim after closing PR #$PR_NUMBER — refuse to report success"
       OPEN_INCOMPLETE=1
+    elif printf '%s\n' "$POST_PR_ROWS" | awk -F'\t' -v want="$PR_NUMBER" '$1 == want { f = 1 } END { exit !f }'; then
+      warn "PR #$PR_NUMBER is STILL a live open PR-body claim after this run closed it (under claim id '$(printf '%s\n' "$POST_PR_ROWS" | awk -F'\t' -v want="$PR_NUMBER" '$1 == want { print $2; exit }')') — refuse to report success"
+      OPEN_INCOMPLETE=1
     else
       while IFS= read -r _post_row; do
         [[ -n "$_post_row" ]] || continue
@@ -1765,6 +1876,22 @@ EOF
 $POST_PR_ROWS
 EOF
       OPEN_SIBLINGS=$(printf '%s\n' "$OPEN_SIBLINGS" | grep -E '^issue-' | sort -u || true)
+    fi
+
+    # --- the SAME proof, bound to the PR NUMBER (#153 review round 4, P1) ---
+    # Everything above reads the claim INVENTORY, which only contains a PR
+    # while that PR carries a well-formed claim marker. So a PR that is still
+    # wide open, but whose marker was removed or rewritten between the
+    # pre-close read and now, disappears from that view and looks exactly like
+    # a PR that closed. That is a false success on the one fact this whole
+    # path exists to establish. Ask the body-agnostic open-PR inventory about
+    # the exact number this run closed, and refuse unless it is really gone.
+    if ! read_open_pr_numbers "$PR_REPO"; then
+      warn "post-close: cannot verify that PR #$PR_NUMBER actually left the open pull-request inventory — $OPEN_NUMBERS_ERR; refuse to report success"
+      OPEN_INCOMPLETE=1
+    elif open_pr_number_present "$PR_NUMBER"; then
+      warn "post-close: PR #$PR_NUMBER is STILL OPEN in $PR_REPO after this run closed it, even though its claim marker no longer appears in the claim inventory — a removed or rewritten marker is not a released claim. Refuse to report success; the worktree, branches and agent-claimed are preserved"
+      OPEN_INCOMPLETE=1
     fi
 
     # --- close-only: worktree/branch are NOT touched here (#153) -----------
@@ -1809,60 +1936,37 @@ EOF
       fi
     fi
 
-    # --- label policy (verified, never assumed) ----------------------------
-    if [[ "$OPEN_INCOMPLETE" -eq 1 ]]; then
-      info "preserving agent-claimed on #$ISSUE — open-PR release did not fully complete or could not be verified"
-    elif [[ -n "$OPEN_SIBLINGS" ]]; then
-      # Sibling policy is unchanged (#153 AC1/AC4): other live PR-body claims
-      # on this issue keep agent-claimed. What changed is that the label's
-      # presence is re-read rather than assumed.
-      OPEN_LABELS=$(gh issue view "$ISSUE" --repo "$PR_REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
-      if [[ "$OPEN_LABELS" == "?" ]]; then
-        warn "could not read labels on $PR_REPO#$ISSUE — sibling-claim label preservation UNVERIFIED"
-        OPEN_INCOMPLETE=1
-      elif ! echo ",$OPEN_LABELS," | grep -q ',agent-claimed,'; then
-        warn "agent-claimed is ABSENT on $PR_REPO#$ISSUE — sibling PR-body claim(s) remain but the label is missing; re-add it by hand"
-        OPEN_INCOMPLETE=1
-      else
-        info "keeping agent-claimed on #$ISSUE — sibling PR-body claim(s) remain (verified): $(printf '%s' "$OPEN_SIBLINGS" | tr '\n' ' ')"
-      fi
-    elif [[ "$KEEP_LABEL" -eq 1 ]]; then
-      OPEN_LABELS=$(gh issue view "$ISSUE" --repo "$PR_REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
-      if [[ "$OPEN_LABELS" == "?" ]]; then
-        warn "could not read labels on $PR_REPO#$ISSUE — --keep-label preservation UNVERIFIED"
-        OPEN_INCOMPLETE=1
-      elif ! echo ",$OPEN_LABELS," | grep -q ',agent-claimed,'; then
-        warn "agent-claimed is ABSENT on $PR_REPO#$ISSUE — --keep-label required the label to stay"
-        OPEN_INCOMPLETE=1
-      else
-        info "keeping agent-claimed on $PR_REPO#$ISSUE — --keep-label verified"
-      fi
-    else
-      if ! gh issue edit "$ISSUE" --repo "$PR_REPO" --remove-label agent-claimed >/dev/null; then
-        warn "gh issue edit failed for #$ISSUE in $PR_REPO"
-      fi
-      OPEN_LABELS=$(gh issue view "$ISSUE" --repo "$PR_REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
-      if [[ "$OPEN_LABELS" == "?" ]]; then
-        warn "could not re-read labels on #$ISSUE — agent-claimed removal UNVERIFIED"
-        OPEN_INCOMPLETE=1
-      elif echo ",$OPEN_LABELS," | grep -q ',agent-claimed,'; then
-        warn "agent-claimed is STILL on $PR_REPO#$ISSUE — remove it by hand before declaring Law 10 done"
-        OPEN_INCOMPLETE=1
-      else
-        info "removed agent-claimed from $PR_REPO#$ISSUE (verified)"
-      fi
+    # --- label policy ------------------------------------------------------
+    # (#153 review round 4, P1) Every path that still reaches here is
+    # INCOMPLETE by construction: the only two outcomes left after the close
+    # are "terminal evidence fatally unusable" and "no exact terminal evidence
+    # came back", and both mean this run cannot prove the identity of anything
+    # it would clean up. So this path NEVER removes agent-claimed — the one
+    # route to a verified label removal after a close is
+    # terminal_cleanup_release(), which proves the registered worktree, both
+    # branch refs, and the live-claim postcondition first. The branches that
+    # used to remove or conditionally keep the label here are gone rather than
+    # left unreachable: an unreachable label-removal branch reads like a
+    # supported outcome, and this one is not.
+    #
+    # The invariant is asserted rather than assumed: if a future edit ever
+    # lets a non-INCOMPLETE outcome reach here, that is a bug that must fail
+    # closed loudly, not quietly become a success.
+    if [[ "$OPEN_INCOMPLETE" -ne 1 ]]; then
+      warn "internal invariant: the close-only path reached its report without being marked INCOMPLETE — treating it as INCOMPLETE anyway (never report success over cleanup that was never proven)"
+      OPEN_INCOMPLETE=1
+    fi
+    info "preserving agent-claimed on #$ISSUE — open-PR release did not fully complete or could not be verified"
+    if [[ -n "$OPEN_SIBLINGS" ]]; then
+      info "note: sibling PR-body claim(s) also still hold #$ISSUE: $(printf '%s' "$OPEN_SIBLINGS" | tr '\n' ' ')"
     fi
 
-    if [[ "$OPEN_INCOMPLETE" -eq 1 ]]; then
-      if [[ -n "$OPEN_TERMINAL_FATAL" ]]; then
-        echo "release-claim.sh: the terminal evidence for the PR this run closed could not be used: $OPEN_TERMINAL_FATAL" >&2
-      fi
-      echo "release-claim.sh: RECOVERY — PR #$PR_NUMBER is closed, so the claim is released, but nothing was removed and agent-claimed was preserved. Re-run 'release-claim.sh $ISSUE --claim-id $PR_CLAIM_ID --repo $PR_REPO --pr $PR_NUMBER' once the PR's terminal evidence reads cleanly; that path runs the exact verified terminal cleanup (registered-worktree proof, head-SHA containment, CAS branch deletes) and removes the label only after proving it." >&2
-      echo "release-claim.sh: INCOMPLETE — open-PR claim release did not finish for issue $ISSUE (see warnings above)" >&2
-      exit 3
+    if [[ -n "$OPEN_TERMINAL_FATAL" ]]; then
+      echo "release-claim.sh: the terminal evidence for the PR this run closed could not be used: $OPEN_TERMINAL_FATAL" >&2
     fi
-    info "OK — released PR-body claim for #$ISSUE (PR #$PR_NUMBER closed and verified no longer live; nothing left to clean up)"
-    exit 0
+    echo "release-claim.sh: RECOVERY — PR #$PR_NUMBER is closed, so the claim is released, but nothing was removed and agent-claimed was preserved. Re-run 'release-claim.sh $ISSUE --claim-id $PR_CLAIM_ID --repo $PR_REPO --pr $PR_NUMBER' once the PR's terminal evidence reads cleanly; that path runs the exact verified terminal cleanup (registered-worktree proof, head-SHA containment, CAS branch deletes) and removes the label only after proving it." >&2
+    echo "release-claim.sh: INCOMPLETE — open-PR claim release did not finish for issue $ISSUE (see warnings above)" >&2
+    exit 3
   fi
 fi
 

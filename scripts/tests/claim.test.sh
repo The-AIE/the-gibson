@@ -52,6 +52,21 @@ case "$1 $2" in
     # cleanup proof is anchored to. Closed PRs move to GH_PR_FILE.closed, so
     # this fixture models the real lifecycle: a released claim leaves the
     # open listing and becomes terminal evidence in the same breath.
+    #
+    # `list-open-numbers` is a third query (#153 review round 4): every open PR
+    # number, body-agnostic. It is matched FIRST because its query also
+    # carries `states: [OPEN]`. GH_PR_ORPHANS models a PR that exists on the
+    # server but is not (yet) in the published claim listing.
+    want_numbers=0
+    for a in "$@"; do
+      case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac
+    done
+    if [[ "$want_numbers" -eq 1 ]]; then
+      cut -d'|' -f1 "${GH_PR_FILE:-/dev/null}" 2>/dev/null | grep -E '^[0-9]+$' || true
+      [[ -z "${GH_PR_ORPHANS:-}" ]] ||
+        cut -d'|' -f1 "$GH_PR_ORPHANS" 2>/dev/null | grep -E '^[0-9]+$' || true
+      exit 0
+    fi
     want_open=0
     for a in "$@"; do
       case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac
@@ -92,6 +107,30 @@ case "$1 $2" in
     [[ "${GH_FAIL_PR_CREATE:-0}" == 1 ]] && exit 1
     body_file=""
     branch=""
+    if [[ "${GH_PR_CREATE_ORPHAN:-0}" == 1 ]]; then
+      # The eventually-consistent failure this models (#153 review round 4):
+      # GitHub CREATES the pull request and then the response — or the network
+      # carrying it — dies. The client sees a nonzero exit and no PR number,
+      # while the PR is real, open, and holding the claim. The live listing is
+      # eventually consistent, so it does not show the row yet either: the row
+      # goes to GH_PR_ORPHANS (visible to the body-agnostic open-PR inventory,
+      # which is what a real server would report) and NOT to GH_PR_FILE.
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --body-file) body_file="$2"; shift 2 ;;
+          --head) branch="$2"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      counter="${GH_PR_FILE}.next"
+      number=$(cat "$counter" 2>/dev/null || echo "${GH_PR_NEXT:-1}")
+      echo $((number + 1)) > "$counter"
+      claim=$(sed -n 's/^- Active-work claim: //p' "$body_file")
+      scope=$(sed -n 's/^- Claim scope: //p' "$body_file")
+      printf '%s|%s|%s|%s|https://github.com/acme/app/pull/%s|2026-08-04T00:00:00Z|2026-08-04T00:00:00Z\n' \
+        "$number" "$claim" "$scope" "$branch" "$number" >> "${GH_PR_ORPHANS:-/dev/null}"
+      exit 1
+    fi
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --body-file) body_file="$2"; shift 2 ;;
@@ -132,22 +171,65 @@ exit 0
 GH
 chmod +x "$BIN/gh"
 
-# Fake `sleep` — the ONLY thing these sensors accelerate.
+# HOSTILE `sleep` sentinel (#153 review round 4, P1).
 #
-# The publication barrier spaces its reads with the PATH command `sleep`, so
-# shimming that command makes the wait instant while leaving what the barrier
-# REQUIRES (consecutive matching reads that all contain this lane's own claim)
-# completely intact. This is a command shim: production resolves the real
-# /bin/sleep, and nothing in claim.sh or scope-overlap.mjs executes a command
-# named by an inherited variable. Every later fixture prepends its own bin to
-# $PATH, which still contains this one, so one shim covers the whole suite.
+# The publication barrier used to space its reads with `execFileSync("sleep")`
+# — an executable resolved through PATH, which meant anyone able to prepend a
+# directory to PATH could collapse the barrier to back-to-back samples taken
+# in the same instant. That is not a test seam; it is an execution path chosen
+# by the environment. Production now blocks on an internal wait with no name
+# to interpose on.
+#
+# So this `sleep` is no longer a helpful shim. It is a TRIPWIRE that records
+# every invocation, and the assertion below requires it to stay empty for the
+# whole suite. Every later fixture prepends its own bin to $PATH, which still
+# contains this one, so the tripwire covers everything.
+export SLEEP_SENTINEL="$ROOT/sleep-sentinel"
+rm -f "$SLEEP_SENTINEL"
 cat > "$BIN/sleep" <<'SLEEP'
 #!/usr/bin/env bash
+echo "sleep $*" >> "${SLEEP_SENTINEL:-/dev/null}"
 exit 0
 SLEEP
 chmod +x "$BIN/sleep"
 export PATH="$BIN:$PATH"
 export GIBSON_SESSION="tester@box"
+
+# --- the patched TEST-COPY toolchain (#153 review round 4, P1) --------------
+# Production's read spacing cannot be accelerated from outside any more — by
+# design. But these are BROAD fixtures: dozens of claim runs whose subject is
+# the claim contract, not the timing, and paying the real barrier in each of
+# them would add minutes to the suite while proving nothing the focused
+# barrier sensors (scope-overlap.test.sh, and the real-production run below)
+# do not already prove.
+#
+# So the broad fixtures run an explicitly patched COPY of the whole toolchain.
+# claim.sh resolves scope-overlap.mjs, pr-claims.sh and lib/claim-guards.sh
+# from its OWN directory, so the copy has to be a complete one; the only edit
+# is a single surgical substitution that removes the blocking call from
+# spaceReads and nothing else. Everything the barrier REQUIRES — consecutive
+# matching reads that all contain this lane's own claim, the floor, the
+# safe-integer bounds — is the production code path.
+#
+# The substitution is VERIFIED, so if production stops looking like this the
+# suite fails loudly here instead of quietly testing something else.
+PRODUCTION_CLAIM="$CLAIM"
+FASTDIR="$ROOT/scripts-fast"
+mkdir -p "$FASTDIR/lib"
+cp "$SCRIPT_DIR/../claim.sh"            "$FASTDIR/claim.sh"
+cp "$SCRIPT_DIR/../pr-claims.sh"        "$FASTDIR/pr-claims.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$FASTDIR/lib/claim-guards.sh"
+sed 's|const verdict = Atomics\.wait(cell, 0, 0, ms);|const verdict = "timed-out"; void cell; void ms;  /* TEST COPY: blocking removed */|' \
+  "$SCRIPT_DIR/../scope-overlap.mjs" > "$FASTDIR/scope-overlap.mjs"
+chmod +x "$FASTDIR/claim.sh" "$FASTDIR/pr-claims.sh"
+if grep -q 'TEST COPY: blocking removed' "$FASTDIR/scope-overlap.mjs" &&
+   ! grep -q 'Atomics\.wait(cell' "$FASTDIR/scope-overlap.mjs" &&
+   node --check "$FASTDIR/scope-overlap.mjs" 2>/dev/null; then
+  ok "the test copy patched out exactly the blocking wait (production shape unchanged)"
+else
+  bad "could not patch the test copy — production spaceReads no longer matches the expected shape; refusing to pretend these fixtures exercise the barrier"
+fi
+CLAIM="$FASTDIR/claim.sh"
 
 new_repo() {
   local root="$1"
@@ -259,20 +341,65 @@ check "generation 3 can claim the id again" "$rc" "0"
 out=$(cd "$ROOT/a/canon" && "$SCRIPT_DIR/../release-claim.sh" 42 --repo acme/app 2>&1); rc=$?
 check "generation 3 releases cleanly too" "$rc" "0"
 
-echo "claim failure is atomic and retryable"
+# --- #153 review round 4, P1: a nonzero `gh pr create` is AMBIGUOUS ---------
+# This fixture used to assert the opposite — that a failed create removed the
+# worktree and the branch and stayed retryable. That is only safe if a nonzero
+# exit proved GitHub created nothing, and it does not: the exit status is the
+# CLIENT's view of the call. GitHub can create the PR and then lose the
+# response, and the eventually consistent PR list can be empty for a while
+# afterwards. Destroying the branch on that evidence destroys the work behind
+# an open claim PR. From the instant `pr create` is invoked, everything is
+# retained until the claim PR is positively bound and positively closed.
+echo "#153 round 4 · a failed gh pr create RETAINS everything (a nonzero exit is not proof no PR exists)"
 new_repo "$ROOT/cleanup"
+export GH_LOG="$ROOT/cleanup/gh.log"
+: > "$GH_LOG"
 export GH_FAIL_PR_CREATE=1
 out=$(cd "$ROOT/cleanup/canon" && "$CLAIM" 43 cleanup 'lib/cleanup.ts' 2>&1); rc=$?
-check "draft PR failure exits nonzero" "$rc" "1"
-test ! -e "$ROOT/cleanup/wt-43-cleanup" &&
-  ok "failed claim removes its worktree" ||
-  bad "failed claim removes its worktree"
-test ! -e "$ROOT/cleanup/canon/.git/refs/heads/feat/43-cleanup" &&
-  ok "failed claim removes its local branch" ||
-  bad "failed claim removes its local branch"
 unset GH_FAIL_PR_CREATE
-out=$(cd "$ROOT/cleanup/canon" && "$CLAIM" 43 cleanup 'lib/cleanup.ts' 2>&1); rc=$?
-check "retry after failed claim succeeds" "$rc" "0"
+check    "draft PR failure exits nonzero"        "$rc" "1"
+contains "reports INCOMPLETE"                    "$out" "INCOMPLETE"
+contains "names the PR that may exist"           "$out" "a possible draft claim PR for issue-43-cleanup"
+contains "says why the exit status proves nothing" "$out" "not proof GitHub created nothing"
+contains "tells the operator to close it by hand" "$out" "Find and close it by hand"
+test -d "$ROOT/cleanup/wt-43-cleanup" &&
+  ok "failed create KEEPS its worktree" ||
+  bad "failed create destroyed its worktree"
+test -n "$(git -C "$ROOT/cleanup/canon" branch --list 'feat/43-cleanup')" &&
+  ok "failed create KEEPS its local branch" ||
+  bad "failed create destroyed its local branch"
+test -n "$(git -C "$ROOT/cleanup/canon" ls-remote --heads origin 'feat/43-cleanup')" &&
+  ok "failed create KEEPS its remote branch" ||
+  bad "failed create destroyed its remote branch"
+lacks "agent-claimed is not removed" "$(cat "$GH_LOG" 2>/dev/null)" "--remove-label"
+
+echo "#153 round 4 · the STAGED case: the server created the PR, the client saw an error, the listing is empty"
+# The strongest form of the same failure, and the one the exit-status shortcut
+# got fatally wrong: the PR really exists and really holds the claim.
+new_repo "$ROOT/orphan"
+export GH_LOG="$ROOT/orphan/gh.log"
+: > "$GH_LOG"
+export GH_PR_ORPHANS="$ROOT/orphan/orphan-prs"
+: > "$GH_PR_ORPHANS"
+export GH_PR_CREATE_ORPHAN=1
+out=$(cd "$ROOT/orphan/canon" && "$CLAIM" 45 orphaned 'lib/orphan.ts' 2>&1); rc=$?
+unset GH_PR_CREATE_ORPHAN
+[[ "$rc" -ne 0 ]] && ok "an unpublished-but-real PR exits nonzero" \
+  || bad "an unpublished-but-real PR exited 0: $out"
+contains "reports INCOMPLETE"          "$out" "INCOMPLETE"
+contains "names the PR that may exist" "$out" "a possible draft claim PR for issue-45-orphaned"
+lacks    "never claims a clean rollback" "$out" "rollback: removed"
+# The PR really is there on the "server", carrying this lane's claim.
+contains "the fixture really created a server-side PR" "$(cat "$GH_PR_ORPHANS")" "issue-45-orphaned"
+# …and nothing behind it was destroyed.
+test -d "$ROOT/orphan/wt-45-orphaned" &&
+  ok "unpublished PR: worktree retained" || bad "unpublished PR: worktree destroyed behind an open claim"
+test -n "$(git -C "$ROOT/orphan/canon" branch --list 'feat/45-orphaned')" &&
+  ok "unpublished PR: local branch retained" || bad "unpublished PR: local branch destroyed behind an open claim"
+test -n "$(git -C "$ROOT/orphan/canon" ls-remote --heads origin 'feat/45-orphaned')" &&
+  ok "unpublished PR: remote branch retained" || bad "unpublished PR: remote branch destroyed behind an open claim"
+lacks "unpublished PR: agent-claimed retained" "$(cat "$GH_LOG" 2>/dev/null)" "--remove-label"
+unset GH_PR_ORPHANS GH_LOG
 
 echo "a claim that cannot push still cleans up after itself and stays retryable"
 # The rollback anchor is pinned to the claim commit BEFORE the push, so a push
@@ -1486,6 +1613,107 @@ check "no gh mutation was attempted at all" "$(grep -c . "$GH_LOG" || true)" "0"
 test ! -e "$ROOT/rowfail/wt-73-rowfail" \
   && ok "a malformed inventory creates no worktree" || bad "a malformed inventory created a worktree"
 unset GH_LOG
+
+# ---------------------------------------------------------------------------
+# #153 review round 4, P1 — an unreadable ledger refuses BEFORE any mutation
+# ---------------------------------------------------------------------------
+# scope-overlap.mjs is read-only, so "fail closed" only means anything if the
+# CALLER has not mutated yet when it refuses. claim.sh runs the overlap check
+# before the label, the branch, the PR and the worktree exist, and this pins
+# that end to end: the ledger read that fails here is one only the sensor
+# takes (claim.sh never reads a claim file's body), so the refusal is
+# provably the sensor's, and nothing was created by the time it happened.
+echo "#153 round 4 · a live claim with unreadable scope refuses the claim before anything is created"
+# The unsafe result this reverses: a live claim file with no `scope:` line
+# used to become a claim with an EMPTY scope, which collides with nothing, so
+# the overlap check said OK and claim.sh went on to add the label, push a
+# branch, open a PR and create a worktree against a lane whose files it could
+# not see. Now the missing metadata poisons the decision — and because the
+# overlap check runs before the first mutation, refusing there means nothing
+# was created at all.
+new_repo "$ROOT/ledgerfail"
+export GH_LOG="$ROOT/ledgerfail/gh.log"
+: > "$GH_LOG"
+(
+  cd "$ROOT/ledgerfail/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  # A real live claim — but its scope is unreadable.
+  printf 'claim: issue-95-other-lane\nissue: 95\nclaimed: 2026-08-01T00:00:00Z\nsession: other@fleet\n' \
+    > docs/claims/issue-95-other-lane.md
+  git add -A && git commit -qm "claim with unreadable scope" && git push -q origin main
+) >/dev/null 2>&1
+out=$(cd "$ROOT/ledgerfail/canon" && "$CLAIM" 96 blocked 'lib/blocked/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a live claim with no readable scope refuses the claim" \
+  || bad "claimed past a live claim whose scope could not be read (rc=$rc): $out"
+contains "names the ledger as the reason" "$out" "scope overlap (or ledger unreadable)"
+contains "the sensor named the unreadable claim" "$out" "issue-95-other-lane"
+contains "and said the metadata poisons it"      "$out" "must poison the decision"
+check "no gh mutation was attempted"      "$(grep -c . "$GH_LOG" || true)" "0"
+test ! -e "$ROOT/ledgerfail/wt-96-blocked" \
+  && ok "an unreadable scope creates no worktree" || bad "an unreadable scope created a worktree"
+test -z "$(git -C "$ROOT/ledgerfail/canon" branch --list 'feat/96-blocked')" \
+  && ok "an unreadable scope creates no local branch" || bad "an unreadable scope created a local branch"
+test -z "$(git -C "$ROOT/ledgerfail/canon" ls-remote --heads origin 'feat/96-blocked')" \
+  && ok "an unreadable scope pushes no remote branch" || bad "an unreadable scope pushed a remote branch"
+check "an unreadable scope opens no PR" "$(grep -c 'issue-96-blocked' "$GH_PR_FILE" || true)" "0"
+unset GH_LOG
+
+# ---------------------------------------------------------------------------
+# #153 review round 4, P1 — the REAL toolchain, the REAL barrier
+# ---------------------------------------------------------------------------
+# Everything above ran the patched test copy, so exactly one sensor here runs
+# the shipped claim.sh end to end and pays the real minimum wait. Its job is to
+# prove that the acceleration the other fixtures enjoy is a property of the
+# COPY and not of production — and that production's spacing cannot be taken
+# away by the hostile `sleep` that has been sitting first on $PATH since the
+# top of this file.
+echo "#153 round 4 · the shipped claim.sh pays the real barrier and never executes a PATH sleep"
+new_repo "$ROOT/prodbar"
+export GH_LOG="$ROOT/prodbar/gh.log"
+: > "$GH_LOG"
+rm -f "$SLEEP_SENTINEL"
+prodbar_start=$(date +%s)
+out=$(cd "$ROOT/prodbar/canon" && \
+  GIBSON_CLAIM_ADMIT_DELAY=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$PRODUCTION_CLAIM" 91 real-barrier 'lib/real-barrier/**' 2>&1); rc=$?
+prodbar_elapsed=$(( $(date +%s) - prodbar_start ))
+check "the shipped claim.sh completes a claim" "$rc" "0"
+[[ "$prodbar_elapsed" -ge 1 ]] &&
+  ok "a 2-read/1s barrier cost at least 1s of real time (${prodbar_elapsed}s)" ||
+  bad "the shipped barrier finished in ${prodbar_elapsed}s — the wait did not happen"
+if [[ -s "$SLEEP_SENTINEL" ]]; then
+  bad "the shipped claim.sh executed the hostile PATH sleep $(wc -l < "$SLEEP_SENTINEL" | tr -d ' ') time(s) — the barrier is externally controllable"
+else
+  ok "the shipped claim.sh executed the hostile PATH sleep ZERO times"
+fi
+unset GH_LOG
+
+echo "#153 round 4 · nothing in this whole suite ever executed the hostile PATH sleep"
+# The tripwire has been first on $PATH for every fixture above. If any of them
+# — production or patched copy — had reached for a `sleep` executable, it
+# would be recorded here.
+if [[ -s "$SLEEP_SENTINEL" ]]; then
+  bad "a PATH sleep was executed during the suite: $(tr '\n' ' ' < "$SLEEP_SENTINEL")"
+else
+  ok "the hostile PATH sleep was never executed by anything under test"
+fi
+
+echo "#153 round 4 · no production script names an executable through the environment (static)"
+# The rollback hook this repo removed (GIBSON_CLAIM_TEST_ROLLBACK_HOOK) and the
+# PATH `sleep` were the same mistake in two shapes: production choosing what to
+# execute from something a caller controls. Neither may come back.
+for prod in "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh" \
+            "$SCRIPT_DIR/../pr-claims.sh" "$SCRIPT_DIR/../lib/claim-guards.sh" \
+            "$SCRIPT_DIR/../scope-overlap.mjs"; do
+  name=$(basename "$prod")
+  if grep -nE '_TEST_[A-Z_]*HOOK|_HOOK\b' "$prod" | grep -vE '^\s*[0-9]+:\s*#|removed|no production hook|there is deliberately' >/dev/null; then
+    bad "$name references a test hook variable"
+  else
+    ok "$name carries no test-hook execution path"
+  fi
+done
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

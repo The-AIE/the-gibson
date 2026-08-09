@@ -750,6 +750,86 @@ contains "names the literal-id contract" "$out" "literal exact claim id"
 out=$("$PC" find-terminal acme/app '' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "empty claim id refused" || bad "empty claim id accepted (rc=$rc): $out"
 
+# ---------------------------------------------------------------------------
+# #153 review round 4, P1 — list-open-numbers
+# ---------------------------------------------------------------------------
+# `list` is the CLAIM inventory: a PR only appears there while it carries a
+# well-formed claim marker. That makes "the claim id is absent from list" an
+# ambiguous answer for a caller that just closed a PR — it is satisfied both
+# by a PR that closed and by a PR that is still wide open with its marker
+# deleted or rewritten. list-open-numbers exists to remove that ambiguity:
+# every open PR number, body-agnostic.
+plain_pr() { printf '{"number":%s}' "$1"; }
+
+echo "list-open-numbers · body-agnostic: PRs with NO claim marker are still listed"
+stage "[$(plain_pr 11),$(plain_pr 12),$(plain_pr 13)]"
+out=$("$PC" list-open-numbers acme/app 2>&1); rc=$?
+check "list-open-numbers exits 0"            "$rc" "0"
+check "lists every open PR number"           "$(printf '%s' "$out" | tr '\n' ' ')" "11 12 13"
+# The contrast that makes it useful: `list` sees none of these.
+out=$("$PC" list acme/app 2>&1); rc=$?
+check "list exits 0 on the same input"       "$rc" "0"
+check "list sees no claims in them at all"   "$out" ""
+
+echo "list-open-numbers · a PR whose marker was REMOVED is still reported open"
+# The hostile case: PR 21 carries a claim, PR 22 is the same PR after somebody
+# stripped its marker. The claim inventory loses 22; the number inventory does
+# not, which is exactly what lets release-claim.sh refuse a false success.
+stage "[$(open_pr 21 '- Active-work claim: issue-21-held\n- Claim scope: lib/**\n- Issue: #21' 'feat/21-held' 'https://github.com/acme/app/pull/21'),$(plain_pr 22)]"
+out=$("$PC" list acme/app 2>&1)
+contains "list sees the marked claim"     "$out" "issue-21-held"
+lacks    "list cannot see the stripped PR" "$out" "	22	"
+out=$("$PC" list-open-numbers acme/app 2>&1); rc=$?
+check "list-open-numbers exits 0"         "$rc" "0"
+echo "$out" | grep -qx '22' &&
+  ok "the stripped PR is still reported as open" ||
+  bad "the stripped PR vanished from the open-number inventory: $out"
+echo "$out" | grep -qx '21' &&
+  ok "the marked PR is reported as open too" ||
+  bad "the marked PR is missing from the open-number inventory: $out"
+
+echo "list-open-numbers · spans every page (a PR on page 2 is not dropped)"
+stage_pages "[$(plain_pr 31)]" "[$(plain_pr 32)]" "[$(plain_pr 33)]"
+out=$("$PC" list-open-numbers acme/app 2>&1); rc=$?
+check "multipage exits 0" "$rc" "0"
+check "every page's numbers are present" "$(printf '%s' "$out" | tr '\n' ' ')" "31 32 33"
+
+echo "list-open-numbers · a mid-pagination API failure fails the whole command"
+# A truncated open-PR inventory is exactly as dangerous as an unreadable one:
+# a caller would read the missing page as "that PR closed".
+stage_pages "[$(plain_pr 41)]" "[$(plain_pr 42)]"
+GH_PAGE_FAIL_AT=1 "$PC" list-open-numbers acme/app >"$ROOT/nums.out" 2>"$ROOT/nums.err"; rc=$?
+[[ "$rc" -ne 0 ]] && ok "a failed page exits nonzero" || bad "a failed page exited 0"
+check "no partial inventory reaches stdout" "$(cat "$ROOT/nums.out")" ""
+
+echo "list-open-numbers · an unreadable page set fails closed"
+GH_PAGES="$ROOT/does-not-exist.json" "$PC" list-open-numbers acme/app >/dev/null 2>&1; rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unreadable page set exits nonzero" || bad "an unreadable page set exited 0"
+
+echo "list-open-numbers · a non-numeric PR number poisons the command"
+# jq refuses it at the source; the shell loop re-checks. Either way the whole
+# command must fail — a row that is not a PR number makes the inventory
+# unusable as proof.
+stage '[{"number":"51"}]'
+out=$("$PC" list-open-numbers acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a non-numeric PR number exits nonzero" || bad "a non-numeric PR number was accepted (rc=$rc): $out"
+contains "names the numeric requirement" "$out" "not numeric"
+
+echo "list-open-numbers · an empty repository is an empty (successful) answer"
+stage ""
+out=$("$PC" list-open-numbers acme/app 2>&1); rc=$?
+check "no open PRs exits 0"    "$rc" "0"
+check "no open PRs prints nothing" "$out" ""
+
+echo "list-open-numbers · usage"
+out=$("$PC" list-open-numbers 2>&1); rc=$?
+check "missing repo exits 2" "$rc" "2"
+out=$("$PC" list-open-numbers acme/app extra 2>&1); rc=$?
+check "an extra argument exits 2" "$rc" "2"
+out=$("$PC" list-open-numbers 'not a repo' 2>&1); rc=$?
+check "a malformed repo exits 2" "$rc" "2"
+contains "documented in --help" "$("$PC" list acme/app --help 2>&1; "$PC" 2>&1)" "list-open-numbers"
+
 echo
 echo "pr-claims.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

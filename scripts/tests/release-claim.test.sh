@@ -2126,6 +2126,35 @@ case "$1" in
     # it. Two distinct queries have to be told apart: `list` restricts to
     # `states: [OPEN]`, `find-terminal` walks every state.
     [[ "$2" == "graphql" ]] || exit 1
+    # `list-open-numbers` is a THIRD query (#153 review round 4): every open PR
+    # number, body-agnostic, so a caller can prove the PR it closed really
+    # closed even when its claim marker was removed. It is checked first
+    # because its query also carries `states: [OPEN]`.
+    want_numbers=0
+    for arg in "$@"; do
+      case "$arg" in *"openPrNumbers"*) want_numbers=1 ;; esac
+    done
+    if [[ "$want_numbers" -eq 1 ]]; then
+      # Default: derive the open numbers from whichever open-claim TSV this
+      # read would have been served, so an ordinary fixture stays consistent
+      # without having to stage a second file. GH_PR_OPEN_NUMBERS overrides it
+      # outright — that is how a fixture models a PR that is still OPEN with
+      # its claim marker removed, which is invisible to the claim inventory.
+      if [[ -n "${GH_PR_OPEN_NUMBERS+x}" ]]; then
+        [[ -z "${GH_PR_OPEN_NUMBERS:-}" ]] || printf '%s\n' "$GH_PR_OPEN_NUMBERS"
+        exit "${GH_PR_OPEN_NUMBERS_EXIT:-0}"
+      fi
+      calls=1
+      if [[ -n "${GH_OPEN_CALLS:-}" ]]; then
+        calls=$(cat "$GH_OPEN_CALLS" 2>/dev/null || echo 0)
+      fi
+      if [[ "$calls" -ge 2 && -n "${GH_PR_OPEN_TSV2:-}" ]]; then
+        cut -f1 "$GH_PR_OPEN_TSV2" 2>/dev/null
+      else
+        cut -f1 "${GH_PR_OPEN_TSV:-/dev/null}" 2>/dev/null
+      fi
+      exit "${GH_PR_OPEN_NUMBERS_EXIT:-0}"
+    fi
     want_open=0
     for arg in "$@"; do
       case "$arg" in *"states: [OPEN]"*) want_open=1 ;; esac
@@ -2205,6 +2234,7 @@ export GH_STATE="$ROOT/term/gh-state"
 export GH_LOG="$ROOT/term/gh.log"
 export GH_LABELS="agent-claimed,tier-b"
 unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 rm -f "$GH_STATE" "$GH_LOG"
 
 # Row layout (13 tab-separated fields, matches pr-claims.sh find-terminal):
@@ -2901,6 +2931,7 @@ export GH_STATE="$ROOT/termsibmissing/gh-state"
 export GH_LOG="$ROOT/termsibmissing/gh.log"
 export GH_LABELS="tier-b"
 unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 rm -f "$GH_STATE" "$GH_LOG"
 out=$(cd "$ROOT/termsibmissing/canon" && "$RC" 220 --claim-id issue-220-checkout-a --repo acme/app 2>&1); rc=$?
 check    "sibling remains but label actually absent exits 3" "$rc" "3"
@@ -2997,6 +3028,7 @@ export GH_STATE="$ROOT/termsib/gh-state"
 export GH_LOG="$ROOT/termsib/gh.log"
 export GH_LABELS="agent-claimed,tier-b"
 unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 rm -f "$GH_STATE" "$GH_LOG"
 out=$(cd "$ROOT/termsib/canon" && "$RC" 210 --claim-id issue-210-checkout-a --repo acme/app 2>&1); rc=$?
 check    "releasing one terminal slice exits 0"     "$rc" "0"
@@ -3106,6 +3138,7 @@ open_fixture() {
   : > "$GH_OPEN_CALLS"
   rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
   unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
+  unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 }
 
 # One 7-field `pr-claims.sh list` row: number, claim, scope, head branch,
@@ -3211,19 +3244,46 @@ contains "reports the release"                   "$out" "OK — claim released f
 [[ -z "$(git -C "$ROOT/openroute/canon" ls-remote --heads origin 'feat/411-routed')" ]] &&
   ok "routed release removed the remote branch" || bad "routed release left the remote branch"
 
-echo "the handover refuses (rather than guesses) when the head branch is not the one the claim id derives"
+# --- #153 review round 4, P1: the head-branch binding precedes the close ----
+# This used to be checked only AFTER `gh pr close` had already fired, so an
+# exact claim marker sitting in the body of a PR on an unrelated branch was
+# enough to close that PR — an irreversible mutation on a pull request whose
+# identity was never bound to the claim. The check now runs before the first
+# mutation and the mismatch is a plain refusal, not a partial run.
+echo "#153 round 4 · an exact marker on an UNRELATED head branch never reaches gh pr close"
 open_fixture openodd 412 odd-branch
 # PR head branch deliberately not feat/412-odd-branch: identity cannot be
-# bound to the claim id, so nothing may be removed on it.
+# bound to the claim id, so the PR must not be closed at all.
 open_row 915 issue-412-odd-branch 'lib/x/**' hotfix/unrelated-branch > "$GH_PR_OPEN_TSV"
 export GH_PR_OPEN_TSV2="$ROOT/openodd/open2.tsv"
 : > "$GH_PR_OPEN_TSV2"
 out=$(cd "$ROOT/openodd/canon" && "$RC" 412 --claim-id issue-412-odd-branch --repo acme/app 2>&1); rc=$?
-check    "unbindable head branch exits 3"    "$rc" "3"
-contains "names the unbindable head branch" "$out" "is not the branch claim id"
+check    "unbindable head branch is a PRE-MUTATION refusal (exit 1)" "$rc" "1"
+contains "names the unbindable head branch" "$out" "is not the branch this claim id derives"
+contains "says nothing was mutated"         "$out" "nothing was mutated"
 lacks    "never reports success"             "$out" "OK —"
+lacks    "never reports a partial run"       "$out" "INCOMPLETE"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "unbindable branch: the PR was NEVER closed" || bad "unbindable branch: gh pr close was called on an unbound PR"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unbindable branch: label never edited" || bad "unbindable branch: label edit attempted"
 [[ -d "$ROOT/openodd/wt-412-odd-branch" ]] &&
   ok "unbindable branch: worktree untouched" || bad "unbindable branch: worktree removed"
+[[ -n "$(git -C "$ROOT/openodd/canon" branch --list 'feat/412-odd-branch')" ]] &&
+  ok "unbindable branch: local branch untouched" || bad "unbindable branch: local branch deleted"
+[[ -n "$(git -C "$ROOT/openodd/canon" ls-remote --heads origin 'feat/412-odd-branch')" ]] &&
+  ok "unbindable branch: remote branch untouched" || bad "unbindable branch: remote branch deleted"
+
+echo "#153 round 4 · --dry-run refuses the same mismatch, so an operator sees it before trying it for real"
+# Reset the open-inventory read counter: the fake serves GH_PR_OPEN_TSV2 from
+# the second read onward, and the run above already consumed the first one.
+: > "$GH_OPEN_CALLS"
+out=$(cd "$ROOT/openodd/canon" && "$RC" 412 --claim-id issue-412-odd-branch --repo acme/app --dry-run 2>&1); rc=$?
+check    "dry-run mismatch exits 1"        "$rc" "1"
+contains "dry-run names the mismatch"      "$out" "is not the branch this claim id derives"
+lacks    "dry-run never offers to close it" "$out" "would close PR"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "dry-run mismatch: still no close" || bad "dry-run mismatch: a PR was closed"
 
 # --- #153 review round 3, P2: a post-close evidence failure is exit 3 -------
 # try_terminal_pr_body_release used to `die` on unusable terminal evidence.
@@ -3338,20 +3398,133 @@ contains "preserves the label"                   "$out" "preserving agent-claime
 [[ -n "$(git -C "$ROOT/openleft/canon" ls-remote --heads origin 'feat/403-leftovers')" ]] &&
   ok "leftover case: remote branch not deleted" || bad "leftover case: remote branch was deleted"
 
-echo "close-only: with nothing left to clean up, it completes and the label removal is verified"
+# --- #153 review round 4, P1: no terminal evidence after a close is NOT ok --
+# This fixture used to assert the opposite. With the artifacts already gone
+# and an EMPTY terminal view, the run reported "OK — released PR-body claim"
+# and removed agent-claimed — i.e. it treated "I cannot see the PR I just
+# closed" as "there is nothing left to clean up". Those are different facts,
+# and only one of them licenses stripping an issue-wide label. Absence of
+# proof is not proof of absence on a mutation path.
+echo "#153 round 4 · an EMPTY terminal view after a successful close is INCOMPLETE, never success"
 open_fixture openclean 404 nothing-left
 open_row 905 issue-404-nothing-left 'lib/x/**' feat/404-nothing-left > "$GH_PR_OPEN_TSV"
 export GH_PR_OPEN_TSV2="$ROOT/openclean/open2.tsv"
 : > "$GH_PR_OPEN_TSV2"
-# Worktree and branches already gone (e.g. an earlier terminal cleanup).
+# Worktree and branches already gone (e.g. an earlier terminal cleanup) — so
+# the ONLY thing standing between this run and a success message is whether it
+# insists on proving the closed PR's identity.
 git -C "$ROOT/openclean/canon" worktree remove --force "$ROOT/openclean/wt-404-nothing-left" >/dev/null 2>&1
 git -C "$ROOT/openclean/canon" branch -D feat/404-nothing-left >/dev/null 2>&1
 git -C "$ROOT/openclean/canon" push -q origin --delete feat/404-nothing-left >/dev/null 2>&1
+: > "$GH_PR_ALL_TSV"   # no terminal row for the PR we just closed
 out=$(cd "$ROOT/openclean/canon" && "$RC" 404 --claim-id issue-404-nothing-left --repo acme/app 2>&1); rc=$?
-check    "nothing-left release exits 0"      "$rc" "0"
-contains "reports the verified release"      "$out" "OK — released PR-body claim for #404"
-contains "verified label removal"            "$out" "removed agent-claimed from acme/app#404 (verified)"
+check    "absent terminal evidence exits 3"  "$rc" "3"
+contains "the PR really was closed"          "$out" "closing PR #905"
+contains "names the unproven identity"       "$out" "no exact terminal PR-body evidence"
+contains "says the artifacts are preserved"  "$out" "are being PRESERVED"
+contains "reports INCOMPLETE"                "$out" "INCOMPLETE"
+contains "names the recovery action"         "$out" "RECOVERY"
+contains "the recovery is the bound re-run"  "$out" "--pr 905"
+contains "preserves the label"               "$out" "preserving agent-claimed"
+lacks    "never reports success"             "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "absent terminal evidence: label never edited" || bad "absent terminal evidence: label edit attempted"
+
+echo "#153 round 4 · the SUCCESS contract: VALID terminal evidence + genuinely absent artifacts completes and verifies the label"
+open_fixture opencleanok 424 proven-clean
+open_row 925 issue-424-proven-clean 'lib/x/**' feat/424-proven-clean > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/opencleanok/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+CLEANOK_SHA=$(git -C "$ROOT/opencleanok/wt-424-proven-clean" rev-parse HEAD)
+git -C "$ROOT/opencleanok/canon" worktree remove --force "$ROOT/opencleanok/wt-424-proven-clean" >/dev/null 2>&1
+git -C "$ROOT/opencleanok/canon" branch -D feat/424-proven-clean >/dev/null 2>&1
+git -C "$ROOT/opencleanok/canon" push -q origin --delete feat/424-proven-clean >/dev/null 2>&1
+# The closed PR's own terminal evidence: CLOSED, exact head SHA, no merge
+# commit, this repository, not a fork. THIS is what authorizes success.
+printf '925\tissue-424-proven-clean\tlib/x/**\t424\tfeat/424-proven-clean\t%s\thttps://github.com/acme/app/pull/925\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$CLEANOK_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/opencleanok/canon" && "$RC" 424 --claim-id issue-424-proven-clean --repo acme/app 2>&1); rc=$?
+check    "proven-clean release exits 0"      "$rc" "0"
+contains "the PR was closed"                 "$out" "closing PR #925"
+contains "the terminal evidence was verified" "$out" "verified terminal PR-body claim #925"
+contains "reports the release"               "$out" "OK — claim released for issue 424"
+contains "verified label removal"            "$out" "removed agent-claimed from acme/app#424 (verified)"
 lacks    "no INCOMPLETE banner"              "$out" "INCOMPLETE"
+
+# --- #153 review round 4, P1: the post-close proof binds the PR NUMBER ------
+# The claim inventory only lists a PR while that PR carries a well-formed
+# claim marker. So "the claim id is gone" is satisfied BOTH by a PR that
+# really closed and by a PR that is still wide open with its marker deleted or
+# rewritten — and the second is a silent false success: the issue is still
+# held by a live PR while the run reports the claim released and strips
+# agent-claimed. Each fixture below is the proven-clean success path above
+# with exactly one thing changed, so the ONLY reason it must not succeed is
+# the PR-number binding.
+echo "#153 round 4 · close reports success but the PR is STILL OPEN under a REWRITTEN marker"
+open_fixture opennum1 425 marker-rewritten
+open_row 926 issue-425-marker-rewritten 'lib/x/**' feat/425-marker-rewritten > "$GH_PR_OPEN_TSV"
+NUM1_SHA=$(git -C "$ROOT/opennum1/wt-425-marker-rewritten" rev-parse HEAD)
+git -C "$ROOT/opennum1/canon" worktree remove --force "$ROOT/opennum1/wt-425-marker-rewritten" >/dev/null 2>&1
+git -C "$ROOT/opennum1/canon" branch -D feat/425-marker-rewritten >/dev/null 2>&1
+git -C "$ROOT/opennum1/canon" push -q origin --delete feat/425-marker-rewritten >/dev/null 2>&1
+printf '926\tissue-425-marker-rewritten\tlib/x/**\t425\tfeat/425-marker-rewritten\t%s\thttps://github.com/acme/app/pull/926\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NUM1_SHA" > "$GH_PR_ALL_TSV"
+# Post-close the claim id is gone from the inventory — but PR #926 is right
+# there, still open, now carrying somebody else's claim id.
+export GH_PR_OPEN_TSV2="$ROOT/opennum1/open2.tsv"
+open_row 926 issue-888-rewritten-marker 'lib/z/**' feat/888-rewritten-marker > "$GH_PR_OPEN_TSV2"
+out=$(cd "$ROOT/opennum1/canon" && "$RC" 425 --claim-id issue-425-marker-rewritten --repo acme/app 2>&1); rc=$?
+check    "a rewritten marker on a still-open PR exits 3" "$rc" "3"
+contains "names the PR that is still open"   "$out" "#926 is STILL OPEN"
+contains "reports INCOMPLETE"                "$out" "INCOMPLETE"
+lacks    "never reports success"             "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "rewritten marker: label never removed" || bad "rewritten marker: label removal was attempted"
+
+echo "#153 round 4 · close reports success but the PR is STILL OPEN with its marker REMOVED (invisible to the claim inventory)"
+open_fixture opennum2 426 marker-removed
+open_row 927 issue-426-marker-removed 'lib/x/**' feat/426-marker-removed > "$GH_PR_OPEN_TSV"
+NUM2_SHA=$(git -C "$ROOT/opennum2/wt-426-marker-removed" rev-parse HEAD)
+git -C "$ROOT/opennum2/canon" worktree remove --force "$ROOT/opennum2/wt-426-marker-removed" >/dev/null 2>&1
+git -C "$ROOT/opennum2/canon" branch -D feat/426-marker-removed >/dev/null 2>&1
+git -C "$ROOT/opennum2/canon" push -q origin --delete feat/426-marker-removed >/dev/null 2>&1
+printf '927\tissue-426-marker-removed\tlib/x/**\t426\tfeat/426-marker-removed\t%s\thttps://github.com/acme/app/pull/927\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NUM2_SHA" > "$GH_PR_ALL_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/opennum2/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"          # the CLAIM inventory sees nothing at all…
+export GH_PR_OPEN_NUMBERS="927" # …but the PR is still open. Only the
+                                # body-agnostic inventory can see that.
+out=$(cd "$ROOT/opennum2/canon" && "$RC" 426 --claim-id issue-426-marker-removed --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_NUMBERS
+check    "a removed marker on a still-open PR exits 3" "$rc" "3"
+contains "names the PR that is still open"   "$out" "#927 is STILL OPEN"
+contains "names the removed/rewritten marker" "$out" "removed or rewritten marker is not a terminal PR"
+contains "reports INCOMPLETE"                "$out" "INCOMPLETE"
+lacks    "never reports success"             "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "removed marker: label never removed" || bad "removed marker: label removal was attempted"
+
+echo "#153 round 4 · an UNREADABLE open-PR inventory is not proof the PR closed"
+open_fixture opennum3 427 numbers-unreadable
+open_row 928 issue-427-numbers-unreadable 'lib/x/**' feat/427-numbers-unreadable > "$GH_PR_OPEN_TSV"
+NUM3_SHA=$(git -C "$ROOT/opennum3/wt-427-numbers-unreadable" rev-parse HEAD)
+git -C "$ROOT/opennum3/canon" worktree remove --force "$ROOT/opennum3/wt-427-numbers-unreadable" >/dev/null 2>&1
+git -C "$ROOT/opennum3/canon" branch -D feat/427-numbers-unreadable >/dev/null 2>&1
+git -C "$ROOT/opennum3/canon" push -q origin --delete feat/427-numbers-unreadable >/dev/null 2>&1
+printf '928\tissue-427-numbers-unreadable\tlib/x/**\t427\tfeat/427-numbers-unreadable\t%s\thttps://github.com/acme/app/pull/928\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NUM3_SHA" > "$GH_PR_ALL_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/opennum3/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+export GH_PR_OPEN_NUMBERS=""
+export GH_PR_OPEN_NUMBERS_EXIT=1
+out=$(cd "$ROOT/opennum3/canon" && "$RC" 427 --claim-id issue-427-numbers-unreadable --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
+check    "an unreadable open-PR inventory exits 3" "$rc" "3"
+contains "names the unverifiable absence"    "$out" "cannot verify that PR #928 is absent from the open pull-request inventory"
+contains "reports INCOMPLETE"                "$out" "INCOMPLETE"
+lacks    "never reports success"             "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unreadable open-PR inventory: label never removed" || bad "unreadable open-PR inventory: label removal was attempted"
 
 echo "a claim still live on the post-close reread refuses success"
 open_fixture openstill 405 still-live
@@ -3390,12 +3563,19 @@ echo "sibling policy is preserved and verified: a surviving live slice keeps age
 open_fixture opensib 407 slice-a
 open_row 908 issue-407-slice-a 'lib/a/**' feat/407-slice-a  > "$GH_PR_OPEN_TSV"
 open_row 909 issue-407-slice-b 'lib/b/**' feat/407-slice-b >> "$GH_PR_OPEN_TSV"
+SIB_SHA=$(git -C "$ROOT/opensib/wt-407-slice-a" rev-parse HEAD)
 git -C "$ROOT/opensib/canon" worktree remove --force "$ROOT/opensib/wt-407-slice-a" >/dev/null 2>&1
 git -C "$ROOT/opensib/canon" branch -D feat/407-slice-a >/dev/null 2>&1
 git -C "$ROOT/opensib/canon" push -q origin --delete feat/407-slice-a >/dev/null 2>&1
 # Post-close: slice-a is gone, slice-b is still working the same issue.
 export GH_PR_OPEN_TSV2="$ROOT/opensib/open2.tsv"
 open_row 909 issue-407-slice-b 'lib/b/**' feat/407-slice-b > "$GH_PR_OPEN_TSV2"
+# Terminal evidence for the closed slice, so the run reaches the verified
+# cleanup rather than the close-only INCOMPLETE path (#153 review round 4):
+# sibling policy is a SUCCESS-path contract, and it has to be exercised on the
+# path that can actually succeed.
+printf '908\tissue-407-slice-a\tlib/a/**\t407\tfeat/407-slice-a\t%s\thttps://github.com/acme/app/pull/908\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SIB_SHA" > "$GH_PR_ALL_TSV"
 out=$(cd "$ROOT/opensib/canon" && "$RC" 407 --claim-id issue-407-slice-a --repo acme/app 2>&1); rc=$?
 check    "sibling-preserving release exits 0" "$rc" "0"
 contains "keeps the label for the sibling"    "$out" "keeping agent-claimed on #407"
@@ -3566,6 +3746,7 @@ bind_fixture() { # dir issue slug [https|ssh]
   export GH_LABELS="agent-claimed,tier-b"
   rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
   unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_OPEN_CALLS
+  unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
   printf '600\tissue-%s-%s\tlib/x/**\t%s\tfeat/%s-%s\t%s\thttps://github.com/acme/app/pull/600\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
     "$issue" "$slug" "$issue" "$issue" "$slug" "$BIND_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
 }
@@ -3783,6 +3964,7 @@ sib_fixture() { # dir issue target-id sibling-row?
   : > "$GH_OPEN_CALLS"
   rm -f "$GH_STATE" "$GH_LOG"
   unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
+  unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 }
 
 echo "an unreadable sibling reread preserves agent-claimed and reports INCOMPLETE"
