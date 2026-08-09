@@ -60,9 +60,11 @@ Grade every dispatch **G / S / F** (Grind / Skilled / Frontier):
 
 Two structural rules on top:
 
-1. **Generation may be cheap; evaluation of Tier B/C may not be graded below S.**
-   A G-grade generator with an F-grade reviewer is a good trade — the reviewer is
-   reading a bounded diff, the generator burned low-marginal-cost tokens getting there.
+1. **Generation may be cheap; evaluation is not.** Tier B evaluation must be at
+   least **S**. Tier C review (adversarial / merge-gate judgment) must be **F** —
+   never imply that an S-grade review clears Tier C. A G-grade generator with an
+   F-grade reviewer is a good trade — the reviewer is reading a bounded diff, the
+   generator burned low-marginal-cost tokens getting there.
 2. **Cross-vendor beats same-vendor at equal grade** (independent failure modes),
    so prefer the *other* pool's equal-grade model for review even when your own is
    available.
@@ -71,7 +73,7 @@ Two structural rules on top:
 
 Start at the cheapest grade plausibly sufficient; escalate on signal, never on vibes:
 
-```
+```text
 attempt at grade N
   → gate fails twice on the same criterion   → retry once with enriched context
   → fails again (3rd)                        → escalate one grade, hand over the
@@ -98,11 +100,14 @@ downward stress-test, applied to money).
 - **Checkpoint before half the context window** on long metered sessions.
 - **No-model checks stay no-model:** health checks, claim verification, gate runs
   are scripts, not prompts.
-- **Cost telemetry:** record runner/pool, wall time, tokens/ACUs **when the runtime
-  reports them**, issue/PR/iteration, and merge outcome via
-  `scripts/cost-ledger.sh`. Missing usage stays unknown — never invent tokens or
-  dollars. The weekly retro reports cost- or effort-per-merged-PR per pool — the
-  number this whole doc exists to push down **without** lowering the quality bar.
+- **Cost telemetry:** `scripts/cost-ledger.sh` records only supported usage and
+  context fields (runner/pool, wall time, tokens/ACUs **when the runtime reports
+  them**, issue/PR/iteration, optional note). Merge outcome is **not** a ledger
+  field — track it separately via GitHub or the journal (and optional
+  `summarize --merged-since` input you already have). Missing usage stays unknown
+  — never invent tokens or dollars. The weekly retro reports cost- or
+  effort-per-merged-PR per pool — the number this whole doc exists to push down
+  **without** lowering the quality bar.
 
 ## Worked default (illustrative fleet shape)
 

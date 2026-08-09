@@ -87,7 +87,11 @@ REPO_SLUG=owner/name       # safe placeholder — replace with the target's orig
 #    *current* git working tree — run it inside the target, not Gibson's clone.
 (cd "$REPO" && "$GIBSON/scripts/claims-status.sh" --markdown)
 
-# 1) Solo grind on a flat-rate runner (default budgets: error 5; stale = error).
+# 1) Green-gate baseline in the *target* worktree BEFORE any write-capable
+#    runner (loop.sh) mutates the tree. Record once at branch point.
+(cd "$REPO" && "$GIBSON/scripts/gate-baseline.sh")
+
+# 2) Solo grind on a flat-rate runner (default budgets: error 5; stale = error).
 #    --repo-slug is required (see loop.sh --help) and must match origin.
 "$GIBSON/scripts/loop.sh" \
   --runner grok \
@@ -98,19 +102,17 @@ REPO_SLUG=owner/name       # safe placeholder — replace with the target's orig
   --stale-budget 5 \
   --escalate-after 2
 
-# 2) Cross-vendor read-only review of the exact branch tip (not self-review)
+# 3) Cross-vendor read-only review of the exact branch tip (not self-review)
 "$GIBSON/scripts/second-opinion.sh" \
   --repo "$REPO" \
   --author grok \
   --reviewers codex,claude \
   --out "$REPO/gibson/second-opinion.md"
 
-# 3) Green gate in the *target* worktree (gate scripts read/write CWD baseline).
-#    Record baseline once at branch point; then gate before each commit.
-(cd "$REPO" && "$GIBSON/scripts/gate-baseline.sh")   # once at branch point
+# 4) Green gate before each commit (compares to the branch-point baseline).
 (cd "$REPO" && "$GIBSON/scripts/gate.sh")
 
-# 4) Record one measured iteration (aggregate tokens optional — omit if unknown)
+# 5) Record one measured iteration (aggregate tokens optional — omit if unknown)
 "$GIBSON/scripts/cost-ledger.sh" append \
   --ledger "$REPO/gibson/cost-ledger.jsonl" \
   --runner grok \
@@ -125,7 +127,7 @@ REPO_SLUG=owner/name       # safe placeholder — replace with the target's orig
 # optional when the runtime reports an aggregate count: --tokens N
 # (no --input-tokens / --output-tokens / --cache-tokens flags today — see §9)
 
-# 5) Roll up (optional merged-PR list is a JSON array file you already have)
+# 6) Roll up (optional merged-PR list is a JSON array file you already have)
 "$GIBSON/scripts/cost-ledger.sh" summarize \
   --ledger "$REPO/gibson/cost-ledger.jsonl" \
   --format text
@@ -246,7 +248,7 @@ More open PRs is not more progress if CI and review cannot keep up.
 Use the ladder from [docs/15](../docs/15-model-economics.md); operationalize with
 `scripts/loop.sh` budgets:
 
-```
+```text
 attempt at grade N
   → same criterion fails twice     → one retry with enriched context (diff, logs, contract)
   → fails again (3rd)              → escalate one grade; hand over loop-state + failure history
@@ -285,13 +287,13 @@ These are scripts and CI — not prompts ([docs/15](../docs/15-model-economics.m
 
 | Check | Command / location |
 |---|---|
-| Claims / WIP | `(cd "$REPO" && scripts/claims-status.sh)` — CWD must be the target |
-| Green gate | `(cd "$REPO" && scripts/gate-baseline.sh)` once at branch point, then `(cd "$REPO" && scripts/gate.sh)` before commits |
-| Loop state schema | `scripts/validate-loop-state.sh` (target `gibson/loop-state.md`) |
-| Injection / deceptive Unicode | `scripts/injection-scan.sh` |
-| Cross-vendor review dispatch | `scripts/second-opinion.sh --repo "$REPO"` (still a model, but **read-only** and not self) |
-| Cost append / summarize | `scripts/cost-ledger.sh` (`--ledger` under `$REPO/gibson/`) |
-| Delivery-control audit | `scripts/delivery-control/audit.sh` |
+| Claims / WIP | `(cd "$REPO" && "$GIBSON/scripts/claims-status.sh")` — CWD must be the target |
+| Green gate | `(cd "$REPO" && "$GIBSON/scripts/gate-baseline.sh")` once at branch point (before write-capable loop), then `(cd "$REPO" && "$GIBSON/scripts/gate.sh")` before commits |
+| Loop state schema | `"$GIBSON/scripts/validate-loop-state.sh" "$REPO/gibson/loop-state.md"` |
+| Injection / deceptive Unicode | `"$GIBSON/scripts/injection-scan.sh"` (pass paths under the agent-ingested tree) |
+| Cross-vendor review dispatch | `"$GIBSON/scripts/second-opinion.sh" --repo "$REPO"` (still a model, but **read-only** and not self) |
+| Cost append / summarize | `"$GIBSON/scripts/cost-ledger.sh"` (`--ledger` under `$REPO/gibson/`) |
+| Delivery-control audit | `"$GIBSON/scripts/delivery-control/audit.sh" --repo "$REPO_SLUG"` |
 | CI on exact head | Required checks on the PR head SHA — see §8 |
 | Deploy / runtime | READY + smoke / posture-probe after merge or vs preview — see §8 (not the same as CI green) |
 
@@ -317,9 +319,37 @@ Cache hits never replace **exact-head** verification after new commits.
    [docs/06](../docs/06-quality-gates.md)).
 2. **Exact-head CI:** required checks must run on the PR's current head SHA.
    A missing check is not a pass ([docs/20](../docs/20-multi-model-orchestration.md)
-   Chatterbuilt lesson). Cross-check when status looks too green:
-   `gh api repos/OWNER/REPO/actions/runs?head_sha=<sha>` → non-empty for required
-   workflows.
+   Chatterbuilt lesson). Fail closed — do **not** grep human-readable
+   `gh pr checks` text, and do **not** treat a missing required set as green.
+   Verified against installed `gh` (`gh pr checks --help` JSON fields;
+   `conclusion` is **not** among them on current CLI — use `name`, `state`,
+   `bucket`):
+
+   ```bash
+   REPO_SLUG=owner/name          # replace
+   PR=123                        # replace
+   SHA=REPLACE_WITH_EXACT_HEAD   # replace with the claimed tip SHA
+
+   # Live PR head must equal the claimed SHA (not an ancestor, not a sibling tip).
+   test "$(gh pr view "$PR" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)" = "$SHA"
+
+   # Existence evidence only: some Actions run exists for this head. This is NOT
+   # a pass signal and does not inspect required checks.
+   gh api "repos/${REPO_SLUG}/actions/runs?head_sha=${SHA}" \
+     --jq 'if (.total_count // 0) < 1 then error("no actions runs for head") else .total_count end' \
+     >/dev/null
+
+   # Complete required-check set. Fields supported here (gh 2.x): name, state,
+   # bucket — there is no `conclusion` field on `gh pr checks --json` (confirmed
+   # via `gh pr checks --json` / --help). Success = every required check has
+   # bucket "pass". Empty required set or CLI failure (including "no required
+   # checks reported") fails closed — never treat a missing set as green.
+   required_json="$(gh pr checks "$PR" --repo "$REPO_SLUG" --required --json name,state,bucket)" \
+     || exit 1
+   test "$(printf '%s\n' "$required_json" | jq 'length')" -gt 0 || exit 1
+   printf '%s\n' "$required_json" | jq -e 'all(.[]; .bucket == "pass")' >/dev/null
+   ```
+
 3. **Cross-vendor review** — author never approves self (Law 5, docs/20 rule 1).
 4. **A worker PASS is a claim** — re-run checks; read the actual diff.
 5. **Owner / human gates** unchanged ([docs/14](../docs/14-human-gates.md)).
@@ -330,7 +360,7 @@ Cache hits never replace **exact-head** verification after new commits.
    for the expected commit SHA and reaches **READY**
    ([docs/12](../docs/12-vercel.md), [playbooks/release.md](release.md)); run
    post-deploy smoke (`BASE_URL=… npx playwright test …` contract happy-paths)
-   and, when applicable, `"$GIBSON/scripts/posture-probe.sh" <url>`
+   and, when applicable, `"$GIBSON/scripts/posture-probe.sh" "$BASE_URL"`
    ([docs/08](../docs/08-security.md)). Docs-only / no product surface: content
    verification on `origin/main` after the merge commit lands — not a Vercel
    READY wait (release playbook). **Never treat "CI green" as "deployed runtime
@@ -433,7 +463,7 @@ plus one sentence of evidence.
 - [ ] Is this ordinary (A), careful (B), or high-stakes money/auth/privacy (C)?
 - [ ] Is the crew using the bulk/cheaper pool for bulk work, and a stronger
       different reviewer when stakes need judgment?
-- [ ] Are we under **≤ 3** active lanes, with no two people on the same files?
+- [ ] Is active WIP **≤ 3 lanes**, with no overlapping file work?
 - [ ] Is there a kill switch and a retry limit so this cannot spin all night on
       open-ended quota or spend? (Flat-rate pools are **not free** — they
       saturate and still burn wall time.)
@@ -468,16 +498,34 @@ plus one sentence of evidence.
 
 ### A — Overnight Tier A backlog (efficient)
 
-1. `(cd "$REPO" && claims-status.sh --markdown)` → **≤ 3** live lanes; no overlap.
-2. `loop.sh --runner grok --repo "$REPO" --repo-slug "$REPO_SLUG" --max-iterations 20
-   --error-budget 5 --stale-budget 5 --escalate-after 2` on a flat-rate pool
-   (quota/saturation still real — not free).
-3. Each hat gets a fresh context; state in `gibson/loop-state.md`.
-4. On stall, `second-opinion.sh --repo "$REPO"` writes `gibson/second-opinion.md`
-   for another vendor.
-5. Morning: journal (include any runtime I/O/cache breakouts when printed) +
-   `cost-ledger.sh summarize`; merge only with exact-head green, independent
-   review, and deploy/runtime verification when the change has a product surface.
+```bash
+# 1) WIP: active WIP ≤ 3 lanes; no overlapping file work
+(cd "$REPO" && "$GIBSON/scripts/claims-status.sh" --markdown)
+
+# 2) Solo grind on a flat-rate pool (quota/saturation still real — not free)
+"$GIBSON/scripts/loop.sh" \
+  --runner grok \
+  --repo "$REPO" \
+  --repo-slug "$REPO_SLUG" \
+  --max-iterations 20 \
+  --error-budget 5 \
+  --stale-budget 5 \
+  --escalate-after 2
+
+# 3) Each hat gets a fresh context; state in gibson/loop-state.md (driver-managed)
+
+# 4) On stall: cross-vendor read-only opinion for another vendor
+"$GIBSON/scripts/second-opinion.sh" \
+  --repo "$REPO" \
+  --out "$REPO/gibson/second-opinion.md"
+
+# 5) Morning rollup (journal any runtime I/O/cache breakouts when printed)
+"$GIBSON/scripts/cost-ledger.sh" summarize \
+  --ledger "$REPO/gibson/cost-ledger.jsonl" \
+  --format text
+# Merge only with exact-head green, independent review, and deploy/runtime
+# verification when the change has a product surface (§8).
+```
 
 ### B — False economy (forbidden)
 
