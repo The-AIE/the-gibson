@@ -32,6 +32,73 @@ check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2'
 contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
 lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
+# --- harness-owned `git` command shim (#153 review round 3, P1) -------------
+# The TOCTOU sensors below need a mutation to land inside a specific window
+# INSIDE release-claim.sh — between its safety proof and the mutation that
+# proof authorises. That used to be done with RELEASE_CLAIM_TEST_*_HOOK
+# variables that production read and EXECUTED. An environment variable naming
+# an executable is an execution path however it is documented, so those are
+# gone; the window is driven from outside instead.
+#
+# write_git_shim installs a `git` earlier on PATH than the real one. It
+# forwards every invocation to the real git, and exactly once — immediately
+# BEFORE the git call the sensor targets — runs a deterministic mutation baked
+# into the generated shim. release-claim.sh cooperates in no way and cannot
+# tell the difference.
+#
+# Triggers:
+#   status2    the SECOND `git -C <path> status --porcelain`, i.e. the
+#              pre-removal revalidation (the first is the safety proof)
+#   updateref  `git update-ref -d refs/heads/…`, the local CAS delete
+#   pushlease  `git push --force-with-lease=… origin :refs/heads/…`
+# The mutation body may use $WT (the -C path of the triggering call), $BR,
+# $CANON, $ORIGIN and $REAL_GIT.
+REAL_GIT=$(command -v git)
+write_git_shim() { # dir trigger branch body
+  local dir="$1" trigger="$2" branch="$3" body="$4"
+  mkdir -p "$ROOT/$dir/shim"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'REAL_GIT=%q\n' "$REAL_GIT"
+    printf 'STATE=%q\n' "$ROOT/$dir/shim/state"
+    printf 'TRIGGER=%q\n' "$trigger"
+    printf 'BR=%q\n' "$branch"
+    printf 'CANON=%q\n' "$ROOT/$dir/canon"
+    printf 'ORIGIN=%q\n' "$ROOT/$dir/origin"
+    cat <<'SHIM'
+args=("$@")
+CPATH=""
+i=0
+while [[ "$i" -lt "${#args[@]}" ]]; do
+  if [[ "${args[$i]}" == "-C" ]]; then CPATH="${args[$((i + 1))]}"; fi
+  i=$((i + 1))
+done
+joined="$*"
+matched=0
+case "$TRIGGER" in
+  status2)
+    if [[ "$joined" == *"status --porcelain"* && -n "$CPATH" ]]; then
+      n=$(cat "$STATE.n" 2>/dev/null || echo 0)
+      n=$((n + 1)); echo "$n" > "$STATE.n"
+      [[ "$n" -eq 2 ]] && matched=1
+    fi
+    ;;
+  updateref) [[ "$joined" == *"update-ref -d refs/heads/"* ]] && matched=1 ;;
+  pushlease) [[ "$joined" == *"--force-with-lease="* ]] && matched=1 ;;
+esac
+if [[ "$matched" -eq 1 && ! -e "$STATE.fired" ]]; then
+  : > "$STATE.fired"
+  WT="$CPATH"
+SHIM
+    printf '%s\n' "$body"
+    cat <<'SHIM2'
+fi
+exec "$REAL_GIT" "$@"
+SHIM2
+  } > "$ROOT/$dir/shim/git"
+  chmod +x "$ROOT/$dir/shim/git"
+}
+
 # A canonical checkout parked on a dirty long-lived branch — the L-009 shape.
 #
 # $2 (optional) gives the checkout a real GitHub repository identity
@@ -2466,12 +2533,7 @@ br=$(git -C "$ROOT/nondef1/canon" branch --list 'feat/310-nondefault-path')
 
 echo "#153 blocker 2: TOCTOU — worktree dirtied between the safety check and removal refuses (rc=3)"
 TOCTOU_SHA=$(term_fixture toctou1 311 toctou-case)
-cat > "$ROOT/toctou1/dirty-hook.sh" <<'HOOK'
-#!/usr/bin/env bash
-echo "raced-in-content" > "$1/raced.txt"
-HOOK
-chmod +x "$ROOT/toctou1/dirty-hook.sh"
-export RELEASE_CLAIM_TEST_DIRTY_HOOK="$ROOT/toctou1/dirty-hook.sh"
+write_git_shim toctou1 status2 feat/311-toctou-case 'echo "raced-in-content" > "$WT/raced.txt"'
 export GH_PR_ALL_TSV="$ROOT/toctou1/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/toctou1/open.tsv"
 : > "$GH_PR_OPEN_TSV"
@@ -2481,8 +2543,7 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '811\tissue-311-toctou-case\tlib/x/**\t311\tfeat/311-toctou-case\t%s\thttps://github.com/acme/app/pull/811\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$TOCTOU_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-out=$(cd "$ROOT/toctou1/canon" && "$RC" 311 --claim-id issue-311-toctou-case --repo acme/app 2>&1); rc=$?
-unset RELEASE_CLAIM_TEST_DIRTY_HOOK
+out=$(cd "$ROOT/toctou1/canon" && PATH="$ROOT/toctou1/shim:$PATH" "$RC" 311 --claim-id issue-311-toctou-case --repo acme/app 2>&1); rc=$?
 check    "TOCTOU dirty-between-check-and-removal exits 3" "$rc" "3"
 contains "names the TOCTOU refusal"                       "$out" "became dirty between the safety proof and removal"
 lacks    "does not claim success on TOCTOU race"          "$out" "OK —"
@@ -2627,19 +2688,15 @@ lacks    "does not claim success on postcondition query failure" "$out" "OK —"
 
 echo "second Codex review: local branch advances after the safety proof but before the CAS delete — refuse, never carry a fresh reread as the CAS expectation, never fall through to the remote delete"
 LOCALADV_SHA=$(term_fixture localadv1 320 local-advance-race-case)
-cat > "$ROOT/localadv1/local-advance-hook.sh" <<'HOOK'
-#!/usr/bin/env bash
 # Simulates a concurrent process advancing the local branch AFTER
 # terminal_cleanup_release's identity proof already accepted its old tip, but
 # BEFORE the CAS delete runs. By this point in the run the worktree for this
 # branch has already been removed, so the ref is safe to move directly. If
-# the CAS delete used a fresh `git rev-parse` read taken after this hook (the
-# original bug) it would trivially match itself and delete the advanced
-# branch; carrying the proof-time OID forward must refuse instead.
-git update-ref "refs/heads/$1" HEAD
-HOOK
-chmod +x "$ROOT/localadv1/local-advance-hook.sh"
-export RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK="$ROOT/localadv1/local-advance-hook.sh"
+# the CAS delete used a fresh `git rev-parse` read taken here (the original
+# bug) it would trivially match itself and delete the advanced branch;
+# carrying the proof-time OID forward must refuse instead.
+write_git_shim localadv1 updateref feat/320-local-advance-race-case \
+  '"$REAL_GIT" -C "$CANON" update-ref "refs/heads/$BR" "$("$REAL_GIT" -C "$CANON" rev-parse HEAD)"'
 export GH_PR_ALL_TSV="$ROOT/localadv1/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/localadv1/open.tsv"
 : > "$GH_PR_OPEN_TSV"
@@ -2649,8 +2706,7 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '820\tissue-320-local-advance-race-case\tlib/x/**\t320\tfeat/320-local-advance-race-case\t%s\thttps://github.com/acme/app/pull/820\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$LOCALADV_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-out=$(cd "$ROOT/localadv1/canon" && "$RC" 320 --claim-id issue-320-local-advance-race-case --repo acme/app 2>&1); rc=$?
-unset RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK
+out=$(cd "$ROOT/localadv1/canon" && PATH="$ROOT/localadv1/shim:$PATH" "$RC" 320 --claim-id issue-320-local-advance-race-case --repo acme/app 2>&1); rc=$?
 check    "local-advance race exits 3"                    "$rc" "3"
 contains "names the local CAS refusal"                   "$out" "local branch CAS delete refused"
 contains "names why the remote delete was skipped"       "$out" "skipping remote branch CAS delete"
@@ -2666,19 +2722,14 @@ remote_br=$(git -C "$ROOT/localadv1/canon" ls-remote --heads origin 'feat/320-lo
 
 echo "second Codex review: remote branch advances after the safety proof but before the CAS delete — refuse, the lease stays bound to the verified terminal head SHA"
 REMOTEADV_SHA=$(term_fixture remoteadv1 321 remote-advance-race-case)
-cat > "$ROOT/remoteadv1/remote-advance-hook.sh" <<HOOK
-#!/usr/bin/env bash
-set -e
-clone_dir=\$(mktemp -d)
-git clone -q "$ROOT/remoteadv1/origin" "\$clone_dir" >/dev/null 2>&1
-git -C "\$clone_dir" fetch -q origin "\$1" >/dev/null 2>&1
-git -C "\$clone_dir" checkout -q "\$1" >/dev/null 2>&1
-git -C "\$clone_dir" commit --allow-empty -qm "raced advance" >/dev/null 2>&1
-git -C "\$clone_dir" push -q origin "\$1" >/dev/null 2>&1
-rm -rf "\$clone_dir"
-HOOK
-chmod +x "$ROOT/remoteadv1/remote-advance-hook.sh"
-export RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK="$ROOT/remoteadv1/remote-advance-hook.sh"
+write_git_shim remoteadv1 pushlease feat/321-remote-advance-race-case '
+  clone_dir=$(mktemp -d)
+  "$REAL_GIT" clone -q "$ORIGIN" "$clone_dir" >/dev/null 2>&1
+  "$REAL_GIT" -C "$clone_dir" fetch -q origin "$BR" >/dev/null 2>&1
+  "$REAL_GIT" -C "$clone_dir" checkout -q "$BR" >/dev/null 2>&1
+  "$REAL_GIT" -C "$clone_dir" commit --allow-empty -qm "raced advance" >/dev/null 2>&1
+  "$REAL_GIT" -C "$clone_dir" push -q origin "$BR" >/dev/null 2>&1
+  rm -rf "$clone_dir"'
 export GH_PR_ALL_TSV="$ROOT/remoteadv1/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/remoteadv1/open.tsv"
 : > "$GH_PR_OPEN_TSV"
@@ -2688,8 +2739,7 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '821\tissue-321-remote-advance-race-case\tlib/x/**\t321\tfeat/321-remote-advance-race-case\t%s\thttps://github.com/acme/app/pull/821\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$REMOTEADV_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-out=$(cd "$ROOT/remoteadv1/canon" && "$RC" 321 --claim-id issue-321-remote-advance-race-case --repo acme/app 2>&1); rc=$?
-unset RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK
+out=$(cd "$ROOT/remoteadv1/canon" && PATH="$ROOT/remoteadv1/shim:$PATH" "$RC" 321 --claim-id issue-321-remote-advance-race-case --repo acme/app 2>&1); rc=$?
 check    "remote-advance race exits 3"                    "$rc" "3"
 contains "names the remote CAS refusal"                   "$out" "remote branch CAS delete refused"
 lacks    "does not claim success on remote-advance race"  "$out" "OK —"
@@ -2700,18 +2750,14 @@ remote_br=$(git -C "$ROOT/remoteadv1/canon" ls-remote --heads origin 'feat/321-r
 
 echo "third Codex review: worktree cleanly switches to another branch between the safety proof and removal — refuse (rc=3), never a substitute for the dirty-file hook"
 SWITCHRACE_SHA=$(term_fixture switchrace1 322 branch-switch-race-case)
-cat > "$ROOT/switchrace1/switch-hook.sh" <<'HOOK'
-#!/usr/bin/env bash
 # Simulates a concurrent process cleanly switching the registered worktree to
 # an unrelated branch in the exact window between terminal_cleanup_release's
 # safety proof (which already validated the worktree's original branch/HEAD)
 # and the non-force `git worktree remove` call. The switch is clean — no
 # uncommitted changes — so `git status --porcelain` alone stays silent; only
 # the dedicated post-proof branch re-check catches it.
-git -C "$1" checkout -q -b decoy-branch-322
-HOOK
-chmod +x "$ROOT/switchrace1/switch-hook.sh"
-export RELEASE_CLAIM_TEST_DIRTY_HOOK="$ROOT/switchrace1/switch-hook.sh"
+write_git_shim switchrace1 status2 feat/322-branch-switch-race-case \
+  '"$REAL_GIT" -C "$WT" checkout -q -b decoy-branch-322'
 export GH_PR_ALL_TSV="$ROOT/switchrace1/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/switchrace1/open.tsv"
 : > "$GH_PR_OPEN_TSV"
@@ -2721,8 +2767,7 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '822\tissue-322-branch-switch-race-case\tlib/x/**\t322\tfeat/322-branch-switch-race-case\t%s\thttps://github.com/acme/app/pull/822\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$SWITCHRACE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-out=$(cd "$ROOT/switchrace1/canon" && "$RC" 322 --claim-id issue-322-branch-switch-race-case --repo acme/app 2>&1); rc=$?
-unset RELEASE_CLAIM_TEST_DIRTY_HOOK
+out=$(cd "$ROOT/switchrace1/canon" && PATH="$ROOT/switchrace1/shim:$PATH" "$RC" 322 --claim-id issue-322-branch-switch-race-case --repo acme/app 2>&1); rc=$?
 check    "branch-switch race exits 3"                  "$rc" "3"
 contains "names the branch-switch TOCTOU refusal"       "$out" "switched off branch"
 lacks    "does not claim success on branch-switch race" "$out" "OK —"
@@ -2738,18 +2783,54 @@ remote_br=$(git -C "$ROOT/switchrace1/canon" ls-remote --heads origin 'feat/322-
 [[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
   ok "branch-switch race: label was never touched" || bad "branch-switch race: label edit was attempted"
 
+echo "#153 round 3 · production runs no command named by an inherited variable"
+# The removed RELEASE_CLAIM_TEST_*_HOOK variables, pointed at an executable
+# sentinel, over a run that reaches every window they used to fire in. If any
+# production path still executes one, the sentinel leaves a marker.
+SENT_DIR="$ROOT/sentinel"
+mkdir -p "$SENT_DIR"
+cat > "$SENT_DIR/run" <<SENT
+#!/usr/bin/env bash
+echo "EXECUTED \$0 \$*" >> "$SENT_DIR/fired"
+exit 0
+SENT
+chmod +x "$SENT_DIR/run"
+: > "$SENT_DIR/fired"
+SENT_SHA=$(term_fixture sentinel1 324 hook-sentinel-case)
+export GH_PR_ALL_TSV="$ROOT/sentinel1/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/sentinel1/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/sentinel1/gh-state"
+export GH_LOG="$ROOT/sentinel1/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '824\tissue-324-hook-sentinel-case\tlib/x/**\t324\tfeat/324-hook-sentinel-case\t%s\thttps://github.com/acme/app/pull/824\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SENT_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/sentinel1/canon" && \
+  RELEASE_CLAIM_TEST_DIRTY_HOOK="$SENT_DIR/run" \
+  RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK="$SENT_DIR/run" \
+  RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK="$SENT_DIR/run" \
+  GIBSON_CLAIM_TEST_ROLLBACK_HOOK="$SENT_DIR/run" \
+  "$RC" 324 --claim-id issue-324-hook-sentinel-case --repo acme/app 2>&1); rc=$?
+check "the sentinel run reached full terminal cleanup" "$rc" "0"
+check "no removed hook was executed" "$(grep -c . "$SENT_DIR/fired" || true)" "0"
+for v in RELEASE_CLAIM_TEST_DIRTY_HOOK RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK \
+         RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK GIBSON_CLAIM_TEST_ROLLBACK_HOOK; do
+  if grep -q "$v" "$RC"; then
+    bad "$v is still referenced in release-claim.sh"
+  else
+    ok "$v is gone from release-claim.sh"
+  fi
+done
+
 echo "third Codex review: worktree gets a clean commit (HEAD move) on the same branch between the safety proof and removal — refuse (rc=3)"
 HEADMOVE_SHA=$(term_fixture headmove1 323 head-move-race-case)
-cat > "$ROOT/headmove1/headmove-hook.sh" <<'HOOK'
-#!/usr/bin/env bash
 # Simulates a concurrent process landing a clean commit on the *same* branch
 # in the window between the safety proof and removal. Status stays clean and
 # the branch name is unchanged — only the HEAD re-check catches this, not the
 # dirty-status check and not the branch-identity check.
-git -C "$1" commit --allow-empty -qm "raced commit, still on the same branch"
-HOOK
-chmod +x "$ROOT/headmove1/headmove-hook.sh"
-export RELEASE_CLAIM_TEST_DIRTY_HOOK="$ROOT/headmove1/headmove-hook.sh"
+write_git_shim headmove1 status2 feat/323-head-move-race-case \
+  '"$REAL_GIT" -C "$WT" commit --allow-empty -qm "raced commit, still on the same branch"'
 export GH_PR_ALL_TSV="$ROOT/headmove1/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/headmove1/open.tsv"
 : > "$GH_PR_OPEN_TSV"
@@ -2759,8 +2840,7 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '823\tissue-323-head-move-race-case\tlib/x/**\t323\tfeat/323-head-move-race-case\t%s\thttps://github.com/acme/app/pull/823\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$HEADMOVE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-out=$(cd "$ROOT/headmove1/canon" && "$RC" 323 --claim-id issue-323-head-move-race-case --repo acme/app 2>&1); rc=$?
-unset RELEASE_CLAIM_TEST_DIRTY_HOOK
+out=$(cd "$ROOT/headmove1/canon" && PATH="$ROOT/headmove1/shim:$PATH" "$RC" 323 --claim-id issue-323-head-move-race-case --repo acme/app 2>&1); rc=$?
 check    "head-move race exits 3"                   "$rc" "3"
 contains "names the HEAD-move TOCTOU refusal"        "$out" "HEAD moved"
 lacks    "does not claim success on head-move race"  "$out" "OK —"
@@ -3144,6 +3224,90 @@ contains "names the unbindable head branch" "$out" "is not the branch claim id"
 lacks    "never reports success"             "$out" "OK —"
 [[ -d "$ROOT/openodd/wt-412-odd-branch" ]] &&
   ok "unbindable branch: worktree untouched" || bad "unbindable branch: worktree removed"
+
+# --- #153 review round 3, P2: a post-close evidence failure is exit 3 -------
+# try_terminal_pr_body_release used to `die` on unusable terminal evidence.
+# Called from HERE the PR is already closed, so that exit-1 death was a
+# partial mutation escaping the documented close-only lifecycle: no
+# INCOMPLETE banner, no preserved-label report, no recovery instruction, and
+# the wrong exit code for callers that distinguish "refused" (1) from
+# "did part of the work" (3).
+echo "#153 round 3 · terminal evidence UNREADABLE after a successful close: exit 3, artifacts + label preserved"
+open_fixture openterm 413 terminal-unreadable
+open_row 916 issue-413-terminal-unreadable 'lib/x/**' feat/413-terminal-unreadable > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openterm/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"          # post-close: the claim really did stop being live
+export GH_PR_ALL_EXIT=1         # …but the closed PR's own terminal evidence will not read
+out=$(cd "$ROOT/openterm/canon" && "$RC" 413 --claim-id issue-413-terminal-unreadable --repo acme/app 2>&1); rc=$?
+unset GH_PR_ALL_EXIT
+check    "post-close terminal read failure exits 3, not 1" "$rc" "3"
+contains "the live read succeeded and the PR was closed"   "$out" "closing PR #916"
+[[ -n "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "the close really happened" || bad "the PR was never closed"
+contains "names the unusable terminal evidence" "$out" "terminal evidence is unusable"
+contains "names the underlying read failure"    "$out" "gh query failed"
+contains "reports INCOMPLETE"                   "$out" "INCOMPLETE"
+contains "names the recovery action"            "$out" "RECOVERY"
+contains "the recovery is the bound re-run"     "$out" "--pr 916"
+contains "says the artifacts were preserved"    "$out" "are being PRESERVED"
+contains "preserves the label"                  "$out" "preserving agent-claimed"
+lacks    "never reports success"                "$out" "OK —"
+[[ -d "$ROOT/openterm/wt-413-terminal-unreadable" ]] &&
+  ok "unreadable terminal evidence: worktree preserved" || bad "unreadable terminal evidence: worktree removed"
+[[ -n "$(git -C "$ROOT/openterm/canon" branch --list 'feat/413-terminal-unreadable')" ]] &&
+  ok "unreadable terminal evidence: local branch preserved" || bad "unreadable terminal evidence: local branch deleted"
+[[ -n "$(git -C "$ROOT/openterm/canon" ls-remote --heads origin 'feat/413-terminal-unreadable')" ]] &&
+  ok "unreadable terminal evidence: remote branch preserved" || bad "unreadable terminal evidence: remote branch deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unreadable terminal evidence: label never edited" || bad "unreadable terminal evidence: label edit attempted"
+
+echo "#153 round 3 · terminal evidence that CONTRADICTS the close is equally exit 3, with the exact check unchanged"
+open_fixture openterm2 414 terminal-contradicts
+open_row 917 issue-414-terminal-contradicts 'lib/x/**' feat/414-terminal-contradicts > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openterm2/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+TERMC_SHA=$(git -C "$ROOT/openterm2/wt-414-terminal-contradicts" rev-parse HEAD)
+# The evidence says the PR is still OPEN. The exact state check is unchanged —
+# it still refuses — it just no longer decides the process's exit code.
+printf '917\tissue-414-terminal-contradicts\tlib/x/**\t414\tfeat/414-terminal-contradicts\t%s\thttps://github.com/acme/app/pull/917\tOPEN\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERMC_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/openterm2/canon" && "$RC" 414 --claim-id issue-414-terminal-contradicts --repo acme/app 2>&1); rc=$?
+check    "contradictory terminal evidence exits 3" "$rc" "3"
+contains "the exact state check still fires"       "$out" "is still OPEN"
+contains "reports INCOMPLETE"                      "$out" "INCOMPLETE"
+contains "names the recovery action"               "$out" "RECOVERY"
+lacks    "never reports success"                   "$out" "OK —"
+[[ -d "$ROOT/openterm2/wt-414-terminal-contradicts" ]] &&
+  ok "contradictory evidence: worktree preserved" || bad "contradictory evidence: worktree removed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "contradictory evidence: label never edited" || bad "contradictory evidence: label edit attempted"
+
+echo "#153 round 3 · the SAME failure before any mutation is still a plain refusal (exit 1) that names the binding"
+# Nothing has been closed on the --claim-id-with-no-ledger-row path, so a
+# fatal evidence verdict there is safe to refuse outright — and must name
+# which binding failed instead of collapsing into "no live claim".
+TERMPRE_SHA=$(term_fixture termpre 415 terminal-premutation)
+export GH_PR_ALL_TSV="$ROOT/termpre/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/termpre/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/termpre/gh-state"
+export GH_LOG="$ROOT/termpre/gh.log"
+export GH_PR_CLOSE_LOG="$ROOT/termpre/close.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
+unset GH_PR_OPEN_TSV2 GH_OPEN_CALLS
+printf '918\tissue-415-terminal-premutation\tlib/x/**\t415\tfeat/415-terminal-premutation\t%s\thttps://github.com/acme/app/pull/918\tOPEN\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERMPRE_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/termpre/canon" && "$RC" 415 --claim-id issue-415-terminal-premutation --repo acme/app --pr 918 2>&1); rc=$?
+check    "pre-mutation fatal evidence exits 1" "$rc" "1"
+contains "names the binding that failed"       "$out" "is still OPEN"
+lacks    "does not hide behind the generic message" "$out" "no live claim"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "pre-mutation refusal closed nothing" || bad "pre-mutation refusal closed a PR"
+[[ -d "$ROOT/termpre/wt-415-terminal-premutation" ]] &&
+  ok "pre-mutation refusal: worktree untouched" || bad "pre-mutation refusal: worktree removed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "pre-mutation refusal: label never edited" || bad "pre-mutation refusal: label edit attempted"
 
 echo "close-only: leftover worktree/branch are NAMED and returned INCOMPLETE, never reported as success"
 open_fixture openleft 403 leftovers

@@ -306,6 +306,26 @@ GitHub read is **fail-closed**: a query failure or a malformed row there
 preserves `agent-claimed` and reports incomplete (exit 3) rather than
 guessing the claim is gone.
 
+**Closing the PR is the release; proving it is a separate step.** When the claim is
+still an open PR, `release-claim.sh` closes it first and then re-reads that closed
+PR's own terminal evidence to bind an exact head SHA before removing anything. If
+that terminal read fails, comes back ambiguous, or contradicts the PR's own state,
+the run is a **partial mutation** — the claim is released, but nothing about the
+worktree or the branches was proven. It therefore takes the close-only path:
+worktree, both branch refs and `agent-claimed` all preserved, `INCOMPLETE`, **exit
+3**, and a `RECOVERY:` line naming the bound re-run to finish the job:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<slug> --repo owner/name --pr <pr-number>
+```
+
+Run that once the evidence reads cleanly and the exact verified cleanup
+(registered-worktree proof, head-SHA containment, compare-and-swap branch deletes)
+takes over. The same evidence failure **before** any mutation is a plain refusal —
+exit **1**, nothing done — and it names which binding failed instead of collapsing
+into "no live claim". Read the exit code as: **1 = refused, nothing done; 3 = did
+part of the work, here is exactly what is left.**
+
 **The repository has to be the same repository.** All of the above authorizes
 deleting a worktree, a branch, and a label, so before any of it runs
 `release-claim.sh` proves that the checkout it is cleaning up (`GIBSON_CANONICAL`,

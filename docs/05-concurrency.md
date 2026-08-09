@@ -175,11 +175,28 @@ evidence both lanes can read:
   same step that publishes the claim, so both racers compute the same winner;
 - an overlapping ledger claim always wins — it was never part of this race.
 
-Exactly one lane survives. The loser rolls back **only what it created** — its own
-PR, branch, worktree, and the `agent-claimed` label if it was the one that added it
-(a label a sibling slice already held is left alone) — and exits non-zero. There is
-no lock file and no repo-global state, so a lane that is killed mid-claim leaves
-nothing behind for the next one to trip over.
+**Under the stated condition, exactly one lane survives.** The condition is the
+publication barrier below: when every racing lane's claim PR becomes visible to
+every other racing lane inside its own quiescence window, all of them compute the
+same lowest PR number and exactly one is admitted. That is a *bounded* guarantee,
+not an unconditional one — eventual-consistency lag has no upper bound that this
+harness controls, so a replica that hides a rival for longer than the whole window
+can still admit two lanes. Everything the barrier *can* see resolves
+deterministically; everything it cannot see it refuses rather than guesses.
+
+The loser rolls back **only what it created** — its own PR, branch, worktree, and
+the `agent-claimed` label if it was the one that added it (a label a sibling slice
+already held is left alone) — and exits non-zero.
+
+> **A killed lane does leave things behind.** Rollback runs from an EXIT trap, so
+> it protects a lane that *fails or refuses*, not one that is *destroyed*. SIGKILL,
+> a power loss, or a terminated shell before the trap finishes can leave an open
+> draft PR — which is a LIVE claim — plus the `agent-claimed` label, a pushed
+> branch, and a worktree. There is no lock file and no repo-global state, which is
+> why a survivor can still make progress; it is not a promise that nothing is left
+> over. Those artifacts do not self-heal: clear them with
+> `scripts/claim-reaper.sh` (below) or the manual recovery in
+> [troubleshooting/claim-conflicts.md](troubleshooting/claim-conflicts.md).
 
 **Seeing yourself is not seeing everyone — so admission waits for the inventory to
 go quiet.** GitHub's pull-request listing is eventually consistent. A rival claim PR
@@ -191,9 +208,24 @@ survive. Admission therefore does not decide on one sample. It re-reads the
 inventory, spaced by `GIBSON_CLAIM_ADMIT_DELAY`, until the claim-relevant projection
 of it (PR number, claim id, scope) comes back **identical on
 `GIBSON_CLAIM_ADMIT_STABLE_READS` consecutive reads that all contain this lane's own
-claim**, and decides on that settled view — the same one handed to
-`scope-overlap.mjs` via `--pr-claims-file`, so the barrier is not thrown away by a
-re-read one line later.
+claim**, and decides on that settled view.
+
+The barrier lives **inside** `scope-overlap.mjs`, which takes those reads itself
+through the `pr-claims.sh` sitting next to it on disk. Nothing hands it an
+inventory. An option to supply one is a forged-evidence path — a caller could pass
+a fabricated empty or self-only inventory and be admitted over a live conflicting
+claim — and no cross-process handoff of caller-supplied data can be made
+unforgeable without a shared secret. So the reads happen where the decision
+happens, and the trust boundary is "the reader I executed", not "the bytes I was
+given".
+
+The barrier also has a **production floor**: at least 2 consecutive matching reads,
+spaced at least 1 second apart. `GIBSON_CLAIM_ADMIT_STABLE_READS`,
+`GIBSON_CLAIM_ADMIT_DELAY` and `GIBSON_CLAIM_ADMIT_ATTEMPTS` may only *raise* it; a
+value below the floor is a usage error, not a silent clamp. There is no supported
+way to switch the barrier off, and no `*_TEST_*` variable that production reads.
+Sensors accelerate the *wait* with a `sleep` command shim, or run an explicitly
+patched test copy — neither is reachable from an ordinary inherited environment.
 
 > **Invariant:** the verdict is computed from a *quiescent* inventory — one that
 > stopped changing across a window of at least `(STABLE_READS - 1) x DELAY`
@@ -220,7 +252,31 @@ same-issue siblings remain legal and the scope check is what keeps them disjoint
 live claim id whose issue number cannot be parsed is ambiguous evidence about
 siblinghood and refuses rather than being assumed to be a different issue.
 
-**A losing lane preserves work it cannot prove is its own.** Rollback runs the same
+**No node, no claim.** `scope-overlap.mjs` is the *only* implementation of the
+overlap and admission decision, and `claim.sh` requires `node` before it mutates
+anything. The old stem-grep fallback answered a weaker question and, worse, ran
+only after the label, the branch, the PR and the worktree already existed. Every
+read the claim path depends on — the live PR-body inventory, the ledger tree, the
+legacy table — fails **closed**: an unreadable or malformed answer refuses the
+claim rather than being treated as "no live claims". Those refusals happen before
+the first mutation, so a nodeless or unreadable run leaves the repository exactly
+as it found it.
+
+**A losing lane preserves work it cannot prove is its own — and it does the claim
+first.** Rollback is ordered. Nothing is destroyed until this lane's own claim PR
+has been positively bound (exact claim id *and* exact head branch, and the number
+this lane created when it knows one), positively closed, and **freshly proven no
+longer live** by a re-read of the authoritative inventory. A `gh pr close` that
+failed, a close that reported success while the claim is still listed, an
+unreadable/malformed/ambiguous inventory, and a `gh pr create` that succeeded but
+printed something unparseable all stop there: every artifact is retained, the
+uncertainty is named, and the run exits `INCOMPLETE` and non-zero. The worktree,
+the branches and the issue-wide `agent-claimed` label are all backing a claim that
+may still be live, and stripping an issue-wide label while this lane's PR may still
+be open would also drop this lane out of every sibling calculation the other lanes
+make.
+
+Once that holds, rollback runs the same
 protections as terminal cleanup — shared as `scripts/lib/claim-guards.sh`, not
 copied, so a fix to one is a fix to both. The worktree is the one `git worktree
 list --porcelain` says is on this branch (never assumed from its path), and it must
@@ -248,6 +304,20 @@ refused for those paths too, and if repository identity cannot be resolved at al
 (no `--repo`, `gh repo view` failing, origin unreadable) the run stops **before**
 any mutation rather than skipping the authoritative inventory and cleaning up on a
 view it never read.
+
+**Closing the PR is the release; proving it is a separate step (release side).**
+`release-claim.sh` closes the owning open PR first, then re-reads the closed PR's
+own terminal evidence to bind an exact head SHA before removing anything. If that
+terminal read fails, is ambiguous, or contradicts the PR's own state, the run is a
+**partial mutation**: the claim is released but nothing about the worktree or the
+branches was proven. It therefore takes the documented close-only path — worktree,
+both branch refs and `agent-claimed` preserved, `INCOMPLETE`, **exit 3**, and a
+`RECOVERY` line naming the bound re-run
+(`release-claim.sh <issue> --claim-id <id> --repo <owner/name> --pr <number>`) that
+runs the exact verified cleanup once the evidence reads cleanly. The same evidence
+failure *before* any mutation is still a plain refusal (exit 1) that names which
+binding failed. Exit 1 means "refused, nothing done"; exit 3 means "did part of the
+work, here is what is left".
 
 **A released claim id may be reused — and that makes the id ambiguous forever
 after.** Once a claim's PR is terminal the id is free again, so a second generation

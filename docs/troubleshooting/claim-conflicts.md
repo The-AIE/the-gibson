@@ -159,7 +159,10 @@ This is a race resolving itself, and there are two shapes of it.
 overlap check, because at the moment each of them looked, neither claim existed
 yet. `claim.sh` re-checks after publishing its claim and stands down if an
 overlapping claim holds a lower PR number — deterministically, so exactly one lane
-survives.
+survives **provided each lane's PR became visible to the other inside its own
+quiescence window** (see the publication barrier below). That window is bounded;
+eventual-consistency lag is not, so this is a strong guarantee, not an absolute
+one.
 
 **Same issue, disjoint scopes.** Two lanes on one issue under different slugs also
 both pass the pre-create duplicate check, and a scope-only re-check clears them
@@ -169,10 +172,12 @@ exactly one lane survives; the loser's message says `issue #<n> is already held`
 If a second lane really is what you want, it needs `--slice` **and** a
 non-overlapping scope.
 
-Nothing of the winner's is touched: the refused lane closed its own PR, deleted its
-own local and remote branch, removed its own worktree, and left `agent-claimed`
-alone whenever a sibling claim on that issue survives. Re-run the claim once the
-winning lane releases, or claim a disjoint scope.
+Nothing of the winner's is touched: the refused lane closed its own PR, and only
+*after* proving that close made its claim stop being live did it delete its own
+local and remote branch and remove its own worktree. It left `agent-claimed` alone
+whenever a sibling claim on that issue survives, or whenever it could not prove its
+own PR was closed. Re-run the claim once the winning lane releases, or claim a
+disjoint scope.
 
 ## "could not obtain a stable live-claim inventory"
 
@@ -182,15 +187,33 @@ a rival created moments before yours can be missing from the page you are served
 even after your own claim shows up in it. `claim.sh` re-reads until the inventory
 comes back identical on `GIBSON_CLAIM_ADMIT_STABLE_READS` (default 2) consecutive
 reads, spaced by `GIBSON_CLAIM_ADMIT_DELAY` (default 2s), giving up after
-`GIBSON_CLAIM_ADMIT_ATTEMPTS` (default 6).
+`GIBSON_CLAIM_ADMIT_ATTEMPTS` (default 6). The reads are taken by
+`scope-overlap.mjs` itself — it is not given an inventory by anyone.
 
 You see this when the API is failing, or when the repository is claiming and
 releasing fast enough that the view keeps changing under the barrier. It is a
 **fail-closed refusal**: the lane rolled back and nothing was admitted on a view it
 could not stabilise. Just re-run the claim. If a busy repository trips it
-repeatedly, widen the window (more attempts, longer delay) rather than lowering
-`GIBSON_CLAIM_ADMIT_STABLE_READS` to 1 — that setting turns the publication barrier
-off entirely and brings back the both-lanes-survive race.
+repeatedly, widen the window: **raise** the attempts and the delay.
+
+You cannot lower it. The barrier has a production floor of 2 matching reads spaced
+at least 1 second apart; `GIBSON_CLAIM_ADMIT_STABLE_READS=1` or
+`GIBSON_CLAIM_ADMIT_DELAY=0` is refused as a usage error rather than honoured,
+because a single sample brings back the both-lanes-survive race. There is no
+supported switch that turns the barrier off.
+
+## "node required" — the claim refused before it did anything
+
+`scope-overlap.mjs` is the only implementation of the overlap and admission
+decision, so `claim.sh` refuses outright on a host without `node`. It refuses
+*before* the label, branch, PR or worktree exist, so there is nothing to clean up:
+install node (or run the lane from a host that has it) and re-run. The old
+stem-grep fallback is gone on purpose — it answered a weaker question, and it ran
+only after everything had already been created.
+
+The same shape applies to a failed read: an unreadable or malformed live-claim
+inventory refuses before the first mutation. "I could not find out" is never
+recorded as "there are no live claims".
 
 ## `claim.sh: INCOMPLETE` — a rollback left something behind
 
@@ -199,6 +222,20 @@ its own and untouched. If, during the admission window, its worktree picked up
 uncommitted or untracked files, its branch advanced, the worktree was moved or
 switched to another branch, or the remote could not be read, the rollback **keeps**
 that artifact, prints `INCOMPLETE` with every leftover named, and exits non-zero.
+
+Rollback does the **claim itself first**, and the artifacts only after. If the run
+could not positively bind its own claim PR, could not close it, or could not
+freshly prove it stopped being a live claim, then *everything* is retained —
+worktree, both branches, and the issue-wide `agent-claimed` label — because they
+are all backing a claim that may still be open. Those messages name what happened:
+
+| Leftover message | What actually happened | What to do |
+|---|---|---|
+| `gh pr close failed` | The PR may still be open, so the claim may still be LIVE. | Close the named PR by hand, then re-run the claim. |
+| `STILL a live claim after gh pr close reported success` | GitHub accepted the close but still lists the claim. | Re-check the PR on GitHub; it may be lag, or the close may not have stuck. |
+| `could not be re-read to prove the claim is gone` | The close probably worked; the proving read failed. | Re-read `pr-claims.sh list <owner/repo>` yourself, then clean up by hand. |
+| `could not be parsed into a PR number ... may exist and be unpublished` | `gh pr create` exited 0 but printed something unparseable. **A PR may exist that nothing here knows the number of.** | Look for an open draft PR on the claim's head branch, close it, then re-run. |
+| `not provably this lane's` | A live PR matched by number but carries someone else's claim id or head branch. | Investigate before touching anything — this lane refused to close a PR it could not prove was its own. |
 
 That output is the work list. For each named item:
 
@@ -215,3 +252,33 @@ own it again), or remove the artifact by hand once you have looked at it. Never
 refusal is that something in there was not accounted for. Note that a kept worktree
 also keeps its branches on purpose: a retained tree must not be orphaned from its
 own history.
+
+## A lane that was KILLED leaves everything behind
+
+Rollback runs from an EXIT trap, so it protects a lane that fails or refuses — not
+one that is destroyed. SIGKILL, a power loss, or a terminal closed before the trap
+finishes can leave **all** of: an open draft PR (which is still a LIVE claim), the
+`agent-claimed` label, a pushed branch, and a worktree. None of that self-heals and
+nothing periodically sweeps it.
+
+Clear it with the reaper, which decides from evidence rather than assertion:
+
+```bash
+scripts/claim-reaper.sh                 # dry-run: what it would expire, and why
+scripts/claim-reaper.sh --apply         # act
+```
+
+If the reaper will not act (it refuses anything it cannot prove is dead), recover
+by hand in this order — the claim first, the artifacts after:
+
+```bash
+scripts/pr-claims.sh list <owner>/<repo>          # is the claim still live? which PR?
+gh pr close <number> --repo <owner>/<repo>        # the close IS the release
+scripts/pr-claims.sh list <owner>/<repo>          # prove it stopped being live
+scripts/release-claim.sh <issue> --claim-id <id> --repo <owner>/<repo> --pr <number>
+```
+
+That last command runs the exact verified cleanup (registered-worktree proof,
+head-SHA containment, compare-and-swap branch deletes) and removes `agent-claimed`
+only after proving no sibling claim still needs it. Do not delete the worktree or
+the branch first: their identity proof is anchored to the terminal PR's head SHA.

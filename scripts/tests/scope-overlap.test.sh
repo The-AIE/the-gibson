@@ -152,6 +152,18 @@ esac
 exit 1
 GH
 chmod +x "$ROOT/bin/gh"
+# Fake `sleep`: the publication barrier spaces its reads with the PATH command
+# `sleep`, so shimming that command is how a sensor accelerates the WAIT
+# without touching what the barrier REQUIRES. The floor on consecutive
+# matching reads is untouched here and is asserted separately below. This is a
+# command shim, not a production hook: an ordinary inherited environment does
+# not carry a fake `sleep`, and nothing in scope-overlap.mjs reads a variable
+# that names an executable.
+cat > "$ROOT/bin/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+exit 0
+SLEEP
+chmod +x "$ROOT/bin/sleep"
 export PATH="$ROOT/bin:$PATH"
 
 setup_repo d
@@ -289,7 +301,9 @@ survivors=0
 
 echo "--admit-pr · an inventory that cannot see this lane's own claim refuses it"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-62-invisible --issue 62 --admit-pr 999); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'not visible' && ok "invisible own claim refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'is not in the live claim inventory' \
+  && echo "$out" | grep -qi 'could not obtain a stable live-claim inventory' \
+  && ok "invisible own claim refuses" \
   || bad "invisible own claim admitted (rc=$rc): $out"
 
 echo "--admit-pr · a LEDGER claim always beats an admission candidate"
@@ -310,51 +324,195 @@ out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --admit-pr 810); rc=
 [[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --claim-id' && ok "--admit-pr without --claim-id rejected" \
   || bad "--admit-pr without --claim-id (rc=$rc): $out"
 
-echo "--pr-claims-file · decides on the caller's settled inventory, not a fresh read"
-# claim.sh's admission barrier waits for the live inventory to go quiet and then
-# hands that exact sample here. A re-read would throw the barrier away, so this
-# flag must genuinely drive the decision — and must validate the sample exactly
-# as a live read is validated (#153 review P1 0A).
-SETTLED="$ROOT/settled.tsv"
-# The stub pr-claims.sh output the sensor would have read is DELIBERATELY empty,
-# so a run that passes only proves the file was ignored.
-: > "$GH_PR_TSV"
+# --- #153 review round 3, P1: there is NO forged-evidence path --------------
+# The previous head let a caller hand the admission decision an inventory
+# (`--pr-claims-file`). That is a production command surface on which a
+# fabricated empty or self-only inventory bought a green admission over a live
+# conflicting claim. No cross-process handoff of caller-supplied data can be
+# made unforgeable without a shared secret, so the option is gone and the
+# admission reads happen inside the process that decides. These are HOSTILE
+# tests: they try to smuggle an inventory in and must all fail.
+echo "#153 · a forged inventory cannot bypass a live conflicting claim"
+# A real, live, LOWER-numbered conflicting claim. Any run below that comes back
+# green has been fooled.
+# The rival's scope collides with this lane and with NOTHING in the ledger, so
+# a green result can only mean the forged inventory replaced the live read —
+# a ledger overlap would refuse for the wrong reason and prove nothing.
 {
-  # The rival holds the lower number, so it wins the tie-break; this lane's own
-  # row is present too, exactly as the barrier requires before it will decide.
-  printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-  printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
-} > "$SETTLED"
-out=$(run_so "$ROOT/d/canon" --scope 'app/api/auth/**' --repo acme/app --claim-id issue-66-late \
-  --issue 66 --admit-pr 700 --pr-claims-file "$SETTLED"); rc=$?
+  printf '640\tissue-65-settled\tlib/gate/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+} > "$GH_PR_TSV"
+
+# The forgeries: an empty inventory, and one containing only this lane.
+FORGED_EMPTY="$ROOT/forged-empty.tsv"
+: > "$FORGED_EMPTY"
+FORGED_SELF="$ROOT/forged-self.tsv"
+printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$FORGED_SELF"
+
+for forged in "$FORGED_EMPTY" "$FORGED_SELF"; do
+  fname=$(basename "$forged")
+  for flag in --pr-claims-file --claims-file --inventory --inventory-file --rows-file --pr-claims; do
+    out=$(run_so "$ROOT/d/canon" --scope 'lib/gate/handlers.ts' --repo acme/app \
+      --claim-id issue-66-late --issue 66 --admit-pr 700 "$flag" "$forged"); rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+      ok "$flag with $fname is refused (rc=$rc)"
+    else
+      bad "$flag with $fname was ADMITTED over a live conflicting claim: $out"
+    fi
+  done
+  # …and on stdin, in case the option was replaced by a pipe.
+  out=$(run_so "$ROOT/d/canon" --scope 'lib/gate/handlers.ts' --repo acme/app \
+    --claim-id issue-66-late --issue 66 --admit-pr 700 < "$forged"); rc=$?
+  [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
+    && ok "stdin $fname is ignored; the live conflicting claim still refuses" \
+    || bad "stdin $fname changed the verdict (rc=$rc): $out"
+done
+
+# The admission decision really is driven by the LIVE read: same arguments,
+# same forged files on disk, and the verdict flips only when the live
+# inventory itself stops carrying the rival.
+out=$(run_so "$ROOT/d/canon" --scope 'lib/gate/handlers.ts' --repo acme/app \
+  --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
-  && ok "a rival present only in the settled inventory still refuses" \
-  || bad "the settled inventory was ignored (rc=$rc): $out"
+  && ok "the live inventory alone decides admission" \
+  || bad "live admission verdict wrong (rc=$rc): $out"
+printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
+  --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
+[[ "$rc" -eq 0 ]] && ok "a genuinely self-only LIVE inventory admits the lane" \
+  || bad "self-only live inventory refused (rc=$rc): $out"
 
-printf '640\tissue-67-self\tapp/api/auth/**\tfeat/67-self\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
-  > "$SETTLED"
-out=$(run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app --claim-id issue-67-self \
-  --issue 67 --admit-pr 640 --pr-claims-file "$SETTLED"); rc=$?
-[[ "$rc" -eq 0 ]] && ok "a settled inventory containing only this lane admits it" \
-  || bad "settled self-only inventory refused (rc=$rc): $out"
+echo "#153 · the source carries no caller-supplied-inventory path at all"
+# Static contract sensor: the runtime tests above can only probe the flag names
+# someone thought of. This one says the capability is absent — the sensor reads
+# no file and no stdin for its evidence, it executes the pr-claims.sh next to
+# it. A future re-introduction fails here even under a name nobody guessed.
+if grep -q 'readFileSync' "$SENSOR"; then
+  bad "scope-overlap.mjs reads a file — a caller-supplied inventory path may be back"
+else
+  ok "scope-overlap.mjs never reads a file for its claim evidence"
+fi
+if grep -qE 'process\.stdin|/dev/stdin|readSync\(0' "$SENSOR"; then
+  bad "scope-overlap.mjs reads stdin — evidence could be piped in"
+else
+  ok "scope-overlap.mjs never reads stdin"
+fi
+if grep -q 'resolve(__dirname, "pr-claims.sh")' "$SENSOR"; then
+  ok "the only claim reader is the pr-claims.sh sitting next to the sensor"
+else
+  bad "scope-overlap.mjs no longer binds its reader to its own directory"
+fi
 
-out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-68-x \
-  --issue 68 --admit-pr 641 --pr-claims-file "$ROOT/no-such-inventory.tsv"); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'cannot read the pre-read' \
-  && ok "an unreadable settled inventory refuses (fail closed)" \
-  || bad "unreadable settled inventory did not refuse (rc=$rc): $out"
+# --- #153 review round 3, P1: the barrier has a production floor ------------
+echo "#153 · the publication barrier cannot be weakened from the environment"
+printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+floor_case() { # label VAR=value expect-substring
+  local label="$1" assign="$2" want="$3" out rc
+  out=$(env "$assign" node "$SENSOR" --repo-path "$ROOT/d/canon" --base main \
+    --scope 'lib/unrelated/**' --repo acme/app --claim-id issue-65-settled \
+    --issue 65 --admit-pr 640 2>&1); rc=$?
+  if [[ "$rc" -eq 2 ]] && echo "$out" | grep -qF "$want"; then
+    ok "$label"
+  else
+    bad "$label (rc=$rc): $out"
+  fi
+}
+floor_case "STABLE_READS=1 is refused, not honoured" \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=1 "below the production minimum of 2"
+floor_case "STABLE_READS=0 is refused" \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=0 "below the production minimum of 2"
+floor_case "DELAY=0 is refused, not honoured" \
+  GIBSON_CLAIM_ADMIT_DELAY=0 "below the production minimum of 1"
+floor_case "ATTEMPTS=1 is refused" \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=1 "below the production minimum of 2"
+floor_case "a non-numeric barrier value is refused" \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=nope "must be a non-negative integer"
+# …and the floor refuses BEFORE any decision: the same run that would have been
+# admitted on a single sample never gets one.
+out=$(GIBSON_CLAIM_ADMIT_STABLE_READS=1 run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' \
+  --repo acme/app --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+[[ "$rc" -eq 2 ]] && ! echo "$out" | grep -q 'quiescent' \
+  && ok "a below-floor barrier never reaches the admission decision" \
+  || bad "below-floor barrier still decided (rc=$rc): $out"
+# Raising the barrier is allowed.
+out=$(GIBSON_CLAIM_ADMIT_STABLE_READS=4 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
+  GIBSON_CLAIM_ADMIT_DELAY=1 run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' \
+  --repo acme/app --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '4 consecutive matching read' \
+  && ok "the barrier may be RAISED" || bad "raising the barrier failed (rc=$rc): $out"
+out=$(GIBSON_CLAIM_ADMIT_STABLE_READS=4 GIBSON_CLAIM_ADMIT_ATTEMPTS=3 \
+  run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'cannot be smaller than' \
+  && ok "an unsatisfiable barrier is a usage error" || bad "unsatisfiable barrier (rc=$rc): $out"
 
-printf 'garbage-row-with-two-fields\tonly\n' > "$SETTLED"
-out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-69-x \
-  --issue 69 --admit-pr 642 --pr-claims-file "$SETTLED"); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'malformed/truncated' \
-  && ok "a malformed row in the settled inventory still refuses" \
-  || bad "malformed settled row accepted (rc=$rc): $out"
+echo "#153 · admission decides only on a QUIESCENT inventory"
+# A rival that only becomes visible AFTER this lane's own row is already there
+# is exactly the eventual-consistency case a single sample misses.
+mkdir -p "$ROOT/bin-lag"
+cat > "$ROOT/bin-lag/gh" <<'LAGGH'
+#!/usr/bin/env bash
+# Read counter in a file: each `pr-claims.sh list` is its own process.
+n=$(cat "$LAG_READS" 2>/dev/null || echo 0)
+n=$((n + 1)); echo "$n" > "$LAG_READS"
+if [[ -n "${LAG_CHURN:-}" ]]; then
+  # Never settles: every read differs.
+  printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+    "$((900 + n))" "$((800 + n))" "$n" "$((800 + n))" "$((900 + n))"
+  exit 0
+fi
+printf '700\tissue-66-late\tapp/api/auth/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+if [[ "$n" -ge "${LAG_RIVAL_AFTER:-3}" ]]; then
+  printf '640\tissue-65-settled\tapp/api/auth/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+fi
+exit 0
+LAGGH
+chmod +x "$ROOT/bin-lag/gh"
+cp "$ROOT/bin/sleep" "$ROOT/bin-lag/sleep"
+export LAG_READS="$ROOT/lag-reads"
+rm -f "$LAG_READS"
+out=$(PATH="$ROOT/bin-lag:$PATH" LAG_RIVAL_AFTER=3 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=3 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
+  run_so "$ROOT/d/canon" --scope 'app/api/auth/handlers.ts' --repo acme/app \
+  --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
+  && ok "a rival visible only after this lane's own row still refuses it" \
+  || bad "late rival was missed (rc=$rc): $out"
+rm -f "$LAG_READS"
+out=$(PATH="$ROOT/bin-lag:$PATH" LAG_CHURN=1 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
+  run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
+  --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'could not obtain a stable live-claim inventory' \
+  && ok "an inventory that never settles refuses rather than guesses" \
+  || bad "unsettled inventory admitted (rc=$rc): $out"
+unset LAG_READS
 
-out=$(run_so "$ROOT/d/canon" --scope 'x/**' --claim-id issue-70-x --pr-claims-file "$SETTLED"); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --repo' \
-  && ok "--pr-claims-file without --repo rejected" \
-  || bad "--pr-claims-file without --repo (rc=$rc): $out"
+echo "#153 · admission refuses a second lane on the SAME issue without --slice"
+{
+  printf '640\tissue-65-settled\tlib/one/**\tfeat/65-settled\thttps://github.com/acme/app/pull/640\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '700\tissue-65-other\tlib/two/**\tfeat/65-other\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+} > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/two/**' --repo acme/app \
+  --claim-id issue-65-other --issue 65 --admit-pr 700); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue #65 is already held' \
+  && ok "disjoint scopes do not license two lanes on one issue" \
+  || bad "same-issue second lane admitted (rc=$rc): $out"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/one/**' --repo acme/app \
+  --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
+[[ "$rc" -eq 0 ]] && ok "the lower-numbered same-issue lane is admitted" \
+  || bad "lower same-issue lane refused (rc=$rc): $out"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/two/**' --repo acme/app --slice \
+  --claim-id issue-65-other --issue 65 --admit-pr 700); rc=$?
+[[ "$rc" -eq 0 ]] && ok "--slice permits the disjoint same-issue sibling" \
+  || bad "--slice same-issue sibling refused (rc=$rc): $out"
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-65-other --admit-pr 700); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --issue' \
+  && ok "--admit-pr without --issue is refused" || bad "--admit-pr without --issue (rc=$rc): $out"
 
 # Reset the fixture for anything appended after this block.
 printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \

@@ -131,6 +131,21 @@ esac
 exit 0
 GH
 chmod +x "$BIN/gh"
+
+# Fake `sleep` — the ONLY thing these sensors accelerate.
+#
+# The publication barrier spaces its reads with the PATH command `sleep`, so
+# shimming that command makes the wait instant while leaving what the barrier
+# REQUIRES (consecutive matching reads that all contain this lane's own claim)
+# completely intact. This is a command shim: production resolves the real
+# /bin/sleep, and nothing in claim.sh or scope-overlap.mjs executes a command
+# named by an inherited variable. Every later fixture prepends its own bin to
+# $PATH, which still contains this one, so one shim covers the whole suite.
+cat > "$BIN/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+exit 0
+SLEEP
+chmod +x "$BIN/sleep"
 export PATH="$BIN:$PATH"
 export GIBSON_SESSION="tester@box"
 
@@ -551,10 +566,10 @@ export PATH="$RACE_DIR/bin:$PATH"
 # Different ISSUES, overlapping SCOPE — the cross-issue case the pre-create
 # duplicate-issue refusal cannot catch.
 (cd "$RACE_DIR/laneA/canon" && GIBSON_CANONICAL="$RACE_DIR/laneA/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 501 alpha 'lib/shared/**' >"$RACE_DIR/outA" 2>&1) &
+  "$CLAIM" 501 alpha 'lib/shared/**' >"$RACE_DIR/outA" 2>&1) &
 race_pid_a=$!
 (cd "$RACE_DIR/laneB/canon" && GIBSON_CANONICAL="$RACE_DIR/laneB/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 502 beta 'lib/shared/util.ts' >"$RACE_DIR/outB" 2>&1) &
+  "$CLAIM" 502 beta 'lib/shared/util.ts' >"$RACE_DIR/outB" 2>&1) &
 race_pid_b=$!
 wait "$race_pid_a"; rc_a=$?
 wait "$race_pid_b"; rc_b=$?
@@ -636,7 +651,7 @@ chmod +x "$BLIND_BIN/gh"
 export GH_CLOSE_LOG="$ROOT/admitblind/close.log"
 : > "$GH_CLOSE_LOG"
 out=$(cd "$ROOT/admitblind/canon" && PATH="$BLIND_BIN:$PATH" GIBSON_CLAIM_ADMIT_ATTEMPTS=2 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 77 blind 'lib/blind/**' 2>&1); rc=$?
+  "$CLAIM" 77 blind 'lib/blind/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "an inventory blind to this claim refuses it" || bad "blind inventory admitted the claim (rc=$rc): $out"
 contains "names the unprovable registration" "$out" "could not obtain a stable live-claim inventory"
 test ! -e "$ROOT/admitblind/wt-77-blind" \
@@ -686,6 +701,15 @@ case "$1 $2" in
     want_open=0
     for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
     [[ "$want_open" -eq 1 ]] || exit 0
+    # Post-close read failures are modelled FIRST: the rollback's proof that
+    # the claim stopped being live is itself a read, and it has to be possible
+    # for that read to fail.
+    if [[ -n "${LAG_BAD_AFTER_CLOSE:-}" && -f "$LAG_STATE/closed" ]]; then
+      case "${LAG_BAD_AFTER_CLOSE}" in
+        unreadable) echo "gh: API rate limit exceeded" >&2; exit 1 ;;
+        malformed)  printf 'not-a-row\twith-two-fields\n' ; exit 0 ;;
+      esac
+    fi
     # Before this lane publishes, the inventory is genuinely empty — the same
     # window the real cross-issue race opens.
     [[ -f "$LAG_STATE/self" ]] || exit 0
@@ -698,12 +722,6 @@ case "$1 $2" in
       printf '%s\tissue-%s-churn\tlib/churn-%s/**\tfeat/%s-churn\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
         "$((900 + n))" "$((800 + n))" "$n" "$((800 + n))" "$((900 + n))"
       exit 0
-    fi
-    if [[ -n "${LAG_BAD_AFTER_CLOSE:-}" && -f "$LAG_STATE/closed" ]]; then
-      case "${LAG_BAD_AFTER_CLOSE}" in
-        unreadable) echo "gh: API rate limit exceeded" >&2; exit 1 ;;
-        malformed)  printf 'not-a-row\twith-two-fields\n' ; exit 0 ;;
-      esac
     fi
     cat "$LAG_STATE/self"
     [[ "$n" -ge "${LAG_RIVAL_AFTER:-3}" ]] && cat "$LAG_STATE/rival"
@@ -727,6 +745,9 @@ case "$1 $2" in
   "pr close")
     echo "closed $3" >> "$LAG_STATE/close.log"
     : > "$LAG_STATE/closed"
+    # A closed PR stops being a live claim. Modelling that is what lets the
+    # rollback's post-close proof ("is this still live?") mean anything.
+    rm -f "$LAG_STATE/self"
     ;;
 esac
 exit 0
@@ -743,7 +764,7 @@ echo "#153 · a rival visible only AFTER this lane's own claim is still caught"
 lag_fixture lagcatch 90 "$LAG_RIVAL_ROW"
 out=$(cd "$ROOT/lagcatch/canon" && PATH="$ROOT/lagcatch/bin:$PATH" \
   LAG_RIVAL_AFTER=3 GIBSON_CLAIM_ADMIT_STABLE_READS=3 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+  "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "a late-publishing rival still refuses this lane" \
   || bad "the lane admitted itself against a rival it had not yet seen (rc=$rc): $out"
 contains "names the rival it eventually saw" "$out" "issue-88-rival"
@@ -756,23 +777,54 @@ test -z "$(git -C "$ROOT/lagcatch/canon" ls-remote --heads origin 'feat/87-lagge
   && ok "late-rival refusal rolled back its remote branch" || bad "late-rival refusal left its remote branch"
 lacks "late-rival refusal released its own label" "$(cat "$ROOT/lagcatch/state/labels")" "agent-claimed"
 
+echo "#153 · production refuses to let a caller switch that barrier off"
+# The old control turned the barrier down with GIBSON_CLAIM_ADMIT_STABLE_READS=1
+# — which is exactly why the environment must not be able to do that. It is
+# gone from production: below-floor values are a usage error, not a setting.
+lag_fixture lagfloor 90 "$LAG_RIVAL_ROW"
+for floor_env in GIBSON_CLAIM_ADMIT_STABLE_READS=1 GIBSON_CLAIM_ADMIT_DELAY=0 GIBSON_CLAIM_ADMIT_ATTEMPTS=1; do
+  out=$(cd "$ROOT/lagfloor/canon" && PATH="$ROOT/lagfloor/bin:$PATH" \
+    env "$floor_env" LAG_RIVAL_AFTER=3 "$CLAIM" 87 floored 'lib/lag/**' 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "below the production minimum"; then
+    ok "$floor_env is refused, not honoured"
+  else
+    bad "$floor_env was accepted (rc=$rc): $out"
+  fi
+done
+test ! -e "$ROOT/lagfloor/wt-87-floored" \
+  && ok "a below-floor barrier leaves no worktree behind" || bad "below-floor run left a worktree"
+
 echo "#153 · that refusal is the barrier's doing, not the fixture's"
-# The mechanism sensor: the SAME fixture, with the barrier turned down to a
-# single sample, admits the claim — which is exactly the pre-repair behaviour.
-# If the publication barrier is ever removed from claim.sh, this pair stops
-# disagreeing and the sensor above stops meaning anything.
+# The mechanism control, run against a TEST COPY of the scripts whose barrier
+# floor is patched down to a single sample. Production is untouched: this is a
+# separate tree under $ROOT, not a runtime switch. If the publication barrier
+# is ever removed from the real sensor, this pair stops disagreeing and the
+# late-rival sensor above stops meaning anything.
+CTL_DIR="$ROOT/ctl-scripts"
+mkdir -p "$CTL_DIR/lib"
+cp "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../pr-claims.sh" "$SCRIPT_DIR/../scope-overlap.mjs" "$CTL_DIR/"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$CTL_DIR/lib/"
+chmod +x "$CTL_DIR/claim.sh" "$CTL_DIR/pr-claims.sh"
+# Patch ONLY the floor literals in the copy, and prove the patch landed.
+perl -0pi -e 's/const ADMIT_FLOOR = \{\n  attempts: 2,\n  stableReads: 2,\n  delaySeconds: 1,\n\};/const ADMIT_FLOOR = {\n  attempts: 1,\n  stableReads: 1,\n  delaySeconds: 0,\n};/' "$CTL_DIR/scope-overlap.mjs"
+if grep -q 'stableReads: 1,' "$CTL_DIR/scope-overlap.mjs"; then
+  ok "the control copy really has its barrier floor patched down"
+else
+  bad "the control copy was not patched — the mechanism control proves nothing"
+fi
+lacks "production still carries the real floor" "$(grep -A3 'const ADMIT_FLOOR' "$SCRIPT_DIR/../scope-overlap.mjs")" "stableReads: 1,"
 lag_fixture lagctl 90 "$LAG_RIVAL_ROW"
 out=$(cd "$ROOT/lagctl/canon" && PATH="$ROOT/lagctl/bin:$PATH" \
-  LAG_RIVAL_AFTER=3 GIBSON_CLAIM_ADMIT_STABLE_READS=1 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
-check "one-sample admission accepts the same lane (barrier disabled)" "$rc" "0"
+  LAG_RIVAL_AFTER=3 GIBSON_CLAIM_ADMIT_STABLE_READS=1 GIBSON_CLAIM_ADMIT_DELAY=0 \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=8 "$CTL_DIR/claim.sh" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+check "one-sample admission accepts the same lane (barrier floor removed)" "$rc" "0"
 lacks "one-sample admission never saw the rival" "$out" "issue-88-rival"
 
 echo "#153 · an inventory that never settles refuses rather than guesses"
 lag_fixture lagchurn 90 "$LAG_RIVAL_ROW"
 out=$(cd "$ROOT/lagchurn/canon" && PATH="$ROOT/lagchurn/bin:$PATH" \
   LAG_CHURN=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 churned 'lib/churned/**' 2>&1); rc=$?
+  "$CLAIM" 87 churned 'lib/churned/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "a never-quiescent inventory refuses the claim" \
   || bad "an unsettled inventory admitted the claim (rc=$rc): $out"
 contains "says the inventory never settled" "$out" "could not obtain a stable live-claim inventory"
@@ -796,10 +848,10 @@ setup_race_repo "$SAME_DIR" "$RACE_REPO" A B
 SAME_OLD_PATH="$PATH"
 export PATH="$SAME_DIR/bin:$PATH"
 (cd "$SAME_DIR/laneA/canon" && GIBSON_CANONICAL="$SAME_DIR/laneA/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 601 alpha 'lib/alpha/**' >"$SAME_DIR/outA" 2>&1) &
+  "$CLAIM" 601 alpha 'lib/alpha/**' >"$SAME_DIR/outA" 2>&1) &
 same_pid_a=$!
 (cd "$SAME_DIR/laneB/canon" && GIBSON_CANONICAL="$SAME_DIR/laneB/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 601 beta 'lib/beta/**' >"$SAME_DIR/outB" 2>&1) &
+  "$CLAIM" 601 beta 'lib/beta/**' >"$SAME_DIR/outB" 2>&1) &
 same_pid_b=$!
 wait "$same_pid_a"; same_rc_a=$?
 wait "$same_pid_b"; same_rc_b=$?
@@ -848,10 +900,10 @@ setup_race_repo "$SLICE_DIR" "$RACE_REPO" A B
 SLICE_OLD_PATH="$PATH"
 export PATH="$SLICE_DIR/bin:$PATH"
 (cd "$SLICE_DIR/laneA/canon" && GIBSON_CANONICAL="$SLICE_DIR/laneA/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 602 alpha 'lib/alpha/**' --slice >"$SLICE_DIR/outA" 2>&1) &
+  "$CLAIM" 602 alpha 'lib/alpha/**' --slice >"$SLICE_DIR/outA" 2>&1) &
 slice_pid_a=$!
 (cd "$SLICE_DIR/laneB/canon" && GIBSON_CANONICAL="$SLICE_DIR/laneB/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 602 beta 'lib/beta/**' --slice >"$SLICE_DIR/outB" 2>&1) &
+  "$CLAIM" 602 beta 'lib/beta/**' --slice >"$SLICE_DIR/outB" 2>&1) &
 slice_pid_b=$!
 wait "$slice_pid_a"; slice_rc_a=$?
 wait "$slice_pid_b"; slice_rc_b=$?
@@ -869,10 +921,10 @@ setup_race_repo "$OVER_DIR" "$RACE_REPO" A B
 OVER_OLD_PATH="$PATH"
 export PATH="$OVER_DIR/bin:$PATH"
 (cd "$OVER_DIR/laneA/canon" && GIBSON_CANONICAL="$OVER_DIR/laneA/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 603 alpha 'lib/pay/**' --slice >"$OVER_DIR/outA" 2>&1) &
+  "$CLAIM" 603 alpha 'lib/pay/**' --slice >"$OVER_DIR/outA" 2>&1) &
 over_pid_a=$!
 (cd "$OVER_DIR/laneB/canon" && GIBSON_CANONICAL="$OVER_DIR/laneB/canon" \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 603 beta 'lib/pay/api.ts' --slice >"$OVER_DIR/outB" 2>&1) &
+  "$CLAIM" 603 beta 'lib/pay/api.ts' --slice >"$OVER_DIR/outB" 2>&1) &
 over_pid_b=$!
 wait "$over_pid_a"; over_rc_a=$?
 wait "$over_pid_b"; over_rc_b=$?
@@ -921,28 +973,225 @@ test ! -e "$ROOT/labelfail/wt-78-unreadable" \
   && ok "unreadable label state created no worktree" || bad "unreadable label state created a worktree"
 unset GH_LOG
 
-echo "#153 · rollback keeps agent-claimed when the sibling inventory is unreadable"
+# --- #153 review round 3, P1: the create/rollback boundary -----------------
+# Nothing may be destroyed until this lane's own claim PR is positively bound,
+# positively closed, and FRESHLY proven no longer live. Each case below breaks
+# exactly one of those three and asserts the same thing: everything survives,
+# including the issue-wide label, and the run says why.
+echo "#153 · a post-close reread that FAILS retains every artifact"
 lag_fixture labelunread 91 "$LAG_RIVAL_ROW"
 out=$(cd "$ROOT/labelunread/canon" && PATH="$ROOT/labelunread/bin:$PATH" \
   LAG_RIVAL_AFTER=1 LAG_BAD_AFTER_CLOSE=unreadable \
   GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 unreadinv 'lib/lag/**' 2>&1); rc=$?
+  "$CLAIM" 87 unreadinv 'lib/lag/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "the refused lane still exits nonzero" || bad "refused lane exited 0: $out"
 contains "reports an incomplete rollback" "$out" "INCOMPLETE"
-contains "names the label it kept"        "$out" "agent-claimed on #87"
-contains "says the inventory was unreadable" "$out" "cannot be ruled out"
+contains "names the unprovable close"     "$out" "could not be re-read to prove the claim is gone"
+contains "keeps the worktree"             "$out" "labelunread/wt-87-unreadinv (kept:"
+contains "keeps both branch refs"         "$out" "local and remote branch feat/87-unreadinv (kept:"
+contains "keeps the issue-wide label"     "$out" "agent-claimed on #87 (kept:"
+test -d "$ROOT/labelunread/wt-87-unreadinv" \
+  && ok "the worktree really survives an unprovable close" || bad "the worktree was destroyed"
+test -n "$(git -C "$ROOT/labelunread/canon" branch --list 'feat/87-unreadinv')" \
+  && ok "the local branch really survives" || bad "the local branch was deleted"
+test -n "$(git -C "$ROOT/labelunread/canon" ls-remote --heads origin 'feat/87-unreadinv')" \
+  && ok "the remote branch really survives" || bad "the remote branch was deleted"
 contains "the label really is still there" "$(cat "$ROOT/labelunread/state/labels")" "agent-claimed"
+lacks "no label edit was even attempted" "$(grep -c -- '--remove-label' "$ROOT/labelunread/state/label.log" || echo 0)" "1"
 
-echo "#153 · rollback keeps agent-claimed when the sibling inventory is malformed"
+echo "#153 · a post-close reread that returns MALFORMED rows retains every artifact"
 lag_fixture labelbad 92 "$LAG_RIVAL_ROW"
 out=$(cd "$ROOT/labelbad/canon" && PATH="$ROOT/labelbad/bin:$PATH" \
   LAG_RIVAL_AFTER=1 LAG_BAD_AFTER_CLOSE=malformed \
   GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 badinv 'lib/lag/**' 2>&1); rc=$?
+  "$CLAIM" 87 badinv 'lib/lag/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "the malformed-inventory lane exits nonzero" || bad "malformed inventory exited 0: $out"
 contains "reports an incomplete rollback"  "$out" "INCOMPLETE"
-contains "names the malformed evidence"    "$out" "malformed row"
+contains "names the malformed evidence"    "$out" "malformed/truncated row"
+test -d "$ROOT/labelbad/wt-87-badinv" \
+  && ok "a malformed post-close read keeps the worktree" || bad "malformed read destroyed the worktree"
 contains "the label survives the malformed read" "$(cat "$ROOT/labelbad/state/labels")" "agent-claimed"
+
+echo "#153 · a FAILED gh pr close retains every artifact and names the live claim"
+lag_fixture closefail 94 "$LAG_RIVAL_ROW"
+# One surgical change to the fake: `pr close` reports failure. The PR therefore
+# may still be open, so the claim may still be LIVE.
+perl -0pi -e 's/  "pr close"\)\n/  "pr close")\n    if [[ -n "\${LAG_CLOSE_FAILS:-}" ]]; then echo "gh: could not close pull request (403)" >&2; exit 1; fi\n/' \
+  "$ROOT/closefail/bin/gh"
+out=$(cd "$ROOT/closefail/canon" && PATH="$ROOT/closefail/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_CLOSE_FAILS=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 closefail 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a failed close exits nonzero" || bad "failed close exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "names the failed close"         "$out" "gh pr close failed"
+contains "says the claim may still be live" "$out" "may still be LIVE"
+test -d "$ROOT/closefail/wt-87-closefail" \
+  && ok "a failed close keeps the worktree" || bad "a failed close destroyed the worktree"
+test -n "$(git -C "$ROOT/closefail/canon" branch --list 'feat/87-closefail')" \
+  && ok "a failed close keeps the local branch" || bad "a failed close deleted the local branch"
+test -n "$(git -C "$ROOT/closefail/canon" ls-remote --heads origin 'feat/87-closefail')" \
+  && ok "a failed close keeps the remote branch" || bad "a failed close deleted the remote branch"
+contains "a failed close keeps agent-claimed" "$(cat "$ROOT/closefail/state/labels")" "agent-claimed"
+lacks "a failed close never removes the issue-wide label" \
+  "$(cat "$ROOT/closefail/state/label.log")" "--remove-label"
+
+echo "#153 · close reports SUCCESS but the claim is still live: retain everything"
+lag_fixture closelies 95 "$LAG_RIVAL_ROW"
+# The fake accepts the close and reports success, but the claim never leaves the
+# live inventory. A close that says it worked is not proof that it did.
+perl -0pi -e 's/    rm -f "\$LAG_STATE\/self"\n/    [[ -n "\${LAG_CLOSE_LIES:-}" ]] || rm -f "\$LAG_STATE\/self"\n/' \
+  "$ROOT/closelies/bin/gh"
+out=$(cd "$ROOT/closelies/canon" && PATH="$ROOT/closelies/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_CLOSE_LIES=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 closelies 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a lying close exits nonzero" || bad "lying close exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "names the still-live claim"     "$out" "STILL a live claim after gh pr close reported success"
+test -d "$ROOT/closelies/wt-87-closelies" \
+  && ok "a lying close keeps the worktree" || bad "a lying close destroyed the worktree"
+test -n "$(git -C "$ROOT/closelies/canon" ls-remote --heads origin 'feat/87-closelies')" \
+  && ok "a lying close keeps the remote branch" || bad "a lying close deleted the remote branch"
+contains "a lying close keeps agent-claimed" "$(cat "$ROOT/closelies/state/labels")" "agent-claimed"
+
+echo "#153 · a successful create whose output is UNPARSEABLE never destroys anything"
+# gh exits 0 and prints something this cannot parse into a PR number, and the
+# PR is not (yet) visible in the live inventory. The claim may exist and be
+# unpublished, so absence from an eventually consistent view proves nothing.
+new_repo "$ROOT/prgarbage"
+mkdir -p "$ROOT/prgarbage/bin"
+cat > "$ROOT/prgarbage/bin/gh" <<'PGGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
+  "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+  # The PR is created but is not published to the open inventory yet.
+  "api graphql") : ;;
+  "pr create") echo "Warning: 1 uncommitted change"; echo "Creating draft pull request for feat/x into main in acme/app" ;;
+  "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+esac
+exit 0
+PGGH
+chmod +x "$ROOT/prgarbage/bin/gh"
+export GH_LOG="$ROOT/prgarbage/label.log"
+export GH_CLOSE_LOG="$ROOT/prgarbage/close.log"
+: > "$GH_LOG"; : > "$GH_CLOSE_LOG"
+out=$(cd "$ROOT/prgarbage/canon" && PATH="$ROOT/prgarbage/bin:$PATH" \
+  "$CLAIM" 96 garbled 'lib/garbled/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unparseable create exits nonzero" || bad "unparseable create exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "names the unparseable output"   "$out" "could not be parsed into a PR number"
+contains "says the PR may exist"          "$out" "may exist and be unpublished"
+test -d "$ROOT/prgarbage/wt-96-garbled" \
+  && ok "an unparseable create keeps the worktree" || bad "unparseable create destroyed the worktree"
+test -n "$(git -C "$ROOT/prgarbage/canon" branch --list 'feat/96-garbled')" \
+  && ok "an unparseable create keeps the local branch" || bad "unparseable create deleted the local branch"
+test -n "$(git -C "$ROOT/prgarbage/canon" ls-remote --heads origin 'feat/96-garbled')" \
+  && ok "an unparseable create keeps the remote branch" || bad "unparseable create deleted the remote branch"
+lacks "an unparseable create never removes the issue-wide label" "$(cat "$GH_LOG")" "--remove-label"
+check "an unparseable create closes nothing blindly" "$(grep -c . "$GH_CLOSE_LOG" || true)" "0"
+unset GH_LOG GH_CLOSE_LOG
+
+echo "#153 · a successful create whose output is unparseable but whose PR IS visible is bound and closed"
+# Same failure, better evidence: the inventory shows the PR, so rollback can
+# bind it by exact claim id AND head branch, close it, and prove it gone —
+# and only then is it allowed to clean up.
+new_repo "$ROOT/prfound"
+mkdir -p "$ROOT/prfound/bin"
+cat > "$ROOT/prfound/bin/gh" <<'PFGH'
+#!/usr/bin/env bash
+STATE="${PF_STATE:?}"
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
+  "issue edit")
+    echo "$*" >> "$STATE/label.log"
+    if echo "$*" | grep -q -- '--add-label'; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
+    ;;
+  "api graphql")
+    want_open=0
+    for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
+    [[ "$want_open" -eq 1 ]] || exit 0
+    cat "$STATE/open" 2>/dev/null
+    exit 0
+    ;;
+  "pr create")
+    branch=""
+    while [[ $# -gt 0 ]]; do case "$1" in --head) branch="$2"; shift 2 ;; *) shift ;; esac; done
+    printf '4242\tissue-97-found\tlib/found/**\t%s\thttps://github.com/acme/app/pull/4242\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+      "$branch" > "$STATE/open"
+    echo "the pull request was created, somewhere"
+    ;;
+  "pr close")
+    echo "closed $3" >> "$STATE/close.log"
+    : > "$STATE/open"
+    ;;
+esac
+exit 0
+PFGH
+chmod +x "$ROOT/prfound/bin/gh"
+export PF_STATE="$ROOT/prfound/state"
+mkdir -p "$PF_STATE"; : > "$PF_STATE/labels"; : > "$PF_STATE/label.log"; : > "$PF_STATE/close.log"; : > "$PF_STATE/open"
+out=$(cd "$ROOT/prfound/canon" && PATH="$ROOT/prfound/bin:$PATH" \
+  "$CLAIM" 97 found 'lib/found/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unparseable-but-visible create still exits nonzero" || bad "exited 0: $out"
+contains "binds and closes the discovered PR" "$out" "closed this lane's own PR #4242"
+contains "the fake really saw the close" "$(cat "$PF_STATE/close.log")" "closed 4242"
+lacks "a proven close is not an incomplete rollback" "$out" "INCOMPLETE"
+test ! -e "$ROOT/prfound/wt-97-found" \
+  && ok "only a proven-closed PR licenses worktree removal" || bad "the worktree survived a proven close"
+test -z "$(git -C "$ROOT/prfound/canon" ls-remote --heads origin 'feat/97-found')" \
+  && ok "only a proven-closed PR licenses branch removal" || bad "the remote branch survived a proven close"
+lacks "and the issue-wide label is released" "$(cat "$PF_STATE/labels")" "agent-claimed"
+unset PF_STATE
+
+echo "#153 · rollback refuses to close a PR that is not provably this lane's"
+new_repo "$ROOT/prforeign"
+mkdir -p "$ROOT/prforeign/bin"
+cat > "$ROOT/prforeign/bin/gh" <<'XFGH'
+#!/usr/bin/env bash
+STATE="${XF_STATE:?}"
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
+  "issue edit")
+    echo "$*" >> "$STATE/label.log"
+    if echo "$*" | grep -q -- '--add-label'; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
+    ;;
+  "api graphql")
+    want_open=0
+    for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
+    [[ "$want_open" -eq 1 ]] || exit 0
+    cat "$STATE/open" 2>/dev/null
+    exit 0
+    ;;
+  "pr create")
+    # Someone else's PR happens to hold the number this lane is told it got.
+    printf '5150\tissue-98-someone-else\tlib/other/**\tfeat/98-someone-else\thttps://github.com/acme/app/pull/5150\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+      > "$STATE/open"
+    echo "https://github.com/acme/app/pull/5150"
+    ;;
+  "pr close") echo "closed $3" >> "$STATE/close.log" ;;
+esac
+exit 0
+XFGH
+chmod +x "$ROOT/prforeign/bin/gh"
+export XF_STATE="$ROOT/prforeign/state"
+mkdir -p "$XF_STATE"; : > "$XF_STATE/labels"; : > "$XF_STATE/label.log"; : > "$XF_STATE/close.log"; : > "$XF_STATE/open"
+out=$(cd "$ROOT/prforeign/canon" && PATH="$ROOT/prforeign/bin:$PATH" \
+  "$CLAIM" 99 mine 'lib/mine/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a foreign PR on this lane's number exits nonzero" || bad "exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "refuses to close it"            "$out" "not provably this lane's"
+check "and never called gh pr close" "$(grep -c . "$XF_STATE/close.log" || true)" "0"
+test -d "$ROOT/prforeign/wt-99-mine" \
+  && ok "a foreign-PR match keeps the worktree" || bad "a foreign-PR match destroyed the worktree"
+contains "a foreign-PR match keeps agent-claimed" "$(cat "$XF_STATE/labels")" "agent-claimed"
+unset XF_STATE
 
 echo "#153 · rollback reports an already-absent label instead of failing on it"
 lag_fixture labelgone 93 "$LAG_RIVAL_ROW"
@@ -967,7 +1216,7 @@ mv "$ROOT/labelgone/bin/gh.wrap" "$ROOT/labelgone/bin/gh"
 export LAG_REAL_GH="$ROOT/labelgone/bin/gh.real"
 out=$(cd "$ROOT/labelgone/canon" && PATH="$ROOT/labelgone/bin:$PATH" \
   LAG_RIVAL_AFTER=1 GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
-  GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" 87 labelgone 'lib/lag/**' 2>&1); rc=$?
+  "$CLAIM" 87 labelgone 'lib/lag/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "the refused lane exits nonzero with no label to remove" || bad "exited 0: $out"
 contains "says the label was already absent" "$out" "already absent"
 lacks "an absent label is not an incomplete rollback" "$out" "INCOMPLETE"
@@ -977,35 +1226,49 @@ unset LAG_REAL_GH
 # #153 review P1 0D — rollback never destroys work it cannot prove is its own
 # ---------------------------------------------------------------------------
 # Every case below runs against the blind-inventory fake, so the lane is
-# guaranteed to reach rollback, and a hook mutates the worktree or a branch in
-# exactly the window the admission delay leaves open.
-rollback_fixture() { # dir issue slug hook-body
-  local dir="$1" hook="$4"
+# guaranteed to reach rollback, and the fixture mutates the worktree or a
+# branch in exactly the window rollback leaves open — between closing this
+# lane's own claim PR and proving the worktree/branches safe to remove.
+#
+# The mutation is baked into the FAKE gh's `pr close` arm, generated per case.
+# It used to be an executable named by GIBSON_CLAIM_TEST_ROLLBACK_HOOK that
+# production ran; an environment variable naming a command IS an execution
+# path, however it is documented, so that hook is gone (#153 review round 3,
+# P1). A fake dependency doing deterministic things when the script calls it
+# needs no cooperation from the script at all.
+rollback_fixture() { # dir issue slug side-effect-body
+  local dir="$1" rb_issue="$2" rb_slug="$3" side="$4"
   new_repo "$ROOT/$dir"
   mkdir -p "$ROOT/$dir/bin"
-  cat > "$ROOT/$dir/bin/gh" <<'RBGH'
-#!/usr/bin/env bash
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'CANON=%q\n' "$ROOT/$dir/canon"
+    printf 'WT=%q\n' "$ROOT/$dir/wt-${rb_issue}-${rb_slug}"
+    printf 'BR=%q\n' "feat/${rb_issue}-${rb_slug}"
+    cat <<'RBGH'
 case "$1 $2" in
   "repo view") echo "acme/app" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
   "api graphql") : ;;
   "pr create") echo "https://github.com/acme/app/pull/7777" ;;
-  "pr close") echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}" ;;
+  "pr close")
+    echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}"
+RBGH
+    printf '%s\n' "$side"
+    cat <<'RBGH2'
+    ;;
 esac
 exit 0
-RBGH
+RBGH2
+  } > "$ROOT/$dir/bin/gh"
   chmod +x "$ROOT/$dir/bin/gh"
-  printf '#!/usr/bin/env bash\nWT="$1"\nBR="$2"\nOID="$3"\nCANON="%s"\n%s\n' \
-    "$ROOT/$dir/canon" "$hook" > "$ROOT/$dir/hook.sh"
-  chmod +x "$ROOT/$dir/hook.sh"
 }
 
 run_rollback_case() { # dir issue slug
   (cd "$ROOT/$1/canon" && PATH="$ROOT/$1/bin:$PATH" \
-    GIBSON_CLAIM_TEST_ROLLBACK_HOOK="$ROOT/$1/hook.sh" \
-    GIBSON_CLAIM_ADMIT_ATTEMPTS=1 GIBSON_CLAIM_ADMIT_STABLE_READS=1 \
-    GIBSON_CLAIM_ADMIT_DELAY=0 "$CLAIM" "$2" "$3" "lib/$3/**" 2>&1)
+    GIBSON_CLAIM_ADMIT_ATTEMPTS=2 \
+    "$CLAIM" "$2" "$3" "lib/$3/**" 2>&1)
 }
 
 echo "#153 · rollback refuses to destroy a worktree that went dirty"
@@ -1077,6 +1340,152 @@ test -z "$(git -C "$ROOT/rbclean/canon" branch --list 'feat/86-cleanroll')" \
   && ok "a clean rollback deletes its own local branch" || bad "clean rollback left its local branch"
 test -z "$(git -C "$ROOT/rbclean/canon" ls-remote --heads origin 'feat/86-cleanroll')" \
   && ok "a clean rollback deletes its own remote branch" || bad "clean rollback left its remote branch"
+
+# ---------------------------------------------------------------------------
+# #153 review round 3, P1 — production runs no inherited test-hook command
+# ---------------------------------------------------------------------------
+echo "#153 · production never executes a command named by an inherited variable"
+# The removed hooks, set to an executable sentinel. If any production code path
+# still runs one, the sentinel leaves a marker. This is the regression sensor
+# for the hooks themselves, not for what they used to simulate — the behaviour
+# they simulated is covered above by the fake-gh fixtures.
+SENTINEL_DIR="$ROOT/sentinel"
+mkdir -p "$SENTINEL_DIR"
+cat > "$SENTINEL_DIR/run" <<SENT
+#!/usr/bin/env bash
+echo "EXECUTED \$0 \$*" >> "$SENTINEL_DIR/fired"
+exit 0
+SENT
+chmod +x "$SENTINEL_DIR/run"
+: > "$SENTINEL_DIR/fired"
+rollback_fixture hooksentinel 79 sentinel ':'
+out=$(cd "$ROOT/hooksentinel/canon" && PATH="$ROOT/hooksentinel/bin:$PATH" \
+  GIBSON_CLAIM_TEST_ROLLBACK_HOOK="$SENTINEL_DIR/run" \
+  RELEASE_CLAIM_TEST_DIRTY_HOOK="$SENTINEL_DIR/run" \
+  RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK="$SENTINEL_DIR/run" \
+  RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK="$SENTINEL_DIR/run" \
+  GIBSON_CLAIM_ADMIT_ATTEMPTS=2 "$CLAIM" 79 sentinel 'lib/sentinel/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "the sentinel run still reached rollback" || bad "sentinel run exited 0: $out"
+check "no removed hook was executed by claim.sh" "$(grep -c . "$SENTINEL_DIR/fired" || true)" "0"
+for v in GIBSON_CLAIM_TEST_ROLLBACK_HOOK RELEASE_CLAIM_TEST_DIRTY_HOOK \
+         RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK; do
+  if grep -q "$v" "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh"; then
+    bad "$v is still referenced in production code"
+  else
+    ok "$v is gone from production code"
+  fi
+done
+# And the general shape: no production claim/release script may execute a
+# command taken from an environment variable.
+for prod in "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh" "$SCRIPT_DIR/../pr-claims.sh"; do
+  if grep -nE '^[[:space:]]*"\$\{?[A-Z_]*(HOOK|CMD|EXEC)[A-Z_]*' "$prod" >/dev/null; then
+    bad "$(basename "$prod") executes a command named by an environment variable"
+  else
+    ok "$(basename "$prod") executes no environment-named command"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# #153 review round 3, P1 — no node, and no unreadable read, means NO mutation
+# ---------------------------------------------------------------------------
+echo "#153 · a host without node refuses BEFORE any mutation"
+new_repo "$ROOT/nonode"
+mkdir -p "$ROOT/nonode/bin"
+cat > "$ROOT/nonode/bin/gh" <<'NNGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") echo "" ;;
+  "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+  "api graphql") : ;;
+  "pr create") echo "$*" >> "${GH_LOG:-/dev/null}"; echo "https://github.com/acme/app/pull/1234" ;;
+  "pr close") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+esac
+exit 0
+NNGH
+chmod +x "$ROOT/nonode/bin/gh"
+export GH_LOG="$ROOT/nonode/gh.log"
+: > "$GH_LOG"
+# A PATH with git and the fake gh, and deliberately without node.
+NONODE_PATH="$ROOT/nonode/bin:$(dirname "$(command -v git)"):/usr/bin:/bin"
+if PATH="$NONODE_PATH" command -v node >/dev/null 2>&1; then
+  echo "  note — node is reachable from the restricted PATH on this host; using a static contract check instead"
+  if grep -q 'node required — scope-overlap.mjs is the authoritative' "$CLAIM" &&
+     grep -q 'command -v node >/dev/null ||' "$CLAIM"; then
+    ok "claim.sh requires node before any mutation (source contract)"
+  else
+    bad "claim.sh no longer requires node before mutating"
+  fi
+else
+  out=$(cd "$ROOT/nonode/canon" && PATH="$NONODE_PATH" "$CLAIM" 71 nonode 'lib/nonode/**' 2>&1); rc=$?
+  [[ "$rc" -ne 0 ]] && ok "a host without node refuses the claim" || bad "claimed without node (rc=$rc): $out"
+  contains "says why node is required" "$out" "node required"
+  check "no gh mutation was attempted at all" "$(grep -c . "$GH_LOG" || true)" "0"
+  test ! -e "$ROOT/nonode/wt-71-nonode" \
+    && ok "no node means no worktree" || bad "a nodeless run created a worktree"
+  test -z "$(git -C "$ROOT/nonode/canon" branch --list 'feat/71-nonode')" \
+    && ok "no node means no branch" || bad "a nodeless run created a branch"
+fi
+# The fallback that used to run instead of node is gone from the source: an
+# admission decision must not have a weaker second implementation.
+lacks "no stem-grep overlap fallback survives" "$(cat "$CLAIM")" "legacy_scope_overlap"
+lacks "no swallowed pr-claims read survives"   "$(cat "$CLAIM")" 'pr-claims.sh" list "$REPO" 2>/dev/null'
+unset GH_LOG
+
+echo "#153 · an unreadable claim inventory refuses BEFORE any mutation"
+new_repo "$ROOT/readfail"
+mkdir -p "$ROOT/readfail/bin"
+cat > "$ROOT/readfail/bin/gh" <<'RFGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") echo "" ;;
+  "api graphql") echo "gh: API rate limit exceeded" >&2; exit 1 ;;
+  *) echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+esac
+exit 0
+RFGH
+chmod +x "$ROOT/readfail/bin/gh"
+export GH_LOG="$ROOT/readfail/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/readfail/canon" && PATH="$ROOT/readfail/bin:$PATH" \
+  "$CLAIM" 72 readfail 'lib/readfail/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "an unreadable inventory refuses the claim" || bad "claimed on an unread inventory (rc=$rc): $out"
+contains "says the inventory was never read" "$out" "unreadable"
+contains "never treats unreadable as empty"  "$out" "a view that was never read"
+check "no gh mutation was attempted at all" "$(grep -c . "$GH_LOG" || true)" "0"
+test ! -e "$ROOT/readfail/wt-72-readfail" \
+  && ok "an unreadable inventory creates no worktree" || bad "an unreadable inventory created a worktree"
+test -z "$(git -C "$ROOT/readfail/canon" branch --list 'feat/72-readfail')" \
+  && ok "an unreadable inventory creates no branch" || bad "an unreadable inventory created a branch"
+test -z "$(git -C "$ROOT/readfail/canon" ls-remote --heads origin 'feat/72-readfail')" \
+  && ok "an unreadable inventory pushes nothing" || bad "an unreadable inventory pushed a branch"
+unset GH_LOG
+
+echo "#153 · a MALFORMED claim inventory row refuses BEFORE any mutation"
+new_repo "$ROOT/rowfail"
+mkdir -p "$ROOT/rowfail/bin"
+cat > "$ROOT/rowfail/bin/gh" <<'RWGH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") echo "" ;;
+  "api graphql") printf 'truncated\trow\n' ;;
+  *) echo "$*" >> "${GH_LOG:-/dev/null}" ;;
+esac
+exit 0
+RWGH
+chmod +x "$ROOT/rowfail/bin/gh"
+export GH_LOG="$ROOT/rowfail/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/rowfail/canon" && PATH="$ROOT/rowfail/bin:$PATH" \
+  "$CLAIM" 73 rowfail 'lib/rowfail/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "a malformed inventory row refuses the claim" || bad "claimed on a malformed inventory (rc=$rc): $out"
+contains "names the malformed row" "$out" "malformed/truncated row"
+check "no gh mutation was attempted at all" "$(grep -c . "$GH_LOG" || true)" "0"
+test ! -e "$ROOT/rowfail/wt-73-rowfail" \
+  && ok "a malformed inventory creates no worktree" || bad "a malformed inventory created a worktree"
+unset GH_LOG
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

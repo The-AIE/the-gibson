@@ -704,13 +704,39 @@ branch_for() { echo "feat/${1#issue-}"; }
 # or label. All mutation is deferred to terminal_cleanup_release(), called
 # later once every helper it needs (phys_path/worktree_registered/…) is
 # defined, only after this function returns 0 (#153 AC1).
+#
+# RETURN CONTRACT (#153 review round 3, P2). This helper is called from two
+# places with two very different amounts of state already mutated, so it must
+# not decide the process's fate itself:
+#   0  verified — the caller may proceed to terminal_cleanup_release().
+#   1  NOT FOUND / not consulted — no terminal evidence exists for this claim,
+#      or the repository binding says this evidence is not ours to read. The
+#      caller falls back to whatever it does when there is no evidence.
+#   2  FATAL — evidence exists but is unreadable, ambiguous, mismatched, or
+#      contradicts the PR's own state. TERMINAL_FAIL_REASON says which.
+#      A caller that has not mutated anything turns this into `die` (exit 1);
+#      the post-close caller, which HAS already closed the PR, must instead
+#      take its documented close-only INCOMPLETE path (exit 3, artifacts and
+#      agent-claimed preserved) — the partial mutation is exactly why exiting
+#      1 through `die` was wrong there.
+# The evidence checks themselves are unchanged: every one of them still
+# refuses. Only who decides the exit code moved.
 TERMINAL_PR_NUMBER=""
 TERMINAL_MODE=0
 TERMINAL_HEAD_SHA=""
 TERMINAL_MERGE_SHA=""
 TERMINAL_STATE=""
+TERMINAL_FAIL_REASON=""
+# Records why terminal evidence is fatal and returns 2. Never exits: the
+# caller knows how much has already been mutated and therefore what a fatal
+# verdict costs.
+terminal_fatal() {
+  TERMINAL_FAIL_REASON="$1"
+  return 2
+}
 try_terminal_pr_body_release() {
   local id="$1" want_pr="${2:-}" rows count
+  TERMINAL_FAIL_REASON=""
   local t_number t_claim t_scope t_issue t_head t_head_sha t_url t_state t_cross t_merge_sha t_base_repo t_created t_updated
   if [[ -z "${PR_REPO:-}" || ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     return 1
@@ -732,11 +758,11 @@ try_terminal_pr_body_release() {
     # ambiguous "which terminal PR carries this id?" — a legitimately reused
     # claim id has more than one.
     if ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal-pr "$PR_REPO" "$id" "$want_pr" 2>&1); then
-      die "cannot verify terminal PR-body claim evidence for '$id' on PR #$want_pr in $PR_REPO (gh query failed) — refuse mutation: $rows"
+      terminal_fatal "cannot verify terminal PR-body claim evidence for '$id' on PR #$want_pr in $PR_REPO (gh query failed) — refuse mutation: $rows" || return 2
     fi
   elif ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal "$PR_REPO" "$id" 2>&1); then
-    die "cannot verify terminal PR-body claim evidence for '$id' on $PR_REPO (gh query failed) — refuse mutation: $rows
-  If this claim id was released and later reused, more than one terminal PR carries it; name the exact one with --pr <number>."
+    terminal_fatal "cannot verify terminal PR-body claim evidence for '$id' on $PR_REPO (gh query failed) — refuse mutation: $rows
+  If this claim id was released and later reused, more than one terminal PR carries it; name the exact one with --pr <number>." || return 2
   fi
   # grep -c (not wc -l): $rows came from command substitution, which strips
   # the trailing newline, so a single-line result would otherwise undercount
@@ -744,7 +770,7 @@ try_terminal_pr_body_release() {
   count=$(printf '%s' "$rows" | grep -c . || true)
   [[ "$count" -gt 0 ]] || return 1
   if [[ "$count" -gt 1 ]]; then
-    die "ambiguous terminal PR-body evidence for claim id '$id' on $PR_REPO — multiple PRs matched. A released claim id may legitimately be reused, so more than one terminal PR can carry it; name the exact one with --pr <number> rather than guessing."
+    terminal_fatal "ambiguous terminal PR-body evidence for claim id '$id' on $PR_REPO — multiple PRs matched. A released claim id may legitimately be reused, so more than one terminal PR can carry it; name the exact one with --pr <number> rather than guessing." || return 2
   fi
   # cut, not `IFS=$'\t' read`: tab is IFS *whitespace*, so bash's read
   # collapses consecutive tabs and silently drops empty fields (e.g. a CLOSED
@@ -767,48 +793,48 @@ try_terminal_pr_body_release() {
   # shellcheck disable=SC2034
   t_updated=$(cut -f13 <<<"$rows")
   [[ -n "$t_number" && -n "$t_claim" && -n "$t_scope" && -n "$t_state" && -n "$t_head" && -n "$t_head_sha" && -n "$t_base_repo" ]] ||
-    die "malformed/truncated terminal PR-body evidence for '$id' on $PR_REPO"
+    terminal_fatal "malformed/truncated terminal PR-body evidence for '$id' on $PR_REPO" || return 2
   [[ "$t_number" =~ ^[0-9]+$ ]] ||
-    die "terminal PR-body claim for '$id' has an unsafe PR number '$t_number' — refuse"
+    terminal_fatal "terminal PR-body claim for '$id' has an unsafe PR number '$t_number' — refuse" || return 2
   if [[ -n "$want_pr" ]]; then
     [[ "$t_number" == "$want_pr" ]] ||
-      die "terminal PR-body evidence for '$id' came back for PR #$t_number, not the requested PR #$want_pr — refuse"
+      terminal_fatal "terminal PR-body evidence for '$id' came back for PR #$t_number, not the requested PR #$want_pr — refuse" || return 2
   fi
   [[ "$t_claim" == "$id" ]] ||
-    die "terminal PR-body claim id mismatch on PR #$t_number (want '$id', got '${t_claim:-?}') — refuse"
+    terminal_fatal "terminal PR-body claim id mismatch on PR #$t_number (want '$id', got '${t_claim:-?}') — refuse" || return 2
   [[ "$t_issue" == "$ISSUE" ]] ||
-    die "terminal PR-body claim #$t_number issue mismatch (want #$ISSUE, got '${t_issue:-?}') — refuse"
+    terminal_fatal "terminal PR-body claim #$t_number issue mismatch (want #$ISSUE, got '${t_issue:-?}') — refuse" || return 2
   case "$t_state" in
     MERGED|CLOSED) ;;
     OPEN)
-      die "terminal PR-body claim #$t_number for '$id' is still OPEN — release only after it merges or closes"
+      terminal_fatal "terminal PR-body claim #$t_number for '$id' is still OPEN — release only after it merges or closes" || return 2
       ;;
     *)
-      die "terminal PR-body claim #$t_number for '$id' has an unrecognized state '$t_state' — refuse"
+      terminal_fatal "terminal PR-body claim #$t_number for '$id' has an unrecognized state '$t_state' — refuse" || return 2
       ;;
   esac
   [[ "$t_cross" == "false" ]] ||
-    die "terminal PR-body claim #$t_number for '$id' is a cross-repository (fork) PR — refuse (foreign-repo evidence)"
+    terminal_fatal "terminal PR-body claim #$t_number for '$id' is a cross-repository (fork) PR — refuse (foreign-repo evidence)" || return 2
   # Base-repository identity is re-derived by pr-claims.sh from the PR's own
   # URL, never assumed from the --repo query argument alone (#153 AC3).
   [[ "$t_base_repo" == "$PR_REPO" ]] ||
-    die "terminal PR-body claim #$t_number for '$id' base-repository mismatch (want '$PR_REPO', got '${t_base_repo:-?}') — refuse (do not infer repository identity from the query argument alone)"
+    terminal_fatal "terminal PR-body claim #$t_number for '$id' base-repository mismatch (want '$PR_REPO', got '${t_base_repo:-?}') — refuse (do not infer repository identity from the query argument alone)" || return 2
   [[ -n "$t_head" && "$t_head" =~ ^[A-Za-z0-9._/-]+$ ]] ||
-    die "terminal PR-body claim #$t_number for '$id' has an unsafe/unreadable head branch — refuse"
+    terminal_fatal "terminal PR-body claim #$t_number for '$id' has an unsafe/unreadable head branch — refuse" || return 2
   local expect_branch
   expect_branch=$(branch_for "$id")
   [[ "$t_head" == "$expect_branch" ]] ||
-    die "terminal PR-body claim #$t_number for '$id' head branch mismatch (want '$expect_branch', got '$t_head') — refuse"
+    terminal_fatal "terminal PR-body claim #$t_number for '$id' head branch mismatch (want '$expect_branch', got '$t_head') — refuse" || return 2
   [[ "$t_head_sha" =~ ^[0-9a-f]{40}$ ]] ||
-    die "terminal PR-body claim #$t_number for '$id' has a malformed/missing head SHA '${t_head_sha:-?}' — refuse"
+    terminal_fatal "terminal PR-body claim #$t_number for '$id' has a malformed/missing head SHA '${t_head_sha:-?}' — refuse" || return 2
   case "$t_state" in
     MERGED)
       [[ -n "$t_merge_sha" && "$t_merge_sha" =~ ^[0-9a-f]{40}$ ]] ||
-        die "terminal PR-body claim #$t_number for '$id' is MERGED but has a malformed/missing merge-commit SHA — refuse"
+        terminal_fatal "terminal PR-body claim #$t_number for '$id' is MERGED but has a malformed/missing merge-commit SHA — refuse" || return 2
       ;;
     CLOSED)
       [[ -z "$t_merge_sha" ]] ||
-        die "terminal PR-body claim #$t_number for '$id' is CLOSED but carries a merge-commit SHA — state/evidence mismatch, refuse (never call unmerged code merged)"
+        terminal_fatal "terminal PR-body claim #$t_number for '$id' is CLOSED but carries a merge-commit SHA — state/evidence mismatch, refuse (never call unmerged code merged)" || return 2
       ;;
   esac
   info "verified terminal PR-body claim #$t_number ($t_state) for '$id' on $PR_REPO — releasing without a ledger row"
@@ -1062,14 +1088,18 @@ terminal_cleanup_release() {
       # (#153 blocker 3) Close the dirty-worktree TOCTOU: revalidate not only
       # clean status but that the exact registered path still belongs to the
       # expected PR head branch and its HEAD is still the previously accepted
-      # exact/contained commit ($got_head, proven safe above) — a
-      # deterministic test hook can dirty the tree, switch its branch, or move
-      # its HEAD in exactly this window. Use non-force `git worktree remove`
-      # so Git itself refuses a tree that went dirty after our own recheck.
-      # Never --force, never rm -rf.
-      if [[ -n "${RELEASE_CLAIM_TEST_DIRTY_HOOK:-}" ]]; then
-        "$RELEASE_CLAIM_TEST_DIRTY_HOOK" "$wt" || true
-      fi
+      # exact/contained commit ($got_head, proven safe above) — a concurrent
+      # actor can dirty the tree, switch its branch, or move its HEAD in
+      # exactly this window. Use non-force `git worktree remove` so Git itself
+      # refuses a tree that went dirty after our own recheck. Never --force,
+      # never rm -rf.
+      #
+      # The sensors that prove this window is really closed drive it from
+      # OUTSIDE the script, through a `git` command shim on PATH that mutates
+      # the tree as the revalidation runs. Production must not execute a
+      # command named by an inherited environment variable to make a test
+      # convenient (#153 review round 3, P1) — an env var that names an
+      # executable IS an execution path, however it is documented.
       local revalidate_out revalidate_branch revalidate_head
       revalidate_branch=""
       if ! revalidate_out=$(git -C "$wt" status --porcelain 2>&1); then
@@ -1153,9 +1183,6 @@ terminal_cleanup_release() {
     # fresh pre-delete read and the delete call) is caught.
     local local_cas_failed=0
     if [[ -n "$local_branch_verified_oid" ]]; then
-      if [[ -n "${RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK:-}" ]]; then
-        "$RELEASE_CLAIM_TEST_LOCAL_ADVANCE_HOOK" "$br" || true
-      fi
       if ! git update-ref -d "refs/heads/$br" "$local_branch_verified_oid" 2>/dev/null; then
         warn "local branch CAS delete refused for '$br' — branch advanced since the safety proof (expected tip $local_branch_verified_oid) or delete failed"
         incomplete=1
@@ -1173,9 +1200,6 @@ terminal_cleanup_release() {
       incomplete=1
       preserve_label=1
     elif [[ "$REMOTE_BRANCH_STATUS" == "present" ]]; then
-      if [[ -n "${RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK:-}" ]]; then
-        "$RELEASE_CLAIM_TEST_REMOTE_ADVANCE_HOOK" "$br" || true
-      fi
       # Exact expected-old lease bound to the verified terminal PR head SHA —
       # never a re-read value. A lease mismatch means the branch advanced/was
       # reused between the precheck and this delete.
@@ -1671,24 +1695,44 @@ EOF
     # ambiguous the moment a released claim id is legitimately reused and a
     # second generation reaches a terminal state. Every evidence check below
     # still applies in full to that exact PR.
-    if [[ "$PR_HEAD_BRANCH" == "$PR_EXPECT_BRANCH" ]] &&
-       try_terminal_pr_body_release "$PR_CLAIM_ID" "$PR_NUMBER"; then
-      terminal_cleanup_release "$PR_CLAIM_ID"
+    # (#153 review round 3, P2) The handover distinguishes three outcomes, and
+    # NONE of them may exit 1 through `die` from here: the PR is already
+    # closed, so this run is a partial mutation and its documented shape is
+    # the close-only INCOMPLETE path below (exit 3, artifacts and
+    # agent-claimed preserved, recovery named). A helper that died here left
+    # exit 1 behind and bypassed that lifecycle entirely.
+    TERMINAL_RC=0
+    OPEN_INCOMPLETE=0
+    OPEN_SIBLINGS=""
+    OPEN_TERMINAL_FATAL=""
+    if [[ "$PR_HEAD_BRANCH" == "$PR_EXPECT_BRANCH" ]]; then
+      try_terminal_pr_body_release "$PR_CLAIM_ID" "$PR_NUMBER" || TERMINAL_RC=$?
+      if [[ "$TERMINAL_RC" -eq 0 ]]; then
+        terminal_cleanup_release "$PR_CLAIM_ID"
+      fi
     fi
 
     # --- close-only fallback ----------------------------------------------
     # Reached when the closed PR's own terminal evidence is not (yet)
-    # readable, or its head branch is not the one this claim id derives.
-    # The claim IS released — the PR is closed — but nothing may be removed
-    # on unproven identity, so say exactly that.
-    OPEN_INCOMPLETE=0
-    OPEN_SIBLINGS=""
+    # readable, is fatally unusable, or its head branch is not the one this
+    # claim id derives. The claim IS released — the PR is closed — but nothing
+    # may be removed on unproven identity, so say exactly that.
     if [[ "$PR_HEAD_BRANCH" != "$PR_EXPECT_BRANCH" ]]; then
       warn "PR #$PR_NUMBER head branch '$PR_HEAD_BRANCH' is not the branch claim id '$PR_CLAIM_ID' derives ('$PR_EXPECT_BRANCH') — refusing to clean up a worktree/branch whose identity cannot be bound to this claim"
       # The exact cleanup never ran, so no worktree/branch state was proven
       # either way. Scanning the PR's own head branch for leftovers below
       # cannot substitute for that proof — say INCOMPLETE and let a human
       # decide what the odd branch was.
+      OPEN_INCOMPLETE=1
+    elif [[ "$TERMINAL_RC" -eq 2 ]]; then
+      # Evidence exists for the PR we just closed, and it is FATALLY unusable:
+      # unreadable query, ambiguous, mismatched, or contradicting the PR's own
+      # state. The exact checks are unchanged — what changed is that this no
+      # longer exits 1 mid-mutation. Preserve everything, keep agent-claimed,
+      # and finish through the close-only INCOMPLETE report (exit 3).
+      OPEN_TERMINAL_FATAL="$TERMINAL_FAIL_REASON"
+      warn "PR #$PR_NUMBER is closed, but its terminal evidence is unusable — refusing to clean up on unproven identity: $TERMINAL_FAIL_REASON"
+      warn "the claim was released by closing PR #$PR_NUMBER; the worktree, both branch refs and agent-claimed are being PRESERVED because nothing about their identity was proven"
       OPEN_INCOMPLETE=1
     else
       warn "PR #$PR_NUMBER is closed but its terminal evidence is not readable yet — refusing to clean up on unproven identity"
@@ -1810,6 +1854,10 @@ EOF
     fi
 
     if [[ "$OPEN_INCOMPLETE" -eq 1 ]]; then
+      if [[ -n "$OPEN_TERMINAL_FATAL" ]]; then
+        echo "release-claim.sh: the terminal evidence for the PR this run closed could not be used: $OPEN_TERMINAL_FATAL" >&2
+      fi
+      echo "release-claim.sh: RECOVERY — PR #$PR_NUMBER is closed, so the claim is released, but nothing was removed and agent-claimed was preserved. Re-run 'release-claim.sh $ISSUE --claim-id $PR_CLAIM_ID --repo $PR_REPO --pr $PR_NUMBER' once the PR's terminal evidence reads cleanly; that path runs the exact verified terminal cleanup (registered-worktree proof, head-SHA containment, CAS branch deletes) and removes the label only after proving it." >&2
       echo "release-claim.sh: INCOMPLETE — open-PR claim release did not finish for issue $ISSUE (see warnings above)" >&2
       exit 3
     fi
@@ -1842,9 +1890,19 @@ if [[ "$CLAIM_ID_SET" -eq 1 ]]; then
     # id-only lookup is used, which is correct until a released id is reused
     # and more than one terminal PR carries it — then it is ambiguous and
     # refuses, and the error names --pr as the way to ask precisely.
-    if [[ "$CAS_MODE" -eq 0 ]] && try_terminal_pr_body_release "$CLAIM_ID_ARG" "$PR_NUMBER_ARG"; then
-      :
+    # Nothing has been mutated on this path, so a FATAL evidence verdict (2)
+    # is still safe to turn into a plain refusal — and it must name which
+    # binding failed rather than collapsing into the generic "no live claim"
+    # message (#153 review round 3, P2).
+    TERMINAL_RC=0
+    if [[ "$CAS_MODE" -eq 0 ]]; then
+      try_terminal_pr_body_release "$CLAIM_ID_ARG" "$PR_NUMBER_ARG" || TERMINAL_RC=$?
     else
+      TERMINAL_RC=1
+    fi
+    if [[ "$TERMINAL_RC" -eq 2 ]]; then
+      die "$TERMINAL_FAIL_REASON"
+    elif [[ "$TERMINAL_RC" -ne 0 ]]; then
       die "no live claim '$CLAIM_ID_ARG' at $REF (checked ledger and terminal PR-body evidence${PR_NUMBER_ARG:+, bound to PR #$PR_NUMBER_ARG})"
     fi
   fi

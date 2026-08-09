@@ -20,43 +20,52 @@ WHAT IT DOES
   another lane that has not published its claim yet: two lanes claiming
   DIFFERENT issues with overlapping scope can each see an inventory without the
   other and both pass. So the claim is admitted a second time AFTER its PR
-  exists (#153 review P1). The post-create pass re-reads the authoritative
-  inventory, requires this lane's own PR to be visible in it, and refuses if an
-  overlapping live PR-body claim holds a LOWER PR number. GitHub assigns PR
-  numbers uniquely and monotonically, so both racers reach the same verdict from
-  the same evidence — exactly one survives, with no lock file, no repo-global
-  state, and nothing stale left behind if a lane is killed. A lane that loses
-  rolls back only what it created (its PR, worktree, branch, and the label if it
-  was the one that added it) and exits nonzero.
+  exists (#153 review P1), by `scope-overlap.mjs --admit-pr`. That pass waits
+  for the authoritative inventory to go quiet, requires this lane's own PR to
+  be visible in it, and refuses if an overlapping live PR-body claim holds a
+  LOWER PR number. GitHub assigns PR numbers uniquely and monotonically, so
+  both racers reach the same verdict from the same evidence. A lane that loses
+  rolls back only what it created (its PR, worktree, branch, and the label if
+  it was the one that added it) and exits nonzero.
 
   THE PUBLICATION BARRIER (why one read is not enough)
   Seeing your own PR in the inventory does not prove you can see everyone
   else's. GitHub's PR list is eventually consistent, so a rival PR created a
   moment before yours can still be missing from the page you are served after
   your own row has appeared. Deciding there lets both lanes admit themselves.
-  So admission does not decide on the first read that contains this lane. It
-  reads the inventory repeatedly, spaced by GIBSON_CLAIM_ADMIT_DELAY, and
-  decides only once the claim-relevant projection of that inventory (PR number,
-  claim id, scope) has come back IDENTICAL on GIBSON_CLAIM_ADMIT_STABLE_READS
-  consecutive reads that all contain this lane's own claim.
+  So admission does not decide on the first read that contains this lane: it
+  decides only once the claim-relevant projection of the inventory (PR number,
+  claim id, scope) has come back IDENTICAL on several consecutive spaced reads
+  that all contain this lane's own claim.
 
     Invariant: the verdict is computed from a quiescent inventory — one that
     stopped changing across a window of at least
     (STABLE_READS - 1) x DELAY seconds — and never from a single sample.
 
-  Bounded failure, stated honestly: quiescence bounds the race, it does not
-  abolish it. Correctness holds when a rival PR created before ours becomes
-  visible to us within that window; a replica lagging longer than the whole
-  window can still hide it, and no client-side read can fix that. Everything
-  outside the window fails CLOSED — a repository churning so fast the inventory
-  never settles, or a read that keeps failing, exhausts
-  GIBSON_CLAIM_ADMIT_ATTEMPTS and the claim is refused and rolled back rather
-  than admitted on evidence it could not stabilise. Refusal is safe and
-  re-runnable; admitting on a partial view is neither.
+  The barrier lives inside scope-overlap.mjs, which takes those reads itself.
+  Nothing hands it an inventory: an option to supply one would be a forged-
+  evidence path, and no cross-process handoff of caller-supplied data can be
+  made unforgeable. It enforces a production floor of at least 2 matching
+  reads spaced at least 1 second apart. GIBSON_CLAIM_ADMIT_* may RAISE that
+  floor; a value below it is a usage error, not a silent clamp. There is no
+  supported way to switch the barrier off.
 
-  Same-issue exclusivity is re-decided on that same quiescent inventory. Two
-  lanes on the SAME issue with different slugs and disjoint scopes both pass
-  the pre-create duplicate check (neither is published yet) and both pass a
+  WHAT THE BARRIER DOES AND DOES NOT GIVE YOU
+  Within the window, the barrier gives a DETERMINISTIC winner: when every
+  racing lane's PR becomes visible to every other racing lane inside its own
+  quiescence window, all of them compute the same lowest PR number and exactly
+  one is admitted. That condition is what makes "exactly one" true — it is not
+  unconditional. Eventual-consistency lag is not bounded by anything this
+  script controls, so a replica that hides a rival for longer than the whole
+  window can still admit two lanes, and no client-side read can fix that.
+  Everything outside the window fails CLOSED: an inventory that never settles,
+  or reads that keep failing, exhaust the attempts and the claim is refused and
+  rolled back rather than admitted on evidence it could not stabilise. Refusal
+  is safe and re-runnable; admitting on a partial view is neither.
+
+  Same-issue exclusivity is decided on that same quiescent inventory. Two lanes
+  on the SAME issue with different slugs and disjoint scopes both pass the
+  pre-create duplicate check (neither is published yet) and both pass a
   scope-only re-check, which is how one issue got built twice. Without --slice
   exactly one survives — the lower PR number, the same deterministic tie-break
   the scope race uses. With --slice, same-issue siblings are exactly as legal
@@ -64,14 +73,26 @@ WHAT IT DOES
 
   ROLLBACK NEVER DESTROYS WORK
   A losing lane rolls back with the same protections release-claim.sh uses for
-  terminal cleanup, shared as lib/claim-guards.sh rather than copied: the
-  worktree is resolved from `git worktree list --porcelain` (never assumed from
-  its path), must be the exact path THIS lane created, on this lane's branch,
-  clean, and still at the exact commit this lane made; local and remote branch
-  deletion are compare-and-swap against that same commit. Anything that cannot
-  be proven is kept, named, and reported — the run exits nonzero and INCOMPLETE
-  instead of force-removing a worktree that went dirty or a branch that moved
-  during the admission window.
+  terminal cleanup, shared as lib/claim-guards.sh rather than copied. Rollback
+  is ORDERED: nothing is destroyed until this lane's own claim PR has been
+  positively bound, positively closed, and freshly proven to be no longer a
+  live claim. Only then are the worktree, branches and issue-wide label
+  considered — the worktree resolved from `git worktree list --porcelain`
+  (never assumed from its path), required to be the exact path THIS lane
+  created, on this lane's branch, clean, and still at the exact commit this
+  lane made; local and remote branch deletion compare-and-swap against that
+  same commit. Anything that cannot be proven is kept, named, and reported —
+  the run exits nonzero and INCOMPLETE instead of force-removing a worktree
+  that went dirty, deleting a branch that moved, or stripping an issue-wide
+  label while this lane's PR may still be open.
+
+  WHAT A KILLED LANE LEAVES BEHIND (be honest about this)
+  Rollback runs from an EXIT trap, so it protects a lane that fails or refuses
+  — not one that is destroyed. SIGKILL, a power loss, or a terminated shell
+  before the trap finishes can leave an open draft PR (a LIVE claim), the
+  agent-claimed label, a pushed branch, and a worktree behind. Those do not
+  self-heal: `claim-reaper.sh` and the manual recovery in
+  docs/troubleshooting/claim-conflicts.md are how they get cleared.
 
 WHY
   Two agents editing the same files silently destroyed each other's work (L-001).
@@ -84,7 +105,9 @@ RISKS
   - Pushes an empty claim commit to a feature branch and opens a draft PR.
   - Adds the agent-claimed label. Undo: gh issue edit --remove-label.
   - Creates ../wt-<issue>-<slug> next to the canonical checkout.
-  - Exits non-zero and removes the label if a conflict is found.
+  - Exits non-zero on a conflict, and removes the label only after proving its
+    own PR is closed and no sibling claim still holds the issue. Anything it
+    cannot prove is kept and reported INCOMPLETE.
   - Does NOT move your canonical checkout: the claim commit is made in a throwaway
     worktree, so a dirty feature branch is fine (L-009).
 
@@ -100,27 +123,35 @@ USAGE
           not overlap, and whoever releases a slice must use
           `release-claim.sh <issue> --claim-id <id>` so the siblings survive.
 
+REQUIREMENTS
+  git, gh, and node. node is required BEFORE any mutation: scope-overlap.mjs is
+  the authoritative overlap and admission decision, and there is no weaker
+  fallback for it. A host without node refuses the claim outright rather than
+  labelling an issue, pushing a branch and opening a PR on a check it could not
+  run (#153 review round 3, P1).
+
 ENV
   GIBSON_CANONICAL   path to target repo canonical checkout (default: cwd)
   GIBSON_SESSION     session id recorded in the claim (default: $USER@host)
   GIBSON_CLAIM_ADMIT_ATTEMPTS
-                     the most times the post-create admission pass will read
-                     the live inventory while waiting for it to contain this
-                     lane's own PR and then go quiet (default 6). Patience
+                     the most times the admission pass will read the live
+                     inventory while waiting for it to contain this lane's own
+                     PR and then go quiet (default 6, minimum 2). Patience
                      only — it never changes the verdict, and running out
                      still refuses the claim and rolls it back.
   GIBSON_CLAIM_ADMIT_STABLE_READS
                      how many CONSECUTIVE reads must return an identical
                      claim inventory (and contain this lane's own claim)
-                     before admission will decide (default 2). 1 disables the
-                     publication barrier and decides on a single sample — it
-                     exists for tests and for a repository you know is
-                     uncontended, not for a fleet.
+                     before admission will decide (default 2, minimum 2).
   GIBSON_CLAIM_ADMIT_DELAY
-                     seconds between those reads (default 2). The quiescence
-                     window is (STABLE_READS - 1) x DELAY; a rival that
-                     publishes within it is seen, one that takes longer is
+                     seconds between those reads (default 2, minimum 1). The
+                     quiescence window is (STABLE_READS - 1) x DELAY; a rival
+                     that publishes within it is seen, one that takes longer is
                      not, and everything unproven refuses.
+                     These three may only RAISE the barrier. A value below the
+                     production minimum is refused as a usage error — the
+                     barrier cannot be weakened or switched off from the
+                     environment.
 
 EXAMPLES
   cd ~/Code/acme-app
@@ -170,6 +201,17 @@ info() { echo "claim.sh: $*"; }
 
 command -v git >/dev/null || die "git required"
 command -v gh >/dev/null || die "gh (GitHub CLI) required"
+# node is a HARD requirement, checked before anything is mutated (#153 review
+# round 3, P1). scope-overlap.mjs is the authoritative overlap and admission
+# decision; the old stem-grep fallback answered a weaker question and, worse,
+# ran only after the label, branch, PR and worktree already existed. A host
+# that cannot run the real check must not claim at all.
+command -v node >/dev/null ||
+  die "node required — scope-overlap.mjs is the authoritative claim-overlap and admission check and there is no weaker fallback; refusing to claim on a host that cannot run it"
+[[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]] ||
+  die "cannot find $SCRIPT_DIR/scope-overlap.mjs — refusing to claim without the authoritative overlap/admission sensor"
+[[ -x "$SCRIPT_DIR/pr-claims.sh" ]] ||
+  die "cannot execute $SCRIPT_DIR/pr-claims.sh — refusing to claim without the authoritative live-claim reader"
 
 # Authoritative issue-label read. A gh failure is UNREADABLE, never "no
 # labels": treating a failed read as an empty one is how a lane both walked
@@ -223,61 +265,79 @@ if ! git rev-parse --verify --quiet "$REF" >/dev/null; then
   die "cannot resolve $REF after fetch — refuse claim (fail closed; #106)"
 fi
 
+# Read + shape-validate `pr-claims.sh list` for $REPO. Sets INVENTORY_ROWS on
+# success; on failure sets INVENTORY_ERR and returns 1. Every caller treats an
+# unreadable or malformed inventory as UNREADABLE, never as empty: "no live
+# claims" and "I could not find out" are different answers, and only one of
+# them licenses a mutation (#153 review round 3, P1).
+INVENTORY_ROWS=""
+INVENTORY_ERR=""
+read_live_inventory() {
+  local rows row fields id num
+  INVENTORY_ROWS=""
+  INVENTORY_ERR=""
+  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>&1); then
+    INVENTORY_ERR="the live claim inventory for $REPO is unreadable — $rows"
+    return 1
+  fi
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    fields=$(awk -F'\t' '{print NF}' <<<"$row")
+    num=$(awk -F'\t' '{print $1}' <<<"$row")
+    id=$(awk -F'\t' '{print $2}' <<<"$row")
+    if [[ "$fields" -ne 7 || -z "$id" || "$id" != issue-* || ! "$num" =~ ^[0-9]+$ ]]; then
+      INVENTORY_ERR="the live claim inventory for $REPO returned a malformed/truncated row — $row"
+      return 1
+    fi
+  done <<EOF
+$rows
+EOF
+  INVENTORY_ROWS="$rows"
+  return 0
+}
+
+# Every live claim id: PR-body claims (authoritative) plus the legacy ledger
+# forms still read for claims made by older versions. Prints ids on stdout and
+# the reason on stderr; returns 1 when ANY of those reads could not be
+# completed. A swallowed read here is how a lane walks past a live claim.
 live_claim_ids() {
-  PR_CLAIM_IDS=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>/dev/null |
-    awk -F '\t' '{print $2}' || true)
-  if [[ -n "$PR_CLAIM_IDS" ]]; then
-    printf '%s\n' "$PR_CLAIM_IDS"
+  local tree table body
+  if ! read_live_inventory; then
+    echo "claim.sh: $INVENTORY_ERR" >&2
+    return 1
   fi
-  git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null |
-    sed 's|^docs/claims/||;s|\.md$||' | grep -E '^issue-' || true
-  git show "$REF:docs/active-work.md" 2>/dev/null |
-    grep -E '^\| ' | awk -F'|' '{print $3}' |
-    sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -E '^issue-' || true
-}
-
-claim_scope() {
-  PR_CLAIM_SCOPE=$("$SCRIPT_DIR/pr-claims.sh" find "$REPO" "$1" 2>/dev/null |
-    awk -F '\t' '{print $3}' || true)
-  if [[ -n "$PR_CLAIM_SCOPE" ]]; then
-    printf '%s\n' "$PR_CLAIM_SCOPE"
-    return 0
+  if [[ -n "$INVENTORY_ROWS" ]]; then
+    printf '%s\n' "$INVENTORY_ROWS" | awk -F '\t' 'NF>0 {print $2}'
   fi
-  LEGACY_CLAIM_SCOPE=$(git show "$REF:docs/claims/$1.md" 2>/dev/null |
-    sed -n 's/^scope: //p')
-  if [[ -n "$LEGACY_CLAIM_SCOPE" ]]; then
-    printf '%s\n' "$LEGACY_CLAIM_SCOPE"
-    return 0
+  if ! tree=$(git ls-tree --name-only "$REF" docs/claims/ 2>&1); then
+    echo "claim.sh: cannot read the claim ledger tree at $REF:docs/claims/ — an unreadable tree is not an empty one: $tree" >&2
+    return 1
   fi
-  git show "$REF:docs/active-work.md" 2>/dev/null |
-    grep -F "| $1 |" | head -1 | awk -F'|' '{print $4}' |
-    sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-}
-
-# Historical stem/prefix overlap between two space-separated scope strings.
-# Used by the pre-create check and by the post-create admission pass when node
-# (and therefore scope-overlap.mjs) is unavailable, so both passes agree on
-# what "overlap" means.
-legacy_scope_overlap() {
-  local a="$1" b="$2" s stem t tstem
-  for s in $a; do
-    stem="${s%%\**}"
-    [[ -z "$stem" ]] && continue
-    if echo " $b " | grep -F "$stem" >/dev/null 2>&1; then
-      return 0
+  if [[ -n "$tree" ]]; then
+    printf '%s\n' "$tree" | sed 's|^docs/claims/||;s|\.md$||' | grep -E '^issue-' || true
+  fi
+  # Presence first, then content: `git show` on a path that does not exist and
+  # `git show` on a tree it cannot read both fail, and only one of those means
+  # "there is no legacy table".
+  if ! table=$(git ls-tree --name-only "$REF" docs/active-work.md 2>&1); then
+    echo "claim.sh: cannot read $REF:docs/active-work.md — an unreadable path is not an absent one: $table" >&2
+    return 1
+  fi
+  if [[ -n "$table" ]]; then
+    if ! body=$(git show "$REF:docs/active-work.md" 2>&1); then
+      echo "claim.sh: cannot read the legacy claim table $REF:docs/active-work.md: $body" >&2
+      return 1
     fi
-  done
-  for t in $b; do
-    tstem="${t%%\**}"
-    [[ -z "$tstem" ]] && continue
-    if echo " $a " | grep -F "$tstem" >/dev/null 2>&1; then
-      return 0
-    fi
-  done
-  return 1
+    printf '%s\n' "$body" | grep -E '^\| ' | awk -F'|' '{print $3}' |
+      sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -E '^issue-' || true
+  fi
+  return 0
 }
 
-LIVE_IDS=$(live_claim_ids | sort -u)
+if ! LIVE_IDS_RAW=$(live_claim_ids); then
+  die "cannot read the authoritative live-claim inventory for $REPO (reason above) — refusing to claim against a view that was never read"
+fi
+LIVE_IDS=$(printf '%s\n' "$LIVE_IDS_RAW" | sed '/^$/d' | sort -u)
 
 # --- L-028 / #11: refuse an accidental second claim on the same issue ---
 # A deliberate second lane is legitimate (L-024 ships big issues in slices), so
@@ -311,28 +371,16 @@ if echo "$LIVE_IDS" | grep -qx "$CLAIM_ID"; then
 fi
 
 # --- scope overlap against every live claim (#106 independent-set sensor) ---
-# Prefer the dedicated sensor (origin fetch already proven above). Fall back to
-# the historical stem check only if node is unavailable (should not happen on
-# fleet hosts; still fail closed on overlap).
-if command -v node >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]]; then
-  _so_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO")
-  for s in $SCOPE; do
-    _so_args+=(--scope "$s")
-  done
-  if [[ "$SLICE" -eq 1 ]]; then
-    _so_args+=(--slice --issue "$ISSUE")
-  fi
-  if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_so_args[@]}"; then
-    die "scope overlap (or ledger unreadable) — coordinate; do not race (#106)"
-  fi
-else
-  for id in $LIVE_IDS; do
-    row_scope=$(claim_scope "$id")
-    [[ -z "$row_scope" ]] && continue
-    if legacy_scope_overlap "$SCOPE" "$row_scope"; then
-      die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
-    fi
-  done
+# The dedicated sensor is the ONLY implementation (node was proven above).
+_so_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO" --issue "$ISSUE")
+for s in $SCOPE; do
+  _so_args+=(--scope "$s")
+done
+if [[ "$SLICE" -eq 1 ]]; then
+  _so_args+=(--slice)
+fi
+if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_so_args[@]}"; then
+  die "scope overlap (or ledger unreadable) — coordinate; do not race (#106)"
 fi
 
 LABEL_ADDED=0
@@ -340,6 +388,12 @@ LABEL_PRE_PRESENT=0
 WORKTREE_CREATED=0
 BRANCH_PUSHED=0
 PR_NUMBER=""
+# Set to 1 the instant `gh pr create` is INVOKED, before its result is known.
+# A PR can exist even when the command reported failure or printed something
+# unparseable, and a rollback that assumes otherwise deletes a worktree and a
+# branch out from under an open claim PR (#153 review round 3, P1).
+PR_CREATE_ATTEMPTED=0
+PR_CREATE_RC=1
 CLAIM_COMPLETE=0
 # The exact commit this lane put on its own branch. Fixed at creation time and
 # never re-read from the ref later: a value read immediately before a delete
@@ -349,6 +403,105 @@ CLAIM_EXPECTED_OID=""
 ROLLBACK_LEFTOVERS=""
 
 leftover() { ROLLBACK_LEFTOVERS="${ROLLBACK_LEFTOVERS}  - $1"$'\n'; }
+
+# --- rollback phase 1: this lane's own claim PR ----------------------------
+# Nothing else may be destroyed until this returns 0. The claim IS the open PR:
+# while it may still be open, the worktree and branch are the live work behind
+# a live claim, and agent-claimed is the issue-wide flag that claim still needs.
+#
+# Returns 0 only when it is PROVEN that this lane holds no live claim PR:
+#   * `gh pr create` was never invoked (nothing to own), or
+#   * it was invoked, the inventory is readable and well formed, and it carries
+#     no claim of ours and the create itself failed, or
+#   * the PR was positively bound to this lane (exact claim id AND exact head
+#     branch, and the number this lane created when it knows one), positively
+#     closed, and a FRESH read of the inventory proves it is no longer live.
+# Everything else returns 1: the artifacts are retained and the uncertainty is
+# named. A `gh pr close` that failed, a close that reported success while the
+# claim is still live, an unreadable/malformed/ambiguous inventory, and a
+# create whose output could not be parsed all land here.
+ROLLBACK_INVENTORY_FRESH=0
+rollback_pr() {
+  local matches="" count row num id head
+  ROLLBACK_INVENTORY_FRESH=0
+  if [[ "$PR_CREATE_ATTEMPTED" -ne 1 ]]; then
+    return 0
+  fi
+
+  if ! read_live_inventory; then
+    leftover "this lane's draft claim PR${PR_NUMBER:+ #$PR_NUMBER} for $CLAIM_ID (kept: $INVENTORY_ERR — an unread inventory cannot prove whether the claim is still live)"
+    return 1
+  fi
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    num=$(awk -F'\t' '{print $1}' <<<"$row")
+    id=$(awk -F'\t' '{print $2}' <<<"$row")
+    head=$(awk -F'\t' '{print $4}' <<<"$row")
+    if [[ "$id" == "$CLAIM_ID" ]] || { [[ -n "$PR_NUMBER" ]] && [[ "$num" == "$PR_NUMBER" ]]; }; then
+      matches="${matches}${num}"$'\t'"${id}"$'\t'"${head}"$'\n'
+    fi
+  done <<EOF
+$INVENTORY_ROWS
+EOF
+  count=$(printf '%s' "$matches" | grep -c . || true)
+
+  if [[ "$count" -gt 1 ]]; then
+    leftover "this lane's draft claim PR for $CLAIM_ID (kept: $count live claim rows match claim id '$CLAIM_ID'${PR_NUMBER:+ or PR #$PR_NUMBER} — ambiguous evidence, refusing to close or clean up anything)"
+    return 1
+  fi
+
+  if [[ "$count" -eq 1 ]]; then
+    num=$(printf '%s' "$matches" | cut -f1)
+    id=$(printf '%s' "$matches" | cut -f2)
+    head=$(printf '%s' "$matches" | cut -f3)
+    if [[ "$id" != "$CLAIM_ID" || "$head" != "$BRANCH" ]]; then
+      leftover "PR #$num (kept: it matched by number but carries claim '$id' on head branch '$head', not this lane's '$CLAIM_ID' on '$BRANCH' — refusing to close a PR that is not provably this lane's)"
+      return 1
+    fi
+    if [[ -n "$PR_NUMBER" && "$num" != "$PR_NUMBER" ]]; then
+      leftover "PR #$num (kept: this lane created PR #$PR_NUMBER, so a different live PR carrying its claim id is unexplained evidence)"
+      return 1
+    fi
+    PR_NUMBER="$num"
+  elif [[ -z "$PR_NUMBER" ]]; then
+    if [[ "$PR_CREATE_RC" -ne 0 ]]; then
+      # gh pr create reported failure AND a readable, well-formed inventory
+      # carries no claim of ours: proven there is no claim PR to close.
+      return 0
+    fi
+    # gh pr create reported SUCCESS but its output could not be parsed into a
+    # number. The PR may exist and simply not be published to this view yet —
+    # and absence from an eventually consistent view is not proof of absence.
+    leftover "a possible draft claim PR for $CLAIM_ID (kept: gh pr create reported success but its output could not be parsed into a PR number, and the live inventory does not show the claim; the PR may exist and be unpublished. Find and close it by hand before re-claiming this issue)"
+    return 1
+  fi
+
+  # PR_NUMBER is bound here — either parsed from this lane's own create, or
+  # discovered above and proven to carry this lane's claim id and branch.
+  if ! gh pr close "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1; then
+    leftover "PR #$PR_NUMBER (kept: gh pr close failed — this lane's claim may still be LIVE. Close it by hand; nothing else was removed)"
+    return 1
+  fi
+  info "rollback: closed this lane's own PR #$PR_NUMBER"
+
+  # A close that reported success is not proof the claim stopped being live.
+  # The authoritative inventory saying so is.
+  if ! read_live_inventory; then
+    leftover "PR #$PR_NUMBER (kept: gh pr close reported success but the post-close inventory could not be re-read to prove the claim is gone — $INVENTORY_ERR)"
+    return 1
+  fi
+  if printf '%s\n' "$INVENTORY_ROWS" |
+     awk -F'\t' -v c="$CLAIM_ID" -v n="$PR_NUMBER" 'NF>0 && ($2==c || $1==n) {f=1} END{exit !f}'; then
+    leftover "PR #$PR_NUMBER (kept: it is STILL a live claim after gh pr close reported success — refusing to destroy anything while the claim may be held)"
+    return 1
+  fi
+  # This same freshly-read, post-close inventory is what the label step below
+  # reasons about: one authoritative read, taken after this claim stopped
+  # being live, instead of two that could disagree.
+  ROLLBACK_INVENTORY_FRESH=1
+  return 0
+}
 
 # --- rollback: remove this lane's own worktree, or refuse and say why -------
 # Same protections as release-claim.sh's terminal cleanup (shared code, not a
@@ -469,7 +622,7 @@ rollback_branches() {
 # surviving sibling still needs it, and a FRESH label read proves what is
 # actually there. Any unreadable or malformed evidence keeps the label.
 rollback_label() {
-  local rows sibling_ids="" malformed="" unparseable="" _row _fields row_num row_id
+  local rows sibling_ids="" unparseable="" _row row_num row_id
   if [[ "$LABEL_ADDED" -ne 1 ]]; then
     return 0
   fi
@@ -478,19 +631,21 @@ rollback_label() {
     return 0
   fi
 
-  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>&1); then
-    leftover "agent-claimed on #$ISSUE (kept: the live claim inventory for $REPO is unreadable, so a sibling lane cannot be ruled out — $rows)"
+  if [[ "$ROLLBACK_INVENTORY_FRESH" -eq 1 ]]; then
+    # rollback_pr already took a validated read AFTER this lane's PR stopped
+    # being live. Re-reading here would only introduce a second view that can
+    # disagree with the one the PR phase proved its postcondition against.
+    rows="$INVENTORY_ROWS"
+  elif read_live_inventory; then
+    rows="$INVENTORY_ROWS"
+  else
+    leftover "agent-claimed on #$ISSUE (kept: $INVENTORY_ERR, so a sibling lane cannot be ruled out)"
     return 1
   fi
   while IFS= read -r _row; do
     [[ -n "$_row" ]] || continue
-    _fields=$(awk -F'\t' '{print NF}' <<<"$_row")
     row_num=$(awk -F'\t' '{print $1}' <<<"$_row")
     row_id=$(awk -F'\t' '{print $2}' <<<"$_row")
-    if [[ "$_fields" -ne 7 || -z "$row_id" || "$row_id" != issue-* || ! "$row_num" =~ ^[0-9]+$ ]]; then
-      malformed="$_row"
-      break
-    fi
     # This lane's own row may still be in the inventory: the PR was only just
     # closed and that view is eventually consistent. Exclude it by both keys.
     [[ "$row_id" == "$CLAIM_ID" ]] && continue
@@ -505,10 +660,6 @@ rollback_label() {
   done <<EOF
 $rows
 EOF
-  if [[ -n "$malformed" ]]; then
-    leftover "agent-claimed on #$ISSUE (kept: the live claim inventory returned a malformed row, so a sibling lane cannot be ruled out — $malformed)"
-    return 1
-  fi
   if [[ -n "$unparseable" ]]; then
     leftover "agent-claimed on #$ISSUE (kept: live claim id '$unparseable' carries no readable issue number, so it cannot be ruled out as a sibling)"
     return 1
@@ -556,24 +707,29 @@ cleanup_claim() {
   fi
   ROLLBACK_LEFTOVERS=""
 
-  # Deterministic hook for the adversarial rollback sensors: lets a test dirty
-  # the worktree, advance a branch, or unregister the worktree in exactly the
-  # window a slow admission pass leaves open. Never set in production.
-  if [[ -n "${GIBSON_CLAIM_TEST_ROLLBACK_HOOK:-}" ]]; then
-    "$GIBSON_CLAIM_TEST_ROLLBACK_HOOK" "$WT_DIR" "$BRANCH" "$CLAIM_EXPECTED_OID" || true
-  fi
-
-  # Close this lane's own PR first, bound to the number it created. Doing this
-  # before the label step also means the sibling inventory below is read after
-  # this claim has stopped being live.
-  if [[ -n "$PR_NUMBER" && "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
-    if gh pr close "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1; then
-      info "rollback: closed this lane's own PR #$PR_NUMBER"
-    else
-      leftover "PR #$PR_NUMBER (gh pr close failed — close it by hand)"
+  # PHASE 1 — the claim itself. Bind, close, and freshly prove this lane's own
+  # PR is no longer a live claim. Until that holds, the worktree, the branches
+  # and the issue-wide label are all still backing a claim that may be live,
+  # and destroying any of them is destroying work behind an open PR (#153
+  # review round 3, P1). Anything unproven retains EVERYTHING.
+  if ! rollback_pr; then
+    if [[ "$WORKTREE_CREATED" -eq 1 ]]; then
+      leftover "worktree $WT_DIR (kept: this lane's claim PR could not be proven closed and no longer live)"
     fi
+    if [[ "$WORKTREE_CREATED" -eq 1 || "$BRANCH_PUSHED" -eq 1 ]]; then
+      leftover "local and remote branch $BRANCH (kept: this lane's claim PR could not be proven closed and no longer live)"
+    fi
+    if [[ "$LABEL_ADDED" -eq 1 && "$LABEL_PRE_PRESENT" -ne 1 ]]; then
+      leftover "agent-claimed on #$ISSUE (kept: agent-claimed is issue-wide and this lane's claim PR may still be open — removing it would unflag a live claim)"
+    fi
+    echo "claim.sh: INCOMPLETE — rollback preserved work instead of destroying it. Left behind:" >&2
+    printf '%s' "$ROLLBACK_LEFTOVERS" >&2
+    echo "claim.sh: resolve these by hand. Nothing was force-removed, and no issue-wide label was touched." >&2
+    [[ "$rc" -eq 0 ]] && rc=1
+    exit "$rc"
   fi
 
+  # PHASE 2 — only now, with no live claim of ours left, the artifacts.
   # Only ever touch a branch this lane actually created. When the run died
   # before `git worktree add`, any branch of that name belongs to someone else
   # — the old unconditional `git branch -D` was willing to delete it.
@@ -663,167 +819,46 @@ cat > "$BODY" <<EOF
 This draft PR reserves the issue before implementation. The claim is released
 when this PR closes or merges.
 EOF
-PR_NUMBER=$(gh pr create --repo "$REPO" --draft --base "$BASE" --head "$BRANCH" \
-  --title "WIP: claim #$ISSUE — $SLUG" --body-file "$BODY" |
-  sed -n 's|.*/pull/||p')
+# Mark the attempt BEFORE the call. From this line on, a PR may exist no
+# matter what gh reports, and rollback must bind and close it before it
+# destroys anything (#153 review round 3, P1).
+PR_CREATE_ATTEMPTED=1
+PR_CREATE_RC=0
+PR_CREATE_OUT=$(gh pr create --repo "$REPO" --draft --base "$BASE" --head "$BRANCH" \
+  --title "WIP: claim #$ISSUE — $SLUG" --body-file "$BODY" 2>&1) || PR_CREATE_RC=$?
 rm -f "$BODY"
-[[ "$PR_NUMBER" =~ ^[0-9]+$ ]] ||
-  die "draft PR creation failed — no PR claim was recorded; re-run after resolving"
+if [[ "$PR_CREATE_RC" -eq 0 ]]; then
+  PR_NUMBER=$(printf '%s\n' "$PR_CREATE_OUT" | sed -n 's|.*/pull/\([0-9][0-9]*\).*|\1|p' | head -1)
+fi
+if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+  PR_NUMBER=""
+  # Two different failures, one honest message: gh may have failed outright,
+  # or it may have created the PR and printed something this cannot parse. The
+  # rollback below decides which by asking the authoritative inventory, and
+  # retains everything if it cannot tell.
+  die "draft PR creation did not yield a usable PR number (gh exit $PR_CREATE_RC): ${PR_CREATE_OUT:-<no output>}"
+fi
 
 # --- post-create admission (#153 review P1: cross-issue overlap TOCTOU) -----
 # The pre-create check above read an inventory that could not yet contain a
-# concurrent lane's claim. Re-decide now that this claim IS published, against
-# the authoritative inventory, with a deterministic winner: the lower PR
-# number. Losing here rolls this lane back through cleanup_claim (its own PR,
-# worktree, branch, and label only) and exits nonzero.
-ADMIT_ATTEMPTS="${GIBSON_CLAIM_ADMIT_ATTEMPTS:-6}"
-ADMIT_DELAY="${GIBSON_CLAIM_ADMIT_DELAY:-2}"
-ADMIT_STABLE_READS="${GIBSON_CLAIM_ADMIT_STABLE_READS:-2}"
-[[ "$ADMIT_ATTEMPTS" =~ ^[0-9]+$ && "$ADMIT_ATTEMPTS" -ge 1 ]] ||
-  die "GIBSON_CLAIM_ADMIT_ATTEMPTS must be a positive integer, got '$ADMIT_ATTEMPTS'"
-[[ "$ADMIT_DELAY" =~ ^[0-9]+$ ]] ||
-  die "GIBSON_CLAIM_ADMIT_DELAY must be a non-negative integer, got '$ADMIT_DELAY'"
-[[ "$ADMIT_STABLE_READS" =~ ^[0-9]+$ && "$ADMIT_STABLE_READS" -ge 1 ]] ||
-  die "GIBSON_CLAIM_ADMIT_STABLE_READS must be a positive integer, got '$ADMIT_STABLE_READS'"
-[[ "$ADMIT_STABLE_READS" -le "$ADMIT_ATTEMPTS" ]] ||
-  die "GIBSON_CLAIM_ADMIT_STABLE_READS ($ADMIT_STABLE_READS) cannot exceed GIBSON_CLAIM_ADMIT_ATTEMPTS ($ADMIT_ATTEMPTS) — that barrier could never be satisfied and every claim would refuse"
-
-# The claim-relevant projection of an inventory: PR number, claim id, scope,
-# order-independent. Two reads that agree on this agree on everything the
-# admission decision uses; unrelated churn (a PR body edited elsewhere, a
-# timestamp bumped) does not stop the barrier from settling.
-admit_fingerprint() {
-  printf '%s\n' "$1" | awk -F'\t' 'NF>0 {print $1"\t"$2"\t"$3}' | LC_ALL=C sort
-}
-
-ADMIT_ROWS=""
-ADMIT_QUIESCED=0
-_admit_prev_fp=""
-_admit_streak=0
-_attempt=1
-while [[ "$_attempt" -le "$ADMIT_ATTEMPTS" ]]; do
-  # Space the reads. Two samples taken in the same instant prove nothing about
-  # whether a rival has finished publishing, so the delay is part of the
-  # barrier, not a politeness.
-  if [[ "$_attempt" -gt 1 && "$ADMIT_DELAY" -gt 0 ]]; then
-    sleep "$ADMIT_DELAY"
-  fi
-  if _rows=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>&1); then
-    if printf '%s\n' "$_rows" |
-       awk -F'\t' -v n="$PR_NUMBER" -v c="$CLAIM_ID" '$1==n && $2==c {f=1} END{exit !f}'; then
-      _fp=$(admit_fingerprint "$_rows")
-      if [[ "$_admit_streak" -gt 0 && "$_fp" == "$_admit_prev_fp" ]]; then
-        _admit_streak=$((_admit_streak + 1))
-      else
-        _admit_streak=1
-      fi
-      _admit_prev_fp="$_fp"
-      ADMIT_ROWS="$_rows"
-      if [[ "$_admit_streak" -ge "$ADMIT_STABLE_READS" ]]; then
-        ADMIT_QUIESCED=1
-        break
-      fi
-      echo "claim.sh: admission: inventory not yet quiescent for PR #$PR_NUMBER ($_admit_streak/$ADMIT_STABLE_READS matching read(s), attempt $_attempt/$ADMIT_ATTEMPTS)" >&2
-    else
-      # Not seeing ourselves resets the streak: a read that cannot see this
-      # claim is not part of any quiescent window this claim may rely on.
-      _admit_streak=0
-      _admit_prev_fp=""
-      ADMIT_ROWS=""
-      echo "claim.sh: admission: PR #$PR_NUMBER is not in the live claim inventory yet (attempt $_attempt/$ADMIT_ATTEMPTS)" >&2
-    fi
-  else
-    _admit_streak=0
-    _admit_prev_fp=""
-    ADMIT_ROWS=""
-    echo "claim.sh: admission: cannot read the live claim inventory for $REPO (attempt $_attempt/$ADMIT_ATTEMPTS): $_rows" >&2
-  fi
-  _attempt=$((_attempt + 1))
+# concurrent lane's claim. Re-decide now that this claim IS published. The
+# publication barrier and the decision both live in scope-overlap.mjs, which
+# takes its own live reads: nothing hands it an inventory, because an option to
+# supply one is a forged-evidence path (#153 review round 3, P1). Losing here
+# rolls this lane back through cleanup_claim — its own PR first, and the
+# worktree, branch and label only once that PR is proven closed — and exits
+# nonzero.
+_adm_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO" --issue "$ISSUE" --admit-pr "$PR_NUMBER")
+for s in $SCOPE; do
+  _adm_args+=(--scope "$s")
 done
-
-if [[ "$ADMIT_QUIESCED" -ne 1 ]]; then
-  die "post-create admission: could not obtain a stable live-claim inventory for $REPO containing this lane's own claim PR #$PR_NUMBER — $ADMIT_STABLE_READS consecutive matching read(s) required, $ADMIT_ATTEMPTS attempt(s) made.
-  An inventory that cannot see this claim, or that is still changing underneath it, cannot prove no one else holds the scope: a rival PR created before this one may simply not have been published to the view yet.
-  Refusing to hold a claim that is not provably registered against a settled view. This lane's PR, branch, worktree and label are being rolled back; re-run once the inventory is readable and quiet."
+if [[ "$SLICE" -eq 1 ]]; then
+  _adm_args+=(--slice)
 fi
-info "admission: inventory quiescent for PR #$PR_NUMBER ($ADMIT_STABLE_READS consecutive matching read(s))"
-
-# --- same-issue exclusivity, re-decided after publication (#153 review P1 0B)
-# Two lanes on the SAME issue with different slugs and disjoint scopes each
-# passed the pre-create duplicate check (neither was published yet) and would
-# each pass a scope-only re-check — one issue, two builds, which is L-028
-# happening again through a different door. Re-decide it here, on the quiescent
-# inventory, with the same tie-break the scope race uses. With --slice this
-# does not apply: same-issue siblings are legal and the scope check below is
-# what keeps them disjoint.
-if [[ "$SLICE" -eq 0 ]]; then
-  while IFS=$'\t' read -r _si_num _si_id _si_rest; do
-    [[ -n "$_si_id" ]] || continue
-    [[ "$_si_id" == "$CLAIM_ID" ]] && continue
-    [[ -n "$PR_NUMBER" && "$_si_num" == "$PR_NUMBER" ]] && continue
-    claim_issue_number "$_si_id" ||
-      die "post-create admission: live claim id '$_si_id' (PR #$_si_num) carries no readable issue number — cannot prove it is not a second lane on issue #$ISSUE; rolling this lane back"
-    [[ "$CLAIM_ISSUE_NUMBER" == "$ISSUE" ]] || continue
-    if [[ "$_si_num" =~ ^[0-9]+$ ]] && [[ "$_si_num" -gt "$PR_NUMBER" ]]; then
-      info "admission: later same-issue lane $_si_id (PR #$_si_num) yields to PR #$PR_NUMBER"
-      continue
-    fi
-    die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): issue #$ISSUE is already held by the live claim $_si_id (PR #$_si_num), which holds the stronger prior.
-  One issue is one claim (L-028) — two lanes on it means two builds of the same work, even when their scopes do not touch.
-  This lane's PR, branch, worktree and label are being rolled back; coordinate with that lane, or re-run with --slice if a deliberate second lane with non-overlapping scope is really what you want."
-  done <<EOF
-$ADMIT_ROWS
-EOF
-fi
-
-if command -v node >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]]; then
-  # Decide on the SAME quiescent inventory the barrier above settled on — not
-  # on a fresh read the sensor takes for itself. A re-read here could be served
-  # a view where the rival has vanished again, which would throw away the whole
-  # publication barrier one line after passing it (#153 review P1 0A).
-  ADMIT_ROWS_FILE=$(mktemp "${TMPDIR:-/tmp}/gibson-admit-rows.XXXXXX")
-  printf '%s\n' "$ADMIT_ROWS" > "$ADMIT_ROWS_FILE"
-  _adm_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO" --admit-pr "$PR_NUMBER" --pr-claims-file "$ADMIT_ROWS_FILE")
-  for s in $SCOPE; do
-    _adm_args+=(--scope "$s")
-  done
-  if [[ "$SLICE" -eq 1 ]]; then
-    _adm_args+=(--slice --issue "$ISSUE")
-  fi
-  if node "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
-    rm -f "$ADMIT_ROWS_FILE"
-  else
-    rm -f "$ADMIT_ROWS_FILE"
-    die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): a live claim with a stronger prior holds overlapping scope.
-  This is the concurrent-claim race resolving deterministically — the lower PR number wins.
-  This lane's PR, branch, worktree and label are being rolled back; re-run once the other lane releases, or claim a disjoint scope."
-  fi
-else
-  # No node: same decision, same tie-break, using the historical stem overlap.
-  while IFS=$'\t' read -r _a_num _a_id _a_scope _a_rest; do
-    [[ -n "$_a_id" ]] || continue
-    [[ "$_a_id" == "$CLAIM_ID" ]] && continue
-    [[ -n "$_a_scope" ]] ||
-      die "post-create admission: live claim '$_a_id' (PR #$_a_num) has an empty scope — unreadable evidence; rolling this lane back"
-    legacy_scope_overlap "$SCOPE" "$_a_scope" || continue
-    if [[ "$_a_num" =~ ^[0-9]+$ ]] && [[ "$_a_num" -gt "$PR_NUMBER" ]]; then
-      info "admission: later overlapping claim $_a_id (PR #$_a_num) yields to PR #$PR_NUMBER"
-      continue
-    fi
-    die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): overlapping live claim $_a_id (PR #$_a_num, scope: $_a_scope) holds the stronger prior.
-  This lane's PR, branch, worktree and label are being rolled back; re-run once it releases, or claim a disjoint scope."
-  done <<EOF
-$ADMIT_ROWS
-EOF
-  for id in $LIVE_IDS; do
-    [[ "$id" == "$CLAIM_ID" ]] && continue
-    row_scope=$(claim_scope "$id")
-    [[ -z "$row_scope" ]] && continue
-    if legacy_scope_overlap "$SCOPE" "$row_scope"; then
-      die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): ledger claim $id (scope: $row_scope) holds the scope.
-  This lane's PR, branch, worktree and label are being rolled back."
-    fi
-  done
+if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
+  die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER) — see the reason above.
+  Either a live claim with a stronger prior holds this issue or overlapping scope (the race resolving deterministically: the lower PR number wins), or the live inventory could not be settled and read, which is refused rather than guessed.
+  This lane's PR is being closed and its branch, worktree and label rolled back only once that close is proven; re-run once the other lane releases, claim a disjoint scope, or pass --slice if a deliberate second lane with non-overlapping scope on this issue is really what you want."
 fi
 info "admission: PR #$PR_NUMBER holds $CLAIM_ID (verified against the live claim inventory)"
 
