@@ -48,27 +48,58 @@ trap 'rm -rf "$ROOT"' EXIT
 
 mkdir -p "$ROOT/bin"
 # Real `gh api graphql --paginate -f query=... --jq EXPR` behavior, minus the
-# network: read the staged JSON array of *pages* from $GH_PAGES — each page
-# shaped like a real GraphQL response
-# (`{"data":{"repository":{"pullRequests":{"nodes":[...],"pageInfo":{...}}}}}`)
-# — and, for each page in order, run the *actual* jq binary with the exact
-# expression pr-claims.sh passed. This mirrors --paginate's real contract:
-# --jq is applied per page, output is concatenated across pages, and a jq
-# failure on any page (duplicate/malformed marker, URL mismatch, ...) aborts
-# the whole command instead of silently moving on to the next page.
+# network — and, since #153's review, an ENFORCER of the pagination contract
+# rather than a fake that quietly replays pages no matter what was asked.
+#
+# A fake that just concatenates staged pages passes identically whether or not
+# production actually paginates, so the "claim on page 2 is still found" tests
+# it fed proved nothing about --paginate, $endCursor, or after:. This one
+# refuses the call unless the request carries every mechanism a real
+# multi-page read needs:
+#   - --paginate                       (else gh returns page 1 and stops)
+#   - a declared $endCursor variable   (else there is nothing to advance)
+#   - pullRequests(after: $endCursor)  (else every page IS page 1)
+#   - pageInfo { hasNextPage endCursor } in the selection set
+#     (else gh cannot tell there is a next page, or where it starts)
+# Remove any one of those from pr-claims.sh and this suite goes red.
+#
+# It then drives the loop the way gh does: page N+1 is fetched with the
+# endCursor page N returned, and the fake refuses if that chain is ever
+# broken. $GH_PAGES stages an array of node-arrays (one per page); pageInfo is
+# synthesized here, with realistic hasNextPage/endCursor values, so the
+# staged data cannot lie about its own pagination. GH_PAGE_FAIL_AT=<0-based>
+# makes that page fail like a real mid-pagination API error.
 cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 if [[ "$1" == "api" && "$2" == "graphql" ]]; then
   shift 2
   jqexpr=""
+  query=""
+  paginate=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --jq) jqexpr="$2"; shift 2 ;;
-      -f|-F) shift 2 ;;
-      --paginate) shift ;;
+      --paginate) paginate=1; shift ;;
+      -f|-F)
+        case "$2" in query=*) query="${2#query=}" ;; esac
+        shift 2
+        ;;
       *) shift ;;
     esac
   done
+  contract_fail() { echo "fake gh: pagination contract violated: $1" >&2; exit 1; }
+  [[ "$paginate" -eq 1 ]] || \
+    contract_fail "no --paginate — gh would return only the first page and every later claim would be silently dropped"
+  case "$query" in
+    *'$endCursor'*) ;;
+    *) contract_fail "query declares no \$endCursor variable — gh has nothing to advance the cursor with" ;;
+  esac
+  printf '%s' "$query" | grep -Eq 'after:[[:space:]]*\$endCursor' || \
+    contract_fail "query never passes \$endCursor to pullRequests(after:) — every page would be page 1"
+  printf '%s' "$query" | grep -Eq 'pageInfo[[:space:]]*\{[^}]*hasNextPage' || \
+    contract_fail "query does not select pageInfo.hasNextPage — gh cannot tell whether another page exists"
+  printf '%s' "$query" | grep -Eq 'pageInfo[[:space:]]*\{[^}]*endCursor' || \
+    contract_fail "query does not select pageInfo.endCursor — gh has no cursor for the next page"
   pages_file="${GH_PAGES:?GH_PAGES not set}"
   # An unreadable/unparseable page set is an API failure, not "zero pages" —
   # a fake that swallowed it would let a fail-open bug pass this suite.
@@ -77,13 +108,32 @@ if [[ "$1" == "api" && "$2" == "graphql" ]]; then
     exit 1
   fi
   i=0
+  cursor=""
   while [[ "$i" -lt "$page_count" ]]; do
-    page=$(jq -c ".[$i]" "$pages_file")
+    expect=""
+    [[ "$i" -gt 0 ]] && expect="cursor-$((i - 1))"
+    [[ "$cursor" == "$expect" ]] || \
+      contract_fail "cursor chain broken before page $((i + 1)) (carrying '${cursor:-<none>}', expected '${expect:-<none>}')"
+    if [[ -n "${GH_PAGE_FAIL_AT:-}" && "$i" -eq "$GH_PAGE_FAIL_AT" ]]; then
+      echo "fake gh: API error while fetching page $((i + 1)) (after: '${cursor:-<none>}')" >&2
+      exit 1
+    fi
+    nodes=$(jq -c ".[$i]" "$pages_file")
+    has_next=false
+    end_cursor=null
+    if [[ $((i + 1)) -lt "$page_count" ]]; then
+      has_next=true
+      end_cursor="\"cursor-$i\""
+    fi
+    page=$(printf '{"data":{"repository":{"pullRequests":{"nodes":%s,"pageInfo":{"hasNextPage":%s,"endCursor":%s}}}}}' \
+      "$nodes" "$has_next" "$end_cursor")
     if ! out=$(printf '%s' "$page" | jq -r "$jqexpr" 2>&1); then
       echo "$out" >&2
       exit 1
     fi
     [[ -n "$out" ]] && printf '%s\n' "$out"
+    [[ "$has_next" == true ]] || break
+    cursor="cursor-$i"
     i=$((i + 1))
   done
   exit 0
@@ -97,13 +147,10 @@ export PATH="$ROOT/bin:$PATH"
 HEX40="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 HEX40B="111111111111111111111111111111111111111a"
 
-# Wraps a JSON array of PR nodes into one GraphQL response page.
-page_of() {
-  printf '{"data":{"repository":{"pullRequests":{"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' "$1"
-}
-
-# Single-page stage (most tests): $1 is a JSON array of PR nodes.
-stage() { printf '[%s]' "$(page_of "$1")" > "$ROOT/pages.json"; }
+# Single-page stage (most tests): $1 is a JSON array of PR nodes. The fake gh
+# above synthesizes each page's pageInfo, so a fixture cannot accidentally
+# stage a page that claims to be the last one when it is not.
+stage() { printf '[%s]' "$1" > "$ROOT/pages.json"; }
 
 # Multipage stage: each argument is a JSON array of PR nodes for that page,
 # in page order — proves matching/validation spans page boundaries.
@@ -111,7 +158,7 @@ stage_pages() {
   local out="[" first=1 nodes
   for nodes in "$@"; do
     [[ $first -eq 1 ]] && first=0 || out+=","
-    out+="$(page_of "$nodes")"
+    out+="$nodes"
   done
   printf '%s]' "$out" > "$ROOT/pages.json"
 }
@@ -572,6 +619,129 @@ printf 'not json at all\n' > "$ROOT/broken-pages.json"
 out=$(GH_PAGES="$ROOT/broken-pages.json" "$PC" find-terminal acme/app issue-139-fleet-profiles 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "unreadable page data exits nonzero" || bad "unreadable page data exits 0 (rc=$rc): $out"
 check "unreadable page data emits no rows" "$(GH_PAGES="$ROOT/broken-pages.json" "$PC" find-terminal acme/app issue-139-fleet-profiles 2>/dev/null)" ""
+
+# --- the pagination contract itself (#153 review P2) -----------------------
+# The fake gh above refuses a request that is missing any mechanism a real
+# multi-page read needs. These probes prove the enforcement is real — i.e.
+# that the passing multipage tests above would go RED if pr-claims.sh dropped
+# --paginate, the $endCursor variable, the after: argument, or pageInfo —
+# rather than trusting a fake that replays pages unconditionally.
+GOOD_QUERY='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequests(first: 100, after: $endCursor) { nodes { number } pageInfo { hasNextPage endCursor } } } }'
+stage "[$(open_pr 70 '- Active-work claim: issue-70-a\n- Claim scope: x\n- Issue: #70' 'feat/70-a' 'https://github.com/acme/app/pull/70')]"
+
+echo "pagination contract · a request without --paginate is refused by the sensor"
+out=$(gh api graphql -f query="$GOOD_QUERY" --jq '.' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing --paginate exits nonzero" || bad "missing --paginate accepted (rc=$rc): $out"
+contains "names the missing --paginate" "$out" "no --paginate"
+
+echo "pagination contract · a query with no \$endCursor variable is refused"
+out=$(gh api graphql --paginate -f query='query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { pullRequests(first: 100) { nodes { number } pageInfo { hasNextPage endCursor } } } }' --jq '.' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing \$endCursor exits nonzero" || bad "missing \$endCursor accepted (rc=$rc): $out"
+contains "names the missing cursor variable" "$out" "endCursor variable"
+
+echo "pagination contract · a query that never passes after: \$endCursor is refused"
+out=$(gh api graphql --paginate -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequests(first: 100) { nodes { number } pageInfo { hasNextPage endCursor } } } }' --jq '.' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing after: cursor exits nonzero" || bad "missing after: cursor accepted (rc=$rc): $out"
+contains "names the missing after: argument" "$out" "every page would be page 1"
+
+echo "pagination contract · a query that omits pageInfo is refused"
+out=$(gh api graphql --paginate -f query='query($owner: String!, $name: String!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequests(first: 100, after: $endCursor) { nodes { number } } } }' --jq '.' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing pageInfo exits nonzero" || bad "missing pageInfo accepted (rc=$rc): $out"
+contains "names the missing pageInfo" "$out" "pageInfo.hasNextPage"
+
+echo "pagination contract · the real reader satisfies it on both commands"
+stage_pages \
+  "[$(open_pr 71 '- Active-work claim: issue-71-a\n- Claim scope: p1\n- Issue: #71' 'feat/71-a' 'https://github.com/acme/app/pull/71')]" \
+  "[$(open_pr 72 '- Active-work claim: issue-72-a\n- Claim scope: p2\n- Issue: #72' 'feat/72-a' 'https://github.com/acme/app/pull/72')]"
+out=$("$PC" list acme/app 2>&1); rc=$?
+check    "contract-enforcing list exits 0" "$rc" "0"
+check    "contract-enforcing list returns both pages" "$(printf '%s' "$out" | grep -c .)" "2"
+lacks    "list never trips the contract"   "$out" "pagination contract violated"
+
+stage_pages \
+  "[$(term_pr 73 CLOSED '- Active-work claim: issue-73-a\n- Claim scope: p1\n- Issue: #73' 'feat/73-a' "$HEX40" 'https://github.com/acme/app/pull/73')]" \
+  "[$(term_pr 74 MERGED '- Active-work claim: issue-74-a\n- Claim scope: p2\n- Issue: #74' 'feat/74-a' "$HEX40" 'https://github.com/acme/app/pull/74' false "$HEX40B")]"
+out=$("$PC" find-terminal acme/app issue-74-a 2>&1); rc=$?
+check    "contract-enforcing find-terminal exits 0" "$rc" "0"
+contains "contract-enforcing find-terminal spans pages" "$out" "issue-74-a"
+lacks    "find-terminal never trips the contract"      "$out" "pagination contract violated"
+
+echo "pagination · an API failure on a LATER page fails the whole command (list)"
+stage_pages \
+  "[$(open_pr 75 '- Active-work claim: issue-75-a\n- Claim scope: p1\n- Issue: #75' 'feat/75-a' 'https://github.com/acme/app/pull/75')]" \
+  "[$(open_pr 76 '- Active-work claim: issue-76-a\n- Claim scope: p2\n- Issue: #76' 'feat/76-a' 'https://github.com/acme/app/pull/76')]" \
+  "[$(open_pr 77 '- Active-work claim: issue-77-a\n- Claim scope: p3\n- Issue: #77' 'feat/77-a' 'https://github.com/acme/app/pull/77')]"
+out=$(GH_PAGE_FAIL_AT=1 "$PC" list acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "page-2 API failure fails the whole list" || bad "page-2 API failure exits 0 (rc=$rc): $out"
+contains "names the failing page" "$out" "page 2"
+check "page-2 API failure emits no rows on stdout" \
+  "$(GH_PAGE_FAIL_AT=1 "$PC" list acme/app 2>/dev/null)" ""
+
+echo "pagination · an API failure on a LATER page fails the whole command (find-terminal)"
+stage_pages \
+  "[$(term_pr 78 MERGED '- Active-work claim: issue-78-a\n- Claim scope: p1\n- Issue: #78' 'feat/78-a' "$HEX40" 'https://github.com/acme/app/pull/78' false "$HEX40B")]" \
+  "[$(term_pr 79 MERGED '- Active-work claim: issue-79-a\n- Claim scope: p2\n- Issue: #79' 'feat/79-a' "$HEX40" 'https://github.com/acme/app/pull/79' false "$HEX40B")]"
+out=$(GH_PAGE_FAIL_AT=1 "$PC" find-terminal acme/app issue-79-a 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "page-2 API failure fails the whole find-terminal" || bad "page-2 API failure exits 0 (rc=$rc): $out"
+check "page-2 API failure never yields a terminal row" \
+  "$(GH_PAGE_FAIL_AT=1 "$PC" find-terminal acme/app issue-79-a 2>/dev/null)" ""
+
+# --- find-terminal-pr: the bound lookup (#153 review P2) -------------------
+# A released claim id is free to be reused, so a second generation makes the
+# id-only lookup permanently ambiguous. The caller that already knows which PR
+# it is releasing asks about that PR instead — with every check still applied.
+REUSED_A="[$(term_pr 80 MERGED '- Active-work claim: issue-80-reused\n- Claim scope: gen1/**\n- Issue: #80' 'feat/80-reused' "$HEX40" 'https://github.com/acme/app/pull/80' false "$HEX40B")]"
+REUSED_B="[$(term_pr 81 CLOSED '- Active-work claim: issue-80-reused\n- Claim scope: gen2/**\n- Issue: #80' 'feat/80-reused' "$HEX40B" 'https://github.com/acme/app/pull/81')]"
+
+echo "find-terminal-pr · two generations of a reused id stay ambiguous for the id-only lookup"
+stage_pages "$REUSED_A" "$REUSED_B"
+out=$("$PC" find-terminal acme/app issue-80-reused 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "reused id: id-only lookup still refuses" || bad "reused id: id-only lookup exits 0 (rc=$rc): $out"
+contains "reused id: names the ambiguity"   "$out" "ambiguous"
+contains "reused id: points at find-terminal-pr" "$out" "find-terminal-pr"
+
+echo "find-terminal-pr · the bound lookup answers for each generation exactly"
+out=$("$PC" find-terminal-pr acme/app issue-80-reused 81 2>&1); rc=$?
+check    "bound lookup exits 0"                 "$rc" "0"
+check    "bound lookup emits exactly one row"   "$(printf '%s' "$out" | grep -c .)" "1"
+check    "bound lookup returns the named PR"    "$(cut -f1 <<<"$out")" "81"
+check    "bound lookup carries that PR's scope" "$(cut -f3 <<<"$out")" "gen2/**"
+check    "bound lookup carries that PR's state" "$(cut -f8 <<<"$out")" "CLOSED"
+out=$("$PC" find-terminal-pr acme/app issue-80-reused 80 2>&1); rc=$?
+check    "bound lookup for generation 1 exits 0" "$rc" "0"
+check    "bound lookup returns generation 1"     "$(cut -f1 <<<"$out")" "80"
+check    "generation 1 keeps its own scope"      "$(cut -f3 <<<"$out")" "gen1/**"
+
+echo "find-terminal-pr · a PR that does not carry the claim id yields nothing"
+stage_pages "$REUSED_A" "$REUSED_B"
+out=$("$PC" find-terminal-pr acme/app issue-80-reused 999 2>&1); rc=$?
+check "bound lookup for an unknown PR exits 0"   "$rc" "0"
+check "bound lookup for an unknown PR is empty"  "$out" ""
+out=$("$PC" find-terminal-pr acme/app issue-30-a 80 2>&1); rc=$?
+check "bound lookup with the wrong claim id exits 0" "$rc" "0"
+check "bound lookup with the wrong claim id is empty" "$out" ""
+
+echo "find-terminal-pr · an OPEN PR is not terminal evidence, even when named"
+stage "[$(term_pr 82 OPEN '- Active-work claim: issue-82-open\n- Claim scope: x\n- Issue: #82' 'feat/82-open' "$HEX40" 'https://github.com/acme/app/pull/82')]"
+out=$("$PC" find-terminal-pr acme/app issue-82-open 82 2>&1); rc=$?
+check "bound lookup on an OPEN PR exits 0"  "$rc" "0"
+check "bound lookup on an OPEN PR is empty" "$out" ""
+
+echo "find-terminal-pr · the named PR still faces every evidence check"
+stage "[$(term_pr 83 MERGED '- Active-work claim: issue-83-bad\n- Claim scope: x\n- Issue: #83' 'feat/83-bad' "$HEX40" 'https://github.com/acme/app/pull/83')]"
+out=$("$PC" find-terminal-pr acme/app issue-83-bad 83 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "bound lookup still refuses a MERGED PR with no merge SHA" || bad "bound lookup accepted bad evidence (rc=$rc): $out"
+contains "bound lookup names the missing merge SHA" "$out" "merge-commit SHA"
+stage "[$(term_pr 84 MERGED '- Active-work claim: issue-84-dup\n- Active-work claim: issue-84-dup\n- Claim scope: x\n- Issue: #84' 'feat/84-dup' "$HEX40" 'https://github.com/acme/app/pull/84' false "$HEX40B")]"
+out=$("$PC" find-terminal-pr acme/app issue-84-dup 84 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "bound lookup still refuses duplicate markers" || bad "bound lookup accepted duplicate markers (rc=$rc): $out"
+
+echo "find-terminal-pr · a non-numeric PR number is refused before any gh call"
+out=$("$PC" find-terminal-pr acme/app issue-80-reused 'not-a-number' 2>&1); rc=$?
+check    "non-numeric PR number exits 2"      "$rc" "2"
+contains "names the numeric requirement"      "$out" "numeric pull-request number"
+out=$("$PC" find-terminal-pr acme/app 'issue-80-.*' 80 2>&1); rc=$?
+check    "bound lookup rejects a regex claim id" "$rc" "2"
 
 echo "find-terminal · a non-literal claim id is refused before any gh call"
 out=$("$PC" find-terminal acme/app 'issue-139-.*' 2>&1); rc=$?

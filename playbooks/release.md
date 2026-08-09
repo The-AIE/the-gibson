@@ -306,6 +306,32 @@ GitHub read is **fail-closed**: a query failure or a malformed row there
 preserves `agent-claimed` and reports incomplete (exit 3) rather than
 guessing the claim is gone.
 
+**The repository has to be the same repository.** All of the above authorizes
+deleting a worktree, a branch, and a label, so before any of it runs
+`release-claim.sh` proves that the checkout it is cleaning up (`GIBSON_CANONICAL`,
+default: cwd) has an origin remote that normalizes to exactly the repository the
+PR evidence came from — https, `ssh://`, and scp-like `git@github.com:owner/name.git`
+forms all normalize, case-insensitively, with optional port and `.git`. A fork or
+a second clone carries the same branch names and the same commits by construction;
+that is not identity and it is refused with nothing mutated. If you hit this, you
+are almost certainly standing in the wrong checkout — `cd` to the right one, or
+pass `GIBSON_CANONICAL=`, rather than reaching for `--repo` to make the message go
+away.
+
+**Releasing a claim id that has been used more than once.** A claim id is free
+again once its PR is terminal, so a later lane may reuse it. Two terminal PRs then
+carry the same id and the id-only lookup refuses as ambiguous — correctly, because
+"which one?" genuinely has two answers. Releasing the *current* open claim never
+runs into this (that path binds to the PR number it just closed). To release an
+older or already-terminal generation by hand, name the PR:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<slug> --pr <pr-number> --repo owner/name
+```
+
+Every check above still applies to that exact PR — naming it narrows the question,
+it does not relax the answer.
+
 **Empty ledger is valid only on a real commit ref with a readable tree.** After
 the last claim file is gone, `docs/claims/` is untracked in git and
 `docs/active-work.md` may be absent — that is zero live claims on a valid

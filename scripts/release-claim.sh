@@ -23,6 +23,23 @@ WHAT IT DOES
   same issue survive unless you name them (L-024), and the label removal is
   verified rather than assumed (L-027).
 
+REPOSITORY BINDING (#153 review)
+  Any cleanup driven by PR-body evidence — closing the owning PR, removing its
+  worktree, deleting its local/remote branch — first proves that
+  GIBSON_CANONICAL's own origin remote IS the repository that evidence came
+  from. The origin URL is normalized (https, ssh://, scp-like git@host:owner/
+  name, optional port, optional .git, case-insensitive) to owner/name and
+  compared to the resolved GitHub repository. A fork or a second clone that
+  merely contains the same branch name and the same commits is NOT the same
+  repository, and is refused before any mutation. A missing, unreadable,
+  ambiguous (multi-valued or rewritten to a different GitHub repo), or
+  non-GitHub origin is likewise refused for those paths rather than assumed.
+
+  Repository identity itself is never guessed: if `gh repo view` cannot
+  resolve it and no --repo was given, the origin identity is used; if that is
+  unreadable too, the run fails BEFORE any worktree, branch, ledger, or label
+  mutation rather than silently skipping the authoritative PR inventory.
+
 WHY
   Abandoned claims block the fleet (Law 10). Cleanup must be as automatic as claim.
 
@@ -32,7 +49,8 @@ RISKS
   - Removes GitHub label. Low risk; re-claim if you still need the issue.
 
 USAGE
-  release-claim.sh <issue> [--claim-id <id>] [--prefix <ns>] [--repo owner/name]
+  release-claim.sh <issue> [--claim-id <id>] [--pr <number>] [--prefix <ns>]
+                           [--repo owner/name]
                            [--keep-branch] [--keep-worktree] [--keep-label]
                            [--expected-claim-path PATH] [--expected-claim-blob OID]
                            [--expected-source file|legacy]
@@ -43,6 +61,17 @@ USAGE
   <issue>        issue number, e.g. 42
   --claim-id     release exactly this claim id (e.g. issue-42-password-reset)
                  and leave every sibling row for the issue alone (L-024)
+  --pr           release the claim bound to exactly this pull-request number.
+                 A claim id becomes free again once its PR is terminal, so a
+                 reused id can legitimately have MORE THAN ONE terminal PR —
+                 which makes the id-only terminal lookup ambiguous forever
+                 after the second generation. Naming the PR restores an exact
+                 question without weakening any evidence check: that PR must
+                 still match the claim id, the issue, the derived head branch,
+                 the head SHA, the base repository, cross-repo=false and a
+                 terminal state. Releasing a still-OPEN claim never needs this
+                 flag — that path already knows its own PR number and binds to
+                 it automatically.
   --prefix       namespace for cross-repo claim ids: --prefix template matches
                  issue-template-<N>-* as well as issue-<N>-* (L-036 / L-037)
   --repo         product repo for the issue/label, when the issue does not live
@@ -142,6 +171,7 @@ KEEP_LABEL=0
 DRY=0
 CLAIM_ID_ARG=""
 CLAIM_ID_SET=0
+PR_NUMBER_ARG=""
 PREFIX=""
 REPO_ARG=""
 EXPECTED_CLAIM_PATH=""
@@ -160,6 +190,7 @@ while [[ $# -gt 0 ]]; do
       CLAIM_ID_ARG="${2:-}"
       shift
       ;;
+    --pr) PR_NUMBER_ARG="${2:-}"; shift ;;
     --prefix) PREFIX="${2:-}"; shift ;;
     --repo) REPO_ARG="${2:-}"; shift ;;
     --expected-claim-path)
@@ -198,6 +229,10 @@ if [[ -n "$PREFIX" && ! "$PREFIX" =~ ^[A-Za-z][A-Za-z0-9-]*$ ]]; then
 fi
 if [[ "$CLAIM_ID_SET" -eq 1 && -z "$CLAIM_ID_ARG" ]]; then
   die "--claim-id requires a non-empty literal claim id"
+fi
+if [[ -n "$PR_NUMBER_ARG" ]]; then
+  [[ "$PR_NUMBER_ARG" =~ ^[0-9]+$ ]] || die "--pr must be a pull-request number, got '$PR_NUMBER_ARG'"
+  [[ "$CLAIM_ID_SET" -eq 1 ]] || die "--pr names the PR for exactly one claim — pass --claim-id too"
 fi
 if [[ -n "$EXPECTED_CLAIM_BLOB" || -n "$EXPECTED_CLAIM_PATH" || -n "$EXPECTED_SOURCE" ]]; then
   [[ -n "$EXPECTED_CLAIM_BLOB" ]] || die "--expected-claim-blob is required when CAS expected-* flags are set"
@@ -666,13 +701,33 @@ TERMINAL_HEAD_SHA=""
 TERMINAL_MERGE_SHA=""
 TERMINAL_STATE=""
 try_terminal_pr_body_release() {
-  local id="$1" rows count
+  local id="$1" want_pr="${2:-}" rows count
   local t_number t_claim t_scope t_issue t_head t_head_sha t_url t_state t_cross t_merge_sha t_base_repo t_created t_updated
   if [[ -z "${PR_REPO:-}" || ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     return 1
   fi
-  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal "$PR_REPO" "$id" 2>&1); then
-    die "cannot verify terminal PR-body claim evidence for '$id' on $PR_REPO (gh query failed) — refuse mutation: $rows"
+  # The evidence about to authorize worktree/branch deletion must come from
+  # THIS checkout's own repository, never a fork/copy carrying the same branch
+  # and commits (#153 review P1). Checked before the query, so unbound
+  # evidence is never even read, let alone acted on. Returning 1 (rather than
+  # dying) keeps the caller's own "no live claim" refusal — which is equally
+  # fail-closed, since nothing has been mutated — while the warning names the
+  # real reason this evidence was not consulted.
+  if ! canonical_repo_binding_ok "$PR_REPO"; then
+    warn "not consulting terminal PR-body evidence for '$id': $BINDING_REASON"
+    return 1
+  fi
+  if [[ -n "$want_pr" ]]; then
+    # Bound lookup (#153 review P2): the caller already knows exactly which PR
+    # it is releasing, so ask about that PR instead of asking the globally
+    # ambiguous "which terminal PR carries this id?" — a legitimately reused
+    # claim id has more than one.
+    if ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal-pr "$PR_REPO" "$id" "$want_pr" 2>&1); then
+      die "cannot verify terminal PR-body claim evidence for '$id' on PR #$want_pr in $PR_REPO (gh query failed) — refuse mutation: $rows"
+    fi
+  elif ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal "$PR_REPO" "$id" 2>&1); then
+    die "cannot verify terminal PR-body claim evidence for '$id' on $PR_REPO (gh query failed) — refuse mutation: $rows
+  If this claim id was released and later reused, more than one terminal PR carries it; name the exact one with --pr <number>."
   fi
   # grep -c (not wc -l): $rows came from command substitution, which strips
   # the trailing newline, so a single-line result would otherwise undercount
@@ -680,7 +735,7 @@ try_terminal_pr_body_release() {
   count=$(printf '%s' "$rows" | grep -c . || true)
   [[ "$count" -gt 0 ]] || return 1
   if [[ "$count" -gt 1 ]]; then
-    die "ambiguous terminal PR-body evidence for claim id '$id' on $PR_REPO — multiple PRs matched; resolve by hand"
+    die "ambiguous terminal PR-body evidence for claim id '$id' on $PR_REPO — multiple PRs matched. A released claim id may legitimately be reused, so more than one terminal PR can carry it; name the exact one with --pr <number> rather than guessing."
   fi
   # cut, not `IFS=$'\t' read`: tab is IFS *whitespace*, so bash's read
   # collapses consecutive tabs and silently drops empty fields (e.g. a CLOSED
@@ -706,6 +761,10 @@ try_terminal_pr_body_release() {
     die "malformed/truncated terminal PR-body evidence for '$id' on $PR_REPO"
   [[ "$t_number" =~ ^[0-9]+$ ]] ||
     die "terminal PR-body claim for '$id' has an unsafe PR number '$t_number' — refuse"
+  if [[ -n "$want_pr" ]]; then
+    [[ "$t_number" == "$want_pr" ]] ||
+      die "terminal PR-body evidence for '$id' came back for PR #$t_number, not the requested PR #$want_pr — refuse"
+  fi
   [[ "$t_claim" == "$id" ]] ||
     die "terminal PR-body claim id mismatch on PR #$t_number (want '$id', got '${t_claim:-?}') — refuse"
   [[ "$t_issue" == "$ISSUE" ]] ||
@@ -922,6 +981,11 @@ query_remote_branch_exact() {
 terminal_cleanup_release() {
   local id="$1" br
   br=$(branch_for "$id")
+
+  # Re-assert the binding at the mutation boundary itself, not only where the
+  # evidence was fetched (#153 review P1). This function is the only place
+  # that removes a worktree or deletes a branch on PR evidence.
+  require_canonical_repo_binding "$PR_REPO" "terminal cleanup for '$id'"
 
   [[ -z "$WORKTREE_PATH_ARG" ]] ||
     die "--worktree-path is not supported for a terminal PR-body claim release (claim-reaper CAS flow only)"
@@ -1293,7 +1357,8 @@ EOF
     if [[ "$preserve_label" -eq 1 || "$incomplete" -eq 1 ]]; then
       info "gh not found — agent-claimed left in place (incomplete cleanup)"
     elif [[ -n "$all_siblings" ]]; then
-      info "gh not found — agent-claimed left in place (sibling claims remain)"
+      warn "gh not found — agent-claimed left in place for sibling claim(s) on #$ISSUE, but its presence could NOT be verified"
+      incomplete=1
     else
       warn "gh not found — agent-claimed NOT removed from #$ISSUE"
       incomplete=1
@@ -1337,7 +1402,177 @@ issue_claim_ids_from() {
 # close-only plus an honest INCOMPLETE — never a success message over
 # unproven cleanup.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PR_REPO="${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+
+# --- repository identity of the canonical checkout (#153 review P1) --------
+# Normalize a git remote URL to its github.com owner/name identity, or fail.
+# Handles every form a real origin carries: https(+userinfo/token), http,
+# ssh:// (with optional port), git://, and the scp-like git@host:owner/name.
+# A trailing .git and a trailing slash are stripped; a non-github.com host, a
+# path that is not exactly two segments, or an unsafe segment fails (return 1)
+# rather than producing a half-parsed identity.
+normalize_github_repo_url() {
+  local url="$1" rest hostport host path owner name
+  [[ -n "$url" ]] || return 1
+  case "$url" in
+    https://*|http://*)  rest="${url#*://}"; rest="${rest#*@}" ;;
+    ssh://*)             rest="${url#ssh://}"; rest="${rest#*@}" ;;
+    git://*)             rest="${url#git://}"; rest="${rest#*@}" ;;
+    */*:*)               return 1 ;;   # a path that merely contains a colon
+    *:*)
+      # scp-like [user@]host:owner/name — the FIRST colon is the separator.
+      rest="${url#*@}"
+      rest="${rest%%:*}/${rest#*:}"
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$rest" == */* ]] || return 1
+  hostport="${rest%%/*}"
+  path="${rest#*/}"
+  host="${hostport%%:*}"
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  case "$host" in
+    github.com|www.github.com|ssh.github.com) ;;
+    *) return 1 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  path="${path%/}"
+  [[ "$path" == */* ]] || return 1
+  owner="${path%%/*}"
+  name="${path#*/}"
+  [[ "$name" != */* ]] || return 1        # more than owner/name — refuse
+  [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+
+# Resolve GIBSON_CANONICAL's own origin repository identity. Always returns 0;
+# the verdict is in CANON_REPO_STATUS:
+#   github     — CANON_REPO_ID holds owner/name
+#   non-github — origin exists and is readable but is not a github.com repo
+#                (a determinate answer: no PR-body claim can live here)
+#   unreadable — no origin, multi-valued origin, or an insteadOf rewrite that
+#                points at a DIFFERENT github repo (ambiguous identity)
+# Only "github" may authorize PR-evidence-driven mutation.
+CANON_REPO_ID=""
+CANON_REPO_STATUS=""
+CANON_REPO_REASON=""
+resolve_canonical_repo_identity() {
+  local raw all n eff raw_id eff_id rc=0
+  CANON_REPO_ID=""
+  CANON_REPO_STATUS=""
+  CANON_REPO_REASON=""
+  # --get-all, not --get: with several remote.origin.url values `git config
+  # --get` silently returns the LAST one and exits 0, so a checkout wired to
+  # two different repositories would answer with one of them and look
+  # perfectly definite. More than one value is ambiguous identity — refuse.
+  all=$(git config --get-all remote.origin.url 2>/dev/null) || rc=$?
+  n=$(printf '%s' "$all" | grep -c . || true)
+  if [[ "$rc" -eq 0 && "$n" -gt 1 ]]; then
+    CANON_REPO_STATUS="unreadable"
+    CANON_REPO_REASON="remote.origin.url is configured $n times in $CANONICAL — ambiguous origin identity"
+    return 0
+  fi
+  raw=$(printf '%s\n' "$all" | head -n1)
+  if [[ "$rc" -ne 0 || -z "$raw" ]]; then
+    CANON_REPO_STATUS="unreadable"
+    CANON_REPO_REASON="no readable origin remote in $CANONICAL (git config remote.origin.url is unset or unreadable)"
+    return 0
+  fi
+  if ! raw_id=$(normalize_github_repo_url "$raw"); then
+    CANON_REPO_STATUS="non-github"
+    CANON_REPO_REASON="origin URL '$raw' is not a github.com repository URL"
+    return 0
+  fi
+  # An insteadOf rewrite is operator-owned local config, not a trust boundary,
+  # so a rewrite to a non-GitHub destination (a mirror, a test bare repo) is
+  # accepted. A rewrite to a DIFFERENT github.com repository is genuinely
+  # ambiguous about which repository this checkout is — refuse that.
+  eff=$(git ls-remote --get-url origin 2>/dev/null || true)
+  if [[ -n "$eff" && "$eff" != "$raw" ]] && eff_id=$(normalize_github_repo_url "$eff"); then
+    if [[ "$(printf '%s' "$eff_id" | tr '[:upper:]' '[:lower:]')" != \
+          "$(printf '%s' "$raw_id" | tr '[:upper:]' '[:lower:]')" ]]; then
+      CANON_REPO_STATUS="unreadable"
+      CANON_REPO_REASON="origin URL '$raw' ($raw_id) is rewritten to '$eff' ($eff_id) — ambiguous repository identity"
+      return 0
+    fi
+  fi
+  CANON_REPO_ID="$raw_id"
+  CANON_REPO_STATUS="github"
+  return 0
+}
+
+# Is PR-body evidence from repository $1 bound to THIS checkout? Containing
+# the same branch name and the same commits is what a fork/copy does by
+# construction — it is not identity (#153 review P1). Returns 1 with
+# BINDING_REASON set; never mutates anything either way.
+BINDING_REASON=""
+canonical_repo_binding_ok() {
+  local repo="$1" want got
+  BINDING_REASON=""
+  case "$CANON_REPO_STATUS" in
+    github) ;;
+    non-github)
+      BINDING_REASON="$CANONICAL has no GitHub repository identity — $CANON_REPO_REASON; PR-body claim evidence from '$repo' cannot be bound to this checkout"
+      return 1
+      ;;
+    *)
+      BINDING_REASON="cannot read the origin repository identity of $CANONICAL — $CANON_REPO_REASON; PR-body claim evidence from '$repo' cannot be bound to this checkout"
+      return 1
+      ;;
+  esac
+  want=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
+  got=$(printf '%s' "$CANON_REPO_ID" | tr '[:upper:]' '[:lower:]')
+  if [[ "$want" != "$got" ]]; then
+    BINDING_REASON="repository binding mismatch — GIBSON_CANONICAL ($CANONICAL) has origin repository '$CANON_REPO_ID', but the PR-body claim evidence comes from '$repo'. A fork or copy that merely contains the same branch and the same commits is NOT the same repository"
+    return 1
+  fi
+  return 0
+}
+
+# Hard gate for the paths that are about to mutate (close a PR, remove a
+# worktree, delete a branch): an unbound repository stops the run before the
+# first mutation rather than being reported afterwards.
+require_canonical_repo_binding() {
+  local repo="$1" ctx="$2"
+  canonical_repo_binding_ok "$repo" ||
+    die "$ctx: $BINDING_REASON — refuse (nothing was mutated)"
+}
+
+resolve_canonical_repo_identity
+
+# Repository identity is never swallowed (#153 review P1): --repo wins, then
+# gh's own answer, then this checkout's origin identity. If none of those can
+# answer and the origin is unreadable, stop here — before any worktree,
+# branch, ledger, or label mutation — rather than silently skipping the
+# authoritative PR-claim inventory and cleaning up on a view we never read.
+PR_REPO=""
+if [[ -n "$REPO_ARG" ]]; then
+  PR_REPO="$REPO_ARG"
+elif command -v gh >/dev/null 2>&1; then
+  GH_REPO_OUT=""
+  if GH_REPO_OUT=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>&1) &&
+     GH_REPO_OUT=$(printf '%s\n' "$GH_REPO_OUT" | head -n1 | tr -d '[:space:]') &&
+     [[ -n "$GH_REPO_OUT" ]]; then
+    PR_REPO="$GH_REPO_OUT"
+  else
+    case "$CANON_REPO_STATUS" in
+      github)
+        PR_REPO="$CANON_REPO_ID"
+        info "gh repo view could not resolve the repository; using $CANONICAL's own origin identity ($PR_REPO)"
+        ;;
+      non-github)
+        info "$CANONICAL has no GitHub repository identity ($CANON_REPO_REASON) — no PR-body claim can live here; reading the ledger only"
+        ;;
+      *)
+        die "cannot resolve the GitHub repository identity for $CANONICAL — $CANON_REPO_REASON; 'gh repo view' also failed. Pass --repo owner/name. Refuse to mutate anything on an unresolved repository identity."
+        ;;
+    esac
+  fi
+fi
+if [[ -n "$PR_REPO" && ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  die "resolved repository identity '$PR_REPO' is not owner/name — refuse to mutate anything on an unusable repository identity"
+fi
 
 # Shape contract for `pr-claims.sh list` output: every non-empty row carries
 # exactly 7 tab-separated fields and a non-empty issue-* claim id. A truncated
@@ -1420,6 +1655,12 @@ EOF
     PR_SIBLINGS=$(printf '%s\n' "$PR_SIBLINGS" | grep -E '^issue-' | sort -u || true)
     [[ "$PR_HEAD_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] ||
       die "owning PR #$PR_NUMBER has an unsafe/empty head branch '${PR_HEAD_BRANCH:-?}' — refuse"
+    # Closing this PR, and everything that follows it, mutates state that
+    # belongs to a specific repository. Prove that repository is the one this
+    # checkout's origin points at BEFORE the first mutation — including in
+    # --dry-run, so an operator sees the binding failure before trying it for
+    # real (#153 review P1).
+    require_canonical_repo_binding "$PR_REPO" "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER)"
     PR_EXPECT_BRANCH=$(branch_for "$PR_CLAIM_ID")
     if [[ "$DRY" -eq 1 ]]; then
       info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim"
@@ -1449,8 +1690,15 @@ EOF
     # that identity is what the cleanup proof is anchored to. An
     # unconventional head branch is not a reason to guess — it falls through
     # to the close-only report below.
+    #
+    # The handover is BOUND TO $PR_NUMBER (#153 review P2). This path already
+    # knows exactly which PR it just closed, so it asks about that PR rather
+    # than asking which terminal PR carries the id — the question that turns
+    # ambiguous the moment a released claim id is legitimately reused and a
+    # second generation reaches a terminal state. Every evidence check below
+    # still applies in full to that exact PR.
     if [[ "$PR_HEAD_BRANCH" == "$PR_EXPECT_BRANCH" ]] &&
-       try_terminal_pr_body_release "$PR_CLAIM_ID"; then
+       try_terminal_pr_body_release "$PR_CLAIM_ID" "$PR_NUMBER"; then
       terminal_cleanup_release "$PR_CLAIM_ID"
     fi
 
@@ -1616,10 +1864,14 @@ if [[ "$CLAIM_ID_SET" -eq 1 ]]; then
     if printf '%s\n' "$ALL_LIVE_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
       die "--claim-id '$CLAIM_ID_ARG' is live but not a claim for issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
     fi
-    if [[ "$CAS_MODE" -eq 0 ]] && try_terminal_pr_body_release "$CLAIM_ID_ARG"; then
+    # --pr binds this lookup to one exact PR (#153 review P2). Without it the
+    # id-only lookup is used, which is correct until a released id is reused
+    # and more than one terminal PR carries it — then it is ambiguous and
+    # refuses, and the error names --pr as the way to ask precisely.
+    if [[ "$CAS_MODE" -eq 0 ]] && try_terminal_pr_body_release "$CLAIM_ID_ARG" "$PR_NUMBER_ARG"; then
       :
     else
-      die "no live claim '$CLAIM_ID_ARG' at $REF (checked ledger and terminal PR-body evidence)"
+      die "no live claim '$CLAIM_ID_ARG' at $REF (checked ledger and terminal PR-body evidence${PR_NUMBER_ARG:+, bound to PR #$PR_NUMBER_ARG})"
     fi
   fi
   # Exactly one logical match (legacy + per-file already deduped by sort -u).
@@ -1691,7 +1943,7 @@ RESIDUAL_IDS=$(residual_after_release)
 if [[ "$DRY" -eq 1 ]]; then
   echo "DRY RUN would:"
   echo "  claim-table repo: $CANONICAL (branch: $(git rev-parse --abbrev-ref HEAD), left untouched)"
-  echo "  product repo:     ${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo '(gh default)')}"
+  echo "  product repo:     ${REPO_ARG:-${PR_REPO:-(unresolved)}}"
   if [[ -n "$TARGET_IDS" ]]; then
     printf '%s\n' "$TARGET_IDS" | while IFS= read -r id; do
       [[ -n "$id" ]] || continue
@@ -2259,24 +2511,42 @@ if [[ -n "$TARGET_IDS" ]]; then
   # GitHub-native sibling check (#153 AC1/AC4): the one authoritative live-
   # claim view is ledger rows UNION live open PR-body claims, not the ledger
   # alone — a sibling slice can be a still-open PR-body claim with no ledger
-  # row at all. Best-effort like the PR-body lookup above: a gh/pr-claims
-  # failure here falls back to ledger-only residual (legacy behavior
-  # preserved, #153 AC6) rather than blocking cleanup over evidence gh cannot
-  # currently see.
-  if [[ -n "${PR_REPO:-}" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
-    _open_pr_rows=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>/dev/null || true)
-    _open_pr_siblings=""
-    while IFS=$'\t' read -r _pr_n _pr_id _pr_s _pr_h _pr_u _pr_c _pr_up; do
-      [[ -n "$_pr_id" ]] || continue
-      claim_id_for_issue "$_pr_id" || continue
-      printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pr_id" && continue
-      _open_pr_siblings="${_open_pr_siblings}${_pr_id}"$'\n'
-    done <<EOF
+  # row at all.
+  #
+  # (#153 review P1) This read used to be `2>/dev/null || true`. That turned a
+  # missing reader, an expired token, a rate limit, or a mid-pagination
+  # failure into "no open sibling claims" — and an unread inventory then
+  # authorized removing agent-claimed off an issue another live lane still
+  # holds. An unreadable or malformed inventory is not an empty one: it
+  # preserves the label and reports INCOMPLETE (exit 3). Only a successfully
+  # read, shape-valid inventory may decide that no sibling remains.
+  if [[ -n "${PR_REPO:-}" ]]; then
+    if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+      warn "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot check for live open sibling claims on $PR_REPO; preserving agent-claimed"
+      INCOMPLETE=1
+      PRESERVE_LABEL=1
+    elif ! _open_pr_rows=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>&1); then
+      warn "post-mutation reread of live PR-body claims failed for $PR_REPO — an unreadable claim inventory is not an empty one; preserving agent-claimed: $_open_pr_rows"
+      INCOMPLETE=1
+      PRESERVE_LABEL=1
+    elif ! open_pr_rows_valid "$_open_pr_rows"; then
+      warn "post-mutation reread of live PR-body claims returned a malformed/truncated row for $PR_REPO — cannot tell whether a sibling claim survives; preserving agent-claimed: $OPEN_PR_BAD_ROW"
+      INCOMPLETE=1
+      PRESERVE_LABEL=1
+    else
+      _open_pr_siblings=""
+      while IFS=$'\t' read -r _pr_n _pr_id _pr_s _pr_h _pr_u _pr_c _pr_up; do
+        [[ -n "$_pr_id" ]] || continue
+        claim_id_for_issue "$_pr_id" || continue
+        printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pr_id" && continue
+        _open_pr_siblings="${_open_pr_siblings}${_pr_id}"$'\n'
+      done <<EOF
 $_open_pr_rows
 EOF
-    _open_pr_siblings=$(printf '%s\n' "$_open_pr_siblings" | grep -E '^issue-' | sort -u || true)
-    if [[ -n "$_open_pr_siblings" ]]; then
-      RESIDUAL_IDS=$(printf '%s\n%s\n' "$RESIDUAL_IDS" "$_open_pr_siblings" | grep -E '^issue-' | sort -u || true)
+      _open_pr_siblings=$(printf '%s\n' "$_open_pr_siblings" | grep -E '^issue-' | sort -u || true)
+      if [[ -n "$_open_pr_siblings" ]]; then
+        RESIDUAL_IDS=$(printf '%s\n%s\n' "$RESIDUAL_IDS" "$_open_pr_siblings" | grep -E '^issue-' | sort -u || true)
+      fi
     fi
   fi
 else
@@ -2349,20 +2619,39 @@ fi
 # --- label ----------------------------------------------------------------
 # L-027: the old code swallowed gh's stderr and logged success unconditionally.
 if command -v gh >/dev/null; then
-  REPO="$REPO_ARG"
-  if [[ -z "$REPO" ]]; then
-    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-  fi
+  # PR_REPO is the already-resolved identity (--repo, then gh, then this
+  # checkout's origin) — resolved once, up front, and never swallowed
+  # (#153 review P1). Do not re-ask gh here and re-introduce the failure mode.
+  REPO="${REPO_ARG:-${PR_REPO:-}}"
   if [[ "$PRESERVE_LABEL" -eq 1 ]]; then
     # Incomplete cleanup (strip/push/reread/target still live): never call
     # remove-label. A live claim with no agent-claimed label is the defect.
     info "preserving agent-claimed on #$ISSUE — incomplete cleanup; not removing label"
   elif [[ -n "$RESIDUAL_IDS" ]]; then
-    # L-024: siblings are still working this issue; the label is still true.
-    # Residual rows on the ledger are themselves the verification — leaving
-    # the label is the complete policy without a GitHub round-trip.
-    info "keeping agent-claimed on #$ISSUE — residual claims remain:"
-    printf '%s\n' "$RESIDUAL_IDS" | sed 's/^/  /'
+    # L-024: siblings are still working this issue, so agent-claimed must
+    # stay. (#153 review P1) "Must stay" is a postcondition, not a hope: a
+    # sibling row proves the label SHOULD be there, never that it IS. Re-read
+    # it. Absent, or unreadable, is INCOMPLETE — a live claim with no
+    # agent-claimed label is precisely the defect Law 10 exists to prevent,
+    # and reporting success over label state we could not read is how it
+    # stayed invisible.
+    if [[ -z "${REPO:-}" ]]; then
+      warn "could not resolve the product repo — cannot verify agent-claimed is still present on #$ISSUE while residual claims remain (pass --repo owner/name)"
+      INCOMPLETE=1
+      printf '%s\n' "$RESIDUAL_IDS" | sed 's/^/  /' >&2
+    else
+      LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "?")
+      if [[ "$LABELS" == "?" ]]; then
+        warn "could not read labels on $REPO#$ISSUE — residual-claim label preservation UNVERIFIED"
+        INCOMPLETE=1
+      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+        warn "agent-claimed is ABSENT on $REPO#$ISSUE — residual claims remain but the label is missing; re-add it by hand"
+        INCOMPLETE=1
+      else
+        info "keeping agent-claimed on #$ISSUE — residual claims remain (verified):"
+        printf '%s\n' "$RESIDUAL_IDS" | sed 's/^/  /'
+      fi
+    fi
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     # Empty ledger + live sibling whose claim is not on this ref (or was never
     # filed). Explicit operator path — do not invent a row, do not strip the
@@ -2406,7 +2695,10 @@ else
   if [[ "$PRESERVE_LABEL" -eq 1 ]]; then
     info "gh not found — agent-claimed left in place (incomplete cleanup; not removing label)"
   elif [[ -n "$RESIDUAL_IDS" ]]; then
-    info "gh not found — agent-claimed left in place (residual claims on ledger)"
+    # Left in place, but unverifiable without gh — say so rather than
+    # reporting a postcondition nobody checked (#153 review P1).
+    warn "gh not found — agent-claimed left in place for residual claims on #$ISSUE, but its presence could NOT be verified"
+    INCOMPLETE=1
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     warn "gh not found — --keep-label cannot verify agent-claimed on #$ISSUE"
     INCOMPLETE=1

@@ -16,6 +16,19 @@ WHAT IT DOES
   is still read for claims made by older versions, and is now a rendered view
   (`claims-status.sh`) rather than a file anyone appends to.
 
+  The pre-create overlap check is a read, and a read cannot be atomic against
+  another lane that has not published its claim yet: two lanes claiming
+  DIFFERENT issues with overlapping scope can each see an inventory without the
+  other and both pass. So the claim is admitted a second time AFTER its PR
+  exists (#153 review P1). The post-create pass re-reads the authoritative
+  inventory, requires this lane's own PR to be visible in it, and refuses if an
+  overlapping live PR-body claim holds a LOWER PR number. GitHub assigns PR
+  numbers uniquely and monotonically, so both racers reach the same verdict from
+  the same evidence — exactly one survives, with no lock file, no repo-global
+  state, and nothing stale left behind if a lane is killed. A lane that loses
+  rolls back only what it created (its PR, worktree, branch, and the label if it
+  was the one that added it) and exits nonzero.
+
 WHY
   Two agents editing the same files silently destroyed each other's work (L-001).
   Two agents claiming the *same issue* under different slugs wasted a full build
@@ -46,6 +59,13 @@ USAGE
 ENV
   GIBSON_CANONICAL   path to target repo canonical checkout (default: cwd)
   GIBSON_SESSION     session id recorded in the claim (default: $USER@host)
+  GIBSON_CLAIM_ADMIT_ATTEMPTS
+                     how many times the post-create admission pass re-reads the
+                     live inventory while waiting for this lane's own PR to
+                     appear in it (default 3). Patience only — it never changes
+                     the verdict, and running out still refuses the claim.
+  GIBSON_CLAIM_ADMIT_DELAY
+                     seconds between those attempts (default 2)
 
 EXAMPLES
   cd ~/Code/acme-app
@@ -140,6 +160,29 @@ claim_scope() {
     sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
+# Historical stem/prefix overlap between two space-separated scope strings.
+# Used by the pre-create check and by the post-create admission pass when node
+# (and therefore scope-overlap.mjs) is unavailable, so both passes agree on
+# what "overlap" means.
+legacy_scope_overlap() {
+  local a="$1" b="$2" s stem t tstem
+  for s in $a; do
+    stem="${s%%\**}"
+    [[ -z "$stem" ]] && continue
+    if echo " $b " | grep -F "$stem" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  for t in $b; do
+    tstem="${t%%\**}"
+    [[ -z "$tstem" ]] && continue
+    if echo " $a " | grep -F "$tstem" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 LIVE_IDS=$(live_claim_ids | sort -u)
 
 # --- L-028 / #11: refuse an accidental second claim on the same issue ---
@@ -187,28 +230,20 @@ else
   for id in $LIVE_IDS; do
     row_scope=$(claim_scope "$id")
     [[ -z "$row_scope" ]] && continue
-    for s in $SCOPE; do
-      stem="${s%%\**}"
-      [[ -z "$stem" ]] && continue
-      if echo " $row_scope " | grep -F "$stem" >/dev/null 2>&1; then
-        die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
-      fi
-      for t in $row_scope; do
-        tstem="${t%%\**}"
-        [[ -z "$tstem" ]] && continue
-        if echo " $SCOPE " | grep -F "$tstem" >/dev/null 2>&1; then
-          die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
-        fi
-      done
-    done
+    if legacy_scope_overlap "$SCOPE" "$row_scope"; then
+      die "scope overlap with live claim $id (scope: $row_scope). Coordinate; do not race."
+    fi
   done
 fi
 
 LABEL_ADDED=0
+LABEL_PRE_PRESENT=0
 WORKTREE_CREATED=0
 BRANCH_PUSHED=0
 PR_NUMBER=""
 CLAIM_COMPLETE=0
+# Rolls back ONLY what this lane created. Never touches another lane's PR,
+# worktree, branch, or label — a losing racer must leave the winner intact.
 cleanup_claim() {
   if [[ "$CLAIM_COMPLETE" -eq 1 ]]; then
     return 0
@@ -223,12 +258,23 @@ cleanup_claim() {
     git push -q origin --delete "$BRANCH" >/dev/null 2>&1 || true
   fi
   git branch -D "$BRANCH" >/dev/null 2>&1 || true
-  if [[ "$LABEL_ADDED" -eq 1 ]]; then
+  if [[ "$LABEL_ADDED" -eq 1 && "$LABEL_PRE_PRESENT" -eq 1 ]]; then
+    # agent-claimed was already on the issue before this lane ran (a sibling
+    # slice holds it). Removing it here would strip a live claim's label.
+    info "leaving agent-claimed on #$ISSUE — it was already there before this claim"
+  elif [[ "$LABEL_ADDED" -eq 1 ]]; then
     info "undo: removing agent-claimed from #$ISSUE"
-    gh issue edit "$ISSUE" --repo "$(gh repo view --json nameWithOwner -q .nameWithOwner)" --remove-label agent-claimed 2>/dev/null || true
+    gh issue edit "$ISSUE" --repo "$REPO" --remove-label agent-claimed 2>/dev/null || true
   fi
 }
 trap cleanup_claim EXIT
+
+# Read the label BEFORE adding it, so the rollback above can tell "I added
+# this" from "a sibling lane already held it".
+PRE_LABELS=$(gh issue view "$ISSUE" --repo "$REPO" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || echo "")
+if echo ",$PRE_LABELS," | grep -q ',agent-claimed,'; then
+  LABEL_PRE_PRESENT=1
+fi
 
 info "adding agent-claimed to #$ISSUE"
 gh issue edit "$ISSUE" --repo "$REPO" --add-label agent-claimed
@@ -271,6 +317,86 @@ PR_NUMBER=$(gh pr create --repo "$REPO" --draft --base "$BASE" --head "$BRANCH" 
 rm -f "$BODY"
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] ||
   die "draft PR creation failed — no PR claim was recorded; re-run after resolving"
+
+# --- post-create admission (#153 review P1: cross-issue overlap TOCTOU) -----
+# The pre-create check above read an inventory that could not yet contain a
+# concurrent lane's claim. Re-decide now that this claim IS published, against
+# the authoritative inventory, with a deterministic winner: the lower PR
+# number. Losing here rolls this lane back through cleanup_claim (its own PR,
+# worktree, branch, and label only) and exits nonzero.
+ADMIT_ATTEMPTS="${GIBSON_CLAIM_ADMIT_ATTEMPTS:-3}"
+ADMIT_DELAY="${GIBSON_CLAIM_ADMIT_DELAY:-2}"
+[[ "$ADMIT_ATTEMPTS" =~ ^[0-9]+$ && "$ADMIT_ATTEMPTS" -ge 1 ]] ||
+  die "GIBSON_CLAIM_ADMIT_ATTEMPTS must be a positive integer, got '$ADMIT_ATTEMPTS'"
+[[ "$ADMIT_DELAY" =~ ^[0-9]+$ ]] ||
+  die "GIBSON_CLAIM_ADMIT_DELAY must be a non-negative integer, got '$ADMIT_DELAY'"
+
+ADMIT_ROWS=""
+ADMIT_SELF_SEEN=0
+_attempt=1
+while [[ "$_attempt" -le "$ADMIT_ATTEMPTS" ]]; do
+  if ADMIT_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$REPO" 2>&1); then
+    if printf '%s\n' "$ADMIT_ROWS" |
+       awk -F'\t' -v n="$PR_NUMBER" -v c="$CLAIM_ID" '$1==n && $2==c {f=1} END{exit !f}'; then
+      ADMIT_SELF_SEEN=1
+      break
+    fi
+    echo "claim.sh: admission: PR #$PR_NUMBER is not in the live claim inventory yet (attempt $_attempt/$ADMIT_ATTEMPTS)" >&2
+  else
+    echo "claim.sh: admission: cannot read the live claim inventory for $REPO (attempt $_attempt/$ADMIT_ATTEMPTS): $ADMIT_ROWS" >&2
+    ADMIT_ROWS=""
+  fi
+  _attempt=$((_attempt + 1))
+  [[ "$_attempt" -le "$ADMIT_ATTEMPTS" && "$ADMIT_DELAY" -gt 0 ]] && sleep "$ADMIT_DELAY"
+done
+
+if [[ "$ADMIT_SELF_SEEN" -ne 1 ]]; then
+  die "post-create admission: this lane's own claim PR #$PR_NUMBER is not readable in the authoritative live-claim inventory for $REPO after $ADMIT_ATTEMPTS attempt(s).
+  An inventory that cannot see this claim cannot prove no one else holds the scope — refusing to hold a claim that is not provably registered.
+  This lane's PR, branch, worktree and label are being rolled back; re-run once the inventory is readable."
+fi
+
+if command -v node >/dev/null 2>&1 && [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]]; then
+  _adm_args=(--repo-path "$CANONICAL" --base "$BASE" --claim-id "$CLAIM_ID" --repo "$REPO" --admit-pr "$PR_NUMBER")
+  for s in $SCOPE; do
+    _adm_args+=(--scope "$s")
+  done
+  if [[ "$SLICE" -eq 1 ]]; then
+    _adm_args+=(--slice --issue "$ISSUE")
+  fi
+  if ! node "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
+    die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): a live claim with a stronger prior holds overlapping scope.
+  This is the concurrent-claim race resolving deterministically — the lower PR number wins.
+  This lane's PR, branch, worktree and label are being rolled back; re-run once the other lane releases, or claim a disjoint scope."
+  fi
+else
+  # No node: same decision, same tie-break, using the historical stem overlap.
+  while IFS=$'\t' read -r _a_num _a_id _a_scope _a_rest; do
+    [[ -n "$_a_id" ]] || continue
+    [[ "$_a_id" == "$CLAIM_ID" ]] && continue
+    [[ -n "$_a_scope" ]] ||
+      die "post-create admission: live claim '$_a_id' (PR #$_a_num) has an empty scope — unreadable evidence; rolling this lane back"
+    legacy_scope_overlap "$SCOPE" "$_a_scope" || continue
+    if [[ "$_a_num" =~ ^[0-9]+$ ]] && [[ "$_a_num" -gt "$PR_NUMBER" ]]; then
+      info "admission: later overlapping claim $_a_id (PR #$_a_num) yields to PR #$PR_NUMBER"
+      continue
+    fi
+    die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): overlapping live claim $_a_id (PR #$_a_num, scope: $_a_scope) holds the stronger prior.
+  This lane's PR, branch, worktree and label are being rolled back; re-run once it releases, or claim a disjoint scope."
+  done <<EOF
+$ADMIT_ROWS
+EOF
+  for id in $LIVE_IDS; do
+    [[ "$id" == "$CLAIM_ID" ]] && continue
+    row_scope=$(claim_scope "$id")
+    [[ -z "$row_scope" ]] && continue
+    if legacy_scope_overlap "$SCOPE" "$row_scope"; then
+      die "post-create admission refused for $CLAIM_ID (PR #$PR_NUMBER): ledger claim $id (scope: $row_scope) holds the scope.
+  This lane's PR, branch, worktree and label are being rolled back."
+    fi
+  done
+fi
+info "admission: PR #$PR_NUMBER holds $CLAIM_ID (verified against the live claim inventory)"
 
 LABEL_ADDED=0  # success — do not undo label
 CLAIM_COMPLETE=1

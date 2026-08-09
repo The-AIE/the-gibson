@@ -159,6 +159,52 @@ the siblings and keeps the label.
 Before claiming: read live claims. Overlap with your intended scope → stop and
 coordinate (different issue, or wait). Never race a live claim.
 
+**Reading live claims is not atomic — so the claim is admitted twice.** Two lanes
+claiming *different* issues with overlapping scope can each read an inventory that
+does not yet contain the other's claim, both pass the pre-create check, and both
+survive with overlapping scope. The same-issue refusal above cannot catch that:
+the issues genuinely differ. So `claim.sh` re-runs the overlap check **after** its
+draft PR exists (`scope-overlap.mjs --admit-pr <number>`), and resolves the race on
+evidence both lanes can read:
+
+- this lane's own claim must be visible in the authoritative inventory, or the
+  claim is refused — an inventory that cannot see the claim proves nothing about
+  who else holds the scope;
+- an overlapping live PR-body claim with a **lower PR number** wins. GitHub
+  assigns PR numbers uniquely and monotonically, and the number is issued in the
+  same step that publishes the claim, so both racers compute the same winner;
+- an overlapping ledger claim always wins — it was never part of this race.
+
+Exactly one lane survives. The loser rolls back **only what it created** — its own
+PR, branch, worktree, and the `agent-claimed` label if it was the one that added it
+(a label a sibling slice already held is left alone) — and exits non-zero. There is
+no lock file and no repo-global state, so a lane that is killed mid-claim leaves
+nothing behind for the next one to trip over.
+
+**Repository identity is proven, not assumed (release side).** A claim's PR-body
+evidence authorizes deleting a worktree, a branch, and a label. Before acting on
+it, `release-claim.sh` proves that `GIBSON_CANONICAL`'s own origin remote **is** the
+repository that evidence came from: the origin URL is normalized to `owner/name`
+(https, `ssh://`, scp-like `git@github.com:owner/name.git`, optional port, optional
+`.git`, case-insensitive) and compared. A fork or a second clone contains the same
+branch names and the same commits by construction — that is not identity, and it is
+refused before any mutation. A missing, multi-valued, or non-GitHub origin is
+refused for those paths too, and if repository identity cannot be resolved at all
+(no `--repo`, `gh repo view` failing, origin unreadable) the run stops **before**
+any mutation rather than skipping the authoritative inventory and cleaning up on a
+view it never read.
+
+**A released claim id may be reused — and that makes the id ambiguous forever
+after.** Once a claim's PR is terminal the id is free again, so a second generation
+can legitimately open a second PR carrying the same id. The id-only terminal lookup
+then has two answers and correctly refuses. The resolution is to ask a narrower
+question, not to accept a guess: the release path binds to the PR number it already
+knows (the open PR it just closed), and an operator releasing an older generation
+by hand names it with `release-claim.sh <issue> --claim-id <id> --pr <number>`.
+Every evidence check — claim id, issue, derived head branch, exact head SHA, base
+repository, cross-repository=false, terminal state — still applies to that exact
+PR.
+
 **Staleness:** claims older than 24h are verified (does the branch/worktree show
 activity?) before being renewed or released. Renew only the timestamp; never strip
 someone else's claim without verification.
@@ -217,6 +263,13 @@ from **evidence**, not assertion:
   `rm -rf` fallback). Renewal, push rejection, OID mismatch, or reread failure
   leave the registered worktree and branch untouched. Final worktree-removal
   failure reports incomplete (no false OK).
+- Removing `agent-claimed` requires a **readable** live claim view. A sibling
+  claim on the same issue can be a live *open PR-body* claim with no ledger row
+  at all, so a PR-claim inventory the run could not read is not evidence that
+  none exists. That read used to be best-effort and an API failure counted as
+  "no siblings" — which is how a live lane could lose its label to a janitor.
+  A failed or malformed inventory read now preserves the label and reports
+  incomplete; the claim is re-reaped on a later run.
 - Scheduling and Mission Control integration are follow-ups; this script is the
   standalone Tier B janitor.
 

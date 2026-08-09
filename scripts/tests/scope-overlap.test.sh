@@ -257,6 +257,63 @@ out=$(PATH="$ROOT/bin-json:$PATH" GH_JSON="$GH_JSON" run_so "$ROOT/d/canon" --sc
   && ok "duplicate-in-body propagates to scope-overlap.mjs fail-closed" \
   || bad "duplicate-in-body (rc=$rc): $out"
 
+# --- #153 review P1: --admit-pr, the post-create admission decision ---------
+# The pre-create check cannot see a lane that has not published its claim yet.
+# --admit-pr re-runs the same overlap check once THIS lane's PR exists and
+# resolves the race deterministically on PR number, so two racers reading the
+# same evidence always agree on who survives.
+echo "--admit-pr · a LOWER-numbered overlapping PR claim refuses this lane"
+{
+  printf '800\tissue-60-shared-lib\tlib/shared/**\tfeat/60-shared-lib\thttps://github.com/acme/app/pull/800\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+  printf '801\tissue-61-shared-util\tlib/shared/util.ts\tfeat/61-shared-util\thttps://github.com/acme/app/pull/801\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n'
+} > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/util.ts' --repo acme/app --claim-id issue-61-shared-util --issue 61 --admit-pr 801); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-60-shared-lib' && ok "later lane stands down for the lower PR number" \
+  || bad "later lane was admitted (rc=$rc): $out"
+echo "$out" | grep -qi 'admission refused' && ok "names the admission refusal" || bad "no admission wording: $out"
+
+echo "--admit-pr · a HIGHER-numbered overlapping PR claim yields to this lane"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-60-shared-lib --issue 60 --admit-pr 800); rc=$?
+[[ "$rc" -eq 0 ]] && ok "earlier lane is admitted over the later one" || bad "earlier lane refused (rc=$rc): $out"
+echo "$out" | grep -q 'yields to PR #800' && ok "names the yielding lane" || bad "no yield wording: $out"
+
+echo "--admit-pr · exactly one of two racing lanes is admitted"
+rc_low=0; rc_high=0
+run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-60-shared-lib --issue 60 --admit-pr 800 >/dev/null 2>&1 || rc_low=$?
+run_so "$ROOT/d/canon" --scope 'lib/shared/util.ts' --repo acme/app --claim-id issue-61-shared-util --issue 61 --admit-pr 801 >/dev/null 2>&1 || rc_high=$?
+survivors=0
+[[ "$rc_low" -eq 0 ]] && survivors=$((survivors + 1))
+[[ "$rc_high" -eq 0 ]] && survivors=$((survivors + 1))
+[[ "$survivors" -eq 1 ]] && ok "exactly one lane survives the same evidence" \
+  || bad "both/neither lane survived (low=$rc_low high=$rc_high)"
+
+echo "--admit-pr · an inventory that cannot see this lane's own claim refuses it"
+out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-62-invisible --issue 62 --admit-pr 999); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'not visible' && ok "invisible own claim refuses" \
+  || bad "invisible own claim admitted (rc=$rc): $out"
+
+echo "--admit-pr · a LEDGER claim always beats an admission candidate"
+printf '810\tissue-63-ledger-race\tapp/api/auth/**\tfeat/63-ledger-race\thttps://github.com/acme/app/pull/810\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+out=$(run_so "$ROOT/d/canon" --scope 'app/api/auth/**' --repo acme/app --claim-id issue-63-ledger-race --issue 63 --admit-pr 810); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-7-password-reset' && ok "ledger claim beats the admission candidate" \
+  || bad "ledger claim did not refuse admission (rc=$rc): $out"
+
+echo "--admit-pr · usage errors are refused before any query"
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-64-x --admit-pr 'abc'); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'pull-request number' && ok "non-numeric --admit-pr rejected" \
+  || bad "non-numeric --admit-pr (rc=$rc): $out"
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --claim-id issue-64-x --admit-pr 810); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --repo' && ok "--admit-pr without --repo rejected" \
+  || bad "--admit-pr without --repo (rc=$rc): $out"
+out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --admit-pr 810); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --claim-id' && ok "--admit-pr without --claim-id rejected" \
+  || bad "--admit-pr without --claim-id (rc=$rc): $out"
+
+# Reset the fixture for anything appended after this block.
+printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\n' \
+  > "$GH_PR_TSV"
+
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

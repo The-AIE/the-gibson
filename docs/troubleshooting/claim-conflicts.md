@@ -104,3 +104,63 @@ assuming it worked.
 
 G13 — two agents want conflicting approaches and re-queue didn't resolve → decision
 card for Mark.
+
+## "repository binding mismatch" on release
+
+`release-claim.sh` refused before touching anything, saying the checkout's origin
+repository is not the repository the PR-body claim evidence came from.
+
+That is the intended answer, not a bug. A fork, a mirror, or a second clone
+contains the same branch names and the same commits as the original — so "the
+branch is here and the commits match" cannot tell you that a worktree and a
+branch belong to the claim you are releasing. Only repository identity can.
+
+Check where you are standing:
+
+```bash
+git -C "$GIBSON_CANONICAL" config --get-all remote.origin.url
+```
+
+- **Wrong checkout** — `cd` to the clone of the repository that owns the PR, or
+  set `GIBSON_CANONICAL` to it. Do not pass `--repo` to silence the message;
+  `--repo` names the issue/label repository, and it cannot make a different
+  clone into the right one.
+- **No origin, or more than one `remote.origin.url`** — the checkout has no
+  single repository identity. Fix the remote before releasing.
+- **A non-GitHub origin** (a bare path, a mirror) — there can be no PR-body
+  claim for that checkout, so the release falls back to the ledger and says so.
+
+## "ambiguous terminal PR-body evidence" for a claim id
+
+Two (or more) terminal pull requests carry the same claim id. That is legal: a
+claim id is free again once its PR is terminal, so a later lane may reuse it —
+and then "which PR is this claim?" genuinely has more than one answer.
+
+Releasing the claim that is still open never hits this; that path binds to the PR
+it just closed. To release a specific generation by hand, name it:
+
+```bash
+scripts/pr-claims.sh find-terminal-pr owner/name issue-<n>-<slug> <pr-number>   # look first
+release-claim.sh <n> --claim-id issue-<n>-<slug> --pr <pr-number> --repo owner/name
+```
+
+Naming the PR narrows the question. It does not relax any check: that PR must
+still match the claim id, the issue, the derived head branch, the exact head SHA,
+the base repository, cross-repository=false, and a terminal state.
+
+## A concurrent lane's claim was refused after its PR was created
+
+Output contains `post-create admission refused` (or `admission: ... not readable
+in the authoritative live-claim inventory`), and the lane rolled back its own PR,
+branch, worktree, and label.
+
+This is the cross-issue race resolving itself. Two lanes claiming *different*
+issues with overlapping scope can both pass the pre-create overlap check, because
+at the moment each of them looked, neither claim existed yet. `claim.sh` therefore
+re-checks after publishing its claim and stands down if an overlapping claim holds
+a lower PR number — deterministically, so exactly one lane survives.
+
+Nothing is left behind: the refused lane closed its own PR, deleted its own local
+and remote branch, removed its own worktree, and removed `agent-claimed` only if
+it was the one that added it. Re-run the claim once the winning lane releases, or
+claim a disjoint scope.

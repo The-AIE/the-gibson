@@ -73,6 +73,16 @@ case "$1" in
     if [[ "${GH_API_FAIL:-0}" == "1" ]]; then
       exit 1
     fi
+    if [[ "${2:-}" == "graphql" ]]; then
+      # pr-claims.sh's paginated PR-body claim read. release-claim.sh's
+      # post-mutation sibling check is fail-closed since #153's review — an
+      # unreadable inventory must not authorize removing agent-claimed — so
+      # this has to answer like a real gh: a successful, empty inventory
+      # (these fixtures have no live PR-body claims). GH_GRAPHQL_FAIL=1 makes
+      # it fail on purpose.
+      [[ "${GH_GRAPHQL_FAIL:-0}" == "1" ]] && exit 1
+      exit 0
+    fi
     if [[ "${2:-}" == repos/* ]]; then
       # print bodies already posted
       if [[ -f "${GH_COMMENTS_FILE:-}" ]]; then
@@ -736,6 +746,33 @@ contains "age==14400 stays KEEP" "$out" "KEEP   issue-90-boundary"
 lacks    "age==14400 not REAP" "$out" "REAP   issue-90-boundary"
 out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/bound/canon" 2>&1)
 contains "age==14401 is REAP" "$out" "REAP   issue-90-boundary"
+
+# ---------------------------------------------------------------------------
+echo "#153 review · an unreadable live PR-claim inventory never authorizes label removal"
+# The reaper's release decides whether agent-claimed comes off. A sibling
+# claim can be a live *open PR-body* claim with no ledger row at all, so an
+# inventory the run could not read is not evidence that none exists. It used
+# to be read best-effort (`2>/dev/null || true`) and an API failure read as
+# "no siblings" — which is how a live lane could lose its label.
+new_repo "$ROOT/greread"
+add_claim_file "$ROOT/greread" issue-70-greread 70 "$CLAIMED_ISO"
+export GH_PR_COUNT=0
+export GH_LOG="$ROOT/greread/gh.log"
+export GH_COMMENTS_FILE="$ROOT/greread/comments"
+export GH_STATE="$ROOT/greread/gh-state"
+rm -f "$GH_LOG" "$GH_STATE"
+: > "$GH_COMMENTS_FILE"
+out=$(GH_GRAPHQL_FAIL=1 GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/greread/canon" --claim-id issue-70-greread --apply 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "unreadable PR-claim inventory: reaper does not report success" \
+  || bad "unreadable PR-claim inventory: reaper exited 0: $out"
+if grep -q -- '--remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "unreadable PR-claim inventory: agent-claimed was removed anyway"
+else
+  ok "unreadable PR-claim inventory: agent-claimed was never removed"
+fi
+unset GH_GRAPHQL_FAIL
 
 # ---------------------------------------------------------------------------
 echo "#73 · never closes an issue (no gh issue close)"

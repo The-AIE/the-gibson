@@ -33,12 +33,32 @@ contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missin
 lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 # A canonical checkout parked on a dirty long-lived branch — the L-009 shape.
+#
+# $2 (optional) gives the checkout a real GitHub repository identity
+# (owner/name), which release-claim.sh now requires before it will act on any
+# PR-body claim evidence (#153 review P1: a fork/copy carrying the same branch
+# and commits is not the same repository). The origin URL becomes the real
+# GitHub URL, and a url.<local>.insteadOf rewrite sends fetch/push at the
+# throwaway bare repo — so the fixture stays hermetic while the *recorded*
+# origin identity is exactly what a real clone carries. $3 selects the URL
+# form (https, the default, or ssh) so both are covered by real runs.
+# Without $2 the origin stays a bare local path: a determinate "this checkout
+# is not a GitHub repository", which is the ledger-only shape most of the
+# suite exercises.
 new_repo() {
-  local root="$1"
+  local root="$1" gh_repo="${2:-}" url_form="${3:-https}" url=""
   rm -rf "$root"
   mkdir -p "$root"
   git init -q --bare "$root/origin"
   git clone -q "$root/origin" "$root/canon" 2>/dev/null
+  if [[ -n "$gh_repo" ]]; then
+    case "$url_form" in
+      ssh) url="git@github.com:${gh_repo}.git" ;;
+      *)   url="https://github.com/${gh_repo}.git" ;;
+    esac
+    git -C "$root/canon" config "url.$root/origin.insteadOf" "$url"
+    git -C "$root/canon" remote set-url origin "$url"
+  fi
   mkdir -p "$root/canon/docs"
   cat > "$root/canon/docs/active-work.md" <<'TABLE'
 | when | claim-id | scope | who |
@@ -2002,9 +2022,9 @@ contains "preserves label when final prune fails" "$out" "preserving agent-claim
 # just against claimed metadata.
 # Args: dir issue slug
 term_fixture() {
-  local dir="$1" issue="$2" slug="$3"
+  local dir="$1" issue="$2" slug="$3" url_form="${4:-https}"
   local id="issue-${issue}-${slug}" branch="feat/${issue}-${slug}"
-  new_repo "$ROOT/$dir"
+  new_repo "$ROOT/$dir" acme/app "$url_form"
   git -C "$ROOT/$dir/canon" worktree add -q "$ROOT/$dir/wt-${issue}-${slug}" \
     -b "$branch" origin/main
   (
@@ -2062,7 +2082,24 @@ case "$1" in
       cat "${GH_PR_OPEN_TSV:-/dev/null}" 2>/dev/null
       exit "${GH_PR_OPEN_EXIT:-${GH_PR_LIST_EXIT:-0}}"
     fi
-    cat "${GH_PR_ALL_TSV:-/dev/null}" 2>/dev/null
+    # find-terminal-pr narrows the real GraphQL query with
+    # `select(.number == N)`. This fake replays staged TSV instead of running
+    # jq, so it honours that narrowing itself — otherwise a reused claim id
+    # with two terminal generations would look ambiguous no matter which PR
+    # the caller actually asked about (#153 review P2).
+    want_num=""
+    for arg in "$@"; do
+      case "$arg" in
+        *"select(.number == "*)
+          want_num=$(printf '%s' "$arg" | sed -n 's/.*select(\.number == \([0-9][0-9]*\)).*/\1/p' | head -1)
+          ;;
+      esac
+    done
+    if [[ -n "$want_num" ]]; then
+      awk -F'\t' -v n="$want_num" '$1==n' "${GH_PR_ALL_TSV:-/dev/null}" 2>/dev/null
+    else
+      cat "${GH_PR_ALL_TSV:-/dev/null}" 2>/dev/null
+    fi
     exit "${GH_PR_ALL_EXIT:-${GH_PR_LIST_EXIT:-0}}"
     ;;
   pr)
@@ -2253,7 +2290,7 @@ br=$(git -C "$ROOT/dirty1/canon" branch --list 'feat/301-dirty-case')
   ok "dirty case: label was never touched" || bad "dirty case: label edit was attempted"
 
 echo "unregistered default-path directory refuses and is preserved (no rm -rf)"
-new_repo "$ROOT/unreg1"
+new_repo "$ROOT/unreg1" acme/app
 mkdir -p "$ROOT/unreg1/wt-302-unreg-case"
 echo marker > "$ROOT/unreg1/wt-302-unreg-case/marker.txt"
 export GH_PR_ALL_TSV="$ROOT/unreg1/all.tsv"
@@ -2395,7 +2432,7 @@ br=$(git -C "$ROOT/ambig1/canon" branch --list 'feat/309-ambiguous-branch-case')
   ok "ambiguous case: label was never touched" || bad "ambiguous case: label edit was attempted"
 
 echo "#153 blocker 1: exact branch registered at a non-default path — operate on it, never a decoy default-path directory"
-new_repo "$ROOT/nondef1"
+new_repo "$ROOT/nondef1" acme/app
 git -C "$ROOT/nondef1/canon" worktree add -q "$ROOT/nondef1/actual-nondefault-location" \
   -b feat/310-nondefault-path origin/main
 (
@@ -2764,7 +2801,7 @@ remote_br=$(git -C "$ROOT/kwnb1/canon" ls-remote --heads origin 'feat/324-keep-w
   ok "--keep-worktree/no-keep-branch: label was never touched" || bad "--keep-worktree/no-keep-branch: label edit was attempted"
 
 echo "#153 blocker 5: sibling claim remains but agent-claimed is actually absent — refuse success (rc=3)"
-new_repo "$ROOT/termsibmissing"
+new_repo "$ROOT/termsibmissing" acme/app
 git -C "$ROOT/termsibmissing/canon" worktree add -q "$ROOT/termsibmissing/wt-220-checkout-a" \
   -b feat/220-checkout-a origin/main
 (
@@ -2854,7 +2891,7 @@ lacks    "does not claim success on malformed reread" "$out" "OK —"
   ok "malformed-reread case: label was never removed" || bad "malformed-reread case: label removal was attempted"
 
 echo "#153 · multi-slice: releasing a terminal claim keeps a live open sibling"
-new_repo "$ROOT/termsib"
+new_repo "$ROOT/termsib" acme/app
 git -C "$ROOT/termsib/canon" worktree add -q "$ROOT/termsib/wt-210-checkout-a" \
   -b feat/210-checkout-a origin/main
 (
@@ -2970,7 +3007,7 @@ open_fixture() {
   # PR-body claim, and point the fake gh's state files at it. Echoes nothing;
   # sets the GH_* fixture env for the caller.
   local dir="$1" issue="$2" slug="$3"
-  new_repo "$ROOT/$dir"
+  new_repo "$ROOT/$dir" acme/app
   git -C "$ROOT/$dir/canon" worktree add -q "$ROOT/$dir/wt-${issue}-${slug}" \
     -b "feat/${issue}-${slug}" origin/main
   (
@@ -3222,7 +3259,7 @@ unset GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS GH_PR_CLOSE_LOG GH_PR_CLOSE
 
 echo "#153 · full lifecycle fixture: reservation -> draft PR-body claim -> terminal PR -> exact-ID release -> verified cleanup"
 CLAIM="$SCRIPT_DIR/../claim.sh"
-new_repo "$ROOT/e2e"
+new_repo "$ROOT/e2e" acme/e2e
 mkdir -p "$ROOT/e2e/bin"
 export GH_PR_FILE="$ROOT/e2e/prs"
 : > "$GH_PR_FILE"
@@ -3244,7 +3281,17 @@ case "$1 $2" in
     for arg in "$@"; do
       case "$arg" in
         *"states: [OPEN]"*)
-          # open state: nothing — the reservation PR is terminal, not live-open.
+          # Live-open inventory. While the reservation PR is open it MUST be
+          # listed here: claim.sh's post-create admission pass refuses a claim
+          # it cannot see in the authoritative inventory (#153 review P1).
+          # GH_PR_MERGED=1 is step 3 — the PR reaching a terminal state and
+          # dropping out of the open listing.
+          [[ "${GH_PR_MERGED:-0}" == 1 ]] && exit 0
+          while IFS='|' read -r number claim scope branch url created updated headsha; do
+            [[ -n "$claim" ]] || continue
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+              "$number" "$claim" "$scope" "$branch" "$url" "$created" "$updated"
+          done < "${GH_PR_FILE:-/dev/null}"
           exit 0
           ;;
       esac
@@ -3292,8 +3339,10 @@ contains "e2e: claim label added"     "$(cat "$GH_LABELS_FILE")" "agent-claimed"
 contains "e2e: draft PR carries the claim" "$(cat "$GH_PR_FILE")" "issue-200-checkout-fix"
 [[ -d "$ROOT/e2e/wt-200-checkout-fix" ]] && ok "e2e: worktree created" || bad "e2e: worktree missing"
 
-# Step 3: reservation PR reaches a terminal state (merged) — nothing more to
-# simulate here: the fake gh's --state all branch already reports MERGED for
+# Step 3: reservation PR reaches a terminal state (merged) — it drops out of
+# the live-open inventory and becomes terminal evidence:
+export GH_PR_MERGED=1
+# nothing more to simulate here: the fake gh's --state all branch already reports MERGED for
 # every row still in GH_PR_FILE (with the real pushed head SHA), and pr list
 # --state open only lists PRs this fixture never puts there, matching a real
 # merged/closed PR falling out of the open listing.
@@ -3311,6 +3360,371 @@ br=$(git -C "$ROOT/e2e/canon" branch --list 'feat/200-checkout-fix')
 remote_br=$(git -C "$ROOT/e2e/canon" ls-remote --heads origin 'feat/200-checkout-fix')
 [[ -z "$remote_br" ]] && ok "e2e: remote branch removed" || bad "e2e: remote branch survived release"
 lacks "e2e: label file no longer carries agent-claimed" "$(cat "$GH_LABELS_FILE")" "agent-claimed"
+
+# ---------------------------------------------------------------------------
+# #153 review P1 · repository binding: PR evidence must come from THIS
+# checkout's own repository. A fork or second clone contains the same branch
+# names and the same commits by construction — that is not identity, and it
+# must never authorize deleting a worktree, a branch, or a label.
+echo "#153 review · repository binding for PR-body evidence"
+export PATH="$ROOT/term/bin:$PATH"
+
+bind_fixture() { # dir issue slug [https|ssh]
+  local dir="$1" issue="$2" slug="$3" form="${4:-https}"
+  BIND_SHA=$(term_fixture "$dir" "$issue" "$slug" "$form")
+  export GH_PR_ALL_TSV="$ROOT/$dir/all.tsv"
+  export GH_PR_OPEN_TSV="$ROOT/$dir/open.tsv"
+  : > "$GH_PR_OPEN_TSV"
+  export GH_STATE="$ROOT/$dir/gh-state"
+  export GH_LOG="$ROOT/$dir/gh.log"
+  export GH_PR_CLOSE_LOG="$ROOT/$dir/close.log"
+  export GH_LABELS="agent-claimed,tier-b"
+  rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
+  unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_OPEN_CALLS
+  printf '600\tissue-%s-%s\tlib/x/**\t%s\tfeat/%s-%s\t%s\thttps://github.com/acme/app/pull/600\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+    "$issue" "$slug" "$issue" "$issue" "$slug" "$BIND_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+}
+
+echo "origin-URL normalization covers every form a real clone carries"
+# Table-driven, against the REAL function lifted out of release-claim.sh, so
+# the parser that decides repository identity is tested directly rather than
+# only through the two URL forms the fixtures happen to use.
+sed -n '/^normalize_github_repo_url() {/,/^}/p' "$RC" > "$ROOT/normalize.inc"
+# shellcheck disable=SC1090,SC1091
+. "$ROOT/normalize.inc"
+norm_case() { # url expected ("<refused>" for a URL with no GitHub identity)
+  local got
+  got=$(normalize_github_repo_url "$1" 2>/dev/null) || got="<refused>"
+  check "normalize: $1" "$got" "$2"
+}
+norm_case "https://github.com/acme/app.git"           "acme/app"
+norm_case "https://github.com/acme/app"               "acme/app"
+norm_case "https://github.com/acme/app/"              "acme/app"
+norm_case "https://GitHub.com/acme/app.git"           "acme/app"
+norm_case "https://token@github.com/acme/app.git"     "acme/app"
+norm_case "git@github.com:acme/app.git"               "acme/app"
+norm_case "git@github.com:acme/app"                   "acme/app"
+norm_case "ssh://git@github.com/acme/app.git"         "acme/app"
+norm_case "ssh://git@github.com:22/acme/app.git"      "acme/app"
+norm_case "ssh://git@ssh.github.com:443/acme/app.git" "acme/app"
+norm_case "git://github.com/acme/app.git"             "acme/app"
+# Anything that is not unambiguously one github.com repository is refused —
+# a half-parsed identity would be worse than no identity at all.
+norm_case "https://gitlab.com/acme/app.git"           "<refused>"
+norm_case "git@gitlab.com:acme/app.git"               "<refused>"
+norm_case "https://github.evil.com/acme/app.git"      "<refused>"
+norm_case "https://github.com/acme"                   "<refused>"
+norm_case "https://github.com/acme/app/extra"         "<refused>"
+norm_case "/tmp/some/bare/origin"                     "<refused>"
+norm_case ""                                          "<refused>"
+
+echo "an SSH-form origin (git@github.com:owner/name.git) binds and releases"
+bind_fixture bindssh 700 ssh-form ssh
+out=$(cd "$ROOT/bindssh/canon" && "$RC" 700 --claim-id issue-700-ssh-form --repo acme/app 2>&1); rc=$?
+check    "ssh-origin release exits 0"   "$rc" "0"
+contains "ssh-origin release completed" "$out" "OK — claim released for issue 700"
+[[ ! -d "$ROOT/bindssh/wt-700-ssh-form" ]] &&
+  ok "ssh-origin release removed the worktree" || bad "ssh-origin release left the worktree"
+
+echo "a MISMATCHED repository refuses the terminal path and mutates nothing"
+bind_fixture bindmis 701 mismatch
+# Same claim id, same branch, same commits — but the evidence is served for a
+# different repository. That is exactly what a fork looks like.
+sed 's|acme/app|other-org/app|g' "$GH_PR_ALL_TSV" > "$ROOT/bindmis/all-fork.tsv"
+mv "$ROOT/bindmis/all-fork.tsv" "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/bindmis/canon" && "$RC" 701 --claim-id issue-701-mismatch --repo other-org/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "foreign-repository evidence exits nonzero" || bad "foreign-repository evidence exits 0: $out"
+contains "names the binding mismatch"   "$out" "repository binding mismatch"
+contains "names the fork reasoning"     "$out" "NOT the same repository"
+lacks    "never reports success"        "$out" "OK —"
+[[ -d "$ROOT/bindmis/wt-701-mismatch" ]] &&
+  ok "binding mismatch: worktree untouched" || bad "binding mismatch: worktree removed"
+[[ -n "$(git -C "$ROOT/bindmis/canon" branch --list 'feat/701-mismatch')" ]] &&
+  ok "binding mismatch: local branch untouched" || bad "binding mismatch: local branch deleted"
+[[ -n "$(git -C "$ROOT/bindmis/canon" ls-remote --heads origin 'feat/701-mismatch')" ]] &&
+  ok "binding mismatch: remote branch untouched" || bad "binding mismatch: remote branch deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "binding mismatch: label never edited" || bad "binding mismatch: label was edited"
+table=$(git -C "$ROOT/bindmis/canon" show origin/main:docs/active-work.md)
+contains "binding mismatch: ledger untouched" "$table" "issue-15-checkout-totals"
+
+echo "a MISMATCHED repository refuses the open-PR path BEFORE closing anything"
+bind_fixture bindopen 702 open-mismatch
+open_row 601 issue-702-open-mismatch 'lib/x/**' feat/702-open-mismatch \
+  | sed 's|github.com/acme/app|github.com/other-org/app|' > "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/bindopen/canon" && "$RC" 702 --claim-id issue-702-open-mismatch --repo other-org/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "open-path binding mismatch exits nonzero" || bad "open-path binding mismatch exits 0: $out"
+contains "open path names the binding mismatch" "$out" "repository binding mismatch"
+[[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
+  ok "open-path binding mismatch: no PR was closed" || bad "open-path binding mismatch: a PR was closed"
+[[ -d "$ROOT/bindopen/wt-702-open-mismatch" ]] &&
+  ok "open-path binding mismatch: worktree untouched" || bad "open-path binding mismatch: worktree removed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "open-path binding mismatch: label never edited" || bad "open-path binding mismatch: label was edited"
+
+echo "even --dry-run reports the binding mismatch instead of planning a close"
+bind_fixture binddry 703 dry-mismatch
+open_row 602 issue-703-dry-mismatch 'lib/x/**' feat/703-dry-mismatch \
+  | sed 's|github.com/acme/app|github.com/other-org/app|' > "$GH_PR_OPEN_TSV"
+out=$(cd "$ROOT/binddry/canon" && "$RC" 703 --claim-id issue-703-dry-mismatch --repo other-org/app --dry-run 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "dry-run binding mismatch exits nonzero" || bad "dry-run binding mismatch exits 0: $out"
+contains "dry-run names the binding mismatch" "$out" "repository binding mismatch"
+lacks    "dry-run plans no close"             "$out" "would close PR"
+
+echo "a checkout with NO origin remote cannot bind, and refuses"
+bind_fixture bindnoorigin 704 no-origin
+git -C "$ROOT/bindnoorigin/canon" remote remove origin
+out=$(cd "$ROOT/bindnoorigin/canon" && "$RC" 704 --claim-id issue-704-no-origin --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "origin-less checkout exits nonzero" || bad "origin-less checkout exits 0: $out"
+contains "names the unreadable origin identity" "$out" "no readable origin remote"
+[[ -d "$ROOT/bindnoorigin/wt-704-no-origin" ]] &&
+  ok "origin-less checkout: worktree untouched" || bad "origin-less checkout: worktree removed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "origin-less checkout: label never edited" || bad "origin-less checkout: label was edited"
+
+echo "an origin configured more than once is ambiguous identity, not the last value"
+bind_fixture bindmulti 705 multi-origin
+# `git config --get` would silently answer with the LAST value here and look
+# perfectly definite. Two configured repositories is not an identity.
+git -C "$ROOT/bindmulti/canon" config --add remote.origin.url https://github.com/acme/app-fork.git
+out=$(cd "$ROOT/bindmulti/canon" && "$RC" 705 --claim-id issue-705-multi-origin --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "multi-valued origin exits nonzero" || bad "multi-valued origin exits 0: $out"
+contains "names the ambiguous origin" "$out" "configured 2 times"
+[[ -d "$ROOT/bindmulti/wt-705-multi-origin" ]] &&
+  ok "multi-valued origin: worktree untouched" || bad "multi-valued origin: worktree removed"
+
+echo "a non-GitHub origin never consults PR-body evidence at all"
+BIND_LOCAL_SHA=$(term_fixture bindlocal 706 local-origin)
+export GH_PR_ALL_TSV="$ROOT/bindlocal/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/bindlocal/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_LOG="$ROOT/bindlocal/gh.log"
+rm -f "$GH_LOG"
+printf '607\tissue-706-local-origin\tlib/x/**\t706\tfeat/706-local-origin\t%s\thttps://github.com/acme/app/pull/607\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$BIND_LOCAL_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+git -C "$ROOT/bindlocal/canon" remote set-url origin "$ROOT/bindlocal/origin"
+out=$(cd "$ROOT/bindlocal/canon" && "$RC" 706 --claim-id issue-706-local-origin --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "non-GitHub origin exits nonzero" || bad "non-GitHub origin exits 0: $out"
+contains "explains why the evidence was not consulted" "$out" "no GitHub repository identity"
+[[ -d "$ROOT/bindlocal/wt-706-local-origin" ]] &&
+  ok "non-GitHub origin: worktree untouched" || bad "non-GitHub origin: worktree removed"
+
+# ---------------------------------------------------------------------------
+# #153 review P1 · repository identity is never swallowed. `gh repo view`
+# failing used to leave PR_REPO empty, which SKIPPED the authoritative PR
+# inventory entirely and went on to strip the ledger and clean up anyway.
+echo "#153 review · unresolvable repository identity fails before any mutation"
+new_repo "$ROOT/unresolved"
+(
+  cd "$ROOT/unresolved/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-800-unresolved | src/a | session:a |
+| 2026-08-01 | issue-801-bystander | src/b | session:b |
+TABLE
+  git add -A && git commit -qm "nonempty legacy ledger" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+git -C "$ROOT/unresolved/canon" worktree add -q "$ROOT/unresolved/wt-800-unresolved" \
+  -b feat/800-unresolved origin/main
+(
+  cd "$ROOT/unresolved/wt-800-unresolved" || exit 1
+  git commit --allow-empty -qs -m "work"
+  git push -q -u origin feat/800-unresolved
+) >/dev/null 2>&1
+# gh is installed and answers other calls, but cannot say which repository
+# this is; the origin remote is gone too, so nothing can resolve it.
+mkdir -p "$ROOT/unresolved/bin"
+cat > "$ROOT/unresolved/bin/gh" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  repo) exit 1 ;;
+  api) exit 0 ;;
+  issue) echo "edited" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$ROOT/unresolved/bin/gh"
+git -C "$ROOT/unresolved/canon" remote remove origin
+export GH_LOG="$ROOT/unresolved/gh.log"
+rm -f "$GH_LOG"
+out=$(cd "$ROOT/unresolved/canon" && PATH="$ROOT/unresolved/bin:$PATH" \
+  "$RC" 800 --claim-id issue-800-unresolved 2>&1); rc=$?
+check    "unresolved identity exits 1"                "$rc" "1"
+contains "names the unresolved repository identity"   "$out" "cannot resolve the GitHub repository identity"
+contains "tells the operator to pass --repo"          "$out" "--repo owner/name"
+lacks    "never reports success"                      "$out" "OK —"
+[[ -d "$ROOT/unresolved/wt-800-unresolved" ]] &&
+  ok "unresolved identity: worktree untouched" || bad "unresolved identity: worktree removed"
+[[ -n "$(git -C "$ROOT/unresolved/canon" branch --list 'feat/800-unresolved')" ]] &&
+  ok "unresolved identity: local branch untouched" || bad "unresolved identity: local branch deleted"
+[[ -n "$(git -C "$ROOT/unresolved/canon" ls-remote --heads "$ROOT/unresolved/origin" 'feat/800-unresolved')" ]] &&
+  ok "unresolved identity: remote branch untouched" || bad "unresolved identity: remote branch deleted"
+table=$(git -C "$ROOT/unresolved/canon" show main:docs/active-work.md)
+contains "unresolved identity: target ledger row untouched"    "$table" "issue-800-unresolved"
+contains "unresolved identity: bystander ledger row untouched" "$table" "issue-801-bystander"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unresolved identity: label never edited" || bad "unresolved identity: label was edited"
+unset GH_LOG
+
+# ---------------------------------------------------------------------------
+# #153 review P1 · the post-mutation sibling reread on the LEDGER path was
+# `2>/dev/null || true`. An unreadable inventory then read as "no open sibling
+# claims", and agent-claimed came off an issue another live lane still held.
+echo "#153 review · ledger-path sibling reread is fail-closed"
+export PATH="$ROOT/term/bin:$PATH"
+
+sib_fixture() { # dir issue target-id sibling-row?
+  local dir="$1" issue="$2" target="$3"
+  new_repo "$ROOT/$dir" acme/app
+  (
+    cd "$ROOT/$dir/canon" || exit 1
+    git checkout -q main
+    printf '| when | claim-id | scope | who |\n|---|---|---|---|\n| 2026-08-01 | %s | src/a | session:a |\n' "$target" \
+      > docs/active-work.md
+    git add -A && git commit -qm "single target row" && git push -q origin main
+    git checkout -q long-lived-feature
+  ) >/dev/null 2>&1
+  export GH_PR_OPEN_TSV="$ROOT/$dir/open.tsv"
+  export GH_PR_ALL_TSV="$ROOT/$dir/all.tsv"
+  : > "$GH_PR_OPEN_TSV"
+  : > "$GH_PR_ALL_TSV"
+  export GH_STATE="$ROOT/$dir/gh-state"
+  export GH_LOG="$ROOT/$dir/gh.log"
+  export GH_LABELS="agent-claimed,tier-b"
+  export GH_OPEN_CALLS="$ROOT/$dir/open-calls"
+  : > "$GH_OPEN_CALLS"
+  rm -f "$GH_STATE" "$GH_LOG"
+  unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
+}
+
+echo "an unreadable sibling reread preserves agent-claimed and reports INCOMPLETE"
+sib_fixture sibfail 810 issue-810-ledger-lane
+# Call 1 (the authoritative pre-mutation inventory) succeeds and is empty;
+# call 2 — the post-mutation sibling reread — fails, as a rate limit or an
+# expired token would.
+export GH_PR_OPEN_TSV2="$ROOT/sibfail/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+export GH_PR_OPEN_EXIT2=1
+out=$(cd "$ROOT/sibfail/canon" && "$RC" 810 --claim-id issue-810-ledger-lane --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_EXIT2 GH_PR_OPEN_TSV2
+check    "unreadable sibling reread exits 3"     "$rc" "3"
+contains "names the unreadable inventory"        "$out" "an unreadable claim inventory is not an empty one"
+contains "preserves the label"                   "$out" "preserving agent-claimed"
+lacks    "never claims the label was removed"    "$out" "removed agent-claimed"
+lacks    "never reports success"                 "$out" "OK —"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "unreadable sibling reread: label never edited" || bad "unreadable sibling reread: label was edited"
+
+echo "a malformed sibling reread row preserves agent-claimed and reports INCOMPLETE"
+sib_fixture sibmal 811 issue-811-ledger-lane
+export GH_PR_OPEN_TSV2="$ROOT/sibmal/open2.tsv"
+printf 'not-enough-fields\n' > "$GH_PR_OPEN_TSV2"
+out=$(cd "$ROOT/sibmal/canon" && "$RC" 811 --claim-id issue-811-ledger-lane --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_TSV2
+check    "malformed sibling reread exits 3" "$rc" "3"
+contains "names the malformed row"          "$out" "malformed/truncated row"
+contains "preserves the label"              "$out" "preserving agent-claimed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "malformed sibling reread: label never edited" || bad "malformed sibling reread: label was edited"
+
+echo "a surviving sibling whose agent-claimed label is ABSENT is INCOMPLETE, not success"
+sib_fixture siblabel 812 issue-812-ledger-lane
+export GH_PR_OPEN_TSV2="$ROOT/siblabel/open2.tsv"
+open_row 620 issue-812-open-slice 'lib/b/**' feat/812-open-slice > "$GH_PR_OPEN_TSV2"
+export GH_LABELS="tier-b"   # agent-claimed is missing while a sibling is live
+out=$(cd "$ROOT/siblabel/canon" && "$RC" 812 --claim-id issue-812-ledger-lane --repo acme/app 2>&1); rc=$?
+export GH_LABELS="agent-claimed,tier-b"
+check    "missing label with a live sibling exits 3" "$rc" "3"
+contains "names the absent label"                    "$out" "agent-claimed is ABSENT"
+lacks    "never reports success"                     "$out" "OK —"
+
+echo "a surviving sibling with the label present is verified, not assumed"
+sib_fixture sibok 813 issue-813-ledger-lane
+export GH_PR_OPEN_TSV2="$ROOT/sibok/open2.tsv"
+open_row 621 issue-813-open-slice 'lib/b/**' feat/813-open-slice > "$GH_PR_OPEN_TSV2"
+out=$(cd "$ROOT/sibok/canon" && "$RC" 813 --claim-id issue-813-ledger-lane --repo acme/app 2>&1); rc=$?
+unset GH_PR_OPEN_TSV2
+check    "verified sibling preservation exits 0" "$rc" "0"
+contains "says the preservation was verified"    "$out" "residual claims remain (verified)"
+contains "names the surviving sibling"           "$out" "issue-813-open-slice"
+lacks    "never removes the label"               "$out" "removed agent-claimed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "verified sibling: label never edited" || bad "verified sibling: label was edited"
+table=$(git -C "$ROOT/sibok/canon" fetch -q origin && git -C "$ROOT/sibok/canon" show origin/main:docs/active-work.md)
+lacks    "target ledger row was still released" "$table" "issue-813-ledger-lane"
+
+# ---------------------------------------------------------------------------
+# #153 review P2 · a reused claim id has more than one terminal PR. The
+# id-only lookup must stay ambiguous; --pr asks the exact question instead.
+echo "#153 review · --pr binds a terminal release to one exact PR"
+TWO_GEN_SHA=$(term_fixture twogen 820 reused-id)
+export GH_PR_ALL_TSV="$ROOT/twogen/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/twogen/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/twogen/gh-state"
+export GH_LOG="$ROOT/twogen/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+unset GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS
+{
+  # Generation 1: an older, already-released PR carrying the same claim id.
+  printf '630\tissue-820-reused-id\tlib/gen1/**\t820\tfeat/820-reused-id\t%s\thttps://github.com/acme/app/pull/630\tMERGED\tfalse\t%s\tacme/app\t2026-07-01T00:00:00Z\t2026-07-02T00:00:00Z\n' \
+    "$HEX40" "$HEX40"
+  # Generation 2: the one actually being released now, at the real head SHA.
+  printf '631\tissue-820-reused-id\tlib/gen2/**\t820\tfeat/820-reused-id\t%s\thttps://github.com/acme/app/pull/631\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+    "$TWO_GEN_SHA"
+} > "$GH_PR_ALL_TSV"
+
+out=$(cd "$ROOT/twogen/canon" && "$RC" 820 --claim-id issue-820-reused-id --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "two generations without --pr still refuse" || bad "two generations exited 0: $out"
+contains "names the ambiguity"        "$out" "ambiguous"
+contains "points at --pr"             "$out" "--pr <number>"
+[[ -d "$ROOT/twogen/wt-820-reused-id" ]] &&
+  ok "ambiguous reuse: worktree untouched" || bad "ambiguous reuse: worktree removed"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "ambiguous reuse: label never edited" || bad "ambiguous reuse: label was edited"
+
+out=$(cd "$ROOT/twogen/canon" && "$RC" 820 --claim-id issue-820-reused-id --pr 631 --repo acme/app 2>&1); rc=$?
+check    "--pr resolves the reuse and releases" "$rc" "0"
+contains "used the named PR"                    "$out" "verified terminal PR-body claim #631"
+contains "reports the release"                  "$out" "OK — claim released for issue 820"
+[[ ! -d "$ROOT/twogen/wt-820-reused-id" ]] &&
+  ok "--pr release removed the worktree" || bad "--pr release left the worktree"
+[[ -z "$(git -C "$ROOT/twogen/canon" branch --list 'feat/820-reused-id')" ]] &&
+  ok "--pr release removed the local branch" || bad "--pr release left the local branch"
+
+echo "--pr never weakens an evidence check"
+# The named PR's head SHA deliberately does not match this worktree, so the
+# fixture's real HEAD is not needed here.
+term_fixture twogen2 821 wrong-pr >/dev/null
+export GH_PR_ALL_TSV="$ROOT/twogen2/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/twogen2/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/twogen2/gh-state"
+export GH_LOG="$ROOT/twogen2/gh.log"
+rm -f "$GH_STATE" "$GH_LOG"
+# The named PR carries the right claim id but the WRONG head SHA — pointing at
+# a PR does not make its evidence match this worktree.
+printf '640\tissue-821-wrong-pr\tlib/x/**\t821\tfeat/821-wrong-pr\t%s\thttps://github.com/acme/app/pull/640\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/twogen2/canon" && "$RC" 821 --claim-id issue-821-wrong-pr --pr 640 --repo acme/app 2>&1); rc=$?
+check    "--pr with mismatched head SHA exits 3" "$rc" "3"
+contains "names the head-SHA refusal"            "$out" "nor provably contained in the merged result"
+[[ -d "$ROOT/twogen2/wt-821-wrong-pr" ]] &&
+  ok "--pr mismatch: worktree untouched" || bad "--pr mismatch: worktree removed"
+
+out=$(cd "$ROOT/twogen2/canon" && "$RC" 821 --claim-id issue-821-wrong-pr --pr 999 --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "--pr naming an unknown PR refuses" || bad "--pr with an unknown PR exited 0: $out"
+contains "names the missing evidence" "$out" "no live claim"
+out=$(cd "$ROOT/twogen2/canon" && "$RC" 821 --pr 640 --repo acme/app 2>&1); rc=$?
+check    "--pr without --claim-id exits 1" "$rc" "1"
+contains "names the --claim-id requirement" "$out" "pass --claim-id too"
+out=$(cd "$ROOT/twogen2/canon" && "$RC" 821 --claim-id issue-821-wrong-pr --pr abc --repo acme/app 2>&1); rc=$?
+check    "--pr with a non-numeric value exits 1" "$rc" "1"
+contains "names the numeric requirement"         "$out" "must be a pull-request number"
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"

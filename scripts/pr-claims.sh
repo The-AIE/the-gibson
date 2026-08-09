@@ -10,6 +10,7 @@ USAGE
   pr-claims.sh list <owner/repo>
   pr-claims.sh find <owner/repo> <claim-id>
   pr-claims.sh find-terminal <owner/repo> <claim-id>
+  pr-claims.sh find-terminal-pr <owner/repo> <claim-id> <pull-request-number>
   pr-claims.sh close <owner/repo> <pull-request-number>
 
 `list`/`find` cover live (open) claims. The list output is tab-separated:
@@ -69,6 +70,20 @@ VALIDATION (#153 blocker 6)
   own state still fails the whole command, as does a gh/jq/pagination
   failure. More than one PR carrying the exact same claim marker is
   ambiguous evidence and is refused rather than resolved by guessing.
+
+  `find-terminal-pr <claim-id> <number>` answers the *bound* question a
+  caller that already knows which PR it is releasing should ask: "is PR
+  #<number> terminal evidence for exactly this claim id?". It selects on the
+  exact claim marker AND the exact PR number, then applies every check
+  find-terminal applies, unchanged. It exists because a claim id may legally
+  be reused after its first PR reached a terminal state (a released claim id
+  is free again), which makes the *global* id lookup permanently ambiguous
+  from the second generation onward while the caller's own question —
+  "release the claim on the PR I just closed" — stays perfectly unambiguous.
+  Binding to the known number is therefore the fix; weakening find-terminal's
+  ambiguity refusal is not. A number that is OPEN, missing, carries some
+  other claim id, or fails any evidence check yields no row (or a nonzero
+  exit) exactly as find-terminal would.
 
 LEGACY TERMINAL-CLAIM SCHEMA (#153 follow-up, find-terminal only)
   Real claims merged before the machine markers existed carry the claim
@@ -219,8 +234,18 @@ list_claims() {
 # shape check in the find-terminal case below: it is interpolated straight
 # into the jq program (gh's --jq takes no --arg) and compared with jq's `==`
 # via index(), so it is an exact string match, never a pattern.
+#
+# $2 (optional) narrows to the single PR with that exact number — the bound
+# find-terminal-pr lookup. It must already have passed the ^[0-9]+$ shape
+# check below, since it too is interpolated into the jq program. Narrowing
+# changes only WHICH PRs are inspected; every validation below still applies
+# in full to the one that matches.
 list_terminal_candidates() {
-  local want="$1"
+  local want="$1" num="${2:-}"
+  local num_filter=""
+  if [[ -n "$num" ]]; then
+    num_filter="| select(.number == $num)"
+  fi
   gh api graphql --paginate \
     -f query='
       query($owner: String!, $name: String!, $endCursor: String) {
@@ -246,6 +271,7 @@ list_terminal_candidates() {
     --jq '
       .data.repository.pullRequests.nodes[]
       | select(.state != "OPEN")
+      '"$num_filter"'
       | (.body // "") as $body
       | ($body | split("\n") | map(select(startswith("- Active-work claim: ")))) as $claimLines
       | ($claimLines | map(sub("^- Active-work claim: "; ""))) as $claimIds
@@ -377,31 +403,55 @@ list_terminal_candidates() {
 case "$COMMAND" in
   list)
     [[ $# -eq 0 ]] || { usage >&2; exit 2; }
-    list_claims
+    # Buffered, never streamed: `gh api graphql --paginate` emits page 1
+    # before it ever discovers that page 2 failed, so streaming would hand a
+    # caller a partial inventory on stdout alongside a nonzero exit. A
+    # truncated inventory is exactly as dangerous as an unreadable one — emit
+    # all pages or none.
+    rows=$(list_claims) || exit 1
+    [[ -z "$rows" ]] || printf '%s\n' "$rows"
     ;;
   find)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
     claim_id="$1"
-    list_claims | awk -F '\t' -v want="$claim_id" '$2 == want { print; found=1 } END { exit !found }'
+    rows=$(list_claims) || exit 1
+    printf '%s\n' "$rows" | awk -F '\t' -v want="$claim_id" '$2 == want { print; found=1 } END { exit !found }'
     ;;
-  find-terminal)
-    [[ $# -eq 1 ]] || { usage >&2; exit 2; }
-    claim_id="$1"
+  find-terminal|find-terminal-pr)
+    if [[ "$COMMAND" == "find-terminal" ]]; then
+      [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+      claim_id="$1"
+      pr_number=""
+    else
+      [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+      claim_id="$1"
+      pr_number="$2"
+      # Interpolated into the jq program below (gh's --jq takes no --arg),
+      # exactly like the claim id — prove it is a bare decimal first.
+      [[ "$pr_number" =~ ^[0-9]+$ ]] || {
+        echo "pr-claims.sh: ERROR: find-terminal-pr needs a numeric pull-request number, got '$pr_number'" >&2
+        exit 2
+      }
+    fi
     # find-terminal takes a *literal exact* claim id, never a pattern: the
     # value is interpolated into the jq program (gh's --jq has no --arg) and
     # drives candidate selection there. Prove it is free of quotes,
     # backslashes, newlines, and regex/glob metacharacters before it can
     # reach jq at all.
     [[ "$claim_id" =~ ^issue-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || {
-      echo "pr-claims.sh: ERROR: find-terminal needs a literal exact claim id (issue-<...>), got '$claim_id'" >&2
+      echo "pr-claims.sh: ERROR: $COMMAND needs a literal exact claim id (issue-<...>), got '$claim_id'" >&2
       exit 2
     }
-    terminal_rows=$(list_terminal_candidates "$claim_id") || exit 1
+    terminal_rows=$(list_terminal_candidates "$claim_id" "$pr_number") || exit 1
     # grep -c (not wc -l): command substitution stripped the trailing newline,
     # so wc -l would undercount a single-row result to 0.
     terminal_count=$(printf '%s' "$terminal_rows" | grep -c . || true)
     if [[ "$terminal_count" -gt 1 ]]; then
-      echo "pr-claims.sh: ERROR: ambiguous terminal PR-body evidence for claim id '$claim_id' on $REPO — $terminal_count terminal PRs carry that exact claim marker; resolve by hand" >&2
+      if [[ -n "$pr_number" ]]; then
+        echo "pr-claims.sh: ERROR: $terminal_count terminal rows came back for the single PR #$pr_number on $REPO — impossible evidence; refuse" >&2
+      else
+        echo "pr-claims.sh: ERROR: ambiguous terminal PR-body evidence for claim id '$claim_id' on $REPO — $terminal_count terminal PRs carry that exact claim marker; resolve by hand (or ask about one exact PR with 'find-terminal-pr $REPO $claim_id <number>')" >&2
+      fi
       exit 1
     fi
     if [[ "$terminal_count" -eq 1 ]]; then
@@ -414,6 +464,13 @@ case "$COMMAND" in
         echo "pr-claims.sh: ERROR: terminal candidate row carries claim id '$emitted_id', not the requested '$claim_id' — refuse" >&2
         exit 1
       }
+      if [[ -n "$pr_number" ]]; then
+        emitted_num=$(cut -f1 <<<"$terminal_rows")
+        [[ "$emitted_num" == "$pr_number" ]] || {
+          echo "pr-claims.sh: ERROR: bound terminal lookup asked for PR #$pr_number but the row is PR #${emitted_num:-?} — refuse" >&2
+          exit 1
+        }
+      fi
       printf '%s\n' "$terminal_rows"
     fi
     ;;

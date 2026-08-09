@@ -22,12 +22,29 @@
  * USAGE
  *   node scripts/scope-overlap.mjs --scope 'app/api/**' [--scope 'lib/x.ts'] \
  *     [--repo-path PATH] [--base main|master] [--slice] [--claim-id ID] \
- *     [--json]
+ *     [--admit-pr N] [--json]
  *   node scripts/scope-overlap.mjs --help
+ *
+ * ADMISSION MODE (--admit-pr N, #153 review P1)
+ *   The pre-create check is inherently a TOCTOU read: two lanes claiming
+ *   different issues with overlapping scope can both read an inventory that
+ *   does not yet contain the other, both pass, and both survive. --admit-pr
+ *   runs the SAME overlap check *after* this lane's claim PR exists, and
+ *   decides admission deterministically:
+ *     - this lane's own claim (--claim-id on PR #N) must be visible in the
+ *       authoritative inventory, or the answer is refuse (fail closed: an
+ *       inventory that cannot see us cannot be used to admit us);
+ *     - an overlapping live PR-body claim on a LOWER PR number wins — PR
+ *       numbers are assigned by GitHub, unique and monotonic, so both racers
+ *       compute the same winner from the same evidence, with no lock, no
+ *       shared file, and nothing left behind if a lane dies;
+ *     - an overlapping claim on a HIGHER PR number yields to us (that lane
+ *       refuses itself on its own admission pass);
+ *     - an overlapping ledger claim always wins (it is not part of this race).
  *
  * EXIT
  *   0  no overlap (or empty proposed scope with no live claims)
- *   1  overlap / fetch failure / unreadable ledger
+ *   1  overlap / fetch failure / unreadable ledger / admission refused
  *   2  usage
  */
 
@@ -74,6 +91,10 @@ FLAGS
   --issue N       issue number (for same-issue detection with --slice)
   --repo O/N      GitHub owner/name — also checks live open PR-body claims
                   (#153). Omit to check the ledger only (legacy behavior).
+  --admit-pr N    post-create admission for this lane's own claim PR #N:
+                  requires --repo and --claim-id, requires this claim to be
+                  visible in the live inventory, and lets only LOWER-numbered
+                  overlapping PR claims refuse it (deterministic race winner).
   --json          machine-readable result
 `);
 }
@@ -94,6 +115,7 @@ function parseArgs(a) {
     issue: null,
     json: false,
     repo: null,
+    admitPr: null,
   };
   for (let i = 0; i < a.length; i++) {
     const x = a[i];
@@ -107,6 +129,7 @@ function parseArgs(a) {
     else if (x === "--claim-id") out.claimId = a[++i];
     else if (x === "--issue") out.issue = String(a[++i] || "");
     else if (x === "--repo") out.repo = a[++i];
+    else if (x === "--admit-pr") out.admitPr = String(a[++i] || "");
     else if (x === "--json") out.json = true;
     else dieUsage(`unknown argument: ${x}`);
   }
@@ -124,6 +147,14 @@ if (!opt.scopes.length) dieUsage("at least one --scope is required");
 // never silently ignored (#153 AC2).
 if (opt.repo != null && !/^[^\s/]+\/[^\s/]+$/.test(opt.repo)) {
   dieUsage(`--repo must be 'owner/name', got '${opt.repo}'`);
+}
+if (opt.admitPr != null) {
+  if (!/^[0-9]+$/.test(opt.admitPr)) {
+    dieUsage(`--admit-pr must be a pull-request number, got '${opt.admitPr}'`);
+  }
+  if (!opt.repo) dieUsage("--admit-pr requires --repo owner/name");
+  if (!opt.claimId) dieUsage("--admit-pr requires --claim-id");
+  opt.admitPr = Number(opt.admitPr);
 }
 
 function git(args, { allowFail = false } = {}) {
@@ -348,14 +379,36 @@ function loadPrClaims() {
     seen.set(id, number);
     const scope = scopeStr.trim().split(/\s+/).filter(Boolean);
     const issueM = id.match(/^issue-(\d+)-/);
-    claims.push({ id, scope, issue: issueM ? issueM[1] : null, source: "pr" });
+    claims.push({
+      id,
+      scope,
+      issue: issueM ? issueM[1] : null,
+      source: "pr",
+      number: Number(number),
+    });
   }
   return claims;
 }
 
-const live = [...loadClaims(), ...loadPrClaims()].filter(
-  (c) => c.id !== opt.claimId
-);
+const prClaims = loadPrClaims();
+
+// Admission mode is only meaningful against an inventory that can already see
+// this lane's own claim. An inventory that cannot see us is not evidence that
+// we won anything — refuse rather than admit on a view that is missing the
+// very row the decision is about (#153 review P1).
+if (opt.admitPr != null) {
+  const self = prClaims.find(
+    (c) => c.id === opt.claimId && c.number === opt.admitPr
+  );
+  if (!self) {
+    fail(
+      `admission: this lane's own claim '${opt.claimId}' is not visible on PR #${opt.admitPr} in the live inventory for ${opt.repo} — refuse (an inventory that cannot see this claim cannot admit it)`,
+      { admitPr: opt.admitPr, claimId: opt.claimId }
+    );
+  }
+}
+
+const live = [...loadClaims(), ...prClaims].filter((c) => c.id !== opt.claimId);
 
 /** Normalize a scope token for comparison. */
 function stem(token) {
@@ -403,6 +456,7 @@ function scopesOverlap(proposed, existing) {
 }
 
 const collisions = [];
+const yielded = [];
 for (const c of live) {
   // same-issue without --slice is claim.sh's job (L-028); we still report
   // scope overlap. With --slice, same-issue is allowed only when disjoint.
@@ -416,6 +470,20 @@ for (const c of live) {
   ) {
     // slice on same issue still requires disjoint scopes — hits mean refuse
   }
+  // Admission tie-break (#153 review P1): a *later* PR number is a lane that
+  // entered the race after us, so it loses on its own admission pass and we
+  // must not refuse ourselves over it — otherwise both racers abort and the
+  // work is simply lost. Anything else (a lower PR number, or a ledger claim
+  // that was never part of this race) beats us.
+  if (
+    opt.admitPr != null &&
+    c.source === "pr" &&
+    Number.isInteger(c.number) &&
+    c.number > opt.admitPr
+  ) {
+    yielded.push({ claim: c, hits });
+    continue;
+  }
   collisions.push({ claim: c, hits });
 }
 
@@ -424,6 +492,7 @@ if (collisions.length) {
     claimId: col.claim.id,
     source: col.claim.source,
     scope: col.claim.scope,
+    prNumber: col.claim.number ?? null,
     hits: col.hits,
   }));
   if (opt.json) {
@@ -431,7 +500,8 @@ if (collisions.length) {
       JSON.stringify(
         {
           ok: false,
-          error: "scope overlap",
+          error: opt.admitPr != null ? "admission refused (scope overlap)" : "scope overlap",
+          admitPr: opt.admitPr,
           collisions: details,
         },
         null,
@@ -443,12 +513,41 @@ if (collisions.length) {
       const hitStr = col.hits
         .map((h) => `${h.proposed} ↔ ${h.existing}`)
         .join(", ");
+      const who =
+        col.claim.source === "pr" && Number.isInteger(col.claim.number)
+          ? `${col.claim.id} (PR #${col.claim.number})`
+          : col.claim.id;
       console.error(
-        `scope-overlap: ERROR: proposed scope overlaps live claim ${col.claim.id} (${col.claim.source}) scope=[${col.claim.scope.join(" ")}] collisions: ${hitStr}`
+        `scope-overlap: ERROR: ${
+          opt.admitPr != null
+            ? `admission refused for PR #${opt.admitPr} — it`
+            : "proposed scope"
+        } overlaps live claim ${who} (${col.claim.source}) scope=[${col.claim.scope.join(" ")}] collisions: ${hitStr}`
       );
     }
   }
   process.exit(1);
 }
 
-ok({ liveClaims: live.length, proposed: opt.scopes, ref: ref.trim() });
+if (opt.admitPr != null && yielded.length && !opt.json) {
+  for (const y of yielded) {
+    console.log(
+      `scope-overlap: later overlapping claim ${y.claim.id} (PR #${y.claim.number}) yields to PR #${opt.admitPr}`
+    );
+  }
+}
+
+ok({
+  liveClaims: live.length,
+  proposed: opt.scopes,
+  ref: ref.trim(),
+  ...(opt.admitPr != null
+    ? {
+        admitPr: opt.admitPr,
+        yielded: yielded.map((y) => ({
+          claimId: y.claim.id,
+          prNumber: y.claim.number,
+        })),
+      }
+    : {}),
+});
