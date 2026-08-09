@@ -195,6 +195,46 @@ assert_safe_abs_path() {
   esac
 }
 
+# Validate one runner token (basename or safe absolute executable path).
+# Shared by parse_lane_line (route tokens), select_lane_runner (every selection
+# candidate including global RUNNER when field 5 is omitted), and already-running
+# revalidation so persisted selected_runner accepts the same shapes initial
+# selection can pick. Fail closed on shell metacharacters/control chars,
+# relative multipath, and real '..' path segments. Never eval/source/interpolate
+# the token as shell.
+assert_safe_runner_token() {
+  local tok="$1" label="${2:-runner token}"
+  [[ -n "$tok" ]] || die "$label is empty"
+  # Hostile shell/control — note '/' is intentionally NOT listed: absolute
+  # executable paths are a supported token form (see check_runner_readiness).
+  # Comma is still hostile here: this validates a single token, not a route.
+  case "$tok" in
+    *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\,]*|*$'\n'*|*$'\r'*|*$'\t'*)
+      die "$label is hostile (shell/control chars): $tok"
+      ;;
+  esac
+  if [[ ! "$tok" =~ ^[A-Za-z0-9._/@+=:-]+$ ]]; then
+    die "$label has disallowed characters: $tok"
+  fi
+  # Path-shaped tokens must be absolute and free of real '..' segments
+  # (same segment rules as assert_safe_abs_path). Relative multipath
+  # (./x, foo/bar) is not a supported selection form. Safe basenames/paths
+  # containing two consecutive dots that are not a segment (e.g. my..runner)
+  # remain allowed.
+  case "$tok" in
+    */*)
+      if [[ "$tok" != /* ]]; then
+        die "$label is a malformed relative path: $tok"
+      fi
+      case "$tok" in
+        *'/../'*|*/..|'/..'*)
+          die "$label has disallowed '..' path segments: $tok"
+          ;;
+      esac
+      ;;
+  esac
+}
+
 origin_slug_from_url() {
   # Mirror dogfood-prep / loop.sh normalization (owner/repo only).
   local url="${1:-}" norm
@@ -441,14 +481,8 @@ parse_lane_line() {
       set +f
       tok=$(printf '%s' "$tok" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       [[ -n "$tok" ]] || die "lane $id: empty token in runner route: $runner_r"
-      case "$tok" in
-        *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\,/]*|*$'\n'*|*$'\r'*|*$'\t'*)
-          die "lane $id: hostile runner route token: $tok"
-          ;;
-      esac
-      if [[ ! "$tok" =~ ^[A-Za-z0-9._/@+=:-]+$ ]]; then
-        die "lane $id: runner route token has disallowed characters: $tok"
-      fi
+      # Basename or safe absolute path — same shape as persisted revalidation.
+      assert_safe_runner_token "$tok" "lane $id: runner route token"
       case ",$seen_toks," in
         *",$tok,"*) die "lane $id: duplicate runner in route: $tok" ;;
       esac
@@ -2169,8 +2203,10 @@ check_runner_readiness() {
   fi
   if [[ "$token" == /* ]]; then
     # Absolute path tokens only — never resolve relative/hostile paths.
+    # Match real '..' segments (same rules as assert_safe_runner_token /
+    # assert_safe_abs_path); do not reject safe names like my..runner.
     case "$token" in
-      *..*) printf 'not_found\n'; return 1 ;;
+      *'/../'*|*/..|'/..'*) printf 'not_found\n'; return 1 ;;
     esac
     if [[ ! -x "$token" || -d "$token" ]]; then
       printf 'not_found\n'
@@ -2293,6 +2329,11 @@ select_lane_runner() {
     set +f
     tok=$(printf '%s' "$tok" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     [[ -n "$tok" ]] || continue
+    # Every selection candidate — including global RUNNER when field 5 is
+    # omitted — must pass the same token shape rules as parse/persist paths.
+    # Without this, a malformed global runner= can bypass parse_lane_line and
+    # only fail (or misbehave) later in readiness.
+    assert_safe_runner_token "$tok" "lane $id: selection candidate"
     class=$(check_runner_readiness "$tok") || true
     case "$class" in
       ready)
@@ -2363,19 +2404,16 @@ select_lane_runner() {
 
 # Validate a reloaded/persisted selected runner token (already-running path).
 # Identity revalidation only — never re-run readiness against a live process.
-# Nonempty + safe inert token + three-role vs *current* reviewer/releaser.
+# Nonempty + same safe token shapes as initial selection (basename or absolute
+# path) + three-role vs *current* reviewer/releaser.
 validate_persisted_selected_runner() {
   local id="$1" selected="$2" context="${3:-already-running}"
   [[ -n "$selected" && "$selected" != "?" ]] \
     || die "lane $id: $context selected_runner is empty/missing — refuse to keep a lane whose builder identity cannot be revalidated"
-  case "$selected" in
-    *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\,/]*|*$'\n'*|*$'\r'*|*$'\t'*)
-      die "lane $id: $context selected_runner is hostile (shell/control chars): $selected"
-      ;;
-  esac
-  if [[ ! "$selected" =~ ^[A-Za-z0-9._/@+=:-]+$ ]]; then
-    die "lane $id: $context selected_runner has disallowed characters: $selected"
-  fi
+  # Must accept every token form initial selection can persist (incl. absolute
+  # executable paths from global runner= or a route token). Fail closed on
+  # shell metacharacters, control chars, relative multipath, and '..'.
+  assert_safe_runner_token "$selected" "lane $id: $context selected_runner"
   # Changed REVIEWER_CMD / RELEASE_CMD must not let a live builder grade/release
   # its own work — re-check provider separation against current config.
   if builder_conflicts_three_role "$selected"; then
@@ -2479,6 +2517,10 @@ preflight_for_start() {
   # do not role-check it (builder separation is against actual selected runners).
   if any_lane_uses_global_runner; then
     [[ -n "${RUNNER:-}" ]] || die "runner is empty — needed as default for lane(s) that omit the ordered-route field"
+    # Same token shapes as select_lane_runner / persist revalidation — fail
+    # closed before PATH/lookup so a malformed global default cannot bypass
+    # parse_lane_line (field 5 omitted) and only fail as a vague not-found.
+    assert_safe_runner_token "$RUNNER" "global runner (default for lanes omitting ordered route)"
     command -v "$RUNNER" >/dev/null 2>&1 || die "runner '$RUNNER' not found on PATH (used as default for lane(s) without an explicit route)"
   fi
   command -v "$GH_BIN" >/dev/null 2>&1 || die "gh binary '$GH_BIN' not found"

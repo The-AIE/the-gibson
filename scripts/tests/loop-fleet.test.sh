@@ -5996,6 +5996,512 @@ wait "$PERSIST_MISSING_PID" 2>/dev/null || true
 rm -f "$ROOT/logs/docs.pid"
 
 # ---------------------------------------------------------------------------
+# #141 repair: absolute-path selected runner persists + idempotent revalidation
+# ---------------------------------------------------------------------------
+echo "#141 absolute-path selected runner start/persist/revalidate"
+
+# Absolute executable path is a supported initial-selection form (global runner=
+# and check_runner_readiness /* branch). Persisted revalidation must accept it
+# so a healthy repeated --start is idempotent (no relaunch, no readiness re-probe).
+reset_calls
+ABS_RUN_DIR="$ROOT/abs-runners"
+rm -rf "$ABS_RUN_DIR"
+mkdir -p "$ABS_RUN_DIR"
+ABS_RUNNER="$ABS_RUN_DIR/abs-path-builder"
+cat > "$ABS_RUNNER" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$ABS_RUNNER"
+# Prove path is absolute and contains '/'.
+case "$ABS_RUNNER" in
+  /*) ok "abs-path fixture is absolute" ;;
+  *) bad "abs-path fixture not absolute: $ABS_RUNNER" ;;
+esac
+FLEET_READINESS_DIR="$ROOT/readiness-abs-path"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+# Probe logs every invocation — repeated --start must not call it (identity only).
+cat > "$FLEET_READINESS_DIR/abs-path-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-abs-path.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/abs-path-builder"
+TARGET=$(setup_target_repo r141-abs-path acme/widget)
+PROF="$ROOT/profiles/r141-abs-path.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-abs-path" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=$ABS_RUNNER" \
+  "lane=docs|545|docs/**|absolute path global default"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-abs-path.log"
+out=$(run_fleet --start 2>&1) || { bad "abs-path initial start failed: $out"; }
+grep -Fq "LAUNCH runner=$ABS_RUNNER" "$CALLS/launches.log" \
+  && ok "abs-path initial launched absolute selected runner" \
+  || bad "abs-path initial launch: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=$ABS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "abs-path persisted absolute selected_runner" \
+  || bad "abs-path status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -qxF "requested_primary=$ABS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "abs-path persisted absolute requested_primary" \
+  || bad "abs-path requested primary lost"
+# First start should have probed readiness once (selection path).
+if [[ -s "$CALLS/ready-probe-abs-path.log" ]]; then
+  ok "abs-path initial selection ran readiness probe"
+else
+  bad "abs-path initial selection skipped readiness probe"
+fi
+# Plant healthy running lane so second --start takes already-running path.
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 545
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for absolute-path selected_runner revalidation
+notes: >
+  abs path reval
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+ABS_PATH_PID=$!
+printf '%s\n' "$ABS_PATH_PID" > "$ROOT/logs/docs.pid"
+pid_check=$(run_fleet --status 2>&1) || true
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "abs-path planted healthy running lane" \
+  || bad "abs-path not running: $pid_check"
+SEL_BEFORE=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-abs-path.log"
+out=$(run_fleet --start 2>&1) || { bad "abs-path repeated --start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "abs-path repeated --start launched zero (no relaunch)" \
+  || bad "abs-path repeated relaunched: $lc out=$out"
+if [[ -s "$CALLS/ready-probe-abs-path.log" ]]; then
+  bad "abs-path repeated --start re-probed readiness: $(cat "$CALLS/ready-probe-abs-path.log")"
+else
+  ok "abs-path repeated --start did not re-run readiness"
+fi
+SEL_AFTER=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
+[[ "$SEL_BEFORE" == "$SEL_AFTER" ]] \
+  && ok "abs-path repeated --start preserved absolute selected_runner" \
+  || bad "abs-path selection changed: $SEL_BEFORE -> $SEL_AFTER"
+# Live process left untouched.
+if kill -0 "$ABS_PATH_PID" 2>/dev/null; then
+  ok "abs-path left live process untouched"
+else
+  bad "abs-path killed live process pid=$ABS_PATH_PID"
+fi
+kill "$ABS_PATH_PID" 2>/dev/null || true
+wait "$ABS_PATH_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# Absolute path also accepted as field-5 route token (parse + readiness).
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-abs-route"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/abs-path-builder" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/abs-path-builder"
+TARGET=$(setup_target_repo r141-abs-route acme/widget)
+PROF="$ROOT/profiles/r141-abs-route.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-abs-route" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|546|docs/**|absolute path route token|$ABS_RUNNER"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "abs-route field-5 start failed: $out"; }
+grep -Fq "LAUNCH runner=$ABS_RUNNER" "$CALLS/launches.log" \
+  && ok "abs-route field-5 selected absolute path token" \
+  || bad "abs-route field-5: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=$ABS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "abs-route field-5 persisted absolute selected_runner" \
+  || bad "abs-route status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+
+# Hostile/malformed path tokens fail closed (no shell execution, no unsafe accept).
+echo "#141 hostile/malformed runner path tokens fail closed"
+reset_calls
+unset FLEET_READINESS_DIR || true
+MARKER="$CALLS/hostile-path-exec.marker"
+rm -f "$MARKER"
+TARGET=$(setup_target_repo r141-hostile-path acme/widget)
+
+# Relative multipath in route — not a supported selection form.
+PROF="$ROOT/profiles/r141-rel-path.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-rel-path" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|547|docs/**|relative multipath|rel/path/builder"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "relative multipath route should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed relative path|hostile|disallowed|runner route' \
+    && ok "relative multipath route token refused" \
+    || bad "unclear relative multipath fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "relative multipath launched zero" || bad "rel multipath launched $lc"
+
+# '..' segment in absolute-looking route token.
+PROF="$ROOT/profiles/r141-dotdot-path.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-dotdot-path" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|548|docs/**|dotdot path|/tmp/../evil-builder"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "dotdot path route should fail: $out" || {
+  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|hostile|disallowed|runner route" \
+    && ok "dotdot path route token refused" \
+    || bad "unclear dotdot path fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "dotdot path launched zero" || bad "dotdot path launched $lc"
+
+# Shell-metachar absolute-looking token must not execute a marker (parse refuse).
+PROF="$ROOT/profiles/r141-shell-abs.profile"
+{
+  echo "version=1"
+  echo "name=r141-shell-abs"
+  echo "repo=$TARGET"
+  echo "slug=acme/widget"
+  echo "gibson=$ROOT/gibson"
+  echo "fleet_dir=$ROOT/fleet"
+  echo "log_dir=$ROOT/logs"
+  echo "runner=fake-runner"
+  # backtick injection must be rejected as hostile data — never executed.
+  printf 'lane=docs|549|docs/**|shell abs|`touch %s`\n' "$MARKER"
+} > "$PROF"
+export FLEET_PROFILE="$PROF"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "shell-metachar abs route should fail: $out" || {
+  echo "$out" | grep -qiE 'hostile|shell|disallowed|safe inert|runner route' \
+    && ok "shell-metachar route token refused" \
+    || bad "unclear shell-metachar fail: $out"
+}
+[[ ! -e "$MARKER" ]] && ok "shell-metachar route did not execute marker" \
+  || bad "shell-metachar route executed marker (injection)"
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "shell-metachar route launched zero" || bad "shell-metachar launched $lc"
+
+# Persisted hostile selected_runner on already-running fails closed (no re-probe).
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-hostile"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/safe-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-persist-hostile.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/safe-builder"
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-persist-hostile acme/widget)
+PROF="$ROOT/profiles/r141-persist-hostile.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-hostile" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|550|docs/**|persist hostile selected|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-hostile initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 550
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for hostile persisted selected_runner
+notes: >
+  hostile plant
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_HOSTILE_PID=$!
+printf '%s\n' "$PERSIST_HOSTILE_PID" > "$ROOT/logs/docs.pid"
+# Plant shell-hostile selected_runner (would have been rejected at selection,
+# but status files can be hand-edited or corrupted).
+{
+  echo "requested_primary=safe-builder"
+  echo 'selected_runner=evil$(reboot)'
+  echo "selected_provider=evil"
+  echo "selected_pool=provider-evil"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-hostile.log"
+out=$(run_fleet --start 2>&1) && bad "persist-hostile selected should fail: $out" || {
+  echo "$out" | grep -qiE 'hostile|shell/control|disallowed|selected_runner' \
+    && ok "persist-hostile selected_runner refused" \
+    || bad "unclear persist-hostile fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-hostile launched zero" || bad "persist-hostile launched $lc"
+if [[ -s "$CALLS/ready-probe-persist-hostile.log" ]]; then
+  bad "persist-hostile re-probed readiness: $(cat "$CALLS/ready-probe-persist-hostile.log")"
+else
+  ok "persist-hostile did not re-run readiness"
+fi
+
+# Plant relative multipath as persisted selected_runner.
+{
+  echo "requested_primary=safe-builder"
+  echo "selected_runner=rel/path/builder"
+  echo "selected_provider=rel"
+  echo "selected_pool=provider-rel"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-hostile.log"
+out=$(run_fleet --start 2>&1) && bad "persist-relpath selected should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed relative path|hostile|disallowed|selected_runner' \
+    && ok "persist-relpath selected_runner refused" \
+    || bad "unclear persist-relpath fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-relpath launched zero" || bad "persist-relpath launched $lc"
+
+# Plant '..' absolute path as persisted selected_runner.
+{
+  echo "requested_primary=safe-builder"
+  echo "selected_runner=/tmp/../evil-builder"
+  echo "selected_provider=evil"
+  echo "selected_pool=provider-evil"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-hostile.log"
+out=$(run_fleet --start 2>&1) && bad "persist-dotdot selected should fail: $out" || {
+  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|hostile|disallowed|selected_runner" \
+    && ok "persist-dotdot selected_runner refused" \
+    || bad "unclear persist-dotdot fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-dotdot launched zero" || bad "persist-dotdot launched $lc"
+if kill -0 "$PERSIST_HOSTILE_PID" 2>/dev/null; then
+  ok "persist-hostile left live process untouched"
+else
+  bad "persist-hostile killed live process"
+fi
+kill "$PERSIST_HOSTILE_PID" 2>/dev/null || true
+wait "$PERSIST_HOSTILE_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# Global RUNNER (field 5 omitted) must hit the same token validator inside
+# select_lane_runner — parse_lane_line never sees the global default.
+echo "#141 global RUNNER malformed path refused at selection"
+reset_calls
+unset FLEET_READINESS_DIR || true
+MARKER="$CALLS/global-malformed-exec.marker"
+rm -f "$MARKER"
+TARGET=$(setup_target_repo r141-global-malform acme/widget)
+PROF="$ROOT/profiles/r141-global-malform.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-global-malform" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=rel/path/global-builder" \
+  "lane=docs|551|docs/**|global default only — no field 5"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "global malformed RUNNER should fail: $out" || {
+  echo "$out" | grep -qiE 'malformed relative path|selection candidate|global runner|hostile|disallowed' \
+    && ok "global malformed RUNNER refused at selection" \
+    || bad "unclear global malformed fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "global malformed launched zero" || bad "global malformed launched $lc"
+[[ ! -e "$MARKER" ]] && ok "global malformed did not execute marker" \
+  || bad "global malformed executed marker"
+
+# Global RUNNER with real '..' segment (field 5 omitted).
+reset_calls
+TARGET=$(setup_target_repo r141-global-dotdot acme/widget)
+PROF="$ROOT/profiles/r141-global-dotdot.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-global-dotdot" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=/tmp/../evil-global" \
+  "lane=docs|552|docs/**|global absolute with .. segment"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "global dotdot RUNNER should fail: $out" || {
+  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|selection candidate|global runner|hostile|disallowed" \
+    && ok "global dotdot RUNNER refused at selection" \
+    || bad "unclear global dotdot fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "global dotdot launched zero" || bad "global dotdot launched $lc"
+
+# Safe consecutive dots in a basename (my..runner) are NOT path segments —
+# must be accepted (not confused with /../ traversal).
+echo "#141 safe basename my..runner is not a path segment"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-dotdot-safe"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/my..runner" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/my..runner"
+ensure_runner_bin "my..runner"
+TARGET=$(setup_target_repo r141-dotdot-safe acme/widget)
+PROF="$ROOT/profiles/r141-dotdot-safe.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-dotdot-safe" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|553|docs/**|safe consecutive dots basename|my..runner"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "safe my..runner start failed: $out"; }
+grep -Fq "LAUNCH runner=my..runner" "$CALLS/launches.log" \
+  && ok "safe my..runner selected (not treated as path segment)" \
+  || bad "safe my..runner: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=my..runner" "$ROOT/logs/docs.runner-status" \
+  && ok "safe my..runner persisted" \
+  || bad "safe my..runner status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+
+# Absolute path whose basename contains consecutive dots (not a .. segment).
+reset_calls
+ABS_DOTS_DIR="$ROOT/abs-dots-runners"
+rm -rf "$ABS_DOTS_DIR"
+mkdir -p "$ABS_DOTS_DIR"
+ABS_DOTS_RUNNER="$ABS_DOTS_DIR/my..runner"
+cat > "$ABS_DOTS_RUNNER" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$ABS_DOTS_RUNNER"
+case "$ABS_DOTS_RUNNER" in
+  /*) ;;
+  *) bad "abs-dots fixture not absolute: $ABS_DOTS_RUNNER" ;;
+esac
+FLEET_READINESS_DIR="$ROOT/readiness-abs-dots"
+rm -rf "$FLEET_READINESS_DIR"
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/my..runner" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/my..runner"
+TARGET=$(setup_target_repo r141-abs-dots acme/widget)
+PROF="$ROOT/profiles/r141-abs-dots.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-abs-dots" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=$ABS_DOTS_RUNNER" \
+  "lane=docs|554|docs/**|absolute path with my..runner basename"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "abs my..runner start failed: $out"; }
+grep -Fq "LAUNCH runner=$ABS_DOTS_RUNNER" "$CALLS/launches.log" \
+  && ok "absolute path with my..runner basename selected" \
+  || bad "abs my..runner: $(cat "$CALLS/launches.log")"
+grep -qxF "selected_runner=$ABS_DOTS_RUNNER" "$ROOT/logs/docs.runner-status" \
+  && ok "absolute my..runner path persisted" \
+  || bad "abs my..runner status: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
 # #141 repair: global RUNNER only defaults for lanes omitting field 5
 # ---------------------------------------------------------------------------
 echo "#141 global RUNNER only for omitted-route lanes"
