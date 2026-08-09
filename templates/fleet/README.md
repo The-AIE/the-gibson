@@ -65,23 +65,43 @@ lane=ID|QUEUE|SCOPE|INTENT|PRIMARY,FALLBACK1,FALLBACK2
 
 Before any new lane launch the driver:
 
-1. Builds each lane's declared route (5th field, or global `runner`).
+1. Builds each lane's declared route (5th field, or global `runner` **only when
+   field 5 is omitted**). Global `runner` / `RUNNER` is not required when every
+   lane declares an explicit ordered route.
 2. Preflights each configured CLI with a **bounded, noninteractive,
    credential-safe** readiness probe (process-group wall timeout; hung checks
    kill only the exact captured group). Probe stdout/stderr is discarded —
    never logged (no tokens, keys, env, or raw credential material).
-3. Selects the **first ready** runner in declared order. Fail over **only** on
+3. **Auth / usability policy:** only a *positive* provider-specific result may
+   select a runner. Codex uses `login status`, Claude `auth status`, Hermes
+   `status`, Grok `models` — exit 0 only. Auth/status/models nonzero is
+   `auth_fail` and **never** falls back to `--version` (a logged-out but
+   installed CLI is not ready; Grok `--version` only proves the binary exists).
+   Probe stdout/stderr is discarded — never inspected for classification.
+   Unknown families without a stable noninteractive auth probe use one
+   bounded minimal non-mutating usability probe (`--version`). Timeout remains
+   exit **124** with process-group cleanup of the exact captured group only.
+4. Selects the **first ready** runner in declared order. Fail over **only** on
    a classified readiness failure (`not_found`, `timeout`, `not_ready`,
    `auth_fail`). Operator order is preserved (no automatic reordering).
-4. Re-checks three-role separation against the **actual selected** builder.
-   A ready candidate that collides with reviewer or release **fails closed**
-   (fallback cannot bypass Law 5).
-5. If no declared runner is ready/selectable → **fail closed, zero new
+5. Re-checks three-role separation against the **actual selected** builder
+   (not an unused global default). A ready candidate that collides with
+   reviewer or release **fails closed** (fallback cannot bypass Law 5).
+   Reviewer and release identities are validated nonempty and distinct
+   globally at preflight. On `--start` against an already-running lane, the
+   driver reloads the persisted `selected_runner`, validates it is nonempty
+   and safe, and re-checks three-role separation against the *current*
+   reviewer/releaser — identity revalidation only (no readiness re-probe).
+   A live lane with **missing** `*.runner-status` fails closed (zero new
+   launches; live process left untouched): current profile/route is not
+   evidence of which executable launched the process. Halt/restart the lane
+   or restore verified status before `--start`.
+6. If no declared runner is ready/selectable → **fail closed, zero new
    launches**, with a diagnostic naming providers only.
-6. Passes the selected runner to `loop.sh --runner`. Status shows
+7. Passes the selected runner to `loop.sh --runner`. Status shows
    requested primary, actual runner, and healthy/degraded/fallback reason
    (persisted under the profile log namespace for idempotent restart).
-7. Appends fleet-local telemetry:
+8. Appends fleet-local telemetry:
    - `gibson.fleet.runner_selection.v1` JSONL in `LOG_DIR/runner-selection.jsonl`
    - a matching `gibson.cost.v1` selection row in `LOG_DIR/cost-ledger.jsonl`
      (or `GIBSON_COST_LEDGER` when set)
@@ -90,7 +110,7 @@ Before any new lane launch the driver:
    reason, selection wall time, and issue when known. No token counts or
    dollar costs are fabricated. Selection append failure fails closed
    (fleet-required telemetry).
-8. Propagates `GIBSON_COST_JOIN_KEY`, `GIBSON_COST_POOL`,
+9. Propagates `GIBSON_COST_JOIN_KEY`, `GIBSON_COST_POOL`,
    `GIBSON_COST_PROVIDER`, `GIBSON_COST_REQUESTED_RUNNER`,
    `GIBSON_COST_FALLBACK_REASON`, `GIBSON_COST_LEDGER`, and
    `GIBSON_COST_TELEMETRY_REQUIRED=1` into each lane's `loop.sh` so later
@@ -191,7 +211,10 @@ Before any `loop.sh` start the driver checks:
 - `origin` slug matches profile `slug`
 - Canonical checkout is clean (`git status --porcelain` must succeed; a failed
   probe is **not** treated as clean)
-- Builder / reviewer / release three-role separation
+- Reviewer / release identities nonempty and distinct; global `runner` is
+  required/on-PATH **only** when a lane omits field 5. Builder separation is
+  enforced against each **actual selected** runner after readiness (an unused
+  global default is not role-checked and need not exist)
 - Open-PR inventory is parsed fail-closed (`gh pr list` via built-in
   `--template` emits strict metadata-only TSV of `number<TAB>headRefName`;
   only empty TSV output is zero-pair success; malformed output, missing

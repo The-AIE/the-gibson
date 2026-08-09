@@ -50,8 +50,10 @@ ERROR_BUDGET="${ERROR_BUDGET:-4}"
 DEADLINE_SECONDS="${DEADLINE_SECONDS:-79200}"
 
 # Three-role split, cross-vendor at every handoff:
-#   build (RUNNER) -> review (Codex/other) -> merge (Claude/third).
+#   build (per-lane selected runner, default RUNNER only when field 5 omitted)
+#   -> review (Codex/other) -> merge (Claude/third).
 # Neither the builder nor the reviewer ever merges its own/co-vendor's work.
+# Global RUNNER is not role-checked when every lane has an explicit route.
 export REVIEWER_CMD="${REVIEWER_CMD:-codex exec -s read-only -}"
 # RELEASE_CMD needs Bash + gh. Claude acceptEdits blocks Bash/gh (L-048).
 export RELEASE_CMD="${RELEASE_CMD:-claude -p --output-format text --permission-mode bypassPermissions}"
@@ -666,7 +668,11 @@ load_profile() {
 
   [[ "$ERROR_BUDGET" =~ ^[1-9][0-9]*$ ]] || die "error_budget must be a positive integer (got: $ERROR_BUDGET)"
   [[ "$DEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "deadline_seconds must be a positive integer (got: $DEADLINE_SECONDS)"
-  [[ -n "$RUNNER" ]] || die "runner is empty"
+  # Global RUNNER is only the default for lanes that omit field 5. Empty is
+  # allowed when every lane declares an explicit ordered route.
+  if any_lane_uses_global_runner; then
+    [[ -n "$RUNNER" ]] || die "runner is empty — at least one lane omits the ordered-route field"
+  fi
 
   [[ ${#LANE_IDS[@]} -ge 1 ]] || die "profile has no lane= records"
   # Fleet WIP doctrine: 1–3 lanes only. Four or more fails closed before launch.
@@ -2080,10 +2086,33 @@ redact_readiness_output() {
   fi
 }
 
+# True when at least one lane omits the ordered-route field (field 5) and
+# therefore depends on the global RUNNER default.
+any_lane_uses_global_runner() {
+  local i=0
+  while [[ $i -lt ${#LANE_IDS[@]} ]]; do
+    if [[ -z "${LANE_RUNNERS[$i]:-}" ]]; then
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Bounded, noninteractive, credential-safe readiness probe for one runner token.
 # Prints a classification on stdout: ready | not_found | timeout | not_ready | auth_fail
 # Exit 0 only when ready. Hung checks terminate only the exact captured process group.
 # Probe stdout/stderr is never logged — only the classification.
+#
+# Auth policy: only a *positive* provider-specific authentication/usability
+# result may select a runner. Auth/status probes never fall back to --version
+# on nonzero exit (that would mark a logged-out but installed CLI as ready).
+# Unsupported-command is never inferred from stderr text (output may contain
+# sensitive material and is discarded). Families without a stable noninteractive
+# auth probe use one bounded minimal non-mutating usability probe (exit 0 proves
+# the configured CLI can accept work); otherwise fail closed.
+# Grok: fixed argv `models` (bounded, non-mutating) — exit 0 only when the
+# configured account/provider can accept work. Never inspect/log models output.
 check_runner_readiness() {
   local token="$1"
   local limit="${FLEET_READINESS_TIMEOUT:-8}"
@@ -2159,38 +2188,34 @@ check_runner_readiness() {
   outf=$(mktemp "${TMPDIR:-/tmp}/fleet-ready.XXXXXX") || { printf 'not_ready\n'; return 1; }
   set +e
   # Fixed argv tables only — never eval, never interpolate profile strings into shell.
+  # Never read probe stdout/stderr for classification (discarded after exit status).
   case "$family" in
     grok)
-      run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
+      # Bounded non-mutating auth/readiness: fixed argv `models` only.
+      # Exit 0 = configured primary can accept work. Never --version (install-only).
+      # Never inspect or log models stdout/stderr.
+      run_with_wall_timeout "$limit" "$exe" models >"$outf" 2>&1
       rc=$?
       ;;
     codex)
-      # Prefer noninteractive auth status; fall back to --version if status unsupported.
+      # Positive login-status only. Nonzero (incl. logged-out) is auth_fail —
+      # never mask with a successful --version.
       run_with_wall_timeout "$limit" "$exe" login status >"$outf" 2>&1
       rc=$?
-      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
-        run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
-        rc=$?
-      fi
       ;;
     claude)
+      # Positive auth-status only. Nonzero is auth_fail — no --version fallback.
       run_with_wall_timeout "$limit" "$exe" auth status >"$outf" 2>&1
       rc=$?
-      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
-        run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
-        rc=$?
-      fi
       ;;
     hermes)
+      # Positive status only. Nonzero is auth_fail — no --version fallback.
       run_with_wall_timeout "$limit" "$exe" status >"$outf" 2>&1
       rc=$?
-      if [[ $rc -ne 0 && $rc -ne 124 ]]; then
-        run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
-        rc=$?
-      fi
       ;;
     *)
-      # Unknown / test stubs: noninteractive --version or bare exit 0.
+      # Unknown family: one bounded minimal non-mutating usability probe.
+      # Exit 0 proves the configured CLI can accept work; no auth claim.
       run_with_wall_timeout "$limit" "$exe" --version >"$outf" 2>&1
       rc=$?
       if [[ $rc -ne 0 && $rc -ne 124 ]]; then
@@ -2211,9 +2236,10 @@ check_runner_readiness() {
     printf 'ready\n'
     return 0
   fi
-  # Non-zero from auth-ish probes → auth_fail; bare version failures → not_ready.
+  # Auth-family probes (incl. Grok models): any nonzero (non-timeout) is auth_fail.
+  # Usability probes for unknown families: not_ready.
   case "$family" in
-    codex|claude|hermes)
+    grok|codex|claude|hermes)
       printf 'auth_fail\n'
       ;;
     *)
@@ -2275,7 +2301,7 @@ select_lane_runner() {
         # and fallback cannot bypass the three-role rule by skipping past a
         # ready-but-illegal candidate.
         if builder_conflicts_three_role "$tok"; then
-          die "lane $id: selected runner '$tok' collides with reviewer/release identity (provider=$(cmd_provider_id "$tok" 2>/dev/null || echo unresolved)). Fallback cannot bypass the three-role rule. route=$route tried=${tried:-none}"
+          die "lane $id: selected runner '$tok' collides with reviewer/release identity (provider=$(cmd_provider_id "$tok" 2>/dev/null || echo unresolved); REVIEWER_CMD=$REVIEWER_CMD RELEASE_CMD=$RELEASE_CMD). Builder cannot grade its own work. Fallback cannot bypass the three-role rule. route=$route tried=${tried:-none}"
         fi
         selected="$tok"
         if [[ "$tok" == "$requested" ]]; then
@@ -2335,10 +2361,36 @@ select_lane_runner() {
   info "lane $id runner: requested=$requested actual=$selected health=$health reason=$reason pool=$pool"
 }
 
+# Validate a reloaded/persisted selected runner token (already-running path).
+# Identity revalidation only — never re-run readiness against a live process.
+# Nonempty + safe inert token + three-role vs *current* reviewer/releaser.
+validate_persisted_selected_runner() {
+  local id="$1" selected="$2" context="${3:-already-running}"
+  [[ -n "$selected" && "$selected" != "?" ]] \
+    || die "lane $id: $context selected_runner is empty/missing — refuse to keep a lane whose builder identity cannot be revalidated"
+  case "$selected" in
+    *[\`\$\;\|\&\<\>\(\)\{\}\[\]\'\"\\,/]*|*$'\n'*|*$'\r'*|*$'\t'*)
+      die "lane $id: $context selected_runner is hostile (shell/control chars): $selected"
+      ;;
+  esac
+  if [[ ! "$selected" =~ ^[A-Za-z0-9._/@+=:-]+$ ]]; then
+    die "lane $id: $context selected_runner has disallowed characters: $selected"
+  fi
+  # Changed REVIEWER_CMD / RELEASE_CMD must not let a live builder grade/release
+  # its own work — re-check provider separation against current config.
+  if builder_conflicts_three_role "$selected"; then
+    die "lane $id: $context selected runner '$selected' collides with current reviewer/release identity (provider=$(cmd_provider_id "$selected" 2>/dev/null || echo unresolved); REVIEWER_CMD=$REVIEWER_CMD RELEASE_CMD=$RELEASE_CMD). Builder cannot grade its own work. Stop the lane or reconfigure roles before --start."
+  fi
+}
+
 # Select runners for every lane before any new launch. Already-running healthy
-# lanes keep their persisted status. Any selection failure dies before launch.
+# lanes keep their *persisted* status after identity revalidation (no readiness
+# re-probe). Missing runner-status on a live lane fails closed — never invent
+# selected_runner from the current profile/global route (that is not evidence of
+# which executable launched the live process). Any selection or revalidation
+# failure dies before launch; live processes are left untouched.
 select_all_lane_runners() {
-  local i id pid statusf
+  local i id pid statusf selected_persisted req_persisted
   LANE_REQUESTED=()
   LANE_SELECTED=()
   LANE_SELECT_HEALTH=()
@@ -2365,24 +2417,23 @@ select_all_lane_runners() {
     fi
     if pid=$(lane_pid_alive "$id" 2>/dev/null); then
       # Healthy lane: reload persisted selection for status continuity.
+      # Identity revalidation only — do NOT re-run readiness probes.
+      # Do NOT infer actual runner from current profile/route when status is
+      # missing: a profile change could hide a builder/reviewer collision.
       statusf=$(lane_runner_status_file "$id")
-      if [[ -f "$statusf" ]]; then
-        LANE_REQUESTED[$i]=$(read_runner_status_field "$statusf" "requested_primary" || echo "?")
-        LANE_SELECTED[$i]=$(read_runner_status_field "$statusf" "selected_runner" || echo "?")
-        LANE_SELECT_HEALTH[$i]=$(read_runner_status_field "$statusf" "health" || echo "healthy")
-        LANE_SELECT_REASON[$i]=$(read_runner_status_field "$statusf" "reason" || echo "already_running")
-        LANE_SELECT_POOL[$i]=$(read_runner_status_field "$statusf" "selected_pool" || echo "unknown")
-        LANE_SELECT_JOIN[$i]=$(read_runner_status_field "$statusf" "join_key" || echo "")
-      else
-        LANE_REQUESTED[$i]="${LANE_RUNNERS[$i]:-$RUNNER}"
-        LANE_REQUESTED[$i]="${LANE_REQUESTED[$i]%%,*}"
-        LANE_SELECTED[$i]="${LANE_REQUESTED[$i]}"
-        LANE_SELECT_HEALTH[$i]="healthy"
-        LANE_SELECT_REASON[$i]="already_running_no_status"
-        LANE_SELECT_POOL[$i]=$(pool_for_provider "$(cmd_provider_id "${LANE_SELECTED[$i]}" 2>/dev/null || echo other)")
-        LANE_SELECT_JOIN[$i]=""
+      if [[ ! -f "$statusf" ]]; then
+        die "lane $id: already running (pid $pid) but missing runner-status evidence at $statusf — refuse to invent selected_runner from current profile/route (that is not evidence of which executable launched the live process). Halt and restart the lane, or restore a verified $id.runner-status before --start."
       fi
-      info "lane $id already running (pid $pid) — keep runner selection status"
+      req_persisted=$(read_runner_status_field "$statusf" "requested_primary" || echo "?")
+      selected_persisted=$(read_runner_status_field "$statusf" "selected_runner" || echo "")
+      validate_persisted_selected_runner "$id" "$selected_persisted" "already-running persisted"
+      LANE_REQUESTED[$i]="$req_persisted"
+      LANE_SELECTED[$i]="$selected_persisted"
+      LANE_SELECT_HEALTH[$i]=$(read_runner_status_field "$statusf" "health" || echo "healthy")
+      LANE_SELECT_REASON[$i]=$(read_runner_status_field "$statusf" "reason" || echo "already_running")
+      LANE_SELECT_POOL[$i]=$(read_runner_status_field "$statusf" "selected_pool" || echo "unknown")
+      LANE_SELECT_JOIN[$i]=$(read_runner_status_field "$statusf" "join_key" || echo "")
+      info "lane $id already running (pid $pid) — keep runner selection status after identity revalidation"
     else
       select_lane_runner "$i"
     fi
@@ -2390,32 +2441,30 @@ select_all_lane_runners() {
   done
 }
 
-assert_three_role_separation() {
-
-  # Never allow the implementation runner to grade or release its own work.
-  # Compare normalized first-executable provider identities only — never substring
-  # match on the full command (a Grok argv containing the word "codex" is still Grok).
-  local r_id rev_id rel_id
-  [[ -n "${RUNNER:-}" ]] || die "RUNNER is empty — builder identity required"
+# Global three-role check for reviewer/release only. Builder identity is not
+# validated against the unused global RUNNER — that check runs after readiness
+# against each *actual* selected runner (select_lane_runner /
+# builder_conflicts_three_role). Compare normalized first-executable provider
+# identities only — never substring match on the full command.
+assert_reviewer_release_separation() {
+  local rev_id rel_id
   [[ -n "${REVIEWER_CMD:-}" ]] || die "REVIEWER_CMD is empty — cross-vendor review required (Law 5)"
   [[ -n "${RELEASE_CMD:-}" ]] || die "RELEASE_CMD is empty — third-identity release required (three-role split)"
 
-  r_id=$(cmd_provider_id "$RUNNER") || true
   rev_id=$(cmd_provider_id "$REVIEWER_CMD") || true
   rel_id=$(cmd_provider_id "$RELEASE_CMD") || true
-  [[ -n "$r_id" ]] || die "cannot resolve builder provider identity from RUNNER='$RUNNER'"
   [[ -n "$rev_id" ]] || die "cannot resolve reviewer provider identity from REVIEWER_CMD='$REVIEWER_CMD'"
   [[ -n "$rel_id" ]] || die "cannot resolve release provider identity from RELEASE_CMD='$RELEASE_CMD'"
 
-  if [[ "$r_id" == "$rev_id" ]]; then
-    die "REVIEWER_CMD must not be the same provider as the builder (provider=$r_id RUNNER=$RUNNER REVIEWER_CMD=$REVIEWER_CMD)"
-  fi
-  if [[ "$r_id" == "$rel_id" ]]; then
-    die "RELEASE_CMD must be a third identity distinct from the builder (provider=$r_id RUNNER=$RUNNER RELEASE_CMD=$RELEASE_CMD)"
-  fi
   if [[ "$rev_id" == "$rel_id" ]]; then
     die "RELEASE_CMD must be a third identity distinct from the reviewer (provider=$rev_id REVIEWER_CMD=$REVIEWER_CMD RELEASE_CMD=$RELEASE_CMD)"
   fi
+}
+
+# Backward-compatible name: global reviewer/release only. Builder separation is
+# enforced against actual selected runners after readiness selection.
+assert_three_role_separation() {
+  assert_reviewer_release_separation
 }
 
 preflight_for_start() {
@@ -2425,10 +2474,16 @@ preflight_for_start() {
   # Direct invocation in do_start requires a regular executable file; -f alone
   # is not enough (a non-executable loop would pass preflight and fail at launch).
   [[ -x "$LOOP_SH" ]] || die "loop driver is not executable: $LOOP_SH"
-  command -v "$RUNNER" >/dev/null 2>&1 || die "runner '$RUNNER' not found on PATH"
+  # Global RUNNER is only the default for lanes that omit field 5. When every
+  # lane declares an explicit route, do not require the default executable and
+  # do not role-check it (builder separation is against actual selected runners).
+  if any_lane_uses_global_runner; then
+    [[ -n "${RUNNER:-}" ]] || die "runner is empty — needed as default for lane(s) that omit the ordered-route field"
+    command -v "$RUNNER" >/dev/null 2>&1 || die "runner '$RUNNER' not found on PATH (used as default for lane(s) without an explicit route)"
+  fi
   command -v "$GH_BIN" >/dev/null 2>&1 || die "gh binary '$GH_BIN' not found"
 
-  assert_three_role_separation
+  assert_reviewer_release_separation
 
   git -C "$BASE_REPO" rev-parse --git-dir >/dev/null 2>&1 || die "target is not a git repository: $BASE_REPO"
 

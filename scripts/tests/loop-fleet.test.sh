@@ -5481,6 +5481,662 @@ d2=$(printf '%s\n' "$DISC1" | sed -n '2p')
   && ok "discriminator helper yields distinct same-process values" \
   || bad "discriminator not distinct d1=$d1 d2=$d2"
 
+# ---------------------------------------------------------------------------
+# #141 repair: auth-fail must not be masked by --version (production families)
+# ---------------------------------------------------------------------------
+echo "#141 auth-fail not masked by version (production families)"
+
+# Production-path stubs: auth/status nonzero, --version zero. Must NOT select.
+# FLEET_READINESS_DIR must be unset so fixed family argv tables run.
+write_family_logged_out_stub() {
+  local name="$1" family="$2"
+  case "$family" in
+    codex)
+      cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+# Logged-out codex: login status fails; --version succeeds (must not select).
+if [[ "${1:-}" == "login" && "${2:-}" == "status" ]]; then
+  echo "not logged in" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "codex stub 0.0.0"
+  exit 0
+fi
+exit 2
+P
+      ;;
+    claude)
+      cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+# Logged-out claude: auth status fails; --version succeeds (must not select).
+if [[ "${1:-}" == "auth" && "${2:-}" == "status" ]]; then
+  echo "not logged in" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "claude stub 0.0.0"
+  exit 0
+fi
+exit 2
+P
+      ;;
+    hermes)
+      cat > "$BIN/$name" <<'P'
+#!/usr/bin/env bash
+# Logged-out hermes: status fails; --version succeeds (must not select).
+if [[ "${1:-}" == "status" ]]; then
+  echo "not authenticated" >&2
+  exit 1
+fi
+if [[ "${1:-}" == "--version" ]]; then
+  echo "hermes stub 0.0.0"
+  exit 0
+fi
+exit 2
+P
+      ;;
+    *)
+      bad "write_family_logged_out_stub: unknown family $family"
+      return 1
+      ;;
+  esac
+  chmod +x "$BIN/$name"
+}
+
+# Ready fallback on production path (other family; --version or bare exit 0).
+cat > "$BIN/grind-ok-fb" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/grind-ok-fb"
+
+auth_issue=511
+for fam in codex claude hermes; do
+  reset_calls
+  unset FLEET_READINESS_DIR || true
+  primary="${fam}-logged-out"
+  write_family_logged_out_stub "$primary" "$fam"
+  TARGET=$(setup_target_repo "r141-auth-$fam" acme/widget)
+  PROF="$ROOT/profiles/r141-auth-$fam.profile"
+  write_profile "$PROF" \
+    "version=1" \
+    "name=r141-auth-$fam" \
+    "repo=$TARGET" \
+    "slug=acme/widget" \
+    "gibson=$ROOT/gibson" \
+    "fleet_dir=$ROOT/fleet" \
+    "log_dir=$ROOT/logs" \
+    "runner=fake-runner" \
+    "lane=docs|${auth_issue}|docs/**|auth fail primary|$primary,grind-ok-fb"
+  export FLEET_PROFILE="$PROF"
+  export REVIEWER_CMD="codex-stub review"
+  export RELEASE_CMD="claude-stub release"
+  export FLEET_READINESS_TIMEOUT=5
+  : > "$CALLS/launches.log"
+  out=$(run_fleet --start 2>&1) || { bad "$fam auth-fail primary start failed: $out"; auth_issue=$((auth_issue + 1)); continue; }
+  lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+  [[ "$lc" == "1" ]] && ok "$fam auth-fail primary launched once" || bad "$fam launches=$lc out=$out"
+  grep -q 'LAUNCH runner=grind-ok-fb' "$CALLS/launches.log" \
+    && ok "$fam auth-fail selected declared fallback grind-ok-fb" \
+    || bad "$fam expected grind-ok-fb: $(cat "$CALLS/launches.log")"
+  if grep -q "LAUNCH runner=$primary" "$CALLS/launches.log"; then
+    bad "$fam selected logged-out primary despite auth fail: $(cat "$CALLS/launches.log")"
+  else
+    ok "$fam did not select logged-out primary"
+  fi
+  grep -q '^health=degraded$' "$ROOT/logs/docs.runner-status" \
+    && ok "$fam fallback health=degraded" \
+    || bad "$fam expected degraded: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+  grep -q 'primary_not_ready' "$ROOT/logs/docs.runner-status" \
+    && ok "$fam reason records primary_not_ready" \
+    || bad "$fam reason missing primary_not_ready: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+  # Diagnostic path must not leak probe stderr (logged-out messages stay discarded).
+  echo "$out" | grep -qiE 'not logged in|not authenticated|api[_-]?key|Bearer |password=' \
+    && bad "$fam start output leaked probe/credential-like material: $out" \
+    || ok "$fam start output has no probe/credential material"
+  auth_issue=$((auth_issue + 1))
+done
+
+# ---------------------------------------------------------------------------
+# #141 repair: Grok production path uses `models` (not --version)
+# ---------------------------------------------------------------------------
+echo "#141 grok models readiness (production family)"
+
+# Production-path Grok stubs: log argv so a regression back to --version fails.
+# FLEET_READINESS_DIR must be unset so fixed family argv tables run.
+write_grok_models_stub() {
+  local name="$1" models_rc="${2:-0}" version_rc="${3:-0}"
+  # models_rc: exit for `models`; version_rc: exit for --version
+  cat > "$BIN/$name" <<P
+#!/usr/bin/env bash
+# Grok production-family stub: fixed argv probe is \`models\` only.
+log="\${GROK_PROBE_LOG:-/dev/null}"
+printf 'invoke name=%s argv=%s\n' "$name" "\$*" >> "\$log"
+if [[ "\${1:-}" == "models" ]]; then
+  # Do not print sensitive material; fleet must not inspect output either.
+  exit $models_rc
+fi
+if [[ "\${1:-}" == "--version" ]]; then
+  echo "grok stub 0.0.0"
+  exit $version_rc
+fi
+exit 2
+P
+  chmod +x "$BIN/$name"
+}
+
+# (a) --version would succeed, models fails → must select declared fallback.
+reset_calls
+unset FLEET_READINESS_DIR || true
+export GROK_PROBE_LOG="$CALLS/grok-probe-fail.log"
+: > "$GROK_PROBE_LOG"
+write_grok_models_stub "grok" 1 0
+# Ready other-family fallback (production path uses --version/bare exit 0).
+cat > "$BIN/grind-ok-fb" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/grind-ok-fb"
+TARGET=$(setup_target_repo r141-grok-models-fail acme/widget)
+PROF="$ROOT/profiles/r141-grok-models-fail.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-grok-models-fail" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|540|docs/**|grok models fail|grok,grind-ok-fb"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "grok models-fail start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "grok models-fail launched once" || bad "grok models-fail launches=$lc out=$out"
+grep -q 'LAUNCH runner=grind-ok-fb' "$CALLS/launches.log" \
+  && ok "grok models-fail selected declared fallback grind-ok-fb" \
+  || bad "grok models-fail expected grind-ok-fb: $(cat "$CALLS/launches.log")"
+if grep -q 'LAUNCH runner=grok' "$CALLS/launches.log"; then
+  bad "grok models-fail selected grok despite models failure: $(cat "$CALLS/launches.log")"
+else
+  ok "grok models-fail did not select grok"
+fi
+grep -q '^health=degraded$' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-fail health=degraded" \
+  || bad "grok models-fail expected degraded: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q 'primary_not_ready' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-fail reason primary_not_ready" \
+  || bad "grok models-fail reason: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+# Stub invocation: must probe models (not version alone).
+grep -q 'invoke name=grok argv=models' "$GROK_PROBE_LOG" \
+  && ok "grok models-fail stub invoked with argv=models" \
+  || bad "grok models-fail missing models invoke: $(cat "$GROK_PROBE_LOG" 2>/dev/null)"
+if grep -qE 'invoke name=grok argv=--version$' "$GROK_PROBE_LOG" \
+  && ! grep -q 'invoke name=grok argv=models' "$GROK_PROBE_LOG"; then
+  bad "grok models-fail regressed to --version-only probe: $(cat "$GROK_PROBE_LOG")"
+else
+  ok "grok models-fail did not regress to version-only readiness"
+fi
+echo "$out" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+  && bad "grok models-fail leaked credential-like material: $out" \
+  || ok "grok models-fail output has no credential material"
+
+# (b) models exit 0 selects Grok; --version alone would fail (proves models wins).
+reset_calls
+unset FLEET_READINESS_DIR || true
+export GROK_PROBE_LOG="$CALLS/grok-probe-ok.log"
+: > "$GROK_PROBE_LOG"
+# models ready; --version fails so a version-only probe would not select Grok.
+write_grok_models_stub "grok" 0 1
+cat > "$BIN/grind-ok-fb" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/grind-ok-fb"
+TARGET=$(setup_target_repo r141-grok-models-ok acme/widget)
+PROF="$ROOT/profiles/r141-grok-models-ok.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-grok-models-ok" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|541|docs/**|grok models ok|grok,grind-ok-fb"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "grok models-ok start failed: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "grok models-ok launched once" || bad "grok models-ok launches=$lc out=$out"
+grep -q 'LAUNCH runner=grok' "$CALLS/launches.log" \
+  && ok "grok models-ok selected grok on models exit 0" \
+  || bad "grok models-ok expected grok: $(cat "$CALLS/launches.log")"
+if grep -q 'LAUNCH runner=grind-ok-fb' "$CALLS/launches.log"; then
+  bad "grok models-ok fell through to fallback despite models ready: $(cat "$CALLS/launches.log")"
+else
+  ok "grok models-ok did not select fallback"
+fi
+grep -q '^health=healthy$' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-ok health=healthy" \
+  || bad "grok models-ok health: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q '^reason=primary_ready$' "$ROOT/logs/docs.runner-status" \
+  && ok "grok models-ok reason=primary_ready" \
+  || bad "grok models-ok reason: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
+grep -q 'invoke name=grok argv=models' "$GROK_PROBE_LOG" \
+  && ok "grok models-ok stub invoked with argv=models" \
+  || bad "grok models-ok missing models invoke: $(cat "$GROK_PROBE_LOG" 2>/dev/null)"
+# Must not have needed --version to succeed (version exits 1 in this stub).
+if grep -qE 'invoke name=grok argv=--version' "$GROK_PROBE_LOG"; then
+  bad "grok models-ok still invoked --version (should be models-only): $(cat "$GROK_PROBE_LOG")"
+else
+  ok "grok models-ok never invoked --version"
+fi
+unset GROK_PROBE_LOG || true
+
+# ---------------------------------------------------------------------------
+# #141 repair: already-running revalidates persisted builder vs current roles
+# ---------------------------------------------------------------------------
+echo "#141 already-running persisted runner role revalidation"
+
+# Plant a healthy running lane with selected_runner that later collides with
+# a changed REVIEWER_CMD. Must fail closed on --start without re-probing readiness.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-role"
+rm -rf "$FLEET_READINESS_DIR"
+# Probe that logs every invocation — re-start must not call it (identity only).
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/safe-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-persist-role.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/safe-builder"
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-persist-role acme/widget)
+PROF="$ROOT/profiles/r141-persist-role.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-role" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|542|docs/**|persist role reval|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-role.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-role initial start failed: $out"; }
+grep -q 'LAUNCH runner=safe-builder' "$CALLS/launches.log" \
+  && ok "persist-role initial selected safe-builder" \
+  || bad "persist-role initial: $(cat "$CALLS/launches.log")"
+# Plant live process so lane_pid_alive treats the lane as healthy.
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 542
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for persisted-runner role revalidation
+notes: >
+  preserve me
+STATE
+mkdir -p "$ROOT/fleet/lane-docs/gibson"
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_ROLE_PID=$!
+printf '%s\n' "$PERSIST_ROLE_PID" > "$ROOT/logs/docs.pid"
+# Prove status shows running before role flip.
+pid_check=$(run_fleet --status 2>&1) || true
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "persist-role planted healthy running lane" \
+  || bad "persist-role not running: $pid_check"
+# Change reviewer to same provider as the live builder (safe-builder).
+export REVIEWER_CMD="safe-builder review"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-role.log"
+out=$(run_fleet --start 2>&1) && bad "persist-role role-flip should fail: $out" || {
+  echo "$out" | grep -qiE 'collides|REVIEWER|provider|grade|already-running|selected runner' \
+    && ok "persist-role role-flip refused on already-running revalidation" \
+    || bad "unclear persist-role fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-role role-flip launched zero" || bad "persist-role launched $lc"
+# Must not re-run readiness probes against the already-running process.
+if [[ -s "$CALLS/ready-probe-persist-role.log" ]]; then
+  bad "persist-role re-probed readiness on already-running: $(cat "$CALLS/ready-probe-persist-role.log")"
+else
+  ok "persist-role did not re-run readiness on already-running"
+fi
+# cleanup planted sleeper
+kill "$PERSIST_ROLE_PID" 2>/dev/null || true
+wait "$PERSIST_ROLE_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+export REVIEWER_CMD="codex-stub review"
+
+# Empty/missing persisted selected_runner on already-running fails closed.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-empty"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "safe-builder" ready
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-persist-empty acme/widget)
+PROF="$ROOT/profiles/r141-persist-empty.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-empty" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|543|docs/**|persist empty selected|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-empty initial start failed: $out"; }
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 543
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for empty selected_runner
+notes: >
+  empty selected
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_EMPTY_PID=$!
+printf '%s\n' "$PERSIST_EMPTY_PID" > "$ROOT/logs/docs.pid"
+# Corrupt persisted selected_runner to empty.
+{
+  echo "requested_primary=safe-builder"
+  echo "selected_runner="
+  echo "selected_provider=safe-builder"
+  echo "selected_pool=provider-safe-builder"
+  echo "health=healthy"
+  echo "reason=primary_ready"
+  echo "route=safe-builder"
+  echo "join_key=fleet-sel:v1:test"
+  echo "updated=2026-01-01T00:00:00Z"
+} > "$ROOT/logs/docs.runner-status"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "persist-empty selected should fail: $out" || {
+  echo "$out" | grep -qiE 'selected_runner is empty|empty/missing|refuse' \
+    && ok "persist-empty selected_runner refused" \
+    || bad "unclear persist-empty fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-empty launched zero" || bad "persist-empty launched $lc"
+kill "$PERSIST_EMPTY_PID" 2>/dev/null || true
+wait "$PERSIST_EMPTY_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# Live lane + missing runner-status → fail closed (never invent from config).
+# Current profile/route is not evidence of which executable launched the process.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-persist-missing"
+rm -rf "$FLEET_READINESS_DIR"
+# Probe that logs every invocation — missing-status refuse must not call it.
+mkdir -p "$FLEET_READINESS_DIR"
+cat > "$FLEET_READINESS_DIR/miss-builder" <<P
+#!/usr/bin/env bash
+printf 'ready-probe-invoked\n' >> "$CALLS/ready-probe-persist-missing.log"
+exit 0
+P
+chmod +x "$FLEET_READINESS_DIR/miss-builder"
+ensure_runner_bin "miss-builder"
+TARGET=$(setup_target_repo r141-persist-missing acme/widget)
+PROF="$ROOT/profiles/r141-persist-missing.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-persist-missing" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|544|docs/**|persist missing status|miss-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-missing.log"
+out=$(run_fleet --start 2>&1) || { bad "persist-missing initial start failed: $out"; }
+grep -q 'LAUNCH runner=miss-builder' "$CALLS/launches.log" \
+  && ok "persist-missing initial selected miss-builder" \
+  || bad "persist-missing initial: $(cat "$CALLS/launches.log")"
+[[ -f "$ROOT/logs/docs.runner-status" ]] \
+  && ok "persist-missing wrote runner-status on first start" \
+  || bad "persist-missing missing status after first start"
+STATE_FILE="$ROOT/fleet/lane-docs/gibson/loop-state.md"
+cat > "$STATE_FILE" <<'STATE'
+# Gibson loop state
+updated: 2026-01-01T00:00:00Z
+issue: 544
+pr:
+hat: builder
+next_hat: reviewer
+round: 1
+parked: false
+next_action: planted for missing runner-status fail-closed
+notes: >
+  no invent from config
+STATE
+bash -c 'while true; do sleep 30; done' \
+  "$ROOT/gibson/scripts/loop.sh" \
+  "$ROOT/fleet/lane-docs" &
+PERSIST_MISSING_PID=$!
+printf '%s\n' "$PERSIST_MISSING_PID" > "$ROOT/logs/docs.pid"
+# Prove status shows running before status file is removed.
+pid_check=$(run_fleet --status 2>&1) || true
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+  && ok "persist-missing planted healthy running lane" \
+  || bad "persist-missing not running: $pid_check"
+# Drop only the runner-status evidence; leave live process + pidfile intact.
+rm -f "$ROOT/logs/docs.runner-status"
+[[ ! -f "$ROOT/logs/docs.runner-status" ]] \
+  && ok "persist-missing removed runner-status evidence" \
+  || bad "persist-missing status still present"
+: > "$CALLS/launches.log"
+: > "$CALLS/ready-probe-persist-missing.log"
+out=$(run_fleet --start 2>&1) && bad "persist-missing should fail closed: $out" || {
+  echo "$out" | grep -qiE 'missing runner-status|refuse to invent|restore a verified|Halt and restart' \
+    && ok "persist-missing clear refusal when status absent" \
+    || bad "unclear persist-missing fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "persist-missing launched zero" || bad "persist-missing launched $lc"
+# Must not re-run readiness probes (would invent from current route probes).
+if [[ -s "$CALLS/ready-probe-persist-missing.log" ]]; then
+  bad "persist-missing re-probed readiness: $(cat "$CALLS/ready-probe-persist-missing.log")"
+else
+  ok "persist-missing did not re-run readiness"
+fi
+# Live process left untouched.
+if kill -0 "$PERSIST_MISSING_PID" 2>/dev/null; then
+  ok "persist-missing left live process untouched"
+else
+  bad "persist-missing killed live process pid=$PERSIST_MISSING_PID"
+fi
+# Positive control still lives above: "status persistence and idempotent restart"
+# with valid persisted selected_runner continues to succeed without relaunch.
+kill "$PERSIST_MISSING_PID" 2>/dev/null || true
+wait "$PERSIST_MISSING_PID" 2>/dev/null || true
+rm -f "$ROOT/logs/docs.pid"
+
+# ---------------------------------------------------------------------------
+# #141 repair: global RUNNER only defaults for lanes omitting field 5
+# ---------------------------------------------------------------------------
+echo "#141 global RUNNER only for omitted-route lanes"
+
+# (a) All lanes explicit, global default missing from PATH → still selects routes.
+reset_calls
+unset FLEET_READINESS_DIR || true
+FLEET_READINESS_DIR="$ROOT/readiness-explicit-miss"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "route-a" ready
+write_ready_probe "route-b" ready
+ensure_runner_bin "route-a"
+ensure_runner_bin "route-b"
+TARGET=$(setup_target_repo r141-explicit-miss acme/widget)
+PROF="$ROOT/profiles/r141-explicit-miss.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-explicit-miss" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=missing-global-runner-xyz" \
+  "lane=docs|521|docs/**|all explicit A|route-a" \
+  "lane=harness|522|scripts/**|all explicit B|route-b"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+# Ensure the bogus global default is not on PATH.
+rm -f "$BIN/missing-global-runner-xyz"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "all-explicit missing global should start: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "2" ]] && ok "all-explicit missing global launched two lanes" || bad "all-explicit miss launches=$lc out=$out"
+grep -q 'LAUNCH runner=route-a' "$CALLS/launches.log" \
+  && grep -q 'LAUNCH runner=route-b' "$CALLS/launches.log" \
+  && ok "all-explicit missing global selected actual routes" \
+  || bad "all-explicit miss routes: $(cat "$CALLS/launches.log")"
+
+# (b) All lanes explicit, global default collides with reviewer but unused → proceed.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-explicit-collide"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "safe-builder" ready
+ensure_runner_bin "safe-builder"
+TARGET=$(setup_target_repo r141-explicit-collide acme/widget)
+PROF="$ROOT/profiles/r141-explicit-collide.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-explicit-collide" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=codex-stub" \
+  "lane=docs|523|docs/**|unused colliding global|safe-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+# codex-stub on PATH as a binary so if it were used it would resolve; it must not.
+cat > "$BIN/codex-stub" <<'P'
+#!/usr/bin/env bash
+exit 0
+P
+chmod +x "$BIN/codex-stub"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) || { bad "all-explicit colliding unused global should start: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "all-explicit unused colliding global launched once" || bad "explicit collide launches=$lc out=$out"
+grep -q 'LAUNCH runner=safe-builder' "$CALLS/launches.log" \
+  && ok "all-explicit unused colliding global selected safe-builder" \
+  || bad "expected safe-builder: $(cat "$CALLS/launches.log")"
+if grep -q 'LAUNCH runner=codex-stub' "$CALLS/launches.log"; then
+  bad "unused colliding global was selected: $(cat "$CALLS/launches.log")"
+else
+  ok "unused colliding global was not selected"
+fi
+
+# (c) Omitted-route lane fails when global default is missing from PATH.
+reset_calls
+unset FLEET_READINESS_DIR || true
+TARGET=$(setup_target_repo r141-omit-miss acme/widget)
+PROF="$ROOT/profiles/r141-omit-miss.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-omit-miss" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=missing-global-runner-xyz" \
+  "lane=docs|524|docs/**|omitted route needs global"
+export FLEET_PROFILE="$PROF"
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+rm -f "$BIN/missing-global-runner-xyz"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "omitted-route missing global should fail: $out" || {
+  echo "$out" | grep -qiE 'missing-global-runner-xyz|not found on PATH|runner' \
+    && ok "omitted-route missing global refused" \
+    || bad "unclear omit-miss fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "omitted-route missing global launched zero" || bad "omit-miss launched $lc"
+
+# (d) Actual selected runner conflicting with reviewer fails closed (retain).
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-actual-role"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "codex-as-builder" ready
+ensure_runner_bin "codex-as-builder"
+TARGET=$(setup_target_repo r141-actual-role acme/widget)
+PROF="$ROOT/profiles/r141-actual-role.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-actual-role" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|525|docs/**|actual role conflict|codex-as-builder"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export REVIEWER_CMD="codex-stub review"
+export RELEASE_CMD="claude-stub release"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "actual selected role conflict should fail: $out" || {
+  echo "$out" | grep -qiE 'three-role|collides|REVIEWER|provider|grade' \
+    && ok "actual selected runner role conflict refused" \
+    || bad "unclear actual-role fail: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "actual selected role conflict launched zero" || bad "actual-role launched $lc"
+
 unset FLEET_READINESS_DIR || true
 export FLEET_READINESS_TIMEOUT=8
 export REVIEWER_CMD="codex-stub review"
