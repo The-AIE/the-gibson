@@ -32,6 +32,14 @@ slug=owner/your-target-repo
 # error_budget=4
 # deadline_seconds=79200
 
+# Optional pool_map=provider:pool-label — declare actual plan shape for telemetry.
+# Defaults are provider-only (e.g. provider-grok) and do NOT invent flat-rate or
+# subscription economics from vendor identity. Uncomment when you know the plan:
+# pool_map=grok:flat-rate-grok
+# pool_map=hermes:flat-rate-hermes
+# pool_map=codex:subscription-codex
+# pool_map=claude:subscription-claude
+
 # ---------------------------------------------------------------------------
 # Lanes — one `lane=` line each. Pipe-separated fields:
 #   id|ordered-issue-queue|exclusive-scope|intent[|ordered-runner-route]
@@ -44,15 +52,16 @@ slug=owner/your-target-repo
 #   CLIs, primary first, explicit fallbacks after. Empty → global runner=.
 #   Only declared runners may be selected. Fail over only on readiness failure.
 #
-# Flat-rate-first (docs/15): grind lanes should list flat-rate pools first
-# (e.g. grok) and metered/frontier providers only at escalation positions.
+# Flat-rate-first (docs/15): grind lanes should list preferred flat-rate runners
+# first and metered/frontier providers only at escalation positions.
 # The driver preserves operator order; it does not reorder by price or inspect
-# billing/plans/keys.
+# billing/plans/keys. Plan shape in the cost ledger comes only from pool_map=
+# (or stays provider-only when undeclared).
 # ---------------------------------------------------------------------------
 
 # Example: Gibson self-dogfood / Autonomy Readiness (issue #96 and friends).
 # Replace issue numbers with open, non-gated items from the live backlog.
-# Grind lane: flat-rate primary, subscription fallback only if primary is not ready.
+# Grind lane: preferred primary first; fallback only if primary is not ready.
 lane=docs|96|docs/** playbooks/** memory/dogfood/**|Overnight dogfood + operator playbooks (Autonomy Readiness / #96). Stay out of scripts/**.|grok,codex
 lane=harness|89|scripts/**|Self-gate and harness sensors only. Do not edit docs/** or playbooks/**.|grok
 

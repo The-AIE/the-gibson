@@ -49,6 +49,13 @@ SUMMARIZE OPTIONS
   with no attributed events are reported as lacking cost data — not zero-cost
   success. Ambiguous join_key→PR maps and corrupt merged JSON fail closed.
 
+  Token averages (per PR, per pool, global) are null/unknown unless every
+  event represented by that metric recorded tokens — partial coverage never
+  becomes a silently lower total. known/total event coverage is always exposed.
+
+  by_pool includes merged/unmerged event counts, distinct attributed merged
+  PR counts, merged wall time, and per-merged-PR metrics for load balancing.
+
 EXIT
   0 ok | 2 usage | 3 corrupt
 HELP
@@ -206,6 +213,33 @@ def fail(msg):
     print("cost-ledger.sh: %s" % msg, file=sys.stderr)
     sys.exit(3)
 
+def as_nonneg_int(val, field, idx, required=False):
+    """Strict integer: reject bool, float, numeric string, negatives. None ok if not required."""
+    if val is None:
+        if required:
+            fail("event %d: %s is required" % (idx, field))
+        return None
+    # bool is a subclass of int — reject before isinstance(int).
+    if isinstance(val, bool):
+        fail("event %d: %s must be a non-negative integer, not boolean" % (idx, field))
+    if isinstance(val, int):
+        if val < 0:
+            fail("event %d: %s must be non-negative" % (idx, field))
+        return val
+    # Reject floats (including 1.0) and numeric strings — no silent coercion.
+    if isinstance(val, float):
+        fail("event %d: %s must be a non-negative integer, not float" % (idx, field))
+    if isinstance(val, str):
+        fail("event %d: %s must be a non-negative integer, not string" % (idx, field))
+    fail("event %d: %s has invalid type" % (idx, field))
+
+def as_optional_str(val, field, idx):
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        fail("event %d: %s must be a string" % (idx, field))
+    return val
+
 path = os.environ["CL_LEDGER"]
 fmt = os.environ.get("CL_FORMAT") or "text"
 period = os.environ.get("CL_PERIOD") or ""
@@ -222,6 +256,23 @@ with open(path, "r", encoding="utf-8") as f:
             fail("corrupt JSONL line %d: %s" % (i, e))
         if not isinstance(ev, dict) or ev.get("schema") != "gibson.cost.v1":
             fail("line %d: missing schema gibson.cost.v1" % i)
+        # Validate required / optional numeric fields consistently (fail closed).
+        as_nonneg_int(ev.get("wall_ms"), "wall_ms", i, required=True)
+        for opt in ("tokens", "issue", "pr", "iteration"):
+            if opt in ev and ev[opt] is not None:
+                as_nonneg_int(ev[opt], opt, i, required=False)
+        if "acus" in ev and ev["acus"] is not None:
+            a = ev["acus"]
+            if isinstance(a, bool) or not isinstance(a, (int, float)):
+                fail("event %d: acus must be a number" % i)
+            if a < 0:
+                fail("event %d: acus must be non-negative" % i)
+        for sfield in ("join_key", "requested_runner", "provider", "fallback_reason",
+                       "event_kind", "runner", "pool", "hat", "repo", "note", "ts"):
+            if sfield in ev and ev[sfield] is not None:
+                as_optional_str(ev[sfield], sfield, i)
+        if "flat_rate" in ev and ev["flat_rate"] is not None and not isinstance(ev["flat_rate"], bool):
+            fail("event %d: flat_rate must be a boolean" % i)
         if period and str(ev.get("ts") or "") < period:
             continue
         events.append(ev)
@@ -265,23 +316,17 @@ for i, ev in enumerate(events):
         fail("event %d: join_key must be a string" % (i + 1))
     if "pr" not in ev or ev["pr"] is None:
         continue
-    try:
-        pr = int(ev["pr"])
-    except (TypeError, ValueError):
-        fail("event %d: pr must be an integer" % (i + 1))
+    pr = as_nonneg_int(ev["pr"], "pr", i + 1, required=False)
+    if pr is None:
+        continue
     if jk in join_to_pr and join_to_pr[jk] != pr:
         fail("ambiguous join_key %r maps to PRs %s and %s" % (jk, join_to_pr[jk], pr))
     join_to_pr[jk] = pr
 
-# Also reject events whose own pr conflicts with join_key map (already covered)
-# and events that declare pr as non-int when present.
 def event_pr(ev, idx):
     if "pr" not in ev or ev["pr"] is None:
         return None
-    try:
-        return int(ev["pr"])
-    except (TypeError, ValueError):
-        fail("event %d: pr must be an integer" % idx)
+    return as_nonneg_int(ev["pr"], "pr", idx, required=False)
 
 def resolved_pr(ev, idx):
     own = event_pr(ev, idx)
@@ -295,7 +340,17 @@ def resolved_pr(ev, idx):
         return own
     return mapped
 
-by_pool = defaultdict(lambda: {"events": 0, "wall_ms": 0, "tokens": 0, "tokens_known": 0})
+def empty_pool():
+    return {
+        "events": 0, "wall_ms": 0,
+        "tokens": 0, "tokens_known": 0,
+        "merged_events": 0, "unmerged_events": 0,
+        "merged_wall_ms": 0,
+        "merged_pr_set": set(),
+        "merged_tokens": 0, "merged_tokens_known": 0,
+    }
+
+by_pool = defaultdict(empty_pool)
 by_hat = defaultdict(lambda: {"events": 0, "wall_ms": 0, "tokens": 0, "tokens_known": 0})
 total_wall = total_tokens = tokens_known = 0
 total_acus = 0.0
@@ -311,17 +366,21 @@ per_pr = defaultdict(lambda: {
 })
 
 for idx, ev in enumerate(events, 1):
-    wall = int(ev.get("wall_ms") or 0)
+    wall = as_nonneg_int(ev.get("wall_ms"), "wall_ms", idx, required=True)
     total_wall += wall
     pool = ev.get("pool") or "unknown"
+    if not isinstance(pool, str):
+        fail("event %d: pool must be a string" % idx)
     hat = ev.get("hat") or "other"
+    if not isinstance(hat, str):
+        fail("event %d: hat must be a string" % idx)
     by_pool[pool]["events"] += 1
     by_pool[pool]["wall_ms"] += wall
     by_hat[hat]["events"] += 1
     by_hat[hat]["wall_ms"] += wall
     tok = None
     if "tokens" in ev and ev["tokens"] is not None:
-        tok = int(ev["tokens"])
+        tok = as_nonneg_int(ev["tokens"], "tokens", idx, required=False)
         total_tokens += tok
         tokens_known += 1
         by_pool[pool]["tokens"] += tok
@@ -344,25 +403,64 @@ for idx, ev in enumerate(events, 1):
         merged_events += 1
         merged_wall += wall
         per_pr[rpr]["merged"] = True
+        by_pool[pool]["merged_events"] += 1
+        by_pool[pool]["merged_wall_ms"] += wall
+        by_pool[pool]["merged_pr_set"].add(rpr)
         if tok is not None:
             merged_tokens += tok
             merged_tokens_known += 1
+            by_pool[pool]["merged_tokens"] += tok
+            by_pool[pool]["merged_tokens_known"] += 1
     else:
         unmerged_events += 1
+        by_pool[pool]["unmerged_events"] += 1
+
+# Finalize per-pool metrics (distinct merged PRs + honest token averages).
+by_pool_out = {}
+for pool, d in sorted(by_pool.items()):
+    n_mpr = len(d["merged_pr_set"])
+    m_ev = d["merged_events"]
+    m_tok_known = d["merged_tokens_known"]
+    tokens_complete = (d["events"] > 0 and d["tokens_known"] == d["events"])
+    merged_tokens_complete = (m_ev > 0 and m_tok_known == m_ev)
+    by_pool_out[pool] = {
+        "events": d["events"],
+        "wall_ms": d["wall_ms"],
+        "tokens": d["tokens"] if tokens_complete else None,
+        "tokens_known_events": d["tokens_known"],
+        "tokens_total_events": d["events"],
+        "tokens_coverage_complete": tokens_complete,
+        "merged_events": d["merged_events"] if merged_numbers else None,
+        "unmerged_events": d["unmerged_events"] if merged_numbers else None,
+        "merged_prs": n_mpr if merged_numbers else None,
+        "merged_wall_ms": d["merged_wall_ms"] if merged_numbers else None,
+        "wall_ms_per_merged_pr": (d["merged_wall_ms"] / n_mpr) if (merged_numbers and n_mpr) else None,
+        "tokens_per_merged_pr": (
+            (d["merged_tokens"] / n_mpr)
+            if (merged_numbers and n_mpr and merged_tokens_complete) else None
+        ),
+        "merged_tokens_known_events": m_tok_known if merged_numbers else None,
+        "merged_tokens_total_events": m_ev if merged_numbers else None,
+        "merged_tokens_coverage_complete": merged_tokens_complete if merged_numbers else None,
+    }
 
 # Per-merged-PR report: every input merged PR appears; no cost is not success.
+# tokens is null unless EVERY event on that PR recorded tokens.
 per_merged = {}
 merged_with_cost = 0
 for num in merged_numbers:
     d = per_pr.get(num)
     if d and d["events"] > 0:
         merged_with_cost += 1
+        complete = d["tokens_known"] == d["events"]
         entry = {
             "pr": num,
             "events": d["events"],
             "wall_ms": d["wall_ms"],
-            "tokens": d["tokens"] if d["tokens_known"] else None,
+            "tokens": d["tokens"] if complete else None,
             "tokens_known_events": d["tokens_known"],
+            "tokens_total_events": d["events"],
+            "tokens_coverage_complete": complete,
             "has_cost_data": True,
         }
     else:
@@ -372,10 +470,14 @@ for num in merged_numbers:
             "wall_ms": None,
             "tokens": None,
             "tokens_known_events": 0,
+            "tokens_total_events": 0,
+            "tokens_coverage_complete": False,
             "has_cost_data": False,
         }
     per_merged[str(num)] = entry
 
+# Global tokens_per_merged_pr: null unless every merged event has tokens.
+merged_tokens_complete = (merged_events > 0 and merged_tokens_known == merged_events)
 cpm = None
 if merged_numbers:
     cpm = {
@@ -385,24 +487,41 @@ if merged_numbers:
         "unmerged_events": unmerged_events,
         "merged_wall_ms": merged_wall,
         "wall_ms_per_merged_pr": (merged_wall / merged_with_cost) if merged_with_cost else None,
-        "tokens_per_merged_pr": (merged_tokens / merged_with_cost) if (merged_with_cost and merged_tokens_known) else None,
+        "tokens_per_merged_pr": (
+            (merged_tokens / merged_with_cost)
+            if (merged_with_cost and merged_tokens_complete) else None
+        ),
         "tokens_known_events": merged_tokens_known,
+        "tokens_total_events": merged_events,
+        "tokens_coverage_complete": merged_tokens_complete,
         "per_merged_pr": per_merged,
         # Legacy field: only average over PRs that have attributed cost data.
         "merged_prs": merged_with_cost,
         "events": merged_events,
     }
 
+# Global total_tokens: expose sum only with coverage metadata; keep sum of known
+# for diagnostics but mark incomplete when any event lacks tokens.
+global_tokens_complete = (len(events) > 0 and tokens_known == len(events))
 summary = {
     "schema": "gibson.cost.summary.v1",
     "events": len(events),
     "total_wall_ms": total_wall,
     "total_tokens": total_tokens if tokens_known else None,
     "tokens_known_events": tokens_known,
+    "tokens_total_events": len(events),
+    "tokens_coverage_complete": global_tokens_complete,
     "total_acus": total_acus if acus_known else None,
     "acus_known_events": acus_known,
-    "by_pool": dict((k, dict(v)) for k, v in sorted(by_pool.items())),
-    "by_hat": dict((k, dict(v)) for k, v in sorted(by_hat.items())),
+    "by_pool": by_pool_out,
+    "by_hat": dict((k, {
+        "events": v["events"],
+        "wall_ms": v["wall_ms"],
+        "tokens": v["tokens"] if (v["events"] > 0 and v["tokens_known"] == v["events"]) else None,
+        "tokens_known_events": v["tokens_known"],
+        "tokens_total_events": v["events"],
+        "tokens_coverage_complete": (v["events"] > 0 and v["tokens_known"] == v["events"]),
+    }) for k, v in sorted(by_hat.items())),
     "prs_touched": sorted(prs),
     "merged_events": merged_events if merged_numbers else None,
     "unmerged_events": unmerged_events if merged_numbers else None,
@@ -413,7 +532,10 @@ if fmt == "json":
     sys.exit(0)
 print("cost-ledger summary: %d event(s), wall_ms=%d" % (len(events), total_wall))
 if tokens_known:
-    print("  tokens (from %d event(s) with data): %d" % (tokens_known, total_tokens))
+    cov = "complete" if global_tokens_complete else "partial"
+    print("  tokens (from %d/%d event(s) with data, coverage=%s): %s" % (
+        tokens_known, len(events), cov,
+        str(total_tokens) if global_tokens_complete else "unknown (incomplete coverage)"))
 else:
     print("  tokens: unknown (no event recorded a token count - not zero)")
 if acus_known:
@@ -421,15 +543,25 @@ if acus_known:
 else:
     print("  ACUs: unknown")
 print("  by pool:")
-for pool, d in sorted(by_pool.items()):
-    tok = (", tokens=%d" % d["tokens"]) if d["tokens_known"] else ", tokens=unknown"
-    print("    %s: events=%d wall_ms=%d%s" % (pool, d["events"], d["wall_ms"], tok))
+for pool, d in sorted(by_pool_out.items()):
+    if d["tokens_coverage_complete"]:
+        tok = ", tokens=%d" % d["tokens"]
+    else:
+        tok = ", tokens=unknown (%d/%d known)" % (d["tokens_known_events"], d["tokens_total_events"])
+    extra = ""
+    if merged_numbers:
+        extra = ", merged_events=%s unmerged_events=%s merged_prs=%s" % (
+            d["merged_events"], d["unmerged_events"], d["merged_prs"])
+        if d["merged_prs"]:
+            tpm = ("tokens_per_merged_pr=%.1f" % d["tokens_per_merged_pr"]) if d["tokens_per_merged_pr"] is not None else "tokens_per_merged_pr=unknown"
+            extra += ", wall_ms_per_merged_pr=%.1f, %s" % (d["wall_ms_per_merged_pr"], tpm)
+    print("    %s: events=%d wall_ms=%d%s%s" % (pool, d["events"], d["wall_ms"], tok, extra))
 print("  by hat:")
-for hat, d in sorted(by_hat.items()):
+for hat, d in sorted(summary["by_hat"].items()):
     print("    %s: events=%d wall_ms=%d" % (hat, d["events"], d["wall_ms"]))
 if cpm:
     if cpm["merged_prs_with_cost"] > 0:
-        extra = (", tokens=%.1f" % cpm["tokens_per_merged_pr"]) if cpm["tokens_per_merged_pr"] is not None else ", tokens=unknown"
+        extra = (", tokens=%.1f" % cpm["tokens_per_merged_pr"]) if cpm["tokens_per_merged_pr"] is not None else ", tokens=unknown (incomplete coverage %d/%d)" % (cpm["tokens_known_events"], cpm["tokens_total_events"])
         print("  cost-per-merged-PR (%d of %d merged PRs with cost data; %d merged events): wall_ms=%.1f%s" % (
             cpm["merged_prs_with_cost"], cpm["merged_prs_in_input"], cpm["merged_events"],
             cpm["wall_ms_per_merged_pr"], extra))
@@ -440,7 +572,10 @@ if cpm:
     for num in merged_numbers:
         entry = per_merged[str(num)]
         if entry["has_cost_data"]:
-            tok = (", tokens=%d" % entry["tokens"]) if entry["tokens"] is not None else ", tokens=unknown"
+            if entry["tokens_coverage_complete"]:
+                tok = ", tokens=%d" % entry["tokens"]
+            else:
+                tok = ", tokens=unknown (%d/%d known)" % (entry["tokens_known_events"], entry["tokens_total_events"])
             print("    PR #%d: events=%d wall_ms=%d%s" % (num, entry["events"], entry["wall_ms"], tok))
         else:
             print("    PR #%d: no attributed events (not zero-cost success)" % num)

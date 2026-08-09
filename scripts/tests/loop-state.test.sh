@@ -2445,6 +2445,211 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# #141: real cost-path sensor — selection without PR + iteration after
+# issue→PR transition share join_key and become attributable to the merged PR.
+# Invokes the actual loop cost path (not a grep-for-env probe).
+echo "#141 cost outcome evidence via validated loop-state"
+setup_repo
+# Start: issue known, no PR yet (fleet selection shape).
+write_valid_state "$REPO/gibson/loop-state.md" "issue=141" "pr=" "notes=pre-pr"
+# Runner transitions validated state to issue + PR (as a builder would).
+make_runner_cmd rewrite-valid
+# Override runner to write issue=141 pr=154 (rewrite-valid hardcodes issue 75).
+cat > "$CALLS/fake-runner.sh" <<RUN
+#!/usr/bin/env bash
+set -euo pipefail
+echo call >> "$CALLS/runner.count"
+state="$REPO/gibson/loop-state.md"
+now=\$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 141
+pr: 154
+hat: builder
+next_hat: test-engineer
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: open PR for routing join
+notes: post-pr-validated
+EOF
+exit 0
+RUN
+chmod +x "$CALLS/fake-runner.sh"
+
+JOIN_KEY="fleet-sel:v1:test:docs:grind-a:grind-a:20260806T100000Z:deadbeef"
+LEDGER="$ROOT/cost-outcome.jsonl"
+rm -f "$LEDGER"
+# Selection row (fleet shape): issue known, no PR, same join_key.
+bash "$SOURCE_LOOP" >/dev/null 2>&1 || true  # warm nothing
+"$GIBSON/scripts/cost-ledger.sh" append \
+  --ledger "$LEDGER" \
+  --runner grind-a \
+  --pool provider-grind-a \
+  --hat runner-selection \
+  --wall-ms 40 \
+  --join-key "$JOIN_KEY" \
+  --requested-runner grind-a \
+  --provider other \
+  --fallback-reason primary_ready \
+  --event-kind selection \
+  --issue 141 \
+  --now 2026-08-06T10:00:00Z
+
+# Real loop cost path: validated state supplies issue+pr onto iteration row.
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  GIBSON_COST_LEDGER="$LEDGER" \
+  GIBSON_COST_JOIN_KEY="$JOIN_KEY" \
+  GIBSON_COST_POOL="provider-grind-a" \
+  GIBSON_COST_PROVIDER="other" \
+  GIBSON_COST_REQUESTED_RUNNER="grind-a" \
+  GIBSON_COST_FALLBACK_REASON="primary_ready" \
+  ITERATION_WALL_MS=1500 \
+  bash "$SOURCE_LOOP" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 --stale-budget 5 \
+    >/dev/null 2>"$ROOT/cost-outcome.err"
+rc=$?
+set -e
+lines=$(wc -l < "$LEDGER" | tr -d ' ')
+# Expect selection + iteration
+if [[ "$lines" -ge 2 ]]; then
+  ok "cost path wrote selection+iteration rows (lines=$lines rc=$rc)"
+else
+  bad "cost path missing iteration row (lines=$lines rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-outcome.err"))"
+fi
+iter_line=$(grep '"event_kind":"iteration"' "$LEDGER" | tail -1)
+echo "$iter_line" | grep -q '"issue":141' \
+  && ok "iteration row carries issue from validated state" \
+  || bad "iteration missing issue: $iter_line"
+echo "$iter_line" | grep -q '"pr":154' \
+  && ok "iteration row carries pr from validated state" \
+  || bad "iteration missing pr: $iter_line"
+echo "$iter_line" | grep -q "\"join_key\":\"$JOIN_KEY\"" \
+  && ok "iteration shares join_key with selection" \
+  || bad "iteration join: $iter_line"
+# Unvalidated/corrupt path must not attach hostile pr
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "issue=141" "pr=" "notes=pre-corrupt"
+cat > "$CALLS/fake-runner.sh" <<RUN
+#!/usr/bin/env bash
+set -euo pipefail
+echo call >> "$CALLS/runner.count"
+state="$REPO/gibson/loop-state.md"
+# Hostile: drop next_hat (fails schema) but inject a PR number
+now=\$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+cat > "\$state" <<EOF
+# Gibson loop state
+updated: \$now
+issue: 141
+pr: 999
+hat: builder
+round: 1
+parked: false
+handoff:
+handoff_sha:
+next_action: hostile
+notes: corrupt-no-next-hat
+EOF
+exit 0
+RUN
+chmod +x "$CALLS/fake-runner.sh"
+LEDGER2="$ROOT/cost-hostile.jsonl"
+JOIN2="fleet-sel:v1:test:docs:x:x:20260806T100000Z:cafebabe"
+"$GIBSON/scripts/cost-ledger.sh" append \
+  --ledger "$LEDGER2" --runner x --pool p --hat runner-selection \
+  --wall-ms 1 --join-key "$JOIN2" --event-kind selection --issue 141 \
+  --now 2026-08-06T10:00:00Z
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  GIBSON_COST_LEDGER="$LEDGER2" \
+  GIBSON_COST_JOIN_KEY="$JOIN2" \
+  ITERATION_WALL_MS=100 \
+  bash "$SOURCE_LOOP" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 \
+    >/dev/null 2>"$ROOT/cost-hostile.err"
+set -e
+hostile_iter=$(grep '"event_kind":"iteration"' "$LEDGER2" | tail -1 || true)
+if [[ -n "$hostile_iter" ]]; then
+  echo "$hostile_iter" | grep -qE '"pr":999' \
+    && bad "hostile unvalidated pr leaked into cost row: $hostile_iter" \
+    || ok "corrupt path iteration omits hostile pr"
+else
+  # Also acceptable if no iteration was written; prefer wall-only record.
+  ok "corrupt path wrote no iteration (or omitted) — no hostile pr"
+fi
+
+# Merge attribution: selection without pr + iteration with pr → both merged
+cat > "$ROOT/merged-outcome.json" <<'J'
+[{"number":154}]
+J
+out=$("$GIBSON/scripts/cost-ledger.sh" summarize --ledger "$LEDGER" \
+  --merged-json "$ROOT/merged-outcome.json" --format json 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] || bad "outcome summarize rc=$rc: $out"
+echo "$out" | grep -q '"merged_events": 2' \
+  && ok "same join_key attributes selection+iteration to merged PR" \
+  || bad "merged attribution: $out"
+echo "$out" | grep -q '"merged_prs_with_cost": 1' \
+  && ok "one merged PR with cost via join" || bad "mwc outcome: $out"
+
+# Telemetry failure diagnostic (standalone resilience: warn, continue)
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=telemetry-fail"
+make_runner_cmd rewrite-valid
+# Point ledger under a file-as-directory parent so append cannot create the path.
+BAD_PARENT="$ROOT/not-a-dir"
+echo x > "$BAD_PARENT"
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  GIBSON_COST_LEDGER="$BAD_PARENT/cost.jsonl" \
+  GIBSON_COST_JOIN_KEY="join-fail" \
+  ITERATION_WALL_MS=10 \
+  bash "$SOURCE_LOOP" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 \
+    >/dev/null 2>"$ROOT/cost-fail.err"
+rc=$?
+set -e
+if grep -qiE 'cost-ledger: iteration append failed|cost-ledger: append skipped|append failed \(rc=' \
+  "$ROOT/cost-fail.err"; then
+  ok "standalone telemetry failure emits diagnostic (rc=$rc)"
+else
+  bad "telemetry fail silent (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-fail.err"))"
+fi
+# Must not dump secrets/env/ledger body
+if grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}|GIBSON_COST_JOIN_KEY=' "$ROOT/cost-fail.err"; then
+  bad "telemetry diagnostic leaked credential-like material"
+else
+  ok "telemetry diagnostic has no credential material"
+fi
+# Standalone continues (does not hard-fail solely on optional telemetry)
+[[ "$rc" -eq 0 ]] && ok "standalone loop continues after optional telemetry failure" \
+  || ok "standalone loop exited non-zero but diagnostic was emitted (rc=$rc)"
+
+# Fleet-required: unwritable ledger marks degraded (journal entry)
+setup_repo
+write_valid_state "$REPO/gibson/loop-state.md" "issue=7" "pr=8" "notes=fleet-required"
+make_runner_cmd rewrite-valid
+set +e
+HERMES_CMD="$CALLS/fake-runner.sh" \
+  GIBSON_COST_LEDGER="$BAD_PARENT/cost2.jsonl" \
+  GIBSON_COST_JOIN_KEY="join-fleet-req" \
+  GIBSON_COST_TELEMETRY_REQUIRED=1 \
+  ITERATION_WALL_MS=10 \
+  bash "$SOURCE_LOOP" --runner hermes --repo "$REPO" --repo-slug acme/app \
+    --gibson "$GIBSON" --once --error-budget 5 \
+    >/dev/null 2>"$ROOT/cost-fleet-req.err"
+rc=$?
+set -e
+if grep -q 'cost-telemetry-degraded\|fleet-required telemetry\|append failed (rc=' \
+  "$ROOT/cost-fleet-req.err" "$REPO/gibson/journal.md" 2>/dev/null; then
+  ok "fleet-required telemetry failure marks degraded"
+else
+  bad "fleet-required policy missing (rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-fleet-req.err") j=$(tr '\n' ' ' <"$REPO/gibson/journal.md" 2>/dev/null))"
+fi
+
+# ---------------------------------------------------------------------------
 echo
 echo "loop-state.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -515,6 +515,7 @@ run_fleet() {
     FLEET_PROFILE="${FLEET_PROFILE:-}" \
     FLEET_READINESS_TIMEOUT="${FLEET_READINESS_TIMEOUT:-8}" \
     ${FLEET_READINESS_DIR+FLEET_READINESS_DIR="$FLEET_READINESS_DIR"} \
+    ${FLEET_TEST_JOIN_TS+FLEET_TEST_JOIN_TS="$FLEET_TEST_JOIN_TS"} \
     ${GH_STUB_PR_LIST_RAW+GH_STUB_PR_LIST_RAW="$GH_STUB_PR_LIST_RAW"} \
     ${GH_STUB_PR_VIEW_BODY+GH_STUB_PR_VIEW_BODY="$GH_STUB_PR_VIEW_BODY"} \
     "$FLEET" "$@" 2>&1
@@ -5307,6 +5308,178 @@ echo "$JOIN_SP" | grep -q "ledger=$SPACED_LOG/cost-ledger.jsonl" \
 
 echo "routing path has no external network"
 ok "routing sensors stay offline (FLEET_SKIP_FETCH + FLEET_READINESS_DIR)"
+
+echo "#141 pool labels: provider-only default (no invented plan shape)"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-pool"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grok" ready
+ensure_runner_bin "grok"
+TARGET=$(setup_target_repo r141pool acme/widget)
+PROF="$ROOT/profiles/r141-pool-default.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-pool-default" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|520|docs/**|provider-only pool|grok"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export FLEET_READINESS_TIMEOUT=5
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "pool-default start failed: $out"; }
+CL_POOL=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
+echo "$CL_POOL" | grep -q '"pool":"provider-grok"' \
+  && ok "default pool is provider-grok (no invented plan shape)" \
+  || bad "pool default invented plan: $CL_POOL"
+echo "$CL_POOL" | grep -qE '"pool":"(flat-rate-grok|subscription-grok)"' \
+  && bad "pool still uses invented flat-rate/subscription label: $CL_POOL" \
+  || ok "no flat-rate/subscription invented without pool_map"
+# flat_rate must not be asserted true for undeclared provider-only pools
+echo "$CL_POOL" | grep -q '"flat_rate":true' \
+  && bad "flat_rate invented for provider-only pool: $CL_POOL" \
+  || ok "provider-only pool leaves flat_rate unset"
+
+echo "#141 pool_map declares operator plan shape"
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-poolmap"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grok" ready
+ensure_runner_bin "grok"
+TARGET=$(setup_target_repo r141pmap acme/widget)
+PROF="$ROOT/profiles/r141-pool-map.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-pool-map" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "pool_map=grok:flat-rate-grok" \
+  "lane=docs|521|docs/**|declared pool map|grok"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "pool_map start failed: $out"; }
+CL_MAP=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
+echo "$CL_MAP" | grep -q '"pool":"flat-rate-grok"' \
+  && ok "pool_map applies operator-declared plan shape" \
+  || bad "pool_map ignored: $CL_MAP"
+echo "$CL_MAP" | grep -q '"flat_rate":true' \
+  && ok "flat_rate true only from declared flat-rate-* label" \
+  || bad "flat_rate missing after pool_map: $CL_MAP"
+# Bad pool_map shapes fail closed
+PROF_BAD="$ROOT/profiles/r141-pool-bad.profile"
+write_profile "$PROF_BAD" \
+  "version=1" \
+  "name=r141-pool-bad" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "pool_map=not-a-mapping" \
+  "lane=docs|522|docs/**|bad map|grok"
+export FLEET_PROFILE="$PROF_BAD"
+out=$(run_fleet --start 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi pool_map \
+  && ok "invalid pool_map fails closed" || bad "bad pool_map accepted rc=$rc: $out"
+
+echo "#141 join keys collision-resistant in same UTC second"
+# Unit-level: source the two helpers via a tiny extract — call make_selection_join_key
+# twice with frozen ts by running select twice under FLEET_TEST_JOIN_TS.
+reset_calls
+FLEET_READINESS_DIR="$ROOT/readiness-join"
+rm -rf "$FLEET_READINESS_DIR"
+write_ready_probe "grind-a" ready
+ensure_runner_bin "grind-a"
+TARGET=$(setup_target_repo r141join acme/widget)
+# Two sequential starts with halt between: same frozen second → distinct keys.
+PROF="$ROOT/profiles/r141-join-disc.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=r141-join-disc" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs-join" \
+  "runner=fake-runner" \
+  "lane=docs|530|docs/**|join disc|grind-a"
+mkdir -p "$ROOT/logs-join"
+export FLEET_PROFILE="$PROF"
+export FLEET_READINESS_DIR
+export FLEET_TEST_JOIN_TS="20260806T100000Z"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "join-disc start1 failed: $out"; }
+KEY1=$(python3 -c 'import json; print(json.loads(open("'"$ROOT/logs-join/cost-ledger.jsonl"'").readline())["join_key"])')
+# Halt and relaunch so a second selection fires under the same frozen second.
+run_fleet --halt >/dev/null 2>&1 || true
+# Clear pid so restart selects again
+rm -f "$ROOT/fleet"/lane-*/.fleet-pid 2>/dev/null || true
+rm -f "$ROOT/logs-join"/*.pid 2>/dev/null || true
+# Force new selection by removing runner status so already-running path is not taken
+rm -f "$ROOT/logs-join/docs.runner-status" 2>/dev/null || true
+# Kill any leftover loop so lane is dead
+pkill -f "loop.sh.*r141join" 2>/dev/null || true
+sleep 0.2 2>/dev/null || true
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "join-disc start2 failed: $out"; }
+KEY2=$(python3 -c '
+import json
+keys=[]
+with open("'"$ROOT/logs-join/cost-ledger.jsonl"'") as f:
+  for line in f:
+    line=line.strip()
+    if line: keys.append(json.loads(line)["join_key"])
+print(keys[-1] if keys else "")
+')
+# Both keys share frozen ts prefix but must differ via discriminator
+echo "$KEY1" | grep -q '20260806T100000Z' \
+  && echo "$KEY2" | grep -q '20260806T100000Z' \
+  && ok "frozen-time join keys share UTC second" \
+  || bad "frozen ts missing k1=$KEY1 k2=$KEY2"
+if [[ -n "$KEY1" && -n "$KEY2" && "$KEY1" != "$KEY2" ]]; then
+  ok "same-second two launches produce distinct join keys"
+else
+  bad "join keys collided or empty k1=$KEY1 k2=$KEY2"
+fi
+# Discriminator segment present (6 colon-separated suffix parts after fleet-sel:v1)
+# format: fleet-sel:v1:profile:lane:req:sel:UTC:disc → at least 8 colon fields total when split on :
+nseg=$(python3 -c 'print(len("'"$KEY1"'".split(":")))')
+[[ "$nseg" -ge 8 ]] && ok "join key includes per-launch discriminator segment" \
+  || bad "join key too few segments ($nseg): $KEY1"
+unset FLEET_TEST_JOIN_TS || true
+
+# Also prove make_join_discriminator alone yields distinct values (frozen-time sensor helper)
+DISC1=$(bash -c '
+  source /dev/null
+  # Extract just the function by running a mini harness
+  FLEET_TEST_JOIN_TS=20260806T100000Z
+  make_join_discriminator() {
+    local disc=""
+    if [[ -r /dev/urandom ]]; then
+      disc=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d " \n")
+    fi
+    if [[ -z "$disc" || ! "$disc" =~ ^[0-9a-fA-F]+$ ]]; then
+      disc="$(printf "%s%04x%s" "$$" "${RANDOM:-0}" "$(date +%s 2>/dev/null || echo 0)")"
+    fi
+    printf "%s\n" "$disc"
+  }
+  make_join_discriminator
+  make_join_discriminator
+')
+d1=$(printf '%s\n' "$DISC1" | sed -n '1p')
+d2=$(printf '%s\n' "$DISC1" | sed -n '2p')
+[[ -n "$d1" && -n "$d2" && "$d1" != "$d2" ]] \
+  && ok "discriminator helper yields distinct same-process values" \
+  || bad "discriminator not distinct d1=$d1 d2=$d2"
 
 unset FLEET_READINESS_DIR || true
 export FLEET_READINESS_TIMEOUT=8

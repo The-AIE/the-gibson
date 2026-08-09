@@ -229,6 +229,170 @@ else
   bad "loop-fleet missing cost-ledger join wiring"
 fi
 
+echo "per-pool merged outcomes (two pools, mixed joins)"
+POOL_LEDGER="$ROOT/by-pool.jsonl"
+rm -f "$POOL_LEDGER"
+# Pool A: selection + iteration → merged PR 10; plus unmerged iteration
+"$CL" append --ledger "$POOL_LEDGER" --runner grind-a --pool provider-grind-a \
+  --hat runner-selection --wall-ms 50 --join-key join-a --event-kind selection \
+  --issue 1 --now 2026-08-06T10:00:00Z
+"$CL" append --ledger "$POOL_LEDGER" --runner grind-a --pool provider-grind-a \
+  --hat builder --wall-ms 1000 --join-key join-a --event-kind iteration \
+  --issue 1 --pr 10 --tokens 2000 --now 2026-08-06T10:05:00Z
+"$CL" append --ledger "$POOL_LEDGER" --runner grind-a --pool provider-grind-a \
+  --hat builder --wall-ms 400 --join-key join-a-open --event-kind iteration \
+  --issue 2 --pr 11 --now 2026-08-06T10:10:00Z
+# Pool B: selection + iteration → merged PR 20 (complete tokens); selection only unmerged
+"$CL" append --ledger "$POOL_LEDGER" --runner frontier-b --pool provider-frontier-b \
+  --hat runner-selection --wall-ms 30 --join-key join-b --event-kind selection \
+  --issue 3 --now 2026-08-06T10:15:00Z
+"$CL" append --ledger "$POOL_LEDGER" --runner frontier-b --pool provider-frontier-b \
+  --hat builder --wall-ms 2000 --join-key join-b --event-kind iteration \
+  --issue 3 --pr 20 --tokens 5000 --now 2026-08-06T10:20:00Z
+"$CL" append --ledger "$POOL_LEDGER" --runner frontier-b --pool provider-frontier-b \
+  --hat runner-selection --wall-ms 20 --join-key join-b-only --event-kind selection \
+  --issue 4 --now 2026-08-06T10:25:00Z
+cat > "$ROOT/merged-pools.json" <<'J'
+[{"number":10},{"number":20}]
+J
+out=$("$CL" summarize --ledger "$POOL_LEDGER" --merged-json "$ROOT/merged-pools.json" --format json 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] || bad "by-pool summarize rc=$rc: $out"
+# Extract by_pool via python for structural asserts
+py_out=$(python3 -c '
+import json,sys
+s=json.loads(sys.argv[1])
+bp=s["by_pool"]
+a=bp["provider-grind-a"]
+b=bp["provider-frontier-b"]
+assert a["merged_events"]==2, a
+assert a["unmerged_events"]==1, a
+assert a["merged_prs"]==1, a
+assert a["merged_wall_ms"]==1050, a
+assert a["wall_ms_per_merged_pr"]==1050.0, a
+# Pool A: selection has no tokens, iteration has tokens → incomplete coverage
+assert a["tokens_per_merged_pr"] is None, a
+assert a["merged_tokens_coverage_complete"] is False, a
+assert b["merged_events"]==2, b
+assert b["unmerged_events"]==1, b
+assert b["merged_prs"]==1, b
+assert b["merged_wall_ms"]==2030, b
+# Pool B: both selection (no tokens) + iteration (tokens) → incomplete
+assert b["tokens_per_merged_pr"] is None, b
+print("ok")
+' "$out" 2>&1) || true
+[[ "$py_out" == "ok" ]] && ok "by_pool merged/unmerged + incomplete tokens" || bad "by_pool struct: $py_out out=$out"
+
+# Complete token coverage on a dedicated pool: both events have tokens
+COMP="$ROOT/complete-tok.jsonl"
+"$CL" append --ledger "$COMP" --runner x --pool pool-complete --hat builder \
+  --wall-ms 100 --pr 30 --tokens 1000 --join-key jc --now 2026-08-06T11:00:00Z
+"$CL" append --ledger "$COMP" --runner x --pool pool-complete --hat builder \
+  --wall-ms 200 --pr 30 --tokens 3000 --join-key jc --now 2026-08-06T11:01:00Z
+cat > "$ROOT/merged-comp.json" <<'J'
+[{"number":30}]
+J
+out=$("$CL" summarize --ledger "$COMP" --merged-json "$ROOT/merged-comp.json" --format json 2>&1)
+py_out=$(python3 -c '
+import json,sys
+s=json.loads(sys.argv[1])
+cpm=s["cost_per_merged_pr"]
+assert cpm["tokens_coverage_complete"] is True, cpm
+assert cpm["tokens_per_merged_pr"]==4000.0, cpm
+assert cpm["tokens_known_events"]==2 and cpm["tokens_total_events"]==2, cpm
+pr=cpm["per_merged_pr"]["30"]
+assert pr["tokens_coverage_complete"] is True and pr["tokens"]==4000, pr
+bp=s["by_pool"]["pool-complete"]
+assert bp["tokens_per_merged_pr"]==4000.0, bp
+assert bp["merged_tokens_coverage_complete"] is True, bp
+print("ok")
+' "$out" 2>&1) || true
+[[ "$py_out" == "ok" ]] && ok "complete token coverage averages" || bad "complete tok: $py_out"
+
+echo "partial token coverage must not invent lower average"
+MIX="$ROOT/mixed-tok.jsonl"
+"$CL" append --ledger "$MIX" --runner x --pool pool-mix --hat builder \
+  --wall-ms 100 --pr 40 --tokens 9000 --join-key jm --now 2026-08-06T12:00:00Z
+"$CL" append --ledger "$MIX" --runner x --pool pool-mix --hat builder \
+  --wall-ms 100 --pr 40 --join-key jm --now 2026-08-06T12:01:00Z
+cat > "$ROOT/merged-mix.json" <<'J'
+[{"number":40}]
+J
+out=$("$CL" summarize --ledger "$MIX" --merged-json "$ROOT/merged-mix.json" --format json 2>&1)
+py_out=$(python3 -c '
+import json,sys
+s=json.loads(sys.argv[1])
+cpm=s["cost_per_merged_pr"]
+assert cpm["tokens_per_merged_pr"] is None, cpm
+assert cpm["tokens_coverage_complete"] is False, cpm
+assert cpm["tokens_known_events"]==1 and cpm["tokens_total_events"]==2, cpm
+pr=cpm["per_merged_pr"]["40"]
+assert pr["tokens"] is None, pr
+assert pr["tokens_coverage_complete"] is False, pr
+assert pr["tokens_known_events"]==1 and pr["tokens_total_events"]==2, pr
+print("ok")
+' "$out" 2>&1) || true
+[[ "$py_out" == "ok" ]] && ok "mixed known/unknown tokens → null average" || bad "mixed tok: $py_out"
+text=$("$CL" summarize --ledger "$MIX" --merged-json "$ROOT/merged-mix.json" --format text 2>&1)
+echo "$text" | grep -q 'tokens=unknown' \
+  && ok "text reports tokens unknown on partial coverage" || bad "text mixed: $text"
+
+echo "hostile JSONL event types fail closed"
+# Boolean pr
+printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1,"pr":true}' \
+  > "$ROOT/hostile-bool.jsonl"
+out=$("$CL" summarize --ledger "$ROOT/hostile-bool.jsonl" 2>&1); rc=$?
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi boolean \
+  && ok "boolean pr rejected" || bad "bool pr rc=$rc: $out"
+# Numeric string pr
+printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1,"pr":"12"}' \
+  > "$ROOT/hostile-str.jsonl"
+out=$("$CL" summarize --ledger "$ROOT/hostile-str.jsonl" 2>&1); rc=$?
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi string \
+  && ok "string pr rejected" || bad "str pr rc=$rc: $out"
+# Float wall_ms
+printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1.5}' \
+  > "$ROOT/hostile-float.jsonl"
+out=$("$CL" summarize --ledger "$ROOT/hostile-float.jsonl" 2>&1); rc=$?
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi float \
+  && ok "float wall_ms rejected" || bad "float wall rc=$rc: $out"
+# Negative tokens
+printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1,"tokens":-3}' \
+  > "$ROOT/hostile-neg.jsonl"
+out=$("$CL" summarize --ledger "$ROOT/hostile-neg.jsonl" 2>&1); rc=$?
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -qiE 'non-negative|negative' \
+  && ok "negative tokens rejected" || bad "neg tok rc=$rc: $out"
+# Valid legacy row still summarizes
+LEG="$ROOT/legacy-ok.jsonl"
+"$CL" append --ledger "$LEG" --runner grok --pool flat-rate --hat builder \
+  --wall-ms 10 --issue 1 --pr 2 --now 2026-08-06T10:00:00Z
+out=$("$CL" summarize --ledger "$LEG" --format json 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"events": 1' \
+  && ok "valid legacy gibson.cost.v1 still summarizes" || bad "legacy: rc=$rc $out"
+
+echo "loop.sh outcome evidence + telemetry policy structure"
+if grep -q 'state_ok' "$SCRIPT_DIR/../loop.sh" \
+  && grep -q 'read_field issue' "$SCRIPT_DIR/../loop.sh" \
+  && grep -q 'read_field pr' "$SCRIPT_DIR/../loop.sh" \
+  && grep -q 'GIBSON_COST_TELEMETRY_REQUIRED' "$SCRIPT_DIR/../loop.sh" \
+  && grep -q 'cost-ledger: iteration append failed' "$SCRIPT_DIR/../loop.sh"; then
+  ok "loop.sh reads validated issue/pr + telemetry diagnostic"
+else
+  bad "loop.sh missing outcome/telemetry policy structure"
+fi
+if grep -q 'make_selection_join_key\|make_join_discriminator' "$SCRIPT_DIR/../loop-fleet.sh" \
+  && grep -q 'pool_map' "$SCRIPT_DIR/../loop-fleet.sh" \
+  && grep -q 'provider-%s\|provider-' "$SCRIPT_DIR/../loop-fleet.sh"; then
+  ok "loop-fleet join discriminator + truthful pool default present"
+else
+  bad "loop-fleet missing join/pool honesty structure"
+fi
+# Must not invent flat-rate/subscription from vendor identity in pool_for_provider
+if grep -A20 '^pool_for_provider()' "$SCRIPT_DIR/../loop-fleet.sh" | grep -qE 'flat-rate-grok|subscription-codex'; then
+  bad "pool_for_provider still invents plan shape from vendor"
+else
+  ok "pool_for_provider does not invent plan shape from vendor"
+fi
+
 echo
 echo "cost-ledger.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

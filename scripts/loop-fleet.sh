@@ -69,6 +69,10 @@ LANE_SELECT_HEALTH=()      # healthy | degraded
 LANE_SELECT_REASON=()      # primary_ready | primary_not_ready:<class> | ...
 LANE_SELECT_POOL=()        # pool label for telemetry
 LANE_SELECT_JOIN=()        # stable join key for later outcome enrichment
+# Optional operator-declared provider → pool labels (plan shape is not inferred
+# from vendor identity). Parallel arrays; empty = provider-only defaults.
+POOL_MAP_PROVIDERS=()
+POOL_MAP_LABELS=()
 
 # Test / ops hooks (PATH stubs preferred; these override when set).
 GH_BIN="${GH_BIN:-gh}"
@@ -334,6 +338,52 @@ validate_lane_id() {
   esac
 }
 
+parse_pool_map_line() {
+  # pool_map=provider:pool-label — operator-declared plan shape for telemetry.
+  # Does not inspect billing, keys, or provider settings. Duplicate providers fail closed.
+  local raw="$1" lineno="${2:-?}"
+  local prov label
+  raw=$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [[ -n "$raw" ]] || die "profile line $lineno: pool_map value is empty (want provider:pool-label)"
+  case "$raw" in
+    *:*) ;;
+    *) die "profile line $lineno: pool_map must be provider:pool-label (got: $raw)" ;;
+  esac
+  prov=${raw%%:*}
+  label=${raw#*:}
+  prov=$(printf '%s' "$prov" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
+  label=$(printf '%s' "$label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [[ -n "$prov" && -n "$label" ]] || die "profile line $lineno: pool_map needs non-empty provider and label"
+  [[ "$prov" =~ ^[a-z][a-z0-9_-]*$ ]] || die "profile line $lineno: invalid pool_map provider '$prov'"
+  # Pool labels are telemetry identifiers only (no shell metacharacters).
+  [[ "$label" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]] || die "profile line $lineno: invalid pool_map label '$label'"
+  local i
+  i=0
+  while [[ $i -lt ${#POOL_MAP_PROVIDERS[@]} ]]; do
+    if [[ "${POOL_MAP_PROVIDERS[$i]}" == "$prov" ]]; then
+      die "profile line $lineno: duplicate pool_map for provider '$prov'"
+    fi
+    i=$((i + 1))
+  done
+  POOL_MAP_PROVIDERS+=("$prov")
+  POOL_MAP_LABELS+=("$label")
+}
+
+lookup_pool_map() {
+  # Print declared pool label for provider family, or empty if undeclared.
+  local fam="$1" i
+  fam=$(printf '%s' "$fam" | tr '[:upper:]' '[:lower:]')
+  i=0
+  while [[ $i -lt ${#POOL_MAP_PROVIDERS[@]} ]]; do
+    if [[ "${POOL_MAP_PROVIDERS[$i]}" == "$fam" ]]; then
+      printf '%s\n' "${POOL_MAP_LABELS[$i]}"
+      return 0
+    fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
 parse_lane_line() {
   # Fields: id|queue|scope|intent[|ordered-route]
   # Exactly 4 or 5 pipe-separated fields. A sixth field fails closed (#139 contract).
@@ -479,6 +529,8 @@ load_profile() {
   LANE_SELECT_REASON=()
   LANE_SELECT_POOL=()
   LANE_SELECT_JOIN=()
+  POOL_MAP_PROVIDERS=()
+  POOL_MAP_LABELS=()
 
   local line lineno=0 key val
   local seen_scalar_keys=""
@@ -503,7 +555,7 @@ load_profile() {
     val=$(printf '%s' "$val" | sed 's/^[[:space:]]*//')
     # trailing space trim for non-intent scalar keys; for lane keep as-is after field split
     case "$key" in
-      version|name|repo|slug|gibson|fleet_dir|log_dir|runner|error_budget|deadline_seconds)
+      version|name|repo|slug|gibson|fleet_dir|log_dir|runner|error_budget|deadline_seconds|pool_map)
         val=$(printf '%s' "$val" | sed 's/[[:space:]]*$//')
         ;;
     esac
@@ -528,12 +580,17 @@ load_profile() {
           deadline_seconds) prof_deadline="$val" ;;
         esac
         ;;
+      pool_map)
+        # Repeated optional mappings: provider:pool-label. Plan shape is operator
+        # knowledge (docs/15) — never inferred from vendor identity alone (#141).
+        parse_pool_map_line "$val" "$lineno"
+        ;;
       lane)
         # Repeated lane= records are required (1–3); uniqueness is enforced per id/issue.
         parse_lane_line "$val"
         ;;
       *)
-        die "profile line $lineno: unknown field '$key' (v1 allows version,name,repo,slug,gibson,fleet_dir,log_dir,runner,error_budget,deadline_seconds,lane)"
+        die "profile line $lineno: unknown field '$key' (v1 allows version,name,repo,slug,gibson,fleet_dir,log_dir,runner,error_budget,deadline_seconds,pool_map,lane)"
         ;;
     esac
   done < "$path"
@@ -1814,20 +1871,53 @@ cmd_provider_id() {
 # --- #141 runner routing: readiness, ordered selection, telemetry -----------
 
 # Map provider family → pool label for selection telemetry only.
-# Does not inspect billing, plans, keys, or paid settings. Flat-rate-first
-# policy is expressed by operator order in the profile route (grind lanes list
-# flat-rate pools first; metered/frontier only at escalation positions).
+# Does NOT invent plan shape (flat-rate / subscription) from vendor identity —
+# that contradicts token-efficiency doctrine (plan shape is operator/current-plan
+# data). Default is truthful provider-only: "provider-<family>". Operators
+# declare real pool economics via optional repeated pool_map=provider:label
+# profile lines. Flat-rate-first preference is still expressed by route order
+# (grind lanes list preferred runners first). No billing/keys/settings inspection.
 pool_for_provider() {
-  local fam
+  local fam mapped
   fam=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
-  case "$fam" in
-    grok)   printf 'flat-rate-grok\n' ;;
-    hermes) printf 'flat-rate-hermes\n' ;;
-    codex)  printf 'subscription-codex\n' ;;
-    claude) printf 'subscription-claude\n' ;;
-    '')     printf 'unknown\n' ;;
-    *)      printf 'other-%s\n' "$fam" ;;
-  esac
+  if [[ -z "$fam" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if mapped=$(lookup_pool_map "$fam" 2>/dev/null); then
+    printf '%s\n' "$mapped"
+    return 0
+  fi
+  printf 'provider-%s\n' "$fam"
+}
+
+# Portable per-launch discriminator (Bash 3.2). Same value is written to both
+# selection telemetry and cost-ledger rows and exported to loop.sh so iteration
+# rows share the join key. Distinct across two launches in the same UTC second.
+make_join_discriminator() {
+  local disc=""
+  # Prefer 8 hex bytes from /dev/urandom (portable; no $RANDOM dependency alone).
+  if [[ -r /dev/urandom ]]; then
+    disc=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  fi
+  if [[ -z "$disc" || ! "$disc" =~ ^[0-9a-fA-F]+$ ]]; then
+    # Fallback: pid + bash RANDOM + epoch (still unique enough for offline sensors).
+    disc="$(printf '%s%04x%s' "$$" "${RANDOM:-0}" "$(date +%s 2>/dev/null || echo 0)")"
+  fi
+  printf '%s\n' "$disc"
+}
+
+# Stable join key for selection + iteration rows.
+# Format: fleet-sel:v1:<profile>:<lane>:<requested>:<selected>:<UTC>:<disc>
+# FLEET_TEST_JOIN_TS (sensors only) freezes the UTC second so collision-resistance
+# of the discriminator can be proven; unset in production.
+make_selection_join_key() {
+  local id="$1" requested="$2" selected="$3"
+  local ts disc
+  ts="${FLEET_TEST_JOIN_TS:-$(date -u +"%Y%m%dT%H%M%SZ")}"
+  disc=$(make_join_discriminator)
+  printf 'fleet-sel:v1:%s:%s:%s:%s:%s:%s\n' \
+    "$PROFILE_NAME" "$id" "$requested" "$selected" "$ts" "$disc"
 }
 
 lane_runner_status_file() { echo "$LOG_DIR/$1.runner-status"; }
@@ -1943,10 +2033,13 @@ with open(path, "a", encoding="utf-8") as f:
   if cl_sh=$(resolve_cost_ledger_sh); then
     ledger=$(fleet_cost_ledger_path)
     # Bash 3.2 + set -u: never expand an empty array with "${arr[@]}".
+    # flat_rate only when the *operator-declared* pool label encodes a known
+    # plan shape prefix. provider-* / unknown never invent economics.
+    # subscription-* is not asserted as flat_rate true (plan shape unknown).
     flat_flag=""
     flat_val=""
     case "$pool" in
-      flat-rate*|subscription-*) flat_flag="--flat-rate"; flat_val="true" ;;
+      flat-rate*) flat_flag="--flat-rate"; flat_val="true" ;;
       metered*|frontier*) flat_flag="--flat-rate"; flat_val="false" ;;
     esac
     set -- \
@@ -1964,8 +2057,10 @@ with open(path, "a", encoding="utf-8") as f:
       --now "$ts"
     if [[ -n "$issue" ]]; then set -- "$@" --issue "$issue"; fi
     if [[ -n "$flat_flag" ]]; then set -- "$@" "$flat_flag" "$flat_val"; fi
-    "$cl_sh" append "$@" >/dev/null 2>&1 \
-      || die "failed to append cost-ledger selection row for lane $id"
+    if ! "$cl_sh" append "$@" >/dev/null 2>&1; then
+      # Selection telemetry is fleet-required when a cost ledger path is in use.
+      die "lane $id: cost-ledger selection append failed (fleet-required telemetry; check ledger path writability — no secrets printed)"
+    fi
   else
     info "lane $id: cost-ledger.sh not found — selection join row skipped"
   fi
@@ -2220,8 +2315,8 @@ select_lane_runner() {
   fi
 
   pool=$(pool_for_provider "$(cmd_provider_id "$selected" 2>/dev/null || echo other)")
-  # Stable join key for later merged-PR outcome enrichment (fleet-local).
-  join="fleet-sel:v1:${PROFILE_NAME}:${id}:${requested}:${selected}:$(date -u +"%Y%m%dT%H%M%SZ")"
+  # Collision-resistant join key (UTC second + per-launch discriminator).
+  join=$(make_selection_join_key "$id" "$requested" "$selected")
 
   LANE_REQUESTED[$idx]="$requested"
   LANE_SELECTED[$idx]="$selected"
@@ -2861,6 +2956,8 @@ do_start() {
     # Export three-role cmds so loop.sh hats can shell out.
     if [[ "$FLEET_SYNC_LAUNCH" == "1" ]]; then
       # Deterministic offline path: no background jobs (sensors / CI).
+      # GIBSON_COST_TELEMETRY_REQUIRED=1: iteration append failure is degraded
+      # (see loop.sh policy), not silent.
       env \
         REVIEWER_CMD="$REVIEWER_CMD" \
         RELEASE_CMD="$RELEASE_CMD" \
@@ -2870,6 +2967,7 @@ do_start() {
         GIBSON_COST_REQUESTED_RUNNER="$sel_req" \
         GIBSON_COST_FALLBACK_REASON="$sel_reason" \
         GIBSON_COST_PROVIDER="$sel_provider" \
+        GIBSON_COST_TELEMETRY_REQUIRED=1 \
         "$LOOP_SH" \
         --runner "$lane_runner" \
         --repo "$d" \
@@ -2888,6 +2986,7 @@ do_start() {
         GIBSON_COST_REQUESTED_RUNNER="$sel_req" \
         GIBSON_COST_FALLBACK_REASON="$sel_reason" \
         GIBSON_COST_PROVIDER="$sel_provider" \
+        GIBSON_COST_TELEMETRY_REQUIRED=1 \
         "$LOOP_SH" \
         --runner "$lane_runner" \
         --repo "$d" \

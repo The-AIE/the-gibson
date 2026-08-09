@@ -232,14 +232,48 @@ fi
 # requested runner / fallback reason) associate iterations with loop-fleet
 # selection rows. Defined at top level (not inside the silent-noop if/elif) so
 # the normal $GIBSON/scripts path still registers the function.
+#
+# Outcome evidence (issue / pr) is taken ONLY from validated loop-state via
+# read_field after post-run schema validation (or the byte-identical exit-0
+# path whose pre-run state already validated). Unvalidated hostile state is
+# never read for join attribution. state_ok=1 enables those fields; state_ok=0
+# records wall/join only.
+#
+# Telemetry failure policy (explicit, tested):
+#   - Standalone / optional ledger: emit a sanitized diagnostic and continue
+#     (loop resilience). Never print ledger body, probe output, env, or secrets.
+#   - Fleet-required (GIBSON_COST_TELEMETRY_REQUIRED=1): same diagnostic, then
+#     non-zero return so the caller can mark degraded / fail closed.
 cost_ledger_record_iteration() {
-  local wall_ms="${1:-0}" hat="${2:-loop-step}"
+  local wall_ms="${1:-0}" hat="${2:-loop-step}" state_ok="${3:-0}"
   local ledger="${GIBSON_COST_LEDGER:-}"
+  local cl_sh issue_v pr_v pool rc cl_err
   [[ -n "$ledger" ]] || return 0
-  [[ -x "$SCRIPT_DIR/cost-ledger.sh" || -f "$SCRIPT_DIR/cost-ledger.sh" ]] || return 0
-  local pool="${GIBSON_COST_POOL:-unknown}"
-  # Bash 3.2 + set -u: build argv as a string of carefully-quoted optional
-  # flags via positional rebuild — never expand empty arrays with "${arr[@]}".
+  cl_sh=""
+  if [[ -x "$SCRIPT_DIR/cost-ledger.sh" || -f "$SCRIPT_DIR/cost-ledger.sh" ]]; then
+    cl_sh="$SCRIPT_DIR/cost-ledger.sh"
+  elif [[ -n "${GIBSON:-}" && ( -x "$GIBSON/scripts/cost-ledger.sh" || -f "$GIBSON/scripts/cost-ledger.sh" ) ]]; then
+    cl_sh="$GIBSON/scripts/cost-ledger.sh"
+  else
+    info "cost-ledger: append skipped — cost-ledger.sh not found (ledger configured; no path/secret printed)"
+    if [[ "${GIBSON_COST_TELEMETRY_REQUIRED:-0}" == "1" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+  pool="${GIBSON_COST_POOL:-unknown}"
+  issue_v=""
+  pr_v=""
+  if [[ "$state_ok" == "1" ]]; then
+    # Validated state only — same grammar as validate-loop-state / read_field.
+    issue_v=$(read_field issue 2>/dev/null || true)
+    pr_v=$(read_field pr 2>/dev/null || true)
+    # Accept only non-negative integer shapes; empty/malformed stay omitted.
+    [[ "$issue_v" =~ ^[0-9]+$ ]] || issue_v=""
+    [[ "$pr_v" =~ ^[0-9]+$ ]] || pr_v=""
+  fi
+  # Bash 3.2 + set -u: build argv via positional rebuild — never expand empty
+  # arrays with "${arr[@]}".
   set -- \
     --ledger "$ledger" \
     --runner "${RUNNER:-unknown}" \
@@ -247,10 +281,10 @@ cost_ledger_record_iteration() {
     --hat "$hat" \
     --wall-ms "$wall_ms" \
     --event-kind iteration
-  if [[ -n "${ISSUE:-}" ]]; then set -- "$@" --issue "$ISSUE"; fi
-  if [[ -n "${PR_NUMBER:-}" ]]; then set -- "$@" --pr "$PR_NUMBER"; fi
-  if [[ -n "${ITERATION:-}" ]]; then set -- "$@" --iteration "$ITERATION"; fi
-  if [[ -n "${REPO_SLUG:-}" ]]; then set -- "$@" --repo "$REPO_SLUG"; fi
+  if [[ -n "$issue_v" ]]; then set -- "$@" --issue "$issue_v"; fi
+  if [[ -n "$pr_v" ]]; then set -- "$@" --pr "$pr_v"; fi
+  if [[ -n "${iter:-}" && "${iter}" =~ ^[0-9]+$ ]]; then set -- "$@" --iteration "$iter"; fi
+  if [[ -n "${EXPECTED_REPO_SLUG:-}" ]]; then set -- "$@" --repo "$EXPECTED_REPO_SLUG"; fi
   if [[ -n "${GIBSON_COST_TOKENS:-}" ]]; then set -- "$@" --tokens "$GIBSON_COST_TOKENS"; fi
   if [[ -n "${GIBSON_COST_ACUS:-}" ]]; then set -- "$@" --acus "$GIBSON_COST_ACUS"; fi
   if [[ -n "${GIBSON_COST_FLAT_RATE:-}" ]]; then set -- "$@" --flat-rate "$GIBSON_COST_FLAT_RATE"; fi
@@ -258,7 +292,28 @@ cost_ledger_record_iteration() {
   if [[ -n "${GIBSON_COST_REQUESTED_RUNNER:-}" ]]; then set -- "$@" --requested-runner "$GIBSON_COST_REQUESTED_RUNNER"; fi
   if [[ -n "${GIBSON_COST_PROVIDER:-}" ]]; then set -- "$@" --provider "$GIBSON_COST_PROVIDER"; fi
   if [[ -n "${GIBSON_COST_FALLBACK_REASON:-}" ]]; then set -- "$@" --fallback-reason "$GIBSON_COST_FALLBACK_REASON"; fi
-  "$SCRIPT_DIR/cost-ledger.sh" append "$@" >/dev/null 2>&1 || true
+  cl_err=$(mktemp "${TMPDIR:-/tmp}/gibson-cost-err.XXXXXX" 2>/dev/null || echo "")
+  set +e
+  if [[ -n "$cl_err" ]]; then
+    "$cl_sh" append "$@" >/dev/null 2>"$cl_err"
+    rc=$?
+  else
+    "$cl_sh" append "$@" >/dev/null 2>&1
+    rc=$?
+  fi
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    # Sanitized diagnostic only — never dump ledger contents, env, or err body
+    # (may echo paths). Class + rc are enough for operators.
+    info "cost-ledger: iteration append failed (rc=$rc class=append_error) — outcome telemetry missing for this step; check ledger path writability and cost-ledger.sh (no secrets printed)"
+    rm -f "$cl_err" 2>/dev/null || true
+    if [[ "${GIBSON_COST_TELEMETRY_REQUIRED:-0}" == "1" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+  rm -f "$cl_err" 2>/dev/null || true
+  return 0
 }
 
 # Resolve --stale-budget: omitted means exactly the (possibly custom) error-budget.
@@ -2446,10 +2501,11 @@ while true; do
         clear_repo_boundary_guard
         rm -f "$PROMPT_FILE"
 
-        # Cost meter (#74): record wall time after every real runner invocation.
-        # Uses iteration_start (strict UTC) when wall ms are not pre-set.
+        # Cost wall time (#74): measure immediately after the runner; the
+        # ledger append itself waits until post-run validation so issue/pr
+        # can be read from validated state only (#141).
+        _cl_wall="${ITERATION_WALL_MS:-0}"
         if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
-          _cl_wall="${ITERATION_WALL_MS:-0}"
           if [[ -z "${ITERATION_WALL_MS:-}" && -n "${iteration_start:-}" ]]; then
             _cl_now=$(date -u +%s 2>/dev/null || echo 0)
             # iteration_start is ISO-8601; best-effort epoch via date -d when available
@@ -2461,7 +2517,6 @@ while true; do
             # clamp negative (clock skew) to 0
             [[ "$_cl_wall" -lt 0 ]] && _cl_wall=0
           fi
-          cost_ledger_record_iteration "${_cl_wall}" "${hat:-loop-step}"
         fi
 
         if ! guard_control_plane_clean; then
@@ -2490,6 +2545,13 @@ while true; do
         if [[ "$unchanged_zero" -eq 0 ]] &&
           ! run_validate_loop_state "$STATE_FILE" "$post_min" 2>"$post_diag"; then
           journal_normal_completion=0
+          # Cost meter on corrupt path: wall/join only — never read hostile state
+          # for issue/pr (#141). Failure policy is soft unless fleet-required.
+          if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
+            if ! cost_ledger_record_iteration "${_cl_wall}" "${hat:-loop-step}" 0; then
+              info "cost-ledger: fleet-required telemetry degraded after state-corrupt iteration"
+            fi
+          fi
           # state-corrupt takes precedence over runner-failure even when ec != 0.
           # Count exactly once as state-corrupt; do not also count runner-failure.
           {
@@ -2540,7 +2602,31 @@ while true; do
         else
           rm -f "$post_diag"
           # Valid post-run state (schema + freshness), or the explicit
-          # byte-identical exit-0 no-progress case above. Precedence from here:
+          # byte-identical exit-0 no-progress case above. Outcome evidence
+          # (issue/pr) may now be read via read_field for cost join (#141).
+          if [[ -n "${GIBSON_COST_LEDGER:-}" ]]; then
+            if ! cost_ledger_record_iteration "${_cl_wall}" "${hat:-loop-step}" 1; then
+              # Fleet-required telemetry failed on a valid iteration: journal
+              # and count as a soft failure unit so status is not silent.
+              journal_normal_completion=0
+              {
+                echo ""
+                echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · cost-telemetry-degraded"
+                echo "diagnosis: fleet-required cost-ledger iteration append failed (GIBSON_COST_TELEMETRY_REQUIRED=1)."
+                echo "policy: standalone loops warn and continue; fleet-required marks degraded (this entry)."
+                echo "secrets: none printed; check ledger path writability only."
+              } >> "$JOURNAL"
+              info "cost-ledger: fleet-required telemetry degraded (valid iteration recorded without durable cost row)"
+              failures=$((failures + 1))
+              if [[ "$ESCALATE_AFTER" -gt 0 && $failures -eq "$ESCALATE_AFTER" ]]; then
+                escalate
+              fi
+              if [[ $failures -ge $BUDGET ]]; then
+                die "error budget exhausted — fleet-required cost telemetry could not append (docs/11, issue #141)"
+              fi
+            fi
+          fi
+          # Precedence from here:
           #   nonzero exit → runner-failure only (no no-progress sensor)
           #   exit 0       → silent_noop_progressed(snapshot, live)
           #                  progressed → reset failures+stale, may hand off
