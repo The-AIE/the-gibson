@@ -1792,6 +1792,118 @@ rc=$?
 check    "successful empty GraphQL + empty ledger exits 0" "$rc" "0"
 contains "may report nothing to reap after successful empty inventory" "$out" "nothing to reap"
 
+# ===========================================================================
+# #153 review round 8 — successful-but-malformed inventory is not empty
+# ===========================================================================
+echo "#153 r8 · malformed-success inventory never plans nothing to reap"
+# Reproduction: empty legacy ledger + executable reader that exits 0 while
+# printing malformed text. Before the fix this was rc 0 + "nothing to reap".
+new_repo "$ROOT/malinv"
+(
+  cd "$ROOT/malinv/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm 'empty ledger' && git push -q origin main
+) >/dev/null 2>&1
+# Ship a sibling reaper whose pr-claims.sh is the hostile reader so we bind
+# SCRIPT_DIR without rewriting production path resolution.
+mkdir -p "$ROOT/malinv/scripts"
+cp "$REAPER" "$ROOT/malinv/scripts/claim-reaper.sh"
+chmod +x "$ROOT/malinv/scripts/claim-reaper.sh"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+# Hostile reader: exit 0 with text that is not a valid list inventory row.
+# Exactly the class that used to be absorbed as "no PR claims".
+case "${1:-}" in
+  list)
+    echo "this is not a tab-separated claim inventory"
+    exit 0
+    ;;
+  *)
+    echo "malinv pr-claims: unmodelled: $*" >&2
+    exit 64
+    ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+state="$STATE_BASE/malinv"
+mkdir -p "$state"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "malformed-success inventory exits nonzero" \
+  || bad "malformed-success inventory exited 0: $out"
+contains "names malformed inventory row" "$out" "malformed"
+lacks    "must not say nothing to reap on malformed-success" "$out" "nothing to reap"
+lacks    "must not emit empty dry-run plan on malformed-success" "$out" "empty ledger — zero mutations"
+lacks    "must not print successful empty plan summary" "$out" "summary: reap=0"
+
+echo "#153 r8 · truncated inventory row (wrong field count) fails closed"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Only 3 tab fields — not the 8-field list contract.
+    printf '42\tissue-42-trunc\tlib/**\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "truncated inventory row exits nonzero" \
+  || bad "truncated inventory row exited 0: $out"
+contains "names field-count failure" "$out" "8 tab-separated fields"
+lacks    "truncated row is not nothing to reap" "$out" "nothing to reap"
+
+echo "#153 r8 · well-formed single inventory row is accepted (not false refuse)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Fresh activity so the reaper KEEPs rather than reaps — we only care that
+    # the inventory is accepted as readable.
+    printf '7\tissue-7-live\tlib/**\tfeat/7-live\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+# NOW near the claim timestamps so activity is not stale.
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$FRESH_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+check    "well-formed inventory is accepted (exit 0)" "$rc" "0"
+contains "well-formed row is protected/recognized" "$out" "issue-7-live"
+lacks    "well-formed row is not malformed refuse" "$out" "malformed/truncated row"
+
 # ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"

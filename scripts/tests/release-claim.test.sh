@@ -217,7 +217,53 @@ TABLE
 }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-rc-test.XXXXXX")
-trap 'rm -rf "$ROOT"' EXIT
+
+# --- full combined stream capture for the final construction-diag gate ------
+# (#153 review round 8). The suite must fail on unbound-variable /
+# command-not-found diagnostics from its OWN full stdout+stderr stream, not
+# only a synthetic predicate that never inspects earlier output. Capture is
+# one process (no recursive self-execution): save original fds, tee the
+# remainder of this shell into a log while still printing live, and scan the
+# log at exit. run-all.sh keeps its independent parent-side guard.
+_RC_STREAM_LOG=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-stream.XXXXXX")
+_RC_STREAM_FIFO=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-fifo.XXXXXX")
+rm -f "$_RC_STREAM_FIFO"
+mkfifo "$_RC_STREAM_FIFO"
+exec 3>&1 4>&2
+# tee mirrors the combined stream to the original stdout (fd 3). Parents that
+# already combine stderr (run-all: `2>&1`) still see everything; standalone
+# runs keep live output without hiding it.
+tee -a "$_RC_STREAM_LOG" < "$_RC_STREAM_FIFO" >&3 &
+_RC_TEE_PID=$!
+exec >"$_RC_STREAM_FIFO" 2>&1
+
+stream_has_shell_construction_diag() {
+  # $1 = path to a combined stdout+stderr capture
+  grep -qE 'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' "$1" 2>/dev/null
+}
+
+# Standalone suite exit decision: zero FAIL count is not enough when the
+# combined stream carried shell-construction diagnostics.
+decide_suite_exit() {
+  local fail_count="$1" stream="$2"
+  if stream_has_shell_construction_diag "$stream"; then
+    return 1
+  fi
+  [[ "$fail_count" -eq 0 ]]
+}
+
+_rc_restore_streams() {
+  # Re-point stdout/stderr at the originals; closing the FIFO write end lets
+  # tee drain and exit. Safe to call more than once.
+  if [[ -n "${_RC_TEE_PID:-}" ]]; then
+    exec 1>&3 2>&4
+    wait "$_RC_TEE_PID" 2>/dev/null || true
+    exec 3>&- 4>&-
+    _RC_TEE_PID=""
+  fi
+}
+
+trap '_rc_restore_streams; rm -rf "$ROOT"; rm -f "${_RC_STREAM_LOG:-}" "${_RC_STREAM_FIFO:-}"' EXIT
 
 # Suite-wide hermetic `gh`. Individual fixtures overwrite $ROOT/bin/gh with
 # their own richer fake; this default guarantees that a test running before
@@ -5016,13 +5062,10 @@ check "pr-claims list against empty graphql inventory exits 0" "$rc" "0"
 [[ -z "$out" ]] && ok "empty inventory is genuinely empty (no forged rows)" ||
   bad "empty inventory returned unexpected rows: $out"
 
-# Suite-level guard: shell construction diagnostics cannot coexist with a
-# zero-failure tally. Capture this suite's own stderr-class messages by
-# re-scanning what we already printed is impossible; instead, prove the
-# generated fixtures themselves do not expand under set -u, and that a
-# synthetic six-unbound-variable stream would fail the guard predicate
-# used by run-all.sh (#153 r7 mutation proof).
-echo "#153 round 7 · suite rejects unbound-variable class with a green tally"
+# Suite-level guard (#153 r7 + r8): shell construction diagnostics cannot
+# coexist with a zero-failure tally. The predicate is shared with the final
+# stream scan; mutation proofs exercise the SAME exit decision the suite uses.
+echo "#153 round 8 · standalone suite exit gate rejects construction diags"
 _guard_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-guard.XXXXXX")
 {
   echo "  ok   — synthetic pass one"
@@ -5034,24 +5077,54 @@ _guard_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-guard.XXXXXX")
   done
   echo "release-claim.test.sh: 2 passed, 0 failed"
 } > "$_guard_probe"
-if grep -qE 'unbound variable|command not found' "$_guard_probe" &&
+if stream_has_shell_construction_diag "$_guard_probe" &&
    grep -qE '[0-9]+ passed, 0 failed' "$_guard_probe"; then
   ok "guard predicate detects unbound-variable class alongside a green tally"
 else
   bad "guard predicate missed the six-unbound-variable class"
 fi
+# Mutation: command-not-found class with a green tally must force nonzero
+# standalone exit via decide_suite_exit (the same function the final gate uses).
+# Phrases in ok/bad labels use hyphens so they never themselves trip the gate.
+{
+  echo "  ok   — synthetic"
+  echo "sh: line 1: frobnicate: command not found"
+  echo "release-claim.test.sh: 729 passed, 0 failed"
+} > "$_guard_probe"
+if ! decide_suite_exit 0 "$_guard_probe"; then
+  ok "mutation: cmd-not-found class with green tally forces standalone nonzero exit"
+else
+  bad "mutation: cmd-not-found class with green tally still decided exit 0"
+fi
+{
+  echo "  ok   — synthetic"
+  echo "release-claim.test.sh: 729 passed, 0 failed"
+} > "$_guard_probe"
+if decide_suite_exit 0 "$_guard_probe"; then
+  ok "mutation: clean green tally still decides standalone exit 0"
+else
+  bad "mutation: clean green tally falsely decided nonzero exit"
+fi
+# And FAIL>0 still exits nonzero even when the stream is clean.
+if ! decide_suite_exit 1 "$_guard_probe"; then
+  ok "mutation: nonzero FAIL count still decides standalone nonzero exit"
+else
+  bad "mutation: nonzero FAIL count decided exit 0"
+fi
 rm -f "$_guard_probe"
-# And this real suite run must itself be free of those diagnostics. The
-# harness captures this script's stdout/stderr; we fail closed here if any
-# construction error slipped through earlier fixtures.
-# (Assertions above already exercised the fakes; this is a final belt.)
 
 echo
 echo "release-claim.test.sh: $PASS passed, $FAIL failed"
-# Fail the suite if our own output stream carried shell-construction
-# diagnostics. Parent run-all.sh also checks this; defence in depth.
-if [[ "$FAIL" -eq 0 ]]; then
-  # Nothing further to scan from inside; exit status is the contract.
-  :
+# Fail the suite if our own full combined execution stream carried shell-
+# construction diagnostics. Parent run-all.sh also checks this independently;
+# this is the standalone defence that r7's final no-op block lacked.
+_rc_restore_streams
+if stream_has_shell_construction_diag "$_RC_STREAM_LOG"; then
+  echo "  FAIL — suite combined stream carried shell construction diagnostics:" >&2
+  grep -E 'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' \
+    "$_RC_STREAM_LOG" | head -20 | sed 's/^/         /' >&2
+  rm -f "$_RC_STREAM_LOG" "$_RC_STREAM_FIFO"
+  exit 1
 fi
+rm -f "$_RC_STREAM_LOG" "$_RC_STREAM_FIFO"
 [[ "$FAIL" -eq 0 ]]

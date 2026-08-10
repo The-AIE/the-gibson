@@ -21,9 +21,14 @@ USAGE
   claims-status.sh [--ref <git-ref>] [--issue <n>] [--markdown]
   claims-status.sh --help
 
-  --ref       read from a git ref instead of the working tree (default origin/main,
-              falling back to the local branch) — the working tree lies when your
-              checkout is behind
+  --ref       read from a git ref instead of the working tree. Default (no
+              --ref): successfully fetch origin main (or master) and read that
+              exact remote-tracking ref — a failed fetch or a missing remote-
+              tracking ref after fetch exits 1 and never falls back to local
+              main/master or reports "no live claims" on an unread base. An
+              explicit --ref is operator-selected and is used as given (no
+              fetch required). The working tree alone lies when your checkout
+              is behind.
   --issue     only claims on this issue number, namespaced ones included
   --markdown  emit the docs/active-work.md table format
 
@@ -45,10 +50,14 @@ DATE-ONLY SEMANTICS
   which can race the NOW snapshot and report 23 whole hours for a full calendar day.
 
 EXIT
-  0  claims printed (or none live — after a successful inventory read)
+  0  claims printed (or none live — after a successful inventory read and a
+     successfully resolved default remote base, or after an explicit --ref)
   1  live PR-body claim inventory unreadable (auth, pagination, malformed
      evidence, or missing reader) — never reported as "no live claims";
-     also a failed docs/claims ls-tree or an unreadable claim/table blob
+     also a failed docs/claims ls-tree or an unreadable claim/table blob;
+     also (default path only) a failed fetch of origin main/master or a
+     missing remote-tracking ref after fetch — never a local main/master
+     fallback that converts unread base into absence
   2  usage error
 EOF
 }
@@ -137,12 +146,28 @@ if [[ -n "$REPO" && ! "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   REPO=""
 fi
 
+# Default ledger base: require a successful fetch of the exact remote base
+# into its remote-tracking ref (#153 review round 8). Never fall back to
+# local main/master, a cached origin/* after a failed fetch, HEAD, or another
+# branch — those convert an unread remote into a false "no live claims".
+# Explicit --ref is operator-selected and keeps its documented as-given
+# semantics (no fetch of its own).
 if [[ -z "$REF" ]]; then
-  BASE=main
-  git show-ref --verify --quiet refs/heads/main || BASE=master
-  git fetch origin "$BASE" >/dev/null 2>&1 || true
-  REF="origin/$BASE"
-  git rev-parse --verify --quiet "$REF" >/dev/null || REF="$BASE"
+  _resolved=""
+  for _base in main master; do
+    if git fetch origin "$_base" >/dev/null 2>&1; then
+      if git rev-parse --verify --quiet "origin/${_base}^{commit}" >/dev/null 2>&1; then
+        _resolved="origin/${_base}"
+        break
+      fi
+    fi
+  done
+  if [[ -z "$_resolved" ]]; then
+    echo "claims-status.sh: ERROR: cannot fetch exact remote ledger base (origin main/master) — refuse (no local/cached fallback); unread base is not absence" >&2
+    exit 1
+  fi
+  REF="$_resolved"
+  unset _resolved _base
 fi
 
 # Injectable clock for sensors (issue #62). Production: leave unset → wall clock.

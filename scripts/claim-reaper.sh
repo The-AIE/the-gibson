@@ -28,7 +28,11 @@ WHAT IT DOES
   An open PR always protects a claim. API/ref failures, malformed evidence,
   unreadable worktrees, unregistered or unsafe paths, symlink/device evidence,
   future-clock evidence, or race-time activity fail closed (refuse reaping).
-  The reaper never closes the target issue.
+  When GitHub-native claims apply, a failed or successful-but-malformed
+  pr-claims.sh list is a hard refusal — never an empty plan. The entire
+  inventory is validated all-or-none against the shipped list contract before
+  any planning or mutation; genuine empty success remains valid. The reaper
+  never closes the target issue.
 
 WHY
   Doctrine assumes dead lanes eventually free the issue, but nothing enforces
@@ -303,12 +307,82 @@ if [[ -n "$PR_REPO" ]]; then
     die "live claim inventory for $PR_REPO is unreadable — ${_pr_list_err}"
   fi
   unset _pr_list_err
+  # Successful exit is not enough: a reader that exits 0 while printing
+  # malformed text must never become "nothing to reap" (#153 review round 8).
+  # Validate the entire inventory all-or-none against the shipped
+  # pr-claims.sh list contract (same shape claim.sh / release-claim.sh /
+  # scope-overlap.mjs defend) before any planning or mutation. Genuine empty
+  # success (no non-empty rows) remains valid.
+  _pr_bad_row=""
+  while IFS= read -r _pr_row; do
+    [[ -n "$_pr_row" ]] || continue
+    _pr_fields=$(awk -F'\t' '{print NF}' <<<"$_pr_row")
+    _pr_number=$(cut -f1 <<<"$_pr_row")
+    _pr_id=$(cut -f2 <<<"$_pr_row")
+    _pr_scope=$(cut -f3 <<<"$_pr_row")
+    _pr_head=$(cut -f4 <<<"$_pr_row")
+    _pr_url=$(cut -f5 <<<"$_pr_row")
+    _pr_created=$(cut -f6 <<<"$_pr_row")
+    _pr_updated=$(cut -f7 <<<"$_pr_row")
+    _pr_cross=$(cut -f8 <<<"$_pr_row")
+    if [[ "$_pr_fields" -ne 8 ]]; then
+      _pr_bad_row="want 8 tab-separated fields, got ${_pr_fields}: ${_pr_row}"
+      break
+    fi
+    if [[ ! "$_pr_number" =~ ^[0-9]+$ ]]; then
+      _pr_bad_row="PR number is not a safe decimal: ${_pr_row}"
+      break
+    fi
+    # Issue-bound claim id: issue-[optional-ns-]<digits>-<slug>, same family
+    # pr-claims.sh / claim-reaper already require for live claims.
+    if [[ ! "$_pr_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+      _pr_bad_row="claim id is not a valid issue-bound id: ${_pr_row}"
+      break
+    fi
+    if [[ -z "$_pr_scope" ]]; then
+      _pr_bad_row="empty claim scope: ${_pr_row}"
+      break
+    fi
+    if [[ -z "$_pr_head" || ! "$_pr_head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      _pr_bad_row="missing/unsafe head branch: ${_pr_row}"
+      break
+    fi
+    if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+$ ]]; then
+      _pr_bad_row="missing/malformed PR URL: ${_pr_row}"
+      break
+    fi
+    if [[ -z "$_pr_created" || -z "$_pr_updated" ]]; then
+      _pr_bad_row="missing created/updated timestamp: ${_pr_row}"
+      break
+    fi
+    if [[ "$_pr_cross" != "true" && "$_pr_cross" != "false" ]]; then
+      _pr_bad_row="repository-identity column is neither 'true' nor 'false' ('${_pr_cross:-<empty>}'): ${_pr_row}"
+      break
+    fi
+  done <<EOF
+$PR_ROWS
+EOF
+  if [[ -n "$_pr_bad_row" ]]; then
+    die "live claim inventory for $PR_REPO returned a malformed/truncated row — refuse rather than treat unreadable evidence as an empty plan: ${_pr_bad_row}"
+  fi
+  unset _pr_bad_row _pr_row _pr_fields _pr_number _pr_id _pr_scope _pr_head _pr_url _pr_created _pr_updated _pr_cross
   # shellcheck disable=SC2034
   # 8 fields since #153 review round 5: the last is the PR's repository
   # identity (`true`/`false`). It is read so the timestamp column is not
   # silently absorbed into it; this reaper only proposes a release, and
   # release-claim.sh re-reads and enforces identity itself before any mutation.
-  while IFS=$'\t' read -r pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated pr_cross; do
+  # Inventory shape was already proven all-or-none above; this loop only
+  # plans/acts. cut avoids IFS tab collapsing (belt after the validator).
+  while IFS= read -r _pr_line; do
+    [[ -n "$_pr_line" ]] || continue
+    pr_number=$(cut -f1 <<<"$_pr_line")
+    pr_id=$(cut -f2 <<<"$_pr_line")
+    pr_scope=$(cut -f3 <<<"$_pr_line")
+    pr_head=$(cut -f4 <<<"$_pr_line")
+    pr_url=$(cut -f5 <<<"$_pr_line")
+    pr_created=$(cut -f6 <<<"$_pr_line")
+    pr_updated=$(cut -f7 <<<"$_pr_line")
+    pr_cross=$(cut -f8 <<<"$_pr_line")
     [[ -n "$pr_id" ]] || continue
     PR_CLAIMS_FOUND=1
     if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_FILTER" ]]; then
@@ -340,6 +414,7 @@ if [[ -n "$PR_REPO" ]]; then
   done <<EOF
 $PR_ROWS
 EOF
+  unset _pr_line pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated pr_cross
   # A migrated repository can have no legacy tree at all. Do not misclassify
   # that valid state as an unreadable ledger after processing PR claims.
   if [[ "$PR_CLAIMS_FOUND" -eq 1 ]]; then

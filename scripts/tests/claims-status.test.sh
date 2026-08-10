@@ -220,6 +220,103 @@ out=$(cd "$ROOT/table/canon" && "$CS" --ref main 2>&1); rc=$?
 check    "unreadable legacy table exits 1" "$rc" "1"
 contains "names unreadable table"         "$out" "cannot read legacy claim table"
 
+# ===========================================================================
+# #153 review round 8 — default status requires a successfully fetched
+# exact remote base. Fetch failure / missing remote-tracking ref must not
+# fall back to local main/master and report absence.
+# ===========================================================================
+echo "#153 r8 · default status: fetch failure fails closed (no local fallback)"
+new_github_repo "$ROOT/fetchfail"
+(
+  cd "$ROOT/fetchfail/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm empty && git push -q origin main
+  # Drop remote-tracking so a failed fetch cannot accidentally reuse it.
+  git update-ref -d refs/remotes/origin/main 2>/dev/null || true
+) >/dev/null 2>&1
+install_empty_gh "$ROOT/fetchfail/bin/gh"
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/fetchfail/bin"
+cat > "$ROOT/fetchfail/bin/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "fetch" ]]; then
+  echo "fatal: simulated unreachable origin (fetch failure)" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$ROOT/fetchfail/bin/git"
+out=$(cd "$ROOT/fetchfail/canon" && PATH="$ROOT/fetchfail/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "fetch failure exits 1" "$rc" "1"
+contains "names unread remote base" "$out" "cannot fetch exact remote ledger base"
+# Success-path absence wording is "no live claims at <ref>" — must not appear.
+lacks    "never announces absence on failed fetch" "$out" "no live claims at"
+
+echo "#153 r8 · default status: missing remote-tracking ref after fetch fails closed"
+new_github_repo "$ROOT/noref"
+(
+  cd "$ROOT/noref/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm empty && git push -q origin main
+  git update-ref -d refs/remotes/origin/main 2>/dev/null || true
+  git update-ref -d refs/remotes/origin/master 2>/dev/null || true
+) >/dev/null 2>&1
+install_empty_gh "$ROOT/noref/bin/gh"
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/noref/bin"
+# fetch "succeeds" but never restores the remote-tracking ref — the exact
+# "fetch rc 0 / ref still missing" class must not fall through to local main.
+cat > "$ROOT/noref/bin/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "fetch" ]]; then
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$ROOT/noref/bin/git"
+out=$(cd "$ROOT/noref/canon" && PATH="$ROOT/noref/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "missing remote-tracking ref exits 1" "$rc" "1"
+contains "names unread remote base when ref missing" "$out" "cannot fetch exact remote ledger base"
+lacks    "never announces absence when remote ref missing" "$out" "no live claims at"
+
+echo "#153 r8 · default status: successful exact remote empty announces no live claims"
+new_github_repo "$ROOT/remempty"
+(
+  cd "$ROOT/remempty/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm empty && git push -q origin main
+) >/dev/null 2>&1
+install_empty_gh "$ROOT/remempty/bin/gh"
+out=$(cd "$ROOT/remempty/canon" && PATH="$ROOT/remempty/bin:$PATH" "$CS" 2>&1); rc=$?
+check    "successful exact remote empty exits 0" "$rc" "0"
+contains "announces no live claims at origin/main" "$out" "no live claims"
+contains "names origin/main as the resolved base" "$out" "origin/main"
+
+echo "#153 r8 · explicit --ref keeps operator-selected semantics (no fetch required)"
+new_local_repo "$ROOT/expref"
+(
+  cd "$ROOT/expref/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm empty && git push -q origin main
+  # Make default fetch path unusable so only --ref can succeed.
+  git update-ref -d refs/remotes/origin/main 2>/dev/null || true
+) >/dev/null 2>&1
+REAL_GIT=$(command -v git)
+mkdir -p "$ROOT/expref/bin"
+cat > "$ROOT/expref/bin/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "fetch" ]]; then
+  echo "fatal: fetch must not be required for explicit --ref" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$ROOT/expref/bin/git"
+out=$(cd "$ROOT/expref/canon" && PATH="$ROOT/expref/bin:$PATH" "$CS" --ref main 2>&1); rc=$?
+check    "explicit --ref main exits 0 without fetch" "$rc" "0"
+contains "explicit --ref may report no live claims at main" "$out" "no live claims"
+contains "names the operator-selected ref" "$out" "at main"
+
 echo
 echo "claims-status.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

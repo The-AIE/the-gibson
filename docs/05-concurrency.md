@@ -154,7 +154,10 @@ Two mechanisms, used together:
    `scripts/claims-status.sh` (`--issue <n>`, `--markdown`, merges PR-body **and**
    legacy forms, flags claims older than 24h; a failed live PR-body inventory
    read exits nonzero with a diagnostic — it never prints "no live claims" on
-   an unread view). Both read `origin/main`/live GitHub
+   an unread view; the default path also requires a successfully fetched
+   exact remote base (`origin/main` or `origin/master`) and fails closed on
+   fetch failure or a missing remote-tracking ref rather than falling back to
+   local main/master). Both read `origin/main`/live GitHub
    state, not your working tree — a stale local checkout is how two lanes each
    conclude they are alone.
 
