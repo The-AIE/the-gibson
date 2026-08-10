@@ -769,13 +769,17 @@ rollback_branches() {
 # review P1 0C). Remove it only after a FRESH authoritative inventory proves no
 # surviving sibling still needs it, and a FRESH label read proves what is
 # actually there. Any unreadable or malformed evidence keeps the label.
+#
+# Two honest reasons exist for leaving the label, and both are safe:
+#   * a surviving same-issue sibling is live in the inventory — report that
+#     even when LABEL_PRE_PRESENT=1 (the loser of a same-issue race often
+#     reads agent-claimed only after the winner already added it; the sibling
+#     is still the reason the label must stay);
+#   * the label was already present before this lane and no same-issue sibling
+#     is proven live — leave it with the pre-present reason, never strip it.
 rollback_label() {
-  local rows sibling_ids="" unparseable="" _row row_num row_id
+  local rows sibling_ids="" unparseable="" _row row_num row_id inv_ok=0
   if [[ "$LABEL_ADDED" -ne 1 ]]; then
-    return 0
-  fi
-  if [[ "$LABEL_PRE_PRESENT" -eq 1 ]]; then
-    info "rollback: leaving agent-claimed on #$ISSUE — it was already there before this claim"
     return 0
   fi
 
@@ -784,37 +788,54 @@ rollback_label() {
     # being live. Re-reading here would only introduce a second view that can
     # disagree with the one the PR phase proved its postcondition against.
     rows="$INVENTORY_ROWS"
+    inv_ok=1
   elif read_live_inventory; then
     rows="$INVENTORY_ROWS"
+    inv_ok=1
+  elif [[ "$LABEL_PRE_PRESENT" -eq 1 ]]; then
+    # Pre-present: this lane never had authority to remove the label. An
+    # unreadable inventory is diagnostic only — leave the label and say why.
+    info "rollback: leaving agent-claimed on #$ISSUE — it was already there before this claim"
+    return 0
   else
     leftover "agent-claimed on #$ISSUE (kept: $INVENTORY_ERR, so a sibling lane cannot be ruled out)"
     return 1
   fi
-  while IFS= read -r _row; do
-    [[ -n "$_row" ]] || continue
-    row_num=$(awk -F'\t' '{print $1}' <<<"$_row")
-    row_id=$(awk -F'\t' '{print $2}' <<<"$_row")
-    # This lane's own row may still be in the inventory: the PR was only just
-    # closed and that view is eventually consistent. Exclude it by both keys.
-    [[ "$row_id" == "$CLAIM_ID" ]] && continue
-    [[ -n "$PR_NUMBER" && "$row_num" == "$PR_NUMBER" ]] && continue
-    if ! claim_issue_number "$row_id"; then
-      unparseable="$row_id"
-      break
-    fi
-    if [[ "$CLAIM_ISSUE_NUMBER" == "$ISSUE" ]]; then
-      sibling_ids="${sibling_ids}    $row_id (PR #$row_num)"$'\n'
-    fi
-  done <<EOF
+  if [[ "$inv_ok" -eq 1 ]]; then
+    while IFS= read -r _row; do
+      [[ -n "$_row" ]] || continue
+      row_num=$(awk -F'\t' '{print $1}' <<<"$_row")
+      row_id=$(awk -F'\t' '{print $2}' <<<"$_row")
+      # This lane's own row may still be in the inventory: the PR was only just
+      # closed and that view is eventually consistent. Exclude it by both keys.
+      [[ "$row_id" == "$CLAIM_ID" ]] && continue
+      [[ -n "$PR_NUMBER" && "$row_num" == "$PR_NUMBER" ]] && continue
+      if ! claim_issue_number "$row_id"; then
+        unparseable="$row_id"
+        break
+      fi
+      if [[ "$CLAIM_ISSUE_NUMBER" == "$ISSUE" ]]; then
+        sibling_ids="${sibling_ids}    $row_id (PR #$row_num)"$'\n'
+      fi
+    done <<EOF
 $rows
 EOF
+  fi
   if [[ -n "$unparseable" ]]; then
+    if [[ "$LABEL_PRE_PRESENT" -eq 1 ]]; then
+      info "rollback: leaving agent-claimed on #$ISSUE — it was already there before this claim"
+      return 0
+    fi
     leftover "agent-claimed on #$ISSUE (kept: live claim id '$unparseable' carries no readable issue number, so it cannot be ruled out as a sibling)"
     return 1
   fi
   if [[ -n "$sibling_ids" ]]; then
     info "rollback: leaving agent-claimed on #$ISSUE — surviving sibling claim(s) still hold this issue:"
     printf '%s' "$sibling_ids"
+    return 0
+  fi
+  if [[ "$LABEL_PRE_PRESENT" -eq 1 ]]; then
+    info "rollback: leaving agent-claimed on #$ISSUE — it was already there before this claim"
     return 0
   fi
 

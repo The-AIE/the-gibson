@@ -917,7 +917,23 @@ lag_fixture() { # dir self-pr rival-row
 #!/usr/bin/env bash
 case "$1 $2" in
   "repo view") echo "acme/app" ;;
-  "issue view") cat "$LAG_STATE/labels" 2>/dev/null || echo "" ;;
+  "issue view")
+    # Optional staged interleaving: return agent-claimed from the Nth label
+    # read onward even if this lane has not written the labels file yet. That
+    # is the same-issue race's LABEL_PRE_PRESENT=1 branch — the winner added
+    # the label between this lane's stale-label guard and its pre-add read —
+    # forced without depending on Linux scheduler timing (#153 CI flake).
+    n=$(cat "$LAG_STATE/label_reads" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$LAG_STATE/label_reads"
+    if [[ -n "${LAG_LABEL_PRESENT_AFTER:-}" && "$n" -ge "${LAG_LABEL_PRESENT_AFTER}" ]]; then
+      if ! grep -qF 'agent-claimed' "$LAG_STATE/labels" 2>/dev/null; then
+        echo "agent-claimed"
+        exit 0
+      fi
+    fi
+    cat "$LAG_STATE/labels" 2>/dev/null || echo ""
+    ;;
   "issue edit")
     echo "$*" >> "$LAG_STATE/label.log"
     if echo "$*" | grep -q -- '--add-label'; then
@@ -959,8 +975,18 @@ case "$1 $2" in
       esac
     fi
     # Before this lane publishes, the inventory is genuinely empty — the same
-    # window the real cross-issue race opens.
-    [[ -f "$LAG_STATE/self" ]] || exit 0
+    # window the real cross-issue race opens. Opt-in post-close rival emission
+    # (LAG_RIVAL_POST_CLOSE=1) keeps a live sibling visible after this lane's
+    # PR is gone, which is what sibling-safe label rollback needs to prove
+    # without depending on concurrent scheduling (#153 label race). Default
+    # remains empty-after-close so multi-run lag fixtures (floor loop) stay
+    # isolated.
+    if [[ ! -f "$LAG_STATE/self" ]]; then
+      if [[ -n "${LAG_RIVAL_POST_CLOSE:-}" && -f "$LAG_STATE/closed" && -f "$LAG_STATE/rival" ]]; then
+        cat "$LAG_STATE/rival"
+      fi
+      exit 0
+    fi
     n=$(cat "$LAG_STATE/reads" 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" > "$LAG_STATE/reads"
@@ -1155,10 +1181,54 @@ test -n "$(git -C "$SAME_DIR/lane$same_win/canon" ls-remote --heads origin "$sam
   && ok "the same-issue winner's remote branch is intact" || bad "the same-issue winner's remote branch was deleted"
 # 0C, proven concurrently: agent-claimed is issue-wide, so the loser must not
 # strip it off the winner just because it also added it.
+# Honest receipt: either interleaving is safe. When the loser saw the label
+# only after the winner added it (LABEL_PRE_PRESENT=1), production still
+# prefers the sibling inventory reason once the winner's claim is live — so
+# this assertion is deterministic on Linux, not a timing coin-flip.
 contains "the loser left agent-claimed for the surviving sibling" \
   "$(cat "$SAME_DIR/labels-601" 2>/dev/null || echo '')" "agent-claimed"
 contains "the loser says it left the label for a sibling" \
   "$(cat "$SAME_DIR/out$same_lose")" "surviving sibling claim(s)"
+lacks "the loser never claims sole pre-present ownership over a live sibling" \
+  "$(cat "$SAME_DIR/out$same_lose")" "it was already there before this claim"
+
+# Deterministic label-receipt branches (no scheduler dependence). The concurrent
+# fixture above proves the race; these force each rollback_label reason so the
+# fresh-inventory sibling path cannot be silently lost behind the pre-present
+# short-circuit, and the pre-present path stays covered when no sibling exists.
+echo "#153 · deterministic: fresh-inventory sibling path leaves agent-claimed (LABEL_PRE_PRESENT=0)"
+LAG_RIVAL_SAME=$'89\tissue-87-winner\tlib/other/**\tfeat/87-winner\thttps://github.com/acme/app/pull/89\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse'
+lag_fixture lagsibling 90 "$LAG_RIVAL_SAME"
+out=$(cd "$ROOT/lagsibling/canon" && PATH="$ROOT/lagsibling/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 LAG_RIVAL_POST_CLOSE=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "same-issue sibling rival refuses this lane" \
+  || bad "same-issue sibling rival admitted the claim (rc=$rc): $out"
+contains "deterministic sibling path names same-issue exclusivity" "$out" "issue #87 is already held"
+contains "deterministic sibling path leaves label for the sibling" "$out" "surviving sibling claim(s)"
+contains "deterministic sibling path names the surviving claim id" "$out" "issue-87-winner"
+contains "deterministic sibling path keeps agent-claimed" \
+  "$(cat "$ROOT/lagsibling/state/labels")" "agent-claimed"
+lacks "deterministic sibling path never removes the label" \
+  "$(cat "$ROOT/lagsibling/state/label.log")" "--remove-label"
+
+echo "#153 · deterministic: LABEL_PRE_PRESENT=1 with no same-issue sibling keeps the pre-present reason"
+lag_fixture lagprepresent 90 "$LAG_RIVAL_ROW"
+out=$(cd "$ROOT/lagprepresent/canon" && PATH="$ROOT/lagprepresent/bin:$PATH" \
+  LAG_LABEL_PRESENT_AFTER=2 LAG_RIVAL_AFTER=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "pre-present cross-issue refusal still exits nonzero" \
+  || bad "pre-present cross-issue refusal exited 0: $out"
+contains "pre-present path keeps the pre-present reason" \
+  "$out" "it was already there before this claim"
+lacks "pre-present path does not invent a sibling when none share the issue" \
+  "$out" "surviving sibling claim(s)"
+contains "pre-present path leaves agent-claimed in place" \
+  "$(cat "$ROOT/lagprepresent/state/labels")" "agent-claimed"
+lacks "pre-present path never strips the label" \
+  "$(cat "$ROOT/lagprepresent/state/label.log")" "--remove-label"
 
 echo "#153 · the same race WITH --slice lets both disjoint lanes live"
 SLICE_DIR="$ROOT/slicerace"
