@@ -121,3 +121,29 @@ are served by grep + labels); no coordination graph at all (leaves fast
 Revisit when: a target's coordination load (issues × lanes × hot files) makes
 grep-recall miss, or a spike shows the adapter beats labels/serialization on a real
 repo.
+
+## D-010 · 2026-08-10 · Constraint-subordinated WIP; evidence-review over re-execution
+Decided: fleet WIP subordinates to the actual constraint (coordinator
+review/merge capacity, ≈3 total lanes; schema lanes = 1 until migration apply
+decouples from deploy). Verification is evidence-review of required CI contexts
+and attached review reasoning — the coordinator does not re-run gates locally
+except on suspicion or Tier C spot-checks. Review stacking is tiered: one
+static cross-vendor pass for Tier A/B, full multi-lens + adversarial refutation
+for Tier C only; a runtime smoke layer (preview-deploy Playwright) outranks any
+additional static reviewer. Outcomes are counted in a per-PR ledger (which
+layer caught what, wasted cycles, escaped defects) and the stack is reweighted
+from counts monthly. Provenance: ConferenceOS 2026-08-10 session — an
+adversarial Fable-class architecture review against observed session data and
+an external published-evidence pass converged independently; owner approved.
+Full doctrine: ConferenceOS `docs/process/fleet-doctrine-2026-08-10.md`;
+baseline for before/after measurement:
+`docs/process/outcome-ledger.jsonl`.
+Rejected: raising WIP at the non-bottleneck (implementation was never the
+constraint — "finished-but-unreviewed lanes are inventory, not progress");
+adding a fourth static reviewer (Greptile — the only large independent
+benchmark favors a tool already in the stack, and high-recall/low-precision
+additions worsen the coordinator-verification bottleneck); prose-only process
+lessons (doesn't compound; counts do).
+Revisit when: the ledger shows merge lead time is no longer coordinator-bound
+after CI gates + migration decoupling land (then WIP can rise), or an escaped
+defect lands that a dropped review layer would plausibly have caught.

@@ -978,3 +978,68 @@ before comparing exact findings; do not treat a tool-version delta as source
 debt or as a baseline-only green.
 **Status:** fixed in #138 / PR #147
 **Tags:** #toolchain #ci #ratchet #shellcheck #sensors #issue-138 #pr-147
+
+## L-052 · 2026-08-10 · coordinator-local-gate-reruns-are-a-flakier-ci
+**What happened:** In a 5-lane ConferenceOS session, the coordinator personally
+re-ran every lane's full gate (typecheck/build/vitest) locally before merge.
+The local re-runs produced the session's only false defects (two concurrent
+`npm run build`s raced `gen-report-registry.mjs`'s temp dir; separately a known
+vitest-without-`--maxWorkers` phantom class exists) and zero unique true
+catches — every confirmed MUST-FIX that session came from cross-vendor review
+(Codex ×7, CodeRabbit ×2), none from local re-runs.
+**Root cause:** "never trust an agent's PASS" was implemented at the wrong
+altitude — a loaded coordinator laptop is a *less* deterministic verifier than
+a required CI context on the head SHA, while consuming the scarcest resource
+(coordinator serial time).
+**Harness fix:** doctrine (ConferenceOS
+`docs/process/fleet-doctrine-2026-08-10.md`, item 1): gates are required CI
+contexts; the coordinator reviews attached evidence (gate output, review
+verdicts with code-level reasoning) and re-runs only on suspicion or Tier C
+spot-checks. Matches Anthropic's published evidence-over-re-execution guidance.
+**General rule / Rule of thumb:** re-verification belongs in the most
+deterministic executor available, not the most trusted actor available.
+**Status:** adopted (ConferenceOS 2026-08-10); Gibson docs/06 alignment pending
+**Tags:** #verification #ci #coordinator #bottleneck
+
+## L-053 · 2026-08-10 · static-llm-review-stacks-saturate-fast
+**What happened:** The same session ran up to four static review layers per PR
+(implementer self-report, Claude 4-lens workflow, Codex comprehensive pass,
+CodeRabbit). Ledger counts across 4 merged PRs: Codex 7 confirmed MUST-FIX,
+CodeRabbit 2, Claude multi-lens 0 unique (its correct behavior was finding
+nothing and *not inventing findings*), coordinator local re-runs 0. Meanwhile
+NOTHING in the stack executed the app — a known class of render-crash bugs
+passes every static layer.
+**Root cause:** review redundancy was added where marginal yield was near zero
+(another static reader) while the missing modality (runtime execution) stayed
+missing. External evidence agrees: reviewer-overlap research (SWR-Bench) shows
+low overlap but proportional noise per added reviewer; the only large
+independent benchmark crowns a tool already in the stack.
+**Harness fix:** ConferenceOS doctrine items 3+4: one static cross-vendor
+review for Tier A/B, full multi-lens reserved for Tier C, and a
+preview-deploy Playwright smoke (routes render + payments happy path) as a
+required layer ranked above all further review refinement.
+**General rule / Rule of thumb:** before adding another reviewer of the same
+modality, add the missing modality; count unique catches per layer before
+paying for redundancy.
+**Status:** adopted (ConferenceOS 2026-08-10)
+**Tags:** #review #modality #playwright #evidence
+
+## L-054 · 2026-08-10 · additive-migrations-are-commutative-serialize-only-contract
+**What happened:** Three concurrent schema-touching lanes required
+hand-allocated migration timestamps and hand-serialized merge ordering because
+production applies migrations synchronously inside the deploy build. The
+research pass surfaced the structural insight: strictly *additive* expand
+steps from parallel lanes are commutative — only *contract* steps
+(DROP/rename/narrow) need ordering at all.
+**Root cause:** coupling migration application to the deploy build makes every
+schema change a serialization event regardless of whether it actually
+conflicts.
+**Harness fix:** ConferenceOS #1290 — CI migration lint (destructive ops need
+an explicit override label; built on the repo's existing statement
+classifier), merge-time ordering validation (replacing hand-allocated
+timestamps), decoupled post-merge apply step. Schema WIP=1 until it lands.
+**General rule / Rule of thumb:** enforce additive-by-default mechanically and
+most schema parallelism becomes real; discipline rules agents must remember
+will drift — machine-checked rules will not.
+**Status:** filed (ConferenceOS #1290), not yet built
+**Tags:** #schema #migrations #concurrency #ci
