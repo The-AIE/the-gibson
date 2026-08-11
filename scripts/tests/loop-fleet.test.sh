@@ -7660,6 +7660,169 @@ else
 fi
 rm -f "$MUT_TICK" "$MUT_TICK.mutation-miss"
 
+# =============================================================================
+# #181 · scope-overlap parity (fleet integration + pure-kernel differential)
+# =============================================================================
+echo "#181 root-wide ** overlaps every lane scope (fleet preflight)"
+reset_calls
+TARGET=$(setup_target_repo rootwide acme/widget)
+PROF="$ROOT/profiles/rootwide.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=rootwide" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=all|260|**|whole repo" \
+  "lane=docs|261|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+zero_launch_case "root-wide ** vs docs/** overlaps" 'scope overlap|invalid claim-scope' --start
+
+echo "#181 unclassifiable bare * refuses (fail closed, not disjoint)"
+reset_calls
+PROF="$ROOT/profiles/barestar.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=barestar" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=star|270|*|unclassifiable" \
+  "lane=docs|271|docs/**|docs"
+export FLEET_PROFILE="$PROF"
+zero_launch_case "bare * fails closed" 'invalid claim-scope|scope overlap' --start
+
+echo "#181 mid-path a/**/b refuses (grammar, not silent disjoint)"
+reset_calls
+PROF="$ROOT/profiles/midstars.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=midstars" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=mid|280|a/**/b|mid double-star" \
+  "lane=axb|281|a/x/b|concrete mid path"
+export FLEET_PROFILE="$PROF"
+zero_launch_case "a/**/b fails closed" 'invalid claim-scope|scope overlap' --start
+
+echo "#181 safe siblings still launch (parity preserves legitimate disjointness)"
+reset_calls
+PROF="$ROOT/profiles/siblings.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=siblings" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|290|docs/**|docs" \
+  "lane=scripts|291|scripts/**|scripts"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+# Expect launch (or at least no scope-overlap refuse). Use run_fleet if available.
+if out=$(run_fleet --start 2>&1); then
+  ok "#181 safe siblings docs/** vs scripts/** start without scope refuse"
+else
+  if echo "$out" | grep -qiE 'scope overlap|invalid claim-scope'; then
+    bad "#181 safe siblings incorrectly refused for scope: $out"
+  else
+    # Other preflight may still fail in this harness; scope must not be why.
+    ok "#181 safe siblings not refused for scope (other preflight: ${out:0:120})"
+  fi
+fi
+
+echo "#181 pure-kernel differential (extract production functions, compare to JS)"
+SCOPE_MJS="$REPO_ROOT/scripts/scope-overlap.mjs"
+BASH_KERNEL="$ROOT/fleet-bash-scope.inc"
+sed -n '/^# --- scope overlap/,/^# --- profile load/p' "$FLEET" | sed '$d' > "$BASH_KERNEL"
+# shellcheck source=/dev/null
+. "$BASH_KERNEL"
+fleet_diff_ok=0
+fleet_diff_fail=0
+# Compact table: a|b|expect
+while IFS='|' read -r ta tb expect; do
+  [[ -n "$expect" ]] || continue
+  for swap in 0 1; do
+    if [[ "$swap" -eq 0 ]]; then a="$ta"; b="$tb"; else a="$tb"; b="$ta"; fi
+    jv=$(node "$SCOPE_MJS" --pair "$a" "$b" 2>/dev/null || true)
+    if scope_tokens_overlap "$a" "$b"; then bv=overlap; else bv=disjoint; fi
+    if [[ "$jv" == "$expect" && "$bv" == "$expect" ]]; then
+      fleet_diff_ok=$((fleet_diff_ok + 1))
+    else
+      fleet_diff_fail=$((fleet_diff_fail + 1))
+      bad "#181 fleet-diff [$a]vs[$b] js=$jv bash=$bv want=$expect"
+    fi
+  done
+done <<'FLEETDIFF'
+**|docs/a.md|overlap
+*|scripts/**|overlap
+a/**/b|a/x/b|overlap
+docs/**|docs/nested/**|overlap
+docs/a.md|docs/b.md|disjoint
+app|application|disjoint
+app/api|app/api/auth/**|overlap
+..|docs|overlap
+/abs|docs|overlap
+FLEETDIFF
+if [[ "$fleet_diff_fail" -eq 0 && "$fleet_diff_ok" -gt 0 ]]; then
+  ok "#181 fleet pure-kernel differential: $fleet_diff_ok pair-checks agree"
+else
+  bad "#181 fleet pure-kernel differential: $fleet_diff_ok ok, $fleet_diff_fail failed"
+fi
+
+echo "#181 Bash mutation receipt (root-wide fail-open makes differential fail)"
+MUT_F="$ROOT/mut-fleet-scope.inc"
+cat > "$MUT_F" <<'MUT'
+scope_stem() {
+  local token="$1"
+  token="${token%/}"
+  token="${token%/\*\*}"
+  token="${token%\*\*}"
+  token="${token%\*}"
+  token="${token%/}"
+  printf '%s\n' "$token"
+}
+scope_token_is_safe() { return 0; }
+scope_tokens_overlap() {
+  local a="$1" b="$2" sa sb
+  [[ -n "$a" && -n "$b" ]] || return 1
+  [[ "$a" == "$b" ]] && return 0
+  sa=$(scope_stem "$a")
+  sb=$(scope_stem "$b")
+  [[ -n "$sa" && -n "$sb" ]] || return 1
+  [[ "$sa" == "$sb" ]] && return 0
+  case "$sa" in "$sb"/*) return 0 ;; esac
+  case "$sb" in "$sa"/*) return 0 ;; esac
+  case "$sa" in "$sb"|"$sb"/*|"$sb".*) return 0 ;; esac
+  case "$sb" in "$sa"|"$sa"/*|"$sa".*) return 0 ;; esac
+  return 1
+}
+MUT
+(
+  # shellcheck source=/dev/null
+  . "$MUT_F"
+  jv=$(node "$SCOPE_MJS" --pair '**' 'docs/a.md' 2>/dev/null || true)
+  if scope_tokens_overlap '**' 'docs/a.md'; then bv=overlap; else bv=disjoint; fi
+  if [[ "$jv" == "overlap" && "$bv" == "disjoint" ]]; then
+    ok "#181 fleet mutation receipt: fail-open Bash ** diverges from JS"
+  else
+    bad "#181 fleet mutation miss: js=$jv bash=$bv"
+  fi
+)
+
 # --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
 echo "docs contract sensors"
 if grep -q 'gh.*1\.9\.0\|gh ≥ 1.9.0\|gh >= 1.9.0' "$REPO_ROOT/templates/fleet/README.md"; then

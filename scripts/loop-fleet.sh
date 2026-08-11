@@ -293,7 +293,13 @@ profile_default_ns() {
   printf '%s\n' "$h"
 }
 
-# --- scope overlap (ported from scripts/scope-overlap.mjs tokensOverlap) ----
+# --- scope overlap (ported from scripts/scope-overlap.mjs pure kernel) ------
+# Canonical fail-closed contract shared with scope-overlap.mjs (#153 / #181):
+#   - ROOT ("**") overlaps every path (including another "**")
+#   - empty, unsafe, or unstemmable tokens fail closed (overlap)
+#   - exact / parent-child / boundary-aware stem containment overlap
+#   - safe siblings stay disjoint
+# A planner (JS) and this fleet driver must never disagree about concurrency.
 
 scope_stem() {
   local token="$1"
@@ -306,15 +312,72 @@ scope_stem() {
   printf '%s\n' "$token"
 }
 
+# Return 0 when token matches the JS currentScopeTokenProblem → null grammar.
+# Bash 3.2 portable: no mapfile, no associative arrays required.
+scope_token_is_safe() {
+  local token="$1" seg rest last literals=0
+  [[ -n "$token" ]] || return 1
+  # Deliberate root-wide scope — valid and classifiable.
+  [[ "$token" == "**" ]] && return 0
+  # Empty segments: leading/trailing slash or "//".
+  case "$token" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  rest="$token"
+  while [[ -n "$rest" ]]; do
+    case "$rest" in
+      */*)
+        seg="${rest%%/*}"
+        rest="${rest#*/}"
+        last=0
+        ;;
+      *)
+        seg="$rest"
+        rest=""
+        last=1
+        ;;
+    esac
+    if [[ "$seg" == "*" || "$seg" == "**" ]]; then
+      # Wildcard only as the final whole segment.
+      [[ "$last" -eq 1 ]] || return 1
+      continue
+    fi
+    # Plain literal segment ([A-Za-z0-9_.-]+, not . or ..).
+    [[ "$seg" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+    if [[ "$seg" == "." || "$seg" == ".." ]]; then
+      return 1
+    fi
+    literals=$((literals + 1))
+  done
+  # Bare "*" / no literals: normalises to nothing → not safe.
+  [[ "$literals" -ge 1 ]] || return 1
+  return 0
+}
+
 scope_tokens_overlap() {
-  # True (0) when two scope tokens collide under path/glob containment —
-  # NOT string-equality alone (L-001 / #106 class).
+  # True (0) when two scope tokens collide under the shared concurrency
+  # contract — NOT string-equality alone (L-001 / #106 / #181 class).
+  # Exit 0 = overlap (must not run concurrently); 1 = disjoint (may).
   local a="$1" b="$2" sa sb
-  [[ -n "$a" && -n "$b" ]] || return 1
+  # Empty tokens fail closed: never authorize concurrency.
+  if [[ -z "$a" || -z "$b" ]]; then
+    return 0
+  fi
+  # Unclassifiable / unsafe tokens fail closed (same as JS tokensOverlap).
+  if ! scope_token_is_safe "$a" || ! scope_token_is_safe "$b"; then
+    return 0
+  fi
+  # Root-wide ** overlaps every path (both orientations).
+  if [[ "$a" == "**" || "$b" == "**" ]]; then
+    return 0
+  fi
   [[ "$a" == "$b" ]] && return 0
   sa=$(scope_stem "$a")
   sb=$(scope_stem "$b")
-  [[ -n "$sa" && -n "$sb" ]] || return 1
+  # Empty stem fail closed (was return 1 — the #181 Bash drift bug).
+  if [[ -z "$sa" || -z "$sb" ]]; then
+    return 0
+  fi
   [[ "$sa" == "$sb" ]] && return 0
   case "$sa" in
     "$sb"/*) return 0 ;;
@@ -459,6 +522,21 @@ parse_lane_line() {
   [[ -n "$queue" ]] || die "lane $id: empty issue queue"
   [[ -n "$scope" ]] || die "lane $id: empty exclusive scope"
   [[ -n "$intent" ]] || die "lane $id: empty intent"
+
+  # Every scope token must parse under the same grammar as scope-overlap.mjs
+  # (#153 / #181). Invalid evidence must refuse the profile, never authorize
+  # a concurrent lane on an unclassifiable stem. noglob so docs/** stays literal.
+  local _stok
+  set -f
+  # shellcheck disable=SC2086
+  for _stok in $scope; do
+    set +f
+    if ! scope_token_is_safe "$_stok"; then
+      die "lane $id: invalid claim-scope token '$_stok' (canonical grammar: '**' or plain segments with optional trailing '*'/'**'; refuse rather than authorize concurrency on unclassifiable evidence — #181)"
+    fi
+    set -f
+  done
+  set +f
 
   # Optional 5th field: ordered runner route. Hostile-data rules — no shell
   # syntax / control characters (never eval'd / sourced / interpolated).

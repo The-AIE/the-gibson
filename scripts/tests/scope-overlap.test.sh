@@ -1457,6 +1457,254 @@ else
   bad "mutation receipt: mutant still identity-refuses: $out"
 fi
 
+# =============================================================================
+# #181 · Bash ↔ JavaScript scope-overlap parity (table-driven differential)
+# =============================================================================
+# A planner (scope-overlap.mjs) and the fleet driver (loop-fleet.sh) must never
+# disagree about whether two lanes may run concurrently. This sensor extracts
+# the production Bash kernel, runs every fixture through both implementations,
+# and compares decisions. It also mutates each implementation to prove the
+# suite fails when root-wide or unclassifiable input is waved through as
+# disjoint — behavioral mutation receipts, not source greps alone.
+echo "#181 · differential scope kernel: JS --pair vs Bash scope_tokens_overlap"
+
+FLEET_SH="$SCRIPT_DIR/../loop-fleet.sh"
+[[ -f "$FLEET_SH" ]] || { bad "loop-fleet.sh missing for parity sensor"; exit 1; }
+
+# Extract the production Bash pure kernel (no die, no profile side effects).
+BASH_KERNEL="$ROOT/bash-scope-kernel.inc"
+sed -n '/^# --- scope overlap/,/^# --- profile load/p' "$FLEET_SH" | sed '$d' > "$BASH_KERNEL"
+if grep -q '^scope_tokens_overlap()' "$BASH_KERNEL" &&
+   grep -q '^scope_token_is_safe()' "$BASH_KERNEL" &&
+   grep -q '^scope_stem()' "$BASH_KERNEL"; then
+  ok "#181 extracted Bash scope kernel from production loop-fleet.sh"
+else
+  bad "#181 failed to extract Bash scope kernel (markers moved?)"
+fi
+
+# shellcheck source=/dev/null
+. "$BASH_KERNEL"
+
+js_pair_verdict() {
+  # Prints overlap|disjoint; captures exit but never trips set -e callers.
+  local out rc
+  out=$(node "$SENSOR" --pair "$1" "$2" 2>/dev/null) || true
+  # Normalize: production prints one word.
+  case "$out" in
+    overlap) printf '%s\n' overlap ;;
+    disjoint) printf '%s\n' disjoint ;;
+    *) printf '%s\n' "error:$out" ;;
+  esac
+}
+
+bash_pair_verdict() {
+  if scope_tokens_overlap "$1" "$2"; then
+    printf '%s\n' overlap
+  else
+    printf '%s\n' disjoint
+  fi
+}
+
+# Table: token_a | token_b | expected(overlap|disjoint) | both_orientations(1|0) | label
+# Use the sentinel __EMPTY__ for the empty-string token — bash `read` collapses
+# consecutive IFS whitespace, so a blank TSV cell cannot carry "".
+DIFF_TABLE="$ROOT/diff-table.tsv"
+cat > "$DIFF_TABLE" <<'TABLE'
+docs/a.md	docs/a.md	overlap	0	exact path
+app/api	app/api/auth/**	overlap	1	parent vs child wildcard
+app/api/auth/**	app/api/auth/login.ts	overlap	1	wildcard parent vs file
+docs/**	docs/nested/**	overlap	1	nested under wildcard
+docs/a.md	docs/b.md	disjoint	1	safe siblings
+app	application	disjoint	1	near-miss stem (no boundary)
+src/foo	src/foobar	disjoint	1	near-miss path prefix
+scripts/scope-overlap.mjs	scripts/loop-fleet.sh	disjoint	1	sibling files
+components/nav/*	components/nav/Item.tsx	overlap	1	single-star trailing
+components/nav/**	components/nav/Item.tsx	overlap	1	double-star trailing
+**	docs/a.md	overlap	1	root-wide vs concrete
+**	app/api/**	overlap	1	root-wide vs wildcard
+**	**	overlap	0	root-wide vs root-wide
+*	docs/a.md	overlap	1	bare star unclassifiable
+/	docs/a.md	overlap	1	bare slash unclassifiable
+.	docs/a.md	overlap	1	dot relative escape
+..	docs/a.md	overlap	1	parent relative escape
+../secrets	docs/a.md	overlap	1	parent path escape
+a//b	docs/a.md	overlap	1	empty segment
+lib/	lib/x.ts	overlap	1	trailing slash
+*.ts	lib/x.ts	overlap	1	wildcard inside segment
+**/nav	components/nav/**	overlap	1	leading double-star segment
+a/**/b	a/x/b	overlap	1	mid-path double-star
+/abs/path	docs/a.md	overlap	1	absolute path
+__EMPTY__	docs/a.md	overlap	1	empty token vs concrete
+TABLE
+
+decode_token() {
+  if [[ "$1" == "__EMPTY__" ]]; then
+    printf '%s\n' ""
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+DIFF_PASS=0
+DIFF_FAIL=0
+DIFF_CASES=0
+while IFS="$(printf '\t')" read -r ta_raw tb_raw expect both label; do
+  [[ -n "$expect" ]] || continue
+  ta=$(decode_token "$ta_raw")
+  tb=$(decode_token "$tb_raw")
+  for orient in 0 1; do
+    if [[ "$orient" -eq 1 && "$both" != "1" ]]; then
+      continue
+    fi
+    if [[ "$orient" -eq 0 ]]; then
+      a="$ta"; b="$tb"; tag="$label"
+    else
+      a="$tb"; b="$ta"; tag="$label (swapped)"
+    fi
+    DIFF_CASES=$((DIFF_CASES + 1))
+    jv=$(js_pair_verdict "$a" "$b")
+    bv=$(bash_pair_verdict "$a" "$b")
+    if [[ "$jv" != "$expect" ]]; then
+      bad "#181 JS  [$a] vs [$b] got $jv want $expect ($tag)"
+      DIFF_FAIL=$((DIFF_FAIL + 1))
+      continue
+    fi
+    if [[ "$bv" != "$expect" ]]; then
+      bad "#181 Bash [$a] vs [$b] got $bv want $expect ($tag)"
+      DIFF_FAIL=$((DIFF_FAIL + 1))
+      continue
+    fi
+    if [[ "$jv" != "$bv" ]]; then
+      bad "#181 parity diverge [$a] vs [$b]: JS=$jv Bash=$bv ($tag)"
+      DIFF_FAIL=$((DIFF_FAIL + 1))
+      continue
+    fi
+    DIFF_PASS=$((DIFF_PASS + 1))
+  done
+done < "$DIFF_TABLE"
+
+if [[ "$DIFF_FAIL" -eq 0 && "$DIFF_PASS" -gt 0 ]]; then
+  ok "#181 differential table: $DIFF_PASS/$DIFF_CASES pair-checks agree (JS=Bash=expected)"
+else
+  bad "#181 differential table: $DIFF_PASS ok, $DIFF_FAIL failed of $DIFF_CASES"
+fi
+
+# Count fixtures (rows) for the report — orientations expand cases.
+DIFF_ROWS=$(grep -c . "$DIFF_TABLE" || true)
+ok "#181 differential fixture rows=$DIFF_ROWS expanded_cases=$DIFF_CASES"
+
+# --- mutation receipts: Bash regression that returns disjoint for root-wide ---
+echo "#181 · mutation receipt: Bash root-wide / unstemmable must make sensor fail"
+MUT_BASH="$ROOT/mut-bash-kernel.inc"
+cp "$BASH_KERNEL" "$MUT_BASH"
+# Restore the pre-#181 fail-OPEN bugs: no ** special case; empty stem → disjoint.
+# Apply via a known-bad reimplementation of scope_tokens_overlap only.
+cat > "$MUT_BASH" <<'MUTBASH'
+scope_stem() {
+  local token="$1"
+  token="${token%/}"
+  token="${token%/\*\*}"
+  token="${token%\*\*}"
+  token="${token%\*}"
+  token="${token%/}"
+  printf '%s\n' "$token"
+}
+# Deliberately broken pre-#181 semantics (mutation target).
+scope_token_is_safe() { return 0; }
+scope_tokens_overlap() {
+  local a="$1" b="$2" sa sb
+  [[ -n "$a" && -n "$b" ]] || return 1
+  [[ "$a" == "$b" ]] && return 0
+  sa=$(scope_stem "$a")
+  sb=$(scope_stem "$b")
+  # BUG: empty stem → disjoint (pre-#181)
+  [[ -n "$sa" && -n "$sb" ]] || return 1
+  [[ "$sa" == "$sb" ]] && return 0
+  case "$sa" in "$sb"/*) return 0 ;; esac
+  case "$sb" in "$sa"/*) return 0 ;; esac
+  case "$sa" in "$sb"|"$sb"/*|"$sb".*) return 0 ;; esac
+  case "$sb" in "$sa"|"$sa"/*|"$sa".*) return 0 ;; esac
+  return 1
+}
+MUTBASH
+
+# Prove the mutant is wrong on the two founding cases before asserting the sensor.
+(
+  # shellcheck source=/dev/null
+  . "$MUT_BASH"
+  mut_bad=0
+  if scope_tokens_overlap '**' 'docs/a.md'; then
+    : # mutant unexpectedly correct on ** — mutation miss
+    mut_bad=1
+  fi
+  if scope_tokens_overlap '*' 'docs/a.md'; then
+    mut_bad=1
+  fi
+  if [[ "$mut_bad" -eq 0 ]]; then
+    ok "#181 Bash mutant exhibits pre-repair fail-open on ** and *"
+  else
+    bad "#181 Bash mutant did not reproduce fail-open (mutation miss)"
+  fi
+)
+
+# Differential against mutant must fail (Bash disagrees with JS on **).
+mut_js=$(js_pair_verdict '**' 'docs/a.md')
+(
+  # shellcheck source=/dev/null
+  . "$MUT_BASH"
+  if scope_tokens_overlap '**' 'docs/a.md'; then mut_bv=overlap; else mut_bv=disjoint; fi
+  if [[ "$mut_js" == "overlap" && "$mut_bv" == "disjoint" ]]; then
+    ok "#181 mutation receipt: Bash fail-open on ** diverges from JS (sensor would fail)"
+  else
+    bad "#181 mutation receipt: expected JS=overlap Bash=disjoint, got JS=$mut_js Bash=$mut_bv"
+  fi
+)
+
+# --- mutation receipts: JS without root-wide / fail-closed empty stem ---
+echo "#181 · mutation receipt: JS without root-wide must make sensor fail"
+MUT_JS="$ROOT/mut-scope-overlap.mjs"
+cp "$SENSOR" "$MUT_JS"
+# Neutralize the ROOT_SCOPE short-circuit and empty-stem fail-closed in the pure kernel.
+# Surgical: rewrite tokensOverlap body markers via perl for a known-bad kernel.
+perl -0pi -e '
+  s/if \(a === ROOT_SCOPE \|\| b === ROOT_SCOPE\) return true;\n  if \(a === b\) return true;/if (a === b) return true; \/* MUTATED no-root *\/\n/s;
+  s/if \(!sa \|\| !sb\) return true;/if (!sa || !sb) return false; \/* MUTATED empty-stem-disjoint *\//s;
+  s/if \(typeof a !== "string" \|\| typeof b !== "string"\) return true;\n  if \(a === "" \|\| b === ""\) return true;\n  \/\/ Unclassifiable evidence: refuse concurrency rather than wave through\.\n  if \(currentScopeTokenProblem\(a\) != null \|\| currentScopeTokenProblem\(b\) != null\) \{\n    return true;\n  \}/if (typeof a !== "string" || typeof b !== "string") return false;\n  if (a === "" || b === "") return false;\n  \/* MUTATED no-invalid-fail-closed *\/\n/s;
+' "$MUT_JS"
+if grep -q 'MUTATED no-root' "$MUT_JS" &&
+   grep -q 'MUTATED empty-stem-disjoint' "$MUT_JS" &&
+   grep -q 'MUTATED no-invalid-fail-closed' "$MUT_JS" &&
+   node --check "$MUT_JS" 2>/dev/null; then
+  ok "#181 JS mutant applied (no root-wide / empty-stem-disjoint / no invalid fail-closed)"
+else
+  bad "#181 JS mutant failed to apply or syntax-check"
+fi
+
+mut_js_root=$(node "$MUT_JS" --pair '**' 'docs/a.md' 2>/dev/null || true)
+mut_js_star=$(node "$MUT_JS" --pair '*' 'docs/a.md' 2>/dev/null || true)
+# Re-source production bash for the comparison baseline.
+# shellcheck source=/dev/null
+. "$BASH_KERNEL"
+bash_root=$(bash_pair_verdict '**' 'docs/a.md')
+bash_star=$(bash_pair_verdict '*' 'docs/a.md')
+if [[ "$mut_js_root" == "disjoint" && "$bash_root" == "overlap" ]]; then
+  ok "#181 mutation receipt: JS fail-open on ** diverges from Bash (sensor would fail)"
+else
+  bad "#181 JS ** mutant: got mut_js=$mut_js_root bash=$bash_root (want mut=disjoint bash=overlap)"
+fi
+if [[ "$mut_js_star" == "disjoint" && "$bash_star" == "overlap" ]]; then
+  ok "#181 mutation receipt: JS fail-open on * diverges from Bash (sensor would fail)"
+else
+  bad "#181 JS * mutant: got mut_js=$mut_js_star bash=$bash_star (want mut=disjoint bash=overlap)"
+fi
+
+# Control: production --pair still agrees with production Bash on the founding cases.
+ctrl_js=$(js_pair_verdict '**' 'docs/a.md')
+ctrl_bash=$(bash_pair_verdict '**' 'docs/a.md')
+[[ "$ctrl_js" == "overlap" && "$ctrl_bash" == "overlap" ]] &&
+  ok "#181 control: production JS and Bash both overlap on ** vs concrete" ||
+  bad "#181 control regressed: JS=$ctrl_js Bash=$ctrl_bash"
+
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
