@@ -555,9 +555,9 @@ EOF
   : > docs/active-work.md
   git add -A && git commit -qm "prune fixtures" && git push -q origin main
   # Registered worktree at non-default path on expected branch (tip = claim epoch).
+  # Keep the worktree clean: non-force `git worktree remove` refuses dirty trees.
   git worktree add -b feat/50-prune "$WT_REG" HEAD >/dev/null 2>&1
   git branch -f feat/50-sib HEAD
-  echo reg > "$WT_REG/marker"
 ) >/dev/null 2>&1
 # Force every file mtime to CLAIM_EPOCH so worktree evidence is stale under STALE_NOW
 # (wall-clock mtimes would KEEP the claim as recent_activity).

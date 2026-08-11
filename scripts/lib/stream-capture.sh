@@ -3,23 +3,25 @@
 #
 # Source this from release-claim.sh (and from sensors that exercise the real
 # production helper in-process). Free of env-var test hooks; never eval's
-# attacker-controlled data.
+# attacker-controlled data (only shell-owned `trap -p` restore text).
 #
 # Capture stdout and stderr of an exact argv separately, preserving exit
 # status. Only stdout is authoritative data for the caller; stderr is
 # diagnostics only.
 #
 # Fail-closed contract:
-#   * Each allocated temp is tracked and signal-protected immediately —
-#     there is no HUP/INT/TERM window with an untracked allocated path.
+#   * Allocation uses a securely created parent directory that is tracked
+#     and signal-protected BEFORE any child file exists — there is no
+#     untracked created-temp window.
 #   * Temp handles are retained until successful unlink is verified.
-#   * Any stdout read or cleanup (unlink) failure poisons stdout as
-#     authoritative evidence (_RC_CAP_STDOUT cleared, nonzero return).
-#   * Successfully read stderr is retained strictly as diagnostic data on
-#     a later unlink failure; it never becomes evidence rows.
-#   * Caller's prior traps are restored exactly on every ordinary return.
-#   * Signal handlers unlink temps, clear capture traps, and re-raise so
-#     the signal's default disposition terminates the process.
+#     Persistent unlink failure never clears handles, poisons stdout
+#     authority, returns nonzero, and preserves diagnostic stderr when it
+#     was read successfully.
+#   * Caller's prior HUP/INT/TERM dispositions are restored exactly on
+#     ordinary return.
+#   * On signal: clean tracked artifacts, restore the prior disposition for
+#     each of HUP/INT/TERM, re-deliver the received signal so prior/default/
+#     ignored semantics are honored without recursion.
 #   * Explicit argv only — "$@" is the full reader. Never eval of the
 #     command under test. trap -p restore text is shell-owned, not user data.
 #
@@ -34,10 +36,15 @@
 #
 # Bash 3.2-safe: no process substitution, no pipeline status games.
 
+_RC_CAP_DIR=""
 _RC_CAP_OUTF=""
 _RC_CAP_ERRF=""
 _RC_CAP_STDOUT=""
 _RC_CAP_STDERR=""
+_RC_CAP_PREV_HUP=""
+_RC_CAP_PREV_INT=""
+_RC_CAP_PREV_TERM=""
+_RC_CAP_IN_SIGNAL=0
 
 # Best-effort unlink from a signal handler. Ordinary paths check rm status
 # and only clear handles after a verified successful unlink.
@@ -46,33 +53,62 @@ _rc_capture_cleanup_temps() {
   [[ -n "${_RC_CAP_ERRF:-}" ]] && rm -f -- "$_RC_CAP_ERRF" 2>/dev/null || true
   _RC_CAP_OUTF=""
   _RC_CAP_ERRF=""
+  if [[ -n "${_RC_CAP_DIR:-}" ]]; then
+    # Remove parent only when empty (children already unlinked) or best-effort.
+    rmdir -- "$_RC_CAP_DIR" 2>/dev/null || rm -rf -- "$_RC_CAP_DIR" 2>/dev/null || true
+    _RC_CAP_DIR=""
+  fi
 }
 
 # Restore prior traps from trap -p snapshots. Shell-owned text only.
+# Prefer explicit args when provided; otherwise use the globals snapshotted
+# at capture start (signal path and ordinary return both work).
 _rc_capture_restore_traps() {
-  local prev_hup="$1" prev_int="$2" prev_term="$3"
+  local prev_hup prev_int prev_term
+  if [[ $# -ge 3 ]]; then
+    prev_hup="$1"
+    prev_int="$2"
+    prev_term="$3"
+  else
+    prev_hup="$_RC_CAP_PREV_HUP"
+    prev_int="$_RC_CAP_PREV_INT"
+    prev_term="$_RC_CAP_PREV_TERM"
+  fi
   if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
   if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
   if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
 }
 
-# Install signal cleanup. Unlink tracked temps (via globals), drop capture
-# traps, re-raise so default disposition terminates the process. Prior traps
-# are NOT restored on the signal path — the process is exiting. Ordinary
-# return paths restore them via _rc_capture_restore_traps.
+# Signal path: clean tracked temps, restore prior dispositions, re-deliver
+# the received signal so prior/default/ignored semantics run without recursion.
+_rc_capture_on_signal() {
+  local sig="$1"
+  # Guard against re-entrancy if a restored handler re-raises while we clean.
+  if [[ "${_RC_CAP_IN_SIGNAL:-0}" -ne 0 ]]; then
+    return 0
+  fi
+  _RC_CAP_IN_SIGNAL=1
+  _rc_capture_cleanup_temps
+  # Restore caller's exact prior dispositions for all three, then re-raise.
+  _rc_capture_restore_traps "$_RC_CAP_PREV_HUP" "$_RC_CAP_PREV_INT" "$_RC_CAP_PREV_TERM"
+  _RC_CAP_IN_SIGNAL=0
+  # Re-deliver so prior custom / ignored / default disposition is honored.
+  kill -s "$sig" $$
+}
+
 _rc_capture_install_signal_traps() {
-  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s HUP $$' HUP
-  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s INT $$' INT
-  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s TERM $$' TERM
+  trap '_rc_capture_on_signal HUP' HUP
+  trap '_rc_capture_on_signal INT' INT
+  trap '_rc_capture_on_signal TERM' TERM
 }
 
 # Unlink both temps with status check. Retains handles until each path is
 # proven gone. Any first-attempt unlink failure is a capture failure even if
 # a later retry succeeds (cleanup failure poisons stdout authority). Retries
 # exist only to leave zero leaked temps; they never turn a failed cleanup
-# into capture success.
+# into capture success. On persistent failure, handles STAY SET.
 _rc_capture_unlink_verified() {
-  local outf="${_RC_CAP_OUTF:-}" errf="${_RC_CAP_ERRF:-}" first_fail=0
+  local outf="${_RC_CAP_OUTF:-}" errf="${_RC_CAP_ERRF:-}" dir="${_RC_CAP_DIR:-}" first_fail=0
   if [[ -n "$outf" ]]; then
     if ! rm -f -- "$outf" || [[ -e "$outf" ]]; then
       first_fail=1
@@ -88,7 +124,8 @@ _rc_capture_unlink_verified() {
     fi
   fi
   # Retry any still-tracked handle so a sticky first failure does not leave
-  # evidence on disk. Success here still does not green a first_fail capture.
+  # evidence on disk when a later attempt can succeed. Success here still
+  # does not green a first_fail capture.
   if [[ -n "${_RC_CAP_OUTF:-}" ]]; then
     if rm -f -- "$_RC_CAP_OUTF" 2>/dev/null && [[ ! -e "$_RC_CAP_OUTF" ]]; then
       _RC_CAP_OUTF=""
@@ -99,6 +136,15 @@ _rc_capture_unlink_verified() {
       _RC_CAP_ERRF=""
     fi
   fi
+  # Parent dir: only remove when both children are verified gone.
+  if [[ -z "${_RC_CAP_OUTF:-}" && -z "${_RC_CAP_ERRF:-}" && -n "$dir" ]]; then
+    if rmdir -- "$dir" 2>/dev/null || { [[ ! -e "$dir" ]]; }; then
+      _RC_CAP_DIR=""
+    else
+      # Directory still present with unexpected content — treat as cleanup fail.
+      first_fail=1
+    fi
+  fi
   if [[ "$first_fail" -ne 0 || -n "${_RC_CAP_OUTF:-}" || -n "${_RC_CAP_ERRF:-}" ]]; then
     return 1
   fi
@@ -107,35 +153,46 @@ _rc_capture_unlink_verified() {
 
 _rc_capture_streams() {
   local outf errf rc=0
-  local prev_hup prev_int prev_term
   local out_data err_data
   _RC_CAP_STDOUT=""
   _RC_CAP_STDERR=""
   _RC_CAP_OUTF=""
   _RC_CAP_ERRF=""
+  _RC_CAP_DIR=""
+  _RC_CAP_IN_SIGNAL=0
 
   # Snapshot caller traps before any allocation so ordinary-return restore
   # is always accurate. Bash 3.2: trap -p prints nothing when unset.
-  prev_hup=$(trap -p HUP 2>/dev/null || true)
-  prev_int=$(trap -p INT 2>/dev/null || true)
-  prev_term=$(trap -p TERM 2>/dev/null || true)
+  _RC_CAP_PREV_HUP=$(trap -p HUP 2>/dev/null || true)
+  _RC_CAP_PREV_INT=$(trap -p INT 2>/dev/null || true)
+  _RC_CAP_PREV_TERM=$(trap -p TERM 2>/dev/null || true)
 
-  # First temp: track + protect immediately — no signal window with an
-  # untracked allocated path.
-  outf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-out.XXXXXX") || return 127
-  _RC_CAP_OUTF="$outf"
-  _rc_capture_install_signal_traps
-
-  # Second temp: same immediate protect.
-  errf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-err.XXXXXX") || {
-    _rc_capture_cleanup_temps
-    _rc_capture_restore_traps "$prev_hup" "$prev_int" "$prev_term"
+  # Parent directory first: securely allocated, tracked, signal-protected
+  # BEFORE any child file can exist — no untracked created-temp window.
+  _RC_CAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-rc-cap.XXXXXX") || {
+    _RC_CAP_DIR=""
     return 127
   }
-  _RC_CAP_ERRF="$errf"
-  # Handler already reads globals; reinstall is a no-op of the same body but
-  # documents that both handles are live under protection.
   _rc_capture_install_signal_traps
+
+  # Child files inside the protected parent (creation cannot outrun tracking).
+  # Names keep the gibson-rc-cap-* prefix so leak sensors and hostile-path
+  # fixtures that match that pattern still see every allocation.
+  outf="$_RC_CAP_DIR/gibson-rc-cap-out"
+  errf="$_RC_CAP_DIR/gibson-rc-cap-err"
+  # Create empty files under the already-protected directory.
+  if ! : >"$outf" 2>/dev/null; then
+    _rc_capture_cleanup_temps
+    _rc_capture_restore_traps
+    return 127
+  fi
+  _RC_CAP_OUTF="$outf"
+  if ! : >"$errf" 2>/dev/null; then
+    _rc_capture_cleanup_temps
+    _rc_capture_restore_traps
+    return 127
+  fi
+  _RC_CAP_ERRF="$errf"
 
   # Explicit argv only — never eval of the command under test.
   "$@" >"$outf" 2>"$errf" || rc=$?
@@ -146,8 +203,11 @@ _rc_capture_streams() {
     _RC_CAP_STDOUT=""
     _RC_CAP_STDERR=""
     _rc_capture_unlink_verified || true
-    _rc_capture_cleanup_temps
-    _rc_capture_restore_traps "$prev_hup" "$prev_int" "$prev_term"
+    # Do not clear handles on persistent unlink failure.
+    if [[ -n "${_RC_CAP_OUTF:-}" || -n "${_RC_CAP_ERRF:-}" || -n "${_RC_CAP_DIR:-}" ]]; then
+      :
+    fi
+    _rc_capture_restore_traps
     return 1
   fi
   if ! err_data=$(cat -- "$errf" 2>/dev/null); then
@@ -155,23 +215,23 @@ _rc_capture_streams() {
     _RC_CAP_STDOUT=""
     _RC_CAP_STDERR=""
     _rc_capture_unlink_verified || true
-    _rc_capture_cleanup_temps
-    _rc_capture_restore_traps "$prev_hup" "$prev_int" "$prev_term"
+    _rc_capture_restore_traps
     return 1
   fi
 
   # Both streams read. Unlink with verification; retain diagnostic stderr and
-  # poison stdout authority if unlink cannot be proved.
+  # poison stdout authority if unlink cannot be proved. NEVER clear handles
+  # on persistent failure — they remain visible/recoverable.
   if ! _rc_capture_unlink_verified; then
     _RC_CAP_STDOUT=""
     # Retain successfully-read stderr strictly as diagnostics.
     _RC_CAP_STDERR="$err_data"
-    _rc_capture_cleanup_temps
-    _rc_capture_restore_traps "$prev_hup" "$prev_int" "$prev_term"
+    # Handles intentionally NOT cleared — persistent unlink remains visible.
+    _rc_capture_restore_traps
     return 1
   fi
 
-  _rc_capture_restore_traps "$prev_hup" "$prev_int" "$prev_term"
+  _rc_capture_restore_traps
   _RC_CAP_STDOUT="$out_data"
   _RC_CAP_STDERR="$err_data"
   return "$rc"

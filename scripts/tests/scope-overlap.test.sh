@@ -107,14 +107,14 @@ session: grok@fleet
 branch: feat/7-password-reset
 worktree: /tmp/wt-7
 C
+    # (#153 exact-head) Mixed per-file + legacy for the same id is refuse,
+    # never silent prefer-file. Issue-7 lives only as per-file; issue-9 is
+    # legacy-only. Do not put issue-7 in the table.
     cat > docs/active-work.md <<'T'
 | UTC | claim-id | scope | session |
 |---|---|---|---|
-| 2026-08-01T10:00:00Z | issue-7-password-reset | app/api/auth/** | grok@fleet |
 | 2026-08-01T11:00:00Z | issue-9-legacy-only | src/legacy/** | other@fleet |
 T
-    # file form for 7; legacy-only for 9 (no claims file — table only after we
-    # remove duplicate: keep both; sensor dedupes by id preferring file)
     echo base > README.md
     $GIT add -A
     $GIT commit -q -m "ledger"
@@ -125,14 +125,11 @@ T
   (
     cd "$ROOT/$name/canon" || exit 1
     rm -f docs/claims/issue-9-legacy-only.md
-    # ensure table has issue-9 (already does) and push
     $GIT add -A
     $GIT commit -q -m "legacy row" --allow-empty 2>/dev/null || true
-    # re-write table only — issue-9 is legacy-only
     cat > docs/active-work.md <<'T'
 | UTC | claim-id | scope | session |
 |---|---|---|---|
-| 2026-08-01T10:00:00Z | issue-7-password-reset | app/api/auth/** | grok@fleet |
 | 2026-08-01T11:00:00Z | issue-9-legacy-only | src/legacy/** | other@fleet |
 T
     $GIT add docs/active-work.md
@@ -1327,6 +1324,71 @@ out=$(run_so "$ROOT/oproot/canon" --scope '**' --claim-id issue-95-root); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-94-seed' &&
   ok "operator --scope ** overlaps every live claim" ||
   bad "operator ** did not collide with a live claim (rc=$rc): $out"
+
+echo "#153 exact-head · mixed ledger admission refuse (legacy scope overlaps, file scope disjoint)"
+# Per-file scope is disjoint from proposed; same-ID legacy scope overlaps.
+# Silent prefer-file would admit; production must refuse mixed representations.
+# Build a clean ledger with ONLY the mixed id (no setup_repo seed claims).
+rm -rf -- "${ROOT:?}/mixadm"
+mkdir -p "$ROOT/mixadm"
+$GIT init -q --bare "$ROOT/mixadm/origin"
+git -C "$ROOT/mixadm/origin" symbolic-ref HEAD refs/heads/main
+$GIT clone -q "$ROOT/mixadm/origin" "$ROOT/mixadm/canon" 2>/dev/null
+(
+  cd "$ROOT/mixadm/canon" || exit 1
+  mkdir -p docs/claims
+  cat > docs/claims/issue-96-mix.md <<'C'
+claim: issue-96-mix
+issue: 96
+claimed: 2026-08-01T10:00:00Z
+scope: components/unrelated/**
+session: grok@fleet
+C
+  cat > docs/active-work.md <<'T'
+| UTC | claim-id | scope | session |
+|---|---|---|---|
+| 2026-08-01T10:00:00Z | issue-96-mix | app/api/auth/** | grok@fleet |
+T
+  echo base > README.md
+  $GIT add -A && $GIT commit -q -m "mixed id only"
+  $GIT branch -M main
+  $GIT push -q -u origin main
+) >/dev/null 2>&1
+# Proposed scope overlaps only the legacy row, not the per-file row.
+out=$(run_so "$ROOT/mixadm/canon" --scope 'app/api/auth/login.ts' --claim-id issue-97-new); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'mixed|ambiguous|duplicate' &&
+  ok "mixed ledger admission refuses (legacy overlap not silent-dropped)" ||
+  bad "mixed ledger admission greened or missed mixed reason (rc=$rc): $out"
+
+echo "#153 exact-head · mutation: restoring silent prefer-file greeds admission"
+# Mutate a private fast-copy of scope-overlap to restore silent prefer-file;
+# require the mutant to admit against the mixed fixture (sensor would go red).
+_mix_mut="$ROOT/mixadm-mut"
+mkdir -p "$_mix_mut"
+cp "$SENSOR_FAST" "$_mix_mut/scope-overlap.mjs"
+cp "$FASTDIR/pr-claims.sh" "$_mix_mut/pr-claims.sh"
+chmod +x "$_mix_mut/pr-claims.sh"
+# Surgical defect: restore silent prefer-file by skipping the prior branch
+# and continuing when the id is already present as per-file.
+perl -i -pe 's/const prior = claims\.find\(\(c\) => c\.id === id\);/if (claims.some((c) => c.id === id)) continue; \/\/ MUTATED prefer-file\n      const prior = null;/' \
+  "$_mix_mut/scope-overlap.mjs"
+perl -i -pe 's/if \(prior\) \{/if (false \&\& prior) { \/\/ MUTATED prefer-file/' \
+  "$_mix_mut/scope-overlap.mjs"
+if grep -q 'MUTATED prefer-file' "$_mix_mut/scope-overlap.mjs" && \
+   node --check "$_mix_mut/scope-overlap.mjs" 2>/dev/null; then
+  ok "mixed admission mutation: prefer-file defect applied"
+else
+  bad "mixed admission mutation: failed to apply prefer-file defect"
+fi
+out=$(node "$_mix_mut/scope-overlap.mjs" --repo-path "$ROOT/mixadm/canon" --base main \
+  --claim-id issue-97-new --scope 'app/api/auth/login.ts' 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation receipt: silent prefer-file admits (sensor would fail)"
+elif echo "$out" | grep -qiE 'mixed|ambiguous mixed'; then
+  bad "mutation receipt: mixed refuse still active after prefer-file restore: $out"
+else
+  bad "mutation receipt: mutant still nonzero (rc=$rc): $out"
+fi
 
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"

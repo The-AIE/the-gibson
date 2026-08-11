@@ -570,7 +570,35 @@ function loadClaims() {
         }
       }
       if (!id || id === "claim-id" || id === "claim") continue;
-      if (claims.some((c) => c.id === id)) continue; // file form wins
+      // (#153 exact-head P1) Duplicate exact claim ids across per-file and
+      // legacy ledgers are ambiguous. Silent prefer-file skipped the legacy
+      // scope entirely, so an overlapping legacy scope could disappear from
+      // admission. Refuse before overlap evaluation. Validate enough of the
+      // legacy row to identify the ambiguity even when metadata is partial —
+      // do not let malformed metadata vanish via the duplicate path.
+      const prior = claims.find((c) => c.id === id);
+      if (prior) {
+        // Still validate the legacy row enough to name the ambiguity; a
+        // truncated/empty-scope legacy row is itself a refuse, not a reason
+        // to silently drop the row under the duplicate path.
+        if (idIndex + 1 >= cols.length) {
+          fail(
+            `legacy claim row for '${id}' in ${ref}:docs/active-work.md is truncated — it has no scope column at all; also duplicates per-file claim id '${id}' (source=${prior.source}); refuse mixed/ambiguous representations`
+          );
+        }
+        const ambigScope = String(cols[idIndex + 1] || "")
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
+        if (!ambigScope.length) {
+          fail(
+            `legacy claim row for '${id}' in ${ref}:docs/active-work.md has an empty scope column and duplicates per-file claim id '${id}' (source=${prior.source}); refuse mixed/ambiguous representations`
+          );
+        }
+        fail(
+          `REFUSE ambiguous mixed ledger representations for exact claim id '${id}': present as per-file (source=${prior.source}) and as legacy row in ${ref}:docs/active-work.md — refuse before overlap evaluation; never silently prefer file form`
+        );
+      }
       // This row IS a live claim. Validate the shape overlap actually uses:
       // a scope column must exist and must carry at least one token. The old
       // `cols[i + 1] || ""` turned a truncated row — a row where the claim id
