@@ -855,6 +855,44 @@ fi
 
 # --- 4. sensor suites -------------------------------------------------------
 echo "== sensors"
+
+# Predicate used below: shell-construction diagnostics must never green a
+# nominally-passing suite (#153 review round 7). Mutation proof for the exact
+# six-unbound-variable class observed under set -u + unquoted fixture heredocs.
+suite_has_shell_construction_diag() {
+  # stdin: suite captured stdout+stderr
+  grep -qE 'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found'
+}
+{
+  _mut_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-runall-shell-diag.XXXXXX")
+  {
+    echo "  ok   — synthetic"
+    for _i in 1 2 3 4 5 6; do
+      echo "scripts/tests/release-claim.test.sh: line 1391: \$2: unbound variable"
+    done
+    echo "release-claim.test.sh: 507 passed, 0 failed"
+  } > "$_mut_probe"
+  if suite_has_shell_construction_diag < "$_mut_probe"; then
+    echo "${GRN}  ok${OFF}   — mutation: six-unbound-variable class is rejected by the shell-diag gate"
+  else
+    echo "${RED}  FAIL${OFF} — mutation: six-unbound-variable class slipped the shell-diag gate"
+    FAILED="$FAILED shell-diag-mutation"
+  fi
+  # Clean green tally with no diagnostics must not trip the gate.
+  {
+    echo "  ok   — synthetic"
+    echo "release-claim.test.sh: 507 passed, 0 failed"
+  } > "$_mut_probe"
+  if suite_has_shell_construction_diag < "$_mut_probe"; then
+    echo "${RED}  FAIL${OFF} — mutation: clean suite tally falsely tripped the shell-diag gate"
+    FAILED="$FAILED shell-diag-mutation-false-positive"
+  else
+    echo "${GRN}  ok${OFF}   — mutation: clean suite tally does not trip the shell-diag gate"
+  fi
+  rm -f "$_mut_probe"
+  unset _mut_probe _i
+}
+
 for suite in scripts/tests/*.test.sh; do
   name=$(basename "$suite")
   [[ -z "$ONLY" || "$name" == *"$ONLY"* ]] || continue
@@ -873,12 +911,29 @@ for suite in scripts/tests/*.test.sh; do
   [[ -n "$tally" ]] || tally="no tally line"
   [[ "$ec" -eq 124 ]] && tally="timed out after ${TIMEOUT}s"
 
-  if [[ "$QUIET" -eq 0 && "$ec" -ne 0 ]]; then
-    echo "$out" | grep -E '^\s*FAIL|unbound variable|command not found' |
+  # Shell-construction diagnostics must never green a nominally-passing suite
+  # (#153 review round 7). An unquoted heredoc under `set -u` can print
+  # `unbound variable` six times while the suite still tallies 0 failed and
+  # exits 0 — --quiet used to hide that. Reject only diagnostic classes that
+  # prove the suite (or a fixture it generated) is misconstructed, not
+  # ordinary assertion text that happens to mention those phrases.
+  shell_diag=""
+  if printf '%s\n' "$out" | suite_has_shell_construction_diag; then
+    shell_diag=$(printf '%s\n' "$out" | grep -E \
+      'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
+      head -20)
+  fi
+
+  if [[ "$QUIET" -eq 0 && ( "$ec" -ne 0 || -n "$shell_diag" ) ]]; then
+    echo "$out" | grep -E '^\s*FAIL|unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
       head -20 | sed 's/^/         /'
   fi
 
-  if [[ "$ec" -eq 0 ]]; then
+  if [[ -n "$shell_diag" ]]; then
+    echo "${RED}  FAIL${OFF} — $name: shell construction diagnostic with tally '$tally' (exit $ec)"
+    echo "$shell_diag" | head -6 | sed 's/^/         /'
+    FAILED="$FAILED $name"
+  elif [[ "$ec" -eq 0 ]]; then
     if is_quarantined "$name"; then
       echo "${RED}  FAIL${OFF} — $name PASSES but is quarantined (#$(quarantine_issue "$name")) — remove it from the list"
       ESCAPED="$ESCAPED $name"
