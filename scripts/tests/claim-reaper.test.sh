@@ -2199,10 +2199,210 @@ contains "canonical PR #1000 is classified STALE" "$out" "STALE PR #1000 claim i
   && ok "canonical PR #1000 invokes release under --apply" \
   || bad "canonical PR #1000 did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
 
-# Source-contract tripwire: dual independent shape requirements remain in source.
-# Same-shaped 0999/0999 URL-only mutation is unreachable for STALE/release
-# assertions (row check fires first); the mismatch-shaped fixture above covers
-# URL mutation behaviorally. These greps keep the dual source invariant explicit.
+# ===========================================================================
+# #153 review-eleven P1 — PR identities must also be within safe integer range
+# ===========================================================================
+# [1-9][0-9]* alone admits arbitrarily long digit strings. A 64-digit positive
+# decimal (or MAX_SAFE_INT+1) matching in both the row and /pull/N must make
+# the entire inventory unreadable/fatal before classification, planning,
+# journaling, or --apply release. Bound via parse_canonical_positive_int over
+# the existing parse_nonneg_int / MAX_SAFE_INT machinery — no host arithmetic
+# on hostile input.
+#
+# Mutation reachability notes (exact equality + dual independent validators):
+# 1. Row-only safe-range bypass on an exact-match overflow fixture: the URL
+#    safe-range check still rejects, so STALE/release cannot fire. Behavioral
+#    teeth come from the *row* diagnostic ("PR number is noncanonical/unsafe")
+#    which disappears under that mutation, plus the source tripwire that the
+#    inventory path still calls parse_canonical_positive_int on the row field.
+# 2. URL-only safe-range bypass: exact-match overflow is unreachable for a
+#    URL-specific diagnostic (row rejects first). The mismatch-shaped fixture
+#    (safe row + overflow URL) gives that mutation behavioral teeth: production
+#    names "pull number is noncanonical/unsafe"; bypassing only the URL range
+#    check degrades to a generic pull-number mismatch.
+# 3. Both safe-range checks bypassed (shape-only [1-9][0-9]*): the exact-match
+#    64-digit fixture becomes STALE and invokes the release spy — suite fails.
+echo "#153 r11 · 64-digit overflow PR identity (exact row/URL match) is rejected"
+# 64-digit positive decimal — length > MAX_SAFE_INT (19 digits), so out of
+# safe range even though it matches ^[1-9][0-9]*$.
+OVERFLOW64="1234567890123456789012345678901234567890123456789012345678901234"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    printf '%s\tissue-64-overflow\tlib/**\tfeat/64-overflow\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+      '$OVERFLOW64' '$OVERFLOW64'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "64-digit overflow PR identity exits nonzero" \
+  || bad "64-digit overflow PR identity was accepted (exit 0): $out"
+# Row-field diagnostic specifically. Softening only the row safe-range check
+# (keeping shape) makes the URL range check reject instead — this assertion
+# fails under that independent mutation even though STALE still cannot fire.
+contains "64-digit overflow names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "64-digit overflow names the hostile row number" "$out" "$OVERFLOW64"
+contains "64-digit overflow names safe-range contract" "$out" "safe range"
+lacks    "64-digit overflow is not classified STALE" "$out" "STALE PR #"
+lacks    "64-digit overflow is not nothing to reap" "$out" "nothing to reap"
+lacks    "64-digit overflow is not protected as live" "$out" "is protected"
+lacks    "64-digit overflow is not planned REAP" "$out" "REAP   issue-64-overflow"
+check    "64-digit overflow never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "64-digit overflow never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r11 · just-over-boundary PR identity (MAX_SAFE_INT+1 exact match) is rejected"
+# MAX_SAFE_INT is 9223372036854775807; +1 is still 19 digits and matches
+# ^[1-9][0-9]*$ but fails the lexical safe-range compare. No shell arithmetic
+# on this value anywhere in the fixture or production path.
+OVER_BOUND="9223372036854775808"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    printf '%s\tissue-over-bound\tlib/**\tfeat/over-bound\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+      '$OVER_BOUND' '$OVER_BOUND'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "just-over-boundary PR identity exits nonzero" \
+  || bad "just-over-boundary PR identity was accepted (exit 0): $out"
+contains "just-over-boundary names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "just-over-boundary names the hostile row number" "$out" "$OVER_BOUND"
+contains "just-over-boundary names safe-range contract" "$out" "safe range"
+lacks    "just-over-boundary is not classified STALE" "$out" "STALE PR #"
+lacks    "just-over-boundary is not nothing to reap" "$out" "nothing to reap"
+check    "just-over-boundary never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "just-over-boundary never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r11 · safe row + overflow URL is rejected via independent URL path"
+# Mismatch-shaped hostile fixture for URL safe-range mutation teeth: row is
+# boundary-safe so the row validator cannot reject first. Only the independent
+# URL /pull/N safe-range parse rejects. Restoring URL validation to shape-only
+# ([1-9][0-9]* without safe range) while leaving the row validator strict
+# changes the diagnostic to a pull-number *mismatch* — this fixture gives that
+# independent URL mutation behavioral teeth. (A pure same-shaped overflow/overflow
+# URL-only mutation is unreachable: the earlier row check necessarily rejects
+# first; see source tripwire below.)
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '7\tissue-7-url-overflow\tlib/**\tfeat/7-url-overflow\thttps://github.com/acme/app/pull/9223372036854775808\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "safe-row + overflow URL exits nonzero" \
+  || bad "safe-row + overflow URL was accepted (exit 0): $out"
+# URL-path diagnostic specifically (not a generic row/URL number mismatch).
+contains "safe-row + overflow URL names noncanonical/unsafe URL pull" "$out" \
+  "pull number is noncanonical/unsafe"
+contains "safe-row + overflow URL names safe-range contract" "$out" "safe range"
+lacks    "safe-row + overflow URL is not a mere number mismatch" "$out" \
+  "does not match row PR number"
+lacks    "safe-row + overflow URL is not classified STALE" "$out" "STALE PR #"
+lacks    "safe-row + overflow URL is not nothing to reap" "$out" "nothing to reap"
+check    "safe-row + overflow URL never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r11 · boundary-safe PR identity (MAX_SAFE_INT) remains accepted under --apply"
+# MAX_SAFE_INT itself must remain accepted. Represented only as a string literal
+# — no shell arithmetic on the PR number in the fixture or production path.
+MAX_SAFE="9223372036854775807"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    printf '%s\tissue-%s-stale\tlib/**\tfeat/max-safe-stale\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+      '$MAX_SAFE' '$MAX_SAFE' '$MAX_SAFE'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "boundary-safe MAX_SAFE_INT PR is accepted (exit 0)" "$rc" "0"
+contains "boundary-safe MAX_SAFE_INT PR is classified STALE" "$out" \
+  "STALE PR #${MAX_SAFE} claim issue-${MAX_SAFE}-stale"
+[[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]] \
+  && ok "boundary-safe MAX_SAFE_INT PR invokes release under --apply" \
+  || bad "boundary-safe MAX_SAFE_INT PR did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+
+# Source-contract tripwires: dual independent shape + safe-range requirements.
+# Same-shaped 0999/0999 or overflow/overflow URL-only mutations are unreachable
+# for STALE/release assertions (row check fires first); the mismatch-shaped
+# fixtures above cover URL mutation behaviorally. These greps keep the dual
+# source invariant explicit for both shape and safe-range layers.
 if grep -qF '/pull/([1-9][0-9]*)$' "$REAPER"; then
   ok "source contract: URL pull capture requires positive canonical decimal"
 else
@@ -2213,6 +2413,20 @@ if grep -qF '^[1-9][0-9]*$' "$REAPER"; then
 else
   bad "source contract: row PR number no longer requires ^[1-9][0-9]*$"
 fi
+if grep -q 'parse_canonical_positive_int' "$REAPER"; then
+  ok "source contract: parse_canonical_positive_int helper is present"
+else
+  bad "source contract: parse_canonical_positive_int helper missing (check $REAPER)"
+fi
+# Both the row field and the captured URL component must call the helper
+# independently (two call sites in the inventory validator, not only the def).
+_call_sites=$(grep -c 'parse_canonical_positive_int "' "$REAPER" || true)
+if [[ "$_call_sites" -ge 2 ]]; then
+  ok "source contract: parse_canonical_positive_int called ≥2 times (row + URL)"
+else
+  bad "source contract: parse_canonical_positive_int call sites = ${_call_sites} (want ≥2 for row+URL)"
+fi
+unset _call_sites
 
 # ---------------------------------------------------------------------------
 echo

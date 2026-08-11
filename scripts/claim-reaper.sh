@@ -155,6 +155,20 @@ parse_nonneg_int() {
   return 0
 }
 
+# Positive canonical decimal in safe range: ^[1-9][0-9]*$ AND ≤ MAX_SAFE_INT.
+# Layers the positive / no-leading-zero rule over parse_nonneg_int. Rejects
+# zero, leading zeros, empty, non-digits, and overflow-length values without
+# normalizing them into a smaller identity (parse_nonneg_int alone would strip
+# leading zeros). Prints the same canonical decimal on success.
+# Used for PR-row and /pull/N identity binding (#153 review-eleven P1).
+parse_canonical_positive_int() {
+  local raw="$1"
+  if [[ ! "$raw" =~ ^[1-9][0-9]*$ ]]; then
+    return 1
+  fi
+  parse_nonneg_int "$raw"
+}
+
 # Safe numeric greater-than for two already-parsed non-negative decimals.
 int_gt() {
   local a="$1" b="$2"
@@ -329,12 +343,13 @@ if [[ -n "$PR_REPO" ]]; then
       _pr_bad_row="want 8 tab-separated fields, got ${_pr_fields}: ${_pr_row}"
       break
     fi
-    # GitHub pull-request numbers are positive canonical decimals: first digit
-    # 1-9, then zero or more digits. Reject zero and leading-zero forms such as
-    # 0999 before any classification, planning, journaling, or release
-    # (#153 review-ten P1). Do not normalize malformed input into a valid identity.
-    if [[ ! "$_pr_number" =~ ^[1-9][0-9]*$ ]]; then
-      _pr_bad_row="PR number is noncanonical/unsafe (want positive decimal without leading zeros): ${_pr_row}"
+    # GitHub pull-request numbers are positive canonical decimals in the
+    # script's safe integer range (1..MAX_SAFE_INT). Reject zero, leading-zero,
+    # and overflow-length forms before any classification, planning, journaling,
+    # or release (#153 review-ten/eleven P1). Do not normalize malformed input
+    # into a valid identity — independent of the URL check below.
+    if ! parse_canonical_positive_int "$_pr_number" >/dev/null; then
+      _pr_bad_row="PR number is noncanonical/unsafe (want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${_pr_row}"
       break
     fi
     # Issue-bound claim id: issue-[optional-ns-]<digits>-<slug>, same family
@@ -351,13 +366,15 @@ if [[ -n "$PR_REPO" ]]; then
       _pr_bad_row="missing/unsafe head branch: ${_pr_row}"
       break
     fi
-    # URL /pull/N must independently be the same positive canonical decimal —
-    # not merely digit-only. Zero and leading-zero URL components fail here
-    # even if a future change loosened the row check (#153 review-ten P1).
+    # URL /pull/N must independently be a positive canonical decimal —
+    # not merely digit-only. Zero and leading-zero URL components fail the
+    # shape match; arbitrarily long digit strings match shape but fail the
+    # independent safe-range parse below (#153 review-ten/eleven P1).
     if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
-      _pr_bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros): ${_pr_row}"
+      _pr_bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${_pr_row}"
       break
     fi
+    # Capture before any further =~ (parse_canonical_positive_int uses regex).
     # Conjunctive identity binding (#153 review-nine P1): a plausible PR URL
     # shape is not enough. The URL's owner/repo must equal PR_REPO and its
     # /pull/N must equal the row number before the row may be classified or
@@ -366,6 +383,14 @@ if [[ -n "$PR_REPO" ]]; then
     # (same rule pr-claims.sh / scope-overlap.mjs already enforce).
     _pr_url_repo="${BASH_REMATCH[1]}"
     _pr_url_num="${BASH_REMATCH[2]}"
+    # Independent safe-range check on the captured /pull/N component. The regex
+    # alone admits arbitrarily long digit strings; bound them before repository
+    # or number equality so an overflow URL is diagnosed as unsafe identity,
+    # not merely a row/URL mismatch (#153 review-eleven P1).
+    if ! parse_canonical_positive_int "$_pr_url_num" >/dev/null; then
+      _pr_bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${_pr_row}"
+      break
+    fi
     if [[ "$_pr_url_repo" != "$PR_REPO" ]]; then
       _pr_bad_row="PR URL repository ('${_pr_url_repo}') does not match inventory repository ('${PR_REPO}'): ${_pr_row}"
       break
