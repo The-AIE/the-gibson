@@ -359,12 +359,17 @@ ENV (admission mode only — these may RAISE the barrier, never lower it)
 }
 
 const argv = process.argv.slice(2);
+// Pure token pair check first — no ledger, no network (#181 differential).
+// Must run before generic --help dispatch so
+// `node scope-overlap.mjs --pair --help docs/a.md` treats `--help` and
+// `docs/a.md` as pair operands rather than silently becoming usage help.
+if (argv[0] === "--pair") {
+  runPairMode(argv);
+}
 if (argv.includes("-h") || argv.includes("--help") || argv.length === 0) {
   help();
   process.exit(argv.includes("-h") || argv.includes("--help") ? 0 : 2);
 }
-// Pure token pair check — no ledger, no network (#181 differential sensor).
-runPairMode(argv);
 
 function parseArgs(a) {
   const out = {

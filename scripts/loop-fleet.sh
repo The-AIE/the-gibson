@@ -316,6 +316,9 @@ scope_stem() {
 # Bash 3.2 portable: no mapfile, no associative arrays required.
 scope_token_is_safe() {
   local token="$1" seg rest last literals=0
+  # Pin C locale so [A-Za-z0-9_.-] is ASCII-only and independent of the caller
+  # locale (JS SCOPE_LITERAL is code-point strict; collation must not widen it).
+  local LC_ALL=C LANG=C
   [[ -n "$token" ]] || return 1
   # Deliberate root-wide scope — valid and classifiable.
   [[ "$token" == "**" ]] && return 0
@@ -342,7 +345,7 @@ scope_token_is_safe() {
       [[ "$last" -eq 1 ]] || return 1
       continue
     fi
-    # Plain literal segment ([A-Za-z0-9_.-]+, not . or ..).
+    # Plain literal segment ([A-Za-z0-9_.-]+, not . or ..). ASCII via LC_ALL=C.
     [[ "$seg" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
     if [[ "$seg" == "." || "$seg" == ".." ]]; then
       return 1
@@ -525,18 +528,24 @@ parse_lane_line() {
 
   # Every scope token must parse under the same grammar as scope-overlap.mjs
   # (#153 / #181). Invalid evidence must refuse the profile, never authorize
-  # a concurrent lane on an unclassifiable stem. noglob so docs/** stays literal.
-  local _stok
-  set -f
-  # shellcheck disable=SC2086
-  for _stok in $scope; do
-    set +f
-    if ! scope_token_is_safe "$_stok"; then
-      die "lane $id: invalid claim-scope token '$_stok' (canonical grammar: '**' or plain segments with optional trailing '*'/'**'; refuse rather than authorize concurrency on unclassifiable evidence — #181)"
-    fi
+  # a concurrent lane on an unclassifiable stem. Subshell isolates set -f so the
+  # caller's glob state is restored on every exit path (same idiom as
+  # scopes_lists_overlap; Bash 3.2 portable).
+  local _stok _bad_scope_tok
+  if _bad_scope_tok=$(
     set -f
-  done
-  set +f
+    # shellcheck disable=SC2086
+    for _stok in $scope; do
+      if ! scope_token_is_safe "$_stok"; then
+        printf '%s\n' "$_stok"
+        exit 0
+      fi
+    done
+    exit 1
+  ); then
+    _bad_scope_tok=${_bad_scope_tok%$'\n'}
+    die "lane $id: invalid claim-scope token '${_bad_scope_tok}' (canonical grammar: '**' or plain segments with optional trailing '*'/'**'; refuse rather than authorize concurrency on unclassifiable evidence — #181)"
+  fi
 
   # Optional 5th field: ordered runner route. Hostile-data rules — no shell
   # syntax / control characters (never eval'd / sourced / interpolated).

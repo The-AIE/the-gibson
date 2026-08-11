@@ -1535,6 +1535,11 @@ lib/	lib/x.ts	overlap	1	trailing slash
 a/**/b	a/x/b	overlap	1	mid-path double-star
 /abs/path	docs/a.md	overlap	1	absolute path
 __EMPTY__	docs/a.md	overlap	1	empty token vs concrete
+café/a.md	docs/a.md	overlap	1	non-ASCII segment fail closed
+docs/café.md	scripts/x.ts	overlap	1	non-ASCII filename fail closed
+naïve/**	docs/**	overlap	1	non-ASCII stem fail closed
+seg;rm/**	docs/a.md	overlap	1	hostile semicolon segment
+$HOST/x	docs/a.md	overlap	1	hostile dollar segment
 TABLE
 
 decode_token() {
@@ -1595,70 +1600,132 @@ ok "#181 differential fixture rows=$DIFF_ROWS expanded_cases=$DIFF_CASES"
 
 # --- mutation receipts: Bash regression that returns disjoint for root-wide ---
 echo "#181 · mutation receipt: Bash root-wide / unstemmable must make sensor fail"
+# Start from the extracted production kernel; surgically mutate the three
+# fail-closed branches (unsafe-token, root-wide, empty-stem). Do not rewrite
+# a handwritten fake that merely approximates pre-#181 behaviour.
 MUT_BASH="$ROOT/mut-bash-kernel.inc"
 cp "$BASH_KERNEL" "$MUT_BASH"
-# Restore the pre-#181 fail-OPEN bugs: no ** special case; empty stem → disjoint.
-# Apply via a known-bad reimplementation of scope_tokens_overlap only.
-cat > "$MUT_BASH" <<'MUTBASH'
-scope_stem() {
-  local token="$1"
-  token="${token%/}"
-  token="${token%/\*\*}"
-  token="${token%\*\*}"
-  token="${token%\*}"
-  token="${token%/}"
-  printf '%s\n' "$token"
-}
-# Deliberately broken pre-#181 semantics (mutation target).
-scope_token_is_safe() { return 0; }
-scope_tokens_overlap() {
-  local a="$1" b="$2" sa sb
-  [[ -n "$a" && -n "$b" ]] || return 1
-  [[ "$a" == "$b" ]] && return 0
-  sa=$(scope_stem "$a")
-  sb=$(scope_stem "$b")
-  # BUG: empty stem → disjoint (pre-#181)
-  [[ -n "$sa" && -n "$sb" ]] || return 1
-  [[ "$sa" == "$sb" ]] && return 0
-  case "$sa" in "$sb"/*) return 0 ;; esac
-  case "$sb" in "$sa"/*) return 0 ;; esac
-  case "$sa" in "$sb"|"$sb"/*|"$sb".*) return 0 ;; esac
-  case "$sb" in "$sa"|"$sa"/*|"$sa".*) return 0 ;; esac
-  return 1
-}
-MUTBASH
+python3 - "$MUT_BASH" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+orig = text
+miss = []
 
-# Prove the mutant is wrong on the two founding cases before asserting the sensor.
+def sub1(pattern, repl, label):
+    global text
+    text2, n = re.subn(pattern, repl, text, count=1, flags=re.M)
+    if n != 1:
+        miss.append(label)
+        return
+    text = text2
+
+# Unsafe / unclassifiable: fail closed (return 0) → fail open (return 1).
+sub1(
+    r'(if ! scope_token_is_safe "\$a" \|\| ! scope_token_is_safe "\$b"; then\n'
+    r'    return )0(\n  fi)',
+    r'\g<1>1  # MUTATED no-unsafe-fail-closed\2',
+    "unsafe-token fail-closed return 0",
+)
+# Root-wide **: return 0 (overlap) → return 1 (disjoint).
+sub1(
+    r'(# Root-wide \*\* overlaps every path \(both orientations\)\.\n'
+    r'  if \[\[ "\$a" == "\*\*" \|\| "\$b" == "\*\*" \]\]; then\n'
+    r'    return )0(\n  fi)',
+    r'\g<1>1  # MUTATED no-root\2',
+    "root-wide return 0",
+)
+# Empty stem: return 0 (fail closed) → return 1 (pre-#181 disjoint).
+sub1(
+    r'(# Empty stem fail closed \(was return 1 — the #181 Bash drift bug\)\.\n'
+    r'  if \[\[ -z "\$sa" \|\| -z "\$sb" \]\]; then\n'
+    r'    return )0(\n  fi)',
+    r'\g<1>1  # MUTATED empty-stem-disjoint\2',
+    "empty-stem fail-closed return 0",
+)
+
+if miss or text == orig:
+    open(path + ".mutation-miss", "w", encoding="utf-8").write(
+        "anchors not found: " + ", ".join(miss or ["no change"]) + "\n"
+    )
+    sys.exit(1)
+for marker in (
+    "MUTATED no-unsafe-fail-closed",
+    "MUTATED no-root",
+    "MUTATED empty-stem-disjoint",
+):
+    if marker not in text:
+        open(path + ".mutation-miss", "w", encoding="utf-8").write(
+            "missing marker: " + marker + "\n"
+        )
+        sys.exit(1)
+open(path, "w", encoding="utf-8").write(text)
+sys.exit(0)
+PY
+if [[ -f "$MUT_BASH.mutation-miss" ]]; then
+  bad "#181 Bash mutant mutation-miss: $(cat "$MUT_BASH.mutation-miss")"
+elif grep -q 'MUTATED no-root' "$MUT_BASH" &&
+     grep -q 'MUTATED empty-stem-disjoint' "$MUT_BASH" &&
+     grep -q 'MUTATED no-unsafe-fail-closed' "$MUT_BASH"; then
+  ok "#181 Bash mutant applied to extracted production kernel (3 surgical markers)"
+else
+  bad "#181 Bash mutant markers missing after surgical patch"
+fi
+
+# Prove the mutated real kernel is wrong on founding cases (subshell returns
+# status only — parent-scope ok/bad move the suite counters).
+mut_founding_rc=0
 (
   # shellcheck source=/dev/null
   . "$MUT_BASH"
-  mut_bad=0
-  if scope_tokens_overlap '**' 'docs/a.md'; then
-    : # mutant unexpectedly correct on ** — mutation miss
-    mut_bad=1
-  fi
-  if scope_tokens_overlap '*' 'docs/a.md'; then
-    mut_bad=1
-  fi
-  if [[ "$mut_bad" -eq 0 ]]; then
-    ok "#181 Bash mutant exhibits pre-repair fail-open on ** and *"
-  else
-    bad "#181 Bash mutant did not reproduce fail-open (mutation miss)"
-  fi
-)
+  # Fail-open mutant must return disjoint (exit 1 from scope_tokens_overlap)
+  # for both founding cases. Any overlap is a mutation miss.
+  if scope_tokens_overlap '**' 'docs/a.md'; then exit 2; fi
+  if scope_tokens_overlap '*' 'docs/a.md'; then exit 3; fi
+  exit 0
+) || mut_founding_rc=$?
+if [[ "$mut_founding_rc" -eq 0 ]]; then
+  ok "#181 Bash mutant exhibits pre-repair fail-open on ** and *"
+else
+  bad "#181 Bash mutant did not reproduce fail-open (mutation miss rc=$mut_founding_rc)"
+fi
 
 # Differential against mutant must fail (Bash disagrees with JS on **).
+# Verdict collected in a subshell; ok/bad run in parent scope.
 mut_js=$(js_pair_verdict '**' 'docs/a.md')
-(
+mut_bv=$(
   # shellcheck source=/dev/null
   . "$MUT_BASH"
-  if scope_tokens_overlap '**' 'docs/a.md'; then mut_bv=overlap; else mut_bv=disjoint; fi
-  if [[ "$mut_js" == "overlap" && "$mut_bv" == "disjoint" ]]; then
-    ok "#181 mutation receipt: Bash fail-open on ** diverges from JS (sensor would fail)"
-  else
-    bad "#181 mutation receipt: expected JS=overlap Bash=disjoint, got JS=$mut_js Bash=$mut_bv"
-  fi
+  if scope_tokens_overlap '**' 'docs/a.md'; then printf '%s\n' overlap; else printf '%s\n' disjoint; fi
 )
+assert_bash_mutation_diverges() {
+  local js_verdict="$1" bash_verdict="$2" label="$3"
+  if [[ "$js_verdict" == "overlap" && "$bash_verdict" == "disjoint" ]]; then
+    ok "$label"
+  else
+    bad "$label: expected JS=overlap Bash=disjoint, got JS=$js_verdict Bash=$bash_verdict"
+  fi
+}
+assert_bash_mutation_diverges "$mut_js" "$mut_bv" \
+  "#181 mutation receipt: Bash fail-open on ** diverges from JS (sensor would fail)"
+
+# Meta-sensor: invoke the SAME parent-scope receipt helper with a mutation-miss
+# verdict, capture its intentional FAIL line, and prove the parent counter moved.
+# Roll the intentional probe back before recording the real meta assertion so a
+# green suite never prints a stray FAIL line or leaves a false failure tally.
+echo "#181 · meta-sensor: parent FAIL increments on mutation-miss path"
+_meta_fail_before=$FAIL
+_meta_probe_out="$ROOT/meta-parent-fail.out"
+assert_bash_mutation_diverges "$mut_js" overlap \
+  "#181 meta intentional mutation miss" >"$_meta_probe_out"
+_meta_fail_after=$FAIL
+FAIL=$_meta_fail_before
+if [[ "$_meta_fail_after" -eq $((_meta_fail_before + 1)) ]] &&
+   grep -q 'meta intentional mutation miss' "$_meta_probe_out"; then
+  ok "#181 meta-sensor: shared receipt helper increments parent FAIL on mutation miss"
+else
+  bad "#181 meta-sensor: shared receipt helper did not move parent FAIL (before=$_meta_fail_before after=$_meta_fail_after)"
+fi
 
 # --- mutation receipts: JS without root-wide / fail-closed empty stem ---
 echo "#181 · mutation receipt: JS without root-wide must make sensor fail"
@@ -1704,6 +1771,28 @@ ctrl_bash=$(bash_pair_verdict '**' 'docs/a.md')
 [[ "$ctrl_js" == "overlap" && "$ctrl_bash" == "overlap" ]] &&
   ok "#181 control: production JS and Bash both overlap on ** vs concrete" ||
   bad "#181 control regressed: JS=$ctrl_js Bash=$ctrl_bash"
+
+# --pair before generic help: operands bind even when one token is --help.
+echo "#181 · --pair binds before generic --help dispatch"
+out=$(node "$SENSOR" --pair --help docs/a.md 2>&1); rc=$?
+# `--help` is a valid literal token and is disjoint from docs/a.md. Bind the
+# exact production-kernel answer and exit semantics, not merely the output shape.
+if [[ "$rc" -eq 0 && "$out" == "disjoint" ]] &&
+   ! echo "$out" | grep -q 'WHAT IT DOES'; then
+  ok "#181 --pair --help docs/a.md binds operands (disjoint/0, no help text)"
+else
+  bad "#181 --pair --help was not pair mode (rc=$rc out=$out)"
+fi
+# Normal --help still works when it is not the first --pair command.
+out=$(node "$SENSOR" --help 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' &&
+  ok "#181 bare --help still prints usage" ||
+  bad "#181 bare --help broken (rc=$rc)"
+# --pair with wrong arity remains a usage error (exit 2).
+out=$(node "$SENSOR" --pair only-one 2>&1); rc=$?
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'exactly two tokens' &&
+  ok "#181 --pair arity error still exits 2" ||
+  bad "#181 --pair arity (rc=$rc out=$out)"
 
 echo
 echo "scope-overlap.test.sh: $PASS passed, $FAIL failed"

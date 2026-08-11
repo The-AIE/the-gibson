@@ -7680,7 +7680,8 @@ write_profile "$PROF" \
   "lane=docs|261|docs/**|docs only"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-zero_launch_case "root-wide ** vs docs/** overlaps" 'scope overlap|invalid claim-scope' --start
+# Root-wide ** is valid grammar; must refuse specifically for lane scope overlap.
+zero_launch_case "root-wide ** vs docs/** overlaps" 'lane scope overlap' --start
 
 echo "#181 unclassifiable bare * refuses (fail closed, not disjoint)"
 reset_calls
@@ -7697,7 +7698,8 @@ write_profile "$PROF" \
   "lane=star|270|*|unclassifiable" \
   "lane=docs|271|docs/**|docs"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "bare * fails closed" 'invalid claim-scope|scope overlap' --start
+# Bare * is invalid claim-scope grammar (not a loose either/or with overlap).
+zero_launch_case "bare * fails closed" 'invalid claim-scope' --start
 
 echo "#181 mid-path a/**/b refuses (grammar, not silent disjoint)"
 reset_calls
@@ -7714,7 +7716,7 @@ write_profile "$PROF" \
   "lane=mid|280|a/**/b|mid double-star" \
   "lane=axb|281|a/x/b|concrete mid path"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "a/**/b fails closed" 'invalid claim-scope|scope overlap' --start
+zero_launch_case "a/**/b fails closed" 'invalid claim-scope' --start
 
 echo "#181 safe siblings still launch (parity preserves legitimate disjointness)"
 reset_calls
@@ -7732,16 +7734,19 @@ write_profile "$PROF" \
   "lane=scripts|291|scripts/**|scripts"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-# Expect launch (or at least no scope-overlap refuse). Use run_fleet if available.
+# Must prove a successful start AND two launch records — not green after an
+# unrelated preflight failure that merely avoided the scope refuse path.
+start_ok=0
 if out=$(run_fleet --start 2>&1); then
-  ok "#181 safe siblings docs/** vs scripts/** start without scope refuse"
+  start_ok=1
 else
-  if echo "$out" | grep -qiE 'scope overlap|invalid claim-scope'; then
-    bad "#181 safe siblings incorrectly refused for scope: $out"
-  else
-    # Other preflight may still fail in this harness; scope must not be why.
-    ok "#181 safe siblings not refused for scope (other preflight: ${out:0:120})"
-  fi
+  bad "#181 safe siblings start failed: $out"
+fi
+lc=$(launch_count | tr -d '[:space:]')
+if [[ "$start_ok" -eq 1 && "$lc" == "2" ]]; then
+  ok "#181 safe siblings docs/** vs scripts/** launched 2 lanes"
+else
+  bad "#181 safe siblings expected successful start + 2 launches, got lc='$lc' out=$out"
 fi
 
 echo "#181 pure-kernel differential (extract production functions, compare to JS)"
@@ -7776,6 +7781,8 @@ app|application|disjoint
 app/api|app/api/auth/**|overlap
 ..|docs|overlap
 /abs|docs|overlap
+café/a.md|docs/a.md|overlap
+docs/café.md|scripts/x.ts|overlap
 FLEETDIFF
 if [[ "$fleet_diff_fail" -eq 0 && "$fleet_diff_ok" -gt 0 ]]; then
   ok "#181 fleet pure-kernel differential: $fleet_diff_ok pair-checks agree"
@@ -7784,44 +7791,121 @@ else
 fi
 
 echo "#181 Bash mutation receipt (root-wide fail-open makes differential fail)"
+# Surgical mutations of the extracted production kernel — not a handwritten fake.
 MUT_F="$ROOT/mut-fleet-scope.inc"
-cat > "$MUT_F" <<'MUT'
-scope_stem() {
-  local token="$1"
-  token="${token%/}"
-  token="${token%/\*\*}"
-  token="${token%\*\*}"
-  token="${token%\*}"
-  token="${token%/}"
-  printf '%s\n' "$token"
-}
-scope_token_is_safe() { return 0; }
-scope_tokens_overlap() {
-  local a="$1" b="$2" sa sb
-  [[ -n "$a" && -n "$b" ]] || return 1
-  [[ "$a" == "$b" ]] && return 0
-  sa=$(scope_stem "$a")
-  sb=$(scope_stem "$b")
-  [[ -n "$sa" && -n "$sb" ]] || return 1
-  [[ "$sa" == "$sb" ]] && return 0
-  case "$sa" in "$sb"/*) return 0 ;; esac
-  case "$sb" in "$sa"/*) return 0 ;; esac
-  case "$sa" in "$sb"|"$sb"/*|"$sb".*) return 0 ;; esac
-  case "$sb" in "$sa"|"$sa"/*|"$sa".*) return 0 ;; esac
-  return 1
-}
-MUT
+cp "$BASH_KERNEL" "$MUT_F"
+python3 - "$MUT_F" <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+orig = text
+miss = []
+
+def sub1(pattern, repl, label):
+    global text
+    text2, n = re.subn(pattern, repl, text, count=1, flags=re.M)
+    if n != 1:
+        miss.append(label)
+        return
+    text = text2
+
+sub1(
+    r'(if ! scope_token_is_safe "\$a" \|\| ! scope_token_is_safe "\$b"; then\n'
+    r'    return )0(\n  fi)',
+    r'\g<1>1  # MUTATED no-unsafe-fail-closed\2',
+    "unsafe-token fail-closed return 0",
+)
+sub1(
+    r'(# Root-wide \*\* overlaps every path \(both orientations\)\.\n'
+    r'  if \[\[ "\$a" == "\*\*" \|\| "\$b" == "\*\*" \]\]; then\n'
+    r'    return )0(\n  fi)',
+    r'\g<1>1  # MUTATED no-root\2',
+    "root-wide return 0",
+)
+sub1(
+    r'(# Empty stem fail closed \(was return 1 — the #181 Bash drift bug\)\.\n'
+    r'  if \[\[ -z "\$sa" \|\| -z "\$sb" \]\]; then\n'
+    r'    return )0(\n  fi)',
+    r'\g<1>1  # MUTATED empty-stem-disjoint\2',
+    "empty-stem fail-closed return 0",
+)
+
+if miss or text == orig:
+    open(path + ".mutation-miss", "w", encoding="utf-8").write(
+        "anchors not found: " + ", ".join(miss or ["no change"]) + "\n"
+    )
+    sys.exit(1)
+for marker in (
+    "MUTATED no-unsafe-fail-closed",
+    "MUTATED no-root",
+    "MUTATED empty-stem-disjoint",
+):
+    if marker not in text:
+        open(path + ".mutation-miss", "w", encoding="utf-8").write(
+            "missing marker: " + marker + "\n"
+        )
+        sys.exit(1)
+open(path, "w", encoding="utf-8").write(text)
+sys.exit(0)
+PY
+if [[ -f "$MUT_F.mutation-miss" ]]; then
+  bad "#181 fleet Bash mutant mutation-miss: $(cat "$MUT_F.mutation-miss")"
+elif grep -q 'MUTATED no-root' "$MUT_F" &&
+     grep -q 'MUTATED empty-stem-disjoint' "$MUT_F" &&
+     grep -q 'MUTATED no-unsafe-fail-closed' "$MUT_F"; then
+  ok "#181 fleet Bash mutant applied to extracted production kernel"
+else
+  bad "#181 fleet Bash mutant markers missing after surgical patch"
+fi
+
+# Subshell returns status / verdict only; parent-scope ok/bad move counters.
+mut_founding_rc=0
 (
   # shellcheck source=/dev/null
   . "$MUT_F"
-  jv=$(node "$SCOPE_MJS" --pair '**' 'docs/a.md' 2>/dev/null || true)
-  if scope_tokens_overlap '**' 'docs/a.md'; then bv=overlap; else bv=disjoint; fi
-  if [[ "$jv" == "overlap" && "$bv" == "disjoint" ]]; then
-    ok "#181 fleet mutation receipt: fail-open Bash ** diverges from JS"
-  else
-    bad "#181 fleet mutation miss: js=$jv bash=$bv"
-  fi
+  if scope_tokens_overlap '**' 'docs/a.md'; then exit 2; fi
+  if scope_tokens_overlap '*' 'docs/a.md'; then exit 3; fi
+  exit 0
+) || mut_founding_rc=$?
+if [[ "$mut_founding_rc" -eq 0 ]]; then
+  ok "#181 fleet Bash mutant exhibits fail-open on ** and *"
+else
+  bad "#181 fleet Bash mutant mutation miss (rc=$mut_founding_rc)"
+fi
+
+jv=$(node "$SCOPE_MJS" --pair '**' 'docs/a.md' 2>/dev/null || true)
+bv=$(
+  # shellcheck source=/dev/null
+  . "$MUT_F"
+  if scope_tokens_overlap '**' 'docs/a.md'; then printf '%s\n' overlap; else printf '%s\n' disjoint; fi
 )
+assert_fleet_bash_mutation_diverges() {
+  local js_verdict="$1" bash_verdict="$2" label="$3"
+  if [[ "$js_verdict" == "overlap" && "$bash_verdict" == "disjoint" ]]; then
+    ok "$label"
+  else
+    bad "$label: expected JS=overlap Bash=disjoint, got JS=$js_verdict Bash=$bash_verdict"
+  fi
+}
+assert_fleet_bash_mutation_diverges "$jv" "$bv" \
+  "#181 fleet mutation receipt: fail-open Bash ** diverges from JS"
+
+# Meta-sensor: invoke the same parent-scope receipt helper with a mutation-miss
+# verdict, capture the intentional FAIL line, and prove the parent counter moved.
+# Roll the intentional probe back before recording the real assertion.
+echo "#181 fleet meta-sensor: parent FAIL increments on mutation-miss path"
+_fleet_meta_fail_before=$FAIL
+_fleet_meta_probe_out="$ROOT/fleet-meta-parent-fail.out"
+assert_fleet_bash_mutation_diverges "$jv" overlap \
+  "#181 fleet meta intentional mutation miss" >"$_fleet_meta_probe_out"
+_fleet_meta_fail_after=$FAIL
+FAIL=$_fleet_meta_fail_before
+if [[ "$_fleet_meta_fail_after" -eq $((_fleet_meta_fail_before + 1)) ]] &&
+   grep -q 'fleet meta intentional mutation miss' "$_fleet_meta_probe_out"; then
+  ok "#181 fleet meta-sensor: shared receipt helper increments parent FAIL on mutation miss"
+else
+  bad "#181 fleet meta-sensor: shared receipt helper did not move parent FAIL (before=$_fleet_meta_fail_before after=$_fleet_meta_fail_after)"
+fi
 
 # --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
 echo "docs contract sensors"
