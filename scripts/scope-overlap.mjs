@@ -423,19 +423,37 @@ if (!existsSync(resolve(opt.repoPath, ".git")) && !existsSync(resolve(opt.repoPa
 const gitDir = git(["rev-parse", "--git-dir"]);
 if (!gitDir) fail(`not a git repo: ${opt.repoPath}`);
 
+// Resolve remote default base authoritatively (#153 exact-head):
+// enumerate which of main/master exists on origin via ls-remote; prefer main;
+// fetch exactly that one. Never try master after an arbitrary main fetch/
+// transport failure (that converted unreadable into alternate-base authority).
 let base = opt.base;
 if (!base) {
-  if (git(["show-ref", "--verify", "--quiet", "refs/remotes/origin/main"]) !== null ||
-      git(["rev-parse", "--verify", "--quiet", "origin/main"])) {
-    base = "main";
-  } else if (git(["rev-parse", "--verify", "--quiet", "origin/master"])) {
-    base = "master";
-  } else {
-    base = "main";
+  const ls = gitResult([
+    "ls-remote",
+    "--heads",
+    "origin",
+    "refs/heads/main",
+    "refs/heads/master",
+  ]);
+  if (!ls.ok) {
+    fail(
+      `cannot enumerate remote heads on origin (ls-remote failed) — refuse (unreadable remote is not ref absence): ${ls.err}`
+    );
+  }
+  const hasMain = /(^|[\t ])refs\/heads\/main$/m.test(ls.out);
+  const hasMaster = /(^|[\t ])refs\/heads\/master$/m.test(ls.out);
+  if (hasMain) base = "main";
+  else if (hasMaster) base = "master";
+  else {
+    fail(
+      `origin has neither refs/heads/main nor refs/heads/master — refuse (true ref absence, no local fallback)`
+    );
   }
 }
 
-// AC3: fetch origin; failure REFUSES — never fall back to local-only tip.
+// AC3: fetch origin; failure REFUSES — never fall back to local-only tip and
+// never fall through to the other base name after a transport failure.
 const fetch = (() => {
   try {
     execFileSync("git", ["fetch", "origin", base], {
@@ -450,7 +468,7 @@ const fetch = (() => {
 })();
 if (!fetch) {
   fail(
-    `cannot fetch origin/${base} — refuse (no local/stale fallback; #106 AC3)`
+    `cannot fetch origin/${base} — refuse (no local/stale fallback; unreadable remote is not alternate-base authority; #106 AC3 / #153)`
   );
 }
 
@@ -485,8 +503,8 @@ function loadClaims() {
   }
   for (const path of tree.out.split("\n").filter(Boolean)) {
     if (!path.endsWith(".md")) continue;
-    const id = path.replace(/^docs\/claims\//, "").replace(/\.md$/, "");
-    if (!/^issue-/.test(id)) continue;
+    const filenameId = path.replace(/^docs\/claims\//, "").replace(/\.md$/, "");
+    if (!/^issue-/.test(filenameId)) continue;
     // A claim FILE that is present must be readable and must carry real scope
     // metadata. Anything else is a live claim whose scope we cannot see, and
     // an unseen scope silently becomes a non-overlapping one — the exact way
@@ -497,6 +515,56 @@ function loadClaims() {
         `unreadable claim blob ${ref}:${path} — a live claim whose scope cannot be read must not become an empty scope; refuse: ${body.err}`
       );
     }
+    // Per-file claim identity (#153 exact-head): exactly one `claim:` and one
+    // `issue:` line; canonical filename MUST equal body claim id; issue field
+    // MUST equal the issue encoded by the claim id. Malformed / missing /
+    // duplicate / mismatched identity poisons the decision (never a silent
+    // filename-only id that can bypass mixed-representation detection).
+    const claimLines = body.out.split("\n").filter((l) => /^claim:\s*/.test(l));
+    if (claimLines.length !== 1) {
+      fail(
+        `claim file ${ref}:${path} has ${claimLines.length} 'claim:' lines (want exactly 1) — malformed claim identity must poison the decision; refuse`
+      );
+    }
+    const bodyClaimId = claimLines[0].replace(/^claim:\s*/, "").trim();
+    if (!bodyClaimId) {
+      fail(
+        `claim file ${ref}:${path} has an empty 'claim:' value — malformed claim identity must poison the decision; refuse`
+      );
+    }
+    if (bodyClaimId !== filenameId) {
+      fail(
+        `claim file ${ref}:${path} identity mismatch: filename id '${filenameId}' != body claim: '${bodyClaimId}' — refuse (mixed/mismatched identity poisons the decision)`
+      );
+    }
+    const issueLines = body.out.split("\n").filter((l) => /^issue:\s*/.test(l));
+    if (issueLines.length !== 1) {
+      fail(
+        `claim file ${ref}:${path} has ${issueLines.length} 'issue:' lines (want exactly 1) — malformed claim identity must poison the decision; refuse`
+      );
+    }
+    const issueRaw = issueLines[0].replace(/^issue:\s*/, "").trim();
+    const issueM = issueRaw.match(/^(\d+)\s*$/);
+    if (!issueM) {
+      fail(
+        `claim file ${ref}:${path} has unreadable 'issue:' value '${issueRaw}' — malformed claim identity must poison the decision; refuse`
+      );
+    }
+    const issueFromBody = issueM[1];
+    // Issue encoded by the claim id: issue-<N>-… or issue-<ns>-<N>-…
+    const issueFromId = (() => {
+      const bare = bodyClaimId.match(/^issue-(\d+)-/);
+      if (bare) return bare[1];
+      const ns = bodyClaimId.match(/^issue-[A-Za-z][A-Za-z0-9]*-(\d+)-/);
+      if (ns) return ns[1];
+      return null;
+    })();
+    if (issueFromId == null || String(issueFromBody) !== String(issueFromId)) {
+      fail(
+        `claim file ${ref}:${path} issue field '${issueFromBody}' does not match issue encoded by claim id '${bodyClaimId}' (encoded=${issueFromId ?? "unreadable"}) — refuse`
+      );
+    }
+    const id = bodyClaimId;
     const scopeLines = body.out
       .split("\n")
       .filter((l) => /^scope:/.test(l));
@@ -522,11 +590,10 @@ function loadClaims() {
       scope,
       `live per-file claim '${id}' (${ref}:${path})`
     );
-    const issueM = body.out.match(/^issue:\s*(\d+)/m);
     claims.push({
       id,
       scope,
-      issue: issueM ? issueM[1] : null,
+      issue: issueFromBody,
       source: "file",
     });
   }
@@ -978,23 +1045,34 @@ function claimIssueNumber(id) {
  * admission decision uses; unrelated churn (a body edited elsewhere, a
  * timestamp bumped) does not stop the barrier from settling.
  */
-function admitFingerprint(claims) {
-  return claims
-    .map((c) => `${c.number}\t${c.id}\t${c.scope.join(" ")}`)
+function admitFingerprint(prClaims, ledgerClaims) {
+  // Combined claim-relevant projection of BOTH authoritative sources.
+  // Split-time views (ledger once, then PR settle, then decide) hide rivals
+  // under either interleaving; the union fingerprint must be stable together.
+  const prPart = prClaims
+    .map((c) => `pr\t${c.number}\t${c.id}\t${c.scope.join(" ")}`)
     .sort()
     .join("\n");
+  const ledPart = ledgerClaims
+    .map((c) => `led\t${c.source}\t${c.id}\t${c.scope.join(" ")}`)
+    .sort()
+    .join("\n");
+  return `${prPart}\n--\n${ledPart}`;
 }
 
 /**
- * THE PUBLICATION BARRIER (#153 review P1 0A, relocated here in round 3).
+ * THE PUBLICATION BARRIER (#153 review P1 0A, relocated here in round 3;
+ * extended to the combined PR + ledger union in exact-head repair).
  *
  * Seeing this lane's own claim in the inventory does not prove it can see
  * everyone else's: GitHub's PR list is eventually consistent, so a rival PR
  * created a moment earlier can still be missing from the page served after
  * this lane's own row appears. Deciding there lets both racers admit
- * themselves. So admission decides only on a QUIESCENT inventory — one whose
- * claim-relevant projection came back identical on `stableReads` consecutive
- * spaced reads that all contained this lane's own claim.
+ * themselves. So admission decides only on a QUIESCENT combined projection of
+ * open PR-body claims AND the remote ledger — one whose claim-relevant
+ * projection came back identical on `stableReads` consecutive spaced reads
+ * that all contained this lane's own claim. Any unreadable source exhausts
+ * the attempt; it never becomes an empty inventory.
  *
  * Bounded, and honest about it: quiescence bounds the race, it does not
  * abolish it. A replica lagging longer than the whole window can still hide a
@@ -1006,9 +1084,28 @@ function settleAdmissionInventory() {
   const { attempts, stableReads, delaySeconds } = admitBarrier;
   let prevFp = null;
   let streak = 0;
-  let settled = null;
+  let settledPr = null;
+  let settledLedger = null;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     if (attempt > 1) spaceReads(delaySeconds);
+    // Combined read of both sources every attempt — never ledger-once then
+    // PR-settle from a split-time view. Re-fetch the remote ledger base so a
+    // late ledger row is visible in the union projection.
+    try {
+      execFileSync("git", ["fetch", "origin", base], {
+        cwd: opt.repoPath,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (e) {
+      streak = 0;
+      prevFp = null;
+      const stderr = e && e.stderr ? String(e.stderr).trim() : "";
+      console.error(
+        `scope-overlap: admission: cannot re-fetch origin/${base} for combined union (attempt ${attempt}/${attempts})${stderr ? ": " + stderr : ""}`
+      );
+      continue;
+    }
     const out = readPrClaimsOnce();
     if (out == null) {
       streak = 0;
@@ -1020,7 +1117,11 @@ function settleAdmissionInventory() {
     }
     // A malformed row is a present, current defect in the authoritative view,
     // not transient lag — refuse outright rather than waiting for it to settle.
-    const claims = parsePrClaims(out);
+    // loadClaims/parsePrClaims call fail() (process.exit) on unreadable authority.
+    let claims;
+    let ledgerClaims;
+    claims = parsePrClaims(out);
+    ledgerClaims = loadClaims();
     const self = claims.find(
       (c) => c.id === opt.claimId && c.number === opt.admitPr
     );
@@ -1045,35 +1146,41 @@ function settleAdmissionInventory() {
         { admitPr: opt.admitPr, claimId: opt.claimId }
       );
     }
-    const fp = admitFingerprint(claims);
+    const fp = admitFingerprint(claims, ledgerClaims);
     streak = streak > 0 && fp === prevFp ? streak + 1 : 1;
     prevFp = fp;
-    settled = claims;
+    settledPr = claims;
+    settledLedger = ledgerClaims;
     if (streak >= stableReads) {
       if (!opt.json) {
         console.log(
-          `scope-overlap: admission: inventory quiescent for PR #${opt.admitPr} (${stableReads} consecutive matching read(s))`
+          `scope-overlap: admission: PR+ledger union quiescent for PR #${opt.admitPr} (${stableReads} consecutive matching read(s))`
         );
       }
-      return settled;
+      return { prClaims: settledPr, ledgerClaims: settledLedger };
     }
     console.error(
-      `scope-overlap: admission: inventory not yet quiescent for PR #${opt.admitPr} (${streak}/${stableReads} matching read(s), attempt ${attempt}/${attempts})`
+      `scope-overlap: admission: PR+ledger union not yet quiescent for PR #${opt.admitPr} (${streak}/${stableReads} matching read(s), attempt ${attempt}/${attempts})`
     );
   }
   fail(
-    `admission: could not obtain a stable live-claim inventory for ${opt.repo} containing this lane's own claim '${opt.claimId}' on PR #${opt.admitPr} — ${stableReads} consecutive matching read(s) required, ${attempts} attempt(s) made. An inventory that cannot see this claim, or that is still changing underneath it, cannot prove no one else holds the scope: a rival PR created before this one may simply not have been published to the view yet. Refusing to hold a claim that is not provably registered against a settled view.`,
+    `admission: could not obtain a stable combined PR+ledger claim inventory for ${opt.repo} containing this lane's own claim '${opt.claimId}' on PR #${opt.admitPr} — ${stableReads} consecutive matching read(s) required, ${attempts} attempt(s) made. An inventory that cannot see this claim, or that is still changing underneath it, cannot prove no one else holds the scope: a rival PR or ledger row created before this one may simply not have been published to the view yet. Refusing to hold a claim that is not provably registered against a settled view.`,
     { admitPr: opt.admitPr, claimId: opt.claimId }
   );
-  return []; // unreachable: fail() exits
+  return { prClaims: [], ledgerClaims: [] }; // unreachable: fail() exits
 }
 
-const prClaims =
-  opt.admitPr != null
-    ? settleAdmissionInventory()
-    : opt.repo
-      ? parsePrClaims(readPrClaimsOnceOrFail())
-      : [];
+let prClaims;
+let settledLedgerClaims = null;
+if (opt.admitPr != null) {
+  const settled = settleAdmissionInventory();
+  prClaims = settled.prClaims;
+  settledLedgerClaims = settled.ledgerClaims;
+} else if (opt.repo) {
+  prClaims = parsePrClaims(readPrClaimsOnceOrFail());
+} else {
+  prClaims = [];
+}
 
 function readPrClaimsOnceOrFail() {
   const out = readPrClaimsOnce();
@@ -1121,7 +1228,12 @@ if (opt.admitPr != null && !opt.slice) {
 // --scope never quietly becomes a non-overlapping empty stem.
 assertScopeTokens(opt.scopes, "proposed --scope");
 
-const live = [...loadClaims(), ...prClaims].filter((c) => c.id !== opt.claimId);
+// For admission, reuse the ledger snapshot from the quiescent combined union
+// so the decision does not re-read a split-time ledger after PR settle.
+// Non-admission paths load the ledger once here (fail closed on unreadable).
+const ledgerClaims =
+  settledLedgerClaims != null ? settledLedgerClaims : loadClaims();
+const live = [...ledgerClaims, ...prClaims].filter((c) => c.id !== opt.claimId);
 
 /** Normalize a scope token for comparison. */
 function stem(token) {

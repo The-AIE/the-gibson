@@ -2842,8 +2842,34 @@ case "$1" in
         calls=$(cat "$GH_OPEN_CALLS" 2>/dev/null || echo 0)
       fi
       open_src="${GH_PR_OPEN_TSV:-/dev/null}"
-      if [[ "$calls" -ge 2 && -n "${GH_PR_OPEN_TSV2:-}" ]]; then
-        open_src="$GH_PR_OPEN_TSV2"
+      # When to serve GH_PR_OPEN_TSV2 (#153 exact-head pre-close fresh list).
+      # Default from-call depends on fixture shape:
+      #   * after a recorded close → always TSV2
+      #   * open path (non-empty OPEN_TSV): call 1=initial, 2=pre-close, 3+=post → from=3
+      #   * terminal fail injection (EXIT2 set, empty OPEN_TSV): post-mutation is call 2 → from=2
+      #   * ledger residual sibling (empty OPEN_TSV, TSV2 content): call 1 empty,
+      #     2=pre-strip, 3=post-push, 4+=sibling reread → from=4
+      # Override with GH_PR_OPEN_TSV2_FROM when a fixture needs a custom window.
+      if [[ -n "${GH_PR_OPEN_TSV2:-}" ]]; then
+        _tsv2_from=2
+        if [[ -n "${GH_PR_OPEN_TSV2_FROM:-}" ]]; then
+          _tsv2_from="$GH_PR_OPEN_TSV2_FROM"
+        elif [[ -s "${GH_PR_OPEN_TSV:-/dev/null}" ]]; then
+          # Open-path: 1=initial, 2=pre-close, 3+=post-close
+          _tsv2_from=3
+        elif [[ -s "${GH_PR_ALL_TSV:-/dev/null}" || -n "${GH_PR_OPEN_EXIT2:-}" ]]; then
+          # Terminal path (has staged terminal evidence) or fail-injection:
+          # 1=initial empty, 2=post-mutation reread
+          _tsv2_from=2
+        else
+          # Ledger residual sibling: 1=initial, 2=pre-strip revalidate,
+          # 3=post-mutation sibling reread (before deferred artifact revalidate)
+          _tsv2_from=3
+        fi
+        if [[ -s "${GH_PR_CLOSED_NUMBERS:-/dev/null}" ]] || [[ "$calls" -ge "$_tsv2_from" ]]; then
+          open_src="$GH_PR_OPEN_TSV2"
+        fi
+        unset _tsv2_from
       fi
       # A PR this fixture already CLOSED is no longer open — the whole point of
       # the body-agnostic inventory is that it is keyed on the number, so it
@@ -2885,9 +2911,25 @@ case "$1" in
         calls=$(( $(cat "$GH_OPEN_CALLS" 2>/dev/null || echo 0) + 1 ))
         echo "$calls" > "$GH_OPEN_CALLS"
       fi
-      if [[ "$calls" -ge 2 && -n "${GH_PR_OPEN_TSV2:-}" ]]; then
-        cat "$GH_PR_OPEN_TSV2" 2>/dev/null
-        exit "${GH_PR_OPEN_EXIT2:-0}"
+      # See the open-numbers branch above for the call-map rationale.
+      if [[ -n "${GH_PR_OPEN_TSV2:-}" ]]; then
+        _tsv2_from=2
+        if [[ -n "${GH_PR_OPEN_TSV2_FROM:-}" ]]; then
+          _tsv2_from="$GH_PR_OPEN_TSV2_FROM"
+        elif [[ -s "${GH_PR_OPEN_TSV:-/dev/null}" ]]; then
+          _tsv2_from=3
+        elif [[ -s "${GH_PR_ALL_TSV:-/dev/null}" || -n "${GH_PR_OPEN_EXIT2:-}" ]]; then
+          _tsv2_from=2
+        else
+          # Ledger residual sibling: 1=initial, 2=pre-strip, 3=sibling reread
+          _tsv2_from=3
+        fi
+        if [[ -s "${GH_PR_CLOSED_NUMBERS:-/dev/null}" ]] || [[ "$calls" -ge "$_tsv2_from" ]]; then
+          unset _tsv2_from
+          cat "$GH_PR_OPEN_TSV2" 2>/dev/null
+          exit "${GH_PR_OPEN_EXIT2:-0}"
+        fi
+        unset _tsv2_from
       fi
       cat "${GH_PR_OPEN_TSV:-/dev/null}" 2>/dev/null
       exit "${GH_PR_OPEN_EXIT:-${GH_PR_LIST_EXIT:-0}}"
@@ -5668,14 +5710,16 @@ rm -rf "$_sig_tmp"
 # Immediate protect of parent dir before child files (static contract).
 if grep -q 'mktemp -d' "$_SC_LIB" && grep -q '_rc_capture_install_signal_traps' "$_SC_LIB"; then
   if awk '
-    /mktemp -d/ { saw_dir=1 }
-    saw_dir && /_rc_capture_install_signal_traps/ { protected=1 }
-    protected && /gibson-rc-cap-out/ { ok=1 }
-    END { exit !ok }
+    /_rc_capture_install_signal_traps/ { traps=1 }
+    traps && /mktemp -d/ { alloc_after=1 }
+    /mktemp -d/ && !traps { bad_order=1 }
+    alloc_after && /_RC_CAP_DIR=/ { tracked=1 }
+    tracked && /gibson-rc-cap-out/ { ok=1 }
+    END { exit !(ok && !bad_order) }
   ' "$_SC_LIB"; then
-    ok "stream-capture: parent dir protected before child file allocation (static)"
+    ok "stream-capture: traps before alloc; parent tracked before children (static)"
   else
-    bad "stream-capture: parent dir not protected before child allocation"
+    bad "stream-capture: traps-before-allocation contract missing (static)"
   fi
 else
   bad "stream-capture: missing parent-dir protect markers"
@@ -6410,11 +6454,11 @@ out=$(cd "$ROOT/secleg/canon" && PATH="$ROOT/secleg/shim:$ROOT/secleg/bin:$PATH"
 [[ "$rc" -ne 0 ]] && ok "second ledger rep: refuses/incomplete" || bad "second ledger rep exited 0: $out"
 files=$(cd "$ROOT/secleg/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/secleg/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
-# At least one representation must survive (both preferred).
-if echo "$files" | grep -q 'issue-860-secleg' || echo "$table" | grep -q 'issue-860-secleg'; then
-  ok "second ledger rep: at least one representation survived"
+# BOTH representations must survive untouched on refusal — one surviving is not enough.
+if echo "$files" | grep -q 'issue-860-secleg' && echo "$table" | grep -q 'issue-860-secleg'; then
+  ok "second ledger rep: BOTH representations survived untouched"
 else
-  bad "second ledger rep: both representations destroyed"
+  bad "second ledger rep: not both representations survived (files='$files' table='$table')"
 fi
 
 echo "#153 r15 · mutation: killing pre-strip union revalidation greeds (receipt)"
@@ -6594,9 +6638,9 @@ else
   ok "production never rm -rf's \$wt"
 fi
 
-echo "#153 r15 · terminal same-ID ledger renewal before artifact cleanup"
-# Stage terminal PR evidence, then inject same-ID ledger between planning and
-# artifact removal via git fetch shim.
+echo "#153 r15 · terminal same-ID ledger renewal BEFORE first safety fetch"
+# Stage terminal PR evidence, then inject same-ID ledger on the pre-artifact
+# safety fetch (existing window). Production must refuse before worktree removal.
 TERM_SHA=$(term_fixture termrenew 880 term-renew)
 export GH_PR_ALL_TSV="$ROOT/termrenew/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/termrenew/open.tsv"
@@ -6643,8 +6687,6 @@ fi
 exec "\$REAL_GIT" "\$@"
 SHIM
 chmod +x "$ROOT/termrenew/shim/git"
-# Record dirty marker in worktree to prove we don't touch it? Prefer clean
-# worktree so the only reason to refuse is ledger renewal.
 wt_path="$ROOT/termrenew/wt-880-term-renew"
 br_before=$(git -C "$ROOT/termrenew/canon" rev-parse feat/880-term-renew 2>/dev/null || echo "")
 out=$(cd "$ROOT/termrenew/canon" && PATH="$ROOT/termrenew/shim:$ROOT/term/bin:$PATH" \
@@ -6657,8 +6699,355 @@ if [[ -n "$br_before" ]] && git -C "$ROOT/termrenew/canon" show-ref --verify --q
 else
   bad "terminal renewal: local branch deleted"
 fi
-# Label should be preserved (INCOMPLETE)
 lacks "terminal renewal no success OK" "$out" "OK — claim released"
+
+echo "#153 exact-head · terminal renewal AFTER safety check, BEFORE worktree remove"
+# Inject same-ID ledger on the pre-removal ledger re-fetch (the new boundary
+# that sits after the earlier safety proof and immediately before
+# `git worktree remove`). status2/worktree-remove must never fire after a
+# renewal in this window.
+TERM_SHA=$(term_fixture termrenew2 881 term-renew-mid)
+export GH_PR_ALL_TSV="$ROOT/termrenew2/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/termrenew2/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/termrenew2/gh-state"
+export GH_LOG="$ROOT/termrenew2/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '981\tissue-881-term-renew-mid\tlib/x/**\t881\tfeat/881-term-renew-mid\t%s\thttps://github.com/acme/app/pull/981\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+if [[ ! -d "$ROOT/termrenew2/wt-881-term-renew-mid" ]]; then
+  git -C "$ROOT/termrenew2/canon" worktree add -q "$ROOT/termrenew2/wt-881-term-renew-mid" "feat/881-term-renew-mid" 2>/dev/null || true
+fi
+mkdir -p "$ROOT/termrenew2/shim"
+# Count fetches: 1=startup, 2=pre-artifact safety (leave clean so safety passes),
+# 3=immediately-before-worktree-remove recheck — inject renewal THERE.
+cat > "$ROOT/termrenew2/shim/git" <<SHIM
+#!/usr/bin/env bash
+REAL_GIT=$(printf %q "$REAL_GIT")
+ORIGIN=$(printf %q "$ROOT/termrenew2/origin")
+STATE=$(printf %q "$ROOT/termrenew2/shim/state")
+joined="\$*"
+# Detect worktree remove — must never run after mid-window renewal.
+if [[ "\$joined" == *"worktree remove"* ]]; then
+  echo "MUTATED-WT-REMOVE" >> "\$STATE.wtrm"
+fi
+if [[ "\$joined" == *"fetch origin"* ]]; then
+  n=\$(cat "\$STATE.nfetch" 2>/dev/null || echo 0)
+  n=\$((n + 1)); echo "\$n" > "\$STATE.nfetch"
+  if [[ "\$n" -eq 3 ]]; then
+    tmp=\$(mktemp -d)
+    "\$REAL_GIT" clone -q "\$ORIGIN" "\$tmp/c" >/dev/null 2>&1
+    (
+      cd "\$tmp/c" || exit 0
+      git checkout -q main
+      mkdir -p docs/claims
+      printf 'claim: issue-881-term-renew-mid\nissue: 881\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: mid-renewed\n' \
+        > docs/claims/issue-881-term-renew-mid.md
+      git add docs/claims/issue-881-term-renew-mid.md
+      git -c user.email=sensor@gibson.invalid -c user.name=sensor commit -qm "mid-window renew" >/dev/null 2>&1
+      git push -q origin main >/dev/null 2>&1
+    )
+    rm -rf "\$tmp"
+  fi
+fi
+exec "\$REAL_GIT" "\$@"
+SHIM
+chmod +x "$ROOT/termrenew2/shim/git"
+: > "$ROOT/termrenew2/shim/state.wtrm"
+wt_path2="$ROOT/termrenew2/wt-881-term-renew-mid"
+out=$(cd "$ROOT/termrenew2/canon" && PATH="$ROOT/termrenew2/shim:$ROOT/term/bin:$PATH" \
+  "$RC" 881 --claim-id issue-881-term-renew-mid --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "mid-window terminal renewal: nonzero" || bad "mid-window terminal renewal exited 0: $out"
+contains "mid-window renewal names same-ID" "$out" "same-ID ledger"
+[[ -d "$wt_path2" ]] && ok "mid-window renewal: worktree remains" || bad "mid-window renewal: worktree removed"
+if git -C "$ROOT/termrenew2/canon" show-ref --verify --quiet refs/heads/feat/881-term-renew-mid; then
+  ok "mid-window renewal: local branch remains"
+else
+  bad "mid-window renewal: local branch deleted"
+fi
+if [[ -s "$ROOT/termrenew2/shim/state.wtrm" ]]; then
+  bad "mid-window renewal: worktree remove still executed: $(cat "$ROOT/termrenew2/shim/state.wtrm")"
+else
+  ok "mid-window renewal: worktree remove never reached"
+fi
+
+echo "#153 exact-head · mid-cleanup claim_ids_all failure disables branch deletion"
+# After worktree is kept (--keep-worktree with --keep-branch unset is incomplete),
+# force a ledger-read failure between worktree phase and branch deletion.
+# More precise: use KEEP_WORKTREE=0, succeed safety, remove worktree... hard.
+# Instead: fail claim_ids_all by making ls-tree fail after first successful
+# terminal ledger recheck, via a git shim on ls-tree after n=N.
+TERM_SHA=$(term_fixture termfailread 882 term-fail-read)
+export GH_PR_ALL_TSV="$ROOT/termfailread/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/termfailread/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/termfailread/gh-state"
+export GH_LOG="$ROOT/termfailread/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '982\tissue-882-term-fail-read\tlib/x/**\t882\tfeat/882-term-fail-read\t%s\thttps://github.com/acme/app/pull/982\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TERM_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+if [[ ! -d "$ROOT/termfailread/wt-882-term-fail-read" ]]; then
+  git -C "$ROOT/termfailread/canon" worktree add -q "$ROOT/termfailread/wt-882-term-fail-read" "feat/882-term-fail-read" 2>/dev/null || true
+fi
+mkdir -p "$ROOT/termfailread/shim"
+# After worktree remove succeeds, the mid-cleanup claim_ids_all must fail closed
+# and leave the local branch. Trigger: fail ls-tree of docs/claims after the
+# worktree has been removed (detect by nls after worktree remove).
+cat > "$ROOT/termfailread/shim/git" <<SHIM
+#!/usr/bin/env bash
+REAL_GIT=$(printf %q "$REAL_GIT")
+STATE=$(printf %q "$ROOT/termfailread/shim/state")
+joined="\$*"
+if [[ "\$joined" == *"worktree remove"* ]]; then
+  echo 1 > "\$STATE.removed"
+  exec "\$REAL_GIT" "\$@"
+fi
+if [[ "\$joined" == *"ls-tree"*docs/claims* ]] || [[ "\$joined" == *"ls-tree"* ]]; then
+  if [[ -f "\$STATE.removed" ]]; then
+    # After worktree removal: fail authoritative ledger enumeration.
+    if [[ "\$joined" == *"docs/claims"* || "\$joined" == *"active-work"* ]]; then
+      echo "fatal: simulated mid-cleanup ls-tree failure" >&2
+      exit 128
+    fi
+  fi
+fi
+if [[ "\$joined" == *"update-ref -d"* ]]; then
+  echo "MUTATED-LOCAL-DELETE" >> "\$STATE.del"
+fi
+exec "\$REAL_GIT" "\$@"
+SHIM
+chmod +x "$ROOT/termfailread/shim/git"
+: > "$ROOT/termfailread/shim/state.del"
+out=$(cd "$ROOT/termfailread/canon" && PATH="$ROOT/termfailread/shim:$ROOT/term/bin:$PATH" \
+  "$RC" 882 --claim-id issue-882-term-fail-read --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "mid-cleanup unreadable: nonzero incomplete" || bad "mid-cleanup unreadable exited 0: $out"
+if git -C "$ROOT/termfailread/canon" show-ref --verify --quiet refs/heads/feat/882-term-fail-read; then
+  ok "mid-cleanup unreadable: local branch preserved"
+else
+  bad "mid-cleanup unreadable: local branch deleted despite claim_ids_all failure"
+fi
+if [[ -s "$ROOT/termfailread/shim/state.del" ]]; then
+  bad "mid-cleanup unreadable: local CAS delete still ran: $(cat "$ROOT/termfailread/shim/state.del")"
+else
+  ok "mid-cleanup unreadable: local CAS delete never reached"
+fi
+
+
+echo "#153 exact-head · non-CAS late same-ID open PR before strip (interleaving A)"
+# Startup inventory empty; ledger has claim; late same-ID PR appears on pre-strip
+# fresh inventory. Non-CAS path must refuse strip (not reuse startup PR_ROWS).
+new_repo "$ROOT/ncaslate" acme/app
+(
+  cd "$ROOT/ncaslate/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-890-ncaslate\nissue: 890\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-890-ncaslate.md
+  git add -A && git commit -qm "ncaslate" && git push -q origin main
+  git checkout -q -b feat/890-ncaslate
+  echo w > w.txt && git add w.txt && git commit -qm w
+  git checkout -q long-lived-feature
+  git worktree add -q "$ROOT/ncaslate/wt-890-ncaslate" feat/890-ncaslate
+) >/dev/null 2>&1
+mkdir -p "$ROOT/ncaslate/scripts/lib" "$ROOT/ncaslate/bin"
+cp "$RC" "$ROOT/ncaslate/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/ncaslate/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/ncaslate/scripts/lib/stream-capture.sh"
+cat > "$ROOT/ncaslate/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+CNT_FILE="$ROOT/ncaslate/list.count"
+n=0
+[[ -f "\$CNT_FILE" ]] && n=\$(cat "\$CNT_FILE" 2>/dev/null || echo 0)
+case "\${1:-}" in
+  list)
+    n=\$((n + 1)); printf '%s\n' "\$n" > "\$CNT_FILE"
+    # Call 1: empty startup. Call 2+: late same-ID open PR.
+    if [[ "\$n" -ge 2 ]]; then
+      printf '990\tissue-890-ncaslate\tlib/**\tfeat/890-ncaslate\thttps://github.com/acme/app/pull/990\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    fi
+    exit 0
+    ;;
+  list-open-numbers) exit 0 ;;
+  *) exit 64 ;;
+esac
+READER
+cat > "$ROOT/ncaslate/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "GH $*" >> "${GH_LOG:-/dev/null}"
+case "$*" in
+  *"repo view"*) echo "acme/app"; exit 0 ;;
+  *"issue view"*) echo 'agent-claimed,tier-b'; exit 0 ;;
+  *"label"*"remove"*) echo "MUTATED-LABEL" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
+  *"pr close"*) echo "CLOSE" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
+  *) exit 0 ;;
+esac
+GH
+chmod +x "$ROOT/ncaslate/scripts/"* "$ROOT/ncaslate/bin/gh"
+: > "$ROOT/ncaslate/list.count"
+export GH_LOG="$ROOT/ncaslate/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/ncaslate/canon" && PATH="$ROOT/ncaslate/bin:$PATH" \
+  "$ROOT/ncaslate/scripts/release-claim.sh" 890 --claim-id issue-890-ncaslate --repo acme/app \
+  2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "non-CAS late open: refuses nonzero" || bad "non-CAS late open exited 0: $out"
+files=$(cd "$ROOT/ncaslate/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+contains "non-CAS late open: ledger preserved" "$files" "issue-890-ncaslate.md"
+[[ -d "$ROOT/ncaslate/wt-890-ncaslate" ]] && ok "non-CAS late open: worktree survived" || bad "non-CAS late open: worktree removed"
+lacks "non-CAS late open: no label mutation" "$(cat "$GH_LOG")" "MUTATED-LABEL"
+
+echo "#153 exact-head · non-CAS empty startup then late ledger second-rep (interleaving B)"
+# Startup sees only file rep; before strip a legacy rep is injected via fetch shim.
+new_repo "$ROOT/ncasleg" acme/app
+(
+  cd "$ROOT/ncasleg/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-891-ncasleg\nissue: 891\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-891-ncasleg.md
+  git add -A && git commit -qm "ncasleg" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+mkdir -p "$ROOT/ncasleg/scripts/lib" "$ROOT/ncasleg/bin" "$ROOT/ncasleg/shim"
+cp "$RC" "$ROOT/ncasleg/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/ncasleg/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/ncasleg/scripts/lib/stream-capture.sh"
+cat > "$ROOT/ncasleg/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in list) exit 0 ;; list-open-numbers) exit 0 ;; *) exit 64 ;; esac
+READER
+cat > "$ROOT/ncasleg/shim/git" <<SHIM
+#!/usr/bin/env bash
+REAL_GIT=$(printf %q "$REAL_GIT")
+STATE=$(printf %q "$ROOT/ncasleg/shim/state")
+ORIGIN=$(printf %q "$ROOT/ncasleg/origin")
+joined="\$*"
+if [[ "\$joined" == *"fetch origin"*main* ]] || [[ "\$joined" == "fetch origin main" ]]; then
+  n=\$(cat "\$STATE.nfetch" 2>/dev/null || echo 0)
+  n=\$((n + 1)); echo "\$n" > "\$STATE.nfetch"
+  # After startup (n=1), inject legacy rep on strip fetch (n=2).
+  if [[ "\$n" -eq 2 ]]; then
+    tmp=\$(mktemp -d)
+    "\$REAL_GIT" clone -q "\$ORIGIN" "\$tmp/c" >/dev/null 2>&1
+    (
+      cd "\$tmp/c" || exit 0
+      git checkout -q main
+      mkdir -p docs
+      cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-891-ncasleg | src/x | session:a |
+TABLE
+      git add docs/active-work.md
+      git -c user.email=sensor@gibson.invalid -c user.name=sensor commit -qm "inject legacy" >/dev/null 2>&1
+      git push -q origin main >/dev/null 2>&1
+    )
+    rm -rf "\$tmp"
+  fi
+fi
+exec "\$REAL_GIT" "\$@"
+SHIM
+cat > "$ROOT/ncasleg/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "GH $*" >> "${GH_LOG:-/dev/null}"
+case "$*" in
+  *"repo view"*) echo "acme/app"; exit 0 ;;
+  *"issue view"*) echo 'agent-claimed,tier-b'; exit 0 ;;
+  *"label"*"remove"*) echo "MUTATED-LABEL" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
+  *) exit 0 ;;
+esac
+GH
+chmod +x "$ROOT/ncasleg/scripts/"* "$ROOT/ncasleg/bin/gh" "$ROOT/ncasleg/shim/git"
+export GH_LOG="$ROOT/ncasleg/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/ncasleg/canon" && PATH="$ROOT/ncasleg/shim:$ROOT/ncasleg/bin:$PATH" \
+  "$ROOT/ncasleg/scripts/release-claim.sh" 891 --claim-id issue-891-ncasleg --repo acme/app \
+  --keep-worktree --keep-branch 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "non-CAS late legacy: refuses nonzero" || bad "non-CAS late legacy exited 0: $out"
+files=$(cd "$ROOT/ncasleg/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+table=$(cd "$ROOT/ncasleg/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
+if echo "$files" | grep -q 'issue-891-ncasleg' && echo "$table" | grep -q 'issue-891-ncasleg'; then
+  ok "non-CAS late legacy: BOTH representations survived"
+else
+  bad "non-CAS late legacy: not both survived (files='$files' table='$table')"
+fi
+
+echo "#153 exact-head · empty expected OIDs refuse (no self-seed at deletion)"
+# Mutate production to call guarded cleanup with empty OIDs after a successful
+# strip would have been possible — prove empty OID refuses rather than self-seeds.
+new_repo "$ROOT/emptyoid" acme/app
+(
+  cd "$ROOT/emptyoid/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-892-emptyoid\nissue: 892\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-892-emptyoid.md
+  git add -A && git commit -qm "emptyoid" && git push -q origin main
+  git checkout -q -b feat/892-emptyoid
+  echo w > w.txt && git add w.txt && git commit -qm w
+  git checkout -q long-lived-feature
+  git worktree add -q "$ROOT/emptyoid/wt-892-emptyoid" feat/892-emptyoid
+) >/dev/null 2>&1
+mkdir -p "$ROOT/emptyoid/scripts/lib" "$ROOT/emptyoid/bin"
+cp "$RC" "$ROOT/emptyoid/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/emptyoid/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/emptyoid/scripts/lib/stream-capture.sh"
+# Force empty frozen OIDs at deletion time (sensor teeth for no-self-seed).
+awk '
+  /^lookup_frozen_oids\(\)/ {
+    print "lookup_frozen_oids() { FROZEN_LOCAL_OID=\"\"; FROZEN_REMOTE_OID=\"\"; return 0; } # MUTATED empty-oids"
+    skip=1; depth=0
+    line=$0
+    for (i=1;i<=length(line);i++){c=substr(line,i,1); if(c=="{")depth++; if(c=="}")depth--}
+    next
+  }
+  skip {
+    line=$0
+    for (i=1;i<=length(line);i++){c=substr(line,i,1); if(c=="{")depth++; if(c=="}")depth--}
+    if (depth<=0) skip=0
+    next
+  }
+  { print }
+' "$ROOT/emptyoid/scripts/release-claim.sh" > "$ROOT/emptyoid/scripts/release-claim.sh.new" \
+  && mv "$ROOT/emptyoid/scripts/release-claim.sh.new" "$ROOT/emptyoid/scripts/release-claim.sh"
+cat > "$ROOT/emptyoid/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in list) exit 0 ;; list-open-numbers) exit 0 ;; *) exit 64 ;; esac
+READER
+cat > "$ROOT/emptyoid/bin/gh" <<'GH'
+#!/usr/bin/env bash
+echo "GH $*" >> "${GH_LOG:-/dev/null}"
+case "$*" in
+  *"repo view"*) echo "acme/app"; exit 0 ;;
+  *"issue view"*) echo 'agent-claimed,tier-b'; exit 0 ;;
+  *"label"*"remove"*) echo "MUTATED-LABEL" >> "${GH_LOG:-/dev/null}"; exit 0 ;;
+  *) exit 0 ;;
+esac
+GH
+chmod +x "$ROOT/emptyoid/scripts/"* "$ROOT/emptyoid/bin/gh"
+if ! grep -q 'MUTATED empty-oids' "$ROOT/emptyoid/scripts/release-claim.sh"; then
+  bad "empty-oid mutation failed to apply"
+elif ! bash -n "$ROOT/emptyoid/scripts/release-claim.sh" 2>/dev/null; then
+  bad "empty-oid mutation broke syntax"
+else
+  ok "empty-oid mutation applied"
+  export GH_LOG="$ROOT/emptyoid/gh.log"
+  : > "$GH_LOG"
+  out=$(cd "$ROOT/emptyoid/canon" && PATH="$ROOT/emptyoid/bin:$PATH" \
+    "$ROOT/emptyoid/scripts/release-claim.sh" 892 --claim-id issue-892-emptyoid --repo acme/app \
+    2>&1); rc=$?
+  # Strip may succeed (ledger gone) but artifact cleanup must refuse empty OIDs
+  # → INCOMPLETE, branch/worktree preserved.
+  if git -C "$ROOT/emptyoid/canon" show-ref --verify --quiet refs/heads/feat/892-emptyoid; then
+    ok "empty-oid: local branch preserved (no self-seed delete)"
+  else
+    bad "empty-oid: local branch deleted despite empty frozen OIDs"
+  fi
+  [[ -d "$ROOT/emptyoid/wt-892-emptyoid" ]] && ok "empty-oid: worktree preserved" \
+    || bad "empty-oid: worktree removed"
+  [[ "$rc" -ne 0 ]] && ok "empty-oid: incomplete/nonzero" || bad "empty-oid exited 0: $out"
+fi
 
 echo "#153 stream-capture · persistent unlink retains handle + nonzero"
 _SC_LIB="$SCRIPT_DIR/../lib/stream-capture.sh"
@@ -6762,17 +7151,44 @@ leaked=$(find "$_first_tmp" -name 'gibson-rc-cap*' 2>/dev/null | head -10 || tru
   || bad "stream-capture first-allocation INT leaked: $leaked"
 rm -rf "$_first_tmp"
 
-# Static contract: parent dir tracked before child files
-if grep -q 'mktemp -d' "$_SC_LIB" && grep -q '_RC_CAP_DIR=' "$_SC_LIB" && \
+# Static contract: signal traps installed BEFORE any mktemp allocation, and
+# parent dir published to tracked globals before child files exist.
+if grep -q 'mktemp -d' "$_SC_LIB" && grep -q '_rc_capture_install_signal_traps' "$_SC_LIB" && \
    awk '
-     /mktemp -d/ { saw_dir=1 }
-     saw_dir && /_rc_capture_install_signal_traps/ { protected=1 }
-     protected && /gibson-rc-cap-out/ { ok=1 }
-     END { exit !ok }
+     /_rc_capture_install_signal_traps/ { traps=1 }
+     traps && /mktemp -d/ { alloc_after_traps=1 }
+     /mktemp -d/ && !traps { alloc_before_traps=1 }
+     alloc_after_traps && /_RC_CAP_DIR=/ { tracked=1 }
+     tracked && /gibson-rc-cap-out/ { ok=1 }
+     END { exit !(ok && !alloc_before_traps) }
    ' "$_SC_LIB"; then
-  ok "stream-capture: parent dir protected before child file allocation"
+  ok "stream-capture: traps before allocation; parent tracked before children"
 else
-  bad "stream-capture: parent-dir-first allocation contract missing"
+  bad "stream-capture: traps-before-allocation / parent-tracked contract missing"
+fi
+# No recursive best-effort rm -rf of capture temps.
+if grep -nE 'rm -rf -- "\$_RC_CAP_DIR"|rm -rf -- "\$dir"' "$_SC_LIB" | grep -v '^[^:]*:.*#'; then
+  bad "stream-capture still uses recursive rm -rf on capture dir"
+else
+  ok "stream-capture: no recursive rm -rf on capture dir"
+fi
+# Signal cleanup must not clear handles without verified unlink.
+if grep -A20 '_rc_capture_cleanup_temps' "$_SC_LIB" | grep -q '_RC_CAP_OUTF=""' && \
+   grep -B5 -A5 '_RC_CAP_OUTF=""' "$_SC_LIB" | grep -q '_rc_capture_unlink_one\|unlink'; then
+  ok "stream-capture: handle clear is gated on verified unlink"
+else
+  # Accept if cleanup only clears after successful unlink helper.
+  if awk '
+    /_rc_capture_cleanup_temps\(\)/ { in_fn=1 }
+    in_fn && /_rc_capture_unlink_one/ { uses_verified=1 }
+    in_fn && /_RC_CAP_OUTF=""/ { if (uses_verified) ok=1 }
+    in_fn && /^}/ { in_fn=0 }
+    END { exit !ok }
+  ' "$_SC_LIB"; then
+    ok "stream-capture: handle clear is gated on verified unlink"
+  else
+    bad "stream-capture: cleanup may clear handles without verified unlink"
+  fi
 fi
 
 echo "#153 round 8 · standalone suite exit gate rejects construction diags"

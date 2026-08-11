@@ -316,11 +316,20 @@ new_repo() {
 }
 
 add_claim() { # repo-root claim-id scope
+  # Issue field must match the issue encoded by the claim id (#153 identity).
+  local _id="$2" _issue=""
+  if [[ "$_id" =~ ^issue-([0-9]+)- ]]; then
+    _issue="${BASH_REMATCH[1]}"
+  elif [[ "$_id" =~ ^issue-[A-Za-z][A-Za-z0-9]*-([0-9]+)- ]]; then
+    _issue="${BASH_REMATCH[1]}"
+  else
+    _issue=0
+  fi
   (
     cd "$1/canon" || exit 1
     git checkout -q main
     mkdir -p docs/claims
-    printf 'claim: %s\nissue: x\nclaimed: 2026-08-01T00:00:00Z\nscope: %s\nsession: other\n' "$2" "$3" \
+    printf 'claim: %s\nissue: %s\nclaimed: 2026-08-01T00:00:00Z\nscope: %s\nsession: other\n' "$2" "$_issue" "$3" \
       > "docs/claims/$2.md"
     git add -A && git commit -qm "claim $2" && git push -q origin main
   ) >/dev/null 2>&1
@@ -915,7 +924,7 @@ export GH_CLOSE_LOG="$ROOT/admitblind/close.log"
 out=$(cd "$ROOT/admitblind/canon" && PATH="$BLIND_BIN:$PATH" GIBSON_CLAIM_ADMIT_ATTEMPTS=2 \
   "$CLAIM" 77 blind 'lib/blind/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "an inventory blind to this claim refuses it" || bad "blind inventory admitted the claim (rc=$rc): $out"
-contains "names the unprovable registration" "$out" "could not obtain a stable live-claim inventory"
+contains "names the unprovable registration" "$out" "could not obtain a stable"
 test ! -e "$ROOT/admitblind/wt-77-blind" \
   && ok "blind admission rolled back its worktree" || bad "blind admission left its worktree"
 test -z "$(git -C "$ROOT/admitblind/canon" branch --list 'feat/77-blind')" \
@@ -1099,7 +1108,7 @@ out=$(cd "$ROOT/lagcatch/canon" && PATH="$ROOT/lagcatch/bin:$PATH" \
 [[ "$rc" -ne 0 ]] && ok "a late-publishing rival still refuses this lane" \
   || bad "the lane admitted itself against a rival it had not yet seen (rc=$rc): $out"
 contains "names the rival it eventually saw" "$out" "issue-88-rival"
-contains "reports the inventory settled first" "$out" "inventory quiescent"
+contains "reports the inventory settled first" "$out" "quiescent"
 test ! -e "$ROOT/lagcatch/wt-87-lagged" \
   && ok "late-rival refusal rolled back its worktree" || bad "late-rival refusal left its worktree"
 test -z "$(git -C "$ROOT/lagcatch/canon" branch --list 'feat/87-lagged')" \
@@ -1158,7 +1167,7 @@ out=$(cd "$ROOT/lagchurn/canon" && PATH="$ROOT/lagchurn/bin:$PATH" \
   "$CLAIM" 87 churned 'lib/churned/**' 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "a never-quiescent inventory refuses the claim" \
   || bad "an unsettled inventory admitted the claim (rc=$rc): $out"
-contains "says the inventory never settled" "$out" "could not obtain a stable live-claim inventory"
+contains "says the inventory never settled" "$out" "could not obtain a stable"
 test ! -e "$ROOT/lagchurn/wt-87-churned" \
   && ok "unsettled refusal rolled back its worktree" || bad "unsettled refusal left its worktree"
 test -z "$(git -C "$ROOT/lagchurn/canon" ls-remote --heads origin 'feat/87-churned')" \

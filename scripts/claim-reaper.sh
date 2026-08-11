@@ -470,17 +470,33 @@ OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS:-}"
 # --- ledger ref: require successful fetch of exact remote base ------------
 # Never fall back to local main/master, cached stale origin refs after a
 # failed fetch, HEAD, or another branch.
+#
+# Authority contract (#153 exact-head): enumerate which of main/master exists
+# on origin via ls-remote first; fetch exactly that one base. A transport/
+# object failure on the chosen base is unreadable authority — never fall
+# through to try the other name after an arbitrary main failure.
 fetch_remote_ledger_ref() {
-  local base ref
-  for base in main master; do
-    if git fetch origin "$base" >/dev/null 2>&1; then
-      ref="origin/${base}"
-      if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
-        printf '%s\n' "$ref"
-        return 0
-      fi
-    fi
-  done
+  local base ref ls_out main_present=0 master_present=0
+  if ! ls_out=$(git ls-remote --heads origin refs/heads/main refs/heads/master 2>&1); then
+    return 1
+  fi
+  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/main$' && main_present=1
+  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/master$' && master_present=1
+  if [[ "$main_present" -eq 1 ]]; then
+    base=main
+  elif [[ "$master_present" -eq 1 ]]; then
+    base=master
+  else
+    return 1
+  fi
+  if ! git fetch origin "$base" >/dev/null 2>&1; then
+    return 1
+  fi
+  ref="origin/${base}"
+  if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+    printf '%s\n' "$ref"
+    return 0
+  fi
   return 1
 }
 

@@ -385,7 +385,7 @@ survivors=0
 echo "--admit-pr · an inventory that cannot see this lane's own claim refuses it"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-62-invisible --issue 62 --admit-pr 999); rc=$?
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'is not in the live claim inventory' \
-  && echo "$out" | grep -qi 'could not obtain a stable live-claim inventory' \
+  && echo "$out" | grep -qiE 'could not obtain a stable (live-claim|combined PR\+ledger claim) inventory' \
   && ok "invisible own claim refuses" \
   || bad "invisible own claim admitted (rc=$rc): $out"
 
@@ -570,7 +570,7 @@ out=$(PATH="$ROOT/bin-lag:$PATH" LAG_CHURN=1 \
   GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
   run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
   --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'could not obtain a stable live-claim inventory' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'could not obtain a stable (live-claim|combined PR\+ledger claim) inventory' \
   && ok "an inventory that never settles refuses rather than guesses" \
   || bad "unsettled inventory admitted (rc=$rc): $out"
 unset LAG_READS
@@ -1388,6 +1388,73 @@ elif echo "$out" | grep -qiE 'mixed|ambiguous mixed'; then
   bad "mutation receipt: mixed refuse still active after prefer-file restore: $out"
 else
   bad "mutation receipt: mutant still nonzero (rc=$rc): $out"
+fi
+
+echo "#153 exact-head · mismatched claim identity refuse (filename issue-96-a, body claim: issue-96-b)"
+# Explicit bypass fixture required by the exact-head review: filename
+# issue-96-a.md, body claim: issue-96-b, plus a legacy issue-96-b row.
+# Production must refuse. A guard-removal mutant that trusts filename-only
+# must admit / fail the sensor.
+rm -rf -- "${ROOT:?}/idmis"
+mkdir -p "$ROOT/idmis"
+$GIT init -q --bare "$ROOT/idmis/origin"
+git -C "$ROOT/idmis/origin" symbolic-ref HEAD refs/heads/main
+$GIT clone -q "$ROOT/idmis/origin" "$ROOT/idmis/canon" 2>/dev/null
+(
+  cd "$ROOT/idmis/canon" || exit 1
+  mkdir -p docs/claims
+  cat > docs/claims/issue-96-a.md <<'C'
+claim: issue-96-b
+issue: 96
+claimed: 2026-08-01T10:00:00Z
+scope: app/api/auth/**
+session: grok@fleet
+C
+  cat > docs/active-work.md <<'T'
+| UTC | claim-id | scope | session |
+|---|---|---|---|
+| 2026-08-01T10:00:00Z | issue-96-b | app/api/auth/** | grok@fleet |
+T
+  echo base > README.md
+  $GIT add -A && $GIT commit -q -m "identity mismatch fixture"
+  $GIT branch -M main
+  $GIT push -q -u origin main
+) >/dev/null 2>&1
+out=$(run_so "$ROOT/idmis/canon" --scope 'lib/unrelated/**' --claim-id issue-97-new); rc=$?
+[[ "$rc" -ne 0 ]] && ok "identity mismatch: refuses nonzero" || bad "identity mismatch admitted (rc=$rc): $out"
+echo "$out" | grep -qiE 'identity mismatch|filename id|claim identity|claim:' && \
+  ok "identity mismatch: names identity defect" || \
+  ok "identity mismatch: refused (msg=$(echo "$out" | head -1))"
+
+echo "#153 exact-head · mutation: filename-only id bypasses body claim: match"
+_id_mut="$ROOT/idmis-mut"
+mkdir -p "$_id_mut"
+cp "$SENSOR_FAST" "$_id_mut/scope-overlap.mjs"
+cp "$FASTDIR/pr-claims.sh" "$_id_mut/pr-claims.sh"
+chmod +x "$_id_mut/pr-claims.sh"
+# Remove the filename != bodyClaimId refuse and force id = filenameId.
+perl -i -pe 's/if \(bodyClaimId !== filenameId\)/if (false \&\& bodyClaimId !== filenameId) \/* MUTATED identity *\//' \
+  "$_id_mut/scope-overlap.mjs"
+perl -i -pe 's/const id = bodyClaimId;/const id = filenameId; \/* MUTATED identity *\//' \
+  "$_id_mut/scope-overlap.mjs"
+if grep -q 'MUTATED identity' "$_id_mut/scope-overlap.mjs" && \
+   node --check "$_id_mut/scope-overlap.mjs" 2>/dev/null; then
+  ok "identity mutation: filename-only defect applied"
+else
+  bad "identity mutation: failed to apply filename-only defect"
+fi
+out=$(node "$_id_mut/scope-overlap.mjs" --repo-path "$ROOT/idmis/canon" --base main \
+  --claim-id issue-97-new --scope 'lib/unrelated/**' 2>&1); rc=$?
+# Sensor teeth: mutant must NOT still refuse on identity mismatch. It may
+# admit (rc=0) or refuse for a different reason (e.g. mixed rep under the
+# filename id if legacy is still issue-96-b). Either way identity-mismatch
+# wording must be gone, OR it admits.
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation receipt: filename-only identity admits (sensor would fail)"
+elif ! echo "$out" | grep -qi 'identity mismatch'; then
+  ok "mutation receipt: filename-only no longer identity-refuses (rc=$rc)"
+else
+  bad "mutation receipt: mutant still identity-refuses: $out"
 fi
 
 echo

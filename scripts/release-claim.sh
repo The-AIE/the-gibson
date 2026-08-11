@@ -438,27 +438,44 @@ fi
 
 # Successful fetch of exact remote base into its remote-tracking ref.
 # Prints base name (main|master). Distinguishes remote absence (no main/master
-# on origin after a successful fetch query) from unreadable/fetch failure.
-# Fails closed on fetch failure — never falls back to local or stale cache.
+# on origin) from unreadable/fetch/transport failure.
+#
+# Authority contract (#153 exact-head):
+#   1. Enumerate which of main/master exists on origin via ls-remote (read).
+#   2. Prefer main when present, else master when present, else refuse.
+#   3. Fetch exactly that one base. A fetch/transport/object failure is
+#      unreadable authority — never fall through to try the other name after
+#      an arbitrary main failure (that used to convert transport error into
+#      alternate-base authority).
+# Never falls back to local or stale cache.
 fetch_remote_base() {
-  local base fetch_out fetch_rc=0
+  local base fetch_out fetch_rc=0 ls_out main_present=0 master_present=0
   CLEANUP_FETCH_REASON=""
-  for base in main master; do
-    fetch_out=$(git fetch origin "$base" 2>&1) && fetch_rc=0 || fetch_rc=$?
-    if [[ "$fetch_rc" -eq 0 ]]; then
-      if git rev-parse --verify --quiet "origin/${base}^{commit}" >/dev/null 2>&1; then
-        printf '%s\n' "$base"
-        return 0
-      fi
-      # Fetch reported success but remote-tracking commit is unreadable.
-      CLEANUP_FETCH_REASON="origin/${base} unreadable after successful fetch"
-      return 1
-    fi
-    # Nonzero: could be "remote has no such ref" (try next base) or network
-    # failure. If both bases fail, refuse — never use local main/master.
-    CLEANUP_FETCH_REASON="git fetch origin ${base} failed: ${fetch_out}"
-  done
-  return 1
+  if ! ls_out=$(git ls-remote --heads origin refs/heads/main refs/heads/master 2>&1); then
+    CLEANUP_FETCH_REASON="git ls-remote --heads origin failed (unreadable remote, not ref absence): $ls_out"
+    return 1
+  fi
+  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/main$' && main_present=1
+  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/master$' && master_present=1
+  if [[ "$main_present" -eq 1 ]]; then
+    base=main
+  elif [[ "$master_present" -eq 1 ]]; then
+    base=master
+  else
+    CLEANUP_FETCH_REASON="origin has neither refs/heads/main nor refs/heads/master (true ref absence)"
+    return 1
+  fi
+  fetch_out=$(git fetch origin "$base" 2>&1) && fetch_rc=0 || fetch_rc=$?
+  if [[ "$fetch_rc" -ne 0 ]]; then
+    CLEANUP_FETCH_REASON="git fetch origin ${base} failed (unreadable remote authority, not alternate-base fallback): ${fetch_out}"
+    return 1
+  fi
+  if ! git rev-parse --verify --quiet "origin/${base}^{commit}" >/dev/null 2>&1; then
+    CLEANUP_FETCH_REASON="origin/${base} unreadable after successful fetch"
+    return 1
+  fi
+  printf '%s\n' "$base"
+  return 0
 }
 
 # Resolve the ledger ref ONLY from origin/<base> after a successful fetch.
@@ -636,10 +653,11 @@ fi
 # re-check here so a mid-run object-store loss still fails closed instead of
 # inventing ids from pathnames alone.
 claim_ids_all() {
-  local claims_out active_out active_entry active_blob claims_line
+  local claims_out active_out active_entry active_blob claims_line claims_full
   local c_mode c_type c_obj
   claims_out=""
-  if ! claims_line=$(git ls-tree "$REF" -- docs/claims 2>/dev/null); then
+  claims_full=""
+  if ! claims_line=$(git ls-tree "$REF" -- docs/claims 2>&1); then
     echo "release-claim.sh: ERROR: cannot list docs/claims at $REF — unreadable ledger tree is not an empty ledger" >&2
     return 1
   fi
@@ -651,8 +669,15 @@ claim_ids_all() {
       echo "release-claim.sh: ERROR: docs/claims at $REF has unexpected Git mode/type ($c_mode $c_type${c_obj:+ $c_obj}) — want 040000 tree" >&2
       return 1
     fi
-    if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>/dev/null); then
+    if ! claims_out=$(git ls-tree --name-only "$REF" docs/claims/ 2>&1); then
       echo "release-claim.sh: ERROR: cannot list docs/claims/ at $REF — unreadable ledger tree is not an empty ledger" >&2
+      return 1
+    fi
+    # Full tree listing is required for blob mode/type/OID validation. Never
+    # swallow enumeration failure with `|| true` — that converted unreadable
+    # into zero representations.
+    if ! claims_full=$(git ls-tree "$REF" docs/claims/ 2>&1); then
+      echo "release-claim.sh: ERROR: cannot list docs/claims/ (full) at $REF — unreadable ledger tree is not an empty ledger" >&2
       return 1
     fi
     # Pathname list is only valid when every listed object is still a readable blob.
@@ -672,12 +697,12 @@ claim_ids_all() {
         return 1
       fi
     done <<EOF
-$(git ls-tree "$REF" docs/claims/ 2>/dev/null || true)
+$claims_full
 EOF
   fi
   active_out=""
   # Tree entry first: absence is empty content; present-but-unreadable hard-fails.
-  if ! active_entry=$(git ls-tree "$REF" -- docs/active-work.md 2>/dev/null); then
+  if ! active_entry=$(git ls-tree "$REF" -- docs/active-work.md 2>&1); then
     echo "release-claim.sh: ERROR: cannot list docs/active-work.md at $REF — unreadable ledger tree is not an empty ledger" >&2
     return 1
   fi
@@ -687,7 +712,7 @@ EOF
       echo "release-claim.sh: ERROR: docs/active-work.md exists in the ledger tree at $REF but its blob is unreadable/corrupt${active_blob:+ ($active_blob)} — not an empty ledger" >&2
       return 1
     fi
-    if ! active_out=$(git show "$REF:docs/active-work.md" 2>/dev/null); then
+    if ! active_out=$(git show "$REF:docs/active-work.md" 2>&1); then
       echo "release-claim.sh: ERROR: cannot read docs/active-work.md at $REF — unreadable/corrupt blob is not an empty ledger" >&2
       return 1
     fi
@@ -1209,6 +1234,31 @@ terminal_cleanup_release() {
     preserve_label=1
   fi
 
+  # --- helper: re-fetch + fully validate remote ledger for same-ID renewal ---
+  # Used immediately before every independent destructive boundary. Any
+  # unreadable evidence or renewed same-ID representation refuses that
+  # mutation, preserves remaining artifacts and the label, and reports
+  # INCOMPLETE. Generation identity is PR number + head SHA, never claim id.
+  _term_ledger_same_id_clear() {
+    local context="$1" base ref live
+    if ! base=$(fetch_remote_base); then
+      warn "cannot fetch remote ledger $context — refuse (no local/cached fallback)${CLEANUP_FETCH_REASON:+: $CLEANUP_FETCH_REASON}"
+      return 1
+    fi
+    ref="origin/${base}"
+    REF="$ref"
+    CLEANUP_BASE="$base"
+    if ! live=$(claim_ids_all); then
+      warn "cannot read authoritative ledger at $ref $context — refuse (unreadable is not absence); preserve remaining artifacts and label"
+      return 1
+    fi
+    if printf '%s\n' "$live" | grep -qxF -- "$id"; then
+      warn "same-ID ledger row for '$id' is live at $ref $context — renewed/live generation; refuse remaining mutation (bound to PR #$TERMINAL_PR_NUMBER head $TERMINAL_HEAD_SHA, not claim id alone)"
+      return 1
+    fi
+    return 0
+  }
+
   # --- mutation (only after the safety proof above) -----------------------
   if [[ "$safe" -eq 1 ]]; then
     if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
@@ -1256,6 +1306,12 @@ terminal_cleanup_release() {
         warn "worktree $wt HEAD moved between the safety proof ($got_head) and removal ($revalidate_head) — refuse to remove (TOCTOU guard)"
         incomplete=1
         preserve_label=1
+      # Immediate same-ID ledger revalidation AFTER the earlier safety proof
+      # and immediately BEFORE the actual worktree-remove command. A renewal
+      # in this exact window must preserve the worktree, branches, and label.
+      elif ! _term_ledger_same_id_clear "immediately before worktree removal"; then
+        incomplete=1
+        preserve_label=1
       elif git worktree remove "$wt" 2>/dev/null; then
         git worktree prune 2>/dev/null || true
         if [[ -d "$wt" ]] || worktree_registered "$wt"; then
@@ -1282,7 +1338,7 @@ terminal_cleanup_release() {
   # exactly how the remote branch used to be deleted while a dirty worktree
   # and its local branch survived.
   local wt_phase_ok=0
-  if [[ "$safe" -eq 1 ]]; then
+  if [[ "$safe" -eq 1 && "$incomplete" -eq 0 ]]; then
     if [[ "$wt_present" -eq 0 ]]; then
       wt_phase_ok=1
     elif [[ "$KEEP_WORKTREE" -eq 1 ]]; then
@@ -1304,22 +1360,12 @@ terminal_cleanup_release() {
   if [[ "$safe" -eq 1 && "$wt_phase_ok" -eq 1 && "$KEEP_BRANCH" -eq 0 ]]; then
     # Revalidate same-ID ledger between independent destructive steps (#153):
     # a concurrent actor can renew the claim id after worktree removal and
-    # before branch deletion.
-    local mid_live mid_base mid_ref
-    if ! mid_base=$(fetch_remote_base); then
-      warn "cannot re-fetch ledger between worktree and branch mutation — refuse branch deletion${CLEANUP_FETCH_REASON:+: $CLEANUP_FETCH_REASON}"
+    # before local branch deletion. Unreadable evidence MUST disable branch
+    # deletion (previous bug: claim_ids_all failure left deletion enabled).
+    if ! _term_ledger_same_id_clear "between worktree and local branch mutation"; then
       incomplete=1
       preserve_label=1
       wt_phase_ok=0
-    else
-      mid_ref="origin/${mid_base}"
-      REF="$mid_ref"
-      if mid_live=$(claim_ids_all) && printf '%s\n' "$mid_live" | grep -qxF -- "$id"; then
-        warn "same-ID ledger row for '$id' appeared/survived at $mid_ref between worktree and branch mutation — refuse branch/label mutation"
-        incomplete=1
-        preserve_label=1
-        wt_phase_ok=0
-      fi
     fi
   fi
 
@@ -1347,18 +1393,24 @@ terminal_cleanup_release() {
     # deleted while an advanced/reused local branch (and its content) survived.
     if [[ "$local_cas_failed" -eq 1 ]]; then
       warn "skipping remote branch CAS delete for '$br' — local branch CAS delete already failed/refused in this run"
-    elif ! query_remote_branch_exact "$br"; then
-      warn "cannot verify remote branch '$br' before deletion — refuse mutation: $REMOTE_BRANCH_REASON"
-      incomplete=1
-      preserve_label=1
-    elif [[ "$REMOTE_BRANCH_STATUS" == "present" ]]; then
-      # Exact expected-old lease bound to the verified terminal PR head SHA —
-      # never a re-read value. A lease mismatch means the branch advanced/was
-      # reused between the precheck and this delete.
-      if ! git push --force-with-lease="refs/heads/${br}:${TERMINAL_HEAD_SHA}" origin ":refs/heads/${br}" >/dev/null 2>&1; then
-        warn "remote branch CAS delete refused for '$br' — lease on $TERMINAL_HEAD_SHA rejected (branch advanced/reused since the precheck) or delete failed"
+    else
+      # Re-fetch same-ID ledger again before remote branch deletion.
+      if ! _term_ledger_same_id_clear "before remote branch mutation"; then
         incomplete=1
         preserve_label=1
+      elif ! query_remote_branch_exact "$br"; then
+        warn "cannot verify remote branch '$br' before deletion — refuse mutation: $REMOTE_BRANCH_REASON"
+        incomplete=1
+        preserve_label=1
+      elif [[ "$REMOTE_BRANCH_STATUS" == "present" ]]; then
+        # Exact expected-old lease bound to the verified terminal PR head SHA —
+        # never a re-read value. A lease mismatch means the branch advanced/was
+        # reused between the precheck and this delete.
+        if ! git push --force-with-lease="refs/heads/${br}:${TERMINAL_HEAD_SHA}" origin ":refs/heads/${br}" >/dev/null 2>&1; then
+          warn "remote branch CAS delete refused for '$br' — lease on $TERMINAL_HEAD_SHA rejected (branch advanced/reused since the precheck) or delete failed"
+          incomplete=1
+          preserve_label=1
+        fi
       fi
     fi
   fi
@@ -1963,37 +2015,85 @@ read_bound_open_pr_evidence() {
 #   * Two+ open PRs with the same exact id → refuse
 #   * Unreadable PR inventory or ledger tree → refuse
 # On refusal: UNION_REFUSE_REASON is set; return 1. On success: return 0.
+# Tri-state representation predicates (#153 exact-head):
+#   return 0 = present
+#   return 1 = absent
+#   return 2 = unreadable
+# Unreadable must never collapse to absent/zero representations.
 ledger_has_file_rep() {
-  local id="$1" ref="${2:-$REF}"
-  git cat-file -e "${ref}:docs/claims/${id}.md" 2>/dev/null
-}
-ledger_has_legacy_rep() {
-  local id="$1" ref="${2:-$REF}" active_out
-  if ! git cat-file -e "${ref}:docs/active-work.md" 2>/dev/null; then
+  local id="$1" ref="${2:-$REF}" ls_out mode typ obj
+  if ! ls_out=$(git ls-tree "$ref" -- "docs/claims/${id}.md" 2>&1); then
+    return 2
+  fi
+  if [[ -z "$ls_out" ]]; then
     return 1
   fi
-  active_out=$(git show "${ref}:docs/active-work.md" 2>/dev/null) || return 1
-  printf '%s\n' "$active_out" | awk -F'|' -v want="$id" '
+  mode=$(printf '%s\n' "$ls_out" | awk '{print $1; exit}')
+  typ=$(printf '%s\n' "$ls_out" | awk '{print $2; exit}')
+  obj=$(printf '%s\n' "$ls_out" | awk '{print $3; exit}')
+  if [[ "$typ" != "blob" || -z "$obj" ]]; then
+    return 2
+  fi
+  if ! git cat-file -e "$obj" 2>/dev/null; then
+    return 2
+  fi
+  if ! git cat-file blob "$obj" >/dev/null 2>&1; then
+    return 2
+  fi
+  return 0
+}
+ledger_has_legacy_rep() {
+  local id="$1" ref="${2:-$REF}" ls_out active_out obj
+  if ! ls_out=$(git ls-tree "$ref" -- docs/active-work.md 2>&1); then
+    return 2
+  fi
+  if [[ -z "$ls_out" ]]; then
+    return 1
+  fi
+  obj=$(printf '%s\n' "$ls_out" | awk '{print $3; exit}')
+  if [[ -z "$obj" ]] || ! git cat-file -e "$obj" 2>/dev/null; then
+    return 2
+  fi
+  if ! active_out=$(git show "${ref}:docs/active-work.md" 2>&1); then
+    return 2
+  fi
+  if printf '%s\n' "$active_out" | awk -F'|' -v want="$id" '
     /^\|/ {
       cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
       if (cid==want) found=1
     }
     END { exit !found }
-  '
+  '; then
+    return 0
+  fi
+  return 1
 }
 
 # Count ledger representations for one id at an exact ref.
 # Sets: LEDGER_FILE_REP (0|1), LEDGER_LEGACY_REP (0|1), LEDGER_ANY_REP (0|1)
+# Returns 2 when any authority read failed — caller must refuse (unreadable
+# is not absence / zero representations).
 count_ledger_reps_at_ref() {
-  local id="$1" ref="$2"
+  local id="$1" ref="$2" fr=0 lr=0
   LEDGER_FILE_REP=0
   LEDGER_LEGACY_REP=0
   LEDGER_ANY_REP=0
-  ledger_has_file_rep "$id" "$ref" && LEDGER_FILE_REP=1
-  ledger_has_legacy_rep "$id" "$ref" && LEDGER_LEGACY_REP=1
+  ledger_has_file_rep "$id" "$ref"
+  fr=$?
+  if [[ "$fr" -eq 2 ]]; then
+    return 2
+  fi
+  [[ "$fr" -eq 0 ]] && LEDGER_FILE_REP=1
+  ledger_has_legacy_rep "$id" "$ref"
+  lr=$?
+  if [[ "$lr" -eq 2 ]]; then
+    return 2
+  fi
+  [[ "$lr" -eq 0 ]] && LEDGER_LEGACY_REP=1
   if [[ "$LEDGER_FILE_REP" -eq 1 || "$LEDGER_LEGACY_REP" -eq 1 ]]; then
     LEDGER_ANY_REP=1
   fi
+  return 0
 }
 
 # Fresh, fully validated open-PR inventory read. Sets PR_ROWS on success.
@@ -2037,7 +2137,12 @@ validate_authoritative_union() {
   }
   while IFS= read -r _uid; do
     [[ -n "$_uid" ]] || continue
-    count_ledger_reps_at_ref "$_uid" "$exact_ref"
+    if ! count_ledger_reps_at_ref "$_uid" "$exact_ref"; then
+      reason="REFUSE unreadable ledger representation evidence for '$_uid' at $exact_ref ($context) — refuse all mutation (unreadable is not absence)"
+      UNION_REFUSE_REASON="$reason"
+      if [[ "$soft" -eq 1 ]]; then return 1; fi
+      die "$reason"
+    fi
     if [[ "$LEDGER_FILE_REP" -eq 1 && "$LEDGER_LEGACY_REP" -eq 1 ]]; then
       reason="REFUSE ambiguous mixed ledger representations for '$_uid' (both docs/claims/${_uid}.md and docs/active-work.md) at $exact_ref ($context) — refuse all mutation; preserve both representations, label, worktree, and branches"
       UNION_REFUSE_REASON="$reason"
@@ -2087,21 +2192,16 @@ revalidate_authoritative_union_soft() {
   local ids="$1" exact_ref="$2" context="$3" mode="${4:-pre-strip}"
   local pr_rows=""
   if [[ -n "${PR_REPO:-}" ]]; then
-    # Fresh inventory policy:
-    #   * CAS pre-strip: always re-list (late-open / same-issue races).
-    #   * Non-CAS pre-strip: reuse the initial PR_ROWS snapshot (already
-    #     fully validated). A second list would steal the post-mutation
-    #     sibling-reread call slot used by ledger-path fixtures.
-    #   * post-push: always re-list (fresh residual open-PR view).
-    if [[ "$mode" == "post-push" || "${CAS_MODE:-0}" -eq 1 ]]; then
-      if ! read_fresh_pr_inventory "$PR_REPO"; then
-        warn "revalidate union ($context): $UNION_REFUSE_REASON"
-        return 1
-      fi
-      pr_rows="$PR_ROWS"
-    else
-      pr_rows="${PR_ROWS:-}"
+    # Fresh inventory policy (#153 exact-head):
+    # ALWAYS re-list before irreversible ledger mutation (pre-strip) and after
+    # push (post-push). Never reuse the startup PR_ROWS snapshot — a late-open
+    # same-ID or same-issue PR after that snapshot and before the strip/push
+    # boundary must be visible and refuse. CAS and non-CAS share this path.
+    if ! read_fresh_pr_inventory "$PR_REPO"; then
+      warn "revalidate union ($context): $UNION_REFUSE_REASON"
+      return 1
     fi
+    pr_rows="$PR_ROWS"
   fi
   if ! validate_authoritative_union "$ids" "$pr_rows" "$exact_ref" "$context" 1; then
     warn "revalidate union ($context): $UNION_REFUSE_REASON"
@@ -2120,7 +2220,7 @@ revalidate_authoritative_union_soft() {
         warn "revalidate union ($context): $UNION_REFUSE_REASON"
         return 1
       elif [[ "$mode" != "post-push" ]] && claim_id_for_issue "$pr_id"; then
-        # Pre-strip / CAS: same-issue open PR also protects the ledger row.
+        # Pre-strip: same-issue open PR also protects the ledger row.
         UNION_REFUSE_REASON="open PR #$pr_number claim '$pr_id' holds issue #$ISSUE ($context)"
         warn "revalidate union ($context): $UNION_REFUSE_REASON"
         return 1
@@ -2297,46 +2397,62 @@ EOF
       exit 0
     fi
     # --- complete authoritative union BEFORE gh pr close (#153 P1) ---------
-    # The mixed-ledger and open-PR-plus-ledger guards used to run only after
-    # this path closed the PR and exited. Validate the full union now:
-    #   * Open PR identity is re-proven by bound-evidence freeze revalidation
-    #     (find-open-pr) immediately below — not by a second inventory list
-    #     that would race fixture call-count contracts with the post-close
-    #     reread.
-    #   * Ledger representations are re-fetched from the exact remote base
-    #     and checked for mixed form and any same-ID row.
+    # Fresh, fully validated PR inventory AND exact remote-ledger snapshot
+    # together, immediately before the irreversible close. Never reuse the
+    # startup PR_ROWS snapshot: a second same-ID open PR that arrived after
+    # that snapshot must refuse before gh pr close.
     # Claim id alone is never generation identity.
     {
+      if ! read_fresh_pr_inventory "$PR_REPO"; then
+        die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): cannot obtain fresh PR inventory before close — $UNION_REFUSE_REASON. Refuse (nothing was mutated)."
+      fi
       if ! _preclose_base=$(fetch_remote_base); then
         die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): cannot re-fetch remote ledger base before close — refuse (nothing was mutated)${CLEANUP_FETCH_REASON:+: $CLEANUP_FETCH_REASON}"
       fi
       _preclose_ref="origin/${_preclose_base}"
       CLEANUP_BASE="$_preclose_base"
       REF="$_preclose_ref"
-      # Multi-open ambiguity was already refused at PR_COUNT>1 on the initial
-      # fully validated inventory. Re-check from that snapshot for same-ID
-      # multiplicity (late second PR of the same id is also refused by freeze
-      # identity if the wrong PR is targeted).
+      # Unique exact target identity on the FRESH inventory.
       _preclose_open_n=0
+      _preclose_open_nums=""
+      _preclose_target_seen=0
       while IFS= read -r pr_row; do
         [[ -n "$pr_row" ]] || continue
         pr_id=$(cut -f2 <<<"$pr_row")
+        pr_number=$(cut -f1 <<<"$pr_row")
         [[ "$pr_id" == "$PR_CLAIM_ID" ]] || continue
         _preclose_open_n=$((_preclose_open_n + 1))
+        _preclose_open_nums="${_preclose_open_nums}#${pr_number} "
+        if [[ "$pr_number" == "$PR_NUMBER" ]]; then
+          _preclose_target_seen=1
+        fi
       done <<EOF
 $PR_ROWS
 EOF
-      if [[ "$_preclose_open_n" -gt 1 ]]; then
-        die "REFUSE ambiguous exact claim id '$PR_CLAIM_ID' across open PR union (${_preclose_open_n} open PRs) (pre-close) — refuse all mutation"
+      if [[ "$_preclose_open_n" -eq 0 ]]; then
+        die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): fresh pre-close inventory no longer carries this claim — refuse before close (nothing was mutated)"
       fi
-      count_ledger_reps_at_ref "$PR_CLAIM_ID" "$_preclose_ref"
+      if [[ "$_preclose_open_n" -gt 1 ]]; then
+        die "REFUSE ambiguous exact claim id '$PR_CLAIM_ID' across open PR union (${_preclose_open_n} open PRs: ${_preclose_open_nums}) (pre-close) — refuse all mutation"
+      fi
+      if [[ "$_preclose_target_seen" -ne 1 ]]; then
+        die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): fresh pre-close inventory carries the claim under a different PR number (${_preclose_open_nums}) — refuse before close (nothing was mutated)"
+      fi
+      # Same-issue second open PR (different claim id) also refuses before close
+      # when --claim-id is exact: generation uniqueness is the exact target, but
+      # a second same-ID is already handled above; mixed same-issue open PRs are
+      # allowed only as multi-slice residual after close — not as a second
+      # same-ID representation.
+      if ! count_ledger_reps_at_ref "$PR_CLAIM_ID" "$_preclose_ref"; then
+        die "REFUSE unreadable ledger representation evidence for '$PR_CLAIM_ID' at $_preclose_ref (pre-close) — refuse all mutation (unreadable is not absence)"
+      fi
       if [[ "$LEDGER_FILE_REP" -eq 1 && "$LEDGER_LEGACY_REP" -eq 1 ]]; then
         die "REFUSE ambiguous mixed ledger representations for '$PR_CLAIM_ID' (both docs/claims/${PR_CLAIM_ID}.md and docs/active-work.md) at $_preclose_ref (pre-close) — refuse all mutation; preserve PR, both representations, label, worktree, and branches"
       fi
       if [[ "$LEDGER_ANY_REP" -eq 1 ]]; then
         die "REFUSE exact claim id '$PR_CLAIM_ID' is live both as open PR (#$PR_NUMBER) and ledger representation(s) (file=$LEDGER_FILE_REP legacy=$LEDGER_LEGACY_REP) at $_preclose_ref (pre-close) — refuse all mutation; preserve PR, ledger, label, worktree, and branches"
       fi
-      unset _preclose_base _preclose_ref _preclose_open_n pr_row pr_id
+      unset _preclose_base _preclose_ref _preclose_open_n _preclose_open_nums _preclose_target_seen pr_row pr_id pr_number
     }
     # Immediate pre-close revalidation of the bound evidence. Any identity or
     # head-SHA movement after the freeze is a race — refuse before close.
@@ -2661,6 +2777,20 @@ guarded_remove_claim_artifacts() {
     return 1
   fi
 
+  # Proven ownership only (#153 exact-head): when branch deletion is requested,
+  # both local and remote expected OIDs must already be bound to the released
+  # claim's proven evidence. Never self-seed from whatever tip exists at
+  # deletion time — that only protects against later movement, not against an
+  # already-reused or advanced branch.
+  if [[ "$KEEP_BRANCH" -eq 0 ]]; then
+    if git show-ref --verify --quiet "refs/heads/$br"; then
+      if [[ -z "$frozen_local_oid" || ! "$frozen_local_oid" =~ ^[0-9a-f]{40}$ ]]; then
+        warn "guarded artifact cleanup: local branch '$br' exists but no pre-frozen proven local OID was supplied — refuse (no self-seed at deletion time)"
+        return 1
+      fi
+    fi
+  fi
+
   # Resolve worktree only from porcelain by exact branch — never default path.
   if ! resolve_registered_worktree_for_branch "$br" "$id"; then
     warn "guarded artifact cleanup: worktree resolution refused: $TERM_WT_REASON"
@@ -2695,13 +2825,7 @@ guarded_remove_claim_artifacts() {
       warn "guarded artifact cleanup: cannot read worktree HEAD"
       return 1
     fi
-    # Freeze HEAD OID if caller did not supply one.
-    if [[ -z "$frozen_local_oid" ]]; then
-      if git show-ref --verify --quiet "refs/heads/$br"; then
-        frozen_local_oid=$(git rev-parse --verify --quiet "refs/heads/$br" 2>/dev/null || true)
-      fi
-    fi
-    # Immediate pre-removal revalidation.
+    # Immediate pre-removal revalidation: branch + registration + cleanliness + HEAD.
     if ! revalidate_out=$(git -C "$wt" status --porcelain 2>&1); then
       warn "guarded artifact cleanup: cannot revalidate status for $wt"
       return 1
@@ -2743,13 +2867,10 @@ guarded_remove_claim_artifacts() {
     return 0
   fi
 
-  # Local branch CAS delete against frozen OID.
+  # Local branch CAS delete against pre-frozen proven OID only.
   if git show-ref --verify --quiet "refs/heads/$br"; then
-    if [[ -z "$frozen_local_oid" ]]; then
-      frozen_local_oid=$(git rev-parse --verify --quiet "refs/heads/$br" 2>/dev/null || true)
-    fi
     if [[ -z "$frozen_local_oid" || ! "$frozen_local_oid" =~ ^[0-9a-f]{40}$ ]]; then
-      warn "guarded artifact cleanup: cannot freeze local branch OID for '$br' — refuse"
+      warn "guarded artifact cleanup: no pre-frozen proven local OID for '$br' — refuse (no self-seed)"
       return 1
     fi
     # Re-read tip immediately before CAS; if it moved, refuse.
@@ -2765,17 +2886,14 @@ guarded_remove_claim_artifacts() {
     fi
   fi
 
-  # Remote branch: distinguish absent from unreadable; lease against frozen OID.
+  # Remote branch: distinguish absent from unreadable; lease against pre-frozen OID only.
   if ! query_remote_branch_exact "$br"; then
     warn "guarded artifact cleanup: remote branch query unreadable for '$br': $REMOTE_BRANCH_REASON"
     return 1
   fi
   if [[ "$REMOTE_BRANCH_STATUS" == "present" ]]; then
-    if [[ -z "$frozen_remote_oid" ]]; then
-      frozen_remote_oid="$REMOTE_BRANCH_OID"
-    fi
     if [[ -z "$frozen_remote_oid" || ! "$frozen_remote_oid" =~ ^[0-9a-f]{40}$ ]]; then
-      warn "guarded artifact cleanup: cannot freeze remote OID for '$br' — refuse"
+      warn "guarded artifact cleanup: remote branch '$br' present but no pre-frozen proven remote OID — refuse (no self-seed at deletion time)"
       return 1
     fi
     if [[ "$REMOTE_BRANCH_OID" != "$frozen_remote_oid" ]]; then
@@ -2795,7 +2913,7 @@ guarded_remove_claim_artifacts() {
 # an exact path that must already be registered on the expected branch.
 # No --force, no rm -rf.
 remove_exact_worktree() {
-  local wt="$1" expect_br="${2:-}" got_br status_out got_head revalidate_head
+  local wt="$1" expect_br="${2:-}" got_br status_out got_head revalidate_head revalidate_branch
   wt="${wt%/}"
   if [[ -L "$wt" ]]; then
     warn "worktree path is a symlink — refuse removal: $wt"
@@ -2809,12 +2927,14 @@ remove_exact_worktree() {
     warn "worktree path is not a registered git worktree — refuse removal (no default-path fallback): $wt"
     return 1
   fi
-  if [[ -n "$expect_br" ]]; then
-    got_br=$(worktree_branch "$wt" || true)
-    if [[ "$got_br" != "$expect_br" ]]; then
-      warn "worktree branch mismatch at $wt (want '$expect_br', got '${got_br:-detached/unknown}') — refuse removal"
-      return 1
-    fi
+  if [[ -z "$expect_br" ]]; then
+    warn "worktree exact-path removal requires a proven expected branch — refuse"
+    return 1
+  fi
+  got_br=$(worktree_branch "$wt" || true)
+  if [[ "$got_br" != "$expect_br" ]]; then
+    warn "worktree branch mismatch at $wt (want '$expect_br', got '${got_br:-detached/unknown}') — refuse removal"
+    return 1
   fi
   if ! status_out=$(git -C "$wt" status --porcelain 2>&1); then
     warn "cannot read worktree status for $wt — refuse removal"
@@ -2829,13 +2949,28 @@ remove_exact_worktree() {
     warn "cannot read worktree HEAD for $wt — refuse removal"
     return 1
   fi
-  # Immediate revalidation before non-force remove.
-  if ! revalidate_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || [[ "$revalidate_head" != "$got_head" ]]; then
-    warn "worktree $wt HEAD moved before removal — refuse"
+  # Immediate revalidation before non-force remove: branch + registration +
+  # cleanliness + HEAD. Switching to a different branch at the same commit
+  # must refuse (same commit is not branch identity).
+  if ! status_out=$(git -C "$wt" status --porcelain 2>&1); then
+    warn "cannot revalidate worktree status for $wt before removal — refuse"
+    return 1
+  fi
+  if [[ -n "$status_out" ]]; then
+    warn "worktree $wt became dirty before removal — refuse"
     return 1
   fi
   if ! worktree_registered "$wt"; then
     warn "worktree $wt no longer registered before removal — refuse"
+    return 1
+  fi
+  revalidate_branch=$(worktree_branch "$wt" || true)
+  if [[ "$revalidate_branch" != "$expect_br" ]]; then
+    warn "worktree $wt switched off branch '$expect_br' (now '${revalidate_branch:-detached/unknown}') immediately before removal — refuse"
+    return 1
+  fi
+  if ! revalidate_head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || [[ "$revalidate_head" != "$got_head" ]]; then
+    warn "worktree $wt HEAD moved before removal — refuse"
     return 1
   fi
   info "removing exact registered worktree $wt (non-force)"
@@ -2924,6 +3059,61 @@ PRESERVE_LABEL_EARLY=0
 # - --keep-worktree / --keep-branch never remove (reaper default).
 DEFER_WT_BRANCH=1
 
+# Pre-freeze proven branch OIDs BEFORE ledger mutation (#153 exact-head).
+# Deletion later may only CAS/lease against these OIDs — never self-seed from
+# whatever tip exists at deletion time (already-reused/advanced branches).
+# Format: lines of "claim-id\tlocal-oid-or-empty\tremote-oid-or-empty"
+FROZEN_ARTIFACT_OIDS=""
+if [[ -n "$TARGET_IDS" && "$KEEP_BRANCH" -eq 0 ]]; then
+  while IFS= read -r id; do
+    [[ -n "$id" ]] || continue
+    _fr_br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
+    _fr_local=""
+    _fr_remote=""
+    if git show-ref --verify --quiet "refs/heads/$_fr_br"; then
+      _fr_local=$(git rev-parse --verify --quiet "refs/heads/$_fr_br" 2>/dev/null || true)
+      if [[ -z "$_fr_local" || ! "$_fr_local" =~ ^[0-9a-f]{40}$ ]]; then
+        warn "cannot pre-freeze local OID for '$_fr_br' before ledger mutation — branch deletion will refuse"
+        _fr_local=""
+      fi
+    fi
+    if query_remote_branch_exact "$_fr_br"; then
+      if [[ "$REMOTE_BRANCH_STATUS" == "present" ]]; then
+        if [[ -n "$REMOTE_BRANCH_OID" && "$REMOTE_BRANCH_OID" =~ ^[0-9a-f]{40}$ ]]; then
+          _fr_remote="$REMOTE_BRANCH_OID"
+        else
+          warn "cannot pre-freeze remote OID for '$_fr_br' before ledger mutation — branch deletion will refuse"
+        fi
+      fi
+      # absent remote: empty remote OID is fine (nothing to delete)
+    else
+      warn "remote branch query unreadable for '$_fr_br' before ledger mutation: $REMOTE_BRANCH_REASON — branch deletion will refuse"
+    fi
+    FROZEN_ARTIFACT_OIDS="${FROZEN_ARTIFACT_OIDS}${id}"$'\t'"${_fr_local}"$'\t'"${_fr_remote}"$'\n'
+  done <<EOF
+$TARGET_IDS
+EOF
+  unset _fr_br _fr_local _fr_remote
+fi
+
+lookup_frozen_oids() {
+  # Sets FROZEN_LOCAL_OID / FROZEN_REMOTE_OID for claim id $1 from pre-strip freeze.
+  local want="$1" line
+  FROZEN_LOCAL_OID=""
+  FROZEN_REMOTE_OID=""
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$(cut -f1 <<<"$line")" == "$want" ]]; then
+      FROZEN_LOCAL_OID=$(cut -f2 <<<"$line")
+      FROZEN_REMOTE_OID=$(cut -f3 <<<"$line")
+      return 0
+    fi
+  done <<EOF
+$FROZEN_ARTIFACT_OIDS
+EOF
+  return 0
+}
+
 if [[ -n "$TARGET_IDS" ]]; then
   while IFS= read -r id; do
     [[ -n "$id" ]] || continue
@@ -2991,7 +3181,10 @@ strip_claim_rows() {
   local _sid
   while IFS= read -r _sid; do
     [[ -n "$_sid" ]] || continue
-    count_ledger_reps_at_ref "$_sid" "$strip_ref"
+    if ! count_ledger_reps_at_ref "$_sid" "$strip_ref"; then
+      warn "strip: unreadable ledger representation evidence for '$_sid' at $strip_ref — refuse (unreadable is not absence)"
+      return 1
+    fi
     if [[ "$LEDGER_FILE_REP" -eq 1 && "$LEDGER_LEGACY_REP" -eq 1 ]]; then
       warn "strip: mixed ledger representations for '$_sid' at $strip_ref — refuse push"
       return 1
@@ -3614,11 +3807,12 @@ EOF
     while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
+      lookup_frozen_oids "$id"
       if [[ -n "$WORKTREE_PATH_ARG" ]]; then
         # Claimed prune: exact path only for worktree; then branch CAS/lease.
         info "post-CAS: revalidating exact registered worktree before prune"
         if [[ "$KEEP_WORKTREE" -eq 0 ]]; then
-          if ! remove_exact_worktree "$WORKTREE_PATH_ARG" "${EXPECTED_BRANCH:-}"; then
+          if ! remove_exact_worktree "$WORKTREE_PATH_ARG" "${EXPECTED_BRANCH:-$br}"; then
             warn "final claimed worktree removal failed for $WORKTREE_PATH_ARG — incomplete (claim row already released; not claiming full success)"
             INCOMPLETE=1
             PRESERVE_LABEL=1
@@ -3628,9 +3822,10 @@ EOF
         if [[ "$KEEP_BRANCH" -eq 0 && "$deferred_ok" -eq 1 ]]; then
           # Branch-only CAS/lease (worktree already handled above). Temporarily
           # force keep-worktree so the guarded primitive only touches branches.
+          # OIDs are the pre-strip proven freeze — never empty self-seed.
           _save_kw="$KEEP_WORKTREE"
           KEEP_WORKTREE=1
-          if ! guarded_remove_claim_artifacts "$id" "$br" "" ""; then
+          if ! guarded_remove_claim_artifacts "$id" "$br" "${FROZEN_LOCAL_OID:-}" "${FROZEN_REMOTE_OID:-}"; then
             warn "final branch CAS/lease removal failed for '$br' — incomplete"
             INCOMPLETE=1
             PRESERVE_LABEL=1
@@ -3639,10 +3834,11 @@ EOF
           KEEP_WORKTREE="$_save_kw"
         fi
       else
-        # Ordinary / CAS without exact path: full guarded artifact cleanup.
+        # Ordinary / CAS without exact path: full guarded artifact cleanup with
+        # pre-frozen proven OIDs only.
         if [[ "$KEEP_WORKTREE" -eq 1 && "$KEEP_BRANCH" -eq 1 ]]; then
           :
-        elif ! guarded_remove_claim_artifacts "$id" "$br" "" ""; then
+        elif ! guarded_remove_claim_artifacts "$id" "$br" "${FROZEN_LOCAL_OID:-}" "${FROZEN_REMOTE_OID:-}"; then
           warn "guarded artifact cleanup incomplete for '$id' / '$br' — not claiming full success"
           INCOMPLETE=1
           PRESERVE_LABEL=1
