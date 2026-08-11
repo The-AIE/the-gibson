@@ -347,8 +347,24 @@ if [[ -n "$PR_REPO" ]]; then
       _pr_bad_row="missing/unsafe head branch: ${_pr_row}"
       break
     fi
-    if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+$ ]]; then
+    if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([0-9]+)$ ]]; then
       _pr_bad_row="missing/malformed PR URL: ${_pr_row}"
+      break
+    fi
+    # Conjunctive identity binding (#153 review-nine P1): a plausible PR URL
+    # shape is not enough. The URL's owner/repo must equal PR_REPO and its
+    # /pull/N must equal the row number before the row may be classified or
+    # released. Do not case-fold or rewrite URL components — GitHub identity
+    # comparison is exact string equality on the captured path segments
+    # (same rule pr-claims.sh / scope-overlap.mjs already enforce).
+    _pr_url_repo="${BASH_REMATCH[1]}"
+    _pr_url_num="${BASH_REMATCH[2]}"
+    if [[ "$_pr_url_repo" != "$PR_REPO" ]]; then
+      _pr_bad_row="PR URL repository ('${_pr_url_repo}') does not match inventory repository ('${PR_REPO}'): ${_pr_row}"
+      break
+    fi
+    if [[ "$_pr_url_num" != "$_pr_number" ]]; then
+      _pr_bad_row="PR URL pull-number ('${_pr_url_num}') does not match row PR number ('${_pr_number}'): ${_pr_row}"
       break
     fi
     if [[ -z "$_pr_created" || -z "$_pr_updated" ]]; then
@@ -365,7 +381,7 @@ EOF
   if [[ -n "$_pr_bad_row" ]]; then
     die "live claim inventory for $PR_REPO returned a malformed/truncated row — refuse rather than treat unreadable evidence as an empty plan: ${_pr_bad_row}"
   fi
-  unset _pr_bad_row _pr_row _pr_fields _pr_number _pr_id _pr_scope _pr_head _pr_url _pr_created _pr_updated _pr_cross
+  unset _pr_bad_row _pr_row _pr_fields _pr_number _pr_id _pr_scope _pr_head _pr_url _pr_url_repo _pr_url_num _pr_created _pr_updated _pr_cross
   # shellcheck disable=SC2034
   # 8 fields since #153 review round 5: the last is the PR's repository
   # identity (`true`/`false`). It is read so the timestamp column is not

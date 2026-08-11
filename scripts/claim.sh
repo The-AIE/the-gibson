@@ -802,14 +802,27 @@ rollback_label() {
     return 1
   fi
   if [[ "$inv_ok" -eq 1 ]]; then
+    # Count EVERY live same-issue row as a sibling that still needs the label.
+    # Do NOT skip a row because its claim id or PR number matches this lane in
+    # isolation (#153 review-nine P1):
+    #
+    #   * same claim id on a different PR is a live rival that still holds the
+    #     issue-wide label (another checkout published the id before this lane
+    #     created its own PR; this lane then failed and rolled back with an
+    #     empty PR_NUMBER — the old single-field id skip stripped the rival);
+    #   * same PR number with a different claim id is unexplained evidence and
+    #     must keep the label too.
+    #
+    # When ROLLBACK_INVENTORY_FRESH=1, rollback_pr already refused phase 2
+    # unless the post-close inventory contained neither this lane's claim id
+    # nor its PR number, so this lane's own row cannot be present here. When
+    # PR_CREATE_ATTEMPTED=0, this lane never published — any matching id is a
+    # rival. Either way, single-field exclusions are wrong; any uncertainty
+    # keeps the label.
     while IFS= read -r _row; do
       [[ -n "$_row" ]] || continue
       row_num=$(awk -F'\t' '{print $1}' <<<"$_row")
       row_id=$(awk -F'\t' '{print $2}' <<<"$_row")
-      # This lane's own row may still be in the inventory: the PR was only just
-      # closed and that view is eventually consistent. Exclude it by both keys.
-      [[ "$row_id" == "$CLAIM_ID" ]] && continue
-      [[ -n "$PR_NUMBER" && "$row_num" == "$PR_NUMBER" ]] && continue
       if ! claim_issue_number "$row_id"; then
         unparseable="$row_id"
         break

@@ -909,7 +909,10 @@ lag_fixture() { # dir self-pr rival-row
   : > "$LAG_STATE/labels"
   : > "$LAG_STATE/label.log"
   : > "$LAG_STATE/close.log"
-  rm -f "$LAG_STATE/self" "$LAG_STATE/reads"
+  # Reset every staged-read counter so later fixtures cannot pass/fail from
+  # a prior invocation's lag knobs leaking through the shared state dir.
+  rm -f "$LAG_STATE/self" "$LAG_STATE/reads" "$LAG_STATE/label_reads" \
+    "$LAG_STATE/closed"
   printf '%s\n' "$rival_row" > "$LAG_STATE/rival"
   export LAG_SELF_PR="$self_pr"
   mkdir -p "$ROOT/$dir/bin"
@@ -975,14 +978,21 @@ case "$1 $2" in
       esac
     fi
     # Before this lane publishes, the inventory is genuinely empty — the same
-    # window the real cross-issue race opens. Opt-in post-close rival emission
-    # (LAG_RIVAL_POST_CLOSE=1) keeps a live sibling visible after this lane's
-    # PR is gone, which is what sibling-safe label rollback needs to prove
-    # without depending on concurrent scheduling (#153 label race). Default
-    # remains empty-after-close so multi-run lag fixtures (floor loop) stay
-    # isolated.
+    # window the real cross-issue race opens — UNLESS a fixture opts into a
+    # post-label rival. LAG_RIVAL_AFTER_LABEL=1 publishes the rival as soon as
+    # this lane has written agent-claimed (after pre-create checks, before PR
+    # create): same-id/different-PR identity theft for label rollback
+    # (#153 review-nine P1). LAG_RIVAL_POST_CLOSE=1 keeps a live sibling
+    # visible after this lane's PR is gone for sibling-safe label rollback.
+    # Default remains empty-before-publish / empty-after-close so multi-run
+    # lag fixtures (floor loop) stay isolated. Every knob is read from the
+    # environment of the current claim invocation only.
     if [[ ! -f "$LAG_STATE/self" ]]; then
-      if [[ -n "${LAG_RIVAL_POST_CLOSE:-}" && -f "$LAG_STATE/closed" && -f "$LAG_STATE/rival" ]]; then
+      if [[ -n "${LAG_RIVAL_AFTER_LABEL:-}" && -f "$LAG_STATE/labels" ]] &&
+         grep -qF 'agent-claimed' "$LAG_STATE/labels" 2>/dev/null &&
+         [[ -f "$LAG_STATE/rival" ]]; then
+        cat "$LAG_STATE/rival"
+      elif [[ -n "${LAG_RIVAL_POST_CLOSE:-}" && -f "$LAG_STATE/closed" && -f "$LAG_STATE/rival" ]]; then
         cat "$LAG_STATE/rival"
       fi
       exit 0
@@ -1229,6 +1239,134 @@ contains "pre-present path leaves agent-claimed in place" \
   "$(cat "$ROOT/lagprepresent/state/labels")" "agent-claimed"
 lacks "pre-present path never strips the label" \
   "$(cat "$ROOT/lagprepresent/state/label.log")" "--remove-label"
+
+# ---------------------------------------------------------------------------
+# #153 review-nine P2 — LABEL_PRE_PRESENT=1 AND a live same-issue sibling
+# ---------------------------------------------------------------------------
+# The two fixtures above cover (pre=0 + sibling) and (pre=1 + no sibling).
+# They do NOT force the combination that the old early-return regression
+# silently broke:
+#   if [[ "$LABEL_PRE_PRESENT" -eq 1 ]]; then return 0; fi
+# With that regression restored, all prior tests still passed. This fixture
+# stages the label as pre-present AND keeps a same-issue rival live after
+# close so production must prefer the sibling reason and never strip.
+echo "#153 · deterministic: LABEL_PRE_PRESENT=1 + live same-issue sibling prefers sibling reason"
+LAG_RIVAL_SAME=$'89\tissue-87-winner\tlib/other/**\tfeat/87-winner\thttps://github.com/acme/app/pull/89\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse'
+lag_fixture lagpreandsib 90 "$LAG_RIVAL_SAME"
+out=$(cd "$ROOT/lagpreandsib/canon" && PATH="$ROOT/lagpreandsib/bin:$PATH" \
+  LAG_LABEL_PRESENT_AFTER=2 LAG_RIVAL_AFTER=1 LAG_RIVAL_POST_CLOSE=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "pre-present+sibling refusal still exits nonzero" \
+  || bad "pre-present+sibling refusal exited 0: $out"
+# Prove the pre-present branch was taken: the staged label read returned the
+# label before this lane wrote it (LABEL_PRE_PRESENT=1). The sole pre-present
+# reason must NOT be the diagnostic once a same-issue sibling is live.
+contains "pre-present+sibling path prefers surviving sibling reason" \
+  "$out" "surviving sibling claim(s)"
+contains "pre-present+sibling path names the sibling claim id" \
+  "$out" "issue-87-winner"
+lacks "pre-present+sibling path does not emit the sole pre-present reason" \
+  "$out" "it was already there before this claim"
+contains "pre-present+sibling path keeps agent-claimed" \
+  "$(cat "$ROOT/lagpreandsib/state/labels")" "agent-claimed"
+lacks "pre-present+sibling path never removes the label" \
+  "$(cat "$ROOT/lagpreandsib/state/label.log")" "--remove-label"
+# Fresh inventory after this lane's claim is gone must still show the rival.
+# (post-close emission is the fixture's LAG_RIVAL_POST_CLOSE contract.)
+contains "pre-present+sibling post-close inventory still holds the rival" \
+  "$(cat "$ROOT/lagpreandsib/state/rival")" "issue-87-winner"
+
+# ---------------------------------------------------------------------------
+# #153 review-nine P1 — same claim ID on a different PR must keep agent-claimed
+# ---------------------------------------------------------------------------
+# Sequence: this lane passes pre-create checks and adds agent-claimed; before
+# it creates a PR, a rival publishes the EXACT same claim id on PR #89; this
+# lane then fails before PR creation (worktree path already exists). Rollback
+# must see the live rival and leave the issue-wide label alone. The old
+# independent `row_id == CLAIM_ID` skip treated the rival as "our stale row"
+# and stripped agent-claimed off a live claim.
+echo "#153 · same-id rival (PR_NUMBER empty): fail before PR create keeps agent-claimed"
+LAG_SAME_ID_RIVAL=$'89\tissue-87-lagged\tlib/other/**\tfeat/87-thief\thttps://github.com/acme/app/pull/89\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\tfalse'
+lag_fixture lagsameid 90 "$LAG_SAME_ID_RIVAL"
+# Force fail AFTER label add, BEFORE pr create: claim.sh dies on an existing
+# worktree path. PR_CREATE_ATTEMPTED stays 0 and PR_NUMBER stays empty.
+mkdir -p "$ROOT/lagsameid/wt-87-lagged"
+out=$(cd "$ROOT/lagsameid/canon" && PATH="$ROOT/lagsameid/bin:$PATH" \
+  LAG_RIVAL_AFTER_LABEL=1 \
+  "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "same-id rival fail-before-create exits nonzero" \
+  || bad "same-id rival fail-before-create exited 0: $out"
+contains "same-id rival is named as a surviving sibling" \
+  "$out" "surviving sibling claim(s)"
+contains "same-id rival claim id is reported" \
+  "$out" "issue-87-lagged"
+contains "same-id rival PR number is reported" \
+  "$out" "PR #89"
+contains "same-id rival keeps agent-claimed" \
+  "$(cat "$ROOT/lagsameid/state/labels")" "agent-claimed"
+lacks "same-id rival never loses the issue-wide label" \
+  "$(cat "$ROOT/lagsameid/state/label.log")" "--remove-label"
+# Prove the rival row is still the live inventory evidence (never closed).
+check "same-id rival never called gh pr close" \
+  "$(grep -c . "$ROOT/lagsameid/state/close.log" 2>/dev/null || true)" "0"
+contains "same-id rival row remains staged live" \
+  "$(cat "$ROOT/lagsameid/state/rival")" $'89\tissue-87-lagged'
+
+echo "#153 · same-id rival (PR_NUMBER known, differs): live rival keeps agent-claimed"
+# This lane creates PR #90 with claim id issue-87-lagged; a rival already holds
+# the same id on PR #89 (appears during admission). Rollback must not strip
+# agent-claimed — either by naming the surviving/ambiguous same-id evidence
+# or by failing phase 1 closed while the rival is still live.
+lag_fixture lagsameidpr 90 "$LAG_SAME_ID_RIVAL"
+out=$(cd "$ROOT/lagsameidpr/canon" && PATH="$ROOT/lagsameidpr/bin:$PATH" \
+  LAG_RIVAL_AFTER=1 \
+  GIBSON_CLAIM_ADMIT_STABLE_READS=2 GIBSON_CLAIM_ADMIT_ATTEMPTS=6 \
+  "$CLAIM" 87 lagged 'lib/lag/**' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "same-id rival with known PR_NUMBER exits nonzero" \
+  || bad "same-id rival with known PR_NUMBER exited 0: $out"
+# Label must remain; no --remove-label. Diagnostic may say sibling, ambiguous
+# evidence, or still-live claim — all honest; never a clean strip.
+contains "same-id known-PR path keeps agent-claimed" \
+  "$(cat "$ROOT/lagsameidpr/state/labels")" "agent-claimed"
+lacks "same-id known-PR path never removes the label" \
+  "$(cat "$ROOT/lagsameidpr/state/label.log")" "--remove-label"
+# Honest diagnostic: surviving sibling, ambiguous multi-match, or still-live
+# claim after close. At least one must appear so a silent strip cannot hide.
+if echo "$out" | grep -qF "surviving sibling claim(s)" ||
+   echo "$out" | grep -qF "ambiguous evidence" ||
+   echo "$out" | grep -qF "STILL a live claim" ||
+   echo "$out" | grep -qF "may still be open"; then
+  ok "same-id known-PR path names surviving/ambiguous/live evidence honestly"
+else
+  bad "same-id known-PR path lacked an honest keep-label diagnostic: $out"
+fi
+contains "same-id known-PR path still sees the rival id in evidence" \
+  "$out" "issue-87-lagged"
+
+# Source contract: rollback_label must not skip inventory rows on a single
+# identity field. Dynamic fixtures above catch independent-ID against a live
+# same-id rival; independent-number is inert when PR_NUMBER is empty (the
+# fail-before-create path) and unreachable under the post-close FRESH
+# invariant when PR_NUMBER is set. This static tripwire makes reintroducing
+# EITHER independent exclusion fail the suite (#153 review-nine mutation).
+echo "#153 · source contract: rollback_label has no independent single-field row skips"
+_rl_body=$(awk '
+  /^rollback_label\(\)/ {p=1}
+  p {print}
+  p && /^}$/ {exit}
+' "$CLAIM")
+if printf '%s\n' "$_rl_body" | grep -F '[[ "$row_id" == "$CLAIM_ID" ]] && continue' >/dev/null; then
+  bad "rollback_label reintroduced independent claim-id exclusion"
+else
+  ok "rollback_label has no independent claim-id exclusion"
+fi
+if printf '%s\n' "$_rl_body" | grep -F '"$row_num" == "$PR_NUMBER"' >/dev/null; then
+  bad "rollback_label reintroduced independent PR-number exclusion"
+else
+  ok "rollback_label has no independent PR-number exclusion"
+fi
+unset _rl_body
 
 echo "#153 · the same race WITH --slice lets both disjoint lanes live"
 SLICE_DIR="$ROOT/slicerace"

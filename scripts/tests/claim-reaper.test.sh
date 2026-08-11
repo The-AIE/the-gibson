@@ -1904,6 +1904,129 @@ check    "well-formed inventory is accepted (exit 0)" "$rc" "0"
 contains "well-formed row is protected/recognized" "$out" "issue-7-live"
 lacks    "well-formed row is not malformed refuse" "$out" "malformed/truncated row"
 
+# ===========================================================================
+# #153 review-nine P1 — PR URL must bind to row repository and PR number
+# ===========================================================================
+# A hostile reader can exit 0 with a plausible GitHub PR URL whose owner/repo
+# or /pull/N disagrees with the row. Production must reject that all-or-none,
+# fail closed, and never classify/plan/release it. Shape-only URL validation
+# previously accepted `https://github.com/evil/other/pull/123` as STALE for
+# acme/app PR #999 and, under --apply, released by claim id alone.
+echo "#153 r9 · foreign-repository PR URL is rejected (not STALE, not released)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Stale activity + foreign repo URL with an otherwise matching pull number.
+    # Shape is valid; repository identity is not. The /pull/N matches the row
+    # so a regression that drops only the repository comparison (leaving the
+    # number check) is still caught by this fixture (#153 review-nine).
+    printf '999\tissue-999-hostile\tlib/**\tfeat/999-hostile\thttps://github.com/evil/other/pull/999\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+# Release spy: any invocation proves --apply was willing to release.
+spy_release="$ROOT/malinv/spy-release.sh"
+cat > "$spy_release" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_release"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "foreign-repo PR URL exits nonzero" \
+  || bad "foreign-repo PR URL exited 0: $out"
+contains "foreign-repo URL names repository mismatch" "$out" "PR URL repository"
+contains "foreign-repo URL names the foreign owner/repo" "$out" "evil/other"
+contains "foreign-repo URL names the expected inventory repo" "$out" "acme/app"
+lacks    "foreign-repo URL is not classified STALE" "$out" "STALE PR #"
+lacks    "foreign-repo URL is not nothing to reap" "$out" "nothing to reap"
+lacks    "foreign-repo URL is not protected as live" "$out" "is protected"
+check    "foreign-repo URL never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r9 · same-repo URL whose /pull/N differs from row number is rejected"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Row number 999, URL points at pull/123 in the correct repo.
+    printf '999\tissue-999-mismatch\tlib/**\tfeat/999-mismatch\thttps://github.com/acme/app/pull/123\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "URL pull-number mismatch exits nonzero" \
+  || bad "URL pull-number mismatch exited 0: $out"
+contains "URL number mismatch names pull-number disagreement" "$out" "PR URL pull-number"
+contains "URL number mismatch names the URL number" "$out" "'123'"
+contains "URL number mismatch names the row number" "$out" "'999'"
+lacks    "URL number mismatch is not classified STALE" "$out" "STALE PR #"
+lacks    "URL number mismatch is not nothing to reap" "$out" "nothing to reap"
+check    "URL number mismatch never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r9 · well-formed identity-bound stale row is still reaped under --apply"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '7\tissue-7-stale\tlib/**\tfeat/7-stale\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "identity-bound stale row is accepted (exit 0)" "$rc" "0"
+contains "identity-bound stale row is classified STALE" "$out" "STALE PR #7 claim issue-7-stale"
+[[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]] \
+  && ok "identity-bound stale row invokes release under --apply" \
+  || bad "identity-bound stale row did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+
 # ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"
