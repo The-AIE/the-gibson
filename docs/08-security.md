@@ -56,7 +56,12 @@ and a leak = immediate human gate (rotation requires a human).
 **2 — SAST.** Semgrep is the workhorse (fast, per-PR, custom rules); CodeQL where
 the repo's language/size justifies it. **Custom rules are ratchet output**: when a
 security lesson lands in `memory/LESSONS.md`, the historian's fix is often a Semgrep
-rule — the agent that hit the bug writes the rule that makes it impossible.
+rule — the agent that hit the bug writes the rule that makes it impossible. For the
+human-interpretive half of this layer (what Semgrep doesn't mechanically catch —
+architecture, secrets discipline, MCP-server posture), the security role reads the
+matching rule file(s) in `references/codeguard/rules/` (OWASP-derived, tagged by
+language and security context — `mcp-security` is a direct hit for any target repo
+running its own MCP server) instead of relying on memorized security knowledge.
 
 **3 — Supply chain.** New-dependency PRs get the elevated treatment automatically
 (hot-file rule): provenance check (age, maintenance, install-script flags), and the
@@ -77,7 +82,12 @@ full/active scan runs against **staging only** — never active-scan prod.
 
 **6 — Adversarial review.** The security lens (doc 06) with the fan-out treatment on
 Tier C: reviewers prompted to *construct the exploit path*, then skeptics prompted to
-*refute* it. Cross-vendor. What survives is filed with severity and repro.
+*refute* it. Cross-vendor. What survives is filed with severity and repro. Ground the
+exploit-path construction in `references/codeguard/rules/` — the tag-based mapping in
+`references/codeguard/SKILL.md` picks the relevant rule files from what security
+context the diff touches (authentication, secrets, web, infrastructure, etc.), so the
+adversarial hat has a comprehensive OWASP-derived checklist to reason against rather
+than whatever it happens to remember.
 
 **7 — AI-surface review.** For any feature that feeds model prompts: retrieved and
 user-supplied content is untrusted; instructions in data are never followed; output

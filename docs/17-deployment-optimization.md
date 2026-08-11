@@ -19,7 +19,12 @@ turn findings into optimization work.
 Two modes, one rule:
 
 - **Inspect** — read-only audit producing a scored report. Runs at adoption,
-  monthly as a drift sensor, and after any major launch.
+  monthly as a drift sensor, and after any major launch. `references/vercel-optimize/`
+  is the concrete tool for this mode on Next.js/SvelteKit/Nuxt targets — it pulls real
+  production signals (`vercel metrics`, `vercel usage`) and gates investigation on
+  metric-backed candidates rather than repo-wide grep, so recommendations trace back to
+  an observed number, not a hunch. Requires an authenticated, linked Vercel CLI session
+  on the target project — run on demand, not auto-invoked by any playbook.
 - **Optimize** — findings become issues through the normal queue (doc 04), built
   and gated like any work.
 - **The rule:** every optimization PR carries its measurement — the metric before,

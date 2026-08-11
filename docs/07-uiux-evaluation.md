@@ -25,6 +25,11 @@ scoring.")
 3. **The design language** — authored at plan time with the frontend-design skill
    (typography, palette, spacing, aesthetic intent). Grading taste against a
    *declared* aesthetic turns a subjective judgment into a conformance check.
+   Ground the declaration in `references/ui-ux-pro-max/` — a searchable local
+   database of 192 WCAG-checked color palettes, 74 font pairings, and 98 UX
+   guidelines matched to product type and stack — instead of inventing a palette
+   from vibes. The evaluator reads the same reference when scoring **Design
+   quality**/**Craft** so the grade isn't just taste-vs-taste.
 
 ## The evaluation script
 

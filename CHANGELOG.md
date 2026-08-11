@@ -10,6 +10,25 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 
 ## Unreleased
 
+### Vendored security + UX reference data (D-011)
+
+- **New `references/` directory** — `codeguard/` (OWASP-derived security rules
+  from CoSAI's Project CodeGuard, tag-mapped by language/context), `ui-ux-pro-max/`
+  (192 WCAG-checked color palettes, 74 font pairings, 98 UX guidelines searchable
+  by product type/stack), `vercel-optimize/` (operational Vercel cost/perf audit
+  tool — pulls real production metrics, run on demand). All pinned to a specific
+  upstream commit; see `references/README.md` for the provenance table.
+- **Wired into `playbooks/security.md`** (Layers 2 SAST + 6 adversarial review now
+  ground exploit-path construction in CodeGuard's rules instead of the reviewing
+  model's memorized knowledge) and **`playbooks/ux-evaluator.md`** (design-language
+  authoring and Design-quality/Craft grading now reference concrete palette/
+  typography data instead of taste alone). `docs/07`, `docs/08`, and `docs/17`
+  cross-reference the same material.
+- Same "borrow vocabulary, no runtime dependency" posture as D-008's OWASP
+  Agentic mapping — static files, no live/MCP dependency (except
+  `vercel-optimize`, which is inherently operational and explicitly not
+  auto-invoked).
+
 ### Dogfood prep (#96)
 
 - **`scripts/dogfood-prep.sh`** — fail-closed overnight preflight (repo-slug match, HALT,
