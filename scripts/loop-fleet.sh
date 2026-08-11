@@ -85,8 +85,9 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}" # tests can set to true / no-op
 #   FLEET_NO_WATCHDOG=1  — skip deadline watchdog process
 #   FLEET_SKIP_FETCH=1   — skip network fetch; resolve default branch from local origin/*
 #   FLEET_FETCH_TIMEOUT  — wall-clock seconds for git fetch AND ls-remote (default 30)
-#   FLEET_WATCHDOG_TEST_RECLAIM_PAUSE — if set to a path, reclaim waits (bounded) while
-#     that path exists between observing stale content and the compare-and-unlink.
+#   FLEET_WATCHDOG_TEST_RECLAIM_PAUSE — if set to a path, reclaim writes
+#     "<path>.entered" with "pause entered" then waits (bounded) while <path>
+#     exists between observing stale content and the final re-read/unlink.
 #     Sensors only: deterministic TOCTOU interleaving. Unset in production.
 #   FLEET_WATCHDOG_TEST_FAIL_PUBLISH=1 — after a live child exists, force pidfile
 #     publish to fail so sensors prove reservation+child cleanup. Unset in production.
@@ -936,9 +937,16 @@ pid_is_live_non_zombie() {
   return 0
 }
 
-# Compare-and-unlink a stale exclusive reservation. Deletes $pf only when the
-# on-disk value still equals the exact observed stale content and is still
-# stale immediately before unlink. Never removes a fresh competing reservation.
+# Best-effort compare-and-unlink for a stale exclusive reservation.
+#
+# Not a fully atomic portable lock. Deletes $pf only when the on-disk value
+# still equals the exact observed stale content and is still stale on re-read.
+# Between the final re-read and rm -f there remains a narrowed TOCTOU window:
+# a competitor that installs a *different* value is preserved when re-read
+# mismatches; a same-value overwrite in that final window can still be
+# unlinked. Prefer noclobber create for exclusive arming; this reclaim only
+# cleans dead-reserver / empty artifacts.
+#
 # Returns 0 if file is gone or was reclaimed; 1 if still present / not reclaimable.
 watchdog_reclaim_stale_reservation() {
   local pf="$1" observed recheck reserver i pause="${FLEET_WATCHDOG_TEST_RECLAIM_PAUSE:-}"
@@ -954,8 +962,13 @@ watchdog_reclaim_stale_reservation() {
       return 1
     fi
   fi
-  # Sensors only: deterministic interleaving between observe and unlink.
+  # Sensors only: announce entry into the interleaving window, then wait while
+  # the pause path exists so the sensor can install a live competitor.
   if [[ -n "$pause" ]]; then
+    # Explicit marker the sensor waits for before installing a competitor.
+    # Do not treat mere existence of $pause as "reclaim entered" — that races
+    # before this function is called.
+    printf 'pause entered\n' > "${pause}.entered" 2>/dev/null || true
     i=0
     while [[ -e "$pause" && $i -lt 100 ]]; do
       sleep 0.05 2>/dev/null || sleep 1
@@ -973,7 +986,8 @@ watchdog_reclaim_stale_reservation() {
   elif [[ -n "$recheck" ]]; then
     return 1
   fi
-  # Final same-value confirm immediately before deletion (narrow TOCTOU window).
+  # Final same-value confirm immediately before deletion (narrowed TOCTOU window;
+  # not fully atomic — see function header).
   recheck=$(tr -d '[:space:]' < "$pf" 2>/dev/null || true)
   [[ "$recheck" == "$observed" ]] || return 1
   if [[ "$recheck" == reserving:* ]]; then
@@ -1236,25 +1250,63 @@ label_is_gated() {
   return 1
 }
 
-# Parse labels from gh issue view --json labels output without requiring jq.
-# Accepts either compact JSON or pretty-printed. Falls back to jq when present.
-json_label_names() {
-  local json="$1"
-  if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$json" | jq -r '(.labels // []) | .[] | .name' 2>/dev/null || true
-    return 0
-  fi
-  # minimal: pull "name":"..." occurrences inside labels array — best-effort
-  printf '%s' "$json" | tr ',' '\n' | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+# Bound for gh stderr diagnostics attached to fail-closed messages.
+# Benign notices on stderr must never enter TSV/body/metadata authority.
+GH_ERR_BOUND=2048
+# Last gh_capture results (bash 3.2: no nameref; globals avoid eval of payload).
+GH_CAPTURE_OUT=""
+GH_CAPTURE_ERR=""
+
+# Run a command with stdout and stderr captured separately.
+# Sets GH_CAPTURE_OUT (full stdout) and GH_CAPTURE_ERR (stderr bounded to
+# GH_ERR_BOUND). Returns the command exit status. Temp files are always removed.
+# Usage: gh_capture cmd arg...
+gh_capture() {
+  local _outf _errf _rc=1
+  GH_CAPTURE_OUT=""
+  GH_CAPTURE_ERR=""
+  _outf=$(mktemp "${TMPDIR:-/tmp}/fleet-gh-out.XXXXXX") || return 1
+  _errf=$(mktemp "${TMPDIR:-/tmp}/fleet-gh-err.XXXXXX") || { rm -f "$_outf"; return 1; }
+  # Disable errexit only for the child invocation. Do NOT re-enable set -e
+  # before return: set -e is shell-global, and a non-zero return under set -e
+  # would abort the caller before it can assign rc=$? and die with diagnostics
+  # (silent fail-closed with only identity lines — #152). Callers own errexit
+  # via their set +e / rc=$? / set -e frames.
+  set +e
+  "$@" >"$_outf" 2>"$_errf"
+  _rc=$?
+  GH_CAPTURE_OUT=$(cat "$_outf" 2>/dev/null || true)
+  # Bound stderr diagnostics — never feed into parsers.
+  GH_CAPTURE_ERR=$(head -c "$GH_ERR_BOUND" "$_errf" 2>/dev/null || true)
+  rm -f "$_outf" "$_errf"
+  return "$_rc"
 }
 
-json_field() {
-  local json="$1" field="$2"
-  if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$json" | jq -r --arg f "$field" '.[$f] // empty' 2>/dev/null || true
-    return 0
+# Fetch issue state + label names via gh built-in --template (no external jq/
+# python/perl). Prints: first line = state, subsequent lines = one label name
+# each. Fail closed on non-zero gh; benign stderr cannot contaminate authority.
+fetch_issue_state_labels() {
+  local issue="$1" lane="$2"
+  local out err rc=0
+  set +e
+  gh_capture \
+    "$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" \
+      --json state,labels \
+      --template '{{.state}}{{"\n"}}{{range .labels}}{{.name}}{{"\n"}}{{end}}'
+  rc=$?
+  out=$GH_CAPTURE_OUT
+  err=$GH_CAPTURE_ERR
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    die "lane $lane: issue #$issue missing or unreadable via gh (repo $EXPECTED_SLUG): ${err:-exit $rc}"
   fi
-  printf '%s' "$json" | sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" | head -1
+  # Authority is stdout only — never merge stderr.
+  printf '%s' "$out"
+  # Ensure a trailing newline so line-oriented readers see the last label.
+  case "$out" in
+    *$'\n') ;;
+    *) printf '\n' ;;
+  esac
 }
 
 # Read a column-zero loop-state field with the same grammar as
@@ -1473,15 +1525,23 @@ _finalize_pr_meta_lines() {
 # Uses gh's built-in --json + --template formatter (no external jq/python/perl).
 # Fail closed on: gh error, malformed formatter output, missing/invalid fields,
 # duplicate/conflicting records, truncation risk. Empty output is zero-pair success.
+# Stdout is TSV authority; stderr is diagnostics only (never merged).
 list_open_pr_pairs() {
-  local out
+  local out err rc=0
 
   # gh --template is built into the CLI (Go templates); it does not require the
   # external jq binary. Only number + headRefName are fetched — never body.
-  if ! out=$("$GH_BIN" pr list --repo "$EXPECTED_SLUG" --state open \
+  set +e
+  gh_capture \
+    "$GH_BIN" pr list --repo "$EXPECTED_SLUG" --state open \
       --json number,headRefName --limit "$OPEN_PR_LIST_LIMIT" \
-      --template '{{range .}}{{printf "%v\t%s\n" .number .headRefName}}{{end}}' 2>&1); then
-    die "cannot list open PRs for claims/PR conflict check: $out"
+      --template '{{range .}}{{printf "%v\t%s\n" .number .headRefName}}{{end}}'
+  rc=$?
+  out=$GH_CAPTURE_OUT
+  err=$GH_CAPTURE_ERR
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    die "cannot list open PRs for claims/PR conflict check: ${err:-exit $rc}"
   fi
 
   _finalize_pr_meta_lines "$out"
@@ -1491,9 +1551,11 @@ list_open_pr_pairs() {
 # number/head/OPEN state before trusting that body. Closes list/view/body races
 # and metadata mismatches.
 # Prints the raw PR body on success.
+# Body authority is gh --jq stdout; re-verify uses --template stdout; stderr is
+# diagnostics only on both calls (never merged into body/TSV).
 fetch_bound_pr_body() {
   local pr_num="$1" expect_head="$2" lane="$3" issue="$4"
-  local meta body got_num got_head got_state rest
+  local meta body got_num got_head got_state rest err rc=0
 
   [[ "$pr_num" =~ ^[1-9][0-9]*$ ]] \
     || die "lane $lane: bound PR number '$pr_num' is not a positive integer"
@@ -1502,17 +1564,31 @@ fetch_bound_pr_body() {
 
   # Fetch only the state-bound candidate body. It remains untrusted until the
   # metadata call immediately below confirms that the same PR is still open on
-  # the expected head.
-  if ! body=$("$GH_BIN" pr view "$pr_num" --repo "$EXPECTED_SLUG" \
-      --json body --jq '.body // ""' 2>&1); then
-    die "lane $lane: cannot fetch body of state-bound PR #$pr_num for issue #$issue: $body"
+  # the expected head. gh --jq is built into the CLI (not external jq).
+  set +e
+  gh_capture \
+    "$GH_BIN" pr view "$pr_num" --repo "$EXPECTED_SLUG" \
+      --json body --jq '.body // ""'
+  rc=$?
+  body=$GH_CAPTURE_OUT
+  err=$GH_CAPTURE_ERR
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    die "lane $lane: cannot fetch body of state-bound PR #$pr_num for issue #$issue: ${err:-exit $rc}"
   fi
 
   # Immediate metadata re-verify via gh built-in formatter (no external jq).
-  if ! meta=$("$GH_BIN" pr view "$pr_num" --repo "$EXPECTED_SLUG" \
+  set +e
+  gh_capture \
+    "$GH_BIN" pr view "$pr_num" --repo "$EXPECTED_SLUG" \
       --json number,headRefName,state \
-      --template '{{.number}}{{"\t"}}{{.headRefName}}{{"\t"}}{{.state}}{{"\n"}}' 2>&1); then
-    die "lane $lane: cannot view state-bound PR #$pr_num for issue #$issue (re-verify failed): $meta"
+      --template '{{.number}}{{"\t"}}{{.headRefName}}{{"\t"}}{{.state}}{{"\n"}}'
+  rc=$?
+  meta=$GH_CAPTURE_OUT
+  err=$GH_CAPTURE_ERR
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    die "lane $lane: cannot view state-bound PR #$pr_num for issue #$issue (re-verify failed): ${err:-exit $rc}"
   fi
   meta=${meta%$'\n'}
   meta=${meta%$'\r'}
@@ -1553,15 +1629,30 @@ fetch_bound_pr_body() {
 #            OPEN fails closed (no skip/park policy is recorded yet)
 check_issue_preflight() {
   local issue="$1" lane="$2" mode="${3:-strict}"
-  local out state labels lab
+  local out state labels lab first=1
 
-  if ! out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>&1); then
-    die "lane $lane: issue #$issue missing or unreadable via gh (repo $EXPECTED_SLUG): $out"
-  fi
+  # gh built-in --template: first line state, then one label name per line.
+  # No hand-parsing of JSON; no external jq/python/perl.
+  out=$(fetch_issue_state_labels "$issue" "$lane")
+  state=""
+  labels=""
+  while IFS= read -r lab || [[ -n "$lab" ]]; do
+    if [[ $first -eq 1 ]]; then
+      state=$lab
+      first=0
+      continue
+    fi
+    [[ -n "$lab" ]] || continue
+    if [[ -n "$labels" ]]; then
+      labels="${labels}"$'\n'"${lab}"
+    else
+      labels="$lab"
+    fi
+  done <<<"$out"
 
-  state=$(json_field "$out" "state")
   # normalize
-  state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]')
+  state=$(printf '%s' "$state" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
+  [[ -n "$state" ]] || die "lane $lane: issue #$issue returned empty state via gh template"
 
   if [[ "$mode" == "prior" ]]; then
     if [[ "$state" == "CLOSED" ]]; then
@@ -1574,7 +1665,6 @@ check_issue_preflight() {
 
   [[ "$state" == "OPEN" ]] || die "lane $lane: issue #$issue is not open (state=$state)"
 
-  labels=$(json_label_names "$out")
   while IFS= read -r lab || [[ -n "$lab" ]]; do
     [[ -n "$lab" ]] || continue
     if label_is_gated "$lab"; then
@@ -1610,19 +1700,27 @@ check_pr_conflicts() {
 # state-bound PR (or claim) fails closed.
 check_own_resumption() {
   local issue="$1" lane="$2"
-  local out labels lab claimed=0
+  local out labels lab claimed=0 first=1
   local bound_pr bound_handoff pairs num head body_raw
   local matched=0 issue_pr_seen=0
   local match_num="" match_head=""
 
-  if ! out=$("$GH_BIN" issue view "$issue" --repo "$EXPECTED_SLUG" --json state,labels 2>&1); then
-    die "lane $lane: issue #$issue missing or unreadable via gh (repo $EXPECTED_SLUG): $out"
-  fi
-  labels=$(json_label_names "$out")
+  # Labels via gh --template (skip state line); no JSON hand-parse.
+  out=$(fetch_issue_state_labels "$issue" "$lane")
+  labels=""
   while IFS= read -r lab || [[ -n "$lab" ]]; do
+    if [[ $first -eq 1 ]]; then
+      first=0
+      continue
+    fi
     [[ -n "$lab" ]] || continue
     [[ "$lab" == "agent-claimed" ]] && claimed=1
-  done <<<"$labels"
+    if [[ -n "$labels" ]]; then
+      labels="${labels}"$'\n'"${lab}"
+    else
+      labels="$lab"
+    fi
+  done <<<"$out"
 
   bound_pr=$(lane_state_pr "$lane" 2>/dev/null || true)
   bound_handoff=$(lane_state_handoff "$lane" 2>/dev/null || true)
@@ -2734,16 +2832,24 @@ EOF
 
 # Run a command as its own process group leader, with a wall-clock bound.
 # Works on stock macOS (no GNU timeout). Captures only the launched PID/group;
-# on expiry TERM then KILL that group only — never pkill/killall/pattern kill.
-# Returns 0 on success, 124 on wall-clock timeout, else the child's exit status.
+# on expiry TERM then full 1s grace then KILL that group only — never
+# pkill/killall/pattern kill. Returns 0 on success, 124 on wall-clock timeout
+# (including large custom limit values), else the child's exit status.
 #
-# Residual process-group cleanup runs while the original leader identity is still
-# retained (live or zombie, not yet reaped). A post-wait group kill is unsafe:
-# after wait reaps the leader, the numeric PID/PGID can be recycled.
+# Lifecycle (exact-PGID only; no post-reap PGID signal):
+#   1. Launch leader with setpgrp; record pid and pgid while live.
+#   2. Watcher enforces wall clock: on expiry write status, TERM group, sleep 1
+#      (full grace), KILL group.
+#   3. Parent polls until timeout flag or leader exit.
+#   4. Stop/reap the watcher BEFORE wait-reaping the leader so the watcher
+#      cannot signal a recycled PGID after leader reap.
+#   5. On non-timeout leader exit: residual exact-PGID KILL for orphans, then
+#      wait the leader. Never signal any PGID after wait.
 run_with_wall_timeout() {
   local limit="$1"
   shift
-  local pid watcher rc=0 status_file timed_out=0 st poll
+  local pid watcher rc=0 status_file timed_out=0 st poll now pgid
+  local elapsed watcher_wait_bound i settle pgrp_ok=0 cand pgrp_ready
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "fleet: bad wall timeout: $limit" >&2; return 1; }
 
   # Fail closed BEFORE launch if we cannot establish a process group.
@@ -2754,29 +2860,94 @@ run_with_wall_timeout() {
   fi
 
   status_file=$(mktemp "${TMPDIR:-/tmp}/fleet-wall.XXXXXX") || return 1
+  # Marker written by the child *after* setpgrp and *before* exec so a
+  # fast-exiting leader still proves own-group leadership (pgid == pid).
+  # Never signal a PGID unless this marker confirms setpgrp ran for $pid.
+  pgrp_ready=$(mktemp "${TMPDIR:-/tmp}/fleet-pgrp.XXXXXX") || {
+    rm -f "$status_file"
+    return 1
+  }
 
   # Become process-group leader so we can terminate only this tree.
+  # Ready-file protocol: child writes its pid after setpgrp, then execs.
   if command -v perl >/dev/null 2>&1; then
-    perl -e 'setpgrp(0,0); exec { $ARGV[0] } @ARGV or exit 127' "$@" &
+    perl -e '
+      setpgrp(0,0);
+      my $rf = $ARGV[0];
+      if (open my $fh, ">", $rf) { print $fh "$$\n"; close $fh; }
+      exec { $ARGV[1] } @ARGV[1..$#ARGV] or exit 127;
+    ' "$pgrp_ready" "$@" &
     pid=$!
   elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
+    python3 -c '
+import os, sys
+os.setpgrp()
+rf = sys.argv[1]
+try:
+    with open(rf, "w") as f:
+        f.write("%d\n" % os.getpid())
+except Exception:
+    pass
+os.execvp(sys.argv[2], sys.argv[2:])
+' "$pgrp_ready" "$@" &
     pid=$!
   else
     # Unreachable: guarded above. Keep as hard fail-closed, never bare child.
     echo "fleet: wall-timeout process-group mechanism vanished before launch" >&2
-    rm -f "$status_file"
+    rm -f "$status_file" "$pgrp_ready"
     return 1
   fi
 
-  # Watcher: wall-clock bound + residual group sweep while leader PID is held.
-  # On natural leader exit the leader becomes a zombie until we wait; the
-  # watcher (and parent pre-wait path) may still signal the exact PGID safely.
+  # Wait for setpgrp proof (ready file contains exact leader pid). Reading
+  # ps pgid too early returns the *parent* shell's group — never signal that.
+  pgid=$pid
+  pgrp_ok=0
+  settle=0
+  while [[ $settle -lt 100 ]]; do
+    if [[ -s "$pgrp_ready" ]]; then
+      cand=$(tr -d '[:space:]' < "$pgrp_ready" 2>/dev/null || true)
+      if [[ "$cand" == "$pid" ]]; then
+        pgid=$pid
+        pgrp_ok=1
+        break
+      fi
+    fi
+    # Also accept ps-visible own-group while still live (ready file races).
+    if kill -0 "$pid" 2>/dev/null; then
+      cand=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d '[:space:]' || true)
+      if [[ "$cand" == "$pid" ]]; then
+        pgid=$pid
+        pgrp_ok=1
+        break
+      fi
+    elif [[ -s "$pgrp_ready" ]]; then
+      cand=$(tr -d '[:space:]' < "$pgrp_ready" 2>/dev/null || true)
+      if [[ "$cand" == "$pid" ]]; then
+        pgid=$pid
+        pgrp_ok=1
+        break
+      fi
+      break
+    elif [[ $settle -gt 5 ]]; then
+      # Process gone and no ready marker — cannot safely group-signal.
+      break
+    fi
+    sleep 0.01 2>/dev/null || true
+    settle=$((settle + 1))
+  done
+  rm -f "$pgrp_ready"
+
+  # Watcher: wall-clock bound. On expiry: TERM → full 1s grace → KILL, exact
+  # PGID only when pgrp_ok. On natural leader exit the watcher exits without
+  # signaling so the parent residual path owns orphan cleanup (and ordering).
   (
     elapsed=0
     while [[ $elapsed -lt $limit ]]; do
+      if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+        exit 0
+      fi
       if ! kill -0 "$pid" 2>/dev/null; then
-        # Leader fully gone (already reaped elsewhere) — nothing safe to signal.
+        # Leader gone from kill-0 view — parent residual owns cleanup.
         exit 0
       fi
       st=$(ps -p "$pid" -o state= 2>/dev/null || true)
@@ -2785,10 +2956,8 @@ run_with_wall_timeout() {
       fi
       st=$(printf '%s' "$st" | tr -d '[:space:]')
       case "$st" in
-        Z*)
-          # Leader zombie: PID still reserved. Sweep exact process group for
-          # residual descendants, then exit so parent can reap.
-          kill -KILL -"$pid" 2>/dev/null || true
+        Z*|'')
+          # Leader zombie/gone: parent residual owns group sweep.
           exit 0
           ;;
       esac
@@ -2796,22 +2965,32 @@ run_with_wall_timeout() {
       elapsed=$((elapsed + 1))
     done
     # Still alive after wall clock — terminate only this process group.
+    # Full TERM grace before KILL (do not short-circuit).
     if kill -0 "$pid" 2>/dev/null; then
       printf 'timeout\n' > "$status_file"
-      kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      if [[ $pgrp_ok -eq 1 ]]; then
+        kill -TERM -"$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL -"$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      else
+        # No confirmed own-group: exact-PID only (never parent PGID).
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
     fi
   ) &
   watcher=$!
 
   # Poll until leader is reaped-ready (zombie/gone) or timeout is flagged.
-  # Do NOT wait/reap yet — residual group cleanup must run while the original
-  # leader PID cannot be recycled by the kernel. Bound by wall clock + grace
-  # so parent sequencing never exceeds the child's budget indefinitely.
+  # Bound by wall clock + grace so parent sequencing never hangs forever.
+  # Use a tick counter as well as date so a stuck/failed date clock cannot
+  # leave this loop unbounded.
   poll=$(date +%s 2>/dev/null || echo 0)
+  settle=0
   while true; do
     if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+      timed_out=1
       break
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -2827,25 +3006,81 @@ run_with_wall_timeout() {
     esac
     now=$(date +%s 2>/dev/null || echo 0)
     if [[ "$poll" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ && "$now" -gt 0 && "$poll" -gt 0 ]]; then
+      # limit + TERM grace (1) + settle slack (2)
       if [[ $((now - poll)) -ge $((limit + 3)) ]]; then
+        # Wall clock elapsed from parent view — treat as timeout if status
+        # not yet written (watcher race); still preserve grace via watcher wait.
+        if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+          timed_out=1
+        elif kill -0 "$pid" 2>/dev/null; then
+          # Force timeout flag so we return 124; watcher may still be in grace.
+          printf 'timeout\n' > "$status_file" 2>/dev/null || true
+          timed_out=1
+        fi
         break
       fi
+    fi
+    # Tick bound: ~10 polls/sec → (limit+3)*10 + slack, independent of date(1).
+    settle=$((settle + 1))
+    if [[ $settle -ge $(((limit + 3) * 10 + 20)) ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        printf 'timeout\n' > "$status_file" 2>/dev/null || true
+        timed_out=1
+      fi
+      break
     fi
     sleep 0.1 2>/dev/null || sleep 1
   done
 
-  # Exact-PGID residual cleanup while leader identity is still retained when
-  # possible (zombie or still live after timeout kills). Never after wait.
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -KILL -"$pid" 2>/dev/null || true
+  if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+    timed_out=1
   fi
 
-  wait "$pid" 2>/dev/null
-  rc=$?
+  # Stop/reap the watcher BEFORE wait-reaping the leader so no post-reap PGID
+  # signal is possible from the watcher. On timeout, let the watcher finish
+  # its full TERM grace + KILL (do not kill it mid-grace). Bound is grace+settle
+  # only — never scales with a large configured wall-clock limit.
+  if [[ $timed_out -eq 1 ]]; then
+    watcher_wait_bound=30   # ~3s at 0.1s polls (grace is 1s + settle)
+    i=0
+    while kill -0 "$watcher" 2>/dev/null && [[ $i -lt $watcher_wait_bound ]]; do
+      sleep 0.1 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+    # If still alive after bound, stop it without pattern kill.
+    if kill -0 "$watcher" 2>/dev/null; then
+      kill -TERM "$watcher" 2>/dev/null || true
+      sleep 0.05 2>/dev/null || true
+      kill -KILL "$watcher" 2>/dev/null || true
+    fi
+    wait "$watcher" 2>/dev/null || true
+    # Ensure group/leader is dead after grace path (pre-wait). Exact-PGID only
+    # when setpgrp was confirmed — never signal the parent shell's group.
+    if [[ $pgrp_ok -eq 1 ]]; then
+      kill -KILL -"$pgid" 2>/dev/null || true
+    else
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  else
+    # Natural exit: stop watcher first so it cannot later timeout-signal.
+    kill -TERM "$watcher" 2>/dev/null || true
+    sleep 0.05 2>/dev/null || true
+    kill -KILL "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    # Residual exact-PGID cleanup for orphaned descendants BEFORE wait.
+    # Only when we confirmed pgid==pid (own group). kill -0 on the leader may
+    # already fail on macOS once the leader has exited; the recorded pgid still
+    # addresses residual members. Never a pattern kill; never parent PGID.
+    if [[ $pgrp_ok -eq 1 ]]; then
+      kill -KILL -"$pgid" 2>/dev/null || true
+    fi
+  fi
 
-  kill "$watcher" 2>/dev/null || true
-  wait "$watcher" 2>/dev/null || true
+  # Capture wait status without tripping set -e (killed children are nonzero).
+  rc=0
+  wait "$pid" 2>/dev/null || rc=$?
 
+  # Re-check timeout flag after watcher completion (race-safe).
   if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
     timed_out=1
   fi

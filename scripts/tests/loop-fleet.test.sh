@@ -177,59 +177,124 @@ _stub_pr_field_string() {
   _stub_json_unescape "$raw"
 }
 
-# Parse: gh issue view N --repo SLUG --json state,labels
+# Parse: gh issue view N --repo SLUG --json state,labels [--template …]
 #        gh pr list --repo SLUG --state open --json number,headRefName --limit N --template …
 #        gh pr view N --repo SLUG --json number,headRefName,state --template …
 #        gh pr view N --repo SLUG --json body --jq …
+#
+# Production uses gh built-in --template for issue state/labels (no external jq).
+# Optional GH_STUB_ISSUE_STDERR / GH_STUB_PR_LIST_STDERR / GH_STUB_PR_VIEW_STDERR
+# write benign notices to stderr only — must never contaminate stdout authority.
 if [[ "$1" == "issue" && "$2" == "view" ]]; then
   issue="$3"
+  # Detect --template (production path) vs raw JSON (legacy fixtures).
+  want_template=0
+  local_args=("$@")
+  i=0
+  while [[ $i -lt ${#local_args[@]} ]]; do
+    if [[ "${local_args[$i]}" == "--template" ]]; then
+      want_template=1
+      break
+    fi
+    i=$((i + 1))
+  done
+  # Optional benign stderr notice (contamination sensor).
+  if [[ -n "${GH_STUB_ISSUE_STDERR:-}" ]]; then
+    printf '%s\n' "$GH_STUB_ISSUE_STDERR" >&2
+  fi
+  state=""
+  labels_tsv=""   # newline-separated label names
   case "$mode" in
     missing)
       echo "could not find issue #$issue" >&2
       exit 1
       ;;
     closed)
-      echo '{"state":"CLOSED","labels":[]}'
-      exit 0
+      state="CLOSED"
+      labels_tsv=""
       ;;
     gated-needs-mark)
-      echo '{"state":"OPEN","labels":[{"name":"needs-mark"},{"name":"enhancement"}]}'
-      exit 0
+      state="OPEN"
+      labels_tsv=$'needs-mark\nenhancement'
       ;;
     gated-tier-c)
-      echo '{"state":"OPEN","labels":[{"name":"tier-c"}]}'
-      exit 0
+      state="OPEN"
+      labels_tsv="tier-c"
       ;;
     gated-decision)
-      echo '{"state":"OPEN","labels":[{"name":"decision"}]}'
-      exit 0
+      state="OPEN"
+      labels_tsv="decision"
       ;;
     gated-blocked)
-      echo '{"state":"OPEN","labels":[{"name":"blocked"}]}'
-      exit 0
+      state="OPEN"
+      labels_tsv="blocked"
       ;;
     gated-halt)
-      echo '{"state":"OPEN","labels":[{"name":"gibson-halt"}]}'
-      exit 0
+      state="OPEN"
+      labels_tsv="gibson-halt"
       ;;
     claimed)
-      echo '{"state":"OPEN","labels":[{"name":"agent-claimed"},{"name":"tier-a"}]}'
-      exit 0
+      state="OPEN"
+      labels_tsv=$'agent-claimed\ntier-a'
       ;;
     ok|pr-conflict)
       # per-issue override file: $GH_STUB_ISSUE_DIR/<n>.json
-      if [[ -n "${GH_STUB_ISSUE_DIR:-}" && -f "${GH_STUB_ISSUE_DIR}/${issue}.json" ]]; then
-        cat "${GH_STUB_ISSUE_DIR}/${issue}.json"
+      # Supports either raw JSON fixtures or pre-rendered template shape
+      # (first line state, then one label name per line) when file ends in .tmpl.
+      if [[ -n "${GH_STUB_ISSUE_DIR:-}" && -f "${GH_STUB_ISSUE_DIR}/${issue}.tmpl" ]]; then
+        if [[ $want_template -eq 1 ]]; then
+          cat "${GH_STUB_ISSUE_DIR}/${issue}.tmpl"
+        else
+          # Legacy raw-JSON consumers: convert template shape → compact JSON.
+          _st=$(head -1 "${GH_STUB_ISSUE_DIR}/${issue}.tmpl")
+          _labs=$(tail -n +2 "${GH_STUB_ISSUE_DIR}/${issue}.tmpl" | awk 'NF{printf "%s{\"name\":\"%s\"}", (n++?",":""), $0}')
+          printf '{"state":"%s","labels":[%s]}\n' "$_st" "$_labs"
+        fi
         exit 0
       fi
-      echo '{"state":"OPEN","labels":[{"name":"tier-a"},{"name":"enhancement"}]}'
-      exit 0
+      if [[ -n "${GH_STUB_ISSUE_DIR:-}" && -f "${GH_STUB_ISSUE_DIR}/${issue}.json" ]]; then
+        if [[ $want_template -eq 1 ]]; then
+          # Convert compact fixture JSON → template shape (state\nlabels…).
+          _json=$(cat "${GH_STUB_ISSUE_DIR}/${issue}.json")
+          _st=$(printf '%s' "$_json" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+          printf '%s\n' "$_st"
+          # Extract "name":"..." occurrences (fixture labels only; order preserved).
+          printf '%s' "$_json" | tr ',' '\n' | sed -n 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+        else
+          cat "${GH_STUB_ISSUE_DIR}/${issue}.json"
+        fi
+        exit 0
+      fi
+      state="OPEN"
+      labels_tsv=$'tier-a\nenhancement'
       ;;
     *)
       echo "gh stub: unknown mode $mode" >&2
       exit 2
       ;;
   esac
+  if [[ $want_template -eq 1 ]]; then
+    # Match gh --template '{{.state}}{{"\n"}}{{range .labels}}{{.name}}{{"\n"}}{{end}}'
+    printf '%s\n' "$state"
+    if [[ -n "$labels_tsv" ]]; then
+      printf '%s\n' "$labels_tsv"
+    fi
+    exit 0
+  fi
+  # Raw JSON shape for any residual non-template callers.
+  _labs_json=""
+  if [[ -n "$labels_tsv" ]]; then
+    while IFS= read -r _ln || [[ -n "$_ln" ]]; do
+      [[ -n "$_ln" ]] || continue
+      if [[ -n "$_labs_json" ]]; then
+        _labs_json="${_labs_json},{\"name\":\"${_ln}\"}"
+      else
+        _labs_json="{\"name\":\"${_ln}\"}"
+      fi
+    done <<<"$labels_tsv"
+  fi
+  printf '{"state":"%s","labels":[%s]}\n' "$state" "$_labs_json"
+  exit 0
 fi
 
 if [[ "$1" == "pr" && "$2" == "list" ]]; then
@@ -237,6 +302,10 @@ if [[ "$1" == "pr" && "$2" == "list" ]]; then
   if [[ "${GH_STUB_PR_LIST_FAIL:-0}" == "1" ]]; then
     echo "gh stub: simulated pr list failure" >&2
     exit 1
+  fi
+  # Optional benign stderr notice (must not contaminate TSV authority).
+  if [[ -n "${GH_STUB_PR_LIST_STDERR:-}" ]]; then
+    printf '%s\n' "$GH_STUB_PR_LIST_STDERR" >&2
   fi
   # Raw override of formatter stdout (malformed metadata / garbage).
   if [[ -n "${GH_STUB_PR_LIST_RAW+x}" ]]; then
@@ -321,6 +390,9 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
       echo "gh stub: simulated pr view failure" >&2
       exit 1
     fi
+    if [[ -n "${GH_STUB_PR_VIEW_STDERR:-}" ]]; then
+      printf '%s\n' "$GH_STUB_PR_VIEW_STDERR" >&2
+    fi
     # Override: "number<TAB>head<TAB>state" for race sensors.
     if [[ -n "${GH_STUB_PR_VIEW_META:-}" ]]; then
       printf '%s\n' "$GH_STUB_PR_VIEW_META"
@@ -357,6 +429,9 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
     if [[ "${GH_STUB_PR_VIEW_BODY_FAIL:-0}" == "1" ]]; then
       echo "gh stub: simulated pr body fetch failure" >&2
       exit 1
+    fi
+    if [[ -n "${GH_STUB_PR_VIEW_STDERR:-}" ]]; then
+      printf '%s\n' "$GH_STUB_PR_VIEW_STDERR" >&2
     fi
     if [[ -n "${GH_STUB_PR_VIEW_BODY+x}" ]]; then
       # Explicit raw body override (may be empty).
@@ -512,6 +587,9 @@ run_fleet() {
     GH_STUB_PR_VIEW_BODY_FAIL="${GH_STUB_PR_VIEW_BODY_FAIL:-0}" \
     GH_STUB_PR_VIEW_META="${GH_STUB_PR_VIEW_META:-}" \
     GH_STUB_PR_BODY_DIR="${GH_STUB_PR_BODY_DIR:-}" \
+    GH_STUB_ISSUE_STDERR="${GH_STUB_ISSUE_STDERR:-}" \
+    GH_STUB_PR_LIST_STDERR="${GH_STUB_PR_LIST_STDERR:-}" \
+    GH_STUB_PR_VIEW_STDERR="${GH_STUB_PR_VIEW_STDERR:-}" \
     FLEET_PROFILE="${FLEET_PROFILE:-}" \
     FLEET_READINESS_TIMEOUT="${FLEET_READINESS_TIMEOUT:-8}" \
     ${FLEET_READINESS_DIR+FLEET_READINESS_DIR="$FLEET_READINESS_DIR"} \
@@ -674,9 +752,11 @@ out=$(run_fleet --status 2>&1) && bad "missing profile should fail" || {
 
 # --- hostile / malformed profiles (zero launches) --------------------------
 echo "hostile / malformed profiles"
+# Assert fail-closed AND the expected refusal class/reason (not only zero launches).
+# Usage: zero_launch_case "label" "reason_regex" --start ...
 zero_launch_case() {
-  local label="$1"
-  shift
+  local label="$1" reason_re="$2"
+  shift 2
   reset_calls
   local before after
   before=$(echo "$(launch_count)" | tr -d '[:space:]')
@@ -685,11 +765,15 @@ zero_launch_case() {
     return
   }
   after=$(echo "$(launch_count)" | tr -d '[:space:]')
-  if [[ "$after" == "0" || "$after" == "$before" ]]; then
-    ok "$label (fail-closed, zero launches)"
-  else
+  if [[ "$after" != "0" && "$after" != "$before" ]]; then
     bad "$label: launched $after runners on failure path"
+    return
   fi
+  if ! echo "$out" | grep -qiE "$reason_re"; then
+    bad "$label: expected refusal matching /$reason_re/, got: $out"
+    return
+  fi
+  ok "$label (fail-closed, zero launches, refusal matched)"
 }
 
 TARGET=$(setup_target_repo badbase acme/widget)
@@ -704,7 +788,7 @@ write_profile "$PROF" \
   "evil=1" \
   "lane=a|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "unknown field" --start
+zero_launch_case "unknown field" 'unknown field' --start
 
 # bad version
 PROF="$ROOT/profiles/ver.profile"
@@ -715,7 +799,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "unsupported version" --start
+zero_launch_case "unsupported version" 'unsupported profile version' --start
 
 # non-absolute repo
 PROF="$ROOT/profiles/relrepo.profile"
@@ -726,7 +810,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "non-absolute repo" --start
+zero_launch_case "non-absolute repo" 'absolute path' --start
 
 # path with ..
 PROF="$ROOT/profiles/dotdot.profile"
@@ -737,7 +821,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "repo path with .." --start
+zero_launch_case "repo path with .." 'must not contain|\\.\\.' --start
 
 # empty queue
 PROF="$ROOT/profiles/emptyq.profile"
@@ -748,7 +832,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a||docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "empty queue" --start
+zero_launch_case "empty queue" 'empty issue queue' --start
 
 # empty scope
 PROF="$ROOT/profiles/emptys.profile"
@@ -759,7 +843,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|1||x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "empty scope" --start
+zero_launch_case "empty scope" 'empty exclusive scope' --start
 
 # empty intent
 PROF="$ROOT/profiles/emptyi.profile"
@@ -770,7 +854,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|1|docs/**|"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "empty intent" --start
+zero_launch_case "empty intent" 'empty intent' --start
 
 # invalid issue id
 PROF="$ROOT/profiles/badiss.profile"
@@ -781,7 +865,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|0abc|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "invalid issue id" --start
+zero_launch_case "invalid issue id" 'invalid issue id' --start
 
 # duplicate lane ids
 PROF="$ROOT/profiles/duplane.profile"
@@ -793,7 +877,7 @@ write_profile "$PROF" \
   "lane=a|1|docs/**|x" \
   "lane=a|2|scripts/**|y"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "duplicate lane ids" --start
+zero_launch_case "duplicate lane ids" 'duplicate lane id' --start
 
 # duplicate issue across lanes
 PROF="$ROOT/profiles/dupiss.profile"
@@ -805,7 +889,7 @@ write_profile "$PROF" \
   "lane=a|5|docs/**|x" \
   "lane=b|5|scripts/**|y"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "duplicate issue across lanes" --start
+zero_launch_case "duplicate issue across lanes" 'appears in both lane' --start
 
 # scope overlap (path containment, not mere string equality)
 PROF="$ROOT/profiles/overlap.profile"
@@ -817,7 +901,7 @@ write_profile "$PROF" \
   "lane=a|1|apps/mcp/**|x" \
   "lane=b|2|apps/mcp/lib/**|y"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "scope overlap containment" --start
+zero_launch_case "scope overlap containment" 'lane scope overlap' --start
 
 # exact-equal scopes
 PROF="$ROOT/profiles/overlap2.profile"
@@ -829,7 +913,7 @@ write_profile "$PROF" \
   "lane=a|1|docs/**|x" \
   "lane=b|2|docs/**|y"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "scope overlap exact" --start
+zero_launch_case "scope overlap exact" 'lane scope overlap' --start
 
 # wrong origin slug
 PROF="$ROOT/profiles/wrongslug.profile"
@@ -841,7 +925,7 @@ write_profile "$PROF" \
   "lane=a|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-zero_launch_case "wrong origin slug" --start
+zero_launch_case "wrong origin slug" 'origin slug|does not match profile slug' --start
 
 # dirty canonical checkout
 DIRTY=$(setup_target_repo dirty acme/widget)
@@ -854,7 +938,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "dirty checkout" --start
+zero_launch_case "dirty checkout" 'dirty|uncommitted|not clean' --start
 
 # missing issue
 PROF="$ROOT/profiles/miss.profile"
@@ -866,7 +950,7 @@ write_profile "$PROF" \
   "lane=a|999|docs/**|x"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=missing
-zero_launch_case "missing issue" --start
+zero_launch_case "missing issue" 'missing or unreadable|could not find issue|ERROR:.*issue' --start
 
 # closed issue
 export GH_STUB_MODE=closed
@@ -878,7 +962,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|3|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "closed issue" --start
+zero_launch_case "closed issue" 'is not open|state=CLOSED' --start
 
 # gated labels
 for mode in gated-needs-mark gated-tier-c gated-decision gated-blocked gated-halt; do
@@ -891,7 +975,7 @@ for mode in gated-needs-mark gated-tier-c gated-decision gated-blocked gated-hal
     "slug=acme/widget" \
     "lane=a|8|docs/**|x"
   export FLEET_PROFILE="$PROF"
-  zero_launch_case "gated label ($mode)" --start
+  zero_launch_case "gated label ($mode)" 'gated label' --start
 done
 
 # claims conflict (agent-claimed)
@@ -904,7 +988,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|12|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "agent-claimed conflict" --start
+zero_launch_case "agent-claimed conflict" 'agent-claimed|claims conflict' --start
 
 # PR conflict
 export GH_STUB_MODE=pr-conflict
@@ -916,7 +1000,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=a|42|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "open PR conflict" --start
+zero_launch_case "open PR conflict" 'conflicts with issue|open PR' --start
 
 # wt-* lane id refused
 export GH_STUB_MODE=ok
@@ -928,7 +1012,7 @@ write_profile "$PROF" \
   "slug=acme/widget" \
   "lane=wt-docs|1|docs/**|x"
 export FLEET_PROFILE="$PROF"
-zero_launch_case "wt-* lane id refused" --start
+zero_launch_case "wt-* lane id refused" 'must not start with wt-' --start
 
 # --- template + docs present -----------------------------------------------
 echo "templates and docs"
@@ -1888,8 +1972,8 @@ write_profile "$PROF" \
   "lane=d|4|marketing/app/**|d"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-zero_launch_case "four-lane profile exceeds WIP" --start
-# message mentions WIP / 3 lanes
+zero_launch_case "four-lane profile exceeds WIP" 'WIP|1-3|3 lanes|allows 1' --start
+# message mentions WIP / 3 lanes (duplicate explicit assert for clarity)
 out=$(run_fleet --start 2>&1) && true
 echo "$out" | grep -qiE 'WIP|1-3|3 lanes|allows 1' \
   && ok "four-lane error names WIP limit" \
@@ -4175,6 +4259,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 WD_PF="$ROOT/logs/watchdog.pid"
 PAUSE_FILE="$CALLS/wd-reclaim-pause"
+ENTERED_FILE="${PAUSE_FILE}.entered"
 # Seed bases without watchdog.
 out=$(
   env PATH="$BIN:$PATH" \
@@ -4186,7 +4271,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) || { bad "wdtoctou seed failed: $out"; }
-rm -f "$WD_PF"
+rm -f "$WD_PF" "$ENTERED_FILE"
 # Dead reserver marker + live competitor that will install during reclaim pause.
 printf 'reserving:999999\n' > "$WD_PF"
 sleep 120 &
@@ -4206,21 +4291,28 @@ COMP_PID=$!
   echo $? >"$CALLS/wdtoctou.rc"
 ) &
 STARTER=$!
-# Wait until starter is blocked in reclaim pause (or finished early).
+# Wait for the explicit "pause entered" marker (not mere pause-file existence —
+# that races before reclaim is entered and was false-green evidence for #152).
 i=0
-while [[ $i -lt 50 ]]; do
-  if ! kill -0 "$STARTER" 2>/dev/null; then
+entered=0
+while [[ $i -lt 100 ]]; do
+  if [[ -f "$ENTERED_FILE" ]] && grep -q 'pause entered' "$ENTERED_FILE" 2>/dev/null; then
+    entered=1
     break
   fi
-  # Starter should still see the pause file and be waiting.
-  if [[ -e "$PAUSE_FILE" ]]; then
-    # Install a fresh competing live reservation while reclaim is paused.
-    printf 'reserving:%s\n' "$COMP_PID" > "$WD_PF"
+  if ! kill -0 "$STARTER" 2>/dev/null; then
     break
   fi
   sleep 0.05 2>/dev/null || sleep 1
   i=$((i + 1))
 done
+if [[ $entered -ne 1 ]]; then
+  bad "TOCTOU reclaim never wrote pause-entered marker (sensor would race): $(cat "$CALLS/wdtoctou.out" 2>/dev/null || true)"
+else
+  ok "TOCTOU reclaim wrote explicit pause-entered marker before competitor install"
+fi
+# Install a fresh competing live reservation only after pause entered.
+printf 'reserving:%s\n' "$COMP_PID" > "$WD_PF"
 [[ -f "$WD_PF" ]] && grep -q "reserving:$COMP_PID" "$WD_PF" \
   || bad "failed to install competing reservation during pause: $(cat "$WD_PF" 2>/dev/null || true)"
 # Release reclaim; starter must NOT delete the fresh competing reservation.
@@ -4261,7 +4353,123 @@ if kill -0 "$COMP_PID" 2>/dev/null; then
 else
   bad "TOCTOU competitor reserver $COMP_PID was killed"
 fi
-rm -f "$WD_PF" "$PAUSE_FILE"
+rm -f "$WD_PF" "$PAUSE_FILE" "$ENTERED_FILE"
+export FLEET_NO_WATCHDOG=1
+export SLEEP_CMD=true
+
+# --- #152: mutation receipt — unconditional stale rm fails the TOCTOU sensor --
+echo "TOCTOU sensor fails against unconditional stale-file removal (mutation)"
+# Behavioral proof: a defective reclaim that rm -f's without re-read would
+# unlink the live competitor installed after pause-entered. Sensor must FAIL
+# against that defective body (mutation receipt).
+MUT_FLEET="$ROOT/mut-loop-fleet-uncond-rm.sh"
+cp "$FLEET" "$MUT_FLEET"
+# Replace the re-read+rm block with unconditional rm (old defective pattern).
+# Keep the pause-entered marker so the sensor still interleaves correctly.
+if ! python3 - "$MUT_FLEET" <<'PY'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+old = """  # Re-read: abort if a competitor installed a different value.
+  recheck=$(tr -d '[:space:]' < \"$pf\" 2>/dev/null || true)
+  [[ \"$recheck\" == \"$observed\" ]] || return 1"""
+new = """  # MUTATION: unconditional stale-file removal (no re-read) — defective.
+  rm -f \"$pf\"
+  return 0
+  # dead code after mutation:
+  recheck=$(tr -d '[:space:]' < \"$pf\" 2>/dev/null || true)
+  [[ \"$recheck\" == \"$observed\" ]] || return 1"""
+if old not in src:
+    open(path + ".mutation-miss", "w").write("anchor not found\n")
+    sys.exit(0)
+open(path, "w").write(src.replace(old, new, 1))
+PY
+then
+  bad "TOCTOU mutation harness could not patch reclaim body"
+fi
+chmod +x "$MUT_FLEET"
+if [[ -f "$MUT_FLEET.mutation-miss" ]]; then
+  bad "TOCTOU mutation anchor not found in production reclaim body"
+else
+  reset_calls
+  TARGET=$(setup_target_repo wdtoctou-mut acme/widget)
+  PROF="$ROOT/profiles/wdtoctou-mut.profile"
+  write_profile "$PROF" \
+    "version=1" \
+    "name=wdtoctou-mut" \
+    "repo=$TARGET" \
+    "slug=acme/widget" \
+    "gibson=$ROOT/gibson" \
+    "fleet_dir=$ROOT/fleet" \
+    "log_dir=$ROOT/logs" \
+    "runner=fake-runner" \
+    "deadline_seconds=70" \
+    "lane=docs|4731|docs/**|docs only"
+  export FLEET_PROFILE="$PROF"
+  WD_PF="$ROOT/logs/watchdog.pid"
+  PAUSE_FILE="$CALLS/wd-reclaim-pause-mut"
+  ENTERED_FILE="${PAUSE_FILE}.entered"
+  out=$(
+    env PATH="$BIN:$PATH" \
+      GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+      RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+      GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+      DEADLINE_SECONDS=70 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+      FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=1 \
+      GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+      "$MUT_FLEET" --start 2>&1
+  ) || { bad "wdtoctou-mut seed failed: $out"; }
+  rm -f "$WD_PF" "$ENTERED_FILE"
+  printf 'reserving:999999\n' > "$WD_PF"
+  sleep 120 &
+  COMP_PID=$!
+  : > "$PAUSE_FILE"
+  (
+    env PATH="$BIN:$PATH" \
+      GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+      RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+      GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=sleep \
+      DEADLINE_SECONDS=70 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+      FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=0 FLEET_SKIP_FETCH=1 \
+      FLEET_WATCHDOG_TEST_RECLAIM_PAUSE="$PAUSE_FILE" \
+      GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+      "$MUT_FLEET" --start >"$CALLS/wdtoctou-mut.out" 2>&1
+    echo $? >"$CALLS/wdtoctou-mut.rc"
+  ) &
+  STARTER=$!
+  i=0
+  entered=0
+  while [[ $i -lt 100 ]]; do
+    if [[ -f "$ENTERED_FILE" ]] && grep -q 'pause entered' "$ENTERED_FILE" 2>/dev/null; then
+      entered=1
+      break
+    fi
+    if ! kill -0 "$STARTER" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  if [[ $entered -ne 1 ]]; then
+    bad "TOCTOU mutation: pause-entered never written"
+  else
+    printf 'reserving:%s\n' "$COMP_PID" > "$WD_PF"
+    rm -f "$PAUSE_FILE"
+    wait "$STARTER" 2>/dev/null || true
+    # Defective unconditional rm MUST have deleted the competitor reservation.
+    if [[ -f "$WD_PF" ]] && grep -q "reserving:$COMP_PID" "$WD_PF"; then
+      bad "TOCTOU mutation: defective unconditional rm did not delete competitor (sensor would false-green)"
+    else
+      ok "TOCTOU mutation receipt: unconditional stale rm deletes live competitor (sensor would fail)"
+    fi
+  fi
+  if kill -0 "$COMP_PID" 2>/dev/null; then
+    kill -TERM "$COMP_PID" 2>/dev/null || true
+    sleep 0.2 2>/dev/null || sleep 1
+    kill -KILL "$COMP_PID" 2>/dev/null || true
+  fi
+  rm -f "$WD_PF" "$PAUSE_FILE" "$ENTERED_FILE" "$MUT_FLEET" "$MUT_FLEET.mutation-miss"
+fi
 export FLEET_NO_WATCHDOG=1
 export SLEEP_CMD=true
 
@@ -4579,9 +4787,10 @@ REAL_GIT=$(command -v git)
 # Unrelated process outside the group — must survive residual cleanup.
 sleep 300 &
 UNRELATED_PID=$!
-# Sequencing marker: residual cleanup must run while leader identity is held
-# (pre-reap). The stub records leader PID; we assert descendant dies and the
-# unrelated PID is untouched (no post-wait recycled-PGID kill).
+# Natural-deadline proof: descendant sleeps 20s. Residual exact-PGID cleanup
+# must kill it well before that natural exit (false-green #152: suite waited
+# for full natural lifetime then still printed "terminated").
+DESC_NATURAL=20
 cat > "$BIN/git" <<STUB
 #!/usr/bin/env bash
 # On fetch: spawn a descendant in this process group, then exit 0 as leader.
@@ -4590,8 +4799,9 @@ cat > "$BIN/git" <<STUB
 for a in "\$@"; do
   if [[ "\$a" == "fetch" ]]; then
     echo "\$\$" > "$CALLS/leaddie-leader.pid"
+    date +%s > "$CALLS/leaddie-desc-start.ts"
     # Keep descendant in the same process group (no setsid).
-    sleep 100 &
+    sleep $DESC_NATURAL &
     echo "\$!" > "$CALLS/leaddie-desc.pid"
     # Natural leader exit 0 — residual path (not wall-clock timeout).
     exit 0
@@ -4602,8 +4812,9 @@ STUB
 chmod +x "$BIN/git"
 export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
-rm -f "$CALLS/leaddie-leader.pid" "$CALLS/leaddie-desc.pid"
+rm -f "$CALLS/leaddie-leader.pid" "$CALLS/leaddie-desc.pid" "$CALLS/leaddie-desc-start.ts"
 : > "$CALLS/launches.log"
+t0=$(date +%s)
 out=$(
   env PATH="$BIN:$PATH" \
     GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
@@ -4625,17 +4836,28 @@ else
 fi
 if [[ -f "$CALLS/leaddie-desc.pid" ]]; then
   desc=$(tr -d '[:space:]' < "$CALLS/leaddie-desc.pid")
+  # Measure time-to-death from fleet start — must be << natural sleep deadline.
   i=0
-  while [[ $i -lt 15 ]]; do
+  died=0
+  while [[ $i -lt 40 ]]; do
     if ! kill -0 "$desc" 2>/dev/null; then
-      ok "leader-exit descendant pid $desc terminated by residual group kill"
+      died=1
       break
     fi
-    sleep 0.2 2>/dev/null || sleep 1
+    sleep 0.1 2>/dev/null || sleep 1
     i=$((i + 1))
   done
-  if kill -0 "$desc" 2>/dev/null; then
-    bad "leader-exit descendant pid $desc still alive after residual cleanup"
+  t_dead=$(date +%s)
+  elapsed=$((t_dead - t0))
+  if [[ $died -eq 1 ]]; then
+    # Must not have waited for natural sleep deadline (~DESC_NATURAL).
+    if [[ $elapsed -ge $((DESC_NATURAL - 3)) ]]; then
+      bad "leader-exit descendant died only after ~natural deadline (${elapsed}s >= $((DESC_NATURAL - 3))s) — residual false-green"
+    else
+      ok "leader-exit descendant pid $desc terminated promptly by residual group kill (${elapsed}s << ${DESC_NATURAL}s natural)"
+    fi
+  else
+    bad "leader-exit descendant pid $desc still alive after residual cleanup window"
     kill -KILL "$desc" 2>/dev/null || true
   fi
   # Sequencing pin: leader is reaped (not live non-zombie) after residual path.
@@ -6761,6 +6983,344 @@ export FLEET_READINESS_TIMEOUT=8
 export REVIEWER_CMD="codex-stub review"
 export RELEASE_CMD="claude-stub release"
 
+# ============================================================================
+# #152 — metadata/stderr, hostile labels, timeout lifecycle sensors
+# ============================================================================
+echo "#152 metadata, hostile labels, timeout lifecycle"
+
+# Static: no remaining JSON hand-parse helpers; gh --template/--jq only.
+if grep -nE 'json_label_names|json_field' "$FLEET" >/dev/null 2>&1; then
+  bad "#152 still has json_label_names/json_field hand-parse helpers"
+else
+  ok "#152 issue metadata uses no json_label_names/json_field hand-parse"
+fi
+if grep -n 'gh_capture' "$FLEET" >/dev/null 2>&1 \
+  && grep -n -- '--template' "$FLEET" >/dev/null 2>&1 \
+  && grep -n -- '--jq' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'fetch_issue_state_labels' "$FLEET" >/dev/null 2>&1; then
+  ok "#152 gh --template/--jq + gh_capture present for strict metadata paths"
+else
+  bad "#152 missing gh --template/--jq or gh_capture on metadata paths"
+fi
+# Static: reclaim guarantee is narrowed (not claiming full atomicity).
+if grep -n 'Not a fully atomic portable lock' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'narrowed TOCTOU window' "$FLEET" >/dev/null 2>&1; then
+  ok "#152 stale-reclaim guarantee reworded to narrowed window"
+else
+  bad "#152 reclaim comments still overclaim atomicity"
+fi
+# Static: watcher reaped before leader wait (ordering contract in source).
+if grep -n 'Stop/reap the watcher BEFORE wait-reaping the leader' "$FLEET" >/dev/null 2>&1; then
+  ok "#152 wall-timeout documents watcher-before-leader reap ordering"
+else
+  bad "#152 missing watcher-before-leader reap ordering contract"
+fi
+
+# Benign stderr must not contaminate issue template / PR TSV / body authority.
+echo "gh stderr cannot contaminate metadata/body authority"
+reset_calls
+TARGET=$(setup_target_repo ghstderr acme/widget)
+PROF="$ROOT/profiles/ghstderr.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=ghstderr" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|600|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+export GH_STUB_ISSUE_STDERR='notice: A new release of gh is available: 2.x → 3.x'
+export GH_STUB_PR_LIST_STDERR='notice: benign pr list diagnostic'
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "benign gh stderr should not fail start: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "benign issue/list stderr left TSV/template authority clean (launched)" \
+  || bad "benign stderr contaminated preflight launches=$lc out=$out"
+unset GH_STUB_ISSUE_STDERR GH_STUB_PR_LIST_STDERR
+
+# Hostile labels: description/order must not hide or manufacture gated labels.
+echo "hostile issue label/description/order fixtures"
+export GH_STUB_MODE=ok
+ISSUEDIR="$ROOT/gh-issues-hostile-labels"
+mkdir -p "$ISSUEDIR"
+export GH_STUB_ISSUE_DIR="$ISSUEDIR"
+
+# Template-shape fixtures (state\nlabels…) — body is never on this path, so
+# description text cannot manufacture labels (matches production --template).
+# Each case uses reset_calls + fresh target so lane state cannot pollute.
+# (1) Clean labels; prose would mention gated words if body were fetched — not fetched.
+reset_calls
+TARGET=$(setup_target_repo hostlab1 acme/widget)
+PROF="$ROOT/profiles/hostlab1.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hostlab1" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|601|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+cat > "$ISSUEDIR/601.tmpl" <<'TMPL'
+OPEN
+tier-a
+enhancement
+TMPL
+printf '%s\n' 'body prose would say: needs-mark decision blocked tier-c gibson-halt agent-claimed' \
+  > "$ISSUEDIR/601.body-note"
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "hostile description-only gated words should launch: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "hostile description cannot manufacture gated labels" \
+  || bad "description manufactured gate launches=$lc out=$out"
+
+# (2) Gated label last after many decoys → must refuse (order cannot hide).
+reset_calls
+TARGET=$(setup_target_repo hostlab2 acme/widget)
+PROF="$ROOT/profiles/hostlab2.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hostlab2" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|602|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+cat > "$ISSUEDIR/602.tmpl" <<'TMPL'
+OPEN
+enhancement
+tier-a
+docs
+good-first-issue
+needs-mark
+TMPL
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "gated label last in order should refuse: $out" || {
+  echo "$out" | grep -qiE "gated label 'needs-mark'" \
+    && ok "gated label last in order still refused" \
+    || bad "unclear gated-last refuse: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "gated-last launched zero" || bad "gated-last launched $lc"
+
+# (3) Near-miss label name must not be treated as gated.
+reset_calls
+TARGET=$(setup_target_repo hostlab3 acme/widget)
+PROF="$ROOT/profiles/hostlab3.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hostlab3" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|603|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+cat > "$ISSUEDIR/603.tmpl" <<'TMPL'
+OPEN
+needs-mark-please
+tier-a-ish
+blocked-by-deps
+TMPL
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "near-miss label names should not gate: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "near-miss label names are not gated (exact match only)" \
+  || bad "near-miss falsely gated launches=$lc out=$out"
+
+# (4) Real gated label first; body-shaped text is not on the template path.
+reset_calls
+TARGET=$(setup_target_repo hostlab4 acme/widget)
+PROF="$ROOT/profiles/hostlab4.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hostlab4" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|604|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+cat > "$ISSUEDIR/604.tmpl" <<'TMPL'
+OPEN
+tier-c
+enhancement
+TMPL
+: > "$CALLS/launches.log"
+out=$(run_fleet --start 2>&1) && bad "real tier-c with hostile body should refuse: $out" || {
+  echo "$out" | grep -qiE "gated label 'tier-c'" \
+    && ok "hostile body cannot hide real gated label" \
+    || bad "unclear tier-c hide refuse: $out"
+}
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "hostile-body gated launched zero" || bad "hostile-body gated launched $lc"
+unset GH_STUB_ISSUE_DIR
+export GH_STUB_MODE=ok
+
+# TERM grace before KILL + return 124 for configured timeout (incl. large values).
+echo "wall-timeout TERM grace, large timeout 124, watcher/leader reap order"
+reset_calls
+TARGET=$(setup_target_repo wtgrace acme/widget)
+PROF="$ROOT/profiles/wtgrace.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wtgrace" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|610|docs/**|docs only"
+REAL_GIT=$(command -v git)
+# Instrument: record TERM then KILL order on the leader process group.
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [[ "\$a" == "fetch" ]]; then
+    echo "\$\$" > "$CALLS/wtgrace-leader.pid"
+    # Trap TERM to record grace evidence, then keep hanging until KILL.
+    trap 'echo TERM >> "$CALLS/wtgrace-signals.log"; exit 0' TERM
+    : > "$CALLS/wtgrace-signals.log"
+    sleep 100 &
+    echo "\$!" > "$CALLS/wtgrace-desc.pid"
+    # Hang as leader so wall-timeout path fires (not natural exit).
+    while true; do sleep 1; done
+    exit 0
+  fi
+done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$BIN/git"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+rm -f "$CALLS/wtgrace-leader.pid" "$CALLS/wtgrace-desc.pid" "$CALLS/wtgrace-signals.log"
+: > "$CALLS/launches.log"
+t0=$(date +%s)
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=2 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "grace timeout hang should fail: $out" || {
+  echo "$out" | grep -qiE 'exceeded wall-clock timeout|timeout' \
+    && ok "TERM-grace path reports wall-clock timeout" \
+    || bad "unclear grace-timeout fail: $out"
+}
+t1=$(date +%s)
+# Full 1s TERM grace: wall path must take at least ~limit+grace (≥3s for limit=2).
+elapsed=$((t1 - t0))
+if [[ $elapsed -ge 3 ]]; then
+  ok "TERM grace preserved before KILL (elapsed=${elapsed}s ≥ limit+grace)"
+else
+  bad "TERM grace short-circuited (elapsed=${elapsed}s < 3s for limit=2 + grace=1)"
+fi
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "grace-timeout launched zero" || bad "grace-timeout launched $lc"
+if [[ -f "$CALLS/wtgrace-desc.pid" ]]; then
+  desc=$(tr -d '[:space:]' < "$CALLS/wtgrace-desc.pid")
+  if kill -0 "$desc" 2>/dev/null; then
+    bad "grace-timeout descendant $desc still alive"
+    kill -KILL "$desc" 2>/dev/null || true
+  else
+    ok "grace-timeout descendant cleaned by exact-PGID path"
+  fi
+fi
+rm -f "$BIN/git"
+
+# Large configured timeout still returns 124 (not silent success / wrong code).
+# Use limit=3 (larger than tiny defaults) with hang; assert timeout messaging.
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [[ "\$a" == "fetch" ]]; then
+    echo "\$\$" > "$CALLS/wtlarge-leader.pid"
+    sleep 100 &
+    echo "\$!" > "$CALLS/wtlarge-desc.pid"
+    wait
+    exit 0
+  fi
+done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$BIN/git"
+rm -f "$CALLS/wtlarge-leader.pid" "$CALLS/wtlarge-desc.pid"
+: > "$CALLS/launches.log"
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=3 \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "large timeout hang should fail closed: $out" || {
+  # die path on 124: "exceeded wall-clock timeout (${limit}s)"
+  echo "$out" | grep -qiE 'exceeded wall-clock timeout \(3s\)' \
+    && ok "large/custom timeout 3s returns fail-closed 124 path" \
+    || bad "large timeout missing 124 path evidence: $out"
+}
+if [[ -f "$CALLS/wtlarge-desc.pid" ]]; then
+  desc=$(tr -d '[:space:]' < "$CALLS/wtlarge-desc.pid")
+  i=0
+  while [[ $i -lt 15 ]]; do
+    if ! kill -0 "$desc" 2>/dev/null; then break; fi
+    sleep 0.1 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$desc" 2>/dev/null; then
+    bad "large-timeout descendant $desc still alive"
+    kill -KILL "$desc" 2>/dev/null || true
+  else
+    ok "large-timeout exact-PGID cleaned descendant"
+  fi
+fi
+rm -f "$BIN/git"
+
+# Watcher/leader reap ordering: residual group kill must not hit an unrelated
+# recycled PID. Unrelated process started AFTER fleet completes must survive.
+# (Post-reap PGID signal would risk killing a newly allocated PID/PGID.)
+sleep 60 &
+POST_UNRELATED=$!
+# Structural + behavioral: source orders watcher wait before leader wait.
+if awk '
+  /run_with_wall_timeout\(\)/ {infn=1}
+  infn && /wait "\$watcher"/ {w=NR}
+  infn && /wait "\$pid"/ {p=NR}
+  infn && /^}/ {if(w&&p){exit (w<p)?0:1}; exit 1}
+' "$FLEET"; then
+  ok "watcher wait precedes leader wait in run_with_wall_timeout"
+else
+  bad "watcher/leader wait ordering inverted or missing"
+fi
+if kill -0 "$POST_UNRELATED" 2>/dev/null; then
+  ok "post-run unrelated PID $POST_UNRELATED untouched (no stray PGID signal)"
+  kill -TERM "$POST_UNRELATED" 2>/dev/null || true
+  sleep 0.1 2>/dev/null || true
+  kill -KILL "$POST_UNRELATED" 2>/dev/null || true
+else
+  bad "post-run unrelated PID was killed"
+fi
 
 # --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
 echo "docs contract sensors"
