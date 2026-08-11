@@ -93,6 +93,11 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}" # tests can set to true / no-op
 #     publish to fail so sensors prove reservation+child cleanup. Unset in production.
 #   FLEET_WATCHDOG_TEST_IMMEDIATE_EXIT=1 — after spawn, SIGKILL the child and leave
 #     it unreaped so sensors prove zombie/immediate-exit never logs armed. Unset in production.
+#   FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK — if set to a path, wait (bounded)
+#     until that path exists (sensor child writes it after arming a TERM trap),
+#     then parent writes the timeout flag so the watcher exits without TERM;
+#     residual path must still deliver TERM → full 1s grace → KILL.
+#     Sensors only. Unset in production.
 FLEET_SYNC_LAUNCH="${FLEET_SYNC_LAUNCH:-0}"
 FLEET_NO_WATCHDOG="${FLEET_NO_WATCHDOG:-0}"
 FLEET_SKIP_FETCH="${FLEET_SKIP_FETCH:-0}"
@@ -2849,7 +2854,11 @@ run_with_wall_timeout() {
   local limit="$1"
   shift
   local pid watcher rc=0 status_file timed_out=0 st poll now pgid
-  local elapsed watcher_wait_bound i settle pgrp_ok=0 cand pgrp_ready
+  local elapsed watcher_wait_bound i settle pgrp_ok=0 cand pgrp_ready arm_path
+  # parent_forced=1 when *this* shell wrote the timeout flag (date/tick or
+  # sensor hook). The watcher exits early on that flag without signaling, so
+  # residual cleanup must own the full TERM → grace → KILL contract.
+  local parent_forced=0
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "fleet: bad wall timeout: $limit" >&2; return 1; }
 
   # Fail closed BEFORE launch if we cannot establish a process group.
@@ -2989,6 +2998,29 @@ os.execvp(sys.argv[2], sys.argv[2:])
   poll=$(date +%s 2>/dev/null || echo 0)
   settle=0
   while true; do
+    # Sensor-only: force parent-owned timeout flag *before* the watcher reaches
+    # its wall deadline. Path value is an arm file the child creates after its
+    # TERM trap is installed — wait for it (bounded) so TERM is observable.
+    # Watcher sees the flag and exits without TERM; residual must still deliver
+    # TERM → full grace → KILL (not bare KILL).
+    if [[ -n "${FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK:-}" ]]; then
+      arm_path="${FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK}"
+      i=0
+      while [[ $i -lt 100 ]]; do
+        [[ -f "$arm_path" ]] && break
+        if ! kill -0 "$pid" 2>/dev/null; then
+          break
+        fi
+        sleep 0.05 2>/dev/null || sleep 1
+        i=$((i + 1))
+      done
+      if kill -0 "$pid" 2>/dev/null; then
+        printf 'timeout\n' > "$status_file" 2>/dev/null || true
+        parent_forced=1
+        timed_out=1
+      fi
+      break
+    fi
     if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
       timed_out=1
       break
@@ -3009,12 +3041,13 @@ os.execvp(sys.argv[2], sys.argv[2:])
       # limit + TERM grace (1) + settle slack (2)
       if [[ $((now - poll)) -ge $((limit + 3)) ]]; then
         # Wall clock elapsed from parent view — treat as timeout if status
-        # not yet written (watcher race); still preserve grace via watcher wait.
+        # not yet written (watcher race). Parent-owned write means residual
+        # must deliver TERM → grace → KILL (watcher may exit on the flag).
         if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
           timed_out=1
         elif kill -0 "$pid" 2>/dev/null; then
-          # Force timeout flag so we return 124; watcher may still be in grace.
           printf 'timeout\n' > "$status_file" 2>/dev/null || true
+          parent_forced=1
           timed_out=1
         fi
         break
@@ -3024,8 +3057,15 @@ os.execvp(sys.argv[2], sys.argv[2:])
     settle=$((settle + 1))
     if [[ $settle -ge $(((limit + 3) * 10 + 20)) ]]; then
       if kill -0 "$pid" 2>/dev/null; then
-        printf 'timeout\n' > "$status_file" 2>/dev/null || true
-        timed_out=1
+        # Only claim parent ownership when we are the writer; if the watcher
+        # already flagged timeout, leave residual as KILL-only after its grace.
+        if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
+          timed_out=1
+        else
+          printf 'timeout\n' > "$status_file" 2>/dev/null || true
+          parent_forced=1
+          timed_out=1
+        fi
       fi
       break
     fi
@@ -3054,12 +3094,26 @@ os.execvp(sys.argv[2], sys.argv[2:])
       kill -KILL "$watcher" 2>/dev/null || true
     fi
     wait "$watcher" 2>/dev/null || true
-    # Ensure group/leader is dead after grace path (pre-wait). Exact-PGID only
-    # when setpgrp was confirmed — never signal the parent shell's group.
-    if [[ $pgrp_ok -eq 1 ]]; then
-      kill -KILL -"$pgid" 2>/dev/null || true
+    # Pre-wait residual while leader is still unreaped (no PID/PGID reuse).
+    # Parent-forced path: watcher may have exited on the flag without TERM —
+    # guarantee TERM → full 1s grace → KILL on exact identity.
+    # Watcher-owned path: residual exact KILL only (watcher already graced).
+    if [[ $parent_forced -eq 1 ]]; then
+      if [[ $pgrp_ok -eq 1 ]]; then
+        kill -TERM -"$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL -"$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      else
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 1
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
     else
-      kill -KILL "$pid" 2>/dev/null || true
+      if [[ $pgrp_ok -eq 1 ]]; then
+        kill -KILL -"$pgid" 2>/dev/null || true
+      else
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
     fi
   else
     # Natural exit: stop watcher first so it cannot later timeout-signal.

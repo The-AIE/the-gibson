@@ -7322,6 +7322,155 @@ else
   bad "post-run unrelated PID was killed"
 fi
 
+# --- CR: parent date/tick fallback must TERM → grace → KILL (not bare KILL) --
+# Deterministic interleaving via FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK=<arm>:
+# child writes <arm> after installing a TERM trap; parent then writes the
+# timeout flag before the watcher deadline; watcher exits without TERM.
+# Residual must still deliver TERM → full 1s grace → KILL while the leader is
+# unreaped. Bare-KILL-only residual fails this sensor (no TERM log, grace < 1s).
+# Not a timing race hope.
+echo "wall-timeout parent-fallback TERM→grace→KILL (not bare KILL)"
+reset_calls
+TARGET=$(setup_target_repo wtparentfb acme/widget)
+PROF="$ROOT/profiles/wtparentfb.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=wtparentfb" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|611|docs/**|docs only"
+REAL_GIT=$(command -v git)
+# Unrelated process outside the timeout group — must survive exact-identity kills.
+sleep 300 &
+PFB_UNRELATED=$!
+PFB_ARM="$CALLS/wtpfb-armed"
+cat > "$BIN/git" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [[ "\$a" == "fetch" ]]; then
+    echo "\$\$" > "$CALLS/wtpfb-leader.pid"
+    : > "$CALLS/wtpfb-signals.log"
+    # Record TERM without exiting so KILL is still required after full grace.
+    # Bare-KILL-only residual never writes TERM → sensor fails closed.
+    trap 'echo TERM >> "$CALLS/wtpfb-signals.log"' TERM
+    sleep 100 &
+    echo "\$!" > "$CALLS/wtpfb-desc.pid"
+    # Arm the parent-fallback sensor only after the TERM trap is installed.
+    : > "$PFB_ARM"
+    # Hang as leader until KILL (do not exit on TERM).
+    while true; do sleep 1; done
+    exit 0
+  fi
+done
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$BIN/git"
+export FLEET_PROFILE="$PROF"
+export GH_STUB_MODE=ok
+rm -f "$CALLS/wtpfb-leader.pid" "$CALLS/wtpfb-desc.pid" "$CALLS/wtpfb-signals.log" "$PFB_ARM"
+: > "$CALLS/launches.log"
+t0=$(date +%s)
+out=$(
+  env PATH="$BIN:$PATH" \
+    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+    FLEET_FETCH_TIMEOUT=30 \
+    FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK="$PFB_ARM" \
+    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
+    "$FLEET" --start 2>&1
+) && bad "parent-fallback hang should fail closed: $out" || {
+  echo "$out" | grep -qiE 'exceeded wall-clock timeout \(30s\)|exceeded wall-clock timeout' \
+    && ok "parent-fallback returns timeout/124-derived fail-closed path" \
+    || bad "parent-fallback missing 124/timeout evidence: $out"
+}
+t1=$(date +%s)
+elapsed=$((t1 - t0))
+# Full 1s grace after TERM; parent-forced path must not bare-KILL instantly.
+# Upper bound keeps the sensor fast (hook skips the 30s wall clock).
+if [[ $elapsed -ge 1 && $elapsed -le 15 ]]; then
+  ok "parent-fallback preserved full TERM grace (elapsed=${elapsed}s ∈ [1,15])"
+else
+  bad "parent-fallback grace broken (elapsed=${elapsed}s; want ≥1 full grace, ≤15 bound)"
+fi
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "0" ]] && ok "parent-fallback launched zero" || bad "parent-fallback launched $lc"
+# TERM must be observed before process death (KILL without prior TERM fails).
+if [[ -f "$CALLS/wtpfb-signals.log" ]] && grep -q '^TERM$' "$CALLS/wtpfb-signals.log"; then
+  ok "parent-fallback observed TERM before KILL/exit"
+else
+  bad "parent-fallback never sent TERM (bare-KILL residual?): log=$(cat "$CALLS/wtpfb-signals.log" 2>/dev/null || echo missing)"
+fi
+# Leader and descendant must be cleaned; leader unreaped only during signaling
+# (by the time we observe, wait has reaped — both must be gone).
+if [[ -f "$CALLS/wtpfb-leader.pid" ]]; then
+  leader=$(tr -d '[:space:]' < "$CALLS/wtpfb-leader.pid")
+  i=0
+  while [[ $i -lt 20 ]]; do
+    if ! kill -0 "$leader" 2>/dev/null; then break; fi
+    sleep 0.1 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$leader" 2>/dev/null; then
+    bad "parent-fallback leader $leader still alive after residual"
+    kill -KILL "$leader" 2>/dev/null || true
+  else
+    ok "parent-fallback leader $leader cleaned (pre-reap signal path completed)"
+  fi
+else
+  bad "parent-fallback leader pid file missing — stub may not have run: $out"
+fi
+if [[ -f "$CALLS/wtpfb-desc.pid" ]]; then
+  desc=$(tr -d '[:space:]' < "$CALLS/wtpfb-desc.pid")
+  i=0
+  while [[ $i -lt 20 ]]; do
+    if ! kill -0 "$desc" 2>/dev/null; then break; fi
+    sleep 0.1 2>/dev/null || sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$desc" 2>/dev/null; then
+    bad "parent-fallback descendant $desc still alive"
+    kill -KILL "$desc" 2>/dev/null || true
+  else
+    ok "parent-fallback exact-PGID cleaned descendant $desc"
+  fi
+else
+  bad "parent-fallback descendant pid file missing — stub may not have run"
+fi
+if kill -0 "$PFB_UNRELATED" 2>/dev/null; then
+  ok "parent-fallback left unrelated PID $PFB_UNRELATED untouched"
+  kill -TERM "$PFB_UNRELATED" 2>/dev/null || true
+  sleep 0.1 2>/dev/null || true
+  kill -KILL "$PFB_UNRELATED" 2>/dev/null || true
+else
+  bad "parent-fallback killed unrelated PID $PFB_UNRELATED"
+fi
+# Post-reap group signal would risk recycled PIDs: unrelated after return must live.
+sleep 60 &
+PFB_POST=$!
+if kill -0 "$PFB_POST" 2>/dev/null; then
+  ok "parent-fallback post-run unrelated PID $PFB_POST untouched (no post-reap group signal)"
+  kill -TERM "$PFB_POST" 2>/dev/null || true
+  sleep 0.1 2>/dev/null || true
+  kill -KILL "$PFB_POST" 2>/dev/null || true
+else
+  bad "parent-fallback post-run unrelated PID was killed"
+fi
+# Structural: parent_forced residual owns TERM when parent wrote the flag.
+if grep -n 'parent_forced' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$FLEET" >/dev/null 2>&1; then
+  ok "parent-fallback structure: parent_forced + sensor hook present"
+else
+  bad "parent-fallback structure: missing parent_forced ownership tracking"
+fi
+rm -f "$BIN/git"
+
 # --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
 echo "docs contract sensors"
 if grep -q 'gh.*1\.9\.0\|gh ≥ 1.9.0\|gh >= 1.9.0' "$REPO_ROOT/templates/fleet/README.md"; then
