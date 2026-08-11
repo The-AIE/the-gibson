@@ -498,11 +498,11 @@ source snapshot. It is intended to:
 This is roadmap design. Today, the coordinator and playbooks assemble much of that
 context procedurally.
 
-The evaluation plan in
-[issue #159](https://github.com/mrhinkle/the-gibson/issues/159) compares no index,
-default skill discovery, explicit inspect-then-retrieve, a compact `AGENTS.md` index,
-and a compiled capsule under held-out, repeated, matched-budget trials. This prevents
-one favorable benchmark from becoming doctrine without local evidence.
+Gibson proposes an ablation over no index, default skill discovery, explicit
+inspect-then-retrieve, a compact `AGENTS.md` index, and a compiled capsule under
+[issue #159's](https://github.com/mrhinkle/the-gibson/issues/159) evaluation
+requirements: held-out, repeated, matched-budget trials. This prevents one favorable
+benchmark from becoming doctrine without local evidence.
 
 The immediate research signal is
 [Vercel's January 2026 Next.js evaluation](https://vercel.com/blog/agents-md-outperforms-skills-in-our-agent-evals):
@@ -722,7 +722,7 @@ strengthened from evidence; weakening authority remains an explicit decision.
 | Green gate and test-integrity controls | Local scripts and portable CI template |
 | Solo unattended loop controls | State validation, budgets, no-progress sensor, halt paths, handoffs |
 | Multi-model coordinator pattern | Documented and exercised through fleet operations |
-| Vendor portability | Adapters for Claude, Codex, Grok, Hermes, Goose, Devin, and others |
+| Vendor portability | Adapters for Claude, Codex, Grok, Hermes, Goose, and Devin |
 | Token-routing procedure | Capability grades, pool routing, bounded retry, cost ledger |
 | UX/security/release procedures | Playbooks, CI templates, preview/runtime checks |
 | Delivery-control audit | Branch/deployment truth checks with dry-run hardening path |
