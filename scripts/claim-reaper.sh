@@ -232,6 +232,16 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 RELEASE_CMD="${GIBSON_REAPER_RELEASE_CMD:-$SCRIPT_DIR/release-claim.sh}"
 [[ -x "$RELEASE_CMD" || -f "$RELEASE_CMD" ]] || die "release-claim not found: $RELEASE_CMD"
 
+# Fail-closed stdout/stderr capture for authoritative inventory reads (#153).
+# Shared helper: allocation, signal traps, verified unlink, stdout authority.
+# Missing/unreadable helper must not become an empty inventory.
+# shellcheck source=lib/stream-capture.sh
+. "$SCRIPT_DIR/lib/stream-capture.sh" ||
+  die "cannot source $SCRIPT_DIR/lib/stream-capture.sh — refuse inventory without fail-closed stream isolation"
+if ! declare -F _rc_capture_streams >/dev/null 2>&1; then
+  die "stream-capture helper loaded without _rc_capture_streams — refuse inventory"
+fi
+
 STATE_DIR="${GIBSON_REAPER_STATE_DIR:-$CANONICAL/gibson}"
 JOURNAL="${GIBSON_REAPER_JOURNAL:-$STATE_DIR/claim-reaper-journal.md}"
 LOCK_DIR="${GIBSON_REAPER_LOCK_DIR:-$STATE_DIR/claim-reaper.lock}"
@@ -290,6 +300,31 @@ normalize_github_repo_url() {
   [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
   [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
   printf '%s/%s\n' "$owner" "$name"
+}
+
+# Origin fallback for PR repository identity. Mirror release-claim.sh:
+# use --get-all, not --get. With several remote.origin.url values, `git config
+# --get` silently returns the LAST one and exits 0 — ambiguous identity that
+# would look definite. Accept only when exactly one readable, nonempty origin
+# value normalizes to GitHub owner/name. Zero, multiple, malformed, or
+# unreadable values leave identity unresolved (return 1).
+resolve_origin_github_repo() {
+  local all n raw id rc=0
+  all=$(git config --get-all remote.origin.url 2>/dev/null) || rc=$?
+  n=$(printf '%s' "$all" | grep -c . || true)
+  if [[ "$rc" -ne 0 || "$n" -eq 0 ]]; then
+    return 1
+  fi
+  if [[ "$n" -gt 1 ]]; then
+    return 1
+  fi
+  raw=$(printf '%s\n' "$all" | head -n1)
+  [[ -n "$raw" ]] || return 1
+  if ! id=$(normalize_github_repo_url "$raw"); then
+    return 1
+  fi
+  printf '%s\n' "$id"
+  return 0
 }
 
 # Shared all-or-none validator for `pr-claims.sh list` stdout (#153 CodeRabbit).
@@ -401,17 +436,13 @@ if [[ -z "$PR_REPO" ]]; then
   PR_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
 fi
 if [[ -z "$PR_REPO" || ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
-  _origin_url=$(git config --get remote.origin.url 2>/dev/null || true)
-  if [[ -n "$_origin_url" ]]; then
-    if _from_origin=$(normalize_github_repo_url "$_origin_url"); then
-      PR_REPO="$_from_origin"
-    else
-      PR_REPO=""
-    fi
+  # Ambiguous/multi/malformed origin leaves identity unresolved (fail closed).
+  if _from_origin=$(resolve_origin_github_repo); then
+    PR_REPO="$_from_origin"
   else
     PR_REPO=""
   fi
-  unset _origin_url _from_origin
+  unset _from_origin
 fi
 if [[ -n "$PR_REPO" && ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   PR_REPO=""
@@ -421,18 +452,25 @@ if [[ -n "$PR_REPO" ]]; then
   if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     die "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot inventory live claims for $PR_REPO; refuse rather than plan 'nothing to reap' on an unread inventory"
   fi
-  # Capture stderr separately from authoritative inventory stdout. Never merge
-  # diagnostics into parseable inventory rows: benign successful stderr must not
-  # poison a valid list, and failed diagnostics are used only on nonzero exit
-  # (#153 CodeRabbit). Never `|| true` this into an empty plan (#153 r7).
-  _pr_list_err_file=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-pr-err.XXXXXX")
-  if ! PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>"$_pr_list_err_file"); then
-    _pr_list_err=$(cat "$_pr_list_err_file" 2>/dev/null || true)
-    rm -f "$_pr_list_err_file"
+  # Capture stderr separately from authoritative inventory stdout via the
+  # shared stream-capture helper. Never merge diagnostics into parseable
+  # inventory rows: benign successful stderr must not poison a valid list,
+  # and failed diagnostics are used only on nonzero exit (#153 CodeRabbit).
+  # Never `|| true` this into an empty plan (#153 r7). Capture-infrastructure
+  # failure poisons stdout authority and is refused the same as a failed list.
+  _pr_list_rc=0
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
+  _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" || _pr_list_rc=$?
+  PR_ROWS="$_RC_CAP_STDOUT"
+  if [[ "$_pr_list_rc" -ne 0 ]]; then
+    _pr_list_err="$_RC_CAP_STDERR"
+    _RC_CAP_STDERR=""
     die "live claim inventory for $PR_REPO is unreadable — ${_pr_list_err}"
   fi
-  rm -f "$_pr_list_err_file"
-  unset _pr_list_err_file _pr_list_err
+  # Successful stderr is non-authoritative; drop it so it cannot affect rows.
+  _RC_CAP_STDERR=""
+  unset _pr_list_rc _pr_list_err
   # Successful exit is not enough: a reader that exits 0 while printing
   # malformed text must never become "nothing to reap" (#153 review round 8).
   # Validate the entire inventory all-or-none against the shared list contract
@@ -791,7 +829,7 @@ open_pr_status() {
 FRESH_PR_PROTECT_REASON=""
 fresh_open_pr_inventory_protect() {
   local target_id="$1" target_issue="$2" repo="$3"
-  local rows row number id err_file err_txt
+  local rows row number id reader_rc=0
   FRESH_PR_PROTECT_REASON=""
   if [[ -z "$repo" ]]; then
     FRESH_PR_PROTECT_REASON="repo unresolved for fresh open-PR inventory"
@@ -801,16 +839,24 @@ fresh_open_pr_inventory_protect() {
     FRESH_PR_PROTECT_REASON="authoritative PR-claim reader missing/not executable"
     return 1
   fi
-  # Capture stderr separately from authoritative inventory stdout. Never merge
-  # diagnostics into parseable inventory rows (#153 CodeRabbit).
-  err_file=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-fresh-err.XXXXXX")
-  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$repo" 2>"$err_file"); then
-    err_txt=$(cat "$err_file" 2>/dev/null || true)
-    rm -f "$err_file"
-    FRESH_PR_PROTECT_REASON="fresh open-PR inventory unreadable: $err_txt"
+  # Shared stream-capture helper: separate stderr from authoritative stdout
+  # (#153 CodeRabbit). Capture-infrastructure failure poisons stdout and
+  # refuses the same as a failed list — never invent an empty inventory.
+  if ! declare -F _rc_capture_streams >/dev/null 2>&1; then
+    FRESH_PR_PROTECT_REASON="stream-capture helper unavailable — refuse unread inventory"
     return 1
   fi
-  rm -f "$err_file"
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
+  _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" list "$repo" || reader_rc=$?
+  rows="$_RC_CAP_STDOUT"
+  if [[ "$reader_rc" -ne 0 ]]; then
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory unreadable: ${_RC_CAP_STDERR}"
+    _RC_CAP_STDERR=""
+    return 1
+  fi
+  # Successful stderr is non-authoritative.
+  _RC_CAP_STDERR=""
   # Full all-or-none validation via the shared startup contract.
   if ! validate_open_pr_inventory_rows "$repo" "$rows"; then
     FRESH_PR_PROTECT_REASON="fresh open-PR inventory malformed/truncated: $VALIDATE_PR_INVENTORY_ERR"
@@ -1632,13 +1678,15 @@ info "ledger ref: $REF; scanning claims (stale>${STALE_SECONDS}s)"
 # action\tid\tissue\tbranch\tlast_active\tage\treason\tblob\twt\tclaimed_raw\tsource\tpath\tremote_sha
 # remote_sha is the frozen live remote tip SHA (empty when proven ABSENT or unused).
 
-REPO=$(resolve_repo 2>/dev/null || true)
-# resolve_repo stops at --repo / gh and does not re-walk origin. When only the
-# GitHub origin URL supplied identity (PR_REPO path above), reuse it so plan-time
-# open-PR checks and pre-dispatch protect are not refused as "repo unresolved"
-# after a `gh repo view` failure (#153 CodeRabbit origin fallback).
-if [[ -z "$REPO" && -n "${PR_REPO:-}" ]]; then
+# Single repository identity for this run. Prefer PR_REPO — already resolved
+# with --repo / gh / unambiguous origin fallback — so plan-time open-PR checks,
+# pre-dispatch protect, and release-claim --repo never consult two different
+# identities in one iteration (#153 follow-up). resolve_repo alone stops at gh
+# and would drop a valid origin identity after `gh repo view` failure.
+if [[ -n "${PR_REPO:-}" ]]; then
   REPO="$PR_REPO"
+else
+  REPO=$(resolve_repo 2>/dev/null || true)
 fi
 
 # Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw/source/path/remote_sha.
@@ -2333,10 +2381,10 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   # before irreversible release dispatch. Startup snapshot is not enough: a
   # valid same-ID (or same-issue) open PR appearing after planning must block
   # ledger/label/worktree/branch/journal-success/handoff mutation.
-  # Pass the already-resolved PR_REPO (origin fallback included), not REPO from
-  # resolve_repo which stops at gh and can drop a valid origin identity after
-  # `gh repo view` failure (#153 CodeRabbit).
-  if ! fresh_open_pr_inventory_protect "$p_id" "$p_issue" "$PR_REPO"; then
+  # Use the same REPO identity as release-claim --repo (origin-fallback-aware
+  # PR_REPO was copied into REPO above) so protect and dispatch never consult
+  # two different repository identities in one iteration (#153 follow-up).
+  if ! fresh_open_pr_inventory_protect "$p_id" "$p_issue" "$REPO"; then
     warn "pre-dispatch: fresh open-PR inventory protects $p_id — ${FRESH_PR_PROTECT_REASON} — refuse release"
     journal_append "INCOMPLETE op=${op} reason=fresh_open_pr_protect"
     INCOMPLETE=1

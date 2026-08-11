@@ -22,6 +22,7 @@ export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REAPER="$SCRIPT_DIR/../claim-reaper.sh"
 RC="$SCRIPT_DIR/../release-claim.sh"
+STREAM_CAPTURE="$SCRIPT_DIR/../lib/stream-capture.sh"
 PASS=0
 FAIL=0
 
@@ -30,6 +31,17 @@ bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
 lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+
+# Install a sibling reaper copy with the real production stream-capture helper
+# at the path production resolves ($dest_dir/lib/stream-capture.sh). Without
+# the helper, claim-reaper fails closed rather than inventing an empty inventory.
+install_sibling_reaper() {
+  local dest_dir="$1"
+  mkdir -p "$dest_dir/lib"
+  cp "$REAPER" "$dest_dir/claim-reaper.sh"
+  chmod +x "$dest_dir/claim-reaper.sh"
+  cp "$STREAM_CAPTURE" "$dest_dir/lib/stream-capture.sh"
+}
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-reaper-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -1808,10 +1820,9 @@ new_repo "$ROOT/malinv"
   git add -A && git commit -qm 'empty ledger' && git push -q origin main
 ) >/dev/null 2>&1
 # Ship a sibling reaper whose pr-claims.sh is the hostile reader so we bind
-# SCRIPT_DIR without rewriting production path resolution.
-mkdir -p "$ROOT/malinv/scripts"
-cp "$REAPER" "$ROOT/malinv/scripts/claim-reaper.sh"
-chmod +x "$ROOT/malinv/scripts/claim-reaper.sh"
+# SCRIPT_DIR without rewriting production path resolution. Carry the real
+# stream-capture helper at the path production sources.
+install_sibling_reaper "$ROOT/malinv/scripts"
 cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
 #!/usr/bin/env bash
 # Hostile reader: exit 0 with text that is not a valid list inventory row.
@@ -2564,8 +2575,7 @@ else
   bad "mutation receipt: defect restore did not re-enable STALE reaping: out=$out spy=$(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
 fi
 # Restore production protect behaviour in the copy and re-green.
-cp "$REAPER" "$ROOT/malinv/scripts/claim-reaper.sh"
-chmod +x "$ROOT/malinv/scripts/claim-reaper.sh"
+install_sibling_reaper "$ROOT/malinv/scripts"
 : > "$ROOT/malinv/spy.log"
 out=$(
   PATH="$BIN:$PATH" \
@@ -2624,9 +2634,7 @@ echo "#153 exact-head · same-ID open PR appearing after planning blocks release
 # dispatch. Assert release spy never called and no journal success/handoff.
 new_repo "$ROOT/appear"
 add_claim_file "$ROOT/appear" issue-850-appear 850 "$CLAIMED_ISO"
-mkdir -p "$ROOT/appear/scripts"
-cp "$REAPER" "$ROOT/appear/scripts/claim-reaper.sh"
-chmod +x "$ROOT/appear/scripts/claim-reaper.sh"
+install_sibling_reaper "$ROOT/appear/scripts"
 # pr-claims list: empty on first call (planning), same-ID open row on later calls
 # (pre-dispatch revalidation).
 cat > "$ROOT/appear/scripts/pr-claims.sh" <<'READER'
@@ -2702,7 +2710,7 @@ lacks "appear-after-plan no handoff comment" "$out" "claim-reaper released"
 echo "#153 exact-head · mutation: removing pre-dispatch revalidation reaps appeared PR"
 # Mutate sibling reaper: make fresh_open_pr_inventory_protect always succeed.
 _reaper_ap="$ROOT/appear/scripts/claim-reaper.sh"
-cp "$REAPER" "$_reaper_ap"
+install_sibling_reaper "$ROOT/appear/scripts"
 # Insert an early return 0 at the top of the protect function body.
 perl -i -pe 's/^(fresh_open_pr_inventory_protect\(\) \{)/$1\n  return 0 # MUTATED always-allow/' "$_reaper_ap"
 if grep -q 'MUTATED always-allow' "$_reaper_ap"; then
@@ -2733,8 +2741,7 @@ else
   bad "mutation receipt: neutralizing revalidation did not re-enable release: out=$out spy=$(cat "$ROOT/appear/spy.log" 2>/dev/null)"
 fi
 # Restore production reaper copy for hygiene.
-cp "$REAPER" "$_reaper_ap"
-chmod +x "$_reaper_ap"
+install_sibling_reaper "$ROOT/appear/scripts"
 
 echo "#153 exact-head · mixed file+legacy same id is REFUSE (not deduped)"
 new_repo "$ROOT/mixrep"
@@ -2795,9 +2802,7 @@ echo "#153 exact-head · mutation: neutralizing mixed_ledger_representations gua
 # both file+legacy rows remain plannable (pre-fix silent survival of dual
 # rows → REAP of the file representation). Prove the mutation applied, then
 # require REAP (sensor would go red).
-mkdir -p "$ROOT/mixmutr"
-cp "$REAPER" "$ROOT/mixmutr/claim-reaper.sh"
-chmod +x "$ROOT/mixmutr/claim-reaper.sh"
+install_sibling_reaper "$ROOT/mixmutr"
 # Sibling empty pr-claims so SCRIPT_DIR resolution succeeds (no live open PRs).
 cat > "$ROOT/mixmutr/pr-claims.sh" <<'READER'
 #!/usr/bin/env bash
@@ -2897,11 +2902,10 @@ contains "fetch failure ledger preserved" "$files" "issue-880-fetchz.md"
 echo "#153 CodeRabbit · benign successful stderr does not poison inventory stdout"
 # pr-claims.sh list exits 0 with a well-formed row on stdout and a warning on
 # stderr. Merging 2>&1 would make the inventory look malformed; separate
-# capture must keep the row valid and protect the open claim.
+# capture (shared stream-capture helper) must keep the row valid and protect
+# the open claim. Do not weaken this sensor.
 new_repo "$ROOT/benign"
-mkdir -p "$ROOT/benign/scripts"
-cp "$REAPER" "$ROOT/benign/scripts/claim-reaper.sh"
-chmod +x "$ROOT/benign/scripts/claim-reaper.sh"
+install_sibling_reaper "$ROOT/benign/scripts"
 cat > "$ROOT/benign/scripts/pr-claims.sh" <<'READER'
 #!/usr/bin/env bash
 case "${1:-}" in
@@ -2934,18 +2938,16 @@ lacks "benign stderr is not malformed refuse" "$out" "malformed/truncated row"
 lacks "benign stderr is not unreadable refuse" "$out" "unreadable"
 
 echo "#153 CodeRabbit · origin-fallback PR_REPO reaches fresh pre-dispatch protect"
-# When `gh repo view` fails, PR_REPO still resolves from the GitHub origin URL.
-# resolve_repo() does not do that fallback, so pre-dispatch must pass PR_REPO
-# (not REPO) or a valid origin identity is dropped and protect refuses as
-# "repo unresolved".
+# When `gh repo view` fails, identity still resolves from exactly one GitHub
+# origin URL. That same identity must drive startup inventory, pre-dispatch
+# protect, and release-claim --repo (never drop origin into "repo unresolved").
 new_repo "$ROOT/origfb"
 add_claim_file "$ROOT/origfb" issue-890-origfb 890 "$CLAIMED_ISO"
 # Bind a GitHub identity on origin while still using the local bare for transport.
 git -C "$ROOT/origfb/canon" config "url.$ROOT/origfb/origin.insteadOf" https://github.com/acme/app.git
 git -C "$ROOT/origfb/canon" remote set-url origin https://github.com/acme/app.git
-mkdir -p "$ROOT/origfb/scripts" "$ROOT/origfb/bin"
-cp "$REAPER" "$ROOT/origfb/scripts/claim-reaper.sh"
-chmod +x "$ROOT/origfb/scripts/claim-reaper.sh"
+mkdir -p "$ROOT/origfb/bin"
+install_sibling_reaper "$ROOT/origfb/scripts"
 # pr-claims: empty on first call (plan REAP); same-id open PR on later calls.
 # Also log the repo argument so we prove origin-fallback identity was used.
 : > "$ROOT/origfb/list-repos.log"
@@ -3010,7 +3012,6 @@ chmod +x "$spy_of"
 state_of="$STATE_BASE/origfb"
 mkdir -p "$state_of"
 : > "$state_of/journal.md"
-export GH_PR_COUNT=0
 out=$(
   PATH="$ROOT/origfb/bin:$BIN:$PATH" \
   ORIGFB_CNT="$ROOT/origfb/origfb.count" \
@@ -3025,8 +3026,12 @@ out=$(
     "$ROOT/origfb/scripts/claim-reaper.sh" --claim-id issue-890-origfb --apply 2>&1
 )
 rc=$?
-# Must reach fresh protect (not die as repo unresolved / unreadable at startup).
-contains "origin-fallback reaches fresh protect" "$out" "fresh open-PR inventory protects"
+# Exact protected claim/reason — not the generic "fresh open-PR inventory protects"
+# prefix that also covers "repo unresolved".
+contains "origin-fallback exact claim protect" "$out" \
+  "carries exact claim id 'issue-890-origfb'"
+[[ "$rc" -ne 0 ]] && ok "origin-fallback incomplete/nonzero (rc=$rc)" \
+  || bad "origin-fallback exited 0 after protect: $out"
 if grep -qxF 'acme/app' "$ROOT/origfb/list-repos.log"; then
   ok "origin-fallback list was called with acme/app"
 else
@@ -3044,6 +3049,159 @@ check "origin-fallback zero release-spy" "$_spy_n" "0"
 files=$(git -C "$ROOT/origfb/canon" fetch -q origin 2>/dev/null
   git -C "$ROOT/origfb/canon" ls-tree --name-only origin/main docs/claims/)
 contains "origin-fallback ledger preserved" "$files" "issue-890-origfb.md"
+
+echo "#153 follow-up · ambiguous multi-valued origin leaves identity unresolved"
+# `git config --get remote.origin.url` returns the LAST value when several
+# exist. Two different GitHub origins + failing gh must leave identity
+# unresolved: no release dispatch, claim/ledger preserved.
+new_repo "$ROOT/ambig"
+add_claim_file "$ROOT/ambig" issue-891-ambig 891 "$CLAIMED_ISO"
+# Keep transport hermetic via insteadOf for BOTH GitHub URLs, but configure two
+# distinct remote.origin.url values so identity is ambiguous (--get-all).
+git -C "$ROOT/ambig/canon" config "url.$ROOT/ambig/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/ambig/canon" config --add "url.$ROOT/ambig/origin.insteadOf" https://github.com/other/app.git
+git -C "$ROOT/ambig/canon" remote set-url origin https://github.com/acme/app.git
+git -C "$ROOT/ambig/canon" config --add remote.origin.url https://github.com/other/app.git
+# Prove two origin values exist (fixture integrity).
+_ambig_n=$(git -C "$ROOT/ambig/canon" config --get-all remote.origin.url 2>/dev/null | grep -c . || true)
+[[ "$_ambig_n" -eq 2 ]] && ok "ambiguous-origin fixture has two origin URLs" \
+  || bad "ambiguous-origin fixture origin count=$_ambig_n"
+mkdir -p "$ROOT/ambig/bin"
+install_sibling_reaper "$ROOT/ambig/scripts"
+: > "$ROOT/ambig/list-repos.log"
+cat > "$ROOT/ambig/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+LOG_FILE="${AMBIG_LOG:-/tmp/ambig.repos}"
+case "${1:-}" in
+  list)
+    printf '%s\n' "${2:-}" >> "$LOG_FILE"
+    # Empty inventory so a wrongly-resolved identity would still plan REAP
+    # of the ledger claim — dispatch must still be blocked.
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/ambig/scripts/pr-claims.sh"
+cat > "$ROOT/ambig/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1" in
+  repo)
+    echo "simulated gh repo view failure" >&2
+    exit 1
+    ;;
+  pr)
+    echo "0"
+    exit 0
+    ;;
+  api)
+    if [[ "${2:-}" == "graphql" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  issue)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+GH
+chmod +x "$ROOT/ambig/bin/gh"
+spy_am="$ROOT/ambig/spy-release.sh"
+cat > "$spy_am" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_am"
+: > "$ROOT/ambig/spy.log"
+state_am="$STATE_BASE/ambig"
+mkdir -p "$state_am"
+: > "$state_am/journal.md"
+out=$(
+  PATH="$ROOT/ambig/bin:$BIN:$PATH" \
+  AMBIG_LOG="$ROOT/ambig/list-repos.log" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/ambig/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_am" \
+  GIBSON_REAPER_JOURNAL="$state_am/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_am/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_am" \
+  SPY_LOG="$ROOT/ambig/spy.log" \
+    "$ROOT/ambig/scripts/claim-reaper.sh" --claim-id issue-891-ambig --apply 2>&1
+)
+rc=$?
+# Must not invent a single owner/name from multi-valued origin.
+if grep -Eqx 'acme/app|other/app' "$ROOT/ambig/list-repos.log" 2>/dev/null; then
+  bad "ambiguous-origin invented a repo identity for inventory: $(cat "$ROOT/ambig/list-repos.log")"
+else
+  ok "ambiguous-origin never called inventory with a resolved identity"
+fi
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/ambig/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+check "ambiguous-origin zero release-spy" "$_spy_n" "0"
+contains "ambiguous-origin plans explicit repository refusal" "$out" \
+  "repo_unresolved_for_pr_check"
+[[ "$rc" -ne 0 ]] && ok "ambiguous-origin incomplete/nonzero (rc=$rc)" \
+  || {
+    # rc=0 only OK if release never fired and ledger still live
+    if [[ "$_spy_n" -eq 0 ]]; then
+      ok "ambiguous-origin rc=0 with zero release (identity unresolved)"
+    else
+      bad "ambiguous-origin rc=0 but release spy fired"
+    fi
+  }
+files=$(git -C "$ROOT/ambig/canon" fetch -q origin 2>/dev/null
+  git -C "$ROOT/ambig/canon" ls-tree --name-only origin/main docs/claims/)
+contains "ambiguous-origin ledger preserved" "$files" "issue-891-ambig.md"
+if [[ -s "$state_am/journal.md" ]] && grep -qE 'COMPLETED|claim_released=1' "$state_am/journal.md" 2>/dev/null; then
+  bad "ambiguous-origin journal has success/handoff: $(cat "$state_am/journal.md")"
+else
+  ok "ambiguous-origin: no journal success/handoff"
+fi
+
+echo "#153 follow-up · stream-capture helper required (fail closed when missing)"
+# Production sources scripts/lib/stream-capture.sh. A sibling copy without the
+# helper must refuse rather than hand-roll empty inventory authority.
+new_repo "$ROOT/nocap"
+add_claim_file "$ROOT/nocap" issue-892-nocap 892 "$CLAIMED_ISO"
+mkdir -p "$ROOT/nocap/scripts"
+cp "$REAPER" "$ROOT/nocap/scripts/claim-reaper.sh"
+chmod +x "$ROOT/nocap/scripts/claim-reaper.sh"
+# Intentionally omit lib/stream-capture.sh.
+cat > "$ROOT/nocap/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in list) exit 0 ;; *) exit 64 ;; esac
+READER
+chmod +x "$ROOT/nocap/scripts/pr-claims.sh"
+state_nc="$STATE_BASE/nocap"
+mkdir -p "$state_nc"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/nocap/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_nc" \
+  GIBSON_REAPER_JOURNAL="$state_nc/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_nc/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/nocap/scripts/claim-reaper.sh" --repo acme/app --claim-id issue-892-nocap 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing stream-capture exits nonzero" \
+  || bad "missing stream-capture exited 0: $out"
+contains "missing stream-capture names helper" "$out" "stream-capture"
+lacks "missing stream-capture never nothing-to-reap" "$out" "nothing to reap"
+lacks "missing stream-capture never empty plan" "$out" "summary: reap="
+# Static proof production uses the shared helper (not a hand-rolled mktemp path).
+if grep -q 'lib/stream-capture.sh' "$REAPER" && \
+   grep -q '_rc_capture_streams' "$REAPER" && \
+   ! grep -qE 'gibson-reaper-pr-err|gibson-reaper-fresh-err' "$REAPER"; then
+  ok "reaper production uses shared stream-capture helper"
+else
+  bad "reaper production does not bind shared stream-capture helper"
+fi
 
 echo "#153 CodeRabbit · comm failure refuse (fail closed, no stale mix output)"
 # Mixed file+legacy same id must run comm -12. A failing comm must die rather
@@ -3092,7 +3250,8 @@ contains "comm failure names refuse" "$out" "comm failed"
 lacks "comm failure never REAP" "$out" "REAP   issue-900-comm"
 lacks "comm failure not silent nothing-to-reap" "$out" "nothing to reap"
 
-echo "#153 CodeRabbit · docs contract: README list TSV is eight fields; derives from"
+echo "#153 CodeRabbit · docs contract: repository binding, head evidence, mixed refuse, label safety, eight-field TSV"
+# Semantic documentation contracts only — not general spelling preferences.
 README="$SCRIPT_DIR/../README.md"
 if grep -qF 'is_cross_repository — eight fields' "$README" && \
    grep -qF 'is_cross_repository` is eighth after' "$README"; then
@@ -3105,11 +3264,6 @@ if grep -qF 'the branch its claim id derives from' "$README"; then
 else
   bad "scripts/README.md head-branch binding missing 'from'"
 fi
-if grep -qF 'afterwards' "$README"; then
-  bad "scripts/README.md still uses British 'afterwards'"
-else
-  ok "scripts/README.md uses American 'afterward'"
-fi
 PLAYBOOK="$SCRIPT_DIR/../../playbooks/release.md"
 if grep -qF 'the branch this claim id derives from' "$PLAYBOOK"; then
   ok "playbooks/release.md head-branch binding includes 'from'"
@@ -3121,9 +3275,9 @@ if grep -qF 'exact released PR number and exact' "$TROUBLE" && \
    grep -qF 'Mixed PR-body + legacy-ledger' "$TROUBLE" && \
    grep -qF 'Manual `agent-claimed` label removal' "$TROUBLE" && \
    grep -qF 'PR-backed claims stay refused' "$TROUBLE"; then
-  ok "claim-conflicts.md carries CodeRabbit repair contracts"
+  ok "claim-conflicts.md carries repository/mixed/label/PR refuse contracts"
 else
-  bad "claim-conflicts.md missing CodeRabbit repair contracts"
+  bad "claim-conflicts.md missing repository/mixed/label/PR refuse contracts"
 fi
 
 # ---------------------------------------------------------------------------
