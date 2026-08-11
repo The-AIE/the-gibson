@@ -190,8 +190,11 @@ done
 # Joined form is display / PR-body metadata ONLY. Execution and validation
 # always iterate SCOPE_PARTS unflattened so a quoted literal `*`, `**`, or
 # `a/**/b` reaches the sensor byte-for-byte (#153 review round 7).
-SCOPE="${SCOPE_PARTS[*]}"
+# Check length BEFORE expanding ${SCOPE_PARTS[*]}: under Bash 3.2 with set -u,
+# expanding an empty array is an unbound-variable error and never reaches the
+# intended "no scope given" message / exit 2 (#153 CodeRabbit).
 [[ ${#SCOPE_PARTS[@]} -gt 0 ]] || { echo "claim.sh: ERROR: no scope given" >&2; exit 2; }
+SCOPE="${SCOPE_PARTS[*]}"
 
 CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
 SESSION="${GIBSON_SESSION:-${USER:-agent}@$(hostname -s 2>/dev/null || echo host)}"

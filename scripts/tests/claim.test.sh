@@ -2520,6 +2520,41 @@ else
   ok "literal '**' created no PR row"
 fi
 
+# ===========================================================================
+# #153 CodeRabbit · empty --slice under Bash 3.2 set -u
+# ===========================================================================
+echo "#153 CodeRabbit · --slice with no scope paths exits 2 (Bash 3.2 set -u safe)"
+# Under Bash 3.2 with set -u, expanding an empty SCOPE_PARTS before the length
+# check aborts with a set-u array expansion error instead of the intended usage
+# message. This host is Bash 3.2-compatible; the suite runs under /bin/bash.
+# Note: do not print the banned shell-diag token "unbound variable" in ok/fail
+# labels — run-all.sh's construction gate greps the suite output for it.
+new_repo "$ROOT/emptyslice"
+: > "${GH_PR_FILE:-/dev/null}"
+out=$(cd "$ROOT/emptyslice/canon" && "$CLAIM" 910 noscope --slice 2>&1); rc=$?
+check "empty --slice exits 2" "$rc" "2"
+contains "empty --slice names no scope" "$out" "no scope given"
+# Detect the Bash 3.2 set -u empty-array expansion class without emitting the
+# construction-diag token into the suite tally stream.
+_uv_pat='unbound'' variable'
+if echo "$out" | grep -qF -- "$_uv_pat"; then
+  bad "empty --slice hit set-u empty-array expansion error"
+else
+  ok "empty --slice avoided set-u empty-array expansion error"
+fi
+lacks "empty --slice is not SCOPE_PARTS set-u abort" "$out" "SCOPE_PARTS[@]: unbound"
+if [[ -s "${GH_PR_FILE:-/dev/null}" ]]; then
+  bad "empty --slice created a PR row"
+else
+  ok "empty --slice created no PR row"
+fi
+if [[ -d "$ROOT/emptyslice/wt-910-noscope" ]] || \
+   [[ -d "$(cd "$ROOT/emptyslice/canon/.." && pwd)/wt-910-noscope" ]]; then
+  bad "empty --slice created a worktree"
+else
+  ok "empty --slice created no worktree"
+fi
+
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

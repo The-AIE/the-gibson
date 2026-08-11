@@ -39,11 +39,21 @@ of live *open* PR-body claims and legacy ledger rows.
    **terminal** state — merged or closed — and needs no file anyone edits. A
    terminal PR is *not* itself a live claim: it is **release authorization**,
    evidence used once to clean up, and the claim it names must be gone from
-   the live view afterward.
+   the live view afterward — bound to that **exact released PR number and exact
+   head SHA**. A later generation may reuse the same claim id, so "id is
+   absent" alone is not proof that *this* release finished.
 2. **Legacy main-ledger rows (still supported).** Older claims recorded a row
    in `docs/active-work.md` or a file under `docs/claims/`. New claims never
    write one; existing rows are still read and released for backward
    compatibility.
+
+**Mixed PR-body + legacy-ledger representation of the same claim id** refuses
+all release mutation until the two sides are **explicitly reconciled**. Do not
+delete one side speculatively: the dual representation is ambiguous authority,
+and either side alone can still be live work. Reconcile deliberately (close or
+release the PR path, or release the validated ledger row, under the normal
+bound forms) so exactly one authoritative representation remains before any
+further cleanup.
 
 **Precedence when releasing one exact claim id:** a live *open* PR-body claim
 is released by closing that PR; otherwise a live ledger row is released by
@@ -73,7 +83,7 @@ label is **fail-closed**: a query failure or malformed result there preserves
 | Same hot file | Serialize with `Blocked by #N`; don't parallelize |
 | Stale >24h | Verify worktree/branch activity; renew timestamp **or** release after verification |
 | Wrong session | Never strip someone else's claim without verification |
-| Label without any claim | `release-claim.sh` or manual: remove label |
+| Label without any claim | Prefer `release-claim.sh` / reaper. Manual `agent-claimed` removal only after a successful validated union read with **no** sibling claim, then a successful post-removal reread (see below) |
 | "no live claim ... at origin/main" but the draft PR already merged/closed | Re-run with the exact `--claim-id <id> --repo owner/name` — release-claim.sh now verifies against the finished PR directly (see Recovery) |
 
 ## Recovery
@@ -133,16 +143,24 @@ git -C "$GIBSON_CANONICAL" config --get-all remote.origin.url
   clone into the right one.
 - **No origin, or more than one `remote.origin.url`** — the checkout has no
   single repository identity. Fix the remote before releasing.
-- **A non-GitHub origin** (a bare path, a mirror) — there can be no PR-body
-  claim for that checkout, so the release falls back to the ledger and says so.
+- **PR-backed claims stay refused** until the canonical origin's repository
+  identity **matches** the PR's repository. Mismatch is not a soft warning and
+  is not cured by `--repo`. There is no "close enough" clone.
+- **Legacy ledger only when that is the claim** — a **separately validated**
+  legacy-ledger claim (no live open PR-body row for that claim id, ledger row
+  readable and well-formed on the authoritative remote) may use the ledger
+  release path. A non-GitHub origin (bare path, mirror) cannot host PR-body
+  evidence for this checkout; that does **not** let a PR-backed claim fall
+  through to the ledger. If the live view still shows a PR-body claim for the
+  id, fix the origin binding — do not invent a ledger release.
 
-## "is not the branch this claim id derives" on release
+## "is not the branch this claim id derives from" on release
 
 `release-claim.sh` refused **before closing anything**: the open PR carrying this
 claim marker has a head branch that is not `feat/<issue>-<slug>`.
 
 `gh pr close` is irreversible, so the PR's identity has to be bound before it, not
-discovered afterwards. An exact claim marker in the body of a PR on an unrelated
+discovered afterward. An exact claim marker in the body of a PR on an unrelated
 branch is not authority to close that PR — someone may have copied a marker, or the
 lane may have been re-branched by hand. Nothing was mutated: the PR is still open,
 the label untouched, the worktree and both branch refs untouched.
@@ -296,7 +314,8 @@ are all backing a claim that may still be open. Those messages name what happene
 | `gh pr create exited N ... not proof GitHub created nothing` | The create call FAILED and the live inventory shows no claim — but a nonzero exit is only the client's view of the call. GitHub can create the PR and lose the response, and the PR list is eventually consistent, so one empty read proves nothing either. **A real, open claim PR may exist.** | Look for an open draft PR on the claim's head branch (`gh pr list --head feat/<issue>-<slug>`), close it if it is there, then remove the retained worktree/branch by hand and re-claim. Nothing was destroyed on your behalf. |
 | `not provably this lane's` | A live PR matched by number but carries someone else's claim id or head branch. | Investigate before touching anything — this lane refused to close a PR it could not prove was its own. |
 
-That output is the work list. For each named item:
+That output is the work list. **Prefer the bound release / reaper path** — do not
+authorize unbound manual branch or worktree cleanup. Inspect only:
 
 ```bash
 git -C <canonical> worktree list --porcelain        # what is actually registered
@@ -306,11 +325,15 @@ git ls-remote --heads origin <branch>               # what origin still has
 ```
 
 Decide deliberately: keep the work (move the branch somewhere safe, or let the lane
-own it again), or remove the artifact by hand once you have looked at it. Never
-`rm -rf` a listed worktree without reading its status first — the whole point of the
-refusal is that something in there was not accounted for. Note that a kept worktree
-also keeps its branches on purpose: a retained tree must not be orphaned from its
-own history.
+own it again), or finish cleanup with the **bound** form of `release-claim.sh` /
+`claim-reaper.sh` once evidence is clean. If you must clean by hand (scripts
+unavailable, emergency only), every deletion must prove **all** of: exact
+registered worktree path (from `worktree list --porcelain`, never a guessed
+default), matching origin repository identity, exact branch name, exact head SHA
+(or safe containment in the merge), clean worktree state, and CAS-safe local and
+remote branch deletion proofs — the same identity gates the scripts enforce.
+Never `rm -rf` a listed worktree without those proofs. A kept worktree also keeps
+its branches on purpose: a retained tree must not be orphaned from its own history.
 
 ## A lane that was KILLED leaves everything behind
 
@@ -341,3 +364,26 @@ That last command runs the exact verified cleanup (registered-worktree proof,
 head-SHA containment, compare-and-swap branch deletes) and removes `agent-claimed`
 only after proving no sibling claim still needs it. Do not delete the worktree or
 the branch first: their identity proof is anchored to the terminal PR's head SHA.
+"Gone from the live view" after this path means the **exact released PR number
+and exact head SHA** for that generation are no longer live evidence — not merely
+that the claim id string is absent (a later generation may reuse the id).
+
+## Manual `agent-claimed` label removal
+
+Prefer `release-claim.sh` / `claim-reaper.sh`. The issue-wide label is shared
+authority: stripping it by hand without a sibling check can unprotect a live
+lane on the same issue.
+
+If you must remove it manually:
+
+1. Run a **successful validated union read** of the one authoritative live-claim
+   view (`pr-claims.sh list` plus legacy ledger rows on the authoritative remote).
+2. Prove there is **no sibling claim** for that issue (no live open PR-body row
+   and no live ledger row that still needs the label).
+3. Only then remove `agent-claimed`.
+4. Run a **successful post-removal reread** of the label (and preferably the
+   union) and confirm it stayed gone.
+
+If the inventory is **malformed, unreadable, or unstable**, preserve
+`agent-claimed` and report the cleanup **incomplete** — never treat "I could not
+read the view" as "no sibling remains."

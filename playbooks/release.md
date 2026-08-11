@@ -308,7 +308,7 @@ guessing the claim is gone.
 
 **The PR's identity is bound before it is closed.** `gh pr close` is the first
 mutation on this path, so the repository binding *and* the head-branch binding run
-before it: the PR's head branch must be exactly the branch this claim id derives
+before it: the PR's head branch must be exactly the branch this claim id derives from
 (`feat/<issue>-<slug>`). An exact claim marker in the body of a PR on an unrelated
 branch is not authority to close that PR, and that mismatch is a plain refusal —
 **exit 1**, PR still open, no label edit, no worktree or branch touched — including

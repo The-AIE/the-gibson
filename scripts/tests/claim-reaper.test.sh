@@ -2891,6 +2891,241 @@ files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/fetchz/canon" fetch -q origin 2
   PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/fetchz/canon" ls-tree --name-only origin/main docs/claims/)
 contains "fetch failure ledger preserved" "$files" "issue-880-fetchz.md"
 
+# ===========================================================================
+# #153 CodeRabbit exact-head repair — stderr, origin fallback, comm fail-closed
+# ===========================================================================
+echo "#153 CodeRabbit · benign successful stderr does not poison inventory stdout"
+# pr-claims.sh list exits 0 with a well-formed row on stdout and a warning on
+# stderr. Merging 2>&1 would make the inventory look malformed; separate
+# capture must keep the row valid and protect the open claim.
+new_repo "$ROOT/benign"
+mkdir -p "$ROOT/benign/scripts"
+cp "$REAPER" "$ROOT/benign/scripts/claim-reaper.sh"
+chmod +x "$ROOT/benign/scripts/claim-reaper.sh"
+cat > "$ROOT/benign/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    echo "gh: notice: GraphQL deprecation warning (benign)" >&2
+    printf '7\tissue-7-live\tlib/**\tfeat/7-live\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/benign/scripts/pr-claims.sh"
+state_bn="$STATE_BASE/benign"
+mkdir -p "$state_bn"
+: > "$state_bn/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$FRESH_NOW" \
+  GIBSON_CANONICAL="$ROOT/benign/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_bn" \
+  GIBSON_REAPER_JOURNAL="$state_bn/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_bn/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/benign/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+check "benign stderr inventory exits 0" "$rc" "0"
+contains "benign stderr row is protected" "$out" "issue-7-live"
+lacks "benign stderr is not malformed refuse" "$out" "malformed/truncated row"
+lacks "benign stderr is not unreadable refuse" "$out" "unreadable"
+
+echo "#153 CodeRabbit · origin-fallback PR_REPO reaches fresh pre-dispatch protect"
+# When `gh repo view` fails, PR_REPO still resolves from the GitHub origin URL.
+# resolve_repo() does not do that fallback, so pre-dispatch must pass PR_REPO
+# (not REPO) or a valid origin identity is dropped and protect refuses as
+# "repo unresolved".
+new_repo "$ROOT/origfb"
+add_claim_file "$ROOT/origfb" issue-890-origfb 890 "$CLAIMED_ISO"
+# Bind a GitHub identity on origin while still using the local bare for transport.
+git -C "$ROOT/origfb/canon" config "url.$ROOT/origfb/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/origfb/canon" remote set-url origin https://github.com/acme/app.git
+mkdir -p "$ROOT/origfb/scripts" "$ROOT/origfb/bin"
+cp "$REAPER" "$ROOT/origfb/scripts/claim-reaper.sh"
+chmod +x "$ROOT/origfb/scripts/claim-reaper.sh"
+# pr-claims: empty on first call (plan REAP); same-id open PR on later calls.
+# Also log the repo argument so we prove origin-fallback identity was used.
+: > "$ROOT/origfb/list-repos.log"
+cat > "$ROOT/origfb/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+CNT_FILE="${ORIGFB_CNT:-/tmp/origfb.count}"
+LOG_FILE="${ORIGFB_LOG:-/tmp/origfb.repos}"
+case "${1:-}" in
+  list)
+    printf '%s\n' "${2:-}" >> "$LOG_FILE"
+    n=0
+    [[ -f "$CNT_FILE" ]] && n=$(cat "$CNT_FILE" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$CNT_FILE"
+    if [[ "$n" -le 1 ]]; then
+      exit 0
+    fi
+    printf '890\tissue-890-origfb\tlib/**\tfeat/890-origfb\thttps://github.com/acme/app/pull/890\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/origfb/scripts/pr-claims.sh"
+# gh: repo view fails; pr list still succeeds with 0 open (branch-specific check).
+cat > "$ROOT/origfb/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1" in
+  repo)
+    echo "simulated gh repo view failure" >&2
+    exit 1
+    ;;
+  pr)
+    echo "0"
+    exit 0
+    ;;
+  api)
+    if [[ "${2:-}" == "graphql" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  issue)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+GH
+chmod +x "$ROOT/origfb/bin/gh"
+spy_of="$ROOT/origfb/spy-release.sh"
+cat > "$spy_of" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_of"
+: > "$ROOT/origfb/spy.log"
+: > "$ROOT/origfb/origfb.count"
+: > "$ROOT/origfb/list-repos.log"
+state_of="$STATE_BASE/origfb"
+mkdir -p "$state_of"
+: > "$state_of/journal.md"
+export GH_PR_COUNT=0
+out=$(
+  PATH="$ROOT/origfb/bin:$BIN:$PATH" \
+  ORIGFB_CNT="$ROOT/origfb/origfb.count" \
+  ORIGFB_LOG="$ROOT/origfb/list-repos.log" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/origfb/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_of" \
+  GIBSON_REAPER_JOURNAL="$state_of/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_of/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_of" \
+  SPY_LOG="$ROOT/origfb/spy.log" \
+    "$ROOT/origfb/scripts/claim-reaper.sh" --claim-id issue-890-origfb --apply 2>&1
+)
+rc=$?
+# Must reach fresh protect (not die as repo unresolved / unreadable at startup).
+contains "origin-fallback reaches fresh protect" "$out" "fresh open-PR inventory protects"
+if grep -qxF 'acme/app' "$ROOT/origfb/list-repos.log"; then
+  ok "origin-fallback list was called with acme/app"
+else
+  bad "origin-fallback list never saw acme/app: $(cat "$ROOT/origfb/list-repos.log")"
+fi
+# Must not have been called with an empty repo identity.
+if grep -qxF '' "$ROOT/origfb/list-repos.log"; then
+  bad "origin-fallback list was called with empty repo identity"
+else
+  ok "origin-fallback list never saw empty repo identity"
+fi
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/origfb/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+check "origin-fallback zero release-spy" "$_spy_n" "0"
+files=$(git -C "$ROOT/origfb/canon" fetch -q origin 2>/dev/null
+  git -C "$ROOT/origfb/canon" ls-tree --name-only origin/main docs/claims/)
+contains "origin-fallback ledger preserved" "$files" "issue-890-origfb.md"
+
+echo "#153 CodeRabbit · comm failure refuse (fail closed, no stale mix output)"
+# Mixed file+legacy same id must run comm -12. A failing comm must die rather
+# than plan REAP from a missing/stale .both file.
+new_repo "$ROOT/commfail"
+(
+  cd "$ROOT/commfail/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  cat > docs/claims/issue-900-comm.md <<EOF
+claim: issue-900-comm
+issue: 900
+claimed: $CLAIMED_ISO
+scope: src/issue-900-comm
+session: test@box
+branch: feat/900-comm
+EOF
+  printf '| when | claim-id | scope | who |\n|---|---|---|---|\n' > docs/active-work.md
+  printf '| %s | issue-900-comm | src/issue-900-comm | test@box |\n' "$CLAIMED_ISO" >> docs/active-work.md
+  git add -A && git commit -qm "mixed reps for comm fail" && git push -q origin main
+) >/dev/null 2>&1
+mkdir -p "$ROOT/commfail/bin"
+COMM_REAL=$(command -v comm)
+cat > "$ROOT/commfail/bin/comm" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "-12" ]]; then
+  echo "simulated comm failure" >&2
+  exit 1
+fi
+exec "$COMM_REAL" "\$@"
+EOF
+chmod +x "$ROOT/commfail/bin/comm"
+out=$(
+  PATH="$ROOT/commfail/bin:$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/commfail/canon" \
+  GIBSON_REAPER_STATE_DIR="$STATE_BASE/commfail" \
+  GIBSON_REAPER_JOURNAL="$STATE_BASE/commfail/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$STATE_BASE/commfail/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$REAPER" --repo acme/app --claim-id issue-900-comm 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "comm failure exits nonzero" || bad "comm failure exited 0: $out"
+contains "comm failure names refuse" "$out" "comm failed"
+lacks "comm failure never REAP" "$out" "REAP   issue-900-comm"
+lacks "comm failure not silent nothing-to-reap" "$out" "nothing to reap"
+
+echo "#153 CodeRabbit · docs contract: README list TSV is eight fields; derives from"
+README="$SCRIPT_DIR/../README.md"
+if grep -qF 'is_cross_repository — eight fields' "$README" && \
+   grep -qF 'is_cross_repository` is eighth after' "$README"; then
+  ok "scripts/README.md documents eight-field list TSV"
+else
+  bad "scripts/README.md missing eight-field list TSV contract"
+fi
+if grep -qF 'the branch its claim id derives from' "$README"; then
+  ok "scripts/README.md head-branch binding includes 'from'"
+else
+  bad "scripts/README.md head-branch binding missing 'from'"
+fi
+if grep -qF 'afterwards' "$README"; then
+  bad "scripts/README.md still uses British 'afterwards'"
+else
+  ok "scripts/README.md uses American 'afterward'"
+fi
+PLAYBOOK="$SCRIPT_DIR/../../playbooks/release.md"
+if grep -qF 'the branch this claim id derives from' "$PLAYBOOK"; then
+  ok "playbooks/release.md head-branch binding includes 'from'"
+else
+  bad "playbooks/release.md head-branch binding missing 'from'"
+fi
+TROUBLE="$SCRIPT_DIR/../../docs/troubleshooting/claim-conflicts.md"
+if grep -qF 'exact released PR number and exact' "$TROUBLE" && \
+   grep -qF 'Mixed PR-body + legacy-ledger' "$TROUBLE" && \
+   grep -qF 'Manual `agent-claimed` label removal' "$TROUBLE" && \
+   grep -qF 'PR-backed claims stay refused' "$TROUBLE"; then
+  ok "claim-conflicts.md carries CodeRabbit repair contracts"
+else
+  bad "claim-conflicts.md missing CodeRabbit repair contracts"
+fi
+
 # ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"

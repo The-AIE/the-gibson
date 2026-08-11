@@ -292,6 +292,110 @@ normalize_github_repo_url() {
   printf '%s/%s\n' "$owner" "$name"
 }
 
+# Shared all-or-none validator for `pr-claims.sh list` stdout (#153 CodeRabbit).
+# Used by startup inventory and fresh_open_pr_inventory_protect so both sites
+# enforce the same rules and the same diagnostics. Does not weaken any rule
+# relative to the previous stronger startup validator.
+#
+# Args: <expected-repo owner/name> <inventory-stdout>
+# On success: returns 0 and clears VALIDATE_PR_INVENTORY_ERR.
+# On failure: sets VALIDATE_PR_INVENTORY_ERR to a single-row diagnostic and
+# returns 1. Empty inventory (no non-empty rows) is valid success.
+VALIDATE_PR_INVENTORY_ERR=""
+validate_open_pr_inventory_rows() {
+  local repo="$1" rows="$2"
+  local bad_row="" row fields number id scope head url created updated cross
+  local url_repo url_num
+  VALIDATE_PR_INVENTORY_ERR=""
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    fields=$(awk -F'\t' '{print NF}' <<<"$row")
+    number=$(cut -f1 <<<"$row")
+    id=$(cut -f2 <<<"$row")
+    scope=$(cut -f3 <<<"$row")
+    head=$(cut -f4 <<<"$row")
+    url=$(cut -f5 <<<"$row")
+    created=$(cut -f6 <<<"$row")
+    updated=$(cut -f7 <<<"$row")
+    cross=$(cut -f8 <<<"$row")
+    if [[ "$fields" -ne 8 ]]; then
+      bad_row="want 8 tab-separated fields, got ${fields}: ${row}"
+      break
+    fi
+    # GitHub pull-request numbers are positive canonical decimals in the
+    # script's safe integer range (1..MAX_SAFE_INT). Reject zero, leading-zero,
+    # and overflow-length forms before any classification, planning, journaling,
+    # or release (#153 review-ten/eleven P1). Do not normalize malformed input
+    # into a valid identity — independent of the URL check below.
+    if ! parse_canonical_positive_int "$number" >/dev/null; then
+      bad_row="PR number is noncanonical/unsafe (want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${row}"
+      break
+    fi
+    # Issue-bound claim id: issue-[optional-ns-]<digits>-<slug>, same family
+    # pr-claims.sh / claim-reaper already require for live claims.
+    if [[ ! "$id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+      bad_row="claim id is not a valid issue-bound id: ${row}"
+      break
+    fi
+    if [[ -z "$scope" ]]; then
+      bad_row="empty claim scope: ${row}"
+      break
+    fi
+    if [[ -z "$head" || ! "$head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      bad_row="missing/unsafe head branch: ${row}"
+      break
+    fi
+    # URL /pull/N must independently be a positive canonical decimal —
+    # not merely digit-only. Zero and leading-zero URL components fail the
+    # shape match; arbitrarily long digit strings match shape but fail the
+    # independent safe-range parse below (#153 review-ten/eleven P1).
+    if [[ -z "$url" || ! "$url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
+      bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${row}"
+      break
+    fi
+    # Capture before any further =~ (parse_canonical_positive_int uses regex).
+    # Conjunctive identity binding (#153 review-nine P1): a plausible PR URL
+    # shape is not enough. The URL's owner/repo must equal the expected repo
+    # and its /pull/N must equal the row number before the row may be
+    # classified or released. Do not case-fold or rewrite URL components —
+    # GitHub identity comparison is exact string equality on the captured
+    # path segments (same rule pr-claims.sh / scope-overlap.mjs already enforce).
+    url_repo="${BASH_REMATCH[1]}"
+    url_num="${BASH_REMATCH[2]}"
+    # Independent safe-range check on the captured /pull/N component. The regex
+    # alone admits arbitrarily long digit strings; bound them before repository
+    # or number equality so an overflow URL is diagnosed as unsafe identity,
+    # not merely a row/URL mismatch (#153 review-eleven P1).
+    if ! parse_canonical_positive_int "$url_num" >/dev/null; then
+      bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${row}"
+      break
+    fi
+    if [[ "$url_repo" != "$repo" ]]; then
+      bad_row="PR URL repository ('${url_repo}') does not match inventory repository ('${repo}'): ${row}"
+      break
+    fi
+    if [[ "$url_num" != "$number" ]]; then
+      bad_row="PR URL pull-number ('${url_num}') does not match row PR number ('${number}'): ${row}"
+      break
+    fi
+    if [[ -z "$created" || -z "$updated" ]]; then
+      bad_row="missing created/updated timestamp: ${row}"
+      break
+    fi
+    if [[ "$cross" != "true" && "$cross" != "false" ]]; then
+      bad_row="repository-identity column is neither 'true' nor 'false' ('${cross:-<empty>}'): ${row}"
+      break
+    fi
+  done <<EOF
+$rows
+EOF
+  if [[ -n "$bad_row" ]]; then
+    VALIDATE_PR_INVENTORY_ERR="$bad_row"
+    return 1
+  fi
+  return 0
+}
+
 PR_REPO="${REPO_ARG:-}"
 if [[ -z "$PR_REPO" ]]; then
   PR_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
@@ -317,107 +421,25 @@ if [[ -n "$PR_REPO" ]]; then
   if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     die "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot inventory live claims for $PR_REPO; refuse rather than plan 'nothing to reap' on an unread inventory"
   fi
-  # Keep stderr so a failed/malformed inventory names the real cause. Never
-  # `|| true` this into an empty plan (#153 review round 7).
-  _pr_list_err=""
-  if ! PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>&1); then
-    _pr_list_err="$PR_ROWS"
+  # Capture stderr separately from authoritative inventory stdout. Never merge
+  # diagnostics into parseable inventory rows: benign successful stderr must not
+  # poison a valid list, and failed diagnostics are used only on nonzero exit
+  # (#153 CodeRabbit). Never `|| true` this into an empty plan (#153 r7).
+  _pr_list_err_file=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-pr-err.XXXXXX")
+  if ! PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>"$_pr_list_err_file"); then
+    _pr_list_err=$(cat "$_pr_list_err_file" 2>/dev/null || true)
+    rm -f "$_pr_list_err_file"
     die "live claim inventory for $PR_REPO is unreadable — ${_pr_list_err}"
   fi
-  unset _pr_list_err
+  rm -f "$_pr_list_err_file"
+  unset _pr_list_err_file _pr_list_err
   # Successful exit is not enough: a reader that exits 0 while printing
   # malformed text must never become "nothing to reap" (#153 review round 8).
-  # Validate the entire inventory all-or-none against the shipped
-  # pr-claims.sh list contract (same shape claim.sh / release-claim.sh /
-  # scope-overlap.mjs defend) before any planning or mutation. Genuine empty
-  # success (no non-empty rows) remains valid.
-  _pr_bad_row=""
-  while IFS= read -r _pr_row; do
-    [[ -n "$_pr_row" ]] || continue
-    _pr_fields=$(awk -F'\t' '{print NF}' <<<"$_pr_row")
-    _pr_number=$(cut -f1 <<<"$_pr_row")
-    _pr_id=$(cut -f2 <<<"$_pr_row")
-    _pr_scope=$(cut -f3 <<<"$_pr_row")
-    _pr_head=$(cut -f4 <<<"$_pr_row")
-    _pr_url=$(cut -f5 <<<"$_pr_row")
-    _pr_created=$(cut -f6 <<<"$_pr_row")
-    _pr_updated=$(cut -f7 <<<"$_pr_row")
-    _pr_cross=$(cut -f8 <<<"$_pr_row")
-    if [[ "$_pr_fields" -ne 8 ]]; then
-      _pr_bad_row="want 8 tab-separated fields, got ${_pr_fields}: ${_pr_row}"
-      break
-    fi
-    # GitHub pull-request numbers are positive canonical decimals in the
-    # script's safe integer range (1..MAX_SAFE_INT). Reject zero, leading-zero,
-    # and overflow-length forms before any classification, planning, journaling,
-    # or release (#153 review-ten/eleven P1). Do not normalize malformed input
-    # into a valid identity — independent of the URL check below.
-    if ! parse_canonical_positive_int "$_pr_number" >/dev/null; then
-      _pr_bad_row="PR number is noncanonical/unsafe (want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${_pr_row}"
-      break
-    fi
-    # Issue-bound claim id: issue-[optional-ns-]<digits>-<slug>, same family
-    # pr-claims.sh / claim-reaper already require for live claims.
-    if [[ ! "$_pr_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
-      _pr_bad_row="claim id is not a valid issue-bound id: ${_pr_row}"
-      break
-    fi
-    if [[ -z "$_pr_scope" ]]; then
-      _pr_bad_row="empty claim scope: ${_pr_row}"
-      break
-    fi
-    if [[ -z "$_pr_head" || ! "$_pr_head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-      _pr_bad_row="missing/unsafe head branch: ${_pr_row}"
-      break
-    fi
-    # URL /pull/N must independently be a positive canonical decimal —
-    # not merely digit-only. Zero and leading-zero URL components fail the
-    # shape match; arbitrarily long digit strings match shape but fail the
-    # independent safe-range parse below (#153 review-ten/eleven P1).
-    if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
-      _pr_bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${_pr_row}"
-      break
-    fi
-    # Capture before any further =~ (parse_canonical_positive_int uses regex).
-    # Conjunctive identity binding (#153 review-nine P1): a plausible PR URL
-    # shape is not enough. The URL's owner/repo must equal PR_REPO and its
-    # /pull/N must equal the row number before the row may be classified or
-    # released. Do not case-fold or rewrite URL components — GitHub identity
-    # comparison is exact string equality on the captured path segments
-    # (same rule pr-claims.sh / scope-overlap.mjs already enforce).
-    _pr_url_repo="${BASH_REMATCH[1]}"
-    _pr_url_num="${BASH_REMATCH[2]}"
-    # Independent safe-range check on the captured /pull/N component. The regex
-    # alone admits arbitrarily long digit strings; bound them before repository
-    # or number equality so an overflow URL is diagnosed as unsafe identity,
-    # not merely a row/URL mismatch (#153 review-eleven P1).
-    if ! parse_canonical_positive_int "$_pr_url_num" >/dev/null; then
-      _pr_bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${_pr_row}"
-      break
-    fi
-    if [[ "$_pr_url_repo" != "$PR_REPO" ]]; then
-      _pr_bad_row="PR URL repository ('${_pr_url_repo}') does not match inventory repository ('${PR_REPO}'): ${_pr_row}"
-      break
-    fi
-    if [[ "$_pr_url_num" != "$_pr_number" ]]; then
-      _pr_bad_row="PR URL pull-number ('${_pr_url_num}') does not match row PR number ('${_pr_number}'): ${_pr_row}"
-      break
-    fi
-    if [[ -z "$_pr_created" || -z "$_pr_updated" ]]; then
-      _pr_bad_row="missing created/updated timestamp: ${_pr_row}"
-      break
-    fi
-    if [[ "$_pr_cross" != "true" && "$_pr_cross" != "false" ]]; then
-      _pr_bad_row="repository-identity column is neither 'true' nor 'false' ('${_pr_cross:-<empty>}'): ${_pr_row}"
-      break
-    fi
-  done <<EOF
-$PR_ROWS
-EOF
-  if [[ -n "$_pr_bad_row" ]]; then
-    die "live claim inventory for $PR_REPO returned a malformed/truncated row — refuse rather than treat unreadable evidence as an empty plan: ${_pr_bad_row}"
+  # Validate the entire inventory all-or-none against the shared list contract
+  # before any planning or mutation. Genuine empty success remains valid.
+  if ! validate_open_pr_inventory_rows "$PR_REPO" "$PR_ROWS"; then
+    die "live claim inventory for $PR_REPO returned a malformed/truncated row — refuse rather than treat unreadable evidence as an empty plan: ${VALIDATE_PR_INVENTORY_ERR}"
   fi
-  unset _pr_bad_row _pr_row _pr_fields _pr_number _pr_id _pr_scope _pr_head _pr_url _pr_url_repo _pr_url_num _pr_created _pr_updated _pr_cross
   # 8 fields since #153 review round 5: the last is the PR's repository
   # identity (`true`/`false`). It is read so the timestamp column is not
   # silently absorbed into it; this reaper only proposes a release, and
@@ -769,8 +791,7 @@ open_pr_status() {
 FRESH_PR_PROTECT_REASON=""
 fresh_open_pr_inventory_protect() {
   local target_id="$1" target_issue="$2" repo="$3"
-  local rows bad_row row fields number id scope head url created updated cross
-  local url_repo url_num
+  local rows row number id err_file err_txt
   FRESH_PR_PROTECT_REASON=""
   if [[ -z "$repo" ]]; then
     FRESH_PR_PROTECT_REASON="repo unresolved for fresh open-PR inventory"
@@ -780,74 +801,19 @@ fresh_open_pr_inventory_protect() {
     FRESH_PR_PROTECT_REASON="authoritative PR-claim reader missing/not executable"
     return 1
   fi
-  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$repo" 2>&1); then
-    FRESH_PR_PROTECT_REASON="fresh open-PR inventory unreadable: $rows"
+  # Capture stderr separately from authoritative inventory stdout. Never merge
+  # diagnostics into parseable inventory rows (#153 CodeRabbit).
+  err_file=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-fresh-err.XXXXXX")
+  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$repo" 2>"$err_file"); then
+    err_txt=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory unreadable: $err_txt"
     return 1
   fi
-  # Full all-or-none validation (same contract as startup inventory).
-  bad_row=""
-  while IFS= read -r row; do
-    [[ -n "$row" ]] || continue
-    fields=$(awk -F'\t' '{print NF}' <<<"$row")
-    number=$(cut -f1 <<<"$row")
-    id=$(cut -f2 <<<"$row")
-    scope=$(cut -f3 <<<"$row")
-    head=$(cut -f4 <<<"$row")
-    url=$(cut -f5 <<<"$row")
-    created=$(cut -f6 <<<"$row")
-    updated=$(cut -f7 <<<"$row")
-    cross=$(cut -f8 <<<"$row")
-    if [[ "$fields" -ne 8 ]]; then
-      bad_row="want 8 tab-separated fields, got ${fields}: ${row}"
-      break
-    fi
-    if ! parse_canonical_positive_int "$number" >/dev/null; then
-      bad_row="PR number noncanonical/unsafe: ${row}"
-      break
-    fi
-    if [[ ! "$id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
-      bad_row="claim id is not a valid issue-bound id: ${row}"
-      break
-    fi
-    if [[ -z "$scope" ]]; then
-      bad_row="empty claim scope: ${row}"
-      break
-    fi
-    if [[ -z "$head" || ! "$head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-      bad_row="missing/unsafe head branch: ${row}"
-      break
-    fi
-    if [[ -z "$url" || ! "$url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
-      bad_row="missing/malformed PR URL: ${row}"
-      break
-    fi
-    url_repo="${BASH_REMATCH[1]}"
-    url_num="${BASH_REMATCH[2]}"
-    if ! parse_canonical_positive_int "$url_num" >/dev/null; then
-      bad_row="PR URL pull number noncanonical/unsafe: ${row}"
-      break
-    fi
-    if [[ "$url_repo" != "$repo" ]]; then
-      bad_row="PR URL repository ('${url_repo}') does not match inventory repository ('${repo}'): ${row}"
-      break
-    fi
-    if [[ "$url_num" != "$number" ]]; then
-      bad_row="PR URL pull-number ('${url_num}') does not match row PR number ('${number}'): ${row}"
-      break
-    fi
-    if [[ -z "$created" || -z "$updated" ]]; then
-      bad_row="missing created/updated timestamp: ${row}"
-      break
-    fi
-    if [[ "$cross" != "true" && "$cross" != "false" ]]; then
-      bad_row="repository-identity column is neither 'true' nor 'false': ${row}"
-      break
-    fi
-  done <<EOF
-$rows
-EOF
-  if [[ -n "$bad_row" ]]; then
-    FRESH_PR_PROTECT_REASON="fresh open-PR inventory malformed/truncated: $bad_row"
+  rm -f "$err_file"
+  # Full all-or-none validation via the shared startup contract.
+  if ! validate_open_pr_inventory_rows "$repo" "$rows"; then
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory malformed/truncated: $VALIDATE_PR_INVENTORY_ERR"
     return 1
   fi
   # Protect on exact target id OR same issue (including differently named /
@@ -1572,13 +1538,18 @@ fi
 # preferring the per-file row (which left the legacy row unbound by CAS and
 # deletable under a renewal of the non-selected representation).
 MIX_IDS_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-mix.XXXXXX")
-trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$MIX_IDS_TMP"' EXIT
+trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$MIX_IDS_TMP" "${MIX_IDS_TMP:+${MIX_IDS_TMP}.file}" "${MIX_IDS_TMP:+${MIX_IDS_TMP}.leg}" "${MIX_IDS_TMP:+${MIX_IDS_TMP}.both}"' EXIT
 : > "$MIX_IDS_TMP"
 # Collect ids that appear as file and as legacy.
 awk -F'\t' '$7=="file" {print $1}' "$CLAIMS_TMP" | sort -u > "${MIX_IDS_TMP}.file"
 awk -F'\t' '$7=="legacy" {print $1}' "$CLAIMS_TMP" | sort -u > "${MIX_IDS_TMP}.leg"
+# Always create/truncate .both before comm so a missing or stale file is never
+# consumed. Fail closed if comm itself fails (#153 CodeRabbit).
+: > "${MIX_IDS_TMP}.both"
 if [[ -s "${MIX_IDS_TMP}.file" && -s "${MIX_IDS_TMP}.leg" ]]; then
-  comm -12 "${MIX_IDS_TMP}.file" "${MIX_IDS_TMP}.leg" > "${MIX_IDS_TMP}.both" || true
+  if ! comm -12 "${MIX_IDS_TMP}.file" "${MIX_IDS_TMP}.leg" > "${MIX_IDS_TMP}.both"; then
+    die "comm failed comparing mixed ledger representations — refuse rather than plan on missing/stale mix output"
+  fi
   while IFS= read -r mid; do
     [[ -n "$mid" ]] || continue
     printf 'REFUSE\t%s\t\t\t\t\tmixed_ledger_representations\tdocs/claims/%s.md+docs/active-work.md\t\t\n' \
@@ -1662,6 +1633,13 @@ info "ledger ref: $REF; scanning claims (stale>${STALE_SECONDS}s)"
 # remote_sha is the frozen live remote tip SHA (empty when proven ABSENT or unused).
 
 REPO=$(resolve_repo 2>/dev/null || true)
+# resolve_repo stops at --repo / gh and does not re-walk origin. When only the
+# GitHub origin URL supplied identity (PR_REPO path above), reuse it so plan-time
+# open-PR checks and pre-dispatch protect are not refused as "repo unresolved"
+# after a `gh repo view` failure (#153 CodeRabbit origin fallback).
+if [[ -z "$REPO" && -n "${PR_REPO:-}" ]]; then
+  REPO="$PR_REPO"
+fi
 
 # Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw/source/path/remote_sha.
 # Args: action reason last_active age worktree_path
@@ -2355,7 +2333,10 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
   # before irreversible release dispatch. Startup snapshot is not enough: a
   # valid same-ID (or same-issue) open PR appearing after planning must block
   # ledger/label/worktree/branch/journal-success/handoff mutation.
-  if ! fresh_open_pr_inventory_protect "$p_id" "$p_issue" "$REPO"; then
+  # Pass the already-resolved PR_REPO (origin fallback included), not REPO from
+  # resolve_repo which stops at gh and can drop a valid origin identity after
+  # `gh repo view` failure (#153 CodeRabbit).
+  if ! fresh_open_pr_inventory_protect "$p_id" "$p_issue" "$PR_REPO"; then
     warn "pre-dispatch: fresh open-PR inventory protects $p_id — ${FRESH_PR_PROTECT_REASON} — refuse release"
     journal_append "INCOMPLETE op=${op} reason=fresh_open_pr_protect"
     INCOMPLETE=1
