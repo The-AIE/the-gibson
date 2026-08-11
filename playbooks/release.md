@@ -250,6 +250,129 @@ leaves the sibling rows and keeps `agent-claimed` on the issue:
 release-claim.sh <issue> --claim-id issue-<issue>-<merged-slug>
 ```
 
+**Claim already merged/closed and no ledger row exists at all (#153).** Current
+`claim.sh` records the claim only in the draft PR's body, never in a ledger
+row — that PR *is* the claim, from reservation through review to merge or
+close. If the ledger genuinely has nothing for this exact id (a plain
+`release-claim.sh <issue>` finding nothing to strip is expected here, not a
+bug), name the exact claim id and repo and `release-claim.sh` verifies it
+directly against that finished PR instead:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<slug> --repo owner/name
+```
+
+This binds the release to the exact issue, claim id, PR number, head branch,
+exact head SHA, base repository (re-derived from the PR's own URL, never
+trusted from `--repo` alone), cross-repository=false, and terminal state
+(MERGED or CLOSED) before touching anything — an **open** PR, ambiguous
+matches, a cross-repository/fork PR, a mismatched issue/branch/scope, a
+malformed or truncated evidence row, or a `gh` query failure all refuse before
+any worktree, branch, or label mutation. A CLOSED PR is never described as
+"merged" — MERGED requires a real merge-commit SHA, CLOSED requires the
+opposite (no merge-commit SHA at all); either/neither is refused as a
+state/evidence mismatch.
+
+Two compatibility rules make this usable on a repository that has real
+history. First, the terminal lookup is **candidate-first**: it inspects only
+the PRs whose body carries your exact claim id, so one unrelated historical PR
+using a pre-#153 body format cannot permanently block every future release.
+Second, an exact candidate that *itself* predates the machine markers is read
+under a strict **legacy terminal-claim schema**: when both `- Claim scope:`
+and `- Issue: #` are entirely absent, the issue comes from exactly one
+`Closes #<n>.` line and the scope from exactly one `## Cumulative scope`
+section of backticked path bullets. Nothing is invented. A marker-only body,
+prose instead of bullets, a missing/duplicated closing line or scope section,
+an unsafe path, or a *current*-format body missing one required field all
+still refuse — as does a candidate whose `Closes` number disagrees with its
+claim id. If your release stops here, fix the PR body; do not weaken the
+check.
+
+Only after every identity check above passes does the script prove the
+*registered* worktree at the exact expected path (never a default-path guess)
+is on that exact branch, is clean (no uncommitted or untracked changes), and
+is at that exact head SHA — or, for a real merge, safely contained in the
+merge commit. Any failure there — dirty, wrong branch, unregistered directory,
+SHA mismatch — leaves the worktree and branch untouched and exits incomplete;
+it never `rm -rf`s an unregistered/default-path directory and never
+force-removes a dirty worktree. No ledger row is ever invented to make this
+work.
+
+Sibling protection still applies, verified with a **fresh** GitHub read taken
+after mutation, not a snapshot from before it: a live sibling claim — ledger
+row **or** another open PR-body claim for the same issue — keeps
+`agent-claimed` until the last one is verified gone. That post-mutation
+GitHub read is **fail-closed**: a query failure or a malformed row there
+preserves `agent-claimed` and reports incomplete (exit 3) rather than
+guessing the claim is gone.
+
+**The PR's identity is bound before it is closed.** `gh pr close` is the first
+mutation on this path, so the repository binding *and* the head-branch binding run
+before it: the PR's head branch must be exactly the branch this claim id derives from
+(`feat/<issue>-<slug>`). An exact claim marker in the body of a PR on an unrelated
+branch is not authority to close that PR, and that mismatch is a plain refusal —
+**exit 1**, PR still open, no label edit, no worktree or branch touched — including
+under `--dry-run`.
+
+**Closing the PR is the release; proving it is a separate step.** When the claim is
+still an open PR, `release-claim.sh` closes it and then re-reads that closed PR's
+own terminal evidence to bind an exact head SHA before removing anything. If that
+terminal read fails, comes back ambiguous, contradicts the PR's own state, **or
+returns no row at all**, the run is a **partial mutation** — the claim is released,
+but nothing about the worktree or the branches was proven. An absent terminal row
+after a close does not mean there is nothing left; it means this run cannot see the
+PR it just closed. All of those take the close-only path: worktree, both branch
+refs and `agent-claimed` all preserved, `INCOMPLETE`, **exit 3**, and a `RECOVERY:`
+line naming the bound re-run to finish the job:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<slug> --repo owner/name --pr <pr-number>
+```
+
+Run that once the evidence reads cleanly and the exact verified cleanup
+(registered-worktree proof, head-SHA containment, compare-and-swap branch deletes)
+takes over. Because every close-only outcome is `INCOMPLETE`, that path never
+removes `agent-claimed` — the only route to a verified label removal after a close
+is the exact terminal cleanup that proved the artifacts first. The same evidence
+failure **before** any mutation is a plain refusal — exit **1**, nothing done — and
+it names which binding failed instead of collapsing into "no live claim". Read the
+exit code as: **1 = refused, nothing done; 3 = did part of the work, here is
+exactly what is left.**
+
+**A closed PR must really be closed.** The claim inventory only lists a PR while it
+carries a well-formed claim marker, so a PR that is still open with its marker
+removed or rewritten vanishes from that view and looks exactly like a PR that
+closed. After the close, `release-claim.sh` therefore also asks a body-agnostic
+open-PR inventory (`pr-claims.sh list-open-numbers`) whether that exact PR number
+is still open. If it is — or if that read cannot be completed — the run refuses
+success, preserves the label and every artifact, and exits 3.
+
+**The repository has to be the same repository.** All of the above authorizes
+deleting a worktree, a branch, and a label, so before any of it runs
+`release-claim.sh` proves that the checkout it is cleaning up (`GIBSON_CANONICAL`,
+default: cwd) has an origin remote that normalizes to exactly the repository the
+PR evidence came from — https, `ssh://`, and scp-like `git@github.com:owner/name.git`
+forms all normalize, case-insensitively, with optional port and `.git`. A fork or
+a second clone carries the same branch names and the same commits by construction;
+that is not identity and it is refused with nothing mutated. If you hit this, you
+are almost certainly standing in the wrong checkout — `cd` to the right one, or
+pass `GIBSON_CANONICAL=`, rather than reaching for `--repo` to make the message go
+away.
+
+**Releasing a claim id that has been used more than once.** A claim id is free
+again once its PR is terminal, so a later lane may reuse it. Two terminal PRs then
+carry the same id and the id-only lookup refuses as ambiguous — correctly, because
+"which one?" genuinely has two answers. Releasing the *current* open claim never
+runs into this (that path binds to the PR number it just closed). To release an
+older or already-terminal generation by hand, name the PR:
+
+```bash
+release-claim.sh <issue> --claim-id issue-<issue>-<slug> --pr <pr-number> --repo owner/name
+```
+
+Every check above still applies to that exact PR — naming it narrows the question,
+it does not relax the answer.
+
 **Empty ledger is valid only on a real commit ref with a readable tree.** After
 the last claim file is gone, `docs/claims/` is untracked in git and
 `docs/active-work.md` may be absent — that is zero live claims on a valid

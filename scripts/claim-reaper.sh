@@ -25,10 +25,19 @@ WHAT IT DOES
   remove only the exact registered target worktree after CAS + verified cleanup
   push succeed.
 
-  An open PR always protects a claim. API/ref failures, malformed evidence,
-  unreadable worktrees, unregistered or unsafe paths, symlink/device evidence,
-  future-clock evidence, or race-time activity fail closed (refuse reaping).
-  The reaper never closes the target issue.
+  An open PR always protects a claim — every valid open PR-body claim row is
+  protected regardless of age and is never dispatched to release-claim.sh
+  (parked ≠ dead). A legacy ledger claim whose id also appears as an open
+  PR-body claim is kept for the same reason, so dual representations cannot
+  re-open a reaped path. Legacy ledger claims without an open PR keep their
+  existing evidence-based stale/reap behaviour. API/ref failures, malformed
+  evidence, unreadable worktrees, unregistered or unsafe paths, symlink/device
+  evidence, future-clock evidence, or race-time activity fail closed (refuse
+  reaping). When GitHub-native claims apply, a failed or successful-but-
+  malformed pr-claims.sh list is a hard refusal — never an empty plan. The
+  entire inventory is validated all-or-none against the shipped list contract
+  before any planning or mutation; genuine empty success remains valid. The
+  reaper never closes the target issue.
 
 WHY
   Doctrine assumes dead lanes eventually free the issue, but nothing enforces
@@ -151,6 +160,20 @@ parse_nonneg_int() {
   return 0
 }
 
+# Positive canonical decimal in safe range: ^[1-9][0-9]*$ AND ≤ MAX_SAFE_INT.
+# Layers the positive / no-leading-zero rule over parse_nonneg_int. Rejects
+# zero, leading zeros, empty, non-digits, and overflow-length values without
+# normalizing them into a smaller identity (parse_nonneg_int alone would strip
+# leading zeros). Prints the same canonical decimal on success.
+# Used for PR-row and /pull/N identity binding (#153 review-eleven P1).
+parse_canonical_positive_int() {
+  local raw="$1"
+  if [[ ! "$raw" =~ ^[1-9][0-9]*$ ]]; then
+    return 1
+  fi
+  parse_nonneg_int "$raw"
+}
+
 # Safe numeric greater-than for two already-parsed non-negative decimals.
 int_gt() {
   local a="$1" b="$2"
@@ -209,6 +232,16 @@ SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 RELEASE_CMD="${GIBSON_REAPER_RELEASE_CMD:-$SCRIPT_DIR/release-claim.sh}"
 [[ -x "$RELEASE_CMD" || -f "$RELEASE_CMD" ]] || die "release-claim not found: $RELEASE_CMD"
 
+# Fail-closed stdout/stderr capture for authoritative inventory reads (#153).
+# Shared helper: allocation, signal traps, verified unlink, stdout authority.
+# Missing/unreadable helper must not become an empty inventory.
+# shellcheck source=lib/stream-capture.sh
+. "$SCRIPT_DIR/lib/stream-capture.sh" ||
+  die "cannot source $SCRIPT_DIR/lib/stream-capture.sh — refuse inventory without fail-closed stream isolation"
+if ! declare -F _rc_capture_streams >/dev/null 2>&1; then
+  die "stream-capture helper loaded without _rc_capture_streams — refuse inventory"
+fi
+
 STATE_DIR="${GIBSON_REAPER_STATE_DIR:-$CANONICAL/gibson}"
 JOURNAL="${GIBSON_REAPER_JOURNAL:-$STATE_DIR/claim-reaper-journal.md}"
 LOCK_DIR="${GIBSON_REAPER_LOCK_DIR:-$STATE_DIR/claim-reaper.lock}"
@@ -228,67 +261,302 @@ fi
 # GitHub-native claims are authoritative for migrated repositories. Keep the
 # legacy ledger scan below intact, but reap stale open-PR claims from the same
 # source that claims-status and claim.sh use.
-PR_REPO="${REPO_ARG:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
-PR_CLAIMS_FOUND=0
-if [[ -n "$PR_REPO" && -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
-  PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>/dev/null || true)
-  # shellcheck disable=SC2034
-  while IFS=$'\t' read -r pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated; do
+#
+# Resolve PR repository identity: explicit --repo, then gh, then a GitHub
+# origin URL. When GitHub-native claims are applicable, a failed/malformed
+# pr-claims.sh list is a hard refusal — never an empty plan or "nothing to
+# reap" (#153 review round 7). A successful empty inventory may continue to
+# the legacy ledger.
+normalize_github_repo_url() {
+  local url="$1" rest hostport host path owner name
+  [[ -n "$url" ]] || return 1
+  case "$url" in
+    https://*|http://*)  rest="${url#*://}"; rest="${rest#*@}" ;;
+    ssh://*)             rest="${url#ssh://}"; rest="${rest#*@}" ;;
+    git://*)             rest="${url#git://}"; rest="${rest#*@}" ;;
+    */*:*)               return 1 ;;
+    *:*)
+      rest="${url#*@}"
+      rest="${rest%%:*}/${rest#*:}"
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "$rest" == */* ]] || return 1
+  hostport="${rest%%/*}"
+  path="${rest#*/}"
+  host="${hostport%%:*}"
+  host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+  case "$host" in
+    github.com|www.github.com|ssh.github.com) ;;
+    *) return 1 ;;
+  esac
+  path="${path%/}"
+  path="${path%.git}"
+  path="${path%/}"
+  [[ "$path" == */* ]] || return 1
+  owner="${path%%/*}"
+  name="${path#*/}"
+  [[ "$name" != */* ]] || return 1
+  [[ "$owner" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+
+# Origin fallback for PR repository identity. Mirror release-claim.sh:
+# use --get-all, not --get. With several remote.origin.url values, `git config
+# --get` silently returns the LAST one and exits 0 — ambiguous identity that
+# would look definite. Accept only when exactly one readable, nonempty origin
+# value normalizes to GitHub owner/name. Zero, multiple, malformed, or
+# unreadable values leave identity unresolved (return 1).
+resolve_origin_github_repo() {
+  local all n raw id rc=0
+  all=$(git config --get-all remote.origin.url 2>/dev/null) || rc=$?
+  n=$(printf '%s' "$all" | grep -c . || true)
+  if [[ "$rc" -ne 0 || "$n" -eq 0 ]]; then
+    return 1
+  fi
+  if [[ "$n" -gt 1 ]]; then
+    return 1
+  fi
+  raw=$(printf '%s\n' "$all" | head -n1)
+  [[ -n "$raw" ]] || return 1
+  if ! id=$(normalize_github_repo_url "$raw"); then
+    return 1
+  fi
+  printf '%s\n' "$id"
+  return 0
+}
+
+# Shared all-or-none validator for `pr-claims.sh list` stdout (#153 CodeRabbit).
+# Used by startup inventory and fresh_open_pr_inventory_protect so both sites
+# enforce the same rules and the same diagnostics. Does not weaken any rule
+# relative to the previous stronger startup validator.
+#
+# Args: <expected-repo owner/name> <inventory-stdout>
+# On success: returns 0 and clears VALIDATE_PR_INVENTORY_ERR.
+# On failure: sets VALIDATE_PR_INVENTORY_ERR to a single-row diagnostic and
+# returns 1. Empty inventory (no non-empty rows) is valid success.
+VALIDATE_PR_INVENTORY_ERR=""
+validate_open_pr_inventory_rows() {
+  local repo="$1" rows="$2"
+  local bad_row="" row fields number id scope head url created updated cross
+  local url_repo url_num
+  VALIDATE_PR_INVENTORY_ERR=""
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    fields=$(awk -F'\t' '{print NF}' <<<"$row")
+    number=$(cut -f1 <<<"$row")
+    id=$(cut -f2 <<<"$row")
+    scope=$(cut -f3 <<<"$row")
+    head=$(cut -f4 <<<"$row")
+    url=$(cut -f5 <<<"$row")
+    created=$(cut -f6 <<<"$row")
+    updated=$(cut -f7 <<<"$row")
+    cross=$(cut -f8 <<<"$row")
+    if [[ "$fields" -ne 8 ]]; then
+      bad_row="want 8 tab-separated fields, got ${fields}: ${row}"
+      break
+    fi
+    # GitHub pull-request numbers are positive canonical decimals in the
+    # script's safe integer range (1..MAX_SAFE_INT). Reject zero, leading-zero,
+    # and overflow-length forms before any classification, planning, journaling,
+    # or release (#153 review-ten/eleven P1). Do not normalize malformed input
+    # into a valid identity — independent of the URL check below.
+    if ! parse_canonical_positive_int "$number" >/dev/null; then
+      bad_row="PR number is noncanonical/unsafe (want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${row}"
+      break
+    fi
+    # Issue-bound claim id: issue-[optional-ns-]<digits>-<slug>, same family
+    # pr-claims.sh / claim-reaper already require for live claims.
+    if [[ ! "$id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+      bad_row="claim id is not a valid issue-bound id: ${row}"
+      break
+    fi
+    if [[ -z "$scope" ]]; then
+      bad_row="empty claim scope: ${row}"
+      break
+    fi
+    if [[ -z "$head" || ! "$head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      bad_row="missing/unsafe head branch: ${row}"
+      break
+    fi
+    # URL /pull/N must independently be a positive canonical decimal —
+    # not merely digit-only. Zero and leading-zero URL components fail the
+    # shape match; arbitrarily long digit strings match shape but fail the
+    # independent safe-range parse below (#153 review-ten/eleven P1).
+    if [[ -z "$url" || ! "$url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
+      bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${row}"
+      break
+    fi
+    # Capture before any further =~ (parse_canonical_positive_int uses regex).
+    # Conjunctive identity binding (#153 review-nine P1): a plausible PR URL
+    # shape is not enough. The URL's owner/repo must equal the expected repo
+    # and its /pull/N must equal the row number before the row may be
+    # classified or released. Do not case-fold or rewrite URL components —
+    # GitHub identity comparison is exact string equality on the captured
+    # path segments (same rule pr-claims.sh / scope-overlap.mjs already enforce).
+    url_repo="${BASH_REMATCH[1]}"
+    url_num="${BASH_REMATCH[2]}"
+    # Independent safe-range check on the captured /pull/N component. The regex
+    # alone admits arbitrarily long digit strings; bound them before repository
+    # or number equality so an overflow URL is diagnosed as unsafe identity,
+    # not merely a row/URL mismatch (#153 review-eleven P1).
+    if ! parse_canonical_positive_int "$url_num" >/dev/null; then
+      bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros, in safe range 1..${MAX_SAFE_INT}): ${row}"
+      break
+    fi
+    if [[ "$url_repo" != "$repo" ]]; then
+      bad_row="PR URL repository ('${url_repo}') does not match inventory repository ('${repo}'): ${row}"
+      break
+    fi
+    if [[ "$url_num" != "$number" ]]; then
+      bad_row="PR URL pull-number ('${url_num}') does not match row PR number ('${number}'): ${row}"
+      break
+    fi
+    if [[ -z "$created" || -z "$updated" ]]; then
+      bad_row="missing created/updated timestamp: ${row}"
+      break
+    fi
+    if [[ "$cross" != "true" && "$cross" != "false" ]]; then
+      bad_row="repository-identity column is neither 'true' nor 'false' ('${cross:-<empty>}'): ${row}"
+      break
+    fi
+  done <<EOF
+$rows
+EOF
+  if [[ -n "$bad_row" ]]; then
+    VALIDATE_PR_INVENTORY_ERR="$bad_row"
+    return 1
+  fi
+  return 0
+}
+
+PR_REPO="${REPO_ARG:-}"
+if [[ -z "$PR_REPO" ]]; then
+  PR_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+fi
+if [[ -z "$PR_REPO" || ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  # Ambiguous/multi/malformed origin leaves identity unresolved (fail closed).
+  if _from_origin=$(resolve_origin_github_repo); then
+    PR_REPO="$_from_origin"
+  else
+    PR_REPO=""
+  fi
+  unset _from_origin
+fi
+if [[ -n "$PR_REPO" && ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  PR_REPO=""
+fi
+
+if [[ -n "$PR_REPO" ]]; then
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    die "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot inventory live claims for $PR_REPO; refuse rather than plan 'nothing to reap' on an unread inventory"
+  fi
+  # Capture stderr separately from authoritative inventory stdout via the
+  # shared stream-capture helper. Never merge diagnostics into parseable
+  # inventory rows: benign successful stderr must not poison a valid list,
+  # and failed diagnostics are used only on nonzero exit (#153 CodeRabbit).
+  # Never `|| true` this into an empty plan (#153 r7). Capture-infrastructure
+  # failure poisons stdout authority and is refused the same as a failed list.
+  _pr_list_rc=0
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
+  _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" || _pr_list_rc=$?
+  PR_ROWS="$_RC_CAP_STDOUT"
+  if [[ "$_pr_list_rc" -ne 0 ]]; then
+    _pr_list_err="$_RC_CAP_STDERR"
+    _RC_CAP_STDERR=""
+    die "live claim inventory for $PR_REPO is unreadable — ${_pr_list_err}"
+  fi
+  # Successful stderr is non-authoritative; drop it so it cannot affect rows.
+  _RC_CAP_STDERR=""
+  unset _pr_list_rc _pr_list_err
+  # Successful exit is not enough: a reader that exits 0 while printing
+  # malformed text must never become "nothing to reap" (#153 review round 8).
+  # Validate the entire inventory all-or-none against the shared list contract
+  # before any planning or mutation. Genuine empty success remains valid.
+  if ! validate_open_pr_inventory_rows "$PR_REPO" "$PR_ROWS"; then
+    die "live claim inventory for $PR_REPO returned a malformed/truncated row — refuse rather than treat unreadable evidence as an empty plan: ${VALIDATE_PR_INVENTORY_ERR}"
+  fi
+  # 8 fields since #153 review round 5: the last is the PR's repository
+  # identity (`true`/`false`). It is read so the timestamp column is not
+  # silently absorbed into it; this reaper only proposes a release, and
+  # release-claim.sh re-reads and enforces identity itself before any mutation.
+  # Inventory shape was already proven all-or-none above; this loop only
+  # plans. cut avoids IFS tab collapsing (belt after the validator).
+  #
+  # (#153 open-PR-always-protects P1) Every valid open PR-body claim row is
+  # PROTECTED and is never dispatched to release-claim.sh, regardless of age.
+  # An open PR is live work (parked ≠ dead); classifying it STALE by
+  # updatedAt and calling release-claim.sh closes that live PR — the exact
+  # contract violation docs/05 forbids. Collect protected claim ids so a
+  # duplicate legacy ledger representation of the same claim cannot fall
+  # through and be reaped either.
+  OPEN_PR_PROTECTED_IDS=""
+  while IFS= read -r _pr_line; do
+    [[ -n "$_pr_line" ]] || continue
+    # Inventory already validated all 8 fields all-or-none above. Only the
+    # PR number and claim id are needed for protection accounting; the rest
+    # is intentionally not re-read (open PR always protects regardless of
+    # age/timestamps/head/cross).
+    pr_number=$(cut -f1 <<<"$_pr_line")
+    pr_id=$(cut -f2 <<<"$_pr_line")
     [[ -n "$pr_id" ]] || continue
-    PR_CLAIMS_FOUND=1
     if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_FILTER" ]]; then
       continue
     fi
-    if [[ ! "$pr_id" =~ ^issue-([0-9]+)- ]]; then
+    # Accept bare and namespaced issue-bound ids (issue-N-… and
+    # issue-<ns>-N-…). The inventory validator already required this shape;
+    # do not re-narrow to numeric-only and silently drop namespaced live work.
+    if [[ ! "$pr_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+- ]]; then
       warn "refusing malformed PR claim id '$pr_id' on PR #$pr_number"
       continue
     fi
-    pr_issue="${BASH_REMATCH[1]}"
-    stamp="$pr_updated"
-    [[ -n "$stamp" ]] || stamp="$pr_created"
-    epoch=$(date -u -d "$stamp" +%s 2>/dev/null ||
-      date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$stamp" +%s 2>/dev/null || echo "")
-    if [[ -z "$epoch" || ! "$epoch" =~ ^[0-9]+$ ]]; then
-      warn "refusing PR #$pr_number claim '$pr_id' with unreadable activity timestamp"
-      continue
-    fi
-    age=$((NOW - epoch))
-    if [[ "$age" -lt "$STALE_SECONDS" ]]; then
-      info "PR #$pr_number claim $pr_id is protected (activity ${age}s ago)"
-      continue
-    fi
-    info "STALE PR #$pr_number claim $pr_id (activity ${age}s ago)"
-    if [[ "$APPLY" -eq 1 ]]; then
-      "$RELEASE_CMD" "$pr_issue" --claim-id "$pr_id" --repo "$PR_REPO" \
-        --keep-branch --keep-worktree
-    fi
+    # Open PR-body claim: always protect. Never call release-claim.sh.
+    OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS}${pr_id}"$'\n'
+    info "PR #$pr_number claim $pr_id is protected (open PR always protects)"
   done <<EOF
 $PR_ROWS
 EOF
-  # A migrated repository can have no legacy tree at all. Do not misclassify
-  # that valid state as an unreadable ledger after processing PR claims.
-  if [[ "$PR_CLAIMS_FOUND" -eq 1 ]]; then
-    legacy_entries=$(git ls-tree --name-only HEAD docs/claims/ docs/active-work.md 2>/dev/null || true)
-    if [[ -z "$legacy_entries" ]]; then
-      exit 0
-    fi
-  fi
+  unset _pr_line pr_number pr_id
+  # (#153 exact-head P2) Never declare the ledger empty from local HEAD.
+  # A feature checkout or an old/empty local tree can lack docs/claims while
+  # origin/main still holds stale claims. Ledger emptiness is decided only
+  # after a successful fetch of the authoritative remote base below.
 fi
+# Empty when GitHub-native claims do not apply; still safe for later grep -qxF.
+OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS:-}"
 
 # --- ledger ref: require successful fetch of exact remote base ------------
 # Never fall back to local main/master, cached stale origin refs after a
 # failed fetch, HEAD, or another branch.
+#
+# Authority contract (#153 exact-head): enumerate which of main/master exists
+# on origin via ls-remote first; fetch exactly that one base. A transport/
+# object failure on the chosen base is unreadable authority — never fall
+# through to try the other name after an arbitrary main failure.
 fetch_remote_ledger_ref() {
-  local base ref
-  for base in main master; do
-    if git fetch origin "$base" >/dev/null 2>&1; then
-      ref="origin/${base}"
-      if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
-        printf '%s\n' "$ref"
-        return 0
-      fi
-    fi
-  done
+  local base ref ls_out main_present=0 master_present=0
+  if ! ls_out=$(git ls-remote --heads origin refs/heads/main refs/heads/master 2>&1); then
+    return 1
+  fi
+  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/main$' && main_present=1
+  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/master$' && master_present=1
+  if [[ "$main_present" -eq 1 ]]; then
+    base=main
+  elif [[ "$master_present" -eq 1 ]]; then
+    base=master
+  else
+    return 1
+  fi
+  if ! git fetch origin "$base" >/dev/null 2>&1; then
+    return 1
+  fi
+  ref="origin/${base}"
+  if git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+    printf '%s\n' "$ref"
+    return 0
+  fi
   return 1
 }
 
@@ -521,6 +789,8 @@ resolve_repo() {
 }
 
 # Open-PR query. Prints "open", "none", or "fail".
+# Kept for plan-time branch-specific KEEP classification only. Pre-dispatch
+# protection uses fresh_open_pr_inventory_protect (authoritative full list).
 open_pr_status() {
   local branch="$1" repo="$2"
   if ! command -v gh >/dev/null 2>&1; then
@@ -544,6 +814,78 @@ open_pr_status() {
     0) echo "none" ;;
     *) echo "open" ;;
   esac
+}
+
+# (#153 exact-head P1) Fresh authoritative open-PR inventory revalidation
+# immediately before an irreversible release dispatch. Any open PR whose
+# claim id equals the target OR belongs to the same issue protects live work
+# and blocks the release call. Malformed/failed/truncated inventory fails
+# closed. Never excludes a same-ID open PR merely because its id equals the
+# cleanup target.
+#
+# Sets FRESH_PR_PROTECT_REASON on refusal. Returns:
+#   0  inventory clean and no protecting open PR
+#   1  protect / refuse (do not dispatch)
+FRESH_PR_PROTECT_REASON=""
+fresh_open_pr_inventory_protect() {
+  local target_id="$1" target_issue="$2" repo="$3"
+  local rows row number id reader_rc=0
+  FRESH_PR_PROTECT_REASON=""
+  if [[ -z "$repo" ]]; then
+    FRESH_PR_PROTECT_REASON="repo unresolved for fresh open-PR inventory"
+    return 1
+  fi
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    FRESH_PR_PROTECT_REASON="authoritative PR-claim reader missing/not executable"
+    return 1
+  fi
+  # Shared stream-capture helper: separate stderr from authoritative stdout
+  # (#153 CodeRabbit). Capture-infrastructure failure poisons stdout and
+  # refuses the same as a failed list — never invent an empty inventory.
+  if ! declare -F _rc_capture_streams >/dev/null 2>&1; then
+    FRESH_PR_PROTECT_REASON="stream-capture helper unavailable — refuse unread inventory"
+    return 1
+  fi
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
+  _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" list "$repo" || reader_rc=$?
+  rows="$_RC_CAP_STDOUT"
+  if [[ "$reader_rc" -ne 0 ]]; then
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory unreadable: ${_RC_CAP_STDERR}"
+    _RC_CAP_STDERR=""
+    return 1
+  fi
+  # Successful stderr is non-authoritative.
+  _RC_CAP_STDERR=""
+  # Full all-or-none validation via the shared startup contract.
+  if ! validate_open_pr_inventory_rows "$repo" "$rows"; then
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory malformed/truncated: $VALIDATE_PR_INVENTORY_ERR"
+    return 1
+  fi
+  # Protect on exact target id OR same issue (including differently named /
+  # namespaced siblings). Never skip a same-ID open PR because it equals the
+  # cleanup target.
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    number=$(cut -f1 <<<"$row")
+    id=$(cut -f2 <<<"$row")
+    [[ -n "$id" ]] || continue
+    if [[ "$id" == "$target_id" ]]; then
+      FRESH_PR_PROTECT_REASON="open PR #${number} carries exact claim id '${id}' (live evidence, not a sibling to ignore)"
+      return 1
+    fi
+    if [[ -n "$target_issue" ]]; then
+      _f_issue=$(issue_from_claim_id "$id")
+      if [[ "$_f_issue" == "$target_issue" ]]; then
+        FRESH_PR_PROTECT_REASON="open PR #${number} claim '${id}' holds same issue #${target_issue}"
+        return 1
+      fi
+    fi
+  done <<EOF
+$rows
+EOF
+  unset _f_issue
+  return 0
 }
 
 # Physical path for comparison (macOS /var vs /private/var). Does not require
@@ -1103,7 +1445,8 @@ PLAN_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-plan.XXXXXX")
 IDENTITY_REFUSE_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-idref.XXXXXX")
 trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP"' EXIT
 
-# Collect raw rows into CLAIMS_TMP then dedupe by id (prefer per-file over legacy).
+# Collect raw rows into CLAIMS_TMP. Simultaneous per-file + legacy for the
+# same id is ambiguous and REFUSED (never silently prefer one representation).
 : > "$CLAIMS_TMP"
 : > "$IDENTITY_REFUSE_TMP"
 # Track seen body claim ids for duplicate detection (file form).
@@ -1236,28 +1579,34 @@ $active_body
 EOF
 fi
 
-# Dedupe: for each id keep file over legacy, else first.
-DEDUP_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-dedup.XXXXXX")
-trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$DEDUP_TMP"' EXIT
-: > "$DEDUP_TMP"
-while IFS= read -r row; do
-  [[ -n "$row" ]] || continue
-  src=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
-  [[ "$src" == "file" ]] || continue
-  printf '%s\n' "$row" >> "$DEDUP_TMP"
-done < "$CLAIMS_TMP"
-while IFS= read -r row; do
-  [[ -n "$row" ]] || continue
-  src=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
-  [[ "$src" == "legacy" ]] || continue
-  id="${row%%$'\t'*}"
-  if awk -F'\t' -v id="$id" '$1==id {found=1} END{exit !found}' "$DEDUP_TMP" 2>/dev/null; then
-    continue
+# (#153 exact-head P1) Mixed same-ID file+legacy representations are
+# ambiguous. Refuse before planning or mutation rather than silently
+# preferring the per-file row (which left the legacy row unbound by CAS and
+# deletable under a renewal of the non-selected representation).
+MIX_IDS_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-mix.XXXXXX")
+trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$MIX_IDS_TMP" "${MIX_IDS_TMP:+${MIX_IDS_TMP}.file}" "${MIX_IDS_TMP:+${MIX_IDS_TMP}.leg}" "${MIX_IDS_TMP:+${MIX_IDS_TMP}.both}"' EXIT
+: > "$MIX_IDS_TMP"
+# Collect ids that appear as file and as legacy.
+awk -F'\t' '$7=="file" {print $1}' "$CLAIMS_TMP" | sort -u > "${MIX_IDS_TMP}.file"
+awk -F'\t' '$7=="legacy" {print $1}' "$CLAIMS_TMP" | sort -u > "${MIX_IDS_TMP}.leg"
+# Always create/truncate .both before comm so a missing or stale file is never
+# consumed. Fail closed if comm itself fails (#153 CodeRabbit).
+: > "${MIX_IDS_TMP}.both"
+if [[ -s "${MIX_IDS_TMP}.file" && -s "${MIX_IDS_TMP}.leg" ]]; then
+  if ! comm -12 "${MIX_IDS_TMP}.file" "${MIX_IDS_TMP}.leg" > "${MIX_IDS_TMP}.both"; then
+    die "comm failed comparing mixed ledger representations — refuse rather than plan on missing/stale mix output"
   fi
-  printf '%s\n' "$row" >> "$DEDUP_TMP"
-done < "$CLAIMS_TMP"
-mv "$DEDUP_TMP" "$CLAIMS_TMP"
-DEDUP_TMP=""
+  while IFS= read -r mid; do
+    [[ -n "$mid" ]] || continue
+    printf 'REFUSE\t%s\t\t\t\t\tmixed_ledger_representations\tdocs/claims/%s.md+docs/active-work.md\t\t\n' \
+      "$mid" "$mid" >> "$IDENTITY_REFUSE_TMP"
+    # Drop both raw rows so they never plan as REAP.
+    awk -F'\t' -v id="$mid" '$1!=id' "$CLAIMS_TMP" > "${CLAIMS_TMP}.nm" || true
+    mv "${CLAIMS_TMP}.nm" "$CLAIMS_TMP"
+  done < "${MIX_IDS_TMP}.both"
+fi
+rm -f "${MIX_IDS_TMP}.file" "${MIX_IDS_TMP}.leg" "${MIX_IDS_TMP}.both" "$MIX_IDS_TMP"
+MIX_IDS_TMP=""
 
 # Optional filter
 if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
@@ -1329,7 +1678,16 @@ info "ledger ref: $REF; scanning claims (stale>${STALE_SECONDS}s)"
 # action\tid\tissue\tbranch\tlast_active\tage\treason\tblob\twt\tclaimed_raw\tsource\tpath\tremote_sha
 # remote_sha is the frozen live remote tip SHA (empty when proven ABSENT or unused).
 
-REPO=$(resolve_repo 2>/dev/null || true)
+# Single repository identity for this run. Prefer PR_REPO — already resolved
+# with --repo / gh / unambiguous origin fallback — so plan-time open-PR checks,
+# pre-dispatch protect, and release-claim --repo never consult two different
+# identities in one iteration (#153 follow-up). resolve_repo alone stops at gh
+# and would drop a valid origin identity after `gh repo view` failure.
+if [[ -n "${PR_REPO:-}" ]]; then
+  REPO="$PR_REPO"
+else
+  REPO=$(resolve_repo 2>/dev/null || true)
+fi
 
 # Emit one plan row. Uses caller's id/issue/branch/blob/claimed_raw/source/path/remote_sha.
 # Args: action reason last_active age worktree_path
@@ -1553,6 +1911,16 @@ while IFS= read -r row || [[ -n "$row" ]]; do
 
   # age = NOW - last_active; both safe → arithmetic is safe.
   age=$((10#$NOW - 10#$last_active))
+
+  # Open PR-body claim inventory protects a legacy ledger row that is the
+  # same claim id (#153 open-PR-always-protects P1). Without this, a
+  # migrated/dual representation could be reaped through the ledger after
+  # the open-PR loop already decided the live claim is protected.
+  if [[ -n "$OPEN_PR_PROTECTED_IDS" ]] &&
+     printf '%s\n' "$OPEN_PR_PROTECTED_IDS" | grep -qxF -- "$id"; then
+    plan_row KEEP open_pr_body "$last_active" "$age" "${wt_path:-}" >> "$PLAN_TMP"
+    continue
+  fi
 
   # Open PR protects (successful query only).
   if [[ -z "$REPO" ]]; then
@@ -1999,10 +2367,26 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     continue
   fi
 
+  # Branch-specific open-PR check (plan-time belt). The authoritative
+  # protection is the fresh full inventory revalidation immediately below.
   pr_st=$(open_pr_status "$p_branch" "$REPO")
   if [[ "$pr_st" != "none" ]]; then
     warn "pre-mutation: PR status=$pr_st for $p_id — refuse"
     journal_append "INCOMPLETE op=${op} reason=pr_${pr_st}"
+    INCOMPLETE=1
+    continue
+  fi
+
+  # (#153 exact-head P1) Fresh authoritative pr-claims.sh list immediately
+  # before irreversible release dispatch. Startup snapshot is not enough: a
+  # valid same-ID (or same-issue) open PR appearing after planning must block
+  # ledger/label/worktree/branch/journal-success/handoff mutation.
+  # Use the same REPO identity as release-claim --repo (origin-fallback-aware
+  # PR_REPO was copied into REPO above) so protect and dispatch never consult
+  # two different repository identities in one iteration (#153 follow-up).
+  if ! fresh_open_pr_inventory_protect "$p_id" "$p_issue" "$REPO"; then
+    warn "pre-dispatch: fresh open-PR inventory protects $p_id — ${FRESH_PR_PROTECT_REASON} — refuse release"
+    journal_append "INCOMPLETE op=${op} reason=fresh_open_pr_protect"
     INCOMPLETE=1
     continue
   fi

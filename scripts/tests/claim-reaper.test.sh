@@ -22,6 +22,7 @@ export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 REAPER="$SCRIPT_DIR/../claim-reaper.sh"
 RC="$SCRIPT_DIR/../release-claim.sh"
+STREAM_CAPTURE="$SCRIPT_DIR/../lib/stream-capture.sh"
 PASS=0
 FAIL=0
 
@@ -30,6 +31,17 @@ bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
 lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+
+# Install a sibling reaper copy with the real production stream-capture helper
+# at the path production resolves ($dest_dir/lib/stream-capture.sh). Without
+# the helper, claim-reaper fails closed rather than inventing an empty inventory.
+install_sibling_reaper() {
+  local dest_dir="$1"
+  mkdir -p "$dest_dir/lib"
+  cp "$REAPER" "$dest_dir/claim-reaper.sh"
+  chmod +x "$dest_dir/claim-reaper.sh"
+  cp "$STREAM_CAPTURE" "$dest_dir/lib/stream-capture.sh"
+}
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-reaper-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -72,6 +84,16 @@ case "$1" in
     # comments list: repos/o/r/issues/N/comments
     if [[ "${GH_API_FAIL:-0}" == "1" ]]; then
       exit 1
+    fi
+    if [[ "${2:-}" == "graphql" ]]; then
+      # pr-claims.sh's paginated PR-body claim read. release-claim.sh's
+      # post-mutation sibling check is fail-closed since #153's review — an
+      # unreadable inventory must not authorize removing agent-claimed — so
+      # this has to answer like a real gh: a successful, empty inventory
+      # (these fixtures have no live PR-body claims). GH_GRAPHQL_FAIL=1 makes
+      # it fail on purpose.
+      [[ "${GH_GRAPHQL_FAIL:-0}" == "1" ]] && exit 1
+      exit 0
     fi
     if [[ "${2:-}" == repos/* ]]; then
       # print bodies already posted
@@ -545,9 +567,9 @@ EOF
   : > docs/active-work.md
   git add -A && git commit -qm "prune fixtures" && git push -q origin main
   # Registered worktree at non-default path on expected branch (tip = claim epoch).
+  # Keep the worktree clean: non-force `git worktree remove` refuses dirty trees.
   git worktree add -b feat/50-prune "$WT_REG" HEAD >/dev/null 2>&1
   git branch -f feat/50-sib HEAD
-  echo reg > "$WT_REG/marker"
 ) >/dev/null 2>&1
 # Force every file mtime to CLAIM_EPOCH so worktree evidence is stale under STALE_NOW
 # (wall-clock mtimes would KEEP the claim as recent_activity).
@@ -643,7 +665,7 @@ contains "names lock contention" "$out" "lock"
 rm -rf "$LOCKDIR"
 
 # ---------------------------------------------------------------------------
-echo "#73 · legacy + per-file duplicate claim ids dedupe safely"
+echo "#73/#153 · legacy + per-file same id is REFUSE (not silently deduped)"
 new_repo "$ROOT/dedupe"
 (
   cd "$ROOT/dedupe/canon" || exit 1
@@ -668,9 +690,12 @@ EOF
 ) >/dev/null 2>&1
 export GH_PR_COUNT=0
 out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/dedupe/canon" 2>&1)
-# Should list claim once as REAP
+# Mixed file+legacy for the same id is ambiguous: REFUSE, never silent REAP.
 reap_lines=$(echo "$out" | grep -c 'REAP   issue-70-both' || true)
-check "deduped to one REAP line" "$reap_lines" "1"
+reap_lines=${reap_lines:-0}
+check "mixed same-id zero REAP lines" "$reap_lines" "0"
+contains "mixed same-id REFUSE in plan" "$out" "REFUSE"
+contains "mixed same-id names mixed reason" "$out" "mixed_ledger_representations"
 
 # ---------------------------------------------------------------------------
 echo "#73 · path with spaces in worktree tracked files (Bash 3.2)"
@@ -736,6 +761,33 @@ contains "age==14400 stays KEEP" "$out" "KEEP   issue-90-boundary"
 lacks    "age==14400 not REAP" "$out" "REAP   issue-90-boundary"
 out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/bound/canon" 2>&1)
 contains "age==14401 is REAP" "$out" "REAP   issue-90-boundary"
+
+# ---------------------------------------------------------------------------
+echo "#153 review · an unreadable live PR-claim inventory never authorizes label removal"
+# The reaper's release decides whether agent-claimed comes off. A sibling
+# claim can be a live *open PR-body* claim with no ledger row at all, so an
+# inventory the run could not read is not evidence that none exists. It used
+# to be read best-effort (`2>/dev/null || true`) and an API failure read as
+# "no siblings" — which is how a live lane could lose its label.
+new_repo "$ROOT/greread"
+add_claim_file "$ROOT/greread" issue-70-greread 70 "$CLAIMED_ISO"
+export GH_PR_COUNT=0
+export GH_LOG="$ROOT/greread/gh.log"
+export GH_COMMENTS_FILE="$ROOT/greread/comments"
+export GH_STATE="$ROOT/greread/gh-state"
+rm -f "$GH_LOG" "$GH_STATE"
+: > "$GH_COMMENTS_FILE"
+out=$(GH_GRAPHQL_FAIL=1 GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/greread/canon" --claim-id issue-70-greread --apply 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "unreadable PR-claim inventory: reaper does not report success" \
+  || bad "unreadable PR-claim inventory: reaper exited 0: $out"
+if grep -q -- '--remove-label' "$GH_LOG" 2>/dev/null; then
+  bad "unreadable PR-claim inventory: agent-claimed was removed anyway"
+else
+  ok "unreadable PR-claim inventory: agent-claimed was never removed"
+fi
+unset GH_GRAPHQL_FAIL
 
 # ---------------------------------------------------------------------------
 echo "#73 · never closes an issue (no gh issue close)"
@@ -1714,6 +1766,1519 @@ else
 fi
 lacks    "must not REAP on remote query failure" "$out" "REAP   issue-104-rmtfail"
 lacks    "must not KEEP from cache on remote query failure" "$out" "KEEP   issue-104-rmtfail"
+
+# ===========================================================================
+# #153 review round 7 — failed PR inventory is not an empty plan
+# ===========================================================================
+echo "#153 r7 · failed GraphQL on empty ledger must not report nothing to reap"
+new_repo "$ROOT/prfail"
+(
+  cd "$ROOT/prfail/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm 'empty ledger' && git push -q origin main
+) >/dev/null 2>&1
+export GH_GRAPHQL_FAIL=1
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/prfail/canon" 2>&1
+)
+rc=$?
+unset GH_GRAPHQL_FAIL
+[[ "$rc" -ne 0 ]] && ok "failed GraphQL exits nonzero" || bad "failed GraphQL exited 0: $out"
+contains "names unreadable inventory" "$out" "unreadable"
+lacks    "must not say nothing to reap on failed inventory" "$out" "nothing to reap"
+lacks    "must not emit empty dry-run plan on failed inventory" "$out" "empty ledger — zero mutations"
+
+echo "#153 r7 · successful empty GraphQL on empty ledger may report nothing to reap"
+new_repo "$ROOT/prempty"
+(
+  cd "$ROOT/prempty/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm 'empty ledger' && git push -q origin main
+) >/dev/null 2>&1
+# Default fake gh answers graphql with exit 0 (successful empty inventory).
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/prempty/canon" 2>&1
+)
+rc=$?
+check    "successful empty GraphQL + empty ledger exits 0" "$rc" "0"
+contains "may report nothing to reap after successful empty inventory" "$out" "nothing to reap"
+
+# ===========================================================================
+# #153 review round 8 — successful-but-malformed inventory is not empty
+# ===========================================================================
+echo "#153 r8 · malformed-success inventory never plans nothing to reap"
+# Reproduction: empty legacy ledger + executable reader that exits 0 while
+# printing malformed text. Before the fix this was rc 0 + "nothing to reap".
+new_repo "$ROOT/malinv"
+(
+  cd "$ROOT/malinv/canon" || exit 1
+  rm -rf docs/claims docs/active-work.md
+  git add -A && git commit -qm 'empty ledger' && git push -q origin main
+) >/dev/null 2>&1
+# Ship a sibling reaper whose pr-claims.sh is the hostile reader so we bind
+# SCRIPT_DIR without rewriting production path resolution. Carry the real
+# stream-capture helper at the path production sources.
+install_sibling_reaper "$ROOT/malinv/scripts"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+# Hostile reader: exit 0 with text that is not a valid list inventory row.
+# Exactly the class that used to be absorbed as "no PR claims".
+case "${1:-}" in
+  list)
+    echo "this is not a tab-separated claim inventory"
+    exit 0
+    ;;
+  *)
+    echo "malinv pr-claims: unmodelled: $*" >&2
+    exit 64
+    ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+state="$STATE_BASE/malinv"
+mkdir -p "$state"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "malformed-success inventory exits nonzero" \
+  || bad "malformed-success inventory exited 0: $out"
+contains "names malformed inventory row" "$out" "malformed"
+lacks    "must not say nothing to reap on malformed-success" "$out" "nothing to reap"
+lacks    "must not emit empty dry-run plan on malformed-success" "$out" "empty ledger — zero mutations"
+lacks    "must not print successful empty plan summary" "$out" "summary: reap=0"
+
+echo "#153 r8 · truncated inventory row (wrong field count) fails closed"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Only 3 tab fields — not the 8-field list contract.
+    printf '42\tissue-42-trunc\tlib/**\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "truncated inventory row exits nonzero" \
+  || bad "truncated inventory row exited 0: $out"
+contains "names field-count failure" "$out" "8 tab-separated fields"
+lacks    "truncated row is not nothing to reap" "$out" "nothing to reap"
+
+echo "#153 r8 · well-formed single inventory row is accepted (not false refuse)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Fresh activity so the reaper KEEPs rather than reaps — we only care that
+    # the inventory is accepted as readable.
+    printf '7\tissue-7-live\tlib/**\tfeat/7-live\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+# NOW near the claim timestamps so activity is not stale.
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$FRESH_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+check    "well-formed inventory is accepted (exit 0)" "$rc" "0"
+contains "well-formed row is protected/recognized" "$out" "issue-7-live"
+lacks    "well-formed row is not malformed refuse" "$out" "malformed/truncated row"
+
+# ===========================================================================
+# #153 review-nine P1 — PR URL must bind to row repository and PR number
+# ===========================================================================
+# A hostile reader can exit 0 with a plausible GitHub PR URL whose owner/repo
+# or /pull/N disagrees with the row. Production must reject that all-or-none,
+# fail closed, and never classify/plan/release it. Shape-only URL validation
+# previously accepted `https://github.com/evil/other/pull/123` as STALE for
+# acme/app PR #999 and, under --apply, released by claim id alone.
+echo "#153 r9 · foreign-repository PR URL is rejected (not STALE, not released)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Stale activity + foreign repo URL with an otherwise matching pull number.
+    # Shape is valid; repository identity is not. The /pull/N matches the row
+    # so a regression that drops only the repository comparison (leaving the
+    # number check) is still caught by this fixture (#153 review-nine).
+    printf '999\tissue-999-hostile\tlib/**\tfeat/999-hostile\thttps://github.com/evil/other/pull/999\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+# Release spy: any invocation proves --apply was willing to release.
+spy_release="$ROOT/malinv/spy-release.sh"
+cat > "$spy_release" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_release"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "foreign-repo PR URL exits nonzero" \
+  || bad "foreign-repo PR URL exited 0: $out"
+contains "foreign-repo URL names repository mismatch" "$out" "PR URL repository"
+contains "foreign-repo URL names the foreign owner/repo" "$out" "evil/other"
+contains "foreign-repo URL names the expected inventory repo" "$out" "acme/app"
+lacks    "foreign-repo URL is not classified STALE" "$out" "STALE PR #"
+lacks    "foreign-repo URL is not nothing to reap" "$out" "nothing to reap"
+lacks    "foreign-repo URL is not protected as live" "$out" "is protected"
+check    "foreign-repo URL never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r9 · same-repo URL whose /pull/N differs from row number is rejected"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Row number 999, URL points at pull/123 in the correct repo.
+    printf '999\tissue-999-mismatch\tlib/**\tfeat/999-mismatch\thttps://github.com/acme/app/pull/123\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "URL pull-number mismatch exits nonzero" \
+  || bad "URL pull-number mismatch exited 0: $out"
+contains "URL number mismatch names pull-number disagreement" "$out" "PR URL pull-number"
+contains "URL number mismatch names the URL number" "$out" "'123'"
+contains "URL number mismatch names the row number" "$out" "'999'"
+lacks    "URL number mismatch is not classified STALE" "$out" "STALE PR #"
+lacks    "URL number mismatch is not nothing to reap" "$out" "nothing to reap"
+check    "URL number mismatch never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 open-PR-always-protects · well-formed open PR row is PROTECTED regardless of age (never reaped)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Stale timestamps on purpose: age must NOT license release of an open PR.
+    printf '7\tissue-7-stale\tlib/**\tfeat/7-stale\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "identity-bound open PR row is accepted (exit 0)" "$rc" "0"
+contains "identity-bound open PR row is protected" "$out" \
+  "PR #7 claim issue-7-stale is protected (open PR always protects)"
+lacks    "open PR row is never classified STALE" "$out" "STALE PR #"
+lacks    "open PR row never emits handoff comment language" "$out" "released by claim-reaper"
+check    "open PR row never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+# Journal must not record a reap for a protected open PR.
+if [[ -s "$state/journal.md" ]] && grep -qE 'issue-7-stale|REAP' "$state/journal.md" 2>/dev/null; then
+  bad "open PR protection mutated the journal: $(cat "$state/journal.md")"
+else
+  ok "open PR protection left the journal untouched"
+fi
+
+# ===========================================================================
+# #153 review-ten P1 — PR identities must be positive canonical decimals
+# ===========================================================================
+# GitHub pull-request numbers are positive canonical decimals (^[1-9][0-9]*$).
+# Digit-only acceptance previously admitted zero and leading-zero forms such as
+# 0999. A successful reader returning those must make the entire inventory
+# unreadable/fatal before classification, planning, journaling, or --apply
+# release. Do not normalize malformed input into a valid identity.
+echo "#153 r10 · leading-zero PR identity (0999) is rejected (not STALE, not released)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Adversarial fixture from independent review-ten: successful reader, stale
+    # timestamps, matching row/URL numbers — but noncanonical leading-zero form.
+    printf '0999\tissue-999-leading-zero\tlib/**\tfeat/999-leading-zero\thttps://github.com/acme/app/pull/0999\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+# Reset journal so a prior successful reap cannot make this look planned/journaled.
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "leading-zero PR identity exits nonzero" \
+  || bad "leading-zero PR identity was accepted (exit 0): $out"
+# Row-field diagnostic specifically (not the URL-path message). Softening only
+# the row validator to ^[0-9]+$ must fail this assertion even if the URL check
+# still rejects the same row.
+contains "leading-zero PR identity names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "leading-zero PR identity names the hostile row number" "$out" "0999"
+lacks    "leading-zero PR identity is not classified STALE" "$out" "STALE PR #"
+lacks    "leading-zero PR identity is not nothing to reap" "$out" "nothing to reap"
+lacks    "leading-zero PR identity is not protected as live" "$out" "is protected"
+lacks    "leading-zero PR identity is not planned REAP" "$out" "REAP   issue-999-leading-zero"
+check    "leading-zero PR identity never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "leading-zero PR identity never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r10 · zero PR identity (0) is rejected (not STALE, not released)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '0\tissue-0-zero\tlib/**\tfeat/0-zero\thttps://github.com/acme/app/pull/0\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "zero PR identity exits nonzero" \
+  || bad "zero PR identity was accepted (exit 0): $out"
+contains "zero PR identity names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "zero PR identity names the hostile row" "$out" $'0\tissue-0-zero'
+lacks    "zero PR identity is not classified STALE" "$out" "STALE PR #"
+lacks    "zero PR identity is not nothing to reap" "$out" "nothing to reap"
+lacks    "zero PR identity is not planned REAP" "$out" "REAP   issue-0-zero"
+check    "zero PR identity never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "zero PR identity never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r10 · canonical row + leading-zero URL /pull/0999 is rejected via URL path"
+# Mismatch-shaped hostile fixture: row is a positive canonical decimal so the
+# row validator cannot reject first. Only the URL /pull/N shape rejects.
+# Restoring the URL capture to [0-9]+ while leaving the row validator strict
+# changes the diagnostic to a pull-number *mismatch* (0999 vs 999) — this
+# fixture gives that independent URL mutation behavioral teeth. (A pure
+# same-shaped 0999/0999 URL-only mutation is unreachable: the earlier row
+# check necessarily rejects first; see source tripwire below.)
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '999\tissue-999-url-lz\tlib/**\tfeat/999-url-lz\thttps://github.com/acme/app/pull/0999\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "canonical-row + leading-zero URL exits nonzero" \
+  || bad "canonical-row + leading-zero URL was accepted (exit 0): $out"
+# URL-path diagnostic specifically. Softening only the URL capture to [0-9]+
+# makes the row pass shape checks and then fail equality as a mismatch —
+# this assertion must fail under that independent mutation.
+contains "canonical-row + leading-zero URL names noncanonical URL pull" "$out" \
+  "pull number is noncanonical/unsafe"
+lacks    "canonical-row + leading-zero URL is not classified STALE" "$out" "STALE PR #"
+lacks    "canonical-row + leading-zero URL is not nothing to reap" "$out" "nothing to reap"
+check    "canonical-row + leading-zero URL never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r10 · canonical multi-digit PR identity (1000) remains accepted under --apply"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # 1000 is a positive canonical decimal (leading 1). Must remain accepted
+    # under the same repository and exact row/URL number bindings as r9's #7.
+    printf '1000\tissue-1000-stale\tlib/**\tfeat/1000-stale\thttps://github.com/acme/app/pull/1000\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "canonical PR #1000 is accepted (exit 0)" "$rc" "0"
+contains "canonical PR #1000 open row is protected" "$out" \
+  "PR #1000 claim issue-1000-stale is protected (open PR always protects)"
+lacks    "canonical open PR #1000 is never STALE" "$out" "STALE PR #"
+check    "canonical open PR #1000 never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+# ===========================================================================
+# #153 review-eleven P1 — PR identities must also be within safe integer range
+# ===========================================================================
+# [1-9][0-9]* alone admits arbitrarily long digit strings. A 64-digit positive
+# decimal (or MAX_SAFE_INT+1) matching in both the row and /pull/N must make
+# the entire inventory unreadable/fatal before classification, planning,
+# journaling, or --apply release. Bound via parse_canonical_positive_int over
+# the existing parse_nonneg_int / MAX_SAFE_INT machinery — no host arithmetic
+# on hostile input.
+#
+# Mutation reachability notes (exact equality + dual independent validators):
+# 1. Row-only safe-range bypass on an exact-match overflow fixture: the URL
+#    safe-range check still rejects, so STALE/release cannot fire. Behavioral
+#    teeth come from the *row* diagnostic ("PR number is noncanonical/unsafe")
+#    which disappears under that mutation, plus the source tripwire that the
+#    inventory path still calls parse_canonical_positive_int on the row field.
+# 2. URL-only safe-range bypass: exact-match overflow is unreachable for a
+#    URL-specific diagnostic (row rejects first). The mismatch-shaped fixture
+#    (safe row + overflow URL) gives that mutation behavioral teeth: production
+#    names "pull number is noncanonical/unsafe"; bypassing only the URL range
+#    check degrades to a generic pull-number mismatch.
+# 3. Both safe-range checks bypassed (shape-only [1-9][0-9]*): the exact-match
+#    64-digit fixture becomes STALE and invokes the release spy — suite fails.
+echo "#153 r11 · 64-digit overflow PR identity (exact row/URL match) is rejected"
+# 64-digit positive decimal — length > MAX_SAFE_INT (19 digits), so out of
+# safe range even though it matches ^[1-9][0-9]*$.
+OVERFLOW64="1234567890123456789012345678901234567890123456789012345678901234"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    printf '%s\tissue-64-overflow\tlib/**\tfeat/64-overflow\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+      '$OVERFLOW64' '$OVERFLOW64'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "64-digit overflow PR identity exits nonzero" \
+  || bad "64-digit overflow PR identity was accepted (exit 0): $out"
+# Row-field diagnostic specifically. Softening only the row safe-range check
+# (keeping shape) makes the URL range check reject instead — this assertion
+# fails under that independent mutation even though STALE still cannot fire.
+contains "64-digit overflow names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "64-digit overflow names the hostile row number" "$out" "$OVERFLOW64"
+contains "64-digit overflow names safe-range contract" "$out" "safe range"
+lacks    "64-digit overflow is not classified STALE" "$out" "STALE PR #"
+lacks    "64-digit overflow is not nothing to reap" "$out" "nothing to reap"
+lacks    "64-digit overflow is not protected as live" "$out" "is protected"
+lacks    "64-digit overflow is not planned REAP" "$out" "REAP   issue-64-overflow"
+check    "64-digit overflow never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "64-digit overflow never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r11 · just-over-boundary PR identity (MAX_SAFE_INT+1 exact match) is rejected"
+# MAX_SAFE_INT is 9223372036854775807; +1 is still 19 digits and matches
+# ^[1-9][0-9]*$ but fails the lexical safe-range compare. No shell arithmetic
+# on this value anywhere in the fixture or production path.
+# Claim id is a valid issue-bound identity (issue-8-over-bound) so this fixture
+# rejects solely on the PR-number safe-range contract — not a malformed claim id.
+OVER_BOUND="9223372036854775808"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    printf '%s\tissue-8-over-bound\tlib/**\tfeat/8-over-bound\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+      '$OVER_BOUND' '$OVER_BOUND'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "just-over-boundary PR identity exits nonzero" \
+  || bad "just-over-boundary PR identity was accepted (exit 0): $out"
+contains "just-over-boundary names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "just-over-boundary names the hostile row number" "$out" "$OVER_BOUND"
+contains "just-over-boundary names safe-range contract" "$out" "safe range"
+lacks    "just-over-boundary is not classified STALE" "$out" "STALE PR #"
+lacks    "just-over-boundary is not nothing to reap" "$out" "nothing to reap"
+check    "just-over-boundary never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "just-over-boundary never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r11 · safe row + overflow URL is rejected via independent URL path"
+# Mismatch-shaped hostile fixture for URL safe-range mutation teeth: row is
+# boundary-safe so the row validator cannot reject first. Only the independent
+# URL /pull/N safe-range parse rejects. Restoring URL validation to shape-only
+# ([1-9][0-9]* without safe range) while leaving the row validator strict
+# changes the diagnostic to a pull-number *mismatch* — this fixture gives that
+# independent URL mutation behavioral teeth. (A pure same-shaped overflow/overflow
+# URL-only mutation is unreachable: the earlier row check necessarily rejects
+# first; see source tripwire below.)
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '7\tissue-7-url-overflow\tlib/**\tfeat/7-url-overflow\thttps://github.com/acme/app/pull/9223372036854775808\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "safe-row + overflow URL exits nonzero" \
+  || bad "safe-row + overflow URL was accepted (exit 0): $out"
+# URL-path diagnostic specifically (not a generic row/URL number mismatch).
+contains "safe-row + overflow URL names noncanonical/unsafe URL pull" "$out" \
+  "pull number is noncanonical/unsafe"
+contains "safe-row + overflow URL names safe-range contract" "$out" "safe range"
+lacks    "safe-row + overflow URL is not a mere number mismatch" "$out" \
+  "does not match row PR number"
+lacks    "safe-row + overflow URL is not classified STALE" "$out" "STALE PR #"
+lacks    "safe-row + overflow URL is not nothing to reap" "$out" "nothing to reap"
+check    "safe-row + overflow URL never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r11 · boundary-safe PR identity (MAX_SAFE_INT) remains accepted and protected"
+# MAX_SAFE_INT itself must remain accepted as inventory identity. Represented
+# only as a string literal — no shell arithmetic on the PR number. Open PR
+# rows are protected (never reaped) regardless of age.
+MAX_SAFE="9223372036854775807"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    printf '%s\tissue-%s-stale\tlib/**\tfeat/max-safe-stale\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+      '$MAX_SAFE' '$MAX_SAFE' '$MAX_SAFE'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "boundary-safe MAX_SAFE_INT PR is accepted (exit 0)" "$rc" "0"
+contains "boundary-safe MAX_SAFE_INT open PR is protected" "$out" \
+  "PR #${MAX_SAFE} claim issue-${MAX_SAFE}-stale is protected (open PR always protects)"
+lacks    "boundary-safe open PR is never STALE" "$out" "STALE PR #"
+check    "boundary-safe open PR never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+# Source-contract tripwires: dual independent shape + safe-range requirements.
+# Same-shaped 0999/0999 or overflow/overflow URL-only mutations are unreachable
+# for STALE/release assertions (row check fires first); the mismatch-shaped
+# fixtures above cover URL mutation behaviorally. These greps keep the dual
+# source invariant explicit for both shape and safe-range layers.
+if grep -qF '/pull/([1-9][0-9]*)$' "$REAPER"; then
+  ok "source contract: URL pull capture requires positive canonical decimal"
+else
+  bad "source contract: URL pull capture no longer requires ([1-9][0-9]*) (check $REAPER)"
+fi
+if grep -qF '^[1-9][0-9]*$' "$REAPER"; then
+  ok "source contract: row PR number requires positive canonical decimal"
+else
+  bad "source contract: row PR number no longer requires ^[1-9][0-9]*$"
+fi
+if grep -q 'parse_canonical_positive_int' "$REAPER"; then
+  ok "source contract: parse_canonical_positive_int helper is present"
+else
+  bad "source contract: parse_canonical_positive_int helper missing (check $REAPER)"
+fi
+# Both the row field and the captured URL component must call the helper
+# independently (two call sites in the inventory validator, not only the def).
+_call_sites=$(grep -c 'parse_canonical_positive_int "' "$REAPER" || true)
+if [[ "$_call_sites" -ge 2 ]]; then
+  ok "source contract: parse_canonical_positive_int called ≥2 times (row + URL)"
+else
+  bad "source contract: parse_canonical_positive_int call sites = ${_call_sites} (want ≥2 for row+URL)"
+fi
+unset _call_sites
+
+# ===========================================================================
+# #153 open-PR-always-protects P1 — sensors + mutation receipt
+# ===========================================================================
+echo "#153 open-PR-always-protects · old open PR yields protected, zero release-spy, zero journal, zero handoff"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Very old updatedAt relative to STALE_NOW — age alone used to license REAP.
+    printf '55\tissue-55-parked\tlib/**\tfeat/55-parked\thttps://github.com/acme/app/pull/55\t2020-01-01T00:00:00Z\t2020-01-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "old open PR protect exits 0" "$rc" "0"
+contains "old open PR names protected contract" "$out" "open PR always protects"
+contains "old open PR names the claim" "$out" "issue-55-parked"
+lacks    "old open PR is never STALE" "$out" "STALE PR #"
+check    "old open PR zero release-spy calls" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+if [[ -s "$state/journal.md" ]] && grep -qE 'issue-55-parked|REAP|COMPLETED' "$state/journal.md" 2>/dev/null; then
+  bad "old open PR protection mutated journal: $(cat "$state/journal.md")"
+else
+  ok "old open PR protection: zero journal mutation"
+fi
+lacks    "old open PR zero handoff comment" "$out" "claim-reaper released"
+
+echo "#153 open-PR-always-protects · mutation: restoring age-based STALE dispatch makes the sensor fail"
+# Mutate the sibling reaper copy only — never the real tree. Replace the
+# always-protect tail with the pre-fix age-based STALE + release path.
+_reaper_copy="$ROOT/malinv/scripts/claim-reaper.sh"
+cp "$REAPER" "$_reaper_copy"
+_mut_tmp="$_reaper_copy.mut"
+# Marker lines that bookend the always-protect body (unique in production).
+_start_pat='# Open PR-body claim: always protect. Never call release-claim.sh.'
+_end_pat='info "PR #$pr_number claim $pr_id is protected (open PR always protects)"'
+{
+  # Emit everything before the protect body.
+  awk -v start="$_start_pat" '
+    index($0, start) { exit }
+    { print }
+  ' "$_reaper_copy"
+  # Defect restored: age-based STALE dispatch (exact pre-fix behaviour).
+  # Reads timestamps from the already-validated row (production no longer
+  # binds them because open PRs never age out).
+  cat <<'DEFECT'
+    # MUTATED DEFECT: age-based STALE dispatch for open PR rows
+    pr_created=$(cut -f6 <<<"$_pr_line")
+    pr_updated=$(cut -f7 <<<"$_pr_line")
+    stamp="$pr_updated"
+    [[ -n "$stamp" ]] || stamp="$pr_created"
+    epoch=$(date -u -d "$stamp" +%s 2>/dev/null ||
+      date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$stamp" +%s 2>/dev/null || echo "")
+    if [[ -z "$epoch" || ! "$epoch" =~ ^[0-9]+$ ]]; then
+      warn "refusing PR #$pr_number claim '$pr_id' with unreadable activity timestamp"
+      continue
+    fi
+    age=$((NOW - epoch))
+    if [[ "$age" -lt "$STALE_SECONDS" ]]; then
+      info "PR #$pr_number claim $pr_id is protected (activity ${age}s ago)"
+      continue
+    fi
+    info "STALE PR #$pr_number claim $pr_id (activity ${age}s ago)"
+    if [[ "$APPLY" -eq 1 ]]; then
+      pr_issue=""
+      if [[ "$pr_id" =~ ^issue-([0-9]+)- ]]; then pr_issue="${BASH_REMATCH[1]}"; fi
+      if [[ -n "$pr_issue" ]]; then
+        "$RELEASE_CMD" "$pr_issue" --claim-id "$pr_id" --repo "$PR_REPO" \
+          --keep-branch --keep-worktree
+      fi
+    fi
+    continue
+DEFECT
+  # Emit everything after the protect info line.
+  awk -v end="$_end_pat" '
+    seen { print; next }
+    index($0, end) { seen=1; next }
+  ' "$_reaper_copy"
+} > "$_mut_tmp"
+mv "$_mut_tmp" "$_reaper_copy"
+chmod +x "$_reaper_copy"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+# With the defect restored, the old open row must be classified STALE and
+# release-spy must fire — proving the committed sensor would go red.
+if echo "$out" | grep -qF 'STALE PR #55 claim issue-55-parked' && \
+   [[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]]; then
+  ok "mutation receipt: restoring age-based STALE reaps the open PR (sensor would fail)"
+else
+  bad "mutation receipt: defect restore did not re-enable STALE reaping: out=$out spy=$(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+fi
+# Restore production protect behaviour in the copy and re-green.
+install_sibling_reaper "$ROOT/malinv/scripts"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+contains "re-green: open PR protected again" "$out" "open PR always protects"
+check    "re-green: zero release-spy" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+unset _reaper_copy _mut_tmp _start_pat _end_pat
+
+echo "#153 open-PR-always-protects · namespaced open PR id is protected (not malformed)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '66\tissue-template-66-ns\tlib/**\tfeat/template-66-ns\thttps://github.com/acme/app/pull/66\t2020-01-01T00:00:00Z\t2020-01-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "namespaced open PR exits 0" "$rc" "0"
+contains "namespaced open PR is protected" "$out" \
+  "PR #66 claim issue-template-66-ns is protected (open PR always protects)"
+lacks    "namespaced open PR is not refused as malformed" "$out" "refusing malformed PR claim id"
+check    "namespaced open PR zero release-spy" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+# ===========================================================================
+# #153 exact-head P1 — pre-dispatch fresh inventory revalidation
+# ===========================================================================
+echo "#153 exact-head · same-ID open PR appearing after planning blocks release"
+# Force a valid same-ID open PR to appear AFTER startup inventory/planning
+# and after the branch-specific open_pr_status check, but BEFORE release
+# dispatch. Assert release spy never called and no journal success/handoff.
+new_repo "$ROOT/appear"
+add_claim_file "$ROOT/appear" issue-850-appear 850 "$CLAIMED_ISO"
+install_sibling_reaper "$ROOT/appear/scripts"
+# pr-claims list: empty on first call (planning), same-ID open row on later calls
+# (pre-dispatch revalidation).
+cat > "$ROOT/appear/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+CNT_FILE="${APPEAR_CNT:-/tmp/appear.count}"
+case "${1:-}" in
+  list)
+    n=0
+    [[ -f "$CNT_FILE" ]] && n=$(cat "$CNT_FILE" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$CNT_FILE"
+    if [[ "$n" -le 1 ]]; then
+      # Startup inventory: empty — ledger claim will plan as REAP.
+      exit 0
+    fi
+    # Pre-dispatch revalidation: same-ID open PR appears.
+    printf '850\tissue-850-appear\tlib/**\tfeat/850-appear\thttps://github.com/acme/app/pull/850\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/appear/scripts/pr-claims.sh"
+spy_appear="$ROOT/appear/spy-release.sh"
+cat > "$spy_appear" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_appear"
+: > "$ROOT/appear/spy.log"
+: > "$ROOT/appear/appear.count"
+state_ap="$STATE_BASE/appear"
+mkdir -p "$state_ap"
+: > "$state_ap/journal.md"
+export GH_PR_COUNT=0
+out=$(
+  PATH="$BIN:$PATH" \
+  APPEAR_CNT="$ROOT/appear/appear.count" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/appear/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_ap" \
+  GIBSON_REAPER_JOURNAL="$state_ap/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_ap/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_appear" \
+  SPY_LOG="$ROOT/appear/spy.log" \
+    "$ROOT/appear/scripts/claim-reaper.sh" --repo acme/app --claim-id issue-850-appear --apply 2>&1
+)
+rc=$?
+# Incomplete (exit 3) or nonzero is fine; success (0) with release is not.
+[[ "$rc" -ne 0 ]] && ok "appear-after-plan refuses/incomplete (rc=$rc)" \
+  || {
+    # rc=0 only OK if release spy never fired and claim still live
+    if [[ "$(grep -c RELEASE_INVOKED "$ROOT/appear/spy.log" 2>/dev/null || echo 0)" -eq 0 ]]; then
+      ok "appear-after-plan rc=0 with zero release (protected)"
+    else
+      bad "appear-after-plan rc=0 but release spy fired"
+    fi
+  }
+contains "appear-after-plan names fresh protect" "$out" "fresh open-PR inventory protects"
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/appear/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+check "appear-after-plan zero release-spy" "$_spy_n" "0"
+if [[ -s "$state_ap/journal.md" ]] && grep -qE 'COMPLETED|claim_released=1' "$state_ap/journal.md" 2>/dev/null; then
+  bad "appear-after-plan journal has success/handoff: $(cat "$state_ap/journal.md")"
+else
+  ok "appear-after-plan: no journal success/handoff"
+fi
+files=$(git -C "$ROOT/appear/canon" fetch -q origin; git -C "$ROOT/appear/canon" ls-tree --name-only origin/main docs/claims/)
+contains "appear-after-plan ledger preserved" "$files" "issue-850-appear.md"
+lacks "appear-after-plan no handoff comment" "$out" "claim-reaper released"
+
+echo "#153 exact-head · mutation: removing pre-dispatch revalidation reaps appeared PR"
+# Mutate sibling reaper: make fresh_open_pr_inventory_protect always succeed.
+_reaper_ap="$ROOT/appear/scripts/claim-reaper.sh"
+install_sibling_reaper "$ROOT/appear/scripts"
+# Insert an early return 0 at the top of the protect function body.
+perl -i -pe 's/^(fresh_open_pr_inventory_protect\(\) \{)/$1\n  return 0 # MUTATED always-allow/' "$_reaper_ap"
+if grep -q 'MUTATED always-allow' "$_reaper_ap"; then
+  ok "appear mutation: pre-dispatch revalidation neutralized"
+else
+  bad "appear mutation: failed to neutralize pre-dispatch revalidation"
+fi
+: > "$ROOT/appear/spy.log"
+: > "$ROOT/appear/appear.count"
+: > "$state_ap/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  APPEAR_CNT="$ROOT/appear/appear.count" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/appear/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_ap" \
+  GIBSON_REAPER_JOURNAL="$state_ap/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_ap/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_appear" \
+  SPY_LOG="$ROOT/appear/spy.log" \
+    "$_reaper_ap" --repo acme/app --claim-id issue-850-appear --apply 2>&1
+)
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/appear/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+if [[ "$_spy_n" -ge 1 ]]; then
+  ok "mutation receipt: removing fresh revalidation dispatches release (sensor would fail)"
+else
+  bad "mutation receipt: neutralizing revalidation did not re-enable release: out=$out spy=$(cat "$ROOT/appear/spy.log" 2>/dev/null)"
+fi
+# Restore production reaper copy for hygiene.
+install_sibling_reaper "$ROOT/appear/scripts"
+
+echo "#153 exact-head · mixed file+legacy same id is REFUSE (not deduped)"
+new_repo "$ROOT/mixrep"
+(
+  cd "$ROOT/mixrep/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-860-mix\nissue: 860\nclaimed: %s\nscope: src/x\nsession: a\nbranch: feat/860-mix\n' \
+    "$CLAIMED_ISO" > docs/claims/issue-860-mix.md
+  cat > docs/active-work.md <<TABLE
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-860-mix | src/x | session:a |
+TABLE
+  git add -A && git commit -qm "mixed reps" && git push -q origin main
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/mixrep/canon" --claim-id issue-860-mix 2>&1
+)
+rc=$?
+check "mixed reps dry-run exits 0" "$rc" "0"
+contains "mixed reps REFUSE in plan" "$out" "REFUSE"
+contains "mixed reps names reason" "$out" "mixed_ledger_representations"
+lacks "mixed reps never REAP" "$out" "REAP   issue-860-mix"
+# Apply must not call release.
+spy_mix="$ROOT/mixrep/spy.sh"
+cat > "$spy_mix" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED\n' >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_mix"
+: > "$ROOT/mixrep/spy.log"
+state_mx="$STATE_BASE/mixrep"
+mkdir -p "$state_mx"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/mixrep/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_mx" \
+  GIBSON_REAPER_JOURNAL="$state_mx/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_mx/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_mix" \
+  SPY_LOG="$ROOT/mixrep/spy.log" \
+    "$REAPER" --repo acme/app --claim-id issue-860-mix --apply 2>&1
+)
+check "mixed reps apply zero release-spy" \
+  "$(grep -c . "$ROOT/mixrep/spy.log" 2>/dev/null || true)" "0"
+files=$(git -C "$ROOT/mixrep/canon" fetch -q origin; git -C "$ROOT/mixrep/canon" ls-tree --name-only origin/main docs/claims/)
+contains "mixed reps file preserved" "$files" "issue-860-mix.md"
+table=$(git -C "$ROOT/mixrep/canon" show origin/main:docs/active-work.md)
+contains "mixed reps legacy preserved" "$table" "issue-860-mix"
+
+echo "#153 exact-head · mutation: neutralizing mixed_ledger_representations guard"
+# Mutate reaper copy: skip the mixed-representation refuse block entirely so
+# both file+legacy rows remain plannable (pre-fix silent survival of dual
+# rows → REAP of the file representation). Prove the mutation applied, then
+# require REAP (sensor would go red).
+install_sibling_reaper "$ROOT/mixmutr"
+# Sibling empty pr-claims so SCRIPT_DIR resolution succeeds (no live open PRs).
+cat > "$ROOT/mixmutr/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in list|list-open-numbers) exit 0 ;; *) exit 64 ;; esac
+READER
+chmod +x "$ROOT/mixmutr/pr-claims.sh"
+# Gate the mixed block on `false &&` so it never runs.
+perl -i -pe 's/if \[\[ -s "\$\{MIX_IDS_TMP\}\.file" && -s "\$\{MIX_IDS_TMP\}\.leg" \]\]; then/if false \&\& [[ -s "\${MIX_IDS_TMP}.file" \&\& -s "\${MIX_IDS_TMP}.leg" ]]; then # MUTATED skip mixed refuse/' \
+  "$ROOT/mixmutr/claim-reaper.sh"
+if grep -q 'MUTATED skip mixed refuse' "$ROOT/mixmutr/claim-reaper.sh"; then
+  ok "mixed mutation: mixed refuse block gated off"
+else
+  bad "mixed mutation: failed to gate off mixed refuse block"
+fi
+out2=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/mixrep/canon" \
+  GIBSON_REAPER_STATE_DIR="$STATE_BASE/mixmutr2" \
+  GIBSON_REAPER_JOURNAL="$STATE_BASE/mixmutr2/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$STATE_BASE/mixmutr2/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_mix" \
+    "$ROOT/mixmutr/claim-reaper.sh" --repo acme/app --claim-id issue-860-mix 2>&1
+)
+if echo "$out2" | grep -q 'mixed_ledger_representations'; then
+  bad "mutation receipt: mixed REFUSE still present after skip: $out2"
+elif echo "$out2" | grep -q 'REAP   issue-860-mix'; then
+  ok "mutation receipt: skipping mixed guard plans REAP (sensor would fail)"
+else
+  bad "mutation receipt: skipping mixed guard did not re-enable REAP: $out2"
+fi
+
+# ===========================================================================
+# #153 exact-head P2 — never declare empty ledger from local HEAD
+# ===========================================================================
+echo "#153 exact-head · local HEAD empty while origin/main has stale claim"
+new_repo "$ROOT/lochead"
+add_claim_file "$ROOT/lochead" issue-870-remote-only 870 "$CLAIMED_ISO"
+(
+  cd "$ROOT/lochead/canon" || exit 1
+  # Detach to a feature commit that has NO docs/claims or active-work —
+  # local HEAD looks empty, but origin/main still holds the claim.
+  git checkout -q --orphan empty-feature
+  git rm -rf --cached . >/dev/null 2>&1 || true
+  rm -rf docs
+  echo "feature only" > feature.txt
+  git add feature.txt
+  git commit -qm "feature without claims tree"
+  # Stay on empty-feature so HEAD lacks docs/claims.
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/lochead/canon" --claim-id issue-870-remote-only 2>&1
+)
+rc=$?
+check "local-empty-HEAD dry-run exits 0" "$rc" "0"
+contains "local-empty-HEAD inventories remote claim" "$out" "issue-870-remote-only"
+lacks "local-empty-HEAD never nothing-to-reap from HEAD" "$out" "nothing to reap"
+# Must REAP or at least plan the remote claim, not exit early as empty.
+if echo "$out" | grep -qE 'REAP   issue-870-remote-only|KEEP   issue-870-remote-only|REFUSE   issue-870-remote-only'; then
+  ok "local-empty-HEAD plans the remote claim (not empty from HEAD)"
+else
+  bad "local-empty-HEAD did not inventory remote claim: $out"
+fi
+
+echo "#153 exact-head · fetch failure is nonzero with zero mutation"
+new_repo "$ROOT/fetchz"
+add_claim_file "$ROOT/fetchz" issue-880-fetchz 880 "$CLAIMED_ISO"
+GIT_REAL=$(command -v git)
+mkdir -p "$ROOT/fetchz/bin"
+cat > "$ROOT/fetchz/bin/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "fetch" ]]; then
+  echo "simulated fetch failure" >&2
+  exit 128
+fi
+exec "$GIT_REAL" "\$@"
+EOF
+chmod +x "$ROOT/fetchz/bin/git"
+out=$(
+  PATH="$ROOT/fetchz/bin:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/fetchz/canon" \
+    "$REAPER" --repo acme/app --claim-id issue-880-fetchz --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "fetch failure exits nonzero" || bad "fetch failure exited 0: $out"
+contains "fetch failure names refuse" "$out" "cannot fetch"
+files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/fetchz/canon" fetch -q origin 2>/dev/null
+  PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/fetchz/canon" ls-tree --name-only origin/main docs/claims/)
+contains "fetch failure ledger preserved" "$files" "issue-880-fetchz.md"
+
+# ===========================================================================
+# #153 CodeRabbit exact-head repair — stderr, origin fallback, comm fail-closed
+# ===========================================================================
+echo "#153 CodeRabbit · benign successful stderr does not poison inventory stdout"
+# pr-claims.sh list exits 0 with a well-formed row on stdout and a warning on
+# stderr. Merging 2>&1 would make the inventory look malformed; separate
+# capture (shared stream-capture helper) must keep the row valid and protect
+# the open claim. Do not weaken this sensor.
+new_repo "$ROOT/benign"
+install_sibling_reaper "$ROOT/benign/scripts"
+cat > "$ROOT/benign/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    echo "gh: notice: GraphQL deprecation warning (benign)" >&2
+    printf '7\tissue-7-live\tlib/**\tfeat/7-live\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/benign/scripts/pr-claims.sh"
+state_bn="$STATE_BASE/benign"
+mkdir -p "$state_bn"
+: > "$state_bn/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$FRESH_NOW" \
+  GIBSON_CANONICAL="$ROOT/benign/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_bn" \
+  GIBSON_REAPER_JOURNAL="$state_bn/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_bn/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/benign/scripts/claim-reaper.sh" --repo acme/app 2>&1
+)
+rc=$?
+check "benign stderr inventory exits 0" "$rc" "0"
+contains "benign stderr row is protected" "$out" "issue-7-live"
+lacks "benign stderr is not malformed refuse" "$out" "malformed/truncated row"
+lacks "benign stderr is not unreadable refuse" "$out" "unreadable"
+
+echo "#153 CodeRabbit · origin-fallback PR_REPO reaches fresh pre-dispatch protect"
+# When `gh repo view` fails, identity still resolves from exactly one GitHub
+# origin URL. That same identity must drive startup inventory, pre-dispatch
+# protect, and release-claim --repo (never drop origin into "repo unresolved").
+new_repo "$ROOT/origfb"
+add_claim_file "$ROOT/origfb" issue-890-origfb 890 "$CLAIMED_ISO"
+# Bind a GitHub identity on origin while still using the local bare for transport.
+git -C "$ROOT/origfb/canon" config "url.$ROOT/origfb/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/origfb/canon" remote set-url origin https://github.com/acme/app.git
+mkdir -p "$ROOT/origfb/bin"
+install_sibling_reaper "$ROOT/origfb/scripts"
+# pr-claims: empty on first call (plan REAP); same-id open PR on later calls.
+# Also log the repo argument so we prove origin-fallback identity was used.
+: > "$ROOT/origfb/list-repos.log"
+cat > "$ROOT/origfb/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+CNT_FILE="${ORIGFB_CNT:-/tmp/origfb.count}"
+LOG_FILE="${ORIGFB_LOG:-/tmp/origfb.repos}"
+case "${1:-}" in
+  list)
+    printf '%s\n' "${2:-}" >> "$LOG_FILE"
+    n=0
+    [[ -f "$CNT_FILE" ]] && n=$(cat "$CNT_FILE" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$CNT_FILE"
+    if [[ "$n" -le 1 ]]; then
+      exit 0
+    fi
+    printf '890\tissue-890-origfb\tlib/**\tfeat/890-origfb\thttps://github.com/acme/app/pull/890\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/origfb/scripts/pr-claims.sh"
+# gh: repo view fails; pr list still succeeds with 0 open (branch-specific check).
+cat > "$ROOT/origfb/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1" in
+  repo)
+    echo "simulated gh repo view failure" >&2
+    exit 1
+    ;;
+  pr)
+    echo "0"
+    exit 0
+    ;;
+  api)
+    if [[ "${2:-}" == "graphql" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  issue)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+GH
+chmod +x "$ROOT/origfb/bin/gh"
+spy_of="$ROOT/origfb/spy-release.sh"
+cat > "$spy_of" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_of"
+: > "$ROOT/origfb/spy.log"
+: > "$ROOT/origfb/origfb.count"
+: > "$ROOT/origfb/list-repos.log"
+state_of="$STATE_BASE/origfb"
+mkdir -p "$state_of"
+: > "$state_of/journal.md"
+out=$(
+  PATH="$ROOT/origfb/bin:$BIN:$PATH" \
+  ORIGFB_CNT="$ROOT/origfb/origfb.count" \
+  ORIGFB_LOG="$ROOT/origfb/list-repos.log" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/origfb/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_of" \
+  GIBSON_REAPER_JOURNAL="$state_of/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_of/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_of" \
+  SPY_LOG="$ROOT/origfb/spy.log" \
+    "$ROOT/origfb/scripts/claim-reaper.sh" --claim-id issue-890-origfb --apply 2>&1
+)
+rc=$?
+# Exact protected claim/reason — not the generic "fresh open-PR inventory protects"
+# prefix that also covers "repo unresolved".
+contains "origin-fallback exact claim protect" "$out" \
+  "carries exact claim id 'issue-890-origfb'"
+[[ "$rc" -ne 0 ]] && ok "origin-fallback incomplete/nonzero (rc=$rc)" \
+  || bad "origin-fallback exited 0 after protect: $out"
+if grep -qxF 'acme/app' "$ROOT/origfb/list-repos.log"; then
+  ok "origin-fallback list was called with acme/app"
+else
+  bad "origin-fallback list never saw acme/app: $(cat "$ROOT/origfb/list-repos.log")"
+fi
+# Must not have been called with an empty repo identity.
+if grep -qxF '' "$ROOT/origfb/list-repos.log"; then
+  bad "origin-fallback list was called with empty repo identity"
+else
+  ok "origin-fallback list never saw empty repo identity"
+fi
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/origfb/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+check "origin-fallback zero release-spy" "$_spy_n" "0"
+files=$(git -C "$ROOT/origfb/canon" fetch -q origin 2>/dev/null
+  git -C "$ROOT/origfb/canon" ls-tree --name-only origin/main docs/claims/)
+contains "origin-fallback ledger preserved" "$files" "issue-890-origfb.md"
+
+echo "#153 follow-up · ambiguous multi-valued origin leaves identity unresolved"
+# `git config --get remote.origin.url` returns the LAST value when several
+# exist. Two different GitHub origins + failing gh must leave identity
+# unresolved: no release dispatch, claim/ledger preserved.
+new_repo "$ROOT/ambig"
+add_claim_file "$ROOT/ambig" issue-891-ambig 891 "$CLAIMED_ISO"
+# Keep transport hermetic via insteadOf for BOTH GitHub URLs, but configure two
+# distinct remote.origin.url values so identity is ambiguous (--get-all).
+git -C "$ROOT/ambig/canon" config "url.$ROOT/ambig/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/ambig/canon" config --add "url.$ROOT/ambig/origin.insteadOf" https://github.com/other/app.git
+git -C "$ROOT/ambig/canon" remote set-url origin https://github.com/acme/app.git
+git -C "$ROOT/ambig/canon" config --add remote.origin.url https://github.com/other/app.git
+# Prove two origin values exist (fixture integrity).
+_ambig_n=$(git -C "$ROOT/ambig/canon" config --get-all remote.origin.url 2>/dev/null | grep -c . || true)
+[[ "$_ambig_n" -eq 2 ]] && ok "ambiguous-origin fixture has two origin URLs" \
+  || bad "ambiguous-origin fixture origin count=$_ambig_n"
+mkdir -p "$ROOT/ambig/bin"
+install_sibling_reaper "$ROOT/ambig/scripts"
+: > "$ROOT/ambig/list-repos.log"
+cat > "$ROOT/ambig/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+LOG_FILE="${AMBIG_LOG:-/tmp/ambig.repos}"
+case "${1:-}" in
+  list)
+    printf '%s\n' "${2:-}" >> "$LOG_FILE"
+    # Empty inventory so a wrongly-resolved identity would still plan REAP
+    # of the ledger claim — dispatch must still be blocked.
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/ambig/scripts/pr-claims.sh"
+cat > "$ROOT/ambig/bin/gh" <<'GH'
+#!/usr/bin/env bash
+case "$1" in
+  repo)
+    echo "simulated gh repo view failure" >&2
+    exit 1
+    ;;
+  pr)
+    echo "0"
+    exit 0
+    ;;
+  api)
+    if [[ "${2:-}" == "graphql" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  issue)
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+GH
+chmod +x "$ROOT/ambig/bin/gh"
+spy_am="$ROOT/ambig/spy-release.sh"
+cat > "$spy_am" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_am"
+: > "$ROOT/ambig/spy.log"
+state_am="$STATE_BASE/ambig"
+mkdir -p "$state_am"
+: > "$state_am/journal.md"
+out=$(
+  PATH="$ROOT/ambig/bin:$BIN:$PATH" \
+  AMBIG_LOG="$ROOT/ambig/list-repos.log" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/ambig/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_am" \
+  GIBSON_REAPER_JOURNAL="$state_am/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_am/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_am" \
+  SPY_LOG="$ROOT/ambig/spy.log" \
+    "$ROOT/ambig/scripts/claim-reaper.sh" --claim-id issue-891-ambig --apply 2>&1
+)
+rc=$?
+# Must not invent a single owner/name from multi-valued origin.
+if grep -Eqx 'acme/app|other/app' "$ROOT/ambig/list-repos.log" 2>/dev/null; then
+  bad "ambiguous-origin invented a repo identity for inventory: $(cat "$ROOT/ambig/list-repos.log")"
+else
+  ok "ambiguous-origin never called inventory with a resolved identity"
+fi
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/ambig/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+check "ambiguous-origin zero release-spy" "$_spy_n" "0"
+contains "ambiguous-origin plans explicit repository refusal" "$out" \
+  "repo_unresolved_for_pr_check"
+[[ "$rc" -ne 0 ]] && ok "ambiguous-origin incomplete/nonzero (rc=$rc)" \
+  || {
+    # rc=0 only OK if release never fired and ledger still live
+    if [[ "$_spy_n" -eq 0 ]]; then
+      ok "ambiguous-origin rc=0 with zero release (identity unresolved)"
+    else
+      bad "ambiguous-origin rc=0 but release spy fired"
+    fi
+  }
+files=$(git -C "$ROOT/ambig/canon" fetch -q origin 2>/dev/null
+  git -C "$ROOT/ambig/canon" ls-tree --name-only origin/main docs/claims/)
+contains "ambiguous-origin ledger preserved" "$files" "issue-891-ambig.md"
+if [[ -s "$state_am/journal.md" ]] && grep -qE 'COMPLETED|claim_released=1' "$state_am/journal.md" 2>/dev/null; then
+  bad "ambiguous-origin journal has success/handoff: $(cat "$state_am/journal.md")"
+else
+  ok "ambiguous-origin: no journal success/handoff"
+fi
+
+echo "#153 follow-up · stream-capture helper required (fail closed when missing)"
+# Production sources scripts/lib/stream-capture.sh. A sibling copy without the
+# helper must refuse rather than hand-roll empty inventory authority.
+new_repo "$ROOT/nocap"
+add_claim_file "$ROOT/nocap" issue-892-nocap 892 "$CLAIMED_ISO"
+mkdir -p "$ROOT/nocap/scripts"
+cp "$REAPER" "$ROOT/nocap/scripts/claim-reaper.sh"
+chmod +x "$ROOT/nocap/scripts/claim-reaper.sh"
+# Intentionally omit lib/stream-capture.sh.
+cat > "$ROOT/nocap/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in list) exit 0 ;; *) exit 64 ;; esac
+READER
+chmod +x "$ROOT/nocap/scripts/pr-claims.sh"
+state_nc="$STATE_BASE/nocap"
+mkdir -p "$state_nc"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/nocap/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_nc" \
+  GIBSON_REAPER_JOURNAL="$state_nc/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_nc/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/nocap/scripts/claim-reaper.sh" --repo acme/app --claim-id issue-892-nocap 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing stream-capture exits nonzero" \
+  || bad "missing stream-capture exited 0: $out"
+contains "missing stream-capture names helper" "$out" "stream-capture"
+lacks "missing stream-capture never nothing-to-reap" "$out" "nothing to reap"
+lacks "missing stream-capture never empty plan" "$out" "summary: reap="
+# Static proof production uses the shared helper (not a hand-rolled mktemp path).
+if grep -q 'lib/stream-capture.sh' "$REAPER" && \
+   grep -q '_rc_capture_streams' "$REAPER" && \
+   ! grep -qE 'gibson-reaper-pr-err|gibson-reaper-fresh-err' "$REAPER"; then
+  ok "reaper production uses shared stream-capture helper"
+else
+  bad "reaper production does not bind shared stream-capture helper"
+fi
+
+echo "#153 CodeRabbit · comm failure refuse (fail closed, no stale mix output)"
+# Mixed file+legacy same id must run comm -12. A failing comm must die rather
+# than plan REAP from a missing/stale .both file.
+new_repo "$ROOT/commfail"
+(
+  cd "$ROOT/commfail/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  cat > docs/claims/issue-900-comm.md <<EOF
+claim: issue-900-comm
+issue: 900
+claimed: $CLAIMED_ISO
+scope: src/issue-900-comm
+session: test@box
+branch: feat/900-comm
+EOF
+  printf '| when | claim-id | scope | who |\n|---|---|---|---|\n' > docs/active-work.md
+  printf '| %s | issue-900-comm | src/issue-900-comm | test@box |\n' "$CLAIMED_ISO" >> docs/active-work.md
+  git add -A && git commit -qm "mixed reps for comm fail" && git push -q origin main
+) >/dev/null 2>&1
+mkdir -p "$ROOT/commfail/bin"
+COMM_REAL=$(command -v comm)
+cat > "$ROOT/commfail/bin/comm" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "-12" ]]; then
+  echo "simulated comm failure" >&2
+  exit 1
+fi
+exec "$COMM_REAL" "\$@"
+EOF
+chmod +x "$ROOT/commfail/bin/comm"
+out=$(
+  PATH="$ROOT/commfail/bin:$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/commfail/canon" \
+  GIBSON_REAPER_STATE_DIR="$STATE_BASE/commfail" \
+  GIBSON_REAPER_JOURNAL="$STATE_BASE/commfail/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$STATE_BASE/commfail/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$REAPER" --repo acme/app --claim-id issue-900-comm 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "comm failure exits nonzero" || bad "comm failure exited 0: $out"
+contains "comm failure names refuse" "$out" "comm failed"
+lacks "comm failure never REAP" "$out" "REAP   issue-900-comm"
+lacks "comm failure not silent nothing-to-reap" "$out" "nothing to reap"
+
+echo "#153 CodeRabbit · docs contract: repository binding, head evidence, mixed refuse, label safety, eight-field TSV"
+# Semantic documentation contracts only — not general spelling preferences.
+README="$SCRIPT_DIR/../README.md"
+if grep -qF 'is_cross_repository — eight fields' "$README" && \
+   grep -qF 'is_cross_repository` is eighth after' "$README"; then
+  ok "scripts/README.md documents eight-field list TSV"
+else
+  bad "scripts/README.md missing eight-field list TSV contract"
+fi
+if grep -qF 'the branch its claim id derives from' "$README"; then
+  ok "scripts/README.md head-branch binding includes 'from'"
+else
+  bad "scripts/README.md head-branch binding missing 'from'"
+fi
+PLAYBOOK="$SCRIPT_DIR/../../playbooks/release.md"
+if grep -qF 'the branch this claim id derives from' "$PLAYBOOK"; then
+  ok "playbooks/release.md head-branch binding includes 'from'"
+else
+  bad "playbooks/release.md head-branch binding missing 'from'"
+fi
+TROUBLE="$SCRIPT_DIR/../../docs/troubleshooting/claim-conflicts.md"
+if grep -qF 'exact released PR number and exact' "$TROUBLE" && \
+   grep -qF 'Mixed PR-body + legacy-ledger' "$TROUBLE" && \
+   grep -qF 'Manual `agent-claimed` label removal' "$TROUBLE" && \
+   grep -qF 'PR-backed claims stay refused' "$TROUBLE"; then
+  ok "claim-conflicts.md carries repository/mixed/label/PR refuse contracts"
+else
+  bad "claim-conflicts.md missing repository/mixed/label/PR refuse contracts"
+fi
 
 # ---------------------------------------------------------------------------
 echo
