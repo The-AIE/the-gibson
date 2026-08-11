@@ -780,99 +780,11 @@ terminal_fatal() {
   return 2
 }
 
-# Capture stdout and stderr of an exact argv separately, preserving exit status.
-# Only stdout is authoritative data for the caller; stderr is diagnostics.
-# Bash 3.2-safe: no process substitution, no pipeline status games, no eval of
-# attacker-controlled data. Explicit argv only — "$@" is the full reader.
-#
-# Fail-closed (#153 stream-capture P2):
-#   * stdout read failure, stderr read failure, and temp removal failure are
-#     all nonzero capture failure. Never hand the caller partial stdout as
-#     authoritative evidence while reporting success.
-#   * HUP/INT/TERM install a cleanup that unlinks both temps before the
-#     signal's default disposition re-raises; prior traps are restored on
-#     every ordinary return path (success or capture failure).
-# Sets _RC_CAP_STDOUT / _RC_CAP_STDERR for the caller after a successful
-# capture of both streams (the child's exit status is still returned).
-_RC_CAP_OUTF=""
-_RC_CAP_ERRF=""
-_rc_capture_cleanup_temps() {
-  # Best-effort unlink from a signal handler; ordinary paths check rm status.
-  [[ -n "${_RC_CAP_OUTF:-}" ]] && rm -f "$_RC_CAP_OUTF" 2>/dev/null || true
-  [[ -n "${_RC_CAP_ERRF:-}" ]] && rm -f "$_RC_CAP_ERRF" 2>/dev/null || true
-  _RC_CAP_OUTF=""
-  _RC_CAP_ERRF=""
-}
-_rc_capture_streams() {
-  local outf errf rc=0
-  local prev_hup prev_int prev_term
-  local out_data err_data
-  _RC_CAP_STDOUT=""
-  _RC_CAP_STDERR=""
-  outf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-out.XXXXXX") || return 127
-  errf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-err.XXXXXX") || {
-    rm -f "$outf" 2>/dev/null || true
-    return 127
-  }
-  _RC_CAP_OUTF="$outf"
-  _RC_CAP_ERRF="$errf"
-  # Save prior traps (trap -p output is shell-owned, not user data). Restore
-  # via the saved command text on ordinary completion; never eval untrusted
-  # strings. Bash 3.2: trap -p prints nothing when unset.
-  prev_hup=$(trap -p HUP 2>/dev/null || true)
-  prev_int=$(trap -p INT 2>/dev/null || true)
-  prev_term=$(trap -p TERM 2>/dev/null || true)
-  # On signal: unlink temps, clear handles, restore prior traps, re-raise so
-  # the process exits with the signal's default disposition rather than
-  # swallowing the interrupt with partial evidence still staged.
-  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s HUP $$' HUP
-  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s INT $$' INT
-  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s TERM $$' TERM
-  # Explicit argv only — never eval of the command under test.
-  "$@" >"$outf" 2>"$errf" || rc=$?
-  # Read both streams before unlinking. A failed read poisons the capture:
-  # clear any partial stdout so a caller that ignores rc cannot treat it as
-  # authoritative evidence.
-  if ! out_data=$(cat "$outf" 2>/dev/null); then
-    _RC_CAP_STDOUT=""
-    _RC_CAP_STDERR=""
-    _rc_capture_cleanup_temps
-    if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
-    if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
-    if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
-    return 1
-  fi
-  if ! err_data=$(cat "$errf" 2>/dev/null); then
-    _RC_CAP_STDOUT=""
-    _RC_CAP_STDERR=""
-    _rc_capture_cleanup_temps
-    if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
-    if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
-    if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
-    return 1
-  fi
-  if ! rm -f "$outf" "$errf"; then
-    _RC_CAP_STDOUT=""
-    _RC_CAP_STDERR=""
-    _RC_CAP_OUTF=""
-    _RC_CAP_ERRF=""
-    # Temps may still exist; best-effort second try so a sticky failure does
-    # not leave evidence on disk for the next run to trip over.
-    rm -f "$outf" "$errf" 2>/dev/null || true
-    if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
-    if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
-    if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
-    return 1
-  fi
-  _RC_CAP_OUTF=""
-  _RC_CAP_ERRF=""
-  if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
-  if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
-  if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
-  _RC_CAP_STDOUT="$out_data"
-  _RC_CAP_STDERR="$err_data"
-  return "$rc"
-}
+# Fail-closed stdout/stderr capture (#153 stream-capture P2/P3). Shared
+# helper so sensors can source the same production code in-process.
+# shellcheck source=lib/stream-capture.sh
+. "$RELEASE_LIB_DIR/stream-capture.sh" ||
+  die "cannot source $RELEASE_LIB_DIR/stream-capture.sh — refuse capture without fail-closed stream isolation"
 
 try_terminal_pr_body_release() {
   local id="$1" want_pr="${2:-}" rows count reader_rc=0
@@ -1469,6 +1381,14 @@ EOF
   if git fetch origin >/dev/null 2>&1 && fresh_ref=$(resolve_ledger_ref); then
     REF="$fresh_ref"
     if fresh_live=$(claim_ids_all); then
+      # (#153 exact-head P1) A surviving same-ID ledger row is live work, not
+      # a residual to ignore. Terminal cleanup must preserve artifacts/label
+      # when the exact target id is still present on the ledger.
+      if printf '%s\n' "$fresh_live" | grep -qxF -- "$id"; then
+        warn "same-ID ledger row for '$id' is still live after terminal cleanup — refuse artifact deletion success; preserving agent-claimed"
+        incomplete=1
+        preserve_label=1
+      fi
       ledger_siblings=$(issue_claim_ids_from "$fresh_live" | grep -vxF -- "$id" || true)
     else
       warn "post-mutation ledger reread failed at $REF — cannot fully verify sibling policy"
@@ -1978,23 +1898,55 @@ read_bound_open_pr_evidence() {
   return 0
 }
 
-# CAS mode (claim-reaper) is ledger-only by contract — the same reason
-# try_terminal_pr_body_release() is gated on CAS_MODE -eq 0. A reaper run
-# must never close someone's live PR.
-if [[ -n "$PR_REPO" && "$CAS_MODE" -eq 0 ]]; then
-  # (#153) The live open-PR claim inventory is AUTHORITATIVE, not advisory.
-  # This used to be `$(... list ... 2>/dev/null || true)`, which turned a
-  # missing reader, an expired token, a rate limit, or a mid-pagination API
-  # failure into "no live PR claims" — and then went straight on to close
-  # PRs, delete branches, strip the ledger, and remove agent-claimed on the
-  # strength of a view it never actually read. Every failure below refuses
-  # before ANY PR/label/worktree/branch/ledger mutation.
+# (#153 exact-head P1) The live open-PR claim inventory is AUTHORITATIVE for
+# BOTH non-CAS open-PR release and CAS ledger cleanup. A reaper/CAS run is
+# ledger-only (never closes a PR) but must still re-read and refuse when an
+# open PR holds the exact target id or the same issue — otherwise a claim
+# that appeared after reaper planning loses its ledger row/label/worktree.
+# An unreadable or malformed inventory is never an empty one.
+PR_ROWS=""
+if [[ -n "$PR_REPO" ]]; then
   [[ -x "$SCRIPT_DIR/pr-claims.sh" ]] ||
     die "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot read live PR-body claims for $PR_REPO; refuse to mutate anything on an unread claim view"
   PR_ROWS=$("$SCRIPT_DIR/pr-claims.sh" list "$PR_REPO" 2>&1) ||
     die "cannot read live PR-body claims for $PR_REPO — an unreadable claim inventory is not an empty one; refuse to mutate anything: $PR_ROWS"
   open_pr_rows_valid "$PR_ROWS" ||
     die "live PR-body claim inventory for $PR_REPO returned a malformed/truncated row — refuse to mutate anything: $OPEN_PR_BAD_ROW"
+fi
+
+# CAS protect (#153 exact-head P1): refuse before ANY mutation when a fresh
+# open PR holds the exact claim id or any claim for the same issue. Direct
+# CAS callers cannot bypass the reaper pre-dispatch guard.
+if [[ -n "$PR_REPO" && "$CAS_MODE" -eq 1 ]]; then
+  _cas_protect_hit=""
+  while IFS= read -r pr_row; do
+    [[ -n "$pr_row" ]] || continue
+    pr_id=$(cut -f2 <<<"$pr_row")
+    pr_number=$(cut -f1 <<<"$pr_row")
+    [[ -n "$pr_id" ]] || continue
+    # Exact target id is live open evidence — never a sibling to ignore.
+    if [[ "$CLAIM_ID_SET" -eq 1 && "$pr_id" == "$CLAIM_ID_ARG" ]]; then
+      _cas_protect_hit="open PR #$pr_number carries exact claim id '$pr_id'"
+      break
+    fi
+    # Same-issue open claim (including differently named / namespaced siblings)
+    # also protects: agent-claimed and multi-slice live work.
+    if claim_id_for_issue "$pr_id"; then
+      _cas_protect_hit="open PR #$pr_number claim '$pr_id' holds issue #$ISSUE"
+      break
+    fi
+  done <<EOF
+$PR_ROWS
+EOF
+  if [[ -n "$_cas_protect_hit" ]]; then
+    die "CAS release refused — ${_cas_protect_hit}; open PR-body claim protects live work (no ledger/label/worktree/branch mutation)"
+  fi
+  unset _cas_protect_hit pr_row pr_id pr_number
+fi
+
+# Non-CAS: intentional open-PR release path (may close the PR). CAS never
+# enters this block — it is ledger-only by contract.
+if [[ -n "$PR_REPO" && "$CAS_MODE" -eq 0 ]]; then
   PR_MATCHES=""
   # cut, not `IFS=$'\t' read`: tab is IFS *whitespace*, so bash's read
   # collapses consecutive tabs and silently drops an empty field (e.g. a
@@ -2017,8 +1969,11 @@ if [[ -n "$PR_REPO" && "$CAS_MODE" -eq 0 ]]; then
 $PR_ROWS
 EOF
   PR_COUNT=$(printf '%s' "$PR_MATCHES" | sed '/^$/d' | wc -l | tr -d ' ')
-  if [[ "$PR_COUNT" -gt 1 && "$CLAIM_ID_SET" -eq 0 ]]; then
-    die "issue #$ISSUE has multiple live PR claims; pass --claim-id"
+  # (#153 exact-head P1) Multiple open PRs matching the requested issue/claim
+  # are ambiguous regardless of --claim-id. Never pick one, and never fall
+  # through to ledger cleanup while ignoring the open rows as "targets".
+  if [[ "$PR_COUNT" -gt 1 ]]; then
+    die "issue #$ISSUE has multiple live open PR claims (ambiguous exact-id/issue union) — refuse all mutation; open PRs: $(printf '%s' "$PR_MATCHES" | cut -f1,2 | tr '\t' '#' | tr '\n' ' ')"
   fi
   if [[ "$PR_COUNT" -eq 1 ]]; then
     PR_NUMBER=$(printf '%s' "$PR_MATCHES" | sed -n '1s/\t.*//p')
@@ -2372,7 +2327,6 @@ if [[ "$CLAIM_ID_SET" -eq 1 ]]; then
       die "no live claim '$CLAIM_ID_ARG' at $REF (checked ledger and terminal PR-body evidence${PR_NUMBER_ARG:+, bound to PR #$PR_NUMBER_ARG})"
     fi
   fi
-  # Exactly one logical match (legacy + per-file already deduped by sort -u).
   TARGET_IDS="$CLAIM_ID_ARG"
 else
   # Bare invocation: freeze zero or one exact id. Never carry a broad issue
@@ -2390,6 +2344,89 @@ else
     TARGET_IDS=$(printf '%s\n' "$ALL_IDS")
     info "bare release freezes single claim id: $TARGET_IDS"
   fi
+fi
+
+# (#153 exact-head P1) Mixed ledger representations: simultaneous per-file
+# and legacy rows for the exact same claim id are ambiguous. Refuse before
+# any planning/mutation rather than silently preferring one and deleting
+# both (a concurrent renewal of the non-selected representation would be
+# destroyed under a partial CAS). Prefer the simplest fail-closed contract.
+ledger_has_file_rep() {
+  local id="$1"
+  git cat-file -e "$REF:docs/claims/${id}.md" 2>/dev/null
+}
+ledger_has_legacy_rep() {
+  local id="$1" active_out
+  if ! git cat-file -e "$REF:docs/active-work.md" 2>/dev/null; then
+    return 1
+  fi
+  active_out=$(git show "$REF:docs/active-work.md" 2>/dev/null) || return 1
+  printf '%s\n' "$active_out" | awk -F'|' -v want="$id" '
+    /^\|/ {
+      cid=$3; gsub(/^[[:space:]]+|[[:space:]]+$/,"",cid);
+      if (cid==want) found=1
+    }
+    END { exit !found }
+  '
+}
+
+if [[ -n "$TARGET_IDS" ]]; then
+  while IFS= read -r _mix_id; do
+    [[ -n "$_mix_id" ]] || continue
+    _mix_file=0
+    _mix_leg=0
+    ledger_has_file_rep "$_mix_id" && _mix_file=1
+    ledger_has_legacy_rep "$_mix_id" && _mix_leg=1
+    if [[ "$_mix_file" -eq 1 && "$_mix_leg" -eq 1 ]]; then
+      die "REFUSE ambiguous mixed ledger representations for '$_mix_id' (both docs/claims/${_mix_id}.md and docs/active-work.md) — refuse all mutation; preserve both representations, label, worktree, and branches"
+    fi
+  done <<EOF
+$TARGET_IDS
+EOF
+  unset _mix_id _mix_file _mix_leg
+fi
+
+# (#153 exact-head P1) Complete authoritative union for the issue: live open
+# PR-body claims PLUS live ledger representations. Duplicate exact IDs across
+# that union are ambiguous and refuse by default. An open PR carrying the
+# exact target id is live evidence, never a row to ignore as "the target".
+# (CAS already refused above; this covers non-CAS ledger cleanup fall-through
+# and multi-representation exact-id reuse.)
+if [[ -n "$TARGET_IDS" && -n "$PR_REPO" && -n "${PR_ROWS+x}" ]]; then
+  while IFS= read -r _uid; do
+    [[ -n "$_uid" ]] || continue
+    _u_open_n=0
+    _u_open_nums=""
+    while IFS= read -r pr_row; do
+      [[ -n "$pr_row" ]] || continue
+      pr_id=$(cut -f2 <<<"$pr_row")
+      pr_number=$(cut -f1 <<<"$pr_row")
+      [[ "$pr_id" == "$_uid" ]] || continue
+      _u_open_n=$((_u_open_n + 1))
+      _u_open_nums="${_u_open_nums}#${pr_number} "
+    done <<EOF
+$PR_ROWS
+EOF
+    _u_ledger=0
+    if printf '%s\n' "$ALL_LIVE_IDS" | grep -qxF -- "$_uid"; then
+      _u_ledger=1
+    fi
+    # Two+ open PRs with the same exact id, or open PR(s) + ledger row for
+    # the same exact id while we are about to strip the ledger (non-CAS
+    # open-PR close path already exited above when PR_COUNT==1).
+    if [[ "$_u_open_n" -gt 1 ]]; then
+      die "REFUSE ambiguous exact claim id '$_uid' across open PR union (${_u_open_n} open PRs: ${_u_open_nums}) — refuse all mutation"
+    fi
+    if [[ "$_u_open_n" -ge 1 && "$_u_ledger" -eq 1 && "$CAS_MODE" -eq 0 && "$TERMINAL_MODE" -eq 0 ]]; then
+      # Non-CAS ledger path reached while an open PR still carries this id.
+      # The intentional open-PR release path should have handled a unique
+      # match; surviving open+ledger is ambiguous live work.
+      die "REFUSE exact claim id '$_uid' is live both as open PR (${_u_open_nums}) and ledger row — refuse ledger cleanup while open PR-body claim protects"
+    fi
+  done <<EOF
+$TARGET_IDS
+EOF
+  unset _uid _u_open_n _u_open_nums _u_ledger pr_row pr_id pr_number
 fi
 
 if [[ -z "$TARGET_IDS" ]]; then
@@ -3032,19 +3069,37 @@ if [[ -n "$TARGET_IDS" ]]; then
       INCOMPLETE=1
       PRESERVE_LABEL=1
     else
+      # (#153 exact-head P1) Open PR-body claims for this issue are residual
+      # live work — INCLUDING an open PR whose claim id equals a TARGET_IDS
+      # entry. An open exact target is live evidence, never a sibling to
+      # ignore because its id matches the cleanup target. Excluding same-ID
+      # open rows previously authorized label removal while live PRs held
+      # the claim.
       _open_pr_siblings=""
-      while IFS=$'\t' read -r _pr_n _pr_id _pr_s _pr_h _pr_u _pr_c _pr_up _pr_x; do
+      _open_pr_same_id=""
+      while IFS= read -r _pr_row; do
+        [[ -n "$_pr_row" ]] || continue
+        _pr_id=$(cut -f2 <<<"$_pr_row")
         [[ -n "$_pr_id" ]] || continue
         claim_id_for_issue "$_pr_id" || continue
-        printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pr_id" && continue
+        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pr_id"; then
+          _open_pr_same_id="${_open_pr_same_id}${_pr_id}"$'\n'
+        fi
         _open_pr_siblings="${_open_pr_siblings}${_pr_id}"$'\n'
       done <<EOF
 $_open_pr_rows
 EOF
       _open_pr_siblings=$(printf '%s\n' "$_open_pr_siblings" | grep -E '^issue-' | sort -u || true)
+      _open_pr_same_id=$(printf '%s\n' "$_open_pr_same_id" | grep -E '^issue-' | sort -u || true)
+      if [[ -n "$_open_pr_same_id" ]]; then
+        warn "open PR-body claim still carries exact target id(s) after ledger cleanup — treating as residual live work; preserving agent-claimed: $(printf '%s' "$_open_pr_same_id" | tr '\n' ' ')"
+        INCOMPLETE=1
+        PRESERVE_LABEL=1
+      fi
       if [[ -n "$_open_pr_siblings" ]]; then
         RESIDUAL_IDS=$(printf '%s\n%s\n' "$RESIDUAL_IDS" "$_open_pr_siblings" | grep -E '^issue-' | sort -u || true)
       fi
+      unset _open_pr_same_id _pr_row _pr_id
     fi
   fi
 else

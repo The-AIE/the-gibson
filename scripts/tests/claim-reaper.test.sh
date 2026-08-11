@@ -653,7 +653,7 @@ contains "names lock contention" "$out" "lock"
 rm -rf "$LOCKDIR"
 
 # ---------------------------------------------------------------------------
-echo "#73 · legacy + per-file duplicate claim ids dedupe safely"
+echo "#73/#153 · legacy + per-file same id is REFUSE (not silently deduped)"
 new_repo "$ROOT/dedupe"
 (
   cd "$ROOT/dedupe/canon" || exit 1
@@ -678,9 +678,12 @@ EOF
 ) >/dev/null 2>&1
 export GH_PR_COUNT=0
 out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/dedupe/canon" 2>&1)
-# Should list claim once as REAP
+# Mixed file+legacy for the same id is ambiguous: REFUSE, never silent REAP.
 reap_lines=$(echo "$out" | grep -c 'REAP   issue-70-both' || true)
-check "deduped to one REAP line" "$reap_lines" "1"
+reap_lines=${reap_lines:-0}
+check "mixed same-id zero REAP lines" "$reap_lines" "0"
+contains "mixed same-id REFUSE in plan" "$out" "REFUSE"
+contains "mixed same-id names mixed reason" "$out" "mixed_ledger_representations"
 
 # ---------------------------------------------------------------------------
 echo "#73 · path with spaces in worktree tracked files (Bash 3.2)"
@@ -2611,6 +2614,282 @@ contains "namespaced open PR is protected" "$out" \
 lacks    "namespaced open PR is not refused as malformed" "$out" "refusing malformed PR claim id"
 check    "namespaced open PR zero release-spy" \
   "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+# ===========================================================================
+# #153 exact-head P1 — pre-dispatch fresh inventory revalidation
+# ===========================================================================
+echo "#153 exact-head · same-ID open PR appearing after planning blocks release"
+# Force a valid same-ID open PR to appear AFTER startup inventory/planning
+# and after the branch-specific open_pr_status check, but BEFORE release
+# dispatch. Assert release spy never called and no journal success/handoff.
+new_repo "$ROOT/appear"
+add_claim_file "$ROOT/appear" issue-850-appear 850 "$CLAIMED_ISO"
+mkdir -p "$ROOT/appear/scripts"
+cp "$REAPER" "$ROOT/appear/scripts/claim-reaper.sh"
+chmod +x "$ROOT/appear/scripts/claim-reaper.sh"
+# pr-claims list: empty on first call (planning), same-ID open row on later calls
+# (pre-dispatch revalidation).
+cat > "$ROOT/appear/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+CNT_FILE="${APPEAR_CNT:-/tmp/appear.count}"
+case "${1:-}" in
+  list)
+    n=0
+    [[ -f "$CNT_FILE" ]] && n=$(cat "$CNT_FILE" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$CNT_FILE"
+    if [[ "$n" -le 1 ]]; then
+      # Startup inventory: empty — ledger claim will plan as REAP.
+      exit 0
+    fi
+    # Pre-dispatch revalidation: same-ID open PR appears.
+    printf '850\tissue-850-appear\tlib/**\tfeat/850-appear\thttps://github.com/acme/app/pull/850\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/appear/scripts/pr-claims.sh"
+spy_appear="$ROOT/appear/spy-release.sh"
+cat > "$spy_appear" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED %s\n' "$*" >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_appear"
+: > "$ROOT/appear/spy.log"
+: > "$ROOT/appear/appear.count"
+state_ap="$STATE_BASE/appear"
+mkdir -p "$state_ap"
+: > "$state_ap/journal.md"
+export GH_PR_COUNT=0
+out=$(
+  PATH="$BIN:$PATH" \
+  APPEAR_CNT="$ROOT/appear/appear.count" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/appear/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_ap" \
+  GIBSON_REAPER_JOURNAL="$state_ap/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_ap/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_appear" \
+  SPY_LOG="$ROOT/appear/spy.log" \
+    "$ROOT/appear/scripts/claim-reaper.sh" --repo acme/app --claim-id issue-850-appear --apply 2>&1
+)
+rc=$?
+# Incomplete (exit 3) or nonzero is fine; success (0) with release is not.
+[[ "$rc" -ne 0 ]] && ok "appear-after-plan refuses/incomplete (rc=$rc)" \
+  || {
+    # rc=0 only OK if release spy never fired and claim still live
+    if [[ "$(grep -c RELEASE_INVOKED "$ROOT/appear/spy.log" 2>/dev/null || echo 0)" -eq 0 ]]; then
+      ok "appear-after-plan rc=0 with zero release (protected)"
+    else
+      bad "appear-after-plan rc=0 but release spy fired"
+    fi
+  }
+contains "appear-after-plan names fresh protect" "$out" "fresh open-PR inventory protects"
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/appear/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+check "appear-after-plan zero release-spy" "$_spy_n" "0"
+if [[ -s "$state_ap/journal.md" ]] && grep -qE 'COMPLETED|claim_released=1' "$state_ap/journal.md" 2>/dev/null; then
+  bad "appear-after-plan journal has success/handoff: $(cat "$state_ap/journal.md")"
+else
+  ok "appear-after-plan: no journal success/handoff"
+fi
+files=$(git -C "$ROOT/appear/canon" fetch -q origin; git -C "$ROOT/appear/canon" ls-tree --name-only origin/main docs/claims/)
+contains "appear-after-plan ledger preserved" "$files" "issue-850-appear.md"
+lacks "appear-after-plan no handoff comment" "$out" "claim-reaper released"
+
+echo "#153 exact-head · mutation: removing pre-dispatch revalidation reaps appeared PR"
+# Mutate sibling reaper: make fresh_open_pr_inventory_protect always succeed.
+_reaper_ap="$ROOT/appear/scripts/claim-reaper.sh"
+cp "$REAPER" "$_reaper_ap"
+# Insert an early return 0 at the top of the protect function body.
+perl -i -pe 's/^(fresh_open_pr_inventory_protect\(\) \{)/$1\n  return 0 # MUTATED always-allow/' "$_reaper_ap"
+if grep -q 'MUTATED always-allow' "$_reaper_ap"; then
+  ok "appear mutation: pre-dispatch revalidation neutralized"
+else
+  bad "appear mutation: failed to neutralize pre-dispatch revalidation"
+fi
+: > "$ROOT/appear/spy.log"
+: > "$ROOT/appear/appear.count"
+: > "$state_ap/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  APPEAR_CNT="$ROOT/appear/appear.count" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/appear/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_ap" \
+  GIBSON_REAPER_JOURNAL="$state_ap/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_ap/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_appear" \
+  SPY_LOG="$ROOT/appear/spy.log" \
+    "$_reaper_ap" --repo acme/app --claim-id issue-850-appear --apply 2>&1
+)
+_spy_n=$(grep -c RELEASE_INVOKED "$ROOT/appear/spy.log" 2>/dev/null || true)
+_spy_n=${_spy_n:-0}
+if [[ "$_spy_n" -ge 1 ]]; then
+  ok "mutation receipt: removing fresh revalidation dispatches release (sensor would fail)"
+else
+  bad "mutation receipt: neutralizing revalidation did not re-enable release: out=$out spy=$(cat "$ROOT/appear/spy.log" 2>/dev/null)"
+fi
+# Restore production reaper copy for hygiene.
+cp "$REAPER" "$_reaper_ap"
+chmod +x "$_reaper_ap"
+
+echo "#153 exact-head · mixed file+legacy same id is REFUSE (not deduped)"
+new_repo "$ROOT/mixrep"
+(
+  cd "$ROOT/mixrep/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-860-mix\nissue: 860\nclaimed: %s\nscope: src/x\nsession: a\nbranch: feat/860-mix\n' \
+    "$CLAIMED_ISO" > docs/claims/issue-860-mix.md
+  cat > docs/active-work.md <<TABLE
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-860-mix | src/x | session:a |
+TABLE
+  git add -A && git commit -qm "mixed reps" && git push -q origin main
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/mixrep/canon" --claim-id issue-860-mix 2>&1
+)
+rc=$?
+check "mixed reps dry-run exits 0" "$rc" "0"
+contains "mixed reps REFUSE in plan" "$out" "REFUSE"
+contains "mixed reps names reason" "$out" "mixed_ledger_representations"
+lacks "mixed reps never REAP" "$out" "REAP   issue-860-mix"
+# Apply must not call release.
+spy_mix="$ROOT/mixrep/spy.sh"
+cat > "$spy_mix" <<'SPY'
+#!/usr/bin/env bash
+printf 'RELEASE_INVOKED\n' >> "${SPY_LOG:-/dev/null}"
+exit 0
+SPY
+chmod +x "$spy_mix"
+: > "$ROOT/mixrep/spy.log"
+state_mx="$STATE_BASE/mixrep"
+mkdir -p "$state_mx"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/mixrep/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_mx" \
+  GIBSON_REAPER_JOURNAL="$state_mx/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_mx/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_mix" \
+  SPY_LOG="$ROOT/mixrep/spy.log" \
+    "$REAPER" --repo acme/app --claim-id issue-860-mix --apply 2>&1
+)
+check "mixed reps apply zero release-spy" \
+  "$(grep -c . "$ROOT/mixrep/spy.log" 2>/dev/null || true)" "0"
+files=$(git -C "$ROOT/mixrep/canon" fetch -q origin; git -C "$ROOT/mixrep/canon" ls-tree --name-only origin/main docs/claims/)
+contains "mixed reps file preserved" "$files" "issue-860-mix.md"
+table=$(git -C "$ROOT/mixrep/canon" show origin/main:docs/active-work.md)
+contains "mixed reps legacy preserved" "$table" "issue-860-mix"
+
+echo "#153 exact-head · mutation: neutralizing mixed_ledger_representations guard"
+# Mutate reaper copy: skip the mixed-representation refuse block entirely so
+# both file+legacy rows remain plannable (pre-fix silent survival of dual
+# rows → REAP of the file representation). Prove the mutation applied, then
+# require REAP (sensor would go red).
+mkdir -p "$ROOT/mixmutr"
+cp "$REAPER" "$ROOT/mixmutr/claim-reaper.sh"
+chmod +x "$ROOT/mixmutr/claim-reaper.sh"
+# Sibling empty pr-claims so SCRIPT_DIR resolution succeeds (no live open PRs).
+cat > "$ROOT/mixmutr/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in list|list-open-numbers) exit 0 ;; *) exit 64 ;; esac
+READER
+chmod +x "$ROOT/mixmutr/pr-claims.sh"
+# Gate the mixed block on `false &&` so it never runs.
+perl -i -pe 's/if \[\[ -s "\$\{MIX_IDS_TMP\}\.file" && -s "\$\{MIX_IDS_TMP\}\.leg" \]\]; then/if false \&\& [[ -s "\${MIX_IDS_TMP}.file" \&\& -s "\${MIX_IDS_TMP}.leg" ]]; then # MUTATED skip mixed refuse/' \
+  "$ROOT/mixmutr/claim-reaper.sh"
+if grep -q 'MUTATED skip mixed refuse' "$ROOT/mixmutr/claim-reaper.sh"; then
+  ok "mixed mutation: mixed refuse block gated off"
+else
+  bad "mixed mutation: failed to gate off mixed refuse block"
+fi
+out2=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/mixrep/canon" \
+  GIBSON_REAPER_STATE_DIR="$STATE_BASE/mixmutr2" \
+  GIBSON_REAPER_JOURNAL="$STATE_BASE/mixmutr2/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$STATE_BASE/mixmutr2/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_mix" \
+    "$ROOT/mixmutr/claim-reaper.sh" --repo acme/app --claim-id issue-860-mix 2>&1
+)
+if echo "$out2" | grep -q 'mixed_ledger_representations'; then
+  bad "mutation receipt: mixed REFUSE still present after skip: $out2"
+elif echo "$out2" | grep -q 'REAP   issue-860-mix'; then
+  ok "mutation receipt: skipping mixed guard plans REAP (sensor would fail)"
+else
+  bad "mutation receipt: skipping mixed guard did not re-enable REAP: $out2"
+fi
+
+# ===========================================================================
+# #153 exact-head P2 — never declare empty ledger from local HEAD
+# ===========================================================================
+echo "#153 exact-head · local HEAD empty while origin/main has stale claim"
+new_repo "$ROOT/lochead"
+add_claim_file "$ROOT/lochead" issue-870-remote-only 870 "$CLAIMED_ISO"
+(
+  cd "$ROOT/lochead/canon" || exit 1
+  # Detach to a feature commit that has NO docs/claims or active-work —
+  # local HEAD looks empty, but origin/main still holds the claim.
+  git checkout -q --orphan empty-feature
+  git rm -rf --cached . >/dev/null 2>&1 || true
+  rm -rf docs
+  echo "feature only" > feature.txt
+  git add feature.txt
+  git commit -qm "feature without claims tree"
+  # Stay on empty-feature so HEAD lacks docs/claims.
+) >/dev/null 2>&1
+export GH_PR_COUNT=0
+out=$(
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  run_reaper "$ROOT/lochead/canon" --claim-id issue-870-remote-only 2>&1
+)
+rc=$?
+check "local-empty-HEAD dry-run exits 0" "$rc" "0"
+contains "local-empty-HEAD inventories remote claim" "$out" "issue-870-remote-only"
+lacks "local-empty-HEAD never nothing-to-reap from HEAD" "$out" "nothing to reap"
+# Must REAP or at least plan the remote claim, not exit early as empty.
+if echo "$out" | grep -qE 'REAP   issue-870-remote-only|KEEP   issue-870-remote-only|REFUSE   issue-870-remote-only'; then
+  ok "local-empty-HEAD plans the remote claim (not empty from HEAD)"
+else
+  bad "local-empty-HEAD did not inventory remote claim: $out"
+fi
+
+echo "#153 exact-head · fetch failure is nonzero with zero mutation"
+new_repo "$ROOT/fetchz"
+add_claim_file "$ROOT/fetchz" issue-880-fetchz 880 "$CLAIMED_ISO"
+GIT_REAL=$(command -v git)
+mkdir -p "$ROOT/fetchz/bin"
+cat > "$ROOT/fetchz/bin/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "fetch" ]]; then
+  echo "simulated fetch failure" >&2
+  exit 128
+fi
+exec "$GIT_REAL" "\$@"
+EOF
+chmod +x "$ROOT/fetchz/bin/git"
+out=$(
+  PATH="$ROOT/fetchz/bin:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/fetchz/canon" \
+    "$REAPER" --repo acme/app --claim-id issue-880-fetchz --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "fetch failure exits nonzero" || bad "fetch failure exited 0: $out"
+contains "fetch failure names refuse" "$out" "cannot fetch"
+files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/fetchz/canon" fetch -q origin 2>/dev/null
+  PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/fetchz/canon" ls-tree --name-only origin/main docs/claims/)
+contains "fetch failure ledger preserved" "$files" "issue-880-fetchz.md"
 
 # ---------------------------------------------------------------------------
 echo

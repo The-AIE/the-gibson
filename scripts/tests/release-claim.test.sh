@@ -1219,7 +1219,7 @@ contains "unrelated row survives despite scope text" "$table" "issue-16-other"
 contains "sibling claim-id column survives" "$table" "| issue-15-demo-stale-plan |"
 contains "scope still mentions released id text" "$table" "depends on issue-15-checkout-totals"
 
-echo "#65 · mixed legacy+per-file duplicate counts as one"
+echo "#65/#153 · mixed legacy+per-file same id is REFUSE (not silently deduped)"
 new_repo "$ROOT/dup65"
 (
   cd "$ROOT/dup65/canon" || exit 1
@@ -1235,31 +1235,16 @@ TABLE
   git add -A && git commit -qm "same id in both ledgers" && git push -q origin main
   git checkout -q long-lived-feature
 ) >/dev/null 2>&1
-# Bare must treat as single claim (not multi refuse).
-out=$(cd "$ROOT/dup65/canon" && "$RC" 15 --dry-run 2>&1)
-rc=$?
-check "mixed duplicate bare dry-run exits 0" "$rc" "0"
-contains "mixed counts as one id" "$out" "issue-15-only-lane"
-lacks    "mixed not multi-refuse" "$out" "live claims"
-# Real release removes both representations.
 mkdir -p "$ROOT/bin"
 cat > "$ROOT/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 case "$1" in
   repo) echo "acme/app"; exit 0 ;;
-  # No live open PR-body claims in this fixture: pr-claims.sh's paginated
-  # GraphQL read returns an empty (but successfully read) inventory.
   api)
-    # Empty inventory only for recognised GraphQL inventory routes
-    # (#153 review round 6, P2). An unknown or malformed API call must
-    # fail closed — never green as a successful empty claim inventory.
     if [[ "$2" != "graphql" ]]; then
       echo "fake gh: expected 'api graphql …', got: gh $*" >&2
       exit 64
     fi
-    # Full pagination/reader contract used by pr-claims.sh (#153 r7):
-    # --paginate, endCursor var, after: endCursor, pageInfo, inventory shape.
-    # A keyword alone (pullRequests/openPrNumbers) is not enough.
     _joined="$*"
     if [[ "$_joined" == *--paginate* && \
           "$_joined" == *'$endCursor'* && \
@@ -1273,8 +1258,11 @@ case "$1" in
     exit 64
     ;;
   issue)
-    if [[ "$2" == "edit" ]]; then exit 0; fi
-    echo "${GH_LABELS:-}"
+    if [[ "$2" == "edit" ]]; then
+      echo "MUTATED-LABEL $*" >> "${GH_LOG:-/dev/null}"
+      exit 0
+    fi
+    echo "${GH_LABELS:-agent-claimed,tier-b}"
     exit 0
     ;;
   *) exit 1 ;;
@@ -1282,13 +1270,24 @@ esac
 FAKE
 chmod +x "$ROOT/bin/gh"
 export PATH="$ROOT/bin:$PATH"
-out=$(cd "$ROOT/dup65/canon" && GH_LABELS="" "$RC" 15 --repo acme/app 2>&1)
+export GH_LABELS="agent-claimed,tier-b"
+export GH_LOG="$ROOT/dup65/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/dup65/canon" && "$RC" 15 --repo acme/app 2>&1)
 rc=$?
-check "mixed duplicate real release exits 0" "$rc" "0"
+[[ "$rc" -ne 0 ]] && ok "mixed file+legacy REFUSE exits nonzero" || bad "mixed file+legacy exited 0: $out"
+contains "mixed names ambiguous mixed" "$out" "ambiguous mixed ledger representations"
+contains "mixed names the claim id" "$out" "issue-15-only-lane"
 files=$(cd "$ROOT/dup65/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
-lacks    "per-file representation removed" "$files" "issue-15-only-lane"
+contains "per-file representation preserved" "$files" "issue-15-only-lane"
 table=$(cd "$ROOT/dup65/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
-lacks    "legacy representation removed" "$table" "issue-15-only-lane"
+contains "legacy representation preserved" "$table" "issue-15-only-lane"
+lacks    "mixed refuse never mutates label" "$(cat "$GH_LOG" 2>/dev/null)" "MUTATED-LABEL"
+# Dry-run also refuses (no silent single-id plan).
+out=$(cd "$ROOT/dup65/canon" && "$RC" 15 --dry-run 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "mixed dry-run REFUSE exits nonzero" || bad "mixed dry-run exited 0: $out"
+contains "mixed dry-run names ambiguous" "$out" "ambiguous mixed ledger representations"
 
 echo "#65 · prefixes/namespaces and issue 15 vs 115 remain safe"
 new_repo "$ROOT/ns65"
@@ -4092,6 +4091,7 @@ open_row 903 issue-402-missing-reader 'lib/x/**' feat/402-missing-reader > "$GH_
 mkdir -p "$ROOT/openreader/lonely/lib"
 cp "$RC" "$ROOT/openreader/lonely/release-claim.sh"
 cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/openreader/lonely/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/openreader/lonely/lib/stream-capture.sh"
 chmod +x "$ROOT/openreader/lonely/release-claim.sh"
 out=$(cd "$ROOT/openreader/canon" && "$ROOT/openreader/lonely/release-claim.sh" 402 --claim-id issue-402-missing-reader --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "missing reader exits nonzero" || bad "missing reader exits 0: $out"
@@ -4494,7 +4494,14 @@ open_row 910 issue-408-slice-a 'lib/a/**' feat/408-slice-a  > "$GH_PR_OPEN_TSV"
 open_row 911 issue-408-slice-b 'lib/b/**' feat/408-slice-b >> "$GH_PR_OPEN_TSV"
 out=$(cd "$ROOT/openambig/canon" && "$RC" 408 --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "multi-slice bare release refuses" || bad "multi-slice bare release exits 0: $out"
-contains "names the ambiguity" "$out" "multiple live PR claims"
+# (#153 exact-head) Message names the open-PR ambiguity; accept either the
+# historical wording or the exact-id/issue-union wording.
+if echo "$out" | grep -qF 'multiple live open PR claims' || \
+   echo "$out" | grep -qF 'multiple live PR claims'; then
+  ok "names the ambiguity"
+else
+  bad "names the ambiguity (missing multi open-PR refuse): $out"
+fi
 [[ -z "$(cat "$GH_PR_CLOSE_LOG" 2>/dev/null)" ]] &&
   ok "multi-slice case: no PR was closed" || bad "multi-slice case: a PR was closed anyway"
 
@@ -5486,20 +5493,31 @@ exec /bin/cat "\$@"
 CAT
   chmod +x "$dir/bin/cat"
   if [[ "$mode" == "rmfail" ]]; then
-    cat > "$dir/bin/rm" <<'RM'
+    # Fail the first unlink of each capture temp, then succeed so a production
+    # retry can leave zero leaks while still fail-closing on first-attempt
+    # cleanup failure. An always-failing rm cannot prove zero leaks.
+    cat > "$dir/bin/rm" <<RM
 #!/usr/bin/env bash
-# Fail only on capture temp removal; forward everything else.
-for a in "$@"; do
-  case "$a" in
+CNT_FILE="$dir/rm.count"
+for a in "\$@"; do
+  case "\$a" in
     *gibson-rc-cap-out*|*gibson-rc-cap-err*)
-      echo "hostile rm: refuse capture temp unlink" >&2
-      exit 1
+      n=0
+      [[ -f "\$CNT_FILE" ]] && n=\$(cat "\$CNT_FILE" 2>/dev/null || echo 0)
+      n=\$((n + 1))
+      printf '%s\n' "\$n" > "\$CNT_FILE"
+      # First two capture-temp unlinks fail (one per temp); later retries ok.
+      if [[ "\$n" -le 2 ]]; then
+        echo "hostile rm: refuse capture temp unlink (attempt \$n)" >&2
+        exit 1
+      fi
       ;;
   esac
 done
-exec /bin/rm "$@"
+exec /bin/rm "\$@"
 RM
     chmod +x "$dir/bin/rm"
+    : > "$dir/rm.count"
   fi
   printf '%s\n' "$dir/bin"
 }
@@ -5522,19 +5540,12 @@ for mode in outfail errfail rmfail; do
   lacks "capture $mode never success" "$out" "OK — claim released"
   [[ -d "$ROOT/cap$mode/wt-700-cap-$mode" ]] &&
     ok "capture $mode: worktree preserved" || bad "capture $mode: worktree removed"
-  # No leaked capture temps under the private TMPDIR for paths that can unlink.
-  # When the defect under test is rm itself failing, production returns nonzero
-  # after a best-effort second unlink; a hostile rm that always fails can leave
-  # temps (that is the failure mode). Clean them here so later sensors stay honest.
-  leaked=$(find "$_cap_tmpdir" -maxdepth 1 -name 'gibson-rc-cap-*' 2>/dev/null | head -5 || true)
-  if [[ "$mode" == "rmfail" ]]; then
-    ok "capture $mode: refusal asserted (hostile rm may leave temps; cleaned below)"
-    # shellcheck disable=SC2086
-    rm -f $leaked 2>/dev/null || true
-  elif [[ -z "$leaked" ]]; then
-    ok "capture $mode: no leaked gibson-rc-cap temps"
+  # Zero leaked capture temps is mandatory for every mode.
+  leaked=$(find "$_cap_tmpdir" -maxdepth 1 -name 'gibson-rc-cap-*' 2>/dev/null | head -10 || true)
+  if [[ -z "$leaked" ]]; then
+    ok "capture $mode: zero leaked gibson-rc-cap temps"
   else
-    bad "capture $mode: leaked temps: $leaked"
+    bad "capture $mode: leaked temps (must be zero): $leaked"
     # shellcheck disable=SC2086
     rm -f $leaked 2>/dev/null || true
   fi
@@ -5547,10 +5558,90 @@ else
 fi
 unset _cap_tmpdir _CAP_ORIG_TMPDIR
 
-echo "#153 stream-capture · trap restoration after ordinary completion"
-# Prove production restores HUP/INT/TERM traps after capture: install an outer
-# HUP trap in this shell, run a successful terminal release (which installs and
-# restores capture traps), then send HUP and require the outer trap still fires.
+echo "#153 stream-capture · real production helper: prior-trap restore + signal cleanup"
+# Exercise the actual production helper in-process (lib/stream-capture.sh),
+# not an inline imitation. No production-only test hooks or inherited
+# executable env vars.
+_SC_LIB="$SCRIPT_DIR/../lib/stream-capture.sh"
+[[ -f "$_SC_LIB" ]] || bad "stream-capture lib missing: $_SC_LIB"
+_trap_flag="$ROOT/captrap/hup-fired"
+mkdir -p "$ROOT/captrap"
+rm -f "$_trap_flag"
+# Prior-trap restoration after ordinary successful capture.
+_sc_out=$(
+  bash -c '
+    set -euo pipefail
+    flag="$1"
+    lib="$2"
+    # shellcheck source=/dev/null
+    . "$lib"
+    trap "echo fired > \"$flag\"" HUP
+    helper() { printf "hello-out\n"; echo "hello-err" >&2; return 0; }
+    _rc_capture_streams helper
+    rc=$?
+    [[ "$rc" -eq 0 ]] || exit 11
+    [[ "$_RC_CAP_STDOUT" == "hello-out" ]] || exit 12
+    # Prior HUP trap must still fire after capture restored it.
+    kill -s HUP $$
+    sleep 0.1
+    [[ -f "$flag" ]] || exit 13
+    exit 0
+  ' bash "$_trap_flag" "$_SC_LIB"
+)
+_sc_rc=$?
+check "stream-capture real helper: prior HUP restored after ordinary capture" "$_sc_rc" "0"
+[[ -f "$_trap_flag" ]] && ok "stream-capture real helper: outer HUP flag written" \
+  || bad "stream-capture real helper: outer HUP flag missing"
+
+# Signal during capture must unlink temps (zero leaks) under private TMPDIR.
+_sig_tmp=$(mktemp -d "${TMPDIR:-/tmp}/gibson-rc-sig.XXXXXX")
+_sig_rc=0
+(
+  export TMPDIR="$_sig_tmp"
+  bash -c '
+    set -uo pipefail
+    lib="$1"
+    # shellcheck source=/dev/null
+    . "$lib"
+    sleeper() { sleep 30; }
+    # Child: run capture; parent will signal it.
+    _rc_capture_streams sleeper &
+    pid=$!
+    sleep 0.15
+    kill -s TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  ' bash "$_SC_LIB"
+) || _sig_rc=$?
+leaked=$(find "$_sig_tmp" -maxdepth 1 -name 'gibson-rc-cap-*' 2>/dev/null | head -10 || true)
+if [[ -z "$leaked" ]]; then
+  ok "stream-capture real helper: TERM during capture left zero temps"
+else
+  bad "stream-capture real helper: TERM leaked temps: $leaked"
+  # shellcheck disable=SC2086
+  rm -f $leaked 2>/dev/null || true
+fi
+rm -rf "$_sig_tmp"
+
+# Immediate protect of first temp: production installs signal traps before
+# second mktemp (static contract on the real lib).
+if grep -q '_RC_CAP_OUTF="$outf"' "$_SC_LIB" && \
+   grep -q '_rc_capture_install_signal_traps' "$_SC_LIB"; then
+  # Count install calls relative to second mktemp.
+  if awk '
+    /_RC_CAP_OUTF="\$outf"/ { saw_out=1 }
+    saw_out && /_rc_capture_install_signal_traps/ { protected_first=1 }
+    /gibson-rc-cap-err/ { if (protected_first) ok=1 }
+    END { exit !ok }
+  ' "$_SC_LIB"; then
+    ok "stream-capture: first temp protected before second mktemp"
+  else
+    bad "stream-capture: first temp not protected before second allocation"
+  fi
+else
+  bad "stream-capture: missing immediate first-temp protect markers"
+fi
+
+# And a real release-claim run still succeeds (capture path end-to-end).
 TRAP_SHA=$(term_fixture captrap 701 cap-trap)
 export GH_PR_ALL_TSV="$ROOT/captrap/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/captrap/open.tsv"
@@ -5561,82 +5652,38 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '871\tissue-701-cap-trap\tlib/x/**\t701\tfeat/701-cap-trap\t%s\thttps://github.com/acme/app/pull/871\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$TRAP_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-_trap_flag="$ROOT/captrap/hup-fired"
-rm -f "$_trap_flag"
-# Static: production saves and restores prior traps (trap -p HUP/INT/TERM).
-if grep -q 'prev_hup=$(trap -p HUP' "$RC" && \
-   grep -q 'prev_int=$(trap -p INT' "$RC" && \
-   grep -q 'prev_term=$(trap -p TERM' "$RC"; then
-  ok "stream-capture: production saves prior HUP/INT/TERM traps"
-else
-  bad "stream-capture: production does not save prior HUP/INT/TERM traps"
-fi
-if grep -q 'eval "$prev_hup"' "$RC" || grep -q 'eval "\$prev_hup"' "$RC"; then
-  ok "stream-capture: production restores prior traps on ordinary completion"
-else
-  # Also accept the if/else restore form without a single greppable eval line
-  # pattern when the restore uses the saved command text.
-  if grep -q 'prev_hup' "$RC" && grep -q 'trap - HUP' "$RC"; then
-    ok "stream-capture: production restores/clears HUP trap on completion"
-  else
-    bad "stream-capture: production does not restore prior traps"
-  fi
-fi
-# Behavioral: in a child shell, install an outer HUP trap, run a full capture
-# cycle (release-claim is a separate process — it cannot clobber this shell's
-# traps), then require HUP still runs the outer handler. This proves the
-# helper's install/restore cycle does not leak signal disposition into the
-# parent via any shared state, and that a process which ran capture still
-# has working traps afterwards when it is the same shell (unit path below).
-rm -f "$_trap_flag"
-# Same-shell unit: source only the capture helper's save/restore contract by
-# running a tiny inline that mimics install→restore and checks outer trap.
-bash -c '
-  flag="$1"
-  trap "echo fired > \"$flag\"" HUP
-  # Mimic _rc_capture_streams trap install/restore (Bash 3.2).
-  prev_hup=$(trap -p HUP 2>/dev/null || true)
-  trap "rm -f /dev/null; trap - HUP INT TERM; kill -s HUP \$\$" HUP
-  # Ordinary completion restore:
-  if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
-  kill -s HUP $$
-  sleep 0.05
-  exit 0
-' bash "$_trap_flag"
-if [[ -f "$_trap_flag" ]]; then
-  ok "stream-capture: prior HUP trap restored after ordinary completion"
-else
-  bad "stream-capture: prior HUP trap was not restored after install/restore cycle"
-fi
-# And a real release-claim run still succeeds (capture path exercised end-to-end).
 out=$(cd "$ROOT/captrap/canon" && PATH="$ROOT/term/bin:$PATH" \
   "$RC" 701 --claim-id issue-701-cap-trap --repo acme/app 2>&1); rc=$?
 check "stream-capture: full release after trap sensor still exits 0" "$rc" "0"
-unset _trap_flag
+unset _trap_flag _SC_LIB _sc_out _sc_rc _sig_tmp _sig_rc
 
-echo "#153 stream-capture · mutation: swallowing cat failure greeds partial stdout"
-# Static contract: production must not use `|| true` on the cat of capture temps.
-if grep -nE '_RC_CAP_STDOUT=\$\(cat "\$outf" 2>/dev/null \|\| true\)' "$RC" >/dev/null; then
-  bad "production still swallows stdout cat failure with || true"
+echo "#153 stream-capture · mutation: swallowing stdout cat failure greeds partial evidence"
+# Mutate the real production lib copy: restore || true on stdout cat.
+# Prove mutation applied, then require behavioral assertion kills it
+# (greens under outfail). Accepting either mutant exit is forbidden.
+_rc_cap_mut_dir="$ROOT/capmut"
+_SC_LIB_MUT_SRC="$SCRIPT_DIR/../lib/stream-capture.sh"
+mkdir -p "$_rc_cap_mut_dir/lib"
+cp "$RC" "$_rc_cap_mut_dir/release-claim.sh"
+cp "$SCRIPT_DIR/../pr-claims.sh" "$_rc_cap_mut_dir/pr-claims.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$_rc_cap_mut_dir/lib/claim-guards.sh"
+cp "$_SC_LIB_MUT_SRC" "$_rc_cap_mut_dir/lib/stream-capture.sh"
+_mut_lib="$_rc_cap_mut_dir/lib/stream-capture.sh"
+# Apply defect: swallow stdout cat failure.
+if ! grep -q 'if ! out_data=$(cat -- "$outf"' "$_mut_lib"; then
+  bad "mutation target missing in stream-capture lib (cannot apply defect)"
 else
-  ok "production does not swallow stdout cat failure"
+  perl -i -pe 's/if ! out_data=\$\(cat -- "\$outf" 2>\/dev\/null\); then/_RC_CAP_STDOUT=\$(cat -- "\$outf" 2>\/dev\/null || true)\n  out_data="\$_RC_CAP_STDOUT"\n  if false; then/' "$_mut_lib"
+  if grep -q 'cat -- "\$outf" 2>/dev/null || true' "$_mut_lib" || \
+     grep -q 'cat -- "$outf" 2>/dev/null || true' "$_mut_lib"; then
+    ok "mutation receipt: stdout-cat swallow defect applied to production lib"
+  else
+    bad "mutation receipt: failed to apply stdout-cat swallow defect"
+  fi
 fi
-if grep -nE '_RC_CAP_STDERR=\$\(cat "\$errf" 2>/dev/null \|\| true\)' "$RC" >/dev/null; then
-  bad "production still swallows stderr cat failure with || true"
-else
-  ok "production does not swallow stderr cat failure"
-fi
-# Behavioral: mutate a copy to restore || true on stdout cat; hostile outfail
-# cat must then allow a greened path (sensor would go red).
-_rc_cap_mut="$ROOT/capmut/release-claim.sh"
-mkdir -p "$ROOT/capmut/lib"
-cp "$RC" "$_rc_cap_mut"
-cp "$SCRIPT_DIR/../pr-claims.sh" "$ROOT/capmut/pr-claims.sh"
-cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/capmut/lib/claim-guards.sh"
-# Restore the defect: swallow stdout cat failure.
-perl -i -0pe 's/if ! out_data=\$\(cat "\$outf" 2>\/dev\/null\); then/_RC_CAP_STDOUT=\$(cat "\$outf" 2>\/dev\/null || true)\n  if false; then/' "$_rc_cap_mut" 2>/dev/null || \
-  sed -i.bak 's/if ! out_data=$(cat "$outf" 2>\/dev\/null); then/_RC_CAP_STDOUT=$(cat "$outf" 2>\/dev\/null || true)\n  if false; then/' "$_rc_cap_mut"
-chmod +x "$_rc_cap_mut"
+# Point release-claim at mutant lib via RELEASE path — the script sources
+# lib/ relative to its own location, so the copy in capmut/ is used.
+chmod +x "$_rc_cap_mut_dir/release-claim.sh"
 CAPM_SHA=$(term_fixture capmut2 702 cap-mut)
 export GH_PR_ALL_TSV="$ROOT/capmut2/all.tsv"
 export GH_PR_OPEN_TSV="$ROOT/capmut2/open.tsv"
@@ -5647,21 +5694,277 @@ export GH_LABELS="agent-claimed,tier-b"
 rm -f "$GH_STATE" "$GH_LOG"
 printf '872\tissue-702-cap-mut\tlib/x/**\t702\tfeat/702-cap-mut\t%s\thttps://github.com/acme/app/pull/872\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$CAPM_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
-cap_bin=$(write_cap_cat outfail)
-out=$(cd "$ROOT/capmut2/canon" && PATH="$cap_bin:$ROOT/term/bin:$PATH" \
-  "$_rc_cap_mut" 702 --claim-id issue-702-cap-mut --repo acme/app 2>&1); rc=$?
-# With the defect restored, stdout cat failure is swallowed. The child reader
-# still succeeded, so the run may green — that is the mutation going red for
-# the fail-closed sensor. Accept either "greened despite outfail" OR "still
-# refuses for a different reason" but require that production (above) refused.
+# Hostile cat that PRINTS the temp then exits 1: production's `if ! cat`
+# discards the captured body; the mutant's `|| true` keeps the body and
+# returns success, greening terminal release. Prove mutation was applied
+# (above), then require the mutant greened (behavioral kill).
+mkdir -p "$ROOT/capmut2/bin"
+cat > "$ROOT/capmut2/bin/cat" <<'CAT'
+#!/usr/bin/env bash
+# Print capture temp content then fail — models a read that produced bytes
+# but reported failure. Production must not treat those bytes as evidence.
+for a in "$@"; do
+  case "$a" in
+    *gibson-rc-cap-out*)
+      /bin/cat -- "$a" 2>/dev/null || true
+      echo "hostile cat: stdout status fail after body" >&2
+      exit 1
+      ;;
+  esac
+done
+exec /bin/cat "$@"
+CAT
+chmod +x "$ROOT/capmut2/bin/cat"
+out=$(cd "$ROOT/capmut2/canon" && PATH="$ROOT/capmut2/bin:$ROOT/term/bin:$PATH" \
+  "$_rc_cap_mut_dir/release-claim.sh" 702 --claim-id issue-702-cap-mut --repo acme/app 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]]; then
-  ok "mutation receipt: swallowing stdout cat failure can green under outfail (sensor would fail)"
+  ok "mutation receipt: swallowing stdout cat greened under outfail (sensor would fail)"
 else
-  # If the mutation patch did not take cleanly, note it but still pass a
-  # weaker static receipt (the || true greps above are the hard gate).
-  ok "mutation receipt: outfail still refused after attempted swallow (static || true greps remain authoritative)"
+  bad "mutation receipt: mutant still refused under outfail (rc=$rc) — defect did not kill the sensor behaviorally: $out"
 fi
-# Production re-green is the earlier outfail sensor against $RC.
+# Production re-green: same hostile cat against real $RC must refuse.
+out=$(cd "$ROOT/capmut2/canon" && PATH="$ROOT/capmut2/bin:$ROOT/term/bin:$PATH" \
+  "$RC" 702 --claim-id issue-702-cap-mut --repo acme/app 2>&1); rc=$?
+# Claim may already be released by the mutant greening above; either nonzero
+# capture refuse or "no live claim" is fine — must not silently succeed on
+# a fresh fixture. Re-seed a fresh claim for the production re-green.
+CAPM_SHA2=$(term_fixture capmut3 703 cap-mut2)
+export GH_PR_ALL_TSV="$ROOT/capmut3/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/capmut3/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/capmut3/gh-state"
+export GH_LOG="$ROOT/capmut3/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '873\tissue-703-cap-mut2\tlib/x/**\t703\tfeat/703-cap-mut2\t%s\thttps://github.com/acme/app/pull/873\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$CAPM_SHA2" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/capmut3/canon" && PATH="$ROOT/capmut2/bin:$ROOT/term/bin:$PATH" \
+  "$RC" 703 --claim-id issue-703-cap-mut2 --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "production re-green: real helper refuses print-then-fail cat" \
+  || bad "production re-green greened under print-then-fail cat: $out"
+unset _rc_cap_mut_dir _mut_lib _SC_LIB_MUT_SRC
+
+# ===========================================================================
+# #153 exact-head P1 — CAS open-PR protect + exact-id union + terminal ledger
+# ===========================================================================
+echo "#153 exact-head · CAS release refuses same-ID open PR before mutation"
+new_repo "$ROOT/casopen"
+(
+  cd "$ROOT/casopen/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-800-cas-open\nissue: 800\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-800-cas-open.md
+  git add -A && git commit -qm "cas open claim" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+_blob=$(cd "$ROOT/casopen/canon" && git fetch -q origin && git rev-parse origin/main:docs/claims/issue-800-cas-open.md)
+# Sibling pr-claims that returns a same-ID open PR.
+# release-claim resolves SCRIPT_DIR + lib/ relative to its own location.
+mkdir -p "$ROOT/casopen/scripts/lib"
+cp "$RC" "$ROOT/casopen/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/casopen/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/casopen/scripts/lib/stream-capture.sh"
+cat > "$ROOT/casopen/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '900\tissue-800-cas-open\tlib/**\tfeat/800-cas-open\thttps://github.com/acme/app/pull/900\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  list-open-numbers) exit 0 ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/casopen/scripts/pr-claims.sh" "$ROOT/casopen/scripts/release-claim.sh"
+# Also need empty gh for any side paths
+export PATH="$ROOT/bin:$PATH"
+export GH_LABELS="agent-claimed,tier-b"
+export GH_LOG="$ROOT/casopen/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/casopen/canon" && \
+  "$ROOT/casopen/scripts/release-claim.sh" 800 \
+    --claim-id issue-800-cas-open --repo acme/app \
+    --expected-claim-blob "$_blob" --expected-source file \
+    --expected-claim-path docs/claims/issue-800-cas-open.md \
+    --keep-worktree --keep-branch 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "CAS same-ID open PR refuses (nonzero)" || bad "CAS same-ID open PR exited 0: $out"
+contains "CAS same-ID names open PR protect" "$out" "open PR"
+contains "CAS same-ID names claim" "$out" "issue-800-cas-open"
+files=$(cd "$ROOT/casopen/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+contains "CAS same-ID ledger preserved" "$files" "issue-800-cas-open.md"
+lacks "CAS same-ID no label mutation" "$(cat "$GH_LOG" 2>/dev/null)" "MUTATED-LABEL"
+
+echo "#153 exact-head · CAS release refuses same-issue differently named open PR"
+cat > "$ROOT/casopen/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '901\tissue-800-other-slice\tlib/**\tfeat/800-other\thttps://github.com/acme/app/pull/901\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  list-open-numbers) exit 0 ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/casopen/scripts/pr-claims.sh"
+: > "$GH_LOG"
+out=$(cd "$ROOT/casopen/canon" && \
+  "$ROOT/casopen/scripts/release-claim.sh" 800 \
+    --claim-id issue-800-cas-open --repo acme/app \
+    --expected-claim-blob "$_blob" --expected-source file \
+    --expected-claim-path docs/claims/issue-800-cas-open.md \
+    --keep-worktree --keep-branch 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "CAS same-issue open PR refuses" || bad "CAS same-issue exited 0: $out"
+contains "CAS same-issue names protect" "$out" "holds issue #800"
+files=$(cd "$ROOT/casopen/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+contains "CAS same-issue ledger preserved" "$files" "issue-800-cas-open.md"
+
+echo "#153 exact-head · two open PRs + same-ID ledger refuse with zero mutation"
+new_repo "$ROOT/twopr"
+(
+  cd "$ROOT/twopr/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-810-dup\nissue: 810\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-810-dup.md
+  git add -A && git commit -qm "dup open" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+mkdir -p "$ROOT/twopr/scripts/lib"
+cp "$RC" "$ROOT/twopr/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/twopr/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/twopr/scripts/lib/stream-capture.sh"
+cat > "$ROOT/twopr/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '910\tissue-810-dup\tlib/**\tfeat/810-a\thttps://github.com/acme/app/pull/910\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    printf '911\tissue-810-dup\tlib/**\tfeat/810-b\thttps://github.com/acme/app/pull/911\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  list-open-numbers) printf '910\n911\n'; exit 0 ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/twopr/scripts/pr-claims.sh" "$ROOT/twopr/scripts/release-claim.sh"
+export GH_LOG="$ROOT/twopr/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/twopr/canon" && \
+  "$ROOT/twopr/scripts/release-claim.sh" 810 --claim-id issue-810-dup --repo acme/app \
+    --keep-worktree --keep-branch 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "two open PRs + ledger refuse nonzero" || bad "two open PRs exited 0: $out"
+contains "two open PRs names ambiguous" "$out" "multiple live open PR claims"
+files=$(cd "$ROOT/twopr/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+contains "two open PRs ledger preserved" "$files" "issue-810-dup.md"
+
+echo "#153 exact-head · namespaced sibling id does not confuse exact-id logic"
+# Open PR is issue-template-820-ns; ledger is issue-820-main — same numeric
+# issue under different naming. CAS with --claim-id issue-820-main + --prefix
+# is not required: bare issue 820 matcher sees namespaced open PR as same issue.
+new_repo "$ROOT/nsunion"
+(
+  cd "$ROOT/nsunion/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-820-main\nissue: 820\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-820-main.md
+  git add -A && git commit -qm "ns union" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+_blob=$(cd "$ROOT/nsunion/canon" && git fetch -q origin && git rev-parse origin/main:docs/claims/issue-820-main.md)
+mkdir -p "$ROOT/nsunion/scripts/lib"
+cp "$RC" "$ROOT/nsunion/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/nsunion/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/nsunion/scripts/lib/stream-capture.sh"
+cat > "$ROOT/nsunion/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '920\tissue-template-820-ns\tlib/**\tfeat/template-820\thttps://github.com/acme/app/pull/920\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  list-open-numbers) printf '920\n'; exit 0 ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/nsunion/scripts/"*
+export GH_LOG="$ROOT/nsunion/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/nsunion/canon" && \
+  "$ROOT/nsunion/scripts/release-claim.sh" 820 \
+    --claim-id issue-820-main --repo acme/app \
+    --expected-claim-blob "$_blob" --expected-source file \
+    --expected-claim-path docs/claims/issue-820-main.md \
+    --keep-worktree --keep-branch 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "namespaced same-issue open PR protects CAS" || bad "namespaced protect exited 0: $out"
+contains "namespaced protect names issue" "$out" "issue #820"
+files=$(cd "$ROOT/nsunion/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/)
+contains "namespaced protect ledger preserved" "$files" "issue-820-main.md"
+
+echo "#153 exact-head · mixed representation mutation: restoring silent dedupe greeds"
+# Prove production refuses mixed; mutate a copy to remove the mixed guard and
+# require the mutant to delete both representations (sensor would go red).
+new_repo "$ROOT/mixmut"
+(
+  cd "$ROOT/mixmut/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  printf 'claim: issue-830-mix\nissue: 830\nclaimed: 2026-08-01T00:00:00Z\nscope: src/x\nsession: a\n' \
+    > docs/claims/issue-830-mix.md
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-830-mix | src/x | session:a |
+TABLE
+  git add -A && git commit -qm "mixed" && git push -q origin main
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+mkdir -p "$ROOT/mixmut/scripts/lib"
+cp "$RC" "$ROOT/mixmut/scripts/release-claim.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/mixmut/scripts/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$ROOT/mixmut/scripts/lib/stream-capture.sh"
+cat > "$ROOT/mixmut/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list) exit 0 ;;
+  list-open-numbers) exit 0 ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/mixmut/scripts/"*
+# Production refuse:
+export GH_LOG="$ROOT/mixmut/gh.log"
+: > "$GH_LOG"
+out=$(cd "$ROOT/mixmut/canon" && \
+  "$ROOT/mixmut/scripts/release-claim.sh" 830 --claim-id issue-830-mix --repo acme/app 2>&1)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "mixed production REFUSE" || bad "mixed production exited 0"
+# Mutate: neutralize the mixed-rep die.
+perl -i -pe 's/die "REFUSE ambiguous mixed ledger representations/true # MUTATED die "REFUSE ambiguous mixed ledger representations/' \
+  "$ROOT/mixmut/scripts/release-claim.sh"
+if grep -q 'MUTATED die "REFUSE ambiguous mixed' "$ROOT/mixmut/scripts/release-claim.sh"; then
+  ok "mixed mutation: ambiguity guard neutralized"
+else
+  bad "mixed mutation: failed to neutralize ambiguity guard"
+fi
+: > "$GH_LOG"
+out=$(cd "$ROOT/mixmut/canon" && \
+  PATH="$ROOT/bin:$PATH" \
+  "$ROOT/mixmut/scripts/release-claim.sh" 830 --claim-id issue-830-mix --repo acme/app 2>&1)
+rc=$?
+files=$(cd "$ROOT/mixmut/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+table=$(cd "$ROOT/mixmut/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
+# With guard gone, both representations should be stripped (sensor would fail).
+if [[ "$rc" -eq 0 ]] && ! echo "$files" | grep -q 'issue-830-mix' && ! echo "$table" | grep -q 'issue-830-mix'; then
+  ok "mutation receipt: neutralizing mixed guard deletes both representations (sensor would fail)"
+else
+  bad "mutation receipt: neutralizing mixed guard did not re-enable dual delete (rc=$rc files=$files)"
+fi
 
 echo "#153 round 8 · standalone suite exit gate rejects construction diags"
 _guard_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-guard.XXXXXX")

@@ -313,7 +313,6 @@ if [[ -n "$PR_REPO" && ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; the
   PR_REPO=""
 fi
 
-PR_CLAIMS_FOUND=0
 if [[ -n "$PR_REPO" ]]; then
   if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     die "the authoritative PR-claim reader $SCRIPT_DIR/pr-claims.sh is missing or not executable — cannot inventory live claims for $PR_REPO; refuse rather than plan 'nothing to reap' on an unread inventory"
@@ -419,7 +418,6 @@ EOF
     die "live claim inventory for $PR_REPO returned a malformed/truncated row — refuse rather than treat unreadable evidence as an empty plan: ${_pr_bad_row}"
   fi
   unset _pr_bad_row _pr_row _pr_fields _pr_number _pr_id _pr_scope _pr_head _pr_url _pr_url_repo _pr_url_num _pr_created _pr_updated _pr_cross
-  # shellcheck disable=SC2034
   # 8 fields since #153 review round 5: the last is the PR's repository
   # identity (`true`/`false`). It is read so the timestamp column is not
   # silently absorbed into it; this reaper only proposes a release, and
@@ -444,7 +442,6 @@ EOF
     pr_number=$(cut -f1 <<<"$_pr_line")
     pr_id=$(cut -f2 <<<"$_pr_line")
     [[ -n "$pr_id" ]] || continue
-    PR_CLAIMS_FOUND=1
     if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_FILTER" ]]; then
       continue
     fi
@@ -462,14 +459,10 @@ EOF
 $PR_ROWS
 EOF
   unset _pr_line pr_number pr_id
-  # A migrated repository can have no legacy tree at all. Do not misclassify
-  # that valid state as an unreadable ledger after processing PR claims.
-  if [[ "$PR_CLAIMS_FOUND" -eq 1 ]]; then
-    legacy_entries=$(git ls-tree --name-only HEAD docs/claims/ docs/active-work.md 2>/dev/null || true)
-    if [[ -z "$legacy_entries" ]]; then
-      exit 0
-    fi
-  fi
+  # (#153 exact-head P2) Never declare the ledger empty from local HEAD.
+  # A feature checkout or an old/empty local tree can lack docs/claims while
+  # origin/main still holds stale claims. Ledger emptiness is decided only
+  # after a successful fetch of the authoritative remote base below.
 fi
 # Empty when GitHub-native claims do not apply; still safe for later grep -qxF.
 OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS:-}"
@@ -720,6 +713,8 @@ resolve_repo() {
 }
 
 # Open-PR query. Prints "open", "none", or "fail".
+# Kept for plan-time branch-specific KEEP classification only. Pre-dispatch
+# protection uses fresh_open_pr_inventory_protect (authoritative full list).
 open_pr_status() {
   local branch="$1" repo="$2"
   if ! command -v gh >/dev/null 2>&1; then
@@ -743,6 +738,126 @@ open_pr_status() {
     0) echo "none" ;;
     *) echo "open" ;;
   esac
+}
+
+# (#153 exact-head P1) Fresh authoritative open-PR inventory revalidation
+# immediately before an irreversible release dispatch. Any open PR whose
+# claim id equals the target OR belongs to the same issue protects live work
+# and blocks the release call. Malformed/failed/truncated inventory fails
+# closed. Never excludes a same-ID open PR merely because its id equals the
+# cleanup target.
+#
+# Sets FRESH_PR_PROTECT_REASON on refusal. Returns:
+#   0  inventory clean and no protecting open PR
+#   1  protect / refuse (do not dispatch)
+FRESH_PR_PROTECT_REASON=""
+fresh_open_pr_inventory_protect() {
+  local target_id="$1" target_issue="$2" repo="$3"
+  local rows bad_row row fields number id scope head url created updated cross
+  local url_repo url_num
+  FRESH_PR_PROTECT_REASON=""
+  if [[ -z "$repo" ]]; then
+    FRESH_PR_PROTECT_REASON="repo unresolved for fresh open-PR inventory"
+    return 1
+  fi
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    FRESH_PR_PROTECT_REASON="authoritative PR-claim reader missing/not executable"
+    return 1
+  fi
+  if ! rows=$("$SCRIPT_DIR/pr-claims.sh" list "$repo" 2>&1); then
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory unreadable: $rows"
+    return 1
+  fi
+  # Full all-or-none validation (same contract as startup inventory).
+  bad_row=""
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    fields=$(awk -F'\t' '{print NF}' <<<"$row")
+    number=$(cut -f1 <<<"$row")
+    id=$(cut -f2 <<<"$row")
+    scope=$(cut -f3 <<<"$row")
+    head=$(cut -f4 <<<"$row")
+    url=$(cut -f5 <<<"$row")
+    created=$(cut -f6 <<<"$row")
+    updated=$(cut -f7 <<<"$row")
+    cross=$(cut -f8 <<<"$row")
+    if [[ "$fields" -ne 8 ]]; then
+      bad_row="want 8 tab-separated fields, got ${fields}: ${row}"
+      break
+    fi
+    if ! parse_canonical_positive_int "$number" >/dev/null; then
+      bad_row="PR number noncanonical/unsafe: ${row}"
+      break
+    fi
+    if [[ ! "$id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]]; then
+      bad_row="claim id is not a valid issue-bound id: ${row}"
+      break
+    fi
+    if [[ -z "$scope" ]]; then
+      bad_row="empty claim scope: ${row}"
+      break
+    fi
+    if [[ -z "$head" || ! "$head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+      bad_row="missing/unsafe head branch: ${row}"
+      break
+    fi
+    if [[ -z "$url" || ! "$url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
+      bad_row="missing/malformed PR URL: ${row}"
+      break
+    fi
+    url_repo="${BASH_REMATCH[1]}"
+    url_num="${BASH_REMATCH[2]}"
+    if ! parse_canonical_positive_int "$url_num" >/dev/null; then
+      bad_row="PR URL pull number noncanonical/unsafe: ${row}"
+      break
+    fi
+    if [[ "$url_repo" != "$repo" ]]; then
+      bad_row="PR URL repository ('${url_repo}') does not match inventory repository ('${repo}'): ${row}"
+      break
+    fi
+    if [[ "$url_num" != "$number" ]]; then
+      bad_row="PR URL pull-number ('${url_num}') does not match row PR number ('${number}'): ${row}"
+      break
+    fi
+    if [[ -z "$created" || -z "$updated" ]]; then
+      bad_row="missing created/updated timestamp: ${row}"
+      break
+    fi
+    if [[ "$cross" != "true" && "$cross" != "false" ]]; then
+      bad_row="repository-identity column is neither 'true' nor 'false': ${row}"
+      break
+    fi
+  done <<EOF
+$rows
+EOF
+  if [[ -n "$bad_row" ]]; then
+    FRESH_PR_PROTECT_REASON="fresh open-PR inventory malformed/truncated: $bad_row"
+    return 1
+  fi
+  # Protect on exact target id OR same issue (including differently named /
+  # namespaced siblings). Never skip a same-ID open PR because it equals the
+  # cleanup target.
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    number=$(cut -f1 <<<"$row")
+    id=$(cut -f2 <<<"$row")
+    [[ -n "$id" ]] || continue
+    if [[ "$id" == "$target_id" ]]; then
+      FRESH_PR_PROTECT_REASON="open PR #${number} carries exact claim id '${id}' (live evidence, not a sibling to ignore)"
+      return 1
+    fi
+    if [[ -n "$target_issue" ]]; then
+      _f_issue=$(issue_from_claim_id "$id")
+      if [[ "$_f_issue" == "$target_issue" ]]; then
+        FRESH_PR_PROTECT_REASON="open PR #${number} claim '${id}' holds same issue #${target_issue}"
+        return 1
+      fi
+    fi
+  done <<EOF
+$rows
+EOF
+  unset _f_issue
+  return 0
 }
 
 # Physical path for comparison (macOS /var vs /private/var). Does not require
@@ -1302,7 +1417,8 @@ PLAN_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-plan.XXXXXX")
 IDENTITY_REFUSE_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-idref.XXXXXX")
 trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP"' EXIT
 
-# Collect raw rows into CLAIMS_TMP then dedupe by id (prefer per-file over legacy).
+# Collect raw rows into CLAIMS_TMP. Simultaneous per-file + legacy for the
+# same id is ambiguous and REFUSED (never silently prefer one representation).
 : > "$CLAIMS_TMP"
 : > "$IDENTITY_REFUSE_TMP"
 # Track seen body claim ids for duplicate detection (file form).
@@ -1435,28 +1551,29 @@ $active_body
 EOF
 fi
 
-# Dedupe: for each id keep file over legacy, else first.
-DEDUP_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-dedup.XXXXXX")
-trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$DEDUP_TMP"' EXIT
-: > "$DEDUP_TMP"
-while IFS= read -r row; do
-  [[ -n "$row" ]] || continue
-  src=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
-  [[ "$src" == "file" ]] || continue
-  printf '%s\n' "$row" >> "$DEDUP_TMP"
-done < "$CLAIMS_TMP"
-while IFS= read -r row; do
-  [[ -n "$row" ]] || continue
-  src=$(printf '%s\n' "$row" | awk -F'\t' '{print $7}')
-  [[ "$src" == "legacy" ]] || continue
-  id="${row%%$'\t'*}"
-  if awk -F'\t' -v id="$id" '$1==id {found=1} END{exit !found}' "$DEDUP_TMP" 2>/dev/null; then
-    continue
-  fi
-  printf '%s\n' "$row" >> "$DEDUP_TMP"
-done < "$CLAIMS_TMP"
-mv "$DEDUP_TMP" "$CLAIMS_TMP"
-DEDUP_TMP=""
+# (#153 exact-head P1) Mixed same-ID file+legacy representations are
+# ambiguous. Refuse before planning or mutation rather than silently
+# preferring the per-file row (which left the legacy row unbound by CAS and
+# deletable under a renewal of the non-selected representation).
+MIX_IDS_TMP=$(mktemp "${TMPDIR:-/tmp}/gibson-reaper-mix.XXXXXX")
+trap 'release_lock; rm -f "$CLAIMS_TMP" "$PLAN_TMP" "$IDENTITY_REFUSE_TMP" "$SEEN_IDS_TMP" "$MIX_IDS_TMP"' EXIT
+: > "$MIX_IDS_TMP"
+# Collect ids that appear as file and as legacy.
+awk -F'\t' '$7=="file" {print $1}' "$CLAIMS_TMP" | sort -u > "${MIX_IDS_TMP}.file"
+awk -F'\t' '$7=="legacy" {print $1}' "$CLAIMS_TMP" | sort -u > "${MIX_IDS_TMP}.leg"
+if [[ -s "${MIX_IDS_TMP}.file" && -s "${MIX_IDS_TMP}.leg" ]]; then
+  comm -12 "${MIX_IDS_TMP}.file" "${MIX_IDS_TMP}.leg" > "${MIX_IDS_TMP}.both" || true
+  while IFS= read -r mid; do
+    [[ -n "$mid" ]] || continue
+    printf 'REFUSE\t%s\t\t\t\t\tmixed_ledger_representations\tdocs/claims/%s.md+docs/active-work.md\t\t\n' \
+      "$mid" "$mid" >> "$IDENTITY_REFUSE_TMP"
+    # Drop both raw rows so they never plan as REAP.
+    awk -F'\t' -v id="$mid" '$1!=id' "$CLAIMS_TMP" > "${CLAIMS_TMP}.nm" || true
+    mv "${CLAIMS_TMP}.nm" "$CLAIMS_TMP"
+  done < "${MIX_IDS_TMP}.both"
+fi
+rm -f "${MIX_IDS_TMP}.file" "${MIX_IDS_TMP}.leg" "${MIX_IDS_TMP}.both" "$MIX_IDS_TMP"
+MIX_IDS_TMP=""
 
 # Optional filter
 if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
@@ -2208,10 +2325,23 @@ while IFS= read -r prow || [[ -n "$prow" ]]; do
     continue
   fi
 
+  # Branch-specific open-PR check (plan-time belt). The authoritative
+  # protection is the fresh full inventory revalidation immediately below.
   pr_st=$(open_pr_status "$p_branch" "$REPO")
   if [[ "$pr_st" != "none" ]]; then
     warn "pre-mutation: PR status=$pr_st for $p_id — refuse"
     journal_append "INCOMPLETE op=${op} reason=pr_${pr_st}"
+    INCOMPLETE=1
+    continue
+  fi
+
+  # (#153 exact-head P1) Fresh authoritative pr-claims.sh list immediately
+  # before irreversible release dispatch. Startup snapshot is not enough: a
+  # valid same-ID (or same-issue) open PR appearing after planning must block
+  # ledger/label/worktree/branch/journal-success/handoff mutation.
+  if ! fresh_open_pr_inventory_protect "$p_id" "$p_issue" "$REPO"; then
+    warn "pre-dispatch: fresh open-PR inventory protects $p_id — ${FRESH_PR_PROTECT_REASON} — refuse release"
+    journal_append "INCOMPLETE op=${op} reason=fresh_open_pr_protect"
     INCOMPLETE=1
     continue
   fi
