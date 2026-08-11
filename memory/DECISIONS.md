@@ -147,3 +147,36 @@ lessons (doesn't compound; counts do).
 Revisit when: the ledger shows merge lead time is no longer coordinator-bound
 after CI gates + migration decoupling land (then WIP can rise), or an escaped
 defect lands that a dropped review layer would plausibly have caught.
+
+## D-011 · 2026-08-11 · Vendor external reference data under references/, not skills/
+Decided: three external references added at `references/` (new top-level dir,
+distinct from `skills/` — the Gibson's own orchestration meta-skills — and
+from `templates/` — what installs into a target repo): `references/codeguard/`
+(OWASP-derived security rules, tag-mapped by language/context, donated to and
+maintained by the Coalition for Secure AI), `references/ui-ux-pro-max/`
+(searchable local database of 192 WCAG-checked color palettes, 74 font
+pairings, 98 UX guidelines, matched to product type/stack), and
+`references/vercel-optimize/` (operational Vercel cost/perf audit tool — the
+one exception: calls the live Vercel CLI/API for real production metrics,
+run on demand per doc 17's "Inspect" mode, not auto-invoked). All three
+pinned to a specific commit SHA (table in `references/README.md`), vendored
+as static files, no live/runtime dependency — same "borrow vocabulary, no
+runtime dependency" posture D-008 already established for the OWASP Agentic
+mapping (docs/26). Wired as `sources:`/inline references from
+`playbooks/security.md` (Layers 2 + 6), `playbooks/ux-evaluator.md` (design-
+language authoring + grading), `docs/08-security.md`, `docs/07-uiux-
+evaluation.md`, and `docs/17-deployment-optimization.md`. Provenance: found
+and evaluated during a ConferenceOS backlog session (2026-08-11) — the
+security role's adversarial-review layer and the ux-evaluator's "design
+language" grading were both previously ungrounded (reasoning from the
+model's own memorized knowledge / declared taste with no concrete reference
+data behind either); both gaps existed in the doctrine (docs 07/08 already
+described what to check) without a concrete data source to check against.
+Rejected: putting these under `skills/` (category error — that dir is the
+Gibson's own 6-skill orchestration layer, not a general capability library);
+a live MCP/API dependency on any of the three (violates D-008's posture,
+adds a point of failure for reference material that changes rarely).
+Revisit when: a re-sync is warranted (upstream ships a meaningfully different
+ruleset/dataset — check `references/README.md`'s commit table first), or a
+target repo's adversarial security/UX review demonstrably still misses
+something these would have caught (promote from reference to gate).

@@ -22,6 +22,7 @@ sources:
   - docs/02-sdlc-pipeline.md (stage 6)
   - docs/08-security.md
   - docs/14-human-gates.md (G4, G15, G16)
+  - references/codeguard/ (OWASP-derived rule reference for Layers 2 + 6)
 ---
 
 # Security — dispatch prompt
@@ -100,7 +101,10 @@ drift. Note any report-only findings that need promotion issues. For AI-heavy ch
 1. Layers 1–3 results + re-check new dependencies (provenance, install scripts).
 2. **AuthZ:** ensure new routes appear in matrix; IDOR probes for cross-tenant IDs.
 3. **DAST:** ZAP baseline against preview only. Never active-scan prod.
-4. **Adversarial:** construct exploit paths; refute pass; survivors filed with severity.
+4. **Adversarial:** read `references/codeguard/SKILL.md`'s tag table, apply the rule
+   files matching this diff's security context (auth, secrets, web, infra, MCP, etc.)
+   and language; construct exploit paths grounded in those rules; refute pass;
+   survivors filed with severity.
 5. **AI-surface:** untrusted retrieval/user content; no instruction-following from data;
    tainted output at sinks; minimal tool scope. prodlint often surfaces missing auth on server actions.
 6. **Posture:** `posture-probe.sh` vs. preview; compare to baseline if present.

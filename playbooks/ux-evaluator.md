@@ -25,6 +25,7 @@ sources:
   - docs/03-roles.md
   - docs/02-sdlc-pipeline.md (stage 5)
   - docs/07-uiux-evaluation.md
+  - references/ui-ux-pro-max/ (design-system reference data for the grading step)
 ---
 
 # UX Evaluator — dispatch prompt
@@ -138,6 +139,12 @@ Calibrate at adoption if repo defaults differ; never silently lower.
 | **Functionality** | User completes contract tasks |
 
 Plus Nielsen-heuristics sweep for interaction findings.
+
+For **Design quality** and **Craft**, don't grade from taste alone: query
+`references/ui-ux-pro-max/scripts/search.py` for the product type/stack to get
+concrete palette contrast ratios, spacing scale, and typography pairing
+expectations, and check the shipped UI against those values, not just against
+whether it "feels coherent."
 
 **Threshold:** any criterion < 7 → `REQUEST_CHANGES` with specific findings.
 
