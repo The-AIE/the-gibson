@@ -2027,6 +2027,193 @@ contains "identity-bound stale row is classified STALE" "$out" "STALE PR #7 clai
   && ok "identity-bound stale row invokes release under --apply" \
   || bad "identity-bound stale row did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
 
+# ===========================================================================
+# #153 review-ten P1 — PR identities must be positive canonical decimals
+# ===========================================================================
+# GitHub pull-request numbers are positive canonical decimals (^[1-9][0-9]*$).
+# Digit-only acceptance previously admitted zero and leading-zero forms such as
+# 0999. A successful reader returning those must make the entire inventory
+# unreadable/fatal before classification, planning, journaling, or --apply
+# release. Do not normalize malformed input into a valid identity.
+echo "#153 r10 · leading-zero PR identity (0999) is rejected (not STALE, not released)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Adversarial fixture from independent review-ten: successful reader, stale
+    # timestamps, matching row/URL numbers — but noncanonical leading-zero form.
+    printf '0999\tissue-999-leading-zero\tlib/**\tfeat/999-leading-zero\thttps://github.com/acme/app/pull/0999\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+# Reset journal so a prior successful reap cannot make this look planned/journaled.
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "leading-zero PR identity exits nonzero" \
+  || bad "leading-zero PR identity was accepted (exit 0): $out"
+# Row-field diagnostic specifically (not the URL-path message). Softening only
+# the row validator to ^[0-9]+$ must fail this assertion even if the URL check
+# still rejects the same row.
+contains "leading-zero PR identity names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "leading-zero PR identity names the hostile row number" "$out" "0999"
+lacks    "leading-zero PR identity is not classified STALE" "$out" "STALE PR #"
+lacks    "leading-zero PR identity is not nothing to reap" "$out" "nothing to reap"
+lacks    "leading-zero PR identity is not protected as live" "$out" "is protected"
+lacks    "leading-zero PR identity is not planned REAP" "$out" "REAP   issue-999-leading-zero"
+check    "leading-zero PR identity never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "leading-zero PR identity never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r10 · zero PR identity (0) is rejected (not STALE, not released)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '0\tissue-0-zero\tlib/**\tfeat/0-zero\thttps://github.com/acme/app/pull/0\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "zero PR identity exits nonzero" \
+  || bad "zero PR identity was accepted (exit 0): $out"
+contains "zero PR identity names row noncanonical/unsafe" "$out" \
+  "PR number is noncanonical/unsafe"
+contains "zero PR identity names the hostile row" "$out" $'0\tissue-0-zero'
+lacks    "zero PR identity is not classified STALE" "$out" "STALE PR #"
+lacks    "zero PR identity is not nothing to reap" "$out" "nothing to reap"
+lacks    "zero PR identity is not planned REAP" "$out" "REAP   issue-0-zero"
+check    "zero PR identity never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+check    "zero PR identity never wrote a journal entry" \
+  "$(grep -c . "$state/journal.md" 2>/dev/null || true)" "0"
+
+echo "#153 r10 · canonical row + leading-zero URL /pull/0999 is rejected via URL path"
+# Mismatch-shaped hostile fixture: row is a positive canonical decimal so the
+# row validator cannot reject first. Only the URL /pull/N shape rejects.
+# Restoring the URL capture to [0-9]+ while leaving the row validator strict
+# changes the diagnostic to a pull-number *mismatch* (0999 vs 999) — this
+# fixture gives that independent URL mutation behavioral teeth. (A pure
+# same-shaped 0999/0999 URL-only mutation is unreachable: the earlier row
+# check necessarily rejects first; see source tripwire below.)
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '999\tissue-999-url-lz\tlib/**\tfeat/999-url-lz\thttps://github.com/acme/app/pull/0999\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+[[ "$rc" -ne 0 ]] && ok "canonical-row + leading-zero URL exits nonzero" \
+  || bad "canonical-row + leading-zero URL was accepted (exit 0): $out"
+# URL-path diagnostic specifically. Softening only the URL capture to [0-9]+
+# makes the row pass shape checks and then fail equality as a mismatch —
+# this assertion must fail under that independent mutation.
+contains "canonical-row + leading-zero URL names noncanonical URL pull" "$out" \
+  "pull number is noncanonical/unsafe"
+lacks    "canonical-row + leading-zero URL is not classified STALE" "$out" "STALE PR #"
+lacks    "canonical-row + leading-zero URL is not nothing to reap" "$out" "nothing to reap"
+check    "canonical-row + leading-zero URL never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+
+echo "#153 r10 · canonical multi-digit PR identity (1000) remains accepted under --apply"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # 1000 is a positive canonical decimal (leading 1). Must remain accepted
+    # under the same repository and exact row/URL number bindings as r9's #7.
+    printf '1000\tissue-1000-stale\tlib/**\tfeat/1000-stale\thttps://github.com/acme/app/pull/1000\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "canonical PR #1000 is accepted (exit 0)" "$rc" "0"
+contains "canonical PR #1000 is classified STALE" "$out" "STALE PR #1000 claim issue-1000-stale"
+[[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]] \
+  && ok "canonical PR #1000 invokes release under --apply" \
+  || bad "canonical PR #1000 did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+
+# Source-contract tripwire: dual independent shape requirements remain in source.
+# Same-shaped 0999/0999 URL-only mutation is unreachable for STALE/release
+# assertions (row check fires first); the mismatch-shaped fixture above covers
+# URL mutation behaviorally. These greps keep the dual source invariant explicit.
+if grep -qF '/pull/([1-9][0-9]*)$' "$REAPER"; then
+  ok "source contract: URL pull capture requires positive canonical decimal"
+else
+  bad "source contract: URL pull capture no longer requires ([1-9][0-9]*) (check $REAPER)"
+fi
+if grep -qF '^[1-9][0-9]*$' "$REAPER"; then
+  ok "source contract: row PR number requires positive canonical decimal"
+else
+  bad "source contract: row PR number no longer requires ^[1-9][0-9]*$"
+fi
+
 # ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"

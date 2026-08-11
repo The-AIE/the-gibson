@@ -329,8 +329,12 @@ if [[ -n "$PR_REPO" ]]; then
       _pr_bad_row="want 8 tab-separated fields, got ${_pr_fields}: ${_pr_row}"
       break
     fi
-    if [[ ! "$_pr_number" =~ ^[0-9]+$ ]]; then
-      _pr_bad_row="PR number is not a safe decimal: ${_pr_row}"
+    # GitHub pull-request numbers are positive canonical decimals: first digit
+    # 1-9, then zero or more digits. Reject zero and leading-zero forms such as
+    # 0999 before any classification, planning, journaling, or release
+    # (#153 review-ten P1). Do not normalize malformed input into a valid identity.
+    if [[ ! "$_pr_number" =~ ^[1-9][0-9]*$ ]]; then
+      _pr_bad_row="PR number is noncanonical/unsafe (want positive decimal without leading zeros): ${_pr_row}"
       break
     fi
     # Issue-bound claim id: issue-[optional-ns-]<digits>-<slug>, same family
@@ -347,8 +351,11 @@ if [[ -n "$PR_REPO" ]]; then
       _pr_bad_row="missing/unsafe head branch: ${_pr_row}"
       break
     fi
-    if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([0-9]+)$ ]]; then
-      _pr_bad_row="missing/malformed PR URL: ${_pr_row}"
+    # URL /pull/N must independently be the same positive canonical decimal —
+    # not merely digit-only. Zero and leading-zero URL components fail here
+    # even if a future change loosened the row check (#153 review-ten P1).
+    if [[ -z "$_pr_url" || ! "$_pr_url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$ ]]; then
+      _pr_bad_row="missing/malformed PR URL (pull number is noncanonical/unsafe; want positive decimal without leading zeros): ${_pr_row}"
       break
     fi
     # Conjunctive identity binding (#153 review-nine P1): a plausible PR URL
