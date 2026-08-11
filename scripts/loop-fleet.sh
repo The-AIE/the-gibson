@@ -93,10 +93,12 @@ SLEEP_CMD="${SLEEP_CMD:-sleep}" # tests can set to true / no-op
 #     publish to fail so sensors prove reservation+child cleanup. Unset in production.
 #   FLEET_WATCHDOG_TEST_IMMEDIATE_EXIT=1 — after spawn, SIGKILL the child and leave
 #     it unreaped so sensors prove zombie/immediate-exit never logs armed. Unset in production.
-#   FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK — if set to a path, wait (bounded)
-#     until that path exists (sensor child writes it after arming a TERM trap),
-#     then parent writes the timeout flag so the watcher exits without TERM;
-#     residual path must still deliver TERM → full 1s grace → KILL.
+#   FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK — if set to "date:<path>" or
+#     "tick:<path>", wait (bounded) until <path> exists (sensor child writes it
+#     after arming a TERM trap), then force only the matching parent-fallback
+#     *precondition* (clock comparison or tick threshold) so the real date/tick
+#     branch body runs (writes timeout + parent_forced). Does NOT write the
+#     timeout flag, set parent_forced, or bypass the production branch body.
 #     Sensors only. Unset in production.
 FLEET_SYNC_LAUNCH="${FLEET_SYNC_LAUNCH:-0}"
 FLEET_NO_WATCHDOG="${FLEET_NO_WATCHDOG:-0}"
@@ -2855,9 +2857,10 @@ run_with_wall_timeout() {
   shift
   local pid watcher rc=0 status_file timed_out=0 st poll now pgid
   local elapsed watcher_wait_bound i settle pgrp_ok=0 cand pgrp_ready arm_path
-  # parent_forced=1 when *this* shell wrote the timeout flag (date/tick or
-  # sensor hook). The watcher exits early on that flag without signaling, so
-  # residual cleanup must own the full TERM → grace → KILL contract.
+  local arm_spec arm_mode pfb_precond=0 now_force
+  # parent_forced=1 when *this* shell wrote the timeout flag via the real
+  # date/tick ownership branches. The watcher exits early on that flag without
+  # signaling, so residual cleanup must own the full TERM → grace → KILL contract.
   local parent_forced=0
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || { echo "fleet: bad wall timeout: $limit" >&2; return 1; }
 
@@ -2998,28 +3001,48 @@ os.execvp(sys.argv[2], sys.argv[2:])
   poll=$(date +%s 2>/dev/null || echo 0)
   settle=0
   while true; do
-    # Sensor-only: force parent-owned timeout flag *before* the watcher reaches
-    # its wall deadline. Path value is an arm file the child creates after its
-    # TERM trap is installed — wait for it (bounded) so TERM is observable.
-    # Watcher sees the flag and exits without TERM; residual must still deliver
-    # TERM → full grace → KILL (not bare KILL).
-    if [[ -n "${FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK:-}" ]]; then
-      arm_path="${FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK}"
-      i=0
-      while [[ $i -lt 100 ]]; do
-        [[ -f "$arm_path" ]] && break
-        if ! kill -0 "$pid" 2>/dev/null; then
-          break
+    # Sensor-only: after child arms TERM trap (creates <path>), force only the
+    # real date or tick branch *precondition* so production ownership body runs.
+    # Format: date:<arm_path> | tick:<arm_path>. Never writes timeout, never sets
+    # parent_forced, never breaks past the production branches. Unset = inert.
+    if [[ -n "${FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK:-}" && $pfb_precond -eq 0 ]]; then
+      arm_spec="${FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK}"
+      arm_mode=""
+      arm_path=""
+      case "$arm_spec" in
+        date:?*|tick:?*)
+          arm_mode="${arm_spec%%:*}"
+          arm_path="${arm_spec#*:}"
+          ;;
+      esac
+      if [[ -n "$arm_mode" && -n "$arm_path" ]]; then
+        i=0
+        while [[ $i -lt 100 ]]; do
+          [[ -f "$arm_path" ]] && break
+          if ! kill -0 "$pid" 2>/dev/null; then
+            break
+          fi
+          sleep 0.05 2>/dev/null || sleep 1
+          i=$((i + 1))
+        done
+        if [[ -f "$arm_path" ]] && kill -0 "$pid" 2>/dev/null; then
+          case "$arm_mode" in
+            date)
+              # Force (now - poll) >= (limit + 3) on the date branch below.
+              poll=1
+              ;;
+            tick)
+              # Keep date branch false; force tick threshold after settle++ below.
+              now_force=$(date +%s 2>/dev/null || echo 0)
+              if [[ "$now_force" =~ ^[0-9]+$ && "$now_force" -gt 0 ]]; then
+                poll=$now_force
+              fi
+              settle=$(( (limit + 3) * 10 + 20 ))
+              ;;
+          esac
+          pfb_precond=1
         fi
-        sleep 0.05 2>/dev/null || sleep 1
-        i=$((i + 1))
-      done
-      if kill -0 "$pid" 2>/dev/null; then
-        printf 'timeout\n' > "$status_file" 2>/dev/null || true
-        parent_forced=1
-        timed_out=1
       fi
-      break
     fi
     if [[ -f "$status_file" ]] && grep -q '^timeout$' "$status_file" 2>/dev/null; then
       timed_out=1

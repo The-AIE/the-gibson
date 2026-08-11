@@ -21,7 +21,22 @@ export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-loop-fleet-test.XXXXXX")
-trap 'rm -rf -- "${ROOT:?}"' EXIT
+TEST_ROOT_OWNER_FILE="$ROOT/.owner-pid"
+# A directly spawned child observes the actual top-level Bash PID as PPID.
+# This avoids Bash 3.2's shared $$ and unavailable BASHPID in subshells.
+/bin/sh -c 'printf "%s\n" "$PPID" > "$1"' sh "$TEST_ROOT_OWNER_FILE" \
+  || { echo "loop-fleet.test.sh: cannot record top-level cleanup owner" >&2; exit 1; }
+cleanup_test_root() {
+  # Only the top-level sensor shell owns the shared fixture root. A child sh's
+  # PPID is the actual invoking Bash process, so inherited EXIT traps in Bash
+  # 3.2 command-substitution/background subshells remain inert.
+  /bin/sh -c '
+    IFS= read -r owner < "$1" || exit 1
+    test "$PPID" = "$owner"
+  ' sh "$TEST_ROOT_OWNER_FILE" 2>/dev/null || return 0
+  rm -rf -- "${ROOT:?}"
+}
+trap cleanup_test_root EXIT
 
 BIN="$ROOT/bin"
 CALLS="$ROOT/calls"
@@ -7323,153 +7338,327 @@ else
 fi
 
 # --- CR: parent date/tick fallback must TERM → grace → KILL (not bare KILL) --
-# Deterministic interleaving via FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK=<arm>:
-# child writes <arm> after installing a TERM trap; parent then writes the
-# timeout flag before the watcher deadline; watcher exits without TERM.
-# Residual must still deliver TERM → full 1s grace → KILL while the leader is
-# unreaped. Bare-KILL-only residual fails this sensor (no TERM log, grace < 1s).
-# Not a timing race hope.
-echo "wall-timeout parent-fallback TERM→grace→KILL (not bare KILL)"
-reset_calls
-TARGET=$(setup_target_repo wtparentfb acme/widget)
-PROF="$ROOT/profiles/wtparentfb.profile"
-write_profile "$PROF" \
-  "version=1" \
-  "name=wtparentfb" \
-  "repo=$TARGET" \
-  "slug=acme/widget" \
-  "gibson=$ROOT/gibson" \
-  "fleet_dir=$ROOT/fleet" \
-  "log_dir=$ROOT/logs" \
-  "runner=fake-runner" \
-  "lane=docs|611|docs/**|docs only"
-REAL_GIT=$(command -v git)
-# Unrelated process outside the timeout group — must survive exact-identity kills.
-sleep 300 &
-PFB_UNRELATED=$!
-PFB_ARM="$CALLS/wtpfb-armed"
-cat > "$BIN/git" <<STUB
+# Deterministic interleaving via FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK=
+#   date:<arm> | tick:<arm>
+# Child writes <arm> AFTER installing a TERM trap. Hook then forces only the
+# matching production branch *precondition* (clock comparison or tick threshold).
+# Real branch body must write timeout + parent_forced=1; residual delivers
+# TERM → full 1s grace → KILL. Hook must NOT write timeout / set parent_forced.
+# Bare-KILL residual fails (no TERM log and/or grace < 1s). Not timing-only hope.
+#
+# pfb_run_probe <fleet_script> <mode> <tag>
+#   mode: date|tick
+#   Writes CALLS/pfb-<tag>.{pass,fail,detail} — pass only when ALL of:
+#     124-derived timeout refuse, elapsed ∈ [1,15], TERM observed, leader gone,
+#     descendant gone, unrelated survives, post-reap unrelated survives, 0 launches.
+#   Does not call ok/bad (caller records evidence / mutation inversion).
+pfb_run_probe() {
+  local fleet_bin="$1" mode="$2" tag="$3"
+  local arm leader_f desc_f sig_f prof target out t0 t1 elapsed lc leader desc
+  local unrelated post_u i fail_reasons="" rc_start=0
+  arm="$CALLS/pfb-${tag}-armed"
+  leader_f="$CALLS/pfb-${tag}-leader.pid"
+  desc_f="$CALLS/pfb-${tag}-desc.pid"
+  sig_f="$CALLS/pfb-${tag}-signals.log"
+  rm -f "$arm" "$leader_f" "$desc_f" "$sig_f" \
+    "$CALLS/pfb-${tag}.pass" "$CALLS/pfb-${tag}.fail" "$CALLS/pfb-${tag}.detail"
+  reset_calls
+  target=$(setup_target_repo "pfb${tag}" acme/widget)
+  prof="$ROOT/profiles/pfb-${tag}.profile"
+  write_profile "$prof" \
+    "version=1" \
+    "name=pfb-${tag}" \
+    "repo=$target" \
+    "slug=acme/widget" \
+    "gibson=$ROOT/gibson" \
+    "fleet_dir=$ROOT/fleet" \
+    "log_dir=$ROOT/logs" \
+    "runner=fake-runner" \
+    "lane=docs|620|docs/**|docs only"
+  REAL_GIT=$(command -v git)
+  sleep 300 &
+  unrelated=$!
+  cat > "$BIN/git" <<STUB
 #!/usr/bin/env bash
 for a in "\$@"; do
   if [[ "\$a" == "fetch" ]]; then
-    echo "\$\$" > "$CALLS/wtpfb-leader.pid"
-    : > "$CALLS/wtpfb-signals.log"
+    echo "\$\$" > "$leader_f"
+    : > "$sig_f"
     # Record TERM without exiting so KILL is still required after full grace.
     # Bare-KILL-only residual never writes TERM → sensor fails closed.
-    trap 'echo TERM >> "$CALLS/wtpfb-signals.log"' TERM
+    trap 'echo TERM >> "$sig_f"' TERM
     sleep 100 &
-    echo "\$!" > "$CALLS/wtpfb-desc.pid"
-    # Arm the parent-fallback sensor only after the TERM trap is installed.
-    : > "$PFB_ARM"
-    # Hang as leader until KILL (do not exit on TERM).
+    echo "\$!" > "$desc_f"
+    # Arm only after TERM trap is installed (preconditions forced after this).
+    : > "$arm"
     while true; do sleep 1; done
     exit 0
   fi
 done
 exec "$REAL_GIT" "\$@"
 STUB
-chmod +x "$BIN/git"
-export FLEET_PROFILE="$PROF"
-export GH_STUB_MODE=ok
-rm -f "$CALLS/wtpfb-leader.pid" "$CALLS/wtpfb-desc.pid" "$CALLS/wtpfb-signals.log" "$PFB_ARM"
-: > "$CALLS/launches.log"
-t0=$(date +%s)
-out=$(
-  env PATH="$BIN:$PATH" \
-    GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
-    RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
-    GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
-    DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
-    FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
-    FLEET_FETCH_TIMEOUT=30 \
-    FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK="$PFB_ARM" \
-    GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
-    "$FLEET" --start 2>&1
-) && bad "parent-fallback hang should fail closed: $out" || {
-  echo "$out" | grep -qiE 'exceeded wall-clock timeout \(30s\)|exceeded wall-clock timeout' \
-    && ok "parent-fallback returns timeout/124-derived fail-closed path" \
-    || bad "parent-fallback missing 124/timeout evidence: $out"
+  chmod +x "$BIN/git"
+  export FLEET_PROFILE="$prof"
+  export GH_STUB_MODE=ok
+  : > "$CALLS/launches.log"
+  t0=$(date +%s)
+  out=$(
+    env PATH="$BIN:$PATH" \
+      GIBSON="$GIBSON" FLEET_DIR="$FLEET_DIR" LOG_DIR="$LOG_DIR" \
+      RUNNER="fake-runner" REVIEWER_CMD="codex-stub review" RELEASE_CMD="claude-stub release" \
+      GH_BIN="$GH_BIN" LOOP_SH="$LOOP_SH" SLEEP_CMD=true \
+      DEADLINE_SECONDS=99 LOOP_LAUNCH_LOG="$LOOP_LAUNCH_LOG" \
+      FLEET_SYNC_LAUNCH=1 FLEET_NO_WATCHDOG=1 FLEET_SKIP_FETCH=0 \
+      FLEET_FETCH_TIMEOUT=30 \
+      FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK="${mode}:${arm}" \
+      GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$prof" \
+      "$fleet_bin" --start 2>&1
+  ) && rc_start=0 || rc_start=$?
+  t1=$(date +%s)
+  elapsed=$((t1 - t0))
+  if [[ $rc_start -eq 0 ]]; then
+    fail_reasons="${fail_reasons}expected_fail_closed;"
+  fi
+  if ! echo "$out" | grep -qiE 'exceeded wall-clock timeout \(30s\)|exceeded wall-clock timeout'; then
+    fail_reasons="${fail_reasons}missing_124_timeout;"
+  fi
+  if [[ $elapsed -lt 1 || $elapsed -gt 15 ]]; then
+    fail_reasons="${fail_reasons}grace_elapsed_${elapsed};"
+  fi
+  lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+  if [[ "$lc" != "0" ]]; then
+    fail_reasons="${fail_reasons}launched_${lc};"
+  fi
+  if [[ ! -f "$sig_f" ]] || ! grep -q '^TERM$' "$sig_f"; then
+    fail_reasons="${fail_reasons}no_TERM;"
+  fi
+  if [[ -f "$leader_f" ]]; then
+    leader=$(tr -d '[:space:]' < "$leader_f")
+    i=0
+    while [[ $i -lt 20 ]]; do
+      if ! kill -0 "$leader" 2>/dev/null; then break; fi
+      sleep 0.1 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+    if kill -0 "$leader" 2>/dev/null; then
+      fail_reasons="${fail_reasons}leader_alive;"
+      kill -KILL "$leader" 2>/dev/null || true
+    fi
+  else
+    fail_reasons="${fail_reasons}leader_pid_missing;"
+  fi
+  if [[ -f "$desc_f" ]]; then
+    desc=$(tr -d '[:space:]' < "$desc_f")
+    i=0
+    while [[ $i -lt 20 ]]; do
+      if ! kill -0 "$desc" 2>/dev/null; then break; fi
+      sleep 0.1 2>/dev/null || sleep 1
+      i=$((i + 1))
+    done
+    if kill -0 "$desc" 2>/dev/null; then
+      fail_reasons="${fail_reasons}desc_alive;"
+      kill -KILL "$desc" 2>/dev/null || true
+    fi
+  else
+    fail_reasons="${fail_reasons}desc_pid_missing;"
+  fi
+  if kill -0 "$unrelated" 2>/dev/null; then
+    kill -TERM "$unrelated" 2>/dev/null || true
+    sleep 0.1 2>/dev/null || true
+    kill -KILL "$unrelated" 2>/dev/null || true
+  else
+    fail_reasons="${fail_reasons}unrelated_killed;"
+  fi
+  wait "$unrelated" 2>/dev/null || true
+  sleep 60 &
+  post_u=$!
+  if kill -0 "$post_u" 2>/dev/null; then
+    kill -TERM "$post_u" 2>/dev/null || true
+    sleep 0.1 2>/dev/null || true
+    kill -KILL "$post_u" 2>/dev/null || true
+  else
+    fail_reasons="${fail_reasons}post_reap_signal;"
+  fi
+  wait "$post_u" 2>/dev/null || true
+  rm -f "$BIN/git"
+  {
+    echo "mode=$mode tag=$tag elapsed=$elapsed lc=$lc rc_start=$rc_start"
+    echo "fail_reasons=${fail_reasons:-none}"
+    echo "out_tail=$(echo "$out" | tail -5 | tr '\n' ' ')"
+    echo "signals=$(cat "$sig_f" 2>/dev/null | tr '\n' ' ')"
+  } > "$CALLS/pfb-${tag}.detail"
+  if [[ -z "$fail_reasons" ]]; then
+    : > "$CALLS/pfb-${tag}.pass"
+    return 0
+  fi
+  printf '%s\n' "$fail_reasons" > "$CALLS/pfb-${tag}.fail"
+  return 1
 }
-t1=$(date +%s)
-elapsed=$((t1 - t0))
-# Full 1s grace after TERM; parent-forced path must not bare-KILL instantly.
-# Upper bound keeps the sensor fast (hook skips the 30s wall clock).
-if [[ $elapsed -ge 1 && $elapsed -le 15 ]]; then
-  ok "parent-fallback preserved full TERM grace (elapsed=${elapsed}s ∈ [1,15])"
+
+# --- date-branch sensor (production date ownership body) --------------------
+echo "wall-timeout parent-fallback DATE branch TERM→grace→KILL"
+if pfb_run_probe "$FLEET" date d1; then
+  ok "date-branch: timeout/124-derived refuse + grace∈[1,15] + TERM + cleanup + unrelated safe"
 else
-  bad "parent-fallback grace broken (elapsed=${elapsed}s; want ≥1 full grace, ≤15 bound)"
+  bad "date-branch sensor failed: $(cat "$CALLS/pfb-d1.fail" 2>/dev/null) detail=$(cat "$CALLS/pfb-d1.detail" 2>/dev/null)"
 fi
-lc=$(echo "$(launch_count)" | tr -d '[:space:]')
-[[ "$lc" == "0" ]] && ok "parent-fallback launched zero" || bad "parent-fallback launched $lc"
-# TERM must be observed before process death (KILL without prior TERM fails).
-if [[ -f "$CALLS/wtpfb-signals.log" ]] && grep -q '^TERM$' "$CALLS/wtpfb-signals.log"; then
-  ok "parent-fallback observed TERM before KILL/exit"
+# Per-check evidence lines (same probe; re-read detail for explicit receipts).
+if [[ -f "$CALLS/pfb-d1.pass" ]]; then
+  ok "date-branch observed exact-identity TERM before KILL/exit"
+  ok "date-branch full 1s grace precedes KILL (elapsed bound proven in probe)"
+  ok "date-branch descendant cleaned; unrelated + post-reap unrelated survived"
 else
-  bad "parent-fallback never sent TERM (bare-KILL residual?): log=$(cat "$CALLS/wtpfb-signals.log" 2>/dev/null || echo missing)"
+  bad "date-branch missing pass receipt"
 fi
-# Leader and descendant must be cleaned; leader unreaped only during signaling
-# (by the time we observe, wait has reaped — both must be gone).
-if [[ -f "$CALLS/wtpfb-leader.pid" ]]; then
-  leader=$(tr -d '[:space:]' < "$CALLS/wtpfb-leader.pid")
-  i=0
-  while [[ $i -lt 20 ]]; do
-    if ! kill -0 "$leader" 2>/dev/null; then break; fi
-    sleep 0.1 2>/dev/null || sleep 1
-    i=$((i + 1))
-  done
-  if kill -0 "$leader" 2>/dev/null; then
-    bad "parent-fallback leader $leader still alive after residual"
-    kill -KILL "$leader" 2>/dev/null || true
+
+# --- tick-branch sensor (production tick ownership body) --------------------
+echo "wall-timeout parent-fallback TICK branch TERM→grace→KILL"
+if pfb_run_probe "$FLEET" tick t1; then
+  ok "tick-branch: timeout/124-derived refuse + grace∈[1,15] + TERM + cleanup + unrelated safe"
+else
+  bad "tick-branch sensor failed: $(cat "$CALLS/pfb-t1.fail" 2>/dev/null) detail=$(cat "$CALLS/pfb-t1.detail" 2>/dev/null)"
+fi
+if [[ -f "$CALLS/pfb-t1.pass" ]]; then
+  ok "tick-branch observed exact-identity TERM before KILL/exit"
+  ok "tick-branch full 1s grace precedes KILL (elapsed bound proven in probe)"
+  ok "tick-branch descendant cleaned; unrelated + post-reap unrelated survived"
+else
+  bad "tick-branch missing pass receipt"
+fi
+
+# Structural: real date + tick branches set parent_forced; hook forces preconditions only.
+if grep -n 'parent_forced=1' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'pfb_precond' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'date:?\*|tick:?\*' "$FLEET" >/dev/null 2>&1; then
+  ok "parent-fallback structure: parent_forced ownership + precondition-only hook"
+else
+  bad "parent-fallback structure: missing parent_forced or precondition hook"
+fi
+# Hook body (code path using ${...:-}) must not write timeout or set parent_forced.
+if awk '
+  BEGIN { failed=0; seen=0; boundary=0 }
+  /FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK:-\}/ {in_hook=1}
+  in_hook {
+    if ($0 ~ /parent_forced=1/) { failed=1; exit }
+    if ($0 ~ /printf .timeout/) { failed=1; exit }
+    if ($0 ~ /pfb_precond=1/) seen=1
+    if (seen && $0 ~ /status_file/ && $0 ~ /timeout/) { boundary=1; exit }
+  }
+  END { exit (failed || !seen || !boundary ? 1 : 0) }
+' "$FLEET"; then
+  ok "parent-fallback hook is precondition-only (no timeout write / parent_forced)"
+else
+  bad "parent-fallback hook still writes timeout or sets parent_forced"
+fi
+
+# --- mutation receipt 1: neutralize date-branch parent_forced=1 -------------
+echo "parent-fallback DATE mutation: sensor must fail without date parent_forced"
+MUT_DATE="$ROOT/mut-loop-fleet-pfb-date.sh"
+cp "$FLEET" "$MUT_DATE"
+if ! python3 - "$MUT_DATE" <<'PY'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+# Unique date-branch anchor: wall-clock comment + parent_forced=1 in that arm.
+old = """        # Wall clock elapsed from parent view — treat as timeout if status
+        # not yet written (watcher race). Parent-owned write means residual
+        # must deliver TERM → grace → KILL (watcher may exit on the flag).
+        if [[ -f \"$status_file\" ]] && grep -q '^timeout$' \"$status_file\" 2>/dev/null; then
+          timed_out=1
+        elif kill -0 \"$pid\" 2>/dev/null; then
+          printf 'timeout\\n' > \"$status_file\" 2>/dev/null || true
+          parent_forced=1
+          timed_out=1
+        fi"""
+new = """        # Wall clock elapsed from parent view — treat as timeout if status
+        # not yet written (watcher race). Parent-owned write means residual
+        # must deliver TERM → grace → KILL (watcher may exit on the flag).
+        if [[ -f \"$status_file\" ]] && grep -q '^timeout$' \"$status_file\" 2>/dev/null; then
+          timed_out=1
+        elif kill -0 \"$pid\" 2>/dev/null; then
+          printf 'timeout\\n' > \"$status_file\" 2>/dev/null || true
+          parent_forced=0
+          timed_out=1
+        fi"""
+if old not in src:
+    open(path + ".mutation-miss", "w").write("date-branch parent_forced=1 anchor not found\n")
+    sys.exit(0)
+open(path, "w").write(src.replace(old, new, 1))
+PY
+then
+  bad "date mutation harness could not patch date-branch body"
+fi
+chmod +x "$MUT_DATE"
+if [[ -f "$MUT_DATE.mutation-miss" ]]; then
+  bad "date mutation fail-closed: $(cat "$MUT_DATE.mutation-miss")"
+else
+  # Behavioral: date sensor against mutated copy must NOT fully pass.
+  if pfb_run_probe "$MUT_DATE" date md1; then
+    bad "date mutation false-green: sensor still passed without date parent_forced=1"
   else
-    ok "parent-fallback leader $leader cleaned (pre-reap signal path completed)"
+    # Must fail on TERM (or grace) — not merely launch noise.
+    reasons=$(cat "$CALLS/pfb-md1.fail" 2>/dev/null || echo missing)
+    if echo "$reasons" | grep -qE 'no_TERM|grace_elapsed_0'; then
+      ok "date mutation receipt: sensor fails without date-branch parent_forced (reasons=$reasons)"
+    else
+      bad "date mutation failed for unexpected reasons (want no_TERM/grace): $reasons detail=$(cat "$CALLS/pfb-md1.detail" 2>/dev/null)"
+    fi
   fi
-else
-  bad "parent-fallback leader pid file missing — stub may not have run: $out"
 fi
-if [[ -f "$CALLS/wtpfb-desc.pid" ]]; then
-  desc=$(tr -d '[:space:]' < "$CALLS/wtpfb-desc.pid")
-  i=0
-  while [[ $i -lt 20 ]]; do
-    if ! kill -0 "$desc" 2>/dev/null; then break; fi
-    sleep 0.1 2>/dev/null || sleep 1
-    i=$((i + 1))
-  done
-  if kill -0 "$desc" 2>/dev/null; then
-    bad "parent-fallback descendant $desc still alive"
-    kill -KILL "$desc" 2>/dev/null || true
+rm -f "$MUT_DATE" "$MUT_DATE.mutation-miss"
+
+# --- mutation receipt 2: neutralize tick-branch parent_forced=1 -------------
+echo "parent-fallback TICK mutation: sensor must fail without tick parent_forced"
+MUT_TICK="$ROOT/mut-loop-fleet-pfb-tick.sh"
+cp "$FLEET" "$MUT_TICK"
+if ! python3 - "$MUT_TICK" <<'PY'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+# Unique tick-branch anchor: ownership comment + parent_forced=1 in else arm.
+old = """        # Only claim parent ownership when we are the writer; if the watcher
+        # already flagged timeout, leave residual as KILL-only after its grace.
+        if [[ -f \"$status_file\" ]] && grep -q '^timeout$' \"$status_file\" 2>/dev/null; then
+          timed_out=1
+        else
+          printf 'timeout\\n' > \"$status_file\" 2>/dev/null || true
+          parent_forced=1
+          timed_out=1
+        fi"""
+new = """        # Only claim parent ownership when we are the writer; if the watcher
+        # already flagged timeout, leave residual as KILL-only after its grace.
+        if [[ -f \"$status_file\" ]] && grep -q '^timeout$' \"$status_file\" 2>/dev/null; then
+          timed_out=1
+        else
+          printf 'timeout\\n' > \"$status_file\" 2>/dev/null || true
+          parent_forced=0
+          timed_out=1
+        fi"""
+if old not in src:
+    open(path + ".mutation-miss", "w").write("tick-branch parent_forced=1 anchor not found\n")
+    sys.exit(0)
+open(path, "w").write(src.replace(old, new, 1))
+PY
+then
+  bad "tick mutation harness could not patch tick-branch body"
+fi
+chmod +x "$MUT_TICK"
+if [[ -f "$MUT_TICK.mutation-miss" ]]; then
+  bad "tick mutation fail-closed: $(cat "$MUT_TICK.mutation-miss")"
+else
+  if pfb_run_probe "$MUT_TICK" tick mt1; then
+    bad "tick mutation false-green: sensor still passed without tick parent_forced=1"
   else
-    ok "parent-fallback exact-PGID cleaned descendant $desc"
+    reasons=$(cat "$CALLS/pfb-mt1.fail" 2>/dev/null || echo missing)
+    if echo "$reasons" | grep -qE 'no_TERM|grace_elapsed_0'; then
+      ok "tick mutation receipt: sensor fails without tick-branch parent_forced (reasons=$reasons)"
+    else
+      bad "tick mutation failed for unexpected reasons (want no_TERM/grace): $reasons detail=$(cat "$CALLS/pfb-mt1.detail" 2>/dev/null)"
+    fi
   fi
-else
-  bad "parent-fallback descendant pid file missing — stub may not have run"
 fi
-if kill -0 "$PFB_UNRELATED" 2>/dev/null; then
-  ok "parent-fallback left unrelated PID $PFB_UNRELATED untouched"
-  kill -TERM "$PFB_UNRELATED" 2>/dev/null || true
-  sleep 0.1 2>/dev/null || true
-  kill -KILL "$PFB_UNRELATED" 2>/dev/null || true
-else
-  bad "parent-fallback killed unrelated PID $PFB_UNRELATED"
-fi
-# Post-reap group signal would risk recycled PIDs: unrelated after return must live.
-sleep 60 &
-PFB_POST=$!
-if kill -0 "$PFB_POST" 2>/dev/null; then
-  ok "parent-fallback post-run unrelated PID $PFB_POST untouched (no post-reap group signal)"
-  kill -TERM "$PFB_POST" 2>/dev/null || true
-  sleep 0.1 2>/dev/null || true
-  kill -KILL "$PFB_POST" 2>/dev/null || true
-else
-  bad "parent-fallback post-run unrelated PID was killed"
-fi
-# Structural: parent_forced residual owns TERM when parent wrote the flag.
-if grep -n 'parent_forced' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$FLEET" >/dev/null 2>&1; then
-  ok "parent-fallback structure: parent_forced + sensor hook present"
-else
-  bad "parent-fallback structure: missing parent_forced ownership tracking"
-fi
-rm -f "$BIN/git"
+rm -f "$MUT_TICK" "$MUT_TICK.mutation-miss"
 
 # --- CR: docs contract sensors (gh prereq, MD018, bypassPermissions warn) --
 echo "docs contract sensors"
