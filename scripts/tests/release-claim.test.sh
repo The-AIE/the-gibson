@@ -2834,6 +2834,13 @@ case "$1" in
     else
       cat "${GH_PR_ALL_TSV:-/dev/null}" 2>/dev/null
     fi
+    # Optional non-authoritative diagnostic on the terminal reader path.
+    # release-claim.sh must capture this on stderr separately from evidence
+    # rows on stdout — a successful warning must never become a second row
+    # (#153 stream-separation P2). Empty is normal; nonempty is benign.
+    if [[ -n "${GH_TERMINAL_STDERR:-}" ]]; then
+      printf '%s\n' "$GH_TERMINAL_STDERR" >&2
+    fi
     exit "${GH_PR_ALL_EXIT:-${GH_PR_LIST_EXIT:-0}}"
     ;;
   pr)
@@ -2886,6 +2893,7 @@ export GH_LOG="$ROOT/term/gh.log"
 export GH_LABELS="agent-claimed,tier-b"
 unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
 unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
+unset GH_TERMINAL_STDERR
 rm -f "$GH_STATE" "$GH_LOG"
 
 # Probed in EXACTLY the configuration that used to hang the whole suite: an
@@ -4962,6 +4970,108 @@ contains "names the --claim-id requirement" "$out" "pass --claim-id too"
 out=$(cd "$ROOT/twogen2/canon" && "$RC" 821 --claim-id issue-821-wrong-pr --pr abc --repo acme/app 2>&1); rc=$?
 check    "--pr with a non-numeric value exits 1" "$rc" "1"
 contains "names the numeric requirement"         "$out" "must be a pull-request number"
+
+# ===========================================================================
+# #153 stream separation · terminal-evidence stdout/stderr must not mix
+# ===========================================================================
+# A successful pr-claims.sh find-terminal[-pr] can write one valid evidence
+# row on stdout and a benign warning on stderr (exit 0). Merging with 2>&1
+# made grep -c count the warning as a second evidence row, refuse as
+# ambiguous, and leave the legitimate worktree stranded. Only stdout is
+# authoritative evidence; successful stderr must not alter row count, fields,
+# or release behaviour. Nonzero-exit stderr enriches the failure diagnostic.
+echo "#153 stream separation · benign stderr is not a second evidence row (unbound find-terminal)"
+STREAM_UB_SHA=$(term_fixture streamub 850 stream-unbound)
+export GH_PR_ALL_TSV="$ROOT/streamub/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/streamub/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSED_NUMBERS="$ROOT/streamub/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/streamub/gh-state"
+export GH_LOG="$ROOT/streamub/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS
+printf '850\tissue-850-stream-unbound\tlib/stream/**\t850\tfeat/850-stream-unbound\t%s\thttps://github.com/acme/app/pull/850\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$STREAM_UB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+export GH_TERMINAL_STDERR="benign terminal reader warning"
+out=$(cd "$ROOT/streamub/canon" && "$RC" 850 --claim-id issue-850-stream-unbound --repo acme/app 2>&1); rc=$?
+check    "unbound find-terminal + benign stderr exits 0" "$rc" "0"
+contains "unbound stream-sep success receipt"            "$out" "OK — claim released for issue 850"
+contains "unbound stream-sep names the terminal PR"      "$out" "PR #850"
+contains "unbound stream-sep verified the single row"    "$out" "verified terminal PR-body claim #850"
+lacks    "unbound stream-sep is not ambiguous"           "$out" "ambiguous"
+lacks    "unbound stream-sep warning is not a second row" "$out" "multiple PRs matched"
+# Parsed fields came from the single stdout row, not the stderr warning.
+contains "unbound stream-sep MERGED state from stdout row" "$out" "(MERGED)"
+[[ ! -d "$ROOT/streamub/wt-850-stream-unbound" ]] &&
+  ok "unbound stream-sep removed the exact worktree" ||
+  bad "unbound stream-sep left the worktree (stderr was counted as a second row?)"
+[[ -z "$(git -C "$ROOT/streamub/canon" branch --list 'feat/850-stream-unbound')" ]] &&
+  ok "unbound stream-sep removed the local branch" ||
+  bad "unbound stream-sep left the local branch"
+unset GH_TERMINAL_STDERR
+
+echo "#153 stream separation · benign stderr is not a second evidence row (bound find-terminal-pr)"
+STREAM_BD_SHA=$(term_fixture streambd 851 stream-bound)
+export GH_PR_ALL_TSV="$ROOT/streambd/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/streambd/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSED_NUMBERS="$ROOT/streambd/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/streambd/gh-state"
+export GH_LOG="$ROOT/streambd/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS
+printf '851\tissue-851-stream-bound\tlib/stream/**\t851\tfeat/851-stream-bound\t%s\thttps://github.com/acme/app/pull/851\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$STREAM_BD_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+export GH_TERMINAL_STDERR="benign terminal reader warning"
+out=$(cd "$ROOT/streambd/canon" && "$RC" 851 --claim-id issue-851-stream-bound --pr 851 --repo acme/app 2>&1); rc=$?
+check    "bound find-terminal-pr + benign stderr exits 0" "$rc" "0"
+contains "bound stream-sep success receipt"               "$out" "OK — claim released for issue 851"
+contains "bound stream-sep names the terminal PR"         "$out" "PR #851"
+contains "bound stream-sep verified the single row"       "$out" "verified terminal PR-body claim #851"
+lacks    "bound stream-sep is not ambiguous"              "$out" "ambiguous"
+lacks    "bound stream-sep warning is not a second row"   "$out" "multiple PRs matched"
+contains "bound stream-sep MERGED state from stdout row"  "$out" "(MERGED)"
+[[ ! -d "$ROOT/streambd/wt-851-stream-bound" ]] &&
+  ok "bound stream-sep removed the exact worktree" ||
+  bad "bound stream-sep left the worktree (stderr was counted as a second row?)"
+[[ -z "$(git -C "$ROOT/streambd/canon" branch --list 'feat/851-stream-bound')" ]] &&
+  ok "bound stream-sep removed the local branch" ||
+  bad "bound stream-sep left the local branch"
+unset GH_TERMINAL_STDERR
+
+echo "#153 stream separation · nonzero terminal reader still refuses and keeps stderr in diagnostic"
+STREAM_NZ_SHA=$(term_fixture streamnz 852 stream-nonzero)
+export GH_PR_ALL_TSV="$ROOT/streamnz/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/streamnz/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_PR_CLOSED_NUMBERS="$ROOT/streamnz/closed-numbers"
+: > "$GH_PR_CLOSED_NUMBERS"
+export GH_STATE="$ROOT/streamnz/gh-state"
+export GH_LOG="$ROOT/streamnz/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+unset GH_PR_LIST_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS
+printf '852\tissue-852-stream-nonzero\tlib/stream/**\t852\tfeat/852-stream-nonzero\t%s\thttps://github.com/acme/app/pull/852\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$STREAM_NZ_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+export GH_PR_ALL_EXIT=1
+export GH_TERMINAL_STDERR="terminal reader blew up: auth expired"
+out=$(cd "$ROOT/streamnz/canon" && "$RC" 852 --claim-id issue-852-stream-nonzero --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "nonzero reader + stderr refuses mutation" ||
+  bad "nonzero reader + stderr exited 0: $out"
+contains "nonzero reader names cannot verify"              "$out" "cannot verify"
+contains "nonzero reader keeps useful stderr in diagnostic" "$out" "terminal reader blew up: auth expired"
+lacks    "nonzero reader never reports success"            "$out" "OK — claim released"
+[[ -d "$ROOT/streamnz/wt-852-stream-nonzero" ]] &&
+  ok "nonzero reader: worktree untouched" || bad "nonzero reader: worktree was removed"
+[[ -n "$(git -C "$ROOT/streamnz/canon" branch --list 'feat/852-stream-nonzero')" ]] &&
+  ok "nonzero reader: local branch untouched" || bad "nonzero reader: local branch was removed"
+# Reset every fixture knob so later tests cannot inherit warning behaviour.
+unset GH_PR_ALL_EXIT GH_TERMINAL_STDERR
+unset GH_PR_LIST_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS
 
 # ===========================================================================
 # #153 review round 7 — release-test fake gh api handlers require the full

@@ -2274,12 +2274,14 @@ echo "#153 r11 · just-over-boundary PR identity (MAX_SAFE_INT+1 exact match) is
 # MAX_SAFE_INT is 9223372036854775807; +1 is still 19 digits and matches
 # ^[1-9][0-9]*$ but fails the lexical safe-range compare. No shell arithmetic
 # on this value anywhere in the fixture or production path.
+# Claim id is a valid issue-bound identity (issue-8-over-bound) so this fixture
+# rejects solely on the PR-number safe-range contract — not a malformed claim id.
 OVER_BOUND="9223372036854775808"
 cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
 #!/usr/bin/env bash
 case "\${1:-}" in
   list)
-    printf '%s\tissue-over-bound\tlib/**\tfeat/over-bound\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
+    printf '%s\tissue-8-over-bound\tlib/**\tfeat/8-over-bound\thttps://github.com/acme/app/pull/%s\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n' \\
       '$OVER_BOUND' '$OVER_BOUND'
     exit 0
     ;;

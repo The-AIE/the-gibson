@@ -779,9 +779,35 @@ terminal_fatal() {
   TERMINAL_FAIL_REASON="$1"
   return 2
 }
+
+# Capture stdout and stderr of an exact argv separately, preserving exit status.
+# Only stdout is authoritative data for the caller; stderr is diagnostics.
+# Bash 3.2-safe: no process substitution, no eval, no pipeline status games.
+# Temp files are always unlinked before every return (success or any failure).
+# Sets _RC_CAP_STDOUT / _RC_CAP_STDERR for the caller to read after return.
+_rc_capture_streams() {
+  local outf errf rc=0
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
+  outf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-out.XXXXXX") || return 127
+  errf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-err.XXXXXX") || {
+    rm -f "$outf"
+    return 127
+  }
+  # Explicit argv only — never eval. "$@" is the full reader invocation.
+  "$@" >"$outf" 2>"$errf" || rc=$?
+  # Read both streams before unlinking so no path leaves files behind.
+  _RC_CAP_STDOUT=$(cat "$outf" 2>/dev/null || true)
+  _RC_CAP_STDERR=$(cat "$errf" 2>/dev/null || true)
+  rm -f "$outf" "$errf"
+  return "$rc"
+}
+
 try_terminal_pr_body_release() {
-  local id="$1" want_pr="${2:-}" rows count
+  local id="$1" want_pr="${2:-}" rows count reader_rc=0
   TERMINAL_FAIL_REASON=""
+  _RC_CAP_STDOUT=""
+  _RC_CAP_STDERR=""
   local t_number t_claim t_scope t_issue t_head t_head_sha t_url t_state t_cross t_merge_sha t_base_repo t_created t_updated
   if [[ -z "${PR_REPO:-}" || ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
     return 1
@@ -797,21 +823,38 @@ try_terminal_pr_body_release() {
     warn "not consulting terminal PR-body evidence for '$id': $BINDING_REASON"
     return 1
   fi
+  # Stream separation (#153 review P2): pr-claims.sh may write benign warnings
+  # to stderr on a successful lookup. Merging stderr into the captured evidence
+  # (2>&1) made one valid row + one warning look like two evidence rows and
+  # stranded a legitimate worktree. Capture streams separately; only stdout is
+  # parsed/counted. Successful stderr is ignored for release behaviour.
+  # Nonzero-exit stderr enriches the existing failure diagnostic only.
   if [[ -n "$want_pr" ]]; then
     # Bound lookup (#153 review P2): the caller already knows exactly which PR
     # it is releasing, so ask about that PR instead of asking the globally
     # ambiguous "which terminal PR carries this id?" — a legitimately reused
     # claim id has more than one.
-    if ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal-pr "$PR_REPO" "$id" "$want_pr" 2>&1); then
-      terminal_fatal "cannot verify terminal PR-body claim evidence for '$id' on PR #$want_pr in $PR_REPO (gh query failed) — refuse mutation: $rows" || return 2
+    reader_rc=0
+    _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" find-terminal-pr "$PR_REPO" "$id" "$want_pr" || reader_rc=$?
+    rows="$_RC_CAP_STDOUT"
+    if [[ "$reader_rc" -ne 0 ]]; then
+      terminal_fatal "cannot verify terminal PR-body claim evidence for '$id' on PR #$want_pr in $PR_REPO (gh query failed) — refuse mutation: ${_RC_CAP_STDERR}" || return 2
     fi
-  elif ! rows=$("$SCRIPT_DIR/pr-claims.sh" find-terminal "$PR_REPO" "$id" 2>&1); then
-    terminal_fatal "cannot verify terminal PR-body claim evidence for '$id' on $PR_REPO (gh query failed) — refuse mutation: $rows
+  else
+    reader_rc=0
+    _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" find-terminal "$PR_REPO" "$id" || reader_rc=$?
+    rows="$_RC_CAP_STDOUT"
+    if [[ "$reader_rc" -ne 0 ]]; then
+      terminal_fatal "cannot verify terminal PR-body claim evidence for '$id' on $PR_REPO (gh query failed) — refuse mutation: ${_RC_CAP_STDERR}
   If this claim id was released and later reused, more than one terminal PR carries it; name the exact one with --pr <number>." || return 2
+    fi
   fi
-  # grep -c (not wc -l): $rows came from command substitution, which strips
-  # the trailing newline, so a single-line result would otherwise undercount
-  # to 0 and a two-line result to 1 — wc -l counts newline characters, not lines.
+  # Successful stderr is non-authoritative; drop it so it cannot affect rows.
+  _RC_CAP_STDERR=""
+  # grep -c (not wc -l): $rows came from command substitution / file read,
+  # which strips the trailing newline, so a single-line result would otherwise
+  # undercount to 0 and a two-line result to 1 — wc -l counts newline
+  # characters, not lines.
   count=$(printf '%s' "$rows" | grep -c . || true)
   [[ "$count" -gt 0 ]] || return 1
   if [[ "$count" -gt 1 ]]; then
