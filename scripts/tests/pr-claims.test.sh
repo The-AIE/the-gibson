@@ -835,6 +835,53 @@ out=$("$PC" list-open-numbers 'not a repo' 2>&1); rc=$?
 check "a malformed repo exits 2" "$rc" "2"
 contains "documented in --help" "$("$PC" list acme/app --help 2>&1; "$PC" 2>&1)" "list-open-numbers"
 
+# ---------------------------------------------------------------------------
+# #153 freeze/revalidate P1 — find-open-pr bound open evidence
+# ---------------------------------------------------------------------------
+# open_pr_full: number body headRefName headRefOid url createdAt updatedAt isCross
+open_pr_full() {
+  printf '{"number":%s,"body":"%s","headRefName":"%s","headRefOid":"%s","url":"%s","createdAt":"%s","updatedAt":"%s","state":"OPEN","isCrossRepository":%s}' \
+    "$1" "$2" "$3" "$4" "$5" "${6:-2026-08-05T00:00:00Z}" "${7:-2026-08-06T00:00:00Z}" "${8:-false}"
+}
+HEX_A="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+echo "find-open-pr · exact claim + number + OPEN returns validated head SHA"
+stage "[$(open_pr_full 71 '- Active-work claim: issue-71-bound\n- Claim scope: lib/**\n- Issue: #71' 'feat/71-bound' "$HEX_A" 'https://github.com/acme/app/pull/71')]"
+out=$("$PC" find-open-pr acme/app issue-71-bound 71 2>&1); rc=$?
+check "find-open-pr exits 0" "$rc" "0"
+check "find-open-pr number"  "$(cut -f1 <<<"$out")" "71"
+check "find-open-pr claim"   "$(cut -f2 <<<"$out")" "issue-71-bound"
+check "find-open-pr issue"   "$(cut -f4 <<<"$out")" "71"
+check "find-open-pr head"    "$(cut -f5 <<<"$out")" "feat/71-bound"
+check "find-open-pr headSha" "$(cut -f6 <<<"$out")" "$HEX_A"
+check "find-open-pr state"   "$(cut -f8 <<<"$out")" "OPEN"
+check "find-open-pr cross"   "$(cut -f9 <<<"$out")" "false"
+check "find-open-pr base"    "$(cut -f10 <<<"$out")" "acme/app"
+
+echo "find-open-pr · wrong claim id yields empty (not another claim's row)"
+stage "[$(open_pr_full 72 '- Active-work claim: issue-72-other\n- Claim scope: lib/**\n- Issue: #72' 'feat/72-other' "$HEX_A" 'https://github.com/acme/app/pull/72')]"
+out=$("$PC" find-open-pr acme/app issue-72-wanted 72 2>&1); rc=$?
+check "wrong claim id exits 0 with empty" "$rc" "0"
+check "wrong claim id prints nothing" "$out" ""
+
+echo "find-open-pr · missing headRefOid fails closed"
+stage "[$(open_pr_full 73 '- Active-work claim: issue-73-nosha\n- Claim scope: lib/**\n- Issue: #73' 'feat/73-nosha' '' 'https://github.com/acme/app/pull/73')]"
+out=$("$PC" find-open-pr acme/app issue-73-nosha 73 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing headRefOid exits nonzero" || bad "missing headRefOid exited 0: $out"
+contains "names missing/not 40-hex head SHA" "$out" "not 40-hex"
+
+echo "find-open-pr · non-40-hex headRefOid fails closed"
+stage "[$(open_pr_full 74 '- Active-work claim: issue-74-badsha\n- Claim scope: lib/**\n- Issue: #74' 'feat/74-badsha' 'not-a-sha' 'https://github.com/acme/app/pull/74')]"
+out=$("$PC" find-open-pr acme/app issue-74-badsha 74 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "malformed headRefOid exits nonzero" || bad "malformed headRefOid exited 0: $out"
+
+echo "find-open-pr · usage refuses non-literal claim id / non-numeric PR"
+out=$("$PC" find-open-pr acme/app 'issue-75-.*' 75 2>&1); rc=$?
+check "regex claim id exits 2" "$rc" "2"
+out=$("$PC" find-open-pr acme/app issue-75-x abc 2>&1); rc=$?
+check "non-numeric PR exits 2" "$rc" "2"
+contains "documented in --help" "$("$PC" 2>&1)" "find-open-pr"
+
 echo
 echo "pr-claims.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -1996,11 +1996,12 @@ lacks    "URL number mismatch is not nothing to reap" "$out" "nothing to reap"
 check    "URL number mismatch never invoked release under --apply" \
   "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
 
-echo "#153 r9 · well-formed identity-bound stale row is still reaped under --apply"
+echo "#153 open-PR-always-protects · well-formed open PR row is PROTECTED regardless of age (never reaped)"
 cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
 #!/usr/bin/env bash
 case "${1:-}" in
   list)
+    # Stale timestamps on purpose: age must NOT license release of an open PR.
     printf '7\tissue-7-stale\tlib/**\tfeat/7-stale\thttps://github.com/acme/app/pull/7\t2026-08-01T00:00:00Z\t2026-08-01T00:00:00Z\tfalse\n'
     exit 0
     ;;
@@ -2009,6 +2010,7 @@ esac
 READER
 chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
 : > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
 out=$(
   PATH="$BIN:$PATH" \
   GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
@@ -2021,11 +2023,19 @@ out=$(
     "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
 )
 rc=$?
-check    "identity-bound stale row is accepted (exit 0)" "$rc" "0"
-contains "identity-bound stale row is classified STALE" "$out" "STALE PR #7 claim issue-7-stale"
-[[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]] \
-  && ok "identity-bound stale row invokes release under --apply" \
-  || bad "identity-bound stale row did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+check    "identity-bound open PR row is accepted (exit 0)" "$rc" "0"
+contains "identity-bound open PR row is protected" "$out" \
+  "PR #7 claim issue-7-stale is protected (open PR always protects)"
+lacks    "open PR row is never classified STALE" "$out" "STALE PR #"
+lacks    "open PR row never emits handoff comment language" "$out" "released by claim-reaper"
+check    "open PR row never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+# Journal must not record a reap for a protected open PR.
+if [[ -s "$state/journal.md" ]] && grep -qE 'issue-7-stale|REAP' "$state/journal.md" 2>/dev/null; then
+  bad "open PR protection mutated the journal: $(cat "$state/journal.md")"
+else
+  ok "open PR protection left the journal untouched"
+fi
 
 # ===========================================================================
 # #153 review-ten P1 — PR identities must be positive canonical decimals
@@ -2194,10 +2204,11 @@ out=$(
 )
 rc=$?
 check    "canonical PR #1000 is accepted (exit 0)" "$rc" "0"
-contains "canonical PR #1000 is classified STALE" "$out" "STALE PR #1000 claim issue-1000-stale"
-[[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]] \
-  && ok "canonical PR #1000 invokes release under --apply" \
-  || bad "canonical PR #1000 did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+contains "canonical PR #1000 open row is protected" "$out" \
+  "PR #1000 claim issue-1000-stale is protected (open PR always protects)"
+lacks    "canonical open PR #1000 is never STALE" "$out" "STALE PR #"
+check    "canonical open PR #1000 never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
 
 # ===========================================================================
 # #153 review-eleven P1 — PR identities must also be within safe integer range
@@ -2363,9 +2374,10 @@ lacks    "safe-row + overflow URL is not nothing to reap" "$out" "nothing to rea
 check    "safe-row + overflow URL never invoked release under --apply" \
   "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
 
-echo "#153 r11 · boundary-safe PR identity (MAX_SAFE_INT) remains accepted under --apply"
-# MAX_SAFE_INT itself must remain accepted. Represented only as a string literal
-# — no shell arithmetic on the PR number in the fixture or production path.
+echo "#153 r11 · boundary-safe PR identity (MAX_SAFE_INT) remains accepted and protected"
+# MAX_SAFE_INT itself must remain accepted as inventory identity. Represented
+# only as a string literal — no shell arithmetic on the PR number. Open PR
+# rows are protected (never reaped) regardless of age.
 MAX_SAFE="9223372036854775807"
 cat > "$ROOT/malinv/scripts/pr-claims.sh" <<READER
 #!/usr/bin/env bash
@@ -2394,11 +2406,11 @@ out=$(
 )
 rc=$?
 check    "boundary-safe MAX_SAFE_INT PR is accepted (exit 0)" "$rc" "0"
-contains "boundary-safe MAX_SAFE_INT PR is classified STALE" "$out" \
-  "STALE PR #${MAX_SAFE} claim issue-${MAX_SAFE}-stale"
-[[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]] \
-  && ok "boundary-safe MAX_SAFE_INT PR invokes release under --apply" \
-  || bad "boundary-safe MAX_SAFE_INT PR did not invoke release: $(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+contains "boundary-safe MAX_SAFE_INT open PR is protected" "$out" \
+  "PR #${MAX_SAFE} claim issue-${MAX_SAFE}-stale is protected (open PR always protects)"
+lacks    "boundary-safe open PR is never STALE" "$out" "STALE PR #"
+check    "boundary-safe open PR never invoked release under --apply" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
 
 # Source-contract tripwires: dual independent shape + safe-range requirements.
 # Same-shaped 0999/0999 or overflow/overflow URL-only mutations are unreachable
@@ -2429,6 +2441,176 @@ else
   bad "source contract: parse_canonical_positive_int call sites = ${_call_sites} (want ≥2 for row+URL)"
 fi
 unset _call_sites
+
+# ===========================================================================
+# #153 open-PR-always-protects P1 — sensors + mutation receipt
+# ===========================================================================
+echo "#153 open-PR-always-protects · old open PR yields protected, zero release-spy, zero journal, zero handoff"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    # Very old updatedAt relative to STALE_NOW — age alone used to license REAP.
+    printf '55\tissue-55-parked\tlib/**\tfeat/55-parked\thttps://github.com/acme/app/pull/55\t2020-01-01T00:00:00Z\t2020-01-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "old open PR protect exits 0" "$rc" "0"
+contains "old open PR names protected contract" "$out" "open PR always protects"
+contains "old open PR names the claim" "$out" "issue-55-parked"
+lacks    "old open PR is never STALE" "$out" "STALE PR #"
+check    "old open PR zero release-spy calls" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+if [[ -s "$state/journal.md" ]] && grep -qE 'issue-55-parked|REAP|COMPLETED' "$state/journal.md" 2>/dev/null; then
+  bad "old open PR protection mutated journal: $(cat "$state/journal.md")"
+else
+  ok "old open PR protection: zero journal mutation"
+fi
+lacks    "old open PR zero handoff comment" "$out" "claim-reaper released"
+
+echo "#153 open-PR-always-protects · mutation: restoring age-based STALE dispatch makes the sensor fail"
+# Mutate the sibling reaper copy only — never the real tree. Replace the
+# always-protect tail with the pre-fix age-based STALE + release path.
+_reaper_copy="$ROOT/malinv/scripts/claim-reaper.sh"
+cp "$REAPER" "$_reaper_copy"
+_mut_tmp="$_reaper_copy.mut"
+# Marker lines that bookend the always-protect body (unique in production).
+_start_pat='# Open PR-body claim: always protect. Never call release-claim.sh.'
+_end_pat='info "PR #$pr_number claim $pr_id is protected (open PR always protects)"'
+{
+  # Emit everything before the protect body.
+  awk -v start="$_start_pat" '
+    index($0, start) { exit }
+    { print }
+  ' "$_reaper_copy"
+  # Defect restored: age-based STALE dispatch (exact pre-fix behaviour).
+  # Reads timestamps from the already-validated row (production no longer
+  # binds them because open PRs never age out).
+  cat <<'DEFECT'
+    # MUTATED DEFECT: age-based STALE dispatch for open PR rows
+    pr_created=$(cut -f6 <<<"$_pr_line")
+    pr_updated=$(cut -f7 <<<"$_pr_line")
+    stamp="$pr_updated"
+    [[ -n "$stamp" ]] || stamp="$pr_created"
+    epoch=$(date -u -d "$stamp" +%s 2>/dev/null ||
+      date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$stamp" +%s 2>/dev/null || echo "")
+    if [[ -z "$epoch" || ! "$epoch" =~ ^[0-9]+$ ]]; then
+      warn "refusing PR #$pr_number claim '$pr_id' with unreadable activity timestamp"
+      continue
+    fi
+    age=$((NOW - epoch))
+    if [[ "$age" -lt "$STALE_SECONDS" ]]; then
+      info "PR #$pr_number claim $pr_id is protected (activity ${age}s ago)"
+      continue
+    fi
+    info "STALE PR #$pr_number claim $pr_id (activity ${age}s ago)"
+    if [[ "$APPLY" -eq 1 ]]; then
+      pr_issue=""
+      if [[ "$pr_id" =~ ^issue-([0-9]+)- ]]; then pr_issue="${BASH_REMATCH[1]}"; fi
+      if [[ -n "$pr_issue" ]]; then
+        "$RELEASE_CMD" "$pr_issue" --claim-id "$pr_id" --repo "$PR_REPO" \
+          --keep-branch --keep-worktree
+      fi
+    fi
+    continue
+DEFECT
+  # Emit everything after the protect info line.
+  awk -v end="$_end_pat" '
+    seen { print; next }
+    index($0, end) { seen=1; next }
+  ' "$_reaper_copy"
+} > "$_mut_tmp"
+mv "$_mut_tmp" "$_reaper_copy"
+chmod +x "$_reaper_copy"
+: > "$ROOT/malinv/spy.log"
+: > "$state/journal.md"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+# With the defect restored, the old open row must be classified STALE and
+# release-spy must fire — proving the committed sensor would go red.
+if echo "$out" | grep -qF 'STALE PR #55 claim issue-55-parked' && \
+   [[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]]; then
+  ok "mutation receipt: restoring age-based STALE reaps the open PR (sensor would fail)"
+else
+  bad "mutation receipt: defect restore did not re-enable STALE reaping: out=$out spy=$(cat "$ROOT/malinv/spy.log" 2>/dev/null)"
+fi
+# Restore production protect behaviour in the copy and re-green.
+cp "$REAPER" "$ROOT/malinv/scripts/claim-reaper.sh"
+chmod +x "$ROOT/malinv/scripts/claim-reaper.sh"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+contains "re-green: open PR protected again" "$out" "open PR always protects"
+check    "re-green: zero release-spy" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
+unset _reaper_copy _mut_tmp _start_pat _end_pat
+
+echo "#153 open-PR-always-protects · namespaced open PR id is protected (not malformed)"
+cat > "$ROOT/malinv/scripts/pr-claims.sh" <<'READER'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list)
+    printf '66\tissue-template-66-ns\tlib/**\tfeat/template-66-ns\thttps://github.com/acme/app/pull/66\t2020-01-01T00:00:00Z\t2020-01-01T00:00:00Z\tfalse\n'
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+chmod +x "$ROOT/malinv/scripts/pr-claims.sh"
+: > "$ROOT/malinv/spy.log"
+out=$(
+  PATH="$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/malinv/canon" \
+  GIBSON_REAPER_STATE_DIR="$state" \
+  GIBSON_REAPER_JOURNAL="$state/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$spy_release" \
+  SPY_LOG="$ROOT/malinv/spy.log" \
+    "$ROOT/malinv/scripts/claim-reaper.sh" --repo acme/app --apply 2>&1
+)
+rc=$?
+check    "namespaced open PR exits 0" "$rc" "0"
+contains "namespaced open PR is protected" "$out" \
+  "PR #66 claim issue-template-66-ns is protected (open PR always protects)"
+lacks    "namespaced open PR is not refused as malformed" "$out" "refusing malformed PR claim id"
+check    "namespaced open PR zero release-spy" \
+  "$(grep -c . "$ROOT/malinv/spy.log" 2>/dev/null || true)" "0"
 
 # ---------------------------------------------------------------------------
 echo

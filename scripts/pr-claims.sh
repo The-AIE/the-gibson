@@ -10,6 +10,7 @@ USAGE
   pr-claims.sh list <owner/repo>
   pr-claims.sh list-open-numbers <owner/repo>
   pr-claims.sh find <owner/repo> <claim-id>
+  pr-claims.sh find-open-pr <owner/repo> <claim-id> <pull-request-number>
   pr-claims.sh find-terminal <owner/repo> <claim-id>
   pr-claims.sh find-terminal-pr <owner/repo> <claim-id> <pull-request-number>
   pr-claims.sh close <owner/repo> <pull-request-number>
@@ -28,6 +29,26 @@ repository. The column is `true` or `false` and nothing else — GraphQL's
 `isCrossRepository` is validated as a real boolean before it is stringified, so
 a null/missing/renamed field poisons the whole command instead of being read as
 "same repository".
+
+`find-open-pr <claim-id> <number>` is the BOUND open-claim evidence read
+(#153 review freeze/revalidate P1). `list` inventories who holds what but does
+not carry `headRefOid`; closing an open PR without freezing that exact head
+SHA lets a concurrent push advance the branch between inventory and close, so
+post-close terminal cleanup can delete worktree/branches against the *new*
+SHA. `find-open-pr` answers "is OPEN PR #<number> exact evidence for this
+claim id right now?" with a fully validated row:
+
+  number, claim id, scope, issue, head branch, head SHA, URL, state (OPEN),
+  is_cross_repository, base repository (from the PR's own URL), created_at,
+  updated_at
+
+It selects on exact claim marker AND exact PR number AND OPEN state, then
+requires the same shape contract as `list` plus a real 40-hex head SHA and
+base-repository identity re-derived from the PR URL. A missing, closed,
+mismatched, cross-repo-unproven, or unreadable PR yields no row (or nonzero
+exit) rather than a partial answer. Callers freeze the head SHA from this
+row, re-read immediately before `gh pr close`, and refuse if any identity
+moved.
 
 `list-open-numbers` answers a DIFFERENT question from `list`, and the
 difference is the whole point (#153 review round 4). `list` is the claim
@@ -295,6 +316,113 @@ list_open_pr_numbers() {
       | (.number | tostring)'
 }
 
+# Bound OPEN PR claim evidence for exact claim id $1 and exact PR number $2.
+# Both args must already have passed shape checks (literal claim id + bare
+# decimal number): they are interpolated into the jq program (gh's --jq has
+# no --arg). Candidate-first on exact claim marker + exact number + OPEN
+# state; every field below is then validated in full. Emits one fully
+# validated TSV row or empty success; gh/jq/pagination/validation failure
+# exits nonzero via the caller's capture.
+list_open_claim_evidence() {
+  local want="$1" num="$2"
+  gh api graphql --paginate \
+    -f query='
+      query openPrClaimEvidence($owner: String!, $name: String!, $endCursor: String) {
+        repository(owner: $owner, name: $name) {
+          pullRequests(first: 100, after: $endCursor, states: [OPEN]) {
+            nodes {
+              number
+              body
+              headRefName
+              headRefOid
+              url
+              createdAt
+              updatedAt
+              state
+              isCrossRepository
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      }' \
+    -f owner="$REPO_OWNER" -f name="$REPO_NAME" \
+    --jq '
+      .data.repository.pullRequests.nodes[]
+      | select(.state == "OPEN")
+      | select(.number == '"$num"')
+      | (.body // "") as $body
+      | ($body | split("\n") | map(select(startswith("- Active-work claim: ")))) as $claimLines
+      | ($claimLines | map(sub("^- Active-work claim: "; ""))) as $claimIds
+      | if ($claimIds | index("'"$want"'")) == null then empty else
+        (if ($claimLines | length) > 1 then
+           error("duplicate Active-work claim marker(s) in PR #\(.number) body (\($claimLines|length) found)")
+         else . end)
+        | ($claimLines[0] | sub("^- Active-work claim: "; "")) as $claim
+        | (if ($claim == "") then error("PR #\(.number): empty Active-work claim id") else . end)
+        | ($body | split("\n") | map(select(startswith("- Claim scope: ")))) as $scopeLines
+        | (if ($scopeLines | length) != 1 then
+             error("PR #\(.number): expected exactly one Claim scope marker, found \($scopeLines|length)")
+           else ($scopeLines[0] | sub("^- Claim scope: "; "")) end) as $scope
+        | (if ($scope == "") then error("PR #\(.number): Claim scope marker is empty") else . end)
+        | ($body | split("\n") | map(select(startswith("- Issue: #")))) as $issueLines
+        | (if ($issueLines | length) != 1 then
+             error("PR #\(.number): expected exactly one Issue marker, found \($issueLines|length)")
+           else ($issueLines[0] | sub("^- Issue: #"; "")) end) as $issueNum
+        | (if ($issueNum | test("^[0-9]+$") | not) then
+             error("PR #\(.number): malformed Issue marker '"'"'\($issueNum)'"'"'")
+           else . end)
+        | (if ($claim | test("^issue-([A-Za-z][A-Za-z0-9]*-)?" + $issueNum + "-[A-Za-z0-9-]+$") | not) then
+             error("PR #\(.number): claim id '"'"'\($claim)'"'"' is inconsistent with Issue marker #\($issueNum)")
+           else . end)
+        | (if ((.headRefName // "") == "") or ((.headRefName | test("^[A-Za-z0-9._/-]+$")) | not) then
+             error("PR #\(.number): unsafe/empty head branch '"'"'\(.headRefName // "")'"'"'")
+           else . end)
+        | (if (.number | type) != "number" then
+             error("PR #\(.number // "?"): PR number is not numeric")
+           else . end)
+        | (if ((.headRefOid // "") | test("^[0-9a-f]{40}$") | not) then
+             error("PR #\(.number): head SHA (headRefOid) is missing or not 40-hex '"'"'\(.headRefOid // "")'"'"'")
+           else . end)
+        | ((try (.url | capture("^https://github\\.com/(?<repo>[^/]+/[^/]+)/pull/(?<num>[0-9]+)$")) catch null)) as $urlCap
+        | (if ($urlCap == null) then
+             error("PR #\(.number): cannot parse canonical PR URL \(.url)")
+           else . end)
+        | (if ($urlCap.repo != "'"$REPO"'") then
+             error("PR #\(.number): PR URL repository (\($urlCap.repo)) does not match queried repository ('"$REPO"')")
+           else . end)
+        | (if (($urlCap.num | tonumber) != .number) then
+             error("PR #\(.number): PR URL pull-number (\($urlCap.num)) does not match PR number")
+           else . end)
+        | (if ((.createdAt // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$") | not) then
+             error("PR #\(.number): created timestamp is not ISO-8601 UTC '"'"'\(.createdAt // "")'"'"'")
+           else . end)
+        | (if ((.updatedAt // "") | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$") | not) then
+             error("PR #\(.number): updated timestamp is not ISO-8601 UTC '"'"'\(.updatedAt // "")'"'"'")
+           else . end)
+        | (if (.isCrossRepository | type) != "boolean" then
+             error("PR #\(.number): isCrossRepository is missing or not a boolean '"'"'\(.isCrossRepository // "null")'"'"' — cannot prove repository identity")
+           else . end)
+        | (if (.state != "OPEN") then
+             error("PR #\(.number): expected OPEN state for bound open evidence, got \(.state)")
+           else . end)
+        | [
+            (.number | tostring),
+            $claim,
+            $scope,
+            $issueNum,
+            .headRefName,
+            .headRefOid,
+            .url,
+            .state,
+            (.isCrossRepository | tostring),
+            $urlCap.repo,
+            .createdAt,
+            .updatedAt
+          ]
+        | @tsv
+      end'
+}
+
 # Terminal (non-OPEN) PRs whose body carries a claim marker whose id is
 # EXACTLY $1, fully validated. $1 must already have passed the literal-id
 # shape check in the find-terminal case below: it is interpolated straight
@@ -508,6 +636,51 @@ EOF
     claim_id="$1"
     rows=$(list_claims) || exit 1
     printf '%s\n' "$rows" | awk -F '\t' -v want="$claim_id" '$2 == want { print; found=1 } END { exit !found }'
+    ;;
+  find-open-pr)
+    [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+    claim_id="$1"
+    pr_number="$2"
+    # Both values are interpolated into the jq program (gh's --jq has no
+    # --arg). Prove bare-decimal PR number and literal exact claim id first.
+    [[ "$pr_number" =~ ^[0-9]+$ ]] || {
+      echo "pr-claims.sh: ERROR: find-open-pr needs a numeric pull-request number, got '$pr_number'" >&2
+      exit 2
+    }
+    [[ "$claim_id" =~ ^issue-[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || {
+      echo "pr-claims.sh: ERROR: find-open-pr needs a literal exact claim id (issue-<...>), got '$claim_id'" >&2
+      exit 2
+    }
+    # Buffered all-or-none: partial pagination is unreadable evidence.
+    open_rows=$(list_open_claim_evidence "$claim_id" "$pr_number") || exit 1
+    open_count=$(printf '%s' "$open_rows" | grep -c . || true)
+    if [[ "$open_count" -gt 1 ]]; then
+      echo "pr-claims.sh: ERROR: $open_count open evidence rows came back for the single PR #$pr_number on $REPO — impossible evidence; refuse" >&2
+      exit 1
+    fi
+    if [[ "$open_count" -eq 1 ]]; then
+      emitted_id=$(cut -f2 <<<"$open_rows")
+      [[ "$emitted_id" == "$claim_id" ]] || {
+        echo "pr-claims.sh: ERROR: open evidence row carries claim id '$emitted_id', not the requested '$claim_id' — refuse" >&2
+        exit 1
+      }
+      emitted_num=$(cut -f1 <<<"$open_rows")
+      [[ "$emitted_num" == "$pr_number" ]] || {
+        echo "pr-claims.sh: ERROR: bound open lookup asked for PR #$pr_number but the row is PR #${emitted_num:-?} — refuse" >&2
+        exit 1
+      }
+      emitted_state=$(cut -f8 <<<"$open_rows")
+      [[ "$emitted_state" == "OPEN" ]] || {
+        echo "pr-claims.sh: ERROR: bound open lookup for PR #$pr_number returned state '${emitted_state:-?}', want OPEN — refuse" >&2
+        exit 1
+      }
+      emitted_sha=$(cut -f6 <<<"$open_rows")
+      [[ "$emitted_sha" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "pr-claims.sh: ERROR: bound open evidence for PR #$pr_number has a malformed/missing head SHA '${emitted_sha:-?}' — refuse" >&2
+        exit 1
+      }
+      printf '%s\n' "$open_rows"
+    fi
     ;;
   find-terminal|find-terminal-pr)
     if [[ "$COMMAND" == "find-terminal" ]]; then

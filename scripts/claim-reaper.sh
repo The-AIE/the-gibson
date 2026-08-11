@@ -25,14 +25,19 @@ WHAT IT DOES
   remove only the exact registered target worktree after CAS + verified cleanup
   push succeed.
 
-  An open PR always protects a claim. API/ref failures, malformed evidence,
-  unreadable worktrees, unregistered or unsafe paths, symlink/device evidence,
-  future-clock evidence, or race-time activity fail closed (refuse reaping).
-  When GitHub-native claims apply, a failed or successful-but-malformed
-  pr-claims.sh list is a hard refusal — never an empty plan. The entire
-  inventory is validated all-or-none against the shipped list contract before
-  any planning or mutation; genuine empty success remains valid. The reaper
-  never closes the target issue.
+  An open PR always protects a claim — every valid open PR-body claim row is
+  protected regardless of age and is never dispatched to release-claim.sh
+  (parked ≠ dead). A legacy ledger claim whose id also appears as an open
+  PR-body claim is kept for the same reason, so dual representations cannot
+  re-open a reaped path. Legacy ledger claims without an open PR keep their
+  existing evidence-based stale/reap behaviour. API/ref failures, malformed
+  evidence, unreadable worktrees, unregistered or unsafe paths, symlink/device
+  evidence, future-clock evidence, or race-time activity fail closed (refuse
+  reaping). When GitHub-native claims apply, a failed or successful-but-
+  malformed pr-claims.sh list is a hard refusal — never an empty plan. The
+  entire inventory is validated all-or-none against the shipped list contract
+  before any planning or mutation; genuine empty success remains valid. The
+  reaper never closes the target issue.
 
 WHY
   Doctrine assumes dead lanes eventually free the issue, but nothing enforces
@@ -420,49 +425,43 @@ EOF
   # silently absorbed into it; this reaper only proposes a release, and
   # release-claim.sh re-reads and enforces identity itself before any mutation.
   # Inventory shape was already proven all-or-none above; this loop only
-  # plans/acts. cut avoids IFS tab collapsing (belt after the validator).
+  # plans. cut avoids IFS tab collapsing (belt after the validator).
+  #
+  # (#153 open-PR-always-protects P1) Every valid open PR-body claim row is
+  # PROTECTED and is never dispatched to release-claim.sh, regardless of age.
+  # An open PR is live work (parked ≠ dead); classifying it STALE by
+  # updatedAt and calling release-claim.sh closes that live PR — the exact
+  # contract violation docs/05 forbids. Collect protected claim ids so a
+  # duplicate legacy ledger representation of the same claim cannot fall
+  # through and be reaped either.
+  OPEN_PR_PROTECTED_IDS=""
   while IFS= read -r _pr_line; do
     [[ -n "$_pr_line" ]] || continue
+    # Inventory already validated all 8 fields all-or-none above. Only the
+    # PR number and claim id are needed for protection accounting; the rest
+    # is intentionally not re-read (open PR always protects regardless of
+    # age/timestamps/head/cross).
     pr_number=$(cut -f1 <<<"$_pr_line")
     pr_id=$(cut -f2 <<<"$_pr_line")
-    pr_scope=$(cut -f3 <<<"$_pr_line")
-    pr_head=$(cut -f4 <<<"$_pr_line")
-    pr_url=$(cut -f5 <<<"$_pr_line")
-    pr_created=$(cut -f6 <<<"$_pr_line")
-    pr_updated=$(cut -f7 <<<"$_pr_line")
-    pr_cross=$(cut -f8 <<<"$_pr_line")
     [[ -n "$pr_id" ]] || continue
     PR_CLAIMS_FOUND=1
     if [[ "$CLAIM_ID_FILTER_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_FILTER" ]]; then
       continue
     fi
-    if [[ ! "$pr_id" =~ ^issue-([0-9]+)- ]]; then
+    # Accept bare and namespaced issue-bound ids (issue-N-… and
+    # issue-<ns>-N-…). The inventory validator already required this shape;
+    # do not re-narrow to numeric-only and silently drop namespaced live work.
+    if [[ ! "$pr_id" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?[0-9]+- ]]; then
       warn "refusing malformed PR claim id '$pr_id' on PR #$pr_number"
       continue
     fi
-    pr_issue="${BASH_REMATCH[1]}"
-    stamp="$pr_updated"
-    [[ -n "$stamp" ]] || stamp="$pr_created"
-    epoch=$(date -u -d "$stamp" +%s 2>/dev/null ||
-      date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$stamp" +%s 2>/dev/null || echo "")
-    if [[ -z "$epoch" || ! "$epoch" =~ ^[0-9]+$ ]]; then
-      warn "refusing PR #$pr_number claim '$pr_id' with unreadable activity timestamp"
-      continue
-    fi
-    age=$((NOW - epoch))
-    if [[ "$age" -lt "$STALE_SECONDS" ]]; then
-      info "PR #$pr_number claim $pr_id is protected (activity ${age}s ago)"
-      continue
-    fi
-    info "STALE PR #$pr_number claim $pr_id (activity ${age}s ago)"
-    if [[ "$APPLY" -eq 1 ]]; then
-      "$RELEASE_CMD" "$pr_issue" --claim-id "$pr_id" --repo "$PR_REPO" \
-        --keep-branch --keep-worktree
-    fi
+    # Open PR-body claim: always protect. Never call release-claim.sh.
+    OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS}${pr_id}"$'\n'
+    info "PR #$pr_number claim $pr_id is protected (open PR always protects)"
   done <<EOF
 $PR_ROWS
 EOF
-  unset _pr_line pr_number pr_id pr_scope pr_head pr_url pr_created pr_updated pr_cross
+  unset _pr_line pr_number pr_id
   # A migrated repository can have no legacy tree at all. Do not misclassify
   # that valid state as an unreadable ledger after processing PR claims.
   if [[ "$PR_CLAIMS_FOUND" -eq 1 ]]; then
@@ -472,6 +471,8 @@ EOF
     fi
   fi
 fi
+# Empty when GitHub-native claims do not apply; still safe for later grep -qxF.
+OPEN_PR_PROTECTED_IDS="${OPEN_PR_PROTECTED_IDS:-}"
 
 # --- ledger ref: require successful fetch of exact remote base ------------
 # Never fall back to local main/master, cached stale origin refs after a
@@ -1751,6 +1752,16 @@ while IFS= read -r row || [[ -n "$row" ]]; do
 
   # age = NOW - last_active; both safe → arithmetic is safe.
   age=$((10#$NOW - 10#$last_active))
+
+  # Open PR-body claim inventory protects a legacy ledger row that is the
+  # same claim id (#153 open-PR-always-protects P1). Without this, a
+  # migrated/dual representation could be reaped through the ledger after
+  # the open-PR loop already decided the live claim is protected.
+  if [[ -n "$OPEN_PR_PROTECTED_IDS" ]] &&
+     printf '%s\n' "$OPEN_PR_PROTECTED_IDS" | grep -qxF -- "$id"; then
+    plan_row KEEP open_pr_body "$last_active" "$age" "${wt_path:-}" >> "$PLAN_TMP"
+    continue
+  fi
 
   # Open PR protects (successful query only).
   if [[ -z "$REPO" ]]; then

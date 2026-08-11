@@ -782,24 +782,95 @@ terminal_fatal() {
 
 # Capture stdout and stderr of an exact argv separately, preserving exit status.
 # Only stdout is authoritative data for the caller; stderr is diagnostics.
-# Bash 3.2-safe: no process substitution, no eval, no pipeline status games.
-# Temp files are always unlinked before every return (success or any failure).
-# Sets _RC_CAP_STDOUT / _RC_CAP_STDERR for the caller to read after return.
+# Bash 3.2-safe: no process substitution, no pipeline status games, no eval of
+# attacker-controlled data. Explicit argv only — "$@" is the full reader.
+#
+# Fail-closed (#153 stream-capture P2):
+#   * stdout read failure, stderr read failure, and temp removal failure are
+#     all nonzero capture failure. Never hand the caller partial stdout as
+#     authoritative evidence while reporting success.
+#   * HUP/INT/TERM install a cleanup that unlinks both temps before the
+#     signal's default disposition re-raises; prior traps are restored on
+#     every ordinary return path (success or capture failure).
+# Sets _RC_CAP_STDOUT / _RC_CAP_STDERR for the caller after a successful
+# capture of both streams (the child's exit status is still returned).
+_RC_CAP_OUTF=""
+_RC_CAP_ERRF=""
+_rc_capture_cleanup_temps() {
+  # Best-effort unlink from a signal handler; ordinary paths check rm status.
+  [[ -n "${_RC_CAP_OUTF:-}" ]] && rm -f "$_RC_CAP_OUTF" 2>/dev/null || true
+  [[ -n "${_RC_CAP_ERRF:-}" ]] && rm -f "$_RC_CAP_ERRF" 2>/dev/null || true
+  _RC_CAP_OUTF=""
+  _RC_CAP_ERRF=""
+}
 _rc_capture_streams() {
   local outf errf rc=0
+  local prev_hup prev_int prev_term
+  local out_data err_data
   _RC_CAP_STDOUT=""
   _RC_CAP_STDERR=""
   outf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-out.XXXXXX") || return 127
   errf=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-cap-err.XXXXXX") || {
-    rm -f "$outf"
+    rm -f "$outf" 2>/dev/null || true
     return 127
   }
-  # Explicit argv only — never eval. "$@" is the full reader invocation.
+  _RC_CAP_OUTF="$outf"
+  _RC_CAP_ERRF="$errf"
+  # Save prior traps (trap -p output is shell-owned, not user data). Restore
+  # via the saved command text on ordinary completion; never eval untrusted
+  # strings. Bash 3.2: trap -p prints nothing when unset.
+  prev_hup=$(trap -p HUP 2>/dev/null || true)
+  prev_int=$(trap -p INT 2>/dev/null || true)
+  prev_term=$(trap -p TERM 2>/dev/null || true)
+  # On signal: unlink temps, clear handles, restore prior traps, re-raise so
+  # the process exits with the signal's default disposition rather than
+  # swallowing the interrupt with partial evidence still staged.
+  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s HUP $$' HUP
+  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s INT $$' INT
+  trap '_rc_capture_cleanup_temps; trap - HUP INT TERM; kill -s TERM $$' TERM
+  # Explicit argv only — never eval of the command under test.
   "$@" >"$outf" 2>"$errf" || rc=$?
-  # Read both streams before unlinking so no path leaves files behind.
-  _RC_CAP_STDOUT=$(cat "$outf" 2>/dev/null || true)
-  _RC_CAP_STDERR=$(cat "$errf" 2>/dev/null || true)
-  rm -f "$outf" "$errf"
+  # Read both streams before unlinking. A failed read poisons the capture:
+  # clear any partial stdout so a caller that ignores rc cannot treat it as
+  # authoritative evidence.
+  if ! out_data=$(cat "$outf" 2>/dev/null); then
+    _RC_CAP_STDOUT=""
+    _RC_CAP_STDERR=""
+    _rc_capture_cleanup_temps
+    if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
+    if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
+    if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
+    return 1
+  fi
+  if ! err_data=$(cat "$errf" 2>/dev/null); then
+    _RC_CAP_STDOUT=""
+    _RC_CAP_STDERR=""
+    _rc_capture_cleanup_temps
+    if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
+    if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
+    if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
+    return 1
+  fi
+  if ! rm -f "$outf" "$errf"; then
+    _RC_CAP_STDOUT=""
+    _RC_CAP_STDERR=""
+    _RC_CAP_OUTF=""
+    _RC_CAP_ERRF=""
+    # Temps may still exist; best-effort second try so a sticky failure does
+    # not leave evidence on disk for the next run to trip over.
+    rm -f "$outf" "$errf" 2>/dev/null || true
+    if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
+    if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
+    if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
+    return 1
+  fi
+  _RC_CAP_OUTF=""
+  _RC_CAP_ERRF=""
+  if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
+  if [[ -n "$prev_int" ]]; then eval "$prev_int"; else trap - INT; fi
+  if [[ -n "$prev_term" ]]; then eval "$prev_term"; else trap - TERM; fi
+  _RC_CAP_STDOUT="$out_data"
+  _RC_CAP_STDERR="$err_data"
   return "$rc"
 }
 
@@ -1789,6 +1860,124 @@ open_pr_number_present() {
   printf '%s\n' "$OPEN_NUMBERS" | grep -qxF -- "$1"
 }
 
+# Bound open-PR evidence for one exact claim id + PR number (#153 freeze P1).
+# Calls pr-claims.sh find-open-pr and validates every identity field the
+# close path depends on. Sets OPEN_EV_* on success (return 0). On failure
+# sets OPEN_EV_ERR and returns 1 — never partial evidence.
+OPEN_EV_NUMBER=""
+OPEN_EV_CLAIM=""
+OPEN_EV_SCOPE=""
+OPEN_EV_ISSUE=""
+OPEN_EV_HEAD=""
+OPEN_EV_HEAD_SHA=""
+OPEN_EV_URL=""
+OPEN_EV_STATE=""
+OPEN_EV_CROSS=""
+OPEN_EV_BASE_REPO=""
+OPEN_EV_ERR=""
+read_bound_open_pr_evidence() {
+  local id="$1" num="$2" rows count reader_rc=0
+  local o_number o_claim o_scope o_issue o_head o_sha o_url o_state o_cross o_base
+  OPEN_EV_NUMBER=""
+  OPEN_EV_CLAIM=""
+  OPEN_EV_SCOPE=""
+  OPEN_EV_ISSUE=""
+  OPEN_EV_HEAD=""
+  OPEN_EV_HEAD_SHA=""
+  OPEN_EV_URL=""
+  OPEN_EV_STATE=""
+  OPEN_EV_CROSS=""
+  OPEN_EV_BASE_REPO=""
+  OPEN_EV_ERR=""
+  if [[ ! -x "$SCRIPT_DIR/pr-claims.sh" ]]; then
+    OPEN_EV_ERR="the authoritative PR reader $SCRIPT_DIR/pr-claims.sh is missing or not executable"
+    return 1
+  fi
+  reader_rc=0
+  _rc_capture_streams "$SCRIPT_DIR/pr-claims.sh" find-open-pr "$PR_REPO" "$id" "$num" || reader_rc=$?
+  rows="$_RC_CAP_STDOUT"
+  if [[ "$reader_rc" -ne 0 ]]; then
+    OPEN_EV_ERR="cannot read bound open PR evidence for '$id' on PR #$num in $PR_REPO: ${_RC_CAP_STDERR}"
+    return 1
+  fi
+  count=$(printf '%s' "$rows" | grep -c . || true)
+  if [[ "$count" -eq 0 ]]; then
+    OPEN_EV_ERR="no bound open PR evidence for claim '$id' on PR #$num in $PR_REPO (PR missing, not OPEN, or not carrying that claim)"
+    return 1
+  fi
+  if [[ "$count" -gt 1 ]]; then
+    OPEN_EV_ERR="ambiguous bound open PR evidence for '$id' on PR #$num ($count rows) — refuse"
+    return 1
+  fi
+  o_number=$(cut -f1 <<<"$rows")
+  o_claim=$(cut -f2 <<<"$rows")
+  o_scope=$(cut -f3 <<<"$rows")
+  o_issue=$(cut -f4 <<<"$rows")
+  o_head=$(cut -f5 <<<"$rows")
+  o_sha=$(cut -f6 <<<"$rows")
+  o_url=$(cut -f7 <<<"$rows")
+  o_state=$(cut -f8 <<<"$rows")
+  o_cross=$(cut -f9 <<<"$rows")
+  o_base=$(cut -f10 <<<"$rows")
+  if [[ -z "$o_number" || -z "$o_claim" || -z "$o_scope" || -z "$o_issue" || -z "$o_head" || -z "$o_sha" || -z "$o_url" || -z "$o_state" || -z "$o_cross" || -z "$o_base" ]]; then
+    OPEN_EV_ERR="malformed/truncated bound open PR evidence for '$id' on PR #$num"
+    return 1
+  fi
+  if [[ "$o_number" != "$num" ]]; then
+    OPEN_EV_ERR="bound open evidence returned PR #${o_number}, want #$num — refuse"
+    return 1
+  fi
+  if [[ "$o_claim" != "$id" ]]; then
+    OPEN_EV_ERR="bound open evidence claim id mismatch (want '$id', got '$o_claim') — refuse"
+    return 1
+  fi
+  if [[ "$o_issue" != "$ISSUE" ]]; then
+    OPEN_EV_ERR="bound open evidence issue mismatch (want #$ISSUE, got #${o_issue}) — refuse"
+    return 1
+  fi
+  if [[ "$o_state" != "OPEN" ]]; then
+    OPEN_EV_ERR="bound open evidence for PR #$num is not OPEN (state='$o_state') — refuse"
+    return 1
+  fi
+  if [[ "$o_cross" != "false" ]]; then
+    OPEN_EV_ERR="bound open evidence for PR #$num is not provably same-repository (isCrossRepository='$o_cross', want 'false') — refuse"
+    return 1
+  fi
+  if [[ "$o_base" != "$PR_REPO" ]]; then
+    OPEN_EV_ERR="bound open evidence base-repository mismatch (want '$PR_REPO', got '$o_base') — refuse"
+    return 1
+  fi
+  if [[ ! "$o_head" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    OPEN_EV_ERR="bound open evidence has unsafe/empty head branch '${o_head}' — refuse"
+    return 1
+  fi
+  if [[ ! "$o_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    OPEN_EV_ERR="bound open evidence has malformed/missing head SHA '${o_sha}' — refuse"
+    return 1
+  fi
+  # URL must bind to this repository and this PR number (same contract list
+  # enforces; re-checked here so a hostile reader cannot skip it).
+  if [[ ! "$o_url" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([0-9]+)$ ]]; then
+    OPEN_EV_ERR="bound open evidence has malformed PR URL '${o_url}' — refuse"
+    return 1
+  fi
+  if [[ "${BASH_REMATCH[1]}" != "$PR_REPO" || "${BASH_REMATCH[2]}" != "$num" ]]; then
+    OPEN_EV_ERR="bound open evidence PR URL does not bind to $PR_REPO PR #$num (url='$o_url') — refuse"
+    return 1
+  fi
+  OPEN_EV_NUMBER="$o_number"
+  OPEN_EV_CLAIM="$o_claim"
+  OPEN_EV_SCOPE="$o_scope"
+  OPEN_EV_ISSUE="$o_issue"
+  OPEN_EV_HEAD="$o_head"
+  OPEN_EV_HEAD_SHA="$o_sha"
+  OPEN_EV_URL="$o_url"
+  OPEN_EV_STATE="$o_state"
+  OPEN_EV_CROSS="$o_cross"
+  OPEN_EV_BASE_REPO="$o_base"
+  return 0
+}
+
 # CAS mode (claim-reaper) is ledger-only by contract — the same reason
 # try_terminal_pr_body_release() is gated on CAS_MODE -eq 0. A reaper run
 # must never close someone's live PR.
@@ -1817,7 +2006,9 @@ if [[ -n "$PR_REPO" && "$CAS_MODE" -eq 0 ]]; then
     pr_head=$(cut -f4 <<<"$pr_row")
     pr_cross=$(cut -f8 <<<"$pr_row")
     [[ -n "$pr_id" ]] || continue
-    echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue
+    # Shared issue matcher (#153 namespaced open-claim P1): never hard-code
+    # ^issue-${ISSUE}- so namespaced ids like issue-template-5-x are seen.
+    claim_id_for_issue "$pr_id" || continue
     if [[ "$CLAIM_ID_SET" -eq 1 && "$pr_id" != "$CLAIM_ID_ARG" ]]; then
       continue
     fi
@@ -1837,12 +2028,15 @@ EOF
     # sibling check (#153 AC1/AC4): other live open PR-body claims for this
     # issue keep agent-claimed, same as a ledger sibling does below. current
     # claim.sh never writes a ledger row, so this is the only sibling source
-    # for a pure PR-body multi-slice issue.
+    # for a pure PR-body multi-slice issue. Shared matcher so namespaced
+    # siblings are never invisible to label policy.
     PR_SIBLINGS=""
-    while IFS=$'\t' read -r _s_n _s_id _s_scope _s_head _s_url _s_created _s_updated _s_cross; do
+    while IFS= read -r _s_row; do
+      [[ -n "$_s_row" ]] || continue
+      _s_id=$(cut -f2 <<<"$_s_row")
       [[ -n "$_s_id" ]] || continue
       [[ "$_s_id" == "$PR_CLAIM_ID" ]] && continue
-      echo "$_s_id" | grep -qE "^issue-${ISSUE}-" || continue
+      claim_id_for_issue "$_s_id" || continue
       PR_SIBLINGS="${PR_SIBLINGS}${_s_id}"$'\n'
     done <<EOF
 $PR_ROWS
@@ -1886,15 +2080,54 @@ EOF
     if [[ "$PR_IS_CROSS_REPO" != "false" ]]; then
       die "open PR-body claim release for '$PR_CLAIM_ID': PR #$PR_NUMBER is not provably a same-repository pull request (isCrossRepository='${PR_IS_CROSS_REPO:-<missing>}', want 'false') — refuse to close it. Nothing was mutated: the PR is still open, no label was touched, no worktree, branch or ledger row was removed. A claim marker and a matching head-branch name are not repository identity; a fork can carry both."
     fi
+    # --- freeze bound open head SHA (#153 freeze/revalidate P1) ------------
+    # The inventory row lacks headRefOid. A concurrent push can advance the
+    # branch between this inventory read and gh pr close; the post-close
+    # terminal row would then carry the NEW sha and authorize deleting a
+    # worktree/branch the freeze never saw. Freeze the exact open head now,
+    # re-read immediately before close, and refuse if anything moved.
+    if ! read_bound_open_pr_evidence "$PR_CLAIM_ID" "$PR_NUMBER"; then
+      die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): cannot freeze bound open evidence — $OPEN_EV_ERR. Refuse (nothing was mutated)."
+    fi
+    # Bound evidence must agree with the inventory identity already proven.
+    if [[ "$OPEN_EV_HEAD" != "$PR_HEAD_BRANCH" ]]; then
+      die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): bound open evidence head branch '$OPEN_EV_HEAD' disagrees with inventory head '$PR_HEAD_BRANCH' — refuse (nothing was mutated)."
+    fi
+    if [[ "$OPEN_EV_CROSS" != "false" ]]; then
+      die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): bound open evidence isCrossRepository='$OPEN_EV_CROSS' (want 'false') — refuse (nothing was mutated)."
+    fi
+    FROZEN_OPEN_HEAD_SHA="$OPEN_EV_HEAD_SHA"
+    FROZEN_OPEN_HEAD_BRANCH="$OPEN_EV_HEAD"
+    FROZEN_OPEN_CLAIM="$OPEN_EV_CLAIM"
+    FROZEN_OPEN_NUMBER="$OPEN_EV_NUMBER"
+    FROZEN_OPEN_SCOPE="$OPEN_EV_SCOPE"
+    FROZEN_OPEN_URL="$OPEN_EV_URL"
     if [[ "$DRY" -eq 1 ]]; then
-      info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim"
+      info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim (frozen open head $FROZEN_OPEN_HEAD_SHA)"
       info "dry-run: would then verify the now-terminal PR and run the exact cleanup for worktree/branch '$PR_HEAD_BRANCH'"
       if [[ -n "$PR_SIBLINGS" ]]; then
         info "dry-run: would keep agent-claimed — sibling PR-body claim(s) remain: $(printf '%s' "$PR_SIBLINGS" | tr '\n' ' ')"
       fi
       exit 0
     fi
-    info "closing PR #$PR_NUMBER to release the PR-body claim"
+    # Immediate pre-close revalidation of the bound evidence. Any identity or
+    # head-SHA movement after the freeze is a race — refuse before close.
+    if ! read_bound_open_pr_evidence "$PR_CLAIM_ID" "$PR_NUMBER"; then
+      die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): pre-close bound evidence re-read failed — $OPEN_EV_ERR. Refuse before close (nothing was mutated: the PR is still open, no label was touched, no worktree or branch was removed)."
+    fi
+    if [[ "$OPEN_EV_NUMBER" != "$FROZEN_OPEN_NUMBER" || \
+          "$OPEN_EV_CLAIM" != "$FROZEN_OPEN_CLAIM" || \
+          "$OPEN_EV_SCOPE" != "$FROZEN_OPEN_SCOPE" || \
+          "$OPEN_EV_HEAD" != "$FROZEN_OPEN_HEAD_BRANCH" || \
+          "$OPEN_EV_HEAD_SHA" != "$FROZEN_OPEN_HEAD_SHA" || \
+          "$OPEN_EV_URL" != "$FROZEN_OPEN_URL" || \
+          "$OPEN_EV_STATE" != "OPEN" || \
+          "$OPEN_EV_CROSS" != "false" || \
+          "$OPEN_EV_BASE_REPO" != "$PR_REPO" || \
+          "$OPEN_EV_ISSUE" != "$ISSUE" ]]; then
+      die "open PR-body claim release for '$PR_CLAIM_ID' (PR #$PR_NUMBER): bound open evidence moved between freeze and pre-close re-read (frozen head $FROZEN_OPEN_HEAD_SHA, now ${OPEN_EV_HEAD_SHA:-<missing>}; identity/state drift). Refuse before close (nothing was mutated: the PR is still open, no label was touched, no worktree or branch was removed)."
+    fi
+    info "closing PR #$PR_NUMBER to release the PR-body claim (frozen open head $FROZEN_OPEN_HEAD_SHA)"
     if ! gh pr close "$PR_NUMBER" --repo "$PR_REPO" >/dev/null; then
       die "gh pr close failed for PR #$PR_NUMBER in $PR_REPO — the claim is still live; nothing else was mutated"
     fi
@@ -1932,7 +2165,17 @@ EOF
     # one whose derived branch already matched.
     try_terminal_pr_body_release "$PR_CLAIM_ID" "$PR_NUMBER" || TERMINAL_RC=$?
     if [[ "$TERMINAL_RC" -eq 0 ]]; then
-      terminal_cleanup_release "$PR_CLAIM_ID"
+      # Terminal head SHA must still be the frozen OPEN head. A post-freeze
+      # race may make the close partial (GitHub closed an advanced tip), but
+      # must never authorize worktree/branch deletion from the moved SHA.
+      if [[ "$TERMINAL_HEAD_SHA" != "$FROZEN_OPEN_HEAD_SHA" ]]; then
+        warn "PR #$PR_NUMBER is closed, but its terminal head SHA ($TERMINAL_HEAD_SHA) does not equal the frozen open head SHA ($FROZEN_OPEN_HEAD_SHA) — a post-freeze race advanced the branch. Refusing cleanup on the moved SHA; worktree, branches and agent-claimed are preserved."
+        OPEN_TERMINAL_FATAL="terminal head SHA ($TERMINAL_HEAD_SHA) != frozen open head SHA ($FROZEN_OPEN_HEAD_SHA)"
+        OPEN_INCOMPLETE=1
+        TERMINAL_RC=2
+      else
+        terminal_cleanup_release "$PR_CLAIM_ID"
+      fi
     fi
 
     # --- close-only fallback ----------------------------------------------
@@ -1988,7 +2231,8 @@ EOF
         _post_id=$(cut -f2 <<<"$_post_row")
         [[ -n "$_post_id" ]] || continue
         [[ "$_post_id" == "$PR_CLAIM_ID" ]] && continue
-        echo "$_post_id" | grep -qE "^issue-${ISSUE}-" || continue
+        # Shared issue matcher — namespaced open siblings must not be ignored.
+        claim_id_for_issue "$_post_id" || continue
         OPEN_SIBLINGS="${OPEN_SIBLINGS}${_post_id}"$'\n'
       done <<EOF
 $POST_PR_ROWS

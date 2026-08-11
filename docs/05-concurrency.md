@@ -358,6 +358,17 @@ first. The same evidence failure *before* any mutation is still a plain refusal
 (exit 1) that names which binding failed. Exit 1 means "refused, nothing done";
 exit 3 means "did part of the work, here is what is left".
 
+**Before close, freeze the open head SHA.** The live inventory (`list`) does not
+carry `headRefOid`. A concurrent push can advance the branch between inventory
+and `gh pr close`, so post-close terminal cleanup could delete worktree/branches
+against a SHA the freeze never saw. `release-claim.sh` therefore calls
+`pr-claims.sh find-open-pr <repo> <claim-id> <number>` — a bound, fully
+validated open-evidence row that includes the exact head SHA — freezes that SHA,
+re-reads and compares immediately before close, and refuses before close if any
+identity moved. After close, terminal evidence must retain that frozen open head
+SHA; a post-freeze race may make the close partial but must never authorize
+worktree/branch deletion from the moved SHA.
+
 **The post-close proof binds the PR number, not just the claim id.** The claim
 inventory only contains a PR while that PR carries a well-formed claim marker, so
 "the claim id is gone from the inventory" is satisfied both by a PR that genuinely
@@ -411,7 +422,12 @@ from **evidence**, not assertion:
   refuse; integers are validated lexically before any Bash arithmetic.
 - Default threshold is **14400 seconds (4 hours)** — deliberately more
   conservative than the 15-minute telemetry "presumed dead" line in docs/11.
-- An open PR always protects the claim (parked ≠ dead).
+- An open PR always protects the claim (parked ≠ dead). Every valid open
+  PR-body claim row from `pr-claims.sh list` is protected **regardless of age**
+  and is never dispatched to `release-claim.sh`. A legacy ledger claim whose
+  id also appears as an open PR-body claim is kept for the same reason, so a
+  dual representation cannot re-open a reaped path. Legacy ledger claims
+  without an open PR keep their existing evidence-based stale/reap behaviour.
 - Fail closed on API/ref failures, malformed evidence, unregistered or unsafe
   worktree paths, symlink/device evidence, future-clock evidence, or race-time
   activity. Never closes the issue.

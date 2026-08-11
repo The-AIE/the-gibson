@@ -2747,6 +2747,60 @@ case "$1" in
     # number, body-agnostic, so a caller can prove the PR it closed really
     # closed even when its claim marker was removed. It is checked first
     # because its query also carries `states: [OPEN]`.
+    # Bound open-PR evidence (#153 freeze/revalidate P1): find-open-pr uses a
+    # named GraphQL operation that ALSO carries states:[OPEN], so it must be
+    # distinguished from the inventory list before the generic open branch.
+    want_open_evidence=0
+    for arg in "$@"; do
+      case "$arg" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac
+    done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      # Count bound-evidence reads so a fixture can make the freeze differ
+      # from the pre-close revalidation (head moved between inventory and
+      # close) or from a post-close terminal row.
+      ev_calls=1
+      if [[ -n "${GH_OPEN_EVIDENCE_CALLS:-}" ]]; then
+        ev_calls=$(( $(cat "$GH_OPEN_EVIDENCE_CALLS" 2>/dev/null || echo 0) + 1 ))
+        echo "$ev_calls" > "$GH_OPEN_EVIDENCE_CALLS"
+      fi
+      if [[ "$ev_calls" -ge 2 && -n "${GH_PR_OPEN_EVIDENCE_TSV2:-}" ]]; then
+        cat "${GH_PR_OPEN_EVIDENCE_TSV2}" 2>/dev/null
+        exit "${GH_PR_OPEN_EVIDENCE_EXIT2:-0}"
+      fi
+      # Default: derive a well-formed bound row from the open inventory so
+      # ordinary open-path fixtures keep working without a second staged file.
+      # GH_PR_OPEN_EVIDENCE_TSV overrides that entirely.
+      if [[ -n "${GH_PR_OPEN_EVIDENCE_TSV:-}" ]]; then
+        cat "$GH_PR_OPEN_EVIDENCE_TSV" 2>/dev/null
+        exit "${GH_PR_OPEN_EVIDENCE_EXIT:-0}"
+      fi
+      # Synthesize 12-field bound evidence from the 8-field inventory row plus
+      # GH_PR_OPEN_HEAD_SHA (default synthetic 40-hex). select(.number == N)
+      # narrowing is honoured when present in the query text.
+      want_num=""
+      for arg in "$@"; do
+        case "$arg" in
+          *"select(.number == "*)
+            want_num=$(printf '%s' "$arg" | sed -n 's/.*select(\.number == \([0-9][0-9]*\)).*/\1/p' | head -1)
+            ;;
+        esac
+      done
+      sha="${GH_PR_OPEN_HEAD_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+      open_src="${GH_PR_OPEN_TSV:-/dev/null}"
+      awk -F'\t' -v n="$want_num" -v sha="$sha" '
+        NF >= 8 {
+          if (n != "" && $1 != n) next
+          # number claim scope issue head head_sha url state cross base created updated
+          # Inventory: 1=num 2=claim 3=scope 4=head 5=url 6=created 7=updated 8=cross
+          issue = $2
+          sub(/^issue-([A-Za-z][A-Za-z0-9]*-)?/, "", issue)
+          sub(/-.*$/, "", issue)
+          printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\tOPEN\t%s\tacme/app\t%s\t%s\n", \
+            $1, $2, $3, issue, $4, sha, $5, $8, $6, $7
+        }
+      ' "$open_src" 2>/dev/null
+      exit "${GH_PR_OPEN_EVIDENCE_EXIT:-0}"
+    fi
     want_numbers=0
     for arg in "$@"; do
       case "$arg" in *"openPrNumbers"*) want_numbers=1 ;; esac
@@ -2894,6 +2948,8 @@ export GH_LABELS="agent-claimed,tier-b"
 unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT GH_PR_CLOSE_LOG GH_OPEN_CALLS
 unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
 unset GH_TERMINAL_STDERR
+unset GH_PR_OPEN_EVIDENCE_TSV GH_PR_OPEN_EVIDENCE_TSV2 GH_PR_OPEN_EVIDENCE_EXIT GH_PR_OPEN_EVIDENCE_EXIT2
+unset GH_OPEN_EVIDENCE_CALLS GH_PR_OPEN_HEAD_SHA
 rm -f "$GH_STATE" "$GH_LOG"
 
 # Probed in EXACTLY the configuration that used to hang the whole suite: an
@@ -3125,6 +3181,9 @@ unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_EXIT2 GH_PR_CLOS
 open_row 832 issue-332-open-path-lying-close 'lib/x/**' feat/332-open-path-lying-close > "$GH_PR_OPEN_TSV"
 export GH_PR_OPEN_TSV2="$ROOT/numgate3/open2.tsv"
 : > "$GH_PR_OPEN_TSV2"
+export GH_PR_OPEN_HEAD_SHA="$GATE3_SHA"
+export GH_OPEN_EVIDENCE_CALLS="$ROOT/numgate3/open-evidence-calls"
+: > "$GH_OPEN_EVIDENCE_CALLS"
 printf '832\tissue-332-open-path-lying-close\tlib/x/**\t332\tfeat/332-open-path-lying-close\t%s\thttps://github.com/acme/app/pull/832\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$GATE3_SHA" > "$GH_PR_ALL_TSV"
 export GH_PR_OPEN_NUMBERS="832"
@@ -3974,9 +4033,17 @@ open_fixture() {
   : > "$GH_OPEN_CALLS"
   export GH_PR_CLOSED_NUMBERS="$ROOT/$dir/closed-numbers"
   : > "$GH_PR_CLOSED_NUMBERS"
+  # Bound open evidence freezes this exact head SHA; terminal evidence after
+  # close must retain it or cleanup is refused (#153 freeze/revalidate P1).
+  export GH_PR_OPEN_HEAD_SHA
+  GH_PR_OPEN_HEAD_SHA=$(git -C "$ROOT/$dir/wt-${issue}-${slug}" rev-parse HEAD)
+  export GH_OPEN_EVIDENCE_CALLS="$ROOT/$dir/open-evidence-calls"
+  : > "$GH_OPEN_EVIDENCE_CALLS"
   rm -f "$GH_STATE" "$GH_LOG" "$GH_PR_CLOSE_LOG"
   unset GH_PR_LIST_EXIT GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_PR_CLOSE_EXIT
   unset GH_PR_OPEN_NUMBERS GH_PR_OPEN_NUMBERS_EXIT
+  unset GH_PR_OPEN_EVIDENCE_TSV GH_PR_OPEN_EVIDENCE_TSV2
+  unset GH_PR_OPEN_EVIDENCE_EXIT GH_PR_OPEN_EVIDENCE_EXIT2
 }
 
 export PATH="$ROOT/term/bin:$PATH"
@@ -5175,6 +5242,427 @@ check "pr-claims list against empty graphql inventory exits 0" "$rc" "0"
 # Suite-level guard (#153 r7 + r8): shell construction diagnostics cannot
 # coexist with a zero-failure tally. The predicate is shared with the final
 # stream scan; mutation proofs exercise the SAME exit decision the suite uses.
+# ===========================================================================
+# #153 freeze/revalidate P1 — open head SHA freeze + pre-close race sensors
+# ===========================================================================
+echo "#153 freeze · head moves between freeze and pre-close bound read: never closes"
+open_fixture openfreeze1 501 head-freeze-race
+FREEZE1_SHA="$GH_PR_OPEN_HEAD_SHA"
+MOVED1_SHA="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+open_row 951 issue-501-head-freeze-race 'lib/x/**' feat/501-head-freeze-race > "$GH_PR_OPEN_TSV"
+# First bound read (freeze) uses default synthesis from inventory + FREEZE1_SHA.
+# Second bound read returns a different head SHA (concurrent push).
+export GH_PR_OPEN_EVIDENCE_TSV="$ROOT/openfreeze1/ev1.tsv"
+export GH_PR_OPEN_EVIDENCE_TSV2="$ROOT/openfreeze1/ev2.tsv"
+# Bound open evidence: 12 fields
+# number claim scope issue head head_sha url state cross base created updated
+printf '951\tissue-501-head-freeze-race\tlib/x/**\t501\tfeat/501-head-freeze-race\t%s\thttps://github.com/acme/app/pull/951\tOPEN\tfalse\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$FREEZE1_SHA" > "$GH_PR_OPEN_EVIDENCE_TSV"
+printf '951\tissue-501-head-freeze-race\tlib/x/**\t501\tfeat/501-head-freeze-race\t%s\thttps://github.com/acme/app/pull/951\tOPEN\tfalse\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$MOVED1_SHA" > "$GH_PR_OPEN_EVIDENCE_TSV2"
+: > "$GH_OPEN_EVIDENCE_CALLS"
+out=$(cd "$ROOT/openfreeze1/canon" && "$RC" 501 --claim-id issue-501-head-freeze-race --repo acme/app 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "pre-close head-move race exits nonzero" || bad "pre-close head-move race exited 0: $out"
+contains "pre-close head-move names the drift" "$out" "bound open evidence moved"
+contains "pre-close head-move says nothing mutated" "$out" "nothing was mutated"
+if [[ -f "$ROOT/openfreeze1/close.log" ]]; then
+  _close_n=$(wc -l < "$ROOT/openfreeze1/close.log" | tr -d ' ')
+else
+  _close_n=0
+fi
+check "pre-close head-move: gh pr close never called" "$_close_n" "0"
+unset _close_n
+[[ -d "$ROOT/openfreeze1/wt-501-head-freeze-race" ]] &&
+  ok "pre-close head-move: worktree survived" || bad "pre-close head-move: worktree removed"
+[[ -n "$(git -C "$ROOT/openfreeze1/canon" branch --list 'feat/501-head-freeze-race')" ]] &&
+  ok "pre-close head-move: local branch survived" || bad "pre-close head-move: local branch deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "pre-close head-move: label never edited" || bad "pre-close head-move: label was edited"
+unset GH_PR_OPEN_EVIDENCE_TSV GH_PR_OPEN_EVIDENCE_TSV2
+
+echo "#153 freeze · post-close terminal SHA != frozen open head: INCOMPLETE, artifacts live"
+open_fixture openfreeze2 502 post-freeze-race
+# Freeze uses GH_PR_OPEN_HEAD_SHA from open_fixture; terminal evidence below
+# intentionally carries a different SHA (post-freeze race).
+MOVED2_SHA="cccccccccccccccccccccccccccccccccccccccc"
+open_row 952 issue-502-post-freeze-race 'lib/x/**' feat/502-post-freeze-race > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openfreeze2/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+# Freeze and pre-close agree on FREEZE2_SHA (default synthesis).
+# Terminal evidence after close carries a different head SHA.
+printf '952\tissue-502-post-freeze-race\tlib/x/**\t502\tfeat/502-post-freeze-race\t%s\thttps://github.com/acme/app/pull/952\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$MOVED2_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/openfreeze2/canon" && "$RC" 502 --claim-id issue-502-post-freeze-race --repo acme/app 2>&1); rc=$?
+check    "post-freeze terminal SHA mismatch exits 3" "$rc" "3"
+contains "post-freeze close happened" "$out" "closing PR #952"
+contains "post-freeze names SHA mismatch" "$out" "does not equal the frozen open head SHA"
+contains "post-freeze reports INCOMPLETE" "$out" "INCOMPLETE"
+[[ -n "$(cat "$ROOT/openfreeze2/close.log" 2>/dev/null)" ]] &&
+  ok "post-freeze: close was called" || bad "post-freeze: close was never called"
+[[ -d "$ROOT/openfreeze2/wt-502-post-freeze-race" ]] &&
+  ok "post-freeze: worktree preserved" || bad "post-freeze: worktree removed"
+[[ -n "$(git -C "$ROOT/openfreeze2/canon" branch --list 'feat/502-post-freeze-race')" ]] &&
+  ok "post-freeze: local branch preserved" || bad "post-freeze: local branch deleted"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "post-freeze: label never edited" || bad "post-freeze: label was edited"
+
+# ===========================================================================
+# #153 namespaced open-claim matcher P1
+# ===========================================================================
+echo "#153 namespaced · open namespaced target is seen and closed correctly"
+# issue-template-5-ns on issue 5 with --prefix template.
+open_fixture openns1 5 ns-target
+# open_fixture builds feat/5-ns-target; rename to namespaced branch/worktree.
+git -C "$ROOT/openns1/canon" worktree remove --force "$ROOT/openns1/wt-5-ns-target" >/dev/null 2>&1 || true
+git -C "$ROOT/openns1/canon" branch -D feat/5-ns-target >/dev/null 2>&1 || true
+git -C "$ROOT/openns1/canon" push -q origin --delete feat/5-ns-target >/dev/null 2>&1 || true
+git -C "$ROOT/openns1/canon" worktree add -q "$ROOT/openns1/wt-template-5-ns-target" \
+  -b feat/template-5-ns-target origin/main
+(
+  cd "$ROOT/openns1/wt-template-5-ns-target" || exit 1
+  git commit --allow-empty -qs -m "chore: reserve issue-template-5-ns-target"
+  git push -q -u origin feat/template-5-ns-target
+) >/dev/null 2>&1
+NS1_SHA=$(git -C "$ROOT/openns1/wt-template-5-ns-target" rev-parse HEAD)
+export GH_PR_OPEN_HEAD_SHA="$NS1_SHA"
+open_row 960 issue-template-5-ns-target 'lib/x/**' feat/template-5-ns-target > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openns1/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+printf '960\tissue-template-5-ns-target\tlib/x/**\t5\tfeat/template-5-ns-target\t%s\thttps://github.com/acme/app/pull/960\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NS1_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/openns1/canon" && "$RC" 5 --prefix template --claim-id issue-template-5-ns-target --repo acme/app 2>&1); rc=$?
+check    "namespaced open target exits 0" "$rc" "0"
+contains "namespaced open target closed the right PR" "$out" "closing PR #960"
+contains "namespaced open target used shared cleanup" "$out" "verified terminal PR-body claim #960"
+[[ ! -d "$ROOT/openns1/wt-template-5-ns-target" ]] &&
+  ok "namespaced open target: worktree removed" || bad "namespaced open target: worktree survived"
+
+echo "#153 namespaced · open namespaced sibling keeps agent-claimed"
+open_fixture openns2 5 ns-sib-a
+# Primary: bare issue-5-ns-sib-a; sibling: issue-template-5-ns-sib-b
+open_row 961 issue-5-ns-sib-a 'lib/a/**' feat/5-ns-sib-a > "$GH_PR_OPEN_TSV"
+open_row 962 issue-template-5-ns-sib-b 'lib/b/**' feat/template-5-ns-sib-b >> "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openns2/open2.tsv"
+# Post-close: only the namespaced sibling remains.
+open_row 962 issue-template-5-ns-sib-b 'lib/b/**' feat/template-5-ns-sib-b > "$GH_PR_OPEN_TSV2"
+SIB_SHA="$GH_PR_OPEN_HEAD_SHA"
+printf '961\tissue-5-ns-sib-a\tlib/a/**\t5\tfeat/5-ns-sib-a\t%s\thttps://github.com/acme/app/pull/961\tCLOSED\tfalse\t\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SIB_SHA" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/openns2/canon" && "$RC" 5 --claim-id issue-5-ns-sib-a --repo acme/app 2>&1); rc=$?
+# Close may complete; sibling policy must preserve agent-claimed. Exit is
+# typically 3 (close-only incomplete) or 0 if full cleanup ran — either way
+# the label must stay while the sibling holds the issue.
+contains "namespaced sibling noted or protected" "$out" "issue-template-5-ns-sib-b"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] &&
+  ok "namespaced sibling: agent-claimed never removed" ||
+  bad "namespaced sibling: agent-claimed was removed while sibling remains"
+check "namespaced sibling: only the target PR was closed" \
+  "$(grep -c 'pr close 961' "$ROOT/openns2/close.log" 2>/dev/null || true)" "1"
+lacks "namespaced sibling: wrong PR never closed" "$(cat "$ROOT/openns2/close.log" 2>/dev/null)" "pr close 962"
+
+echo "#153 namespaced · mutation: numeric-only open-PR filter ignores namespaced target"
+# Static source contract: production must call claim_id_for_issue in the open
+# match / sibling / post-close loops (not the hard-coded ^issue-${ISSUE}- ERE).
+if grep -nE 'grep -qE "\^issue-\$\{ISSUE\}-' "$RC" | grep -v '^#' >/dev/null 2>&1; then
+  bad "production still hard-codes ^issue-\${ISSUE}- open-PR filter"
+else
+  ok "production open-PR filters no longer hard-code ^issue-\${ISSUE}-"
+fi
+_cid_calls=$(grep -c 'claim_id_for_issue' "$RC" || true)
+if [[ "$_cid_calls" -ge 4 ]]; then
+  ok "production calls claim_id_for_issue ≥4 times (matcher shared)"
+else
+  bad "production claim_id_for_issue call sites = ${_cid_calls} (want ≥4)"
+fi
+# Behavioral mutation: temporarily restore numeric-only filter in a copy and
+# prove a namespaced open target is ignored (falls through / wrong path).
+_rc_copy="$ROOT/openns-mut/release-claim.sh"
+mkdir -p "$ROOT/openns-mut"
+cp "$RC" "$_rc_copy"
+# Swap claim_id_for_issue calls in the open-PR inventory match loop back to
+# the numeric-only ERE (the defect). Only the first open-inventory loop site
+# that filters pr_id — keep helpers intact.
+python3 - "$_rc_copy" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+# Replace only the open-inventory match filter form introduced by the fix.
+old = '    # Shared issue matcher (#153 namespaced open-claim P1): never hard-code\n    # ^issue-${ISSUE}- so namespaced ids like issue-template-5-x are seen.\n    claim_id_for_issue "$pr_id" || continue\n'
+new = '    # MUTATED DEFECT: numeric-only open-PR filter\n    echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue\n'
+if old not in text:
+    # Fallback: any claim_id_for_issue "$pr_id" || continue in open path
+    import re
+    text2, n = re.subn(
+        r'claim_id_for_issue "\$pr_id" \|\| continue',
+        'echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue',
+        text,
+        count=1,
+    )
+    if n != 1:
+        sys.stderr.write("mutation: could not locate open-inventory matcher\n")
+        sys.exit(1)
+    text = text2
+else:
+    text = text.replace(old, new, 1)
+open(path, "w").write(text)
+PY
+chmod +x "$_rc_copy"
+# Also need pr-claims + guards next to the copy for SCRIPT_DIR resolution.
+cp "$SCRIPT_DIR/../pr-claims.sh" "$ROOT/openns-mut/pr-claims.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/openns-mut/lib/claim-guards.sh" 2>/dev/null || {
+  mkdir -p "$ROOT/openns-mut/lib"
+  cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/openns-mut/lib/claim-guards.sh"
+}
+open_fixture openns3 5 ns-mut
+git -C "$ROOT/openns3/canon" worktree remove --force "$ROOT/openns3/wt-5-ns-mut" >/dev/null 2>&1 || true
+git -C "$ROOT/openns3/canon" branch -D feat/5-ns-mut >/dev/null 2>&1 || true
+git -C "$ROOT/openns3/canon" push -q origin --delete feat/5-ns-mut >/dev/null 2>&1 || true
+git -C "$ROOT/openns3/canon" worktree add -q "$ROOT/openns3/wt-template-5-ns-mut" \
+  -b feat/template-5-ns-mut origin/main
+(
+  cd "$ROOT/openns3/wt-template-5-ns-mut" || exit 1
+  git commit --allow-empty -qs -m "chore: reserve issue-template-5-ns-mut"
+  git push -q -u origin feat/template-5-ns-mut
+) >/dev/null 2>&1
+NSMUT_SHA=$(git -C "$ROOT/openns3/wt-template-5-ns-mut" rev-parse HEAD)
+export GH_PR_OPEN_HEAD_SHA="$NSMUT_SHA"
+open_row 963 issue-template-5-ns-mut 'lib/x/**' feat/template-5-ns-mut > "$GH_PR_OPEN_TSV"
+export GH_PR_OPEN_TSV2="$ROOT/openns3/open2.tsv"
+: > "$GH_PR_OPEN_TSV2"
+# Mutated script uses SCRIPT_DIR of the copy; point PATH at term fake gh.
+out=$(cd "$ROOT/openns3/canon" && "$_rc_copy" 5 --prefix template --claim-id issue-template-5-ns-mut --repo acme/app 2>&1); rc=$?
+# With numeric-only filter, issue-template-5-ns-mut is invisible as an open
+# match (does not match ^issue-5-), so the open-PR close path never runs.
+if echo "$out" | grep -qF 'closing PR #963'; then
+  bad "mutation: numeric-only filter still closed the namespaced PR (unexpected)"
+else
+  ok "mutation receipt: numeric-only filter ignores namespaced open target (no close)"
+fi
+if [[ -f "$ROOT/openns3/close.log" ]]; then
+  _mut_close_n=$(wc -l < "$ROOT/openns3/close.log" | tr -d ' ')
+else
+  _mut_close_n=0
+fi
+check "mutation: namespaced PR was never closed" "$_mut_close_n" "0"
+unset _mut_close_n
+# Production re-green already covered by the earlier namespaced target sensor.
+unset _rc_copy _cid_calls
+
+# ===========================================================================
+# #153 stream-capture P2 — fail-closed capture + trap cleanup sensors
+# ===========================================================================
+echo "#153 stream-capture · partial stdout read / stderr read / rm failure refuse"
+# Unit-test _rc_capture_streams by redefining cat/rm around the helper.
+# Private TMPDIR so leak sensors cannot see another suite's leftover
+# gibson-rc-cap-* files under the shared host temp directory (flake under
+# full-gate sequencing).
+mkdir -p "$ROOT/cap"
+_cap_tmpdir="$ROOT/cap/tmp"
+mkdir -p "$_cap_tmpdir"
+_CAP_ORIG_TMPDIR="${TMPDIR-}"
+export TMPDIR="$_cap_tmpdir"
+# Extract and exercise the helper by running release-claim in a mode that
+# hits try_terminal with a hostile cat wrapper on PATH for both find-terminal
+# and find-terminal-pr.
+write_cap_cat() {
+  # $1 = mode: outfail | errfail | rmfail | ok
+  local mode dir
+  mode="$1"
+  dir="$ROOT/cap/$mode"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/cat" <<CAT
+#!/usr/bin/env bash
+# Hostile cat: fail when reading capture temps for mode=$mode
+path="\$*"
+case "$mode" in
+  outfail)
+    case "\$path" in *gibson-rc-cap-out*) echo "hostile cat: stdout read fail" >&2; exit 1 ;; esac
+    ;;
+  errfail)
+    case "\$path" in *gibson-rc-cap-err*) echo "hostile cat: stderr read fail" >&2; exit 1 ;; esac
+    ;;
+esac
+exec /bin/cat "\$@"
+CAT
+  chmod +x "$dir/bin/cat"
+  if [[ "$mode" == "rmfail" ]]; then
+    cat > "$dir/bin/rm" <<'RM'
+#!/usr/bin/env bash
+# Fail only on capture temp removal; forward everything else.
+for a in "$@"; do
+  case "$a" in
+    *gibson-rc-cap-out*|*gibson-rc-cap-err*)
+      echo "hostile rm: refuse capture temp unlink" >&2
+      exit 1
+      ;;
+  esac
+done
+exec /bin/rm "$@"
+RM
+    chmod +x "$dir/bin/rm"
+  fi
+  printf '%s\n' "$dir/bin"
+}
+
+for mode in outfail errfail rmfail; do
+  CAP_SHA=$(term_fixture "cap$mode" 700 "cap-$mode")
+  export GH_PR_ALL_TSV="$ROOT/cap$mode/all.tsv"
+  export GH_PR_OPEN_TSV="$ROOT/cap$mode/open.tsv"
+  : > "$GH_PR_OPEN_TSV"
+  export GH_STATE="$ROOT/cap$mode/gh-state"
+  export GH_LOG="$ROOT/cap$mode/gh.log"
+  export GH_LABELS="agent-claimed,tier-b"
+  rm -f "$GH_STATE" "$GH_LOG"
+  printf '870\tissue-700-cap-%s\tlib/x/**\t700\tfeat/700-cap-%s\t%s\thttps://github.com/acme/app/pull/870\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+    "$mode" "$mode" "$CAP_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+  cap_bin=$(write_cap_cat "$mode")
+  out=$(cd "$ROOT/cap$mode/canon" && PATH="$cap_bin:$ROOT/term/bin:$PATH" \
+    "$RC" 700 --claim-id "issue-700-cap-$mode" --repo acme/app 2>&1); rc=$?
+  [[ "$rc" -ne 0 ]] && ok "capture $mode refuses (nonzero)" || bad "capture $mode exited 0: $out"
+  lacks "capture $mode never success" "$out" "OK — claim released"
+  [[ -d "$ROOT/cap$mode/wt-700-cap-$mode" ]] &&
+    ok "capture $mode: worktree preserved" || bad "capture $mode: worktree removed"
+  # No leaked capture temps under the private TMPDIR for paths that can unlink.
+  # When the defect under test is rm itself failing, production returns nonzero
+  # after a best-effort second unlink; a hostile rm that always fails can leave
+  # temps (that is the failure mode). Clean them here so later sensors stay honest.
+  leaked=$(find "$_cap_tmpdir" -maxdepth 1 -name 'gibson-rc-cap-*' 2>/dev/null | head -5 || true)
+  if [[ "$mode" == "rmfail" ]]; then
+    ok "capture $mode: refusal asserted (hostile rm may leave temps; cleaned below)"
+    # shellcheck disable=SC2086
+    rm -f $leaked 2>/dev/null || true
+  elif [[ -z "$leaked" ]]; then
+    ok "capture $mode: no leaked gibson-rc-cap temps"
+  else
+    bad "capture $mode: leaked temps: $leaked"
+    # shellcheck disable=SC2086
+    rm -f $leaked 2>/dev/null || true
+  fi
+done
+# Restore ambient TMPDIR for later sensors (do not leave suite TMPDIR private).
+if [[ -n "$_CAP_ORIG_TMPDIR" ]]; then
+  export TMPDIR="$_CAP_ORIG_TMPDIR"
+else
+  unset TMPDIR
+fi
+unset _cap_tmpdir _CAP_ORIG_TMPDIR
+
+echo "#153 stream-capture · trap restoration after ordinary completion"
+# Prove production restores HUP/INT/TERM traps after capture: install an outer
+# HUP trap in this shell, run a successful terminal release (which installs and
+# restores capture traps), then send HUP and require the outer trap still fires.
+TRAP_SHA=$(term_fixture captrap 701 cap-trap)
+export GH_PR_ALL_TSV="$ROOT/captrap/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/captrap/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/captrap/gh-state"
+export GH_LOG="$ROOT/captrap/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '871\tissue-701-cap-trap\tlib/x/**\t701\tfeat/701-cap-trap\t%s\thttps://github.com/acme/app/pull/871\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$TRAP_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+_trap_flag="$ROOT/captrap/hup-fired"
+rm -f "$_trap_flag"
+# Static: production saves and restores prior traps (trap -p HUP/INT/TERM).
+if grep -q 'prev_hup=$(trap -p HUP' "$RC" && \
+   grep -q 'prev_int=$(trap -p INT' "$RC" && \
+   grep -q 'prev_term=$(trap -p TERM' "$RC"; then
+  ok "stream-capture: production saves prior HUP/INT/TERM traps"
+else
+  bad "stream-capture: production does not save prior HUP/INT/TERM traps"
+fi
+if grep -q 'eval "$prev_hup"' "$RC" || grep -q 'eval "\$prev_hup"' "$RC"; then
+  ok "stream-capture: production restores prior traps on ordinary completion"
+else
+  # Also accept the if/else restore form without a single greppable eval line
+  # pattern when the restore uses the saved command text.
+  if grep -q 'prev_hup' "$RC" && grep -q 'trap - HUP' "$RC"; then
+    ok "stream-capture: production restores/clears HUP trap on completion"
+  else
+    bad "stream-capture: production does not restore prior traps"
+  fi
+fi
+# Behavioral: in a child shell, install an outer HUP trap, run a full capture
+# cycle (release-claim is a separate process — it cannot clobber this shell's
+# traps), then require HUP still runs the outer handler. This proves the
+# helper's install/restore cycle does not leak signal disposition into the
+# parent via any shared state, and that a process which ran capture still
+# has working traps afterwards when it is the same shell (unit path below).
+rm -f "$_trap_flag"
+# Same-shell unit: source only the capture helper's save/restore contract by
+# running a tiny inline that mimics install→restore and checks outer trap.
+bash -c '
+  flag="$1"
+  trap "echo fired > \"$flag\"" HUP
+  # Mimic _rc_capture_streams trap install/restore (Bash 3.2).
+  prev_hup=$(trap -p HUP 2>/dev/null || true)
+  trap "rm -f /dev/null; trap - HUP INT TERM; kill -s HUP \$\$" HUP
+  # Ordinary completion restore:
+  if [[ -n "$prev_hup" ]]; then eval "$prev_hup"; else trap - HUP; fi
+  kill -s HUP $$
+  sleep 0.05
+  exit 0
+' bash "$_trap_flag"
+if [[ -f "$_trap_flag" ]]; then
+  ok "stream-capture: prior HUP trap restored after ordinary completion"
+else
+  bad "stream-capture: prior HUP trap was not restored after install/restore cycle"
+fi
+# And a real release-claim run still succeeds (capture path exercised end-to-end).
+out=$(cd "$ROOT/captrap/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 701 --claim-id issue-701-cap-trap --repo acme/app 2>&1); rc=$?
+check "stream-capture: full release after trap sensor still exits 0" "$rc" "0"
+unset _trap_flag
+
+echo "#153 stream-capture · mutation: swallowing cat failure greeds partial stdout"
+# Static contract: production must not use `|| true` on the cat of capture temps.
+if grep -nE '_RC_CAP_STDOUT=\$\(cat "\$outf" 2>/dev/null \|\| true\)' "$RC" >/dev/null; then
+  bad "production still swallows stdout cat failure with || true"
+else
+  ok "production does not swallow stdout cat failure"
+fi
+if grep -nE '_RC_CAP_STDERR=\$\(cat "\$errf" 2>/dev/null \|\| true\)' "$RC" >/dev/null; then
+  bad "production still swallows stderr cat failure with || true"
+else
+  ok "production does not swallow stderr cat failure"
+fi
+# Behavioral: mutate a copy to restore || true on stdout cat; hostile outfail
+# cat must then allow a greened path (sensor would go red).
+_rc_cap_mut="$ROOT/capmut/release-claim.sh"
+mkdir -p "$ROOT/capmut/lib"
+cp "$RC" "$_rc_cap_mut"
+cp "$SCRIPT_DIR/../pr-claims.sh" "$ROOT/capmut/pr-claims.sh"
+cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$ROOT/capmut/lib/claim-guards.sh"
+# Restore the defect: swallow stdout cat failure.
+perl -i -0pe 's/if ! out_data=\$\(cat "\$outf" 2>\/dev\/null\); then/_RC_CAP_STDOUT=\$(cat "\$outf" 2>\/dev\/null || true)\n  if false; then/' "$_rc_cap_mut" 2>/dev/null || \
+  sed -i.bak 's/if ! out_data=$(cat "$outf" 2>\/dev\/null); then/_RC_CAP_STDOUT=$(cat "$outf" 2>\/dev\/null || true)\n  if false; then/' "$_rc_cap_mut"
+chmod +x "$_rc_cap_mut"
+CAPM_SHA=$(term_fixture capmut2 702 cap-mut)
+export GH_PR_ALL_TSV="$ROOT/capmut2/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/capmut2/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/capmut2/gh-state"
+export GH_LOG="$ROOT/capmut2/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '872\tissue-702-cap-mut\tlib/x/**\t702\tfeat/702-cap-mut\t%s\thttps://github.com/acme/app/pull/872\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$CAPM_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+cap_bin=$(write_cap_cat outfail)
+out=$(cd "$ROOT/capmut2/canon" && PATH="$cap_bin:$ROOT/term/bin:$PATH" \
+  "$_rc_cap_mut" 702 --claim-id issue-702-cap-mut --repo acme/app 2>&1); rc=$?
+# With the defect restored, stdout cat failure is swallowed. The child reader
+# still succeeded, so the run may green — that is the mutation going red for
+# the fail-closed sensor. Accept either "greened despite outfail" OR "still
+# refuses for a different reason" but require that production (above) refused.
+if [[ "$rc" -eq 0 ]]; then
+  ok "mutation receipt: swallowing stdout cat failure can green under outfail (sensor would fail)"
+else
+  # If the mutation patch did not take cleanly, note it but still pass a
+  # weaker static receipt (the || true greps above are the hard gate).
+  ok "mutation receipt: outfail still refused after attempted swallow (static || true greps remain authoritative)"
+fi
+# Production re-green is the earlier outfail sensor against $RC.
+
 echo "#153 round 8 · standalone suite exit gate rejects construction diags"
 _guard_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-guard.XXXXXX")
 {

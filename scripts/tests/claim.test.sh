@@ -47,7 +47,7 @@ case "$1 $2" in
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
   "api graphql")
     # pr-claims.sh's paginated GraphQL read. `list` restricts the query to
-    # `states: [OPEN]` and wants 7 fields; `find-terminal` walks every state
+    # `states: [OPEN]` and wants 8 fields; `find-terminal` walks every state
     # and wants 13, including the exact head SHA that release-claim.sh's
     # cleanup proof is anchored to. Closed PRs move to GH_PR_FILE.closed, so
     # this fixture models the real lifecycle: a released claim leaves the
@@ -57,6 +57,39 @@ case "$1 $2" in
     # number, body-agnostic. It is matched FIRST because its query also
     # carries `states: [OPEN]`. GH_PR_ORPHANS models a PR that exists on the
     # server but is not (yet) in the published claim listing.
+    #
+    # `find-open-pr` (operation openPrClaimEvidence) is the bound open
+    # evidence read (#153 freeze/revalidate P1). It also carries
+    # states:[OPEN], so it must be distinguished from the inventory list
+    # before the generic open branch. It returns 12 fields including head SHA.
+    want_open_evidence=0
+    for a in "$@"; do
+      case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac
+    done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      want_num=""
+      for a in "$@"; do
+        case "$a" in
+          *"select(.number == "*)
+            want_num=$(printf '%s' "$a" | sed -n 's/.*select(\.number == \([0-9][0-9]*\)).*/\1/p' | head -1)
+            ;;
+        esac
+      done
+      while IFS='|' read -r number claim scope branch url created updated cross; do
+        [[ -n "$claim" ]] || continue
+        [[ -z "$want_num" || "$number" == "$want_num" ]] || continue
+        issue=""
+        if [[ "$claim" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?([0-9]+)- ]]; then
+          issue="${BASH_REMATCH[2]}"
+        fi
+        headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+        [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tOPEN\t%s\tacme/app\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
+          "${cross:-false}" "$created" "$updated"
+      done < "${GH_PR_FILE:-/dev/null}"
+      exit 0
+    fi
     want_numbers=0
     for a in "$@"; do
       case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac
