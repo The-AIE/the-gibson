@@ -11,7 +11,7 @@ If you only open one file, use the row that matches you. Glossary:
 ## 🙂 Non-technical owner (Operator)
 
 1. [VIBECODING.md](../VIBECODING.md) — the only page you need  
-2. Optionally: [HOW-IT-WORKS.md](../HOW-IT-WORKS.md) — what The Gibson is and how it works, still jargon-free  
+2. Optionally: [HOW-IT-WORKS.md](../HOW-IT-WORKS.md) — comprehensive SDLC guide: plain-language Part I, technical Parts II–IV
 3. Optionally: decision-card shape in [playbooks/templates/](../playbooks/templates/)  
 4. Stop. You do not need the rest of this repo.
 
@@ -87,7 +87,7 @@ If you only open one file, use the row that matches you. Glossary:
 | PLAN → issues sample | [examples/04-plan-to-issues-sample.md](examples/04-plan-to-issues-sample.md) |
 | UX eval sample | [examples/07-ux-eval-sample.md](examples/07-ux-eval-sample.md) |
 | AuthZ matrix sample | [examples/08-authz-matrix-sample.md](examples/08-authz-matrix-sample.md) |
-| What it is & how it works (any reader) | [../HOW-IT-WORKS.md](../HOW-IT-WORKS.md) |
+| How the automated SDLC works (human + technical) | [../HOW-IT-WORKS.md](../HOW-IT-WORKS.md) |
 | Security audit: threat model, layer status, checklist | [../SECURITY-AUDIT.md](../SECURITY-AUDIT.md) |
 | Troubleshooting | [troubleshooting/](troubleshooting/) |
 | Doc build queue | [DOC-BACKLOG.md](DOC-BACKLOG.md) |
