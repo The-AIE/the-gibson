@@ -1,31 +1,90 @@
+# gibson-template-version: sha256:b83840d535c79474ee0d95afaa5113263816d47b64fa571735d4156332d21ab8
 # The Gibson — schema change without migration file fails (docs/12, L-002)
 # Install as .github/workflows/schema-guard.yml when the repo has Prisma (or
 # adapt paths for Drizzle/SQL migrations).
+#
+# Shape (issue #191): workflow-level path filters would also hide the
+# destructive-flag ban whenever a PR touches only scripts/tests/config. Split
+# into two jobs in one file:
+#   schema-guard — path-gated via an in-job git-diff check (same path set as
+#                  the former on.pull_request.paths filter)
+#   forbid-destructive-flags — runs on every PR, no path filter
+# Chosen over two on: triggers / a second workflow file because gibson-gate
+# style is a single pull_request trigger with no workflow-level paths:, and
+# an in-job check needs no third-party paths-filter action.
 
 name: gibson-schema-guard
 on:
   pull_request:
-    paths:
-      - "prisma/**"
-      - "**/schema.prisma"
-      - "drizzle/**"
-      - "supabase/migrations/**"
-      - "migrations/**"
+
+# Deny all by default. Jobs grant least privilege only.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   schema-guard:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { fetch-depth: 0 }
 
-      - name: Detect schema vs migration coherence
+      - name: Detect whether schema-related paths changed
+        id: paths
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          changed=$(git diff --name-only "$BASE"..."$HEAD" || true)
+          # fetch-depth: 0 is not enough on every PR (forks, missing base
+          # ref). Fetch each end explicitly; a failed diff must FAIL the
+          # step — never become changed=false (fail closed).
+          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "Fetching missing base SHA $BASE"
+            git fetch --no-tags --prune origin "$BASE"
+          fi
+          if ! git cat-file -e "${HEAD}^{commit}" 2>/dev/null; then
+            echo "Fetching missing head SHA $HEAD"
+            git fetch --no-tags --prune origin "$HEAD"
+          fi
+          if ! changed=$(git diff --name-only "$BASE"..."$HEAD"); then
+            echo "::error::git diff ${BASE}...${HEAD} failed — refusing to skip schema coherence (fail closed)."
+            exit 1
+          fi
+          # Former workflow-level paths: filter (kept as an in-job gate).
+          if echo "$changed" | grep -E '^(prisma/|drizzle/|supabase/migrations/|migrations/)' >/dev/null \
+            || echo "$changed" | grep -E 'schema\.prisma$' >/dev/null \
+            || echo "$changed" | grep -E '/schema\.prisma$' >/dev/null; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Schema-related paths present in this PR — running coherence check."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No schema-related paths in this PR — schema coherence check skipped."
+          fi
+
+      - name: Detect schema vs migration coherence
+        if: steps.paths.outputs.changed == 'true'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "Fetching missing base SHA $BASE"
+            git fetch --no-tags --prune origin "$BASE"
+          fi
+          if ! git cat-file -e "${HEAD}^{commit}" 2>/dev/null; then
+            echo "Fetching missing head SHA $HEAD"
+            git fetch --no-tags --prune origin "$HEAD"
+          fi
+          if ! changed=$(git diff --name-only "$BASE"..."$HEAD"); then
+            echo "::error::git diff ${BASE}...${HEAD} failed — refusing to skip schema coherence (fail closed)."
+            exit 1
+          fi
           echo "Changed files:"
           echo "$changed"
 
@@ -50,6 +109,15 @@ jobs:
           else
             echo "No schema model change detected in path filter hit — OK"
           fi
+
+  # Runs on every PR (no path filter). Destructive migrate flags are a
+  # fleet-wide ban and must not be skippable by avoiding prisma/** paths.
+  forbid-destructive-flags:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Forbid destructive Prisma flags in scripts
         run: |

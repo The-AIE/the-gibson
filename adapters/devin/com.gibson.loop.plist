@@ -5,8 +5,12 @@
 
   1. Replace every CHANGEME and REPO_PATH below.
   2. cp adapters/devin/com.gibson.loop.plist ~/Library/LaunchAgents/
-  3. launchctl load -w ~/Library/LaunchAgents/com.gibson.loop.plist
+  3. chmod 600 ~/Library/LaunchAgents/com.gibson.loop.plist
+     (plist may hold DEVIN_API_KEY / webhook URL — keep it owner-readable only)
+  4. launchctl load -w ~/Library/LaunchAgents/com.gibson.loop.plist
   Stop it with `touch <repo>/gibson/HALT` (clean) or `launchctl unload` (hard).
+  KeepAlive is {SuccessfulExit: false}: a clean exit (including HALT) is not
+  restarted; only crash/nonzero exits relaunch the loop.
 -->
 <plist version="1.0">
 <dict>
@@ -52,7 +56,10 @@
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
 
   <key>StandardOutPath</key>
   <string>/Users/CHANGEME/Library/Logs/gibson-loop.log</string>
