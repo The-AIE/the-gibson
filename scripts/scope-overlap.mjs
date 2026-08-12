@@ -88,6 +88,147 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// =============================================================================
+// Pure token kernel (#153 grammar / #181 Bash↔JS parity)
+//
+// This block is the single authority for "may two scope tokens authorize
+// concurrent work?". loop-fleet.sh ports the same rules in Bash. The
+// differential sensor (--pair and scripts/tests/*) compares both.
+//
+// Contract (fail closed — never authorize concurrency on ambiguous evidence):
+//   - ROOT ("**") overlaps every path, including another "**"
+//   - empty, unsafe, or unstemmable tokens overlap (refuse concurrency)
+//   - exact / parent-child / boundary-aware stem containment overlap
+//   - safe sibling paths (docs/a vs docs/b, app vs application) stay disjoint
+// =============================================================================
+
+/**
+ * THE AUTHORITATIVE SCOPE GRAMMAR (#153 review rounds 5–6, P1; #181 parity)
+ *
+ *   token    := ROOT | path
+ *   ROOT     := "**"                       the whole repository
+ *   path     := literal ("/" literal)* ("/" wild)?
+ *   literal  := [A-Za-z0-9_.-]+  and not "." and not ".."
+ *   wild     := "*" | "**"
+ *
+ * i.e. at least one literal segment, no empty segments (so no leading or
+ * trailing "/" and no "//"), no parent-directory escapes, and a wildcard only
+ * as a whole trailing segment. A bare "*", a bare "/", a leading double-star
+ * segment, "a//b", "../x", "*.ts" and a double-star in the middle of a path
+ * (including a / ** / b) are all rejected as ambiguous rather than normalised
+ * into something that quietly protects less than it says.
+ *
+ * ROOT ("**") is the one deliberate root-wide scope, and it is SUPPORTED: it
+ * overlaps every path rather than overlapping nothing (see tokensOverlap).
+ */
+const ROOT_SCOPE = "**";
+const SCOPE_LITERAL = /^[A-Za-z0-9_.-]+$/;
+
+/** null when the token is valid; otherwise the reason it is not. */
+function currentScopeTokenProblem(token) {
+  if (typeof token !== "string" || token === "") return "empty token";
+  if (token === ROOT_SCOPE) return null;
+  const segments = token.split("/");
+  let literals = 0;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const last = i === segments.length - 1;
+    if (seg === "") {
+      return "empty path segment (a leading '/', a trailing '/', or '//')";
+    }
+    if (seg === "*" || seg === "**") {
+      if (!last) return `wildcard segment '${seg}' is only allowed as the final segment`;
+      continue;
+    }
+    if (!SCOPE_LITERAL.test(seg)) {
+      return `segment '${seg}' is not a plain path segment ([A-Za-z0-9_.-]+) or a trailing '*'/'**'`;
+    }
+    if (seg === "." || seg === "..") {
+      return `segment '${seg}' is a relative-path escape`;
+    }
+    literals++;
+  }
+  if (literals === 0) {
+    return "no literal path segment — it normalises to nothing and would collide with nothing";
+  }
+  return null;
+}
+
+/** Normalize a scope token for comparison. */
+function stem(token) {
+  // strip trailing ** / * segments for prefix compare
+  return token.replace(/\/\*\*$/, "").replace(/\*\*$/, "").replace(/\*$/, "").replace(/\/$/, "");
+}
+
+/**
+ * True when two scope tokens collide under the shared concurrency contract.
+ * - either side empty / non-string / grammar-invalid — unreadable, assume collision
+ * - either side is the root-wide scope (`**`) — it contains every path
+ * - either side normalises to nothing — unreadable, so assume collision
+ * - exact match
+ * - either is prefix of the other (after stem)
+ * - shared path prefix of at least one directory segment (boundary-aware)
+ *
+ * Production claim paths still run assertScopeTokens first for a precise
+ * diagnostic; this kernel must itself fail closed so a planner (JS) and the
+ * fleet driver (Bash) never disagree (#181).
+ */
+function tokensOverlap(a, b) {
+  // Empty / missing / non-string: cannot authorize concurrency (#181).
+  if (typeof a !== "string" || typeof b !== "string") return true;
+  if (a === "" || b === "") return true;
+  // Unclassifiable evidence: refuse concurrency rather than wave through.
+  if (currentScopeTokenProblem(a) != null || currentScopeTokenProblem(b) != null) {
+    return true;
+  }
+  // The deliberate root-wide scope (#153 review round 5, P1 / #181). `**`
+  // stems to the empty string; without this branch it used to fall through
+  // to "no overlap" and a whole-repo claim protected nothing.
+  if (a === ROOT_SCOPE || b === ROOT_SCOPE) return true;
+  if (a === b) return true;
+  const sa = stem(a);
+  const sb = stem(b);
+  // Belt-and-suspenders: grammar-validated tokens should not empty-stem, but
+  // "I cannot tell" must never be answered as "they do not touch".
+  if (!sa || !sb) return true;
+  if (sa === sb) return true;
+  // prefix: app/api vs app/api/auth/**
+  if (sa.startsWith(sb + "/") || sb.startsWith(sa + "/")) return true;
+  // reciprocal stem containment used by the old claim.sh grep
+  if (sa.includes(sb) || sb.includes(sa)) {
+    // avoid matching "app" vs "application" — require boundary
+    const boundary = (x, y) =>
+      x === y ||
+      x.startsWith(y + "/") ||
+      x.startsWith(y + ".") ||
+      y.startsWith(x + "/") ||
+      y.startsWith(x + ".");
+    if (boundary(sa, sb) || boundary(sb, sa)) return true;
+  }
+  return false;
+}
+
+/**
+ * Pair mode for the differential sensor (#181). No ledger, no network:
+ *   node scripts/scope-overlap.mjs --pair TOKEN_A TOKEN_B
+ * Prints "overlap" or "disjoint" and exits 1 / 0. Invalid tokens are overlap
+ * (fail closed). Not an environment-controlled hook — a first-class read-only
+ * query of the same kernel production uses.
+ */
+function runPairMode(args) {
+  // args is process.argv.slice(2) starting at --pair
+  if (args[0] !== "--pair") return false;
+  if (args.length !== 3) {
+    console.error("scope-overlap: --pair requires exactly two tokens");
+    process.exit(2);
+  }
+  const a = args[1];
+  const b = args[2];
+  const hit = tokensOverlap(a, b);
+  console.log(hit ? "overlap" : "disjoint");
+  process.exit(hit ? 1 : 0);
+}
+
 // --- production floor for the publication barrier (#153 review round 3, P1)
 // These are the SMALLEST values production will run with. GIBSON_CLAIM_ADMIT_*
 // may raise them; nothing may lower them, and there is no documented knob that
@@ -190,6 +331,9 @@ FLAGS
                   option to supply the inventory: admission reads it here, so a
                   caller cannot hand in a fabricated one.
   --json          machine-readable result
+  --pair A B      pure token comparison only (no ledger): print overlap|disjoint,
+                  exit 1 on overlap/invalid, 0 on disjoint. Same kernel as
+                  loop-fleet.sh (#181 parity). Not an env-controlled test hook.
 
 ENV (admission mode only — these may RAISE the barrier, never lower it)
   GIBSON_CLAIM_ADMIT_ATTEMPTS       most reads before giving up
@@ -215,6 +359,13 @@ ENV (admission mode only — these may RAISE the barrier, never lower it)
 }
 
 const argv = process.argv.slice(2);
+// Pure token pair check first — no ledger, no network (#181 differential).
+// Must run before generic --help dispatch so
+// `node scope-overlap.mjs --pair --help docs/a.md` treats `--help` and
+// `docs/a.md` as pair operands rather than silently becoming usage help.
+if (argv[0] === "--pair") {
+  runPairMode(argv);
+}
 if (argv.includes("-h") || argv.includes("--help") || argv.length === 0) {
   help();
   process.exit(argv.includes("-h") || argv.includes("--help") ? 0 : 2);
@@ -855,79 +1006,10 @@ function spaceReads(seconds) {
 }
 
 /**
- * THE AUTHORITATIVE SCOPE GRAMMAR (#153 review rounds 5–6, P1)
- *
- * Every authoritative scope source uses this grammar: live PR-body claim
- * scopes, per-file ledger claims, legacy table-ledger rows, and operator
- * `--scope` tokens. A token that does not parse is ambiguous evidence and
- * refuses — it never disappears from overlap admission, and never becomes a
- * non-overlapping empty stem.
- *
- * Round 5 applied this only to PR-body rows. Round 6 closed the bypass for
- * ledger and operator sources: a live legacy claim scoped with a mid-path
- * double-star (a / ** / b) versus a proposed a/x/b was returning OK because
- * nonempty was enough for ledger admission while only PR-body tokens were
- * grammar-checked.
- *
- * The grammar is deliberately narrow and matches the scopes this repo
- * actually issues (app/api/auth/** , lib/email.ts, docs/05-concurrency.md,
- * components/nav/** ):
- *
- *   token    := ROOT | path
- *   ROOT     := "**"                       the whole repository
- *   path     := literal ("/" literal)* ("/" wild)?
- *   literal  := [A-Za-z0-9_.-]+  and not "." and not ".."
- *   wild     := "*" | "**"
- *
- * i.e. at least one literal segment, no empty segments (so no leading or
- * trailing "/" and no "//"), no parent-directory escapes, and a wildcard only
- * as a whole trailing segment. A bare "*", a bare "/", a leading double-star
- * segment, "a//b", "../x", "*.ts" and a double-star in the middle of a path
- * (including a / ** / b) are all rejected as ambiguous rather than normalised
- * into something that quietly protects less than it says.
- *
- * ROOT ("**") is the one deliberate root-wide scope, and it is SUPPORTED: it
- * overlaps every path rather than overlapping nothing (see tokensOverlap).
- * Refusing it outright would be defensible too, but silently treating "I claim
- * the whole repository" as "I claim nothing" is not.
- */
-const ROOT_SCOPE = "**";
-const SCOPE_LITERAL = /^[A-Za-z0-9_.-]+$/;
-
-/** null when the token is valid; otherwise the reason it is not. */
-function currentScopeTokenProblem(token) {
-  if (typeof token !== "string" || token === "") return "empty token";
-  if (token === ROOT_SCOPE) return null;
-  const segments = token.split("/");
-  let literals = 0;
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const last = i === segments.length - 1;
-    if (seg === "") {
-      return "empty path segment (a leading '/', a trailing '/', or '//')";
-    }
-    if (seg === "*" || seg === "**") {
-      if (!last) return `wildcard segment '${seg}' is only allowed as the final segment`;
-      continue;
-    }
-    if (!SCOPE_LITERAL.test(seg)) {
-      return `segment '${seg}' is not a plain path segment ([A-Za-z0-9_.-]+) or a trailing '*'/'**'`;
-    }
-    if (seg === "." || seg === "..") {
-      return `segment '${seg}' is a relative-path escape`;
-    }
-    literals++;
-  }
-  if (literals === 0) {
-    return "no literal path segment — it normalises to nothing and would collide with nothing";
-  }
-  return null;
-}
-
-/**
  * Fail closed when any token is outside the safe grammar. `origin` names the
  * evidence source in the error (PR body, per-file ledger, legacy table, or
  * proposed --scope) so the operator can find the bad claim without guessing.
+ * Grammar and tokensOverlap live at the top of this file (pure kernel / #181).
  */
 function assertScopeTokens(tokens, origin) {
   for (const token of tokens) {
@@ -1235,54 +1317,7 @@ const ledgerClaims =
   settledLedgerClaims != null ? settledLedgerClaims : loadClaims();
 const live = [...ledgerClaims, ...prClaims].filter((c) => c.id !== opt.claimId);
 
-/** Normalize a scope token for comparison. */
-function stem(token) {
-  // strip trailing ** / * segments for prefix compare
-  return token.replace(/\/\*\*$/, "").replace(/\*\*$/, "").replace(/\*$/, "").replace(/\/$/, "");
-}
-
-/**
- * True when two scope tokens collide.
- * - either side is the root-wide scope (`**`) — it contains every path
- * - either side normalises to nothing — unreadable, so assume collision
- * - exact match
- * - either is prefix of the other (after stem)
- * - shared path prefix of at least one directory segment
- *
- * By the time this runs, every authoritative source has already been through
- * assertScopeTokens, so empty stems are a last-ditch fail-closed belt rather
- * than the primary validation path.
- */
-function tokensOverlap(a, b) {
-  if (!a || !b) return false;
-  // The deliberate root-wide scope (#153 review round 5, P1). `**` stems to
-  // the empty string, so it used to fall through to "no overlap": a claim on
-  // the entire repository protected nothing. It contains every path, so it
-  // overlaps every token — including another `**`.
-  if (a === ROOT_SCOPE || b === ROOT_SCOPE) return true;
-  if (a === b) return true;
-  const sa = stem(a);
-  const sb = stem(b);
-  // Belt-and-suspenders: every authoritative token is grammar-validated
-  // before comparison, but "I cannot tell" must never be answered as "they
-  // do not touch" on a path that decides whether two lanes may run at once.
-  if (!sa || !sb) return true;
-  if (sa === sb) return true;
-  // prefix: app/api vs app/api/auth/**
-  if (sa.startsWith(sb + "/") || sb.startsWith(sa + "/")) return true;
-  // reciprocal stem containment used by the old claim.sh grep
-  if (sa.includes(sb) || sb.includes(sa)) {
-    // avoid matching "app" vs "application" — require boundary
-    const boundary = (x, y) =>
-      x === y ||
-      x.startsWith(y + "/") ||
-      x.startsWith(y + ".") ||
-      y.startsWith(x + "/") ||
-      y.startsWith(x + ".");
-    if (boundary(sa, sb) || boundary(sb, sa)) return true;
-  }
-  return false;
-}
+// stem / tokensOverlap: pure kernel at top of file (#181 parity with Bash).
 
 function scopesOverlap(proposed, existing) {
   const hits = [];
