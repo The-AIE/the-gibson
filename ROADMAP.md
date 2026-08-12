@@ -8,6 +8,30 @@ nav_exclude: true
 The Gibson dogfoods itself: each phase ships via its own pipeline, and phase
 boundaries are working demos, not doc milestones.
 
+## Substrate first — conventions before features (2026-08-12, #190)
+
+Before the remaining phases take new feature work, the codebase itself becomes
+the foundation for success: conventions written down, sensor-enforced, and
+retrofitted. Rationale: the 2026-08-12 three-lens review found every tier's
+flagship file already embodies the right rule (`gibson-gate.yml`, `run-all.sh`,
+`formal-review.sh`) while the rest of that tier drifts below it — and lessons
+marked *fixed* in target repos (L-055, L-056) were never applied to the
+artifacts this repo ships. Features built on that substrate inherit its drift.
+
+- **[docs/CONVENTIONS.md](docs/CONVENTIONS.md)** is the contract: shell, `.mjs`,
+  Actions/templates, secrets, gate/control-plane, doc-system, lesson ledger,
+  vendoring. Every rule names its enforcement; every retrofit batch lands its
+  sensor in the same PR, so fixes can't regress.
+- **Order:** Batch D first (control-plane protected paths + secret handling —
+  live exposure, tiny diffs), then A (CI hardening: pins, permissions,
+  concurrency, visible skips), B (script conventions), C (doc sensors),
+  E (vendoring hygiene). Judgment-tier items (kill-switch canonical statement,
+  phantom lesson IDs, waiver policy) stay owner-gated.
+- **Meta-rule now in force:** a lesson is not `fixed` until Gibson's own shipped
+  artifacts reflect it. Fixed-in-target-only is `fix-pending (harness)`.
+- **Demo:** the self-gate runs the new sensors green on this repo, and a
+  deliberately planted violation of each convention class fails CI.
+
 ## Phase 1 — Doctrine (this commit)
 Design docs 01–15, operator guide, memory seeds, templates, specs. ✅
 
