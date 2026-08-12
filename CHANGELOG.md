@@ -15,16 +15,16 @@ and any migration note. Sync PRs (docs/18) quote the relevant entries verbatim.
 - **New `docs/CONVENTIONS.md`** — code & doc conventions for the harness repo
   itself, from the 2026-08-12 three-lens review (scripts A−, doc-system B−,
   CI/templates/security B−). Eight sections (shell, `.mjs`, Actions/templates,
-  secrets, gate/control-plane, doc-system, lesson ledger, vendoring); each rule
-  is anchored to an existing flagship file in this repo and names its
-  enforcement sensor. Appendix defines retrofit batches A–E, dispatched as
-  separate issues.
+  secrets, gate/control-plane, doc-system, lesson ledger, conditional
+  vendoring); each rule defines a target and points to an existing pattern,
+  retrofit batch, or owner decision. The appendix keeps enforcement separate
+  from adoption and makes vendoring work conditional on a vendored tree.
 - **ROADMAP.md gains a "Substrate first" track** ahead of the remaining phases:
   conventions + sensors land before new feature work. Introduces the meta-rule
   that a lesson's `Status` may not be `fixed` until Gibson's own shipped
   artifacts reflect it (fixed-in-target-only is `fix-pending (issue #N)`) —
-  closing the L-055/L-056 gap where lessons were applied in adopting repos but
-  not in the templates this repo ships.
+  closing the gap where lessons were applied in adopting repos but not in the
+  templates this repo ships.
 - Fork-owner note: docs-only; no script, CI, or template behavior changes in
   this entry. The behavior changes arrive with the batch PRs.
 
