@@ -119,6 +119,7 @@ source "$SCRIPT_DIR/silent-noop.sh"
 source "$DYNAMIC_LIB/thing.sh"
 # statically spelled, but absent — must be unknown rather than an invented edge
 source "$SCRIPT_DIR/does-not-exist.sh"
+if true; then source "$SCRIPT_DIR/lib/compound.sh"; fi
 if true; then exit 0; fi
 
 usage() {
@@ -126,6 +127,11 @@ usage() {
 source "$SCRIPT_DIR/not-executable-doc-example.sh"
 USAGE
 }
+EOF
+
+  cat > "$repo/scripts/lib/compound.sh" <<'EOF'
+#!/usr/bin/env bash
+true
 EOF
 
   cat > "$repo/scripts/silent-noop.sh" <<'EOF'
@@ -153,13 +159,13 @@ EOF
   # tests (classified separately) with mutation-category tags
   cat > "$repo/scripts/tests/demo.test.sh" <<'EOF'
 #!/usr/bin/env bash
-# mutation-category:review_bypass
-# mutation-category:stale_head_acceptance
-# mutation-category:halt_bypass
-# mutation-category:corrupt_state_progress
-# mutation-category:claim_ambiguity
-# mutation-category:false_delivery_success
-# mutation-category:incomplete_cleanup
+ok "mutation-category:review_bypass receipt"
+ok "mutation-category:stale_head_acceptance receipt"
+ok "mutation-category:halt_bypass receipt"
+ok "mutation-category:corrupt_state_progress receipt"
+ok "mutation-category:claim_ambiguity receipt"
+ok "mutation-category:false_delivery_success receipt"
+ok "mutation-category:incomplete_cleanup receipt"
 ok "mutation receipt: review bypass sensor would fail"
 echo "stale-head APPROVE is BLOCKED"
 echo "Law 5 and G12 and tier-c"
@@ -303,6 +309,35 @@ NODE
 
 # ---------------------------------------------------------------------------
 echo
+echo "=== large report stream completeness (>64 KiB) ==="
+node - "$FIX/scripts/large-output.sh" <<'NODE'
+const fs = require("fs");
+const out = ["#!/usr/bin/env bash"];
+for (let i = 0; i < 1800; i += 1) out.push('source "$DYNAMIC_' + i + '/thing.sh"');
+fs.writeFileSync(process.argv[2], out.join("\n") + "\n");
+NODE
+$GIT -C "$FIX" add -A
+$GIT -C "$FIX" commit -q -m "large report fixture"
+LARGE_SHA=$(git -C "$FIX" rev-parse HEAD)
+large_pipe_rc=0
+"$COLLECTOR" --repo "$FIX" --ref "$LARGE_SHA" --no-baseline --format json |
+  node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{if(Buffer.byteLength(s)<=65536)throw new Error("fixture output too small");JSON.parse(s)})' \
+  || large_pipe_rc=$?
+check "large piped JSON is complete" "$large_pipe_rc" "0"
+large_file_rc=0
+"$COLLECTOR" --repo "$FIX" --ref "$LARGE_SHA" --no-baseline --format json > "$ROOT/large-report.json" \
+  || large_file_rc=$?
+if [[ "$large_file_rc" -eq 0 ]] && node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$ROOT/large-report.json"; then
+  ok "large redirected JSON is complete"
+else
+  bad "large redirected JSON is truncated or invalid"
+fi
+seed_fixture "$FIX"
+MAIN_SHA=$(git -C "$FIX" rev-parse HEAD)
+MAIN_TREE=$(git -C "$FIX" rev-parse 'HEAD^{tree}')
+
+# ---------------------------------------------------------------------------
+echo
 echo "=== dirty current-tree exact refusal ==="
 echo dirty >> "$FIX/README.md"
 run_collector "$FIX" --worktree --no-baseline --format json
@@ -312,7 +347,7 @@ contains "dirty refusal message" "$(cat "$ROOT/err.txt")" "dirty worktree"
 $GIT -C "$FIX" checkout -q -- README.md
 run_collector "$FIX" --worktree --no-baseline --format json
 check "clean worktree exit 0" "$RC" "0"
-contains "worktree exact true" "$OUT" '"exact": true'
+contains "worktree is honestly non-exact" "$OUT" '"exact": false'
 
 # ---------------------------------------------------------------------------
 echo
@@ -394,6 +429,9 @@ if (
 // Static edge claim.sh -> scripts/lib/claim-guards.sh
 if (!edges.some((e) => e.from === "scripts/claim.sh" && e.to === "scripts/lib/claim-guards.sh")) {
   throw new Error("missing static edge: " + JSON.stringify(edges));
+}
+if (!edges.some((e) => e.from === "scripts/loop.sh" && e.to === "scripts/lib/compound.sh")) {
+  throw new Error("missing compound-command edge: " + JSON.stringify(edges));
 }
 if (!String(r.shell_dependencies.note).includes("never guessed")) {
   throw new Error("deps note");
@@ -573,6 +611,73 @@ run_collector "$FIX" --ref "$MAIN_SHA" --baseline "$ROOT/impossible-base.json" -
 check "impossible baseline metric exits 3" "$RC" "3"
 contains "impossible metric is incomplete evidence" "$(cat "$ROOT/err.txt")" "incomplete baseline evidence"
 
+# Cross-field and nested evidence contradictions fail closed.
+for variant in source_flags source_oid driver mutation dependency policy; do
+  cp "$ROOT/base-low.json" "$ROOT/contradictory-$variant.json"
+  node - "$ROOT/contradictory-$variant.json" "$variant" <<'NODE'
+const fs = require("fs");
+const p = process.argv[2];
+const variant = process.argv[3];
+const b = JSON.parse(fs.readFileSync(p, "utf8"));
+if (variant === "source_flags") {
+  b.source.mode = "worktree"; b.source.exact = false; b.source.dirty = true;
+} else if (variant === "source_oid") {
+  b.source.commit = "0000000000000000000000000000000000000000";
+  b.source.tree = "1111111111111111111111111111111111111111";
+} else if (variant === "driver") {
+  b.safety_critical_drivers[0].present = false;
+  b.safety_critical_drivers[0].lines = 9;
+} else if (variant === "mutation") {
+  const m = b.mutation_receipts.categories[0];
+  m.status = "present"; m.evidence = "none"; m.match_count = 1; m.locations = [];
+} else if (variant === "dependency") {
+  b.shell_dependencies.edges = [{from:"/absolute",to:null}];
+} else if (variant === "policy") {
+  b.policy_identifiers.duplicates = [null];
+}
+fs.writeFileSync(p, JSON.stringify(b) + "\n");
+NODE
+  run_collector "$FIX" --ref "$MAIN_SHA" --baseline "$ROOT/contradictory-$variant.json" --format json
+  check "contradictory baseline $variant exits 3" "$RC" "3"
+done
+
+# The managed default is only authoritative when its bytes match the artifact
+# committed at HEAD and its collector digest matches the running collector.
+mkdir -p "$FIX/config"
+cp "$ROOT/base-low.json" "$FIX/config/architecture-fitness-baseline.v1.json"
+$GIT -C "$FIX" add config/architecture-fitness-baseline.v1.json
+$GIT -C "$FIX" commit -q -m "add managed architecture baseline"
+MANAGED_SHA=$(git -C "$FIX" rev-parse HEAD)
+run_collector "$FIX" --ref "$MANAGED_SHA" --format json
+check "committed managed baseline exits 0" "$RC" "0"
+contains "managed baseline is labeled" "$OUT" '"input": "committed_default"'
+printf '\n' >> "$FIX/config/architecture-fitness-baseline.v1.json"
+run_collector "$FIX" --ref "$MANAGED_SHA" --format json
+check "modified managed baseline exits 3" "$RC" "3"
+contains "modified managed baseline fails closed" "$(cat "$ROOT/err.txt")" "must match the committed HEAD artifact"
+$GIT -C "$FIX" checkout -q -- config/architecture-fitness-baseline.v1.json
+node - "$FIX/config/architecture-fitness-baseline.v1.json" <<'NODE'
+const fs = require("fs");
+const p = process.argv[2];
+const b = JSON.parse(fs.readFileSync(p, "utf8"));
+b.collector.digest = "0".repeat(64);
+fs.writeFileSync(p, JSON.stringify(b) + "\n");
+NODE
+$GIT -C "$FIX" add config/architecture-fitness-baseline.v1.json
+$GIT -C "$FIX" commit -q -m "commit stale collector baseline"
+STALE_COLLECTOR_SHA=$(git -C "$FIX" rev-parse HEAD)
+run_collector "$FIX" --ref "$STALE_COLLECTOR_SHA" --format json
+check "stale managed collector digest exits 3" "$RC" "3"
+contains "stale managed collector fails closed" "$(cat "$ROOT/err.txt")" "collector digest must match"
+run_collector "$FIX" --ref "$STALE_COLLECTOR_SHA" --baseline config/architecture-fitness-baseline.v1.json --format json
+check "explicit historical baseline remains available" "$RC" "0"
+contains "explicit baseline is labeled" "$OUT" '"input": "explicit_file"'
+rm -f "$FIX/config/architecture-fitness-baseline.v1.json"
+$GIT -C "$FIX" add -A
+$GIT -C "$FIX" commit -q -m "remove managed baseline fixture"
+MAIN_SHA=$(git -C "$FIX" rev-parse HEAD)
+MAIN_TREE=$(git -C "$FIX" rev-parse 'HEAD^{tree}')
+
 # Baseline reads do not follow a symlink leaf.
 ln -s "$ROOT/base-low.json" "$ROOT/base-link.json"
 run_collector "$FIX" --ref "$MAIN_SHA" --baseline "$ROOT/base-link.json" --format json
@@ -616,6 +721,9 @@ if (!/may not have existed|did not necessarily exist|provenance/i.test(note)) {
 }
 NODE
 
+run_collector "$FIX" --worktree --no-baseline --emit-baseline "$ROOT/worktree-base.json" --format json
+check "worktree baseline capture is refused" "$RC" "3"
+
 # Relative emission is anchored to --repo, not the caller's working directory.
 run_collector "$FIX" --ref "$MAIN_SHA" --no-baseline --emit-baseline "config/relative-base.json" --format json
 check "relative emit-baseline exit 0" "$RC" "0"
@@ -656,7 +764,25 @@ const edges = r.shell_dependencies.edges;
 const unknowns = r.shell_dependencies.unknowns;
 if (edges.some((e) => /evil/.test(e.to))) throw new Error("guessed evil edge");
 if (unknowns.length < 2) throw new Error("want >=2 unknowns, got " + unknowns.length);
+for (const u of unknowns.filter((u) => /evil/.test(u.raw))) {
+  if (u.reason !== "dynamic_or_unresolved_include") throw new Error("wrong reason " + JSON.stringify(u));
+}
 NODE
+
+# Execute a neutralized dynamic-detector mutant and prove the oracle kills it.
+MUTANT="$ROOT/architecture-fitness-dynamic-mutant.sh"
+sed 's/if (isDynamic(raw)) {/if (false) {/' "$COLLECTOR" > "$MUTANT"
+chmod +x "$MUTANT"
+MUTANT_OUT=$("$MUTANT" --repo "$FIX" --ref "$DYN_SHA" --no-baseline --format json)
+if printf '%s' "$MUTANT_OUT" | node -e '
+let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{
+  const r=JSON.parse(s); const evil=r.shell_dependencies.unknowns.filter(u=>/evil/.test(u.raw));
+  if(evil.length<2 || evil.some(u=>u.reason!=="dynamic_or_unresolved_include")) process.exit(1);
+})'; then
+  bad "dynamic-detector mutant survived the oracle"
+else
+  ok "dynamic-detector mutant is killed"
+fi
 
 # ---------------------------------------------------------------------------
 echo

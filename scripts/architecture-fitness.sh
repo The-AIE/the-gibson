@@ -76,6 +76,7 @@ info()      { echo "architecture-fitness.sh: $*" >&2; }
 REF=""
 WORKTREE=0
 BASELINE=""
+BASELINE_EXPLICIT=0
 NO_BASELINE=0
 FORMAT="json"
 EMIT_BASELINE=""
@@ -93,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --baseline)
       [[ $# -ge 2 ]] || die_usage "--baseline requires a path"
       BASELINE="$2"
+      BASELINE_EXPLICIT=1
       shift 2
       ;;
     --no-baseline) NO_BASELINE=1; shift ;;
@@ -168,6 +170,7 @@ export AF_REPO="$REPO"
 export AF_REF="$REF"
 export AF_WORKTREE="$WORKTREE"
 export AF_BASELINE="${BASELINE:-}"
+export AF_BASELINE_EXPLICIT="$BASELINE_EXPLICIT"
 export AF_FORMAT="$FORMAT"
 export AF_EMIT_BASELINE="${EMIT_BASELINE:-}"
 export AF_COLLECTOR_VERSION="$COLLECTOR_VERSION"
@@ -190,6 +193,7 @@ const REPO = process.env.AF_REPO;
 const REF_ARG = process.env.AF_REF || "";
 const WORKTREE = process.env.AF_WORKTREE === "1";
 const BASELINE_PATH = process.env.AF_BASELINE || "";
+const BASELINE_EXPLICIT = process.env.AF_BASELINE_EXPLICIT === "1";
 const FORMAT = process.env.AF_FORMAT || "json";
 const EMIT_BASELINE = process.env.AF_EMIT_BASELINE || "";
 const COLLECTOR_VERSION = process.env.AF_COLLECTOR_VERSION;
@@ -260,7 +264,11 @@ if (WORKTREE) {
         "commit changes or use --ref <commit>)"
     );
   }
-  exact = true;
+  // A clean status is not byte identity: checkout filters, skip-worktree /
+  // assume-unchanged flags, and a concurrent writer can all make disk bytes
+  // differ from HEAD. Worktree reports are therefore intentionally non-exact.
+  // Use --ref for an exact object-database receipt or baseline capture.
+  exact = false;
 } else {
   sourceMode = "commit";
   const ref = REF_ARG || "HEAD";
@@ -575,7 +583,18 @@ for (const d of DRIVER_MAP) {
 // ---------------------------------------------------------------------------
 // Shell source/include dependency edges (static only)
 // ---------------------------------------------------------------------------
-const SOURCE_LINE_RE = /^\s*(?:\.|source)\s+(.*)$/;
+const SOURCE_INVOCATION_RE =
+  /(?:^|[;&|()]|\bthen\b|\bdo\b)\s*(?:\.|source)\s+((?:"[^"]*"|'[^']*'|[^\s;&|)]+))/g;
+
+function sourceTargets(line) {
+  const targets = [];
+  SOURCE_INVOCATION_RE.lastIndex = 0;
+  let match;
+  while ((match = SOURCE_INVOCATION_RE.exec(line)) !== null) {
+    targets.push(match[1]);
+  }
+  return targets;
+}
 
 function parseSourceTarget(raw) {
   let s = raw.trim();
@@ -653,7 +672,6 @@ for (const f of shellFiles) {
       continue;
     }
     if (/^\s*#/.test(line)) continue;
-    const m = line.match(SOURCE_LINE_RE);
     const heredocRe = /<<(-)?\s*(?:'([^']+)'|"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/g;
     let heredocMatch;
     while ((heredocMatch = heredocRe.exec(line)) !== null) {
@@ -662,47 +680,48 @@ for (const f of shellFiles) {
         delimiter: heredocMatch[2] || heredocMatch[3] || heredocMatch[4],
       });
     }
-    if (!m) continue;
-    const raw = parseSourceTarget(m[1]);
-    const loc = f.path + ":" + (i + 1);
-    if (isDynamic(raw)) {
-      depUnknowns.push({
+    for (const target of sourceTargets(line)) {
+      const raw = parseSourceTarget(target);
+      const loc = f.path + ":" + (i + 1);
+      if (isDynamic(raw)) {
+        depUnknowns.push({
+          from: f.path,
+          line: i + 1,
+          raw: raw,
+          reason: "dynamic_or_unresolved_include",
+          location: loc,
+        });
+        continue;
+      }
+      const resolved = resolveStatic(f.path, raw);
+      if (!resolved) {
+        depUnknowns.push({
+          from: f.path,
+          line: i + 1,
+          raw: raw,
+          reason: "unresolved_static_target",
+          location: loc,
+        });
+        continue;
+      }
+      if (!fileByPath.has(resolved)) {
+        depUnknowns.push({
+          from: f.path,
+          line: i + 1,
+          raw: raw,
+          reason: "missing_static_target",
+          location: loc,
+        });
+        continue;
+      }
+      depEdges.push({
         from: f.path,
+        to: resolved,
+        kind: "static_source",
         line: i + 1,
-        raw: raw,
-        reason: "dynamic_or_unresolved_include",
         location: loc,
       });
-      continue;
     }
-    const resolved = resolveStatic(f.path, raw);
-    if (!resolved) {
-      depUnknowns.push({
-        from: f.path,
-        line: i + 1,
-        raw: raw,
-        reason: "unresolved_static_target",
-        location: loc,
-      });
-      continue;
-    }
-    if (!fileByPath.has(resolved)) {
-      depUnknowns.push({
-        from: f.path,
-        line: i + 1,
-        raw: raw,
-        reason: "missing_static_target",
-        location: loc,
-      });
-      continue;
-    }
-    depEdges.push({
-      from: f.path,
-      to: resolved,
-      kind: "static_source",
-      line: i + 1,
-      location: loc,
-    });
   }
 }
 
@@ -885,8 +904,9 @@ const mutationCategories = [];
 for (const cat of MUTATION_CATEGORIES) {
   const explicitLocations = [];
   const heuristicLocations = [];
-  const explicitTag = new RegExp(
-    "\\bmutation-category:\\s*" + cat.id + "\\b",
+  const explicitReceipt = new RegExp(
+    "^\\s*(?:ok|pass|check|assert_[A-Za-z0-9_]+)\\s+.*" +
+      "\\bmutation-category:\\s*" + cat.id + "\\b",
     "i"
   );
   for (const f of files) {
@@ -894,12 +914,12 @@ for (const cat of MUTATION_CATEGORIES) {
     // and this collector's own fixtures/pattern definitions cannot prove a receipt.
     if (
       f.binary ||
-      classify(f.path) !== "tests" ||
+      !/(?:^|\/)tests\/.*(?:\.test\.|\.spec\.|_test\.)/.test(f.path) ||
       f.path === "scripts/tests/architecture-fitness.test.sh"
     ) continue;
     const lines = f.text.split("\n");
     for (let i = 0; i < lines.length; i++) {
-      if (explicitTag.test(lines[i])) {
+      if (explicitReceipt.test(lines[i])) {
         explicitLocations.push({
           path: f.path,
           line: i + 1,
@@ -941,7 +961,7 @@ for (const cat of MUTATION_CATEGORIES) {
   let selected = [];
   if (explicit.length > 0) {
     status = "present";
-    evidence = "explicit_test_tag";
+    evidence = "explicit_test_assertion";
     selected = explicit;
   } else if (heuristic.length > 0) {
     status = "unknown";
@@ -1018,7 +1038,8 @@ const report = {
   mutation_receipts: {
     note:
       "Seven #159 categories. present requires an explicit mutation-category tag " +
-      "in a test other than this collector's fixture sensor; heuristic-only test " +
+      "in an executable test assertion outside this collector's fixture sensor; " +
+      "heuristic-only test " +
       "matches are unknown; no test evidence is missing. " +
       "Counts are diagnostic; test quantity is insufficient proof.",
     categories: mutationCategories,
@@ -1042,6 +1063,18 @@ function loadBaseline(bp) {
   } finally {
     if (fd !== null) fs.closeSync(fd);
   }
+  const isManagedDefault =
+    !BASELINE_EXPLICIT &&
+    path.resolve(bp) === path.resolve(REPO, DEFAULT_BASELINE);
+  if (isManagedDefault) {
+    const committed = git(["show", "HEAD:" + DEFAULT_BASELINE]);
+    if (committed.status !== 0 || committed.stdout !== raw) {
+      fail(
+        "incomplete baseline evidence: default baseline bytes must match " +
+          "the committed HEAD artifact"
+      );
+    }
+  }
   let obj;
   try {
     obj = JSON.parse(raw);
@@ -1063,29 +1096,53 @@ function loadBaseline(bp) {
   function nonNegativeInteger(value) {
     return Number.isSafeInteger(value) && value >= 0;
   }
+  function positiveInteger(value) {
+    return Number.isSafeInteger(value) && value > 0;
+  }
+  function relativePath(value) {
+    if (
+      typeof value !== "string" ||
+      value.length === 0 ||
+      value.startsWith("/") ||
+      value.includes("\\")
+    ) return false;
+    return !value.split("/").some((part) => part === ".." || part === "");
+  }
   function relativeLocation(value) {
-    if (typeof value !== "string" || value.startsWith("/") || value.includes("\\")) {
-      return false;
-    }
-    const parts = value.replace(/:\d+$/, "").split("/");
-    return /:\d+$/.test(value) && !parts.some((part) => part === ".." || part === "");
+    if (typeof value !== "string" || !/:\d+$/.test(value)) return false;
+    return relativePath(value.replace(/:\d+$/, ""));
   }
 
   // Required evidence in baseline. Fail closed on plausible-looking but
   // structurally incomplete or impossible values.
   if (
     !obj.source ||
-    !/^[0-9a-f]{40}$/.test(String(obj.source.commit || "")) ||
-    !/^[0-9a-f]{40}$/.test(String(obj.source.tree || ""))
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(String(obj.source.commit || "")) ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(String(obj.source.tree || "")) ||
+    obj.source.mode !== "commit" ||
+    obj.source.exact !== true ||
+    obj.source.dirty !== false
   ) {
-    fail("incomplete baseline evidence: source.commit and source.tree required");
+    evidenceFail("exact clean commit source with commit/tree ids");
+  }
+  const baselineCommit = git(["rev-parse", "--verify", obj.source.commit + "^{commit}"]);
+  if (baselineCommit.status !== 0 || baselineCommit.stdout.trim() !== obj.source.commit) {
+    evidenceFail("source commit must resolve exactly in this repository");
+  }
+  const baselineTree = git(["rev-parse", obj.source.commit + "^{tree}"]);
+  if (baselineTree.status !== 0 || baselineTree.stdout.trim() !== obj.source.tree) {
+    evidenceFail("source tree must match source commit");
   }
   if (
     !obj.collector ||
     typeof obj.collector.version !== "string" ||
+    obj.collector.version.length === 0 ||
     !/^[0-9a-f]{64}$/.test(String(obj.collector.digest || ""))
   ) {
     evidenceFail("collector version and digest");
+  }
+  if (isManagedDefault && obj.collector.digest !== COLLECTOR_DIGEST) {
+    evidenceFail("default baseline collector digest must match the current collector");
   }
   if (!obj.classification || typeof obj.classification !== "object") {
     fail("incomplete baseline evidence: classification required");
@@ -1121,7 +1178,13 @@ function loadBaseline(bp) {
       typeof driver.present !== "boolean" ||
       !nonNegativeInteger(driver.lines) ||
       !nonNegativeInteger(driver.branch_proxy_count) ||
-      !nonNegativeInteger(driver.decision_proxy_count)
+      !nonNegativeInteger(driver.decision_proxy_count) ||
+      typeof driver.proxy_label !== "string" ||
+      !driver.proxy_label.includes("not semantic complexity") ||
+      (driver.present === false &&
+        (driver.lines !== 0 ||
+          driver.branch_proxy_count !== 0 ||
+          driver.decision_proxy_count !== 0))
     ) {
       evidenceFail("safety_critical_drivers." + expected.id);
     }
@@ -1133,6 +1196,30 @@ function loadBaseline(bp) {
   ) {
     evidenceFail("shell_dependencies edges/unknowns");
   }
+  for (const edge of obj.shell_dependencies.edges) {
+    if (
+      !edge ||
+      !relativePath(edge.from) ||
+      !relativePath(edge.to) ||
+      edge.kind !== "static_source" ||
+      !positiveInteger(edge.line) ||
+      edge.location !== edge.from + ":" + edge.line
+    ) evidenceFail("shell_dependencies edge structure");
+  }
+  for (const unknown of obj.shell_dependencies.unknowns) {
+    if (
+      !unknown ||
+      !relativePath(unknown.from) ||
+      typeof unknown.raw !== "string" ||
+      ![
+        "dynamic_or_unresolved_include",
+        "unresolved_static_target",
+        "missing_static_target",
+      ].includes(unknown.reason) ||
+      !positiveInteger(unknown.line) ||
+      unknown.location !== unknown.from + ":" + unknown.line
+    ) evidenceFail("shell_dependencies unknown structure");
+  }
   if (
     !obj.policy_identifiers ||
     !Array.isArray(obj.policy_identifiers.occurrences) ||
@@ -1140,6 +1227,31 @@ function loadBaseline(bp) {
   ) {
     evidenceFail("policy_identifiers occurrences/duplicates");
   }
+  function validPolicyEntry(entry, duplicate) {
+    return (
+      entry &&
+      typeof entry.id === "string" &&
+      entry.id.length > 0 &&
+      typeof entry.kind === "string" &&
+      Array.isArray(entry.files) &&
+      entry.files.every(relativePath) &&
+      Array.isArray(entry.sample_locations) &&
+      entry.sample_locations.every(relativeLocation) &&
+      (duplicate
+        ? positiveInteger(entry.file_count) && entry.file_count === entry.files.length
+        : positiveInteger(entry.count))
+    );
+  }
+  if (!obj.policy_identifiers.occurrences.every((entry) => validPolicyEntry(entry, false))) {
+    evidenceFail("policy_identifiers occurrence structure");
+  }
+  if (!obj.policy_identifiers.duplicates.every((entry) => validPolicyEntry(entry, true))) {
+    evidenceFail("policy_identifiers duplicate structure");
+  }
+  if (
+    !nonNegativeInteger(obj.policy_identifiers.occurrence_count) ||
+    obj.policy_identifiers.occurrence_count !== obj.policy_identifiers.occurrences.length
+  ) evidenceFail("policy_identifiers occurrence_count");
   if (!obj.mutation_receipts || !Array.isArray(obj.mutation_receipts.categories)) {
     evidenceFail("mutation_receipts.categories");
   }
@@ -1157,18 +1269,33 @@ function loadBaseline(bp) {
     const mutation = baselineMutations.get(expected.id);
     if (
       !mutation ||
+      mutation.label !== expected.label ||
       !["present", "unknown", "missing"].includes(mutation.status) ||
       !nonNegativeInteger(mutation.match_count) ||
       !Array.isArray(mutation.locations) ||
       !mutation.locations.every(relativeLocation) ||
+      mutation.match_count < mutation.locations.length ||
       (mutation.status === "missing" &&
-        (mutation.match_count !== 0 || mutation.locations.length !== 0)) ||
-      (mutation.status !== "missing" && mutation.match_count < 1)
+        (mutation.evidence !== "none" ||
+          mutation.match_count !== 0 ||
+          mutation.locations.length !== 0)) ||
+      (mutation.status === "unknown" &&
+        (mutation.evidence !== "heuristic_test_match_only" ||
+          mutation.match_count < 1 ||
+          mutation.locations.length < 1)) ||
+      (mutation.status === "present" &&
+        (mutation.evidence !== "explicit_test_assertion" ||
+          mutation.match_count < 1 ||
+          mutation.locations.length < 1))
     ) {
       evidenceFail("mutation_receipts." + expected.id);
     }
   }
-  return obj;
+  return {
+    document: obj,
+    digest: crypto.createHash("sha256").update(raw).digest("hex"),
+    input: isManagedDefault ? "committed_default" : "explicit_file",
+  };
 }
 
 function compareReports(current, baseline) {
@@ -1306,11 +1433,14 @@ function displayBaselinePath(bp) {
 }
 
 if (BASELINE_PATH) {
-  const baseline = loadBaseline(BASELINE_PATH);
+  const loadedBaseline = loadBaseline(BASELINE_PATH);
+  const baseline = loadedBaseline.document;
   report.baseline = {
     path: displayBaselinePath(BASELINE_PATH),
     source_commit: baseline.source.commit,
     source_tree: baseline.source.tree,
+    digest: loadedBaseline.digest,
+    input: loadedBaseline.input,
     present: true,
   };
   report.comparison = compareReports(report, baseline);
@@ -1319,6 +1449,7 @@ if (BASELINE_PATH) {
     path: null,
     source_commit: null,
     source_tree: null,
+    digest: null,
     present: false,
   };
   report.comparison = {
@@ -1333,10 +1464,22 @@ if (BASELINE_PATH) {
   };
 }
 
+// Refuse path leakage before either stdout or a baseline artifact is written.
+const json = stableStringify(report);
+if (json.includes(REPO)) {
+  fail("internal error: report contains absolute repo path");
+}
+if (/\/Users\/|\/home\/|\/private\/var\/folders\/|\/tmp\/gibson-/i.test(json)) {
+  fail("internal error: report appears to contain absolute user/temp paths");
+}
+
 // ---------------------------------------------------------------------------
 // Emit baseline artifact (no comparison; truthful provenance)
 // ---------------------------------------------------------------------------
 if (EMIT_BASELINE) {
+  if (sourceMode !== "commit" || exact !== true || dirty !== false) {
+    fail("baseline capture requires an exact commit source; use --ref, not --worktree");
+  }
   const baselineDoc = {
     schema: "gibson.architecture-fitness-baseline.v1",
     disposition: "report-only-baseline",
@@ -1352,10 +1495,10 @@ if (EMIT_BASELINE) {
     source: {
       commit: sourceCommit,
       tree: sourceTree,
-      mode: sourceMode,
-      exact: exact,
-      dirty: dirty,
-      ref: REF_ARG || (WORKTREE ? "WORKTREE" : sourceCommit),
+      mode: "commit",
+      exact: true,
+      dirty: false,
+      ref: REF_ARG || sourceCommit,
     },
     collector: {
       version: COLLECTOR_VERSION,
@@ -1428,18 +1571,6 @@ if (EMIT_BASELINE) {
       try { fs.rmdirSync(tempDir); } catch (e) { /* best effort */ }
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Absolute path leakage guard on emitted JSON
-// ---------------------------------------------------------------------------
-const json = stableStringify(report);
-// Detect home-like absolute paths or the repo path leaking.
-if (json.includes(REPO)) {
-  fail("internal error: report contains absolute repo path");
-}
-if (/\/Users\/|\/home\/|\/private\/var\/folders\/|\/tmp\/gibson-/i.test(json)) {
-  fail("internal error: report appears to contain absolute user/temp paths");
 }
 
 function humanSummary(rep) {
@@ -1526,5 +1657,7 @@ if (FORMAT === "human") {
   process.stdout.write("\n--- JSON ---\n");
 }
 process.stdout.write(json);
-process.exit(0);
+// Do not force process.exit(): stdout is asynchronous when piped, and a forced
+// exit truncates large reports at the stream buffer boundary.
+process.exitCode = 0;
 NODE
