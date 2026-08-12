@@ -465,10 +465,12 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
  * exercise the residual replace-through-open/identity-then-restore portable
  * boundary. Production code never sets it. Pass `null` to clear.
  *
- * Automatic one-shot: the installed callback is consumed (cleared) before
- * invoke. Success, return, or throw cannot affect a later API call unless
- * the test re-arms via this setter from inside the callback. The payload
- * never includes a raw numeric fd.
+ * Call-scoped one-shot: every installed safe-read callback is snapshotted
+ * and cleared at the start of each {@link readContainedFile} call, before
+ * lexical resolution or any other fallible stage. A failure before this
+ * hook's stage discards the callback with that call. Re-arming via this
+ * setter from inside a callback arms the next call, not another stage of
+ * the current call. The payload never includes a raw numeric fd.
  *
  * @type {null | ((info: {
  *   rootReal: string,
@@ -492,9 +494,10 @@ export function setSafeReadBeforeOpenHook(fn) {
  * deterministic injected-swap regression sensor. Production code never sets it.
  * Pass `null` to clear.
  *
- * Automatic one-shot: the installed callback is consumed (cleared) before
- * invoke. Success, return, or throw cannot affect a later API call unless
- * the test re-arms via this setter from inside the callback. The payload
+ * Call-scoped one-shot: consumed at {@link readContainedFile} entry with
+ * the other safe-read hooks, then invoked from that call's local snapshot
+ * after open+fstat. A failure before this stage discards the callback with
+ * that call. Re-arming via this setter arms the next call only. The payload
  * never includes a raw numeric fd (no validator-owned descriptor number).
  *
  * @type {null | ((info: {
@@ -521,10 +524,11 @@ export function setSafeReadAfterOpenHook(fn) {
  * restore a temporarily replaced root in the residual replace-through-open
  * window. Production code never sets it. Pass `null` to clear.
  *
- * Automatic one-shot: the installed callback is consumed (cleared) before
- * invoke. Success, return, or throw cannot affect a later API call unless
- * the test re-arms via this setter from inside the callback. The payload
- * never includes a raw numeric fd (no validator-owned descriptor number).
+ * Call-scoped one-shot: consumed at {@link readContainedFile} entry with
+ * the other safe-read hooks, then invoked from that call's local snapshot
+ * after identity/containment bind. A failure before this stage discards
+ * the callback with that call. Re-arming via this setter arms the next
+ * call only. The payload never includes a raw numeric fd.
  *
  * @type {null | ((info: {
  *   rootReal: string,
@@ -543,8 +547,33 @@ export function setSafeReadAfterIdentityHook(fn) {
 }
 
 /**
- * Invoke a consumed (already-cleared) test hook. Clearing happens at the
- * call site *before* this runs so throw/return cannot leave the slot armed.
+ * Snapshot and clear all three test-only safe-read hooks at the start of
+ * one {@link readContainedFile} call. Later stages use the returned locals.
+ * A failure before a later stage discards that callback with the failed
+ * call. A callback that re-arms via its setter arms the next call, not
+ * another stage of the current call — this function must not run again
+ * during cleanup.
+ *
+ * @returns {{
+ *   beforeOpen: null | ((info: object) => void),
+ *   afterOpen: null | ((info: object) => void),
+ *   afterIdentity: null | ((info: object) => void),
+ * }}
+ */
+function consumeSafeReadHooksForCall() {
+  const beforeOpen = safeReadBeforeOpenHook;
+  const afterOpen = safeReadAfterOpenHook;
+  const afterIdentity = safeReadAfterIdentityHook;
+  safeReadBeforeOpenHook = null;
+  safeReadAfterOpenHook = null;
+  safeReadAfterIdentityHook = null;
+  return { beforeOpen, afterOpen, afterIdentity };
+}
+
+/**
+ * Invoke a call-scoped (already snapshotted) test hook. The global slot
+ * was cleared at {@link readContainedFile} entry; this must not read or
+ * write global hook state.
  *
  * @param {null | ((info: object) => void)} fn
  * @param {object} payload fd-opaque hook context (never a raw descriptor)
@@ -569,6 +598,8 @@ function invokeConsumedSafeReadHook(fn, payload) {
  * @param {string} relPath for error messages
  * @param {{ dev: bigint, ino: bigint, isFile: () => boolean }} opened bigint Stats
  * @param {RootIdentity} [rootId] optional identity token for hook context
+ * @param {null | ((info: object) => void)} [afterOpenHook] this call's
+ *   snapshotted after-open callback (never re-read from global state)
  * @returns {{ rootReal: string, real: string }}
  */
 function assertOpenedIdentityContained(
@@ -577,7 +608,8 @@ function assertOpenedIdentityContained(
   fd,
   relPath,
   opened,
-  rootId
+  rootId,
+  afterOpenHook
 ) {
   // Reject FIFO/socket/dir/device after nonblocking open — never hang on open.
   if (!opened.isFile()) {
@@ -589,9 +621,7 @@ function assertOpenedIdentityContained(
       `path: opened identity must use BigInt dev/ino (got ${typeof opened.dev}/${typeof opened.ino}): ${relPath}`
     );
   }
-  const afterOpen = safeReadAfterOpenHook;
-  safeReadAfterOpenHook = null;
-  invokeConsumedSafeReadHook(afterOpen, {
+  invokeConsumedSafeReadHook(afterOpenHook, {
     rootReal,
     rootId,
     relPath,
@@ -663,14 +693,17 @@ function assertOpenedIdentityContained(
  * @returns {string | Buffer}
  */
 export function readContainedFile(repoRoot, relPath, encoding = null) {
+  // Call-scoped: snapshot and clear every hook before lexical resolve, root
+  // assert, open, fstat, or any other fallible stage. Later stages use these
+  // locals. Do not clear globals again in a finally — that would erase a
+  // deliberate re-arm for the next call.
+  const { beforeOpen, afterOpen, afterIdentity } = consumeSafeReadHooksForCall();
   // Freeze/assert root identity once for this read; do not re-mint from path.
   const rootId = coerceRootIdentity(repoRoot);
   const { absPath, rootReal } = resolveLexicalUnderRoot(rootId, relPath);
   // Re-assert after lexical resolve (hook may have run / concurrent replace).
   assertRootIdentity(rootId);
   // Test-only: residual replace-through-open window starts here.
-  const beforeOpen = safeReadBeforeOpenHook;
-  safeReadBeforeOpenHook = null;
   invokeConsumedSafeReadHook(beforeOpen, { rootId, rootReal, relPath, absPath });
   let fd;
   try {
@@ -688,11 +721,10 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
       fd,
       relPath,
       opened,
-      rootId
+      rootId,
+      afterOpen
     );
     // Test-only residual window: after identity bind, before post-open root assert.
-    const afterIdentity = safeReadAfterIdentityHook;
-    safeReadAfterIdentityHook = null;
     invokeConsumedSafeReadHook(afterIdentity, {
       rootId,
       rootReal,

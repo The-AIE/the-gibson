@@ -1869,17 +1869,89 @@ else
   ok "retained root-dir-fd feature removed (no raw numeric fd retain/close)"
 fi
 # Must not claim replace-and-restore is impossible under portable pathname open.
-# Line-safe: grep without -z, so `.` cannot cross newlines. Never use [^\n] —
-# POSIX character classes treat that as "not the letter n", not "not newline".
-FALSE_REPLACE_RESTORE_EXACT='replace-and-restore at the same pathname cannot accept bytes'
-FALSE_REPLACE_RESTORE_RE='replace-and-restore.{0,80}cannot accept|cannot accept.{0,80}replace-and-restore'
-if grep -Fiq -- "$FALSE_REPLACE_RESTORE_EXACT" "$TOOL" \
-     "$REPO_ROOT/docs/policy-manifest-v1.md" "$REPO_ROOT/scripts/README.md" || \
-   grep -Eiq -- "$FALSE_REPLACE_RESTORE_RE" "$TOOL" \
-     "$REPO_ROOT/docs/policy-manifest-v1.md" "$REPO_ROOT/scripts/README.md"; then
-  bad "docs/code still claim replace-and-restore cannot accept foreign bytes"
+# Line-safe pure matcher (Node, physical lines only). Never flatten files and
+# never use POSIX [^\n] — that class is "not the letter n", not "not newline".
+PROSE_SCAN_OUT=$(
+  PM_TOOL="$TOOL" \
+  PM_DOCS="$REPO_ROOT/docs/policy-manifest-v1.md" \
+  PM_README="$REPO_ROOT/scripts/README.md" \
+  PM_PROSE_DIR="$ROOT" \
+  "$NODE" --input-type=module -e '
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+function lineHasFalseReplaceRestoreAssurance(line) {
+  const n = String(line).replace(/[\u2010-\u2015]/g, "-");
+  const race = /replace[\s-]+and[\s-]+restore/i;
+  const deny = /\bcan(?:not(?:\s+ever)?|\s+never)(?:\s+be)?\s+accept(?:ed)?\b/i;
+  return race.test(n) && deny.test(n);
+}
+
+function textHasFalseReplaceRestoreAssurance(text) {
+  return String(text).split("\n").some(lineHasFalseReplaceRestoreAssurance);
+}
+
+const falseSentences = [
+  "A replace-and-restore at the same pathname cannot accept bytes",
+  "A replace-and-restore at the same pathname cannot ever accept bytes",
+  "A replace-and-restore at the same pathname can never accept bytes",
+  "Foreign bytes cannot be accepted after a replace-and-restore at the same pathname",
+  "A replace and restore at the same pathname cannot accept bytes",
+];
+const honestSentences = [
+  "A replace-and-restore at the same pathname can still yield hostile bytes",
+  "The race remains possible after a replace-and-restore at the same pathname",
+  "A replace-and-restore at the same pathname may accept hostile bytes",
+  "replace-and-restore acceptance is not a security PASS",
+];
+
+const files = [
+  ["tool", process.env.PM_TOOL],
+  ["docs", process.env.PM_DOCS],
+  ["readme", process.env.PM_README],
+];
+let bad = 0;
+function ok(m) { console.log("PROSE_OK " + m); }
+function fail(m) { bad += 1; console.log("PROSE_BAD " + m); }
+
+for (const [name, p] of files) {
+  const text = readFileSync(p, "utf8");
+  if (textHasFalseReplaceRestoreAssurance(text)) fail(name + " production prose claims replace-and-restore cannot accept");
+  else ok(name + " production prose accepted (no false assurance)");
+}
+
+falseSentences.forEach((s, i) => {
+  if (textHasFalseReplaceRestoreAssurance(s + "\n")) ok("rejects false: " + s);
+  else fail("missed false: " + s);
+  const p = join(process.env.PM_PROSE_DIR, "prose-false-" + i + ".txt");
+  writeFileSync(p, s + "\n");
+  if (textHasFalseReplaceRestoreAssurance(readFileSync(p, "utf8"))) ok("mutation file rejects: " + s);
+  else fail("mutation file missed: " + s);
+});
+
+for (const s of honestSentences) {
+  if (textHasFalseReplaceRestoreAssurance(s + "\n")) fail("false-matched honest: " + s);
+  else ok("accepts honest: " + s);
+}
+
+// Split across physical lines must not match (do not flatten).
+const split = "Foreign bytes cannot be accepted after a\nreplace-and-restore at the same pathname\n";
+if (textHasFalseReplaceRestoreAssurance(split)) fail("matched false assurance across physical lines");
+else ok("line-safe: split false sentence does not match");
+
+console.log("PROSE_SUMMARY " + JSON.stringify({ bad }));
+process.exit(bad === 0 ? 0 : 1);
+'
+) || true
+if echo "$PROSE_SCAN_OUT" | grep -qE "PROSE_(OK|BAD|SUMMARY)"; then
+  while IFS= read -r line; do
+    case "$line" in
+      PROSE_OK\ *) ok "${line#PROSE_OK }" ;;
+      PROSE_BAD\ *) bad "${line#PROSE_BAD }" ;;
+    esac
+  done <<< "$PROSE_SCAN_OUT"
 else
-  ok "no false impossible-replace-and-restore guarantee in code/docs"
+  bad "prose matcher probe failed (out=$PROSE_SCAN_OUT)"
 fi
 if grep -q 'KNOWN_PORTABLE_BOUNDARY' "$REPO_ROOT/docs/policy-manifest-v1.md" && \
    grep -q 'openat' "$REPO_ROOT/docs/policy-manifest-v1.md"; then
@@ -1887,16 +1959,9 @@ if grep -q 'KNOWN_PORTABLE_BOUNDARY' "$REPO_ROOT/docs/policy-manifest-v1.md" && 
 else
   bad "docs missing residual portable boundary wording"
 fi
-# Mutation: the exact prior false sentence must trip the same line-safe scan.
+# Control: the legacy POSIX [^\n] class is letter-n and misses that sentence.
 PROSE_MUT="$ROOT/prose-false-claim.txt"
 printf '%s\n' "A replace-and-restore at the same pathname cannot accept bytes" > "$PROSE_MUT"
-if grep -Fiq -- "$FALSE_REPLACE_RESTORE_EXACT" "$PROSE_MUT" || \
-   grep -Eiq -- "$FALSE_REPLACE_RESTORE_RE" "$PROSE_MUT"; then
-  ok "prose sensor detects exact old false replace-and-restore claim"
-else
-  bad "prose sensor missed exact old false claim"
-fi
-# Control: the legacy POSIX [^\n] class is letter-n and misses that sentence.
 if grep -Eiq 'replace-and-restore[^\n]{0,80}cannot accept|cannot accept[^\n]{0,80}replace-and-restore' \
      "$PROSE_MUT"; then
   bad "legacy POSIX [^\\\\n] unexpectedly matched the old claim"
@@ -1933,6 +1998,8 @@ import {
   openSync,
   closeSync,
   fstatSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -2046,6 +2113,102 @@ try {
     else bad(name + " re-arm count unexpected calls=" + calls);
   }
 
+  // Cross-hook re-arm: a callback that sets another hook arms the *next* call,
+  // not a later stage of the current call (no finally-wipe of that re-arm).
+  {
+    let afterOpenCalls = 0;
+    setSafeReadBeforeOpenHook(() => {
+      setSafeReadAfterOpenHook(() => { afterOpenCalls += 1; });
+    });
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    const sameCall = afterOpenCalls;
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    setSafeReadBeforeOpenHook(null);
+    setSafeReadAfterOpenHook(null);
+    if (sameCall === 0 && afterOpenCalls === 1) {
+      ok("re-arm from beforeOpen affects next call only, not current afterOpen");
+    } else {
+      bad("cross-hook re-arm unexpected " + JSON.stringify({ sameCall, afterOpenCalls }));
+    }
+  }
+
+  // Early-failure: a hook armed for a later stage must not survive a first
+  // call that dies before that stage.
+  {
+    let calls = 0;
+    setSafeReadBeforeOpenHook(() => { calls += 1; });
+    let firstThrew = false;
+    try { readContainedFile(root, "../escape", "utf8"); }
+    catch { firstThrew = true; }
+    let second = null;
+    try { second = readContainedFile(root, "docs/inside.txt", "utf8"); }
+    catch (e) { second = "THREW:" + (e && e.message ? e.message : e); }
+    setSafeReadBeforeOpenHook(null);
+    if (firstThrew && calls === 0 && second === "HOOK_LC_BYTES\n") {
+      ok("beforeOpen discarded after pre-stage lexical failure");
+    } else {
+      bad("beforeOpen persisted after lexical failure " + JSON.stringify({ firstThrew, calls, second }));
+    }
+  }
+
+  {
+    let calls = 0;
+    setSafeReadAfterOpenHook(() => { calls += 1; });
+    let firstThrew = false;
+    try { readContainedFile(root, "docs/missing-no-such-file.txt", "utf8"); }
+    catch { firstThrew = true; }
+    let second = null;
+    try { second = readContainedFile(root, "docs/inside.txt", "utf8"); }
+    catch (e) { second = "THREW:" + (e && e.message ? e.message : e); }
+    setSafeReadAfterOpenHook(null);
+    if (firstThrew && calls === 0 && second === "HOOK_LC_BYTES\n") {
+      ok("afterOpen discarded after pre-stage missing-path failure");
+    } else {
+      bad("afterOpen persisted after missing-path failure " + JSON.stringify({ firstThrew, calls, second }));
+    }
+  }
+
+  {
+    let calls = 0;
+    setSafeReadAfterIdentityHook(() => { calls += 1; });
+    let firstThrew = false;
+    try { readContainedFile(root, "docs/missing-no-such-file.txt", "utf8"); }
+    catch { firstThrew = true; }
+    let second = null;
+    try { second = readContainedFile(root, "docs/inside.txt", "utf8"); }
+    catch (e) { second = "THREW:" + (e && e.message ? e.message : e); }
+    setSafeReadAfterIdentityHook(null);
+    if (firstThrew && calls === 0 && second === "HOOK_LC_BYTES\n") {
+      ok("afterIdentity discarded after pre-stage missing-path failure");
+    } else {
+      bad("afterIdentity persisted after missing-path failure " + JSON.stringify({ firstThrew, calls, second }));
+    }
+  }
+
+  {
+    const outside = join(tmpdir(), "gibson-pm-hooklc-out-" + process.pid + "-" + Date.now());
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "secret.txt"), "SECRET\n");
+    try { unlinkSync(join(root, "docs/escape-link")); } catch { /* ignore */ }
+    symlinkSync(join(outside, "secret.txt"), join(root, "docs/escape-link"));
+    let calls = 0;
+    setSafeReadAfterIdentityHook(() => { calls += 1; });
+    let firstThrew = false;
+    try { readContainedFile(root, "docs/escape-link", "utf8"); }
+    catch { firstThrew = true; }
+    let second = null;
+    try { second = readContainedFile(root, "docs/inside.txt", "utf8"); }
+    catch (e) { second = "THREW:" + (e && e.message ? e.message : e); }
+    setSafeReadAfterIdentityHook(null);
+    try { unlinkSync(join(root, "docs/escape-link")); } catch { /* ignore */ }
+    try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (firstThrew && calls === 0 && second === "HOOK_LC_BYTES\n") {
+      ok("afterIdentity discarded after pre-stage containment failure");
+    } else {
+      bad("afterIdentity persisted after containment failure " + JSON.stringify({ firstThrew, calls, second }));
+    }
+  }
+
   for (const name of names) {
     const set = setters[name];
     let unrelated = -1;
@@ -2124,7 +2287,110 @@ else
   bad "hook lifecycle probe failed (rc=$HOOK_LC_RC out=$HOOK_LC_OUT)"
 fi
 
-# Mutation: re-expose raw fd on afterIdentity/afterOpen and prove reuse-close.
+# Mutation: revert call-entry hook consumption to stage-local consumption.
+# Early-failure lifecycle must go red for all three hooks.
+echo
+echo "=== mutation: stage-local hook consume must persist after pre-stage failure ==="
+HOOK_STAGE_TOOL="$ROOT/policy-manifest-hook-stage-local.mjs"
+cp "$TOOL" "$HOOK_STAGE_TOOL"
+"$NODE" -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  let s = fs.readFileSync(p, "utf8");
+  const entry = [
+    "  safeReadBeforeOpenHook = null;",
+    "  safeReadAfterOpenHook = null;",
+    "  safeReadAfterIdentityHook = null;",
+  ].join("\n");
+  if (!s.includes(entry)) {
+    process.stderr.write("HOOK_STAGE_MUTATION_MISS entry\n");
+    process.exit(2);
+  }
+  s = s.replace(entry, "  /* MUT: stage-local consume only */");
+  const a = s.replace(
+    "invokeConsumedSafeReadHook(beforeOpen, { rootId, rootReal, relPath, absPath });",
+    "safeReadBeforeOpenHook = null;\n  invokeConsumedSafeReadHook(beforeOpen, { rootId, rootReal, relPath, absPath });"
+  );
+  const b = a.replace(
+    "invokeConsumedSafeReadHook(afterOpenHook, {",
+    "safeReadAfterOpenHook = null;\n  invokeConsumedSafeReadHook(afterOpenHook, {"
+  );
+  const c = b.replace(
+    "invokeConsumedSafeReadHook(afterIdentity, {",
+    "safeReadAfterIdentityHook = null;\n  invokeConsumedSafeReadHook(afterIdentity, {"
+  );
+  if (a === s || b === a || c === b) {
+    process.stderr.write("HOOK_STAGE_MUTATION_MISS invoke\n");
+    process.exit(2);
+  }
+  fs.writeFileSync(p, c);
+' "$HOOK_STAGE_TOOL"
+if ! "$NODE" --check "$HOOK_STAGE_TOOL" 2>/dev/null; then
+  bad "stage-local hook mutation produced invalid syntax"
+else
+  HOOK_STAGE_OUT=$(
+    PM_TOOL="$HOOK_STAGE_TOOL" \
+    "$NODE" --input-type=module -e '
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+
+const {
+  readContainedFile,
+  setSafeReadBeforeOpenHook,
+  setSafeReadAfterOpenHook,
+  setSafeReadAfterIdentityHook,
+} = await import(pathToFileURL(process.env.PM_TOOL).href);
+
+const probes = [
+  ["beforeOpen", setSafeReadBeforeOpenHook, "../escape"],
+  ["afterOpen", setSafeReadAfterOpenHook, "docs/missing-no-such-file.txt"],
+  ["afterIdentity", setSafeReadAfterIdentityHook, "docs/missing-no-such-file.txt"],
+];
+const root = join(tmpdir(), "gibson-pm-hookstage-" + process.pid + "-" + Date.now());
+const persisted = [];
+try {
+  mkdirSync(join(root, "docs"), { recursive: true });
+  writeFileSync(join(root, "docs/inside.txt"), "HOOK_STAGE\n");
+  for (const [name, setHook, failPath] of probes) {
+    let calls = 0;
+    setHook(() => { calls += 1; });
+    try { readContainedFile(root, failPath, "utf8"); } catch { /* expected */ }
+    try { readContainedFile(root, "docs/inside.txt", "utf8"); } catch { /* ignore */ }
+    setHook(null);
+    const didPersist = calls >= 1;
+    console.log("HOOK_STAGE_RESULT " + JSON.stringify({ name, calls, persisted: didPersist }));
+    if (didPersist) persisted.push(name);
+  }
+  if (persisted.length === probes.length) {
+    console.log("HOOK_STAGE_DEFECT_REPRODUCED_ALL");
+    process.exit(0);
+  }
+  console.log("HOOK_STAGE_PARTIAL " + JSON.stringify(persisted));
+  process.exit(1);
+} finally {
+  setSafeReadBeforeOpenHook(null);
+  setSafeReadAfterOpenHook(null);
+  setSafeReadAfterIdentityHook(null);
+  try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+' 2>&1
+  ) || true
+  if echo "$HOOK_STAGE_OUT" | grep -q "HOOK_STAGE_DEFECT_REPRODUCED_ALL" && \
+     echo "$HOOK_STAGE_OUT" | grep -q '"name":"beforeOpen"' && \
+     echo "$HOOK_STAGE_OUT" | grep -q '"name":"afterOpen"' && \
+     echo "$HOOK_STAGE_OUT" | grep -q '"name":"afterIdentity"'; then
+    ok "stage-local mutation persists beforeOpen after pre-stage failure"
+    ok "stage-local mutation persists afterOpen after pre-stage failure"
+    ok "stage-local mutation persists afterIdentity after pre-stage failure"
+  else
+    bad "stage-local mutation did not reproduce persistence for all hooks (out=$HOOK_STAGE_OUT)"
+  fi
+fi
+
+# Mutation: re-expose raw fd on afterOpen AND afterIdentity and prove reuse-close
+# independently for each hook. One passing case must not satisfy the sensor.
 echo
 echo "=== mutation: raw fd hook payload reuse-close must be detectable ==="
 FD_EXPOSE_TOOL="$ROOT/policy-manifest-fd-expose.mjs"
@@ -2134,8 +2400,8 @@ cp "$TOOL" "$FD_EXPOSE_TOOL"
   const p = process.argv[1];
   let s = fs.readFileSync(p, "utf8");
   const a = s.replace(
-    "invokeConsumedSafeReadHook(afterOpen, {",
-    "invokeConsumedSafeReadHook(afterOpen, { fd,"
+    "invokeConsumedSafeReadHook(afterOpenHook, {",
+    "invokeConsumedSafeReadHook(afterOpenHook, { fd,"
   );
   const b = a.replace(
     "invokeConsumedSafeReadHook(afterIdentity, {",
@@ -2162,50 +2428,67 @@ import { pathToFileURL } from "node:url";
 
 const {
   readContainedFile,
+  setSafeReadAfterOpenHook,
   setSafeReadAfterIdentityHook,
 } = await import(pathToFileURL(process.env.PM_TOOL).href);
 
+const cases = [
+  ["afterOpen", setSafeReadAfterOpenHook],
+  ["afterIdentity", setSafeReadAfterIdentityHook],
+];
 const root = join(tmpdir(), "gibson-pm-fdexpose-" + process.pid + "-" + Date.now());
+const reproduced = [];
 try {
   mkdirSync(join(root, "docs"), { recursive: true });
   writeFileSync(join(root, "docs/inside.txt"), "FD_EXPOSE\n");
-  let owned = -1;
-  let unrelated = -1;
-  setSafeReadAfterIdentityHook((info) => {
-    if (typeof info.fd !== "number") {
-      console.log("FD_EXPOSE_NO_FD");
-      return;
+  for (const [name, setHook] of cases) {
+    let owned = -1;
+    let unrelated = -1;
+    setHook((info) => {
+      if (typeof info.fd !== "number") {
+        console.log("FD_EXPOSE_NO_FD " + name);
+        return;
+      }
+      owned = info.fd;
+      closeSync(owned);
+      unrelated = openSync("/dev/null", "r");
+      console.log("FD_EXPOSE_REUSED " + JSON.stringify({ name, owned, unrelated, same: owned === unrelated }));
+      throw new Error("HOOK_THROW_FD_EXPOSE_" + name);
+    });
+    try { readContainedFile(root, "docs/inside.txt", "utf8"); } catch { /* expected */ }
+    setHook(null);
+    let closedUnrelated = false;
+    try {
+      fstatSync(unrelated);
+    } catch (e) {
+      closedUnrelated = !!(e && (e.code === "EBADF" || /EBADF|bad file descriptor/i.test(String(e))));
     }
-    owned = info.fd;
-    closeSync(owned);
-    unrelated = openSync("/dev/null", "r");
-    console.log("FD_EXPOSE_REUSED " + JSON.stringify({ owned, unrelated, same: owned === unrelated }));
-    throw new Error("HOOK_THROW_FD_EXPOSE");
-  });
-  try { readContainedFile(root, "docs/inside.txt", "utf8"); } catch { /* expected */ }
-  setSafeReadAfterIdentityHook(null);
-  let closedUnrelated = false;
-  try {
-    fstatSync(unrelated);
-  } catch (e) {
-    closedUnrelated = !!(e && (e.code === "EBADF" || /EBADF|bad file descriptor/i.test(String(e))));
+    try { if (unrelated >= 0) closeSync(unrelated); } catch { /* already closed */ }
+    if (owned >= 0 && unrelated >= 0 && owned === unrelated && closedUnrelated) {
+      console.log("FD_EXPOSE_DEFECT_REPRODUCED " + name);
+      reproduced.push(name);
+    } else {
+      console.log("FD_EXPOSE_UNEXPECTED " + name + " " + JSON.stringify({ owned, unrelated, closedUnrelated }));
+    }
   }
-  try { if (unrelated >= 0) closeSync(unrelated); } catch { /* already closed */ }
-  if (owned >= 0 && unrelated >= 0 && owned === unrelated && closedUnrelated) {
-    console.log("FD_EXPOSE_DEFECT_REPRODUCED");
+  if (reproduced.length === cases.length) {
+    console.log("FD_EXPOSE_DEFECT_REPRODUCED_BOTH");
     process.exit(0);
   }
-  console.log("FD_EXPOSE_UNEXPECTED " + JSON.stringify({ owned, unrelated, closedUnrelated }));
+  console.log("FD_EXPOSE_PARTIAL " + JSON.stringify(reproduced));
   process.exit(1);
 } finally {
   try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 ' 2>&1
   ) || true
-  if echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED"; then
-    ok "fd-expose mutation reproduces unrelated-descriptor close"
+  if echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED_BOTH" && \
+     echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED afterOpen" && \
+     echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED afterIdentity"; then
+    ok "fd-expose mutation reproduces unrelated-descriptor close for afterOpen"
+    ok "fd-expose mutation reproduces unrelated-descriptor close for afterIdentity"
   else
-    bad "fd-expose mutation did not reproduce reuse-close (out=$FD_EXPOSE_OUT)"
+    bad "fd-expose mutation did not reproduce reuse-close for both hooks (out=$FD_EXPOSE_OUT)"
   fi
 fi
 
