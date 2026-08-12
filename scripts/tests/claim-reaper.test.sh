@@ -3280,6 +3280,310 @@ else
   bad "claim-conflicts.md missing repository/mixed/label/PR refuse contracts"
 fi
 
+# ===========================================================================
+# #180 · already-absent recovery handoff reuses resolved repository identity
+# ===========================================================================
+# The early --claim-id already-absent path must consume PR_REPO (resolved with
+# --repo / gh / unambiguous origin fallback at startup), not a second gh-only
+# resolve_repo pass. Fixtures below seed journal proof
+# (claim_released=1 + handoff_comment_failed) with an absent claim and never
+# mutate ledger/label/branch/worktree — only the authorized success handoff.
+
+# Shared gh mock for #180: repo view fails; issue comments + comment list work.
+# Logs every --repo value seen on issue comment so identity is assertable.
+_install_abs180_gh() {
+  local dest="$1" comments_file="$2" repo_log="$3"
+  mkdir -p "$dest"
+  cat > "$dest/gh" <<GH
+#!/usr/bin/env bash
+case "\$1" in
+  repo)
+    echo "simulated gh repo view failure" >&2
+    exit 1
+    ;;
+  api)
+    if [[ "\${2:-}" == "graphql" ]]; then
+      exit 0
+    fi
+    if [[ "\${2:-}" == repos/* ]]; then
+      if [[ -f "${comments_file}" ]]; then
+        cat "${comments_file}"
+      fi
+      exit 0
+    fi
+    exit 1
+    ;;
+  issue)
+    shift
+    if [[ "\${1:-}" == "comment" ]]; then
+      # Capture --repo for identity proof.
+      prev=""
+      for a in "\$@"; do
+        if [[ "\$prev" == "--repo" ]]; then
+          printf '%s\n' "\$a" >> "${repo_log}"
+        fi
+        prev="\$a"
+      done
+      body=""
+      prev=""
+      for a in "\$@"; do
+        if [[ "\$prev" == "--body" ]]; then body="\$a"; fi
+        prev="\$a"
+      done
+      printf '%s\n' "\$body" >> "${comments_file}"
+      exit 0
+    fi
+    exit 1
+    ;;
+  pr)
+    echo "0"
+    exit 0
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+GH
+  chmod +x "$dest/gh"
+}
+
+_install_abs180_empty_pr_claims() {
+  local dest_dir="$1" log_file="${2:-}"
+  mkdir -p "$dest_dir"
+  cat > "$dest_dir/pr-claims.sh" <<READER
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list)
+    if [[ -n "${log_file}" ]]; then
+      printf '%s\n' "\${2:-}" >> "${log_file}"
+    fi
+    exit 0
+    ;;
+  *) exit 64 ;;
+esac
+READER
+  chmod +x "$dest_dir/pr-claims.sh"
+}
+
+echo "#180 · one-origin fallback completes already-absent recovery handoff"
+# gh repo view fails; exactly one GitHub origin supplies PR_REPO. Journal
+# proves prior claim_released=1 + handoff_comment_failed. Recovery must post
+# the success handoff to that same identity (acme/app) and COMPLETE.
+new_repo "$ROOT/abs180one"
+# No claim file — already absent. Bind one GitHub origin for identity.
+git -C "$ROOT/abs180one/canon" config "url.$ROOT/abs180one/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/abs180one/canon" remote set-url origin https://github.com/acme/app.git
+install_sibling_reaper "$ROOT/abs180one/scripts"
+: > "$ROOT/abs180one/list-repos.log"
+_install_abs180_empty_pr_claims "$ROOT/abs180one/scripts" "$ROOT/abs180one/list-repos.log"
+: > "$ROOT/abs180one/comments"
+: > "$ROOT/abs180one/comment-repos.log"
+mkdir -p "$ROOT/abs180one/bin"
+_install_abs180_gh "$ROOT/abs180one/bin" "$ROOT/abs180one/comments" "$ROOT/abs180one/comment-repos.log"
+state_a1="$STATE_BASE/abs180one"
+mkdir -p "$state_a1"
+# Seed Law-8 recovery proof only (no live claim, no release mutation this run).
+printf '2026-08-01T00:00:00Z INCOMPLETE op=reap:issue-180-absone:stale reason=handoff_comment_failed claim_released=1\n' \
+  > "$state_a1/journal.md"
+out=$(
+  PATH="$ROOT/abs180one/bin:$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/abs180one/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_a1" \
+  GIBSON_REAPER_JOURNAL="$state_a1/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_a1/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/abs180one/scripts/claim-reaper.sh" --claim-id issue-180-absone --apply 2>&1
+)
+rc=$?
+check "one-origin recovery exits 0" "$rc" "0"
+contains "one-origin recovery mentions absent" "$out" "nothing to reap"
+contains "one-origin recovery posts handoff" "$out" "handoff"
+if grep -qF '<!-- gibson-claim-reaper:issue-180-absone -->' "$ROOT/abs180one/comments" 2>/dev/null; then
+  ok "one-origin recovery posted success marker"
+else
+  bad "one-origin recovery missing success marker: $(cat "$ROOT/abs180one/comments" 2>/dev/null)"
+fi
+if grep -qxF 'acme/app' "$ROOT/abs180one/comment-repos.log" 2>/dev/null; then
+  ok "one-origin recovery commented on acme/app"
+else
+  bad "one-origin recovery comment --repo log: $(cat "$ROOT/abs180one/comment-repos.log" 2>/dev/null)"
+fi
+if grep -qxF 'acme/app' "$ROOT/abs180one/list-repos.log" 2>/dev/null; then
+  ok "one-origin recovery inventory used acme/app (startup identity)"
+else
+  bad "one-origin recovery inventory log: $(cat "$ROOT/abs180one/list-repos.log" 2>/dev/null)"
+fi
+j1=$(cat "$state_a1/journal.md" 2>/dev/null || true)
+contains "one-origin recovery journals already_absent COMPLETED" "$j1" "already_absent"
+contains "one-origin recovery journals recovery_handoff=1" "$j1" "recovery_handoff=1"
+# No claim/ledger mutation possible (claim was never present); assert empty claims tree.
+files=$(git -C "$ROOT/abs180one/canon" fetch -q origin 2>/dev/null
+  git -C "$ROOT/abs180one/canon" ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
+lacks "one-origin recovery never invents a claim file" "$files" "issue-180-absone.md"
+
+echo "#180 · ambiguous multi-origin refuses already-absent recovery handoff"
+# Two distinct GitHub origins + failing gh → identity unresolved. Recovery
+# proof present but must not invent a repo or post a handoff.
+new_repo "$ROOT/abs180amb"
+git -C "$ROOT/abs180amb/canon" config "url.$ROOT/abs180amb/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/abs180amb/canon" config --add "url.$ROOT/abs180amb/origin.insteadOf" https://github.com/other/app.git
+git -C "$ROOT/abs180amb/canon" remote set-url origin https://github.com/acme/app.git
+git -C "$ROOT/abs180amb/canon" config --add remote.origin.url https://github.com/other/app.git
+_ambig_n=$(git -C "$ROOT/abs180amb/canon" config --get-all remote.origin.url 2>/dev/null | grep -c . || true)
+[[ "$_ambig_n" -eq 2 ]] && ok "ambiguous-absent fixture has two origin URLs" \
+  || bad "ambiguous-absent fixture origin count=$_ambig_n"
+install_sibling_reaper "$ROOT/abs180amb/scripts"
+: > "$ROOT/abs180amb/list-repos.log"
+_install_abs180_empty_pr_claims "$ROOT/abs180amb/scripts" "$ROOT/abs180amb/list-repos.log"
+: > "$ROOT/abs180amb/comments"
+: > "$ROOT/abs180amb/comment-repos.log"
+mkdir -p "$ROOT/abs180amb/bin"
+_install_abs180_gh "$ROOT/abs180amb/bin" "$ROOT/abs180amb/comments" "$ROOT/abs180amb/comment-repos.log"
+state_aa="$STATE_BASE/abs180amb"
+mkdir -p "$state_aa"
+printf '2026-08-01T00:00:00Z INCOMPLETE op=reap:issue-180-absamb:stale reason=handoff_comment_failed claim_released=1\n' \
+  > "$state_aa/journal.md"
+out=$(
+  PATH="$ROOT/abs180amb/bin:$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/abs180amb/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_aa" \
+  GIBSON_REAPER_JOURNAL="$state_aa/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_aa/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/abs180amb/scripts/claim-reaper.sh" --claim-id issue-180-absamb --apply 2>&1
+)
+rc=$?
+check "ambiguous-absent recovery exits incomplete (3)" "$rc" "3"
+if grep -Eqx 'acme/app|other/app' "$ROOT/abs180amb/list-repos.log" 2>/dev/null; then
+  bad "ambiguous-absent invented inventory identity: $(cat "$ROOT/abs180amb/list-repos.log")"
+else
+  ok "ambiguous-absent never resolved inventory identity"
+fi
+if [[ -s "$ROOT/abs180amb/comments" ]] || grep -qF 'gibson-claim-reaper:issue-180-absamb' "$ROOT/abs180amb/comments" 2>/dev/null; then
+  bad "ambiguous-absent must not post handoff: $(cat "$ROOT/abs180amb/comments")"
+else
+  ok "ambiguous-absent posted no handoff comment"
+fi
+if [[ -s "$ROOT/abs180amb/comment-repos.log" ]]; then
+  bad "ambiguous-absent issue comment saw a --repo: $(cat "$ROOT/abs180amb/comment-repos.log")"
+else
+  ok "ambiguous-absent never selected a comment --repo"
+fi
+ja=$(cat "$state_aa/journal.md" 2>/dev/null || true)
+contains "ambiguous-absent journals handoff_comment_failed" "$ja" "handoff_comment_failed"
+lacks "ambiguous-absent no recovery_handoff success" "$ja" "recovery_handoff=1"
+lacks "ambiguous-absent no COMPLETED already_absent success" "$ja" "result=already_absent"
+
+echo "#180 · unresolved identity refuses already-absent recovery handoff"
+# Non-GitHub single origin + failing gh → PR_REPO empty. Same recovery proof
+# must fail closed with no handoff post.
+new_repo "$ROOT/abs180unr"
+# Default new_repo origin is a local bare path (non-GitHub) — leave it.
+install_sibling_reaper "$ROOT/abs180unr/scripts"
+: > "$ROOT/abs180unr/list-repos.log"
+_install_abs180_empty_pr_claims "$ROOT/abs180unr/scripts" "$ROOT/abs180unr/list-repos.log"
+: > "$ROOT/abs180unr/comments"
+: > "$ROOT/abs180unr/comment-repos.log"
+mkdir -p "$ROOT/abs180unr/bin"
+_install_abs180_gh "$ROOT/abs180unr/bin" "$ROOT/abs180unr/comments" "$ROOT/abs180unr/comment-repos.log"
+state_au="$STATE_BASE/abs180unr"
+mkdir -p "$state_au"
+printf '2026-08-01T00:00:00Z INCOMPLETE op=reap:issue-180-absunr:stale reason=handoff_comment_failed claim_released=1\n' \
+  > "$state_au/journal.md"
+out=$(
+  PATH="$ROOT/abs180unr/bin:$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/abs180unr/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_au" \
+  GIBSON_REAPER_JOURNAL="$state_au/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_au/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$ROOT/abs180unr/scripts/claim-reaper.sh" --claim-id issue-180-absunr --apply 2>&1
+)
+rc=$?
+check "unresolved-absent recovery exits incomplete (3)" "$rc" "3"
+if grep -Eqx 'acme/app|other/app' "$ROOT/abs180unr/list-repos.log" 2>/dev/null; then
+  bad "unresolved-absent invented inventory identity: $(cat "$ROOT/abs180unr/list-repos.log")"
+else
+  ok "unresolved-absent never resolved inventory identity"
+fi
+if grep -qF 'gibson-claim-reaper:issue-180-absunr' "$ROOT/abs180unr/comments" 2>/dev/null; then
+  bad "unresolved-absent must not post handoff: $(cat "$ROOT/abs180unr/comments")"
+else
+  ok "unresolved-absent posted no handoff comment"
+fi
+if [[ -s "$ROOT/abs180unr/comment-repos.log" ]]; then
+  bad "unresolved-absent issue comment saw a --repo: $(cat "$ROOT/abs180unr/comment-repos.log")"
+else
+  ok "unresolved-absent never selected a comment --repo"
+fi
+ju=$(cat "$state_au/journal.md" 2>/dev/null || true)
+contains "unresolved-absent journals handoff_comment_failed" "$ju" "handoff_comment_failed"
+lacks "unresolved-absent no recovery_handoff success" "$ju" "recovery_handoff=1"
+contains "unresolved-absent incomplete mentions handoff" "$out" "handoff"
+
+echo "#180 · mutation: restoring gh-only resolve_repo makes one-origin recovery fail"
+# Mutant derived from production (not a handwritten substitute). Anchor on the
+# PR_REPO assignment; restore `_abs_repo=$(resolve_repo …)`. One-origin fixture
+# must then fail (sensor would go red without the #180 fix).
+_reaper_mut="$ROOT/abs180mut/scripts/claim-reaper.sh"
+new_repo "$ROOT/abs180mut"
+git -C "$ROOT/abs180mut/canon" config "url.$ROOT/abs180mut/origin.insteadOf" https://github.com/acme/app.git
+git -C "$ROOT/abs180mut/canon" remote set-url origin https://github.com/acme/app.git
+install_sibling_reaper "$ROOT/abs180mut/scripts"
+: > "$ROOT/abs180mut/list-repos.log"
+_install_abs180_empty_pr_claims "$ROOT/abs180mut/scripts" "$ROOT/abs180mut/list-repos.log"
+: > "$ROOT/abs180mut/comments"
+: > "$ROOT/abs180mut/comment-repos.log"
+mkdir -p "$ROOT/abs180mut/bin"
+_install_abs180_gh "$ROOT/abs180mut/bin" "$ROOT/abs180mut/comments" "$ROOT/abs180mut/comment-repos.log"
+# Anchor / mutation-miss guard: production must still assign _abs_repo from PR_REPO
+# under the already-absent recovery proof branch (comments sit between the if and
+# the assignment, so use a wide before-context).
+if grep -qF '_abs_repo="${PR_REPO:-}"' "$_reaper_mut" && \
+   grep -B12 -F '_abs_repo="${PR_REPO:-}"' "$_reaper_mut" | grep -qF 'journal_has_claim_released_handoff_failed'; then
+  ok "mutation anchor: already-absent recovery binds _abs_repo to PR_REPO"
+else
+  bad "mutation-miss: production missing _abs_repo=\"\${PR_REPO:-}\" under recovery proof"
+fi
+# Surgical restore of the pre-#180 gh-only lookup (copy only).
+# Escape \$( so Perl does not expand the real-GID special variable $( .
+perl -i -pe 's/^(\s*)_abs_repo="\$\{PR_REPO:-\}"/$1_abs_repo=\$(resolve_repo 2>\/dev\/null || true)  # MUTATED gh-only/' "$_reaper_mut"
+if grep -q 'MUTATED gh-only' "$_reaper_mut" && \
+   grep -qF '_abs_repo=$(resolve_repo 2>/dev/null || true)' "$_reaper_mut" && \
+   ! grep -qF '_abs_repo="${PR_REPO:-}"' "$_reaper_mut"; then
+  ok "mutation applied: restored gh-only resolve_repo on recovery path"
+else
+  bad "mutation-miss: failed to restore gh-only resolve_repo: $(grep -n '_abs_repo' "$_reaper_mut" || true)"
+fi
+state_am="$STATE_BASE/abs180mut"
+mkdir -p "$state_am"
+printf '2026-08-01T00:00:00Z INCOMPLETE op=reap:issue-180-absmut:stale reason=handoff_comment_failed claim_released=1\n' \
+  > "$state_am/journal.md"
+out=$(
+  PATH="$ROOT/abs180mut/bin:$BIN:$PATH" \
+  GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" \
+  GIBSON_CANONICAL="$ROOT/abs180mut/canon" \
+  GIBSON_REAPER_STATE_DIR="$state_am" \
+  GIBSON_REAPER_JOURNAL="$state_am/journal.md" \
+  GIBSON_REAPER_LOCK_DIR="$state_am/lock" \
+  GIBSON_REAPER_RELEASE_CMD="$RC" \
+    "$_reaper_mut" --claim-id issue-180-absmut --apply 2>&1
+)
+rc=$?
+# With gh-only lookup restored, origin identity is dropped → incomplete, no comment.
+if [[ "$rc" -eq 3 ]] && \
+   ! grep -qF 'gibson-claim-reaper:issue-180-absmut' "$ROOT/abs180mut/comments" 2>/dev/null && \
+   ! grep -qF 'recovery_handoff=1' "$state_am/journal.md" 2>/dev/null; then
+  ok "mutation receipt: gh-only lookup makes one-origin recovery fail (sensor would fail)"
+else
+  bad "mutation receipt: expected incomplete/no-handoff under gh-only mutant: rc=$rc out=$out comments=$(cat "$ROOT/abs180mut/comments" 2>/dev/null) journal=$(cat "$state_am/journal.md")"
+fi
+# Hygiene: restore production sibling (no further use of mutant).
+install_sibling_reaper "$ROOT/abs180mut/scripts"
+
 # ---------------------------------------------------------------------------
 echo
 echo "claim-reaper.test.sh: $PASS passed, $FAIL failed"
