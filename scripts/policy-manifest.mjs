@@ -77,6 +77,91 @@ const REQUIRED_FORBIDDEN_PAIRS = [
   ["builder", "ux-evaluator"],
   ["reviewer", "ux-evaluator"],
 ];
+/** Closed core reviewIndependence id set (schema parity; unknown IDs fail closed). */
+const ALLOWED_RI_IDS = ["ri.law5", "ri.tier-a", "ri.tier-b", "ri.tier-c"];
+const REQUIRED_RI_IDS = ALLOWED_RI_IDS.slice();
+
+/** additionalProperties:false parity — allowed keys per object shape. */
+const ALLOWED_ROOT_KEYS = new Set([
+  "schemaId",
+  "schemaVersion",
+  "manifestId",
+  "manifestVersion",
+  "status",
+  "authority",
+  "activated",
+  "generatorVersion",
+  "validatorVersion",
+  "compatibility",
+  "provenance",
+  "humanGates",
+  "riskTiers",
+  "roles",
+  "forbiddenRolePairs",
+  "reviewIndependence",
+  "workflowStages",
+  "tierGateMappings",
+  "forkExtensions",
+  "notices",
+]);
+const ALLOWED_COMPAT_KEYS = new Set([
+  "policy",
+  "forkExtensionRule",
+  "coreIdPrefix",
+  "upgrade",
+  "rollback",
+  "notes",
+]);
+const ALLOWED_PROVENANCE_KEYS = new Set(["sources"]);
+const ALLOWED_SOURCE_KEYS = new Set([
+  "id",
+  "path",
+  "digestAlgorithm",
+  "digest",
+  "role",
+]);
+const ALLOWED_GATE_KEYS = new Set([
+  "id",
+  "category",
+  "summary",
+  "severity",
+  "relatedTierIds",
+]);
+const ALLOWED_TIER_KEYS = new Set(["id", "definition", "evidenceMinimums"]);
+const ALLOWED_EVIDENCE_KEYS = new Set([
+  "reviewDepth",
+  "adversarialReview",
+  "humanMergeGate",
+  "humanGateIds",
+  "uxEvalIfVisible",
+  "serializedWhenStateful",
+  "crossVendorPreferred",
+]);
+const ALLOWED_ROLE_KEYS = new Set(["id", "summary"]);
+const ALLOWED_PAIR_KEYS = new Set(["a", "b", "scope", "symmetric", "rationale"]);
+const ALLOWED_RI_KEYS = new Set([
+  "id",
+  "description",
+  "tierId",
+  "minimumRelationship",
+  "preferredRelationship",
+  "humanGateId",
+  "generatorMustNotEqual",
+]);
+const ALLOWED_STAGE_KEYS = new Set(["id", "order", "name", "roleId"]);
+const ALLOWED_TGM_KEYS = new Set(["tierId", "gateIds", "rationale"]);
+const ALLOWED_FORK_KEYS = new Set([
+  "allowedNamespaces",
+  "forbiddenCoreShadow",
+  "precedence",
+  "conflictDisposition",
+]);
+const ALLOWED_NOTICES_KEYS = new Set([
+  "authority",
+  "activationOwner",
+  "generatedViews",
+]);
+
 const CORE_ID_PREFIX = "gibson.";
 const SAFE_REL_PATH = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
@@ -105,7 +190,14 @@ function defaultRepoRoot() {
 
 /**
  * Resolve a path under repoRoot. Refuse absolute escapes and `..` segments
- * that leave the root. Fail closed.
+ * that leave the root. When the path exists (including as a symlink), also
+ * require that realpath(path) stays inside the real repo root so a
+ * repository-relative symlink cannot escape for later stat/hash/read.
+ * Fail closed.
+ *
+ * @param {string} repoRoot
+ * @param {string} relPath
+ * @returns {string} absolute path suitable for read/stat/hash (realpath when the entry exists)
  */
 export function resolveUnderRoot(repoRoot, relPath) {
   if (typeof relPath !== "string" || !relPath) {
@@ -121,17 +213,78 @@ export function resolveUnderRoot(repoRoot, relPath) {
   if (!SAFE_REL_PATH.test(norm.replace(/\\/g, "/"))) {
     throw new Error(`path: malformed relative path: ${relPath}`);
   }
-  const rootReal = realpathSync(repoRoot);
+  let rootReal;
+  try {
+    rootReal = realpathSync(repoRoot);
+  } catch (e) {
+    throw new Error(`path: cannot realpath repo root: ${e.message}`);
+  }
+  // Ensure root is a directory (not a symlink-to-file, etc.)
+  try {
+    if (!statSync(rootReal).isDirectory()) {
+      throw new Error("path: repo root is not a directory");
+    }
+  } catch (e) {
+    if (e.message && e.message.startsWith("path:")) throw e;
+    throw new Error(`path: cannot stat repo root: ${e.message}`);
+  }
+
   const abs = resolve(rootReal, norm);
   const rel = relative(rootReal, abs);
   if (rel.startsWith("..") || isAbsolute(rel)) {
     throw new Error(`path: resolves outside repo root: ${relPath}`);
   }
+
+  // Lexical containment is not enough: if any path component is a symlink,
+  // subsequent readFile/stat/hash follow it. Refuse realpath escape.
+  if (existsSync(abs)) {
+    let real;
+    try {
+      real = realpathSync(abs);
+    } catch (e) {
+      throw new Error(`path: cannot realpath ${relPath}: ${e.message}`);
+    }
+    const relReal = relative(rootReal, real);
+    if (relReal.startsWith("..") || isAbsolute(relReal)) {
+      throw new Error(
+        `path: realpath escapes repo root (symlink or link chain): ${relPath}`
+      );
+    }
+    // Return the contained real path so callers hash/read the verified target.
+    return real;
+  }
   return abs;
 }
 
-export function sha256File(absPath) {
-  const buf = readFileSync(absPath);
+/**
+ * Hash a file only after proving its realpath stays under repoRoot when a
+ * root is supplied. Absolute paths from resolveUnderRoot already satisfy this.
+ */
+export function sha256File(absPath, repoRoot) {
+  let target = absPath;
+  if (repoRoot) {
+    // Re-assert realpath containment for any absolute path handed in.
+    let rootReal;
+    try {
+      rootReal = realpathSync(repoRoot);
+    } catch (e) {
+      throw new Error(`path: cannot realpath repo root: ${e.message}`);
+    }
+    let real;
+    try {
+      real = realpathSync(absPath);
+    } catch (e) {
+      throw new Error(`path: cannot realpath for hash: ${e.message}`);
+    }
+    const relReal = relative(rootReal, real);
+    if (relReal.startsWith("..") || isAbsolute(relReal)) {
+      throw new Error(
+        `path: hash target realpath escapes repo root: ${absPath}`
+      );
+    }
+    target = real;
+  }
+  const buf = readFileSync(target);
   return createHash("sha256").update(buf).digest("hex");
 }
 
@@ -215,6 +368,28 @@ function sortFindings(findings) {
   });
 }
 
+/**
+ * Schema parity: additionalProperties:false. Unknown keys are errors.
+ * @param {Record<string, unknown>} obj
+ * @param {Set<string>} allowed
+ * @param {string} pathPrefix empty for root
+ * @param {(f: Finding) => void} push
+ */
+function rejectUnknownKeys(obj, allowed, pathPrefix, push) {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.has(k)) {
+      const loc = pathPrefix ? `${pathPrefix}.${k}` : k;
+      push(
+        err(
+          "E_UNKNOWN_PROPERTY",
+          `unknown property '${k}' (schema additionalProperties:false)`,
+          loc
+        )
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Structural + semantic validation (fail closed)
 // ---------------------------------------------------------------------------
@@ -243,6 +418,9 @@ export function validateCandidate(candidate, options = {}) {
 
   /** @type {Record<string, unknown>} */
   const c = /** @type {Record<string, unknown>} */ (candidate);
+
+  // Schema parity: refuse unknown root controls before field checks.
+  rejectUnknownKeys(c, ALLOWED_ROOT_KEYS, "", push);
 
   // --- identity / versions / authority ------------------------------------
   if (c.schemaId !== SUPPORTED_SCHEMA_ID) {
@@ -319,6 +497,7 @@ export function validateCandidate(candidate, options = {}) {
     push(err("E_COMPAT", "compatibility object required", "compatibility"));
   } else {
     const k = /** @type {Record<string, unknown>} */ (compat);
+    rejectUnknownKeys(k, ALLOWED_COMPAT_KEYS, "compatibility", push);
     if (k.policy !== "semver-major-break") {
       push(err("E_COMPAT_POLICY", "compatibility.policy must be semver-major-break", "compatibility.policy"));
     }
@@ -354,6 +533,12 @@ export function validateCandidate(candidate, options = {}) {
   if (!prov || typeof prov !== "object" || Array.isArray(prov)) {
     push(err("E_PROVENANCE", "provenance object required", "provenance"));
   } else {
+    rejectUnknownKeys(
+      /** @type {Record<string, unknown>} */ (prov),
+      ALLOWED_PROVENANCE_KEYS,
+      "provenance",
+      push
+    );
     const sources = /** @type {Record<string, unknown>} */ (prov).sources;
     if (!Array.isArray(sources) || sources.length === 0) {
       push(err("E_PROVENANCE_SOURCES", "provenance.sources must be a non-empty array", "provenance.sources"));
@@ -365,6 +550,7 @@ export function validateCandidate(candidate, options = {}) {
           return;
         }
         const s = /** @type {Record<string, unknown>} */ (src);
+        rejectUnknownKeys(s, ALLOWED_SOURCE_KEYS, p, push);
         if (typeof s.id !== "string" || !/^src\.[a-z0-9.-]+$/.test(s.id)) {
           push(err("E_PROVENANCE_ID", "source id malformed", `${p}.id`));
         } else if (sourceIds.has(s.id)) {
@@ -400,14 +586,16 @@ export function validateCandidate(candidate, options = {}) {
           options.repoRoot &&
           typeof s.path === "string" &&
           typeof s.digest === "string" &&
-          SHA256_HEX.test(s.digest)
+          SHA256_HEX.test(s.digest) &&
+          SAFE_REL_PATH.test(s.path) &&
+          !s.path.includes("..")
         ) {
           try {
             const abs = resolveUnderRoot(options.repoRoot, s.path);
             if (!existsSync(abs) || !statSync(abs).isFile()) {
               push(err("E_PROVENANCE_MISSING_FILE", `source file missing: ${s.path}`, `${p}.path`));
             } else {
-              const live = sha256File(abs);
+              const live = sha256File(abs, options.repoRoot);
               if (live !== s.digest) {
                 push(
                   err(
@@ -419,7 +607,13 @@ export function validateCandidate(candidate, options = {}) {
               }
             }
           } catch (e) {
-            push(err("E_PROVENANCE_PATH", e.message, `${p}.path`));
+            // Symlink escape / path refusal — fail closed (not a soft warning).
+            const msg = e && e.message ? e.message : String(e);
+            if (/realpath escapes|symlink/i.test(msg)) {
+              push(err("E_PROVENANCE_PATH_ESCAPE", msg, `${p}.path`));
+            } else {
+              push(err("E_PROVENANCE_PATH", msg, `${p}.path`));
+            }
           }
         }
       });
@@ -439,6 +633,7 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const gate = /** @type {Record<string, unknown>} */ (g);
+      rejectUnknownKeys(gate, ALLOWED_GATE_KEYS, p, push);
       if (typeof gate.id !== "string" || !GATE_ID_RE.test(gate.id)) {
         push(err("E_GATE_ID", `unknown or malformed gate id ${JSON.stringify(gate.id)}`, `${p}.id`));
       } else if (gateIds.has(gate.id)) {
@@ -516,6 +711,7 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const tier = /** @type {Record<string, unknown>} */ (t);
+      rejectUnknownKeys(tier, ALLOWED_TIER_KEYS, p, push);
       if (!REQUIRED_TIER_IDS.includes(/** @type {string} */ (tier.id))) {
         push(err("E_UNKNOWN_ID", `unknown tier id ${JSON.stringify(tier.id)}`, `${p}.id`));
       } else if (tierIds.has(/** @type {string} */ (tier.id))) {
@@ -532,6 +728,7 @@ export function validateCandidate(candidate, options = {}) {
         push(err("E_TIER_EVIDENCE", "evidenceMinimums object required", `${p}.evidenceMinimums`));
       } else {
         const e = /** @type {Record<string, unknown>} */ (em);
+        rejectUnknownKeys(e, ALLOWED_EVIDENCE_KEYS, `${p}.evidenceMinimums`, push);
         const depths = ["solo", "full-lens", "fan-out"];
         if (!depths.includes(/** @type {string} */ (e.reviewDepth))) {
           push(err("E_TIER_REVIEW_DEPTH", "reviewDepth invalid", `${p}.evidenceMinimums.reviewDepth`));
@@ -630,6 +827,7 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const role = /** @type {Record<string, unknown>} */ (r);
+      rejectUnknownKeys(role, ALLOWED_ROLE_KEYS, p, push);
       if (!REQUIRED_ROLE_IDS.includes(/** @type {string} */ (role.id))) {
         push(err("E_UNKNOWN_ID", `unknown role id ${JSON.stringify(role.id)}`, `${p}.id`));
       } else if (roleIds.has(/** @type {string} */ (role.id))) {
@@ -661,6 +859,7 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const fp = /** @type {Record<string, unknown>} */ (pair);
+      rejectUnknownKeys(fp, ALLOWED_PAIR_KEYS, p, push);
       if (typeof fp.a !== "string" || (roleIds.size && !roleIds.has(fp.a))) {
         push(err("E_BROKEN_REF", `forbidden pair.a unknown role ${JSON.stringify(fp.a)}`, `${p}.a`));
       }
@@ -732,8 +931,18 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const r = /** @type {Record<string, unknown>} */ (ri);
+      rejectUnknownKeys(r, ALLOWED_RI_KEYS, p, push);
       if (typeof r.id !== "string" || !/^ri\.[a-z0-9.-]+$/.test(r.id)) {
         push(err("E_RI_ID", "reviewIndependence id malformed", `${p}.id`));
+      } else if (!ALLOWED_RI_IDS.includes(r.id)) {
+        // Closed set: ri.unknown and any non-core id fail closed.
+        push(
+          err(
+            "E_RI_UNKNOWN_ID",
+            `unknown reviewIndependence id ${r.id}; allowed: ${ALLOWED_RI_IDS.join(", ")}`,
+            `${p}.id`
+          )
+        );
       } else if (riIds.has(r.id)) {
         push(err("E_DUPLICATE_ID", `duplicate reviewIndependence id ${r.id}`, `${p}.id`));
       } else {
@@ -756,6 +965,22 @@ export function validateCandidate(candidate, options = {}) {
             `${p}.minimumRelationship`
           )
         );
+      }
+      if (r.preferredRelationship !== undefined) {
+        const allowedPref = [
+          "cross-vendor",
+          "two-fresh-context-approve",
+          "human-gate",
+        ];
+        if (!allowedPref.includes(/** @type {string} */ (r.preferredRelationship))) {
+          push(
+            err(
+              "E_RI_PREF",
+              `unknown preferredRelationship ${JSON.stringify(r.preferredRelationship)}`,
+              `${p}.preferredRelationship`
+            )
+          );
+        }
       }
       if (r.tierId !== undefined) {
         if (!REQUIRED_TIER_IDS.includes(/** @type {string} */ (r.tierId))) {
@@ -786,12 +1011,17 @@ export function validateCandidate(candidate, options = {}) {
         }
       }
     });
-    // Required relationships for current semantics
-    if (!riIds.has("ri.law5")) {
-      push(err("E_RI_REQUIRED", "reviewIndependence must include ri.law5", "reviewIndependence"));
-    }
-    if (!riIds.has("ri.tier-c")) {
-      push(err("E_RI_REQUIRED", "reviewIndependence must include ri.tier-c", "reviewIndependence"));
+    // Closed required set for core candidate encoding.
+    for (const need of REQUIRED_RI_IDS) {
+      if (!riIds.has(need)) {
+        push(
+          err(
+            "E_RI_REQUIRED",
+            `reviewIndependence must include ${need}`,
+            "reviewIndependence"
+          )
+        );
+      }
     }
     const tierC = (/** @type {unknown[]} */ (c.reviewIndependence || [])).find((x) => {
       if (!x || typeof x !== "object") return false;
@@ -826,6 +1056,7 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const s = /** @type {Record<string, unknown>} */ (st);
+      rejectUnknownKeys(s, ALLOWED_STAGE_KEYS, p, push);
       if (!REQUIRED_STAGE_IDS.includes(/** @type {string} */ (s.id))) {
         push(err("E_UNKNOWN_ID", `unknown stage id ${JSON.stringify(s.id)}`, `${p}.id`));
       } else if (stageIds.has(/** @type {string} */ (s.id))) {
@@ -867,6 +1098,7 @@ export function validateCandidate(candidate, options = {}) {
         return;
       }
       const map = /** @type {Record<string, unknown>} */ (m);
+      rejectUnknownKeys(map, ALLOWED_TGM_KEYS, p, push);
       if (!REQUIRED_TIER_IDS.includes(/** @type {string} */ (map.tierId))) {
         push(err("E_UNKNOWN_ID", `unknown tierId ${map.tierId}`, `${p}.tierId`));
       }
@@ -914,6 +1146,7 @@ export function validateCandidate(candidate, options = {}) {
     push(err("E_FORK", "forkExtensions object required", "forkExtensions"));
   } else {
     const f = /** @type {Record<string, unknown>} */ (fe);
+    rejectUnknownKeys(f, ALLOWED_FORK_KEYS, "forkExtensions", push);
     if (!Array.isArray(f.allowedNamespaces) || f.allowedNamespaces.length === 0) {
       push(err("E_FORK_NS", "allowedNamespaces must be a non-empty array", "forkExtensions.allowedNamespaces"));
     } else {
@@ -995,6 +1228,7 @@ export function validateCandidate(candidate, options = {}) {
     push(err("E_NOTICES", "notices object required", "notices"));
   } else {
     const n = /** @type {Record<string, unknown>} */ (notices);
+    rejectUnknownKeys(n, ALLOWED_NOTICES_KEYS, "notices", push);
     if (typeof n.authority !== "string" || !/report-only/i.test(n.authority)) {
       push(
         err(
@@ -1423,7 +1657,7 @@ function main(argv) {
     }
     try {
       const abs = resolveUnderRoot(repoRoot, opt.path);
-      const digest = sha256File(abs);
+      const digest = sha256File(abs, repoRoot);
       process.stdout.write(`${digest}  ${opt.path.replace(/\\/g, "/")}\n`);
       process.exit(0);
     } catch (e) {

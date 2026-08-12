@@ -144,25 +144,17 @@ check "report json exits 0" "$rc" "0"
 run_tool report --repo-root "$REPO_ROOT" --format json > "$R2"; rc=$?
 check "report json second run exits 0" "$rc" "0"
 if cmp -s "$R1" "$R2"; then ok "report JSON is byte-stable across runs"; else bad "report JSON not byte-stable"; fi
-# Frozen fixture: store and compare key invariant fields + full structural hash
+# Frozen fixture is committed under config/policy/fixtures/. Missing must fail closed
+# — the suite must never write into the repo working tree (no silent mutation).
 FIXTURE_DIR="$REPO_ROOT/config/policy/fixtures"
-mkdir -p "$FIXTURE_DIR"
-# Compare against a regenerated copy written beside the tool for this suite only
-# when the on-disk fixture exists; otherwise create it once from the clean report.
 FROZEN="$FIXTURE_DIR/report-snapshot.json"
-if [[ -f "$FROZEN" ]]; then
-  if cmp -s "$R1" "$FROZEN"; then
-    ok "report matches frozen fixture"
-  else
-    # Allow candidate-count fields to match even if we only check digest of findings path
-    # Prefer exact match; if digests of sources change the snapshot must update with candidate.
-    bad "report does not match frozen fixture (update config/policy/fixtures/report-snapshot.json if intentional)"
-    # Show a short diff hint
-    echo "         tip: node scripts/policy-manifest.mjs report --format json > config/policy/fixtures/report-snapshot.json"
-  fi
+if [[ ! -f "$FROZEN" ]]; then
+  bad "missing committed frozen fixture config/policy/fixtures/report-snapshot.json (fail closed; suite does not create it)"
+elif cmp -s "$R1" "$FROZEN"; then
+  ok "report matches frozen fixture"
 else
-  cp "$R1" "$FROZEN"
-  ok "wrote frozen report fixture (first run)"
+  bad "report does not match frozen fixture (update config/policy/fixtures/report-snapshot.json if intentional)"
+  echo "         tip: node scripts/policy-manifest.mjs report --format json > config/policy/fixtures/report-snapshot.json"
 fi
 ok_field=$(json_get "$R1" "ok")
 check "report.ok true" "$ok_field" "true"
@@ -358,6 +350,92 @@ M="$ROOT/m-act.json"
 mutate_json "$CANDIDATE" "$M" 'c.activated = true; c.authority = "active";'
 out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "activation claim fails closed" || bad "activation claim passed"
+
+# 13) unknown root property (additionalProperties:false parity)
+M="$ROOT/m-unk-root.json"
+mutate_json "$CANDIDATE" "$M" 'c.secretControlPlane = { "enabled": true };'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "unknown root property fails closed" || bad "unknown root property passed"
+has "unknown root property code" "$out" "E_UNKNOWN_PROPERTY"
+
+# 14) unknown nested property
+M="$ROOT/m-unk-nested.json"
+mutate_json "$CANDIDATE" "$M" 'c.compatibility.extraLever = "loosen";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "unknown nested property fails closed" || bad "unknown nested property passed"
+has "unknown nested property code" "$out" "E_UNKNOWN_PROPERTY"
+
+# 15) unknown reviewIndependence id (closed set)
+M="$ROOT/m-ri-unk.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence.push({
+    id: "ri.unknown",
+    description: "should fail",
+    minimumRelationship: "independent-approve"
+  });
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "unknown RI id fails closed" || bad "unknown RI id passed"
+has "unknown RI id code" "$out" "E_RI_UNKNOWN_ID"
+
+# 15b) missing required RI id (closed set completeness)
+M="$ROOT/m-ri-miss.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.filter(r => r.id !== "ri.tier-a");
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "missing required RI id fails closed" || bad "missing required RI id passed"
+has "missing RI required code" "$out" "E_RI_REQUIRED"
+
+# 15c) unknown nested field on a reviewIndependence entry
+M="$ROOT/m-ri-prop.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.law5" ? Object.assign({}, r, { shadowAuthority: true }) : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "unknown RI nested property fails closed" || bad "unknown RI nested property passed"
+has "unknown RI nested property code" "$out" "E_UNKNOWN_PROPERTY"
+
+# 16) adversarial symlink escape: repo-relative symlink to outside must fail digest check
+# Build a disposable mini-repo so we never touch the real checkout.
+MINI="$ROOT/mini-repo"
+OUTSIDE_FOR_LINK="$ROOT/outside-secret"
+mkdir -p "$MINI/docs" "$MINI/config/policy/candidates" "$OUTSIDE_FOR_LINK"
+echo "secret-bytes-not-in-repo" > "$OUTSIDE_FOR_LINK/leaked.txt"
+# Legitimate in-repo doctrine stubs so other fields can be valid if needed
+printf '# gates\n**G1**\n' > "$MINI/docs/14-human-gates.md"
+# Symlink that looks repo-relative but realpaths outside
+ln -s "$OUTSIDE_FOR_LINK/leaked.txt" "$MINI/docs/escape-link.md"
+# Candidate with a provenance path pointing at the symlink
+M="$ROOT/m-symlink.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.provenance.sources = [{
+    id: "src.escape",
+    path: "docs/escape-link.md",
+    digestAlgorithm: "sha256",
+    digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    role: "canonical-doctrine"
+  }];
+'
+# Copy mutated candidate into mini repo (validator resolves relative to --repo-root)
+cp "$M" "$MINI/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$MINI" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "symlink escape fails closed" || bad "symlink escape passed (rc=$rc)"
+if echo "$out" | grep -Eq 'E_PROVENANCE_PATH_ESCAPE|realpath escapes|symlink'; then
+  ok "symlink escape diagnosed"
+else
+  bad "symlink escape missing escape diagnosis (out=$out)"
+fi
+# Also prove digest CLI refuses
+out=$(run_tool digest --path docs/escape-link.md --repo-root "$MINI" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "digest CLI refuses symlink escape" || bad "digest CLI followed symlink escape"
+
+# Control: legitimate in-repo path still works under realpath containment
+echo "legit" > "$MINI/docs/legit.md"
+out=$(run_tool digest --path docs/legit.md --repo-root "$MINI" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "legitimate in-repo path still digests" || bad "legitimate path refused (out=$out)"
 
 echo
 echo "=== docs guide present ==="
