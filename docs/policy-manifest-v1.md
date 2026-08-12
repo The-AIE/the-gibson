@@ -140,10 +140,22 @@ authority:
 The pure validator refuses (non-exhaustive):
 
 - unsupported schema id / major version
+- **schema value parity** against `policy-manifest-v1.schema.json` (single
+  source): every `type`, `enum`, `const`, `required`, `pattern`, `minLength`,
+  `minItems` / `maxItems`, and numeric `minimum` / `maximum` — so a
+  runtime-valid document cannot be schema-invalid on value constraints
+- unknown properties on all object shapes (`additionalProperties: false`)
 - unknown or duplicate IDs
 - broken references (roles, gates, tiers, stages)
 - contradictory tier ↔ gate mappings (e.g. G12 on Tier A)
 - missing required forbidden pairs; asymmetric pairs without reverse edges
+- **reviewIndependence semantic pins** for each core id (not only presence):
+  - `ri.law5` → `different-agent` + preferred `cross-vendor` +
+    `generatorMustNotEqual: reviewer`
+  - `ri.tier-a` → tier `A`, `independent-approve`, preferred `cross-vendor`
+  - `ri.tier-b` → tier `B`, `independent-approve`, preferred
+    `two-fresh-context-approve`
+  - `ri.tier-c` → tier `C`, `human-gate` / preferred `human-gate`, gate `G12`
 - unsafe fork namespaces (including core `gibson.` shadow)
 - malformed provenance (path escapes, non-sha256 digests)
 - ambiguous overrides (duplicate precedence, non-refuse disposition)
@@ -168,10 +180,14 @@ outside the focused suite that runs it.
 The focused suite proves the gate fails when a fixture:
 
 - deletes or renames a human gate
-- weakens a minimum review relationship (Tier C)
+- weakens a minimum review relationship (Tier C) or any other core RI pin
 - drops a forbidden role pairing or makes a pair asymmetric
 - corrupts a source digest
 - declares an unsupported schema major
+- violates schema value parity (enum / boolean type / integer-or-string /
+  array cardinality / const / missing required / pattern)
+- substitutes a schema-valid but semantically wrong field on `ri.law5`,
+  `ri.tier-a`, `ri.tier-b`, or `ri.tier-c`
 
 ## Activation work that remains in #164
 

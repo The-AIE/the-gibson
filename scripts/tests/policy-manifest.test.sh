@@ -398,6 +398,294 @@ out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-che
 [[ "$rc" -ne 0 ]] && ok "unknown RI nested property fails closed" || bad "unknown RI nested property passed"
 has "unknown RI nested property code" "$out" "E_UNKNOWN_PROPERTY"
 
+# ---------------------------------------------------------------------------
+# Schema value parity receipts (runtime must reject every schema value rule)
+# Representative enum / boolean / integer-or-string / cardinality / const /
+# missing-required failures across shapes. Codes are E_SCHEMA_*.
+# ---------------------------------------------------------------------------
+
+# 17) enum: humanGates category outside published enum
+M="$ROOT/m-schema-enum-cat.json"
+mutate_json "$CANDIDATE" "$M" 'c.humanGates[0].category = "bogus";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema enum category fails closed" || bad "schema enum category passed"
+has "schema enum category code" "$out" "E_SCHEMA_ENUM"
+
+# 17b) enum: status
+M="$ROOT/m-schema-enum-status.json"
+mutate_json "$CANDIDATE" "$M" 'c.status = "active";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema enum status fails closed" || bad "schema enum status passed"
+has "schema enum status code" "$out" "E_SCHEMA_ENUM"
+
+# 17c) enum: evidence reviewDepth
+M="$ROOT/m-schema-enum-depth.json"
+mutate_json "$CANDIDATE" "$M" 'c.riskTiers[0].evidenceMinimums.reviewDepth = "shallow";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema enum reviewDepth fails closed" || bad "schema enum reviewDepth passed"
+has "schema enum reviewDepth code" "$out" "E_SCHEMA_ENUM"
+
+# 18) boolean type: uxEvalIfVisible string "yes" (schema type boolean)
+M="$ROOT/m-schema-bool.json"
+mutate_json "$CANDIDATE" "$M" 'c.riskTiers[1].evidenceMinimums.uxEvalIfVisible = "yes";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema boolean type fails closed" || bad "schema boolean type passed"
+has "schema boolean type code" "$out" "E_SCHEMA_TYPE"
+
+# 18b) boolean type: severity as string
+M="$ROOT/m-schema-bool-sev.json"
+mutate_json "$CANDIDATE" "$M" 'c.humanGates[0].severity = "true";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema severity type fails closed" || bad "schema severity type passed"
+has "schema severity type code" "$out" "E_SCHEMA_TYPE"
+
+# 19) integer/string mismatch: notices.generatedViews must be string
+M="$ROOT/m-schema-int-str.json"
+mutate_json "$CANDIDATE" "$M" 'c.notices.generatedViews = 17;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema generatedViews type fails closed" || bad "schema generatedViews type passed"
+has "schema generatedViews type code" "$out" "E_SCHEMA_TYPE"
+
+# 19b) integer bounds: workflowStages.order out of range
+M="$ROOT/m-schema-order-max.json"
+mutate_json "$CANDIDATE" "$M" 'c.workflowStages[0].order = 99;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema order maximum fails closed" || bad "schema order maximum passed"
+has "schema order maximum code" "$out" "E_SCHEMA_MAXIMUM"
+
+# 19c) integer type: order as float
+M="$ROOT/m-schema-order-float.json"
+mutate_json "$CANDIDATE" "$M" 'c.workflowStages[0].order = 1.5;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema order integer type fails closed" || bad "schema order integer type passed"
+has "schema order integer type code" "$out" "E_SCHEMA_TYPE"
+
+# 20) array cardinality: humanGates below minItems 16
+M="$ROOT/m-schema-minitems.json"
+mutate_json "$CANDIDATE" "$M" 'c.humanGates = c.humanGates.slice(0, 10);'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema minItems fails closed" || bad "schema minItems passed"
+has "schema minItems code" "$out" "E_SCHEMA_MIN_ITEMS"
+
+# 20b) array cardinality: roles above maxItems 9 (duplicate-like extra entry)
+M="$ROOT/m-schema-maxitems.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.roles.push({ id: "planner", summary: "extra beyond maxItems" });
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema maxItems fails closed" || bad "schema maxItems passed"
+has "schema maxItems code" "$out" "E_SCHEMA_MAX_ITEMS"
+
+# 20c) uniqueness/cardinality companion: empty provenance.sources (minItems 1)
+M="$ROOT/m-schema-sources-empty.json"
+mutate_json "$CANDIDATE" "$M" 'c.provenance.sources = [];'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema sources minItems fails closed" || bad "schema sources minItems passed"
+has "schema sources minItems code" "$out" "E_SCHEMA_MIN_ITEMS"
+
+# 21) const: authority must be report-only
+M="$ROOT/m-schema-const-auth.json"
+mutate_json "$CANDIDATE" "$M" 'c.authority = "advisory";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema const authority fails closed" || bad "schema const authority passed"
+has "schema const authority code" "$out" "E_SCHEMA_CONST"
+
+# 21b) const: forkExtensions.forbiddenCoreShadow must be true
+M="$ROOT/m-schema-const-shadow.json"
+mutate_json "$CANDIDATE" "$M" 'c.forkExtensions.forbiddenCoreShadow = false;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema const forbiddenCoreShadow fails closed" || bad "schema const forbiddenCoreShadow passed"
+has "schema const forbiddenCoreShadow code" "$out" "E_SCHEMA_CONST"
+
+# 21c) const: activated must be false
+M="$ROOT/m-schema-const-act.json"
+mutate_json "$CANDIDATE" "$M" 'c.activated = true;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema const activated fails closed" || bad "schema const activated passed"
+has "schema const activated code" "$out" "E_SCHEMA_CONST"
+
+# 22) missing required field: gate without category
+M="$ROOT/m-schema-required.json"
+mutate_json "$CANDIDATE" "$M" 'delete c.humanGates[0].category;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema required category fails closed" || bad "schema required category passed"
+has "schema required category code" "$out" "E_SCHEMA_REQUIRED"
+
+# 22b) missing required root field
+M="$ROOT/m-schema-required-root.json"
+mutate_json "$CANDIDATE" "$M" 'delete c.notices;'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema required notices fails closed" || bad "schema required notices passed"
+has "schema required notices code" "$out" "E_SCHEMA_REQUIRED"
+
+# 22c) pattern: malformed provenance source id
+M="$ROOT/m-schema-pattern.json"
+mutate_json "$CANDIDATE" "$M" 'c.provenance.sources[0].id = "bad-id";'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "schema pattern source id fails closed" || bad "schema pattern source id passed"
+has "schema pattern source id code" "$out" "E_SCHEMA_PATTERN"
+
+# ---------------------------------------------------------------------------
+# reviewIndependence semantic pins — each id's full defining tuple
+# Mutations use individually schema-valid values that are semantically wrong.
+# ---------------------------------------------------------------------------
+
+# 23) ri.law5: different-agent → human-gate (schema-valid enum, wrong meaning)
+M="$ROOT/m-ri-law5-min.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.law5"
+      ? Object.assign({}, r, { minimumRelationship: "human-gate" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.law5 min relationship pin fails closed" || bad "ri.law5 min relationship pin passed"
+has "ri.law5 pin code" "$out" "E_RI_LAW5"
+
+# 23b) ri.law5: generatorMustNotEqual → builder (schema-valid role, wrong pin)
+M="$ROOT/m-ri-law5-gen.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.law5"
+      ? Object.assign({}, r, { generatorMustNotEqual: "builder" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.law5 generator pin fails closed" || bad "ri.law5 generator pin passed"
+has "ri.law5 generator pin code" "$out" "E_RI_LAW5"
+
+# 23c) ri.law5: preferredRelationship → human-gate
+M="$ROOT/m-ri-law5-pref.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.law5"
+      ? Object.assign({}, r, { preferredRelationship: "human-gate" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.law5 preferred pin fails closed" || bad "ri.law5 preferred pin passed"
+has "ri.law5 preferred pin code" "$out" "E_RI_LAW5"
+
+# 24) ri.tier-a: independent-approve → different-agent
+M="$ROOT/m-ri-a-min.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-a"
+      ? Object.assign({}, r, { minimumRelationship: "different-agent" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-a min pin fails closed" || bad "ri.tier-a min pin passed"
+has "ri.tier-a pin code" "$out" "E_RI_TIER_A"
+
+# 24b) ri.tier-a: tierId A → B (schema-valid tier enum, wrong binding)
+M="$ROOT/m-ri-a-tier.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-a"
+      ? Object.assign({}, r, { tierId: "B" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-a tierId pin fails closed" || bad "ri.tier-a tierId pin passed"
+has "ri.tier-a tierId pin code" "$out" "E_RI_TIER_A"
+
+# 24c) ri.tier-a: preferred cross-vendor → two-fresh-context-approve
+M="$ROOT/m-ri-a-pref.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-a"
+      ? Object.assign({}, r, { preferredRelationship: "two-fresh-context-approve" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-a preferred pin fails closed" || bad "ri.tier-a preferred pin passed"
+has "ri.tier-a preferred pin code" "$out" "E_RI_TIER_A"
+
+# 25) ri.tier-b: preferred two-fresh-context-approve → cross-vendor
+M="$ROOT/m-ri-b-pref.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-b"
+      ? Object.assign({}, r, { preferredRelationship: "cross-vendor" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-b preferred pin fails closed" || bad "ri.tier-b preferred pin passed"
+has "ri.tier-b pin code" "$out" "E_RI_TIER_B"
+
+# 25b) ri.tier-b: minimum independent-approve → human-gate
+M="$ROOT/m-ri-b-min.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-b"
+      ? Object.assign({}, r, { minimumRelationship: "human-gate" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-b min pin fails closed" || bad "ri.tier-b min pin passed"
+has "ri.tier-b min pin code" "$out" "E_RI_TIER_B"
+
+# 25c) ri.tier-b: tierId B → A
+M="$ROOT/m-ri-b-tier.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-b"
+      ? Object.assign({}, r, { tierId: "A" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-b tierId pin fails closed" || bad "ri.tier-b tierId pin passed"
+has "ri.tier-b tierId pin code" "$out" "E_RI_TIER_B"
+
+# 26) ri.tier-c: preferred human-gate → cross-vendor (schema-valid, wrong)
+M="$ROOT/m-ri-c-pref.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-c"
+      ? Object.assign({}, r, { preferredRelationship: "cross-vendor" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-c preferred pin fails closed" || bad "ri.tier-c preferred pin passed"
+has "ri.tier-c preferred pin code" "$out" "E_RI_TIER_C"
+
+# 26b) ri.tier-c: humanGateId G12 → G1 (schema-valid gate, wrong pin)
+M="$ROOT/m-ri-c-gate.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-c"
+      ? Object.assign({}, r, { humanGateId: "G1" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-c humanGateId pin fails closed" || bad "ri.tier-c humanGateId pin passed"
+has "ri.tier-c humanGateId pin code" "$out" "E_RI_TIER_C"
+
+# 26c) ri.tier-c: tierId C → B
+M="$ROOT/m-ri-c-tier.json"
+mutate_json "$CANDIDATE" "$M" '
+  c.reviewIndependence = c.reviewIndependence.map(r =>
+    r.id === "ri.tier-c"
+      ? Object.assign({}, r, { tierId: "B" })
+      : r
+  );
+'
+out=$(run_tool validate --manifest "$M" --repo-root "$REPO_ROOT" --no-digest-check 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "ri.tier-c tierId pin fails closed" || bad "ri.tier-c tierId pin passed"
+has "ri.tier-c tierId pin code" "$out" "E_RI_TIER_C"
+
 # 16) adversarial symlink escape: repo-relative symlink to outside must fail digest check
 # Build a disposable mini-repo so we never touch the real checkout.
 MINI="$ROOT/mini-repo"

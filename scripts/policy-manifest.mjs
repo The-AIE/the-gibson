@@ -391,18 +391,332 @@ function rejectUnknownKeys(obj, allowed, pathPrefix, push) {
 }
 
 // ---------------------------------------------------------------------------
+// Schema value parity — single source: published policy-manifest-v1.schema.json
+// Enforces every type / enum / const / required / pattern / minLength /
+// minItems / maxItems / minimum / maximum expressed by the schema so a
+// runtime-valid document cannot be schema-invalid on value constraints.
+// additionalProperties is handled by rejectUnknownKeys (stable E_UNKNOWN_PROPERTY).
+// ---------------------------------------------------------------------------
+
+/** @type {Record<string, unknown> | null} */
+let _bundledSchema = null;
+
+/**
+ * Load the published schema shipped next to this validator (script-relative).
+ * Fail closed if missing — schema is the value-constraint source of truth.
+ * @param {Record<string, unknown> | null | undefined} override
+ * @returns {Record<string, unknown>}
+ */
+export function loadPolicySchema(override) {
+  if (override && typeof override === "object") {
+    return override;
+  }
+  if (_bundledSchema) return _bundledSchema;
+  const abs = join(scriptDir(), "..", DEFAULT_SCHEMA_REL);
+  if (!existsSync(abs) || !statSync(abs).isFile()) {
+    throw new Error(`schema missing at ${DEFAULT_SCHEMA_REL}`);
+  }
+  _bundledSchema = /** @type {Record<string, unknown>} */ (loadJson(abs));
+  return _bundledSchema;
+}
+
+/**
+ * JSON typeof classification matching draft 2020-12 for this schema's subset.
+ * @param {unknown} value
+ * @returns {string}
+ */
+function jsonTypeOf(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "boolean") return "boolean";
+  if (typeof value === "string") return "string";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "number";
+    if (Number.isInteger(value)) return "integer";
+    return "number";
+  }
+  if (typeof value === "object") return "object";
+  return typeof value;
+}
+
+/**
+ * Does value satisfy a JSON Schema `type` keyword (string or string[])?
+ * integer is a subtype of number per JSON Schema.
+ * @param {unknown} value
+ * @param {string | string[]} typeSpec
+ */
+function matchesSchemaType(value, typeSpec) {
+  const types = Array.isArray(typeSpec) ? typeSpec : [typeSpec];
+  const actual = jsonTypeOf(value);
+  for (const t of types) {
+    if (t === actual) return true;
+    if (t === "number" && actual === "integer") return true;
+  }
+  return false;
+}
+
+/**
+ * Walk `data` against a draft-2020-12 subset schema node.
+ * Emits E_SCHEMA_* findings only (value constraints). Does not emit
+ * additionalProperties findings — those stay on E_UNKNOWN_PROPERTY.
+ *
+ * @param {unknown} data
+ * @param {Record<string, unknown>} schema
+ * @param {string} path empty string for root
+ * @param {(f: Finding) => void} push
+ */
+export function enforceSchemaValueConstraints(data, schema, path, push) {
+  if (!schema || typeof schema !== "object") return;
+
+  // --- type ----------------------------------------------------------------
+  if (schema.type !== undefined) {
+    if (!matchesSchemaType(data, /** @type {string|string[]} */ (schema.type))) {
+      push(
+        err(
+          "E_SCHEMA_TYPE",
+          `value type ${jsonTypeOf(data)} does not match schema type ${JSON.stringify(schema.type)}`,
+          path || undefined
+        )
+      );
+      // Wrong container type: do not recurse into properties/items.
+      const t = schema.type;
+      const needsObject =
+        t === "object" || (Array.isArray(t) && t.includes("object"));
+      const needsArray =
+        t === "array" || (Array.isArray(t) && t.includes("array"));
+      if ((needsObject && jsonTypeOf(data) !== "object") ||
+          (needsArray && jsonTypeOf(data) !== "array")) {
+        return;
+      }
+    }
+  }
+
+  // --- const ---------------------------------------------------------------
+  if (Object.prototype.hasOwnProperty.call(schema, "const")) {
+    if (!Object.is(data, schema.const)) {
+      push(
+        err(
+          "E_SCHEMA_CONST",
+          `value must equal const ${JSON.stringify(schema.const)}`,
+          path || undefined
+        )
+      );
+    }
+  }
+
+  // --- enum ----------------------------------------------------------------
+  if (Array.isArray(schema.enum)) {
+    const ok = schema.enum.some((v) => Object.is(v, data));
+    if (!ok) {
+      push(
+        err(
+          "E_SCHEMA_ENUM",
+          `value ${JSON.stringify(data)} not in enum ${JSON.stringify(schema.enum)}`,
+          path || undefined
+        )
+      );
+    }
+  }
+
+  // --- string constraints --------------------------------------------------
+  if (typeof data === "string") {
+    if (typeof schema.minLength === "number" && data.length < schema.minLength) {
+      push(
+        err(
+          "E_SCHEMA_MIN_LENGTH",
+          `string length ${data.length} < minLength ${schema.minLength}`,
+          path || undefined
+        )
+      );
+    }
+    if (typeof schema.pattern === "string") {
+      let re;
+      try {
+        re = new RegExp(schema.pattern);
+      } catch {
+        push(
+          err(
+            "E_SCHEMA_PATTERN",
+            `schema pattern is invalid: ${schema.pattern}`,
+            path || undefined
+          )
+        );
+        re = null;
+      }
+      if (re && !re.test(data)) {
+        push(
+          err(
+            "E_SCHEMA_PATTERN",
+            `value ${JSON.stringify(data)} does not match pattern ${schema.pattern}`,
+            path || undefined
+          )
+        );
+      }
+    }
+  }
+
+  // --- numeric bounds (integer / number) -----------------------------------
+  if (typeof data === "number" && Number.isFinite(data)) {
+    if (typeof schema.minimum === "number" && data < schema.minimum) {
+      push(
+        err(
+          "E_SCHEMA_MINIMUM",
+          `value ${data} < minimum ${schema.minimum}`,
+          path || undefined
+        )
+      );
+    }
+    if (typeof schema.maximum === "number" && data > schema.maximum) {
+      push(
+        err(
+          "E_SCHEMA_MAXIMUM",
+          `value ${data} > maximum ${schema.maximum}`,
+          path || undefined
+        )
+      );
+    }
+  }
+
+  // --- object: required + properties ---------------------------------------
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const obj = /** @type {Record<string, unknown>} */ (data);
+    if (Array.isArray(schema.required)) {
+      for (const key of schema.required) {
+        if (!Object.prototype.hasOwnProperty.call(obj, key)) {
+          const child = path ? `${path}.${key}` : String(key);
+          push(
+            err(
+              "E_SCHEMA_REQUIRED",
+              `missing required property '${key}'`,
+              child
+            )
+          );
+        }
+      }
+    }
+    if (schema.properties && typeof schema.properties === "object") {
+      const props = /** @type {Record<string, Record<string, unknown>>} */ (
+        schema.properties
+      );
+      for (const key of Object.keys(props)) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          const child = path ? `${path}.${key}` : key;
+          enforceSchemaValueConstraints(obj[key], props[key], child, push);
+        }
+      }
+    }
+  }
+
+  // --- array: cardinality + items ------------------------------------------
+  if (Array.isArray(data)) {
+    if (typeof schema.minItems === "number" && data.length < schema.minItems) {
+      push(
+        err(
+          "E_SCHEMA_MIN_ITEMS",
+          `array length ${data.length} < minItems ${schema.minItems}`,
+          path || undefined
+        )
+      );
+    }
+    if (typeof schema.maxItems === "number" && data.length > schema.maxItems) {
+      push(
+        err(
+          "E_SCHEMA_MAX_ITEMS",
+          `array length ${data.length} > maxItems ${schema.maxItems}`,
+          path || undefined
+        )
+      );
+    }
+    if (schema.items && typeof schema.items === "object") {
+      const itemSchema = /** @type {Record<string, unknown>} */ (schema.items);
+      data.forEach((item, i) => {
+        const childPath = path ? `${path}[${i}]` : `[${i}]`;
+        enforceSchemaValueConstraints(item, itemSchema, childPath, push);
+      });
+    }
+  }
+}
+
+/**
+ * Core reviewIndependence semantic tuples (behavior-preserving pins).
+ * Each id's defining fields must match exactly; individually schema-valid
+ * substitutions that change meaning fail closed.
+ */
+const RI_SEMANTIC_PINS = {
+  "ri.law5": {
+    code: "E_RI_LAW5",
+    expect: {
+      minimumRelationship: "different-agent",
+      preferredRelationship: "cross-vendor",
+      generatorMustNotEqual: "reviewer",
+    },
+  },
+  "ri.tier-a": {
+    code: "E_RI_TIER_A",
+    expect: {
+      tierId: "A",
+      minimumRelationship: "independent-approve",
+      preferredRelationship: "cross-vendor",
+    },
+  },
+  "ri.tier-b": {
+    code: "E_RI_TIER_B",
+    expect: {
+      tierId: "B",
+      minimumRelationship: "independent-approve",
+      preferredRelationship: "two-fresh-context-approve",
+    },
+  },
+  "ri.tier-c": {
+    code: "E_RI_TIER_C",
+    expect: {
+      tierId: "C",
+      minimumRelationship: "human-gate",
+      preferredRelationship: "human-gate",
+      humanGateId: "G12",
+    },
+  },
+};
+
+/**
+ * @param {Record<string, unknown>} entry
+ * @param {string} pathPrefix e.g. reviewIndependence[0]
+ * @param {(f: Finding) => void} push
+ */
+function enforceRiSemanticPin(entry, pathPrefix, push) {
+  const id = entry.id;
+  if (typeof id !== "string") return;
+  const pin = RI_SEMANTIC_PINS[/** @type {keyof typeof RI_SEMANTIC_PINS} */ (id)];
+  if (!pin) return;
+  for (const [field, expected] of Object.entries(pin.expect)) {
+    const actual = entry[field];
+    if (actual !== expected) {
+      push(
+        err(
+          pin.code,
+          `${id} semantic pin: ${field} must be ${JSON.stringify(expected)} (got ${JSON.stringify(actual)})`,
+          `${pathPrefix}.${field}`
+        )
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Structural + semantic validation (fail closed)
 // ---------------------------------------------------------------------------
 
 /**
  * Validate a candidate object. Pure — does not read the filesystem unless
  * `options.checkProvenanceDigests` is true (then uses options.repoRoot).
+ * Schema value constraints always apply via the bundled schema (or options.schema).
  *
  * @param {unknown} candidate
  * @param {{
  *   repoRoot?: string,
  *   checkProvenanceDigests?: boolean,
  *   expectedValidatorVersion?: string,
+ *   schema?: Record<string, unknown>,
  * }} [options]
  * @returns {Finding[]}
  */
@@ -418,6 +732,21 @@ export function validateCandidate(candidate, options = {}) {
 
   /** @type {Record<string, unknown>} */
   const c = /** @type {Record<string, unknown>} */ (candidate);
+
+  // Schema value parity (types, enums, consts, required, bounds, patterns,
+  // array cardinality). Single source: published JSON Schema.
+  try {
+    const schema = loadPolicySchema(options.schema);
+    enforceSchemaValueConstraints(c, schema, "", push);
+  } catch (e) {
+    push(
+      err(
+        "E_SCHEMA_LOAD",
+        `cannot load policy schema for value parity: ${e && e.message ? e.message : String(e)}`,
+        DEFAULT_SCHEMA_REL
+      )
+    );
+  }
 
   // Schema parity: refuse unknown root controls before field checks.
   rejectUnknownKeys(c, ALLOWED_ROOT_KEYS, "", push);
@@ -1023,22 +1352,16 @@ export function validateCandidate(candidate, options = {}) {
         );
       }
     }
-    const tierC = (/** @type {unknown[]} */ (c.reviewIndependence || [])).find((x) => {
-      if (!x || typeof x !== "object") return false;
-      return /** @type {Record<string, unknown>} */ (x).id === "ri.tier-c";
+    // Semantic pins for every core RI id (not only ri.tier-c). Schema-valid
+    // substitutions that change approved meaning fail closed.
+    (/** @type {unknown[]} */ (c.reviewIndependence || [])).forEach((x, i) => {
+      if (!x || typeof x !== "object" || Array.isArray(x)) return;
+      enforceRiSemanticPin(
+        /** @type {Record<string, unknown>} */ (x),
+        `reviewIndependence[${i}]`,
+        push
+      );
     });
-    if (tierC && typeof tierC === "object") {
-      const r = /** @type {Record<string, unknown>} */ (tierC);
-      if (r.minimumRelationship !== "human-gate" || r.humanGateId !== "G12") {
-        push(
-          err(
-            "E_RI_TIER_C",
-            "ri.tier-c must require human-gate with humanGateId G12",
-            "reviewIndependence"
-          )
-        );
-      }
-    }
   }
 
   // --- workflow stages ----------------------------------------------------
