@@ -465,6 +465,11 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
  * exercise the residual replace-through-open/identity-then-restore portable
  * boundary. Production code never sets it. Pass `null` to clear.
  *
+ * Automatic one-shot: the installed callback is consumed (cleared) before
+ * invoke. Success, return, or throw cannot affect a later API call unless
+ * the test re-arms via this setter from inside the callback. The payload
+ * never includes a raw numeric fd.
+ *
  * @type {null | ((info: {
  *   rootReal: string,
  *   rootId: RootIdentity,
@@ -487,12 +492,16 @@ export function setSafeReadBeforeOpenHook(fn) {
  * deterministic injected-swap regression sensor. Production code never sets it.
  * Pass `null` to clear.
  *
+ * Automatic one-shot: the installed callback is consumed (cleared) before
+ * invoke. Success, return, or throw cannot affect a later API call unless
+ * the test re-arms via this setter from inside the callback. The payload
+ * never includes a raw numeric fd (no validator-owned descriptor number).
+ *
  * @type {null | ((info: {
  *   rootReal: string,
  *   rootId: RootIdentity,
  *   relPath: string,
  *   absPath: string,
- *   fd: number,
  *   openedDev: bigint,
  *   openedIno: bigint,
  * }) => void)}
@@ -512,12 +521,16 @@ export function setSafeReadAfterOpenHook(fn) {
  * restore a temporarily replaced root in the residual replace-through-open
  * window. Production code never sets it. Pass `null` to clear.
  *
+ * Automatic one-shot: the installed callback is consumed (cleared) before
+ * invoke. Success, return, or throw cannot affect a later API call unless
+ * the test re-arms via this setter from inside the callback. The payload
+ * never includes a raw numeric fd (no validator-owned descriptor number).
+ *
  * @type {null | ((info: {
  *   rootReal: string,
  *   rootId: RootIdentity,
  *   relPath: string,
  *   absPath: string,
- *   fd: number,
  * }) => void)}
  */
 let safeReadAfterIdentityHook = null;
@@ -527,6 +540,19 @@ let safeReadAfterIdentityHook = null;
  */
 export function setSafeReadAfterIdentityHook(fn) {
   safeReadAfterIdentityHook = typeof fn === "function" ? fn : null;
+}
+
+/**
+ * Invoke a consumed (already-cleared) test hook. Clearing happens at the
+ * call site *before* this runs so throw/return cannot leave the slot armed.
+ *
+ * @param {null | ((info: object) => void)} fn
+ * @param {object} payload fd-opaque hook context (never a raw descriptor)
+ */
+function invokeConsumedSafeReadHook(fn, payload) {
+  if (typeof fn === "function") {
+    fn(payload);
+  }
 }
 
 /**
@@ -563,17 +589,16 @@ function assertOpenedIdentityContained(
       `path: opened identity must use BigInt dev/ino (got ${typeof opened.dev}/${typeof opened.ino}): ${relPath}`
     );
   }
-  if (typeof safeReadAfterOpenHook === "function") {
-    safeReadAfterOpenHook({
-      rootReal,
-      rootId,
-      relPath,
-      absPath,
-      fd,
-      openedDev: opened.dev,
-      openedIno: opened.ino,
-    });
-  }
+  const afterOpen = safeReadAfterOpenHook;
+  safeReadAfterOpenHook = null;
+  invokeConsumedSafeReadHook(afterOpen, {
+    rootReal,
+    rootId,
+    relPath,
+    absPath,
+    openedDev: opened.dev,
+    openedIno: opened.ino,
+  });
   let real;
   try {
     real = realpathSync(absPath);
@@ -644,9 +669,9 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
   // Re-assert after lexical resolve (hook may have run / concurrent replace).
   assertRootIdentity(rootId);
   // Test-only: residual replace-through-open window starts here.
-  if (typeof safeReadBeforeOpenHook === "function") {
-    safeReadBeforeOpenHook({ rootId, rootReal, relPath, absPath });
-  }
+  const beforeOpen = safeReadBeforeOpenHook;
+  safeReadBeforeOpenHook = null;
+  invokeConsumedSafeReadHook(beforeOpen, { rootId, rootReal, relPath, absPath });
   let fd;
   try {
     // O_RDONLY|O_NONBLOCK: portable; rejects FIFO after open without hanging.
@@ -666,15 +691,14 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
       rootId
     );
     // Test-only residual window: after identity bind, before post-open root assert.
-    if (typeof safeReadAfterIdentityHook === "function") {
-      safeReadAfterIdentityHook({
-        rootId,
-        rootReal,
-        relPath,
-        absPath,
-        fd,
-      });
-    }
+    const afterIdentity = safeReadAfterIdentityHook;
+    safeReadAfterIdentityHook = null;
+    invokeConsumedSafeReadHook(afterIdentity, {
+      rootId,
+      rootReal,
+      relPath,
+      absPath,
+    });
     // Root must still be the same directory after target open/bind.
     // Observable replacement fails here; replace-and-restore may not.
     assertRootIdentity(rootId);

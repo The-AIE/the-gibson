@@ -1387,12 +1387,15 @@ try {
   // Schema-class swap via loadPolicySchema
   clearPolicySchemaCache();
   const schemaRel = "config/policy/schema/policy-manifest-v1.schema.json";
-  setSafeReadAfterOpenHook(({ relPath, absPath }) => {
+  function schemaSwapHook({ relPath, absPath }) {
     if (relPath === schemaRel || /policy-manifest-v1\.schema\.json$/.test(absPath)) {
       try { unlinkSync(absPath); } catch { /* ignore */ }
       symlinkSync(join(outside, "leaked.txt"), absPath);
+      return;
     }
-  });
+    setSafeReadAfterOpenHook(schemaSwapHook);
+  }
+  setSafeReadAfterOpenHook(schemaSwapHook);
   threw = false;
   msg = "";
   try {
@@ -1413,12 +1416,15 @@ try {
 
   // Higher-level manifest load path with swap
   const manRel = "config/policy/candidates/gibson-core-v1.candidate.json";
-  setSafeReadAfterOpenHook(({ absPath, relPath }) => {
+  function manifestSwapHook({ absPath, relPath }) {
     if (relPath === manRel || /gibson-core-v1\.candidate\.json$/.test(absPath)) {
       try { unlinkSync(absPath); } catch { /* ignore */ }
       symlinkSync(join(outside, "leaked.txt"), absPath);
+      return;
     }
-  });
+    setSafeReadAfterOpenHook(manifestSwapHook);
+  }
+  setSafeReadAfterOpenHook(manifestSwapHook);
   threw = false;
   msg = "";
   try {
@@ -1437,12 +1443,15 @@ try {
   }
 
   // Doctrine-class: checkDoctrineConsistency with swap on a doctrine path
-  setSafeReadAfterOpenHook(({ absPath, relPath }) => {
+  function doctrineSwapHook({ absPath, relPath }) {
     if (relPath === "docs/14-human-gates.md" || /14-human-gates\.md$/.test(absPath)) {
       try { unlinkSync(absPath); } catch { /* ignore */ }
       symlinkSync(join(outside, "leaked.txt"), absPath);
+      return;
     }
-  });
+    setSafeReadAfterOpenHook(doctrineSwapHook);
+  }
+  setSafeReadAfterOpenHook(doctrineSwapHook);
   threw = false;
   msg = "";
   try {
@@ -1517,9 +1526,11 @@ try {
 
       let opensSeen = 0;
       let replaced = false;
-      setSafeReadAfterOpenHook(() => {
+      function countRootReplaceOpens() {
         opensSeen += 1;
-      });
+        setSafeReadAfterOpenHook(countRootReplaceOpens);
+      }
+      setSafeReadAfterOpenHook(countRootReplaceOpens);
       setRootIdentityRecheckHook((rootId) => {
         // After the first doctrine open inside this operation, replace the
         // canonical directory at the frozen pathname with a different inode.
@@ -1858,8 +1869,14 @@ else
   ok "retained root-dir-fd feature removed (no raw numeric fd retain/close)"
 fi
 # Must not claim replace-and-restore is impossible under portable pathname open.
-if grep -Eiq 'replace-and-restore[^\n]{0,80}cannot accept|cannot accept[^\n]{0,80}replace-and-restore' "$TOOL" \
-  "$REPO_ROOT/docs/policy-manifest-v1.md" "$REPO_ROOT/scripts/README.md"; then
+# Line-safe: grep without -z, so `.` cannot cross newlines. Never use [^\n] —
+# POSIX character classes treat that as "not the letter n", not "not newline".
+FALSE_REPLACE_RESTORE_EXACT='replace-and-restore at the same pathname cannot accept bytes'
+FALSE_REPLACE_RESTORE_RE='replace-and-restore.{0,80}cannot accept|cannot accept.{0,80}replace-and-restore'
+if grep -Fiq -- "$FALSE_REPLACE_RESTORE_EXACT" "$TOOL" \
+     "$REPO_ROOT/docs/policy-manifest-v1.md" "$REPO_ROOT/scripts/README.md" || \
+   grep -Eiq -- "$FALSE_REPLACE_RESTORE_RE" "$TOOL" \
+     "$REPO_ROOT/docs/policy-manifest-v1.md" "$REPO_ROOT/scripts/README.md"; then
   bad "docs/code still claim replace-and-restore cannot accept foreign bytes"
 else
   ok "no false impossible-replace-and-restore guarantee in code/docs"
@@ -1869,6 +1886,327 @@ if grep -q 'KNOWN_PORTABLE_BOUNDARY' "$REPO_ROOT/docs/policy-manifest-v1.md" && 
   ok "docs record residual portable openat/replace-restore boundary"
 else
   bad "docs missing residual portable boundary wording"
+fi
+# Mutation: the exact prior false sentence must trip the same line-safe scan.
+PROSE_MUT="$ROOT/prose-false-claim.txt"
+printf '%s\n' "A replace-and-restore at the same pathname cannot accept bytes" > "$PROSE_MUT"
+if grep -Fiq -- "$FALSE_REPLACE_RESTORE_EXACT" "$PROSE_MUT" || \
+   grep -Eiq -- "$FALSE_REPLACE_RESTORE_RE" "$PROSE_MUT"; then
+  ok "prose sensor detects exact old false replace-and-restore claim"
+else
+  bad "prose sensor missed exact old false claim"
+fi
+# Control: the legacy POSIX [^\n] class is letter-n and misses that sentence.
+if grep -Eiq 'replace-and-restore[^\n]{0,80}cannot accept|cannot accept[^\n]{0,80}replace-and-restore' \
+     "$PROSE_MUT"; then
+  bad "legacy POSIX [^\\\\n] unexpectedly matched the old claim"
+else
+  ok "legacy POSIX [^n] class misses the old claim (letter n, not newline)"
+fi
+
+# Static: consumed hook payloads must not pass a raw fd property.
+# Match only an `fd` key inside the payload object — not later `let fd`.
+if grep -E 'invokeConsumedSafeReadHook\(beforeOpen, \{[^}]*\bfd\b' "$TOOL" || \
+   grep -n 'invokeConsumedSafeReadHook(afterOpen' -A 8 "$TOOL" | grep -qE '^\s+fd[,:]' || \
+   grep -n 'invokeConsumedSafeReadHook(afterIdentity' -A 8 "$TOOL" | grep -qE '^\s+fd[,:]'; then
+  bad "safe-read hook payload still passes raw fd"
+else
+  ok "safe-read hook call sites are fd-opaque"
+fi
+
+# ---------------------------------------------------------------------------
+# Safe-read hooks: one-shot lifecycle + fd-opaque payloads + unrelated-fd
+# survival. A hook must not receive the validator-owned descriptor, must
+# clear before invoke (success or throw), and must not close an unrelated
+# descriptor the hook itself opened.
+# ---------------------------------------------------------------------------
+echo
+echo "=== safe-read hook one-shot lifecycle and fd-opaque payloads ==="
+HOOK_LC_RC=0
+HOOK_LC_OUT=$(
+  PM_TOOL="$TOOL" \
+  "$NODE" --input-type=module -e '
+import {
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  openSync,
+  closeSync,
+  fstatSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+
+const toolPath = process.env.PM_TOOL;
+const {
+  readContainedFile,
+  setSafeReadBeforeOpenHook,
+  setSafeReadAfterOpenHook,
+  setSafeReadAfterIdentityHook,
+} = await import(pathToFileURL(toolPath).href);
+
+const setters = {
+  beforeOpen: setSafeReadBeforeOpenHook,
+  afterOpen: setSafeReadAfterOpenHook,
+  afterIdentity: setSafeReadAfterIdentityHook,
+};
+const names = Object.keys(setters);
+
+function payloadExposesFd(info) {
+  if (!info || typeof info !== "object") return "non-object";
+  if (Object.prototype.hasOwnProperty.call(info, "fd")) return "own-fd";
+  const walk = (v, depth) => {
+    if (depth > 5) return null;
+    if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v < 65536) {
+      return "numeric-fd-like";
+    }
+    if (v && typeof v === "object") {
+      if (Object.prototype.hasOwnProperty.call(v, "fd")) return "nested-fd";
+      for (const child of Object.values(v)) {
+        const hit = walk(child, depth + 1);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(info, 0);
+}
+
+function fdStillOpen(fd) {
+  try {
+    fstatSync(fd);
+    return true;
+  } catch (e) {
+    return !(e && (e.code === "EBADF" || /EBADF|bad file descriptor/i.test(String(e))));
+  }
+}
+
+const root = join(tmpdir(), "gibson-pm-hooklc-" + process.pid + "-" + Date.now());
+const results = { ok: [], bad: [] };
+function ok(m) { results.ok.push(m); console.log("HOOK_LC_OK " + m); }
+function bad(m) { results.bad.push(m); console.log("HOOK_LC_BAD " + m); }
+
+try {
+  mkdirSync(join(root, "docs"), { recursive: true });
+  writeFileSync(join(root, "docs/inside.txt"), "HOOK_LC_BYTES\n");
+
+  for (const name of names) {
+    const set = setters[name];
+    let seen = null;
+    set((info) => { seen = info; });
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    set(null);
+    const expose = payloadExposesFd(seen);
+    if (seen && !expose) ok(name + " payload is fd-opaque");
+    else bad(name + " payload exposes descriptor: " + expose + " keys=" + (seen ? Object.keys(seen).join(",") : "null"));
+  }
+
+  for (const name of names) {
+    const set = setters[name];
+    let calls = 0;
+    set(() => { calls += 1; });
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    set(null);
+    if (calls === 1) ok(name + " cleared after successful invocation");
+    else bad(name + " persisted after success calls=" + calls);
+  }
+
+  for (const name of names) {
+    const set = setters[name];
+    let calls = 0;
+    set(() => { calls += 1; throw new Error("HOOK_THROW_" + name); });
+    let threw = false;
+    try { readContainedFile(root, "docs/inside.txt", "utf8"); }
+    catch (e) { threw = /HOOK_THROW_/.test(e && e.message ? e.message : String(e)); }
+    let second = null;
+    try { second = readContainedFile(root, "docs/inside.txt", "utf8"); }
+    catch (e) { second = "THREW:" + (e && e.message ? e.message : e); }
+    set(null);
+    if (threw && calls === 1 && second === "HOOK_LC_BYTES\n") {
+      ok(name + " cleared after thrown invocation");
+    } else {
+      bad(name + " throw lifecycle unexpected " + JSON.stringify({ threw, calls, second }));
+    }
+  }
+
+  for (const name of names) {
+    const set = setters[name];
+    let calls = 0;
+    function rearm() {
+      calls += 1;
+      set(rearm);
+    }
+    set(rearm);
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    set(null);
+    if (calls === 2) ok(name + " second read affected only after explicit re-arm");
+    else bad(name + " re-arm count unexpected calls=" + calls);
+  }
+
+  for (const name of names) {
+    const set = setters[name];
+    let unrelated = -1;
+    set(() => {
+      unrelated = openSync("/dev/null", "r");
+    });
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    const alive = unrelated >= 0 && fdStillOpen(unrelated);
+    try { if (unrelated >= 0) closeSync(unrelated); } catch { /* ignore */ }
+    set(null);
+    if (alive) ok(name + " unrelated fd survives successful cleanup");
+    else bad(name + " unrelated fd closed after successful cleanup");
+  }
+
+  for (const name of names) {
+    const set = setters[name];
+    let unrelated = -1;
+    set(() => {
+      unrelated = openSync("/dev/null", "r");
+      throw new Error("HOOK_THROW_UNRELATED_" + name);
+    });
+    try { readContainedFile(root, "docs/inside.txt", "utf8"); } catch { /* expected */ }
+    const alive = unrelated >= 0 && fdStillOpen(unrelated);
+    try { if (unrelated >= 0) closeSync(unrelated); } catch { /* ignore */ }
+    set(null);
+    if (alive) ok(name + " unrelated fd survives thrown cleanup");
+    else bad(name + " unrelated fd closed after thrown cleanup");
+  }
+
+  // Round-9 exploit shape: if a payload had fd, close it, reopen /dev/null
+  // onto the reused number, throw, then owner finally would close unrelated.
+  // Live payloads have no fd, so the exploit is unreachable.
+  {
+    let unrelated = -1;
+    let ownedSeen = false;
+    setSafeReadAfterIdentityHook((info) => {
+      if (Object.prototype.hasOwnProperty.call(info, "fd") || typeof info.fd === "number") {
+        ownedSeen = true;
+        try { closeSync(info.fd); } catch { /* ignore */ }
+      }
+      unrelated = openSync("/dev/null", "r");
+      throw new Error("HOOK_THROW_REUSE_LIVE");
+    });
+    try { readContainedFile(root, "docs/inside.txt", "utf8"); } catch { /* expected */ }
+    const alive = unrelated >= 0 && fdStillOpen(unrelated);
+    try { if (unrelated >= 0) closeSync(unrelated); } catch { /* ignore */ }
+    setSafeReadAfterIdentityHook(null);
+    setSafeReadAfterOpenHook(null);
+    if (!ownedSeen && alive) ok("round-9 fd-reuse exploit unreachable; unrelated fd survives");
+    else bad("round-9 exploit still reachable ownedSeen=" + ownedSeen + " alive=" + alive);
+  }
+} catch (e) {
+  bad("hook lifecycle probe threw: " + (e && e.message ? e.message : e));
+} finally {
+  setSafeReadBeforeOpenHook(null);
+  setSafeReadAfterOpenHook(null);
+  setSafeReadAfterIdentityHook(null);
+  try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+console.log("HOOK_LC_SUMMARY " + JSON.stringify({ ok: results.ok.length, bad: results.bad.length }));
+process.exit(results.bad.length === 0 ? 0 : 1);
+'
+) || HOOK_LC_RC=$?
+if echo "$HOOK_LC_OUT" | grep -qE "HOOK_LC_(OK|BAD|SUMMARY)"; then
+  while IFS= read -r line; do
+    case "$line" in
+      HOOK_LC_OK\ *) ok "${line#HOOK_LC_OK }" ;;
+      HOOK_LC_BAD\ *) bad "${line#HOOK_LC_BAD }" ;;
+    esac
+  done <<< "$HOOK_LC_OUT"
+  if [[ "$HOOK_LC_RC" -ne 0 ]] && ! echo "$HOOK_LC_OUT" | grep -q "HOOK_LC_BAD "; then
+    bad "hook lifecycle probe exited non-zero without HOOK_LC_BAD (rc=$HOOK_LC_RC)"
+  fi
+else
+  bad "hook lifecycle probe failed (rc=$HOOK_LC_RC out=$HOOK_LC_OUT)"
+fi
+
+# Mutation: re-expose raw fd on afterIdentity/afterOpen and prove reuse-close.
+echo
+echo "=== mutation: raw fd hook payload reuse-close must be detectable ==="
+FD_EXPOSE_TOOL="$ROOT/policy-manifest-fd-expose.mjs"
+cp "$TOOL" "$FD_EXPOSE_TOOL"
+"$NODE" -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  let s = fs.readFileSync(p, "utf8");
+  const a = s.replace(
+    "invokeConsumedSafeReadHook(afterOpen, {",
+    "invokeConsumedSafeReadHook(afterOpen, { fd,"
+  );
+  const b = a.replace(
+    "invokeConsumedSafeReadHook(afterIdentity, {",
+    "invokeConsumedSafeReadHook(afterIdentity, { fd,"
+  );
+  if (a === s || b === a) {
+    process.stderr.write("FD_EXPOSE_MUTATION_MISS\n");
+    process.exit(2);
+  }
+  fs.writeFileSync(p, b);
+' "$FD_EXPOSE_TOOL"
+if ! "$NODE" --check "$FD_EXPOSE_TOOL" 2>/dev/null; then
+  bad "fd-expose mutation produced invalid syntax"
+else
+  FD_EXPOSE_OUT=$(
+    PM_TOOL="$FD_EXPOSE_TOOL" \
+    "$NODE" --input-type=module -e '
+import {
+  mkdirSync, writeFileSync, rmSync, openSync, closeSync, fstatSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+
+const {
+  readContainedFile,
+  setSafeReadAfterIdentityHook,
+} = await import(pathToFileURL(process.env.PM_TOOL).href);
+
+const root = join(tmpdir(), "gibson-pm-fdexpose-" + process.pid + "-" + Date.now());
+try {
+  mkdirSync(join(root, "docs"), { recursive: true });
+  writeFileSync(join(root, "docs/inside.txt"), "FD_EXPOSE\n");
+  let owned = -1;
+  let unrelated = -1;
+  setSafeReadAfterIdentityHook((info) => {
+    if (typeof info.fd !== "number") {
+      console.log("FD_EXPOSE_NO_FD");
+      return;
+    }
+    owned = info.fd;
+    closeSync(owned);
+    unrelated = openSync("/dev/null", "r");
+    console.log("FD_EXPOSE_REUSED " + JSON.stringify({ owned, unrelated, same: owned === unrelated }));
+    throw new Error("HOOK_THROW_FD_EXPOSE");
+  });
+  try { readContainedFile(root, "docs/inside.txt", "utf8"); } catch { /* expected */ }
+  setSafeReadAfterIdentityHook(null);
+  let closedUnrelated = false;
+  try {
+    fstatSync(unrelated);
+  } catch (e) {
+    closedUnrelated = !!(e && (e.code === "EBADF" || /EBADF|bad file descriptor/i.test(String(e))));
+  }
+  try { if (unrelated >= 0) closeSync(unrelated); } catch { /* already closed */ }
+  if (owned >= 0 && unrelated >= 0 && owned === unrelated && closedUnrelated) {
+    console.log("FD_EXPOSE_DEFECT_REPRODUCED");
+    process.exit(0);
+  }
+  console.log("FD_EXPOSE_UNEXPECTED " + JSON.stringify({ owned, unrelated, closedUnrelated }));
+  process.exit(1);
+} finally {
+  try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+' 2>&1
+  ) || true
+  if echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED"; then
+    ok "fd-expose mutation reproduces unrelated-descriptor close"
+  else
+    bad "fd-expose mutation did not reproduce reuse-close (out=$FD_EXPOSE_OUT)"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -2061,9 +2399,11 @@ try {
   let opens = 0;
   let checksAtFour = 0;
   let replaced = false;
-  setSafeReadAfterOpenHook(() => {
+  function countFinalRvOpens() {
     opens += 1;
-  });
+    setSafeReadAfterOpenHook(countFinalRvOpens);
+  }
+  setSafeReadAfterOpenHook(countFinalRvOpens);
   setRootIdentityRecheckHook((rootId) => {
     if (opens < 4) return;
     checksAtFour += 1;
@@ -2253,7 +2593,11 @@ try {
   }
   const frozen = resolveCanonicalRepoRoot(liveRoot);
   let opens = 0, checksAtFour = 0, replaced = false;
-  setSafeReadAfterOpenHook(() => { opens += 1; });
+  function countNarrowOpens() {
+    opens += 1;
+    setSafeReadAfterOpenHook(countNarrowOpens);
+  }
+  setSafeReadAfterOpenHook(countNarrowOpens);
   setRootIdentityRecheckHook((rootId) => {
     if (opens < 4) return;
     checksAtFour += 1;
