@@ -829,6 +829,277 @@ echo "legit" > "$MINI/docs/legit.md"
 out=$(run_tool digest --path docs/legit.md --repo-root "$MINI" 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && ok "legitimate in-repo path still digests" || bad "legitimate path refused (out=$out)"
 
+# Safe name with leading-dot segment that is NOT exact ".." (segment-exact only)
+mkdir -p "$MUT/docs/..hidden"
+printf 'hidden-ok\n' > "$MUT/docs/..hidden/x.md"
+out=$(run_tool digest --path "docs/..hidden/x.md" --repo-root "$MUT" 2>&1); rc=$?
+[[ "$rc" -eq 0 ]] && ok "digest accepts docs/..hidden/x.md" || bad "digest rejected docs/..hidden/x.md (out=$out)"
+
+# ---------------------------------------------------------------------------
+# Deterministic injected path-swap (TOCTOU) — not timing-flaky
+# Proves open → identity/containment bind fails closed when the path is
+# switched after open and before acceptance; shared primitive covers all
+# read classes (text / hash / json) used by digest, doctrine, schema, manifest.
+# ---------------------------------------------------------------------------
+
+echo
+echo "=== deterministic injected path-swap (TOCTOU) ==="
+
+SWAP_RC=0
+# Paths via env (not argv): importing the tool module must not trip isMain()
+# which treats process.argv[1] === tool path as a CLI invocation.
+SWAP_OUT=$(
+  PM_TOOL="$TOOL" PM_SCHEMA="$SCHEMA" PM_CANDIDATE="$CANDIDATE" \
+  "$NODE" --input-type=module -e '
+import {
+  mkdirSync,
+  writeFileSync,
+  unlinkSync,
+  symlinkSync,
+  rmSync,
+  cpSync,
+} from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+
+const toolPath = process.env.PM_TOOL;
+const schemaSrc = process.env.PM_SCHEMA;
+const candidateSrc = process.env.PM_CANDIDATE;
+if (!toolPath || !schemaSrc || !candidateSrc) {
+  console.log("SENSOR_BAD missing PM_TOOL/PM_SCHEMA/PM_CANDIDATE env");
+  process.exit(1);
+}
+
+const {
+  readContainedFile,
+  sha256ContainedFile,
+  setSafeReadAfterOpenHook,
+  loadPolicySchema,
+  clearPolicySchemaCache,
+} = await import(pathToFileURL(toolPath).href);
+
+let fail = 0;
+function ok(m) { console.log("SENSOR_OK " + m); }
+function bad(m) { console.log("SENSOR_BAD " + m); fail++; }
+
+const root = join(tmpdir(), "gibson-pm-swap-" + process.pid + "-" + Date.now());
+const outside = join(tmpdir(), "gibson-pm-outside-" + process.pid + "-" + Date.now());
+try {
+  mkdirSync(join(root, "docs"), { recursive: true });
+  mkdirSync(join(root, "config/policy/schema"), { recursive: true });
+  mkdirSync(join(root, "config/policy/candidates"), { recursive: true });
+  mkdirSync(outside, { recursive: true });
+
+  writeFileSync(join(root, "docs/inside.txt"), "INSIDE_BYTES_v1\n");
+  writeFileSync(join(root, "docs/other.txt"), "OTHER_INSIDE\n");
+  writeFileSync(join(outside, "leaked.txt"), "OUTSIDE_SECRET_BYTES\n");
+  cpSync(schemaSrc, join(root, "config/policy/schema/policy-manifest-v1.schema.json"));
+  cpSync(candidateSrc, join(root, "config/policy/candidates/gibson-core-v1.candidate.json"));
+  // Doctrine stubs for representative doctrine-class read
+  writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
+
+  // Control: no hook → shared primitive accepts normal files
+  setSafeReadAfterOpenHook(null);
+  const text = readContainedFile(root, "docs/inside.txt", "utf8");
+  if (text === "INSIDE_BYTES_v1\n") ok("control readContainedFile inside text");
+  else bad("control readContainedFile wrong bytes");
+  const dig = sha256ContainedFile(root, "docs/inside.txt");
+  const expect = createHash("sha256").update("INSIDE_BYTES_v1\n").digest("hex");
+  if (dig === expect) ok("control sha256ContainedFile");
+  else bad("control sha256ContainedFile mismatch");
+  try {
+    loadPolicySchema(null, root);
+    ok("control loadPolicySchema (json/schema class)");
+  } catch (e) {
+    bad("control loadPolicySchema failed: " + e.message);
+  }
+  try {
+    const man = readContainedFile(
+      root,
+      "config/policy/candidates/gibson-core-v1.candidate.json",
+      "utf8"
+    );
+    JSON.parse(man);
+    ok("control manifest json class read");
+  } catch (e) {
+    bad("control manifest read failed: " + e.message);
+  }
+  try {
+    const d = readContainedFile(root, "docs/14-human-gates.md", "utf8");
+    if (d.includes("**G1**")) ok("control doctrine class read");
+    else bad("control doctrine missing marker");
+  } catch (e) {
+    bad("control doctrine read failed: " + e.message);
+  }
+
+  // Injected swap A: after open, replace path with symlink to outside.
+  // Fail closed on realpath escape; must not accept outside identity.
+  setSafeReadAfterOpenHook(({ absPath }) => {
+    try { unlinkSync(absPath); } catch { /* ignore */ }
+    symlinkSync(join(outside, "leaked.txt"), absPath);
+  });
+  let threw = false;
+  let msg = "";
+  try {
+    readContainedFile(root, "docs/inside.txt", "utf8");
+  } catch (e) {
+    threw = true;
+    msg = e && e.message ? e.message : String(e);
+  }
+  setSafeReadAfterOpenHook(null);
+  // Restore inside file for subsequent cases
+  try { unlinkSync(join(root, "docs/inside.txt")); } catch { /* ignore */ }
+  writeFileSync(join(root, "docs/inside.txt"), "INSIDE_BYTES_v1\n");
+
+  if (threw && /realpath escapes|symlink|identity changed|swap or race/i.test(msg)) {
+    ok("swap-to-outside fails closed (escape/identity)");
+  } else if (threw) {
+    bad("swap-to-outside threw unexpected: " + msg);
+  } else {
+    bad("swap-to-outside did not fail closed");
+  }
+  // Prove we did not return outside secret as a successful read (already threw)
+  if (threw) ok("swap-to-outside did not return outside bytes as success");
+  else bad("swap-to-outside returned success (would leak outside bytes)");
+
+  // Injected swap B: after open, replace with different in-root file.
+  // Opened fd identity must not match new realpath → fail closed.
+  setSafeReadAfterOpenHook(({ absPath }) => {
+    try { unlinkSync(absPath); } catch { /* ignore */ }
+    // hard-link alternative: copy other file into place (new inode)
+    writeFileSync(absPath, "OTHER_INSIDE\n");
+  });
+  threw = false;
+  msg = "";
+  try {
+    const leaked = readContainedFile(root, "docs/inside.txt", "utf8");
+    // If somehow succeeds, must not be the swapped-in content from a new inode
+    // without identity bind — success here is a defect.
+    if (leaked === "OTHER_INSIDE\n") {
+      bad("swap-to-other-inside accepted replacement bytes");
+    } else {
+      bad("swap-to-other-inside succeeded unexpectedly with: " + JSON.stringify(leaked));
+    }
+  } catch (e) {
+    threw = true;
+    msg = e && e.message ? e.message : String(e);
+  }
+  setSafeReadAfterOpenHook(null);
+  try { unlinkSync(join(root, "docs/inside.txt")); } catch { /* ignore */ }
+  writeFileSync(join(root, "docs/inside.txt"), "INSIDE_BYTES_v1\n");
+
+  if (threw && /identity changed|swap or race|realpath escapes/i.test(msg)) {
+    ok("swap-to-other-inside fails closed (identity bind)");
+  } else if (threw) {
+    bad("swap-to-other-inside threw unexpected: " + msg);
+  } else {
+    bad("swap-to-other-inside did not fail closed");
+  }
+
+  // Same shared primitive via hash path (digest class)
+  setSafeReadAfterOpenHook(({ absPath }) => {
+    try { unlinkSync(absPath); } catch { /* ignore */ }
+    symlinkSync(join(outside, "leaked.txt"), absPath);
+  });
+  threw = false;
+  msg = "";
+  try {
+    sha256ContainedFile(root, "docs/inside.txt");
+  } catch (e) {
+    threw = true;
+    msg = e && e.message ? e.message : String(e);
+  }
+  setSafeReadAfterOpenHook(null);
+  try { unlinkSync(join(root, "docs/inside.txt")); } catch { /* ignore */ }
+  writeFileSync(join(root, "docs/inside.txt"), "INSIDE_BYTES_v1\n");
+  if (threw && /realpath escapes|symlink|identity changed|swap or race/i.test(msg)) {
+    ok("digest-class sha256ContainedFile swap fails closed");
+  } else {
+    bad("digest-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
+  }
+
+  // Schema-class swap via loadPolicySchema (json under DEFAULT_SCHEMA_REL).
+  // Clear cache so the open+identity path runs again (control already filled it).
+  clearPolicySchemaCache();
+  const schemaRel = "config/policy/schema/policy-manifest-v1.schema.json";
+  setSafeReadAfterOpenHook(({ relPath, absPath }) => {
+    if (relPath === schemaRel || /policy-manifest-v1\.schema\.json$/.test(absPath)) {
+      try { unlinkSync(absPath); } catch { /* ignore */ }
+      symlinkSync(join(outside, "leaked.txt"), absPath);
+    }
+  });
+  threw = false;
+  msg = "";
+  try {
+    loadPolicySchema(null, root);
+  } catch (e) {
+    threw = true;
+    msg = e && e.message ? e.message : String(e);
+  }
+  setSafeReadAfterOpenHook(null);
+  clearPolicySchemaCache();
+  try { unlinkSync(join(root, schemaRel)); } catch { /* ignore */ }
+  cpSync(schemaSrc, join(root, schemaRel));
+  if (threw && /realpath escapes|symlink|identity changed|swap or race|schema/i.test(msg)) {
+    ok("schema-class loadPolicySchema swap fails closed");
+  } else {
+    bad("schema-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
+  }
+
+  // Manifest-class: readContainedFile on candidate path with swap
+  const manRel = "config/policy/candidates/gibson-core-v1.candidate.json";
+  setSafeReadAfterOpenHook(({ absPath }) => {
+    try { unlinkSync(absPath); } catch { /* ignore */ }
+    symlinkSync(join(outside, "leaked.txt"), absPath);
+  });
+  threw = false;
+  msg = "";
+  try {
+    readContainedFile(root, manRel, "utf8");
+  } catch (e) {
+    threw = true;
+    msg = e && e.message ? e.message : String(e);
+  }
+  setSafeReadAfterOpenHook(null);
+  try { unlinkSync(join(root, manRel)); } catch { /* ignore */ }
+  cpSync(candidateSrc, join(root, manRel));
+  if (threw && /realpath escapes|symlink|identity changed|swap or race/i.test(msg)) {
+    ok("manifest-class readContainedFile swap fails closed");
+  } else {
+    bad("manifest-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
+  }
+
+  // Representative CLI path: digest command must also fail closed on static escape
+  // (end-to-end already covered elsewhere; here prove hook is cleared and normal ok)
+  setSafeReadAfterOpenHook(null);
+  try {
+    sha256ContainedFile(root, "docs/inside.txt");
+    ok("post-swap hook cleared; normal hash works");
+  } catch (e) {
+    bad("post-swap normal hash failed: " + e.message);
+  }
+} finally {
+  setSafeReadAfterOpenHook(null);
+  try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+process.exit(fail === 0 ? 0 : 1);
+' 2>&1) || SWAP_RC=$?
+
+# Map SENSOR_OK / SENSOR_BAD lines into suite tally
+while IFS= read -r line; do
+  case "$line" in
+    SENSOR_OK\ *) ok "${line#SENSOR_OK }" ;;
+    SENSOR_BAD\ *) bad "${line#SENSOR_BAD }" ;;
+    *) ;; # ignore node warnings / noise
+  esac
+done <<< "$SWAP_OUT"
+if [[ "$SWAP_RC" -ne 0 ]] && ! echo "$SWAP_OUT" | grep -q "SENSOR_BAD "; then
+  bad "injected-swap sensor exited non-zero without SENSOR_BAD (out=$SWAP_OUT)"
+fi
+
 echo
 echo "=== docs guide present ==="
 GUIDE="$REPO_ROOT/docs/policy-manifest-v1.md"

@@ -169,6 +169,10 @@ The pure validator refuses (non-exhaustive):
 - `--manifest` and schema reads that escape the declared `--repo-root`
   (absolute paths, symlink realpath escape); schema is always loaded from
   `config/policy/schema/policy-manifest-v1.schema.json` under that root
+- path swaps after open (TOCTOU): every validation read (manifest, schema,
+  doctrine, digest) opens once, binds realpath + fd identity under
+  `--repo-root`, and only then reads bytes from that fd — identity change or
+  realpath escape fails closed before any out-of-root replacement is accepted
 - ambiguous overrides (duplicate precedence, non-refuse disposition)
 - `activated: true` or non-`report-only` authority on this slice
 
@@ -203,8 +207,10 @@ The focused suite proves the gate fails when a fixture:
   RI id (e.g. `ri.law5` + `tierId`, `ri.tier-a` + `humanGateId`)
 - supplies an absolute `--manifest` or a manifest/schema symlink that escapes
   `--repo-root`
+- injects a path swap between open and identity/containment acceptance
+  (deterministic TOCTOU sensor; fails closed on escape or identity change)
 - uses a provenance path with an exact `..` segment (while still accepting
-  in-root names like `docs/a..b.md`)
+  in-root names like `docs/a..b.md` and `docs/..hidden/x.md`)
 
 ## Activation work that remains in #164
 
