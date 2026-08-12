@@ -1645,7 +1645,13 @@ if [[ "$CLAIM_ID_FILTER_SET" -eq 1 ]]; then
       # (claim_released=1 + handoff_comment_failed) may we retry the success
       # handoff. Never post a presumed-dead/released comment without that proof.
       if journal_has_claim_released_handoff_failed "$CLAIM_ID_FILTER"; then
-        _abs_repo=$(resolve_repo 2>/dev/null || true)
+        # Same single repository identity as startup PR evidence (#180).
+        # PR_REPO is already resolved via --repo / gh / unambiguous origin
+        # fallback. Do not re-run gh-only resolve_repo here — that drops a
+        # valid one-origin identity after `gh repo view` failure and leaves
+        # recovery handoff incomplete even though claim evidence used that
+        # identity. Empty PR_REPO stays fail-closed (no invented repo).
+        _abs_repo="${PR_REPO:-}"
         _abs_issue=$(issue_from_claim_id "$CLAIM_ID_FILTER")
         _abs_branch=$(branch_for "$CLAIM_ID_FILTER")
         if ! ensure_absent_handoff_comment "$_abs_issue" "$_abs_repo" "$CLAIM_ID_FILTER" "$_abs_branch" "unknown"; then
