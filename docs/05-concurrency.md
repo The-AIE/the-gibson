@@ -80,6 +80,25 @@ Two mechanisms, used together:
    and safe to clean up, not a claim still in flight. Once released, that claim
    must be absent/removed from the post-release live view.
 
+   **One scope-overlap contract for planner and fleet (#181 / #159 policy-drift):**
+   claim-time overlap (`scripts/scope-overlap.mjs`) and inter-lane preflight in
+   the fleet driver (`scripts/loop-fleet.sh`) implement the **same** pure token
+   kernel. They must never disagree about whether two scopes may run
+   concurrently:
+
+   | Input shape | Decision |
+   |---|---|
+   | Exact path, parent/child, or trailing `*`/`**` containment | **overlap** — refuse concurrency |
+   | Root-wide `**` vs any other valid scope (either argument order) | **overlap** — `**` is the whole repository |
+   | Empty, absolute, `..`, mid-path `a/**/b`, bare `*`, or other unstemmable/unclassifiable token | **fail closed** — treat as overlap / refuse; never authorize concurrency on ambiguous evidence |
+   | Safe siblings (`docs/a` vs `docs/b`, `app` vs `application`) | **disjoint** — may run concurrently |
+
+   There is no environment-controlled production test hook and no permissive
+   fallback that weakens this answer. A table-driven differential sensor in
+   `scripts/tests/scope-overlap.test.sh` (and a fleet-side mirror) runs the same
+   fixtures through both implementations and fails if either returns disjoint
+   for root-wide or unclassifiable input.
+
    Precedence when releasing one exact claim id: a live *open* PR-body claim is
    released by closing that PR; otherwise a live ledger row is released by
    removing it; otherwise — PR already merged/closed and no ledger row was ever

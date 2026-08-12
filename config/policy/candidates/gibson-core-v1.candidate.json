@@ -1,0 +1,374 @@
+{
+  "schemaId": "gibson.policy.manifest.schema.v1",
+  "schemaVersion": "1.0.0",
+  "manifestId": "gibson.core.policy",
+  "manifestVersion": "1.0.0",
+  "status": "candidate",
+  "authority": "report-only",
+  "activated": false,
+  "generatorVersion": "1.0.0",
+  "validatorVersion": "1.0.0",
+  "compatibility": {
+    "policy": "semver-major-break",
+    "forkExtensionRule": "namespaced-only",
+    "coreIdPrefix": "gibson.",
+    "upgrade": "Bump manifestVersion for additive clarifications within major 1. A new schema major requires a new schemaId/version pair and a migration note; validators must refuse unsupported majors.",
+    "rollback": "Revert to the previous candidate file and validatorVersion pin. Because this slice is report-only and not activated, rollback restores representation only — runtime gates are unchanged.",
+    "notes": "Forks extend with namespaced IDs under allowedNamespaces only. Core gibson.* IDs may not be shadowed. Precedence conflicts refuse closed. Generated doctrine views and activation remain #164."
+  },
+  "provenance": {
+    "sources": [
+      {
+        "id": "src.human-gates",
+        "path": "docs/14-human-gates.md",
+        "digestAlgorithm": "sha256",
+        "digest": "cb3f3131d7288120c9715083c0a1f519da230bec98e7cc7ce2fcfc17afa9d99c",
+        "role": "canonical-doctrine"
+      },
+      {
+        "id": "src.quality-gates",
+        "path": "docs/06-quality-gates.md",
+        "digestAlgorithm": "sha256",
+        "digest": "c874545a0c78d8367146a61929d3dc8cde97e2afcc011e724b0877480d91c499",
+        "role": "canonical-doctrine"
+      },
+      {
+        "id": "src.roles",
+        "path": "docs/03-roles.md",
+        "digestAlgorithm": "sha256",
+        "digest": "ac3a5b02e618ae5965fdc56fdb7a4d942cab8ef44ae9ae9384a153b9cb868a97",
+        "role": "canonical-doctrine"
+      },
+      {
+        "id": "src.sdlc-pipeline",
+        "path": "docs/02-sdlc-pipeline.md",
+        "digestAlgorithm": "sha256",
+        "digest": "f1543c07b3bcc965f3931215c854e17ad7c92d45220e67a6d33e11ab88a1f031",
+        "role": "canonical-doctrine"
+      },
+      {
+        "id": "src.fork-upstream",
+        "path": "docs/18-fork-and-upstream.md",
+        "digestAlgorithm": "sha256",
+        "digest": "73b10097fd6a2f1761a1c031f84e4c49930d0cd8dea3988f2ba8f822a69d7035",
+        "role": "compatibility-doctrine"
+      }
+    ]
+  },
+  "humanGates": [
+    {
+      "id": "G1",
+      "category": "destructive",
+      "summary": "Schema-destructive change, non-additive migration, or manual write against a production database.",
+      "severity": false
+    },
+    {
+      "id": "G2",
+      "category": "destructive",
+      "summary": "Deleting user data, emptying buckets, removing deployments/envs/domains.",
+      "severity": false
+    },
+    {
+      "id": "G3",
+      "category": "destructive",
+      "summary": "Force-push to a shared branch; history rewrite.",
+      "severity": false
+    },
+    {
+      "id": "G4",
+      "category": "destructive",
+      "summary": "Secret rotation and any confirmed secret leak response.",
+      "severity": false
+    },
+    {
+      "id": "G5",
+      "category": "money",
+      "summary": "Any spend: new paid services, plan changes, domain purchases, paid API keys.",
+      "severity": false
+    },
+    {
+      "id": "G6",
+      "category": "money",
+      "summary": "Merge gate on billing/pricing/payment code (Tier C).",
+      "severity": false,
+      "relatedTierIds": ["C"]
+    },
+    {
+      "id": "G7",
+      "category": "outward-facing",
+      "summary": "Production launches of user-visible surfaces (first public exposure).",
+      "severity": false
+    },
+    {
+      "id": "G8",
+      "category": "outward-facing",
+      "summary": "Sending anything to humans: email, SMS, social, newsletter, publishing packages, public repos.",
+      "severity": false
+    },
+    {
+      "id": "G9",
+      "category": "outward-facing",
+      "summary": "Anything using the owner identity or accounts beyond repo/CI scope.",
+      "severity": false
+    },
+    {
+      "id": "G10",
+      "category": "scope-judgment",
+      "summary": "Plan is ambiguous or contradictory on a decision that changes what gets built.",
+      "severity": false
+    },
+    {
+      "id": "G11",
+      "category": "scope-judgment",
+      "summary": "Work grew beyond claimed scope (>2× estimate or undeclared Tier C surface).",
+      "severity": false
+    },
+    {
+      "id": "G12",
+      "category": "scope-judgment",
+      "summary": "Tier C merge approval (money/auth/consent/PII/security/schema).",
+      "severity": false,
+      "relatedTierIds": ["C"]
+    },
+    {
+      "id": "G13",
+      "category": "scope-judgment",
+      "summary": "Two agents want conflicting approaches and coordination failed.",
+      "severity": false
+    },
+    {
+      "id": "G14",
+      "category": "access-security",
+      "summary": "Credentials or approvals only a human holds.",
+      "severity": false
+    },
+    {
+      "id": "G15",
+      "category": "access-security",
+      "summary": "Active exploitation signal or vulnerability discovered live in production.",
+      "severity": true
+    },
+    {
+      "id": "G16",
+      "category": "access-security",
+      "summary": "Evidence of prompt-injection steering an agent.",
+      "severity": true
+    }
+  ],
+  "riskTiers": [
+    {
+      "id": "A",
+      "definition": "Routine: UI copy, isolated components, docs, tests.",
+      "evidenceMinimums": {
+        "reviewDepth": "solo",
+        "adversarialReview": false,
+        "humanMergeGate": false,
+        "crossVendorPreferred": true
+      }
+    },
+    {
+      "id": "B",
+      "definition": "Elevated: shared modules, API routes, data reads, >150 lines or >6 files.",
+      "evidenceMinimums": {
+        "reviewDepth": "full-lens",
+        "adversarialReview": false,
+        "humanMergeGate": false,
+        "uxEvalIfVisible": true,
+        "crossVendorPreferred": true
+      }
+    },
+    {
+      "id": "C",
+      "definition": "Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
+      "evidenceMinimums": {
+        "reviewDepth": "fan-out",
+        "adversarialReview": true,
+        "humanMergeGate": true,
+        "humanGateIds": ["G12"],
+        "uxEvalIfVisible": true,
+        "serializedWhenStateful": true,
+        "crossVendorPreferred": true
+      }
+    }
+  ],
+  "roles": [
+    {
+      "id": "planner",
+      "summary": "Expand a brief into PLAN.md with testable acceptance criteria."
+    },
+    {
+      "id": "decomposer",
+      "summary": "Turn an approved plan into dependency-ordered contract-bearing issues."
+    },
+    {
+      "id": "builder",
+      "summary": "Claim one issue, implement in a worktree, open a green-gate PR."
+    },
+    {
+      "id": "test-engineer",
+      "summary": "Attach executable checks for every contract criterion."
+    },
+    {
+      "id": "reviewer",
+      "summary": "Multi-lens review with APPROVE or REQUEST_CHANGES; never own generation."
+    },
+    {
+      "id": "ux-evaluator",
+      "summary": "Grade live preview against design language; never evaluate from the diff alone."
+    },
+    {
+      "id": "security",
+      "summary": "Run security layers; adversarial pass on Tier C; no report-only softening of hard-fail."
+    },
+    {
+      "id": "release",
+      "summary": "Merge approved green work, verify deploy, clean claim; never rotate secrets."
+    },
+    {
+      "id": "historian",
+      "summary": "File lessons and harness improvements from exhaust; append, do not rewrite history."
+    }
+  ],
+  "forbiddenRolePairs": [
+    {
+      "a": "builder",
+      "b": "reviewer",
+      "scope": "same-unit-of-work",
+      "symmetric": true,
+      "rationale": "Law 5 / docs/03: builder ≠ reviewer on the same unit of work."
+    },
+    {
+      "a": "builder",
+      "b": "ux-evaluator",
+      "scope": "same-unit-of-work",
+      "symmetric": true,
+      "rationale": "Law 5 / docs/03: builder ≠ ux-evaluator on the same unit of work."
+    },
+    {
+      "a": "reviewer",
+      "b": "ux-evaluator",
+      "scope": "same-unit-of-work",
+      "symmetric": true,
+      "rationale": "docs/03 separation: builder ≠ reviewer ≠ ux-evaluator on the same unit of work."
+    }
+  ],
+  "reviewIndependence": [
+    {
+      "id": "ri.law5",
+      "description": "Never grade your own homework. Generator must not equal reviewer on the same unit.",
+      "minimumRelationship": "different-agent",
+      "preferredRelationship": "cross-vendor",
+      "generatorMustNotEqual": "reviewer"
+    },
+    {
+      "id": "ri.tier-a",
+      "description": "Tier A: solo review pass; standard gates.",
+      "tierId": "A",
+      "minimumRelationship": "independent-approve",
+      "preferredRelationship": "cross-vendor"
+    },
+    {
+      "id": "ri.tier-b",
+      "description": "Tier B: full-lens independent APPROVE; prefer two fresh-context verdicts in solo-platform mode.",
+      "tierId": "B",
+      "minimumRelationship": "independent-approve",
+      "preferredRelationship": "two-fresh-context-approve"
+    },
+    {
+      "id": "ri.tier-c",
+      "description": "Tier C: adversarial fan-out plus human merge gate G12. Unchanged under solo-platform.",
+      "tierId": "C",
+      "minimumRelationship": "human-gate",
+      "preferredRelationship": "human-gate",
+      "humanGateId": "G12"
+    }
+  ],
+  "workflowStages": [
+    {
+      "id": "plan",
+      "order": 0,
+      "name": "PLAN",
+      "roleId": "planner"
+    },
+    {
+      "id": "decompose",
+      "order": 1,
+      "name": "DECOMPOSE",
+      "roleId": "decomposer"
+    },
+    {
+      "id": "build",
+      "order": 2,
+      "name": "BUILD",
+      "roleId": "builder"
+    },
+    {
+      "id": "test",
+      "order": 3,
+      "name": "TEST",
+      "roleId": "test-engineer"
+    },
+    {
+      "id": "review",
+      "order": 4,
+      "name": "REVIEW",
+      "roleId": "reviewer"
+    },
+    {
+      "id": "ux-eval",
+      "order": 5,
+      "name": "UX-EVAL",
+      "roleId": "ux-evaluator"
+    },
+    {
+      "id": "security",
+      "order": 6,
+      "name": "SECURITY",
+      "roleId": "security"
+    },
+    {
+      "id": "merge",
+      "order": 7,
+      "name": "MERGE",
+      "roleId": "release"
+    },
+    {
+      "id": "deploy",
+      "order": 8,
+      "name": "DEPLOY+VERIFY",
+      "roleId": "release"
+    },
+    {
+      "id": "retro",
+      "order": 9,
+      "name": "RETRO",
+      "roleId": "historian"
+    }
+  ],
+  "tierGateMappings": [
+    {
+      "tierId": "C",
+      "gateIds": ["G6", "G12"],
+      "rationale": "G6 is the billing/pricing/payment merge gate (Tier C). G12 is Tier C merge approval. Both bind to Tier C without elevating A/B."
+    }
+  ],
+  "forkExtensions": {
+    "allowedNamespaces": ["fork.", "local."],
+    "forbiddenCoreShadow": true,
+    "precedence": [
+      "task",
+      "role",
+      "directory",
+      "target-repo",
+      "fork-local",
+      "gibson",
+      "global"
+    ],
+    "conflictDisposition": "refuse"
+  },
+  "notices": {
+    "authority": "This candidate is report-only. It is NOT an activated policy authority and must not be treated as merge, gate, or CI hard-fail authority.",
+    "activationOwner": "Parent issue #164 owns activation, generated doctrine views, and any runtime consumer migration.",
+    "generatedViews": "Generated AGENTS/doctrine views are out of scope for this slice. Adapters and generated blocks cannot become policy authorities."
+  }
+}

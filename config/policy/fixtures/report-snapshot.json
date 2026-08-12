@@ -1,0 +1,32 @@
+{
+  "activated": false,
+  "authority": "report-only",
+  "candidate": {
+    "activated": false,
+    "authority": "report-only",
+    "generatorVersion": "1.0.0",
+    "manifestId": "gibson.core.policy",
+    "manifestVersion": "1.0.0",
+    "schemaId": "gibson.policy.manifest.schema.v1",
+    "schemaVersion": "1.0.0",
+    "status": "candidate",
+    "validatorVersion": "1.0.0"
+  },
+  "counts": {
+    "errors": 0,
+    "findings": 0,
+    "forbiddenRolePairs": 3,
+    "humanGates": 16,
+    "reviewIndependence": 4,
+    "riskTiers": 3,
+    "roles": 9,
+    "warnings": 0,
+    "workflowStages": 10
+  },
+  "findings": [],
+  "mode": "report",
+  "notice": "This report validates a report-only policy-manifest candidate. It does NOT activate policy authority, change gates, or authorize merge.",
+  "ok": true,
+  "tool": "policy-manifest",
+  "toolVersion": "1.0.0"
+}
