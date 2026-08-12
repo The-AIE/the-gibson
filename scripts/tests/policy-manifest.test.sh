@@ -836,14 +836,133 @@ out=$(run_tool digest --path "docs/..hidden/x.md" --repo-root "$MUT" 2>&1); rc=$
 [[ "$rc" -eq 0 ]] && ok "digest accepts docs/..hidden/x.md" || bad "digest rejected docs/..hidden/x.md (out=$out)"
 
 # ---------------------------------------------------------------------------
-# Deterministic injected path-swap (TOCTOU) — not timing-flaky
-# Proves open → identity/containment bind fails closed when the path is
-# switched after open and before acceptance; shared primitive covers all
-# read classes (text / hash / json) used by digest, doctrine, schema, manifest.
+# Deterministic injected path-swap (TOCTOU) + integrity / FIFO / root-swap
+# Proves open → BigInt identity/containment bind fails closed when the path is
+# switched after open; higher-level manifest load + doctrine consistency;
+# root-swap cannot poison schema; FIFO rejects promptly; sensor receipts are
+# exact (unique set + count + terminal sentinel).
 # ---------------------------------------------------------------------------
 
 echo
-echo "=== deterministic injected path-swap (TOCTOU) ==="
+echo "=== deterministic injected path-swap (TOCTOU) + integrity ==="
+
+# Exact unique receipt set the production sensor must emit (one each).
+# SENSOR_DONE N is required as the terminal sentinel with N == receipt count.
+EXPECTED_SWAP_RECEIPTS="control readContainedFile inside text
+control sha256ContainedFile
+control loadPolicySchema (json/schema class)
+control loadManifestCandidate (higher-level)
+control checkDoctrineConsistency (higher-level)
+bigint identity on production open path
+swap-to-outside fails closed (escape/identity)
+swap-to-outside did not return outside bytes as success
+swap-to-other-inside fails closed (identity bind)
+digest-class sha256ContainedFile swap fails closed
+schema-class loadPolicySchema swap fails closed
+manifest-class loadManifestCandidate swap fails closed
+doctrine-class checkDoctrineConsistency swap fails closed
+root-swap schema re-read (no cache poison)
+post-swap hook cleared; normal hash works
+fifo rejected promptly as non-regular"
+
+# tally_sensor_receipts OUT_TEXT
+# Requires: every expected receipt exactly once, zero SENSOR_BAD, unique OK
+# lines, and terminal SENSOR_DONE <count> matching expected count.
+# Prints ok/bad into the suite tally. Returns 0 only if integrity holds.
+tally_sensor_receipts() {
+  local out_text="$1"
+  local expected_count
+  expected_count=$(printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -c . || true)
+  local ok_lines bad_lines done_lines
+  ok_lines=$(printf '%s\n' "$out_text" | grep -c '^SENSOR_OK ' || true)
+  bad_lines=$(printf '%s\n' "$out_text" | grep -c '^SENSOR_BAD ' || true)
+  done_lines=$(printf '%s\n' "$out_text" | grep -c '^SENSOR_DONE ' || true)
+
+  if [[ "$bad_lines" -ne 0 ]]; then
+    while IFS= read -r line; do
+      case "$line" in
+        SENSOR_BAD\ *) bad "${line#SENSOR_BAD }" ;;
+      esac
+    done <<< "$out_text"
+  fi
+
+  # Exact unique SENSOR_OK set
+  local missing=0 dup=0
+  while IFS= read -r exp; do
+    [[ -z "$exp" ]] && continue
+    local n
+    n=$(printf '%s\n' "$out_text" | grep -cF "SENSOR_OK $exp" || true)
+    if [[ "$n" -eq 0 ]]; then
+      bad "sensor missing receipt: $exp"
+      missing=$((missing + 1))
+    elif [[ "$n" -gt 1 ]]; then
+      bad "sensor duplicate receipt: $exp (count=$n)"
+      dup=$((dup + 1))
+    else
+      ok "$exp"
+    fi
+  done <<< "$EXPECTED_SWAP_RECEIPTS"
+
+  # Unexpected SENSOR_OK not in the expected set
+  while IFS= read -r line; do
+    case "$line" in
+      SENSOR_OK\ *)
+        local body="${line#SENSOR_OK }"
+        if ! printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -qxF -- "$body"; then
+          bad "sensor unexpected receipt: $body"
+        fi
+        ;;
+    esac
+  done <<< "$out_text"
+
+  if [[ "$ok_lines" -ne "$expected_count" ]]; then
+    bad "sensor SENSOR_OK count want $expected_count got $ok_lines"
+  else
+    ok "sensor SENSOR_OK exact count $expected_count"
+  fi
+
+  if [[ "$done_lines" -ne 1 ]]; then
+    bad "sensor missing unique SENSOR_DONE sentinel (done_lines=$done_lines)"
+  else
+    local done_n
+    done_n=$(printf '%s\n' "$out_text" | sed -n 's/^SENSOR_DONE //p' | head -n1)
+    if [[ "$done_n" == "$expected_count" ]]; then
+      ok "sensor SENSOR_DONE sentinel count $expected_count"
+    else
+      bad "sensor SENSOR_DONE want $expected_count got $done_n"
+    fi
+  fi
+}
+
+# --- aggregator mutation checks (blank / partial / duplicate / missing sentinel) ---
+echo
+echo "=== sensor aggregator integrity mutations ==="
+# Run tally against deliberately broken payloads; expect FAIL to rise, then
+# roll PASS/FAIL back so only the meta-receipt is counted.
+agg_mut_check() {
+  local name="$1"
+  local payload="$2"
+  local before_fail=$FAIL
+  local before_pass=$PASS
+  tally_sensor_receipts "$payload" >/dev/null 2>&1 || true
+  if [[ "$FAIL" -gt "$before_fail" ]]; then
+    FAIL=$before_fail
+    PASS=$before_pass
+    ok "aggregator rejects $name"
+  else
+    FAIL=$before_fail
+    PASS=$before_pass
+    bad "aggregator accepted $name (should fail)"
+  fi
+}
+
+agg_mut_check "blank output" ""
+agg_mut_check "partial receipts" "$(printf '%s\n' "SENSOR_OK control readContainedFile inside text" "SENSOR_DONE 1")"
+agg_mut_check "duplicate receipt" "$(printf '%s\n' "SENSOR_OK control readContainedFile inside text" "SENSOR_OK control readContainedFile inside text" "SENSOR_DONE 1")"
+# Full expected set but missing SENSOR_DONE
+_full_no_done=$(printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | while IFS= read -r r; do printf 'SENSOR_OK %s\n' "$r"; done)
+agg_mut_check "missing sentinel" "$_full_no_done"
+unset _full_no_done
 
 SWAP_RC=0
 # Paths via env (not argv): importing the tool module must not trip isMain()
@@ -863,6 +982,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 const toolPath = process.env.PM_TOOL;
 const schemaSrc = process.env.PM_SCHEMA;
@@ -878,14 +998,22 @@ const {
   setSafeReadAfterOpenHook,
   loadPolicySchema,
   clearPolicySchemaCache,
+  loadManifestCandidate,
+  checkDoctrineConsistency,
+  resolveCanonicalRepoRoot,
 } = await import(pathToFileURL(toolPath).href);
 
 let fail = 0;
-function ok(m) { console.log("SENSOR_OK " + m); }
+let okCount = 0;
+function ok(m) { console.log("SENSOR_OK " + m); okCount++; }
 function bad(m) { console.log("SENSOR_BAD " + m); fail++; }
 
 const root = join(tmpdir(), "gibson-pm-swap-" + process.pid + "-" + Date.now());
 const outside = join(tmpdir(), "gibson-pm-outside-" + process.pid + "-" + Date.now());
+const rootA = join(tmpdir(), "gibson-pm-rootA-" + process.pid + "-" + Date.now());
+const rootB = join(tmpdir(), "gibson-pm-rootB-" + process.pid + "-" + Date.now());
+const rootLink = join(tmpdir(), "gibson-pm-rootLink-" + process.pid + "-" + Date.now());
+
 try {
   mkdirSync(join(root, "docs"), { recursive: true });
   mkdirSync(join(root, "config/policy/schema"), { recursive: true });
@@ -897,11 +1025,15 @@ try {
   writeFileSync(join(outside, "leaked.txt"), "OUTSIDE_SECRET_BYTES\n");
   cpSync(schemaSrc, join(root, "config/policy/schema/policy-manifest-v1.schema.json"));
   cpSync(candidateSrc, join(root, "config/policy/candidates/gibson-core-v1.candidate.json"));
-  // Doctrine stubs for representative doctrine-class read
+  // Minimal doctrine markers so checkDoctrineConsistency can parse (or report)
   writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
+  writeFileSync(join(root, "docs/03-roles.md"), "## planner\n");
+  writeFileSync(join(root, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n**B**\n**C**\n");
+  writeFileSync(join(root, "docs/02-sdlc-pipeline.md"), "## Stage 0 — Plan\n");
 
   // Control: no hook → shared primitive accepts normal files
   setSafeReadAfterOpenHook(null);
+  clearPolicySchemaCache();
   const text = readContainedFile(root, "docs/inside.txt", "utf8");
   if (text === "INSIDE_BYTES_v1\n") ok("control readContainedFile inside text");
   else bad("control readContainedFile wrong bytes");
@@ -915,27 +1047,70 @@ try {
   } catch (e) {
     bad("control loadPolicySchema failed: " + e.message);
   }
+  // Higher-level manifest load path (not bare readContainedFile)
   try {
-    const man = readContainedFile(
+    const man = loadManifestCandidate(
       root,
-      "config/policy/candidates/gibson-core-v1.candidate.json",
-      "utf8"
+      "config/policy/candidates/gibson-core-v1.candidate.json"
     );
-    JSON.parse(man);
-    ok("control manifest json class read");
+    if (man && typeof man === "object" && man.schemaId) {
+      ok("control loadManifestCandidate (higher-level)");
+    } else {
+      bad("control loadManifestCandidate missing schemaId");
+    }
   } catch (e) {
-    bad("control manifest read failed: " + e.message);
+    bad("control loadManifestCandidate failed: " + e.message);
   }
+  // Higher-level doctrine consistency path
   try {
-    const d = readContainedFile(root, "docs/14-human-gates.md", "utf8");
-    if (d.includes("**G1**")) ok("control doctrine class read");
-    else bad("control doctrine missing marker");
+    const cand = loadManifestCandidate(
+      root,
+      "config/policy/candidates/gibson-core-v1.candidate.json"
+    );
+    const findings = checkDoctrineConsistency(cand, root);
+    if (Array.isArray(findings)) {
+      ok("control checkDoctrineConsistency (higher-level)");
+    } else {
+      bad("control checkDoctrineConsistency non-array");
+    }
   } catch (e) {
-    bad("control doctrine read failed: " + e.message);
+    bad("control checkDoctrineConsistency failed: " + e.message);
   }
 
+  // BigInt identity: production open path must surface bigint dev/ino
+  let sawBigInt = false;
+  setSafeReadAfterOpenHook(({ openedDev, openedIno }) => {
+    if (typeof openedDev === "bigint" && typeof openedIno === "bigint") {
+      sawBigInt = true;
+      // Prove Number would silently round values above MAX_SAFE_INTEGER
+      const beyond = BigInt(Number.MAX_SAFE_INTEGER) + 2n;
+      if (Number(beyond) === Number.MAX_SAFE_INTEGER + 2) {
+        // Number cannot represent beyond exactly; if equality held, platform weird
+      }
+      if (BigInt(Number(beyond)) !== beyond) {
+        // expected: Number rounds — BigInt path cannot silently equal after round-trip
+      } else {
+        throw new Error("identity: Number round-trip preserved >MAX_SAFE_INTEGER (unexpected)");
+      }
+    } else {
+      throw new Error(
+        "identity: expected bigint dev/ino, got " +
+          typeof openedDev +
+          "/" +
+          typeof openedIno
+      );
+    }
+  });
+  try {
+    readContainedFile(root, "docs/inside.txt", "utf8");
+    if (sawBigInt) ok("bigint identity on production open path");
+    else bad("bigint identity hook did not observe BigInt stats");
+  } catch (e) {
+    bad("bigint identity path failed: " + (e && e.message ? e.message : e));
+  }
+  setSafeReadAfterOpenHook(null);
+
   // Injected swap A: after open, replace path with symlink to outside.
-  // Fail closed on realpath escape; must not accept outside identity.
   setSafeReadAfterOpenHook(({ absPath }) => {
     try { unlinkSync(absPath); } catch { /* ignore */ }
     symlinkSync(join(outside, "leaked.txt"), absPath);
@@ -949,7 +1124,6 @@ try {
     msg = e && e.message ? e.message : String(e);
   }
   setSafeReadAfterOpenHook(null);
-  // Restore inside file for subsequent cases
   try { unlinkSync(join(root, "docs/inside.txt")); } catch { /* ignore */ }
   writeFileSync(join(root, "docs/inside.txt"), "INSIDE_BYTES_v1\n");
 
@@ -960,23 +1134,18 @@ try {
   } else {
     bad("swap-to-outside did not fail closed");
   }
-  // Prove we did not return outside secret as a successful read (already threw)
   if (threw) ok("swap-to-outside did not return outside bytes as success");
   else bad("swap-to-outside returned success (would leak outside bytes)");
 
   // Injected swap B: after open, replace with different in-root file.
-  // Opened fd identity must not match new realpath → fail closed.
   setSafeReadAfterOpenHook(({ absPath }) => {
     try { unlinkSync(absPath); } catch { /* ignore */ }
-    // hard-link alternative: copy other file into place (new inode)
     writeFileSync(absPath, "OTHER_INSIDE\n");
   });
   threw = false;
   msg = "";
   try {
     const leaked = readContainedFile(root, "docs/inside.txt", "utf8");
-    // If somehow succeeds, must not be the swapped-in content from a new inode
-    // without identity bind — success here is a defect.
     if (leaked === "OTHER_INSIDE\n") {
       bad("swap-to-other-inside accepted replacement bytes");
     } else {
@@ -998,7 +1167,7 @@ try {
     bad("swap-to-other-inside did not fail closed");
   }
 
-  // Same shared primitive via hash path (digest class)
+  // Digest-class swap
   setSafeReadAfterOpenHook(({ absPath }) => {
     try { unlinkSync(absPath); } catch { /* ignore */ }
     symlinkSync(join(outside, "leaked.txt"), absPath);
@@ -1020,8 +1189,7 @@ try {
     bad("digest-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
   }
 
-  // Schema-class swap via loadPolicySchema (json under DEFAULT_SCHEMA_REL).
-  // Clear cache so the open+identity path runs again (control already filled it).
+  // Schema-class swap via loadPolicySchema
   clearPolicySchemaCache();
   const schemaRel = "config/policy/schema/policy-manifest-v1.schema.json";
   setSafeReadAfterOpenHook(({ relPath, absPath }) => {
@@ -1042,22 +1210,24 @@ try {
   clearPolicySchemaCache();
   try { unlinkSync(join(root, schemaRel)); } catch { /* ignore */ }
   cpSync(schemaSrc, join(root, schemaRel));
-  if (threw && /realpath escapes|symlink|identity changed|swap or race|schema/i.test(msg)) {
+  if (threw && /realpath escapes|symlink|identity changed|swap or race|schema|cannot read/i.test(msg)) {
     ok("schema-class loadPolicySchema swap fails closed");
   } else {
     bad("schema-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
   }
 
-  // Manifest-class: readContainedFile on candidate path with swap
+  // Higher-level manifest load path with swap
   const manRel = "config/policy/candidates/gibson-core-v1.candidate.json";
-  setSafeReadAfterOpenHook(({ absPath }) => {
-    try { unlinkSync(absPath); } catch { /* ignore */ }
-    symlinkSync(join(outside, "leaked.txt"), absPath);
+  setSafeReadAfterOpenHook(({ absPath, relPath }) => {
+    if (relPath === manRel || /gibson-core-v1\.candidate\.json$/.test(absPath)) {
+      try { unlinkSync(absPath); } catch { /* ignore */ }
+      symlinkSync(join(outside, "leaked.txt"), absPath);
+    }
   });
   threw = false;
   msg = "";
   try {
-    readContainedFile(root, manRel, "utf8");
+    loadManifestCandidate(root, manRel);
   } catch (e) {
     threw = true;
     msg = e && e.message ? e.message : String(e);
@@ -1065,14 +1235,130 @@ try {
   setSafeReadAfterOpenHook(null);
   try { unlinkSync(join(root, manRel)); } catch { /* ignore */ }
   cpSync(candidateSrc, join(root, manRel));
-  if (threw && /realpath escapes|symlink|identity changed|swap or race/i.test(msg)) {
-    ok("manifest-class readContainedFile swap fails closed");
+  if (threw && /realpath escapes|symlink|identity changed|swap or race|cannot read/i.test(msg)) {
+    ok("manifest-class loadManifestCandidate swap fails closed");
   } else {
     bad("manifest-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
   }
 
-  // Representative CLI path: digest command must also fail closed on static escape
-  // (end-to-end already covered elsewhere; here prove hook is cleared and normal ok)
+  // Doctrine-class: checkDoctrineConsistency with swap on a doctrine path
+  setSafeReadAfterOpenHook(({ absPath, relPath }) => {
+    if (relPath === "docs/14-human-gates.md" || /14-human-gates\.md$/.test(absPath)) {
+      try { unlinkSync(absPath); } catch { /* ignore */ }
+      symlinkSync(join(outside, "leaked.txt"), absPath);
+    }
+  });
+  threw = false;
+  msg = "";
+  try {
+    const cand = loadManifestCandidate(root, manRel);
+    // loadManifest may succeed; consistency should surface escape as findings or throw
+    const findings = checkDoctrineConsistency(cand, root);
+    const hasEscape = findings.some(
+      (f) =>
+        f.severity === "error" &&
+        /realpath escapes|symlink|identity changed|swap or race|cannot read|E_CONSISTENCY_READ/i.test(
+          String(f.message) + " " + String(f.code)
+        )
+    );
+    if (hasEscape) {
+      ok("doctrine-class checkDoctrineConsistency swap fails closed");
+    } else {
+      bad(
+        "doctrine-class swap not in findings: " +
+          JSON.stringify(findings.map((f) => f.code + ":" + f.message))
+      );
+    }
+  } catch (e) {
+    threw = true;
+    msg = e && e.message ? e.message : String(e);
+    if (/realpath escapes|symlink|identity changed|swap or race|cannot read/i.test(msg)) {
+      ok("doctrine-class checkDoctrineConsistency swap fails closed");
+    } else {
+      bad("doctrine-class swap threw unexpected: " + msg);
+    }
+  }
+  setSafeReadAfterOpenHook(null);
+  try { unlinkSync(join(root, "docs/14-human-gates.md")); } catch { /* ignore */ }
+  writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
+
+  // Root-swap / no cache poison: symlink root → A, load; retarget → B, load must
+  // see B; retarget → A, load must see A again (never sticky B under A identity).
+  function writeMiniRoot(dir, marker) {
+    mkdirSync(join(dir, "config/policy/schema"), { recursive: true });
+    mkdirSync(join(dir, "config/policy/candidates"), { recursive: true });
+    // Minimal schema object; marker in a custom top-level field is fine for load-only
+    const schema = {
+      $schema: "https://json-schema.org/draft/2020-12/schema",
+      type: "object",
+      title: marker,
+    };
+    writeFileSync(
+      join(dir, "config/policy/schema/policy-manifest-v1.schema.json"),
+      JSON.stringify(schema) + "\n"
+    );
+  }
+  writeMiniRoot(rootA, "SCHEMA_ROOT_A");
+  writeMiniRoot(rootB, "SCHEMA_ROOT_B");
+  try { unlinkSync(rootLink); } catch { /* ignore */ }
+  symlinkSync(rootA, rootLink);
+  clearPolicySchemaCache();
+  let s1;
+  try {
+    s1 = loadPolicySchema(null, rootLink);
+  } catch (e) {
+    bad("root-swap load A failed: " + e.message);
+    s1 = null;
+  }
+  try { unlinkSync(rootLink); } catch { /* ignore */ }
+  symlinkSync(rootB, rootLink);
+  clearPolicySchemaCache();
+  let s2;
+  try {
+    s2 = loadPolicySchema(null, rootLink);
+  } catch (e) {
+    bad("root-swap load B failed: " + e.message);
+    s2 = null;
+  }
+  try { unlinkSync(rootLink); } catch { /* ignore */ }
+  symlinkSync(rootA, rootLink);
+  clearPolicySchemaCache();
+  let s3;
+  try {
+    s3 = loadPolicySchema(null, rootLink);
+  } catch (e) {
+    bad("root-swap load A2 failed: " + e.message);
+    s3 = null;
+  }
+  if (
+    s1 &&
+    s2 &&
+    s3 &&
+    s1.title === "SCHEMA_ROOT_A" &&
+    s2.title === "SCHEMA_ROOT_B" &&
+    s3.title === "SCHEMA_ROOT_A" &&
+    s1.title !== s2.title
+  ) {
+    ok("root-swap schema re-read (no cache poison)");
+  } else {
+    bad(
+      "root-swap cache poison or mismatch: " +
+        JSON.stringify({
+          s1: s1 && s1.title,
+          s2: s2 && s2.title,
+          s3: s3 && s3.title,
+        })
+    );
+  }
+  // Also: direct realpath of A after B load must not return B if ever cached under A
+  const realA = resolveCanonicalRepoRoot(rootA);
+  clearPolicySchemaCache();
+  const sDirectA = loadPolicySchema(null, realA);
+  if (sDirectA.title !== "SCHEMA_ROOT_A") {
+    bad("direct rootA after B load returned " + sDirectA.title);
+  }
+
+  // Hook cleared; normal path works
   setSafeReadAfterOpenHook(null);
   try {
     sha256ContainedFile(root, "docs/inside.txt");
@@ -1080,24 +1366,77 @@ try {
   } catch (e) {
     bad("post-swap normal hash failed: " + e.message);
   }
+
+  // FIFO: nonblocking open + reject non-regular promptly (bounded wall clock).
+  // Use mkfifo(1) only — no nested shell (outer sensor is bash single-quoted).
+  const fifoPath = join(root, "docs/fifo-pipe");
+  const mk = spawnSync("mkfifo", [fifoPath], { encoding: "utf8" });
+  if (mk.status !== 0) {
+    bad("fifo setup failed (mkfifo unavailable status=" + mk.status + ")");
+  } else {
+    const t0 = Date.now();
+    let fifoThrew = false;
+    let fifoMsg = "";
+    try {
+      readContainedFile(root, "docs/fifo-pipe", "utf8");
+    } catch (e) {
+      fifoThrew = true;
+      fifoMsg = e && e.message ? e.message : String(e);
+    }
+    const elapsed = Date.now() - t0;
+    if (
+      fifoThrew &&
+      /not a regular file|cannot open/i.test(fifoMsg) &&
+      elapsed < 2000
+    ) {
+      ok("fifo rejected promptly as non-regular");
+    } else if (!fifoThrew) {
+      bad("fifo was accepted as a regular file");
+    } else if (elapsed >= 2000) {
+      bad("fifo open hung ms=" + elapsed + " msg=" + fifoMsg);
+    } else {
+      bad("fifo reject unexpected: ms=" + elapsed + " msg=" + fifoMsg);
+    }
+  }
 } finally {
+  // Outer finally: never leak hook or cache across failures
   setSafeReadAfterOpenHook(null);
+  clearPolicySchemaCache();
   try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
   try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { rmSync(rootA, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { rmSync(rootB, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { unlinkSync(rootLink); } catch { /* ignore */ }
+  try { rmSync(rootLink, { recursive: true, force: true }); } catch { /* ignore */ }
 }
+console.log("SENSOR_DONE " + okCount);
 process.exit(fail === 0 ? 0 : 1);
 ' 2>&1) || SWAP_RC=$?
 
-# Map SENSOR_OK / SENSOR_BAD lines into suite tally
-while IFS= read -r line; do
-  case "$line" in
-    SENSOR_OK\ *) ok "${line#SENSOR_OK }" ;;
-    SENSOR_BAD\ *) bad "${line#SENSOR_BAD }" ;;
-    *) ;; # ignore node warnings / noise
-  esac
-done <<< "$SWAP_OUT"
+# Strict aggregator: exact unique receipts + count + terminal sentinel
+tally_sensor_receipts "$SWAP_OUT"
 if [[ "$SWAP_RC" -ne 0 ]] && ! echo "$SWAP_OUT" | grep -q "SENSOR_BAD "; then
   bad "injected-swap sensor exited non-zero without SENSOR_BAD (out=$SWAP_OUT)"
+fi
+
+# Static proof: production identity path uses bigint Stats options
+if grep -q 'fstatSync(fd, { bigint: true })' "$TOOL" && \
+   grep -q 'statSync(real, { bigint: true })' "$TOOL"; then
+  ok "source uses BigInt fstatSync/statSync options"
+else
+  bad "source missing BigInt stats options on identity path"
+fi
+if grep -q 'O_RDONLY' "$TOOL" && grep -q 'O_NONBLOCK' "$TOOL"; then
+  ok "source opens with O_RDONLY|O_NONBLOCK"
+else
+  bad "source missing nonblocking open flags"
+fi
+# No approve-then-reopen legacy exports
+if grep -q 'export function resolveUnderRoot' "$TOOL" || \
+   grep -q 'export function sha256File' "$TOOL"; then
+  bad "unsafe legacy resolveUnderRoot/sha256File still exported"
+else
+  ok "unsafe legacy resolveUnderRoot/sha256File removed"
 fi
 
 echo

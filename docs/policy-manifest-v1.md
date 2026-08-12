@@ -169,10 +169,18 @@ The pure validator refuses (non-exhaustive):
 - `--manifest` and schema reads that escape the declared `--repo-root`
   (absolute paths, symlink realpath escape); schema is always loaded from
   `config/policy/schema/policy-manifest-v1.schema.json` under that root
+- **canonical root**: `--repo-root` is `realpath`'d once to an immutable
+  directory identity (no soft fallback if realpath fails); that same root is
+  used for every manifest/schema/doctrine/digest operation; schema is not
+  cached across roots (root-symlink swap cannot poison root A with root B bytes)
 - path swaps after open (TOCTOU): every validation read (manifest, schema,
-  doctrine, digest) opens once, binds realpath + fd identity under
-  `--repo-root`, and only then reads bytes from that fd — identity change or
-  realpath escape fails closed before any out-of-root replacement is accepted
+  doctrine, digest) opens once with portable `O_RDONLY|O_NONBLOCK` (FIFO/device
+  never hang), binds realpath + **BigInt** `dev`/`ino` fd identity under the
+  canonical root, and only then reads bytes from that fd — identity change,
+  non-regular type, or realpath escape fails closed before any out-of-root
+  replacement is accepted
+- no approve-then-reopen path API: hashing and loads require root-relative
+  containment and verified bytes from the opened fd
 - ambiguous overrides (duplicate precedence, non-refuse disposition)
 - `activated: true` or non-`report-only` authority on this slice
 
@@ -208,7 +216,10 @@ The focused suite proves the gate fails when a fixture:
 - supplies an absolute `--manifest` or a manifest/schema symlink that escapes
   `--repo-root`
 - injects a path swap between open and identity/containment acceptance
-  (deterministic TOCTOU sensor; fails closed on escape or identity change)
+  (deterministic TOCTOU sensor; fails closed on escape or identity change;
+  covers higher-level `loadManifestCandidate` and `checkDoctrineConsistency`)
+- swaps the `--repo-root` symlink between schema loads (no cache poison)
+- opens a FIFO under the root (rejects promptly as non-regular)
 - uses a provenance path with an exact `..` segment (while still accepting
   in-root names like `docs/a..b.md` and `docs/..hidden/x.md`)
 

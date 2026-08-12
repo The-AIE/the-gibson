@@ -32,7 +32,7 @@
 import { createHash } from "node:crypto";
 import {
   closeSync,
-  existsSync,
+  constants as fsConstants,
   fstatSync,
   openSync,
   readFileSync,
@@ -41,6 +41,10 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+/** Portable open flags: read-only + nonblocking so FIFOs/devices never hang. */
+const OPEN_READ_NONBLOCK =
+  fsConstants.O_RDONLY | fsConstants.O_NONBLOCK;
 
 // ---------------------------------------------------------------------------
 // Constants (pinned versions for this pure validator)
@@ -217,12 +221,47 @@ export function isSafeRepoRelPath(p) {
 }
 
 /**
- * Lexically resolve a repo-relative path under repoRoot. Refuse absolute paths,
- * NUL, and exact `..` segments. Does **not** open or realpath the target — that
- * is bound to the fd in {@link readContainedFile}. Safe names such as
- * `docs/a..b.md` and `docs/..hidden/x.md` remain legal.
+ * Resolve and validate one immutable canonical repository root. Realpath must
+ * succeed (no fallback to unresolved strings — that would desync cache keys
+ * and containment). The returned path is the single root identity all
+ * subsequent reads/schema loads must use.
  *
  * @param {string} repoRoot
+ * @returns {string} absolute realpath of a directory
+ */
+export function resolveCanonicalRepoRoot(repoRoot) {
+  if (typeof repoRoot !== "string" || !repoRoot) {
+    throw new Error("path: empty repo root");
+  }
+  if (repoRoot.includes("\0")) {
+    throw new Error("path: unsafe repo root");
+  }
+  let rootReal;
+  try {
+    rootReal = realpathSync(repoRoot);
+  } catch (e) {
+    throw new Error(`path: cannot realpath repo root: ${e.message}`);
+  }
+  try {
+    const st = statSync(rootReal, { bigint: true });
+    if (!st.isDirectory()) {
+      throw new Error("path: repo root is not a directory");
+    }
+  } catch (e) {
+    if (e.message && e.message.startsWith("path:")) throw e;
+    throw new Error(`path: cannot stat repo root: ${e.message}`);
+  }
+  return rootReal;
+}
+
+/**
+ * Lexically resolve a repo-relative path under a **canonical** repo root.
+ * Prefer passing the return value of {@link resolveCanonicalRepoRoot} so root
+ * identity is frozen once per CLI/operation. Refuse absolute paths, NUL, and
+ * exact `..` segments. Does **not** open the target — that is bound to the fd
+ * in {@link readContainedFile}. Safe names such as `docs/a..b.md` remain legal.
+ *
+ * @param {string} repoRoot canonical or resolvable repo root
  * @param {string} relPath
  * @returns {{ rootReal: string, absPath: string, norm: string }}
  */
@@ -251,21 +290,8 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
   if (!SAFE_REL_PATH.test(norm)) {
     throw new Error(`path: malformed relative path: ${relPath}`);
   }
-  let rootReal;
-  try {
-    rootReal = realpathSync(repoRoot);
-  } catch (e) {
-    throw new Error(`path: cannot realpath repo root: ${e.message}`);
-  }
-  // Ensure root is a directory (not a symlink-to-file, etc.)
-  try {
-    if (!statSync(rootReal).isDirectory()) {
-      throw new Error("path: repo root is not a directory");
-    }
-  } catch (e) {
-    if (e.message && e.message.startsWith("path:")) throw e;
-    throw new Error(`path: cannot stat repo root: ${e.message}`);
-  }
+  // Single validated root identity for this resolution (no soft fallback).
+  const rootReal = resolveCanonicalRepoRoot(repoRoot);
 
   const absPath = resolve(rootReal, norm);
   const rel = relative(rootReal, absPath);
@@ -282,12 +308,12 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
  * Pass `null` to clear.
  *
  * @type {null | ((info: {
- *   repoRoot: string,
+ *   rootReal: string,
  *   relPath: string,
  *   absPath: string,
  *   fd: number,
- *   openedDev: number,
- *   openedIno: number|bigint,
+ *   openedDev: bigint,
+ *   openedIno: bigint,
  * }) => void)}
  */
 let safeReadAfterOpenHook = null;
@@ -300,38 +326,40 @@ export function setSafeReadAfterOpenHook(fn) {
 }
 
 /**
- * After open: bind the opened fd identity to a realpath that stays under
- * repoRoot. Fail closed if realpath escapes, the target is not a regular file,
- * or dev/ino no longer matches the opened fd (rename/symlink swap). Does
- * **not** read file bytes — callers must only read from the fd after this
- * returns successfully.
+ * After open: bind the opened fd identity (BigInt dev/ino) to a realpath that
+ * stays under the **already-canonical** rootReal. Fail closed if realpath
+ * escapes, the target is not a regular file, or BigInt dev/ino no longer
+ * matches the opened fd (rename/symlink swap). Does **not** re-resolve the
+ * repo root (avoids root-symlink race vs the identity used for open) and does
+ * **not** read file bytes.
  *
- * @param {string} repoRoot
+ * @param {string} rootReal immutable canonical repo root from resolveCanonicalRepoRoot
  * @param {string} absPath lexical absolute path used for open
  * @param {number} fd
  * @param {string} relPath for error messages
- * @param {{ dev: number, ino: number|bigint, isFile: () => boolean }} opened
+ * @param {{ dev: bigint, ino: bigint, isFile: () => boolean }} opened bigint Stats
  * @returns {{ rootReal: string, real: string }}
  */
-function assertOpenedIdentityContained(repoRoot, absPath, fd, relPath, opened) {
+function assertOpenedIdentityContained(rootReal, absPath, fd, relPath, opened) {
+  // Reject FIFO/socket/dir/device after nonblocking open — never hang on open.
   if (!opened.isFile()) {
     throw new Error(`path: not a regular file: ${relPath}`);
   }
+  if (typeof opened.dev !== "bigint" || typeof opened.ino !== "bigint") {
+    // Production path must use BigInt stats; Number silently rounds >2^53-1.
+    throw new Error(
+      `path: opened identity must use BigInt dev/ino (got ${typeof opened.dev}/${typeof opened.ino}): ${relPath}`
+    );
+  }
   if (typeof safeReadAfterOpenHook === "function") {
     safeReadAfterOpenHook({
-      repoRoot,
+      rootReal,
       relPath,
       absPath,
       fd,
       openedDev: opened.dev,
       openedIno: opened.ino,
     });
-  }
-  let rootReal;
-  try {
-    rootReal = realpathSync(repoRoot);
-  } catch (e) {
-    throw new Error(`path: cannot realpath repo root: ${e.message}`);
   }
   let real;
   try {
@@ -351,10 +379,15 @@ function assertOpenedIdentityContained(repoRoot, absPath, fd, relPath, opened) {
   }
   let realStat;
   try {
-    realStat = statSync(real);
+    realStat = statSync(real, { bigint: true });
   } catch (e) {
     throw new Error(
       `path: cannot stat resolved path for identity: ${relPath}: ${e.message}`
+    );
+  }
+  if (typeof realStat.dev !== "bigint" || typeof realStat.ino !== "bigint") {
+    throw new Error(
+      `path: resolved identity must use BigInt dev/ino: ${relPath}`
     );
   }
   if (realStat.dev !== opened.dev || realStat.ino !== opened.ino) {
@@ -369,10 +402,10 @@ function assertOpenedIdentityContained(repoRoot, absPath, fd, relPath, opened) {
 }
 
 /**
- * Open a repo-relative path, prove the opened identity is a regular file
- * contained under repoRoot, then read bytes **only from that fd**. Fail closed
- * if lexical path, resolved path, opened identity, or containment changes —
- * never reads bytes from an out-of-root replacement before acceptance.
+ * Open a repo-relative path with nonblocking read flags, prove the opened
+ * identity is a regular file contained under repoRoot (BigInt dev/ino), then
+ * read bytes **only from that fd**. Fail closed on FIFO/device/dir (after open,
+ * without hanging), lexical/realpath escape, or identity change.
  *
  * Applies to every validation read class (manifest, schema, doctrine, digest).
  *
@@ -382,16 +415,17 @@ function assertOpenedIdentityContained(repoRoot, absPath, fd, relPath, opened) {
  * @returns {string | Buffer}
  */
 export function readContainedFile(repoRoot, relPath, encoding = null) {
-  const { absPath } = resolveLexicalUnderRoot(repoRoot, relPath);
+  const { absPath, rootReal } = resolveLexicalUnderRoot(repoRoot, relPath);
   let fd;
   try {
-    fd = openSync(absPath, "r");
+    // O_RDONLY|O_NONBLOCK: portable; rejects FIFO after open without hanging.
+    fd = openSync(absPath, OPEN_READ_NONBLOCK);
   } catch (e) {
     throw new Error(`path: cannot open ${relPath}: ${e.message}`);
   }
   try {
-    const opened = fstatSync(fd);
-    assertOpenedIdentityContained(repoRoot, absPath, fd, relPath, opened);
+    const opened = fstatSync(fd, { bigint: true });
+    assertOpenedIdentityContained(rootReal, absPath, fd, relPath, opened);
     // Bytes only from the verified opened identity.
     return encoding == null
       ? readFileSync(fd)
@@ -406,77 +440,9 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
 }
 
 /**
- * Resolve a path under repoRoot. Refuse absolute paths, NUL, and `..` segments
- * (segment-exact only). When the path exists, open it and bind realpath + fd
- * identity containment (same fail-closed rules as reads) without consuming
- * bytes. Returns the contained real path when present, else the lexical abs.
- *
- * Prefer {@link readContainedFile} / {@link sha256ContainedFile} for actual IO.
- *
- * @param {string} repoRoot
- * @param {string} relPath
- * @returns {string}
- */
-export function resolveUnderRoot(repoRoot, relPath) {
-  const { absPath } = resolveLexicalUnderRoot(repoRoot, relPath);
-  if (!existsSync(absPath)) {
-    return absPath;
-  }
-  let fd;
-  try {
-    fd = openSync(absPath, "r");
-  } catch (e) {
-    throw new Error(`path: cannot open ${relPath}: ${e.message}`);
-  }
-  try {
-    const opened = fstatSync(fd);
-    const { real } = assertOpenedIdentityContained(
-      repoRoot,
-      absPath,
-      fd,
-      relPath,
-      opened
-    );
-    return real;
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
-/**
- * Resolve a CLI input path that must stay under --repo-root. Absolute paths
- * are refused even when they happen to point inside the root — callers must
- * supply repo-relative paths so the declared containment boundary is explicit.
- *
- * @param {string} repoRoot
- * @param {string} relPath
- * @param {string} label
- * @returns {string}
- */
-export function resolveContainedInput(repoRoot, relPath, label) {
-  if (typeof relPath !== "string" || !relPath) {
-    throw new Error(`${label}: empty path`);
-  }
-  if (isAbsolute(relPath)) {
-    throw new Error(
-      `${label}: absolute paths are refused; use a path relative to --repo-root (got ${relPath})`
-    );
-  }
-  try {
-    return resolveUnderRoot(repoRoot, relPath);
-  } catch (e) {
-    const msg = e && e.message ? e.message : String(e);
-    throw new Error(`${label}: ${msg}`);
-  }
-}
-
-/**
  * Hash a repo-relative file under repoRoot using the fd-bound safe-read
- * primitive (open → identity/containment → hash from same fd).
+ * primitive (open → identity/containment → hash from same fd). Mandatory
+ * root-relative containment — there is no absolute/out-of-root hash API.
  *
  * @param {string} repoRoot
  * @param {string} relPath
@@ -485,46 +451,6 @@ export function resolveContainedInput(repoRoot, relPath, label) {
 export function sha256ContainedFile(repoRoot, relPath) {
   const buf = /** @type {Buffer} */ (readContainedFile(repoRoot, relPath, null));
   return createHash("sha256").update(buf).digest("hex");
-}
-
-/**
- * Hash a file by absolute path. When repoRoot is supplied, open once and bind
- * realpath + fd identity under that root before hashing from the same fd
- * (no separate approve-then-reopen path).
- *
- * Prefer {@link sha256ContainedFile} when the caller has a repo-relative path.
- *
- * @param {string} absPath
- * @param {string} [repoRoot]
- * @returns {string}
- */
-export function sha256File(absPath, repoRoot) {
-  if (typeof absPath !== "string" || !absPath) {
-    throw new Error("path: empty");
-  }
-  let fd;
-  try {
-    fd = openSync(absPath, "r");
-  } catch (e) {
-    throw new Error(`path: cannot open for hash: ${e.message}`);
-  }
-  try {
-    const opened = fstatSync(fd);
-    if (!opened.isFile()) {
-      throw new Error(`path: not a regular file for hash: ${absPath}`);
-    }
-    if (repoRoot) {
-      assertOpenedIdentityContained(repoRoot, absPath, fd, absPath, opened);
-    }
-    const buf = readFileSync(fd);
-    return createHash("sha256").update(buf).digest("hex");
-  } finally {
-    try {
-      closeSync(fd);
-    } catch {
-      /* ignore */
-    }
-  }
 }
 
 export function sha256Text(text) {
@@ -553,12 +479,15 @@ function sortKeys(value) {
 }
 
 /**
- * Load JSON from a repo-relative path via fd-bound containment.
+ * Load JSON from a repo-relative path via fd-bound containment (open → BigInt
+ * identity bind → read from same fd). Higher-level path used for manifest and
+ * schema class reads — not a raw open of an absolute path.
+ *
  * @param {string} repoRoot
  * @param {string} relPath
  * @returns {unknown}
  */
-function loadJsonContained(repoRoot, relPath) {
+export function loadJsonContained(repoRoot, relPath) {
   let raw;
   try {
     raw = /** @type {string} */ (readContainedFile(repoRoot, relPath, "utf8"));
@@ -570,6 +499,21 @@ function loadJsonContained(repoRoot, relPath) {
   } catch (e) {
     throw new Error(`invalid JSON ${relPath}: ${e.message}`);
   }
+}
+
+/**
+ * Load the report-only candidate manifest under a canonical repo root.
+ * Thin higher-level wrapper over {@link loadJsonContained}.
+ *
+ * @param {string} repoRoot
+ * @param {string} [relPath]
+ * @returns {unknown}
+ */
+export function loadManifestCandidate(
+  repoRoot,
+  relPath = DEFAULT_MANIFEST_REL
+) {
+  return loadJsonContained(repoRoot, relPath);
 }
 
 /**
@@ -661,12 +605,13 @@ function rejectUnknownKeys(obj, allowed, pathPrefix, push) {
 // additionalProperties is handled by rejectUnknownKeys (stable E_UNKNOWN_PROPERTY).
 // ---------------------------------------------------------------------------
 
-/** @type {Map<string, Record<string, unknown>>} */
-const _schemaByRoot = new Map();
-
-/** Test-only: drop schema cache so containment re-runs against live paths. */
+/**
+ * Test-only no-op retained for call-site compatibility. Schema is not cached:
+ * every load re-resolves the canonical root and re-reads under that identity
+ * so a root symlink swap cannot poison root A with root B bytes.
+ */
 export function clearPolicySchemaCache() {
-  _schemaByRoot.clear();
+  /* intentionally empty — no schema cache */
 }
 
 /**
@@ -675,6 +620,10 @@ export function clearPolicySchemaCache() {
  * read. Never load schema from the tool checkout when a repo root is declared —
  * that would let an absolute/out-of-root manifest validate against foreign
  * schema bytes.
+ *
+ * Resolves **one** immutable canonical root (no realpath failure fallback),
+ * then reads schema under that same root identity. No schema cache: each call
+ * re-validates root identity + re-reads so root-swap cannot serve stale bytes.
  *
  * Fail closed if missing or if the path escapes the root (including schema
  * symlink escape or post-open swap). Optional `override` is for pure unit tests
@@ -693,19 +642,12 @@ export function loadPolicySchema(override, repoRoot) {
       `schema load requires --repo-root containment (expected ${DEFAULT_SCHEMA_REL})`
     );
   }
-  let rootKey;
-  try {
-    rootKey = realpathSync(repoRoot);
-  } catch {
-    rootKey = resolve(repoRoot);
-  }
-  const cached = _schemaByRoot.get(rootKey);
-  if (cached) return cached;
-  // Containment: open + identity-bind + read from same fd (no re-open race).
+  // One immutable root identity for this load — same string used for the read.
+  const rootReal = resolveCanonicalRepoRoot(repoRoot);
   let schema;
   try {
     schema = /** @type {Record<string, unknown>} */ (
-      loadJsonContained(repoRoot, DEFAULT_SCHEMA_REL)
+      loadJsonContained(rootReal, DEFAULT_SCHEMA_REL)
     );
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
@@ -716,7 +658,6 @@ export function loadPolicySchema(override, repoRoot) {
     }
     throw e;
   }
-  _schemaByRoot.set(rootKey, schema);
   return schema;
 }
 
@@ -2238,11 +2179,14 @@ DEFAULTS
   --format     both
 
 CONTAINMENT
-  --manifest, schema, doctrine, and digest paths are resolved only under
-  --repo-root (lexical + realpath + opened-fd identity). Absolute paths,
-  symlink escapes, and post-open path swaps are refused before any byte read.
-  Schema is always loaded from config/policy/schema/policy-manifest-v1.schema.json
-  inside the declared root — never from the tool checkout alone.
+  --repo-root is realpath'd once to an immutable canonical directory (no soft
+  fallback). --manifest, schema, doctrine, and digest paths are resolved only
+  under that root (lexical + realpath + BigInt fd identity). Opens use
+  O_RDONLY|O_NONBLOCK so FIFO/device never hang; non-regular types fail closed
+  after open. Absolute paths, symlink escapes, and post-open path swaps are
+  refused before any byte read. Schema is always loaded from
+  config/policy/schema/policy-manifest-v1.schema.json inside the declared root
+  — never from the tool checkout alone; no schema cache across roots.
 
 EXIT
   0  validation / consistency pass
@@ -2319,9 +2263,14 @@ function main(argv) {
     process.exit(opt.cmd === "help" ? 0 : 2);
   }
 
-  const repoRoot = opt.repoRoot ? resolve(opt.repoRoot) : defaultRepoRoot();
-  if (!existsSync(repoRoot) || !statSync(repoRoot).isDirectory()) {
-    console.error(`policy-manifest: repo root not a directory: ${repoRoot}`);
+  // Freeze one immutable canonical root for this process invocation — used for
+  // every manifest / schema / doctrine / digest operation (no per-read rekey).
+  let repoRoot;
+  try {
+    const requested = opt.repoRoot ? resolve(opt.repoRoot) : defaultRepoRoot();
+    repoRoot = resolveCanonicalRepoRoot(requested);
+  } catch (e) {
+    console.error(`policy-manifest: ${e.message}`);
     process.exit(2);
   }
 
@@ -2331,7 +2280,7 @@ function main(argv) {
       process.exit(2);
     }
     try {
-      // Open → identity/containment → hash from same fd (no re-open race).
+      // Open → BigInt identity/containment → hash from same fd (no re-open race).
       const digest = sha256ContainedFile(repoRoot, opt.path);
       process.stdout.write(`${digest}  ${opt.path.replace(/\\/g, "/")}\n`);
       process.exit(0);
@@ -2341,9 +2290,9 @@ function main(argv) {
     }
   }
 
-  // All validation reads honor --repo-root: relative-only, lexical + realpath
-  // + opened-identity containment. Absolute --manifest is refused even if it
-  // points inside root. Bytes are read only from the fd that passed containment.
+  // All validation reads honor the frozen canonical --repo-root: relative-only,
+  // lexical + realpath + BigInt opened-identity containment. Absolute --manifest
+  // is refused even if it points inside root. Bytes only from the verified fd.
   if (typeof opt.manifest !== "string" || !opt.manifest) {
     console.error("policy-manifest: manifest: empty path");
     process.exit(2);
@@ -2357,7 +2306,7 @@ function main(argv) {
 
   let candidate;
   try {
-    candidate = loadJsonContained(repoRoot, opt.manifest);
+    candidate = loadManifestCandidate(repoRoot, opt.manifest);
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
     if (isMissingPathError(msg)) {
@@ -2368,8 +2317,7 @@ function main(argv) {
     process.exit(2);
   }
 
-  // Schema must load from the declared root (same containment). Fail closed
-  // before any validate/report so foreign schema bytes cannot be used.
+  // Schema must load from the same frozen root. Fail closed before validate.
   let schema;
   try {
     schema = loadPolicySchema(null, repoRoot);
