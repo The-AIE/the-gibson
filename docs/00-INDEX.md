@@ -79,7 +79,7 @@ If you only open one file, use the row that matches you. Glossary:
 | — | [goose-license-verification](GOOSE-LICENSE-VERIFICATION.md) | #29 findings: Apache-2.0 embed / re-brand / pin / AAIF governance |
 | — | [goose-spike-findings](GOOSE-SPIKE-FINDINGS.md) | #28 paperwork pass only — no live runtime spike; scaffold permitted, runtime still gated |
 | — | [autonomy-modes](autonomy-modes.md) | Four modes + per-tool overrides mapped to Goose; no new Gibson session defaults |
-| — | [conventions](CONVENTIONS.md) | Code & doc conventions for this repo — every rule names its enforcement; retrofit batches |
+| — | [conventions](CONVENTIONS.md) | Code & doc target contract — live vs planned state, retrofit batches, and owner gates |
 
 ## Worked examples & ops
 
