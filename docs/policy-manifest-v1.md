@@ -149,15 +149,26 @@ The pure validator refuses (non-exhaustive):
 - broken references (roles, gates, tiers, stages)
 - contradictory tier ↔ gate mappings (e.g. G12 on Tier A)
 - missing required forbidden pairs; asymmetric pairs without reverse edges
-- **reviewIndependence semantic pins** for each core id (not only presence):
+- **reviewIndependence semantic pins** for each core id — exact field
+  **presence and absence** (schema-valid optional semantic fields that are not
+  part of an id's meaning are refused with the id's pin code):
   - `ri.law5` → `different-agent` + preferred `cross-vendor` +
-    `generatorMustNotEqual: reviewer`
-  - `ri.tier-a` → tier `A`, `independent-approve`, preferred `cross-vendor`
+    `generatorMustNotEqual: reviewer`; **absent** `tierId`, `humanGateId`
+    (`E_RI_LAW5`)
+  - `ri.tier-a` → tier `A`, `independent-approve`, preferred `cross-vendor`;
+    **absent** `humanGateId`, `generatorMustNotEqual` (`E_RI_TIER_A`)
   - `ri.tier-b` → tier `B`, `independent-approve`, preferred
-    `two-fresh-context-approve`
-  - `ri.tier-c` → tier `C`, `human-gate` / preferred `human-gate`, gate `G12`
+    `two-fresh-context-approve`; **absent** `humanGateId`,
+    `generatorMustNotEqual` (`E_RI_TIER_B`)
+  - `ri.tier-c` → tier `C`, `human-gate` / preferred `human-gate`, gate `G12`;
+    **absent** `generatorMustNotEqual` (`E_RI_TIER_C`)
+  - Descriptive fields (`id`, `description`) remain schema-governed only
 - unsafe fork namespaces (including core `gibson.` shadow)
-- malformed provenance (path escapes, non-sha256 digests)
+- malformed provenance (exact `..` path segments, non-sha256 digests); filenames
+  like `a..b.md` that are not a `..` segment remain legal
+- `--manifest` and schema reads that escape the declared `--repo-root`
+  (absolute paths, symlink realpath escape); schema is always loaded from
+  `config/policy/schema/policy-manifest-v1.schema.json` under that root
 - ambiguous overrides (duplicate precedence, non-refuse disposition)
 - `activated: true` or non-`report-only` authority on this slice
 
@@ -188,6 +199,12 @@ The focused suite proves the gate fails when a fixture:
   array cardinality / const / missing required / pattern)
 - substitutes a schema-valid but semantically wrong field on `ri.law5`,
   `ri.tier-a`, `ri.tier-b`, or `ri.tier-c`
+- adds a schema-valid optional semantic field that must be **absent** for that
+  RI id (e.g. `ri.law5` + `tierId`, `ri.tier-a` + `humanGateId`)
+- supplies an absolute `--manifest` or a manifest/schema symlink that escapes
+  `--repo-root`
+- uses a provenance path with an exact `..` segment (while still accepting
+  in-root names like `docs/a..b.md`)
 
 ## Activation work that remains in #164
 

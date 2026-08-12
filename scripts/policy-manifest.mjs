@@ -36,7 +36,7 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------------------
@@ -189,11 +189,36 @@ function defaultRepoRoot() {
 }
 
 /**
- * Resolve a path under repoRoot. Refuse absolute escapes and `..` segments
- * that leave the root. When the path exists (including as a symlink), also
+ * True iff `p` contains an exact `..` path segment after normalizing separators
+ * to `/`. Does **not** treat substrings like `a..b.md` as traversal — only a
+ * whole segment equal to `..` (e.g. `docs/../x` or `../secret`).
+ *
+ * @param {string} p
+ * @returns {boolean}
+ */
+export function hasDotDotSegment(p) {
+  if (typeof p !== "string" || !p) return false;
+  const parts = p.replace(/\\/g, "/").split("/");
+  return parts.includes("..");
+}
+
+/**
+ * Schema-documented safe repo-relative path: SAFE_REL_PATH pattern and no
+ * exact `..` segment. Used for provenance path validation.
+ *
+ * @param {string} p
+ * @returns {boolean}
+ */
+export function isSafeRepoRelPath(p) {
+  return typeof p === "string" && SAFE_REL_PATH.test(p) && !hasDotDotSegment(p);
+}
+
+/**
+ * Resolve a path under repoRoot. Refuse absolute paths, NUL, and `..` segments
+ * (segment-exact only). When the path exists (including as a symlink), also
  * require that realpath(path) stays inside the real repo root so a
  * repository-relative symlink cannot escape for later stat/hash/read.
- * Fail closed.
+ * Fail closed. All manifest/schema validation reads must go through this.
  *
  * @param {string} repoRoot
  * @param {string} relPath
@@ -206,11 +231,22 @@ export function resolveUnderRoot(repoRoot, relPath) {
   if (isAbsolute(relPath) || relPath.includes("\0")) {
     throw new Error(`path: absolute or unsafe: ${relPath}`);
   }
-  const norm = normalize(relPath);
-  if (norm.startsWith("..") || norm.split(sep).includes("..")) {
+  // Normalize `.` / redundant separators; still refuse exact `..` segments on
+  // both the raw and normalized forms so `docs/../x` cannot slip through when
+  // normalize collapses it inside the root.
+  if (hasDotDotSegment(relPath)) {
     throw new Error(`path: escapes repo root: ${relPath}`);
   }
-  if (!SAFE_REL_PATH.test(norm.replace(/\\/g, "/"))) {
+  const norm = normalize(relPath).replace(/\\/g, "/");
+  if (
+    !norm ||
+    norm === ".." ||
+    norm.startsWith("../") ||
+    hasDotDotSegment(norm)
+  ) {
+    throw new Error(`path: escapes repo root: ${relPath}`);
+  }
+  if (!SAFE_REL_PATH.test(norm)) {
     throw new Error(`path: malformed relative path: ${relPath}`);
   }
   let rootReal;
@@ -231,7 +267,7 @@ export function resolveUnderRoot(repoRoot, relPath) {
 
   const abs = resolve(rootReal, norm);
   const rel = relative(rootReal, abs);
-  if (rel.startsWith("..") || isAbsolute(rel)) {
+  if (rel.startsWith("..") || isAbsolute(rel) || hasDotDotSegment(rel)) {
     throw new Error(`path: resolves outside repo root: ${relPath}`);
   }
 
@@ -245,7 +281,11 @@ export function resolveUnderRoot(repoRoot, relPath) {
       throw new Error(`path: cannot realpath ${relPath}: ${e.message}`);
     }
     const relReal = relative(rootReal, real);
-    if (relReal.startsWith("..") || isAbsolute(relReal)) {
+    if (
+      relReal.startsWith("..") ||
+      isAbsolute(relReal) ||
+      hasDotDotSegment(relReal)
+    ) {
       throw new Error(
         `path: realpath escapes repo root (symlink or link chain): ${relPath}`
       );
@@ -254,6 +294,33 @@ export function resolveUnderRoot(repoRoot, relPath) {
     return real;
   }
   return abs;
+}
+
+/**
+ * Resolve a CLI input path that must stay under --repo-root. Absolute paths
+ * are refused even when they happen to point inside the root — callers must
+ * supply repo-relative paths so the declared containment boundary is explicit.
+ *
+ * @param {string} repoRoot
+ * @param {string} relPath
+ * @param {string} label
+ * @returns {string}
+ */
+export function resolveContainedInput(repoRoot, relPath, label) {
+  if (typeof relPath !== "string" || !relPath) {
+    throw new Error(`${label}: empty path`);
+  }
+  if (isAbsolute(relPath)) {
+    throw new Error(
+      `${label}: absolute paths are refused; use a path relative to --repo-root (got ${relPath})`
+    );
+  }
+  try {
+    return resolveUnderRoot(repoRoot, relPath);
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    throw new Error(`${label}: ${msg}`);
+  }
 }
 
 /**
@@ -398,26 +465,49 @@ function rejectUnknownKeys(obj, allowed, pathPrefix, push) {
 // additionalProperties is handled by rejectUnknownKeys (stable E_UNKNOWN_PROPERTY).
 // ---------------------------------------------------------------------------
 
-/** @type {Record<string, unknown> | null} */
-let _bundledSchema = null;
+/** @type {Map<string, Record<string, unknown>>} */
+const _schemaByRoot = new Map();
 
 /**
- * Load the published schema shipped next to this validator (script-relative).
- * Fail closed if missing — schema is the value-constraint source of truth.
+ * Load the published schema from the declared --repo-root via the same
+ * lexical + realpath containment as every other validation read. Never load
+ * schema from the tool checkout when a repo root is declared — that would let
+ * an absolute/out-of-root manifest validate against foreign schema bytes.
+ *
+ * Fail closed if missing or if the path escapes the root (including schema
+ * symlink escape). Optional `override` is for pure unit tests only.
+ *
  * @param {Record<string, unknown> | null | undefined} override
+ * @param {string | null | undefined} repoRoot
  * @returns {Record<string, unknown>}
  */
-export function loadPolicySchema(override) {
+export function loadPolicySchema(override, repoRoot) {
   if (override && typeof override === "object") {
     return override;
   }
-  if (_bundledSchema) return _bundledSchema;
-  const abs = join(scriptDir(), "..", DEFAULT_SCHEMA_REL);
-  if (!existsSync(abs) || !statSync(abs).isFile()) {
-    throw new Error(`schema missing at ${DEFAULT_SCHEMA_REL}`);
+  if (typeof repoRoot !== "string" || !repoRoot) {
+    throw new Error(
+      `schema load requires --repo-root containment (expected ${DEFAULT_SCHEMA_REL})`
+    );
   }
-  _bundledSchema = /** @type {Record<string, unknown>} */ (loadJson(abs));
-  return _bundledSchema;
+  let rootKey;
+  try {
+    rootKey = realpathSync(repoRoot);
+  } catch {
+    rootKey = resolve(repoRoot);
+  }
+  const cached = _schemaByRoot.get(rootKey);
+  if (cached) return cached;
+  // Containment: refuse absolute / symlink escape for schema itself.
+  const abs = resolveUnderRoot(repoRoot, DEFAULT_SCHEMA_REL);
+  if (!existsSync(abs) || !statSync(abs).isFile()) {
+    throw new Error(
+      `schema missing or not a file at ${DEFAULT_SCHEMA_REL} under repo root`
+    );
+  }
+  const schema = /** @type {Record<string, unknown>} */ (loadJson(abs));
+  _schemaByRoot.set(rootKey, schema);
+  return schema;
 }
 
 /**
@@ -639,8 +729,14 @@ export function enforceSchemaValueConstraints(data, schema, path, push) {
 
 /**
  * Core reviewIndependence semantic tuples (behavior-preserving pins).
- * Each id's defining fields must match exactly; individually schema-valid
- * substitutions that change meaning fail closed.
+ *
+ * Exact field presence AND absence: each id's defining semantic fields must
+ * match expected values, and schema-valid optional semantic fields that are
+ * not part of that id's intended meaning must be absent. Descriptive fields
+ * (id, description) remain schema-governed only.
+ *
+ * Proven zero-error escapes this closes: ri.law5+tierId, ri.tier-a+humanGateId,
+ * ri.tier-b+generatorMustNotEqual, ri.tier-c+generatorMustNotEqual.
  */
 const RI_SEMANTIC_PINS = {
   "ri.law5": {
@@ -650,6 +746,8 @@ const RI_SEMANTIC_PINS = {
       preferredRelationship: "cross-vendor",
       generatorMustNotEqual: "reviewer",
     },
+    // Law 5 is role-pair independence, not a tier/gate binding.
+    forbid: ["tierId", "humanGateId"],
   },
   "ri.tier-a": {
     code: "E_RI_TIER_A",
@@ -658,6 +756,8 @@ const RI_SEMANTIC_PINS = {
       minimumRelationship: "independent-approve",
       preferredRelationship: "cross-vendor",
     },
+    // Tier A has no human-gate floor and no generator role pin.
+    forbid: ["humanGateId", "generatorMustNotEqual"],
   },
   "ri.tier-b": {
     code: "E_RI_TIER_B",
@@ -666,6 +766,8 @@ const RI_SEMANTIC_PINS = {
       minimumRelationship: "independent-approve",
       preferredRelationship: "two-fresh-context-approve",
     },
+    // Tier B has no human-gate floor and no generator role pin.
+    forbid: ["humanGateId", "generatorMustNotEqual"],
   },
   "ri.tier-c": {
     code: "E_RI_TIER_C",
@@ -675,6 +777,8 @@ const RI_SEMANTIC_PINS = {
       preferredRelationship: "human-gate",
       humanGateId: "G12",
     },
+    // Tier C is the human-gate floor; generatorMustNotEqual is Law 5's pin.
+    forbid: ["generatorMustNotEqual"],
   },
 };
 
@@ -688,6 +792,7 @@ function enforceRiSemanticPin(entry, pathPrefix, push) {
   if (typeof id !== "string") return;
   const pin = RI_SEMANTIC_PINS[/** @type {keyof typeof RI_SEMANTIC_PINS} */ (id)];
   if (!pin) return;
+  // Required semantic field values (presence + exact match).
   for (const [field, expected] of Object.entries(pin.expect)) {
     const actual = entry[field];
     if (actual !== expected) {
@@ -695,6 +800,19 @@ function enforceRiSemanticPin(entry, pathPrefix, push) {
         err(
           pin.code,
           `${id} semantic pin: ${field} must be ${JSON.stringify(expected)} (got ${JSON.stringify(actual)})`,
+          `${pathPrefix}.${field}`
+        )
+      );
+    }
+  }
+  // Forbidden semantic fields: schema-legal on the shared RI shape, but not
+  // part of this id's intended meaning. Absence is load-bearing.
+  for (const field of pin.forbid) {
+    if (Object.prototype.hasOwnProperty.call(entry, field) && entry[field] !== undefined) {
+      push(
+        err(
+          pin.code,
+          `${id} semantic pin: ${field} must be absent (got ${JSON.stringify(entry[field])})`,
           `${pathPrefix}.${field}`
         )
       );
@@ -734,9 +852,9 @@ export function validateCandidate(candidate, options = {}) {
   const c = /** @type {Record<string, unknown>} */ (candidate);
 
   // Schema value parity (types, enums, consts, required, bounds, patterns,
-  // array cardinality). Single source: published JSON Schema.
+  // array cardinality). Single source: published JSON Schema under repoRoot.
   try {
-    const schema = loadPolicySchema(options.schema);
+    const schema = loadPolicySchema(options.schema, options.repoRoot);
     enforceSchemaValueConstraints(c, schema, "", push);
   } catch (e) {
     push(
@@ -887,8 +1005,14 @@ export function validateCandidate(candidate, options = {}) {
         } else {
           sourceIds.add(s.id);
         }
-        if (typeof s.path !== "string" || !SAFE_REL_PATH.test(s.path) || s.path.includes("..")) {
-          push(err("E_PROVENANCE_PATH", "source path must be a safe repo-relative path", `${p}.path`));
+        if (typeof s.path !== "string" || !isSafeRepoRelPath(s.path)) {
+          push(
+            err(
+              "E_PROVENANCE_PATH",
+              "source path must be a safe repo-relative path (no absolute paths; no exact '..' segments)",
+              `${p}.path`
+            )
+          );
         }
         if (s.digestAlgorithm !== "sha256") {
           push(err("E_PROVENANCE_ALG", "digestAlgorithm must be sha256", `${p}.digestAlgorithm`));
@@ -916,8 +1040,7 @@ export function validateCandidate(candidate, options = {}) {
           typeof s.path === "string" &&
           typeof s.digest === "string" &&
           SHA256_HEX.test(s.digest) &&
-          SAFE_REL_PATH.test(s.path) &&
-          !s.path.includes("..")
+          isSafeRepoRelPath(s.path)
         ) {
           try {
             const abs = resolveUnderRoot(options.repoRoot, s.path);
@@ -1892,6 +2015,12 @@ DEFAULTS
   --repo-root  repository root (parent of scripts/)
   --format     both
 
+CONTAINMENT
+  --manifest and the published schema path are resolved only under --repo-root
+  (lexical + realpath). Absolute paths and symlink escapes are refused. Schema
+  is always loaded from config/policy/schema/policy-manifest-v1.schema.json
+  inside the declared root — never from the tool checkout alone.
+
 EXIT
   0  validation / consistency pass
   1  validation or consistency errors
@@ -1989,15 +2118,11 @@ function main(argv) {
     }
   }
 
+  // All validation reads honor --repo-root: relative-only, lexical + realpath
+  // containment. Absolute --manifest is refused even if it points inside root.
   let manifestAbs;
   try {
-    // Absolute --manifest is allowed for offline fixtures/mutation receipts.
-    // Relative paths must stay under repoRoot (fail closed on .. / escapes).
-    if (isAbsolute(opt.manifest)) {
-      manifestAbs = resolve(opt.manifest);
-    } else {
-      manifestAbs = resolveUnderRoot(repoRoot, opt.manifest);
-    }
+    manifestAbs = resolveContainedInput(repoRoot, opt.manifest, "manifest");
   } catch (e) {
     console.error(`policy-manifest: ${e.message}`);
     process.exit(2);
@@ -2015,24 +2140,20 @@ function main(argv) {
     process.exit(2);
   }
 
-  // Schema file presence is documentation; pure validator does not require a
-  // JSON-Schema engine. Still refuse if the default schema path is broken when
-  // present in-repo (informational only).
+  // Schema must load from the declared root (same containment). Fail closed
+  // before any validate/report so foreign schema bytes cannot be used.
+  let schema;
   try {
-    const schemaAbs = resolveUnderRoot(repoRoot, DEFAULT_SCHEMA_REL);
-    if (!existsSync(schemaAbs)) {
-      // non-fatal for validate of alternate fixtures; surface as stderr info
-      if (opt.cmd === "validate" || opt.cmd === "report") {
-        // keep silent unless default candidate — no dependency on schema engine
-      }
-    }
-  } catch {
-    // ignore
+    schema = loadPolicySchema(null, repoRoot);
+  } catch (e) {
+    console.error(`policy-manifest: ${e.message}`);
+    process.exit(2);
   }
 
   if (opt.cmd === "validate") {
     const findings = validateCandidate(candidate, {
       repoRoot,
+      schema,
       checkProvenanceDigests: !opt.noDigestCheck,
       expectedValidatorVersion: VALIDATOR_VERSION,
     });
@@ -2049,6 +2170,7 @@ function main(argv) {
     }
     const findings = validateCandidate(candidate, {
       repoRoot,
+      schema,
       checkProvenanceDigests: !opt.noDigestCheck,
       expectedValidatorVersion: VALIDATOR_VERSION,
     });
@@ -2078,6 +2200,7 @@ function main(argv) {
     // Structural first, then doctrine identifiers.
     const structural = validateCandidate(candidate, {
       repoRoot,
+      schema,
       checkProvenanceDigests: true,
       expectedValidatorVersion: VALIDATOR_VERSION,
     });
