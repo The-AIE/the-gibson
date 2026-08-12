@@ -17,7 +17,7 @@
   },
   "collector": {
     "version": "1.0.0",
-    "digest": "a929006eddcc0f3a69bd46b68df39a63a5be9084386b339b1214981415aadb66",
+    "digest": "98536807652c3acaedd68dca9e80c178cefb39b1e64357b539db8f7039d28ee1",
     "note": "Collector did not necessarily exist at source.commit; digest is of the collector that produced this baseline artifact."
   },
   "classification": {
@@ -215,7 +215,134 @@
         "location": "scripts/release-claim.sh:815"
       }
     ],
-    "unknowns": [],
+    "unknowns": [
+      {
+        "from": "scripts/devin-supervisor.sh",
+        "line": 722,
+        "raw": "Re-review",
+        "reason": "missing_static_target",
+        "location": "scripts/devin-supervisor.sh:722"
+      },
+      {
+        "from": "scripts/devin-supervisor.sh",
+        "line": 784,
+        "raw": "Generate",
+        "reason": "missing_static_target",
+        "location": "scripts/devin-supervisor.sh:784"
+      },
+      {
+        "from": "scripts/formal-review.sh",
+        "line": 82,
+        "raw": "See",
+        "reason": "missing_static_target",
+        "location": "scripts/formal-review.sh:82"
+      },
+      {
+        "from": "scripts/gate-baseline.sh",
+        "line": 581,
+        "raw": "Emit",
+        "reason": "missing_static_target",
+        "location": "scripts/gate-baseline.sh:581"
+      },
+      {
+        "from": "scripts/git-configure.sh",
+        "line": 345,
+        "raw": "as",
+        "reason": "missing_static_target",
+        "location": "scripts/git-configure.sh:345"
+      },
+      {
+        "from": "scripts/git-configure.sh",
+        "line": 1734,
+        "raw": "Not",
+        "reason": "missing_static_target",
+        "location": "scripts/git-configure.sh:1734"
+      },
+      {
+        "from": "scripts/git-configure.sh",
+        "line": 1738,
+        "raw": "Not",
+        "reason": "missing_static_target",
+        "location": "scripts/git-configure.sh:1738"
+      },
+      {
+        "from": "scripts/loop.sh",
+        "line": 2042,
+        "raw": "Create",
+        "reason": "missing_static_target",
+        "location": "scripts/loop.sh:2042"
+      },
+      {
+        "from": "scripts/loop.sh",
+        "line": 2155,
+        "raw": "Either",
+        "reason": "missing_static_target",
+        "location": "scripts/loop.sh:2155"
+      },
+      {
+        "from": "scripts/loop.sh",
+        "line": 2229,
+        "raw": "Re-run",
+        "reason": "missing_static_target",
+        "location": "scripts/loop.sh:2229"
+      },
+      {
+        "from": "scripts/pr-claims.sh",
+        "line": 528,
+        "raw": "==",
+        "reason": "missing_static_target",
+        "location": "scripts/pr-claims.sh:528"
+      },
+      {
+        "from": "scripts/release-claim.sh",
+        "line": 503,
+        "raw": "A",
+        "reason": "missing_static_target",
+        "location": "scripts/release-claim.sh:503"
+      },
+      {
+        "from": "scripts/release-preflight.sh",
+        "line": 174,
+        "raw": "GitHub's",
+        "reason": "missing_static_target",
+        "location": "scripts/release-preflight.sh:174"
+      },
+      {
+        "from": "scripts/release-preflight.sh",
+        "line": 248,
+        "raw": "!=",
+        "reason": "missing_static_target",
+        "location": "scripts/release-preflight.sh:248"
+      },
+      {
+        "from": "scripts/release-preflight.sh",
+        "line": 364,
+        "raw": "as",
+        "reason": "missing_static_target",
+        "location": "scripts/release-preflight.sh:364"
+      },
+      {
+        "from": "scripts/release-preflight.sh",
+        "line": 534,
+        "raw": "!=",
+        "reason": "missing_static_target",
+        "location": "scripts/release-preflight.sh:534"
+      },
+      {
+        "from": "scripts/release-preflight.sh",
+        "line": 535,
+        "raw": "!=",
+        "reason": "missing_static_target",
+        "location": "scripts/release-preflight.sh:535"
+      },
+      {
+        "from": "scripts/silent-noop.sh",
+        "line": 325,
+        "raw": "Fix",
+        "reason": "missing_static_target",
+        "location": "scripts/silent-noop.sh:325"
+      }
+    ],
     "note": "Only statically discoverable executable production source/include edges are listed. Dynamic or unresolved includes are explicit unknowns; edges are never guessed."
   },
   "policy_identifiers": {
@@ -2969,7 +3096,7 @@
     ]
   },
   "mutation_receipts": {
-    "note": "Seven #159 categories. present requires an explicit mutation-category tag in a test other than this collector's fixture sensor; heuristic-only test matches are unknown; no test evidence is missing. Counts are diagnostic; test quantity is insufficient proof.",
+    "note": "Seven #159 categories. present requires an explicit mutation-category tag in an executable test assertion outside this collector's fixture sensor; heuristic-only test matches are unknown; no test evidence is missing. Counts are diagnostic; test quantity is insufficient proof.",
     "categories": [
       {
         "id": "review_bypass",

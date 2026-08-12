@@ -31,7 +31,7 @@ Issue **#184** is the first reversible slice: **collect**, **baseline**, and
 | Driver size + proxy counts | Control scripts are growing or shrinking on crude structural proxies | True cyclomatic / semantic complexity |
 | Dependency edges / unknowns | Static `source`/`.` includes we can prove; dynamics listed as unknown | A full runtime call graph |
 | Policy ID duplicates | The same `G1` / `Law N` / `L-NNN` / `tier-*` string appears in multiple files | Canonical policy authority (that is **#164**) |
-| Mutation-category present/missing | We found (or did not find) stable diagnostic matches for each #159 category | That tests prove the failure mode is impossible |
+| Mutation-category present/unknown/missing | We found an explicit test assertion, only a heuristic lead, or no test evidence for each #159 category | That tests prove the failure mode is impossible |
 | Comparison increase/decrease | Metrics moved vs the committed baseline | A merge block (not in this slice) |
 
 ## Technical contract
@@ -62,8 +62,10 @@ scripts/architecture-fitness.sh [--ref REF | --worktree]
 
 - `--ref REF` scans the Git **object database** commit tree for that ref. Dirty
   worktree state does not affect the result. Unresolved refs fail closed.
-- `--worktree` scans tracked files on disk. A **dirty** worktree is **refused**
-  for exact-SHA results — the tool never labels a dirty tree as an exact SHA.
+- `--worktree` scans tracked files on disk. A **dirty** worktree is refused, and
+  even a clean worktree is explicitly labeled `exact: false`: clean Git status
+  alone cannot prove disk bytes equal `HEAD` when filters, index flags, or a
+  concurrent writer may exist. Baseline capture therefore requires `--ref`.
 - Default (no flag) is the `HEAD` commit tree (exact, object database).
 
 ### Classification
@@ -101,7 +103,8 @@ be labeled as such.
 
 Only **statically discoverable executable production** `.` / `source` edges
 are emitted; test dependencies remain part of the separate test classification.
-Examples inside heredocs are ignored. Dynamic or unresolvable includes
+Line-start and compound-command includes are recognized. Examples inside
+heredocs are ignored. Dynamic or unresolvable includes
 (command substitution, unknown `$VAR` roots, absolutes, or missing targets)
 appear under **unknowns**. Edges are **never guessed**.
 
@@ -126,15 +129,16 @@ and stable matching locations:
 6. `false_delivery_success`
 7. `incomplete_cleanup`
 
-- **present** requires an explicit `mutation-category:<id>` tag in a test;
+- **present** requires an explicit `mutation-category:<id>` marker in an
+  executable assertion in a test file;
 - **unknown** means a test contains a heuristic phrase but no explicit tag;
 - **missing** means no matching test evidence was found.
 
 Documentation, production diagnostics, and the collector's own pattern text do
 not count as receipt evidence. The collector sensor's own fixture tags are also
 excluded, so adding this dashboard cannot improve its coverage score. Even an
-explicit tag only records the intended coverage category: **test quantity is
-insufficient proof of correctness.**
+explicit assertion only records the intended coverage category: **test quantity
+is insufficient proof of correctness.**
 
 ### Committed baseline
 
@@ -144,7 +148,12 @@ commit:
 - **source commit:** `01bafdeecadb28ecee7415cd1b2ef57c58b7c4bc`
 - **source tree:** `41fcceeb0d8e8d6d46d426e595e1190cad8d2599`
 
-The baseline records **collector version/digest separately**. It does **not**
+The baseline records **collector version/digest separately**, and each report
+fingerprints the exact baseline bytes it loaded. The managed default must
+byte-match the copy committed at `HEAD` and its collector digest must match the
+running collector; an explicitly supplied `--baseline` is instead labeled
+`explicit_file` so historical or external comparisons stay possible without
+being represented as the managed committed baseline. It does **not**
 claim the collector existed at that source commit; provenance is truthful and
 independent of the scanned tree.
 
@@ -173,8 +182,8 @@ This slice is **calibration / observability**:
 - Dependency edges ignore runtime `bash -c`, eval, and indirect dispatch.
 - Identifier greps collide with prose and examples; duplicates are a **hint**,
   not a policy verdict (#164).
-- Mutation-category presence means “an explicit category tag exists in a test,”
-  not “a mutant was killed in CI today.” Heuristic-only test text stays
+- Mutation-category presence means “an explicit category assertion exists in a
+  test,” not “a mutant was killed in CI today.” Heuristic-only test text stays
   `unknown`; production and documentation text do not establish coverage.
 
 ## Dependency on #164
@@ -213,7 +222,9 @@ Focused tests use temporary fixture repositories and cover byte stability,
 dirty exact refusal, unresolved refs, malformed/incomplete baselines, category
 separation, dynamic dependency unknowns, duplicate IDs, missing mutation
 categories, heuristic-only mutation uncertainty, symlink-safe baseline I/O,
-report-only regression exit 0, and absolute-path leakage.
+large piped/redirected report completeness, deep baseline contradictions, a
+neutralized dynamic-detector mutant, report-only regression exit 0, and
+absolute-path leakage.
 
 ## Non-goals (this slice)
 
