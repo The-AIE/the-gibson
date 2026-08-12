@@ -175,16 +175,27 @@ The pure validator refuses (non-exhaustive):
   manifest/schema/doctrine/provenance open so root disappearance, replacement,
   type change, or containment failure fails closed — a mutable pathname string
   alone is never trusted across multi-file operations. Schema is not cached
-  across roots (root-symlink swap cannot poison root A with root B bytes)
+  across roots (root-symlink swap cannot poison root A with root B bytes).
+  **Portable boundary:** Node has no portable `openat` for fd-relative child
+  opens without native addons, so retention is **pathname open + BigInt
+  fd/realpath identity verification**, optionally reinforced by a retained
+  root directory fd used only for re-`fstat` of the root (closed
+  deterministically). A replace-and-restore at the same pathname cannot accept
+  bytes from a different target identity: every child open re-asserts root
+  BigInt `dev`/`ino`, binds the opened fd's BigInt identity under realpath
+  containment, and reads bytes only from that verified fd.
 - path swaps after open (TOCTOU): every validation read (manifest, schema,
   doctrine, digest) opens once with portable `O_RDONLY|O_NONBLOCK` (FIFO/device
   never hang), binds realpath + **BigInt** `dev`/`ino` fd identity under the
   frozen root, and only then reads bytes from that fd — identity change,
   non-regular type, or realpath escape fails closed before any out-of-root
   replacement is accepted
-- **consistency provenance fail-closed**: `check-consistency` propagates every
-  `E_PROVENANCE_*` finding (path escape, identity, containment, type, digest
-  mismatch, missing file) rather than only digest/missing codes
+- **consistency revalidation fail-closed**: `check-consistency` re-asserts the
+  frozen root immediately before and after final schema/provenance validation
+  and propagates every relevant error — all `E_PROVENANCE_*` findings **and**
+  `E_SCHEMA_LOAD` / root-identity bind failures. A narrow `E_PROVENANCE_*`-only
+  filter would discard root disappearance after the four doctrine reads and
+  falsely emit `I_CONSISTENCY_OK`
 - no approve-then-reopen path API: hashing and loads require root-relative
   containment and verified bytes from the opened fd
 - ambiguous overrides (duplicate precedence, non-refuse disposition)
@@ -227,6 +238,10 @@ The focused suite proves the gate fails when a fixture:
 - replaces/renames the actual canonical root directory between reads inside one
   `checkDoctrineConsistency` operation (frozen root identity refuses the new
   inode at the same pathname)
+- replaces the root **after the four doctrine reads / at final revalidation**
+  and proves an error with no `I_CONSISTENCY_OK` (early mid-read replacement
+  alone is not sufficient); a mutation that reverts to a narrow
+  `E_PROVENANCE_*` filter reproduces the false-OK defect
 - swaps the `--repo-root` symlink between schema loads (no cache poison)
 - opens a FIFO under the root (rejects promptly as non-regular)
 - uses a provenance path with an exact `..` segment (while still accepting
@@ -235,6 +250,9 @@ The focused suite proves the gate fails when a fixture:
   symlink to outside) and proves consistency fails closed with `E_PROVENANCE_*`
 - exercises the production BigInt root-identity comparator with values above
   `2^53` that collide under `Number` coercion
+- sensor receipt capture is a **raw byte file** (not a shell variable): NUL,
+  ESC/ANSI, CR, other C0/C1 controls, invalid bytes, empty lines, early
+  sentinel, trailing junk, duplicates, and truncation all fail closed
 
 ## Activation work that remains in #164
 

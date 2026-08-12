@@ -878,18 +878,24 @@ root-swap schema re-read (no cache poison)
 post-swap hook cleared; normal hash works
 fifo rejected promptly as non-regular"
 
-# Strict receipt grammar (physical lines; no sanitization of hostile prefixes):
-#   ^SENSOR_OK <id>$
-#   ^SENSOR_BAD <msg>$
-#   ^SENSOR_DONE <uint>$
-# Every nonempty line must match; final physical line must be exactly
-# SENSOR_DONE <expected_count>; exactly one SENSOR_OK per expected id;
-# no SENSOR_BAD on the success path; early sentinel / trailing junk / ANSI
-# prefixes / truncation / duplicates all fail closed.
-tally_sensor_receipts() {
-  local out_text="$1"
+# Strict receipt grammar over a **raw byte file** (never a Bash variable):
+# Bash command substitution strips NUL, so capture must be file/stream first.
+#   1) Raw byte gate: only printable ASCII 0x20-0x7E and LF (0x0A).
+#      Reject NUL, ESC/ANSI, CR, other C0/C1, high/invalid bytes, empty lines.
+#   2) Line grammar:
+#        ^SENSOR_OK <id>$
+#        ^SENSOR_BAD <msg>$
+#        ^SENSOR_DONE <uint>$
+#      Final physical line must be exactly SENSOR_DONE <expected_count>;
+#      exactly one SENSOR_OK per expected id; no SENSOR_BAD on success;
+#      no early sentinel / trailing junk / duplicates / truncation.
+tally_sensor_receipts_file() {
+  local raw_file="$1"
   local expected_count
   expected_count=$(printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -c . || true)
+  local lines_file="$ROOT/sensor-receipt-lines.txt"
+  local raw_err="$ROOT/sensor-raw-err.txt"
+  local byte_rc=0
   local line_n=0
   local ok_lines=0
   local bad_lines=0
@@ -897,13 +903,57 @@ tally_sensor_receipts() {
   local last_line=""
   local seen_oks=""
 
-  if [[ -z "$out_text" ]]; then
+  if [[ ! -f "$raw_file" ]]; then
+    bad "sensor raw receipt file missing"
+    return 0
+  fi
+
+  # Step 1: validate raw bytes from the file (Buffer — preserves NUL for reject).
+  "$NODE" -e '
+    const fs = require("fs");
+    const rawPath = process.argv[1];
+    const outPath = process.argv[2];
+    const buf = fs.readFileSync(rawPath);
+    if (buf.length === 0) {
+      process.stderr.write("SENSOR_RAW_EMPTY\n");
+      process.exit(3);
+    }
+    for (let i = 0; i < buf.length; i++) {
+      const b = buf[i];
+      // Permit only LF line separators and printable ASCII receipt charset.
+      // Reject NUL (0x00), CR (0x0D), ESC (0x1B), other C0/C1, and high bytes.
+      if (b === 0x0a) continue;
+      if (b >= 0x20 && b <= 0x7e) continue;
+      process.stderr.write("SENSOR_RAW_BAD_BYTE offset=" + i + " byte=" + b + "\n");
+      process.exit(2);
+    }
+    const text = buf.toString("latin1");
+    const endsWithLf = buf[buf.length - 1] === 0x0a;
+    let lines = text.split("\n");
+    if (endsWithLf) lines = lines.slice(0, -1);
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].length === 0) {
+        process.stderr.write("SENSOR_RAW_EMPTY_LINE index=" + (i + 1) + "\n");
+        process.exit(4);
+      }
+    }
+    fs.writeFileSync(outPath, lines.length ? lines.join("\n") + "\n" : "");
+    process.exit(0);
+  ' "$raw_file" "$lines_file" 2>"$raw_err" || byte_rc=$?
+
+  if [[ "$byte_rc" -ne 0 ]]; then
+    local err_snip
+    err_snip=$(tr "\n" " " < "$raw_err" 2>/dev/null | head -c 200)
+    bad "sensor raw byte/line reject (rc=$byte_rc $err_snip)"
+    return 0
+  fi
+
+  if [[ ! -s "$lines_file" ]]; then
     bad "sensor blank output (no receipts)"
     return 0
   fi
 
-  # Walk physical lines. Here-string supplies a trailing newline if missing.
-  # Empty lines are grammar violations (fail closed — no soft skip).
+  # Step 2: grammar parse on validated printable lines (NULs already refused).
   while IFS= read -r line || [[ -n "$line" ]]; do
     line_n=$((line_n + 1))
     last_line="$line"
@@ -911,16 +961,8 @@ tally_sensor_receipts() {
       bad "sensor empty physical line at index $line_n"
       continue
     fi
-    # Reject control/non-print bytes (ANSI CSI, etc.). Do NOT strip prefixes.
-    case "$line" in
-      *$'\033'*|*$'\007'*|*$'\001'*|*$'\002'*|*$'\003'*|*$'\004'*)
-        bad "sensor control/ANSI byte in line: $(printf '%q' "$line")"
-        continue
-        ;;
-    esac
     case "$line" in
       SENSOR_OK\ *)
-        # Require exactly "SENSOR_OK " + nonempty body; no leading junk.
         if [[ "$line" != SENSOR_OK\ * || "$line" == "SENSOR_OK " ]]; then
           bad "sensor SENSOR_OK grammar reject: $(printf '%q' "$line")"
           continue
@@ -946,7 +988,6 @@ tally_sensor_receipts() {
         ;;
       SENSOR_DONE\ *)
         local done_rest="${line#SENSOR_DONE }"
-        # Exact grammar: SENSOR_DONE + single space + one-or-more digits only.
         if [[ "$line" != "SENSOR_DONE $done_rest" || ! "$done_rest" =~ ^[0-9]+$ ]]; then
           bad "sensor SENSOR_DONE grammar reject: $(printf '%q' "$line")"
           continue
@@ -957,25 +998,22 @@ tally_sensor_receipts() {
         bad "sensor unexpected line (strict grammar): $(printf '%q' "$line")"
         ;;
     esac
-  done <<< "$out_text"
+  done < "$lines_file"
 
-  # Final physical line must be exactly SENSOR_DONE <expected_count>
   if [[ "$last_line" != "SENSOR_DONE $expected_count" ]]; then
     bad "sensor final line want 'SENSOR_DONE $expected_count' got $(printf '%q' "$last_line")"
   else
     ok "sensor final line SENSOR_DONE $expected_count"
   fi
 
-  # Exactly one DONE total (early sentinel + final, or missing, both fail).
   if [[ "$done_lines" -ne 1 ]]; then
     bad "sensor SENSOR_DONE count want 1 got $done_lines (early sentinel or missing)"
   fi
 
-  # Every expected id exactly once (whole-line fixed match; no prefix sanitize).
   while IFS= read -r exp; do
     [[ -z "$exp" ]] && continue
     local n
-    n=$(printf '%s\n' "$out_text" | grep -cxF "SENSOR_OK $exp" || true)
+    n=$(grep -cxF "SENSOR_OK $exp" "$lines_file" || true)
     if [[ "$n" -eq 0 ]]; then
       bad "sensor missing receipt: $exp"
     elif [[ "$n" -gt 1 ]]; then
@@ -997,17 +1035,17 @@ tally_sensor_receipts() {
 }
 
 # --- aggregator mutation checks (blank / partial / duplicate / missing /
-# early sentinel / trailing junk / ANSI prefix / truncation) ---
+# early sentinel / trailing junk / ANSI / NUL prefix / truncation) ---
 echo
 echo "=== sensor aggregator integrity mutations ==="
-# Run tally against deliberately broken payloads; expect FAIL to rise, then
-# roll PASS/FAIL back so only the meta-receipt is counted.
-agg_mut_check() {
+# Production path only: write payload bytes to a raw file, then tally that file.
+# Never pass hostile bytes through a Bash variable (NUL would be stripped).
+agg_mut_check_file() {
   local name="$1"
-  local payload="$2"
+  local raw_file="$2"
   local before_fail=$FAIL
   local before_pass=$PASS
-  tally_sensor_receipts "$payload" >/dev/null 2>&1 || true
+  tally_sensor_receipts_file "$raw_file" >/dev/null 2>&1 || true
   if [[ "$FAIL" -gt "$before_fail" ]]; then
     FAIL=$before_fail
     PASS=$before_pass
@@ -1017,6 +1055,20 @@ agg_mut_check() {
     PASS=$before_pass
     bad "aggregator accepted $name (should fail)"
   fi
+}
+
+# Write a text payload to a raw file and run the production tally path.
+agg_mut_check() {
+  local name="$1"
+  local payload="$2"
+  local f="$ROOT/agg-mut.raw"
+  if [[ -z "$payload" ]]; then
+    : > "$f"
+  else
+    # printf %s preserves content already in the shell string (no NUL expected here).
+    printf '%s\n' "$payload" > "$f"
+  fi
+  agg_mut_check_file "$name" "$f"
 }
 
 _build_full_ok_body() {
@@ -1040,13 +1092,42 @@ agg_mut_check "ANSI-prefixed SENSOR_BAD" "$(printf '%s\n' $'\033[31mSENSOR_BAD h
 # Truncation: full OKs but cut off before complete SENSOR_DONE line
 agg_mut_check "truncation before DONE" "$(printf '%s\n' "$_full_ok" "SENSOR_DO")"
 agg_mut_check "truncation mid-count" "$(printf '%s\n' "$_full_ok" "SENSOR_DONE")"
-unset _full_ok _EXPECTED_COUNT
+# NUL-prefixed *otherwise complete and valid* stream must fail at raw-byte gate.
+# Write via printf to a file — Bash variables would strip the NUL.
+_NUL_RAW="$ROOT/sensor-nul-prefixed.raw"
+{
+  printf '\0'
+  printf '%s\n' "$_full_ok"
+  printf 'SENSOR_DONE %s\n' "$_EXPECTED_COUNT"
+} > "$_NUL_RAW"
+agg_mut_check_file "NUL-prefixed complete stream" "$_NUL_RAW"
+# CR and other C0 controls similarly fail closed on the raw path.
+_CR_RAW="$ROOT/sensor-cr-prefixed.raw"
+{
+  printf '\r'
+  printf '%s\n' "$_full_ok"
+  printf 'SENSOR_DONE %s\n' "$_EXPECTED_COUNT"
+} > "$_CR_RAW"
+agg_mut_check_file "CR-prefixed complete stream" "$_CR_RAW"
+unset _full_ok _EXPECTED_COUNT _NUL_RAW _CR_RAW
+
+# Static proof: production path is file-based (raw capture), not a shell variable.
+if grep -q 'tally_sensor_receipts_file' "$SCRIPT_DIR/policy-manifest.test.sh" && \
+   grep -q 'SENSOR_RAW_BAD_BYTE' "$SCRIPT_DIR/policy-manifest.test.sh" && \
+   grep -q 'SWAP_RAW=' "$SCRIPT_DIR/policy-manifest.test.sh" && \
+   ! grep -E '^[[:space:]]*SWAP_OUT=' "$SCRIPT_DIR/policy-manifest.test.sh"; then
+  ok "sensor capture uses raw file path (not shell variable)"
+else
+  bad "sensor capture still uses shell variable or missing raw-byte gate"
+fi
 
 SWAP_RC=0
+SWAP_RAW="$ROOT/sensor-swap-receipts.raw"
+: > "$SWAP_RAW"
 # Paths via env (not argv): importing the tool module must not trip isMain()
 # which treats process.argv[1] === tool path as a CLI invocation.
-SWAP_OUT=$(
-  PM_TOOL="$TOOL" PM_SCHEMA="$SCHEMA" PM_CANDIDATE="$CANDIDATE" \
+# Capture to a raw byte file — never a Bash variable (NUL-preserving).
+PM_TOOL="$TOOL" PM_SCHEMA="$SCHEMA" PM_CANDIDATE="$CANDIDATE" \
   "$NODE" --input-type=module -e '
 import {
   mkdirSync,
@@ -1643,12 +1724,12 @@ try {
 }
 console.log("SENSOR_DONE " + okCount);
 process.exit(fail === 0 ? 0 : 1);
-' 2>&1) || SWAP_RC=$?
+' >"$SWAP_RAW" 2>"$ROOT/sensor-swap.err" || SWAP_RC=$?
 
-# Strict aggregator: exact unique receipts + count + terminal sentinel grammar
-tally_sensor_receipts "$SWAP_OUT"
-if [[ "$SWAP_RC" -ne 0 ]] && ! echo "$SWAP_OUT" | grep -q "^SENSOR_BAD "; then
-  bad "injected-swap sensor exited non-zero without SENSOR_BAD (out=$SWAP_OUT)"
+# Strict aggregator on the raw byte file (NUL-preserving capture path)
+tally_sensor_receipts_file "$SWAP_RAW"
+if [[ "$SWAP_RC" -ne 0 ]] && ! grep -a -q "^SENSOR_BAD " "$SWAP_RAW" 2>/dev/null; then
+  bad "injected-swap sensor exited non-zero without SENSOR_BAD (rc=$SWAP_RC)"
 fi
 
 # Static proof: production identity path uses bigint Stats options + comparator
@@ -1790,11 +1871,332 @@ else
 fi
 lacks "later source no false consistency OK" "$out" "I_CONSISTENCY_OK"
 
-# Source-level proof: consistency revalidation propagates all E_PROVENANCE_* codes
-if grep -q 'startsWith("E_PROVENANCE")' "$TOOL" || grep -q "startsWith('E_PROVENANCE')" "$TOOL"; then
-  ok "consistency propagates all E_PROVENANCE_* findings"
+# Source-level proof: consistency revalidation propagates E_PROVENANCE_* AND
+# E_SCHEMA_LOAD / root-identity failures (not a narrow E_PROVENANCE-only filter).
+if grep -q 'export function isConsistencyRevalidationError' "$TOOL" && \
+   grep -q 'E_SCHEMA_LOAD' "$TOOL" && \
+   grep -q 'startsWith("E_PROVENANCE")' "$TOOL"; then
+  ok "consistency revalidation keeps provenance + schema/root errors"
 else
-  bad "consistency missing E_PROVENANCE_* propagation filter"
+  bad "consistency missing broad revalidation error propagation"
+fi
+
+# ---------------------------------------------------------------------------
+# Final revalidation root identity failure: after the four doctrine reads,
+# replace the frozen root before schema/provenance revalidation. Must produce
+# an error and must NEVER emit I_CONSISTENCY_OK. Early mid-read replacement
+# alone is not sufficient.
+# ---------------------------------------------------------------------------
+echo
+echo "=== final revalidation root identity failure (post four doctrine reads) ==="
+FINAL_RV_RC=0
+FINAL_RV_OUT=$(
+  PM_TOOL="$TOOL" PM_CANDIDATE="$CANDIDATE" PM_REPO="$REPO_ROOT" \
+  "$NODE" --input-type=module -e '
+import {
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+  cpSync,
+  renameSync,
+  readFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+
+const toolPath = process.env.PM_TOOL;
+const candidateSrc = process.env.PM_CANDIDATE;
+const repo = process.env.PM_REPO;
+const {
+  checkDoctrineConsistency,
+  resolveCanonicalRepoRoot,
+  setRootIdentityRecheckHook,
+  setSafeReadAfterOpenHook,
+  tryOpenRootDirFd,
+  closeRootDirFd,
+  assertRootIdentity,
+} = await import(pathToFileURL(toolPath).href);
+
+const liveRoot = join(tmpdir(), "gibson-pm-finalrv-" + process.pid + "-" + Date.now());
+const liveMoved = liveRoot + ".moved";
+try {
+  rmSync(liveRoot, { recursive: true, force: true });
+  rmSync(liveMoved, { recursive: true, force: true });
+  mkdirSync(liveRoot, { recursive: true });
+
+  const cand0 = JSON.parse(readFileSync(candidateSrc, "utf8"));
+  const paths = new Set([
+    "docs/14-human-gates.md",
+    "docs/03-roles.md",
+    "docs/06-quality-gates.md",
+    "docs/02-sdlc-pipeline.md",
+    "config/policy/schema/policy-manifest-v1.schema.json",
+  ]);
+  for (const s of cand0.provenance.sources) {
+    if (typeof s.path === "string") paths.add(s.path);
+  }
+  for (const d of paths) {
+    mkdirSync(join(liveRoot, d.split("/").slice(0, -1).join("/") || "."), {
+      recursive: true,
+    });
+    cpSync(join(repo, d), join(liveRoot, d));
+  }
+  const cand = JSON.parse(JSON.stringify(cand0));
+  for (const s of cand.provenance.sources) {
+    s.digest = createHash("sha256")
+      .update(readFileSync(join(liveRoot, s.path)))
+      .digest("hex");
+  }
+
+  const frozen = resolveCanonicalRepoRoot(liveRoot);
+
+  // Prove retained dir fd open/close works on this platform (or null fallback).
+  const fd = tryOpenRootDirFd(frozen);
+  if (fd != null) {
+    assertRootIdentity(frozen, { rootDirFd: fd });
+    closeRootDirFd(fd);
+    closeRootDirFd(fd); // deterministic double-close safety
+    console.log("FINAL_RV_DIRFD_OK");
+  } else {
+    console.log("FINAL_RV_DIRFD_NULL");
+  }
+
+  let opens = 0;
+  let checksAtFour = 0;
+  let replaced = false;
+  setSafeReadAfterOpenHook(() => {
+    opens += 1;
+  });
+  setRootIdentityRecheckHook((rootId) => {
+    if (opens < 4) return;
+    checksAtFour += 1;
+    // checksAtFour===1: post-open assert of the fourth doctrine file — leave intact.
+    // checksAtFour===2: first assert of final revalidation — replace root here.
+    if (checksAtFour === 2 && !replaced) {
+      replaced = true;
+      renameSync(rootId.path, liveMoved);
+      mkdirSync(rootId.path, { recursive: true });
+      mkdirSync(join(rootId.path, "config/policy/schema"), { recursive: true });
+      // Hostile replacement at same pathname, different inode; schema bind fails.
+      writeFileSync(
+        join(rootId.path, "config/policy/schema/policy-manifest-v1.schema.json"),
+        "{}\n"
+      );
+    }
+  });
+
+  const findings = checkDoctrineConsistency(cand, frozen);
+  setRootIdentityRecheckHook(null);
+  setSafeReadAfterOpenHook(null);
+
+  const codes = findings.map((f) => f.code);
+  const hasOk = codes.includes("I_CONSISTENCY_OK");
+  const hasError = findings.some((f) => f.severity === "error");
+  const hasRootOrSchema = findings.some(
+    (f) =>
+      f.severity === "error" &&
+      (f.code === "E_SCHEMA_LOAD" ||
+        f.code === "E_CONSISTENCY_READ" ||
+        /repo root identity|cannot bind repo root|E_SCHEMA_LOAD/i.test(
+          String(f.code) + " " + String(f.message)
+        ))
+  );
+
+  console.log(
+    "FINAL_RV_RESULT " +
+      JSON.stringify({
+        opens,
+        checksAtFour,
+        replaced,
+        hasOk,
+        hasError,
+        hasRootOrSchema,
+        codes,
+      })
+  );
+
+  if (opens !== 4 || !replaced) {
+    console.log("FINAL_RV_FAIL setup opens=" + opens + " replaced=" + replaced);
+    process.exit(2);
+  }
+  if (hasOk || !hasError || !hasRootOrSchema) {
+    console.log("FINAL_RV_FAIL false-OK or missing error");
+    process.exit(1);
+  }
+  console.log("FINAL_RV_PASS");
+  process.exit(0);
+} catch (e) {
+  setRootIdentityRecheckHook(null);
+  setSafeReadAfterOpenHook(null);
+  console.log("FINAL_RV_FAIL " + (e && e.message ? e.message : e));
+  process.exit(2);
+} finally {
+  try { rmSync(liveRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { rmSync(liveMoved, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+' 2>&1
+) || FINAL_RV_RC=$?
+
+if [[ "$FINAL_RV_RC" -eq 0 ]] && echo "$FINAL_RV_OUT" | grep -q "FINAL_RV_PASS"; then
+  ok "final revalidation root identity failure errors without I_CONSISTENCY_OK"
+else
+  bad "final revalidation root identity failure not fail-closed (rc=$FINAL_RV_RC out=$FINAL_RV_OUT)"
+fi
+if echo "$FINAL_RV_OUT" | grep -q "FINAL_RV_DIRFD_OK\|FINAL_RV_DIRFD_NULL"; then
+  ok "root dir fd open/close path exercised (or portable null fallback)"
+else
+  bad "root dir fd path not exercised"
+fi
+lacks "final revalidation no I_CONSISTENCY_OK in probe" "$FINAL_RV_OUT" '"hasOk":true'
+
+# Mutation proof: narrow E_PROVENANCE_* filter discards E_SCHEMA_LOAD and the
+# focused final-revalidation case would falsely pass — prove the suite fails
+# when production is reverted to that narrow filter.
+echo
+echo "=== mutation: narrow E_PROVENANCE filter must break final-revalidation proof ==="
+NARROW_TOOL="$ROOT/policy-manifest-narrow-filter.mjs"
+cp "$TOOL" "$NARROW_TOOL"
+# Force isConsistencyRevalidationError to the defective narrow filter and
+# remove the before/after final-revalidation root asserts (exact-head shape).
+"$NODE" -e '
+  const fs = require("fs");
+  const p = process.argv[1];
+  let s = fs.readFileSync(p, "utf8");
+  function replaceFunction(src, name, body) {
+    const start = src.indexOf("export function " + name);
+    if (start < 0) throw new Error("missing " + name);
+    const brace = src.indexOf("{", start);
+    let depth = 0, end = -1;
+    for (let i = brace; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) { end = i + 1; break; }
+      }
+    }
+    if (end < 0) throw new Error("cannot find end of " + name);
+    return src.slice(0, start) + body + src.slice(end);
+  }
+  s = replaceFunction(
+    s,
+    "isConsistencyRevalidationError",
+    "export function isConsistencyRevalidationError(f) {\n" +
+      "  // MUTATION: defective narrow filter (round-7 defect) — discards E_SCHEMA_LOAD\n" +
+      "  return !!(f && typeof f.code === \"string\" && f.code.startsWith(\"E_PROVENANCE\"));\n" +
+      "}"
+  );
+  // Marker sits inside the catch template string, which is AFTER "catch (e)".
+  // Walk back: catch → try, then brace-match the catch body only.
+  for (const marker of [
+    "repo root identity failed before final revalidation",
+    "repo root identity failed after final revalidation",
+  ]) {
+    const mi = s.indexOf(marker);
+    if (mi < 0) throw new Error("missing marker " + marker);
+    const catchIdx = s.lastIndexOf("catch (e)", mi);
+    if (catchIdx < 0) throw new Error("missing catch for " + marker);
+    const tryIdx = s.lastIndexOf("try {", catchIdx);
+    if (tryIdx < 0) throw new Error("missing try for " + marker);
+    const catchBrace = s.indexOf("{", catchIdx);
+    let depth = 0, end = -1;
+    for (let i = catchBrace; i < s.length; i++) {
+      if (s[i] === "{") depth++;
+      else if (s[i] === "}") {
+        depth--;
+        if (depth === 0) { end = i + 1; break; }
+      }
+    }
+    if (end < 0 || end <= mi) throw new Error("cannot end catch for " + marker);
+    s = s.slice(0, tryIdx) + "/* mutated: removed " + marker + " */" + s.slice(end);
+  }
+  fs.writeFileSync(p, s);
+  // Syntax must remain valid after mutation surgery.
+  try {
+    new Function(s);
+  } catch (e) {
+    // ESM export syntax is not valid for Function(); fall back to node --check via write.
+  }
+' "$NARROW_TOOL"
+if ! "$NODE" --check "$NARROW_TOOL" 2>/dev/null; then
+  bad "narrow filter mutation produced invalid syntax"
+fi
+NARROW_OUT=$(
+  PM_TOOL="$NARROW_TOOL" PM_CANDIDATE="$CANDIDATE" PM_REPO="$REPO_ROOT" \
+  "$NODE" --input-type=module -e '
+import {
+  mkdirSync, writeFileSync, rmSync, cpSync, renameSync, readFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+
+const toolPath = process.env.PM_TOOL;
+const candidateSrc = process.env.PM_CANDIDATE;
+const repo = process.env.PM_REPO;
+const {
+  checkDoctrineConsistency,
+  resolveCanonicalRepoRoot,
+  setRootIdentityRecheckHook,
+  setSafeReadAfterOpenHook,
+} = await import(pathToFileURL(toolPath).href);
+
+const liveRoot = join(tmpdir(), "gibson-pm-narrow-" + process.pid + "-" + Date.now());
+const liveMoved = liveRoot + ".moved";
+try {
+  mkdirSync(liveRoot, { recursive: true });
+  const cand0 = JSON.parse(readFileSync(candidateSrc, "utf8"));
+  const paths = new Set([
+    "docs/14-human-gates.md","docs/03-roles.md","docs/06-quality-gates.md",
+    "docs/02-sdlc-pipeline.md","config/policy/schema/policy-manifest-v1.schema.json",
+  ]);
+  for (const s of cand0.provenance.sources) if (typeof s.path === "string") paths.add(s.path);
+  for (const d of paths) {
+    mkdirSync(join(liveRoot, d.split("/").slice(0, -1).join("/") || "."), { recursive: true });
+    cpSync(join(repo, d), join(liveRoot, d));
+  }
+  const cand = JSON.parse(JSON.stringify(cand0));
+  for (const s of cand.provenance.sources) {
+    s.digest = createHash("sha256").update(readFileSync(join(liveRoot, s.path))).digest("hex");
+  }
+  const frozen = resolveCanonicalRepoRoot(liveRoot);
+  let opens = 0, checksAtFour = 0, replaced = false;
+  setSafeReadAfterOpenHook(() => { opens += 1; });
+  setRootIdentityRecheckHook((rootId) => {
+    if (opens < 4) return;
+    checksAtFour += 1;
+    if (checksAtFour === 2 && !replaced) {
+      replaced = true;
+      renameSync(rootId.path, liveMoved);
+      mkdirSync(rootId.path, { recursive: true });
+      mkdirSync(join(rootId.path, "config/policy/schema"), { recursive: true });
+      writeFileSync(join(rootId.path, "config/policy/schema/policy-manifest-v1.schema.json"), "{}\n");
+    }
+  });
+  const findings = checkDoctrineConsistency(cand, frozen);
+  setRootIdentityRecheckHook(null);
+  setSafeReadAfterOpenHook(null);
+  const hasOk = findings.some((f) => f.code === "I_CONSISTENCY_OK");
+  const hasError = findings.some((f) => f.severity === "error");
+  // Defect signature: false I_CONSISTENCY_OK after final-revalidation root replace.
+  if (replaced && opens === 4 && hasOk && !hasError) {
+    console.log("NARROW_DEFECT_REPRODUCED");
+    process.exit(0);
+  }
+  console.log("NARROW_UNEXPECTED " + JSON.stringify(findings.map((f) => f.code)));
+  process.exit(1);
+} finally {
+  try { rmSync(liveRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { rmSync(liveMoved, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+' 2>&1
+) || true
+if echo "$NARROW_OUT" | grep -q "NARROW_DEFECT_REPRODUCED"; then
+  ok "narrow E_PROVENANCE filter mutation reproduces false I_CONSISTENCY_OK"
+else
+  bad "narrow filter mutation did not reproduce defect (out=$NARROW_OUT)"
 fi
 
 # ---------------------------------------------------------------------------
