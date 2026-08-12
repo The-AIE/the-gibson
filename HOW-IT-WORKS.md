@@ -11,8 +11,8 @@ If you operate, audit, adopt, or extend the harness, continue through Parts II�
 > controls, vendor adapters, cost telemetry, and delivery-control audits. The
 > complete promise — a non-technical owner repeatedly receiving production-quality
 > software from an unattended loop — still requires the live canary and external
-> operator proof tracked in [issue #96](https://github.com/mrhinkle/the-gibson/issues/96)
-> and [issue #18](https://github.com/mrhinkle/the-gibson/issues/18). Architecture
+> operator proof tracked in [issue #96](https://github.com/The-AIE/the-gibson/issues/96)
+> and [issue #18](https://github.com/The-AIE/the-gibson/issues/18). Architecture
 > described as **roadmap** below is not represented as shipped enforcement.
 
 ---
@@ -484,7 +484,7 @@ security, and other action-specific workflows — remain skills and playbooks.
 #### Roadmap pattern
 
 The context-compiler design in
-[issue #166](https://github.com/mrhinkle/the-gibson/issues/166) will generate a
+[issue #166](https://github.com/The-AIE/the-gibson/issues/166) will generate a
 versioned, provenanced task capsule and least-capability tool manifest from the
 canonical policy model, repository map, issue contract, research packet, and exact
 source snapshot. It is intended to:
@@ -500,7 +500,7 @@ context procedurally.
 
 Gibson proposes an ablation over no index, default skill discovery, explicit
 inspect-then-retrieve, a compact `AGENTS.md` index, and a compiled capsule under
-[issue #159's](https://github.com/mrhinkle/the-gibson/issues/159) evaluation
+[issue #159's](https://github.com/The-AIE/the-gibson/issues/159) evaluation
 requirements: held-out, repeated, matched-budget trials. This prevents one favorable
 benchmark from becoming doctrine without local evidence.
 
@@ -689,7 +689,7 @@ state/journal, claim files, lessons, and the cost ledger. The release role must 
 those facts before claiming success.
 
 The portable delivery-receipt design in
-[issue #160](https://github.com/mrhinkle/the-gibson/issues/160) will project one
+[issue #160](https://github.com/The-AIE/the-gibson/issues/160) will project one
 verifiable record containing the issue/contract, context and capability digests,
 exact code head, checks, independent review, merge, deployment, cleanup, cost, and
 terminal disposition. Until that lands, PR comments and run artifacts are evidence,
@@ -737,19 +737,19 @@ runtime behavior.
 
 | Gap | Design owner |
 |---|---|
-| Live owner-controlled branch/environment/reviewer protections | [#140](https://github.com/mrhinkle/the-gibson/issues/140) |
-| Unattended end-to-end self-dogfood canary | [#96](https://github.com/mrhinkle/the-gibson/issues/96) |
-| External non-technical operator proof | [#18](https://github.com/mrhinkle/the-gibson/issues/18) |
-| Canonical policy manifest and generated doctrine views | [#164](https://github.com/mrhinkle/the-gibson/issues/164) |
-| Research packets and dispatch readiness | [#167](https://github.com/mrhinkle/the-gibson/issues/167) |
-| Deterministic context compiler and tool budget | [#166](https://github.com/mrhinkle/the-gibson/issues/166) |
-| Formal workflow state machine and append-only event journal | [#158](https://github.com/mrhinkle/the-gibson/issues/158) |
-| Portable exact-head delivery receipt | [#160](https://github.com/mrhinkle/the-gibson/issues/160) |
-| Typed kernel/runtime boundary and replaceable ports | [#162](https://github.com/mrhinkle/the-gibson/issues/162) |
-| Architecture fitness, matched-budget evaluation, and drift gates | [#159](https://github.com/mrhinkle/the-gibson/issues/159) |
+| Live owner-controlled branch/environment/reviewer protections | [#140](https://github.com/The-AIE/the-gibson/issues/140) |
+| Unattended end-to-end self-dogfood canary | [#96](https://github.com/The-AIE/the-gibson/issues/96) |
+| External non-technical operator proof | [#18](https://github.com/The-AIE/the-gibson/issues/18) |
+| Canonical policy manifest and generated doctrine views | [#164](https://github.com/The-AIE/the-gibson/issues/164) |
+| Research packets and dispatch readiness | [#167](https://github.com/The-AIE/the-gibson/issues/167) |
+| Deterministic context compiler and tool budget | [#166](https://github.com/The-AIE/the-gibson/issues/166) |
+| Formal workflow state machine and append-only event journal | [#158](https://github.com/The-AIE/the-gibson/issues/158) |
+| Portable exact-head delivery receipt | [#160](https://github.com/The-AIE/the-gibson/issues/160) |
+| Typed kernel/runtime boundary and replaceable ports | [#162](https://github.com/The-AIE/the-gibson/issues/162) |
+| Architecture fitness, matched-budget evaluation, and drift gates | [#159](https://github.com/The-AIE/the-gibson/issues/159) |
 
 The umbrella design and dependency order live in
-[architecture epic #165](https://github.com/mrhinkle/the-gibson/issues/165).
+[architecture epic #165](https://github.com/The-AIE/the-gibson/issues/165).
 It uses a strangler migration: current behavior remains authoritative until a
 reviewed replacement proves equivalence and has a rollback path.
 
