@@ -172,18 +172,26 @@ The pure validator refuses (non-exhaustive):
 - **canonical root identity**: `--repo-root` is `realpath`'d once into an
   immutable token of canonical path + exact **BigInt** `dev`/`ino` (no soft
   fallback if realpath fails). That token is re-asserted before and after every
-  manifest/schema/doctrine/provenance open so root disappearance, replacement,
-  type change, or containment failure fails closed — a mutable pathname string
-  alone is never trusted across multi-file operations. Schema is not cached
-  across roots (root-symlink swap cannot poison root A with root B bytes).
-  **Portable boundary:** Node has no portable `openat` for fd-relative child
-  opens without native addons, so retention is **pathname open + BigInt
-  fd/realpath identity verification**, optionally reinforced by a retained
-  root directory fd used only for re-`fstat` of the root (closed
-  deterministically). A replace-and-restore at the same pathname cannot accept
-  bytes from a different target identity: every child open re-asserts root
-  BigInt `dev`/`ino`, binds the opened fd's BigInt identity under realpath
-  containment, and reads bytes only from that verified fd.
+  manifest/schema/doctrine/provenance open so **observable** root
+  disappearance, replacement, type change, or containment failure fails closed —
+  a mutable pathname string alone is never trusted across multi-file operations.
+  Schema is not cached across roots (root-symlink swap cannot poison root A with
+  root B bytes). Every child open re-asserts root BigInt `dev`/`ino`, binds the
+  opened fd's BigInt identity under realpath containment, and reads bytes only
+  from that verified fd.
+  **Portable boundary (residual):** Node has no portable `openat` for
+  fd-relative child opens without native addons. Child files are opened by
+  pathname (`openSync(absPath)`) after the last pre-open root check; there is
+  **no** retained root directory fd anchoring child opens (a root-dir fd would
+  only re-`fstat` the root and adds numeric-fd reuse hazard). A same-user
+  concurrent **replace-through-open/identity then restore** at the same pathname
+  can still leave an fd opened under a temporary replacement accepted if the
+  original root is restored before the post-open root assertion. Complete
+  closure of that race needs a future native/portable fd-relative open
+  capability or external filesystem/process isolation. The focused suite records
+  this as a `KNOWN_PORTABLE_BOUNDARY` sensor receipt (not a security PASS that
+  the race is impossible). Observable replacements that remain installed still
+  fail closed.
 - path swaps after open (TOCTOU): every validation read (manifest, schema,
   doctrine, digest) opens once with portable `O_RDONLY|O_NONBLOCK` (FIFO/device
   never hang), binds realpath + **BigInt** `dev`/`ino` fd identity under the
@@ -242,6 +250,10 @@ The focused suite proves the gate fails when a fixture:
   and proves an error with no `I_CONSISTENCY_OK` (early mid-read replacement
   alone is not sufficient); a mutation that reverts to a narrow
   `E_PROVENANCE_*` filter reproduces the false-OK defect
+- exercises the exact **replace-through-open/identity-then-restore** window via
+  a narrow test hook and records `KNOWN_PORTABLE_BOUNDARY` (docs match real
+  portable Node behavior; acceptance of temporary-replacement fd bytes is not
+  claimed as a security PASS)
 - swaps the `--repo-root` symlink between schema loads (no cache poison)
 - opens a FIFO under the root (rejects promptly as non-regular)
 - uses a provenance path with an exact `..` segment (while still accepting

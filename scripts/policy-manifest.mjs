@@ -284,21 +284,24 @@ export function setRootIdentityRecheckHook(fn) {
  * canonical realpath. Does **not** mint a new identity from the current path
  * (that would accept a hostile replacement at the same pathname).
  *
- * Portable boundary: Node does not expose a portable `openat` for
- * fd-relative child opens across macOS/Linux/Windows without native addons.
- * Therefore retention is **pathname open + BigInt fd/realpath identity
- * verification** (optionally reinforced by a retained directory fd used only
- * for re-`fstat` of the root itself — see {@link tryOpenRootDirFd}). A
- * replace-and-restore at the same pathname cannot accept bytes from a
- * different target identity: every child open re-asserts root BigInt
- * dev/ino, binds the opened fd's BigInt identity under realpath containment,
- * and reads bytes only from that verified fd.
+ * Portable boundary (honest): Node has no portable `openat` / fd-relative
+ * child-open primitive without native addons. Child files are opened by
+ * pathname (`openSync(absPath)`) after the last pre-open root check. Every
+ * child open re-asserts root BigInt dev/ino before and after open, binds the
+ * opened fd's BigInt identity under realpath containment, and reads bytes only
+ * from that verified fd — so **observable** root disappearance/replacement
+ * fails closed. A same-user concurrent **replace-through-open/identity then
+ * restore** at the same pathname can still leave an fd opened under a
+ * temporary replacement accepted if the original root is restored before the
+ * post-open root assertion. Closing that residual race needs a future native
+ * or portable fd-relative open capability, or external filesystem/process
+ * isolation. This function does not retain a root directory fd (a retained
+ * root fd would only re-fstat the root and would not anchor child opens).
  *
  * @param {RootIdentity} rootId
- * @param {{ rootDirFd?: number | null }} [opts] optional retained root dir fd
  * @returns {RootIdentity}
  */
-export function assertRootIdentity(rootId, opts = {}) {
+export function assertRootIdentity(rootId) {
   if (!isRootIdentity(rootId)) {
     throw new Error("path: invalid repo root identity token");
   }
@@ -329,32 +332,6 @@ export function assertRootIdentity(rootId, opts = {}) {
       "path: repo root identity changed (replacement or race)"
     );
   }
-  // Optional retained directory fd: re-fstat must still match the frozen
-  // identity (detects close-and-reuse races on platforms that allow dir open).
-  const rootDirFd = opts && opts.rootDirFd;
-  if (rootDirFd != null && typeof rootDirFd === "number" && rootDirFd >= 0) {
-    let fdSt;
-    try {
-      fdSt = fstatSync(rootDirFd, { bigint: true });
-    } catch (e) {
-      throw new Error(
-        `path: retained root dir fd unreadable: ${e && e.message ? e.message : e}`
-      );
-    }
-    if (!fdSt.isDirectory()) {
-      throw new Error("path: retained root dir fd is not a directory");
-    }
-    if (typeof fdSt.dev !== "bigint" || typeof fdSt.ino !== "bigint") {
-      throw new Error(
-        `path: retained root dir fd identity must use BigInt (got ${typeof fdSt.dev}/${typeof fdSt.ino})`
-      );
-    }
-    if (!rootIdentitiesEqual(rootId, { dev: fdSt.dev, ino: fdSt.ino })) {
-      throw new Error(
-        "path: retained root dir fd identity diverged from frozen root"
-      );
-    }
-  }
   let real;
   try {
     real = realpathSync(rootId.path);
@@ -369,71 +346,6 @@ export function assertRootIdentity(rootId, opts = {}) {
     );
   }
   return rootId;
-}
-
-/**
- * Best-effort open of the repository root as a directory fd for re-`fstat`
- * reinforcement during a multi-file operation. Returns `null` when the
- * platform refuses directory open (portable fallback: pathname + identity
- * verification alone). Caller **must** close a non-null fd (see
- * {@link closeRootDirFd}).
- *
- * @param {RootIdentity} rootId
- * @returns {number | null}
- */
-export function tryOpenRootDirFd(rootId) {
-  if (!isRootIdentity(rootId)) {
-    throw new Error("path: invalid repo root identity token");
-  }
-  assertRootIdentity(rootId);
-  let fd;
-  try {
-    // O_RDONLY only: some platforms reject O_NONBLOCK on directories.
-    fd = openSync(rootId.path, fsConstants.O_RDONLY);
-  } catch {
-    // Portable boundary: directory open is not available; pathname + BigInt
-    // identity revalidation remains mandatory and sufficient.
-    return null;
-  }
-  try {
-    const st = fstatSync(fd, { bigint: true });
-    if (!st.isDirectory()) {
-      throw new Error("path: opened root path is not a directory");
-    }
-    if (typeof st.dev !== "bigint" || typeof st.ino !== "bigint") {
-      throw new Error(
-        `path: root dir fd identity must use BigInt (got ${typeof st.dev}/${typeof st.ino})`
-      );
-    }
-    if (!rootIdentitiesEqual(rootId, { dev: st.dev, ino: st.ino })) {
-      throw new Error(
-        "path: root dir fd identity does not match frozen root"
-      );
-    }
-    return fd;
-  } catch (e) {
-    try {
-      closeSync(fd);
-    } catch {
-      /* ignore */
-    }
-    throw e;
-  }
-}
-
-/**
- * Deterministically close a root directory fd from {@link tryOpenRootDirFd}.
- * No-op for null/undefined. Safe against double-close.
- *
- * @param {number | null | undefined} fd
- */
-export function closeRootDirFd(fd) {
-  if (fd == null || typeof fd !== "number" || fd < 0) return;
-  try {
-    closeSync(fd);
-  } catch {
-    /* ignore double-close / already closed */
-  }
 }
 
 /**
@@ -548,6 +460,28 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
 }
 
 /**
+ * Test-only hook: runs after the pre-open root identity assertion and
+ * **before** pathname `openSync` in {@link readContainedFile}. Used to
+ * exercise the residual replace-through-open/identity-then-restore portable
+ * boundary. Production code never sets it. Pass `null` to clear.
+ *
+ * @type {null | ((info: {
+ *   rootReal: string,
+ *   rootId: RootIdentity,
+ *   relPath: string,
+ *   absPath: string,
+ * }) => void)}
+ */
+let safeReadBeforeOpenHook = null;
+
+/**
+ * @param {null | ((info: object) => void)} fn
+ */
+export function setSafeReadBeforeOpenHook(fn) {
+  safeReadBeforeOpenHook = typeof fn === "function" ? fn : null;
+}
+
+/**
  * Test-only hook: runs after open+fstat and **before** realpath/identity
  * containment validation and **before** any byte read. Used by the
  * deterministic injected-swap regression sensor. Production code never sets it.
@@ -570,6 +504,29 @@ let safeReadAfterOpenHook = null;
  */
 export function setSafeReadAfterOpenHook(fn) {
   safeReadAfterOpenHook = typeof fn === "function" ? fn : null;
+}
+
+/**
+ * Test-only hook: runs after opened-fd identity/containment bind and **before**
+ * the post-open root identity re-assert in {@link readContainedFile}. Used to
+ * restore a temporarily replaced root in the residual replace-through-open
+ * window. Production code never sets it. Pass `null` to clear.
+ *
+ * @type {null | ((info: {
+ *   rootReal: string,
+ *   rootId: RootIdentity,
+ *   relPath: string,
+ *   absPath: string,
+ *   fd: number,
+ * }) => void)}
+ */
+let safeReadAfterIdentityHook = null;
+
+/**
+ * @param {null | ((info: object) => void)} fn
+ */
+export function setSafeReadAfterIdentityHook(fn) {
+  safeReadAfterIdentityHook = typeof fn === "function" ? fn : null;
 }
 
 /**
@@ -662,11 +619,16 @@ function assertOpenedIdentityContained(
  * identity is a regular file contained under the frozen root identity
  * (BigInt dev/ino), then read bytes **only from that fd**. Fail closed on
  * FIFO/device/dir (after open, without hanging), lexical/realpath escape,
- * root identity change, or target identity change.
+ * **observable** root identity change, or target identity change.
  *
  * Root identity is verified before open and again after open (before bytes)
- * so a rename/replacement of the canonical root between multi-file operation
- * steps cannot be accepted.
+ * so an observable rename/replacement of the canonical root between multi-file
+ * operation steps fails closed. Residual portable boundary: because the child
+ * is opened by mutable pathname (no portable fd-relative `openat`), a
+ * same-user concurrent replace-through-open/identity-then-restore at the same
+ * pathname can still yield bytes from a temporary replacement fd if the
+ * original root is restored before the post-open root assertion. That window
+ * is documented and sensor-proven as `KNOWN_PORTABLE_BOUNDARY`, not closed.
  *
  * Applies to every validation read class (manifest, schema, doctrine, digest).
  *
@@ -681,9 +643,14 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
   const { absPath, rootReal } = resolveLexicalUnderRoot(rootId, relPath);
   // Re-assert after lexical resolve (hook may have run / concurrent replace).
   assertRootIdentity(rootId);
+  // Test-only: residual replace-through-open window starts here.
+  if (typeof safeReadBeforeOpenHook === "function") {
+    safeReadBeforeOpenHook({ rootId, rootReal, relPath, absPath });
+  }
   let fd;
   try {
     // O_RDONLY|O_NONBLOCK: portable; rejects FIFO after open without hanging.
+    // Pathname open: not fd-relative; see portable-boundary notes above.
     fd = openSync(absPath, OPEN_READ_NONBLOCK);
   } catch (e) {
     throw new Error(`path: cannot open ${relPath}: ${e.message}`);
@@ -698,7 +665,18 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
       opened,
       rootId
     );
+    // Test-only residual window: after identity bind, before post-open root assert.
+    if (typeof safeReadAfterIdentityHook === "function") {
+      safeReadAfterIdentityHook({
+        rootId,
+        rootReal,
+        relPath,
+        absPath,
+        fd,
+      });
+    }
     // Root must still be the same directory after target open/bind.
+    // Observable replacement fails here; replace-and-restore may not.
     assertRootIdentity(rootId);
     // Bytes only from the verified opened identity.
     return encoding == null
@@ -708,7 +686,7 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
     try {
       closeSync(fd);
     } catch {
-      /* ignore double-close / already closed */
+      /* ignore already-closed */
     }
   }
 }
@@ -2201,7 +2179,7 @@ export function isConsistencyRevalidationError(f) {
   // under other codes if classification changes.
   const msg = typeof f.message === "string" ? f.message : "";
   if (
-    /repo root identity|retained root dir fd|cannot bind repo root|root identity changed|repo root disappeared|no longer canonical|realpath escapes|swap or race/i.test(
+    /repo root identity|cannot bind repo root|root identity changed|repo root disappeared|no longer canonical|realpath escapes|swap or race/i.test(
       msg
     )
   ) {
@@ -2215,6 +2193,8 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
   const findings = [];
 
   // One immutable root identity for the whole consistency operation.
+  // No retained root directory fd: without portable openat it cannot anchor
+  // child opens, and a raw numeric fd close path is a reuse hazard.
   let rootId;
   try {
     rootId = coerceRootIdentity(repoRoot);
@@ -2229,250 +2209,228 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
     return sortFindings(findings);
   }
 
-  // Best-effort retained root directory fd for re-fstat reinforcement.
-  // Closed deterministically in finally. Null on platforms that refuse dir open.
-  /** @type {number | null} */
-  let rootDirFd = null;
+  const gatePath = "docs/14-human-gates.md";
+  const rolesPath = "docs/03-roles.md";
+  const tiersPath = "docs/06-quality-gates.md";
+  const stagesPath = "docs/02-sdlc-pipeline.md";
+
+  /** @type {Set<string>} */
+  let doctrineGates = new Set();
+  /** @type {Set<string>} */
+  let doctrineRoles = new Set();
+  /** @type {Set<string>} */
+  let doctrineTiers = new Set();
+  /** @type {Set<string>} */
+  let doctrineStages = new Set();
+
   try {
-    try {
-      rootDirFd = tryOpenRootDirFd(rootId);
-    } catch (e) {
-      findings.push(
-        err(
-          "E_CONSISTENCY_READ",
-          `cannot retain repo root dir fd: ${e && e.message ? e.message : e}`,
-          "repo-root"
-        )
-      );
-      return sortFindings(findings);
-    }
-
-    const gatePath = "docs/14-human-gates.md";
-    const rolesPath = "docs/03-roles.md";
-    const tiersPath = "docs/06-quality-gates.md";
-    const stagesPath = "docs/02-sdlc-pipeline.md";
-
-    /** @type {Set<string>} */
-    let doctrineGates = new Set();
-    /** @type {Set<string>} */
-    let doctrineRoles = new Set();
-    /** @type {Set<string>} */
-    let doctrineTiers = new Set();
-    /** @type {Set<string>} */
-    let doctrineStages = new Set();
-
-    try {
-      const text = /** @type {string} */ (
-        readContainedFile(rootId, gatePath, "utf8")
-      );
-      let m;
-      const re = new RegExp(DOCTRINE_GATE_RE.source, "g");
-      while ((m = re.exec(text)) !== null) {
-        doctrineGates.add(`G${m[1]}`);
-      }
-    } catch (e) {
-      findings.push(err("E_CONSISTENCY_READ", `cannot read ${gatePath}: ${e.message}`, gatePath));
-    }
-
-    try {
-      const text = /** @type {string} */ (
-        readContainedFile(rootId, rolesPath, "utf8")
-      );
-      let m;
-      const re = new RegExp(DOCTRINE_ROLE_HEADING_RE.source, "gm");
-      while ((m = re.exec(text)) !== null) {
-        doctrineRoles.add(m[1]);
-      }
-    } catch (e) {
-      findings.push(err("E_CONSISTENCY_READ", `cannot read ${rolesPath}: ${e.message}`, rolesPath));
-    }
-
-    try {
-      const text = /** @type {string} */ (
-        readContainedFile(rootId, tiersPath, "utf8")
-      );
-      // Risk tiers table rows: **A** / **B** / **C** under "## Risk tiers"
-      if (/##\s*Risk tiers/i.test(text)) {
-        const section = text.split(/##\s*Risk tiers/i)[1]?.split(/\n##\s+/)[0] || "";
-        for (const t of ["A", "B", "C"]) {
-          if (new RegExp(`\\*\\*${t}\\*\\*`).test(section)) doctrineTiers.add(t);
-        }
-      }
-    } catch (e) {
-      findings.push(err("E_CONSISTENCY_READ", `cannot read ${tiersPath}: ${e.message}`, tiersPath));
-    }
-
-    try {
-      const text = /** @type {string} */ (
-        readContainedFile(rootId, stagesPath, "utf8")
-      );
-      // Stage headings: "## Stage N — Name"
-      const stageNameToId = {
-        Plan: "plan",
-        Decompose: "decompose",
-        Build: "build",
-        Test: "test",
-        Review: "review",
-        "UX Evaluation": "ux-eval",
-        Security: "security",
-        Merge: "merge",
-        "Deploy + Verify": "deploy",
-        "Retro (the ratchet)": "retro",
-      };
-      const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      for (const [name, id] of Object.entries(stageNameToId)) {
-        // Em dash (—) or hyphen between stage number and title (docs/02).
-        const re = new RegExp(
-          `##\\s*Stage\\s+\\d+\\s*[\\u2014\\-]\\s*${escapeRe(name)}`,
-          "i"
-        );
-        if (re.test(text)) {
-          doctrineStages.add(id);
-        }
-      }
-    } catch (e) {
-      findings.push(err("E_CONSISTENCY_READ", `cannot read ${stagesPath}: ${e.message}`, stagesPath));
-    }
-
-    const candGates = new Set(
-      (Array.isArray(candidate.humanGates) ? candidate.humanGates : [])
-        .map((g) => (g && typeof g === "object" ? /** @type {any} */ (g).id : null))
-        .filter(Boolean)
+    const text = /** @type {string} */ (
+      readContainedFile(rootId, gatePath, "utf8")
     );
-    const candRoles = new Set(
-      (Array.isArray(candidate.roles) ? candidate.roles : [])
-        .map((r) => (r && typeof r === "object" ? /** @type {any} */ (r).id : null))
-        .filter(Boolean)
-    );
-    const candTiers = new Set(
-      (Array.isArray(candidate.riskTiers) ? candidate.riskTiers : [])
-        .map((t) => (t && typeof t === "object" ? /** @type {any} */ (t).id : null))
-        .filter(Boolean)
-    );
-    const candStages = new Set(
-      (Array.isArray(candidate.workflowStages) ? candidate.workflowStages : [])
-        .map((s) => (s && typeof s === "object" ? /** @type {any} */ (s).id : null))
-        .filter(Boolean)
-    );
-
-    function diffSets(label, doctrine, cand) {
-      for (const id of doctrine) {
-        if (!cand.has(id)) {
-          findings.push(
-            err(
-              "E_CONSISTENCY_DRIFT",
-              `doctrine has ${label} ${id} but candidate does not`,
-              label
-            )
-          );
-        }
-      }
-      for (const id of cand) {
-        if (!doctrine.has(id)) {
-          findings.push(
-            err(
-              "E_CONSISTENCY_DRIFT",
-              `candidate has ${label} ${id} but selected doctrine tables do not`,
-              label
-            )
-          );
-        }
-      }
+    let m;
+    const re = new RegExp(DOCTRINE_GATE_RE.source, "g");
+    while ((m = re.exec(text)) !== null) {
+      doctrineGates.add(`G${m[1]}`);
     }
-
-    if (doctrineGates.size) diffSets("gate", doctrineGates, candGates);
-    else if (!findings.some((f) => f.path === gatePath)) {
-      findings.push(err("E_CONSISTENCY_PARSE", "no G1-G16 markers found in doctrine", gatePath));
-    }
-
-    if (doctrineRoles.size) diffSets("role", doctrineRoles, candRoles);
-    else if (!findings.some((f) => f.path === rolesPath)) {
-      findings.push(err("E_CONSISTENCY_PARSE", "no role headings found in doctrine", rolesPath));
-    }
-
-    if (doctrineTiers.size) diffSets("tier", doctrineTiers, candTiers);
-    else if (!findings.some((f) => f.path === tiersPath)) {
-      findings.push(err("E_CONSISTENCY_PARSE", "no risk tier markers found in doctrine", tiersPath));
-    }
-
-    if (doctrineStages.size) diffSets("stage", doctrineStages, candStages);
-    else if (!findings.some((f) => f.path === stagesPath)) {
-      findings.push(err("E_CONSISTENCY_PARSE", "no stage headings found in doctrine", stagesPath));
-    }
-
-    // Re-assert the original frozen root identity immediately BEFORE final
-    // schema/provenance validation. A root replacement after the four doctrine
-    // reads must never fall through to I_CONSISTENCY_OK.
-    try {
-      assertRootIdentity(rootId, { rootDirFd });
-    } catch (e) {
-      findings.push(
-        err(
-          "E_CONSISTENCY_READ",
-          `repo root identity failed before final revalidation: ${e && e.message ? e.message : e}`,
-          "repo-root"
-        )
-      );
-    }
-
-    // Final revalidation under the same frozen root identity. Propagate every
-    // fail-closed root/schema/provenance error via isConsistencyRevalidationError
-    // — not only E_PROVENANCE_* (that narrow filter discards E_SCHEMA_LOAD when
-    // the root disappears after the four doctrine reads).
-    let revalidationFindings = [];
-    try {
-      revalidationFindings = validateCandidate(candidate, {
-        repoRoot: rootId,
-        checkProvenanceDigests: true,
-        expectedValidatorVersion: VALIDATOR_VERSION,
-      });
-    } catch (e) {
-      findings.push(
-        err(
-          "E_CONSISTENCY_READ",
-          `final revalidation threw: ${e && e.message ? e.message : e}`,
-          "consistency"
-        )
-      );
-    }
-    for (const f of revalidationFindings) {
-      if (isConsistencyRevalidationError(f)) {
-        findings.push(f);
-      }
-    }
-
-    // Re-assert the original frozen root identity immediately AFTER final
-    // schema/provenance validation.
-    try {
-      assertRootIdentity(rootId, { rootDirFd });
-    } catch (e) {
-      findings.push(
-        err(
-          "E_CONSISTENCY_READ",
-          `repo root identity failed after final revalidation: ${e && e.message ? e.message : e}`,
-          "repo-root"
-        )
-      );
-    }
-
-    // I_CONSISTENCY_OK only when zero error-severity findings exist. Never
-    // coexist with root/schema/provenance failures.
-    const hasError = findings.some((f) => f.severity === "error");
-    if (!hasError) {
-      findings.push(
-        info(
-          "I_CONSISTENCY_OK",
-          "selected doctrine identifiers/tables match the candidate; digests agree",
-          "consistency"
-        )
-      );
-    }
-
-    return sortFindings(findings);
-  } finally {
-    closeRootDirFd(rootDirFd);
-    rootDirFd = null;
+  } catch (e) {
+    findings.push(err("E_CONSISTENCY_READ", `cannot read ${gatePath}: ${e.message}`, gatePath));
   }
+
+  try {
+    const text = /** @type {string} */ (
+      readContainedFile(rootId, rolesPath, "utf8")
+    );
+    let m;
+    const re = new RegExp(DOCTRINE_ROLE_HEADING_RE.source, "gm");
+    while ((m = re.exec(text)) !== null) {
+      doctrineRoles.add(m[1]);
+    }
+  } catch (e) {
+    findings.push(err("E_CONSISTENCY_READ", `cannot read ${rolesPath}: ${e.message}`, rolesPath));
+  }
+
+  try {
+    const text = /** @type {string} */ (
+      readContainedFile(rootId, tiersPath, "utf8")
+    );
+    // Risk tiers table rows: **A** / **B** / **C** under "## Risk tiers"
+    if (/##\s*Risk tiers/i.test(text)) {
+      const section = text.split(/##\s*Risk tiers/i)[1]?.split(/\n##\s+/)[0] || "";
+      for (const t of ["A", "B", "C"]) {
+        if (new RegExp(`\\*\\*${t}\\*\\*`).test(section)) doctrineTiers.add(t);
+      }
+    }
+  } catch (e) {
+    findings.push(err("E_CONSISTENCY_READ", `cannot read ${tiersPath}: ${e.message}`, tiersPath));
+  }
+
+  try {
+    const text = /** @type {string} */ (
+      readContainedFile(rootId, stagesPath, "utf8")
+    );
+    // Stage headings: "## Stage N — Name"
+    const stageNameToId = {
+      Plan: "plan",
+      Decompose: "decompose",
+      Build: "build",
+      Test: "test",
+      Review: "review",
+      "UX Evaluation": "ux-eval",
+      Security: "security",
+      Merge: "merge",
+      "Deploy + Verify": "deploy",
+      "Retro (the ratchet)": "retro",
+    };
+    const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    for (const [name, id] of Object.entries(stageNameToId)) {
+      // Em dash (—) or hyphen between stage number and title (docs/02).
+      const re = new RegExp(
+        `##\\s*Stage\\s+\\d+\\s*[\\u2014\\-]\\s*${escapeRe(name)}`,
+        "i"
+      );
+      if (re.test(text)) {
+        doctrineStages.add(id);
+      }
+    }
+  } catch (e) {
+    findings.push(err("E_CONSISTENCY_READ", `cannot read ${stagesPath}: ${e.message}`, stagesPath));
+  }
+
+  const candGates = new Set(
+    (Array.isArray(candidate.humanGates) ? candidate.humanGates : [])
+      .map((g) => (g && typeof g === "object" ? /** @type {any} */ (g).id : null))
+      .filter(Boolean)
+  );
+  const candRoles = new Set(
+    (Array.isArray(candidate.roles) ? candidate.roles : [])
+      .map((r) => (r && typeof r === "object" ? /** @type {any} */ (r).id : null))
+      .filter(Boolean)
+  );
+  const candTiers = new Set(
+    (Array.isArray(candidate.riskTiers) ? candidate.riskTiers : [])
+      .map((t) => (t && typeof t === "object" ? /** @type {any} */ (t).id : null))
+      .filter(Boolean)
+  );
+  const candStages = new Set(
+    (Array.isArray(candidate.workflowStages) ? candidate.workflowStages : [])
+      .map((s) => (s && typeof s === "object" ? /** @type {any} */ (s).id : null))
+      .filter(Boolean)
+  );
+
+  function diffSets(label, doctrine, cand) {
+    for (const id of doctrine) {
+      if (!cand.has(id)) {
+        findings.push(
+          err(
+            "E_CONSISTENCY_DRIFT",
+            `doctrine has ${label} ${id} but candidate does not`,
+            label
+          )
+        );
+      }
+    }
+    for (const id of cand) {
+      if (!doctrine.has(id)) {
+        findings.push(
+          err(
+            "E_CONSISTENCY_DRIFT",
+            `candidate has ${label} ${id} but selected doctrine tables do not`,
+            label
+          )
+        );
+      }
+    }
+  }
+
+  if (doctrineGates.size) diffSets("gate", doctrineGates, candGates);
+  else if (!findings.some((f) => f.path === gatePath)) {
+    findings.push(err("E_CONSISTENCY_PARSE", "no G1-G16 markers found in doctrine", gatePath));
+  }
+
+  if (doctrineRoles.size) diffSets("role", doctrineRoles, candRoles);
+  else if (!findings.some((f) => f.path === rolesPath)) {
+    findings.push(err("E_CONSISTENCY_PARSE", "no role headings found in doctrine", rolesPath));
+  }
+
+  if (doctrineTiers.size) diffSets("tier", doctrineTiers, candTiers);
+  else if (!findings.some((f) => f.path === tiersPath)) {
+    findings.push(err("E_CONSISTENCY_PARSE", "no risk tier markers found in doctrine", tiersPath));
+  }
+
+  if (doctrineStages.size) diffSets("stage", doctrineStages, candStages);
+  else if (!findings.some((f) => f.path === stagesPath)) {
+    findings.push(err("E_CONSISTENCY_PARSE", "no stage headings found in doctrine", stagesPath));
+  }
+
+  // Re-assert the original frozen root identity immediately BEFORE final
+  // schema/provenance validation. A root replacement after the four doctrine
+  // reads must never fall through to I_CONSISTENCY_OK.
+  try {
+    assertRootIdentity(rootId);
+  } catch (e) {
+    findings.push(
+      err(
+        "E_CONSISTENCY_READ",
+        `repo root identity failed before final revalidation: ${e && e.message ? e.message : e}`,
+        "repo-root"
+      )
+    );
+  }
+
+  // Final revalidation under the same frozen root identity. Propagate every
+  // fail-closed root/schema/provenance error via isConsistencyRevalidationError
+  // — not only E_PROVENANCE_* (that narrow filter discards E_SCHEMA_LOAD when
+  // the root disappears after the four doctrine reads).
+  let revalidationFindings = [];
+  try {
+    revalidationFindings = validateCandidate(candidate, {
+      repoRoot: rootId,
+      checkProvenanceDigests: true,
+      expectedValidatorVersion: VALIDATOR_VERSION,
+    });
+  } catch (e) {
+    findings.push(
+      err(
+        "E_CONSISTENCY_READ",
+        `final revalidation threw: ${e && e.message ? e.message : e}`,
+        "consistency"
+      )
+    );
+  }
+  for (const f of revalidationFindings) {
+    if (isConsistencyRevalidationError(f)) {
+      findings.push(f);
+    }
+  }
+
+  // Re-assert the original frozen root identity immediately AFTER final
+  // schema/provenance validation.
+  try {
+    assertRootIdentity(rootId);
+  } catch (e) {
+    findings.push(
+      err(
+        "E_CONSISTENCY_READ",
+        `repo root identity failed after final revalidation: ${e && e.message ? e.message : e}`,
+        "repo-root"
+      )
+    );
+  }
+
+  // I_CONSISTENCY_OK only when zero error-severity findings exist. Never
+  // coexist with root/schema/provenance failures.
+  const hasError = findings.some((f) => f.severity === "error");
+  if (!hasError) {
+    findings.push(
+      info(
+        "I_CONSISTENCY_OK",
+        "selected doctrine identifiers/tables match the candidate; digests agree",
+        "consistency"
+      )
+    );
+  }
+
+  return sortFindings(findings);
 }
 
 // ---------------------------------------------------------------------------
@@ -2609,18 +2567,21 @@ CONTAINMENT
   --repo-root is realpath'd once into an immutable root identity token
   (canonical path + exact BigInt dev/ino; no soft fallback). That identity is
   re-asserted before and after every manifest/schema/doctrine/provenance open
-  so root disappearance, replacement, or type change fails closed. Portable
-  boundary: pathname open + BigInt fd/realpath identity (optional retained
-  root dir fd for re-fstat only; closed deterministically) — Node has no
-  portable openat without native addons. Paths are resolved only under that
-  root (lexical + realpath + BigInt fd identity). Opens use O_RDONLY|O_NONBLOCK
-  so FIFO/device never hang; non-regular types fail closed after open. Absolute
-  paths, symlink escapes, and post-open path swaps are refused before any byte
-  read. Consistency revalidation re-asserts the frozen root before and after
-  final schema/provenance checks and propagates E_PROVENANCE_* plus E_SCHEMA_LOAD
-  / root-identity failures (never a false I_CONSISTENCY_OK). Schema is always
-  loaded from config/policy/schema/policy-manifest-v1.schema.json inside the
-  declared root — never from the tool checkout alone; no schema cache across roots.
+  so observable root disappearance, replacement, or type change fails closed.
+  Portable boundary: child opens are pathname openSync + BigInt fd/realpath
+  identity — Node has no portable openat without native addons, so a same-user
+  concurrent replace-through-open/identity-then-restore at the same pathname
+  remains a residual race (documented + sensor KNOWN_PORTABLE_BOUNDARY). No
+  retained root directory fd (it would not anchor child opens). Paths resolve
+  only under the frozen root (lexical + realpath + BigInt fd identity). Opens
+  use O_RDONLY|O_NONBLOCK so FIFO/device never hang; non-regular types fail
+  closed after open. Absolute paths, symlink escapes, and post-open path swaps
+  are refused before any byte read. Consistency revalidation re-asserts the
+  frozen root before and after final schema/provenance checks and propagates
+  E_PROVENANCE_* plus E_SCHEMA_LOAD / root-identity failures (never a false
+  I_CONSISTENCY_OK). Schema is always loaded from
+  config/policy/schema/policy-manifest-v1.schema.json inside the declared root
+  — never from the tool checkout alone; no schema cache across roots.
 
 EXIT
   0  validation / consistency pass

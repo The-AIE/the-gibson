@@ -874,6 +874,7 @@ schema-class loadPolicySchema swap fails closed
 manifest-class loadManifestCandidate swap fails closed
 doctrine-class checkDoctrineConsistency swap fails closed
 root directory replacement within operation fails closed
+KNOWN_PORTABLE_BOUNDARY replace-through-open then restore can accept temporary-replacement fd bytes
 root-swap schema re-read (no cache poison)
 post-swap hook cleared; normal hash works
 fifo rejected promptly as non-regular"
@@ -1156,6 +1157,8 @@ const {
   readContainedFile,
   sha256ContainedFile,
   setSafeReadAfterOpenHook,
+  setSafeReadBeforeOpenHook,
+  setSafeReadAfterIdentityHook,
   setRootIdentityRecheckHook,
   loadPolicySchema,
   clearPolicySchemaCache,
@@ -1594,6 +1597,88 @@ try {
     }
   }
 
+  // KNOWN_PORTABLE_BOUNDARY: exact replace-through-open/identity-then-restore.
+  // After pre-open root assert, install a replacement root at the same path
+  // with hostile bytes; after open+fstat (still under replacement), restore the
+  // original root before the post-open root assert. Portable pathname open
+  // cannot close this race without openat. This receipt is an explicit
+  // limitation matching docs — NOT a security PASS that hostile bytes are
+  // refused. Observable (non-restored) replacement above still fails closed.
+  {
+    const boundRoot = join(tmpdir(), "gibson-pm-boundary-" + process.pid + "-" + Date.now());
+    const boundMoved = boundRoot + ".orig-moved";
+    const boundHostile = boundRoot + ".hostile-staging";
+    const HOSTILE = "HOSTILE_REPLACE_RESTORE_BYTES_v1\n";
+    try {
+      mkdirSync(join(boundRoot, "docs"), { recursive: true });
+      writeFileSync(join(boundRoot, "docs/inside.txt"), "INSIDE_BYTES_v1\n");
+      mkdirSync(join(boundHostile, "docs"), { recursive: true });
+      writeFileSync(join(boundHostile, "docs/inside.txt"), HOSTILE);
+
+      const frozen = resolveCanonicalRepoRoot(boundRoot);
+      let replaced = false;
+      let restored = false;
+      // Replace after pre-open root assert, before pathname openSync.
+      setSafeReadBeforeOpenHook(({ rootId, relPath }) => {
+        if (relPath !== "docs/inside.txt" || replaced) return;
+        if (rootId.path !== frozen.path) return;
+        replaced = true;
+        renameSync(rootId.path, boundMoved);
+        renameSync(boundHostile, rootId.path);
+      });
+      // Restore after open+identity bind, before post-open root assert.
+      setSafeReadAfterIdentityHook(({ rootId, relPath }) => {
+        if (relPath !== "docs/inside.txt" || !replaced || restored) return;
+        if (rootId.path !== frozen.path) return;
+        restored = true;
+        renameSync(rootId.path, boundHostile);
+        renameSync(boundMoved, rootId.path);
+      });
+
+      let got = null;
+      let threw = false;
+      let msg = "";
+      try {
+        got = readContainedFile(frozen, "docs/inside.txt", "utf8");
+      } catch (e) {
+        threw = true;
+        msg = e && e.message ? e.message : String(e);
+      }
+      setSafeReadBeforeOpenHook(null);
+      setSafeReadAfterIdentityHook(null);
+
+      if (!replaced || !restored) {
+        bad(
+          "portable boundary setup incomplete: " +
+            JSON.stringify({ replaced, restored, threw, msg, got })
+        );
+      } else if (threw) {
+        // Behavior change: if production later closes this race, the suite must
+        // fail loudly rather than silently claim the limitation still exists.
+        bad(
+          "portable boundary unexpectedly refused (docs/sensor claim would be stale): " +
+            msg
+        );
+      } else if (got === HOSTILE) {
+        // Explicit limitation receipt — NOT "fails closed" / security PASS.
+        ok(
+          "KNOWN_PORTABLE_BOUNDARY replace-through-open then restore can accept temporary-replacement fd bytes"
+        );
+      } else {
+        bad(
+          "portable boundary unexpected bytes: " +
+            JSON.stringify({ got, expected: HOSTILE })
+        );
+      }
+    } finally {
+      setSafeReadBeforeOpenHook(null);
+      setSafeReadAfterIdentityHook(null);
+      try { rmSync(boundRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { rmSync(boundMoved, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { rmSync(boundHostile, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
   // Root-swap / no cache poison: symlink root → A, load; retarget → B, load must
   // see B; retarget → A, load must see A again (never sticky B under A identity).
   function writeMiniRoot(dir, marker) {
@@ -1713,6 +1798,8 @@ try {
 } finally {
   // Outer finally: never leak hook or cache across failures
   setSafeReadAfterOpenHook(null);
+  setSafeReadBeforeOpenHook(null);
+  setSafeReadAfterIdentityHook(null);
   setRootIdentityRecheckHook(null);
   clearPolicySchemaCache();
   try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -1760,6 +1847,28 @@ if grep -q 'export function resolveUnderRoot' "$TOOL" || \
   bad "unsafe legacy resolveUnderRoot/sha256File still exported"
 else
   ok "unsafe legacy resolveUnderRoot/sha256File removed"
+fi
+# Root-dir-fd feature removed: it did not anchor child opens and double-close
+# of a raw numeric fd is unsafe under OS reuse.
+if grep -q 'export function tryOpenRootDirFd' "$TOOL" || \
+   grep -q 'export function closeRootDirFd' "$TOOL" || \
+   grep -q 'rootDirFd' "$TOOL"; then
+  bad "retained root-dir-fd feature still present"
+else
+  ok "retained root-dir-fd feature removed (no raw numeric fd retain/close)"
+fi
+# Must not claim replace-and-restore is impossible under portable pathname open.
+if grep -Eiq 'replace-and-restore[^\n]{0,80}cannot accept|cannot accept[^\n]{0,80}replace-and-restore' "$TOOL" \
+  "$REPO_ROOT/docs/policy-manifest-v1.md" "$REPO_ROOT/scripts/README.md"; then
+  bad "docs/code still claim replace-and-restore cannot accept foreign bytes"
+else
+  ok "no false impossible-replace-and-restore guarantee in code/docs"
+fi
+if grep -q 'KNOWN_PORTABLE_BOUNDARY' "$REPO_ROOT/docs/policy-manifest-v1.md" && \
+   grep -q 'openat' "$REPO_ROOT/docs/policy-manifest-v1.md"; then
+  ok "docs record residual portable openat/replace-restore boundary"
+else
+  bad "docs missing residual portable boundary wording"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1914,9 +2023,6 @@ const {
   resolveCanonicalRepoRoot,
   setRootIdentityRecheckHook,
   setSafeReadAfterOpenHook,
-  tryOpenRootDirFd,
-  closeRootDirFd,
-  assertRootIdentity,
 } = await import(pathToFileURL(toolPath).href);
 
 const liveRoot = join(tmpdir(), "gibson-pm-finalrv-" + process.pid + "-" + Date.now());
@@ -1951,17 +2057,6 @@ try {
   }
 
   const frozen = resolveCanonicalRepoRoot(liveRoot);
-
-  // Prove retained dir fd open/close works on this platform (or null fallback).
-  const fd = tryOpenRootDirFd(frozen);
-  if (fd != null) {
-    assertRootIdentity(frozen, { rootDirFd: fd });
-    closeRootDirFd(fd);
-    closeRootDirFd(fd); // deterministic double-close safety
-    console.log("FINAL_RV_DIRFD_OK");
-  } else {
-    console.log("FINAL_RV_DIRFD_NULL");
-  }
 
   let opens = 0;
   let checksAtFour = 0;
@@ -2043,11 +2138,6 @@ if [[ "$FINAL_RV_RC" -eq 0 ]] && echo "$FINAL_RV_OUT" | grep -q "FINAL_RV_PASS";
   ok "final revalidation root identity failure errors without I_CONSISTENCY_OK"
 else
   bad "final revalidation root identity failure not fail-closed (rc=$FINAL_RV_RC out=$FINAL_RV_OUT)"
-fi
-if echo "$FINAL_RV_OUT" | grep -q "FINAL_RV_DIRFD_OK\|FINAL_RV_DIRFD_NULL"; then
-  ok "root dir fd open/close path exercised (or portable null fallback)"
-else
-  bad "root dir fd path not exercised"
 fi
 lacks "final revalidation no I_CONSISTENCY_OK in probe" "$FINAL_RV_OUT" '"hasOk":true'
 
@@ -2197,6 +2287,124 @@ if echo "$NARROW_OUT" | grep -q "NARROW_DEFECT_REPRODUCED"; then
   ok "narrow E_PROVENANCE filter mutation reproduces false I_CONSISTENCY_OK"
 else
   bad "narrow filter mutation did not reproduce defect (out=$NARROW_OUT)"
+fi
+
+# ---------------------------------------------------------------------------
+# No fd growth across repeated success + injected-error API calls.
+# Where /dev/fd is available, count open descriptors before/after a burst of
+# checkDoctrineConsistency / readContainedFile / assertRootIdentity calls.
+# ---------------------------------------------------------------------------
+echo
+echo "=== no fd growth across repeated success + injected-error API calls ==="
+FD_PROBE_OUT=$(
+  PM_TOOL="$TOOL" PM_CANDIDATE="$CANDIDATE" PM_REPO="$REPO_ROOT" \
+  "$NODE" --input-type=module -e '
+import { readdirSync, readFileSync, mkdirSync, writeFileSync, rmSync, cpSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { createHash } from "node:crypto";
+
+function countFds() {
+  try {
+    return readdirSync("/dev/fd").length;
+  } catch {
+    try {
+      return readdirSync("/proc/self/fd").length;
+    } catch {
+      return null;
+    }
+  }
+}
+
+const toolPath = process.env.PM_TOOL;
+const candidateSrc = process.env.PM_CANDIDATE;
+const repo = process.env.PM_REPO;
+const {
+  checkDoctrineConsistency,
+  loadManifestCandidate,
+  readContainedFile,
+  resolveCanonicalRepoRoot,
+  assertRootIdentity,
+  setRootIdentityRecheckHook,
+} = await import(pathToFileURL(toolPath).href);
+
+const liveRoot = join(tmpdir(), "gibson-pm-fdleak-" + process.pid + "-" + Date.now());
+try {
+  mkdirSync(liveRoot, { recursive: true });
+  const cand0 = JSON.parse(readFileSync(candidateSrc, "utf8"));
+  const paths = new Set([
+    "docs/14-human-gates.md","docs/03-roles.md","docs/06-quality-gates.md",
+    "docs/02-sdlc-pipeline.md","config/policy/schema/policy-manifest-v1.schema.json",
+  ]);
+  for (const s of cand0.provenance.sources) if (typeof s.path === "string") paths.add(s.path);
+  for (const d of paths) {
+    mkdirSync(join(liveRoot, d.split("/").slice(0, -1).join("/") || "."), { recursive: true });
+    cpSync(join(repo, d), join(liveRoot, d));
+  }
+  writeFileSync(join(liveRoot, "docs/inside.txt"), "FD_PROBE\n");
+  const cand = JSON.parse(JSON.stringify(cand0));
+  for (const s of cand.provenance.sources) {
+    s.digest = createHash("sha256").update(readFileSync(join(liveRoot, s.path))).digest("hex");
+  }
+  const frozen = resolveCanonicalRepoRoot(liveRoot);
+  // Warm once so first-call allocations are not counted as leaks.
+  checkDoctrineConsistency(cand, frozen);
+  readContainedFile(frozen, "docs/inside.txt", "utf8");
+  assertRootIdentity(frozen);
+
+  const before = countFds();
+  for (let i = 0; i < 50; i++) {
+    checkDoctrineConsistency(cand, frozen);
+    readContainedFile(frozen, "docs/inside.txt", "utf8");
+    assertRootIdentity(frozen);
+  }
+  // Injected errors: root identity failures must not leak descriptors.
+  for (let i = 0; i < 30; i++) {
+    setRootIdentityRecheckHook((rootId) => {
+      // Force a temporary disappearance that assertRootIdentity must refuse.
+      rmSync(join(rootId.path, "docs/inside.txt"), { force: true });
+    });
+    try {
+      readContainedFile(frozen, "docs/inside.txt", "utf8");
+    } catch {
+      /* expected */
+    }
+    setRootIdentityRecheckHook(null);
+    writeFileSync(join(liveRoot, "docs/inside.txt"), "FD_PROBE\n");
+    try {
+      assertRootIdentity({ path: frozen.path + "-missing-" + i, dev: frozen.dev, ino: frozen.ino });
+    } catch {
+      /* expected */
+    }
+  }
+  const after = countFds();
+  if (before == null || after == null) {
+    console.log("FD_PROBE_SKIP no /dev/fd or /proc/self/fd");
+    process.exit(0);
+  }
+  // Allow tiny platform noise (dirent enumeration of /dev/fd can self-include).
+  const delta = after - before;
+  console.log("FD_PROBE " + JSON.stringify({ before, after, delta }));
+  if (delta > 2) {
+    console.log("FD_PROBE_LEAK");
+    process.exit(1);
+  }
+  console.log("FD_PROBE_OK");
+  process.exit(0);
+} finally {
+  setRootIdentityRecheckHook(null);
+  try { rmSync(liveRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+' 2>&1
+) || FD_PROBE_RC=$?
+FD_PROBE_RC=${FD_PROBE_RC:-0}
+if echo "$FD_PROBE_OUT" | grep -q "FD_PROBE_SKIP"; then
+  ok "fd growth probe skipped (no /dev/fd enumeration)"
+elif [[ "$FD_PROBE_RC" -eq 0 ]] && echo "$FD_PROBE_OUT" | grep -q "FD_PROBE_OK"; then
+  ok "no fd growth across repeated success + injected-error API calls"
+else
+  bad "fd growth probe failed (rc=$FD_PROBE_RC out=$FD_PROBE_OUT)"
 fi
 
 # ---------------------------------------------------------------------------
