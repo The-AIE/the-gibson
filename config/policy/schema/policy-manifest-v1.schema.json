@@ -1,0 +1,481 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gibson.policy.manifest.schema.v1",
+  "title": "Gibson Policy Manifest v1 (report-only candidate)",
+  "description": "Versioned, machine-readable representation of approved Gibson control-plane policy identifiers and relationships. This schema documents the v1 candidate shape. A pure offline Node validator enforces the rules; this file is not activated as merge authority. Activation remains owned by parent issue #164.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaId",
+    "schemaVersion",
+    "manifestId",
+    "manifestVersion",
+    "status",
+    "authority",
+    "activated",
+    "generatorVersion",
+    "validatorVersion",
+    "compatibility",
+    "provenance",
+    "humanGates",
+    "riskTiers",
+    "roles",
+    "forbiddenRolePairs",
+    "reviewIndependence",
+    "workflowStages",
+    "tierGateMappings",
+    "forkExtensions",
+    "notices"
+  ],
+  "properties": {
+    "schemaId": {
+      "type": "string",
+      "const": "gibson.policy.manifest.schema.v1"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "description": "Semver of this schema family. Major must be 1 for this schema id. Unsupported majors fail closed."
+    },
+    "manifestId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9.-]*$",
+      "description": "Stable id of this policy document (core uses gibson. prefix)."
+    },
+    "manifestVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["candidate", "draft", "superseded"],
+      "description": "Lifecycle status. 'candidate' means report-only encoding of approved semantics."
+    },
+    "authority": {
+      "type": "string",
+      "const": "report-only",
+      "description": "Hard constant for v1. Never claims activated policy authority."
+    },
+    "activated": {
+      "type": "boolean",
+      "const": false,
+      "description": "Must be false for this report-only slice. Activation is out of scope (#164)."
+    },
+    "generatorVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "validatorVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "forkExtensionRule",
+        "coreIdPrefix",
+        "upgrade",
+        "rollback",
+        "notes"
+      ],
+      "properties": {
+        "policy": {
+          "type": "string",
+          "enum": ["semver-major-break"]
+        },
+        "forkExtensionRule": {
+          "type": "string",
+          "enum": ["namespaced-only"]
+        },
+        "coreIdPrefix": {
+          "type": "string",
+          "const": "gibson."
+        },
+        "upgrade": {
+          "type": "string"
+        },
+        "rollback": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sources"],
+      "properties": {
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "path",
+              "digestAlgorithm",
+              "digest",
+              "role"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^src\\.[a-z0-9.-]+$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/-]*$",
+                "description": "Repo-relative POSIX path. No absolute paths, no .. segments."
+              },
+              "digestAlgorithm": {
+                "type": "string",
+                "const": "sha256"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "canonical-doctrine",
+                  "compatibility-doctrine",
+                  "supporting"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "humanGates": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "category", "summary", "severity"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^G([1-9]|1[0-6])$"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "destructive",
+              "money",
+              "outward-facing",
+              "scope-judgment",
+              "access-security"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "boolean"
+          },
+          "relatedTierIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["A", "B", "C"]
+            }
+          }
+        }
+      }
+    },
+    "riskTiers": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "definition", "evidenceMinimums"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": ["A", "B", "C"]
+          },
+          "definition": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidenceMinimums": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "reviewDepth",
+              "adversarialReview",
+              "humanMergeGate"
+            ],
+            "properties": {
+              "reviewDepth": {
+                "type": "string",
+                "enum": ["solo", "full-lens", "fan-out"]
+              },
+              "adversarialReview": {
+                "type": "boolean"
+              },
+              "humanMergeGate": {
+                "type": "boolean"
+              },
+              "humanGateIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^G([1-9]|1[0-6])$"
+                }
+              },
+              "uxEvalIfVisible": {
+                "type": "boolean"
+              },
+              "serializedWhenStateful": {
+                "type": "boolean"
+              },
+              "crossVendorPreferred": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "roles": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "summary"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "planner",
+              "decomposer",
+              "builder",
+              "test-engineer",
+              "reviewer",
+              "ux-evaluator",
+              "security",
+              "release",
+              "historian"
+            ]
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "forbiddenRolePairs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["a", "b", "scope", "symmetric", "rationale"],
+        "properties": {
+          "a": { "type": "string" },
+          "b": { "type": "string" },
+          "scope": {
+            "type": "string",
+            "enum": ["same-unit-of-work"]
+          },
+          "symmetric": {
+            "type": "boolean"
+          },
+          "rationale": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "reviewIndependence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "description",
+          "minimumRelationship"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^ri\\.[a-z0-9.-]+$"
+          },
+          "description": {
+            "type": "string"
+          },
+          "tierId": {
+            "type": "string",
+            "enum": ["A", "B", "C"]
+          },
+          "minimumRelationship": {
+            "type": "string",
+            "enum": [
+              "different-agent",
+              "independent-approve",
+              "cross-vendor-preferred",
+              "human-gate"
+            ]
+          },
+          "preferredRelationship": {
+            "type": "string",
+            "enum": [
+              "cross-vendor",
+              "two-fresh-context-approve",
+              "human-gate"
+            ]
+          },
+          "humanGateId": {
+            "type": "string",
+            "pattern": "^G([1-9]|1[0-6])$"
+          },
+          "generatorMustNotEqual": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "workflowStages": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "order", "name", "roleId"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "decompose",
+              "build",
+              "test",
+              "review",
+              "ux-eval",
+              "security",
+              "merge",
+              "deploy",
+              "retro"
+            ]
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "roleId": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tierGateMappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tierId", "gateIds", "rationale"],
+        "properties": {
+          "tierId": {
+            "type": "string",
+            "enum": ["A", "B", "C"]
+          },
+          "gateIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^G([1-9]|1[0-6])$"
+            }
+          },
+          "rationale": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "forkExtensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowedNamespaces",
+        "forbiddenCoreShadow",
+        "precedence",
+        "conflictDisposition"
+      ],
+      "properties": {
+        "allowedNamespaces": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*\\.$"
+          }
+        },
+        "forbiddenCoreShadow": {
+          "type": "boolean",
+          "const": true
+        },
+        "precedence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "task",
+              "role",
+              "directory",
+              "target-repo",
+              "fork-local",
+              "gibson",
+              "global"
+            ]
+          }
+        },
+        "conflictDisposition": {
+          "type": "string",
+          "enum": ["refuse"]
+        }
+      }
+    },
+    "notices": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority", "activationOwner"],
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "activationOwner": {
+          "type": "string"
+        },
+        "generatedViews": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
