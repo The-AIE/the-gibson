@@ -27,8 +27,19 @@ command_not_found_handle() {
 
 command -v node >/dev/null || { echo "policy-manifest.test.sh: node required"; exit 1; }
 
-# Hostile PATH stubs for network/model tools — pure validator must never call them.
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-policy-manifest.XXXXXX")
+# Temporary root: fail immediately unless mktemp -d succeeds with a nonempty
+# existing directory. Check BEFORE installing traps or constructing/writing any
+# child paths — a failed/empty ROOT would otherwise resolve hostile stubs toward
+# /bin, $HOME, or the repository.
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-policy-manifest.XXXXXX") || {
+  echo "policy-manifest.test.sh: mktemp -d failed; refusing to continue" >&2
+  exit 1
+}
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+  echo "policy-manifest.test.sh: mktemp -d did not return an existing directory; refusing to continue" >&2
+  exit 1
+fi
+# Only after a validated temporary root: install cleanup and write child paths.
 trap 'rm -rf -- "${ROOT:?}"' EXIT
 BIN="$ROOT/bin"
 mkdir -p "$BIN"
@@ -840,20 +851,21 @@ out=$(run_tool digest --path "docs/..hidden/x.md" --repo-root "$MUT" 2>&1); rc=$
 # Proves open → BigInt identity/containment bind fails closed when the path is
 # switched after open; higher-level manifest load + doctrine consistency;
 # root-swap cannot poison schema; FIFO rejects promptly; sensor receipts are
-# exact (unique set + count + terminal sentinel).
+# exact (unique set + count + terminal sentinel grammar).
 # ---------------------------------------------------------------------------
 
 echo
 echo "=== deterministic injected path-swap (TOCTOU) + integrity ==="
 
 # Exact unique receipt set the production sensor must emit (one each).
-# SENSOR_DONE N is required as the terminal sentinel with N == receipt count.
+# SENSOR_DONE N is required as the terminal physical line with N == receipt count.
 EXPECTED_SWAP_RECEIPTS="control readContainedFile inside text
 control sha256ContainedFile
 control loadPolicySchema (json/schema class)
 control loadManifestCandidate (higher-level)
 control checkDoctrineConsistency (higher-level)
 bigint identity on production open path
+bigint identity comparator rejects Number-colliding values
 swap-to-outside fails closed (escape/identity)
 swap-to-outside did not return outside bytes as success
 swap-to-other-inside fails closed (identity bind)
@@ -861,59 +873,117 @@ digest-class sha256ContainedFile swap fails closed
 schema-class loadPolicySchema swap fails closed
 manifest-class loadManifestCandidate swap fails closed
 doctrine-class checkDoctrineConsistency swap fails closed
+root directory replacement within operation fails closed
 root-swap schema re-read (no cache poison)
 post-swap hook cleared; normal hash works
 fifo rejected promptly as non-regular"
 
-# tally_sensor_receipts OUT_TEXT
-# Requires: every expected receipt exactly once, zero SENSOR_BAD, unique OK
-# lines, and terminal SENSOR_DONE <count> matching expected count.
-# Prints ok/bad into the suite tally. Returns 0 only if integrity holds.
+# Strict receipt grammar (physical lines; no sanitization of hostile prefixes):
+#   ^SENSOR_OK <id>$
+#   ^SENSOR_BAD <msg>$
+#   ^SENSOR_DONE <uint>$
+# Every nonempty line must match; final physical line must be exactly
+# SENSOR_DONE <expected_count>; exactly one SENSOR_OK per expected id;
+# no SENSOR_BAD on the success path; early sentinel / trailing junk / ANSI
+# prefixes / truncation / duplicates all fail closed.
 tally_sensor_receipts() {
   local out_text="$1"
   local expected_count
   expected_count=$(printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -c . || true)
-  local ok_lines bad_lines done_lines
-  ok_lines=$(printf '%s\n' "$out_text" | grep -c '^SENSOR_OK ' || true)
-  bad_lines=$(printf '%s\n' "$out_text" | grep -c '^SENSOR_BAD ' || true)
-  done_lines=$(printf '%s\n' "$out_text" | grep -c '^SENSOR_DONE ' || true)
+  local line_n=0
+  local ok_lines=0
+  local bad_lines=0
+  local done_lines=0
+  local last_line=""
+  local seen_oks=""
 
-  if [[ "$bad_lines" -ne 0 ]]; then
-    while IFS= read -r line; do
-      case "$line" in
-        SENSOR_BAD\ *) bad "${line#SENSOR_BAD }" ;;
-      esac
-    done <<< "$out_text"
+  if [[ -z "$out_text" ]]; then
+    bad "sensor blank output (no receipts)"
+    return 0
   fi
 
-  # Exact unique SENSOR_OK set
-  local missing=0 dup=0
-  while IFS= read -r exp; do
-    [[ -z "$exp" ]] && continue
-    local n
-    n=$(printf '%s\n' "$out_text" | grep -cF "SENSOR_OK $exp" || true)
-    if [[ "$n" -eq 0 ]]; then
-      bad "sensor missing receipt: $exp"
-      missing=$((missing + 1))
-    elif [[ "$n" -gt 1 ]]; then
-      bad "sensor duplicate receipt: $exp (count=$n)"
-      dup=$((dup + 1))
-    else
-      ok "$exp"
+  # Walk physical lines. Here-string supplies a trailing newline if missing.
+  # Empty lines are grammar violations (fail closed — no soft skip).
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_n=$((line_n + 1))
+    last_line="$line"
+    if [[ -z "$line" ]]; then
+      bad "sensor empty physical line at index $line_n"
+      continue
     fi
-  done <<< "$EXPECTED_SWAP_RECEIPTS"
-
-  # Unexpected SENSOR_OK not in the expected set
-  while IFS= read -r line; do
+    # Reject control/non-print bytes (ANSI CSI, etc.). Do NOT strip prefixes.
+    case "$line" in
+      *$'\033'*|*$'\007'*|*$'\001'*|*$'\002'*|*$'\003'*|*$'\004'*)
+        bad "sensor control/ANSI byte in line: $(printf '%q' "$line")"
+        continue
+        ;;
+    esac
     case "$line" in
       SENSOR_OK\ *)
+        # Require exactly "SENSOR_OK " + nonempty body; no leading junk.
+        if [[ "$line" != SENSOR_OK\ * || "$line" == "SENSOR_OK " ]]; then
+          bad "sensor SENSOR_OK grammar reject: $(printf '%q' "$line")"
+          continue
+        fi
+        ok_lines=$((ok_lines + 1))
         local body="${line#SENSOR_OK }"
+        if printf '%s\n' "$seen_oks" | grep -qxF -- "$body"; then
+          bad "sensor duplicate receipt: $body"
+        else
+          seen_oks="${seen_oks}${body}"$'\n'
+        fi
         if ! printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -qxF -- "$body"; then
           bad "sensor unexpected receipt: $body"
         fi
         ;;
+      SENSOR_BAD\ *)
+        if [[ "$line" == "SENSOR_BAD " || "$line" == "SENSOR_BAD" ]]; then
+          bad "sensor SENSOR_BAD grammar reject: $(printf '%q' "$line")"
+          continue
+        fi
+        bad_lines=$((bad_lines + 1))
+        bad "${line#SENSOR_BAD }"
+        ;;
+      SENSOR_DONE\ *)
+        local done_rest="${line#SENSOR_DONE }"
+        # Exact grammar: SENSOR_DONE + single space + one-or-more digits only.
+        if [[ "$line" != "SENSOR_DONE $done_rest" || ! "$done_rest" =~ ^[0-9]+$ ]]; then
+          bad "sensor SENSOR_DONE grammar reject: $(printf '%q' "$line")"
+          continue
+        fi
+        done_lines=$((done_lines + 1))
+        ;;
+      *)
+        bad "sensor unexpected line (strict grammar): $(printf '%q' "$line")"
+        ;;
     esac
   done <<< "$out_text"
+
+  # Final physical line must be exactly SENSOR_DONE <expected_count>
+  if [[ "$last_line" != "SENSOR_DONE $expected_count" ]]; then
+    bad "sensor final line want 'SENSOR_DONE $expected_count' got $(printf '%q' "$last_line")"
+  else
+    ok "sensor final line SENSOR_DONE $expected_count"
+  fi
+
+  # Exactly one DONE total (early sentinel + final, or missing, both fail).
+  if [[ "$done_lines" -ne 1 ]]; then
+    bad "sensor SENSOR_DONE count want 1 got $done_lines (early sentinel or missing)"
+  fi
+
+  # Every expected id exactly once (whole-line fixed match; no prefix sanitize).
+  while IFS= read -r exp; do
+    [[ -z "$exp" ]] && continue
+    local n
+    n=$(printf '%s\n' "$out_text" | grep -cxF "SENSOR_OK $exp" || true)
+    if [[ "$n" -eq 0 ]]; then
+      bad "sensor missing receipt: $exp"
+    elif [[ "$n" -gt 1 ]]; then
+      bad "sensor duplicate receipt: $exp (count=$n)"
+    else
+      ok "$exp"
+    fi
+  done <<< "$EXPECTED_SWAP_RECEIPTS"
 
   if [[ "$ok_lines" -ne "$expected_count" ]]; then
     bad "sensor SENSOR_OK count want $expected_count got $ok_lines"
@@ -921,20 +991,13 @@ tally_sensor_receipts() {
     ok "sensor SENSOR_OK exact count $expected_count"
   fi
 
-  if [[ "$done_lines" -ne 1 ]]; then
-    bad "sensor missing unique SENSOR_DONE sentinel (done_lines=$done_lines)"
-  else
-    local done_n
-    done_n=$(printf '%s\n' "$out_text" | sed -n 's/^SENSOR_DONE //p' | head -n1)
-    if [[ "$done_n" == "$expected_count" ]]; then
-      ok "sensor SENSOR_DONE sentinel count $expected_count"
-    else
-      bad "sensor SENSOR_DONE want $expected_count got $done_n"
-    fi
+  if [[ "$bad_lines" -ne 0 ]]; then
+    bad "sensor SENSOR_BAD present (count=$bad_lines)"
   fi
 }
 
-# --- aggregator mutation checks (blank / partial / duplicate / missing sentinel) ---
+# --- aggregator mutation checks (blank / partial / duplicate / missing /
+# early sentinel / trailing junk / ANSI prefix / truncation) ---
 echo
 echo "=== sensor aggregator integrity mutations ==="
 # Run tally against deliberately broken payloads; expect FAIL to rise, then
@@ -956,13 +1019,28 @@ agg_mut_check() {
   fi
 }
 
+_build_full_ok_body() {
+  printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | while IFS= read -r r; do
+    [[ -z "$r" ]] && continue
+    printf 'SENSOR_OK %s\n' "$r"
+  done
+}
+_EXPECTED_COUNT=$(printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -c . || true)
+_full_ok=$(_build_full_ok_body)
+
 agg_mut_check "blank output" ""
 agg_mut_check "partial receipts" "$(printf '%s\n' "SENSOR_OK control readContainedFile inside text" "SENSOR_DONE 1")"
 agg_mut_check "duplicate receipt" "$(printf '%s\n' "SENSOR_OK control readContainedFile inside text" "SENSOR_OK control readContainedFile inside text" "SENSOR_DONE 1")"
-# Full expected set but missing SENSOR_DONE
-_full_no_done=$(printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | while IFS= read -r r; do printf 'SENSOR_OK %s\n' "$r"; done)
-agg_mut_check "missing sentinel" "$_full_no_done"
-unset _full_no_done
+agg_mut_check "missing sentinel" "$_full_ok"
+agg_mut_check "early sentinel" "$(printf '%s\n' "SENSOR_DONE $_EXPECTED_COUNT" "$_full_ok" "SENSOR_DONE $_EXPECTED_COUNT")"
+agg_mut_check "trailing junk" "$(printf '%s\n' "$_full_ok" "SENSOR_DONE $_EXPECTED_COUNT" "TRAILING_JUNK")"
+# ANSI/control-prefixed "duplicate"/BAD must not be sanitized into valid receipts
+agg_mut_check "ANSI-prefixed SENSOR_OK" "$(printf '%s\n' $'\033[32mSENSOR_OK control readContainedFile inside text' "SENSOR_DONE 1")"
+agg_mut_check "ANSI-prefixed SENSOR_BAD" "$(printf '%s\n' $'\033[31mSENSOR_BAD hostile' "SENSOR_DONE 0")"
+# Truncation: full OKs but cut off before complete SENSOR_DONE line
+agg_mut_check "truncation before DONE" "$(printf '%s\n' "$_full_ok" "SENSOR_DO")"
+agg_mut_check "truncation mid-count" "$(printf '%s\n' "$_full_ok" "SENSOR_DONE")"
+unset _full_ok _EXPECTED_COUNT
 
 SWAP_RC=0
 # Paths via env (not argv): importing the tool module must not trip isMain()
@@ -977,6 +1055,7 @@ import {
   symlinkSync,
   rmSync,
   cpSync,
+  renameSync,
 } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -996,11 +1075,14 @@ const {
   readContainedFile,
   sha256ContainedFile,
   setSafeReadAfterOpenHook,
+  setRootIdentityRecheckHook,
   loadPolicySchema,
   clearPolicySchemaCache,
   loadManifestCandidate,
   checkDoctrineConsistency,
   resolveCanonicalRepoRoot,
+  rootIdentitiesEqual,
+  assertRootIdentity,
 } = await import(pathToFileURL(toolPath).href);
 
 let fail = 0;
@@ -1082,16 +1164,6 @@ try {
   setSafeReadAfterOpenHook(({ openedDev, openedIno }) => {
     if (typeof openedDev === "bigint" && typeof openedIno === "bigint") {
       sawBigInt = true;
-      // Prove Number would silently round values above MAX_SAFE_INTEGER
-      const beyond = BigInt(Number.MAX_SAFE_INTEGER) + 2n;
-      if (Number(beyond) === Number.MAX_SAFE_INTEGER + 2) {
-        // Number cannot represent beyond exactly; if equality held, platform weird
-      }
-      if (BigInt(Number(beyond)) !== beyond) {
-        // expected: Number rounds — BigInt path cannot silently equal after round-trip
-      } else {
-        throw new Error("identity: Number round-trip preserved >MAX_SAFE_INTEGER (unexpected)");
-      }
     } else {
       throw new Error(
         "identity: expected bigint dev/ino, got " +
@@ -1109,6 +1181,45 @@ try {
     bad("bigint identity path failed: " + (e && e.message ? e.message : e));
   }
   setSafeReadAfterOpenHook(null);
+
+  // Behavioral BigInt comparator: two distinct identities above 2^53 that
+  // collide when coerced through Number must NOT compare equal. Lossy
+  // Number(dev)===Number(dev) would falsely accept a replacement root.
+  {
+    const hi1 = BigInt(Number.MAX_SAFE_INTEGER) + 1n; // 2^53
+    const hi2 = BigInt(Number.MAX_SAFE_INTEGER) + 2n; // 2^53+1
+    // Sanity: Number rounds both into the same float neighborhood.
+    const numberCollides =
+      Number(hi1) === Number(hi2) ||
+      Number(hi1) === Number(hi1 + 1n);
+    const a = { dev: hi1, ino: hi1 };
+    const b = { dev: hi2, ino: hi2 };
+    const same = { dev: hi1, ino: hi1 };
+    const eqAB = rootIdentitiesEqual(a, b);
+    const eqAA = rootIdentitiesEqual(a, same);
+    const lossyWouldMatch = Number(a.dev) === Number(b.dev) && Number(a.ino) === Number(b.ino);
+    if (
+      typeof a.dev === "bigint" &&
+      eqAA === true &&
+      eqAB === false &&
+      lossyWouldMatch === true &&
+      numberCollides
+    ) {
+      ok("bigint identity comparator rejects Number-colliding values");
+    } else {
+      bad(
+        "bigint comparator behavior unexpected: " +
+          JSON.stringify({
+            eqAA,
+            eqAB,
+            lossyWouldMatch,
+            numberCollides,
+            n1: Number(hi1),
+            n2: Number(hi2),
+          })
+      );
+    }
+  }
 
   // Injected swap A: after open, replace path with symlink to outside.
   setSafeReadAfterOpenHook(({ absPath }) => {
@@ -1282,6 +1393,126 @@ try {
   try { unlinkSync(join(root, "docs/14-human-gates.md")); } catch { /* ignore */ }
   writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
 
+  // Root directory replacement WITHIN one multi-file operation: freeze a
+  // RootIdentity, then rename/replace the actual directory between reads of
+  // checkDoctrineConsistency. Prior symlink-swap between independent calls is
+  // insufficient — this proves the frozen token is re-asserted per read.
+  {
+    const liveRoot = join(tmpdir(), "gibson-pm-rootlive-" + process.pid + "-" + Date.now());
+    const liveMoved = liveRoot + ".moved-aside";
+    const liveReplacement = liveRoot + ".replacement-staging";
+    try {
+      mkdirSync(join(liveRoot, "docs"), { recursive: true });
+      mkdirSync(join(liveRoot, "config/policy/schema"), { recursive: true });
+      mkdirSync(join(liveRoot, "config/policy/candidates"), { recursive: true });
+      writeFileSync(join(liveRoot, "docs/14-human-gates.md"), "# gates\n**G1**\n**G2**\n");
+      writeFileSync(join(liveRoot, "docs/03-roles.md"), "## planner\n");
+      writeFileSync(join(liveRoot, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n**B**\n**C**\n");
+      writeFileSync(join(liveRoot, "docs/02-sdlc-pipeline.md"), "## Stage 0 — Plan\n");
+      cpSync(schemaSrc, join(liveRoot, "config/policy/schema/policy-manifest-v1.schema.json"));
+      cpSync(candidateSrc, join(liveRoot, "config/policy/candidates/gibson-core-v1.candidate.json"));
+
+      const frozen = resolveCanonicalRepoRoot(liveRoot);
+      // Build a hostile replacement directory with different inode at same path.
+      mkdirSync(join(liveReplacement, "docs"), { recursive: true });
+      mkdirSync(join(liveReplacement, "config/policy/schema"), { recursive: true });
+      mkdirSync(join(liveReplacement, "config/policy/candidates"), { recursive: true });
+      writeFileSync(join(liveReplacement, "docs/14-human-gates.md"), "# REPLACED\n**G1**\n");
+      writeFileSync(join(liveReplacement, "docs/03-roles.md"), "## planner\n");
+      writeFileSync(join(liveReplacement, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n");
+      writeFileSync(join(liveReplacement, "docs/02-sdlc-pipeline.md"), "## Stage 0 — Plan\n");
+      cpSync(schemaSrc, join(liveReplacement, "config/policy/schema/policy-manifest-v1.schema.json"));
+      cpSync(candidateSrc, join(liveReplacement, "config/policy/candidates/gibson-core-v1.candidate.json"));
+
+      // Load candidate first without replacement so the multi-file op under
+      // test is checkDoctrineConsistency itself (not the prior manifest load).
+      const cand = loadManifestCandidate(
+        frozen,
+        "config/policy/candidates/gibson-core-v1.candidate.json"
+      );
+
+      let opensSeen = 0;
+      let replaced = false;
+      setSafeReadAfterOpenHook(() => {
+        opensSeen += 1;
+      });
+      setRootIdentityRecheckHook((rootId) => {
+        // After the first doctrine open inside this operation, replace the
+        // canonical directory at the frozen pathname with a different inode.
+        if (opensSeen < 1 || replaced) return;
+        if (rootId.path !== frozen.path) return;
+        replaced = true;
+        try {
+          renameSync(rootId.path, liveMoved);
+          renameSync(liveReplacement, rootId.path);
+        } catch (e) {
+          throw new Error("test root replace setup failed: " + e.message);
+        }
+      });
+
+      let refused = false;
+      let refuseMsg = "";
+      try {
+        const findings = checkDoctrineConsistency(cand, frozen);
+        const hasRootFail = findings.some(
+          (f) =>
+            f.severity === "error" &&
+            /repo root identity changed|repo root disappeared|repo root path no longer canonical|cannot read|cannot bind|identity changed|swap or race/i.test(
+              String(f.message) + " " + String(f.code)
+            )
+        );
+        if (hasRootFail) {
+          refused = true;
+          refuseMsg = "findings";
+        } else {
+          refuseMsg =
+            "no root-identity finding: " +
+            JSON.stringify(findings.map((f) => f.code + ":" + f.message));
+        }
+      } catch (e) {
+        refuseMsg = e && e.message ? e.message : String(e);
+        if (
+          /repo root identity changed|repo root disappeared|repo root path no longer canonical|cannot read|cannot bind|identity changed|swap or race/i.test(
+            refuseMsg
+          )
+        ) {
+          refused = true;
+        }
+      }
+      setRootIdentityRecheckHook(null);
+      setSafeReadAfterOpenHook(null);
+
+      // Frozen token must still refuse the live path (replacement inode).
+      let directRefuse = false;
+      try {
+        assertRootIdentity(frozen);
+      } catch (e) {
+        if (
+          /repo root identity changed|repo root disappeared|no longer canonical/i.test(
+            e && e.message ? e.message : String(e)
+          )
+        ) {
+          directRefuse = true;
+        }
+      }
+
+      if (refused && replaced && directRefuse) {
+        ok("root directory replacement within operation fails closed");
+      } else {
+        bad(
+          "root directory replacement not refused: " +
+            JSON.stringify({ refused, replaced, directRefuse, refuseMsg, opensSeen })
+        );
+      }
+    } finally {
+      setRootIdentityRecheckHook(null);
+      setSafeReadAfterOpenHook(null);
+      try { rmSync(liveRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { rmSync(liveMoved, { recursive: true, force: true }); } catch { /* ignore */ }
+      try { rmSync(liveReplacement, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+
   // Root-swap / no cache poison: symlink root → A, load; retarget → B, load must
   // see B; retarget → A, load must see A again (never sticky B under A identity).
   function writeMiniRoot(dir, marker) {
@@ -1401,6 +1632,7 @@ try {
 } finally {
   // Outer finally: never leak hook or cache across failures
   setSafeReadAfterOpenHook(null);
+  setRootIdentityRecheckHook(null);
   clearPolicySchemaCache();
   try { rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
   try { rmSync(outside, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -1413,23 +1645,33 @@ console.log("SENSOR_DONE " + okCount);
 process.exit(fail === 0 ? 0 : 1);
 ' 2>&1) || SWAP_RC=$?
 
-# Strict aggregator: exact unique receipts + count + terminal sentinel
+# Strict aggregator: exact unique receipts + count + terminal sentinel grammar
 tally_sensor_receipts "$SWAP_OUT"
-if [[ "$SWAP_RC" -ne 0 ]] && ! echo "$SWAP_OUT" | grep -q "SENSOR_BAD "; then
+if [[ "$SWAP_RC" -ne 0 ]] && ! echo "$SWAP_OUT" | grep -q "^SENSOR_BAD "; then
   bad "injected-swap sensor exited non-zero without SENSOR_BAD (out=$SWAP_OUT)"
 fi
 
-# Static proof: production identity path uses bigint Stats options
+# Static proof: production identity path uses bigint Stats options + comparator
 if grep -q 'fstatSync(fd, { bigint: true })' "$TOOL" && \
-   grep -q 'statSync(real, { bigint: true })' "$TOOL"; then
-  ok "source uses BigInt fstatSync/statSync options"
+   grep -q 'statSync(real, { bigint: true })' "$TOOL" && \
+   grep -q 'export function rootIdentitiesEqual' "$TOOL"; then
+  ok "source uses BigInt fstatSync/statSync and rootIdentitiesEqual"
 else
-  bad "source missing BigInt stats options on identity path"
+  bad "source missing BigInt stats options or rootIdentitiesEqual"
 fi
 if grep -q 'O_RDONLY' "$TOOL" && grep -q 'O_NONBLOCK' "$TOOL"; then
   ok "source opens with O_RDONLY|O_NONBLOCK"
 else
   bad "source missing nonblocking open flags"
+fi
+# Root identity token (path + BigInt dev/ino) must be captured, not path-only
+if grep -q 'export function resolveCanonicalRepoRoot' "$TOOL" && \
+   grep -q 'export function assertRootIdentity' "$TOOL" && \
+   grep -q 'dev: st.dev' "$TOOL" && \
+   grep -q 'ino: st.ino' "$TOOL"; then
+  ok "source captures root identity path+dev+ino token"
+else
+  bad "source missing root identity token capture"
 fi
 # No approve-then-reopen legacy exports
 if grep -q 'export function resolveUnderRoot' "$TOOL" || \
@@ -1437,6 +1679,210 @@ if grep -q 'export function resolveUnderRoot' "$TOOL" || \
   bad "unsafe legacy resolveUnderRoot/sha256File still exported"
 else
   ok "unsafe legacy resolveUnderRoot/sha256File removed"
+fi
+
+# ---------------------------------------------------------------------------
+# Consistency must fail closed on ALL provenance errors (not only digest /
+# missing-file). Fifth/later provenance sources are traversed; path escape
+# and later-source symlink swap must surface as E_PROVENANCE_* findings.
+# ---------------------------------------------------------------------------
+echo
+echo "=== consistency fail-closed on provenance errors (incl. later sources) ==="
+
+# Disposable mini-repo for relative --manifest containment
+MINI_PROV="$ROOT/mini-prov"
+mkdir -p "$MINI_PROV/docs" "$MINI_PROV/config/policy/schema" "$MINI_PROV/config/policy/candidates"
+for d in docs/14-human-gates.md docs/03-roles.md docs/06-quality-gates.md docs/02-sdlc-pipeline.md; do
+  mkdir -p "$MINI_PROV/$(dirname "$d")"
+  cp "$REPO_ROOT/$d" "$MINI_PROV/$d"
+done
+cp "$SCHEMA" "$MINI_PROV/config/policy/schema/policy-manifest-v1.schema.json"
+# Also copy any other provenance paths the candidate pins so digests can be re-pinned
+"$NODE" -e '
+  const fs = require("fs");
+  const path = require("path");
+  const repo = process.argv[1];
+  const mini = process.argv[2];
+  const cand = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+  for (const s of cand.provenance.sources) {
+    if (typeof s.path !== "string") continue;
+    const src = path.join(repo, s.path);
+    const dst = path.join(mini, s.path);
+    if (fs.existsSync(src) && fs.statSync(src).isFile()) {
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(src, dst);
+    }
+  }
+' "$REPO_ROOT" "$MINI_PROV" "$CANDIDATE"
+
+# Fifth provenance source with exact .. traversal path (relative manifest only)
+mutate_json "$CANDIDATE" "$MINI_PROV/fifth-escape.json" '
+  c.provenance.sources.push({
+    id: "src.fifth-outside",
+    path: "../outside.md",
+    digestAlgorithm: "sha256",
+    digest: "0".repeat(64),
+    role: "supporting"
+  });
+'
+# Re-pin digests for the original sources under the mini root so only the fifth fails
+"$NODE" -e '
+  const fs = require("fs");
+  const crypto = require("crypto");
+  const path = require("path");
+  const root = process.argv[1];
+  const p = process.argv[2];
+  const c = JSON.parse(fs.readFileSync(p, "utf8"));
+  for (const s of c.provenance.sources) {
+    if (s.path === "../outside.md") continue;
+    const abs = path.join(root, s.path);
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+      s.digest = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex");
+    }
+  }
+  fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+' "$MINI_PROV" "$MINI_PROV/fifth-escape.json"
+out=$(run_tool check-consistency --repo-root "$MINI_PROV" --manifest "fifth-escape.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "fifth provenance ../outside.md fails consistency" || bad "fifth provenance ../outside.md accepted (out=$out)"
+has "fifth source path error code" "$out" "E_PROVENANCE_PATH"
+# Must not claim consistency OK while discarding escape
+lacks "fifth source no false I_CONSISTENCY_OK alone" "$out" "I_CONSISTENCY_OK"
+
+# Later (5th) source that is a symlink escaping the root
+OUTSIDE_PROV="$ROOT/outside-prov"
+mkdir -p "$OUTSIDE_PROV"
+printf 'OUTSIDE_PROV_SECRET\n' > "$OUTSIDE_PROV/leaked.md"
+ln -sfn "$OUTSIDE_PROV/leaked.md" "$MINI_PROV/docs/later-escape.md"
+"$NODE" -e '
+  const fs = require("fs");
+  const crypto = require("crypto");
+  const path = require("path");
+  const root = process.argv[1];
+  const candPath = process.argv[2];
+  const outPath = process.argv[3];
+  const c = JSON.parse(fs.readFileSync(candPath, "utf8"));
+  function dig(rel) {
+    return crypto.createHash("sha256").update(fs.readFileSync(path.join(root, rel))).digest("hex");
+  }
+  for (const s of c.provenance.sources) {
+    const abs = path.join(root, s.path);
+    try {
+      if (fs.existsSync(abs) && fs.statSync(abs).isFile() && !fs.lstatSync(abs).isSymbolicLink()) {
+        s.digest = dig(s.path);
+      }
+    } catch { /* skip */ }
+  }
+  c.provenance.sources.push({
+    id: "src.later-symlink-escape",
+    path: "docs/later-escape.md",
+    digestAlgorithm: "sha256",
+    digest: "a".repeat(64),
+    role: "supporting"
+  });
+  fs.writeFileSync(outPath, JSON.stringify(c, null, 2) + "\n");
+' "$MINI_PROV" "$CANDIDATE" "$MINI_PROV/cand-later.json"
+out=$(run_tool check-consistency --repo-root "$MINI_PROV" --manifest "cand-later.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "later provenance symlink escape fails consistency" || bad "later symlink escape accepted (out=$out)"
+if echo "$out" | grep -Eq 'E_PROVENANCE_PATH_ESCAPE|E_PROVENANCE_PATH'; then
+  ok "later source emits provenance path/escape code"
+else
+  bad "later source missing provenance escape code (out=$out)"
+fi
+lacks "later source no false consistency OK" "$out" "I_CONSISTENCY_OK"
+
+# Source-level proof: consistency revalidation propagates all E_PROVENANCE_* codes
+if grep -q 'startsWith("E_PROVENANCE")' "$TOOL" || grep -q "startsWith('E_PROVENANCE')" "$TOOL"; then
+  ok "consistency propagates all E_PROVENANCE_* findings"
+else
+  bad "consistency missing E_PROVENANCE_* propagation filter"
+fi
+
+# ---------------------------------------------------------------------------
+# mktemp -d failure must stop before traps / child path construction.
+# Inject a failing mktemp; prove the suite-equivalent preamble exits without
+# creating or writing under /bin, $HOME, or the repository.
+# ---------------------------------------------------------------------------
+echo
+echo "=== mktemp -d failure stops before hostile path writes ==="
+MKTEMP_PROBE="$ROOT/mktemp-probe"
+mkdir -p "$MKTEMP_PROBE/bin" "$MKTEMP_PROBE/watch"
+# Marker path that must remain untouched if ROOT were empty/wrong
+MARKER_BIN="$MKTEMP_PROBE/watch/bin-marker"
+# Fake mktemp that fails
+cat > "$MKTEMP_PROBE/bin/mktemp" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$MKTEMP_PROBE/bin/mktemp"
+# Probe script mirrors the suite's fail-closed preamble (not the full suite)
+cat > "$MKTEMP_PROBE/probe.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -uo pipefail
+# If ROOT were empty, these would resolve to broad paths — we must never write.
+# Use env overrides so the probe never targets real /bin or $HOME.
+export PATH="${FAKE_BIN}:/usr/bin:/bin"
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-policy-manifest-probe.XXXXXX") || {
+  echo "PROBE_MKTEMP_FAILED"
+  exit 1
+}
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+  echo "PROBE_MKTEMP_EMPTY"
+  exit 1
+fi
+# Only after validation may we install trap / write children.
+trap 'rm -rf -- "${ROOT:?}"' EXIT
+mkdir -p "$ROOT/bin"
+echo "STUB_WRITTEN" > "$ROOT/bin/hostile-stub"
+echo "PROBE_UNEXPECTED_SUCCESS"
+exit 0
+PROBE
+chmod +x "$MKTEMP_PROBE/probe.sh"
+PROBE_OUT=$(
+  FAKE_BIN="$MKTEMP_PROBE/bin" \
+  TMPDIR="$MKTEMP_PROBE/tmp-should-not-matter" \
+  bash "$MKTEMP_PROBE/probe.sh" 2>&1
+) || PROBE_RC=$?
+PROBE_RC=${PROBE_RC:-0}
+if [[ "$PROBE_RC" -ne 0 ]] && echo "$PROBE_OUT" | grep -q "PROBE_MKTEMP_FAILED"; then
+  ok "mktemp failure exits before trap/child writes"
+else
+  bad "mktemp failure probe did not fail closed (rc=$PROBE_RC out=$PROBE_OUT)"
+fi
+# Prove no write escaped into the watch markers / real broad paths via empty ROOT
+if [[ -e "$MARKER_BIN" || -e "/bin/hostile-stub-policy-manifest-probe" ]]; then
+  bad "mktemp failure wrote under bin-like path"
+else
+  ok "mktemp failure did not write bin marker"
+fi
+# Empty-ROOT simulation: without the guard, ROOT="" + mkdir -p "$ROOT/bin" → /bin
+# Prove the guard rejects empty ROOT before mkdir.
+cat > "$MKTEMP_PROBE/probe-empty.sh" <<'PROBE'
+#!/usr/bin/env bash
+set -uo pipefail
+# Simulate mktemp returning empty string without exiting (hostile)
+ROOT=""
+if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
+  echo "PROBE_EMPTY_REJECTED"
+  exit 1
+fi
+# Would resolve to /bin if we got here
+mkdir -p "$ROOT/bin"
+echo "owned" > "$ROOT/bin/hostile-stub-policy-manifest-probe"
+echo "PROBE_EMPTY_WRITTEN"
+exit 0
+PROBE
+EMPTY_OUT=$(bash "$MKTEMP_PROBE/probe-empty.sh" 2>&1) || EMPTY_RC=$?
+EMPTY_RC=${EMPTY_RC:-0}
+if [[ "$EMPTY_RC" -ne 0 ]] && echo "$EMPTY_OUT" | grep -q "PROBE_EMPTY_REJECTED"; then
+  ok "empty ROOT rejected before child path construction"
+else
+  bad "empty ROOT not rejected (rc=$EMPTY_RC out=$EMPTY_OUT)"
+fi
+if [[ -e /bin/hostile-stub-policy-manifest-probe ]]; then
+  bad "empty ROOT simulation wrote /bin/hostile-stub-policy-manifest-probe"
+  rm -f /bin/hostile-stub-policy-manifest-probe 2>/dev/null || true
+else
+  ok "empty ROOT simulation did not write under /bin"
 fi
 
 echo

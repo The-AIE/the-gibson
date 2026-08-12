@@ -221,13 +221,127 @@ export function isSafeRepoRelPath(p) {
 }
 
 /**
- * Resolve and validate one immutable canonical repository root. Realpath must
- * succeed (no fallback to unresolved strings — that would desync cache keys
- * and containment). The returned path is the single root identity all
- * subsequent reads/schema loads must use.
+ * Immutable repository-root identity: canonical realpath plus exact BigInt
+ * device/inode. Captured once per CLI/operation and re-asserted around every
+ * target open/read so a rename/replacement of the root directory cannot be
+ * silently accepted via a mutable pathname string.
+ *
+ * @typedef {{ path: string, dev: bigint, ino: bigint }} RootIdentity
+ */
+
+/**
+ * Exact BigInt root-identity comparison (production comparator).
+ * Must NOT coerce through Number — values above 2^53-1 collide after rounding
+ * and would falsely treat distinct directories as the same root.
+ *
+ * @param {{ dev: bigint, ino: bigint } | null | undefined} a
+ * @param {{ dev: bigint, ino: bigint } | null | undefined} b
+ * @returns {boolean}
+ */
+export function rootIdentitiesEqual(a, b) {
+  if (!a || !b) return false;
+  if (typeof a.dev !== "bigint" || typeof a.ino !== "bigint") return false;
+  if (typeof b.dev !== "bigint" || typeof b.ino !== "bigint") return false;
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+/**
+ * True when value is a frozen-shape root identity token (path + BigInt dev/ino).
+ * @param {unknown} v
+ * @returns {v is RootIdentity}
+ */
+export function isRootIdentity(v) {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof /** @type {RootIdentity} */ (v).path === "string" &&
+    /** @type {RootIdentity} */ (v).path.length > 0 &&
+    typeof /** @type {RootIdentity} */ (v).dev === "bigint" &&
+    typeof /** @type {RootIdentity} */ (v).ino === "bigint"
+  );
+}
+
+/**
+ * Test-only hook: runs at the start of {@link assertRootIdentity}, **before**
+ * re-stat of the declared root. Used to deterministically rename/replace the
+ * canonical root directory between reads inside one multi-file operation.
+ * Production code never sets it. Pass `null` to clear.
+ *
+ * @type {null | ((rootId: RootIdentity) => void)}
+ */
+let rootIdentityRecheckHook = null;
+
+/**
+ * @param {null | ((rootId: RootIdentity) => void)} fn
+ */
+export function setRootIdentityRecheckHook(fn) {
+  rootIdentityRecheckHook = typeof fn === "function" ? fn : null;
+}
+
+/**
+ * Re-stat the declared root path and require the exact same BigInt dev/ino
+ * identity. Rejects root disappearance, replacement, type change, or loss of
+ * canonical realpath. Does **not** mint a new identity from the current path
+ * (that would accept a hostile replacement at the same pathname).
+ *
+ * @param {RootIdentity} rootId
+ * @returns {RootIdentity}
+ */
+export function assertRootIdentity(rootId) {
+  if (!isRootIdentity(rootId)) {
+    throw new Error("path: invalid repo root identity token");
+  }
+  if (rootId.path.includes("\0")) {
+    throw new Error("path: unsafe repo root");
+  }
+  if (typeof rootIdentityRecheckHook === "function") {
+    rootIdentityRecheckHook(rootId);
+  }
+  let st;
+  try {
+    st = statSync(rootId.path, { bigint: true });
+  } catch (e) {
+    throw new Error(
+      `path: repo root disappeared or unreadable: ${e && e.message ? e.message : e}`
+    );
+  }
+  if (!st.isDirectory()) {
+    throw new Error("path: repo root is not a directory");
+  }
+  if (typeof st.dev !== "bigint" || typeof st.ino !== "bigint") {
+    throw new Error(
+      `path: repo root identity must use BigInt dev/ino (got ${typeof st.dev}/${typeof st.ino})`
+    );
+  }
+  if (!rootIdentitiesEqual(rootId, { dev: st.dev, ino: st.ino })) {
+    throw new Error(
+      "path: repo root identity changed (replacement or race)"
+    );
+  }
+  let real;
+  try {
+    real = realpathSync(rootId.path);
+  } catch (e) {
+    throw new Error(
+      `path: cannot realpath repo root: ${e && e.message ? e.message : e}`
+    );
+  }
+  if (real !== rootId.path) {
+    throw new Error(
+      "path: repo root path no longer canonical (symlink retarget or replace)"
+    );
+  }
+  return rootId;
+}
+
+/**
+ * Resolve and validate one immutable canonical repository-root identity.
+ * Realpath must succeed (no fallback to unresolved strings). Captures path
+ * plus exact BigInt `dev`/`ino` so later reads re-assert the same directory
+ * rather than trusting a mutable pathname alone.
  *
  * @param {string} repoRoot
- * @returns {string} absolute realpath of a directory
+ * @returns {RootIdentity}
  */
 export function resolveCanonicalRepoRoot(repoRoot) {
   if (typeof repoRoot !== "string" || !repoRoot) {
@@ -242,28 +356,57 @@ export function resolveCanonicalRepoRoot(repoRoot) {
   } catch (e) {
     throw new Error(`path: cannot realpath repo root: ${e.message}`);
   }
+  let st;
   try {
-    const st = statSync(rootReal, { bigint: true });
-    if (!st.isDirectory()) {
-      throw new Error("path: repo root is not a directory");
-    }
+    st = statSync(rootReal, { bigint: true });
   } catch (e) {
-    if (e.message && e.message.startsWith("path:")) throw e;
     throw new Error(`path: cannot stat repo root: ${e.message}`);
   }
-  return rootReal;
+  if (!st.isDirectory()) {
+    throw new Error("path: repo root is not a directory");
+  }
+  if (typeof st.dev !== "bigint" || typeof st.ino !== "bigint") {
+    throw new Error(
+      `path: repo root identity must use BigInt dev/ino (got ${typeof st.dev}/${typeof st.ino})`
+    );
+  }
+  return Object.freeze({
+    path: rootReal,
+    dev: st.dev,
+    ino: st.ino,
+  });
 }
 
 /**
- * Lexically resolve a repo-relative path under a **canonical** repo root.
- * Prefer passing the return value of {@link resolveCanonicalRepoRoot} so root
- * identity is frozen once per CLI/operation. Refuse absolute paths, NUL, and
- * exact `..` segments. Does **not** open the target — that is bound to the fd
- * in {@link readContainedFile}. Safe names such as `docs/a..b.md` remain legal.
+ * Coerce a path string or existing {@link RootIdentity} into a verified
+ * identity. Strings are resolved once (new token). Existing tokens are
+ * re-asserted against the live filesystem without minting a replacement
+ * identity from the pathname alone.
  *
- * @param {string} repoRoot canonical or resolvable repo root
+ * @param {string | RootIdentity} repoRoot
+ * @returns {RootIdentity}
+ */
+export function coerceRootIdentity(repoRoot) {
+  if (isRootIdentity(repoRoot)) {
+    return assertRootIdentity(repoRoot);
+  }
+  if (typeof repoRoot === "string") {
+    return resolveCanonicalRepoRoot(repoRoot);
+  }
+  throw new Error("path: empty repo root");
+}
+
+/**
+ * Lexically resolve a repo-relative path under a **canonical** repo root
+ * identity. Prefer passing the return value of {@link resolveCanonicalRepoRoot}
+ * so root identity is frozen once per CLI/operation. Refuse absolute paths,
+ * NUL, and exact `..` segments. Does **not** open the target — that is bound
+ * to the fd in {@link readContainedFile}. Safe names such as `docs/a..b.md`
+ * remain legal.
+ *
+ * @param {string | RootIdentity} repoRoot canonical root identity or path
  * @param {string} relPath
- * @returns {{ rootReal: string, absPath: string, norm: string }}
+ * @returns {{ rootId: RootIdentity, rootReal: string, absPath: string, norm: string }}
  */
 export function resolveLexicalUnderRoot(repoRoot, relPath) {
   if (typeof relPath !== "string" || !relPath) {
@@ -290,15 +433,16 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
   if (!SAFE_REL_PATH.test(norm)) {
     throw new Error(`path: malformed relative path: ${relPath}`);
   }
-  // Single validated root identity for this resolution (no soft fallback).
-  const rootReal = resolveCanonicalRepoRoot(repoRoot);
+  // Bind to the immutable root identity (string → resolve; token → re-assert).
+  const rootId = coerceRootIdentity(repoRoot);
+  const rootReal = rootId.path;
 
   const absPath = resolve(rootReal, norm);
   const rel = relative(rootReal, absPath);
   if (rel.startsWith("..") || isAbsolute(rel) || hasDotDotSegment(rel)) {
     throw new Error(`path: resolves outside repo root: ${relPath}`);
   }
-  return { rootReal, absPath, norm };
+  return { rootId, rootReal, absPath, norm };
 }
 
 /**
@@ -309,6 +453,7 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
  *
  * @type {null | ((info: {
  *   rootReal: string,
+ *   rootId: RootIdentity,
  *   relPath: string,
  *   absPath: string,
  *   fd: number,
@@ -333,14 +478,22 @@ export function setSafeReadAfterOpenHook(fn) {
  * repo root (avoids root-symlink race vs the identity used for open) and does
  * **not** read file bytes.
  *
- * @param {string} rootReal immutable canonical repo root from resolveCanonicalRepoRoot
+ * @param {string} rootReal immutable canonical repo root path from RootIdentity
  * @param {string} absPath lexical absolute path used for open
  * @param {number} fd
  * @param {string} relPath for error messages
  * @param {{ dev: bigint, ino: bigint, isFile: () => boolean }} opened bigint Stats
+ * @param {RootIdentity} [rootId] optional identity token for hook context
  * @returns {{ rootReal: string, real: string }}
  */
-function assertOpenedIdentityContained(rootReal, absPath, fd, relPath, opened) {
+function assertOpenedIdentityContained(
+  rootReal,
+  absPath,
+  fd,
+  relPath,
+  opened,
+  rootId
+) {
   // Reject FIFO/socket/dir/device after nonblocking open — never hang on open.
   if (!opened.isFile()) {
     throw new Error(`path: not a regular file: ${relPath}`);
@@ -354,6 +507,7 @@ function assertOpenedIdentityContained(rootReal, absPath, fd, relPath, opened) {
   if (typeof safeReadAfterOpenHook === "function") {
     safeReadAfterOpenHook({
       rootReal,
+      rootId,
       relPath,
       absPath,
       fd,
@@ -403,19 +557,28 @@ function assertOpenedIdentityContained(rootReal, absPath, fd, relPath, opened) {
 
 /**
  * Open a repo-relative path with nonblocking read flags, prove the opened
- * identity is a regular file contained under repoRoot (BigInt dev/ino), then
- * read bytes **only from that fd**. Fail closed on FIFO/device/dir (after open,
- * without hanging), lexical/realpath escape, or identity change.
+ * identity is a regular file contained under the frozen root identity
+ * (BigInt dev/ino), then read bytes **only from that fd**. Fail closed on
+ * FIFO/device/dir (after open, without hanging), lexical/realpath escape,
+ * root identity change, or target identity change.
+ *
+ * Root identity is verified before open and again after open (before bytes)
+ * so a rename/replacement of the canonical root between multi-file operation
+ * steps cannot be accepted.
  *
  * Applies to every validation read class (manifest, schema, doctrine, digest).
  *
- * @param {string} repoRoot
+ * @param {string | RootIdentity} repoRoot
  * @param {string} relPath
  * @param {BufferEncoding | null} [encoding] null → Buffer
  * @returns {string | Buffer}
  */
 export function readContainedFile(repoRoot, relPath, encoding = null) {
-  const { absPath, rootReal } = resolveLexicalUnderRoot(repoRoot, relPath);
+  // Freeze/assert root identity once for this read; do not re-mint from path.
+  const rootId = coerceRootIdentity(repoRoot);
+  const { absPath, rootReal } = resolveLexicalUnderRoot(rootId, relPath);
+  // Re-assert after lexical resolve (hook may have run / concurrent replace).
+  assertRootIdentity(rootId);
   let fd;
   try {
     // O_RDONLY|O_NONBLOCK: portable; rejects FIFO after open without hanging.
@@ -425,7 +588,16 @@ export function readContainedFile(repoRoot, relPath, encoding = null) {
   }
   try {
     const opened = fstatSync(fd, { bigint: true });
-    assertOpenedIdentityContained(rootReal, absPath, fd, relPath, opened);
+    assertOpenedIdentityContained(
+      rootReal,
+      absPath,
+      fd,
+      relPath,
+      opened,
+      rootId
+    );
+    // Root must still be the same directory after target open/bind.
+    assertRootIdentity(rootId);
     // Bytes only from the verified opened identity.
     return encoding == null
       ? readFileSync(fd)
@@ -525,11 +697,12 @@ function isMissingPathError(msg) {
 }
 
 /**
- * True when an error message indicates containment escape or identity swap.
+ * True when an error message indicates containment escape or identity swap
+ * (including frozen root-identity replacement between multi-file steps).
  * @param {string} msg
  */
 function isPathEscapeError(msg) {
-  return /realpath escapes|symlink|identity changed|swap or race|absolute or unsafe|escapes repo root|resolves outside/i.test(
+  return /realpath escapes|symlink|identity changed|swap or race|absolute or unsafe|escapes repo root|resolves outside|repo root identity changed|repo root disappeared|repo root path no longer canonical|repo root is not a directory/i.test(
     msg
   );
 }
@@ -621,33 +794,38 @@ export function clearPolicySchemaCache() {
  * that would let an absolute/out-of-root manifest validate against foreign
  * schema bytes.
  *
- * Resolves **one** immutable canonical root (no realpath failure fallback),
- * then reads schema under that same root identity. No schema cache: each call
- * re-validates root identity + re-reads so root-swap cannot serve stale bytes.
+ * Resolves **one** immutable canonical root identity (path + BigInt dev/ino;
+ * no realpath failure fallback), re-asserts it around the schema open/read, and
+ * never caches schema bytes across roots.
  *
  * Fail closed if missing or if the path escapes the root (including schema
- * symlink escape or post-open swap). Optional `override` is for pure unit tests
- * only.
+ * symlink escape, post-open swap, or root directory replacement). Optional
+ * `override` is for pure unit tests only.
  *
  * @param {Record<string, unknown> | null | undefined} override
- * @param {string | null | undefined} repoRoot
+ * @param {string | RootIdentity | null | undefined} repoRoot
  * @returns {Record<string, unknown>}
  */
 export function loadPolicySchema(override, repoRoot) {
   if (override && typeof override === "object") {
     return override;
   }
-  if (typeof repoRoot !== "string" || !repoRoot) {
+  if (
+    (typeof repoRoot !== "string" || !repoRoot) &&
+    !isRootIdentity(repoRoot)
+  ) {
     throw new Error(
       `schema load requires --repo-root containment (expected ${DEFAULT_SCHEMA_REL})`
     );
   }
-  // One immutable root identity for this load — same string used for the read.
-  const rootReal = resolveCanonicalRepoRoot(repoRoot);
+  // One immutable root identity for this load — re-asserted around the read.
+  const rootId = coerceRootIdentity(
+    /** @type {string | RootIdentity} */ (repoRoot)
+  );
   let schema;
   try {
     schema = /** @type {Record<string, unknown>} */ (
-      loadJsonContained(rootReal, DEFAULT_SCHEMA_REL)
+      loadJsonContained(rootId, DEFAULT_SCHEMA_REL)
     );
   } catch (e) {
     const msg = e && e.message ? e.message : String(e);
@@ -658,6 +836,8 @@ export function loadPolicySchema(override, repoRoot) {
     }
     throw e;
   }
+  // Post-read: root must still be the same directory.
+  assertRootIdentity(rootId);
   return schema;
 }
 
@@ -979,10 +1159,12 @@ function enforceRiSemanticPin(entry, pathPrefix, push) {
  * Validate a candidate object. Pure — does not read the filesystem unless
  * `options.checkProvenanceDigests` is true (then uses options.repoRoot).
  * Schema value constraints always apply via the bundled schema (or options.schema).
+ * When a repo root is supplied, all schema/provenance reads share one frozen
+ * {@link RootIdentity} for the duration of this call.
  *
  * @param {unknown} candidate
  * @param {{
- *   repoRoot?: string,
+ *   repoRoot?: string | RootIdentity,
  *   checkProvenanceDigests?: boolean,
  *   expectedValidatorVersion?: string,
  *   schema?: Record<string, unknown>,
@@ -1002,10 +1184,30 @@ export function validateCandidate(candidate, options = {}) {
   /** @type {Record<string, unknown>} */
   const c = /** @type {Record<string, unknown>} */ (candidate);
 
+  // Freeze one root identity for this validation (schema + all provenance).
+  /** @type {RootIdentity | null} */
+  let rootId = null;
+  if (options.repoRoot) {
+    try {
+      rootId = coerceRootIdentity(options.repoRoot);
+    } catch (e) {
+      push(
+        err(
+          "E_SCHEMA_LOAD",
+          `cannot bind repo root identity: ${e && e.message ? e.message : String(e)}`,
+          "repo-root"
+        )
+      );
+    }
+  }
+
   // Schema value parity (types, enums, consts, required, bounds, patterns,
   // array cardinality). Single source: published JSON Schema under repoRoot.
   try {
-    const schema = loadPolicySchema(options.schema, options.repoRoot);
+    const schema = loadPolicySchema(
+      options.schema,
+      rootId || options.repoRoot
+    );
     enforceSchemaValueConstraints(c, schema, "", push);
   } catch (e) {
     push(
@@ -1187,15 +1389,16 @@ export function validateCandidate(candidate, options = {}) {
 
         if (
           options.checkProvenanceDigests &&
-          options.repoRoot &&
+          rootId &&
           typeof s.path === "string" &&
           typeof s.digest === "string" &&
           SHA256_HEX.test(s.digest) &&
           isSafeRepoRelPath(s.path)
         ) {
           try {
-            // Single open → identity/containment → hash from same fd.
-            const live = sha256ContainedFile(options.repoRoot, s.path);
+            // Single open → identity/containment → hash from same fd, under
+            // the frozen root identity for this validateCandidate call.
+            const live = sha256ContainedFile(rootId, s.path);
             if (live !== s.digest) {
               push(
                 err(
@@ -1206,7 +1409,7 @@ export function validateCandidate(candidate, options = {}) {
               );
             }
           } catch (e) {
-            // Symlink escape / swap / path refusal — fail closed (not a soft warning).
+            // Symlink escape / swap / root replace / path refusal — fail closed.
             const msg = e && e.message ? e.message : String(e);
             if (isMissingPathError(msg)) {
               push(
@@ -1864,15 +2067,31 @@ export function validateCandidate(candidate, options = {}) {
 
 /**
  * Extract selected identifiers from live doctrine files and compare to the
- * candidate. Does not mutate doctrine. Uses fs only.
+ * candidate. Does not mutate doctrine. Uses fs only. Binds every doctrine and
+ * provenance revalidation read to one frozen {@link RootIdentity}.
  *
  * @param {Record<string, unknown>} candidate
- * @param {string} repoRoot
+ * @param {string | RootIdentity} repoRoot
  * @returns {Finding[]}
  */
 export function checkDoctrineConsistency(candidate, repoRoot) {
   /** @type {Finding[]} */
   const findings = [];
+
+  // One immutable root identity for the whole consistency operation.
+  let rootId;
+  try {
+    rootId = coerceRootIdentity(repoRoot);
+  } catch (e) {
+    findings.push(
+      err(
+        "E_CONSISTENCY_READ",
+        `cannot bind repo root identity: ${e && e.message ? e.message : e}`,
+        "repo-root"
+      )
+    );
+    return sortFindings(findings);
+  }
 
   const gatePath = "docs/14-human-gates.md";
   const rolesPath = "docs/03-roles.md";
@@ -1890,7 +2109,7 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
 
   try {
     const text = /** @type {string} */ (
-      readContainedFile(repoRoot, gatePath, "utf8")
+      readContainedFile(rootId, gatePath, "utf8")
     );
     let m;
     const re = new RegExp(DOCTRINE_GATE_RE.source, "g");
@@ -1903,7 +2122,7 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
 
   try {
     const text = /** @type {string} */ (
-      readContainedFile(repoRoot, rolesPath, "utf8")
+      readContainedFile(rootId, rolesPath, "utf8")
     );
     let m;
     const re = new RegExp(DOCTRINE_ROLE_HEADING_RE.source, "gm");
@@ -1916,7 +2135,7 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
 
   try {
     const text = /** @type {string} */ (
-      readContainedFile(repoRoot, tiersPath, "utf8")
+      readContainedFile(rootId, tiersPath, "utf8")
     );
     // Risk tiers table rows: **A** / **B** / **C** under "## Risk tiers"
     if (/##\s*Risk tiers/i.test(text)) {
@@ -1931,7 +2150,7 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
 
   try {
     const text = /** @type {string} */ (
-      readContainedFile(repoRoot, stagesPath, "utf8")
+      readContainedFile(rootId, stagesPath, "utf8")
     );
     // Stage headings: "## Stage N — Name"
     const stageNameToId = {
@@ -2027,13 +2246,18 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
     findings.push(err("E_CONSISTENCY_PARSE", "no stage headings found in doctrine", stagesPath));
   }
 
-  // Also re-check provenance digests as part of consistency.
-  const digestFindings = validateCandidate(candidate, {
-    repoRoot,
+  // Re-check provenance under the same frozen root identity. Fail closed on
+  // every provenance read/identity/containment/type/digest error — not only
+  // digest mismatch / missing file (a narrow filter would discard
+  // E_PROVENANCE_PATH_ESCAPE and emit a false I_CONSISTENCY_OK).
+  const provenanceFindings = validateCandidate(candidate, {
+    repoRoot: rootId,
     checkProvenanceDigests: true,
     expectedValidatorVersion: VALIDATOR_VERSION,
-  }).filter((f) => f.code === "E_PROVENANCE_DIGEST_MISMATCH" || f.code === "E_PROVENANCE_MISSING_FILE");
-  findings.push(...digestFindings);
+  }).filter(
+    (f) => typeof f.code === "string" && f.code.startsWith("E_PROVENANCE")
+  );
+  findings.push(...provenanceFindings);
 
   if (!findings.length) {
     findings.push(
@@ -2179,12 +2403,14 @@ DEFAULTS
   --format     both
 
 CONTAINMENT
-  --repo-root is realpath'd once to an immutable canonical directory (no soft
-  fallback). --manifest, schema, doctrine, and digest paths are resolved only
-  under that root (lexical + realpath + BigInt fd identity). Opens use
-  O_RDONLY|O_NONBLOCK so FIFO/device never hang; non-regular types fail closed
-  after open. Absolute paths, symlink escapes, and post-open path swaps are
-  refused before any byte read. Schema is always loaded from
+  --repo-root is realpath'd once into an immutable root identity token
+  (canonical path + exact BigInt dev/ino; no soft fallback). That identity is
+  re-asserted before and after every manifest/schema/doctrine/provenance open
+  so root disappearance, replacement, or type change fails closed. Paths are
+  resolved only under that root (lexical + realpath + BigInt fd identity).
+  Opens use O_RDONLY|O_NONBLOCK so FIFO/device never hang; non-regular types
+  fail closed after open. Absolute paths, symlink escapes, and post-open path
+  swaps are refused before any byte read. Schema is always loaded from
   config/policy/schema/policy-manifest-v1.schema.json inside the declared root
   — never from the tool checkout alone; no schema cache across roots.
 
