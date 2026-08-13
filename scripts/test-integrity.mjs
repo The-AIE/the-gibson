@@ -58,6 +58,49 @@ import {
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// inlined from lib/args.mjs — this file must stay single-file (vendored by gibson-gate.yml sparse-checkout)
+function dieUsage(msg) {
+  console.error(msg);
+  process.exit(2);
+}
+
+function unknownFlag(flag) {
+  dieUsage(`unknown flag: ${flag}`);
+}
+
+function readFlag(args, name) {
+  const i = args.indexOf(name);
+  if (i < 0) return null;
+  if (i + 1 >= args.length) {
+    dieUsage(`${name} requires a value`);
+  }
+  // Consume the next token verbatim — a value may look like a flag
+  // (`--waiver-text '--documented waiver'`). Missing only when i+1 >= length.
+  return args[i + 1];
+}
+
+function hasFlag(args, name) {
+  return args.includes(name);
+}
+
+function rejectUnknownFlags(argv, allowed, opts = {}) {
+  const allow = new Set(allowed);
+  const valueFlags = new Set(
+    opts.valueFlags ||
+      [...allow].filter((f) => f !== "-h" && f !== "--help" && f !== "--json")
+  );
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") break;
+    if (a.startsWith("-") && a !== "-") {
+      if (!allow.has(a)) unknownFlag(a);
+      if (valueFlags.has(a) && i + 1 < argv.length) {
+        i += 1;
+      }
+    }
+  }
+}
+
 /** Resolve symlinks so isMain works when the helper is copied into /tmp (macOS /var → /private/var). */
 function realpathOrResolve(p) {
   try {
@@ -977,20 +1020,6 @@ EXAMPLES
   process.exit(exit);
 }
 
-function readFlag(args, name) {
-  const i = args.indexOf(name);
-  if (i < 0) return null;
-  if (i + 1 >= args.length) {
-    console.error(`${RESULT}: ${name} requires a value`);
-    process.exit(2);
-  }
-  return args[i + 1];
-}
-
-function hasFlag(args, name) {
-  return args.includes(name);
-}
-
 function main(argv) {
   const args = argv.slice(2);
   if (args.length === 0 || args[0] === "-h" || args[0] === "--help") {
@@ -1000,6 +1029,7 @@ function main(argv) {
 
   try {
     if (cmd === "parse") {
+      rejectUnknownFlags(args, ["--input", "--out", "-h", "--help"]);
       const input = readFlag(args, "--input");
       if (!input) usage();
       const out = readFlag(args, "--out");
@@ -1012,6 +1042,16 @@ function main(argv) {
     }
 
     if (cmd === "compare") {
+      rejectUnknownFlags(args, [
+        "--base",
+        "--head",
+        "--waiver-text",
+        "--waiver-file",
+        "--trusted-source",
+        "--json",
+        "-h",
+        "--help",
+      ]);
       const basePath = readFlag(args, "--base");
       const headPath = readFlag(args, "--head");
       if (!basePath || !headPath) usage();
@@ -1052,6 +1092,15 @@ function main(argv) {
     }
 
     if (cmd === "journal-append") {
+      rejectUnknownFlags(args, [
+        "--journal",
+        "--old",
+        "--new",
+        "--reason",
+        "--sha",
+        "-h",
+        "--help",
+      ]);
       const journal = readFlag(args, "--journal");
       const oldPath = readFlag(args, "--old");
       const newPath = readFlag(args, "--new");
@@ -1071,6 +1120,11 @@ function main(argv) {
       return;
     }
 
+    // Unknown command — if it looks like a flag, say so (#192).
+    if (cmd.startsWith("-")) {
+      console.error(`unknown flag: ${cmd}`);
+      process.exit(2);
+    }
     console.error(`${RESULT}: unknown command ${JSON.stringify(cmd)}`);
     usage();
   } catch (e) {

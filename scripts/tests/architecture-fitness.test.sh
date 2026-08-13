@@ -18,7 +18,7 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export LC_ALL=C
 export LANG=C
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 COLLECTOR="$SCRIPT_DIR/../architecture-fitness.sh"
 PASS=0
 FAIL=0

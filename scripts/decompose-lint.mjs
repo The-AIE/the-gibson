@@ -26,6 +26,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { parseFlags } from "./lib/args.mjs";
 
 function help() {
   console.log(`decompose-lint.mjs — validate decomposition quality (docs/04)
@@ -59,17 +60,13 @@ if (args.includes("-h") || args.includes("--help") || args.length === 0) {
   process.exit(args.includes("-h") || args.includes("--help") ? 0 : 2);
 }
 
-function parseArgs(argv) {
-  const out = { file: null, repo: null, label: "gibson" };
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--file") out.file = argv[++i];
-    else if (argv[i] === "--repo") out.repo = argv[++i];
-    else if (argv[i] === "--label") out.label = argv[++i];
-  }
-  return out;
-}
-
-const opt = parseArgs(args);
+const opt = parseFlags(args, {
+  flags: {
+    "--file": { key: "file", default: null },
+    "--repo": { key: "repo", default: null },
+    "--label": { key: "label", default: "gibson" },
+  },
+});
 
 function loadIssues() {
   if (opt.file) {

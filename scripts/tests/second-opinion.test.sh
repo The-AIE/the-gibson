@@ -17,7 +17,7 @@
 #   scripts/tests/second-opinion.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON=$(cd "$SCRIPT_DIR/../.." && pwd)
 SECOND_OPINION="$GIBSON/scripts/second-opinion.sh"
 

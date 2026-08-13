@@ -392,7 +392,7 @@ parse_args() {
 }
 
 # Locate decision-ledger.sh next to this script for list validation reuse.
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 LEDGER_TOOL="$SCRIPT_DIR/decision-ledger.sh"
 
 render_digest() {

@@ -25,7 +25,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/../test-integrity.mjs"
 GATE="$SCRIPT_DIR/../gate.sh"
 BASELINE_SH="$SCRIPT_DIR/../gate-baseline.sh"
@@ -914,6 +914,8 @@ set +e
   WT_SIM="$ROOT/merge-base-wt"
   mkdir -p "$WT_SIM/scripts"
   cp "$TI" "$WT_SIM/scripts/test-integrity.mjs"
+  mkdir -p "$WT_SIM/scripts/lib"
+  cp "$SCRIPT_DIR/../lib/args.mjs" "$WT_SIM/scripts/lib/args.mjs"
   TI_TRUSTED="$WT_SIM/scripts/test-integrity.mjs"
   # head must not be the grading authority when base helper exists
   if [[ ! -f "$TI_TRUSTED" ]]; then
@@ -995,6 +997,8 @@ HOSTILE
 WT_BASE="$ROOT/trusted-base-wt"
 mkdir -p "$WT_BASE/scripts"
 cp "$TI" "$WT_BASE/scripts/test-integrity.mjs"
+mkdir -p "$WT_BASE/scripts/lib"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$WT_BASE/scripts/lib/args.mjs"
 write_metrics "$ROOT/t-base.json" 10 0 0
 write_metrics "$ROOT/t-head.json" 7 0 0
 # Using trusted helper → must FAIL with delta
@@ -1912,6 +1916,8 @@ MAX_BYTES=8388608
 ART="$ROOT/ti-art"
 mkdir -p "$ART/base" "$ART/head" "$ART/grader"
 cp "$TI" "$ART/grader/test-integrity.mjs"
+mkdir -p "$ART/grader/lib"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$ART/grader/lib/args.mjs"
 chmod 0555 "$ART/grader/test-integrity.mjs"
 
 # Shared offline validator mirroring ci/gibson-gate.yml final job (hostile inputs).

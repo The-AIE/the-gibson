@@ -22,6 +22,7 @@
 
 import { readdirSync, statSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
+import { parseFlags } from "./lib/args.mjs";
 
 function help() {
   console.log(`route-inventory.mjs — emit route inventory for AuthZ matrix (docs/08)
@@ -54,21 +55,17 @@ if (args.includes("-h") || args.includes("--help")) {
   process.exit(0);
 }
 
-function parseArgs(argv) {
-  const out = {
-    root: process.cwd(),
-    out: null,
-    roles: ["anon", "user", "admin"],
-  };
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--root") out.root = argv[++i];
-    else if (argv[i] === "--out") out.out = argv[++i];
-    else if (argv[i] === "--roles") out.roles = argv[++i].split(",").map((s) => s.trim());
-  }
-  return out;
-}
-
-const opt = parseArgs(args);
+const opt = parseFlags(args, {
+  flags: {
+    "--root": { key: "root", default: process.cwd() },
+    "--out": { key: "out", default: null },
+    "--roles": {
+      key: "roles",
+      default: () => ["anon", "user", "admin"],
+      transform: (s) => s.split(",").map((x) => x.trim()),
+    },
+  },
+});
 const appDirCandidates = [
   join(opt.root, "app"),
   join(opt.root, "src", "app"),

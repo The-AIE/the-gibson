@@ -61,7 +61,7 @@ rm -f "$HDR"
 
 # Optional Lighthouse JSON summary
 LH_SUMMARY="(lighthouse not installed or failed)"
-if command -v npx >/dev/null; then
+if command -v npx >/dev/null && command -v node >/dev/null 2>&1; then
   LH_TMP=$(mktemp)
   if npx --yes lighthouse@"11" "$URL" --quiet --chrome-flags="--headless --no-sandbox" \
       --only-categories=performance,accessibility,seo --output=json --output-path="$LH_TMP" 2>/dev/null; then
@@ -78,11 +78,13 @@ fi
 
 # Optional Vercel
 VERCEL_BLOCK="(set VERCEL_TOKEN + --vercel-project for API metrics)"
-if [[ -n "${VERCEL_TOKEN:-}" && -n "$VPROJ" ]]; then
+if [[ -n "${VERCEL_TOKEN:-}" && -n "$VPROJ" ]] && command -v node >/dev/null 2>&1; then
   VERCEL_BLOCK=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
     "https://api.vercel.com/v9/projects/${VPROJ}" 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);console.log("project="+j.name+" framework="+(j.framework||"?"));}catch(e){console.log("(vercel parse failed)")}})' \
     || echo "(vercel API failed)")
+elif [[ -n "${VERCEL_TOKEN:-}" && -n "$VPROJ" ]]; then
+  VERCEL_BLOCK="(node not on PATH — cannot parse Vercel API JSON)"
 fi
 
 # Posture reuse

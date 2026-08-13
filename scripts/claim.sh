@@ -202,10 +202,10 @@ CLAIM_ID="issue-${ISSUE}-${SLUG}"
 BRANCH="feat/${ISSUE}-${SLUG}"
 WT_DIR="$(cd "$CANONICAL/.." && pwd)/wt-${ISSUE}-${SLUG}"
 UTC="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
-info() { echo "claim.sh: $*"; }
+info() { echo "claim.sh: $*" >&2; }
 
 # Shared cleanup guards (#153 review P1 0D) — the same worktree resolution and
 # exact remote-branch query release-claim.sh's terminal cleanup uses. Rollback

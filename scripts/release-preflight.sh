@@ -117,8 +117,8 @@ PR_JSON=$(gh pr view "$PR" --repo "$REPO" \
   --json number,title,body,author,isDraft,mergeable,reviewDecision,labels,closingIssuesReferences,statusCheckRollup,reviews,comments,headRefOid 2>/dev/null) ||
   die "could not read $REPO#$PR"
 
-jqr() { echo "$PR_JSON" | jq -r "$1"; }
 command -v jq >/dev/null || die "jq is required"
+jqr() { echo "$PR_JSON" | jq -r "$1"; }
 
 AUTHOR=$(jqr '.author.login // ""')
 DRAFT=$(jqr '.isDraft')

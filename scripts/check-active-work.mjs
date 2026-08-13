@@ -27,6 +27,34 @@
 
 import { execFileSync } from "node:child_process";
 
+// inlined from lib/args.mjs — this file must stay single-file (vendored by gibson-gate.yml sparse-checkout)
+function dieUsage(msg) {
+  console.error(msg);
+  process.exit(2);
+}
+
+function unknownFlag(flag) {
+  dieUsage(`unknown flag: ${flag}`);
+}
+
+function rejectUnknownFlags(argv, allowed, opts = {}) {
+  const allow = new Set(allowed);
+  const valueFlags = new Set(
+    opts.valueFlags ||
+      [...allow].filter((f) => f !== "-h" && f !== "--help" && f !== "--json")
+  );
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") break;
+    if (a.startsWith("-") && a !== "-") {
+      if (!allow.has(a)) unknownFlag(a);
+      if (valueFlags.has(a) && i + 1 < argv.length) {
+        i += 1;
+      }
+    }
+  }
+}
+
 const log = (msg) => console.log(`check-active-work: ${msg}`);
 const err = (msg) => console.error(`check-active-work: ${msg}`);
 
@@ -34,6 +62,17 @@ function die(msg) {
   err(msg);
   process.exit(1);
 }
+
+// Env-driven (no flags). Still fail closed on typos so a CI misconfig is loud (#192).
+const cliArgs = process.argv.slice(2);
+if (cliArgs.includes("-h") || cliArgs.includes("--help")) {
+  console.log(`check-active-work.mjs — claim-isolation sensor (docs/05, #55)
+
+Driven by GITHUB_* env (pull_request). No flags.
+`);
+  process.exit(0);
+}
+rejectUnknownFlags(cliArgs, ["-h", "--help"]);
 
 const EVENT = process.env.GITHUB_EVENT_NAME || "";
 if (EVENT && EVENT !== "pull_request") {

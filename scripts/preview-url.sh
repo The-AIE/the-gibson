@@ -78,7 +78,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 die() { echo "preview-url.sh: ERROR: $*" >&2; exit 1; }
-command -v gh >/dev/null || die "gh required"
+# gh for PR/deploy lookups; node for JSON filter pipelines (#192).
+command -v gh >/dev/null 2>&1 || die "gh (GitHub CLI) required — install: https://cli.github.com/"
+command -v node >/dev/null 2>&1 || die "node required to parse gh JSON output — install Node.js and put it on PATH"
 
 REPO_ARGS=()
 if [[ -n "$REPO" ]]; then

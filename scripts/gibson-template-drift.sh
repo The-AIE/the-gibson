@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ -z "$GIBSON" ]]; then
   GIBSON=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 fi

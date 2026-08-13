@@ -92,7 +92,7 @@ info() { echo "second-opinion.sh: $*" >&2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
 [[ -n "$TASK_FILE" ]] && TASK=$(cat "$TASK_FILE")
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON="${GIBSON:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PLAYBOOK="$GIBSON/playbooks/reviewer.md"
 [[ -f "$PLAYBOOK" ]] || die "missing $PLAYBOOK"

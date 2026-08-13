@@ -7,7 +7,7 @@ export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-sensor@gibson.invalid}"
 export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SENSOR="$SCRIPT_DIR/../scope-overlap.mjs"
 
 PASS=0
@@ -53,11 +53,12 @@ GIT="git -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gp
 # patch stops matching and the suite fails loudly here rather than silently
 # reverting to testing a copy that no longer resembles the real thing.
 FASTDIR="$ROOT/fast"
-mkdir -p "$FASTDIR"
+mkdir -p "$FASTDIR/lib"
 SENSOR_FAST="$FASTDIR/scope-overlap.mjs"
 # pr-claims.sh is resolved next to the sensor on purpose (that binding is its
 # trust boundary), so the copy needs its own reader alongside it.
 cp "$SCRIPT_DIR/../pr-claims.sh" "$FASTDIR/pr-claims.sh"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$FASTDIR/lib/args.mjs"
 chmod +x "$FASTDIR/pr-claims.sh"
 # The substitution replaces the marked body of blockAtLeast() — the wait AND
 # the monotonic measurement that verifies it (#153 review round 5) — with an
@@ -1364,9 +1365,10 @@ echo "#153 exact-head · mutation: restoring silent prefer-file greeds admission
 # Mutate a private fast-copy of scope-overlap to restore silent prefer-file;
 # require the mutant to admit against the mixed fixture (sensor would go red).
 _mix_mut="$ROOT/mixadm-mut"
-mkdir -p "$_mix_mut"
+mkdir -p "$_mix_mut/lib"
 cp "$SENSOR_FAST" "$_mix_mut/scope-overlap.mjs"
 cp "$FASTDIR/pr-claims.sh" "$_mix_mut/pr-claims.sh"
+cp "$FASTDIR/lib/args.mjs" "$_mix_mut/lib/args.mjs"
 chmod +x "$_mix_mut/pr-claims.sh"
 # Surgical defect: restore silent prefer-file by skipping the prior branch
 # and continuing when the id is already present as per-file.
@@ -1428,9 +1430,10 @@ echo "$out" | grep -qiE 'identity mismatch|filename id|claim identity|claim:' &&
 
 echo "#153 exact-head · mutation: filename-only id bypasses body claim: match"
 _id_mut="$ROOT/idmis-mut"
-mkdir -p "$_id_mut"
+mkdir -p "$_id_mut/lib"
 cp "$SENSOR_FAST" "$_id_mut/scope-overlap.mjs"
 cp "$FASTDIR/pr-claims.sh" "$_id_mut/pr-claims.sh"
+cp "$FASTDIR/lib/args.mjs" "$_id_mut/lib/args.mjs"
 chmod +x "$_id_mut/pr-claims.sh"
 # Remove the filename != bodyClaimId refuse and force id = filenameId.
 perl -i -pe 's/if \(bodyClaimId !== filenameId\)/if (false \&\& bodyClaimId !== filenameId) \/* MUTATED identity *\//' \
@@ -1729,7 +1732,10 @@ fi
 
 # --- mutation receipts: JS without root-wide / fail-closed empty stem ---
 echo "#181 · mutation receipt: JS without root-wide must make sensor fail"
-MUT_JS="$ROOT/mut-scope-overlap.mjs"
+# Keep the mutant next to lib/args.mjs (import path is ./lib/args.mjs).
+mkdir -p "$ROOT/mut-js/lib"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$ROOT/mut-js/lib/args.mjs"
+MUT_JS="$ROOT/mut-js/scope-overlap.mjs"
 cp "$SENSOR" "$MUT_JS"
 # Neutralize the ROOT_SCOPE short-circuit and empty-stem fail-closed in the pure kernel.
 # Surgical: rewrite tokensOverlap body markers via perl for a known-bad kernel.
