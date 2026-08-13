@@ -106,7 +106,7 @@ Targets may ship a small JSON file so scripts know check names and model:
     "review-evidence"
   ],
   "productionEnvironment": "Production",
-  "reviewerLogin": "mrhinkle"
+  "reviewerLogin": "CHANGEME-reviewer"
 }
 ```
 

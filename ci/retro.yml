@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:5fa9e1cf9609b7607e3d2c4a377ac653172ae89f095db50fc4a0f4b15ee3af25
+# gibson-template-version: sha256:b7bdcd8d968369dcdb5b8c3a34b25aaad8728366a45eb1f57c4649ac000d2729
 # The Gibson — weekly historian sweep (docs/09)
 # Install as .github/workflows/retro.yml. Emits a markdown artifact of lesson
 # candidates; does not auto-commit to memory/ (historian agent or human applies).
@@ -12,9 +12,8 @@ on:
 # Deny all by default. Jobs grant least privilege only.
 permissions: {}
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# No PR trigger: do not share a cancel-in-progress group. A weekly/manual
+# sweep must not cancel a sibling run of the same workflow.
 
 jobs:
   weekly-sweep:

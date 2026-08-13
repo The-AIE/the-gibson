@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:1db6a1c351c969d10958cfac81fbd9dd22ec3efae5aa45450da06280674834f4
+# gibson-template-version: sha256:52862725d1c8b11a693e6a955da7270aefb01fb71c157687134f3c36147c1a70
 # The Gibson — security layers 2, 3 (partial), 4, 5, 8 (+ nightly full DAST)
 # Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
 # Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub
@@ -23,7 +23,8 @@ permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs only. Nightly/manual DAST must run to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Layer 2 — SAST (Semgrep). Report-only until target has a clean board.
@@ -39,17 +40,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
-      # L-056: report-only degradation must be visible (warning + step summary).
-      # uses: and run: are mutually exclusive, so the announce step carries the
-      # runtime annotations; the job (not the uses: step) is continue-on-error.
-      # if: always() so the announce still fires when checkout fails.
-      - name: Announce Semgrep report-only (L-056)
-        if: always()
-        run: |
-          msg="Semgrep SAST is report-only (job continue-on-error); findings do not fail the gate until promoted to hard-fail"
-          echo "::warning::${msg}"
-          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
       - name: Semgrep SAST (report)
+        id: semgrep
         uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
         with:
           config: >-
@@ -59,6 +51,34 @@ jobs:
             p/security-audit
             p/secrets
             p/owasp-top-ten
+      # L-056: report-only must stay visible. Trailing if: always() so a
+      # checkout/action failure is not hidden; steps.semgrep.outcome
+      # distinguishes success from failure/skipped. Job stays continue-on-error.
+      - name: Report Semgrep outcome
+        if: always()
+        env:
+          SEMGREP_OUTCOME: ${{ steps.semgrep.outcome }}
+        run: |
+          outcome="${SEMGREP_OUTCOME:-unknown}"
+          case "$outcome" in
+            success)
+              msg="Semgrep SAST is report-only (job continue-on-error); scan completed — findings do not fail the gate until promoted to hard-fail"
+              echo "::notice::${msg}"
+              ;;
+            failure)
+              msg="Semgrep SAST is report-only (job continue-on-error); scan failed — findings do not fail the gate until promoted to hard-fail"
+              echo "::warning::${msg}"
+              ;;
+            skipped)
+              msg="Semgrep SAST is report-only (job continue-on-error); scan skipped (prior step or action did not run)"
+              echo "::warning::${msg}"
+              ;;
+            *)
+              msg="Semgrep SAST is report-only (job continue-on-error); unexpected outcome=${outcome}"
+              echo "::warning::${msg}"
+              ;;
+          esac
+          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
 
   # Layer 3 (partial) — Trivy filesystem / supply-chain complementary scan.
   trivy-fs:
@@ -194,7 +214,9 @@ jobs:
           set -e
           echo "::add-mask::${VERCEL_AUTOMATION_BYPASS_SECRET:-__unset__}"
           if [ ! -x scripts/posture-probe.sh ]; then
-            echo "posture-probe.sh not vendored — skip"
+            msg="posture-probe.sh not vendored — skip (adoption gap)"
+            echo "::warning::${msg}"
+            echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           bypass=""

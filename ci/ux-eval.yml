@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:89f58559c349743f8e0f42b99aa42226717a35e113cd5acba84c16674b53ac5c
+# gibson-template-version: sha256:8aa1f22c8463582bbf0caa4e55f5da168f259b59d293639ca4d622ca6c2be9e5
 # The Gibson — UX evaluation against Vercel preview (docs/07)
 # Install as .github/workflows/ux-eval.yml.
 #
@@ -50,7 +50,9 @@ jobs:
             # Not vendored yet: assume UI, because assuming "no UI" is the
             # failure mode that silently disables this gate.
             echo "surface=ui" >> "$GITHUB_OUTPUT"
-            echo "::notice::scripts/ux-surface.sh not vendored — treating this PR as UI-affecting"
+            msg="scripts/ux-surface.sh not vendored — treating this PR as UI-affecting"
+            echo "::notice::${msg}"
+            echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if ./scripts/ux-surface.sh --pr "${{ github.event.pull_request.number }}"; then

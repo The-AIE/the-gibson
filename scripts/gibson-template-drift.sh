@@ -105,7 +105,10 @@ sha256_stdin() {
 }
 
 content_sha256() {
-  grep -v '^# gibson-template-version:' "$1" | sha256_stdin
+  # An empty or stamp-only file is valid input to the hasher. grep -v returns
+  # 1 when it selects no lines; tolerate that no-content case so the caller
+  # emits a named DRIFT diagnostic and final summary instead of dying silently.
+  { grep -v '^# gibson-template-version:' "$1" || true; } | sha256_stdin
 }
 
 read_stamp() {

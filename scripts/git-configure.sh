@@ -396,6 +396,9 @@ test-integrity"
   if [[ -n "$REVIEWER_LOGIN" ]]; then
     case "$REVIEWER_LOGIN" in
       *[[:space:]/\\]*|"") die_usage "invalid reviewerLogin: $(sq "$REVIEWER_LOGIN")" ;;
+      CHANGEME*|REPLACE_*|REPLACE-*|\<*\>)
+        die_usage "reviewerLogin placeholder must be replaced: $(sq "$REVIEWER_LOGIN")"
+        ;;
     esac
   fi
 

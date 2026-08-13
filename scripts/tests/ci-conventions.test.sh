@@ -135,11 +135,11 @@ check_sha_pin() {
   return "$failed"
 }
 
-# (b) every workflow file declares a top-level permissions: key.
+# (b) shipped templates deny by default; live workflows stay read-only at top.
 check_permissions() {
   local root="$1"
   local failed=0
-  local f rel any
+  local f rel any offenders
   any=0
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
@@ -147,6 +147,29 @@ check_permissions() {
     rel=${f#"$root"/}
     if ! grep -Eq '^permissions:' "$f"; then
       echo "$rel missing top-level permissions:"
+      failed=1
+      continue
+    fi
+    if [[ "$rel" == ci/* ]]; then
+      if ! grep -Eq '^permissions:[[:space:]]*\{\}[[:space:]]*(#.*)?$' "$f"; then
+        echo "$rel shipped template must use top-level permissions: {}"
+        failed=1
+      fi
+      continue
+    fi
+    offenders=$(awk '
+      /^permissions:/ {
+        in_permissions=1
+        if ($0 ~ /write-all/ || $0 ~ /:[[:space:]]*write([[:space:]#]|$)/) print NR ":" $0
+        next
+      }
+      in_permissions && /^[^[:space:]#]/ { in_permissions=0 }
+      in_permissions && !/^[[:space:]]*#/ {
+        if ($0 ~ /write-all/ || $0 ~ /:[[:space:]]*write([[:space:]#]|$)/) print NR ":" $0
+      }
+    ' "$f")
+    if [[ -n "$offenders" ]]; then
+      echo "$rel workflow-level permissions exceed read-only: $offenders"
       failed=1
     fi
   done < <(collect_workflows "$root")
@@ -183,7 +206,7 @@ has_pr_trigger() {
   ' "$1"
 }
 
-# (c) PR-triggered workflows have concurrency.cancel-in-progress unless stateful.
+# (c) PR-triggered workflows actively cancel superseded PR runs unless stateful.
 check_concurrency() {
   local root="$1"
   local failed=0
@@ -197,16 +220,17 @@ check_concurrency() {
     if ! has_pr_trigger "$f"; then
       continue
     fi
-    if grep -Eq '^concurrency:' "$f" && grep -Eq 'cancel-in-progress:[[:space:]]*true' "$f"; then
+    if grep -Eq '^concurrency:' "$f" && grep -Eq \
+      '^[[:space:]]*cancel-in-progress:[[:space:]]*(true|\$\{\{[^}]*github\.event_name[^}]*pull_request[^}]*\}\})[[:space:]]*(#.*)?$' "$f"; then
       continue
     fi
-    echo "$rel PR-triggered but missing concurrency.cancel-in-progress: true"
+    echo "$rel PR-triggered but missing active PR cancel-in-progress"
     failed=1
   done < <(collect_workflows "$root")
   return "$failed"
 }
 
-# (d) no hostile github.event.* inside run: blocks (allowlist only).
+# (d) no hostile direct github.* interpolation inside run commands.
 check_untrusted_interpolation() {
   local root="$1"
   local failed=0
@@ -220,6 +244,20 @@ check_untrusted_interpolation() {
         while (substr(s, n+1, 1) == " ") n++
         return n
       }
+      function scan(candidate, lineno,    rest, expr, path, allowed) {
+        rest = candidate
+        while (match(rest, /\$\{\{[[:space:]]*github\.[^}]+[[:space:]]*\}\}/)) {
+          expr = substr(rest, RSTART, RLENGTH)
+          path = expr
+          sub(/^\$\{\{[[:space:]]*github\./, "", path)
+          sub(/[[:space:]]*\}\}$/, "", path)
+          allowed = 0
+          if (path ~ /^event\..*\.sha$/ || path ~ /^event\..*\.number$/) allowed = 1
+          if (path == "repository" || path == "run_id" || path == "run_attempt") allowed = 1
+          if (!allowed) printf "%s:%d: %s\n", rel, lineno, expr
+          rest = substr(rest, RSTART + RLENGTH)
+        }
+      }
       {
         line = $0
         ind = leading(line)
@@ -228,35 +266,24 @@ check_untrusted_interpolation() {
           run_ind = ind
           next
         }
+        if (match(line, /^[[:space:]]*-?[[:space:]]*run:[[:space:]]+[^|>[:space:]]/)) {
+          inline = line
+          sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]+/, "", inline)
+          scan(inline, NR)
+          in_run = 0
+          next
+        }
         if (in_run) {
           if (length(line) && ind <= run_ind && line ~ /^[[:space:]]*(- |[A-Za-z0-9_]+:)/) {
             in_run = 0
-            if (match(line, /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/)) {
-              in_run = 1
-              run_ind = ind
-              next
-            }
           } else if (in_run) {
-            rest = line
-            while (match(rest, /\$\{\{[[:space:]]*github\.event\.[^}]+[[:space:]]*\}\}/)) {
-              expr = substr(rest, RSTART, RLENGTH)
-              path = expr
-              sub(/^\$\{\{[[:space:]]*github\.event\./, "", path)
-              sub(/[[:space:]]*\}\}$/, "", path)
-              allowed = 0
-              if (path ~ /\.sha$/ || path ~ /\.number$/ || path == "sha" || path == "number") allowed = 1
-              if (path == "repository" || path == "run_id" || path == "run_attempt") allowed = 1
-              if (!allowed) {
-                printf "%s:%d: %s\n", rel, NR, expr
-              }
-              rest = substr(rest, RSTART + RLENGTH)
-            }
+            scan(line, NR)
           }
         }
       }
     ' "$f")
     if [[ -n "$offenders" ]]; then
-      echo "$rel forbidden github.event in run: block(s): $offenders"
+      echo "$rel forbidden direct github context in run command(s): $offenders"
       failed=1
     fi
   done < <(collect_workflows "$root")
@@ -401,7 +428,7 @@ has_step_summary_append() {
   local line stripped
   while IFS= read -r line; do
     stripped=${line%%#*}
-    if printf '%s\n' "$stripped" | grep -Eq '>>[[:space:]]*["'\'']?\$\{?GITHUB_STEP_SUMMARY'; then
+    if printf '%s\n' "$stripped" | grep -Eq '>>[[:space:]]*["'\'']?\$\{?GITHUB_STEP_SUMMARY(\}|[^A-Za-z0-9_]|$)'; then
       return 0
     fi
   done <<< "$1"
@@ -430,7 +457,7 @@ job_has_announce_step() {
         line = arr[i]
         hash = index(line, "#")
         if (hash > 0) line = substr(line, 1, hash - 1)
-        if (line ~ />>[[:space:]]*["'"'"']?\$\{?GITHUB_STEP_SUMMARY/) return 1
+        if (line ~ />>[[:space:]]*["'"'"']?\$\{?GITHUB_STEP_SUMMARY(\}|[^A-Za-z0-9_]|$)/) return 1
       }
       return 0
     }
@@ -490,8 +517,8 @@ job_has_announce_step() {
         in_run = 0
         run_ind = 0
         for (i = step_start[s]; i <= step_end[s]; i++) {
-          if (lines[i] ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*/) {
-            if (lines[i] ~ /^[[:space:]]*-?[[:space:]]*if:[[:space:]]*always\(\)[[:space:]]*(#.*)?$/) {
+          if (lines[i] ~ /^[[:space:]]*-?[[:space:]]*["'"'"']?if["'"'"']?[[:space:]]*:[[:space:]]*/) {
+            if (lines[i] ~ /^[[:space:]]*-?[[:space:]]*["'"'"']?if["'"'"']?[[:space:]]*:[[:space:]]*always\(\)[[:space:]]*(#.*)?$/) {
               has_always = 1
             } else {
               has_other_if = 1
@@ -577,8 +604,8 @@ check_visible_skip() {
           }
         ' "$f")
         script=$(run_script_from_step "$block")
-        if ! has_annotation_emission "$script"; then
-          echo "$rel:$ln continue-on-error step missing ::warning:: or ::notice:: in step body"
+        if ! has_annotation_emission "$script" || ! has_step_summary_append "$script"; then
+          echo "$rel:$ln continue-on-error step missing active annotation and GITHUB_STEP_SUMMARY in step body"
           failed=1
         fi
       else
@@ -592,20 +619,90 @@ check_visible_skip() {
   return "$failed"
 }
 
-# (g) templates/ contains no operator literals (mrhinkle, /Users/).
+# (g) graceful skip/report-only exit 0 branches must be visible in the same step.
+check_graceful_skip() {
+  local root="$1"
+  local failed=0
+  local f rel hits
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rel=${f#"$root"/}
+    hits=$(awk -v rel="$rel" '
+      function leading(s,    n) {
+        n = 0
+        while (substr(s, n+1, 1) == " ") n++
+        return n
+      }
+      function inspect(script, exit_line,    lower, has_ann, has_sum) {
+        lower = tolower(script)
+        if (lower !~ /(^|[;[:space:]])exit[[:space:]]+0([;[:space:]]|$)/) return
+        if (lower !~ /(skip|missing|not[[:space:]]+installed|not[[:space:]]+vendored|report-only|adoption[[:space:]]+gap)/) return
+        has_ann = script ~ /(^|\n)[[:space:]]*(echo|printf)[[:space:]]+["'"'"']?::(warning|notice)::/
+        has_sum = script ~ />>[[:space:]]*["'"'"']?\$\{?GITHUB_STEP_SUMMARY(\}|[^A-Za-z0-9_]|$)/
+        if (!has_ann || !has_sum) {
+          printf "%s:%d graceful exit 0 skip/report-only branch missing active annotation and GITHUB_STEP_SUMMARY\n", rel, exit_line
+        }
+      }
+      function flush() {
+        if (have_run) inspect(script, exit_line)
+        have_run = 0
+        script = ""
+        exit_line = 0
+      }
+      {
+        line = $0
+        ind = leading(line)
+        if (match(line, /^[[:space:]]*-?[[:space:]]*run:[[:space:]]*[|>]/)) {
+          flush()
+          have_run = 1
+          run_ind = ind
+          next
+        }
+        if (match(line, /^[[:space:]]*-?[[:space:]]*run:[[:space:]]+[^|>[:space:]]/)) {
+          flush()
+          body = line
+          sub(/^[[:space:]]*-?[[:space:]]*run:[[:space:]]+/, "", body)
+          sub(/[[:space:]]+#.*/, "", body)
+          inspect(body, NR)
+          next
+        }
+        if (have_run) {
+          if (length(line) && ind <= run_ind && line ~ /^[[:space:]]*(- |[A-Za-z0-9_]+:)/) {
+            flush()
+          } else {
+            body = line
+            sub(/^[[:space:]]+/, "", body)
+            if (body ~ /^#/ || body == "") next
+            sub(/[[:space:]]+#.*/, "", body)
+            script = script body "\n"
+            if (!exit_line && tolower(body) ~ /(^|[;[:space:]])exit[[:space:]]+0([;[:space:]]|$)/) exit_line = NR
+          }
+        }
+      }
+      END { flush() }
+    ' "$f")
+    if [[ -n "$hits" ]]; then
+      printf '%s\n' "$hits"
+      failed=1
+    fi
+  done < <(collect_workflows "$root")
+  return "$failed"
+}
+
+# (h) templates/ and ci/ contain no operator literals (mrhinkle, /Users/).
 check_operator_literals() {
   local root="$1"
-  local hits
-  if [[ ! -d "$root/templates" ]]; then
-    return 0
-  fi
-  hits=$(grep -RInE 'mrhinkle|/Users/' "$root/templates" 2>/dev/null || true)
-  if [[ -z "$hits" ]]; then
-    return 0
-  fi
-  hits=$(printf '%s\n' "$hits" | sed "s#^${root}/##")
-  echo "templates/ operator literals: $hits"
-  return 1
+  local hits scope failed
+  failed=0
+  for scope in templates ci; do
+    [[ -d "$root/$scope" ]] || continue
+    hits=$(grep -RInE 'mrhinkle|/Users/' "$root/$scope" 2>/dev/null || true)
+    [[ -n "$hits" ]] || continue
+    hits=$(printf '%s\n' "$hits" | sed "s#^${root}/##")
+    echo "$scope/ operator literals: $hits"
+    failed=1
+  done
+  return "$failed"
 }
 
 # Report a planted-fixture failure. needle must appear in the check output.
@@ -632,6 +729,40 @@ assert_clean() {
   else
     bad "mutation $n: $desc was rejected: [$got]"
   fi
+}
+
+fixture_content_hash() {
+  { grep -v '^# gibson-template-version:' "$1" || true; } | {
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha256sum
+    else
+      shasum -a 256
+    fi
+  } | awk '{print $1}'
+}
+
+stamp_fixture() {
+  local file="$1" hash tmp
+  hash=$(fixture_content_hash "$file")
+  tmp="${file}.stamped"
+  {
+    echo "# gibson-template-version: sha256:${hash}"
+    grep -v '^# gibson-template-version:' "$file" || true
+  } > "$tmp"
+  mv "$tmp" "$file"
+}
+
+# Exact equivalent of the schema-guard every-PR destructive-flag scan. Keep
+# the flag fragments split so installing that workflow in this repo does not
+# make this sensor file self-match.
+destructive_flag_hits() {
+  local root="$1" loss_a loss_b reset_a reset_b pattern
+  loss_a='--accept-data'
+  loss_b='-loss'
+  reset_a='--force'
+  reset_b='-reset'
+  pattern="${loss_a}${loss_b}|${reset_a}${reset_b}"
+  (cd "$root" && git grep -nE -- "$pattern" -- '*.json' '*.sh' '*.ts' '*.js' '*.yml' '*.yaml' 2>/dev/null)
 }
 
 # --- clean-tree pass -------------------------------------------------------
@@ -667,7 +798,7 @@ else
   done <<< "$sha_viol"
 fi
 
-echo "# (b) every workflow file declares permissions:"
+echo "# (b) shipped templates deny by default; live workflow top-level grants are read-only"
 perm_viol=$(check_permissions "$REPO_ROOT") || true
 if [[ -z "$perm_viol" ]]; then
   for f in "${WORKFLOWS[@]}"; do
@@ -680,7 +811,7 @@ else
   done <<< "$perm_viol"
 fi
 
-echo "# (c) PR-triggered workflows have concurrency.cancel-in-progress (unless stateful)"
+echo "# (c) PR-triggered workflows actively cancel superseded PR runs (unless stateful)"
 conc_viol=$(check_concurrency "$REPO_ROOT") || true
 if [[ -z "$conc_viol" ]]; then
   for f in "${WORKFLOWS[@]}"; do
@@ -690,7 +821,7 @@ if [[ -z "$conc_viol" ]]; then
     elif ! has_pr_trigger "$f"; then
       ok "$rel has no PR-class triggers — concurrency not required"
     else
-      ok "$rel has concurrency.cancel-in-progress: true"
+      ok "$rel has active PR cancellation"
     fi
   done
 else
@@ -700,11 +831,11 @@ else
   done <<< "$conc_viol"
 fi
 
-echo "# (d) no hostile github.event.* inside run: blocks (allowlist only)"
+echo "# (d) no hostile direct github.* interpolation inside run commands"
 untrust_viol=$(check_untrusted_interpolation "$REPO_ROOT") || true
 if [[ -z "$untrust_viol" ]]; then
   for f in "${WORKFLOWS[@]}"; do
-    ok "${f#"$REPO_ROOT"/} run: blocks only use allowlisted github.event fields"
+    ok "${f#"$REPO_ROOT"/} run commands only use allowlisted direct github contexts"
   done
 else
   while IFS= read -r line; do
@@ -749,23 +880,39 @@ else
   done <<< "$vis_viol"
 fi
 
+echo "# (g) graceful exit-0 skips/report-only branches are visible"
+grace_viol=$(check_graceful_skip "$REPO_ROOT") || true
+if [[ -z "$grace_viol" ]]; then
+  ok "all graceful skip/report-only exits emit an annotation and step summary"
+else
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    bad "$line"
+  done <<< "$grace_viol"
+fi
+
 echo "# gibson-template-drift.sh --repo without a value is usage (exit 2)"
+drift_rc=0
 drift_out=$("$DRIFT_SH" --repo 2>&1) || drift_rc=$?
-drift_rc=${drift_rc:-0}
 if [[ "$drift_rc" -eq 2 ]] && printf '%s\n' "$drift_out" | grep -Eq 'Usage|USAGE|--repo'; then
   ok "--repo with no value prints usage and exits 2"
 else
   bad "--repo with no value: expected exit 2 + usage, got rc=${drift_rc} out=${drift_out}"
 fi
 
-echo "# (g) templates/ contains no operator literals (mrhinkle, /Users/)"
+echo "# live ci/*.yml template stamps are current"
+drift_rc=0
+drift_out=$("$DRIFT_SH" --gibson "$REPO_ROOT" --repo "$REPO_ROOT" 2>&1) || drift_rc=$?
+if [[ "$drift_rc" -eq 0 ]] && printf '%s\n' "$drift_out" | grep -Fq 'drift=0'; then
+  ok "all live ci/*.yml stamps match their content"
+else
+  bad "live template stamp drift (rc=${drift_rc} out=${drift_out})"
+fi
+
+echo "# (h) templates/ and ci/ contain no operator literals (mrhinkle, /Users/)"
 op_viol=$(check_operator_literals "$REPO_ROOT") || true
 if [[ -z "$op_viol" ]]; then
-  if [[ -d "$REPO_ROOT/templates" ]]; then
-    ok "templates/ free of mrhinkle and /Users/ literals"
-  else
-    ok "no templates/ directory (N/A)"
-  fi
+  ok "templates/ and ci/ are free of mrhinkle and /Users/ literals"
 else
   bad "$op_viol"
 fi
@@ -839,7 +986,7 @@ jobs:
 YML
 got=$(check_concurrency "$MUT/4") || true
 assert_planted 4 "on: pull_request with no concurrency:" \
-  "ci/planted.yml PR-triggered but missing concurrency.cancel-in-progress: true" "$got"
+  "ci/planted.yml PR-triggered but missing active PR cancel-in-progress" "$got"
 
 # 5. untrusted interpolation in a run: block
 mkdir -p "$MUT/5/ci"
@@ -895,7 +1042,7 @@ jobs:
 YML
 got=$(check_visible_skip "$MUT/7") || true
 assert_planted 7 "continue-on-error with warning only in a YAML comment" \
-  "continue-on-error step missing ::warning:: or ::notice:: in step body" "$got"
+  "continue-on-error step missing active annotation and GITHUB_STEP_SUMMARY" "$got"
 
 # 8. templates/ file containing mrhinkle
 mkdir -p "$MUT/8/templates"
@@ -937,7 +1084,7 @@ jobs:
 YML
 got=$(check_visible_skip "$MUT/10") || true
 assert_planted 10 "step continue-on-error: \${{ ... }} with no annotation" \
-  "continue-on-error step missing ::warning:: or ::notice:: in step body" "$got"
+  "continue-on-error step missing active annotation and GITHUB_STEP_SUMMARY" "$got"
 
 # 11. mid-string ::warning:: is not an annotation emission
 mkdir -p "$MUT/11/ci"
@@ -955,7 +1102,7 @@ jobs:
 YML
 got=$(check_visible_skip "$MUT/11") || true
 assert_planted 11 "echo \"prefix ::warning:: not an annotation\" does not satisfy" \
-  "continue-on-error step missing ::warning:: or ::notice:: in step body" "$got"
+  "continue-on-error step missing active annotation and GITHUB_STEP_SUMMARY" "$got"
 
 # 12. shell-comment ::warning:: is not an annotation emission
 mkdir -p "$MUT/12/ci"
@@ -973,7 +1120,7 @@ jobs:
 YML
 got=$(check_visible_skip "$MUT/12") || true
 assert_planted 12 "do_scan # ::warning:: comment does not satisfy" \
-  "continue-on-error step missing ::warning:: or ::notice:: in step body" "$got"
+  "continue-on-error step missing active annotation and GITHUB_STEP_SUMMARY" "$got"
 
 # 13. job-level soft job WITH if: always() announce step (must pass)
 mkdir -p "$MUT/13/ci"
@@ -1168,6 +1315,302 @@ YML
 got=$(check_visible_skip "$MUT/22") || true
 assert_planted 22 "announce summary write only in trailing comment" \
   "continue-on-error job missing dedicated announce step" "$got"
+
+# 23. inline run: hostile PR title interpolation
+mkdir -p "$MUT/23/ci"
+cat > "$MUT/23/ci/planted.yml" <<'YML'
+name: planted-inline-event
+on: pull_request
+permissions: {}
+concurrency:
+  group: x
+  cancel-in-progress: true
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ github.event.pull_request.title }}"
+YML
+got=$(check_untrusted_interpolation "$MUT/23") || true
+assert_planted 23 "inline run: hostile PR title interpolation" \
+  'ci/planted.yml:11: ${{ github.event.pull_request.title }}' "$got"
+
+# 24. direct github.head_ref in a run command
+mkdir -p "$MUT/24/ci"
+cat > "$MUT/24/ci/planted.yml" <<'YML'
+name: planted-head-ref
+on: pull_request
+permissions: {}
+concurrency:
+  group: x
+  cancel-in-progress: true
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "${{ github.head_ref }}"
+YML
+got=$(check_untrusted_interpolation "$MUT/24") || true
+assert_planted 24 "direct github.head_ref inside run block" \
+  '${{ github.head_ref }}' "$got"
+
+# 25. comment-only cancellation must not satisfy a PR workflow
+mkdir -p "$MUT/25/ci"
+cat > "$MUT/25/ci/planted.yml" <<'YML'
+name: planted-comment-cancel
+on: pull_request
+permissions: {}
+concurrency:
+  group: x
+  # cancel-in-progress: true
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+YML
+got=$(check_concurrency "$MUT/25") || true
+assert_planted 25 "comment-only cancel-in-progress" \
+  "missing active PR cancel-in-progress" "$got"
+
+# 26. workflow-level write-all is not least privilege
+mkdir -p "$MUT/26/ci"
+cat > "$MUT/26/ci/planted.yml" <<'YML'
+name: planted-write-all
+on: pull_request
+permissions: write-all
+concurrency:
+  group: x
+  cancel-in-progress: true
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+YML
+got=$(check_permissions "$MUT/26") || true
+assert_planted 26 "shipped template permissions: write-all" \
+  "shipped template must use top-level permissions: {}" "$got"
+
+# 27. operator literals in ci/ are covered, not only templates/
+mkdir -p "$MUT/27/ci"
+cat > "$MUT/27/ci/planted.yml" <<'YML'
+# operator: mrhinkle
+name: planted-operator
+on: push
+permissions: {}
+jobs: {}
+YML
+got=$(check_operator_literals "$MUT/27") || true
+assert_planted 27 "ci/ contains an operator login" \
+  "ci/ operator literals:" "$got"
+
+# 28. graceful missing/skip exit without warning + summary
+mkdir -p "$MUT/28/ci"
+cat > "$MUT/28/ci/planted.yml" <<'YML'
+name: planted-graceful-skip
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "posture probe missing — skip"
+          exit 0
+YML
+got=$(check_graceful_skip "$MUT/28") || true
+assert_planted 28 "graceful missing/skip exit without visibility" \
+  "ci/planted.yml:10 graceful exit 0 skip/report-only branch missing" "$got"
+
+# 29. a stale template stamp must fail the drift ratchet
+mkdir -p "$MUT/29/ci" "$MUT/29-repo"
+cat > "$MUT/29/ci/planted.yml" <<'YML'
+# gibson-template-version: sha256:0000000000000000000000000000000000000000000000000000000000000000
+name: planted-stale-stamp
+on: push
+permissions: {}
+YML
+drift_rc=0
+got=$("$DRIFT_SH" --gibson "$MUT/29" --repo "$MUT/29-repo" 2>&1) || drift_rc=$?
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "template stamp mismatch"; then
+  ok "mutation 29: stale template stamp fails with diagnostic"
+  echo "  PLANTED[29] FAIL — $got"
+else
+  bad "mutation 29: stale template stamp (rc=${drift_rc} out=${got})"
+fi
+
+# 30. zero-byte installed workflow reports drift instead of dying silently
+mkdir -p "$MUT/30/ci" "$MUT/30-repo/.github/workflows"
+cat > "$MUT/30/ci/planted.yml" <<'YML'
+name: planted-zero-byte
+on: push
+permissions: {}
+YML
+stamp_fixture "$MUT/30/ci/planted.yml"
+: > "$MUT/30-repo/.github/workflows/planted.yml"
+drift_rc=0
+got=$("$DRIFT_SH" --gibson "$MUT/30" --repo "$MUT/30-repo" 2>&1) || drift_rc=$?
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "installed stamp missing" \
+  && printf '%s\n' "$got" | grep -Fq "drift=1"; then
+  ok "mutation 30: zero-byte install emits DRIFT + summary"
+  echo "  PLANTED[30] FAIL — $got"
+else
+  bad "mutation 30: zero-byte install (rc=${drift_rc} out=${got})"
+fi
+
+# 31. stamp-only installed workflow reports content drift + summary
+mkdir -p "$MUT/31/ci" "$MUT/31-repo/.github/workflows"
+cat > "$MUT/31/ci/planted.yml" <<'YML'
+name: planted-stamp-only
+on: push
+permissions: {}
+YML
+stamp_fixture "$MUT/31/ci/planted.yml"
+: > "$MUT/31-repo/.github/workflows/empty-body"
+empty_hash=$(fixture_content_hash "$MUT/31-repo/.github/workflows/empty-body")
+printf '# gibson-template-version: sha256:%s\n' "$empty_hash" > "$MUT/31-repo/.github/workflows/planted.yml"
+drift_rc=0
+got=$("$DRIFT_SH" --gibson "$MUT/31" --repo "$MUT/31-repo" 2>&1) || drift_rc=$?
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "content hash mismatch" \
+  && printf '%s\n' "$got" | grep -Fq "drift=1"; then
+  ok "mutation 31: stamp-only install emits DRIFT + summary"
+  echo "  PLANTED[31] FAIL — $got"
+else
+  bad "mutation 31: stamp-only install (rc=${drift_rc} out=${got})"
+fi
+
+# 32. --strict-missing turns an optional missing install into exit 1
+mkdir -p "$MUT/32/ci" "$MUT/32-repo"
+cat > "$MUT/32/ci/planted.yml" <<'YML'
+name: planted-strict-missing
+on: push
+permissions: {}
+YML
+stamp_fixture "$MUT/32/ci/planted.yml"
+default_rc=0
+"$DRIFT_SH" --gibson "$MUT/32" --repo "$MUT/32-repo" >/dev/null 2>&1 || default_rc=$?
+strict_rc=0
+strict_out=$("$DRIFT_SH" --gibson "$MUT/32" --repo "$MUT/32-repo" --strict-missing 2>&1) || strict_rc=$?
+if [[ "$default_rc" -eq 0 && "$strict_rc" -eq 1 ]] \
+  && printf '%s\n' "$strict_out" | grep -Fq "MISSING install"; then
+  ok "mutation 32: --strict-missing fails while default remains optional"
+  echo "  PLANTED[32] FAIL — $strict_out"
+else
+  bad "mutation 32: strict missing (default=${default_rc} strict=${strict_rc} out=${strict_out})"
+fi
+
+# 33/34. actual destructive-flag scan: installed workflow is clean; planted use fires.
+mkdir -p "$MUT/33/repo/.github/workflows"
+cp "$REPO_ROOT/ci/schema-guard.yml" "$MUT/33/repo/.github/workflows/schema-guard.yml"
+git -C "$MUT/33/repo" init -q
+git -C "$MUT/33/repo" add .
+scan_rc=0
+got=$(destructive_flag_hits "$MUT/33/repo") || scan_rc=$?
+if [[ "$scan_rc" -eq 1 && -z "$got" ]]; then
+  ok "mutation 33: clean repo containing installed schema guard does not self-match"
+else
+  bad "mutation 33: clean schema-guard control (rc=${scan_rc} out=${got})"
+fi
+loss_a='--accept-data'; loss_b='-loss'
+mkdir -p "$MUT/33/repo/scripts"
+printf '%s\n' "prisma migrate deploy ${loss_a}${loss_b}" > "$MUT/33/repo/scripts/migrate.sh"
+git -C "$MUT/33/repo" add scripts/migrate.sh
+scan_rc=0
+got=$(destructive_flag_hits "$MUT/33/repo") || scan_rc=$?
+if [[ "$scan_rc" -eq 0 ]] && printf '%s\n' "$got" | grep -Fq "scripts/migrate.sh:1"; then
+  ok "mutation 34: planted destructive migration flag fails with file:line"
+  echo "  PLANTED[34] FAIL — $got"
+else
+  bad "mutation 34: planted destructive flag (rc=${scan_rc} out=${got})"
+fi
+
+# 35. a differently named summary variable must not satisfy visibility
+mkdir -p "$MUT/35/ci"
+cat > "$MUT/35/ci/planted.yml" <<'YML'
+name: planted-summary-prefix
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: announce
+        if: always()
+        run: |
+          echo "::warning::soft job"
+          echo "soft" >> "$GITHUB_STEP_SUMMARY_UNUSED"
+YML
+got=$(check_visible_skip "$MUT/35") || true
+assert_planted 35 "summary variable prefix is not GITHUB_STEP_SUMMARY" \
+  "continue-on-error job missing dedicated announce step" "$got"
+
+# 36/37. non-always if spellings cannot masquerade as an unconditional first step
+for n in 36 37; do mkdir -p "$MUT/$n/ci"; done
+cat > "$MUT/36/ci/planted.yml" <<'YML'
+name: planted-spaced-if
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: announce
+        if : ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          echo "::warning::soft job"
+          echo "soft" >> "$GITHUB_STEP_SUMMARY"
+YML
+cat > "$MUT/37/ci/planted.yml" <<'YML'
+name: planted-quoted-if
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: announce
+        'if': ${{ github.event_name == 'schedule' }}
+        run: |
+          echo "::warning::soft job"
+          echo "soft" >> "$GITHUB_STEP_SUMMARY"
+YML
+got=$(check_visible_skip "$MUT/36") || true
+assert_planted 36 "spaced non-always if key is disqualified" \
+  "continue-on-error job missing dedicated announce step" "$got"
+got=$(check_visible_skip "$MUT/37") || true
+assert_planted 37 "quoted non-always if key is disqualified" \
+  "continue-on-error job missing dedicated announce step" "$got"
+
+# 38/39. allowed least-privilege self-gate and PR-only cancellation controls.
+mkdir -p "$MUT/38/.github/workflows" "$MUT/39/ci"
+cat > "$MUT/38/.github/workflows/planted.yml" <<'YML'
+name: planted-live-read-only
+on: push
+permissions:
+  contents: read
+jobs: {}
+YML
+got=$(check_permissions "$MUT/38") || true
+assert_clean 38 "live workflow top-level contents: read is allowed" "$got"
+cat > "$MUT/39/ci/planted.yml" <<'YML'
+name: planted-pr-only-cancel
+on:
+  pull_request:
+  schedule:
+    - cron: "0 1 * * *"
+permissions: {}
+concurrency:
+  group: x
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs: {}
+YML
+got=$(check_concurrency "$MUT/39") || true
+assert_clean 39 "PR-only cancellation expression is accepted" "$got"
 
 echo
 echo "ci-conventions.test.sh: $PASS passed, $FAIL failed"

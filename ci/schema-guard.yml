@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:b83840d535c79474ee0d95afaa5113263816d47b64fa571735d4156332d21ab8
+# gibson-template-version: sha256:bf875a6a2901bbd781b9e861e54c60f113565392918fc5e20b2ae31671280e49
 # The Gibson — schema change without migration file fails (docs/12, L-002)
 # Install as .github/workflows/schema-guard.yml when the repo has Prisma (or
 # adapt paths for Drizzle/SQL migrations).
@@ -63,7 +63,9 @@ jobs:
             echo "Schema-related paths present in this PR — running coherence check."
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No schema-related paths in this PR — schema coherence check skipped."
+            msg="No schema-related paths in this PR — schema coherence check skipped."
+            echo "::notice::${msg}"
+            echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Detect schema vs migration coherence
@@ -121,8 +123,17 @@ jobs:
 
       - name: Forbid destructive Prisma flags in scripts
         run: |
-          set -e
-          if git grep -nE -- '--accept-data-loss|--force-reset' -- '*.json' '*.sh' '*.ts' '*.js' '*.yml' '*.yaml' 2>/dev/null; then
+          set -euo pipefail
+          # Assemble the two complete flags from pieces so this workflow source
+          # never contains them contiguously (a self-match would fail every
+          # adopter PR that installs the file). Equivalent grep: both flags,
+          # repo-wide, on the intended file types, every PR.
+          loss_a='--accept-data'
+          loss_b='-loss'
+          reset_a='--force'
+          reset_b='-reset'
+          pattern="${loss_a}${loss_b}|${reset_a}${reset_b}"
+          if git grep -nE -- "$pattern" -- '*.json' '*.sh' '*.ts' '*.js' '*.yml' '*.yaml' 2>/dev/null; then
             echo "::error::Destructive prisma/migrate flags are forbidden (docs/12)."
             exit 1
           fi

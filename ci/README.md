@@ -34,6 +34,23 @@ cp /path/to/the-gibson/ci/schema-guard.yml .github/workflows/
 cp /path/to/the-gibson/ci/retro.yml .github/workflows/
 ```
 
+## Check copied-template drift
+
+After copying one or more `ci/*.yml` workflows, run:
+
+```bash
+/path/to/the-gibson/scripts/gibson-template-drift.sh \
+  --gibson /path/to/the-gibson \
+  --repo /path/to/your-repo
+```
+
+The check covers shipped `ci/*.yml` workflows only; it does not stamp target
+repo JSON templates or adapter plists. A copied workflow with a missing,
+invalid, or stale content-hash stamp exits 1. Templates that the adopter did
+not install are reported but do not fail by default, because adopters may use a
+subset. Add `--strict-missing` when the adopter requires the complete template
+set and wants any missing workflow to exit 1.
+
 **Also vendor scripts the workflows call** (or submodule / copy into `scripts/`):
 
 - `test-integrity.mjs` (required for protected test-integrity grading)

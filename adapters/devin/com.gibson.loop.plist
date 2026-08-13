@@ -60,6 +60,9 @@
     <key>SuccessfulExit</key>
     <false/>
   </dict>
+  <!-- Avoid a tight restart loop when configuration or credentials are bad. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
 
   <key>StandardOutPath</key>
   <string>/Users/CHANGEME/Library/Logs/gibson-loop.log</string>
