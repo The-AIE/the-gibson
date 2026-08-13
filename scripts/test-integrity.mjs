@@ -85,10 +85,7 @@ function hasFlag(args, name) {
 
 function rejectUnknownFlags(argv, allowed, opts = {}) {
   const allow = new Set(allowed);
-  const valueFlags = new Set(
-    opts.valueFlags ||
-      [...allow].filter((f) => f !== "-h" && f !== "--help" && f !== "--json")
-  );
+  const valueFlags = new Set(opts.valueFlags || []);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--") break;
@@ -1029,7 +1026,9 @@ function main(argv) {
 
   try {
     if (cmd === "parse") {
-      rejectUnknownFlags(args, ["--input", "--out", "-h", "--help"]);
+      rejectUnknownFlags(args, ["--input", "--out", "-h", "--help"], {
+        valueFlags: ["--input", "--out"],
+      });
       const input = readFlag(args, "--input");
       if (!input) usage();
       const out = readFlag(args, "--out");
@@ -1042,16 +1041,28 @@ function main(argv) {
     }
 
     if (cmd === "compare") {
-      rejectUnknownFlags(args, [
-        "--base",
-        "--head",
-        "--waiver-text",
-        "--waiver-file",
-        "--trusted-source",
-        "--json",
-        "-h",
-        "--help",
-      ]);
+      rejectUnknownFlags(
+        args,
+        [
+          "--base",
+          "--head",
+          "--waiver-text",
+          "--waiver-file",
+          "--trusted-source",
+          "--json",
+          "-h",
+          "--help",
+        ],
+        {
+          valueFlags: [
+            "--base",
+            "--head",
+            "--waiver-text",
+            "--waiver-file",
+            "--trusted-source",
+          ],
+        }
+      );
       const basePath = readFlag(args, "--base");
       const headPath = readFlag(args, "--head");
       if (!basePath || !headPath) usage();
@@ -1092,15 +1103,21 @@ function main(argv) {
     }
 
     if (cmd === "journal-append") {
-      rejectUnknownFlags(args, [
-        "--journal",
-        "--old",
-        "--new",
-        "--reason",
-        "--sha",
-        "-h",
-        "--help",
-      ]);
+      rejectUnknownFlags(
+        args,
+        [
+          "--journal",
+          "--old",
+          "--new",
+          "--reason",
+          "--sha",
+          "-h",
+          "--help",
+        ],
+        {
+          valueFlags: ["--journal", "--old", "--new", "--reason", "--sha"],
+        }
+      );
       const journal = readFlag(args, "--journal");
       const oldPath = readFlag(args, "--old");
       const newPath = readFlag(args, "--new");

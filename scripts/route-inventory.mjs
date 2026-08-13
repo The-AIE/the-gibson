@@ -22,7 +22,42 @@
 
 import { readdirSync, statSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join, relative, dirname } from "node:path";
-import { parseFlags } from "./lib/args.mjs";
+
+// inlined from lib/args.mjs — this file must stay single-file
+// (vendored by ci/security.yml as a lone copy; no scripts/lib/ in that tree)
+function dieUsage(msg) {
+  console.error(msg);
+  process.exit(2);
+}
+
+function unknownFlag(flag) {
+  dieUsage(`unknown flag: ${flag}`);
+}
+
+function readFlag(args, name) {
+  const i = args.indexOf(name);
+  if (i < 0) return null;
+  if (i + 1 >= args.length) {
+    dieUsage(`${name} requires a value`);
+  }
+  // Consume the next token verbatim — a value may look like a flag.
+  return args[i + 1];
+}
+
+function rejectUnknownFlags(argv, allowed, opts = {}) {
+  const allow = new Set(allowed);
+  const valueFlags = new Set(opts.valueFlags || []);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") break;
+    if (a.startsWith("-") && a !== "-") {
+      if (!allow.has(a)) unknownFlag(a);
+      if (valueFlags.has(a) && i + 1 < argv.length) {
+        i += 1;
+      }
+    }
+  }
+}
 
 function help() {
   console.log(`route-inventory.mjs — emit route inventory for AuthZ matrix (docs/08)
@@ -55,26 +90,24 @@ if (args.includes("-h") || args.includes("--help")) {
   process.exit(0);
 }
 
-const opt = parseFlags(args, {
-  flags: {
-    "--root": { key: "root", default: process.cwd() },
-    "--out": { key: "out", default: null },
-    "--roles": {
-      key: "roles",
-      default: () => ["anon", "user", "admin"],
-      transform: (s) => s.split(",").map((x) => x.trim()),
-    },
-  },
+rejectUnknownFlags(args, ["--root", "--out", "--roles", "-h", "--help"], {
+  valueFlags: ["--root", "--out", "--roles"],
 });
+const root = readFlag(args, "--root") || process.cwd();
+const out = readFlag(args, "--out");
+const rolesRaw = readFlag(args, "--roles");
+const roles = rolesRaw
+  ? rolesRaw.split(",").map((x) => x.trim())
+  : ["anon", "user", "admin"];
 const appDirCandidates = [
-  join(opt.root, "app"),
-  join(opt.root, "src", "app"),
+  join(root, "app"),
+  join(root, "src", "app"),
 ];
 const appDir = appDirCandidates.find((p) => existsSync(p));
 
 if (!appDir) {
   console.error(
-    `route-inventory: no app/ or src/app/ under ${opt.root} (Next.js App Router)`
+    `route-inventory: no app/ or src/app/ under ${root} (Next.js App Router)`
   );
   process.exit(2);
 }
@@ -110,7 +143,7 @@ function walk(dir) {
       const methods = kind === "handler" ? ["GET", "POST", "PUT", "PATCH", "DELETE"] : ["GET"];
       routes.push({
         path: url === "/" ? "/" : url.replace(/\/$/, "") || "/",
-        file: relative(opt.root, full),
+        file: relative(root, full),
         kind,
         methods,
       });
@@ -134,12 +167,12 @@ unique.sort((a, b) => a.path.localeCompare(b.path));
 const matrix = {
   generated_at: new Date().toISOString(),
   framework: "next-app-router",
-  root: opt.root,
-  roles: opt.roles,
+  root,
+  roles,
   routes: unique.map((r) => ({
     ...r,
     // expected HTTP status per role — FILL IN (200 | 401 | 403 | 404)
-    expect: Object.fromEntries(opt.roles.map((role) => [role, null])),
+    expect: Object.fromEntries(roles.map((role) => [role, null])),
     idor_probes: [
       // { as: "user", resourceOwnedBy: "other-user", expect: 403|404 }
     ],
@@ -149,10 +182,10 @@ const matrix = {
 };
 
 const text = JSON.stringify(matrix, null, 2);
-if (opt.out) {
-  mkdirSync(dirname(opt.out), { recursive: true });
-  writeFileSync(opt.out, text + "\n");
-  console.error(`route-inventory: wrote ${opt.out} (${unique.length} routes)`);
+if (out) {
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, text + "\n");
+  console.error(`route-inventory: wrote ${out} (${unique.length} routes)`);
 } else {
   console.log(text);
 }

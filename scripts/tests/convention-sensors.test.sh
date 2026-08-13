@@ -22,7 +22,8 @@ echo "# vendored mjs self-containment"
 listed=$(cs_list_vendored_mjs "$REPO_ROOT") || { bad "list vendored mjs (plumbing)"; listed=""; }
 echo "$listed" | grep -qx 'scripts/test-integrity.mjs' \
   && echo "$listed" | grep -qx 'scripts/check-active-work.mjs' \
-  && ok "sparse-checkout + README name the two vendored mjs files" \
+  && echo "$listed" | grep -qx 'scripts/route-inventory.mjs' \
+  && ok "sparse-checkout + README name the three vendored mjs files" \
   || bad "vendored list: $listed"
 
 hits=$(cs_vendored_selfcontained "$REPO_ROOT"); rc=$?
@@ -30,10 +31,12 @@ hits=$(cs_vendored_selfcontained "$REPO_ROOT"); rc=$?
   && ok "clean tree: vendored mjs files have no relative imports" \
   || bad "clean tree self-containment (rc=$rc): $hits"
 
-# Isolated copies must run without lib/ (the gibson-gate sparse-checkout).
+# Isolated copies must run without lib/ (the gibson-gate sparse-checkout
+# and ci/security.yml single-file vendor of route-inventory.mjs).
 mkdir -p "$ROOT/isolated"
 cp "$REPO_ROOT/scripts/test-integrity.mjs" "$ROOT/isolated/test-integrity.mjs"
 cp "$REPO_ROOT/scripts/check-active-work.mjs" "$ROOT/isolated/check-active-work.mjs"
+cp "$REPO_ROOT/scripts/route-inventory.mjs" "$ROOT/isolated/route-inventory.mjs"
 out=$(node "$ROOT/isolated/test-integrity.mjs" --help 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'test-integrity' \
   && ok "isolated test-integrity.mjs --help works without lib/" \
@@ -42,6 +45,48 @@ out=$(node "$ROOT/isolated/check-active-work.mjs" --help 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] \
   && ok "isolated check-active-work.mjs --help works without lib/" \
   || bad "isolated check-active-work (rc=$rc): $out"
+
+# Isolated route-inventory must scan a real app/ tree with no lib/ beside it.
+mkdir -p "$ROOT/ri-app/app/dashboard"
+printf '%s\n' 'export default function Page(){return null}' > "$ROOT/ri-app/app/page.tsx"
+printf '%s\n' 'export default function Dash(){return null}' > "$ROOT/ri-app/app/dashboard/page.tsx"
+out=$(node "$ROOT/isolated/route-inventory.mjs" --root "$ROOT/ri-app" 2>/dev/null); rc=$?
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"/dashboard"' \
+  && ok "isolated route-inventory.mjs scans app/ fixture without lib/" \
+  || bad "isolated route-inventory (rc=$rc): $out"
+
+# A README-listed bare name (`planted-vendor.mjs`) must be discovered as
+# scripts/planted-vendor.mjs, and a relative import in that file must fail.
+BARE="$ROOT/bare-vendor"
+mkdir -p "$BARE/ci" "$BARE/scripts"
+printf '%s\n' 'name: dummy' > "$BARE/ci/gibson-gate.yml"
+{
+  printf '%s\n' 'Vendor these:'
+  printf '%s\n' '- `planted-vendor.mjs`'
+  printf '%s\n' 'Do not copy example.mjs into scripts/ as a prose example.'
+  printf '%s\n' 'Also ignore path-qualified `other/dir/skip-me.mjs`.'
+} > "$BARE/ci/README.md"
+{
+  printf '%s\n' '#!/usr/bin/env node'
+  printf '%s\n' 'import { readFlag } from "./lib/args.mjs";'
+  printf '%s\n' 'console.log("planted");'
+} > "$BARE/scripts/planted-vendor.mjs"
+bare_listed=$(cs_list_vendored_mjs "$BARE") || { bad "list bare-name vendored mjs"; bare_listed=""; }
+if echo "$bare_listed" | grep -qx 'scripts/planted-vendor.mjs' \
+    && ! echo "$bare_listed" | grep -qx 'scripts/example.mjs' \
+    && ! echo "$bare_listed" | grep -q 'skip-me.mjs'; then
+  ok "README bare name planted-vendor.mjs maps to scripts/planted-vendor.mjs"
+else
+  bad "bare-name list missing planted-vendor or pulled prose: $bare_listed"
+fi
+hits=$(cs_vendored_selfcontained "$BARE"); rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep -q 'from'; then
+  echo "  planted README-listed bare-name relative-import failure line:"
+  printf '%s\n' "$hits" | sed 's/^/    /'
+  ok "mutation: relative import in README-listed bare-name file fails"
+else
+  bad "mutation bare-name relative-import unexpectedly passed (rc=$rc): $hits"
+fi
 
 # Mutation: a fixture copy of a vendored-listed file WITH a relative import
 # must fail. Build the import via single-quoted pieces so this test file

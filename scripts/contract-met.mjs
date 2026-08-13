@@ -62,7 +62,6 @@ const opt = parseFlags(args, {
     "--pr-title": {
       key: "prTitle",
       default: "",
-      emptyOk: true,
       transform: (s) => s || "",
     },
     "--repo": { key: "repo", default: null },

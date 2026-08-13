@@ -39,10 +39,7 @@ function unknownFlag(flag) {
 
 function rejectUnknownFlags(argv, allowed, opts = {}) {
   const allow = new Set(allowed);
-  const valueFlags = new Set(
-    opts.valueFlags ||
-      [...allow].filter((f) => f !== "-h" && f !== "--help" && f !== "--json")
-  );
+  const valueFlags = new Set(opts.valueFlags || []);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--") break;
@@ -72,7 +69,7 @@ Driven by GITHUB_* env (pull_request). No flags.
 `);
   process.exit(0);
 }
-rejectUnknownFlags(cliArgs, ["-h", "--help"]);
+rejectUnknownFlags(cliArgs, ["-h", "--help"], { valueFlags: [] });
 
 const EVENT = process.env.GITHUB_EVENT_NAME || "";
 if (EVENT && EVENT !== "pull_request") {

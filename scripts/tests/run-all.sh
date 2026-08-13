@@ -1010,8 +1010,9 @@ fi
 # --- 2g. vendored mjs self-containment (#192) -------------------------------
 # ci/gibson-gate.yml sparse-checks out ONLY scripts/test-integrity.mjs into
 # the isolated grader. Adopters vendor that file plus check-active-work.mjs
-# as single files. A relative import (./ or ../ — static, side-effect,
-# dynamic, or re-export) dies with ERR_MODULE_NOT_FOUND.
+# and route-inventory.mjs as single files (ci/README.md names the latter
+# bare). A relative import (./ or ../ — static, side-effect, dynamic, or
+# re-export) dies with ERR_MODULE_NOT_FOUND.
 echo "== vendored mjs self-containment"
 VENDOR_HITS=""
 VENDOR_RC=0

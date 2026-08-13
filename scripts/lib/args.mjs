@@ -64,7 +64,6 @@ export function hasFlag(args, name) {
  * @property {unknown} [default]       default when flag absent (function ok)
  * @property {string[]} [values]       allowed values when type==='enum'
  * @property {(v: string) => unknown} [transform]  map the raw string value
- * @property {boolean} [emptyOk]       allow empty string value (e.g. --pr-title "")
  */
 
 /**
@@ -168,15 +167,12 @@ export function parseFlags(argv, schema) {
  * @param {Iterable<string>} allowed  e.g. ["--input", "--out", "--json"]
  * @param {object} [opts]
  * @param {Iterable<string>} [opts.valueFlags]  flags that consume the next argv
- *   token as a value (defaults: every allowed entry that is not a pure boolean
- *   short/long help flag)
+ *   token as a value. Default is empty — boolean flags never swallow the next
+ *   token. Callers must pass valueFlags explicitly for every value-taking flag.
  */
 export function rejectUnknownFlags(argv, allowed, opts = {}) {
   const allow = new Set(allowed);
-  const valueFlags = new Set(
-    opts.valueFlags ||
-      [...allow].filter((f) => f !== "-h" && f !== "--help" && f !== "--json")
-  );
+  const valueFlags = new Set(opts.valueFlags || []);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--") break;

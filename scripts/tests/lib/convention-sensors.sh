@@ -35,6 +35,10 @@
 #   - exec / eval / variable invocation: `exec jq`, `$TOOL`, `"$cmd" jq`
 #   - JS import built from an expression: `import(base + "./z")`
 #   - JS string-literal decoys: `const s = "import \"./z.mjs\""`
+#   - no-op guard definition: `need_cmd() { :; }` then `need_cmd jq` — the
+#     sensor matches the call text, not whether the helper actually checks
+#   - string-unaware /* */ stripping: a `/*` inside a JS string opens a fake
+#     block comment that hides a later real relative import from the matcher
 # The list is closed. New findings are accepted-by-default unless they are
 # plausible accidental drift — file an issue rather than blocking a batch.
 # A deliberate evader defeats any grep sensor. If the threat model changes,
@@ -71,8 +75,15 @@ cs_list_vendored_mjs() {
         }
         in_sc && $0 ~ /^[^[:space:]]/ { in_sc=0 }
       ' "$yml" || exit 2
-      # Vendor instructions name scripts/<file>.mjs (not bare `file.mjs`).
+      # Vendor instructions name scripts/<file>.mjs and/or bare `file.mjs`
+      # in the adopter vendor list (ci/README.md uses both).
       grep -oE 'scripts/[A-Za-z0-9._-]+\.mjs' "$readme" || true
+      # Bare vendor-list filenames (`route-inventory.mjs`) map to
+      # scripts/<name>.mjs. Only backtick-quoted basenames — not prose
+      # examples like "copy foo.mjs into scripts/" and not path-qualified
+      # `dir/foo.mjs`.
+      grep -oE '`[A-Za-z0-9._-]+\.mjs`' "$readme" \
+        | tr -d '`' | sed 's|^|scripts/|' || true
     } | sort -u
   ) || return 2
   if [[ -z "$listed" ]]; then
@@ -355,7 +366,7 @@ cs_bash4_hits() {
     echo "convention-sensors: missing $f" >&2
     return 2
   fi
-  local tmp rc
+  local tmp tmpq rc
   tmp=$(mktemp "${TMPDIR:-/tmp}/cs-bash4.XXXXXX") || return 2
   tmpq=$(mktemp "${TMPDIR:-/tmp}/cs-bash4q.XXXXXX") || { rm -f "$tmp"; return 2; }
   if ! _cs_bash4_strip "$f" keepdq > "$tmp"; then
