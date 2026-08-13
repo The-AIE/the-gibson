@@ -1,3 +1,4 @@
+# gibson-template-version: sha256:52862725d1c8b11a693e6a955da7270aefb01fb71c157687134f3c36147c1a70
 # The Gibson — security layers 2, 3 (partial), 4, 5, 8 (+ nightly full DAST)
 # Install as .github/workflows/security.yml in the target repo (docs/13, docs/08).
 # Calibrate: fill <angle> placeholders; preview URL resolution needs Vercel GitHub
@@ -17,23 +18,31 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pull-requests: write
-  deployments: read
+# Deny all by default. Jobs grant least privilege only.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs only. Nightly/manual DAST must run to completion.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Layer 2 — SAST (Semgrep). Report-only until target has a clean board.
   sast-semgrep:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Report-only until promoted: job-level so the SHA-pinned uses: step can
+    # fail without a comment-only ::warning:: gaming the visible-skip sensor.
+    continue-on-error: true
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
       - name: Semgrep SAST (report)
-        continue-on-error: true
-        uses: semgrep/semgrep-action@v1
+        id: semgrep
+        uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
         with:
           config: >-
             p/typescript
@@ -42,18 +51,52 @@ jobs:
             p/security-audit
             p/secrets
             p/owasp-top-ten
+      # L-056: report-only must stay visible. Trailing if: always() so a
+      # checkout/action failure is not hidden; steps.semgrep.outcome
+      # distinguishes success from failure/skipped. Job stays continue-on-error.
+      - name: Report Semgrep outcome
+        if: always()
+        env:
+          SEMGREP_OUTCOME: ${{ steps.semgrep.outcome }}
+        run: |
+          outcome="${SEMGREP_OUTCOME:-unknown}"
+          case "$outcome" in
+            success)
+              msg="Semgrep SAST is report-only (job continue-on-error); scan completed — findings do not fail the gate until promoted to hard-fail"
+              echo "::notice::${msg}"
+              ;;
+            failure)
+              msg="Semgrep SAST is report-only (job continue-on-error); scan failed — findings do not fail the gate until promoted to hard-fail"
+              echo "::warning::${msg}"
+              ;;
+            skipped)
+              msg="Semgrep SAST is report-only (job continue-on-error); scan skipped (prior step or action did not run)"
+              echo "::warning::${msg}"
+              ;;
+            *)
+              msg="Semgrep SAST is report-only (job continue-on-error); unexpected outcome=${outcome}"
+              echo "::warning::${msg}"
+              ;;
+          esac
+          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
 
   # Layer 3 (partial) — Trivy filesystem / supply-chain complementary scan.
   trivy-fs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
+      - name: Announce Trivy report-only (L-056)
+        run: |
+          msg="Trivy filesystem scan is report-only (exit-code 0); findings do not fail the gate until promoted to hard-fail"
+          echo "::warning::${msg}"
+          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
       - name: Trivy filesystem scan (report)
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # 0.28.0
         with:
           scan-type: fs
           scan-ref: .
@@ -65,9 +108,11 @@ jobs:
   authz-matrix:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
       - name: Generate route inventory
         run: |
@@ -78,14 +123,18 @@ jobs:
           elif [ -f .gibson/scripts/route-inventory.mjs ]; then
             node .gibson/scripts/route-inventory.mjs --root . --out /tmp/routes-now.json
           else
-            echo "route-inventory.mjs not installed — skip structural check (adoption gap)"
+            msg="route-inventory.mjs not installed — skip structural check (adoption gap)"
+            echo "::warning::${msg}"
+            echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
       - name: Fail if matrix missing for discovered routes
         run: |
           # Expected committed matrix at tests/authz/route-matrix.json (adoption)
           if [ ! -f tests/authz/route-matrix.json ]; then
-            echo "No tests/authz/route-matrix.json yet — report-only until burn-down"
+            msg="No tests/authz/route-matrix.json yet — report-only until burn-down (authz matrix skip)"
+            echo "::warning::${msg}"
+            echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           node -e '
@@ -110,8 +159,11 @@ jobs:
   zap-baseline:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Resolve preview URL
         id: preview
         env:
@@ -137,7 +189,7 @@ jobs:
           echo "skip=0" >> "$GITHUB_OUTPUT"
       - name: ZAP baseline scan
         if: steps.preview.outputs.skip != '1'
-        uses: zaproxy/action-baseline@v0.12.0
+        uses: zaproxy/action-baseline@66042c8e7e24680119199a017e5b0e8603bf4dae # v0.12.0
         with:
           target: ${{ steps.preview.outputs.url }}
           # fail_action true = hard-fail on high+ (docs/08)
@@ -149,8 +201,11 @@ jobs:
   posture:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Resolve preview + probe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -159,7 +214,9 @@ jobs:
           set -e
           echo "::add-mask::${VERCEL_AUTOMATION_BYPASS_SECRET:-__unset__}"
           if [ ! -x scripts/posture-probe.sh ]; then
-            echo "posture-probe.sh not vendored — skip"
+            msg="posture-probe.sh not vendored — skip (adoption gap)"
+            echo "::warning::${msg}"
+            echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           bypass=""
@@ -174,10 +231,12 @@ jobs:
   zap-full-staging:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Full scan against staging
-        uses: zaproxy/action-full-scan@v0.10.0
+        uses: zaproxy/action-full-scan@d2a07475d467566c9a3e3c700f31f47724aa1060 # v0.10.0
         with:
           # Set repo variable STAGING_URL — never production
           target: ${{ vars.STAGING_URL }}

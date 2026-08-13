@@ -985,6 +985,12 @@ contains "enforce_admins drift" "$out" "enforce_admins"
 contains "strict drift" "$out" "strict"
 
 echo "=== reviewer identity same / missing ==="
+s=$(new_state rev-placeholder)
+jq '.reviewerLogin="CHANGEME-reviewer"' "$s/work/.gibson-delivery.json" >"$s/work/c.json" && mv "$s/work/c.json" "$s/work/.gibson-delivery.json"
+out=$(run_gc_ready "$s" --audit); rc=$?
+check "placeholder reviewer exit 2" "$rc" "2"
+contains "placeholder reviewer fails loud" "$out" "reviewerLogin placeholder must be replaced"
+
 s=$(new_state rev-missing)
 jq 'del(.reviewerLogin)' "$s/work/.gibson-delivery.json" >"$s/work/c.json" && mv "$s/work/c.json" "$s/work/.gibson-delivery.json"
 out=$(run_gc_ready "$s" --audit); rc=$?

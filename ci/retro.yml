@@ -1,3 +1,4 @@
+# gibson-template-version: sha256:b7bdcd8d968369dcdb5b8c3a34b25aaad8728366a45eb1f57c4649ac000d2729
 # The Gibson — weekly historian sweep (docs/09)
 # Install as .github/workflows/retro.yml. Emits a markdown artifact of lesson
 # candidates; does not auto-commit to memory/ (historian agent or human applies).
@@ -8,16 +9,22 @@ on:
     - cron: "0 14 * * 1" # Mondays 14:00 UTC
   workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: write
-  pull-requests: read
+# Deny all by default. Jobs grant least privilege only.
+permissions: {}
+
+# No PR trigger: do not share a cancel-in-progress group. A weekly/manual
+# sweep must not cancel a sibling run of the same workflow.
 
 jobs:
   weekly-sweep:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read       # gh run list (workflow-failure exhaust)
+      issues: write       # optional tracking issue
+      pull-requests: read # gh pr list exhaust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Collect exhaust (last 7 days)
         id: exhaust
@@ -56,7 +63,7 @@ jobs:
           cat retro-out/exhaust.md
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gibson-retro-exhaust
           path: retro-out/

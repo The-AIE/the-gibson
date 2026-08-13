@@ -1,3 +1,4 @@
+# gibson-template-version: sha256:e6e97e55ab6232ddd88d611a48b8fc019837cb63d2d2133da5e851b95a625e3b
 # The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
 # Fill <angle> placeholders from the repo's gate commands.
@@ -24,6 +25,10 @@ on:
 
 # Deny all by default. Jobs grant least privilege only.
 permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ===========================================================================

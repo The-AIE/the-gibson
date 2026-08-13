@@ -12,7 +12,7 @@ the code.
 | [`gibson-gate.yml`](gibson-gate.yml) | Green gate + security layers 1–3 + **protected test-integrity** (four isolated jobs; unique required check `test-integrity`) | [docs/06](../docs/06-quality-gates.md), [docs/08](../docs/08-security.md), issue #70 |
 | [`security.yml`](security.yml) | Layers 4 (authz matrix), 5 (ZAP baseline vs. preview), 8 (posture); nightly full DAST vs. **staging** | docs/08 |
 | [`ux-eval.yml`](ux-eval.yml) | Playwright contract flows + axe + Lighthouse against PR preview URL | [docs/07](../docs/07-uiux-evaluation.md) |
-| [`schema-guard.yml`](schema-guard.yml) | Schema diff without migration file fails; bans destructive migrate flags | [docs/12](../docs/12-vercel.md), L-002 |
+| [`schema-guard.yml`](schema-guard.yml) | Schema diff without migration file fails; bans destructive migrate flags. The `forbid-destructive-flags` job creates a **new required-check context** — add it to branch protection or a red run will not block merges. | [docs/12](../docs/12-vercel.md), L-002 |
 | [`retro.yml`](retro.yml) | Weekly exhaust → artifact (+ optional issue) for historian | [docs/09](../docs/09-memory-and-self-improvement.md) |
 
 ## How to install
@@ -33,6 +33,23 @@ cp /path/to/the-gibson/ci/ux-eval.yml .github/workflows/
 cp /path/to/the-gibson/ci/schema-guard.yml .github/workflows/
 cp /path/to/the-gibson/ci/retro.yml .github/workflows/
 ```
+
+## Check copied-template drift
+
+After copying one or more `ci/*.yml` workflows, run:
+
+```bash
+/path/to/the-gibson/scripts/gibson-template-drift.sh \
+  --gibson /path/to/the-gibson \
+  --repo /path/to/your-repo
+```
+
+The check covers shipped `ci/*.yml` workflows only; it does not stamp target
+repo JSON templates or adapter plists. A copied workflow with a missing,
+invalid, or stale content-hash stamp exits 1. Templates that the adopter did
+not install are reported but do not fail by default, because adopters may use a
+subset. Add `--strict-missing` when the adopter requires the complete template
+set and wants any missing workflow to exit 1.
 
 **Also vendor scripts the workflows call** (or submodule / copy into `scripts/`):
 
