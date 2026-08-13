@@ -40,7 +40,7 @@ HELP
 
 die() { echo "formal-review.sh: ERROR: $*" >&2; exit 1; }
 die_usage() { echo "formal-review.sh: $*" >&2; exit 2; }
-info() { echo "formal-review.sh: $*"; }
+info() { echo "formal-review.sh: $*" >&2; }
 
 PR="" REPO="" EVENT="" BODY="" BODY_FILE="" DRY=0
 

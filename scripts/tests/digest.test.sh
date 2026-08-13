@@ -6,7 +6,7 @@
 # byte preservation, and that delivery/ingest/hostile cmds never run.
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DIGEST="$SCRIPT_DIR/../digest.sh"
 LEDGER_TOOL="$SCRIPT_DIR/../decision-ledger.sh"
 PASS=0

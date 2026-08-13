@@ -24,6 +24,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { parseFlags } from "./lib/args.mjs";
 
 function help() {
   console.log(`contract-read-check.mjs — Law 1 contract-read sensor (#97)
@@ -56,12 +57,14 @@ if (args.includes("-h") || args.includes("--help") || args.length === 0) {
   process.exit(args.includes("-h") || args.includes("--help") ? 0 : 2);
 }
 
-let receiptPath = null;
-let bodyPath = null;
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--receipt") receiptPath = args[++i];
-  else if (args[i] === "--body-file") bodyPath = args[++i];
-}
+const parsed = parseFlags(args, {
+  flags: {
+    "--receipt": { key: "receiptPath", default: null },
+    "--body-file": { key: "bodyPath", default: null },
+  },
+});
+const receiptPath = parsed.receiptPath;
+const bodyPath = parsed.bodyPath;
 
 function fail(msg) {
   console.log(`contract-read-check: FAIL — ${msg}`);

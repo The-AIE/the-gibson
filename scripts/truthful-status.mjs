@@ -22,6 +22,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { parseFlags } from "./lib/args.mjs";
 
 function help() {
   console.log(`truthful-status.mjs — Law 8 truthful-report sensor (#97)
@@ -48,14 +49,20 @@ if (args.includes("-h") || args.includes("--help") || args.length === 0) {
   process.exit(args.includes("-h") || args.includes("--help") ? 0 : 2);
 }
 
-let claimed = null;
-let logFile = null;
-let gateExit = null;
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--claimed") claimed = (args[++i] || "").toLowerCase();
-  else if (args[i] === "--log-file") logFile = args[++i];
-  else if (args[i] === "--gate-exit") gateExit = args[++i];
-}
+const parsed = parseFlags(args, {
+  flags: {
+    "--claimed": {
+      key: "claimed",
+      default: null,
+      transform: (s) => (s || "").toLowerCase(),
+    },
+    "--log-file": { key: "logFile", default: null },
+    "--gate-exit": { key: "gateExit", default: null },
+  },
+});
+let claimed = parsed.claimed;
+let logFile = parsed.logFile;
+let gateExit = parsed.gateExit;
 
 if (!claimed) {
   console.error("truthful-status: --claimed is required");

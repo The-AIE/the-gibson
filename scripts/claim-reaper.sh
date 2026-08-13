@@ -134,7 +134,7 @@ done
 
 die() { echo "claim-reaper.sh: ERROR: $*" >&2; exit 1; }
 usage_die() { echo "claim-reaper.sh: ERROR: $*" >&2; exit 2; }
-info() { echo "claim-reaper.sh: $*"; }
+info() { echo "claim-reaper.sh: $*" >&2; }
 warn() { echo "claim-reaper.sh: WARNING: $*" >&2; }
 
 # Safe non-negative decimal integer parse. Lexical + bounded string compare
@@ -228,7 +228,10 @@ CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
 cd "$CANONICAL" || die "cannot cd to $CANONICAL"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git repo: $CANONICAL"
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib/common.sh
+. "$SCRIPT_DIR/lib/common.sh" || die "cannot source $SCRIPT_DIR/lib/common.sh"
+need_cmd git
 RELEASE_CMD="${GIBSON_REAPER_RELEASE_CMD:-$SCRIPT_DIR/release-claim.sh}"
 [[ -x "$RELEASE_CMD" || -f "$RELEASE_CMD" ]] || die "release-claim not found: $RELEASE_CMD"
 
@@ -432,7 +435,7 @@ EOF
 }
 
 PR_REPO="${REPO_ARG:-}"
-if [[ -z "$PR_REPO" ]]; then
+if [[ -z "$PR_REPO" ]] && command -v gh >/dev/null 2>&1; then
   PR_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
 fi
 if [[ -z "$PR_REPO" || ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then

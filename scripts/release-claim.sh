@@ -266,7 +266,7 @@ done
 
 CANONICAL="${GIBSON_CANONICAL:-$(pwd)}"
 die() { echo "release-claim.sh: ERROR: $*" >&2; exit 1; }
-info() { echo "release-claim.sh: $*"; }
+info() { echo "release-claim.sh: $*" >&2; }
 warn() { echo "release-claim.sh: WARNING: $*" >&2; }
 
 # Shared cleanup guards (#153 review P1 0D). The worktree enumeration and the
@@ -1629,7 +1629,7 @@ issue_claim_ids_from() {
 # required anyway. Where that handover cannot be made safely, the fallback is
 # close-only plus an honest INCOMPLETE — never a success message over
 # unproven cleanup.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # --- repository identity of the canonical checkout (#153 review P1) --------
 # Normalize a git remote URL to its github.com owner/name identity, or fail.

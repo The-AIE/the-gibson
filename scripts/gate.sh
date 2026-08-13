@@ -80,7 +80,7 @@ info() { echo "gate.sh: $*" >&2; }
 fail() { echo "gate.sh: FAIL: $*" >&2; FAILED=1; }
 FAILED=0
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/test-integrity.mjs"
 
 # Strict in-memory capture cap for configured command output.
@@ -263,6 +263,7 @@ if [[ -f "$BASELINE" ]]; then
   # shellcheck disable=SC2002
   SNAP_BYTES=$(cat -- "$BASELINE") \
     || die "cannot read baseline: $BASELINE"
+  command -v node >/dev/null || die "node is required to parse the trusted baseline"
   # Extract failure/exit/metrics from the trusted bytes via stdin (no re-read path).
   eval "$(printf '%s' "$SNAP_BYTES" | node -e '
     let s = "";

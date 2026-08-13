@@ -2,6 +2,15 @@
 # cost-ledger.sh - per-iteration cost ledger + cost-per-merged-PR rollup (L-003 / #74 / #141)
 set -euo pipefail
 
+# python3 is required for JSONL append/summarize (#192 tool guard).
+require_python3() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "cost-ledger.sh: ERROR: python3 is required for JSON/hashing; install python3 or put it on PATH" >&2
+    exit 1
+  fi
+}
+
+
 usage() {
   cat <<'HELP'
 cost-ledger.sh - per-iteration cost ledger (L-003 / issues #74, #141)
@@ -160,6 +169,7 @@ case "$CMD" in
     export CL_JOIN="${JOIN_KEY:-}" CL_REQ_RUNNER="${REQUESTED_RUNNER:-}"
     export CL_PROVIDER="${PROVIDER:-}" CL_FB_REASON="${FALLBACK_REASON:-}"
     export CL_EVENT_KIND="${EVENT_KIND:-}"
+    require_python3
     python3 -c '
 import json, os, sys
 path = os.environ["CL_LEDGER"]
@@ -205,6 +215,7 @@ print("cost-ledger.sh: appended %s runner=%s hat=%s wall_ms=%s" % (
     [[ -f "$LEDGER" ]] || die_corrupt "ledger not found: $LEDGER"
     [[ -L "$LEDGER" ]] && die_corrupt "ledger must not be a symlink"
     export CL_LEDGER="$LEDGER" CL_MERGED="${MERGED:-}" CL_FORMAT="$FORMAT" CL_PERIOD="${PERIOD_START:-}"
+    require_python3
     python3 -c '
 import json, os, sys
 from collections import defaultdict

@@ -11,7 +11,7 @@
 #   scripts/tests/injection-scan.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SCAN="$SCRIPT_DIR/../injection-scan.sh"
 PASS=0
 FAIL=0

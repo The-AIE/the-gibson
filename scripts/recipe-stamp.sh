@@ -49,7 +49,7 @@ done
 [[ -n "$RECIPE" ]] || { echo "recipe-stamp.sh: --recipe is required" >&2; exit 2; }
 [[ -f "$RECIPE" ]] || { echo "recipe-stamp.sh: recipe not found: $RECIPE" >&2; exit 1; }
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 LEDGER="$GIBSON_ROOT/memory/recipe-runs.md"
 

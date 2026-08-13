@@ -185,7 +185,7 @@ is_positive_safe_int() {
 [[ -n "$EXPECTED_REPO_SLUG" ]] || { usage; exit 2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON="${GIBSON:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PLAYBOOK="$GIBSON/playbooks/loop-step.md"
 [[ -f "$PLAYBOOK" ]] || die "missing $PLAYBOOK"

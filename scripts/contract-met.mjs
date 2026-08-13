@@ -24,6 +24,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { parseFlags } from "./lib/args.mjs";
 
 function help() {
   console.log(`contract-met.mjs — Law 6 acceptance-criteria sensor (#97)
@@ -54,25 +55,19 @@ if (args.includes("-h") || args.includes("--help") || args.length === 0) {
   process.exit(args.includes("-h") || args.includes("--help") ? 0 : 2);
 }
 
-function parseArgs(argv) {
-  const out = {
-    issueFile: null,
-    prBodyFile: null,
-    prTitle: "",
-    repo: null,
-    pr: null,
-  };
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--issue-file") out.issueFile = argv[++i];
-    else if (argv[i] === "--pr-body-file") out.prBodyFile = argv[++i];
-    else if (argv[i] === "--pr-title") out.prTitle = argv[++i] || "";
-    else if (argv[i] === "--repo") out.repo = argv[++i];
-    else if (argv[i] === "--pr") out.pr = argv[++i];
-  }
-  return out;
-}
-
-const opt = parseArgs(args);
+const opt = parseFlags(args, {
+  flags: {
+    "--issue-file": { key: "issueFile", default: null },
+    "--pr-body-file": { key: "prBodyFile", default: null },
+    "--pr-title": {
+      key: "prTitle",
+      default: "",
+      transform: (s) => s || "",
+    },
+    "--repo": { key: "repo", default: null },
+    "--pr": { key: "pr", default: null },
+  },
+});
 
 function section(body, name) {
   if (!body) return null;

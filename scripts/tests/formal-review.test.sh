@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # formal-review.test.sh — dedicated reviewer identity sensors (#67)
 set -uo pipefail
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 FR="$SCRIPT_DIR/../formal-review.sh"
 PASS=0; FAIL=0
 ok(){ echo "  ok   — $1"; PASS=$((PASS+1)); }

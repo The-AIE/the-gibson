@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # delivery-control audit — read-only write-path health (docs/23).
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
@@ -94,7 +94,7 @@ audit_branch() {
   [[ "${force}" == "false" ]] || { echo "  FAIL: force pushes must be disabled"; ok=1; }
   [[ "${delete}" == "false" ]] || { echo "  FAIL: branch deletion must be disabled"; ok=1; }
   local missing=()
-  for ctx in "${REQUIRED_CONTEXTS[@]}"; do
+  for ctx in ${REQUIRED_CONTEXTS[@]+"${REQUIRED_CONTEXTS[@]}"}; do
     if ! echo "${body}" | jq -e --arg c "${ctx}" '.required_status_checks.contexts // [] | index($c) != null' >/dev/null 2>&1; then
       missing+=("${ctx}")
     fi

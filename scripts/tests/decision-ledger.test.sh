@@ -5,7 +5,7 @@
 # semantics, stable ids, locks, validation, and that no delivery/approval path runs.
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TOOL="$SCRIPT_DIR/../decision-ledger.sh"
 PASS=0
 FAIL=0

@@ -4,7 +4,7 @@
 # Throwaway repos + stub gh/runner/loop only. No network, no live PRs, no models.
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 FLEET="$REPO_ROOT/scripts/loop-fleet.sh"
 

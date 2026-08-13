@@ -79,7 +79,7 @@ done
 command -v git >/dev/null || { echo "claims-status.sh: ERROR: git required" >&2; exit 2; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
   { echo "claims-status.sh: ERROR: not a git repo" >&2; exit 2; }
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 # Normalize a git remote URL to github.com owner/name, or return 1.
 # Mirrors release-claim.sh's contract so a checkout whose origin is GitHub

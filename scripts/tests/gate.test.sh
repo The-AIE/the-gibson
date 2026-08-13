@@ -25,7 +25,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/../test-integrity.mjs"
 GATE="$SCRIPT_DIR/../gate.sh"
 BASELINE_SH="$SCRIPT_DIR/../gate-baseline.sh"

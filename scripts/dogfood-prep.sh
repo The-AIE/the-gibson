@@ -81,7 +81,7 @@ done
 [[ -n "$SLUG" ]] || usage_err "--repo-slug is required"
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ -z "$GIBSON" ]]; then
   GIBSON=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 fi

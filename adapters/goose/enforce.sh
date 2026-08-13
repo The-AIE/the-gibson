@@ -48,7 +48,7 @@ HELP
 die() { echo "enforce.sh: ERROR: $*" >&2; exit 1; }
 usage_err() { echo "enforce.sh: $*" >&2; usage >&2; exit 2; }
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_GIBSON=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 GIBSON_ROOT="${GIBSON_ROOT:-$DEFAULT_GIBSON}"
 

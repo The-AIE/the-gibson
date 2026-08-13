@@ -181,8 +181,9 @@ COMMAND="$1"
 REPO="$2"
 shift 2
 
+# gh is required (its built-in --jq does the JSON work; no external jq binary).
 command -v gh >/dev/null 2>&1 || {
-  echo "pr-claims.sh: ERROR: gh (GitHub CLI) required" >&2
+  echo "pr-claims.sh: ERROR: gh (GitHub CLI) required — install: https://cli.github.com/" >&2
   exit 2
 }
 

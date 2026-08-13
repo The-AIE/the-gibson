@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Create hotfix branch from production tag (docs/23).
 set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 

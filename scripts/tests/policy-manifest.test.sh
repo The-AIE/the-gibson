@@ -6,7 +6,7 @@
 # doctrine consistency, and mutation receipts for gate/review/pair/digest/version.
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 TOOL="$SCRIPT_DIR/../policy-manifest.mjs"
 CANDIDATE="$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json"

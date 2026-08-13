@@ -71,7 +71,7 @@ done
 die() { echo "gate-baseline.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "gate-baseline.sh: $*" >&2; }
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/test-integrity.mjs"
 command -v node >/dev/null || die "node is required"
 

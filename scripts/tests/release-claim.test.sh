@@ -21,7 +21,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 RC="$SCRIPT_DIR/../release-claim.sh"
 PASS=0
 FAIL=0

@@ -23,7 +23,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 CLAIM="$SCRIPT_DIR/../claim.sh"
 PASS=0
 FAIL=0
@@ -268,6 +268,7 @@ mkdir -p "$FASTDIR/lib"
 cp "$SCRIPT_DIR/../claim.sh"            "$FASTDIR/claim.sh"
 cp "$SCRIPT_DIR/../pr-claims.sh"        "$FASTDIR/pr-claims.sh"
 cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$FASTDIR/lib/claim-guards.sh"
+cp "$SCRIPT_DIR/../lib/args.mjs"        "$FASTDIR/lib/args.mjs"
 # The marked region is the wait AND the monotonic measurement that verifies
 # it (#153 review round 5) — both have to go, because spaceReads now refuses
 # unless the measured elapsed time reaches the configured delay, so removing
@@ -1144,6 +1145,7 @@ CTL_DIR="$ROOT/ctl-scripts"
 mkdir -p "$CTL_DIR/lib"
 cp "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../pr-claims.sh" "$SCRIPT_DIR/../scope-overlap.mjs" "$CTL_DIR/"
 cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$CTL_DIR/lib/"
+cp "$SCRIPT_DIR/../lib/args.mjs" "$CTL_DIR/lib/args.mjs"
 chmod +x "$CTL_DIR/claim.sh" "$CTL_DIR/pr-claims.sh"
 # Patch ONLY the floor literals in the copy, and prove the patch landed.
 perl -0pi -e 's/const ADMIT_FLOOR = \{\n  attempts: 2,\n  stableReads: 2,\n  delaySeconds: 1,\n\};/const ADMIT_FLOOR = {\n  attempts: 1,\n  stableReads: 1,\n  delaySeconds: 0,\n};/' "$CTL_DIR/scope-overlap.mjs"

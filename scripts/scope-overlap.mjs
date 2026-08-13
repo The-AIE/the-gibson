@@ -85,6 +85,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseFlags } from "./lib/args.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -371,40 +372,60 @@ if (argv.includes("-h") || argv.includes("--help") || argv.length === 0) {
   process.exit(argv.includes("-h") || argv.includes("--help") ? 0 : 2);
 }
 
-function parseArgs(a) {
-  const out = {
-    scopes: [],
-    repoPath: process.cwd(),
-    base: null,
-    slice: false,
-    claimId: null,
-    issue: null,
-    json: false,
-    repo: null,
-    admitPr: null,
-  };
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i];
-    if (x === "--scope") {
-      const v = a[++i];
-      if (!v) dieUsage("--scope requires a value");
-      out.scopes.push(...v.split(/\s+/).filter(Boolean));
-    } else if (x === "--repo-path") out.repoPath = resolve(a[++i] || "");
-    else if (x === "--base") out.base = a[++i];
-    else if (x === "--slice") out.slice = true;
-    else if (x === "--claim-id") out.claimId = a[++i];
-    else if (x === "--issue") out.issue = String(a[++i] || "");
-    else if (x === "--repo") out.repo = a[++i];
-    else if (x === "--admit-pr") out.admitPr = String(a[++i] || "");
-    else if (x === "--json") out.json = true;
-    else dieUsage(`unknown argument: ${x}`);
-  }
-  return out;
-}
-
 function dieUsage(msg) {
   console.error(`scope-overlap: ${msg}`);
   process.exit(2);
+}
+
+function parseArgs(a) {
+  // Shared unknown-flag / missing-value contract (#192); keep scope-overlap
+  // multi-value --scope and resolve() defaults identical to pre-#192.
+  const parsed = parseFlags(a, {
+    prefix: "scope-overlap: ",
+    flags: {
+      "--scope": {
+        key: "scopeRaw",
+        multiple: true,
+        default: () => [],
+      },
+      "--repo-path": {
+        key: "repoPath",
+        default: () => process.cwd(),
+        transform: (v) => resolve(v || ""),
+      },
+      "--base": { key: "base", default: null },
+      "--slice": { key: "slice", type: "boolean" },
+      "--claim-id": { key: "claimId", default: null },
+      "--issue": {
+        key: "issue",
+        default: null,
+        transform: (v) => String(v || ""),
+      },
+      "--repo": { key: "repo", default: null },
+      "--admit-pr": {
+        key: "admitPr",
+        default: null,
+        transform: (v) => String(v || ""),
+      },
+      "--json": { key: "json", type: "boolean" },
+    },
+  });
+  const scopes = [];
+  for (const v of /** @type {string[]} */ (parsed.scopeRaw || [])) {
+    if (!v) dieUsage("--scope requires a value");
+    scopes.push(...String(v).split(/\s+/).filter(Boolean));
+  }
+  return {
+    scopes,
+    repoPath: parsed.repoPath,
+    base: parsed.base,
+    slice: parsed.slice,
+    claimId: parsed.claimId,
+    issue: parsed.issue,
+    json: parsed.json,
+    repo: parsed.repo,
+    admitPr: parsed.admitPr,
+  };
 }
 
 const opt = parseArgs(argv);

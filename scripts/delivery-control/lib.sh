@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Shared helpers for delivery-control scripts (docs/23).
+# Not standalone: sources ../lib/common.sh (sibling). Copy both.
 set -euo pipefail
 
 die() { echo "error: $*" >&2; exit 1; }
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+# Shared need_cmd (#192). Sourced before the source-time need_cmd calls below
+# so missing tools still fail at source exactly as before.
+# shellcheck source=../lib/common.sh
+. "$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../lib/common.sh"
 
 need_cmd gh
 need_cmd jq
@@ -49,7 +54,14 @@ load_config() {
   PROD_ENV="$(echo "${cfg}" | jq -r --arg d "${PROD_ENV}" '.productionEnvironment // $d')"
   REVIEWER_LOGIN="$(echo "${cfg}" | jq -r --arg d "${REVIEWER_LOGIN}" '.reviewerLogin // $d')"
   if echo "${cfg}" | jq -e '.requiredContexts | type == "array" and length > 0' >/dev/null 2>&1; then
-    mapfile -t REQUIRED_CONTEXTS < <(echo "${cfg}" | jq -r '.requiredContexts[]')
+    # Bash 3.2 — no mapfile (git-configure.sh:126 / loop-fleet.sh:504).
+    # Append every line, including empty strings: mapfile -t preserved those
+    # (`requiredContexts:[""]`). Guard later expansions with the 3.2-safe
+    # ${arr[@]+"${arr[@]}"} idiom so an empty result does not explode under set -u.
+    REQUIRED_CONTEXTS=()
+    while IFS= read -r _ctx; do
+      REQUIRED_CONTEXTS+=("${_ctx}")
+    done < <(echo "${cfg}" | jq -r '.requiredContexts[]')
   fi
   if [[ "${PROD_ENV}" == "null" ]]; then
     PROD_ENV=""
@@ -69,7 +81,12 @@ confirm_apply() {
 }
 
 json_contexts() {
-  printf '%s\n' "${REQUIRED_CONTEXTS[@]}" | jq -R . | jq -s .
+  # printf '%s\n' with zero args still emits one newline; skip it when empty.
+  if [[ ${#REQUIRED_CONTEXTS[@]} -eq 0 ]]; then
+    printf '%s\n' '[]'
+    return
+  fi
+  printf '%s\n' ${REQUIRED_CONTEXTS[@]+"${REQUIRED_CONTEXTS[@]}"} | jq -R . | jq -s .
 }
 
 protection_payload() {

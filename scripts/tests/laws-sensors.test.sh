@@ -2,7 +2,7 @@
 # laws-sensors.test.sh — Law 1 / 6 / 8 deterministic sensors (#97)
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 L1="$SCRIPT_DIR/../contract-read-check.mjs"
 L6="$SCRIPT_DIR/../contract-met.mjs"
 L8="$SCRIPT_DIR/../truthful-status.mjs"

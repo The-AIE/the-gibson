@@ -123,7 +123,7 @@ ENV
 
 EXAMPLES
   # inside a driver (issue #63 wiring)
-  SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
+  SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
   source "$SCRIPT_DIR/silent-noop.sh"
   if silent_noop_progressed "$STATE_SNAPSHOT" "$STATE_FILE"; then
     failures=0; stale=0

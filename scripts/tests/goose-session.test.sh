@@ -2,7 +2,7 @@
 # goose-session.test.sh — offline sensors for #33 lifecycle + #35 enforcement
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 ENFORCE="$REPO_ROOT/adapters/goose/enforce.sh"
 SESSION="$REPO_ROOT/adapters/goose/session.sh"
