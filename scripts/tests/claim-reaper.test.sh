@@ -19,7 +19,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REAPER="$SCRIPT_DIR/../claim-reaper.sh"
 RC="$SCRIPT_DIR/../release-claim.sh"
 STREAM_CAPTURE="$SCRIPT_DIR/../lib/stream-capture.sh"
@@ -35,12 +35,14 @@ lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else
 # Install a sibling reaper copy with the real production stream-capture helper
 # at the path production resolves ($dest_dir/lib/stream-capture.sh). Without
 # the helper, claim-reaper fails closed rather than inventing an empty inventory.
+# Also ships lib/common.sh (need_cmd; #192) — production sources it at startup.
 install_sibling_reaper() {
   local dest_dir="$1"
   mkdir -p "$dest_dir/lib"
   cp "$REAPER" "$dest_dir/claim-reaper.sh"
   chmod +x "$dest_dir/claim-reaper.sh"
   cp "$STREAM_CAPTURE" "$dest_dir/lib/stream-capture.sh"
+  cp "$SCRIPT_DIR/../lib/common.sh" "$dest_dir/lib/common.sh"
 }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-reaper-test.XXXXXX")
@@ -3167,9 +3169,12 @@ echo "#153 follow-up · stream-capture helper required (fail closed when missing
 # helper must refuse rather than hand-roll empty inventory authority.
 new_repo "$ROOT/nocap"
 add_claim_file "$ROOT/nocap" issue-892-nocap 892 "$CLAIMED_ISO"
-mkdir -p "$ROOT/nocap/scripts"
+mkdir -p "$ROOT/nocap/scripts/lib"
 cp "$REAPER" "$ROOT/nocap/scripts/claim-reaper.sh"
 chmod +x "$ROOT/nocap/scripts/claim-reaper.sh"
+# common.sh is required at startup (#192); omit only stream-capture so the
+# fail-closed path under test is still the inventory helper, not need_cmd.
+cp "$SCRIPT_DIR/../lib/common.sh" "$ROOT/nocap/scripts/lib/common.sh"
 # Intentionally omit lib/stream-capture.sh.
 cat > "$ROOT/nocap/scripts/pr-claims.sh" <<'READER'
 #!/usr/bin/env bash

@@ -47,7 +47,7 @@ HELP
 die() { echo "session.sh: ERROR: $*" >&2; exit 1; }
 usage_err() { echo "session.sh: $*" >&2; usage >&2; exit 2; }
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_GIBSON=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 GIBSON_ROOT="${GIBSON_ROOT:-$DEFAULT_GIBSON}"
 ENFORCE="$SCRIPT_DIR/enforce.sh"

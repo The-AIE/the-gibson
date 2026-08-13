@@ -21,7 +21,7 @@
 #   scripts/tests/silent-noop.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SENSOR="$SCRIPT_DIR/../silent-noop.sh"
 PASS=0
 FAIL=0

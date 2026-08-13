@@ -25,7 +25,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 RECIPES_DIR="$REPO_ROOT/playbooks/recipes"
 FINDINGS_TEMPLATE="$REPO_ROOT/playbooks/red-team/findings/TEMPLATE.md"

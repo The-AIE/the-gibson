@@ -7,7 +7,7 @@ usage() {
 run-all.sh — run every Gibson sensor and report one verdict
 
 WHAT IT DOES
-  1. shellcheck -S warning over scripts/*.sh and scripts/tests/*.sh, compared to
+  1. shellcheck -S warning over scripts/**/*.sh and adapters/**/*.sh, compared to
      scripts/tests/shellcheck-baseline.txt — a NEW finding fails, a fixed one
      tells you to shrink the baseline.
   2. bash -n over the same files (and, when docker is available, bash 3.2 too,
@@ -75,9 +75,11 @@ SHELLCHECK_SHA256_DARWIN_AARCH64=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc
 SHELLCHECK_SHA256_DARWIN_X86_64=3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
 SHELLCHECK_SHA256_LINUX_X86_64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 BASELINE="$SCRIPT_DIR/shellcheck-baseline.txt"
+# shellcheck source=lib/convention-sensors.sh
+. "$SCRIPT_DIR/lib/convention-sensors.sh"
 WORKFLOW_SELF_GATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
 
 # Parse "ShellCheck … version: X.Y.Z" (or a bare X.Y.Z) → X.Y.Z, else empty.
@@ -702,7 +704,9 @@ run_limited() {
   fi
 }
 
-SH_FILES=$(find scripts -name '*.sh' -type f | sort)
+# scripts/ and adapters/ — both ship bash that must stay Bash-3.2 clean
+# (adapters/goose/*.sh enter the gate here; #192).
+SH_FILES=$(find scripts adapters -name '*.sh' -type f | sort)
 
 # --- 0. toolchain -----------------------------------------------------------
 echo "== toolchain"
@@ -837,6 +841,224 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   rm -f /tmp/run-all-32.$$
 else
   echo "${YEL}  SKIP${OFF} — no usable docker; bash 3.2 unverified on this host"
+fi
+
+# --- 2b. bash-4 builtins (runtime-only on 3.2; bash -n does not catch them) --
+# mapfile/readarray/declare -A / ${var^^} / ${var,,} / &>> parse under bash -n
+# on modern bash but fail at RUNTIME on stock macOS 3.2.57. Grep sensor (#192).
+# One grep -E per pattern over comment-stripped lines. Plumbing errors fail
+# the sensor (no 2>/dev/null || true). Double-quoted spans stay visible so
+# echo "${name^^}" is not hidden.
+echo "== bash-4 builtins (grep sensor)"
+BASH4_HITS=""
+BASH4_PLUMB=0
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  hits=$(cs_bash4_hits "$f")
+  rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    BASH4_PLUMB=1
+    BASH4_HITS="${BASH4_HITS}${f}: sensor plumbing failed"$'\n'
+  elif [[ "$rc" -eq 1 ]]; then
+    BASH4_HITS="${BASH4_HITS}${hits}"$'\n'
+  fi
+done <<< "$SH_FILES"
+
+if [[ "$BASH4_PLUMB" -ne 0 ]]; then
+  echo "${RED}  FAIL${OFF} — bash-4 sensor plumbing failed (fail closed):"
+  printf '%s' "$BASH4_HITS" | sed 's/^/         /'
+  FAILED="$FAILED bash-4-builtins-plumbing"
+elif [[ -n "$BASH4_HITS" ]]; then
+  echo "${RED}  FAIL${OFF} — bash-4-only constructs (fail at runtime on macOS 3.2):"
+  printf '%s' "$BASH4_HITS" | sed 's/^/         /'
+  FAILED="$FAILED bash-4-builtins"
+else
+  echo "${GRN}  ok${OFF}   — no mapfile/readarray/declare -A/\${^^}/\${,,}/&>> in code"
+fi
+
+# --- 2c. SCRIPT_DIR spelling (#192) ----------------------------------------
+# Canonical form (CDPATH guard + double-dash + BASH_SOURCE):
+#   SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Sourced libraries that intentionally never set SCRIPT_DIR (claim-guards,
+# stream-capture, silent-noop body, delivery-control/lib) are fine — this
+# sensor only rejects non-canonical *assignments*.
+echo "== SCRIPT_DIR convention"
+SCRIPT_DIR_HITS=""
+SCRIPT_DIR_PLUMB=0
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  hits=$(cs_script_dir_hits "$f")
+  rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    SCRIPT_DIR_PLUMB=1
+    SCRIPT_DIR_HITS="${SCRIPT_DIR_HITS}${f}: sensor plumbing failed"$'\n'
+  elif [[ "$rc" -eq 1 ]]; then
+    SCRIPT_DIR_HITS="${SCRIPT_DIR_HITS}${hits}"$'\n'
+  fi
+done <<< "$SH_FILES"
+
+if [[ "$SCRIPT_DIR_PLUMB" -ne 0 ]]; then
+  echo "${RED}  FAIL${OFF} — SCRIPT_DIR sensor plumbing failed (fail closed):"
+  printf '%s' "$SCRIPT_DIR_HITS" | sed 's/^/         /'
+  FAILED="$FAILED script-dir-plumbing"
+elif [[ -n "$SCRIPT_DIR_HITS" ]]; then
+  echo "${RED}  FAIL${OFF} — non-canonical SCRIPT_DIR assignment(s):"
+  printf '%s' "$SCRIPT_DIR_HITS" | sed 's/^/         /'
+  echo "         want: $SCRIPT_DIR_CANON"
+  FAILED="$FAILED script-dir-convention"
+else
+  echo "${GRN}  ok${OFF}   — all SCRIPT_DIR assignments match the canonical form"
+fi
+
+# --- 2d. info()/warn() must write to stderr (#192) --------------------------
+# info() on stdout pollutes pipes (claim.sh used to). Every info/warn body
+# must redirect to >&2.
+echo "== info/warn stderr"
+INFO_WARN_HITS=""
+INFO_WARN_PLUMB=0
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  hits=$(cs_info_warn_hits "$f")
+  rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    INFO_WARN_PLUMB=1
+    INFO_WARN_HITS="${INFO_WARN_HITS}${f}: sensor plumbing failed"$'\n'
+  elif [[ "$rc" -eq 1 ]]; then
+    INFO_WARN_HITS="${INFO_WARN_HITS}${hits}"$'\n'
+  fi
+done <<< "$SH_FILES"
+
+if [[ "$INFO_WARN_PLUMB" -ne 0 ]]; then
+  echo "${RED}  FAIL${OFF} — info/warn sensor plumbing failed (fail closed):"
+  printf '%s' "$INFO_WARN_HITS" | sed 's/^/         /'
+  FAILED="$FAILED info-warn-plumbing"
+elif [[ -n "$INFO_WARN_HITS" ]]; then
+  echo "${RED}  FAIL${OFF} — info()/warn() without >&2 (stdout pollutes pipes):"
+  printf '%s' "$INFO_WARN_HITS" | sed 's/^/         /'
+  FAILED="$FAILED info-warn-stderr"
+else
+  echo "${GRN}  ok${OFF}   — info()/warn() bodies redirect to stderr"
+fi
+
+# --- 2e. tool guards: jq / gh / node / python3 (#192) -----------------------
+# A production script that *invokes* one of these tools must also *guard* it
+# (need_cmd X, command -v X, require_python3, or command -v "$GH_BIN").
+# Test files are allowlisted. Scripts that only mention a tool in help text
+# are not invocations (command-position match only).
+echo "== tool guards (jq/gh/node/python3)"
+# TOOL_GUARD_BASELINE: pre-existing unguarded invocations outside this batch's
+# retrofit list. Shrink only — do not grow without a burn-down note.
+# file<TAB>tool
+TOOL_GUARD_BASELINE=$(cat <<'EOF'
+scripts/loop.sh	node
+EOF
+)
+TOOL_GUARD_HITS=""
+TOOL_GUARD_PLUMB=0
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  hits=$(cs_tool_guard_hits "$f")
+  rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    TOOL_GUARD_PLUMB=1
+    TOOL_GUARD_HITS="${TOOL_GUARD_HITS}${f}: sensor plumbing failed"$'\n'
+    continue
+  fi
+  [[ "$rc" -eq 0 || -z "$hits" ]] && continue
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    # hit format: "file  tool  N: orig"
+    _tf=${line%%  *}
+    _rest=${line#*  }
+    _tt=${_rest%%  *}
+    if echo "$TOOL_GUARD_BASELINE" | grep -qxF "${_tf}	${_tt}"; then
+      continue
+    fi
+    TOOL_GUARD_HITS="${TOOL_GUARD_HITS}${line}"$'\n'
+  done <<< "$hits"
+done <<< "$SH_FILES"
+
+# Ratchet: baseline entries that no longer fire (file now line-order guarded)
+# must be removed.
+TOOL_GUARD_STALE=""
+while IFS= read -r row; do
+  [[ -z "$row" || "$row" =~ ^# ]] && continue
+  bf=${row%%	*}; bt=${row#*	}
+  [[ -f "$bf" ]] || { TOOL_GUARD_STALE="${TOOL_GUARD_STALE}${row} (missing file)"$'\n'; continue; }
+  _now=$(cs_tool_guard_hits "$bf") || true
+  if ! printf '%s\n' "$_now" | grep -q "  ${bt}  "; then
+    TOOL_GUARD_STALE="${TOOL_GUARD_STALE}${row}"$'\n'
+  fi
+done <<< "$TOOL_GUARD_BASELINE"
+
+if [[ "$TOOL_GUARD_PLUMB" -ne 0 ]]; then
+  echo "${RED}  FAIL${OFF} — tool-guard sensor plumbing failed (fail closed):"
+  printf '%s' "$TOOL_GUARD_HITS" | sed 's/^/         /'
+  FAILED="$FAILED tool-guards-plumbing"
+elif [[ -n "$TOOL_GUARD_HITS" ]]; then
+  echo "${RED}  FAIL${OFF} — tool invoked without need_cmd/command -v guard:"
+  printf '%s' "$TOOL_GUARD_HITS" | sed 's/^/         /'
+  FAILED="$FAILED tool-guards"
+elif [[ -n "$TOOL_GUARD_STALE" ]]; then
+  echo "${RED}  FAIL${OFF} — tool-guard baseline entries no longer needed; remove them:"
+  printf '%s' "$TOOL_GUARD_STALE" | sed 's/^/         /'
+  FAILED="$FAILED tool-guards-baseline-stale"
+else
+  echo "${GRN}  ok${OFF}   — jq/gh/node/python3 invocations are guarded (or baselined)"
+fi
+
+# --- 2g. vendored mjs self-containment (#192) -------------------------------
+# ci/gibson-gate.yml sparse-checks out ONLY scripts/test-integrity.mjs into
+# the isolated grader. Adopters vendor that file plus check-active-work.mjs
+# and route-inventory.mjs as single files (ci/README.md names the latter
+# bare). A relative import (./ or ../ — static, side-effect, dynamic, or
+# re-export) dies with ERR_MODULE_NOT_FOUND.
+echo "== vendored mjs self-containment"
+VENDOR_HITS=""
+VENDOR_RC=0
+VENDOR_HITS=$(cs_vendored_selfcontained "$REPO_ROOT") || VENDOR_RC=$?
+if [[ "$VENDOR_RC" -eq 2 ]]; then
+  echo "${RED}  FAIL${OFF} — vendored-mjs sensor plumbing failed (fail closed)"
+  printf '%s\n' "$VENDOR_HITS" | sed 's/^/         /'
+  FAILED="$FAILED vendored-mjs-plumbing"
+elif [[ "$VENDOR_RC" -ne 0 ]]; then
+  echo "${RED}  FAIL${OFF} — vendored scripts/*.mjs must be single-file (no relative import ./ or ../):"
+  printf '%s' "$VENDOR_HITS" | sed 's/^/         /'
+  FAILED="$FAILED vendored-mjs-selfcontained"
+else
+  echo "${GRN}  ok${OFF}   — vendored-listed scripts/*.mjs have no relative imports"
+fi
+
+# --- 2f. mjs unknown-flag contract (#192) -----------------------------------
+# Every scripts/*.mjs must exit 2 on --definitely-not-a-flag with
+# "unknown flag:" or "unknown option:" on stderr. args.mjs uses "flag";
+# policy-manifest.mjs (upstream #188) uses "option". Do not retrofit that
+# parser — the contract is the exit code plus either wording.
+echo "== mjs unknown-flag"
+MJS_FLAG_HITS=""
+if command -v node >/dev/null 2>&1; then
+  while IFS= read -r mjs; do
+    [[ -f "$mjs" ]] || continue
+    _outf=$(mktemp "${TMPDIR:-/tmp}/mjs-flag-out.XXXXXX")
+    _errf=$(mktemp "${TMPDIR:-/tmp}/mjs-flag-err.XXXXXX")
+    node "$mjs" --definitely-not-a-flag >"$_outf" 2>"$_errf"
+    rc=$?
+    if [[ "$rc" -ne 2 ]] || ! grep -qE 'unknown (flag|option):' "$_errf"; then
+      MJS_FLAG_HITS="${MJS_FLAG_HITS}${mjs} (rc=$rc stderr=$(head -1 "$_errf") stdout=$(head -1 "$_outf"))"$'\n'
+    fi
+    rm -f "$_outf" "$_errf"
+  done < <(find scripts -maxdepth 1 -name '*.mjs' -type f | sort)
+  if [[ -n "$MJS_FLAG_HITS" ]]; then
+    echo "${RED}  FAIL${OFF} — scripts/*.mjs must exit 2 on unknown --flag:"
+    printf '%s' "$MJS_FLAG_HITS" | sed 's/^/         /'
+    FAILED="$FAILED mjs-unknown-flag"
+  else
+    n_mjs=$(find scripts -maxdepth 1 -name '*.mjs' -type f | wc -l | tr -d ' ')
+    echo "${GRN}  ok${OFF}   — $n_mjs scripts/*.mjs reject --definitely-not-a-flag (exit 2)"
+  fi
+else
+  echo "${RED}  FAIL${OFF} — node not installed; cannot probe mjs unknown-flag contract"
+  FAILED="$FAILED mjs-unknown-flag-node-missing"
 fi
 
 # --- 3. injection scan ------------------------------------------------------

@@ -33,7 +33,7 @@
 #   loop-fleet.sh --profile PATH --halt   # graceful: lanes finish current hat
 set -euo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 DEFAULT_GIBSON=$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd)
 
 # --- globals (filled by profile load / env) ---------------------------------
@@ -2714,7 +2714,7 @@ preflight_for_start() {
     assert_safe_runner_token "$RUNNER" "global runner (default for lanes omitting ordered route)"
     command -v "$RUNNER" >/dev/null 2>&1 || die "runner '$RUNNER' not found on PATH (used as default for lane(s) without an explicit route)"
   fi
-  command -v "$GH_BIN" >/dev/null 2>&1 || die "gh binary '$GH_BIN' not found"
+  command -v "$GH_BIN" >/dev/null 2>&1 || die "gh binary '$GH_BIN' not found — install GitHub CLI (https://cli.github.com/) or set GH_BIN"
 
   assert_reviewer_release_separation
 

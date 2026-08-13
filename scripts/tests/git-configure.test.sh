@@ -14,7 +14,7 @@
 #   scripts/tests/git-configure.test.sh
 set -uo pipefail
 
-SCRIPT_DIR=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TARGET="$SCRIPT_DIR/../git-configure.sh"
 PASS=0
 FAIL=0
@@ -688,6 +688,20 @@ out=$(bash "$TARGET" --help 2>&1); rc=$?
 check "help exits 0" "$rc" "0"
 contains "help names audit" "$out" "--audit"
 contains "help names apply boundary" "$out" "NEVER applied"
+
+out=$(bash "$TARGET" --version 2>&1); rc=$?
+check "version exits 0" "$rc" "0"
+contains "version string" "$out" "git-configure.sh"
+
+# --help / --version must not require gh/jq (they exit before the tool guards).
+# Keep /bin so `cat` (usage heredoc) resolves; gh is Homebrew, jq is /usr/bin.
+out=$(PATH="/bin" /bin/bash "$TARGET" --help 2>&1); rc=$?
+check "PATH-stripped --help exits 0" "$rc" "0"
+contains "PATH-stripped --help names audit" "$out" "--audit"
+
+out=$(PATH="/bin" /bin/bash "$TARGET" --version 2>&1); rc=$?
+check "PATH-stripped --version exits 0" "$rc" "0"
+contains "PATH-stripped --version prints version" "$out" "git-configure.sh"
 
 out=$(bash "$TARGET" --nope 2>&1); rc=$?
 check "unknown arg exit 2" "$rc" "2"

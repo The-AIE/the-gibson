@@ -165,6 +165,17 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die_usage "missing required command: $1"
 }
 
+# Line-order guard: helpers below invoke gh/jq only from main(), which
+# calls need_cmd first. --help / -h / --version skip so usage and version
+# work without the tools. Operational paths still hit the guards in main().
+case " $* " in
+  *" --help "*|*" -h "*|*" --version "*) ;;
+  *)
+    need_cmd gh
+    need_cmd jq
+    ;;
+esac
+
 # Shell-quote a value for safe paste into remediation commands (never eval).
 sq() {
   printf '%q' "$1"
