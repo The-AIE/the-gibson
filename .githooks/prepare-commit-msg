@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# prepare-commit-msg: append Signed-off-by from the committer identity when absent.
+# Wired via core.hooksPath=.githooks (see scripts/setup-hooks.sh).
+set -euo pipefail
+
+msg_file="${1:-}"
+if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
+  exit 0
+fi
+
+# Already present — leave message alone (covers git commit -s and prior hooks).
+if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg_file" 2>/dev/null; then
+  exit 0
+fi
+
+ident="$(git var GIT_COMMITTER_IDENT 2>/dev/null || true)"
+if [[ -z "$ident" ]]; then
+  exit 0
+fi
+
+# "Name <email> timestamp tz" → "Name <email>"
+sob="${ident%%>*}>"
+if [[ "$sob" != *'<'* || "$sob" != *'>'* ]]; then
+  exit 0
+fi
+
+git interpret-trailers \
+  --if-exists doNothing \
+  --trailer "Signed-off-by: ${sob}" \
+  --in-place \
+  "$msg_file"

@@ -45,6 +45,9 @@ RISKS
     latch) still fails open. Non-matching hosts never query gh against
     unrelated same-slug repos. The child always rechecks live even when the
     loop's in-process cache is still warm.
+  - DCO (#204): handoff (including --dry-run) refuses if any commit in the
+    handed-off range <base>..<head> lacks a Signed-off-by trailer. The base
+    commit itself is outside that range. Empty ranges pass.
 
 USAGE
   devin-supervisor.sh ensure  --repo <path>
@@ -127,6 +130,29 @@ die() { echo "devin-supervisor.sh: ERROR: $*" >&2; exit 1; }
 # a false "supervisor rejected the handoff" (issue #71 mid-cadence halt).
 die_kill_switch() { echo "devin-supervisor.sh: ERROR: $*" >&2; exit 75; }
 info() { echo "devin-supervisor.sh: $*" >&2; }
+
+# List commits in <base>..<head> that lack a Signed-off-by trailer (issue #204).
+# Prints unsigned SHAs one per line on stdout. Returns 0 when the range is
+# readable (including an empty range); 1 when the range cannot be walked.
+# Match is case-insensitive on a line starting Signed-off-by: + whitespace —
+# the same pattern as .githooks/prepare-commit-msg. GPG signatures are ignored.
+dco_unsigned_shas() {
+  local repo="$1" base="$2" head="$3" sha log_out
+  git -C "$repo" rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || return 1
+  git -C "$repo" rev-parse --verify --quiet "${head}^{commit}" >/dev/null 2>&1 || return 1
+  log_out=$(git -C "$repo" log --format=%H "${base}..${head}" 2>/dev/null) || return 1
+  [[ -n "$log_out" ]] || return 0
+  while IFS= read -r sha; do
+    [[ -n "$sha" ]] || continue
+    if git -C "$repo" log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+      continue
+    fi
+    printf '%s\n' "$sha"
+  done <<EOF
+$log_out
+EOF
+  return 0
+}
 
 [[ -n "$REPO" ]] || { usage; exit 2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
@@ -720,6 +746,32 @@ case "$CMD" in
       fi
       if [[ "$remote_sha" != "$SHA" ]]; then
         die "pinned SHA $SHA no longer matches remote tip of $BRANCH ($remote_sha). Re-review the new tip before handoff."
+      fi
+    fi
+
+    # DCO (#204): refuse unsigned work in the handed-off range, including
+    # --dry-run. Prefer exact SHA pins when both objects are readable; otherwise
+    # walk --base..(--sha or --branch). The *base* commit is outside the range
+    # on purpose — fixtures leave it unsigned. Empty range is fine.
+    dco_base=""
+    dco_head=""
+    if [[ -n "$BASE_SHA" && -n "$SHA" ]] &&
+       git -C "$REPO" rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null 2>&1 &&
+       git -C "$REPO" rev-parse --verify --quiet "$SHA^{commit}" >/dev/null 2>&1; then
+      dco_base="$BASE_SHA"
+      dco_head="$SHA"
+    else
+      dco_base="$BASE"
+      dco_head="${SHA:-$BRANCH}"
+    fi
+    if [[ -n "$dco_base" && -n "$dco_head" ]]; then
+      if dco_out=$(dco_unsigned_shas "$REPO" "$dco_base" "$dco_head"); then
+        if [[ -n "$dco_out" ]]; then
+          dco_list=$(printf '%s' "$dco_out" | tr '\n' ' ')
+          die "unsigned commit(s) in ${dco_base}..${dco_head} lack a Signed-off-by trailer: ${dco_list}. Run git commit --amend -s or rebase -S, then retry."
+        fi
+      else
+        die "cannot read git log ${dco_base}..${dco_head} to verify Signed-off-by trailers"
       fi
     fi
 

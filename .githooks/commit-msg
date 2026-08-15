@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# commit-msg: refuse a commit that still has no Signed-off-by trailer.
+# prepare-commit-msg adds one when it can; this hook is the reject half.
+# Wired via core.hooksPath=.githooks (see scripts/setup-hooks.sh).
+set -euo pipefail
+
+msg_file="${1:-}"
+if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
+  exit 0
+fi
+
+# Merge/squash commits that already carry the trailer pass (same match as
+# prepare-commit-msg). A still-missing trailer is refused for every source.
+if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg_file" 2>/dev/null; then
+  exit 0
+fi
+
+echo "commit-msg: missing Signed-off-by trailer — refusing the commit." >&2
+echo "commit-msg: run \`git commit -s\` or \`scripts/setup-hooks.sh\` so prepare-commit-msg can add one." >&2
+exit 1
