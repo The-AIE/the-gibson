@@ -378,7 +378,12 @@ integrity argued otherwise and won.
 
 Measured promotion of auto-remediation (§8); extraction of the harness's proven
 patterns into a versioned adoption pack any repository can stamp and keep in sync;
-porting the retired-facts checker harness-wide; and the strongest test available to a
+porting the retired-facts checker harness-wide; compiling gated acceptance criteria
+into executable, validated-then-frozen flow contracts before implementation begins —
+constructing the oracle from the specification rather than living with its absence,
+per the grader architecture of [12] (whose freeze-before-use step joins [1]'s frozen
+specification and [2]'s frozen verifier sets as a thrice-independently-converged
+pattern); and the strongest test available to a
 system like this one: publishing the outcome ledger's before/after deltas — review
 rounds per change, avoidable attestations, time-to-detection, and expected cost per
 completed task by route [3] — across a multi-month window, so both the harness's
@@ -394,6 +399,7 @@ value claim and its routing policy are falsifiable by its own instruments.
 [9] M. Burgess. *Legal responsibilities using autonomous agents for artificial intelligence.* arXiv:2608.08022, 2026.
 [10] M. Burgess. *Information and causality in Promise Theory.* arXiv:2004.12661, 2020.
 [11] Y. Luo et al. *AutoDesign: Meta-harness optimization for long-horizon agentic design.* arXiv:2608.13560, 2026.
+[12] B. Chen, H. Liu, S. Zhang. *WebGrader: Training LLMs for web development with self-evolving programmatic grader.* arXiv:2608.06474, 2026.
 
 *Repository artifacts cited throughout are available in the The-AIE organization's
 public issue and CI history; the harness's own documentation index is
