@@ -59,6 +59,26 @@ function rejectUnknownFlags(argv, allowed, opts = {}) {
   }
 }
 
+// This CLI has no positional-argument contract. A bare path (or anything
+// after `--`) must not fall through to a silent cwd scan.
+function rejectUnexpectedPositionals(argv, opts = {}) {
+  const valueFlags = new Set(opts.valueFlags || []);
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--") {
+      const rest = argv.slice(i + 1);
+      dieUsage(`unexpected argument: ${rest.length ? rest[0] : "--"}`);
+    }
+    if (a.startsWith("-") && a !== "-") {
+      if (valueFlags.has(a) && i + 1 < argv.length) {
+        i += 1;
+      }
+      continue;
+    }
+    dieUsage(`unexpected argument: ${a}`);
+  }
+}
+
 function help() {
   console.log(`route-inventory.mjs — emit route inventory for AuthZ matrix (docs/08)
 
@@ -90,9 +110,11 @@ if (args.includes("-h") || args.includes("--help")) {
   process.exit(0);
 }
 
+const VALUE_FLAGS = ["--root", "--out", "--roles"];
 rejectUnknownFlags(args, ["--root", "--out", "--roles", "-h", "--help"], {
-  valueFlags: ["--root", "--out", "--roles"],
+  valueFlags: VALUE_FLAGS,
 });
+rejectUnexpectedPositionals(args, { valueFlags: VALUE_FLAGS });
 const root = readFlag(args, "--root") || process.cwd();
 const out = readFlag(args, "--out");
 const rolesRaw = readFlag(args, "--roles");
