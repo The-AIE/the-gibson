@@ -21,6 +21,15 @@
 // Env: GITHUB_TOKEN, GITHUB_REPOSITORY. Flags: --post (upsert issue; without
 // it, prints the report and exits), SENSOR_WINDOW_DAYS (default 14).
 
+const KNOWN_FLAGS = new Set(["--post"]);
+const unknown = process.argv.slice(2).filter((a) => !KNOWN_FLAGS.has(a));
+if (unknown.length > 0) {
+  console.error(
+    `sensor-health: unknown flag(s): ${unknown.join(" ")}\nusage: node scripts/sensor-health.mjs [--post]`
+  );
+  process.exit(2);
+}
+
 const TOKEN = process.env.GITHUB_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY;
 const WINDOW_DAYS = Number(process.env.SENSOR_WINDOW_DAYS || 14);
