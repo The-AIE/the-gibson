@@ -1,6 +1,6 @@
 # Merge audit: The-AIE/conference-os
 
-Generated 2026-08-15T17:51:12.426Z. Cohort: **50** merges by `merged_at` (newest first).
+Generated 2026-08-15T17:55:28.596Z. Cohort: **50** merges by `merged_at` (newest first).
 
 **Advisory grade: D (66.4/100).** Grade never fails the process; use `--strict` for deterministic policy violations only.
 
@@ -16,6 +16,8 @@ Generated 2026-08-15T17:51:12.426Z. Cohort: **50** merges by `merged_at` (newest
 | In-flight check at merge | 46/50 |
 | In-flight later failed | 0/50 |
 | Exact-head review evidence | 50/50 |
+| Review path | none 2, owner-attestation 31, provider-evidence-comment 2, trusted-provider-review 15 |
+| Avoidable owner attestations | 13/44 (provider approval preceded: 5, later: 8, unknown: 0) |
 | Independent exact-head review | 14/50 |
 | Formal GitHub approvals | 16/50 |
 | Burst merges (≤60s pairs) | 11 pairs / 14 PRs |
