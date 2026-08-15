@@ -454,6 +454,22 @@ rounds per change, avoidable attestations, time-to-detection, and expected cost 
 completed task by route [3] — across a multi-month window, so both the harness's
 value claim and its routing policy are falsifiable by its own instruments.
 
+## Acknowledgments
+
+The question that started this work — *what will your AI factory look like?* —
+came out of conversations with **Marc Sirkin**, and it has been the organizing
+question ever since. **Reuven Cohen's** public work on agentic engineering
+practice shaped the author's understanding of what disciplined agent
+orchestration looks like in the wild. **Mark Burgess's** Promise Theory
+[8,9,10] gave the system its theoretical spine — several of its mechanisms
+were built before the author knew the theory that explains why they work.
+A recent public conversation between **Greg Isenberg** and **Allie K. Miller**
+reinforced the conviction that individually-owned, agent-operated software
+factories are arriving faster than the industry's tooling assumptions expect.
+Errors, overclaims, and unearned confidence are the author's alone — and the
+pre-registered predictions in the companion document exist so that any of the
+above can check.
+
 ## References
 
 [1] J. Abenhaïm. *Specification-first convergence with an AI coding agent.* arXiv:2608.12440, 2026.
