@@ -41,7 +41,10 @@ loops; DevOps; self-improving processes.
 
 ## 1. Introduction
 
-Coding agents are now fast enough that throughput is rarely the constraint. In the
+Coding agents are now fast enough that throughput is rarely the constraint, and
+production telemetry confirms the interaction shape this paper assumes: sparse
+human-initiated turns, each expanding into long autonomous loops of inference coupled
+with tool execution [14]. In the
 27 days preceding the process audit that motivated this paper's measurement apparatus,
 the primary repository under study merged 634 pull requests with a median time-to-merge
 of 0.5 hours¹. The constraints that actually bound the system were, in order:
@@ -102,8 +105,10 @@ reserved for owner-gated classes) is an instance of this framework arrived at
 operationally; §7.2 supplies the kind of datum their framework prices: a
 security-adjacent change whose nominal implementation cost was under a dollar of
 inference consumed three implementation rounds and two adversarial review rounds
-before it was safe to merge. [3] reports no empirical results; our outcome ledger
-(§10) is positioned to supply exactly that class of evidence.
+before it was safe to merge. [3] reports no empirical results, and the ACEM cost model [13] likewise offers
+constructs (a revision factor for retries, a human-oversight intensity scale that
+parallels our tier ladder) with symbolic constants awaiting calibration; our outcome
+ledger (§10) is positioned to supply exactly that class of evidence to both.
 
 **Theoretical framing.** Promise Theory [8] holds that autonomous agents cannot be
 obligated, only make voluntary promises about their own behavior, and that the
@@ -400,6 +405,8 @@ value claim and its routing policy are falsifiable by its own instruments.
 [10] M. Burgess. *Information and causality in Promise Theory.* arXiv:2004.12661, 2020.
 [11] Y. Luo et al. *AutoDesign: Meta-harness optimization for long-horizon agentic design.* arXiv:2608.13560, 2026.
 [12] B. Chen, H. Liu, S. Zhang. *WebGrader: Training LLMs for web development with self-evolving programmatic grader.* arXiv:2608.06474, 2026.
+[13] M. El-Ramly. *ACEM: A cost estimation model for agentic software engineering.* arXiv:2608.02582, 2026.
+[14] B. Liu et al. *Agentic coding in the wild: characterizing GitHub Copilot traces at production scale.* arXiv:2608.00101, 2026.
 
 *Repository artifacts cited throughout are available in the The-AIE organization's
 public issue and CI history; the harness's own documentation index is
