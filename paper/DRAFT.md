@@ -18,6 +18,13 @@ agents rather than a hired engineering team. The Gibson is our attempt to
 prove that claim honestly, and this paper reports how it is built and how it
 is measured.
 
+A definitional point first: The Gibson is not a coding harness. It does not
+try to make any agent better at writing code — the frontier platforms compete
+to do that, and they are interchangeable here. It is a **coding governance
+harness**: the layer of evidence gates, identities, sensors, routing, and
+measurement that drives good results out of *any* platform plugged into it —
+and keeps driving them as platforms are swapped, added, or retired.
+
 Three commitments distinguish the attempt:
 
 1. **Trust comes from evidence, not from any vendor's agent.** No artifact is
@@ -108,7 +115,14 @@ of 0.5 hours¹. The constraints that actually bound the system were, in order:
    fact about the review gate's trust configuration, while the machine-readable
    config held the right one.
 
-The Gibson is the harness built to attack these constraints. Its animating principle,
+The Gibson is the harness built to attack these constraints — and the word
+"harness" here means governance, not capability. Unlike the scaffolds in §2,
+which improve an agent's ability to produce correct patches, this system is
+agnostic about how code gets produced; it governs what happens to claims,
+evidence, and authority once it is. Capability harnesses compete on model
+performance and are obsoleted by the next model; a governance harness
+compounds across model generations, because its assets — gates, sensors,
+identities, measurements — attach to the repository, not the agent. Its animating principle,
 adopted as doctrine on 2026-08-15 after the evidence above accumulated in one session:
 **a lesson only sticks if it is executable.** Prose is where knowledge goes to rot;
 checks are where it survives.
