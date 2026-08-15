@@ -337,7 +337,15 @@ into a retired-fact record. The harness does not exempt its own components.
 
 **Agent self-modification.** Following the cost result in [2] and our own prose-rot
 evidence, improvement effort goes into verifiers and configuration, not into agents
-rewriting themselves.
+rewriting themselves. AutoDesign [11] demonstrates the opposite architecture
+succeeding — recursive meta-harness optimization (+12.4% from a learned harness,
+under $3 per autonomous loop) — but in a domain with a cheap, trustworthy automated
+scoring oracle and contained blast radius. We read the two results as jointly
+identifying the deciding variable: **oracle quality and rollout cost**, not
+self-modification per se. Most of this harness's domain fails that test; the one
+corner that passes it — the sensor scripts, which carry mutation-tested suites that
+constitute exactly such an oracle — makes bounded meta-optimization of the sensors
+themselves admissible future work rather than doctrine violation.
 
 **Autonomous remediation (yet).** The sensor loops currently file findings; they do
 not dispatch fixes. Promotion to a deterministic-first repair ladder (re-run /
@@ -385,6 +393,7 @@ value claim and its routing policy are falsifiable by its own instruments.
 [8] M. Burgess. *Cooperation in human and machine agents: Promise Theory considerations.* arXiv:2604.10505, 2026; M. Burgess, J. Bergstra, *Promise Theory: Principles and Applications*, 2014/2019.
 [9] M. Burgess. *Legal responsibilities using autonomous agents for artificial intelligence.* arXiv:2608.08022, 2026.
 [10] M. Burgess. *Information and causality in Promise Theory.* arXiv:2004.12661, 2020.
+[11] Y. Luo et al. *AutoDesign: Meta-harness optimization for long-horizon agentic design.* arXiv:2608.13560, 2026.
 
 *Repository artifacts cited throughout are available in the The-AIE organization's
 public issue and CI history; the harness's own documentation index is
