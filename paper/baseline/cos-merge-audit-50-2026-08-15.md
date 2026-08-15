@@ -1,6 +1,6 @@
 # Merge audit: The-AIE/conference-os
 
-Generated 2026-08-15T17:45:23.054Z. Cohort: **50** merges by `merged_at` (newest first).
+Generated 2026-08-15T17:51:12.426Z. Cohort: **50** merges by `merged_at` (newest first).
 
 **Advisory grade: D (66.4/100).** Grade never fails the process; use `--strict` for deterministic policy violations only.
 
