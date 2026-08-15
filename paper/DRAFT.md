@@ -200,7 +200,14 @@ instruction in this harness.
 
 **Industrial practice.** Loop engineering [6,7] structures agent work as
 outer-system-driven find/execute/check cycles with a second agent reviewing; Anthropic's
-guidance recommends a reviewer with no memory of the change. Cloudflare's review system
+guidance recommends a reviewer with no memory of the change. Google's SDLC whitepaper
+[6] — the canonical statement of this school, taught at scale — frames vibe coding and
+agentic engineering as endpoints of one spectrum positioned by how much verification
+surrounds the output, and holds that "generation is largely solved" while verification,
+judgment, and direction are the new craft; it also names *trajectory* evaluation (was
+the path sound?) as distinct from output evaluation. The Gibson agrees with the
+diagnosis and extends it in the direction §1 describes: their harness wraps a model
+with verification; a governance harness spans vendors and outlives any of them. Cloudflare's review system
 processes tens of thousands of merge requests with domain-specialized reviewer agents
 over human-authored code [11 in 1]; the Bun rewrite shipped a million generated lines
 against a pre-existing million-assertion oracle [13 in 1]. The Gibson differs from all
@@ -475,7 +482,7 @@ above can check.
 [1] J. Abenhaïm. *Specification-first convergence with an AI coding agent.* arXiv:2608.12440, 2026.
 [2] V. Kulkarni, S. Paul, A. Kumar, N. Tzou, S. Chappidi. *SBCO: Self-supervised, verifier-grounded harness optimization for planning agents.* arXiv:2608.10157, 2026.
 [3] S. Manoharan et al. *Task-to-model optimization for enterprise LLM coding assistants.* arXiv:2608.08528, 2026.
-[4] SWE-bench; [5] SWE-agent; [6] A. Osmani, *Loop engineering*, 2026; [7] Anthropic, agentic coding guidance, 2026 — as cited in [1].
+[4] SWE-bench; [5] SWE-agent; [6] A. Osmani, S. Saboo, S. Kartakis. *The New SDLC With Vibe Coding.* Google/Kaggle whitepaper, 2026 (expands Osmani's loop-engineering writing); [7] Anthropic, agentic coding guidance, 2026 — as cited in [1].
 [8] M. Burgess. *Cooperation in human and machine agents: Promise Theory considerations.* arXiv:2604.10505, 2026; M. Burgess, J. Bergstra, *Promise Theory: Principles and Applications*, 2014/2019.
 [9] M. Burgess. *Legal responsibilities using autonomous agents for artificial intelligence.* arXiv:2608.08022, 2026.
 [10] M. Burgess. *Information and causality in Promise Theory.* arXiv:2004.12661, 2020.
