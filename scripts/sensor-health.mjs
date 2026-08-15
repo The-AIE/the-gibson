@@ -25,7 +25,7 @@ const KNOWN_FLAGS = new Set(["--post"]);
 const unknown = process.argv.slice(2).filter((a) => !KNOWN_FLAGS.has(a));
 if (unknown.length > 0) {
   console.error(
-    `sensor-health: unknown flag(s): ${unknown.join(" ")}\nusage: node scripts/sensor-health.mjs [--post]`
+    `sensor-health: unknown flag: ${unknown.join(" ")}\nusage: node scripts/sensor-health.mjs [--post]`
   );
   process.exit(2);
 }
