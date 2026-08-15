@@ -63,6 +63,11 @@ RISKS
     branch, so a local-only ref is nothing it can act on. Any commit in the
     handed-off range that lacks a Signed-off-by trailer also blocks the
     handoff (issue #204) before the reviewer or supervisor is invoked.
+  - Review rounds are capped per tier from config/review-round-caps.json
+    (issue #205). Exceeding the cap exits nonzero and does not start another
+    model review / second-opinion — a human decision is required. The
+    pre-handoff Law 5 review and a single supervisor handoff are not extra
+    fix→review rounds.
   - The review receipt is an operational control, not a security boundary. It is
     a plain file under <repo>/gibson/, so anything running as the same user —
     including the agents the gate constrains — can write it. Isolating it from
@@ -2065,7 +2070,148 @@ resolve_base_pin() {
   printf '%s %s\n' "$name" "$sha"
 }
 
+# Per-tier review-round caps (issue #205). Caps are read from
+# config/review-round-caps.json (override: GIBSON_REVIEW_ROUND_CAPS). Tier comes
+# from GIBSON_TIER, then optional loop-state `tier:`, then gh issue labels
+# tier-a/tier-b/tier-c when `issue:` is set. Unknown tier uses the file's
+# `default` key (tightest committed default is A=1), never unlimited.
+# Missing/unreadable/invalid config fails closed.
+
+resolve_issue_tier() {
+  local t issue labels
+  t="${GIBSON_TIER:-}"
+  if [[ -z "$t" && -f "$STATE_FILE" ]]; then
+    t=$(read_field tier || true)
+  fi
+  if [[ -z "$t" && -f "$STATE_FILE" ]] && command -v gh >/dev/null 2>&1; then
+    issue=$(read_field issue || true)
+    if [[ -n "$issue" && "$issue" =~ ^[0-9]+$ ]]; then
+      if [[ -n "${EXPECTED_REPO_SLUG:-}" ]]; then
+        labels=$(gh issue view "$issue" --repo "$EXPECTED_REPO_SLUG" \
+          --json labels --jq '.labels[].name' 2>/dev/null || true)
+      else
+        labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null || true)
+      fi
+      # Prefer the first matching label; last-wins if several (should not happen).
+      printf '%s\n' "$labels" | grep -qiE '^tier-c$' && t=C
+      printf '%s\n' "$labels" | grep -qiE '^tier-b$' && t=B
+      printf '%s\n' "$labels" | grep -qiE '^tier-a$' && t=A
+    fi
+  fi
+  printf '%s\n' "$t"
+}
+
+# Prints TIER<TAB>CAP. Exit 1 + stderr on missing/invalid config.
+review_round_cap_resolve() {
+  local caps_file requested
+  caps_file="${GIBSON_REVIEW_ROUND_CAPS:-$GIBSON/config/review-round-caps.json}"
+  requested="${1:-}"
+  command -v node >/dev/null 2>&1 || {
+    echo "review-round-caps: node is required to read $caps_file" >&2
+    return 1
+  }
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const requested = String(process.argv[2] || "").trim();
+    let raw;
+    try {
+      raw = fs.readFileSync(file, "utf8");
+    } catch (e) {
+      process.stderr.write("review-round-caps: missing or unreadable config: " + file + "\n");
+      process.exit(1);
+    }
+    let j;
+    try {
+      j = JSON.parse(raw);
+    } catch (e) {
+      process.stderr.write("review-round-caps: invalid JSON in " + file + "\n");
+      process.exit(1);
+    }
+    if (!j || typeof j !== "object" || Array.isArray(j)) {
+      process.stderr.write("review-round-caps: config must be a JSON object\n");
+      process.exit(1);
+    }
+    const defKey = (j.default == null) ? "" : String(j.default).trim();
+    if (!defKey) {
+      process.stderr.write("review-round-caps: missing default key\n");
+      process.exit(1);
+    }
+    function capOf(k) {
+      if (!k) return null;
+      const v = j[k];
+      if (typeof v !== "number" || !isFinite(v) || Math.floor(v) !== v || v < 1) return null;
+      return v;
+    }
+    const defCap = capOf(defKey);
+    if (defCap == null) {
+      process.stderr.write("review-round-caps: default tier " + defKey + " has no valid positive integer cap\n");
+      process.exit(1);
+    }
+    let tier = requested.toUpperCase();
+    let cap = capOf(tier);
+    if (!tier || cap == null) {
+      tier = String(defKey).toUpperCase();
+      cap = defCap;
+    }
+    process.stdout.write(tier + "\t" + String(cap) + "\n");
+  ' "$caps_file" "$requested"
+}
+
+# Return 0 if another model review may start. Return 1 after journaling when
+# the cap is reached or the config cannot be trusted. Caller must exit nonzero
+# and must not invoke a reviewer/second-opinion/supervisor review.
+refuse_review_round_if_capped() {
+  local action="${1:-review}"
+  local issue round tier_raw pair tier cap msg
+  issue=""
+  round=""
+  if [[ -f "$STATE_FILE" ]]; then
+    issue=$(read_field issue || true)
+    round=$(read_field round || true)
+  fi
+  if ! [[ "$round" =~ ^[0-9]+$ ]]; then
+    msg="exceeded review-round cap — human decision required (issue=${issue:-?} tier=? cap=? current=${round:-unreadable} action=$action): loop-state round: is missing or not a non-negative integer"
+    info "$msg"
+    {
+      echo ""
+      echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · review-round cap · action=$action"
+      echo "$msg"
+    } >> "$JOURNAL"
+    return 1
+  fi
+  tier_raw=$(resolve_issue_tier)
+  if ! pair=$(review_round_cap_resolve "$tier_raw"); then
+    msg="exceeded review-round cap — human decision required (issue=${issue:-?} tier=${tier_raw:-?} cap=? current=$round action=$action): review-round-caps config is missing or invalid"
+    info "$msg"
+    {
+      echo ""
+      echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · review-round cap · action=$action"
+      echo "$msg"
+    } >> "$JOURNAL"
+    return 1
+  fi
+  tier=$(printf '%s' "$pair" | awk -F'\t' '{print $1}')
+  cap=$(printf '%s' "$pair" | awk -F'\t' '{print $2}')
+  if [[ "$round" -lt "$cap" ]]; then
+    return 0
+  fi
+  msg="exceeded review-round cap — human decision required (issue=${issue:-?} tier=$tier cap=$cap current=$round action=$action)"
+  info "$msg"
+  {
+    echo ""
+    echo "## $(date -u +"%Y-%m-%dT%H:%M:%SZ") · review-round cap · action=$action"
+    echo "$msg"
+    echo "Do not start another model review. Amend the config only with a human decision, or park the issue."
+  } >> "$JOURNAL"
+  return 1
+}
+
 escalate() {
+  if ! refuse_review_round_if_capped second-opinion; then
+    info "second-opinion skipped — review-round cap reached or config unreadable"
+    exit 1
+  fi
   local out="$REVIEW_ARTIFACT"
   info "escalating after $failures consecutive failures — reviewers: $REVIEWERS"
   # The receipt is dropped even though escalation no longer touches the pre-handoff
@@ -2511,6 +2657,15 @@ while true; do
       info "dry-run: would invoke $RUNNER with rendered loop-step ($hat)"
       rm -f "$PROMPT_FILE"
     else
+      # Issue #205: another reviewer-hat iteration is a model review round.
+      # At or over the per-tier cap, escalate to a human — do not invoke
+      # the runner. --print-prompt / --dry-run stay inert (above).
+      if [[ "$hat" == "reviewer" ]]; then
+        if ! refuse_review_round_if_capped reviewer; then
+          rm -f "$PROMPT_FILE"
+          exit 1
+        fi
+      fi
       # Snapshot the validated pre-iteration state immediately before the real
       # runner. Snapshot failure is a single state-corrupt/recovery-control
       # failure — never a silent continuation into the runner.
