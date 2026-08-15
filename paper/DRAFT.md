@@ -197,7 +197,8 @@ anecdotal.
 
 CI lanes are treated as sensors, and sensors themselves are monitored. A daily job
 classifies every active workflow from its recent run history: **BLIND** (≥3 completed
-runs, never green — its verdicts carry no information), **FAILING** (was green once,
+runs, never green — in the causal-information sense of [10], a channel whose verdicts
+carry no information about the property it guards), **FAILING** (was green once,
 none in the window), **IDLE** (with its latest-ever conclusion surfaced, so a failing
 lane cannot hide by going quiet), or OK. Findings land in a standing issue updated in
 place, with a notification comment only when the finding set changes. The loop is
@@ -383,6 +384,7 @@ value claim and its routing policy are falsifiable by its own instruments.
 [4] SWE-bench; [5] SWE-agent; [6] A. Osmani, *Loop engineering*, 2026; [7] Anthropic, agentic coding guidance, 2026 — as cited in [1].
 [8] M. Burgess. *Cooperation in human and machine agents: Promise Theory considerations.* arXiv:2604.10505, 2026; M. Burgess, J. Bergstra, *Promise Theory: Principles and Applications*, 2014/2019.
 [9] M. Burgess. *Legal responsibilities using autonomous agents for artificial intelligence.* arXiv:2608.08022, 2026.
+[10] M. Burgess. *Information and causality in Promise Theory.* arXiv:2004.12661, 2020.
 
 *Repository artifacts cited throughout are available in the The-AIE organization's
 public issue and CI history; the harness's own documentation index is
