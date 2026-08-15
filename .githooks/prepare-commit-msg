@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# prepare-commit-msg: append Signed-off-by from the committer identity when absent.
+# Wired via core.hooksPath=.githooks (see scripts/setup-hooks.sh).
+set -euo pipefail
+
+msg_file="${1:-}"
+if [[ -z "$msg_file" || ! -f "$msg_file" ]]; then
+  exit 0
+fi
+
+# Already present — leave message alone (covers git commit -s and prior hooks).
+if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg_file" 2>/dev/null; then
+  exit 0
+fi
+
+# Resolve the committer the same way `git commit` does:
+#   1. GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL (env wins)
+#   2. git var GIT_COMMITTER_IDENT (user.name / user.email + timestamp)
+# Require both a non-empty name and email so the trailer cannot be
+# "Signed-off-by:" or "Signed-off-by: <>".
+name="${GIT_COMMITTER_NAME:-}"
+email="${GIT_COMMITTER_EMAIL:-}"
+
+if [[ -z "$name" || -z "$email" ]]; then
+  ident="$(git var GIT_COMMITTER_IDENT 2>/dev/null || true)"
+  if [[ -n "$ident" ]]; then
+    # "Name <email> timestamp tz"
+    ident_email="${ident#*<}"
+    ident_email="${ident_email%%>*}"
+    ident_name="${ident%% <*}"
+    if [[ -z "$name" && -n "$ident_name" && "$ident_name" != "$ident" ]]; then
+      name="$ident_name"
+    fi
+    if [[ -z "$email" && -n "$ident_email" && "$ident_email" != "$ident" ]]; then
+      email="$ident_email"
+    fi
+  fi
+fi
+
+if [[ -z "$name" ]]; then
+  name="$(git config --get user.name 2>/dev/null || true)"
+fi
+if [[ -z "$email" ]]; then
+  email="$(git config --get user.email 2>/dev/null || true)"
+fi
+
+# Trim surrounding whitespace (git config can carry it; env usually does not).
+name="${name#"${name%%[![:space:]]*}"}"
+name="${name%"${name##*[![:space:]]}"}"
+email="${email#"${email%%[![:space:]]*}"}"
+email="${email%"${email##*[![:space:]]}"}"
+
+if [[ -z "$name" || -z "$email" ]]; then
+  exit 0
+fi
+
+# A newline inside either field would split the trailer into a second paragraph.
+case "$name$email" in
+  *$'\n'*|*$'\r'*) exit 0 ;;
+esac
+
+sob="${name} <${email}>"
+
+git interpret-trailers \
+  --if-exists doNothing \
+  --trailer "Signed-off-by: ${sob}" \
+  --in-place \
+  "$msg_file"
