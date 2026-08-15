@@ -10,11 +10,14 @@
 #   scripts/tests/setup-hooks.test.sh
 set -uo pipefail
 
-# Hermetic git identity (#101).
-export GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-gibson-sensor}"
-export GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-sensor@gibson.invalid}"
-export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
-export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
+# Hermetic git identity (#101). Overwrite, do not inherit: gibson-self-gate
+# exports GIT_COMMITTER_NAME=gibson-ci, and ${GIT_COMMITTER_NAME:-gibson-sensor}
+# would keep that. The hook correctly signs as the env committer, so the
+# "names the committer" assertion below would look for the wrong person.
+export GIT_AUTHOR_NAME=gibson-sensor
+export GIT_AUTHOR_EMAIL=sensor@gibson.invalid
+export GIT_COMMITTER_NAME=gibson-sensor
+export GIT_COMMITTER_EMAIL=sensor@gibson.invalid
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 GIBSON=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
@@ -77,6 +80,10 @@ echo "setup-hooks.sh sets core.hooksPath and is safe to re-run"
 REPO="$ROOT/repo"
 mkdir -p "$REPO"
 $GIT init -q "$REPO"
+# Persist the hermetic identity in the throwaway repo too — `git init -c`
+# does not write user.name/email, and the hook falls back to git var / config.
+git -C "$REPO" config user.name gibson-sensor
+git -C "$REPO" config user.email sensor@gibson.invalid
 # Copy hooks so the temp repo has a .githooks dir (setup-hooks looks at toplevel).
 mkdir -p "$REPO/.githooks"
 cp "$PREPARE" "$COMMIT_MSG" "$REPO/.githooks/"
@@ -117,7 +124,7 @@ if grep -qiE '^Signed-off-by:[[:space:]]+' "$msg"; then
 else
   bad "prepare-commit-msg did not add a trailer: $(cat "$msg")"
 fi
-if grep -q 'gibson-sensor' "$msg"; then
+if grep -q 'gibson-sensor' "$msg" && grep -q 'sensor@gibson.invalid' "$msg"; then
   ok "added trailer uses the committer identity"
 else
   bad "added trailer did not name the committer: $(cat "$msg")"

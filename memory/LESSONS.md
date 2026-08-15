@@ -978,3 +978,24 @@ before comparing exact findings; do not treat a tool-version delta as source
 debt or as a baseline-only green.
 **Status:** fixed in #138 / PR #147
 **Tags:** #toolchain #ci #ratchet #shellcheck #sensors #issue-138 #pr-147
+
+## L-052 · 2026-08-15 · hermetic-identity-fallback-inherits-ci
+**What happened:** PR #215 (`feat/204-signing-at-commit-time`) was green locally
+(`setup-hooks.test.sh` 21/21) and red in gibson-self-gate: 20 passed, 1 failed
+with `added trailer did not name the committer`. The hook had added
+`Signed-off-by: gibson-ci <ci@gibson.invalid>` — the actual committer — while
+the assertion grepped for the fixture name `gibson-sensor`.
+**Root cause:** the suite used `${GIT_COMMITTER_NAME:-gibson-sensor}`. That is
+not hermetic. gibson-self-gate writes `GIT_COMMITTER_NAME=gibson-ci` into
+`GITHUB_ENV` (the #101 runner-identity pin). `${VAR:-default}` keeps the CI
+value, so the hook (correctly, via `git var GIT_COMMITTER_IDENT`) signed as
+`gibson-ci` and the hardcoded name check failed. Local runs had no
+`GIT_COMMITTER_*` and therefore used the fallback, hiding the failure.
+**Harness fix:** (1) `prepare-commit-msg` now composes `Name <email>` from
+`GIT_COMMITTER_*`, then `git var`, then `user.name`/`user.email`, and refuses
+to add a trailer unless both name and email are non-empty. (2) The sensor
+overwrites the hermetic identity (no `:-` inherit) and still asserts
+`gibson-sensor` plus the matching email. A test that greps a fallback name
+must pin that name, not inherit the host.
+**Status:** fixed (PR #215 follow-up)
+**Tags:** #dco #hooks #ci #sensors #identity #issue-204 #pr-215
