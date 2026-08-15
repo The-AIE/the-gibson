@@ -75,7 +75,11 @@ function classify(runs) {
     return { state: "FAILING", detail: `latest run ${latest.conclusion}; last green ${lastGreen}` };
   }
   if (inWindow.length === 0) {
-    return { state: "IDLE", detail: `no completed runs in ${WINDOW_DAYS}d` };
+    const last = latest
+      ? `; latest ever: ${latest.conclusion} ${latest.created_at?.slice(0, 10)}`
+      : "";
+    const warn = latest && latest.conclusion !== "success" ? " ⚠️" : "";
+    return { state: "IDLE", detail: `no completed runs in ${WINDOW_DAYS}d${last}${warn}` };
   }
   const lastGreen = successes[0]?.created_at?.slice(0, 10) ?? "n/a";
   return { state: "OK", detail: `last green ${lastGreen}` };
