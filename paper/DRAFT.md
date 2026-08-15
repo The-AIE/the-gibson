@@ -93,6 +93,32 @@ reliability, and fix observability before logic (§8). We adopt their repair lad
 (deterministic repair → bounded model repair → human escalation) for the harness's
 planned auto-remediation stage.
 
+**Cost-optimal routing.** Manoharan et al. [3] argue that enterprise agent spend
+should be optimized on *expected cost per completed task* — pricing retries,
+escalations, and wait time — rather than token cost, with routing organized by task
+category × difficulty and deployed in stages. The Gibson's routing doctrine
+(implementation to cost-efficient platforms, judgment to a top tier, human authority
+reserved for owner-gated classes) is an instance of this framework arrived at
+operationally; §7.2 supplies the kind of datum their framework prices: a
+security-adjacent change whose nominal implementation cost was under a dollar of
+inference consumed three implementation rounds and two adversarial review rounds
+before it was safe to merge. [3] reports no empirical results; our outcome ledger
+(§10) is positioned to supply exactly that class of evidence.
+
+**Theoretical framing.** Promise Theory [8] holds that autonomous agents cannot be
+obligated, only make voluntary promises about their own behavior, and that the
+assessment of whether a promise was kept belongs to the promisee, never the promiser.
+The Gibson is usefully read as an engineered instance of this: pull-request gate
+fields (scope claims, isolation declarations, verification checklists) are promises
+from identifiable agents; reviews and attestations are assessments by independent
+promisees; the rule that no agent's self-declared PASS is evidence is not a policy
+preference but the promise-theoretic structure itself. Burgess's application of the
+framework to responsibility attribution for AI agents [9] parallels the harness's
+owner-attestation model, in which a human's structured attestation is itself a
+promise — one that accepts responsibility for agent-lane work — and the per-lane
+credential-backed identities (§4.1) exist precisely so that promises have
+attributable promisers.
+
 **Industrial practice.** Loop engineering [6,7] structures agent work as
 outer-system-driven find/execute/check cycles with a second agent reviewing; Anthropic's
 guidance recommends a reviewer with no memory of the change. Cloudflare's review system
@@ -331,14 +357,18 @@ Measured promotion of auto-remediation (§8); extraction of the harness's proven
 patterns into a versioned adoption pack any repository can stamp and keep in sync;
 porting the retired-facts checker harness-wide; and the strongest test available to a
 system like this one: publishing the outcome ledger's before/after deltas — review
-rounds per change, avoidable attestations, time-to-detection — across a multi-month
-window, so the harness's value claim is falsifiable by its own instruments.
+rounds per change, avoidable attestations, time-to-detection, and expected cost per
+completed task by route [3] — across a multi-month window, so both the harness's
+value claim and its routing policy are falsifiable by its own instruments.
 
 ## References
 
 [1] J. Abenhaïm. *Specification-first convergence with an AI coding agent.* arXiv:2608.12440, 2026.
 [2] V. Kulkarni, S. Paul, A. Kumar, N. Tzou, S. Chappidi. *SBCO: Self-supervised, verifier-grounded harness optimization for planning agents.* arXiv:2608.10157, 2026.
-[3] SWE-bench; [4] SWE-agent; [5] OpenAI harness engineering report; [6] A. Osmani, *Loop engineering*, 2026; [7] Anthropic, agentic coding guidance, 2026 — as cited in [1].
+[3] S. Manoharan et al. *Task-to-model optimization for enterprise LLM coding assistants.* arXiv:2608.08528, 2026.
+[4] SWE-bench; [5] SWE-agent; [6] A. Osmani, *Loop engineering*, 2026; [7] Anthropic, agentic coding guidance, 2026 — as cited in [1].
+[8] M. Burgess, J. Bergstra. *Promise Theory: Principles and Applications.* 2014/2019.
+[9] M. Burgess. *Legal responsibilities using autonomous agents for artificial intelligence.* arXiv:2608.08022, 2026.
 
 *Repository artifacts cited throughout are available in the The-AIE organization's
 public issue and CI history; the harness's own documentation index is
