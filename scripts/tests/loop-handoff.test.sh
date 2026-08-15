@@ -295,7 +295,7 @@ setup_repo() { # setup_repo [with-remote|with-remote-unpublished]
   $GIT -C "$REPO" commit -q -m "base"
   $GIT -C "$REPO" checkout -q -b "$BRANCH"
   echo work >> "$REPO/README.md"
-  $GIT -C "$REPO" commit -q -am "work"
+  $GIT -C "$REPO" commit -q -s -am "work"
   $GIT -C "$REPO" checkout -q main
   if [[ "${1:-}" == "with-remote" || "${1:-}" == "with-remote-unpublished" ]]; then
     $GIT init -q --bare "$REMOTE"
@@ -369,7 +369,7 @@ setup_repo_trunk() { # setup_repo_trunk <trunk> <stale-local|remote|none>
   $GIT -C "$REPO" commit -q -m "base"
   $GIT -C "$REPO" checkout -q -b "$BRANCH"
   echo work >> "$REPO/README.md"
-  $GIT -C "$REPO" commit -q -am "work"
+  $GIT -C "$REPO" commit -q -s -am "work"
   $GIT -C "$REPO" checkout -q "$trunk"
   if [[ "$origin_head" != "none" ]]; then
     $GIT init -q --bare "$REMOTE"
@@ -748,7 +748,7 @@ rm -rf "$OTHER"
 git clone -q "$REMOTE" "$OTHER"
 git -C "$OTHER" checkout -q -B "$BRANCH" "origin/$BRANCH"
 echo advanced >> "$OTHER/README.md"
-$GIT -C "$OTHER" commit -q -am "advance the remote from a second clone"
+$GIT -C "$OTHER" commit -q -s -am "advance the remote from a second clone"
 git -C "$OTHER" push -q origin "$BRANCH"
 ADVANCED=$(git -C "$OTHER" rev-parse HEAD)
 if git -C "$REPO" rev-parse --verify --quiet "$ADVANCED^{commit}" >/dev/null 2>&1; then
@@ -1028,7 +1028,7 @@ git clone -q "$REMOTE" "$DIFF_CLONE"
 git -C "$DIFF_CLONE" checkout -q -B "$BRANCH" "origin/$BRANCH"
 echo head > "$DIFF_CLONE/REMOTE-HEAD-ONLY.md"
 $GIT -C "$DIFF_CLONE" add REMOTE-HEAD-ONLY.md
-$GIT -C "$DIFF_CLONE" commit -q -m "advance the head on the remote"
+$GIT -C "$DIFF_CLONE" commit -q -s -m "advance the head on the remote"
 git -C "$DIFF_CLONE" push -q origin "$BRANCH"
 EXACT_HEAD=$(git -C "$DIFF_CLONE" rev-parse HEAD)
 git -C "$DIFF_CLONE" checkout -q main
@@ -1043,7 +1043,7 @@ EXACT_BASE=$(git -C "$DIFF_CLONE" rev-parse HEAD)
 $GIT -C "$REPO" checkout -q "$BRANCH"
 echo stale > "$REPO/STALE-LOCAL-ONLY.md"
 $GIT -C "$REPO" add STALE-LOCAL-ONLY.md
-$GIT -C "$REPO" commit -q -m "a local-only commit the remote never saw"
+$GIT -C "$REPO" commit -q -s -m "a local-only commit the remote never saw"
 $GIT -C "$REPO" checkout -q main
 # Fetch the objects without moving refs/heads/*: the clone can READ both reviewed
 # commits (as the driver guarantees before any review) while its branch names
