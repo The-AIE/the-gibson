@@ -8,6 +8,52 @@ requests, CI runs, commit attribution) that are cited inline and independently i
 
 ---
 
+## Executive summary
+
+We believe it is now feasible to give a single user — ultimately including a
+non-technical one — an autonomous system that delivers **enterprise-grade
+software development capability**: work that is reviewed, attributed, tested,
+auditable, and safe to run a business on, produced largely by coordinated AI
+agents rather than a hired engineering team. The Gibson is our attempt to
+prove that claim honestly, and this paper reports how it is built and how it
+is measured.
+
+Three commitments distinguish the attempt:
+
+1. **Trust comes from evidence, not from any vendor's agent.** No artifact is
+   accepted on the authority of the agent that produced it. Every change
+   carries machine-checkable evidence — an independent review bound to the
+   exact code it approves, a real cryptographic identity for every
+   contributor, sensors that watch the checks themselves, and records that
+   prevent corrected mistakes from being re-learned. Quality is enforced by
+   the system, so it does not depend on the user being able to read the code.
+2. **Token spend is optimized as a first-class function.** The system routes
+   each task to the cheapest model that measurably clears that task's quality
+   bar, spends premium reasoning only on judgment (specifications and
+   adversarial review), and converts expensive human-style verification into
+   free executable checks wherever possible. The measured effect is that
+   inexpensive models, inside the harness, safely do work that would
+   otherwise require premium autonomous-agent subscriptions.
+3. **The user owns their code and can leave.** The harness is deliberately
+   multi-vendor (four agent platforms today) with thin adapters, standard
+   artifacts (plain git repositories, ordinary CI, portable evidence records),
+   and no dependence on any single provider's proprietary workflow. Avoiding
+   systems that make code hard to own or move is a design requirement, not an
+   afterthought: every mechanism described here works on a standard GitHub
+   repository the user controls.
+
+Feasibility is being determined the only way we consider valid: by running
+the system on **multiple complex, real projects** — a production
+conference-management platform, an AI-operated small-business website
+product, and the harness's own codebase — under pre-registered, falsifiable
+predictions (§10, companion pre-registration) rather than demonstrations.
+This paper reports the architecture, the evidence to date, and the
+measurements that will confirm or refute the claim. The remaining unproven
+step — operation by a genuinely non-technical user — is explicitly staged as
+the system's final validation (§10) rather than asserted here.
+
+---
+
 ## Abstract
 
 We describe The Gibson, a software-development-lifecycle harness that coordinates coding
