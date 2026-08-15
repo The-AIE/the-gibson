@@ -50,6 +50,12 @@ review: precision ≥ 90% (findings are real) AND no known-broken lane missed
 observability gets fixed first and the window extends — and H6 is reported as
 not yet met.
 
+**H7 — Harness vs raw (AB-219, registered before any arm executed).** On matched,
+randomized Tier A/B tasks blind-judged by a non-participant platform, the harness
+arm will show fewer surviving defects per task at higher per-task inference cost,
+and a lower cost per defect-free completion on Tier B. Protocol:
+`paper/experiment/PROTOCOL.md`. Null or reversed results are reported as such.
+
 ## Readout schedule
 
 | Date | Readout | Predictions scored |
@@ -57,6 +63,7 @@ not yet met.
 | 2026-08-21 | Auto-remediation promotion review | H6 |
 | 2026-09-14 | Monthly process audit | H1 (interim), H2, H3, H4, H5 |
 | ~2026-09-15 | 30-day paper-grade readout (outcome-ledger deltas for DRAFT §10) | all |
+| when n=12 judged | AB-219 blind-judged comparison | H7 |
 
 ## Commitments
 
