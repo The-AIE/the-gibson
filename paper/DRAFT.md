@@ -117,7 +117,21 @@ framework to responsibility attribution for AI agents [9] parallels the harness'
 owner-attestation model, in which a human's structured attestation is itself a
 promise — one that accepts responsibility for agent-lane work — and the per-lane
 credential-backed identities (§4.1) exist precisely so that promises have
-attributable promisers.
+attributable promisers. Three further correspondences from [8] are load-bearing
+here. *Restricted vocabularies:* machine-assessed promises in the harness are
+deliberately narrow grammars (structured evidence comments binding a head SHA and
+result; exact-format intentionality annotations) — and §7.4 records a same-day
+instance of a prose-formatted annotation failing assessment until it matched the
+restricted grammar, precisely the comprehension-fidelity trade [8] predicts.
+*Trust economics:* monitoring cost scales with distrust, so review depth is
+tier-scaled — mechanical work gets checklist assessment, security-adjacent work gets
+multi-round adversarial assessment. *Stigmergic coordination:* agents here
+coordinate almost entirely through environmental memory — claims in open
+pull-request bodies, standing report issues, repository doctrine — rather than
+real-time messaging, which is what lets four vendors' agents cooperate without any
+shared runtime; [8]'s warning that stigmergic memory is a security surface is the
+prompt-injection class, and is why observed content is never treated as
+instruction in this harness.
 
 **Industrial practice.** Loop engineering [6,7] structures agent work as
 outer-system-driven find/execute/check cycles with a second agent reviewing; Anthropic's
@@ -367,7 +381,7 @@ value claim and its routing policy are falsifiable by its own instruments.
 [2] V. Kulkarni, S. Paul, A. Kumar, N. Tzou, S. Chappidi. *SBCO: Self-supervised, verifier-grounded harness optimization for planning agents.* arXiv:2608.10157, 2026.
 [3] S. Manoharan et al. *Task-to-model optimization for enterprise LLM coding assistants.* arXiv:2608.08528, 2026.
 [4] SWE-bench; [5] SWE-agent; [6] A. Osmani, *Loop engineering*, 2026; [7] Anthropic, agentic coding guidance, 2026 — as cited in [1].
-[8] M. Burgess, J. Bergstra. *Promise Theory: Principles and Applications.* 2014/2019.
+[8] M. Burgess. *Cooperation in human and machine agents: Promise Theory considerations.* arXiv:2604.10505, 2026; M. Burgess, J. Bergstra, *Promise Theory: Principles and Applications*, 2014/2019.
 [9] M. Burgess. *Legal responsibilities using autonomous agents for artificial intelligence.* arXiv:2608.08022, 2026.
 
 *Repository artifacts cited throughout are available in the The-AIE organization's
