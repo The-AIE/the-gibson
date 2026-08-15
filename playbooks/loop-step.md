@@ -18,7 +18,8 @@ outputs:
 gates:
   - kill switch checked by driver before this prompt runs (docs/11)
   - fresh context per hat — do not assume prior conversation memory
-  - bounded retries: 3 fix→review rounds then park
+  - bounded retries: per-tier fix→review caps in `config/review-round-caps.json`
+    (A=1 / B=2 / C=3 by default) then park + human; the driver enforces this
   - human-gated work is queued, not force-merged
 forbidden:
   - wearing multiple hats in one context (driver must reset)
@@ -137,8 +138,10 @@ touch /path/to/target/gibson/HALT
   (especially Tier B/C). Else adversarial self-pass **from files only** + flag
   human merge gate for Tier C.
 - Verdict APPROVE → next `ux-evaluator` (or `security` if no UI).
-- REQUEST_CHANGES → next `builder`, round += 1; if round ≥ 3 → **park** with
-  handoff note, pick different issue.
+- REQUEST_CHANGES → next `builder`, round += 1; if `round` has reached the
+  per-tier cap in `config/review-round-caps.json` (default A=1 / B=2 / C=3) the
+  driver refuses another model review and escalates to a human. Do not start
+  another reviewer/second-opinion round yourself.
 
 ### If `{{hat}}` = ux-evaluator
 
@@ -258,7 +261,7 @@ touch /path/to/target/gibson/HALT
 
 | Rail | Rule |
 |---|---|
-| Retries | 3 fix→review rounds → park + handoff |
+| Retries | per-tier cap (`config/review-round-caps.json`) → park + human |
 | Error budget | driver stops after N consecutive red gates (default 5) |
 | Kill switch | `gibson/HALT` file or `GIBSON_HALT=1` (both unconditional); the `gibson-halt` label is a soft cue, only when `gh` is available → exit cleanly |
 | Human gates | queue + move on; never auto-approve Tier C merge |
