@@ -60,7 +60,9 @@ RISKS
     Likewise a supervisor handoff requires the BRANCH to exist on the remote:
     a repo with no origin, and a branch that was never pushed, are both blocked
     before the review is spent — the supervisor opens the PR from the remote
-    branch, so a local-only ref is nothing it can act on.
+    branch, so a local-only ref is nothing it can act on. Any commit in the
+    handed-off range that lacks a Signed-off-by trailer also blocks the
+    handoff (issue #204) before the reviewer or supervisor is invoked.
   - The review receipt is an operational control, not a security boundary. It is
     a plain file under <repo>/gibson/, so anything running as the same user —
     including the agents the gate constrains — can write it. Isolating it from
@@ -2279,6 +2281,29 @@ ensure_cross_vendor_review() {
   return 1
 }
 
+# List commits in <base>..<head> that lack a Signed-off-by trailer (issue #204).
+# Prints unsigned SHAs one per line on stdout. Returns 0 when the range is
+# readable (including an empty range); 1 when the range cannot be walked.
+# Match is case-insensitive on a line starting Signed-off-by: + whitespace —
+# the same pattern as .githooks/prepare-commit-msg. GPG signatures are ignored.
+dco_unsigned_shas() {
+  local repo="$1" base="$2" head="$3" sha log_out
+  git -C "$repo" rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 || return 1
+  git -C "$repo" rev-parse --verify --quiet "${head}^{commit}" >/dev/null 2>&1 || return 1
+  log_out=$(git -C "$repo" log --format=%H "${base}..${head}" 2>/dev/null) || return 1
+  [[ -n "$log_out" ]] || return 0
+  while IFS= read -r sha; do
+    [[ -n "$sha" ]] || continue
+    if git -C "$repo" log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+      continue
+    fi
+    printf '%s\n' "$sha"
+  done <<EOF
+$log_out
+EOF
+  return 0
+}
+
 # File-handoff protocol: pin and pass the head SHA so a later push cannot
 # invalidate the review without the supervisor noticing (issue #55). The gate is
 # closed — every early return here leaves handoff/handoff_sha queued in
@@ -2319,6 +2344,21 @@ supervisor_handoff() {
     return 0
   fi
   info "pinning handoff to $branch @ $sha (base $base @ $base_sha)"
+
+  # DCO (#204): refuse unsigned work in the handed-off range before spending
+  # a reviewer or invoking the supervisor. The *base* commit is outside
+  # $base_sha..$sha on purpose. Empty range is fine.
+  local unsigned
+  if unsigned=$(dco_unsigned_shas "$REPO" "$base_sha" "$sha"); then
+    if [[ -n "$unsigned" ]]; then
+      unsigned=$(printf '%s' "$unsigned" | tr '\n' ' ')
+      block "unsigned commit(s) in $base_sha..$sha lack a Signed-off-by trailer: $unsigned. Amend with git commit --amend -s or rebase -S, then re-queue."
+      return 0
+    fi
+  else
+    block "cannot read git log $base_sha..$sha to verify Signed-off-by trailers — refusing the handoff (fail closed)."
+    return 0
+  fi
 
   if ! ensure_cross_vendor_review "$branch" "$sha" "$base" "$base_sha"; then
     info "handoff of $branch @ $sha blocked: no completed distinct-vendor review — branch stays queued in loop-state"
