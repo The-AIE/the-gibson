@@ -76,6 +76,33 @@ out=$(node "$SENSOR" --root "$ROOT" --roles admin,guest 2>/dev/null); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"guest"' && ok "--roles accepted" \
   || bad "--roles (rc=$rc): $out"
 
+# --- unexpected positional must not scan cwd or write --out (#202) ---
+pos_out="$ROOT/should-not-exist.json"
+out=$(node "$SENSOR" /tmp/example --out "$pos_out" 2>"$ROOT/pos.err"); rc=$?
+stderr=$(cat "$ROOT/pos.err")
+[[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
+  && [[ -z "$out" ]] && [[ ! -f "$pos_out" ]] \
+  && ok "bare positional exits 2 with unexpected argument and writes no file" \
+  || bad "bare positional (rc=$rc stdout=$(printf %s "$out" | wc -c) file=$([[ -f $pos_out ]] && echo yes || echo no)): $stderr"
+
+# --- positional after -- is rejected the same way ---
+dash_out="$ROOT/should-not-exist-dash.json"
+node "$SENSOR" -- --root "$ROOT" --out "$dash_out" 2>"$ROOT/dash.err" >/dev/null; rc=$?
+stderr=$(cat "$ROOT/dash.err")
+[[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
+  && [[ ! -f "$dash_out" ]] \
+  && ok "argument after -- exits 2 with unexpected argument and writes no file" \
+  || bad "after -- (rc=$rc file=$([[ -f $dash_out ]] && echo yes || echo no)): $stderr"
+
+# --- trailing positional after documented flags ---
+trail_out="$ROOT/should-not-exist-trail.json"
+node "$SENSOR" --root "$ROOT" --out "$trail_out" /tmp/example 2>"$ROOT/trail.err" >/dev/null; rc=$?
+stderr=$(cat "$ROOT/trail.err")
+[[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
+  && [[ ! -f "$trail_out" ]] \
+  && ok "trailing positional exits 2 and does not write --out" \
+  || bad "trailing positional (rc=$rc file=$([[ -f $trail_out ]] && echo yes || echo no)): $stderr"
+
 echo
 echo "route-inventory.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
