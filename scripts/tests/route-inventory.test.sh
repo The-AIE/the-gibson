@@ -87,7 +87,7 @@ stderr=$(cat "$ROOT/pos.err")
 
 # --- positional after -- is rejected the same way ---
 dash_out="$ROOT/should-not-exist-dash.json"
-out=$(node "$SENSOR" -- --root "$ROOT" --out "$dash_out" 2>"$ROOT/dash.err" >/dev/null); rc=$?
+node "$SENSOR" -- --root "$ROOT" --out "$dash_out" 2>"$ROOT/dash.err" >/dev/null; rc=$?
 stderr=$(cat "$ROOT/dash.err")
 [[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
   && [[ ! -f "$dash_out" ]] \
@@ -96,7 +96,7 @@ stderr=$(cat "$ROOT/dash.err")
 
 # --- trailing positional after documented flags ---
 trail_out="$ROOT/should-not-exist-trail.json"
-out=$(node "$SENSOR" --root "$ROOT" --out "$trail_out" /tmp/example 2>"$ROOT/trail.err" >/dev/null); rc=$?
+node "$SENSOR" --root "$ROOT" --out "$trail_out" /tmp/example 2>"$ROOT/trail.err" >/dev/null; rc=$?
 stderr=$(cat "$ROOT/trail.err")
 [[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
   && [[ ! -f "$trail_out" ]] \
