@@ -1,0 +1,49 @@
+{
+ "seed": 219,
+ "target_n": 12,
+ "enrolled": [
+  {
+   "id": "cos#1245",
+   "class": "styling/brand fix",
+   "tier": "A",
+   "arm": "raw",
+   "status": "enrolled"
+  },
+  {
+   "id": "cos#1220",
+   "class": "file-upload feature",
+   "tier": "B",
+   "arm": "harness",
+   "status": "enrolled"
+  },
+  {
+   "id": "cos#1221",
+   "class": "data-model/relations feature",
+   "tier": "B",
+   "arm": "raw",
+   "status": "enrolled"
+  },
+  {
+   "id": "cos#1313",
+   "class": "hardening/bug-fix",
+   "tier": "B",
+   "arm": "harness",
+   "status": "enrolled"
+  },
+  {
+   "id": "cos#1327",
+   "class": "API validation boundary",
+   "tier": "B",
+   "arm": "raw",
+   "status": "enrolled"
+  },
+  {
+   "id": "cos#1330",
+   "class": "mechanical refactor/naming",
+   "tier": "A",
+   "arm": "raw",
+   "status": "enrolled"
+  }
+ ],
+ "prospective_rule": "every new eligible Tier A/B product issue (not meta/harness, not Tier C) is randomized on arrival until n=12; classes balanced toward common coding needs"
+}
