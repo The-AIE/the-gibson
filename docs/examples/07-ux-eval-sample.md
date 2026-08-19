@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Worked example — Playwright flow + UX eval report (docs/07)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 Continues the Northstar Clinic password-reset story (issue #103 / #104).
 **Rule zero:** evaluate the deployment, not the diff.
 

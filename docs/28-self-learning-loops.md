@@ -5,6 +5,9 @@ nav_order: 28
 
 # Self-learning loops — a lesson only sticks if it is executable
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 Epic: [#210](https://github.com/The-AIE/the-gibson/issues/210). Owner
 hypothesis (Mark, 2026-08-15): the fleet repeats mistakes because lessons live
 as prose. Confirmed by evidence the day it was raised: a CI lane red for its

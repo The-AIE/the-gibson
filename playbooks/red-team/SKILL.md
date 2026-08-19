@@ -5,6 +5,9 @@ description: Run Gibson's repeatable red-team protocol against a target app to f
 
 # Gibson Red-Team
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 This skill runs the Gibson red-team protocol. The full method is in `PROTOCOL.md`; the target
 under test is defined in `targets/<target>.md` (start with `conference-os.md`).
 

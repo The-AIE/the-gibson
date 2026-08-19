@@ -1,0 +1,206 @@
+{
+  "schemaId": "gibson.mandatory-read-chain.v1",
+  "schemaVersion": "1.2.0",
+  "authority": "AGENTS.md is the sole always-mandatory human-readable contract for commit/PR/merge behavior. Role playbooks are conditionally mandatory session-start load when a role is dispatched. Non-role job dispatch prompts are conditionally mandatory when that job is active. docs/ is on-demand and non-normative. The policy-manifest candidate remains report-only / activated=false until #164 and is only a checked mirror.",
+  "mandatoryFiles": ["AGENTS.md"],
+  "allowedMandatoryFiles": ["AGENTS.md"],
+  "fixedMandatoryFiles": ["AGENTS.md"],
+  "conditionalDispatchPrompts": {
+    "roles": [
+      "planner",
+      "decomposer",
+      "builder",
+      "test-engineer",
+      "reviewer",
+      "ux-evaluator",
+      "security",
+      "release",
+      "historian"
+    ],
+    "pathTemplate": "playbooks/{role}.md",
+    "localOverrideTemplate": "local/playbooks/{role}.md",
+    "jobPrompts": [
+      "playbooks/adopt.md",
+      "playbooks/delivery-control.md",
+      "playbooks/deploy-audit.md",
+      "playbooks/dogfood-overnight.md",
+      "playbooks/loop-step.md",
+      "playbooks/token-efficiency.md"
+    ],
+    "disclosurePhrases": [
+      "Conditional session-start human-readable load",
+      "when a role is dispatched",
+      "playbooks/<role>.md",
+      "When a non-role job is dispatched",
+      "role/job dispatch prompt"
+    ]
+  },
+  "sessionStartNotBudgeted": [
+    "local/AGENTS.local.md",
+    "<target>/AGENTS.md",
+    "memory/LESSONS.md (tag-filtered consult; attested, not full-file ingest)"
+  ],
+  "byteBudget": {
+    "AGENTS.md": 20480,
+    "mandatoryChain": 20480,
+    "note": "Fixed mandatory chain only. Conditional role/job dispatch prompts are measured and reported separately."
+  },
+  "tokenProxy": {
+    "id": "utf8-bytes-div-4",
+    "formula": "ceil(utf8_bytes / 4)",
+    "note": "Reproducible approximation of model tokens from UTF-8 bytes. This repo had no prior mandatory-read token proxy; architecture-fitness 'tokens' count control-flow keywords and are a different metric."
+  },
+  "machineCanonical": {
+    "humanGates": "AGENTS.md",
+    "roles": "AGENTS.md",
+    "riskTiers": "AGENTS.md",
+    "workflowStages": "AGENTS.md",
+    "forbiddenRolePairs": "AGENTS.md",
+    "policyManifestMirror": "config/policy/candidates/gibson-core-v1.candidate.json",
+    "reviewRoundCaps": "config/review-round-caps.json",
+    "testIntegrity": "scripts/test-integrity.mjs",
+    "claimOverlap": "scripts/scope-overlap.mjs",
+    "greenGate": "scripts/gate.sh",
+    "dcoHook": "scripts/setup-hooks.sh",
+    "exactHeadRelease": "scripts/release-claim.sh",
+    "ruleMigrationAudit": "config/policy/rule-migration-audit.v1.json"
+  },
+  "requiredMachineSourcePaths": [
+    "config/policy/candidates/gibson-core-v1.candidate.json",
+    "config/review-round-caps.json",
+    "scripts/test-integrity.mjs",
+    "scripts/scope-overlap.mjs",
+    "scripts/gate.sh",
+    "scripts/setup-hooks.sh",
+    "scripts/release-claim.sh",
+    "config/policy/mandatory-read-chain.v1.json",
+    "config/policy/rule-migration-audit.v1.json"
+  ],
+  "requiredRulePatterns": [
+    "sole always-mandatory human-readable",
+    "on-demand and non-normative",
+    "checked mirror",
+    "activated=false",
+    "Conditional session-start human-readable load",
+    "when a role is dispatched",
+    "playbooks/<role>.md",
+    "When a non-role job is dispatched",
+    "role/job dispatch prompt",
+    "One issue = one claim = one worktree = one branch",
+    "canonical checkout",
+    "generate",
+    "typecheck",
+    "zero new failures",
+    "test-integrity",
+    "Never grade your own homework",
+    "exact committed head SHA",
+    "Signed-off-by",
+    "Acceptance criteria are the contract",
+    "Tier C is sacred",
+    "failures verbatim",
+    "memory/LESSONS.md",
+    "release-claim.sh",
+    "What I'm asking",
+    "What it does",
+    "Why it should be done",
+    "The risks",
+    "additive-only",
+    "Max **3**",
+    "agent-claimed",
+    "VERDICT: APPROVE",
+    "fail closed",
+    "Ask Contract",
+    "six lenses",
+    "file:line",
+    "adversarial cases required",
+    "destructive production testing",
+    "Eight layers",
+    "human gates",
+    "Tier definitions",
+    "hard-fail security layers",
+    "audit",
+    "dry-run",
+    "explicit human apply"
+  ],
+  "requiredBindingFamilies": [
+    {
+      "id": "six-lens-review",
+      "label": "Six-lens review with file:line findings",
+      "patterns": ["six lenses", "file:line", "Correctness", "Consent / PII"]
+    },
+    {
+      "id": "tier-c-adversarial-tests",
+      "label": "Tier C adversarial tests (test-engineer)",
+      "patterns": ["adversarial cases required"]
+    },
+    {
+      "id": "no-destructive-prod-testing",
+      "label": "Prohibition on destructive production testing",
+      "patterns": ["destructive production testing"]
+    },
+    {
+      "id": "eight-security-layers",
+      "label": "Eight security layers",
+      "patterns": ["Eight layers", "AuthZ matrix", "Runtime posture"]
+    },
+    {
+      "id": "self-modification-gates",
+      "label": "Self-modification gates for tier/security/human-gate controls",
+      "patterns": ["Self-modification bounds", "Tier definitions", "hard-fail security layers"]
+    },
+    {
+      "id": "delivery-control",
+      "label": "Delivery-control audit, dry-run, and human-apply",
+      "patterns": ["Delivery control", "dry-run", "explicit human apply"]
+    },
+    {
+      "id": "role-outputs-prohibitions",
+      "label": "Per-role outputs and prohibitions",
+      "patterns": ["| planner |", "| reviewer |", "| security |", "| release |"]
+    }
+  ],
+  "forbiddenContractPatterns": [
+    "Complete list with rationale in `docs/14-human-gates.md`",
+    "Roles and their contracts are in `docs/03-roles.md`",
+    "Stage rules: `docs/02-sdlc-pipeline.md`",
+    "the full presentation rules are `docs/16-nontechnical-operation.md`",
+    "are canonical in `config/policy/candidates/gibson-core-v1.candidate.json`"
+  ],
+  "forbiddenRepoClaims": [
+    {
+      "path": "README.md",
+      "patterns": [
+        "Rules, roles, gates, playbooks every agent follows | `AGENTS.md`, `docs/`, `playbooks/`"
+      ]
+    }
+  ],
+  "docsNonNormativeGlobs": ["docs/**/*.md"],
+  "docsNonNormativeMarker": "**Authority:** Non-normative",
+  "playbookGlobs": ["playbooks/**/*.md"],
+  "playbookDispatchMarker": "**Authority:** Conditionally mandatory dispatch prompt",
+  "playbookNonNormativeMarker": "**Authority:** Non-normative",
+  "onDemandSectionHeading": "On-demand (non-normative)",
+  "policyManifestMirrorPath": "config/policy/candidates/gibson-core-v1.candidate.json",
+  "ruleMigrationAuditPath": "config/policy/rule-migration-audit.v1.json",
+  "preChangeAt": {
+    "commit": "dcca0c18d39488d3a18842901a3d46efee0e280b",
+    "impliedMandatoryFiles": [
+      "AGENTS.md",
+      "docs/02-sdlc-pipeline.md",
+      "docs/03-roles.md",
+      "docs/05-concurrency.md",
+      "docs/06-quality-gates.md",
+      "docs/09-memory-and-self-improvement.md",
+      "docs/11-solo-loop.md",
+      "docs/14-human-gates.md",
+      "docs/16-nontechnical-operation.md",
+      "docs/18-fork-and-upstream.md",
+      "docs/23-delivery-control.md",
+      "playbooks/delivery-control.md"
+    ],
+    "impliedMandatoryBytes": 125317,
+    "lessonsBytes": 66857,
+    "agentsBytes": 7404,
+    "note": "Pre-change implied mandatory chain is the files AGENTS.md treated as binding by unguarded 'see docs/N' pointers, measured at the exact branch point. memory/LESSONS.md is reported separately because Law 1 required a consult; docs/09 already specified tag-filter rather than full-file ingest."
+  }
+}

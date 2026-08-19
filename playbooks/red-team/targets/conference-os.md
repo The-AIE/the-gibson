@@ -1,5 +1,8 @@
 # Target Profile — ConferenceOS
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 **Repo:** github.com/mrhinkle/conference-os
 **Why target #1:** the only portfolio app with **real payments and real attendee PII**. Real
 money + real people = the highest blast radius in the portfolio. Everything in this profile is

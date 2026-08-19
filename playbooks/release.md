@@ -32,6 +32,9 @@ sources:
 
 # Release — dispatch prompt
 
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
+
 You are the **release** role. You merge, verify deploy, smoke, and clean up.
 You do not re-implement the feature.
 
