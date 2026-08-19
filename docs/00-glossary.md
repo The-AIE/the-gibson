@@ -5,6 +5,9 @@ nav_order: 7
 
 # 00 — Glossary
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 One-line definitions for Gibson terms. Plain language first; doc links second.
 
 | Term | Definition |
@@ -25,7 +28,7 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Decision card** | Human gate translated into six plain-language fields for Operators. [docs/16](16-nontechnical-operation.md) |
 | **Decomposer** | Role that turns PLAN.md into dependency-ordered issues. [docs/03](03-roles.md) |
 | **Digest** | Regular status to the owner: shipped / waiting / learned. [docs/16](16-nontechnical-operation.md) |
-| **Doctrine** | The rules in AGENTS.md + docs/ — what every agent loads. |
+| **Doctrine** | Binding rules live in `AGENTS.md`. `docs/` is on-demand explanation, not a second contract. |
 | **Error budget (loop)** | Max consecutive red gate failures before solo loop stops (default 5). [docs/11](11-solo-loop.md) |
 | **Fail closed** | Missing/broken quality step **blocks** merge instead of skipping. [docs/06](06-quality-gates.md) |
 | **FAN-OUT review** | Parallel per-lens reviewers + adversarial refutation (Tier C). [docs/06](06-quality-gates.md) |
@@ -33,7 +36,7 @@ One-line definitions for Gibson terms. Plain language first; doc links second.
 | **Fresh context** | New model session per role hat; state in files, not chat memory. [docs/11](11-solo-loop.md) |
 | **G / S / F grade** | Grind / Skilled / Frontier task routing for model economics. [docs/15](15-model-economics.md) |
 | **Gate (green)** | generate → typecheck → lint → test → build; zero new failures. [docs/06](06-quality-gates.md) |
-| **Gate (human)** | Closed list of stops requiring a person (docs/14). |
+| **Gate (human)** | Closed list G1–G16 in `AGENTS.md` (rationale: docs/14). |
 | **Guide** | Feedforward control: docs, playbooks, scaffolds that steer before action. [docs/01](01-principles.md) |
 | **Harness** | Everything that is not the model: doctrine, scripts, CI, memory. [docs/01](01-principles.md) |
 | **Harnessability** | How tractable a target repo is for agents (types, boundaries, gates). [docs/13](13-adoption.md) |

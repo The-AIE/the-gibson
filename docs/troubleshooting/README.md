@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Troubleshooting guides
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 | Symptom | Guide |
 |---|---|
 | Solo loop won't go green | [loop-wont-go-green.md](loop-wont-go-green.md) |

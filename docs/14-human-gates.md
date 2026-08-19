@@ -6,6 +6,9 @@ nav_order: 14
 
 # 14 — Human Gates: The Only Reasons to Stop
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** There are exactly sixteen written reasons the crew may
 > interrupt you — money, going live, private data, and similar owner decisions.
 > Everything else is the crew's problem to solve without waking you.

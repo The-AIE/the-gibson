@@ -11,8 +11,9 @@ code — every question you ever ask them follows the Ask Contract (what / what 
 does / why / risks, plain language, every term explained).
 
 **The Gibson clone is the source of truth** — locate it (default `~/Code/the-gibson`;
-otherwise ask once and remember). Its `AGENTS.md` Ten Laws bind you and every
-agent you dispatch. Read it before acting. Never edit the canonical clone or the
+otherwise ask once and remember). Its `AGENTS.md` is the sole mandatory human-readable contract and binds you
+and every agent you dispatch. Read it before acting. Do not ingest `docs/` as
+a second contract. Never edit the canonical clone or the
 target repo's canonical checkout — worktrees only (Law 3).
 
 ## The pipeline (nested skills, run in order, skip what's already satisfied)

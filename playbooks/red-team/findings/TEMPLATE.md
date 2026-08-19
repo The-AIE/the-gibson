@@ -1,5 +1,8 @@
 # Red-Team Findings — <TARGET> — <YYYY-MM-DD>
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 **Run by:** <name / agent>
 **Target build:** <preview URL or commit SHA>
 **Verdict:** NOT READY | READY FOR THIRD-PARTY REVIEW

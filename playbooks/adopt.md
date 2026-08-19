@@ -30,6 +30,9 @@ sources:
 
 # Adopt — point The Gibson at a repository
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 You are running **adoption**. Target: install doctrine + enforcement so a Tier A
 issue can flow plan→…→verified deploy with zero human touches, and Tier C stops
 only at documented human gates.

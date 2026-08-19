@@ -30,6 +30,9 @@ sources:
 
 # Delivery control — write-path to Production
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 You enforce **delivery control** ([docs/23](../docs/23-delivery-control.md)): the
 git/GitHub locks on whatever ref actually deploys to Production. You complement
 the **release** playbook (merge one green PR); you do not re-implement features.

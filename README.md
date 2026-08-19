@@ -14,7 +14,7 @@ you can audit.
 > - 🍴 **"I want to fork this for my own team."** Read
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
 >   `local/`, keep getting upstream improvements.
-> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md). That's your contract.
+> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md). That's the only mandatory contract; `docs/` is on-demand.
 > - 📚 **Reading order by audience:** [docs/00-INDEX.md](docs/00-INDEX.md) ·
 >   [FAQ.md](FAQ.md) · [docs/00-glossary.md](docs/00-glossary.md)
 >

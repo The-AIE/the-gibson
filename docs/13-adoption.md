@@ -6,6 +6,9 @@ nav_order: 13
 
 # 13 — Adoption: Pointing The Gibson at a Repo
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Pointing this system at your project is itself a guided job:
 > check how ready the project is, install the rule files and safety nets, then run a
 > small practice task before trusting the full crew.

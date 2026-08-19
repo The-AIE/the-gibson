@@ -6,6 +6,9 @@ nav_order: 16
 
 # 16 — Operating Without a Terminal (Non-Technical Mode)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** You should never need a black terminal window. The crew asks
 > you decisions in plain language — what they want, what it does, why it helps, and what
 > could go wrong — and you answer in ordinary words.

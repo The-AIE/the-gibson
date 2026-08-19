@@ -6,6 +6,9 @@ nav_order: 11
 
 # 11 — The Solo Loop: One Agent, Continuously
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** You can also run one agent alone overnight. It puts on each
 > hat in turn — build, test, review, ship — and keeps going until the list is done or it
 > hits a decision only a human can make.

@@ -6,6 +6,9 @@ nav_order: 27
 
 # Policy manifest v1 — report-only candidate and offline validator
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This is a frozen checklist of today's approved rules
 > (when to stop, who reviews what, which jobs cannot grade themselves) written
 > so a computer can read it. It does **not** change how the crew runs. It is a
@@ -44,8 +47,10 @@ It encodes, without adding/removing/tightening/loosening approved semantics:
 ## What this is not
 
 - **Not** an activated policy authority. Reports always say so.
-- **Not** a change to `AGENTS.md`, numbered doctrine, playbooks, CI hard-fail,
-  merge authority, or runtime consumers.
+- **Not** merge, gate, or CI hard-fail authority. `#208` made `AGENTS.md` the
+  sole mandatory human-readable contract; this candidate remains the
+  machine-readable enumeration of gates/roles/tiers/stages/pairs that
+  `scripts/contract-authority.mjs` checks for drift. Activation is still `#164`.
 - **Not** generated doctrine blocks (those remain **#164**).
 - **Not** a consumer for the context compiler (**#166** consumes a *later*
   resolved bundle, not this candidate by implication).

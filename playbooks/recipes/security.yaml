@@ -1,7 +1,7 @@
 # Gibson security role — Goose recipe mirror
 # Source of truth: playbooks/security.md — do not fork doctrine text here.
 # playbook: playbooks/security.md
-# playbook-sha256: 41138f60014430b5392389ab87ac66f09e37fed78facc3e83f75f73a1f5297ad
+# playbook-sha256: 7d48a064c1b5df659ac8ba3551daeb8d2f0cca93dd5a8cf6a783dcd513e13357
 #
 # Goose schema version (version field below) is the official Recipe type
 # version for Goose v1.45.0 (1.0.0). That is distinct from Gibson recipe

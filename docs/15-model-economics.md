@@ -6,6 +6,9 @@ nav_order: 15
 
 # 15 — Model Economics: Which Mind for Which Task
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Different tasks need different AI strength and cost different
 > amounts. Use the cheaper option when it is good enough, and save the expensive models
 > for hard problems that truly need them.
