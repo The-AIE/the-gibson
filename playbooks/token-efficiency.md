@@ -47,6 +47,9 @@ sources:
 
 # Token efficiency — route, bound, measure, preserve quality
 
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
+
 > 🙂 **In plain English:** Spend the *right* amount of AI attention — not the least,
 > not the most. Use cheaper pools for bulk work that sensors catch, save stronger
 > minds for judgment, measure what you used, and never cut corners on tests or

@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Worked example — PLAN.md → issue set (docs/04)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 Fictional target: **Northstar Clinic** (`northstar/clinic-web`), a Next.js +
 Vercel booking site. Mark's brief: *"Patients should reset their password by
 email; it has to work on phones."*

@@ -6,6 +6,9 @@ nav_order: 25
 
 # 25 — Trust for Vibecoding, and Where Agent Governance Fits
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Vibecoding made it easy to *build* software. It did nothing
 > to make the result *trustworthy*. The Gibson's whole job is the second part — the
 > gates, the second opinion, the paper trail — so a non-technical owner can stand

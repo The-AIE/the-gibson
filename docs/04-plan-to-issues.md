@@ -6,6 +6,9 @@ nav_order: 4
 
 # 04 — Plan → Issues (Decomposition Protocol)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** A big plan becomes a list of small, finishable to-dos. Each
 > to-do is small enough to ship on its own, with a clear definition of "done," so the
 > crew never gets lost inside one giant project.

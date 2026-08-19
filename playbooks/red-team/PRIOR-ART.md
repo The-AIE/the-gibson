@@ -1,5 +1,8 @@
 # Prior Art & Credits
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 Gibson did not appear from nothing. Two open source projects shaped how we think about
 agent harnesses, and we have borrowed liberally from both. This file credits them, records
 exactly what we took, and says — per item — whether we **build on** it or **borrow** the idea.

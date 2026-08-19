@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Preview URL resolution failures
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 ## Symptoms
 
 - `preview-url.sh` times out

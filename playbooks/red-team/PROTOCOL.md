@@ -1,5 +1,8 @@
 # Gibson Red-Team Protocol
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 A repeatable adversarial audit you run on demand. The goal is to exhaust every flaw a
 motivated attacker or a self-directed expert could find, so that when you pay a third-party
 firm you are buying the deep business-logic and design findings only humans catch — not a
