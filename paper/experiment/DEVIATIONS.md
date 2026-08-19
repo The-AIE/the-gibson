@@ -94,3 +94,35 @@ is unchanged and still falsifiable: the reversed or null result is reported as s
 
 Whether a frozen replay generalizes to live development is a limitation of the revised
 design and will be stated as one in the paper, not argued away.
+
+---
+
+## D-1 revisions under cross-vendor review (2026-08-19, same day, before merge)
+
+The first draft of Amendment D-1 was reviewed read-only by Codex (implementer of
+neither arm) and **FAILED**. The findings and the revisions they forced, all made
+before the amendment was merged or any arm executed:
+
+1. **Leakage check was fail-open** (`|| echo` instead of abort; reusable scratch dir;
+   no check that later objects are absent; "remote removed" overstated as isolation).
+   → Recipe made fail-closed with a fresh `mktemp -d`, an object-absence assertion on
+   the fixing merge commit, a blind-brief rule, and a mandatory transcript audit; the
+   residual undetectable-consultation risk is now stated as a limitation instead of
+   implied away. The raw arm's push option was removed outright — nothing is pushed.
+2. **Eligibility wording contradicted the enrolled set** (four enrolled tasks touch
+   schema/auth surfaces while the wording excluded "schema, auth"). → Eligibility
+   rewritten to what was actually meant and done: `owner-gate-*` and live-surface
+   replays are excluded; schema-/auth-*touching* app features are eligible in replay
+   because nothing is ever merged or applied. The v1 seed's own internal tension on
+   this point (raw `cos#1221` was schema-adjacent from day one) is now on the record.
+3. **The raw-arm gate had silently dropped `npm test where applicable`.** → Restored.
+4. **Ambiguity between "both arms replay" and "reuse historical harness data".**
+   → Resolved: all twelve tasks get fresh replays in both arms; historical pipeline
+   data for `cos#1220`/`cos#1313` is supplementary observational data only.
+5. **`"reproducible": true` overclaimed the seven-task selection.** → Assignment is
+   reproducible (seed 219); selection is judgment-based and pre-outcome, stated as a
+   limitation.
+
+Codex independently confirmed: all twelve merge SHAs exist, every base SHA is exactly
+its merge commit's first parent, retained arms match v1, the shuffle reproduces
+exactly, balance is 6/6.
