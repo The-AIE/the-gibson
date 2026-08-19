@@ -1,49 +1,195 @@
 {
+ "version": 2,
+ "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
+ "deviation": "D-1 — see DEVIATIONS.md",
+ "revised": "2026-08-19 (r4, third cross-vendor pass)",
  "seed": 219,
  "target_n": 12,
+ "design": "frozen replay set",
+ "unit": {
+  "definition": "an already-closed ConferenceOS issue, replayed against the commit its fix landed on top of",
+  "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
+  "checkout_rule": "fresh mktemp -d scratch dir; git init + fetch --depth 1 --no-tags at base_commit; remote removed; NEVER reused",
+  "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers — any failed assertion or audit hit voids the run",
+  "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch"
+ },
+ "eligibility": {
+  "include": "Tier A/B product issues, closed, with exactly one merged fixing PR",
+  "exclude": [
+   "issues carrying any owner-gate-* label",
+   "tasks whose replay would require real external services, real user data, or live credentials",
+   "meta/harness work: CI, workflows, docs, ledger, dependency bumps, agent tooling"
+  ],
+  "note": "schema-/auth-/PII-touching app features ARE eligible in replay: neither arm's output is merged, deployed, or applied to any database (see DEVIATIONS.md D-1 revision 2)"
+ },
+ "assignment_procedure": {
+  "retained": "the 5 tasks enrolled at registration keep the arm they drew under seed 219; NOT re-drawn after their outcomes were observed",
+  "new": "python3 random.Random(219) over the 7 new task ids sorted ascending [1214,1217,1226,1232,1237,1253,1367]; shuffle, then draw arm per task from the arms still short of 6, balancing to 6/6",
+  "resulting_shuffle_order": [
+   1237,
+   1232,
+   1217,
+   1214,
+   1226,
+   1367,
+   1253
+  ],
+  "reproducible": "arm assignment only (seed 219); task selection is documented but judgmental",
+  "selection": "the 7 continuation tasks were selected by the coordinator pre-outcome to span distinct common-need classes; selection is judgment-based and NOT algorithmically reproducible — stated limitation"
+ },
  "enrolled": [
   {
    "id": "cos#1245",
    "class": "styling/brand fix",
    "tier": "A",
    "arm": "raw",
-   "status": "enrolled"
+   "origin": "retained-v1",
+   "fixing_pr": 1351,
+   "merge_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
+   "base_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
+   "status": "ready"
   },
   {
    "id": "cos#1220",
    "class": "file-upload feature",
    "tier": "B",
    "arm": "harness",
-   "status": "enrolled"
+   "origin": "retained-v1",
+   "fixing_pr": 1349,
+   "merge_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
+   "base_commit": "78538fd09c74bcec580f867f29fbbbafe3ba3bfb",
+   "status": "ready",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay"
   },
   {
    "id": "cos#1221",
    "class": "data-model/relations feature",
    "tier": "B",
    "arm": "raw",
-   "status": "enrolled"
+   "origin": "retained-v1",
+   "fixing_pr": 1353,
+   "merge_commit": "4795b96788b550ecd095666d1302e824929c6e48",
+   "base_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
+   "status": "ready"
   },
   {
    "id": "cos#1313",
    "class": "hardening/bug-fix",
    "tier": "B",
    "arm": "harness",
-   "status": "enrolled"
+   "origin": "retained-v1",
+   "fixing_pr": 1350,
+   "merge_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
+   "base_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
+   "status": "ready",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay"
   },
   {
    "id": "cos#1327",
    "class": "API validation boundary",
    "tier": "B",
    "arm": "raw",
-   "status": "enrolled"
+   "origin": "retained-v1",
+   "fixing_pr": 1332,
+   "merge_commit": "dc5d22643ab384192b37e66f98b1280f716c9700",
+   "base_commit": "d486e1162d01530b8eabe834a077e66e343c8d8b",
+   "status": "ready"
   },
   {
-   "id": "cos#1330",
-   "class": "mechanical refactor/naming",
+   "id": "cos#1226",
+   "class": "integration resilience (retry/backoff)",
+   "tier": "B",
+   "arm": "raw",
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1227,
+   "merge_commit": "899f6d11992d61e349d5da54fc409cd5f1341b2a",
+   "base_commit": "dbbcc3c21c105f74ce26351cfe52a75b904dbfe8",
+   "status": "ready"
+  },
+  {
+   "id": "cos#1253",
+   "class": "performance",
+   "tier": "B",
+   "arm": "raw",
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1278,
+   "merge_commit": "117adf4713eb80980cf1a9268d73edc15bd4bbcb",
+   "base_commit": "02e0cd55a198ed329fac12dbe36e10834c9d749f",
+   "status": "ready"
+  },
+  {
+   "id": "cos#1367",
+   "class": "date/state logic bug",
    "tier": "A",
    "arm": "raw",
-   "status": "enrolled"
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1378,
+   "merge_commit": "8f731bdd7e09e29b595eabd2f13249c325b3fa4a",
+   "base_commit": "df0a5e657919d742038a016217b6741df8345850",
+   "status": "ready"
+  },
+  {
+   "id": "cos#1214",
+   "class": "accessibility/UX copy",
+   "tier": "A",
+   "arm": "harness",
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1259,
+   "merge_commit": "e6126b65b5cb75cf1d0e91fc19620ed29678d8d1",
+   "base_commit": "d510efbfe3cd13dd1518fc7eb9e4f04933a50132",
+   "status": "ready"
+  },
+  {
+   "id": "cos#1217",
+   "class": "cascade/resync bug",
+   "tier": "B",
+   "arm": "harness",
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1235,
+   "merge_commit": "a40d5c63a7f0a91139a329f1f01902756db6ea1c",
+   "base_commit": "8b1fa99226c05f93d32d6972d118f4bd430146dc",
+   "status": "ready"
+  },
+  {
+   "id": "cos#1232",
+   "class": "drag-and-drop editor feature",
+   "tier": "B",
+   "arm": "harness",
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1236,
+   "merge_commit": "5f5d33723e199d100384267e558d7ba825c80ae7",
+   "base_commit": "9a148363cdd0b8c563f18aff740821f3d9979ff9",
+   "status": "ready"
+  },
+  {
+   "id": "cos#1237",
+   "class": "data-integrity validation",
+   "tier": "B",
+   "arm": "harness",
+   "origin": "seed-219-continuation",
+   "fixing_pr": 1238,
+   "merge_commit": "c0f8df9cad4b8074f1ae1f2971c37a97ebefacaf",
+   "base_commit": "2d1415e20e561139657ebc73b628dd0912a02979",
+   "status": "ready"
   }
  ],
- "prospective_rule": "every new eligible Tier A/B product issue (not meta/harness, not Tier C) is randomized on arrival until n=12; classes balanced toward common coding needs"
+ "balance": {
+  "raw": 6,
+  "harness": 6
+ },
+ "dropped": [
+  {
+   "id": "cos#1330",
+   "was_arm": "raw",
+   "reason": "still open — no merged fix exists, so no replay base can be defined; independently a weak unit (pure positional refactor, no behavior change, explicit do-not-run-concurrently constraint)"
+  }
+ ],
+ "contaminated_v1_record": {
+  "note": "kept for the record; these were consumed by ordinary development before any arm ran",
+  "cos#1327": "closed 2026-08-14, before enrollment was recorded",
+  "cos#1245": "closed 2026-08-15 via PR 1351",
+  "cos#1221": "closed 2026-08-15 via PR 1353",
+  "cos#1220": "closed 2026-08-15 via PR 1349",
+  "cos#1313": "closed 2026-08-15 via PR 1350"
+ }
 }
