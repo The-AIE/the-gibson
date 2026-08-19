@@ -10,7 +10,7 @@ One directory per runtime. Contract and matrix: [docs/10](../docs/10-vendor-adap
 Each adapter provides:
 
 1. **Doctrine loading** — AGENTS.md into context  
-2. **Role dispatch** — run `playbooks/<role>.md`  
+2. **Role dispatch** — run `playbooks/<role>.md` (unnamed role resolves to `builder`)
 3. **Telemetry** — deterministic where possible  
 4. **Cost capture** — exact or estimated  
 

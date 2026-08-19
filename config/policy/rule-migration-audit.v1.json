@@ -26,8 +26,8 @@
     {
       "id": "role-outputs-prohibitions",
       "label": "Nine roles and per-role outputs/prohibitions",
-      "home": "AGENTS.md: Your role this session",
-      "machine": ["config/policy/rule-migration-audit.v1.json", "scripts/contract-authority.mjs"]
+      "home": "AGENTS.md: Your role this session + config/policy/role-contracts.v1.json",
+      "machine": ["config/policy/role-contracts.v1.json", "scripts/contract-authority.mjs"]
     },
     {
       "id": "forbidden-role-pairs",

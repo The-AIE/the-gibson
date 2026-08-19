@@ -143,10 +143,12 @@
               "role": {
                 "type": "string",
                 "enum": [
-                  "canonical-doctrine",
+                  "human-readable-contract",
+                  "explanatory-history",
                   "compatibility-doctrine",
                   "supporting"
-                ]
+                ],
+                "description": "Provenance role for the file this candidate was encoded from. `human-readable-contract` is AGENTS.md. `explanatory-history` is a non-normative docs/ pin. Never `canonical-doctrine`: docs/ is not authority."
               }
             }
           }

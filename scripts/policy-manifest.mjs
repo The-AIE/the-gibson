@@ -1515,12 +1515,34 @@ export function validateCandidate(candidate, options = {}) {
             )
           );
         }
-        if (
-          s.role !== "canonical-doctrine" &&
+        if (s.role === "canonical-doctrine") {
+          push(
+            err(
+              "E_PROVENANCE_ROLE",
+              "canonical-doctrine is forbidden; non-normative docs must use explanatory-history and AGENTS.md must use human-readable-contract",
+              `${p}.role`
+            )
+          );
+        } else if (
+          s.role !== "human-readable-contract" &&
+          s.role !== "explanatory-history" &&
           s.role !== "compatibility-doctrine" &&
           s.role !== "supporting"
         ) {
           push(err("E_PROVENANCE_ROLE", "source role unknown", `${p}.role`));
+        }
+        if (
+          typeof s.path === "string" &&
+          s.path.startsWith("docs/") &&
+          s.role === "human-readable-contract"
+        ) {
+          push(
+            err(
+              "E_PROVENANCE_ROLE",
+              "docs/ paths cannot be human-readable-contract (AGENTS.md is the contract)",
+              `${p}.role`
+            )
+          );
         }
 
         if (

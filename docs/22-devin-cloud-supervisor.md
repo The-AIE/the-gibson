@@ -41,7 +41,7 @@ rather than by asking a runner to be honest about its own diff.
 1. grok          implement → green gate → fix        (repeat, flat-rate)
 2. codex/claude  read-only second opinion            (after --escalate-after N failures)
 3. devin cloud   review the diff, PR, CI, merge      (when the branch is ready)
-4. human         the gate list in docs/14            (never automated away)
+4. human         the gate list in AGENTS.md          (never automated away)
 ```
 
 Nothing escalates on a task that goes green on the first pass, which is most of them.

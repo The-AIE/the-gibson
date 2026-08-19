@@ -234,6 +234,7 @@ echo "=== mutation receipts ==="
 MUT="$ROOT/mut-sandbox"
 mkdir -p "$MUT/config/policy/schema" "$MUT/docs"
 cp "$SCHEMA" "$MUT/config/policy/schema/policy-manifest-v1.schema.json"
+cp "$REPO_ROOT/AGENTS.md" "$MUT/AGENTS.md"
 for _doc in 14-human-gates.md 06-quality-gates.md 03-roles.md 02-sdlc-pipeline.md 18-fork-and-upstream.md; do
   cp "$REPO_ROOT/docs/$_doc" "$MUT/docs/"
 done
@@ -300,6 +301,15 @@ mut_validate "m-digest.json" '
 '
 [[ "$rc" -ne 0 ]] && ok "corrupt digest fails closed" || bad "corrupt digest passed"
 has "digest mismatch code" "$out" "E_PROVENANCE_DIGEST_MISMATCH"
+
+# 5a) canonical-doctrine provenance on docs is forbidden
+mut_validate "m-canonical-doctrine.json" '
+  c.provenance.sources.forEach(s => {
+    if (String(s.path).startsWith("docs/")) s.role = "canonical-doctrine";
+  });
+' --no-digest-check
+[[ "$rc" -ne 0 ]] && ok "canonical-doctrine provenance fails closed" || bad "canonical-doctrine provenance passed"
+has "canonical-doctrine role code" "$out" "E_PROVENANCE_ROLE"
 
 # 5b) malformed digest
 mut_validate "m-digest-bad.json" '
@@ -821,7 +831,7 @@ mutate_json "$CANDIDATE" "$MINI/config/policy/candidates/gibson-core-v1.candidat
     path: "docs/escape-link.md",
     digestAlgorithm: "sha256",
     digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    role: "canonical-doctrine"
+    role: "explanatory-history"
   }];
 '
 out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$MINI" 2>&1); rc=$?

@@ -31,7 +31,7 @@ target repo's canonical checkout — worktrees only (Law 3).
    owner's product direction into a plan and decomposed issues before any
    building starts. This is the only RECURRING owner step — but any step that
    SPENDS money (e.g. creating a Devin cloud session, which bills ACUs) is also
-   an owner gate per docs/14: ask first, every time, Ask Contract format.
+   an owner gate per AGENTS.md G1–G16: ask first, every time, Ask Contract format.
 5. **`gibson-run`** — start and supervise the loop (`scripts/loop.sh`) with the
    routing table from step 2. Devin (cloud supervisor, `docs/22`) reviews
    finished branches and opens/owns PRs via the `handoff:` field in loop-state;
@@ -61,7 +61,7 @@ Flat-rate pools absorb all volume; metered tokens buy only judgment.
   or failed review blocks the handoff (the branch stays queued in loop-state).
 - Law 7: Tier C — money, auth, consent/PII, security boundaries, production
   data — always ends at a human merge gate. Devin does not override the owner.
-- Owner interruptions: product direction and human gates (`docs/14`) only.
+- Owner interruptions: product direction and human gates (`AGENTS.md` G1–G16) only.
   Batch everything else into the digest.
 - Kill switch: the `gibson/HALT` file is the permanent stop `loop.sh` checks
   every iteration, and `GIBSON_HALT=1` is checked unconditionally alongside it —

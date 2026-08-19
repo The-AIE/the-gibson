@@ -717,7 +717,7 @@ strengthened from evidence; weakening authority remains an explicit decision.
 | Capability | Current state |
 |---|---|
 | Cross-runtime agent contract | Root `AGENTS.md` plus local and target overrides |
-| Ten-stage doctrine and nine role contracts | `docs/` and `playbooks/` |
+| Ten-stage doctrine and nine role contracts | `AGENTS.md` (authority); `playbooks/` (dispatch prompts); `docs/` (explanation) |
 | Claim/worktree isolation | Scripts, ledger files, GitHub labels, overlap sensors |
 | Green gate and test-integrity controls | Local scripts and portable CI template |
 | Solo unattended loop controls | State validation, budgets, no-progress sensor, halt paths, handoffs |

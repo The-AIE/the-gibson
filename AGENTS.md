@@ -31,11 +31,13 @@ file, and must not use the candidate to supply binding values.
 
 **Conditional session-start human-readable load:** when a role is dispatched,
 also load that role's playbook (`playbooks/<role>.md`, replaced by
-`local/playbooks/<role>.md` when present). When a non-role job is dispatched,
-also load that job's dispatch prompt. That playbook is part of session-start
-load for the session — not optional flavor text. Playbooks are role/job dispatch prompts
-and routing mirrors; they must not add, drop, or weaken rules in this file.
-Fixed load and conditional dispatch-prompt load are measured separately (see
+`local/playbooks/<role>.md` when present). If no role is named, the resolved
+role is `builder` and `playbooks/builder.md` is that load (including default
+assignment). When a non-role job is dispatched, also load that job's dispatch
+prompt. That playbook is part of session-start load for the session — not
+optional flavor text. Playbooks are role/job dispatch prompts and routing
+mirrors; they must not add, drop, or weaken rules in this file. Fixed load
+and conditional dispatch-prompt load are measured separately (see
 `config/policy/mandatory-read-chain.v1.json`).
 
 **Also at session start (not the fixed byte budget):**
@@ -70,6 +72,7 @@ candidate):
 | Exact-head claim release | `scripts/release-claim.sh` |
 | Fixed + conditional read-chain budget | `config/policy/mandatory-read-chain.v1.json` |
 | Rule → home migration audit | `config/policy/rule-migration-audit.v1.json` |
+| Per-role outputs / gates / prohibitions | `config/policy/role-contracts.v1.json` |
 
 ## Mission
 
@@ -144,7 +147,14 @@ You are exactly one of:
 `planner` · `decomposer` · `builder` · `test-engineer` · `reviewer` ·
 `ux-evaluator` · `security` · `release` · `historian`
 
-If your dispatch prompt doesn't name a role, you are a `builder`.
+If no role is named, the resolved role is `builder` (if your dispatch prompt
+doesn't name a role, you are a `builder`). `playbooks/builder.md` is the
+conditionally mandatory session-start load, including default assignment.
+
+Per-role outputs, gates, and prohibitions are canonical in
+`config/policy/role-contracts.v1.json` (activated machine source named here).
+Playbook frontmatter is a routing mirror of that file and must not add, drop,
+rename, weaken, or negate those obligations.
 
 **Forbidden pairs on the same unit of work** (symmetric): `builder` ≠
 `reviewer`; `builder` ≠ `ux-evaluator`; `reviewer` ≠ `ux-evaluator`.

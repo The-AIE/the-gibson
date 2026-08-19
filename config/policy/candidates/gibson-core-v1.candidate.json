@@ -19,32 +19,39 @@
   "provenance": {
     "sources": [
       {
+        "id": "src.agents-contract",
+        "path": "AGENTS.md",
+        "digestAlgorithm": "sha256",
+        "digest": "c1348a8f72190fafaf97848be44266f06365d2f57616c438ebb1f80d4b3fbb9a",
+        "role": "human-readable-contract"
+      },
+      {
         "id": "src.human-gates",
         "path": "docs/14-human-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "79a27abb8a6f0dd98d89a7f137c561e2b5a09d33cf4ae0466917786b7dcf349a",
-        "role": "canonical-doctrine"
+        "digest": "e3e304507fde966ffaad3532b6b2c494ce5aeff36467bfd73545f0f23b5e1801",
+        "role": "explanatory-history"
       },
       {
         "id": "src.quality-gates",
         "path": "docs/06-quality-gates.md",
         "digestAlgorithm": "sha256",
         "digest": "921bbfd214f50fe1b75e71f106d021a8b673d25e478e0fccd682e229e4c142ab",
-        "role": "canonical-doctrine"
+        "role": "explanatory-history"
       },
       {
         "id": "src.roles",
         "path": "docs/03-roles.md",
         "digestAlgorithm": "sha256",
-        "digest": "f5cf0ae93faeddbc46c2c108fde626fe3eaf0b3d25bcad8b29730569446d6ca2",
-        "role": "canonical-doctrine"
+        "digest": "126c0f616e598d950366cbfadaca40d2aaa857bcfade56bc19e132fe32ffc8dc",
+        "role": "explanatory-history"
       },
       {
         "id": "src.sdlc-pipeline",
         "path": "docs/02-sdlc-pipeline.md",
         "digestAlgorithm": "sha256",
         "digest": "c876a38d895e4408a72cdef6aee4a8e9c2e233d7239df09cde6679c47a4a000a",
-        "role": "canonical-doctrine"
+        "role": "explanatory-history"
       },
       {
         "id": "src.fork-upstream",
@@ -91,7 +98,9 @@
       "category": "money",
       "summary": "Merge gate on billing/pricing/payment code (Tier C).",
       "severity": false,
-      "relatedTierIds": ["C"]
+      "relatedTierIds": [
+        "C"
+      ]
     },
     {
       "id": "G7",
@@ -128,7 +137,9 @@
       "category": "scope-judgment",
       "summary": "Tier C merge approval (money/auth/consent/PII/security/schema).",
       "severity": false,
-      "relatedTierIds": ["C"]
+      "relatedTierIds": [
+        "C"
+      ]
     },
     {
       "id": "G13",
@@ -184,7 +195,9 @@
         "reviewDepth": "fan-out",
         "adversarialReview": true,
         "humanMergeGate": true,
-        "humanGateIds": ["G12"],
+        "humanGateIds": [
+          "G12"
+        ],
         "uxEvalIfVisible": true,
         "serializedWhenStateful": true,
         "crossVendorPreferred": true
@@ -348,12 +361,18 @@
   "tierGateMappings": [
     {
       "tierId": "C",
-      "gateIds": ["G6", "G12"],
+      "gateIds": [
+        "G6",
+        "G12"
+      ],
       "rationale": "G6 is the billing/pricing/payment merge gate (Tier C). G12 is Tier C merge approval. Both bind to Tier C without elevating A/B."
     }
   ],
   "forkExtensions": {
-    "allowedNamespaces": ["fork.", "local."],
+    "allowedNamespaces": [
+      "fork.",
+      "local."
+    ],
     "forbiddenCoreShadow": true,
     "precedence": [
       "task",

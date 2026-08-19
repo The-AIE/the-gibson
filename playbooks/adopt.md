@@ -190,7 +190,7 @@ immediately; whole-codebase hard-fail when burn-down completes.
 | Check | Pass |
 |---|---|
 | Tier A issue | plan→issue→build→test→review→eval→merge→deploy→verified with **zero** human touches |
-| Tier C issue | stops at **exactly** the human gates in docs/14, nowhere else |
+| Tier C issue | stops at **exactly** the human gates in AGENTS.md, nowhere else |
 | Deploy truth | Production Branch written from verified settings |
 | Claims | active-work.md + labels live |
 | Gate | CI gibson-gate green on a canary PR |

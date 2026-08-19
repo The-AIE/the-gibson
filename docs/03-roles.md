@@ -13,10 +13,12 @@ nav_order: 3
 > and more. A job is a list of what you may and may not do, not a brand of AI. Any AI
 > can wear any hat if it follows the contract for that job.
 
-Nine roles. A role is a **contract** — inputs, outputs, forbidden actions — not a
-vendor or a model. Any runtime can wear any hat; Mission Control routes by task
-class (deep refactors → claude-code, terminal-heavy fan-out → codex, research and
-second opinions → grok, messaging/ops and recurring jobs → hermes), but the contract
+Nine roles. Binding contracts (outputs, gates, forbidden actions) live in
+[`AGENTS.md`](../AGENTS.md) and `config/policy/role-contracts.v1.json`. This
+page explains the jobs. A role is not a vendor or a model. Any runtime can
+wear any hat; Mission Control routes by task class (deep refactors →
+claude-code, terminal-heavy fan-out → codex, research and second opinions →
+grok, messaging/ops and recurring jobs → hermes), but the AGENTS.md contract
 is identical wherever it runs. Dispatch prompts live in `playbooks/`.
 
 Separation rules (non-negotiable):

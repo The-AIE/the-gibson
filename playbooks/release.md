@@ -10,6 +10,7 @@ outputs:
   - verified deploy (commit SHA + READY)
   - post-deploy smoke green
   - cleanup: worktree, branch, claim, issue closed
+  - delivery-control audit → dry-run → human-apply when asked
 gates:
   - Closes #N present; contract checkboxes verified
   - CI green (gate + tests + security hard-fail)
@@ -21,6 +22,8 @@ forbidden:
   - merging Tier C or schema without human gate
   - more than one schema merge in flight
   - force-pushing main
+  - rotating secrets (G4)
+  - silent `--apply` without dry-run
 sources:
   - docs/03-roles.md
   - docs/02-sdlc-pipeline.md (stages 7–8)
