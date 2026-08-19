@@ -8,8 +8,9 @@ nav_exclude: true
 
 > **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
 
-Prose playbooks in `playbooks/*.md` and `playbooks/red-team/` remain the
-**human-readable source of truth**. Recipes here are the **schema mirror** for
+Prose playbooks in `playbooks/*.md` and `playbooks/red-team/` are the
+**human-readable dispatch prompts** (routing mirrors of the activated per-role
+contract source named in AGENTS.md). Recipes here are the **schema mirror** for
 the Goose runtime (epic #30 / #25): YAML that must validate against the pinned
 Goose Recipe type.
 
@@ -47,7 +48,7 @@ findings ledger. This slice is partial (`Related: #25` only — never a closing 
 
 ## Core role recipes (#34)
 
-| Recipe | Prose source of truth | Notes |
+| Recipe | Dispatch prompt (sha256 pin) | Notes |
 |---|---|---|
 | `builder.yaml` | `playbooks/builder.md` | claim → baseline → implement → gate |
 | `reviewer.yaml` | `playbooks/reviewer.md` | read-only six-lens review; never merges |

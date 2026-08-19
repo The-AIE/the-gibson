@@ -34,7 +34,7 @@ TOOLCHAIN_LOCK="$RECIPES_DIR/red-team.toolchain.json"
 BUILDER_RECIPE="$RECIPES_DIR/builder.yaml"
 REVIEWER_RECIPE="$RECIPES_DIR/reviewer.yaml"
 SECURITY_RECIPE="$RECIPES_DIR/security.yaml"
-# Core role mirrors (#34) — prose playbook is source of truth; recipe pins its sha256.
+# Core role mirrors (#34) — recipe pins sha256 of the prose playbook bytes.
 ROLE_RECIPES=(builder reviewer security)
 
 PASS=0

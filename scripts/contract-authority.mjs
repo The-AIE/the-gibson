@@ -29,29 +29,37 @@
  *   node scripts/contract-authority.mjs --help
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parseFlags } from "./lib/args.mjs";
 import {
-  collapseWs,
+  coerceRootIdentity,
+  readContainedFile,
+  loadJsonContained,
+  resolveLexicalUnderRoot,
+  hasDotDotSegment,
+} from "./policy-manifest.mjs";
+import {
   parseFrontmatter,
   frontmatterHasOperativeKeys,
   parseYamlList,
   extractSection,
   extractNumberedItems,
-  extractGateSummaries,
   extractMarkdownTable,
-  diffObligationLists,
   findNonNormativeOperativeContradiction,
   findDocsAuthorityClaims,
-  PROVENANCE_FORBIDDEN_ROLES,
-  PROVENANCE_ALLOWED_ROLES,
+  provenanceRoleFindings,
+  structuredAgentsEnumerationFindings,
+  diffObligationMatrix,
+  remapRoleCodesToJob,
+  listEq,
+  EXPECTED_ASK_FIELDS,
+  EXPECTED_ROLES,
 } from "./lib/contract-semantics.mjs";
 
 const DEFAULT_CONFIG_REL = "config/policy/mandatory-read-chain.v1.json";
-const GATE_ID_RE = /\*\*G([1-9]|1[0-6])\*\*/g;
 const ROLE_CONTRACTS_REL = "config/policy/role-contracts.v1.json";
 
 function help() {
@@ -117,23 +125,12 @@ function defaultRepoRoot() {
   return resolve(scriptDir(), "..");
 }
 
-function hasDotDotSegment(p) {
-  return p.replace(/\\/g, "/").split("/").includes("..");
+function readAuthorityText(rootId, relPath) {
+  return /** @type {string} */ (readContainedFile(rootId, relPath, "utf8"));
 }
 
-function resolveUnderRoot(root, relPath) {
-  if (typeof relPath !== "string" || !relPath) {
-    throw new Error("empty path");
-  }
-  if (isAbsolute(relPath) || relPath.includes("\0") || hasDotDotSegment(relPath)) {
-    throw new Error(`unsafe path: ${relPath}`);
-  }
-  const abs = resolve(root, relPath);
-  const rel = relative(root, abs);
-  if (rel.startsWith("..") || isAbsolute(rel) || hasDotDotSegment(rel)) {
-    throw new Error(`path escapes repo root: ${relPath}`);
-  }
-  return abs;
+function loadAuthorityJson(rootId, relPath) {
+  return loadJsonContained(rootId, relPath);
 }
 
 function utf8Bytes(text) {
@@ -142,20 +139,6 @@ function utf8Bytes(text) {
 
 function approxTokens(bytes) {
   return Math.ceil(bytes / 4);
-}
-
-function loadJson(absPath) {
-  let raw;
-  try {
-    raw = readFileSync(absPath, "utf8");
-  } catch (e) {
-    throw new Error(`cannot read ${absPath}: ${e.message}`);
-  }
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    throw new Error(`invalid JSON ${absPath}: ${e.message}`);
-  }
 }
 
 function isPlaybooksMdPath(rel) {
@@ -172,27 +155,60 @@ function playbookStem(rel) {
   return String(rel).replace(/^playbooks\//, "").replace(/\.md$/, "");
 }
 
-function walkMdFiles(root, relDir, acc) {
-  const abs = join(root, relDir);
-  if (!existsSync(abs)) return;
+/** Optional local override only when the leaf is genuinely absent. */
+function isGenuineMissingPath(msg) {
+  const s = String(msg || "");
+  if (
+    /escape|unsafe|absolute|malformed|identity|symlink|realpath|not a regular file|EISDIR|ENOTDIR|EACCES|EPERM|ELOOP/i.test(
+      s
+    )
+  ) {
+    return false;
+  }
+  return /ENOENT|\bno such file\b/i.test(s);
+}
+
+function walkMdFiles(rootId, relDir, acc) {
+  let lex;
+  try {
+    lex = resolveLexicalUnderRoot(rootId, relDir);
+  } catch {
+    return;
+  }
   let st;
   try {
-    st = statSync(abs);
-  } catch {
+    st = lstatSync(lex.absPath);
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (isGenuineMissingPath(msg)) return;
+    fail("E_PATH", `${relDir}: ${msg}`);
+    return;
+  }
+  if (st.isSymbolicLink()) {
+    fail("E_PATH", `${relDir}: symlink`);
     return;
   }
   if (!st.isDirectory()) return;
   let ents;
   try {
-    ents = readdirSync(abs, { withFileTypes: true });
-  } catch {
+    ents = readdirSync(lex.absPath, { withFileTypes: true });
+  } catch (e) {
+    fail("E_PATH", `${relDir}: ${e && e.message ? e.message : e}`);
     return;
   }
   for (const ent of ents) {
     if (ent.name === ".git" || ent.name === "node_modules") continue;
+    if (ent.name === "." || ent.name === ".." || hasDotDotSegment(ent.name)) {
+      continue;
+    }
     const rel = `${relDir}/${ent.name}`.replace(/\\/g, "/");
+    if (hasDotDotSegment(rel)) continue;
+    if (ent.isSymbolicLink()) {
+      fail("E_PATH", `${rel}: symlink`);
+      continue;
+    }
     if (ent.isDirectory()) {
-      walkMdFiles(root, rel, acc);
+      walkMdFiles(rootId, rel, acc);
     } else if (ent.isFile() && ent.name.endsWith(".md")) {
       acc.push(rel);
     }
@@ -208,26 +224,30 @@ function gitShowBytes(root, ref, relPath) {
   return r.stdout.length;
 }
 
-const repoRoot = resolve(
+const repoRootArg = resolve(
   typeof parsed.repoRoot === "string" && parsed.repoRoot
     ? parsed.repoRoot
     : defaultRepoRoot()
 );
-if (!existsSync(repoRoot) || !statSync(repoRoot).isDirectory()) {
-  dieUsage(`repo root is not a directory: ${repoRoot}`);
+if (!existsSync(repoRootArg) || !statSync(repoRootArg).isDirectory()) {
+  dieUsage(`repo root is not a directory: ${repoRootArg}`);
 }
 
-let configAbs;
+let rootId;
 try {
-  configAbs = resolveUnderRoot(repoRoot, parsed.configRel || DEFAULT_CONFIG_REL);
+  rootId = coerceRootIdentity(repoRootArg);
 } catch (e) {
   dieUsage(e.message);
 }
-if (!existsSync(configAbs)) {
-  dieUsage(`config missing: ${parsed.configRel}`);
-}
+const repoRoot = rootId.path;
+const configRel = parsed.configRel || DEFAULT_CONFIG_REL;
 
-const cfg = loadJson(configAbs);
+let cfg;
+try {
+  cfg = loadAuthorityJson(rootId, configRel);
+} catch (e) {
+  dieUsage(e.message);
+}
 const findings = [];
 
 function fail(code, message) {
@@ -262,18 +282,18 @@ let agentsText = "";
 let agentsBytes = 0;
 const chainFiles = [];
 for (const rel of mandatoryFiles) {
-  let abs;
+  let text;
   try {
-    abs = resolveUnderRoot(repoRoot, rel);
+    text = readAuthorityText(rootId, rel);
   } catch (e) {
-    fail("E_PATH", `${rel}: ${e.message}`);
+    const msg = String(e && e.message ? e.message : e);
+    if (/cannot open|no such file|ENOENT/i.test(msg) && !/escape|unsafe|absolute|malformed/i.test(msg)) {
+      fail("E_MISSING", `mandatory file missing: ${rel}`);
+    } else {
+      fail("E_PATH", `${rel}: ${msg}`);
+    }
     continue;
   }
-  if (!existsSync(abs)) {
-    fail("E_MISSING", `mandatory file missing: ${rel}`);
-    continue;
-  }
-  const text = readFileSync(abs, "utf8");
   const bytes = utf8Bytes(text);
   chainFiles.push({ path: rel, bytes, approxTokens: approxTokens(bytes) });
   if (rel === "AGENTS.md") {
@@ -421,60 +441,101 @@ const discoveredDispatch = [];
     ? cfg.playbookGlobs
     : ["playbooks/**/*.md"];
   for (const g of globs) {
-    if (g === "playbooks/**/*.md") walkMdFiles(repoRoot, "playbooks", playbooksToDiscover);
+    if (g === "playbooks/**/*.md") walkMdFiles(rootId, "playbooks", playbooksToDiscover);
     else fail("E_GLOB", `unsupported playbookGlob: ${g}`);
   }
   const seen = new Set();
   for (const rel of playbooksToDiscover) {
     if (seen.has(rel)) continue;
     seen.add(rel);
-    let abs;
+    let text;
     try {
-      abs = resolveUnderRoot(repoRoot, rel);
+      text = readAuthorityText(rootId, rel);
     } catch (e) {
       fail("E_PATH", `${rel}: ${e.message}`);
       continue;
     }
-    if (!existsSync(abs)) continue;
-    const text = readFileSync(abs, "utf8");
     if (text.includes(playbookDispatchMarker)) discoveredDispatch.push(rel);
   }
   discoveredDispatch.sort();
 }
 
+const localOverrideTemplate =
+  dispatchCfg && typeof dispatchCfg.localOverrideTemplate === "string"
+    ? dispatchCfg.localOverrideTemplate
+    : "local/playbooks/{role}.md";
+const effectiveRoleTexts = new Map();
+const jobTexts = new Map();
 const dispatchPrompts = [];
 let dispatchBytesMin = null;
 let dispatchBytesMax = 0;
 let dispatchBytesSum = 0;
 for (const entry of closedEntries) {
   const rel = entry.path;
-  let abs;
+  let text;
   try {
-    abs = resolveUnderRoot(repoRoot, rel);
+    text = readAuthorityText(rootId, rel);
   } catch (e) {
-    fail("E_DISPATCH_PROMPT_PATH", `${rel}: ${e.message}`);
+    const msg = String(e && e.message ? e.message : e);
+    if (/cannot open|no such file|ENOENT/i.test(msg) && !/escape|unsafe|absolute|malformed/i.test(msg)) {
+      fail("E_DISPATCH_PROMPT_MISSING", `conditional dispatch prompt missing: ${rel}`);
+    } else {
+      fail("E_DISPATCH_PROMPT_PATH", `${rel}: ${msg}`);
+    }
     continue;
   }
-  if (!existsSync(abs)) {
-    fail("E_DISPATCH_PROMPT_MISSING", `conditional dispatch prompt missing: ${rel}`);
-    continue;
-  }
-  const text = readFileSync(abs, "utf8");
   if (!text.includes(playbookDispatchMarker)) {
     fail(
       "E_DISPATCH_SET",
       `manifest dispatch prompt is not marked as a dispatch prompt: ${rel}`
     );
   }
-  const bytes = utf8Bytes(text);
+  let effectiveRel = rel;
+  let effectiveText = text;
+  let overrideRel = null;
+  if (entry.kind === "role") {
+    overrideRel = localOverrideTemplate.replace("{role}", entry.id);
+    try {
+      const overrideText = readAuthorityText(rootId, overrideRel);
+      effectiveRel = overrideRel;
+      effectiveText = overrideText;
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      if (isGenuineMissingPath(msg)) {
+        overrideRel = null;
+      } else {
+        fail("E_PATH", `local override ${overrideRel}: ${msg}`);
+        overrideRel = null;
+      }
+    }
+    effectiveRoleTexts.set(entry.id, {
+      path: effectiveRel,
+      corePath: rel,
+      text: effectiveText,
+      override: Boolean(overrideRel && effectiveRel === overrideRel),
+    });
+  } else {
+    jobTexts.set(entry.id, { path: rel, text: effectiveText });
+  }
+  const bytes = utf8Bytes(effectiveText);
   const rec = {
-    path: rel,
+    path: effectiveRel,
     kind: entry.kind,
     bytes,
     approxTokens: approxTokens(bytes),
   };
-  if (entry.kind === "role") rec.role = entry.id;
-  else rec.job = entry.id;
+  if (entry.kind === "role") {
+    rec.role = entry.id;
+    if (effectiveRel !== rel) {
+      rec.corePath = rel;
+      rec.effective = "local-override";
+    } else {
+      rec.effective = "core";
+    }
+  } else {
+    rec.job = entry.id;
+    rec.effective = "core";
+  }
   dispatchPrompts.push(rec);
   dispatchBytesSum += bytes;
   dispatchBytesMax = Math.max(dispatchBytesMax, bytes);
@@ -507,7 +568,7 @@ const auditRel =
     : "config/policy/rule-migration-audit.v1.json";
 let audit = null;
 try {
-  audit = loadJson(resolveUnderRoot(repoRoot, auditRel));
+  audit = loadAuthorityJson(rootId, auditRel);
 } catch (e) {
   fail("E_AUDIT", e.message);
 }
@@ -518,7 +579,7 @@ const mirrorRel =
     ? cfg.policyManifestMirrorPath
     : "config/policy/candidates/gibson-core-v1.candidate.json";
 try {
-  mirror = loadJson(resolveUnderRoot(repoRoot, mirrorRel));
+  mirror = loadAuthorityJson(rootId, mirrorRel);
 } catch (e) {
   fail("E_MIRROR", e.message);
 }
@@ -527,11 +588,24 @@ const roleContractsRel =
   typeof cfg.roleContractsPath === "string"
     ? cfg.roleContractsPath
     : ROLE_CONTRACTS_REL;
+const jobContractsRel =
+  typeof cfg.jobContractsPath === "string"
+    ? cfg.jobContractsPath
+    : roleContractsRel;
 let roleContracts = null;
 try {
-  roleContracts = loadJson(resolveUnderRoot(repoRoot, roleContractsRel));
+  roleContracts = loadAuthorityJson(rootId, roleContractsRel);
 } catch (e) {
   fail("E_ROLE_CONTRACTS", e.message);
+}
+let jobContracts = roleContracts;
+if (jobContractsRel !== roleContractsRel) {
+  try {
+    jobContracts = loadAuthorityJson(rootId, jobContractsRel);
+  } catch (e) {
+    fail("E_JOB_CONTRACTS", e.message);
+    jobContracts = null;
+  }
 }
 if (roleContracts) {
   if (roleContracts.authority === "report-only" || roleContracts.activated === false) {
@@ -549,53 +623,6 @@ if (roleContracts) {
   if (!roleContracts.roles || typeof roleContracts.roles !== "object") {
     fail("E_ROLE_CONTRACTS", `${roleContractsRel} missing roles object`);
   }
-}
-
-const EXPECTED_LENSES = [
-  "Correctness",
-  "Security",
-  "Consent / PII",
-  "Money",
-  "Performance",
-  "Maintainability",
-];
-const EXPECTED_SECURITY_LAYERS = [
-  "Secrets",
-  "SAST",
-  "Supply chain",
-  "AuthZ matrix",
-  "DAST",
-  "Adversarial review",
-  "AI-surface / injection review",
-  "Runtime posture",
-];
-const EXPECTED_ASK_FIELDS = [
-  "What I'm asking",
-  "What it does",
-  "Why it should be done",
-  "The risks",
-];
-const EXPECTED_STAGES = [
-  "PLAN",
-  "DECOMPOSE",
-  "BUILD",
-  "TEST",
-  "REVIEW",
-  "UX-EVAL",
-  "SECURITY",
-  "MERGE",
-  "DEPLOY+VERIFY",
-  "RETRO",
-];
-const EXPECTED_PAIRS = [
-  ["builder", "reviewer"],
-  ["builder", "ux-evaluator"],
-  ["reviewer", "ux-evaluator"],
-];
-
-function listEq(actual, expected) {
-  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
-  return actual.every((v, i) => v === expected[i]);
 }
 
 if (agentsText) {
@@ -709,69 +736,8 @@ if (agentsText) {
     }
   }
 
-  const lensSection = extractSection(agentsText, "Review lenses (binding)");
-  const lensItems = extractNumberedItems(lensSection);
-  if (!listEq(lensItems, EXPECTED_LENSES) || !/file:line/.test(lensSection)) {
-    fail(
-      "E_BINDING_FAMILY",
-      `AGENTS.md missing binding-family six-lens-review structured list`
-    );
-  }
-  const secSection = extractSection(agentsText, "Security layers (binding)");
-  const secFlat = collapseWs(secSection);
-  const secIntro = collapseWs(secSection.split("\n").slice(0, 6).join(" "));
-  for (const layer of EXPECTED_SECURITY_LAYERS) {
-    if (!secFlat.includes(layer)) {
-      fail(
-        "E_BINDING_FAMILY",
-        `AGENTS.md missing binding-family eight-security-layers item: ${layer}`
-      );
-    }
-  }
-  if (!/Eight layers/.test(secIntro) && !/1\.\s*Secrets/.test(secSection)) {
-    fail("E_BINDING_FAMILY", "AGENTS.md missing binding-family eight-security-layers");
-  }
-  const deliverySection = extractSection(agentsText, "Delivery control (binding)");
-  if (
-    !deliverySection ||
-    !/\baudit\b/.test(deliverySection) ||
-    !/\bdry-run\b/.test(deliverySection) ||
-    !/explicit human apply/.test(deliverySection)
-  ) {
-    fail(
-      "E_BINDING_FAMILY",
-      "AGENTS.md missing binding-family delivery-control structured requirements"
-    );
-  }
-  const selfMod = extractSection(agentsText, "Self-modification bounds (binding)");
-  if (
-    !selfMod ||
-    !/human gates/.test(selfMod) ||
-    !/Tier definitions/.test(selfMod) ||
-    !/hard-fail security layers/.test(selfMod)
-  ) {
-    fail(
-      "E_BINDING_FAMILY",
-      "AGENTS.md missing binding-family self-modification-gates"
-    );
-  }
-  const testEngRow = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]).find(
-    (r) => r[0] === "test-engineer"
-  );
-  if (!testEngRow || !/adversarial cases required/.test(testEngRow.join(" "))) {
-    fail(
-      "E_BINDING_FAMILY",
-      "AGENTS.md missing binding-family tier-c-adversarial-tests"
-    );
-  }
-  const secRow = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]).find(
-    (r) => r[0] === "security"
-  );
-  if (!secRow || !/destructive production testing/.test(secRow.join(" "))) {
-    fail(
-      "E_BINDING_FAMILY",
-      "AGENTS.md missing binding-family no-destructive-prod-testing"
-    );
+  for (const f of structuredAgentsEnumerationFindings(agentsText, mirror)) {
+    fail(f.code, f.message);
   }
 
   const implied = findDocsAuthorityClaims(agentsText).filter((h) =>
@@ -812,11 +778,12 @@ if (agentsText) {
   }
   if (
     !agentsText.includes(roleContractsRel) ||
-    !/activated machine source/.test(agentsText)
+    !/activated machine source/.test(agentsText) ||
+    !/per-job/.test(agentsText)
   ) {
     fail(
       "E_MACHINE_SOURCE",
-      `AGENTS.md must designate ${roleContractsRel} as the activated per-role contract source`
+      `AGENTS.md must designate ${roleContractsRel} as the activated per-role and per-job contract source`
     );
   }
 
@@ -829,36 +796,11 @@ if (agentsText) {
     fail("E_RULE", `AGENTS.md Ask Contract fields ${JSON.stringify(askFields)} != ${JSON.stringify(EXPECTED_ASK_FIELDS)}`);
   }
 
-  // Gate IDs/summaries are owned by AGENTS.md (not supplied by the candidate).
-  const agentsGates = extractGateSummaries(agentsText);
-  for (let i = 1; i <= 16; i++) {
-    const id = `G${i}`;
-    if (!agentsGates.has(id)) {
-      fail("E_GATE", `AGENTS.md missing ${id}`);
-    }
-  }
-  const present = new Set();
-  let m;
-  const re = new RegExp(GATE_ID_RE.source, "g");
-  while ((m = re.exec(agentsText)) !== null) {
-    present.add(`G${m[1]}`);
-  }
-  for (const id of present) {
-    const n = Number(id.slice(1));
-    if (!Number.isInteger(n) || n < 1 || n > 16) {
-      fail("E_GATE_DRIFT", `AGENTS.md has unexpected gate id ${id}`);
-    }
-  }
-
   const roleSection = extractSection(agentsText, "Your role this session");
-  const roleLine = /`planner`[\s\S]*?`historian`/.exec(roleSection);
-  const parsedRoles = roleLine
-    ? [...roleLine[0].matchAll(/`([a-z-]+)`/g)].map((x) => x[1])
-    : [];
-  if (!listEq(parsedRoles, roleIds)) {
+  if (!listEq(roleIds, EXPECTED_ROLES)) {
     fail(
-      "E_ROLE",
-      `AGENTS.md role enumeration ${JSON.stringify(parsedRoles)} != ${JSON.stringify(roleIds)}`
+      "E_DISPATCH_CONFIG",
+      `conditionalDispatchPrompts.roles ${JSON.stringify(roleIds)} != ${JSON.stringify(EXPECTED_ROLES)}`
     );
   }
 
@@ -897,26 +839,6 @@ if (agentsText) {
     );
   }
 
-  const tierSection = extractSection(agentsText, "Risk tiers");
-  for (const t of ["A", "B", "C"]) {
-    if (!new RegExp(`\\*\\*${t}\\*\\*`).test(tierSection || agentsText)) {
-      fail("E_TIER", `AGENTS.md missing risk tier **${t}**`);
-    }
-  }
-  const pipelineSection = extractSection(agentsText, "The pipeline you are inside");
-  for (const s of EXPECTED_STAGES) {
-    if (!(pipelineSection || agentsText).includes(s)) {
-      fail("E_STAGE", `AGENTS.md missing stage name ${s}`);
-    }
-  }
-  const roleFlat = collapseWs(roleSection || agentsText);
-  for (const [a, b] of EXPECTED_PAIRS) {
-    const token = "`" + a + "` ≠ `" + b + "`";
-    if (!roleFlat.includes(token)) {
-      fail("E_PAIR", `AGENTS.md missing forbidden pair ${a} ≠ ${b}`);
-    }
-  }
-
   // Report-only candidate is a checked mirror of AGENTS authority — never the
   // supplier of binding values, and never activated on this slice.
   if (mirror) {
@@ -932,112 +854,12 @@ if (agentsText) {
         `${mirrorRel} must keep authority=report-only until #164 (got ${JSON.stringify(mirror.authority)})`
       );
     }
-    if (Array.isArray(mirror.humanGates)) {
-      for (const g of mirror.humanGates) {
-        if (!g || typeof g.id !== "string") continue;
-        if (!agentsGates.has(g.id)) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `report-only candidate has ${g.id} absent from AGENTS.md authority`
-          );
-          continue;
-        }
-        if (
-          typeof g.summary === "string" &&
-          g.summary &&
-          agentsGates.get(g.id) !== g.summary
-        ) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `report-only candidate ${g.id} summary drifts from AGENTS.md authority`
-          );
-        }
-      }
-      for (const id of agentsGates.keys()) {
-        if (!mirror.humanGates.some((g) => g && g.id === id)) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `AGENTS.md has ${id} missing from report-only candidate mirror`
-          );
-        }
-      }
-    }
-    if (Array.isArray(mirror.roles)) {
-      for (const r of mirror.roles) {
-        if (!r || typeof r.id !== "string") continue;
-        if (
-          !agentsText.includes("`" + r.id + "`") &&
-          !agentsText.includes(`| ${r.id} |`)
-        ) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `report-only candidate role ${r.id} absent from AGENTS.md authority`
-          );
-        }
-      }
-    }
-    if (Array.isArray(mirror.riskTiers)) {
-      for (const t of mirror.riskTiers) {
-        if (!t || typeof t.id !== "string") continue;
-        if (!new RegExp(`\\*\\*${t.id}\\*\\*`).test(agentsText)) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `report-only candidate tier ${t.id} absent from AGENTS.md authority`
-          );
-        }
-      }
-    }
-    if (Array.isArray(mirror.workflowStages)) {
-      for (const s of mirror.workflowStages) {
-        if (!s || typeof s.name !== "string") continue;
-        if (!agentsText.includes(s.name)) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `report-only candidate stage ${s.name} absent from AGENTS.md authority`
-          );
-        }
-      }
-    }
-    if (Array.isArray(mirror.forbiddenRolePairs)) {
-      for (const pair of mirror.forbiddenRolePairs) {
-        if (!pair || typeof pair.a !== "string" || typeof pair.b !== "string") {
-          continue;
-        }
-        const token = "`" + pair.a + "` ≠ `" + pair.b + "`";
-        if (!collapseWs(roleSection || agentsText).includes(token)) {
-          fail(
-            "E_MIRROR_DRIFT",
-            `report-only candidate pair ${pair.a} ≠ ${pair.b} absent from AGENTS.md authority`
-          );
-        }
-      }
-    }
     const prov = mirror.provenance && typeof mirror.provenance === "object"
       ? mirror.provenance
       : null;
-    const sources = prov && Array.isArray(prov.sources) ? prov.sources : [];
-    for (const src of sources) {
-      if (!src || typeof src !== "object") continue;
-      const role = src.role;
-      const path = typeof src.path === "string" ? src.path : "";
-      if (PROVENANCE_FORBIDDEN_ROLES.has(role) || role === "canonical-doctrine") {
-        fail(
-          "E_PROVENANCE_ROLE",
-          `report-only candidate provenance labels ${path || "a source"} ${role} (non-normative docs must not be canonical-doctrine)`
-        );
-      }
-      if (path.startsWith("docs/") && /canonical/i.test(String(role || ""))) {
-        fail(
-          "E_PROVENANCE_ROLE",
-          `report-only candidate provenance labels non-normative ${path} as ${role}`
-        );
-      }
-      if (role && !PROVENANCE_ALLOWED_ROLES.has(role)) {
-        fail(
-          "E_PROVENANCE_ROLE",
-          `report-only candidate provenance role unknown: ${role}`
-        );
-      }
+    const provSources = prov && Array.isArray(prov.sources) ? prov.sources : [];
+    for (const f of provenanceRoleFindings(provSources)) {
+      fail(f.code, f.message);
     }
   }
 }
@@ -1056,17 +878,23 @@ function checkRepoAuthorityClaims(rel, text) {
 const repoClaims = Array.isArray(cfg.forbiddenRepoClaims)
   ? cfg.forbiddenRepoClaims
   : [];
+function tryAuthorityText(rel) {
+  try {
+    return readAuthorityText(rootId, rel);
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (/cannot open|no such file|ENOENT/i.test(msg) && !/escape|unsafe|absolute|malformed/i.test(msg)) {
+      return null;
+    }
+    fail("E_PATH", `${rel}: ${msg}`);
+    return null;
+  }
+}
+
 for (const claim of repoClaims) {
   if (!claim || typeof claim.path !== "string") continue;
-  let abs;
-  try {
-    abs = resolveUnderRoot(repoRoot, claim.path);
-  } catch (e) {
-    fail("E_PATH", `${claim.path}: ${e.message}`);
-    continue;
-  }
-  if (!existsSync(abs)) continue;
-  const text = readFileSync(abs, "utf8");
+  const text = tryAuthorityText(claim.path);
+  if (text == null) continue;
   const patterns = Array.isArray(claim.patterns) ? claim.patterns : [];
   for (const p of patterns) {
     if (text.includes(p)) {
@@ -1080,15 +908,10 @@ for (const claim of repoClaims) {
 }
 
 for (const extra of ["README.md", "HOW-IT-WORKS.md", "adapters/goose/README.md"]) {
-  let abs;
-  try {
-    abs = resolveUnderRoot(repoRoot, extra);
-  } catch {
-    continue;
-  }
-  if (!existsSync(abs)) continue;
   if (repoClaims.some((c) => c && c.path === extra)) continue;
-  checkRepoAuthorityClaims(extra, readFileSync(abs, "utf8"));
+  const text = tryAuthorityText(extra);
+  if (text == null) continue;
+  checkRepoAuthorityClaims(extra, text);
 }
 
 const docsMarker = cfg.docsNonNormativeMarker || "**Authority:** Non-normative";
@@ -1108,21 +931,20 @@ const checkedPlaybooks = [];
 if (!parsed.measureOnly) {
   const docsToCheck = [];
   for (const g of docsGlobs) {
-    if (g === "docs/**/*.md") walkMdFiles(repoRoot, "docs", docsToCheck);
+    if (g === "docs/**/*.md") walkMdFiles(rootId, "docs", docsToCheck);
     else fail("E_GLOB", `unsupported docsNonNormativeGlob: ${g}`);
   }
   const seenDocs = new Set();
   for (const rel of docsToCheck) {
     if (seenDocs.has(rel)) continue;
     seenDocs.add(rel);
-    let abs;
+    let text;
     try {
-      abs = resolveUnderRoot(repoRoot, rel);
+      text = readAuthorityText(rootId, rel);
     } catch (e) {
       fail("E_PATH", `${rel}: ${e.message}`);
       continue;
     }
-    const text = readFileSync(abs, "utf8");
     if (!text.includes(docsMarker)) {
       fail("E_BANNER", `${rel} missing non-normative marker`);
     } else {
@@ -1139,21 +961,20 @@ if (!parsed.measureOnly) {
 
   const playbooksToCheck = [];
   for (const g of playbookGlobs) {
-    if (g === "playbooks/**/*.md") walkMdFiles(repoRoot, "playbooks", playbooksToCheck);
+    if (g === "playbooks/**/*.md") walkMdFiles(rootId, "playbooks", playbooksToCheck);
     else fail("E_GLOB", `unsupported playbookGlob: ${g}`);
   }
   const seenPb = new Set();
   for (const rel of playbooksToCheck) {
     if (seenPb.has(rel)) continue;
     seenPb.add(rel);
-    let abs;
+    let text;
     try {
-      abs = resolveUnderRoot(repoRoot, rel);
+      text = readAuthorityText(rootId, rel);
     } catch (e) {
       fail("E_PATH", `${rel}: ${e.message}`);
       continue;
     }
-    const text = readFileSync(abs, "utf8");
     const fm = parseFrontmatter(text);
     const hasOperative = fm.hasFrontmatter && frontmatterHasOperativeKeys(fm.raw);
     const hasDispatch = text.includes(playbookDispatchMarker);
@@ -1185,23 +1006,6 @@ if (!parsed.measureOnly) {
         `${rel} asserts docs as stop/role authority (${hit.id}): ${hit.snippet}`
       );
     }
-
-    const stem = playbookStem(rel);
-    if (
-      roleContracts &&
-      roleContracts.roles &&
-      Object.prototype.hasOwnProperty.call(roleContracts.roles, stem)
-    ) {
-      const authRole = roleContracts.roles[stem];
-      const buckets = ["outputs", "gates", "forbidden"];
-      for (const bucket of buckets) {
-        const authItems = Array.isArray(authRole[bucket]) ? authRole[bucket] : [];
-        const pbItems = parseYamlList(fm.raw, bucket);
-        for (const diff of diffObligationLists(stem, bucket, authItems, pbItems)) {
-          fail(diff.code, diff.message);
-        }
-      }
-    }
   }
 
   if (roleContracts && roleContracts.roles) {
@@ -1218,6 +1022,67 @@ if (!parsed.measureOnly) {
             `role-contracts ${role} missing ${bucket} list`
           );
         }
+      }
+      const loaded = effectiveRoleTexts.get(role);
+      if (!loaded) continue;
+      const fm = parseFrontmatter(loaded.text);
+      const pbBuckets = {
+        outputs: parseYamlList(fm.raw, "outputs"),
+        gates: parseYamlList(fm.raw, "gates"),
+        forbidden: parseYamlList(fm.raw, "forbidden"),
+      };
+      const authBuckets = {
+        outputs: Array.isArray(rec.outputs) ? rec.outputs : [],
+        gates: Array.isArray(rec.gates) ? rec.gates : [],
+        forbidden: Array.isArray(rec.forbidden) ? rec.forbidden : [],
+      };
+      for (const diff of diffObligationMatrix(role, authBuckets, pbBuckets)) {
+        fail(diff.code, diff.message);
+      }
+    }
+  }
+
+  const jobsObj =
+    jobContracts && jobContracts.jobs && typeof jobContracts.jobs === "object"
+      ? jobContracts.jobs
+      : null;
+  if (!jobsObj) {
+    fail(
+      "E_JOB_CONTRACTS",
+      `${jobContractsRel} missing jobs object (activated per-job contract)`
+    );
+  } else {
+    const jobIds = Array.isArray(jobPromptList)
+      ? jobPromptList.map((p) => playbookStem(p))
+      : [];
+    for (const job of jobIds) {
+      if (!Object.prototype.hasOwnProperty.call(jobsObj, job)) {
+        fail("E_JOB_CONTRACTS", `job-contracts missing job ${job}`);
+        continue;
+      }
+      const rec = jobsObj[job];
+      for (const bucket of ["outputs", "gates", "forbidden"]) {
+        if (!Array.isArray(rec[bucket]) || rec[bucket].length === 0) {
+          fail("E_JOB_CONTRACTS", `job-contracts ${job} missing ${bucket} list`);
+        }
+      }
+      const loaded = jobTexts.get(job);
+      if (!loaded) continue;
+      const fm = parseFrontmatter(loaded.text);
+      const pbBuckets = {
+        outputs: parseYamlList(fm.raw, "outputs"),
+        gates: parseYamlList(fm.raw, "gates"),
+        forbidden: parseYamlList(fm.raw, "forbidden"),
+      };
+      const authBuckets = {
+        outputs: Array.isArray(rec.outputs) ? rec.outputs : [],
+        gates: Array.isArray(rec.gates) ? rec.gates : [],
+        forbidden: Array.isArray(rec.forbidden) ? rec.forbidden : [],
+      };
+      for (const diff of remapRoleCodesToJob(
+        diffObligationMatrix(job, authBuckets, pbBuckets)
+      )) {
+        fail(diff.code, diff.message);
       }
     }
   }
@@ -1267,6 +1132,7 @@ const report = {
     whenUnnamed: true,
   },
   roleContractsPath: roleContractsRel,
+  jobContractsPath: jobContractsRel,
   findings,
   ok: findings.length === 0,
 };
@@ -1286,8 +1152,10 @@ function printText() {
     for (const f of dispatchPrompts) {
       const label =
         f.kind === "role" ? `role:${f.role}` : `job:${f.job}`;
+      const effective =
+        f.effective === "local-override" ? " local-override" : "";
       lines.push(
-        `    ${f.path}: ${f.bytes} bytes (~${f.approxTokens} tokens) [${label}]`
+        `    ${f.path}: ${f.bytes} bytes (~${f.approxTokens} tokens) [${label}${effective}]`
       );
     }
     lines.push(

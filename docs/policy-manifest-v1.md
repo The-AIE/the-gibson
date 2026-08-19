@@ -33,7 +33,7 @@ The candidate carries:
 - stable **schema id / schema version**, **manifest id / version**
 - **status** `candidate`, **authority** `report-only`, **activated** `false`
 - **generatorVersion** and **validatorVersion**
-- **source path + sha256 digest** provenance: `AGENTS.md` is `human-readable-contract`; non-normative `docs/` pins are `explanatory-history` (never `canonical-doctrine`)
+- **source path + sha256 digest** provenance: exactly one `AGENTS.md` source with role `human-readable-contract`; every `docs/**` pin is `explanatory-history` (never `canonical-doctrine` or `compatibility-doctrine`)
 - a documented **compatibility** policy (semver major break; namespaced forks)
 
 It encodes, without adding/removing/tightening/loosening approved semantics
@@ -210,7 +210,7 @@ The pure validator refuses (non-exhaustive):
   frozen root immediately before and after final schema/provenance validation
   and propagates every relevant error — all `E_PROVENANCE_*` findings **and**
   `E_SCHEMA_LOAD` / root-identity bind failures. A narrow `E_PROVENANCE_*`-only
-  filter would discard root disappearance after the four doctrine reads and
+  filter would discard root disappearance after the AGENTS.md doctrine read and
   falsely emit `I_CONSISTENCY_OK`
 - no approve-then-reopen path API: hashing and loads require root-relative
   containment and verified bytes from the opened fd
@@ -219,13 +219,14 @@ The pure validator refuses (non-exhaustive):
 
 ## Consistency check (report-only)
 
-`check-consistency` compares selected live doctrine identifiers to the
-candidate:
+`check-consistency` compares selected live enumerations in `AGENTS.md` to the
+candidate (never falling back to explanatory `docs/`):
 
-- G1–G16 markers in `docs/14-human-gates.md`
-- role `##` headings in `docs/03-roles.md`
-- Tier A/B/C markers under Risk tiers in `docs/06-quality-gates.md`
-- Stage headings in `docs/02-sdlc-pipeline.md`
+- G1–G16 closed-list bullets in `AGENTS.md` (exact multiplicity)
+- role enumeration in `AGENTS.md`
+- Tier A/B/C table rows in `AGENTS.md`
+- Ten stages backtick list in `AGENTS.md`
+- forbidden role pairs in `AGENTS.md`
 - provenance digests vs live file bytes
 
 It does **not** rewrite doctrine and does **not** change existing CI enforcement
@@ -254,7 +255,7 @@ The focused suite proves the gate fails when a fixture:
 - replaces/renames the actual canonical root directory between reads inside one
   `checkDoctrineConsistency` operation (frozen root identity refuses the new
   inode at the same pathname)
-- replaces the root **after the four doctrine reads / at final revalidation**
+- replaces the root **after the AGENTS.md doctrine read / at final revalidation**
   and proves an error with no `I_CONSISTENCY_OK` (early mid-read replacement
   alone is not sufficient); a mutation that reverts to a narrow
   `E_PROVENANCE_*` filter reproduces the false-OK defect

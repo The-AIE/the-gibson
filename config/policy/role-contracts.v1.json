@@ -3,7 +3,7 @@
   "schemaVersion": "1.0.0",
   "authority": "activated",
   "designatedBy": "AGENTS.md",
-  "note": "Authoritative per-role outputs, gates, and prohibitions. Playbook frontmatter is a routing mirror of this file and must not add, drop, rename, weaken, or negate these obligations. This file is not the report-only #164 candidate.",
+  "note": "Authoritative per-role and per-job outputs, gates, and prohibitions. Playbook frontmatter is a routing mirror of this file and must not add, drop, rename, weaken, or negate these obligations. A job prompt may add job-specific procedure in the body. This file is not the report-only #164 candidate.",
   "roles": {
     "planner": {
       "outputs": [
@@ -166,6 +166,121 @@
         "editing lessons others wrote (append only)",
         "letting a twice-failure pass without a lesson",
         "silent skips of the retro sweep"
+      ]
+    }
+  },
+  "jobs": {
+    "adopt": {
+      "outputs": [
+        "adoption report (harnessability grade + fix-list)",
+        "PR(s) installing AGENTS section, labels, CI, Playwright scaffold, active-work.md",
+        "baseline failure record + burn-down issues",
+        "canary Tier A issue per runtime"
+      ],
+      "gates": [
+        "every human ask uses the Ask Contract (what / does / why / risks)",
+        "no irreversible install without approval (PRs, not force-push)",
+        "low harnessability → affordance issues first, not full autonomy promises"
+      ],
+      "forbidden": [
+        "transplanting CI without calibration",
+        "claiming \"adopted\" before Tier A flows end-to-end with zero human touches"
+      ]
+    },
+    "delivery-control": {
+      "outputs": [
+        "audit report (protection + branch-model truth + drift)",
+        "optional harden of branch protection / Production environment",
+        "optional promote / hotfix / forward-port actions (after confirm)"
+      ],
+      "gates": [
+        "audit is always first and read-only",
+        "harden/promote/hotfix require dry-run then explicit human apply",
+        "secret rotation never performed (G4 handoff only)",
+        "force-push never"
+      ],
+      "forbidden": [
+        "rotating NEON_API_KEY or any long-lived secret",
+        "silent --apply without dry-run shown to the operator",
+        "force-push to main / release / production refs",
+        "promote during freeze without hotfix discipline"
+      ]
+    },
+    "deploy-audit": {
+      "outputs": [
+        "reports/deploy-audit-<date>.md scorecard",
+        "top 5 optimizations ranked by impact÷effort",
+        "optimization issues filed (docs/04) when in write mode"
+      ],
+      "gates": [
+        "inspect is read-only by default",
+        "every optimization PR must carry before/after metrics (docs/17)",
+        "no-regression: worsening a budgeted metric → REQUEST_CHANGES"
+      ],
+      "forbidden": [
+        "inventing field vitals when Analytics unavailable",
+        "optimizing without a measurement plan"
+      ]
+    },
+    "dogfood-overnight": {
+      "outputs": [
+        "Preflight green from scripts/dogfood-prep.sh",
+        "Overnight loop journal under <repo>/gibson/journal.md",
+        "Evidence copy under memory/dogfood/ after review",
+        "At least one merged PR (done criterion for issue #96)"
+      ],
+      "gates": [
+        "Preflight must pass before --run",
+        "--run requires --confirm YES",
+        "Kill switch: touch <repo>/gibson/HALT or GIBSON_HALT=1",
+        "Do not dogfood parked Goose live-path issues (#28/#33/#36) without lab approval"
+      ],
+      "forbidden": [
+        "Unattended --run without confirm",
+        "Publishing marketing artifacts (docs/14)",
+        "Force-push, secrets, production destroy"
+      ]
+    },
+    "loop-step": {
+      "outputs": [
+        "hat-specific artifacts (PR, tests, verdict, eval, merge, lesson)",
+        "updated gibson/loop-state.md (next hat / next action / round count)",
+        "append to gibson/journal.md",
+        "MC heartbeat when configured"
+      ],
+      "gates": [
+        "kill switch checked by driver before this prompt runs (docs/11)",
+        "fresh context per hat — do not assume prior conversation memory",
+        "bounded retries: per-tier fix→review caps in `config/review-round-caps.json` (A=1 / B=2 / C=3 by default) then park + human; the driver enforces this",
+        "human-gated work is queued, not force-merged"
+      ],
+      "forbidden": [
+        "wearing multiple hats in one context (driver must reset)",
+        "self-APPROVE of code you just built in the same context without file re-read",
+        "ignoring error budget / park rules"
+      ]
+    },
+    "token-efficiency": {
+      "outputs": [
+        "graded dispatch (G / S / F) with chosen runner and escalate path",
+        "bounded run (retries, error/stale budgets, stop or park decision)",
+        "cost-ledger event(s) and optional summarize rollup when measured",
+        "plain-language status: continue / reroute / stop with quality evidence"
+      ],
+      "gates": [
+        "flat-rate-first for volume; metered only for judgment that needs it (docs/15)",
+        "never grade below the task's minimum capability floor",
+        "green gate, exact-head CI, cross-vendor review, and deploy/runtime verification stay absolute (docs/06, docs/12, docs/20)",
+        "no-model checks stay no-model (scripts/*, ci/*)",
+        "missing usage stays unknown — never invent tokens or dollars"
+      ],
+      "forbidden": [
+        "weakening gates, truncating required evidence, or reusing stale reviews",
+        "routing Tier B/C evaluation below S, or Tier C adversarial below F",
+        "changing billing, plan settings, keys, env secrets, or provider routing config",
+        "inventing fixed dollar prices or assuming a vendor's current plan rate",
+        "treating flat-rate / subscription usage as free or unlimited",
+        "unbounded coordinators / infinite retry on the same failure"
       ]
     }
   }

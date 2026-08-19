@@ -145,12 +145,55 @@
                 "enum": [
                   "human-readable-contract",
                   "explanatory-history",
-                  "compatibility-doctrine",
                   "supporting"
                 ],
-                "description": "Provenance role for the file this candidate was encoded from. `human-readable-contract` is AGENTS.md. `explanatory-history` is a non-normative docs/ pin. Never `canonical-doctrine`: docs/ is not authority."
+                "description": "Provenance role. `human-readable-contract` is bound to AGENTS.md only. Every docs/** pin is `explanatory-history`. `supporting` is for non-doc supporting files. `compatibility-doctrine` is retired."
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": {
+                    "path": { "const": "AGENTS.md" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "role": { "const": "human-readable-contract" }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": {
+                    "path": { "pattern": "^docs/" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "role": { "const": "explanatory-history" }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "type": "object",
+                  "required": ["role"],
+                  "properties": {
+                    "role": { "const": "human-readable-contract" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "path": { "const": "AGENTS.md" }
+                  }
+                }
+              }
+            ]
           }
         }
       }
