@@ -126,3 +126,21 @@ before the amendment was merged or any arm executed:
 Codex independently confirmed: all twelve merge SHAs exist, every base SHA is exactly
 its merge commit's first parent, retained arms match v1, the shuffle reproduces
 exactly, balance is 6/6.
+
+### r2 → r3 (same day, second adversarial pass)
+
+Codex FAILED r2 on two residual findings; both fixed before merge:
+
+1. **Leakage recipe was still sampled, not total** (checked reachable count plus
+   absence of one named object; setup not fail-closed; remote removal unasserted).
+   → Replaced with a `set -euo pipefail` block and a **total object census**: the
+   scratch store must equal the base commit's reachable closure exactly, so any
+   unreachable later commit, tree, or blob fails the run. Adversarially verified by
+   smuggling a later-history object into a test scratch store — the census catches it.
+2. **"Replayed in both senses" read as a 24-run crossover.** → Reworded to what the
+   ledger always encoded: each task runs once in its assigned arm, twelve runs, 6/6,
+   between-task randomized as registered; `cos#1220`/`cos#1313` harness measurements
+   come from fresh replays rather than their historical traversals.
+
+Codex confirmed in the same pass: eligibility, the restored raw-arm test gate, and the
+reproducibility scoping are resolved; the SHA ledger is byte-identical and re-verified.
