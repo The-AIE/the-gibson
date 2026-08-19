@@ -1,5 +1,8 @@
 # Gibson, Millwright & Chatterbuilt — Positioning & Portfolio Fit
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > STATUS: names DECIDED (Gibson, Millwright). Monetization model DECIDED (open core engine +
 > commercial bundle). Open questions remain `OPEN`.
 

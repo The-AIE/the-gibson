@@ -1,5 +1,8 @@
 # Gibson — Red-Team Module
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 Red-team is **one playbook on Gibson, not Gibson's identity**. Gibson is a portable SDLC
 harness; this playbook is the adversarial audit capability it can run: a repeatable protocol
 you point at an app to find security, auth, payment, PII/consent, and business-logic flaws

@@ -1,0 +1,103 @@
+{
+  "schemaId": "gibson.mandatory-read-chain.v1",
+  "schemaVersion": "1.0.0",
+  "authority": "AGENTS.md is the sole mandatory human-readable contract for commit/PR/merge behavior. This file is the machine-readable closed set, byte budget, and token proxy for that chain.",
+  "mandatoryFiles": ["AGENTS.md"],
+  "allowedMandatoryFiles": ["AGENTS.md"],
+  "sessionStartNotBudgeted": [
+    "local/AGENTS.local.md",
+    "<target>/AGENTS.md",
+    "memory/LESSONS.md (tag-filtered consult; attested, not full-file ingest)"
+  ],
+  "byteBudget": {
+    "AGENTS.md": 20480,
+    "mandatoryChain": 20480
+  },
+  "tokenProxy": {
+    "id": "utf8-bytes-div-4",
+    "formula": "ceil(utf8_bytes / 4)",
+    "note": "Reproducible approximation of model tokens from UTF-8 bytes. This repo had no prior mandatory-read token proxy; architecture-fitness 'tokens' count control-flow keywords and are a different metric."
+  },
+  "machineCanonical": {
+    "humanGates": "config/policy/candidates/gibson-core-v1.candidate.json",
+    "roles": "config/policy/candidates/gibson-core-v1.candidate.json",
+    "riskTiers": "config/policy/candidates/gibson-core-v1.candidate.json",
+    "workflowStages": "config/policy/candidates/gibson-core-v1.candidate.json",
+    "forbiddenRolePairs": "config/policy/candidates/gibson-core-v1.candidate.json",
+    "reviewRoundCaps": "config/review-round-caps.json",
+    "testIntegrity": "scripts/test-integrity.mjs",
+    "claimOverlap": "scripts/scope-overlap.mjs",
+    "greenGate": "scripts/gate.sh",
+    "dcoHook": "scripts/setup-hooks.sh",
+    "exactHeadRelease": "scripts/release-claim.sh"
+  },
+  "requiredMachineSourcePaths": [
+    "config/policy/candidates/gibson-core-v1.candidate.json",
+    "config/review-round-caps.json",
+    "scripts/test-integrity.mjs",
+    "scripts/scope-overlap.mjs",
+    "scripts/gate.sh",
+    "scripts/setup-hooks.sh",
+    "scripts/release-claim.sh",
+    "config/policy/mandatory-read-chain.v1.json"
+  ],
+  "requiredRulePatterns": [
+    "sole mandatory human-readable",
+    "on-demand and non-normative",
+    "One issue = one claim = one worktree = one branch",
+    "canonical checkout",
+    "generate",
+    "typecheck",
+    "zero new failures",
+    "test-integrity",
+    "Never grade your own homework",
+    "exact committed head SHA",
+    "Signed-off-by",
+    "Acceptance criteria are the contract",
+    "Tier C is sacred",
+    "failures verbatim",
+    "memory/LESSONS.md",
+    "release-claim.sh",
+    "What I'm asking",
+    "What it does",
+    "Why it should be done",
+    "The risks",
+    "additive-only",
+    "Max **3**",
+    "agent-claimed",
+    "VERDICT: APPROVE",
+    "fail closed",
+    "Ask Contract"
+  ],
+  "forbiddenContractPatterns": [
+    "Complete list with rationale in `docs/14-human-gates.md`",
+    "Roles and their contracts are in `docs/03-roles.md`",
+    "Stage rules: `docs/02-sdlc-pipeline.md`",
+    "the full presentation rules are `docs/16-nontechnical-operation.md`"
+  ],
+  "nonNormativeGlobs": ["docs/**/*.md", "playbooks/**/*.md"],
+  "nonNormativeMarker": "**Authority:** Non-normative",
+  "onDemandSectionHeading": "On-demand (non-normative)",
+  "policyManifestPath": "config/policy/candidates/gibson-core-v1.candidate.json",
+  "preChangeAt": {
+    "commit": "dcca0c18d39488d3a18842901a3d46efee0e280b",
+    "impliedMandatoryFiles": [
+      "AGENTS.md",
+      "docs/02-sdlc-pipeline.md",
+      "docs/03-roles.md",
+      "docs/05-concurrency.md",
+      "docs/06-quality-gates.md",
+      "docs/09-memory-and-self-improvement.md",
+      "docs/11-solo-loop.md",
+      "docs/14-human-gates.md",
+      "docs/16-nontechnical-operation.md",
+      "docs/18-fork-and-upstream.md",
+      "docs/23-delivery-control.md",
+      "playbooks/delivery-control.md"
+    ],
+    "impliedMandatoryBytes": 125317,
+    "lessonsBytes": 66857,
+    "agentsBytes": 7404,
+    "note": "Pre-change implied mandatory chain is the files AGENTS.md treated as binding by unguarded 'see docs/N' pointers, measured at the exact branch point. memory/LESSONS.md is reported separately because Law 1 required a consult; docs/09 already specified tag-filter rather than full-file ingest."
+  }
+}

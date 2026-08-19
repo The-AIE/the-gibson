@@ -47,6 +47,9 @@ sources:
 
 # Token efficiency — route, bound, measure, preserve quality
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Spend the *right* amount of AI attention — not the least,
 > not the most. Use cheaper pools for bulk work that sensors catch, save stronger
 > minds for judgment, measure what you used, and never cut corners on tests or

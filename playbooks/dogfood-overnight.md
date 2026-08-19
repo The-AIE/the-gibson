@@ -28,6 +28,9 @@ sources:
 
 # Overnight dogfood — operator playbook (#96)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** run the fleet on itself overnight, with a kill switch
 > and a morning review. This is how we prove the harness, not a demo slide.
 

@@ -6,6 +6,9 @@ nav_order: 1
 
 # 01 — Design Principles
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This chapter is the "why" behind every rule. Each rule comes
 > from a real mistake or a proven idea. When two rules disagree, you follow the one that
 > better protects people and the software.

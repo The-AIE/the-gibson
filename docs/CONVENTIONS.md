@@ -5,6 +5,9 @@ nav_exclude: true
 
 # The Gibson — Code & Doc Conventions
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 **Status:** Adopted 2026-08-12 (#190). Retrofit batches in the appendix are dispatched separately; a rule is enforced only after its named batch and sensor merge.
 **Audience:** Every agent and human changing this repo. Written to be executable by a smaller model: each rule states the target requirement and the existing in-repo pattern to copy; the appendix routes enforcement work and owner decisions.
 **Origin:** 2026-08-12 three-lens quality review (scripts A−, doc-system B−, CI/templates/security B−). The repo's defining defect is its own lesson system pointed inward: lessons get filed with discipline but are not consistently applied to Gibson's shipped artifacts. The review found missing concurrency controls in shipped CI templates and silent-skip patterns in `ci/security.yml` and `ci/ux-eval.yml`. Flagship files (`ci/gibson-gate.yml`, `scripts/tests/run-all.sh`, `scripts/formal-review.sh`, `docs/05-concurrency.md`) already demonstrate parts of the target; these conventions make those patterns the floor.
@@ -70,7 +73,7 @@ Markdown is this repo's code. It gets sensors like code does. At the review snap
 - **6.2 Deprecated-mechanism list.** A checked-in `.gibson-deprecated` file of `pattern → replacement + lesson`, sensor-enforced; first entry `docs/active-work.md` → `docs/claims/issue-<N>-<slug>.md` (L-023), with `docs/05-concurrency.md` and legacy-read code exempted.
 - **6.3 Backtick-path check.** Every `` `docs/…` ``/`playbooks/…`/`scripts/…`/`skills/…`/`templates/…`/`ci/…` path quoted in markdown must exist, with a checked-in allowlist for target-repo paths (`docs/active-work.md`, `docs/claims/*`, `gibson/*`, `local/*`). The review snapshot found stale backticked filenames even though ordinary Markdown links resolved; Batch C fixes them with the sensor.
 - **6.4 Index completeness.** `docs/00-INDEX.md` names every `docs/**/*.md`; `playbooks/README.md` every playbook. Stale counts ("the 19 design chapters" — there are 27) die with this sensor.
-- **6.5 Loadability budget.** Files in the routine agent load set (`AGENTS.md`, `playbooks/*.md`, `skills/*/SKILL.md`) fail CI over a declared byte budget. The large `memory/LESSONS.md` ledger cannot be a routine mandatory full read without an index (see 7.3).
+- **6.5 Loadability budget.** Files in the routine agent load set (`AGENTS.md`, `playbooks/*.md`, `skills/*/SKILL.md`) fail CI over a declared byte budget. The large `memory/LESSONS.md` ledger cannot be a routine mandatory full read without an index (see 7.3). **Live for AGENTS.md (#208):** `scripts/contract-authority.mjs` plus `config/policy/mandatory-read-chain.v1.json` — `AGENTS.md` is the sole mandatory human-readable contract; playbooks and skills remain on-demand.
 - **6.6 Adoption checklists install everything the doctrine mandates.** `QUICKSTART.md`'s manual path currently omits `templates/target-repo/MEMORY.md`, which `docs/09-memory-and-self-improvement.md` and `docs/24-agent-memory-conventions.md` make mandatory.
 
 ## 7. The lesson ledger (`memory/LESSONS.md`)

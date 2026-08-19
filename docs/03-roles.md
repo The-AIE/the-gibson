@@ -6,6 +6,9 @@ nav_order: 3
 
 # 03 — The Development Team (Roles)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** The crew has nine jobs — planner, builder, tester, reviewer,
 > and more. A job is a list of what you may and may not do, not a brand of AI. Any AI
 > can wear any hat if it follows the contract for that job.

@@ -33,6 +33,9 @@ sources:
 
 # Solo loop step — parameterized dispatch
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 You are running **one hat** of the solo loop in a **fresh context**. State lives in
 files only. Read `{{loop_state}}` and execute exactly the hat `{{hat}}`.
 

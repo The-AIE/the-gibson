@@ -6,6 +6,9 @@ nav_order: 22
 
 # 22 — The Cloud Supervisor: Devin as Reviewer and Merger
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** A cheap, fast agent does the building on your own machine
 > all day. When a piece of work is finished, it is handed to one always-available
 > cloud agent that checks the work, puts it up on GitHub, waits for the tests, and

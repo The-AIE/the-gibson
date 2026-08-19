@@ -6,6 +6,9 @@ nav_order: 19
 
 # 19 — Productization: Chatterbuilt Foreman, CodeWright & the Guided-Setup MCP
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This chapter explains the product names and how the free
 > open-source toolkit relates to the paid guided experience. It is the business and
 > product map, not day-to-day operator steps.

@@ -6,6 +6,9 @@ nav_order: 5
 
 # 05 — Concurrency: Worktrees, Claims, Hot Files, Lanes
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** When several agents work at once, they must not step on each
 > other. Each one gets its own private copy of the project, claims its task out loud,
 > and stays out of files another agent is already changing.

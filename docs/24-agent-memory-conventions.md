@@ -6,6 +6,9 @@ nav_order: 24
 
 # 24 — AGENTS.md and shared MEMORY conventions
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Every project gets two simple text files agents read and
 > update. One is the rulebook (`AGENTS.md`). One is the shared notebook of lessons
 > (`MEMORY.md` or `memory/`). Updating the notebook does not need a full test run.

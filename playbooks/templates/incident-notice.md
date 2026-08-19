@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Incident notice
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 ```
 WHAT HAPPENED: {{one_sentence_plain_story}}
 IMPACT:        {{who_was_affected_for_how_long}}
