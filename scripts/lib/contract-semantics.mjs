@@ -342,13 +342,664 @@ export function extractNumberedItems(sectionText) {
   return out;
 }
 
+export const EXPECTED_GATE_IDS = Array.from({ length: 16 }, (_, i) => `G${i + 1}`);
+export const EXPECTED_ROLES = [
+  "planner",
+  "decomposer",
+  "builder",
+  "test-engineer",
+  "reviewer",
+  "ux-evaluator",
+  "security",
+  "release",
+  "historian",
+];
+export const EXPECTED_TIERS = ["A", "B", "C"];
+export const EXPECTED_STAGES = [
+  "PLAN",
+  "DECOMPOSE",
+  "BUILD",
+  "TEST",
+  "REVIEW",
+  "UX-EVAL",
+  "SECURITY",
+  "MERGE",
+  "DEPLOY+VERIFY",
+  "RETRO",
+];
+export const EXPECTED_PAIRS = [
+  ["builder", "reviewer"],
+  ["builder", "ux-evaluator"],
+  ["reviewer", "ux-evaluator"],
+];
+export const EXPECTED_LENSES = [
+  "Correctness",
+  "Security",
+  "Consent / PII",
+  "Money",
+  "Performance",
+  "Maintainability",
+];
+export const EXPECTED_SECURITY_LAYERS = [
+  "Secrets",
+  "SAST",
+  "Supply chain",
+  "AuthZ matrix",
+  "DAST",
+  "Adversarial review",
+  "AI-surface / injection review",
+  "Runtime posture",
+];
+export const EXPECTED_ASK_FIELDS = [
+  "What I'm asking",
+  "What it does",
+  "Why it should be done",
+  "The risks",
+];
+export const EXPECTED_DELIVERY_STEPS = ["audit", "dry-run", "explicit human apply"];
+export const EXPECTED_SELF_MOD_CONTROLS = [
+  "human gates",
+  "Tier definitions",
+  "hard-fail security layers",
+];
+
+const GATE_ENTRY_RE = /^[ \t]*- \*\*(G\d+)\*\*(?:[ \t]*⛔)?[ \t]*—[ \t]*(.+)$/gm;
+const ANY_GATE_ID_RE = /\*\*(G\d+)\*\*/g;
+
+/**
+ * Structural closed-list parse of human-gate bullets. Multiplicity is
+ * preserved; unexpected IDs such as G17 are visible; duplicates are not
+ * collapsed. Only `- **G<digits>** — summary` list entries count.
+ */
+export function parseHumanGateEntries(agentsText) {
+  const section = extractSection(agentsText, "Human gates (the ONLY reasons to stop)");
+  const hay = section || agentsText;
+  const entries = [];
+  let m;
+  const re = new RegExp(GATE_ENTRY_RE.source, "gm");
+  while ((m = re.exec(hay)) !== null) {
+    entries.push({
+      id: m[1],
+      summary: collapseWs(m[2]),
+      index: entries.length,
+    });
+  }
+  return entries;
+}
+
+/** First-wins Map for callers that only need id → summary. Prefer parseHumanGateEntries. */
 export function extractGateSummaries(agentsText) {
   const out = new Map();
-  const re = /\*\*(G(?:[1-9]|1[0-6]))\*\*\s*(?:⛔\s*)?—\s*([^\n]+)/g;
-  let m;
-  while ((m = re.exec(agentsText)) !== null) {
-    out.set(m[1], m[2].trim());
+  for (const e of parseHumanGateEntries(agentsText)) {
+    if (!out.has(e.id)) out.set(e.id, e.summary);
   }
+  return out;
+}
+
+export function parseRoleEnumeration(agentsText) {
+  const section = extractSection(agentsText, "Your role this session") || agentsText;
+  const marker = "You are exactly one of:";
+  const idx = section.indexOf(marker);
+  const slice = idx === -1 ? section : section.slice(idx + marker.length);
+  const rest = String(slice).replace(/^\s+/, "");
+  const para = rest.split(/\n\n/)[0] || "";
+  return [...para.matchAll(/`([a-z][a-z0-9-]*)`/g)].map((x) => x[1]);
+}
+
+export function parseRiskTiers(agentsText) {
+  const rows = extractMarkdownTable(agentsText, ["Tier", "Definition", "Treatment"]);
+  return rows.map((r) => ({
+    id: String(r[0] || "")
+      .replace(/\*/g, "")
+      .trim(),
+    definition: collapseWs(r[1] || ""),
+    treatment: collapseWs(r[2] || ""),
+  }));
+}
+
+export function parseTenStagesList(agentsText) {
+  const m = /Ten stages\s*\(([\s\S]*?)\)/.exec(agentsText);
+  if (!m) return [];
+  return [...m[1].matchAll(/`([^`]+)`/g)].map((x) => x[1].trim()).filter(Boolean);
+}
+
+export function parseForbiddenPairs(agentsText) {
+  const section = extractSection(agentsText, "Your role this session") || agentsText;
+  const m = /\*\*Forbidden pairs[\s\S]*?(?:\n\n|$)/.exec(section);
+  const block = m ? m[0] : section;
+  const pairs = [...block.matchAll(/`([a-z-]+)`\s*≠\s*`([a-z-]+)`/g)].map((x) => ({
+    a: x[1],
+    b: x[2],
+  }));
+  const symmetric = /\(\s*symmetric\s*\)/i.test(block);
+  return { pairs, symmetric, block };
+}
+
+export function parseSecurityLayers(agentsText) {
+  const section = extractSection(agentsText, "Security layers (binding)");
+  if (!section) return [];
+  const flat = collapseWs(section);
+  const start = flat.search(/\d+\.\s+/);
+  const numbered = start >= 0 ? flat.slice(start) : flat;
+  const layers = [];
+  for (const part of numbered.split(/\s*·\s*/)) {
+    const m = /(\d+)\.\s+(.+)/.exec(part.trim());
+    if (!m) continue;
+    const raw = collapseWs(m[2]).replace(/[.;]+$/, "");
+    const name = collapseWs(raw.split(/\s+[—(]/)[0]);
+    layers.push({ n: Number(m[1]), name, raw });
+  }
+  return layers;
+}
+
+export function parseDeliveryControlSteps(agentsText) {
+  const section = extractSection(agentsText, "Delivery control (binding)");
+  if (!section) return { section: "", steps: [] };
+  const flat = collapseWs(section);
+  const steps = [];
+  for (const step of EXPECTED_DELIVERY_STEPS) {
+    if (new RegExp(`\\b${escapeRe(step)}\\b`, "i").test(flat)) steps.push(step);
+  }
+  const ordered = [];
+  const audit = /\baudit\b/i.exec(flat);
+  const dry = /\bdry-run\b/i.exec(flat);
+  const apply = /\bexplicit human apply\b/i.exec(flat);
+  if (audit) ordered.push({ step: "audit", index: audit.index });
+  if (dry) ordered.push({ step: "dry-run", index: dry.index });
+  if (apply) ordered.push({ step: "explicit human apply", index: apply.index });
+  ordered.sort((a, b) => a.index - b.index);
+  return { section, steps: ordered.map((s) => s.step), text: flat };
+}
+
+export function parseSelfModificationControls(agentsText) {
+  const section = extractSection(agentsText, "Self-modification bounds (binding)");
+  if (!section) return { section: "", controls: [], text: "" };
+  const flat = collapseWs(section);
+  const controls = EXPECTED_SELF_MOD_CONTROLS.filter((c) =>
+    new RegExp(escapeRe(c), "i").test(flat)
+  );
+  return { section, controls, text: flat };
+}
+
+function countMap(items) {
+  const m = new Map();
+  for (const x of items) m.set(x, (m.get(x) || 0) + 1);
+  return m;
+}
+
+function pairKey(a, b) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+/**
+ * Closed-sequence comparison: addition, omission, duplicate, rename.
+ * `unexpectedCode` is used for extras when the expected set is a closed ID list
+ * (gates); otherwise extras are ADDITION.
+ */
+export function diffClosedSequence(prefix, actual, expected, opts = {}) {
+  const findings = [];
+  const unexpectedCode = opts.unexpectedCode || `E_${prefix}_ADDITION`;
+  const actualCounts = countMap(actual);
+  const expectedCounts = countMap(expected);
+  const omitted = [];
+  const extra = [];
+  for (const id of expected) {
+    const got = actualCounts.get(id) || 0;
+    const want = expectedCounts.get(id) || 0;
+    if (got === 0 && !omitted.includes(id)) {
+      omitted.push(id);
+      findings.push({
+        code: `E_${prefix}_OMISSION`,
+        message: `${prefix.toLowerCase()} list omits ${id}`,
+        item: id,
+      });
+    }
+    if (got > want) {
+      findings.push({
+        code: `E_${prefix}_DUPLICATE`,
+        message: `${prefix.toLowerCase()} list duplicates ${id} (${got} times)`,
+        item: id,
+      });
+    }
+  }
+  for (const id of actual) {
+    if (!expectedCounts.has(id) && !extra.includes(id)) {
+      extra.push(id);
+      findings.push({
+        code: unexpectedCode,
+        message: `${prefix.toLowerCase()} list has unexpected ${id}`,
+        item: id,
+      });
+    }
+  }
+  if (opts.renameCode && omitted.length === 1 && extra.length === 1) {
+    return [
+      {
+        code: opts.renameCode,
+        message: `${prefix.toLowerCase()} ${omitted[0]} renamed to ${extra[0]}`,
+        item: omitted[0],
+        other: extra[0],
+      },
+      ...findings.filter(
+        (f) =>
+          f.code !== `E_${prefix}_OMISSION` &&
+          f.code !== unexpectedCode &&
+          f.code !== `E_${prefix}_ADDITION`
+      ),
+    ];
+  }
+  return findings;
+}
+
+export function diffGateClosedList(entries) {
+  const ids = entries.map((e) => e.id);
+  return diffClosedSequence("GATE", ids, EXPECTED_GATE_IDS, {
+    unexpectedCode: "E_GATE_UNEXPECTED",
+  });
+}
+
+export function diffGateSummariesAgainstCandidate(entries, candidateGates) {
+  const findings = [];
+  const candById = new Map();
+  const candIds = [];
+  for (const g of Array.isArray(candidateGates) ? candidateGates : []) {
+    if (!g || typeof g.id !== "string") continue;
+    candIds.push(g.id);
+    candById.set(g.id, g);
+  }
+  const byId = new Map();
+  for (const e of entries) {
+    if (!byId.has(e.id)) byId.set(e.id, e);
+  }
+  for (const id of EXPECTED_GATE_IDS) {
+    const entry = byId.get(id);
+    const cand = candById.get(id);
+    if (!entry || !cand) continue;
+    const summary = typeof cand.summary === "string" ? collapseWs(cand.summary) : "";
+    if (!summary) continue;
+    if (entry.summary === summary) continue;
+    const a = semanticShape(entry.summary, "gates");
+    const b = semanticShape(summary, "gates");
+    if (a.polarity !== b.polarity) {
+      findings.push({
+        code: "E_GATE_NEGATION",
+        message: `AGENTS.md ${id} summary polarity drifts from report-only candidate`,
+        item: id,
+      });
+    } else if (MODAL_RANK[a.modal] < MODAL_RANK[b.modal]) {
+      findings.push({
+        code: "E_GATE_WEAKENING",
+        message: `AGENTS.md ${id} summary modal weakened vs report-only candidate (${b.modal} → ${a.modal})`,
+        item: id,
+      });
+    } else if (MODAL_RANK[b.modal] < MODAL_RANK[a.modal]) {
+      findings.push({
+        code: "E_GATE_WEAKENING",
+        message: `report-only candidate ${id} summary modal weakened vs AGENTS.md (${a.modal} → ${b.modal})`,
+        item: id,
+      });
+    } else {
+      findings.push({
+        code: "E_MIRROR_DRIFT",
+        message: `report-only candidate ${id} summary drifts from AGENTS.md authority`,
+        item: id,
+      });
+    }
+  }
+  return findings;
+}
+
+export function diffForbiddenPairs(parsed, expectedPairs = EXPECTED_PAIRS) {
+  const findings = [];
+  const expected = new Set(expectedPairs.map(([a, b]) => pairKey(a, b)));
+  const actual = new Set();
+  const directed = [];
+  for (const p of parsed.pairs || []) {
+    const key = pairKey(p.a, p.b);
+    if (actual.has(key)) {
+      findings.push({
+        code: "E_PAIR_DUPLICATE",
+        message: `forbidden pair duplicated: ${p.a} ≠ ${p.b}`,
+        item: key,
+      });
+    }
+    actual.add(key);
+    directed.push(`${p.a}|${p.b}`);
+  }
+  for (const key of expected) {
+    if (!actual.has(key)) {
+      findings.push({
+        code: "E_PAIR_OMISSION",
+        message: `forbidden pair omitted: ${key.replace("|", " ≠ ")}`,
+        item: key,
+      });
+    }
+  }
+  for (const key of actual) {
+    if (!expected.has(key)) {
+      findings.push({
+        code: "E_PAIR_ADDITION",
+        message: `forbidden pair added: ${key.replace("|", " ≠ ")}`,
+        item: key,
+      });
+    }
+  }
+  if (parsed.pairs && parsed.pairs.length && parsed.symmetric === false) {
+    findings.push({
+      code: "E_PAIR_ASYMMETRY",
+      message: "forbidden pairs declaration is not marked symmetric",
+    });
+  }
+  return findings;
+}
+
+function sectionSentences(section) {
+  return String(section || "")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => collapseWs(s))
+    .filter((s) => s.length > 8);
+}
+
+function bestSentenceMatch(expectedText, section) {
+  const want = semanticShape(expectedText, "gates");
+  let best = null;
+  let bestScore = 0;
+  for (const s of sectionSentences(section)) {
+    const got = semanticShape(s, "gates");
+    const score = topicOverlap(want.tokens, got.tokens);
+    if (score > bestScore) {
+      bestScore = score;
+      best = { text: s, shape: got };
+    }
+  }
+  return bestScore >= 0.35 ? { ...best, score: bestScore, want } : null;
+}
+
+function localPolarityWindow(text, needle) {
+  const flat = collapseWs(text);
+  const idx = flat.toLowerCase().indexOf(String(needle).toLowerCase());
+  if (idx < 0) return null;
+  const before = flat.slice(Math.max(0, idx - 48), idx);
+  const clause = flat.slice(Math.max(0, idx - 48), Math.min(flat.length, idx + needle.length + 48));
+  const stripped = clause.replace(/\bnot just\b[\s\S]*/i, "");
+  return { before, clause: stripped, idx };
+}
+
+export function diffBindingPhrase(familyId, phrase, section, opts = {}) {
+  const findings = [];
+  const hit = localPolarityWindow(section || "", phrase);
+  if (!hit) {
+    findings.push({
+      code: "E_BINDING_FAMILY",
+      message: `AGENTS.md binding-family ${familyId} omits required statement: ${phrase}`,
+    });
+    return findings;
+  }
+  const before = hit.before.toLowerCase();
+  const clause = hit.clause.toLowerCase();
+  if (
+    /\b(never|not|no longer|without)\b/.test(before) ||
+    new RegExp(`\\b(never|not)\\s+${escapeRe(phrase.split(" ")[0])}`, "i").test(clause)
+  ) {
+    findings.push({
+      code: "E_BINDING_NEGATION",
+      message: `AGENTS.md binding-family ${familyId} negated around "${phrase}"`,
+    });
+  } else if (opts.requireMust !== false && /\b(optional|may|should)\b/.test(before)) {
+    findings.push({
+      code: "E_BINDING_WEAKENING",
+      message: `AGENTS.md binding-family ${familyId} weakened around "${phrase}"`,
+    });
+  }
+  return findings;
+}
+
+export function diffBindingSentence(familyId, expectedText, section) {
+  return diffBindingPhrase(familyId, expectedText, section);
+}
+
+export const BINDING_FAMILY_SENTENCES = {
+  "six-lens-review": ["file:line"],
+  "tier-c-adversarial-tests": ["adversarial cases required"],
+  "no-destructive-prod-testing": ["destructive production testing"],
+  "eight-security-layers": [
+    "hard-fail blocks merge/release",
+    "never destructive payloads against production",
+  ],
+  "self-modification-gates": ["themselves Tier C"],
+  "delivery-control": ["explicit human apply"],
+};
+
+/**
+ * Presence-only scans used to prove a mutant is green without the repaired
+ * structured check. These deliberately collapse duplicates and ignore extras
+ * outside the expected token set.
+ */
+export function legacyPresenceOnly(agentsText) {
+  const presentGates = new Set();
+  const re = /\*\*G([1-9]|1[0-6])\*\*/g;
+  let m;
+  while ((m = re.exec(agentsText)) !== null) presentGates.add(`G${m[1]}`);
+  const missingGates = EXPECTED_GATE_IDS.filter((id) => !presentGates.has(id));
+  const secFlat = collapseWs(
+    extractSection(agentsText, "Security layers (binding)") || agentsText
+  );
+  const missingLayers = EXPECTED_SECURITY_LAYERS.filter((l) => !secFlat.includes(l));
+  const delivery = extractSection(agentsText, "Delivery control (binding)") || "";
+  const selfMod = extractSection(agentsText, "Self-modification bounds (binding)") || "";
+  const pipeline = extractSection(agentsText, "The pipeline you are inside") || agentsText;
+  const missingStages = EXPECTED_STAGES.filter((s) => !pipeline.includes(s) && !agentsText.includes(s));
+  const tierSection = extractSection(agentsText, "Risk tiers") || agentsText;
+  const missingTiers = EXPECTED_TIERS.filter((t) => !new RegExp(`\\*\\*${t}\\*\\*`).test(tierSection));
+  const roleFlat = collapseWs(
+    extractSection(agentsText, "Your role this session") || agentsText
+  );
+  const missingPairs = EXPECTED_PAIRS.filter(
+    ([a, b]) => !roleFlat.includes("`" + a + "` ≠ `" + b + "`")
+  );
+  return {
+    missingGates,
+    missingLayers,
+    hasDeliveryTokens:
+      /\baudit\b/.test(delivery) &&
+      /\bdry-run\b/.test(delivery) &&
+      /explicit human apply/.test(delivery),
+    hasSelfModTokens:
+      /human gates/.test(selfMod) &&
+      /Tier definitions/.test(selfMod) &&
+      /hard-fail security layers/.test(selfMod),
+    missingStages,
+    missingTiers,
+    missingPairs,
+  };
+}
+
+export function structuredAgentsEnumerationFindings(agentsText, candidate) {
+  const findings = [];
+  const gates = parseHumanGateEntries(agentsText);
+  findings.push(...diffGateClosedList(gates));
+  if (candidate && Array.isArray(candidate.humanGates)) {
+    findings.push(...diffGateSummariesAgainstCandidate(gates, candidate.humanGates));
+    const candIds = candidate.humanGates
+      .map((g) => (g && g.id ? g.id : null))
+      .filter(Boolean);
+    for (const id of EXPECTED_GATE_IDS) {
+      if (!candIds.includes(id) && gates.some((g) => g.id === id)) {
+        findings.push({
+          code: "E_MIRROR_DRIFT",
+          message: `AGENTS.md has ${id} missing from report-only candidate mirror`,
+        });
+      }
+    }
+    for (const id of candIds) {
+      if (!EXPECTED_GATE_IDS.includes(id)) {
+        findings.push({
+          code: "E_MIRROR_DRIFT",
+          message: `report-only candidate has ${id} absent from AGENTS.md authority`,
+        });
+      }
+    }
+  }
+
+  const roles = parseRoleEnumeration(agentsText);
+  findings.push(
+    ...diffClosedSequence("ROLE_ENUM", roles, EXPECTED_ROLES, {
+      renameCode: "E_ROLE_ENUM_RENAME",
+      unexpectedCode: "E_ROLE_ENUM_ADDITION",
+    }).map((f) => {
+      if (f.code === "E_ROLE_ENUM_OMISSION") {
+        return { ...f, message: `AGENTS.md role enumeration omits ${f.item}` };
+      }
+      return f;
+    })
+  );
+
+  const tiers = parseRiskTiers(agentsText).map((t) => t.id);
+  findings.push(...diffClosedSequence("TIER", tiers, EXPECTED_TIERS));
+
+  const stages = parseTenStagesList(agentsText);
+  findings.push(...diffClosedSequence("STAGE", stages, EXPECTED_STAGES));
+
+  const pairs = parseForbiddenPairs(agentsText);
+  findings.push(...diffForbiddenPairs(pairs));
+
+  const layers = parseSecurityLayers(agentsText);
+  const layerNames = layers.map((l) => l.name);
+  findings.push(
+    ...diffClosedSequence("BINDING", layerNames, EXPECTED_SECURITY_LAYERS).map((f) => ({
+      ...f,
+      code:
+        f.code === "E_BINDING_OMISSION"
+          ? "E_BINDING_FAMILY"
+          : f.code === "E_BINDING_ADDITION"
+            ? "E_BINDING_FAMILY"
+            : f.code === "E_BINDING_DUPLICATE"
+              ? "E_BINDING_FAMILY"
+              : f.code,
+      message:
+        f.code === "E_BINDING_OMISSION"
+          ? `AGENTS.md missing binding-family eight-security-layers item: ${f.item}`
+          : f.message,
+    }))
+  );
+
+  const delivery = parseDeliveryControlSteps(agentsText);
+  if (!listEq(delivery.steps, EXPECTED_DELIVERY_STEPS)) {
+    findings.push({
+      code: "E_BINDING_FAMILY",
+      message: `AGENTS.md missing binding-family delivery-control structured requirements`,
+    });
+  }
+  const selfMod = parseSelfModificationControls(agentsText);
+  if (!listEq(selfMod.controls, EXPECTED_SELF_MOD_CONTROLS)) {
+    findings.push({
+      code: "E_BINDING_FAMILY",
+      message: "AGENTS.md missing binding-family self-modification-gates",
+    });
+  }
+
+  for (const [familyId, sentences] of Object.entries(BINDING_FAMILY_SENTENCES)) {
+    let section = agentsText;
+    if (familyId === "six-lens-review") {
+      section = extractSection(agentsText, "Review lenses (binding)");
+    } else if (familyId === "eight-security-layers") {
+      section = extractSection(agentsText, "Security layers (binding)");
+    } else if (familyId === "self-modification-gates") {
+      section = extractSection(agentsText, "Self-modification bounds (binding)");
+    } else if (familyId === "delivery-control") {
+      section = extractSection(agentsText, "Delivery control (binding)");
+    } else if (
+      familyId === "tier-c-adversarial-tests" ||
+      familyId === "no-destructive-prod-testing"
+    ) {
+      const rows = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]);
+      section = rows.map((r) => r.join(" | ")).join("\n");
+    }
+    for (const sentence of sentences) {
+      findings.push(...diffBindingSentence(familyId, sentence, section));
+    }
+  }
+
+  const lensSection = extractSection(agentsText, "Review lenses (binding)");
+  const lensItems = extractNumberedItems(lensSection);
+  if (!listEq(lensItems, EXPECTED_LENSES)) {
+    findings.push({
+      code: "E_BINDING_FAMILY",
+      message: "AGENTS.md missing binding-family six-lens-review structured list",
+    });
+  }
+
+  return findings;
+}
+
+export function listEq(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  return actual.every((v, i) => v === expected[i]);
+}
+
+export function remapRoleCodesToJob(findings) {
+  return findings.map((f) => ({
+    ...f,
+    code: String(f.code || "").replace(/^E_ROLE_/, "E_JOB_"),
+    message: String(f.message || "").replace(/^(\S+) (outputs|gates|forbidden):/, "job $1 $2:"),
+  }));
+}
+
+export function diffObligationMatrix(id, authByBucket, pbByBucket) {
+  const buckets = ["outputs", "gates", "forbidden"];
+  const per = {};
+  for (const b of buckets) {
+    per[b] = diffObligationLists(
+      id,
+      b,
+      Array.isArray(authByBucket[b]) ? authByBucket[b] : [],
+      Array.isArray(pbByBucket[b]) ? pbByBucket[b] : []
+    );
+  }
+  const omissions = [];
+  const additions = [];
+  for (const b of buckets) {
+    for (const f of per[b]) {
+      if (f.code === "E_ROLE_OMISSION") omissions.push({ bucket: b, f });
+      if (f.code === "E_ROLE_ADDITION") additions.push({ bucket: b, f });
+    }
+  }
+  const drop = new Set();
+  const extra = [];
+  for (const om of omissions) {
+    const omText = String(om.f.message || "").replace(/^.*omits authority obligation:\s*/, "");
+    const omShape = semanticShape(omText, om.bucket);
+    let best = null;
+    let bestScore = 0;
+    for (const ad of additions) {
+      if (ad.bucket === om.bucket) continue;
+      const adText = String(ad.f.message || "").replace(
+        /^.*adds obligation absent from authority:\s*/,
+        ""
+      );
+      const score = topicOverlap(omShape.tokens, semanticShape(adText, ad.bucket).tokens);
+      if (score > bestScore) {
+        bestScore = score;
+        best = ad;
+      }
+    }
+    if (best && bestScore >= 0.45) {
+      drop.add(om.f);
+      drop.add(best.f);
+      extra.push({
+        code: "E_ROLE_CROSS_BUCKET",
+        message: `${id} moved obligation across buckets ("${omText}" from ${om.bucket} to ${best.bucket})`,
+      });
+      additions.splice(additions.indexOf(best), 1);
+    }
+  }
+  const out = [];
+  for (const b of buckets) {
+    for (const f of per[b]) {
+      if (!drop.has(f)) out.push(f);
+    }
+  }
+  out.push(...extra);
   return out;
 }
 
@@ -393,6 +1044,22 @@ const OPERATIVE_CLAIM_PATTERNS = [
     id: "role-is-a-contract",
     re: /\ba role is a\s+\*\*contract\*\*/i,
   },
+  {
+    id: "principle-wins-over-agents",
+    re: /\bthe principle wins\b/i,
+  },
+  {
+    id: "docs-01-19-are-the-spec",
+    re: /\bdesign docs \(01[–-]19\) are the spec\b/i,
+  },
+  {
+    id: "do-not-contradict-docs-01-19",
+    re: /\bnever contradict docs 01[–-]19\b/i,
+  },
+  {
+    id: "playbooks-source-of-truth",
+    re: /\bprose playbooks\b[\s\S]{0,120}\bhuman-readable source of truth\b/i,
+  },
 ];
 
 function paragraphDefersToAgents(para) {
@@ -431,10 +1098,89 @@ export function findDocsAuthorityClaims(text) {
   return findOperativeClaims(text).filter((h) => !h.defersToAgents);
 }
 
-export const PROVENANCE_FORBIDDEN_ROLES = new Set(["canonical-doctrine"]);
+export const PROVENANCE_FORBIDDEN_ROLES = new Set([
+  "canonical-doctrine",
+  "compatibility-doctrine",
+]);
 export const PROVENANCE_ALLOWED_ROLES = new Set([
   "human-readable-contract",
   "explanatory-history",
-  "compatibility-doctrine",
   "supporting",
 ]);
+
+/**
+ * Path-bound provenance roles. Cross-field: exactly one AGENTS.md source
+ * with role human-readable-contract; every docs/** source is
+ * explanatory-history; human-readable-contract is forbidden on any other path.
+ */
+export function provenanceRoleFindings(sources) {
+  const findings = [];
+  const list = Array.isArray(sources) ? sources : [];
+  const agentsSources = [];
+  const contractSources = [];
+  list.forEach((src, i) => {
+    if (!src || typeof src !== "object") return;
+    const path = typeof src.path === "string" ? src.path : "";
+    const role = src.role;
+    const loc = `provenance.sources[${i}]`;
+    if (PROVENANCE_FORBIDDEN_ROLES.has(role) || role === "canonical-doctrine") {
+      findings.push({
+        code: "E_PROVENANCE_ROLE",
+        message: `${path || loc} uses retired/forbidden provenance role ${role}`,
+        path: loc,
+      });
+    } else if (role && !PROVENANCE_ALLOWED_ROLES.has(role)) {
+      findings.push({
+        code: "E_PROVENANCE_ROLE",
+        message: `report-only candidate provenance role unknown: ${role}`,
+        path: loc,
+      });
+    }
+    if (path === "AGENTS.md") agentsSources.push({ src, loc, role });
+    if (role === "human-readable-contract") contractSources.push({ src, loc, path });
+    if (path === "AGENTS.md" && role && role !== "human-readable-contract") {
+      findings.push({
+        code: "E_PROVENANCE_ROLE",
+        message: `AGENTS.md provenance source must use role human-readable-contract (got ${role})`,
+        path: loc,
+      });
+    }
+    if (path && path !== "AGENTS.md" && role === "human-readable-contract") {
+      findings.push({
+        code: "E_PROVENANCE_ROLE",
+        message: `human-readable-contract is forbidden on ${path} (only AGENTS.md)`,
+        path: loc,
+      });
+    }
+    if (path.startsWith("docs/") && role && role !== "explanatory-history") {
+      findings.push({
+        code: "E_PROVENANCE_ROLE",
+        message: `docs/ path ${path} must use explanatory-history (got ${role})`,
+        path: loc,
+      });
+    }
+  });
+  if (agentsSources.length === 0) {
+    findings.push({
+      code: "E_PROVENANCE_ROLE",
+      message:
+        "exactly one provenance source must have path AGENTS.md and role human-readable-contract",
+      path: "provenance.sources",
+    });
+  } else if (agentsSources.length > 1) {
+    findings.push({
+      code: "E_PROVENANCE_ROLE",
+      message: "duplicate AGENTS.md provenance source",
+      path: "provenance.sources",
+    });
+  }
+  const agentsContract = agentsSources.filter((s) => s.role === "human-readable-contract");
+  if (agentsSources.length === 1 && agentsContract.length !== 1) {
+    findings.push({
+      code: "E_PROVENANCE_ROLE",
+      message: "AGENTS.md provenance source is not labeled human-readable-contract",
+      path: agentsSources[0].loc,
+    });
+  }
+  return findings;
+}

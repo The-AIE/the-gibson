@@ -22,7 +22,7 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "c1348a8f72190fafaf97848be44266f06365d2f57616c438ebb1f80d4b3fbb9a",
+        "digest": "8e7b778c53366381cfe987ea0d99194b793eb7c3279a163d8159474285624c56",
         "role": "human-readable-contract"
       },
       {
@@ -58,7 +58,7 @@
         "path": "docs/18-fork-and-upstream.md",
         "digestAlgorithm": "sha256",
         "digest": "6003123b35d2cf785509608c98ad06c2be9c307d9219b4cb639d3f6c0ffd3425",
-        "role": "compatibility-doctrine"
+        "role": "explanatory-history"
       }
     ]
   },

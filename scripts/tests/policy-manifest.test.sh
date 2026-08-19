@@ -41,6 +41,10 @@ if [[ -z "${ROOT}" || ! -d "${ROOT}" ]]; then
 fi
 # Only after a validated temporary root: install cleanup and write child paths.
 trap 'rm -rf -- "${ROOT:?}"' EXIT
+# Copied policy-manifest mutants import ./lib/contract-semantics.mjs relative
+# to the copy sitting in ROOT.
+mkdir -p "$ROOT/lib"
+cp "$REPO_ROOT/scripts/lib/contract-semantics.mjs" "$ROOT/lib/contract-semantics.mjs"
 BIN="$ROOT/bin"
 mkdir -p "$BIN"
 FORBIDDEN_LOG="$ROOT/forbidden.log"
@@ -145,6 +149,140 @@ echo "=== check-consistency clean ==="
 out=$(run_tool check-consistency --repo-root "$REPO_ROOT" 2>&1); rc=$?
 check "consistency exits 0" "$rc" "0"
 has "consistency PASS" "$out" "consistency: PASS"
+
+echo
+echo "=== consistency compares AGENTS.md even when docs still agree ==="
+AGENTS_DRIFT="$ROOT/agents-drift"
+mkdir -p "$AGENTS_DRIFT/docs" "$AGENTS_DRIFT/config/policy/schema" "$AGENTS_DRIFT/config/policy/candidates"
+cp "$SCHEMA" "$AGENTS_DRIFT/config/policy/schema/policy-manifest-v1.schema.json"
+cp "$CANDIDATE" "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json"
+cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
+for d in docs/14-human-gates.md docs/03-roles.md docs/06-quality-gates.md docs/02-sdlc-pipeline.md docs/06-quality-gates.md docs/18-fork-and-upstream.md; do
+  mkdir -p "$AGENTS_DRIFT/$(dirname "$d")"
+  cp "$REPO_ROOT/$d" "$AGENTS_DRIFT/$d"
+done
+# Pin digests to this tree.
+"$NODE" -e '
+const fs=require("fs");
+const {createHash}=require("crypto");
+const p=process.argv[1];
+const root=process.argv[2];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  s.digest=createHash("sha256").update(fs.readFileSync(root+"/"+s.path)).digest("hex");
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+
+# Gate omission in AGENTS.md; docs/14 and candidate still have G7.
+"$NODE" -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(/\*\*G7\*\*[^\n]*/,"**GX** — removed from AGENTS");
+fs.writeFileSync(p,t);
+' "$AGENTS_DRIFT/AGENTS.md"
+"$NODE" -e '
+const fs=require("fs"); const {createHash}=require("crypto");
+const p=process.argv[1]; const root=process.argv[2];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -q 'G7' \
+  && ok "consistency: AGENTS.md G7 omission drifts even when docs/14 agrees" \
+  || bad "consistency AGENTS G7 omission vs agreeing docs (rc=$rc): $out"
+cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
+
+# Role drift.
+"$NODE" -e '
+const fs=require("fs");
+let t=fs.readFileSync(process.argv[1],"utf8");
+t=t.replace("`historian`","`archivist`");
+fs.writeFileSync(process.argv[1],t);
+' "$AGENTS_DRIFT/AGENTS.md"
+"$NODE" -e '
+const fs=require("fs"); const {createHash}=require("crypto");
+const p=process.argv[1]; const root=process.argv[2];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -Eq 'historian|archivist' \
+  && ok "consistency: AGENTS.md role rename drifts even when docs/03 agrees" \
+  || bad "consistency AGENTS role rename vs agreeing docs (rc=$rc): $out"
+cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
+
+# Stage drift.
+"$NODE" -e '
+const fs=require("fs");
+let t=fs.readFileSync(process.argv[1],"utf8");
+t=t.replace("`DEPLOY+VERIFY`, `RETRO`","`DEPLOY+VERIFY`, `RETRO`, `ELEVEN`");
+fs.writeFileSync(process.argv[1],t);
+' "$AGENTS_DRIFT/AGENTS.md"
+"$NODE" -e '
+const fs=require("fs"); const {createHash}=require("crypto");
+const p=process.argv[1]; const root=process.argv[2];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -q 'ELEVEN' \
+  && ok "consistency: AGENTS.md stage addition drifts even when docs/02 agrees" \
+  || bad "consistency AGENTS stage addition vs agreeing docs (rc=$rc): $out"
+cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
+
+# Pair drift.
+"$NODE" -e '
+const fs=require("fs");
+let t=fs.readFileSync(process.argv[1],"utf8");
+t=t.replace("`reviewer` ≠ `ux-evaluator`.","`reviewer` ≠ `ux-evaluator`; `planner` ≠ `historian`.");
+fs.writeFileSync(process.argv[1],t);
+' "$AGENTS_DRIFT/AGENTS.md"
+"$NODE" -e '
+const fs=require("fs"); const {createHash}=require("crypto");
+const p=process.argv[1]; const root=process.argv[2];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -q 'planner' \
+  && ok "consistency: AGENTS.md pair addition drifts even when docs/03 agrees" \
+  || bad "consistency AGENTS pair addition vs agreeing docs (rc=$rc): $out"
+
+# Tier drift.
+cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
+"$NODE" -e '
+const fs=require("fs");
+let t=fs.readFileSync(process.argv[1],"utf8");
+t=t.replace("| **C** |","| **D** |");
+fs.writeFileSync(process.argv[1],t);
+' "$AGENTS_DRIFT/AGENTS.md"
+"$NODE" -e '
+const fs=require("fs"); const {createHash}=require("crypto");
+const p=process.argv[1]; const root=process.argv[2];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (s.path==="AGENTS.md") s.digest=createHash("sha256").update(fs.readFileSync(root+"/AGENTS.md")).digest("hex");
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
+out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -Eq 'tier D|tier C' \
+  && ok "consistency: AGENTS.md tier rename drifts even when docs/06 agrees" \
+  || bad "consistency AGENTS tier drift vs agreeing docs (rc=$rc): $out"
 
 echo
 echo "=== report mode: JSON + text, byte-stable ==="
@@ -777,14 +915,18 @@ else
 fi
 # Full validate with provenance pointing at a..b.md
 mut_validate "m-prov-dotdot-name.json" "
-  c.provenance.sources = [{
-    id: 'src.dotdot-name',
-    path: 'docs/a..b.md',
-    digestAlgorithm: 'sha256',
-    digest: '$DOTDOT_DIGEST',
-    role: 'supporting'
-  }];
-"
+  const agents = c.provenance.sources.find(s => s.path === 'AGENTS.md');
+  c.provenance.sources = [
+    agents,
+    {
+      id: 'src.dotdot-name',
+      path: 'docs/a..b.md',
+      digestAlgorithm: 'sha256',
+      digest: '$DOTDOT_DIGEST',
+      role: 'explanatory-history'
+    }
+  ];
+" --no-digest-check
 [[ "$rc" -eq 0 ]] && ok "validate accepts provenance path docs/a..b.md" || bad "validate rejected docs/a..b.md (out=$out)"
 
 # Negative: exact ".." segment still rejected at path validation
@@ -1201,7 +1343,8 @@ try {
   writeFileSync(join(outside, "leaked.txt"), "OUTSIDE_SECRET_BYTES\n");
   cpSync(schemaSrc, join(root, "config/policy/schema/policy-manifest-v1.schema.json"));
   cpSync(candidateSrc, join(root, "config/policy/candidates/gibson-core-v1.candidate.json"));
-  // Minimal doctrine markers so checkDoctrineConsistency can parse (or report)
+  // AGENTS.md is the doctrine source for checkDoctrineConsistency.
+  writeFileSync(join(root, "AGENTS.md"), "# gates\n- **G1** — one.\n");
   writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
   writeFileSync(join(root, "docs/03-roles.md"), "## planner\n");
   writeFileSync(join(root, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n**B**\n**C**\n");
@@ -1452,9 +1595,9 @@ try {
     bad("manifest-class swap not diagnosed (threw=" + threw + " msg=" + msg + ")");
   }
 
-  // Doctrine-class: checkDoctrineConsistency with swap on a doctrine path
+  // Doctrine-class: checkDoctrineConsistency with swap on AGENTS.md
   function doctrineSwapHook({ absPath, relPath }) {
-    if (relPath === "docs/14-human-gates.md" || /14-human-gates\.md$/.test(absPath)) {
+    if (relPath === "AGENTS.md" || /AGENTS\.md$/.test(absPath)) {
       try { unlinkSync(absPath); } catch { /* ignore */ }
       symlinkSync(join(outside, "leaked.txt"), absPath);
       return;
@@ -1493,8 +1636,8 @@ try {
     }
   }
   setSafeReadAfterOpenHook(null);
-  try { unlinkSync(join(root, "docs/14-human-gates.md")); } catch { /* ignore */ }
-  writeFileSync(join(root, "docs/14-human-gates.md"), "# gates\n**G1**\n");
+  try { unlinkSync(join(root, "AGENTS.md")); } catch { /* ignore */ }
+  writeFileSync(join(root, "AGENTS.md"), "# gates\n- **G1** — one.\n");
 
   // Root directory replacement WITHIN one multi-file operation: freeze a
   // RootIdentity, then rename/replace the actual directory between reads of
@@ -1508,6 +1651,7 @@ try {
       mkdirSync(join(liveRoot, "docs"), { recursive: true });
       mkdirSync(join(liveRoot, "config/policy/schema"), { recursive: true });
       mkdirSync(join(liveRoot, "config/policy/candidates"), { recursive: true });
+      writeFileSync(join(liveRoot, "AGENTS.md"), "# gates\n- **G1** — one.\n- **G2** — two.\n");
       writeFileSync(join(liveRoot, "docs/14-human-gates.md"), "# gates\n**G1**\n**G2**\n");
       writeFileSync(join(liveRoot, "docs/03-roles.md"), "## planner\n");
       writeFileSync(join(liveRoot, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n**B**\n**C**\n");
@@ -1520,6 +1664,7 @@ try {
       mkdirSync(join(liveReplacement, "docs"), { recursive: true });
       mkdirSync(join(liveReplacement, "config/policy/schema"), { recursive: true });
       mkdirSync(join(liveReplacement, "config/policy/candidates"), { recursive: true });
+      writeFileSync(join(liveReplacement, "AGENTS.md"), "# REPLACED\n- **G1** — one.\n");
       writeFileSync(join(liveReplacement, "docs/14-human-gates.md"), "# REPLACED\n**G1**\n");
       writeFileSync(join(liveReplacement, "docs/03-roles.md"), "## planner\n");
       writeFileSync(join(liveReplacement, "docs/06-quality-gates.md"), "## Risk tiers\n**A**\n");
@@ -2513,7 +2658,7 @@ echo "=== consistency fail-closed on provenance errors (incl. later sources) ===
 # Disposable mini-repo for relative --manifest containment
 MINI_PROV="$ROOT/mini-prov"
 mkdir -p "$MINI_PROV/docs" "$MINI_PROV/config/policy/schema" "$MINI_PROV/config/policy/candidates"
-for d in docs/14-human-gates.md docs/03-roles.md docs/06-quality-gates.md docs/02-sdlc-pipeline.md; do
+for d in AGENTS.md docs/14-human-gates.md docs/03-roles.md docs/06-quality-gates.md docs/02-sdlc-pipeline.md; do
   mkdir -p "$MINI_PROV/$(dirname "$d")"
   cp "$REPO_ROOT/$d" "$MINI_PROV/$d"
 done
@@ -2665,6 +2810,7 @@ try {
 
   const cand0 = JSON.parse(readFileSync(candidateSrc, "utf8"));
   const paths = new Set([
+    "AGENTS.md",
     "docs/14-human-gates.md",
     "docs/03-roles.md",
     "docs/06-quality-gates.md",
@@ -2698,9 +2844,9 @@ try {
   }
   setSafeReadAfterOpenHook(countFinalRvOpens);
   setRootIdentityRecheckHook((rootId) => {
-    if (opens < 4) return;
+    if (opens < 1) return;
     checksAtFour += 1;
-    // checksAtFour===1: post-open assert of the fourth doctrine file — leave intact.
+    // checksAtFour===1: post-open assert of AGENTS.md — leave intact.
     // checksAtFour===2: first assert of final revalidation — replace root here.
     if (checksAtFour === 2 && !replaced) {
       replaced = true;
@@ -2745,7 +2891,7 @@ try {
       })
   );
 
-  if (opens !== 4 || !replaced) {
+  if (opens !== 1 || !replaced) {
     console.log("FINAL_RV_FAIL setup opens=" + opens + " replaced=" + replaced);
     process.exit(2);
   }
@@ -2872,7 +3018,7 @@ try {
   mkdirSync(liveRoot, { recursive: true });
   const cand0 = JSON.parse(readFileSync(candidateSrc, "utf8"));
   const paths = new Set([
-    "docs/14-human-gates.md","docs/03-roles.md","docs/06-quality-gates.md",
+    "AGENTS.md","docs/14-human-gates.md","docs/03-roles.md","docs/06-quality-gates.md",
     "docs/02-sdlc-pipeline.md","config/policy/schema/policy-manifest-v1.schema.json",
   ]);
   for (const s of cand0.provenance.sources) if (typeof s.path === "string") paths.add(s.path);
@@ -2892,7 +3038,7 @@ try {
   }
   setSafeReadAfterOpenHook(countNarrowOpens);
   setRootIdentityRecheckHook((rootId) => {
-    if (opens < 4) return;
+    if (opens < 1) return;
     checksAtFour += 1;
     if (checksAtFour === 2 && !replaced) {
       replaced = true;
@@ -2908,7 +3054,7 @@ try {
   const hasOk = findings.some((f) => f.code === "I_CONSISTENCY_OK");
   const hasError = findings.some((f) => f.severity === "error");
   // Defect signature: false I_CONSISTENCY_OK after final-revalidation root replace.
-  if (replaced && opens === 4 && hasOk && !hasError) {
+  if (replaced && opens === 1 && hasOk && !hasError) {
     console.log("NARROW_DEFECT_REPRODUCED");
     process.exit(0);
   }
@@ -2971,7 +3117,7 @@ try {
   mkdirSync(liveRoot, { recursive: true });
   const cand0 = JSON.parse(readFileSync(candidateSrc, "utf8"));
   const paths = new Set([
-    "docs/14-human-gates.md","docs/03-roles.md","docs/06-quality-gates.md",
+    "AGENTS.md","docs/14-human-gates.md","docs/03-roles.md","docs/06-quality-gates.md",
     "docs/02-sdlc-pipeline.md","config/policy/schema/policy-manifest-v1.schema.json",
   ]);
   for (const s of cand0.provenance.sources) if (typeof s.path === "string") paths.add(s.path);

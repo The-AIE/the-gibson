@@ -72,7 +72,7 @@ candidate):
 | Exact-head claim release | `scripts/release-claim.sh` |
 | Fixed + conditional read-chain budget | `config/policy/mandatory-read-chain.v1.json` |
 | Rule → home migration audit | `config/policy/rule-migration-audit.v1.json` |
-| Per-role outputs / gates / prohibitions | `config/policy/role-contracts.v1.json` |
+| Per-role / per-job outputs / gates / prohibitions | `config/policy/role-contracts.v1.json` |
 
 ## Mission
 
@@ -151,7 +151,7 @@ If no role is named, the resolved role is `builder` (if your dispatch prompt
 doesn't name a role, you are a `builder`). `playbooks/builder.md` is the
 conditionally mandatory session-start load, including default assignment.
 
-Per-role outputs, gates, and prohibitions are canonical in
+Per-role and per-job outputs, gates, and prohibitions are canonical in
 `config/policy/role-contracts.v1.json` (activated machine source named here).
 Playbook frontmatter is a routing mirror of that file and must not add, drop,
 rename, weaken, or negate those obligations.

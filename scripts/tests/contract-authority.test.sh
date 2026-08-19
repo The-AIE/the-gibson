@@ -189,13 +189,12 @@ write_dispatch_stub() {
   } > "$dest"
 }
 
-# Real role playbooks so semantic parity against role-contracts.v1.json holds.
+# Real role and job playbooks so semantic parity against role-contracts.v1.json holds.
 for role in planner decomposer builder test-engineer reviewer ux-evaluator security release historian; do
   cp "$REPO_ROOT/playbooks/${role}.md" "$SANDBOX/playbooks/${role}.md"
 done
-# Job stubs so closed-list measurement + set equality pass.
 for job in adopt delivery-control deploy-audit dogfood-overnight loop-step token-efficiency; do
-  write_dispatch_stub "$SANDBOX/playbooks/${job}.md" "$job"
+  cp "$REPO_ROOT/playbooks/${job}.md" "$SANDBOX/playbooks/${job}.md"
 done
 
 {
@@ -498,7 +497,7 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_DISPATCH_SET' && echo "$out" | 
 else
   bad "mutation unmarked dispatch prompt (rc=$rc): $out"
 fi
-write_dispatch_stub "$SANDBOX/playbooks/token-efficiency.md" token-efficiency
+cp "$REPO_ROOT/playbooks/token-efficiency.md" "$SANDBOX/playbooks/token-efficiency.md"
 
 # Misleading README claim
 node -e '
@@ -532,9 +531,9 @@ t=t.replace("  - merging\n", "  - never skip merging\n");
 fs.writeFileSync(p,t);
 ' "$SANDBOX/playbooks/builder.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_NEGATION|E_ROLE_WEAKENING|E_ROLE_RENAME|E_ROLE_ADDITION|E_ROLE_OMISSION'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION'; then
   echo "  planted role-negation failure line:"
-  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
   ok "mutation: retaining keywords while negating a role prohibition fails"
 else
   bad "mutation role negation (rc=$rc): $out"
@@ -549,9 +548,9 @@ t=t.replace("  - merging\n", "  - merging is optional\n");
 fs.writeFileSync(p,t);
 ' "$SANDBOX/playbooks/builder.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_WEAKENING|E_ROLE_NEGATION|E_ROLE_RENAME|E_ROLE_ADDITION|E_ROLE_OMISSION'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_WEAKENING'; then
   echo "  planted role-weakening failure line:"
-  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  echo "$out" | grep 'E_ROLE_WEAKENING' | sed 's/^/    /'
   ok "mutation: retaining keywords while weakening a role prohibition fails"
 else
   bad "mutation role weakening (rc=$rc): $out"
@@ -567,9 +566,9 @@ t=t.replace("gates:\n", "gates:\n  - merging\n");
 fs.writeFileSync(p,t);
 ' "$SANDBOX/playbooks/builder.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_ADDITION|E_ROLE_OMISSION|E_ROLE_NEGATION'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_CROSS_BUCKET'; then
   echo "  planted role-moved failure line:"
-  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  echo "$out" | grep 'E_ROLE_CROSS_BUCKET' | sed 's/^/    /'
   ok "mutation: moving a prohibition into gates while keeping the keyword fails"
 else
   bad "mutation role move (rc=$rc): $out"
@@ -677,6 +676,788 @@ else
   bad "mutation missing default builder playbook (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
+
+SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs"
+
+prove_legacy_green_structured_red() {
+  local name="$1"
+  local expected_code="$2"
+  local family="$3"
+  local report
+  report=$(
+    SEM="$SEM" AGENTS="$SANDBOX/AGENTS.md" CAND="$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json" \
+    FAMILY="$family" EXPECTED_CODE="$expected_code" \
+    node --input-type=module -e '
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { legacyPresenceOnly, structuredAgentsEnumerationFindings } = await import(pathToFileURL(process.env.SEM).href);
+const text = readFileSync(process.env.AGENTS, "utf8");
+const cand = JSON.parse(readFileSync(process.env.CAND, "utf8"));
+const legacy = legacyPresenceOnly(text);
+const structured = structuredAgentsEnumerationFindings(text, cand);
+const family = process.env.FAMILY;
+const code = process.env.EXPECTED_CODE;
+let legacyGreen = false;
+if (family === "gates") legacyGreen = legacy.missingGates.length === 0;
+else if (family === "layers") legacyGreen = legacy.missingLayers.length === 0;
+else if (family === "delivery") legacyGreen = legacy.hasDeliveryTokens === true;
+else if (family === "selfmod") legacyGreen = legacy.hasSelfModTokens === true;
+else if (family === "stages") legacyGreen = legacy.missingStages.length === 0;
+else if (family === "tiers") legacyGreen = legacy.missingTiers.length === 0;
+else if (family === "pairs") legacyGreen = legacy.missingPairs.length === 0;
+const red = structured.some((f) => f.code === code);
+console.log(JSON.stringify({ legacyGreen, red, codes: structured.map((f) => f.code) }));
+process.exit(legacyGreen && red ? 0 : 1);
+'
+  )
+  local prc=$?
+  if [[ "$prc" -eq 0 ]]; then
+    echo "  legacy-green/structured-red: $report"
+    ok "legacy green / structured red ($name → $expected_code)"
+  else
+    bad "legacy green / structured red ($name → $expected_code): $report"
+  fi
+}
+
+echo "# closed-list / Tier-C semantic mutations"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("- **G16**")) throw new Error("missing G16");
+t=t.replace("- **G16** ⛔ — Evidence of prompt-injection steering an agent.\n",
+  "- **G16** ⛔ — Evidence of prompt-injection steering an agent.\n- **G17** — Extra unpublished stop.\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_GATE_UNEXPECTED'; then
+  echo "  planted G17-addition failure line:"
+  echo "$out" | grep 'E_GATE_UNEXPECTED' | sed 's/^/    /'
+  ok "mutation: adding G17 fails with E_GATE_UNEXPECTED"
+else
+  bad "mutation G17 (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "G17 addition" "E_GATE_UNEXPECTED" "gates"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("- **G1** — Schema-destructive change, non-additive migration, or manual write against a production database.\n",
+  "- **G1** — Schema-destructive change, non-additive migration, or manual write against a production database.\n- **G1** — Schema-destructive change, non-additive migration, or manual write against a production database.\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_GATE_DUPLICATE'; then
+  echo "  planted duplicate-G1 failure line:"
+  echo "$out" | grep 'E_GATE_DUPLICATE' | sed 's/^/    /'
+  ok "mutation: duplicate G1 fails with E_GATE_DUPLICATE"
+else
+  bad "mutation duplicate G1 (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "duplicate G1" "E_GATE_DUPLICATE" "gates"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "- **G1** — Schema-destructive change, non-additive migration, or manual write against a production database.",
+  "- **G1** — Not a schema-destructive change, non-additive migration, or manual write against a production database."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_GATE_NEGATION'; then
+  echo "  planted G1-negation failure line:"
+  echo "$out" | grep 'E_GATE_NEGATION' | sed 's/^/    /'
+  ok "mutation: G1 summary negation fails with E_GATE_NEGATION"
+else
+  bad "mutation G1 negation (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("`historian`", "`archivist`");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_ENUM_RENAME'; then
+  echo "  planted role-rename failure line:"
+  echo "$out" | grep 'E_ROLE_ENUM_RENAME' | sed 's/^/    /'
+  ok "mutation: standalone role rename fails with E_ROLE_ENUM_RENAME"
+else
+  bad "mutation role rename (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "Ten stages (`PLAN`, `DECOMPOSE`, `BUILD`, `TEST`, `REVIEW`, `UX-EVAL`,\n`SECURITY`, `MERGE`, `DEPLOY+VERIFY`, `RETRO`).",
+  "Ten stages (`PLAN`, `DECOMPOSE`, `BUILD`, `TEST`, `REVIEW`, `UX-EVAL`,\n`SECURITY`, `MERGE`, `DEPLOY+VERIFY`, `RETRO`, `ELEVEN`)."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_STAGE_ADDITION'; then
+  echo "  planted stage-addition failure line:"
+  echo "$out" | grep 'E_STAGE_ADDITION' | sed 's/^/    /'
+  ok "mutation: stage addition fails with E_STAGE_ADDITION"
+else
+  bad "mutation stage addition (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "stage addition" "E_STAGE_ADDITION" "stages"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "Ten stages (`PLAN`, `DECOMPOSE`, `BUILD`, `TEST`, `REVIEW`, `UX-EVAL`,\n`SECURITY`, `MERGE`, `DEPLOY+VERIFY`, `RETRO`).",
+  "Ten stages (`PLAN`, `DECOMPOSE`, `BUILD`, `TEST`, `REVIEW`, `UX-EVAL`,\n`SECURITY`, `MERGE`, `DEPLOY+VERIFY`)."
+);
+t=t.replace("→ retro", "→ RETRO");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_STAGE_OMISSION'; then
+  echo "  planted stage-omission failure line:"
+  echo "$out" | grep 'E_STAGE_OMISSION' | sed 's/^/    /'
+  ok "mutation: stage omission fails with E_STAGE_OMISSION"
+else
+  bad "mutation stage omission (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "stage omission" "E_STAGE_OMISSION" "stages"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("`builder` ≠\n`reviewer`; `builder` ≠ `ux-evaluator`; `reviewer` ≠ `ux-evaluator`.",
+  "`builder` ≠ `ux-evaluator`; `reviewer` ≠ `ux-evaluator`.");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PAIR_OMISSION'; then
+  echo "  planted pair-removal failure line:"
+  echo "$out" | grep 'E_PAIR_OMISSION' | sed 's/^/    /'
+  ok "mutation: forbidden-pair removal fails with E_PAIR_OMISSION"
+else
+  bad "mutation pair removal (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("`reviewer` ≠ `ux-evaluator`.",
+  "`reviewer` ≠ `ux-evaluator`; `planner` ≠ `historian`.");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PAIR_ADDITION'; then
+  echo "  planted pair-addition failure line:"
+  echo "$out" | grep 'E_PAIR_ADDITION' | sed 's/^/    /'
+  ok "mutation: forbidden-pair addition fails with E_PAIR_ADDITION"
+else
+  bad "mutation pair addition (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "pair addition" "E_PAIR_ADDITION" "pairs"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("(symmetric)", "(asymmetric)");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PAIR_ASYMMETRY'; then
+  echo "  planted pair-asymmetry failure line:"
+  echo "$out" | grep 'E_PAIR_ASYMMETRY' | sed 's/^/    /'
+  ok "mutation: forbidden-pair asymmetry fails with E_PAIR_ASYMMETRY"
+else
+  bad "mutation pair asymmetry (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Duplicate rule: duplicate a Ten-stages token inside the closed list.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("`PLAN`, `DECOMPOSE`", "`PLAN`, `PLAN`, `DECOMPOSE`");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_STAGE_DUPLICATE'; then
+  echo "  planted duplicate-rule failure line:"
+  echo "$out" | grep 'E_STAGE_DUPLICATE' | sed 's/^/    /'
+  ok "mutation: duplicate stage rule fails with E_STAGE_DUPLICATE"
+else
+  bad "mutation duplicate rule (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "duplicate stage" "E_STAGE_DUPLICATE" "stages"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Binding-family negation/weakening (presence-only remains green).
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("hard-fail blocks merge/release", "never hard-fail blocks merge/release");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  echo "  planted eight-layer negation failure line:"
+  echo "$out" | grep 'E_BINDING_NEGATION' | sed 's/^/    /'
+  ok "mutation: eight-security-layers negation fails with E_BINDING_NEGATION"
+else
+  bad "mutation eight-layer negation (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "eight-layer negation" "E_BINDING_NEGATION" "layers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("then **explicit human apply**", "then optional **explicit human apply**");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+  echo "  planted delivery-control weakening failure line:"
+  echo "$out" | grep 'E_BINDING_WEAKENING' | sed 's/^/    /'
+  ok "mutation: delivery-control weakening fails with E_BINDING_WEAKENING"
+else
+  bad "mutation delivery weakening (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "delivery weakening" "E_BINDING_WEAKENING" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("are\nthemselves Tier C", "are not\nthemselves Tier C");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  echo "  planted self-mod negation failure line:"
+  echo "$out" | grep 'E_BINDING_NEGATION' | sed 's/^/    /'
+  ok "mutation: self-modification negation fails with E_BINDING_NEGATION"
+else
+  bad "mutation self-mod negation (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "self-mod negation" "E_BINDING_NEGATION" "selfmod"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("(**adversarial cases required**)", "(not **adversarial cases required**)");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  echo "  planted adversarial-tests negation failure line:"
+  echo "$out" | grep 'E_BINDING_NEGATION' | sed 's/^/    /'
+  ok "mutation: tier-c-adversarial-tests negation fails with E_BINDING_NEGATION"
+else
+  bad "mutation adversarial negation (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("**destructive production testing**", "not **destructive production testing**");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  echo "  planted destructive-prod negation failure line:"
+  echo "$out" | grep 'E_BINDING_NEGATION' | sed 's/^/    /'
+  ok "mutation: no-destructive-prod-testing negation fails with E_BINDING_NEGATION"
+else
+  bad "mutation destructive-prod negation (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("findings cite **file:line**", "findings never cite **file:line**");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  echo "  planted six-lens negation failure line:"
+  echo "$out" | grep 'E_BINDING_NEGATION' | sed 's/^/    /'
+  ok "mutation: six-lens-review negation fails with E_BINDING_NEGATION"
+else
+  bad "mutation six-lens negation (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+echo "# live contradiction fixtures (docs/01, DOC-BACKLOG, recipes, candidate)"
+mkdir -p "$SANDBOX/docs" "$SANDBOX/playbooks/recipes"
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-01-principle-wins.md" \
+  "$SANDBOX/docs/01-principles.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'principle-wins-over-agents'; then
+  echo "  planted docs-01 contradiction failure line:"
+  echo "$out" | grep 'E_AUTHORITY_CONTRADICTION' | sed 's/^/    /'
+  ok "fixture: live docs/01 principle-wins shape fails"
+else
+  bad "fixture docs/01 contradiction (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/01-principles.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-backlog-as-spec.md" \
+  "$SANDBOX/docs/DOC-BACKLOG.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -Eq 'docs-01-19-are-the-spec|do-not-contradict-docs-01-19'; then
+  echo "  planted DOC-BACKLOG contradiction failure line:"
+  echo "$out" | grep 'E_AUTHORITY_CONTRADICTION' | sed 's/^/    /'
+  ok "fixture: live DOC-BACKLOG docs-01-19-are-the-spec shape fails"
+else
+  bad "fixture DOC-BACKLOG contradiction (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/DOC-BACKLOG.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/recipes-playbooks-source-of-truth.md" \
+  "$SANDBOX/playbooks/recipes/README.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'playbooks-source-of-truth'; then
+  echo "  planted recipes README contradiction failure line:"
+  echo "$out" | grep 'E_AUTHORITY_CONTRADICTION' | sed 's/^/    /'
+  ok "fixture: live playbooks/recipes README source-of-truth shape fails"
+else
+  bad "fixture recipes README contradiction (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/playbooks/recipes/README.md"
+
+# Consume the previously unused candidate-canonical-doctrine fixture.
+node -e '
+const fs=require("fs");
+const live=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const fix=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+live.provenance = fix.provenance;
+fs.writeFileSync(process.argv[1], JSON.stringify(live,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$REPO_ROOT/config/policy/fixtures/authority-contradictions/candidate-canonical-doctrine.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE'; then
+  echo "  planted unused-candidate-fixture failure line:"
+  echo "$out" | grep 'E_PROVENANCE_ROLE' | sed 's/^/    /'
+  ok "fixture: candidate-canonical-doctrine.json provenance shape fails"
+else
+  bad "fixture unused candidate-canonical-doctrine (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+echo "# provenance path-role mutations"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+c.provenance.sources = c.provenance.sources.filter((s) => s.path !== "AGENTS.md");
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE' && echo "$out" | grep -q 'exactly one provenance source'; then
+  ok "mutation: missing AGENTS.md provenance source fails"
+else
+  bad "mutation missing AGENTS provenance (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+const agents = c.provenance.sources.find((s) => s.path === "AGENTS.md");
+c.provenance.sources.push({ ...agents, id: "src.agents-contract-dup" });
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE' && echo "$out" | grep -q 'duplicate AGENTS.md'; then
+  ok "mutation: duplicate AGENTS.md provenance source fails"
+else
+  bad "mutation duplicate AGENTS provenance (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) if (s.path === "AGENTS.md") s.role = "supporting";
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE' && echo "$out" | grep -q 'human-readable-contract'; then
+  ok "mutation: AGENTS.md relabeled supporting fails"
+else
+  bad "mutation AGENTS relabeled supporting (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) if (s.path === "docs/14-human-gates.md") s.role = "human-readable-contract";
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE' && echo "$out" | grep -q 'docs/14-human-gates.md'; then
+  ok "mutation: non-AGENTS relabeled human-readable-contract fails"
+else
+  bad "mutation non-AGENTS human-readable-contract (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (s.path === "docs/18-fork-and-upstream.md") s.role = "compatibility-doctrine";
+  if (s.path === "docs/03-roles.md") s.role = "supporting";
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE' && echo "$out" | grep -q 'explanatory-history'; then
+  ok "mutation: docs relabeled compatibility/supporting fails"
+else
+  bad "mutation docs relabeled (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+const agents = c.provenance.sources.find((s) => s.path === "AGENTS.md");
+const docs = c.provenance.sources.find((s) => s.path === "docs/14-human-gates.md");
+const tmp = agents.role; agents.role = docs.role; docs.role = tmp;
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE'; then
+  ok "mutation: provenance path-role swap fails"
+else
+  bad "mutation path-role swap (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+echo "# local override + job contracts"
+mkdir -p "$SANDBOX/local/playbooks"
+cp "$SANDBOX/playbooks/builder.md" "$SANDBOX/local/playbooks/builder.md"
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - merging\n", "  - merging is optional\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/local/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_WEAKENING'; then
+  echo "  planted local-override weakening failure line:"
+  echo "$out" | grep 'E_ROLE_WEAKENING' | sed 's/^/    /'
+  ok "mutation: weakened local builder override fails closed"
+else
+  bad "mutation local builder override (rc=$rc): $out"
+fi
+
+# Oversized local override accounting: report the override bytes, not the smaller core.
+node -e '
+const fs=require("fs");
+const core=fs.readFileSync(process.argv[1],"utf8");
+fs.writeFileSync(process.argv[2], core + "x".repeat(20000) + "\n");
+' "$SANDBOX/playbooks/builder.md" "$SANDBOX/local/playbooks/builder.md"
+json=$(node "$TOOL" --repo-root "$SANDBOX" --format json 2>&1); rc=$?
+acct=$(printf '%s' "$json" | node -e '
+let s=""; process.stdin.on("data", d => s+=d); process.stdin.on("end", () => {
+  const j = JSON.parse(s);
+  const files = (j.conditionalDispatchPrompts && j.conditionalDispatchPrompts.files) || [];
+  const eff = files.find((f) => f.role === "builder");
+  if (!eff) { console.error("no builder record"); process.exit(1); }
+  if (eff.path !== "local/playbooks/builder.md") { console.error("effective path " + eff.path); process.exit(1); }
+  if (eff.effective !== "local-override") { console.error("effective " + eff.effective); process.exit(1); }
+  if (!(eff.bytes > 15000)) { console.error("bytes " + eff.bytes); process.exit(1); }
+  if (j.conditionalDispatchPrompts.bytesMax !== eff.bytes && j.conditionalDispatchPrompts.bytesMax < eff.bytes) {
+    console.error("bytesMax ignored override"); process.exit(1);
+  }
+  const core = files.find((f) => f.path === "playbooks/builder.md" && f.effective !== "local-override");
+  if (core) { console.error("core playbook still reported as effective load"); process.exit(1); }
+  process.exit(0);
+});
+'); acct_rc=$?
+if [[ "$acct_rc" -eq 0 ]]; then
+  ok "local override oversized accounting uses override bytes as effective load"
+else
+  bad "local override accounting: $acct"
+fi
+rm -rf "$SANDBOX/local"
+
+# Symlink entry under playbooks/ must E_PATH (never follow or silently skip).
+ln -s "$SANDBOX/playbooks/builder.md" "$SANDBOX/playbooks/planted-symlink.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PATH' && echo "$out" | grep -q 'playbooks/planted-symlink.md' && echo "$out" | grep -qi 'symlink'; then
+  echo "  planted playbooks symlink failure line:"
+  echo "$out" | grep 'E_PATH' | sed 's/^/    /'
+  ok "mutation: playbooks symlink entry fails with E_PATH"
+else
+  bad "mutation playbooks symlink entry (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/playbooks/planted-symlink.md"
+
+# Existing local override that is a directory (non-regular) must E_PATH, not fall back.
+mkdir -p "$SANDBOX/local/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PATH' && echo "$out" | grep -q 'local/playbooks/builder.md'; then
+  echo "  planted local-override directory failure line:"
+  echo "$out" | grep 'E_PATH' | sed 's/^/    /'
+  ok "mutation: local override directory fails with E_PATH"
+else
+  bad "mutation local override directory (rc=$rc): $out"
+fi
+rm -rf "$SANDBOX/local"
+
+# Genuinely absent local override still uses the core playbook and passes.
+json=$(node "$TOOL" --repo-root "$SANDBOX" --format json 2>&1); rc=$?
+absent=$(printf '%s' "$json" | node -e '
+let s=""; process.stdin.on("data", d => s+=d); process.stdin.on("end", () => {
+  const j = JSON.parse(s);
+  if (j.ok !== true) { console.error("not ok findings=" + JSON.stringify(j.findings || [])); process.exit(1); }
+  const files = (j.conditionalDispatchPrompts && j.conditionalDispatchPrompts.files) || [];
+  const builder = files.find((f) => f.role === "builder");
+  if (!builder) { console.error("no builder"); process.exit(1); }
+  if (builder.path !== "playbooks/builder.md") { console.error("path " + builder.path); process.exit(1); }
+  if (builder.effective !== "core") { console.error("effective " + builder.effective); process.exit(1); }
+  process.exit(0);
+});
+'); absent_rc=$?
+if [[ "$rc" -eq 0 && "$absent_rc" -eq 0 ]]; then
+  ok "genuinely absent local override uses core playbook and passes"
+else
+  bad "absent local override (rc=$rc absent_rc=$absent_rc): $absent $json"
+fi
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - transplanting CI without calibration\n", "");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/adopt.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_JOB_OMISSION'; then
+  echo "  planted job-omission failure line:"
+  echo "$out" | grep 'E_JOB_OMISSION' | sed 's/^/    /'
+  ok "mutation: job obligation omission fails with E_JOB_OMISSION"
+else
+  bad "mutation job omission (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/adopt.md" "$SANDBOX/playbooks/adopt.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - transplanting CI without calibration\n", "  - never skip transplanting CI without calibration\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/adopt.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_JOB_NEGATION'; then
+  ok "mutation: job obligation negation fails with E_JOB_NEGATION"
+else
+  bad "mutation job negation (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/adopt.md" "$SANDBOX/playbooks/adopt.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - transplanting CI without calibration\n", "  - transplanting CI without calibration is optional\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/adopt.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_JOB_WEAKENING'; then
+  ok "mutation: job obligation weakening fails with E_JOB_WEAKENING"
+else
+  bad "mutation job weakening (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/adopt.md" "$SANDBOX/playbooks/adopt.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("forbidden:\n", "forbidden:\n  - extra unpublished job obligation\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/adopt.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_JOB_ADDITION'; then
+  ok "mutation: job obligation addition fails with E_JOB_ADDITION"
+else
+  bad "mutation job addition (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/adopt.md" "$SANDBOX/playbooks/adopt.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - transplanting CI without calibration\n", "  - transplanting CI without calibration\n  - transplanting CI without calibration\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/adopt.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_JOB_DUPLICATE'; then
+  ok "mutation: job obligation duplicate fails with E_JOB_DUPLICATE"
+else
+  bad "mutation job duplicate (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/adopt.md" "$SANDBOX/playbooks/adopt.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+delete c.jobs.adopt;
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/role-contracts.v1.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_JOB_CONTRACTS' && echo "$out" | grep -q 'adopt'; then
+  ok "mutation: missing job contract fails with E_JOB_CONTRACTS"
+else
+  bad "mutation missing job contract (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/role-contracts.v1.json" "$SANDBOX/config/policy/role-contracts.v1.json"
+
+echo "# authority path containment"
+OUTSIDE="$ROOT/outside-secret"
+mkdir -p "$OUTSIDE"
+printf 'LEAKED\n' > "$OUTSIDE/leaked.txt"
+rm -f "$SANDBOX/AGENTS.md"
+ln -s "$OUTSIDE/leaked.txt" "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eqi 'E_PATH|realpath escapes|symlink|escape'; then
+  echo "  planted symlink-escape failure line:"
+  echo "$out" | grep -E 'E_PATH|E_MISSING' | sed 's/^/    /'
+  ok "authority sensor: AGENTS.md symlink escape fails closed"
+else
+  bad "authority sensor symlink escape (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/AGENTS.md"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Authority sensor must reuse policy-manifest fd-bound reads (no weaker local primitive).
+if grep -q 'from "./policy-manifest.mjs"' "$TOOL" && grep -q 'readContainedFile' "$TOOL" && \
+   ! grep -q 'function resolveUnderRoot' "$TOOL"; then
+  ok "authority sensor imports policy-manifest readContainedFile (no local resolveUnderRoot)"
+else
+  bad "authority sensor does not reuse policy-manifest safe-read"
+fi
+
+# Deterministic path-swap on the shared primitive the authority sensor uses for AGENTS.md.
+SWAP_OUT=$(
+  SANDBOX="$SANDBOX" OUTSIDE="$OUTSIDE" PM="$REPO_ROOT/scripts/policy-manifest.mjs" \
+  node --input-type=module -e '
+import { symlinkSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const {
+  readContainedFile,
+  coerceRootIdentity,
+  setSafeReadAfterOpenHook,
+} = await import(pathToFileURL(process.env.PM).href);
+const sandbox = process.env.SANDBOX;
+const outside = process.env.OUTSIDE;
+const rootId = coerceRootIdentity(sandbox);
+function swapHook({ relPath, absPath }) {
+  if (relPath === "AGENTS.md" || /AGENTS\.md$/.test(absPath)) {
+    try { unlinkSync(absPath); } catch { /* ignore */ }
+    symlinkSync(join(outside, "leaked.txt"), absPath);
+    return;
+  }
+  setSafeReadAfterOpenHook(swapHook);
+}
+setSafeReadAfterOpenHook(swapHook);
+let threw = false;
+let msg = "";
+try {
+  readContainedFile(rootId, "AGENTS.md", "utf8");
+} catch (e) {
+  threw = true;
+  msg = e && e.message ? e.message : String(e);
+}
+setSafeReadAfterOpenHook(null);
+if (threw && /realpath escapes|symlink|identity changed|swap or race|cannot read/i.test(msg) && !/LEAKED/.test(msg)) {
+  console.log("SWAP_FAIL_CLOSED");
+  process.exit(0);
+}
+console.log("SWAP_UNEXPECTED threw=" + threw + " msg=" + msg);
+process.exit(1);
+'
+) || true
+if echo "$SWAP_OUT" | grep -q "SWAP_FAIL_CLOSED"; then
+  ok "authority sensor: deterministic AGENTS.md path-swap fails closed"
+else
+  bad "authority sensor path-swap: $SWAP_OUT"
+fi
+rm -f "$SANDBOX/AGENTS.md"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Legitimate in-root names still accepted by the shared safe-read primitive.
+mkdir -p "$SANDBOX/docs/..hidden"
+printf 'ok\n' > "$SANDBOX/docs/a..b.md"
+printf 'ok\n' > "$SANDBOX/docs/..hidden/x.md"
+{
+  printf '%s\n' '# hidden'
+  printf '%s\n' '> **Authority:** Non-normative. Binding rules live in AGENTS.md.'
+} > "$SANDBOX/docs/a..b.md"
+{
+  printf '%s\n' '# hidden'
+  printf '%s\n' '> **Authority:** Non-normative. Binding rules live in AGENTS.md.'
+} > "$SANDBOX/docs/..hidden/x.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "authority sensor accepts in-root a..b and ..hidden names"
+else
+  bad "authority sensor rejected legitimate a..b / ..hidden (rc=$rc): $out"
+fi
 
 echo
 echo "contract-authority.test.sh: $PASS passed, $FAIL failed"
