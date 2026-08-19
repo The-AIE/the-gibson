@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Weco AIDE²: First Evidence of Level-1 Recursive Self-Improvement
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 **Source:** [AIDE²: The First Evidence of Recursive Self-Improvement](https://www.weco.ai/blog/first-evidence-of-recursive-self-improvement)  
 **Date:** 14 July 2026 · Weco Team  
 **Companion framing:** [4 Levels of Recursive Self-Improvement](https://www.weco.ai/blog/4-levels-of-recursive-self-improvement)

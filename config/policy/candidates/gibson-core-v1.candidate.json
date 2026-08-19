@@ -22,35 +22,35 @@
         "id": "src.human-gates",
         "path": "docs/14-human-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "cb3f3131d7288120c9715083c0a1f519da230bec98e7cc7ce2fcfc17afa9d99c",
+        "digest": "79a27abb8a6f0dd98d89a7f137c561e2b5a09d33cf4ae0466917786b7dcf349a",
         "role": "canonical-doctrine"
       },
       {
         "id": "src.quality-gates",
         "path": "docs/06-quality-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "c874545a0c78d8367146a61929d3dc8cde97e2afcc011e724b0877480d91c499",
+        "digest": "921bbfd214f50fe1b75e71f106d021a8b673d25e478e0fccd682e229e4c142ab",
         "role": "canonical-doctrine"
       },
       {
         "id": "src.roles",
         "path": "docs/03-roles.md",
         "digestAlgorithm": "sha256",
-        "digest": "ac3a5b02e618ae5965fdc56fdb7a4d942cab8ef44ae9ae9384a153b9cb868a97",
+        "digest": "f5cf0ae93faeddbc46c2c108fde626fe3eaf0b3d25bcad8b29730569446d6ca2",
         "role": "canonical-doctrine"
       },
       {
         "id": "src.sdlc-pipeline",
         "path": "docs/02-sdlc-pipeline.md",
         "digestAlgorithm": "sha256",
-        "digest": "f1543c07b3bcc965f3931215c854e17ad7c92d45220e67a6d33e11ab88a1f031",
+        "digest": "c876a38d895e4408a72cdef6aee4a8e9c2e233d7239df09cde6679c47a4a000a",
         "role": "canonical-doctrine"
       },
       {
         "id": "src.fork-upstream",
         "path": "docs/18-fork-and-upstream.md",
         "digestAlgorithm": "sha256",
-        "digest": "73b10097fd6a2f1761a1c031f84e4c49930d0cd8dea3988f2ba8f822a69d7035",
+        "digest": "6003123b35d2cf785509608c98ad06c2be9c307d9219b4cb639d3f6c0ffd3425",
         "role": "compatibility-doctrine"
       }
     ]

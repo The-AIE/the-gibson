@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Spike: per-project coordination knowledge graph (#105)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 **Status:** spike findings (2026-08-06)  
 **Doctrine:** D-009 / docs/25 §5 — graph is **target-side adapter over existing
 substrate**, never a Gibson-core database.  

@@ -5,9 +5,16 @@ nav_exclude: true
 
 # playbooks/ — the portable skill format
 
-One file per role ([docs/03](../docs/03-roles.md)) plus loop, adopt, and deploy-audit
-helpers. A playbook = YAML frontmatter (role, inputs, outputs, gates, forbidden) +
-the full dispatch prompt + a **How to use this** section with copy-paste examples.
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
+Conditionally mandatory dispatch prompts when a role/job is active — not a
+second contract. Binding commit/PR/merge rules live only in
+[AGENTS.md](../AGENTS.md). One file per role ([docs/03](../docs/03-roles.md))
+plus loop, adopt, and deploy-audit helpers. A playbook = YAML frontmatter
+(role, inputs, outputs, gates, forbidden as **routing mirrors** of AGENTS.md) +
+the full dispatch prompt + a **How to use this** section with copy-paste
+examples. Frontmatter must not introduce obligations absent from AGENTS.md.
 
 Same file → every runtime ([docs/10](../docs/10-vendor-adapters.md)): vendor
 adapter, prompt file, or stdin as that CLI actually supports — Claude skill

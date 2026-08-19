@@ -5,6 +5,9 @@ nav_order: 4
 
 # Copy-Paste Prompts
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Ready-made things to say to the crew. Copy one, send it, answer the plain questions that come back.
 
 Use these with Hermes / chat / Mission Control. You do not need to remember special commands.

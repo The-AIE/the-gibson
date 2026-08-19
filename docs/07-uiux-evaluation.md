@@ -6,6 +6,9 @@ nav_order: 7
 
 # 07 — UI/UX Evaluation: Playwright vs. Live Deployments
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Looking at code is not enough for screens people use. An agent
 > opens the real preview website, clicks through like a customer, and grades what it
 > actually sees and experiences — not what the builder claimed it would feel like.

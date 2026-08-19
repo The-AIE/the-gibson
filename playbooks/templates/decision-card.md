@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Decision card (human gate → Operator)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 ```
 WHAT:        {{one_sentence_decision_in_plain_language}}
 WHY YOU:     {{why_this_is_an_owner_decision}} ({{gate_id e.g. G6/G7/G12}})

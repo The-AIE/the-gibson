@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Status message (nothing needed from owner)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 ```
 STATUS:  {{one_or_two_sentences_what_shipped_or_progress}}
 LIVE:    {{url_or_"not_live_yet"}}
