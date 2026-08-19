@@ -118,20 +118,25 @@ git -C "$SCRATCH" remote add origin file:///Users/mrhinkle/Code/conference-os
 git -C "$SCRATCH" fetch --depth 1 --no-tags origin <base_commit>
 git -C "$SCRATCH" checkout -q FETCH_HEAD
 git -C "$SCRATCH" remote remove origin
-# assertions — every one is fail-closed
+# assertions — enumerations land in files so a failed enumerator (which a
+# process substitution would hide from diff) aborts via pipefail, and the
+# both-enumerators-empty case fails the non-emptiness checks.
+git -C "$SCRATCH" cat-file --batch-all-objects --batch-check='%(objectname)' | sort > "$SCRATCH/.all"
+git -C "$SCRATCH" rev-list --objects HEAD | awk '{print $1}' | sort -u > "$SCRATCH/.reach"
+test -s "$SCRATCH/.all"
+test -s "$SCRATCH/.reach"
+# TOTAL object census: store == the base commit's reachable closure, exactly.
+diff "$SCRATCH/.all" "$SCRATCH/.reach"
 test "$(git -C "$SCRATCH" rev-list --count --all)" = 1
-test "$(git -C "$SCRATCH" remote | wc -l | tr -d ' ')" = 0
-# TOTAL object census: the store must contain exactly the objects reachable from
-# HEAD (the base commit and its tree closure) — nothing else. This is total, not
-# sampled: ANY unreachable commit, tree, or blob fails the diff.
-diff <(git -C "$SCRATCH" cat-file --batch-all-objects --batch-check='%(objectname)' | sort) \
-     <(git -C "$SCRATCH" rev-list --objects HEAD | awk '{print $1}' | sort -u)
+git -C "$SCRATCH" remote > "$SCRATCH/.remotes"
+test ! -s "$SCRATCH/.remotes"
 ```
 
-Verified 2026-08-19 on git 2.50.1: a depth-1 fetch of a real base commit passes the
-census (3,125 objects, store == HEAD closure, zero unreachable), and an adversarial
-check — writing one later-history object into the scratch store with `hash-object -w`
-— makes the census fail, as required.
+Verified 2026-08-19 on git 2.50.1, file-based form: a depth-1 fetch of a real base
+commit passes the census (3,125 objects, store == HEAD closure, zero unreachable); an
+adversarial check — writing one later-history object into the scratch store with
+`hash-object -w` — makes the census fail; and the both-enumerators-empty failure mode
+is caught by the `test -s` non-emptiness guards rather than passing through `diff`.
 
 2. **Blind brief.** The implementer's brief contains the issue text and the scratch path
 only — never the canonical repo path, the issue URL, or the PR number.

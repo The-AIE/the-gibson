@@ -2,7 +2,7 @@
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
  "deviation": "D-1 — see DEVIATIONS.md",
- "revised": "2026-08-19 (r2, post cross-vendor review)",
+ "revised": "2026-08-19 (r4, third cross-vendor pass)",
  "seed": 219,
  "target_n": 12,
  "design": "frozen replay set",
@@ -10,7 +10,7 @@
   "definition": "an already-closed ConferenceOS issue, replayed against the commit its fix landed on top of",
   "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
   "checkout_rule": "fresh mktemp -d scratch dir; git init + fetch --depth 1 --no-tags at base_commit; remote removed; NEVER reused",
-  "leakage_rule": "fail-closed: rev-list --count --all must equal 1 AND the fixing merge_commit object must be ABSENT (cat-file -e fails); blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers — any hit voids the run",
+  "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers — any failed assertion or audit hit voids the run",
   "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch"
  },
  "eligibility": {

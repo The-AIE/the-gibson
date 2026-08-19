@@ -117,8 +117,9 @@ before the amendment was merged or any arm executed:
    this point (raw `cos#1221` was schema-adjacent from day one) is now on the record.
 3. **The raw-arm gate had silently dropped `npm test where applicable`.** → Restored.
 4. **Ambiguity between "both arms replay" and "reuse historical harness data".**
-   → Resolved: all twelve tasks get fresh replays in both arms; historical pipeline
-   data for `cos#1220`/`cos#1313` is supplementary observational data only.
+   → Resolved: each task gets one fresh replay in its assigned arm (twelve runs,
+   6/6, no crossover); historical pipeline data for `cos#1220`/`cos#1313` is
+   supplementary observational data only.
 5. **`"reproducible": true` overclaimed the seven-task selection.** → Assignment is
    reproducible (seed 219); selection is judgment-based and pre-outcome, stated as a
    limitation.
@@ -144,3 +145,16 @@ Codex FAILED r2 on two residual findings; both fixed before merge:
 
 Codex confirmed in the same pass: eligibility, the restored raw-arm test gate, and the
 reproducibility scoping are resolved; the SHA ledger is byte-identical and re-verified.
+
+### r3 → r4 (same day, third adversarial pass)
+
+Codex FAILED r3 on residue of the same two findings; both fixed:
+
+1. Census enumerations moved from process substitutions to files: a failed
+   enumerator now aborts via `pipefail`, and the both-empty case fails the
+   `test -s` guards instead of slipping through `diff`. The remote assertion is
+   file-based for the same reason. `assignments.json`'s leakage_rule updated to
+   describe the census (it still carried the r2 sampled check). Both-empty guard
+   behavior verified by test.
+2. The one remaining "fresh replays in both arms" sentence (in this file's r1
+   record) aligned with the 12-run single-arm design stated in the amendment.
