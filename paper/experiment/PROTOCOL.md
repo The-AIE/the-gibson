@@ -79,12 +79,14 @@ logged in `DEVIATIONS.md` ("Revisions under cross-vendor review").
 A task is an already-closed issue plus a **base commit** — the first parent of the merge
 commit of the PR that closed it. Both arms implement the issue text against that base.
 `assignments.json` v2 carries the resolved `fixing_pr`, `merge_commit`, and `base_commit`
-for all twelve tasks. **All twelve tasks are replayed in both senses**: the raw arm and
-the harness arm each produce fresh replay runs. For `cos#1220` and `cos#1313`, which
-also traversed the real pipeline before this amendment, the historical PR data (review
-rounds) is reported as **supplementary observational data only** — it is never mixed
-into the replay measurements, and its missing cost/wall-clock figures are reported as
-missing, not estimated.
+for all twelve tasks. **Each task is replayed exactly once, in its assigned arm** —
+twelve runs total, six raw and six harness, a between-task randomized comparison exactly
+as registered; there is no crossover. The clarification this amendment makes is that the
+harness measurements for `cos#1220` and `cos#1313` come from **fresh harness replays**,
+not from their historical pipeline traversals: that historical PR data (review rounds)
+is reported as **supplementary observational data only**, never mixed into the replay
+measurements, and its missing cost/wall-clock figures are reported as missing, not
+estimated.
 
 ### Eligibility (clarified)
 
@@ -104,22 +106,32 @@ Every replayed issue's real fix exists later in the same repository's history, a
 implementer runs on a machine where the canonical checkout and GitHub access exist.
 The control has three layers; a run failing any one of them is **void and re-run**:
 
-1. **Truncated tree.** Always a FRESH scratch directory (`mktemp -d`), never reused:
+1. **Truncated tree, proven clean by total census.** Always a FRESH scratch directory
+(`mktemp -d`), never reused. The whole block runs under `set -euo pipefail` — any
+failing command aborts the run; nothing proceeds on a warning:
 
 ```bash
+set -euo pipefail
 SCRATCH=$(mktemp -d)
 git init -q "$SCRATCH"
 git -C "$SCRATCH" remote add origin file:///Users/mrhinkle/Code/conference-os
 git -C "$SCRATCH" fetch --depth 1 --no-tags origin <base_commit>
 git -C "$SCRATCH" checkout -q FETCH_HEAD
 git -C "$SCRATCH" remote remove origin
-# fail-closed assertions — abort the run on any failure, never proceed on echo
-test "$(git -C "$SCRATCH" rev-list --count --all)" = 1 || exit 1
-git -C "$SCRATCH" cat-file -e <merge_commit> 2>/dev/null && exit 1  # later objects must be ABSENT
+# assertions — every one is fail-closed
+test "$(git -C "$SCRATCH" rev-list --count --all)" = 1
+test "$(git -C "$SCRATCH" remote | wc -l | tr -d ' ')" = 0
+# TOTAL object census: the store must contain exactly the objects reachable from
+# HEAD (the base commit and its tree closure) — nothing else. This is total, not
+# sampled: ANY unreachable commit, tree, or blob fails the diff.
+diff <(git -C "$SCRATCH" cat-file --batch-all-objects --batch-check='%(objectname)' | sort) \
+     <(git -C "$SCRATCH" rev-list --objects HEAD | awk '{print $1}' | sort -u)
 ```
 
-Verified 2026-08-19 on git 2.50.1: one commit reachable, and the fixing merge commit's
-object absent from the scratch object store.
+Verified 2026-08-19 on git 2.50.1: a depth-1 fetch of a real base commit passes the
+census (3,125 objects, store == HEAD closure, zero unreachable), and an adversarial
+check — writing one later-history object into the scratch store with `hash-object -w`
+— makes the census fail, as required.
 
 2. **Blind brief.** The implementer's brief contains the issue text and the scratch path
 only — never the canonical repo path, the issue URL, or the PR number.
