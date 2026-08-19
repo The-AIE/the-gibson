@@ -46,8 +46,8 @@ Each already exists in the harness:
    Contract states *what / does / why / risks* in plain language so a non-technical
    owner can actually consent ([docs/09](09-memory-and-self-improvement.md), README).
 4. **Bounded autonomy, few human gates.** Autonomy by default for reversible work; a
-   one-page closed list of mandatory stops; everything reversible; "pause everything"
-   always available ([docs/14](14-human-gates.md)).
+   one-page closed list of mandatory stops in `AGENTS.md`; everything reversible; "pause everything"
+   always available (rationale: [docs/14](14-human-gates.md)).
 5. **The ratchet.** A failure that happens twice becomes a permanent sensor, so trust
    compounds instead of decaying ([docs/09](09-memory-and-self-improvement.md)).
 

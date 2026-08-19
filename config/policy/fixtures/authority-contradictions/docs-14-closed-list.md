@@ -13,12 +13,10 @@ nav_order: 14
 > interrupt you — money, going live, private data, and similar owner decisions.
 > Everything else is the crew's problem to solve without waking you.
 
-The closed stop list lives in [`AGENTS.md`](../AGENTS.md). This page restates
-those G1–G16 IDs for explanation and history only; it is not the operative
-list. If the situation isn't in AGENTS.md, the agent keeps working — through
-test failures, flaky CI, merge conflicts, unclear docs, and mid-task errors,
-all of which are the agent's to resolve. Changing the AGENTS.md list is itself
-Tier C (the ratchet may tighten autonomously, it loosens only with Mark's
+This list is **closed**. If the situation isn't here, the agent keeps working —
+through test failures, flaky CI, merge conflicts, unclear docs, and mid-task errors,
+all of which are the agent's to resolve. Changing this list is itself Tier C
+(doc 09: the ratchet may tighten autonomously, it loosens only with Mark's
 sign-off).
 
 When a gate triggers: record state (PR comment / loop-state / MC message), queue the

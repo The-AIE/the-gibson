@@ -18,8 +18,9 @@
  *   banner/frontmatter contradictions.
  *
  * RISKS
- *   Structural + pattern sensors, not a full prose parser. Independent review
- *   still applies. Read-only. Does not activate the report-only candidate.
+ *   Structured semantic comparison of enumerations and obligation objects,
+ *   not a full legal parser. Independent review still applies. Read-only.
+ *   Does not activate the report-only candidate.
  *
  * USAGE
  *   node scripts/contract-authority.mjs
@@ -33,10 +34,25 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { parseFlags } from "./lib/args.mjs";
+import {
+  collapseWs,
+  parseFrontmatter,
+  frontmatterHasOperativeKeys,
+  parseYamlList,
+  extractSection,
+  extractNumberedItems,
+  extractGateSummaries,
+  extractMarkdownTable,
+  diffObligationLists,
+  findNonNormativeOperativeContradiction,
+  findDocsAuthorityClaims,
+  PROVENANCE_FORBIDDEN_ROLES,
+  PROVENANCE_ALLOWED_ROLES,
+} from "./lib/contract-semantics.mjs";
 
 const DEFAULT_CONFIG_REL = "config/policy/mandatory-read-chain.v1.json";
 const GATE_ID_RE = /\*\*G([1-9]|1[0-6])\*\*/g;
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---/;
+const ROLE_CONTRACTS_REL = "config/policy/role-contracts.v1.json";
 
 function help() {
   console.log(`contract-authority.mjs — #208 authority boundary + read-chain budget
@@ -51,7 +67,7 @@ WHY
   and blocks candidate pre-activation / banner contradictions.
 
 RISKS
-  Structural/pattern sensor, not a semantic proof. Read-only.
+  Structured semantic sensor, not a full legal proof. Read-only.
 
 USAGE
   node scripts/contract-authority.mjs
@@ -128,10 +144,6 @@ function approxTokens(bytes) {
   return Math.ceil(bytes / 4);
 }
 
-function collapseWs(s) {
-  return String(s).replace(/\s+/g, " ").trim();
-}
-
 function loadJson(absPath) {
   let raw;
   try {
@@ -194,27 +206,6 @@ function gitShowBytes(root, ref, relPath) {
   });
   if (r.status !== 0) return null;
   return r.stdout.length;
-}
-
-function parseFrontmatter(text) {
-  const m = FRONTMATTER_RE.exec(text);
-  if (!m) return { hasFrontmatter: false, body: text, raw: "" };
-  return { hasFrontmatter: true, body: text.slice(m[0].length), raw: m[1] };
-}
-
-function frontmatterHasOperativeKeys(fmRaw) {
-  // Operative dispatch keys at YAML top level (start of line).
-  return /^(gates|forbidden)\s*:/m.test(fmRaw);
-}
-
-function extractGateSummaries(agentsText) {
-  const out = new Map();
-  const re = /\*\*(G(?:[1-9]|1[0-6]))\*\*\s*(?:⛔\s*)?—\s*([^\n]+)/g;
-  let m;
-  while ((m = re.exec(agentsText)) !== null) {
-    out.set(m[1], m[2].trim());
-  }
-  return out;
 }
 
 const repoRoot = resolve(
@@ -532,17 +523,95 @@ try {
   fail("E_MIRROR", e.message);
 }
 
+const roleContractsRel =
+  typeof cfg.roleContractsPath === "string"
+    ? cfg.roleContractsPath
+    : ROLE_CONTRACTS_REL;
+let roleContracts = null;
+try {
+  roleContracts = loadJson(resolveUnderRoot(repoRoot, roleContractsRel));
+} catch (e) {
+  fail("E_ROLE_CONTRACTS", e.message);
+}
+if (roleContracts) {
+  if (roleContracts.authority === "report-only" || roleContracts.activated === false) {
+    fail(
+      "E_ROLE_CONTRACTS",
+      `${roleContractsRel} must be an activated machine source (not the report-only #164 candidate)`
+    );
+  }
+  if (roleContracts.designatedBy !== "AGENTS.md") {
+    fail(
+      "E_ROLE_CONTRACTS",
+      `${roleContractsRel} must be designated by AGENTS.md`
+    );
+  }
+  if (!roleContracts.roles || typeof roleContracts.roles !== "object") {
+    fail("E_ROLE_CONTRACTS", `${roleContractsRel} missing roles object`);
+  }
+}
+
+const EXPECTED_LENSES = [
+  "Correctness",
+  "Security",
+  "Consent / PII",
+  "Money",
+  "Performance",
+  "Maintainability",
+];
+const EXPECTED_SECURITY_LAYERS = [
+  "Secrets",
+  "SAST",
+  "Supply chain",
+  "AuthZ matrix",
+  "DAST",
+  "Adversarial review",
+  "AI-surface / injection review",
+  "Runtime posture",
+];
+const EXPECTED_ASK_FIELDS = [
+  "What I'm asking",
+  "What it does",
+  "Why it should be done",
+  "The risks",
+];
+const EXPECTED_STAGES = [
+  "PLAN",
+  "DECOMPOSE",
+  "BUILD",
+  "TEST",
+  "REVIEW",
+  "UX-EVAL",
+  "SECURITY",
+  "MERGE",
+  "DEPLOY+VERIFY",
+  "RETRO",
+];
+const EXPECTED_PAIRS = [
+  ["builder", "reviewer"],
+  ["builder", "ux-evaluator"],
+  ["reviewer", "ux-evaluator"],
+];
+
+function listEq(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) return false;
+  return actual.every((v, i) => v === expected[i]);
+}
+
 if (agentsText) {
-  const authorityPhrases = [
-    "sole always-mandatory human-readable",
-    "on-demand and non-normative",
-    "checked mirror",
-    "activated=false",
-  ];
-  for (const p of authorityPhrases) {
-    if (!agentsText.toLowerCase().includes(p.toLowerCase())) {
-      fail("E_AUTHORITY", `AGENTS.md missing authority phrase: ${p}`);
-    }
+  const canonicalBlock = extractSection(agentsText, "AGENTS.md — The Gibson Operational Contract")
+    || agentsText.slice(0, 2500);
+  const authorityObj = {
+    soleAlwaysMandatory: /sole always-mandatory human-readable/.test(canonicalBlock),
+    docsOnDemand: /on-demand and non-normative/.test(agentsText),
+    checkedMirror: /checked mirror/.test(agentsText),
+    activatedFalse: /activated=false/.test(agentsText),
+  };
+  for (const [k, v] of Object.entries(authorityObj)) {
+    if (!v) fail("E_AUTHORITY", `AGENTS.md missing authority property ${k}`);
+  }
+  if (/one of several always-mandatory/.test(agentsText) || /not the sole always-mandatory/.test(agentsText)) {
+    fail("E_AUTHORITY", "AGENTS.md weakens sole always-mandatory authority");
   }
 
   // Must not claim the report-only candidate is canonical/authority.
@@ -565,19 +634,25 @@ if (agentsText) {
     fail("E_ON_DEMAND", `AGENTS.md missing heading ## ${heading}`);
   }
 
-  // Conditional role/job dispatch-prompt disclosure (honest session-start load).
-  const disclosure = Array.isArray(dispatchCfg && dispatchCfg.disclosurePhrases)
-    ? dispatchCfg.disclosurePhrases
-    : [];
-  for (const p of disclosure) {
-    if (!agentsText.includes(p)) {
-      fail(
-        "E_ROLE_DISCLOSURE",
-        `AGENTS.md omits conditional dispatch-prompt disclosure phrase: ${p}`
-      );
-    }
+  const loadSection = extractSection(agentsText, "Authority and mandatory load");
+  if (!/Conditional session-start human-readable load/.test(loadSection || agentsText)) {
+    fail(
+      "E_ROLE_DISCLOSURE",
+      "AGENTS.md omits conditional dispatch-prompt disclosure (Conditional session-start human-readable load)"
+    );
   }
-  // Reject the false claim that AGENTS-only is the complete session-start load.
+  if (!/when a role is dispatched/.test(loadSection || agentsText)) {
+    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits when a role is dispatched");
+  }
+  if (!/playbooks\/<role>\.md/.test(loadSection || agentsText)) {
+    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits playbooks/<role>.md");
+  }
+  if (!/When a non-role job is dispatched/.test(loadSection || agentsText)) {
+    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits When a non-role job is dispatched");
+  }
+  if (!/role\/job dispatch prompt/.test(loadSection || agentsText)) {
+    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits role/job dispatch prompt");
+  }
   if (
     /Mandatory human-readable load \(this repository\):\s*this file only/i.test(
       agentsText
@@ -590,29 +665,35 @@ if (agentsText) {
     );
   }
 
-  const patterns = Array.isArray(cfg.requiredRulePatterns)
-    ? cfg.requiredRulePatterns
-    : [];
-  const agentsFlat = collapseWs(agentsText);
-  for (const p of patterns) {
-    if (!agentsFlat.includes(collapseWs(p))) {
-      fail("E_RULE", `AGENTS.md missing required rule pattern: ${p}`);
-    }
-  }
-
   const families = Array.isArray(cfg.requiredBindingFamilies)
     ? cfg.requiredBindingFamilies
     : [];
   for (const fam of families) {
     if (!fam || typeof fam.id !== "string") continue;
-    const fps = Array.isArray(fam.patterns) ? fam.patterns : [];
-    for (const p of fps) {
-      if (!agentsFlat.includes(collapseWs(p))) {
+    const sectionName = typeof fam.section === "string" ? fam.section : "";
+    const section = sectionName ? extractSection(agentsText, sectionName) : "";
+    const expectedItems = Array.isArray(fam.requiredItems) ? fam.requiredItems : [];
+    if (sectionName && !section) {
+      fail(
+        "E_BINDING_FAMILY",
+        `AGENTS.md missing binding-family ${fam.id} section: ${sectionName}`
+      );
+      continue;
+    }
+    if (expectedItems.length) {
+      const got = extractNumberedItems(section);
+      if (!listEq(got, expectedItems)) {
         fail(
           "E_BINDING_FAMILY",
-          `AGENTS.md missing binding-family ${fam.id} pattern: ${p}`
+          `AGENTS.md binding-family ${fam.id} items ${JSON.stringify(got)} != ${JSON.stringify(expectedItems)}`
         );
       }
+    }
+    if (section && /\b(optional|advisory|non-binding)\b/i.test(section.split("\n")[0] || "")) {
+      fail(
+        "E_BINDING_FAMILY",
+        `AGENTS.md binding-family ${fam.id} weakened in section heading`
+      );
     }
   }
 
@@ -628,6 +709,80 @@ if (agentsText) {
     }
   }
 
+  const lensSection = extractSection(agentsText, "Review lenses (binding)");
+  const lensItems = extractNumberedItems(lensSection);
+  if (!listEq(lensItems, EXPECTED_LENSES) || !/file:line/.test(lensSection)) {
+    fail(
+      "E_BINDING_FAMILY",
+      `AGENTS.md missing binding-family six-lens-review structured list`
+    );
+  }
+  const secSection = extractSection(agentsText, "Security layers (binding)");
+  const secFlat = collapseWs(secSection);
+  const secIntro = collapseWs(secSection.split("\n").slice(0, 6).join(" "));
+  for (const layer of EXPECTED_SECURITY_LAYERS) {
+    if (!secFlat.includes(layer)) {
+      fail(
+        "E_BINDING_FAMILY",
+        `AGENTS.md missing binding-family eight-security-layers item: ${layer}`
+      );
+    }
+  }
+  if (!/Eight layers/.test(secIntro) && !/1\.\s*Secrets/.test(secSection)) {
+    fail("E_BINDING_FAMILY", "AGENTS.md missing binding-family eight-security-layers");
+  }
+  const deliverySection = extractSection(agentsText, "Delivery control (binding)");
+  if (
+    !deliverySection ||
+    !/\baudit\b/.test(deliverySection) ||
+    !/\bdry-run\b/.test(deliverySection) ||
+    !/explicit human apply/.test(deliverySection)
+  ) {
+    fail(
+      "E_BINDING_FAMILY",
+      "AGENTS.md missing binding-family delivery-control structured requirements"
+    );
+  }
+  const selfMod = extractSection(agentsText, "Self-modification bounds (binding)");
+  if (
+    !selfMod ||
+    !/human gates/.test(selfMod) ||
+    !/Tier definitions/.test(selfMod) ||
+    !/hard-fail security layers/.test(selfMod)
+  ) {
+    fail(
+      "E_BINDING_FAMILY",
+      "AGENTS.md missing binding-family self-modification-gates"
+    );
+  }
+  const testEngRow = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]).find(
+    (r) => r[0] === "test-engineer"
+  );
+  if (!testEngRow || !/adversarial cases required/.test(testEngRow.join(" "))) {
+    fail(
+      "E_BINDING_FAMILY",
+      "AGENTS.md missing binding-family tier-c-adversarial-tests"
+    );
+  }
+  const secRow = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]).find(
+    (r) => r[0] === "security"
+  );
+  if (!secRow || !/destructive production testing/.test(secRow.join(" "))) {
+    fail(
+      "E_BINDING_FAMILY",
+      "AGENTS.md missing binding-family no-destructive-prod-testing"
+    );
+  }
+
+  const implied = findDocsAuthorityClaims(agentsText).filter((h) =>
+    /docs\/(03|14)|candidate\.json/.test(h.snippet + h.id)
+  );
+  for (const hit of implied) {
+    fail(
+      "E_IMPLIED_BINDING",
+      `AGENTS.md still treats a docs/ file or candidate as the contract via: ${hit.id}`
+    );
+  }
   const forbidden = Array.isArray(cfg.forbiddenContractPatterns)
     ? cfg.forbiddenContractPatterns
     : [];
@@ -643,10 +798,35 @@ if (agentsText) {
   const sources = Array.isArray(cfg.requiredMachineSourcePaths)
     ? cfg.requiredMachineSourcePaths
     : [];
+  const sourceTable = extractMarkdownTable(agentsText, [
+    "Topic",
+    "Authoritative / operational source",
+  ]);
+  const namedSources = new Set(
+    sourceTable.map((r) => r[1].replace(/`/g, "").trim())
+  );
   for (const p of sources) {
-    if (!agentsText.includes(p)) {
+    if (![...namedSources].some((s) => s.includes(p)) && !agentsText.includes(p)) {
       fail("E_MACHINE_SOURCE", `AGENTS.md does not name canonical source ${p}`);
     }
+  }
+  if (
+    !agentsText.includes(roleContractsRel) ||
+    !/activated machine source/.test(agentsText)
+  ) {
+    fail(
+      "E_MACHINE_SOURCE",
+      `AGENTS.md must designate ${roleContractsRel} as the activated per-role contract source`
+    );
+  }
+
+  const askSection = extractSection(agentsText, "The Ask Contract (how you talk to the user)");
+  const askFields = [];
+  const askRe = /^\s*\d+\.\s+\*\*([^*]+)\*\*/gm;
+  let askM;
+  while ((askM = askRe.exec(askSection)) !== null) askFields.push(askM[1].trim());
+  if (!listEq(askFields, EXPECTED_ASK_FIELDS)) {
+    fail("E_RULE", `AGENTS.md Ask Contract fields ${JSON.stringify(askFields)} != ${JSON.stringify(EXPECTED_ASK_FIELDS)}`);
   }
 
   // Gate IDs/summaries are owned by AGENTS.md (not supplied by the candidate).
@@ -670,49 +850,69 @@ if (agentsText) {
     }
   }
 
-  // Role / tier / stage / pair presence from AGENTS-owned required lists.
-  for (const role of roleIds) {
-    if (
-      !agentsText.includes("`" + role + "`") &&
-      !agentsText.includes(`| ${role} |`)
-    ) {
-      fail("E_ROLE", `AGENTS.md missing role ${role}`);
-    }
+  const roleSection = extractSection(agentsText, "Your role this session");
+  const roleLine = /`planner`[\s\S]*?`historian`/.exec(roleSection);
+  const parsedRoles = roleLine
+    ? [...roleLine[0].matchAll(/`([a-z-]+)`/g)].map((x) => x[1])
+    : [];
+  if (!listEq(parsedRoles, roleIds)) {
+    fail(
+      "E_ROLE",
+      `AGENTS.md role enumeration ${JSON.stringify(parsedRoles)} != ${JSON.stringify(roleIds)}`
+    );
   }
+
+  const defaultCfg =
+    cfg.defaultRole && typeof cfg.defaultRole === "object" ? cfg.defaultRole : {};
+  const defaultId = defaultCfg.id || "builder";
+  const defaultPath = defaultCfg.path || "playbooks/builder.md";
+  const unnamedResolves =
+    /If no role is named, the resolved role is `builder`/.test(roleSection) ||
+    /If your dispatch prompt doesn't name a role, you are a `builder`/.test(roleSection);
+  const builderPlaybookRequired =
+    /playbooks\/builder\.md/.test(roleSection + "\n" + (loadSection || "")) &&
+    (/conditionally mandatory/.test(roleSection) ||
+      /conditionally mandatory/.test(loadSection || "") ||
+      /including default assignment/.test(roleSection + (loadSection || "")));
+  const skipBuilder =
+    /skip\s+`?playbooks\/builder\.md`?/.test(roleSection + (loadSection || "")) ||
+    /may skip playbooks\/builder\.md/.test(roleSection + (loadSection || "")) ||
+    /builder playbook is optional/.test(roleSection + (loadSection || ""));
+  if (defaultId !== "builder" || defaultPath !== "playbooks/builder.md") {
+    fail(
+      "E_DEFAULT_BUILDER",
+      "defaultRole must resolve unnamed roles to builder via playbooks/builder.md"
+    );
+  }
+  if (!unnamedResolves || !builderPlaybookRequired || skipBuilder) {
+    fail(
+      "E_DEFAULT_BUILDER",
+      "AGENTS.md must resolve an unnamed role to builder and make playbooks/builder.md the conditional session-start load"
+    );
+  }
+  if (!closedSeen.has(defaultPath)) {
+    fail(
+      "E_DEFAULT_BUILDER",
+      `default builder dispatch prompt omitted from the closed list: ${defaultPath}`
+    );
+  }
+
+  const tierSection = extractSection(agentsText, "Risk tiers");
   for (const t of ["A", "B", "C"]) {
-    if (!new RegExp(`\\*\\*${t}\\*\\*`).test(agentsText)) {
+    if (!new RegExp(`\\*\\*${t}\\*\\*`).test(tierSection || agentsText)) {
       fail("E_TIER", `AGENTS.md missing risk tier **${t}**`);
     }
   }
-  const stages = [
-    "PLAN",
-    "DECOMPOSE",
-    "BUILD",
-    "TEST",
-    "REVIEW",
-    "UX-EVAL",
-    "SECURITY",
-    "MERGE",
-    "DEPLOY+VERIFY",
-    "RETRO",
-  ];
-  for (const s of stages) {
-    if (!agentsText.includes(s)) {
+  const pipelineSection = extractSection(agentsText, "The pipeline you are inside");
+  for (const s of EXPECTED_STAGES) {
+    if (!(pipelineSection || agentsText).includes(s)) {
       fail("E_STAGE", `AGENTS.md missing stage name ${s}`);
     }
   }
-  const pairs = [
-    ["builder", "reviewer"],
-    ["builder", "ux-evaluator"],
-    ["reviewer", "ux-evaluator"],
-  ];
-  for (const [a, b] of pairs) {
-    const ok =
-      agentsText.includes("`" + a + "` ≠ `" + b + "`") ||
-      (agentsText.includes("`" + a + "`") &&
-        agentsText.includes("`" + b + "`") &&
-        /forbidden pairs/i.test(agentsText));
-    if (!ok) {
+  const roleFlat = collapseWs(roleSection || agentsText);
+  for (const [a, b] of EXPECTED_PAIRS) {
+    const token = "`" + a + "` ≠ `" + b + "`";
+    if (!roleFlat.includes(token)) {
       fail("E_PAIR", `AGENTS.md missing forbidden pair ${a} ≠ ${b}`);
     }
   }
@@ -803,12 +1003,8 @@ if (agentsText) {
         if (!pair || typeof pair.a !== "string" || typeof pair.b !== "string") {
           continue;
         }
-        const ok =
-          agentsText.includes("`" + pair.a + "` ≠ `" + pair.b + "`") ||
-          (agentsText.includes("`" + pair.a + "`") &&
-            agentsText.includes("`" + pair.b + "`") &&
-            /forbidden pairs/i.test(agentsText));
-        if (!ok) {
+        const token = "`" + pair.a + "` ≠ `" + pair.b + "`";
+        if (!collapseWs(roleSection || agentsText).includes(token)) {
           fail(
             "E_MIRROR_DRIFT",
             `report-only candidate pair ${pair.a} ≠ ${pair.b} absent from AGENTS.md authority`
@@ -816,10 +1012,47 @@ if (agentsText) {
         }
       }
     }
+    const prov = mirror.provenance && typeof mirror.provenance === "object"
+      ? mirror.provenance
+      : null;
+    const sources = prov && Array.isArray(prov.sources) ? prov.sources : [];
+    for (const src of sources) {
+      if (!src || typeof src !== "object") continue;
+      const role = src.role;
+      const path = typeof src.path === "string" ? src.path : "";
+      if (PROVENANCE_FORBIDDEN_ROLES.has(role) || role === "canonical-doctrine") {
+        fail(
+          "E_PROVENANCE_ROLE",
+          `report-only candidate provenance labels ${path || "a source"} ${role} (non-normative docs must not be canonical-doctrine)`
+        );
+      }
+      if (path.startsWith("docs/") && /canonical/i.test(String(role || ""))) {
+        fail(
+          "E_PROVENANCE_ROLE",
+          `report-only candidate provenance labels non-normative ${path} as ${role}`
+        );
+      }
+      if (role && !PROVENANCE_ALLOWED_ROLES.has(role)) {
+        fail(
+          "E_PROVENANCE_ROLE",
+          `report-only candidate provenance role unknown: ${role}`
+        );
+      }
+    }
   }
 }
 
-// Forbidden misleading repo claims (e.g. README saying agents follow docs/playbooks rules).
+function checkRepoAuthorityClaims(rel, text) {
+  const hits = findDocsAuthorityClaims(text);
+  for (const hit of hits) {
+    fail(
+      "E_REPO_CLAIM",
+      `${rel} implies docs are authority (${hit.id}): ${hit.snippet}`
+    );
+  }
+}
+
+// Forbidden misleading repo claims (README/docs describing docs as the contract).
 const repoClaims = Array.isArray(cfg.forbiddenRepoClaims)
   ? cfg.forbiddenRepoClaims
   : [];
@@ -843,6 +1076,19 @@ for (const claim of repoClaims) {
       );
     }
   }
+  checkRepoAuthorityClaims(claim.path, text);
+}
+
+for (const extra of ["README.md", "HOW-IT-WORKS.md", "adapters/goose/README.md"]) {
+  let abs;
+  try {
+    abs = resolveUnderRoot(repoRoot, extra);
+  } catch {
+    continue;
+  }
+  if (!existsSync(abs)) continue;
+  if (repoClaims.some((c) => c && c.path === extra)) continue;
+  checkRepoAuthorityClaims(extra, readFileSync(abs, "utf8"));
 }
 
 const docsMarker = cfg.docsNonNormativeMarker || "**Authority:** Non-normative";
@@ -881,6 +1127,13 @@ if (!parsed.measureOnly) {
       fail("E_BANNER", `${rel} missing non-normative marker`);
     } else {
       markedDocs.push(rel);
+      const contra = findNonNormativeOperativeContradiction(text, docsMarker);
+      for (const hit of contra) {
+        fail(
+          "E_AUTHORITY_CONTRADICTION",
+          `${rel} has a non-normative banner then asserts a closed/authoritative/operative list (${hit.id}): ${hit.snippet}`
+        );
+      }
     }
   }
 
@@ -924,6 +1177,49 @@ if (!parsed.measureOnly) {
     } else {
       checkedPlaybooks.push(rel);
     }
+
+    const bodyHits = findDocsAuthorityClaims(fm.body || text);
+    for (const hit of bodyHits) {
+      fail(
+        "E_AUTHORITY_CONTRADICTION",
+        `${rel} asserts docs as stop/role authority (${hit.id}): ${hit.snippet}`
+      );
+    }
+
+    const stem = playbookStem(rel);
+    if (
+      roleContracts &&
+      roleContracts.roles &&
+      Object.prototype.hasOwnProperty.call(roleContracts.roles, stem)
+    ) {
+      const authRole = roleContracts.roles[stem];
+      const buckets = ["outputs", "gates", "forbidden"];
+      for (const bucket of buckets) {
+        const authItems = Array.isArray(authRole[bucket]) ? authRole[bucket] : [];
+        const pbItems = parseYamlList(fm.raw, bucket);
+        for (const diff of diffObligationLists(stem, bucket, authItems, pbItems)) {
+          fail(diff.code, diff.message);
+        }
+      }
+    }
+  }
+
+  if (roleContracts && roleContracts.roles) {
+    for (const role of roleIds) {
+      if (!Object.prototype.hasOwnProperty.call(roleContracts.roles, role)) {
+        fail("E_ROLE_CONTRACTS", `role-contracts missing role ${role}`);
+        continue;
+      }
+      const rec = roleContracts.roles[role];
+      for (const bucket of ["outputs", "gates", "forbidden"]) {
+        if (!Array.isArray(rec[bucket]) || rec[bucket].length === 0) {
+          fail(
+            "E_ROLE_CONTRACTS",
+            `role-contracts ${role} missing ${bucket} list`
+          );
+        }
+      }
+    }
   }
 }
 
@@ -965,6 +1261,12 @@ const report = {
   },
   nonNormativeMarkedDocs: markedDocs.length,
   playbooksChecked: checkedPlaybooks.length,
+  defaultRole: {
+    id: (cfg.defaultRole && cfg.defaultRole.id) || "builder",
+    path: (cfg.defaultRole && cfg.defaultRole.path) || "playbooks/builder.md",
+    whenUnnamed: true,
+  },
+  roleContractsPath: roleContractsRel,
   findings,
   ok: findings.length === 0,
 };

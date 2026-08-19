@@ -198,5 +198,5 @@ locally. Reviewer, test-engineer, and ux-evaluator are **other hats**.
 
 ## When to stop (human gates only)
 
-G1–G16 in docs/14. Everything else — red tests, flaky CI, merge conflicts, unclear
+G1–G16 in AGENTS.md. Everything else — red tests, flaky CI, merge conflicts, unclear
 docs — you resolve yourself.

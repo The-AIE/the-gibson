@@ -27,7 +27,7 @@ Enforcement (claim / worktree / gate / release) is invocable **today** via
 
 Permission tiers: [permission-map.yaml](permission-map.yaml) maps
 [docs/autonomy-modes.md](../../docs/autonomy-modes.md) Always/Ask/Never classes.
-Session defaults are still not forced unattended (docs/14 remains authoritative).
+Session defaults are still not forced unattended (AGENTS.md remains the stop authority; docs/14 is rationale).
 
 **Authorized today:**
 - `adapters/goose/enforce.sh` / `session.sh` lifecycle (offline sensors in CI)
@@ -89,9 +89,11 @@ always mounts doctrine **explicitly** (never rely on ambient config alone):
 1. Gibson `AGENTS.md`
 2. Optional Gibson `local/AGENTS.local.md` (fork overlay, if present)
 3. Target repo `AGENTS.md` (if present)
-4. Role playbook — **replacement, not additive** (Law 1 / docs/18): if
-   `local/playbooks/<role>.md` exists, mount **only** that file; otherwise mount
-   core `playbooks/<role>.md`. Never mount both.
+4. Role playbook — **replacement, not additive** (Law 1 / docs/18): if no
+   role is named, the resolved role is `builder` and `playbooks/builder.md`
+   is the conditional load. If `local/playbooks/<role>.md` exists, mount
+   **only** that file; otherwise mount core `playbooks/<role>.md`. Never
+   mount both.
 5. `memory/LESSONS.md` (relevant slice)
 
 The operator path is a Gibson recipe that **references** those files on disk —

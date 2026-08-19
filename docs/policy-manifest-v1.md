@@ -33,16 +33,17 @@ The candidate carries:
 - stable **schema id / schema version**, **manifest id / version**
 - **status** `candidate`, **authority** `report-only`, **activated** `false`
 - **generatorVersion** and **validatorVersion**
-- **source path + sha256 digest** provenance for doctrine files it encodes
+- **source path + sha256 digest** provenance: `AGENTS.md` is `human-readable-contract`; non-normative `docs/` pins are `explanatory-history` (never `canonical-doctrine`)
 - a documented **compatibility** policy (semver major break; namespaced forks)
 
-It encodes, without adding/removing/tightening/loosening approved semantics:
+It encodes, without adding/removing/tightening/loosening approved semantics
+owned by `AGENTS.md`:
 
-- human gates **G1–G16** (`docs/14-human-gates.md`)
-- risk tiers **A / B / C** and evidence minimums (`docs/06-quality-gates.md`)
-- nine roles and forbidden same-unit pairs (`docs/03-roles.md`)
+- human gates **G1–G16** (authority: `AGENTS.md`; `docs/14` is explanatory history)
+- risk tiers **A / B / C** and evidence minimums (authority: `AGENTS.md`; `docs/06` is explanation)
+- nine roles and forbidden same-unit pairs (authority: `AGENTS.md`; `docs/03` is explanation)
 - review-independence relationships (Law 5, tier floors, Tier C → G12)
-- workflow stage names **plan → retro** (`docs/02-sdlc-pipeline.md`)
+- workflow stage names **plan → retro** (authority: `AGENTS.md`; `docs/02` is explanation)
 
 ## What this is not
 

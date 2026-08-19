@@ -35,6 +35,13 @@
       "role/job dispatch prompt"
     ]
   },
+  "defaultRole": {
+    "id": "builder",
+    "whenUnnamed": true,
+    "path": "playbooks/builder.md",
+    "note": "If no role is named, the resolved role is builder and playbooks/builder.md is the conditionally mandatory session-start load."
+  },
+  "roleContractsPath": "config/policy/role-contracts.v1.json",
   "sessionStartNotBudgeted": [
     "local/AGENTS.local.md",
     "<target>/AGENTS.md",
@@ -53,6 +60,7 @@
   "machineCanonical": {
     "humanGates": "AGENTS.md",
     "roles": "AGENTS.md",
+    "roleContracts": "config/policy/role-contracts.v1.json",
     "riskTiers": "AGENTS.md",
     "workflowStages": "AGENTS.md",
     "forbiddenRolePairs": "AGENTS.md",
@@ -74,7 +82,8 @@
     "scripts/setup-hooks.sh",
     "scripts/release-claim.sh",
     "config/policy/mandatory-read-chain.v1.json",
-    "config/policy/rule-migration-audit.v1.json"
+    "config/policy/rule-migration-audit.v1.json",
+    "config/policy/role-contracts.v1.json"
   ],
   "requiredRulePatterns": [
     "sole always-mandatory human-readable",
@@ -126,7 +135,15 @@
     {
       "id": "six-lens-review",
       "label": "Six-lens review with file:line findings",
-      "patterns": ["six lenses", "file:line", "Correctness", "Consent / PII"]
+      "section": "Review lenses (binding)",
+      "requiredItems": [
+        "Correctness",
+        "Security",
+        "Consent / PII",
+        "Money",
+        "Performance",
+        "Maintainability"
+      ]
     },
     {
       "id": "tier-c-adversarial-tests",
@@ -156,7 +173,7 @@
     {
       "id": "role-outputs-prohibitions",
       "label": "Per-role outputs and prohibitions",
-      "patterns": ["| planner |", "| reviewer |", "| security |", "| release |"]
+      "section": "Your role this session"
     }
   ],
   "forbiddenContractPatterns": [
@@ -170,7 +187,10 @@
     {
       "path": "README.md",
       "patterns": [
-        "Rules, roles, gates, playbooks every agent follows | `AGENTS.md`, `docs/`, `playbooks/`"
+        "Rules, roles, gates, playbooks every agent follows | `AGENTS.md`, `docs/`, `playbooks/`",
+        "The development team: nine roles, their contracts and handoffs",
+        "The only reasons an agent may stop",
+        "The complete list of mandatory stops fits on one page: [docs/14-human-gates.md](docs/14-human-gates.md)"
       ]
     }
   ],

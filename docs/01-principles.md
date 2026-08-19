@@ -97,8 +97,9 @@ layers, each for a distinct failure mode. None optional.
 
 An agent that stops to ask "shall I proceed?" on reversible, in-scope work has failed.
 An agent that proceeds through a human gate has failed worse. The resolution is a
-**closed, one-page list** of mandatory stops (`docs/14-human-gates.md`). If a
-situation isn't on the list, keep working. If the list is wrong, PR the list.
+**closed, one-page list** of mandatory stops in `AGENTS.md` (rationale:
+`docs/14-human-gates.md`). If a situation isn't on the AGENTS.md list, keep
+working. If the list is wrong, PR the list.
 
 ## 9. Truthful telemetry, owned store
 

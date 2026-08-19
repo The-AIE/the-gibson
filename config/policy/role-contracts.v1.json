@@ -1,0 +1,172 @@
+{
+  "schemaId": "gibson.role-contracts.v1",
+  "schemaVersion": "1.0.0",
+  "authority": "activated",
+  "designatedBy": "AGENTS.md",
+  "note": "Authoritative per-role outputs, gates, and prohibitions. Playbook frontmatter is a routing mirror of this file and must not add, drop, rename, weaken, or negate these obligations. This file is not the report-only #164 candidate.",
+  "roles": {
+    "planner": {
+      "outputs": [
+        "PLAN.md (or GitHub Discussion) with problem, scope/non-scope, architecture sketch, risks, deliverables with numbered testable acceptance criteria",
+        "for UI work: design language (typography, color, spacing, aesthetic intent)",
+        "Operator translation when Operator-tier (doc 16) — plain summary is contractual"
+      ],
+      "gates": [
+        "human approves the plan (Stage 0 — cheapest place to be wrong)",
+        "constrain to deliverables, not granular implementation detail"
+      ],
+      "forbidden": [
+        "writing implementation code",
+        "over-specifying how builders must implement"
+      ]
+    },
+    "decomposer": {
+      "outputs": [
+        "dependency-ordered GitHub issues, each one mergeable unit with sprint contract",
+        "epic/tracking issue linking children and mirroring PLAN deliverables"
+      ],
+      "gates": [
+        "scripts/decompose-lint.mjs passes",
+        "second agent spot-check for overlap and oversized units",
+        "no issues that overlap live claims"
+      ],
+      "forbidden": [
+        "issues without contracts",
+        "parallel issues that both claim the same hot file without Blocked-by",
+        "schema changes as riders on feature issues"
+      ]
+    },
+    "builder": {
+      "outputs": [
+        "claim row + agent-claimed label",
+        "git worktree + branch feat/<issue>-<slug>",
+        "green-gate-passing commits (Signed-off-by)",
+        "PR referencing Closes #<N>; contract criteria addressed"
+      ],
+      "gates": [
+        "claim before touch (docs/05)",
+        "green gate before every commit (docs/06)",
+        "zero new failures vs. branch-point baseline",
+        "never edit the canonical checkout"
+      ],
+      "forbidden": [
+        "editing outside claimed scope",
+        "editing the canonical checkout",
+        "merging",
+        "reviewing own work",
+        "casual new dependencies (prefer REST/fetch; hot-file rule on package.json)"
+      ]
+    },
+    "test-engineer": {
+      "outputs": [
+        "executable checks for every contract criterion",
+        "regression test for every bug fixed",
+        "criterion → test ID map on the PR",
+        "reduced test.todo count on feature PRs"
+      ],
+      "gates": [
+        "CI test job green",
+        "criterion coverage complete (not % coverage — criterion coverage)",
+        "no weakening/deleting failing tests to pass the gate"
+      ],
+      "forbidden": [
+        "deleting or softening failing tests to go green",
+        "happy-path-only on Tier C (adversarial cases required)"
+      ]
+    },
+    "reviewer": {
+      "outputs": [
+        "PR review with file:line findings across six lenses",
+        "final line exactly: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES"
+      ],
+      "gates": [
+        "never review own generation (Law 5)",
+        "cross-vendor when available (reviewer_platform ≠ builder)",
+        "fail closed: missing/broken reviewer blocks merge",
+        "Tier C: FAN-OUT + adversarial refutation pass"
+      ],
+      "forbidden": [
+        "merging",
+        "rubber-stamp LGTM without per-lens clearance",
+        "writing implementation code in the builder's branch"
+      ]
+    },
+    "ux-evaluator": {
+      "outputs": [
+        "eval report on the PR: score table, screenshot gallery, bug filings",
+        "PASS or REQUEST_CHANGES",
+        "statement that every contract flow was driven, not assumed"
+      ],
+      "gates": [
+        "evaluate the deployment, not the diff (rule zero)",
+        "never the same agent as the builder",
+        "axe critical/serious = 0 hard fail",
+        "any grade criterion < 7 → REQUEST_CHANGES",
+        "visual diff above threshold needs explicit PR approval"
+      ],
+      "forbidden": [
+        "grading from the builder's description or the code diff alone",
+        "passing a flow you did not actually drive",
+        "writing product code in the builder's branch"
+      ]
+    },
+    "security": {
+      "outputs": [
+        "layer results table on the PR",
+        "findings as issues with severity + exploit-path reasoning",
+        "hard-fail vs report-only classification per docs/08"
+      ],
+      "gates": [
+        "hard-fail layers block merge (secrets, SAST high+, supply critical, authz, DAST high+, adversarial verdict, AI-surface, posture regression)",
+        "DAST active scan never against prod",
+        "confirmed secret leak → human gate G4"
+      ],
+      "forbidden": [
+        "report-only softening of a hard-fail layer",
+        "destructive payloads against production"
+      ]
+    },
+    "release": {
+      "outputs": [
+        "merge to integration branch",
+        "verified deploy (commit SHA + READY)",
+        "post-deploy smoke green",
+        "cleanup: worktree, branch, claim, issue closed",
+        "delivery-control audit → dry-run → human-apply when asked"
+      ],
+      "gates": [
+        "Closes #N present; contract checkboxes verified",
+        "CI green (gate + tests + security hard-fail)",
+        "review VERDICT: APPROVE; UX eval pass when applicable",
+        "DCO/Signed-off-by survives squash",
+        "Tier C / schema → human approval",
+        "one schema merge in flight fleet-wide"
+      ],
+      "forbidden": [
+        "merging Tier C or schema without human gate",
+        "more than one schema merge in flight",
+        "force-pushing main",
+        "rotating secrets (G4)",
+        "silent `--apply` without dry-run"
+      ]
+    },
+    "historian": {
+      "outputs": [
+        "LESSONS.md appends (never rewrites others' entries)",
+        "DECISIONS.md when architecture/process choices land",
+        "harness-improvement issues/PRs",
+        "weekly digest material (what learned, what changed, cost trend)"
+      ],
+      "gates": [
+        "twice-failure or uncaught failure must produce a lesson (Law 9)",
+        "harness changes go through normal pipeline",
+        "loosening human gates / tiers / hard-fail thresholds = Tier C"
+      ],
+      "forbidden": [
+        "editing lessons others wrote (append only)",
+        "letting a twice-failure pass without a lesson",
+        "silent skips of the retro sweep"
+      ]
+    }
+  }
+}

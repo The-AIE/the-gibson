@@ -168,6 +168,7 @@ mkdir -p "$SANDBOX/config/policy/candidates" "$SANDBOX/docs" "$SANDBOX/playbooks
 cp "$REPO_ROOT/AGENTS.md" "$SANDBOX/AGENTS.md"
 cp "$REPO_ROOT/config/policy/mandatory-read-chain.v1.json" "$SANDBOX/config/policy/mandatory-read-chain.v1.json"
 cp "$REPO_ROOT/config/policy/rule-migration-audit.v1.json" "$SANDBOX/config/policy/rule-migration-audit.v1.json"
+cp "$REPO_ROOT/config/policy/role-contracts.v1.json" "$SANDBOX/config/policy/role-contracts.v1.json"
 cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
   "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
 cp "$REPO_ROOT/README.md" "$SANDBOX/README.md"
@@ -188,10 +189,11 @@ write_dispatch_stub() {
   } > "$dest"
 }
 
-# Minimal dispatch-prompt stubs so closed-list measurement + set equality pass.
+# Real role playbooks so semantic parity against role-contracts.v1.json holds.
 for role in planner decomposer builder test-engineer reviewer ux-evaluator security release historian; do
-  write_dispatch_stub "$SANDBOX/playbooks/${role}.md" "$role"
+  cp "$REPO_ROOT/playbooks/${role}.md" "$SANDBOX/playbooks/${role}.md"
 done
+# Job stubs so closed-list measurement + set equality pass.
 for job in adopt delivery-control deploy-audit dogfood-overnight loop-step token-efficiency; do
   write_dispatch_stub "$SANDBOX/playbooks/${job}.md" "$job"
 done
@@ -448,18 +450,7 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION'; then
 else
   bad "mutation authority contradiction (rc=$rc): $out"
 fi
-# restore honest builder playbook
-{
-  printf '%s\n' '---'
-  printf '%s\n' 'role: builder'
-  printf '%s\n' 'gates:'
-  printf '%s\n' '  - example'
-  printf '%s\n' 'forbidden:'
-  printf '%s\n' '  - example'
-  printf '%s\n' '---'
-  printf '%s\n' '# builder'
-  printf '%s\n' '> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.'
-} > "$SANDBOX/playbooks/builder.md"
+cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
 
 # Newly marked dispatch prompt omitted from the closed list
 write_dispatch_stub "$SANDBOX/playbooks/extra-job.md" extra-job
@@ -530,6 +521,162 @@ else
   bad "mutation README claim (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/README.md" "$SANDBOX/README.md"
+
+# --- semantic weakening / negation (retain keywords, invert obligation) ---
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("  - merging\n")) throw new Error("missing merging forbidden item");
+t=t.replace("  - merging\n", "  - never skip merging\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_NEGATION|E_ROLE_WEAKENING|E_ROLE_RENAME|E_ROLE_ADDITION|E_ROLE_OMISSION'; then
+  echo "  planted role-negation failure line:"
+  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  ok "mutation: retaining keywords while negating a role prohibition fails"
+else
+  bad "mutation role negation (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - merging\n", "  - merging is optional\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_WEAKENING|E_ROLE_NEGATION|E_ROLE_RENAME|E_ROLE_ADDITION|E_ROLE_OMISSION'; then
+  echo "  planted role-weakening failure line:"
+  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  ok "mutation: retaining keywords while weakening a role prohibition fails"
+else
+  bad "mutation role weakening (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - merging\n", "");
+t=t.replace("gates:\n", "gates:\n  - merging\n");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_ADDITION|E_ROLE_OMISSION|E_ROLE_NEGATION'; then
+  echo "  planted role-moved failure line:"
+  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  ok "mutation: moving a prohibition into gates while keeping the keyword fails"
+else
+  bad "mutation role move (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("  - merging\n", "  - merging\n  - merging\n");
+t=t.replace("  - reviewing own work\n", "");
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_ROLE_DUPLICATE|E_ROLE_OMISSION'; then
+  echo "  planted role-duplicate failure line:"
+  echo "$out" | grep -E 'E_ROLE_' | sed 's/^/    /'
+  ok "mutation: duplicating one prohibition while dropping another fails"
+else
+  bad "mutation role duplicate (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
+
+# --- live docs/README/candidate contradiction fixtures ---
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-14-closed-list.md" \
+  "$SANDBOX/docs/14-human-gates.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'closed-list'; then
+  echo "  planted live-docs-14 contradiction failure line:"
+  echo "$out" | grep 'E_AUTHORITY_CONTRADICTION' | sed 's/^/    /'
+  ok "fixture: live docs/14 non-normative banner + closed operative list fails"
+else
+  bad "fixture docs/14 contradiction (rc=$rc): $out"
+fi
+{
+  printf '%s\n' '# stub'
+  printf '%s\n' '> **Authority:** Non-normative. Binding rules live in AGENTS.md.'
+} > "$SANDBOX/docs/14-human-gates.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/readme-docs-as-authority.md" \
+  "$SANDBOX/README.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_REPO_CLAIM'; then
+  echo "  planted live-README contradiction failure line:"
+  echo "$out" | grep 'E_REPO_CLAIM' | sed 's/^/    /'
+  ok "fixture: live README docs/03 contracts + docs/14 stop-authority rows fail"
+else
+  bad "fixture README contradiction (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/README.md" "$SANDBOX/README.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const c=JSON.parse(fs.readFileSync(p,"utf8"));
+for (const s of c.provenance.sources) {
+  if (String(s.path).startsWith("docs/")) s.role = "canonical-doctrine";
+}
+fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+' "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_PROVENANCE_ROLE'; then
+  echo "  planted candidate-canonical-doctrine failure line:"
+  echo "$out" | grep 'E_PROVENANCE_ROLE' | sed 's/^/    /'
+  ok "fixture: live candidate canonical-doctrine provenance on docs/ fails"
+else
+  bad "fixture candidate canonical-doctrine (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/config/policy/candidates/gibson-core-v1.candidate.json" \
+  "$SANDBOX/config/policy/candidates/gibson-core-v1.candidate.json"
+
+# --- default builder cannot skip playbooks/builder.md ---
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  /If no role is named, the resolved role is `builder`[\s\S]*?including default assignment\./,
+  "If no role is named, the resolved role is `builder`. Default builder may skip playbooks/builder.md."
+);
+t=t.replace(
+  /If no role is named, the resolved role is `builder` and `playbooks\/builder\.md` is that load \(including default\nassignment\)\./,
+  "If no role is named, the resolved role is `builder`. Default builder may skip playbooks/builder.md."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_DEFAULT_BUILDER'; then
+  echo "  planted default-builder-skip failure line:"
+  echo "$out" | grep 'E_DEFAULT_BUILDER' | sed 's/^/    /'
+  ok "mutation: default builder skipping playbooks/builder.md fails"
+else
+  bad "mutation default-builder skip (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+rm -f "$SANDBOX/playbooks/builder.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Eq 'E_DEFAULT_BUILDER|E_DISPATCH_PROMPT_MISSING' && echo "$out" | grep -q 'playbooks/builder.md'; then
+  echo "  planted missing-default-builder-playbook failure line:"
+  echo "$out" | grep -E 'E_DEFAULT_BUILDER|E_DISPATCH_PROMPT_MISSING' | sed 's/^/    /'
+  ok "mutation: unnamed/default builder with playbooks/builder.md missing fails"
+else
+  bad "mutation missing default builder playbook (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
 
 echo
 echo "contract-authority.test.sh: $PASS passed, $FAIL failed"

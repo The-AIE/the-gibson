@@ -14,7 +14,7 @@ you can audit.
 > - 🍴 **"I want to fork this for my own team."** Read
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
 >   `local/`, keep getting upstream improvements.
-> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md) (always mandatory). If a role is dispatched, also load that role playbook. If no role is named, you are a builder and must load [playbooks/builder.md](playbooks/builder.md). If a job is dispatched, also load that job's dispatch prompt. `docs/` is on-demand and non-normative.
+> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md) (always mandatory). If a role is dispatched, also load that role playbook. If a job is dispatched, also load that job's dispatch prompt. `docs/` is on-demand and non-normative.
 > - 📚 **Reading order by audience:** [docs/00-INDEX.md](docs/00-INDEX.md) ·
 >   [FAQ.md](FAQ.md) · [docs/00-glossary.md](docs/00-glossary.md)
 >
@@ -107,7 +107,7 @@ flowchart LR
 
 | Piece | Job |
 |---|---|
-| Roles | planner · decomposer · builder · test-engineer · reviewer · ux-evaluator · security · release · historian — contracts in [AGENTS.md](AGENTS.md); explanation in [docs/03](docs/03-roles.md) |
+| Roles | planner · decomposer · builder · test-engineer · reviewer · ux-evaluator · security · release · historian — [docs/03](docs/03-roles.md) |
 | Stores | Gibson `memory/` (durable) + MC memory table (runtime) — [docs/09](docs/09-memory-and-self-improvement.md) |
 | MC | Who works; Gibson = how they work |
 
@@ -128,9 +128,8 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 5. **Agent-agnostic core, vendor-thin edges.** If a rule only works in one vendor's
    runtime, it isn't doctrine yet.
 6. **Autonomy by default, human gates by exception.** Agents do not stop to ask
-   permission for reversible work inside a claimed scope. The closed stop list
-   is in [AGENTS.md](AGENTS.md); [docs/14-human-gates.md](docs/14-human-gates.md)
-   is on-demand rationale only.
+   permission for reversible work inside a claimed scope. The complete list of
+   mandatory stops fits on one page: [docs/14-human-gates.md](docs/14-human-gates.md).
 
 ## Documentation map
 
@@ -143,7 +142,7 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [AGENTS.md](AGENTS.md) | **Agents start here.** The operational contract every agent loads first |
 | [docs/01-principles.md](docs/01-principles.md) | Design principles and the research they came from |
 | [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md) | The full pipeline, stage by stage, with gates |
-| [docs/03-roles.md](docs/03-roles.md) | Explanation of the nine roles (binding contracts live in AGENTS.md) |
+| [docs/03-roles.md](docs/03-roles.md) | The development team: nine roles, their contracts and handoffs |
 | [docs/04-plan-to-issues.md](docs/04-plan-to-issues.md) | Decomposing a plan into well-scoped issues with sprint contracts |
 | [docs/05-concurrency.md](docs/05-concurrency.md) | Worktrees, scope claims, hot files, lane limits |
 | [docs/06-quality-gates.md](docs/06-quality-gates.md) | The green gate, review tiers, and lens system |
@@ -154,7 +153,7 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/11-solo-loop.md](docs/11-solo-loop.md) | Single-platform continuous mode (one agent, e.g. Grok, runs the whole loop) |
 | [docs/12-vercel.md](docs/12-vercel.md) | Deployment doctrine: previews, promotion, schema safety |
 | [docs/13-adoption.md](docs/13-adoption.md) | Installing The Gibson into a target repo |
-| [docs/14-human-gates.md](docs/14-human-gates.md) | Rationale and history for the G1–G16 stops listed in AGENTS.md |
+| [docs/14-human-gates.md](docs/14-human-gates.md) | The only reasons an agent may stop |
 | [docs/15-model-economics.md](docs/15-model-economics.md) | Which model for which task: G/S/F grades, flat-rate-first, escalation ladder |
 | [docs/16-nontechnical-operation.md](docs/16-nontechnical-operation.md) | Operator tier: chat-only interface, decision cards, the never-stuck ladder |
 | [docs/17-deployment-optimization.md](docs/17-deployment-optimization.md) | Inspecting & optimizing the deployment target: rendering, caching, cost, field vitals |

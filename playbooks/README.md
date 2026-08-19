@@ -10,8 +10,10 @@ nav_exclude: true
 
 Conditionally mandatory dispatch prompts when a role/job is active — not a
 second contract. Binding commit/PR/merge rules live only in
-[AGENTS.md](../AGENTS.md). One file per role ([docs/03](../docs/03-roles.md))
-plus loop, adopt, and deploy-audit helpers. A playbook = YAML frontmatter
+[AGENTS.md](../AGENTS.md). If no role is named, the resolved role is builder
+and [builder.md](builder.md) is the session-start load. One file per role
+(explanation: [docs/03](../docs/03-roles.md)) plus loop, adopt, and
+deploy-audit helpers. A playbook = YAML frontmatter
 (role, inputs, outputs, gates, forbidden as **routing mirrors** of AGENTS.md) +
 the full dispatch prompt + a **How to use this** section with copy-paste
 examples. Frontmatter must not introduce obligations absent from AGENTS.md.
