@@ -6,6 +6,9 @@ nav_order: 18
 
 # 18 — Fork & Upstream: Customize Without Losing Updates
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Make your own copy, customize it for your team, and still pull
 > in improvements from the original. Your local tweaks stay separate so updates do not
 > wipe them out.

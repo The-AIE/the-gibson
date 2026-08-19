@@ -1,5 +1,8 @@
 # 20 — Multi-Model Orchestration: the Coordinator Pattern
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 How one persistent coordinator model runs a fleet of stateless worker models
 (implementers and reviewers from different vendors) without shared memory,
 shared inboxes, or humans relaying status. Captured from live operation of the

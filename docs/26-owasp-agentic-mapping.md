@@ -5,6 +5,9 @@ nav_exclude: true
 
 # OWASP Agentic Top 10 ↔ Gibson's eight security layers
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 **Audience:** Adopters, security reviewers, buyers who already speak
 [OWASP Agentic](https://genai.owasp.org/initiatives/agentic-security-initiative/)
 vocabulary and want an honest map of what The Gibson covers at **build time**.

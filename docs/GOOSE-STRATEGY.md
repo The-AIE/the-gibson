@@ -6,6 +6,9 @@ nav_order: 22
 
 # Goose Strategy — build The Gibson on Goose's engine, own the front door
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Goose is an open-source AI-agent engine run by a
 > neutral foundation. Instead of building and maintaining our own plumbing
 > (the agent loop, tool connections, run configs), The Gibson will run on

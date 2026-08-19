@@ -6,6 +6,9 @@ nav_order: 23
 
 # 23 — Delivery Control: Who Can Write Production
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Before the crew merges code that goes live, we check that
 > the *door to production* is locked the right way — reviews required, tests green,
 > and no secret shortcuts for admins. This chapter is that lock checklist. Rotating

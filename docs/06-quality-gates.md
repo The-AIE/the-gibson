@@ -6,6 +6,9 @@ nav_order: 6
 
 # 06 — Quality Gates: Green Gate, Tiers, Lenses
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Before any change is saved, automatic checks must pass: does
 > the code type-check, stay clean, pass tests, and build? Harder or riskier changes get
 > stricter review. Nothing ships on hope alone.

@@ -6,6 +6,9 @@ nav_order: 25
 
 # Autonomy modes — Crew Chief / downstream boundary
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** four settings for how much the AI may do alone, plus
 > per-tool overrides for dangerous actions. This page **defines and maps** the
 > modes so adapters and products share vocabulary. It does **not** adopt new

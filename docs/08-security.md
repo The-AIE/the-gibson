@@ -6,6 +6,9 @@ nav_order: 8
 
 # 08 — The Security Testing System
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Safety is eight layers of checks — from leaked passwords to
 > who can access what. Some failures hard-stop a release; others open a ticket to fix
 > later. Soft warnings are temporary, never a permanent resting place.

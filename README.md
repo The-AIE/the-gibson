@@ -14,7 +14,7 @@ you can audit.
 > - 🍴 **"I want to fork this for my own team."** Read
 >   [docs/18-fork-and-upstream.md](docs/18-fork-and-upstream.md) — customize in
 >   `local/`, keep getting upstream improvements.
-> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md). That's your contract.
+> - 🤖 **"I'm an agent."** Load [AGENTS.md](AGENTS.md) (always mandatory). If a role is dispatched, also load that role playbook. If a job is dispatched, also load that job's dispatch prompt. `docs/` is on-demand and non-normative.
 > - 📚 **Reading order by audience:** [docs/00-INDEX.md](docs/00-INDEX.md) ·
 >   [FAQ.md](FAQ.md) · [docs/00-glossary.md](docs/00-glossary.md)
 >
@@ -46,7 +46,7 @@ Three layers:
 
 | Layer | What | Where |
 |---|---|---|
-| **Doctrine** | Rules, roles, gates, playbooks every agent follows | `AGENTS.md`, `docs/`, `playbooks/` |
+| **Doctrine** | Binding contract in `AGENTS.md`; role/job playbooks are conditional dispatch prompts; `docs/` is on-demand explanation | `AGENTS.md` (authority), `playbooks/` (conditional), `docs/` (non-normative) |
 | **Enforcement** | Deterministic gates that don't care who wrote the code | `ci/`, `scripts/`, target-repo CI |
 | **Memory** | Versioned lessons, decisions, incidents — the self-improvement substrate | `memory/` |
 
@@ -167,7 +167,7 @@ Full detail: [docs/02-sdlc-pipeline.md](docs/02-sdlc-pipeline.md)
 | [docs/DOC-BACKLOG.md](docs/DOC-BACKLOG.md) | Documentation build-out queue |
 | [docs/examples/](docs/examples/) | Worked PLAN→issues, UX eval, authz matrix samples |
 | [docs/troubleshooting/](docs/troubleshooting/) | Loop, claims, preview URL, ZAP, visual flake |
-| [playbooks/](playbooks/) | Role dispatch prompts + adopt/loop |
+| [playbooks/](playbooks/) | Role/job dispatch prompts |
 | [scripts/](scripts/) | claim, gate, loop, posture, upstream-sync, … |
 | [ci/](ci/) | Reusable workflow templates |
 | [adapters/](adapters/) | Claude Code / Codex / Grok / Hermes runners + Devin cloud supervisor setup |

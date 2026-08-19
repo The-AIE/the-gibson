@@ -6,6 +6,9 @@ nav_order: 2
 
 # 02 — The SDLC Pipeline
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Building software here is like an assembly line with ten
 > stations. Every station takes something in, produces something out, and has a
 > checkpoint. You cannot skip a station just because you feel confident.
