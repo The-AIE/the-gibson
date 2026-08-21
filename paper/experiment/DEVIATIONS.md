@@ -267,6 +267,17 @@ Verified on the host, same day, all three in one probe:
 - `curl https://api.github.com/` → `HTTP:200` — **vector A is NOT closed.** Stated here
   rather than implied away.
 
+**The control is an allowlist, not a denylist — this matters for coverage.** `extends =
+"strict"` confines reads to the working directory plus system paths; the `deny` list is
+belt-and-braces, not load-bearing. Probed the same day: under the `ab219` profile,
+`ls /Users/dev` itself returns `Operation not permitted`. So local copies of the
+repository that nobody enumerated are covered **by construction** rather than by having been
+listed. That was checked against real examples: a filesystem scan found two further
+target-app checkouts outside the deny list — `/Users/example-org/target-app` and
+`/Users/dev/cos-bakeoff/target-app` — and both were denied by the profile anyway
+(`Operation not permitted`). Independently, neither contains the fixing commit
+`9e4b1b89…` (they track a different fork), but the coverage argument does not rest on that.
+
 **3. What actually closes vector A, and what does not.**
 
 Raw outbound sockets remain available; that is not fixable for Grok on macOS. The *specific*
