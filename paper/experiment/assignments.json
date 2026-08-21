@@ -1,8 +1,8 @@
 {
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
- "deviation": "D-1 — see DEVIATIONS.md",
- "revised": "2026-08-19 (r4, third cross-vendor pass)",
+ "deviation": "D-1, D-2 — see DEVIATIONS.md",
+ "revised": "2026-08-21 (D-2 — network isolation both arms; pending cross-vendor review)",
  "seed": 219,
  "target_n": 12,
  "design": "frozen replay set",
@@ -11,7 +11,14 @@
   "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
   "checkout_rule": "fresh mktemp -d scratch dir; git init + fetch --depth 1 --no-tags at base_commit; remote removed; NEVER reused",
   "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers — any failed assertion or audit hit voids the run",
-  "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch"
+  "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch",
+  "dependency_provisioning": "coordinator runs `npm ci && npx prisma generate` in the scratch tree BEFORE dispatch, with network; install time/tokens excluded from metrics 3-4 in both arms; node_modules is git-ignored and derives only from the base commit's lockfile",
+  "network_isolation": "BOTH arms (owner decision 2026-08-21): implementer runs under `codex exec -s workspace-write` with GH_TOKEN/GITHUB_TOKEN scrubbed — child-process network egress denied, kernel-enforced (Seatbelt), verified on host 2026-08-21 (curl -> could not resolve host). Grok is NOT a valid replay implementer on macOS: its child-network blocking is Linux-only and measured as a no-op here (curl -> HTTP:200).",
+  "implementer_platform": "codex, both arms — forced by the macOS sandbox limitation above, not by preference; holds platform constant across arms and removes a confound",
+  "judge": "Devin only. Codex implements both arms and is disqualified by the registered 'implemented neither arm' rule; Claude never judges. If Devin is unavailable, judging blocks rather than falling back.",
+  "harness_reviewer": "Grok (not Codex, which implements), also network-denied",
+  "brief_sanitization": "issue title+body with every #NNNN replaced by an opaque token ([REF-A], [REF-B], ...), every owner/repo slug and URL removed; sanitized text stored at paper/experiment/briefs/<code-name>.txt and given verbatim to the blind judge as the task statement",
+  "void_run_rule": "a run failing any leakage layer leaves status at 'ready' and appends to that task's void_runs array; void runs are reported as attempts-per-completed-task, never silently dropped"
  },
  "eligibility": {
   "include": "Tier A/B product issues, closed, with exactly one merged fixing PR",
@@ -47,7 +54,21 @@
    "fixing_pr": 1351,
    "merge_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
    "base_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
-   "status": "ready"
+   "status": "ready",
+   "void_runs": [
+    {
+     "date": "2026-08-21",
+     "arm": "raw",
+     "implementer": "grok (no network isolation available on macOS)",
+     "cause": "leakage — transcript audit hit: first action was `gh issue view 1245`; then read fixing PR #1351, its merge commit, and post-fix contents of two edited files via `gh api .../contents?ref=<merge_commit>`",
+     "layers": "census PASS; blind brief PASS; transcript audit HIT",
+     "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-VOID.ndjson",
+     "wall_clock": "5m41s (recorded, not counted)",
+     "tokens": "233936 in / 28056 out / 2961920 cache-read (recorded, not counted)",
+     "inference_cost_usd": null,
+     "cost_note": "missing, not estimated — the Grok CLI transcript carries token counts but no cost figure"
+    }
+   ]
   },
   {
    "id": "cos#1220",
