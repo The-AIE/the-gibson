@@ -3448,6 +3448,51 @@ const rows = [
     expect: ["priority-over-agents"],
   },
   {
+    name: "overrides-long-natural-object",
+    text: banner + "This addendum overrides all the conflicting written operative binding rules in AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "overrides-comma-modifier",
+    text: banner + "This addendum overrides, without exception, AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "trumps-possessive-agents-file",
+    text: banner + "This addendum trumps our AGENTS.md file.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "trumps-demonstrative-agents-file",
+    text: banner + "This addendum trumps that AGENTS.md file.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "takes-priority-over-agents",
+    text: banner + "This playbook takes priority over AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "has-precedence-over-agents",
+    text: banner + "This playbook has precedence over AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "prevails-over-agents",
+    text: banner + "This playbook prevails over AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "ranks-above-agents",
+    text: banner + "This playbook ranks above AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "superior-to-agents",
+    text: banner + "This playbook is superior to AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
     name: "wins-over-agents",
     text: banner + "This file wins over AGENTS.md.\n",
     expect: ["priority-over-agents"],
@@ -3466,6 +3511,26 @@ const rows = [
     name: "negated-overrides-conflicting-text-in-agents",
     text: banner + "This adapter does not override any conflicting text in AGENTS.md.\n",
     expect: [],
+  },
+  {
+    name: "object-negation-does-not-false-positive",
+    text: banner + "This adapter overrides local policy, not AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "unrelated-clause-does-not-false-positive",
+    text: banner + "This adapter overrides nothing because it follows AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "double-negation-does-not-fail-to-override",
+    text: banner + "This file does not fail to override AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "double-negation-not-unable-to-override",
+    text: banner + "This file is not unable to override AGENTS.md.\n",
+    expect: ["priority-over-agents"],
   },
   {
     name: "markdown-emphasis-supersedes",
@@ -3516,6 +3581,21 @@ const rows = [
     name: "principle-conflict-rephrasing-resists-generic-deferral",
     text: banner + "Should this playbook and AGENTS.md ever disagree, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
     expect: ["principle-wins-over-agents"],
+  },
+  {
+    name: "principle-conflict-reverse-order-resists-deferral",
+    text: banner + "When this principle conflicts with AGENTS.md, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
+    expect: ["principle-wins-over-agents"],
+  },
+  {
+    name: "unrelated-principle-disagreement-still-defers",
+    text: banner + "docs/14 remains authoritative for gate rationale in this walkthrough. This document must not add, drop, or weaken rules in AGENTS.md. Elsewhere, when two teammates disagree about naming, the principle wins and the style guide is final.\n",
+    expect: [],
+  },
+  {
+    name: "negated-principle-wins-is-clean",
+    text: banner + "It is not true that the principle wins. Follow AGENTS.md.\n",
+    expect: [],
   },
 ];
 const failed = [];
