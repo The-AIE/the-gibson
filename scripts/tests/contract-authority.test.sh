@@ -3453,6 +3453,21 @@ const rows = [
     expect: ["priority-over-agents"],
   },
   {
+    name: "overrides-hard-wrapped-natural-object",
+    text: banner + "This chapter overrides all conflicting rules in\nAGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "overrides-coordinated-natural-object",
+    text: banner + "This chapter overrides the terms and conditions of AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "takes-precedence-over-coordinated-rules",
+    text: banner + "This playbook takes precedence over the commit and merge rules of AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
     name: "overrides-comma-modifier",
     text: banner + "This addendum overrides, without exception, AGENTS.md.\n",
     expect: ["priority-over-agents"],
@@ -3523,6 +3538,41 @@ const rows = [
     expect: [],
   },
   {
+    name: "citation-as-described-does-not-false-positive",
+    text: banner + "This adapter overrides the vendor default, as described in AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "citation-recorded-does-not-false-positive",
+    text: banner + "A local overlay wins over the upstream defaults recorded in AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "colon-clause-does-not-false-positive",
+    text: banner + "This guide overrides nothing at all: the operative rules stay in AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "dash-citation-does-not-false-positive",
+    text: banner + "The recipe overrides the default lint step — see AGENTS.md for the binding contract.\n",
+    expect: [],
+  },
+  {
+    name: "noun-overrides-live-does-not-false-positive",
+    text: banner + "Vendor overrides live in adapters/, never in AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "noun-overrides-are-does-not-false-positive",
+    text: banner + "Config overrides are merged before the agent loads AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "noun-trumps-card-does-not-false-positive",
+    text: banner + "The role trumps card is a mnemonic, summarizing AGENTS.md.\n",
+    expect: [],
+  },
+  {
     name: "double-negation-does-not-fail-to-override",
     text: banner + "This file does not fail to override AGENTS.md.\n",
     expect: ["priority-over-agents"],
@@ -3530,6 +3580,11 @@ const rows = [
   {
     name: "double-negation-not-unable-to-override",
     text: banner + "This file is not unable to override AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "double-negation-never-fails-to-override",
+    text: banner + "This file never fails to override AGENTS.md.\n",
     expect: ["priority-over-agents"],
   },
   {
@@ -3585,6 +3640,21 @@ const rows = [
   {
     name: "principle-conflict-reverse-order-resists-deferral",
     text: banner + "When this principle conflicts with AGENTS.md, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
+    expect: ["principle-wins-over-agents"],
+  },
+  {
+    name: "principle-conflict-long-same-sentence-resists-deferral",
+    text: banner + "Where AGENTS.md and the design principles in this chapter conflict, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
+    expect: ["principle-wins-over-agents"],
+  },
+  {
+    name: "principle-conflict-linked-next-sentence-resists-deferral",
+    text: banner + "This playbook and AGENTS.md sometimes disagree. In that case, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
+    expect: ["principle-wins-over-agents"],
+  },
+  {
+    name: "principle-conflict-linked-where-they-do-resists-deferral",
+    text: banner + "This playbook and AGENTS.md can conflict. Where they do, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
     expect: ["principle-wins-over-agents"],
   },
   {
