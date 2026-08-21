@@ -880,9 +880,10 @@ function maskPreservingNewlines(text) {
 
 /**
  * Remove inert Markdown regions before authority-claim scanning while
- * preserving offsets. Fenced examples and HTML comments are evidence or
- * commentary, not operative prose. Inline Markdown delimiters become spaces
- * so ordinary emphasis and code spans cannot evade a matcher.
+ * preserving offsets. Fenced examples are inert. HTML comments remain
+ * scan-visible because agent harnesses ingest them as prompt context. Inline
+ * Markdown delimiters become spaces so ordinary emphasis and code spans
+ * cannot evade a matcher.
  */
 function authorityClaimHaystack(text) {
   const original = String(text || "");
@@ -918,9 +919,7 @@ function authorityClaimHaystack(text) {
   if (fence && fenceStart >= 0) {
     masked = masked.slice(0, fenceStart) + original.slice(fenceStart);
   }
-  return masked
-    .replace(/<!--[\s\S]*?-->/g, maskPreservingNewlines)
-    .replace(/[`*_]/g, " ");
+  return masked.replace(/[`*_]/g, " ");
 }
 
 function splitAroundPhrase(unit, phrase) {
@@ -1675,9 +1674,20 @@ export function diffObligationMatrix(id, authByBucket, pbByBucket) {
 // occurrence independently classifiable: a benign noun/citation occurrence
 // cannot swallow a later live claim in the same sentence.
 const AGENTS_PRIORITY_VERB_RE =
-  /\b(?:overrides?|trumps?|prevails?\s+over|(?:takes?|has)\s+(?:precedence|priority)\s+over|wins?\s+over|ranks?\s+above|is\s+superior\s+to)\b/i;
-const AGENTS_SUPERSEDE_VERB_RE = /\bsupersed(?:e|es|ing)\b/i;
-const AGENTS_OUTRANK_VERB_RE = /\boutranks?\b/i;
+  /\b(?:overrid(?:e|es|ing|den)|overrode|trump(?:s|ed|ing)?|prevail(?:s|ed|ing)?\s+over|(?:take|takes|took|taking|has|had)\s+(?:precedence|priority)\s+over|(?:win|wins|won|winning)\s+over|rank(?:s|ed|ing)?\s+above|(?:is|was|are|were)\s+superior\s+to)\b/i;
+const AGENTS_SUPERSEDE_VERB_RE = /\bsupersed(?:e|es|ing|ed)\b/i;
+const AGENTS_OUTRANK_VERB_RE = /\boutrank(?:s|ed|ing)?\b/i;
+const AUTHORITY_SELF_NOUN_SRC =
+  "(?:file|document|chapter|playbook|adapter|guide|addendum|overlay|recipe|appendix|section)";
+const AUTHORITY_SELF_SUBJECT_RE = new RegExp(
+  `\\b(?:(?:this|the|our|that)\\s+(?:(?:[A-Za-z][A-Za-z'-]*)\\s+){0,2}${AUTHORITY_SELF_NOUN_SRC}|it|this)\\s*$`,
+  "i"
+);
+const SELF_AUTHORITATIVE_RE = new RegExp(
+  `\\b(?:this|the|our|that)\\s+(?:(?:[A-Za-z][A-Za-z'-]*)\\s+){0,2}${AUTHORITY_SELF_NOUN_SRC}\\s+is\\s+(?:the\\s+)?(?:(?:authoritative\\b(?!\\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\\b))|binding contract|source of truth|canonical source)\\b`,
+  "i"
+);
+const AGENTS_SUBORDINATE_RE = /\bAGENTS\.md\s+is\s+subordinate\b/i;
 const AUTHORITY_RELATION_PATTERNS = [
   AGENTS_PRIORITY_VERB_RE,
   AGENTS_SUPERSEDE_VERB_RE,
@@ -1701,10 +1711,7 @@ function priorityMatchDirectlyTargetsAgents(para, matchIdx, matchLen) {
   const searchEnd = Math.min(sentenceEnd, relationEnd + 320);
   const { before } = localClaimSpan(src, matchIdx, matchLen);
   const subject = collapseWs(authorityClaimHaystack(before));
-  const selfAuthoritySubject =
-    /\b(?:(?:this|the|our|that)\s+(?:file|document|chapter|playbook|adapter|guide|addendum|overlay|recipe|appendix|section)|it|this)\s*$/i.test(
-      subject
-    );
+  const selfAuthoritySubject = AUTHORITY_SELF_SUBJECT_RE.test(subject);
   const agentsRe = /\bAGENTS\.md\b/gi;
   agentsRe.lastIndex = relationEnd;
   let agents;
@@ -1717,7 +1724,6 @@ function priorityMatchDirectlyTargetsAgents(para, matchIdx, matchLen) {
         gap
       ) ||
       /\|/.test(gap) ||
-      /\b(?:because|although|though|whereas|while|yet)\b/i.test(gap) ||
       /\b(?:as\s+(?:described|documented|stated|shown|recorded)|according\s+to|see|refer(?:red)?\s+to|pointer\s+to|summariz(?:e|es|ed|ing)|alongside)\b/i.test(
         gap
       ) ||
@@ -1842,11 +1848,11 @@ const OPERATIVE_CLAIM_PATTERNS = [
   },
   {
     id: "agents-subordinate",
-    re: /\bAGENTS\.md\s+is\s+subordinate\b/i,
+    re: AGENTS_SUBORDINATE_RE,
   },
   {
     id: "self-authoritative",
-    re: /\bthis (?:file|document|chapter) is (?:the )?(?:(?:authoritative\b(?!\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\b))|binding contract|source of truth|canonical source)\b/i,
+    re: SELF_AUTHORITATIVE_RE,
   },
   {
     id: "docs-01-19-are-the-spec",
@@ -1889,10 +1895,8 @@ function paragraphConflictsWithAgents(para) {
   const p = collapseWs(authorityClaimHaystack(para));
   return (
     paragraphHasLiveAuthorityRelation(para) ||
-    /\bAGENTS\.md is subordinate\b/i.test(p) ||
-    /\bthis (?:file|document|chapter) is (?:the )?(?:(?:authoritative\b(?!\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\b))|binding contract|source of truth|canonical source)\b/i.test(
-      p
-    )
+    AGENTS_SUBORDINATE_RE.test(p) ||
+    SELF_AUTHORITATIVE_RE.test(p)
   );
 }
 
