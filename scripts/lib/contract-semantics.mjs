@@ -885,14 +885,17 @@ function maskPreservingNewlines(text) {
  * so ordinary emphasis and code spans cannot evade a matcher.
  */
 function authorityClaimHaystack(text) {
-  const lines = String(text || "").match(/.*(?:\r?\n|$)/g) || [];
+  const original = String(text || "");
+  const lines = original.match(/.*(?:\r?\n|$)/g) || [];
   let fence = null;
+  let fenceStart = -1;
   let masked = "";
   for (const line of lines) {
     if (!line) continue;
     const marker = /^[ \t]*(`{3,}|~{3,})/.exec(line);
     if (!fence && marker) {
       fence = { char: marker[1][0], length: marker[1].length };
+      fenceStart = masked.length;
       masked += maskPreservingNewlines(line);
       continue;
     }
@@ -902,13 +905,21 @@ function authorityClaimHaystack(text) {
       const close = new RegExp(
         `^[ \\t]*${delimiter}{${fence.length},}[ \\t]*(?:\\r?\\n)?$`
       );
-      if (close.test(line)) fence = null;
+      if (close.test(line)) {
+        fence = null;
+        fenceStart = -1;
+      }
       continue;
     }
     masked += line;
   }
+  // Malformed, unclosed inert regions fail closed: scan their contents rather
+  // than letting one opener hide the remainder of the file.
+  if (fence && fenceStart >= 0) {
+    masked = masked.slice(0, fenceStart) + original.slice(fenceStart);
+  }
   return masked
-    .replace(/<!--[\s\S]*?(?:-->|$)/g, maskPreservingNewlines)
+    .replace(/<!--[\s\S]*?-->/g, maskPreservingNewlines)
     .replace(/[`*_]/g, " ");
 }
 
@@ -1660,6 +1671,17 @@ export function diffObligationMatrix(id, authByBucket, pbByBucket) {
   return out;
 }
 
+const AGENTS_OBJECT_GAP_SRC =
+  "(?:\\s+(?:the|any|all|every|whatever|anything|conflicting|binding|written|operative|local|other|current|rules?|text|instructions?|content|contract|file|terms?|requirements?|polic(?:y|ies)|in|from|of|says)){0,6}\\s+AGENTS\\.md\\b";
+const AGENTS_PRIORITY_CLAIM_RE = new RegExp(
+  `\\b(?:overrides?|trumps?|takes?\\s+precedence\\s+over|wins?\\s+over)${AGENTS_OBJECT_GAP_SRC}`,
+  "i"
+);
+const AGENTS_GOVERNS_CLAIM_RE = new RegExp(
+  `\\bgoverns?\\b[\\s\\S]{0,80}\\bsupersed(?:e|es|ing)${AGENTS_OBJECT_GAP_SRC}`,
+  "i"
+);
+
 const OPERATIVE_CLAIM_PATTERNS = [
   {
     id: "closed-list",
@@ -1715,11 +1737,11 @@ const OPERATIVE_CLAIM_PATTERNS = [
   },
   {
     id: "priority-over-agents",
-    re: /\b(?:overrides?|trumps?|takes?\s+precedence\s+over|wins?\s+over)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i,
+    re: AGENTS_PRIORITY_CLAIM_RE,
   },
   {
     id: "governs-over-agents",
-    re: /\bgoverns?\b[\s\S]{0,80}\bsupersed(?:e|es|ing)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i,
+    re: AGENTS_GOVERNS_CLAIM_RE,
   },
   {
     id: "agents-subordinate",
@@ -1771,16 +1793,18 @@ function paragraphConflictsWithAgents(para) {
   return (
     /\boutranks\s+AGENTS\.md\b/i.test(p) ||
     /\bsupersedes\s+AGENTS\.md\b/i.test(p) ||
-    /\b(?:overrides?|trumps?|takes?\s+precedence\s+over|wins?\s+over)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i.test(
-      p
-    ) ||
-    /\bgoverns?\b[\s\S]{0,80}\bsupersed(?:e|es|ing)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i.test(
-      p
-    ) ||
+    AGENTS_PRIORITY_CLAIM_RE.test(p) ||
+    AGENTS_GOVERNS_CLAIM_RE.test(p) ||
     /\bwhen\s+AGENTS\.md\b[\s\S]{0,80}\bconflict[\s\S]{0,80}\b(?:the )?(?:principle|this (?:file|document))\s+wins\b/i.test(
       p
     ) ||
     /\bAGENTS\.md\b[\s\S]{0,80}\band\s+(?:a |the )?principle conflict[\s\S]{0,60}\bprinciple wins\b/i.test(
+      p
+    ) ||
+    /\bAGENTS\.md\b[\s\S]{0,100}\b(?:conflicts?|disagrees?)\b[\s\S]{0,80}\b(?:the )?principle wins\b/i.test(
+      p
+    ) ||
+    /\b(?:conflicts?|disagrees?)\b[\s\S]{0,100}\bAGENTS\.md\b[\s\S]{0,80}\b(?:the )?principle wins\b/i.test(
       p
     ) ||
     /\bAGENTS\.md is subordinate\b/i.test(p) ||
