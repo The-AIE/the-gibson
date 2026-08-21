@@ -3515,7 +3515,72 @@ const rows = [
   {
     name: "governs-superseding-agents",
     text: banner + "This document governs behavior, superseding anything in AGENTS.md.\n",
-    expect: ["governs-over-agents"],
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "governs-negated-supersedes-is-clean",
+    text: banner + "This appendix governs formatting only; nothing here supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "governs-cannot-bridge-blank-paragraph",
+    text: banner + "This section governs the review flow.\n\nNothing in this guide supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "comma-conflict-modifier-is-live",
+    text: banner + "This adapter overrides, when they conflict, AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "comma-including-agents-is-live",
+    text: banner + "This adapter overrides everything, including AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "colon-direct-object-is-live",
+    text: banner + "This chapter overrides the sole authority: AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "dash-direct-object-is-live",
+    text: banner + "This guide overrides all rules — even those in AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "restrictive-documented-object-is-live-for-self-authority-subject",
+    text: banner + "This playbook overrides the rules documented in AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "per-role-object-is-live",
+    text: banner + "This overlay takes precedence over the per-role obligations in AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "first-noun-candidate-cannot-mask-live-claim",
+    text: banner + "Vendor overrides live in adapters/ and this chapter overrides AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "first-citation-candidate-cannot-mask-live-claim",
+    text: banner + "This chapter overrides the lint step as described in the guide and this chapter overrides AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "historical-retraction-cannot-mask-active-priority-claim",
+    text: banner + "That claim is retired — this chapter overrides AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "historical-retraction-cannot-mask-active-trumps-claim",
+    text: banner + "Historically this file trumped AGENTS.md; that claim is retired — this file trumps AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "live-priority-keeps-sibling-authority-claim-live",
+    text: banner + "Follow AGENTS.md. docs/14 remains authoritative. This chapter overrides, in all respects, AGENTS.md.\n",
+    expect: ["docs-14-authoritative", "priority-over-agents"],
   },
   {
     name: "negated-overrides-agents",
@@ -3660,6 +3725,11 @@ const rows = [
   {
     name: "unrelated-principle-disagreement-still-defers",
     text: banner + "docs/14 remains authoritative for gate rationale in this walkthrough. This document must not add, drop, or weaken rules in AGENTS.md. Elsewhere, when two teammates disagree about naming, the principle wins and the style guide is final.\n",
+    expect: [],
+  },
+  {
+    name: "unrelated-agents-conflict-explanation-then-principle-still-defers",
+    text: banner + "AGENTS.md explains what to do when two agents conflict. Then the principle wins in a coin toss. This document must not add, drop, or weaken rules in AGENTS.md.\n",
     expect: [],
   },
   {
