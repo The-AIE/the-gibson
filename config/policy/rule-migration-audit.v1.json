@@ -21,7 +21,9 @@
       "id": "ask-contract",
       "label": "Ask Contract four fields",
       "home": "AGENTS.md: The Ask Contract",
-      "machine": []
+      "machine": [
+        "scripts/contract-authority.mjs"
+      ]
     },
     {
       "id": "role-outputs-prohibitions",
@@ -87,7 +89,9 @@
       "id": "style-commitments",
       "label": "Style commitments versus technical decisions",
       "home": "AGENTS.md: Style commitments",
-      "machine": []
+      "machine": [
+        "scripts/contract-authority.mjs"
+      ]
     },
     {
       "id": "risk-tiers",

@@ -84,6 +84,7 @@ import {
   CANONICAL_JOB_PROMPTS,
   CANONICAL_DISCLOSURE_PHRASES,
   CANONICAL_BINDING_FAMILIES,
+  CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS,
   CANONICAL_FORBIDDEN_CONTRACT_PATTERNS,
   CANONICAL_FORBIDDEN_REPO_CLAIMS,
   CANONICAL_MACHINE_SOURCE_PATHS,
@@ -709,6 +710,13 @@ if (agentsText) {
   }
 
   const families = CANONICAL_BINDING_FAMILIES;
+  const enforcedFamilyIds = families.map((fam) => fam && fam.id);
+  if (!listEq(enforcedFamilyIds, CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS)) {
+    fail(
+      "E_AUDIT_COVERAGE",
+      `binding-family enforcement ${JSON.stringify(enforcedFamilyIds)} != rule-migration audit ${JSON.stringify(CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS)}`
+    );
+  }
   for (const fam of families) {
     if (!fam || typeof fam.id !== "string") continue;
     const sectionName = typeof fam.section === "string" ? fam.section : "";
@@ -730,9 +738,11 @@ if (agentsText) {
         );
       }
     }
+    const familyHay = sectionName ? section : agentsText;
+    const familyFlat = collapseWs(familyHay);
     for (const p of Array.isArray(fam.patterns) ? fam.patterns : []) {
       if (typeof p !== "string" || !p) continue;
-      if (!agentsText.includes(p) && !collapseWs(agentsText).includes(collapseWs(p))) {
+      if (!familyHay.includes(p) && !familyFlat.includes(collapseWs(p))) {
         fail(
           "E_BINDING_FAMILY",
           `AGENTS.md binding-family ${fam.id} omits required statement: ${p}`
