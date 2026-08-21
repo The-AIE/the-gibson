@@ -135,6 +135,73 @@
   ],
   "requiredBindingFamilies": [
     {
+      "id": "authority-load-order",
+      "label": "Authority, mandatory load order, overlays, and lesson consult",
+      "section": "Authority and mandatory load",
+      "patterns": [
+        "Fixed mandatory human-readable load (byte-budgeted)",
+        "Conditional session-start human-readable load",
+        "local/AGENTS.local.md",
+        "The **target repo's** `AGENTS.md`",
+        "memory/LESSONS.md",
+        "on-demand and non-normative"
+      ]
+    },
+    {
+      "id": "ten-laws",
+      "label": "Ten Laws",
+      "section": "The Ten Laws",
+      "requiredItems": [
+        "Read before you act.",
+        "Claim before you touch.",
+        "Never edit in the canonical checkout.",
+        "The green gate is absolute.",
+        "Never grade your own homework.",
+        "Acceptance criteria are the contract.",
+        "Tier C is sacred.",
+        "Report truthfully, loudly, and in the right place.",
+        "Feed the ratchet.",
+        "Clean up after merge."
+      ],
+      "patterns": [
+        "One issue = one claim = one worktree = one branch",
+        "generate → typecheck → lint → test → build",
+        "exact committed head SHA",
+        "failures verbatim",
+        "release-claim.sh"
+      ]
+    },
+    {
+      "id": "ask-contract",
+      "label": "Ask Contract four fields",
+      "section": "The Ask Contract (how you talk to the user)",
+      "requiredItems": [
+        "What I'm asking",
+        "What it does",
+        "Why it should be done",
+        "The risks"
+      ],
+      "patterns": ["Never hand the user a bare command or a bare yes/no"]
+    },
+    {
+      "id": "role-outputs-prohibitions",
+      "label": "Per-role outputs, prohibitions, and durable handoffs",
+      "section": "Your role this session",
+      "patterns": [
+        "Per-role and per-job outputs, gates, and prohibitions are canonical",
+        "Handoffs are **files and GitHub objects, never chat memory**"
+      ]
+    },
+    {
+      "id": "forbidden-role-pairs",
+      "label": "Forbidden role pairs and cross-vendor review",
+      "section": "Your role this session",
+      "patterns": [
+        "Forbidden pairs on the same unit of work",
+        "Cross-vendor review is the default when more than one runtime is available"
+      ]
+    },
+    {
       "id": "six-lens-review",
       "label": "Six-lens review with file:line findings",
       "section": "Review lenses (binding)",
@@ -145,37 +212,118 @@
         "Money",
         "Performance",
         "Maintainability"
-      ]
+      ],
+      "patterns": ["file:line", "VERDICT: REQUEST_CHANGES"]
     },
     {
       "id": "tier-c-adversarial-tests",
       "label": "Tier C adversarial tests (test-engineer)",
+      "section": "Your role this session",
       "patterns": ["adversarial cases required"]
     },
     {
       "id": "no-destructive-prod-testing",
       "label": "Prohibition on destructive production testing",
+      "section": "Your role this session",
       "patterns": ["destructive production testing"]
     },
     {
       "id": "eight-security-layers",
       "label": "Eight security layers",
-      "patterns": ["Eight layers", "AuthZ matrix", "Runtime posture"]
+      "section": "Security layers (binding)",
+      "patterns": [
+        "Eight layers",
+        "hard-fail blocks merge/release",
+        "AuthZ matrix",
+        "never destructive payloads against production",
+        "Runtime posture"
+      ]
     },
     {
       "id": "self-modification-gates",
       "label": "Self-modification gates for tier/security/human-gate controls",
-      "patterns": ["Self-modification bounds", "Tier definitions", "hard-fail security layers"]
+      "section": "Self-modification bounds (binding)",
+      "patterns": [
+        "Harness changes use the same PR + review pipeline as product changes",
+        "Tier definitions",
+        "hard-fail security layers",
+        "themselves Tier C (**G12**)"
+      ]
     },
     {
       "id": "delivery-control",
       "label": "Delivery-control audit, dry-run, and human-apply",
-      "patterns": ["Delivery control", "dry-run", "explicit human apply"]
+      "section": "Delivery control (binding)",
+      "patterns": ["audit", "dry-run", "explicit human apply", "Never rotate secrets"]
     },
     {
-      "id": "role-outputs-prohibitions",
-      "label": "Per-role outputs and prohibitions",
-      "section": "Your role this session"
+      "id": "workflow-stages",
+      "label": "Ten workflow stages and skip recording",
+      "section": "The pipeline you are inside",
+      "patterns": [
+        "plan → decompose → build → test → review → ux-eval → security → merge → deploy → retro",
+        "Ten stages (`PLAN`, `DECOMPOSE`, `BUILD`, `TEST`, `REVIEW`, `UX-EVAL`, `SECURITY`, `MERGE`, `DEPLOY+VERIFY`, `RETRO`)",
+        "record the skip on the PR"
+      ]
+    },
+    {
+      "id": "human-gates",
+      "label": "G1-G16 closed stop list and explicit non-gates",
+      "section": "Human gates (the ONLY reasons to stop)",
+      "patterns": [
+        "This list is **closed**. Changing it is Tier C",
+        "### Explicit non-gates",
+        "Failing tests · red CI · flaky infrastructure · merge conflicts · missing docs",
+        "the gates decide, not the feeling"
+      ]
+    },
+    {
+      "id": "style-commitments",
+      "label": "Style commitments versus technical decisions",
+      "section": "Human gates (the ONLY reasons to stop)",
+      "patterns": [
+        "### Style commitments (owner taste, not a numbered G)",
+        "Technical correctness is an agent + CI decision; taste is the owner's",
+        "open a decision item for the taste call rather than self-approving it",
+        "stop and ask"
+      ]
+    },
+    {
+      "id": "risk-tiers",
+      "label": "Risk tiers, escalation, and stateful serialization",
+      "section": "Risk tiers",
+      "patterns": [
+        "| **A** | Routine:",
+        "| **B** | Elevated:",
+        "| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data.",
+        "**G12**",
+        "serialize when stateful",
+        "Diffs may drift **into** Tier C; they never drift out without a reviewer saying so"
+      ]
+    },
+    {
+      "id": "commit-pr-merge",
+      "label": "Pre-commit pipeline, DCO, exact-head review, and merge order",
+      "section": "Commit, PR, and merge",
+      "patterns": [
+        "generate → typecheck → lint → test → build",
+        "Signed-off-by",
+        "exact committed head SHA",
+        "`release` verifies, in order",
+        "Tier C / schema → **G12** human approval recorded"
+      ]
+    },
+    {
+      "id": "concurrency",
+      "label": "Claims, worktrees, lane limit, rebase, and no shared force-push",
+      "section": "Concurrency (compact)",
+      "patterns": [
+        "One issue, one worktree, one branch",
+        "agent-claimed",
+        "Max **3** active mutating lanes per target repo",
+        "Before push: rebase onto the remote default branch in *your* worktree",
+        "Never force-push a shared branch (**G3**)"
+      ]
     }
   ],
   "forbiddenContractPatterns": [
