@@ -218,22 +218,25 @@ Isolation comes from the **container**, not the host. The Mini is *not* clean �
 `~/workspace/conference-os` there contains the fixing commit — it is simply always on and
 already running colima.
 
-- Image `ab219-runner:1`
-  (`sha256:36e61e1b902d6a6007a173188afac1b84531142cd314fcd0316f1c1356de24ff`), from
+- Image `ab219-runner:2`
+  (`sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08`), from
   `node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`
   plus `git` and `@xai-official/grok@1.0.3`. Empty agent `HOME`.
 - The frozen tree is built on the laptop under the D-1 census, shipped as a tarball, and the
   **census is re-verified on the Mini after transfer**. It is mounted alone at `/work`.
-- Only `~/.grok/auth.json` is additionally mounted, read-only: xAI inference auth, no
-  repository access.
-- `--rm`, so agent state is per-run and discarded.
+- `auth.json` is mounted as a **single read-only FILE** at `/home/agent/.grok/auth.json`,
+  never as a directory. Mounting the directory causes Grok to persist session state to the
+  host, which would carry the previous run's transcript into the next container — the
+  retained-session-store defect, reintroduced by mount shape. Verified after the fix: the
+  agent authenticates and **no host-side session state is created**.
+- `--rm`, so agent state lands in the ephemeral layer and is destroyed with the container.
 
 ```bash
 docker run --rm \
   -v <SCRATCH>:/work \
   -v <BRIEF>:/brief.txt:ro \
-  -v <AUTHDIR>:/home/agent/.grok \
-  -w /work ab219-runner:1 \
+  -v <AUTH_JSON_FILE>:/home/agent/.grok/auth.json:ro \
+  -w /work ab219-runner:2 \
   grok --always-approve --cwd /work --model <PINNED_MODEL> \
        --output-format streaming-messages-json --prompt-file /brief.txt
 ```
