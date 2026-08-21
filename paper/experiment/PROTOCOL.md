@@ -194,71 +194,95 @@ Both are stated as limitations of the design in the paper. Neither is argued awa
 
 ## Amendment D-2 (2026-08-21) — governs where it conflicts with D-1 and with the registered text
 
-Cause and full accounting: `DEVIATIONS.md` (D-2). In short: the first replay executed
-under D-1 was voided because the implementer retrieved the fixing PR and the post-fix file
-contents over the network as its first action. D-1's controls detect that but do not
-prevent it. Owner decision 2026-08-21: network denial applies to **both** arms.
+Cause and full accounting: `DEVIATIONS.md` (D-2). The first replay executed under D-1 was
+voided: the implementer retrieved the fixing PR and post-fix file contents as its first
+action. D-1's layers detect that but do not prevent it. Owner decision 2026-08-21: isolation
+applies to **both** arms.
 
-### Leakage control — layer 0 (new, prevention, fail-closed)
+### Threat model (two independent vectors)
+
+- **A — network.** `gh`/`curl` to GitHub. Requires credentials: the repo is private and
+  unauthenticated retrieval of the fixing PR returns 404.
+- **B — local filesystem.** The canonical checkout at `/Users/mrhinkle/Code/conference-os`
+  and its sibling worktrees carry the entire future history, including the fix, and need
+  **no credentials**. This is the higher-value vector.
+
+### Leakage control — layer 0 (new, prevention)
 
 Layers 1–3 of D-1 (total object census, blind brief, transcript audit) are retained
-unchanged. A new layer precedes them.
+unchanged. A new layer precedes them, applied identically in **both arms**.
 
-**Both arms** run their implementer with child-process network egress denied:
+A project-scoped sandbox profile is written into the **disposable scratch tree** (never the
+user's global config):
+
+```toml
+# $SCRATCH/.grok/sandbox.toml
+[profiles.ab219]
+extends = "strict"
+read_only = ["/Users/mrhinkle/.hermes/node", "/Users/mrhinkle/.local/bin"]
+deny = ["/Users/mrhinkle/Code", "/Users/mrhinkle/.config/gh", "/Users/mrhinkle/.ssh", "/Users/mrhinkle/Documents"]
+```
 
 ```bash
 env -u GH_TOKEN -u GITHUB_TOKEN \
-  codex exec -s workspace-write --skip-git-repo-check -C "$SCRATCH" \
-  "$(cat "$BRIEF")" < /dev/null
+  grok --always-approve --cwd "$SCRATCH" --sandbox ab219 --disable-web-search -p "$(cat "$BRIEF")"
 ```
 
-`-s workspace-write` confines writes to the scratch workspace and denies child-process
-network egress. Verified on this host 2026-08-21: a probe running
-`curl -sS -m 8 https://api.github.com/` inside the sandbox returns
-`curl: (6) Could not resolve host` / `HTTP:000 rc=6`.
+Verified on this host 2026-08-21:
 
-**Grok must not be used as a replay implementer on macOS.** Its documented child-network
-blocking is Linux-only and is a no-op on macOS; the same probe under
-`grok --sandbox strict` returns `HTTP:200`. Specifying it would be a control that does not
-exist on the host.
+| probe | result |
+|---|---|
+| `node --version` | `v22.22.3` — toolchain usable (required: `strict` alone hides `$HOME/.hermes`, making the done-gate unrunnable) |
+| `head /Users/mrhinkle/Code/conference-os/package.json` | `Operation not permitted` — **vector B closed, kernel-enforced** |
+| `curl https://api.github.com/` | `HTTP:200` — **vector A NOT closed** |
 
-Because Codex implements both arms:
-- the blind judge is **Devin** (the registered "implemented neither arm" rule; Claude never
-  judges; Codex is disqualified). If Devin is unavailable, judging blocks rather than
-  falling back.
-- the harness arm's cross-vendor reviewer is **Grok**, also network-denied.
+**Vector A is mitigated by credential denial, not by network denial:** the repo is private
+(unauthenticated fetch of the fixing PR → 404), `GH_TOKEN`/`GITHUB_TOKEN` are scrubbed,
+`~/.config/gh` is kernel-denied, and `--disable-web-search` removes the model's own
+retrieval tools. General web access survives and is **detection-only** via the retained audit.
+
+**Do not substitute `codex exec -s workspace-write`.** It blocks network but leaves vector B
+fully readable (probed: `RC=0`), which is a net loss. Literal denial of both vectors requires
+a container/VM runner with the scratch tree as the only mount and egress limited to the
+inference endpoint; that is recorded in `DEVIATIONS.md` as the recommended hardening, not
+silently substituted.
+
+### Platform, reviewer, judge
+
+- **Implementer: Grok, both arms** — forced by the above. Holds platform constant across
+  arms, so the comparison is harness-vs-raw with the model fixed.
+- **Harness cross-vendor reviewer: Codex**, under the same isolation profile.
+- **Blind judge: Devin only.** Grok implemented both arms; Claude never judges; Codex has
+  seen harness-arm output as reviewer. If Devin is unavailable, judging blocks.
 
 ### Dependency pre-provisioning (coordinator, before dispatch)
-
-The done-gate needs `node_modules`, which needs network. The coordinator installs
-dependencies in the scratch tree **before** the implementer session starts and with network
-available:
 
 ```bash
 ( cd "$SCRATCH" && npm ci && npx prisma generate )
 ```
 
-Install time and tokens are **excluded** from metrics 3 and 4 in both arms. `node_modules`
-is git-ignored and derives only from the lockfile at the base commit, so it can neither
-enter an exported patch nor carry post-base information.
+Run with network, before the implementer starts. Install time and tokens are **excluded**
+from metrics 3 and 4 in both arms. `node_modules` is git-ignored and derives only from the
+lockfile at the base commit, so it can neither enter an exported patch nor carry post-base
+information.
 
 ### Brief sanitization (amends D-1 layer 2)
 
-The brief is the issue title and body with every `#NNNN` cross-reference replaced by an
-opaque token (`[REF-A]`, `[REF-B]`, …), and every `owner/repo` slug and URL removed — in
-addition to D-1's bar on the canonical path, issue URL, and fixing-PR number. The sanitized
-text is written to `paper/experiment/briefs/<code-name>.txt` and is the task statement given
-to the blind judge, so implementer and judge see the same statement.
+Every `#NNNN` cross-reference becomes an opaque token (`[REF-A]`, `[REF-B]`, …); every
+`owner/repo` slug and URL is removed, in addition to D-1's bars. The sanitized text is stored
+at `paper/experiment/briefs/<code-name>.txt` and is the statement given to the blind judge,
+so implementer and judge see the same task.
 
 ### Void-run ledger
 
-A run that fails any layer leaves the task at `status: ready` and appends a record to that
+A run failing any layer leaves the task at `status: ready` and appends a record to that
 task's `void_runs` array in `assignments.json` (date, arm, cause, evidence path). The paper
 reports attempts per completed task in both arms.
 
 ### Limitation created by this amendment
 
-Both arms now work without documentation lookup, package search, or web access, which real
-developers and real harness lanes have. The depression is symmetric, so the between-arm
-comparison holds, but absolute per-task performance under replay is a floor, not a realistic
-estimate. Reported as a limitation, not argued away.
+Both arms lose documentation lookup and package search, which real developers and real
+harness lanes have. The depression is symmetric, so the between-arm comparison holds, but
+absolute per-task performance under replay is a floor, not a realistic estimate. Vector A is
+closed by credential denial rather than by network denial, and the residual is detected, not
+prevented. Reported as limitations, not argued away.
