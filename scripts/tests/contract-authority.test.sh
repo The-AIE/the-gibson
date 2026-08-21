@@ -3192,6 +3192,26 @@ const rows = [
     expect: [],
   },
   {
+    name: "historical-not-retired",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is not retired.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "historical-never-retired",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim was never retired.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "historical-do-not-treat-as-retired",
+    text: banner + "Historically this file supersedes AGENTS.md; do not treat that claim as retired.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "historical-no-longer-true",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is no longer true.\n",
+    expect: [],
+  },
+  {
     name: "same-paragraph-later-active",
     text: banner + "Historically this file supersedes AGENTS.md; that claim is retired. Follow AGENTS.md. This file supersedes AGENTS.md.\n",
     expect: ["supersedes-agents"],
@@ -3257,6 +3277,26 @@ const rows = [
     expect: [],
   },
   {
+    name: "never-bounded-modifier-supersedes",
+    text: banner + "This file never under any circumstances supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "never-comma-wrapped-modifier-supersedes",
+    text: banner + "This file never, under any circumstances, supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "no-document-long-subject-supersedes",
+    text: banner + "No document in this entire repository ever supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "nothing-long-subject-outranks",
+    text: banner + "Nothing in this entire repository ever outranks AGENTS.md.\n",
+    expect: [],
+  },
+  {
     name: "negation-does-not-mask-later-active",
     text: banner + "No document supersedes AGENTS.md. This file supersedes AGENTS.md.\n",
     expect: ["supersedes-agents"],
@@ -3264,6 +3304,11 @@ const rows = [
   {
     name: "never-then-but-active",
     text: banner + "This file never supersedes AGENTS.md, but this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "unrelated-negation-before-active",
+    text: banner + "No earlier claim was accepted, but this file supersedes AGENTS.md.\n",
     expect: ["supersedes-agents"],
   },
   {
