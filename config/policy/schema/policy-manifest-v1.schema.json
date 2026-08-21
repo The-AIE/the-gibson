@@ -429,7 +429,18 @@
           },
           "name": {
             "type": "string",
-            "minLength": 1
+            "enum": [
+              "PLAN",
+              "DECOMPOSE",
+              "BUILD",
+              "TEST",
+              "REVIEW",
+              "UX-EVAL",
+              "SECURITY",
+              "MERGE",
+              "DEPLOY+VERIFY",
+              "RETRO"
+            ]
           },
           "roleId": {
             "type": "string"

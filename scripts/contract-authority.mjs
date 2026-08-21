@@ -29,7 +29,7 @@
  *   node scripts/contract-authority.mjs --help
  */
 
-import { existsSync, lstatSync, readdirSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -38,7 +38,6 @@ import {
   coerceRootIdentity,
   readContainedFile,
   loadJsonContained,
-  resolveLexicalUnderRoot,
   hasDotDotSegment,
 } from "./policy-manifest.mjs";
 import {
@@ -55,12 +54,53 @@ import {
   diffObligationMatrix,
   remapRoleCodesToJob,
   listEq,
+  collapseWs,
   EXPECTED_ASK_FIELDS,
   EXPECTED_ROLES,
 } from "./lib/contract-semantics.mjs";
+import {
+  isGenuineMissingPath,
+  setDiscoverAfterOpenHook,
+  setDiscoverBeforeOpendirHook,
+  walkMdFiles,
+  discoverMdFiles,
+} from "./lib/authority-discover.mjs";
+import {
+  CANONICAL_MANDATORY_FILES,
+  CANONICAL_DOCS_GLOBS,
+  CANONICAL_PLAYBOOK_GLOBS,
+  CANONICAL_LOCAL_OVERRIDE,
+  CANONICAL_ROLE_PATH,
+  CANONICAL_DOCS_MARKER,
+  CANONICAL_PLAYBOOK_NON_NORM,
+  CANONICAL_DISPATCH_MARKER,
+  CANONICAL_ON_DEMAND,
+  CANONICAL_DEFAULT_ROLE,
+  CANONICAL_DEFAULT_PATH,
+  CANONICAL_ROLE_CONTRACTS,
+  CANONICAL_MIRROR,
+  CANONICAL_AUDIT,
+  CANONICAL_JOB_PROMPTS,
+  CANONICAL_DISCLOSURE_PHRASES,
+  CANONICAL_BINDING_FAMILIES,
+  CANONICAL_FORBIDDEN_CONTRACT_PATTERNS,
+  CANONICAL_FORBIDDEN_REPO_CLAIMS,
+  CANONICAL_MACHINE_SOURCE_PATHS,
+  CANONICAL_REQUIRED_RULE_PATTERNS,
+  CANONICAL_PRE_CHANGE,
+  CANONICAL_BYTE_BUDGET,
+  pinReadChainConfig,
+} from "./lib/authority-config-canonical.mjs";
+
+export {
+  isGenuineMissingPath,
+  setDiscoverAfterOpenHook,
+  setDiscoverBeforeOpendirHook,
+  walkMdFiles,
+  discoverMdFiles,
+};
 
 const DEFAULT_CONFIG_REL = "config/policy/mandatory-read-chain.v1.json";
-const ROLE_CONTRACTS_REL = "config/policy/role-contracts.v1.json";
 
 function help() {
   console.log(`contract-authority.mjs — #208 authority boundary + read-chain budget
@@ -91,30 +131,19 @@ EXIT
 `);
 }
 
-const args = process.argv.slice(2);
-if (args.includes("-h") || args.includes("--help")) {
-  help();
-  process.exit(0);
-}
-
-const parsed = parseFlags(args, {
-  prefix: "contract-authority: ",
-  flags: {
-    "--repo-root": { key: "repoRoot", default: null },
-    "--config": { key: "configRel", default: DEFAULT_CONFIG_REL },
-    "--measure": { key: "measureOnly", type: "boolean" },
-    "--format": {
-      key: "format",
-      type: "enum",
-      values: ["text", "json"],
-      default: "text",
-    },
-  },
-});
-
 function dieUsage(msg) {
   console.error(`contract-authority: ${msg}`);
   process.exit(2);
+}
+
+function isCliMain() {
+  const self = fileURLToPath(import.meta.url);
+  const inv = process.argv[1] ? resolve(process.argv[1]) : "";
+  try {
+    return realpathSync(self) === realpathSync(inv);
+  } catch {
+    return resolve(self) === resolve(inv);
+  }
 }
 
 function scriptDir() {
@@ -155,66 +184,6 @@ function playbookStem(rel) {
   return String(rel).replace(/^playbooks\//, "").replace(/\.md$/, "");
 }
 
-/** Optional local override only when the leaf is genuinely absent. */
-function isGenuineMissingPath(msg) {
-  const s = String(msg || "");
-  if (
-    /escape|unsafe|absolute|malformed|identity|symlink|realpath|not a regular file|EISDIR|ENOTDIR|EACCES|EPERM|ELOOP/i.test(
-      s
-    )
-  ) {
-    return false;
-  }
-  return /ENOENT|\bno such file\b/i.test(s);
-}
-
-function walkMdFiles(rootId, relDir, acc) {
-  let lex;
-  try {
-    lex = resolveLexicalUnderRoot(rootId, relDir);
-  } catch {
-    return;
-  }
-  let st;
-  try {
-    st = lstatSync(lex.absPath);
-  } catch (e) {
-    const msg = String(e && e.message ? e.message : e);
-    if (isGenuineMissingPath(msg)) return;
-    fail("E_PATH", `${relDir}: ${msg}`);
-    return;
-  }
-  if (st.isSymbolicLink()) {
-    fail("E_PATH", `${relDir}: symlink`);
-    return;
-  }
-  if (!st.isDirectory()) return;
-  let ents;
-  try {
-    ents = readdirSync(lex.absPath, { withFileTypes: true });
-  } catch (e) {
-    fail("E_PATH", `${relDir}: ${e && e.message ? e.message : e}`);
-    return;
-  }
-  for (const ent of ents) {
-    if (ent.name === ".git" || ent.name === "node_modules") continue;
-    if (ent.name === "." || ent.name === ".." || hasDotDotSegment(ent.name)) {
-      continue;
-    }
-    const rel = `${relDir}/${ent.name}`.replace(/\\/g, "/");
-    if (hasDotDotSegment(rel)) continue;
-    if (ent.isSymbolicLink()) {
-      fail("E_PATH", `${rel}: symlink`);
-      continue;
-    }
-    if (ent.isDirectory()) {
-      walkMdFiles(rootId, rel, acc);
-    } else if (ent.isFile() && ent.name.endsWith(".md")) {
-      acc.push(rel);
-    }
-  }
-}
-
 function gitShowBytes(root, ref, relPath) {
   const r = spawnSync("git", ["-C", root, "show", `${ref}:${relPath}`], {
     encoding: "buffer",
@@ -223,6 +192,27 @@ function gitShowBytes(root, ref, relPath) {
   if (r.status !== 0) return null;
   return r.stdout.length;
 }
+
+export function main(args = process.argv.slice(2)) {
+  if (args.includes("-h") || args.includes("--help")) {
+    help();
+    process.exit(0);
+  }
+
+  const parsed = parseFlags(args, {
+    prefix: "contract-authority: ",
+    flags: {
+      "--repo-root": { key: "repoRoot", default: null },
+      "--config": { key: "configRel", default: DEFAULT_CONFIG_REL },
+      "--measure": { key: "measureOnly", type: "boolean" },
+      "--format": {
+        key: "format",
+        type: "enum",
+        values: ["text", "json"],
+        default: "text",
+      },
+    },
+  });
 
 const repoRootArg = resolve(
   typeof parsed.repoRoot === "string" && parsed.repoRoot
@@ -254,29 +244,20 @@ function fail(code, message) {
   findings.push({ code, message });
 }
 
-const mandatoryFiles = Array.isArray(cfg.mandatoryFiles) ? cfg.mandatoryFiles : [];
-const allowed = Array.isArray(cfg.allowedMandatoryFiles)
-  ? cfg.allowedMandatoryFiles
-  : ["AGENTS.md"];
-if (
-  mandatoryFiles.length !== allowed.length ||
-  mandatoryFiles.some((f, i) => f !== allowed[i])
-) {
-  fail(
-    "E_MANDATORY_SET",
-    `mandatoryFiles must equal allowedMandatoryFiles (${allowed.join(", ")}); got ${JSON.stringify(mandatoryFiles)}`
-  );
-}
-if (allowed.length !== 1 || allowed[0] !== "AGENTS.md") {
-  fail(
-    "E_MANDATORY_SET",
-    "allowedMandatoryFiles is a closed set: only AGENTS.md"
+function sameStringList(actual, expected) {
+  return (
+    Array.isArray(actual) &&
+    actual.length === expected.length &&
+    actual.every((v, i) => v === expected[i])
   );
 }
 
-const byteBudget = cfg.byteBudget || {};
-const agentsBudget = Number(byteBudget["AGENTS.md"] || 0);
-const chainBudget = Number(byteBudget.mandatoryChain || 0);
+pinReadChainConfig(cfg, fail);
+
+const mandatoryFiles = CANONICAL_MANDATORY_FILES;
+const byteBudget = CANONICAL_BYTE_BUDGET;
+const agentsBudget = CANONICAL_BYTE_BUDGET["AGENTS.md"];
+const chainBudget = CANONICAL_BYTE_BUDGET.mandatoryChain;
 
 let agentsText = "";
 let agentsBytes = 0;
@@ -287,7 +268,7 @@ for (const rel of mandatoryFiles) {
     text = readAuthorityText(rootId, rel);
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
-    if (/cannot open|no such file|ENOENT/i.test(msg) && !/escape|unsafe|absolute|malformed/i.test(msg)) {
+    if (isGenuineMissingPath(msg)) {
       fail("E_MISSING", `mandatory file missing: ${rel}`);
     } else {
       fail("E_PATH", `${rel}: ${msg}`);
@@ -304,24 +285,22 @@ for (const rel of mandatoryFiles) {
 
 const chainBytes = chainFiles.reduce((s, f) => s + f.bytes, 0);
 
-if (agentsBudget > 0 && agentsBytes > agentsBudget) {
+if (Number.isInteger(agentsBudget) && agentsBudget > 0 && agentsBytes > agentsBudget) {
   fail(
     "E_BUDGET",
     `AGENTS.md is ${agentsBytes} bytes (budget ${agentsBudget})`
   );
 }
-if (chainBudget > 0 && chainBytes > chainBudget) {
+if (Number.isInteger(chainBudget) && chainBudget > 0 && chainBytes > chainBudget) {
   fail(
     "E_BUDGET",
     `mandatory chain is ${chainBytes} bytes (budget ${chainBudget})`
   );
 }
 
-const pre = cfg.preChangeAt && typeof cfg.preChangeAt === "object" ? cfg.preChangeAt : {};
-const beforeCommit = typeof pre.commit === "string" ? pre.commit : "";
-const beforeFiles = Array.isArray(pre.impliedMandatoryFiles)
-  ? pre.impliedMandatoryFiles
-  : [];
+const pre = CANONICAL_PRE_CHANGE;
+const beforeCommit = pre.commit;
+const beforeFiles = pre.impliedMandatoryFiles;
 let beforeBytesFromGit = 0;
 let beforeGitOk = true;
 const beforePerFile = [];
@@ -372,32 +351,23 @@ if (!dispatchCfg) {
     "conditionalDispatchPrompts object is required (closed role + job dispatch-prompt list)"
   );
 }
-const roleIds = Array.isArray(dispatchCfg && dispatchCfg.roles)
-  ? dispatchCfg.roles
-  : [];
-const rolePathTemplate =
-  dispatchCfg && typeof dispatchCfg.pathTemplate === "string"
-    ? dispatchCfg.pathTemplate
-    : "playbooks/{role}.md";
-const jobPromptList = Array.isArray(dispatchCfg && dispatchCfg.jobPrompts)
-  ? dispatchCfg.jobPrompts
-  : null;
-if (dispatchCfg && roleIds.length === 0) {
+const roleIds = EXPECTED_ROLES;
+if (!dispatchCfg || dispatchCfg.pathTemplate !== CANONICAL_ROLE_PATH) {
   fail(
     "E_DISPATCH_CONFIG",
-    "conditionalDispatchPrompts.roles must list the dispatched roles"
+    `conditionalDispatchPrompts.pathTemplate must be ${JSON.stringify(CANONICAL_ROLE_PATH)}; got ${JSON.stringify(dispatchCfg && dispatchCfg.pathTemplate)}`
   );
 }
-if (dispatchCfg && !Array.isArray(dispatchCfg.jobPrompts)) {
-  fail(
-    "E_DISPATCH_CONFIG",
-    "conditionalDispatchPrompts.jobPrompts must be an array of playbooks/**/*.md paths"
-  );
-}
+const rolePathTemplate = CANONICAL_ROLE_PATH;
+const jobPromptList = CANONICAL_JOB_PROMPTS;
 
-const playbookDispatchMarker =
-  cfg.playbookDispatchMarker ||
-  "**Authority:** Conditionally mandatory dispatch prompt";
+if (cfg.playbookDispatchMarker !== CANONICAL_DISPATCH_MARKER) {
+  fail(
+    "E_CONFIG",
+    `playbookDispatchMarker must be the contract-defined value; got ${JSON.stringify(cfg.playbookDispatchMarker ?? null)}`
+  );
+}
+const playbookDispatchMarker = CANONICAL_DISPATCH_MARKER;
 
 const closedEntries = [];
 const closedSeen = new Set();
@@ -437,12 +407,14 @@ if (Array.isArray(jobPromptList)) {
 const discoveredDispatch = [];
 {
   const playbooksToDiscover = [];
-  const globs = Array.isArray(cfg.playbookGlobs)
-    ? cfg.playbookGlobs
-    : ["playbooks/**/*.md"];
-  for (const g of globs) {
-    if (g === "playbooks/**/*.md") walkMdFiles(rootId, "playbooks", playbooksToDiscover);
-    else fail("E_GLOB", `unsupported playbookGlob: ${g}`);
+  const globs = Array.isArray(cfg.playbookGlobs) ? cfg.playbookGlobs : [];
+  if (!sameStringList(globs, CANONICAL_PLAYBOOK_GLOBS)) {
+    fail(
+      "E_GLOB",
+      `playbookGlobs must be ${JSON.stringify(CANONICAL_PLAYBOOK_GLOBS)}; got ${JSON.stringify(globs)}`
+    );
+  } else {
+    discoverMdFiles(rootId, "playbooks", playbooksToDiscover, fail, { optional: true });
   }
   const seen = new Set();
   for (const rel of playbooksToDiscover) {
@@ -460,10 +432,16 @@ const discoveredDispatch = [];
   discoveredDispatch.sort();
 }
 
-const localOverrideTemplate =
-  dispatchCfg && typeof dispatchCfg.localOverrideTemplate === "string"
-    ? dispatchCfg.localOverrideTemplate
-    : "local/playbooks/{role}.md";
+if (
+  !dispatchCfg ||
+  dispatchCfg.localOverrideTemplate !== CANONICAL_LOCAL_OVERRIDE
+) {
+  fail(
+    "E_CONFIG",
+    `localOverrideTemplate must be ${JSON.stringify(CANONICAL_LOCAL_OVERRIDE)}; got ${JSON.stringify(dispatchCfg && dispatchCfg.localOverrideTemplate)}`
+  );
+}
+const localOverrideTemplate = CANONICAL_LOCAL_OVERRIDE;
 const effectiveRoleTexts = new Map();
 const jobTexts = new Map();
 const dispatchPrompts = [];
@@ -477,7 +455,7 @@ for (const entry of closedEntries) {
     text = readAuthorityText(rootId, rel);
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
-    if (/cannot open|no such file|ENOENT/i.test(msg) && !/escape|unsafe|absolute|malformed/i.test(msg)) {
+    if (isGenuineMissingPath(msg)) {
       fail("E_DISPATCH_PROMPT_MISSING", `conditional dispatch prompt missing: ${rel}`);
     } else {
       fail("E_DISPATCH_PROMPT_PATH", `${rel}: ${msg}`);
@@ -562,10 +540,7 @@ for (const rel of [...closedSeen].sort()) {
   }
 }
 
-const auditRel =
-  typeof cfg.ruleMigrationAuditPath === "string"
-    ? cfg.ruleMigrationAuditPath
-    : "config/policy/rule-migration-audit.v1.json";
+const auditRel = CANONICAL_AUDIT;
 let audit = null;
 try {
   audit = loadAuthorityJson(rootId, auditRel);
@@ -574,24 +549,15 @@ try {
 }
 
 let mirror = null;
-const mirrorRel =
-  typeof cfg.policyManifestMirrorPath === "string"
-    ? cfg.policyManifestMirrorPath
-    : "config/policy/candidates/gibson-core-v1.candidate.json";
+const mirrorRel = CANONICAL_MIRROR;
 try {
   mirror = loadAuthorityJson(rootId, mirrorRel);
 } catch (e) {
   fail("E_MIRROR", e.message);
 }
 
-const roleContractsRel =
-  typeof cfg.roleContractsPath === "string"
-    ? cfg.roleContractsPath
-    : ROLE_CONTRACTS_REL;
-const jobContractsRel =
-  typeof cfg.jobContractsPath === "string"
-    ? cfg.jobContractsPath
-    : roleContractsRel;
+const roleContractsRel = CANONICAL_ROLE_CONTRACTS;
+const jobContractsRel = CANONICAL_ROLE_CONTRACTS;
 let roleContracts = null;
 try {
   roleContracts = loadAuthorityJson(rootId, roleContractsRel);
@@ -656,29 +622,38 @@ if (agentsText) {
     );
   }
 
-  const heading = cfg.onDemandSectionHeading || "On-demand (non-normative)";
+  if (
+    typeof cfg.onDemandSectionHeading === "string" &&
+    cfg.onDemandSectionHeading !== CANONICAL_ON_DEMAND
+  ) {
+    fail(
+      "E_CONFIG",
+      `onDemandSectionHeading must be ${JSON.stringify(CANONICAL_ON_DEMAND)}; got ${JSON.stringify(cfg.onDemandSectionHeading)}`
+    );
+  }
+  const heading = CANONICAL_ON_DEMAND;
   if (!agentsText.includes(`## ${heading}`)) {
     fail("E_ON_DEMAND", `AGENTS.md missing heading ## ${heading}`);
   }
+  const requiredRules = CANONICAL_REQUIRED_RULE_PATTERNS;
+  const agentsFlat = collapseWs(agentsText);
+  for (const p of requiredRules) {
+    if (typeof p !== "string" || !p) {
+      fail("E_CONFIG", "requiredRulePatterns entries must be non-empty strings");
+      continue;
+    }
+    if (!agentsText.includes(p) && !agentsFlat.includes(collapseWs(p))) {
+      fail("E_RULE", `AGENTS.md missing required rule pattern: ${p}`);
+    }
+  }
 
   const loadSection = extractSection(agentsText, "Authority and mandatory load");
-  if (!/Conditional session-start human-readable load/.test(loadSection || agentsText)) {
-    fail(
-      "E_ROLE_DISCLOSURE",
-      "AGENTS.md omits conditional dispatch-prompt disclosure (Conditional session-start human-readable load)"
-    );
-  }
-  if (!/when a role is dispatched/.test(loadSection || agentsText)) {
-    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits when a role is dispatched");
-  }
-  if (!/playbooks\/<role>\.md/.test(loadSection || agentsText)) {
-    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits playbooks/<role>.md");
-  }
-  if (!/When a non-role job is dispatched/.test(loadSection || agentsText)) {
-    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits When a non-role job is dispatched");
-  }
-  if (!/role\/job dispatch prompt/.test(loadSection || agentsText)) {
-    fail("E_ROLE_DISCLOSURE", "AGENTS.md omits role/job dispatch prompt");
+  const loadHay = loadSection || agentsText;
+  const loadFlat = collapseWs(loadHay);
+  for (const phrase of CANONICAL_DISCLOSURE_PHRASES) {
+    if (!loadHay.includes(phrase) && !loadFlat.includes(collapseWs(phrase))) {
+      fail("E_ROLE_DISCLOSURE", `AGENTS.md omits ${phrase}`);
+    }
   }
   if (
     /Mandatory human-readable load \(this repository\):\s*this file only/i.test(
@@ -692,9 +667,7 @@ if (agentsText) {
     );
   }
 
-  const families = Array.isArray(cfg.requiredBindingFamilies)
-    ? cfg.requiredBindingFamilies
-    : [];
+  const families = CANONICAL_BINDING_FAMILIES;
   for (const fam of families) {
     if (!fam || typeof fam.id !== "string") continue;
     const sectionName = typeof fam.section === "string" ? fam.section : "";
@@ -713,6 +686,15 @@ if (agentsText) {
         fail(
           "E_BINDING_FAMILY",
           `AGENTS.md binding-family ${fam.id} items ${JSON.stringify(got)} != ${JSON.stringify(expectedItems)}`
+        );
+      }
+    }
+    for (const p of Array.isArray(fam.patterns) ? fam.patterns : []) {
+      if (typeof p !== "string" || !p) continue;
+      if (!agentsText.includes(p) && !collapseWs(agentsText).includes(collapseWs(p))) {
+        fail(
+          "E_BINDING_FAMILY",
+          `AGENTS.md binding-family ${fam.id} omits required statement: ${p}`
         );
       }
     }
@@ -749,9 +731,7 @@ if (agentsText) {
       `AGENTS.md still treats a docs/ file or candidate as the contract via: ${hit.id}`
     );
   }
-  const forbidden = Array.isArray(cfg.forbiddenContractPatterns)
-    ? cfg.forbiddenContractPatterns
-    : [];
+  const forbidden = CANONICAL_FORBIDDEN_CONTRACT_PATTERNS;
   for (const p of forbidden) {
     if (agentsText.includes(p)) {
       fail(
@@ -761,9 +741,7 @@ if (agentsText) {
     }
   }
 
-  const sources = Array.isArray(cfg.requiredMachineSourcePaths)
-    ? cfg.requiredMachineSourcePaths
-    : [];
+  const sources = CANONICAL_MACHINE_SOURCE_PATHS;
   const sourceTable = extractMarkdownTable(agentsText, [
     "Topic",
     "Authoritative / operational source",
@@ -804,10 +782,19 @@ if (agentsText) {
     );
   }
 
-  const defaultCfg =
-    cfg.defaultRole && typeof cfg.defaultRole === "object" ? cfg.defaultRole : {};
-  const defaultId = defaultCfg.id || "builder";
-  const defaultPath = defaultCfg.path || "playbooks/builder.md";
+  const defaultCfg = {
+    id: CANONICAL_DEFAULT_ROLE,
+    whenUnnamed: true,
+    path: CANONICAL_DEFAULT_PATH,
+  };
+  const defaultId = defaultCfg.id;
+  const defaultPath = defaultCfg.path;
+  if (defaultId !== CANONICAL_DEFAULT_ROLE || defaultPath !== CANONICAL_DEFAULT_PATH) {
+    fail(
+      "E_DEFAULT_BUILDER",
+      `defaultRole must be id=${CANONICAL_DEFAULT_ROLE} path=${CANONICAL_DEFAULT_PATH}; got ${JSON.stringify(defaultCfg)}`
+    );
+  }
   const unnamedResolves =
     /If no role is named, the resolved role is `builder`/.test(roleSection) ||
     /If your dispatch prompt doesn't name a role, you are a `builder`/.test(roleSection);
@@ -832,10 +819,10 @@ if (agentsText) {
       "AGENTS.md must resolve an unnamed role to builder and make playbooks/builder.md the conditional session-start load"
     );
   }
-  if (!closedSeen.has(defaultPath)) {
+  if (!closedSeen.has(CANONICAL_DEFAULT_PATH)) {
     fail(
       "E_DEFAULT_BUILDER",
-      `default builder dispatch prompt omitted from the closed list: ${defaultPath}`
+      `default builder dispatch prompt omitted from the closed list: ${CANONICAL_DEFAULT_PATH}`
     );
   }
 
@@ -875,15 +862,13 @@ function checkRepoAuthorityClaims(rel, text) {
 }
 
 // Forbidden misleading repo claims (README/docs describing docs as the contract).
-const repoClaims = Array.isArray(cfg.forbiddenRepoClaims)
-  ? cfg.forbiddenRepoClaims
-  : [];
+const repoClaims = CANONICAL_FORBIDDEN_REPO_CLAIMS;
 function tryAuthorityText(rel) {
   try {
     return readAuthorityText(rootId, rel);
   } catch (e) {
     const msg = String(e && e.message ? e.message : e);
-    if (/cannot open|no such file|ENOENT/i.test(msg) && !/escape|unsafe|absolute|malformed/i.test(msg)) {
+    if (isGenuineMissingPath(msg)) {
       return null;
     }
     fail("E_PATH", `${rel}: ${msg}`);
@@ -914,26 +899,42 @@ for (const extra of ["README.md", "HOW-IT-WORKS.md", "adapters/goose/README.md"]
   checkRepoAuthorityClaims(extra, text);
 }
 
-const docsMarker = cfg.docsNonNormativeMarker || "**Authority:** Non-normative";
-const playbookNonNormativeMarker =
-  cfg.playbookNonNormativeMarker || "**Authority:** Non-normative";
+if (cfg.docsNonNormativeMarker !== CANONICAL_DOCS_MARKER) {
+  fail(
+    "E_CONFIG",
+    `docsNonNormativeMarker must be the contract-defined value; got ${JSON.stringify(cfg.docsNonNormativeMarker ?? null)}`
+  );
+}
+if (cfg.playbookNonNormativeMarker !== CANONICAL_PLAYBOOK_NON_NORM) {
+  fail(
+    "E_CONFIG",
+    `playbookNonNormativeMarker must be the contract-defined value; got ${JSON.stringify(cfg.playbookNonNormativeMarker ?? null)}`
+  );
+}
+const docsMarker = CANONICAL_DOCS_MARKER;
+const playbookNonNormativeMarker = CANONICAL_PLAYBOOK_NON_NORM;
 const docsGlobs = Array.isArray(cfg.docsNonNormativeGlobs)
   ? cfg.docsNonNormativeGlobs
-  : Array.isArray(cfg.nonNormativeGlobs)
-    ? cfg.nonNormativeGlobs.filter((g) => String(g).startsWith("docs/"))
-    : ["docs/**/*.md"];
-const playbookGlobs = Array.isArray(cfg.playbookGlobs)
-  ? cfg.playbookGlobs
-  : ["playbooks/**/*.md"];
+  : [];
+const playbookGlobs = Array.isArray(cfg.playbookGlobs) ? cfg.playbookGlobs : [];
+if (!sameStringList(docsGlobs, CANONICAL_DOCS_GLOBS)) {
+  fail(
+    "E_GLOB",
+    `docsNonNormativeGlobs must be ${JSON.stringify(CANONICAL_DOCS_GLOBS)}; got ${JSON.stringify(docsGlobs)}`
+  );
+}
+if (!sameStringList(playbookGlobs, CANONICAL_PLAYBOOK_GLOBS)) {
+  fail(
+    "E_GLOB",
+    `playbookGlobs must be ${JSON.stringify(CANONICAL_PLAYBOOK_GLOBS)}; got ${JSON.stringify(playbookGlobs)}`
+  );
+}
 
 const markedDocs = [];
 const checkedPlaybooks = [];
-if (!parsed.measureOnly) {
+{
   const docsToCheck = [];
-  for (const g of docsGlobs) {
-    if (g === "docs/**/*.md") walkMdFiles(rootId, "docs", docsToCheck);
-    else fail("E_GLOB", `unsupported docsNonNormativeGlob: ${g}`);
-  }
+  discoverMdFiles(rootId, "docs", docsToCheck, fail, { optional: true });
   const seenDocs = new Set();
   for (const rel of docsToCheck) {
     if (seenDocs.has(rel)) continue;
@@ -960,10 +961,7 @@ if (!parsed.measureOnly) {
   }
 
   const playbooksToCheck = [];
-  for (const g of playbookGlobs) {
-    if (g === "playbooks/**/*.md") walkMdFiles(rootId, "playbooks", playbooksToCheck);
-    else fail("E_GLOB", `unsupported playbookGlob: ${g}`);
-  }
+  discoverMdFiles(rootId, "playbooks", playbooksToCheck, fail, { optional: true });
   const seenPb = new Set();
   for (const rel of playbooksToCheck) {
     if (seenPb.has(rel)) continue;
@@ -1175,7 +1173,7 @@ function printText() {
       `  memory/LESSONS.md at branch point (consult, not full ingest): ${pre.lessonsBytes} bytes (~${approxTokens(pre.lessonsBytes)} tokens)`
     );
   }
-  if (parsed.measureOnly) {
+  if (parsed.measureOnly && findings.length === 0) {
     console.log(lines.join("\n"));
     return;
   }
@@ -1183,7 +1181,11 @@ function printText() {
     lines.push("contract-authority: OK — authority boundary and budget hold");
     console.log(lines.join("\n"));
   } else {
-    lines.push(`contract-authority: FAIL — ${findings.length} finding(s)`);
+    if (parsed.measureOnly) {
+      lines.push(`contract-authority: FAIL — ${findings.length} finding(s)`);
+    } else {
+      lines.push(`contract-authority: FAIL — ${findings.length} finding(s)`);
+    }
     for (const f of findings) {
       lines.push(`  ${f.code}: ${f.message}`);
     }
@@ -1197,7 +1199,14 @@ if (parsed.format === "json") {
   printText();
 }
 
-if (parsed.measureOnly) {
-  process.exit(0);
+  return {
+    report,
+    findings,
+    exitCode: findings.length === 0 ? 0 : 1,
+  };
 }
-process.exit(findings.length === 0 ? 0 : 1);
+
+if (isCliMain()) {
+  const result = main();
+  process.exit(result.exitCode);
+}

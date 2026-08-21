@@ -274,6 +274,7 @@ export function diffObligationLists(role, bucket, authorityItems, playbookItems)
       findings.push({
         code: "E_ROLE_OMISSION",
         message: `${role} ${bucket}: playbook omits authority obligation: ${aItem.text}`,
+        text: aItem.text,
       });
     }
   }
@@ -281,6 +282,7 @@ export function diffObligationLists(role, bucket, authorityItems, playbookItems)
     findings.push({
       code: "E_ROLE_ADDITION",
       message: `${role} ${bucket}: playbook adds obligation absent from authority: ${pItem.text}`,
+      text: pItem.text,
     });
   }
   return findings;
@@ -403,28 +405,42 @@ export const EXPECTED_SELF_MOD_CONTROLS = [
   "hard-fail security layers",
 ];
 
-const GATE_ENTRY_RE = /^[ \t]*- \*\*(G\d+)\*\*(?:[ \t]*⛔)?[ \t]*—[ \t]*(.+)$/gm;
-const ANY_GATE_ID_RE = /\*\*(G\d+)\*\*/g;
+/**
+ * Operative G-number list entries in the Human gates section.
+ * Matches common Markdown list forms (unordered, numbered, bold/plain,
+ * em-dash/colon/hyphen separators). Narrative mentions of G-numbers in
+ * running prose or table cells are not entries.
+ */
+const OPERATIVE_GATE_LINE_RE =
+  /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?(?:\*\*|__|`)?(G\d+)(?:\*\*|__|`)?(?:[ \t]*⛔)?[ \t]*(?:[—–:−-][ \t]*)?(.*)$/;
 
 /**
- * Structural closed-list parse of human-gate bullets. Multiplicity is
- * preserved; unexpected IDs such as G17 are visible; duplicates are not
- * collapsed. Only `- **G<digits>** — summary` list entries count.
+ * Structural closed-list parse of human-gate list entries. Multiplicity
+ * is preserved; unexpected IDs such as G17 are visible; duplicates are
+ * not collapsed. Order is the document order of operative entries.
  */
 export function parseHumanGateEntries(agentsText) {
   const section = extractSection(agentsText, "Human gates (the ONLY reasons to stop)");
   const hay = section || agentsText;
   const entries = [];
-  let m;
-  const re = new RegExp(GATE_ENTRY_RE.source, "gm");
-  while ((m = re.exec(hay)) !== null) {
+  for (const line of String(hay).split(/\r?\n/)) {
+    const m = OPERATIVE_GATE_LINE_RE.exec(line);
+    if (!m) continue;
     entries.push({
       id: m[1],
-      summary: collapseWs(m[2]),
+      summary: collapseWs(m[2] || ""),
       index: entries.length,
     });
   }
   return entries;
+}
+
+/** Authoritative role table (`| Role | Out | Forbidden |`). */
+export function parseRoleTable(agentsText) {
+  const rows = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]);
+  return rows.map((r) =>
+    collapseWs(String(r[0] || "").replace(/[`*]/g, ""))
+  ).filter(Boolean);
 }
 
 /** First-wins Map for callers that only need id → summary. Prefer parseHumanGateEntries. */
@@ -588,6 +604,21 @@ export function diffClosedSequence(prefix, actual, expected, opts = {}) {
       ),
     ];
   }
+  const countsOk =
+    omitted.length === 0 &&
+    extra.length === 0 &&
+    expected.every(
+      (id) => (actualCounts.get(id) || 0) === (expectedCounts.get(id) || 0)
+    );
+  if (opts.checkOrder !== false && countsOk) {
+    const actualExpected = actual.filter((id) => expectedCounts.has(id));
+    if (actualExpected.some((id, i) => id !== expected[i])) {
+      findings.push({
+        code: `E_${prefix}_ORDER`,
+        message: `${prefix.toLowerCase()} list is out of canonical order`,
+      });
+    }
+  }
   return findings;
 }
 
@@ -715,41 +746,491 @@ function bestSentenceMatch(expectedText, section) {
   return bestScore >= 0.35 ? { ...best, score: bestScore, want } : null;
 }
 
-function localPolarityWindow(text, needle) {
-  const flat = collapseWs(text);
-  const idx = flat.toLowerCase().indexOf(String(needle).toLowerCase());
+/** Neutralize the "not just" idiom without discarding the remainder. */
+export function neutralizeNotJust(text) {
+  return String(text || "").replace(/\bnot just\b/gi, " ");
+}
+
+/**
+ * Enclosing sentence or table-row units. Prose wrapping is collapsed so a
+ * protected phrase and a later weakener in the same sentence stay together;
+ * a later sentence cannot hide behind a decoy occurrence.
+ */
+export function polarityUnits(section) {
+  const units = [];
+  const lines = String(section || "").split(/\r?\n/);
+  const prose = [];
+  for (const line of lines) {
+    if (line.includes("|")) {
+      const cell = collapseWs(line);
+      if (cell) units.push(cell);
+      continue;
+    }
+    prose.push(line);
+  }
+  const flat = collapseWs(prose.join(" "));
+  if (flat) {
+    for (const sent of flat.split(/(?<=[.!?])\s+/)) {
+      const t = sent.trim();
+      if (t) units.push(t);
+    }
+  }
+  return units;
+}
+
+function unitContainsPhrase(unit, phrase) {
+  return unit.toLowerCase().includes(String(phrase).toLowerCase());
+}
+
+/**
+ * Removal verbs: skipping/waiving/bypassing the protected obligation.
+ * Longer forms first so "skipped" is not read as "skip" + junk.
+ */
+const REMOVAL_VERB_SRC =
+  "(?:skipped|skipping|skips|skip|waived|waiving|waives|waive|bypassed|bypassing|bypasses|bypass|omitted|omitting|omits|omit|ignored|ignoring|ignores|ignore)";
+const REMOVAL_VERB_RE = new RegExp(`\\b${REMOVAL_VERB_SRC}\\b`, "i");
+const OBLIGATION_PRED_SRC =
+  "(?:required|mandatory|enforced|necessary|(?<!non-)binding|obligatory|needed|recommended|advisory)";
+const OBLIGATION_FILLER_SRC =
+  "(?:actually|really|consistently|currently|truly|fully|strictly|generally|even|quite|inherently|practically)";
+const STRENGTHENING_REMOVAL_RE = new RegExp(
+  `\\b(?:(?:must|may|shall|should)\\s+not|cannot|can't|should\\s+never|never|not|don't|do not|without)\\s+(?:be\\s+)?${REMOVAL_VERB_SRC}\\b`,
+  "i"
+);
+
+function normalizeApostrophes(text) {
+  return String(text || "").replace(/[\u2018\u2019]/g, "'");
+}
+
+/**
+ * Consume strengthening idioms that name a softener in order to reject it.
+ * Bare "is recommended" / "is optional" must still weaken. Bare
+ * "not recommended" / "not advisory" / "not binding" are obligation
+ * negation, not softeners.
+ */
+function neutralizeNegatedSofteners(text) {
+  return String(text || "")
+    .replace(/\bnot\s+(?:just|merely)\s+recommended\b/gi, " ")
+    .replace(
+      /\brather\s+than\s+(?:optional|elective|advisory|non-binding|recommended)\b/gi,
+      " "
+    )
+    .replace(
+      /\bnot\s+(?:merely\s+)?(?:optional|elective|non-binding)\b/gi,
+      " "
+    );
+}
+
+function stripMdEmphasis(s) {
+  return String(s || "").replace(/[`*_]+/g, " ");
+}
+
+function splitAroundPhrase(unit, phrase) {
+  const neutralized = collapseWs(
+    stripMdEmphasis(neutralizeNotJust(collapseWs(unit)))
+  );
+  const needle = collapseWs(stripMdEmphasis(String(phrase || "")));
+  if (!needle) {
+    return { before: neutralized, after: "", full: neutralized, idx: -1 };
+  }
+  const idx = neutralized.toLowerCase().indexOf(needle.toLowerCase());
   if (idx < 0) return null;
-  const before = flat.slice(Math.max(0, idx - 48), idx);
-  const clause = flat.slice(Math.max(0, idx - 48), Math.min(flat.length, idx + needle.length + 48));
-  const stripped = clause.replace(/\bnot just\b[\s\S]*/i, "");
-  return { before, clause: stripped, idx };
+  return {
+    before: neutralized.slice(0, idx),
+    after: neutralized.slice(idx + needle.length),
+    full: neutralized,
+    idx,
+  };
+}
+
+/**
+ * True when THIS clause prohibits removing the obligation (never skip X,
+ * X must not be skipped, without bypassing X). That is strengthening of
+ * the clause only — callers must not treat it as covering later independent
+ * clauses or phrase occurrences in the same unit.
+ */
+export function prohibitsObligationRemoval(clause, phrase = "") {
+  const parts = splitAroundPhrase(normalizeApostrophes(clause), phrase);
+  if (!parts) return false;
+  const { before, after, full } = parts;
+  if (
+    new RegExp(
+      `\\b(?:never|not|no longer|without|don't|do not|must not|may not|cannot|can't|shall not|should not)\\s+(?:\\w+\\s+){0,3}${REMOVAL_VERB_SRC}\\s*$`,
+      "i"
+    ).test(before)
+  ) {
+    return true;
+  }
+  if (
+    new RegExp(
+      `^\\s*(?:must not|may not|cannot|can't|shall not|should not|should never|is not to|are not to)\\s+(?:be\\s+)?${REMOVAL_VERB_SRC}\\b`,
+      "i"
+    ).test(after)
+  ) {
+    return true;
+  }
+  if (STRENGTHENING_REMOVAL_RE.test(after) || STRENGTHENING_REMOVAL_RE.test(full)) {
+    return true;
+  }
+  return false;
+}
+
+function remainderAfterLastNegation(before) {
+  const m = String(before || "").match(
+    /.*\b(never|not|no longer|without|don't)\b(.*)$/i
+  );
+  return m ? m[2] : null;
+}
+
+/**
+ * Contrastive/adversative clause boundaries. "unless" stays on the
+ * following clause so convenience matchers still see it.
+ */
+const CLAUSE_BOUNDARY_RE =
+  /(?:;+\s*(?:however|nevertheless|nonetheless)?,?\s*)|(?:,\s*(?:but|however|although|though|whereas|nevertheless|nonetheless|yet)\s+)|(?:\s+(?:but|however|although|though|whereas|nevertheless|nonetheless|yet)\s+)|(?:(?:,\s+|\s+)(?=unless\b))/gi;
+
+function splitAdversativeClauses(text) {
+  const src = collapseWs(text);
+  if (!src) return [];
+  const parts = [];
+  let last = 0;
+  const re = new RegExp(CLAUSE_BOUNDARY_RE.source, "gi");
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index < last) continue;
+    const left = collapseWs(src.slice(last, m.index));
+    if (left) parts.push(left);
+    last = m.index + m[0].length;
+    if (last === m.index) last = m.index + 1;
+  }
+  const tail = collapseWs(
+    src.slice(last).replace(
+      /^(?:however|nevertheless|nonetheless|although|though|whereas|but|yet)\b[,:\s]*/i,
+      ""
+    )
+  );
+  if (tail) parts.push(tail);
+  return parts.length ? parts : [src];
+}
+
+function splitStrengtheningPrefix(text, phrase) {
+  if (!phrase) return [text];
+  const m = /[,;]\s+/.exec(text);
+  if (!m) return [text];
+  const left = collapseWs(text.slice(0, m.index));
+  const right = collapseWs(text.slice(m.index + m[0].length));
+  if (
+    left &&
+    right &&
+    unitContainsPhrase(left, phrase) &&
+    prohibitsObligationRemoval(left, phrase)
+  ) {
+    return [left, right];
+  }
+  return [text];
+}
+
+function rhsHasIndependentNegationOrWeakening(right, phrase) {
+  const bound = unitContainsPhrase(right, phrase)
+    ? right
+    : collapseWs(`${phrase} ${right}`);
+  if (prohibitsObligationRemoval(bound, phrase)) return false;
+  if (obligationNegatedAtClause(bound, phrase)) return true;
+  if (clauseWeakensAtClause(bound, phrase)) return true;
+  return false;
+}
+
+/**
+ * Split coordinating `and` only when the right-hand clause independently
+ * negates or weakens the obligation. Harmless `and` phrases such as
+ * "mandatory and cannot be skipped" stay one clause.
+ */
+function splitAndWhenRhsPolarized(text, phrase) {
+  const src = collapseWs(normalizeApostrophes(text));
+  if (!phrase || !src) return [src];
+  const re = /(?:,\s+|\s+)and\s+/gi;
+  const parts = [];
+  let last = 0;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index < last) continue;
+    const left = collapseWs(src.slice(last, m.index));
+    const right = collapseWs(src.slice(m.index + m[0].length));
+    if (left && right && rhsHasIndependentNegationOrWeakening(right, phrase)) {
+      parts.push(left);
+      last = m.index + m[0].length;
+    }
+  }
+  const tail = collapseWs(src.slice(last));
+  if (tail) parts.push(tail);
+  return parts.length ? parts : [src];
+}
+
+function splitPhraseOccurrences(text, phrase) {
+  const needle = collapseWs(stripMdEmphasis(String(phrase || "")));
+  if (!needle) return [text];
+  const lower = text.toLowerCase();
+  const n = needle.toLowerCase();
+  const idxs = [];
+  let from = 0;
+  while (from <= lower.length - n.length) {
+    const i = lower.indexOf(n, from);
+    if (i < 0) break;
+    idxs.push(i);
+    from = i + Math.max(n.length, 1);
+  }
+  if (idxs.length <= 1) return [text];
+  const parts = [];
+  for (let k = 0; k < idxs.length; k++) {
+    const start = k === 0 ? 0 : idxs[k];
+    const end = k + 1 < idxs.length ? idxs[k + 1] : text.length;
+    const chunk = collapseWs(text.slice(start, end));
+    if (chunk) parts.push(chunk);
+  }
+  return parts.length ? parts : [text];
+}
+
+/**
+ * Independent grammatical clauses / phrase occurrences inside one unit.
+ * A strengthening prohibition covers only the clause it appears in;
+ * later optionality, obligation-negation, convenience, or another
+ * removal verb is analyzed on its own, including after coordinating
+ * `and`/`yet` when the right-hand clause independently negates or
+ * weakens. Pronoun/ellipsis remainders after a seen phrase are bound
+ * back to that phrase.
+ */
+function polarityClauses(unit, phrase) {
+  const text = collapseWs(
+    stripMdEmphasis(neutralizeNotJust(neutralizeNegatedSofteners(unit)))
+  );
+  if (!text) return [];
+  if (!phrase) return [text];
+  const expanded = [];
+  for (const adv of splitAdversativeClauses(text)) {
+    for (const andPart of splitAndWhenRhsPolarized(adv, phrase)) {
+      for (const pref of splitStrengtheningPrefix(andPart, phrase)) {
+        for (const occ of splitPhraseOccurrences(pref, phrase)) {
+          if (occ) expanded.push(occ);
+        }
+      }
+    }
+  }
+  const bound = [];
+  let seen = false;
+  for (const clause of expanded) {
+    const has = unitContainsPhrase(clause, phrase);
+    if (has) seen = true;
+    if (!has && !seen) continue;
+    bound.push(has ? clause : `${phrase} ${clause}`);
+  }
+  return bound.length ? bound : [text];
+}
+
+/**
+ * True when the grammatical target is the obligation itself (X is not
+ * required / X isn't mandatory / X is never required / X doesn't need to
+ * happen / do not require X), not a skip/waive/bypass verb.
+ * Strengthening a removal verb in one clause does not suppress a later
+ * independent negation in the same unit. Negated softeners ("not optional")
+ * are not obligation-negation.
+ */
+export function obligationNegated(unit, phrase) {
+  for (const clause of polarityClauses(unit, phrase)) {
+    if (obligationNegatedAtClause(clause, phrase)) return true;
+  }
+  return false;
+}
+
+function afterNegatesObligation(after) {
+  const a = neutralizeNegatedSofteners(normalizeApostrophes(after));
+  if (
+    new RegExp(
+      `\\b(?:is|are|was|were)\\s+(?:not|never|no longer)\\s+(?:${OBLIGATION_FILLER_SRC}\\s+)?${OBLIGATION_PRED_SRC}\\b`,
+      "i"
+    ).test(a)
+  ) {
+    return true;
+  }
+  if (
+    new RegExp(
+      `\\b(?:isn't|aren't|wasn't|weren't)\\s+(?:${OBLIGATION_FILLER_SRC}\\s+)?${OBLIGATION_PRED_SRC}\\b`,
+      "i"
+    ).test(a)
+  ) {
+    return true;
+  }
+  if (
+    /\bneed(?:\s+not|n't)\s+(?:happen|occur|apply|be|exist)\b/i.test(a) ||
+    /\bneed(?:\s+not|n't)\b/i.test(a)
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:does(?:n't|\s+not)|do(?:n't|\s+not))\s+need(?:s)?(?:\s+to)?\s+(?:happen|occur|apply|be|exist)\b/i.test(
+      a
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\bnever\s+needs?(?:\s+to)?\s+(?:happen|occur|apply|be|exist)\b/i.test(a)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function obligationNegatedAtClause(clause, phrase) {
+  const normalized = normalizeApostrophes(clause);
+  const parts = splitAroundPhrase(normalized, phrase);
+  if (!parts) return false;
+  if (prohibitsObligationRemoval(normalized, phrase)) return false;
+  const { before, after } = parts;
+  if (afterNegatesObligation(after)) return true;
+  if (
+    /\b(?:do not|don't|does not|doesn't|never|must not)\s+(?:require|enforce|mandate)\s*$/i.test(
+      before
+    )
+  ) {
+    return true;
+  }
+  if (!/\b(never|not|no longer|without|don't)\b/i.test(before)) return false;
+  const rest = remainderAfterLastNegation(before);
+  if (rest == null) return false;
+  return !REMOVAL_VERB_RE.test(rest);
+}
+
+/**
+ * Class of obligation hedges: optionality, convenience/practicality,
+ * modal softeners (may/should/recommended), and skip/waive/bypass of the
+ * protected phrase. Inspects each grammatical clause after neutralizing
+ * "not just" and negated-softener strengthening ("not optional",
+ * "not merely recommended", "rather than recommended"). Valid
+ * "never skip X" / "X must not be skipped" prohibitions neutralize only
+ * their own clause, not a later independent weakener.
+ */
+export function clauseWeakensBinding(clause, phrase = "") {
+  if (!phrase) return clauseWeakensAtClause(clause, phrase);
+  for (const part of polarityClauses(clause, phrase)) {
+    if (clauseWeakensAtClause(part, phrase)) return true;
+  }
+  return false;
+}
+
+function clauseWeakensAtClause(clause, phrase = "") {
+  if (prohibitsObligationRemoval(clause, phrase)) return false;
+  const raw = neutralizeNotJust(neutralizeNegatedSofteners(clause));
+  const c = phrase
+    ? raw.replace(new RegExp(escapeRe(phrase), "ig"), " ")
+    : raw;
+  if (
+    /\b(?:only\s+)?(?:when|unless|if)\s+(?:\w+\s+){0,4}(?:convenient|practical|desired|wanted|easy)\b/i.test(
+      c
+    )
+  ) {
+    return true;
+  }
+  if (/\b(?:which|that)\s+is\s+optional\b|\bis\s+optional\b/i.test(c)) {
+    return true;
+  }
+  if (/\b(?<!non-)optional\b|\belective\b|\badvisory\b|\bnon-binding\b/i.test(c)) {
+    return true;
+  }
+  if (/\b(?:may|should|might|could)(?!\s+not)\b/i.test(c)) {
+    return true;
+  }
+  if (/\bis recommended\b|\brecommended\b/i.test(c)) {
+    return true;
+  }
+  if (
+    /\b(?:may|can|could|should|might)\s+(?:be\s+)?(?:skipped|waived|bypassed|omitted|ignored)\b/i.test(
+      c
+    )
+  ) {
+    return true;
+  }
+  if (REMOVAL_VERB_RE.test(c)) {
+    return true;
+  }
+  return false;
 }
 
 export function diffBindingPhrase(familyId, phrase, section, opts = {}) {
   const findings = [];
-  const hit = localPolarityWindow(section || "", phrase);
-  if (!hit) {
+  const units = polarityUnits(section || "");
+  const hits = units.filter((u) => unitContainsPhrase(u, phrase));
+  if (!hits.length) {
     findings.push({
       code: "E_BINDING_FAMILY",
       message: `AGENTS.md binding-family ${familyId} omits required statement: ${phrase}`,
     });
     return findings;
   }
-  const before = hit.before.toLowerCase();
-  const clause = hit.clause.toLowerCase();
-  if (
-    /\b(never|not|no longer|without)\b/.test(before) ||
-    new RegExp(`\\b(never|not)\\s+${escapeRe(phrase.split(" ")[0])}`, "i").test(clause)
-  ) {
+  for (const unit of hits) {
+    if (obligationNegated(unit, phrase)) {
+      findings.push({
+        code: "E_BINDING_NEGATION",
+        message: `AGENTS.md binding-family ${familyId} negated around "${phrase}"`,
+      });
+      continue;
+    }
+    if (opts.requireMust !== false && clauseWeakensBinding(unit, phrase)) {
+      findings.push({
+        code: "E_BINDING_WEAKENING",
+        message: `AGENTS.md binding-family ${familyId} weakened around "${phrase}"`,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * Tier A/B/C treatment semantics — IDs alone are not enough. Tier C
+ * must keep fan-out + adversarial review + G12 human merge strength.
+ */
+export function diffTierTreatments(tiers) {
+  const findings = [];
+  const byId = new Map();
+  for (const t of Array.isArray(tiers) ? tiers : []) {
+    const id = String(t.id || "")
+      .replace(/\*/g, "")
+      .trim();
+    if (id) byId.set(id, t);
+  }
+  const tierA = byId.get("A");
+  if (tierA && !/independent review/i.test(tierA.treatment || "")) {
     findings.push({
-      code: "E_BINDING_NEGATION",
-      message: `AGENTS.md binding-family ${familyId} negated around "${phrase}"`,
+      code: "E_TIER_WEAKENING",
+      message: "Tier A treatment missing independent review",
     });
-  } else if (opts.requireMust !== false && /\b(optional|may|should)\b/.test(before)) {
+  }
+  const tierB = byId.get("B");
+  if (tierB && !/full-lens review/i.test(tierB.treatment || "")) {
     findings.push({
-      code: "E_BINDING_WEAKENING",
-      message: `AGENTS.md binding-family ${familyId} weakened around "${phrase}"`,
+      code: "E_TIER_WEAKENING",
+      message: "Tier B treatment missing full-lens review",
     });
+  }
+  const tierC = byId.get("C");
+  if (tierC) {
+    const treat = collapseWs(tierC.treatment || "");
+    const lower = treat.toLowerCase();
+    const hasG12 = /\bg12\b/i.test(treat);
+    const hasHumanMerge = /human merge/.test(lower);
+    const hasAdversarial = /adversarial review/.test(lower);
+    const hasFanout = /fan-out|fan out/.test(lower);
+    if (!hasG12 || !hasHumanMerge || !hasAdversarial || !hasFanout) {
+      findings.push({
+        code: "E_TIER_WEAKENING",
+        message:
+          "Tier C treatment missing required human merge / adversarial review strength",
+      });
+    } else if (clauseWeakensBinding(treat)) {
+      findings.push({
+        code: "E_TIER_WEAKENING",
+        message: "Tier C treatment weakens human merge / adversarial review",
+      });
+    }
   }
   return findings;
 }
@@ -854,8 +1335,38 @@ export function structuredAgentsEnumerationFindings(agentsText, candidate) {
     })
   );
 
-  const tiers = parseRiskTiers(agentsText).map((t) => t.id);
+  const tableRoles = parseRoleTable(agentsText);
+  findings.push(
+    ...diffClosedSequence("ROLE_TABLE", tableRoles, EXPECTED_ROLES, {
+      renameCode: "E_ROLE_TABLE_RENAME",
+      unexpectedCode: "E_ROLE_TABLE_ADDITION",
+    }).map((f) => {
+      if (f.code === "E_ROLE_TABLE_OMISSION") {
+        return { ...f, message: `AGENTS.md role table omits ${f.item}` };
+      }
+      return f;
+    })
+  );
+  if (
+    tableRoles.length &&
+    roles.length &&
+    (tableRoles.length !== roles.length || tableRoles.some((id, i) => id !== roles[i]))
+  ) {
+    const tableSet = new Set(tableRoles);
+    const enumSet = new Set(roles);
+    if ([...tableSet].some((id) => !enumSet.has(id)) || [...enumSet].some((id) => !tableSet.has(id))) {
+      findings.push({
+        code: "E_ROLE_TABLE_ADDITION",
+        message:
+          "AGENTS.md role table disagrees with the expected role enumeration",
+      });
+    }
+  }
+
+  const tierRows = parseRiskTiers(agentsText);
+  const tiers = tierRows.map((t) => t.id);
   findings.push(...diffClosedSequence("TIER", tiers, EXPECTED_TIERS));
+  findings.push(...diffTierTreatments(tierRows));
 
   const stages = parseTenStagesList(agentsText);
   findings.push(...diffClosedSequence("STAGE", stages, EXPECTED_STAGES));
@@ -967,16 +1478,22 @@ export function diffObligationMatrix(id, authByBucket, pbByBucket) {
   const drop = new Set();
   const extra = [];
   for (const om of omissions) {
-    const omText = String(om.f.message || "").replace(/^.*omits authority obligation:\s*/, "");
+    const omText =
+      typeof om.f.text === "string"
+        ? om.f.text
+        : String(om.f.message || "").replace(/^.*omits authority obligation:\s*/, "");
     const omShape = semanticShape(omText, om.bucket);
     let best = null;
     let bestScore = 0;
     for (const ad of additions) {
       if (ad.bucket === om.bucket) continue;
-      const adText = String(ad.f.message || "").replace(
-        /^.*adds obligation absent from authority:\s*/,
-        ""
-      );
+      const adText =
+        typeof ad.f.text === "string"
+          ? ad.f.text
+          : String(ad.f.message || "").replace(
+              /^.*adds obligation absent from authority:\s*/,
+              ""
+            );
       const score = topicOverlap(omShape.tokens, semanticShape(adText, ad.bucket).tokens);
       if (score > bestScore) {
         bestScore = score;
@@ -1049,6 +1566,18 @@ const OPERATIVE_CLAIM_PATTERNS = [
     re: /\bthe principle wins\b/i,
   },
   {
+    id: "outranks-agents",
+    re: /\boutranks\s+AGENTS\.md\b/i,
+  },
+  {
+    id: "supersedes-agents",
+    re: /\bsupersedes\s+AGENTS\.md\b/i,
+  },
+  {
+    id: "self-authoritative",
+    re: /\bthis (?:file|document|chapter) is (?:the )?(?:authoritative|binding contract|source of truth)\b/i,
+  },
+  {
     id: "docs-01-19-are-the-spec",
     re: /\bdesign docs \(01[–-]19\) are the spec\b/i,
   },
@@ -1062,24 +1591,89 @@ const OPERATIVE_CLAIM_PATTERNS = [
   },
 ];
 
+function isHistoricalFraming(para) {
+  return /\b(historically|historical note|earlier draft|used to|previously|before #\d+|once claimed|no longer(?: true)?|that claim is retired|now live only in)\b/i.test(
+    para
+  );
+}
+
+function paragraphExplicitlyDefersToAgents(para) {
+  return (
+    /\bbinding(?: commit\/PR\/merge)? rules live(?: only)? in\b[\s\S]{0,60}\bAGENTS\.md\b/i.test(
+      para
+    ) ||
+    /\b(?:follow|defer(?:s|red)? to)\s+\[?`?AGENTS\.md/i.test(para) ||
+    /\bAGENTS\.md\b[\s\S]{0,60}\bis the (?:sole |operative |always-mandatory )?(?:human-readable )?contract/i.test(
+      para
+    ) ||
+    /\bmust not add, drop, or weaken\b/i.test(para) ||
+    /\b(?:closed (?:stop )?list|stop list) (?:lives|remain(?:s)?(?: the closed list)?) in\b[\s\S]{0,40}\bAGENTS\.md\b/i.test(
+      para
+    ) ||
+    /\blives in\b[\s\S]{0,40}\bAGENTS\.md\b/i.test(para)
+  );
+}
+
+function paragraphConflictsWithAgents(para) {
+  const p = collapseWs(para);
+  return (
+    /\boutranks\s+AGENTS\.md\b/i.test(p) ||
+    /\bsupersedes\s+AGENTS\.md\b/i.test(p) ||
+    /\boverrides\s+AGENTS\.md\b/i.test(p) ||
+    /\bwhen\s+AGENTS\.md\b[\s\S]{0,80}\bconflict[\s\S]{0,80}\b(?:the )?(?:principle|this (?:file|document))\s+wins\b/i.test(
+      p
+    ) ||
+    /\bAGENTS\.md\b[\s\S]{0,80}\band\s+(?:a |the )?principle conflict[\s\S]{0,60}\bprinciple wins\b/i.test(
+      p
+    ) ||
+    /\bAGENTS\.md is subordinate\b/i.test(p)
+  );
+}
+
+function isRetractedHistorical(para) {
+  return (
+    isHistoricalFraming(para) &&
+    (/\b(no longer|retired|now live|now (?:the )?contract|that claim is retired|do not (?:follow|treat))\b/i.test(
+      para
+    ) ||
+      paragraphExplicitlyDefersToAgents(para))
+  );
+}
+
 function paragraphDefersToAgents(para) {
-  return /\bAGENTS\.md\b/.test(para);
+  if (paragraphConflictsWithAgents(para) && !isRetractedHistorical(para)) {
+    return false;
+  }
+  return paragraphExplicitlyDefersToAgents(para) || isRetractedHistorical(para);
+}
+
+function paragraphAt(text, idx, matchLen) {
+  const start = text.lastIndexOf("\n\n", idx);
+  const end = text.indexOf("\n\n", idx + matchLen);
+  return text.slice(start === -1 ? 0 : start, end === -1 ? text.length : end);
 }
 
 export function findOperativeClaims(text) {
   const hits = [];
+  const hay = String(text || "");
   for (const pat of OPERATIVE_CLAIM_PATTERNS) {
-    const m = pat.re.exec(text);
-    if (!m) continue;
-    const idx = m.index;
-    const start = text.lastIndexOf("\n\n", idx);
-    const end = text.indexOf("\n\n", idx + m[0].length);
-    const para = text.slice(start === -1 ? 0 : start, end === -1 ? text.length : end);
-    hits.push({
-      id: pat.id,
-      snippet: collapseWs(m[0]).slice(0, 160),
-      defersToAgents: paragraphDefersToAgents(para),
-    });
+    const flags = pat.re.flags.includes("g") ? pat.re.flags : `${pat.re.flags}g`;
+    const re = new RegExp(pat.re.source, flags);
+    let m;
+    while ((m = re.exec(hay)) !== null) {
+      if (!m[0] || m[0].length === 0) {
+        re.lastIndex += 1;
+        continue;
+      }
+      const idx = m.index;
+      const para = paragraphAt(hay, idx, m[0].length);
+      hits.push({
+        id: pat.id,
+        snippet: collapseWs(m[0]).slice(0, 160),
+        defersToAgents: paragraphDefersToAgents(para),
+        index: idx,
+      });
+    }
   }
   return hits;
 }

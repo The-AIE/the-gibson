@@ -157,10 +157,24 @@ mkdir -p "$AGENTS_DRIFT/docs" "$AGENTS_DRIFT/config/policy/schema" "$AGENTS_DRIF
 cp "$SCHEMA" "$AGENTS_DRIFT/config/policy/schema/policy-manifest-v1.schema.json"
 cp "$CANDIDATE" "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json"
 cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
-for d in docs/14-human-gates.md docs/03-roles.md docs/06-quality-gates.md docs/02-sdlc-pipeline.md docs/06-quality-gates.md docs/18-fork-and-upstream.md; do
-  mkdir -p "$AGENTS_DRIFT/$(dirname "$d")"
-  cp "$REPO_ROOT/$d" "$AGENTS_DRIFT/$d"
-done
+"$NODE" -e '
+const fs = require("fs");
+const path = require("path");
+const repo = process.argv[1];
+const dest = process.argv[2];
+const cand = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+const seen = new Set();
+for (const s of (cand.provenance && cand.provenance.sources) || []) {
+  if (!s || typeof s.path !== "string" || s.path === "AGENTS.md") continue;
+  if (seen.has(s.path)) continue;
+  seen.add(s.path);
+  const src = path.join(repo, s.path);
+  const dst = path.join(dest, s.path);
+  if (!fs.existsSync(src) || !fs.statSync(src).isFile()) continue;
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  fs.copyFileSync(src, dst);
+}
+' "$REPO_ROOT" "$AGENTS_DRIFT" "$CANDIDATE"
 # Pin digests to this tree.
 "$NODE" -e '
 const fs=require("fs");
@@ -583,6 +597,11 @@ has "schema order maximum code" "$out" "E_SCHEMA_MAXIMUM"
 mut_validate "m-schema-order-float.json" 'c.workflowStages[0].order = 1.5;' --no-digest-check
 [[ "$rc" -ne 0 ]] && ok "schema order integer type fails closed" || bad "schema order integer type passed"
 has "schema order integer type code" "$out" "E_SCHEMA_TYPE"
+
+# 19d) workflowStages[].name must be one of the ten canonical tokens
+mut_validate "m-schema-stage-name.json" 'c.workflowStages[0].name = "NOT-A-STAGE";' --no-digest-check
+[[ "$rc" -ne 0 ]] && ok "schema stage name enum fails closed" || bad "schema stage name enum passed"
+has "schema stage name enum code" "$out" "E_SCHEMA_ENUM"
 
 # 20) array cardinality: humanGates below minItems 16
 mut_validate "m-schema-minitems.json" 'c.humanGates = c.humanGates.slice(0, 10);' --no-digest-check
