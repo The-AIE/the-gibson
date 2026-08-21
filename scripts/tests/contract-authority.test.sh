@@ -3428,6 +3428,26 @@ const rows = [
     expect: ["priority-over-agents"],
   },
   {
+    name: "trumps-the-agents-file",
+    text: banner + "This addendum trumps the AGENTS.md file when they disagree.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "takes-precedence-over-whatever-agents-says",
+    text: banner + "This playbook takes precedence over whatever AGENTS.md says.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "wins-over-rules-in-agents",
+    text: banner + "This file wins over the rules in AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "overrides-conflicting-text-in-agents",
+    text: banner + "This adapter overrides any conflicting text in AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
     name: "wins-over-agents",
     text: banner + "This file wins over AGENTS.md.\n",
     expect: ["priority-over-agents"],
@@ -3440,6 +3460,11 @@ const rows = [
   {
     name: "negated-overrides-agents",
     text: banner + "This adapter does not override AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "negated-overrides-conflicting-text-in-agents",
+    text: banner + "This adapter does not override any conflicting text in AGENTS.md.\n",
     expect: [],
   },
   {
@@ -3476,6 +3501,21 @@ const rows = [
     name: "fence-does-not-mask-later-live-claim",
     text: banner + "```md\nThis file overrides AGENTS.md.\n```\n\nThis file overrides AGENTS.md.\n",
     expect: ["priority-over-agents"],
+  },
+  {
+    name: "unclosed-fence-fails-closed",
+    text: banner + "```md\nThis file overrides AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "unclosed-html-comment-fails-closed",
+    text: banner + "<!-- This file overrides AGENTS.md.\n",
+    expect: ["priority-over-agents"],
+  },
+  {
+    name: "principle-conflict-rephrasing-resists-generic-deferral",
+    text: banner + "Should this playbook and AGENTS.md ever disagree, the principle wins. This document must not add, drop, or weaken rules in AGENTS.md.\n",
+    expect: ["principle-wins-over-agents"],
   },
 ];
 const failed = [];
