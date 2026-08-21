@@ -1672,13 +1672,13 @@ export function diffObligationMatrix(id, authByBucket, pbByBucket) {
 }
 
 const AGENTS_OBJECT_GAP_SRC =
-  "(?:\\s+(?:the|any|all|every|whatever|anything|conflicting|binding|written|operative|local|other|current|rules?|text|instructions?|content|contract|file|terms?|requirements?|polic(?:y|ies)|in|from|of|says)){0,6}\\s+AGENTS\\.md\\b";
+  "(?:(?!\\b(?:and|but|or|while|plus|because|although|though|yet|not|except|excluding|rather)\\b)[^.!?;\\r\\n]){0,160}?AGENTS\\.md\\b";
 const AGENTS_PRIORITY_CLAIM_RE = new RegExp(
-  `\\b(?:overrides?|trumps?|takes?\\s+precedence\\s+over|wins?\\s+over)${AGENTS_OBJECT_GAP_SRC}`,
+  `\\b(?:overrides?|trumps?|prevails?\\s+over|(?:takes?|has)\\s+(?:precedence|priority)\\s+over|wins?\\s+over|ranks?\\s+above|is\\s+superior\\s+to)\\b${AGENTS_OBJECT_GAP_SRC}`,
   "i"
 );
 const AGENTS_GOVERNS_CLAIM_RE = new RegExp(
-  `\\bgoverns?\\b[\\s\\S]{0,80}\\bsupersed(?:e|es|ing)${AGENTS_OBJECT_GAP_SRC}`,
+  `\\bgoverns?\\b[\\s\\S]{0,80}\\bsupersed(?:e|es|ing)\\b${AGENTS_OBJECT_GAP_SRC}`,
   "i"
 );
 
@@ -1801,12 +1801,6 @@ function paragraphConflictsWithAgents(para) {
     /\bAGENTS\.md\b[\s\S]{0,80}\band\s+(?:a |the )?principle conflict[\s\S]{0,60}\bprinciple wins\b/i.test(
       p
     ) ||
-    /\bAGENTS\.md\b[\s\S]{0,100}\b(?:conflicts?|disagrees?)\b[\s\S]{0,80}\b(?:the )?principle wins\b/i.test(
-      p
-    ) ||
-    /\b(?:conflicts?|disagrees?)\b[\s\S]{0,100}\bAGENTS\.md\b[\s\S]{0,80}\b(?:the )?principle wins\b/i.test(
-      p
-    ) ||
     /\bAGENTS\.md is subordinate\b/i.test(p) ||
     /\bthis (?:file|document|chapter) is (?:the )?(?:(?:authoritative\b(?!\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\b))|binding contract|source of truth|canonical source)\b/i.test(
       p
@@ -1915,6 +1909,7 @@ const NEGATABLE_OPERATIVE_CLAIMS = new Set([
   "outranks-agents",
   "priority-over-agents",
   "governs-over-agents",
+  "principle-wins-over-agents",
 ]);
 
 /**
@@ -1923,6 +1918,9 @@ const NEGATABLE_OPERATIVE_CLAIMS = new Set([
  */
 function neutralizeAffirmativeNotIdioms(text) {
   return String(text || "")
+    .replace(/\b(?:does|do|did)\s+not\s+fail\s+to\b/gi, " ")
+    .replace(/\b(?:is|are|was|were)\s+not\s+unable\s+to\b/gi, " ")
+    .replace(/\b(?:cannot|can't)\s+fail\s+to\b/gi, " ")
     .replace(/\bno\s+doubt\b/gi, " ")
     .replace(/\bno\s+question\b/gi, " ")
     .replace(/\bwithout\s+(?:a\s+)?doubt\b/gi, " ")
@@ -2008,10 +2006,30 @@ function matchRetractedHistorical(para, matchIdx, matchLen) {
   return true;
 }
 
+function principleClaimConflictsWithAgents(para, matchIdx, matchLen) {
+  const { start, end } = sentenceBounds(para, matchIdx, matchLen);
+  const sentence = collapseWs(authorityClaimHaystack(para.slice(start, end)));
+  const conflict = "(?:conflicts?|disagrees?|clashes?|contradicts?)";
+  return (
+    new RegExp(`\\bAGENTS\\.md\\b[^.!?;]{0,40}\\b${conflict}\\b`, "i").test(
+      sentence
+    ) ||
+    new RegExp(`\\b${conflict}\\b[^.!?;]{0,40}\\bAGENTS\\.md\\b`, "i").test(
+      sentence
+    )
+  );
+}
+
 function paragraphDefersToAgents(para, claimId, matchIdx, matchLen) {
   if (matchRetractedHistorical(para, matchIdx, matchLen)) return true;
   if (matchNegatesOperativeClaim(para, claimId, matchIdx, matchLen)) return true;
   if (claimAttributedToAgents(para, claimId)) return true;
+  if (
+    claimId === "principle-wins-over-agents" &&
+    principleClaimConflictsWithAgents(para, matchIdx, matchLen)
+  ) {
+    return false;
+  }
   // Explicit operative conflict wins over a generic Follow-AGENTS
   // sentence in the same paragraph.
   if (paragraphConflictsWithAgents(para)) return false;
