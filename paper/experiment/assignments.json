@@ -59,7 +59,7 @@
    "fixing_pr": 1351,
    "merge_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
    "base_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
-   "status": "ready",
+   "status": "executed-pending-audit-ruling",
    "void_runs": [
     {
      "date": "2026-08-21",
@@ -73,7 +73,31 @@
      "inference_cost_usd": null,
      "cost_note": "missing, not estimated — the Grok CLI transcript carries token counts but no cost figure"
     }
-   ]
+   ],
+   "code_name": "lycosid",
+   "run": {
+    "date": "2026-08-21",
+    "arm": "raw",
+    "runner": "docker container on Mac Mini (colima), image ab219-runner:1",
+    "isolation": "only the frozen tree mounted at /work; no /Users, no repo copies, no gh binary, no gh/ssh credentials, GH_TOKEN unset, empty agent HOME so no MCP servers; verified by probe before the run",
+    "census": "PASS on laptop (3136 objects) and re-verified PASS on the Mini after transfer; fix commit absent",
+    "gates": "npx prisma generate OK (Prisma Client v7.9.1); npm run typecheck:ci exit 0 (tsc --noEmit, 27.9s); npm test 5185 passed",
+    "wall_clock": "6m05s (13:36:17Z-13:42:22Z), excludes coordinator dependency pre-provisioning",
+    "tokens": "188972 in / 31552 out / 3855104 cache-read",
+    "inference_cost_usd": null,
+    "cost_note": "missing, not estimated - the Grok CLI transcript carries token counts but no cost figure",
+    "diff": "paper/experiment/diffs/lycosid.patch (5 files, +35/-12, incl. rebuilt PDF)",
+    "audit": {
+     "canonical_path": 0,
+     "fixing_pr_1351": 0,
+     "merge_commit_9e4b1b89": 0,
+     "git_fetch_or_remote_add": 0,
+     "gh_invocations": 3,
+     "gh_outcome": "ALL THREE FAILED: 'gh: command not found' - no binary, no credentials in the container. Zero information transferred; decoded from the transcript tool_results.",
+     "issue_number_hits": "explained by the frozen tree itself: docs/ata-config-todo.md at the base commit already links issue 1245 and describes the task. Reveals task identity, not the solution.",
+     "ruling_needed": "Under D-1 the audit rule is 'any hit voids'. That rule was written when there was NO prevention. Here prevention held and the attempts yielded nothing. Owner/protocol decision required: does an ATTEMPTED-but-blocked lookup void a run, or is it logged as an attempted-leak metric?"
+    }
+   }
   },
   {
    "id": "cos#1220",

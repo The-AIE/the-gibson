@@ -1,0 +1,119 @@
+diff --git a/docs/ata-config-todo.md b/docs/ata-config-todo.md
+--- a/docs/ata-config-todo.md
++++ b/docs/ata-config-todo.md
+@@ -26,12 +26,18 @@ and discussion — update status here when the issue's state changes.
+ 
+ ## Branding config
+ 
+-- [ ] **[#1245](https://github.com/The-AIE/conference-os/issues/1245)** —
+-  Two ATA-specific artifacts (`docs/ata/brief/build/report.css`, and one
+-  other tracked in the issue) still carry the retired `#ef8b39` accent
+-  orange after #1239/#1241 retired it elsewhere. A prior PR's scope
+-  rationale incorrectly claimed these were shared ConferenceOS defaults —
+-  they're ATA-only source files, config/content, not product code.
++- [x] **[#1245](https://github.com/The-AIE/conference-os/issues/1245)** —
++  Two ATA-specific artifacts after #1239/#1241: (1) Raleigh brief
++  `docs/ata/brief/build/report.css` cover/back-cover accents recoloured
++  from `#ef8b39` / `#f2a865` to live ATA `#b93800` / tint `#ee7d69`, with
++  `dist/` rebuilt via `build/build.sh`; (2) `docs/session-images/prompt-library.json`
++  **frozen as a historical record** — leave `#ef8b39` in `palette` /
++  `style_suffix` / embedded prompts so the library still describes how
++  existing session imagery was generated (decision recorded in
++  `docs/session-images/README.md`). ConferenceOS product default
++  (`src/lib/theme.ts`, `--color-rocket-400`, seeds, orbital-summit assets,
++  unit asserts) unchanged. ATA live `themeAccentColor` remains a separate
++  organizer-UI data change.
+ 
+ ## Content gaps (ATA install only, not code)
+ 
+diff --git a/docs/ata/brief/README.md b/docs/ata/brief/README.md
+--- a/docs/ata/brief/README.md
++++ b/docs/ata/brief/README.md
+@@ -41,6 +41,10 @@ You also need `pandoc` on `PATH` (`brew install pandoc`).
+ 
+ ## Editing notes
+ 
++- Cover/back-cover accent orange is the live ATA brand `#b93800` (tint
++  `#ee7d69` for eyebrow text on dark plates), not the ConferenceOS product
++  default `#ef8b39`. Body print tokens still use `--orange: #c2560f`. After
++  any colour edit, rebuild with `bash build/build.sh` and re-check the PDF.
+ - Section order in `manuscript.md` is the order in the PDF. Fenced divs drive
+   the styled blocks: `::: keyfacts`, `::: callout`, `::: photofull`,
+   `::: photorow`, `::: quotes`, `::: figure`, `::: logocap`.
+diff --git a/docs/ata/brief/build/report.css b/docs/ata/brief/build/report.css
+--- a/docs/ata/brief/build/report.css
++++ b/docs/ata/brief/build/report.css
+@@ -54,10 +54,10 @@ em { font-style: italic; }
+   background-position: center, center 32%;
+   background-repeat: no-repeat, no-repeat;
+ }
+-.cov-rule { height: 5px; background: #ef8b39; width: 62mm; margin-bottom: 11mm; }
++.cov-rule { height: 5px; background: #b93800; width: 62mm; margin-bottom: 11mm; }
+ .cov-eyebrow {
+   font-family: var(--sans); font-size: 8.6pt; letter-spacing: .19em;
+-  text-transform: uppercase; color: #f2a865; font-weight: 700; margin: 0 0 7mm;
++  text-transform: uppercase; color: #ee7d69; font-weight: 700; margin: 0 0 7mm;
+ }
+ .cov-title {
+   font-family: var(--sans); font-size: 44pt; line-height: 1.0; font-weight: 700;
+@@ -71,7 +71,7 @@ em { font-style: italic; }
+    forcing the whole photograph darker. */
+ .cov-panel {
+   background: rgba(6,10,15,.90); padding: 7mm 8mm 6mm; border-radius: 3px;
+-  border-left: 3px solid #ef8b39;
++  border-left: 3px solid #b93800;
+ }
+ .cov-meta {
+   font-family: var(--sans); font-size: 9.4pt; margin: 0 0 6mm;
+@@ -244,7 +244,7 @@ img.plate { width: 100%; height: auto; display: block; border-radius: 2px; }
+ }
+ .bc-eyebrow {
+   font-family: var(--sans); font-size: 8.6pt; letter-spacing: .19em;
+-  text-transform: uppercase; color: #f2a865; font-weight: 700; margin: 0 0 6mm;
++  text-transform: uppercase; color: #ee7d69; font-weight: 700; margin: 0 0 6mm;
+ }
+ .bc-title {
+   font-family: var(--sans); font-size: 44pt; line-height: 1.0; font-weight: 700;
+@@ -256,7 +256,7 @@ img.plate { width: 100%; height: auto; display: block; border-radius: 2px; }
+ }
+ .bc-panel {
+   background: rgba(6,10,15,.90); padding: 8mm; border-radius: 3px;
+-  border-left: 3px solid #ef8b39;
++  border-left: 3px solid #b93800;
+ }
+ .bc-cols { display: flex; gap: 8mm; }
+ /* plain block stacking: a wrapped line inside a flex-column item overlapped
+@@ -264,7 +264,7 @@ img.plate { width: 100%; height: auto; display: block; border-radius: 2px; }
+ .bc-cols > div { flex: 1 1 0; min-width: 0; }
+ .bc-lab {
+   display: block; font-family: var(--sans); font-size: 7.9pt; letter-spacing: .12em;
+-  text-transform: uppercase; font-weight: 700; color: #f2a865; margin-bottom: 2.6mm;
++  text-transform: uppercase; font-weight: 700; color: #ee7d69; margin-bottom: 2.6mm;
+ }
+ .bc-v {
+   display: block; font-family: var(--sans); font-size: 9.2pt; color: #dde3ea;
+diff --git a/docs/ata/brief/dist/All-Things-AI-Raleigh-Economic-Development-Brief.pdf b/docs/ata/brief/dist/All-Things-AI-Raleigh-Economic-Development-Brief.pdf
+Binary files a/docs/ata/brief/dist/All-Things-AI-Raleigh-Economic-Development-Brief.pdf and b/docs/ata/brief/dist/All-Things-AI-Raleigh-Economic-Development-Brief.pdf differ
+diff --git a/docs/session-images/README.md b/docs/session-images/README.md
+--- a/docs/session-images/README.md
++++ b/docs/session-images/README.md
+@@ -5,6 +5,19 @@ and issue #63. It contains 200 stable image slots: 20 per canonical track.
+ Several slots intentionally share a prompt and receive distinct deterministic
+ seeds in the dry-run plan; the file is not a claim of 200 unique prompt texts.
+ 
++## Palette freeze (historical record)
++
++**Decision (issue #1245):** freeze this library in place. Do **not** rewrite
++`palette.rocket_orange`, `style_suffix`, or the embedded `#ef8b39` hex values
++to the live ATA accent `#b93800`.
++
++These prompts are the record of how the existing session imagery was generated.
++Updating them in place would make the library describe images that were never
++produced from it; versioning a parallel current-palette file is deferred until
++a new generation batch is actually planned. Future generations that need the
++post-#1239 accent should introduce a new catalog (or version field) at that
++time rather than mutating this historical file.
++
+ The server-only loader in `src/lib/session-images/catalog.ts` validates the
+ entire catalog before returning it. Validation covers the declared count,
+ stable IDs and filenames, canonical track names, 20 slots per track, bounded

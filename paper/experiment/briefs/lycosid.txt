@@ -1,0 +1,46 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): <WORKDIR>
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Two more ATA-specific artifacts still carry the retired accent orange (#ef8b39)
+
+## Problem
+
+Follow-up to #1239, which retired `#ef8b39` from `public/brand/allthingsai-favicon.svg`. A cross-vendor review of PR #1241 found that PR's scope rationale was wrong: it claimed every remaining `#ef8b39` in the repo was the ConferenceOS product default. Two tracked artifacts are in fact ATA-specific and still carry the old orange.
+
+### 1. `docs/ata/brief/build/report.css:57`
+
+`.cov-rule` fills with `#ef8b39`, and `.cov-eyebrow` uses `#f2a865`, a tint of it. This is the paged-media stylesheet for the Raleigh economic-development brief. Per `docs/ata/brief/README.md` it is a **source** file, not build output, so changing it is a real edit and requires rebuilding `dist/` through `build/build.sh` (pandoc then WeasyPrint, which needs the DYLD path export on macOS).
+
+Deliberately left out of #1241 because that brief is a document being put in front of Raleigh Economic Development. Recolouring it means regenerating and re-checking the delivered PDF, which is its own piece of work with its own review.
+
+### 2. `docs/session-images/prompt-library.json`
+
+202 occurrences: the `palette.rocket_orange` key plus the `style_suffix` string, which is embedded verbatim into all 200 session-image prompts as "All Things AI palette: nebula blue (#307fe2) and rocket orange (#ef8b39) accent lighting".
+
+Deliberately left out of #1241 because these prompts are the record of how the existing session imagery was generated. Rewriting them retroactively would make the library describe images that were never produced from it. The open question is whether to update the palette so future generations use `#b93800` and accept the drift from already-generated art, version the library, or leave it as a historical record.
+
+## Acceptance criteria
+
+- [ ] Decide and record the approach for the prompt library: update in place, version, or freeze
+- [ ] If the brief is recoloured, `report.css` updated, `dist/` rebuilt via `build/build.sh`, rebuilt PDF eyeballed
+- [ ] No change to the ConferenceOS product default: `src/lib/theme.ts`, `--color-rocket-400` in `globals.css`, `scripts/seed-*.ts`, `public/events/orbital-summit-2026/*`, and the unit tests asserting on it
+
+## Context
+
+ATA's live accent is a separate matter again: all four ATA events and the "All Things AI" Organization row have `themeAccentColor` set to `null` in prod, so event pages inherit the `#ef8b39` default. That is a data change through the organizer branding UI, not code.
+
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in <WORKDIR>:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in <WORKDIR>. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

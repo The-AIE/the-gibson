@@ -1,0 +1,6 @@
+{
+ "note": "code-name -> task/arm mapping. The blind judge NEVER receives this file.",
+ "mapping": {
+  "lycosid": { "task": "cos#1245", "arm": "raw", "run_date": "2026-08-21", "runner": "container/mac-mini" }
+ }
+}
