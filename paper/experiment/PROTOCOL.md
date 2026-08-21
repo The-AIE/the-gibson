@@ -189,3 +189,76 @@ a stated limitation.
 Replay measures task difficulty under each arm, not whether a change would have shipped;
 the leakage audit detects consultation of the real fix but cannot make it impossible.
 Both are stated as limitations of the design in the paper. Neither is argued away.
+
+---
+
+## Amendment D-2 (2026-08-21) — governs where it conflicts with D-1 and with the registered text
+
+Cause and full accounting: `DEVIATIONS.md` (D-2). In short: the first replay executed
+under D-1 was voided because the implementer retrieved the fixing PR and the post-fix file
+contents over the network as its first action. D-1's controls detect that but do not
+prevent it. Owner decision 2026-08-21: network denial applies to **both** arms.
+
+### Leakage control — layer 0 (new, prevention, fail-closed)
+
+Layers 1–3 of D-1 (total object census, blind brief, transcript audit) are retained
+unchanged. A new layer precedes them.
+
+**Both arms** run their implementer with child-process network egress denied:
+
+```bash
+env -u GH_TOKEN -u GITHUB_TOKEN \
+  codex exec -s workspace-write --skip-git-repo-check -C "$SCRATCH" \
+  "$(cat "$BRIEF")" < /dev/null
+```
+
+`-s workspace-write` confines writes to the scratch workspace and denies child-process
+network egress. Verified on this host 2026-08-21: a probe running
+`curl -sS -m 8 https://api.github.com/` inside the sandbox returns
+`curl: (6) Could not resolve host` / `HTTP:000 rc=6`.
+
+**Grok must not be used as a replay implementer on macOS.** Its documented child-network
+blocking is Linux-only and is a no-op on macOS; the same probe under
+`grok --sandbox strict` returns `HTTP:200`. Specifying it would be a control that does not
+exist on the host.
+
+Because Codex implements both arms:
+- the blind judge is **Devin** (the registered "implemented neither arm" rule; Claude never
+  judges; Codex is disqualified). If Devin is unavailable, judging blocks rather than
+  falling back.
+- the harness arm's cross-vendor reviewer is **Grok**, also network-denied.
+
+### Dependency pre-provisioning (coordinator, before dispatch)
+
+The done-gate needs `node_modules`, which needs network. The coordinator installs
+dependencies in the scratch tree **before** the implementer session starts and with network
+available:
+
+```bash
+( cd "$SCRATCH" && npm ci && npx prisma generate )
+```
+
+Install time and tokens are **excluded** from metrics 3 and 4 in both arms. `node_modules`
+is git-ignored and derives only from the lockfile at the base commit, so it can neither
+enter an exported patch nor carry post-base information.
+
+### Brief sanitization (amends D-1 layer 2)
+
+The brief is the issue title and body with every `#NNNN` cross-reference replaced by an
+opaque token (`[REF-A]`, `[REF-B]`, …), and every `owner/repo` slug and URL removed — in
+addition to D-1's bar on the canonical path, issue URL, and fixing-PR number. The sanitized
+text is written to `paper/experiment/briefs/<code-name>.txt` and is the task statement given
+to the blind judge, so implementer and judge see the same statement.
+
+### Void-run ledger
+
+A run that fails any layer leaves the task at `status: ready` and appends a record to that
+task's `void_runs` array in `assignments.json` (date, arm, cause, evidence path). The paper
+reports attempts per completed task in both arms.
+
+### Limitation created by this amendment
+
+Both arms now work without documentation lookup, package search, or web access, which real
+developers and real harness lanes have. The depression is symmetric, so the between-arm
+comparison holds, but absolute per-task performance under replay is a floor, not a realistic
+estimate. Reported as a limitation, not argued away.

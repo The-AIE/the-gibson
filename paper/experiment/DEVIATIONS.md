@@ -158,3 +158,141 @@ Codex FAILED r3 on residue of the same two findings; both fixed:
    behavior verified by test.
 2. The one remaining "fresh replays in both arms" sentence (in this file's r1
    record) aligned with the 12-run single-arm design stated in the amendment.
+
+---
+
+## D-2 — network isolation for both arms; dependency pre-provisioning; brief sanitization
+
+**Raised:** 2026-08-21. **Author:** Claude (coordinator). **Owner decision:** Mark, 2026-08-21
+("both" — network denial applies to both arms, not the raw arm alone).
+**Status:** proposed. **One task has executed under D-1 and was voided; see below.**
+
+### What went wrong
+
+The first replay executed under D-1 — `cos#1245`, raw arm, 2026-08-21 — was **void on
+the leakage audit**. All three registered layers were applied correctly and the failure
+was not an execution mistake:
+
+| layer | result |
+|---|---|
+| 1. total object census | PASS — 3,136 objects, store == `HEAD` closure exactly, `rev-list --count --all` = 1, `git remote` empty |
+| 2. blind brief | PASS — scanned clean for canonical path, issue URL, fixing-PR number before dispatch |
+| 3. post-run transcript audit | **HIT — void** |
+
+The implementer's **first action, before reading any file in the frozen tree**, was
+`gh issue view 1245 --repo The-AIE/conference-os`. It went on to read the fixing PR
+(#1351), that PR's merge commit, and — via `gh api .../contents/<path>?ref=<merge_commit>`
+— the **post-fix contents of two of the files it then edited**.
+
+Its own third command, `git show 9e4b1b89… --stat`, failed locally: the census-truncated
+tree worked exactly as designed. The implementer simply routed around it over the network.
+
+### Why this is a design defect and not bad luck
+
+D-1 acknowledged that the truncated tree "prevents *accidental* leakage; it is not
+isolation," and booked the remainder as a stated limitation on the premise that residual
+consultation would be **undetectable**. The observed behavior is the opposite: leakage
+was overt, immediate, total, and trivially detected. The honest reading is that under
+D-1 the arms have **no leakage control at all** — only a detector — and that the detector
+converts every run into a void run rather than into data. Re-running under D-1 as written
+produces void runs indefinitely, because the implementer runs on a host with an
+authenticated `gh` and reaches for it as move one.
+
+A second, narrower defect is now also demonstrated. Codex flagged on 2026-08-19 that "the
+task statement is not frozen/sanitized"; D-1 closed it only partway. The brief rule bars
+the canonical path, the issue URL, and the fixing-PR number, but passes the issue **body**
+verbatim, and this body contained `#1239` and `#1241`. Those cross-references are a direct
+pivot to the fix.
+
+### The change
+
+**1. Network denial for the implementer session, in BOTH arms (owner decision, 2026-08-21).**
+
+Applying it to the raw arm alone would hand the harness arm a capability — documentation
+lookup, package registries, general search — that the raw arm lacks, and the primary
+metric would then partly measure that asymmetry rather than the harness. Both arms are
+therefore denied network egress for child processes, and both lose it equally.
+
+**2. Implementer platform for replay runs is pinned to Codex, for both arms — forced by
+a verified platform limitation, not by preference.**
+
+Grok's sandbox cannot deliver this control on the available hardware. Its own
+documentation states that child-network blocking "is enforced on **Linux only** (via
+seccomp). On macOS it is a no-op." Measured on this host (macOS, 2026-08-21):
+
+| mechanism | probe result |
+|---|---|
+| `grok --sandbox strict` | `HTTP:200` — **network NOT blocked** (`gh` binary unreadable, but `curl` reaches the internet) |
+| `codex exec -s workspace-write` | `curl: (6) Could not resolve host: api.github.com` / `HTTP:000 rc=6` — **network blocked, kernel-enforced (Seatbelt)** |
+
+Writing `grok --sandbox strict` into the protocol would therefore have been a control that
+does not exist on the machine the experiment runs on — the same class of error D-2 is being
+filed to correct. Both arms use `codex exec -s workspace-write`, with `GH_TOKEN` and
+`GITHUB_TOKEN` scrubbed from the environment as a second, independent layer.
+
+Consequences of pinning the platform, stated rather than buried:
+
+- The registered raw-arm wording ("same platform mix as harness arm's implementers") is
+  **satisfied more strictly than before**: platform is now held constant across arms,
+  removing a confound the v1 design tolerated.
+- The comparison becomes harness-vs-raw **holding the model fixed**, which is the
+  contrast H7 actually predicts. It is no longer a comparison across vendors.
+- **The blind judge must now be Devin.** The registered rule is that the judge
+  implemented neither arm; with Codex implementing both, Codex is disqualified, and
+  Claude never judges. If Devin is unavailable, judging blocks — it does not fall back
+  to Codex.
+- The harness arm's cross-vendor reviewer must not be Codex; it is Grok, and the
+  reviewer is **also** network-denied, since a networked reviewer could retrieve the real
+  fix and inject it through review feedback.
+
+**3. Dependency pre-provisioning by the coordinator, before the implementer starts.**
+
+The registered done-gate (`npx prisma generate && npm run typecheck:ci`, `npm test` where
+applicable) requires `node_modules`, and installing it requires network. The coordinator
+therefore runs `npm ci` and `npx prisma generate` in the scratch tree **with network, before
+dispatch**, and the implementer session begins against a tree that already has its
+dependencies.
+
+This is a strict improvement to the measurement, not only a workaround: dependency install
+is identical work in both arms and was previously charged to the arm's wall-clock and token
+cost (in the voided `cos#1245` run, `npm ci` consumed a visible share of 5m41s). Pre-provisioning
+removes it from both arms' metrics 3 and 4. `node_modules` is git-ignored, so it cannot enter
+an exported patch, and it is derived solely from the lockfile **at the base commit** — it
+carries no post-base information.
+
+**4. Brief sanitization, and the sanitized text becomes the artifact of record.**
+
+Before dispatch, the issue body is rewritten: every `#NNNN` cross-reference is replaced with
+an opaque token (`[REF-A]`, `[REF-B]`, …), every `owner/repo` slug and every URL is removed.
+The sanitized brief is stored under `paper/experiment/briefs/<code-name>.txt` and is the text
+the judge sees as the task statement, so judge and implementer receive the same statement.
+
+**5. Void runs are recorded, not discarded.**
+
+`assignments.json` gains a `void_runs` array per task. A voided run leaves `status` at
+`ready` and appends a record (date, arm, cause, evidence path). The paper reports
+attempts-per-completed-task; silently dropping void runs would misstate the cost of both arms.
+
+**6. The audit is retained unchanged, as a backstop, plus one assertion.**
+
+Prevention does not retire detection. The transcript audit runs exactly as under D-1, and
+additionally asserts that the sandbox flag was in effect for the run. Any hit still voids.
+
+### What this costs, stated plainly
+
+Both arms now work without documentation lookup, package search, or web access. Real
+developers and real harness lanes have those. This depresses both arms **symmetrically**,
+so the between-arm comparison stays sound, but absolute per-task performance under replay
+is a floor rather than a realistic estimate, and generalization to networked development is
+correspondingly weaker. This is an additional external-validity limitation stacked on the
+one D-1 already created, and it is reported as such rather than argued away.
+
+The residual risk that an implementer consults the fix through a channel neither denied nor
+logged is reduced but not eliminated. It remains a stated limitation.
+
+### What is NOT changed
+
+Arm assignments are untouched: `cos#1245` keeps `raw`, and no arm is re-drawn after an
+observed outcome — the voided run produced no measurement, and re-drawing on it would be
+the exact bias the ledger exists to prevent. Enrollment stays closed at n=12, balanced 6/6.
+Metrics 1–4 stand. The census and the no-push rule are unchanged.
