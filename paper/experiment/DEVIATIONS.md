@@ -266,6 +266,25 @@ This closes **vector B absolutely** (nothing else is mounted) and **vector A** b
 credential in the container at all. It also closes, by construction, the three defects that
 blocked draft 2: the temp trees, the retained session store, and the MCP channel.
 
+**Defect found and fixed in the runner itself (2026-08-21, after the first clean run).**
+The first runner mounted a host *directory* at `/home/agent/.grok` to supply `auth.json`.
+Grok writes session state into that directory, so the run's own transcript persisted to the
+host at `~/ab219/authmnt/sessions/%2Fwork/…/chat_history.jsonl` — and would have been
+mounted into the **next** run's container. That is the same retained-session-store defect
+Codex blocked draft 2 on, reintroduced by the mount shape, and it falsified the "per-run
+state, `--rm`" claim.
+
+Fixed: `auth.json` is mounted as a **single read-only file** into a writable `.grok`
+directory baked into the image, so session state lands in the container's ephemeral layer
+and is destroyed with `--rm`. Image `ab219-runner:2`
+(`sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08`). Verified:
+the agent authenticates (`AUTH_OK`) and **no host-side session state is created**. The
+polluted directory was moved aside rather than deleted, so the incident stays inspectable.
+
+This does **not** invalidate the `cos#1245` run: that container started from a freshly
+created mount containing only `auth.json`, so nothing from a prior session was present. The
+pollution was written during the run and would only have affected run 2 onward.
+
 **It was tested adversarially by the implementer itself.** In the clean run, the opening
 moves were `gh issue list`, `gh issue view 1245`, `gh api repos/…/issues/1245`, and
 `gh pr view 1241`. All returned **`gh: command not found`**; the transcript `tool_result`
