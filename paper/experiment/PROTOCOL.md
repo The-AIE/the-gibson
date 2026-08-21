@@ -192,104 +192,108 @@ Both are stated as limitations of the design in the paper. Neither is argued awa
 
 ---
 
-## Amendment D-2 (2026-08-21) — governs where it conflicts with D-1 and with the registered text
+## Amendment D-2 (2026-08-21) — governs where it conflicts with D-1 and the registered text
 
-Cause and full accounting: `DEVIATIONS.md` (D-2). The first replay executed under D-1 was
-voided: the implementer retrieved the fixing PR and post-fix file contents as its first
-action. D-1's layers detect that but do not prevent it. Owner decision 2026-08-21: isolation
-applies to **both** arms.
+Cause and full accounting, including two rejected drafts: `DEVIATIONS.md` (D-2). The first
+replay under D-1 was voided — the implementer retrieved the fixing PR and post-fix file
+contents as its opening move. D-1 detects that but does not prevent it. Owner decisions
+2026-08-21: isolation applies to **both** arms; the runner is hosted on the Mac Mini; a
+**blocked** attempt is logged, not voiding.
 
-### Threat model (two independent vectors)
+### Threat model
 
-- **A — network.** `gh`/`curl` to GitHub. Requires credentials: the repo is private and
-  unauthenticated retrieval of the fixing PR returns 404.
-- **B — local filesystem.** The canonical checkout at `/Users/mrhinkle/Code/conference-os`
-  and its sibling worktrees carry the entire future history, including the fix, and need
-  **no credentials**. This is the higher-value vector.
+- **A — network** to GitHub. Needs credentials: the repo is private and unauthenticated
+  retrieval of the fixing PR returns **404**.
+- **B — local filesystem.** Any checkout with the future history yields the fix via one
+  `git show`, with **no** credentials. Higher-value vector.
 
-### Leakage control — layer 0 (new, prevention)
+**No host-side sandbox on either Mac closes both.** Measured: `codex -s workspace-write`
+denies network but reads the canonical checkout (`RC=0`); a Grok `strict`-based profile
+denies the canonical checkout but not network (`HTTP:200`), and was defeated anyway via the
+temp trees and `~/.grok`, both of which any workable profile must grant.
 
-Layers 1–3 of D-1 (total object census, blind brief, transcript audit) are retained
-unchanged. A new layer precedes them, applied identically in **both arms**.
+### Leakage control — layer 0: containerized runner
 
-A project-scoped sandbox profile is written into the **disposable scratch tree** (never the
-user's global config):
+Isolation comes from the **container**, not the host. The Mini is *not* clean —
+`~/workspace/conference-os` there contains the fixing commit — it is simply always on and
+already running colima.
 
-```toml
-# $SCRATCH/.grok/sandbox.toml
-[profiles.ab219]
-extends = "strict"
-read_only = ["/Users/mrhinkle/.hermes/node", "/Users/mrhinkle/.local/bin"]
-deny = ["/Users/mrhinkle/Code", "/Users/mrhinkle/.config/gh", "/Users/mrhinkle/.ssh", "/Users/mrhinkle/Documents"]
-```
+- Image `ab219-runner:1`
+  (`sha256:36e61e1b902d6a6007a173188afac1b84531142cd314fcd0316f1c1356de24ff`), from
+  `node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`
+  plus `git` and `@xai-official/grok@1.0.3`. Empty agent `HOME`.
+- The frozen tree is built on the laptop under the D-1 census, shipped as a tarball, and the
+  **census is re-verified on the Mini after transfer**. It is mounted alone at `/work`.
+- Only `~/.grok/auth.json` is additionally mounted, read-only: xAI inference auth, no
+  repository access.
+- `--rm`, so agent state is per-run and discarded.
 
 ```bash
-env -u GH_TOKEN -u GITHUB_TOKEN \
-  grok --always-approve --cwd "$SCRATCH" --sandbox ab219 --disable-web-search -p "$(cat "$BRIEF")"
+docker run --rm \
+  -v <SCRATCH>:/work \
+  -v <BRIEF>:/brief.txt:ro \
+  -v <AUTHDIR>:/home/agent/.grok \
+  -w /work ab219-runner:1 \
+  grok --always-approve --cwd /work --model <PINNED_MODEL> \
+       --output-format streaming-messages-json --prompt-file /brief.txt
 ```
 
-Verified on this host 2026-08-21:
+**Probe before every run** (assumption is what voided the first attempt):
 
-| probe | result |
+| probe | required result |
 |---|---|
-| `node --version` | `v22.22.3` — toolchain usable (required: `strict` alone hides `$HOME/.hermes`, making the done-gate unrunnable) |
-| `head /Users/mrhinkle/Code/conference-os/package.json` | `Operation not permitted` — **vector B closed, kernel-enforced** |
-| `curl https://api.github.com/` | `HTTP:200` — **vector A NOT closed** |
+| `ls /Users` | No such file or directory |
+| repo copies in container | none |
+| fix commit from `/work` | could not get object info |
+| `gh`, `~/.config/gh`, `~/.ssh` | absent; `GH_TOKEN` unset |
+| `~/.grok` config | absent (no MCP servers) |
+| private repo unauthenticated | 404 |
 
-**Coverage is by allowlist, not by enumeration.** `extends = "strict"` confines reads to the
-working directory plus system paths, so the `deny` list is belt-and-braces. Probed: under
-`ab219`, `ls /Users/mrhinkle` returns `Operation not permitted`, and two further
-conference-os checkouts found outside the deny list
-(`/Users/mrhinkle/conference-os`, `/Users/mrhinkle/cos-bakeoff/conference-os`) were denied
-anyway. Unenumerated local copies are therefore covered by construction.
+### Audit rule (amended)
 
-**Vector A is mitigated by credential denial, not by network denial:** the repo is private
-(unauthenticated fetch of the fixing PR → 404), `GH_TOKEN`/`GITHUB_TOKEN` are scrubbed,
-`~/.config/gh` is kernel-denied, and `--disable-web-search` removes the model's own
-retrieval tools. General web access survives and is **detection-only** via the retained audit.
+- **Successful retrieval** of out-of-tree information → run is **void** and re-run.
+- **Blocked attempt** → recorded in `attempted_leak`, run stands.
+- The distinction must be evidenced by decoding tool results, never inferred from command
+  text. Attempt counts are reported as a finding: the raw arm reached for the answer as its
+  opening move in both independent sessions run so far.
 
-**Do not substitute `codex exec -s workspace-write`.** It blocks network but leaves vector B
-fully readable (probed: `RC=0`), which is a net loss. Literal denial of both vectors requires
-a container/VM runner with the scratch tree as the only mount and egress limited to the
-inference endpoint; that is recorded in `DEVIATIONS.md` as the recommended hardening, not
-silently substituted.
+### Model pinning
 
-### Platform, reviewer, judge
+Runs pin `--model` explicitly and record it (`cos#1245`: **grok-4.5**). Both arms use the
+same platform and pinned model, which removes a confound but **narrows the estimand**: H7
+was registered over a platform mix and is now tested for one model. Reported as a limitation.
 
-- **Implementer: Grok, both arms** — forced by the above. Holds platform constant across
-  arms, so the comparison is harness-vs-raw with the model fixed.
-- **Harness cross-vendor reviewer: Codex**, under the same isolation profile.
-- **Blind judge: Devin only.** Grok implemented both arms; Claude never judges; Codex has
-  seen harness-arm output as reviewer. If Devin is unavailable, judging blocks.
+### Brief
 
-### Dependency pre-provisioning (coordinator, before dispatch)
+**Verbatim issue text** plus the working directory — no sanitization. The container closes
+the lookup vector, so sanitization would only delete requirements, and it would interact
+with arm (the harness spec gate can compensate where raw cannot).
 
-```bash
-( cd "$SCRATCH" && npm ci && npx prisma generate )
-```
+Limitation: the frozen tree may name its own task — at `cos#1245`'s base commit,
+`docs/ata-config-todo.md` links the issue and describes the work. Brief-blinding conceals
+task identity less than D-1 claimed; it does not reveal the solution.
 
-Run with network, before the implementer starts. Install time and tokens are **excluded**
-from metrics 3 and 4 in both arms. `node_modules` is git-ignored and derives only from the
-lockfile at the base commit, so it can neither enter an exported patch nor carry post-base
-information.
+### Dependency pre-provisioning
 
-### Brief sanitization (amends D-1 layer 2)
+`npm ci && npx prisma generate`, run by the coordinator in the mounted tree before the
+implementer session. Excluded from metrics 3–4 in both arms.
 
-Every `#NNNN` cross-reference becomes an opaque token (`[REF-A]`, `[REF-B]`, …); every
-`owner/repo` slug and URL is removed, in addition to D-1's bars. The sanitized text is stored
-at `paper/experiment/briefs/<code-name>.txt` and is the statement given to the blind judge,
-so implementer and judge see the same task.
+Stated honestly: `npm ci` executes `postinstall` and several dependency install scripts with
+network, so this is **not** information-free, and the exclusion **changes** registered metric
+accounting rather than leaving it untouched. It is identical work in both arms, Node/npm are
+pinned by the image digest, and the lockfile is the base commit's.
 
-### Void-run ledger
+### Harness-arm isolation
 
-A run failing any layer leaves the task at `status: ready` and appends a record to that
-task's `void_runs` array in `assignments.json` (date, arm, cause, evidence path). The paper
-reports attempts per completed task in both arms.
+- implementer — `ab219-runner:1`, as above;
+- cross-vendor reviewer — not the implementing platform; receives the exported patch and the
+  brief **only**, with no repository mount and no GitHub credential;
+- spec gate and captain — operate on the issue text and the patch only.
 
-### Limitation created by this amendment
+### Limitations created by this amendment
 
-Both arms lose documentation lookup and package search, which real developers and real
-harness lanes have. The depression is symmetric, so the between-arm comparison holds, but
-absolute per-task performance under replay is a floor, not a realistic estimate. Vector A is
-closed by credential denial rather than by network denial, and the residual is detected, not
-prevented. Reported as limitations, not argued away.
+Egress is **not** restricted to the inference endpoint: the container reaches the public
+internet, and the clean run used that to fetch build tools. Retrieval of this fix remains
+impossible without a credential the container lacks, but egress allowlisting is unbuilt and
+is the next hardening. The estimand is narrowed to one model. Replay measures task
+difficulty under each arm, not whether a change would have shipped.

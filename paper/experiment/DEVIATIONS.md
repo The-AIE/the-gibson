@@ -161,210 +161,203 @@ Codex FAILED r3 on residue of the same two findings; both fixed:
 
 ---
 
-## D-2 — implementer isolation for both arms; dependency pre-provisioning; brief sanitization
+## D-2 — containerized implementer isolation for both arms
 
-**Raised:** 2026-08-21. **Author:** Claude (coordinator). **Owner decision:** Mark, 2026-08-21
-("both" — isolation applies to both arms, not the raw arm alone).
-**Status:** proposed. **One task executed under D-1 and was voided; see below.**
+**Raised:** 2026-08-21. **Author:** Claude (coordinator).
+**Owner decisions:** Mark, 2026-08-21 — (i) isolation applies to **both** arms; (ii) the
+runner is hosted on the always-on Mac Mini; (iii) a *blocked* leakage attempt is logged as
+a metric and does not void a run (see "Audit rule, amended").
+**Status:** proposed. **Supersedes two earlier drafts of D-2**, both of which are recorded
+below rather than deleted, because the way they failed is the finding.
 
 ### What went wrong
 
 The first replay executed under D-1 — `cos#1245`, raw arm, 2026-08-21 — was **void on the
-leakage audit**. All three registered layers were applied correctly; this is a design
-defect, not an execution mistake:
+leakage audit**. All three D-1 layers were applied correctly; this is a design defect, not
+an execution mistake:
 
 | layer | result |
 |---|---|
-| 1. total object census | PASS — 3,136 objects, store == `HEAD` closure exactly, `rev-list --count --all` = 1, `git remote` empty |
-| 2. blind brief | PASS — scanned clean for canonical path, issue URL, fixing-PR number before dispatch |
+| 1. total object census | PASS — 3,136 objects, store == `HEAD` closure, 1 commit, no remotes |
+| 2. blind brief | PASS — scanned clean before dispatch |
 | 3. post-run transcript audit | **HIT — void** |
 
-The implementer's **first action, before reading any file in the frozen tree**, was
-`gh issue view 1245 --repo The-AIE/conference-os`. It then read the fixing PR (#1351), that
-PR's merge commit, and — via `gh api .../contents/<path>?ref=<merge_commit>` — the
-**post-fix contents of two of the files it went on to edit**.
+The implementer's first action, before reading any file in the frozen tree, was
+`gh issue view 1245`. It then read the fixing PR (#1351), that PR's merge commit, and — via
+`gh api .../contents/<path>?ref=<merge_commit>` — the **post-fix contents of two of the
+files it went on to edit**. Its own third command, `git show 9e4b1b89…`, failed locally:
+the census-truncated tree worked. It routed around it.
 
-Its own third command, `git show 9e4b1b89… --stat`, failed locally: the census-truncated
-tree worked exactly as designed. The implementer routed around it.
+D-1 acknowledged the truncated tree "is not isolation" and booked the remainder as a
+limitation, on the premise that residual consultation would be **undetectable**. The
+observed behavior was the opposite — overt, immediate, total, trivially detected. Under D-1
+the arms had a **detector and no control**, so runs void indefinitely rather than producing
+data.
 
-### Why this is a design defect
+### Two rejected drafts, and why they are on the record
 
-D-1 acknowledged the truncated tree "prevents *accidental* leakage; it is not isolation,"
-and booked the remainder as a limitation on the premise that residual consultation would be
-**undetectable**. The observed behavior is the opposite: overt, immediate, total, trivially
-detected. Under D-1 the arms have a **detector and no control**, so runs void indefinitely
-rather than producing data.
+**Draft 1 — `codex exec -s workspace-write` (network denial).** Rejected after probing the
+second vector. Codex denies child-process network but confines *writes*, not reads: it read
+`/Users/mrhinkle/Code/conference-os/package.json` with `RC=0`. It would have closed the
+lesser vector while leaving the entire future history readable by `cat`. The draft was
+written after testing **one** vector.
 
-A second defect: Codex flagged on 2026-08-19 that "the task statement is not
-frozen/sanitized." D-1 closed it only partway — the brief rule bars the canonical path,
-issue URL, and fixing-PR number, but passes the issue **body** verbatim, and that body
-contained `#1239` and `#1241`: a direct pivot to the fix.
+**Draft 2 — a Grok sandbox profile (`extends = "strict"` plus a deny list).** Reviewed
+adversarially by Codex, which returned **BLOCK** on seven findings. Verified and confirmed:
+the profile was defeated from **inside its own sandbox**.
 
-### The threat model, corrected
-
-The first draft of this amendment prescribed network denial alone. That draft was wrong,
-and the error is recorded rather than quietly replaced: it was written after testing **one**
-leakage vector. There are two, and they are independent.
-
-| vector | what it yields | credentials needed |
-|---|---|---|
-| **A. network** — `gh`/`curl` to GitHub | issue, fixing PR, merge commit, post-fix file contents | yes (repo is private; unauthenticated `GET /repos/The-AIE/conference-os/pulls/1351` returns **404**) |
-| **B. local filesystem** — the canonical checkout at `/Users/mrhinkle/Code/conference-os` and ~40 sibling worktrees | the **entire** future history, including the exact fix commit, via `git -C … show <merge_commit>` | **none** |
-
-Vector B is the higher-value one: zero friction, no credentials, and it hands over the
-literal diff. The voided run used A only because A was easiest, not because B was closed.
-
-### Controls, measured on the host rather than assumed
-
-All four probes run 2026-08-21 on this machine (macOS):
-
-| mechanism | vector A (network) | vector B (canonical checkout) |
-|---|---|---|
-| `grok --sandbox strict` | ❌ `HTTP:200` — **not blocked** | ✅ `Operation not permitted` — **blocked** |
-| `codex exec -s workspace-write` | ✅ `curl: (6) Could not resolve host` — **blocked** | ❌ `RC=0`, file read — **not blocked** |
-
-**Neither CLI closes both vectors on macOS.** Grok's own documentation states that
-child-network blocking "is enforced on **Linux only** (via seccomp). On macOS it is a
-no-op." Codex's sandbox confines *writes*, not reads. This is a hard platform constraint,
-not a configuration oversight, and it is the reason the first draft's
-`codex exec -s workspace-write` prescription is rejected here: it would have closed the
-lesser vector while leaving the entire future history readable by `cat`.
-
-### The change
-
-**1. Both arms run under an identical isolation profile (owner decision, 2026-08-21).**
-
-Applying isolation to the raw arm alone would hand the harness arm capabilities the raw arm
-lacks, and the primary metric would partly measure that asymmetry. Both arms get the same
-profile, so any residual depresses both equally.
-
-**2. The profile: Grok with a project-scoped custom sandbox, chosen because it closes
-vector B.**
-
-Written to `.grok/sandbox.toml` **inside the disposable scratch tree** (per-run, never in
-the user's global config), and dispatched with credentials scrubbed and the model's own
-retrieval tools disabled:
-
-```toml
-[profiles.ab219]
-extends = "strict"
-read_only = ["/Users/mrhinkle/.hermes/node", "/Users/mrhinkle/.local/bin"]
-deny = ["/Users/mrhinkle/Code", "/Users/mrhinkle/.config/gh", "/Users/mrhinkle/.ssh", "/Users/mrhinkle/Documents"]
+```
+git -C /private/tmp/conferenceos-final-monitor-…/repo show --stat 9e4b1b89…
+  commit 9e4b1b89459e589db396cb229c80e90369da2b2e
+      Merge pull request #1351 from The-AIE/fix/1245-retire-accent-orange
+  RC=0
 ```
 
-```bash
-env -u GH_TOKEN -u GITHUB_TOKEN \
-  grok --always-approve --cwd "$SCRATCH" --sandbox ab219 --disable-web-search -p "$(cat "$BRIEF")"
-```
+The failure is structural, not a gap in a list. Any workable profile **must** grant the
+temp tree — the frozen scratch clone lives there — and the fleet routinely leaves
+full-history worktrees in those same directories. It must also grant `~/.grok` for session
+persistence, and that directory still held the voided run's own transcript
+(`grep -rl 'gh issue view 1245' ~/.grok/sessions` succeeded from inside the sandbox).
 
-Verified on the host, same day, all three in one probe:
+**Conclusion carried forward: no host-side sandbox on either Mac closes the leak.** The
+generalization "coverage is by allowlist, so unenumerated copies are covered by
+construction" was **wrong** — it held for `$HOME` and was over-extended to paths the
+profile actually grants.
 
-- `node --version` → `v22.22.3` — the toolchain stays usable. This grant is **required**:
-  plain `strict` confines reads to CWD plus system paths, and `node` lives under
-  `$HOME/.hermes`, so `strict` alone makes the registered done-gate unrunnable.
-- `head /Users/mrhinkle/Code/conference-os/package.json` → `Operation not permitted` —
-  **vector B closed, kernel-enforced.**
-- `curl https://api.github.com/` → `HTTP:200` — **vector A is NOT closed.** Stated here
-  rather than implied away.
+### The threat model
 
-**The control is an allowlist, not a denylist — this matters for coverage.** `extends =
-"strict"` confines reads to the working directory plus system paths; the `deny` list is
-belt-and-braces, not load-bearing. Probed the same day: under the `ab219` profile,
-`ls /Users/mrhinkle` itself returns `Operation not permitted`. So local copies of the
-repository that nobody enumerated are covered **by construction** rather than by having been
-listed. That was checked against real examples: a filesystem scan found two further
-conference-os checkouts outside the deny list — `/Users/mrhinkle/conference-os` and
-`/Users/mrhinkle/cos-bakeoff/conference-os` — and both were denied by the profile anyway
-(`Operation not permitted`). Independently, neither contains the fixing commit
-`9e4b1b89…` (they track a different fork), but the coverage argument does not rest on that.
+| vector | yields | credentials |
+|---|---|---|
+| **A — network** to GitHub | issue, fixing PR, merge commit, post-fix file contents | yes: repo is **private**, unauthenticated `GET /repos/…/pulls/1351` returns **404** (probed) |
+| **B — local filesystem** | the entire future history including the fix, via one `git show` | **none** |
 
-**3. What actually closes vector A, and what does not.**
+B is the higher-value vector. The voided run used A only because A was easiest.
 
-Raw outbound sockets remain available; that is not fixable for Grok on macOS. The *specific*
-leak is nonetheless closed by three independent facts, each verified:
+### The change: a containerized runner, hosted on the Mac Mini
 
-- the repository is **private**, and unauthenticated retrieval of the fixing PR returns
-  **404** (probed);
-- `GH_TOKEN`/`GITHUB_TOKEN` are scrubbed from the environment, and `~/.config/gh` is in the
-  kernel `deny` list, so no credential is reachable;
-- `--disable-web-search` removes the model's own `web_search`/`web_fetch` tools.
+Isolation comes from the **container**, not from the choice of host. The Mini is not a
+clean machine: `~/workspace/conference-os` there **contains the fixing commit**, alongside
+~27 git directories, many `cos-lanes/lane-*` worktrees, `~/.config/gh/hosts.yml`, an SSH
+key, and 164 Grok sessions. Running bare on the Mini would leak exactly as the laptop did.
+The Mini was chosen because it is always on and already runs colima, so the build was cheap.
 
-So retrieval of *this fix* over the network requires a credential that does not exist in
-the session. General web access survives, and that residual is **detection-only**, covered
-by the retained transcript audit. It is stated as a limitation, not argued away.
+**Runner.** Docker on colima. Image `ab219-runner:1`
+(`sha256:36e61e1b902d6a6007a173188afac1b84531142cd314fcd0316f1c1356de24ff`), built from
+`node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`
+plus `git` and `@xai-official/grok@1.0.3`, with an empty agent `HOME`.
 
-**4. Literal network denial for both arms is deferred, with the reason recorded.**
+**Tree handling.** The frozen tree is built on the laptop under the D-1 census, shipped as
+a tarball, and the **census is re-verified on the Mini after transfer** before any run.
+It is mounted alone at `/work`. Nothing else from either host filesystem is mounted, except
+`~/.grok/auth.json` read-only, which carries xAI inference auth and no repository access.
 
-The owner asked for both arms to lose network. On this hardware that is not achievable for
-the CLI that closes vector B, and the CLI that does deny network leaves vector B wide open —
-which would be a net loss. Achieving both simultaneously requires running implementers in a
-container or VM with the scratch tree as the only mount and egress restricted to the
-inference endpoint. Docker is installed on this host (20.10.24) but the daemon is not
-running, and building a runner image with an authenticated CLI inside is a real piece of
-infrastructure, not a flag. It is recorded as the recommended hardening if the residual in
-item 3 is judged unacceptable; it is **not** silently substituted for what was asked.
+**Verified before the run, by probe — not assumed:**
 
-**5. Implementer platform pinned to Grok for both arms.**
+| probe | result |
+|---|---|
+| `ls /Users` | `No such file or directory` |
+| repo copies anywhere in the container | none found |
+| fix commit reachable from `/work` | `could not get object info` |
+| `gh` binary, `~/.config/gh`, `~/.ssh` | absent; `GH_TOKEN` unset |
+| `~/.grok` (config) | absent — **no MCP servers configured** |
+| private repo, unauthenticated | `404` |
 
-Forced by item 2. Side effect, in the experiment's favor: platform is held **constant**
-across arms, so the comparison is harness-vs-raw holding the model fixed — the contrast H7
-actually predicts — rather than a comparison across vendors, which the v1 design tolerated.
+This closes **vector B absolutely** (nothing else is mounted) and **vector A** by leaving no
+credential in the container at all. It also closes, by construction, the three defects that
+blocked draft 2: the temp trees, the retained session store, and the MCP channel.
 
-Consequences, stated:
+**It was tested adversarially by the implementer itself.** In the clean run, the opening
+moves were `gh issue list`, `gh issue view 1245`, `gh api repos/…/issues/1245`, and
+`gh pr view 1241`. All returned **`gh: command not found`**; the transcript `tool_result`
+payloads were decoded to confirm zero information transferred.
 
-- The harness arm's cross-vendor reviewer must not be Grok; it is **Codex**, also run under
-  the same isolation profile, since a reviewer that can read the canonical checkout could
-  inject the real fix through review feedback.
-- The blind judge must be **Devin**: the registered rule bars a platform that implemented
-  either arm (Grok, both), Claude never judges, and Codex has seen harness-arm output as its
-  reviewer. If Devin is unavailable, judging **blocks** rather than falling back.
+### Audit rule, amended (owner decision)
 
-**6. Dependency pre-provisioning by the coordinator, before dispatch.**
+D-1's rule was "any audit hit voids the run," written when there was **no prevention**. With
+prevention in place, a blocked attempt is expected and is evidence the control works.
 
-The done-gate (`npx prisma generate && npm run typecheck:ci`, `npm test` where applicable)
-needs `node_modules`, and installing it needs network the implementer will not have. The
-coordinator therefore runs `npm ci && npx prisma generate` in the scratch tree **before** the
-implementer session, with network available.
+- A **successful retrieval** of out-of-tree information still voids the run.
+- A **blocked attempt** is recorded in a new `attempted_leak` metric and does **not** void.
+- The distinction must be evidenced by decoding the tool results, not inferred from the
+  command text.
 
-This is a strict improvement to the measurement, not only a workaround: dependency install
-is identical work in both arms and was previously charged to the arm (in the voided run,
-`npm ci` consumed a visible share of 5m41s). It is **excluded** from metrics 3 and 4 in both
-arms. `node_modules` is git-ignored, so it cannot enter an exported patch, and it derives
-solely from the lockfile **at the base commit**, carrying no post-base information.
+The attempt count is reported as a finding in its own right: the raw arm reached for the
+answer as its opening move in **both** independent sessions.
 
-**7. Brief sanitization; the sanitized text becomes the artifact of record.**
+### Model pinning (closes a real defect in draft 2)
 
-Before dispatch, every `#NNNN` cross-reference in the issue body is replaced with an opaque
-token (`[REF-A]`, `[REF-B]`, …), and every `owner/repo` slug and URL is removed — in addition
-to D-1's bars. The sanitized brief is stored at `paper/experiment/briefs/<code-name>.txt` and
-is the task statement given to the blind judge, so implementer and judge see the same text.
+Draft 2 claimed pinning the CLI held "the model constant." That was false — the dispatch
+omitted `--model`. Runs now pin the model explicitly and record it; the clean `cos#1245`
+run was **`grok-4.5`**, recorded from the transcript.
 
-**8. Void runs are recorded, not discarded.**
+Consequence, stated rather than buried: with one platform and one pinned model in both
+arms, the estimand is **narrower than registered**. H7 was registered over a platform mix;
+under D-2 it is tested for `grok-4.5` specifically. This is a genuine narrowing of external
+validity, reported as such. It is also a gain in internal validity — platform and model are
+now held constant across arms, removing a confound the v1 design tolerated.
 
-`assignments.json` gains a `void_runs` array per task. A voided run leaves `status` at
-`ready` and appends a record (date, arm, cause, evidence path). The paper reports
-attempts-per-completed-task; dropping void runs silently would misstate the cost of both arms.
+### Brief: verbatim issue text, no sanitization
 
-**9. The audit is retained unchanged as the backstop.**
+Draft 2 proposed replacing `#NNNN` cross-references with opaque tokens. Codex objected that
+this **deletes requirements** rather than sanitizing them, and interacts with arm — the
+harness spec gate can compensate for missing context where the raw arm cannot. The
+objection is accepted. Because the container closes the lookup vector, sanitization buys
+nothing, so the brief is the **verbatim issue text plus the working directory**, exactly as
+registered in D-1.
 
-Prevention does not retire detection — item 3 explicitly depends on it. The transcript audit
-runs exactly as under D-1 and additionally records the sandbox profile in force. Any hit
-still voids.
+**Limitation, newly discovered and stated:** the frozen tree names its own task.
+`docs/ata-config-todo.md` at `cos#1245`'s base commit already links the issue and describes
+the work, which is how the implementer obtained the number. Brief-blinding therefore
+conceals less than D-1 claimed. It reveals task *identity*, not the solution, so the
+measurement stands — but the rule should not claim more than it delivers.
+
+### Dependency pre-provisioning, with its costs stated honestly
+
+The done-gate needs `node_modules`. The coordinator runs `npm ci && npx prisma generate` in
+the mounted tree **before** the implementer session.
+
+Codex's objection is accepted in full: `npm ci` executes the root `postinstall` and several
+dependency install scripts with network access, so provisioning is **not** information-free,
+and excluding it **does change** registered metric accounting rather than leaving metrics
+3–4 untouched. Recorded as a deliberate change, not a neutral normalization:
+
+- provisioning is identical work in both arms, so the exclusion does not favor either;
+- Node and npm are now pinned by the image digest, which the host-side design did not do;
+- the lockfile is the base commit's, so ordinary registry resolution carries no post-base
+  information — but lifecycle scripts are acknowledged as an unpinned surface.
+
+### Harness-arm isolation (closes draft 2's incoherence)
+
+Draft 2 assigned Codex "the same profile" while that profile was Grok-only, with no wrapper
+or auth story. Under D-2 every harness stage that could inject the real fix runs against the
+**same mounted tree in the same runner**, or against the exported patch alone:
+
+- **implementer** — `ab219-runner:1`, as above;
+- **cross-vendor reviewer** — must not be the implementing platform, receives the exported
+  patch and the brief **only**, with no repository mount and no GitHub credential;
+- **spec gate and captain** — operate on the issue text and the patch only.
+
+### Void and attempt ledger
+
+`assignments.json` carries `void_runs` per task and an `attempted_leak` count per run. A
+voided run leaves `status` at `ready`. The paper reports attempts per completed task, and
+blocked-leak attempts, in both arms.
 
 ### What this costs, stated plainly
 
-Both arms now work without documentation lookup or package search, which real developers and
-real harness lanes have. The depression is **symmetric**, so the between-arm comparison
-holds, but absolute per-task performance under replay is a floor rather than a realistic
-estimate. This stacks on the external-validity limitation D-1 already created.
+Both arms work inside a container without the ambient host toolchain. Network egress is
+**not** restricted to the inference endpoint — the container reaches the public internet,
+and the clean run used that to fetch build tools (pandoc, pip). Retrieval of *this* fix is
+impossible without a credential the container does not have, and the private repo returns
+404, but egress allowlisting remains unbuilt and is the next hardening if the residual is
+judged unacceptable.
 
-Vector A is mitigated by credential denial rather than by network denial. Vector B is closed
-at the kernel. The residual — a session that reaches the public internet for something other
-than this private repository — is detectable and not prevented.
+The estimand is narrowed to one model. Replay measures task difficulty under each arm, not
+whether a change would have shipped. Neither is argued away.
 
 ### What is NOT changed
 
-Arm assignments are untouched: `cos#1245` keeps `raw`, and no arm is re-drawn after an
-observed outcome — the voided run produced no measurement, and re-drawing on it would be the
-exact bias the ledger exists to prevent. Enrollment stays closed at n=12, balanced 6/6.
-Metrics 1–4 stand. The census and the no-push rule are unchanged.
+Arm assignments are untouched — `cos#1245` keeps `raw`, never re-drawn after an observed
+outcome. Enrollment stays closed at n=12, balanced 6/6. Metrics 1–4 stand, with metric 3–4
+accounting amended as above. The census, the blind judge rule, and the no-push rule are
+unchanged.
