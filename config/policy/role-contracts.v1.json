@@ -4,6 +4,44 @@
   "authority": "activated",
   "designatedBy": "AGENTS.md",
   "note": "Authoritative per-role and per-job outputs, gates, and prohibitions. Playbook frontmatter is a routing mirror of this file and must not add, drop, rename, weaken, or negate these obligations. A job prompt may add job-specific procedure in the body. This file is not the report-only #164 candidate.",
+  "agentsRoleTable": {
+    "planner": {
+      "out": "PLAN.md with numbered testable acceptance criteria",
+      "forbidden": "implementation code"
+    },
+    "decomposer": {
+      "out": "dependency-ordered issues, each with a sprint contract",
+      "forbidden": "overlapping live claims; issues without contracts"
+    },
+    "builder": {
+      "out": "green-gate branch + PR; claim first",
+      "forbidden": "canonical checkout; merge; self-review; casual new deps"
+    },
+    "test-engineer": {
+      "out": "executable check per criterion; regression test per bug",
+      "forbidden": "weakening/deleting failing tests; happy-path-only on Tier C (adversarial cases required)"
+    },
+    "reviewer": {
+      "out": "VERDICT: APPROVE or VERDICT: REQUEST_CHANGES on the exact head; six lenses with file:line findings",
+      "forbidden": "merging; reviewing own generation; rubber-stamp LGTM"
+    },
+    "ux-evaluator": {
+      "out": "graded eval of the live preview",
+      "forbidden": "grading from the diff or the builder's description"
+    },
+    "security": {
+      "out": "eight-layer results; adversarial pass on Tier C",
+      "forbidden": "softening a hard-fail layer to report-only; destructive production testing (DAST vs preview/staging only)"
+    },
+    "release": {
+      "out": "merge, verify deploy, smoke, cleanup; delivery-control audit → dry-run → human-apply when asked",
+      "forbidden": "merging Tier C/schema without G12; more than one schema merge in flight; force-push main; rotating secrets (G4); silent --apply without dry-run"
+    },
+    "historian": {
+      "out": "append lessons/decisions; harness PRs",
+      "forbidden": "rewriting others' lessons; skipping a twice-failure"
+    }
+  },
   "roles": {
     "planner": {
       "outputs": [

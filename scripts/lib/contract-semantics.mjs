@@ -437,10 +437,19 @@ export function parseHumanGateEntries(agentsText) {
 
 /** Authoritative role table (`| Role | Out | Forbidden |`). */
 export function parseRoleTable(agentsText) {
+  return parseRoleTableContracts(agentsText).map((r) => r.role);
+}
+
+/** Exact AGENTS.md role-table summaries for comparison with the activated mirror. */
+export function parseRoleTableContracts(agentsText) {
   const rows = extractMarkdownTable(agentsText, ["Role", "Out", "Forbidden"]);
-  return rows.map((r) =>
-    collapseWs(String(r[0] || "").replace(/[`*]/g, ""))
-  ).filter(Boolean);
+  return rows
+    .map((r) => ({
+      role: collapseWs(String(r[0] || "").replace(/[`*]/g, "")),
+      out: collapseWs(String(r[1] || "").replace(/[`*]/g, "")),
+      forbidden: collapseWs(String(r[2] || "").replace(/[`*]/g, "")),
+    }))
+    .filter((r) => r.role);
 }
 
 /** First-wins Map for callers that only need id → summary. Prefer parseHumanGateEntries. */
@@ -863,6 +872,44 @@ function neutralizeNegatedSofteners(text) {
 
 function stripMdEmphasis(s) {
   return String(s || "").replace(/[`*_]+/g, " ");
+}
+
+function maskPreservingNewlines(text) {
+  return String(text || "").replace(/[^\r\n]/g, " ");
+}
+
+/**
+ * Remove inert Markdown regions before authority-claim scanning while
+ * preserving offsets. Fenced examples and HTML comments are evidence or
+ * commentary, not operative prose. Inline Markdown delimiters become spaces
+ * so ordinary emphasis and code spans cannot evade a matcher.
+ */
+function authorityClaimHaystack(text) {
+  const lines = String(text || "").match(/.*(?:\r?\n|$)/g) || [];
+  let fence = null;
+  let masked = "";
+  for (const line of lines) {
+    if (!line) continue;
+    const marker = /^[ \t]*(`{3,}|~{3,})/.exec(line);
+    if (!fence && marker) {
+      fence = { char: marker[1][0], length: marker[1].length };
+      masked += maskPreservingNewlines(line);
+      continue;
+    }
+    if (fence) {
+      masked += maskPreservingNewlines(line);
+      const delimiter = fence.char === "`" ? "`" : "~";
+      const close = new RegExp(
+        `^[ \\t]*${delimiter}{${fence.length},}[ \\t]*(?:\\r?\\n)?$`
+      );
+      if (close.test(line)) fence = null;
+      continue;
+    }
+    masked += line;
+  }
+  return masked
+    .replace(/<!--[\s\S]*?(?:-->|$)/g, maskPreservingNewlines)
+    .replace(/[`*_]/g, " ");
 }
 
 function splitAroundPhrase(unit, phrase) {
@@ -1616,7 +1663,7 @@ export function diffObligationMatrix(id, authByBucket, pbByBucket) {
 const OPERATIVE_CLAIM_PATTERNS = [
   {
     id: "closed-list",
-    re: /\bthis list is\s+\*\*closed\*\*/i,
+    re: /\bthis list is\s+closed\b/i,
   },
   {
     id: "authoritative-stops-in-docs",
@@ -1652,7 +1699,7 @@ const OPERATIVE_CLAIM_PATTERNS = [
   },
   {
     id: "role-is-a-contract",
-    re: /\ba role is a\s+\*\*contract\*\*/i,
+    re: /\ba role is a\s+contract\b/i,
   },
   {
     id: "principle-wins-over-agents",
@@ -1667,8 +1714,20 @@ const OPERATIVE_CLAIM_PATTERNS = [
     re: /\bsupersedes\s+AGENTS\.md\b/i,
   },
   {
+    id: "priority-over-agents",
+    re: /\b(?:overrides?|trumps?|takes?\s+precedence\s+over|wins?\s+over)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i,
+  },
+  {
+    id: "governs-over-agents",
+    re: /\bgoverns?\b[\s\S]{0,80}\bsupersed(?:e|es|ing)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i,
+  },
+  {
+    id: "agents-subordinate",
+    re: /\bAGENTS\.md\s+is\s+subordinate\b/i,
+  },
+  {
     id: "self-authoritative",
-    re: /\bthis (?:file|document|chapter) is (?:the )?(?:authoritative|binding contract|source of truth)\b/i,
+    re: /\bthis (?:file|document|chapter) is (?:the )?(?:(?:authoritative\b(?!\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\b))|binding contract|source of truth|canonical source)\b/i,
   },
   {
     id: "docs-01-19-are-the-spec",
@@ -1708,11 +1767,16 @@ function paragraphExplicitlyDefersToAgents(para) {
 }
 
 function paragraphConflictsWithAgents(para) {
-  const p = collapseWs(para);
+  const p = collapseWs(authorityClaimHaystack(para));
   return (
     /\boutranks\s+AGENTS\.md\b/i.test(p) ||
     /\bsupersedes\s+AGENTS\.md\b/i.test(p) ||
-    /\boverrides\s+AGENTS\.md\b/i.test(p) ||
+    /\b(?:overrides?|trumps?|takes?\s+precedence\s+over|wins?\s+over)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i.test(
+      p
+    ) ||
+    /\bgoverns?\b[\s\S]{0,80}\bsupersed(?:e|es|ing)\s+(?:anything\s+in\s+)?AGENTS\.md\b/i.test(
+      p
+    ) ||
     /\bwhen\s+AGENTS\.md\b[\s\S]{0,80}\bconflict[\s\S]{0,80}\b(?:the )?(?:principle|this (?:file|document))\s+wins\b/i.test(
       p
     ) ||
@@ -1720,7 +1784,7 @@ function paragraphConflictsWithAgents(para) {
       p
     ) ||
     /\bAGENTS\.md is subordinate\b/i.test(p) ||
-    /\bthis (?:file|document|chapter) is (?:the )?(?:authoritative|binding contract|source of truth)\b/i.test(
+    /\bthis (?:file|document|chapter) is (?:the )?(?:(?:authoritative\b(?!\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\b))|binding contract|source of truth|canonical source)\b/i.test(
       p
     )
   );
@@ -1825,6 +1889,8 @@ function localClaimUnit(para, matchIdx, matchLen) {
 const NEGATABLE_OPERATIVE_CLAIMS = new Set([
   "supersedes-agents",
   "outranks-agents",
+  "priority-over-agents",
+  "governs-over-agents",
 ]);
 
 /**
@@ -1855,7 +1921,9 @@ function historicalRetirementPolarity(text) {
   let m;
   while ((m = re.exec(src)) !== null) {
     const before = collapseWs(src.slice(Math.max(0, m.index - 120), m.index));
-    const polarityBefore = collapseWs(neutralizeAffirmativeNotIdioms(before));
+    const polarityBefore = collapseWs(
+      neutralizeAffirmativeNotIdioms(normalizeAdverbialPunctuation(before))
+    );
     if (
       /\bdo\s+not\s+treat(?:\s+[A-Za-z][A-Za-z'-]*){0,8}\s+as\s*$/i.test(
         polarityBefore
@@ -1923,11 +1991,7 @@ function paragraphDefersToAgents(para, claimId, matchIdx, matchLen) {
   // Explicit operative conflict wins over a generic Follow-AGENTS
   // sentence in the same paragraph.
   if (paragraphConflictsWithAgents(para)) return false;
-  if (
-    claimId === "closed-list" ||
-    claimId === "self-authoritative" ||
-    OPERATIVE_CLAIM_PATTERNS.some((p) => p.id === claimId)
-  ) {
+  if (claimId === "closed-list" || claimId === "self-authoritative") {
     return false;
   }
   return paragraphExplicitlyDefersToAgents(para);
@@ -1945,7 +2009,8 @@ function paragraphAt(text, idx, matchLen) {
 
 export function findOperativeClaims(text) {
   const hits = [];
-  const hay = String(text || "");
+  const original = String(text || "");
+  const hay = authorityClaimHaystack(original);
   for (const pat of OPERATIVE_CLAIM_PATTERNS) {
     const flags = pat.re.flags.includes("g") ? pat.re.flags : `${pat.re.flags}g`;
     const re = new RegExp(pat.re.source, flags);
@@ -1959,7 +2024,7 @@ export function findOperativeClaims(text) {
       const para = paragraphAt(hay, idx, m[0].length);
       hits.push({
         id: pat.id,
-        snippet: collapseWs(m[0]).slice(0, 160),
+        snippet: collapseWs(original.slice(idx, idx + m[0].length)).slice(0, 160),
         defersToAgents: paragraphDefersToAgents(
           para.text,
           pat.id,
