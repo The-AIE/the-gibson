@@ -4,7 +4,11 @@
  * the JSON cannot redirect or disable a protected control.
  */
 
-import { EXPECTED_ROLES, diffClosedSequence } from "./contract-semantics.mjs";
+import {
+  EXPECTED_ROLES,
+  diffClosedSequence,
+  listEq,
+} from "./contract-semantics.mjs";
 
 export const CANONICAL_SCHEMA_ID = "gibson.mandatory-read-chain.v1";
 export const CANONICAL_SCHEMA_VERSION = "1.2.0";
@@ -35,25 +39,156 @@ export const CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_KEYS = [
   "home",
   "machine",
 ];
-export const CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS = [
-  "authority-load-order",
-  "ten-laws",
-  "ask-contract",
-  "role-outputs-prohibitions",
-  "forbidden-role-pairs",
-  "six-lens-review",
-  "tier-c-adversarial-tests",
-  "no-destructive-prod-testing",
-  "eight-security-layers",
-  "self-modification-gates",
-  "delivery-control",
-  "workflow-stages",
-  "human-gates",
-  "style-commitments",
-  "risk-tiers",
-  "commit-pr-merge",
-  "concurrency",
+/** Descriptive `note` may vary. Every other root/family key is closed. */
+export const CANONICAL_RULE_MIGRATION_AUDIT_ROOT_KEYS = [
+  "schemaId",
+  "schemaVersion",
+  "issue",
+  "authority",
+  "families",
 ];
+export const CANONICAL_RULE_MIGRATION_AUDIT = {
+  schemaId: CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID,
+  schemaVersion: "1.0.0",
+  issue: 208,
+  authority: "AGENTS.md",
+  families: [
+    {
+      id: "authority-load-order",
+      label:
+        "Authority, fixed vs conditional load, fork overlay, target contract, tag-filtered lessons",
+      home: "AGENTS.md: Authority and mandatory load",
+      machine: [
+        "config/policy/mandatory-read-chain.v1.json",
+        "scripts/contract-authority.mjs",
+        "scripts/contract-read-check.mjs",
+      ],
+    },
+    {
+      id: "ten-laws",
+      label: "Ten Laws",
+      home: "AGENTS.md: The Ten Laws",
+      machine: [
+        "scripts/gate.sh",
+        "scripts/test-integrity.mjs",
+        "scripts/scope-overlap.mjs",
+        "scripts/release-claim.sh",
+        "scripts/contract-met.mjs",
+        "scripts/truthful-status.mjs",
+      ],
+    },
+    {
+      id: "ask-contract",
+      label: "Ask Contract four fields",
+      home: "AGENTS.md: The Ask Contract",
+      machine: [],
+    },
+    {
+      id: "role-outputs-prohibitions",
+      label: "Nine roles and per-role outputs/prohibitions",
+      home: "AGENTS.md: Your role this session + config/policy/role-contracts.v1.json",
+      machine: [
+        "config/policy/role-contracts.v1.json",
+        "scripts/contract-authority.mjs",
+      ],
+    },
+    {
+      id: "forbidden-role-pairs",
+      label: "Forbidden builder/reviewer/UX pairs and cross-vendor default",
+      home: "AGENTS.md: Your role this session",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "six-lens-review",
+      label: "Six-lens review with file:line findings",
+      home: "AGENTS.md: Review lenses (binding)",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "tier-c-adversarial-tests",
+      label: "Tier C adversarial test cases required",
+      home: "AGENTS.md: Your role this session (test-engineer)",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "no-destructive-prod-testing",
+      label: "No destructive production testing / DAST vs preview-staging only",
+      home: "AGENTS.md: Your role this session (security) + Security layers",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "eight-security-layers",
+      label: "Eight security layers",
+      home: "AGENTS.md: Security layers (binding)",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "self-modification-gates",
+      label:
+        "Self-modification gates for human gates / tiers / hard-fail security layers",
+      home: "AGENTS.md: Self-modification bounds (binding)",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "delivery-control",
+      label: "Delivery-control audit, dry-run, human-apply",
+      home: "AGENTS.md: Delivery control (binding)",
+      machine: ["scripts/delivery-control/", "scripts/contract-authority.mjs"],
+    },
+    {
+      id: "workflow-stages",
+      label: "Ten workflow stages and skip recording",
+      home: "AGENTS.md: The pipeline you are inside",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "human-gates",
+      label: "G1–G16 closed stop list and explicit non-gates",
+      home: "AGENTS.md: Human gates",
+      machine: ["scripts/contract-authority.mjs"],
+    },
+    {
+      id: "style-commitments",
+      label: "Style commitments versus technical decisions",
+      home: "AGENTS.md: Style commitments",
+      machine: [],
+    },
+    {
+      id: "risk-tiers",
+      label:
+        "Tier A/B/C definitions, escalation, review strength, stateful serialization",
+      home: "AGENTS.md: Risk tiers",
+      machine: [
+        "config/review-round-caps.json",
+        "scripts/contract-authority.mjs",
+      ],
+    },
+    {
+      id: "commit-pr-merge",
+      label: "Pre-commit pipeline, DCO, exact-head review, merge order",
+      home: "AGENTS.md: Commit, PR, and merge",
+      machine: [
+        "scripts/gate.sh",
+        "scripts/setup-hooks.sh",
+        "scripts/release-claim.sh",
+        "scripts/contract-met.mjs",
+      ],
+    },
+    {
+      id: "concurrency",
+      label:
+        "Claims, worktrees, hot files, lane limit, rebase, no shared force-push",
+      home: "AGENTS.md: Concurrency",
+      machine: [
+        "scripts/scope-overlap.mjs",
+        "scripts/claim.sh",
+        "scripts/release-claim.sh",
+      ],
+    },
+  ],
+};
+export const CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS =
+  CANONICAL_RULE_MIGRATION_AUDIT.families.map((f) => f.id);
 
 export const CANONICAL_JOB_PROMPTS = [
   "playbooks/adopt.md",
@@ -353,8 +488,10 @@ export function canonicalEq(actual, expected, path, fail) {
 }
 
 /**
- * Closed 17-family rule-migration audit. Shape and IDs are hardcoded here
- * so a same-PR edit of the JSON cannot drop, duplicate, or add a family.
+ * Closed 17-family rule-migration audit. Root identity and each family's
+ * id/label/home/machine mapping are hardcoded so a same-PR JSON edit
+ * cannot redirect a rule home. Descriptive `note` may vary; unknown
+ * root or family keys fail closed.
  */
 export function diffRuleMigrationAudit(audit) {
   const findings = [];
@@ -365,12 +502,47 @@ export function diffRuleMigrationAudit(audit) {
     });
     return findings;
   }
-  if (
-    audit.schemaId !== CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID
-  ) {
+  const allowedRoot = new Set([
+    ...CANONICAL_RULE_MIGRATION_AUDIT_ROOT_KEYS,
+    "note",
+  ]);
+  for (const k of Object.keys(audit)) {
+    if (!allowedRoot.has(k)) {
+      findings.push({
+        code: "E_AUDIT",
+        message: `rule-migration audit has unknown key ${k}`,
+      });
+    }
+  }
+  const canon = CANONICAL_RULE_MIGRATION_AUDIT;
+  if (audit.schemaId !== canon.schemaId) {
     findings.push({
       code: "E_AUDIT",
-      message: `rule-migration audit schemaId must be ${CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID}`,
+      message: `rule-migration audit schemaId must be ${canon.schemaId}`,
+    });
+  }
+  if (audit.schemaVersion !== canon.schemaVersion) {
+    findings.push({
+      code: "E_AUDIT",
+      message: `rule-migration audit schemaVersion must be ${JSON.stringify(canon.schemaVersion)}`,
+    });
+  }
+  if (audit.issue !== canon.issue) {
+    findings.push({
+      code: "E_AUDIT",
+      message: `rule-migration audit issue must be ${canon.issue}`,
+    });
+  }
+  if (audit.authority !== canon.authority) {
+    findings.push({
+      code: "E_AUDIT",
+      message: `rule-migration audit authority must be ${canon.authority}`,
+    });
+  }
+  if ("note" in audit && typeof audit.note !== "string") {
+    findings.push({
+      code: "E_AUDIT",
+      message: "rule-migration audit note must be a string when present",
     });
   }
   if (!Array.isArray(audit.families)) {
@@ -380,6 +552,7 @@ export function diffRuleMigrationAudit(audit) {
     });
     return findings;
   }
+  const byId = new Map(canon.families.map((f) => [f.id, f]));
   const ids = [];
   audit.families.forEach((fam, i) => {
     const loc = `families[${i}]`;
@@ -390,33 +563,68 @@ export function diffRuleMigrationAudit(audit) {
       });
       return;
     }
-    for (const key of CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_KEYS) {
-      if (key === "id") {
-        if (typeof fam.id !== "string" || !fam.id) {
-          findings.push({
-            code: "E_AUDIT_FAMILY",
-            message: `rule-migration audit ${loc} missing id`,
-          });
-        } else {
-          ids.push(fam.id);
-        }
-        continue;
-      }
-      if (key === "machine") {
-        if (!Array.isArray(fam.machine)) {
-          findings.push({
-            code: "E_AUDIT_FAMILY",
-            message: `rule-migration audit ${loc} missing machine`,
-          });
-        }
-        continue;
-      }
-      if (typeof fam[key] !== "string" || !fam[key]) {
+    for (const k of Object.keys(fam)) {
+      if (!CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_KEYS.includes(k)) {
         findings.push({
           code: "E_AUDIT_FAMILY",
-          message: `rule-migration audit ${loc} missing ${key}`,
+          message: `rule-migration audit ${loc} has unknown key ${k}`,
         });
       }
+    }
+    if (typeof fam.id !== "string" || !fam.id) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} missing id`,
+      });
+    } else {
+      ids.push(fam.id);
+    }
+    if (typeof fam.label !== "string" || !fam.label) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} missing label`,
+      });
+    }
+    if (typeof fam.home !== "string" || !fam.home) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} missing home`,
+      });
+    }
+    if (!Array.isArray(fam.machine)) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} missing machine`,
+      });
+    } else {
+      fam.machine.forEach((entry, j) => {
+        if (typeof entry !== "string" || !entry) {
+          findings.push({
+            code: "E_AUDIT_FAMILY",
+            message: `rule-migration audit ${loc} machine[${j}] is not a nonempty string`,
+          });
+        }
+      });
+    }
+    const want = fam.id && byId.get(fam.id);
+    if (!want) return;
+    if (typeof fam.label === "string" && fam.label !== want.label) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} label drifted from ${want.id} home mapping`,
+      });
+    }
+    if (typeof fam.home === "string" && fam.home !== want.home) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} home drifted from ${want.id} mapping`,
+      });
+    }
+    if (Array.isArray(fam.machine) && !listEq(fam.machine, want.machine)) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} machine mapping drifted from ${want.id}`,
+      });
     }
   });
   for (const f of diffClosedSequence(
