@@ -999,3 +999,65 @@ overwrites the hermetic identity (no `:-` inherit) and still asserts
 must pin that name, not inherit the host.
 **Status:** fixed (PR #215 follow-up)
 **Tags:** #dco #hooks #ci #sensors #identity #issue-204 #pr-215
+
+## L-053 · 2026-08-21 · cancel-in-progress-plus-always-stamps-false-reds
+**What happened:** ConferenceOS workflows combining `concurrency:
+cancel-in-progress` with status-publishing steps under `if: always()` stamped
+false-red commit statuses from cancelled runs (ConferenceOS #1458, two
+workflows): a superseded run's publish step fired with empty outputs /
+`JOB_STATUS=cancelled`, fell into the `case` fallthrough, and wrote "failed
+closed" on a head whose surviving run later passed. Merge captains triaged
+phantom reds for days.
+**Root cause:** `always()` runs on cancellation too; a status published from a
+cancelled run is a verdict from a run that decided nothing. Naive fix
+(skip-on-cancel) can fail OPEN — if cancellation lands between
+resolve-head and invalidate-prior-status, a stale `success` survives. The
+sound fixes are step-order-dependent: stamp `pending` on cancellation when
+the step can still run (evaluator pattern), or skip-on-cancel ONLY when a
+`pending` stamp is already guaranteed before the publish guard can pass
+(smoke pattern).
+**Harness fix:** before adding `cancel-in-progress` to any workflow that
+publishes commit statuses, audit every `always()` step for cancelled-state
+fallthrough; pick pending-on-cancel vs skip-on-cancel by whether a prior
+pending stamp is guaranteed. ConferenceOS PRs #1462/#1468 are the worked
+examples.
+**Status:** fixed in ConferenceOS; audit other repos when adding concurrency
+**Tags:** #ci #github-actions #concurrency #false-red
+
+## L-054 · 2026-08-21 · vercel-cost-and-noise-controls
+**What happened:** ConferenceOS's Vercel bill and PR signal were dominated by
+two misconfigurations, not by build speed: (1) builds queued serially until
+the owner enabled Elastic concurrency (the machine-tier upgrade under
+consideration would have bought nothing — canonical builds were already
+3–5 min); (2) a demo project built every PR branch against a shared preview
+DB and failed 100% of the time (ConferenceOS #1391), billing minutes and
+stamping a guaranteed-red check that trained everyone to ignore red X's.
+**Root cause:** per-project build triggers default to "every branch"; demo/
+secondary projects have no business building PR branches.
+**Harness fix:** secondary/demo Vercel projects get an Ignored Build Step
+(`if [ "$VERCEL_ENV" == "production" ]; then exit 1; else exit 0; fi` —
+exit 1 = build, exit 0 = skip); check Elastic/concurrent builds before
+paying for bigger build machines. Candidate doctrine home: docs/12 +
+docs/17.
+**Status:** applied in ConferenceOS; doctrine docs not yet updated
+**Tags:** #vercel #cost #ci-noise #deployment
+
+## L-055 · 2026-08-21 · npm-cache-is-repo-posture-dependent
+**What happened:** Porting ConferenceOS's CI cache work (setup-node
+`cache: npm`, ESLint `--cache --cache-strategy content`, Next.js
+`.next/cache`) to other repos: Chatterbuilt's calibrated gate took it
+cleanly (PR chatterbuilt#518), but this repo's own gate sensor
+(`gate.test.sh` phase-2: "no secrets/cache/env/OIDC") REJECTED `cache:` in
+`ci/gibson-gate.yml` — deliberately: the template's base/head
+test-integrity jobs execute untrusted PR code, and a cache shared across
+that boundary is a poisoning surface.
+**Root cause:** cache safety depends on the workflow's trust architecture,
+not on the cache mechanism. Single-trust-boundary gates (one checkout of
+the merge ref, npm ci verifying lockfile integrity hashes) can cache;
+multi-job untrusted-code architectures ban it on purpose.
+**Harness fix:** none needed here — the sensor did its job and blocked the
+transplant. Lesson: run the target repo's own sensors BEFORE pushing a
+ported "improvement"; a green idea in one repo can be a designed-out
+anti-pattern in another.
+**Status:** working as designed
+**Tags:** #ci #cache #security #calibrate-dont-transplant
