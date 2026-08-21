@@ -1767,31 +1767,102 @@ function sentenceBounds(text, idx, matchLen) {
 }
 
 /**
- * Match/clause-local unit for historical retraction. A later or earlier
- * active "This file supersedes AGENTS.md" in the same paragraph is not
- * covered by a neighboring retracted sentence. Bare semicolon stays in
- * the same clause so "Historically X; that claim is retired" remains one
- * retracted unit.
+ * Independent-clause split for retraction/negation locality. Adversative
+ * `but` plus coordinating `and`/`or`/`while`/`plus`, semicolon/comma/colon,
+ * slashes, and em/en/ASCII dashes. A later active "this file supersedes
+ * AGENTS.md" after "that claim is retired —" is its own clause.
  */
-function localClaimUnit(para, matchIdx, matchLen) {
+const RETRACTION_CLAUSE_BOUNDARY_RE = new RegExp(
+  `(?:${CLAUSE_BOUNDARY_RE.source})|(?:${POLARIZED_COORD_RE.source})|(?:\\s*[\\u2014\\u2013]\\s*)`,
+  "gi"
+);
+
+function localClaimSpan(para, matchIdx, matchLen) {
   const src = String(para || "");
-  if (matchIdx == null || matchIdx < 0 || matchIdx > src.length) return src;
+  if (matchIdx == null || matchIdx < 0 || matchIdx > src.length) {
+    return { clause: src, before: src, after: "" };
+  }
   const { start, end } = sentenceBounds(src, matchIdx, matchLen);
   const sentence = src.slice(start, end);
   const relIdx = matchIdx - start;
-  const re = new RegExp(CLAUSE_BOUNDARY_RE.source, "gi");
+  const re = new RegExp(RETRACTION_CLAUSE_BOUNDARY_RE.source, "gi");
   let last = 0;
+  let clauseStart = 0;
+  let clauseEnd = sentence.length;
   let m;
   while ((m = re.exec(sentence)) !== null) {
     if (m.index < last) continue;
     if (relIdx < m.index) {
-      const left = collapseWs(sentence.slice(last, m.index));
-      return left || collapseWs(sentence) || src;
+      clauseStart = last;
+      clauseEnd = m.index;
+      break;
     }
     last = m.index + m[0].length;
+    clauseStart = last;
+    clauseEnd = sentence.length;
   }
-  const tail = collapseWs(sentence.slice(last));
-  return tail || collapseWs(sentence) || src;
+  const clause = sentence.slice(clauseStart, clauseEnd);
+  const before = sentence.slice(clauseStart, Math.max(relIdx, clauseStart));
+  const after = sentence.slice(relIdx + matchLen, clauseEnd);
+  return { clause, before, after };
+}
+
+/**
+ * Match/clause-local unit for historical retraction. A later or earlier
+ * active "This file supersedes AGENTS.md" in the same paragraph or after
+ * dash/`and` punctuation is not covered by a neighboring retraction.
+ */
+function localClaimUnit(para, matchIdx, matchLen) {
+  const src = String(para || "");
+  const { clause } = localClaimSpan(para, matchIdx, matchLen);
+  return collapseWs(clause) || collapseWs(src);
+}
+
+const NEGATABLE_OPERATIVE_CLAIMS = new Set([
+  "supersedes-agents",
+  "outranks-agents",
+]);
+
+/**
+ * Correlative/evidential "not"/"no" that affirms the following predicate.
+ * Stripped before asking whether THIS verb is negated.
+ */
+function neutralizeAffirmativeNotIdioms(text) {
+  return String(text || "")
+    .replace(/\bno\s+doubt\b/gi, " ")
+    .replace(/\bno\s+question\b/gi, " ")
+    .replace(/\bwithout\s+(?:a\s+)?doubt\b/gi, " ")
+    .replace(/\bnot\s+only\b/gi, " ")
+    .replace(/\bnot\s+merely\b/gi, " ")
+    .replace(/\bnot\s+just\b/gi, " ")
+    .replace(/\bnot\s+simply\b/gi, " ");
+}
+
+function matchNegatesOperativeClaim(para, claimId, matchIdx, matchLen) {
+  if (!NEGATABLE_OPERATIVE_CLAIMS.has(claimId)) return false;
+  const { before } = localClaimSpan(para, matchIdx, matchLen);
+  const stripped = collapseWs(
+    neutralizeAffirmativeNotIdioms(normalizeApostrophes(before))
+  );
+  if (!stripped) return false;
+  // Predicate-attached: the negator immediately precedes this verb.
+  if (
+    /\b(?:never|not|cannot|can't|does\s+not|doesn't|do\s+not|don't|did\s+not|didn't|no\s+longer)\s*$/i.test(
+      stripped
+    )
+  ) {
+    return true;
+  }
+  // The entire pre-verbal span is a negative subject NP (No document /
+  // Nothing / Nobody), not an earlier unrelated "no"/"not".
+  if (
+    /^(?:no|nothing|nobody|none|neither)(?:\s+[A-Za-z][A-Za-z'-]*){0,3}$/i.test(
+      stripped
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function matchRetractedHistorical(para, matchIdx, matchLen) {
@@ -1810,6 +1881,7 @@ function matchRetractedHistorical(para, matchIdx, matchLen) {
 
 function paragraphDefersToAgents(para, claimId, matchIdx, matchLen) {
   if (matchRetractedHistorical(para, matchIdx, matchLen)) return true;
+  if (matchNegatesOperativeClaim(para, claimId, matchIdx, matchLen)) return true;
   if (claimAttributedToAgents(para, claimId)) return true;
   // Explicit operative conflict wins over a generic Follow-AGENTS
   // sentence in the same paragraph.

@@ -3148,6 +3148,36 @@ else
 fi
 rm -f "$SANDBOX/docs/planted-same-para-active-then-hist.md"
 
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-dash-then-active-supersedes.md" \
+  "$SANDBOX/docs/planted-hist-dash-active.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'supersedes-agents'; then
+  ok "fixture: historical-then-emdash-active supersedes is not masked"
+else
+  bad "fixture historical-dash-then-active (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-hist-dash-active.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-and-then-active-supersedes.md" \
+  "$SANDBOX/docs/planted-hist-and-active.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'supersedes-agents'; then
+  ok "fixture: historical-then-and-active supersedes is not masked"
+else
+  bad "fixture historical-and-then-active (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-hist-and-active.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-benign-negated-supersedes.md" \
+  "$SANDBOX/docs/planted-benign-negated.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: negated supersedes/outranks strengthening remains green"
+else
+  bad "benign negated supersedes (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-benign-negated.md"
+
 echo "# match/clause-local historical retraction table"
 RETRACT_TABLE=$(
   SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
@@ -3180,6 +3210,86 @@ const rows = [
     name: "same-sentence-earlier-active",
     text: banner + "This file supersedes AGENTS.md, but historically that claim is retired.\n",
     expect: ["supersedes-agents"],
+  },
+  {
+    name: "dash-then-active",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is retired — this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "en-dash-then-active",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is retired \u2013 this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "ascii-dash-then-active",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is retired -- this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "and-then-active",
+    text: banner + "Historically this file supersedes AGENTS.md, and that claim is retired, and this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "and-without-comma-then-active",
+    text: banner + "Historically this file supersedes AGENTS.md and that claim is retired and this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "no-document-supersedes",
+    text: banner + "No document supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "nothing-outranks",
+    text: banner + "Nothing outranks AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "never-supersedes",
+    text: banner + "This file never supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "never-outranks",
+    text: banner + "This file never outranks AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "negation-does-not-mask-later-active",
+    text: banner + "No document supersedes AGENTS.md. This file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "never-then-but-active",
+    text: banner + "This file never supersedes AGENTS.md, but this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "not-only-supersedes",
+    text: banner + "This file not only supersedes AGENTS.md; it also outranks it.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "not-merely-supersedes",
+    text: banner + "This file not merely supersedes AGENTS.md; it outranks AGENTS.md.\n",
+    expect: ["outranks-agents", "supersedes-agents"],
+  },
+  {
+    name: "no-doubt-supersedes",
+    text: banner + "There is no doubt this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "no-longer-supersedes",
+    text: banner + "This file no longer supersedes AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "nobody-supersedes",
+    text: banner + "Nobody supersedes AGENTS.md.\n",
+    expect: [],
   },
 ];
 const failed = [];
@@ -3305,6 +3415,23 @@ const mutations = [
   { name: "audit-json-false", code: "E_AUDIT", raw: "false\n" },
   { name: "audit-json-zero", code: "E_AUDIT", raw: "0\n" },
   { name: "audit-json-empty-string", code: "E_AUDIT", raw: "\"\"\n" },
+  { name: "root-authority-docs-14", code: "E_AUDIT", patch: (a) => { a.authority = "docs/14-human-gates.md"; } },
+  { name: "root-issue-999", code: "E_AUDIT", patch: (a) => { a.issue = 999; } },
+  { name: "root-schemaVersion-false", code: "E_AUDIT", patch: (a) => { a.schemaVersion = false; } },
+  { name: "root-combined-drift", code: "E_AUDIT", patch: (a) => { a.authority = "docs/14-human-gates.md"; a.issue = 999; a.schemaVersion = false; } },
+  { name: "every-home-readme", code: "E_AUDIT_FAMILY", patch: (a) => { for (const f of a.families) f.home = "README.md: nowhere"; } },
+  { name: "every-machine-empty", code: "E_AUDIT_FAMILY", patch: (a) => { for (const f of a.families) f.machine = []; } },
+  { name: "every-home-and-machine", code: "E_AUDIT_FAMILY", patch: (a) => { for (const f of a.families) { f.home = "README.md: nowhere"; f.machine = []; } } },
+  { name: "label-drift", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].label = "drifted label"; } },
+  { name: "home-drift", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].home = "README.md: nowhere"; } },
+  { name: "machine-reordered", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].machine = a.families[0].machine.slice().reverse(); } },
+  { name: "machine-null-entry", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].machine = [null]; } },
+  { name: "machine-false-entry", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].machine = [false]; } },
+  { name: "machine-zero-entry", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].machine = [0]; } },
+  { name: "machine-object-entry", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].machine = [{}]; } },
+  { name: "unknown-root-key", code: "E_AUDIT", patch: (a) => { a.canonicalDoctrine = true; } },
+  { name: "unknown-family-key", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].extra = "nope"; } },
+  { name: "note-may-vary", expectGreen: true, patch: (a) => { a.note = "varied descriptive note"; } },
 ];
 const failed = [];
 for (const mut of mutations) {
@@ -3318,7 +3445,13 @@ for (const mut of mutations) {
   }
   const result = main(["--repo-root", sandbox, "--format", "text"]);
   const codes = (result.findings || []).map((f) => f.code);
-  if (result.exitCode === 0 || !codes.includes(mut.code)) {
+  if (mut.expectGreen) {
+    if (result.exitCode !== 0) {
+      failed.push(mut.name + " expected green exit=" + result.exitCode + " codes=" + codes.join(","));
+    } else {
+      console.log("AUDIT_MUT_OK " + mut.name + " green");
+    }
+  } else if (result.exitCode === 0 || !codes.includes(mut.code)) {
     failed.push(mut.name + " exit=" + result.exitCode + " codes=" + codes.join(","));
   } else {
     console.log("AUDIT_MUT_OK " + mut.name + " " + mut.code);
