@@ -57,6 +57,7 @@ import {
   collapseWs,
   EXPECTED_ASK_FIELDS,
   EXPECTED_ROLES,
+  parseRoleTableContracts,
 } from "./lib/contract-semantics.mjs";
 import {
   isGenuineMissingPath,
@@ -592,6 +593,35 @@ if (roleContracts) {
   if (!roleContracts.roles || typeof roleContracts.roles !== "object") {
     fail("E_ROLE_CONTRACTS", `${roleContractsRel} missing roles object`);
   }
+  const roleTable = parseRoleTableContracts(agentsText);
+  const tableMirror = roleContracts.agentsRoleTable;
+  if (!tableMirror || typeof tableMirror !== "object" || Array.isArray(tableMirror)) {
+    fail("E_ROLE_CONTRACTS", `${roleContractsRel} missing agentsRoleTable mirror`);
+  } else {
+    const seen = new Set();
+    for (const row of roleTable) {
+      seen.add(row.role);
+      const mirrored = tableMirror[row.role];
+      if (
+        !mirrored ||
+        mirrored.out !== row.out ||
+        mirrored.forbidden !== row.forbidden
+      ) {
+        fail(
+          "E_ROLE_CONTRACTS",
+          `${roleContractsRel} agentsRoleTable drift for ${row.role}`
+        );
+      }
+    }
+    for (const role of Object.keys(tableMirror)) {
+      if (!seen.has(role)) {
+        fail(
+          "E_ROLE_CONTRACTS",
+          `${roleContractsRel} agentsRoleTable has role absent from AGENTS.md: ${role}`
+        );
+      }
+    }
+  }
 }
 
 if (agentsText) {
@@ -858,6 +888,14 @@ function checkRepoAuthorityClaims(rel, text) {
   }
 }
 
+const checkedRepoClaimPaths = new Set();
+
+function checkRepoAuthorityFile(rel, text) {
+  if (checkedRepoClaimPaths.has(rel)) return;
+  checkedRepoClaimPaths.add(rel);
+  checkRepoAuthorityClaims(rel, text);
+}
+
 // Forbidden misleading repo claims (README/docs describing docs as the contract).
 const repoClaims = CANONICAL_FORBIDDEN_REPO_CLAIMS;
 function tryAuthorityText(rel) {
@@ -886,14 +924,39 @@ for (const claim of repoClaims) {
       );
     }
   }
-  checkRepoAuthorityClaims(claim.path, text);
+  checkRepoAuthorityFile(claim.path, text);
 }
 
 for (const extra of ["README.md", "HOW-IT-WORKS.md", "adapters/goose/README.md"]) {
   if (repoClaims.some((c) => c && c.path === extra)) continue;
   const text = tryAuthorityText(extra);
   if (text == null) continue;
-  checkRepoAuthorityClaims(extra, text);
+  checkRepoAuthorityFile(extra, text);
+}
+
+// Deny-list-default discovery: every repository Markdown file is an authority
+// claim surface unless it is the binding contract itself, a planted test
+// fixture, or already covered by the stricter docs/playbooks checks below.
+// This includes auto-loaded CLAUDE.md, root guides, adapters, memory, and paper.
+const repoMarkdown = [];
+discoverMdFiles(rootId, "", repoMarkdown, fail, {
+  optional: false,
+  skipHidden: true,
+});
+for (const rel of [...new Set(repoMarkdown)].sort()) {
+  if (
+    rel === "AGENTS.md" ||
+    rel.startsWith(".") ||
+    rel.startsWith("config/policy/fixtures/") ||
+    rel.startsWith("docs/") ||
+    rel.startsWith("playbooks/") ||
+    checkedRepoClaimPaths.has(rel)
+  ) {
+    continue;
+  }
+  const text = tryAuthorityText(rel);
+  if (text == null) continue;
+  checkRepoAuthorityFile(rel, text);
 }
 
 if (cfg.docsNonNormativeMarker !== CANONICAL_DOCS_MARKER) {

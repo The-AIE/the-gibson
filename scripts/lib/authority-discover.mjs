@@ -121,7 +121,7 @@ export function listBoundDirectory(rootId, relDir) {
   assertRootIdentity(rootId);
   let lex;
   try {
-    lex = resolveLexicalUnderRoot(rootId, relDir);
+    lex = relDir === "" ? { absPath: rootId.path } : resolveLexicalUnderRoot(rootId, relDir);
   } catch (e) {
     failPath(relDir, e && e.message ? e.message : e);
   }
@@ -241,7 +241,7 @@ export function listBoundDirectory(rootId, relDir) {
  * @param {string} relDir
  * @param {string[]} acc
  * @param {(code: string, message: string) => void} fail
- * @param {{ optional?: boolean }} [opts]
+ * @param {{ optional?: boolean, skipHidden?: boolean }} [opts]
  */
 export function walkMdFiles(rootId, relDir, acc, fail, opts = {}) {
   let listing;
@@ -262,17 +262,21 @@ export function walkMdFiles(rootId, relDir, acc, fail, opts = {}) {
   }
   for (const ent of listing.names) {
     if (ent.name === ".git" || ent.name === "node_modules") continue;
+    if (opts.skipHidden && ent.name.startsWith(".")) continue;
     if (ent.name === "." || ent.name === ".." || hasDotDotSegment(ent.name)) {
       continue;
     }
-    const rel = `${relDir}/${ent.name}`.replace(/\\/g, "/");
+    const rel = `${relDir ? `${relDir}/` : ""}${ent.name}`.replace(/\\/g, "/");
     if (hasDotDotSegment(rel)) continue;
     if (ent.isSymbolicLink) {
       fail("E_PATH", `${rel}: symlink`);
       continue;
     }
     if (ent.isDirectory) {
-      walkMdFiles(rootId, rel, acc, fail, { optional: false });
+      walkMdFiles(rootId, rel, acc, fail, {
+        optional: false,
+        skipHidden: opts.skipHidden,
+      });
     } else if (ent.isFile && ent.name.endsWith(".md")) {
       acc.push(rel);
     }
@@ -316,7 +320,8 @@ export function legacyPathWalkMdFiles(absRoot, relDir, acc) {
 export function listCommittedMdFiles(repoRoot, relDir) {
   const gitDir = join(repoRoot, ".git");
   if (!existsSync(gitDir)) return null;
-  const r = spawnSync("git", ["-C", repoRoot, "ls-files", "-z", "--", relDir], {
+  const pathspec = relDir || "*.md";
+  const r = spawnSync("git", ["-C", repoRoot, "ls-files", "-z", "--", pathspec], {
     encoding: "buffer",
     maxBuffer: 8 * 1024 * 1024,
   });
@@ -328,11 +333,11 @@ export function listCommittedMdFiles(repoRoot, relDir) {
     throw err;
   }
   const raw = Buffer.isBuffer(r.stdout) ? r.stdout.toString("utf8") : String(r.stdout || "");
-  const prefix = `${relDir}/`;
+  const prefix = relDir ? `${relDir}/` : "";
   const out = [];
   for (const rel of raw.split("\0")) {
     if (!rel || hasDotDotSegment(rel)) continue;
-    if (!rel.startsWith(prefix) || !rel.endsWith(".md")) continue;
+    if ((prefix && !rel.startsWith(prefix)) || !rel.endsWith(".md")) continue;
     if (rel.includes("\\")) continue;
     out.push(rel.replace(/\\/g, "/"));
   }
