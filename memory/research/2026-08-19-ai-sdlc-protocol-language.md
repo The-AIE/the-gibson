@@ -1,8 +1,9 @@
 # Research: "Specifying AI-SDLC Processes: A Protocol Language for Human-Agent Boundaries"
 
 **Prifti (Birkbeck), De Meo (Messina), Provetti (Birkbeck)** — arXiv:2606.20615v3
-(2026-08-16), ACM TOSEM. Reference implementation open source (Apache 2.0):
-github.com/snodo-dev/snodo, with a Lean 4 mechanisation of the core theorem.
+(2026-08-16), under review at ACM TOSEM. https://arxiv.org/abs/2606.20615
+Reference implementation open source (Apache 2.0):
+https://github.com/snodo-dev/snodo, with a Lean 4 mechanisation of the core theorem.
 Full read 2026-08-19 (Claude, Cowork session); filed as external validation and
 prior art for the-gibson's thesis.
 
@@ -28,7 +29,9 @@ On SWE-bench Verified, the **identical bug-fix methodology**:
   from no methodology at all (null in every run);
 - delivered as an **executed, validated, self-correcting process** → **+14–22
   points absolute resolve rate**, replicated across seeds and two model tiers
-  (n up to 191, McNemar p < 0.001).
+  (n up to 191). Significance varied by run and comparator (Table 3 includes
+  McNemar p=0.064, p=0.004 and p=0.015 cells alongside p<0.0001);
+  https://arxiv.org/html/2606.20615#S6.SS5.
 
 This is our "prose is advisory; gates are law" rule (FLEET.md, 2026-08-19)
 measured under controlled conditions. Ablation: the gain is the *executed
@@ -120,25 +123,29 @@ five independent literatures. Links for cold agents and future write-ups:
    often more effectively than through discussion.
    https://www.sciencedirect.com/science/article/pii/S1389041715000339
    (program overview: https://crowston.syr.edu/stigmergy)
+   We read this as support for treating the repository as the coordination
+   medium (repo-as-truth).
 2. **Self-preference bias (cross-vendor review).** Panickssery, Bowman &
    Feng, "LLM Evaluators Recognize and Favor Their Own Generations," NeurIPS
-   2024: self-preference correlates linearly with self-recognition — same-model
-   review is structurally compromised.
+   2024: self-preference correlates linearly with self-recognition. We read
+   this as: same-model review is structurally compromised.
    https://proceedings.neurips.cc/paper_files/paper/2024/file/7f1f0218e45f5414c79c0679633e47bc-Paper-Conference.pdf
    Follow-up quantification: https://arxiv.org/abs/2604.22891
 3. **Intrinsic self-correction fails (external gates).** Huang et al., "Large
    Language Models Cannot Self-Correct Reasoning Yet," ICLR 2024: self-review
-   without external signal often degrades answers.
+   without external signal often degrades answers. We read this as the case
+   for external gates rather than self-review.
    https://arxiv.org/abs/2310.01798
 4. **Failure taxonomy (governance is the bottleneck).** Cemri et al., "Why Do
    Multi-Agent LLM Systems Fail?" (MAST, 1,600+ annotated traces): ~42%
-   specification/design, ~37% inter-agent misalignment, ~21% verification —
-   the large majority of failures are governance-layer, not model-capability.
+   specification/design, ~37% inter-agent misalignment, ~21% verification.
+   We read this as: the large majority of failures are governance-layer, not
+   model-capability.
    https://arxiv.org/abs/2503.13657
 5. **Process-as-artifact (SOPs reduce cascading error).** Hong et al.,
    "MetaGPT: Meta Programming for a Multi-Agent Collaborative Framework,"
    ICLR 2024 (oral). https://arxiv.org/abs/2308.00352
-   And the AI-SDLC protocol paper above (arXiv:2606.20615), which supersedes
+   We read the AI-SDLC protocol paper above (arXiv:2606.20615) as superseding
    prompt-encoded SOPs with structurally enforced ones.
 
 Caveat that travels with the bundle: convergent support, not end-to-end proof —
