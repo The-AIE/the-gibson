@@ -63,7 +63,7 @@
    "fixing_pr": 1351,
    "merge_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
    "base_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
-   "status": "executed",
+   "status": "ready",
    "void_runs": [
     {
      "date": "2026-08-21",
@@ -73,9 +73,9 @@
      "layers": "census PASS; blind brief PASS; transcript audit HIT",
      "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-VOID.ndjson",
      "wall_clock": "5m41s (recorded, not counted)",
-     "tokens": "233936 in / 28056 out / 2961920 cache-read (recorded, not counted)",
-     "inference_cost_usd": null,
-     "cost_note": "missing, not estimated — the Grok CLI transcript carries token counts but no cost figure"
+     "tokens": "116968 in / 14028 out / 1480960 cache-read (CORRECTED)",
+     "inference_cost_usd": 0.17995928,
+     "cost_note": "CORRECTION 2026-08-21: an earlier ledger entry said cost was missing and reported exactly DOUBLE each token count. Both were wrong and were caught by cross-vendor review. The transcript's result line carries total_cost_usd; the double-count came from summing `usage` in both the per-message and final result objects. Authoritative source: the single `type=result` line."
     }
    ],
    "code_name": "lycosid",
@@ -87,9 +87,9 @@
     "census": "PASS on laptop (3136 objects) and re-verified PASS on the Mini after transfer; fix commit absent",
     "gates": "npx prisma generate OK (Prisma Client v7.9.1); npm run typecheck:ci exit 0 (tsc --noEmit, 27.9s); npm test 5185 passed",
     "wall_clock": "6m05s (13:36:17Z-13:42:22Z), excludes coordinator dependency pre-provisioning",
-    "tokens": "188972 in / 31552 out / 3855104 cache-read",
-    "inference_cost_usd": null,
-    "cost_note": "missing, not estimated - the Grok CLI transcript carries token counts but no cost figure",
+    "tokens": "94486 in / 15776 out / 1927552 cache-read",
+    "inference_cost_usd": 0.321345424,
+    "cost_note": "from the transcript's `type=result` line (total_cost_usd). Metric 3 is measurable; the earlier 'missing' claim was an extractor error, now fixed.",
     "diff": "paper/experiment/diffs/lycosid.patch (5 files, +35/-12, incl. rebuilt PDF)",
     "audit": {
      "canonical_path": 0,
@@ -103,7 +103,11 @@
      "ruling": "owner 2026-08-21: blocked attempts are logged, not voiding. All three gh attempts returned 'gh: command not found' (decoded from tool_results); zero information transferred. Run STANDS."
     },
     "model": "grok-4.5",
-    "attempted_leak": 3
+    "attempted_leak": 3,
+    "duration_ms": 363782,
+    "num_turns": 29,
+    "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-CLEAN.ndjson sha256:ed7c5cc039aa29107f4396e8bef8af2900098cf4591aab293e448e136899700d",
+    "status_note": "RETURNED to ready pending prospective adoption of the amended audit rule - see D-2 review round 2, finding 1."
    }
   },
   {
