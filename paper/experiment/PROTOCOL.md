@@ -236,6 +236,13 @@ Verified on this host 2026-08-21:
 | `head /Users/mrhinkle/Code/conference-os/package.json` | `Operation not permitted` — **vector B closed, kernel-enforced** |
 | `curl https://api.github.com/` | `HTTP:200` — **vector A NOT closed** |
 
+**Coverage is by allowlist, not by enumeration.** `extends = "strict"` confines reads to the
+working directory plus system paths, so the `deny` list is belt-and-braces. Probed: under
+`ab219`, `ls /Users/mrhinkle` returns `Operation not permitted`, and two further
+conference-os checkouts found outside the deny list
+(`/Users/mrhinkle/conference-os`, `/Users/mrhinkle/cos-bakeoff/conference-os`) were denied
+anyway. Unenumerated local copies are therefore covered by construction.
+
 **Vector A is mitigated by credential denial, not by network denial:** the repo is private
 (unauthenticated fetch of the fixing PR → 404), `GH_TOKEN`/`GITHUB_TOKEN` are scrubbed,
 `~/.config/gh` is kernel-denied, and `--disable-web-search` removes the model's own
