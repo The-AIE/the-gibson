@@ -4,7 +4,7 @@
  * the JSON cannot redirect or disable a protected control.
  */
 
-import { EXPECTED_ROLES } from "./contract-semantics.mjs";
+import { EXPECTED_ROLES, diffClosedSequence } from "./contract-semantics.mjs";
 
 export const CANONICAL_SCHEMA_ID = "gibson.mandatory-read-chain.v1";
 export const CANONICAL_SCHEMA_VERSION = "1.2.0";
@@ -27,6 +27,33 @@ export const CANONICAL_ROLE_CONTRACTS = "config/policy/role-contracts.v1.json";
 export const CANONICAL_MIRROR =
   "config/policy/candidates/gibson-core-v1.candidate.json";
 export const CANONICAL_AUDIT = "config/policy/rule-migration-audit.v1.json";
+export const CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID =
+  "gibson.rule-migration-audit.v1";
+export const CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_KEYS = [
+  "id",
+  "label",
+  "home",
+  "machine",
+];
+export const CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS = [
+  "authority-load-order",
+  "ten-laws",
+  "ask-contract",
+  "role-outputs-prohibitions",
+  "forbidden-role-pairs",
+  "six-lens-review",
+  "tier-c-adversarial-tests",
+  "no-destructive-prod-testing",
+  "eight-security-layers",
+  "self-modification-gates",
+  "delivery-control",
+  "workflow-stages",
+  "human-gates",
+  "style-commitments",
+  "risk-tiers",
+  "commit-pr-merge",
+  "concurrency",
+];
 
 export const CANONICAL_JOB_PROMPTS = [
   "playbooks/adopt.md",
@@ -323,6 +350,83 @@ export function canonicalEq(actual, expected, path, fail) {
     }
     return;
   }
+}
+
+/**
+ * Closed 17-family rule-migration audit. Shape and IDs are hardcoded here
+ * so a same-PR edit of the JSON cannot drop, duplicate, or add a family.
+ */
+export function diffRuleMigrationAudit(audit) {
+  const findings = [];
+  if (!audit || typeof audit !== "object" || Array.isArray(audit)) {
+    findings.push({
+      code: "E_AUDIT",
+      message: "rule-migration audit must be an object",
+    });
+    return findings;
+  }
+  if (
+    audit.schemaId !== CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID
+  ) {
+    findings.push({
+      code: "E_AUDIT",
+      message: `rule-migration audit schemaId must be ${CANONICAL_RULE_MIGRATION_AUDIT_SCHEMA_ID}`,
+    });
+  }
+  if (!Array.isArray(audit.families)) {
+    findings.push({
+      code: "E_AUDIT",
+      message: "rule-migration audit families must be an array",
+    });
+    return findings;
+  }
+  const ids = [];
+  audit.families.forEach((fam, i) => {
+    const loc = `families[${i}]`;
+    if (!fam || typeof fam !== "object" || Array.isArray(fam)) {
+      findings.push({
+        code: "E_AUDIT_FAMILY",
+        message: `rule-migration audit ${loc} is malformed`,
+      });
+      return;
+    }
+    for (const key of CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_KEYS) {
+      if (key === "id") {
+        if (typeof fam.id !== "string" || !fam.id) {
+          findings.push({
+            code: "E_AUDIT_FAMILY",
+            message: `rule-migration audit ${loc} missing id`,
+          });
+        } else {
+          ids.push(fam.id);
+        }
+        continue;
+      }
+      if (key === "machine") {
+        if (!Array.isArray(fam.machine)) {
+          findings.push({
+            code: "E_AUDIT_FAMILY",
+            message: `rule-migration audit ${loc} missing machine`,
+          });
+        }
+        continue;
+      }
+      if (typeof fam[key] !== "string" || !fam[key]) {
+        findings.push({
+          code: "E_AUDIT_FAMILY",
+          message: `rule-migration audit ${loc} missing ${key}`,
+        });
+      }
+    }
+  });
+  for (const f of diffClosedSequence(
+    "AUDIT_FAMILY",
+    ids,
+    CANONICAL_RULE_MIGRATION_AUDIT_FAMILY_IDS
+  )) {
+    findings.push(f);
+  }
+  return findings;
 }
 
 /**

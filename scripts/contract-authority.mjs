@@ -90,6 +90,7 @@ import {
   CANONICAL_PRE_CHANGE,
   CANONICAL_BYTE_BUDGET,
   pinReadChainConfig,
+  diffRuleMigrationAudit,
 } from "./lib/authority-config-canonical.mjs";
 
 export {
@@ -541,9 +542,11 @@ for (const rel of [...closedSeen].sort()) {
 }
 
 const auditRel = CANONICAL_AUDIT;
-let audit = null;
+let audit;
+let auditParsed = false;
 try {
   audit = loadAuthorityJson(rootId, auditRel);
+  auditParsed = true;
 } catch (e) {
   fail("E_AUDIT", e.message);
 }
@@ -706,15 +709,9 @@ if (agentsText) {
     }
   }
 
-  if (audit && Array.isArray(audit.families)) {
-    for (const fam of families) {
-      if (!fam || typeof fam.id !== "string") continue;
-      if (!audit.families.some((a) => a && a.id === fam.id)) {
-        fail(
-          "E_AUDIT_FAMILY",
-          `rule-migration audit missing required family ${fam.id}`
-        );
-      }
+  if (auditParsed) {
+    for (const f of diffRuleMigrationAudit(audit)) {
+      fail(f.code, f.message);
     }
   }
 
