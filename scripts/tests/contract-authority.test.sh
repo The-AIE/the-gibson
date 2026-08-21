@@ -2107,6 +2107,9 @@ for (const [family, phrase] of [
   add(family, phrase, `${phrase} is not, technically, required`, ["E_BINDING_NEGATION"], `${family} is-not-comma-technically-required`);
   add(family, phrase, `${phrase} is not (technically) required`, ["E_BINDING_NEGATION"], `${family} is-not-paren-technically-required`);
   add(family, phrase, `${phrase} is technically not required`, ["E_BINDING_NEGATION"], `${family} is-technically-not-required`);
+  add(family, phrase, `${phrase} cannot be required`, ["E_BINDING_NEGATION"], `${family} cannot-be-required`);
+  add(family, phrase, `${phrase} does not have to happen`, ["E_BINDING_NEGATION"], `${family} does-not-have-to-happen`);
+  add(family, phrase, `${phrase} cannot be skipped`, [], `${family} cannot-be-skipped`);
 }
 const failed = [];
 for (const row of rows) {
@@ -2146,6 +2149,9 @@ const rows = [
   { name: "human-merge-is-not-always-required", treatment: "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-is-not-in-any-way-required", treatment: "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
   { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-cannot-be-required", treatment: "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-does-not-have-to-happen", treatment: "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-cannot-be-skipped", treatment: "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful", expect: [] },
   { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: ["E_TIER_WEAKENING"] },
 ];
 const failed = [];
@@ -3013,6 +3019,22 @@ assert_sensor_exact_code \
   "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful" \
   "E_TIER_WEAKENING" \
   "tier C human-merge-is-technically-not-required" "tiers"
+assert_sensor_exact_code \
+  "Tier C human merge cannot-be-required" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** human merge cannot be required; serialize when stateful" \
+  "E_TIER_WEAKENING" \
+  "tier C human-merge-cannot-be-required" "tiers"
+assert_sensor_exact_code \
+  "Tier C human merge does-not-have-to-happen" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** human merge does not have to happen; serialize when stateful" \
+  "E_TIER_WEAKENING" \
+  "tier C human-merge-does-not-have-to-happen" "tiers"
+assert_sensor_green \
+  "Tier C human merge cannot-be-skipped" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** human merge cannot be skipped; serialize when stateful"
 
 echo "# first-match contradiction masking"
 cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-then-active-supersedes.md" \
@@ -3106,6 +3128,83 @@ else
 fi
 rm -f "$SANDBOX/docs/planted-hist-after.md"
 
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-same-paragraph-historical-then-active-supersedes.md" \
+  "$SANDBOX/docs/planted-same-para-hist-then-active.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'supersedes-agents'; then
+  ok "fixture: same-paragraph historical-then-active supersedes is not masked"
+else
+  bad "fixture same-paragraph-historical-then-active (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-same-para-hist-then-active.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-same-paragraph-active-then-historical-supersedes.md" \
+  "$SANDBOX/docs/planted-same-para-active-then-hist.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'supersedes-agents'; then
+  ok "fixture: same-paragraph active-then-historical supersedes still fails"
+else
+  bad "fixture same-paragraph-active-then-historical (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-same-para-active-then-hist.md"
+
+echo "# match/clause-local historical retraction table"
+RETRACT_TABLE=$(
+  SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  node --input-type=module -e '
+import { pathToFileURL } from "node:url";
+const { findDocsAuthorityClaims } = await import(pathToFileURL(process.env.SEM).href);
+const banner = "> **Authority:** Non-normative. Binding rules live only in AGENTS.md.\n\n";
+const rows = [
+  {
+    name: "retracted-only",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is retired. Follow AGENTS.md.\n",
+    expect: [],
+  },
+  {
+    name: "same-paragraph-later-active",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is retired. Follow AGENTS.md. This file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "same-paragraph-earlier-active",
+    text: banner + "This file supersedes AGENTS.md. Historically this file supersedes AGENTS.md; that claim is retired. Follow AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "same-sentence-later-active",
+    text: banner + "Historically this file supersedes AGENTS.md; that claim is retired, but this file supersedes AGENTS.md.\n",
+    expect: ["supersedes-agents"],
+  },
+  {
+    name: "same-sentence-earlier-active",
+    text: banner + "This file supersedes AGENTS.md, but historically that claim is retired.\n",
+    expect: ["supersedes-agents"],
+  },
+];
+const failed = [];
+for (const row of rows) {
+  const got = [...new Set(findDocsAuthorityClaims(row.text).map((h) => h.id))];
+  if (JSON.stringify(got) !== JSON.stringify(row.expect)) {
+    failed.push(row.name + " got " + JSON.stringify(got) + " want " + JSON.stringify(row.expect));
+  } else {
+    console.log("RETRACT_OK " + row.name);
+  }
+}
+if (failed.length) {
+  console.log("RETRACT_FAIL " + failed.join(" | "));
+  process.exit(1);
+}
+process.exit(0);
+'
+)
+if [[ $? -eq 0 ]]; then
+  echo "$RETRACT_TABLE" | grep -c 'RETRACT_OK' | awk '{print "    "$1" retraction table rows"}'
+  ok "table-driven match/clause-local historical retraction"
+else
+  bad "retraction table: $RETRACT_TABLE"
+fi
+
 echo "# table-driven closed-config mutations"
 CFG_MUT_OUT=$(
   SANDBOX="$SANDBOX" REPO_ROOT="$REPO_ROOT" \
@@ -3169,6 +3268,85 @@ else
 fi
 cp "$REPO_ROOT/config/policy/mandatory-read-chain.v1.json" \
   "$SANDBOX/config/policy/mandatory-read-chain.v1.json"
+
+echo "# table-driven rule-migration audit mutations"
+AUDIT_MUT_OUT=$(
+  SANDBOX="$SANDBOX" REPO_ROOT="$REPO_ROOT" \
+  node --input-type=module -e '
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+const sandbox = process.env.SANDBOX;
+const repo = process.env.REPO_ROOT;
+const { main } = await import(pathToFileURL(join(repo, "scripts/contract-authority.mjs")).href);
+const auditPath = join(sandbox, "config/policy/rule-migration-audit.v1.json");
+const orig = readFileSync(join(repo, "config/policy/rule-migration-audit.v1.json"), "utf8");
+const extraFam = {
+  id: "made-up-family",
+  label: "not in the closed set",
+  home: "nowhere",
+  machine: [],
+};
+const mutations = [
+  { name: "missing-families-array", code: "E_AUDIT", patch: (a) => { delete a.families; } },
+  { name: "families-not-array", code: "E_AUDIT", patch: (a) => { a.families = "nope"; } },
+  { name: "family-not-object", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0] = "nope"; } },
+  { name: "missing-id", code: "E_AUDIT_FAMILY", patch: (a) => { delete a.families[0].id; } },
+  { name: "empty-id", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].id = ""; } },
+  { name: "missing-label", code: "E_AUDIT_FAMILY", patch: (a) => { delete a.families[0].label; } },
+  { name: "missing-home", code: "E_AUDIT_FAMILY", patch: (a) => { delete a.families[0].home; } },
+  { name: "missing-machine", code: "E_AUDIT_FAMILY", patch: (a) => { delete a.families[0].machine; } },
+  { name: "machine-not-array", code: "E_AUDIT_FAMILY", patch: (a) => { a.families[0].machine = "scripts/gate.sh"; } },
+  { name: "duplicate-id", code: "E_AUDIT_FAMILY_DUPLICATE", patch: (a) => { a.families.push({ ...a.families[0] }); } },
+  { name: "extra-family", code: "E_AUDIT_FAMILY_ADDITION", patch: (a) => { a.families.push(extraFam); } },
+  { name: "drop-family", code: "E_AUDIT_FAMILY_OMISSION", patch: (a) => { a.families.splice(0, 1); } },
+  { name: "malformed-audit-object", code: "E_AUDIT", patch: () => null },
+  { name: "audit-json-null", code: "E_AUDIT", raw: "null\n" },
+  { name: "audit-json-false", code: "E_AUDIT", raw: "false\n" },
+  { name: "audit-json-zero", code: "E_AUDIT", raw: "0\n" },
+  { name: "audit-json-empty-string", code: "E_AUDIT", raw: "\"\"\n" },
+];
+const failed = [];
+for (const mut of mutations) {
+  if (Object.prototype.hasOwnProperty.call(mut, "raw")) {
+    writeFileSync(auditPath, mut.raw);
+  } else {
+    const parsed = JSON.parse(orig);
+    const patched = mut.patch(parsed);
+    const body = patched === null ? "[]\n" : JSON.stringify(parsed, null, 2) + "\n";
+    writeFileSync(auditPath, body);
+  }
+  const result = main(["--repo-root", sandbox, "--format", "text"]);
+  const codes = (result.findings || []).map((f) => f.code);
+  if (result.exitCode === 0 || !codes.includes(mut.code)) {
+    failed.push(mut.name + " exit=" + result.exitCode + " codes=" + codes.join(","));
+  } else {
+    console.log("AUDIT_MUT_OK " + mut.name + " " + mut.code);
+  }
+}
+writeFileSync(auditPath, orig);
+const control = main(["--repo-root", sandbox, "--format", "text"]);
+if (control.exitCode !== 0) {
+  failed.push("valid-audit control exit=" + control.exitCode + " " + JSON.stringify(control.findings));
+} else {
+  console.log("AUDIT_MUT_OK valid-audit");
+}
+if (failed.length) {
+  console.log("AUDIT_MUT_FAIL " + failed.join(" | "));
+  process.exit(1);
+}
+process.exit(0);
+'
+)
+audit_rc=$?
+if [[ "$audit_rc" -eq 0 ]]; then
+  echo "$AUDIT_MUT_OUT" | sed 's/^/    /'
+  ok "table-driven rule-migration audit mutations fail closed with valid-audit control"
+else
+  bad "table-driven rule-migration audit mutations: $AUDIT_MUT_OUT"
+fi
+cp "$REPO_ROOT/config/policy/rule-migration-audit.v1.json" \
+  "$SANDBOX/config/policy/rule-migration-audit.v1.json"
 
 echo "# pre-opendir replace/restore cannot omit a committed docs file"
 GIT_SANDBOX="$ROOT/git-sandbox"

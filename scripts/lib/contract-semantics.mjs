@@ -1139,6 +1139,23 @@ function afterNegatesObligation(after) {
   ) {
     return true;
   }
+  if (
+    /\b(?:does(?:n't|\s+not)|do(?:n't|\s+not))\s+have\s+to\s+(?:happen|occur|apply|be|exist)\b/i.test(
+      a
+    )
+  ) {
+    return true;
+  }
+  // "cannot be required" negates the obligation. "cannot be skipped" is a
+  // strengthening removal predicate and must not match OBLIGATION_PRED_SRC.
+  if (
+    new RegExp(
+      `\\b(?:cannot|can't|can not)\\s+be\\s+${OBLIGATION_ADVERBIAL_SLOT}${OBLIGATION_PRED_SRC}\\b`,
+      "i"
+    ).test(a)
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -1726,8 +1743,73 @@ function isRetractedHistorical(para) {
   );
 }
 
-function paragraphDefersToAgents(para, claimId) {
-  if (isRetractedHistorical(para)) return true;
+/**
+ * Sentence bounds around a match. File-extension dots (`.md`) are not
+ * boundaries because they are not followed by whitespace; a sentence
+ * period after `AGENTS.md` is.
+ */
+function sentenceBounds(text, idx, matchLen) {
+  const src = String(text || "");
+  const matchEnd = Math.max(idx, 0) + Math.max(matchLen, 0);
+  let start = 0;
+  const startRe = /[.!?][ \t\r\n]+/g;
+  let m;
+  while ((m = startRe.exec(src)) !== null) {
+    if (m.index + m[0].length <= idx) start = m.index + m[0].length;
+    else break;
+  }
+  let end = src.length;
+  const endRe = /[.!?]/g;
+  endRe.lastIndex = matchEnd;
+  const em = endRe.exec(src);
+  if (em) end = em.index + em[0].length;
+  return { start, end };
+}
+
+/**
+ * Match/clause-local unit for historical retraction. A later or earlier
+ * active "This file supersedes AGENTS.md" in the same paragraph is not
+ * covered by a neighboring retracted sentence. Bare semicolon stays in
+ * the same clause so "Historically X; that claim is retired" remains one
+ * retracted unit.
+ */
+function localClaimUnit(para, matchIdx, matchLen) {
+  const src = String(para || "");
+  if (matchIdx == null || matchIdx < 0 || matchIdx > src.length) return src;
+  const { start, end } = sentenceBounds(src, matchIdx, matchLen);
+  const sentence = src.slice(start, end);
+  const relIdx = matchIdx - start;
+  const re = new RegExp(CLAUSE_BOUNDARY_RE.source, "gi");
+  let last = 0;
+  let m;
+  while ((m = re.exec(sentence)) !== null) {
+    if (m.index < last) continue;
+    if (relIdx < m.index) {
+      const left = collapseWs(sentence.slice(last, m.index));
+      return left || collapseWs(sentence) || src;
+    }
+    last = m.index + m[0].length;
+  }
+  const tail = collapseWs(sentence.slice(last));
+  return tail || collapseWs(sentence) || src;
+}
+
+function matchRetractedHistorical(para, matchIdx, matchLen) {
+  const { start, end } = sentenceBounds(para, matchIdx, matchLen);
+  const sentence = para.slice(start, end);
+  const local = localClaimUnit(para, matchIdx, matchLen);
+  if (isRetractedHistorical(local)) return true;
+  if (!isRetractedHistorical(sentence)) return false;
+  // Same-sentence later/earlier active conflict is live unless that
+  // clause is itself the historically framed claim being retracted.
+  if (paragraphConflictsWithAgents(local) && !isHistoricalFraming(local)) {
+    return false;
+  }
+  return true;
+}
+
+function paragraphDefersToAgents(para, claimId, matchIdx, matchLen) {
+  if (matchRetractedHistorical(para, matchIdx, matchLen)) return true;
   if (claimAttributedToAgents(para, claimId)) return true;
   // Explicit operative conflict wins over a generic Follow-AGENTS
   // sentence in the same paragraph.
@@ -1743,9 +1825,13 @@ function paragraphDefersToAgents(para, claimId) {
 }
 
 function paragraphAt(text, idx, matchLen) {
-  const start = text.lastIndexOf("\n\n", idx);
+  const found = text.lastIndexOf("\n\n", idx);
+  const start = found === -1 ? 0 : found;
   const end = text.indexOf("\n\n", idx + matchLen);
-  return text.slice(start === -1 ? 0 : start, end === -1 ? text.length : end);
+  return {
+    text: text.slice(start, end === -1 ? text.length : end),
+    start,
+  };
 }
 
 export function findOperativeClaims(text) {
@@ -1765,7 +1851,12 @@ export function findOperativeClaims(text) {
       hits.push({
         id: pat.id,
         snippet: collapseWs(m[0]).slice(0, 160),
-        defersToAgents: paragraphDefersToAgents(para, pat.id),
+        defersToAgents: paragraphDefersToAgents(
+          para.text,
+          pat.id,
+          idx - para.start,
+          m[0].length
+        ),
         index: idx,
       });
     }
