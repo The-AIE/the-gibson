@@ -1671,8 +1671,12 @@ export function diffObligationMatrix(id, authByBucket, pbByBucket) {
   return out;
 }
 
+// Broad candidate span only. Whether AGENTS.md is actually the governed
+// object (rather than a later citation) is decided match-locally below.
+// A single Markdown line wrap is prose, while a blank line is a paragraph
+// boundary and must never join claims.
 const AGENTS_OBJECT_GAP_SRC =
-  "(?:(?!\\b(?:and|but|or|while|plus|because|although|though|yet|not|except|excluding|rather)\\b)[^.!?;\\r\\n]){0,160}?AGENTS\\.md\\b";
+  "(?:(?!\\r?\\n[ \\t]*\\r?\\n)[^.!?;]){0,240}?AGENTS\\.md\\b";
 const AGENTS_PRIORITY_CLAIM_RE = new RegExp(
   `\\b(?:overrides?|trumps?|prevails?\\s+over|(?:takes?|has)\\s+(?:precedence|priority)\\s+over|wins?\\s+over|ranks?\\s+above|is\\s+superior\\s+to)\\b${AGENTS_OBJECT_GAP_SRC}`,
   "i"
@@ -1681,6 +1685,57 @@ const AGENTS_GOVERNS_CLAIM_RE = new RegExp(
   `\\bgoverns?\\b[\\s\\S]{0,80}\\bsupersed(?:e|es|ing)\\b${AGENTS_OBJECT_GAP_SRC}`,
   "i"
 );
+
+const PRIORITY_RELATION_VERB_RE =
+  /\b(?:overrides?|trumps?|prevails?\s+over|(?:takes?|has)\s+(?:precedence|priority)\s+over|wins?\s+over|ranks?\s+above|is\s+superior\s+to|supersed(?:e|es|ing))\b/i;
+
+/**
+ * Distinguish a direct AGENTS.md authority object from ordinary citations.
+ * The candidate regex stays deliberately broad enough for hard-wrapped and
+ * coordinated noun phrases; this classifier supplies the precision boundary.
+ */
+function priorityMatchDirectlyTargetsAgents(matchText) {
+  const text = collapseWs(authorityClaimHaystack(matchText));
+  const verb = PRIORITY_RELATION_VERB_RE.exec(text);
+  const agents = /\bAGENTS\.md\b/i.exec(text);
+  if (!verb || !agents || agents.index <= verb.index + verb[0].length) {
+    return false;
+  }
+  let gap = collapseWs(text.slice(verb.index + verb[0].length, agents.index));
+  // A paired comma parenthetical is still inside the predicate.
+  gap = gap.replace(
+    /^,\s*(?:without exception|categorically|always|in every case|regardless of context)\s*,\s*/i,
+    ""
+  );
+  if (!gap) return true;
+  // Noun uses: "Vendor overrides live ..." / "Config overrides are ...".
+  if (
+    /^(?:live|are|is|was|were|remain|remains|exist|exists|apply|applies|occur|occurs|happen|happens|get|gets|become|becomes|serve|serves)\b/i.test(
+      gap
+    )
+  ) {
+    return false;
+  }
+  // Clear object denial and independent/citation relations do not make
+  // AGENTS.md the object of the priority verb.
+  if (
+    /\b(?:not|never|nothing|except|excluding|rather\s+than|anything\s+but)\b/i.test(
+      gap
+    ) ||
+    /(?:[|:\u2014\u2013]|--)/.test(gap) ||
+    /,/.test(gap) ||
+    /\b(?:because|although|though|whereas|while|yet)\b/i.test(gap) ||
+    /\b(?:as\s+(?:described|documented|stated|shown|recorded)|according\s+to|per|see|refer(?:red)?\s+to|pointer\s+to|recorded|stated|shown|documented|summariz(?:e|es|ed|ing)|alongside|before|after|then)\b/i.test(
+      gap
+    ) ||
+    /\b(?:and|or)\s+(?:(?:the|this|that|our|its)\s+)?(?:agent|fleet|runner|reader|document|file|playbook|adapter|it|they|we)\s+(?:loads?|reads?|follows?|consults?|uses?|opens?|points?)\b/i.test(
+      gap
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
 
 const OPERATIVE_CLAIM_PATTERNS = [
   {
@@ -1793,14 +1848,6 @@ function paragraphConflictsWithAgents(para) {
   return (
     /\boutranks\s+AGENTS\.md\b/i.test(p) ||
     /\bsupersedes\s+AGENTS\.md\b/i.test(p) ||
-    AGENTS_PRIORITY_CLAIM_RE.test(p) ||
-    AGENTS_GOVERNS_CLAIM_RE.test(p) ||
-    /\bwhen\s+AGENTS\.md\b[\s\S]{0,80}\bconflict[\s\S]{0,80}\b(?:the )?(?:principle|this (?:file|document))\s+wins\b/i.test(
-      p
-    ) ||
-    /\bAGENTS\.md\b[\s\S]{0,80}\band\s+(?:a |the )?principle conflict[\s\S]{0,60}\bprinciple wins\b/i.test(
-      p
-    ) ||
     /\bAGENTS\.md is subordinate\b/i.test(p) ||
     /\bthis (?:file|document|chapter) is (?:the )?(?:(?:authoritative\b(?!\s+(?:walkthrough|guide|history|explanation|overview|reference|documentation)\b))|binding contract|source of truth|canonical source)\b/i.test(
       p
@@ -1921,6 +1968,7 @@ function neutralizeAffirmativeNotIdioms(text) {
     .replace(/\b(?:does|do|did)\s+not\s+fail\s+to\b/gi, " ")
     .replace(/\b(?:is|are|was|were)\s+not\s+unable\s+to\b/gi, " ")
     .replace(/\b(?:cannot|can't)\s+fail\s+to\b/gi, " ")
+    .replace(/\bnever\s+fail(?:s|ed)?\s+to\b/gi, " ")
     .replace(/\bno\s+doubt\b/gi, " ")
     .replace(/\bno\s+question\b/gi, " ")
     .replace(/\bwithout\s+(?:a\s+)?doubt\b/gi, " ")
@@ -2009,21 +2057,50 @@ function matchRetractedHistorical(para, matchIdx, matchLen) {
 function principleClaimConflictsWithAgents(para, matchIdx, matchLen) {
   const { start, end } = sentenceBounds(para, matchIdx, matchLen);
   const sentence = collapseWs(authorityClaimHaystack(para.slice(start, end)));
-  const conflict = "(?:conflicts?|disagrees?|clashes?|contradicts?)";
-  return (
-    new RegExp(`\\bAGENTS\\.md\\b[^.!?;]{0,40}\\b${conflict}\\b`, "i").test(
-      sentence
-    ) ||
-    new RegExp(`\\b${conflict}\\b[^.!?;]{0,40}\\bAGENTS\\.md\\b`, "i").test(
+  const agentsAndConflict = (value) =>
+    /\bAGENTS\.md\b/i.test(value) &&
+    /\b(?:conflicts?|disagrees?|clashes?|contradicts?)\b/i.test(value);
+  if (agentsAndConflict(sentence)) return true;
+
+  // A tightly linked follow-up sentence preserves the preceding conflict's
+  // referent without joining unrelated sentences in the paragraph.
+  if (
+    !/^(?:in\s+that\s+case|in\s+such\s+cases|where\s+they\s+do|when\s+they\s+do|if\s+so|then)\b/i.test(
       sentence
     )
+  ) {
+    return false;
+  }
+  const prefix = String(para || "").slice(0, start).trimEnd();
+  if (!prefix) return false;
+  const withoutTerminator = /[.!?]$/.test(prefix) ? prefix.slice(0, -1) : prefix;
+  let previousStart = 0;
+  const boundary = /[.!?][ \t\r\n]+/g;
+  let m;
+  while ((m = boundary.exec(withoutTerminator)) !== null) {
+    previousStart = m.index + m[0].length;
+  }
+  const previous = collapseWs(
+    authorityClaimHaystack(prefix.slice(previousStart))
   );
+  return agentsAndConflict(previous);
 }
 
 function paragraphDefersToAgents(para, claimId, matchIdx, matchLen) {
+  if (
+    (claimId === "priority-over-agents" || claimId === "governs-over-agents") &&
+    !priorityMatchDirectlyTargetsAgents(
+      String(para || "").slice(matchIdx, matchIdx + matchLen)
+    )
+  ) {
+    return true;
+  }
   if (matchRetractedHistorical(para, matchIdx, matchLen)) return true;
   if (matchNegatesOperativeClaim(para, claimId, matchIdx, matchLen)) return true;
   if (claimAttributedToAgents(para, claimId)) return true;
+  if (claimId === "priority-over-agents" || claimId === "governs-over-agents") {
+    return false;
+  }
   if (
     claimId === "principle-wins-over-agents" &&
     principleClaimConflictsWithAgents(para, matchIdx, matchLen)
