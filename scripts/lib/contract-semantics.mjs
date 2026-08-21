@@ -1734,12 +1734,16 @@ function claimAttributedToAgents(para, claimId) {
 }
 
 function isRetractedHistorical(para) {
+  if (!isHistoricalFraming(para)) return false;
+  const retirement = historicalRetirementPolarity(para);
+  if (retirement.affirmative) return true;
+  // An explicit denial of retirement keeps the historical authority claim
+  // live even when the paragraph also contains a generic AGENTS.md deferral.
+  if (retirement.denied) return false;
   return (
-    isHistoricalFraming(para) &&
-    (/\b(no longer|retired|now live|now (?:the )?contract|that claim is retired|do not (?:follow|treat))\b/i.test(
+    /\b(?:no longer true|now live|now (?:the )?contract|do not follow)\b/i.test(
       para
-    ) ||
-      paragraphExplicitlyDefersToAgents(para))
+    ) || paragraphExplicitlyDefersToAgents(para)
   );
 }
 
@@ -1773,7 +1777,7 @@ function sentenceBounds(text, idx, matchLen) {
  * AGENTS.md" after "that claim is retired —" is its own clause.
  */
 const RETRACTION_CLAUSE_BOUNDARY_RE = new RegExp(
-  `(?:${CLAUSE_BOUNDARY_RE.source})|(?:${POLARIZED_COORD_RE.source})|(?:\\s*[\\u2014\\u2013]\\s*)`,
+  `(?:${CLAUSE_BOUNDARY_RE.source})|(?:(?:,\\s+|\\s+)(?:and|or|while|plus)\\s+)|(?:\\s+\\/\\s+)|(?::\\s+)|(?:\\s*[\\u2014\\u2013]\\s*)|(?:\\s+--+\\s+)`,
   "gi"
 );
 
@@ -1838,16 +1842,49 @@ function neutralizeAffirmativeNotIdioms(text) {
     .replace(/\bnot\s+simply\b/gi, " ");
 }
 
+/**
+ * Classify explicit uses of "retired" by their local polarity. Generic
+ * AGENTS.md deferral must not turn "not/never retired" or "do not treat
+ * ... as retired" into a retraction.
+ */
+function historicalRetirementPolarity(text) {
+  const src = collapseWs(normalizeApostrophes(text));
+  let affirmative = false;
+  let denied = false;
+  const re = /\bretired\b/gi;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const before = collapseWs(src.slice(Math.max(0, m.index - 120), m.index));
+    const polarityBefore = collapseWs(neutralizeAffirmativeNotIdioms(before));
+    if (
+      /\bdo\s+not\s+treat(?:\s+[A-Za-z][A-Za-z'-]*){0,8}\s+as\s*$/i.test(
+        polarityBefore
+      ) ||
+      /\b(?:not|never|no\s+longer)(?:\s+[A-Za-z][A-Za-z'-]*){0,4}\s*$/i.test(
+        polarityBefore
+      )
+    ) {
+      denied = true;
+    } else {
+      affirmative = true;
+    }
+  }
+  return { affirmative, denied };
+}
+
 function matchNegatesOperativeClaim(para, claimId, matchIdx, matchLen) {
   if (!NEGATABLE_OPERATIVE_CLAIMS.has(claimId)) return false;
   const { before } = localClaimSpan(para, matchIdx, matchLen);
   const stripped = collapseWs(
-    neutralizeAffirmativeNotIdioms(normalizeApostrophes(before))
+    neutralizeAffirmativeNotIdioms(
+      normalizeAdverbialPunctuation(normalizeApostrophes(before))
+    )
   );
   if (!stripped) return false;
-  // Predicate-attached: the negator immediately precedes this verb.
+  // Predicate-attached: the negator precedes this verb through a bounded
+  // adverbial modifier (including comma-wrapped modifiers).
   if (
-    /\b(?:never|not|cannot|can't|does\s+not|doesn't|do\s+not|don't|did\s+not|didn't|no\s+longer)\s*$/i.test(
+    /\b(?:never|not|cannot|can't|does\s+not|doesn't|do\s+not|don't|did\s+not|didn't|no\s+longer)(?:\s+[A-Za-z][A-Za-z'-]*){0,5}\s*$/i.test(
       stripped
     )
   ) {
@@ -1856,7 +1893,7 @@ function matchNegatesOperativeClaim(para, claimId, matchIdx, matchLen) {
   // The entire pre-verbal span is a negative subject NP (No document /
   // Nothing / Nobody), not an earlier unrelated "no"/"not".
   if (
-    /^(?:no|nothing|nobody|none|neither)(?:\s+[A-Za-z][A-Za-z'-]*){0,3}$/i.test(
+    /^(?:no|nothing|nobody|none|neither)(?:\s+[A-Za-z][A-Za-z'-]*){0,9}$/i.test(
       stripped
     )
   ) {
