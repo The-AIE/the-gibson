@@ -306,16 +306,24 @@ const beforeFiles = pre.impliedMandatoryFiles;
 let beforeBytesFromGit = 0;
 let beforeGitOk = true;
 const beforePerFile = [];
+const missingBeforeFiles = [];
 if (beforeCommit && beforeFiles.length) {
   for (const rel of beforeFiles) {
     const b = gitShowBytes(repoRoot, beforeCommit, rel);
     if (b == null) {
       beforeGitOk = false;
+      missingBeforeFiles.push(rel);
       beforePerFile.push({ path: rel, bytes: null });
     } else {
       beforeBytesFromGit += b;
       beforePerFile.push({ path: rel, bytes: b });
     }
+  }
+  if (!beforeGitOk) {
+    fail(
+      "E_BEFORE_PIN",
+      `cannot read pinned pre-change evidence at ${beforeCommit}: ${missingBeforeFiles.join(", ")}`
+    );
   }
   if (beforeGitOk && typeof pre.impliedMandatoryBytes === "number") {
     if (beforeBytesFromGit !== pre.impliedMandatoryBytes) {
@@ -890,9 +898,20 @@ function checkRepoAuthorityClaims(rel, text) {
 
 const checkedRepoClaimPaths = new Set();
 
+function checkNonPlaybookFrontmatter(rel, text) {
+  const fm = parseFrontmatter(text);
+  if (fm.hasFrontmatter && frontmatterHasOperativeKeys(fm.raw)) {
+    fail(
+      "E_AUTHORITY_CONTRADICTION",
+      `${rel} has operative gates:/forbidden:/outputs: frontmatter outside a conditionally mandatory playbook`
+    );
+  }
+}
+
 function checkRepoAuthorityFile(rel, text) {
   if (checkedRepoClaimPaths.has(rel)) return;
   checkedRepoClaimPaths.add(rel);
+  checkNonPlaybookFrontmatter(rel, text);
   checkRepoAuthorityClaims(rel, text);
 }
 
@@ -946,10 +965,12 @@ discoverMdFiles(rootId, "", repoMarkdown, fail, {
 for (const rel of [...new Set(repoMarkdown)].sort()) {
   if (
     rel === "AGENTS.md" ||
+    rel === "local/AGENTS.local.md" ||
     rel.startsWith(".") ||
     rel.startsWith("config/policy/fixtures/") ||
     rel.startsWith("docs/") ||
     rel.startsWith("playbooks/") ||
+    rel.startsWith("local/playbooks/") ||
     checkedRepoClaimPaths.has(rel)
   ) {
     continue;
@@ -1006,6 +1027,7 @@ const checkedPlaybooks = [];
       fail("E_PATH", `${rel}: ${e.message}`);
       continue;
     }
+    checkNonPlaybookFrontmatter(rel, text);
     if (!text.includes(docsMarker)) {
       fail("E_BANNER", `${rel} missing non-normative marker`);
     } else {
