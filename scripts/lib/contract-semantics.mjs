@@ -791,8 +791,32 @@ const REMOVAL_VERB_SRC =
 const REMOVAL_VERB_RE = new RegExp(`\\b${REMOVAL_VERB_SRC}\\b`, "i");
 const OBLIGATION_PRED_SRC =
   "(?:required|mandatory|enforced|necessary|(?<!non-)binding|obligatory|needed|recommended|advisory)";
-const OBLIGATION_FILLER_SRC =
-  "(?:actually|really|consistently|currently|truly|fully|strictly|generally|even|quite|inherently|practically)";
+/**
+ * Bounded adverb/adverbial slot around a negator and the obligation
+ * predicate. 0–4 tokens (including a short hyphenated token) so a
+ * generalized modifier or short prepositional filler can sit before or
+ * after the negator without a closed word list. Slot tokens are not
+ * themselves negators or obligation predicates, so the negator is not
+ * swallowed. Punctuation around the slot is normalized first. Negated
+ * softeners ("not merely recommended") are stripped before this slot
+ * is applied.
+ */
+const OBLIGATION_NEGATOR_TOKEN_SRC = "(?:not|never|no)";
+const OBLIGATION_ADVERBIAL_SLOT = `(?:(?!(?:${OBLIGATION_PRED_SRC}|${OBLIGATION_NEGATOR_TOKEN_SRC})\\b)[A-Za-z]+(?:-[A-Za-z]+)?\\s+){0,4}`;
+/**
+ * Independent-clause separators that can introduce a new subject.
+ * Coordinating `and` is intentionally omitted: ellipsis after `and`
+ * ("required and should never be skipped") stays in the same clause.
+ * Bounded punctuation/connective set: comma, semicolon, colon+space
+ * (so `file:line` is not a boundary), slash, em/en-dash, ASCII `--`,
+ * opening `(`, and `or`/`while`/`plus`. Opening `(` truncates local
+ * strengthening here and is not a polarized splitter, so a short
+ * parenthetical adverb stays in the same negation clause.
+ */
+const NEW_SUBJECT_BOUNDARY_RE =
+  /(?:[,;:]\s+|\s+\/\s+|\s*[\u2014\u2013]\s+|\s+--+\s+|\s*\(\s*|\s+(?:or|while|plus)\s+)/i;
+const POLARIZED_COORD_RE =
+  /(?:[,;:]\s+|\s+\/\s+|\s*[\u2014\u2013]\s+|\s+--+\s+|(?:,\s+|\s+)(?:and|or|while|plus)\s+)/gi;
 const STRENGTHENING_REMOVAL_RE = new RegExp(
   `\\b(?:(?:must|may|shall|should)\\s+not|cannot|can't|should\\s+never|never|not|don't|do not|without)\\s+(?:be\\s+)?${REMOVAL_VERB_SRC}\\b`,
   "i"
@@ -800,6 +824,22 @@ const STRENGTHENING_REMOVAL_RE = new RegExp(
 
 function normalizeApostrophes(text) {
   return String(text || "").replace(/[\u2018\u2019]/g, "'");
+}
+
+/**
+ * Unwrap wrapping commas, parentheses, and dash punctuation around an
+ * adverbial slot so "not, technically, required" and "not (technically)
+ * required" match the same generalized token slot. Does not split
+ * clauses — callers that need a new-subject boundary use
+ * NEW_SUBJECT_BOUNDARY_RE instead.
+ */
+function normalizeAdverbialPunctuation(text) {
+  return collapseWs(
+    String(text || "")
+      .replace(/[\u2014\u2013]/g, " ")
+      .replace(/--+/g, " ")
+      .replace(/[(),]/g, " ")
+  );
 }
 
 /**
@@ -852,10 +892,10 @@ function splitAroundPhrase(unit, phrase) {
 export function prohibitsObligationRemoval(clause, phrase = "") {
   const parts = splitAroundPhrase(normalizeApostrophes(clause), phrase);
   if (!parts) return false;
-  const { before, after, full } = parts;
+  const { before, after } = parts;
   if (
     new RegExp(
-      `\\b(?:never|not|no longer|without|don't|do not|must not|may not|cannot|can't|shall not|should not)\\s+(?:\\w+\\s+){0,3}${REMOVAL_VERB_SRC}\\s*$`,
+      `\\b(?:never|not|no longer|without|don't|do not|must not|may not|cannot|can't|shall not|should not)\\s+(?:\\w+\\s+){0,3}${REMOVAL_VERB_SRC}(?:\\s+(?:the|this|that|a|an))*\\s*$`,
       "i"
     ).test(before)
   ) {
@@ -869,10 +909,19 @@ export function prohibitsObligationRemoval(clause, phrase = "") {
   ) {
     return true;
   }
-  if (STRENGTHENING_REMOVAL_RE.test(after) || STRENGTHENING_REMOVAL_RE.test(full)) {
+  // Strengthening is clause-local to the protected phrase. An unrelated
+  // "cannot be skipped" after a new-subject boundary belongs to that
+  // later subject and must not cover this phrase.
+  if (STRENGTHENING_REMOVAL_RE.test(clauseLocalAfter(after))) {
     return true;
   }
   return false;
+}
+
+function clauseLocalAfter(after) {
+  const s = String(after || "");
+  const m = NEW_SUBJECT_BOUNDARY_RE.exec(s);
+  return collapseWs(m ? s.slice(0, m.index) : s);
 }
 
 function remainderAfterLastNegation(before) {
@@ -930,10 +979,10 @@ function splitStrengtheningPrefix(text, phrase) {
   return [text];
 }
 
-function rhsHasIndependentNegationOrWeakening(right, phrase) {
-  const bound = unitContainsPhrase(right, phrase)
-    ? right
-    : collapseWs(`${phrase} ${right}`);
+function clauseHasIndependentNegationOrWeakening(clause, phrase) {
+  const bound = unitContainsPhrase(clause, phrase)
+    ? clause
+    : collapseWs(`${phrase} ${clause}`);
   if (prohibitsObligationRemoval(bound, phrase)) return false;
   if (obligationNegatedAtClause(bound, phrase)) return true;
   if (clauseWeakensAtClause(bound, phrase)) return true;
@@ -941,14 +990,20 @@ function rhsHasIndependentNegationOrWeakening(right, phrase) {
 }
 
 /**
- * Split coordinating `and` only when the right-hand clause independently
- * negates or weakens the obligation. Harmless `and` phrases such as
- * "mandatory and cannot be skipped" stay one clause.
+ * Split coordinating separators when either side independently negates or
+ * weakens the obligation, even if the other side is strengthening. A
+ * strengthening predicate may neutralize only its own clause. Covers
+ * `and`/`or`/`while`/`plus`, comma, semicolon, colon+space, slash, and
+ * em/en/ASCII dashes so "is optional, Unit tests cannot be skipped"
+ * and "is optional / Unit tests cannot be skipped" keep the optionality.
+ * Harmless "mandatory and cannot be skipped" stays one clause because
+ * neither side independently negates or weakens. Opening `(` is not a
+ * splitter (parenthetical adverbs stay attached to the negator).
  */
 function splitAndWhenRhsPolarized(text, phrase) {
   const src = collapseWs(normalizeApostrophes(text));
   if (!phrase || !src) return [src];
-  const re = /(?:,\s+|\s+)and\s+/gi;
+  const re = new RegExp(POLARIZED_COORD_RE.source, "gi");
   const parts = [];
   let last = 0;
   let m;
@@ -956,7 +1011,12 @@ function splitAndWhenRhsPolarized(text, phrase) {
     if (m.index < last) continue;
     const left = collapseWs(src.slice(last, m.index));
     const right = collapseWs(src.slice(m.index + m[0].length));
-    if (left && right && rhsHasIndependentNegationOrWeakening(right, phrase)) {
+    if (
+      left &&
+      right &&
+      (clauseHasIndependentNegationOrWeakening(left, phrase) ||
+        clauseHasIndependentNegationOrWeakening(right, phrase))
+    ) {
       parts.push(left);
       last = m.index + m[0].length;
     }
@@ -993,11 +1053,11 @@ function splitPhraseOccurrences(text, phrase) {
 /**
  * Independent grammatical clauses / phrase occurrences inside one unit.
  * A strengthening prohibition covers only the clause it appears in;
- * later optionality, obligation-negation, convenience, or another
- * removal verb is analyzed on its own, including after coordinating
- * `and`/`yet` when the right-hand clause independently negates or
- * weakens. Pronoun/ellipsis remainders after a seen phrase are bound
- * back to that phrase.
+ * earlier or later optionality, obligation-negation, convenience, or
+ * another removal verb is analyzed on its own, including after
+ * coordinating `and`/`or`/`while`/`plus`/`yet`, comma, colon, slash, or
+ * dash when either side independently negates or weakens. Pronoun/ellipsis
+ * remainders after a seen phrase are bound back to that phrase.
  */
 function polarityClauses(unit, phrase) {
   const text = collapseWs(
@@ -1042,10 +1102,12 @@ export function obligationNegated(unit, phrase) {
 }
 
 function afterNegatesObligation(after) {
-  const a = neutralizeNegatedSofteners(normalizeApostrophes(after));
+  const a = normalizeAdverbialPunctuation(
+    neutralizeNegatedSofteners(normalizeApostrophes(after))
+  );
   if (
     new RegExp(
-      `\\b(?:is|are|was|were)\\s+(?:not|never|no longer)\\s+(?:${OBLIGATION_FILLER_SRC}\\s+)?${OBLIGATION_PRED_SRC}\\b`,
+      `\\b(?:is|are|was|were)\\s+${OBLIGATION_ADVERBIAL_SLOT}(?:not|never|no longer)\\s+${OBLIGATION_ADVERBIAL_SLOT}${OBLIGATION_PRED_SRC}\\b`,
       "i"
     ).test(a)
   ) {
@@ -1053,7 +1115,7 @@ function afterNegatesObligation(after) {
   }
   if (
     new RegExp(
-      `\\b(?:isn't|aren't|wasn't|weren't)\\s+(?:${OBLIGATION_FILLER_SRC}\\s+)?${OBLIGATION_PRED_SRC}\\b`,
+      `\\b(?:isn't|aren't|wasn't|weren't)\\s+${OBLIGATION_ADVERBIAL_SLOT}${OBLIGATION_PRED_SRC}\\b`,
       "i"
     ).test(a)
   ) {
@@ -1120,9 +1182,16 @@ export function clauseWeakensBinding(clause, phrase = "") {
 function clauseWeakensAtClause(clause, phrase = "") {
   if (prohibitsObligationRemoval(clause, phrase)) return false;
   const raw = neutralizeNotJust(neutralizeNegatedSofteners(clause));
-  const c = phrase
+  const stripped = phrase
     ? raw.replace(new RegExp(escapeRe(phrase), "ig"), " ")
     : raw;
+  // Unrelated "cannot be skipped" about another subject is not a weakener
+  // of this phrase; strip those strengthening idioms before the remnant
+  // is scanned for optionality or a leftover removal verb.
+  const c = String(stripped).replace(
+    new RegExp(STRENGTHENING_REMOVAL_RE.source, "gi"),
+    " "
+  );
   if (
     /\b(?:only\s+)?(?:when|unless|if)\s+(?:\w+\s+){0,4}(?:convenient|practical|desired|wanted|easy)\b/i.test(
       c
@@ -1225,7 +1294,14 @@ export function diffTierTreatments(tiers) {
         message:
           "Tier C treatment missing required human merge / adversarial review strength",
       });
-    } else if (clauseWeakensBinding(treat)) {
+    } else if (
+      obligationNegated(treat, "human merge") ||
+      obligationNegated(treat, "adversarial review") ||
+      obligationNegated(treat, "fan-out") ||
+      clauseWeakensBinding(treat, "human merge") ||
+      clauseWeakensBinding(treat, "adversarial review") ||
+      clauseWeakensBinding(treat)
+    ) {
       findings.push({
         code: "E_TIER_WEAKENING",
         message: "Tier C treatment weakens human merge / adversarial review",
@@ -1626,7 +1702,17 @@ function paragraphConflictsWithAgents(para) {
     /\bAGENTS\.md\b[\s\S]{0,80}\band\s+(?:a |the )?principle conflict[\s\S]{0,60}\bprinciple wins\b/i.test(
       p
     ) ||
-    /\bAGENTS\.md is subordinate\b/i.test(p)
+    /\bAGENTS\.md is subordinate\b/i.test(p) ||
+    /\bthis (?:file|document|chapter) is (?:the )?(?:authoritative|binding contract|source of truth)\b/i.test(
+      p
+    )
+  );
+}
+
+function claimAttributedToAgents(para, claimId) {
+  if (claimId !== "closed-list") return false;
+  return /\b(?:closed (?:stop )?list|stop list) (?:lives|remain(?:s)?(?: the closed list)?) in\b[\s\S]{0,40}\bAGENTS\.md\b/i.test(
+    para
   );
 }
 
@@ -1640,11 +1726,20 @@ function isRetractedHistorical(para) {
   );
 }
 
-function paragraphDefersToAgents(para) {
-  if (paragraphConflictsWithAgents(para) && !isRetractedHistorical(para)) {
+function paragraphDefersToAgents(para, claimId) {
+  if (isRetractedHistorical(para)) return true;
+  if (claimAttributedToAgents(para, claimId)) return true;
+  // Explicit operative conflict wins over a generic Follow-AGENTS
+  // sentence in the same paragraph.
+  if (paragraphConflictsWithAgents(para)) return false;
+  if (
+    claimId === "closed-list" ||
+    claimId === "self-authoritative" ||
+    OPERATIVE_CLAIM_PATTERNS.some((p) => p.id === claimId)
+  ) {
     return false;
   }
-  return paragraphExplicitlyDefersToAgents(para) || isRetractedHistorical(para);
+  return paragraphExplicitlyDefersToAgents(para);
 }
 
 function paragraphAt(text, idx, matchLen) {
@@ -1670,7 +1765,7 @@ export function findOperativeClaims(text) {
       hits.push({
         id: pat.id,
         snippet: collapseWs(m[0]).slice(0, 160),
-        defersToAgents: paragraphDefersToAgents(para),
+        defersToAgents: paragraphDefersToAgents(para, pat.id),
         index: idx,
       });
     }
@@ -1679,13 +1774,14 @@ export function findOperativeClaims(text) {
 }
 
 /**
- * A non-normative file that later asserts a closed/authoritative/operative
- * list without deferring to AGENTS.md in the same paragraph.
+ * A non-normative file that asserts a closed/authoritative/operative list.
+ * The complete file is evaluated: a live claim before the marker still
+ * counts, and a generic AGENTS.md deferral does not erase an explicit
+ * conflict unless that exact claim is historically retracted.
  */
 export function findNonNormativeOperativeContradiction(text, nonNormativeMarker) {
   if (!text.includes(nonNormativeMarker)) return [];
-  const after = text.slice(text.indexOf(nonNormativeMarker) + nonNormativeMarker.length);
-  return findOperativeClaims(after).filter((h) => !h.defersToAgents);
+  return findDocsAuthorityClaims(text);
 }
 
 export function findDocsAuthorityClaims(text) {

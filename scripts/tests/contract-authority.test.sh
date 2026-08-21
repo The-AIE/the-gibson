@@ -2072,6 +2072,41 @@ for (const [family, phrase] of [
   add(family, phrase, `${phrase} is required, not merely recommended`, [], `${family} required-not-merely-recommended`);
   add(family, phrase, `${phrase} is mandatory and may not be waived`, [], `${family} mandatory-and-may-not-be-waived`);
   add(family, phrase, `${phrase} is required and should never be skipped`, [], `${family} required-and-should-never-be-skipped`);
+  add(family, phrase, `${phrase} is not required and cannot be skipped`, ["E_BINDING_NEGATION"], `${family} not-required-and-cannot-be-skipped`);
+  add(family, phrase, `${phrase} is optional and must not be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-and-must-not-be-skipped`);
+  add(family, phrase, `${phrase} is recommended and may not be waived`, ["E_BINDING_WEAKENING"], `${family} recommended-and-may-not-be-waived`);
+  add(family, phrase, `${phrase} isn\u0027t mandatory and should never be skipped`, ["E_BINDING_NEGATION"], `${family} isnt-mandatory-and-should-never-be-skipped`);
+  add(family, phrase, `${phrase} may be skipped and must not be waived`, ["E_BINDING_WEAKENING"], `${family} may-be-skipped-and-must-not-be-waived`);
+  add(family, phrase, `${phrase} is not optional and is mandatory`, [], `${family} not-optional-and-is-mandatory`);
+  add(family, phrase, `${phrase} is not optional and cannot be skipped`, [], `${family} not-optional-and-cannot-be-skipped`);
+  add(family, phrase, `${phrase} is not merely recommended and must not be waived`, [], `${family} not-merely-recommended-and-must-not-be-waived`);
+  add(family, phrase, `${phrase} is always required and should never be skipped`, [], `${family} always-required-and-should-never-be-skipped`);
+  add(family, phrase, `${phrase} is not operationally required`, ["E_BINDING_NEGATION"], `${family} is-not-operationally-required`);
+  add(family, phrase, `${phrase} is not materially mandatory`, ["E_BINDING_NEGATION"], `${family} is-not-materially-mandatory`);
+  add(family, phrase, `${phrase} is no longer categorically enforced`, ["E_BINDING_NEGATION"], `${family} is-no-longer-categorically-enforced`);
+  add(family, phrase, `Unit tests cannot be skipped, ${phrase} is optional`, ["E_BINDING_WEAKENING"], `${family} unrelated-strengthen-then-optional`);
+  add(family, phrase, `Unit tests cannot be skipped, ${phrase} is mandatory`, [], `${family} unrelated-strengthen-then-mandatory`);
+  add(family, phrase, `${phrase} is optional, Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-comma-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional \u2014 Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-emdash-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional or Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-or-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is mandatory, Unit tests cannot be skipped`, [], `${family} mandatory-comma-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is not technically required`, ["E_BINDING_NEGATION"], `${family} is-not-technically-required`);
+  add(family, phrase, `${phrase} is not formally mandatory`, ["E_BINDING_NEGATION"], `${family} is-not-formally-mandatory`);
+  add(family, phrase, `${phrase} is not necessarily required`, ["E_BINDING_NEGATION"], `${family} is-not-necessarily-required`);
+  add(family, phrase, `${phrase} is not always required`, ["E_BINDING_NEGATION"], `${family} is-not-always-required`);
+  add(family, phrase, `${phrase} is optional / Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-slash-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional: Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-colon-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional -- Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-dash-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional (Unit tests cannot be skipped)`, ["E_BINDING_WEAKENING"], `${family} optional-paren-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional while Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-while-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is optional plus Unit tests cannot be skipped`, ["E_BINDING_WEAKENING"], `${family} optional-plus-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is mandatory / Unit tests cannot be skipped`, [], `${family} mandatory-slash-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is mandatory: Unit tests cannot be skipped`, [], `${family} mandatory-colon-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is mandatory (Unit tests cannot be skipped)`, [], `${family} mandatory-paren-unrelated-cannot-skip`);
+  add(family, phrase, `${phrase} is not in any way required`, ["E_BINDING_NEGATION"], `${family} is-not-in-any-way-required`);
+  add(family, phrase, `${phrase} is not, technically, required`, ["E_BINDING_NEGATION"], `${family} is-not-comma-technically-required`);
+  add(family, phrase, `${phrase} is not (technically) required`, ["E_BINDING_NEGATION"], `${family} is-not-paren-technically-required`);
+  add(family, phrase, `${phrase} is technically not required`, ["E_BINDING_NEGATION"], `${family} is-technically-not-required`);
 }
 const failed = [];
 for (const row of rows) {
@@ -2094,6 +2129,46 @@ if [[ $? -eq 0 ]]; then
   ok "table-driven polarity across delivery-control and six-lens-review"
 else
   bad "polarity table: $POLARITY_TABLE"
+fi
+
+echo "# Tier C treatment polarity table"
+TIER_TABLE=$(
+  SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  node --input-type=module -e '
+import { pathToFileURL } from "node:url";
+const { diffTierTreatments } = await import(pathToFileURL(process.env.SEM).href);
+const canonical = "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful";
+const rows = [
+  { name: "canonical-treatment", treatment: canonical, expect: [] },
+  { name: "human-merge-is-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-is-not-operationally-required", treatment: "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-is-not-technically-required", treatment: "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-is-not-always-required", treatment: "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-is-not-in-any-way-required", treatment: "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "human-merge-is-technically-not-required", treatment: "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful", expect: ["E_TIER_WEAKENING"] },
+  { name: "missing-fan-out", treatment: "Optional review; G12 when convenient", expect: ["E_TIER_WEAKENING"] },
+];
+const failed = [];
+for (const row of rows) {
+  const got = diffTierTreatments([{ id: "C", definition: "Money", treatment: row.treatment }]).map((f) => f.code);
+  if (JSON.stringify(got) !== JSON.stringify(row.expect)) {
+    failed.push(row.name + " got " + JSON.stringify(got) + " want " + JSON.stringify(row.expect));
+  } else {
+    console.log("TIER_OK " + row.name);
+  }
+}
+if (failed.length) {
+  console.log("TIER_FAIL " + failed.join(" | "));
+  process.exit(1);
+}
+process.exit(0);
+'
+)
+if [[ $? -eq 0 ]]; then
+  echo "$TIER_TABLE" | grep -c 'TIER_OK' | awk '{print "    "$1" tier-C table rows"}'
+  ok "table-driven Tier C treatment polarity"
+else
+  bad "tier C table: $TIER_TABLE"
 fi
 
 # Sensor-path receipts for both families (verb-before strengthening vs after-phrase negation).
@@ -2438,6 +2513,507 @@ else
 fi
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 
+# Reverse-order coordinating-and: LHS negation/weakening must not be
+# masked by a later strengthening removal predicate.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "**explicit human apply** is not required and cannot be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: not-required and cannot-be-skipped fails with E_BINDING_NEGATION"
+else
+  bad "sensor not-required-and-cannot-be-skipped apply (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "apply not-required-and-cannot-be-skipped" "E_BINDING_NEGATION" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "findings cite **file:line**",
+  "**file:line** isn\u0027t mandatory and should never be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: isnt-mandatory and should-never-be-skipped fails with E_BINDING_NEGATION"
+else
+  bad "sensor isnt-mandatory-and-should-never-be-skipped file:line (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "**explicit human apply** is optional and must not be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+  ok "sensor: optional and must-not-be-skipped fails with E_BINDING_WEAKENING"
+else
+  bad "sensor optional-and-must-not-be-skipped apply (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "apply optional-and-must-not-be-skipped" "E_BINDING_WEAKENING" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "findings cite **file:line**",
+  "**file:line** may be skipped and must not be waived"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+  ok "sensor: may-be-skipped and must-not-be-waived fails with E_BINDING_WEAKENING"
+else
+  bad "sensor may-be-skipped-and-must-not-be-waived file:line (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Adverbial obligation hedges, unrelated-clause strengthening, Tier C.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("then **explicit human apply**", "**explicit human apply** is not operationally required");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: explicit human apply is-not-operationally-required fails with E_BINDING_NEGATION"
+else
+  bad "sensor is-not-operationally-required apply (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "apply is-not-operationally-required" "E_BINDING_NEGATION" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("findings cite **file:line**", "**file:line** is not materially mandatory");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: file:line is-not-materially-mandatory fails with E_BINDING_NEGATION"
+else
+  bad "sensor is-not-materially-mandatory file:line (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("then **explicit human apply**", "**explicit human apply** is no longer categorically enforced");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: explicit human apply is-no-longer-categorically-enforced fails with E_BINDING_NEGATION"
+else
+  bad "sensor is-no-longer-categorically-enforced apply (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "apply is-no-longer-categorically-enforced" "E_BINDING_NEGATION" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "Unit tests cannot be skipped, **explicit human apply** is optional"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+  ok "sensor: unrelated cannot-be-skipped then optional fails with E_BINDING_WEAKENING"
+else
+  bad "sensor unrelated-strengthen-then-optional apply (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "apply unrelated-strengthen-then-optional" "E_BINDING_WEAKENING" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** human merge is not required; serialize when stateful"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_TIER_WEAKENING'; then
+  ok "sensor: Tier C human merge is-not-required fails with E_TIER_WEAKENING"
+else
+  bad "sensor tier-C human-merge-is-not-required (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "tier C human-merge-is-not-required" "E_TIER_WEAKENING" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** human merge is not operationally required; serialize when stateful"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_TIER_WEAKENING'; then
+  ok "sensor: Tier C human merge is-not-operationally-required fails with E_TIER_WEAKENING"
+else
+  bad "sensor tier-C human-merge-is-not-operationally-required (rc=$rc): $out"
+fi
+prove_legacy_green_structured_red "tier C human-merge-is-not-operationally-required" "E_TIER_WEAKENING" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Unrelated strengthening after a weakener (comma / em-dash / or).
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "**explicit human apply** is optional, Unit tests cannot be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+weak_n=$(printf '%s\n' "$out" | grep -c 'E_BINDING_WEAKENING' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$weak_n" -eq 1 ]] && ! echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: optional comma unrelated cannot-be-skipped fails with E_BINDING_WEAKENING"
+else
+  bad "sensor optional-comma-unrelated-cannot-skip apply (rc=$rc n=$weak_n): $out"
+fi
+prove_legacy_green_structured_red "apply optional-comma-unrelated-cannot-skip" "E_BINDING_WEAKENING" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "findings cite **file:line**",
+  "**file:line** is optional, Unit tests cannot be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+weak_n=$(printf '%s\n' "$out" | grep -c 'E_BINDING_WEAKENING' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$weak_n" -eq 1 ]] && ! echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: file:line optional comma unrelated cannot-be-skipped fails with E_BINDING_WEAKENING"
+else
+  bad "sensor optional-comma-unrelated-cannot-skip file:line (rc=$rc n=$weak_n): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "**explicit human apply** is optional \u2014 Unit tests cannot be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+weak_n=$(printf '%s\n' "$out" | grep -c 'E_BINDING_WEAKENING' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$weak_n" -eq 1 ]] && ! echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: optional em-dash unrelated cannot-be-skipped fails with E_BINDING_WEAKENING"
+else
+  bad "sensor optional-emdash-unrelated-cannot-skip apply (rc=$rc n=$weak_n): $out"
+fi
+prove_legacy_green_structured_red "apply optional-emdash-unrelated-cannot-skip" "E_BINDING_WEAKENING" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "**explicit human apply** is optional or Unit tests cannot be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+weak_n=$(printf '%s\n' "$out" | grep -c 'E_BINDING_WEAKENING' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$weak_n" -eq 1 ]] && ! echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+  ok "sensor: optional or unrelated cannot-be-skipped fails with E_BINDING_WEAKENING"
+else
+  bad "sensor optional-or-unrelated-cannot-skip apply (rc=$rc n=$weak_n): $out"
+fi
+prove_legacy_green_structured_red "apply optional-or-unrelated-cannot-skip" "E_BINDING_WEAKENING" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "then **explicit human apply**",
+  "**explicit human apply** is mandatory, Unit tests cannot be skipped"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "sensor: mandatory comma unrelated cannot-be-skipped stays green"
+else
+  bad "sensor mandatory-comma-unrelated-cannot-skip apply (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Generalized adverb/adverbial slot between negator and obligation predicate.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("then **explicit human apply**", "**explicit human apply** is not technically required");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+neg_n=$(printf '%s\n' "$out" | grep -c 'E_BINDING_NEGATION' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$neg_n" -eq 1 ]] && ! echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+  ok "sensor: explicit human apply is-not-technically-required fails with E_BINDING_NEGATION"
+else
+  bad "sensor is-not-technically-required apply (rc=$rc n=$neg_n): $out"
+fi
+prove_legacy_green_structured_red "apply is-not-technically-required" "E_BINDING_NEGATION" "delivery"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace("findings cite **file:line**", "**file:line** is not always required");
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+neg_n=$(printf '%s\n' "$out" | grep -c 'E_BINDING_NEGATION' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$neg_n" -eq 1 ]] && ! echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+  ok "sensor: file:line is-not-always-required fails with E_BINDING_NEGATION"
+else
+  bad "sensor is-not-always-required file:line (rc=$rc n=$neg_n): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** human merge is not technically required; serialize when stateful"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+tier_n=$(printf '%s\n' "$out" | grep -c 'E_TIER_WEAKENING' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$tier_n" -eq 1 ]]; then
+  ok "sensor: Tier C human merge is-not-technically-required fails with E_TIER_WEAKENING"
+else
+  bad "sensor tier-C human-merge-is-not-technically-required (rc=$rc n=$tier_n): $out"
+fi
+prove_legacy_green_structured_red "tier C human-merge-is-not-technically-required" "E_TIER_WEAKENING" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+t=t.replace(
+  "Fan-out + adversarial review + **G12** human merge gate; serialize when stateful",
+  "Fan-out + adversarial review + **G12** human merge is not always required; serialize when stateful"
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+tier_n=$(printf '%s\n' "$out" | grep -c 'E_TIER_WEAKENING' || true)
+if [[ "$rc" -ne 0 ]] && [[ "$tier_n" -eq 1 ]]; then
+  ok "sensor: Tier C human merge is-not-always-required fails with E_TIER_WEAKENING"
+else
+  bad "sensor tier-C human-merge-is-not-always-required (rc=$rc n=$tier_n): $out"
+fi
+prove_legacy_green_structured_red "tier C human-merge-is-not-always-required" "E_TIER_WEAKENING" "tiers"
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# New-subject separators, post-negator punctuation, pre-negator adverb, Tier-C.
+assert_sensor_exact_code() {
+  local desc="$1"
+  local search="$2"
+  local repl="$3"
+  local code="$4"
+  local legacy_name="${5:-}"
+  local legacy_fam="${6:-}"
+  cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+  node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const s=process.argv[2];
+const r=process.argv[3];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes(s)) { console.error("NEEDLE_MISSING "+s); process.exit(2); }
+fs.writeFileSync(p, t.replace(s, r));
+' "$SANDBOX/AGENTS.md" "$search" "$repl" || { bad "sensor $desc (needle missing)"; return; }
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  n=$(printf '%s\n' "$out" | grep -c "$code" || true)
+  if [[ "$rc" -ne 0 ]] && [[ "$n" -eq 1 ]]; then
+    if [[ "$code" == "E_BINDING_WEAKENING" ]] && echo "$out" | grep -q 'E_BINDING_NEGATION'; then
+      bad "sensor $desc (also E_BINDING_NEGATION): $out"
+    elif [[ "$code" == "E_BINDING_NEGATION" ]] && echo "$out" | grep -q 'E_BINDING_WEAKENING'; then
+      bad "sensor $desc (also E_BINDING_WEAKENING): $out"
+    else
+      ok "sensor: $desc fails with $code"
+    fi
+  else
+    bad "sensor $desc (rc=$rc n=$n): $out"
+  fi
+  if [[ -n "$legacy_name" ]]; then
+    prove_legacy_green_structured_red "$legacy_name" "$code" "$legacy_fam"
+  fi
+  cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+}
+
+assert_sensor_green() {
+  local desc="$1"
+  local search="$2"
+  local repl="$3"
+  cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+  node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const s=process.argv[2];
+const r=process.argv[3];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes(s)) { console.error("NEEDLE_MISSING "+s); process.exit(2); }
+fs.writeFileSync(p, t.replace(s, r));
+' "$SANDBOX/AGENTS.md" "$search" "$repl" || { bad "sensor $desc (needle missing)"; return; }
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "sensor: $desc stays green"
+  else
+    bad "sensor $desc (rc=$rc): $out"
+  fi
+  cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+}
+
+APPLY_NEEDLE='then **explicit human apply**'
+LINE_NEEDLE='findings cite **file:line**'
+TIER_NEEDLE='Fan-out + adversarial review + **G12** human merge gate; serialize when stateful'
+
+assert_sensor_exact_code \
+  "optional slash unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is optional / Unit tests cannot be skipped" \
+  "E_BINDING_WEAKENING" \
+  "apply optional-slash-unrelated-cannot-skip" "delivery"
+assert_sensor_exact_code \
+  "file:line optional colon unrelated cannot-be-skipped" \
+  "$LINE_NEEDLE" \
+  "**file:line** is optional: Unit tests cannot be skipped" \
+  "E_BINDING_WEAKENING"
+assert_sensor_exact_code \
+  "optional ascii-dash unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is optional -- Unit tests cannot be skipped" \
+  "E_BINDING_WEAKENING" \
+  "apply optional-dash-unrelated-cannot-skip" "delivery"
+assert_sensor_exact_code \
+  "optional paren unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is optional (Unit tests cannot be skipped)" \
+  "E_BINDING_WEAKENING" \
+  "apply optional-paren-unrelated-cannot-skip" "delivery"
+assert_sensor_exact_code \
+  "file:line optional while unrelated cannot-be-skipped" \
+  "$LINE_NEEDLE" \
+  "**file:line** is optional while Unit tests cannot be skipped" \
+  "E_BINDING_WEAKENING"
+assert_sensor_exact_code \
+  "optional plus unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is optional plus Unit tests cannot be skipped" \
+  "E_BINDING_WEAKENING" \
+  "apply optional-plus-unrelated-cannot-skip" "delivery"
+
+assert_sensor_green \
+  "mandatory slash unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is mandatory / Unit tests cannot be skipped"
+assert_sensor_green \
+  "mandatory colon unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is mandatory: Unit tests cannot be skipped"
+assert_sensor_green \
+  "mandatory paren unrelated cannot-be-skipped" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is mandatory (Unit tests cannot be skipped)"
+
+assert_sensor_exact_code \
+  "explicit human apply is-not-comma-technically-required" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is not, technically, required" \
+  "E_BINDING_NEGATION" \
+  "apply is-not-comma-technically-required" "delivery"
+assert_sensor_exact_code \
+  "file:line is-not-paren-technically-required" \
+  "$LINE_NEEDLE" \
+  "**file:line** is not (technically) required" \
+  "E_BINDING_NEGATION"
+assert_sensor_exact_code \
+  "explicit human apply is-technically-not-required" \
+  "$APPLY_NEEDLE" \
+  "**explicit human apply** is technically not required" \
+  "E_BINDING_NEGATION" \
+  "apply is-technically-not-required" "delivery"
+assert_sensor_exact_code \
+  "file:line is-not-in-any-way-required" \
+  "$LINE_NEEDLE" \
+  "**file:line** is not in any way required" \
+  "E_BINDING_NEGATION"
+
+assert_sensor_exact_code \
+  "Tier C human merge is-not-in-any-way-required" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** human merge is not in any way required; serialize when stateful" \
+  "E_TIER_WEAKENING" \
+  "tier C human-merge-is-not-in-any-way-required" "tiers"
+assert_sensor_exact_code \
+  "Tier C human merge is-technically-not-required" \
+  "$TIER_NEEDLE" \
+  "Fan-out + adversarial review + **G12** human merge is technically not required; serialize when stateful" \
+  "E_TIER_WEAKENING" \
+  "tier C human-merge-is-technically-not-required" "tiers"
+
 echo "# first-match contradiction masking"
 cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-then-active-supersedes.md" \
   "$SANDBOX/docs/planted-hist-then-active.md"
@@ -2478,6 +3054,57 @@ else
   bad "benign historical retracted (rc=$rc): $out"
 fi
 rm -f "$SANDBOX/docs/planted-hist-retracted.md"
+
+echo "# contradiction position / deferral receipts"
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-supersedes-before-marker.md" \
+  "$SANDBOX/docs/planted-supersedes-before.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'supersedes-agents'; then
+  ok "fixture: live supersedes before non-normative marker fails"
+else
+  bad "fixture supersedes-before-marker (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-supersedes-before.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-same-paragraph-authoritative.md" \
+  "$SANDBOX/docs/planted-same-para-auth.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'self-authoritative'; then
+  ok "fixture: same-paragraph Follow-AGENTS plus source-of-truth fails"
+else
+  bad "fixture same-paragraph-authoritative (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-same-para-auth.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-closed-list-follow-agents.md" \
+  "$SANDBOX/docs/planted-closed-follow.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_AUTHORITY_CONTRADICTION' && echo "$out" | grep -q 'closed-list'; then
+  ok "fixture: Follow AGENTS.md plus this-list-is-closed fails"
+else
+  bad "fixture closed-list-follow-agents (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-closed-follow.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-retracted-before-marker.md" \
+  "$SANDBOX/docs/planted-hist-before.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: retracted historical supersedes before marker remains green"
+else
+  bad "benign historical-before-marker (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-hist-before.md"
+
+cp "$REPO_ROOT/config/policy/fixtures/authority-contradictions/docs-historical-retracted-after-marker.md" \
+  "$SANDBOX/docs/planted-hist-after.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: retracted historical supersedes after marker remains green"
+else
+  bad "benign historical-after-marker (rc=$rc): $out"
+fi
+rm -f "$SANDBOX/docs/planted-hist-after.md"
 
 echo "# table-driven closed-config mutations"
 CFG_MUT_OUT=$(
