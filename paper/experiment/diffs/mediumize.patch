@@ -1,3 +1,212 @@
+diff --git a/prisma/migrations/20260822120000_sponsor_contacts_multi_contact/migration.sql b/prisma/migrations/20260822120000_sponsor_contacts_multi_contact/migration.sql
+new file mode 100644
+index 0000000..415e6b0
+--- /dev/null
++++ b/prisma/migrations/20260822120000_sponsor_contacts_multi_contact/migration.sql
+@@ -0,0 +1,203 @@
++-- Multiple contacts per Sponsor / community-partner company.
++-- CrmContact = person; Sponsor = company; SponsorContact = membership + roles.
++-- Additive only: new enum + table + FKs. Legacy Sponsor.contact* columns kept.
++-- Backfill: reuse existing SPONSOR_CONTACT CrmContactLink rows when present;
++-- otherwise create CrmContact (+ link) from flat contact columns.
++
++-- CreateEnum
++DO $$ BEGIN
++  CREATE TYPE "SponsorContactRole" AS ENUM (
++    'PRIMARY',
++    'BILLING',
++    'MARKETING',
++    'ON_SITE',
++    'SIGNATORY',
++    'OTHER'
++  );
++EXCEPTION
++  WHEN duplicate_object THEN NULL;
++END $$;
++
++-- CreateTable
++CREATE TABLE IF NOT EXISTS "SponsorContact" (
++    "id" TEXT NOT NULL,
++    "sponsorId" TEXT NOT NULL,
++    "contactId" TEXT NOT NULL,
++    "roles" "SponsorContactRole"[] DEFAULT ARRAY['PRIMARY']::"SponsorContactRole"[],
++    "isPrimary" BOOLEAN NOT NULL DEFAULT false,
++    "notes" TEXT,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "SponsorContact_pkey" PRIMARY KEY ("id")
++);
++
++CREATE UNIQUE INDEX IF NOT EXISTS "SponsorContact_sponsorId_contactId_key"
++  ON "SponsorContact"("sponsorId", "contactId");
++CREATE INDEX IF NOT EXISTS "SponsorContact_sponsorId_idx"
++  ON "SponsorContact"("sponsorId");
++CREATE INDEX IF NOT EXISTS "SponsorContact_contactId_idx"
++  ON "SponsorContact"("contactId");
++CREATE INDEX IF NOT EXISTS "SponsorContact_sponsorId_isPrimary_idx"
++  ON "SponsorContact"("sponsorId", "isPrimary");
++
++DO $$
++BEGIN
++  IF NOT EXISTS (
++    SELECT 1 FROM pg_constraint WHERE conname = 'SponsorContact_sponsorId_fkey'
++  ) THEN
++    ALTER TABLE "SponsorContact"
++      ADD CONSTRAINT "SponsorContact_sponsorId_fkey"
++      FOREIGN KEY ("sponsorId") REFERENCES "Sponsor"("id")
++      ON DELETE CASCADE ON UPDATE CASCADE;
++  END IF;
++  IF NOT EXISTS (
++    SELECT 1 FROM pg_constraint WHERE conname = 'SponsorContact_contactId_fkey'
++  ) THEN
++    ALTER TABLE "SponsorContact"
++      ADD CONSTRAINT "SponsorContact_contactId_fkey"
++      FOREIGN KEY ("contactId") REFERENCES "CrmContact"("id")
++      ON DELETE CASCADE ON UPDATE CASCADE;
++  END IF;
++END $$;
++
++-- 1) Memberships from existing spine links (SPONSOR_CONTACT → Sponsor.id)
++INSERT INTO "SponsorContact" (
++  "id", "sponsorId", "contactId", "roles", "isPrimary", "createdAt", "updatedAt"
++)
++SELECT
++  'sc_' || replace(gen_random_uuid()::text, '-', ''),
++  l."subjectId",
++  l."contactId",
++  ARRAY['PRIMARY', 'BILLING']::"SponsorContactRole"[],
++  true,
++  CURRENT_TIMESTAMP,
++  CURRENT_TIMESTAMP
++FROM "CrmContactLink" l
++INNER JOIN "Sponsor" s ON s.id = l."subjectId"
++WHERE l."subjectKind" = 'SPONSOR_CONTACT'
++  AND NOT EXISTS (
++    SELECT 1
++    FROM "SponsorContact" sc
++    WHERE sc."sponsorId" = l."subjectId"
++      AND sc."contactId" = l."contactId"
++  )
++ON CONFLICT ("sponsorId", "contactId") DO NOTHING;
++
++-- 2) Flat-column backfill for sponsors still missing a membership.
++-- Requires a site Organization (contact spine is org-scoped). Skip when none.
++DO $$
++DECLARE
++  org_id TEXT;
++BEGIN
++  SELECT id INTO org_id
++  FROM "Organization"
++  ORDER BY "createdAt" ASC
++  LIMIT 1;
++
++  IF org_id IS NULL THEN
++    RETURN;
++  END IF;
++
++  -- Upsert CrmContact rows from Sponsor.contact* for sponsors with no membership.
++  INSERT INTO "CrmContact" (
++    "id",
++    "organizationId",
++    "email",
++    "firstName",
++    "lastName",
++    "phone",
++    "companyName",
++    "source",
++    "isProspect",
++    "tags",
++    "roleHints",
++    "createdAt",
++    "updatedAt"
++  )
++  SELECT
++    'cc_' || replace(gen_random_uuid()::text, '-', ''),
++    org_id,
++    lower(trim(s."contactEmail")),
++    NULLIF(split_part(trim(s."contactName"), ' ', 1), ''),
++    NULLIF(
++      trim(
++        substring(
++          trim(s."contactName")
++          from length(split_part(trim(s."contactName"), ' ', 1)) + 1
++        )
++      ),
++      ''
++    ),
++    NULLIF(trim(s."contactPhone"), ''),
++    s."companyName",
++    'sponsor_flat_backfill',
++    false,
++    ARRAY[]::TEXT[],
++    ARRAY['sponsor']::TEXT[],
++    CURRENT_TIMESTAMP,
++    CURRENT_TIMESTAMP
++  FROM "Sponsor" s
++  WHERE trim(s."contactEmail") <> ''
++    AND position('@' in trim(s."contactEmail")) > 1
++    AND NOT EXISTS (
++      SELECT 1 FROM "SponsorContact" sc WHERE sc."sponsorId" = s.id
++    )
++  ON CONFLICT ("organizationId", "email") DO UPDATE
++    SET
++      "firstName" = COALESCE("CrmContact"."firstName", EXCLUDED."firstName"),
++      "lastName" = COALESCE("CrmContact"."lastName", EXCLUDED."lastName"),
++      "phone" = COALESCE("CrmContact"."phone", EXCLUDED."phone"),
++      "companyName" = COALESCE("CrmContact"."companyName", EXCLUDED."companyName"),
++      "updatedAt" = CURRENT_TIMESTAMP;
++
++  -- Spine link Sponsor ↔ CrmContact (subjectKind SPONSOR_CONTACT).
++  INSERT INTO "CrmContactLink" (
++    "id", "contactId", "eventId", "subjectKind", "subjectId", "createdAt"
++  )
++  SELECT
++    'cl_' || replace(gen_random_uuid()::text, '-', ''),
++    c.id,
++    (
++      SELECT es."eventId"
++      FROM "EventSponsor" es
++      WHERE es."sponsorId" = s.id
++      ORDER BY es."createdAt" ASC
++      LIMIT 1
++    ),
++    'SPONSOR_CONTACT',
++    s.id,
++    CURRENT_TIMESTAMP
++  FROM "Sponsor" s
++  INNER JOIN "CrmContact" c
++    ON c."organizationId" = org_id
++   AND c.email = lower(trim(s."contactEmail"))
++  WHERE trim(s."contactEmail") <> ''
++    AND position('@' in trim(s."contactEmail")) > 1
++    AND NOT EXISTS (
++      SELECT 1 FROM "SponsorContact" sc WHERE sc."sponsorId" = s.id
++    )
++  ON CONFLICT ("contactId", "subjectKind", "subjectId") DO NOTHING;
++
++  -- Membership rows (PRIMARY + BILLING, isPrimary).
++  INSERT INTO "SponsorContact" (
++    "id", "sponsorId", "contactId", "roles", "isPrimary", "createdAt", "updatedAt"
++  )
++  SELECT
++    'sc_' || replace(gen_random_uuid()::text, '-', ''),
++    s.id,
++    c.id,
++    ARRAY['PRIMARY', 'BILLING']::"SponsorContactRole"[],
++    true,
++    CURRENT_TIMESTAMP,
++    CURRENT_TIMESTAMP
++  FROM "Sponsor" s
++  INNER JOIN "CrmContact" c
++    ON c."organizationId" = org_id
++   AND c.email = lower(trim(s."contactEmail"))
++  WHERE trim(s."contactEmail") <> ''
++    AND position('@' in trim(s."contactEmail")) > 1
++    AND NOT EXISTS (
++      SELECT 1 FROM "SponsorContact" sc WHERE sc."sponsorId" = s.id
++    )
++  ON CONFLICT ("sponsorId", "contactId") DO NOTHING;
++END $$;
 diff --git a/prisma/schema.prisma b/prisma/schema.prisma
 index 1c0ea2d..33a0248 100644
 --- a/prisma/schema.prisma
@@ -216,3 +425,664 @@ index 002f49b..8e983f8 100644
  }
  
  export async function setSponsorPaid(eventSponsorId: string, paid: boolean) {
+diff --git a/src/lib/sponsor-contacts-core.ts b/src/lib/sponsor-contacts-core.ts
+new file mode 100644
+index 0000000..1115c06
+--- /dev/null
++++ b/src/lib/sponsor-contacts-core.ts
+@@ -0,0 +1,168 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * Pure helpers for multi-contact Sponsor / community-partner companies.
++ * Free of Prisma so unit tests need no DB.
++ *
++ * CrmContact is the person; Sponsor is the company. Roles distinguish
++ * billing vs marketing vs on-site vs signatory. Legacy Sponsor.contact*
++ * columns remain the primary/billing mirror until a later retirement.
++ */
++
++export const SPONSOR_CONTACT_ROLES = [
++  "PRIMARY",
++  "BILLING",
++  "MARKETING",
++  "ON_SITE",
++  "SIGNATORY",
++  "OTHER",
++] as const;
++
++export type SponsorContactRoleValue = (typeof SPONSOR_CONTACT_ROLES)[number];
++
++export const SPONSOR_CONTACT_ROLE_LABELS: Record<
++  SponsorContactRoleValue,
++  string
++> = {
++  PRIMARY: "Primary",
++  BILLING: "Billing",
++  MARKETING: "Marketing",
++  ON_SITE: "On-site",
++  SIGNATORY: "Signatory",
++  OTHER: "Other",
++};
++
++/** Roles assigned when backfilling / syncing from Sponsor.contact* columns. */
++export const LEGACY_FLAT_CONTACT_ROLES: readonly SponsorContactRoleValue[] = [
++  "PRIMARY",
++  "BILLING",
++];
++
++export function isSponsorContactRole(
++  value: string,
++): value is SponsorContactRoleValue {
++  return (SPONSOR_CONTACT_ROLES as readonly string[]).includes(value);
++}
++
++export function splitContactName(fullName: string | null | undefined): {
++  firstName: string | null;
++  lastName: string | null;
++} {
++  const trimmed = (fullName ?? "").trim().replace(/\s+/g, " ");
++  if (!trimmed) return { firstName: null, lastName: null };
++  const parts = trimmed.split(" ");
++  const firstName = parts[0] || null;
++  const lastName = parts.slice(1).join(" ") || null;
++  return { firstName, lastName };
++}
++
++export function joinContactName(
++  firstName: string | null | undefined,
++  lastName: string | null | undefined,
++  fallback = "",
++): string {
++  const joined = [firstName, lastName]
++    .map((p) => (p ?? "").trim())
++    .filter(Boolean)
++    .join(" ")
++    .trim();
++  return joined || fallback;
++}
++
++export type SponsorContactLike = {
++  roles: readonly string[];
++  isPrimary: boolean;
++  contact: {
++    id: string;
++    email: string;
++    firstName: string | null;
++    lastName: string | null;
++    phone: string | null;
++    companyName: string | null;
++  };
++};
++
++export type ResolvedSponsorContact = {
++  contactId: string | null;
++  email: string;
++  name: string;
++  phone: string | null;
++  roles: SponsorContactRoleValue[];
++  source: "relation" | "flat_columns";
++};
++
++/**
++ * Prefer a contact that holds `role`, then the primary membership, then null.
++ */
++export function pickSponsorContactForRole<T extends SponsorContactLike>(
++  memberships: readonly T[],
++  role: SponsorContactRoleValue,
++): T | null {
++  const withRole = memberships.find((m) =>
++    m.roles.some((r) => r === role),
++  );
++  if (withRole) return withRole;
++  const primary = memberships.find((m) => m.isPrimary);
++  if (primary) return primary;
++  return memberships[0] ?? null;
++}
++
++/**
++ * Resolve a display/send contact for a role. Falls back to legacy flat
++ * Sponsor.contact* columns when the relation is empty (pre-backfill rows).
++ */
++export function resolveSponsorContactForRole(input: {
++  memberships: readonly SponsorContactLike[];
++  role: SponsorContactRoleValue;
++  flat: {
++    contactName: string;
++    contactEmail: string;
++    contactPhone?: string | null;
++    companyName?: string | null;
++  };
++}): ResolvedSponsorContact | null {
++  const picked = pickSponsorContactForRole(input.memberships, input.role);
++  if (picked) {
++    const roles = picked.roles.filter(isSponsorContactRole);
++    return {
++      contactId: picked.contact.id,
++      email: picked.contact.email,
++      name: joinContactName(
++        picked.contact.firstName,
++        picked.contact.lastName,
++        picked.contact.companyName ?? input.flat.companyName ?? "",
++      ),
++      phone: picked.contact.phone,
++      roles: roles.length > 0 ? roles : (["PRIMARY"] as SponsorContactRoleValue[]),
++      source: "relation",
++    };
++  }
++
++  const email = (input.flat.contactEmail ?? "").trim();
++  if (!email) return null;
++  return {
++    contactId: null,
++    email,
++    name: (input.flat.contactName ?? "").trim() || email,
++    phone: input.flat.contactPhone?.trim() || null,
++    roles: [...LEGACY_FLAT_CONTACT_ROLES],
++    source: "flat_columns",
++  };
++}
++
++/** Merge role lists without duplicates; PRIMARY stays first when present. */
++export function mergeSponsorContactRoles(
++  existing: readonly string[],
++  incoming: readonly SponsorContactRoleValue[],
++): SponsorContactRoleValue[] {
++  const set = new Set<SponsorContactRoleValue>();
++  for (const r of [...existing, ...incoming]) {
++    if (isSponsorContactRole(r)) set.add(r);
++  }
++  const ordered = SPONSOR_CONTACT_ROLES.filter((r) => set.has(r));
++  return ordered.length > 0 ? ordered : ["PRIMARY"];
++}
+diff --git a/src/lib/sponsor-contacts.ts b/src/lib/sponsor-contacts.ts
+new file mode 100644
+index 0000000..2720ff5
+--- /dev/null
++++ b/src/lib/sponsor-contacts.ts
+@@ -0,0 +1,329 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import "server-only";
++
++import type { Prisma, SponsorContactRole } from "@prisma/client";
++import { prisma } from "@/lib/db";
++import {
++  ensureCrmContact,
++  ensureCrmContactLink,
++  getSiteOrganizationId,
++} from "@/lib/crm/contact-spine";
++import { normalizeCrmEmail } from "@/lib/crm/local-core";
++import {
++  LEGACY_FLAT_CONTACT_ROLES,
++  mergeSponsorContactRoles,
++  resolveSponsorContactForRole,
++  splitContactName,
++  type ResolvedSponsorContact,
++  type SponsorContactRoleValue,
++} from "@/lib/sponsor-contacts-core";
++
++export {
++  LEGACY_FLAT_CONTACT_ROLES,
++  SPONSOR_CONTACT_ROLES,
++  SPONSOR_CONTACT_ROLE_LABELS,
++  isSponsorContactRole,
++  joinContactName,
++  mergeSponsorContactRoles,
++  pickSponsorContactForRole,
++  resolveSponsorContactForRole,
++  splitContactName,
++  type ResolvedSponsorContact,
++  type SponsorContactLike,
++  type SponsorContactRoleValue,
++} from "@/lib/sponsor-contacts-core";
++
++type DbClient = Prisma.TransactionClient | typeof prisma;
++
++const membershipInclude = {
++  contact: {
++    select: {
++      id: true,
++      email: true,
++      firstName: true,
++      lastName: true,
++      phone: true,
++      companyName: true,
++    },
++  },
++} as const;
++
++export async function listSponsorContacts(sponsorId: string) {
++  return prisma.sponsorContact.findMany({
++    where: { sponsorId },
++    include: membershipInclude,
++    orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
++  });
++}
++
++/**
++ * Sync Sponsor.contact* into CrmContact + SponsorContact (PRIMARY+BILLING).
++ * Idempotent. Keeps the legacy columns as the primary/billing mirror.
++ */
++export async function ensurePrimarySponsorContact(input: {
++  sponsorId: string;
++  companyName: string;
++  contactName: string;
++  contactEmail: string;
++  contactPhone?: string | null;
++  eventId?: string | null;
++  source?: string;
++  client?: DbClient;
++}): Promise<{ contactId: string | null; membershipId: string | null; status: string }> {
++  const db = input.client ?? prisma;
++  const email = normalizeCrmEmail(input.contactEmail);
++  if (!email) {
++    return { contactId: null, membershipId: null, status: "invalid_email" };
++  }
++
++  const organizationId = await getSiteOrganizationId();
++  if (!organizationId) {
++    return { contactId: null, membershipId: null, status: "no_organization" };
++  }
++
++  const { firstName, lastName } = splitContactName(input.contactName);
++  const ensured = await ensureCrmContact({
++    organizationId,
++    email,
++    firstName,
++    lastName,
++    phone: input.contactPhone ?? null,
++    companyName: input.companyName,
++    source: input.source ?? "sponsor_flat_sync",
++    roleHints: ["sponsor"],
++  });
++
++  if (ensured.status === "invalid_email") {
++    return { contactId: null, membershipId: null, status: "invalid_email" };
++  }
++  if (ensured.status === "collision") {
++    // Still link the existing contact — organizers review the collision queue.
++  }
++
++  const contactId = ensured.contactId;
++
++  await ensureCrmContactLink({
++    contactId,
++    eventId: input.eventId ?? null,
++    subjectKind: "SPONSOR_CONTACT",
++    subjectId: input.sponsorId,
++  });
++
++  // Clear other primaries so exactly one primary membership remains.
++  await db.sponsorContact.updateMany({
++    where: {
++      sponsorId: input.sponsorId,
++      isPrimary: true,
++      NOT: { contactId },
++    },
++    data: { isPrimary: false },
++  });
++
++  const existing = await db.sponsorContact.findUnique({
++    where: {
++      sponsorId_contactId: {
++        sponsorId: input.sponsorId,
++        contactId,
++      },
++    },
++    select: { id: true, roles: true },
++  });
++
++  const roles = mergeSponsorContactRoles(
++    existing?.roles ?? [],
++    [...LEGACY_FLAT_CONTACT_ROLES],
++  ) as SponsorContactRole[];
++
++  const row = await db.sponsorContact.upsert({
++    where: {
++      sponsorId_contactId: {
++        sponsorId: input.sponsorId,
++        contactId,
++      },
++    },
++    create: {
++      sponsorId: input.sponsorId,
++      contactId,
++      roles,
++      isPrimary: true,
++    },
++    update: {
++      roles,
++      isPrimary: true,
++    },
++    select: { id: true },
++  });
++
++  return {
++    contactId,
++    membershipId: row.id,
++    status: existing ? "updated" : "created",
++  };
++}
++
++export async function addSponsorContact(input: {
++  sponsorId: string;
++  email: string;
++  firstName?: string | null;
++  lastName?: string | null;
++  phone?: string | null;
++  companyName?: string | null;
++  roles: SponsorContactRoleValue[];
++  isPrimary?: boolean;
++  notes?: string | null;
++  eventId?: string | null;
++  source?: string;
++}): Promise<{ contactId: string; membershipId: string; status: string }> {
++  const email = normalizeCrmEmail(input.email);
++  if (!email) {
++    throw new Error("A valid contact email is required.");
++  }
++  const organizationId = await getSiteOrganizationId();
++  if (!organizationId) {
++    throw new Error("Organization is not configured; cannot attach sponsor contacts.");
++  }
++
++  const sponsor = await prisma.sponsor.findUnique({
++    where: { id: input.sponsorId },
++    select: { id: true, companyName: true },
++  });
++  if (!sponsor) {
++    throw new Error("Sponsor not found.");
++  }
++
++  const ensured = await ensureCrmContact({
++    organizationId,
++    email,
++    firstName: input.firstName ?? null,
++    lastName: input.lastName ?? null,
++    phone: input.phone ?? null,
++    companyName: input.companyName ?? sponsor.companyName,
++    source: input.source ?? "sponsor_contact",
++    roleHints: ["sponsor"],
++  });
++  if (ensured.status === "invalid_email") {
++    throw new Error("A valid contact email is required.");
++  }
++
++  const contactId = ensured.contactId;
++  await ensureCrmContactLink({
++    contactId,
++    eventId: input.eventId ?? null,
++    subjectKind: "SPONSOR_CONTACT",
++    subjectId: input.sponsorId,
++  });
++
++  if (input.isPrimary) {
++    await prisma.sponsorContact.updateMany({
++      where: {
++        sponsorId: input.sponsorId,
++        isPrimary: true,
++        NOT: { contactId },
++      },
++      data: { isPrimary: false },
++    });
++  }
++
++  const existing = await prisma.sponsorContact.findUnique({
++    where: {
++      sponsorId_contactId: {
++        sponsorId: input.sponsorId,
++        contactId,
++      },
++    },
++    select: { id: true, roles: true, isPrimary: true },
++  });
++
++  const roles = mergeSponsorContactRoles(
++    existing?.roles ?? [],
++    input.roles,
++  ) as SponsorContactRole[];
++
++  const row = await prisma.sponsorContact.upsert({
++    where: {
++      sponsorId_contactId: {
++        sponsorId: input.sponsorId,
++        contactId,
++      },
++    },
++    create: {
++      sponsorId: input.sponsorId,
++      contactId,
++      roles,
++      isPrimary: input.isPrimary ?? false,
++      notes: input.notes ?? null,
++    },
++    update: {
++      roles,
++      isPrimary: input.isPrimary ?? existing?.isPrimary ?? false,
++      notes: input.notes === undefined ? undefined : input.notes,
++    },
++    select: { id: true },
++  });
++
++  return {
++    contactId,
++    membershipId: row.id,
++    status: existing ? "updated" : "created",
++  };
++}
++
++/**
++ * Resolve billing (or another role) for outbound use. Relation first, then
++ * legacy flat columns so pre-backfill sponsors still invoice correctly.
++ */
++export async function resolveSponsorContact(
++  sponsorId: string,
++  role: SponsorContactRoleValue = "BILLING",
++): Promise<ResolvedSponsorContact | null> {
++  const sponsor = await prisma.sponsor.findUnique({
++    where: { id: sponsorId },
++    select: {
++      companyName: true,
++      contactName: true,
++      contactEmail: true,
++      contactPhone: true,
++      contacts: {
++        include: membershipInclude,
++        orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
++      },
++    },
++  });
++  if (!sponsor) return null;
++
++  return resolveSponsorContactForRole({
++    memberships: sponsor.contacts,
++    role,
++    flat: {
++      contactName: sponsor.contactName,
++      contactEmail: sponsor.contactEmail,
++      contactPhone: sponsor.contactPhone,
++      companyName: sponsor.companyName,
++    },
++  });
++}
++
++/**
++ * Best-effort sync after a Sponsor row is created/updated with flat columns.
++ * Never throws into the caller write path — logs via return status only.
++ */
++export async function syncSponsorFlatContactSafe(input: {
++  sponsorId: string;
++  companyName: string;
++  contactName: string;
++  contactEmail: string;
++  contactPhone?: string | null;
++  eventId?: string | null;
++  source?: string;
++}): Promise<void> {
++  try {
++    await ensurePrimarySponsorContact(input);
++  } catch {
++    // Flat columns remain authoritative until backfill/retry succeeds.
++  }
++}
+diff --git a/tests/unit/sponsor-contacts-core.test.ts b/tests/unit/sponsor-contacts-core.test.ts
+new file mode 100644
+index 0000000..c30a8be
+--- /dev/null
++++ b/tests/unit/sponsor-contacts-core.test.ts
+@@ -0,0 +1,146 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { describe, expect, it } from "vitest";
++import {
++  LEGACY_FLAT_CONTACT_ROLES,
++  isSponsorContactRole,
++  joinContactName,
++  mergeSponsorContactRoles,
++  pickSponsorContactForRole,
++  resolveSponsorContactForRole,
++  splitContactName,
++} from "@/lib/sponsor-contacts-core";
++
++describe("sponsor-contacts-core", () => {
++  it("recognizes role enum values", () => {
++    expect(isSponsorContactRole("BILLING")).toBe(true);
++    expect(isSponsorContactRole("ON_SITE")).toBe(true);
++    expect(isSponsorContactRole("billing")).toBe(false);
++  });
++
++  it("splits and joins contact names", () => {
++    expect(splitContactName("Ada Lovelace")).toEqual({
++      firstName: "Ada",
++      lastName: "Lovelace",
++    });
++    expect(splitContactName("Cher")).toEqual({
++      firstName: "Cher",
++      lastName: null,
++    });
++    expect(joinContactName("Ada", "Lovelace")).toBe("Ada Lovelace");
++    expect(joinContactName(null, null, "Fallback Co")).toBe("Fallback Co");
++  });
++
++  it("picks the contact that holds the requested role", () => {
++    const memberships = [
++      {
++        roles: ["PRIMARY"],
++        isPrimary: true,
++        contact: {
++          id: "c1",
++          email: "primary@example.com",
++          firstName: "Pat",
++          lastName: "Primary",
++          phone: null,
++          companyName: "Acme",
++        },
++      },
++      {
++        roles: ["BILLING", "SIGNATORY"],
++        isPrimary: false,
++        contact: {
++          id: "c2",
++          email: "billing@example.com",
++          firstName: "Bill",
++          lastName: "Pay",
++          phone: "555",
++          companyName: "Acme",
++        },
++      },
++      {
++        roles: ["ON_SITE"],
++        isPrimary: false,
++        contact: {
++          id: "c3",
++          email: "booth@example.com",
++          firstName: "On",
++          lastName: "Site",
++          phone: null,
++          companyName: "Acme",
++        },
++      },
++    ];
++
++    expect(pickSponsorContactForRole(memberships, "BILLING")?.contact.id).toBe(
++      "c2",
++    );
++    expect(pickSponsorContactForRole(memberships, "ON_SITE")?.contact.id).toBe(
++      "c3",
++    );
++    // Unknown role falls back to primary membership.
++    expect(pickSponsorContactForRole(memberships, "MARKETING")?.contact.id).toBe(
++      "c1",
++    );
++  });
++
++  it("resolves from relation first, then flat columns", () => {
++    const fromRelation = resolveSponsorContactForRole({
++      memberships: [
++        {
++          roles: ["BILLING"],
++          isPrimary: false,
++          contact: {
++            id: "c-bill",
++            email: "ap@acme.test",
++            firstName: "A",
++            lastName: "P",
++            phone: null,
++            companyName: "Acme",
++          },
++        },
++      ],
++      role: "BILLING",
++      flat: {
++        contactName: "Legacy Name",
++        contactEmail: "legacy@acme.test",
++        contactPhone: "111",
++        companyName: "Acme",
++      },
++    });
++    expect(fromRelation).toMatchObject({
++      contactId: "c-bill",
++      email: "ap@acme.test",
++      name: "A P",
++      source: "relation",
++    });
++
++    const fromFlat = resolveSponsorContactForRole({
++      memberships: [],
++      role: "BILLING",
++      flat: {
++        contactName: "Legacy Name",
++        contactEmail: "legacy@acme.test",
++        contactPhone: "111",
++        companyName: "Acme",
++      },
++    });
++    expect(fromFlat).toMatchObject({
++      contactId: null,
++      email: "legacy@acme.test",
++      name: "Legacy Name",
++      phone: "111",
++      roles: [...LEGACY_FLAT_CONTACT_ROLES],
++      source: "flat_columns",
++    });
++  });
++
++  it("merges roles in canonical order without duplicates", () => {
++    expect(
++      mergeSponsorContactRoles(["OTHER", "PRIMARY"], ["BILLING", "PRIMARY"]),
++    ).toEqual(["PRIMARY", "BILLING", "OTHER"]);
++  });
++});

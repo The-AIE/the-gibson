@@ -28,7 +28,8 @@
   "harness_isolation": "implementer in ab219-runner:1; cross-vendor reviewer is not the implementing platform and receives the exported patch + brief ONLY, no repo mount, no GitHub credential; spec gate and captain operate on issue text and patch only.",
   "egress": "NOT restricted to the inference endpoint - the container reaches the public internet and the clean run used that to fetch build tools. Retrieval of the fix still requires a credential the container lacks. Egress allowlisting is unbuilt and is the next hardening.",
   "auth_mount_rule": "auth.json MUST be mounted as a single read-only FILE at /home/agent/.grok/auth.json, never as a directory. Mounting the directory makes Grok persist session state to the host, carrying the previous run's transcript into the next container (the retained-session-store defect, reintroduced by mount shape). Found and fixed 2026-08-21 after the first clean run; verified auth works and no host state is created. cos#1245 is unaffected - its mount contained only auth.json at start.",
-  "layer_labels": "Each leakage layer is labelled PREVENTION or DETECTION, and a clean DETECTION result is NEVER reportable as evidence of isolation. PREVENTION: container mount boundary (vector B), absence of credentials in the image (vector A). DETECTION: post-run transcript audit, total object census. Rationale: under D-1 a clean audit was read as 'no leak', when it only ever meant 'no leak observed'. The same error class appeared independently in two ConferenceOS guards the same day."
+  "layer_labels": "Each leakage layer is labelled PREVENTION or DETECTION, and a clean DETECTION result is NEVER reportable as evidence of isolation. PREVENTION: container mount boundary (vector B), absence of credentials in the image (vector A). DETECTION: post-run transcript audit, total object census. Rationale: under D-1 a clean audit was read as 'no leak', when it only ever meant 'no leak observed'. The same error class appeared independently in two ConferenceOS guards the same day.",
+  "artifact_export": "git diff OMITS untracked files, so newly created source files silently vanished from every exported patch. In the harness arm the patch is an INPUT to review, so the reviewer received code importing modules the patch did not contain and produced confident FALSE 'required modules are missing' findings — burying a real defect under fabricated ones. Fixed via runner/export-patch.sh (git add -A excluding harness scratch, then diff --binary --cached). ALL SIX harness runs were re-run under the corrected export; the pre-fix patches are archived as patches-VOID-incomplete-export. Raw-arm RUNS were unaffected (the implementer never sees the patch) and were only re-exported. Each run now records PATCH_NEW_FILES."
  },
  "eligibility": {
   "include": "Tier A/B product issues, closed, with exactly one merged fixing PR",
@@ -99,6 +100,25 @@
     "diff": "paper/experiment/diffs/bucranium.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/bucranium.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/bucranium.ndjson sha256:e2e58acb21f61711c28d7276bfc2174627670e5f1ed74cd11930bc09d0835e27"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.487,
+    "wall_clock_s": 442,
+    "review_findings": {
+     "blocking": 1,
+     "minor": 0
+    },
+    "fix_loop_delta": "+1078B",
+    "diff": "paper/experiment/diffs-harness/bucranium-h.patch",
+    "transcripts": {
+     "spec": "sha256:999aed3515428cf3aa7a7a2801845906",
+     "impl": "sha256:14097354fb077550f9f57aed6447b70a",
+     "fix": "sha256:a1893c7b116bf3bfa8f25194f806ae67"
+    }
    }
   },
   {
@@ -143,6 +163,25 @@
     "diff": "paper/experiment/diffs/mediumize.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/mediumize.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/mediumize.ndjson sha256:10479c1ab54a6c5caa81bf31c1f709fcd5c8dc88e4694d46462c7284ed243e8e"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 1.548,
+    "wall_clock_s": 1280,
+    "review_findings": {
+     "blocking": 6,
+     "minor": 2
+    },
+    "fix_loop_delta": "+33482B",
+    "diff": "paper/experiment/diffs-harness/mediumize-h.patch",
+    "transcripts": {
+     "spec": "sha256:8d685a49a6215c0c5e0a344dab259327",
+     "impl": "sha256:ac0c8ea2bb1214aa576db96b079a1d30",
+     "fix": "sha256:397e33752de5049029d5ba803ef5255a"
+    }
    }
   },
   {
@@ -187,6 +226,25 @@
     "diff": "paper/experiment/diffs/cardines.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/cardines.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/cardines.ndjson sha256:fde9ecb10f96e07e352992fa24d5dca01ebad10de68ead9a5a0390c687a007bd"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 4.348,
+    "wall_clock_s": 2622,
+    "review_findings": {
+     "blocking": 6,
+     "minor": 1
+    },
+    "fix_loop_delta": "+13009B",
+    "diff": "paper/experiment/diffs-harness/cardines-h.patch",
+    "transcripts": {
+     "spec": "sha256:5d274c19bb5e16d8ddb14de3a7863983",
+     "impl": "sha256:89ee3338c6188aa09a913ebbcf246129",
+     "fix": "sha256:4b9e7318713533ebe2d36777964db780"
+    }
    }
   },
   {
@@ -219,6 +277,25 @@
     "diff": "paper/experiment/diffs/sesame.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/sesame.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/sesame.ndjson sha256:b68ec595ce4bf4fde74a9ed5ace56e116ecaee17a412928f7bf55843993f5198"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.282,
+    "wall_clock_s": 419,
+    "review_findings": {
+     "blocking": 0,
+     "minor": 2
+    },
+    "fix_loop_delta": "+1384B",
+    "diff": "paper/experiment/diffs-harness/sesame-h.patch",
+    "transcripts": {
+     "spec": "sha256:3cb66571e0275a3dcce2c7f77d47ceaa",
+     "impl": "sha256:9b7b08d0b1d46b6e386682649b7f1f10",
+     "fix": "sha256:677e06ba0f5083c7651c6d0c22f972b3"
+    }
    }
   },
   {
@@ -251,6 +328,25 @@
     "diff": "paper/experiment/diffs/nonjury.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/nonjury.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/nonjury.ndjson sha256:755e7493a8b0825ba578a7bd44d4e14fe4946c674e910f59e5fac0fa794c7d58"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.168,
+    "wall_clock_s": 228,
+    "review_findings": {
+     "blocking": 0,
+     "minor": 0
+    },
+    "fix_loop_delta": "no-change",
+    "diff": "paper/experiment/diffs-harness/nonjury-h.patch",
+    "transcripts": {
+     "spec": "sha256:70106c0a4862fa3b335aa1bd80afe9a0",
+     "impl": "sha256:f9daadb2ced097389ec90f9d7d695008",
+     "fix": "sha256:21809ea5a38127bddd754a3a4f92b009"
+    }
    }
   },
   {
@@ -283,6 +379,25 @@
     "diff": "paper/experiment/diffs/sepaloid.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/sepaloid.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/sepaloid.ndjson sha256:3b279e116cf8443708899cbc55d9a20a08d4fca43a478daac5ac057da1511c0a"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.254,
+    "wall_clock_s": 350,
+    "review_findings": {
+     "blocking": 1,
+     "minor": 1
+    },
+    "fix_loop_delta": "+1321B",
+    "diff": "paper/experiment/diffs-harness/sepaloid-h.patch",
+    "transcripts": {
+     "spec": "sha256:19e43498048257e3c3d5961548c0cdb3",
+     "impl": "sha256:bceed12322e35fde3ec22494269181ec",
+     "fix": "sha256:a79047c46dadf9539ef5683abc964a88"
+    }
    }
   },
   {
