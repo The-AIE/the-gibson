@@ -1,0 +1,93 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): /work
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# #875 Phase 1.1: contact-spine hardening — live registration gap, collision persistence, write concurrency
+
+## Context
+
+Epic #875's Phase 1 (contact spine) is already shipped — issue #876, PR #882, merged 2026-07-28. This is **not** Phase 1 work. It's a hardening/gap-closure follow-up produced by an adversarial multi-pass review (3 independent implementation plans, cross-examined by 9 skeptical passes across data-loss/collision-safety/rollback-safety lenses, all findings verified against live code) that found the shipped code has real gaps between what #875 asked for and what actually landed — including one that's live in production today.
+
+Full source doc (29K chars, complete schema/algorithm/sequencing spec) available on request; this issue carries the actionable summary and the decisions needed to dispatch it.
+
+## The headline finding
+
+**The two real registration flows — public single-attendee and group/bulk — never call the CRM contact-spine linking function at all.** Only an unused v1 API route does (verified: zero references to `crm`/`Crm`/`contact-spine` in `register/actions.ts`, `register/group/actions.ts`, or `inventory-core.ts`, the shared DB-write helper both flows use). Most real registrations don't enter the CRM until someone manually re-runs the offline backfill script.
+
+Where the spine *is* wired in (the v1 route), a name collision on a shared email still silently links two different humans' registration history under one contact with **zero trace anywhere** — no log, no DB row. Root cause: `ensureCrmContact` does unguarded check-then-create (`findUnique` → `create`, no transaction/upsert/P2002 handling) — a real race condition that can throw unhandled errors on concurrent registrations, and in the backfill script aborts the entire run mid-batch, discarding every collision found before the crash.
+
+## Decisions (confirmed 2026-08-11)
+
+1. **Blank-name collision default:** flag for review (not pass-through).
+2. **Sponsor multi-year linking:** "most recent sponsorship wins" — no schema change, no `subjectId` semantic change, no one-time data migration required for already-backfilled rows. (Reverses the doc's recommendation of per-year links; simpler, no migration risk.)
+3. **Consent-gate send paths:** verified — `isOutreachOnlyProspectEmail` (`contact-spine.ts`) has zero callers anywhere in the codebase. The three actual recipient-list builders (`broadcast-recipients.ts`, `attendee-messages.ts`, `cfp-comms.ts`) query `Registration`/`EventSponsor`/`VolunteerSignup` directly — imported CRM prospects never appear in their audience queries today because there is no send path that targets `CrmContact` prospects at all yet. **This step is deferred, not built** — there's nothing to wire the gate into until a prospect-outreach send feature exists (Phase 2+ support-desk territory). Leave `isOutreachOnlyProspectEmail` in place with its doc comment as the hard requirement for whoever builds that feature.
+4. **Manual merge/split UI:** explicitly deferred, not in this issue's scope. `CrmContactCollision` rows stay accept/reject only; no way to represent "two different people share this email" ships here.
+5. **Public registration path wiring:** bundled into this issue (not split out) — consent-gating is moot without it, and the collision-safety fixes need it in scope to be tested end-to-end.
+6. Filed as this issue + dispatching to the fleet now (not one or the other).
+
+## Scope for this issue (revised per decisions above — 4 and 3 are cut from the original synthesis)
+
+### Schema (additive only, Migration 1)
+`CrmContactCollision` table: full incoming-payload snapshot (not just names — the CSV-import collision path writes nothing to `CrmContact`/`CrmContactLink` today, so this table is the only place that data survives), `@@unique([organizationId, sourceFingerprint])` to prevent duplicate rows on re-run.
+
+### Code, in dependency order (each step its own PR — schema failure and app-logic failure must never be the same incident to debug)
+
+**Step A — concurrency fix (ship before anything else touches `contact-spine.ts`):** `ensureCrmContact` → atomic `prisma.crmContact.upsert()` keyed on `(organizationId, email)`. Fold the tags/roleHints array-merge into the same upsert's `update` clause (closes a secondary lost-update bug — concurrent enrichers currently silently clobber each other's array additions). Per-row error isolation in the backfill script and CSV import loop (one bad row must not abort the whole batch and discard already-buffered collisions).
+
+**Step B — PARTNER self-link event-scoping fix:** `subjectId = \`${contactId}:${eventId}\`` instead of `subjectId = contactId` for PARTNER self-links (code-only, no schema change) — closes a real hole where importing the same prospect into a second event silently no-ops, and deleting either event cascades away data the other event was quietly sharing. **Required first:** one-time audit query for existing PARTNER links where `subjectId = contactId` grouped by `contactId` having `count(distinct eventId) > 1` — these already collapsed across events in production; re-derive from CSV import history if recoverable, otherwise flag into the collision queue.
+
+**Step C — collision persistence at all four call sites (depends on Migration 1 + Step A):** backfill script, CSV import (full payload, write at *apply* time not preview time), registration API route, and the newly-wired public registration paths (Step E). Write-as-detected via `upsert` on `sourceFingerprint`, not buffer-then-discard-on-crash.
+
+**Step D — historical collision audit (depends on Step C):** one-time script scanning `CrmContactLink` rows created since 2026-07-28 for name mismatches against their linked contact, surfacing any already-silently-mismerged production data into the collision table with `source: "historical_audit"`.
+
+**Step E — wire the contact spine into the real public registration paths (depends on Steps A, C):** best-effort, async, never blocking payment/registration — call after the registration transaction commits, never inside it. Group flow needs a suppression rule: registrations sharing one order/transaction id and email but different names are a normal group-purchase shape, not a collision — link them all to one contact for that order without individually flagging each row. Highest review scrutiny of this batch — treat as Tier-C-adjacent despite being code-only, since it's new logic on a payment-adjacent path.
+
+**Step F (independent, can ship anytime):** `sumPipelineForecastCents` PAID-exclusion one-line fix in `local-core.ts`.
+
+**Step G (independent, can ship anytime):** collision-rule dedup — the backfill script's `.mjs` file hand-duplicates `crmNameCollision` instead of importing `local-core.ts`'s copy (can't import a TS module from a bare .mjs script). Either convert the script to run via `tsx`, or add a parity fixture test asserting both copies agree on the same input matrix.
+
+Cut from original synthesis per decisions 2 and 3 above: no pagination-cursor migration bundled here (that was always independent, tracked separately if wanted — not blocking this issue); no consent-gate wiring step (nothing to wire yet).
+
+## Collision-detection algorithm (canonical, applies identically at all four write sites after Step C)
+
+```
+flag = false
+if incoming has NO firstName AND NO lastName at all:
+    if existing.lastName is present:
+        flag = true                          # blank-name case — confirmed: flag it
+elif existing.lastName present AND incoming.lastName present:
+    if existing.lastName != incoming.lastName:
+        flag = true
+    elif existing.firstName present AND incoming.firstName present:
+        if existing.firstName != incoming.firstName:
+            flag = true
+return flag
+```
+Comparison case-insensitive, trimmed. Suppression override (group orders, Step E) applies *before* this predicate runs, not inside it. On flag: link still completes (never blocked) — collision row written immediately.
+
+## Test plan (additions beyond what's already covered by existing suites)
+
+- Concurrency: two simulated concurrent `ensureCrmContact` calls for the same `(orgId, email)` — exactly one row, no unhandled exception.
+- Group suppression: 5-row group order sharing one email, 5 distinct names — zero collision rows, all 5 link to one contact.
+- CSV collision completeness: flagged row's full payload lands in `CrmContactCollision` at apply time; "accept" actually creates the link, not just flips a status.
+- PARTNER link event-scoping: same prospect imported into two events → two distinct links; deleting one event leaves the other's link intact.
+- Collision dedupe: backfill script run twice against unchanged data → one collision row per collision, not one per run.
+- Batch partial-failure isolation: mid-batch CSV failure → rows before the failure stay committed, response reports accurate partial success.
+
+## Sequencing note for whoever dispatches this
+
+Step A must land before B/C/D/E touch the same files. Steps F and G have no dependencies and can run in parallel with everything else. Do not combine steps into one PR — this is deliberate per-step isolation so a schema issue and an app-logic issue are never the same incident to debug.
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in /work:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in /work. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

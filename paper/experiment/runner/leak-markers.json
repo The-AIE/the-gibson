@@ -33,5 +33,10 @@
   "issue": 1220,
   "fixing_pr": 1349,
   "merge": "f96e525937f5f295a7456010d617a37d3d59a203"
+ },
+ "gantline": {
+  "issue": 1313,
+  "fixing_pr": 1350,
+  "merge": "672edf7bec2392a504a0111b641b41a19c66aac5"
  }
 }
