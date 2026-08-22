@@ -1,0 +1,61 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): <WORKDIR>
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# CFP page uses past tense for a CFP that has not opened yet
+
+The public CFP page for ATA 2027 currently reads:
+
+> **CFP Currently Closed**
+> The call for proposals for All Things AI 2027 is not currently open.
+> **CFP closed on February 1, 2027**
+
+Today is 16 August 2026. That close date is **eighteen months in the future**, written in the **past tense**, for a CFP that has never opened.
+
+## The bug is the tense
+
+`Event.cfpOpen` is `false` and `Event.cfpCloseDate` is `2027-02-01`. The page treats "not open" as "has closed" and conjugates accordingly. It should read the date against `now` and choose its tense from that.
+
+### Exact copy
+
+| State | `cfpOpen` | `cfpCloseDate` | Copy |
+|---|---|---|---|
+| Not open yet | `false` | future or null | **"The call for proposals opens in October."** Closing line: *"Want a heads-up when it opens? Join the speaker interest list."* |
+| Open | `true` | future | **"The call for proposals is open. It closes on 1 February 2027."** |
+| Closed | `false` | past | **"The call for proposals closed on 1 February 2027."** |
+
+The heading follows the same rule: **"CFP Opens Soon"** / **"CFP Open"** / **"CFP Closed"** — not "CFP Currently Closed" in all three.
+
+The middle state is the one that does not exist today, and it is the state ATA 2027 is in.
+
+## Why it matters
+
+That page's only job right now is capturing speaker interest before the CFP opens in October, and the "Join the speaker interest list" link below already works. Past tense tells the people we most want to recruit that they have already missed it.
+
+Relevant to #1352: of 87 speakers declined in 2025, three reapplied. Speaker supply is fragile, and this page turns interested people away by default.
+
+## Acceptance criteria
+
+- [ ] Pure helper resolving CFP state from `cfpOpen` + `cfpCloseDate` + `now`, returning heading, body and tense
+- [ ] Unit tests: closed with a **future** close date, closed with a **past** close date, closed with a **null** close date, and open
+- [ ] "Not open yet" leads with the interest list rather than the closure
+- [ ] No past-tense string is reachable while `cfpCloseDate` is in the future
+- [ ] Verified on ATA 2027, which is in exactly this state today
+
+## Found during
+
+Anonymous first-visitor walkthrough while preparing ATA 2027 for testing. Everything else degraded correctly — `/register`, `/scholarships`, `/schedule`, `/speakers` and `/sponsors` all render sensible closed or coming-soon states.
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in <WORKDIR>:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in <WORKDIR>. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

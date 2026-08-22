@@ -1,0 +1,46 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): <WORKDIR>
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Sponsors and community partners need multiple contacts, not one embedded contact
+
+Requested 2026-08-08.
+
+## The constraint today
+
+`Sponsor` embeds exactly **one** contact as flat columns:
+
+```prisma
+companyName   String
+contactName   String
+contactEmail  String
+contactPhone  String?
+```
+
+One sponsor therefore has one contact, by construction. There is no way to record the person who signed, the marketing lead who sends the logo, and the on-site staffer who shows up — which is the normal shape of a real sponsorship.
+
+## Related to #1215
+
+That issue notes the mirror-image problem from the CRM side: `CrmContact.companyName` is **free text, not a relation**, so a contact is not linked to the `Sponsor` record their deal belongs to. Two people from the same sponsor cannot be seen as one account.
+
+Both point at the same fix: a proper **many-contacts-to-one-organization** relation, with `CrmContact` as the person record and `Sponsor` as the company. The embedded columns become the primary/billing contact at most, or migrate into the relation entirely.
+
+## Considerations
+
+- **Roles matter.** Billing, marketing, on-site, signatory — an invoice should go to the billing contact, not whoever was entered first.
+- **Migration is not a drop.** The existing `contactName`/`contactEmail`/`contactPhone` values are real data and must become contact records, not be discarded. The additive path is: add the relation, backfill from the flat columns, and only later consider retiring them — the schema guard blocks non-additive changes without an explicit coordinator exception (#1170) for good reason.
+- Community partners should use the same model rather than a parallel one.
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in <WORKDIR>:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in <WORKDIR>. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

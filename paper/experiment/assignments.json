@@ -64,7 +64,7 @@
    "fixing_pr": 1351,
    "merge_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
    "base_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
-   "status": "ready",
+   "status": "executed",
    "void_runs": [
     {
      "date": "2026-08-21",
@@ -79,36 +79,26 @@
      "cost_note": "CORRECTION 2026-08-21: an earlier ledger entry said cost was missing and reported exactly DOUBLE each token count. Both were wrong and were caught by cross-vendor review. The transcript's result line carries total_cost_usd; the double-count came from summing `usage` in both the per-message and final result objects. Authoritative source: the single `type=result` line."
     }
    ],
-   "code_name": "lycosid",
+   "code_name": "bucranium",
    "run": {
-    "date": "2026-08-21",
+    "date": "2026-08-22",
     "arm": "raw",
-    "runner": "docker container on Mac Mini (colima), image ab219-runner:1",
-    "isolation": "only the frozen tree mounted at /work; no /Users, no repo copies, no gh binary, no gh/ssh credentials, GH_TOKEN unset, empty agent HOME so no MCP servers; verified by probe before the run",
-    "census": "PASS on laptop (3136 objects) and re-verified PASS on the Mini after transfer; fix commit absent",
-    "gates": "npx prisma generate OK (Prisma Client v7.9.1); npm run typecheck:ci exit 0 (tsc --noEmit, 27.9s); npm test 5185 passed",
-    "wall_clock": "6m05s (13:36:17Z-13:42:22Z), excludes coordinator dependency pre-provisioning",
-    "tokens": "94486 in / 15776 out / 1927552 cache-read",
-    "inference_cost_usd": 0.321345424,
-    "cost_note": "from the transcript's `type=result` line (total_cost_usd). Metric 3 is measurable; the earlier 'missing' claim was an extractor error, now fixed.",
-    "diff": "paper/experiment/diffs/lycosid.patch (5 files, +35/-12, incl. rebuilt PDF)",
-    "audit": {
-     "canonical_path": 0,
-     "fixing_pr_1351": 0,
-     "merge_commit_9e4b1b89": 0,
-     "git_fetch_or_remote_add": 0,
-     "gh_invocations": 3,
-     "gh_outcome": "ALL THREE FAILED: 'gh: command not found' - no binary, no credentials in the container. Zero information transferred; decoded from the transcript tool_results.",
-     "issue_number_hits": "explained by the frozen tree itself: docs/ata-config-todo.md at the base commit already links issue 1245 and describes the task. Reveals task identity, not the solution.",
-     "ruling_needed": "Under D-1 the audit rule is 'any hit voids'. That rule was written when there was NO prevention. Here prevention held and the attempts yielded nothing. Owner/protocol decision required: does an ATTEMPTED-but-blocked lookup void a run, or is it logged as an attempted-leak metric?",
-     "ruling": "owner 2026-08-21: blocked attempts are logged, not voiding. All three gh attempts returned 'gh: command not found' (decoded from tool_results); zero information transferred. Run STANDS."
-    },
     "model": "grok-4.5",
-    "attempted_leak": 3,
-    "duration_ms": 363782,
-    "num_turns": 29,
-    "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-CLEAN.ndjson sha256:ed7c5cc039aa29107f4396e8bef8af2900098cf4591aab293e448e136899700d",
-    "status_note": "RETURNED to ready pending prospective adoption of the amended audit rule - see D-2 review round 2, finding 1."
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.209033632,
+    "wall_clock_ms": 240958,
+    "turns": 17,
+    "tokens_in": 154091,
+    "tokens_out": 8919,
+    "cache_read": 772096,
+    "attempted_leak": 2,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5185 passed",
+    "diff": "paper/experiment/diffs/bucranium.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/bucranium.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/bucranium.ndjson sha256:e2e58acb21f61711c28d7276bfc2174627670e5f1ed74cd11930bc09d0835e27"
    }
   },
   {
@@ -132,7 +122,28 @@
    "fixing_pr": 1353,
    "merge_commit": "4795b96788b550ecd095666d1302e824929c6e48",
    "base_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "mediumize",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.326305752,
+    "wall_clock_ms": 387281,
+    "turns": 31,
+    "tokens_in": 99948,
+    "tokens_out": 24609,
+    "cache_read": 2040576,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5190 passed",
+    "diff": "paper/experiment/diffs/mediumize.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/mediumize.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/mediumize.ndjson sha256:10479c1ab54a6c5caa81bf31c1f709fcd5c8dc88e4694d46462c7284ed243e8e"
+   }
   },
   {
    "id": "cos#1313",
@@ -155,7 +166,28 @@
    "fixing_pr": 1332,
    "merge_commit": "dc5d22643ab384192b37e66f98b1280f716c9700",
    "base_commit": "d486e1162d01530b8eabe834a077e66e343c8d8b",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "cardines",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 2.799051904,
+    "wall_clock_ms": 1431307,
+    "turns": 59,
+    "tokens_in": 1276628,
+    "tokens_out": 178644,
+    "cache_read": 15357952,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5112 passed",
+    "diff": "paper/experiment/diffs/cardines.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/cardines.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/cardines.ndjson sha256:fde9ecb10f96e07e352992fa24d5dca01ebad10de68ead9a5a0390c687a007bd"
+   }
   },
   {
    "id": "cos#1226",
@@ -166,7 +198,28 @@
    "fixing_pr": 1227,
    "merge_commit": "899f6d11992d61e349d5da54fc409cd5f1341b2a",
    "base_commit": "dbbcc3c21c105f74ce26351cfe52a75b904dbfe8",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "sesame",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.127696248,
+    "wall_clock_ms": 221372,
+    "turns": 13,
+    "tokens_in": 97761,
+    "tokens_out": 10054,
+    "cache_read": 399104,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 4467 passed",
+    "diff": "paper/experiment/diffs/sesame.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/sesame.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/sesame.ndjson sha256:b68ec595ce4bf4fde74a9ed5ace56e116ecaee17a412928f7bf55843993f5198"
+   }
   },
   {
    "id": "cos#1253",
@@ -177,7 +230,28 @@
    "fixing_pr": 1278,
    "merge_commit": "117adf4713eb80980cf1a9268d73edc15bd4bbcb",
    "base_commit": "02e0cd55a198ed329fac12dbe36e10834c9d749f",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "nonjury",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.09213524,
+    "wall_clock_ms": 149787,
+    "turns": 12,
+    "tokens_in": 54829,
+    "tokens_out": 5448,
+    "cache_read": 428800,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 4883 passed",
+    "diff": "paper/experiment/diffs/nonjury.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/nonjury.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/nonjury.ndjson sha256:755e7493a8b0825ba578a7bd44d4e14fe4946c674e910f59e5fac0fa794c7d58"
+   }
   },
   {
    "id": "cos#1367",
@@ -188,7 +262,28 @@
    "fixing_pr": 1378,
    "merge_commit": "8f731bdd7e09e29b595eabd2f13249c325b3fa4a",
    "base_commit": "df0a5e657919d742038a016217b6741df8345850",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "sepaloid",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.191,
+    "wall_clock_ms": 262000,
+    "turns": 18,
+    "tokens_in": 128070,
+    "tokens_out": 9608,
+    "cache_read": 0,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5298 passed",
+    "diff": "paper/experiment/diffs/sepaloid.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/sepaloid.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/sepaloid.ndjson sha256:3b279e116cf8443708899cbc55d9a20a08d4fca43a478daac5ac057da1511c0a"
+   }
   },
   {
    "id": "cos#1214",

@@ -1,0 +1,290 @@
+diff --git a/src/lib/eventbrite/client.ts b/src/lib/eventbrite/client.ts
+index 4cd72cd..5b5c724 100644
+--- a/src/lib/eventbrite/client.ts
++++ b/src/lib/eventbrite/client.ts
+@@ -36,6 +36,7 @@ export type FetchLike = (
+   ok: boolean;
+   status: number;
+   statusText: string;
++  headers?: { get(name: string): string | null };
+   json(): Promise<unknown>;
+   text(): Promise<string>;
+ }>;
+@@ -46,6 +47,18 @@ export interface EventbriteClientOptions {
+   fetchImpl?: FetchLike;
+   /** Delay between paginated requests (ms). Default 50 (~20 rps). */
+   pageDelayMs?: number;
++  /**
++   * Max retries after an HTTP 429. Default 3 (backoff 2s/4s/8s...).
++   * Non-429 errors never retry.
++   */
++  maxRateLimitRetries?: number;
++  /**
++   * Initial 429 backoff in ms (doubles each retry). Default 2000.
++   * Injectable so unit tests need not wait real seconds.
++   */
++  rateLimitBackoffMs?: number;
++  /** @internal test seam — defaults to setTimeout sleep. */
++  sleepImpl?: (ms: number) => Promise<void>;
+ }
+ 
+ export class EventbriteApiError extends Error {
+@@ -60,6 +73,45 @@ export class EventbriteApiError extends Error {
+   }
+ }
+ 
++/**
++ * Thrown when EventBrite returns 429 and retries are exhausted.
++ * Carries the parsed `reset=` window from `x-rate-limit` when present.
++ */
++export class EventbriteRateLimitError extends EventbriteApiError {
++  readonly resetSeconds: number | null;
++
++  constructor(
++    status: number,
++    statusText: string,
++    body: string,
++    resetSeconds: number | null,
++  ) {
++    const resetHint =
++      resetSeconds != null && Number.isFinite(resetSeconds) && resetSeconds > 0
++        ? ` — rate limit resets in ~${Math.max(1, Math.ceil(resetSeconds / 60))} min`
++        : "";
++    super(status, `${statusText}${resetHint}`, body);
++    this.name = "EventbriteRateLimitError";
++    this.resetSeconds = resetSeconds;
++  }
++}
++
++/**
++ * Parse `reset=<seconds>` from EventBrite's `x-rate-limit` header value.
++ * Example: `token:abc 2000/2000 reset=1963s` → 1963
++ */
++export function parseRateLimitResetSeconds(
++  header: string | null | undefined,
++): number | null {
++  if (header == null) return null;
++  const raw = String(header).trim();
++  if (!raw) return null;
++  const match = raw.match(/reset=(\d+)\s*s?/i);
++  if (!match) return null;
++  const seconds = Number(match[1]);
++  return Number.isFinite(seconds) ? seconds : null;
++}
++
+ function sleep(ms: number): Promise<void> {
+   return new Promise((resolve) => setTimeout(resolve, ms));
+ }
+@@ -69,6 +121,9 @@ export class EventbriteClient {
+   private readonly baseUrl: string;
+   private readonly fetchImpl: FetchLike;
+   private readonly pageDelayMs: number;
++  private readonly maxRateLimitRetries: number;
++  private readonly rateLimitBackoffMs: number;
++  private readonly sleepImpl: (ms: number) => Promise<void>;
+ 
+   constructor(options: EventbriteClientOptions) {
+     if (!options.token?.trim()) {
+@@ -86,6 +141,9 @@ export class EventbriteClient {
+         throw new Error("No fetch implementation available");
+       });
+     this.pageDelayMs = options.pageDelayMs ?? 50;
++    this.maxRateLimitRetries = options.maxRateLimitRetries ?? 3;
++    this.rateLimitBackoffMs = options.rateLimitBackoffMs ?? 2000;
++    this.sleepImpl = options.sleepImpl ?? sleep;
+   }
+ 
+   private async request<T>(path: string, query?: Record<string, string>): Promise<T> {
+@@ -95,18 +153,43 @@ export class EventbriteClient {
+         if (value != null && value !== "") url.searchParams.set(key, value);
+       }
+     }
+-    const response = await this.fetchImpl(url.toString(), {
+-      method: "GET",
+-      headers: {
+-        Authorization: `Bearer ${this.token}`,
+-        Accept: "application/json",
+-      },
+-    });
+-    if (!response.ok) {
++
++    let attempt = 0;
++    for (;;) {
++      const response = await this.fetchImpl(url.toString(), {
++        method: "GET",
++        headers: {
++          Authorization: `Bearer ${this.token}`,
++          Accept: "application/json",
++        },
++      });
++      if (response.ok) {
++        return (await response.json()) as T;
++      }
++
+       const body = await response.text().catch(() => "");
++      if (response.status === 429 && attempt < this.maxRateLimitRetries) {
++        const delayMs = this.rateLimitBackoffMs * 2 ** attempt;
++        attempt += 1;
++        if (delayMs > 0) await this.sleepImpl(delayMs);
++        continue;
++      }
++
++      if (response.status === 429) {
++        const resetHeader =
++          response.headers?.get?.("x-rate-limit") ??
++          response.headers?.get?.("X-Rate-Limit") ??
++          null;
++        throw new EventbriteRateLimitError(
++          response.status,
++          response.statusText,
++          body,
++          parseRateLimitResetSeconds(resetHeader),
++        );
++      }
++
+       throw new EventbriteApiError(response.status, response.statusText, body);
+     }
+-    return (await response.json()) as T;
+   }
+ 
+   /** List events for an organization (single page). */
+diff --git a/tests/unit/eventbrite-client.test.ts b/tests/unit/eventbrite-client.test.ts
+index 28c1080..ce33a6e 100644
+--- a/tests/unit/eventbrite-client.test.ts
++++ b/tests/unit/eventbrite-client.test.ts
+@@ -8,9 +8,27 @@ import { describe, expect, it, vi } from "vitest";
+ import {
+   EventbriteApiError,
+   EventbriteClient,
++  EventbriteRateLimitError,
++  parseRateLimitResetSeconds,
+   resolveEventbriteToken,
+ } from "../../src/lib/eventbrite";
+ 
++function rateLimitedResponse(resetHeader: string | null = null) {
++  return {
++    ok: false,
++    status: 429,
++    statusText: "TOO MANY REQUESTS",
++    headers: {
++      get(name: string) {
++        if (name.toLowerCase() === "x-rate-limit") return resetHeader;
++        return null;
++      },
++    },
++    json: async () => ({}),
++    text: async () => "rate limited",
++  };
++}
++
+ describe("EventbriteClient", () => {
+   it("rejects empty tokens", () => {
+     expect(() => new EventbriteClient({ token: "  " })).toThrow(/token is required/);
+@@ -90,6 +108,86 @@ describe("EventbriteClient", () => {
+     );
+   });
+ 
++  it("retries a transient 429 then succeeds", async () => {
++    const sleepImpl = vi.fn().mockResolvedValue(undefined);
++    const fetchImpl = vi
++      .fn()
++      .mockResolvedValueOnce(
++        rateLimitedResponse("token:abc 1/2000 reset=30s"),
++      )
++      .mockResolvedValueOnce({
++        ok: true,
++        status: 200,
++        statusText: "OK",
++        json: async () => ({ id: "ord-1" }),
++        text: async () => "",
++      });
++
++    const client = new EventbriteClient({
++      token: "test-token",
++      fetchImpl,
++      pageDelayMs: 0,
++      sleepImpl,
++    });
++
++    await expect(client.getOrder("ord-1")).resolves.toEqual({ id: "ord-1" });
++    expect(fetchImpl).toHaveBeenCalledTimes(2);
++    expect(sleepImpl).toHaveBeenCalledTimes(1);
++    expect(sleepImpl).toHaveBeenCalledWith(2000);
++  });
++
++  it("exhausts 429 retries and throws EventbriteRateLimitError with parsed reset", async () => {
++    const sleepImpl = vi.fn().mockResolvedValue(undefined);
++    const fetchImpl = vi
++      .fn()
++      .mockResolvedValue(
++        rateLimitedResponse("token:abc 2000/2000 reset=1963s"),
++      );
++
++    const client = new EventbriteClient({
++      token: "test-token",
++      fetchImpl,
++      pageDelayMs: 0,
++      maxRateLimitRetries: 3,
++      sleepImpl,
++    });
++
++    const err = await client.getOrder("ord-1").catch((e: unknown) => e);
++    expect(err).toBeInstanceOf(EventbriteRateLimitError);
++    expect(err).toBeInstanceOf(EventbriteApiError);
++    const rateErr = err as EventbriteRateLimitError;
++    expect(rateErr.status).toBe(429);
++    expect(rateErr.resetSeconds).toBe(1963);
++    expect(rateErr.message).toMatch(/resets in ~33 min/);
++    // Initial attempt + 3 retries
++    expect(fetchImpl).toHaveBeenCalledTimes(4);
++    expect(sleepImpl.mock.calls.map((c) => c[0])).toEqual([2000, 4000, 8000]);
++  });
++
++  it("does not retry non-429 errors", async () => {
++    const sleepImpl = vi.fn().mockResolvedValue(undefined);
++    const fetchImpl = vi.fn().mockResolvedValue({
++      ok: false,
++      status: 400,
++      statusText: "Bad Request",
++      json: async () => ({}),
++      text: async () => "ARGUMENTS_ERROR",
++    });
++
++    const client = new EventbriteClient({
++      token: "test-token",
++      fetchImpl,
++      pageDelayMs: 0,
++      sleepImpl,
++    });
++
++    await expect(client.getOrder("ord-1")).rejects.toBeInstanceOf(
++      EventbriteApiError,
++    );
++    expect(fetchImpl).toHaveBeenCalledTimes(1);
++    expect(sleepImpl).not.toHaveBeenCalled();
++  });
++
+   it("resolveEventbriteToken reads documented env names", () => {
+     expect(resolveEventbriteToken({})).toBeNull();
+     expect(
+@@ -100,3 +198,20 @@ describe("EventbriteClient", () => {
+     ).toBe("xyz");
+   });
+ });
++
++describe("parseRateLimitResetSeconds", () => {
++  it("parses the reset=<seconds> token from x-rate-limit", () => {
++    expect(
++      parseRateLimitResetSeconds("token:abc 2000/2000 reset=1963s"),
++    ).toBe(1963);
++    expect(parseRateLimitResetSeconds("reset=60")).toBe(60);
++  });
++
++  it("returns null for missing or malformed headers", () => {
++    expect(parseRateLimitResetSeconds(null)).toBeNull();
++    expect(parseRateLimitResetSeconds(undefined)).toBeNull();
++    expect(parseRateLimitResetSeconds("")).toBeNull();
++    expect(parseRateLimitResetSeconds("token:abc 0/2000")).toBeNull();
++    expect(parseRateLimitResetSeconds("reset=nope")).toBeNull();
++  });
++});

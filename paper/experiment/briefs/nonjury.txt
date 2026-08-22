@@ -1,0 +1,56 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): <WORKDIR>
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Perf: bulkSyncEvent resolves ESP binding once per registration instead of once per bulk run
+
+## Context
+
+Follow-up from CodeRabbit review on PR #1247 (#658). `src/lib/esp/sync.ts`'s `bulkSyncEvent` resolves the site-wide ESP binding once at the top (line ~368) purely as a readiness gate, then calls `syncRegistration(registrationId)` in a loop — and `syncRegistration` re-resolves its own binding via `resolveEspBinding()` on every single iteration (line ~148). A bulk sync of N registrations performs N binding resolutions instead of 1.
+
+## Why this is now low-severity (not blocking #1247's merge)
+
+Before #1247's fix for the "resolveEspBinding can scan all Events + auto-seed on a hot path" finding, this N+1 pattern meant N full unfiltered `Event` table scans per bulk sync. After that fix, `resolveEspBinding` on the runtime path is a single indexed `findFirst` against `SiteIntegrationSettings` — cheap. This is now a pure micro-optimization, not a correctness or real load concern.
+
+## Suggested fix
+
+Give `syncRegistration` an optional pre-resolved binding parameter:
+
+```ts
+export async function syncRegistration(
+  registrationId: string,
+  preResolvedBinding?: SiteEspBinding,
+): Promise<SyncResult> {
+  // ...
+  const espBinding = preResolvedBinding ?? (await resolveEspBinding({ eventFallback: { /* ... */ } }));
+  // ...
+}
+```
+
+And pass it from `bulkSyncEvent`'s loop:
+
+```ts
+const syncResult = await syncRegistration(registration.id, espBinding);
+```
+
+Note: `bulkSyncEvent` resolves with a single event's fallback, and `syncRegistration` resolves with that same registration's event — for the bulk-loop call site these fallbacks match, since both operate on one event. Confirm no other caller of `syncRegistration` relies on a different per-registration fallback before making the parameter change.
+
+## Acceptance criteria
+- [ ] `bulkSyncEvent` resolves the ESP binding once and passes it into every `syncRegistration` call in its loop.
+- [ ] `syncRegistration` still resolves its own binding when called directly (without a pre-resolved one), preserving existing single-registration-sync behavior.
+- [ ] Existing sync tests still pass; add a case asserting `resolveEspBinding`/`getEspProvider` is called exactly once for an N-registration bulk sync.
+
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in <WORKDIR>:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in <WORKDIR>. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

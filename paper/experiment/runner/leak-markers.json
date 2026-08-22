@@ -1,0 +1,8 @@
+{
+ "bucranium": {"issue":1245,"fixing_pr":1351,"merge":"9e4b1b89459e589db396cb229c80e90369da2b2e"},
+ "mediumize": {"issue":1221,"fixing_pr":1353,"merge":"4795b96788b550ecd095666d1302e824929c6e48"},
+ "cardines":  {"issue":1327,"fixing_pr":1332,"merge":"dc5d22643ab384192b37e66f98b1280f716c9700"},
+ "sesame":    {"issue":1226,"fixing_pr":1227,"merge":"899f6d11992d61e349d5da54fc409cd5f1341b2a"},
+ "nonjury":   {"issue":1253,"fixing_pr":1278,"merge":"117adf4713eb80980cf1a9268d73edc15bd4bbcb"},
+ "sepaloid":  {"issue":1367,"fixing_pr":1378,"merge":"8f731bdd7e09e29b595eabd2f13249c325b3fa4a"}
+}

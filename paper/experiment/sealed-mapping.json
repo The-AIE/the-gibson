@@ -1,6 +1,41 @@
 {
- "note": "code-name -> task/arm mapping. The blind judge NEVER receives this file.",
+ "note": "code-name -> task/arm. The blind judge NEVER receives this file.",
  "mapping": {
-  "lycosid": { "task": "cos#1245", "arm": "raw", "run_date": "2026-08-21", "runner": "container/mac-mini" }
+  "bucranium": {
+   "task": "cos#1245",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "mediumize": {
+   "task": "cos#1221",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "cardines": {
+   "task": "cos#1327",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "sesame": {
+   "task": "cos#1226",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "nonjury": {
+   "task": "cos#1253",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "sepaloid": {
+   "task": "cos#1367",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  }
  }
 }

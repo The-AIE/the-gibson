@@ -1,0 +1,32 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): <WORKDIR>
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Conventions Batch A: API boundary — zod validation, error registry, route-auth inventory
+
+Batch A of the conventions retrofit (docs/CONVENTIONS.md, Appendix). API boundary.
+
+Add `src/lib/api-validation.ts` (`parseBody`/`parseQuery`) and `src/lib/schemas.ts` (shared field validators, consolidating the 12 existing zod files' repeated shapes -- pure consolidation, typecheck is the oracle). Convert all 55 API routes to zod validation + registry error responses + try/catch. Fix the 401/403/400 status drift. Add `route-auth-inventory.ts` + drift test covering all 55 routes. Move the one test-only export out of `invoices/[token]/pdf`.
+
+Scope note: routes only -- the 60 non-zod `actions.ts` files are explicitly NOT in scope here (that's a separate judgment-tier item bundled with the `requireEventForAction` design, not this batch).
+
+Acceptance criteria: 0 `typeof` validation chains in route files; 0 raw error `NextResponse.json` in routes; inventory test green and covering 55/55; existing checks in each route ARE the validation spec -- translate 1:1, do not strengthen or weaken.
+
+Sequence after Batch B (lint ratchet, #1322) merges.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in <WORKDIR>:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in <WORKDIR>. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

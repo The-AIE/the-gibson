@@ -1,0 +1,218 @@
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 1c0ea2d..33a0248 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -1398,9 +1398,45 @@ model Sponsor {
+   clerkUserId   String?
+   events        EventSponsor[]
+   offsiteEvents OffsiteEvent[]
++  /// People at this company (billing, marketing, on-site, …). Flat
++  /// contactName/Email/Phone remain the primary/billing mirror until retired.
++  contacts      SponsorContact[]
+   createdAt     DateTime       @default(now())
+ }
+ 
++/// Role a person holds at a Sponsor / community-partner company.
++/// PRIMARY is the legacy embedded contact; BILLING is preferred for invoices.
++enum SponsorContactRole {
++  PRIMARY
++  BILLING
++  MARKETING
++  ON_SITE
++  SIGNATORY
++  OTHER
++}
++
++/// Many CrmContact people ↔ one Sponsor company. Community partners reuse
++/// Sponsor, so they share this relation rather than a parallel contact model.
++model SponsorContact {
++  id        String               @id @default(cuid())
++  sponsorId String
++  sponsor   Sponsor              @relation(fields: [sponsorId], references: [id], onDelete: Cascade)
++  contactId String
++  contact   CrmContact           @relation(fields: [contactId], references: [id], onDelete: Cascade)
++  /// One person may hold several roles (e.g. BILLING + SIGNATORY).
++  roles     SponsorContactRole[] @default([PRIMARY])
++  /// Default company contact; mirrors Sponsor.contact* when true.
++  isPrimary Boolean              @default(false)
++  notes     String?
++  createdAt DateTime             @default(now())
++  updatedAt DateTime             @updatedAt
++
++  @@unique([sponsorId, contactId])
++  @@index([sponsorId])
++  @@index([contactId])
++  @@index([sponsorId, isPrimary])
++}
++
+ model EventSponsor {
+   id              String                 @id @default(cuid())
+   eventId         String
+@@ -2934,6 +2970,8 @@ model CrmContact {
+   enrichment     CrmContactEnrichment?
+   /// #1313 name-collision review rows against this contact
+   collisions     CrmContactCollision[]
++  /// Sponsor / community-partner company memberships (person → company).
++  sponsorMemberships SponsorContact[]
+ 
+   @@unique([organizationId, email])
+   @@index([organizationId, lastName, firstName])
+diff --git a/scripts/backfill-crm-contacts.mjs b/scripts/backfill-crm-contacts.mjs
+index 2acacc1..ce26cc9 100644
+--- a/scripts/backfill-crm-contacts.mjs
++++ b/scripts/backfill-crm-contacts.mjs
+@@ -191,6 +191,49 @@ async function ensureLink(contactId, person, stats, dryRun) {
+   stats.linksCreated++;
+ }
+ 
++/** Mirror SPONSOR_CONTACT spine links into SponsorContact memberships. */
++async function ensureSponsorMembership(contactId, person, stats, dryRun) {
++  if (person.subjectKind !== "SPONSOR_CONTACT") return;
++  if (!contactId || String(contactId).startsWith("dry-")) {
++    if (dryRun) stats.wouldSponsorMembership = (stats.wouldSponsorMembership ?? 0) + 1;
++    return;
++  }
++  const existing = await prisma.sponsorContact.findUnique({
++    where: {
++      sponsorId_contactId: {
++        sponsorId: person.subjectId,
++        contactId,
++      },
++    },
++    select: { id: true },
++  });
++  if (existing) {
++    stats.sponsorMembershipExisting = (stats.sponsorMembershipExisting ?? 0) + 1;
++    return;
++  }
++  if (dryRun) {
++    stats.wouldSponsorMembership = (stats.wouldSponsorMembership ?? 0) + 1;
++    return;
++  }
++  await prisma.sponsorContact.updateMany({
++    where: {
++      sponsorId: person.subjectId,
++      isPrimary: true,
++      NOT: { contactId },
++    },
++    data: { isPrimary: false },
++  });
++  await prisma.sponsorContact.create({
++    data: {
++      sponsorId: person.subjectId,
++      contactId,
++      roles: ["PRIMARY", "BILLING"],
++      isPrimary: true,
++    },
++  });
++  stats.sponsorMembershipCreated = (stats.sponsorMembershipCreated ?? 0) + 1;
++}
++
+ async function main() {
+   const { dryRun } = parseArgs(process.argv.slice(2));
+   console.log(
+@@ -351,6 +394,7 @@ async function main() {
+       const contactId = await ensureContact(org.id, person, stats, dryRun);
+       if (contactId) {
+         await ensureLink(contactId, person, stats, dryRun);
++        await ensureSponsorMembership(contactId, person, stats, dryRun);
+       }
+     } catch (err) {
+       stats.failed++;
+@@ -370,6 +414,9 @@ async function main() {
+     wouldLink: stats.wouldLink,
+     linksCreated: stats.linksCreated,
+     linksExisting: stats.linksExisting,
++    sponsorMembershipCreated: stats.sponsorMembershipCreated ?? 0,
++    sponsorMembershipExisting: stats.sponsorMembershipExisting ?? 0,
++    wouldSponsorMembership: stats.wouldSponsorMembership ?? 0,
+     skippedNoEmail: stats.skippedNoEmail,
+     collisionCount: stats.collisions.length,
+     failed: stats.failed,
+diff --git a/src/lib/community-partners.ts b/src/lib/community-partners.ts
+index 3dfdcd5..a957bed 100644
+--- a/src/lib/community-partners.ts
++++ b/src/lib/community-partners.ts
+@@ -266,7 +266,7 @@ export async function createCommunityPartner(
+   const contactEmail =
+     input.contactEmail?.trim() || syntheticPartnerContactEmail(name, eventId);
+ 
+-  return prisma.$transaction(async (tx) => {
++  const created = await prisma.$transaction(async (tx) => {
+     const org = await tx.affiliateOrganization.create({
+       data: {
+         eventId,
+@@ -324,8 +324,21 @@ export async function createCommunityPartner(
+       },
+     });
+ 
+-    return { id: org.id };
++    return { id: org.id, sponsorId: sponsor.id, contactName, contactEmail, name };
+   });
++
++  // Same SponsorContact model as paid sponsors (no parallel partner contacts).
++  const { syncSponsorFlatContactSafe } = await import('@/lib/sponsor-contacts');
++  await syncSponsorFlatContactSafe({
++    sponsorId: created.sponsorId,
++    companyName: created.name,
++    contactName: created.contactName,
++    contactEmail: created.contactEmail,
++    eventId,
++    source: 'community_partner',
++  });
++
++  return { id: created.id };
+ }
+ 
+ export async function updateCommunityPartner(
+@@ -394,6 +407,16 @@ export async function updateCommunityPartner(
+       },
+     }),
+   ]);
++
++  const { syncSponsorFlatContactSafe } = await import('@/lib/sponsor-contacts');
++  await syncSponsorFlatContactSafe({
++    sponsorId: eventSponsor.sponsorId,
++    companyName: name,
++    contactName,
++    contactEmail,
++    eventId,
++    source: 'community_partner',
++  });
+ }
+ 
+ export async function deleteCommunityPartner(
+diff --git a/src/lib/services/sponsorship.ts b/src/lib/services/sponsorship.ts
+index 002f49b..8e983f8 100644
+--- a/src/lib/services/sponsorship.ts
++++ b/src/lib/services/sponsorship.ts
+@@ -932,7 +932,7 @@ export async function deleteAsset(assetId: string) {
+  */
+ export async function addSponsorToEvent(eventId: string, input: z.infer<typeof sponsorSignupSchema>) {
+   const data = sponsorSignupSchema.parse(input);
+-  return prisma.$transaction(async (tx) => {
++  const eventSponsor = await prisma.$transaction(async (tx) => {
+     const tier = await tx.sponsorTier.findUniqueOrThrow({ where: { id: data.tierId } });
+     if (tier.maxSponsors != null) {
+       const taken = await tx.eventSponsor.count({ where: { eventId, tierId: tier.id } });
+@@ -966,6 +966,20 @@ export async function addSponsorToEvent(eventId: string, input: z.infer<typeof s
+       include: { sponsor: true, tier: true },
+     });
+   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
++
++  // Keep CrmContact + SponsorContact in sync with flat contact columns.
++  const { syncSponsorFlatContactSafe } = await import("@/lib/sponsor-contacts");
++  await syncSponsorFlatContactSafe({
++    sponsorId: eventSponsor.sponsorId,
++    companyName: eventSponsor.sponsor.companyName,
++    contactName: eventSponsor.sponsor.contactName,
++    contactEmail: eventSponsor.sponsor.contactEmail,
++    contactPhone: eventSponsor.sponsor.contactPhone,
++    eventId,
++    source: "sponsor_signup",
++  });
++
++  return eventSponsor;
+ }
+ 
+ export async function setSponsorPaid(eventSponsorId: string, paid: boolean) {

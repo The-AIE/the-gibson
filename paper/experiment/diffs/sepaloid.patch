@@ -1,0 +1,93 @@
+diff --git a/src/app/(public)/events/[eventSlug]/cfp/page.tsx b/src/app/(public)/events/[eventSlug]/cfp/page.tsx
+index aedb8df..86c1845 100644
+--- a/src/app/(public)/events/[eventSlug]/cfp/page.tsx
++++ b/src/app/(public)/events/[eventSlug]/cfp/page.tsx
+@@ -3,12 +3,12 @@
+  * Unauthorized copying, modification, or distribution of this file,
+  * via any medium, is strictly prohibited.
+  */
+-import { format } from 'date-fns';
+ import { AlertCircle } from 'lucide-react';
+ import Link from 'next/link';
+ import { notFound } from 'next/navigation';
+ import { prisma } from '@/lib/db';
+ import { loadPastTalkExamples } from '@/lib/cfp-past-talks';
++import { resolveCfpPublicState } from '@/lib/cfp-public-state';
+ import CfpForm from './cfp-form';
+ 
+ interface CfpPageProps {
+@@ -37,33 +37,34 @@ export default async function CfpPage({ params }: CfpPageProps) {
+ 
+   if (!event) notFound();
+ 
+-  if (!event.cfpOpen) {
++  const cfpState = resolveCfpPublicState({
++    cfpOpen: event.cfpOpen,
++    cfpCloseDate: event.cfpCloseDate,
++  });
++
++  if (cfpState.kind !== 'open') {
++    const interestHref = `/events/${event.slug}/speak`;
+     return (
+       <div className="min-h-screen bg-gray-50 py-12">
+         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+           <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-8 text-center">
+             <AlertCircle className="mx-auto mb-4 h-12 w-12 text-yellow-600" />
+             <h1 className="text-2xl font-bold text-yellow-900 mb-2">
+-              CFP Currently Closed
++              {cfpState.heading}
+             </h1>
+-            <p className="text-yellow-800">
+-              The call for proposals for {event.name} is not currently open.
+-            </p>
+-            {event.cfpCloseDate && (
+-              <p className="text-sm text-yellow-700 mt-2">
+-                CFP closed on {format(event.cfpCloseDate, 'MMMM d, yyyy')}
++            <p className="text-yellow-800">{cfpState.body}</p>
++            {cfpState.kind === 'not-yet' && cfpState.interestPrompt ? (
++              <p className="mt-4 text-sm text-yellow-800">
++                Want a heads-up when it opens?{' '}
++                <Link
++                  href={interestHref}
++                  className="font-semibold text-nebula-700 underline hover:text-nebula-800"
++                >
++                  Join the speaker interest list
++                </Link>
++                .
+               </p>
+-            )}
+-            <p className="mt-4 text-sm text-yellow-800">
+-              Want a heads-up when it opens?{' '}
+-              <Link
+-                href={`/events/${event.slug}/speak`}
+-                className="font-semibold text-nebula-700 underline hover:text-nebula-800"
+-              >
+-                Join the speaker interest list
+-              </Link>
+-              .
+-            </p>
++            ) : null}
+           </div>
+         </div>
+       </div>
+diff --git a/tests/unit/cfp-marketing-pages.test.ts b/tests/unit/cfp-marketing-pages.test.ts
+index b5e86a6..59ae686 100644
+--- a/tests/unit/cfp-marketing-pages.test.ts
++++ b/tests/unit/cfp-marketing-pages.test.ts
+@@ -34,12 +34,15 @@ describe('CFP marketing pages wiring (#26 #24 #58)', () => {
+     expect(source).toContain('Notify me when CFP opens');
+   });
+ 
+-  it('closed CFP page links to speaker interest list', () => {
++  it('CFP page resolves tense via helper and links interest list for not-yet', () => {
+     const source = readFileSync(
+       join(root, 'src/app/(public)/events/[eventSlug]/cfp/page.tsx'),
+       'utf8'
+     );
++    expect(source).toContain('resolveCfpPublicState');
+     expect(source).toContain('/speak');
++    expect(source).toContain('Join the speaker interest list');
++    expect(source).not.toContain('CFP Currently Closed');
+     expect(source).toContain('loadPastTalkExamples');
+     expect(source).toContain('pastTalkExamples');
+   });
