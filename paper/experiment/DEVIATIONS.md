@@ -380,3 +380,104 @@ Arm assignments are untouched — `cos#1245` keeps `raw`, never re-drawn after a
 outcome. Enrollment stays closed at n=12, balanced 6/6. Metrics 1–4 stand, with metric 3–4
 accounting amended as above. The census, the blind judge rule, and the no-push rule are
 unchanged.
+
+---
+
+## D-3 — within-task paired design; harness arm becomes a fixed scripted treatment
+
+**Raised:** 2026-08-22. **Author:** Claude (coordinator). **Owner decision:** Mark, 2026-08-22.
+**Status:** proposed. **Declared BEFORE any harness-arm run executes** — zero harness replays
+have been performed at the time of writing. The six raw-arm runs are complete and their
+outcomes are known; the six harness runs are not.
+
+### Cause: the registered comparison cannot detect anything at this n
+
+D-1 fixed each task to exactly one arm — twelve runs, six raw, six harness, **between-task**,
+no crossover. With the raw arm now complete, the observed per-task cost is:
+
+| code | task | cost |
+|---|---|---|
+| nonjury | `cos#1253` | $0.092 |
+| sesame | `cos#1226` | $0.128 |
+| sepaloid | `cos#1367` | $0.191 |
+| bucranium | `cos#1245` | $0.209 |
+| mediumize | `cos#1221` | $0.326 |
+| **cardines** | **`cos#1327`** | **$2.799** |
+
+A **30× spread**, driven by task kind rather than by anything an arm does: `cos#1327` is a
+codebase-wide convention sweep (80 files, +3,898/−2,671), the rest are scoped fixes. In a
+between-task design with n=6 per arm and outcome variance of this size, the arm that happens
+to draw the sweep task determines the cost comparison. The registered analysis is not
+underpowered at the margin — it is uninformative for metric 3, and close to it for the rest.
+
+This was not visible before the raw arm ran. It is recorded here as a cause, not excused.
+
+### The change: within-task pairing
+
+Each task is run in **both** arms, and the arms are compared **within task**. Task difficulty
+is differenced out rather than randomized over. Six pairs in a consistent direction is a
+meaningful result on a sign test; six unpaired samples at this variance is not.
+
+Pairing is available only because of the D-2 runner. Each replay starts from a fresh census-
+verified tree in an ephemeral container with no shared state, no persisted agent session, and
+a stateless model endpoint, so running the same task twice is not a repeated measure on a
+contaminated subject. The registered "no crossover" rule was written for a live backlog where
+the same issue cannot be fixed twice; that constraint does not exist in replay.
+
+**The seed-219 arm assignment becomes moot** — every task receives both arms, so there is no
+assignment left to bias or to cherry-pick. This is strictly cleaner than what was registered.
+The first paired set is the six tasks already executed raw: `bucranium`, `mediumize`,
+`cardines`, `sesame`, `nonjury`, `sepaloid`.
+
+### The harness arm becomes a fixed, scripted treatment
+
+The registered harness arm was "the normal full pipeline." That is not a specifiable
+treatment: it changes as `FLEET.md` changes — it changed twice on 2026-08-21 while this
+experiment was being repaired — it contains human judgment (owner attestation), and it has
+variable review rounds. Cross-vendor review blocked three successive amendments partly on
+this, and correctly.
+
+The harness arm is therefore defined as a fixed script, identical for every task:
+
+1. **spec gate** — implementer platform, in-container, produces a spec and acceptance
+   checklist from the issue text. No implementation.
+2. **implement** — same platform, in-container, against the issue text and that spec.
+3. **adversarial review, cross-vendor** — a different platform from the implementer, running
+   in a container with **only the patch and the brief mounted**: no repository, no history,
+   no credentials, no MCP configuration. It cannot reach the real fix because the real fix is
+   not present in its container.
+4. **one fix loop** — implementer addresses the review findings. Then stop.
+
+Exactly one review round and one fix loop, for every task, regardless of what the review
+says. Variable rounds are what made the pipeline unspecifiable; fixing the count is what
+makes the treatment reproducible. Rounds therefore stop being an outcome (registered metric
+2) for the harness arm and become a constant — recorded as a change to metric 2, not a
+silent redefinition.
+
+Raw arm is unchanged: one session, issue text only, no spec gate, no review.
+
+### What this measures, stated more narrowly than before
+
+Not "the harness versus a raw LLM." With platform and model held constant and the pipeline
+scripted, the contrast is **structured review versus one-shot implementation**, for
+`grok-4.5`, on twelve replayed ConferenceOS issues. That is a narrower claim than registered
+and it is the one the design can support. H7's direction remains falsifiable; its scope does
+not.
+
+### Costs of pairing, stated
+
+**Blinding is weakened.** The judge receives two patches per issue and can tell they address
+the same task. A judge may infer that the more elaborate patch is the harness one. Mitigation:
+patches are presented in randomized order under code names, scored independently against the
+issue's own acceptance criteria rather than against each other, and the judge is not told the
+set is paired. This reduces but does not eliminate the inference, and it is reported as a
+limitation rather than argued away.
+
+**Metric 2 is no longer an outcome for the harness arm** (see above).
+
+**The raw runs were executed before this amendment.** Their outcomes are known, and this
+amendment was written with that knowledge. What it changes is the *analysis structure and the
+harness treatment*, neither of which can retroactively alter a raw result: no raw run is
+re-scored, re-run, or dropped, and the six harness runs it governs have not executed. The
+honest statement is that D-3 is prospective with respect to every run it affects, and
+retrospective with respect to the variance observation that motivated it.
