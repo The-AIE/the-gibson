@@ -1,11 +1,11 @@
 {
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
- "deviation": "D-1, D-2 \u2014 see DEVIATIONS.md",
- "revised": "2026-08-21 (D-2 \u2014 containerized implementer isolation; pending cross-vendor review)",
+ "deviation": "D-1, D-2, D-3, D-4 \u2014 see DEVIATIONS.md",
+ "revised": "2026-08-22 (D-4 \u2014 leak detector instrumented for provider-side web tools)",
  "seed": 219,
  "target_n": 12,
- "design": "frozen replay set",
+ "design": "frozen replay set, within-task paired (D-3)",
  "unit": {
   "definition": "an already-closed ConferenceOS issue, replayed against the commit its fix landed on top of",
   "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
