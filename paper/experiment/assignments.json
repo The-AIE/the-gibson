@@ -1,8 +1,8 @@
 {
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
- "deviation": "D-1, D-2 — see DEVIATIONS.md",
- "revised": "2026-08-21 (D-2 — containerized implementer isolation; pending cross-vendor review)",
+ "deviation": "D-1, D-2 \u2014 see DEVIATIONS.md",
+ "revised": "2026-08-21 (D-2 \u2014 containerized implementer isolation; pending cross-vendor review)",
  "seed": 219,
  "target_n": 12,
  "design": "frozen replay set",
@@ -10,15 +10,15 @@
   "definition": "an already-closed ConferenceOS issue, replayed against the commit its fix landed on top of",
   "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
   "checkout_rule": "fresh mktemp -d scratch dir; git init + fetch --depth 1 --no-tags at base_commit; remote removed; NEVER reused",
-  "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers. A failed census/setup assertion ALWAYS voids. An audit hit is adjudicated under `audit_rule` (adopted prospectively 2026-08-21, before any run executes under it).",
+  "leakage_rule": "fail-closed under set -euo pipefail: total object census \u2014 the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers. A failed census/setup assertion ALWAYS voids. An audit hit is adjudicated under `audit_rule` (adopted prospectively 2026-08-21, before any run executes under it).",
   "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch",
   "dependency_provisioning": "coordinator runs `npm ci && npx prisma generate` in the mounted tree before dispatch; excluded from metrics 3-4 in both arms. NOT information-free: npm ci runs postinstall and several dependency install scripts with network. Excluding it CHANGES registered metric accounting rather than leaving it untouched. Identical work in both arms; Node/npm pinned by image digest; lockfile is the base commit's.",
-  "implementer_platform": "grok, both arms — forced by the macOS sandbox matrix above; holds platform constant across arms and removes a confound",
+  "implementer_platform": "grok, both arms \u2014 forced by the macOS sandbox matrix above; holds platform constant across arms and removes a confound",
   "judge": "Devin only. Grok implemented both arms; Claude never judges; Codex has seen harness-arm output as reviewer. If Devin is unavailable, judging blocks rather than falling back.",
   "harness_reviewer": "Codex (not Grok, which implements), under the same isolation profile",
   "void_run_rule": "a run failing any leakage layer leaves status at 'ready' and appends to that task's void_runs array; void runs are reported as attempts-per-completed-task, never silently dropped",
-  "vector_a_network": "mitigated by credential denial, NOT network denial: repo is private (unauth GET of fixing PR -> 404, probed), tokens scrubbed, ~/.config/gh kernel-denied, web_search/web_fetch disabled. Residual general web access is DETECTION-ONLY via the retained transcript audit.",
-  "vector_b_local_filesystem": "closed at the kernel by the deny list — the canonical checkout and sibling worktrees carry the full future history including the fix and need no credentials; this is the higher-value vector",
+  "vector_a_network": "mitigated by credential denial, NOT network denial: repo is private (unauth GET of fixing PR -> 404, probed), tokens scrubbed, ~/.config/gh kernel-denied. CORRECTED 2026-08-22 (D-4): the earlier claim that 'web_search/web_fetch disabled' was FALSE. The implementer platform carries first-class web_search/web_fetch tools that execute provider-side, not as container network traffic, so container isolation cannot reach them; blowgun issued web_search 'conference-os sponsor partner logo upload issue github The-AIE' and cardines-h issued web_fetch of a library changelog. What actually held is that the repository is private: the search returned 404s and 'no public issues found', i.e. zero solution content. Residual general web access is DETECTION-ONLY via the transcript audit, which is now instrumented for these tools (adjudicate.py v2).",
+  "vector_b_local_filesystem": "closed at the kernel by the deny list \u2014 the canonical checkout and sibling worktrees carry the full future history including the fix and need no credentials; this is the higher-value vector",
   "isolation": "CONTAINER, both arms. docker/colima on the Mac Mini. Image ab219-runner:2 sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08 from node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 + git + @xai-official/grok@1.0.3, empty agent HOME. Frozen tree census-verified on the laptop, shipped, census re-verified on the Mini, mounted ALONE at /work. Only ~/.grok/auth.json mounted read-only (inference auth, no repo access). --rm so agent state is per-run.",
   "isolation_note": "Isolation comes from the CONTAINER, not the host. The Mini is NOT clean: ~/workspace/conference-os there CONTAINS the fixing commit, plus ~27 git dirs, cos-lanes worktrees, gh creds, ssh key, 164 grok sessions. No host-side sandbox on either Mac closes both vectors.",
   "isolation_probes": "Required before every run: ls /Users -> No such file or directory; no repo copies in container; fix commit from /work -> could not get object info; gh/gh-config/ssh absent and GH_TOKEN unset; ~/.grok config absent (no MCP); private repo unauth -> 404.",
@@ -29,7 +29,8 @@
   "egress": "NOT restricted to the inference endpoint - the container reaches the public internet and the clean run used that to fetch build tools. Retrieval of the fix still requires a credential the container lacks. Egress allowlisting is unbuilt and is the next hardening.",
   "auth_mount_rule": "auth.json MUST be mounted as a single read-only FILE at /home/agent/.grok/auth.json, never as a directory. Mounting the directory makes Grok persist session state to the host, carrying the previous run's transcript into the next container (the retained-session-store defect, reintroduced by mount shape). Found and fixed 2026-08-21 after the first clean run; verified auth works and no host state is created. cos#1245 is unaffected - its mount contained only auth.json at start.",
   "layer_labels": "Each leakage layer is labelled PREVENTION or DETECTION, and a clean DETECTION result is NEVER reportable as evidence of isolation. PREVENTION: container mount boundary (vector B), absence of credentials in the image (vector A). DETECTION: post-run transcript audit, total object census. Rationale: under D-1 a clean audit was read as 'no leak', when it only ever meant 'no leak observed'. The same error class appeared independently in two ConferenceOS guards the same day.",
-  "artifact_export": "git diff OMITS untracked files, so newly created source files silently vanished from every exported patch. In the harness arm the patch is an INPUT to review, so the reviewer received code importing modules the patch did not contain and produced confident FALSE 'required modules are missing' findings — burying a real defect under fabricated ones. Fixed via runner/export-patch.sh (git add -A excluding harness scratch, then diff --binary --cached). ALL SIX harness runs were re-run under the corrected export; the pre-fix patches are archived as patches-VOID-incomplete-export. Raw-arm RUNS were unaffected (the implementer never sees the patch) and were only re-exported. Each run now records PATCH_NEW_FILES."
+  "artifact_export": "git diff OMITS untracked files, so newly created source files silently vanished from every exported patch. In the harness arm the patch is an INPUT to review, so the reviewer received code importing modules the patch did not contain and produced confident FALSE 'required modules are missing' findings \u2014 burying a real defect under fabricated ones. Fixed via runner/export-patch.sh (git add -A excluding harness scratch, then diff --binary --cached). ALL SIX harness runs were re-run under the corrected export; the pre-fix patches are archived as patches-VOID-incomplete-export. Raw-arm RUNS were unaffected (the implementer never sees the patch) and were only re-exported. Each run now records PATCH_NEW_FILES.",
+  "audit_instrument": "adjudicate.py v2 (2026-08-22): the v1 extractor read only tool inputs with a 'command' field, so it could not see web_search/web_fetch calls at all and scored blowgun flagged=0. v2 normalises those calls into flaggable pseudo-commands and applies the same positive-content test to the returned payload. All six previously-adjudicated raw runs were re-adjudicated under v2: every verdict is unchanged (retrieved=0). The provider's own usage counter is NOT a substitute -- it reported web_search_requests=0 for a run that demonstrably issued one."
  },
  "eligibility": {
   "include": "Tier A/B product issues, closed, with exactly one merged fixing PR",
@@ -53,7 +54,7 @@
    1253
   ],
   "reproducible": "arm assignment only (seed 219); task selection is documented but judgmental",
-  "selection": "the 7 continuation tasks were selected by the coordinator pre-outcome to span distinct common-need classes; selection is judgment-based and NOT algorithmically reproducible — stated limitation"
+  "selection": "the 7 continuation tasks were selected by the coordinator pre-outcome to span distinct common-need classes; selection is judgment-based and NOT algorithmically reproducible \u2014 stated limitation"
  },
  "enrolled": [
   {
@@ -71,7 +72,7 @@
      "date": "2026-08-21",
      "arm": "raw",
      "implementer": "grok (no network isolation available on macOS)",
-     "cause": "leakage — transcript audit hit: first action was `gh issue view 1245`; then read fixing PR #1351, its merge commit, and post-fix contents of two edited files via `gh api .../contents?ref=<merge_commit>`",
+     "cause": "leakage \u2014 transcript audit hit: first action was `gh issue view 1245`; then read fixing PR #1351, its merge commit, and post-fix contents of two edited files via `gh api .../contents?ref=<merge_commit>`",
      "layers": "census PASS; blind brief PASS; transcript audit HIT",
      "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-VOID.ndjson",
      "wall_clock": "5m41s (recorded, not counted)",
@@ -95,7 +96,7 @@
     "tokens_out": 8919,
     "cache_read": 772096,
     "attempted_leak": 2,
-    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5185 passed",
     "diff": "paper/experiment/diffs/bucranium.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/bucranium.txt",
@@ -130,8 +131,31 @@
    "fixing_pr": 1349,
    "merge_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
    "base_commit": "78538fd09c74bcec580f867f29fbbbafe3ba3bfb",
-   "status": "ready",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay"
+   "status": "executed",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only \u2014 the arm measurement is a fresh harness replay",
+   "code_name": "blowgun",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z",
+    "census": "PASS on laptop (3125 objects) and re-verified PASS on the Mini after transfer; tarball sha256 a864c02e0f3966fb...; fixing merge commit absent from the store",
+    "inference_cost_usd": 0.659572936,
+    "wall_clock_ms": 637256,
+    "turns": 50,
+    "tokens_in": 228713,
+    "tokens_out": 23972,
+    "cache_read": 4462208,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "web_search \"conference-os sponsor partner logo upload issue github The-AIE\" -- the implementer's move to find the canonical issue online. Payload contained no fixing-PR number, no merge SHA and no solution content: the repo is private, so the search returned 404s and \"no public GitHub issues ... turned up\". Blocked by repo privacy, not by the container.",
+    "audit": "CLEAN -- adjudicated by positive-content test on decoded tool_results (adjudicate.py v2, which was written during this run because v1 could not see web_search); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5152 passed / 49 todo (487 files)",
+    "diff": "paper/experiment/diffs/blowgun.patch (11 files, 2 new, corrected export)",
+    "brief": "paper/experiment/briefs/blowgun.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/blowgun.ndjson sha256:e25c2e69cac28420cf06c4f06f111d663b34b8de07652e40849e0bb1e688d8ae",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (6 open COS PRs updated inside 24h on 2026-08-22)"
+   }
   },
   {
    "id": "cos#1221",
@@ -158,7 +182,7 @@
     "tokens_out": 24609,
     "cache_read": 2040576,
     "attempted_leak": 0,
-    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5190 passed",
     "diff": "paper/experiment/diffs/mediumize.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/mediumize.txt",
@@ -194,7 +218,7 @@
    "merge_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
    "base_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
    "status": "ready",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay"
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only \u2014 the arm measurement is a fresh harness replay"
   },
   {
    "id": "cos#1327",
@@ -221,7 +245,7 @@
     "tokens_out": 178644,
     "cache_read": 15357952,
     "attempted_leak": 0,
-    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5112 passed",
     "diff": "paper/experiment/diffs/cardines.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/cardines.txt",
@@ -272,7 +296,7 @@
     "tokens_out": 10054,
     "cache_read": 399104,
     "attempted_leak": 0,
-    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 4467 passed",
     "diff": "paper/experiment/diffs/sesame.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/sesame.txt",
@@ -323,7 +347,7 @@
     "tokens_out": 5448,
     "cache_read": 428800,
     "attempted_leak": 0,
-    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 4883 passed",
     "diff": "paper/experiment/diffs/nonjury.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/nonjury.txt",
@@ -374,7 +398,7 @@
     "tokens_out": 9608,
     "cache_read": 0,
     "attempted_leak": 0,
-    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5298 passed",
     "diff": "paper/experiment/diffs/sepaloid.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/sepaloid.txt",
@@ -453,7 +477,7 @@
   {
    "id": "cos#1330",
    "was_arm": "raw",
-   "reason": "still open — no merged fix exists, so no replay base can be defined; independently a weak unit (pure positional refactor, no behavior change, explicit do-not-run-concurrently constraint)"
+   "reason": "still open \u2014 no merged fix exists, so no replay base can be defined; independently a weak unit (pure positional refactor, no behavior change, explicit do-not-run-concurrently constraint)"
   }
  ],
  "contaminated_v1_record": {

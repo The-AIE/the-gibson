@@ -36,7 +36,10 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "$R.end"
 echo "[$CODE] AGENT_RC=$RC lines=$(wc -l < "$R.ndjson")"
 
 echo "=== [$CODE] export artifact (binary-capable) ==="
-cd "$R" && git diff --binary FETCH_HEAD > "$HOME/ab219/patches/$CODE.patch" 2>/dev/null
-echo "[$CODE] PATCH_BYTES=$(wc -c < "$HOME/ab219/patches/$CODE.patch")"
+# git diff OMITS untracked files: newly created source files silently vanish
+# from the patch. Use the shared corrected exporter (stage-then-diff --cached).
+"$HOME/ab219/export-patch.sh" "$R" "$HOME/ab219/patches/$CODE.patch"
+cd "$R"
+echo "[$CODE] PATCH_BYTES=$(wc -c < "$HOME/ab219/patches/$CODE.patch") NEW_FILES=$(grep -c "^new file mode" "$HOME/ab219/patches/$CODE.patch" || true)"
 git diff --stat FETCH_HEAD | tail -8
 echo "[$CODE] DONE"

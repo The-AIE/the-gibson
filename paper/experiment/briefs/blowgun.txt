@@ -1,0 +1,34 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): /work
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Upload images for sponsors and partners instead of pasting a logo URL
+
+Sponsor and partner logos are entered as a URL. Organizers have image files, not hosted URLs, so they should be able to upload.
+
+## Part of a cluster — one upload pipeline, not three
+
+| Surface |
+|---|
+| Org settings save fails — Banner URL appears to hold an inlined `data:` URI |
+| Sizzle reel + poster have no upload control |
+| Sponsor / partner logos are URL-only |
+
+All three are the same missing capability: **a real image upload path that stores a hosted URL**. Building it once fixes all three; building it per-screen guarantees drift.
+
+The failure mode is already visible in the org-settings case — an Upload control that inlines base64 into a form field rather than uploading, which appears to break saving entirely. Whatever is built here must upload to a host and persist a URL, consistent with how `logoUrl` / `faviconUrl` are modeled.
+
+Note the hosts must also be CSP-allowed: `IMAGE_REMOTE_HOSTS` drives both next/image `remotePatterns` and the CSP `img-src` allowlist. An upload target that is not in that list produces images that return HTTP 200 and still render blank — exactly the CloudFront failure fixed earlier.
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in /work:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in /work. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

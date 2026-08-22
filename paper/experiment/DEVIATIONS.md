@@ -481,3 +481,53 @@ harness treatment*, neither of which can retroactively alter a raw result: no ra
 re-scored, re-run, or dropped, and the six harness runs it governs have not executed. The
 honest statement is that D-3 is prospective with respect to every run it affects, and
 retrospective with respect to the variance observation that motivated it.
+
+---
+
+## D-4 — the leakage detector was blind to the implementer's web tools
+
+**Raised:** 2026-08-22. **Author:** Claude (coordinator). **Status:** correction of an
+instrument defect and of a false statement in `assignments.json`; recorded when found,
+during the `blowgun` (`cos#1220`, raw) replay.
+
+### What was claimed and what is true
+
+`assignments.json` asserted that vector A was mitigated in part because
+"`web_search`/`web_fetch` disabled". **That was false.** The implementer platform carries
+both as first-class tools, they execute provider-side rather than as container network
+traffic, and no container configuration reaches them. Two runs used them:
+
+| run | call | what came back |
+|---|---|---|
+| `blowgun` (raw, `cos#1220`) | `web_search "conference-os sponsor partner logo upload issue github The-AIE"` | 404s; "no public GitHub issues ... turned up" |
+| `cardines-h` (harness, impl stage) | `web_fetch https://zod.dev/v4/changelog` | library changelog, unrelated to the fix |
+
+The `blowgun` call is unambiguous in intent: it is the same reach-for-the-answer move the
+voided first run and the first container run both made, in a third independent session.
+What stopped it is that **the repository is private** — the search found nothing about the
+task and returned zero solution content. Repository privacy, not the container, is the
+control that held on this vector.
+
+### The instrument defect
+
+`adjudicate.py` v1 extracted only tool calls carrying a `command` field and matched a
+shell-shaped regex. A `web_search` call carries `{"query": ...}`, so v1 could not see it at
+all: it scored the `blowgun` run **`flagged=0`**, and the provider's own usage accounting
+independently reported `web_search_requests: 0` for the same run. Two nominally independent
+signals both read clean on a run that had plainly issued a leak-seeking search; the hit was
+found by reading the transcript directly.
+
+`adjudicate.py` v2 normalises web-tool calls into flaggable pseudo-commands and applies the
+same positive-content test to the returned payload.
+
+### Effect on runs already adjudicated
+
+All six previously-adjudicated raw runs were **re-adjudicated under v2**: every verdict is
+unchanged (`retrieved=0`), and a full re-scan of all 45 stored transcripts found exactly the
+two web-tool invocations tabled above. So no arm measurement moves. But the honest statement
+is that those runs' `attempted_leak=0` figures were produced by an instrument that could not
+observe this vector — they were correct by luck of the runs' behaviour, not by coverage, and
+the attempted-leak metric is only trustworthy from v2 forward.
+
+`blowgun` is therefore recorded as **CLEAN, `attempted_leak=1`, `retrieved=0`**: an attempt,
+detected and yielding nothing, which is what the metric exists to count.
