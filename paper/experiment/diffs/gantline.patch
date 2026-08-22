@@ -1,0 +1,868 @@
+diff --git a/scripts/backfill-crm-contacts.mjs b/scripts/backfill-crm-contacts.mjs
+index 45f38a0..21b9134 100644
+--- a/scripts/backfill-crm-contacts.mjs
++++ b/scripts/backfill-crm-contacts.mjs
+@@ -88,8 +88,13 @@ async function ensureContact(orgId, person, stats, dryRun) {
+     return `dry-${email}`;
+   }
+ 
+-  const created = await prisma.crmContact.create({
+-    data: {
++  // Atomic on (organizationId, email) — concurrent/re-run creates collapse
++  // instead of throwing P2002 and aborting the batch.
++  const created = await prisma.crmContact.upsert({
++    where: {
++      organizationId_email: { organizationId: orgId, email },
++    },
++    create: {
+       organizationId: orgId,
+       email,
+       firstName: person.firstName ?? null,
+@@ -99,6 +104,7 @@ async function ensureContact(orgId, person, stats, dryRun) {
+       source: "backfill",
+       isProspect: false,
+     },
++    update: {},
+     select: { id: true },
+   });
+   stats.created++;
+@@ -165,6 +171,7 @@ async function main() {
+     linksExisting: 0,
+     skippedNoEmail: 0,
+     collisions: [],
++    rowErrors: [],
+   };
+ 
+   const people = [];
+@@ -292,10 +299,27 @@ async function main() {
+ 
+   console.log(`Subjects to process: ${people.length}`);
+ 
++  // Per-row isolation: one bad subject must not abort the batch or discard
++  // collisions already buffered from earlier rows.
+   for (const person of people) {
+-    const contactId = await ensureContact(org.id, person, stats, dryRun);
+-    if (contactId) {
+-      await ensureLink(contactId, person, stats, dryRun);
++    try {
++      const contactId = await ensureContact(org.id, person, stats, dryRun);
++      if (contactId) {
++        await ensureLink(contactId, person, stats, dryRun);
++      }
++    } catch (err) {
++      const message = err instanceof Error ? err.message : String(err);
++      stats.rowErrors.push({
++        email: person.email ?? null,
++        subjectKind: person.subjectKind,
++        subjectId: person.subjectId,
++        source: person.source,
++        error: message,
++      });
++      console.error(
++        `Row failed (${person.source} ${person.subjectKind}/${person.subjectId}):`,
++        message,
++      );
+     }
+   }
+ 
+@@ -310,6 +334,7 @@ async function main() {
+     linksExisting: stats.linksExisting,
+     skippedNoEmail: stats.skippedNoEmail,
+     collisionCount: stats.collisions.length,
++    rowErrorCount: stats.rowErrors.length,
+   }, null, 2));
+ 
+   if (stats.collisions.length > 0) {
+@@ -323,6 +348,18 @@ async function main() {
+       console.log(`  … and ${stats.collisions.length - 50} more`);
+     }
+   }
++
++  if (stats.rowErrors.length > 0) {
++    console.log("\nRow errors (batch continued):");
++    for (const e of stats.rowErrors.slice(0, 50)) {
++      console.log(
++        `  ${e.email ?? "(no email)"} (${e.source} ${e.subjectKind}/${e.subjectId}): ${e.error}`,
++      );
++    }
++    if (stats.rowErrors.length > 50) {
++      console.log(`  … and ${stats.rowErrors.length - 50} more`);
++    }
++  }
+ }
+ 
+ main()
+diff --git a/src/app/(admin)/organizer/events/[slug]/crm/actions.ts b/src/app/(admin)/organizer/events/[slug]/crm/actions.ts
+index 3b4780c..fb84b3f 100644
+--- a/src/app/(admin)/organizer/events/[slug]/crm/actions.ts
++++ b/src/app/(admin)/organizer/events/[slug]/crm/actions.ts
+@@ -575,6 +575,7 @@ export async function applyProspectCsvAction(
+       skipped: number;
+       collisions: number;
+       malformed: number;
++      failed: number;
+     }
+   | { success: false; error: string }
+ > {
+@@ -630,54 +631,66 @@ export async function applyProspectCsvAction(
+     let skipped = 0;
+     let collisions = 0;
+     let malformed = 0;
++    let failed = 0;
+ 
++    // Per-row isolation: a mid-batch throw must not discard earlier commits or
++    // collapse the response into a blanket failure.
+     for (const row of plan.rows) {
+-      if (row.action === 'malformed') {
+-        malformed++;
+-        continue;
+-      }
+-      if (row.action === 'skip') {
+-        skipped++;
+-        continue;
+-      }
+-      if (row.action === 'collision') {
+-        collisions++;
+-        continue;
+-      }
++      try {
++        if (row.action === 'malformed') {
++          malformed++;
++          continue;
++        }
++        if (row.action === 'skip') {
++          skipped++;
++          continue;
++        }
++        if (row.action === 'collision') {
++          collisions++;
++          continue;
++        }
+ 
+-      const ensured = await ensureCrmContact({
+-        organizationId,
+-        email: row.prospect.email,
+-        firstName: row.prospect.firstName,
+-        lastName: row.prospect.lastName,
+-        companyName: row.prospect.companyName,
+-        jobTitle: row.prospect.jobTitle,
+-        phone: row.prospect.phone,
+-        tags: row.prospect.tags,
+-        roleHints: row.prospect.roleHints,
+-        source: 'import',
+-        isProspect: true,
+-      });
++        const ensured = await ensureCrmContact({
++          organizationId,
++          email: row.prospect.email,
++          firstName: row.prospect.firstName,
++          lastName: row.prospect.lastName,
++          companyName: row.prospect.companyName,
++          jobTitle: row.prospect.jobTitle,
++          phone: row.prospect.phone,
++          tags: row.prospect.tags,
++          roleHints: row.prospect.roleHints,
++          source: 'import',
++          isProspect: true,
++        });
++
++        if (ensured.status === 'invalid_email') {
++          malformed++;
++          continue;
++        }
++        if (ensured.status === 'collision') {
++          collisions++;
++          continue;
++        }
+ 
+-      if (ensured.status === 'invalid_email') {
+-        malformed++;
+-        continue;
++        // Self-link as PARTNER so the contact appears on this event's people list.
++        await ensureCrmContactLink({
++          contactId: ensured.contactId,
++          eventId: event.id,
++          subjectKind: 'PARTNER',
++          subjectId: ensured.contactId,
++        });
++
++        if (row.action === 'create' || ensured.status === 'created') created++;
++        else linked++;
++      } catch (rowError) {
++        failed++;
++        log.error('applyProspectCsvAction row failed:', {
++          lineNumber: row.lineNumber,
++          action: row.action,
++          error: rowError instanceof Error ? rowError.message : String(rowError),
++        });
+       }
+-      if (ensured.status === 'collision') {
+-        collisions++;
+-        continue;
+-      }
+-
+-      // Self-link as PARTNER so the contact appears on this event's people list.
+-      await ensureCrmContactLink({
+-        contactId: ensured.contactId,
+-        eventId: event.id,
+-        subjectKind: 'PARTNER',
+-        subjectId: ensured.contactId,
+-      });
+-
+-      if (row.action === 'create' || ensured.status === 'created') created++;
+-      else linked++;
+     }
+ 
+     refreshCrm(slug);
+@@ -688,6 +701,7 @@ export async function applyProspectCsvAction(
+       skipped,
+       collisions,
+       malformed,
++      failed,
+     };
+   } catch (error) {
+     log.error('applyProspectCsvAction failed:', error);
+diff --git a/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx b/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx
+index 627a912..c50431b 100644
+--- a/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx
+@@ -64,8 +64,10 @@ export default function ProspectImportForm({ slug }: { slug: string }) {
+         setError(res.error);
+         return;
+       }
++      const failedPart =
++        res.failed > 0 ? `, ${res.failed} failed (other rows kept)` : "";
+       setApplyResult(
+-        `Imported: ${res.created} created, ${res.linked} linked/updated, ${res.skipped} skipped, ${res.collisions} collisions left for review, ${res.malformed} malformed.`,
++        `Imported: ${res.created} created, ${res.linked} linked/updated, ${res.skipped} skipped, ${res.collisions} collisions left for review, ${res.malformed} malformed${failedPart}.`,
+       );
+     });
+   }
+diff --git a/src/lib/crm/contact-spine.ts b/src/lib/crm/contact-spine.ts
+index c1a833e..e9ed9ef 100644
+--- a/src/lib/crm/contact-spine.ts
++++ b/src/lib/crm/contact-spine.ts
+@@ -52,8 +52,66 @@ export type EnsureContactResult =
+     }
+   | { status: "invalid_email" };
+ 
++type CrmContactIdentityRow = {
++  id: string;
++  firstName: string | null;
++  lastName: string | null;
++  phone: string | null;
++  companyName: string | null;
++  jobTitle: string | null;
++  tags: string[];
++  roleHints: string[];
++  isProspect: boolean;
++};
++
++type CrmContactWriteData = {
++  firstName?: string;
++  lastName?: string;
++  phone?: string;
++  companyName?: string;
++  jobTitle?: string;
++  tags?: string[];
++  roleHints?: string[];
++  isProspect?: boolean;
++};
++
++/**
++ * Non-destructive enrich for an existing contact: fill blanks + union tags/hints.
++ * Folded into upsert's `update` so create and enrich share one atomic write.
++ */
++function buildCrmContactUpdate(
++  existing: CrmContactIdentityRow,
++  input: EnsureContactInput,
++): CrmContactWriteData {
++  const tags = Array.from(
++    new Set([...(existing.tags ?? []), ...(input.tags ?? [])]),
++  ).slice(0, 40);
++  const roleHints = Array.from(
++    new Set([...(existing.roleHints ?? []), ...(input.roleHints ?? [])]),
++  ).slice(0, 20);
++
++  const data: CrmContactWriteData = {};
++  if (!existing.firstName && input.firstName) data.firstName = input.firstName;
++  if (!existing.lastName && input.lastName) data.lastName = input.lastName;
++  if (!existing.phone && input.phone) data.phone = input.phone;
++  if (!existing.companyName && input.companyName) {
++    data.companyName = input.companyName;
++  }
++  if (!existing.jobTitle && input.jobTitle) data.jobTitle = input.jobTitle;
++  if (tags.length !== (existing.tags?.length ?? 0)) data.tags = tags;
++  if (roleHints.length !== (existing.roleHints?.length ?? 0)) {
++    data.roleHints = roleHints;
++  }
++  // Once someone has a non-prospect link path, keep isProspect false.
++  if (existing.isProspect && input.isProspect === false) {
++    data.isProspect = false;
++  }
++  return data;
++}
++
+ /**
+- * Find-or-create CrmContact by org+email. NEVER auto-merges on name collision.
++ * Find-or-create CrmContact by org+email via atomic upsert.
++ * NEVER auto-merges on name collision — collision still returns without write.
+  */
+ export async function ensureCrmContact(
+   input: EnsureContactInput,
+@@ -95,57 +153,39 @@ export async function ensureCrmContact(
+     if (input.dryRun) {
+       return { status: "existing", contactId: existing.id };
+     }
++  } else if (input.dryRun) {
++    return { status: "created", contactId: "dry-run" };
++  }
+ 
+-    // Non-destructive enrich: fill blanks + merge tags/hints.
+-    const tags = Array.from(
+-      new Set([...(existing.tags ?? []), ...(input.tags ?? [])]),
+-    ).slice(0, 40);
+-    const roleHints = Array.from(
+-      new Set([...(existing.roleHints ?? []), ...(input.roleHints ?? [])]),
+-    ).slice(0, 20);
+-
+-    const data: {
+-      firstName?: string;
+-      lastName?: string;
+-      phone?: string;
+-      companyName?: string;
+-      jobTitle?: string;
+-      tags?: string[];
+-      roleHints?: string[];
+-      isProspect?: boolean;
+-    } = {};
+-    if (!existing.firstName && input.firstName) data.firstName = input.firstName;
+-    if (!existing.lastName && input.lastName) data.lastName = input.lastName;
+-    if (!existing.phone && input.phone) data.phone = input.phone;
+-    if (!existing.companyName && input.companyName) {
+-      data.companyName = input.companyName;
+-    }
+-    if (!existing.jobTitle && input.jobTitle) data.jobTitle = input.jobTitle;
+-    if (tags.length !== (existing.tags?.length ?? 0)) data.tags = tags;
+-    if (roleHints.length !== (existing.roleHints?.length ?? 0)) {
+-      data.roleHints = roleHints;
+-    }
+-    // Once someone has a non-prospect link path, keep isProspect false.
+-    if (existing.isProspect && input.isProspect === false) {
+-      data.isProspect = false;
+-    }
++  const updateData = existing ? buildCrmContactUpdate(existing, input) : null;
+ 
+-    if (Object.keys(data).length > 0) {
+-      await prisma.crmContact.update({
+-        where: { id: existing.id },
+-        data,
+-      });
+-      return { status: "updated", contactId: existing.id };
+-    }
++  // Known existing row with nothing to enrich — skip the write.
++  if (existing && updateData && Object.keys(updateData).length === 0) {
+     return { status: "existing", contactId: existing.id };
+   }
+ 
+-  if (input.dryRun) {
+-    return { status: "created", contactId: "dry-run" };
+-  }
++  // When the pre-read missed a concurrent create, append tags/hints rather
++  // than clobbering the winner's name fields (push is race-safe on PG arrays).
++  const raceUpdate = {
++    ...(input.tags && input.tags.length > 0
++      ? { tags: { push: input.tags } }
++      : {}),
++    ...(input.roleHints && input.roleHints.length > 0
++      ? { roleHints: { push: input.roleHints } }
++      : {}),
++    ...(input.isProspect === false ? { isProspect: false } : {}),
++  };
+ 
+-  const created = await prisma.crmContact.create({
+-    data: {
++  // Atomic on (organizationId, email): concurrent creates collapse to one row
++  // instead of an unhandled P2002. Tag/roleHint unions live in `update`.
++  const contact = await prisma.crmContact.upsert({
++    where: {
++      organizationId_email: {
++        organizationId: input.organizationId,
++        email,
++      },
++    },
++    create: {
+       organizationId: input.organizationId,
+       email,
+       firstName: input.firstName ?? null,
+@@ -158,12 +198,19 @@ export async function ensureCrmContact(
+       tags: input.tags ?? [],
+       roleHints: input.roleHints ?? [],
+     },
++    update: updateData ?? raceUpdate,
+     select: { id: true },
+   });
+-  // #1250: every new contact is enriched in the DB (provider is a stub today).
+-  // Safe wrapper never throws into the create path.
+-  await enrichCrmContactSafe(created.id);
+-  return { status: "created", contactId: created.id };
++
++  if (!existing) {
++    // #1250: every new contact is enriched in the DB (provider is a stub today).
++    // Safe wrapper never throws into the create path. On a create-race the
++    // loser also reaches here; enrich is idempotent / safe to overlap.
++    await enrichCrmContactSafe(contact.id);
++    return { status: "created", contactId: contact.id };
++  }
++
++  return { status: "updated", contactId: contact.id };
+ }
+ 
+ /**
+diff --git a/tests/unit/crm-contact-spine.test.ts b/tests/unit/crm-contact-spine.test.ts
+new file mode 100644
+index 0000000..47c5926
+--- /dev/null
++++ b/tests/unit/crm-contact-spine.test.ts
+@@ -0,0 +1,180 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * #875 Phase 1.1 Step A: ensureCrmContact concurrency — atomic upsert on
++ * (organizationId, email) must yield exactly one row and never throw on a
++ * simulated concurrent create race.
++ */
++
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++type ContactRow = {
++  id: string;
++  organizationId: string;
++  email: string;
++  firstName: string | null;
++  lastName: string | null;
++  phone: string | null;
++  companyName: string | null;
++  jobTitle: string | null;
++  source: string | null;
++  isProspect: boolean;
++  tags: string[];
++  roleHints: string[];
++};
++
++const mocks = vi.hoisted(() => ({
++  crmContactFindUnique: vi.fn(),
++  crmContactUpsert: vi.fn(),
++  enrichCrmContactSafe: vi.fn(),
++}));
++
++vi.mock("@/lib/db", () => ({
++  prisma: {
++    crmContact: {
++      findUnique: mocks.crmContactFindUnique,
++      upsert: mocks.crmContactUpsert,
++    },
++  },
++}));
++
++vi.mock("@/lib/crm/enrichment", () => ({
++  enrichCrmContactSafe: (...args: unknown[]) =>
++    mocks.enrichCrmContactSafe(...args),
++}));
++
++import { ensureCrmContact } from "@/lib/crm/contact-spine";
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.enrichCrmContactSafe.mockResolvedValue(undefined);
++});
++
++describe("ensureCrmContact concurrency (#875 Step A)", () => {
++  it("collapses two concurrent creates for the same org+email into one row", async () => {
++    let stored: ContactRow | null = null;
++    let upsertCalls = 0;
++
++    mocks.crmContactFindUnique.mockImplementation(async () => {
++      // Both callers race before either upsert commits.
++      return stored;
++    });
++
++    mocks.crmContactUpsert.mockImplementation(
++      async (args: {
++        where: { organizationId_email: { organizationId: string; email: string } };
++        create: Omit<ContactRow, "id">;
++        update: Record<string, unknown>;
++        select: { id: true };
++      }) => {
++        upsertCalls += 1;
++        // Yield so both findUnique calls observe null before either write.
++        await Promise.resolve();
++        if (!stored) {
++          stored = { id: "contact_1", ...args.create };
++        } else {
++          // Simulate ON CONFLICT DO UPDATE — apply push-style tag merges when present.
++          const update = args.update as {
++            tags?: { push: string[] } | string[];
++            roleHints?: { push: string[] } | string[];
++            isProspect?: boolean;
++          };
++          if (Array.isArray(update.tags)) {
++            stored.tags = update.tags;
++          } else if (update.tags && Array.isArray(update.tags.push)) {
++            stored.tags = Array.from(
++              new Set([...stored.tags, ...update.tags.push]),
++            );
++          }
++          if (Array.isArray(update.roleHints)) {
++            stored.roleHints = update.roleHints;
++          } else if (update.roleHints && Array.isArray(update.roleHints.push)) {
++            stored.roleHints = Array.from(
++              new Set([...stored.roleHints, ...update.roleHints.push]),
++            );
++          }
++          if (typeof update.isProspect === "boolean") {
++            stored.isProspect = update.isProspect;
++          }
++        }
++        return { id: stored.id };
++      },
++    );
++
++    const [a, b] = await Promise.all([
++      ensureCrmContact({
++        organizationId: "org_1",
++        email: "shared@acme.com",
++        firstName: "Ada",
++        lastName: "Lovelace",
++        tags: ["vip"],
++        source: "registration",
++      }),
++      ensureCrmContact({
++        organizationId: "org_1",
++        email: "shared@acme.com",
++        firstName: "Ada",
++        lastName: "Lovelace",
++        tags: ["speaker"],
++        source: "registration",
++      }),
++    ]);
++
++    expect(a.status).not.toBe("invalid_email");
++    expect(b.status).not.toBe("invalid_email");
++    if (a.status === "invalid_email" || b.status === "invalid_email") return;
++
++    expect(a.contactId).toBe("contact_1");
++    expect(b.contactId).toBe("contact_1");
++    expect(stored).not.toBeNull();
++    expect(upsertCalls).toBe(2);
++    // Exactly one persisted contact row for the key.
++    expect(stored!.email).toBe("shared@acme.com");
++    expect(stored!.organizationId).toBe("org_1");
++  });
++
++  it("folds tag and roleHint unions into the upsert update clause", async () => {
++    mocks.crmContactFindUnique.mockResolvedValueOnce({
++      id: "existing",
++      email: "bob@acme.com",
++      firstName: "Bob",
++      lastName: "Builder",
++      phone: null,
++      companyName: "Acme",
++      jobTitle: null,
++      tags: ["vip"],
++      roleHints: ["sponsor"],
++      isProspect: true,
++    });
++    mocks.crmContactUpsert.mockResolvedValueOnce({ id: "existing" });
++
++    const result = await ensureCrmContact({
++      organizationId: "org_1",
++      email: "bob@acme.com",
++      firstName: "Bob",
++      lastName: "Builder",
++      tags: ["speaker"],
++      roleHints: ["partner"],
++      isProspect: false,
++    });
++
++    expect(result).toEqual({ status: "updated", contactId: "existing" });
++    expect(mocks.crmContactUpsert).toHaveBeenCalledTimes(1);
++    const upsertArg = mocks.crmContactUpsert.mock.calls[0][0];
++    expect(upsertArg.update).toEqual({
++      tags: ["vip", "speaker"],
++      roleHints: ["sponsor", "partner"],
++      isProspect: false,
++    });
++    expect(upsertArg.where).toEqual({
++      organizationId_email: {
++        organizationId: "org_1",
++        email: "bob@acme.com",
++      },
++    });
++  });
++});
+diff --git a/tests/unit/crm-enrichment.test.ts b/tests/unit/crm-enrichment.test.ts
+index 0bd15e1..e4f1935 100644
+--- a/tests/unit/crm-enrichment.test.ts
++++ b/tests/unit/crm-enrichment.test.ts
+@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
+   crmContactFindMany: vi.fn(),
+   crmContactCreate: vi.fn(),
+   crmContactUpdate: vi.fn(),
++  crmContactUpsert: vi.fn(),
+   crmContactEnrichmentUpdate: vi.fn(),
+   crmContactEnrichmentUpsert: vi.fn(),
+   leadFindFirst: vi.fn(),
+@@ -33,6 +34,7 @@ vi.mock("@/lib/db", () => ({
+       findMany: mocks.crmContactFindMany,
+       create: mocks.crmContactCreate,
+       update: mocks.crmContactUpdate,
++      upsert: mocks.crmContactUpsert,
+     },
+     crmContactEnrichment: {
+       update: mocks.crmContactEnrichmentUpdate,
+@@ -297,7 +299,7 @@ describe("ensureCrmContact fires enrichment on creation", () => {
+         jobTitle: null,
+         enrichment: null,
+       });
+-    mocks.crmContactCreate.mockResolvedValueOnce({ id: "new_contact" });
++    mocks.crmContactUpsert.mockResolvedValueOnce({ id: "new_contact" });
+     mocks.crmContactEnrichmentUpsert.mockResolvedValueOnce({
+       id: "enr_new",
+       provider: "fixture",
+@@ -313,7 +315,8 @@ describe("ensureCrmContact fires enrichment on creation", () => {
+     });
+ 
+     expect(result).toEqual({ status: "created", contactId: "new_contact" });
+-    expect(mocks.crmContactCreate).toHaveBeenCalledTimes(1);
++    expect(mocks.crmContactUpsert).toHaveBeenCalledTimes(1);
++    expect(mocks.crmContactCreate).not.toHaveBeenCalled();
+     expect(mocks.crmContactEnrichmentUpsert).toHaveBeenCalledTimes(1);
+   });
+ 
+@@ -339,6 +342,7 @@ describe("ensureCrmContact fires enrichment on creation", () => {
+     });
+ 
+     expect(result.status).toBe("existing");
++    expect(mocks.crmContactUpsert).not.toHaveBeenCalled();
+     expect(mocks.crmContactCreate).not.toHaveBeenCalled();
+     expect(mocks.crmContactEnrichmentUpsert).not.toHaveBeenCalled();
+   });
+@@ -836,7 +840,7 @@ describe("ensureCrmContact enrichment timeout", () => {
+           jobTitle: null,
+           enrichment: null,
+         });
+-      mocks.crmContactCreate.mockResolvedValueOnce({ id: "new_contact" });
++      mocks.crmContactUpsert.mockResolvedValueOnce({ id: "new_contact" });
+ 
+       const pending = ensureCrmContact({
+         organizationId: "org_1",
+@@ -852,7 +856,8 @@ describe("ensureCrmContact enrichment timeout", () => {
+       const result = await pending;
+ 
+       expect(result).toEqual({ status: "created", contactId: "new_contact" });
+-      expect(mocks.crmContactCreate).toHaveBeenCalledTimes(1);
++      expect(mocks.crmContactUpsert).toHaveBeenCalledTimes(1);
++      expect(mocks.crmContactCreate).not.toHaveBeenCalled();
+       // Provider never resolved, so no enrichment row was written.
+       expect(mocks.crmContactEnrichmentUpsert).not.toHaveBeenCalled();
+       expect(mocks.crmContactEnrichmentUpdate).not.toHaveBeenCalled();
+diff --git a/tests/unit/crm-prospect-csv-apply.test.ts b/tests/unit/crm-prospect-csv-apply.test.ts
+new file mode 100644
+index 0000000..c2c3f68
+--- /dev/null
++++ b/tests/unit/crm-prospect-csv-apply.test.ts
+@@ -0,0 +1,189 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * #875 Phase 1.1 Step A: prospect CSV apply — per-row error isolation so a
++ * mid-batch failure keeps earlier rows committed and reports partial success.
++ */
++
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++const mocks = vi.hoisted(() => ({
++  requireAdmin: vi.fn(),
++  eventFindUnique: vi.fn(),
++  crmContactFindMany: vi.fn(),
++  ensureCrmContact: vi.fn(),
++  ensureCrmContactLink: vi.fn(),
++  getSiteOrganizationId: vi.fn(),
++  planProspectCsvImport: vi.fn(),
++  revalidatePath: vi.fn(),
++  logError: vi.fn(),
++}));
++
++vi.mock("@/lib/auth", () => ({
++  requireAdmin: (...args: unknown[]) => mocks.requireAdmin(...args),
++}));
++
++vi.mock("next/cache", () => ({
++  revalidatePath: (...args: unknown[]) => mocks.revalidatePath(...args),
++}));
++
++vi.mock("@/lib/db", () => ({
++  prisma: {
++    event: {
++      findUnique: (...args: unknown[]) => mocks.eventFindUnique(...args),
++    },
++    crmContact: {
++      findMany: (...args: unknown[]) => mocks.crmContactFindMany(...args),
++    },
++  },
++}));
++
++vi.mock("@/lib/logger", () => ({
++  createLogger: () => ({
++    info: vi.fn(),
++    warn: vi.fn(),
++    error: (...args: unknown[]) => mocks.logError(...args),
++  }),
++}));
++
++vi.mock("@/lib/crm/local", () => ({
++  resolveCrmSubject: vi.fn(),
++  recordCrmActivity: vi.fn(),
++}));
++
++vi.mock("@/lib/crm/local-core", () => ({
++  isValidCrmNoteBody: () => true,
++  isValidCrmTagName: () => true,
++  isValidCrmTaskTitle: () => true,
++  isCrmPipelineStage: () => false,
++  isCrmSubjectKind: () => true,
++  normalizeCrmNoteBody: (s: string) => s,
++  normalizeCrmTagName: (s: string) => s,
++  normalizeCrmTaskTitle: (s: string) => s,
++  pipelineStageWriteSideEffects: () => ({}),
++}));
++
++vi.mock("@/lib/activity-write", () => ({
++  ACTIVITY_EVENT_NAMES: {},
++}));
++
++vi.mock("@/lib/activity-write-server", () => ({
++  recordActivity: vi.fn(),
++}));
++
++vi.mock("@/lib/crm/contact-spine", () => ({
++  ensureCrmContact: (...args: unknown[]) => mocks.ensureCrmContact(...args),
++  ensureCrmContactLink: (...args: unknown[]) =>
++    mocks.ensureCrmContactLink(...args),
++  getSiteOrganizationId: (...args: unknown[]) =>
++    mocks.getSiteOrganizationId(...args),
++}));
++
++vi.mock("@/lib/crm/prospect-import", () => ({
++  planProspectCsvImport: (...args: unknown[]) =>
++    mocks.planProspectCsvImport(...args),
++}));
++
++vi.mock("@/lib/crm/enrichment", () => ({
++  enrichCrmContact: vi.fn(),
++}));
++
++import { applyProspectCsvAction } from "../../src/app/(admin)/organizer/events/[slug]/crm/actions";
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.requireAdmin.mockResolvedValue("admin_1");
++  mocks.eventFindUnique.mockResolvedValue({ id: "evt_1", slug: "space-jam" });
++  mocks.getSiteOrganizationId.mockResolvedValue("org_1");
++  mocks.crmContactFindMany.mockResolvedValue([]);
++  mocks.ensureCrmContactLink.mockResolvedValue("created");
++});
++
++describe("applyProspectCsvAction row isolation (#875 Step A)", () => {
++  it("keeps earlier rows and reports failed count when a mid-batch row throws", async () => {
++    mocks.planProspectCsvImport.mockReturnValue({
++      rows: [
++        {
++          action: "create",
++          lineNumber: 2,
++          prospect: {
++            email: "ada@example.com",
++            firstName: "Ada",
++            lastName: "Lovelace",
++            companyName: null,
++            jobTitle: null,
++            phone: null,
++            tags: [],
++            roleHints: [],
++          },
++        },
++        {
++          action: "create",
++          lineNumber: 3,
++          prospect: {
++            email: "bad@example.com",
++            firstName: "Bad",
++            lastName: "Row",
++            companyName: null,
++            jobTitle: null,
++            phone: null,
++            tags: [],
++            roleHints: [],
++          },
++        },
++        {
++          action: "create",
++          lineNumber: 4,
++          prospect: {
++            email: "charles@example.com",
++            firstName: "Charles",
++            lastName: "Babbage",
++            companyName: null,
++            jobTitle: null,
++            phone: null,
++            tags: [],
++            roleHints: [],
++          },
++        },
++      ],
++      counts: {
++        create: 3,
++        link: 0,
++        skip: 0,
++        collision: 0,
++        malformed: 0,
++        totalDataRows: 3,
++      },
++      headers: ["email"],
++      mapping: {},
++      missingEmailColumn: false,
++    });
++
++    mocks.ensureCrmContact
++      .mockResolvedValueOnce({ status: "created", contactId: "c_ada" })
++      .mockRejectedValueOnce(new Error("simulated db failure"))
++      .mockResolvedValueOnce({ status: "created", contactId: "c_charles" });
++
++    const result = await applyProspectCsvAction(
++      "space-jam",
++      "email\nada@example.com\nbad@example.com\ncharles@example.com\n",
++    );
++
++    expect(result).toEqual({
++      success: true,
++      created: 2,
++      linked: 0,
++      skipped: 0,
++      collisions: 0,
++      malformed: 0,
++      failed: 1,
++    });
++    expect(mocks.ensureCrmContact).toHaveBeenCalledTimes(3);
++    expect(mocks.ensureCrmContactLink).toHaveBeenCalledTimes(2);
++    expect(mocks.logError).toHaveBeenCalled();
++  });
++});

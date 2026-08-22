@@ -217,8 +217,32 @@
    "fixing_pr": 1350,
    "merge_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
    "base_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
-   "status": "ready",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only \u2014 the arm measurement is a fresh harness replay"
+   "status": "executed",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only \u2014 the arm measurement is a fresh harness replay",
+   "code_name": "gantline",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v3 (D-5)",
+    "census": "PASS on laptop (3129 objects, store == HEAD closure, 1 commit, no remotes, base correct, fixing merge commit 672edf7b absent) and re-verified PASS on the Mini after transfer (3129 objects); tarball sha256 a18f78bba6f99c390f1786d488b31a542c341f865a1b4cd5bc3eb1b810150442 matched end to end",
+    "inference_cost_usd": 0.318028792,
+    "wall_clock_ms": 524382,
+    "turns": 24,
+    "tokens_in": 160934,
+    "tokens_out": 29631,
+    "cache_read": 1452416,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "node scripts/agent-preflight.mjs --issue 875 -- an IN-TREE script that itself spawns gh. Returned 'Failed to load issue #875: spawnSync gh ENOENT'; zero information transferred. adjudicate.py v2 could not see this vector (no 'gh' in the command text); found by hand audit and fixed as v3. See DEVIATIONS.md D-5.",
+    "audit": "CLEAN -- retrieved=0 under adjudicate.py v3, confirmed by hand scan of every tool_use/tool_result in the transcript: no successful out-of-tree retrieval, and every gh/github string in the transcript traced to the platform's own tool catalogue or to repo documentation inside the frozen tree",
+    "gates": "VERIFIED BY COORDINATOR in-container, not taken on the implementer's word: prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 -- 5168 passed / 49 todo (490 files passed, 1 skipped)",
+    "scope_decision": "the implementer shipped Step A only (concurrency + batch-isolation) and declined Steps B-G, citing the issue's own 'Step A must land before B/C/D/E' sequencing rule; recorded as the run's own judgement, to be scored by the blind judge against the issue's acceptance criteria",
+    "diff": "paper/experiment/diffs/gantline.patch (7 files, 2 new, corrected export)",
+    "brief": "paper/experiment/briefs/gantline.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/gantline.ndjson sha256:271d38c0055ae7934363158f99edd2a1f21dadbd2aa742ea00ea5ebae06b7355",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (3 open COS PRs updated inside 24h on 2026-08-22)"
+   }
   },
   {
    "id": "cos#1327",
@@ -487,5 +511,7 @@
   "cos#1221": "closed 2026-08-15 via PR 1353",
   "cos#1220": "closed 2026-08-15 via PR 1349",
   "cos#1313": "closed 2026-08-15 via PR 1350"
- }
+ },
+ "vector_c_in_tree_tooling": "NEW 2026-08-22 (D-5), found during the gantline (cos#1313) replay: the frozen tree itself ships scripts whose job is to pull live issue/PR state (scripts/agent-preflight.mjs, scripts/agent-dispatch-packet.mjs, scripts/generate-status.mjs), and the tree's AGENTS.md instructs agents to run them. The implementer ran `node scripts/agent-preflight.mjs --issue 875` as its opening move. PREVENTION held -- the script spawns gh, which is absent from the image, so it returned 'Failed to load issue #875: spawnSync gh ENOENT' and transferred nothing. DETECTION did NOT: the command text contains no 'gh' and no URL, so adjudicate.py v2's command-side regex scored the run flagged=0. Fixed as v3.",
+ "audit_instrument": "adjudicate.py v3 (2026-08-22, D-5). v1 read only tool inputs with a 'command' field and could not see web_search/web_fetch at all (D-4). v2 added those. v3 adds (a) command-side patterns for in-tree tooling that fetches issue/PR state and (b) a result-side detector for evidence that an external fetch was attempted and failed, restricted to command-executing tools so that repo docs quoting `gh api` are not miscounted as attempts; and it resolves leak markers for harness ('-h') and pre-container dated transcript names, which previously loaded NO markers. VALIDATED ON A KNOWN POSITIVE for the first time: with markers resolved, the pre-container voided run (2026-08-21-cos1245-raw-VOID) scores VOID with retrieved=3 on the fixing PR number and merge SHA, while the containerized run of the same task scores CLEAN. All 46 stored transcripts re-scanned under v3: every in-experiment verdict unchanged (retrieved=0); the only new signal is gantline's indirect attempt. The provider's own usage counter is NOT a substitute -- it reported web_search_requests=0 for a run that demonstrably issued one."
 }
