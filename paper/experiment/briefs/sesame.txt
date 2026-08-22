@@ -1,0 +1,40 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): <WORKDIR>
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# hotfix: EventbriteClient has no retry/backoff on 429, crashes the import loader
+
+## Report
+
+Running #1142's import loader live on 2026-08-08: a dry-run immediately followed by a live run crashed the live run on its very first request with a bare stack trace (`EventbriteApiError: EventBrite API 429 TOO MANY REQUESTS`), no partial writes (crashed before reaching the write loop).
+
+## Root cause
+
+`EventbriteClient.request()` (`src/lib/eventbrite/client.ts`) throws immediately on ANY non-OK response, including 429, for every method (attendee pagination, order fetching, org events). There is no retry/backoff anywhere in the client itself. Direct curl against the same endpoint confirmed the actual state: `x-rate-limit: token:... 2000/2000 reset=1963s` — the account's quota was fully exhausted (2000/2000 used), resetting in ~33 minutes. Cumulative dry-run + live-attempt traffic across one evening's testing burned through the whole budget.
+
+## Fix (shipped, branch `fix/eventbrite-attendees-429-retry`)
+
+- Retries a 429 with exponential backoff (2s/4s/8s...) up to `maxRateLimitRetries` (default 3) — helps a short transient burst.
+- Non-429 errors (401/404/400/...) still fail immediately, unchanged — retrying those would never succeed (e.g. #1142's own page_size 400 bug from earlier the same night).
+- After retries are exhausted on a 429, throws a new `EventbriteRateLimitError` (extends `EventbriteApiError`) carrying the parsed `x-rate-limit` reset window, so a caller gets an actionable 'resets in ~33 min' message instead of a bare stack trace.
+- `parseRateLimitResetSeconds()` is a small, independently-tested parser for the `reset=<seconds>` token.
+
+No behavior change for the existing order-fetch loop's try/catch in `import-eventbrite-attendees.ts` — it already catches and logs any Error subtype, so it now just gets a clearer message for free.
+
+## Test plan
+- [x] 5 new unit tests: transient-429-then-succeeds, exhausts-retries-throws-EventbriteRateLimitError-with-parsed-reset, non-429-still-fails-immediately (regression guard), parseRateLimitResetSeconds parse + null-safety
+- [x] `npx prisma generate && npm run typecheck:ci && npm run build` — all pass
+
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in <WORKDIR>:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in <WORKDIR>. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.
