@@ -156,7 +156,9 @@ $DIFF
 
 Answer in this shape:
 
-1. VERDICT: approve | changes-requested
+1. VERDICT: APPROVE | REQUEST_CHANGES
+   (canonical tokens from AGENTS.md; aliases approve / changes-requested are
+   accepted at this adapter boundary and mapped to the same GitHub events)
 2. Defects, most important first, each with file:line and the failure it causes.
    Cover the three lenses (docs/06): security, correctness, ops.
 3. Minimal, concrete instructions the implementer should follow.
@@ -286,9 +288,12 @@ info "wrote $OUT"
 # under the dedicated identity. Builder GH_TOKEN is never used.
 if [[ "${GIBSON_FORMAL_REVIEW:-0}" == "1" && -n "${PR_NUMBER:-}" && -n "${REPO_SLUG:-${GITHUB_REPOSITORY:-}}" ]]; then
   _fr_event=""
-  if grep -qiE 'VERDICT:[[:space:]]*approve' "$OUT" 2>/dev/null; then
+  # Canonical AGENTS.md tokens are APPROVE / REQUEST_CHANGES. approve and
+  # changes-requested are explicit aliases at this adapter boundary. PASS is
+  # not a PR-review approval synonym.
+  if grep -qiE 'VERDICT:[[:space:]]*approve([^A-Za-z]|$)' "$OUT" 2>/dev/null; then
     _fr_event=approve
-  elif grep -qiE 'VERDICT:[[:space:]]*(changes-requested|request.changes)' "$OUT" 2>/dev/null; then
+  elif grep -qiE 'VERDICT:[[:space:]]*(REQUEST_CHANGES|changes-requested|request.changes)' "$OUT" 2>/dev/null; then
     _fr_event=request-changes
   fi
   if [[ -n "$_fr_event" && -f "$SCRIPT_DIR/formal-review.sh" ]]; then

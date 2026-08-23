@@ -58,6 +58,11 @@ import {
   EXPECTED_ASK_FIELDS,
   EXPECTED_ROLES,
   parseRoleTableContracts,
+  parseHumanGateEntries,
+  reviewVerdictVocabularyFindings,
+  overlayLimitFindings,
+  playbookBodyObligationFindings,
+  CANONICAL_REVIEW_HARNESS_FILES,
 } from "./lib/contract-semantics.mjs";
 import {
   isGenuineMissingPath,
@@ -940,6 +945,60 @@ function tryAuthorityText(rel) {
   }
 }
 
+{
+  const harnessFiles = {};
+  for (const rel of CANONICAL_REVIEW_HARNESS_FILES) {
+    try {
+      harnessFiles[rel] = readAuthorityText(rootId, rel);
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      if (isGenuineMissingPath(msg)) {
+        harnessFiles[rel] = null;
+      } else {
+        fail("E_PATH", `${rel}: ${msg}`);
+        harnessFiles[rel] = null;
+      }
+    }
+  }
+  for (const f of reviewVerdictVocabularyFindings({ agentsText, harnessFiles })) {
+    fail(f.code, f.message);
+  }
+}
+
+{
+  const overlayRel = "local/AGENTS.local.md";
+  let overlayText = null;
+  let overlayPresent = false;
+  try {
+    overlayText = readAuthorityText(rootId, overlayRel);
+    overlayPresent = true;
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e);
+    if (isGenuineMissingPath(msg)) {
+      overlayPresent = false;
+    } else {
+      fail("E_PATH", `${overlayRel}: ${msg}`);
+      overlayPresent = true;
+      overlayText = "";
+    }
+  }
+  if (overlayPresent) {
+    let decisionsText = null;
+    try {
+      decisionsText = readAuthorityText(rootId, "memory/DECISIONS.md");
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e);
+      if (!isGenuineMissingPath(msg)) {
+        fail("E_PATH", `memory/DECISIONS.md: ${msg}`);
+      }
+    }
+    const expectedGates = parseHumanGateEntries(agentsText).map((e) => e.id);
+    for (const f of overlayLimitFindings(overlayText, decisionsText, expectedGates)) {
+      fail(f.code, f.message);
+    }
+  }
+}
+
 for (const claim of repoClaims) {
   if (!claim || typeof claim.path !== "string") continue;
   const text = tryAuthorityText(claim.path);
@@ -966,21 +1025,33 @@ for (const extra of ["README.md", "HOW-IT-WORKS.md", "adapters/goose/README.md"]
 // Deny-list-default discovery: every repository Markdown file is an authority
 // claim surface unless it is the binding contract itself, a planted test
 // fixture, or already covered by the stricter docs/playbooks checks below.
-// This includes auto-loaded CLAUDE.md, root guides, adapters, memory, and paper.
+// Hidden auto-loaded instruction files (.claude/rules, .agents, …) are
+// included; .git is skipped by the walker. local/AGENTS.local.md is excluded
+// from this generic scan because AGENTS.md authorizes overlay precedence —
+// its Ask-Contract / human-gate limits are enforced separately above.
 const repoMarkdown = [];
 discoverMdFiles(rootId, "", repoMarkdown, fail, {
   optional: false,
-  skipHidden: true,
+  skipHidden: false,
 });
+function isRoleOverridePlaybook(rel) {
+  if (!rel.startsWith("local/playbooks/") || !rel.endsWith(".md")) return false;
+  const rest = rel.slice("local/playbooks/".length);
+  if (rest.includes("/")) return false;
+  const stem = rest.replace(/\.md$/, "");
+  return Array.isArray(roleIds) && roleIds.includes(stem);
+}
+
 for (const rel of [...new Set(repoMarkdown)].sort()) {
   if (
     rel === "AGENTS.md" ||
     rel === "local/AGENTS.local.md" ||
-    rel.startsWith(".") ||
+    rel === ".git" ||
+    rel.startsWith(".git/") ||
     rel.startsWith("config/policy/fixtures/") ||
     rel.startsWith("docs/") ||
     rel.startsWith("playbooks/") ||
-    rel.startsWith("local/playbooks/") ||
+    isRoleOverridePlaybook(rel) ||
     checkedRepoClaimPaths.has(rel)
   ) {
     continue;
@@ -1129,6 +1200,13 @@ const checkedPlaybooks = [];
       for (const diff of diffObligationMatrix(role, authBuckets, pbBuckets)) {
         fail(diff.code, diff.message);
       }
+      for (const diff of playbookBodyObligationFindings(
+        role,
+        authBuckets,
+        fm.body || ""
+      )) {
+        fail(diff.code, diff.message);
+      }
     }
   }
 
@@ -1171,6 +1249,11 @@ const checkedPlaybooks = [];
       };
       for (const diff of remapRoleCodesToJob(
         diffObligationMatrix(job, authBuckets, pbBuckets)
+      )) {
+        fail(diff.code, diff.message);
+      }
+      for (const diff of remapRoleCodesToJob(
+        playbookBodyObligationFindings(job, authBuckets, fm.body || "")
       )) {
         fail(diff.code, diff.message);
       }
