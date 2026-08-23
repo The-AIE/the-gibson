@@ -2343,3 +2343,291 @@ export function provenanceRoleFindings(sources) {
   }
   return findings;
 }
+
+/**
+ * Canonical PR-review terminal verdicts. The merge harness
+ * (`scripts/release-preflight.sh`, `scripts/second-opinion.sh`) accepts
+ * VERDICT: APPROVE / REQUEST_CHANGES. Stated limit: playbooks/ux-evaluator.md
+ * uses VERDICT: PASS for graded live-preview eval; that token is not a
+ * PR-review approval and is not consumed by the merge harness.
+ */
+export const CANONICAL_REVIEW_VERDICT_POSITIVE = "APPROVE";
+export const CANONICAL_REVIEW_VERDICT_NEGATIVE = "REQUEST_CHANGES";
+export const CANONICAL_REVIEW_HARNESS_FILES = [
+  "scripts/second-opinion.sh",
+  "scripts/release-preflight.sh",
+];
+
+const REVIEW_VERDICT_TOKEN_RE = /\bVERDICT:\s*([A-Za-z][A-Za-z0-9_-]*)/g;
+
+function collectVerdictTokens(text) {
+  const tokens = new Set();
+  const src = String(text || "");
+  const re = new RegExp(REVIEW_VERDICT_TOKEN_RE.source, "gi");
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const tok = String(m[1] || "").toUpperCase().replace(/-/g, "_");
+    if (tok) tokens.add(tok);
+  }
+  return tokens;
+}
+
+function harnessAcceptsApprove(text) {
+  const t = String(text || "");
+  if (/VERDICT:\\s\*\(APPROVE/.test(t)) return true;
+  if (/VERDICT:\\s\*\(APPROVE\|REQUEST_CHANGES\)/.test(t)) return true;
+  if (/VERDICT:\[\[:space:\]\]\*approve/i.test(t)) return true;
+  if (/VERDICT:\[\[:space:\]\]\*\(APPROVE/i.test(t)) return true;
+  if (/VERDICT:\s*APPROVE\b/i.test(t)) return true;
+  if (/VERDICT:\s*approve\b/.test(t)) return true;
+  if (/\bAPPROVE\|REQUEST_CHANGES\b/.test(t) && /\bVERDICT\b/.test(t)) return true;
+  return false;
+}
+
+function harnessAcceptsPass(text) {
+  const t = String(text || "");
+  if (/VERDICT:\\s\*\(PASS/.test(t)) return true;
+  if (/VERDICT:\[\[:space:\]\]\*PASS/i.test(t)) return true;
+  if (/VERDICT:\s*PASS\b/i.test(t)) return true;
+  if (/\bVERDICT: PASS\b/.test(t)) return true;
+  return false;
+}
+
+/**
+ * Document and merge-harness reviewer verdicts must agree. Missing harness
+ * files fail closed (cannot determine authority).
+ *
+ * @param {{
+ *   agentsText: string,
+ *   harnessFiles: Record<string, string | null | undefined>,
+ * }} input
+ * @returns {Array<{ code: string, message: string }>}
+ */
+export function reviewVerdictVocabularyFindings(input) {
+  const findings = [];
+  const agentsText = input && input.agentsText != null ? String(input.agentsText) : "";
+  const harnessFiles =
+    input && input.harnessFiles && typeof input.harnessFiles === "object"
+      ? input.harnessFiles
+      : null;
+  if (!agentsText.trim()) {
+    findings.push({
+      code: "E_VERDICT_VOCABULARY",
+      message: "cannot determine reviewer verdict vocabulary: AGENTS.md is empty",
+    });
+    return findings;
+  }
+  const roleSection = extractSection(agentsText, "Your role this session") || "";
+  const lensSection = extractSection(agentsText, "Review lenses (binding)") || "";
+  const mergeSection = extractSection(agentsText, "Commit, PR, and merge") || "";
+  const hay = `${roleSection}\n${lensSection}\n${mergeSection}`;
+  const tokens = collectVerdictTokens(hay);
+  if (!tokens.has(CANONICAL_REVIEW_VERDICT_POSITIVE)) {
+    findings.push({
+      code: "E_VERDICT_VOCABULARY",
+      message: `AGENTS.md reviewer verdicts must include VERDICT: ${CANONICAL_REVIEW_VERDICT_POSITIVE}; got ${JSON.stringify([...tokens].sort())}`,
+    });
+  }
+  if (tokens.has("PASS")) {
+    findings.push({
+      code: "E_VERDICT_VOCABULARY",
+      message: `AGENTS.md reviewer/merge sections list VERDICT: PASS; canonical PR-review positive verdict is ${CANONICAL_REVIEW_VERDICT_POSITIVE}`,
+    });
+  }
+  if (!tokens.has(CANONICAL_REVIEW_VERDICT_NEGATIVE)) {
+    findings.push({
+      code: "E_VERDICT_VOCABULARY",
+      message: `AGENTS.md reviewer verdicts must include VERDICT: ${CANONICAL_REVIEW_VERDICT_NEGATIVE}; got ${JSON.stringify([...tokens].sort())}`,
+    });
+  }
+  if (!harnessFiles) {
+    findings.push({
+      code: "E_VERDICT_VOCABULARY",
+      message: "cannot determine review-verdict harness: harness file map is missing",
+    });
+    return findings;
+  }
+  for (const rel of CANONICAL_REVIEW_HARNESS_FILES) {
+    if (!Object.prototype.hasOwnProperty.call(harnessFiles, rel)) {
+      findings.push({
+        code: "E_VERDICT_VOCABULARY",
+        message: `${rel}: cannot determine review-verdict harness (not consulted)`,
+      });
+      continue;
+    }
+    const text = harnessFiles[rel];
+    if (text == null || String(text).trim() === "") {
+      findings.push({
+        code: "E_VERDICT_VOCABULARY",
+        message: `${rel}: cannot determine review-verdict harness (file missing or empty)`,
+      });
+      continue;
+    }
+    const acceptsApprove = harnessAcceptsApprove(text);
+    const acceptsPass = harnessAcceptsPass(text);
+    if (!acceptsApprove) {
+      findings.push({
+        code: "E_VERDICT_VOCABULARY",
+        message: `${rel} does not accept VERDICT: ${CANONICAL_REVIEW_VERDICT_POSITIVE} (document/harness disagreement)`,
+      });
+    }
+    if (acceptsPass && !acceptsApprove) {
+      findings.push({
+        code: "E_VERDICT_VOCABULARY",
+        message: `${rel} requires VERDICT: PASS without translating VERDICT: ${CANONICAL_REVIEW_VERDICT_POSITIVE}`,
+      });
+    }
+  }
+  return findings;
+}
+
+const OVERLAY_GATE_REMOVAL_AFTER_RE =
+  /\b(G(?:[1-9]|1[0-6]))\b[\s\S]{0,160}?\b(?:removed|waived|deleted|dropped|rescinded|repealed|retired|no longer applies|does not apply|is optional|may be skipped|is not required|not required)\b/gi;
+const OVERLAY_GATE_REMOVAL_BEFORE_RE =
+  /\b(?:remove|waive|delete|drop|rescind|repeal|retire|skip)\b[\s\S]{0,80}?\b(G(?:[1-9]|1[0-6]))\b/gi;
+
+function overlayRemovalAuthorized(decisionsText, gateId) {
+  const t = String(decisionsText || "");
+  if (!t.trim()) return false;
+  const id = String(gateId || "");
+  if (!id || !new RegExp(`\\b${id}\\b`).test(t)) return false;
+  if (!/\bowner\b/i.test(t)) return false;
+  if (!/\b(?:removed|removal|waived|waiver)\b/i.test(t)) return false;
+  return true;
+}
+
+/**
+ * Enforce AGENTS.md overlay limits on local/AGENTS.local.md: Ask Contract
+ * may not be weakened, and G1–G16 may be extended but not removed unless
+ * memory/DECISIONS.md records an owner decision. Empty overlay or missing
+ * expected gate ids fail closed.
+ *
+ * @param {string} overlayText
+ * @param {string | null | undefined} decisionsText
+ * @param {string[]} expectedGateIds
+ * @returns {Array<{ code: string, message: string }>}
+ */
+export function overlayLimitFindings(overlayText, decisionsText, expectedGateIds) {
+  const findings = [];
+  const text = overlayText == null ? "" : String(overlayText);
+  if (!text.trim()) {
+    findings.push({
+      code: "E_OVERLAY",
+      message:
+        "local/AGENTS.local.md is present but empty; cannot determine overlay limits",
+    });
+    return findings;
+  }
+  if (!Array.isArray(expectedGateIds) || expectedGateIds.length === 0) {
+    findings.push({
+      code: "E_OVERLAY",
+      message:
+        "cannot determine human-gate list to enforce overlay limits (fail closed)",
+    });
+    return findings;
+  }
+
+  const hay = authorityClaimHaystack(text);
+  if (/\bAsk Contract\b/i.test(hay)) {
+    if (obligationNegated(hay, "Ask Contract") || clauseWeakensBinding(hay, "Ask Contract")) {
+      findings.push({
+        code: "E_OVERLAY",
+        message: "local/AGENTS.local.md weakens the Ask Contract",
+      });
+    }
+  }
+  for (const field of EXPECTED_ASK_FIELDS) {
+    if (!hay.includes(field)) continue;
+    if (obligationNegated(hay, field) || clauseWeakensBinding(hay, field)) {
+      findings.push({
+        code: "E_OVERLAY",
+        message: `local/AGENTS.local.md weakens Ask Contract field "${field}"`,
+      });
+    }
+  }
+
+  const entries = parseHumanGateEntries(text);
+  if (entries.length) {
+    const got = new Set(entries.map((e) => e.id));
+    for (const id of expectedGateIds) {
+      if (got.has(id)) continue;
+      if (overlayRemovalAuthorized(decisionsText, id)) continue;
+      findings.push({
+        code: "E_OVERLAY",
+        message: `local/AGENTS.local.md removes human gate ${id} without an owner decision in memory/DECISIONS.md`,
+      });
+    }
+  }
+
+  const seen = new Set();
+  for (const re of [OVERLAY_GATE_REMOVAL_AFTER_RE, OVERLAY_GATE_REMOVAL_BEFORE_RE]) {
+    re.lastIndex = 0;
+    let m;
+    while ((m = re.exec(hay)) !== null) {
+      const id = m[1];
+      if (!expectedGateIds.includes(id) || seen.has(id)) continue;
+      seen.add(id);
+      if (overlayRemovalAuthorized(decisionsText, id)) continue;
+      findings.push({
+        code: "E_OVERLAY",
+        message: `local/AGENTS.local.md removes or waives human gate ${id} without an owner decision in memory/DECISIONS.md`,
+      });
+    }
+  }
+  return findings;
+}
+
+function isUnqualifiedMergeForbidden(item) {
+  const tokens = contentTokens(normalizeObligation(item));
+  return tokens.length === 1 && /^merg/.test(tokens[0] || "");
+}
+
+function requiresGreenGate(item) {
+  return /\bgreen gate\b/.test(normalizeObligation(item));
+}
+
+const BODY_GRANT_MERGE_RE =
+  /\b(?:may|can|allowed to|permitted to)\s+merge\b/i;
+const BODY_SKIP_GREEN_RE =
+  /\bgreen gate\b[\s\S]{0,80}\b(?:may be skipped|can be skipped|is optional|is waived|need not run)\b/i;
+const BODY_SKIP_GREEN_RE2 =
+  /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
+
+/**
+ * Playbook / job BODY must not invert frontmatter obligations. Frontmatter
+ * parity alone is not enough: "the builder may merge" or "the green gate
+ * may be skipped" in the mandatory prompt body changes agent behaviour.
+ *
+ * @param {string} id
+ * @param {{ forbidden?: string[], gates?: string[], outputs?: string[] }} authBuckets
+ * @param {string} body
+ * @returns {Array<{ code: string, message: string }>}
+ */
+export function playbookBodyObligationFindings(id, authBuckets, body) {
+  const findings = [];
+  const forbidden = Array.isArray(authBuckets && authBuckets.forbidden)
+    ? authBuckets.forbidden
+    : [];
+  const gates = Array.isArray(authBuckets && authBuckets.gates)
+    ? authBuckets.gates
+    : [];
+  const hay = authorityClaimHaystack(body || "");
+  if (!hay.trim()) return findings;
+
+  if (forbidden.some(isUnqualifiedMergeForbidden) && BODY_GRANT_MERGE_RE.test(hay)) {
+    findings.push({
+      code: "E_ROLE_NEGATION",
+      message: `${id} body grants merge authority while forbidden lists merging`,
+    });
+  }
+  if (
+    gates.some(requiresGreenGate) &&
+    (BODY_SKIP_GREEN_RE.test(hay) || BODY_SKIP_GREEN_RE2.test(hay))
+  ) {
+    findings.push({
+      code: "E_ROLE_NEGATION",
+      message: `${id} body permits skipping the green gate while gates require it`,
+    });
+  }
+  return findings;
+}

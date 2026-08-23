@@ -179,6 +179,11 @@ const ALLOWED_NOTICES_KEYS = new Set([
 
 const CORE_ID_PREFIX = "gibson.";
 const SAFE_REL_PATH = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/;
+// Contained reads (authority scan, digest) allow hidden in-root instruction
+// dirs (.claude, .agents, .github). Provenance paths stay on SAFE_REL_PATH.
+// Exact `.` / `..` segments are refused separately. `.git` is never legal.
+const CONTAINED_REL_PATH =
+  /^(?!.*(?:^|\/)\.git(?:\/|$))(?:[a-zA-Z0-9][a-zA-Z0-9._-]*|\.[a-zA-Z0-9._-]+)(?:\/(?:[a-zA-Z0-9][a-zA-Z0-9._-]*|\.[a-zA-Z0-9._-]+))*$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const GATE_ID_RE = /^G([1-9]|1[0-6])$/;
 const DEFAULT_MANIFEST_REL =
@@ -457,7 +462,7 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
   ) {
     throw new Error(`path: escapes repo root: ${relPath}`);
   }
-  if (!SAFE_REL_PATH.test(norm)) {
+  if (!CONTAINED_REL_PATH.test(norm)) {
     throw new Error(`path: malformed relative path: ${relPath}`);
   }
   // Bind to the immutable root identity (string → resolve; token → re-assert).
