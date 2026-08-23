@@ -2482,15 +2482,19 @@ export function reviewVerdictVocabularyFindings(input) {
 }
 
 const OVERLAY_GATE_REMOVAL_AFTER_RE =
-  /\b(G(?:[1-9]|1[0-6]))\b[\s\S]{0,160}?\b(?:removed|waived|deleted|dropped|rescinded|repealed|retired|no longer applies|does not apply|is optional|may be skipped|is not required|not required)\b/gi;
+  /\b(G\d+)\b[\s\S]{0,160}?\b(?:removed|waived|deleted|dropped|rescinded|repealed|retired|no longer applies|does not apply|is optional|may be skipped|is not required|not required)\b/gi;
 const OVERLAY_GATE_REMOVAL_BEFORE_RE =
-  /\b(?:remove|waive|delete|drop|rescind|repeal|retire|skip)\b[\s\S]{0,80}?\b(G(?:[1-9]|1[0-6]))\b/gi;
+  /\b(?:remove|waive|delete|drop|rescind|repeal|retire|skip)\b[\s\S]{0,80}?\b(G\d+)\b/gi;
 const OVERLAY_AUTH_VERB_RE = /\b(approved|authorized|waived)\b/gi;
 const OVERLAY_REMOVAL_ACTION_RE =
   /\b(?:removed|removing|removal|remove|waived|waiving|waiver|waive)\b/i;
 const OVERLAY_AUTH_NEGATION_RE =
   /\b(?:not|never|no|nor|don't|do not|didn't|did not|cannot|can't|wasn't|weren't|isn't|aren't|neither)\b/i;
-const OVERLAY_GATE_ID_RE = /G(?:[1-9]|1[0-6])/;
+/** Any G-number, including unpublished future ids. Mixed-gate uniqueness uses this. */
+const OVERLAY_GATE_ID_RE = /G\d+/;
+const CLAUSE_PREDICATE_START_RE =
+  /\b(?:is|are|was|were|be|been|being|may|can|must|shall|should|might|could|did|does|do|has|have|had|approved|authorized|waived|rejected|declined|permitted|allowed|prohibited|required)\b/i;
+const ACTOR_COORD_RE = /(?:(?:,\s+|\s+)(?:and|or)\s+)/gi;
 const OVERLAY_GATE_POLARITY_SPLIT_RE = new RegExp(
   `,\\s+(?=(?:not|nor|neither)\\s+${OVERLAY_GATE_ID_RE.source}\\b)`,
   "i"
@@ -2560,14 +2564,74 @@ function splitOverlayClauses(sentence) {
   return parts;
 }
 
+function leadingActor(text) {
+  const src = collapseWs(text);
+  if (!src) return "";
+  const m = CLAUSE_PREDICATE_START_RE.exec(src);
+  if (!m || m.index === 0) return "";
+  return collapseWs(src.slice(0, m.index));
+}
+
+function classifyCoordRhs(rhs) {
+  const t = collapseWs(rhs);
+  if (!t) return "object";
+  if (/^G\d+\b/i.test(t)) return "object";
+  const pred = CLAUSE_PREDICATE_START_RE.exec(t);
+  if (!pred) return "object";
+  return pred.index === 0 ? "ellipsis" : "clause";
+}
+
+/**
+ * Split coordinated subject/action clauses. Object coordination
+ * (`G17 and G12`) stays one unit. A verb-phrase remainder keeps the
+ * left-hand actor so polarity of "did not oppose … and approved …"
+ * is local to each predicate. A new noun-phrase subject starts its
+ * own clause (`owner rejected … and counsel approved …`).
+ */
+function splitCoordinatedActorClauses(text) {
+  const src = collapseWs(normalizeApostrophes(text));
+  if (!src) return [];
+  const parts = [];
+  let last = 0;
+  let actor = leadingActor(src);
+  const re = new RegExp(ACTOR_COORD_RE.source, "gi");
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index < last) continue;
+    const left = collapseWs(src.slice(last, m.index));
+    const right = collapseWs(src.slice(m.index + m[0].length));
+    if (!left || !right) continue;
+    const kind = classifyCoordRhs(right);
+    if (kind === "object") continue;
+    parts.push(left);
+    last = m.index + m[0].length;
+    if (kind === "clause") {
+      actor = leadingActor(right) || actor;
+    }
+  }
+  let tail = collapseWs(src.slice(last));
+  if (tail) {
+    if (parts.length && classifyCoordRhs(tail) === "ellipsis" && actor) {
+      tail = collapseWs(`${actor} ${tail}`);
+    }
+    parts.push(tail);
+  }
+  return parts.length ? parts : [src];
+}
+
+function verbInRelativeClause(text, verbIndex) {
+  return /\b(?:that|which|who)\s+$/i.test(String(text || "").slice(0, verbIndex));
+}
+
 /**
  * Same-sentence / `Decided:` units that may authorize a named-gate
  * removal. Sibling `Rejected:` fields are omitted so they cannot
- * authorize or poison another gate. Adversative and contrastive
- * named-gate polarity clauses stay independent so "approved G11, not
- * G12" cannot authorize G12, while "did not approve G11, but approved
- * G12" can. After those splits, a unit that still names more than one
- * G1–G16 gate cannot authorize any of them.
+ * authorize or poison another gate. Adversative, contrastive, and
+ * coordinated subject/action clauses stay independent so "approved
+ * G11, not G12" cannot authorize G12, while "did not approve G11, but
+ * approved G12" can, and "did not oppose … and approved G12" binds
+ * approval to the owner remainder. After those splits, a unit that
+ * still names more than one G-number cannot authorize any of them.
  */
 function overlayAuthorizationUnits(decisionsText) {
   const src = String(decisionsText || "");
@@ -2580,7 +2644,9 @@ function overlayAuthorizationUnits(decisionsText) {
       for (const sent of polarityUnits(field.body)) {
         for (const adv of splitAdversativeClauses(sent)) {
           for (const clause of splitOverlayClauses(adv)) {
-            units.push(clause);
+            for (const actorPart of splitCoordinatedActorClauses(clause)) {
+              units.push(actorPart);
+            }
           }
         }
       }
@@ -2629,11 +2695,12 @@ function overlayNamedGateIds(text) {
 /**
  * Same-clause owner authorization requires an un-negated approval verb,
  * an un-negated remove/waive act, and an un-negated named gate bound in
- * that coordinated clause. A unit may authorize the target only when it
- * names no other G1–G16 gate; independently split units still authorize
- * when they carry their own owner approval and removal/waiver. `not G12`
- * / `neither … G12` deny G12 even when a sibling gate is approved in the
- * same sentence.
+ * that coordinated clause. Relative-clause verbs (`decision that waived
+ * G12`) are not the clause's decision. A unit may authorize the target
+ * only when it names no other G-number; independently split units still
+ * authorize when they carry their own owner approval and removal/waiver.
+ * `not G12` / `neither … G12` deny G12 even when a sibling gate is
+ * approved in the same sentence.
  */
 function clauseAuthorizesGateRemoval(clause, gateId) {
   const t = collapseWs(clause);
@@ -2648,6 +2715,7 @@ function clauseAuthorizesGateRemoval(clause, gateId) {
   const actions = overlayRegexMatches(OVERLAY_REMOVAL_ACTION_RE, t);
   if (!verbs.length || !actions.length) return false;
   for (const verb of verbs) {
+    if (verbInRelativeClause(t, verb.index)) continue;
     if (overlayAuthVerbNegated(t.slice(0, verb.index))) continue;
     for (const action of actions) {
       if (
@@ -2802,8 +2870,10 @@ function grantPolarityUnits(hay) {
   const out = [];
   for (const unit of polarityUnits(hay)) {
     for (const adv of splitAdversativeClauses(unit)) {
-      for (const part of splitOverlayClauses(adv)) {
-        if (part) out.push(part);
+      for (const actorPart of splitCoordinatedActorClauses(adv)) {
+        for (const part of splitOverlayClauses(actorPart)) {
+          if (part) out.push(part);
+        }
       }
     }
   }
@@ -2825,19 +2895,65 @@ function unnegatedPermissionSpans(text) {
   );
 }
 
+function clauseSubjectIsIndependent(text) {
+  const actor = leadingActor(text) || String(text || "").slice(0, 80);
+  return /\b(?:independent|different|another|other)\s+(?:agent|reviewer)s?\b/i.test(
+    actor
+  );
+}
+
+function independentReviewNotRequired(text) {
+  const t = String(text || "");
+  if (!/\b(?:independent|different|another|other)\s+(?:agent|reviewer)s?\b/i.test(t)) {
+    return false;
+  }
+  if (!REVIEW_ACT_RE.test(t)) return false;
+  return (
+    /\b(?:is|are|was|were)\s+not\s+required\b/i.test(t) ||
+    /\bneed not\b/i.test(t) ||
+    /\b(?:does|do|did)\s+not\s+(?:need|have)\s+to\b/i.test(t) ||
+    /\bnot\s+necessary\b/i.test(t)
+  );
+}
+
+function topicLocallyExcluded(text, index) {
+  const before = collapseWs(String(text || "").slice(0, index));
+  const last = (before.split(/\s+/).filter(Boolean).pop() || "")
+    .replace(/[^A-Za-z']/g, "");
+  if (LOCAL_POLARITY_TOKEN_RE.test(last)) return true;
+  if (/^(?:except|excluding)$/i.test(last)) return true;
+  return false;
+}
+
+function ownWorkGrantedIn(text) {
+  const re = new RegExp(OWN_WORK_TOPIC_RE.source, "gi");
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (!topicLocallyExcluded(text, m.index)) return true;
+  }
+  return false;
+}
+
 function sameAgentGrantAt(text, span) {
   const before = text.slice(0, span.index);
   const after = text.slice(span.index);
+  const afterEnd = text.slice(span.end);
+  if (clauseSubjectIsIndependent(text)) return false;
   const subject = /\bsame[\s-]?agent\b/i.test(before);
   if (/\bbe\s+(?:the\s+)?same[\s-]?agent\b/i.test(after)) return true;
   if (subject && /\bbe\s+(?:the\s+)?reviewer\b/i.test(after)) return true;
   if (subject && REVIEW_ACT_RE.test(after)) return true;
+  if (subject && /\breview\b/i.test(before)) return true;
+  if (/\b(?:be\s+)?reviewed\s+by\s+(?:the\s+)?same[\s-]?agent\b/i.test(afterEnd)) {
+    return true;
+  }
   return false;
 }
 
 function selfReviewGrantTopic(unit) {
   const text = collapseWs(String(unit || ""));
   if (!text) return null;
+  if (independentReviewNotRequired(text)) return "same-agent";
   const perms = unnegatedPermissionSpans(text);
   if (!perms.length) return null;
   let sameAgentGrant = false;
@@ -2847,27 +2963,36 @@ function selfReviewGrantTopic(unit) {
     const before = text.slice(0, span.index);
     const after = text.slice(span.end);
     if (
-      /\bself[\s-]?review\b/i.test(text) ||
-      OWN_WORK_TOPIC_RE.test(text) ||
-      (REVIEW_ACT_RE.test(after) && OWN_WORK_TOPIC_RE.test(`${before} ${after}`))
+      /\bself[\s-]?review\b/i.test(text) &&
+      !clauseSubjectIsIndependent(text)
+    ) {
+      ownGrant = true;
+    }
+    if (
+      ownWorkGrantedIn(text) ||
+      (REVIEW_ACT_RE.test(after) && ownWorkGrantedIn(`${before} ${after}`))
     ) {
       ownGrant = true;
     }
   }
   if (!sameAgentGrant && !ownGrant) return null;
-  if (/\bgenerat/i.test(text) && /\b(?:own|self)\b/i.test(text)) {
+  if (/\bgenerat/i.test(text) && /\b(?:own|self)\b/i.test(text) && ownWorkGrantedIn(text)) {
     return "own generation";
   }
-  if (/\bself[\s-]?review\b/i.test(text)) return "self-review";
+  if (/\bself[\s-]?review\b/i.test(text) && !clauseSubjectIsIndependent(text)) {
+    return "self-review";
+  }
   if (sameAgentGrant) return "same-agent";
   return "own work";
 }
 
 /**
  * Modal, noun, and passive self-review grants are clause-local.
- * Semicolon and adversative units are not joined, so a prohibition on
- * the same agent cannot bind a later grant to a different agent.
- * Local modal/passive polarity is classified before a grant is recorded.
+ * Coordinated subject/action clauses, semicolons, and adversative units
+ * are not joined, so a prohibition on the same agent cannot bind a later
+ * permission for an independent or different subject. Own-work topics
+ * under local not/except polarity are not grants. Local modal/passive
+ * polarity is classified before a grant is recorded.
  */
 function bodySelfReviewGrantTopic(hay) {
   for (const unit of grantPolarityUnits(hay)) {
