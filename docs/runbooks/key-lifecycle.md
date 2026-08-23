@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Key lifecycle — per-lane GitHub App identities
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Three robot identities commit and push agent work.
 > Each one has a private key file on a specific machine. This page says where
 > those files live, how to shut an identity off if a machine is compromised,

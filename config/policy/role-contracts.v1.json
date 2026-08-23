@@ -1,0 +1,325 @@
+{
+  "schemaId": "gibson.role-contracts.v1",
+  "schemaVersion": "1.0.0",
+  "authority": "activated",
+  "designatedBy": "AGENTS.md",
+  "note": "Authoritative per-role and per-job outputs, gates, and prohibitions. Playbook frontmatter is a routing mirror of this file and must not add, drop, rename, weaken, or negate these obligations. A job prompt may add job-specific procedure in the body. This file is not the report-only #164 candidate.",
+  "agentsRoleTable": {
+    "planner": {
+      "out": "PLAN.md with numbered testable acceptance criteria",
+      "forbidden": "implementation code"
+    },
+    "decomposer": {
+      "out": "dependency-ordered issues, each with a sprint contract",
+      "forbidden": "overlapping live claims; issues without contracts"
+    },
+    "builder": {
+      "out": "green-gate branch + PR; claim first",
+      "forbidden": "canonical checkout; merge; self-review; casual new deps"
+    },
+    "test-engineer": {
+      "out": "executable check per criterion; regression test per bug",
+      "forbidden": "weakening/deleting failing tests; happy-path-only on Tier C (adversarial cases required)"
+    },
+    "reviewer": {
+      "out": "VERDICT: APPROVE or VERDICT: REQUEST_CHANGES on the exact head; six lenses with file:line findings",
+      "forbidden": "merging; reviewing own generation; rubber-stamp LGTM"
+    },
+    "ux-evaluator": {
+      "out": "graded eval of the live preview",
+      "forbidden": "grading from the diff or the builder's description"
+    },
+    "security": {
+      "out": "eight-layer results; adversarial pass on Tier C",
+      "forbidden": "softening a hard-fail layer to report-only; destructive production testing (DAST vs preview/staging only)"
+    },
+    "release": {
+      "out": "merge, verify deploy, smoke, cleanup; delivery-control audit → dry-run → human-apply when asked",
+      "forbidden": "merging Tier C/schema without G12; more than one schema merge in flight; force-push main; rotating secrets (G4); silent --apply without dry-run"
+    },
+    "historian": {
+      "out": "append lessons/decisions; harness PRs",
+      "forbidden": "rewriting others' lessons; skipping a twice-failure"
+    }
+  },
+  "roles": {
+    "planner": {
+      "outputs": [
+        "PLAN.md (or GitHub Discussion) with problem, scope/non-scope, architecture sketch, risks, deliverables with numbered testable acceptance criteria",
+        "for UI work: design language (typography, color, spacing, aesthetic intent)",
+        "Operator translation when Operator-tier (doc 16) — plain summary is contractual"
+      ],
+      "gates": [
+        "human approves the plan (Stage 0 — cheapest place to be wrong)",
+        "constrain to deliverables, not granular implementation detail"
+      ],
+      "forbidden": [
+        "writing implementation code",
+        "over-specifying how builders must implement"
+      ]
+    },
+    "decomposer": {
+      "outputs": [
+        "dependency-ordered GitHub issues, each one mergeable unit with sprint contract",
+        "epic/tracking issue linking children and mirroring PLAN deliverables"
+      ],
+      "gates": [
+        "scripts/decompose-lint.mjs passes",
+        "second agent spot-check for overlap and oversized units",
+        "no issues that overlap live claims"
+      ],
+      "forbidden": [
+        "issues without contracts",
+        "parallel issues that both claim the same hot file without Blocked-by",
+        "schema changes as riders on feature issues"
+      ]
+    },
+    "builder": {
+      "outputs": [
+        "claim row + agent-claimed label",
+        "git worktree + branch feat/<issue>-<slug>",
+        "green-gate-passing commits (Signed-off-by)",
+        "PR referencing Closes #<N>; contract criteria addressed"
+      ],
+      "gates": [
+        "claim before touch (docs/05)",
+        "green gate before every commit (docs/06)",
+        "zero new failures vs. branch-point baseline",
+        "never edit the canonical checkout"
+      ],
+      "forbidden": [
+        "editing outside claimed scope",
+        "editing the canonical checkout",
+        "merging",
+        "reviewing own work",
+        "casual new dependencies (prefer REST/fetch; hot-file rule on package.json)"
+      ]
+    },
+    "test-engineer": {
+      "outputs": [
+        "executable checks for every contract criterion",
+        "regression test for every bug fixed",
+        "criterion → test ID map on the PR",
+        "reduced test.todo count on feature PRs"
+      ],
+      "gates": [
+        "CI test job green",
+        "criterion coverage complete (not % coverage — criterion coverage)",
+        "no weakening/deleting failing tests to pass the gate"
+      ],
+      "forbidden": [
+        "deleting or softening failing tests to go green",
+        "happy-path-only on Tier C (adversarial cases required)"
+      ]
+    },
+    "reviewer": {
+      "outputs": [
+        "PR review with file:line findings across six lenses",
+        "final line exactly: VERDICT: APPROVE | VERDICT: REQUEST_CHANGES"
+      ],
+      "gates": [
+        "never review own generation (Law 5)",
+        "cross-vendor when available (reviewer_platform ≠ builder)",
+        "fail closed: missing/broken reviewer blocks merge",
+        "Tier C: FAN-OUT + adversarial refutation pass"
+      ],
+      "forbidden": [
+        "merging",
+        "rubber-stamp LGTM without per-lens clearance",
+        "writing implementation code in the builder's branch"
+      ]
+    },
+    "ux-evaluator": {
+      "outputs": [
+        "eval report on the PR: score table, screenshot gallery, bug filings",
+        "PASS or REQUEST_CHANGES",
+        "statement that every contract flow was driven, not assumed"
+      ],
+      "gates": [
+        "evaluate the deployment, not the diff (rule zero)",
+        "never the same agent as the builder",
+        "axe critical/serious = 0 hard fail",
+        "any grade criterion < 7 → REQUEST_CHANGES",
+        "visual diff above threshold needs explicit PR approval"
+      ],
+      "forbidden": [
+        "grading from the builder's description or the code diff alone",
+        "passing a flow you did not actually drive",
+        "writing product code in the builder's branch"
+      ]
+    },
+    "security": {
+      "outputs": [
+        "layer results table on the PR",
+        "findings as issues with severity + exploit-path reasoning",
+        "hard-fail vs report-only classification per docs/08"
+      ],
+      "gates": [
+        "hard-fail layers block merge (secrets, SAST high+, supply critical, authz, DAST high+, adversarial verdict, AI-surface, posture regression)",
+        "DAST active scan never against prod",
+        "confirmed secret leak → human gate G4"
+      ],
+      "forbidden": [
+        "report-only softening of a hard-fail layer",
+        "destructive payloads against production"
+      ]
+    },
+    "release": {
+      "outputs": [
+        "merge to integration branch",
+        "verified deploy (commit SHA + READY)",
+        "post-deploy smoke green",
+        "cleanup: worktree, branch, claim, issue closed",
+        "delivery-control audit → dry-run → human-apply when asked"
+      ],
+      "gates": [
+        "Closes #N present; contract checkboxes verified",
+        "CI green (gate + tests + security hard-fail)",
+        "review VERDICT: APPROVE; UX eval pass when applicable",
+        "DCO/Signed-off-by survives squash",
+        "Tier C / schema → human approval",
+        "one schema merge in flight fleet-wide"
+      ],
+      "forbidden": [
+        "merging Tier C or schema without human gate",
+        "more than one schema merge in flight",
+        "force-pushing main",
+        "rotating secrets (G4)",
+        "silent `--apply` without dry-run"
+      ]
+    },
+    "historian": {
+      "outputs": [
+        "LESSONS.md appends (never rewrites others' entries)",
+        "DECISIONS.md when architecture/process choices land",
+        "harness-improvement issues/PRs",
+        "weekly digest material (what learned, what changed, cost trend)"
+      ],
+      "gates": [
+        "twice-failure or uncaught failure must produce a lesson (Law 9)",
+        "harness changes go through normal pipeline",
+        "loosening human gates / tiers / hard-fail thresholds = Tier C"
+      ],
+      "forbidden": [
+        "editing lessons others wrote (append only)",
+        "letting a twice-failure pass without a lesson",
+        "silent skips of the retro sweep"
+      ]
+    }
+  },
+  "jobs": {
+    "adopt": {
+      "outputs": [
+        "adoption report (harnessability grade + fix-list)",
+        "PR(s) installing AGENTS section, labels, CI, Playwright scaffold, active-work.md",
+        "baseline failure record + burn-down issues",
+        "canary Tier A issue per runtime"
+      ],
+      "gates": [
+        "every human ask uses the Ask Contract (what / does / why / risks)",
+        "no irreversible install without approval (PRs, not force-push)",
+        "low harnessability → affordance issues first, not full autonomy promises"
+      ],
+      "forbidden": [
+        "transplanting CI without calibration",
+        "claiming \"adopted\" before Tier A flows end-to-end with zero human touches"
+      ]
+    },
+    "delivery-control": {
+      "outputs": [
+        "audit report (protection + branch-model truth + drift)",
+        "optional harden of branch protection / Production environment",
+        "optional promote / hotfix / forward-port actions (after confirm)"
+      ],
+      "gates": [
+        "audit is always first and read-only",
+        "harden/promote/hotfix require dry-run then explicit human apply",
+        "secret rotation never performed (G4 handoff only)",
+        "force-push never"
+      ],
+      "forbidden": [
+        "rotating NEON_API_KEY or any long-lived secret",
+        "silent --apply without dry-run shown to the operator",
+        "force-push to main / release / production refs",
+        "promote during freeze without hotfix discipline"
+      ]
+    },
+    "deploy-audit": {
+      "outputs": [
+        "reports/deploy-audit-<date>.md scorecard",
+        "top 5 optimizations ranked by impact÷effort",
+        "optimization issues filed (docs/04) when in write mode"
+      ],
+      "gates": [
+        "inspect is read-only by default",
+        "every optimization PR must carry before/after metrics (docs/17)",
+        "no-regression: worsening a budgeted metric → REQUEST_CHANGES"
+      ],
+      "forbidden": [
+        "inventing field vitals when Analytics unavailable",
+        "optimizing without a measurement plan"
+      ]
+    },
+    "dogfood-overnight": {
+      "outputs": [
+        "Preflight green from scripts/dogfood-prep.sh",
+        "Overnight loop journal under <repo>/gibson/journal.md",
+        "Evidence copy under memory/dogfood/ after review",
+        "At least one merged PR (done criterion for issue #96)"
+      ],
+      "gates": [
+        "Preflight must pass before --run",
+        "--run requires --confirm YES",
+        "Kill switch: touch <repo>/gibson/HALT or GIBSON_HALT=1",
+        "Do not dogfood parked Goose live-path issues (#28/#33/#36) without lab approval"
+      ],
+      "forbidden": [
+        "Unattended --run without confirm",
+        "Publishing marketing artifacts (docs/14)",
+        "Force-push, secrets, production destroy"
+      ]
+    },
+    "loop-step": {
+      "outputs": [
+        "hat-specific artifacts (PR, tests, verdict, eval, merge, lesson)",
+        "updated gibson/loop-state.md (next hat / next action / round count)",
+        "append to gibson/journal.md",
+        "MC heartbeat when configured"
+      ],
+      "gates": [
+        "kill switch checked by driver before this prompt runs (docs/11)",
+        "fresh context per hat — do not assume prior conversation memory",
+        "bounded retries: per-tier fix→review caps in `config/review-round-caps.json` (A=1 / B=2 / C=3 by default) then park + human; the driver enforces this",
+        "human-gated work is queued, not force-merged"
+      ],
+      "forbidden": [
+        "wearing multiple hats in one context (driver must reset)",
+        "self-APPROVE of code you just built in the same context without file re-read",
+        "ignoring error budget / park rules"
+      ]
+    },
+    "token-efficiency": {
+      "outputs": [
+        "graded dispatch (G / S / F) with chosen runner and escalate path",
+        "bounded run (retries, error/stale budgets, stop or park decision)",
+        "cost-ledger event(s) and optional summarize rollup when measured",
+        "plain-language status: continue / reroute / stop with quality evidence"
+      ],
+      "gates": [
+        "flat-rate-first for volume; metered only for judgment that needs it (docs/15)",
+        "never grade below the task's minimum capability floor",
+        "green gate, exact-head CI, cross-vendor review, and deploy/runtime verification stay absolute (docs/06, docs/12, docs/20)",
+        "no-model checks stay no-model (scripts/*, ci/*)",
+        "missing usage stays unknown — never invent tokens or dollars"
+      ],
+      "forbidden": [
+        "weakening gates, truncating required evidence, or reusing stale reviews",
+        "routing Tier B/C evaluation below S, or Tier C adversarial below F",
+        "changing billing, plan settings, keys, env secrets, or provider routing config",
+        "inventing fixed dollar prices or assuming a vendor's current plan rate",
+        "treating flat-rate / subscription usage as free or unlimited",
+        "unbounded coordinators / infinite retry on the same failure"
+      ]
+    }
+  }
+}

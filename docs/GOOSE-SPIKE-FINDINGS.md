@@ -6,6 +6,9 @@ nav_order: 26
 
 # Goose spike findings (#28) — paperwork + architecture pass
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** before betting the harness on Goose, we checked license
 > (already done) and whether we can keep Gibson's brand while using Goose as the
 > engine. This records a paperwork/architecture pass only. Issue #28 remains open.

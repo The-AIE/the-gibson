@@ -6,6 +6,9 @@ nav_order: 22
 
 # 22 — The Cloud Supervisor: Devin as Reviewer and Merger
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** A cheap, fast agent does the building on your own machine
 > all day. When a piece of work is finished, it is handed to one always-available
 > cloud agent that checks the work, puts it up on GitHub, waits for the tests, and
@@ -38,7 +41,7 @@ rather than by asking a runner to be honest about its own diff.
 1. grok          implement → green gate → fix        (repeat, flat-rate)
 2. codex/claude  read-only second opinion            (after --escalate-after N failures)
 3. devin cloud   review the diff, PR, CI, merge      (when the branch is ready)
-4. human         the gate list in docs/14            (never automated away)
+4. human         the gate list in AGENTS.md          (never automated away)
 ```
 
 Nothing escalates on a task that goes green on the first pass, which is most of them.

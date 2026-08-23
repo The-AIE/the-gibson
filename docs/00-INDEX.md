@@ -5,6 +5,9 @@ nav_order: 8
 
 # Documentation index — reading order by audience
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 If you only open one file, use the row that matches you. Glossary:
 [00-glossary.md](00-glossary.md).
 
@@ -19,8 +22,8 @@ If you only open one file, use the row that matches you. Glossary:
 
 1. [QUICKSTART.md](../QUICKSTART.md) — clone → first adopted repo
 2. [GUIDE.md](../GUIDE.md) — day-to-day: briefs, gates, loop, adopt
-3. [AGENTS.md](../AGENTS.md) — the contract agents load
-4. [docs/14-human-gates.md](14-human-gates.md) — closed list of stops
+3. [AGENTS.md](../AGENTS.md) — the contract agents load (closed G1–G16 list lives here)
+4. [docs/14-human-gates.md](14-human-gates.md) — on-demand rationale for those stops
 5. [docs/15-model-economics.md](15-model-economics.md) — who runs what (doctrine)
 6. [playbooks/token-efficiency.md](../playbooks/token-efficiency.md) — route, bound, measure, keep quality
 7. [docs/16-nontechnical-operation.md](16-nontechnical-operation.md) — how to talk to Operators
@@ -37,12 +40,12 @@ If you only open one file, use the row that matches you. Glossary:
 
 ## 🤖 Agent (any runtime)
 
-1. [AGENTS.md](../AGENTS.md)  
-2. `local/AGENTS.local.md` if present  
-3. Target repo `AGENTS.md`  
-4. [memory/LESSONS.md](../memory/LESSONS.md) (tag-filter)  
-5. Role playbook under [playbooks/](../playbooks/)  
-6. Stage detail only as needed from the map below
+1. [AGENTS.md](../AGENTS.md) — **the only mandatory human-readable contract**
+2. `local/AGENTS.local.md` if present (fork overlay)
+3. Target repo `AGENTS.md`
+4. [memory/LESSONS.md](../memory/LESSONS.md) — tag-filter consult, not full-file ingest
+5. Role playbook under [playbooks/](../playbooks/) when dispatched to that role
+6. Everything in the map below is **on-demand and non-normative**
 
 ## 📚 Doctrine map (full set)
 

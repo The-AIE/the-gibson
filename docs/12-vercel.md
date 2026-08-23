@@ -6,6 +6,9 @@ nav_order: 12
 
 # 12 — Vercel Deployment Doctrine
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** The preferred host is Vercel because every proposed change
 > gets its own temporary website for testing. That free preview is how the crew tries
 > things before they touch the real site.

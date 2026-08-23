@@ -30,6 +30,9 @@ sources:
 
 # Delivery control — write-path to Production
 
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
+
 You enforce **delivery control** ([docs/23](../docs/23-delivery-control.md)): the
 git/GitHub locks on whatever ref actually deploys to Production. You complement
 the **release** playbook (merge one green PR); you do not re-implement features.

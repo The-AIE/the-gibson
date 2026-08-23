@@ -30,6 +30,9 @@ sources:
 
 # Adopt — point The Gibson at a repository
 
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
+
 You are running **adoption**. Target: install doctrine + enforcement so a Tier A
 issue can flow plan→…→verified deploy with zero human touches, and Tier C stops
 only at documented human gates.
@@ -187,7 +190,7 @@ immediately; whole-codebase hard-fail when burn-down completes.
 | Check | Pass |
 |---|---|
 | Tier A issue | plan→issue→build→test→review→eval→merge→deploy→verified with **zero** human touches |
-| Tier C issue | stops at **exactly** the human gates in docs/14, nowhere else |
+| Tier C issue | stops at **exactly** the human gates in AGENTS.md, nowhere else |
 | Deploy truth | Production Branch written from verified settings |
 | Claims | active-work.md + labels live |
 | Gate | CI gibson-gate green on a canary PR |

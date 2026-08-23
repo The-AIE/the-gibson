@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Intake question (planner → Operator)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 One question at a time. Business vocabulary only.
 
 ```

@@ -6,6 +6,9 @@ nav_order: 25
 
 # Autonomy modes — Crew Chief / downstream boundary
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** four settings for how much the AI may do alone, plus
 > per-tool overrides for dangerous actions. This page **defines and maps** the
 > modes so adapters and products share vocabulary. It does **not** adopt new
@@ -31,12 +34,13 @@ Gibson. Until a **separate adoption decision** (issue #24 acceptance / owner
 gate) records otherwise:
 
 - **Authoritative stops** remain the closed list in
-  [docs/14-human-gates.md](14-human-gates.md) and Law 7 (Tier C).
+  [`AGENTS.md`](../AGENTS.md) (G1–G16) and Law 7 (Tier C). `docs/14` is
+  rationale only.
 - Existing solo-loop / operator docs keep whatever posture they already state;
   do not read this page as changing unattended grind or Operator-tier defaults.
 - Products that map these modes (e.g. Chatterbuilt Crew Chief) choose their own
-  product defaults under their own decision process — still subject to docs/14
-  when operating as Gibson fleet work.
+  product defaults under their own decision process — still subject to the
+  AGENTS.md stop list when operating as Gibson fleet work.
 
 ## Per-tool overrides
 
@@ -50,7 +54,7 @@ These **supersede** the session mode for a specific tool or action class:
 
 ## Mandatory escalations (never autonomous)
 
-Regardless of mode, the following always require a human (docs/14, Law 7):
+Regardless of mode, the following always require a human (AGENTS.md G1–G16, Law 7):
 
 - Money / pricing / billing code merges
 - Production launch of new user-visible surfaces
@@ -67,7 +71,7 @@ Offline wiring lives in [`adapters/goose/permission-map.yaml`](../adapters/goose
 and is enforced by [`adapters/goose/enforce.sh`](../adapters/goose/enforce.sh) (#35):
 
 - Session mode → Goose autonomy analogue (table above); **defaults still not forced**
-  unattended — docs/14 remains authoritative until a separate adoption decision
+  unattended — AGENTS.md remains the stop authority until a separate adoption decision
 - Gibson gate/claim/release → recipe-mandated shell steps via `enforce.sh`
   (`pre-edit`, `pre-commit`, `release`); green-gate tools are **Always allow** so
   permission prompts cannot skip the gate

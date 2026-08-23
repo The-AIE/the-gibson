@@ -143,12 +143,57 @@
               "role": {
                 "type": "string",
                 "enum": [
-                  "canonical-doctrine",
-                  "compatibility-doctrine",
+                  "human-readable-contract",
+                  "explanatory-history",
                   "supporting"
-                ]
+                ],
+                "description": "Provenance role. `human-readable-contract` is bound to AGENTS.md only. Every docs/** pin is `explanatory-history`. `supporting` is for non-doc supporting files. `compatibility-doctrine` is retired."
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": {
+                    "path": { "const": "AGENTS.md" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "role": { "const": "human-readable-contract" }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "type": "object",
+                  "required": ["path"],
+                  "properties": {
+                    "path": { "pattern": "^docs/" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "role": { "const": "explanatory-history" }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "type": "object",
+                  "required": ["role"],
+                  "properties": {
+                    "role": { "const": "human-readable-contract" }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "path": { "const": "AGENTS.md" }
+                  }
+                }
+              }
+            ]
           }
         }
       }
@@ -384,7 +429,18 @@
           },
           "name": {
             "type": "string",
-            "minLength": 1
+            "enum": [
+              "PLAN",
+              "DECOMPOSE",
+              "BUILD",
+              "TEST",
+              "REVIEW",
+              "UX-EVAL",
+              "SECURITY",
+              "MERGE",
+              "DEPLOY+VERIFY",
+              "RETRO"
+            ]
           },
           "roleId": {
             "type": "string"

@@ -1,0 +1,115 @@
+{
+  "schemaId": "gibson.rule-migration-audit.v1",
+  "schemaVersion": "1.0.0",
+  "issue": 208,
+  "authority": "AGENTS.md",
+  "note": "Semantic rule→home audit for #208. Binding force lives in AGENTS.md or presently activated/operational machine sources named there. The report-only candidate is a checked mirror only until #164.",
+  "families": [
+    {
+      "id": "authority-load-order",
+      "label": "Authority, fixed vs conditional load, fork overlay, target contract, tag-filtered lessons",
+      "home": "AGENTS.md: Authority and mandatory load",
+      "machine": ["config/policy/mandatory-read-chain.v1.json", "scripts/contract-authority.mjs", "scripts/contract-read-check.mjs"]
+    },
+    {
+      "id": "ten-laws",
+      "label": "Ten Laws",
+      "home": "AGENTS.md: The Ten Laws",
+      "machine": ["scripts/gate.sh", "scripts/test-integrity.mjs", "scripts/scope-overlap.mjs", "scripts/release-claim.sh", "scripts/contract-met.mjs", "scripts/truthful-status.mjs"]
+    },
+    {
+      "id": "ask-contract",
+      "label": "Ask Contract four fields",
+      "home": "AGENTS.md: The Ask Contract",
+      "machine": [
+        "scripts/contract-authority.mjs"
+      ]
+    },
+    {
+      "id": "role-outputs-prohibitions",
+      "label": "Nine roles and per-role outputs/prohibitions",
+      "home": "AGENTS.md: Your role this session + config/policy/role-contracts.v1.json",
+      "machine": ["config/policy/role-contracts.v1.json", "scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "forbidden-role-pairs",
+      "label": "Forbidden builder/reviewer/UX pairs and cross-vendor default",
+      "home": "AGENTS.md: Your role this session",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "six-lens-review",
+      "label": "Six-lens review with file:line findings",
+      "home": "AGENTS.md: Review lenses (binding)",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "tier-c-adversarial-tests",
+      "label": "Tier C adversarial test cases required",
+      "home": "AGENTS.md: Your role this session (test-engineer)",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "no-destructive-prod-testing",
+      "label": "No destructive production testing / DAST vs preview-staging only",
+      "home": "AGENTS.md: Your role this session (security) + Security layers",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "eight-security-layers",
+      "label": "Eight security layers",
+      "home": "AGENTS.md: Security layers (binding)",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "self-modification-gates",
+      "label": "Self-modification gates for human gates / tiers / hard-fail security layers",
+      "home": "AGENTS.md: Self-modification bounds (binding)",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "delivery-control",
+      "label": "Delivery-control audit, dry-run, human-apply",
+      "home": "AGENTS.md: Delivery control (binding)",
+      "machine": ["scripts/delivery-control/", "scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "workflow-stages",
+      "label": "Ten workflow stages and skip recording",
+      "home": "AGENTS.md: The pipeline you are inside",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "human-gates",
+      "label": "G1–G16 closed stop list and explicit non-gates",
+      "home": "AGENTS.md: Human gates",
+      "machine": ["scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "style-commitments",
+      "label": "Style commitments versus technical decisions",
+      "home": "AGENTS.md: Style commitments",
+      "machine": [
+        "scripts/contract-authority.mjs"
+      ]
+    },
+    {
+      "id": "risk-tiers",
+      "label": "Tier A/B/C definitions, escalation, review strength, stateful serialization",
+      "home": "AGENTS.md: Risk tiers",
+      "machine": ["config/review-round-caps.json", "scripts/contract-authority.mjs"]
+    },
+    {
+      "id": "commit-pr-merge",
+      "label": "Pre-commit pipeline, DCO, exact-head review, merge order",
+      "home": "AGENTS.md: Commit, PR, and merge",
+      "machine": ["scripts/gate.sh", "scripts/setup-hooks.sh", "scripts/release-claim.sh", "scripts/contract-met.mjs"]
+    },
+    {
+      "id": "concurrency",
+      "label": "Claims, worktrees, hot files, lane limit, rebase, no shared force-push",
+      "home": "AGENTS.md: Concurrency",
+      "machine": ["scripts/scope-overlap.mjs", "scripts/claim.sh", "scripts/release-claim.sh"]
+    }
+  ]
+}

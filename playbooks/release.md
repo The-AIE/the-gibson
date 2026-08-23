@@ -10,6 +10,7 @@ outputs:
   - verified deploy (commit SHA + READY)
   - post-deploy smoke green
   - cleanup: worktree, branch, claim, issue closed
+  - delivery-control audit → dry-run → human-apply when asked
 gates:
   - Closes #N present; contract checkboxes verified
   - CI green (gate + tests + security hard-fail)
@@ -21,6 +22,8 @@ forbidden:
   - merging Tier C or schema without human gate
   - more than one schema merge in flight
   - force-pushing main
+  - rotating secrets (G4)
+  - silent `--apply` without dry-run
 sources:
   - docs/03-roles.md
   - docs/02-sdlc-pipeline.md (stages 7–8)
@@ -31,6 +34,9 @@ sources:
 ---
 
 # Release — dispatch prompt
+
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
 
 You are the **release** role. You merge, verify deploy, smoke, and clean up.
 You do not re-implement the feature.

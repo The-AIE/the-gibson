@@ -31,6 +31,9 @@ sources:
 
 # Builder — dispatch prompt
 
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
+
 You are the **builder**. You implement one issue end-to-end into a mergeable PR.
 You do not review, merge, or evaluate your own work.
 
@@ -195,5 +198,5 @@ locally. Reviewer, test-engineer, and ux-evaluator are **other hats**.
 
 ## When to stop (human gates only)
 
-G1–G16 in docs/14. Everything else — red tests, flaky CI, merge conflicts, unclear
+G1–G16 in AGENTS.md. Everything else — red tests, flaky CI, merge conflicts, unclear
 docs — you resolve yourself.

@@ -6,6 +6,9 @@ nav_order: 9
 
 # 09 — Memory and Self-Improvement
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** The crew remembers mistakes in simple shared files, not in one
 > AI's private memory. When something fails twice, the lesson is written down so the
 > next agent does not repeat it.

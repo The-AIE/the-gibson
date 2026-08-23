@@ -6,6 +6,9 @@ nav_order: 10
 
 # 10 — Vendor Adapters: One Doctrine, Any Runtime
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** The rules are the same no matter which AI brand you use.
 > Brand-specific folders only add convenience. They never invent private rules that
 > other tools would not know about.
