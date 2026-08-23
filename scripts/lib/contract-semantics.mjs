@@ -2471,10 +2471,10 @@ export function reviewVerdictVocabularyFindings(input) {
         message: `${rel} does not accept VERDICT: ${CANONICAL_REVIEW_VERDICT_POSITIVE} (document/harness disagreement)`,
       });
     }
-    if (acceptsPass && !acceptsApprove) {
+    if (acceptsPass) {
       findings.push({
         code: "E_VERDICT_VOCABULARY",
-        message: `${rel} requires VERDICT: PASS without translating VERDICT: ${CANONICAL_REVIEW_VERDICT_POSITIVE}`,
+        message: `${rel} accepts VERDICT: PASS; canonical PR-review positive verdict is ${CANONICAL_REVIEW_VERDICT_POSITIVE}`,
       });
     }
   }
@@ -2485,22 +2485,137 @@ const OVERLAY_GATE_REMOVAL_AFTER_RE =
   /\b(G(?:[1-9]|1[0-6]))\b[\s\S]{0,160}?\b(?:removed|waived|deleted|dropped|rescinded|repealed|retired|no longer applies|does not apply|is optional|may be skipped|is not required|not required)\b/gi;
 const OVERLAY_GATE_REMOVAL_BEFORE_RE =
   /\b(?:remove|waive|delete|drop|rescind|repeal|retire|skip)\b[\s\S]{0,80}?\b(G(?:[1-9]|1[0-6]))\b/gi;
+const OVERLAY_AUTH_VERB_RE = /\b(approved|authorized|waived)\b/gi;
+const OVERLAY_REMOVAL_ACTION_RE =
+  /\b(?:removed|removing|removal|remove|waived|waiving|waiver|waive)\b/i;
+const OVERLAY_AUTH_NEGATION_RE =
+  /\b(?:not|never|no|don't|do not|didn't|did not|cannot|can't|wasn't|weren't|isn't|aren't|neither)\b/i;
+
+function overlayRegexMatches(re, text) {
+  const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
+  const clone = new RegExp(re.source, flags);
+  const out = [];
+  let m;
+  while ((m = clone.exec(text)) !== null) {
+    if (!m[0]) {
+      clone.lastIndex += 1;
+      continue;
+    }
+    out.push({ index: m.index, end: m.index + m[0].length });
+  }
+  return out;
+}
+
+/**
+ * Split an ADR-lite ledger into labeled fields. `Rejected:` alternatives
+ * are returned so callers can ignore them; they must neither authorize
+ * nor veto another gate's `Decided:` unit.
+ */
+function splitAdrLabeledFields(entry) {
+  const text = String(entry || "");
+  const re = /(^|\r?\n)((?:Decided|Rejected|Revisit when))\s*:/gi;
+  const hits = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    hits.push({
+      label: m[2],
+      labelIndex: m.index + m[1].length,
+      bodyIndex: m.index + m[0].length,
+    });
+  }
+  if (!hits.length) return [{ label: "", body: text }];
+  const fields = [];
+  const prefix = text.slice(0, hits[0].labelIndex);
+  if (collapseWs(prefix)) fields.push({ label: "", body: prefix });
+  for (let i = 0; i < hits.length; i++) {
+    const end = i + 1 < hits.length ? hits[i + 1].labelIndex : text.length;
+    fields.push({
+      label: hits[i].label,
+      body: text.slice(hits[i].bodyIndex, end),
+    });
+  }
+  return fields;
+}
+
+function splitOverlayClauses(sentence) {
+  const src = collapseWs(sentence);
+  if (!src) return [];
+  return src
+    .split(/\s*;\s+/)
+    .map((part) => collapseWs(part))
+    .filter(Boolean);
+}
+
+/**
+ * Same-sentence / `Decided:` units that may authorize a named-gate
+ * removal. Sibling `Rejected:` fields are omitted so they cannot
+ * authorize or poison another gate.
+ */
+function overlayAuthorizationUnits(decisionsText) {
+  const src = String(decisionsText || "");
+  if (!src.trim()) return [];
+  const units = [];
+  for (const chunk of src.split(/^##\s+/m)) {
+    if (!collapseWs(chunk)) continue;
+    for (const field of splitAdrLabeledFields(chunk)) {
+      if (/^rejected$/i.test(field.label)) continue;
+      for (const sent of polarityUnits(field.body)) {
+        for (const clause of splitOverlayClauses(sent)) {
+          units.push(clause);
+        }
+      }
+    }
+  }
+  return units;
+}
+
+function overlayAuthVerbNegated(before) {
+  const tail = collapseWs(before).split(/\s+/).slice(-10).join(" ");
+  return OVERLAY_AUTH_NEGATION_RE.test(tail);
+}
+
+/**
+ * Same-clause owner authorization requires an un-negated approval verb
+ * and an un-negated remove/waive act. Negation between them
+ * ("approved no removal", "approved not to remove") fails closed.
+ */
+function clauseAuthorizesGateRemoval(clause, gateId) {
+  const t = collapseWs(clause);
+  const id = String(gateId || "");
+  if (!t || !id) return false;
+  if (!new RegExp(`\\b${escapeRe(id)}\\b`).test(t)) return false;
+  if (!/\bowner\b/i.test(t)) return false;
+  const verbs = overlayRegexMatches(OVERLAY_AUTH_VERB_RE, t);
+  const actions = overlayRegexMatches(OVERLAY_REMOVAL_ACTION_RE, t);
+  if (!verbs.length || !actions.length) return false;
+  for (const verb of verbs) {
+    if (overlayAuthVerbNegated(t.slice(0, verb.index))) continue;
+    for (const action of actions) {
+      if (action.index === verb.index) return true;
+      const lo = Math.min(verb.end, action.end);
+      const hi = Math.max(verb.index, action.index);
+      if (OVERLAY_AUTH_NEGATION_RE.test(t.slice(lo, hi))) continue;
+      return true;
+    }
+  }
+  return false;
+}
 
 function overlayRemovalAuthorized(decisionsText, gateId) {
-  const t = String(decisionsText || "");
-  if (!t.trim()) return false;
   const id = String(gateId || "");
-  if (!id || !new RegExp(`\\b${id}\\b`).test(t)) return false;
-  if (!/\bowner\b/i.test(t)) return false;
-  if (!/\b(?:removed|removal|waived|waiver)\b/i.test(t)) return false;
-  return true;
+  if (!id) return false;
+  for (const unit of overlayAuthorizationUnits(decisionsText)) {
+    if (clauseAuthorizesGateRemoval(unit, id)) return true;
+  }
+  return false;
 }
 
 /**
  * Enforce AGENTS.md overlay limits on local/AGENTS.local.md: Ask Contract
  * may not be weakened, and G1–G16 may be extended but not removed unless
- * memory/DECISIONS.md records an owner decision. Empty overlay or missing
- * expected gate ids fail closed.
+ * memory/DECISIONS.md records an un-negated same-gate owner authorization
+ * (`Decided:` / same-sentence). Empty overlay or missing expected gate ids
+ * fail closed. Sibling `Rejected:` fields do not authorize.
  *
  * @param {string} overlayText
  * @param {string | null | undefined} decisionsText
@@ -2554,7 +2669,7 @@ export function overlayLimitFindings(overlayText, decisionsText, expectedGateIds
       if (overlayRemovalAuthorized(decisionsText, id)) continue;
       findings.push({
         code: "E_OVERLAY",
-        message: `local/AGENTS.local.md removes human gate ${id} without an owner decision in memory/DECISIONS.md`,
+        message: `local/AGENTS.local.md removes human gate ${id} without an affirmative same-gate owner authorization in memory/DECISIONS.md`,
       });
     }
   }
@@ -2570,7 +2685,7 @@ export function overlayLimitFindings(overlayText, decisionsText, expectedGateIds
       if (overlayRemovalAuthorized(decisionsText, id)) continue;
       findings.push({
         code: "E_OVERLAY",
-        message: `local/AGENTS.local.md removes or waives human gate ${id} without an owner decision in memory/DECISIONS.md`,
+        message: `local/AGENTS.local.md removes or waives human gate ${id} without an affirmative same-gate owner authorization in memory/DECISIONS.md`,
       });
     }
   }
@@ -2586,17 +2701,61 @@ function requiresGreenGate(item) {
   return /\bgreen gate\b/.test(normalizeObligation(item));
 }
 
+function isSelfReviewObligation(item) {
+  const n = normalizeObligation(item);
+  if (!n) return false;
+  if (/\bself[\s-]?review\b/.test(n)) return true;
+  if (/\bsame[\s-]?agent\b/.test(n)) return true;
+  if (!/\b(?:own|self)\b/.test(n)) return false;
+  if (/\bgenerat/.test(n)) return true;
+  if (/\bwork\b/.test(n)) return true;
+  if (/\breview/.test(n)) return true;
+  return false;
+}
+
 const BODY_GRANT_MERGE_RE =
   /\b(?:may|can|allowed to|permitted to)\s+merge\b/i;
 const BODY_SKIP_GREEN_RE =
   /\bgreen gate\b[\s\S]{0,80}\b(?:may be skipped|can be skipped|is optional|is waived|need not run)\b/i;
 const BODY_SKIP_GREEN_RE2 =
   /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
+const BODY_SELF_REVIEW_GRANT_RE =
+  /\b(?:may|can|allowed to|permitted to)\s+(?:review|evaluate|evaluating|grade|grading)\b[\s\S]{0,80}?\b(?:(?:its|their|your|our|my)\s+own|own\s+(?:generation|work)|self(?:[\s-]+(?:review|generation|work)))\b/i;
+const BODY_SAME_AGENT_SUBJECT_GRANT_RE =
+  /\bsame[\s-]?agent\b[\s\S]{0,80}?\b(?:may|can|allowed to|permitted to)\s+(?:review|evaluate|evaluating|grade|grading)\b/i;
+const BODY_SAME_AGENT_IDENTITY_GRANT_RE =
+  /\b(?:may|can|allowed to|permitted to)\s+be\s+(?:the\s+)?same[\s-]?agent\b/i;
+
+function selfReviewGrantTopic(unit) {
+  const text = String(unit || "");
+  if (!text) return null;
+  const sameAgentGrant =
+    BODY_SAME_AGENT_SUBJECT_GRANT_RE.test(text) ||
+    BODY_SAME_AGENT_IDENTITY_GRANT_RE.test(text);
+  const ownGrant = BODY_SELF_REVIEW_GRANT_RE.test(text);
+  if (!sameAgentGrant && !ownGrant) return null;
+  const lower = text.toLowerCase();
+  if (/\bgenerat/.test(lower)) return "own generation";
+  if (/\bself[\s-]?review\b/.test(lower)) return "self-review";
+  if (sameAgentGrant) return "same-agent";
+  return "own work";
+}
+
+/** Modal self-review grants are polarity-unit local; units are not joined. */
+function bodySelfReviewGrantTopic(hay) {
+  for (const unit of polarityUnits(hay)) {
+    const topic = selfReviewGrantTopic(unit);
+    if (topic) return topic;
+  }
+  return null;
+}
 
 /**
- * Playbook / job BODY must not invert frontmatter obligations. Frontmatter
- * parity alone is not enough: "the builder may merge" or "the green gate
- * may be skipped" in the mandatory prompt body changes agent behaviour.
+ * Playbook / job BODY must not invert role-contract obligations. Frontmatter
+ * parity alone is not enough: "the builder may merge", "the green gate
+ * may be skipped", or a modal grant to review own/self/same-agent work
+ * in the mandatory prompt body changes agent behaviour. Polarized
+ * sentences are not joined.
  *
  * @param {string} id
  * @param {{ forbidden?: string[], gates?: string[], outputs?: string[] }} authBuckets
@@ -2627,6 +2786,17 @@ export function playbookBodyObligationFindings(id, authBuckets, body) {
     findings.push({
       code: "E_ROLE_NEGATION",
       message: `${id} body permits skipping the green gate while gates require it`,
+    });
+  }
+  const selfReviewProhibited =
+    gates.some(isSelfReviewObligation) || forbidden.some(isSelfReviewObligation);
+  const selfReviewGrant = selfReviewProhibited
+    ? bodySelfReviewGrantTopic(hay)
+    : null;
+  if (selfReviewGrant) {
+    findings.push({
+      code: "E_ROLE_NEGATION",
+      message: `${id} body grants review of ${selfReviewGrant} while gates or forbidden prohibit self-review`,
     });
   }
   return findings;
