@@ -2489,7 +2489,14 @@ const OVERLAY_AUTH_VERB_RE = /\b(approved|authorized|waived)\b/gi;
 const OVERLAY_REMOVAL_ACTION_RE =
   /\b(?:removed|removing|removal|remove|waived|waiving|waiver|waive)\b/i;
 const OVERLAY_AUTH_NEGATION_RE =
-  /\b(?:not|never|no|don't|do not|didn't|did not|cannot|can't|wasn't|weren't|isn't|aren't|neither)\b/i;
+  /\b(?:not|never|no|nor|don't|do not|didn't|did not|cannot|can't|wasn't|weren't|isn't|aren't|neither)\b/i;
+const OVERLAY_GATE_ID_RE = /G(?:[1-9]|1[0-6])/;
+const OVERLAY_GATE_POLARITY_SPLIT_RE = new RegExp(
+  `,\\s+(?=(?:not|nor|neither)\\s+${OVERLAY_GATE_ID_RE.source}\\b)`,
+  "i"
+);
+const LOCAL_POLARITY_TOKEN_RE =
+  /^(?:not|never|no|neither|nor|don't|cannot|can't|isn't|aren't|wasn't|weren't)$/i;
 
 function overlayRegexMatches(re, text) {
   const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
@@ -2540,16 +2547,27 @@ function splitAdrLabeledFields(entry) {
 function splitOverlayClauses(sentence) {
   const src = collapseWs(sentence);
   if (!src) return [];
-  return src
-    .split(/\s*;\s+/)
-    .map((part) => collapseWs(part))
-    .filter(Boolean);
+  const parts = [];
+  for (const semi of src.split(/\s*;\s+/)) {
+    const chunk = collapseWs(semi);
+    if (!chunk) continue;
+    const polar = chunk.split(OVERLAY_GATE_POLARITY_SPLIT_RE);
+    for (const piece of polar) {
+      const t = collapseWs(piece);
+      if (t) parts.push(t);
+    }
+  }
+  return parts;
 }
 
 /**
  * Same-sentence / `Decided:` units that may authorize a named-gate
  * removal. Sibling `Rejected:` fields are omitted so they cannot
- * authorize or poison another gate.
+ * authorize or poison another gate. Adversative and contrastive
+ * named-gate polarity clauses stay independent so "approved G11, not
+ * G12" cannot authorize G12, while "did not approve G11, but approved
+ * G12" can. After those splits, a unit that still names more than one
+ * G1–G16 gate cannot authorize any of them.
  */
 function overlayAuthorizationUnits(decisionsText) {
   const src = String(decisionsText || "");
@@ -2560,8 +2578,10 @@ function overlayAuthorizationUnits(decisionsText) {
     for (const field of splitAdrLabeledFields(chunk)) {
       if (/^rejected$/i.test(field.label)) continue;
       for (const sent of polarityUnits(field.body)) {
-        for (const clause of splitOverlayClauses(sent)) {
-          units.push(clause);
+        for (const adv of splitAdversativeClauses(sent)) {
+          for (const clause of splitOverlayClauses(adv)) {
+            units.push(clause);
+          }
         }
       }
     }
@@ -2574,28 +2594,81 @@ function overlayAuthVerbNegated(before) {
   return OVERLAY_AUTH_NEGATION_RE.test(tail);
 }
 
+function localPolarityTokens(before) {
+  return collapseWs(before)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(-4)
+    .map((tok) => tok.replace(/[^A-Za-z']/g, ""));
+}
+
+function namedGatePolarityDenied(text, gateIndex, gateId) {
+  const tail = localPolarityTokens(text.slice(0, gateIndex));
+  if (tail.some((tok) => LOCAL_POLARITY_TOKEN_RE.test(tok))) return true;
+  const id = escapeRe(gateId);
+  return new RegExp(`\\bneither\\b[\\s\\S]{0,80}\\b${id}\\b`, "i").test(text);
+}
+
+function spanHasAuthNegation(text, from, to) {
+  if (from > to) {
+    const tmp = from;
+    from = to;
+    to = tmp;
+  }
+  if (from >= to) return false;
+  return OVERLAY_AUTH_NEGATION_RE.test(text.slice(from, to));
+}
+
+function overlayNamedGateIds(text) {
+  return overlayRegexMatches(
+    new RegExp(`\\b${OVERLAY_GATE_ID_RE.source}\\b`, "gi"),
+    text
+  ).map((span) => text.slice(span.index, span.end).toUpperCase());
+}
+
 /**
- * Same-clause owner authorization requires an un-negated approval verb
- * and an un-negated remove/waive act. Negation between them
- * ("approved no removal", "approved not to remove") fails closed.
+ * Same-clause owner authorization requires an un-negated approval verb,
+ * an un-negated remove/waive act, and an un-negated named gate bound in
+ * that coordinated clause. A unit may authorize the target only when it
+ * names no other G1–G16 gate; independently split units still authorize
+ * when they carry their own owner approval and removal/waiver. `not G12`
+ * / `neither … G12` deny G12 even when a sibling gate is approved in the
+ * same sentence.
  */
 function clauseAuthorizesGateRemoval(clause, gateId) {
   const t = collapseWs(clause);
   const id = String(gateId || "");
   if (!t || !id) return false;
-  if (!new RegExp(`\\b${escapeRe(id)}\\b`).test(t)) return false;
   if (!/\bowner\b/i.test(t)) return false;
+  const gates = overlayRegexMatches(new RegExp(`\\b${escapeRe(id)}\\b`, "gi"), t);
+  if (!gates.length) return false;
+  const target = id.toUpperCase();
+  if (overlayNamedGateIds(t).some((named) => named !== target)) return false;
   const verbs = overlayRegexMatches(OVERLAY_AUTH_VERB_RE, t);
   const actions = overlayRegexMatches(OVERLAY_REMOVAL_ACTION_RE, t);
   if (!verbs.length || !actions.length) return false;
   for (const verb of verbs) {
     if (overlayAuthVerbNegated(t.slice(0, verb.index))) continue;
     for (const action of actions) {
-      if (action.index === verb.index) return true;
-      const lo = Math.min(verb.end, action.end);
-      const hi = Math.max(verb.index, action.index);
-      if (OVERLAY_AUTH_NEGATION_RE.test(t.slice(lo, hi))) continue;
-      return true;
+      if (
+        action.index !== verb.index &&
+        spanHasAuthNegation(
+          t,
+          Math.min(verb.end, action.end),
+          Math.max(verb.index, action.index)
+        )
+      ) {
+        continue;
+      }
+      const pairLo = Math.min(verb.index, action.index);
+      const pairHi = Math.max(verb.end, action.end);
+      for (const gate of gates) {
+        if (namedGatePolarityDenied(t, gate.index, id)) continue;
+        const betweenLo = gate.index >= pairHi ? pairHi : gate.end;
+        const betweenHi = gate.index >= pairHi ? gate.index : pairLo;
+        if (spanHasAuthNegation(t, betweenLo, betweenHi)) continue;
+        return true;
+      }
     }
   }
   return false;
@@ -2719,31 +2792,85 @@ const BODY_SKIP_GREEN_RE =
   /\bgreen gate\b[\s\S]{0,80}\b(?:may be skipped|can be skipped|is optional|is waived|need not run)\b/i;
 const BODY_SKIP_GREEN_RE2 =
   /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
-const BODY_SELF_REVIEW_GRANT_RE =
-  /\b(?:may|can|allowed to|permitted to)\s+(?:review|evaluate|evaluating|grade|grading)\b[\s\S]{0,80}?\b(?:(?:its|their|your|our|my)\s+own|own\s+(?:generation|work)|self(?:[\s-]+(?:review|generation|work)))\b/i;
-const BODY_SAME_AGENT_SUBJECT_GRANT_RE =
-  /\bsame[\s-]?agent\b[\s\S]{0,80}?\b(?:may|can|allowed to|permitted to)\s+(?:review|evaluate|evaluating|grade|grading)\b/i;
-const BODY_SAME_AGENT_IDENTITY_GRANT_RE =
-  /\b(?:may|can|allowed to|permitted to)\s+be\s+(?:the\s+)?same[\s-]?agent\b/i;
+const PERMISSION_PRED_RE =
+  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:allowed|permitted|authorized)\s+to|may|can|permitted|allowed|authorized)\b/gi;
+const OWN_WORK_TOPIC_RE =
+  /\b(?:(?:its|their|your|our|my)\s+own(?:\s+(?:work|generation))?|own\s+work|review of\s+(?:its|their|your|our|my)\s+own)\b/i;
+const REVIEW_ACT_RE = /\b(?:review|evaluate|evaluating|grade|grading)\b/i;
+
+function grantPolarityUnits(hay) {
+  const out = [];
+  for (const unit of polarityUnits(hay)) {
+    for (const adv of splitAdversativeClauses(unit)) {
+      for (const part of splitOverlayClauses(adv)) {
+        if (part) out.push(part);
+      }
+    }
+  }
+  return out;
+}
+
+function permissionPredicateNegated(text, span) {
+  const rawBefore = text.slice(0, span.index);
+  const local = rawBefore.split(NEW_SUBJECT_BOUNDARY_RE).pop() || rawBefore;
+  if (localPolarityTokens(local).some((tok) => LOCAL_POLARITY_TOKEN_RE.test(tok))) {
+    return true;
+  }
+  return /^\s*(?:not|never)\b/i.test(text.slice(span.end));
+}
+
+function unnegatedPermissionSpans(text) {
+  return overlayRegexMatches(PERMISSION_PRED_RE, text).filter(
+    (span) => !permissionPredicateNegated(text, span)
+  );
+}
+
+function sameAgentGrantAt(text, span) {
+  const before = text.slice(0, span.index);
+  const after = text.slice(span.index);
+  const subject = /\bsame[\s-]?agent\b/i.test(before);
+  if (/\bbe\s+(?:the\s+)?same[\s-]?agent\b/i.test(after)) return true;
+  if (subject && /\bbe\s+(?:the\s+)?reviewer\b/i.test(after)) return true;
+  if (subject && REVIEW_ACT_RE.test(after)) return true;
+  return false;
+}
 
 function selfReviewGrantTopic(unit) {
-  const text = String(unit || "");
+  const text = collapseWs(String(unit || ""));
   if (!text) return null;
-  const sameAgentGrant =
-    BODY_SAME_AGENT_SUBJECT_GRANT_RE.test(text) ||
-    BODY_SAME_AGENT_IDENTITY_GRANT_RE.test(text);
-  const ownGrant = BODY_SELF_REVIEW_GRANT_RE.test(text);
+  const perms = unnegatedPermissionSpans(text);
+  if (!perms.length) return null;
+  let sameAgentGrant = false;
+  let ownGrant = false;
+  for (const span of perms) {
+    if (sameAgentGrantAt(text, span)) sameAgentGrant = true;
+    const before = text.slice(0, span.index);
+    const after = text.slice(span.end);
+    if (
+      /\bself[\s-]?review\b/i.test(text) ||
+      OWN_WORK_TOPIC_RE.test(text) ||
+      (REVIEW_ACT_RE.test(after) && OWN_WORK_TOPIC_RE.test(`${before} ${after}`))
+    ) {
+      ownGrant = true;
+    }
+  }
   if (!sameAgentGrant && !ownGrant) return null;
-  const lower = text.toLowerCase();
-  if (/\bgenerat/.test(lower)) return "own generation";
-  if (/\bself[\s-]?review\b/.test(lower)) return "self-review";
+  if (/\bgenerat/i.test(text) && /\b(?:own|self)\b/i.test(text)) {
+    return "own generation";
+  }
+  if (/\bself[\s-]?review\b/i.test(text)) return "self-review";
   if (sameAgentGrant) return "same-agent";
   return "own work";
 }
 
-/** Modal self-review grants are polarity-unit local; units are not joined. */
+/**
+ * Modal, noun, and passive self-review grants are clause-local.
+ * Semicolon and adversative units are not joined, so a prohibition on
+ * the same agent cannot bind a later grant to a different agent.
+ * Local modal/passive polarity is classified before a grant is recorded.
+ */
 function bodySelfReviewGrantTopic(hay) {
-  for (const unit of polarityUnits(hay)) {
+  for (const unit of grantPolarityUnits(hay)) {
     const topic = selfReviewGrantTopic(unit);
     if (topic) return topic;
   }

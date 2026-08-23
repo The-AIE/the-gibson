@@ -4561,6 +4561,84 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "overlay-g11-not-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner approved removal of G11, not G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-neither-g11-nor-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "The owner waived neither G11 nor G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-g11-except-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner approved removal of G11, except G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-g11-rather-than-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner approved removal of G11 rather than G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-g11-excluding-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner approved removal of G11, excluding G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-g11-and-g12-collective",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner approved removal of G11 and G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-g11-denied-but-g12-approved",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner did not approve removal of G11, but the owner approved removal of G12.",
+      expectedGates
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "overlay-simple-same-gate-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner approved removal of G12.",
+      expectedGates
+    ),
+    expectEmpty: true,
+  },
+  {
     name: "self-review-reviewer-own-generation",
     findings: () => playbookBodyObligationFindings(
       "reviewer",
@@ -4626,6 +4704,72 @@ const rows = [
     ),
     code: "E_ROLE_NEGATION",
     msg: ["same-agent"],
+  },
+  {
+    name: "self-review-same-agent-not-allowed",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "The same agent is not allowed to review the change."
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "self-review-same-agent-never-permitted",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "The same agent is never permitted to review the change."
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "self-review-not-permitted-own-work",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "The reviewer is not permitted to review its own work."
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "self-review-same-agent-never-semicolon-different-allowed",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "The same agent must never review; a different agent is allowed to review."
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "self-review-noun-is-permitted",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "Self-review is permitted."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["self-review"],
+  },
+  {
+    name: "self-review-same-agent-can-be-reviewer",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "The same agent can be the reviewer."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-of-own-work-is-allowed",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "Review of its own work is allowed."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["own work"],
   },
   {
     name: "self-review-positive-live-reviewer",
@@ -4842,6 +4986,102 @@ if [[ "$rc" -eq 0 ]]; then
 else
   bad "benign overlay approved removing G12 (rc=$rc): $out"
 fi
+
+printf '%s\n' 'Decided: the owner approved removal of G11, not G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted G11-not-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: approved G11 not G12 does not authorize G12 overlay removal"
+else
+  bad "mutation overlay G11 not G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'The owner waived neither G11 nor G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted neither-G11-nor-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: waived neither G11 nor G12 does not authorize G12 overlay removal"
+else
+  bad "mutation overlay neither G11 nor G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: the owner approved removal of G11, except G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted G11-except-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: approved G11 except G12 does not authorize G12 overlay removal"
+else
+  bad "mutation overlay G11 except G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: the owner approved removal of G11 rather than G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted G11-rather-than-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: approved G11 rather than G12 does not authorize G12 overlay removal"
+else
+  bad "mutation overlay G11 rather than G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: the owner approved removal of G11, excluding G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted G11-excluding-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: approved G11 excluding G12 does not authorize G12 overlay removal"
+else
+  bad "mutation overlay G11 excluding G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: the owner approved removal of G11 and G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted G11-and-G12 collective overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: approved G11 and G12 does not authorize G12 overlay removal"
+else
+  bad "mutation overlay G11 and G12 collective (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: the owner did not approve removal of G11, but the owner approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: denied G11 but approved G12 authorizes G12 overlay removal"
+else
+  bad "benign overlay G11 denied but G12 approved (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: the owner approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: simple same-gate G12 approval authorizes overlay removal"
+else
+  bad "benign overlay simple same-gate G12 (rc=$rc): $out"
+fi
 rm -f "$SANDBOX/local/AGENTS.local.md" "$SANDBOX/memory/DECISIONS.md"
 
 node -e '
@@ -4988,6 +5228,148 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
   ok "mutation: reviewer body same-agent identity grant fails"
 else
   bad "mutation reviewer same-agent identity grant (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The same agent is not allowed to review the change."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: same-agent is-not-allowed restatement remains green"
+else
+  bad "benign reviewer same-agent is-not-allowed (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The same agent is never permitted to review the change."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: same-agent never-permitted restatement remains green"
+else
+  bad "benign reviewer same-agent never-permitted (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The reviewer is not permitted to review its own work."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: not-permitted own-work restatement remains green"
+else
+  bad "benign reviewer not-permitted own-work (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The same agent must never review; a different agent is allowed to review."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: same-agent prohibition plus different-agent permission remains green"
+else
+  bad "benign reviewer same-agent never semicolon different allowed (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. Self-review is permitted."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'self-review'; then
+  echo "  planted reviewer self-review noun grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: reviewer body self-review is-permitted grant fails"
+else
+  bad "mutation reviewer self-review is-permitted grant (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The same agent can be the reviewer."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted reviewer same-agent can-be-reviewer failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: reviewer body same-agent can-be-the-reviewer grant fails"
+else
+  bad "mutation reviewer same-agent can-be-reviewer grant (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. Review of its own work is allowed."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'own work'; then
+  echo "  planted reviewer review-of-own-work-is-allowed failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: reviewer body review-of-own-work is-allowed grant fails"
+else
+  bad "mutation reviewer review-of-own-work is-allowed grant (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 
