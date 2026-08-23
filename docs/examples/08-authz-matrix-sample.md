@@ -5,6 +5,9 @@ nav_exclude: true
 
 # Worked example — AuthZ matrix for a 3-role app (docs/08 layer 4)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 Fictional app: **Northstar Clinic** — roles `anon`, `patient`, `staff`.
 
 Generated scaffold from `route-inventory.mjs`, then filled with expected statuses

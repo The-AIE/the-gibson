@@ -1061,3 +1061,19 @@ ported "improvement"; a green idea in one repo can be a designed-out
 anti-pattern in another.
 **Status:** working as designed
 **Tags:** #ci #cache #security #calibrate-dont-transplant
+
+## L-056 · 2026-08-21 · authority-matchers-need-adversarial-mutation-witnesses
+**What happened:** The #208 authority sensor passed 250 tests while missing
+live claims hidden by connective modifiers, modified self-subjects, HTML
+comments, operative frontmatter outside playbooks, and past/perfect verb forms.
+It also silently skipped the no-shrink proof when pinned git evidence was
+unavailable and rejected the fork overlay that AGENTS.md explicitly permits.
+**Root cause:** The matcher and discovery exemptions evolved faster than their
+positive/negative mutation matrix; some historical fixtures were vacuous
+because the scanner never recognized the verb form they purported to test.
+**Harness fix:** Every authority relation, carve-out, file-class exemption, and
+evidence dependency needs a paired adversarial mutation witness. Treat HTML
+comments as agent-visible input, and fail closed when pinned evidence cannot be
+read.
+**Status:** fixed in #208 follow-up
+**Tags:** #authority #sensors #mutation-testing #fail-closed #issue-208

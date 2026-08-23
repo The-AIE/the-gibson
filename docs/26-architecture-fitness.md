@@ -5,6 +5,9 @@ nav_order: 26
 
 # Architecture fitness — report-only baseline (#184 / parent #159)
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This is a health report for Gibson's control-plane shape.
 > It measures how big critical scripts are, what depends on what, whether important
 > safety tests still exist, and how those numbers drift over time. In this first

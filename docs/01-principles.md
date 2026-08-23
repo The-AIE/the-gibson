@@ -6,14 +6,20 @@ nav_order: 1
 
 # 01 — Design Principles
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This chapter is the "why" behind every rule. Each rule comes
-> from a real mistake or a proven idea. When two rules disagree, you follow the one that
-> better protects people and the software.
+> from a real mistake or a proven idea. If a principle here seems to disagree with
+> AGENTS.md, follow AGENTS.md and open a PR or a decision item — do not treat this
+> chapter as a higher rule.
 
 Every rule in this repo traces to one of these principles, and every principle traces
 to a source that earned it — a production incident, a published harness design, or a
-measured result. When a rule and a principle conflict, the principle wins and the rule
-gets a PR.
+measured result. If a principle here and a rule in AGENTS.md seem to conflict,
+AGENTS.md is the operative contract. Do not change behavior from this chapter.
+Open a PR or a decision item so the contract can be updated if the principle is
+right; this file stays explanation.
 
 ## 1. Agent = Model + Harness — and only the harness compounds
 
@@ -94,8 +100,9 @@ layers, each for a distinct failure mode. None optional.
 
 An agent that stops to ask "shall I proceed?" on reversible, in-scope work has failed.
 An agent that proceeds through a human gate has failed worse. The resolution is a
-**closed, one-page list** of mandatory stops (`docs/14-human-gates.md`). If a
-situation isn't on the list, keep working. If the list is wrong, PR the list.
+**closed, one-page list** of mandatory stops in `AGENTS.md` (rationale:
+`docs/14-human-gates.md`). If a situation isn't on the AGENTS.md list, keep
+working. If the list is wrong, PR the list.
 
 ## 9. Truthful telemetry, owned store
 

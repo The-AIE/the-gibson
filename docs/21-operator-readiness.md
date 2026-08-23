@@ -6,6 +6,9 @@ nav_order: 21
 
 # 21 — Operator Readiness Checklist
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This is the definition of done for "a non-coder can get software built with the same rigor as exceptional developers."
 
 The end goal is met when **all** of the following are true on at least one live Operator-tier product.

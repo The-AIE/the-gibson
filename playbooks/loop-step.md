@@ -33,6 +33,9 @@ sources:
 
 # Solo loop step — parameterized dispatch
 
+
+> **Authority:** Conditionally mandatory dispatch prompt when this role/job is active. Binding commit/PR/merge rules live only in [`AGENTS.md`](../AGENTS.md). Frontmatter `gates:` / `forbidden:` / role outputs are routing mirrors of that contract and must not introduce obligations absent from AGENTS.md.
+
 You are running **one hat** of the solo loop in a **fresh context**. State lives in
 files only. Read `{{loop_state}}` and execute exactly the hat `{{hat}}`.
 

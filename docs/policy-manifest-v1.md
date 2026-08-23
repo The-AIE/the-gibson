@@ -6,6 +6,9 @@ nav_order: 27
 
 # Policy manifest v1 — report-only candidate and offline validator
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** This is a frozen checklist of today's approved rules
 > (when to stop, who reviews what, which jobs cannot grade themselves) written
 > so a computer can read it. It does **not** change how the crew runs. It is a
@@ -30,22 +33,27 @@ The candidate carries:
 - stable **schema id / schema version**, **manifest id / version**
 - **status** `candidate`, **authority** `report-only`, **activated** `false`
 - **generatorVersion** and **validatorVersion**
-- **source path + sha256 digest** provenance for doctrine files it encodes
+- **source path + sha256 digest** provenance: exactly one `AGENTS.md` source with role `human-readable-contract`; every `docs/**` pin is `explanatory-history` (never `canonical-doctrine` or `compatibility-doctrine`)
 - a documented **compatibility** policy (semver major break; namespaced forks)
 
-It encodes, without adding/removing/tightening/loosening approved semantics:
+It encodes, without adding/removing/tightening/loosening approved semantics
+owned by `AGENTS.md`:
 
-- human gates **G1–G16** (`docs/14-human-gates.md`)
-- risk tiers **A / B / C** and evidence minimums (`docs/06-quality-gates.md`)
-- nine roles and forbidden same-unit pairs (`docs/03-roles.md`)
+- human gates **G1–G16** (authority: `AGENTS.md`; `docs/14` is explanatory history)
+- risk tiers **A / B / C** and evidence minimums (authority: `AGENTS.md`; `docs/06` is explanation)
+- nine roles and forbidden same-unit pairs (authority: `AGENTS.md`; `docs/03` is explanation)
 - review-independence relationships (Law 5, tier floors, Tier C → G12)
-- workflow stage names **plan → retro** (`docs/02-sdlc-pipeline.md`)
+- workflow stage names **plan → retro** (authority: `AGENTS.md`; `docs/02` is explanation)
 
 ## What this is not
 
 - **Not** an activated policy authority. Reports always say so.
-- **Not** a change to `AGENTS.md`, numbered doctrine, playbooks, CI hard-fail,
-  merge authority, or runtime consumers.
+- **Not** merge, gate, or CI hard-fail authority. `#208` made `AGENTS.md` the
+  sole always-mandatory human-readable contract; this candidate remains a
+  **checked mirror** (`report-only`, `activated=false`) of enumerations that
+  `AGENTS.md` owns. `scripts/contract-authority.mjs` fails if the mirror drifts
+  from `AGENTS.md`; it must not treat the candidate as binding authority.
+  Activation is still `#164`.
 - **Not** generated doctrine blocks (those remain **#164**).
 - **Not** a consumer for the context compiler (**#166** consumes a *later*
   resolved bundle, not this candidate by implication).
@@ -202,7 +210,7 @@ The pure validator refuses (non-exhaustive):
   frozen root immediately before and after final schema/provenance validation
   and propagates every relevant error — all `E_PROVENANCE_*` findings **and**
   `E_SCHEMA_LOAD` / root-identity bind failures. A narrow `E_PROVENANCE_*`-only
-  filter would discard root disappearance after the four doctrine reads and
+  filter would discard root disappearance after the AGENTS.md doctrine read and
   falsely emit `I_CONSISTENCY_OK`
 - no approve-then-reopen path API: hashing and loads require root-relative
   containment and verified bytes from the opened fd
@@ -211,13 +219,14 @@ The pure validator refuses (non-exhaustive):
 
 ## Consistency check (report-only)
 
-`check-consistency` compares selected live doctrine identifiers to the
-candidate:
+`check-consistency` compares selected live enumerations in `AGENTS.md` to the
+candidate (never falling back to explanatory `docs/`):
 
-- G1–G16 markers in `docs/14-human-gates.md`
-- role `##` headings in `docs/03-roles.md`
-- Tier A/B/C markers under Risk tiers in `docs/06-quality-gates.md`
-- Stage headings in `docs/02-sdlc-pipeline.md`
+- G1–G16 closed-list bullets in `AGENTS.md` (exact multiplicity)
+- role enumeration in `AGENTS.md`
+- Tier A/B/C table rows in `AGENTS.md`
+- Ten stages backtick list in `AGENTS.md`
+- forbidden role pairs in `AGENTS.md`
 - provenance digests vs live file bytes
 
 It does **not** rewrite doctrine and does **not** change existing CI enforcement
@@ -246,7 +255,7 @@ The focused suite proves the gate fails when a fixture:
 - replaces/renames the actual canonical root directory between reads inside one
   `checkDoctrineConsistency` operation (frozen root identity refuses the new
   inode at the same pathname)
-- replaces the root **after the four doctrine reads / at final revalidation**
+- replaces the root **after the AGENTS.md doctrine read / at final revalidation**
   and proves an error with no `I_CONSISTENCY_OK` (early mid-read replacement
   alone is not sufficient); a mutation that reverts to a narrow
   `E_PROVENANCE_*` filter reproduces the false-OK defect

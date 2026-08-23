@@ -41,6 +41,14 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, normalize, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  parseHumanGateEntries,
+  parseRoleEnumeration,
+  parseRiskTiers,
+  parseTenStagesList,
+  parseForbiddenPairs,
+  provenanceRoleFindings,
+} from "./lib/contract-semantics.mjs";
 
 /** Portable open flags: read-only + nonblocking so FIFOs/devices never hang. */
 const OPEN_READ_NONBLOCK =
@@ -171,6 +179,11 @@ const ALLOWED_NOTICES_KEYS = new Set([
 
 const CORE_ID_PREFIX = "gibson.";
 const SAFE_REL_PATH = /^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/;
+// Contained reads (authority scan, digest) allow hidden in-root instruction
+// dirs (.claude, .agents, .github). Provenance paths stay on SAFE_REL_PATH.
+// Exact `.` / `..` segments are refused separately. `.git` is never legal.
+const CONTAINED_REL_PATH =
+  /^(?!.*(?:^|\/)\.git(?:\/|$))(?:[a-zA-Z0-9][a-zA-Z0-9._-]*|\.[a-zA-Z0-9._-]+)(?:\/(?:[a-zA-Z0-9][a-zA-Z0-9._-]*|\.[a-zA-Z0-9._-]+))*$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const GATE_ID_RE = /^G([1-9]|1[0-6])$/;
 const DEFAULT_MANIFEST_REL =
@@ -178,10 +191,15 @@ const DEFAULT_MANIFEST_REL =
 const DEFAULT_SCHEMA_REL =
   "config/policy/schema/policy-manifest-v1.schema.json";
 
-// Doctrine identifier extraction patterns (report-only consistency).
-const DOCTRINE_GATE_RE = /\*\*G([1-9]|1[0-6])\*\*/g;
-const DOCTRINE_ROLE_HEADING_RE =
-  /^## (planner|decomposer|builder|test-engineer|reviewer|ux-evaluator|security|release|historian)\s*$/gm;
+function countIds(ids) {
+  const m = new Map();
+  for (const id of ids) m.set(id, (m.get(id) || 0) + 1);
+  return m;
+}
+
+function pairKey(a, b) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
 
 // ---------------------------------------------------------------------------
 // Path / IO helpers — pure fs, no subprocess
@@ -444,7 +462,7 @@ export function resolveLexicalUnderRoot(repoRoot, relPath) {
   ) {
     throw new Error(`path: escapes repo root: ${relPath}`);
   }
-  if (!SAFE_REL_PATH.test(norm)) {
+  if (!CONTAINED_REL_PATH.test(norm)) {
     throw new Error(`path: malformed relative path: ${relPath}`);
   }
   // Bind to the immutable root identity (string → resolve; token → re-assert).
@@ -1192,6 +1210,28 @@ export function enforceSchemaValueConstraints(data, schema, path, push) {
       });
     }
   }
+
+  // --- allOf ---------------------------------------------------------------
+  if (Array.isArray(schema.allOf)) {
+    for (const sub of schema.allOf) {
+      if (sub && typeof sub === "object") {
+        enforceSchemaValueConstraints(data, sub, path, push);
+      }
+    }
+  }
+
+  // --- if / then / else (JSON Schema 2020-12 subset) -----------------------
+  if (schema.if && typeof schema.if === "object") {
+    const ifFindings = [];
+    enforceSchemaValueConstraints(data, schema.if, path, (f) => ifFindings.push(f));
+    const ifOk = ifFindings.length === 0;
+    if (ifOk && schema.then && typeof schema.then === "object") {
+      enforceSchemaValueConstraints(data, schema.then, path, push);
+    }
+    if (!ifOk && schema.else && typeof schema.else === "object") {
+      enforceSchemaValueConstraints(data, schema.else, path, push);
+    }
+  }
 }
 
 /**
@@ -1515,13 +1555,7 @@ export function validateCandidate(candidate, options = {}) {
             )
           );
         }
-        if (
-          s.role !== "canonical-doctrine" &&
-          s.role !== "compatibility-doctrine" &&
-          s.role !== "supporting"
-        ) {
-          push(err("E_PROVENANCE_ROLE", "source role unknown", `${p}.role`));
-        }
+        // Path-bound role checks run after the loop via provenanceRoleFindings.
 
         if (
           options.checkProvenanceDigests &&
@@ -1563,6 +1597,15 @@ export function validateCandidate(candidate, options = {}) {
           }
         }
       });
+      for (const f of provenanceRoleFindings(sources)) {
+        push(
+          err(
+            f.code,
+            f.message,
+            f.path || "provenance.sources"
+          )
+        );
+      }
     }
   }
 
@@ -2265,161 +2308,158 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
     return sortFindings(findings);
   }
 
-  const gatePath = "docs/14-human-gates.md";
-  const rolesPath = "docs/03-roles.md";
-  const tiersPath = "docs/06-quality-gates.md";
-  const stagesPath = "docs/02-sdlc-pipeline.md";
-
-  /** @type {Set<string>} */
-  let doctrineGates = new Set();
-  /** @type {Set<string>} */
-  let doctrineRoles = new Set();
-  /** @type {Set<string>} */
-  let doctrineTiers = new Set();
-  /** @type {Set<string>} */
-  let doctrineStages = new Set();
-
+  const agentsPath = "AGENTS.md";
+  let agentsText = "";
   try {
-    const text = /** @type {string} */ (
-      readContainedFile(rootId, gatePath, "utf8")
+    agentsText = /** @type {string} */ (
+      readContainedFile(rootId, agentsPath, "utf8")
     );
-    let m;
-    const re = new RegExp(DOCTRINE_GATE_RE.source, "g");
-    while ((m = re.exec(text)) !== null) {
-      doctrineGates.add(`G${m[1]}`);
-    }
   } catch (e) {
-    findings.push(err("E_CONSISTENCY_READ", `cannot read ${gatePath}: ${e.message}`, gatePath));
+    findings.push(
+      err(
+        "E_CONSISTENCY_READ",
+        `cannot read ${agentsPath}: ${e && e.message ? e.message : e}`,
+        agentsPath
+      )
+    );
   }
 
-  try {
-    const text = /** @type {string} */ (
-      readContainedFile(rootId, rolesPath, "utf8")
-    );
-    let m;
-    const re = new RegExp(DOCTRINE_ROLE_HEADING_RE.source, "gm");
-    while ((m = re.exec(text)) !== null) {
-      doctrineRoles.add(m[1]);
-    }
-  } catch (e) {
-    findings.push(err("E_CONSISTENCY_READ", `cannot read ${rolesPath}: ${e.message}`, rolesPath));
-  }
-
-  try {
-    const text = /** @type {string} */ (
-      readContainedFile(rootId, tiersPath, "utf8")
-    );
-    // Risk tiers table rows: **A** / **B** / **C** under "## Risk tiers"
-    if (/##\s*Risk tiers/i.test(text)) {
-      const section = text.split(/##\s*Risk tiers/i)[1]?.split(/\n##\s+/)[0] || "";
-      for (const t of ["A", "B", "C"]) {
-        if (new RegExp(`\\*\\*${t}\\*\\*`).test(section)) doctrineTiers.add(t);
+  function diffIdLists(label, agentsIds, candIds) {
+    const aCounts = countIds(agentsIds);
+    const cCounts = countIds(candIds);
+    const keys = new Set([...aCounts.keys(), ...cCounts.keys()]);
+    for (const id of keys) {
+      const a = aCounts.get(id) || 0;
+      const c = cCounts.get(id) || 0;
+      if (a !== c) {
+        if (c > 0 && a === 0) {
+          findings.push(
+            err(
+              "E_CONSISTENCY_DRIFT",
+              `candidate has ${label} ${id} but AGENTS.md does not`,
+              label
+            )
+          );
+        } else if (a > 0 && c === 0) {
+          findings.push(
+            err(
+              "E_CONSISTENCY_DRIFT",
+              `AGENTS.md has ${label} ${id} but candidate does not`,
+              label
+            )
+          );
+        } else {
+          findings.push(
+            err(
+              "E_CONSISTENCY_DRIFT",
+              `AGENTS.md ${label} ${id} multiplicity ${a} != candidate ${c}`,
+              label
+            )
+          );
+        }
       }
     }
-  } catch (e) {
-    findings.push(err("E_CONSISTENCY_READ", `cannot read ${tiersPath}: ${e.message}`, tiersPath));
   }
 
-  try {
-    const text = /** @type {string} */ (
-      readContainedFile(rootId, stagesPath, "utf8")
-    );
-    // Stage headings: "## Stage N — Name"
-    const stageNameToId = {
-      Plan: "plan",
-      Decompose: "decompose",
-      Build: "build",
-      Test: "test",
-      Review: "review",
-      "UX Evaluation": "ux-eval",
-      Security: "security",
-      Merge: "merge",
-      "Deploy + Verify": "deploy",
-      "Retro (the ratchet)": "retro",
-    };
-    const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    for (const [name, id] of Object.entries(stageNameToId)) {
-      // Em dash (—) or hyphen between stage number and title (docs/02).
-      const re = new RegExp(
-        `##\\s*Stage\\s+\\d+\\s*[\\u2014\\-]\\s*${escapeRe(name)}`,
-        "i"
-      );
-      if (re.test(text)) {
-        doctrineStages.add(id);
-      }
-    }
-  } catch (e) {
-    findings.push(err("E_CONSISTENCY_READ", `cannot read ${stagesPath}: ${e.message}`, stagesPath));
-  }
+  if (agentsText) {
+    const gateIds = parseHumanGateEntries(agentsText).map((e) => e.id);
+    const roleIds = parseRoleEnumeration(agentsText);
+    const tierIds = parseRiskTiers(agentsText).map((t) => t.id);
+    const stageNames = parseTenStagesList(agentsText);
+    const pairs = parseForbiddenPairs(agentsText);
 
-  const candGates = new Set(
-    (Array.isArray(candidate.humanGates) ? candidate.humanGates : [])
+    const candGates = (Array.isArray(candidate.humanGates) ? candidate.humanGates : [])
       .map((g) => (g && typeof g === "object" ? /** @type {any} */ (g).id : null))
-      .filter(Boolean)
-  );
-  const candRoles = new Set(
-    (Array.isArray(candidate.roles) ? candidate.roles : [])
+      .filter(Boolean);
+    const candRoles = (Array.isArray(candidate.roles) ? candidate.roles : [])
       .map((r) => (r && typeof r === "object" ? /** @type {any} */ (r).id : null))
-      .filter(Boolean)
-  );
-  const candTiers = new Set(
-    (Array.isArray(candidate.riskTiers) ? candidate.riskTiers : [])
+      .filter(Boolean);
+    const candTiers = (Array.isArray(candidate.riskTiers) ? candidate.riskTiers : [])
       .map((t) => (t && typeof t === "object" ? /** @type {any} */ (t).id : null))
-      .filter(Boolean)
-  );
-  const candStages = new Set(
-    (Array.isArray(candidate.workflowStages) ? candidate.workflowStages : [])
-      .map((s) => (s && typeof s === "object" ? /** @type {any} */ (s).id : null))
-      .filter(Boolean)
-  );
+      .filter(Boolean);
+    const candStages = (Array.isArray(candidate.workflowStages)
+      ? candidate.workflowStages
+      : [])
+      .map((s) => (s && typeof s === "object" ? /** @type {any} */ (s).name : null))
+      .filter(Boolean);
 
-  function diffSets(label, doctrine, cand) {
-    for (const id of doctrine) {
-      if (!cand.has(id)) {
+    if (!gateIds.length) {
+      findings.push(
+        err("E_CONSISTENCY_PARSE", "no G1-G16 list entries found in AGENTS.md", agentsPath)
+      );
+    } else {
+      diffIdLists("gate", gateIds, candGates);
+    }
+    if (!roleIds.length) {
+      findings.push(
+        err("E_CONSISTENCY_PARSE", "no role enumeration found in AGENTS.md", agentsPath)
+      );
+    } else {
+      diffIdLists("role", roleIds, candRoles);
+    }
+    if (!tierIds.length) {
+      findings.push(
+        err("E_CONSISTENCY_PARSE", "no risk tier table found in AGENTS.md", agentsPath)
+      );
+    } else {
+      diffIdLists("tier", tierIds, candTiers);
+    }
+    if (!stageNames.length) {
+      findings.push(
+        err("E_CONSISTENCY_PARSE", "no Ten stages list found in AGENTS.md", agentsPath)
+      );
+    } else {
+      diffIdLists("stage", stageNames, candStages);
+    }
+
+    const candPairs = new Set(
+      (Array.isArray(candidate.forbiddenRolePairs) ? candidate.forbiddenRolePairs : [])
+        .filter((p) => p && typeof p === "object")
+        .map((p) => pairKey(/** @type {any} */ (p).a, /** @type {any} */ (p).b))
+    );
+    const agentsPairs = new Set(
+      (pairs.pairs || []).map((p) => pairKey(p.a, p.b))
+    );
+    for (const key of agentsPairs) {
+      if (!candPairs.has(key)) {
         findings.push(
           err(
             "E_CONSISTENCY_DRIFT",
-            `doctrine has ${label} ${id} but candidate does not`,
-            label
+            `AGENTS.md has forbidden pair ${key.replace("|", " ≠ ")} but candidate does not`,
+            "pair"
           )
         );
       }
     }
-    for (const id of cand) {
-      if (!doctrine.has(id)) {
+    for (const key of candPairs) {
+      if (!agentsPairs.has(key)) {
         findings.push(
           err(
             "E_CONSISTENCY_DRIFT",
-            `candidate has ${label} ${id} but selected doctrine tables do not`,
-            label
+            `candidate has forbidden pair ${key.replace("|", " ≠ ")} but AGENTS.md does not`,
+            "pair"
           )
         );
       }
     }
-  }
 
-  if (doctrineGates.size) diffSets("gate", doctrineGates, candGates);
-  else if (!findings.some((f) => f.path === gatePath)) {
-    findings.push(err("E_CONSISTENCY_PARSE", "no G1-G16 markers found in doctrine", gatePath));
-  }
-
-  if (doctrineRoles.size) diffSets("role", doctrineRoles, candRoles);
-  else if (!findings.some((f) => f.path === rolesPath)) {
-    findings.push(err("E_CONSISTENCY_PARSE", "no role headings found in doctrine", rolesPath));
-  }
-
-  if (doctrineTiers.size) diffSets("tier", doctrineTiers, candTiers);
-  else if (!findings.some((f) => f.path === tiersPath)) {
-    findings.push(err("E_CONSISTENCY_PARSE", "no risk tier markers found in doctrine", tiersPath));
-  }
-
-  if (doctrineStages.size) diffSets("stage", doctrineStages, candStages);
-  else if (!findings.some((f) => f.path === stagesPath)) {
-    findings.push(err("E_CONSISTENCY_PARSE", "no stage headings found in doctrine", stagesPath));
+    if (!pairs.symmetric && agentsPairs.size) {
+      findings.push(
+        err(
+          "E_CONSISTENCY_DRIFT",
+          "AGENTS.md forbidden pairs are not marked symmetric",
+          "pair"
+        )
+      );
+    }
+  } else if (!findings.some((f) => f.path === agentsPath)) {
+    findings.push(
+      err("E_CONSISTENCY_PARSE", "AGENTS.md was empty; no fallback to docs/", agentsPath)
+    );
   }
 
   // Re-assert the original frozen root identity immediately BEFORE final
-  // schema/provenance validation. A root replacement after the four doctrine
+  // schema/provenance validation. A root replacement after the AGENTS.md doctrine
   // reads must never fall through to I_CONSISTENCY_OK.
   try {
     assertRootIdentity(rootId);
@@ -2436,7 +2476,7 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
   // Final revalidation under the same frozen root identity. Propagate every
   // fail-closed root/schema/provenance error via isConsistencyRevalidationError
   // — not only E_PROVENANCE_* (that narrow filter discards E_SCHEMA_LOAD when
-  // the root disappears after the four doctrine reads).
+  // the root disappears after the AGENTS.md doctrine read).
   let revalidationFindings = [];
   try {
     revalidationFindings = validateCandidate(candidate, {
@@ -2480,7 +2520,7 @@ export function checkDoctrineConsistency(candidate, repoRoot) {
     findings.push(
       info(
         "I_CONSISTENCY_OK",
-        "selected doctrine identifiers/tables match the candidate; digests agree",
+        "AGENTS.md enumerations match the candidate; digests agree",
         "consistency"
       )
     );

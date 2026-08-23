@@ -6,6 +6,9 @@ nav_order: 23
 
 # Goose license + embed/re-brand/pin verification — issue #29 findings
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** before building The Gibson on Goose's engine, we
 > checked the paperwork: the license lets us embed it in a commercial
 > product, rebrand the experience so users only see Gibson, and pin an

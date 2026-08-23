@@ -6,6 +6,9 @@ nav_order: 17
 
 # 17 — Deployment Target: Inspection & Optimization
 
+
+> **Authority:** Non-normative. Explanation, rationale, and history only. Binding commit/PR/merge rules live in [`AGENTS.md`](../AGENTS.md). This file must not add, drop, or weaken those rules.
+
 > 🙂 **In plain English:** Besides building features, the crew can check how the live
 > site feels — speed, cost, caching — and suggest tune-ups ranked by how much they help
 > versus how hard they are.
