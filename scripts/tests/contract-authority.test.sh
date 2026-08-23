@@ -4494,6 +4494,38 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "pass-approve-first-posix-alternation",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": [
+          "#!/bin/bash",
+          "VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)",
+        ].join("\n"),
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-approve-request-changes-posix-group",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": [
+          "#!/bin/bash",
+          "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)",
+        ].join("\n"),
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
     name: "overlay-rejected-g12",
     findings: () => overlayLimitFindings(
       overlayRm,
@@ -4639,10 +4671,29 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "overlay-owner-explicitly-approved-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: the owner explicitly approved removal of G12.",
+      expectedGates
+    ),
+    expectEmpty: true,
+  },
+  {
     name: "overlay-rejected-the-decision-that-waived-g12",
     findings: () => overlayLimitFindings(
       overlayRm,
       "The owner rejected the decision that waived G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-rejected-decision-that-counsel-approved-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "The owner rejected the decision that counsel approved removal of G12.",
       expectedGates
     ),
     code: "E_OVERLAY",
@@ -4693,6 +4744,16 @@ const rows = [
       "builder",
       builder,
       "The builder may review its own work."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["own work"],
+  },
+  {
+    name: "self-review-has-permission-own-work",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "The reviewer has permission to review its own work."
     ),
     code: "E_ROLE_NEGATION",
     msg: ["own work"],
@@ -4869,6 +4930,15 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "self-review-other-than-its-own",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "The reviewer may review any work other than its own work."
+    ),
+    expectEmpty: true,
+  },
+  {
     name: "self-review-another-agent-not-its-own",
     findings: () => playbookBodyObligationFindings(
       "reviewer",
@@ -5022,6 +5092,29 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: bare PASS prose in review harness remains green"
 else
   bad "benign bare PASS prose (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted APPROVE-first POSIX PASS-alternation failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness VERDICT POSIX APPROVE|PASS alternation fails"
+else
+  bad "mutation harness POSIX APPROVE|PASS alternation (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: harness VERDICT POSIX APPROVE|REQUEST_CHANGES-only remains green"
+else
+  bad "benign harness POSIX APPROVE|REQUEST_CHANGES-only (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
@@ -5207,6 +5300,15 @@ else
   bad "benign overlay simple same-gate G12 (rc=$rc): $out"
 fi
 
+printf '%s\n' 'Decided: the owner explicitly approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: owner explicitly approved G12 authorizes overlay removal"
+else
+  bad "benign overlay owner explicitly approved G12 (rc=$rc): $out"
+fi
+
 printf '%s\n' 'The owner rejected the decision that waived G12.' \
   > "$SANDBOX/memory/DECISIONS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -5218,6 +5320,19 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
   ok "mutation: rejected decision that waived G12 does not authorize overlay removal"
 else
   bad "mutation overlay rejected decision that waived G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'The owner rejected the decision that counsel approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted rejected-decision-that-counsel-approved-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: rejected decision that counsel approved G12 does not authorize overlay removal"
+else
+  bad "mutation overlay rejected decision that counsel approved G12 (rc=$rc): $out"
 fi
 
 printf '%s\n' 'The owner rejected removal of G12 and counsel approved removal of G12.' \
@@ -5301,6 +5416,28 @@ else
   bad "mutation builder own-work grant (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/playbooks/builder.md" "$SANDBOX/playbooks/builder.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The reviewer has permission to review its own work."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'own work'; then
+  echo "  planted reviewer has-permission own-work grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: reviewer body has-permission own-work grant fails"
+else
+  bad "mutation reviewer has-permission own-work grant (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 
 node -e '
 const fs=require("fs");
@@ -5668,6 +5805,25 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: reviewer may-review-any-work-except-its-own remains green"
 else
   bad "benign reviewer except-its-own (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. The reviewer may review any work other than its own work."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: reviewer may-review-any-work-other-than-its-own remains green"
+else
+  bad "benign reviewer other-than-its-own (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 

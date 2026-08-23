@@ -2384,18 +2384,45 @@ function harnessAcceptsApprove(text) {
   return false;
 }
 
+function harnessVerdictRegexGroupTokens(text) {
+  const tokens = new Set();
+  const t = String(text || "");
+  // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a pipe group.
+  const re = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)\(([^)]*)\)/gi;
+  let m;
+  while ((m = re.exec(t)) !== null) {
+    for (const part of m[1].split("|")) {
+      const tok = String(part || "")
+        .replace(/[^A-Za-z0-9_]/g, "")
+        .toUpperCase();
+      if (tok) tokens.add(tok);
+    }
+  }
+  return tokens;
+}
+
 function harnessAcceptsPass(text) {
   const t = String(text || "");
   if (/VERDICT:\\s\*\(PASS/.test(t)) return true;
   if (/VERDICT:\[\[:space:\]\]\*PASS/i.test(t)) return true;
   if (/VERDICT:\s*PASS\b/i.test(t)) return true;
   if (/\bVERDICT: PASS\b/.test(t)) return true;
+  // PASS as a regex alternative in a VERDICT matcher, including an
+  // APPROVE-first group such as VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES).
+  // Not a general regex parser: nested groups and non-VERDICT alternations
+  // that later feed a matcher are residual NLP/regex limitations.
+  if (/\bVERDICT\b/.test(t) && /\bAPPROVE\|PASS\b/.test(t)) return true;
+  if (harnessVerdictRegexGroupTokens(t).has("PASS")) return true;
   return false;
 }
 
 /**
  * Document and merge-harness reviewer verdicts must agree. Missing harness
- * files fail closed (cannot determine authority).
+ * files fail closed (cannot determine authority). A VERDICT regex group
+ * that lists PASS as an alternative (including APPROVE-first
+ * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)`) is a harness accept of
+ * PASS; `APPROVE|REQUEST_CHANGES` without PASS stays green. Residual:
+ * nested groups and non-VERDICT alternations are not parsed.
  *
  * @param {{
  *   agentsText: string,
@@ -2620,7 +2647,20 @@ function splitCoordinatedActorClauses(text) {
 }
 
 function verbInRelativeClause(text, verbIndex) {
-  return /\b(?:that|which|who)\s+$/i.test(String(text || "").slice(0, verbIndex));
+  const before = collapseWs(String(text || "").slice(0, verbIndex));
+  if (!before) return false;
+  if (/\b(?:that|which|who)\s*$/i.test(before)) return true;
+  const m = before.match(/\b(?:that|which|who)\s+(.+)$/i);
+  if (!m) return false;
+  const relSubject = collapseWs(m[1]);
+  if (!relSubject) return true;
+  // Finite relative with an intervening subject (`that counsel approved`).
+  // An owner relative subject can still be the authorizing actor; any other
+  // subject cannot. Residual: not general NLP — whose/whom, nested
+  // complementizers, and passive by-phrases as the only owner mention
+  // are not modeled.
+  if (/\bowner\b/i.test(relSubject)) return false;
+  return relSubject.split(/\s+/).length <= 6;
 }
 
 /**
@@ -2696,11 +2736,12 @@ function overlayNamedGateIds(text) {
  * Same-clause owner authorization requires an un-negated approval verb,
  * an un-negated remove/waive act, and an un-negated named gate bound in
  * that coordinated clause. Relative-clause verbs (`decision that waived
- * G12`) are not the clause's decision. A unit may authorize the target
- * only when it names no other G-number; independently split units still
- * authorize when they carry their own owner approval and removal/waiver.
- * `not G12` / `neither … G12` deny G12 even when a sibling gate is
- * approved in the same sentence.
+ * G12`, `decision that counsel approved removal of G12`) are not the
+ * clause's decision. A unit may authorize the target only when it names
+ * no other G-number; independently split units still authorize when they
+ * carry their own owner approval and removal/waiver. `not G12` /
+ * `neither … G12` deny G12 even when a sibling gate is approved in the
+ * same sentence. Residual: this is not general NLP.
  */
 function clauseAuthorizesGateRemoval(clause, gateId) {
   const t = collapseWs(clause);
@@ -2861,7 +2902,7 @@ const BODY_SKIP_GREEN_RE =
 const BODY_SKIP_GREEN_RE2 =
   /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
 const PERMISSION_PRED_RE =
-  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:allowed|permitted|authorized)\s+to|may|can|permitted|allowed|authorized)\b/gi;
+  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+permission\s+to|may|can|permitted|allowed|authorized)\b/gi;
 const OWN_WORK_TOPIC_RE =
   /\b(?:(?:its|their|your|our|my)\s+own(?:\s+(?:work|generation))?|own\s+work|review of\s+(?:its|their|your|our|my)\s+own)\b/i;
 const REVIEW_ACT_RE = /\b(?:review|evaluate|evaluating|grade|grading)\b/i;
@@ -2918,10 +2959,14 @@ function independentReviewNotRequired(text) {
 
 function topicLocallyExcluded(text, index) {
   const before = collapseWs(String(text || "").slice(0, index));
-  const last = (before.split(/\s+/).filter(Boolean).pop() || "")
-    .replace(/[^A-Za-z']/g, "");
+  const toks = before.split(/\s+/).filter(Boolean);
+  const last = (toks[toks.length - 1] || "").replace(/[^A-Za-z']/g, "");
+  const prev = (toks[toks.length - 2] || "").replace(/[^A-Za-z']/g, "");
   if (LOCAL_POLARITY_TOKEN_RE.test(last)) return true;
   if (/^(?:except|excluding)$/i.test(last)) return true;
+  // `other than its own work` is the same local-exclusion family as except.
+  // Residual: aside from / besides / apart from are not modeled.
+  if (/^other$/i.test(prev) && /^than$/i.test(last)) return true;
   return false;
 }
 
@@ -2991,8 +3036,11 @@ function selfReviewGrantTopic(unit) {
  * Coordinated subject/action clauses, semicolons, and adversative units
  * are not joined, so a prohibition on the same agent cannot bind a later
  * permission for an independent or different subject. Own-work topics
- * under local not/except polarity are not grants. Local modal/passive
- * polarity is classified before a grant is recorded.
+ * under local not/except/`other than` polarity are not grants. Noun
+ * permission (`has permission to`) is a grant. Local modal/passive
+ * polarity is classified before a grant is recorded. Residual: this is
+ * not general NLP — besides/aside from/apart from and license-to-X
+ * paraphrases are not modeled.
  */
 function bodySelfReviewGrantTopic(hay) {
   for (const unit of grantPolarityUnits(hay)) {
