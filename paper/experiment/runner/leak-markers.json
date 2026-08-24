@@ -38,5 +38,10 @@
   "issue": 1313,
   "fixing_pr": 1350,
   "merge": "672edf7bec2392a504a0111b641b41a19c66aac5"
+ },
+ "nettler": {
+  "issue": 1214,
+  "fixing_pr": 1259,
+  "merge": "e6126b65b5cb75cf1d0e91fc19620ed29678d8d1"
  }
 }

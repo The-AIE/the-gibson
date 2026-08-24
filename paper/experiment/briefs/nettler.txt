@@ -1,0 +1,26 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): /work
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Attendance page: poor dropdown contrast and jargon unfamiliar to non-technical organizers
+
+Reported 2026-08-08 on `/organizer/events/[slug]/attendance`.
+
+Two problems:
+1. **Contrast** — dropdown controls are hard to read. Worth an accessibility pass against WCAG AA on this screen, not just a colour tweak.
+2. **Naming** — labels and options use terms that mean nothing to a non-technical organizer. Rename to what the person is actually trying to do.
+
+Same audience principle as the rest of the organizer surface: the people running an event are not engineers.
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in /work:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in /work. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.
