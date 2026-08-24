@@ -15,6 +15,9 @@ These are portable across every fleet repo. The tools live in `~/.claude/fleet/`
   author's-own-example, workflow-expression validity) in `~/.claude/fleet/dispatch-spec-template.md`.
 - **Mutation-proof any guard/sensor change.** Break the property, show the test RED, restore, show GREEN.
   A test that cannot fail proves nothing. One mutation proves one mutation — enumerate the evasion space.
+- **One working directory per agent.** A git worktree per lane, disjoint file scopes. Never two agents
+  in one checkout — they corrupt each other's index and branch state within seconds. This is a hard rule
+  with no exceptions; it is separate from, and stricter than, the coordinator rule below.
 - **One coordinator per repo.** Count coordinators before adding one. A second coordinator on the same
   branch corrupts work — check for recent driver comments before touching a PR.
 - **Clear the blocker before decomposing behind it.** Above ~40% dependency-blocked, stop filing work
