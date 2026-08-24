@@ -379,3 +379,5 @@ in detail*. They are not a second contract.
 Full map: `docs/00-INDEX.md`. Findings, spikes, backlogs, and retros stay in
 place (`docs/GOOSE-SPIKE-FINDINGS.md`, `docs/DOC-BACKLOG.md`, `memory/`,
 `paper/`).
+
+**Fleet review conventions (non-normative reference):** for shared fleet review discipline — severity contract, spec-review-first, self-review checklist, mutation-proof, worktree-per-agent, one-coordinator-per-repo, lane-sync, and the merge-not-review independence floor — see `docs/fleet-review-conventions.md` (waterfalled from ConferenceOS 2026-08-24). This is a pointer, not an added gate: this repo's operative gates (`.gibson-gate.json`, `gate.sh`, contract-authority) remain the sole binding contract here.
