@@ -1,0 +1,781 @@
+diff --git a/src/app/(admin)/organizer/events/[slug]/attendance/attendance-client.tsx b/src/app/(admin)/organizer/events/[slug]/attendance/attendance-client.tsx
+index 465af19..c3a9619 100644
+--- a/src/app/(admin)/organizer/events/[slug]/attendance/attendance-client.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/attendance/attendance-client.tsx
+@@ -54,16 +54,55 @@ type SearchHit = {
+   checkInAt: string | null;
+ };
+ 
++type ScanKind = 'ENTRY_SCAN' | 'EXIT_SCAN' | 'MANUAL' | 'CHECKPOINT';
++
++/**
++ * Explicit light-surface control styles.
++ * Admin shell is dark (`text-gray-100`); without these, native selects/inputs
++ * inherit pale text onto a light control face and fail WCAG AA contrast.
++ * Borders use gray-500 (≥3:1 vs white) for non-text UI contrast (1.4.11).
++ */
++const fieldClassName =
++  'mt-1 w-full rounded-md border border-gray-500 bg-white px-2.5 py-2 text-sm text-gray-900 placeholder:text-gray-600 focus:border-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-1';
++
++const fieldMonoClassName = `${fieldClassName} font-mono`;
++
++const secondaryButtonClassName =
++  'rounded-md border border-gray-500 bg-white px-3 py-1.5 text-sm font-medium text-gray-900 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-1 disabled:opacity-50';
++
+ const KIND_LABELS: Record<string, string> = {
+-  OVERLAP: 'Overlap',
+-  DUPLICATE: 'Duplicate scan',
+-  SCAN_AND_LEAVE: 'Scan-and-leave',
+-  LATE_ENTRY: 'Late entry',
+-  EARLY_EXIT: 'Early exit',
+-  IMPOSSIBLE: 'Impossible attendance',
+-  SIGNUP_NO_SCAN: 'Signup, no scan',
++  OVERLAP: 'In two sessions at once',
++  DUPLICATE: 'Scanned more than once',
++  SCAN_AND_LEAVE: 'Checked in and left quickly',
++  LATE_ENTRY: 'Arrived late',
++  EARLY_EXIT: 'Left early',
++  IMPOSSIBLE: 'Attendance does not add up',
++  SIGNUP_NO_SCAN: 'Signed up but never checked in',
+ };
+ 
++const STATUS_FILTER_LABELS: Record<StatusFilter, string> = {
++  OPEN: 'Needs review',
++  RESOLVED: 'Fixed',
++  DISMISSED: 'Ignored',
++  ALL: 'All',
++};
++
++const STATUS_ROW_LABELS: Record<ExceptionRow['status'], string> = {
++  OPEN: 'Needs review',
++  RESOLVED: 'Fixed',
++  DISMISSED: 'Ignored',
++};
++
++const SCAN_KIND_OPTIONS: { value: ScanKind; label: string }[] = [
++  { value: 'ENTRY_SCAN', label: 'Arrived (door scan)' },
++  { value: 'EXIT_SCAN', label: 'Left (door scan)' },
++  { value: 'CHECKPOINT', label: 'Still in the room (mid-session check)' },
++  {
++    value: 'MANUAL',
++    label: 'Manual entry (lost badge, broken scanner, etc.)',
++  },
++];
++
+ function formatWhen(iso: string | null | undefined): string {
+   if (!iso) return '—';
+   try {
+@@ -73,6 +112,29 @@ function formatWhen(iso: string | null | undefined): string {
+   }
+ }
+ 
++function detailSummary(detail: Record<string, unknown> | null): string | null {
++  if (!detail) return null;
++  const parts: string[] = [];
++  for (const [key, value] of Object.entries(detail)) {
++    if (value == null || value === '') continue;
++    const readableKey = key
++      .replace(/([A-Z])/g, ' $1')
++      .replace(/[_-]+/g, ' ')
++      .trim()
++      .toLowerCase();
++    const readableValue =
++      typeof value === 'string' || typeof value === 'number'
++        ? String(value)
++        : Array.isArray(value)
++          ? value.map(String).join(', ')
++          : null;
++    if (readableValue) {
++      parts.push(`${readableKey}: ${readableValue}`);
++    }
++  }
++  return parts.length > 0 ? parts.join(' · ') : null;
++}
++
+ export function AttendanceDeskClient({
+   event,
+   exceptions: initialExceptions,
+@@ -101,16 +163,12 @@ export function AttendanceDeskClient({
+   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+   const [selectedReg, setSelectedReg] = useState<SearchHit | null>(null);
+   const [manualReason, setManualReason] = useState('');
+-  const [scanKind, setScanKind] = useState<
+-    'ENTRY_SCAN' | 'EXIT_SCAN' | 'MANUAL' | 'CHECKPOINT'
+-  >('ENTRY_SCAN');
++  const [scanKind, setScanKind] = useState<ScanKind>('ENTRY_SCAN');
+ 
+   // Correction form
+   const [correctId, setCorrectId] = useState('');
+   const [correctReason, setCorrectReason] = useState('');
+-  const [correctKind, setCorrectKind] = useState<
+-    'ENTRY_SCAN' | 'EXIT_SCAN' | 'MANUAL' | 'CHECKPOINT'
+-  >('MANUAL');
++  const [correctKind, setCorrectKind] = useState<ScanKind>('MANUAL');
+   const [correctAt, setCorrectAt] = useState('');
+ 
+   // Roster
+@@ -175,11 +233,13 @@ export function AttendanceDeskClient({
+ 
+   function onRecordScan() {
+     if (!selectedReg || !sessionId) {
+-      toast.error('Select a session and attendee first');
++      toast.error('Choose a session and an attendee first');
+       return;
+     }
+     if (scanKind === 'MANUAL' && !manualReason.trim()) {
+-      toast.error('Manual entries require a reason (lost badge, device failure, etc.)');
++      toast.error(
++        'Manual entries need a short reason (lost badge, scanner failure, etc.)'
++      );
+       return;
+     }
+     run(async () => {
+@@ -206,7 +266,9 @@ export function AttendanceDeskClient({
+ 
+   function onCorrect() {
+     if (!correctId.trim() || !correctReason.trim() || !correctAt) {
+-      toast.error('Correction needs evidence id, new time, and reason');
++      toast.error(
++        'Correction needs the original record id, a new time, and a reason'
++      );
+       return;
+     }
+     run(async () => {
+@@ -245,13 +307,13 @@ export function AttendanceDeskClient({
+         toast.error(result.error);
+         return;
+       }
+-      toast.success(result.message ?? 'Detectors ran');
++      toast.success(result.message ?? 'Checked for issues');
+     });
+   }
+ 
+   function onLoadRoster() {
+     if (!sessionId) {
+-      toast.error('Pick a session');
++      toast.error('Pick a session first');
+       return;
+     }
+     run(async () => {
+@@ -264,66 +326,64 @@ export function AttendanceDeskClient({
+         return;
+       }
+       setRoster(result.roster);
+-      toast.success(`Roster: ${result.roster.rows.length} rows`);
++      toast.success(`Showing ${result.roster.rows.length} attendees`);
+     });
+   }
+ 
+   return (
+-    <div className="space-y-8">
++    <div className="space-y-8 text-gray-900">
+       <header className="space-y-2">
+-        <h1 className="text-2xl font-bold tracking-tight text-gray-900">
+-          Session attendance desk
++        <h1 className="text-2xl font-bold tracking-tight text-white">
++          Session attendance
+         </h1>
+-        <p className="text-sm text-gray-600 max-w-3xl">
+-          Exception queue and event-day tools for{' '}
+-          <strong>{event.name}</strong>. Session entry/exit and virtual
+-          join/leave are evidence; event check-in and session signup never count
+-          as attendance. Corrections append a new row (prior value kept).
++        <p className="max-w-3xl text-sm text-gray-300">
++          Record who was in each session for <strong className="text-gray-100">{event.name}</strong>.
++          Door scans and online join/leave count; signing up for a session or
++          checking in at the event door alone does not. If you fix a mistake,
++          the old record is kept and a corrected one is added.
+         </p>
+-        <p className="text-xs text-gray-500">
+-          Open exceptions: {openCount} · Timezone: {event.timezone}
++        <p className="text-sm text-gray-400">
++          Issues needing review: {openCount} · Times shown in {event.timezone}
+         </p>
+         <div className="flex flex-wrap gap-2 pt-1">
+           <button
+             type="button"
+             disabled={pending}
+             onClick={onSyncVirtual}
+-            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
++            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50"
+           >
+-            Sync virtual evidence
++            Pull online attendance
+           </button>
+           <button
+             type="button"
+             disabled={pending}
+             onClick={onRunDetectors}
+-            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-50"
++            className={secondaryButtonClassName}
+           >
+-            Re-run detectors
++            Find attendance issues
+           </button>
+         </div>
+       </header>
+ 
+       {/* Event-day desk */}
+-      <section className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm space-y-4">
++      <section className="space-y-4 rounded-lg border border-gray-500 bg-white p-4 shadow-sm">
+         <h2 className="text-lg font-semibold text-gray-900">
+-          Event-day exception desk
++          Record someone&apos;s attendance
+         </h2>
+-        <p className="text-xs text-gray-500">
+-          Lost badge, device failure, late arrivals, room changes: use manual
+-          entry with a reason. Offline scanners should send a stable{' '}
+-          <code className="text-[11px]">clientEventId</code> so retries are
+-          idempotent.
++        <p className="text-sm text-gray-700">
++          Use this when a badge is lost, a scanner fails, someone arrives late,
++          or a room changes. For a manual entry, always add a short reason.
+         </p>
+ 
+         <div className="grid gap-3 sm:grid-cols-2">
+           <label className="block text-sm">
+-            <span className="font-medium text-gray-700">Session</span>
++            <span className="font-medium text-gray-900">Session</span>
+             <select
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++              className={fieldClassName}
+               value={sessionId}
+               onChange={(e) => setSessionId(e.target.value)}
+             >
+-              <option value="">Select session…</option>
++              <option value="">Choose a session…</option>
+               {sessions.map((s) => (
+                 <option key={s.id} value={s.id}>
+                   {s.title} ({formatWhen(s.startTime)})
+@@ -333,27 +393,26 @@ export function AttendanceDeskClient({
+           </label>
+ 
+           <label className="block text-sm">
+-            <span className="font-medium text-gray-700">Evidence kind</span>
++            <span className="font-medium text-gray-900">What happened</span>
+             <select
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++              className={fieldClassName}
+               value={scanKind}
+-              onChange={(e) =>
+-                setScanKind(e.target.value as typeof scanKind)
+-              }
++              onChange={(e) => setScanKind(e.target.value as ScanKind)}
+             >
+-              <option value="ENTRY_SCAN">Entry scan</option>
+-              <option value="EXIT_SCAN">Exit scan</option>
+-              <option value="CHECKPOINT">Checkpoint</option>
+-              <option value="MANUAL">Manual (lost badge / device / admin)</option>
++              {SCAN_KIND_OPTIONS.map((opt) => (
++                <option key={opt.value} value={opt.value}>
++                  {opt.label}
++                </option>
++              ))}
+             </select>
+           </label>
+         </div>
+ 
+-        <div className="flex flex-wrap gap-2 items-end">
+-          <label className="block text-sm flex-1 min-w-[12rem]">
+-            <span className="font-medium text-gray-700">Find attendee</span>
++        <div className="flex flex-wrap items-end gap-2">
++          <label className="block min-w-[12rem] flex-1 text-sm">
++            <span className="font-medium text-gray-900">Find attendee</span>
+             <input
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++              className={fieldClassName}
+               value={searchQ}
+               onChange={(e) => setSearchQ(e.target.value)}
+               onKeyDown={(e) => {
+@@ -362,37 +421,37 @@ export function AttendanceDeskClient({
+                   onSearch();
+                 }
+               }}
+-              placeholder="Name, email, or badge QR"
++              placeholder="Name, email, or badge code"
+             />
+           </label>
+           <button
+             type="button"
+             disabled={pending}
+             onClick={onSearch}
+-            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium"
++            className={secondaryButtonClassName}
+           >
+             Search
+           </button>
+         </div>
+ 
+         {searchHits.length > 0 && (
+-          <ul className="divide-y divide-gray-100 rounded-md border border-gray-200 max-h-40 overflow-auto text-sm">
++          <ul className="max-h-40 divide-y divide-gray-200 overflow-auto rounded-md border border-gray-500 text-sm">
+             {searchHits.map((hit) => (
+               <li key={hit.id}>
+                 <button
+                   type="button"
+-                  className={`w-full text-left px-3 py-2 hover:bg-indigo-50 ${
+-                    selectedReg?.id === hit.id ? 'bg-indigo-50' : ''
++                  className={`w-full px-3 py-2 text-left text-gray-900 hover:bg-indigo-50 focus:bg-indigo-50 focus:outline-none ${
++                    selectedReg?.id === hit.id ? 'bg-indigo-50' : 'bg-white'
+                   }`}
+                   onClick={() => setSelectedReg(hit)}
+                 >
+                   <span className="font-medium">
+                     {hit.firstName} {hit.lastName}
+                   </span>{' '}
+-                  <span className="text-gray-500">{hit.email}</span>
++                  <span className="text-gray-700">{hit.email}</span>
+                   {hit.checkInAt && (
+-                    <span className="ml-2 text-xs text-amber-700">
+-                      event checked in (not session proof)
++                    <span className="ml-2 text-xs font-medium text-amber-900">
++                      checked in at event door (not session proof)
+                     </span>
+                   )}
+                 </button>
+@@ -402,7 +461,7 @@ export function AttendanceDeskClient({
+         )}
+ 
+         {selectedReg && (
+-          <p className="text-sm text-gray-700">
++          <p className="text-sm text-gray-900">
+             Selected:{' '}
+             <strong>
+               {selectedReg.firstName} {selectedReg.lastName}
+@@ -412,14 +471,14 @@ export function AttendanceDeskClient({
+         )}
+ 
+         <label className="block text-sm">
+-          <span className="font-medium text-gray-700">
+-            Reason (required for manual / optional notes)
++          <span className="font-medium text-gray-900">
++            Reason (required for manual entry; optional notes otherwise)
+           </span>
+           <input
+-            className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++            className={fieldClassName}
+             value={manualReason}
+             onChange={(e) => setManualReason(e.target.value)}
+-            placeholder="e.g. lost badge, handheld scanner failed, late arrival room B→A"
++            placeholder="e.g. lost badge, handheld scanner failed, moved from room B to A"
+           />
+         </label>
+ 
+@@ -427,32 +486,37 @@ export function AttendanceDeskClient({
+           type="button"
+           disabled={pending || !selectedReg || !sessionId}
+           onClick={onRecordScan}
+-          className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
++          className="rounded-md bg-emerald-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-1 disabled:opacity-50"
+         >
+-          Record evidence
++          Save attendance
+         </button>
+       </section>
+ 
+       {/* Exception queue */}
+-      <section className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm space-y-4">
++      <section className="space-y-4 rounded-lg border border-gray-500 bg-white p-4 shadow-sm">
+         <div className="flex flex-wrap items-center justify-between gap-2">
+           <h2 className="text-lg font-semibold text-gray-900">
+-            Exception queue
++            Problems to review
+           </h2>
+-          <div className="flex gap-1 text-sm">
++          <div
++            className="flex flex-wrap gap-1 text-sm"
++            role="group"
++            aria-label="Filter by status"
++          >
+             {(['OPEN', 'RESOLVED', 'DISMISSED', 'ALL'] as StatusFilter[]).map(
+               (s) => (
+                 <button
+                   key={s}
+                   type="button"
+                   onClick={() => setStatusFilter(s)}
+-                  className={`rounded px-2 py-1 ${
++                  aria-pressed={statusFilter === s}
++                  className={`rounded px-2.5 py-1.5 font-medium focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-1 ${
+                     statusFilter === s
+                       ? 'bg-gray-900 text-white'
+-                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
++                      : 'border border-gray-500 bg-white text-gray-900 hover:bg-gray-50'
+                   }`}
+                 >
+-                  {s}
++                  {STATUS_FILTER_LABELS[s]}
+                 </button>
+               )
+             )}
+@@ -460,148 +524,153 @@ export function AttendanceDeskClient({
+         </div>
+ 
+         {filtered.length === 0 ? (
+-          <p className="text-sm text-gray-500">No exceptions in this filter.</p>
++          <p className="text-sm text-gray-700">
++            No problems in this view.
++          </p>
+         ) : (
+           <ul className="space-y-3">
+-            {filtered.map((ex) => (
+-              <li
+-                key={ex.id}
+-                className="rounded-md border border-gray-200 p-3 space-y-2"
+-              >
+-                <div className="flex flex-wrap items-start justify-between gap-2">
+-                  <div>
+-                    <span className="inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900">
+-                      {KIND_LABELS[ex.kind] ?? ex.kind}
+-                    </span>
+-                    <span
+-                      className={`ml-2 text-xs font-medium ${
+-                        ex.status === 'OPEN'
+-                          ? 'text-red-700'
+-                          : 'text-gray-500'
+-                      }`}
+-                    >
+-                      {ex.status}
+-                    </span>
+-                    <p className="mt-1 text-sm font-medium text-gray-900">
+-                      {ex.attendeeName}{' '}
+-                      <span className="font-normal text-gray-500">
+-                        {ex.attendeeEmail}
++            {filtered.map((ex) => {
++              const summary = detailSummary(ex.detail);
++              return (
++                <li
++                  key={ex.id}
++                  className="space-y-2 rounded-md border border-gray-500 p-3"
++                >
++                  <div className="flex flex-wrap items-start justify-between gap-2">
++                    <div>
++                      <span className="inline-flex items-center rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-950">
++                        {KIND_LABELS[ex.kind] ?? ex.kind}
+                       </span>
+-                    </p>
+-                    <p className="text-xs text-gray-500">
+-                      Session: {ex.sessionTitle ?? '—'} · Created{' '}
+-                      {formatWhen(ex.createdAt)}
+-                      {ex.eventCheckInAt && (
+-                        <>
+-                          {' '}
+-                          · Event check-in {formatWhen(ex.eventCheckInAt)}{' '}
+-                          (context only)
+-                        </>
+-                      )}
+-                    </p>
+-                  </div>
+-                </div>
+-                {ex.detail && (
+-                  <pre className="overflow-x-auto rounded bg-gray-50 p-2 text-[11px] text-gray-700">
+-                    {JSON.stringify(ex.detail, null, 2)}
+-                  </pre>
+-                )}
+-                {ex.status === 'OPEN' ? (
+-                  <div className="flex flex-wrap gap-2 items-end">
+-                    <label className="block text-sm flex-1 min-w-[12rem]">
+-                      <span className="text-xs text-gray-600">
+-                        Resolution note (required)
++                      <span
++                        className={`ml-2 text-xs font-semibold ${
++                          ex.status === 'OPEN'
++                            ? 'text-red-800'
++                            : 'text-gray-700'
++                        }`}
++                      >
++                        {STATUS_ROW_LABELS[ex.status]}
+                       </span>
+-                      <input
+-                        className="mt-0.5 w-full rounded-md border border-gray-300 px-2 py-1 text-sm"
+-                        value={noteById[ex.id] ?? ''}
+-                        onChange={(e) =>
+-                          setNoteById((m) => ({
+-                            ...m,
+-                            [ex.id]: e.target.value,
+-                          }))
+-                        }
+-                        placeholder="Authorized reason for resolve/dismiss"
+-                      />
+-                    </label>
+-                    <button
+-                      type="button"
+-                      disabled={pending}
+-                      onClick={() => onResolve(ex.id, 'RESOLVED')}
+-                      className="rounded-md bg-emerald-600 px-2.5 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+-                    >
+-                      Resolve
+-                    </button>
+-                    <button
+-                      type="button"
+-                      disabled={pending}
+-                      onClick={() => onResolve(ex.id, 'DISMISSED')}
+-                      className="rounded-md border border-gray-300 px-2.5 py-1.5 text-xs font-medium disabled:opacity-50"
+-                    >
+-                      Dismiss
+-                    </button>
++                      <p className="mt-1 text-sm font-medium text-gray-900">
++                        {ex.attendeeName}{' '}
++                        <span className="font-normal text-gray-700">
++                          {ex.attendeeEmail}
++                        </span>
++                      </p>
++                      <p className="text-sm text-gray-700">
++                        Session: {ex.sessionTitle ?? '—'} · Flagged{' '}
++                        {formatWhen(ex.createdAt)}
++                        {ex.eventCheckInAt && (
++                          <>
++                            {' '}
++                            · Event-door check-in{' '}
++                            {formatWhen(ex.eventCheckInAt)} (context only)
++                          </>
++                        )}
++                      </p>
++                    </div>
+                   </div>
+-                ) : (
+-                  <p className="text-xs text-gray-500">
+-                    {ex.resolutionNote} · {formatWhen(ex.resolvedAt)}
+-                  </p>
+-                )}
+-              </li>
+-            ))}
++                  {summary && (
++                    <p className="rounded bg-gray-100 px-2 py-1.5 text-sm text-gray-800">
++                      {summary}
++                    </p>
++                  )}
++                  {ex.status === 'OPEN' ? (
++                    <div className="flex flex-wrap items-end gap-2">
++                      <label className="block min-w-[12rem] flex-1 text-sm">
++                        <span className="font-medium text-gray-900">
++                          Note (required)
++                        </span>
++                        <input
++                          className={fieldClassName}
++                          value={noteById[ex.id] ?? ''}
++                          onChange={(e) =>
++                            setNoteById((m) => ({
++                              ...m,
++                              [ex.id]: e.target.value,
++                            }))
++                          }
++                          placeholder="Why you are fixing or ignoring this"
++                        />
++                      </label>
++                      <button
++                        type="button"
++                        disabled={pending}
++                        onClick={() => onResolve(ex.id, 'RESOLVED')}
++                        className="rounded-md bg-emerald-700 px-2.5 py-1.5 text-sm font-medium text-white hover:bg-emerald-800 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:ring-offset-1 disabled:opacity-50"
++                      >
++                        Mark fixed
++                      </button>
++                      <button
++                        type="button"
++                        disabled={pending}
++                        onClick={() => onResolve(ex.id, 'DISMISSED')}
++                        className={secondaryButtonClassName}
++                      >
++                        Ignore
++                      </button>
++                    </div>
++                  ) : (
++                    <p className="text-sm text-gray-700">
++                      {ex.resolutionNote} · {formatWhen(ex.resolvedAt)}
++                    </p>
++                  )}
++                </li>
++              );
++            })}
+           </ul>
+         )}
+       </section>
+ 
+       {/* Correction chain */}
+-      <section className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm space-y-3">
++      <section className="space-y-3 rounded-lg border border-gray-500 bg-white p-4 shadow-sm">
+         <h2 className="text-lg font-semibold text-gray-900">
+-          Manual correction
++          Fix a mistaken check-in
+         </h2>
+-        <p className="text-xs text-gray-500">
+-          Never edits history. Creates a new evidence row that supersedes the
+-          prior id; actor + reason + previous/new timestamps are retained for
+-          audit.
++        <p className="text-sm text-gray-700">
++          Does not erase history. Adds a new record that replaces the old one,
++          and keeps who changed it, why, and both times for your records.
+         </p>
+         <div className="grid gap-3 sm:grid-cols-2">
+           <label className="block text-sm">
+-            <span className="font-medium text-gray-700">
+-              Supersede evidence id
++            <span className="font-medium text-gray-900">
++              ID of the record to replace
+             </span>
+             <input
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm font-mono"
++              className={fieldMonoClassName}
+               value={correctId}
+               onChange={(e) => setCorrectId(e.target.value)}
+-              placeholder="cuid of prior evidence row"
++              placeholder="Paste the id from the attendance record"
+             />
+           </label>
+           <label className="block text-sm">
+-            <span className="font-medium text-gray-700">New kind</span>
++            <span className="font-medium text-gray-900">
++              Corrected check-in type
++            </span>
+             <select
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++              className={fieldClassName}
+               value={correctKind}
+-              onChange={(e) =>
+-                setCorrectKind(e.target.value as typeof correctKind)
+-              }
++              onChange={(e) => setCorrectKind(e.target.value as ScanKind)}
+             >
+-              <option value="ENTRY_SCAN">ENTRY_SCAN</option>
+-              <option value="EXIT_SCAN">EXIT_SCAN</option>
+-              <option value="CHECKPOINT">CHECKPOINT</option>
+-              <option value="MANUAL">MANUAL</option>
++              {SCAN_KIND_OPTIONS.map((opt) => (
++                <option key={opt.value} value={opt.value}>
++                  {opt.label}
++                </option>
++              ))}
+             </select>
+           </label>
+           <label className="block text-sm">
+-            <span className="font-medium text-gray-700">New occurred at</span>
++            <span className="font-medium text-gray-900">Correct time</span>
+             <input
+               type="datetime-local"
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++              className={fieldClassName}
+               value={correctAt}
+               onChange={(e) => setCorrectAt(e.target.value)}
+             />
+           </label>
+           <label className="block text-sm">
+-            <span className="font-medium text-gray-700">Reason (required)</span>
++            <span className="font-medium text-gray-900">Reason (required)</span>
+             <input
+-              className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
++              className={fieldClassName}
+               value={correctReason}
+               onChange={(e) => setCorrectReason(e.target.value)}
+               placeholder="Why this correction is authorized"
+@@ -612,70 +681,70 @@ export function AttendanceDeskClient({
+           type="button"
+           disabled={pending}
+           onClick={onCorrect}
+-          className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
++          className="rounded-md bg-gray-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-1 disabled:opacity-50"
+         >
+-          Append correction
++          Save correction
+         </button>
+       </section>
+ 
+       {/* Session roster */}
+-      <section className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm space-y-3">
++      <section className="space-y-3 rounded-lg border border-gray-500 bg-white p-4 shadow-sm">
+         <div className="flex flex-wrap items-center justify-between gap-2">
+           <h2 className="text-lg font-semibold text-gray-900">
+-            Session roster / export
++            Who attended this session
+           </h2>
+           <div className="flex gap-2">
+             <button
+               type="button"
+               disabled={pending || !sessionId}
+               onClick={onLoadRoster}
+-              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium disabled:opacity-50"
++              className={secondaryButtonClassName}
+             >
+-              Load roster
++              Show list
+             </button>
+             {sessionId && (
+               <a
+                 href={`/organizer/events/${event.slug}/attendance/export?sessionId=${encodeURIComponent(sessionId)}`}
+-                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700"
++                className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-600 focus:ring-offset-1"
+               >
+-                Download CSV
++                Download spreadsheet
+               </a>
+             )}
+           </div>
+         </div>
+-        <p className="text-xs text-gray-500">
+-          Reconstructs entry/exit from the active evidence chain. Eligible
+-          instructional minutes are computed later by the completion engine
+-          (#521), not stored here.
++        <p className="text-sm text-gray-700">
++          Built from arrival and departure records for the session chosen
++          above. Credit minutes for certificates are calculated separately
++          later.
+         </p>
+ 
+         {roster && (
+           <div className="overflow-x-auto">
+-            <table className="min-w-full text-left text-sm">
+-              <thead className="border-b text-xs uppercase text-gray-500">
++            <table className="min-w-full text-left text-sm text-gray-900">
++              <thead className="border-b border-gray-500 text-xs font-semibold uppercase tracking-wide text-gray-800">
+                 <tr>
+                   <th className="py-2 pr-3">Attendee</th>
+-                  <th className="py-2 pr-3">Entry</th>
+-                  <th className="py-2 pr-3">Exit</th>
+-                  <th className="py-2 pr-3">Present (min)</th>
+-                  <th className="py-2 pr-3">Watch (s)</th>
+-                  <th className="py-2 pr-3">Signup</th>
+-                  <th className="py-2 pr-3">Exceptions</th>
++                  <th className="py-2 pr-3">Arrived</th>
++                  <th className="py-2 pr-3">Left</th>
++                  <th className="py-2 pr-3">Minutes present</th>
++                  <th className="py-2 pr-3">Online watch (sec)</th>
++                  <th className="py-2 pr-3">Signed up?</th>
++                  <th className="py-2 pr-3">Open issues</th>
+                 </tr>
+               </thead>
+-              <tbody className="divide-y divide-gray-100">
++              <tbody className="divide-y divide-gray-200">
+                 {roster.rows.map((row) => (
+                   <tr key={row.registrationId}>
+                     <td className="py-2 pr-3">
+                       <div className="font-medium">
+                         {row.firstName} {row.lastName}
+                       </div>
+-                      <div className="text-xs text-gray-500">{row.email}</div>
++                      <div className="text-sm text-gray-700">{row.email}</div>
+                     </td>
+-                    <td className="py-2 pr-3 text-xs">
++                    <td className="py-2 pr-3 text-sm">
+                       {formatWhen(row.entryAt)}
+                     </td>
+-                    <td className="py-2 pr-3 text-xs">
++                    <td className="py-2 pr-3 text-sm">
+                       {formatWhen(row.exitAt)}
+                     </td>
+                     <td className="py-2 pr-3">
+@@ -684,11 +753,13 @@ export function AttendanceDeskClient({
+                     <td className="py-2 pr-3">
+                       {row.virtualWatchSeconds ?? '—'}
+                     </td>
+-                    <td className="py-2 pr-3 text-xs">
++                    <td className="py-2 pr-3 text-sm">
+                       {row.sessionSignupStatus ?? '—'}
+                     </td>
+-                    <td className="py-2 pr-3 text-xs text-amber-800">
+-                      {row.openExceptionKinds.join(', ') || '—'}
++                    <td className="py-2 pr-3 text-sm text-amber-950">
++                      {row.openExceptionKinds
++                        .map((k) => KIND_LABELS[k] ?? k)
++                        .join(', ') || '—'}
+                     </td>
+                   </tr>
+                 ))}

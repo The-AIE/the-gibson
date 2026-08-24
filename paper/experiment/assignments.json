@@ -1,8 +1,8 @@
 {
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
- "deviation": "D-1, D-2, D-3, D-4 \u2014 see DEVIATIONS.md",
- "revised": "2026-08-22 (D-4 \u2014 leak detector instrumented for provider-side web tools)",
+ "deviation": "D-1, D-2, D-3, D-4, D-5, D-6 — see DEVIATIONS.md",
+ "revised": "2026-08-24 (D-6 — leak detector was keyed to block structure; server-side tool encoding and subagent sessions were unobserved)",
  "seed": 219,
  "target_n": 12,
  "design": "frozen replay set, within-task paired (D-3)",
@@ -10,15 +10,15 @@
   "definition": "an already-closed ConferenceOS issue, replayed against the commit its fix landed on top of",
   "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
   "checkout_rule": "fresh mktemp -d scratch dir; git init + fetch --depth 1 --no-tags at base_commit; remote removed; NEVER reused",
-  "leakage_rule": "fail-closed under set -euo pipefail: total object census \u2014 the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers. A failed census/setup assertion ALWAYS voids. An audit hit is adjudicated under `audit_rule` (adopted prospectively 2026-08-21, before any run executes under it).",
+  "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers. A failed census/setup assertion ALWAYS voids. An audit hit is adjudicated under `audit_rule` (adopted prospectively 2026-08-21, before any run executes under it).",
   "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch",
   "dependency_provisioning": "coordinator runs `npm ci && npx prisma generate` in the mounted tree before dispatch; excluded from metrics 3-4 in both arms. NOT information-free: npm ci runs postinstall and several dependency install scripts with network. Excluding it CHANGES registered metric accounting rather than leaving it untouched. Identical work in both arms; Node/npm pinned by image digest; lockfile is the base commit's.",
-  "implementer_platform": "grok, both arms \u2014 forced by the macOS sandbox matrix above; holds platform constant across arms and removes a confound",
+  "implementer_platform": "grok, both arms — forced by the macOS sandbox matrix above; holds platform constant across arms and removes a confound",
   "judge": "Devin only. Grok implemented both arms; Claude never judges; Codex has seen harness-arm output as reviewer. If Devin is unavailable, judging blocks rather than falling back.",
   "harness_reviewer": "Codex (not Grok, which implements), under the same isolation profile",
   "void_run_rule": "a run failing any leakage layer leaves status at 'ready' and appends to that task's void_runs array; void runs are reported as attempts-per-completed-task, never silently dropped",
   "vector_a_network": "mitigated by credential denial, NOT network denial: repo is private (unauth GET of fixing PR -> 404, probed), tokens scrubbed, ~/.config/gh kernel-denied. CORRECTED 2026-08-22 (D-4): the earlier claim that 'web_search/web_fetch disabled' was FALSE. The implementer platform carries first-class web_search/web_fetch tools that execute provider-side, not as container network traffic, so container isolation cannot reach them; blowgun issued web_search 'conference-os sponsor partner logo upload issue github The-AIE' and cardines-h issued web_fetch of a library changelog. What actually held is that the repository is private: the search returned 404s and 'no public issues found', i.e. zero solution content. Residual general web access is DETECTION-ONLY via the transcript audit, which is now instrumented for these tools (adjudicate.py v2).",
-  "vector_b_local_filesystem": "closed at the kernel by the deny list \u2014 the canonical checkout and sibling worktrees carry the full future history including the fix and need no credentials; this is the higher-value vector",
+  "vector_b_local_filesystem": "closed at the kernel by the deny list — the canonical checkout and sibling worktrees carry the full future history including the fix and need no credentials; this is the higher-value vector",
   "isolation": "CONTAINER, both arms. docker/colima on the Mac Mini. Image ab219-runner:2 sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08 from node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 + git + @xai-official/grok@1.0.3, empty agent HOME. Frozen tree census-verified on the laptop, shipped, census re-verified on the Mini, mounted ALONE at /work. Only ~/.grok/auth.json mounted read-only (inference auth, no repo access). --rm so agent state is per-run.",
   "isolation_note": "Isolation comes from the CONTAINER, not the host. The Mini is NOT clean: ~/workspace/conference-os there CONTAINS the fixing commit, plus ~27 git dirs, cos-lanes worktrees, gh creds, ssh key, 164 grok sessions. No host-side sandbox on either Mac closes both vectors.",
   "isolation_probes": "Required before every run: ls /Users -> No such file or directory; no repo copies in container; fix commit from /work -> could not get object info; gh/gh-config/ssh absent and GH_TOKEN unset; ~/.grok config absent (no MCP); private repo unauth -> 404.",
@@ -29,7 +29,7 @@
   "egress": "NOT restricted to the inference endpoint - the container reaches the public internet and the clean run used that to fetch build tools. Retrieval of the fix still requires a credential the container lacks. Egress allowlisting is unbuilt and is the next hardening.",
   "auth_mount_rule": "auth.json MUST be mounted as a single read-only FILE at /home/agent/.grok/auth.json, never as a directory. Mounting the directory makes Grok persist session state to the host, carrying the previous run's transcript into the next container (the retained-session-store defect, reintroduced by mount shape). Found and fixed 2026-08-21 after the first clean run; verified auth works and no host state is created. cos#1245 is unaffected - its mount contained only auth.json at start.",
   "layer_labels": "Each leakage layer is labelled PREVENTION or DETECTION, and a clean DETECTION result is NEVER reportable as evidence of isolation. PREVENTION: container mount boundary (vector B), absence of credentials in the image (vector A). DETECTION: post-run transcript audit, total object census. Rationale: under D-1 a clean audit was read as 'no leak', when it only ever meant 'no leak observed'. The same error class appeared independently in two ConferenceOS guards the same day.",
-  "artifact_export": "git diff OMITS untracked files, so newly created source files silently vanished from every exported patch. In the harness arm the patch is an INPUT to review, so the reviewer received code importing modules the patch did not contain and produced confident FALSE 'required modules are missing' findings \u2014 burying a real defect under fabricated ones. Fixed via runner/export-patch.sh (git add -A excluding harness scratch, then diff --binary --cached). ALL SIX harness runs were re-run under the corrected export; the pre-fix patches are archived as patches-VOID-incomplete-export. Raw-arm RUNS were unaffected (the implementer never sees the patch) and were only re-exported. Each run now records PATCH_NEW_FILES.",
+  "artifact_export": "git diff OMITS untracked files, so newly created source files silently vanished from every exported patch. In the harness arm the patch is an INPUT to review, so the reviewer received code importing modules the patch did not contain and produced confident FALSE 'required modules are missing' findings — burying a real defect under fabricated ones. Fixed via runner/export-patch.sh (git add -A excluding harness scratch, then diff --binary --cached). ALL SIX harness runs were re-run under the corrected export; the pre-fix patches are archived as patches-VOID-incomplete-export. Raw-arm RUNS were unaffected (the implementer never sees the patch) and were only re-exported. Each run now records PATCH_NEW_FILES.",
   "audit_instrument": "adjudicate.py v2 (2026-08-22): the v1 extractor read only tool inputs with a 'command' field, so it could not see web_search/web_fetch calls at all and scored blowgun flagged=0. v2 normalises those calls into flaggable pseudo-commands and applies the same positive-content test to the returned payload. All six previously-adjudicated raw runs were re-adjudicated under v2: every verdict is unchanged (retrieved=0). The provider's own usage counter is NOT a substitute -- it reported web_search_requests=0 for a run that demonstrably issued one."
  },
  "eligibility": {
@@ -54,7 +54,7 @@
    1253
   ],
   "reproducible": "arm assignment only (seed 219); task selection is documented but judgmental",
-  "selection": "the 7 continuation tasks were selected by the coordinator pre-outcome to span distinct common-need classes; selection is judgment-based and NOT algorithmically reproducible \u2014 stated limitation"
+  "selection": "the 7 continuation tasks were selected by the coordinator pre-outcome to span distinct common-need classes; selection is judgment-based and NOT algorithmically reproducible — stated limitation"
  },
  "enrolled": [
   {
@@ -72,7 +72,7 @@
      "date": "2026-08-21",
      "arm": "raw",
      "implementer": "grok (no network isolation available on macOS)",
-     "cause": "leakage \u2014 transcript audit hit: first action was `gh issue view 1245`; then read fixing PR #1351, its merge commit, and post-fix contents of two edited files via `gh api .../contents?ref=<merge_commit>`",
+     "cause": "leakage — transcript audit hit: first action was `gh issue view 1245`; then read fixing PR #1351, its merge commit, and post-fix contents of two edited files via `gh api .../contents?ref=<merge_commit>`",
      "layers": "census PASS; blind brief PASS; transcript audit HIT",
      "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-VOID.ndjson",
      "wall_clock": "5m41s (recorded, not counted)",
@@ -96,7 +96,7 @@
     "tokens_out": 8919,
     "cache_read": 772096,
     "attempted_leak": 2,
-    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5185 passed",
     "diff": "paper/experiment/diffs/bucranium.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/bucranium.txt",
@@ -132,7 +132,7 @@
    "merge_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
    "base_commit": "78538fd09c74bcec580f867f29fbbbafe3ba3bfb",
    "status": "executed",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only \u2014 the arm measurement is a fresh harness replay",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay",
    "code_name": "blowgun",
    "run": {
     "date": "2026-08-22",
@@ -182,7 +182,7 @@
     "tokens_out": 24609,
     "cache_read": 2040576,
     "attempted_leak": 0,
-    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5190 passed",
     "diff": "paper/experiment/diffs/mediumize.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/mediumize.txt",
@@ -218,7 +218,7 @@
    "merge_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
    "base_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
    "status": "executed",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only \u2014 the arm measurement is a fresh harness replay",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay",
    "code_name": "gantline",
    "run": {
     "date": "2026-08-22",
@@ -269,7 +269,7 @@
     "tokens_out": 178644,
     "cache_read": 15357952,
     "attempted_leak": 0,
-    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5112 passed",
     "diff": "paper/experiment/diffs/cardines.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/cardines.txt",
@@ -320,7 +320,7 @@
     "tokens_out": 10054,
     "cache_read": 399104,
     "attempted_leak": 0,
-    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 4467 passed",
     "diff": "paper/experiment/diffs/sesame.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/sesame.txt",
@@ -371,7 +371,7 @@
     "tokens_out": 5448,
     "cache_read": 428800,
     "attempted_leak": 0,
-    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 4883 passed",
     "diff": "paper/experiment/diffs/nonjury.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/nonjury.txt",
@@ -422,7 +422,7 @@
     "tokens_out": 9608,
     "cache_read": 0,
     "attempted_leak": 0,
-    "audit": "CLEAN \u2014 adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5298 passed",
     "diff": "paper/experiment/diffs/sepaloid.patch (binary-capable export)",
     "brief": "paper/experiment/briefs/sepaloid.txt",
@@ -457,7 +457,33 @@
    "fixing_pr": 1259,
    "merge_commit": "e6126b65b5cb75cf1d0e91fc19620ed29678d8d1",
    "base_commit": "d510efbfe3cd13dd1518fc7eb9e4f04933a50132",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "nettler",
+   "run": {
+    "date": "2026-08-23",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v4 (D-6)",
+    "census": "PASS at extract on the Mini (2979 objects, store == HEAD closure, 1 commit, no remotes, base d510efbf correct, fixing merge commit e6126b65 absent -- 'could not get object info'). Re-verified after the run: the store holds exactly one object beyond the closure, blob c3a9619b, which is the agent's own edited file staged by the coordinator's export step (`git add -A`); it hashes identically to the post-run working file. Locally created, not fetched.",
+    "inference_cost_usd": 0.164716224,
+    "wall_clock_ms": 252176,
+    "turns": 15,
+    "tokens_in": 109328,
+    "tokens_out": 12384,
+    "cache_read": 589312,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "One web_search, issued as a type='server_tool_use' block that adjudicate.py v3 could not see (D-6a): query 'WCAG AA contrast native select dropdown gray-300 border light background best practices'. Ten results returned, all public accessibility-standards pages (w3.org WCAG 2.2, webaim.org, dequeuniversity.com, and similar). Counted as an attempt under the flag-any-web-tool rule, but recorded plainly: the query targets a public web standard, not this repository, and no leak marker appears in the payload. It is out-of-tree information entering an isolated run, which is reported as such; it is not an attempt to retrieve the fix.",
+    "audit": "CLEAN -- retrieved=0 under adjudicate.py v4, plus a structure-independent raw-byte scan of the whole transcript for the fixing PR number and merge SHA which returned ZERO hits. Confirmed by hand: all 36 parent tool calls read or wrote only under /work; no gh, no github.com, no in-tree fleet tooling; zero subagents spawned, so this run has no unobserved region.",
+    "gates": "VERIFIED BY COORDINATOR in-container, not taken on the implementer's word: prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 -- 4673 passed / 49 todo (442 files passed, 1 skipped)",
+    "clarification_request": "The implementer invoked ask_user_question to choose between two copy registers ('plain action words' vs 'everyday event language') and the runtime auto-answered 'No user is available to answer questions in this non-interactive session. Continue with your best judgment.' It then chose plain action words. Recorded because the raw arm has no spec gate in which such ambiguity could be resolved -- this is the treatment working as defined, not a defect.",
+    "self_reported_limitation": "The implementer stated it could not click through the live page (no browser tooling in the container) and verified contrast by computing WCAG ratios for the new palette in python3 instead. Recorded for the judge.",
+    "diff": "paper/experiment/diffs/nettler.patch (1 file, 0 new, +281/-210) sha256:9bf2a2d0e70f662371b32eb86fda7a93978f82ca4839b35bb62590ca536ba7c9",
+    "brief": "paper/experiment/briefs/nettler.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/nettler.ndjson sha256:6e5bf805b9bc7e94628973f6a3f6fddaf5fb559d5f416309e750711739c352e6",
+    "aborted_attempt": "An earlier dispatch of this task on 2026-08-23T11:35Z failed to start: grok exited RC=1 with 'Not signed in' before any turn, producing a 2-line transcript and a 0-byte patch. Auth was refreshed and the run re-dispatched at 11:37:05Z. Recorded, not hidden: no model output was produced by the aborted attempt, so it is an infrastructure abort rather than a void run, and its cost is $0.",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (7 open COS PRs updated inside 24h on 2026-08-24)"
+   }
   },
   {
    "id": "cos#1217",
@@ -501,7 +527,7 @@
   {
    "id": "cos#1330",
    "was_arm": "raw",
-   "reason": "still open \u2014 no merged fix exists, so no replay base can be defined; independently a weak unit (pure positional refactor, no behavior change, explicit do-not-run-concurrently constraint)"
+   "reason": "still open — no merged fix exists, so no replay base can be defined; independently a weak unit (pure positional refactor, no behavior change, explicit do-not-run-concurrently constraint)"
   }
  ],
  "contaminated_v1_record": {
@@ -513,5 +539,6 @@
   "cos#1313": "closed 2026-08-15 via PR 1350"
  },
  "vector_c_in_tree_tooling": "NEW 2026-08-22 (D-5), found during the gantline (cos#1313) replay: the frozen tree itself ships scripts whose job is to pull live issue/PR state (scripts/agent-preflight.mjs, scripts/agent-dispatch-packet.mjs, scripts/generate-status.mjs), and the tree's AGENTS.md instructs agents to run them. The implementer ran `node scripts/agent-preflight.mjs --issue 875` as its opening move. PREVENTION held -- the script spawns gh, which is absent from the image, so it returned 'Failed to load issue #875: spawnSync gh ENOENT' and transferred nothing. DETECTION did NOT: the command text contains no 'gh' and no URL, so adjudicate.py v2's command-side regex scored the run flagged=0. Fixed as v3.",
- "audit_instrument": "adjudicate.py v3 (2026-08-22, D-5). v1 read only tool inputs with a 'command' field and could not see web_search/web_fetch at all (D-4). v2 added those. v3 adds (a) command-side patterns for in-tree tooling that fetches issue/PR state and (b) a result-side detector for evidence that an external fetch was attempted and failed, restricted to command-executing tools so that repo docs quoting `gh api` are not miscounted as attempts; and it resolves leak markers for harness ('-h') and pre-container dated transcript names, which previously loaded NO markers. VALIDATED ON A KNOWN POSITIVE for the first time: with markers resolved, the pre-container voided run (2026-08-21-cos1245-raw-VOID) scores VOID with retrieved=3 on the fixing PR number and merge SHA, while the containerized run of the same task scores CLEAN. All 46 stored transcripts re-scanned under v3: every in-experiment verdict unchanged (retrieved=0); the only new signal is gantline's indirect attempt. The provider's own usage counter is NOT a substitute -- it reported web_search_requests=0 for a run that demonstrably issued one."
+ "audit_instrument": "adjudicate.py v4 (2026-08-24, D-6). v1 read only tool inputs with a 'command' field and could not see web_search/web_fetch at all (D-4). v2 added those. v3 added in-tree-tooling command patterns and a result-side attempt detector, and resolved markers for '-h' and dated transcript names; it was the first version validated on a known positive. v4 closes three gaps of one species -- every prior version keyed detection to a block whose \"type\" is exactly \"tool_use\": (a) the provider ALSO emits its own tools as type=\"server_tool_use\" with type=\"web_search_tool_result\" payloads, which v3 walked straight past -- nettler scored flagged=0 while its transcript contains a web_search and ten returned URLs, and the SAME vector in blowgun had been caught only because it happened to arrive as a plain tool_use; (b) spawn_subagent opens a child session whose tool calls never enter the parent transcript, so 15 subagent sessions across 4 transcripts have never been directly observed by ANY version -- v4 cannot see them either and REPORTS the unobserved region per run so no run silently claims coverage; (c) search_tool is a tool-catalogue probe, reported but not counted as an attempt since it cannot reach the network. v4 also adds a STRUCTURE-INDEPENDENT total scan of the raw transcript bytes for that task's leak markers, which no future unanticipated encoding can walk past; it fires 24 hits on the known-positive VOID run and zero on every in-experiment run. All 47 stored transcripts re-scanned under v4: 1 VOID (the known pre-container leak), 46 CLEAN, no verdict changed; two attempted-leak counts rose by one (nettler 0->1, cardines-h 1->2). No arm measurement moves. The provider's own usage counter is NOT a substitute and is demonstrably inconsistent: for nettler it reported server_tool_use.web_search_requests=1 and modelUsage.webSearchRequests=0 in the same result object.",
+ "subagent_unobserved_region": "NEW 2026-08-24 (D-6b). spawn_subagent runs a child agent session in the same container; its individual tool calls are not emitted into the parent transcript. The only parent-visible evidence is a coarse 'Tools used: ...' line in a polled progress result, present only for children polled while still running. 15 such sessions exist: cardines (raw, 4), cardines-h impl (6 and 4 across two stage transcripts), mediumize-h impl (1). PREVENTION is unaffected -- children run in the same credential-free image, so the shell vector is closed for them by construction. DETECTION is partial: every captured 'Tools used' line lists in-tree tools only (read_file, grep, list_dir, run_terminal_command, write, search_replace, todo_write, ask_user_question) and no web tool, but children never polled mid-run left no such line. The provider-side web vector is therefore NOT directly observable inside a subagent session. Stated as a limitation, not closed."
 }

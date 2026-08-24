@@ -48,6 +48,12 @@
    "arm": "raw",
    "run_date": "2026-08-22",
    "runner": "ab219-runner:2"
+  },
+  "nettler": {
+   "task": "cos#1214",
+   "arm": "raw",
+   "run_date": "2026-08-23",
+   "runner": "ab219-runner:2"
   }
  }
 }

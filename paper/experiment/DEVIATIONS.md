@@ -612,3 +612,104 @@ binary), provider-side `web_search` (blocked, private repo), and now in-tree fle
 (blocked, absent binary). Reported as a finding in its own right, with the caveat that
 attempt counts are only instrument-trustworthy from v2 forward, and for vector C from v3
 forward.
+
+---
+
+## D-6 — the leak detector was keyed to block structure, and two encodings walked past it
+
+**Raised:** 2026-08-24. **Author:** Claude (coordinator). **Status:** recorded, instrument
+fixed, all 47 stored transcripts re-scanned. **No arm measurement moves.**
+
+Found during the `nettler` / `cos#1214` raw replay, by hand-reading the transcript after
+`adjudicate.py` v3 returned `flagged=0`. The same way D-4 and D-5 were found. That is now
+three consecutive raw replays where the hand audit caught what the instrument missed, and
+the pattern in the misses is the finding.
+
+### (a) The provider emits the same vector in two different wire shapes
+
+Every version of the detector walked the transcript looking for blocks whose `"type"` is
+exactly `"tool_use"`. The implementer platform *also* emits its own server-side tools as:
+
+```
+{"type":"server_tool_use",       "name":"web_search", "input":{"query":"..."}}
+{"type":"web_search_tool_result","tool_use_id":"ws_…","content":[{"type":"web_search_result","url":"…"}]}
+```
+
+v3 saw neither block. `nettler` scored `flagged=0` while its transcript contains a
+`web_search` and ten returned URLs.
+
+The sharp edge: **`blowgun`'s web search — the one D-4 was written about — arrived as a
+plain `tool_use`.** One experiment contains both encodings of one vector, and v2/v3 covered
+exactly the one that happened to show up first. D-4's fix was correct and insufficient in
+the same way D-1's leakage control was.
+
+The provider's own counter cannot be used as a cross-check. In `nettler`'s single result
+object it reports both `server_tool_use.web_search_requests: 1` and
+`modelUsage.webSearchRequests: 0`. D-4 already recorded it reading `0` for a run that
+demonstrably issued one.
+
+### (b) Subagent sessions have never been observed by any version of the detector
+
+`spawn_subagent` starts a child agent session. Its individual tool calls **never enter the
+parent transcript** — the parent sees only `"Subagent started in background."`, and, if it
+polls the child while it is still running, one coarse line: `Tools used: grep, read_file, …`.
+
+Fifteen such sessions exist in this experiment: `cardines` (raw, 4), `cardines-h` impl
+(6 and 4, across two stage transcripts), `mediumize-h` impl (1). No version of
+`adjudicate.py`, including v4, can see inside them.
+
+- **Prevention is unaffected.** Children run in the same credential-free image, so the shell
+  vector (`gh`, `git fetch`) is closed for them by construction, exactly as for the parent.
+- **Detection is partial.** Every captured `Tools used` line lists in-tree tools only —
+  `read_file`, `grep`, `list_dir`, `run_terminal_command`, `write`, `search_replace`,
+  `todo_write`, `ask_user_question` — and no web tool. But a child that was never polled
+  mid-run left no such line, so this is opportunistic evidence, not coverage.
+
+The honest statement: **the provider-side web vector is not directly observable inside a
+subagent session.** v4 therefore prints the unobserved region, with the child count and
+descriptions, on every run that spawns one, so that no run can silently read as fully
+audited. This is stated as a limitation of the audit, not closed.
+
+### (c) `search_tool`
+
+Five runs called `search_tool`, which every version ignored. It searches the *session's MCP
+tool catalogue*, not the web; in all five it returned `result_count: 0` with the note
+`"No MCP tools are available in this session."` — which is, incidentally, the first
+in-run confirmation of D-2's claim that the container has no MCP channel. v4 reports it and
+does **not** count it as an attempt, since it cannot reach the network. Its payload is still
+marker-tested in case that ever changes.
+
+### The structural fix
+
+Four detector revisions have now each closed one *encoding* of one vector, and each was
+found by a human reading a transcript the instrument had cleared. Enumerating shapes is
+losing. v4 adds a check that does not depend on shape at all:
+
+> **Structure-independent total scan.** The raw transcript bytes are searched for that
+> task's leak markers — fixing PR number, merge SHA — regardless of how any block is
+> encoded. Every hit is printed with context for hand adjudication.
+
+Validated on the known positive: it fires **24 marker hits** on
+`2026-08-21-cos1245-raw-VOID`, the one run known to have leaked, and **zero** on every
+in-experiment run. It cannot be walked past by an encoding this file has not anticipated.
+
+### Re-scan
+
+All **47** stored transcripts re-adjudicated under v4: **1 VOID** (the known pre-container
+leak, still `retrieved=3`), **46 CLEAN**, **no verdict changed**. Two attempted-leak counts
+rise by one — `nettler` 0→1 and `cardines-h` 1→2, both the newly-visible `server_tool_use`
+encoding. **No arm measurement moves.**
+
+Coverage caveat, restated so it is not lost: attempted-leak counts are instrument-trustworthy
+only from v2 forward for direct web tools, from v3 forward for in-tree tooling, from v4
+forward for the server-side encoding — and **never** for what happened inside those fifteen
+subagent sessions.
+
+### `nettler`'s own web search, stated plainly
+
+The search that exposed (a) was
+`"WCAG AA contrast native select dropdown gray-300 border light background best practices"`,
+returning ten public accessibility-standards pages (w3.org WCAG 2.2, webaim.org,
+dequeuniversity.com and similar). It is counted as an attempt under the flag-any-web-tool
+rule, and it contains no leak marker. It is out-of-tree *information* entering a run that was
+meant to be bounded, and is reported as that; it is not an attempt to retrieve the fix.
