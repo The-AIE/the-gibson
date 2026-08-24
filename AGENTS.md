@@ -379,3 +379,5 @@ in detail*. They are not a second contract.
 Full map: `docs/00-INDEX.md`. Findings, spikes, backlogs, and retros stay in
 place (`docs/GOOSE-SPIKE-FINDINGS.md`, `docs/DOC-BACKLOG.md`, `memory/`,
 `paper/`).
+
+**Fleet review conventions:** severity contract, spec-review-first, self-review checklist, mutation-proof, one-coordinator-per-repo, lane-sync, and the merge-not-review independence floor apply here — see `docs/fleet-review-conventions.md` (waterfalled from ConferenceOS 2026-08-24).
