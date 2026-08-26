@@ -86,6 +86,10 @@ OPTIONS
   --print-prompt      render prompt only (no runner)
   --max-iterations N  cap iterations (default: unlimited until halt)
   --error-budget N    consecutive failures before stop (default: 5)
+  --runner-timeout N  per-iteration runner wall-clock cap in seconds
+                      (default: 1800; env GIBSON_RUNNER_TIMEOUT). On expiry the
+                      whole runner tree is killed and the iteration counts as a
+                      failure (Liveness Contract clause 4).
   --stale-budget N    consecutive no-progress (exit 0, no substantive
                       loop-state change) iterations before stop (default:
                       same as --error-budget). Clock-only updated: rewrites
