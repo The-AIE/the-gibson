@@ -2589,7 +2589,7 @@ supervisor_handoff() {
 
 heartbeat() {
   if [[ -n "${MC_HEARTBEAT_URL:-}" ]]; then
-    curl -sS -X POST "$MC_HEARTBEAT_URL" \
+    curl -sS --max-time 10 -X POST "$MC_HEARTBEAT_URL" \
       -H 'content-type: application/json' \
       -d "{\"source\":\"loop.sh\",\"repo\":\"$REPO\",\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
       >/dev/null 2>&1 || info "heartbeat failed (non-fatal)"
