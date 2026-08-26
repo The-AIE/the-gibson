@@ -1,8 +1,8 @@
 # The Liveness Contract
 
-On-demand detail for the binding one-line rule in `AGENTS.md` ("Never hang; bound
-your work and finish"). This file elaborates that rule; it does not add, drop, or
-weaken it.
+> **Authority:** Non-normative. On-demand detail for the binding one-line rule in
+> [`AGENTS.md`](../AGENTS.md) ("Never hang; bound your work and finish"). This file
+> elaborates that rule; it must not add, drop, or weaken it.
 
 ## Why
 
