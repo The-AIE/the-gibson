@@ -31,7 +31,10 @@ that happens twice becomes a permanent improvement to the harness itself.
 > *"Agent = Model + Harness."* The model is rented. The harness is yours, and it
 > compounds. — after [Fowler, Harness Engineering](https://martinfowler.com/articles/harness-engineering.html)
 
-Named for the supercomputer in *Hackers* (1995). You don't hack The Gibson.
+Named for the supercomputer in *Hackers* (1995) — which shares its name with
+**William Gibson**, who said *"The future is already here — it's just not evenly
+distributed."* The Gibson is a piece of that unevenly-distributed future. It's
+Apache-2.0 so it doesn't have to stay that way. You don't hack The Gibson.
 The Gibson hacks the backlog.
 
 ## What it is
