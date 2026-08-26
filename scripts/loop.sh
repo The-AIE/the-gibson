@@ -86,6 +86,10 @@ OPTIONS
   --print-prompt      render prompt only (no runner)
   --max-iterations N  cap iterations (default: unlimited until halt)
   --error-budget N    consecutive failures before stop (default: 5)
+  --runner-timeout N  per-iteration runner wall-clock cap in seconds
+                      (default: 1800; env GIBSON_RUNNER_TIMEOUT). On expiry the
+                      whole runner tree is killed and the iteration counts as a
+                      failure (Liveness Contract clause 4).
   --stale-budget N    consecutive no-progress (exit 0, no substantive
                       loop-state change) iterations before stop (default:
                       same as --error-budget). Clock-only updated: rewrites
@@ -137,6 +141,9 @@ ONCE=0
 PRINT=0
 MAX=-1
 BUDGET=5
+# Runner wall-clock cap (seconds). A hung runner is killed (whole tree) and the
+# iteration counts as a failure, feeding the error budget. Env-overridable.
+RUNNER_TIMEOUT="${GIBSON_RUNNER_TIMEOUT:-1800}"
 # Empty until after parse: omitted --stale-budget resolves exactly to --error-budget.
 STALE_BUDGET=""
 STALE_BUDGET_SET=0
@@ -159,6 +166,7 @@ while [[ $# -gt 0 ]]; do
     --print-prompt) PRINT=1; shift ;;
     --max-iterations) MAX="$2"; shift 2 ;;
     --error-budget) BUDGET="$2"; shift 2 ;;
+    --runner-timeout) RUNNER_TIMEOUT="$2"; shift 2 ;;
     --stale-budget) STALE_BUDGET="$2"; STALE_BUDGET_SET=1; shift 2 ;;
     --hat) FORCE_HAT="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
@@ -228,6 +236,17 @@ elif [[ -f "$SCRIPT_DIR/silent-noop.sh" ]]; then
   source "$SCRIPT_DIR/silent-noop.sh"
 else
   die "missing silent-noop.sh (looked in $GIBSON/scripts and $SCRIPT_DIR)"
+fi
+# Wall-clock bound for the runner (Liveness Contract clause 4): a hung runner must
+# not stall the loop. run_with_wall_timeout kills the whole process tree on expiry.
+if [[ -f "$GIBSON/scripts/lib/wall-timeout.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$GIBSON/scripts/lib/wall-timeout.sh"
+elif [[ -f "$SCRIPT_DIR/lib/wall-timeout.sh" ]]; then
+  # shellcheck disable=SC1090,SC1091
+  source "$SCRIPT_DIR/lib/wall-timeout.sh"
+else
+  die "missing lib/wall-timeout.sh (looked in $GIBSON/scripts/lib and $SCRIPT_DIR/lib)"
 fi
 if ! declare -F silent_noop_progressed >/dev/null 2>&1; then
   die "silent-noop.sh did not define silent_noop_progressed"
@@ -1975,23 +1994,23 @@ invoke_runner() {
       # --cwd: bypassPermissions plus an inherited cwd would point the runner at
       # whatever directory the operator launched from — often the canonical
       # Gibson checkout, which AGENTS.md Law 3 says nothing may mutate.
-      grok --prompt-file "$prompt_file" --cwd "$REPO" --permission-mode bypassPermissions
+      run_with_wall_timeout "$RUNNER_TIMEOUT" grok --prompt-file "$prompt_file" --cwd "$REPO" --permission-mode bypassPermissions
       ;;
     claude)
       command -v claude >/dev/null || die "claude CLI not found"
       # stdin, for the same frontmatter reason as grok's --prompt-file above:
       # as a positional arg the leading "---" is parsed as an unknown option
-      (cd "$REPO" && claude -p --output-format text --permission-mode acceptEdits) < "$prompt_file"
+      run_with_wall_timeout "$RUNNER_TIMEOUT" bash -c 'cd "$1" && exec claude -p --output-format text --permission-mode acceptEdits' _ "$REPO" < "$prompt_file"
       ;;
     codex)
       command -v codex >/dev/null || die "codex CLI not found"
-      codex exec --full-auto --cd "$REPO" - < "$prompt_file"
+      run_with_wall_timeout "$RUNNER_TIMEOUT" codex exec --full-auto --cd "$REPO" - < "$prompt_file"
       ;;
     hermes)
       if [[ -n "${HERMES_CMD:-}" ]]; then
-        eval "$HERMES_CMD" < "$prompt_file"
+        run_with_wall_timeout "$RUNNER_TIMEOUT" bash -c "$HERMES_CMD" < "$prompt_file"
       elif command -v hermes >/dev/null; then
-        hermes run --prompt-file "$prompt_file"
+        run_with_wall_timeout "$RUNNER_TIMEOUT" hermes run --prompt-file "$prompt_file"
       else
         die "hermes runner not found; set HERMES_CMD"
       fi
