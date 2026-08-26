@@ -1428,6 +1428,23 @@ slice_pid_b=$!
 wait "$slice_pid_a"; slice_rc_a=$?
 wait "$slice_pid_b"; slice_rc_b=$?
 export PATH="$SLICE_OLD_PATH"
+# Self-diagnosis for the CI-only flake (#247). A slice lane can fail for two very
+# different reasons the assertions below CANNOT tell apart: a genuine scope-overlap
+# rejection, OR a test-ENVIRONMENT failure — claim.sh could not run at all because
+# `node` is missing from PATH (it shells out to scope-overlap.mjs and fails closed)
+# or the fast claim.sh copy is absent. Both surface as "lane B rc=1 / prs<2", which
+# reads like a claim-logic regression. When anything is off, dump each lane's actual
+# output and flag the environment case, so a CI failure names its own cause instead
+# of leaving us guessing. Passing runs print nothing — behavior is unchanged.
+slice_prs_now="$(grep -c . "$SLICE_DIR/prs" 2>/dev/null || echo 0)"
+if [ "$slice_rc_a" != 0 ] || [ "$slice_rc_b" != 0 ] || [ "$slice_prs_now" != 2 ]; then
+  echo "  [#247 diag] slice-race incomplete — rc_a=$slice_rc_a rc_b=$slice_rc_b prs=$slice_prs_now (want rc 0/0, prs 2)"
+  echo "  [#247 diag] laneA: $(tr '\n' ' ' < "$SLICE_DIR/outA" 2>/dev/null)"
+  echo "  [#247 diag] laneB: $(tr '\n' ' ' < "$SLICE_DIR/outB" 2>/dev/null)"
+  if grep -qiE "node required|No such file or directory|refusing to claim on a host" "$SLICE_DIR/outA" "$SLICE_DIR/outB" 2>/dev/null; then
+    echo "  [#247 diag] >>> ENVIRONMENT failure (claim.sh could not run: node/PATH or missing fast copy) — NOT a claim-logic result."
+  fi
+fi
 check "slice lane A survives" "$slice_rc_a" "0"
 check "slice lane B survives" "$slice_rc_b" "0"
 check "both slice claims are live" "$(grep -c . "$SLICE_DIR/prs" || true)" "2"
