@@ -412,12 +412,12 @@ json_get() {
 api() {
   local method="$1" path="$2" body="${3:-}"
   if [[ -n "$body" ]]; then
-    curl -sS -X "$method" "$API$path" \
+    curl -sS --max-time 30 -X "$method" "$API$path" \
       -H "Authorization: Bearer $DEVIN_API_KEY" \
       -H 'content-type: application/json' \
       -d "$body"
   else
-    curl -sS -X "$method" "$API$path" -H "Authorization: Bearer $DEVIN_API_KEY"
+    curl -sS --max-time 30 -X "$method" "$API$path" -H "Authorization: Bearer $DEVIN_API_KEY"
   fi
 }
 
@@ -509,7 +509,7 @@ fire_webhook() {
     const [reason, slug, repo, prompt] = process.argv.slice(1);
     process.stdout.write(JSON.stringify({ source: "gibson/devin-supervisor.sh", reason, slug, repo, prompt }));
   ' "$REASON" "$SLUG" "$REPO" "$(bootstrap_prompt)")
-  curl -sS -X POST "$DEVIN_WEBHOOK_URL" -H 'content-type: application/json' -d "$body" >/dev/null
+  curl -sS --max-time 15 -X POST "$DEVIN_WEBHOOK_URL" -H 'content-type: application/json' -d "$body" >/dev/null
 }
 
 webhook_session() {
