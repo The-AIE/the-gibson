@@ -79,7 +79,7 @@ fi
 # Optional Vercel
 VERCEL_BLOCK="(set VERCEL_TOKEN + --vercel-project for API metrics)"
 if [[ -n "${VERCEL_TOKEN:-}" && -n "$VPROJ" ]] && command -v node >/dev/null 2>&1; then
-  VERCEL_BLOCK=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+  VERCEL_BLOCK=$(curl -sS --max-time 20 -H "Authorization: Bearer $VERCEL_TOKEN" \
     "https://api.vercel.com/v9/projects/${VPROJ}" 2>/dev/null \
     | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);console.log("project="+j.name+" framework="+(j.framework||"?"));}catch(e){console.log("(vercel parse failed)")}})' \
     || echo "(vercel API failed)")
