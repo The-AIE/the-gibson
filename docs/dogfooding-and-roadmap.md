@@ -1,7 +1,8 @@
 # The Gibson: dogfooding, the flywheel, and the road to "click magic"
 
-Non-normative. This is the *why* behind the harness — the strategy that decides what
-we build next. It does not add, drop, or weaken any rule in `AGENTS.md`.
+> **Authority:** Non-normative. The *why* behind the harness — the strategy that
+> decides what we build next. It must not add, drop, or weaken any rule in
+> [`AGENTS.md`](../AGENTS.md).
 
 ## The thesis: the harness is the product
 
