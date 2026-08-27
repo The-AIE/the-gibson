@@ -121,3 +121,26 @@ are served by grep + labels); no coordination graph at all (leaves fast
 Revisit when: a target's coordination load (issues × lanes × hot files) makes
 grep-recall miss, or a spike shows the adapter beats labels/serialization on a real
 repo.
+
+## D-010 · 2026-08-27 · Ponytail/Caveman-style discipline enters as portable doctrine, not vendor plugins
+Decided: the *rule* behind Ponytail (ponytail.dev — a YAGNI decision ladder: necessity check →
+existing pattern → stdlib → native feature → installed dependency → one-liner → only then custom
+code) and Caveman (token-minimal output discipline) is worth having in Gibson-driven work — it
+restates doctrine already in every target repo's CLAUDE.md ("don't add features beyond what the
+task requires," "three similar lines beats a premature abstraction"). Per D-002, it enters as
+Markdown doctrine (a decision-ladder checklist in the relevant playbook/AGENTS.md section) plus,
+if it earns its keep, a portable lint/audit script any vendor's lane can run — never as the vendor
+plugins themselves. Caveman is a Claude-only skill; Ponytail's actual mechanism is a per-vendor
+plugin (Claude Code, Copilot, Gemini each need their own install) even though its rule is
+vendor-agnostic. Depending on either plugin as Gibson's enforcement mechanism would exclude every
+non-Claude lane (Grok, Codex, Devin) from the check entirely.
+Rejected: installing the Ponytail/Caveman plugins as Gibson infrastructure (violates D-002 —
+doctrine expressible only as a vendor skill/hook is doctrine-debt); ignoring the idea because the
+tools themselves don't fit (forfeits a real, low-cost discipline improvement that's already
+proven out via the tools' own measured numbers).
+Revisit when: a target repo's over-engineering rate (measured via retro evidence, not vibes)
+justifies the audit-script half of this — i.e. `ponytail-audit`'s bloat-detection logic gets
+reimplemented as a portable check rather than staying a claim on ponytail.dev's own numbers.
+Until then, the decision ladder is available as doctrine text for any playbook that wants it;
+using the actual Ponytail/Caveman tools interactively in an individual Claude session (not as a
+Gibson-core mechanism) remains fine and separate from this decision.
