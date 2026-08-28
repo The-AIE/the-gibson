@@ -51,6 +51,32 @@ Name specific runners (Grok, Codex, Claude, Hermes) only as **examples of where 
 shape often sits today**. Re-validate against your installed CLIs and current plan
 pages; never treat a remembered monthly fee as doctrine.
 
+## Availability, not just cost: rate-limit windows
+
+**Status:** doctrine only — no shipped ledger extension yet. Tracked in
+[DOC-BACKLOG.md](DOC-BACKLOG.md).
+
+The pool table above reasons about **marginal cost**. A second, orthogonal axis is
+whether a given account currently has **headroom** at all: a flat-rate pool can be
+free and still be temporarily unusable because its 5-hour or 7-day window is
+exhausted. Routing on cost shape alone treats a saturated flat-rate account and a
+fresh one as interchangeable when they aren't — the saturated one fails the dispatch,
+not because the task was wrong for the pool, but because the window was.
+
+When more than one account exists for the same vendor/tier, prefer whichever has
+window headroom **before** applying the G/S/F grade — the grade decides which tier
+the work belongs in; window-awareness decides which account inside that tier can
+actually take it right now. This is the same discipline as "cross-vendor beats
+same-vendor at equal grade" (above), extended from independence to availability: a
+second account in the same pool is only useful if the routing layer knows when to
+reach for it.
+
+Follow-up: extend `scripts/cost-ledger.sh` to record each runtime's reported
+rate-limit-window state (when the runtime exposes it) alongside the existing
+tokens/ACU fields, so routing can read "headroom: yes/no/unknown" the same
+disciplined way it already reads "usage: known/unknown" — never invent a window
+state the runtime didn't report.
+
 ## Task-class → tier heuristic
 
 Grade every dispatch **G / S / F** (Grind / Skilled / Frontier):
