@@ -43,5 +43,10 @@
   "issue": 1214,
   "fixing_pr": 1259,
   "merge": "e6126b65b5cb75cf1d0e91fc19620ed29678d8d1"
+ },
+ "furlong": {
+  "issue": 1217,
+  "fixing_pr": 1235,
+  "merge": "a40d5c63a7f0a91139a329f1f01902756db6ea1c"
  }
 }
