@@ -1,0 +1,1029 @@
+diff --git a/src/app/(admin)/organizer/events/[slug]/schedule/components/schedule-board.tsx b/src/app/(admin)/organizer/events/[slug]/schedule/components/schedule-board.tsx
+index aff051b..1f45d1c 100644
+--- a/src/app/(admin)/organizer/events/[slug]/schedule/components/schedule-board.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/schedule/components/schedule-board.tsx
+@@ -19,11 +19,13 @@ import {
+   type Announcements,
+ } from '@dnd-kit/core';
+ import type { Room } from '@prisma/client';
+-import { useState } from 'react';
++import { useMemo, useState } from 'react';
+ import {
+   SCHEDULE_SLOT_MINUTES,
+   durationForTalkFormat,
+   evaluateSchedulePlacement,
++  eventCalendarDayKeys,
++  isSessionWithinEventWindow,
+   moveEndTime,
+   scheduleDateKey,
+   sessionTypeForTalkFormat,
+@@ -69,25 +71,6 @@ interface ScheduleBoardProps {
+   onUnassignSession: (session: ScheduleSession) => Promise<void>;
+ }
+ 
+-function eventDateKeys(
+-  start: string,
+-  end: string,
+-  timeZone: string,
+-  sessions: readonly ScheduleSession[]
+-): string[] {
+-  const startKey = scheduleDateKey(start, timeZone);
+-  const endKey = scheduleDateKey(end, timeZone);
+-  const keys: string[] = [];
+-  let cursor = new Date(`${startKey}T12:00:00.000Z`);
+-  const final = new Date(`${endKey}T12:00:00.000Z`);
+-  while (cursor <= final && keys.length < 31) {
+-    keys.push(cursor.toISOString().slice(0, 10));
+-    cursor = new Date(cursor.getTime() + 86_400_000);
+-  }
+-  sessions.forEach((session) => keys.push(scheduleDateKey(session.startTime, timeZone)));
+-  return [...new Set(keys)].sort().slice(0, 31);
+-}
+-
+ function dayLabel(dayKey: string, timeZone: string) {
+   return new Intl.DateTimeFormat('en-US', {
+     timeZone,
+@@ -110,17 +93,56 @@ export function ScheduleBoard({
+   onResizeSession,
+   onUnassignSession,
+ }: ScheduleBoardProps) {
+-  const days = eventDateKeys(eventStart, eventEnd, timeZone, sessions);
+-  const [selectedDay, setSelectedDay] = useState(days[0]);
++  // Day tabs follow the event window only. Sessions outside that window are
++  // listed below — never mixed into tabs (that made old dates look "stuck").
++  const days = useMemo(
++    () => eventCalendarDayKeys(eventStart, eventEnd, timeZone),
++    [eventEnd, eventStart, timeZone]
++  );
++  const outOfRangeSessions = useMemo(
++    () =>
++      sessions.filter(
++        (session) =>
++          !isSessionWithinEventWindow(
++            session.startTime,
++            session.endTime,
++            eventStart,
++            eventEnd
++          )
++      ),
++    [eventEnd, eventStart, sessions]
++  );
++  // Keep the organizer's day choice when it still exists; otherwise fall back
++  // to the first event day (avoids a setState-in-effect when dates change).
++  const [selectedDayOverride, setSelectedDayOverride] = useState<string | null>(
++    null
++  );
++  const selectedDay =
++    selectedDayOverride && days.includes(selectedDayOverride)
++      ? selectedDayOverride
++      : (days[0] ?? '');
+   const [activeData, setActiveData] = useState<ScheduleDragData | null>(null);
+   const [hoverGuard, setHoverGuard] = useState<ScheduleGuardResult | null>(null);
++
+   const sensors = useSensors(
+     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+     useSensor(KeyboardSensor, { coordinateGetter: gridKeyboardCoordinates })
+   );
+-  const { startMinute, endMinute } = dayTimeWindow(sessions, selectedDay, timeZone);
++  const inRangeSessions = sessions.filter((session) =>
++    isSessionWithinEventWindow(
++      session.startTime,
++      session.endTime,
++      eventStart,
++      eventEnd
++    )
++  );
++  const { startMinute, endMinute } = dayTimeWindow(
++    inRangeSessions,
++    selectedDay,
++    timeZone
++  );
+   const slotMinutes = buildSlotMinutes(startMinute, endMinute);
+-  const daySessions = sessions.filter(
++  const daySessions = inRangeSessions.filter(
+     (session) => scheduleDateKey(session.startTime, timeZone) === selectedDay
+   );
+   const unassignedSessions = sessions.filter((session) => !session.roomId);
+@@ -260,22 +282,57 @@ export function ScheduleBoard({
+       }}
+     >
+       <div className="space-y-4" aria-busy={busy}>
++        {outOfRangeSessions.length > 0 && (
++          <div
++            role="status"
++            className="rounded-lg border border-amber-700/80 bg-amber-950/40 p-4 text-sm text-amber-100"
++          >
++            <p className="font-medium text-amber-50">
++              {outOfRangeSessions.length === 1
++                ? '1 session is outside the event dates'
++                : `${outOfRangeSessions.length} sessions are outside the event dates`}
++            </p>
++            <p className="mt-1 text-amber-100/90">
++              Event dates changed (or these times never matched the window). Times were not
++              moved automatically — edit each session below or drag it onto a day in range.
++            </p>
++            <ul className="mt-3 space-y-1.5">
++              {outOfRangeSessions.map((session) => (
++                <li key={session.id} className="text-amber-50/95">
++                  <span className="font-medium">{session.title}</span>
++                  <span className="text-amber-200/80">
++                    {' '}
++                    · {dayLabel(scheduleDateKey(session.startTime, timeZone), timeZone)}{' '}
++                    {formatScheduleTime(session.startTime, timeZone)}
++                  </span>
++                </li>
++              ))}
++            </ul>
++          </div>
++        )}
++
+         <div className="flex flex-wrap gap-2" role="group" aria-label="Schedule day">
+-          {days.map((day) => (
+-            <button
+-              key={day}
+-              type="button"
+-              aria-pressed={selectedDay === day}
+-              onClick={() => setSelectedDay(day)}
+-              className={`rounded-full px-4 py-2 text-sm font-medium ${
+-                selectedDay === day
+-                  ? 'bg-blue-600 text-white'
+-                  : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+-              }`}
+-            >
+-              {dayLabel(day, timeZone)}
+-            </button>
+-          ))}
++          {days.length === 0 ? (
++            <p className="text-sm text-gray-400">
++              Set the event start and end dates in Settings to build the day grid.
++            </p>
++          ) : (
++            days.map((day) => (
++              <button
++                key={day}
++                type="button"
++                aria-pressed={selectedDay === day}
++                onClick={() => setSelectedDayOverride(day)}
++                className={`rounded-full px-4 py-2 text-sm font-medium ${
++                  selectedDay === day
++                    ? 'bg-blue-600 text-white'
++                    : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
++                }`}
++              >
++                {dayLabel(day, timeZone)}
++              </button>
++            ))
++          )}
+         </div>
+ 
+         <div className="grid gap-4 xl:grid-cols-[240px_minmax(0,1fr)]">
+diff --git a/src/app/(admin)/organizer/events/[slug]/settings/actions.ts b/src/app/(admin)/organizer/events/[slug]/settings/actions.ts
+index 39fe396..b2c3608 100644
+--- a/src/app/(admin)/organizer/events/[slug]/settings/actions.ts
++++ b/src/app/(admin)/organizer/events/[slug]/settings/actions.ts
+@@ -69,11 +69,17 @@ import {
+   toEmbedConfigDto,
+   type EmbedConfigDto,
+ } from '@/lib/embed-config';
++import {
++  countSessionsOutsideEventWindow,
++  eventWindowFromDateOnly,
++  scheduleDateKey,
++} from '@/lib/schedule-editor';
+ 
+ /**
+- * #1193: when event start/end dates change and sessions already exist, the
+- * organizer must explicitly choose whether to keep or clear the schedule.
+- * Never auto-purge — silent delete is worse than stranded sessions.
++ * #1193 / schedule date propagation: when event start/end dates change and
++ * sessions already exist, the organizer must explicitly choose whether to
++ * keep or clear the schedule. Never auto-purge or silently re-anchor times —
++ * stranded sessions are surfaced for the organizer to move.
+  */
+ export type ScheduleOnDateChange = 'keep' | 'clear';
+ 
+@@ -87,25 +93,29 @@ export type UpdateEventDetailsResult =
+         startDate: Date;
+         endDate: Date;
+       };
++      /** Present when dates changed and sessions were kept outside the window. */
++      outOfRangeSessionCount?: number;
+     }
+   | {
+       status: 'needs_schedule_confirmation';
+       sessionCount: number;
++      /** How many of those sessions fall outside the proposed new window. */
++      outOfRangeSessionCount: number;
+     };
+ 
+-/** Calendar-day key in UTC — matches the date-only form inputs. */
+-function calendarDayUtc(value: Date): string {
+-  return value.toISOString().slice(0, 10);
+-}
+-
+ export async function updateEventDetails(
+   eventId: string,
+   data: {
+     name: string;
+     slug: string;
+     description: string | null;
+-    startDate: Date;
+-    endDate: Date;
++    /**
++     * Date-only YYYY-MM-DD (preferred) or a Date whose calendar day is read
++     * in `timezone`. Server always materializes the stored window in the
++     * event timezone — never UTC midnight from `new Date('YYYY-MM-DD')`.
++     */
++    startDate: string | Date;
++    endDate: string | Date;
+     status: EventStatus;
+     eventFormat: EventFormat;
+     eventType: EventType;
+@@ -144,12 +154,26 @@ export async function updateEventDetails(
+     throw new Error('Invalid schedule action for date change');
+   }
+ 
++  const startKeyInput =
++    typeof data.startDate === 'string'
++      ? data.startDate
++      : scheduleDateKey(data.startDate, timezone);
++  const endKeyInput =
++    typeof data.endDate === 'string'
++      ? data.endDate
++      : scheduleDateKey(data.endDate, timezone);
++  const { startDate, endDate, startKey, endKey } = eventWindowFromDateOnly(
++    startKeyInput,
++    endKeyInput,
++    timezone
++  );
++
+   const validatedData = {
+     name: data.name,
+     slug: data.slug,
+     description: data.description,
+-    startDate: data.startDate,
+-    endDate: data.endDate,
++    startDate,
++    endDate,
+     status: data.status,
+     eventFormat: data.eventFormat,
+     eventType: data.eventType,
+@@ -175,6 +199,10 @@ export async function updateEventDetails(
+       slug: true,
+       startDate: true,
+       endDate: true,
++      timezone: true,
++      sessions: {
++        select: { startTime: true, endTime: true },
++      },
+       _count: { select: { sessions: true } },
+     },
+   });
+@@ -182,16 +210,32 @@ export async function updateEventDetails(
+     throw new Error('Event not found');
+   }
+ 
++  const existingStartKey = scheduleDateKey(existing.startDate, timezone);
++  const existingEndKey = scheduleDateKey(existing.endDate, timezone);
+   const datesChanging =
+-    calendarDayUtc(existing.startDate) !== calendarDayUtc(data.startDate) ||
+-    calendarDayUtc(existing.endDate) !== calendarDayUtc(data.endDate);
++    existingStartKey !== startKey || existingEndKey !== endKey;
++  const timezoneChanging =
++    (existing.timezone || '').trim() !== timezone;
++  // Only rewrite the stored window when the organizer changed the calendar
++  // days or timezone. Name-only saves keep existing start/end timestamps
++  // (seeded events often use 08:00–18:00 local, not full-day bounds).
++  const shouldRewriteWindow = datesChanging || timezoneChanging;
+   const sessionCount = existing._count.sessions;
++  const outOfRangeSessionCount = countSessionsOutsideEventWindow(
++    existing.sessions,
++    startDate,
++    endDate
++  );
+   // Only prompt when there is session data at risk — zero sessions stays a
+   // silent one-step save (issue #1193 guardrail).
+   const needsScheduleConfirmation = datesChanging && sessionCount > 0;
+ 
+   if (needsScheduleConfirmation && !options?.scheduleOnDateChange) {
+-    return { status: 'needs_schedule_confirmation', sessionCount };
++    return {
++      status: 'needs_schedule_confirmation',
++      sessionCount,
++      outOfRangeSessionCount,
++    };
+   }
+ 
+   // Never honor clear/keep unless confirmation was actually required —
+@@ -199,6 +243,10 @@ export async function updateEventDetails(
+   const shouldClearSchedule =
+     needsScheduleConfirmation && options?.scheduleOnDateChange === 'clear';
+ 
++  const writeData = shouldRewriteWindow
++    ? validatedData
++    : { ...validatedData, startDate: existing.startDate, endDate: existing.endDate };
++
+   const updated = await prisma.$transaction(async (tx) => {
+     if (shouldClearSchedule) {
+       // CfpSubmission.session has no onDelete (defaults to Restrict) — null
+@@ -223,8 +271,8 @@ export async function updateEventDetails(
+             deletedSessionCount: deleted.count,
+             previousStartDate: existing.startDate.toISOString(),
+             previousEndDate: existing.endDate.toISOString(),
+-            newStartDate: data.startDate.toISOString(),
+-            newEndDate: data.endDate.toISOString(),
++            newStartDate: startDate.toISOString(),
++            newEndDate: endDate.toISOString(),
+           },
+         },
+       });
+@@ -232,7 +280,7 @@ export async function updateEventDetails(
+ 
+     return tx.event.update({
+       where: { id: eventId },
+-      data: validatedData,
++      data: writeData,
+     });
+   });
+ 
+@@ -240,12 +288,23 @@ export async function updateEventDetails(
+   if (existing.slug !== data.slug) {
+     revalidatePath(`/organizer/events/${existing.slug}/settings`);
+   }
+-  if (shouldClearSchedule) {
++  // Schedule day tabs derive from Event.startDate/endDate — always refresh
++  // when the window or timezone changed (keep or clear).
++  if (shouldRewriteWindow || shouldClearSchedule) {
+     revalidatePath(`/organizer/events/${updated.slug}/schedule`);
+     revalidatePath(`/events/${updated.slug}`);
++    revalidatePath(`/events/${updated.slug}/schedule`);
+   }
+ 
+-  return { status: 'updated', event: updated };
++  return {
++    status: 'updated',
++    event: updated,
++    ...(datesChanging &&
++    !shouldClearSchedule &&
++    outOfRangeSessionCount > 0
++      ? { outOfRangeSessionCount }
++      : {}),
++  };
+ }
+ 
+ export async function updateEventVenue(eventId: string, venueId: string | null) {
+diff --git a/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx b/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx
+index 3ee5e0d..f966ad2 100644
+--- a/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx
+@@ -20,6 +20,7 @@ import {
+ } from '../actions';
+ import { toast } from 'sonner';
+ import { EventImageUploadButton } from './event-image-upload';
++import { scheduleDateKey } from '@/lib/schedule-editor';
+ // Reused destructive-action confirmation pattern (#322 / #1193): ConfirmDialog
+ // is the only structured confirm dialog in this codebase (schedule-builder,
+ // attendee-organizations, task-collab-panel). Import across the settings/
+@@ -57,21 +58,25 @@ const TIMEZONE_SUGGESTIONS = [
+ ];
+ 
+ export default function EventDetailsSection({ event }: EventDetailsSectionProps) {
++  const initialTimezone = event.timezone || 'America/New_York';
+   const [isLoading, setIsLoading] = useState(false);
+   const [fieldErrors, setFieldErrors] = useState<EventDetailsFieldErrors>({});
+   const [scheduleConfirm, setScheduleConfirm] = useState<{
+     sessionCount: number;
++    outOfRangeSessionCount: number;
+   } | null>(null);
+   const [formData, setFormData] = useState({
+     name: event.name,
+     slug: event.slug,
+     description: event.description || '',
+-    startDate: event.startDate.toISOString().split('T')[0],
+-    endDate: event.endDate.toISOString().split('T')[0],
++    // Event-local calendar days — not UTC from toISOString(), which shifts
++    // the picker west of UTC (America/New_York shows the previous evening).
++    startDate: scheduleDateKey(event.startDate, initialTimezone),
++    endDate: scheduleDateKey(event.endDate, initialTimezone),
+     status: event.status,
+     eventFormat: event.eventFormat,
+     eventType: event.eventType,
+-    timezone: event.timezone || 'America/New_York',
++    timezone: initialTimezone,
+     bannerUrl: event.bannerUrl || '',
+     websiteUrl: event.websiteUrl || '',
+     xHandle: event.xHandle || '',
+@@ -105,8 +110,9 @@ export default function EventDetailsSection({ event }: EventDetailsSectionProps)
+     name: formData.name,
+     slug: formData.slug,
+     description: formData.description || null,
+-    startDate: new Date(formData.startDate),
+-    endDate: new Date(formData.endDate),
++    // Pass date-only keys; the server expands them in the event timezone.
++    startDate: formData.startDate,
++    endDate: formData.endDate,
+     status: formData.status as EventStatus,
+     eventFormat: formData.eventFormat as EventFormat,
+     eventType: formData.eventType as EventType,
+@@ -154,16 +160,27 @@ export default function EventDetailsSection({ event }: EventDetailsSectionProps)
+       );
+ 
+       if (result.status === 'needs_schedule_confirmation') {
+-        setScheduleConfirm({ sessionCount: result.sessionCount });
++        setScheduleConfirm({
++          sessionCount: result.sessionCount,
++          outOfRangeSessionCount: result.outOfRangeSessionCount,
++        });
+         return;
+       }
+ 
+       setScheduleConfirm(null);
+-      toast.success(
+-        scheduleOnDateChange === 'clear'
+-          ? 'Event dates updated and schedule cleared'
+-          : 'Event details updated successfully'
+-      );
++      if (scheduleOnDateChange === 'clear') {
++        toast.success('Event dates updated and schedule cleared');
++      } else if (
++        result.outOfRangeSessionCount &&
++        result.outOfRangeSessionCount > 0
++      ) {
++        const n = result.outOfRangeSessionCount;
++        toast.warning(
++          `Event dates updated. ${n} session${n === 1 ? '' : 's'} still fall outside the new range — open Schedule to move ${n === 1 ? 'it' : 'them'}.`
++        );
++      } else {
++        toast.success('Event details updated successfully');
++      }
+     } catch (error) {
+       const message = error instanceof Error ? error.message : '';
+       if (/body|too large|413|Body exceeded|Failed to find Server Action/i.test(message)) {
+@@ -185,7 +202,13 @@ export default function EventDetailsSection({ event }: EventDetailsSectionProps)
+   };
+ 
+   const sessionCount = scheduleConfirm?.sessionCount ?? 0;
++  const outOfRangeCount = scheduleConfirm?.outOfRangeSessionCount ?? 0;
+   const sessionWord = sessionCount === 1 ? 'session' : 'sessions';
++  const outOfRangeWord = outOfRangeCount === 1 ? 'session' : 'sessions';
++  const confirmDescription =
++    outOfRangeCount > 0
++      ? `This event has ${sessionCount} scheduled ${sessionWord}. ${outOfRangeCount} ${outOfRangeWord} would fall outside the new event dates if you keep the schedule. Session times are not moved automatically — keep them and adjust on the Schedule page, or clear the schedule and rebuild for the new dates.`
++      : `This event has ${sessionCount} scheduled ${sessionWord}. Changing the dates may leave them scheduled outside the new event window. Keep the existing schedule as-is (you can adjust session times later), or clear the schedule so it can be rebuilt for the new dates.`;
+ 
+   return (
+     <div className="max-w-2xl">
+@@ -576,11 +599,12 @@ export default function EventDetailsSection({ event }: EventDetailsSectionProps)
+ 
+       {/* #1193: only shown when the server reports dates are changing AND
+           sessions already exist. Keep is the safe default; clear is the
+-          secondary destructive path. Cancel aborts with no write. */}
++          secondary destructive path. Cancel aborts with no write. Session
++          times are never silently re-anchored. */}
+       <ConfirmDialog
+         open={scheduleConfirm !== null}
+         title="Event dates are changing"
+-        description={`This event has ${sessionCount} scheduled ${sessionWord}. Changing the dates may leave them scheduled outside the new event window. Keep the existing schedule as-is (you can adjust session times later), or clear the schedule so it can be rebuilt for the new dates.`}
++        description={confirmDescription}
+         isDangerous={false}
+         confirmLabel="Keep schedule"
+         secondaryLabel="Clear schedule"
+diff --git a/src/lib/schedule-editor.ts b/src/lib/schedule-editor.ts
+index 8f004dd..67f10ce 100644
+--- a/src/lib/schedule-editor.ts
++++ b/src/lib/schedule-editor.ts
+@@ -86,6 +86,94 @@ export function isSessionWithinEventWindow(
+   return start >= windowStart && end <= windowEnd;
+ }
+ 
++const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
++
++/**
++ * Validate a YYYY-MM-DD calendar day key. Returns the key when valid.
++ */
++export function parseDateOnlyKey(value: string): string | null {
++  const trimmed = value.trim();
++  if (!DATE_ONLY_RE.test(trimmed)) return null;
++  const [year, month, day] = trimmed.split('-').map(Number);
++  const probe = new Date(Date.UTC(year, month - 1, day));
++  if (
++    probe.getUTCFullYear() !== year ||
++    probe.getUTCMonth() !== month - 1 ||
++    probe.getUTCDate() !== day
++  ) {
++    return null;
++  }
++  return trimmed;
++}
++
++/**
++ * Inclusive event-local calendar days from start→end (cap 31).
++ * Derived at render time from Event.startDate/endDate + timezone — not
++ * materialized. Does not union session timestamps (orphans stay visible via
++ * outside-window surfacing instead of expanding the day tabs).
++ */
++export function eventCalendarDayKeys(
++  start: string | Date,
++  end: string | Date,
++  timeZone: string
++): string[] {
++  const startKey = scheduleDateKey(start, timeZone);
++  const endKey = scheduleDateKey(end, timeZone);
++  if (!parseDateOnlyKey(startKey) || !parseDateOnlyKey(endKey)) return [];
++  const keys: string[] = [];
++  let cursor = new Date(`${startKey}T12:00:00.000Z`);
++  const final = new Date(`${endKey}T12:00:00.000Z`);
++  if (final < cursor) return [startKey];
++  while (cursor <= final && keys.length < 31) {
++    keys.push(cursor.toISOString().slice(0, 10));
++    cursor = new Date(cursor.getTime() + 86_400_000);
++  }
++  return keys;
++}
++
++/**
++ * Convert date-only picker values into an event window in `timeZone`.
++ * Start = local midnight of the start day; end = local 23:59 of the end day.
++ * Avoids `new Date('YYYY-MM-DD')` (UTC midnight), which shifts day tabs west
++ * of UTC (e.g. America/New_York).
++ */
++export function eventWindowFromDateOnly(
++  startDateKey: string,
++  endDateKey: string,
++  timeZone: string
++): { startDate: Date; endDate: Date; startKey: string; endKey: string } {
++  const startKey = parseDateOnlyKey(startDateKey);
++  const endKey = parseDateOnlyKey(endDateKey);
++  if (!startKey || !endKey) {
++    throw new Error('Start and end dates must be valid YYYY-MM-DD values');
++  }
++  if (endKey < startKey) {
++    throw new Error('End date must be on or after the start date');
++  }
++  const startDate = zonedScheduleTime(startKey, 0, 0, timeZone);
++  // 23:59 local covers the last 15-minute schedule slot on the end day.
++  const endDate = zonedScheduleTime(endKey, 23, 59, timeZone);
++  return { startDate, endDate, startKey, endKey };
++}
++
++/** Count sessions whose full span is outside the given event window. */
++export function countSessionsOutsideEventWindow(
++  sessions: ReadonlyArray<{ startTime: string | Date; endTime: string | Date }>,
++  eventStart: string | Date,
++  eventEnd: string | Date
++): number {
++  return sessions.reduce((count, session) => {
++    return isSessionWithinEventWindow(
++      session.startTime,
++      session.endTime,
++      eventStart,
++      eventEnd
++    )
++      ? count
++      : count + 1;
++  }, 0);
++}
++
+ export function normalizeSpeakerName(value: string | null | undefined): string {
+   return value?.trim().toLocaleLowerCase('en-US') ?? '';
+ }
+diff --git a/tests/unit/schedule-editor.test.ts b/tests/unit/schedule-editor.test.ts
+index 8ef8e7b..6147a55 100644
+--- a/tests/unit/schedule-editor.test.ts
++++ b/tests/unit/schedule-editor.test.ts
+@@ -7,10 +7,14 @@
+ import { describe, expect, it } from 'vitest';
+ import {
+   buildScheduleChangeEvents,
++  countSessionsOutsideEventWindow,
+   durationForTalkFormat,
+   evaluateSchedulePlacement,
++  eventCalendarDayKeys,
++  eventWindowFromDateOnly,
+   isSessionWithinEventWindow,
+   moveEndTime,
++  parseDateOnlyKey,
+   resizeEndTime,
+   scheduleDateKey,
+   sessionTypeForTalkFormat,
+@@ -224,3 +228,55 @@ describe('schedule timing helpers', () => {
+     expect(scheduleDateKey(instant, 'America/New_York')).toBe('2027-04-08');
+   });
+ });
++
++describe('event date-only window helpers', () => {
++  it('parses valid YYYY-MM-DD keys and rejects impossible calendar days', () => {
++    expect(parseDateOnlyKey('2027-04-08')).toBe('2027-04-08');
++    expect(parseDateOnlyKey('2027-02-30')).toBeNull();
++    expect(parseDateOnlyKey('04/08/2027')).toBeNull();
++  });
++
++  it('builds an event-local full-day window from date pickers', () => {
++    const window = eventWindowFromDateOnly(
++      '2027-04-08',
++      '2027-04-09',
++      'America/New_York'
++    );
++    expect(window.startKey).toBe('2027-04-08');
++    expect(window.endKey).toBe('2027-04-09');
++    expect(scheduleDateKey(window.startDate, 'America/New_York')).toBe(
++      '2027-04-08'
++    );
++    expect(scheduleDateKey(window.endDate, 'America/New_York')).toBe(
++      '2027-04-09'
++    );
++    expect(eventCalendarDayKeys(window.startDate, window.endDate, 'America/New_York')).toEqual([
++      '2027-04-08',
++      '2027-04-09',
++    ]);
++  });
++
++  it('counts sessions outside the proposed event window without moving them', () => {
++    const window = eventWindowFromDateOnly(
++      '2028-04-08',
++      '2028-04-09',
++      'America/New_York'
++    );
++    expect(
++      countSessionsOutsideEventWindow(
++        [
++          {
++            startTime: '2027-04-08T14:00:00.000Z',
++            endTime: '2027-04-08T15:00:00.000Z',
++          },
++          {
++            startTime: '2028-04-08T14:00:00.000Z',
++            endTime: '2028-04-08T15:00:00.000Z',
++          },
++        ],
++        window.startDate,
++        window.endDate
++      )
++    ).toBe(1);
++  });
++});
+diff --git a/tests/unit/schedule-purge-on-date-change.test.ts b/tests/unit/schedule-purge-on-date-change.test.ts
+index 7b9c75c..3a41705 100644
+--- a/tests/unit/schedule-purge-on-date-change.test.ts
++++ b/tests/unit/schedule-purge-on-date-change.test.ts
+@@ -5,13 +5,16 @@
+  */
+ 
+ /**
+- * #1193: changing Event.startDate/endDate with existing Session rows must
+- * never silently strand or silently purge the schedule. Covers:
++ * #1193 + schedule date propagation: changing Event.startDate/endDate with
++ * existing Session rows must never silently strand or silently purge the
++ * schedule. Covers:
+  * 1. date change + zero sessions → silent update, no confirmation needed
+  * 2. date change + sessions + keep → dates updated, sessions untouched
+  * 3. date change + sessions + clear → sessions deleted, audit row, dates updated
+  * 4. date change + sessions + no choice → needs_schedule_confirmation (no write)
+  * 5. no date change + clear option → must NOT purge (stale client guard)
++ * 6. date-only keys materialize in the event timezone (not UTC midnight)
++ * 7. confirmation reports how many sessions fall outside the new window
+  */
+ 
+ import { beforeEach, describe, expect, it, vi } from 'vitest';
+@@ -62,6 +65,11 @@ vi.mock('@/lib/integrations/slack-notifications', () => ({
+ }));
+ 
+ import { updateEventDetails } from '@/app/(admin)/organizer/events/[slug]/settings/actions';
++import {
++  eventCalendarDayKeys,
++  eventWindowFromDateOnly,
++  scheduleDateKey,
++} from '@/lib/schedule-editor';
+ 
+ const basePayload = {
+   name: 'Cosmic',
+@@ -78,21 +86,30 @@ const basePayload = {
+   hashtag: null as string | null,
+ };
+ 
++// Seeded-style window: 08:00–18:00 America/New_York on Apr 8–9 2027 (EDT).
+ const originalStart = new Date('2027-04-08T12:00:00.000Z');
+-const originalEnd = new Date('2027-04-09T20:00:00.000Z');
+-const newStart = new Date('2028-04-08T00:00:00.000Z');
+-const newEnd = new Date('2028-04-09T00:00:00.000Z');
+-
+-function mockExisting(sessionCount: number, overrides?: {
+-  startDate?: Date;
+-  endDate?: Date;
+-}) {
++const originalEnd = new Date('2027-04-09T22:00:00.000Z');
++const inRangeSession = {
++  startTime: new Date('2027-04-08T14:00:00.000Z'),
++  endTime: new Date('2027-04-08T15:00:00.000Z'),
++};
++
++function mockExisting(
++  sessions: Array<{ startTime: Date; endTime: Date }>,
++  overrides?: {
++    startDate?: Date;
++    endDate?: Date;
++    timezone?: string;
++  }
++) {
+   mocks.eventFindUnique.mockResolvedValue({
+     id: 'event-1',
+     slug: 'cosmic-2027',
+     startDate: overrides?.startDate ?? originalStart,
+     endDate: overrides?.endDate ?? originalEnd,
+-    _count: { sessions: sessionCount },
++    timezone: overrides?.timezone ?? 'America/New_York',
++    sessions,
++    _count: { sessions: sessions.length },
+   });
+ }
+ 
+@@ -115,20 +132,26 @@ beforeEach(() => {
+ 
+ describe('updateEventDetails schedule purge on date change (#1193)', () => {
+   it('date change with zero sessions updates silently (no confirmation, no purge)', async () => {
+-    mockExisting(0);
++    mockExisting([]);
+ 
+     const result = await updateEventDetails('event-1', {
+       ...basePayload,
+-      startDate: newStart,
+-      endDate: newEnd,
++      startDate: '2028-04-08',
++      endDate: '2028-04-09',
+     });
+ 
++    const expected = eventWindowFromDateOnly(
++      '2028-04-08',
++      '2028-04-09',
++      'America/New_York'
++    );
++
+     expect(result).toEqual({
+       status: 'updated',
+       event: expect.objectContaining({
+         id: 'event-1',
+-        startDate: newStart,
+-        endDate: newEnd,
++        startDate: expected.startDate,
++        endDate: expected.endDate,
+       }),
+     });
+     expect(mocks.sessionDeleteMany).not.toHaveBeenCalled();
+@@ -137,24 +160,33 @@ describe('updateEventDetails schedule purge on date change (#1193)', () => {
+     expect(mocks.eventUpdate).toHaveBeenCalledWith({
+       where: { id: 'event-1' },
+       data: expect.objectContaining({
+-        startDate: newStart,
+-        endDate: newEnd,
++        startDate: expected.startDate,
++        endDate: expected.endDate,
+       }),
+     });
++    expect(mocks.revalidatePath).toHaveBeenCalledWith(
++      '/organizer/events/cosmic-2027/schedule'
++    );
+   });
+ 
+   it('date change with sessions and no choice returns needs_schedule_confirmation without writing', async () => {
+-    mockExisting(4);
++    mockExisting([
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++    ]);
+ 
+     const result = await updateEventDetails('event-1', {
+       ...basePayload,
+-      startDate: newStart,
+-      endDate: newEnd,
++      startDate: '2028-04-08',
++      endDate: '2028-04-09',
+     });
+ 
+     expect(result).toEqual({
+       status: 'needs_schedule_confirmation',
+       sessionCount: 4,
++      outOfRangeSessionCount: 4,
+     });
+     expect(mocks.eventUpdate).not.toHaveBeenCalled();
+     expect(mocks.sessionDeleteMany).not.toHaveBeenCalled();
+@@ -162,42 +194,66 @@ describe('updateEventDetails schedule purge on date change (#1193)', () => {
+   });
+ 
+   it('date change with sessions + keep updates dates and leaves sessions untouched', async () => {
+-    mockExisting(3);
++    mockExisting([inRangeSession, inRangeSession, inRangeSession]);
+ 
+     const result = await updateEventDetails(
+       'event-1',
+       {
+         ...basePayload,
+-        startDate: newStart,
+-        endDate: newEnd,
++        startDate: '2028-04-08',
++        endDate: '2028-04-09',
+       },
+       { scheduleOnDateChange: 'keep' }
+     );
+ 
++    const expected = eventWindowFromDateOnly(
++      '2028-04-08',
++      '2028-04-09',
++      'America/New_York'
++    );
++
+     expect(result.status).toBe('updated');
++    if (result.status === 'updated') {
++      expect(result.outOfRangeSessionCount).toBe(3);
++    }
+     expect(mocks.eventUpdate).toHaveBeenCalledWith({
+       where: { id: 'event-1' },
+       data: expect.objectContaining({
+-        startDate: newStart,
+-        endDate: newEnd,
++        startDate: expected.startDate,
++        endDate: expected.endDate,
+       }),
+     });
+     expect(mocks.sessionDeleteMany).not.toHaveBeenCalled();
+     expect(mocks.cfpUpdateMany).not.toHaveBeenCalled();
+     expect(mocks.auditLogCreate).not.toHaveBeenCalled();
++    expect(mocks.revalidatePath).toHaveBeenCalledWith(
++      '/organizer/events/cosmic-2027/schedule'
++    );
+   });
+ 
+   it('date change with sessions + clear deletes sessions, audits, and updates dates in one transaction', async () => {
+-    mockExisting(5);
++    mockExisting([
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++    ]);
+     mocks.sessionDeleteMany.mockResolvedValue({ count: 5 });
+     mocks.cfpUpdateMany.mockResolvedValue({ count: 2 });
+ 
++    const expected = eventWindowFromDateOnly(
++      '2028-04-08',
++      '2028-04-09',
++      'America/New_York'
++    );
++
+     const result = await updateEventDetails(
+       'event-1',
+       {
+         ...basePayload,
+-        startDate: newStart,
+-        endDate: newEnd,
++        startDate: '2028-04-08',
++        endDate: '2028-04-09',
+       },
+       { scheduleOnDateChange: 'clear' }
+     );
+@@ -223,16 +279,16 @@ describe('updateEventDetails schedule purge on date change (#1193)', () => {
+           deletedSessionCount: 5,
+           previousStartDate: originalStart.toISOString(),
+           previousEndDate: originalEnd.toISOString(),
+-          newStartDate: newStart.toISOString(),
+-          newEndDate: newEnd.toISOString(),
++          newStartDate: expected.startDate.toISOString(),
++          newEndDate: expected.endDate.toISOString(),
+         },
+       },
+     });
+     expect(mocks.eventUpdate).toHaveBeenCalledWith({
+       where: { id: 'event-1' },
+       data: expect.objectContaining({
+-        startDate: newStart,
+-        endDate: newEnd,
++        startDate: expected.startDate,
++        endDate: expected.endDate,
+       }),
+     });
+     // All of the above ran on the same mockTx via $transaction.
+@@ -243,15 +299,23 @@ describe('updateEventDetails schedule purge on date change (#1193)', () => {
+   });
+ 
+   it('does not purge when dates are unchanged even if clear is passed', async () => {
+-    mockExisting(7);
++    mockExisting([
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++      inRangeSession,
++    ]);
+ 
+-    // Same calendar days as existing (UTC keys match form date-only values).
++    // Same event-local calendar days as existing.
+     const result = await updateEventDetails(
+       'event-1',
+       {
+         ...basePayload,
+-        startDate: new Date('2027-04-08T00:00:00.000Z'),
+-        endDate: new Date('2027-04-09T00:00:00.000Z'),
++        startDate: '2027-04-08',
++        endDate: '2027-04-09',
+       },
+       { scheduleOnDateChange: 'clear' }
+     );
+@@ -259,6 +323,80 @@ describe('updateEventDetails schedule purge on date change (#1193)', () => {
+     expect(result.status).toBe('updated');
+     expect(mocks.sessionDeleteMany).not.toHaveBeenCalled();
+     expect(mocks.auditLogCreate).not.toHaveBeenCalled();
+-    expect(mocks.eventUpdate).toHaveBeenCalled();
++    // Calendar days unchanged → keep original timestamps (not full-day rewrite).
++    expect(mocks.eventUpdate).toHaveBeenCalledWith({
++      where: { id: 'event-1' },
++      data: expect.objectContaining({
++        startDate: originalStart,
++        endDate: originalEnd,
++      }),
++    });
++  });
++
++  it('stores date-only inputs as event-local day bounds so schedule tabs match the picker', async () => {
++    mockExisting([]);
++
++    await updateEventDetails('event-1', {
++      ...basePayload,
++      startDate: '2027-05-15',
++      endDate: '2027-05-16',
++    });
++
++    const updateArg = mocks.eventUpdate.mock.calls[0]?.[0] as {
++      data: { startDate: Date; endDate: Date };
++    };
++    expect(updateArg).toBeTruthy();
++    expect(scheduleDateKey(updateArg.data.startDate, 'America/New_York')).toBe(
++      '2027-05-15'
++    );
++    expect(scheduleDateKey(updateArg.data.endDate, 'America/New_York')).toBe(
++      '2027-05-16'
++    );
++    // UTC midnight would have produced 2027-05-14 / 2027-05-15 in ET.
++    expect(
++      eventCalendarDayKeys(
++        updateArg.data.startDate,
++        updateArg.data.endDate,
++        'America/New_York'
++      )
++    ).toEqual(['2027-05-15', '2027-05-16']);
++  });
++});
++
++describe('eventCalendarDayKeys (schedule date propagation)', () => {
++  it('derives days from the event window only — not from session timestamps', () => {
++    const start = eventWindowFromDateOnly(
++      '2027-04-15',
++      '2027-04-16',
++      'America/New_York'
++    ).startDate;
++    const end = eventWindowFromDateOnly(
++      '2027-04-15',
++      '2027-04-16',
++      'America/New_York'
++    ).endDate;
++
++    expect(eventCalendarDayKeys(start, end, 'America/New_York')).toEqual([
++      '2027-04-15',
++      '2027-04-16',
++    ]);
++  });
++
++  it('rejects UTC-midnight date-only parsing for US Eastern day tabs', () => {
++    // Historical bug: settings saved new Date('YYYY-MM-DD') (UTC midnight).
++    const utcMidnightStart = new Date('2027-04-15T00:00:00.000Z');
++    const utcMidnightEnd = new Date('2027-04-16T00:00:00.000Z');
++    expect(
++      eventCalendarDayKeys(utcMidnightStart, utcMidnightEnd, 'America/New_York')
++    ).toEqual(['2027-04-14', '2027-04-15']);
++
++    const fixed = eventWindowFromDateOnly(
++      '2027-04-15',
++      '2027-04-16',
++      'America/New_York'
++    );
++    expect(
++      eventCalendarDayKeys(fixed.startDate, fixed.endDate, 'America/New_York')
++    ).toEqual(['2027-04-15', '2027-04-16']);
+   });
+ });
+diff --git a/tests/unit/url-save-actions.test.ts b/tests/unit/url-save-actions.test.ts
+index 4ff9398..982488c 100644
+--- a/tests/unit/url-save-actions.test.ts
++++ b/tests/unit/url-save-actions.test.ts
+@@ -107,6 +107,8 @@ describe('URL save action boundaries', () => {
+       features: {},
+       startDate: new Date('2027-04-08T12:00:00.000Z'),
+       endDate: new Date('2027-04-09T20:00:00.000Z'),
++      timezone: 'America/New_York',
++      sessions: [],
+       _count: { sessions: 0 },
+     });
+     mocks.eventUpdate.mockImplementation(({ data }) =>

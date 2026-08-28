@@ -1,0 +1,11 @@
+Reported 2026-08-08. Changing the event dates in settings does not propagate to `/organizer/events/[slug]/schedule`.
+
+This is a data-consistency bug rather than a display bug: the schedule is built around day boundaries derived from the event's start/end dates, so when those move, sessions can end up anchored to days that no longer exist in the range — or the schedule keeps rendering the old days entirely.
+
+## Worth determining before fixing
+
+- Are schedule days **derived** from the event dates at render time, or **materialized** when sessions are created? If materialized, moving the dates orphans them and a migration/backfill is needed, not just a re-render.
+- What should happen to sessions that fall **outside** the new range — surfaced for the organizer to move, or silently re-anchored? Silently moving someone's agenda is worse than telling them there is a conflict.
+- Timezone: the event carries a timezone (`America/New_York` for ATA 2027), so day boundaries are timezone-dependent and a naive date shift will move sessions across days.
+
+The safe behavior is to keep the schedule consistent and **tell the organizer** what was affected, rather than quietly rewriting session times.
