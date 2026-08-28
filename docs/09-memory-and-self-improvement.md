@@ -93,6 +93,33 @@ failure/surprise ──▶ lesson filed ──▶ harness fix PR'd ──▶ gat
 `harness-improvement` issue on The Gibson and the fleet builds it like any other work
 — The Gibson dogfoods its own pipeline.
 
+## Injection at the moment of action (planned)
+
+**Status:** doctrine only — no shipped hook yet. Tracked in [DOC-BACKLOG.md](DOC-BACKLOG.md).
+
+Session-start reading (Law 1) is the floor, not the ceiling. It works when a lesson
+is fresh in an agent's context; it stops working on a long session, past a
+fresh-context-per-hat boundary (doc 11), or simply because the risky action is the
+120th tool call, not the 1st. The gap: a lesson can exist, be correctly filed, and
+still not stop the mistake it describes, because nothing re-surfaces it at the moment
+the mistake is about to happen again.
+
+The planned second surface: a pre-action hook that, immediately before a file edit or
+shell command, checks the pending action's tags/paths against `memory/LESSONS.md` and
+injects only the matching lesson text — a deterministic tag/path match, **not a model
+call**. This keeps it free (no G/S/F cost, doc 15) and keeps the injection surface
+itself simple enough to trust. [Doc 10](10-vendor-adapters.md)'s adapter matrix marks
+Claude Code as the only runtime with true lifecycle hooks today, so it's the first
+implementation target; other runtimes fall back to session-start reading until their
+own hook/watcher surface exists.
+
+This is additive to Law 1, not a replacement for it — session-start reading still
+carries the lessons a pre-action match would miss (anything not tied to a specific
+file/command pattern). It depends on the **generated index target**
+(*memory/LESSONS-INDEX.md*, [CONVENTIONS.md §7.3](CONVENTIONS.md)) existing first —
+without an index, a pre-action hook would have to grep the full ledger on every tool
+call, which defeats the point.
+
 ## Automated retro (the sweep)
 
 A scheduled workflow (weekly) + the historian role:
