@@ -36,6 +36,8 @@ fi
 
 echo "$out" | grep -q 'fixed mandatory chain' && ok "live tree prints fixed chain bytes" \
   || bad "live tree missing fixed chain bytes"
+echo "$out" | grep -q 'mutation headroom:' && ok "live tree prints mutation headroom" \
+  || bad "live tree missing mutation headroom: $out"
 
 echo "$out" | grep -q 'conditional dispatch prompts' && ok "live tree prints conditional dispatch-prompt load" \
   || bad "live tree missing conditional dispatch-prompt load: $out"
@@ -140,6 +142,14 @@ process.stdin.on("end", () => {
     console.error("worst-case " + d.worstCaseFixedPlusLargestDispatchPrompt + " != " + worst);
     process.exit(1);
   }
+  if (!j.mutationHeadroom || j.mutationHeadroom.minimumBytes !== 1024) {
+    console.error("missing 1024-byte mutation reserve");
+    process.exit(1);
+  }
+  if (j.mutationHeadroom.availableBytes !== j.byteBudget["AGENTS.md"] - j.mandatoryChainBytes) {
+    console.error("mutation headroom accounting drift");
+    process.exit(1);
+  }
   process.exit(0);
 });
 ' 2>&1); rc_json_check=$?
@@ -156,10 +166,10 @@ case "$agents_bytes" in
     bad "AGENTS.md byte count is not a non-empty integer: ${agents_bytes:-<empty>}"
     ;;
   *)
-    if [[ "$agents_bytes" -le 20480 ]]; then
-      ok "AGENTS.md $agents_bytes bytes <= 20480 budget"
+    if [[ "$agents_bytes" -le 19456 ]]; then
+      ok "AGENTS.md $agents_bytes bytes <= 19456 reserve threshold"
     else
-      bad "AGENTS.md $agents_bytes bytes exceeds 20480 budget"
+      bad "AGENTS.md $agents_bytes bytes leaves less than 1024 bytes below the 20480 hard cap"
     fi
     ;;
 esac
@@ -381,8 +391,8 @@ const fs=require("fs");
 const p=process.argv[1];
 let t=fs.readFileSync(p,"utf8");
 t=t.replace(
-  "The report-only policy-manifest candidate",
-  "Enumerations of gates, roles, tiers, stages, and forbidden pairs are canonical in `config/policy/candidates/gibson-core-v1.candidate.json`. The report-only policy-manifest candidate"
+  "The policy-manifest candidate",
+  "Enumerations of gates, roles, tiers, stages, and forbidden pairs are canonical in `config/policy/candidates/gibson-core-v1.candidate.json`. The policy-manifest candidate"
 );
 fs.writeFileSync(p,t);
 ' "$SANDBOX/AGENTS.md"
@@ -490,6 +500,26 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_BUDGET'; then
   ok "mutation: oversized AGENTS.md fails budget"
 else
   bad "mutation budget (rc=$rc): $out"
+fi
+cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
+
+# Fixed load may be under the hard cap while still consuming the mutation reserve.
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+const target=20480-1024+1;
+const add=target-Buffer.byteLength(t);
+if (add <= 0) throw new Error("fixture requires live contract below reserve threshold");
+fs.writeFileSync(p,t+" ".repeat(add));
+' "$SANDBOX/AGENTS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_HEADROOM' && ! echo "$out" | grep -q 'E_BUDGET'; then
+  echo "  planted mutation-headroom failure line:"
+  echo "$out" | grep 'E_HEADROOM' | sed 's/^/    /'
+  ok "mutation: fixed load inside hard cap but inside 1024-byte reserve fails"
+else
+  bad "mutation headroom reserve (rc=$rc): $out"
 fi
 cp "$SANDBOX/AGENTS.md.bak" "$SANDBOX/AGENTS.md"
 

@@ -51,7 +51,7 @@
   "byteBudget": {
     "AGENTS.md": 20480,
     "mandatoryChain": 20480,
-    "note": "Fixed mandatory chain only. Conditional role/job dispatch prompts are measured and reported separately."
+    "note": "Fixed mandatory chain only. Keep at least 1024 bytes unused for semantic mutation fixtures; conditional role/job dispatch prompts are measured separately."
   },
   "tokenProxy": {
     "id": "utf8-bytes-div-4",
