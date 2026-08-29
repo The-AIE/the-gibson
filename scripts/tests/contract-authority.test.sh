@@ -4447,6 +4447,20 @@ const breApproveOnly = [
   "#!/bin/bash",
   String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
 ].join("\n");
+function breApproveOnlySourceRun(n) {
+  const bs = "\\".repeat(n);
+  return [
+    "#!/bin/bash",
+    `grep "VERDICT:[[:space:]]*${bs}(APPROVE${bs}|REQUEST_CHANGES${bs})"`,
+  ].join("\n");
+}
+function sourceBackslashRunLen(text, delim) {
+  const escaped = delim.replace(/[()|]/g, "\\$&");
+  const m = String(text).match(new RegExp("(\\\\+)" + escaped));
+  return m ? m[1].length : 0;
+}
+const tripleEscapedBreApproveOnly = breApproveOnlySourceRun(3);
+const quadEscapedBreApproveOnly = breApproveOnlySourceRun(4);
 // Prove consecutive-backslash shell-source BRE bytes (not the single-backslash form).
 const singleBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)"`;
 const doubleBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)"`;
@@ -4463,6 +4477,18 @@ if (!breApproveOnly.includes(singleBreApproveNeedle) || breApproveOnly.includes(
 }
 if (!doubleEscapedBreApproveOnly.includes(doubleBreApproveNeedle) || doubleEscapedBreApproveOnly.includes(singleBreApproveNeedle)) {
   throw new Error("doubleEscapedBreApproveOnly lost consecutive-backslash BRE approve-only bytes");
+}
+if (sourceBackslashRunLen(breApproveOnly, "(") !== 1 || sourceBackslashRunLen(breApproveOnly, "|") !== 1) {
+  throw new Error("breApproveOnly source-run length drifted from one backslash");
+}
+if (sourceBackslashRunLen(doubleEscapedBreApproveOnly, "(") !== 2 || sourceBackslashRunLen(doubleEscapedBreApproveOnly, "|") !== 2) {
+  throw new Error("doubleEscapedBreApproveOnly source-run length drifted from two backslashes");
+}
+if (sourceBackslashRunLen(tripleEscapedBreApproveOnly, "(") !== 3 || sourceBackslashRunLen(tripleEscapedBreApproveOnly, "|") !== 3) {
+  throw new Error("tripleEscapedBreApproveOnly lost three-source-backslash BRE bytes");
+}
+if (sourceBackslashRunLen(quadEscapedBreApproveOnly, "(") !== 4 || sourceBackslashRunLen(quadEscapedBreApproveOnly, "|") !== 4) {
+  throw new Error("quadEscapedBreApproveOnly lost four-source-backslash BRE bytes");
 }
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
@@ -4641,6 +4667,34 @@ const rows = [
       },
     }),
     expectEmpty: true,
+  },
+  {
+    name: "approve-only-triple-source-backslash-bre-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": tripleEscapedBreApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "approve-only-quad-source-backslash-bre-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": quadEscapedBreApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
   },
   {
     name: "overlay-rejected-g12",
@@ -5318,6 +5372,66 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: harness VERDICT BRE APPROVE\\|REQUEST_CHANGES-only remains green"
 else
   bad "benign harness BRE APPROVE\\|REQUEST_CHANGES-only (rc=$rc): $out"
+fi
+
+TRIPLE_ESCAPED_BRE_APPROVE_ONLY_SH=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\\\\\(APPROVE\\\\\\|REQUEST_CHANGES\\\\\\)"\n'
+printf '%s' "$TRIPLE_ESCAPED_BRE_APPROVE_ONLY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\\\\\(APPROVE\\\\\\|REQUEST_CHANGES\\\\\\)\"";
+const double = "grep \"VERDICT:[[:space:]]*\\\\(APPROVE\\\\|REQUEST_CHANGES\\\\)\"";
+const single = "grep \"VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)\"";
+const m = t.match(/(\\+)\(/);
+if (!t.includes(want) || t.includes(double) || t.includes(single) || !m || m[1].length !== 3) {
+  console.error("triple-escaped BRE approve-only bytes mismatch run=" + (m && m[1].length));
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness triple-escaped BRE approve-only bytes mismatch"
+}
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "mutation harness triple-escaped BRE approve-only incorrectly matches as executable BRE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  echo "  planted triple-escaped BRE approve-only failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness triple-escaped VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness triple-escaped BRE approve-only (rc=$rc): $out"
+fi
+
+QUAD_ESCAPED_BRE_APPROVE_ONLY_SH=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\\\\\\\(APPROVE\\\\\\\\|REQUEST_CHANGES\\\\\\\\)"\n'
+printf '%s' "$QUAD_ESCAPED_BRE_APPROVE_ONLY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\\\\\\\(APPROVE\\\\\\\\|REQUEST_CHANGES\\\\\\\\)\"";
+const triple = "grep \"VERDICT:[[:space:]]*\\\\\\(APPROVE\\\\\\|REQUEST_CHANGES\\\\\\)\"";
+const double = "grep \"VERDICT:[[:space:]]*\\\\(APPROVE\\\\|REQUEST_CHANGES\\\\)\"";
+const m = t.match(/(\\+)\(/);
+if (!t.includes(want) || t.includes(triple) || t.includes(double) || !m || m[1].length !== 4) {
+  console.error("quad-escaped BRE approve-only bytes mismatch run=" + (m && m[1].length));
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness quad-escaped BRE approve-only bytes mismatch"
+}
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "mutation harness quad-escaped BRE approve-only incorrectly matches as executable BRE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  echo "  planted quad-escaped BRE approve-only failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness quad-escaped VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness quad-escaped BRE approve-only (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 rm -f "$SANDBOX/scripts/.verdict-sample.txt"

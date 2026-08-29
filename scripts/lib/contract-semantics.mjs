@@ -2390,9 +2390,14 @@ function harnessVerdictRegexGroupTokens(text) {
   // Normalize only BRE grouping/alternation syntax before parsing the
   // VERDICT-local group. ERE `(APPROVE|REQUEST_CHANGES)` and BRE
   // `\(APPROVE\|REQUEST_CHANGES\)` must carry the same authority meaning.
-  // Collapse repeated source escapes too: inside shell double quotes, `\\(`
-  // becomes the same BRE `\(` passed to grep.
-  const t = String(text || "").replace(/\\+([()|])/g, "$1");
+  // Inside double-quoted shell, a source run of one or two backslashes
+  // immediately before `(`, `)`, or `|` becomes the single runtime
+  // backslash that makes grep BRE grouping/alternation executable. Do not
+  // consume a suffix of a longer run: three or more source backslashes are
+  // not that executable form.
+  const t = String(text || "").replace(/(\\*)([()|])/g, (match, slashes, delim) =>
+    slashes.length === 1 || slashes.length === 2 ? delim : match
+  );
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a pipe group.
   const re = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)\(([^)]*)\)/gi;
   let m;
