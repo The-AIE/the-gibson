@@ -109,6 +109,7 @@ export {
 };
 
 const DEFAULT_CONFIG_REL = "config/policy/mandatory-read-chain.v1.json";
+const MIN_MUTATION_HEADROOM_BYTES = 1024;
 
 function help() {
   console.log(`contract-authority.mjs — #208 authority boundary + read-chain budget
@@ -292,6 +293,10 @@ for (const rel of mandatoryFiles) {
 }
 
 const chainBytes = chainFiles.reduce((s, f) => s + f.bytes, 0);
+const mutationHeadroomBytes = Math.min(
+  agentsBudget - agentsBytes,
+  chainBudget - chainBytes
+);
 
 if (Number.isInteger(agentsBudget) && agentsBudget > 0 && agentsBytes > agentsBudget) {
   fail(
@@ -303,6 +308,21 @@ if (Number.isInteger(chainBudget) && chainBudget > 0 && chainBytes > chainBudget
   fail(
     "E_BUDGET",
     `mandatory chain is ${chainBytes} bytes (budget ${chainBudget})`
+  );
+}
+if (
+  Number.isInteger(agentsBudget) &&
+  agentsBudget > 0 &&
+  Number.isInteger(chainBudget) &&
+  chainBudget > 0 &&
+  mutationHeadroomBytes < MIN_MUTATION_HEADROOM_BYTES
+) {
+  fail(
+    "E_HEADROOM",
+    `fixed mandatory load has ${mutationHeadroomBytes} bytes of mutation headroom; ` +
+      `minimum ${MIN_MUTATION_HEADROOM_BYTES} required. Compact AGENTS.md to <= ` +
+      `${Math.min(agentsBudget, chainBudget) - MIN_MUTATION_HEADROOM_BYTES} bytes ` +
+      `without raising the ${Math.min(agentsBudget, chainBudget)}-byte hard cap`
   );
 }
 
@@ -1288,6 +1308,12 @@ const report = {
   },
   tokenProxy: cfg.tokenProxy || { id: "utf8-bytes-div-4" },
   byteBudget,
+  mutationHeadroom: {
+    minimumBytes: MIN_MUTATION_HEADROOM_BYTES,
+    availableBytes: mutationHeadroomBytes,
+    maximumFixedLoadBytes:
+      Math.min(agentsBudget, chainBudget) - MIN_MUTATION_HEADROOM_BYTES,
+  },
   preChange: {
     commit: beforeCommit || null,
     impliedMandatoryBytesPin: pre.impliedMandatoryBytes || null,
@@ -1318,6 +1344,9 @@ function printText() {
   for (const f of chainFiles) {
     lines.push(`  ${f.path}: ${f.bytes} bytes (~${f.approxTokens} tokens)`);
   }
+  lines.push(
+    `  mutation headroom: ${mutationHeadroomBytes} bytes available; minimum ${MIN_MUTATION_HEADROOM_BYTES} bytes`
+  );
   if (dispatchPrompts.length) {
     lines.push(
       `  conditional dispatch prompts: ${dispatchPrompts.length} files; per-file ${dispatchBytesMin}–${dispatchBytesMax} bytes (~${approxTokens(dispatchBytesMin)}–${approxTokens(dispatchBytesMax)} tokens); sum ${dispatchBytesSum} bytes`
