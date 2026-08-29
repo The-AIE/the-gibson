@@ -4434,10 +4434,36 @@ const brePassDecoy = [
   "# VERDICT: APPROVE",
   String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)"`,
 ].join("\n");
+const doubleEscapedBrePassDecoy = [
+  "#!/bin/bash",
+  "# VERDICT: APPROVE",
+  String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)"`,
+].join("\n");
+const doubleEscapedBreApproveOnly = [
+  "#!/bin/bash",
+  String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"`,
+].join("\n");
 const breApproveOnly = [
   "#!/bin/bash",
   String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
 ].join("\n");
+// Prove consecutive-backslash shell-source BRE bytes (not the single-backslash form).
+const singleBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)"`;
+const doubleBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)"`;
+const singleBreApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`;
+const doubleBreApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"`;
+if (!brePassDecoy.includes(singleBrePassNeedle) || brePassDecoy.includes(doubleBrePassNeedle)) {
+  throw new Error("brePassDecoy lost single-backslash BRE PASS bytes");
+}
+if (!doubleEscapedBrePassDecoy.includes(doubleBrePassNeedle) || doubleEscapedBrePassDecoy.includes(singleBrePassNeedle)) {
+  throw new Error("doubleEscapedBrePassDecoy lost consecutive-backslash BRE PASS bytes");
+}
+if (!breApproveOnly.includes(singleBreApproveNeedle) || breApproveOnly.includes(doubleBreApproveNeedle)) {
+  throw new Error("breApproveOnly lost single-backslash BRE approve-only bytes");
+}
+if (!doubleEscapedBreApproveOnly.includes(doubleBreApproveNeedle) || doubleEscapedBreApproveOnly.includes(singleBreApproveNeedle)) {
+  throw new Error("doubleEscapedBreApproveOnly lost consecutive-backslash BRE approve-only bytes");
+}
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
 const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
@@ -4585,6 +4611,32 @@ const rows = [
       agentsText,
       harnessFiles: {
         "scripts/second-opinion.sh": breApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-approve-first-double-escaped-bre-alternation",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": doubleEscapedBrePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-approve-request-changes-double-escaped-bre-group",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": doubleEscapedBreApproveOnly,
         "scripts/release-preflight.sh": approveOnly,
       },
     }),
@@ -5196,6 +5248,69 @@ else
   bad "mutation harness BRE APPROVE\\|PASS alternation (rc=$rc): $out"
 fi
 
+DOUBLE_ESCAPED_BRE_PASS_DECOY_SH=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\\\(APPROVE\\\\|PASS\\\\|REQUEST_CHANGES\\\\)"\n'
+printf '%s' "$DOUBLE_ESCAPED_BRE_PASS_DECOY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+# Prove consecutive-backslash file bytes and load-bearing BRE acceptance of PASS.
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\\\(APPROVE\\\\|PASS\\\\|REQUEST_CHANGES\\\\)\"";
+const single = "grep \"VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)\"";
+if (!t.includes(want) || t.includes(single)) {
+  console.error("double-escaped BRE PASS decoy bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness double-escaped BRE PASS decoy bytes mismatch"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness double-escaped BRE PASS decoy is not executable BRE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted double-escaped BRE PASS-alternation failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness double-escaped VERDICT BRE APPROVE\\|PASS alternation fails"
+else
+  bad "mutation harness double-escaped BRE APPROVE\\|PASS alternation (rc=$rc): $out"
+fi
+
+DOUBLE_ESCAPED_BRE_APPROVE_ONLY_SH=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\\\(APPROVE\\\\|REQUEST_CHANGES\\\\)"\n'
+printf '%s' "$DOUBLE_ESCAPED_BRE_APPROVE_ONLY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\\\(APPROVE\\\\|REQUEST_CHANGES\\\\)\"";
+const single = "grep \"VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)\"";
+if (!t.includes(want) || t.includes(single)) {
+  console.error("double-escaped BRE approve-only bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "benign harness double-escaped BRE approve-only bytes mismatch"
+}
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "benign harness double-escaped BRE approve-only is not executable BRE"
+fi
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign harness double-escaped BRE approve-only incorrectly matches PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: harness double-escaped VERDICT BRE APPROVE\\|REQUEST_CHANGES-only remains green"
+else
+  bad "benign harness double-escaped BRE APPROVE\\|REQUEST_CHANGES-only (rc=$rc): $out"
+fi
+
 BRE_APPROVE_ONLY_SH=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
 printf '%s' "$BRE_APPROVE_ONLY_SH" > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -5205,6 +5320,7 @@ else
   bad "benign harness BRE APPROVE\\|REQUEST_CHANGES-only (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt"
 
 mkdir -p "$SANDBOX/local" "$SANDBOX/memory"
 printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
