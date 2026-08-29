@@ -22,7 +22,7 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "e734ebabb49772ebeab384fcb2c725f7c6ac84a450145d9ae440c598110cd8da",
+        "digest": "8be44244b112dec939a338eb77efeddd5651c8a0257c8880aaed3ff073678003",
         "role": "human-readable-contract"
       },
       {
