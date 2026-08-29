@@ -2374,6 +2374,7 @@ function collectVerdictTokens(text) {
 
 function harnessAcceptsApprove(text) {
   const t = String(text || "");
+  if (harnessVerdictRegexGroupTokens(t).has("APPROVE")) return true;
   if (/VERDICT:\\s\*\(APPROVE/.test(t)) return true;
   if (/VERDICT:\\s\*\(APPROVE\|REQUEST_CHANGES\)/.test(t)) return true;
   if (/VERDICT:\[\[:space:\]\]\*approve/i.test(t)) return true;
@@ -2386,7 +2387,10 @@ function harnessAcceptsApprove(text) {
 
 function harnessVerdictRegexGroupTokens(text) {
   const tokens = new Set();
-  const t = String(text || "");
+  // Normalize only BRE grouping/alternation syntax before parsing the
+  // VERDICT-local group. ERE `(APPROVE|REQUEST_CHANGES)` and BRE
+  // `\(APPROVE\|REQUEST_CHANGES\)` must carry the same authority meaning.
+  const t = String(text || "").replace(/\\([()|])/g, "$1");
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a pipe group.
   const re = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)\(([^)]*)\)/gi;
   let m;
@@ -2419,10 +2423,11 @@ function harnessAcceptsPass(text) {
 /**
  * Document and merge-harness reviewer verdicts must agree. Missing harness
  * files fail closed (cannot determine authority). A VERDICT regex group
- * that lists PASS as an alternative (including APPROVE-first
- * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)`) is a harness accept of
- * PASS; `APPROVE|REQUEST_CHANGES` without PASS stays green. Residual:
- * nested groups and non-VERDICT alternations are not parsed.
+ * that lists PASS as an alternative (including ERE
+ * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)` and BRE
+ * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`) is a harness accept of
+ * PASS; APPROVE/REQUEST_CHANGES without PASS stays green. Residual: nested
+ * groups and non-VERDICT alternations are not parsed.
  *
  * @param {{
  *   agentsText: string,
