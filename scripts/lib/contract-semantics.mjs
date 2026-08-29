@@ -2385,18 +2385,73 @@ function harnessAcceptsApprove(text) {
   return false;
 }
 
+/**
+ * Quote context for canonical Bash grep forms only — not a general shell
+ * parser. Tracks line-local none/single/double so BRE source-run rules can
+ * differ for unquoted vs single-quoted vs double-quoted regexes. Residual:
+ * $'...' ANSI-C quoting, line-continuations, and comments with unmatched
+ * quotes. Executable-command provenance for bare ERE groups and comment-only
+ * APPROVE text is outside this BRE helper and tracked in issue #263.
+ */
+function lineLocalQuoteContext(text, index) {
+  const src = String(text || "");
+  const lineStart = src.lastIndexOf("\n", Math.max(0, index - 1)) + 1;
+  let state = "none";
+  let i = lineStart;
+  while (i < index) {
+    const c = src[i];
+    i += 1;
+    if (state === "single") {
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      if (c === "\\") {
+        if (i < index) i += 1;
+        continue;
+      }
+      if (c === '"') state = "none";
+      continue;
+    }
+    if (c === "'") state = "single";
+    else if (c === '"') state = "double";
+  }
+  return state;
+}
+
+function executableBreSourceRun(slashCount, text, offset) {
+  // Do not consume a suffix of a longer run: three or more source
+  // backslashes are not the executable grep BRE form in any quote context.
+  // Unquoted source never normalizes a slash run: Bash consumes one
+  // backslash, so a 1-slash run is received as literal `(`/`|`/`)` (grep
+  // rc 1 on `VERDICT: APPROVE`), and a 2-slash run leaves an unquoted `(`
+  // (Bash syntax error, rc 2).
+  const ctx = lineLocalQuoteContext(text, offset);
+  if (slashCount === 1) return ctx === "single" || ctx === "double";
+  if (slashCount === 2) return ctx === "double";
+  return false;
+}
+
 function harnessVerdictRegexGroupTokens(text) {
   const tokens = new Set();
   // Normalize only BRE grouping/alternation syntax before parsing the
   // VERDICT-local group. ERE `(APPROVE|REQUEST_CHANGES)` and BRE
   // `\(APPROVE\|REQUEST_CHANGES\)` must carry the same authority meaning.
-  // Inside double-quoted shell, a source run of one or two backslashes
-  // immediately before `(`, `)`, or `|` becomes the single runtime
-  // backslash that makes grep BRE grouping/alternation executable. Do not
-  // consume a suffix of a longer run: three or more source backslashes are
-  // not that executable form.
-  const t = String(text || "").replace(/(\\*)([()|])/g, (match, slashes, delim) =>
-    slashes.length === 1 || slashes.length === 2 ? delim : match
+  // Quote context for canonical Bash grep forms (not a general parser):
+  // - double-quoted source: a run of one or two backslashes immediately
+  //   before `(`, `)`, or `|` becomes the one runtime backslash grep BRE
+  //   needs. Both `"\(...\)"` and `"\\(...\\)"` are executable.
+  // - single-quoted source: only a run of one backslash is executable.
+  //   `'\(...\)'` is executable; `'\\(...\\)'` remains two runtime
+  //   backslashes and is not BRE grouping/alternation.
+  // - unquoted source: no slash run is executable. Bash consumes a single
+  //   source backslash, so `\(` is received by grep as literal `(`, not BRE
+  //   grouping. Two source backslashes leave a runtime backslash then an
+  //   unquoted `(`, which is a Bash syntax error.
+  const t = String(text || "").replace(
+    /(\\*)([()|])/g,
+    (match, slashes, delim, offset, whole) =>
+      executableBreSourceRun(slashes.length, whole, offset) ? delim : match
   );
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a pipe group.
   const re = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)\(([^)]*)\)/gi;
