@@ -4429,6 +4429,15 @@ const approveOnly = [
   "#!/bin/bash",
   "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
 ].join("\n");
+const brePassDecoy = [
+  "#!/bin/bash",
+  "# VERDICT: APPROVE",
+  String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)"`,
+].join("\n");
+const breApproveOnly = [
+  "#!/bin/bash",
+  String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+].join("\n");
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
 const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
@@ -4550,6 +4559,32 @@ const rows = [
           "#!/bin/bash",
           "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)",
         ].join("\n"),
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-approve-first-bre-alternation",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": brePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-approve-request-changes-bre-group",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": breApproveOnly,
         "scripts/release-preflight.sh": approveOnly,
       },
     }),
@@ -5145,6 +5180,29 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: harness VERDICT POSIX APPROVE|REQUEST_CHANGES-only remains green"
 else
   bad "benign harness POSIX APPROVE|REQUEST_CHANGES-only (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+BRE_PASS_DECOY_SH=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$BRE_PASS_DECOY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted APPROVE-first BRE PASS-alternation failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness VERDICT BRE APPROVE\\|PASS alternation fails"
+else
+  bad "mutation harness BRE APPROVE\\|PASS alternation (rc=$rc): $out"
+fi
+
+BRE_APPROVE_ONLY_SH=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$BRE_APPROVE_ONLY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: harness VERDICT BRE APPROVE\\|REQUEST_CHANGES-only remains green"
+else
+  bad "benign harness BRE APPROVE\\|REQUEST_CHANGES-only (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
