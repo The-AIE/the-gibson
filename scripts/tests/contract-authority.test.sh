@@ -4646,6 +4646,66 @@ const pipelineEnvPassGrepOnly = ["#!/bin/bash", pipelineEnvPassNeedle].join("\n"
 const pipelineEnvApproveGrepOnly = ["#!/bin/bash", pipelineEnvApproveNeedle].join("\n");
 const pipelineCommandPassGrepOnly = ["#!/bin/bash", pipelineCommandPassNeedle].join("\n");
 const pipelineCommandApproveGrepOnly = ["#!/bin/bash", pipelineCommandApproveNeedle].join("\n");
+function pipelineEreThenWrappedDefaultBreGrep(wrapper, alts) {
+  const body = `VERDICT:[[:space:]]*\\(${alts.join("\\|")}\\)`;
+  return "grep -E " + SQ + ".*" + SQ + "|" + wrapper + "grep " + SQ + body + SQ;
+}
+function pipelineEreThenWrappedDefaultBreScript(wrapper, alts) {
+  const qiE = "grep -qiE " + SQ + "VERDICT:[[:space:]]*approve([^A-Za-z]|$)" + SQ;
+  const printfSample = "printf " + SQ + "%s\\n" + SQ + " \"$sample\"";
+  return [
+    "#!/bin/bash",
+    "sample=$1",
+    "if " + printfSample + " | " + qiE + "; then :; fi",
+    printfSample + " | " + pipelineEreThenWrappedDefaultBreGrep(wrapper, alts),
+  ].join("\n");
+}
+const pipelineCommandDashDashPassDecoy = pipelineEreThenWrappedDefaultBreScript("command -- ", prefixedPipelinePassAlts);
+const pipelineCommandDashDashApproveOnly = pipelineEreThenWrappedDefaultBreScript("command -- ", prefixedPipelineApproveAlts);
+const pipelineCommandDashPDashDashPassDecoy = pipelineEreThenWrappedDefaultBreScript("command -p -- ", prefixedPipelinePassAlts);
+const pipelineCommandDashPDashDashApproveOnly = pipelineEreThenWrappedDefaultBreScript("command -p -- ", prefixedPipelineApproveAlts);
+const pipelineRedirPassDecoy = pipelineEreThenWrappedDefaultBreScript("2>/dev/null ", prefixedPipelinePassAlts);
+const pipelineRedirApproveOnly = pipelineEreThenWrappedDefaultBreScript("2>/dev/null ", prefixedPipelineApproveAlts);
+const pipelineCommandDashDashPassNeedle = pipelineEreThenWrappedDefaultBreGrep("command -- ", prefixedPipelinePassAlts);
+const pipelineCommandDashDashApproveNeedle = pipelineEreThenWrappedDefaultBreGrep("command -- ", prefixedPipelineApproveAlts);
+const pipelineCommandDashPDashDashPassNeedle = pipelineEreThenWrappedDefaultBreGrep("command -p -- ", prefixedPipelinePassAlts);
+const pipelineCommandDashPDashDashApproveNeedle = pipelineEreThenWrappedDefaultBreGrep("command -p -- ", prefixedPipelineApproveAlts);
+const pipelineRedirPassNeedle = pipelineEreThenWrappedDefaultBreGrep("2>/dev/null ", prefixedPipelinePassAlts);
+const pipelineRedirApproveNeedle = pipelineEreThenWrappedDefaultBreGrep("2>/dev/null ", prefixedPipelineApproveAlts);
+const pipelineCommandDashDashPassGrepOnly = ["#!/bin/bash", pipelineCommandDashDashPassNeedle].join("\n");
+const pipelineCommandDashDashApproveGrepOnly = ["#!/bin/bash", pipelineCommandDashDashApproveNeedle].join("\n");
+const pipelineCommandDashPDashDashPassGrepOnly = ["#!/bin/bash", pipelineCommandDashPDashDashPassNeedle].join("\n");
+const pipelineCommandDashPDashDashApproveGrepOnly = ["#!/bin/bash", pipelineCommandDashPDashDashApproveNeedle].join("\n");
+const pipelineRedirPassGrepOnly = ["#!/bin/bash", pipelineRedirPassNeedle].join("\n");
+const pipelineRedirApproveGrepOnly = ["#!/bin/bash", pipelineRedirApproveNeedle].join("\n");
+const ignoreCaseBracketPassNeedle = "grep -i " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)" + SQ;
+const ignoreCaseBracketApproveNeedle = "grep -i " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)" + SQ;
+const ignoreCaseBracketPassDecoy = [
+  "#!/bin/bash",
+  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  ignoreCaseBracketPassNeedle,
+].join("\n");
+const ignoreCaseBracketApproveOnly = [
+  "#!/bin/bash",
+  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  ignoreCaseBracketApproveNeedle,
+].join("\n");
+const ignoreCaseBracketPassGrepOnly = ["#!/bin/bash", ignoreCaseBracketPassNeedle].join("\n");
+const ignoreCaseBracketApproveGrepOnly = ["#!/bin/bash", ignoreCaseBracketApproveNeedle].join("\n");
+const noIgnoreCaseBracketPassGrepOnly = [
+  "#!/bin/bash",
+  "grep " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)" + SQ,
+].join("\n");
+const commandDashVPassBesideApprove = [
+  "#!/bin/bash",
+  "command -v grep " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)" + SQ,
+  String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+].join("\n");
+const commandDashVUpperPassBesideApprove = [
+  "#!/bin/bash",
+  "command -V grep " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)" + SQ,
+  String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+].join("\n");
 const breSpaceQuantPassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS[[:space:]]*\|REQUEST_CHANGES\)"`;
 const breOptPPassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|P\?PASS\|REQUEST_CHANGES\)"`;
 const breSpaceQuantApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE[[:space:]]*\|REQUEST_CHANGES\)"`;
@@ -4967,6 +5027,21 @@ if (!pipelineEnvPassDecoy.includes("|env grep ") || pipelineEnvPassDecoy.include
 if (!pipelineCommandPassDecoy.includes("|command grep ") || pipelineCommandPassDecoy.includes("| command grep") || !pipelineCommandPassNeedle.includes("PASS") || pipelineCommandApproveNeedle.includes("PASS")) {
   throw new Error("prefixed command pipeline fixtures lost no-whitespace command prefix");
 }
+if (!pipelineCommandDashDashPassDecoy.includes("|command -- grep ") || pipelineCommandDashDashPassDecoy.includes("| command --") || pipelineCommandDashDashApproveNeedle.includes("PASS")) {
+  throw new Error("command -- pipeline fixtures lost executing wrapper bytes");
+}
+if (!pipelineCommandDashPDashDashPassDecoy.includes("|command -p -- grep ") || pipelineCommandDashPDashDashApproveNeedle.includes("PASS")) {
+  throw new Error("command -p -- pipeline fixtures lost executing wrapper bytes");
+}
+if (!pipelineRedirPassDecoy.includes("|2>/dev/null grep ") || pipelineRedirApproveNeedle.includes("PASS")) {
+  throw new Error("leading-redirection pipeline fixtures lost 2>/dev/null bytes");
+}
+if (!ignoreCaseBracketPassNeedle.includes("P[a]SS") || !ignoreCaseBracketPassNeedle.includes("grep -i ") || ignoreCaseBracketApproveNeedle.includes("PASS")) {
+  throw new Error("ignore-case bracket PASS fixtures lost -i / P[a]SS bytes");
+}
+if (!commandDashVPassBesideApprove.includes("command -v grep ") || !commandDashVUpperPassBesideApprove.includes("command -V grep ")) {
+  throw new Error("command -v/-V false-red controls lost introspection bytes");
+}
 if (!breSpaceQuantPassNeedle.includes("PASS[[:space:]]*") || breSpaceQuantPassNeedle.includes("PASSSPACE") || !breOptPPassNeedle.includes("P\\?PASS") || breOptPPassNeedle.includes("PPASS")) {
   throw new Error("lossless BRE quantified PASS fixtures lost executable alt bytes");
 }
@@ -5048,6 +5123,17 @@ const grepProofs = [
   { name: "pipeline-command-prefix-pass-matches-PASS", script: pipelineCommandPassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "pipeline-command-prefix-approve-only-does-not-match-PASS", script: pipelineCommandApproveGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "pipeline-command-prefix-approve-only-matches-APPROVE", script: pipelineCommandApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-command-dash-dash-pass-matches-PASS", script: pipelineCommandDashDashPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-command-dash-dash-approve-only-does-not-match-PASS", script: pipelineCommandDashDashApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-command-dash-dash-approve-only-matches-APPROVE", script: pipelineCommandDashDashApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-command-dash-p-dash-dash-pass-matches-PASS", script: pipelineCommandDashPDashDashPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-command-dash-p-dash-dash-approve-only-does-not-match-PASS", script: pipelineCommandDashPDashDashApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-redir-pass-matches-PASS", script: pipelineRedirPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-redir-approve-only-does-not-match-PASS", script: pipelineRedirApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-redir-approve-only-matches-APPROVE", script: pipelineRedirApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "ignore-case-bracket-pass-matches-PASS", script: ignoreCaseBracketPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "ignore-case-bracket-approve-only-does-not-match-PASS", script: ignoreCaseBracketApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "no-ignore-case-bracket-pass-does-not-match-PASS", script: noIgnoreCaseBracketPassGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "bre-space-quant-pass-matches-PASS", script: breSpaceQuantPassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "bre-space-quant-pass-matches-APPROVE", script: breSpaceQuantPassGrepOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "bre-opt-p-pass-matches-PASS", script: breOptPPassGrepOnly, sample: "VERDICT: PASS", want: true },
@@ -5083,6 +5169,9 @@ const pipelineScriptProofs = [
   { name: "pipeline-lcall-prefix-script-approve-only-matches-APPROVE", script: pipelineLcAllApproveOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "pipeline-env-prefix-script-pass-matches-PASS", script: pipelineEnvPassDecoy, sample: "VERDICT: PASS", want: true },
   { name: "pipeline-command-prefix-script-pass-matches-PASS", script: pipelineCommandPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-command-dash-dash-script-pass-matches-PASS", script: pipelineCommandDashDashPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-command-dash-p-dash-dash-script-pass-matches-PASS", script: pipelineCommandDashPDashDashPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-redir-script-pass-matches-PASS", script: pipelineRedirPassDecoy, sample: "VERDICT: PASS", want: true },
 ];
 for (const proof of pipelineScriptProofs) {
   const got = bashArgScriptMatches(proof.script, proof.sample);
@@ -5188,32 +5277,56 @@ for (const proof of grepStatusProofs) {
 }
 {
   const semSrc = readFileSync(process.env.SEM, "utf8");
-  const preStart = semSrc.indexOf("function precomputePrefixedGrepStarts");
-  const barStart = semSrc.indexOf("function isCommandPipelineBar");
   const stagesStart = semSrc.indexOf("function shellPipelineStages");
-  if (preStart < 0 || barStart < 0 || stagesStart <= barStart || barStart <= preStart) {
-    throw new Error("missing linear pipeline-bar precompute");
+  const normStart = semSrc.indexOf("function normalizeExecutableStage");
+  const skipEnvStart = semSrc.indexOf("function skipEnvUtilityArgs");
+  const wordsStart = semSrc.indexOf("function unquotedShellWords");
+  if (stagesStart < 0 || normStart < 0 || wordsStart < 0 || skipEnvStart < 0) {
+    throw new Error("missing normalized executable-command/pipeline representation");
   }
-  const barFn = semSrc.slice(barStart, stagesStart);
-  const preFn = semSrc.slice(preStart, barStart);
-  if (/src\.slice\(\s*k\s*\)/.test(barFn) || /\(\?:\.\*\\\/\)\?/.test(barFn) || /(?:e\|f)\?grep/.test(barFn)) {
-    throw new Error("isCommandPipelineBar still suffix-slices or suffix-scans for grep");
+  if (semSrc.includes("function precomputePrefixedGrepStarts") || semSrc.includes("function isCommandPipelineBar")) {
+    throw new Error("old grep-guessing pipeline-bar helpers must be removed");
   }
-  if (!/grepFrom\s*\[\s*i\s*\+\s*1\s*\]/.test(barFn)) {
-    throw new Error("isCommandPipelineBar does not consult precomputed prefixed-grep starts");
+  const stagesFnEnd = semSrc.indexOf("\nfunction ", stagesStart + 1);
+  const stagesFn = semSrc.slice(stagesStart, stagesFnEnd);
+  if (/grepFrom/.test(stagesFn) || /isCommandPipelineBar/.test(stagesFn) || /precomputePrefixedGrepStarts/.test(stagesFn)) {
+    throw new Error("shellPipelineStages still consults grep-guessing connector inference");
   }
-  if (/src\.slice\(\s*k\s*\)/.test(preFn) || /\(\?:\.\*\\\/\)\?/.test(preFn)) {
-    throw new Error("precomputePrefixedGrepStarts still uses suffix slice/regex");
+  if (!/if\s*\(\s*c\s*===\s*"\|"\s*&&\s*src\[i\s*\+\s*1\]\s*===\s*"\|"\s*\)/.test(stagesFn)) {
+    throw new Error("shellPipelineStages must keep || as a non-connector");
   }
-  if (!/unquotedShellWords/.test(preFn) || !/for\s*\(\s*let t = words\.length - 1/.test(preFn)) {
-    throw new Error("precomputePrefixedGrepStarts is not a linear token/prefix pass");
+  if (!/if\s*\(\s*c\s*===\s*"\|"\s*\)\s*\{/.test(stagesFn)) {
+    throw new Error("shellPipelineStages must treat every unquoted single | as a connector");
+  }
+  const normFnEnd = semSrc.indexOf("\nfunction ", normStart + 1);
+  const normFn = semSrc.slice(normStart, normFnEnd);
+  if (!/w\s*===\s*"--"/.test(normFn)) {
+    throw new Error("normalizeExecutableStage missing command -- executing form");
+  }
+  if (!/w\s*===\s*"-v"\s*\|\|\s*w\s*===\s*"-V"/.test(normFn) || !/introspection/.test(normFn)) {
+    throw new Error("normalizeExecutableStage missing command -v/-V introspection gate");
+  }
+  if (!/isRedirectionWord/.test(normFn) || !/ignoreCase/.test(normFn)) {
+    throw new Error("normalizeExecutableStage must carry redirections and ignore-case flags");
+  }
+  // Mutation tooth vs a112465: old helper required whitespace-or-grep connector inference.
+  const oldGuessingConnector = (src, i) => {
+    const prev = i > 0 ? src[i - 1] : "";
+    const next = src[i + 1] || "";
+    if (/[ \t]/.test(prev) && /[ \t]/.test(next)) return true;
+    return /^(?:LC_ALL=C\s+)?(?:env\s+|command\s+)?(?:e|f)?grep\b/.test(src.slice(i + 1));
+  };
+  const witness = "grep -E " + SQ + ".*" + SQ + "|command -- grep " + SQ + "VERDICT" + SQ;
+  let oldSplits = 0;
+  for (let i = 0; i < witness.length; i += 1) {
+    if (witness[i] === "|" && oldGuessingConnector(witness, i)) oldSplits += 1;
+  }
+  if (oldSplits !== 0) {
+    throw new Error("old a112465 connector witness unexpectedly splits command -- form");
   }
   const smallBars = 4096;
+  const midBars = 8192;
   const largeBars = 16384;
-  const oldSuffixVisits = (n) => (n * (n + 1)) / 2;
-  if (oldSuffixVisits(largeBars) < oldSuffixVisits(smallBars) * 8) {
-    throw new Error("old per-bar suffix visit witness is not quadratic");
-  }
   const nCheck = spawnSync("bash", ["-n", "-c", hereDocBarProbe(largeBars)], { encoding: "utf8" });
   if (nCheck.status !== 0) {
     throw new Error("inert here-doc bars failed bash -n: " + nCheck.stderr);
@@ -5231,12 +5344,24 @@ for (const proof of grepStatusProofs) {
       },
     });
   }
-  const fSmall = evalBars(smallBars);
-  const fLarge = evalBars(largeBars);
-  if (fSmall.length || fLarge.length) {
-    throw new Error("inert here-doc bars must remain helper-green got " + JSON.stringify(fSmall) + " / " + JSON.stringify(fLarge));
+  function timeEval(n) {
+    const t0 = process.hrtime.bigint();
+    const findings = evalBars(n);
+    const ns = Number(process.hrtime.bigint() - t0);
+    return { findings, ns };
   }
-  console.log("H241_OK pipeline-bar-linear-precompute-not-suffix-scan");
+  const r4 = timeEval(smallBars);
+  const r8 = timeEval(midBars);
+  const r16 = timeEval(largeBars);
+  if (r4.findings.length || r8.findings.length || r16.findings.length) {
+    throw new Error("inert here-doc bars must remain helper-green got " + JSON.stringify([r4.findings, r8.findings, r16.findings]));
+  }
+  // Linear-ish receipt: 16k must not exceed ~8x the 4k cost (superlinear old suffix scan was ~16x+).
+  if (r16.ns > r4.ns * 8 + 50_000_000) {
+    throw new Error("pipeline stage classification regresses superlinearly r4=" + r4.ns + " r8=" + r8.ns + " r16=" + r16.ns);
+  }
+  console.log("H241_OK pipeline-normalized-executable-command-representation");
+  console.log("H241_OK pipeline-perf-receipt-4k-8k-16k ns=" + [r4.ns, r8.ns, r16.ns].join(","));
 }
 {
   const semSrc = readFileSync(process.env.SEM, "utf8");
@@ -5257,6 +5382,91 @@ for (const proof of grepStatusProofs) {
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
 const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
+{
+  // Table-driven cross-products with mutation teeth against a112465 connector/actor models.
+  const wrappers = [
+    { name: "command-dash-dash", passScript: pipelineCommandDashDashPassDecoy, approveScript: pipelineCommandDashDashApproveOnly, passGrep: pipelineCommandDashDashPassGrepOnly, approveGrep: pipelineCommandDashDashApproveGrepOnly },
+    { name: "command-dash-p-dash-dash", passScript: pipelineCommandDashPDashDashPassDecoy, approveScript: pipelineCommandDashPDashDashApproveOnly, passGrep: pipelineCommandDashPDashDashPassGrepOnly, approveGrep: pipelineCommandDashPDashDashApproveGrepOnly },
+    { name: "redir", passScript: pipelineRedirPassDecoy, approveScript: pipelineRedirApproveOnly, passGrep: pipelineRedirPassGrepOnly, approveGrep: pipelineRedirApproveGrepOnly },
+    { name: "command", passScript: pipelineCommandPassDecoy, approveScript: pipelineCommandApproveOnly, passGrep: pipelineCommandPassGrepOnly, approveGrep: pipelineCommandApproveGrepOnly },
+    { name: "env", passScript: pipelineEnvPassDecoy, approveScript: pipelineEnvApproveOnly, passGrep: pipelineEnvPassGrepOnly, approveGrep: pipelineEnvApproveGrepOnly },
+    { name: "lcall", passScript: pipelineLcAllPassDecoy, approveScript: pipelineLcAllApproveOnly, passGrep: pipelineLcAllPassGrepOnly, approveGrep: pipelineLcAllApproveGrepOnly },
+  ];
+  for (const w of wrappers) {
+    const passFindings = reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": w.passScript,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    });
+    if (!passFindings.some((f) => f.code === "E_VERDICT_VOCABULARY" && /accepts VERDICT: PASS/.test(f.message))) {
+      throw new Error("cross-product wrapper PASS false-green " + w.name + " got " + JSON.stringify(passFindings));
+    }
+    const approveFindings = reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": w.approveScript,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    });
+    if (approveFindings.length) {
+      throw new Error("cross-product wrapper approve-only false-red " + w.name + " got " + JSON.stringify(approveFindings));
+    }
+    if (!bashGrepMatches(w.passGrep, "VERDICT: PASS") || bashGrepMatches(w.approveGrep, "VERDICT: PASS") || !bashGrepMatches(w.approveGrep, "VERDICT: APPROVE")) {
+      throw new Error("cross-product wrapper runtime mismatch " + w.name);
+    }
+    console.log("H241_OK cross-product-wrapper-" + w.name);
+  }
+  const ignorePass = reviewVerdictVocabularyFindings({
+    agentsText,
+    harnessFiles: {
+      "scripts/second-opinion.sh": ignoreCaseBracketPassDecoy,
+      "scripts/release-preflight.sh": approveOnly,
+    },
+  });
+  if (!ignorePass.some((f) => /accepts VERDICT: PASS/.test(f.message))) {
+    throw new Error("cross-product ignore-case bracket PASS false-green got " + JSON.stringify(ignorePass));
+  }
+  if (!bashGrepMatches(ignoreCaseBracketPassGrepOnly, "VERDICT: PASS")) {
+    throw new Error("cross-product ignore-case bracket runtime does not match PASS");
+  }
+  console.log("H241_OK cross-product-ignore-case-bracket-pass");
+  const actorRows = [
+    { name: "owner-reported-counsel", decision: "Decided: The owner reported counsel approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owners-counsel", decision: "Decided: The owner\u0027s counsel approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owners-delegate-g5", decision: "Decided: The owner\u0027s delegate approved waiver of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
+    { name: "owner-approved-g12", decision: "Decided: The owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    { name: "owner-approved-g5", decision: "Decided: The owner approved waiver of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: false },
+  ];
+  for (const row of actorRows) {
+    const findings = overlayLimitFindings(row.overlay, row.decision, ["G5", "G11", "G12"]);
+    const hit = findings.some((f) => f.code === "E_OVERLAY" && f.message.includes(row.gate));
+    if (hit !== row.expectFinding) {
+      throw new Error("cross-product actor " + row.name + " expectFinding=" + row.expectFinding + " got " + JSON.stringify(findings));
+    }
+    console.log("H241_OK cross-product-actor-" + row.name);
+  }
+  const permRows = [
+    { name: "authorize-review-by", body: "An independent reviewer may authorize review by the same agent.", expect: true },
+    { name: "permit-review-by", body: "An independent reviewer may permit review by the same agent.", expect: true },
+    { name: "delegate-review-to", body: "An independent reviewer may delegate review to the same agent.", expect: true },
+    { name: "authorize-same-agent-to", body: "An independent reviewer may authorize the same agent to review the change.", expect: true },
+    { name: "independent-may-review", body: "An independent reviewer may review the change.", expect: false },
+  ];
+  for (const row of permRows) {
+    const findings = playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      row.body
+    );
+    const hit = findings.some((f) => f.code === "E_ROLE_NEGATION" && /same-agent/.test(f.message));
+    if (hit !== row.expect) {
+      throw new Error("cross-product permission " + row.name + " expect=" + row.expect + " got " + JSON.stringify(findings));
+    }
+    console.log("H241_OK cross-product-permission-" + row.name);
+  }
+}
 const expectedGates = ["G11", "G12", "G15"];
 const roleContracts = JSON.parse(
   readFileSync(join(repo, "config/policy/role-contracts.v1.json"), "utf8")
@@ -6047,6 +6257,143 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "pass-pipeline-command-dash-dash-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineCommandDashDashPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-pipeline-command-dash-dash-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineCommandDashDashApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-pipeline-command-dash-p-dash-dash-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineCommandDashPDashDashPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-pipeline-command-dash-p-dash-dash-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineCommandDashPDashDashApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-pipeline-redir-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineRedirPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-pipeline-redir-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineRedirApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-ignore-case-bracket-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ignoreCaseBracketPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-ignore-case-bracket-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ignoreCaseBracketApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-no-ignore-case-bracket-pass-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": noIgnoreCaseBracketPassGrepOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-command-dash-v-pass-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commandDashVPassBesideApprove,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-command-dash-V-pass-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commandDashVUpperPassBesideApprove,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
     name: "pass-bre-space-quant-alt-beside-approve",
     findings: () => reviewVerdictVocabularyFindings({
       agentsText,
@@ -6322,6 +6669,45 @@ const rows = [
     msg: ["G12", "affirmative same-gate owner authorization"],
   },
   {
+    name: "overlay-owner-reported-counsel-approved-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: The owner reported counsel approved removal of G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owners-counsel-approved-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: The owner\u0027s counsel approved removal of G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owners-delegate-approved-g5",
+    findings: () => overlayLimitFindings(
+      "G5 is waived. Money gates no longer need a human gate.",
+      "Decided: The owner\u0027s delegate approved waiver of G5.",
+      ["G5", "G11", "G12"]
+    ),
+    code: "E_OVERLAY",
+    msg: ["G5", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owner-approved-g5-control",
+    findings: () => overlayLimitFindings(
+      "G5 is waived. Money gates no longer need a human gate.",
+      "Decided: The owner approved waiver of G5.",
+      ["G5", "G11", "G12"]
+    ),
+    expectEmpty: true,
+  },
+  {
     name: "self-review-reviewer-own-generation",
     findings: () => playbookBodyObligationFindings(
       "reviewer",
@@ -6555,6 +6941,36 @@ const rows = [
       "reviewer",
       { gates: ["never review own generation (Law 5)"], forbidden: [] },
       "An independent reviewer may authorize the same agent to review the change."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-independent-may-authorize-review-by-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may authorize review by the same agent."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-independent-may-permit-review-by-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may permit review by the same agent."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-independent-may-delegate-review-to-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may delegate review to the same agent."
     ),
     code: "E_ROLE_NEGATION",
     msg: ["same-agent"],
@@ -7771,7 +8187,7 @@ fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" "$SANDBOX/scripts/.pipeline-ere-bre-grep.sh"
 
-for prefix_spec in "LC_ALL=C|lcall" "env|env" "command|command"; do
+for prefix_spec in "LC_ALL=C|lcall" "env|env" "command|command" "command --|command-dash-dash" "command -p --|command-dash-p-dash-dash" "2>/dev/null|redir"; do
   prefix=${prefix_spec%%|*}
   tag=${prefix_spec#*|}
   node -e '
@@ -7881,6 +8297,103 @@ fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
   cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 done
 rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" "$SANDBOX/scripts/.prefixed-pipeline-grep.sh"
+
+
+# ignore-case bracket-class PASS encoding (production-path + runtime)
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const sidecar = process.argv[2];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before ignore-case bracket substitute");
+  process.exit(1);
+}
+const mixed = "grep -i '\''VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'\''";
+t = t.replace(needle, mixed);
+if (t.includes(needle) || !t.includes("P[a]SS") || !t.includes("grep -i ") || !t.includes("formal-review.sh")) {
+  console.error("ignore-case bracket PASS substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$SANDBOX/scripts/.ignore-case-bracket-grep.sh" || {
+  bad "mutation harness ignore-case bracket PASS substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.ignore-case-bracket-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness ignore-case bracket PASS runtime does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted ignore-case bracket PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: substituting ignore-case bracket P[a]SS into canonical harness fails"
+else
+  bad "mutation ignore-case bracket PASS canonical substitute (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.ignore-case-bracket-grep.sh"
+
+# command -v / -V introspection false-red controls beside real APPROVE matcher
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle)) {
+  console.error("canonical second-opinion matcher missing before command -v control");
+  process.exit(1);
+}
+const planted = "command -v grep '\''VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)'\''" + String.fromCharCode(10) + needle;
+t = t.replace(needle, planted);
+if (!t.includes("command -v grep ") || !t.includes(needle) || !t.includes("PASS")) {
+  console.error("command -v control substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "benign harness command -v PASS introspection substitute failed"
+}
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: command -v PASS introspection beside APPROVE matcher remains green"
+else
+  bad "benign command -v PASS introspection (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle)) {
+  console.error("canonical second-opinion matcher missing before command -V control");
+  process.exit(1);
+}
+const planted = "command -V grep '\''VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)'\''" + String.fromCharCode(10) + needle;
+t = t.replace(needle, planted);
+if (!t.includes("command -V grep ") || !t.includes(needle) || !t.includes("PASS")) {
+  console.error("command -V control substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "benign harness command -V PASS introspection substitute failed"
+}
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: command -V PASS introspection beside APPROVE matcher remains green"
+else
+  bad "benign command -V PASS introspection (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
 node -e '
 const fs = require("fs");
@@ -8104,6 +8617,44 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
 else
   bad "mutation overlay owner notified after counsel (rc=$rc): $out"
 fi
+
+printf '%s\n' 'Decided: The owner reported counsel approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+printf '%s\n' 'G12 is removed.' > "$SANDBOX/local/AGENTS.local.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' && echo "$out" | grep -q 'G12'; then
+  echo "  planted owner-reported-counsel overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner reported counsel approved does not authorize overlay removal"
+else
+  bad "mutation overlay owner reported counsel (rc=$rc): $out"
+fi
+
+printf '%s\n' "Decided: The owner's counsel approved removal of G12." \
+  > "$SANDBOX/memory/DECISIONS.md"
+printf '%s\n' 'G12 is removed.' > "$SANDBOX/local/AGENTS.local.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' && echo "$out" | grep -q 'G12'; then
+  echo "  planted owners-counsel overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner's counsel approved does not authorize overlay removal"
+else
+  bad "mutation overlay owner's counsel (rc=$rc): $out"
+fi
+
+printf '%s\n' "Decided: The owner's delegate approved waiver of G5." \
+  > "$SANDBOX/memory/DECISIONS.md"
+printf '%s\n' 'G5 is waived.' > "$SANDBOX/local/AGENTS.local.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' && echo "$out" | grep -q 'G5'; then
+  echo "  planted owners-delegate overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner's delegate approved does not authorize overlay removal"
+else
+  bad "mutation overlay owner's delegate (rc=$rc): $out"
+fi
+printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
+  > "$SANDBOX/local/AGENTS.local.md"
 
 printf '%s\n' 'The owner declined to waive G12' > "$SANDBOX/memory/DECISIONS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -8468,6 +9019,73 @@ else
   bad "mutation independent reviewer authorize same agent (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may authorize review by the same agent."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted authorize-review-by-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: independent reviewer authorize review by the same agent fails"
+else
+  bad "mutation independent authorize review by same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may permit review by the same agent."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted permit-review-by-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: independent reviewer permit review by the same agent fails"
+else
+  bad "mutation independent permit review by same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may delegate review to the same agent."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted delegate-review-to-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: independent reviewer delegate review to the same agent fails"
+else
+  bad "mutation independent delegate review to same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
 
 node -e '
 const fs=require("fs");
