@@ -2577,6 +2577,81 @@ function lineHasGrepEre(line) {
   return false;
 }
 
+/**
+ * Split a shell slice into command-list segments on unquoted `;`, `&&`,
+ * `||`, and bare `&` only. Quote/#-comment aware via the same bounded
+ * scanner used elsewhere — not a general shell parser. Pipelines (`|`)
+ * are intentionally not split so unquoted ERE `|` inside a pattern is
+ * not mistaken for a command separator (residual with #263/#264).
+ */
+function shellCommandListSegments(shellSlice) {
+  const src = String(shellSlice || "");
+  const segments = [];
+  let start = 0;
+  let state = "none";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      if (c === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      if (c === "\\") {
+        i += Math.min(2, src.length - i);
+        continue;
+      }
+      if (c === '"') state = "none";
+      i += 1;
+      continue;
+    }
+    const atWordStart = i === 0 || /[ \t\r\n]/.test(src[i - 1] || "");
+    if (c === "#" && atWordStart) break;
+    if (c === "\\") {
+      i += Math.min(2, src.length - i);
+      continue;
+    }
+    if (c === "'") {
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (c === ";") {
+      segments.push(src.slice(start, i));
+      i += 1;
+      start = i;
+      continue;
+    }
+    if (c === "&" && src[i + 1] === "&") {
+      segments.push(src.slice(start, i));
+      i += 2;
+      start = i;
+      continue;
+    }
+    if (c === "|" && src[i + 1] === "|") {
+      segments.push(src.slice(start, i));
+      i += 2;
+      start = i;
+      continue;
+    }
+    if (c === "&") {
+      segments.push(src.slice(start, i));
+      i += 1;
+      start = i;
+      continue;
+    }
+    i += 1;
+  }
+  segments.push(src.slice(start));
+  return segments;
+}
+
 function executableBreDelimRun(slashCount, quoteState) {
   // Quote context for canonical Bash grep forms (not a general parser):
   // - double-quoted source: a run of one or two backslashes immediately
@@ -2673,31 +2748,35 @@ function collectMatcherClusterTokens(slice, tokens) {
 
 function harnessVerdictRegexGroupTokens(text) {
   const tokens = new Set();
-  // Normalize only executable BRE grouping/alternation in each shell slice,
-  // then parse every sibling group in the same matcher cluster. Physical
-  // lines join only while a shell quote is open, covering legal multiline
-  // quoted grep patterns without restoring unconstrained cross-line groups.
-  // Canonical grep ERE (`grep -E`, combined short flags containing `E`,
-  // `egrep`) must not apply BRE backslash normalization; unescaped quoted
-  // ERE groups remain executable. Pre-existing unquoted escaped ERE is
-  // residual #263/#264.
+  // Normalize only executable BRE grouping/alternation in each command-list
+  // segment, then parse every sibling group in the same matcher cluster.
+  // Physical lines join only while a shell quote is open, covering legal
+  // multiline quoted grep patterns without restoring unconstrained
+  // cross-line groups. ERE/BRE mode is attributed per segment (`grep -E`
+  // / `egrep` / combined short flags containing `E`) so a sibling
+  // `grep -E` before a default-BRE verdict matcher cannot suppress BRE
+  // normalization for that matcher. Unescaped quoted ERE groups remain
+  // executable on their own ERE segment. Pre-existing unquoted escaped
+  // ERE and pipeline (`|`) command mixing are residual #263/#264.
   for (const shellSlice of shellMatcherSlices(text)) {
-    const commentAt = unquotedCommentStart(shellSlice);
-    let slice = commentAt === -1 ? shellSlice : shellSlice.slice(0, commentAt);
-    if (!lineHasGrepEre(shellSlice)) {
-      const quoteStates = shellSliceQuoteStates(slice);
-      slice = slice.replace(
-        /(\\*)([()|])/g,
-        (match, slashes, delim, offset) =>
-          executableBreDelimRun(
-            slashes.length,
-            quoteStates[offset] || "none"
-          )
-            ? delim
-            : match
-      );
+    for (const segment of shellCommandListSegments(shellSlice)) {
+      const commentAt = unquotedCommentStart(segment);
+      let slice = commentAt === -1 ? segment : segment.slice(0, commentAt);
+      if (!lineHasGrepEre(segment)) {
+        const quoteStates = shellSliceQuoteStates(slice);
+        slice = slice.replace(
+          /(\\*)([()|])/g,
+          (match, slashes, delim, offset) =>
+            executableBreDelimRun(
+              slashes.length,
+              quoteStates[offset] || "none"
+            )
+              ? delim
+              : match
+        );
+      }
+      collectMatcherClusterTokens(slice, tokens);
     }
-    collectMatcherClusterTokens(slice, tokens);
   }
   return tokens;
 }
