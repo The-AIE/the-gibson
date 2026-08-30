@@ -4811,6 +4811,52 @@ const absEnvPassGrepOnly = wrapGrepNeedle(absEnvPassNeedle, false);
 const commandAbsEnvPassGrepOnly = wrapGrepNeedle(commandAbsEnvPassNeedle, false);
 const commandEnvApproveGrepOnly = wrapGrepNeedle(commandEnvApproveNeedle, false);
 const absEnvApproveGrepOnly = wrapGrepNeedle(absEnvApproveNeedle, false);
+const DQ = String.fromCharCode(34);
+function envQuotedSplitGrep(envBin, splitTok, grepFlag, pat) {
+  return envBin + " " + splitTok + " " + DQ + "grep " + grepFlag + " " + SQ + pat + SQ + DQ;
+}
+function envSplitEqGrep(envBin, grepFlag, pat) {
+  return envBin + " --split-string=" + DQ + "grep " + grepFlag + " " + SQ + pat + SQ + DQ;
+}
+function envPathGrep(pathTok, dir, grepFlag, pat) {
+  return "env " + pathTok + " " + dir + " grep " + grepFlag + " " + SQ + pat + SQ;
+}
+const grepBareThenYPassNeedle = "grep " + SQ + bracketPassPat + SQ + " -y";
+const grepBareThenYApproveNeedle = "grep " + SQ + bracketApprovePat + SQ + " -y";
+const envSPassNeedle = envQuotedSplitGrep("env", "-S", "-y", bracketPassPat);
+const envSApproveNeedle = envQuotedSplitGrep("env", "-S", "-y", bracketApprovePat);
+const absEnvSPassNeedle = envQuotedSplitGrep("/usr/bin/env", "-S", "-y", bracketPassPat);
+const absEnvSApproveNeedle = envQuotedSplitGrep("/usr/bin/env", "-S", "-y", bracketApprovePat);
+const envSplitStringEqPassNeedle = envSplitEqGrep("env", "-y", bracketPassPat);
+const envSplitStringEqApproveNeedle = envSplitEqGrep("env", "-y", bracketApprovePat);
+const envPPassNeedle = envPathGrep("-P", "/usr/bin", "-y", bracketPassPat);
+const envPApproveNeedle = envPathGrep("-P", "/usr/bin", "-y", bracketApprovePat);
+const envPathPassNeedle = envPathGrep("--path", "/usr/bin", "-y", bracketPassPat);
+const envPathApproveNeedle = envPathGrep("--path", "/usr/bin", "-y", bracketApprovePat);
+const grepBareThenYPassDecoy = wrapGrepNeedle(grepBareThenYPassNeedle, true);
+const grepBareThenYApproveOnly = wrapGrepNeedle(grepBareThenYApproveNeedle, true);
+const envSPassDecoy = wrapGrepNeedle(envSPassNeedle, true);
+const envSApproveOnly = wrapGrepNeedle(envSApproveNeedle, true);
+const absEnvSPassDecoy = wrapGrepNeedle(absEnvSPassNeedle, true);
+const absEnvSApproveOnly = wrapGrepNeedle(absEnvSApproveNeedle, true);
+const envSplitStringEqPassDecoy = wrapGrepNeedle(envSplitStringEqPassNeedle, true);
+const envSplitStringEqApproveOnly = wrapGrepNeedle(envSplitStringEqApproveNeedle, true);
+const envPPassDecoy = wrapGrepNeedle(envPPassNeedle, true);
+const envPApproveOnly = wrapGrepNeedle(envPApproveNeedle, true);
+const envPathPassDecoy = wrapGrepNeedle(envPathPassNeedle, true);
+const envPathApproveOnly = wrapGrepNeedle(envPathApproveNeedle, true);
+const grepBareThenYPassGrepOnly = wrapGrepNeedle(grepBareThenYPassNeedle, false);
+const grepBareThenYApproveGrepOnly = wrapGrepNeedle(grepBareThenYApproveNeedle, false);
+const envSPassGrepOnly = wrapGrepNeedle(envSPassNeedle, false);
+const envSApproveGrepOnly = wrapGrepNeedle(envSApproveNeedle, false);
+const absEnvSPassGrepOnly = wrapGrepNeedle(absEnvSPassNeedle, false);
+const absEnvSApproveGrepOnly = wrapGrepNeedle(absEnvSApproveNeedle, false);
+const envSplitStringEqPassGrepOnly = wrapGrepNeedle(envSplitStringEqPassNeedle, false);
+const envSplitStringEqApproveGrepOnly = wrapGrepNeedle(envSplitStringEqApproveNeedle, false);
+const envPPassGrepOnly = wrapGrepNeedle(envPPassNeedle, false);
+const envPApproveGrepOnly = wrapGrepNeedle(envPApproveNeedle, false);
+const envPathPassGrepOnly = wrapGrepNeedle(envPathPassNeedle, false);
+const envPathApproveGrepOnly = wrapGrepNeedle(envPathApproveNeedle, false);
 const grepDashEThenIPassNeedle = "grep -e " + SQ + bracketPassPat + SQ + " -i";
 const grepDashEThenIgnoreCasePassNeedle = "grep -e " + SQ + bracketPassPat + SQ + " --ignore-case";
 const grepDashEAttachedThenIPassNeedle = "grep -e" + SQ + bracketPassPat + SQ + " -i";
@@ -5194,6 +5240,18 @@ if (!obsoleteYIBracketPassNeedle.includes("grep -yi ") || !obsoleteIYBracketPass
 if (!grepDashEThenYPassNeedle.includes("grep -e ") || !grepDashEThenYPassNeedle.endsWith(" -y")) {
   throw new Error("trailing grep -y after -e fixture lost -y bytes");
 }
+if (!grepBareThenYPassNeedle.startsWith("grep ") || !grepBareThenYPassNeedle.endsWith(" -y") || !grepBareThenYPassNeedle.includes("P[a]SS") || grepBareThenYApproveNeedle.includes("PASS")) {
+  throw new Error("bare-pattern then grep -y fixtures lost trailing -y / P[a]SS bytes");
+}
+if (!envSPassNeedle.startsWith("env -S ") || !envSPassNeedle.includes("grep -y ") || !absEnvSPassNeedle.startsWith("/usr/bin/env -S ") || envSApproveNeedle.includes("PASS")) {
+  throw new Error("env -S / /usr/bin/env -S fixtures lost split-string grep bytes");
+}
+if (!envSplitStringEqPassNeedle.startsWith("env --split-string=") || !envSplitStringEqPassNeedle.includes("grep -y ") || envSplitStringEqApproveNeedle.includes("PASS")) {
+  throw new Error("GNU --split-string= fixtures lost attached split-string grep bytes");
+}
+if (!envPPassNeedle.startsWith("env -P /usr/bin grep -y ") || !envPathPassNeedle.startsWith("env --path /usr/bin grep -y ") || envPApproveNeedle.includes("PASS") || envPathApproveNeedle.includes("PASS")) {
+  throw new Error("separated env -P/--path fixtures lost path-operand grep bytes");
+}
 if (!envDepth8PassNeedle.startsWith("env ".repeat(8) + "grep -i ") || envDepth8PassNeedle.startsWith("env ".repeat(9))) {
   throw new Error("env depth-8 PASS fixture lost eight env wrappers");
 }
@@ -5256,6 +5314,28 @@ function bashGrepRun(script, sample) {
 }
 function bashGrepMatches(script, sample) {
   return bashGrepRun(script, sample).status === 0;
+}
+function envTrue(args) {
+  return spawnSync("env", args.concat(["true"]), { encoding: "utf8" }).status === 0;
+}
+const envRuntime = {
+  s: envTrue(["-S"]),
+  absS: spawnSync("/usr/bin/env", ["-S", "true"], { encoding: "utf8" }).status === 0,
+  split: envTrue(["--split-string=true"]),
+  p: envTrue(["-P", "/usr/bin"]),
+  path: envTrue(["--path", "/usr/bin"]),
+};
+function runtimeGrepMatches(script, sample, want, requireEnv) {
+  if (requireEnv && !envRuntime[requireEnv]) {
+    if (want === true && bashGrepMatches(script, sample)) {
+      throw new Error("unsupported env form unexpectedly matched " + sample);
+    }
+    return "unsupported-closed";
+  }
+  if (bashGrepMatches(script, sample) !== want) {
+    throw new Error("runtime mismatch want=" + want + " sample=" + sample);
+  }
+  return "matched";
 }
 function bashWholeScriptMatches(script, sample) {
   const body = String(script).split(/\n/).slice(1).join("\n");
@@ -5332,6 +5412,21 @@ const grepProofs = [
   { name: "obsolete-yE-bracket-pass-matches-PASS", script: obsoleteYEBracketPassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "obsolete-Ey-bracket-pass-matches-PASS", script: obsoleteEYBracketPassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "grep-e-then-y-pass-matches-PASS", script: grepDashEThenYPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-bare-then-y-pass-matches-PASS", script: grepBareThenYPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-bare-then-y-pass-matches-APPROVE", script: grepBareThenYPassGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "grep-bare-then-y-approve-only-does-not-match-PASS", script: grepBareThenYApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-bare-then-y-approve-only-matches-APPROVE", script: grepBareThenYApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "env-S-pass-matches-PASS", script: envSPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "s" },
+  { name: "env-S-approve-only-does-not-match-PASS", script: envSApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "s" },
+  { name: "env-S-approve-only-matches-APPROVE", script: envSApproveGrepOnly, sample: "VERDICT: APPROVE", want: true, requireEnv: "s" },
+  { name: "abs-env-S-pass-matches-PASS", script: absEnvSPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "absS" },
+  { name: "abs-env-S-approve-only-does-not-match-PASS", script: absEnvSApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "absS" },
+  { name: "env-split-string-eq-pass-matches-PASS", script: envSplitStringEqPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "split" },
+  { name: "env-split-string-eq-approve-only-does-not-match-PASS", script: envSplitStringEqApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "split" },
+  { name: "env-P-pass-matches-PASS", script: envPPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "p" },
+  { name: "env-P-approve-only-does-not-match-PASS", script: envPApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "p" },
+  { name: "env-path-pass-matches-PASS", script: envPathPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "path" },
+  { name: "env-path-approve-only-does-not-match-PASS", script: envPathApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "path" },
   { name: "env-depth-8-pass-matches-PASS", script: envDepth8PassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "env-depth-8-approve-only-does-not-match-PASS", script: envDepth8ApproveGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "env-depth-9-pass-matches-PASS", script: envDepth9PassGrepOnly, sample: "VERDICT: PASS", want: true },
@@ -5382,11 +5477,13 @@ const grepProofs = [
   { name: "grep-e-then-i-approve-only-matches-APPROVE", script: grepDashEThenIApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
 ];
 for (const proof of grepProofs) {
-  const got = bashGrepMatches(proof.script, proof.sample);
-  if (got !== proof.want) {
-    throw new Error(proof.name + " want match=" + proof.want + " got " + got);
-  }
-  console.log("H241_OK grep-" + proof.name);
+  const receipt = runtimeGrepMatches(
+    proof.script,
+    proof.sample,
+    proof.want,
+    proof.requireEnv
+  );
+  console.log("H241_OK grep-" + proof.name + " " + receipt);
 }
 function bashGrepFileMatches(pattern, sample, flags, want) {
   const dir = mkdtempSync(join(tmpdir(), "gibson-241-gf-"));
@@ -5911,6 +6008,48 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
         throw new Error("pre-repair skip allowlist should miss " + body);
       }
     }
+    const oldCopularFollowRe =
+      /^(?:and|or|but|nor|because|since|so|therefore|thus|rather|than|while|when|if|unless|although|though|after|before|versus|vs|then|hereby|explicitly|formally|also|still|now|today|was|were|is|are|be|been|being|remains?|stays?|continues?|applies|does|did|cannot|must|may|shall|should|will|would)$/i;
+    function oldCopularFollowAuthorizes(afterTarget) {
+      const after = String(afterTarget || "").replace(/\s+/g, " ").trim().replace(/^[.,:;!?()[\]]+/, "");
+      const next = (after.split(/\s+/)[0] || "").replace(/[^A-Za-z]/g, "");
+      if (!next) return true;
+      return oldCopularFollowRe.test(next);
+    }
+    for (const after of ["was rejected.", "was not authorized.", "was denied.", "was declined."]) {
+      if (!oldCopularFollowAuthorizes(after)) {
+        throw new Error("pre-repair copular follow tooth lost " + after);
+      }
+    }
+    const oldPermPredRe =
+      /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+permission\s+to|may|can|permitted|allowed|authorized)\b/gi;
+    function oldSpanRequiresSecondGrant(clause) {
+      const local = String(clause).split(/[.!?;]/)[0] || "";
+      const selfM = /\bself[\s-]?review\b/i.exec(local);
+      if (!selfM) return false;
+      oldPermPredRe.lastIndex = 0;
+      let span = null;
+      let m;
+      while ((m = oldPermPredRe.exec(local)) !== null) {
+        if (m.index < selfM.index) span = m;
+      }
+      if (!span) return false;
+      const between = local.slice(span.index + span[0].length, selfM.index);
+      return /\b(?:authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?|delegat(?:e|es|ed|ing)|grant(?:s|ed|ing)?|approv(?:e|es|ed|ing)|giv(?:e|es|en|ing)|provid(?:e|es|ed|ing)|lets?|letting|assign(?:s|ed|ing)?|may|can)\b/i.test(between);
+    }
+    const missedPermissionSpans = [
+      "An independent reviewer has permission to self-review.",
+      "An independent reviewer has the right to self-review.",
+      "An independent reviewer has authority to self-review.",
+      "An independent reviewer must self-review.",
+      "An independent reviewer shall self-review.",
+      "An independent reviewer is required to self-review.",
+    ];
+    for (const body of missedPermissionSpans) {
+      if (oldSpanRequiresSecondGrant(body) || oldGrantThenSelfReview(body)) {
+        throw new Error("pre-repair permission-span tooth should miss " + body);
+      }
+    }
     console.log("H241_OK overlay-removal-object-bind-and-self-review-grant-source");
   }
   const actorRows = [
@@ -5928,6 +6067,12 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "owner-approved-removal-of-obsolete-documentation-about-g12", decision: "Decided: The owner approved removal of obsolete documentation about G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
     { name: "owner-approved-removal-of-another-object-minutes-mention-g12", decision: "Decided: The owner approved removal of another object; the minutes mention G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
     { name: "owner-approved-the-removal-of-g12", decision: "Decided: The owner approved the removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    { name: "owner-approved-that-removal-of-g12-was-rejected", decision: "Decided: The owner approved that removal of G12 was rejected.", gate: "G12", overlay: "G12 is waived.", expectFinding: true },
+    { name: "owner-approved-that-removal-of-g12-was-not-authorized", decision: "Decided: The owner approved that removal of G12 was not authorized.", gate: "G12", overlay: "G12 is waived.", expectFinding: true },
+    { name: "owner-approved-that-removal-of-g12-was-denied", decision: "Decided: The owner approved that removal of G12 was denied.", gate: "G12", overlay: "G12 is waived.", expectFinding: true },
+    { name: "owner-approved-that-removal-of-g12-was-declined", decision: "Decided: The owner approved that removal of G12 was declined.", gate: "G12", overlay: "G12 is waived.", expectFinding: true },
+    { name: "owner-approved-removal-of-the-g12-gate", decision: "Decided: The owner approved removal of the G12 gate.", gate: "G12", overlay: "G12 is waived.", expectFinding: false },
+    { name: "owner-approved-removal-of-gate-g12", decision: "Decided: The owner approved removal of gate G12.", gate: "G12", overlay: "G12 is waived.", expectFinding: false },
     { name: "owner-approved-removal-of-references-to-g5", decision: "Decided: The owner approved removal of references to G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
     { name: "owner-approved-removal-of-the-g5-example", decision: "Decided: The owner approved removal of the G5 example.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
     { name: "owner-approved-removal-of-obsolete-documentation-about-g5", decision: "Decided: The owner approved removal of obsolete documentation about G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
@@ -5986,6 +6131,18 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "authorize-an-agent-to-circumvent-the-prohibition-on-self-review", body: "An independent reviewer may authorize an agent to circumvent the prohibition on self-review.", expect: true },
     { name: "approve-a-ban-exception-permitting-self-review", body: "An independent reviewer may approve a ban exception permitting self-review.", expect: true },
     { name: "may-not-authorize-the-agent-with-permission-to-self-review", body: "An independent reviewer may not authorize the agent with permission to self-review.", expect: false },
+    { name: "has-permission-to-self-review", body: "An independent reviewer has permission to self-review.", expect: true },
+    { name: "has-the-right-to-self-review", body: "An independent reviewer has the right to self-review.", expect: true },
+    { name: "has-authority-to-self-review", body: "An independent reviewer has authority to self-review.", expect: true },
+    { name: "must-self-review", body: "An independent reviewer must self-review.", expect: true },
+    { name: "shall-self-review", body: "An independent reviewer shall self-review.", expect: true },
+    { name: "is-required-to-self-review", body: "An independent reviewer is required to self-review.", expect: true },
+    { name: "does-not-have-permission-to-self-review", body: "An independent reviewer does not have permission to self-review.", expect: false },
+    { name: "must-not-self-review", body: "An independent reviewer must not self-review.", expect: false },
+    { name: "shall-not-self-review", body: "An independent reviewer shall not self-review.", expect: false },
+    { name: "is-not-required-to-self-review", body: "An independent reviewer is not required to self-review.", expect: false },
+    { name: "cannot-self-review", body: "An independent reviewer cannot self-review.", expect: false },
+    { name: "may-not-self-review", body: "An independent reviewer may not self-review.", expect: false },
   ];
   for (const row of permRows) {
     const findings = playbookBodyObligationFindings(
@@ -10429,6 +10586,41 @@ else
   bad "benign overlay owner approved the removal of G12 (rc=$rc): $out"
 fi
 
+printf '%s\n' '# Fork overlay' 'G12 is waived.' \
+  > "$SANDBOX/local/AGENTS.local.md"
+for decision in \
+  "Decided: The owner approved removal of the G12 gate." \
+  "Decided: The owner approved removal of gate G12."
+do
+  printf '%s\n' "$decision" > "$SANDBOX/memory/DECISIONS.md"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "benign: $(printf '%s' "$decision" | tr '\n' ' ') still authorizes overlay removal"
+  else
+    bad "benign overlay gate-noun G12 ($decision) (rc=$rc): $out"
+  fi
+done
+for decision in \
+  "Decided: The owner approved that removal of G12 was rejected." \
+  "Decided: The owner approved that removal of G12 was not authorized." \
+  "Decided: The owner approved that removal of G12 was denied." \
+  "Decided: The owner approved that removal of G12 was declined."
+do
+  printf '%s\n' "$decision" > "$SANDBOX/memory/DECISIONS.md"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+    && echo "$out" | grep -q 'G12' \
+    && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+    echo "  planted copular-rejection G12 authorization failure line:"
+    echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+    ok "mutation: $(printf '%s' "$decision" | tr '\n' ' ') does not authorize overlay removal of G12"
+  else
+    bad "mutation overlay copular-rejection G12 ($decision) (rc=$rc): $out"
+  fi
+done
+printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
+  > "$SANDBOX/local/AGENTS.local.md"
+
 for decision in \
   "Decided: The owner approved removal of references to G12." \
   "Decided: The owner approved removal of the G12 example." \
@@ -11227,7 +11419,13 @@ for body in \
   "An independent reviewer may grant the recorded right to self-review." \
   "An independent reviewer may approve the rejected request to self-review." \
   "An independent reviewer may authorize an agent to circumvent the prohibition on self-review." \
-  "An independent reviewer may approve a ban exception permitting self-review."
+  "An independent reviewer may approve a ban exception permitting self-review." \
+  "An independent reviewer has permission to self-review." \
+  "An independent reviewer has the right to self-review." \
+  "An independent reviewer has authority to self-review." \
+  "An independent reviewer must self-review." \
+  "An independent reviewer shall self-review." \
+  "An independent reviewer is required to self-review."
 do
   node -e '
 const fs=require("fs");
@@ -11260,7 +11458,13 @@ for body in \
   "An independent reviewer may approve a report on self-review." \
   "An independent reviewer may authorize an agent to prohibit self-review." \
   "An independent reviewer may approve a ban on self-review." \
-  "An independent reviewer may not authorize the agent with permission to self-review."
+  "An independent reviewer may not authorize the agent with permission to self-review." \
+  "An independent reviewer does not have permission to self-review." \
+  "An independent reviewer must not self-review." \
+  "An independent reviewer shall not self-review." \
+  "An independent reviewer is not required to self-review." \
+  "An independent reviewer cannot self-review." \
+  "An independent reviewer may not self-review."
 do
   node -e '
 const fs=require("fs");
