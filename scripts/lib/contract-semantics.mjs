@@ -2875,20 +2875,91 @@ function shellPipelineStages(segment) {
   return stages;
 }
 
+/**
+ * Strip one outer shell quoting layer from a scanned word. Used only for
+ * finite `env -S` / `--split-string` nested command operands — not a
+ * general shell decoder.
+ */
+function decodeShellWord(word) {
+  const w = String(word || "");
+  if (w.length >= 2) {
+    const a = w[0];
+    const b = w[w.length - 1];
+    if ((a === '"' && b === '"') || (a === "'" && b === "'")) {
+      return w.slice(1, -1);
+    }
+  }
+  return w;
+}
+
+/**
+ * Consume `env` utility options. Separated `-P`/`--path` operands are
+ * skipped so the executable command remains visible. `-S` /
+ * `--split-string` (GNU spelling) splice the finite nested command
+ * string into `words` in place and return the index at that nested
+ * command — callers continue wrapper normalization from there. Missing
+ * split-string operands fail closed via `unresolved: true`.
+ *
+ * @returns {{ index: number, unresolved?: boolean }}
+ */
 function skipEnvUtilityArgs(words, i) {
   let u = i;
-  while (
-    u < words.length &&
-    (words[u].word.startsWith("-") || isEnvAssignmentWord(words[u].word))
-  ) {
+  while (u < words.length) {
     const w = words[u].word;
+    if (isEnvAssignmentWord(w)) {
+      u += 1;
+      continue;
+    }
+    if (w === "-S" || w === "--split-string") {
+      if (u + 1 >= words.length) return { index: u, unresolved: true };
+      const nested = decodeShellWord(words[u + 1].word);
+      const nestedWords = unquotedShellWords(nested);
+      if (!nestedWords.length) return { index: u, unresolved: true };
+      words.splice(u, 2, ...nestedWords);
+      return { index: u };
+    }
+    if (w.startsWith("--split-string=")) {
+      const nested = decodeShellWord(w.slice("--split-string=".length));
+      const nestedWords = unquotedShellWords(nested);
+      if (!nestedWords.length) return { index: u, unresolved: true };
+      words.splice(u, 1, ...nestedWords);
+      return { index: u };
+    }
+    if (w.startsWith("-S") && w.length > 2) {
+      const nested = decodeShellWord(w.slice(2));
+      const nestedWords = unquotedShellWords(nested);
+      if (!nestedWords.length) return { index: u, unresolved: true };
+      words.splice(u, 1, ...nestedWords);
+      return { index: u };
+    }
+    if (w === "-P" || w === "--path") {
+      u += 1;
+      if (u < words.length) u += 1;
+      continue;
+    }
+    if (w.startsWith("--path=")) {
+      u += 1;
+      continue;
+    }
+    if (w.startsWith("-P") && w.length > 2) {
+      u += 1;
+      continue;
+    }
     if (w === "-u" || w === "-C" || w === "--unset" || w === "--chdir") {
       u += 2;
       continue;
     }
-    u += 1;
+    if (w.startsWith("--unset=") || w.startsWith("--chdir=")) {
+      u += 1;
+      continue;
+    }
+    if (w.startsWith("-") && w.length > 1) {
+      u += 1;
+      continue;
+    }
+    break;
   }
-  return u;
+  return { index: u };
 }
 
 function isShellKeywordWord(word) {
@@ -2912,11 +2983,15 @@ function isShellKeywordWord(word) {
  * finite parsed word list — not a magic depth. Every wrapper iteration
  * must advance the word cursor. If a defensive cap is exhausted while a
  * recognized wrapper remains, fail closed rather than classifying the
- * stage as a green `other`. `command -v/-V` is introspection-only and
- * never an executable verdict matcher; names after those flags are not
- * executed. Operand-taking grep options (`-m`/`-A`/`-C`/`--max-count`,
- * `-e`/`--regexp`, `-f`/`--file`) consume separated or attached operands
- * so later dialect/case flags remain visible. `-e` does not end option
+ * stage as a green `other`. `env -P`/`--path` consume their path
+ * operand. `env -S`/`--split-string` splice a finite nested command
+ * string (fail closed when unresolved). `command -v/-V` is
+ * introspection-only and never an executable verdict matcher; names
+ * after those flags are not executed. Operand-taking grep options
+ * (`-m`/`-A`/`-C`/`--max-count`, `-e`/`--regexp`, `-f`/`--file`)
+ * consume separated or attached operands so later dialect/case flags
+ * remain visible. Matcher-affecting options after the first bare
+ * pattern (`grep 'pat' -y`) are modeled. `-e` does not end option
  * parsing. `-i`/`-y`/`--ignore-case` set ignore-case (`-y` is the
  * obsolete GNU/BSD synonym of `-i`, including bundled orderings).
  * `-f`/`--file` is fail-closed (pattern file unread). Residual: not a
@@ -2988,7 +3063,7 @@ function normalizeExecutableStage(stage) {
   let introspection = false;
   // Cap is the finite parsed input, not a magic depth. Nine (or 32)
   // valid `env` wrappers must still reveal the executable grep.
-  const wrapperCap = words.length;
+  let wrapperCap = words.length;
   let wrapperGuard = 0;
   while (i < words.length && !introspection) {
     const remainingWrapper =
@@ -3002,7 +3077,18 @@ function normalizeExecutableStage(stage) {
     if (isEnvUtilityWord(words[i].word)) {
       wrappers.push(words[i].word);
       i += 1;
-      i = skipEnvUtilityArgs(words, i);
+      const skipped = skipEnvUtilityArgs(words, i);
+      if (skipped.unresolved) {
+        return failClosedUnresolvedWrapper();
+      }
+      // Nested -S/--split-string words replace the option in place; the
+      // cursor stays on the nested command so the next loop iteration
+      // (or skipPrefixNoise) can see env/command/grep monotonically.
+      if (skipped.index < i) {
+        return failClosedUnresolvedWrapper();
+      }
+      i = skipped.index;
+      wrapperCap = words.length;
       skipPrefixNoise();
     } else if (isCommandUtilityWord(words[i].word)) {
       wrappers.push(words[i].word);
@@ -3085,6 +3171,9 @@ function normalizeExecutableStage(stage) {
     }
     if (w === "--") {
       i += 1;
+      // After `--`, remaining words are operands; matcher-affecting
+      // options cannot follow. Stop closed rather than inventing a
+      // second option scan past operand-only args.
       break;
     }
     if (w === "--ignore-case") {
@@ -3157,7 +3246,9 @@ function normalizeExecutableStage(stage) {
       }
       continue;
     }
-    break;
+    // Bare pattern or file operand. BSD/GNU grep still accept later
+    // matcher-affecting options (`grep 'pat' -y`), so keep scanning.
+    i += 1;
   }
   return {
     kind: "grep",
@@ -3612,17 +3703,21 @@ function harnessAcceptsPass(text) {
  * including no-whitespace `LC_ALL=C` / `env` / `command` / `command --` /
  * `command -p --` / `command env` / `/usr/bin/env` prefixes and leading
  * redirections such as `2>/dev/null grep`) is a harness accept of PASS;
- * APPROVE/REQUEST_CHANGES without PASS stays green. Grep `-i` / `-y` /
+ * APPROVE/REQUEST_CHANGES without PASS stays green. `env -S` /
+ * `/usr/bin/env -S` / GNU `--split-string=` splice a finite nested
+ * command (unresolved split-strings fail closed). Separated `env -P DIR`
+ * / `--path DIR` consume the path operand. Grep `-i` / `-y` /
  * `--ignore-case` flows into bracket/POSIX-class matching, including after
- * operand-taking options (`-m 1`, `-A 1`, `-C 1`, `--max-count 1`) and
- * after `-e`/`--regexp`. `-y` is the obsolete GNU/BSD synonym of `-i`
- * (bundled `-yi`/`-iy`/`-yE`/`-Ey` included). Wrapper depth follows the
- * finite parsed word list; a remaining recognized wrapper after a
- * defensive cap fail-closes. `-f`/`--file` fail-closes rather than
- * inventing file contents. Introspection-only `command -v/-V` is not an
- * executable matcher. Residual: nested groups and non-VERDICT
- * alternations are not parsed. Residual #263/#264: not a general
- * shell/regex parser. Residual #265: pathological scan cost.
+ * operand-taking options (`-m 1`, `-A 1`, `-C 1`, `--max-count 1`), after
+ * `-e`/`--regexp`, and after the first bare pattern (`grep 'pat' -y`).
+ * `-y` is the obsolete GNU/BSD synonym of `-i` (bundled `-yi`/`-iy`/`-yE`/
+ * `-Ey` included). Wrapper depth follows the finite parsed word list; a
+ * remaining recognized wrapper after a defensive cap fail-closes.
+ * `-f`/`--file` fail-closes rather than inventing file contents.
+ * Introspection-only `command -v/-V` is not an executable matcher.
+ * Residual: nested groups and non-VERDICT alternations are not parsed.
+ * Residual #263/#264: not a general shell/regex parser. Residual #265:
+ * pathological scan cost.
  *
  * @param {{
  *   agentsText: string,
@@ -3977,8 +4072,19 @@ function overlayComplementSkipOnly(text) {
 
 const OVERLAY_REMOVAL_TARGET_SKIP_RE =
   /^(?:the|a|an|its|this|that|of|for|to|named|human|gate|explicitly|hereby|formally|also|then)$/i;
+/** Clause continuations after a complete gate-removal target. */
 const OVERLAY_GATE_OBJECT_FOLLOW_RE =
-  /^(?:and|or|but|nor|because|since|so|therefore|thus|rather|than|while|when|if|unless|although|though|after|before|from|in|into|on|onto|at|by|with|without|via|per|as|for|of|versus|vs|then|hereby|explicitly|formally|also|still|now|today|was|were|is|are|be|been|being|remains?|stays?|continues?|applies|does|did|cannot|must|may|shall|should|will|would)$/i;
+  /^(?:and|or|but|nor|because|since|so|therefore|thus|rather|than|while|when|if|unless|although|though|after|before|versus|vs|then|hereby|explicitly|formally|also|still|now|today|was|were|is|are|be|been|being|remains?|stays?|continues?|applies|does|did|cannot|must|may|shall|should|will|would)$/i;
+/**
+ * Prepositions that attach a collateral/narrowed object after the gate
+ * id (`G12 from documentation`, `G12 in the example`, `G12 as a label`).
+ * These are not removal of the human gate itself.
+ */
+const OVERLAY_GATE_COLLATERAL_PREP_RE =
+  /^(?:from|in|into|on|onto|at|by|with|without|via|per|as|for|of|about|regarding|concerning|among|across|within|toward|towards)$/i;
+const OVERLAY_GATE_COPULA_RE = /^(?:was|were|is|are|be|been|being)$/i;
+const OVERLAY_REMOVAL_COPULAR_REJECTION_RE =
+  /^(?:rejected|denied|declined|(?:not|never)\s+(?:authorized|approved))\b/i;
 
 function overlayRemovalTargetSkipOnly(text) {
   const t = collapseWs(text);
@@ -3991,10 +4097,23 @@ function overlayRemovalTargetSkipOnly(text) {
 }
 
 /**
- * The named gate must be the object of this removal/waiver act, not a
- * later mention or a pre-modifier of another noun. Residual: not
- * general NLP.
+ * The named gate must be the complete object of this removal/waiver act
+ * (`removal of G12`, `removal of the G12 gate`, `removal of gate G12`),
+ * not a later mention, a pre-modifier / collateral target
+ * (`references to G12`, `the G12 example`, `G12 from documentation`,
+ * `G12 in the example`, `G12 as a label`), or a post-target copular
+ * rejection/negation of that removal (`was rejected`, `was not
+ * authorized`, `was denied`, `was declined`). Residual: not general NLP.
  */
+function overlayCopularComplementRejectsRemoval(after, copula) {
+  if (!OVERLAY_GATE_COPULA_RE.test(copula)) return false;
+  const rest = collapseWs(after.replace(/^[A-Za-z']+\b/, "")).replace(
+    /^[.,:;!?()[\]"'`]+/,
+    ""
+  );
+  return OVERLAY_REMOVAL_COPULAR_REJECTION_RE.test(rest);
+}
+
 function overlayGateIsRemovalObject(text, action, gate) {
   if (!action || !gate) return false;
   if (gate.index < action.end) return false;
@@ -4002,10 +4121,21 @@ function overlayGateIsRemovalObject(text, action, gate) {
     return false;
   }
   const afterRaw = String(text || "").slice(gate.end);
-  const after = collapseWs(afterRaw).replace(/^[.,:;!?()[\]"'`]+/, "");
+  let after = collapseWs(afterRaw).replace(/^[.,:;!?()[\]"'`]+/, "");
   if (!after) return true;
+  // Complete the target noun: optional trailing "gate" / "human gate".
+  const trailer = /^(?:human\s+)?gates?\b/i.exec(after);
+  if (trailer) {
+    after = collapseWs(after.slice(trailer[0].length)).replace(
+      /^[.,:;!?()[\]"'`]+/,
+      ""
+    );
+    if (!after) return true;
+  }
   const next = (after.split(/\s+/)[0] || "").replace(/[^A-Za-z']/g, "");
   if (!next) return true;
+  if (OVERLAY_GATE_COLLATERAL_PREP_RE.test(next)) return false;
+  if (overlayCopularComplementRejectsRemoval(after, next)) return false;
   return OVERLAY_GATE_OBJECT_FOLLOW_RE.test(next);
 }
 
@@ -4225,7 +4355,7 @@ const BODY_SKIP_GREEN_RE =
 const BODY_SKIP_GREEN_RE2 =
   /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
 const PERMISSION_PRED_RE =
-  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+permission\s+to|may|can|permitted|allowed|authorized)\b/gi;
+  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:is|are)\s+required\s+to|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+(?:the\s+)?(?:permission|right|authority)\s+to|must|shall|may|can|permitted|allowed|authorized)\b/gi;
 const OWN_WORK_TOPIC_RE =
   /\b(?:(?:its|their|your|our|my)\s+own(?:\s+(?:work|generation))?|own\s+work|review of\s+(?:its|their|your|our|my)\s+own)\b/i;
 const REVIEW_ACT_RE = /\b(?:review|evaluate|evaluating|grade|grading)\b/i;
@@ -4271,6 +4401,9 @@ function independentReviewNotRequired(text) {
   if (!/\b(?:independent|different|another|other)\s+(?:agent|reviewer)s?\b/i.test(t)) {
     return false;
   }
+  // "is not required to self-review" restates the prohibition; it does
+  // not authorize same-agent review.
+  if (/\bself[\s-]?review\b/i.test(t)) return false;
   if (!REVIEW_ACT_RE.test(t)) return false;
   return (
     /\b(?:is|are|was|were)\s+not\s+required\b/i.test(t) ||
@@ -4302,8 +4435,13 @@ function ownWorkGrantedIn(text) {
   return false;
 }
 
-const AUTH_GRANT_VERB_RE =
-  /\b(?:authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?|delegat(?:e|es|ed|ing)|grant(?:s|ed|ing)?|approv(?:e|es|ed|ing))\b/i;
+const AUTH_GRANT_VERB_SRC =
+  "authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?|delegat(?:e|es|ed|ing)|grant(?:s|ed|ing)?|approv(?:e|es|ed|ing)|giv(?:e|es|en|ing)|provid(?:e|es|ed|ing)|lets?|letting|assign(?:s|ed|ing)?";
+const AUTH_GRANT_VERB_RE = new RegExp(`\\b(?:${AUTH_GRANT_VERB_SRC})\\b`, "i");
+const SELF_REVIEW_GRANT_VERB_RE = new RegExp(
+  `\\b(?:${AUTH_GRANT_VERB_SRC}|may|can)\\b`,
+  "i"
+);
 const REVIEW_NOUN_PHRASE_SRC =
   "(?:the\\s+)?review(?:\\s+to\\s+be\\s+(?:conducted|done|performed|carried\\s+out))?";
 const REVIEWER_NOUN_TARGET_SRC =
@@ -4332,6 +4470,24 @@ function lastInfinitiveLemma(intervening) {
   return lemma;
 }
 
+/**
+ * Unnegated has/have/had permission|right|authority and
+ * must/shall/is|are required to are themselves the grant. Do not wait
+ * for a second grant verb after that span. Residual: not general NLP.
+ */
+function permissionPredicateGrantsSelfReview(text, span) {
+  const local = String(text || "").split(/[.!?;]/)[0] || "";
+  if (!span || span.end > local.length) return false;
+  const selfs = overlayRegexMatches(/\bself[\s-]?review\b/i, local);
+  for (const self of selfs) {
+    if (self.index < span.end) continue;
+    if (!interveningSelfReviewBlocksGrant(local, span.end, self.index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function interveningSelfReviewBlocksGrant(local, verbEnd, selfIndex) {
   if (topicLocallyExcluded(local, selfIndex)) return true;
   const intervening = collapseWs(local.slice(verbEnd, selfIndex));
@@ -4339,18 +4495,40 @@ function interveningSelfReviewBlocksGrant(local, verbEnd, selfIndex) {
   const first = interveningWord(intervening.split(/\s+/)[0]);
   if (LOCAL_POLARITY_TOKEN_RE.test(first)) return true;
   if (/\b(?:not|never|no)\s+to\s*$/i.test(intervening)) return true;
-  // Trailing `to self-review` is the grant act itself.
+  // Trailing `to self-review` / `conduct self-review` is the grant act.
   if (/\bto\s*$/i.test(intervening)) return false;
+  if (/\b(?:to\s+)?(?:conduct|perform|carry\s+out)\s*$/i.test(intervening)) {
+    return false;
+  }
   // Last infinitive is the authorized act (`to discuss` vs `to conduct`).
   const infLemma = lastInfinitiveLemma(intervening);
   if (infLemma) return SELF_REVIEW_NON_GRANT_PRED_RE.test(infLemma);
-  // No infinitive: non-grant only when the grant object is that topic
-  // attaching to self-review (`a report about`, `a ban on`).
+  // No infinitive: non-grant when the grant object is that topic
+  // attaching to self-review (`a report about`, `a ban on`), or when
+  // the last word is itself that predicate (`may discuss self-review`).
   const toks = intervening.split(/\s+/).filter(Boolean);
   const last = interveningWord(toks[toks.length - 1]);
   const prev = interveningWord(toks[toks.length - 2]);
-  if (!SELF_REVIEW_NON_GRANT_TOPIC_PREP_RE.test(last)) return false;
-  return SELF_REVIEW_NON_GRANT_PRED_RE.test(prev);
+  if (SELF_REVIEW_NON_GRANT_TOPIC_PREP_RE.test(last)) {
+    return SELF_REVIEW_NON_GRANT_PRED_RE.test(prev);
+  }
+  return SELF_REVIEW_NON_GRANT_PRED_RE.test(last);
+}
+
+/**
+ * One forward pass over a polarity/clause unit: grant-verb and
+ * self-review spans. Callers reuse this instead of nested per-self-review
+ * verb rescans. Residual: not general NLP.
+ */
+function selfReviewClauseState(text) {
+  const src = String(text || "");
+  const local = src.split(/[.!?;]/)[0] || "";
+  return {
+    src,
+    local,
+    verbs: overlayRegexMatches(SELF_REVIEW_GRANT_VERB_RE, local),
+    selfs: overlayRegexMatches(/\bself[\s-]?review\b/i, local),
+  };
 }
 
 /**
@@ -4358,40 +4536,53 @@ function interveningSelfReviewBlocksGrant(local, verbEnd, selfIndex) {
  * polarity/clause unit is a grant unless the intervening phrase is an
  * explicit non-grant predicate or topic (infinitive discuss/report/… or
  * a report/ban/… attaching via about/on/of) or a local negation.
- * Prenominal modifiers of the recipient or role are not that predicate.
- * Unfamiliar intervening language fails closed. Discuss / reject /
- * review are not grant verbs. A later sentence cannot bind.
- * Residual: not general NLP.
+ * Direct `can self-review` / `may conduct self-review` and
+ * give/provide permission are grants. Prenominal modifiers of the
+ * recipient or role are not that predicate. Unfamiliar intervening
+ * language fails closed. Discuss / reject / review are not grant verbs.
+ * A later sentence cannot bind. Residual: not general NLP.
+ *
+ * Rightmost grant verb before each self-review is enough: an earlier
+ * unblocked grant would already have attached to an earlier
+ * self-review, and last-infinitive / trailing-to / last-predicate
+ * blocking is determined by the gap after that nearest verb.
  */
-function grantThenSelfReview(after) {
-  const src = String(after || "");
-  const local = src.split(/[.!?;]/)[0] || "";
-  const selfRe = /\bself[\s-]?review\b/gi;
-  let selfM;
-  while ((selfM = selfRe.exec(local)) !== null) {
-    const beforeSelf = local.slice(0, selfM.index);
-    const verbRe = new RegExp(AUTH_GRANT_VERB_RE.source, "gi");
-    let m;
-    while ((m = verbRe.exec(beforeSelf)) !== null) {
-      if (
-        !interveningSelfReviewBlocksGrant(
-          local,
-          m.index + m[0].length,
-          selfM.index
-        )
-      ) {
-        return true;
-      }
+function grantThenSelfReviewFromState(state, fromIndex) {
+  const local = state && state.local;
+  const verbs = (state && state.verbs) || [];
+  const selfs = (state && state.selfs) || [];
+  if (!local || !verbs.length || !selfs.length) return false;
+  const start = Number(fromIndex) || 0;
+  let vi = 0;
+  for (let si = 0; si < selfs.length; si += 1) {
+    const self = selfs[si];
+    if (self.index < start) continue;
+    while (vi + 1 < verbs.length && verbs[vi + 1].end <= self.index) {
+      vi += 1;
+    }
+    const verb = verbs[vi];
+    if (!verb || verb.index < start || verb.end > self.index) continue;
+    if (!interveningSelfReviewBlocksGrant(local, verb.end, self.index)) {
+      return true;
     }
   }
   return false;
 }
 
+function grantThenSelfReview(after, state, fromIndex) {
+  const precomputed = state && Array.isArray(state.verbs) && Array.isArray(state.selfs);
+  const st = precomputed ? state : selfReviewClauseState(after);
+  const start = precomputed ? Number(fromIndex) || 0 : 0;
+  return grantThenSelfReviewFromState(st, start);
+}
+
 function selfReviewGrantAction(blob) {
-  if (/\bdelegat/i.test(blob)) return "delegate";
+  if (/\bdelegat/i.test(blob) || /\bassign/i.test(blob)) return "delegate";
   if (/\bpermit/i.test(blob)) return "permit";
-  if (/\ballow/i.test(blob)) return "allow";
-  if (/\bgrant/i.test(blob)) return "grant";
+  if (/\ballow/i.test(blob) || /\blets?\b/i.test(blob)) return "allow";
+  if (/\bgrant/i.test(blob) || /\bgiv(?:e|es|en|ing)\b/i.test(blob) || /\bprovid/i.test(blob)) {
+    return "grant";
+  }
   if (/\bapprov/i.test(blob)) return "approve";
   if (/\bauthoriz/i.test(blob)) return "authorize";
   return "authorize";
@@ -4400,14 +4591,18 @@ function selfReviewGrantAction(blob) {
 /**
  * Normalize a self-review permission unit to actor/action/target/polarity.
  * Unnegated permission that authorizes, permits, allows, grants, approves,
- * or delegates review to/by the same agent, self-review, or the same agent
- * as reviewer fails regardless of word order, voice, or intervening
- * review-conducted / grant-verb phrases that are not an explicit
- * non-grant predicate/topic or local negation. Prenominal recipient or
- * role modifiers are not that predicate. Unfamiliar intervening
- * language fails closed. An independent subject reviewing, discussing,
- * or rejecting self-review is not a grant; granting self-review or
- * same-agent review is.
+ * gives/provides permission, lets/assigns, or delegates review to/by the
+ * same agent, self-review, or the same agent as reviewer fails regardless
+ * of word order, voice, or intervening review-conducted / grant-verb
+ * phrases that are not an explicit non-grant predicate/topic or local
+ * negation. Direct `can self-review` / `may conduct self-review`,
+ * `has/have/had permission|right|authority to self-review`, and
+ * `must` / `shall` / `is|are required to self-review` are grants without
+ * a second grant verb. Passive `assigned to the same agent` is a grant.
+ * Prenominal recipient or role modifiers are not that predicate.
+ * Unfamiliar intervening language fails closed. An independent subject
+ * reviewing, discussing, or rejecting self-review is not a grant;
+ * granting self-review or same-agent review is.
  *
  * @returns {{
  *   action: 'authorize' | 'permit' | 'allow' | 'delegate' | 'grant' | 'approve' | 'review' | null,
@@ -4415,7 +4610,7 @@ function selfReviewGrantAction(blob) {
  *   polarity: 'grant' | 'none',
  * } | null}
  */
-function selfReviewPermissionUnit(text, span) {
+function selfReviewPermissionUnit(text, span, state) {
   const after = text.slice(span.index);
   const afterEnd = text.slice(span.end);
   const before = text.slice(0, span.index);
@@ -4434,7 +4629,14 @@ function selfReviewPermissionUnit(text, span) {
     `${AUTH_GRANT_VERB_RE.source}\\s+(?:the\\s+)?same[\\s-]?agent\\s+${REVIEWER_NOUN_TARGET_SRC}\\b`,
     "i"
   ).test(after);
-  if (grantThenSelfReview(after)) {
+  if (grantThenSelfReview(after, state, span.index)) {
+    return {
+      action: selfReviewGrantAction(after),
+      target: "self-review",
+      polarity: "grant",
+    };
+  }
+  if (permissionPredicateGrantsSelfReview(text, span)) {
     return {
       action: selfReviewGrantAction(after),
       target: "self-review",
@@ -4454,7 +4656,9 @@ function selfReviewPermissionUnit(text, span) {
     };
   }
   const passiveDelegated =
-    /\bbe\s+delegat(?:e|ed|ing)\s+to\s+(?:the\s+)?same[\s-]?agent\b/i.test(afterEnd);
+    /\bbe\s+(?:delegat(?:e|ed|ing)|assigned)\s+to\s+(?:the\s+)?same[\s-]?agent\b/i.test(
+      afterEnd
+    );
   const passiveConductedBy =
     /\bbe\s+(?:conducted|done|performed|carried\s+out)\s+by\s+(?:the\s+)?same[\s-]?agent\b/i.test(
       afterEnd
@@ -4488,8 +4692,8 @@ function selfReviewPermissionUnit(text, span) {
   return null;
 }
 
-function sameAgentGrantAt(text, span) {
-  const unit = selfReviewPermissionUnit(text, span);
+function sameAgentGrantAt(text, span, state) {
+  const unit = selfReviewPermissionUnit(text, span, state);
   if (!unit || unit.polarity !== "grant" || unit.target !== "same-agent") {
     return false;
   }
@@ -4506,8 +4710,8 @@ function sameAgentGrantAt(text, span) {
   return true;
 }
 
-function selfReviewTopicGrantAt(text, span) {
-  const unit = selfReviewPermissionUnit(text, span);
+function selfReviewTopicGrantAt(text, span, state) {
+  const unit = selfReviewPermissionUnit(text, span, state);
   return Boolean(
     unit && unit.polarity === "grant" && unit.target === "self-review"
   );
@@ -4519,11 +4723,12 @@ function selfReviewGrantTopic(unit) {
   if (independentReviewNotRequired(text)) return "same-agent";
   const perms = unnegatedPermissionSpans(text);
   if (!perms.length) return null;
+  const state = selfReviewClauseState(text);
   let sameAgentGrant = false;
   let ownGrant = false;
   for (const span of perms) {
-    if (sameAgentGrantAt(text, span)) sameAgentGrant = true;
-    if (selfReviewTopicGrantAt(text, span)) ownGrant = true;
+    if (sameAgentGrantAt(text, span, state)) sameAgentGrant = true;
+    if (selfReviewTopicGrantAt(text, span, state)) ownGrant = true;
     const before = text.slice(0, span.index);
     const after = text.slice(span.end);
     if (
