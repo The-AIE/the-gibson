@@ -2876,59 +2876,241 @@ function shellPipelineStages(segment) {
 }
 
 /**
- * Strip one outer shell quoting layer from a scanned word. Used only for
- * finite `env -S` / `--split-string` nested command operands — not a
- * general shell decoder.
+ * Resolve one already-scanned shell word (quotes + backslash-escapes) to
+ * the value it would receive as argv, so wrapper/option classification
+ * treats whole-word-quoted forms (`'-y'`, `"-S"`, `-'P'`) identically to
+ * bare ones. Classification-only: `scanText`/raw source still feeds
+ * regex/BRE quote-state parsing untouched. An unterminated quote or a
+ * trailing lone backslash is ambiguous and fails closed rather than
+ * guessing a value.
  */
-function decodeShellWord(word) {
+function decodeArgvWord(word) {
   const w = String(word || "");
-  if (w.length >= 2) {
-    const a = w[0];
-    const b = w[w.length - 1];
-    if ((a === '"' && b === '"') || (a === "'" && b === "'")) {
-      return w.slice(1, -1);
+  let out = "";
+  let state = "none";
+  let i = 0;
+  while (i < w.length) {
+    const c = w[i];
+    if (state === "single") {
+      if (c === "'") {
+        state = "none";
+        i += 1;
+        continue;
+      }
+      out += c;
+      i += 1;
+      continue;
     }
+    if (state === "double") {
+      if (c === "\\") {
+        const n = w[i + 1];
+        if (n === '"' || n === "\\" || n === "$" || n === "`") {
+          out += n;
+          i += 2;
+          continue;
+        }
+        if (n === undefined) return { value: out, ambiguous: true };
+        out += c;
+        i += 1;
+        continue;
+      }
+      if (c === '"') {
+        state = "none";
+        i += 1;
+        continue;
+      }
+      out += c;
+      i += 1;
+      continue;
+    }
+    if (c === "'") {
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (c === "\\") {
+      const n = w[i + 1];
+      if (n === undefined) return { value: out, ambiguous: true };
+      out += n;
+      i += 2;
+      continue;
+    }
+    out += c;
+    i += 1;
   }
-  return w;
+  if (state !== "none") return { value: out, ambiguous: true };
+  return { value: out, ambiguous: false };
 }
 
 /**
- * Consume `env` utility options. Separated `-P`/`--path` operands are
+ * Bounded decoder for a GNU `env -S`/`--split-string` operand — env's own
+ * mini-language, distinct from general shell syntax. Whitespace and
+ * quotes group argv words as usual; an env-level `\_` outside quotes is a
+ * forced argv separator (used to defeat naive whitespace tokenizers, e.g.
+ * `grep\_-y\_'pattern'`), and `\\`/`\'`/`\"`/`\t`/`\n` resolve to their
+ * literal character. Any other backslash escape is unrecognized and fails
+ * closed (`unresolved: true`) rather than guessing at intent. Quoted
+ * content is copied through unresolved so nested BRE escapes (`\(`, `\|`,
+ * `\)`) reach the caller's regex parsing unchanged.
+ */
+function tokenizeEnvSplitString(raw) {
+  const src = String(raw || "");
+  const words = [];
+  let cur = "";
+  let started = false;
+  let state = "none";
+  let i = 0;
+  const flush = () => {
+    if (started) words.push(cur);
+    cur = "";
+    started = false;
+  };
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      started = true;
+      if (c === "'") {
+        state = "none";
+        i += 1;
+        continue;
+      }
+      cur += c;
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      started = true;
+      if (c === "\\") {
+        const n = src[i + 1];
+        if (n === '"' || n === "\\" || n === "$" || n === "`") {
+          cur += n;
+          i += 2;
+          continue;
+        }
+        if (n === undefined) return { words, unresolved: true };
+        cur += c;
+        i += 1;
+        continue;
+      }
+      if (c === '"') {
+        state = "none";
+        i += 1;
+        continue;
+      }
+      cur += c;
+      i += 1;
+      continue;
+    }
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      flush();
+      i += 1;
+      continue;
+    }
+    if (c === "'") {
+      state = "single";
+      started = true;
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      state = "double";
+      started = true;
+      i += 1;
+      continue;
+    }
+    if (c === "\\") {
+      const n = src[i + 1];
+      if (n === "_") {
+        flush();
+        i += 2;
+        continue;
+      }
+      if (n === "\\" || n === "'" || n === '"') {
+        cur += n;
+        started = true;
+        i += 2;
+        continue;
+      }
+      if (n === "t") {
+        cur += "\t";
+        started = true;
+        i += 2;
+        continue;
+      }
+      if (n === "n") {
+        cur += "\n";
+        started = true;
+        i += 2;
+        continue;
+      }
+      return { words, unresolved: true };
+    }
+    cur += c;
+    started = true;
+    i += 1;
+  }
+  flush();
+  if (state !== "none") return { words, unresolved: true };
+  return { words, unresolved: false };
+}
+
+function splitEnvOperandIntoWords(operandRaw) {
+  const split = tokenizeEnvSplitString(operandRaw);
+  if (split.unresolved || !split.words.length) return null;
+  return split.words.map((word) => ({ start: 0, end: 0, word }));
+}
+
+/**
+ * Consume `env` utility options. Every option word is resolved through
+ * `decodeArgvWord` first so a whole-word-quoted `'-S'`, `"-P"`, or
+ * `--split-string='...'` classifies exactly like its unquoted form; an
+ * ambiguous decode fails closed. Separated `-P`/`--path` operands are
  * skipped so the executable command remains visible. `-S` /
  * `--split-string` (GNU spelling) splice the finite nested command
  * string into `words` in place and return the index at that nested
- * command — callers continue wrapper normalization from there. Missing
- * split-string operands fail closed via `unresolved: true`.
+ * command — callers continue wrapper normalization from there. The
+ * operand is decoded through the shell quoting layer, then through
+ * `tokenizeEnvSplitString` for env's own separator/escape rules. Missing
+ * or unresolved split-string operands fail closed via `unresolved: true`.
  *
  * @returns {{ index: number, unresolved?: boolean }}
  */
 function skipEnvUtilityArgs(words, i) {
   let u = i;
   while (u < words.length) {
-    const w = words[u].word;
-    if (isEnvAssignmentWord(w)) {
+    const raw = words[u].word;
+    if (isEnvAssignmentWord(raw)) {
       u += 1;
       continue;
     }
+    const decoded = decodeArgvWord(raw);
+    if (decoded.ambiguous) return { index: u, unresolved: true };
+    const w = decoded.value;
     if (w === "-S" || w === "--split-string") {
       if (u + 1 >= words.length) return { index: u, unresolved: true };
-      const nested = decodeShellWord(words[u + 1].word);
-      const nestedWords = unquotedShellWords(nested);
-      if (!nestedWords.length) return { index: u, unresolved: true };
+      const operand = decodeArgvWord(words[u + 1].word);
+      if (operand.ambiguous) return { index: u, unresolved: true };
+      const nestedWords = splitEnvOperandIntoWords(operand.value);
+      if (!nestedWords) return { index: u, unresolved: true };
       words.splice(u, 2, ...nestedWords);
       return { index: u };
     }
     if (w.startsWith("--split-string=")) {
-      const nested = decodeShellWord(w.slice("--split-string=".length));
-      const nestedWords = unquotedShellWords(nested);
-      if (!nestedWords.length) return { index: u, unresolved: true };
+      const nestedWords = splitEnvOperandIntoWords(
+        w.slice("--split-string=".length)
+      );
+      if (!nestedWords) return { index: u, unresolved: true };
       words.splice(u, 1, ...nestedWords);
       return { index: u };
     }
     if (w.startsWith("-S") && w.length > 2) {
-      const nested = decodeShellWord(w.slice(2));
-      const nestedWords = unquotedShellWords(nested);
-      if (!nestedWords.length) return { index: u, unresolved: true };
+      const nestedWords = splitEnvOperandIntoWords(w.slice(2));
+      if (!nestedWords) return { index: u, unresolved: true };
       words.splice(u, 1, ...nestedWords);
       return { index: u };
     }
@@ -3163,12 +3345,24 @@ function normalizeExecutableStage(stage) {
   let patternFile = false;
   i += 1;
   while (i < words.length) {
-    const w = words[i].word;
-    if (isRedirectionWord(w)) {
+    const raw = words[i].word;
+    if (isRedirectionWord(raw)) {
       i += 1;
-      if (redirectionConsumesTarget(w) && i < words.length) i += 1;
+      if (redirectionConsumesTarget(raw) && i < words.length) i += 1;
       continue;
     }
+    // Whole-word ordinary quoting around an option (`'-y'`, `"-y"`,
+    // `'--ignore-case'`) must classify exactly like the unquoted form —
+    // the shell strips those quotes identically before grep ever sees
+    // argv. An ambiguous decode (unterminated quote) fails closed rather
+    // than silently treating the option as inert.
+    const decoded = decodeArgvWord(raw);
+    if (decoded.ambiguous) {
+      unsupportedExecutableMatcher = true;
+      i += 1;
+      continue;
+    }
+    const w = decoded.value;
     if (w === "--") {
       i += 1;
       // After `--`, remaining words are operands; matcher-affecting
@@ -3822,7 +4016,7 @@ const OVERLAY_GATE_POLARITY_SPLIT_RE = new RegExp(
   "i"
 );
 const LOCAL_POLARITY_TOKEN_RE =
-  /^(?:not|never|no|neither|nor|don't|cannot|can't|isn't|aren't|wasn't|weren't)$/i;
+  /^(?:not|never|no|neither|nor|don't|doesn't|didn't|cannot|can't|couldn't|isn't|aren't|wasn't|weren't|hasn't|haven't|hadn't|won't|wouldn't|shouldn't)$/i;
 
 function overlayRegexMatches(re, text) {
   const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
@@ -4035,6 +4229,96 @@ function verbInRelativeClause(text, verbIndex) {
  * approval to the owner remainder. After those splits, a unit that
  * still names more than one G-number cannot authorize any of them.
  */
+/**
+ * True when `left` ends with a completed removal/waiver-action object
+ * (`removal of G12`, `waiver of the G12 gate`) with nothing but filler
+ * after the gate id — the same shape `overlayGateIsRemovalObject` binds.
+ * Used to keep an immediately following adversative connector
+ * (`, but only from documentation`, `, but that was explicitly
+ * rejected`) attached to that object instead of letting generic
+ * adversative sentence-splitting discard it and authorize from the
+ * truncated left half alone. Gate mentions that are not the object of a
+ * removal action (`did not approve G11`) are unaffected, so a genuine
+ * "did not approve G11, but approved G12" split is untouched.
+ */
+function overlayAdversativeBoundaryIsPostRemovalTarget(left, rightRemainder) {
+  const t = collapseWs(left);
+  if (!t) return false;
+  const gates = overlayRegexMatches(new RegExp(OVERLAY_GATE_ID_RE.source, "gi"), t);
+  if (!gates.length) return false;
+  const lastGate = gates[gates.length - 1];
+  if (!overlayRemovalTargetSkipOnly(t.slice(lastGate.end))) return false;
+  const actions = overlayRegexMatches(OVERLAY_REMOVAL_ACTION_RE, t);
+  let boundToRemoval = false;
+  for (let i = actions.length - 1; i >= 0; i -= 1) {
+    const action = actions[i];
+    if (action.end > lastGate.index) continue;
+    if (overlayRemovalTargetSkipOnly(t.slice(action.end, lastGate.index))) {
+      boundToRemoval = true;
+      break;
+    }
+  }
+  if (!boundToRemoval) return false;
+  // Binding is target-local: a *different* gate id on the far side of the
+  // connector (`did not approve removal of G11, but approved removal of
+  // G12`) is an independent clause about a different gate, not a
+  // restriction/rejection of this one — do not let a denial for one gate
+  // suppress the split that frees a separately affirmative approval for
+  // another. Only merge when nothing but this same gate id (or no gate
+  // id at all) appears past the connector.
+  const targetId = t.slice(lastGate.index, lastGate.end).toUpperCase();
+  const rightGates = overlayNamedGateIds(String(rightRemainder || ""));
+  if (rightGates.some((id) => id !== targetId)) return false;
+  return true;
+}
+
+/**
+ * The bare-whitespace `yet` boundary in `CLAUSE_BOUNDARY_RE` is meant for
+ * contrastive "X yet Y"; it also matches the hedge "not yet"/"never yet"
+ * (`was not yet authorized`), which is not a clause boundary at all.
+ */
+function overlayBoundaryIsNotYetIdiom(left, matchedText) {
+  return /\byet\b/i.test(matchedText) && /\b(?:not|never)\s*$/i.test(left);
+}
+
+/**
+ * Same boundaries as `splitAdversativeClauses`, but a boundary
+ * immediately following a completed removal-target object is not split
+ * — the restriction/rejection after the connector stays bound to that
+ * object for `overlayGateIsRemovalObject` to see — and a `not yet` /
+ * `never yet` hedge is not treated as a boundary at all.
+ */
+function splitOverlayAdversativeClauses(text) {
+  const src = collapseWs(text);
+  if (!src) return [];
+  const parts = [];
+  let last = 0;
+  const re = new RegExp(CLAUSE_BOUNDARY_RE.source, "gi");
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index < last) continue;
+    const left = collapseWs(src.slice(last, m.index));
+    const rightRemainder = src.slice(m.index + m[0].length);
+    if (
+      overlayAdversativeBoundaryIsPostRemovalTarget(left, rightRemainder) ||
+      overlayBoundaryIsNotYetIdiom(left, m[0])
+    ) {
+      continue;
+    }
+    if (left) parts.push(left);
+    last = m.index + m[0].length;
+    if (last === m.index) last = m.index + 1;
+  }
+  const tail = collapseWs(
+    src.slice(last).replace(
+      /^(?:however|nevertheless|nonetheless|although|though|whereas|but|yet)\b[,:\s]*/i,
+      ""
+    )
+  );
+  if (tail) parts.push(tail);
+  return parts.length ? parts : [src];
+}
+
 function overlayAuthorizationUnits(decisionsText) {
   const src = String(decisionsText || "");
   if (!src.trim()) return [];
@@ -4044,7 +4328,7 @@ function overlayAuthorizationUnits(decisionsText) {
     for (const field of splitAdrLabeledFields(chunk)) {
       if (/^rejected$/i.test(field.label)) continue;
       for (const sent of polarityUnits(field.body)) {
-        for (const adv of splitAdversativeClauses(sent)) {
+        for (const adv of splitOverlayAdversativeClauses(sent)) {
           for (const clause of splitOverlayClauses(adv)) {
             for (const actorPart of splitCoordinatedActorClauses(clause)) {
               units.push(actorPart);
@@ -4083,8 +4367,38 @@ const OVERLAY_GATE_OBJECT_FOLLOW_RE =
 const OVERLAY_GATE_COLLATERAL_PREP_RE =
   /^(?:from|in|into|on|onto|at|by|with|without|via|per|as|for|of|about|regarding|concerning|among|across|within|toward|towards)$/i;
 const OVERLAY_GATE_COPULA_RE = /^(?:was|were|is|are|be|been|being)$/i;
+/** Prefix-anchored copula, including stative "remains"/"stays"/"continues", for scanning past an adversative connector. */
+const OVERLAY_GATE_COPULA_PREFIX_RE =
+  /^(?:was|were|is|are|be|been|being|remains?|stays?|continues?(?:\s+to\s+be)?)\b/i;
 const OVERLAY_REMOVAL_COPULAR_REJECTION_RE =
-  /^(?:rejected|denied|declined|(?:not|never)\s+(?:authorized|approved))\b/i;
+  /^(?:(?:explicitly|hereby|formally|also|then)\s+)?(?:rejected|denied|declined|unauthorized|unapproved|pending|(?:not|never)\s+(?:yet\s+)?(?:authorized|approved))\b/i;
+/** Adversative connectors that can introduce a restriction/rejection of a just-named removal target. */
+const OVERLAY_ADVERSATIVE_CONNECTOR_RE =
+  /^(?:but|however|nevertheless|nonetheless|although|though|whereas|yet|still)$/i;
+const OVERLAY_POST_CONNECTOR_FILLER_RE = /^(?:that|it|this|which)\s+/i;
+const OVERLAY_POST_CONNECTOR_RESTRICTION_RE =
+  /^(?:not|never|only|merely|just|solely|simply)\b/i;
+
+/**
+ * A contrastive connector directly after a completed removal target
+ * (`removal of G12, but only from documentation` / `..., but not as a
+ * human gate` / `..., but that was explicitly rejected` / `..., but
+ * remains denied`) restricts or rejects the removal rather than leaving
+ * it intact. Bind that restriction to the removal object here, before
+ * any adversative sentence-splitting elsewhere could discard the second
+ * half and evaluate the first half in isolation.
+ */
+function overlayAdversativeConnectorRejectsRemoval(after, next) {
+  if (!OVERLAY_ADVERSATIVE_CONNECTOR_RE.test(next)) return false;
+  let rest = collapseWs(String(after || "").replace(/^[A-Za-z']+\b/, ""));
+  rest = rest.replace(OVERLAY_POST_CONNECTOR_FILLER_RE, "");
+  if (!rest) return false;
+  if (OVERLAY_POST_CONNECTOR_RESTRICTION_RE.test(rest)) return true;
+  const copula = OVERLAY_GATE_COPULA_PREFIX_RE.exec(rest);
+  if (!copula) return false;
+  const predicate = collapseWs(rest.slice(copula[0].length));
+  return OVERLAY_REMOVAL_COPULAR_REJECTION_RE.test(predicate);
+}
 
 function overlayRemovalTargetSkipOnly(text) {
   const t = collapseWs(text);
@@ -4121,14 +4435,21 @@ function overlayGateIsRemovalObject(text, action, gate) {
     return false;
   }
   const afterRaw = String(text || "").slice(gate.end);
-  let after = collapseWs(afterRaw).replace(/^[.,:;!?()[\]"'`]+/, "");
+  // Strip leading punctuation, then re-collapse: stripping a comma out of
+  // an already-collapsed ", but …" leaves a bare leading space, which
+  // would otherwise split() into a phantom empty first token below.
+  let after = collapseWs(
+    collapseWs(afterRaw).replace(/^[.,:;!?()[\]"'`]+/, "")
+  );
   if (!after) return true;
   // Complete the target noun: optional trailing "gate" / "human gate".
   const trailer = /^(?:human\s+)?gates?\b/i.exec(after);
   if (trailer) {
-    after = collapseWs(after.slice(trailer[0].length)).replace(
-      /^[.,:;!?()[\]"'`]+/,
-      ""
+    after = collapseWs(
+      collapseWs(after.slice(trailer[0].length)).replace(
+        /^[.,:;!?()[\]"'`]+/,
+        ""
+      )
     );
     if (!after) return true;
   }
@@ -4136,6 +4457,7 @@ function overlayGateIsRemovalObject(text, action, gate) {
   if (!next) return true;
   if (OVERLAY_GATE_COLLATERAL_PREP_RE.test(next)) return false;
   if (overlayCopularComplementRejectsRemoval(after, next)) return false;
+  if (overlayAdversativeConnectorRejectsRemoval(after, next)) return false;
   return OVERLAY_GATE_OBJECT_FOLLOW_RE.test(next);
 }
 
@@ -4354,8 +4676,23 @@ const BODY_SKIP_GREEN_RE =
   /\bgreen gate\b[\s\S]{0,80}\b(?:may be skipped|can be skipped|is optional|is waived|need not run)\b/i;
 const BODY_SKIP_GREEN_RE2 =
   /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
-const PERMISSION_PRED_RE =
-  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:is|are)\s+required\s+to|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+(?:the\s+)?(?:permission|right|authority)\s+to|must|shall|may|can|permitted|allowed|authorized)\b/gi;
+/** Bounded adjective slot before permission/right/authority (`explicit permission`, `full authority`). */
+const PERMISSION_NOUN_ADJ_SRC = "(?:explicit|express|full|written|formal)\\s+";
+const PERMISSION_PRED_RE = new RegExp(
+  "\\b(?:" +
+    "(?:is|are)\\s+(?:permitted|allowed|authorized)" +
+    "|(?:is|are)\\s+(?:(?:expressly|explicitly|formally)\\s+)?required\\s+to" +
+    "|(?:allowed|permitted|authorized)\\s+to" +
+    "|(?:has|have|had)\\s+(?:the\\s+)?(?:" +
+    PERMISSION_NOUN_ADJ_SRC +
+    ")?(?:permission|right|authority)\\s+to" +
+    "|(?:has|have|had|was|were|is|are)\\s+(?:been\\s+)?(?:granted|given)\\s+(?:the\\s+)?(?:" +
+    PERMISSION_NOUN_ADJ_SRC +
+    ")?(?:permission|right|authority)\\s+to" +
+    "|must|shall|may|can|permitted|allowed|authorized" +
+    ")\\b",
+  "gi"
+);
 const OWN_WORK_TOPIC_RE =
   /\b(?:(?:its|their|your|our|my)\s+own(?:\s+(?:work|generation))?|own\s+work|review of\s+(?:its|their|your|our|my)\s+own)\b/i;
 const REVIEW_ACT_RE = /\b(?:review|evaluate|evaluating|grade|grading)\b/i;
@@ -4374,13 +4711,79 @@ function grantPolarityUnits(hay) {
   return out;
 }
 
+/**
+ * The whitespace-delimited tokens immediately before `index`, truncated
+ * at the nearest `NEW_SUBJECT_BOUNDARY_RE` separator — equivalent to
+ * `text.slice(0, index).split(NEW_SUBJECT_BOUNDARY_RE).pop()` tokenized
+ * by `/\s+/`, but found by scanning backward from `index` a bounded
+ * number of tokens (`maxTokens`) instead of slicing/splitting the whole
+ * `0..index` prefix. Cost is proportional to the width of the returned
+ * tokens and the small gaps checked between them, not to `index`, so a
+ * caller filtering many occurrences across a long text stays linear
+ * rather than quadratic. This is a token-count bound, not an arbitrary
+ * byte window: a single token may be any length and is still returned
+ * whole (contractions like "doesn't" included, unstripped — same as
+ * plain `\s+` splitting). Residual: a dash/slash boundary glued directly
+ * onto a word with no surrounding whitespace is not distinguished from
+ * an ordinary token character (not general NLP).
+ */
+function boundedLocalTailTokens(text, index, maxTokens) {
+  const s = String(text || "");
+  const tokens = [];
+  let i = Math.max(0, Math.min(index, s.length));
+  while (tokens.length < maxTokens && i > 0) {
+    const beforeGap = i;
+    while (i > 0 && /\s/.test(s[i - 1])) i -= 1;
+    const hadGap = i < beforeGap;
+    if (i === 0) break;
+    // `[,;:]\s+` — punctuation immediately followed by whitespace.
+    if (hadGap && /[,;:]/.test(s[i - 1])) break;
+    // `\s*\(\s*` — an opening paren, with or without preceding whitespace.
+    if (s[i - 1] === "(") break;
+    const tokenEnd = i;
+    // Stop token collection at a bare `(` glued to the word (`(the`) too,
+    // so the next iteration's paren check above can see it as a
+    // boundary instead of it being swallowed into the token text.
+    while (i > 0 && !/\s/.test(s[i - 1]) && s[i - 1] !== "(") i -= 1;
+    const token = s.slice(i, tokenEnd);
+    if (!token) break;
+    // `\s+(?:or|while|plus)\s+` — the connector word is itself the
+    // separator: stop without including it. Whitespace after it is
+    // guaranteed by `hadGap` on the loop iteration that collected it.
+    if (hadGap && /^(?:or|while|plus)$/i.test(token)) break;
+    // `\s+\/\s+` and dash-run separators as their own whitespace-bounded
+    // token.
+    if (
+      hadGap &&
+      (token === "/" || /^[—–]+$/.test(token) || /^--+$/.test(token))
+    ) {
+      break;
+    }
+    tokens.unshift(token);
+  }
+  return tokens;
+}
+
+/** Fixed-length literal words only — bounding this scan to a small
+ * constant window is exact, not approximate (unlike the backward token
+ * scan above, whose tokens may be arbitrarily long). */
+const NOT_NEVER_PREFIX_RE = /^(?:not|never)\b/i;
+
+function afterSpanStartsWithNegation(text, spanEnd) {
+  const s = String(text || "");
+  let i = spanEnd;
+  while (i < s.length && /\s/.test(s[i])) i += 1;
+  return NOT_NEVER_PREFIX_RE.test(s.slice(i, i + 5));
+}
+
 function permissionPredicateNegated(text, span) {
-  const rawBefore = text.slice(0, span.index);
-  const local = rawBefore.split(NEW_SUBJECT_BOUNDARY_RE).pop() || rawBefore;
-  if (localPolarityTokens(local).some((tok) => LOCAL_POLARITY_TOKEN_RE.test(tok))) {
+  const tokens = boundedLocalTailTokens(text, span.index, 4).map((tok) =>
+    tok.replace(/[^A-Za-z']/g, "")
+  );
+  if (tokens.some((tok) => LOCAL_POLARITY_TOKEN_RE.test(tok))) {
     return true;
   }
-  return /^\s*(?:not|never)\b/i.test(text.slice(span.end));
+  return afterSpanStartsWithNegation(text, span.end);
 }
 
 function unnegatedPermissionSpans(text) {
@@ -4413,11 +4816,31 @@ function independentReviewNotRequired(text) {
   );
 }
 
+/**
+ * The two whitespace-delimited tokens immediately before `index`, found
+ * by scanning backward a bounded distance from `index` itself — not by
+ * slicing/collapsing/splitting the whole `0..index` prefix. Cost is
+ * proportional to the width of those two tokens, not to `index`, so a
+ * caller checking many occurrences across a long text stays linear
+ * rather than quadratic.
+ */
+function lastTwoWordsBefore(text, index) {
+  const s = String(text || "");
+  let i = Math.max(0, Math.min(index, s.length));
+  const words = ["", ""];
+  for (let k = 0; k < 2; k += 1) {
+    while (i > 0 && /\s/.test(s[i - 1])) i -= 1;
+    const end = i;
+    while (i > 0 && !/\s/.test(s[i - 1])) i -= 1;
+    words[k] = s.slice(i, end);
+  }
+  return words;
+}
+
 function topicLocallyExcluded(text, index) {
-  const before = collapseWs(String(text || "").slice(0, index));
-  const toks = before.split(/\s+/).filter(Boolean);
-  const last = (toks[toks.length - 1] || "").replace(/[^A-Za-z']/g, "");
-  const prev = (toks[toks.length - 2] || "").replace(/[^A-Za-z']/g, "");
+  const [lastRaw, prevRaw] = lastTwoWordsBefore(text, index);
+  const last = lastRaw.replace(/[^A-Za-z']/g, "");
+  const prev = prevRaw.replace(/[^A-Za-z']/g, "");
   if (LOCAL_POLARITY_TOKEN_RE.test(last)) return true;
   if (/^(?:except|excluding)$/i.test(last)) return true;
   // `other than its own work` is the same local-exclusion family as except.
@@ -4454,9 +4877,12 @@ const REVIEWER_NOUN_TARGET_SRC =
  * treated as the authorized act.
  */
 const SELF_REVIEW_NON_GRANT_PRED_RE =
-  /\b(?:discuss(?:es|ed|ing|ion|ions)?|report(?:s|ed|ing)?|document(?:s|ed|ing|ation)?|mention(?:s|ed|ing)?|record(?:s|ed|ing)?|reject(?:s|ed|ing|ion)?|ban(?:s|ned|ning)?|prohibit(?:s|ed|ing|ion)?)\b/i;
+  /\b(?:discuss(?:es|ed|ing|ion|ions)?|report(?:s|ed|ing)?|document(?:s|ed|ing|ation)?|mention(?:s|ed|ing)?|record(?:s|ed|ing)?|reject(?:s|ed|ing|ion)?|ban(?:s|ned|ning)?|prohibit(?:s|ed|ing|ion)?|den(?:y|ies|ying|ied)|refus(?:e|es|ed|ing)|forbid(?:s|ding)?|forbade|forbidden|prevent(?:s|ed|ing)?)\b/i;
 const SELF_REVIEW_NON_GRANT_TOPIC_PREP_RE =
   /^(?:about|on|of|regarding|concerning)$/i;
+/** Reversed-subject obligation: "Self-review is required of <reviewer>." */
+const SELF_REVIEW_REQUIRED_OF_RE =
+  /\bself[\s-]?review\s+(?:is|are|was|were)\s+(?!not\b)(?:(?:expressly|explicitly|formally)\s+)?required\s+of\b/i;
 
 function interveningWord(tok) {
   return String(tok || "").replace(/[^A-Za-z']/g, "");
@@ -4471,14 +4897,21 @@ function lastInfinitiveLemma(intervening) {
 }
 
 /**
- * Unnegated has/have/had permission|right|authority and
- * must/shall/is|are required to are themselves the grant. Do not wait
- * for a second grant verb after that span. Residual: not general NLP.
+ * Unnegated has/have/had permission|right|authority (with an optional
+ * explicit/full/express/written/formal modifier), passive was/were/has
+ * been granted|given permission|right|authority, and must/shall/is|are
+ * (expressly/explicitly/formally) required to are themselves the grant.
+ * Do not wait for a second grant verb after that span. Reuses the
+ * clause's precomputed self-review spans (`state.selfs`) instead of
+ * rescanning per permission span. Residual: not general NLP.
  */
-function permissionPredicateGrantsSelfReview(text, span) {
+function permissionPredicateGrantsSelfReview(text, span, state) {
   const local = String(text || "").split(/[.!?;]/)[0] || "";
   if (!span || span.end > local.length) return false;
-  const selfs = overlayRegexMatches(/\bself[\s-]?review\b/i, local);
+  const selfs =
+    state && Array.isArray(state.selfs) && state.local === local
+      ? state.selfs
+      : overlayRegexMatches(/\bself[\s-]?review\b/i, local);
   for (const self of selfs) {
     if (self.index < span.end) continue;
     if (!interveningSelfReviewBlocksGrant(local, span.end, self.index)) {
@@ -4516,19 +4949,80 @@ function interveningSelfReviewBlocksGrant(local, verbEnd, selfIndex) {
 }
 
 /**
- * One forward pass over a polarity/clause unit: grant-verb and
- * self-review spans. Callers reuse this instead of nested per-self-review
- * verb rescans. Residual: not general NLP.
+ * Merge two ascending-by-`.end` span lists into one ascending-by-`.end`
+ * list, in O(a + b). Used to combine grant-verb and permission-predicate
+ * spans into a single candidate list for the nearest-candidate-per-self
+ * pass below, instead of scanning each list separately per self.
+ */
+function mergeSpansByEnd(a, b) {
+  const merged = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i].end <= b[j].end) merged.push(a[i++]);
+    else merged.push(b[j++]);
+  }
+  while (i < a.length) merged.push(a[i++]);
+  while (j < b.length) merged.push(b[j++]);
+  return merged;
+}
+
+/**
+ * Single forward pass over `selfs` (ascending): for each self-review
+ * span, advance a monotonic cursor `ci` to the nearest preceding grant
+ * candidate (a merged grant-verb / unnegated-permission span) and check
+ * whether the gap to that self blocks the grant. `ci` only ever moves
+ * forward across the whole outer loop — it is never reset to the start
+ * of `candidates` for a later self — so total cost is O(candidates +
+ * selfs), not O(candidates * selfs). `minIndex` mirrors the leftmost
+ * recognized permission predicate's position: a candidate or self
+ * entirely before it is out of scope, matching the original
+ * permission-anchored scan it replaces.
+ */
+function nearestCandidateGrantsAnySelf(local, candidates, selfs, minIndex) {
+  if (!local || !candidates.length || !selfs.length) return false;
+  const floor = Number(minIndex) || 0;
+  let ci = 0;
+  for (let si = 0; si < selfs.length; si += 1) {
+    const self = selfs[si];
+    if (self.index < floor) continue;
+    while (ci + 1 < candidates.length && candidates[ci + 1].end <= self.index) {
+      ci += 1;
+    }
+    const candidate = candidates[ci];
+    if (!candidate || candidate.index < floor || candidate.end > self.index) {
+      continue;
+    }
+    if (!interveningSelfReviewBlocksGrant(local, candidate.end, self.index)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * One forward pass over a polarity/clause unit: grant-verb, self-review,
+ * and unnegated-permission spans, plus the self-review-target grant
+ * verdict for the whole clause (`selfReviewTargetGrant`) computed once
+ * via `nearestCandidateGrantsAnySelf` — not once per permission span.
+ * Callers reuse this instead of nested per-self-review-per-permission
+ * rescans. Residual: not general NLP.
  */
 function selfReviewClauseState(text) {
   const src = String(text || "");
   const local = src.split(/[.!?;]/)[0] || "";
-  return {
-    src,
-    local,
-    verbs: overlayRegexMatches(SELF_REVIEW_GRANT_VERB_RE, local),
-    selfs: overlayRegexMatches(/\bself[\s-]?review\b/i, local),
-  };
+  const verbs = overlayRegexMatches(SELF_REVIEW_GRANT_VERB_RE, local);
+  const selfs = overlayRegexMatches(/\bself[\s-]?review\b/i, local);
+  const perms = unnegatedPermissionSpans(src).filter((p) => p.end <= local.length);
+  const selfReviewTargetGrant = perms.length
+    ? nearestCandidateGrantsAnySelf(
+        local,
+        mergeSpansByEnd(verbs, perms),
+        selfs,
+        perms[0].index
+      )
+    : false;
+  return { src, local, verbs, selfs, perms, selfReviewTargetGrant };
 }
 
 /**
@@ -4629,14 +5123,17 @@ function selfReviewPermissionUnit(text, span, state) {
     `${AUTH_GRANT_VERB_RE.source}\\s+(?:the\\s+)?same[\\s-]?agent\\s+${REVIEWER_NOUN_TARGET_SRC}\\b`,
     "i"
   ).test(after);
-  if (grantThenSelfReview(after, state, span.index)) {
-    return {
-      action: selfReviewGrantAction(after),
-      target: "self-review",
-      polarity: "grant",
-    };
-  }
-  if (permissionPredicateGrantsSelfReview(text, span)) {
+  // Hot path: `state.selfReviewTargetGrant` is the single precomputed
+  // clause-wide verdict from `selfReviewClauseState`'s one forward pass.
+  // `grantThenSelfReview` / `permissionPredicateGrantsSelfReview` remain
+  // as narrow fallback helpers for callers that pass no precomputed
+  // state (not this function's hot path, which always receives one).
+  const selfReviewTargetGrant =
+    state && typeof state.selfReviewTargetGrant === "boolean"
+      ? state.selfReviewTargetGrant
+      : grantThenSelfReview(after, state, span.index) ||
+        permissionPredicateGrantsSelfReview(text, span, state);
+  if (selfReviewTargetGrant) {
     return {
       action: selfReviewGrantAction(after),
       target: "self-review",
@@ -4692,8 +5189,13 @@ function selfReviewPermissionUnit(text, span, state) {
   return null;
 }
 
-function sameAgentGrantAt(text, span, state) {
-  const unit = selfReviewPermissionUnit(text, span, state);
+/**
+ * `unit` is the single `selfReviewPermissionUnit` result for this
+ * permission span — computed once by the caller and reused for both the
+ * same-agent and self-review target checks, rather than recomputed once
+ * per check.
+ */
+function sameAgentGrantFromUnit(text, unit) {
   if (!unit || unit.polarity !== "grant" || unit.target !== "same-agent") {
     return false;
   }
@@ -4710,8 +5212,7 @@ function sameAgentGrantAt(text, span, state) {
   return true;
 }
 
-function selfReviewTopicGrantAt(text, span, state) {
-  const unit = selfReviewPermissionUnit(text, span, state);
+function selfReviewTopicGrantFromUnit(unit) {
   return Boolean(
     unit && unit.polarity === "grant" && unit.target === "self-review"
   );
@@ -4720,28 +5221,49 @@ function selfReviewTopicGrantAt(text, span, state) {
 function selfReviewGrantTopic(unit) {
   const text = collapseWs(String(unit || ""));
   if (!text) return null;
+  // Reversed subject: "Self-review is required of an independent
+  // reviewer" obligates self-review directly (self-review is the
+  // grammatical subject, not the object after a permission verb), so it
+  // is not reached by the permission-span scan below.
+  if (SELF_REVIEW_REQUIRED_OF_RE.test(text)) return "self-review";
   if (independentReviewNotRequired(text)) return "same-agent";
-  const perms = unnegatedPermissionSpans(text);
-  if (!perms.length) return null;
+  // One forward pass computes verbs/selfs/perms and the clause-wide
+  // self-review-target grant verdict together; nothing here rescans from
+  // offset zero per permission.
   const state = selfReviewClauseState(text);
+  const perms = state.perms;
+  if (!perms.length) return null;
   let sameAgentGrant = false;
-  let ownGrant = false;
-  for (const span of perms) {
-    if (sameAgentGrantAt(text, span, state)) sameAgentGrant = true;
-    if (selfReviewTopicGrantAt(text, span, state)) ownGrant = true;
-    const before = text.slice(0, span.index);
-    const after = text.slice(span.end);
-    if (
-      /\bself[\s-]?review\b/i.test(text) &&
-      !clauseSubjectIsIndependent(text)
-    ) {
-      ownGrant = true;
+  // These do not depend on which permission span is inspected; compute
+  // them once instead of once per permission span.
+  let ownGrant =
+    (/\bself[\s-]?review\b/i.test(text) && !clauseSubjectIsIndependent(text)) ||
+    ownWorkGrantedIn(text) ||
+    state.selfReviewTargetGrant;
+  // Every remaining check below (same-agent phrase detection, and the
+  // own-work-after-review-act fallback) is a before-only or after-only
+  // pattern match: existence in a shorter suffix/prefix implies existence
+  // in the longest suffix (leftmost permission span) or longest prefix
+  // (rightmost permission span) that contains it. So checking at most
+  // those two representative spans — not one call per permission span —
+  // finds everything the full permission-by-permission scan would, in
+  // O(clause length) regardless of how many permission predicates exist.
+  const first = perms[0];
+  const last = perms[perms.length - 1];
+  const candidateSpans = first === last ? [first] : [first, last];
+  for (const span of candidateSpans) {
+    if (sameAgentGrant && ownGrant) break;
+    const permUnit = selfReviewPermissionUnit(text, span, state);
+    if (!sameAgentGrant && sameAgentGrantFromUnit(text, permUnit)) {
+      sameAgentGrant = true;
     }
-    if (
-      ownWorkGrantedIn(text) ||
-      (REVIEW_ACT_RE.test(after) && ownWorkGrantedIn(`${before} ${after}`))
-    ) {
-      ownGrant = true;
+    if (!ownGrant && selfReviewTopicGrantFromUnit(permUnit)) ownGrant = true;
+    if (!ownGrant) {
+      const before = text.slice(0, span.index);
+      const after = text.slice(span.end);
+      if (REVIEW_ACT_RE.test(after) && ownWorkGrantedIn(`${before} ${after}`)) {
+        ownGrant = true;
+      }
     }
   }
   if (!sameAgentGrant && !ownGrant) return null;

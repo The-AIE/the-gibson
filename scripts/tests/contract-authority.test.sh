@@ -4821,6 +4821,84 @@ function envSplitEqGrep(envBin, grepFlag, pat) {
 function envPathGrep(pathTok, dir, grepFlag, pat) {
   return "env " + pathTok + " " + dir + " grep " + grepFlag + " " + SQ + pat + SQ;
 }
+// Ordinary whole-word single/double quoting around env options (-S,
+// --split-string / --split-string=, -P, --path) and grep options (-y,
+// bundled flags) must classify exactly like unquoted argv — the shell
+// strips the quotes identically either way. #241 follow-up.
+function envQuotedOptSplitGrep(envBin, splitTok, grepFlag, pat) {
+  return envBin + " " + SQ + splitTok + SQ + " " + DQ + "grep " + grepFlag + " " + SQ + pat + SQ + DQ;
+}
+function envQuotedGluedSplitGrep(envBin, grepFlag, pat) {
+  return envBin + " " + SQ + "--split-string=" + SQ + DQ + "grep " + grepFlag + " " + SQ + pat + SQ + DQ;
+}
+function envQuotedPathGrep(pathTok, dir, grepFlag, pat) {
+  return "env " + SQ + pathTok + SQ + " " + dir + " grep " + grepFlag + " " + SQ + pat + SQ;
+}
+const envQuotedSPassNeedle = envQuotedOptSplitGrep("env", "-S", "-y", bracketPassPat);
+const envQuotedSApproveNeedle = envQuotedOptSplitGrep("env", "-S", "-y", bracketApprovePat);
+const absEnvQuotedSPassNeedle = envQuotedOptSplitGrep("/usr/bin/env", "-S", "-y", bracketPassPat);
+const absEnvQuotedSApproveNeedle = envQuotedOptSplitGrep("/usr/bin/env", "-S", "-y", bracketApprovePat);
+const envQuotedLongSplitPassNeedle = envQuotedOptSplitGrep("env", "--split-string", "-y", bracketPassPat);
+const envQuotedLongSplitApproveNeedle = envQuotedOptSplitGrep("env", "--split-string", "-y", bracketApprovePat);
+const envQuotedGluedSplitPassNeedle = envQuotedGluedSplitGrep("env", "-y", bracketPassPat);
+const envQuotedGluedSplitApproveNeedle = envQuotedGluedSplitGrep("env", "-y", bracketApprovePat);
+const envQuotedPPassNeedle = envQuotedPathGrep("-P", "/usr/bin", "-y", bracketPassPat);
+const envQuotedPApproveNeedle = envQuotedPathGrep("-P", "/usr/bin", "-y", bracketApprovePat);
+const envQuotedPathPassNeedle = envQuotedPathGrep("--path", "/usr/bin", "-y", bracketPassPat);
+const envQuotedPathApproveNeedle = envQuotedPathGrep("--path", "/usr/bin", "-y", bracketApprovePat);
+// Required repro: env-level backslash-underscore (\_) as an argv
+// separator inside a GNU env -S split-string, obfuscating the executable
+// grep/-y/pattern boundary without any literal whitespace.
+const envBackslashUnderscorePassNeedle =
+  "/usr/bin/env -S " + DQ + "grep\\_-y\\_" + SQ + bracketPassPat + SQ + DQ;
+const envBackslashUnderscoreApproveNeedle =
+  "/usr/bin/env -S " + DQ + "grep\\_-y\\_" + SQ + bracketApprovePat + SQ + DQ;
+const grepQuotedYBeforePassNeedle = "grep " + SQ + "-y" + SQ + " " + SQ + bracketPassPat + SQ;
+const grepQuotedYBeforeApproveNeedle = "grep " + SQ + "-y" + SQ + " " + SQ + bracketApprovePat + SQ;
+const grepQuotedYAfterPassNeedle = "grep " + SQ + bracketPassPat + SQ + " " + SQ + "-y" + SQ;
+const grepQuotedYAfterApproveNeedle = "grep " + SQ + bracketApprovePat + SQ + " " + SQ + "-y" + SQ;
+const grepQuotedBundlePassNeedle = "grep " + SQ + "-iy" + SQ + " " + SQ + bracketPassPat + SQ;
+const grepQuotedBundleApproveNeedle = "grep " + SQ + "-iy" + SQ + " " + SQ + bracketApprovePat + SQ;
+const envQuotedSPassDecoy = wrapGrepNeedle(envQuotedSPassNeedle, true);
+const envQuotedSApproveOnly = wrapGrepNeedle(envQuotedSApproveNeedle, true);
+const absEnvQuotedSPassDecoy = wrapGrepNeedle(absEnvQuotedSPassNeedle, true);
+const absEnvQuotedSApproveOnly = wrapGrepNeedle(absEnvQuotedSApproveNeedle, true);
+const envQuotedLongSplitPassDecoy = wrapGrepNeedle(envQuotedLongSplitPassNeedle, true);
+const envQuotedLongSplitApproveOnly = wrapGrepNeedle(envQuotedLongSplitApproveNeedle, true);
+const envQuotedGluedSplitPassDecoy = wrapGrepNeedle(envQuotedGluedSplitPassNeedle, true);
+const envQuotedGluedSplitApproveOnly = wrapGrepNeedle(envQuotedGluedSplitApproveNeedle, true);
+const envQuotedPPassDecoy = wrapGrepNeedle(envQuotedPPassNeedle, true);
+const envQuotedPApproveOnly = wrapGrepNeedle(envQuotedPApproveNeedle, true);
+const envQuotedPathPassDecoy = wrapGrepNeedle(envQuotedPathPassNeedle, true);
+const envQuotedPathApproveOnly = wrapGrepNeedle(envQuotedPathApproveNeedle, true);
+const envBackslashUnderscorePassDecoy = wrapGrepNeedle(envBackslashUnderscorePassNeedle, true);
+const envBackslashUnderscoreApproveOnly = wrapGrepNeedle(envBackslashUnderscoreApproveNeedle, true);
+const grepQuotedYBeforePassDecoy = wrapGrepNeedle(grepQuotedYBeforePassNeedle, true);
+const grepQuotedYBeforeApproveOnly = wrapGrepNeedle(grepQuotedYBeforeApproveNeedle, true);
+const grepQuotedYAfterPassDecoy = wrapGrepNeedle(grepQuotedYAfterPassNeedle, true);
+const grepQuotedYAfterApproveOnly = wrapGrepNeedle(grepQuotedYAfterApproveNeedle, true);
+const grepQuotedBundlePassDecoy = wrapGrepNeedle(grepQuotedBundlePassNeedle, true);
+const grepQuotedBundleApproveOnly = wrapGrepNeedle(grepQuotedBundleApproveNeedle, true);
+const envQuotedSPassGrepOnly = wrapGrepNeedle(envQuotedSPassNeedle, false);
+const envQuotedSApproveGrepOnly = wrapGrepNeedle(envQuotedSApproveNeedle, false);
+const absEnvQuotedSPassGrepOnly = wrapGrepNeedle(absEnvQuotedSPassNeedle, false);
+const absEnvQuotedSApproveGrepOnly = wrapGrepNeedle(absEnvQuotedSApproveNeedle, false);
+const envQuotedLongSplitPassGrepOnly = wrapGrepNeedle(envQuotedLongSplitPassNeedle, false);
+const envQuotedLongSplitApproveGrepOnly = wrapGrepNeedle(envQuotedLongSplitApproveNeedle, false);
+const envQuotedGluedSplitPassGrepOnly = wrapGrepNeedle(envQuotedGluedSplitPassNeedle, false);
+const envQuotedGluedSplitApproveGrepOnly = wrapGrepNeedle(envQuotedGluedSplitApproveNeedle, false);
+const envQuotedPPassGrepOnly = wrapGrepNeedle(envQuotedPPassNeedle, false);
+const envQuotedPApproveGrepOnly = wrapGrepNeedle(envQuotedPApproveNeedle, false);
+const envQuotedPathPassGrepOnly = wrapGrepNeedle(envQuotedPathPassNeedle, false);
+const envQuotedPathApproveGrepOnly = wrapGrepNeedle(envQuotedPathApproveNeedle, false);
+const envBackslashUnderscorePassGrepOnly = wrapGrepNeedle(envBackslashUnderscorePassNeedle, false);
+const envBackslashUnderscoreApproveGrepOnly = wrapGrepNeedle(envBackslashUnderscoreApproveNeedle, false);
+const grepQuotedYBeforePassGrepOnly = wrapGrepNeedle(grepQuotedYBeforePassNeedle, false);
+const grepQuotedYBeforeApproveGrepOnly = wrapGrepNeedle(grepQuotedYBeforeApproveNeedle, false);
+const grepQuotedYAfterPassGrepOnly = wrapGrepNeedle(grepQuotedYAfterPassNeedle, false);
+const grepQuotedYAfterApproveGrepOnly = wrapGrepNeedle(grepQuotedYAfterApproveNeedle, false);
+const grepQuotedBundlePassGrepOnly = wrapGrepNeedle(grepQuotedBundlePassNeedle, false);
+const grepQuotedBundleApproveGrepOnly = wrapGrepNeedle(grepQuotedBundleApproveNeedle, false);
 const grepBareThenYPassNeedle = "grep " + SQ + bracketPassPat + SQ + " -y";
 const grepBareThenYApproveNeedle = "grep " + SQ + bracketApprovePat + SQ + " -y";
 const envSPassNeedle = envQuotedSplitGrep("env", "-S", "-y", bracketPassPat);
@@ -5475,6 +5553,31 @@ const grepProofs = [
   { name: "grep-multi-e-pass-matches-PASS", script: grepMultiDashEPassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "grep-e-then-i-approve-only-does-not-match-PASS", script: grepDashEThenIApproveGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "grep-e-then-i-approve-only-matches-APPROVE", script: grepDashEThenIApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "env-quoted-S-pass-matches-PASS", script: envQuotedSPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "s" },
+  { name: "env-quoted-S-approve-only-does-not-match-PASS", script: envQuotedSApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "s" },
+  { name: "env-quoted-S-approve-only-matches-APPROVE", script: envQuotedSApproveGrepOnly, sample: "VERDICT: APPROVE", want: true, requireEnv: "s" },
+  { name: "abs-env-quoted-S-pass-matches-PASS", script: absEnvQuotedSPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "absS" },
+  { name: "abs-env-quoted-S-approve-only-does-not-match-PASS", script: absEnvQuotedSApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "absS" },
+  { name: "env-quoted-long-split-string-pass-matches-PASS", script: envQuotedLongSplitPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "split" },
+  { name: "env-quoted-long-split-string-approve-only-does-not-match-PASS", script: envQuotedLongSplitApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "split" },
+  { name: "env-quoted-glued-split-string-eq-pass-matches-PASS", script: envQuotedGluedSplitPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "split" },
+  { name: "env-quoted-glued-split-string-eq-approve-only-does-not-match-PASS", script: envQuotedGluedSplitApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "split" },
+  { name: "env-quoted-P-pass-matches-PASS", script: envQuotedPPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "p" },
+  { name: "env-quoted-P-approve-only-does-not-match-PASS", script: envQuotedPApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "p" },
+  { name: "env-quoted-path-pass-matches-PASS", script: envQuotedPathPassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "path" },
+  { name: "env-quoted-path-approve-only-does-not-match-PASS", script: envQuotedPathApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "path" },
+  { name: "env-backslash-underscore-pass-matches-PASS", script: envBackslashUnderscorePassGrepOnly, sample: "VERDICT: PASS", want: true, requireEnv: "absS" },
+  { name: "env-backslash-underscore-approve-only-does-not-match-PASS", script: envBackslashUnderscoreApproveGrepOnly, sample: "VERDICT: PASS", want: false, requireEnv: "absS" },
+  { name: "env-backslash-underscore-approve-only-matches-APPROVE", script: envBackslashUnderscoreApproveGrepOnly, sample: "VERDICT: APPROVE", want: true, requireEnv: "absS" },
+  { name: "grep-quoted-y-before-pattern-pass-matches-PASS", script: grepQuotedYBeforePassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-quoted-y-before-pattern-approve-only-does-not-match-PASS", script: grepQuotedYBeforeApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-quoted-y-before-pattern-approve-only-matches-APPROVE", script: grepQuotedYBeforeApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "grep-quoted-y-after-pattern-pass-matches-PASS", script: grepQuotedYAfterPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-quoted-y-after-pattern-approve-only-does-not-match-PASS", script: grepQuotedYAfterApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-quoted-y-after-pattern-approve-only-matches-APPROVE", script: grepQuotedYAfterApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "grep-quoted-bundle-pass-matches-PASS", script: grepQuotedBundlePassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-quoted-bundle-approve-only-does-not-match-PASS", script: grepQuotedBundleApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-quoted-bundle-approve-only-matches-APPROVE", script: grepQuotedBundleApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
 ];
 for (const proof of grepProofs) {
   const receipt = runtimeGrepMatches(
@@ -5902,6 +6005,285 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     console.log("H241_OK wrapper-depth-perf-receipt-8-32-64 ns=" + [r8.ns, r32.ns, r64.ns].join(","));
   }
   {
+    // Ordinary whole-word quoting around env/grep options must classify
+    // exactly like unquoted argv, and the GNU env -S backslash-underscore
+    // separator must not evade classification. #241 follow-up.
+    const quotedFamily = [
+      { name: "env-quoted-S", pass: envQuotedSPassDecoy, approve: envQuotedSApproveOnly, passGrep: envQuotedSPassGrepOnly, approveGrep: envQuotedSApproveGrepOnly, requireEnv: "s" },
+      { name: "abs-env-quoted-S", pass: absEnvQuotedSPassDecoy, approve: absEnvQuotedSApproveOnly, passGrep: absEnvQuotedSPassGrepOnly, approveGrep: absEnvQuotedSApproveGrepOnly, requireEnv: "absS" },
+      { name: "env-quoted-long-split-string", pass: envQuotedLongSplitPassDecoy, approve: envQuotedLongSplitApproveOnly, passGrep: envQuotedLongSplitPassGrepOnly, approveGrep: envQuotedLongSplitApproveGrepOnly, requireEnv: "split" },
+      { name: "env-quoted-glued-split-string-eq", pass: envQuotedGluedSplitPassDecoy, approve: envQuotedGluedSplitApproveOnly, passGrep: envQuotedGluedSplitPassGrepOnly, approveGrep: envQuotedGluedSplitApproveGrepOnly, requireEnv: "split" },
+      { name: "env-quoted-P", pass: envQuotedPPassDecoy, approve: envQuotedPApproveOnly, passGrep: envQuotedPPassGrepOnly, approveGrep: envQuotedPApproveGrepOnly, requireEnv: "p" },
+      { name: "env-quoted-path", pass: envQuotedPathPassDecoy, approve: envQuotedPathApproveOnly, passGrep: envQuotedPathPassGrepOnly, approveGrep: envQuotedPathApproveGrepOnly, requireEnv: "path" },
+      { name: "env-backslash-underscore", pass: envBackslashUnderscorePassDecoy, approve: envBackslashUnderscoreApproveOnly, passGrep: envBackslashUnderscorePassGrepOnly, approveGrep: envBackslashUnderscoreApproveGrepOnly, requireEnv: "absS" },
+      { name: "grep-quoted-y-before-pattern", pass: grepQuotedYBeforePassDecoy, approve: grepQuotedYBeforeApproveOnly, passGrep: grepQuotedYBeforePassGrepOnly, approveGrep: grepQuotedYBeforeApproveGrepOnly },
+      { name: "grep-quoted-y-after-pattern", pass: grepQuotedYAfterPassDecoy, approve: grepQuotedYAfterApproveOnly, passGrep: grepQuotedYAfterPassGrepOnly, approveGrep: grepQuotedYAfterApproveGrepOnly },
+      { name: "grep-quoted-bundle", pass: grepQuotedBundlePassDecoy, approve: grepQuotedBundleApproveOnly, passGrep: grepQuotedBundlePassGrepOnly, approveGrep: grepQuotedBundleApproveGrepOnly },
+    ];
+    for (const q of quotedFamily) {
+      const passFindings = reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: { "scripts/second-opinion.sh": q.pass, "scripts/release-preflight.sh": approveOnly },
+      });
+      // Static text classification does not depend on whether this
+      // platform\u0027s `env` binary actually supports -S/-P/--path; only
+      // the runtime cross-check below is gated on that.
+      const passOk = passFindings.some((f) => f.code === "E_VERDICT_VOCABULARY" && /accepts VERDICT: PASS/.test(f.message));
+      if (!passOk) {
+        throw new Error("quoted-argv family PASS false-green " + q.name + " got " + JSON.stringify(passFindings));
+      }
+      const approveFindings = reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: { "scripts/second-opinion.sh": q.approve, "scripts/release-preflight.sh": approveOnly },
+      });
+      if (approveFindings.length) {
+        throw new Error("quoted-argv family approve-only false-red " + q.name + " got " + JSON.stringify(approveFindings));
+      }
+      const receipt = runtimeGrepMatches(q.passGrep, "VERDICT: PASS", true, q.requireEnv);
+      runtimeGrepMatches(q.approveGrep, "VERDICT: PASS", false, q.requireEnv);
+      runtimeGrepMatches(q.approveGrep, "VERDICT: APPROVE", true, q.requireEnv);
+      console.log("H241_OK quoted-argv-" + q.name + " " + receipt);
+    }
+    {
+      // Pre-repair tooth: the old raw-argv-token env/grep option
+      // classifier compared words with `===` against bare strings like
+      // "-S" and "-y" — never decoding shell quoting first — so a
+      // whole-word-quoted \u0027-S\u0027 or \u0027-y\u0027 compared unequal to the bare form
+      // and fell through unrecognized.
+      function oldRawOptionRecognized(word) {
+        return (
+          word === "-S" ||
+          word === "--split-string" ||
+          word === "-P" ||
+          word === "--path" ||
+          word === "-y"
+        );
+      }
+      for (const quoted of ["\u0027-S\u0027", "\u0027-P\u0027", "\u0027--path\u0027", "\u0027-y\u0027", "\"-y\""]) {
+        if (oldRawOptionRecognized(quoted)) {
+          throw new Error("pre-repair raw-token tooth should miss quoted option " + quoted);
+        }
+      }
+      // Pre-repair tooth: the old nested `env -S` command splitter used
+      // plain whitespace/quote scanning with no env-level `\_` escape,
+      // so a backslash-underscore stayed glued to its neighbors as one
+      // opaque word instead of separating the executable from its flags
+      // and pattern.
+      function oldWhitespaceOnlyEnvSplit(raw) {
+        const words = [];
+        let cur = "";
+        let started = false;
+        let state = "none";
+        for (let i = 0; i < raw.length; i += 1) {
+          const c = raw[i];
+          if (state === "single") {
+            started = true;
+            if (c === "\u0027") state = "none";
+            else cur += c;
+            continue;
+          }
+          if (c === "\u0027") {
+            state = "single";
+            started = true;
+            continue;
+          }
+          if (c === " " || c === "\t") {
+            if (started) words.push(cur);
+            cur = "";
+            started = false;
+            continue;
+          }
+          if (c === "\\") {
+            started = true;
+            cur += c;
+            i += 1;
+            if (i < raw.length) cur += raw[i];
+            continue;
+          }
+          cur += c;
+          started = true;
+        }
+        if (started) words.push(cur);
+        return words;
+      }
+      const oldSplit = oldWhitespaceOnlyEnvSplit(
+        "grep\\_-y\\_\u0027" + bracketPassPat + "\u0027"
+      );
+      if (oldSplit.length !== 1 || oldSplit[0] !== "grep") {
+        // The obfuscated executable, `-y`, and pattern never separate
+        // under the old whitespace-only splitter, so the wrapped grep
+        // is never recognized as the grep family at all.
+        console.log("H241_OK pre-repair-env-backslash-underscore-tooth-confirmed-glued " + JSON.stringify(oldSplit));
+      } else {
+        throw new Error("pre-repair whitespace-only env split tooth unexpectedly separated the executable");
+      }
+      console.log("H241_OK quoted-argv-pre-repair-teeth");
+    }
+  }
+  {
+    // Committed self-review performance witnesses. Warmed medians (2
+    // discarded warm-up runs, then a median of several samples) with
+    // generous CI-safe ratio + additive slack, sized to make the old
+    // per-occurrence quadratic behavior obviously fail while the new
+    // linear behavior comfortably passes.
+    function median(samples) {
+      const sorted = samples.slice().sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)];
+    }
+    const reviewerGates = { gates: ["never review own generation (Law 5)"], forbidden: [] };
+    function timePlaybookFindings(body) {
+      const t0 = process.hrtime.bigint();
+      const findings = playbookBodyObligationFindings("reviewer", reviewerGates, body);
+      const ns = Number(process.hrtime.bigint() - t0);
+      return { findings, ns };
+    }
+    function benchPlaybook(body, reps) {
+      timePlaybookFindings(body);
+      timePlaybookFindings(body);
+      const samples = [];
+      for (let i = 0; i < reps; i += 1) samples.push(timePlaybookFindings(body));
+      return {
+        ns: median(samples.map((s) => s.ns)),
+        allEmpty: samples.every((s) => s.findings.length === 0),
+      };
+    }
+    // Generous CI-safe bound: each doubling may cost up to ~3.2x plus a
+    // flat 20ms, which the old roughly-quadratic receipts (15.86/59.21/
+    // 226.93 ms and 46.97/275.62/2049.70 ms) exceed on their larger
+    // doubling, while new ~2x linear receipts pass with wide headroom.
+    function assertDoublingBound(label, smallerNs, largerNs) {
+      const bound = smallerNs * 3.2 + 20_000_000;
+      if (largerNs > bound) {
+        throw new Error(
+          "self-review perf witness " + label + " exceeded linear bound: " +
+          (largerNs / 1e6).toFixed(2) + "ms > " + (bound / 1e6).toFixed(2) + "ms bound (from " +
+          (smallerNs / 1e6).toFixed(2) + "ms)"
+        );
+      }
+    }
+    // Witness 1: one permission plus repeated benign own-work exclusions
+    // ("other than its own work") at 4K/8K/16K occurrences. Targets the
+    // old topicLocallyExcluded prefix-zero slice/split per occurrence.
+    function ownWorkExclusionBody(n) {
+      const topics = Array.from(
+        { length: n },
+        (_, i) => "other than its own work topic " + i
+      ).join(" ");
+      return "An independent reviewer has permission to review any work " + topics + ".";
+    }
+    const ownWork4k = benchPlaybook(ownWorkExclusionBody(4096), 7);
+    const ownWork8k = benchPlaybook(ownWorkExclusionBody(8192), 7);
+    const ownWork16k = benchPlaybook(ownWorkExclusionBody(16384), 7);
+    if (!ownWork4k.allEmpty || !ownWork8k.allEmpty || !ownWork16k.allEmpty) {
+      throw new Error(
+        "own-work-exclusion perf witness must stay finding-empty at every size"
+      );
+    }
+    assertDoublingBound("own-work-exclusion 4k-to-8k", ownWork4k.ns, ownWork8k.ns);
+    assertDoublingBound("own-work-exclusion 8k-to-16k", ownWork8k.ns, ownWork16k.ns);
+    console.log(
+      "H241_OK self-review-perf-own-work-exclusion-4k-8k-16k ms=" +
+        [ownWork4k.ns, ownWork8k.ns, ownWork16k.ns].map((ns) => (ns / 1e6).toFixed(2)).join(",") +
+        " ratio=" +
+        (ownWork8k.ns / ownWork4k.ns).toFixed(2) + "," + (ownWork16k.ns / ownWork8k.ns).toFixed(2)
+    );
+    // Witness 2: one long clause with repeated benign non-grant
+    // permission occurrences ("may discuss self-review") under one
+    // actor, at 1K/2K/4K. Targets the old per-permission self/verb
+    // rescan (permissionPredicateGrantsSelfReview / grantThenSelfReview
+    // called once per permission span, each rescanning every self span
+    // from offset zero).
+    function repeatedNonGrantSelfReviewBody(n) {
+      const repeats = Array.from({ length: n }, () => "may discuss self-review").join(" ");
+      return "An independent reviewer " + repeats + ".";
+    }
+    const nonGrant1k = benchPlaybook(repeatedNonGrantSelfReviewBody(1024), 5);
+    const nonGrant2k = benchPlaybook(repeatedNonGrantSelfReviewBody(2048), 5);
+    const nonGrant4k = benchPlaybook(repeatedNonGrantSelfReviewBody(4096), 5);
+    if (!nonGrant1k.allEmpty || !nonGrant2k.allEmpty || !nonGrant4k.allEmpty) {
+      throw new Error(
+        "repeated-non-grant-self-review perf witness must stay finding-empty at every size"
+      );
+    }
+    assertDoublingBound("repeated-non-grant-self-review 1k-to-2k", nonGrant1k.ns, nonGrant2k.ns);
+    assertDoublingBound("repeated-non-grant-self-review 2k-to-4k", nonGrant2k.ns, nonGrant4k.ns);
+    console.log(
+      "H241_OK self-review-perf-repeated-non-grant-1k-2k-4k ms=" +
+        [nonGrant1k.ns, nonGrant2k.ns, nonGrant4k.ns].map((ns) => (ns / 1e6).toFixed(2)).join(",") +
+        " ratio=" +
+        (nonGrant2k.ns / nonGrant1k.ns).toFixed(2) + "," + (nonGrant4k.ns / nonGrant2k.ns).toFixed(2)
+    );
+    // Sanity: reproduce the exact old reviewer receipts and confirm the
+    // same bound would have failed them (proves the assertion has teeth,
+    // not just that current numbers happen to be small).
+    const oldOwnWorkReceiptMs = [15.86, 59.21, 226.93];
+    const oldNonGrantReceiptMs = [46.97, 275.62, 2049.7];
+    function boundHolds(smallerMs, largerMs) {
+      return largerMs <= smallerMs * 3.2 + 20;
+    }
+    if (
+      boundHolds(oldOwnWorkReceiptMs[0], oldOwnWorkReceiptMs[1]) &&
+      boundHolds(oldOwnWorkReceiptMs[1], oldOwnWorkReceiptMs[2]) &&
+      boundHolds(oldNonGrantReceiptMs[0], oldNonGrantReceiptMs[1]) &&
+      boundHolds(oldNonGrantReceiptMs[1], oldNonGrantReceiptMs[2])
+    ) {
+      throw new Error("perf bound tooth is too loose: the old quadratic reviewer receipts would pass it");
+    }
+    console.log("H241_OK self-review-perf-bound-rejects-old-quadratic-receipts");
+    // Final explicit grant control: still correctly detected as a grant.
+    const grantControlFindings = playbookBodyObligationFindings(
+      "reviewer",
+      reviewerGates,
+      "An independent reviewer has permission to self-review."
+    );
+    if (!grantControlFindings.some((f) => f.code === "E_ROLE_NEGATION" && /self-review/.test(f.message))) {
+      throw new Error("final explicit grant control must still produce E_ROLE_NEGATION");
+    }
+    console.log("H241_OK self-review-perf-final-explicit-grant-control");
+    // Non-brittle source-structure check: isolate each function body by
+    // its own start marker through the next function declaration (not
+    // exact line numbers), then assert the hot path has no per-permission
+    // rescan shape left in it.
+    const semSrcForPerf = readFileSync(process.env.SEM, "utf8");
+    function functionBody(src, name, nextMarkerRe) {
+      const start = src.indexOf("function " + name);
+      if (start < 0) throw new Error("cannot locate function " + name + " in source");
+      const rest = src.slice(start);
+      const nextRel = rest.slice(1).search(nextMarkerRe);
+      return nextRel < 0 ? rest : rest.slice(0, nextRel + 1);
+    }
+    const permissionPredicateNegatedBody = functionBody(
+      semSrcForPerf,
+      "permissionPredicateNegated",
+      /^function /m
+    );
+    if (
+      /slice\(\s*0\s*,\s*span\.index\s*\)/.test(permissionPredicateNegatedBody) ||
+      /split\(\s*NEW_SUBJECT_BOUNDARY_RE\s*\)/.test(permissionPredicateNegatedBody)
+    ) {
+      throw new Error(
+        "permissionPredicateNegated must not slice(0, span.index) or split(NEW_SUBJECT_BOUNDARY_RE) per permission"
+      );
+    }
+    const selfReviewGrantTopicBody = functionBody(
+      semSrcForPerf,
+      "selfReviewGrantTopic",
+      /^function /m
+    );
+    if (/for\s*\(\s*const\s+span\s+of\s+perms\s*\)/.test(selfReviewGrantTopicBody)) {
+      throw new Error("selfReviewGrantTopic must not loop directly for (const span of perms)");
+    }
+    if (
+      /permissionPredicateGrantsSelfReview\s*\(/.test(selfReviewGrantTopicBody) ||
+      /\bgrantThenSelfReview\s*\(/.test(selfReviewGrantTopicBody)
+    ) {
+      throw new Error(
+        "selfReviewGrantTopic must not call permissionPredicateGrantsSelfReview/grantThenSelfReview directly (per-permission rescan shape)"
+      );
+    }
+    console.log("H241_OK self-review-perf-source-structure-no-per-permission-rescan");
+  }
+  {
     const semSrc = readFileSync(process.env.SEM, "utf8");
     if (!/function overlayGateIsRemovalObject/.test(semSrc) || !/overlayGateIsRemovalObject\(t, action, gate\)/.test(semSrc)) {
       throw new Error("owner authorization is not bound to the removal-action object");
@@ -5911,6 +6293,15 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     }
     if (/SELF_REVIEW_GRANT_SKIP_RE/.test(semSrc) || /selfReviewGrantSkipOnly/.test(semSrc) || /SELF_REVIEW_GRANT_ENABLE_RE/.test(semSrc) || /toks\.length\s*>\s*8/.test(semSrc) || /SELF_REVIEW_NON_GRANT_PRED_RE\.test\(\s*intervening\s*\)/.test(semSrc)) {
       throw new Error("obsolete self-review skip allowlist/cap / bare-token non-grant classifier still present");
+    }
+    if (
+      !/overlayAdversativeConnectorRejectsRemoval/.test(semSrc) ||
+      !/overlayAdversativeBoundaryIsPostRemovalTarget/.test(semSrc) ||
+      !/SELF_REVIEW_REQUIRED_OF_RE/.test(semSrc)
+    ) {
+      throw new Error(
+        "owner post-target adversative-connector narrowing / reversed self-review-required-of modeling is not present"
+      );
     }
     const oldWouldAuthorizeLaterMention = (clause) => {
       const t = String(clause);
@@ -6050,6 +6441,69 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
         throw new Error("pre-repair permission-span tooth should miss " + body);
       }
     }
+    // Modified/passive/reversed permission obligations added this round
+    // (explicit/full adjective slot, was/has-been granted|given passive,
+    // expressly-required adverb slot, reversed "self-review is required
+    // of" subject) are unreachable by the same old span/verb classifiers
+    // above — same tooth, extended family.
+    const modifiedPassiveReversedMisses = [
+      "An independent reviewer has explicit permission to self-review.",
+      "An independent reviewer has full authority to self-review.",
+      "An independent reviewer was granted permission to self-review.",
+      "An independent reviewer has been given permission to self-review.",
+      "An independent reviewer is expressly required to self-review.",
+      "Self-review is required of an independent reviewer.",
+    ];
+    for (const body of modifiedPassiveReversedMisses) {
+      if (oldSpanRequiresSecondGrant(body) || oldGrantThenSelfReview(body)) {
+        throw new Error("pre-repair modified/passive/reversed tooth should miss " + body);
+      }
+    }
+    // deny/refuse/forbid/prevent self-review must block a grant verb the
+    // same way discuss/report/reject/ban/prohibit already did. Before
+    // this round SELF_REVIEW_NON_GRANT_PRED_RE lacked those four verbs,
+    // so an old-shaped predicate list would have let "may deny
+    // self-review" etc. read as an unblocked (granted) intervening gap.
+    const oldSelfReviewNonGrantPredRe =
+      /\b(?:discuss(?:es|ed|ing|ion|ions)?|report(?:s|ed|ing)?|document(?:s|ed|ing|ation)?|mention(?:s|ed|ing)?|record(?:s|ed|ing)?|reject(?:s|ed|ing|ion)?|ban(?:s|ned|ning)?|prohibit(?:s|ed|ing|ion)?)\b/i;
+    for (const verb of ["deny", "refuse", "forbid", "prevent"]) {
+      if (oldSelfReviewNonGrantPredRe.test(verb)) {
+        throw new Error("pre-repair deny-family tooth should miss " + verb);
+      }
+    }
+    // The doesnt contraction negating a permission predicate: the
+    // pre-repair LOCAL_POLARITY_TOKEN_RE lacked that contraction family
+    // (only the bare dont spelling was covered), so An independent
+    // reviewer doesnt have permission to self-review would have read as
+    // an unnegated (granted) permission span. Apostrophes below are
+    // written as \u0027 escapes, matching this heredoc file convention.
+    const oldLocalPolarityTokenRe =
+      /^(?:not|never|no|neither|nor|don\u0027t|cannot|can\u0027t|isn\u0027t|aren\u0027t|wasn\u0027t|weren\u0027t)$/i;
+    if (oldLocalPolarityTokenRe.test("doesn\u0027t")) {
+      throw new Error("pre-repair contraction tooth should miss the doesnt spelling");
+    }
+    // Naive owner+approved+removal+gate-id keyword co-occurrence (the
+    // same shape as oldWouldAuthorizeLaterMention above) would also
+    // wrongly authorize every pending/narrowed/rejected/target-qualifier
+    // family below, since it never inspects what follows the gate id.
+    const ownerNarrowingMisses = [
+      "The owner approved that removal of G12 is pending.",
+      "The owner approved removal of G12, but only from documentation.",
+      "The owner approved removal of G12, but not as a human gate.",
+      "The owner approved removal of G12, but that was explicitly rejected.",
+      "The owner approved removal of G12, but that was not yet authorized.",
+      "The owner approved removal of G12, but that was unauthorized.",
+      "The owner approved removal of G12, but that remains denied.",
+      "The owner approved removal of G12 from documentation.",
+      "The owner approved removal of G12 in the example.",
+      "The owner approved removal of G12 as a label.",
+    ];
+    for (const clause of ownerNarrowingMisses) {
+      if (!oldWouldAuthorizeLaterMention(clause)) {
+        throw new Error("pre-repair owner-narrowing tooth lost " + clause);
+      }
+    }
+    console.log("H241_OK owner-narrowing-and-self-review-family-pre-repair-teeth");
     console.log("H241_OK overlay-removal-object-bind-and-self-review-grant-source");
   }
   const actorRows = [
@@ -6078,6 +6532,20 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "owner-approved-removal-of-obsolete-documentation-about-g5", decision: "Decided: The owner approved removal of obsolete documentation about G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
     { name: "owner-approved-removal-of-another-object-minutes-mention-g5", decision: "Decided: The owner approved removal of another object; the minutes mention G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
     { name: "owner-approved-the-removal-of-g5", decision: "Decided: The owner approved the removal of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: false },
+    { name: "owner-approved-removal-pending", decision: "Decided: the owner approved that removal of G12 is pending.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-only-from-documentation", decision: "Decided: the owner approved removal of G12, but only from documentation.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-not-as-a-human-gate", decision: "Decided: the owner approved removal of G12, but not as a human gate.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-explicitly-rejected", decision: "Decided: the owner approved removal of G12, but that was explicitly rejected.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-not-yet-authorized", decision: "Decided: the owner approved removal of G12, but that was not yet authorized.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-unauthorized", decision: "Decided: the owner approved removal of G12, but that was unauthorized.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-remains-denied", decision: "Decided: the owner approved removal of G12, but that remains denied.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-target-qualifier-from-documentation", decision: "Decided: the owner approved removal of G12 from documentation.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-target-qualifier-in-the-example", decision: "Decided: the owner approved removal of G12 in the example.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-target-qualifier-as-a-label", decision: "Decided: the owner approved removal of G12 as a label.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-g12-gate-noun-preserved-green", decision: "Decided: the owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    { name: "owner-approved-the-g12-gate-preserved-green", decision: "Decided: the owner approved removal of the G12 gate.", gate: "G12", overlay: "G12 is waived.", expectFinding: false },
+    { name: "owner-approved-g5-preserved-green", decision: "Decided: the owner approved removal of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: false },
+    { name: "g11-denied-but-g12-approved-cross-gate-green", decision: "Decided: the owner did not approve removal of G11, but the owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
   ];
   for (const row of actorRows) {
     const findings = overlayLimitFindings(row.overlay, row.decision, ["G5", "G11", "G12"]);
@@ -6143,6 +6611,23 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "is-not-required-to-self-review", body: "An independent reviewer is not required to self-review.", expect: false },
     { name: "cannot-self-review", body: "An independent reviewer cannot self-review.", expect: false },
     { name: "may-not-self-review", body: "An independent reviewer may not self-review.", expect: false },
+    { name: "has-explicit-permission-to-self-review", body: "An independent reviewer has explicit permission to self-review.", expect: true },
+    { name: "has-full-authority-to-self-review", body: "An independent reviewer has full authority to self-review.", expect: true },
+    { name: "was-granted-permission-to-self-review", body: "An independent reviewer was granted permission to self-review.", expect: true },
+    { name: "has-been-given-permission-to-self-review", body: "An independent reviewer has been given permission to self-review.", expect: true },
+    { name: "is-expressly-required-to-self-review", body: "An independent reviewer is expressly required to self-review.", expect: true },
+    { name: "self-review-is-required-of-independent-reviewer", body: "Self-review is required of an independent reviewer.", expect: true },
+    { name: "may-give-permission-to-self-review", body: "An independent reviewer may give the builder permission to self-review.", expect: true },
+    { name: "may-let-same-agent-review-own-work", body: "An independent reviewer may let the same agent review its own work.", expect: true },
+    { name: "may-assign-same-agent-to-review", body: "An independent reviewer may assign the same agent to review.", expect: true },
+    { name: "can-self-review", body: "An independent reviewer can self-review.", expect: true },
+    { name: "doesnt-have-permission-to-self-review", body: "An independent reviewer doesn\u0027t have permission to self-review.", expect: false },
+    { name: "may-deny-self-review", body: "An independent reviewer may deny self-review.", expect: false },
+    { name: "may-refuse-self-review", body: "An independent reviewer may refuse self-review.", expect: false },
+    { name: "may-forbid-self-review", body: "An independent reviewer may forbid self-review.", expect: false },
+    { name: "may-prevent-self-review", body: "An independent reviewer may prevent self-review.", expect: false },
+    { name: "may-prohibit-self-review-bare", body: "An independent reviewer may prohibit self-review.", expect: false },
+    { name: "ordinary-independent-review", body: "An independent reviewer reviews the change and approves it.", expect: false },
   ];
   for (const row of permRows) {
     const findings = playbookBodyObligationFindings(
@@ -8608,6 +9093,128 @@ else
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
+echo "# 241 quoted argv/env bypass regressions (sandbox CLI)"
+mutate_quoted_argv_pass() {
+  local label="$1"
+  local out rc
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+    && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+    echo "  planted quoted-argv PASS failure line ($label):"
+    echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+    ok "mutation: $label PASS harness fails"
+  else
+    bad "mutation quoted-argv PASS ($label) (rc=$rc): $out"
+  fi
+}
+mutate_quoted_argv_approve_only() {
+  local label="$1"
+  local out rc
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "benign: $label APPROVE-only harness remains green"
+  else
+    bad "benign quoted-argv APPROVE-only ($label) (rc=$rc): $out"
+  fi
+}
+
+# Quoted env '-S' PASS vs APPROVE-only.
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_S_PASS_EOF'
+#!/bin/bash
+# VERDICT: APPROVE
+env '-S' "grep -y 'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)'"
+QUOTED_S_PASS_EOF
+mutate_quoted_argv_pass "quoted env '-S'"
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_S_APPROVE_EOF'
+#!/bin/bash
+env '-S' "grep -y 'VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)'"
+QUOTED_S_APPROVE_EOF
+mutate_quoted_argv_approve_only "quoted env '-S'"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# Quoted grep '-y' before the pattern, PASS vs APPROVE-only.
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_Y_BEFORE_PASS_EOF'
+#!/bin/bash
+# VERDICT: APPROVE
+grep '-y' 'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)'
+QUOTED_Y_BEFORE_PASS_EOF
+mutate_quoted_argv_pass "quoted grep '-y' before pattern"
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_Y_BEFORE_APPROVE_EOF'
+#!/bin/bash
+grep '-y' 'VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)'
+QUOTED_Y_BEFORE_APPROVE_EOF
+mutate_quoted_argv_approve_only "quoted grep '-y' before pattern"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# Quoted grep '-y' after the pattern, PASS vs APPROVE-only.
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_Y_AFTER_PASS_EOF'
+#!/bin/bash
+# VERDICT: APPROVE
+grep 'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)' '-y'
+QUOTED_Y_AFTER_PASS_EOF
+mutate_quoted_argv_pass "quoted grep '-y' after pattern"
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_Y_AFTER_APPROVE_EOF'
+#!/bin/bash
+grep 'VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)' '-y'
+QUOTED_Y_AFTER_APPROVE_EOF
+mutate_quoted_argv_approve_only "quoted grep '-y' after pattern"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# Quoted env '-P', PASS vs APPROVE-only. Static text classification does
+# not execute env/grep, so this is not gated on runtime -P support.
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_P_PASS_EOF'
+#!/bin/bash
+# VERDICT: APPROVE
+env '-P' /usr/bin grep -y 'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)'
+QUOTED_P_PASS_EOF
+mutate_quoted_argv_pass "quoted env '-P'"
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_P_APPROVE_EOF'
+#!/bin/bash
+env '-P' /usr/bin grep -y 'VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)'
+QUOTED_P_APPROVE_EOF
+mutate_quoted_argv_approve_only "quoted env '-P'"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# Quoted env '--path', PASS vs APPROVE-only. Static text classification
+# does not execute env/grep, so this is not gated on this platform's env
+# binary supporting the GNU long-option spelling.
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_PATH_PASS_EOF'
+#!/bin/bash
+# VERDICT: APPROVE
+env '--path' /usr/bin grep -y 'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)'
+QUOTED_PATH_PASS_EOF
+mutate_quoted_argv_pass "quoted env '--path'"
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'QUOTED_PATH_APPROVE_EOF'
+#!/bin/bash
+env '--path' /usr/bin grep -y 'VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)'
+QUOTED_PATH_APPROVE_EOF
+mutate_quoted_argv_approve_only "quoted env '--path'"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# Required repro: /usr/bin/env -S backslash-underscore obfuscated
+# executable/flag/pattern boundary, PASS vs APPROVE-only. Static text
+# classification does not execute env/grep, so this is not gated on
+# runtime -S support either.
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'ENV_BACKSLASH_UNDERSCORE_PASS_EOF'
+#!/bin/bash
+# VERDICT: APPROVE
+/usr/bin/env -S "grep\_-y\_'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)'"
+ENV_BACKSLASH_UNDERSCORE_PASS_EOF
+mutate_quoted_argv_pass "env -S backslash-underscore"
+cat > "$SANDBOX/scripts/second-opinion.sh" <<'ENV_BACKSLASH_UNDERSCORE_APPROVE_EOF'
+#!/bin/bash
+/usr/bin/env -S "grep\_-y\_'VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)'"
+ENV_BACKSLASH_UNDERSCORE_APPROVE_EOF
+mutate_quoted_argv_approve_only "env -S backslash-underscore"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "restore: sandbox remains green after quoted-argv/env CLI mutations"
+else
+  bad "restore after quoted-argv/env CLI mutations (rc=$rc): $out"
+fi
+
 BRE_PASS_DECOY_SH=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)"\n'
 printf '%s' "$BRE_PASS_DECOY_SH" > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -10441,6 +11048,55 @@ else
   bad "benign overlay G11 denied but G12 approved (rc=$rc): $out"
 fi
 
+for decision in \
+  "Decided: the owner approved that removal of G12 is pending." \
+  "Decided: the owner approved removal of G12, but only from documentation." \
+  "Decided: the owner approved removal of G12, but not as a human gate." \
+  "Decided: the owner approved removal of G12, but that was explicitly rejected." \
+  "Decided: the owner approved removal of G12, but that was not yet authorized." \
+  "Decided: the owner approved removal of G12, but that was unauthorized." \
+  "Decided: the owner approved removal of G12, but that remains denied."
+do
+  printf '%s\n' "$decision" > "$SANDBOX/memory/DECISIONS.md"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+    && echo "$out" | grep -q 'G12' \
+    && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+    echo "  planted owner-narrowing G12 authorization failure line:"
+    echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+    ok "mutation: $(printf '%s' "$decision" | tr '\n' ' ') does not authorize overlay removal of G12"
+  else
+    bad "mutation overlay owner-narrowing G12 ($decision) (rc=$rc): $out"
+  fi
+done
+
+for decision in \
+  "Decided: the owner approved removal of G12 from documentation." \
+  "Decided: the owner approved removal of G12 in the example." \
+  "Decided: the owner approved removal of G12 as a label."
+do
+  printf '%s\n' "$decision" > "$SANDBOX/memory/DECISIONS.md"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+    && echo "$out" | grep -q 'G12' \
+    && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+    echo "  planted target-qualifier G12 authorization failure line:"
+    echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+    ok "mutation: $(printf '%s' "$decision" | tr '\n' ' ') does not authorize overlay removal of G12"
+  else
+    bad "mutation overlay target-qualifier G12 ($decision) (rc=$rc): $out"
+  fi
+done
+
+printf '%s\n' 'Decided: the owner did not approve removal of G11, but the owner approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "restore: denied G11 but approved G12 still authorizes G12 overlay removal after narrowing mutations"
+else
+  bad "restore overlay G11 denied but G12 approved after narrowing mutations (rc=$rc): $out"
+fi
+
 printf '%s\n' 'Decided: the owner approved removal of G12.' \
   > "$SANDBOX/memory/DECISIONS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -11425,7 +12081,17 @@ for body in \
   "An independent reviewer has authority to self-review." \
   "An independent reviewer must self-review." \
   "An independent reviewer shall self-review." \
-  "An independent reviewer is required to self-review."
+  "An independent reviewer is required to self-review." \
+  "An independent reviewer has explicit permission to self-review." \
+  "An independent reviewer has full authority to self-review." \
+  "An independent reviewer was granted permission to self-review." \
+  "An independent reviewer has been given permission to self-review." \
+  "An independent reviewer is expressly required to self-review." \
+  "Self-review is required of an independent reviewer." \
+  "An independent reviewer may give the builder permission to self-review." \
+  "An independent reviewer may let the same agent review its own work." \
+  "An independent reviewer may assign the same agent to review." \
+  "An independent reviewer can self-review."
 do
   node -e '
 const fs=require("fs");
@@ -11438,7 +12104,7 @@ fs.writeFileSync(p,t);
 ' "$SANDBOX/playbooks/reviewer.md" "$body"
   out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
   if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
-    && echo "$out" | grep -q 'self-review'; then
+    && echo "$out" | grep -q 'self-review\|same-agent'; then
     echo "  planted actor-intervening self-review grant failure line:"
     echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
     ok "mutation: $body fails"
@@ -11464,7 +12130,14 @@ for body in \
   "An independent reviewer shall not self-review." \
   "An independent reviewer is not required to self-review." \
   "An independent reviewer cannot self-review." \
-  "An independent reviewer may not self-review."
+  "An independent reviewer may not self-review." \
+  "An independent reviewer doesn't have permission to self-review." \
+  "An independent reviewer may deny self-review." \
+  "An independent reviewer may refuse self-review." \
+  "An independent reviewer may forbid self-review." \
+  "An independent reviewer may prevent self-review." \
+  "An independent reviewer may prohibit self-review." \
+  "An independent reviewer reviews the change and approves it."
 do
   node -e '
 const fs=require("fs");
