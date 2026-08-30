@@ -2387,19 +2387,19 @@ function harnessAcceptsApprove(text) {
 
 /**
  * Quote context for canonical Bash grep forms only — not a general shell
- * parser. Tracks line-local none/single/double so BRE source-run rules can
+ * parser. Tracks shell-slice none/single/double so BRE source-run rules can
  * differ for unquoted vs single-quoted vs double-quoted regexes. An unquoted
  * comment start (` #` / line-leading `#`) ends executable matching on that
- * line; `#` inside quotes is not a comment. Residual #264: $'...' ANSI-C
- * quoting, escaped quotes, and line continuations. Residual #263:
+ * physical line; `#` inside quotes is not a comment. Residual #264: $'...'
+ * ANSI-C quoting and escaped quote context. Residual #263:
  * executable-command provenance for bare unquoted ERE groups and
  * comment-only APPROVE text.
  */
-function lineLocalQuoteContext(text, index) {
+function shellSliceQuoteContext(text, index) {
   const src = String(text || "");
-  const lineStart = src.lastIndexOf("\n", Math.max(0, index - 1)) + 1;
+  const sliceStart = 0;
   let state = "none";
-  let i = lineStart;
+  let i = sliceStart;
   while (i < index) {
     const c = src[i];
     if (state === "single") {
@@ -2417,13 +2417,63 @@ function lineLocalQuoteContext(text, index) {
       continue;
     }
     if (state === "comment") return "comment";
-    const atWordStart = i === lineStart || src[i - 1] === " " || src[i - 1] === "\t";
+    const atWordStart =
+      i === sliceStart || /[ \t\r\n]/.test(src[i - 1] || "");
     if (c === "#" && atWordStart) return "comment";
     i += 1;
     if (c === "'") state = "single";
     else if (c === '"') state = "double";
   }
   return state;
+}
+
+function quoteStateAfterPhysicalLine(line, initialState) {
+  const src = String(line || "");
+  let state = initialState || "none";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      if (c === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      if (c === "\\") {
+        i += Math.min(2, src.length - i);
+        continue;
+      }
+      if (c === '"') state = "none";
+      i += 1;
+      continue;
+    }
+    const atWordStart = i === 0 || src[i - 1] === " " || src[i - 1] === "\t";
+    if (c === "#" && atWordStart) break;
+    if (c === "\\") {
+      i += Math.min(2, src.length - i);
+      continue;
+    }
+    if (c === "'") state = "single";
+    else if (c === '"') state = "double";
+    i += 1;
+  }
+  return state;
+}
+
+function shellMatcherSlices(text) {
+  const slices = [];
+  let slice = "";
+  let quoteState = "none";
+  for (const line of String(text || "").split(/\r?\n/)) {
+    slice = slice ? `${slice}\n${line}` : line;
+    quoteState = quoteStateAfterPhysicalLine(line, quoteState);
+    if (quoteState === "none") {
+      slices.push(slice);
+      slice = "";
+    }
+  }
+  if (slice) slices.push(slice);
+  return slices;
 }
 
 function unquotedCommentStart(line) {
@@ -2447,7 +2497,7 @@ function unquotedCommentStart(line) {
       i += 1;
       continue;
     }
-    const atWordStart = i === 0 || src[i - 1] === " " || src[i - 1] === "\t";
+    const atWordStart = i === 0 || /[ \t\r\n]/.test(src[i - 1] || "");
     if (c === "#" && atWordStart) return i;
     if (c === "'") state = "single";
     else if (c === '"') state = "double";
@@ -2544,10 +2594,10 @@ function addVerdictToken(tokens, raw) {
 }
 
 function collectMatcherClusterTokens(slice, tokens) {
-  // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a line-local
+  // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a shell-slice
   // matcher cluster of balanced groups (and ungrouped |TOKEN siblings).
-  // Never match a group across a newline: dangling `(` on this line must
-  // not swallow a later line's PASS matcher.
+  // A slice spans physical lines only while a shell quote remains open;
+  // a closed-quote dangling `(` cannot swallow a later PASS matcher.
   const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
   let p;
   while ((p = prefixRe.exec(slice)) !== null) {
@@ -2580,22 +2630,24 @@ function collectMatcherClusterTokens(slice, tokens) {
 
 function harnessVerdictRegexGroupTokens(text) {
   const tokens = new Set();
-  // Normalize only executable BRE grouping/alternation on each line, then
-  // parse every sibling group in the same line-local matcher cluster.
+  // Normalize only executable BRE grouping/alternation in each shell slice,
+  // then parse every sibling group in the same matcher cluster. Physical
+  // lines join only while a shell quote is open, covering legal multiline
+  // quoted grep patterns without restoring unconstrained cross-line groups.
   // Canonical grep ERE (`grep -E`, combined short flags containing `E`,
   // `egrep`) must not apply BRE backslash normalization; unescaped quoted
   // ERE groups remain executable. Pre-existing unquoted escaped ERE is
   // residual #263/#264.
-  for (const line of String(text || "").split(/\r?\n/)) {
-    const commentAt = unquotedCommentStart(line);
-    let slice = commentAt === -1 ? line : line.slice(0, commentAt);
-    if (!lineHasGrepEre(line)) {
+  for (const shellSlice of shellMatcherSlices(text)) {
+    const commentAt = unquotedCommentStart(shellSlice);
+    let slice = commentAt === -1 ? shellSlice : shellSlice.slice(0, commentAt);
+    if (!lineHasGrepEre(shellSlice)) {
       slice = slice.replace(
         /(\\*)([()|])/g,
         (match, slashes, delim, offset, whole) =>
           executableBreDelimRun(
             slashes.length,
-            lineLocalQuoteContext(whole, offset)
+            shellSliceQuoteContext(whole, offset)
           )
             ? delim
             : match

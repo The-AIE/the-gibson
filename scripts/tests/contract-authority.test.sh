@@ -4578,6 +4578,22 @@ const grepEUnescapedPassDecoy = grepEreScript(
   "-E",
   `"VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)"`
 );
+const literalNewlineErePassDecoy = [
+  "#!/bin/bash",
+  "grep -qE \"VERDICT:",
+  "(PASS|REQUEST_CHANGES)\"",
+].join("\n");
+const continuedErePassDecoy = [
+  "#!/bin/bash",
+  "grep -qE \"VERDICT:[[:space:]]*(APPROVE|\\",
+  "PASS)\"",
+].join("\n");
+const closedQuoteDanglingThenPassProse = [
+  "#!/bin/bash",
+  "grep -qE \"VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)\"",
+  "grep -qE \"VERDICT:[[:space:]]*(APPROVE\"",
+  "echo \"|PASS)\"",
+].join("\n");
 const danglingCommentBrePass = [
   "#!/bin/bash",
   "# note: VERDICT: (legacy form dropped",
@@ -4774,6 +4790,13 @@ function bashGrepRun(script, sample) {
 function bashGrepMatches(script, sample) {
   return bashGrepRun(script, sample).status === 0;
 }
+function bashWholeScriptMatches(script, sample) {
+  const body = String(script).split(/\n/).slice(1).join("\n");
+  return spawnSync("bash", ["-c", body], {
+    input: `${sample}\n`,
+    encoding: "utf8",
+  }).status === 0;
+}
 const grepProofs = [
   { name: "single-quoted-run1-approve-matches-APPROVE", script: singleQuotedBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "single-quoted-run1-pass-matches-PASS", script: singleQuotedBrePassDecoy, sample: "VERDICT: PASS", want: true },
@@ -4810,6 +4833,16 @@ for (const proof of grepProofs) {
   const got = bashGrepMatches(proof.script, proof.sample);
   if (got !== proof.want) {
     throw new Error(proof.name + " want match=" + proof.want + " got " + got);
+  }
+  console.log("H241_OK grep-" + proof.name);
+}
+const multilineGrepProofs = [
+  { name: "literal-newline-ERE-pass-matches-PASS", script: literalNewlineErePassDecoy },
+  { name: "continued-ERE-pass-matches-PASS", script: continuedErePassDecoy },
+];
+for (const proof of multilineGrepProofs) {
+  if (!bashWholeScriptMatches(proof.script, "VERDICT: PASS")) {
+    throw new Error(proof.name + " want match=true got false");
   }
   console.log("H241_OK grep-" + proof.name);
 }
@@ -5351,6 +5384,47 @@ const rows = [
       "scripts/second-opinion.sh accepts VERDICT: PASS",
       "canonical PR-review positive verdict is APPROVE",
     ],
+  },
+  {
+    name: "grep-E-literal-newline-pass-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": literalNewlineErePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "grep-E-continuation-pass-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": continuedErePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "closed-quote-dangling-group-does-not-swallow-pass-prose",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": closedQuoteDanglingThenPassProse,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
   },
   {
     name: "dangling-comment-bre-pass-is-executable-pass",
