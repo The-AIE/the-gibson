@@ -4543,6 +4543,35 @@ const mixedDqGroup3Alt1PassDecoy = mixedDqGroupAltScript(3, 1, ["APPROVE", "PASS
 const mixedDqGroup3Alt1ApproveOnly = mixedDqGroupAltScript(3, 1, ["APPROVE", "REQUEST_CHANGES"]);
 const mixedDqGroup3Alt1PassNeedle = mixedDqGroupAltGrep(3, 1, ["APPROVE", "PASS", "REQUEST_CHANGES"]);
 const mixedDqGroup3Alt1ApproveNeedle = mixedDqGroupAltGrep(3, 1, ["APPROVE", "REQUEST_CHANGES"]);
+function sameLineEreDecoyBreGrep(alts) {
+  const body = `VERDICT:[[:space:]]*\\(${alts.join("\\|")}\\)`;
+  return "grep -E " + SQ + "never" + SQ + " /dev/null; grep " + SQ + body + SQ;
+}
+function sameLineEreDecoyBreScript(alts) {
+  return [
+    "#!/bin/bash",
+    "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+    sameLineEreDecoyBreGrep(alts),
+  ].join("\n");
+}
+const sameLineEreDecoyBrePassDecoy = sameLineEreDecoyBreScript([
+  "APPROVE",
+  "PASS",
+  "REQUEST_CHANGES",
+]);
+const sameLineEreDecoyBreApproveOnly = sameLineEreDecoyBreScript([
+  "APPROVE",
+  "REQUEST_CHANGES",
+]);
+const sameLineEreDecoyBrePassNeedle = sameLineEreDecoyBreGrep([
+  "APPROVE",
+  "PASS",
+  "REQUEST_CHANGES",
+]);
+const sameLineEreDecoyBreApproveNeedle = sameLineEreDecoyBreGrep([
+  "APPROVE",
+  "REQUEST_CHANGES",
+]);
 const siblingDqRun1PassDecoy = siblingQuotedScript("double", 1, ["APPROVE", "PASS"]);
 const siblingDqRun2PassDecoy = siblingQuotedScript("double", 2, ["APPROVE", "PASS"]);
 const siblingSqRun1PassDecoy = siblingQuotedScript("single", 1, ["APPROVE", "PASS"]);
@@ -4798,6 +4827,15 @@ if (!mixedDqGroup3Alt1ApproveOnly.includes(mixedDqGroup3Alt1ApproveNeedle) || mi
 if (!mixedDqGroup3Alt1PassDecoy.includes("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"") || !mixedDqGroup3Alt1ApproveOnly.includes("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"")) {
   throw new Error("mixed double-quoted group-run-3 scripts lost the real APPROVE echo path");
 }
+if (!sameLineEreDecoyBrePassDecoy.includes(sameLineEreDecoyBrePassNeedle) || sameLineEreDecoyBrePassDecoy.includes(sameLineEreDecoyBreApproveNeedle) || !sameLineEreDecoyBrePassDecoy.includes("grep -E " + SQ + "never" + SQ) || sourceBackslashRunLen(sameLineEreDecoyBrePassDecoy, "(") !== 1 || sourceBackslashRunLen(sameLineEreDecoyBrePassDecoy, "|") !== 1) {
+  throw new Error("sameLineEreDecoyBrePassDecoy lost same-line ERE-decoy default-BRE PASS bytes");
+}
+if (!sameLineEreDecoyBreApproveOnly.includes(sameLineEreDecoyBreApproveNeedle) || sameLineEreDecoyBreApproveOnly.includes(sameLineEreDecoyBrePassNeedle) || !sameLineEreDecoyBreApproveOnly.includes("grep -E " + SQ + "never" + SQ) || sourceBackslashRunLen(sameLineEreDecoyBreApproveOnly, "(") !== 1 || sourceBackslashRunLen(sameLineEreDecoyBreApproveOnly, "|") !== 1) {
+  throw new Error("sameLineEreDecoyBreApproveOnly lost same-line ERE-decoy default-BRE approve-only bytes");
+}
+if (!sameLineEreDecoyBrePassDecoy.includes("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"") || !sameLineEreDecoyBreApproveOnly.includes("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"")) {
+  throw new Error("same-line ERE-decoy BRE scripts lost the real APPROVE echo path");
+}
 function bashGrepRun(script, sample) {
   const line = String(script).split(/\n/).find((l) => /^grep\s/.test(l));
   if (!line) throw new Error("missing grep line");
@@ -4855,6 +4893,9 @@ const grepProofs = [
   { name: "unquoted-run4-approve-does-not-match", script: unquotedQuadEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: false },
   { name: "mixed-dq-group3-alt1-pass-matches-PASS", script: mixedDqGroup3Alt1PassDecoy, sample: "VERDICT: PASS", want: true },
   { name: "mixed-dq-group3-alt1-approve-only-does-not-match-PASS", script: mixedDqGroup3Alt1ApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "same-line-ere-decoy-bre-pass-matches-PASS", script: sameLineEreDecoyBrePassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "same-line-ere-decoy-bre-approve-only-does-not-match-PASS", script: sameLineEreDecoyBreApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "same-line-ere-decoy-bre-approve-only-matches-APPROVE", script: sameLineEreDecoyBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
 ];
 for (const proof of grepProofs) {
   const got = bashGrepMatches(proof.script, proof.sample);
@@ -5615,6 +5656,32 @@ const rows = [
       agentsText,
       harnessFiles: {
         "scripts/second-opinion.sh": mixedDqGroup3Alt1ApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-same-line-ere-decoy-default-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": sameLineEreDecoyBrePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-same-line-ere-decoy-default-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": sameLineEreDecoyBreApproveOnly,
         "scripts/release-preflight.sh": approveOnly,
       },
     }),
@@ -7041,6 +7108,112 @@ fi
 
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.mixed-bre-grep.sh"
+
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const mode = process.argv[2];
+const sidecar = process.argv[3];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before same-line ERE-decoy BRE substitute");
+  process.exit(1);
+}
+const alts = mode === "pass"
+  ? ["APPROVE", "PASS", "REQUEST_CHANGES"]
+  : ["APPROVE", "REQUEST_CHANGES"];
+const bs = "\\";
+const body = "VERDICT:[[:space:]]*" + bs + "(" + alts.join(bs + "|") + bs + ")";
+const mixed = "grep -E '\''never'\'' /dev/null; grep '\''" + body + "'\''";
+t = t.replace(needle, mixed);
+const paren = mixed.match(/(\\+)\(/);
+const pipe = mixed.match(/APPROVE(\\+)\|/);
+if (t.includes(needle) || !t.includes(mixed) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES") || !t.includes("grep -E '\''never'\''") || !paren || paren[1].length !== 1 || !pipe || pipe[1].length !== 1) {
+  console.error("same-line ERE-decoy BRE canonical substitute bytes mismatch mode=" + mode + " paren=" + (paren && paren[1].length) + " pipe=" + (pipe && pipe[1].length));
+  process.exit(1);
+}
+if (mode === "pass" && !t.includes("PASS")) {
+  console.error("same-line ERE-decoy BRE PASS substitute lost PASS");
+  process.exit(1);
+}
+if (mode !== "pass" && t.includes("PASS")) {
+  console.error("same-line ERE-decoy BRE approve-only substitute gained PASS");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" pass "$SANDBOX/scripts/.same-line-ere-bre-grep.sh" || {
+  bad "mutation harness same-line ERE-decoy default-BRE PASS substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.same-line-ere-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness same-line ERE-decoy default-BRE PASS runtime does not match VERDICT: PASS"
+fi
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.same-line-ere-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+  :
+else
+  bad "mutation harness same-line ERE-decoy default-BRE PASS runtime does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted same-line ERE-decoy default-BRE PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: substituting same-line ERE-decoy default-BRE PASS into canonical harness fails"
+else
+  bad "mutation same-line ERE-decoy default-BRE PASS canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const sidecar = process.argv[2];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before same-line ERE-decoy BRE approve-only substitute");
+  process.exit(1);
+}
+const bs = "\\";
+const body = "VERDICT:[[:space:]]*" + bs + "(APPROVE" + bs + "|REQUEST_CHANGES" + bs + ")";
+const mixed = "grep -E '\''never'\'' /dev/null; grep '\''" + body + "'\''";
+t = t.replace(needle, mixed);
+const paren = mixed.match(/(\\+)\(/);
+const pipe = mixed.match(/APPROVE(\\+)\|/);
+if (t.includes(needle) || !t.includes(mixed) || mixed.includes("PASS") || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES") || !t.includes("grep -E '\''never'\''") || !paren || paren[1].length !== 1 || !pipe || pipe[1].length !== 1) {
+  console.error("same-line ERE-decoy BRE approve-only canonical substitute bytes mismatch paren=" + (paren && paren[1].length) + " pipe=" + (pipe && pipe[1].length));
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$SANDBOX/scripts/.same-line-ere-bre-grep.sh" || {
+  bad "benign harness same-line ERE-decoy default-BRE approve-only substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.same-line-ere-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign harness same-line ERE-decoy default-BRE approve-only incorrectly matches VERDICT: PASS"
+fi
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.same-line-ere-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+  :
+else
+  bad "benign harness same-line ERE-decoy default-BRE approve-only runtime does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: substituting same-line ERE-decoy default-BRE APPROVE|REQUEST_CHANGES into canonical harness remains green"
+else
+  bad "benign same-line ERE-decoy default-BRE approve-only canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" "$SANDBOX/scripts/.same-line-ere-bre-grep.sh"
 
 mkdir -p "$SANDBOX/local" "$SANDBOX/memory"
 printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
