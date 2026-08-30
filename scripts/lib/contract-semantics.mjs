@@ -2580,9 +2580,9 @@ function lineHasGrepEre(line) {
 /**
  * Split a shell slice into command-list segments on unquoted `;`, `&&`,
  * `||`, and bare `&` only. Quote/#-comment aware via the same bounded
- * scanner used elsewhere — not a general shell parser. Pipelines (`|`)
- * are intentionally not split so unquoted ERE `|` inside a pattern is
- * not mistaken for a command separator (residual with #263/#264).
+ * scanner used elsewhere — not a general shell parser. Pipeline `|` is
+ * isolated later by `shellPipelineStages` so grep ERE/BRE mode is per
+ * executable grep command.
  */
 function shellCommandListSegments(shellSlice) {
   const src = String(shellSlice || "");
@@ -2650,6 +2650,79 @@ function shellCommandListSegments(shellSlice) {
   }
   segments.push(src.slice(start));
   return segments;
+}
+
+/**
+ * Split one command-list segment into pipeline stages so each executable
+ * grep keeps its own ERE/BRE mode. Unquoted `|` that is not `||` is a
+ * pipeline bar only when it is a command connector: whitespace on both
+ * sides (`cmd | cmd`) or the next non-whitespace token is a grep-family
+ * command (`'.*'|grep`). An unescaped ERE `|` inside a matcher token
+ * (`APPROVE|PASS`, including quoted `"...|..."` / `'...|...'`) is not a
+ * stage boundary. Not a general shell parser; residuals #263/#264 keep
+ * ANSI-C quotes, escaped quote context, and unquoted continuation.
+ */
+function isCommandPipelineBar(src, i) {
+  const prev = i > 0 ? src[i - 1] : "";
+  const next = src[i + 1] || "";
+  if (/[ \t]/.test(prev) && /[ \t]/.test(next)) return true;
+  let k = i + 1;
+  while (k < src.length && /[ \t]/.test(src[k])) k += 1;
+  return /^(?:.*\/)?(?:e|f)?grep(?:[\s;|&<>]|$)/.test(src.slice(k));
+}
+
+function shellPipelineStages(segment) {
+  const src = String(segment || "");
+  const stages = [];
+  let start = 0;
+  let state = "none";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      if (c === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      if (c === "\\") {
+        i += Math.min(2, src.length - i);
+        continue;
+      }
+      if (c === '"') state = "none";
+      i += 1;
+      continue;
+    }
+    const atWordStart = i === 0 || /[ \t\r\n]/.test(src[i - 1] || "");
+    if (c === "#" && atWordStart) break;
+    if (c === "\\") {
+      i += Math.min(2, src.length - i);
+      continue;
+    }
+    if (c === "'") {
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (c === "|" && src[i + 1] === "|") {
+      i += 2;
+      continue;
+    }
+    if (c === "|" && isCommandPipelineBar(src, i)) {
+      stages.push(src.slice(start, i));
+      i += 1;
+      start = i;
+      continue;
+    }
+    i += 1;
+  }
+  stages.push(src.slice(start));
+  return stages;
 }
 
 function executableBreDelimRun(slashCount, quoteState) {
@@ -2748,34 +2821,36 @@ function collectMatcherClusterTokens(slice, tokens) {
 
 function harnessVerdictRegexGroupTokens(text) {
   const tokens = new Set();
-  // Normalize only executable BRE grouping/alternation in each command-list
-  // segment, then parse every sibling group in the same matcher cluster.
+  // Normalize only executable BRE grouping/alternation in each pipeline
+  // stage, then parse every sibling group in the same matcher cluster.
   // Physical lines join only while a shell quote is open, covering legal
   // multiline quoted grep patterns without restoring unconstrained
-  // cross-line groups. ERE/BRE mode is attributed per segment (`grep -E`
-  // / `egrep` / combined short flags containing `E`) so a sibling
-  // `grep -E` before a default-BRE verdict matcher cannot suppress BRE
-  // normalization for that matcher. Unescaped quoted ERE groups remain
-  // executable on their own ERE segment. Pre-existing unquoted escaped
-  // ERE and pipeline (`|`) command mixing are residual #263/#264.
+  // cross-line groups. Command-list `;` / `&&` / `||` split first, then
+  // pipeline `|` splits per executable grep so an upstream `grep -E`
+  // cannot suppress BRE normalization of a downstream default-BRE
+  // matcher. Unescaped quoted ERE groups remain executable on their own
+  // ERE stage. Residual #263/#264: not a general shell/regex parser
+  // (bare unquoted ERE provenance, ANSI-C / escaped quotes).
   for (const shellSlice of shellMatcherSlices(text)) {
     for (const segment of shellCommandListSegments(shellSlice)) {
-      const commentAt = unquotedCommentStart(segment);
-      let slice = commentAt === -1 ? segment : segment.slice(0, commentAt);
-      if (!lineHasGrepEre(segment)) {
-        const quoteStates = shellSliceQuoteStates(slice);
-        slice = slice.replace(
-          /(\\*)([()|])/g,
-          (match, slashes, delim, offset) =>
-            executableBreDelimRun(
-              slashes.length,
-              quoteStates[offset] || "none"
-            )
-              ? delim
-              : match
-        );
+      for (const stage of shellPipelineStages(segment)) {
+        const commentAt = unquotedCommentStart(stage);
+        let slice = commentAt === -1 ? stage : stage.slice(0, commentAt);
+        if (!lineHasGrepEre(stage)) {
+          const quoteStates = shellSliceQuoteStates(slice);
+          slice = slice.replace(
+            /(\\*)([()|])/g,
+            (match, slashes, delim, offset) =>
+              executableBreDelimRun(
+                slashes.length,
+                quoteStates[offset] || "none"
+              )
+                ? delim
+                : match
+          );
+        }
+        collectMatcherClusterTokens(slice, tokens);
       }
-      collectMatcherClusterTokens(slice, tokens);
     }
   }
   return tokens;
@@ -2801,11 +2876,12 @@ function harnessAcceptsPass(text) {
  * files fail closed (cannot determine authority). A VERDICT regex group
  * that lists PASS as an alternative (including ERE
  * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)` and BRE
- * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)` and the mixed
- * double-quoted group-run-3 / alternation-run-1 form) is a harness accept of
+ * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`, the mixed
+ * double-quoted group-run-3 / alternation-run-1 form, and a pipeline
+ * `grep -E` stage followed by a default-BRE matcher) is a harness accept of
  * PASS; APPROVE/REQUEST_CHANGES without PASS stays green. Residual: nested
  * groups and non-VERDICT alternations are not parsed. Residual #263/#264:
- * not a general shell/regex parser.
+ * not a general shell/regex parser. Residual #265: pathological scan cost.
  *
  * @param {{
  *   agentsText: string,
