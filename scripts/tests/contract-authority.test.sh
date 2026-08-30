@@ -4696,6 +4696,108 @@ const noIgnoreCaseBracketPassGrepOnly = [
   "#!/bin/bash",
   "grep " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)" + SQ,
 ].join("\n");
+function wrapGrepNeedle(needle, withEcho) {
+  const lines = ["#!/bin/bash"];
+  if (withEcho) lines.push("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"");
+  lines.push(needle);
+  return lines.join("\n");
+}
+const ereIntervalPassNeedle = "grep -E " + SQ + "VERDICT:[[:space:]]*(APPROVE|P{1}ASS|REQUEST_CHANGES)" + SQ;
+const ereIntervalOpenPassNeedle = "grep -E " + SQ + "VERDICT:[[:space:]]*(APPROVE|P{1,}ASS|REQUEST_CHANGES)" + SQ;
+const ereIntervalMNPassNeedle = "grep -E " + SQ + "VERDICT:[[:space:]]*(APPROVE|P{1,1}ASS|REQUEST_CHANGES)" + SQ;
+const ereIntervalP2PassNeedle = "grep -E " + SQ + "VERDICT:[[:space:]]*(APPROVE|P{2}ASS|REQUEST_CHANGES)" + SQ;
+const ereIntervalApproveNeedle = "grep -E " + SQ + "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)" + SQ;
+const breLiteralBracePassNeedle = "grep " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|P{1}ASS\\|REQUEST_CHANGES\\)" + SQ;
+const ereIntervalPassDecoy = wrapGrepNeedle(ereIntervalPassNeedle, true);
+const ereIntervalOpenPassDecoy = wrapGrepNeedle(ereIntervalOpenPassNeedle, true);
+const ereIntervalMNPassDecoy = wrapGrepNeedle(ereIntervalMNPassNeedle, true);
+const ereIntervalP2ApproveOnly = wrapGrepNeedle(ereIntervalP2PassNeedle, true);
+const ereIntervalApproveOnly = wrapGrepNeedle(ereIntervalApproveNeedle, true);
+const breLiteralBraceApproveOnly = wrapGrepNeedle(breLiteralBracePassNeedle, true);
+const ereIntervalPassGrepOnly = wrapGrepNeedle(ereIntervalPassNeedle, false);
+const ereIntervalOpenPassGrepOnly = wrapGrepNeedle(ereIntervalOpenPassNeedle, false);
+const ereIntervalMNPassGrepOnly = wrapGrepNeedle(ereIntervalMNPassNeedle, false);
+const ereIntervalP2PassGrepOnly = wrapGrepNeedle(ereIntervalP2PassNeedle, false);
+const ereIntervalApproveGrepOnly = wrapGrepNeedle(ereIntervalApproveNeedle, false);
+const breLiteralBracePassGrepOnly = wrapGrepNeedle(breLiteralBracePassNeedle, false);
+const bracketPassPat = "VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)";
+const bracketApprovePat = "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)";
+const grepDashMSeparatedPassNeedle = "grep -m 1 -i " + SQ + bracketPassPat + SQ;
+const grepDashASeparatedPassNeedle = "grep -A 1 -i " + SQ + bracketPassPat + SQ;
+const grepDashCSeparatedPassNeedle = "grep -C 1 -i " + SQ + bracketPassPat + SQ;
+const grepMaxCountSeparatedPassNeedle = "grep --max-count 1 -i " + SQ + bracketPassPat + SQ;
+const grepDashMAttachedPassNeedle = "grep -m1 -i " + SQ + bracketPassPat + SQ;
+const grepMaxCountAttachedPassNeedle = "grep --max-count=1 -i " + SQ + bracketPassPat + SQ;
+const grepDashMSeparatedApproveNeedle = "grep -m 1 -i " + SQ + bracketApprovePat + SQ;
+const grepDashASeparatedApproveNeedle = "grep -A 1 -i " + SQ + bracketApprovePat + SQ;
+const grepDashCSeparatedApproveNeedle = "grep -C 1 -i " + SQ + bracketApprovePat + SQ;
+const grepMaxCountSeparatedApproveNeedle = "grep --max-count 1 -i " + SQ + bracketApprovePat + SQ;
+const grepDashMSeparatedPassDecoy = wrapGrepNeedle(grepDashMSeparatedPassNeedle, true);
+const grepDashASeparatedPassDecoy = wrapGrepNeedle(grepDashASeparatedPassNeedle, true);
+const grepDashCSeparatedPassDecoy = wrapGrepNeedle(grepDashCSeparatedPassNeedle, true);
+const grepMaxCountSeparatedPassDecoy = wrapGrepNeedle(grepMaxCountSeparatedPassNeedle, true);
+const grepDashMAttachedPassDecoy = wrapGrepNeedle(grepDashMAttachedPassNeedle, true);
+const grepMaxCountAttachedPassDecoy = wrapGrepNeedle(grepMaxCountAttachedPassNeedle, true);
+const grepDashMSeparatedApproveOnly = wrapGrepNeedle(grepDashMSeparatedApproveNeedle, true);
+const grepDashASeparatedApproveOnly = wrapGrepNeedle(grepDashASeparatedApproveNeedle, true);
+const grepDashCSeparatedApproveOnly = wrapGrepNeedle(grepDashCSeparatedApproveNeedle, true);
+const grepMaxCountSeparatedApproveOnly = wrapGrepNeedle(grepMaxCountSeparatedApproveNeedle, true);
+const grepDashMSeparatedPassGrepOnly = wrapGrepNeedle(grepDashMSeparatedPassNeedle, false);
+const grepDashASeparatedPassGrepOnly = wrapGrepNeedle(grepDashASeparatedPassNeedle, false);
+const grepDashCSeparatedPassGrepOnly = wrapGrepNeedle(grepDashCSeparatedPassNeedle, false);
+const grepMaxCountSeparatedPassGrepOnly = wrapGrepNeedle(grepMaxCountSeparatedPassNeedle, false);
+const grepDashMAttachedPassGrepOnly = wrapGrepNeedle(grepDashMAttachedPassNeedle, false);
+const grepMaxCountAttachedPassGrepOnly = wrapGrepNeedle(grepMaxCountAttachedPassNeedle, false);
+const grepDashMSeparatedApproveGrepOnly = wrapGrepNeedle(grepDashMSeparatedApproveNeedle, false);
+const grepDashASeparatedApproveGrepOnly = wrapGrepNeedle(grepDashASeparatedApproveNeedle, false);
+const grepDashCSeparatedApproveGrepOnly = wrapGrepNeedle(grepDashCSeparatedApproveNeedle, false);
+const grepMaxCountSeparatedApproveGrepOnly = wrapGrepNeedle(grepMaxCountSeparatedApproveNeedle, false);
+const commandEnvPassNeedle = "command env grep -i " + SQ + bracketPassPat + SQ;
+const absEnvPassNeedle = "/usr/bin/env grep -i " + SQ + bracketPassPat + SQ;
+const commandAbsEnvPassNeedle = "command /usr/bin/env grep -i " + SQ + bracketPassPat + SQ;
+const commandEnvApproveNeedle = "command env grep -i " + SQ + bracketApprovePat + SQ;
+const absEnvApproveNeedle = "/usr/bin/env grep -i " + SQ + bracketApprovePat + SQ;
+const commandEnvPassDecoy = wrapGrepNeedle(commandEnvPassNeedle, true);
+const absEnvPassDecoy = wrapGrepNeedle(absEnvPassNeedle, true);
+const commandAbsEnvPassDecoy = wrapGrepNeedle(commandAbsEnvPassNeedle, true);
+const commandEnvApproveOnly = wrapGrepNeedle(commandEnvApproveNeedle, true);
+const absEnvApproveOnly = wrapGrepNeedle(absEnvApproveNeedle, true);
+const commandEnvPassGrepOnly = wrapGrepNeedle(commandEnvPassNeedle, false);
+const absEnvPassGrepOnly = wrapGrepNeedle(absEnvPassNeedle, false);
+const commandAbsEnvPassGrepOnly = wrapGrepNeedle(commandAbsEnvPassNeedle, false);
+const commandEnvApproveGrepOnly = wrapGrepNeedle(commandEnvApproveNeedle, false);
+const absEnvApproveGrepOnly = wrapGrepNeedle(absEnvApproveNeedle, false);
+const grepDashEThenIPassNeedle = "grep -e " + SQ + bracketPassPat + SQ + " -i";
+const grepDashEThenIgnoreCasePassNeedle = "grep -e " + SQ + bracketPassPat + SQ + " --ignore-case";
+const grepDashEAttachedThenIPassNeedle = "grep -e" + SQ + bracketPassPat + SQ + " -i";
+const grepRegexpThenIPassNeedle = "grep --regexp " + SQ + bracketPassPat + SQ + " -i";
+const grepRegexpEqThenIgnoreCasePassNeedle = "grep --regexp=" + SQ + bracketPassPat + SQ + " --ignore-case";
+const grepIEPassNeedle = "grep -ie " + SQ + bracketPassPat + SQ;
+const grepMultiDashEPassNeedle = "grep -e " + SQ + bracketApprovePat + SQ + " -e " + SQ + "VERDICT:[[:space:]]*\\(P[a]SS\\)" + SQ + " -i";
+const grepDashEThenIApproveNeedle = "grep -e " + SQ + bracketApprovePat + SQ + " -i";
+const grepDashEThenIgnoreCaseApproveNeedle = "grep -e " + SQ + bracketApprovePat + SQ + " --ignore-case";
+const grepDashFPassNeedle = "grep -f verdicts.pat -i";
+const grepFileLongPassNeedle = "grep --file verdicts.pat -i";
+const grepDashEThenIPassDecoy = wrapGrepNeedle(grepDashEThenIPassNeedle, true);
+const grepDashEThenIgnoreCasePassDecoy = wrapGrepNeedle(grepDashEThenIgnoreCasePassNeedle, true);
+const grepDashEAttachedThenIPassDecoy = wrapGrepNeedle(grepDashEAttachedThenIPassNeedle, true);
+const grepRegexpThenIPassDecoy = wrapGrepNeedle(grepRegexpThenIPassNeedle, true);
+const grepRegexpEqThenIgnoreCasePassDecoy = wrapGrepNeedle(grepRegexpEqThenIgnoreCasePassNeedle, true);
+const grepIEPassDecoy = wrapGrepNeedle(grepIEPassNeedle, true);
+const grepMultiDashEPassDecoy = wrapGrepNeedle(grepMultiDashEPassNeedle, true);
+const grepDashEThenIApproveOnly = wrapGrepNeedle(grepDashEThenIApproveNeedle, true);
+const grepDashEThenIgnoreCaseApproveOnly = wrapGrepNeedle(grepDashEThenIgnoreCaseApproveNeedle, true);
+const grepDashFPassDecoy = wrapGrepNeedle(grepDashFPassNeedle, true);
+const grepFileLongPassDecoy = wrapGrepNeedle(grepFileLongPassNeedle, true);
+const grepDashEThenIPassGrepOnly = wrapGrepNeedle(grepDashEThenIPassNeedle, false);
+const grepDashEThenIgnoreCasePassGrepOnly = wrapGrepNeedle(grepDashEThenIgnoreCasePassNeedle, false);
+const grepDashEAttachedThenIPassGrepOnly = wrapGrepNeedle(grepDashEAttachedThenIPassNeedle, false);
+const grepRegexpThenIPassGrepOnly = wrapGrepNeedle(grepRegexpThenIPassNeedle, false);
+const grepRegexpEqThenIgnoreCasePassGrepOnly = wrapGrepNeedle(grepRegexpEqThenIgnoreCasePassNeedle, false);
+const grepIEPassGrepOnly = wrapGrepNeedle(grepIEPassNeedle, false);
+const grepMultiDashEPassGrepOnly = wrapGrepNeedle(grepMultiDashEPassNeedle, false);
+const grepDashEThenIApproveGrepOnly = wrapGrepNeedle(grepDashEThenIApproveNeedle, false);
+const grepDashEThenIgnoreCaseApproveGrepOnly = wrapGrepNeedle(grepDashEThenIgnoreCaseApproveNeedle, false);
 const commandDashVPassBesideApprove = [
   "#!/bin/bash",
   "command -v grep " + SQ + "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)" + SQ,
@@ -5039,6 +5141,30 @@ if (!pipelineRedirPassDecoy.includes("|2>/dev/null grep ") || pipelineRedirAppro
 if (!ignoreCaseBracketPassNeedle.includes("P[a]SS") || !ignoreCaseBracketPassNeedle.includes("grep -i ") || ignoreCaseBracketApproveNeedle.includes("PASS")) {
   throw new Error("ignore-case bracket PASS fixtures lost -i / P[a]SS bytes");
 }
+if (!ereIntervalPassNeedle.includes("P{1}ASS") || !ereIntervalPassNeedle.includes("grep -E ") || ereIntervalApproveNeedle.includes("PASS") || ereIntervalApproveNeedle.includes("P{1}")) {
+  throw new Error("ERE interval PASS fixtures lost P{1}ASS / approve-only bytes");
+}
+if (!ereIntervalOpenPassNeedle.includes("P{1,}ASS") || !ereIntervalMNPassNeedle.includes("P{1,1}ASS") || !ereIntervalP2PassNeedle.includes("P{2}ASS")) {
+  throw new Error("ERE interval {m,}/{m,n}/{2} fixtures lost counted-interval bytes");
+}
+if (!breLiteralBracePassNeedle.includes("P{1}ASS") || breLiteralBracePassNeedle.includes("grep -E ")) {
+  throw new Error("BRE literal-brace P{1}ASS control lost default-BRE bytes");
+}
+if (!grepDashMSeparatedPassNeedle.includes("grep -m 1 -i ") || !grepDashASeparatedPassNeedle.includes("grep -A 1 -i ") || !grepDashCSeparatedPassNeedle.includes("grep -C 1 -i ") || !grepMaxCountSeparatedPassNeedle.includes("grep --max-count 1 -i ")) {
+  throw new Error("separated grep operand PASS fixtures lost -m/-A/-C/--max-count bytes");
+}
+if (!grepDashMAttachedPassNeedle.includes("grep -m1 -i ") || !grepMaxCountAttachedPassNeedle.includes("grep --max-count=1 -i ")) {
+  throw new Error("attached grep operand PASS fixtures lost -m1/--max-count= bytes");
+}
+if (!commandEnvPassNeedle.includes("command env grep -i ") || !absEnvPassNeedle.includes("/usr/bin/env grep -i ") || !commandAbsEnvPassNeedle.includes("command /usr/bin/env grep -i ")) {
+  throw new Error("wrapper composition PASS fixtures lost command env / abs-env bytes");
+}
+if (!grepDashEThenIPassNeedle.includes("grep -e ") || !grepDashEThenIPassNeedle.endsWith(" -i") || !grepDashEThenIgnoreCasePassNeedle.includes(" --ignore-case") || !grepMultiDashEPassNeedle.includes(" -e ")) {
+  throw new Error("-e/--regexp PASS fixtures lost trailing case-flag / multi -e bytes");
+}
+if (!grepDashFPassNeedle.includes("grep -f ") || !grepFileLongPassNeedle.includes("grep --file ")) {
+  throw new Error("-f/--file PASS fixtures lost pattern-file bytes");
+}
 if (!commandDashVPassBesideApprove.includes("command -v grep ") || !commandDashVUpperPassBesideApprove.includes("command -V grep ")) {
   throw new Error("command -v/-V false-red controls lost introspection bytes");
 }
@@ -5052,7 +5178,8 @@ if (breSpaceQuantApproveNeedle.includes("PASS") || breOptPApproveNeedle.includes
   throw new Error("lossless BRE quantified approve-only fixtures gained PASS");
 }
 function bashGrepRun(script, sample) {
-  const line = String(script).split(/\n/).find((l) => /^grep\s/.test(l));
+  const line = String(script).split(/\n/).find((l) => /^grep\s/.test(l))
+    || String(script).split(/\n/).find((l) => /^(?:command|env|\/usr\/bin\/env)\b/.test(l) && /\bgrep\b/.test(l));
   if (!line) throw new Error("missing grep line");
   const dir = mkdtempSync(join(tmpdir(), "gibson-241-grep-"));
   try {
@@ -5142,6 +5269,38 @@ const grepProofs = [
   { name: "bre-space-quant-approve-only-matches-APPROVE", script: breSpaceQuantApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "bre-opt-p-approve-only-does-not-match-PASS", script: breOptPApproveGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "bre-opt-p-approve-only-matches-APPROVE", script: breOptPApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "ere-interval-m-pass-matches-PASS", script: ereIntervalPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "ere-interval-m-pass-matches-APPROVE", script: ereIntervalPassGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "ere-interval-open-pass-matches-PASS", script: ereIntervalOpenPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "ere-interval-mn-pass-matches-PASS", script: ereIntervalMNPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "ere-interval-p2-does-not-match-PASS", script: ereIntervalP2PassGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "ere-interval-approve-only-does-not-match-PASS", script: ereIntervalApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "ere-interval-approve-only-matches-APPROVE", script: ereIntervalApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-literal-brace-p1-does-not-match-PASS", script: breLiteralBracePassGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "bre-literal-brace-p1-matches-APPROVE", script: breLiteralBracePassGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "grep-m-separated-pass-matches-PASS", script: grepDashMSeparatedPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-A-separated-pass-matches-PASS", script: grepDashASeparatedPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-C-separated-pass-matches-PASS", script: grepDashCSeparatedPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-max-count-separated-pass-matches-PASS", script: grepMaxCountSeparatedPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-m-attached-pass-matches-PASS", script: grepDashMAttachedPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-max-count-attached-pass-matches-PASS", script: grepMaxCountAttachedPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-m-separated-approve-only-does-not-match-PASS", script: grepDashMSeparatedApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-m-separated-approve-only-matches-APPROVE", script: grepDashMSeparatedApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "command-env-pass-matches-PASS", script: commandEnvPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "abs-env-pass-matches-PASS", script: absEnvPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "command-abs-env-pass-matches-PASS", script: commandAbsEnvPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "command-env-approve-only-does-not-match-PASS", script: commandEnvApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "command-env-approve-only-matches-APPROVE", script: commandEnvApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "abs-env-approve-only-does-not-match-PASS", script: absEnvApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-e-then-i-pass-matches-PASS", script: grepDashEThenIPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-e-then-ignore-case-pass-matches-PASS", script: grepDashEThenIgnoreCasePassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-e-attached-then-i-pass-matches-PASS", script: grepDashEAttachedThenIPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-regexp-then-i-pass-matches-PASS", script: grepRegexpThenIPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-regexp-eq-then-ignore-case-pass-matches-PASS", script: grepRegexpEqThenIgnoreCasePassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-ie-pass-matches-PASS", script: grepIEPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-multi-e-pass-matches-PASS", script: grepMultiDashEPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "grep-e-then-i-approve-only-does-not-match-PASS", script: grepDashEThenIApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "grep-e-then-i-approve-only-matches-APPROVE", script: grepDashEThenIApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
 ];
 for (const proof of grepProofs) {
   const got = bashGrepMatches(proof.script, proof.sample);
@@ -5150,6 +5309,26 @@ for (const proof of grepProofs) {
   }
   console.log("H241_OK grep-" + proof.name);
 }
+function bashGrepFileMatches(pattern, sample, flags, want) {
+  const dir = mkdtempSync(join(tmpdir(), "gibson-241-gf-"));
+  try {
+    writeFileSync(join(dir, "verdicts.pat"), `${pattern}\n`);
+    writeFileSync(join(dir, "sample.txt"), `${sample}\n`);
+    const got = spawnSync("bash", ["-c", `grep -f verdicts.pat ${flags.join(" ")} sample.txt`], {
+      cwd: dir,
+      encoding: "utf8",
+    }).status === 0;
+    if (got !== want) {
+      throw new Error("grep -f runtime want=" + want + " got " + got + " flags=" + flags.join(" "));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+bashGrepFileMatches(bracketPassPat, "VERDICT: PASS", ["-i"], true);
+bashGrepFileMatches(bracketApprovePat, "VERDICT: PASS", ["-i"], false);
+bashGrepFileMatches(bracketApprovePat, "VERDICT: APPROVE", ["-i"], true);
+console.log("H241_OK grep-f-runtime-pass-and-approve-only-controls");
 function bashArgScriptMatches(script, sample) {
   const dir = mkdtempSync(join(tmpdir(), "gibson-241-arg-"));
   try {
@@ -5391,6 +5570,8 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "command", passScript: pipelineCommandPassDecoy, approveScript: pipelineCommandApproveOnly, passGrep: pipelineCommandPassGrepOnly, approveGrep: pipelineCommandApproveGrepOnly },
     { name: "env", passScript: pipelineEnvPassDecoy, approveScript: pipelineEnvApproveOnly, passGrep: pipelineEnvPassGrepOnly, approveGrep: pipelineEnvApproveGrepOnly },
     { name: "lcall", passScript: pipelineLcAllPassDecoy, approveScript: pipelineLcAllApproveOnly, passGrep: pipelineLcAllPassGrepOnly, approveGrep: pipelineLcAllApproveGrepOnly },
+    { name: "command-env", passScript: commandEnvPassDecoy, approveScript: commandEnvApproveOnly, passGrep: commandEnvPassGrepOnly, approveGrep: commandEnvApproveGrepOnly },
+    { name: "abs-env", passScript: absEnvPassDecoy, approveScript: absEnvApproveOnly, passGrep: absEnvPassGrepOnly, approveGrep: absEnvApproveGrepOnly },
   ];
   for (const w of wrappers) {
     const passFindings = reviewVerdictVocabularyFindings({
@@ -5438,6 +5619,10 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "owners-delegate-g5", decision: "Decided: The owner\u0027s delegate approved waiver of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: true },
     { name: "owner-approved-g12", decision: "Decided: The owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
     { name: "owner-approved-g5", decision: "Decided: The owner approved waiver of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: false },
+    { name: "owner-approved-retaining-g12", decision: "Decided: The owner approved retaining G12 rather than removal.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-minutes-recording-g12", decision: "Decided: The owner approved minutes recording that removal of G12 was rejected.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-discussion-g12", decision: "Decided: The owner approved discussion of removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-authorized-counsel-to-decide-g12", decision: "Decided: The owner authorized counsel to decide whether to remove G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
   ];
   for (const row of actorRows) {
     const findings = overlayLimitFindings(row.overlay, row.decision, ["G5", "G11", "G12"]);
@@ -5453,6 +5638,10 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "delegate-review-to", body: "An independent reviewer may delegate review to the same agent.", expect: true },
     { name: "authorize-same-agent-to", body: "An independent reviewer may authorize the same agent to review the change.", expect: true },
     { name: "independent-may-review", body: "An independent reviewer may review the change.", expect: false },
+    { name: "review-may-be-delegated", body: "Review may be delegated to the same agent.", expect: true },
+    { name: "delegate-the-review-to", body: "An independent reviewer may delegate the review to the same agent.", expect: true },
+    { name: "permit-the-review-conducted-by", body: "An independent reviewer may permit the review to be conducted by the same agent.", expect: true },
+    { name: "same-agent-may-not", body: "The same agent may not review the change.", expect: false },
   ];
   for (const row of permRows) {
     const findings = playbookBodyObligationFindings(
@@ -6446,6 +6635,431 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "pass-ere-interval-m-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ereIntervalPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-ere-interval-open-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ereIntervalOpenPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-ere-interval-mn-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ereIntervalMNPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-ere-interval-p2-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ereIntervalP2ApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-ere-interval-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": ereIntervalApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-bre-literal-brace-p1",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": breLiteralBraceApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-grep-m-separated-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashMSeparatedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-A-separated-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashASeparatedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-C-separated-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashCSeparatedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-max-count-separated-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepMaxCountSeparatedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-m-attached-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashMAttachedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-max-count-attached-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepMaxCountAttachedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-grep-m-separated-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashMSeparatedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-grep-A-separated-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashASeparatedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-grep-max-count-separated-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepMaxCountSeparatedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-command-env-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commandEnvPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-abs-env-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": absEnvPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-command-abs-env-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commandAbsEnvPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-command-env-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commandEnvApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-abs-env-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": absEnvApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-grep-e-then-i-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashEThenIPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-e-then-ignore-case-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashEThenIgnoreCasePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-e-attached-then-i-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashEAttachedThenIPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-regexp-then-i-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepRegexpThenIPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-regexp-eq-then-ignore-case-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepRegexpEqThenIgnoreCasePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-ie-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepIEPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-multi-e-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepMultiDashEPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-grep-e-then-i-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashEThenIApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-grep-e-then-ignore-case-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashEThenIgnoreCaseApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-grep-f-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepDashFPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-grep-file-long-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepFileLongPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
     name: "overlay-rejected-g12",
     findings: () => overlayLimitFindings(
       overlayRm,
@@ -6706,6 +7320,46 @@ const rows = [
       ["G5", "G11", "G12"]
     ),
     expectEmpty: true,
+  },
+  {
+    name: "overlay-owner-approved-retaining-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: The owner approved retaining G12 rather than removal.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owner-approved-minutes-recording-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: The owner approved minutes recording that removal of G12 was rejected.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owner-approved-discussion-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: The owner approved discussion of removal of G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owner-authorized-counsel-to-decide-g12",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Decided: The owner authorized counsel to decide whether to remove G12.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
   },
   {
     name: "self-review-reviewer-own-generation",
@@ -6971,6 +7625,36 @@ const rows = [
       "reviewer",
       { gates: ["never review own generation (Law 5)"], forbidden: [] },
       "An independent reviewer may delegate review to the same agent."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-may-be-delegated-to-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "Review may be delegated to the same agent."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-independent-may-delegate-the-review-to-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may delegate the review to the same agent."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-independent-may-permit-the-review-conducted-by-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may permit the review to be conducted by the same agent."
     ),
     code: "E_ROLE_NEGATION",
     msg: ["same-agent"],
@@ -8340,6 +9024,151 @@ fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.ignore-case-bracket-grep.sh"
 
+run_canonical_grep_sub() {
+  local mixed="$1"
+  local sidecar="$2"
+  local mode="$3"
+  local tag="$4"
+  node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const mixed = process.argv[2];
+const sidecar = process.argv[3];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before " + process.argv[4] + " substitute");
+  process.exit(1);
+}
+t = t.replace(needle, mixed);
+if (t.includes(needle) || !t.includes(mixed) || !t.includes("formal-review.sh")) {
+  console.error(process.argv[4] + " canonical substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$mixed" "$sidecar" "$tag" || {
+    bad "harness $tag substitute into canonical harness failed"
+    return 1
+  }
+  printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+  printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+  local matcher
+  matcher=$(grep -E 'grep( |$)' "$sidecar" | head -1)
+  if [[ "$mode" == "pass" ]]; then
+    if bash -c "$matcher \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+      :
+    else
+      bad "mutation harness $tag runtime does not match VERDICT: PASS"
+    fi
+    out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+    if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+      && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+      && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+      echo "  planted $tag PASS failure line:"
+      echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+      ok "mutation: substituting $tag PASS into canonical harness fails"
+    else
+      bad "mutation $tag PASS canonical substitute (rc=$rc): $out"
+    fi
+  else
+    if bash -c "$matcher \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+      bad "benign harness $tag incorrectly matches VERDICT: PASS"
+    fi
+    if bash -c "$matcher \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+      :
+    else
+      bad "benign harness $tag runtime does not match VERDICT: APPROVE"
+    fi
+    out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+    if [[ "$rc" -eq 0 ]]; then
+      ok "benign: substituting $tag APPROVE-only into canonical harness remains green"
+    else
+      bad "benign $tag approve-only canonical substitute (rc=$rc): $out"
+    fi
+  fi
+  cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+}
+
+run_canonical_grep_sub \
+  "grep -E 'VERDICT:[[:space:]]*(APPROVE|P{1}ASS|REQUEST_CHANGES)'" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" pass "ERE-interval-P{1}ASS"
+run_canonical_grep_sub \
+  "grep -E 'VERDICT:[[:space:]]*(APPROVE|P{1,}ASS|REQUEST_CHANGES)'" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" pass "ERE-interval-P{1,}ASS"
+run_canonical_grep_sub \
+  "grep -E 'VERDICT:[[:space:]]*(APPROVE|P{1,1}ASS|REQUEST_CHANGES)'" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" pass "ERE-interval-P{1,1}ASS"
+run_canonical_grep_sub \
+  "grep -E 'VERDICT:[[:space:]]*(APPROVE|P{2}ASS|REQUEST_CHANGES)'" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" approve "ERE-interval-P{2}ASS"
+run_canonical_grep_sub \
+  "grep -E 'VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)'" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" approve "ERE-interval-approve-only"
+run_canonical_grep_sub \
+  "grep 'VERDICT:[[:space:]]*\\(APPROVE\\|P{1}ASS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" approve "BRE-literal-P{1}ASS"
+run_canonical_grep_sub \
+  "grep -m 1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" pass "grep--m-1--i"
+run_canonical_grep_sub \
+  "grep -A 1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" pass "grep--A-1--i"
+run_canonical_grep_sub \
+  "grep -C 1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" pass "grep--C-1--i"
+run_canonical_grep_sub \
+  "grep --max-count 1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" pass "grep--max-count-1--i"
+run_canonical_grep_sub \
+  "grep -m1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" pass "grep--m1--i"
+run_canonical_grep_sub \
+  "grep --max-count=1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" pass "grep--max-count=1--i"
+run_canonical_grep_sub \
+  "grep -m 1 -i 'VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.operand-grep.sh" approve "grep--m-1--i-approve-only"
+run_canonical_grep_sub \
+  "command env grep -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.wrapper-grep.sh" pass "command-env-grep--i"
+run_canonical_grep_sub \
+  "/usr/bin/env grep -i 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.wrapper-grep.sh" pass "abs-env-grep--i"
+run_canonical_grep_sub \
+  "command env grep -i 'VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.wrapper-grep.sh" approve "command-env-grep-approve-only"
+run_canonical_grep_sub \
+  "/usr/bin/env grep -i 'VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)'" \
+  "$SANDBOX/scripts/.wrapper-grep.sh" approve "abs-env-grep-approve-only"
+run_canonical_grep_sub \
+  "grep -e 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)' -i" \
+  "$SANDBOX/scripts/.dash-e-grep.sh" pass "grep--e-then--i"
+run_canonical_grep_sub \
+  "grep -e 'VERDICT:[[:space:]]*\\(APPROVE\\|P[a]SS\\|REQUEST_CHANGES\\)' --ignore-case" \
+  "$SANDBOX/scripts/.dash-e-grep.sh" pass "grep--e-then--ignore-case"
+run_canonical_grep_sub \
+  "grep -e 'VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)' -e 'VERDICT:[[:space:]]*\\(P[a]SS\\)' -i" \
+  "$SANDBOX/scripts/.dash-e-grep.sh" pass "grep-multi--e-then--i"
+run_canonical_grep_sub \
+  "grep -e 'VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)' -i" \
+  "$SANDBOX/scripts/.dash-e-grep.sh" approve "grep--e-then--i-approve-only"
+printf '%s\n' 'VERDICT:[[:space:]]*\(APPROVE\|P[a]SS\|REQUEST_CHANGES\)' > "$SANDBOX/scripts/.verdicts.pat"
+run_canonical_grep_sub \
+  "grep -f $SANDBOX/scripts/.verdicts.pat -i" \
+  "$SANDBOX/scripts/.dash-f-grep.sh" pass "grep--f-fail-closed"
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "grep -f \"$SANDBOX/scripts/.verdicts.pat\" -i \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  ok "benign: real Bash grep -f -i matches VERDICT: PASS from unread pattern file"
+else
+  bad "grep -f runtime control did not match VERDICT: PASS"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" \
+  "$SANDBOX/scripts/.ere-interval-grep.sh" "$SANDBOX/scripts/.operand-grep.sh" \
+  "$SANDBOX/scripts/.wrapper-grep.sh" "$SANDBOX/scripts/.dash-e-grep.sh" \
+  "$SANDBOX/scripts/.dash-f-grep.sh" "$SANDBOX/scripts/.verdicts.pat"
+
 # command -v / -V introspection false-red controls beside real APPROVE matcher
 node -e '
 const fs = require("fs");
@@ -8890,6 +9719,63 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
 else
   bad "mutation overlay G17 and G12 collective (rc=$rc): $out"
 fi
+
+printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
+  > "$SANDBOX/local/AGENTS.local.md"
+printf '%s\n' 'Decided: The owner approved retaining G12 rather than removal.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted retaining-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner approved retaining G12 rather than removal does not authorize overlay removal"
+else
+  bad "mutation overlay retaining G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: The owner approved minutes recording that removal of G12 was rejected.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' && echo "$out" | grep -q 'G12'; then
+  echo "  planted minutes-recording-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner approved minutes recording that removal of G12 was rejected does not authorize overlay removal"
+else
+  bad "mutation overlay minutes recording G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: The owner approved discussion of removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' && echo "$out" | grep -q 'G12'; then
+  echo "  planted discussion-of-removal-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner approved discussion of removal of G12 does not authorize overlay removal"
+else
+  bad "mutation overlay discussion of removal G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: The owner authorized counsel to decide whether to remove G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' && echo "$out" | grep -q 'G12'; then
+  echo "  planted counsel-to-decide-G12 overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner authorized counsel to decide whether to remove G12 does not authorize overlay removal"
+else
+  bad "mutation overlay counsel to decide G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Decided: The owner approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: owner approved removal of G12 still authorizes overlay removal"
+else
+  bad "benign overlay owner approved removal of G12 (rc=$rc): $out"
+fi
 rm -f "$SANDBOX/local/AGENTS.local.md" "$SANDBOX/memory/DECISIONS.md"
 
 node -e '
@@ -9086,6 +9972,71 @@ else
 fi
 cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. Review may be delegated to the same agent."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted review-may-be-delegated-to-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: Review may be delegated to the same agent fails"
+else
+  bad "mutation review may be delegated to the same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may delegate the review to the same agent."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted delegate-the-review-to-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: independent reviewer may delegate the review to the same agent fails"
+else
+  bad "mutation independent delegate the review to same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may permit the review to be conducted by the same agent."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted permit-the-review-conducted-by-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: independent reviewer may permit the review to be conducted by the same agent fails"
+else
+  bad "mutation independent permit the review conducted by same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 
 node -e '
 const fs=require("fs");

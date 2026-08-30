@@ -2536,6 +2536,44 @@ function isGrepFamilyWord(word) {
   return base === "grep" || base === "egrep" || base === "fgrep";
 }
 
+function isEnvUtilityWord(word) {
+  return grepFamilyBase(word) === "env";
+}
+
+function isCommandUtilityWord(word) {
+  return grepFamilyBase(word) === "command";
+}
+
+/** Short grep options whose next argv (or attached tail) is an operand. */
+const GREP_SHORT_OPERAND = {
+  e: "pattern",
+  f: "file",
+  m: "count",
+  A: "count",
+  B: "count",
+  C: "count",
+  D: "action",
+  d: "action",
+};
+
+/** Long grep options that take a separate or `--name=value` operand. */
+const GREP_LONG_OPERAND = {
+  "--regexp": "pattern",
+  "--file": "file",
+  "--max-count": "count",
+  "--after-context": "count",
+  "--before-context": "count",
+  "--context": "count",
+  "--devices": "action",
+  "--directories": "action",
+  "--label": "label",
+  "--exclude": "glob",
+  "--exclude-from": "file",
+  "--exclude-dir": "glob",
+  "--include": "glob",
+  "--binary-files": "type",
+};
+
 /**
  * Split a shell slice into command-list segments on unquoted `;`, `&&`,
  * `||`, and bare `&` only. Quote/#-comment aware via the same bounded
@@ -2867,10 +2905,17 @@ function isShellKeywordWord(word) {
 
 /**
  * One normalized executable-command representation consumed by all
- * verdict classification. Carries wrappers (`command`, `env`,
- * assignments), leading redirections, grep dialect, and grep flags in
- * the same object. `command -v/-V` is introspection-only and never an
- * executable verdict matcher. Residual: not a general shell parser.
+ * verdict classification. Carries wrappers (`command`, `env`, including
+ * absolute-path `env`, assignments), leading redirections, grep dialect,
+ * and grep flags in the same object. Wrappers are consumed iteratively
+ * in valid order (`env command`, `command env`, `/usr/bin/env`).
+ * `command -v/-V` is introspection-only and never an executable verdict
+ * matcher; names after those flags are not executed. Operand-taking
+ * grep options (`-m`/`-A`/`-C`/`--max-count`, `-e`/`--regexp`,
+ * `-f`/`--file`) consume separated or attached operands so later
+ * dialect/case flags remain visible. `-e` does not end option parsing.
+ * `-f`/`--file` is fail-closed (pattern file unread). Residual: not a
+ * general shell parser.
  *
  * @returns {{
  *   kind: 'grep' | 'introspection' | 'other',
@@ -2880,6 +2925,7 @@ function isShellKeywordWord(word) {
  *   leadingRedirs: string[],
  *   scanText: string,
  *   unsupportedExecutableMatcher: boolean,
+ *   patternFile: boolean,
  * }}
  */
 function normalizeExecutableStage(stage) {
@@ -2897,77 +2943,78 @@ function normalizeExecutableStage(stage) {
     leadingRedirs,
     scanText: slice,
     unsupportedExecutableMatcher: false,
+    patternFile: false,
   };
-  while (i < words.length) {
-    const w = words[i].word;
-    if (isRedirectionWord(w)) {
-      leadingRedirs.push(w);
-      i += 1;
-      if (redirectionConsumesTarget(w) && i < words.length && !isRedirectionWord(words[i].word)) {
-        leadingRedirs.push(words[i].word);
-        i += 1;
-      }
-      continue;
-    }
-    if (isEnvAssignmentWord(w)) {
-      wrappers.push(w);
-      i += 1;
-      continue;
-    }
-    // Production harnesses wrap matchers as `if grep ...; then`. Skip
-    // reserved words so the executable grep (and its -i flag) remains
-    // visible to verdict classification.
-    if (isShellKeywordWord(w)) {
-      i += 1;
-      continue;
-    }
-    break;
-  }
-  if (i < words.length && words[i].word === "env") {
-    wrappers.push("env");
-    i += 1;
-    i = skipEnvUtilityArgs(words, i);
-  }
-  let introspection = false;
-  if (i < words.length && words[i].word === "command") {
-    wrappers.push("command");
-    i += 1;
+  const skipPrefixNoise = () => {
     while (i < words.length) {
       const w = words[i].word;
-      if (w === "--") {
+      if (isRedirectionWord(w)) {
+        leadingRedirs.push(w);
         i += 1;
-        break;
+        if (redirectionConsumesTarget(w) && i < words.length && !isRedirectionWord(words[i].word)) {
+          leadingRedirs.push(words[i].word);
+          i += 1;
+        }
+        continue;
       }
-      if (w === "-v" || w === "-V") {
-        introspection = true;
+      if (isEnvAssignmentWord(w)) {
+        wrappers.push(w);
         i += 1;
         continue;
       }
-      if (w === "-p") {
-        i += 1;
-        continue;
-      }
-      if (/^-[pvV]+$/.test(w)) {
-        if (/[vV]/.test(w)) introspection = true;
+      // Production harnesses wrap matchers as `if grep ...; then`. Skip
+      // reserved words so the executable grep (and its -i flag) remains
+      // visible to verdict classification.
+      if (isShellKeywordWord(w)) {
         i += 1;
         continue;
       }
       break;
     }
-  }
-  while (i < words.length && isEnvAssignmentWord(words[i].word)) {
-    wrappers.push(words[i].word);
-    i += 1;
-  }
-  while (i < words.length && isRedirectionWord(words[i].word)) {
-    leadingRedirs.push(words[i].word);
-    const w = words[i].word;
-    i += 1;
-    if (redirectionConsumesTarget(w) && i < words.length && !isRedirectionWord(words[i].word)) {
-      leadingRedirs.push(words[i].word);
+  };
+  skipPrefixNoise();
+  let introspection = false;
+  let wrapperGuard = 0;
+  while (i < words.length && !introspection && wrapperGuard < 8) {
+    wrapperGuard += 1;
+    if (isEnvUtilityWord(words[i].word)) {
+      wrappers.push(words[i].word);
       i += 1;
+      i = skipEnvUtilityArgs(words, i);
+      skipPrefixNoise();
+      continue;
     }
+    if (isCommandUtilityWord(words[i].word)) {
+      wrappers.push(words[i].word);
+      i += 1;
+      while (i < words.length) {
+        const w = words[i].word;
+        if (w === "--") {
+          i += 1;
+          break;
+        }
+        if (w === "-v" || w === "-V") {
+          introspection = true;
+          i += 1;
+          continue;
+        }
+        if (w === "-p") {
+          i += 1;
+          continue;
+        }
+        if (/^-[pvV]+$/.test(w)) {
+          if (/[vV]/.test(w)) introspection = true;
+          i += 1;
+          continue;
+        }
+        break;
+      }
+      if (!introspection) skipPrefixNoise();
+      continue;
+    }
+    break;
   }
+  if (!introspection) skipPrefixNoise();
   if (i >= words.length) {
     return { ...empty, wrappers: wrappers.slice(), leadingRedirs: leadingRedirs.slice() };
   }
@@ -2989,12 +3036,14 @@ function normalizeExecutableStage(stage) {
       leadingRedirs: leadingRedirs.slice(),
       scanText: slice,
       unsupportedExecutableMatcher: false,
+      patternFile: false,
     };
   }
   const base = grepFamilyBase(cmdWord);
   let dialect = base === "egrep" ? "ere" : base === "fgrep" ? "fixed" : "bre";
   let ignoreCase = false;
   let unsupportedExecutableMatcher = false;
+  let patternFile = false;
   i += 1;
   while (i < words.length) {
     const w = words[i].word;
@@ -3027,30 +3076,54 @@ function normalizeExecutableStage(stage) {
       i += 1;
       continue;
     }
-    if (w === "--perl-regexp" || w === "-P") {
+    if (w === "--perl-regexp") {
       unsupportedExecutableMatcher = true;
       i += 1;
       continue;
     }
     if (w.startsWith("--")) {
+      const eq = w.indexOf("=");
+      const name = eq === -1 ? w : w.slice(0, eq);
+      const operandKind = GREP_LONG_OPERAND[name];
+      if (operandKind) {
+        i += 1;
+        if (eq !== -1) {
+          if (operandKind === "file") patternFile = true;
+          continue;
+        }
+        if (i < words.length) {
+          if (operandKind === "file") patternFile = true;
+          i += 1;
+        }
+        continue;
+      }
       i += 1;
       continue;
     }
     if (w.startsWith("-") && w.length > 1 && !isEnvAssignmentWord(w)) {
-      let stopForPattern = false;
-      for (const ch of w.slice(1)) {
+      const body = w.slice(1);
+      i += 1;
+      let ci = 0;
+      while (ci < body.length) {
+        const ch = body[ci];
         if (ch === "i") ignoreCase = true;
         else if (ch === "E") dialect = "ere";
         else if (ch === "G") dialect = "bre";
         else if (ch === "F") dialect = "fixed";
         else if (ch === "P") unsupportedExecutableMatcher = true;
-        else if (ch === "e" || ch === "f") {
-          stopForPattern = true;
+        const operandKind = GREP_SHORT_OPERAND[ch];
+        if (operandKind) {
+          const attached = body.slice(ci + 1);
+          if (attached.length) {
+            if (operandKind === "file") patternFile = true;
+          } else if (i < words.length) {
+            if (operandKind === "file") patternFile = true;
+            i += 1;
+          }
           break;
         }
+        ci += 1;
       }
-      i += 1;
-      if (stopForPattern) break;
       continue;
     }
     break;
@@ -3063,6 +3136,7 @@ function normalizeExecutableStage(stage) {
     leadingRedirs: leadingRedirs.slice(),
     scanText: slice,
     unsupportedExecutableMatcher,
+    patternFile,
   };
 }
 
@@ -3104,11 +3178,28 @@ function charsEqFold(a, b) {
   return a === b || a.toUpperCase() === b.toUpperCase();
 }
 
+function parseCountedInterval(inner) {
+  const m = /^(\d+)(?:,(\d*))?$/.exec(inner);
+  if (!m) return null;
+  const min = Number(m[1]);
+  if (!Number.isFinite(min) || min < 0) return null;
+  const max = m[2] === undefined ? min : m[2] === "" ? Infinity : Number(m[2]);
+  if (max !== Infinity && (!Number.isFinite(max) || max < 0)) return null;
+  return { min, max };
+}
+
 function parseVerdictAltQuantifier(src, i, dialect) {
   if (src[i] === "*") return { min: 0, max: Infinity, next: i + 1 };
   if (dialect === "ere") {
     if (src[i] === "?") return { min: 0, max: 1, next: i + 1 };
     if (src[i] === "+") return { min: 1, max: Infinity, next: i + 1 };
+    if (src[i] === "{") {
+      const close = src.indexOf("}", i + 1);
+      if (close !== -1) {
+        const parsed = parseCountedInterval(src.slice(i + 1, close));
+        if (parsed) return { min: parsed.min, max: parsed.max, next: close + 1 };
+      }
+    }
   }
   if (dialect === "bre" && src[i] === "\\") {
     const n = src[i + 1];
@@ -3117,13 +3208,8 @@ function parseVerdictAltQuantifier(src, i, dialect) {
     if (n === "{") {
       const close = src.indexOf("\\}", i + 2);
       if (close !== -1) {
-        const inner = src.slice(i + 2, close);
-        const m = /^(\d+)(?:,(\d*))?$/.exec(inner);
-        if (m) {
-          const min = Number(m[1]);
-          const max = m[2] === undefined ? min : m[2] === "" ? Infinity : Number(m[2]);
-          return { min, max, next: close + 2 };
-        }
+        const parsed = parseCountedInterval(src.slice(i + 2, close));
+        if (parsed) return { min: parsed.min, max: parsed.max, next: close + 2 };
       }
     }
   }
@@ -3414,8 +3500,15 @@ function harnessVerdictRegexGroupTokens(text) {
         : [{ stage: segment, norm: normalizeExecutableStage(segment) }];
       for (const { norm } of units) {
         if (norm.kind === "introspection") continue;
-        if (norm.kind === "grep" && norm.unsupportedExecutableMatcher) {
-          if (stageHasVerdictMatcherShape(norm.scanText)) {
+        if (
+          norm.kind === "grep" &&
+          (norm.unsupportedExecutableMatcher || norm.patternFile)
+        ) {
+          // `-P` and `-f`/`--file` are unread/unsupported pattern sources.
+          // Fail closed for executable VERDICT classification rather than
+          // inventing file contents. Residual: non-VERDICT `grep -f` in a
+          // review harness is also fail-closed.
+          if (stageHasVerdictMatcherShape(norm.scanText) || norm.patternFile) {
             tokens.add("PASS");
             tokens.add("APPROVE");
             tokens.add("REQUEST_CHANGES");
@@ -3476,14 +3569,17 @@ function harnessAcceptsPass(text) {
  * that lists PASS as an alternative (including ERE
  * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)` and BRE
  * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`, lossless quantified
- * alts `PASS[[:space:]]*` / `P\?PASS`, the mixed double-quoted
- * group-run-3 / alternation-run-1 form, and a pipeline `grep -E` stage
- * followed by a default-BRE matcher, including no-whitespace
- * `LC_ALL=C` / `env` / `command` / `command --` / `command -p --`
- * prefixes and leading redirections such as `2>/dev/null grep`) is a
- * harness accept of PASS; APPROVE/REQUEST_CHANGES without PASS stays
- * green. Grep `-i` / `--ignore-case` flows into bracket/POSIX-class
- * matching. Introspection-only `command -v/-V` is not an executable
+ * alts `PASS[[:space:]]*` / `P\?PASS`, ERE `{m}` / `{m,}` / `{m,n}`
+ * (`P{1}ASS`), the mixed double-quoted group-run-3 / alternation-run-1
+ * form, and a pipeline `grep -E` stage followed by a default-BRE matcher,
+ * including no-whitespace `LC_ALL=C` / `env` / `command` / `command --` /
+ * `command -p --` / `command env` / `/usr/bin/env` prefixes and leading
+ * redirections such as `2>/dev/null grep`) is a harness accept of PASS;
+ * APPROVE/REQUEST_CHANGES without PASS stays green. Grep `-i` /
+ * `--ignore-case` flows into bracket/POSIX-class matching, including after
+ * operand-taking options (`-m 1`, `-A 1`, `-C 1`, `--max-count 1`) and
+ * after `-e`/`--regexp`. `-f`/`--file` fail-closes rather than inventing
+ * file contents. Introspection-only `command -v/-V` is not an executable
  * matcher. Residual: nested groups and non-VERDICT alternations are not
  * parsed. Residual #263/#264: not a general shell/regex parser.
  * Residual #265: pathological scan cost.
@@ -3831,6 +3927,14 @@ function overlayAuthVerbNegated(before) {
   return OVERLAY_AUTH_NEGATION_RE.test(tail);
 }
 
+function overlayComplementSkipOnly(text) {
+  const t = collapseWs(text);
+  if (!t) return true;
+  return t.split(/\s+/).every((tok) =>
+    /^(?:the|a|an|its|this|that|explicitly|hereby|formally|also|then)$/i.test(tok)
+  );
+}
+
 function localPolarityTokens(before) {
   return collapseWs(before)
     .split(/\s+/)
@@ -3865,16 +3969,19 @@ function overlayNamedGateIds(text) {
 
 /**
  * Same-clause owner authorization requires an un-negated approval verb
- * whose actor is the owner, an un-negated remove/waive act, and an
- * un-negated named gate bound in that coordinated clause. Owner must
- * approve/decide the gate-removal clause, not merely be mentioned or
- * notified. Relative-clause verbs (`decision that waived G12`,
- * `decision that counsel approved removal of G12`) are not the clause's
- * decision. A unit may authorize the target only when it names no other
- * G-number; independently split units still authorize when they carry
- * their own owner approval and removal/waiver. `not G12` / `neither …
- * G12` deny G12 even when a sibling gate is approved in the same
- * sentence. Residual: this is not general NLP.
+ * whose actor is the owner, an un-negated remove/waive act as that
+ * verb's own complement, and an un-negated named gate bound in that
+ * coordinated clause. Retain / reject / discuss / record / delegate /
+ * authorize-someone-else-to-decide are not the removal act even when
+ * the words co-occur. Owner must approve the gate-removal clause, not
+ * merely be mentioned or notified. Relative-clause verbs (`decision
+ * that waived G12`, `decision that counsel approved removal of G12`)
+ * are not the clause's decision. A unit may authorize the target only
+ * when it names no other G-number; independently split units still
+ * authorize when they carry their own owner approval and
+ * removal/waiver. `not G12` / `neither … G12` deny G12 even when a
+ * sibling gate is approved in the same sentence. Residual: this is
+ * not general NLP.
  */
 function clauseAuthorizesGateRemoval(clause, gateId) {
   const t = collapseWs(clause);
@@ -3893,6 +4000,10 @@ function clauseAuthorizesGateRemoval(clause, gateId) {
     if (overlayAuthVerbNegated(t.slice(0, verb.index))) continue;
     if (!ownerIsVerbActor(t, verb.index)) continue;
     for (const action of actions) {
+      if (action.index !== verb.index) {
+        if (action.index < verb.end) continue;
+        if (!overlayComplementSkipOnly(t.slice(verb.end, action.index))) continue;
+      }
       if (
         action.index !== verb.index &&
         spanHasAuthNegation(
@@ -4113,10 +4224,24 @@ function ownWorkGrantedIn(text) {
   return false;
 }
 
+const AUTH_GRANT_VERB_RE =
+  /\b(?:authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?|delegat(?:e|es|ed|ing))\b/i;
+const REVIEW_NOUN_PHRASE_SRC =
+  "(?:the\\s+)?review(?:\\s+to\\s+be\\s+(?:conducted|done|performed|carried\\s+out))?";
+
+function selfReviewGrantAction(blob) {
+  if (/\bdelegat/i.test(blob)) return "delegate";
+  if (/\bpermit/i.test(blob)) return "permit";
+  if (/\ballow/i.test(blob)) return "allow";
+  if (/\bauthoriz/i.test(blob)) return "authorize";
+  return "authorize";
+}
+
 /**
  * Normalize a self-review permission unit to actor/action/target/polarity.
  * Any unnegated permission that authorizes, permits, allows, or delegates
- * review to/by the same agent fails regardless of word order.
+ * review to/by the same agent fails regardless of word order, voice, or
+ * optional articles / intervening "review to be conducted" phrases.
  *
  * @returns {{
  *   action: 'authorize' | 'permit' | 'allow' | 'delegate' | 'review' | null,
@@ -4128,20 +4253,39 @@ function selfReviewPermissionUnit(text, span) {
   const after = text.slice(span.index);
   const afterEnd = text.slice(span.end);
   const before = text.slice(0, span.index);
-  const delegateReviewToSame =
-    /\b(?:authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?|delegat(?:e|es|ed|ing))\s+review\s+(?:by|to)\s+(?:the\s+)?same[\s-]?agent\b/i.test(
-      after
+  const activeReviewPhraseGrant = new RegExp(
+    `${AUTH_GRANT_VERB_RE.source}\\s+${REVIEW_NOUN_PHRASE_SRC}\\s+(?:by|to)\\s+(?:the\\s+)?same[\\s-]?agent\\b`,
+    "i"
+  ).test(after);
+  const activeSameAgentGrant =
+    new RegExp(
+      `${AUTH_GRANT_VERB_RE.source}\\s+(?:the\\s+)?same[\\s-]?agent\\b`,
+      "i"
+    ).test(after) && REVIEW_ACT_RE.test(after);
+  const sameAgentToReview =
+    /\bsame[\s-]?agent\s+to\s+(?:review|evaluate|grade)\b/i.test(after);
+  if (activeReviewPhraseGrant || activeSameAgentGrant || sameAgentToReview) {
+    return {
+      action: selfReviewGrantAction(after),
+      target: "same-agent",
+      polarity: "grant",
+    };
+  }
+  const passiveDelegated =
+    /\bbe\s+delegat(?:e|ed|ing)\s+to\s+(?:the\s+)?same[\s-]?agent\b/i.test(afterEnd);
+  const passiveConductedBy =
+    /\bbe\s+(?:conducted|done|performed|carried\s+out)\s+by\s+(?:the\s+)?same[\s-]?agent\b/i.test(
+      afterEnd
     );
-  const authorizeSameAgent =
-    /\b(?:authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?|delegat(?:e|es|ed|ing))\s+(?:the\s+)?same[\s-]?agent\b/i.test(
-      after
-    ) || /\bsame[\s-]?agent\s+to\s+(?:review|evaluate|grade)\b/i.test(after);
-  if (delegateReviewToSame || (authorizeSameAgent && REVIEW_ACT_RE.test(after))) {
-    let action = "authorize";
-    if (/\bdelegat/i.test(after)) action = "delegate";
-    else if (/\bpermit/i.test(after)) action = "permit";
-    else if (/\ballow/i.test(after)) action = "allow";
-    return { action, target: "same-agent", polarity: "grant" };
+  if (
+    (passiveDelegated || passiveConductedBy) &&
+    (REVIEW_ACT_RE.test(after) || /\breview\b/i.test(before))
+  ) {
+    return {
+      action: passiveDelegated ? "delegate" : selfReviewGrantAction(after),
+      target: "same-agent",
+      polarity: "grant",
+    };
   }
   const subject = /\bsame[\s-]?agent\b/i.test(before);
   if (/\bbe\s+(?:the\s+)?same[\s-]?agent\b/i.test(after)) {
