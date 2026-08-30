@@ -4612,6 +4612,79 @@ const pipelineEreThenDefaultBreApproveGrepOnly = [
   "#!/bin/bash",
   pipelineEreThenDefaultBreApproveNeedle,
 ].join("\n");
+function pipelineEreThenPrefixedDefaultBreGrep(prefix, alts) {
+  const body = `VERDICT:[[:space:]]*\\(${alts.join("\\|")}\\)`;
+  return "grep -E " + SQ + ".*" + SQ + "|" + prefix + "grep " + SQ + body + SQ;
+}
+function pipelineEreThenPrefixedDefaultBreScript(prefix, alts) {
+  const qiE = "grep -qiE " + SQ + "VERDICT:[[:space:]]*approve([^A-Za-z]|$)" + SQ;
+  const printfSample = "printf " + SQ + "%s\\n" + SQ + " \"$sample\"";
+  return [
+    "#!/bin/bash",
+    "sample=$1",
+    "if " + printfSample + " | " + qiE + "; then :; fi",
+    printfSample + " | " + pipelineEreThenPrefixedDefaultBreGrep(prefix, alts),
+  ].join("\n");
+}
+const prefixedPipelinePassAlts = ["APPROVE", "PASS", "REQUEST_CHANGES"];
+const prefixedPipelineApproveAlts = ["APPROVE", "REQUEST_CHANGES"];
+const pipelineLcAllPassDecoy = pipelineEreThenPrefixedDefaultBreScript("LC_ALL=C ", prefixedPipelinePassAlts);
+const pipelineLcAllApproveOnly = pipelineEreThenPrefixedDefaultBreScript("LC_ALL=C ", prefixedPipelineApproveAlts);
+const pipelineEnvPassDecoy = pipelineEreThenPrefixedDefaultBreScript("env ", prefixedPipelinePassAlts);
+const pipelineEnvApproveOnly = pipelineEreThenPrefixedDefaultBreScript("env ", prefixedPipelineApproveAlts);
+const pipelineCommandPassDecoy = pipelineEreThenPrefixedDefaultBreScript("command ", prefixedPipelinePassAlts);
+const pipelineCommandApproveOnly = pipelineEreThenPrefixedDefaultBreScript("command ", prefixedPipelineApproveAlts);
+const pipelineLcAllPassNeedle = pipelineEreThenPrefixedDefaultBreGrep("LC_ALL=C ", prefixedPipelinePassAlts);
+const pipelineLcAllApproveNeedle = pipelineEreThenPrefixedDefaultBreGrep("LC_ALL=C ", prefixedPipelineApproveAlts);
+const pipelineEnvPassNeedle = pipelineEreThenPrefixedDefaultBreGrep("env ", prefixedPipelinePassAlts);
+const pipelineEnvApproveNeedle = pipelineEreThenPrefixedDefaultBreGrep("env ", prefixedPipelineApproveAlts);
+const pipelineCommandPassNeedle = pipelineEreThenPrefixedDefaultBreGrep("command ", prefixedPipelinePassAlts);
+const pipelineCommandApproveNeedle = pipelineEreThenPrefixedDefaultBreGrep("command ", prefixedPipelineApproveAlts);
+const pipelineLcAllPassGrepOnly = ["#!/bin/bash", pipelineLcAllPassNeedle].join("\n");
+const pipelineLcAllApproveGrepOnly = ["#!/bin/bash", pipelineLcAllApproveNeedle].join("\n");
+const pipelineEnvPassGrepOnly = ["#!/bin/bash", pipelineEnvPassNeedle].join("\n");
+const pipelineEnvApproveGrepOnly = ["#!/bin/bash", pipelineEnvApproveNeedle].join("\n");
+const pipelineCommandPassGrepOnly = ["#!/bin/bash", pipelineCommandPassNeedle].join("\n");
+const pipelineCommandApproveGrepOnly = ["#!/bin/bash", pipelineCommandApproveNeedle].join("\n");
+const breSpaceQuantPassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS[[:space:]]*\|REQUEST_CHANGES\)"`;
+const breOptPPassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|P\?PASS\|REQUEST_CHANGES\)"`;
+const breSpaceQuantApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE[[:space:]]*\|REQUEST_CHANGES\)"`;
+const breOptPApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\(A\?PPROVE\|REQUEST_CHANGES\)"`;
+const breSpaceQuantPassDecoy = [
+  "#!/bin/bash",
+  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  breSpaceQuantPassNeedle,
+].join("\n");
+const breOptPPassDecoy = [
+  "#!/bin/bash",
+  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  breOptPPassNeedle,
+].join("\n");
+const breSpaceQuantApproveOnly = [
+  "#!/bin/bash",
+  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  breSpaceQuantApproveNeedle,
+].join("\n");
+const breOptPApproveOnly = [
+  "#!/bin/bash",
+  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  breOptPApproveNeedle,
+].join("\n");
+const breSpaceQuantPassGrepOnly = ["#!/bin/bash", breSpaceQuantPassNeedle].join("\n");
+const breOptPPassGrepOnly = ["#!/bin/bash", breOptPPassNeedle].join("\n");
+const breSpaceQuantApproveGrepOnly = ["#!/bin/bash", breSpaceQuantApproveNeedle].join("\n");
+const breOptPApproveGrepOnly = ["#!/bin/bash", breOptPApproveNeedle].join("\n");
+function hereDocBarProbe(n) {
+  return [": <<" + SQ + "GIBSON_PROBE" + SQ, "|".repeat(n), "GIBSON_PROBE"].join("\n");
+}
+function hereDocBarHarness(n) {
+  return [
+    "#!/bin/bash",
+    hereDocBarProbe(n),
+    "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+    String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+  ].join("\n");
+}
 const siblingDqRun1PassDecoy = siblingQuotedScript("double", 1, ["APPROVE", "PASS"]);
 const siblingDqRun2PassDecoy = siblingQuotedScript("double", 2, ["APPROVE", "PASS"]);
 const siblingSqRun1PassDecoy = siblingQuotedScript("single", 1, ["APPROVE", "PASS"]);
@@ -4885,6 +4958,24 @@ if (!pipelineEreThenDefaultBreApproveOnly.includes(pipelineEreThenDefaultBreAppr
 if (!pipelineEreThenDefaultBrePassDecoy.includes("sample=$1") || !pipelineEreThenDefaultBreApproveOnly.includes("sample=$1")) {
   throw new Error("pipeline ERE-then-default-BRE scripts lost the real canonical APPROVE path beside the pipeline");
 }
+if (!pipelineLcAllPassDecoy.includes("|LC_ALL=C grep ") || pipelineLcAllPassDecoy.includes("| LC_ALL=C") || !pipelineLcAllPassNeedle.includes("PASS") || pipelineLcAllApproveNeedle.includes("PASS")) {
+  throw new Error("prefixed LC_ALL=C pipeline fixtures lost no-whitespace assignment prefix");
+}
+if (!pipelineEnvPassDecoy.includes("|env grep ") || pipelineEnvPassDecoy.includes("| env grep") || !pipelineEnvPassNeedle.includes("PASS") || pipelineEnvApproveNeedle.includes("PASS")) {
+  throw new Error("prefixed env pipeline fixtures lost no-whitespace env prefix");
+}
+if (!pipelineCommandPassDecoy.includes("|command grep ") || pipelineCommandPassDecoy.includes("| command grep") || !pipelineCommandPassNeedle.includes("PASS") || pipelineCommandApproveNeedle.includes("PASS")) {
+  throw new Error("prefixed command pipeline fixtures lost no-whitespace command prefix");
+}
+if (!breSpaceQuantPassNeedle.includes("PASS[[:space:]]*") || breSpaceQuantPassNeedle.includes("PASSSPACE") || !breOptPPassNeedle.includes("P\\?PASS") || breOptPPassNeedle.includes("PPASS")) {
+  throw new Error("lossless BRE quantified PASS fixtures lost executable alt bytes");
+}
+if (!breSpaceQuantApproveNeedle.includes("APPROVE[[:space:]]*") || breSpaceQuantApproveNeedle.includes("APPROVESPACE") || !breOptPApproveNeedle.includes("A\\?PPROVE") || breOptPApproveNeedle.includes("PPASS")) {
+  throw new Error("lossless BRE quantified approve-only fixtures lost executable alt bytes");
+}
+if (breSpaceQuantApproveNeedle.includes("PASS") || breOptPApproveNeedle.includes("PASS")) {
+  throw new Error("lossless BRE quantified approve-only fixtures gained PASS");
+}
 function bashGrepRun(script, sample) {
   const line = String(script).split(/\n/).find((l) => /^grep\s/.test(l));
   if (!line) throw new Error("missing grep line");
@@ -4948,6 +5039,23 @@ const grepProofs = [
   { name: "pipeline-ere-then-default-bre-pass-matches-PASS", script: pipelineEreThenDefaultBrePassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "pipeline-ere-then-default-bre-approve-only-does-not-match-PASS", script: pipelineEreThenDefaultBreApproveGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "pipeline-ere-then-default-bre-approve-only-matches-APPROVE", script: pipelineEreThenDefaultBreApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-lcall-prefix-pass-matches-PASS", script: pipelineLcAllPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-lcall-prefix-approve-only-does-not-match-PASS", script: pipelineLcAllApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-lcall-prefix-approve-only-matches-APPROVE", script: pipelineLcAllApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-env-prefix-pass-matches-PASS", script: pipelineEnvPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-env-prefix-approve-only-does-not-match-PASS", script: pipelineEnvApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-env-prefix-approve-only-matches-APPROVE", script: pipelineEnvApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-command-prefix-pass-matches-PASS", script: pipelineCommandPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-command-prefix-approve-only-does-not-match-PASS", script: pipelineCommandApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-command-prefix-approve-only-matches-APPROVE", script: pipelineCommandApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-space-quant-pass-matches-PASS", script: breSpaceQuantPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "bre-space-quant-pass-matches-APPROVE", script: breSpaceQuantPassGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-opt-p-pass-matches-PASS", script: breOptPPassGrepOnly, sample: "VERDICT: PASS", want: true },
+  { name: "bre-opt-p-pass-matches-APPROVE", script: breOptPPassGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-space-quant-approve-only-does-not-match-PASS", script: breSpaceQuantApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "bre-space-quant-approve-only-matches-APPROVE", script: breSpaceQuantApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-opt-p-approve-only-does-not-match-PASS", script: breOptPApproveGrepOnly, sample: "VERDICT: PASS", want: false },
+  { name: "bre-opt-p-approve-only-matches-APPROVE", script: breOptPApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
 ];
 for (const proof of grepProofs) {
   const got = bashGrepMatches(proof.script, proof.sample);
@@ -4970,6 +5078,11 @@ const pipelineScriptProofs = [
   { name: "pipeline-ere-then-default-bre-script-pass-matches-PASS", script: pipelineEreThenDefaultBrePassDecoy, sample: "VERDICT: PASS", want: true },
   { name: "pipeline-ere-then-default-bre-script-approve-only-does-not-match-PASS", script: pipelineEreThenDefaultBreApproveOnly, sample: "VERDICT: PASS", want: false },
   { name: "pipeline-ere-then-default-bre-script-approve-only-matches-APPROVE", script: pipelineEreThenDefaultBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-lcall-prefix-script-pass-matches-PASS", script: pipelineLcAllPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-lcall-prefix-script-approve-only-does-not-match-PASS", script: pipelineLcAllApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "pipeline-lcall-prefix-script-approve-only-matches-APPROVE", script: pipelineLcAllApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "pipeline-env-prefix-script-pass-matches-PASS", script: pipelineEnvPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "pipeline-command-prefix-script-pass-matches-PASS", script: pipelineCommandPassDecoy, sample: "VERDICT: PASS", want: true },
 ];
 for (const proof of pipelineScriptProofs) {
   const got = bashArgScriptMatches(proof.script, proof.sample);
@@ -5072,6 +5185,74 @@ for (const proof of grepStatusProofs) {
     throw new Error("old prefix-rescan visits unexpectedly fit a linear bound");
   }
   console.log("H241_OK quote-context-linear-precompute-not-prefix-rescan");
+}
+{
+  const semSrc = readFileSync(process.env.SEM, "utf8");
+  const preStart = semSrc.indexOf("function precomputePrefixedGrepStarts");
+  const barStart = semSrc.indexOf("function isCommandPipelineBar");
+  const stagesStart = semSrc.indexOf("function shellPipelineStages");
+  if (preStart < 0 || barStart < 0 || stagesStart <= barStart || barStart <= preStart) {
+    throw new Error("missing linear pipeline-bar precompute");
+  }
+  const barFn = semSrc.slice(barStart, stagesStart);
+  const preFn = semSrc.slice(preStart, barStart);
+  if (/src\.slice\(\s*k\s*\)/.test(barFn) || /\(\?:\.\*\\\/\)\?/.test(barFn) || /(?:e\|f)\?grep/.test(barFn)) {
+    throw new Error("isCommandPipelineBar still suffix-slices or suffix-scans for grep");
+  }
+  if (!/grepFrom\s*\[\s*i\s*\+\s*1\s*\]/.test(barFn)) {
+    throw new Error("isCommandPipelineBar does not consult precomputed prefixed-grep starts");
+  }
+  if (/src\.slice\(\s*k\s*\)/.test(preFn) || /\(\?:\.\*\\\/\)\?/.test(preFn)) {
+    throw new Error("precomputePrefixedGrepStarts still uses suffix slice/regex");
+  }
+  if (!/unquotedShellWords/.test(preFn) || !/for\s*\(\s*let t = words\.length - 1/.test(preFn)) {
+    throw new Error("precomputePrefixedGrepStarts is not a linear token/prefix pass");
+  }
+  const smallBars = 4096;
+  const largeBars = 16384;
+  const oldSuffixVisits = (n) => (n * (n + 1)) / 2;
+  if (oldSuffixVisits(largeBars) < oldSuffixVisits(smallBars) * 8) {
+    throw new Error("old per-bar suffix visit witness is not quadratic");
+  }
+  const nCheck = spawnSync("bash", ["-n", "-c", hereDocBarProbe(largeBars)], { encoding: "utf8" });
+  if (nCheck.status !== 0) {
+    throw new Error("inert here-doc bars failed bash -n: " + nCheck.stderr);
+  }
+  const runCheck = spawnSync("bash", ["-c", hereDocBarProbe(largeBars)], { encoding: "utf8" });
+  if (runCheck.status !== 0) {
+    throw new Error("inert here-doc bars failed bash execution rc=" + runCheck.status);
+  }
+  function evalBars(n) {
+    return reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": hereDocBarHarness(n),
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    });
+  }
+  const fSmall = evalBars(smallBars);
+  const fLarge = evalBars(largeBars);
+  if (fSmall.length || fLarge.length) {
+    throw new Error("inert here-doc bars must remain helper-green got " + JSON.stringify(fSmall) + " / " + JSON.stringify(fLarge));
+  }
+  console.log("H241_OK pipeline-bar-linear-precompute-not-suffix-scan");
+}
+{
+  const semSrc = readFileSync(process.env.SEM, "utf8");
+  const start = semSrc.indexOf("function addVerdictToken");
+  const end = semSrc.indexOf("function splitUnescapedVerdictAlts");
+  if (start < 0 || end <= start) {
+    throw new Error("cannot locate addVerdictToken");
+  }
+  const body = semSrc.slice(start, end);
+  if (/\.replace\(\s*\/\[\^A-Za-z0-9_\]/.test(body)) {
+    throw new Error("addVerdictToken still deletes punctuation into fake tokens");
+  }
+  if (!/verdictAltMatchesLiteral/.test(body)) {
+    throw new Error("addVerdictToken is not lossless alternative matching");
+  }
+  console.log("H241_OK lossless-verdict-alt-no-punctuation-deletion");
 }
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
@@ -5788,6 +5969,136 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "pass-pipeline-lcall-prefix-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineLcAllPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-pipeline-lcall-prefix-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineLcAllApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-pipeline-env-prefix-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineEnvPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-pipeline-env-prefix-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineEnvApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-pipeline-command-prefix-bre-pass-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineCommandPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-pipeline-command-prefix-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": pipelineCommandApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-bre-space-quant-alt-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": breSpaceQuantPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-bre-optional-p-alt-beside-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": breOptPPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-bre-space-quant-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": breSpaceQuantApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-bre-optional-p-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": breOptPApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
     name: "overlay-rejected-g12",
     findings: () => overlayLimitFindings(
       overlayRm,
@@ -5985,6 +6296,26 @@ const rows = [
     findings: () => overlayLimitFindings(
       overlayRm,
       "the owner approved removal of G17 and G12",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-counsel-approved-for-the-owner",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "Counsel approved removal of G12 for the owner.",
+      expectedGates
+    ),
+    code: "E_OVERLAY",
+    msg: ["G12", "affirmative same-gate owner authorization"],
+  },
+  {
+    name: "overlay-owner-notified-after-counsel-approved",
+    findings: () => overlayLimitFindings(
+      overlayRm,
+      "The owner was notified after counsel approved removal of G12.",
       expectedGates
     ),
     code: "E_OVERLAY",
@@ -6215,6 +6546,25 @@ const rows = [
       "reviewer",
       { gates: ["never review own generation (Law 5)"], forbidden: [] },
       "Self-review is prohibited, and an independent reviewer is allowed to review the change."
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "self-review-independent-may-authorize-same-agent",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may authorize the same agent to review the change."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["same-agent"],
+  },
+  {
+    name: "self-review-positive-independent-may-review",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      { gates: ["never review own generation (Law 5)"], forbidden: [] },
+      "An independent reviewer may review the change."
     ),
     expectEmpty: true,
   },
@@ -7421,6 +7771,297 @@ fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" "$SANDBOX/scripts/.pipeline-ere-bre-grep.sh"
 
+for prefix_spec in "LC_ALL=C|lcall" "env|env" "command|command"; do
+  prefix=${prefix_spec%%|*}
+  tag=${prefix_spec#*|}
+  node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const mode = process.argv[2];
+const sidecar = process.argv[3];
+const prefix = process.argv[4];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before prefixed pipeline substitute");
+  process.exit(1);
+}
+const alts = mode === "pass"
+  ? ["APPROVE", "PASS", "REQUEST_CHANGES"]
+  : ["APPROVE", "REQUEST_CHANGES"];
+const bs = "\\";
+const body = "VERDICT:[[:space:]]*" + bs + "(" + alts.join(bs + "|") + bs + ")";
+const mixed = "grep -E '\''.*'\''|" + prefix + " grep '\''" + body + "'\''";
+t = t.replace(needle, mixed);
+const paren = mixed.match(/(\\+)\(/);
+const pipe = mixed.match(/APPROVE(\\+)\|/);
+if (t.includes(needle) || !t.includes(mixed) || !t.includes("|" + prefix + " grep") || t.includes("| " + prefix) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES") || !paren || paren[1].length !== 1 || !pipe || pipe[1].length !== 1) {
+  console.error("prefixed pipeline canonical substitute bytes mismatch prefix=" + prefix + " mode=" + mode);
+  process.exit(1);
+}
+if (mode === "pass" && !t.includes("PASS")) {
+  console.error("prefixed pipeline PASS substitute lost PASS");
+  process.exit(1);
+}
+if (mode !== "pass" && t.includes("PASS")) {
+  console.error("prefixed pipeline approve-only substitute gained PASS");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" pass "$SANDBOX/scripts/.prefixed-pipeline-grep.sh" "$prefix" || {
+    bad "mutation harness prefixed $tag pipeline PASS substitute into canonical harness failed"
+  }
+  printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.prefixed-pipeline-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+    :
+  else
+    bad "mutation harness prefixed $tag pipeline PASS runtime does not match VERDICT: PASS"
+  fi
+  printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.prefixed-pipeline-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+    :
+  else
+    bad "mutation harness prefixed $tag pipeline PASS runtime does not match VERDICT: APPROVE"
+  fi
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+    && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+    && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+    echo "  planted prefixed $tag pipeline PASS failure line:"
+    echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+    ok "mutation: substituting prefixed $tag pipeline PASS into canonical harness fails"
+  else
+    bad "mutation prefixed $tag pipeline PASS canonical substitute (rc=$rc): $out"
+  fi
+
+  cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+  node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const sidecar = process.argv[2];
+const prefix = process.argv[3];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before prefixed pipeline approve-only substitute");
+  process.exit(1);
+}
+const bs = "\\";
+const body = "VERDICT:[[:space:]]*" + bs + "(APPROVE" + bs + "|REQUEST_CHANGES" + bs + ")";
+const mixed = "grep -E '\''.*'\''|" + prefix + " grep '\''" + body + "'\''";
+t = t.replace(needle, mixed);
+const paren = mixed.match(/(\\+)\(/);
+const pipe = mixed.match(/APPROVE(\\+)\|/);
+if (t.includes(needle) || !t.includes(mixed) || mixed.includes("PASS") || !t.includes("|" + prefix + " grep") || t.includes("| " + prefix) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES") || !paren || paren[1].length !== 1 || !pipe || pipe[1].length !== 1) {
+  console.error("prefixed pipeline approve-only canonical substitute bytes mismatch prefix=" + prefix);
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$SANDBOX/scripts/.prefixed-pipeline-grep.sh" "$prefix" || {
+    bad "benign harness prefixed $tag pipeline approve-only substitute into canonical harness failed"
+  }
+  printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.prefixed-pipeline-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+    bad "benign harness prefixed $tag pipeline approve-only incorrectly matches VERDICT: PASS"
+  fi
+  printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.prefixed-pipeline-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+    :
+  else
+    bad "benign harness prefixed $tag pipeline approve-only runtime does not match VERDICT: APPROVE"
+  fi
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "benign: substituting prefixed $tag pipeline APPROVE|REQUEST_CHANGES into canonical harness remains green"
+  else
+    bad "benign prefixed $tag pipeline approve-only canonical substitute (rc=$rc): $out"
+  fi
+  cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+done
+rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" "$SANDBOX/scripts/.prefixed-pipeline-grep.sh"
+
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const mode = process.argv[2];
+const sidecar = process.argv[3];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before lossless BRE alt substitute");
+  process.exit(1);
+}
+const mixed = mode === "space"
+  ? "grep '\''VERDICT:[[:space:]]*\\(APPROVE\\|PASS[[:space:]]*\\|REQUEST_CHANGES\\)'\''"
+  : "grep '\''VERDICT:[[:space:]]*\\(APPROVE\\|P\\?PASS\\|REQUEST_CHANGES\\)'\''";
+t = t.replace(needle, mixed);
+if (t.includes(needle) || !t.includes(mixed) || !t.includes("PASS") || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("lossless BRE alt canonical substitute bytes mismatch mode=" + mode);
+  process.exit(1);
+}
+if (mode === "space" && (!mixed.includes("PASS[[:space:]]*") || mixed.includes("PASSSPACE"))) {
+  console.error("space-quant BRE alt lost PASS[[:space:]]* bytes");
+  process.exit(1);
+}
+if (mode === "optp" && (!mixed.includes("P\\?PASS") || mixed.includes("PPASS"))) {
+  console.error("optional-P BRE alt lost P\\?PASS bytes");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" space "$SANDBOX/scripts/.lossless-bre-grep.sh" || {
+  bad "mutation harness space-quant BRE PASS substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness space-quant BRE PASS runtime does not match VERDICT: PASS"
+fi
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+  :
+else
+  bad "mutation harness space-quant BRE PASS runtime does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted space-quant BRE PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: substituting space-quant BRE PASS into canonical harness fails"
+else
+  bad "mutation space-quant BRE PASS canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const sidecar = process.argv[2];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before space-quant BRE approve-only substitute");
+  process.exit(1);
+}
+const mixed = "grep '\''VERDICT:[[:space:]]*\\(APPROVE[[:space:]]*\\|REQUEST_CHANGES\\)'\''";
+t = t.replace(needle, mixed);
+if (t.includes(needle) || !t.includes(mixed) || mixed.includes("PASS") || !mixed.includes("APPROVE[[:space:]]*") || mixed.includes("APPROVESPACE") || !t.includes("formal-review.sh")) {
+  console.error("space-quant BRE approve-only canonical substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$SANDBOX/scripts/.lossless-bre-grep.sh" || {
+  bad "benign harness space-quant BRE approve-only substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign harness space-quant BRE approve-only incorrectly matches VERDICT: PASS"
+fi
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+  :
+else
+  bad "benign harness space-quant BRE approve-only runtime does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: substituting space-quant BRE APPROVE[[:space:]]*|REQUEST_CHANGES into canonical harness remains green"
+else
+  bad "benign space-quant BRE approve-only canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const sidecar = process.argv[2];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before optional-P BRE alt substitute");
+  process.exit(1);
+}
+const mixed = "grep '\''VERDICT:[[:space:]]*\\(APPROVE\\|P\\?PASS\\|REQUEST_CHANGES\\)'\''";
+t = t.replace(needle, mixed);
+if (t.includes(needle) || !t.includes(mixed) || !mixed.includes("P\\?PASS") || mixed.includes("PPASS") || !t.includes("formal-review.sh")) {
+  console.error("optional-P BRE alt canonical substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$SANDBOX/scripts/.lossless-bre-grep.sh" || {
+  bad "mutation harness optional-P BRE PASS substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness optional-P BRE PASS runtime does not match VERDICT: PASS"
+fi
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+  :
+else
+  bad "mutation harness optional-P BRE PASS runtime does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted optional-P BRE PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: substituting optional-P BRE PASS into canonical harness fails"
+else
+  bad "mutation optional-P BRE PASS canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const sidecar = process.argv[2];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before optional-P BRE approve-only substitute");
+  process.exit(1);
+}
+const mixed = "grep '\''VERDICT:[[:space:]]*\\(A\\?PPROVE\\|REQUEST_CHANGES\\)'\''";
+t = t.replace(needle, mixed);
+if (t.includes(needle) || !t.includes(mixed) || mixed.includes("PASS") || !mixed.includes("A\\?PPROVE") || mixed.includes("PPASS") || !t.includes("formal-review.sh")) {
+  console.error("optional-P BRE approve-only canonical substitute bytes mismatch");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$SANDBOX/scripts/.lossless-bre-grep.sh" || {
+  bad "benign harness optional-P BRE approve-only substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign harness optional-P BRE approve-only incorrectly matches VERDICT: PASS"
+fi
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample-approve.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.lossless-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample-approve.txt\""; then
+  :
+else
+  bad "benign harness optional-P BRE approve-only runtime does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: substituting optional-P BRE A\\?PPROVE|REQUEST_CHANGES into canonical harness remains green"
+else
+  bad "benign optional-P BRE approve-only canonical substitute (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.verdict-sample-approve.txt" "$SANDBOX/scripts/.lossless-bre-grep.sh"
+
 mkdir -p "$SANDBOX/local" "$SANDBOX/memory"
 printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
   > "$SANDBOX/local/AGENTS.local.md"
@@ -7436,6 +8077,32 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
   ok "mutation: rejected G12 decision does not authorize overlay removal"
 else
   bad "mutation overlay rejected G12 (rc=$rc): $out"
+fi
+
+printf '%s\n' 'Counsel approved removal of G12 for the owner.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted counsel-for-owner overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: counsel approval for the owner does not authorize overlay removal"
+else
+  bad "mutation overlay counsel approved for the owner (rc=$rc): $out"
+fi
+
+printf '%s\n' 'The owner was notified after counsel approved removal of G12.' \
+  > "$SANDBOX/memory/DECISIONS.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+  && echo "$out" | grep -q 'G12' \
+  && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+  echo "  planted owner-notified-after-counsel overlay failure line:"
+  echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+  ok "mutation: owner notified after counsel approval does not authorize overlay removal"
+else
+  bad "mutation overlay owner notified after counsel (rc=$rc): $out"
 fi
 
 printf '%s\n' 'The owner declined to waive G12' > "$SANDBOX/memory/DECISIONS.md"
@@ -7777,6 +8444,47 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: separate polarity units do not join a general review grant to an own-work prohibition"
 else
   bad "benign reviewer separate polarity units (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may authorize the same agent to review the change."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+  && echo "$out" | grep -q 'same-agent'; then
+  echo "  planted independent-authorize-same-agent grant failure line:"
+  echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+  ok "mutation: independent reviewer authorizing the same agent fails"
+else
+  bad "mutation independent reviewer authorize same agent (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+
+node -e '
+const fs=require("fs");
+const p=process.argv[1];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace(
+  "You never merge.",
+  "You never merge. An independent reviewer may review the change."
+);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: independent reviewer may-review remains green"
+else
+  bad "benign independent reviewer may-review (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 

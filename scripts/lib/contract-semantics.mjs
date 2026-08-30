@@ -2652,27 +2652,188 @@ function shellCommandListSegments(shellSlice) {
   return segments;
 }
 
+function isEnvAssignmentWord(word) {
+  const w = String(word || "");
+  const eq = w.indexOf("=");
+  if (eq <= 0) return false;
+  const name = w.slice(0, eq);
+  for (let i = 0; i < name.length; i += 1) {
+    const c = name.charCodeAt(i);
+    const letter = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+    const digit = c >= 48 && c <= 57;
+    if (!(letter || (i > 0 && digit))) return false;
+  }
+  return true;
+}
+
+function isGrepFamilyWord(word) {
+  let w = String(word || "");
+  if (w.length >= 2) {
+    const a = w[0];
+    const b = w[w.length - 1];
+    if ((a === "'" && b === "'") || (a === '"' && b === '"')) {
+      w = w.slice(1, -1);
+    }
+  }
+  const slash = w.lastIndexOf("/");
+  const base = slash === -1 ? w : w.slice(slash + 1);
+  return base === "grep" || base === "egrep" || base === "fgrep";
+}
+
+function unquotedShellWords(src) {
+  const words = [];
+  const n = src.length;
+  let state = "none";
+  let i = 0;
+  let start = -1;
+  const flush = (end) => {
+    if (start !== -1 && end > start) {
+      words.push({ start, end, word: src.slice(start, end) });
+    }
+    start = -1;
+  };
+  const isMeta = (c) =>
+    c === "|" ||
+    c === "&" ||
+    c === ";" ||
+    c === "<" ||
+    c === ">" ||
+    c === "(" ||
+    c === ")" ||
+    c === "\n" ||
+    c === "\r";
+  while (i < n) {
+    const c = src[i];
+    if (state === "single") {
+      if (start === -1) start = i;
+      i += 1;
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      if (start === -1) start = i;
+      if (c === "\\") {
+        i += Math.min(2, n - i);
+        continue;
+      }
+      i += 1;
+      if (c === '"') state = "none";
+      continue;
+    }
+    const atWordStart = i === 0 || /[ \t\r\n]/.test(src[i - 1] || "");
+    if (c === "#" && atWordStart) break;
+    if (c === "\\") {
+      if (start === -1) start = i;
+      i += Math.min(2, n - i);
+      continue;
+    }
+    if (c === "'") {
+      if (start === -1) start = i;
+      state = "single";
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      if (start === -1) start = i;
+      state = "double";
+      i += 1;
+      continue;
+    }
+    if (c === " " || c === "\t" || isMeta(c)) {
+      flush(i);
+      i += 1;
+      continue;
+    }
+    if (start === -1) start = i;
+    i += 1;
+  }
+  flush(i);
+  return words;
+}
+
+/**
+ * One linear pass: at each index, whether a grep-family command starts
+ * after optional env-assignment / `env` / `command` prefixes. Used so
+ * `|LC_ALL=C grep`, `|env grep`, and `|command grep` are pipeline bars
+ * without per-bar suffix allocation or `.*\/grep` scanning. Residual:
+ * not a general shell parser (ANSI-C quotes, here-doc delimiters as
+ * quote state, and arbitrary wrappers stay #263/#264).
+ */
+function precomputePrefixedGrepStarts(src) {
+  const n = src.length;
+  const from = new Uint8Array(n + 1);
+  const words = unquotedShellWords(src);
+  const ok = new Array(words.length).fill(false);
+  for (let t = words.length - 1; t >= 0; t -= 1) {
+    const w = words[t].word;
+    if (isGrepFamilyWord(w)) {
+      ok[t] = true;
+      continue;
+    }
+    if (isEnvAssignmentWord(w)) {
+      ok[t] = Boolean(ok[t + 1]);
+      continue;
+    }
+    if (w === "env") {
+      let u = t + 1;
+      while (
+        u < words.length &&
+        (words[u].word.startsWith("-") || isEnvAssignmentWord(words[u].word))
+      ) {
+        if (words[u].word === "-u" || words[u].word === "-C") u += 2;
+        else u += 1;
+      }
+      ok[t] = u < words.length && ok[u];
+      continue;
+    }
+    if (w === "command") {
+      let u = t + 1;
+      while (u < words.length && /^-[pvV]+$/.test(words[u].word)) u += 1;
+      ok[t] = u < words.length && ok[u];
+    }
+  }
+  const startToTok = new Int32Array(n).fill(-1);
+  for (let t = 0; t < words.length; t += 1) {
+    startToTok[words[t].start] = t;
+  }
+  const nextNonWs = new Int32Array(n + 1);
+  nextNonWs[n] = n;
+  let nxt = n;
+  for (let i = n - 1; i >= 0; i -= 1) {
+    if (src[i] !== " " && src[i] !== "\t") nxt = i;
+    nextNonWs[i] = nxt;
+  }
+  for (let i = 0; i < n; i += 1) {
+    const k = nextNonWs[i];
+    if (k >= n) continue;
+    const t = startToTok[k];
+    if (t >= 0 && ok[t]) from[i] = 1;
+  }
+  return from;
+}
+
 /**
  * Split one command-list segment into pipeline stages so each executable
  * grep keeps its own ERE/BRE mode. Unquoted `|` that is not `||` is a
  * pipeline bar only when it is a command connector: whitespace on both
- * sides (`cmd | cmd`) or the next non-whitespace token is a grep-family
- * command (`'.*'|grep`). An unescaped ERE `|` inside a matcher token
+ * sides (`cmd | cmd`) or the next command is a grep-family invocation,
+ * including no-whitespace assignment/`env`/`command` prefixes
+ * (`'.*'|LC_ALL=C grep`). An unescaped ERE `|` inside a matcher token
  * (`APPROVE|PASS`, including quoted `"...|..."` / `'...|...'`) is not a
- * stage boundary. Not a general shell parser; residuals #263/#264 keep
- * ANSI-C quotes, escaped quote context, and unquoted continuation.
+ * stage boundary. Classification uses a precomputed prefix map, not a
+ * per-bar suffix regex. Not a general shell parser; residuals #263/#264
+ * keep ANSI-C quotes, escaped quote context, and unquoted continuation.
  */
-function isCommandPipelineBar(src, i) {
+function isCommandPipelineBar(src, i, grepFrom) {
   const prev = i > 0 ? src[i - 1] : "";
   const next = src[i + 1] || "";
   if (/[ \t]/.test(prev) && /[ \t]/.test(next)) return true;
-  let k = i + 1;
-  while (k < src.length && /[ \t]/.test(src[k])) k += 1;
-  return /^(?:.*\/)?(?:e|f)?grep(?:[\s;|&<>]|$)/.test(src.slice(k));
+  return Boolean(grepFrom && grepFrom[i + 1]);
 }
 
 function shellPipelineStages(segment) {
   const src = String(segment || "");
+  const grepFrom = precomputePrefixedGrepStarts(src);
   const stages = [];
   let start = 0;
   let state = "none";
@@ -2713,7 +2874,7 @@ function shellPipelineStages(segment) {
       i += 2;
       continue;
     }
-    if (c === "|" && isCommandPipelineBar(src, i)) {
+    if (c === "|" && isCommandPipelineBar(src, i, grepFrom)) {
       stages.push(src.slice(start, i));
       i += 1;
       start = i;
@@ -2746,11 +2907,200 @@ function executableBreDelimRun(slashCount, quoteState) {
   return false;
 }
 
-function addVerdictToken(tokens, raw) {
-  const tok = String(raw || "")
-    .replace(/[^A-Za-z0-9_]/g, "")
-    .toUpperCase();
-  if (tok) tokens.add(tok);
+const POSIX_CLASS_PRED = {
+  space: (ch) => /\s/.test(ch),
+  blank: (ch) => ch === " " || ch === "\t",
+  digit: (ch) => ch >= "0" && ch <= "9",
+  xdigit: (ch) => /[0-9A-Fa-f]/.test(ch),
+  alnum: (ch) => /[A-Za-z0-9]/.test(ch),
+  alpha: (ch) => /[A-Za-z]/.test(ch),
+  lower: (ch) => ch >= "a" && ch <= "z",
+  upper: (ch) => ch >= "A" && ch <= "Z",
+  word: (ch) => /[A-Za-z0-9_]/.test(ch),
+  punct: (ch) => /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/.test(ch),
+};
+
+function charsEqFold(a, b) {
+  return a === b || a.toUpperCase() === b.toUpperCase();
+}
+
+function parseVerdictAltQuantifier(src, i, dialect) {
+  if (src[i] === "*") return { min: 0, max: Infinity, next: i + 1 };
+  if (dialect === "ere") {
+    if (src[i] === "?") return { min: 0, max: 1, next: i + 1 };
+    if (src[i] === "+") return { min: 1, max: Infinity, next: i + 1 };
+  }
+  if (dialect === "bre" && src[i] === "\\") {
+    const n = src[i + 1];
+    if (n === "?") return { min: 0, max: 1, next: i + 2 };
+    if (n === "+") return { min: 1, max: Infinity, next: i + 2 };
+    if (n === "{") {
+      const close = src.indexOf("\\}", i + 2);
+      if (close !== -1) {
+        const inner = src.slice(i + 2, close);
+        const m = /^(\d+)(?:,(\d*))?$/.exec(inner);
+        if (m) {
+          const min = Number(m[1]);
+          const max = m[2] === undefined ? min : m[2] === "" ? Infinity : Number(m[2]);
+          return { min, max, next: close + 2 };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function parseVerdictAltAtom(src, i) {
+  // Shell backslash-newline is line continuation, not a regex atom
+  // (`APPROVE|\` / `PASS)`). Do not fold other punctuation away.
+  while (i < src.length && src[i] === "\\") {
+    const n = src[i + 1];
+    if (n === "\n") {
+      i += 2;
+      continue;
+    }
+    if (n === "\r") {
+      i += src[i + 2] === "\n" ? 3 : 2;
+      continue;
+    }
+    break;
+  }
+  if (i >= src.length) return null;
+  if (src.startsWith("[[:", i)) {
+    const close = src.indexOf(":]]", i + 3);
+    if (close !== -1) {
+      const name = src.slice(i + 3, close).toLowerCase();
+      return { kind: "posix", name, next: close + 3 };
+    }
+  }
+  if (src[i] === "[") {
+    let j = i + 1;
+    if (src[j] === "^") j += 1;
+    if (src[j] === "]") j += 1;
+    while (j < src.length && src[j] !== "]") j += 1;
+    if (j < src.length && src[j] === "]") {
+      return { kind: "class", raw: src.slice(i, j + 1), next: j + 1 };
+    }
+  }
+  if (src[i] === ".") return { kind: "any", next: i + 1 };
+  if (src[i] === "\\") {
+    if (i + 1 >= src.length) return { kind: "char", ch: "\\", next: i + 1 };
+    return { kind: "char", ch: src[i + 1], next: i + 2 };
+  }
+  return { kind: "char", ch: src[i], next: i + 1 };
+}
+
+function compileVerdictAltAtoms(src, dialect) {
+  const atoms = [];
+  let i = 0;
+  while (i < src.length) {
+    const atom = parseVerdictAltAtom(src, i);
+    if (!atom) break;
+    i = atom.next;
+    const q = parseVerdictAltQuantifier(src, i, dialect);
+    if (q) {
+      atom.min = q.min;
+      atom.max = q.max;
+      i = q.next;
+    } else {
+      atom.min = 1;
+      atom.max = 1;
+    }
+    atoms.push(atom);
+  }
+  return atoms;
+}
+
+function consumeVerdictAtom(atom, want, ti) {
+  if (ti >= want.length) return -1;
+  const ch = want[ti];
+  if (atom.kind === "any") return 1;
+  if (atom.kind === "char") return charsEqFold(atom.ch, ch) ? 1 : -1;
+  if (atom.kind === "posix") {
+    const pred = POSIX_CLASS_PRED[atom.name];
+    if (!pred) return -1;
+    return pred(ch) ? 1 : -1;
+  }
+  if (atom.kind === "class") {
+    const raw = atom.raw;
+    const neg = raw[1] === "^";
+    const inner = raw.slice(neg ? 2 : 1, -1);
+    let hit = inner.includes(ch);
+    if (!hit) {
+      for (let k = 0; k + 2 < inner.length; k += 1) {
+        if (inner[k + 1] === "-" && inner[k] <= ch && ch <= inner[k + 2]) {
+          hit = true;
+          break;
+        }
+      }
+    }
+    return (neg ? !hit : hit) ? 1 : -1;
+  }
+  return -1;
+}
+
+/**
+ * Does this one regex alternative match a literal verdict token?
+ * Interprets POSIX classes and BRE/ERE quantifiers on the alternative
+ * (`PASS[[:space:]]*`, `P\?PASS`) instead of deleting punctuation, which
+ * would glue `[[:space:]]` / `\?` into fake tokens such as PASSSPACE or
+ * PPASS. Bounded: pattern and token lengths are capped.
+ */
+function verdictAltMatchesLiteral(raw, token, dialect) {
+  const src = String(raw || "");
+  const want = String(token || "");
+  if (!src || !want || src.length > 240 || want.length > 32) return false;
+  const atoms = compileVerdictAltAtoms(src, dialect || "bre");
+  if (!atoms) return false;
+  const memo = new Map();
+  function rec(ai, ti) {
+    const key = `${ai}:${ti}`;
+    if (memo.has(key)) return memo.get(key);
+    if (ai === atoms.length) {
+      const okEnd = ti === want.length;
+      memo.set(key, okEnd);
+      return okEnd;
+    }
+    const atom = atoms[ai];
+    let t = ti;
+    let k = 0;
+    while (k < atom.min) {
+      const n = consumeVerdictAtom(atom, want, t);
+      if (n < 0) {
+        memo.set(key, false);
+        return false;
+      }
+      t += n;
+      k += 1;
+    }
+    while (k <= atom.max) {
+      if (rec(ai + 1, t)) {
+        memo.set(key, true);
+        return true;
+      }
+      if (k === atom.max) break;
+      const n = consumeVerdictAtom(atom, want, t);
+      if (n < 0) break;
+      t += n;
+      k += 1;
+    }
+    memo.set(key, false);
+    return false;
+  }
+  return rec(0, 0);
+}
+
+function addVerdictToken(tokens, raw, dialect) {
+  const src = String(raw || "");
+  if (!src) return;
+  const mode = dialect || "bre";
+  for (const cand of ["APPROVE", "PASS", "REQUEST_CHANGES"]) {
+    if (verdictAltMatchesLiteral(src, cand, mode)) tokens.add(cand);
+  }
+  const ident = src.trim();
+  if (/^[A-Za-z][A-Za-z0-9_]*$/.test(ident)) {
+    tokens.add(ident.toUpperCase());
+  }
 }
 
 function splitUnescapedVerdictAlts(inner) {
@@ -2776,14 +3126,18 @@ function splitUnescapedVerdictAlts(inner) {
   return parts;
 }
 
-function collectMatcherClusterTokens(slice, tokens) {
+function collectMatcherClusterTokens(slice, tokens, dialect) {
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a shell-slice
   // matcher cluster of balanced groups (and ungrouped |TOKEN siblings).
   // A slice spans physical lines only while a shell quote remains open;
   // a closed-quote dangling `(` cannot swallow a later PASS matcher.
   // Double-quoted group-run-3 / alternation-run-1 leaves leftover `\(`
   // while normalizing `|`; skip those leftover escapes so the executable
-  // top-level PASS alternative is visible. Not a general regex parser.
+  // top-level PASS alternative is visible. Alternatives keep POSIX
+  // classes and quantifiers so `PASS[[:space:]]*` / `P\?PASS` still
+  // tokenize as PASS rather than PASSSPACE / PPASS. Not a general regex
+  // parser.
+  const mode = dialect || "bre";
   const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
   let p;
   while ((p = prefixRe.exec(slice)) !== null) {
@@ -2798,13 +3152,13 @@ function collectMatcherClusterTokens(slice, tokens) {
         if (close === -1) break;
         const inner = slice.slice(i + 1, close);
         for (const part of splitUnescapedVerdictAlts(inner)) {
-          addVerdictToken(tokens, part);
+          addVerdictToken(tokens, part, mode);
         }
         i = close + 1;
       } else if (/[A-Za-z]/.test(slice[i] || "")) {
         let j = i;
         while (j < slice.length && /[A-Za-z0-9_]/.test(slice[j])) j += 1;
-        addVerdictToken(tokens, slice.slice(i, j));
+        addVerdictToken(tokens, slice.slice(i, j), mode);
         i = j;
       } else {
         break;
@@ -2836,7 +3190,8 @@ function harnessVerdictRegexGroupTokens(text) {
       for (const stage of shellPipelineStages(segment)) {
         const commentAt = unquotedCommentStart(stage);
         let slice = commentAt === -1 ? stage : stage.slice(0, commentAt);
-        if (!lineHasGrepEre(stage)) {
+        const ereStage = lineHasGrepEre(stage);
+        if (!ereStage) {
           const quoteStates = shellSliceQuoteStates(slice);
           slice = slice.replace(
             /(\\*)([()|])/g,
@@ -2849,7 +3204,7 @@ function harnessVerdictRegexGroupTokens(text) {
                 : match
           );
         }
-        collectMatcherClusterTokens(slice, tokens);
+        collectMatcherClusterTokens(slice, tokens, ereStage ? "ere" : "bre");
       }
     }
   }
@@ -2876,10 +3231,12 @@ function harnessAcceptsPass(text) {
  * files fail closed (cannot determine authority). A VERDICT regex group
  * that lists PASS as an alternative (including ERE
  * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)` and BRE
- * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`, the mixed
- * double-quoted group-run-3 / alternation-run-1 form, and a pipeline
- * `grep -E` stage followed by a default-BRE matcher) is a harness accept of
- * PASS; APPROVE/REQUEST_CHANGES without PASS stays green. Residual: nested
+ * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`, lossless quantified
+ * alts `PASS[[:space:]]*` / `P\?PASS`, the mixed double-quoted
+ * group-run-3 / alternation-run-1 form, and a pipeline `grep -E` stage
+ * followed by a default-BRE matcher, including no-whitespace
+ * `LC_ALL=C` / `env` / `command` prefixes) is a harness accept of PASS;
+ * APPROVE/REQUEST_CHANGES without PASS stays green. Residual: nested
  * groups and non-VERDICT alternations are not parsed. Residual #263/#264:
  * not a general shell/regex parser. Residual #265: pathological scan cost.
  *
@@ -3105,6 +3462,27 @@ function splitCoordinatedActorClauses(text) {
   return parts.length ? parts : [src];
 }
 
+/**
+ * Owner must be the grammatical actor of this approval/waiver verb, not
+ * merely mentioned (`for the owner`) or notified (`the owner was
+ * notified after counsel approved`). Intervening `after`/`before`/…
+ * clauses keep their own actor. Residual: not general NLP.
+ */
+function ownerIsVerbActor(text, verbIndex) {
+  const before = collapseWs(String(text || "").slice(0, verbIndex));
+  if (!before) return false;
+  const parts = before.split(
+    /\b(?:after|before|when|while|because|since|although|though|if)\b/i
+  );
+  const local = collapseWs(parts[parts.length - 1] || "");
+  if (!/\bowner\b/i.test(local)) return false;
+  const withoutPrepOwner = local.replace(
+    /\b(?:for|to|of|with|from|about|under|by)\s+(?:the\s+)?owner\b/gi,
+    " "
+  );
+  return /\bowner\b/i.test(withoutPrepOwner);
+}
+
 function verbInRelativeClause(text, verbIndex) {
   const before = collapseWs(String(text || "").slice(0, verbIndex));
   if (!before) return false;
@@ -3192,15 +3570,17 @@ function overlayNamedGateIds(text) {
 }
 
 /**
- * Same-clause owner authorization requires an un-negated approval verb,
- * an un-negated remove/waive act, and an un-negated named gate bound in
- * that coordinated clause. Relative-clause verbs (`decision that waived
- * G12`, `decision that counsel approved removal of G12`) are not the
- * clause's decision. A unit may authorize the target only when it names
- * no other G-number; independently split units still authorize when they
- * carry their own owner approval and removal/waiver. `not G12` /
- * `neither … G12` deny G12 even when a sibling gate is approved in the
- * same sentence. Residual: this is not general NLP.
+ * Same-clause owner authorization requires an un-negated approval verb
+ * whose actor is the owner, an un-negated remove/waive act, and an
+ * un-negated named gate bound in that coordinated clause. Owner must
+ * approve/decide the gate-removal clause, not merely be mentioned or
+ * notified. Relative-clause verbs (`decision that waived G12`,
+ * `decision that counsel approved removal of G12`) are not the clause's
+ * decision. A unit may authorize the target only when it names no other
+ * G-number; independently split units still authorize when they carry
+ * their own owner approval and removal/waiver. `not G12` / `neither …
+ * G12` deny G12 even when a sibling gate is approved in the same
+ * sentence. Residual: this is not general NLP.
  */
 function clauseAuthorizesGateRemoval(clause, gateId) {
   const t = collapseWs(clause);
@@ -3217,6 +3597,7 @@ function clauseAuthorizesGateRemoval(clause, gateId) {
   for (const verb of verbs) {
     if (verbInRelativeClause(t, verb.index)) continue;
     if (overlayAuthVerbNegated(t.slice(0, verb.index))) continue;
+    if (!ownerIsVerbActor(t, verb.index)) continue;
     for (const action of actions) {
       if (
         action.index !== verb.index &&
@@ -3442,7 +3823,15 @@ function sameAgentGrantAt(text, span) {
   const before = text.slice(0, span.index);
   const after = text.slice(span.index);
   const afterEnd = text.slice(span.end);
-  if (clauseSubjectIsIndependent(text)) return false;
+  const delegatedSameAgent =
+    /\b(?:authoriz(?:e|es|ed|ing)|permit(?:s|ted)?|allow(?:s|ed)?)\s+(?:the\s+)?same[\s-]?agent\b/i.test(
+      after
+    ) || /\bsame[\s-]?agent\s+to\s+(?:review|evaluate|grade)\b/i.test(after);
+  // An independent subject reviewing is not a same-agent grant, but that
+  // subject must not suppress an explicit grant *to* the same agent
+  // (`authorize the same agent to review`).
+  if (clauseSubjectIsIndependent(text) && !delegatedSameAgent) return false;
+  if (delegatedSameAgent && REVIEW_ACT_RE.test(after)) return true;
   const subject = /\bsame[\s-]?agent\b/i.test(before);
   if (/\bbe\s+(?:the\s+)?same[\s-]?agent\b/i.test(after)) return true;
   if (subject && /\bbe\s+(?:the\s+)?reviewer\b/i.test(after)) return true;
