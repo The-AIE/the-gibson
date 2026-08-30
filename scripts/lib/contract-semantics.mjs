@@ -2388,10 +2388,12 @@ function harnessAcceptsApprove(text) {
 /**
  * Quote context for canonical Bash grep forms only — not a general shell
  * parser. Tracks line-local none/single/double so BRE source-run rules can
- * differ for unquoted vs single-quoted vs double-quoted regexes. Residual:
- * $'...' ANSI-C quoting, line-continuations, and comments with unmatched
- * quotes. Executable-command provenance for bare ERE groups and comment-only
- * APPROVE text is outside this BRE helper and tracked in issue #263.
+ * differ for unquoted vs single-quoted vs double-quoted regexes. An unquoted
+ * comment start (` #` / line-leading `#`) ends executable matching on that
+ * line; `#` inside quotes is not a comment. Residual #264: $'...' ANSI-C
+ * quoting, escaped quotes, and line continuations. Residual #263:
+ * executable-command provenance for bare unquoted ERE groups and
+ * comment-only APPROVE text.
  */
 function lineLocalQuoteContext(text, index) {
   const src = String(text || "");
@@ -2400,12 +2402,13 @@ function lineLocalQuoteContext(text, index) {
   let i = lineStart;
   while (i < index) {
     const c = src[i];
-    i += 1;
     if (state === "single") {
+      i += 1;
       if (c === "'") state = "none";
       continue;
     }
     if (state === "double") {
+      i += 1;
       if (c === "\\") {
         if (i < index) i += 1;
         continue;
@@ -2413,56 +2416,192 @@ function lineLocalQuoteContext(text, index) {
       if (c === '"') state = "none";
       continue;
     }
+    if (state === "comment") return "comment";
+    const atWordStart = i === lineStart || src[i - 1] === " " || src[i - 1] === "\t";
+    if (c === "#" && atWordStart) return "comment";
+    i += 1;
     if (c === "'") state = "single";
     else if (c === '"') state = "double";
   }
   return state;
 }
 
-function executableBreSourceRun(slashCount, text, offset) {
-  // Do not consume a suffix of a longer run: three or more source
-  // backslashes are not the executable grep BRE form in any quote context.
-  // Unquoted source never normalizes a slash run: Bash consumes one
-  // backslash, so a 1-slash run is received as literal `(`/`|`/`)` (grep
-  // rc 1 on `VERDICT: APPROVE`), and a 2-slash run leaves an unquoted `(`
-  // (Bash syntax error, rc 2).
-  const ctx = lineLocalQuoteContext(text, offset);
-  if (slashCount === 1) return ctx === "single" || ctx === "double";
-  if (slashCount === 2) return ctx === "double";
+function unquotedCommentStart(line) {
+  const src = String(line || "");
+  let state = "none";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      if (c === "'") state = "none";
+      i += 1;
+      continue;
+    }
+    if (state === "double") {
+      if (c === "\\") {
+        i += 1;
+        if (i < src.length) i += 1;
+        continue;
+      }
+      if (c === '"') state = "none";
+      i += 1;
+      continue;
+    }
+    const atWordStart = i === 0 || src[i - 1] === " " || src[i - 1] === "\t";
+    if (c === "#" && atWordStart) return i;
+    if (c === "'") state = "single";
+    else if (c === '"') state = "double";
+    i += 1;
+  }
+  return -1;
+}
+
+function maskQuotedForTokens(line) {
+  const src = String(line || "");
+  let out = "";
+  let state = "none";
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (state === "single") {
+      out += " ";
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      out += " ";
+      if (c === "\\") {
+        if (i + 1 < src.length) {
+          i += 1;
+          out += " ";
+        }
+        continue;
+      }
+      if (c === '"') state = "none";
+      continue;
+    }
+    if (c === "'") {
+      state = "single";
+      out += " ";
+      continue;
+    }
+    if (c === '"') {
+      state = "double";
+      out += " ";
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+function lineHasGrepEre(line) {
+  const commentAt = unquotedCommentStart(line);
+  const s = commentAt === -1 ? line : String(line).slice(0, commentAt);
+  const tokens = maskQuotedForTokens(s)
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const cmd = tokens[i].split("/").pop();
+    if (cmd === "egrep") return true;
+    if (cmd !== "grep") continue;
+    for (let j = i + 1; j < tokens.length; j += 1) {
+      const t = tokens[j];
+      if (t === "--") break;
+      if (t.startsWith("--")) continue;
+      if (/^-[A-Za-z0-9]*E[A-Za-z0-9]*$/.test(t)) return true;
+    }
+  }
   return false;
+}
+
+function executableBreDelimRun(slashCount, quoteState) {
+  // Quote context for canonical Bash grep forms (not a general parser):
+  // - double-quoted source: a run of one or two backslashes immediately
+  //   before `(`, `)`, or `|` becomes the one runtime backslash grep BRE
+  //   needs. Both `"\(...\)"` and `"\\(...\\)"` are executable. Runs of
+  //   three or more stay extra runtime backslashes and are not grouping.
+  // - single-quoted source: only a run of one backslash is executable.
+  //   `'\(...\)'` is executable; `'\\(...\\)'` remains two runtime
+  //   backslashes and is not BRE grouping/alternation.
+  // - unquoted source: run 1 is received as literal `(`/`|`/`)` (grep rc 1
+  //   on `VERDICT: APPROVE`); run 2 leaves an unquoted `(` (Bash syntax
+  //   error, rc 2); run 3 is the executable form (`\\\(` → `\(`). Nearby
+  //   longer runs change the pattern and do not match ordinary verdict
+  //   samples. Do not consume a suffix of a longer run.
+  if (quoteState === "comment") return false;
+  if (slashCount === 1) return quoteState === "single" || quoteState === "double";
+  if (slashCount === 2) return quoteState === "double";
+  if (slashCount === 3) return quoteState === "none";
+  return false;
+}
+
+function addVerdictToken(tokens, raw) {
+  const tok = String(raw || "")
+    .replace(/[^A-Za-z0-9_]/g, "")
+    .toUpperCase();
+  if (tok) tokens.add(tok);
+}
+
+function collectMatcherClusterTokens(slice, tokens) {
+  // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a line-local
+  // matcher cluster of balanced groups (and ungrouped |TOKEN siblings).
+  // Never match a group across a newline: dangling `(` on this line must
+  // not swallow a later line's PASS matcher.
+  const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
+  let p;
+  while ((p = prefixRe.exec(slice)) !== null) {
+    let i = p.index + p[0].length;
+    if (slice[i] !== "(") continue;
+    while (i < slice.length) {
+      if (slice[i] === "(") {
+        const close = slice.indexOf(")", i + 1);
+        if (close === -1) break;
+        const inner = slice.slice(i + 1, close);
+        for (const part of inner.split("|")) addVerdictToken(tokens, part);
+        i = close + 1;
+      } else if (/[A-Za-z]/.test(slice[i] || "")) {
+        let j = i;
+        while (j < slice.length && /[A-Za-z0-9_]/.test(slice[j])) j += 1;
+        addVerdictToken(tokens, slice.slice(i, j));
+        i = j;
+      } else {
+        break;
+      }
+      if (slice[i] === "|") {
+        i += 1;
+        continue;
+      }
+      break;
+    }
+    prefixRe.lastIndex = Math.max(prefixRe.lastIndex, i);
+  }
 }
 
 function harnessVerdictRegexGroupTokens(text) {
   const tokens = new Set();
-  // Normalize only BRE grouping/alternation syntax before parsing the
-  // VERDICT-local group. ERE `(APPROVE|REQUEST_CHANGES)` and BRE
-  // `\(APPROVE\|REQUEST_CHANGES\)` must carry the same authority meaning.
-  // Quote context for canonical Bash grep forms (not a general parser):
-  // - double-quoted source: a run of one or two backslashes immediately
-  //   before `(`, `)`, or `|` becomes the one runtime backslash grep BRE
-  //   needs. Both `"\(...\)"` and `"\\(...\\)"` are executable.
-  // - single-quoted source: only a run of one backslash is executable.
-  //   `'\(...\)'` is executable; `'\\(...\\)'` remains two runtime
-  //   backslashes and is not BRE grouping/alternation.
-  // - unquoted source: no slash run is executable. Bash consumes a single
-  //   source backslash, so `\(` is received by grep as literal `(`, not BRE
-  //   grouping. Two source backslashes leave a runtime backslash then an
-  //   unquoted `(`, which is a Bash syntax error.
-  const t = String(text || "").replace(
-    /(\\*)([()|])/g,
-    (match, slashes, delim, offset, whole) =>
-      executableBreSourceRun(slashes.length, whole, offset) ? delim : match
-  );
-  // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a pipe group.
-  const re = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)\(([^)]*)\)/gi;
-  let m;
-  while ((m = re.exec(t)) !== null) {
-    for (const part of m[1].split("|")) {
-      const tok = String(part || "")
-        .replace(/[^A-Za-z0-9_]/g, "")
-        .toUpperCase();
-      if (tok) tokens.add(tok);
+  // Normalize only executable BRE grouping/alternation on each line, then
+  // parse every sibling group in the same line-local matcher cluster.
+  // Canonical grep ERE (`grep -E`, combined short flags containing `E`,
+  // `egrep`) must not apply BRE backslash normalization; unescaped quoted
+  // ERE groups remain executable. Pre-existing unquoted escaped ERE is
+  // residual #263/#264.
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const commentAt = unquotedCommentStart(line);
+    let slice = commentAt === -1 ? line : line.slice(0, commentAt);
+    if (!lineHasGrepEre(line)) {
+      slice = slice.replace(
+        /(\\*)([()|])/g,
+        (match, slashes, delim, offset, whole) =>
+          executableBreDelimRun(
+            slashes.length,
+            lineLocalQuoteContext(whole, offset)
+          )
+            ? delim
+            : match
+      );
     }
+    collectMatcherClusterTokens(slice, tokens);
   }
   return tokens;
 }

@@ -4505,6 +4505,89 @@ const unquotedBreApproveOnly = unquotedBreApproveOnlySourceRun(1);
 const unquotedDoubleEscapedBreApproveOnly = unquotedBreApproveOnlySourceRun(2);
 const unquotedBrePassDecoy = unquotedBrePassDecoySourceRun(1);
 const unquotedDoubleEscapedBrePassDecoy = unquotedBrePassDecoySourceRun(2);
+const unquotedTripleEscapedBreApproveOnly = unquotedBreApproveOnlySourceRun(3);
+const unquotedQuadEscapedBreApproveOnly = unquotedBreApproveOnlySourceRun(4);
+const unquotedQuadEscapedBrePassDecoy = unquotedBrePassDecoySourceRun(4);
+const unquotedTripleEscapedBrePassDecoy = [
+  "#!/bin/bash",
+  "# VERDICT: APPROVE",
+  `grep -q VERDICT:[[:space:]]*${"\\".repeat(3)}(APPROVE${"\\".repeat(3)}|PASS${"\\".repeat(3)})`,
+].join("\n");
+const unquotedTripleEscapedBreApproveOnlyQuiet = [
+  "#!/bin/bash",
+  `grep -q VERDICT:[[:space:]]*${"\\".repeat(3)}(APPROVE${"\\".repeat(3)}|REQUEST_CHANGES${"\\".repeat(3)})`,
+].join("\n");
+function siblingQuotedGrep(quote, n, alts) {
+  const bs = "\\".repeat(n);
+  const body = alts.map((tok) => `${bs}(${tok}${bs})`).join(`${bs}|`);
+  if (quote === "single") return singleQuotedGrep(`VERDICT:[[:space:]]*${body}`);
+  if (quote === "double") return `grep "VERDICT:[[:space:]]*${body}"`;
+  return `grep VERDICT:[[:space:]]*${body}`;
+}
+function siblingQuotedScript(quote, n, alts) {
+  return ["#!/bin/bash", siblingQuotedGrep(quote, n, alts)].join("\n");
+}
+const siblingDqRun1PassDecoy = siblingQuotedScript("double", 1, ["APPROVE", "PASS"]);
+const siblingDqRun2PassDecoy = siblingQuotedScript("double", 2, ["APPROVE", "PASS"]);
+const siblingSqRun1PassDecoy = siblingQuotedScript("single", 1, ["APPROVE", "PASS"]);
+const siblingDqRun1ApproveOnly = siblingQuotedScript("double", 1, ["APPROVE", "REQUEST_CHANGES"]);
+const siblingDqRun2ApproveOnly = siblingQuotedScript("double", 2, ["APPROVE", "REQUEST_CHANGES"]);
+const siblingSqRun1ApproveOnly = siblingQuotedScript("single", 1, ["APPROVE", "REQUEST_CHANGES"]);
+const commentApostrophePassThenApprove = [
+  "#!/bin/bash",
+  "# reviewer\u0027s note: never accept VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\)",
+  String.raw`grep -q "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+].join("\n");
+const commentApostropheApproveOnly = [
+  "#!/bin/bash",
+  "# the reviewer\u0027s old VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\) form",
+  "echo hello",
+].join("\n");
+const quotedHashApproveOnly = [
+  "#!/bin/bash",
+  String.raw`grep -q "# VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+].join("\n");
+const quotedHashPassDecoy = [
+  "#!/bin/bash",
+  String.raw`grep -q "# VERDICT:[[:space:]]*\(APPROVE\|PASS\)"`,
+].join("\n");
+function grepEreScript(flags, pattern) {
+  return ["#!/bin/bash", `grep ${flags} ${pattern}`].join("\n");
+}
+const grepEEscapedApproveOnly = grepEreScript(
+  "-E",
+  String.raw`"VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`
+);
+const grepQEEscapedApproveOnly = grepEreScript(
+  "-qE",
+  String.raw`"VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`
+);
+const grepEQEscapedApproveOnly = grepEreScript(
+  "-Eq",
+  String.raw`"VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`
+);
+const grepEEscapedApproveOnlySq = [
+  "#!/bin/bash",
+  "grep -E " + SQ + String.raw`VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)` + SQ,
+].join("\n");
+const grepEUnescapedApproveOnly = grepEreScript(
+  "-E",
+  `"VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)"`
+);
+const grepEUnescapedPassDecoy = grepEreScript(
+  "-E",
+  `"VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)"`
+);
+const danglingCommentBrePass = [
+  "#!/bin/bash",
+  "# note: VERDICT: (legacy form dropped",
+  String.raw`grep "VERDICT:[[:space:]]*\(PASS\|APPROVE\)"`,
+].join("\n");
+const danglingCommentBreApproveOnly = [
+  "#!/bin/bash",
+  "# note: VERDICT: (legacy form dropped",
+  String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`,
+].join("\n");
 // Prove consecutive-backslash shell-source BRE bytes (not the single-backslash form).
 const singleBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)"`;
 const doubleBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)"`;
@@ -4518,6 +4601,24 @@ const unquotedBreApproveNeedle = String.raw`grep VERDICT:[[:space:]]*\(APPROVE\|
 const unquotedDoubleEscapedBreApproveNeedle = String.raw`grep VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)`;
 const unquotedBrePassNeedle = String.raw`grep VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`;
 const unquotedDoubleEscapedBrePassNeedle = String.raw`grep VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)`;
+const unquotedTripleEscapedBreApproveNeedle = String.raw`grep VERDICT:[[:space:]]*\\\(APPROVE\\\|REQUEST_CHANGES\\\)`;
+const unquotedTripleEscapedBreApproveQuietNeedle = String.raw`grep -q VERDICT:[[:space:]]*\\\(APPROVE\\\|REQUEST_CHANGES\\\)`;
+const unquotedTripleEscapedBrePassNeedle = String.raw`grep -q VERDICT:[[:space:]]*\\\(APPROVE\\\|PASS\\\)`;
+const unquotedQuadEscapedBreApproveNeedle = String.raw`grep VERDICT:[[:space:]]*\\\\(APPROVE\\\\|REQUEST_CHANGES\\\\)`;
+const siblingDqRun1PassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\)\|\(PASS\)"`;
+const siblingDqRun2PassNeedle = String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(PASS\\)"`;
+const siblingSqRun1PassNeedle = singleQuotedGrep(String.raw`VERDICT:[[:space:]]*\(APPROVE\)\|\(PASS\)`);
+const siblingDqRun1ApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\)\|\(REQUEST_CHANGES\)"`;
+const siblingDqRun2ApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(REQUEST_CHANGES\\)"`;
+const siblingSqRun1ApproveNeedle = singleQuotedGrep(String.raw`VERDICT:[[:space:]]*\(APPROVE\)\|\(REQUEST_CHANGES\)`);
+const grepEEscapedApproveNeedle = String.raw`grep -E "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`;
+const grepQEEscapedApproveNeedle = String.raw`grep -qE "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`;
+const grepEQEscapedApproveNeedle = String.raw`grep -Eq "VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`;
+const grepEEscapedApproveSqNeedle = "grep -E " + SQ + String.raw`VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)` + SQ;
+const grepEUnescapedApproveNeedle = String.raw`grep -E "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)"`;
+const grepEUnescapedPassNeedle = String.raw`grep -E "VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)"`;
+const danglingCommentBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(PASS\|APPROVE\)"`;
+const danglingCommentOpener = "# note: VERDICT: (legacy form dropped";
 if (!brePassDecoy.includes(singleBrePassNeedle) || brePassDecoy.includes(doubleBrePassNeedle)) {
   throw new Error("brePassDecoy lost single-backslash BRE PASS bytes");
 }
@@ -4590,6 +4691,72 @@ if (sourceBackslashRunLen(unquotedBrePassDecoy, "(") !== 1 || sourceBackslashRun
 if (sourceBackslashRunLen(unquotedDoubleEscapedBrePassDecoy, "(") !== 2 || sourceBackslashRunLen(unquotedDoubleEscapedBrePassDecoy, "|") !== 2) {
   throw new Error("unquotedDoubleEscapedBrePassDecoy source-run length drifted from two backslashes");
 }
+if (!unquotedTripleEscapedBreApproveOnly.includes(unquotedTripleEscapedBreApproveNeedle) || sourceBackslashRunLen(unquotedTripleEscapedBreApproveOnly, "(") !== 3) {
+  throw new Error("unquotedTripleEscapedBreApproveOnly lost unquoted source-run 3 BRE approve-only bytes");
+}
+if (!unquotedTripleEscapedBrePassDecoy.includes(unquotedTripleEscapedBrePassNeedle) || unquotedTripleEscapedBrePassDecoy.includes(unquotedBrePassNeedle) || sourceBackslashRunLen(unquotedTripleEscapedBrePassDecoy, "(") !== 3) {
+  throw new Error("unquotedTripleEscapedBrePassDecoy lost unquoted source-run 3 BRE PASS bytes");
+}
+if (!unquotedTripleEscapedBreApproveOnlyQuiet.includes(unquotedTripleEscapedBreApproveQuietNeedle) || sourceBackslashRunLen(unquotedTripleEscapedBreApproveOnlyQuiet, "(") !== 3) {
+  throw new Error("unquotedTripleEscapedBreApproveOnlyQuiet lost unquoted source-run 3 quiet BRE bytes");
+}
+if (!unquotedQuadEscapedBreApproveOnly.includes(unquotedQuadEscapedBreApproveNeedle) || sourceBackslashRunLen(unquotedQuadEscapedBreApproveOnly, "(") !== 4) {
+  throw new Error("unquotedQuadEscapedBreApproveOnly lost unquoted source-run 4 BRE approve-only bytes");
+}
+if (!siblingDqRun1PassDecoy.includes(siblingDqRun1PassNeedle) || siblingDqRun1PassDecoy.includes(siblingDqRun2PassNeedle)) {
+  throw new Error("siblingDqRun1PassDecoy lost double-quoted sibling run-1 PASS bytes");
+}
+if (!siblingDqRun2PassDecoy.includes(siblingDqRun2PassNeedle) || siblingDqRun2PassDecoy.includes(siblingDqRun1PassNeedle)) {
+  throw new Error("siblingDqRun2PassDecoy lost double-quoted sibling run-2 PASS bytes");
+}
+if (!siblingSqRun1PassDecoy.includes(siblingSqRun1PassNeedle) || siblingSqRun1PassDecoy.includes(siblingDqRun1PassNeedle)) {
+  throw new Error("siblingSqRun1PassDecoy lost single-quoted sibling run-1 PASS bytes");
+}
+if (!siblingDqRun1ApproveOnly.includes(siblingDqRun1ApproveNeedle) || siblingDqRun1ApproveOnly.includes(siblingDqRun1PassNeedle)) {
+  throw new Error("siblingDqRun1ApproveOnly lost double-quoted sibling run-1 approve-only bytes");
+}
+if (!siblingDqRun2ApproveOnly.includes(siblingDqRun2ApproveNeedle) || siblingDqRun2ApproveOnly.includes(siblingDqRun2PassNeedle)) {
+  throw new Error("siblingDqRun2ApproveOnly lost double-quoted sibling run-2 approve-only bytes");
+}
+if (!siblingSqRun1ApproveOnly.includes(siblingSqRun1ApproveNeedle) || siblingSqRun1ApproveOnly.includes(siblingSqRun1PassNeedle)) {
+  throw new Error("siblingSqRun1ApproveOnly lost single-quoted sibling run-1 approve-only bytes");
+}
+if (!grepEEscapedApproveOnly.includes(grepEEscapedApproveNeedle) || grepEEscapedApproveOnly.includes(grepEUnescapedApproveNeedle)) {
+  throw new Error("grepEEscapedApproveOnly lost grep -E escaped APPROVE bytes");
+}
+if (!grepQEEscapedApproveOnly.includes(grepQEEscapedApproveNeedle)) {
+  throw new Error("grepQEEscapedApproveOnly lost grep -qE escaped APPROVE bytes");
+}
+if (!grepEQEscapedApproveOnly.includes(grepEQEscapedApproveNeedle)) {
+  throw new Error("grepEQEscapedApproveOnly lost grep -Eq escaped APPROVE bytes");
+}
+if (!grepEEscapedApproveOnlySq.includes(grepEEscapedApproveSqNeedle) || grepEEscapedApproveOnlySq.includes(grepEEscapedApproveNeedle)) {
+  throw new Error("grepEEscapedApproveOnlySq lost single-quoted grep -E escaped APPROVE bytes");
+}
+if (!grepEUnescapedApproveOnly.includes(grepEUnescapedApproveNeedle) || grepEUnescapedApproveOnly.includes(grepEEscapedApproveNeedle)) {
+  throw new Error("grepEUnescapedApproveOnly lost unescaped ERE APPROVE bytes");
+}
+if (!grepEUnescapedPassDecoy.includes(grepEUnescapedPassNeedle) || grepEUnescapedPassDecoy.includes(grepEEscapedApproveNeedle)) {
+  throw new Error("grepEUnescapedPassDecoy lost unescaped ERE PASS bytes");
+}
+if (!danglingCommentBrePass.includes(danglingCommentOpener) || !danglingCommentBrePass.includes(danglingCommentBrePassNeedle)) {
+  throw new Error("danglingCommentBrePass lost comment+dangling BRE PASS bytes");
+}
+if (!danglingCommentBreApproveOnly.includes(danglingCommentOpener) || danglingCommentBreApproveOnly.includes(danglingCommentBrePassNeedle)) {
+  throw new Error("danglingCommentBreApproveOnly lost comment+dangling BRE approve-only bytes");
+}
+if (!commentApostrophePassThenApprove.includes("reviewer\u0027s note") || !commentApostrophePassThenApprove.includes(String.raw`\(APPROVE\|PASS\)`)) {
+  throw new Error("commentApostrophePassThenApprove lost apostrophe comment PASS bytes");
+}
+if (!commentApostropheApproveOnly.includes("reviewer\u0027s old") || !commentApostropheApproveOnly.includes(String.raw`\(APPROVE\|REQUEST_CHANGES\)`)) {
+  throw new Error("commentApostropheApproveOnly lost apostrophe comment APPROVE bytes");
+}
+if (!quotedHashApproveOnly.includes(String.raw`grep -q "# VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)"`)) {
+  throw new Error("quotedHashApproveOnly lost quoted-hash APPROVE bytes");
+}
+if (!quotedHashPassDecoy.includes(String.raw`grep -q "# VERDICT:[[:space:]]*\(APPROVE\|PASS\)"`)) {
+  throw new Error("quotedHashPassDecoy lost quoted-hash PASS bytes");
+}
 function bashGrepRun(script, sample) {
   const line = String(script).split(/\n/).find((l) => /^grep\s/.test(l));
   if (!line) throw new Error("missing grep line");
@@ -4616,6 +4783,28 @@ const grepProofs = [
   { name: "double-quoted-run2-approve-matches-APPROVE", script: doubleEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "double-quoted-run3-approve-does-not-match", script: tripleEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: false },
   { name: "double-quoted-run4-approve-does-not-match", script: quadEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: false },
+  { name: "sibling-double-quoted-run1-pass-matches-PASS", script: siblingDqRun1PassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "sibling-double-quoted-run2-pass-matches-PASS", script: siblingDqRun2PassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "sibling-single-quoted-run1-pass-matches-PASS", script: siblingSqRun1PassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "sibling-double-quoted-run1-approve-matches-APPROVE", script: siblingDqRun1ApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "sibling-double-quoted-run2-approve-matches-APPROVE", script: siblingDqRun2ApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "sibling-single-quoted-run1-approve-matches-APPROVE", script: siblingSqRun1ApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "sibling-double-quoted-run1-approve-does-not-match-PASS", script: siblingDqRun1ApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "quoted-hash-approve-matches-APPROVE", script: quotedHashApproveOnly, sample: "# VERDICT: APPROVE", want: true },
+  { name: "quoted-hash-pass-matches-PASS", script: quotedHashPassDecoy, sample: "# VERDICT: PASS", want: true },
+  { name: "comment-apostrophe-then-approve-matches-APPROVE", script: commentApostrophePassThenApprove, sample: "VERDICT: APPROVE", want: true },
+  { name: "grep-E-unescaped-approve-matches-APPROVE", script: grepEUnescapedApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "grep-E-unescaped-pass-matches-PASS", script: grepEUnescapedPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "grep-E-escaped-approve-does-not-match-APPROVE", script: grepEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
+  { name: "grep-qE-escaped-approve-does-not-match-APPROVE", script: grepQEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
+  { name: "grep-Eq-escaped-approve-does-not-match-APPROVE", script: grepEQEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
+  { name: "grep-E-single-quoted-escaped-approve-does-not-match", script: grepEEscapedApproveOnlySq, sample: "VERDICT: APPROVE", want: false },
+  { name: "dangling-comment-bre-pass-matches-PASS", script: danglingCommentBrePass, sample: "VERDICT: PASS", want: true },
+  { name: "dangling-comment-bre-approve-only-does-not-match-PASS", script: danglingCommentBreApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "unquoted-run3-approve-matches-APPROVE", script: unquotedTripleEscapedBreApproveOnlyQuiet, sample: "VERDICT: APPROVE", want: true },
+  { name: "unquoted-run3-pass-matches-PASS", script: unquotedTripleEscapedBrePassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "unquoted-run3-approve-does-not-match-PASS", script: unquotedTripleEscapedBreApproveOnlyQuiet, sample: "VERDICT: PASS", want: false },
+  { name: "unquoted-run4-approve-does-not-match", script: unquotedQuadEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: false },
 ];
 for (const proof of grepProofs) {
   const got = bashGrepMatches(proof.script, proof.sample);
@@ -4629,6 +4818,14 @@ const grepStatusProofs = [
   { name: "unquoted-run2-approve-rc-2", script: unquotedDoubleEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: 2 },
   { name: "unquoted-run1-pass-rc-1", script: unquotedBrePassDecoy, sample: "VERDICT: PASS", want: 1 },
   { name: "unquoted-run2-pass-rc-2", script: unquotedDoubleEscapedBrePassDecoy, sample: "VERDICT: PASS", want: 2 },
+  { name: "unquoted-run3-approve-rc-0", script: unquotedTripleEscapedBreApproveOnlyQuiet, sample: "VERDICT: APPROVE", want: 0 },
+  { name: "unquoted-run3-pass-rc-0", script: unquotedTripleEscapedBrePassDecoy, sample: "VERDICT: PASS", want: 0 },
+  { name: "unquoted-run3-approve-pass-rc-1", script: unquotedTripleEscapedBreApproveOnlyQuiet, sample: "VERDICT: PASS", want: 1 },
+  { name: "unquoted-run4-approve-rc-2", script: unquotedQuadEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: 2 },
+  { name: "grep-E-escaped-approve-rc-1", script: grepEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: 1 },
+  { name: "grep-qE-escaped-approve-rc-1", script: grepQEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: 1 },
+  { name: "grep-Eq-escaped-approve-rc-1", script: grepEQEscapedApproveOnly, sample: "VERDICT: APPROVE", want: 1 },
+  { name: "grep-E-single-quoted-escaped-approve-rc-1", script: grepEEscapedApproveOnlySq, sample: "VERDICT: APPROVE", want: 1 },
 ];
 for (const proof of grepStatusProofs) {
   const got = bashGrepRun(proof.script, proof.sample).status;
@@ -4939,6 +5136,294 @@ const rows = [
       agentsText,
       harnessFiles: {
         "scripts/second-opinion.sh": unquotedDoubleEscapedBrePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-approve-first-sibling-double-quoted-run1-bre",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": siblingDqRun1PassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-approve-first-sibling-double-quoted-run2-bre",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": siblingDqRun2PassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-approve-first-sibling-single-quoted-run1-bre",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": siblingSqRun1PassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-sibling-double-quoted-run1-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": siblingDqRun1ApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-sibling-double-quoted-run2-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": siblingDqRun2ApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-positive-sibling-single-quoted-run1-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": siblingSqRun1ApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "comment-apostrophe-pass-does-not-red-legitimate-harness",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commentApostrophePassThenApprove,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "comment-apostrophe-approve-is-not-executable-approve",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": commentApostropheApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "quoted-hash-approve-request-changes-remains-green",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": quotedHashApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "quoted-hash-pass-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": quotedHashPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "grep-E-escaped-approve-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepEEscapedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "grep-qE-escaped-approve-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepQEEscapedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "grep-Eq-escaped-approve-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepEQEscapedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "grep-E-single-quoted-escaped-approve-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepEEscapedApproveOnlySq,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "grep-E-unescaped-approve-request-changes-remains-green",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepEUnescapedApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "grep-E-unescaped-pass-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": grepEUnescapedPassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "dangling-comment-bre-pass-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": danglingCommentBrePass,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "dangling-comment-bre-approve-only-remains-green",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": danglingCommentBreApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-unquoted-source-run-3-bre-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": unquotedTripleEscapedBrePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-unquoted-source-run-3-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": unquotedTripleEscapedBreApproveOnlyQuiet,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "approve-only-unquoted-source-run-4-bre-not-executable",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": unquotedQuadEscapedBreApproveOnly,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh does not accept VERDICT: APPROVE",
+    ],
+  },
+  {
+    name: "pass-decoy-unquoted-source-run-4-bre-not-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": unquotedQuadEscapedBrePassDecoy,
         "scripts/release-preflight.sh": approveOnly,
       },
     }),
@@ -5919,6 +6404,352 @@ if [[ "$rc" -eq 0 ]] && ! echo "$out" | grep -q 'accepts VERDICT: PASS'; then
   ok "benign: harness unquoted source-run 2 VERDICT BRE APPROVE\\|PASS is not credited as executable PASS"
 else
   bad "benign harness unquoted source-run 2 BRE PASS decoy (rc=$rc): $out"
+fi
+
+SIBLING_DQ_RUN1_PASS_SH=$'#!/bin/bash\ngrep -q "VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(PASS\\)"\n'
+printf '%s' "$SIBLING_DQ_RUN1_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep -q \"VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(PASS\\)\"";
+if (!t.includes(want)) {
+  console.error("sibling double-quoted run-1 PASS bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness sibling double-quoted run-1 PASS bytes mismatch"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness sibling double-quoted run-1 PASS grep does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted sibling double-quoted run-1 PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness sibling double-quoted run-1 VERDICT BRE APPROVE)\\|(PASS fails"
+else
+  bad "mutation harness sibling double-quoted run-1 PASS (rc=$rc): $out"
+fi
+
+SIBLING_DQ_RUN2_PASS_SH=$'#!/bin/bash\ngrep -q "VERDICT:[[:space:]]*\\\\(APPROVE\\\\)\\\\|\\\\(PASS\\\\)"\n'
+printf '%s' "$SIBLING_DQ_RUN2_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep -q \"VERDICT:[[:space:]]*\\\\(APPROVE\\\\)\\\\|\\\\(PASS\\\\)\"";
+const single = "grep -q \"VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(PASS\\)\"";
+if (!t.includes(want) || t.includes(single)) {
+  console.error("sibling double-quoted run-2 PASS bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness sibling double-quoted run-2 PASS bytes mismatch"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness sibling double-quoted run-2 PASS grep does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted sibling double-quoted run-2 PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness sibling double-quoted run-2 VERDICT BRE APPROVE)\\|(PASS fails"
+else
+  bad "mutation harness sibling double-quoted run-2 PASS (rc=$rc): $out"
+fi
+
+SIBLING_SQ_RUN1_PASS_SH=$'#!/bin/bash\ngrep -q \'VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(PASS\\)\'\n'
+printf '%s' "$SIBLING_SQ_RUN1_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness sibling single-quoted run-1 PASS grep does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted sibling single-quoted run-1 PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness sibling single-quoted run-1 VERDICT BRE APPROVE)\\|(PASS fails"
+else
+  bad "mutation harness sibling single-quoted run-1 PASS (rc=$rc): $out"
+fi
+
+SIBLING_DQ_RUN1_APPROVE_SH=$'#!/bin/bash\ngrep -q "VERDICT:[[:space:]]*\\(APPROVE\\)\\|\\(REQUEST_CHANGES\\)"\n'
+printf '%s' "$SIBLING_DQ_RUN1_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "benign harness sibling double-quoted run-1 approve-only grep does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: harness sibling double-quoted run-1 VERDICT BRE APPROVE)\\|(REQUEST_CHANGES remains green"
+else
+  bad "benign harness sibling double-quoted run-1 approve-only (rc=$rc): $out"
+fi
+
+COMMENT_APOSTROPHE_PASS_THEN_APPROVE_SH=$'#!/bin/bash\n# reviewer\'s note: never accept VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\)\ngrep -q "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$COMMENT_APOSTROPHE_PASS_THEN_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "benign harness comment-apostrophe then APPROVE grep does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && ! echo "$out" | grep -q 'accepts VERDICT: PASS'; then
+  ok "benign: apostrophe in unquoted # comment does not make legitimate APPROVE harness red"
+else
+  bad "benign harness comment-apostrophe PASS then APPROVE (rc=$rc): $out"
+fi
+
+COMMENT_APOSTROPHE_APPROVE_ONLY_SH=$'#!/bin/bash\n# the reviewer\'s old VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\) form\necho hello\n'
+printf '%s' "$COMMENT_APOSTROPHE_APPROVE_ONLY_SH" > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  echo "  planted comment-apostrophe APPROVE-only failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: apostrophe in unquoted # comment does not credit non-executable APPROVE"
+else
+  bad "mutation harness comment-apostrophe APPROVE-only (rc=$rc): $out"
+fi
+
+QUOTED_HASH_APPROVE_SH=$'#!/bin/bash\ngrep -q "# VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$QUOTED_HASH_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: # inside double quotes is not a comment and executable APPROVE stays green"
+else
+  bad "benign harness quoted-hash APPROVE (rc=$rc): $out"
+fi
+
+QUOTED_HASH_PASS_SH=$'#!/bin/bash\ngrep -q "# VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\)"\n'
+printf '%s' "$QUOTED_HASH_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted quoted-hash PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: # inside double quotes does not hide executable PASS"
+else
+  bad "mutation harness quoted-hash PASS (rc=$rc): $out"
+fi
+
+GREP_E_ESCAPED_APPROVE_SH=$'#!/bin/bash\ngrep -E "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$GREP_E_ESCAPED_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 1 ]]; then
+  bad "mutation harness grep -E escaped approve-only runtime rc want 1 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  echo "  planted grep -E escaped APPROVE failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: grep -E escaped VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness grep -E escaped approve-only (rc=$rc): $out"
+fi
+
+GREP_QE_ESCAPED_APPROVE_SH=$'#!/bin/bash\ngrep -qE "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$GREP_QE_ESCAPED_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 1 ]]; then
+  bad "mutation harness grep -qE escaped approve-only runtime rc want 1 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  ok "mutation: grep -qE escaped VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness grep -qE escaped approve-only (rc=$rc): $out"
+fi
+
+GREP_EQ_ESCAPED_APPROVE_SH=$'#!/bin/bash\ngrep -Eq "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$GREP_EQ_ESCAPED_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 1 ]]; then
+  bad "mutation harness grep -Eq escaped approve-only runtime rc want 1 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  ok "mutation: grep -Eq escaped VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness grep -Eq escaped approve-only (rc=$rc): $out"
+fi
+
+GREP_E_SQ_ESCAPED_APPROVE_SH=$'#!/bin/bash\ngrep -E \'VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)\'\n'
+printf '%s' "$GREP_E_SQ_ESCAPED_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 1 ]]; then
+  bad "mutation harness grep -E single-quoted escaped approve-only runtime rc want 1 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  ok "mutation: grep -E single-quoted escaped VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness grep -E single-quoted escaped approve-only (rc=$rc): $out"
+fi
+
+GREP_E_UNESCAPED_APPROVE_SH=$'#!/bin/bash\ngrep -E "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)"\n'
+printf '%s' "$GREP_E_UNESCAPED_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "benign harness grep -E unescaped approve-only grep does not match VERDICT: APPROVE"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: grep -E unescaped VERDICT ERE APPROVE|REQUEST_CHANGES remains green"
+else
+  bad "benign harness grep -E unescaped approve-only (rc=$rc): $out"
+fi
+
+GREP_E_UNESCAPED_PASS_SH=$'#!/bin/bash\ngrep -E "VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)"\n'
+printf '%s' "$GREP_E_UNESCAPED_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness grep -E unescaped PASS grep does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted grep -E unescaped PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: grep -E unescaped VERDICT ERE APPROVE|PASS fails"
+else
+  bad "mutation harness grep -E unescaped PASS (rc=$rc): $out"
+fi
+
+DANGLING_COMMENT_BRE_PASS_SH=$'#!/bin/bash\n# note: VERDICT: (legacy form dropped\ngrep "VERDICT:[[:space:]]*\\(PASS\\|APPROVE\\)"\n'
+printf '%s' "$DANGLING_COMMENT_BRE_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+if (!t.includes("# note: VERDICT: (legacy form dropped") || !t.includes("grep \"VERDICT:[[:space:]]*\\(PASS\\|APPROVE\\)\"")) {
+  console.error("dangling comment BRE PASS bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness dangling comment BRE PASS bytes mismatch"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness dangling comment BRE PASS grep does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted dangling comment BRE PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: dangling comment group does not hide later executable BRE PASS"
+else
+  bad "mutation harness dangling comment BRE PASS (rc=$rc): $out"
+fi
+
+DANGLING_COMMENT_BRE_APPROVE_SH=$'#!/bin/bash\n# note: VERDICT: (legacy form dropped\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$DANGLING_COMMENT_BRE_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: dangling comment group does not hide later executable BRE APPROVE-only"
+else
+  bad "benign harness dangling comment BRE approve-only (rc=$rc): $out"
+fi
+
+UNQUOTED_RUN3_PASS_SH=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep -q VERDICT:[[:space:]]*\\\\\\(APPROVE\\\\\\|PASS\\\\\\)\n'
+printf '%s' "$UNQUOTED_RUN3_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep -q VERDICT:[[:space:]]*\\\\\\(APPROVE\\\\\\|PASS\\\\\\)";
+const m = t.match(/(\\+)\(/);
+if (!t.includes(want) || !m || m[1].length !== 3) {
+  console.error("unquoted run-3 PASS bytes mismatch run=" + (m && m[1].length));
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness unquoted source-run 3 BRE PASS bytes mismatch"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 0 ]]; then
+  bad "mutation harness unquoted source-run 3 BRE PASS runtime rc want 0 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted unquoted source-run 3 BRE PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness unquoted source-run 3 VERDICT BRE APPROVE\\|PASS fails"
+else
+  bad "mutation harness unquoted source-run 3 BRE PASS (rc=$rc): $out"
+fi
+
+UNQUOTED_RUN3_APPROVE_SH=$'#!/bin/bash\ngrep -q VERDICT:[[:space:]]*\\\\\\(APPROVE\\\\\\|REQUEST_CHANGES\\\\\\)\n'
+printf '%s' "$UNQUOTED_RUN3_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 0 ]]; then
+  bad "benign harness unquoted source-run 3 BRE approve-only runtime rc want 0 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: harness unquoted source-run 3 VERDICT BRE APPROVE\\|REQUEST_CHANGES remains green"
+else
+  bad "benign harness unquoted source-run 3 BRE approve-only (rc=$rc): $out"
+fi
+
+UNQUOTED_RUN4_APPROVE_SH=$'#!/bin/bash\ngrep VERDICT:[[:space:]]*\\\\\\\\(APPROVE\\\\\\\\|REQUEST_CHANGES\\\\\\\\)\n'
+printf '%s' "$UNQUOTED_RUN4_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const m = t.match(/(\\+)\(/);
+if (!m || m[1].length !== 4) {
+  console.error("unquoted run-4 approve-only bytes mismatch run=" + (m && m[1].length));
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation harness unquoted source-run 4 BRE approve-only bytes mismatch"
+}
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""
+grep_rc=$?
+if [[ "$grep_rc" -ne 2 ]]; then
+  bad "mutation harness unquoted source-run 4 BRE approve-only runtime rc want 2 got $grep_rc"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'scripts/second-opinion.sh does not accept VERDICT: APPROVE'; then
+  echo "  planted unquoted source-run 4 BRE approve-only failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: harness unquoted source-run 4 VERDICT BRE is not credited as canonical APPROVE"
+else
+  bad "mutation harness unquoted source-run 4 BRE approve-only (rc=$rc): $out"
 fi
 
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
