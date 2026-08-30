@@ -2390,18 +2390,25 @@ function harnessAcceptsApprove(text) {
  * parser. Tracks shell-slice none/single/double so BRE source-run rules can
  * differ for unquoted vs single-quoted vs double-quoted regexes. An unquoted
  * comment start (` #` / line-leading `#`) ends executable matching on that
- * physical line; `#` inside quotes is not a comment. Residual #264: $'...'
- * ANSI-C quoting and escaped quote context. Residual #263:
- * executable-command provenance for bare unquoted ERE groups and
- * comment-only APPROVE text.
+ * physical line; `#` inside quotes is not a comment. One linear pass records
+ * the state at every index; delimiter normalization must consume that map
+ * instead of rescanning prefixes. Residual #264: $'...' ANSI-C quoting and
+ * escaped quote context. Residual #263: executable-command provenance for
+ * bare unquoted ERE groups and comment-only APPROVE text.
  */
-function shellSliceQuoteContext(text, index) {
+function shellSliceQuoteStates(text) {
   const src = String(text || "");
-  const sliceStart = 0;
+  const n = src.length;
+  const states = new Array(n);
   let state = "none";
-  let i = sliceStart;
-  while (i < index) {
+  let i = 0;
+  while (i < n) {
+    states[i] = state;
     const c = src[i];
+    if (state === "comment") {
+      i += 1;
+      continue;
+    }
     if (state === "single") {
       i += 1;
       if (c === "'") state = "none";
@@ -2410,21 +2417,26 @@ function shellSliceQuoteContext(text, index) {
     if (state === "double") {
       i += 1;
       if (c === "\\") {
-        if (i < index) i += 1;
+        if (i < n) {
+          states[i] = state;
+          i += 1;
+        }
         continue;
       }
       if (c === '"') state = "none";
       continue;
     }
-    if (state === "comment") return "comment";
-    const atWordStart =
-      i === sliceStart || /[ \t\r\n]/.test(src[i - 1] || "");
-    if (c === "#" && atWordStart) return "comment";
+    const atWordStart = i === 0 || /[ \t\r\n]/.test(src[i - 1] || "");
+    if (c === "#" && atWordStart) {
+      state = "comment";
+      i += 1;
+      continue;
+    }
     i += 1;
     if (c === "'") state = "single";
     else if (c === '"') state = "double";
   }
-  return state;
+  return states;
 }
 
 function quoteStateAfterPhysicalLine(line, initialState) {
@@ -2593,22 +2605,53 @@ function addVerdictToken(tokens, raw) {
   if (tok) tokens.add(tok);
 }
 
+function splitUnescapedVerdictAlts(inner) {
+  // Split only on `|` that survived BRE normalization (executable
+  // alternation). Leftover `\|` / `\\|` runs are not grouping alts.
+  const parts = [];
+  let start = 0;
+  let slashes = 0;
+  const src = String(inner || "");
+  for (let k = 0; k < src.length; k += 1) {
+    const c = src[k];
+    if (c === "\\") {
+      slashes += 1;
+      continue;
+    }
+    if (c === "|" && slashes === 0) {
+      parts.push(src.slice(start, k));
+      start = k + 1;
+    }
+    slashes = 0;
+  }
+  parts.push(src.slice(start));
+  return parts;
+}
+
 function collectMatcherClusterTokens(slice, tokens) {
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a shell-slice
   // matcher cluster of balanced groups (and ungrouped |TOKEN siblings).
   // A slice spans physical lines only while a shell quote remains open;
   // a closed-quote dangling `(` cannot swallow a later PASS matcher.
+  // Double-quoted group-run-3 / alternation-run-1 leaves leftover `\(`
+  // while normalizing `|`; skip those leftover escapes so the executable
+  // top-level PASS alternative is visible. Not a general regex parser.
   const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
   let p;
   while ((p = prefixRe.exec(slice)) !== null) {
     let i = p.index + p[0].length;
+    let k = i;
+    while (slice[k] === "\\") k += 1;
+    if (k > i && slice[k] === "(") i = k;
     if (slice[i] !== "(") continue;
     while (i < slice.length) {
       if (slice[i] === "(") {
         const close = slice.indexOf(")", i + 1);
         if (close === -1) break;
         const inner = slice.slice(i + 1, close);
-        for (const part of inner.split("|")) addVerdictToken(tokens, part);
+        for (const part of splitUnescapedVerdictAlts(inner)) {
+          addVerdictToken(tokens, part);
+        }
         i = close + 1;
       } else if (/[A-Za-z]/.test(slice[i] || "")) {
         let j = i;
@@ -2642,12 +2685,13 @@ function harnessVerdictRegexGroupTokens(text) {
     const commentAt = unquotedCommentStart(shellSlice);
     let slice = commentAt === -1 ? shellSlice : shellSlice.slice(0, commentAt);
     if (!lineHasGrepEre(shellSlice)) {
+      const quoteStates = shellSliceQuoteStates(slice);
       slice = slice.replace(
         /(\\*)([()|])/g,
-        (match, slashes, delim, offset, whole) =>
+        (match, slashes, delim, offset) =>
           executableBreDelimRun(
             slashes.length,
-            shellSliceQuoteContext(whole, offset)
+            quoteStates[offset] || "none"
           )
             ? delim
             : match
@@ -2678,9 +2722,11 @@ function harnessAcceptsPass(text) {
  * files fail closed (cannot determine authority). A VERDICT regex group
  * that lists PASS as an alternative (including ERE
  * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)` and BRE
- * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)`) is a harness accept of
+ * `[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)` and the mixed
+ * double-quoted group-run-3 / alternation-run-1 form) is a harness accept of
  * PASS; APPROVE/REQUEST_CHANGES without PASS stays green. Residual: nested
- * groups and non-VERDICT alternations are not parsed.
+ * groups and non-VERDICT alternations are not parsed. Residual #263/#264:
+ * not a general shell/regex parser.
  *
  * @param {{
  *   agentsText: string,

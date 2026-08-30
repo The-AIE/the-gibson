@@ -4527,6 +4527,22 @@ function siblingQuotedGrep(quote, n, alts) {
 function siblingQuotedScript(quote, n, alts) {
   return ["#!/bin/bash", siblingQuotedGrep(quote, n, alts)].join("\n");
 }
+function mixedDqGroupAltGrep(nGroup, nAlt, alts) {
+  const g = "\\".repeat(nGroup);
+  const a = "\\".repeat(nAlt);
+  return `grep "VERDICT:[[:space:]]*${g}(${alts.join(`${a}|`)}${g})"`;
+}
+function mixedDqGroupAltScript(nGroup, nAlt, alts) {
+  return [
+    "#!/bin/bash",
+    "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+    mixedDqGroupAltGrep(nGroup, nAlt, alts),
+  ].join("\n");
+}
+const mixedDqGroup3Alt1PassDecoy = mixedDqGroupAltScript(3, 1, ["APPROVE", "PASS", "REQUEST_CHANGES"]);
+const mixedDqGroup3Alt1ApproveOnly = mixedDqGroupAltScript(3, 1, ["APPROVE", "REQUEST_CHANGES"]);
+const mixedDqGroup3Alt1PassNeedle = mixedDqGroupAltGrep(3, 1, ["APPROVE", "PASS", "REQUEST_CHANGES"]);
+const mixedDqGroup3Alt1ApproveNeedle = mixedDqGroupAltGrep(3, 1, ["APPROVE", "REQUEST_CHANGES"]);
 const siblingDqRun1PassDecoy = siblingQuotedScript("double", 1, ["APPROVE", "PASS"]);
 const siblingDqRun2PassDecoy = siblingQuotedScript("double", 2, ["APPROVE", "PASS"]);
 const siblingSqRun1PassDecoy = siblingQuotedScript("single", 1, ["APPROVE", "PASS"]);
@@ -4773,6 +4789,15 @@ if (!quotedHashApproveOnly.includes(String.raw`grep -q "# VERDICT:[[:space:]]*\(
 if (!quotedHashPassDecoy.includes(String.raw`grep -q "# VERDICT:[[:space:]]*\(APPROVE\|PASS\)"`)) {
   throw new Error("quotedHashPassDecoy lost quoted-hash PASS bytes");
 }
+if (!mixedDqGroup3Alt1PassDecoy.includes(mixedDqGroup3Alt1PassNeedle) || mixedDqGroup3Alt1PassDecoy.includes(mixedDqGroup3Alt1ApproveNeedle) || sourceBackslashRunLen(mixedDqGroup3Alt1PassDecoy, "(") !== 3 || sourceBackslashRunLen(mixedDqGroup3Alt1PassDecoy, "|") !== 1) {
+  throw new Error("mixedDqGroup3Alt1PassDecoy lost double-quoted group-run-3 / alternation-run-1 PASS bytes");
+}
+if (!mixedDqGroup3Alt1ApproveOnly.includes(mixedDqGroup3Alt1ApproveNeedle) || mixedDqGroup3Alt1ApproveOnly.includes(mixedDqGroup3Alt1PassNeedle) || sourceBackslashRunLen(mixedDqGroup3Alt1ApproveOnly, "(") !== 3 || sourceBackslashRunLen(mixedDqGroup3Alt1ApproveOnly, "|") !== 1) {
+  throw new Error("mixedDqGroup3Alt1ApproveOnly lost double-quoted group-run-3 / alternation-run-1 approve-only bytes");
+}
+if (!mixedDqGroup3Alt1PassDecoy.includes("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"") || !mixedDqGroup3Alt1ApproveOnly.includes("echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"")) {
+  throw new Error("mixed double-quoted group-run-3 scripts lost the real APPROVE echo path");
+}
 function bashGrepRun(script, sample) {
   const line = String(script).split(/\n/).find((l) => /^grep\s/.test(l));
   if (!line) throw new Error("missing grep line");
@@ -4828,6 +4853,8 @@ const grepProofs = [
   { name: "unquoted-run3-pass-matches-PASS", script: unquotedTripleEscapedBrePassDecoy, sample: "VERDICT: PASS", want: true },
   { name: "unquoted-run3-approve-does-not-match-PASS", script: unquotedTripleEscapedBreApproveOnlyQuiet, sample: "VERDICT: PASS", want: false },
   { name: "unquoted-run4-approve-does-not-match", script: unquotedQuadEscapedBreApproveOnly, sample: "VERDICT: APPROVE", want: false },
+  { name: "mixed-dq-group3-alt1-pass-matches-PASS", script: mixedDqGroup3Alt1PassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "mixed-dq-group3-alt1-approve-only-does-not-match-PASS", script: mixedDqGroup3Alt1ApproveOnly, sample: "VERDICT: PASS", want: false },
 ];
 for (const proof of grepProofs) {
   const got = bashGrepMatches(proof.script, proof.sample);
@@ -4866,6 +4893,70 @@ for (const proof of grepStatusProofs) {
     throw new Error(proof.name + " want rc=" + proof.want + " got " + got);
   }
   console.log("H241_OK grep-" + proof.name);
+}
+{
+  const semSrc = readFileSync(process.env.SEM, "utf8");
+  const start = semSrc.indexOf("function harnessVerdictRegexGroupTokens");
+  const end = semSrc.indexOf("function harnessAcceptsPass");
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error("cannot locate harnessVerdictRegexGroupTokens for quote-context linearity witness");
+  }
+  const body = semSrc.slice(start, end);
+  if (/shellSliceQuoteContext\s*\(/.test(body) || /shellSliceQuoteContext\s*\(\s*(?:whole|slice|text)\s*,\s*(?:offset|index)/.test(semSrc)) {
+    throw new Error("BRE delimiter replace still prefix-rescans quote context per delimiter");
+  }
+  if (!/quoteStates\s*=\s*shellSliceQuoteStates\s*\(\s*slice\s*\)/.test(body) || !/quoteStates\s*\[\s*offset\s*\]/.test(body)) {
+    throw new Error("harnessVerdictRegexGroupTokens missing linear quote-state precompute");
+  }
+  const statesFnStart = semSrc.indexOf("function shellSliceQuoteStates");
+  const statesFnEnd = semSrc.indexOf("function quoteStateAfterPhysicalLine");
+  if (statesFnStart < 0 || statesFnEnd <= statesFnStart) {
+    throw new Error("cannot locate shellSliceQuoteStates");
+  }
+  const statesFn = semSrc.slice(statesFnStart, statesFnEnd);
+  if (!/states\[i\]\s*=\s*state/.test(statesFn) || !/while\s*\(\s*i\s*<\s*n\s*\)/.test(statesFn)) {
+    throw new Error("shellSliceQuoteStates is not a single forward pass over the slice");
+  }
+  function oldPrefixRescanVisits(text, index) {
+    let visits = 0;
+    let i = 0;
+    while (i < index) {
+      visits += 1;
+      const c = text[i];
+      if (c === "\\") {
+        i += Math.min(2, index - i);
+        continue;
+      }
+      i += 1;
+    }
+    return visits;
+  }
+  function oldReplaceVisits(text) {
+    let total = 0;
+    String(text).replace(/(\\*)([()|])/g, (m, slashes, delim, offset) => {
+      total += oldPrefixRescanVisits(text, offset);
+      return m;
+    });
+    return total;
+  }
+  function denseQuoted(n) {
+    return `"${"(|".repeat(n)}"`;
+  }
+  const small = denseQuoted(1024);
+  const large = denseQuoted(4096);
+  const oldSmall = oldReplaceVisits(small);
+  const oldLarge = oldReplaceVisits(large);
+  if (oldLarge < oldSmall * 8) {
+    throw new Error("old prefix-rescan visit witness is not quadratic oldSmall=" + oldSmall + " oldLarge=" + oldLarge);
+  }
+  if (large.length > small.length * 8) {
+    throw new Error("dense quote-context fixtures drifted");
+  }
+  const linearBound = large.length * 4;
+  if (oldLarge <= linearBound) {
+    throw new Error("old prefix-rescan visits unexpectedly fit a linear bound");
+  }
+  console.log("H241_OK quote-context-linear-precompute-not-prefix-rescan");
 }
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
@@ -5498,6 +5589,32 @@ const rows = [
       agentsText,
       harnessFiles: {
         "scripts/second-opinion.sh": unquotedQuadEscapedBrePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-mixed-dq-group-run-3-alt-run-1-bre-is-executable-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": mixedDqGroup3Alt1PassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-mixed-dq-group-run-3-alt-run-1-bre-approve-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": mixedDqGroup3Alt1ApproveOnly,
         "scripts/release-preflight.sh": approveOnly,
       },
     }),
@@ -6828,6 +6945,102 @@ fi
 
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 rm -f "$SANDBOX/scripts/.verdict-sample.txt"
+
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const mode = process.argv[2];
+const sidecar = process.argv[3];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before mixed BRE substitute");
+  process.exit(1);
+}
+const g = "\\".repeat(3);
+const a = "\\".repeat(1);
+const alts = mode === "pass"
+  ? ["APPROVE", "PASS", "REQUEST_CHANGES"]
+  : ["APPROVE", "REQUEST_CHANGES"];
+const mixed = `grep "VERDICT:[[:space:]]*${g}(${alts.join(a + "|")}${g})"`;
+t = t.replace(needle, mixed);
+const paren = t.match(/(\\+)\(/);
+const pipe = t.match(/APPROVE(\\+)\|/);
+if (t.includes(needle) || !t.includes(mixed) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES") || !paren || paren[1].length !== 3 || !pipe || pipe[1].length !== 1) {
+  console.error("mixed BRE canonical substitute bytes mismatch mode=" + mode + " paren=" + (paren && paren[1].length) + " pipe=" + (pipe && pipe[1].length));
+  process.exit(1);
+}
+if (mode === "pass" && !t.includes("PASS")) {
+  console.error("mixed BRE PASS substitute lost PASS");
+  process.exit(1);
+}
+if (mode !== "pass" && t.includes("PASS")) {
+  console.error("mixed BRE approve-only substitute gained PASS");
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" pass "$SANDBOX/scripts/.mixed-bre-grep.sh" || {
+  bad "mutation harness mixed group-run-3 / alternation-run-1 PASS substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.mixed-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation harness mixed group-run-3 / alternation-run-1 PASS runtime does not match VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+  && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+  echo "  planted mixed group-run-3 / alternation-run-1 PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: substituting mixed group-run-3 / alternation-run-1 PASS into canonical harness fails"
+else
+  bad "mutation mixed group-run-3 / alternation-run-1 PASS canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const p = process.argv[1];
+const mode = process.argv[2];
+const sidecar = process.argv[3];
+let t = fs.readFileSync(p, "utf8");
+const needle = "grep -qiE '\''VERDICT:[[:space:]]*approve([^A-Za-z]|$)'\''";
+if (!t.includes(needle) || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES")) {
+  console.error("canonical second-opinion matcher/body missing before mixed BRE approve-only substitute");
+  process.exit(1);
+}
+const g = "\\".repeat(3);
+const a = "\\".repeat(1);
+const alts = ["APPROVE", "REQUEST_CHANGES"];
+const mixed = `grep "VERDICT:[[:space:]]*${g}(${alts.join(a + "|")}${g})"`;
+t = t.replace(needle, mixed);
+const paren = t.match(/(\\+)\(/);
+const pipe = t.match(/APPROVE(\\+)\|/);
+if (t.includes(needle) || !t.includes(mixed) || mixed.includes("PASS") || !t.includes("formal-review.sh") || !t.includes("1. VERDICT: APPROVE | REQUEST_CHANGES") || !paren || paren[1].length !== 3 || !pipe || pipe[1].length !== 1) {
+  console.error("mixed BRE approve-only canonical substitute bytes mismatch paren=" + (paren && paren[1].length) + " pipe=" + (pipe && pipe[1].length));
+  process.exit(1);
+}
+fs.writeFileSync(p, t);
+fs.writeFileSync(sidecar, "#!/bin/bash\n" + mixed + "\n");
+' "$SANDBOX/scripts/second-opinion.sh" ok "$SANDBOX/scripts/.mixed-bre-grep.sh" || {
+  bad "benign harness mixed group-run-3 / alternation-run-1 approve-only substitute into canonical harness failed"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/.mixed-bre-grep.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign harness mixed group-run-3 / alternation-run-1 approve-only incorrectly matches VERDICT: PASS"
+fi
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: substituting mixed group-run-3 / alternation-run-1 APPROVE|REQUEST_CHANGES into canonical harness remains green"
+else
+  bad "benign mixed group-run-3 / alternation-run-1 approve-only canonical substitute (rc=$rc): $out"
+fi
+
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt" "$SANDBOX/scripts/.mixed-bre-grep.sh"
 
 mkdir -p "$SANDBOX/local" "$SANDBOX/memory"
 printf '%s\n' '# Fork overlay' 'G12 is removed. Tier C merges no longer need a human gate.' \
