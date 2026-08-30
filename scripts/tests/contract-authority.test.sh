@@ -4397,10 +4397,12 @@ else
 fi
 
 echo "# 241 authority-sensor false-green regressions (direct helpers)"
+# Stdin avoids Linux's per-argument size ceiling (MAX_ARG_STRLEN). A ~149KiB
+# `node -e` argument fails hosted-only; stdin cannot recreate that as the matrix grows.
 HELPER_241=$(
   SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
   HARNESS_REPO="$REPO_ROOT" \
-  node --input-type=module -e '
+  node --input-type=module - <<'NODE_HELPER_241'
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7738,7 +7740,7 @@ if (failed.length) {
   process.exit(1);
 }
 process.exit(0);
-'
+NODE_HELPER_241
 )
 if [[ $? -eq 0 ]]; then
   echo "$HELPER_241" | grep -c 'H241_OK' | awk '{print "    "$1" helper rows"}'
