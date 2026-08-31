@@ -15,6 +15,12 @@
 #
 # USAGE
 #   scripts/tests/gate.test.sh
+#   scripts/tests/gate.test.sh --self-contract
+#
+# Ordinary no-argument path: lightweight generated gate.json metrics only.
+# It is discovered by run-all.sh and MUST remain non-recursive (never invoke
+# --self-contract or the production run-all suite).
+# Opt-in --self-contract: disjoint exact-SHA production baseline fixture.
 set -uo pipefail
 
 # Hermetic git identity (#101): suites that commit must not read ambient global
@@ -29,6 +35,7 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/../test-integrity.mjs"
 GATE="$SCRIPT_DIR/../gate.sh"
 BASELINE_SH="$SCRIPT_DIR/../gate-baseline.sh"
+REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 
 PASS=0
 FAIL=0
@@ -37,6 +44,225 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 
 command -v node >/dev/null || { echo "gate.test.sh: node is required"; exit 1; }
 command -v git  >/dev/null || { echo "gate.test.sh: git is required"; exit 1; }
+
+# --- opt-in --self-contract path (exact-SHA production baseline; disjoint) ---
+# Resolves SOURCE_SHA from the committed candidate under review, checks out
+# that exact SHA in a clean detached fixture, and runs the one full
+# production gate-baseline. Unknown flags fail. This function is never
+# called from the ordinary no-argument path below.
+SELF_CONTRACT_FIXTURE=""
+SELF_CONTRACT_KIND=""
+cleanup_self_contract() {
+  if [[ -z "${SELF_CONTRACT_FIXTURE:-}" ]]; then
+    return 0
+  fi
+  if [[ "${SELF_CONTRACT_KIND:-}" == worktree ]]; then
+    git -C "$REPO_ROOT" worktree remove --force "$SELF_CONTRACT_FIXTURE" >/dev/null 2>&1 \
+      || rm -rf "$SELF_CONTRACT_FIXTURE"
+  else
+    rm -rf "$SELF_CONTRACT_FIXTURE"
+  fi
+  SELF_CONTRACT_FIXTURE=""
+}
+
+run_self_contract() {
+  local SOURCE_SHA fixture_sha base_out elapsed t0 rc out recorded_sha recorded_test
+  local fixture_helper fixture_root fixture_helper_dir resolved_helper
+  SOURCE_SHA=$(git -C "$REPO_ROOT" rev-parse HEAD) || {
+    bad "self-contract: git rev-parse HEAD failed"
+    return 1
+  }
+  case "$SOURCE_SHA" in
+    *[!0-9a-f]*) bad "self-contract: HEAD SHA is not hex: $SOURCE_SHA"; return 1 ;;
+  esac
+  if [[ ${#SOURCE_SHA} -ne 40 && ${#SOURCE_SHA} -ne 64 ]]; then
+    bad "self-contract: HEAD SHA length ${#SOURCE_SHA} is not 40 or 64"
+    return 1
+  fi
+  echo "self-contract: SOURCE_SHA=$SOURCE_SHA"
+
+  SELF_CONTRACT_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/gibson-self-contract.XXXXXX") || {
+    bad "self-contract: mktemp failed"
+    return 1
+  }
+  rmdir "$SELF_CONTRACT_FIXTURE" || true
+  SELF_CONTRACT_KIND=""
+  if git -C "$REPO_ROOT" worktree add --detach "$SELF_CONTRACT_FIXTURE" "$SOURCE_SHA" >/dev/null 2>&1; then
+    SELF_CONTRACT_KIND=worktree
+  else
+    mkdir -p "$SELF_CONTRACT_FIXTURE"
+    if git clone --local --quiet "$REPO_ROOT" "$SELF_CONTRACT_FIXTURE" >/dev/null 2>&1 \
+      && git -C "$SELF_CONTRACT_FIXTURE" checkout --detach --quiet "$SOURCE_SHA" >/dev/null 2>&1; then
+      SELF_CONTRACT_KIND=clone
+    else
+      bad "self-contract: could not create detached fixture at $SOURCE_SHA"
+      rm -rf "$SELF_CONTRACT_FIXTURE"
+      SELF_CONTRACT_FIXTURE=""
+      return 1
+    fi
+  fi
+  trap cleanup_self_contract EXIT
+
+  fixture_sha=$(git -C "$SELF_CONTRACT_FIXTURE" rev-parse HEAD) || {
+    bad "self-contract: fixture rev-parse failed"
+    return 1
+  }
+  if [[ "$fixture_sha" == "$SOURCE_SHA" ]]; then
+    ok "self-contract: fixture HEAD equals SOURCE_SHA"
+  else
+    bad "self-contract: fixture HEAD $fixture_sha != SOURCE_SHA $SOURCE_SHA"
+    return 1
+  fi
+  if [[ -n "$(git -C "$SELF_CONTRACT_FIXTURE" status --porcelain)" ]]; then
+    bad "self-contract: fixture is not clean (untracked/dirty files present)"
+    return 1
+  else
+    ok "self-contract: fixture working tree is clean"
+  fi
+
+  # Isolated baseline; ignore developer env overrides and preexisting files.
+  unset GIBSON_GENERATE GIBSON_TYPECHECK GIBSON_LINT GIBSON_TEST GIBSON_BUILD
+  unset GIBSON_TEST_INTEGRITY_TEXT
+  base_out="$SELF_CONTRACT_FIXTURE/.gibson-self-contract-baseline.json"
+  if [[ -e "$base_out" ]]; then
+    bad "self-contract: isolated baseline path already exists"
+    return 1
+  fi
+
+  # Exact-SHA authority: invoke the fixture-owned helper, never the mutable
+  # source-tree BASELINE_SH. An uncommitted edit of the source helper must not
+  # be able to forge evidence attributed to SOURCE_SHA. Any helper path must
+  # resolve inside the fixture (regular file; no symlink escape).
+  fixture_helper="$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"
+  if [[ -L "$fixture_helper" ]]; then
+    bad "self-contract: fixture helper is a symlink (must be the exact candidate file)"
+    return 1
+  fi
+  if [[ ! -f "$fixture_helper" ]]; then
+    bad "self-contract: fixture helper missing at $fixture_helper"
+    return 1
+  fi
+  fixture_root=$(CDPATH='' cd -- "$SELF_CONTRACT_FIXTURE" && pwd) || {
+    bad "self-contract: could not resolve fixture root"
+    return 1
+  }
+  fixture_helper_dir=$(CDPATH='' cd -- "$(dirname -- "$fixture_helper")" && pwd) || {
+    bad "self-contract: could not resolve fixture helper directory"
+    return 1
+  }
+  resolved_helper="${fixture_helper_dir}/$(basename -- "$fixture_helper")"
+  case "$resolved_helper" in
+    "$fixture_root"/*) ;;
+    *)
+      bad "self-contract: helper path escaped fixture: $resolved_helper"
+      return 1
+      ;;
+  esac
+
+  echo "self-contract: running one full production gate-baseline (no focused substitute)"
+  t0=$SECONDS
+  out=$(cd "$SELF_CONTRACT_FIXTURE" && bash "$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh" --out "$base_out" 2>&1)
+  rc=$?
+  elapsed=$((SECONDS - t0))
+  echo "self-contract: gate-baseline wall ${elapsed}s"
+  printf '%s\n' "$out" | grep -E 'wall:| ok | FAIL |run-all:' | tail -n 40 | sed 's/^/         /'
+
+  if [[ "$rc" -ne 0 ]]; then
+    bad "self-contract: gate-baseline.sh exited $rc"
+    printf '%s\n' "$out" | tail -n 30 | sed 's/^/         /'
+    return 1
+  fi
+  if [[ ! -f "$base_out" ]]; then
+    bad "self-contract: baseline file missing at $base_out"
+    return 1
+  fi
+  ok "self-contract: gate-baseline.sh exited 0"
+
+  recorded_sha=$(node -e '
+    const fs=require("fs");
+    const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    if(!j.test_metrics || typeof j.test_metrics.total!=="number") process.exit(2);
+    process.stdout.write(String(j.git_sha||""));
+  ' "$base_out") || {
+    bad "self-contract: baseline is not parseable / lacks test_metrics"
+    return 1
+  }
+  if [[ "$recorded_sha" == "$SOURCE_SHA" ]]; then
+    ok "self-contract: recorded git_sha equals SOURCE_SHA"
+  else
+    bad "self-contract: recorded git_sha $recorded_sha != SOURCE_SHA $SOURCE_SHA"
+    return 1
+  fi
+  recorded_test=$(node -e '
+    const fs=require("fs");
+    const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    process.stdout.write(String((j.commands&&j.commands.test)||""));
+  ' "$base_out")
+  if [[ "$recorded_test" == "bash scripts/tests/run-all.sh --no-quarantine" ]]; then
+    ok "self-contract: baseline recorded the canonical --no-quarantine test command"
+  else
+    bad "self-contract: baseline test command was '$recorded_test'"
+    return 1
+  fi
+}
+
+SELF_CONTRACT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-contract)
+      SELF_CONTRACT=1
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: scripts/tests/gate.test.sh [--self-contract]"
+      exit 0
+      ;;
+    *)
+      echo "gate.test.sh: unknown flag: $1" >&2
+      echo "Usage: scripts/tests/gate.test.sh [--self-contract]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$SELF_CONTRACT" -eq 1 ]]; then
+  run_self_contract
+  echo
+  echo "gate.test.sh: $PASS passed, $FAIL failed"
+  [[ "$FAIL" -eq 0 ]]
+  exit $?
+fi
+
+# --- ordinary no-argument path (non-recursive; disjoint from --self-contract) ---
+
+# Lightweight static pin of the --self-contract authority boundary. Does not
+# run the full exact-SHA suite (that path is opt-in and may not run while
+# this worktree is uncommitted).
+{
+  _gt="$SCRIPT_DIR/gate.test.sh"
+  if grep -Fq 'bash "$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"' "$_gt"; then
+    ok "self-contract source invokes \$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"
+  else
+    bad "self-contract source missing fixture-owned gate-baseline.sh invocation"
+  fi
+  if awk '
+    /^run_self_contract\(\)/ { p=1 }
+    p && /bash[[:space:]]+"\$BASELINE_SH"/ { hit=1 }
+    p && /^SELF_CONTRACT=/ { p=0 }
+    END { exit hit ? 0 : 1 }
+  ' "$_gt"; then
+    bad "self-contract source still invokes mutable \$BASELINE_SH (forges SOURCE_SHA)"
+  else
+    ok "self-contract source does not invoke mutable \$BASELINE_SH"
+  fi
+  if grep -Fq 'helper path escaped fixture' "$_gt" \
+    && grep -Fq '"$fixture_root"/*' "$_gt"; then
+    ok "self-contract source requires helper path to resolve inside the fixture"
+  else
+    bad "self-contract source missing in-fixture helper path bound"
+  fi
+  unset _gt
+}
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-gate-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -52,6 +278,16 @@ compare() { # base head waiver_text [trusted]
   node "$TI" compare --base "$base" --head "$head" \
     --waiver-text "$waiver" --trusted-source "$trusted" 2>&1
 }
+
+# ---------------------------------------------------------------------------
+echo "unknown flags fail closed (ordinary path stays non-recursive)"
+# ---------------------------------------------------------------------------
+unk_out=$(bash "$SCRIPT_DIR/gate.test.sh" --not-a-real-flag 2>&1); unk_rc=$?
+if [[ "$unk_rc" -eq 2 ]] && printf '%s\n' "$unk_out" | grep -q 'unknown flag: --not-a-real-flag'; then
+  ok "unknown flag exits 2 without running fixtures"
+else
+  bad "unknown flag (rc=$unk_rc): $unk_out"
+fi
 
 # ---------------------------------------------------------------------------
 echo "deletion without waiver hard-fails with exact total delta"
@@ -414,6 +650,25 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'test-integrity' \
   ok "gate.sh fails on new skips with exact delta"
 else
   bad "gate.sh new skips (rc=$rc): $out"
+fi
+
+# Restore original lightweight metrics → gate.sh green. This mutation/restore
+# fixture is disjoint from --self-contract: it never invokes the production
+# run-all suite or the exact-SHA baseline path.
+cat > "$GDIR/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=5 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$GDIR" && bash "$GATE" --baseline "$GDIR/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'GREEN'; then
+  ok "gate.sh returns green after restore of original metrics"
+else
+  bad "gate.sh restore green (rc=$rc): $out"
 fi
 
 # Trusted-source labeling: CI path never treats a local baseline as self-authorizing
