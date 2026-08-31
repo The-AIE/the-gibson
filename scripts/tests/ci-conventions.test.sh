@@ -1612,6 +1612,178 @@ YML
 got=$(check_concurrency "$MUT/39") || true
 assert_clean 39 "PR-only cancellation expression is accepted" "$got"
 
+# --- #274 machine-readable self-gate contract --------------------------------
+echo "# #274 command consistency (AGENTS.md, gate.json, sensors job, run-all --no-quarantine)"
+
+GATE_JSON="$REPO_ROOT/.agents/gate.json"
+CANON_TEST='bash scripts/tests/run-all.sh --no-quarantine'
+if [[ ! -f "$GATE_JSON" ]]; then
+  bad "missing .agents/gate.json (Gibson must not fall through to generic defaults)"
+else
+  gate_vals=$(node -e '
+    const g=require(process.argv[1]);
+    const keys=["generate","typecheck","lint","test","build"];
+    for (const k of keys) {
+      if (!Object.prototype.hasOwnProperty.call(g,k)) process.exit(2);
+      process.stdout.write(k+"="+JSON.stringify(g[k])+"\n");
+    }
+  ' "$GATE_JSON") || { bad "gate.json is not parseable or missing a step key"; gate_vals=""; }
+  if [[ -n "$gate_vals" ]]; then
+    printf '%s\n' "$gate_vals" | grep -qx 'generate=""' \
+      && ok "gate.json generate is an explicit empty string" \
+      || bad "gate.json generate is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -qx 'typecheck=""' \
+      && ok "gate.json typecheck is an explicit empty string" \
+      || bad "gate.json typecheck is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -qx 'lint=""' \
+      && ok "gate.json lint is an explicit empty string" \
+      || bad "gate.json lint is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -qx 'build=""' \
+      && ok "gate.json build is an explicit empty string" \
+      || bad "gate.json build is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -qx "test=\"${CANON_TEST}\"" \
+      && ok "gate.json test is exactly ${CANON_TEST}" \
+      || bad "gate.json test drifted (got $(printf '%s\n' "$gate_vals" | grep '^test='))"
+  fi
+fi
+
+if grep -Fq "$CANON_TEST" "$REPO_ROOT/AGENTS.md" \
+  && grep -Fq '.agents/gate.json' "$REPO_ROOT/AGENTS.md"; then
+  ok "AGENTS.md names .agents/gate.json and the canonical --no-quarantine command"
+else
+  bad "AGENTS.md missing machine-readable twin pointer or canonical command"
+fi
+if tr '\n' ' ' < "$REPO_ROOT/AGENTS.md" | grep -Fq 'generate → typecheck → lint → test → build'; then
+  ok "AGENTS.md still states the full five-step green gate (twin does not weaken it)"
+else
+  bad "AGENTS.md no longer states generate → typecheck → lint → test → build"
+fi
+
+WF="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
+sensors_cmd=$(awk '
+  /^  sensors:/ { in_job=1; next }
+  in_job && /^  [A-Za-z0-9_]+:/ { in_job=0 }
+  in_job && /^      - name: Run every sensor$/ { in_step=1; next }
+  in_step && /^      - name:/ { in_step=0 }
+  in_job && in_step && /^        run:/ {
+    sub(/^        run:[[:space:]]*/, "")
+    print
+    exit
+  }
+' "$WF")
+if [[ "$sensors_cmd" == "$CANON_TEST" ]]; then
+  ok "workflow sensors job Run every sensor is exactly ${CANON_TEST}"
+else
+  bad "workflow sensors job drifted (got '${sensors_cmd}', want exactly '${CANON_TEST}')"
+fi
+
+echo "# #274 run-all metric contract (no static count, no second gate.json parser)"
+if grep -E 'require\(.*gate\.json|readFileSync\([^)]*gate\.json' \
+     "$REPO_ROOT/scripts/tests/run-all.sh" >/dev/null; then
+  bad "run-all.sh parses .agents/gate.json (second config parser forbidden)"
+else
+  ok "run-all.sh does not parse .agents/gate.json"
+fi
+if grep -E 'echo[[:space:]]+["'\'']GIBSON_TEST_METRICS total=[0-9]+' \
+     "$REPO_ROOT/scripts/tests/run-all.sh" >/dev/null; then
+  bad "run-all.sh appends a static GIBSON_TEST_METRICS count"
+else
+  ok "run-all.sh does not append a static GIBSON_TEST_METRICS count"
+fi
+
+metric_out=$(bash "$REPO_ROOT/scripts/tests/run-all.sh" --only args.test --timeout 120 --quiet 2>&1) || true
+metric_line=$(printf '%s\n' "$metric_out" | grep -E '^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$' || true)
+metric_n=$(printf '%s\n' "$metric_line" | grep -c . || true)
+if [[ "$metric_n" -eq 1 ]]; then
+  ok "run-all --only args.test emits exactly one terminal GIBSON_TEST_METRICS line"
+else
+  bad "run-all --only args.test metric lines=$metric_n (want 1): ${metric_line}"
+fi
+diag_line=$(printf '%s\n' "$metric_out" | grep -E '^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$' || true)
+if [[ -n "$diag_line" ]]; then
+  ok "run-all emits explicit-assertion / legacy-sentinel diagnostic subtotals"
+else
+  bad "run-all missing metric-subtotals diagnostic: $(printf '%s\n' "$metric_out" | tail -n 8)"
+fi
+# Aggregate machine line must be the final non-empty output line, with
+# exactly one diagnostic immediately before it.
+if printf '%s\n' "$metric_out" | awk '
+  /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/ { d++ }
+  /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/ { m++ }
+  NF { n++; prev=last; last=$0 }
+  END {
+    if (d != 1) exit 1
+    if (m != 1) exit 1
+    if (last !~ /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/) exit 1
+    if (prev !~ /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/) exit 1
+    exit 0
+  }
+'; then
+  ok "aggregate machine line is the final non-empty line with exactly one diagnostic immediately before it"
+else
+  bad "aggregate GIBSON_TEST_METRICS is not the final non-empty line immediately after the one metric-subtotals diagnostic"
+fi
+
+parse_out=$(printf '%s\n' "$metric_out" | node "$REPO_ROOT/scripts/test-integrity.mjs" parse --input /dev/stdin 2>&1) || parse_rc=$?
+parse_rc=${parse_rc:-0}
+if [[ "$parse_rc" -eq 0 ]] && printf '%s\n' "$parse_out" | grep -q '"total":'; then
+  ok "test-integrity parses the run-all aggregate metrics"
+else
+  bad "test-integrity cannot parse run-all output (rc=${parse_rc}): ${parse_out}"
+fi
+# Live tally of the selected suite must equal explicit-assertions (no sentinels).
+args_tally=$(printf '%s\n' "$metric_out" | grep -oE 'args\.test\.sh: [0-9]+ passed, [0-9]+ failed' | tail -1)
+args_p=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+args_f=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
+want_total=$((args_p + args_f))
+got_total=$(printf '%s\n' "$metric_line" | grep -oE 'total=[0-9]+' | head -1 | cut -d= -f2)
+got_explicit=$(printf '%s\n' "$diag_line" | grep -oE 'explicit-assertions=[0-9]+' | cut -d= -f2)
+got_sent=$(printf '%s\n' "$diag_line" | grep -oE 'legacy-sentinels=[0-9]+' | cut -d= -f2)
+if [[ "$got_total" == "$want_total" && "$got_explicit" == "$want_total" && "$got_sent" == "0" ]]; then
+  ok "aggregate total=${got_total} equals selected-suite tally (0 sentinels)"
+else
+  bad "aggregate drifted from selected-suite tally (tally=$want_total total=$got_total explicit=$got_explicit sentinels=$got_sent)"
+fi
+if printf '%s\n' "$metric_out" | grep -Eq '^run-all wall: [0-9]+s$'; then
+  ok "run-all prints total wall time"
+else
+  bad "run-all missing total wall time"
+fi
+if printf '%s\n' "$metric_out" | grep -Eq 'args\.test\.sh: [0-9]+ passed, [0-9]+ failed \([0-9]+s\)'; then
+  ok "run-all prints per-suite wall time"
+else
+  bad "run-all missing per-suite wall time"
+fi
+
+echo "# #274 ordinary gate.test.sh is non-recursive and disjoint from --self-contract"
+GT="$REPO_ROOT/scripts/tests/gate.test.sh"
+if grep -Fq 'ordinary no-argument path (non-recursive; disjoint from --self-contract)' "$GT" \
+  && grep -Fq 'opt-in --self-contract path (exact-SHA production baseline; disjoint)' "$GT"; then
+  ok "gate.test.sh marks ordinary and --self-contract fixtures as disjoint"
+else
+  bad "gate.test.sh missing explicit disjoint-fixture markers"
+fi
+# Ordinary path must not invoke the production suite or --self-contract as a
+# command. Quoted comparisons and usage text may name the canonical command.
+if grep -nE '(^|[;|&][[:space:]]*)bash[[:space:]]+scripts/tests/run-all\.sh[[:space:]]+--no-quarantine' "$GT" >/dev/null; then
+  bad "gate.test.sh ordinary path would invoke the production run-all suite"
+else
+  ok "gate.test.sh does not invoke bash scripts/tests/run-all.sh --no-quarantine"
+fi
+# A recursive self-call with --self-contract (not usage text / flag parser) is
+# forbidden. Unknown-flag probes may invoke gate.test.sh with other flags.
+if grep -nE 'bash[[:space:]].*gate\.test\.sh[[:space:]]+--self-contract' "$GT" >/dev/null; then
+  bad "gate.test.sh invokes itself with --self-contract (would recurse under run-all)"
+else
+  ok "gate.test.sh does not invoke itself with --self-contract"
+fi
+if grep -Fq 'bash "$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"' "$GT" \
+  && grep -Fq 'helper path escaped fixture' "$GT"; then
+  ok "self-contract source invokes fixture-owned helper with in-fixture path bound"
+else
+  bad "self-contract source missing fixture-owned helper invocation or in-fixture bound"
+fi
+
 echo
 echo "ci-conventions.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

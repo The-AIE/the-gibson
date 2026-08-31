@@ -717,6 +717,7 @@ run_limited() {
 }
 
 cd "$REPO_ROOT" || exit 2
+RUN_ALL_T0=$SECONDS
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; OFF=$'\033[0m'
 [[ -t 1 ]] || { RED=""; GRN=""; YEL=""; OFF=""; }
@@ -1104,6 +1105,337 @@ else
   FAILED="$FAILED injection-scan-missing"
 fi
 
+# --- aggregate metrics (#274) -----------------------------------------------
+# Exactly one terminal GIBSON_TEST_METRICS line, derived from selected suite
+# receipts. Not a static count and not a second parser of .agents/gate.json.
+# Precedence per selected suite (exactly once), from the last non-empty line:
+# terminal machine metric; else exact terminal passed/failed tally plus
+# skip/todo on that line; else one legacy no-tally sentinel. Duplicate or
+# non-terminal GIBSON_TEST_METRICS, and malformed / negative / fractional /
+# overflow input, fail closed. Existing GREEN/RED remains the suite-failure
+# authority.
+GIBSON_METRICS_MAX_SAFE=9007199254740991
+METRIC_TOTAL=0
+METRIC_SKIPPED=0
+METRIC_TODO=0
+METRIC_EXPLICIT=0
+METRIC_SENTINEL=0
+METRIC_CONTRACT_FAIL=0
+METRIC_CONTRACT_REASON=""
+
+gibson_metrics_fail() {
+  METRIC_CONTRACT_FAIL=1
+  if [[ -z "$METRIC_CONTRACT_REASON" ]]; then
+    METRIC_CONTRACT_REASON="$1"
+  fi
+}
+
+# Non-negative integer, no leading zeros (except 0), <= MAX_SAFE_INTEGER.
+gibson_metrics_is_uinteger() {
+  local n="$1" max="$GIBSON_METRICS_MAX_SAFE" len i c1 c2
+  case "$n" in
+    ''|*[!0-9]*) return 1 ;;
+    0) return 0 ;;
+    0*) return 1 ;;
+  esac
+  len=${#n}
+  if [[ "$len" -gt 16 ]]; then return 1; fi
+  if [[ "$len" -lt 16 ]]; then return 0; fi
+  i=0
+  while [[ "$i" -lt 16 ]]; do
+    c1=${n:$i:1}
+    c2=${max:$i:1}
+    if [[ "$c1" -gt "$c2" ]]; then return 1; fi
+    if [[ "$c1" -lt "$c2" ]]; then return 0; fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+gibson_metrics_add_into() {
+  local cur amt sum
+  eval "cur=\$$1"
+  amt="$2"
+  if ! gibson_metrics_is_uinteger "$cur" || ! gibson_metrics_is_uinteger "$amt"; then
+    gibson_metrics_fail "non-integer add ($1)"
+    return 1
+  fi
+  sum=$((cur + amt))
+  if [[ "$sum" -lt "$cur" ]] || ! gibson_metrics_is_uinteger "$sum"; then
+    gibson_metrics_fail "overflow adding to $1"
+    return 1
+  fi
+  eval "$1=\$sum"
+}
+
+# Parse one KV body: total=N skipped=M todo=K (all three required; no extras).
+# Sets _gmt _gms _gmd. Returns 0 on success.
+gibson_metrics_parse_kv() {
+  local body="$1" tok val seen_t=0 seen_s=0 seen_d=0
+  local oldifs globoff=0
+  _gmt=""; _gms=""; _gmd=""
+  case "$-" in *f*) globoff=1 ;; esac
+  set -f
+  oldifs=$IFS
+  IFS=' '
+  # shellcheck disable=SC2086
+  set -- $body
+  IFS=$oldifs
+  if [[ "$globoff" -eq 0 ]]; then set +f; fi
+  if [[ "$#" -eq 0 ]]; then return 1; fi
+  for tok in "$@"; do
+    case "$tok" in
+      total=*)
+        [[ "$seen_t" -eq 0 ]] || return 1
+        val=${tok#total=}
+        gibson_metrics_is_uinteger "$val" || return 1
+        _gmt=$val; seen_t=1
+        ;;
+      skipped=*)
+        [[ "$seen_s" -eq 0 ]] || return 1
+        val=${tok#skipped=}
+        gibson_metrics_is_uinteger "$val" || return 1
+        _gms=$val; seen_s=1
+        ;;
+      todo=*)
+        [[ "$seen_d" -eq 0 ]] || return 1
+        val=${tok#todo=}
+        gibson_metrics_is_uinteger "$val" || return 1
+        _gmd=$val; seen_d=1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ "$seen_t" -eq 1 && "$seen_s" -eq 1 && "$seen_d" -eq 1 ]] || return 1
+  return 0
+}
+
+# Strict JSON object: exactly one raw total/skipped/todo key each (duplicate
+# keys fail closed regardless of value), each a non-negative safe integer, no
+# extra keys, no trailing text. Reject backslash/escaped key spelling before
+# parse: this schema is fixed ASCII keys and numeric values, and JSON.parse
+# collapses unicode-escaped keys while the raw exact-key count does not.
+# Payload is env data (inert); Node is already required for this repo's
+# sensors. Bash-3.2 stays the classifier.
+gibson_metrics_parse_json() {
+  local json="$1" parsed
+  _gmt=""; _gms=""; _gmd=""
+  command -v node >/dev/null 2>&1 || return 1
+  parsed=$(GIBSON_METRICS_JSON="$json" node -e '
+const s = process.env.GIBSON_METRICS_JSON || "";
+if (s.includes("\\")) process.exit(1);
+let o;
+try { o = JSON.parse(s); } catch (e) { process.exit(1); }
+if (!o || typeof o !== "object" || Array.isArray(o)) process.exit(1);
+const keys = Object.keys(o);
+if (keys.length !== 3) process.exit(1);
+if (!Object.prototype.hasOwnProperty.call(o, "total") ||
+    !Object.prototype.hasOwnProperty.call(o, "skipped") ||
+    !Object.prototype.hasOwnProperty.call(o, "todo")) process.exit(1);
+function fieldOk(key) {
+  const n = o[key];
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 9007199254740991) {
+    return false;
+  }
+  const occ = s.match(new RegExp("\"" + key + "\"\\s*:", "g"));
+  if (!occ || occ.length !== 1) return false;
+  const m = s.match(new RegExp("\"" + key + "\"\\s*:\\s*(-?\\d+)"));
+  if (!m) return false;
+  return m[1] === String(n);
+}
+if (!fieldOk("total") || !fieldOk("skipped") || !fieldOk("todo")) process.exit(1);
+process.stdout.write(String(o.total) + " " + String(o.skipped) + " " + String(o.todo));
+' 2>/dev/null) || return 1
+  [[ -n "$parsed" ]] || return 1
+  _gmt=${parsed%% *}
+  parsed=${parsed#* }
+  _gms=${parsed%% *}
+  _gmd=${parsed#* }
+  gibson_metrics_is_uinteger "$_gmt" || return 1
+  gibson_metrics_is_uinteger "$_gms" || return 1
+  gibson_metrics_is_uinteger "$_gmd" || return 1
+  return 0
+}
+
+# Skip+todo must not exceed total.
+gibson_metrics_bounds_ok() {
+  local t="$1" s="$2" d="$3" sk
+  sk=$((s + d))
+  if [[ "$sk" -lt "$s" ]]; then return 1; fi
+  if [[ "$sk" -gt "$t" ]]; then return 1; fi
+  return 0
+}
+
+# Extract N from "<N> <word>" on a tally suffix. Empty → default.
+# Duplicate, fractional, or signed forms fail (print nothing, return 1).
+# Callers pass the exact terminal tally suffix, not a prefixed line.
+gibson_metrics_tally_count() {
+  local line="$1" word="$2" default="$3" raw n num
+  if printf '%s\n' "$line" | grep -Eq -- "-[0-9]+[[:space:]]+${word}"; then
+    return 1
+  fi
+  if printf '%s\n' "$line" | grep -Eq -- "[+][0-9]+[[:space:]]+${word}"; then
+    return 1
+  fi
+  n=$(printf '%s\n' "$line" | grep -oE "[0-9]+(\.[0-9]+)?[[:space:]]+${word}" | grep -c . || true)
+  if [[ "$n" -eq 0 ]]; then
+    printf '%s' "$default"
+    return 0
+  fi
+  if [[ "$n" -gt 1 ]]; then return 1; fi
+  raw=$(printf '%s\n' "$line" | grep -oE "[0-9]+(\.[0-9]+)?[[:space:]]+${word}" | tail -1)
+  num=${raw%%[[:space:]]*}
+  num=${num%% *}
+  gibson_metrics_is_uinteger "$num" || return 1
+  printf '%s' "$num"
+}
+
+gibson_metrics_last_nonempty() {
+  printf '%s\n' "$1" | awk 'NF { last=$0 } END { printf "%s", last }'
+}
+
+# Exact terminal tally suffix: "<n> passed, <n> failed" with optional skipped/
+# todo and optional goose-validate clause. Trailing garbage is not this shape.
+gibson_metrics_tally_suffix_re='[0-9]+[[:space:]]+passed,[[:space:]]+[0-9]+[[:space:]]+failed(,[[:space:]]+[0-9]+[[:space:]]+skipped)?(,[[:space:]]+[0-9]+[[:space:]]+todo)?(, goose-validate: [^[:space:]]+)?'
+
+gibson_metrics_tally_suffix() {
+  printf '%s\n' "$1" | grep -oE "${gibson_metrics_tally_suffix_re}[[:space:]]*$" || true
+}
+
+gibson_metrics_is_exact_tally() {
+  printf '%s\n' "$1" | grep -Eq \
+    "(^|[^0-9+-])${gibson_metrics_tally_suffix_re}[[:space:]]*$"
+}
+
+# Classify one suite receipt from the exact last non-empty line.
+# Prints: kind total skipped todo
+# kind is machine|tally|sentinel. Return 1 on contract failure (prints error ...).
+# Duplicate, non-terminal, or bare GIBSON_TEST_METRICS markers fail closed. A
+# tally is eligible only when that last line ends with the exact supported
+# suffix; counts come only from that suffix. Reserved passed/failed/skipped/todo
+# counters in a prefix, and explicit +N counts, fail closed. Otherwise a
+# visible legacy sentinel, unless malformed metric evidence requires RED.
+gibson_metrics_marker_re='^[[:space:]]*GIBSON_TEST_METRICS([[:space:]]|$)'
+gibson_metrics_classify() {
+  local receipt="$1" machine_n last body passed failed skipped todo total suffix prefix
+  _gmt=0; _gms=0; _gmd=0
+  last=$(gibson_metrics_last_nonempty "$receipt")
+  machine_n=$(printf '%s\n' "$receipt" | grep -cE "$gibson_metrics_marker_re" || true)
+  if [[ "$machine_n" -gt 1 ]]; then
+    echo "error duplicate-machine-metric"
+    return 1
+  fi
+  if [[ "$machine_n" -eq 1 ]]; then
+    if ! printf '%s\n' "$last" | grep -Eq "$gibson_metrics_marker_re"; then
+      echo "error non-terminal-machine-metric"
+      return 1
+    fi
+    body=${last#*GIBSON_TEST_METRICS}
+    body=${body#${body%%[![:space:]]*}}
+    if [[ "$body" == \{* ]]; then
+      gibson_metrics_parse_json "$body" || { echo "error malformed-machine-json"; return 1; }
+    else
+      gibson_metrics_parse_kv "$body" || { echo "error malformed-machine-kv"; return 1; }
+    fi
+    gibson_metrics_bounds_ok "$_gmt" "$_gms" "$_gmd" || { echo "error skip-todo-exceeds-total"; return 1; }
+    echo "machine ${_gmt} ${_gms} ${_gmd}"
+    return 0
+  fi
+  if printf '%s\n' "$last" | grep -Eq -- '-[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+    echo "error negative-tally"
+    return 1
+  fi
+  if printf '%s\n' "$last" | grep -Eq '[+][0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+    echo "error signed-tally"
+    return 1
+  fi
+  if printf '%s\n' "$last" | grep -Eq '[0-9]+\.[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+    echo "error fractional-tally"
+    return 1
+  fi
+  if ! gibson_metrics_is_exact_tally "$last"; then
+    echo "sentinel 1 0 0"
+    return 0
+  fi
+  suffix=$(gibson_metrics_tally_suffix "$last")
+  if [[ -z "$suffix" ]]; then
+    echo "error missing-tally-suffix"
+    return 1
+  fi
+  prefix=${last%"$suffix"}
+  if [[ -n "$prefix" ]] && printf '%s\n' "$prefix" | grep -Eq '[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+    echo "error prefix-tally-counter"
+    return 1
+  fi
+  passed=$(gibson_metrics_tally_count "$suffix" passed "") || { echo "error duplicate-or-bad-passed"; return 1; }
+  failed=$(gibson_metrics_tally_count "$suffix" failed "") || { echo "error duplicate-or-bad-failed"; return 1; }
+  if [[ -z "$passed" || -z "$failed" ]]; then
+    echo "error missing-passed-or-failed"
+    return 1
+  fi
+  skipped=$(gibson_metrics_tally_count "$suffix" skipped 0) || { echo "error duplicate-or-bad-skipped"; return 1; }
+  todo=$(gibson_metrics_tally_count "$suffix" todo 0) || { echo "error duplicate-or-bad-todo"; return 1; }
+  total=$((passed + failed + skipped + todo))
+  if [[ "$total" -lt "$passed" ]] || ! gibson_metrics_is_uinteger "$total"; then
+    echo "error overflow-tally"
+    return 1
+  fi
+  echo "tally ${total} ${skipped} ${todo}"
+  return 0
+}
+
+gibson_metrics_contribute() {
+  local receipt="$1" name="$2" classified kind total skipped todo
+  classified=$(gibson_metrics_classify "$receipt") || {
+    gibson_metrics_fail "suite $name: ${classified:-classify-failed}"
+    return 1
+  }
+  kind=${classified%% *}
+  total=$(printf '%s\n' "$classified" | awk '{print $2}')
+  skipped=$(printf '%s\n' "$classified" | awk '{print $3}')
+  todo=$(printf '%s\n' "$classified" | awk '{print $4}')
+  case "$kind" in
+    machine|tally)
+      gibson_metrics_add_into METRIC_TOTAL "$total" || return 1
+      gibson_metrics_add_into METRIC_SKIPPED "$skipped" || return 1
+      gibson_metrics_add_into METRIC_TODO "$todo" || return 1
+      gibson_metrics_add_into METRIC_EXPLICIT "$total" || return 1
+      ;;
+    sentinel)
+      gibson_metrics_add_into METRIC_TOTAL 1 || return 1
+      gibson_metrics_add_into METRIC_SENTINEL 1 || return 1
+      ;;
+    *)
+      gibson_metrics_fail "suite $name: unknown kind $kind"
+      return 1
+      ;;
+  esac
+}
+
+gibson_metrics_assert_class() {
+  local receipt="$1" want="$2" desc="$3" got
+  got=$(gibson_metrics_classify "$receipt") || got="error classify-rc"
+  if [[ "$got" == "$want" ]]; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: $desc"
+    return 0
+  fi
+  echo "${RED}  FAIL${OFF} — metrics mutation: $desc (got '$got' want '$want')"
+  FAILED="$FAILED metrics-contract-mutation"
+  return 1
+}
+
+gibson_metrics_assert_error() {
+  local receipt="$1" desc="$2" got rc=0
+  got=$(gibson_metrics_classify "$receipt") || rc=$?
+  if [[ "$rc" -ne 0 && "$got" == error* ]]; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: $desc"
+    return 0
+  fi
+  echo "${RED}  FAIL${OFF} — metrics mutation: $desc (got '$got' rc=$rc)"
+  FAILED="$FAILED metrics-contract-mutation"
+  return 1
+}
+
 # --- 4. sensor suites -------------------------------------------------------
 echo "== sensors"
 
@@ -1144,6 +1476,92 @@ suite_has_shell_construction_diag() {
   unset _mut_probe _i
 }
 
+# Metric-contract mutation coverage (#274): synthetic receipts only — never a
+# static production count and never a parse of .agents/gate.json.
+{
+  gibson_metrics_assert_class \
+    $'ok\nGIBSON_TEST_METRICS total=10 skipped=1 todo=2\n' \
+    "machine 10 1 2" \
+    "terminal machine KV is used"
+  gibson_metrics_assert_class \
+    $'ok\nGIBSON_TEST_METRICS {"total":9,"skipped":0,"todo":1}\n' \
+    "machine 9 0 1" \
+    "terminal machine JSON is used"
+  gibson_metrics_assert_class \
+    $'probe: 2 passed, 0 failed\nsuite: 4 passed, 1 failed, 3 skipped, 1 todo\n' \
+    "tally 9 3 1" \
+    "terminal passed/failed tally plus skip/todo"
+  gibson_metrics_assert_class \
+    $'no numbers here\n' \
+    "sentinel 1 0 0" \
+    "legacy no-tally sentinel"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS total=7 skipped=0 todo=0\n' \
+    "duplicate machine metric fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS total=-1 skipped=0 todo=0\n' \
+    "negative machine metric fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS total=1.5 skipped=0 todo=0\n' \
+    "fractional machine metric fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS total=9007199254740993 skipped=0 todo=0\n' \
+    "overflow machine metric fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS total=nope skipped=0 todo=0\n' \
+    "malformed machine metric fails closed"
+  gibson_metrics_assert_error \
+    $'suite: 4.5 passed, 0 failed\n' \
+    "fractional tally fails closed"
+  gibson_metrics_assert_error \
+    $'ok\nGIBSON_TEST_METRICS total=10 skipped=1 todo=2\nmore output after machine\n' \
+    "non-terminal machine evidence fails closed"
+  gibson_metrics_assert_class \
+    $'suite: 4 passed, 1 failed, 3 skipped, 1 todo\nmore output after tally\n' \
+    "sentinel 1 0 0" \
+    "non-terminal tally falls back to the visible legacy sentinel"
+  gibson_metrics_assert_error \
+    $'suite: -1 passed, 0 failed\n' \
+    "negative tally fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS total=10 skipped=0 todo=0 trailing\n' \
+    "trailing garbage on a machine receipt fails closed"
+  gibson_metrics_assert_class \
+    $'suite: 4 passed, 0 failed trailing garbage\n' \
+    "sentinel 1 0 0" \
+    "tally trailing garbage is not the exact supported shape (legacy sentinel)"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS {"total":1,"skipped":0,"todo":0,}\n' \
+    "malformed machine JSON fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS {"total":1,"skipped":0,"todo":0}{"x":1}\n' \
+    "trailing JSON after a machine object fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS {"total":1,"skipped":0,"todo":0,"extra":1}\n' \
+    "extra JSON key on a machine receipt fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS {"total":1,"total":1,"skipped":0,"todo":0}\n' \
+    "same-value duplicate JSON keys fail closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS {"total":1,"total":2,"skipped":0,"todo":0}\n' \
+    "differing-value duplicate JSON keys fail closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS {"total":1,"to\\u0074al":1,"skipped":0,"todo":0}\n' \
+    "escaped JSON key semantic duplicate fails closed"
+  gibson_metrics_assert_error \
+    $'ok\nGIBSON_TEST_METRICS\n' \
+    "bare machine marker fails closed"
+  gibson_metrics_assert_error \
+    $'GIBSON_TEST_METRICS\nGIBSON_TEST_METRICS total=1 skipped=0 todo=0\n' \
+    "bare nonterminal plus terminal machine marker fails closed"
+  gibson_metrics_assert_error \
+    $'99 skipped; suite: 4 passed, 0 failed\n' \
+    "prefix reserved counters fail closed"
+  gibson_metrics_assert_error \
+    $'+1 passed, 0 failed\n' \
+    "explicit plus sign on a tally count fails closed"
+}
+
 for suite in scripts/tests/*.test.sh; do
   name=$(basename "$suite")
   [[ -z "$ONLY" || "$name" == *"$ONLY"* ]] || continue
@@ -1151,10 +1569,14 @@ for suite in scripts/tests/*.test.sh; do
   if [[ ! -x "$suite" ]]; then
     echo "${RED}  FAIL${OFF} — $name is not executable"
     FAILED="$FAILED $name"
+    gibson_metrics_contribute "" "$name" || true
     continue
   fi
 
+  suite_t0=$SECONDS
   out=$(run_limited "$suite" 2>&1); ec=$?
+  suite_elapsed=$((SECONDS - suite_t0))
+  gibson_metrics_contribute "$out" "$name" || true
   # grep -o, not a greedy sed capture: `.*([0-9]+ passed` eats all but the last
   # digit and turns "42 passed" into "2 passed".
   # Prefer extended tally (goose-validate disposition, #95); fall back to plain.
@@ -1181,21 +1603,21 @@ for suite in scripts/tests/*.test.sh; do
   fi
 
   if [[ -n "$shell_diag" ]]; then
-    echo "${RED}  FAIL${OFF} — $name: shell construction diagnostic with tally '$tally' (exit $ec)"
+    echo "${RED}  FAIL${OFF} — $name: shell construction diagnostic with tally '$tally' (exit $ec, ${suite_elapsed}s)"
     echo "$shell_diag" | head -6 | sed 's/^/         /'
     FAILED="$FAILED $name"
   elif [[ "$ec" -eq 0 ]]; then
     if is_quarantined "$name"; then
-      echo "${RED}  FAIL${OFF} — $name PASSES but is quarantined (#$(quarantine_issue "$name")) — remove it from the list"
+      echo "${RED}  FAIL${OFF} — $name PASSES but is quarantined (#$(quarantine_issue "$name")) — remove it from the list (${suite_elapsed}s)"
       ESCAPED="$ESCAPED $name"
     else
-      echo "${GRN}  ok${OFF}   — $name: $tally"
+      echo "${GRN}  ok${OFF}   — $name: $tally (${suite_elapsed}s)"
     fi
   elif is_quarantined "$name"; then
-    echo "${YEL}  KNOWN${OFF}— $name: $tally (quarantined, #$(quarantine_issue "$name"))"
+    echo "${YEL}  KNOWN${OFF}— $name: $tally (quarantined, #$(quarantine_issue "$name"), ${suite_elapsed}s)"
     QUARANTINED="$QUARANTINED $name"
   else
-    echo "${RED}  FAIL${OFF} — $name: $tally (exit $ec)"
+    echo "${RED}  FAIL${OFF} — $name: $tally (exit $ec, ${suite_elapsed}s)"
     FAILED="$FAILED $name"
   fi
 done
@@ -1216,9 +1638,23 @@ if [[ "$n_fail" -gt 0 ]]; then
   echo "failed:$FAILED"
 fi
 
+verdict_rc=1
 if [[ "$n_fail" -eq 0 && "$n_esc" -eq 0 ]]; then
   echo "run-all: GREEN — 0 failed, $n_quar quarantined"
-  exit 0
+  verdict_rc=0
+else
+  echo "run-all: RED — $n_fail failed, $n_esc escaped quarantine, $n_quar quarantined"
+  verdict_rc=1
 fi
-echo "run-all: RED — $n_fail failed, $n_esc escaped quarantine, $n_quar quarantined"
-exit 1
+
+echo "run-all wall: $((SECONDS - RUN_ALL_T0))s"
+
+# Diagnostic immediately before the single machine line so a sentinel is never
+# hidden. Do not emit GIBSON_TEST_METRICS when the metric contract failed.
+if [[ "$METRIC_CONTRACT_FAIL" -ne 0 ]]; then
+  echo "run-all: metric contract RED — $METRIC_CONTRACT_REASON" >&2
+  exit 1
+fi
+echo "run-all metric-subtotals: explicit-assertions=${METRIC_EXPLICIT} legacy-sentinels=${METRIC_SENTINEL}"
+echo "GIBSON_TEST_METRICS total=${METRIC_TOTAL} skipped=${METRIC_SKIPPED} todo=${METRIC_TODO}"
+exit "$verdict_rc"
