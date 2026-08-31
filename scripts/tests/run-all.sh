@@ -31,7 +31,12 @@ USAGE
   scripts/tests/run-all.sh --help
 
   --only PATTERN          run only suites whose filename matches PATTERN
-  --timeout SECONDS       per-suite timeout (default 600; 0 disables)
+  --timeout SECONDS       per-suite timeout (default 600; 0 disables).
+                          Nonzero values use scripts/lib/wall-timeout.sh
+                          (perl/python3 process-group watchdog; Bash 3.2).
+                          Fails closed before suites if that watchdog cannot
+                          start; never silently unbounded. 0 is the explicit
+                          opt-out.
   --no-quarantine         treat quarantined suites as required — the burn-down view
   --list-quarantine       print the quarantine list with issue links and exit
   --quiet                 suite summary lines only, no per-assertion output
@@ -678,6 +683,39 @@ case "$TIMEOUT" in
   ''|*[!0-9]*) echo "run-all.sh: --timeout wants a whole number of seconds" >&2; exit 2 ;;
 esac
 
+# Portable suite timeout (#260): reuse scripts/lib/wall-timeout.sh — do not
+# duplicate its process-group watchdog, and do not depend on GNU timeout.
+WALL_TIMEOUT_LIB="$SCRIPT_DIR/../lib/wall-timeout.sh"
+if [[ ! -f "$WALL_TIMEOUT_LIB" ]]; then
+  echo "run-all.sh: missing lib/wall-timeout.sh (looked in $SCRIPT_DIR/../lib)" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090,SC1091
+source "$WALL_TIMEOUT_LIB"
+if ! declare -F run_with_wall_timeout >/dev/null 2>&1; then
+  echo "run-all.sh: lib/wall-timeout.sh did not define run_with_wall_timeout" >&2
+  exit 2
+fi
+
+# Nonzero TIMEOUT needs perl or python3 so the helper can setpgrp + tree-kill.
+suite_timeout_capable() {
+  command -v perl >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1
+}
+
+if [[ "$TIMEOUT" -gt 0 ]] && ! suite_timeout_capable; then
+  echo "run-all.sh: --timeout ${TIMEOUT} requires perl or python3 for the portable process-group watchdog (no unbounded fallback). Install one, or pass --timeout 0 to opt out explicitly." >&2
+  exit 2
+fi
+
+# TIMEOUT 0 = explicit unbounded. Nonzero → helper (124 on wall expiry).
+run_limited() {
+  if [[ "$TIMEOUT" -eq 0 ]]; then
+    "$@"
+    return $?
+  fi
+  run_with_wall_timeout "$TIMEOUT" "$@"
+}
+
 cd "$REPO_ROOT" || exit 2
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; OFF=$'\033[0m'
@@ -693,15 +731,6 @@ quarantine_issue() {
 
 is_quarantined() {
   [[ "$USE_QUARANTINE" -eq 1 ]] && [[ -n "$(quarantine_issue "$1")" ]]
-}
-
-# Run a command with a timeout when one is available; 124 means it hung.
-run_limited() {
-  if [[ "$TIMEOUT" -gt 0 ]] && command -v timeout >/dev/null 2>&1; then
-    timeout "$TIMEOUT" "$@"
-  else
-    "$@"
-  fi
 }
 
 # scripts/ and adapters/ — both ship bash that must stay Bash-3.2 clean
