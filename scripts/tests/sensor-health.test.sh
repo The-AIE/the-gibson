@@ -34,8 +34,10 @@ fi
 grep -qi 'Advisory: this job stays green' "$WF" && bad "advisory always-green wording present" || ok "advisory always-green wording removed"
 grep -qi 'Fail-closed' "$WF" && ok "fail-closed wording present" || bad "missing Fail-closed note"
 grep -q '#212' "$WF" && ok "standing issue #212 referenced" || bad "workflow should mention #212"
+PLANT2=""
+PLANT3=""
 PLANT=$(mktemp "${TMPDIR:-/tmp}/sensor-health-plant.XXXXXX")
-trap 'rm -f "$PLANT" "$PLANT2"' EXIT
+trap 'rm -f "$PLANT" "$PLANT2" "$PLANT3"' EXIT
 cat >"$PLANT" <<'YAML'
 jobs:
   sensor-health:
@@ -59,7 +61,6 @@ jobs:
 YAML
 grep -nE 'set[[:space:]]+\+e' "$PLANT2" >/dev/null && ok "planted set +e detectable" || bad "planted set +e missed"
 PLANT3=$(mktemp "${TMPDIR:-/tmp}/sensor-health-plant3.XXXXXX")
-trap 'rm -f "$PLANT" "$PLANT2" "$PLANT3"' EXIT
 cat >"$PLANT3" <<'YAML'
 jobs:
   sensor-health:
