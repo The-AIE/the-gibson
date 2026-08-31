@@ -307,7 +307,7 @@ restate the numbers here).
 Before **every** product commit, in the worktree: generate → typecheck → lint →
 test → build. Zero new failures vs. the recorded branch point. CI
 (`ci/gibson-gate.yml`) is the law; local `scripts/gate.sh` is the same
-obligation. This repo's machine-readable twin is `.agents/gate.json`
+obligation. Machine-readable twin is `.agents/gate.json`
 (test: `bash scripts/tests/run-all.sh --no-quarantine`; empty strings for
 inapplicable generate/typecheck/lint/build). The twin does not weaken or
 replace the full five-step gate.
