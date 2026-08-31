@@ -4282,17 +4282,55 @@ function overlayBoundaryIsNotYetIdiom(left, matchedText) {
 }
 
 /**
+ * The explicitly named owner subject a following coordinated predicate
+ * may inherit. Only the canonical bare `the owner` subject is
+ * inheritable: any other leading actor (counsel, a delegate, a reporter,
+ * an unnamed subject) must never become an owner approval in the second
+ * clause, so anything else yields no inheritable actor at all.
+ */
+function overlayInheritableOwnerActor(clause) {
+  const actor = leadingActor(clause);
+  if (!actor) return "";
+  const canonical = collapseWs(actor.replace(/[^\w\s']/g, " "));
+  return /^(?:the\s+)?owner$/i.test(canonical) ? "the owner" : "";
+}
+
+/**
+ * Re-attach an inherited owner subject to a split clause that has no
+ * subject of its own (`…, but approved removal of G12`). Only a bare
+ * predicate remainder inherits: a clause that already names an actor —
+ * owner or otherwise — keeps it, and an object remainder (`, but not
+ * G12`) is not a predicate at all. Polarity is not inherited, so a
+ * denial for one gate cannot travel to the other clause; only the
+ * subject does.
+ */
+function overlayWithInheritedActor(part, actor) {
+  if (!actor || !part) return part;
+  if (/\bowner\b/i.test(part)) return part;
+  if (classifyCoordRhs(part) !== "ellipsis") return part;
+  return collapseWs(`${actor} ${part}`);
+}
+
+/**
  * Same boundaries as `splitAdversativeClauses`, but a boundary
  * immediately following a completed removal-target object is not split
  * — the restriction/rejection after the connector stays bound to that
  * object for `overlayGateIsRemovalObject` to see — and a `not yet` /
- * `never yet` hedge is not treated as a boundary at all.
+ * `never yet` hedge is not treated as a boundary at all. Where a
+ * boundary does split, a subjectless second predicate inherits an
+ * explicit owner subject from the clause before it.
  */
 function splitOverlayAdversativeClauses(text) {
   const src = collapseWs(text);
   if (!src) return [];
   const parts = [];
   let last = 0;
+  let actor = "";
+  const push = (part) => {
+    if (!part) return;
+    parts.push(parts.length ? overlayWithInheritedActor(part, actor) : part);
+    actor = overlayInheritableOwnerActor(part) || actor;
+  };
   const re = new RegExp(CLAUSE_BOUNDARY_RE.source, "gi");
   let m;
   while ((m = re.exec(src)) !== null) {
@@ -4305,7 +4343,7 @@ function splitOverlayAdversativeClauses(text) {
     ) {
       continue;
     }
-    if (left) parts.push(left);
+    push(left);
     last = m.index + m[0].length;
     if (last === m.index) last = m.index + 1;
   }
@@ -4315,8 +4353,47 @@ function splitOverlayAdversativeClauses(text) {
       ""
     )
   );
-  if (tail) parts.push(tail);
+  push(tail);
   return parts.length ? parts : [src];
+}
+
+/**
+ * Semicolon/gate-polarity splitting for overlay authorization units. A
+ * `;` that directly follows a completed gate-removal target keeps its
+ * continuation attached (`removal of G12; only its label may be
+ * deleted`), so `overlayGateIsRemovalObject` judges that continuation
+ * instead of the truncated left half authorizing on its own. A
+ * semicolon after anything else (`removal of another object; the minutes
+ * mention G12`) still splits, and `, not G12` polarity splitting is
+ * unchanged.
+ */
+function splitOverlayAuthorizationClauses(sentence) {
+  const src = collapseWs(sentence);
+  if (!src) return [];
+  const chunks = [];
+  const re = /\s*;\s+/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    if (m.index < last) continue;
+    const left = collapseWs(src.slice(last, m.index));
+    const rightRemainder = src.slice(m.index + m[0].length);
+    if (overlayAdversativeBoundaryIsPostRemovalTarget(left, rightRemainder)) {
+      continue;
+    }
+    if (left) chunks.push(left);
+    last = m.index + m[0].length;
+  }
+  const tail = collapseWs(src.slice(last));
+  if (tail) chunks.push(tail);
+  const parts = [];
+  for (const chunk of chunks.length ? chunks : [src]) {
+    for (const piece of chunk.split(OVERLAY_GATE_POLARITY_SPLIT_RE)) {
+      const t = collapseWs(piece);
+      if (t) parts.push(t);
+    }
+  }
+  return parts;
 }
 
 function overlayAuthorizationUnits(decisionsText) {
@@ -4329,7 +4406,7 @@ function overlayAuthorizationUnits(decisionsText) {
       if (/^rejected$/i.test(field.label)) continue;
       for (const sent of polarityUnits(field.body)) {
         for (const adv of splitOverlayAdversativeClauses(sent)) {
-          for (const clause of splitOverlayClauses(adv)) {
+          for (const clause of splitOverlayAuthorizationClauses(adv)) {
             for (const actorPart of splitCoordinatedActorClauses(clause)) {
               units.push(actorPart);
             }
@@ -4366,38 +4443,61 @@ const OVERLAY_GATE_OBJECT_FOLLOW_RE =
  */
 const OVERLAY_GATE_COLLATERAL_PREP_RE =
   /^(?:from|in|into|on|onto|at|by|with|without|via|per|as|for|of|about|regarding|concerning|among|across|within|toward|towards)$/i;
-const OVERLAY_GATE_COPULA_RE = /^(?:was|were|is|are|be|been|being)$/i;
-/** Prefix-anchored copula, including stative "remains"/"stays"/"continues", for scanning past an adversative connector. */
-const OVERLAY_GATE_COPULA_PREFIX_RE =
-  /^(?:was|were|is|are|be|been|being|remains?|stays?|continues?(?:\s+to\s+be)?)\b/i;
-const OVERLAY_REMOVAL_COPULAR_REJECTION_RE =
-  /^(?:(?:explicitly|hereby|formally|also|then)\s+)?(?:rejected|denied|declined|unauthorized|unapproved|pending|(?:not|never)\s+(?:yet\s+)?(?:authorized|approved))\b/i;
-/** Adversative connectors that can introduce a restriction/rejection of a just-named removal target. */
+/**
+ * Copulas that can carry a post-target predicate about the removal. The
+ * statives `remains` / `stays` / `continues` belong here with `was` /
+ * `is`: `removal of G12 remains pending` reports the same non-final
+ * state as `removal of G12 is pending`, so it must reach the rejection
+ * test below instead of passing as an ordinary object continuation.
+ */
+const OVERLAY_GATE_COPULA_RE =
+  /^(?:was|were|is|are|be|been|being|remains?|stays?|continues?)$/i;
+/** `continues to be pending` — infinitival copula after a stative. */
+const OVERLAY_GATE_STATIVE_TO_BE_RE = /^to\s+be\s+/i;
+/** Adverbs that may sit between the copula and the rejection predicate. */
+const OVERLAY_REJECTION_MODIFIER_SRC =
+  "(?:explicitly|expressly|hereby|formally|duly|also|then|later|subsequently|since|already|still|now)\\s+";
+/**
+ * Copular complements that report the removal as not (or no longer) in
+ * force: an outright rejection (`was denied`, `was expressly denied`), a
+ * non-final state (`is pending`, `remains pending`), or a negated /
+ * lapsed authorization (`was not yet authorized`, `was no longer
+ * authorized`).
+ */
+const OVERLAY_REMOVAL_COPULAR_REJECTION_RE = new RegExp(
+  "^(?:" +
+    OVERLAY_REJECTION_MODIFIER_SRC +
+    ")*(?:rejected|denied|declined|refused|revoked|retracted|withdrawn|reversed|overturned|unauthorized|unapproved|pending" +
+    "|(?:not|never|no\\s+longer)\\s+(?:yet\\s+)?(?:authorized|approved|permitted|allowed|in\\s+effect))\\b",
+  "i"
+);
+/**
+ * Adversative connectors. Directly after a just-named removal target one
+ * of these introduces a restriction, a rejection, or something this
+ * sensor cannot resolve — never a benign continuation.
+ */
 const OVERLAY_ADVERSATIVE_CONNECTOR_RE =
   /^(?:but|however|nevertheless|nonetheless|although|though|whereas|yet|still)$/i;
-const OVERLAY_POST_CONNECTOR_FILLER_RE = /^(?:that|it|this|which)\s+/i;
-const OVERLAY_POST_CONNECTOR_RESTRICTION_RE =
-  /^(?:not|never|only|merely|just|solely|simply)\b/i;
 
 /**
  * A contrastive connector directly after a completed removal target
- * (`removal of G12, but only from documentation` / `..., but not as a
- * human gate` / `..., but that was explicitly rejected` / `..., but
- * remains denied`) restricts or rejects the removal rather than leaving
- * it intact. Bind that restriction to the removal object here, before
- * any adversative sentence-splitting elsewhere could discard the second
- * half and evaluate the first half in isolation.
+ * never leaves that removal authorized. Some continuations narrow it
+ * (`, but only from documentation`, `, but from documentation only`,
+ * `, but not as a human gate`), some retract it (`, but that was
+ * explicitly rejected`, `, but the owner rejected it`, `, but later
+ * denied that removal`, `, but that remains denied`), and the rest are
+ * language this sensor does not model.
+ *
+ * `overlayAdversativeBoundaryIsPostRemovalTarget` deliberately keeps
+ * such a continuation bound to the target instead of splitting it away,
+ * so this is the point where it has to be judged: an unresolved
+ * continuation must fail closed, because the alternative is authorizing
+ * from the truncated left half alone. Residual: not general NLP — a
+ * genuinely benign contrastive continuation is treated as unresolved
+ * and does not authorize.
  */
-function overlayAdversativeConnectorRejectsRemoval(after, next) {
-  if (!OVERLAY_ADVERSATIVE_CONNECTOR_RE.test(next)) return false;
-  let rest = collapseWs(String(after || "").replace(/^[A-Za-z']+\b/, ""));
-  rest = rest.replace(OVERLAY_POST_CONNECTOR_FILLER_RE, "");
-  if (!rest) return false;
-  if (OVERLAY_POST_CONNECTOR_RESTRICTION_RE.test(rest)) return true;
-  const copula = OVERLAY_GATE_COPULA_PREFIX_RE.exec(rest);
-  if (!copula) return false;
-  const predicate = collapseWs(rest.slice(copula[0].length));
-  return OVERLAY_REMOVAL_COPULAR_REJECTION_RE.test(predicate);
+function overlayAdversativeContinuationBlocksRemoval(next) {
+  return OVERLAY_ADVERSATIVE_CONNECTOR_RE.test(next);
 }
 
 function overlayRemovalTargetSkipOnly(text) {
@@ -4425,7 +4525,10 @@ function overlayCopularComplementRejectsRemoval(after, copula) {
     /^[.,:;!?()[\]"'`]+/,
     ""
   );
-  return OVERLAY_REMOVAL_COPULAR_REJECTION_RE.test(rest);
+  const predicate = collapseWs(
+    rest.replace(OVERLAY_GATE_STATIVE_TO_BE_RE, "")
+  );
+  return OVERLAY_REMOVAL_COPULAR_REJECTION_RE.test(predicate);
 }
 
 function overlayGateIsRemovalObject(text, action, gate) {
@@ -4457,7 +4560,7 @@ function overlayGateIsRemovalObject(text, action, gate) {
   if (!next) return true;
   if (OVERLAY_GATE_COLLATERAL_PREP_RE.test(next)) return false;
   if (overlayCopularComplementRejectsRemoval(after, next)) return false;
-  if (overlayAdversativeConnectorRejectsRemoval(after, next)) return false;
+  if (overlayAdversativeContinuationBlocksRemoval(next)) return false;
   return OVERLAY_GATE_OBJECT_FOLLOW_RE.test(next);
 }
 
@@ -4883,17 +4986,158 @@ const SELF_REVIEW_NON_GRANT_TOPIC_PREP_RE =
 /** Reversed-subject obligation: "Self-review is required of <reviewer>." */
 const SELF_REVIEW_REQUIRED_OF_RE =
   /\bself[\s-]?review\s+(?:is|are|was|were)\s+(?!not\b)(?:(?:expressly|explicitly|formally)\s+)?required\s+of\b/i;
+/**
+ * Reversed permission subject: the permission is the grammatical subject
+ * and the grant is its passive predicate ("Permission to self-review is
+ * granted to an independent reviewer"), so the clause contains no
+ * forward grant-verb-then-self-review span pair for the ordinary scan to
+ * find. The copula must not be negated, and the whole subject must not
+ * be locally excluded ("No permission to self-review is granted") —
+ * `reversedSelfReviewPermissionGranted` checks the latter.
+ */
+const SELF_REVIEW_PERMISSION_SUBJECT_GRANTED_RE = new RegExp(
+  "\\b(?:permission|right|authority|licence|license|leave|clearance)\\s+to\\s+self[\\s-]?review\\b" +
+    "[^.!?;]{0,40}?\\b(?:is|are|was|were|has\\s+been|have\\s+been|had\\s+been)\\s+" +
+    "(?!not\\b|never\\b|no\\b)(?:(?:hereby|expressly|explicitly|formally|duly|already)\\s+)*" +
+    "(?:granted|given|conferred|extended|provided|allowed|permitted|authorized)\\b",
+  "i"
+);
+
+function reversedSelfReviewPermissionGranted(text) {
+  const re = new RegExp(SELF_REVIEW_PERMISSION_SUBJECT_GRANTED_RE.source, "gi");
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (!topicLocallyExcluded(text, m.index)) return true;
+  }
+  return false;
+}
 
 function interveningWord(tok) {
   return String(tok || "").replace(/[^A-Za-z']/g, "");
 }
 
-function lastInfinitiveLemma(intervening) {
+/**
+ * Every `to <lemma>` in a clause, scanned once. The gap classifier below
+ * consumes this index instead of re-tokenizing the intervening span, so a
+ * candidate that stays nearest for many self-review mentions never pays
+ * for an ever-growing rescan.
+ */
+function localInfinitiveSpans(local) {
   const infRe = /\bto\s+([A-Za-z][A-Za-z'-]*)/gi;
-  let lemma = "";
+  const out = [];
   let m;
-  while ((m = infRe.exec(intervening)) !== null) lemma = m[1];
-  return lemma;
+  while ((m = infRe.exec(local)) !== null) {
+    out.push({ index: m.index, end: m.index + m[0].length, lemma: m[1] });
+  }
+  return out;
+}
+
+/**
+ * The last `to <lemma>` lying wholly inside the gap `[verbEnd, selfIndex)`,
+ * by binary search over `localInfinitiveSpans`. Equivalent to rescanning
+ * the gap itself: a grant-verb / permission span ends on a word boundary
+ * and `self-review` starts on one, so no infinitive can straddle either
+ * edge of the gap, and the spans are ascending in both `index` and `end`.
+ */
+function lastInfinitiveLemma(infinitives, verbEnd, selfIndex) {
+  let lo = 0;
+  let hi = infinitives.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (infinitives[mid].end <= selfIndex) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (found < 0) return "";
+  const hit = infinitives[found];
+  return hit.index >= verbEnd ? hit.lemma : "";
+}
+
+/**
+ * The two whitespace-delimited raw tokens immediately before `end`, found
+ * by scanning backward without ever crossing `start` (the gap's left
+ * edge). Cost is the width of those two tokens, not the width of the gap
+ * — the same bounded shape as `lastTwoWordsBefore`. Returns
+ * `[last, prev]`; a token that does not exist comes back as `null`.
+ */
+function lastTwoRawTokensBetween(text, start, end) {
+  const s = text;
+  const lo = Math.max(0, Math.min(start, s.length));
+  let i = Math.max(lo, Math.min(end, s.length));
+  const out = [null, null];
+  for (let k = 0; k < 2 && i > lo; k += 1) {
+    while (i > lo && /\s/.test(s[i - 1])) i -= 1;
+    const tokEnd = i;
+    while (i > lo && !/\s/.test(s[i - 1])) i -= 1;
+    if (i === tokEnd) break;
+    out[k] = s.slice(i, tokEnd);
+  }
+  return out;
+}
+
+/**
+ * A negative-authority verb that takes its own object
+ * (`deny permission to self-review`, `forbid the builder to
+ * self-review`, `prevent the builder from self-review`). Distinct from
+ * `SELF_REVIEW_NON_GRANT_PRED_RE`, which classifies the act at the *end*
+ * of the gap; this one classifies the verb at its *start*, where the
+ * rest of the gap is that verb's object rather than a grant.
+ */
+const SELF_REVIEW_NEGATIVE_AUTHORITY_VERB_RE =
+  /^(?:den(?:y|ies|ied|ying)|refus(?:e|es|ed|ing)|forbid(?:s|ding)?|forbade|forbidden|prevent(?:s|ed|ing)?|prohibit(?:s|ed|ing)?|disallow(?:s|ed|ing)?|withhold(?:s|ing)?|withheld|bar(?:s|red|ring)?|block(?:s|ed|ing)?|reject(?:s|ed|ing)?|revok(?:e|es|ed|ing))$/i;
+
+/**
+ * Longest word either first-token test can match: `shouldn't` /
+ * `wouldn't` in `LOCAL_POLARITY_TOKEN_RE`, and `prohibiting` /
+ * `disallowing` / `withholding` in
+ * `SELF_REVIEW_NEGATIVE_AUTHORITY_VERB_RE`.
+ */
+const GAP_FIRST_WORD_MAX_LETTERS = 11;
+
+/**
+ * Probe the gap's first whitespace-delimited token once per candidate.
+ * Only the two first-token tests read that token, and both are anchored
+ * to words of at most `GAP_FIRST_WORD_MAX_LETTERS` letters, so
+ * collecting one letter more than that is enough to decide every prefix
+ * of it: anything longer can never match and is not materialized.
+ */
+function scanFirstGapToken(text, verbEnd) {
+  const s = text;
+  let i = Math.max(0, Math.min(verbEnd, s.length));
+  while (i < s.length && /\s/.test(s[i])) i += 1;
+  const probe = { verbEnd, start: i, letters: [], overflowAt: Infinity };
+  while (i < s.length && !/\s/.test(s[i])) {
+    if (/[A-Za-z']/.test(s[i])) {
+      if (probe.letters.length > GAP_FIRST_WORD_MAX_LETTERS) {
+        probe.overflowAt = i;
+        break;
+      }
+      probe.letters.push({ at: i, ch: s[i] });
+    }
+    i += 1;
+  }
+  return probe;
+}
+
+/**
+ * The probed first token, clipped at `selfIndex` (a `self-review` match
+ * can begin inside that token, e.g. `may not-self-review`) and reduced to
+ * the letters `interveningWord` would keep. `""` when the clipped token is
+ * longer than any word either first-token test can match, which cannot
+ * match either way.
+ */
+function firstGapWord(probe, selfIndex) {
+  if (probe.start >= selfIndex || selfIndex > probe.overflowAt) return "";
+  let out = "";
+  for (let k = 0; k < probe.letters.length; k += 1) {
+    if (probe.letters[k].at >= selfIndex) break;
+    out += probe.letters[k].ch;
+  }
+  return out;
 }
 
 /**
@@ -4908,44 +5152,77 @@ function lastInfinitiveLemma(intervening) {
 function permissionPredicateGrantsSelfReview(text, span, state) {
   const local = String(text || "").split(/[.!?;]/)[0] || "";
   if (!span || span.end > local.length) return false;
+  const sameClause = Boolean(state) && state.local === local;
   const selfs =
-    state && Array.isArray(state.selfs) && state.local === local
+    sameClause && Array.isArray(state.selfs)
       ? state.selfs
       : overlayRegexMatches(/\bself[\s-]?review\b/i, local);
+  const blocksGrant =
+    (sameClause && state.blocksGrant) || selfReviewGapClassifier(local);
   for (const self of selfs) {
     if (self.index < span.end) continue;
-    if (!interveningSelfReviewBlocksGrant(local, span.end, self.index)) {
-      return true;
-    }
+    if (!blocksGrant(span.end, self.index)) return true;
   }
   return false;
 }
 
-function interveningSelfReviewBlocksGrant(local, verbEnd, selfIndex) {
-  if (topicLocallyExcluded(local, selfIndex)) return true;
-  const intervening = collapseWs(local.slice(verbEnd, selfIndex));
-  if (!intervening) return false;
-  const first = interveningWord(intervening.split(/\s+/)[0]);
-  if (LOCAL_POLARITY_TOKEN_RE.test(first)) return true;
-  if (/\b(?:not|never|no)\s+to\s*$/i.test(intervening)) return true;
-  // Trailing `to self-review` / `conduct self-review` is the grant act.
-  if (/\bto\s*$/i.test(intervening)) return false;
-  if (/\b(?:to\s+)?(?:conduct|perform|carry\s+out)\s*$/i.test(intervening)) {
-    return false;
-  }
-  // Last infinitive is the authorized act (`to discuss` vs `to conduct`).
-  const infLemma = lastInfinitiveLemma(intervening);
-  if (infLemma) return SELF_REVIEW_NON_GRANT_PRED_RE.test(infLemma);
-  // No infinitive: non-grant when the grant object is that topic
-  // attaching to self-review (`a report about`, `a ban on`), or when
-  // the last word is itself that predicate (`may discuss self-review`).
-  const toks = intervening.split(/\s+/).filter(Boolean);
-  const last = interveningWord(toks[toks.length - 1]);
-  const prev = interveningWord(toks[toks.length - 2]);
-  if (SELF_REVIEW_NON_GRANT_TOPIC_PREP_RE.test(last)) {
-    return SELF_REVIEW_NON_GRANT_PRED_RE.test(prev);
-  }
-  return SELF_REVIEW_NON_GRANT_PRED_RE.test(last);
+/**
+ * Per-clause gap classifier: decides, for one candidate end and one
+ * self-review start, whether the intervening language blocks the grant.
+ *
+ * Nothing here slices, collapses, or tokenizes the whole
+ * `[verbEnd, selfIndex)` gap. Each check reads either a bounded backward
+ * token scan, the candidate's cached forward first-token probe, or a
+ * binary search over the clause's infinitive index — so one candidate that
+ * remains nearest for many self-review mentions costs O(log n) per mention
+ * instead of an ever-growing rescan. The classification itself is
+ * unchanged: unfamiliar intervening language still fails closed.
+ */
+function selfReviewGapClassifier(local) {
+  const text = String(local || "");
+  let infinitives = null;
+  let probe = null;
+  return function interveningSelfReviewBlocksGrant(verbEnd, selfIndex) {
+    if (topicLocallyExcluded(text, selfIndex)) return true;
+    const [lastRaw, prevRaw] = lastTwoRawTokensBetween(text, verbEnd, selfIndex);
+    // No token in the gap at all — the grant verb attaches directly.
+    if (lastRaw === null) return false;
+    if (!probe || probe.verbEnd !== verbEnd) {
+      probe = scanFirstGapToken(text, verbEnd);
+    }
+    const firstWord = firstGapWord(probe, selfIndex);
+    if (LOCAL_POLARITY_TOKEN_RE.test(firstWord)) return true;
+    // A negative-authority verb heading the gap governs everything after
+    // it: `deny permission to self-review` and `forbid the builder to
+    // self-review` end in the same `… to` tail as a genuine grant, and
+    // `prevent/prohibit … from self-review` in the same bare-noun tail,
+    // so this has to bind before the trailing-`to` / conduct rules below
+    // can read that tail as the granted act.
+    if (SELF_REVIEW_NEGATIVE_AUTHORITY_VERB_RE.test(firstWord)) return true;
+    // The gap's last two tokens are the whole tail these three
+    // end-anchored patterns can reach, and a token start carries the same
+    // `\b` context here as in the full gap, so matching on them is exact.
+    const tail = prevRaw === null ? lastRaw : `${prevRaw} ${lastRaw}`;
+    if (/\b(?:not|never|no)\s+to\s*$/i.test(tail)) return true;
+    // Trailing `to self-review` / `conduct self-review` is the grant act.
+    if (/\bto\s*$/i.test(tail)) return false;
+    if (/\b(?:to\s+)?(?:conduct|perform|carry\s+out)\s*$/i.test(tail)) {
+      return false;
+    }
+    // Last infinitive is the authorized act (`to discuss` vs `to conduct`).
+    if (!infinitives) infinitives = localInfinitiveSpans(text);
+    const infLemma = lastInfinitiveLemma(infinitives, verbEnd, selfIndex);
+    if (infLemma) return SELF_REVIEW_NON_GRANT_PRED_RE.test(infLemma);
+    // No infinitive: non-grant when the grant object is that topic
+    // attaching to self-review (`a report about`, `a ban on`), or when
+    // the last word is itself that predicate (`may discuss self-review`).
+    const last = interveningWord(lastRaw);
+    const prev = interveningWord(prevRaw);
+    if (SELF_REVIEW_NON_GRANT_TOPIC_PREP_RE.test(last)) {
+      return SELF_REVIEW_NON_GRANT_PRED_RE.test(prev);
+    }
+    return SELF_REVIEW_NON_GRANT_PRED_RE.test(last);
+  };
 }
 
 /**
@@ -4979,8 +5256,8 @@ function mergeSpansByEnd(a, b) {
  * entirely before it is out of scope, matching the original
  * permission-anchored scan it replaces.
  */
-function nearestCandidateGrantsAnySelf(local, candidates, selfs, minIndex) {
-  if (!local || !candidates.length || !selfs.length) return false;
+function nearestCandidateGrantsAnySelf(blocksGrant, candidates, selfs, minIndex) {
+  if (!blocksGrant || !candidates.length || !selfs.length) return false;
   const floor = Number(minIndex) || 0;
   let ci = 0;
   for (let si = 0; si < selfs.length; si += 1) {
@@ -4993,9 +5270,7 @@ function nearestCandidateGrantsAnySelf(local, candidates, selfs, minIndex) {
     if (!candidate || candidate.index < floor || candidate.end > self.index) {
       continue;
     }
-    if (!interveningSelfReviewBlocksGrant(local, candidate.end, self.index)) {
-      return true;
-    }
+    if (!blocksGrant(candidate.end, self.index)) return true;
   }
   return false;
 }
@@ -5014,15 +5289,38 @@ function selfReviewClauseState(text) {
   const verbs = overlayRegexMatches(SELF_REVIEW_GRANT_VERB_RE, local);
   const selfs = overlayRegexMatches(/\bself[\s-]?review\b/i, local);
   const perms = unnegatedPermissionSpans(src).filter((p) => p.end <= local.length);
+  const blocksGrant = selfReviewGapClassifier(local);
+  // No modal / permission predicate anchors this clause. An indicative or
+  // passive grant is still a grant ("gives the builder permission to
+  // self-review", "is hereby granted permission to self-review"), so fall
+  // back to the clause's own unnegated grant verbs. `verbs` cannot serve:
+  // it also carries `may` / `can`, and an unnegated one of those would
+  // have produced a permission span — so every modal left in `verbs` here
+  // is a negated one. This second pass only runs for the clauses that
+  // found no permission span at all.
+  const grantVerbs = perms.length
+    ? []
+    : overlayRegexMatches(AUTH_GRANT_VERB_RE, local).filter(
+        (span) => !permissionPredicateNegated(local, span)
+      );
   const selfReviewTargetGrant = perms.length
     ? nearestCandidateGrantsAnySelf(
-        local,
+        blocksGrant,
         mergeSpansByEnd(verbs, perms),
         selfs,
         perms[0].index
       )
-    : false;
-  return { src, local, verbs, selfs, perms, selfReviewTargetGrant };
+    : nearestCandidateGrantsAnySelf(blocksGrant, grantVerbs, selfs, 0);
+  return {
+    src,
+    local,
+    verbs,
+    selfs,
+    perms,
+    grantVerbs,
+    blocksGrant,
+    selfReviewTargetGrant,
+  };
 }
 
 /**
@@ -5046,6 +5344,8 @@ function grantThenSelfReviewFromState(state, fromIndex) {
   const verbs = (state && state.verbs) || [];
   const selfs = (state && state.selfs) || [];
   if (!local || !verbs.length || !selfs.length) return false;
+  const blocksGrant =
+    (state && state.blocksGrant) || selfReviewGapClassifier(local);
   const start = Number(fromIndex) || 0;
   let vi = 0;
   for (let si = 0; si < selfs.length; si += 1) {
@@ -5056,9 +5356,7 @@ function grantThenSelfReviewFromState(state, fromIndex) {
     }
     const verb = verbs[vi];
     if (!verb || verb.index < start || verb.end > self.index) continue;
-    if (!interveningSelfReviewBlocksGrant(local, verb.end, self.index)) {
-      return true;
-    }
+    if (!blocksGrant(verb.end, self.index)) return true;
   }
   return false;
 }
@@ -5227,29 +5525,41 @@ function selfReviewGrantTopic(unit) {
   // is not reached by the permission-span scan below.
   if (SELF_REVIEW_REQUIRED_OF_RE.test(text)) return "self-review";
   if (independentReviewNotRequired(text)) return "same-agent";
-  // One forward pass computes verbs/selfs/perms and the clause-wide
-  // self-review-target grant verdict together; nothing here rescans from
-  // offset zero per permission.
+  // One forward pass computes verbs/selfs/perms/grant-verbs and the
+  // clause-wide self-review-target grant verdict together; nothing here
+  // rescans from offset zero per anchor.
   const state = selfReviewClauseState(text);
   const perms = state.perms;
-  if (!perms.length) return null;
+  const reversedGrant = reversedSelfReviewPermissionGranted(text);
+  // Permission spans anchor the clause when it has any; otherwise its
+  // unnegated grant verbs do, so an indicative or passive grant with no
+  // modal is still evaluated.
+  const anchors = perms.length ? perms : state.grantVerbs;
+  if (!anchors.length) return reversedGrant ? "self-review" : null;
   let sameAgentGrant = false;
-  // These do not depend on which permission span is inspected; compute
-  // them once instead of once per permission span.
+  // These do not depend on which anchor span is inspected; compute them
+  // once instead of once per anchor span. The broad topic tests (a bare
+  // `self-review` mention, own work anywhere in the clause) stay behind
+  // the permission anchor: with no permission predicate in the clause
+  // they would read a prohibition ("must never review your own work",
+  // whose only modal is negated) as a grant.
   let ownGrant =
-    (/\bself[\s-]?review\b/i.test(text) && !clauseSubjectIsIndependent(text)) ||
-    ownWorkGrantedIn(text) ||
-    state.selfReviewTargetGrant;
+    reversedGrant ||
+    state.selfReviewTargetGrant ||
+    (perms.length > 0 &&
+      ((/\bself[\s-]?review\b/i.test(text) &&
+        !clauseSubjectIsIndependent(text)) ||
+        ownWorkGrantedIn(text)));
   // Every remaining check below (same-agent phrase detection, and the
   // own-work-after-review-act fallback) is a before-only or after-only
   // pattern match: existence in a shorter suffix/prefix implies existence
-  // in the longest suffix (leftmost permission span) or longest prefix
-  // (rightmost permission span) that contains it. So checking at most
-  // those two representative spans — not one call per permission span —
-  // finds everything the full permission-by-permission scan would, in
-  // O(clause length) regardless of how many permission predicates exist.
-  const first = perms[0];
-  const last = perms[perms.length - 1];
+  // in the longest suffix (leftmost anchor span) or longest prefix
+  // (rightmost anchor span) that contains it. So checking at most those
+  // two representative spans — not one call per anchor span — finds
+  // everything the full anchor-by-anchor scan would, in O(clause length)
+  // regardless of how many anchors exist.
+  const first = anchors[0];
+  const last = anchors[anchors.length - 1];
   const candidateSpans = first === last ? [first] : [first, last];
   for (const span of candidateSpans) {
     if (sameAgentGrant && ownGrant) break;
