@@ -1112,8 +1112,9 @@ fi
 # terminal machine metric; else exact terminal passed/failed tally plus
 # skip/todo on that line; else one legacy no-tally sentinel. Duplicate or
 # non-terminal GIBSON_TEST_METRICS, and malformed / negative / fractional /
-# overflow input, fail closed. Existing GREEN/RED remains the suite-failure
-# authority.
+# overflow input, fail closed. Metric-contract failure is bound into FAILED
+# before n_fail/GREEN/RED so the one final verdict cannot print GREEN. Do not
+# emit GIBSON_TEST_METRICS when the metric contract failed.
 GIBSON_METRICS_MAX_SAFE=9007199254740991
 METRIC_TOTAL=0
 METRIC_SKIPPED=0
@@ -1436,6 +1437,72 @@ gibson_metrics_assert_error() {
   return 1
 }
 
+# Fold metric-contract failure into FAILED, then count n_fail and print the
+# one GREEN/RED verdict. Diagnosis is printed first so a contract failure
+# cannot display GREEN. Sets verdict_rc. Does not emit GIBSON_TEST_METRICS.
+gibson_run_all_bind_and_print_verdict() {
+  local n_fail n_quar n_esc
+  if [[ "$METRIC_CONTRACT_FAIL" -ne 0 ]]; then
+    echo "run-all: metric contract RED — $METRIC_CONTRACT_REASON" >&2
+    FAILED="$FAILED metric-contract"
+  fi
+  n_fail=$(echo "$FAILED" | wc -w | tr -d ' ')
+  n_quar=$(echo "$QUARANTINED" | wc -w | tr -d ' ')
+  n_esc=$(echo "$ESCAPED" | wc -w | tr -d ' ')
+
+  if [[ "$n_quar" -gt 0 ]]; then
+    echo "quarantined (known red, burn-down issues open):$QUARANTINED"
+  fi
+  if [[ "$n_esc" -gt 0 ]]; then
+    echo "quarantined but passing — shrink the list:$ESCAPED"
+  fi
+  if [[ "$n_fail" -gt 0 ]]; then
+    echo "failed:$FAILED"
+  fi
+
+  verdict_rc=1
+  if [[ "$n_fail" -eq 0 && "$n_esc" -eq 0 ]]; then
+    echo "run-all: GREEN — 0 failed, $n_quar quarantined"
+    verdict_rc=0
+  else
+    echo "run-all: RED — $n_fail failed, $n_esc escaped quarantine, $n_quar quarantined"
+    verdict_rc=1
+  fi
+}
+
+# Emit the aggregate machine line only when the metric contract held.
+# Returns verdict_rc, or 1 when the contract failed (no machine line).
+gibson_metrics_emit_aggregate_or_fail() {
+  if [[ "$METRIC_CONTRACT_FAIL" -ne 0 ]]; then
+    return 1
+  fi
+  echo "run-all metric-subtotals: explicit-assertions=${METRIC_EXPLICIT} legacy-sentinels=${METRIC_SENTINEL}"
+  echo "GIBSON_TEST_METRICS total=${METRIC_TOTAL} skipped=${METRIC_SKIPPED} todo=${METRIC_TODO}"
+  return "$verdict_rc"
+}
+
+# Synthetic verdict probe: subshell with caller-supplied FAILED/ESCAPED and
+# metric-contract flag. No production env injection hook; no recursive run-all.
+# Stderr is merged so the diagnosis is observable. Exit status is the finish rc.
+gibson_metrics_verdict_probe() {
+  (
+    FAILED="$1"
+    ESCAPED="$2"
+    QUARANTINED=""
+    METRIC_CONTRACT_FAIL="$3"
+    METRIC_CONTRACT_REASON="$4"
+    METRIC_TOTAL=3
+    METRIC_SKIPPED=0
+    METRIC_TODO=0
+    METRIC_EXPLICIT=3
+    METRIC_SENTINEL=0
+    verdict_rc=1
+    gibson_run_all_bind_and_print_verdict
+    gibson_metrics_emit_aggregate_or_fail
+    exit $?
+  ) 2>&1
+}
+
 # --- 4. sensor suites -------------------------------------------------------
 echo "== sensors"
 
@@ -1560,6 +1627,48 @@ suite_has_shell_construction_diag() {
   gibson_metrics_assert_error \
     $'+1 passed, 0 failed\n' \
     "explicit plus sign on a tally count fails closed"
+
+  # Verdict-binding mutations: synthetic globals only — no env injection hook
+  # and no recursive run-all.
+  _vrc=0
+  _vout=$(gibson_metrics_verdict_probe "" "" 1 "synthetic-verdict-bind") || _vrc=$?
+  if [[ "$_vrc" -ne 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — synthetic-verdict-bind' \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: metric-contract verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-verdict-mutation"
+  fi
+
+  _vrc=0
+  _vout=$(gibson_metrics_verdict_probe "" "" 0 "") || _vrc=$?
+  if [[ "$_vrc" -eq 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && ! printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
+     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: green run still prints GREEN and aggregate metrics"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: green verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-verdict-mutation"
+  fi
+
+  _vrc=0
+  _vout=$(gibson_metrics_verdict_probe "foo.test.sh" "" 0 "") || _vrc=$?
+  if [[ "$_vrc" -ne 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: ordinary suite failure is RED with aggregate metrics"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: suite-failure verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-verdict-mutation"
+  fi
+  unset _vout _vrc
 }
 
 for suite in scripts/tests/*.test.sh; do
@@ -1624,37 +1733,7 @@ done
 
 # --- verdict ----------------------------------------------------------------
 echo
-n_fail=$(echo "$FAILED" | wc -w | tr -d ' ')
-n_quar=$(echo "$QUARANTINED" | wc -w | tr -d ' ')
-n_esc=$(echo "$ESCAPED" | wc -w | tr -d ' ')
-
-if [[ "$n_quar" -gt 0 ]]; then
-  echo "quarantined (known red, burn-down issues open):$QUARANTINED"
-fi
-if [[ "$n_esc" -gt 0 ]]; then
-  echo "quarantined but passing — shrink the list:$ESCAPED"
-fi
-if [[ "$n_fail" -gt 0 ]]; then
-  echo "failed:$FAILED"
-fi
-
-verdict_rc=1
-if [[ "$n_fail" -eq 0 && "$n_esc" -eq 0 ]]; then
-  echo "run-all: GREEN — 0 failed, $n_quar quarantined"
-  verdict_rc=0
-else
-  echo "run-all: RED — $n_fail failed, $n_esc escaped quarantine, $n_quar quarantined"
-  verdict_rc=1
-fi
-
+gibson_run_all_bind_and_print_verdict
 echo "run-all wall: $((SECONDS - RUN_ALL_T0))s"
-
-# Diagnostic immediately before the single machine line so a sentinel is never
-# hidden. Do not emit GIBSON_TEST_METRICS when the metric contract failed.
-if [[ "$METRIC_CONTRACT_FAIL" -ne 0 ]]; then
-  echo "run-all: metric contract RED — $METRIC_CONTRACT_REASON" >&2
-  exit 1
-fi
-echo "run-all metric-subtotals: explicit-assertions=${METRIC_EXPLICIT} legacy-sentinels=${METRIC_SENTINEL}"
-echo "GIBSON_TEST_METRICS total=${METRIC_TOTAL} skipped=${METRIC_SKIPPED} todo=${METRIC_TODO}"
-exit "$verdict_rc"
+gibson_metrics_emit_aggregate_or_fail
+exit $?
