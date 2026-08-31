@@ -7,6 +7,43 @@ set -uo pipefail
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 FLEET="$REPO_ROOT/scripts/loop-fleet.sh"
+LOOP="$REPO_ROOT/scripts/loop.sh"
+RUN_ALL="$REPO_ROOT/scripts/tests/run-all.sh"
+WALL_TIMEOUT_TEST="$REPO_ROOT/scripts/tests/wall-timeout.test.sh"
+WALL_TIMEOUT_LIB="$REPO_ROOT/scripts/lib/wall-timeout.sh"
+
+# Copy the fleet driver with its sibling helper so SCRIPT_DIR-relative source
+# (and symlink resolution) still finds scripts/lib/wall-timeout.sh.
+copy_fleet_tree() {
+  local dest="$1"
+  mkdir -p "$dest/lib"
+  cp "$FLEET" "$dest/loop-fleet.sh"
+  cp "$WALL_TIMEOUT_LIB" "$dest/lib/wall-timeout.sh"
+  chmod +x "$dest/loop-fleet.sh"
+  printf '%s\n' "$dest/loop-fleet.sh"
+}
+
+wall_timeout_definitions() {
+  local scan_root
+  for scan_root in "$@"; do
+    if [[ -f "$scan_root" ]]; then
+      grep -HnE '^[[:space:]]*(function[[:space:]]+)?run_with_wall_timeout[[:space:]]*(\(\))?[[:space:]]*\{' \
+        "$scan_root" 2>/dev/null || true
+    elif [[ -d "$scan_root" ]]; then
+      find "$scan_root" -type f -name '*.sh' -exec grep -HnE \
+        '^[[:space:]]*(function[[:space:]]+)?run_with_wall_timeout[[:space:]]*(\(\))?[[:space:]]*\{' {} + \
+        2>/dev/null || true
+    fi
+  done
+}
+
+wall_timeout_suite_present() {
+  [[ -f "$1" && -x "$1" && "$(basename "$1")" == "wall-timeout.test.sh" ]]
+}
+
+wall_timeout_is_quarantined() {
+  awk '$1 == "wall-timeout.test.sh" { found=1 } END { exit found ? 0 : 1 }'
+}
 
 PASS=0
 FAIL=0
@@ -4377,8 +4414,7 @@ echo "TOCTOU sensor fails against unconditional stale-file removal (mutation)"
 # Behavioral proof: a defective reclaim that rm -f's without re-read would
 # unlink the live competitor installed after pause-entered. Sensor must FAIL
 # against that defective body (mutation receipt).
-MUT_FLEET="$ROOT/mut-loop-fleet-uncond-rm.sh"
-cp "$FLEET" "$MUT_FLEET"
+MUT_FLEET=$(copy_fleet_tree "$ROOT/mut-toctou")
 # Replace the re-read+rm block with unconditional rm (old defective pattern).
 # Keep the pause-entered marker so the sensor still interleaves correctly.
 if ! python3 - "$MUT_FLEET" <<'PY'
@@ -4782,6 +4818,86 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "executable LOOP_SH still launches via direct path" \
   || bad "exec LOOP_SH launches=$lc out=$out"
 rm -f "$NONEXEC"
+
+# --- #269: shared helper wiring, no live duplicate, symlink-safe source ----
+echo "wall-timeout shared helper wiring (#269)"
+_wt_defs=$(wall_timeout_definitions "$REPO_ROOT/scripts" "$REPO_ROOT/adapters")
+_wt_def_count=$(printf '%s\n' "$_wt_defs" | awk 'NF { n++ } END { print n + 0 }')
+if [[ "$_wt_def_count" == "1" ]] \
+  && printf '%s\n' "$_wt_defs" | grep -Fq "$WALL_TIMEOUT_LIB:"; then
+  ok "scripts/adapters contain exactly one wall-timeout definition (shared helper)"
+else
+  bad "wall-timeout definition parity failed (count=$_wt_def_count): $_wt_defs"
+fi
+if grep -nE 'source "\$WALL_TIMEOUT_LIB"' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'lib/wall-timeout.sh' "$FLEET" >/dev/null 2>&1; then
+  ok "loop-fleet.sh sources scripts/lib/wall-timeout.sh"
+else
+  bad "loop-fleet.sh does not source the shared wall-timeout helper"
+fi
+if grep -n 'wall-timeout.sh' "$LOOP" >/dev/null 2>&1 \
+  && ! wall_timeout_definitions "$LOOP" | grep -q .; then
+  ok "loop.sh sources wall-timeout without redefining it"
+else
+  bad "loop.sh wiring does not preserve the single shared definition"
+fi
+if wall_timeout_suite_present "$WALL_TIMEOUT_TEST"; then
+  ok "wall-timeout.test.sh remains executable and auto-discoverable"
+else
+  bad "wall-timeout.test.sh is missing or non-executable"
+fi
+_wt_quarantine=$(bash "$RUN_ALL" --list-quarantine 2>/dev/null || true)
+if printf '%s\n' "$_wt_quarantine" | wall_timeout_is_quarantined; then
+  bad "wall-timeout.test.sh is quarantined"
+else
+  ok "wall-timeout.test.sh is absent from run-all quarantine"
+fi
+
+# Non-vacuity for all three external protection predicates.
+_wt_injected_quarantine=$(printf '%-28s #%-4s %s\n' 'wall-timeout.test.sh' '9999' 'mutation')
+if printf '%s\n' "$_wt_injected_quarantine" | wall_timeout_is_quarantined; then
+  ok "quarantine sensor catches injected space-formatted entry"
+else
+  bad "quarantine sensor false-green against injected entry"
+fi
+_wt_nonexec="$ROOT/wall-timeout.test.sh"
+: > "$_wt_nonexec"
+chmod 0644 "$_wt_nonexec"
+if ! wall_timeout_suite_present "$_wt_nonexec" \
+  && ! wall_timeout_suite_present "$ROOT/missing-wall-timeout.test.sh"; then
+  ok "suite-presence sensor rejects non-executable and missing mutations"
+else
+  bad "suite-presence sensor accepted a non-executable or missing mutation"
+fi
+
+# Meta-sensor: injecting a live duplicate must fail the same definition count.
+_dup_dir="$ROOT/dup-wall"
+mkdir -p "$_dup_dir"
+_dup_fleet=$(copy_fleet_tree "$_dup_dir")
+printf '\nrun_with_wall_timeout() {\n  false\n}\n' >> "$_dup_fleet"
+_dup_defs=$(wall_timeout_definitions "$_dup_dir")
+_dup_count=$(printf '%s\n' "$_dup_defs" | awk 'NF { n++ } END { print n + 0 }')
+if [[ "$_dup_count" == "2" ]]; then
+  ok "duplicate sensor fails closed when a live copy is reintroduced"
+else
+  bad "definition sensor missed injected duplicate (count=$_dup_count): $_dup_defs"
+fi
+rm -rf "$_dup_dir"
+
+# Symlink-safe: invoke the driver through a symlink in another directory.
+_sy="$ROOT/symlink-fleet"
+mkdir -p "$_sy"
+ln -s "$FLEET" "$_sy/loop-fleet.sh"
+if [[ -x "$_sy/loop-fleet.sh" ]]; then
+  _sy_out=$(bash "$_sy/loop-fleet.sh" --help 2>&1) || true
+  if printf '%s\n' "$_sy_out" | grep -qiE 'missing lib/wall-timeout|did not define run_with_wall_timeout'; then
+    bad "symlink invocation could not resolve repo-contained wall-timeout helper: $_sy_out"
+  else
+    ok "symlink invocation resolves repo-contained wall-timeout.sh"
+  fi
+else
+  bad "could not create loop-fleet.sh symlink"
+fi
 
 # --- CR: residual process-group cleanup after leader exit ------------------
 echo "wall-timeout residual group kill after leader exit"
@@ -7025,7 +7141,7 @@ else
   bad "#152 reclaim comments still overclaim atomicity"
 fi
 # Static: watcher reaped before leader wait (ordering contract in source).
-if grep -n 'Stop/reap the watcher BEFORE wait-reaping the leader' "$FLEET" >/dev/null 2>&1; then
+if grep -n 'Stop/reap the watcher BEFORE wait-reaping the leader' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1; then
   ok "#152 wall-timeout documents watcher-before-leader reap ordering"
 else
   bad "#152 missing watcher-before-leader reap ordering contract"
@@ -7323,7 +7439,7 @@ if awk '
   infn && /wait "\$watcher"/ {w=NR}
   infn && /wait "\$pid"/ {p=NR}
   infn && /^}/ {if(w&&p){exit (w<p)?0:1}; exit 1}
-' "$FLEET"; then
+' "$WALL_TIMEOUT_LIB"; then
   ok "watcher wait precedes leader wait in run_with_wall_timeout"
 else
   bad "watcher/leader wait ordering inverted or missing"
@@ -7527,10 +7643,10 @@ else
 fi
 
 # Structural: real date + tick branches set parent_forced; hook forces preconditions only.
-if grep -n 'parent_forced=1' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'pfb_precond' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'date:?\*|tick:?\*' "$FLEET" >/dev/null 2>&1; then
+if grep -n 'parent_forced=1' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1 \
+  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1 \
+  && grep -n 'pfb_precond' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1 \
+  && grep -n 'date:?\*|tick:?\*' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1; then
   ok "parent-fallback structure: parent_forced ownership + precondition-only hook"
 else
   bad "parent-fallback structure: missing parent_forced or precondition hook"
@@ -7546,7 +7662,7 @@ if awk '
     if (seen && $0 ~ /status_file/ && $0 ~ /timeout/) { boundary=1; exit }
   }
   END { exit (failed || !seen || !boundary ? 1 : 0) }
-' "$FLEET"; then
+' "$WALL_TIMEOUT_LIB"; then
   ok "parent-fallback hook is precondition-only (no timeout write / parent_forced)"
 else
   bad "parent-fallback hook still writes timeout or sets parent_forced"
@@ -7554,9 +7670,8 @@ fi
 
 # --- mutation receipt 1: neutralize date-branch parent_forced=1 -------------
 echo "parent-fallback DATE mutation: sensor must fail without date parent_forced"
-MUT_DATE="$ROOT/mut-loop-fleet-pfb-date.sh"
-cp "$FLEET" "$MUT_DATE"
-if ! python3 - "$MUT_DATE" <<'PY'
+MUT_DATE=$(copy_fleet_tree "$ROOT/mut-pfb-date")
+if ! python3 - "$ROOT/mut-pfb-date/lib/wall-timeout.sh" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -7590,8 +7705,8 @@ then
   bad "date mutation harness could not patch date-branch body"
 fi
 chmod +x "$MUT_DATE"
-if [[ -f "$MUT_DATE.mutation-miss" ]]; then
-  bad "date mutation fail-closed: $(cat "$MUT_DATE.mutation-miss")"
+if [[ -f "$ROOT/mut-pfb-date/lib/wall-timeout.sh.mutation-miss" ]]; then
+  bad "date mutation fail-closed: $(cat "$ROOT/mut-pfb-date/lib/wall-timeout.sh.mutation-miss")"
 else
   # Behavioral: date sensor against mutated copy must NOT fully pass.
   if pfb_run_probe "$MUT_DATE" date md1; then
@@ -7606,13 +7721,12 @@ else
     fi
   fi
 fi
-rm -f "$MUT_DATE" "$MUT_DATE.mutation-miss"
+rm -rf "$ROOT/mut-pfb-date"
 
 # --- mutation receipt 2: neutralize tick-branch parent_forced=1 -------------
 echo "parent-fallback TICK mutation: sensor must fail without tick parent_forced"
-MUT_TICK="$ROOT/mut-loop-fleet-pfb-tick.sh"
-cp "$FLEET" "$MUT_TICK"
-if ! python3 - "$MUT_TICK" <<'PY'
+MUT_TICK=$(copy_fleet_tree "$ROOT/mut-pfb-tick")
+if ! python3 - "$ROOT/mut-pfb-tick/lib/wall-timeout.sh" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -7644,8 +7758,8 @@ then
   bad "tick mutation harness could not patch tick-branch body"
 fi
 chmod +x "$MUT_TICK"
-if [[ -f "$MUT_TICK.mutation-miss" ]]; then
-  bad "tick mutation fail-closed: $(cat "$MUT_TICK.mutation-miss")"
+if [[ -f "$ROOT/mut-pfb-tick/lib/wall-timeout.sh.mutation-miss" ]]; then
+  bad "tick mutation fail-closed: $(cat "$ROOT/mut-pfb-tick/lib/wall-timeout.sh.mutation-miss")"
 else
   if pfb_run_probe "$MUT_TICK" tick mt1; then
     bad "tick mutation false-green: sensor still passed without tick parent_forced=1"
@@ -7658,7 +7772,7 @@ else
     fi
   fi
 fi
-rm -f "$MUT_TICK" "$MUT_TICK.mutation-miss"
+rm -rf "$ROOT/mut-pfb-tick"
 
 # =============================================================================
 # #181 · scope-overlap parity (fleet integration + pure-kernel differential)
