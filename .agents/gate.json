@@ -1,0 +1,8 @@
+{
+  "$comment": "Machine-readable twin of the local green gate in AGENTS.md. Vendor-neutral: any harness may read it. Empty string = this step does not apply (no generic default). Extra top-level keys are ignored. Timing comes from the test command's own per-suite and total wall receipts.",
+  "generate": "",
+  "typecheck": "",
+  "lint": "",
+  "test": "bash scripts/tests/run-all.sh --no-quarantine",
+  "build": ""
+}

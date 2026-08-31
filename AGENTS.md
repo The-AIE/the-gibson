@@ -62,6 +62,7 @@ candidate):
 | Test-integrity (count ratchet, waivers) | `scripts/test-integrity.mjs` |
 | Claim overlap / admission | `scripts/scope-overlap.mjs` |
 | Green-gate runner | `scripts/gate.sh` |
+| Local green-gate commands (machine twin) | `.agents/gate.json` |
 | DCO local hook | `scripts/setup-hooks.sh` |
 | Exact-head claim release | `scripts/release-claim.sh` |
 | Fixed + conditional read-chain budget | `config/policy/mandatory-read-chain.v1.json` |
@@ -306,7 +307,10 @@ restate the numbers here).
 Before **every** product commit, in the worktree: generate → typecheck → lint →
 test → build. Zero new failures vs. the recorded branch point. CI
 (`ci/gibson-gate.yml`) is the law; local `scripts/gate.sh` is the same
-obligation.
+obligation. This repo's machine-readable twin is `.agents/gate.json`
+(test: `bash scripts/tests/run-all.sh --no-quarantine`; empty strings for
+inapplicable generate/typecheck/lint/build). The twin does not weaken or
+replace the full five-step gate.
 
 Every commit carries a `Signed-off-by` trailer (DCO). Use `git commit -s`.
 Unsigned commits in a handed-off range refuse. The trailer must survive squash.
