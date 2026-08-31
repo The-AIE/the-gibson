@@ -1,0 +1,31 @@
+{
+  "schemaId": "gibson.sensor-health.observation.v1",
+  "schemaVersion": "1.0.0",
+  "policies": [
+    {
+      "path": ".github/workflows/gibson-self-gate.yml",
+      "mode": "current-head",
+      "events": ["push"],
+      "targetChecks": ["sensors"]
+    },
+    {
+      "path": ".github/workflows/sensor-health.yml",
+      "mode": "freshness",
+      "events": ["schedule", "workflow_dispatch"],
+      "windowDays": 2
+    },
+    {
+      "path": "dynamic/github-code-scanning/code-security-risk-assessment",
+      "mode": "freshness",
+      "events": ["dynamic"],
+      "windowDays": 30
+    },
+    {
+      "path": "dynamic/pages/pages-build-deployment",
+      "mode": "freshness",
+      "events": ["dynamic"],
+      "windowDays": 30,
+      "enabledWhen": { "repoField": "has_pages", "equals": true }
+    }
+  ]
+}
