@@ -1,21 +1,14 @@
 name: Sensor health
-
-# Daily CI sensor-health audit (doctrine: #210). A required lane that has
-# never been green is BLIND, not passing. Advisory: this job stays green;
-# findings land in the standing "🩺 Sensor health (daily)" issue, with a
-# notification comment only when the finding set changes.
+# Daily sensor-health (#210/#256). Fail-closed; no continue-on-error / || true / set +e. Updates #212 by number only.
 on:
   schedule:
     - cron: "23 11 * * *"
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: sensor-health
   cancel-in-progress: false
-
 jobs:
   sensor-health:
     runs-on: ubuntu-latest
@@ -26,7 +19,8 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Audit sensors and upsert report issue
+      - name: Audit sensors and upsert report issue #212
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/sensor-health.mjs --post
