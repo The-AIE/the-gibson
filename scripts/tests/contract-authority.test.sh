@@ -6120,6 +6120,17 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
       console.log("H241_OK quoted-argv-pre-repair-teeth");
     }
   }
+  // Non-brittle source-structure helper shared by the performance and
+  // authority-modeling blocks below: isolate a function body by its own
+  // start marker through the next function declaration, never by exact
+  // line numbers.
+  function functionBody(src, name, nextMarkerRe) {
+    const start = src.indexOf("function " + name);
+    if (start < 0) throw new Error("cannot locate function " + name + " in source");
+    const rest = src.slice(start);
+    const nextRel = rest.slice(1).search(nextMarkerRe);
+    return nextRel < 0 ? rest : rest.slice(0, nextRel + 1);
+  }
   {
     // Committed self-review performance witnesses. Warmed medians (2
     // discarded warm-up runs, then a median of several samples) with
@@ -6213,11 +6224,58 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
         " ratio=" +
         (nonGrant2k.ns / nonGrant1k.ns).toFixed(2) + "," + (nonGrant4k.ns / nonGrant2k.ns).toFixed(2)
     );
+    // Witness 3: ONE fixed permission/grant candidate ("may") followed by
+    // many benign `discuss self-review` mentions. The monotonic candidate
+    // cursor never advances here, so every mention reuses the same
+    // candidate end while its own index keeps moving right — the shape
+    // that made the old classifier re-slice, re-collapse and re-tokenize
+    // an ever-growing gap once per mention. Witness 2 misses it because
+    // its per-mention `may` advances the cursor to a nearby candidate.
+    function fixedCandidateManyMentionsBody(n) {
+      const mentions = [];
+      for (let i = 0; i < n; i += 1) mentions.push("discuss self-review");
+      return "An independent reviewer may " + mentions.join(" ") + ".";
+    }
+    const fixedCand512 = benchPlaybook(fixedCandidateManyMentionsBody(512), 5);
+    const fixedCand1k = benchPlaybook(fixedCandidateManyMentionsBody(1024), 5);
+    const fixedCand2k = benchPlaybook(fixedCandidateManyMentionsBody(2048), 5);
+    if (!fixedCand512.allEmpty || !fixedCand1k.allEmpty || !fixedCand2k.allEmpty) {
+      throw new Error(
+        "fixed-candidate many-mention perf witness must stay finding-empty at every size"
+      );
+    }
+    assertDoublingBound("fixed-candidate-many-mentions 512-to-1k", fixedCand512.ns, fixedCand1k.ns);
+    assertDoublingBound("fixed-candidate-many-mentions 1k-to-2k", fixedCand1k.ns, fixedCand2k.ns);
+    console.log(
+      "H241_OK self-review-perf-fixed-candidate-many-mentions-512-1k-2k ms=" +
+        [fixedCand512.ns, fixedCand1k.ns, fixedCand2k.ns].map((ns) => (ns / 1e6).toFixed(2)).join(",") +
+        " ratio=" +
+        (fixedCand1k.ns / fixedCand512.ns).toFixed(2) + "," + (fixedCand2k.ns / fixedCand1k.ns).toFixed(2)
+    );
+    // Same shape at the largest size, but the clause ends in an explicit
+    // in-clause grant. The cursor must still advance past every benign
+    // mention to that last candidate and report it, so the bounded gap
+    // classification cannot buy its speed by losing authority detection.
+    const trailingGrantFindings = playbookBodyObligationFindings(
+      "reviewer",
+      reviewerGates,
+      "An independent reviewer may " +
+        Array.from({ length: 2048 }, () => "discuss self-review").join(" ") +
+        " and has permission to self-review."
+    );
+    if (!trailingGrantFindings.some((f) => f.code === "E_ROLE_NEGATION" && /self-review/.test(f.message))) {
+      throw new Error(
+        "trailing in-clause grant after 2048 benign mentions must still produce E_ROLE_NEGATION"
+      );
+    }
+    console.log("H241_OK self-review-perf-fixed-candidate-trailing-grant-still-detected");
     // Sanity: reproduce the exact old reviewer receipts and confirm the
     // same bound would have failed them (proves the assertion has teeth,
     // not just that current numbers happen to be small).
     const oldOwnWorkReceiptMs = [15.86, 59.21, 226.93];
     const oldNonGrantReceiptMs = [46.97, 275.62, 2049.7];
+    // Reviewer receipt for witness 3 shape at 512/1024/2048.
+    const oldFixedCandidateReceiptMs = [33.21, 131.66, 540.48];
     function boundHolds(smallerMs, largerMs) {
       return largerMs <= smallerMs * 3.2 + 20;
     }
@@ -6228,6 +6286,14 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
       boundHolds(oldNonGrantReceiptMs[1], oldNonGrantReceiptMs[2])
     ) {
       throw new Error("perf bound tooth is too loose: the old quadratic reviewer receipts would pass it");
+    }
+    if (
+      boundHolds(oldFixedCandidateReceiptMs[0], oldFixedCandidateReceiptMs[1]) &&
+      boundHolds(oldFixedCandidateReceiptMs[1], oldFixedCandidateReceiptMs[2])
+    ) {
+      throw new Error(
+        "perf bound tooth is too loose: the old fixed-candidate quadratic receipt would pass it"
+      );
     }
     console.log("H241_OK self-review-perf-bound-rejects-old-quadratic-receipts");
     // Final explicit grant control: still correctly detected as a grant.
@@ -6245,13 +6311,6 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     // exact line numbers), then assert the hot path has no per-permission
     // rescan shape left in it.
     const semSrcForPerf = readFileSync(process.env.SEM, "utf8");
-    function functionBody(src, name, nextMarkerRe) {
-      const start = src.indexOf("function " + name);
-      if (start < 0) throw new Error("cannot locate function " + name + " in source");
-      const rest = src.slice(start);
-      const nextRel = rest.slice(1).search(nextMarkerRe);
-      return nextRel < 0 ? rest : rest.slice(0, nextRel + 1);
-    }
     const permissionPredicateNegatedBody = functionBody(
       semSrcForPerf,
       "permissionPredicateNegated",
@@ -6282,6 +6341,34 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
       );
     }
     console.log("H241_OK self-review-perf-source-structure-no-per-permission-rescan");
+    // The per-self-review gap classifier must not materialize the gap:
+    // no slice/collapse/tokenize of the candidateEnd-to-selfIndex gap, and the
+    // infinitive lookup must consume the clause-wide precomputed index.
+    const gapClassifierBody = functionBody(
+      semSrcForPerf,
+      "selfReviewGapClassifier",
+      /^function /m
+    );
+    if (
+      /slice\(\s*verbEnd/.test(gapClassifierBody) ||
+      /collapseWs\(/.test(gapClassifierBody) ||
+      /\.split\(/.test(gapClassifierBody)
+    ) {
+      throw new Error(
+        "selfReviewGapClassifier must not slice/collapse/split the whole intervening gap per self-review"
+      );
+    }
+    if (!/localInfinitiveSpans\(/.test(gapClassifierBody) || !/lastInfinitiveLemma\(\s*infinitives/.test(gapClassifierBody)) {
+      throw new Error(
+        "selfReviewGapClassifier must consume the precomputed clause infinitive index"
+      );
+    }
+    if (!/function lastInfinitiveLemma\(infinitives, verbEnd, selfIndex\)/.test(semSrcForPerf)) {
+      throw new Error(
+        "lastInfinitiveLemma must take the precomputed infinitive index, not a per-gap string"
+      );
+    }
+    console.log("H241_OK self-review-perf-source-structure-bounded-gap-classifier");
   }
   {
     const semSrc = readFileSync(process.env.SEM, "utf8");
@@ -6295,13 +6382,123 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
       throw new Error("obsolete self-review skip allowlist/cap / bare-token non-grant classifier still present");
     }
     if (
-      !/overlayAdversativeConnectorRejectsRemoval/.test(semSrc) ||
+      !/overlayAdversativeContinuationBlocksRemoval/.test(semSrc) ||
       !/overlayAdversativeBoundaryIsPostRemovalTarget/.test(semSrc) ||
+      !/function splitOverlayAuthorizationClauses/.test(semSrc) ||
+      !/function overlayInheritableOwnerActor/.test(semSrc) ||
+      !/function overlayWithInheritedActor/.test(semSrc) ||
       !/SELF_REVIEW_REQUIRED_OF_RE/.test(semSrc)
     ) {
       throw new Error(
-        "owner post-target adversative-connector narrowing / reversed self-review-required-of modeling is not present"
+        "owner post-target adversative fail-closed / target-local continuation binding / owner-subject inheritance / reversed self-review-required-of modeling is not present"
       );
+    }
+    if (
+      !/SELF_REVIEW_PERMISSION_SUBJECT_GRANTED_RE/.test(semSrc) ||
+      !/function reversedSelfReviewPermissionGranted/.test(semSrc) ||
+      !/SELF_REVIEW_NEGATIVE_AUTHORITY_VERB_RE/.test(semSrc) ||
+      !/grantVerbs/.test(semSrc)
+    ) {
+      throw new Error(
+        "reversed/passive permission subject, gap-initial negative-authority verbs, or the bare grant-verb anchor fallback is not modeled"
+      );
+    }
+    // The adversative continuation after a completed removal target must
+    // fail closed, not fall through to the benign object-follower set.
+    const removalObjectBody = functionBody(
+      semSrc,
+      "overlayGateIsRemovalObject",
+      /^function /m
+    );
+    if (
+      !/overlayAdversativeContinuationBlocksRemoval\(next\)\)\s*return false/.test(
+        removalObjectBody
+      )
+    ) {
+      throw new Error(
+        "overlayGateIsRemovalObject must reject an adversative continuation before the object-follower set can accept it"
+      );
+    }
+    // The bare grant-verb fallback must only run for clauses with no
+    // permission span, and must drop negated grant verbs.
+    const clauseStateBody = functionBody(
+      semSrc,
+      "selfReviewClauseState",
+      /^function /m
+    );
+    if (
+      !/perms\.length\s*\?\s*\[\]/.test(clauseStateBody) ||
+      !/permissionPredicateNegated\(local, span\)/.test(clauseStateBody)
+    ) {
+      throw new Error(
+        "grant-verb anchors must be computed only without permission spans and filtered for local negation"
+      );
+    }
+    // Pre-repair teeth: the shapes the reviewer reproduced must be ones
+    // the previous modeling actually got wrong, not ones it already
+    // handled.
+    const oldCopulaRe = /^(?:was|were|is|are|be|been|being)$/i;
+    const oldRejectionRe =
+      /^(?:(?:explicitly|hereby|formally|also|then)\s+)?(?:rejected|denied|declined|unauthorized|unapproved|pending|(?:not|never)\s+(?:yet\s+)?(?:authorized|approved))\b/i;
+    const oldPostTargetRejects = (copula, predicate) =>
+      oldCopulaRe.test(copula) && oldRejectionRe.test(predicate);
+    if (oldPostTargetRejects("remains", "pending")) {
+      throw new Error("pre-repair tooth should miss the stative `remains pending`");
+    }
+    if (oldPostTargetRejects("was", "expressly denied")) {
+      throw new Error("pre-repair tooth should miss the modifier `expressly denied`");
+    }
+    if (oldPostTargetRejects("was", "no longer authorized")) {
+      throw new Error("pre-repair tooth should miss `no longer authorized`");
+    }
+    const oldPostConnectorRestrictionRe =
+      /^(?:not|never|only|merely|just|solely|simply)\b/i;
+    if (oldPostConnectorRestrictionRe.test("from documentation only.")) {
+      throw new Error("pre-repair tooth should miss restriction-final narrowing");
+    }
+    if (oldPostConnectorRestrictionRe.test("the owner rejected it.")) {
+      throw new Error("pre-repair tooth should miss an explicit-subject retraction");
+    }
+    if (oldPostConnectorRestrictionRe.test("later denied that removal.")) {
+      throw new Error("pre-repair tooth should miss a modifier-led retraction");
+    }
+    // The old semicolon split discarded the restriction half outright.
+    const oldSemicolonSplit = (t) => String(t).split(/\s*;\s+/);
+    if (
+      oldSemicolonSplit(
+        "the owner approved removal of G12; only its label may be deleted."
+      )[0] !== "the owner approved removal of G12"
+    ) {
+      throw new Error(
+        "pre-repair tooth should show the semicolon split truncating to a bare approval"
+      );
+    }
+    // The old self-review scan needed a permission-predicate anchor, so
+    // an indicative or passive grant produced no anchor at all.
+    const oldPermissionAnchored = (clause) =>
+      /\b(?:must|shall|may|can|permitted|allowed|authorized)\b/i.test(String(clause));
+    for (const indicative of [
+      "An independent reviewer gives the builder permission to self-review.",
+      "An independent reviewer lets the same agent review its own work.",
+      "An independent reviewer assigns the same agent to review.",
+      "Permission to self-review is granted to an independent reviewer.",
+      "An independent reviewer is hereby granted permission to self-review.",
+    ]) {
+      if (oldPermissionAnchored(indicative)) {
+        throw new Error(
+          "pre-repair tooth should find no permission anchor in: " + indicative
+        );
+      }
+    }
+    // The old gap classifier read the trailing `… to` of an
+    // object-bearing negative-authority verb as the granted act.
+    const oldTrailingToGrants = (gapTail) => /\bto\s*$/i.test(String(gapTail));
+    for (const gapTail of ["permission to", "builder to"]) {
+      if (!oldTrailingToGrants(gapTail)) {
+        throw new Error(
+          "pre-repair tooth should read `" + gapTail + "` as a grant tail"
+        );
+      }
     }
     const oldWouldAuthorizeLaterMention = (clause) => {
       const t = String(clause);
@@ -6545,7 +6742,34 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "owner-approved-g12-gate-noun-preserved-green", decision: "Decided: the owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
     { name: "owner-approved-the-g12-gate-preserved-green", decision: "Decided: the owner approved removal of the G12 gate.", gate: "G12", overlay: "G12 is waived.", expectFinding: false },
     { name: "owner-approved-g5-preserved-green", decision: "Decided: the owner approved removal of G5.", gate: "G5", overlay: "G5 is waived.", expectFinding: false },
-    { name: "g11-denied-but-g12-approved-cross-gate-green", decision: "Decided: the owner did not approve removal of G11, but the owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    // #241 exact-head reviewer reproductions — owner G12 target/polarity.
+    // Each mutation row is paired with a control of the same syntactic
+    // family that differs only in the part that decides it, so a
+    // regression flips exactly one of the pair rather than both.
+    //
+    // Stative and modified copular complements after the removal target.
+    { name: "owner-approved-that-removal-remains-pending", decision: "Decided: the owner approved that removal of G12 remains pending.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-that-removal-remains-authorized-control", decision: "Decided: the owner approved that removal of G12 remains authorized.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    { name: "owner-approved-that-removal-was-expressly-denied", decision: "Decided: the owner approved that removal of G12 was expressly denied.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-that-removal-was-no-longer-authorized", decision: "Decided: the owner approved that removal of G12 was no longer authorized.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-that-removal-remains-in-effect-control", decision: "Decided: the owner approved that removal of G12 remains in effect.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    // Adversative continuations bound to the removal target: restriction
+    // final, explicit-subject retraction, modifier-led retraction.
+    { name: "owner-approved-but-from-documentation-only", decision: "Decided: the owner approved removal of G12, but from documentation only.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-but-owner-rejected-it", decision: "Decided: the owner approved removal of G12, but the owner rejected it.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-but-later-denied-that-removal", decision: "Decided: the owner approved removal of G12, but later denied that removal.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-and-recorded-the-decision-control", decision: "Decided: the owner approved removal of G12 and recorded the decision.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    // Semicolon continuation bound to the removal target. The control
+    // puts an unrelated clause first, so the semicolon still splits.
+    { name: "owner-approved-semicolon-only-its-label-deleted", decision: "Decided: the owner approved removal of G12; only its label may be deleted.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "owner-approved-after-unrelated-semicolon-clause-control", decision: "Decided: the minutes were circulated; the owner approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    // Shared-subject cross-gate coordination. The owner subject is
+    // inherited by the second predicate; the polarity of the first
+    // gate is not, and neither gate contaminates the other.
+    { name: "g11-denied-but-approved-g12-shared-subject-green", decision: "Decided: the owner did not approve removal of G11, but approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    { name: "g11-rejected-but-approved-g12-shared-subject-green", decision: "Decided: the owner rejected removal of G11, but approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: false },
+    { name: "g12-denied-but-approved-g11-stays-local", decision: "Decided: the owner did not approve removal of G12, but approved removal of G11.", gate: "G12", overlay: overlayRm, expectFinding: true },
+    { name: "g11-denied-but-counsel-approved-g12-not-inherited", decision: "Decided: the owner did not approve removal of G11, but counsel approved removal of G12.", gate: "G12", overlay: overlayRm, expectFinding: true },
   ];
   for (const row of actorRows) {
     const findings = overlayLimitFindings(row.overlay, row.decision, ["G5", "G11", "G12"]);
@@ -6628,6 +6852,49 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     { name: "may-prevent-self-review", body: "An independent reviewer may prevent self-review.", expect: false },
     { name: "may-prohibit-self-review-bare", body: "An independent reviewer may prohibit self-review.", expect: false },
     { name: "ordinary-independent-review", body: "An independent reviewer reviews the change and approves it.", expect: false },
+    // Gap-classification controls. Each one is decided by a part of the
+    // gap the bounded classifier reads separately — the trailing tokens,
+    // the leading token, or the clause infinitive index — so a regression
+    // in any one of those reads flips a row here.
+    { name: "may-carry-out-self-review", body: "An independent reviewer may carry out self-review.", expect: true },
+    { name: "may-perform-self-review", body: "An independent reviewer may perform self-review.", expect: true },
+    { name: "authorize-the-agent-to-carry-out-self-review", body: "An independent reviewer may authorize the agent to carry out self-review.", expect: true },
+    { name: "authorize-an-agent-not-to-self-review", body: "An independent reviewer may authorize an agent not to self-review.", expect: false },
+    { name: "grant-no-permission-to-self-review", body: "An independent reviewer may grant no permission to self-review.", expect: false },
+    // The only infinitive in the clause sits BEFORE the nearest candidate,
+    // so it is not the authorized act and must not block the grant.
+    { name: "infinitive-before-candidate-does-not-block", body: "An independent reviewer told to discuss policy may approve unrestricted self-review.", expect: true },
+    // #241 exact-head reviewer reproductions — indicative, reversed and
+    // passive grants that carry no modal or permission-predicate anchor,
+    // each paired with its negated counterpart.
+    { name: "indicative-gives-builder-permission-to-self-review", body: "An independent reviewer gives the builder permission to self-review.", expect: true },
+    { name: "indicative-does-not-give-permission-to-self-review", body: "An independent reviewer does not give the builder permission to self-review.", expect: false },
+    { name: "indicative-lets-same-agent-review-own-work", body: "An independent reviewer lets the same agent review its own work.", expect: true },
+    { name: "indicative-assigns-same-agent-to-review", body: "An independent reviewer assigns the same agent to review.", expect: true },
+    { name: "indicative-grants-permission-to-self-review", body: "An independent reviewer grants the builder permission to self-review.", expect: true },
+    { name: "indicative-never-grants-permission-to-self-review", body: "An independent reviewer never grants permission to self-review.", expect: false },
+    { name: "reversed-permission-to-self-review-is-granted", body: "Permission to self-review is granted to an independent reviewer.", expect: true },
+    { name: "reversed-permission-to-self-review-is-not-granted", body: "Permission to self-review is not granted to an independent reviewer.", expect: false },
+    { name: "reversed-no-permission-to-self-review-is-granted", body: "No permission to self-review is granted to an independent reviewer.", expect: false },
+    { name: "reversed-authority-to-self-review-is-conferred", body: "Authority to self-review is conferred on an independent reviewer.", expect: true },
+    { name: "passive-is-hereby-granted-permission-to-self-review", body: "An independent reviewer is hereby granted permission to self-review.", expect: true },
+    { name: "passive-is-not-granted-permission-to-self-review", body: "An independent reviewer is not granted permission to self-review.", expect: false },
+    // The grant-verb fallback must not turn a prohibition whose only
+    // modal is negated into a grant.
+    { name: "indicative-prohibition-of-own-work-review", body: "The builder must never review its own work.", expect: false },
+    // Object-bearing negative-authority verbs. The gap tail is the same
+    // `... to` / `... from` a real grant produces, so only the verb at the
+    // head of the gap distinguishes these from the affirmative controls
+    // immediately below.
+    { name: "may-deny-permission-to-self-review", body: "An independent reviewer may deny permission to self-review.", expect: false },
+    { name: "may-refuse-permission-to-self-review", body: "An independent reviewer may refuse permission to self-review.", expect: false },
+    { name: "may-forbid-the-builder-to-self-review", body: "An independent reviewer may forbid the builder to self-review.", expect: false },
+    { name: "may-prevent-the-builder-from-self-review", body: "An independent reviewer may prevent the builder from self-review.", expect: false },
+    { name: "may-prohibit-the-builder-from-self-review", body: "An independent reviewer may prohibit the builder from self-review.", expect: false },
+    { name: "indicative-denies-the-builder-permission-to-self-review", body: "An independent reviewer denies the builder permission to self-review.", expect: false },
+    { name: "may-grant-the-builder-permission-to-self-review-control", body: "An independent reviewer may grant the builder permission to self-review.", expect: true },
+    { name: "may-allow-the-builder-to-self-review-control", body: "An independent reviewer may allow the builder to self-review.", expect: true },
+    { name: "may-authorize-the-builder-to-self-review-control", body: "An independent reviewer may authorize the builder to self-review.", expect: true },
   ];
   for (const row of permRows) {
     const findings = playbookBodyObligationFindings(
@@ -11097,6 +11364,47 @@ else
   bad "restore overlay G11 denied but G12 approved after narrowing mutations (rc=$rc): $out"
 fi
 
+for decision in \
+  "Decided: the owner approved that removal of G12 remains pending." \
+  "Decided: the owner approved that removal of G12 was expressly denied." \
+  "Decided: the owner approved that removal of G12 was no longer authorized." \
+  "Decided: the owner approved removal of G12, but from documentation only." \
+  "Decided: the owner approved removal of G12, but the owner rejected it." \
+  "Decided: the owner approved removal of G12, but later denied that removal." \
+  "Decided: the owner approved removal of G12; only its label may be deleted." \
+  "Decided: the owner did not approve removal of G12, but approved removal of G11." \
+  "Decided: the owner did not approve removal of G11, but counsel approved removal of G12."
+do
+  printf '%s\n' "$decision" > "$SANDBOX/memory/DECISIONS.md"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_OVERLAY' \
+    && echo "$out" | grep -q 'G12' \
+    && echo "$out" | grep -q 'affirmative same-gate owner authorization'; then
+    echo "  planted #241 owner target/polarity failure line:"
+    echo "$out" | grep 'E_OVERLAY' | sed 's/^/    /'
+    ok "mutation: $(printf '%s' "$decision" | tr '\n' ' ') does not authorize overlay removal of G12"
+  else
+    bad "mutation #241 owner target/polarity ($decision) (rc=$rc): $out"
+  fi
+done
+
+for decision in \
+  "Decided: the owner approved that removal of G12 remains authorized." \
+  "Decided: the owner approved that removal of G12 remains in effect." \
+  "Decided: the owner approved removal of G12 and recorded the decision." \
+  "Decided: the minutes were circulated; the owner approved removal of G12." \
+  "Decided: the owner did not approve removal of G11, but approved removal of G12." \
+  "Decided: the owner rejected removal of G11, but approved removal of G12."
+do
+  printf '%s\n' "$decision" > "$SANDBOX/memory/DECISIONS.md"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "benign: $(printf '%s' "$decision" | tr '\n' ' ') still authorizes overlay removal of G12"
+  else
+    bad "benign #241 owner target/polarity control ($decision) (rc=$rc): $out"
+  fi
+done
+
 printf '%s\n' 'Decided: the owner approved removal of G12.' \
   > "$SANDBOX/memory/DECISIONS.md"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -12153,6 +12461,71 @@ fs.writeFileSync(p,t);
     ok "benign: $body remains green"
   else
     bad "benign actor-intervening self-review control ($body) (rc=$rc): $out"
+  fi
+  cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+done
+
+for body in \
+  "An independent reviewer gives the builder permission to self-review." \
+  "An independent reviewer lets the same agent review its own work." \
+  "An independent reviewer assigns the same agent to review." \
+  "Permission to self-review is granted to an independent reviewer." \
+  "An independent reviewer is hereby granted permission to self-review." \
+  "An independent reviewer grants the builder permission to self-review." \
+  "Authority to self-review is conferred on an independent reviewer." \
+  "An independent reviewer may grant the builder permission to self-review." \
+  "An independent reviewer may allow the builder to self-review." \
+  "An independent reviewer may authorize the builder to self-review."
+do
+  node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const body=process.argv[2];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace("You never merge.", "You never merge. " + body);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md" "$body"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_ROLE_NEGATION' \
+    && echo "$out" | grep -q 'self-review\|same-agent'; then
+    echo "  planted #241 unanchored self-review grant failure line:"
+    echo "$out" | grep 'E_ROLE_NEGATION' | sed 's/^/    /'
+    ok "mutation: $body fails"
+  else
+    bad "mutation #241 unanchored self-review grant ($body) (rc=$rc): $out"
+  fi
+  cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
+done
+
+for body in \
+  "An independent reviewer may deny permission to self-review." \
+  "An independent reviewer may refuse permission to self-review." \
+  "An independent reviewer may forbid the builder to self-review." \
+  "An independent reviewer may prevent the builder from self-review." \
+  "An independent reviewer may prohibit the builder from self-review." \
+  "An independent reviewer denies the builder permission to self-review." \
+  "An independent reviewer does not give the builder permission to self-review." \
+  "An independent reviewer never grants permission to self-review." \
+  "Permission to self-review is not granted to an independent reviewer." \
+  "No permission to self-review is granted to an independent reviewer." \
+  "An independent reviewer is not granted permission to self-review." \
+  "The builder must never review its own work."
+do
+  node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const body=process.argv[2];
+let t=fs.readFileSync(p,"utf8");
+if (!t.includes("You never merge.")) throw new Error("missing reviewer body anchor");
+t=t.replace("You never merge.", "You never merge. " + body);
+fs.writeFileSync(p,t);
+' "$SANDBOX/playbooks/reviewer.md" "$body"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "benign: $body remains green"
+  else
+    bad "benign #241 negative-authority self-review control ($body) (rc=$rc): $out"
   fi
   cp "$REPO_ROOT/playbooks/reviewer.md" "$SANDBOX/playbooks/reviewer.md"
 done
