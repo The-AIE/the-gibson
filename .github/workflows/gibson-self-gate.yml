@@ -144,7 +144,7 @@ jobs:
       # script parses under bash 3.2 — stock macOS, where most of our
       # portability lessons were earned.
       - name: Run every sensor
-        run: ./scripts/tests/run-all.sh
+        run: bash scripts/tests/run-all.sh --no-quarantine
 
       # Advisory: the burn-down view. Shows what the quarantine is hiding
       # without failing the build, so the list stays visible instead of
