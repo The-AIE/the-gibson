@@ -1677,6 +1677,17 @@ else
   bad "workflow sensors job drifted (got '${sensors_cmd}', want exactly '${CANON_TEST}')"
 fi
 
+echo "# #274 metric-contract failure binds into ordinary GREEN/RED before n_fail"
+if awk '
+  /FAILED="\$FAILED metric-contract"/ { bind=NR }
+  /n_fail=\$\(echo "\$FAILED"/ { nfail=NR }
+  END { if (bind && nfail && bind < nfail) exit 0; exit 1 }
+' "$REPO_ROOT/scripts/tests/run-all.sh"; then
+  ok "metric-contract is bound into FAILED before n_fail is computed"
+else
+  bad "metric-contract failure is not bound into FAILED before n_fail"
+fi
+
 echo "# #274 run-all metric contract (no static count, no second gate.json parser)"
 if grep -E 'require\(.*gate\.json|readFileSync\([^)]*gate\.json' \
      "$REPO_ROOT/scripts/tests/run-all.sh" >/dev/null; then
@@ -1753,6 +1764,13 @@ if printf '%s\n' "$metric_out" | grep -Eq 'args\.test\.sh: [0-9]+ passed, [0-9]+
   ok "run-all prints per-suite wall time"
 else
   bad "run-all missing per-suite wall time"
+fi
+if printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics' \
+   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: green run still prints GREEN and aggregate metrics' \
+   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: ordinary suite failure is RED with aggregate metrics'; then
+  ok "run-all exercised metric-contract verdict-binding mutations"
+else
+  bad "run-all missing metric-contract verdict-binding mutations"
 fi
 
 echo "# #274 ordinary gate.test.sh is non-recursive and disjoint from --self-contract"
