@@ -253,6 +253,34 @@ run_guardian_return_fixture success 0 30 /bin/bash -c 'exit 0'
 run_guardian_return_fixture nonzero 7 30 /bin/bash -c 'exit 7'
 run_guardian_return_fixture timeout 124 1 /bin/bash -c 'sleep 5'
 
+# The trusted launcher can become ready after the parent's bounded proof loop.
+# Release HOLD_READY only after pgrp_ok=0 is published, then prove late guardian
+# adoption and teardown on both natural and timeout returns.
+run_late_guardian_fixture() {
+  local mode="$1" want="$2" limit="$3" dir="$ROOT/guardian-late-$1" rc=0 release
+  shift 3
+  mkdir -p "$dir"
+  : > "$dir/hold-ready"
+  FLEET_WALL_TIMEOUT_TEST_PUBLISH="$dir"
+  FLEET_WALL_TIMEOUT_TEST_HOLD_READY="$dir/hold-ready"
+  export FLEET_WALL_TIMEOUT_TEST_PUBLISH FLEET_WALL_TIMEOUT_TEST_HOLD_READY
+  (
+    wait_file "$dir/pgrp_ok" 160 || exit 1
+    rm -f "$dir/hold-ready"
+  ) &
+  release=$!
+  run_with_wall_timeout "$limit" "$@" || rc=$?
+  wait "$release" 2>/dev/null || true
+  unset FLEET_WALL_TIMEOUT_TEST_PUBLISH FLEET_WALL_TIMEOUT_TEST_HOLD_READY
+  rm -f "$dir/hold-ready"
+  eq "$mode late-guardian fixture status" "$rc" "$want"
+  eq "$mode late-guardian initial proof stays fail-closed" "$(read_ident "$dir/pgrp_ok")" "0"
+  assert_published_guardian_absent "$mode late return" "$dir"
+}
+
+run_late_guardian_fixture success 0 30 /bin/bash -c 'exit 0'
+run_late_guardian_fixture timeout 124 1 /bin/bash -c 'sleep 5'
+
 # Sourcing the file must not install traps.
 _src_before=$(bash -c 'trap -p HUP; trap -p INT; trap -p TERM' 2>/dev/null || true)
 _src_after=$(bash -c 'source "$1"; trap -p HUP; trap -p INT; trap -p TERM' bash "$WALL_LIB" 2>/dev/null || true)

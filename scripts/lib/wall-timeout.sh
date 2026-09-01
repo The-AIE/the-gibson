@@ -129,8 +129,20 @@ _wt_settle_signal_cascade() {
 
 _wt_stop_guardian() {
   local guard="${_WT_GUARDIAN:-}" expected="${_WT_PID:-}" i=0 st guard_pgid
+  local ready_pid="" ready_guard=""
+  # The launcher may publish after the initial bounded proof window. Ordinary
+  # and timeout cleanup must adopt that late guardian just as cancellation does;
+  # otherwise pgrp_ok=0 could return successfully while the guardian survives.
+  if [[ ! "$guard" =~ ^[1-9][0-9]*$ && "$expected" =~ ^[1-9][0-9]*$ \
+    && -s "${_WT_PGRP_READY:-}" ]]; then
+    read -r ready_pid ready_guard < "${_WT_PGRP_READY}" || true
+    if [[ "$ready_pid" == "$expected" && "$ready_guard" =~ ^[1-9][0-9]*$ ]]; then
+      guard="$ready_guard"
+    fi
+  fi
   _WT_GUARDIAN=""
   [[ "$guard" =~ ^[1-9][0-9]*$ && "$expected" =~ ^[1-9][0-9]*$ ]] || return 0
+  _wt_publish guardian.pid "$guard"
   while kill -0 "$guard" 2>/dev/null && [[ $i -lt 20 ]]; do
     guard_pgid=$(ps -p "$guard" -o pgid= 2>/dev/null | tr -d '[:space:]' || true)
     [[ "$guard_pgid" == "$expected" ]] || return 0
