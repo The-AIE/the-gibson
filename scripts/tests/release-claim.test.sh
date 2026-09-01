@@ -7703,6 +7703,7 @@ new_repo "$ROOT/led271"
 TABLE
   git add -A && git commit -qm "ledger preview" && git push -q origin main
   git branch -f feat/278-ledger-preview HEAD
+  git push -q origin feat/278-ledger-preview
   git worktree add -q "$ROOT/led271/actual-ledger-wt" feat/278-ledger-preview
   mkdir -p "$ROOT/led271/wt-278-ledger-preview"
   echo decoy > "$ROOT/led271/wt-278-ledger-preview/decoy.txt"

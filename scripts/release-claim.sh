@@ -348,8 +348,12 @@ phys_path() {
   local p="$1" dir base
   p="${p%/}"
   [[ -n "$p" ]] || { echo ""; return 0; }
-  if [[ -d "$p" && ! -L "$p" ]]; then
-    (CDPATH='' cd "$p" 2>/dev/null && pwd -P) || printf '%s\n' "$p"
+  # A directory symlink is still a directory identity. Resolve the leaf with
+  # `cd -P` just like shared guard_phys_path; otherwise GIBSON_CANONICAL set to
+  # a symlink and Git's real-path worktree listing compare as different paths,
+  # bypassing the canonical-checkout refusal.
+  if [[ -d "$p" ]]; then
+    (CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P) || printf '%s\n' "$p"
     return 0
   fi
   dir=$(dirname -- "$p" 2>/dev/null || echo ".")
