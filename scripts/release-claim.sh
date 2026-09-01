@@ -127,6 +127,8 @@ USAGE
                  do not remove the registered worktree directory (default still
                  removes it). Used by claim-reaper so a dead lane's claim can be
                  released while preserving the on-disk tree for recovery.
+                 Requires --keep-branch; a retained worktree cannot lose its
+                 checked-out branch.
   --keep-label   keep agent-claimed even when the ledger has no residual row
                  for this issue (live sibling lane whose claim file is absent
                  or lives elsewhere). Verifies the live GitHub label is present
@@ -321,11 +323,11 @@ fi
 if [[ -n "$EXPECTED_BRANCH" && ! "$EXPECTED_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
   die "--expected-branch has unsafe characters"
 fi
-# A retained worktree cannot lose its branch (#153 blocker 4, #271). Live
-# terminal cleanup already refuses this combination as incomplete (rc=3).
-# Dry-run must fail closed before printing an impossible keep-worktree /
-# delete-branch plan rather than previewing a mutation live would reject.
-if [[ "$DRY" -eq 1 && "$KEEP_WORKTREE" -eq 1 && "$KEEP_BRANCH" -eq 0 ]]; then
+# A retained worktree cannot lose its branch (#153 blocker 4, #271). Refuse
+# this impossible artifact plan at common CLI preflight for dry-run and live
+# terminal/ledger cleanup. Claim-reaper's supported recovery path supplies
+# both keep flags; its internal branch-only CAS step is therefore unaffected.
+if [[ "$KEEP_WORKTREE" -eq 1 && "$KEEP_BRANCH" -eq 0 ]]; then
   die "--keep-worktree without --keep-branch would retain a worktree after deleting its branch — refuse (a retained worktree must not lose its branch)"
 fi
 

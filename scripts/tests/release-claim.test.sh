@@ -3862,7 +3862,7 @@ rm -f "$GH_STATE" "$GH_LOG"
 printf '824\tissue-324-keep-worktree-no-keep-branch-case\tlib/x/**\t324\tfeat/324-keep-worktree-no-keep-branch-case\t%s\thttps://github.com/acme/app/pull/824\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$KWNB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
 out=$(cd "$ROOT/kwnb1/canon" && "$RC" 324 --claim-id issue-324-keep-worktree-no-keep-branch-case --repo acme/app --keep-worktree 2>&1); rc=$?
-check    "--keep-worktree without --keep-branch exits 3"     "$rc" "3"
+check    "--keep-worktree without --keep-branch fails preflight" "$rc" "1"
 contains "names the retained-worktree-loses-branch refusal"  "$out" "a retained worktree must not lose its branch"
 lacks    "does not claim success"                             "$out" "OK —"
 [[ -d "$ROOT/kwnb1/wt-324-keep-worktree-no-keep-branch-case" ]] &&
@@ -7207,9 +7207,10 @@ export GIT_TERMINAL_PROMPT=0
 #   ambig1 (ambiguous registration),
 #   nondef1 (non-default registered path),
 #   head-branch mismatch (terminal evidence),
-#   kwnb1 (live --keep-worktree without --keep-branch is rc=3).
-# Symlink and canonical-checkout alias refusals remain in
-# resolve_registered_worktree_for_branch; this issue does not loosen them.
+#   kwnb1 (live --keep-worktree without --keep-branch fails common preflight).
+# The executable sym271, nond271, and canon271 fixtures below additionally pin
+# registered-symlink, registered-non-directory, and canonical-checkout-alias
+# refusals through the same shared resolver used by dry-run and live cleanup.
 
 extract_fn() { # file function-name
   local file="$1" name="$2"
@@ -7416,6 +7417,11 @@ else
   bad "primary dry-run mutated state: $(diff -u "$ROOT/nd271/before.snap" "$ROOT/nd271/after.snap" | head -40)"
 fi
 assert_mutation_free_logs "primary" "$GH_GIT_LOG" "$GH_ALL_LOG"
+if [[ -s "$GH_GIT_LOG" && -s "$GH_ALL_LOG" ]]; then
+  ok "primary mutation-log shims were exercised (non-empty git and gh logs)"
+else
+  bad "primary mutation-log proof is vacuous (git_bytes=$(wc -c < "$GH_GIT_LOG" 2>/dev/null || echo 0) gh_bytes=$(wc -c < "$GH_ALL_LOG" 2>/dev/null || echo 0))"
+fi
 [[ -f "$ROOT/nd271/wt-271-nondefault-preview/decoy.txt" ]] \
   && ok "primary decoy untouched on disk" || bad "primary decoy was touched"
 [[ -d "$ROOT/nd271/actual-nondefault" ]] \
@@ -7514,6 +7520,107 @@ lacks    "unreadable dry-run prints no successful plan" "$out" "DRY RUN would:"
 [[ -d "$ROOT/unr271/wt-274-unread-preview" ]] \
   && ok "unreadable dry-run: worktree untouched" || bad "unreadable dry-run removed worktree"
 
+# --- registered symlink/non-directory/canonical-alias paths fail closed ---
+# These are live terminal-path fixtures, not source-presence assertions. Each
+# uses Git's retained worktree registration so the corresponding production
+# resolver branch executes before any artifact mutation.
+
+SYM_SHA=$(term_fixture sym271 281 registered-symlink)
+SYM_PATH="$ROOT/sym271/wt-281-registered-symlink"
+SYM_MOVED="$ROOT/sym271/registered-symlink-target"
+mv "$SYM_PATH" "$SYM_MOVED"
+ln -s "$SYM_MOVED" "$SYM_PATH"
+export GH_PR_ALL_TSV="$ROOT/sym271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/sym271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/sym271/gh-state"
+export GH_LOG="$ROOT/sym271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '881\tissue-281-registered-symlink\tlib/x/**\t281\tfeat/281-registered-symlink\t%s\thttps://github.com/acme/app/pull/881\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SYM_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/sym271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 281 --claim-id issue-281-registered-symlink --repo acme/app 2>&1); rc=$?
+check "registered symlink release exits 3" "$rc" "3"
+contains "registered symlink names refusal" "$out" "registered worktree path is a symlink"
+lacks "registered symlink does not claim success" "$out" "OK —"
+[[ -L "$SYM_PATH" && -d "$SYM_MOVED" ]] \
+  && ok "registered symlink refusal preserves link and target worktree" \
+  || bad "registered symlink refusal mutated link/target worktree"
+br=$(git -C "$ROOT/sym271/canon" branch --list 'feat/281-registered-symlink')
+[[ -n "$br" ]] && ok "registered symlink refusal preserves local branch" \
+  || bad "registered symlink refusal deleted local branch"
+remote_br=$(git -C "$ROOT/sym271/canon" ls-remote --heads origin 'feat/281-registered-symlink')
+[[ -n "$remote_br" ]] && ok "registered symlink refusal preserves remote branch" \
+  || bad "registered symlink refusal deleted remote branch"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] \
+  && ok "registered symlink refusal never edits the label" \
+  || bad "registered symlink refusal attempted a label edit"
+
+NOND_SHA=$(term_fixture nond271 282 registered-not-directory)
+NOND_PATH="$ROOT/nond271/wt-282-registered-not-directory"
+NOND_MOVED="$ROOT/nond271/registered-not-directory-target"
+mv "$NOND_PATH" "$NOND_MOVED"
+printf 'not-a-directory\n' > "$NOND_PATH"
+export GH_PR_ALL_TSV="$ROOT/nond271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/nond271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/nond271/gh-state"
+export GH_LOG="$ROOT/nond271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '882\tissue-282-registered-not-directory\tlib/x/**\t282\tfeat/282-registered-not-directory\t%s\thttps://github.com/acme/app/pull/882\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NOND_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/nond271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 282 --claim-id issue-282-registered-not-directory --repo acme/app 2>&1); rc=$?
+check "registered non-directory release exits 3" "$rc" "3"
+contains "registered non-directory names refusal" "$out" "registered worktree path is missing or not a directory"
+lacks "registered non-directory does not claim success" "$out" "OK —"
+[[ -f "$NOND_PATH" && -d "$NOND_MOVED" ]] \
+  && ok "registered non-directory refusal preserves file and moved worktree" \
+  || bad "registered non-directory refusal mutated file/moved worktree"
+br=$(git -C "$ROOT/nond271/canon" branch --list 'feat/282-registered-not-directory')
+[[ -n "$br" ]] && ok "registered non-directory refusal preserves local branch" \
+  || bad "registered non-directory refusal deleted local branch"
+remote_br=$(git -C "$ROOT/nond271/canon" ls-remote --heads origin 'feat/282-registered-not-directory')
+[[ -n "$remote_br" ]] && ok "registered non-directory refusal preserves remote branch" \
+  || bad "registered non-directory refusal deleted remote branch"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] \
+  && ok "registered non-directory refusal never edits the label" \
+  || bad "registered non-directory refusal attempted a label edit"
+
+CANON_SHA=$(term_fixture canon271 283 canonical-alias)
+CANON_REAL="$ROOT/canon271/wt-283-canonical-alias"
+CANON_ALIAS="$ROOT/canon271/canonical-alias"
+git -C "$ROOT/canon271/canon" worktree remove --force "$CANON_REAL" >/dev/null 2>&1
+git -C "$ROOT/canon271/canon" checkout -q feat/283-canonical-alias
+ln -s "$ROOT/canon271/canon" "$CANON_ALIAS"
+export GH_PR_ALL_TSV="$ROOT/canon271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/canon271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/canon271/gh-state"
+export GH_LOG="$ROOT/canon271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '883\tissue-283-canonical-alias\tlib/x/**\t283\tfeat/283-canonical-alias\t%s\thttps://github.com/acme/app/pull/883\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$CANON_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/canon271/canon" && GIBSON_CANONICAL="$CANON_ALIAS" PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 283 --claim-id issue-283-canonical-alias --repo acme/app 2>&1); rc=$?
+check "canonical-checkout alias release exits 3" "$rc" "3"
+contains "canonical-checkout alias names refusal" "$out" "canonical checkout itself"
+lacks "canonical-checkout alias does not claim success" "$out" "OK —"
+check "canonical-checkout alias preserves checked-out feature branch" \
+  "$(git -C "$ROOT/canon271/canon" branch --show-current)" "feat/283-canonical-alias"
+[[ -L "$CANON_ALIAS" && -d "$ROOT/canon271/canon" ]] \
+  && ok "canonical-checkout alias refusal preserves alias and canonical checkout" \
+  || bad "canonical-checkout alias refusal mutated alias/canonical checkout"
+remote_br=$(git -C "$ROOT/canon271/canon" ls-remote --heads origin 'feat/283-canonical-alias')
+[[ -n "$remote_br" ]] && ok "canonical-checkout alias refusal preserves remote branch" \
+  || bad "canonical-checkout alias refusal deleted remote branch"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] \
+  && ok "canonical-checkout alias refusal never edits the label" \
+  || bad "canonical-checkout alias refusal attempted a label edit"
+
 # --- unregistered historical-path decoy fails closed ----------------------
 new_repo "$ROOT/dec271" acme/app
 mkdir -p "$ROOT/dec271/wt-275-decoy-preview"
@@ -7608,6 +7715,36 @@ contains "ledger dry-run names registered path" "$out" "$LED_SHOWN"
 contains "ledger dry-run names branch" "$out" "feat/278-ledger-preview"
 lacks    "ledger dry-run excludes decoy" "$out" "wt-278-ledger-preview"
 lacks    "ledger dry-run does not promise removal" "$out" "remove worktree:"
+
+# The ordinary-ledger live path must enforce the same retained-worktree rule
+# as terminal cleanup instead of keeping the worktree and deleting its refs.
+export GH_STATE="$ROOT/led271/gh-state"
+export GH_LOG="$ROOT/led271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+snapshot_release_state "$ROOT/led271/canon" "$ROOT/led271/before-live-keep.snap" \
+  "$ROOT/led271/actual-ledger-wt" "$ROOT/led271/wt-278-ledger-preview"
+out=$(cd "$ROOT/led271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 278 --claim-id issue-278-ledger-preview --keep-worktree 2>&1); rc=$?
+check "ordinary ledger keep-worktree/no-keep-branch fails preflight" "$rc" "1"
+contains "ordinary ledger names retained-worktree refusal" "$out" "a retained worktree must not lose its branch"
+lacks "ordinary ledger keep-worktree refusal does not claim success" "$out" "OK —"
+snapshot_release_state "$ROOT/led271/canon" "$ROOT/led271/after-live-keep.snap" \
+  "$ROOT/led271/actual-ledger-wt" "$ROOT/led271/wt-278-ledger-preview"
+if cmp -s "$ROOT/led271/before-live-keep.snap" "$ROOT/led271/after-live-keep.snap"; then
+  ok "ordinary ledger keep-worktree preflight is mutation-invariant"
+else
+  bad "ordinary ledger keep-worktree preflight mutated state"
+fi
+[[ -d "$ROOT/led271/actual-ledger-wt" ]] \
+  && ok "ordinary ledger refusal preserves registered worktree" \
+  || bad "ordinary ledger refusal removed registered worktree"
+br=$(git -C "$ROOT/led271/canon" branch --list 'feat/278-ledger-preview')
+[[ -n "$br" ]] && ok "ordinary ledger refusal preserves local branch" \
+  || bad "ordinary ledger refusal deleted local branch"
+remote_br=$(git -C "$ROOT/led271/canon" ls-remote --heads origin 'feat/278-ledger-preview')
+[[ -n "$remote_br" ]] && ok "ordinary ledger refusal preserves remote branch" \
+  || bad "ordinary ledger refusal deleted remote branch"
 
 # --- claim-reaper CAS preview still uses explicit --worktree-path ---------
 new_repo "$ROOT/cas271"
@@ -7715,9 +7852,9 @@ else
   bad "mutation M2 failed to apply or failed bash -n"
 fi
 
-# M3: drop keep-worktree/keep-branch dry-run preflight — impossible plan prints.
+# M3: drop keep-worktree/keep-branch common preflight — impossible plan prints.
 copy_rc_bundle "$ROOT/mut3"
-perl -i -pe 's/if \[\[ "\$DRY" -eq 1 && "\$KEEP_WORKTREE" -eq 1 && "\$KEEP_BRANCH" -eq 0 \]\]; then/if false; then # MUTATED_KEEP_PREFLIGHT/' \
+perl -i -pe 's/if \[\[ "\$KEEP_WORKTREE" -eq 1 && "\$KEEP_BRANCH" -eq 0 \]\]; then/if false; then # MUTATED_KEEP_PREFLIGHT/' \
   "$ROOT/mut3/scripts/release-claim.sh"
 if grep -q 'MUTATED_KEEP_PREFLIGHT' "$ROOT/mut3/scripts/release-claim.sh" \
    && bash -n "$ROOT/mut3/scripts/release-claim.sh"; then
