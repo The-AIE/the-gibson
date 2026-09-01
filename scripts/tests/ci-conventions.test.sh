@@ -1688,6 +1688,41 @@ else
   bad "metric-contract failure is not bound into FAILED before n_fail"
 fi
 
+echo "# #278 legacy-sentinel attribution reconciles before the GREEN/RED bind"
+RA="$REPO_ROOT/scripts/tests/run-all.sh"
+if awk '
+  /gibson_metrics_reconcile_legacy_sentinels/ && $0 !~ /\(\)/ { rec=NR }
+  /FAILED="\$FAILED metric-contract"/ { bind=NR }
+  /n_fail=\$\(echo "\$FAILED"/ { nfail=NR }
+  END { if (rec && bind && nfail && rec < bind && bind < nfail) exit 0; exit 1 }
+' "$RA"; then
+  ok "legacy-sentinel reconcile runs before metric-contract bind and n_fail"
+else
+  bad "legacy-sentinel reconcile is not ordered before metric-contract bind / n_fail"
+fi
+if grep -Fq 'duplicate sentinel attribution' "$RA" \
+  && grep -Fq 'legacy-sentinel name/count drift' "$RA" \
+  && grep -Fq 'explicit assertions and sentinel' "$RA"; then
+  ok "run-all.sh fails closed on duplicate sentinel, name/count drift, and dual contribution"
+else
+  bad "run-all.sh missing fail-closed sentinel attribution guards"
+fi
+# Non-vacuity: deleting each guard string must turn the corresponding grep red.
+_mut_src=$(mktemp "${TMPDIR:-/tmp}/gibson-278-runall.XXXXXX")
+sed -e '/duplicate sentinel attribution/d' \
+    -e '/legacy-sentinel name\/count drift/d' \
+    -e '/explicit assertions and sentinel/d' \
+    "$RA" > "$_mut_src"
+if grep -Fq 'duplicate sentinel attribution' "$_mut_src" \
+   || grep -Fq 'legacy-sentinel name/count drift' "$_mut_src" \
+   || grep -Fq 'explicit assertions and sentinel' "$_mut_src"; then
+  bad "mutation: deleting sentinel attribution guards still grepped true (vacuous)"
+else
+  ok "mutation: deleting sentinel attribution guards turns the source check red"
+fi
+rm -f "$_mut_src"
+unset _mut_src
+
 echo "# #274 run-all metric contract (no static count, no second gate.json parser)"
 if grep -E 'require\(.*gate\.json|readFileSync\([^)]*gate\.json' \
      "$REPO_ROOT/scripts/tests/run-all.sh" >/dev/null; then
@@ -1735,6 +1770,35 @@ else
   bad "aggregate GIBSON_TEST_METRICS is not the final non-empty line immediately after the one metric-subtotals diagnostic"
 fi
 
+# #278 named legacy-sentinel diagnostic is non-machine, immediately before
+# the retained subtotals line. Empty list when legacy-sentinels=0.
+named_line=$(printf '%s\n' "$metric_out" | grep -E '^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$' || true)
+named_n=$(printf '%s\n' "$named_line" | grep -c . || true)
+if [[ "$named_n" -eq 1 ]]; then
+  ok "run-all emits exactly one named legacy-sentinel diagnostic"
+else
+  bad "run-all named legacy-sentinel lines=$named_n (want 1): ${named_line}"
+fi
+if printf '%s\n' "$metric_out" | awk '
+  /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/ { n++ }
+  /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/ { d++ }
+  /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/ { m++ }
+  NF { pprev=prev; prev=last; last=$0 }
+  END {
+    if (n != 1) exit 1
+    if (d != 1) exit 1
+    if (m != 1) exit 1
+    if (last !~ /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/) exit 1
+    if (prev !~ /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/) exit 1
+    if (pprev !~ /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/) exit 1
+    exit 0
+  }
+'; then
+  ok "named legacy-sentinel diagnostic sits immediately before terminal subtotals"
+else
+  bad "named legacy-sentinel diagnostic is not immediately before metric-subtotals"
+fi
+
 parse_out=$(printf '%s\n' "$metric_out" | node "$REPO_ROOT/scripts/test-integrity.mjs" parse --input /dev/stdin 2>&1) || parse_rc=$?
 parse_rc=${parse_rc:-0}
 if [[ "$parse_rc" -eq 0 ]] && printf '%s\n' "$parse_out" | grep -q '"total":'; then
@@ -1755,6 +1819,11 @@ if [[ "$got_total" == "$want_total" && "$got_explicit" == "$want_total" && "$got
 else
   bad "aggregate drifted from selected-suite tally (tally=$want_total total=$got_total explicit=$got_explicit sentinels=$got_sent)"
 fi
+if [[ "$got_sent" == "0" && "$named_line" == "run-all legacy-sentinels:" ]]; then
+  ok "zero-sentinel run names no suites"
+else
+  bad "zero-sentinel named list drifted (sent=$got_sent named=${named_line})"
+fi
 if printf '%s\n' "$metric_out" | grep -Eq '^run-all wall: [0-9]+s$'; then
   ok "run-all prints total wall time"
 else
@@ -1772,6 +1841,106 @@ if printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: metric-contract fai
 else
   bad "run-all missing metric-contract verdict-binding mutations"
 fi
+if printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: tally then trailing status remains a sentinel' \
+   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: status then terminal tally contributes explicit assertions' \
+   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: duplicate sentinel attribution refuses' \
+   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: name/count drift refuses' \
+   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: one suite cannot contribute both explicit assertions and a sentinel'; then
+  ok "run-all exercised sentinel attribution and terminal-tally ordering mutations"
+else
+  bad "run-all missing sentinel attribution / terminal-tally ordering mutations"
+fi
+
+# Non-vacuity of the footer-shape assertion: syntactically valid footers that
+# move the named diagnostic, duplicate a name, or drift the count must fail.
+footer_shape_ok() {
+  awk '
+    /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/ { n++ }
+    /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/ { d++ }
+    /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/ { m++ }
+    NF { pprev=prev; prev=last; last=$0 }
+    END {
+      if (n != 1) exit 1
+      if (d != 1) exit 1
+      if (m != 1) exit 1
+      if (last !~ /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/) exit 1
+      if (prev !~ /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/) exit 1
+      if (pprev !~ /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/) exit 1
+      exit 0
+    }
+  '
+}
+named_matches_subtotal() {
+  awk '
+    BEGIN { named=0; sent=""; dup=0 }
+    /^run-all legacy-sentinels:/ {
+      line=$0
+      sub(/^run-all legacy-sentinels: ?/, "", line)
+      named=0
+      dup=0
+      delete seen
+      if (line != "") named=split(line, a, / /)
+      for (i=1; i<=named; i++) {
+        if (a[i] in seen) { dup=1 }
+        seen[a[i]]=1
+      }
+    }
+    /legacy-sentinels=[0-9]+/ && /explicit-assertions=/ {
+      if (match($0, /legacy-sentinels=[0-9]+/)) {
+        split(substr($0, RSTART), kv, /=/)
+        sent=kv[2]+0
+      }
+    }
+    END {
+      if (dup) exit 1
+      if (named == sent) exit 0
+      exit 1
+    }
+  '
+}
+if printf '%s\n' "$metric_out" | named_matches_subtotal; then
+  ok "live named list reconciles with legacy-sentinels subtotal"
+else
+  bad "live named list does not reconcile with legacy-sentinels subtotal"
+fi
+_good_footer=$(printf '%s\n' \
+  'run-all legacy-sentinels: zeta.test.sh alpha.test.sh' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2' \
+  'GIBSON_TEST_METRICS total=2 skipped=0 todo=0')
+if printf '%s\n' "$_good_footer" | footer_shape_ok \
+   && printf '%s\n' "$_good_footer" | named_matches_subtotal; then
+  ok "mutation control: well-formed named sentinel footer is accepted"
+else
+  bad "mutation control: well-formed named sentinel footer was rejected"
+fi
+_swap_footer=$(printf '%s\n' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=1' \
+  'run-all legacy-sentinels: foo.test.sh' \
+  'GIBSON_TEST_METRICS total=1 skipped=0 todo=0')
+if printf '%s\n' "$_swap_footer" | footer_shape_ok; then
+  bad "mutation: named diagnostic after subtotals still passed the footer shape check"
+else
+  ok "mutation: named diagnostic after subtotals fails the footer shape check"
+fi
+_dup_footer=$(printf '%s\n' \
+  'run-all legacy-sentinels: foo.test.sh foo.test.sh' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2' \
+  'GIBSON_TEST_METRICS total=2 skipped=0 todo=0')
+if printf '%s\n' "$_dup_footer" | named_matches_subtotal; then
+  bad "mutation: duplicate sentinel name still passed name/count reconciliation"
+else
+  ok "mutation: duplicate sentinel name turns name/count reconciliation red"
+fi
+_drift_footer=$(printf '%s\n' \
+  'run-all legacy-sentinels: foo.test.sh' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2' \
+  'GIBSON_TEST_METRICS total=2 skipped=0 todo=0')
+if printf '%s\n' "$_drift_footer" | named_matches_subtotal; then
+  bad "mutation: name/count drift still passed reconciliation"
+else
+  ok "mutation: name/count drift turns reconciliation red"
+fi
+unset _good_footer _swap_footer _dup_footer _drift_footer
 
 echo "# #274 ordinary gate.test.sh is non-recursive and disjoint from --self-contract"
 GT="$REPO_ROOT/scripts/tests/gate.test.sh"
