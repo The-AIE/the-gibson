@@ -428,7 +428,7 @@ contains "v1 reservation trailer" "$res_msg" "Gibson-Reservation: v1"
 contains "claim-id trailer" "$res_msg" "Gibson-Claim-ID: issue-42-password-reset"
 contains "issue trailer" "$res_msg" "Gibson-Issue: #42"
 contains "branch trailer" "$res_msg" "Gibson-Branch: feat/42-password-reset"
-contains "DCO trailer present" "$res_msg" "Signed-off-by: gibson-sensor <sensor@gibson.invalid>"
+contains "DCO trailer present" "$res_msg" "Signed-off-by: ${GIT_AUTHOR_NAME} <${GIT_AUTHOR_EMAIL}>"
 table=$(cd "$ROOT/a/canon" && git show origin/main:docs/active-work.md)
 lacks "does not append to the shared table" "$table" "issue-42"
 head_before=$(cd "$ROOT/a/canon" && git rev-parse origin/main)

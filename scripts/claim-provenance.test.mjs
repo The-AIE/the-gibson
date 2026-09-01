@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { describe, it } from "node:test";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,6 +26,31 @@ import {
   projectClaimBody,
   snapshotFromPr,
 } from "./claim-provenance.mjs";
+
+{
+  const entry = process.argv[1];
+  let isMain = false;
+  if (entry) {
+    try {
+      isMain = realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+    } catch {
+      try {
+        isMain = pathToFileURL(resolve(entry)).href === import.meta.url;
+      } catch {
+        isMain = false;
+      }
+    }
+  }
+  if (isMain) {
+    const unknown = process.argv.slice(2);
+    if (unknown.length) {
+      console.error(
+        `claim-provenance.test: unknown flag: ${unknown.join(" ")}\nusage: node --test scripts/claim-provenance.test.mjs`
+      );
+      process.exit(2);
+    }
+  }
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
