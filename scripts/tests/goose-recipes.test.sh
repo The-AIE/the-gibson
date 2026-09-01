@@ -5091,8 +5091,11 @@ else
 fi
 
 echo
-# Tally line includes optional-validate disposition so run-all / greps cannot
-# treat "exit 0 + N passed" as "goose validated" when status is NOT RUN (#95).
-echo "goose-recipes.test.sh: $PASS passed, $FAIL failed, goose-validate: $GOOSE_VALIDATE_STATUS"
+# Informational validate status is not terminal evidence (#278): run-all
+# classifies the last non-empty line only. Keep the tally last, in the exact
+# supported suffix shape. The optional goose-validate clause is a single
+# non-space token so greps cannot treat "exit 0 + N passed" as "goose
+# validated" when status is NOT RUN (#95).
 echo "goose recipe validate status: $GOOSE_VALIDATE_STATUS"
+echo "goose-recipes.test.sh: $PASS passed, $FAIL failed, goose-validate: ${GOOSE_VALIDATE_STATUS%% *}"
 [[ "$FAIL" -eq 0 ]]
