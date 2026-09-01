@@ -127,6 +127,8 @@ USAGE
                  do not remove the registered worktree directory (default still
                  removes it). Used by claim-reaper so a dead lane's claim can be
                  released while preserving the on-disk tree for recovery.
+                 Requires --keep-branch; a retained worktree cannot lose its
+                 checked-out branch.
   --keep-label   keep agent-claimed even when the ledger has no residual row
                  for this issue (live sibling lane whose claim file is absent
                  or lives elsewhere). Verifies the live GitHub label is present
@@ -147,7 +149,9 @@ USAGE
   --expected-branch BRANCH
                  when --worktree-path is set, the worktree must be checked out
                  on this branch before removal.
-  --dry-run      print what would happen, touch nothing
+  --dry-run      print the exact registered worktree and branch live safety
+                 checks would evaluate; touch nothing. Names identity and
+                 pending revalidation; does not promise deletion.
 
   Matching: issue-<N>-* plus issue-<alpha-ns>-<N>-*. issue-1<N>-* never matches.
   Bare multi-claim: if more than one live claim exists for the issue and you
@@ -319,6 +323,13 @@ fi
 if [[ -n "$EXPECTED_BRANCH" && ! "$EXPECTED_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
   die "--expected-branch has unsafe characters"
 fi
+# A retained worktree cannot lose its branch (#153 blocker 4, #271). Refuse
+# this impossible artifact plan at common CLI preflight for dry-run and live
+# terminal/ledger cleanup. Claim-reaper's supported recovery path supplies
+# both keep flags; its internal branch-only CAS step is therefore unaffected.
+if [[ "$KEEP_WORKTREE" -eq 1 && "$KEEP_BRANCH" -eq 0 ]]; then
+  die "--keep-worktree without --keep-branch would retain a worktree after deleting its branch — refuse (a retained worktree must not lose its branch)"
+fi
 
 cd "$CANONICAL"
 WT_PARENT="$(cd "$CANONICAL/.." && pwd)"
@@ -337,8 +348,12 @@ phys_path() {
   local p="$1" dir base
   p="${p%/}"
   [[ -n "$p" ]] || { echo ""; return 0; }
-  if [[ -d "$p" && ! -L "$p" ]]; then
-    (CDPATH='' cd "$p" 2>/dev/null && pwd -P) || printf '%s\n' "$p"
+  # A directory symlink is still a directory identity. Resolve the leaf with
+  # `cd -P` just like shared guard_phys_path; otherwise GIBSON_CANONICAL set to
+  # a symlink and Git's real-path worktree listing compare as different paths,
+  # bypassing the canonical-checkout refusal.
+  if [[ -d "$p" ]]; then
+    (CDPATH='' cd -P -- "$p" 2>/dev/null && pwd -P) || printf '%s\n' "$p"
     return 0
   fi
   dir=$(dirname -- "$p" 2>/dev/null || echo ".")
@@ -798,9 +813,13 @@ branch_for() { echo "feat/${1#issue-}"; }
 TERMINAL_PR_NUMBER=""
 TERMINAL_MODE=0
 TERMINAL_HEAD_SHA=""
+TERMINAL_HEAD_BRANCH=""
 TERMINAL_MERGE_SHA=""
 TERMINAL_STATE=""
 TERMINAL_FAIL_REASON=""
+CLEANUP_TARGET_BRANCH=""
+CLEANUP_TARGET_WT=""
+CLEANUP_TARGET_REASON=""
 # Records why terminal evidence is fatal and returns 2. Never exits: the
 # caller knows how much has already been mutated and therefore what a fatal
 # verdict costs.
@@ -925,6 +944,8 @@ try_terminal_pr_body_release() {
   expect_branch=$(branch_for "$id")
   [[ "$t_head" == "$expect_branch" ]] ||
     terminal_fatal "terminal PR-body claim #$t_number for '$id' head branch mismatch (want '$expect_branch', got '$t_head') — refuse" || return 2
+  # Store the already-verified PR-evidence head branch. Preview and live
+  # cleanup consume this value rather than calling branch_for again (#271).
   [[ "$t_head_sha" =~ ^[0-9a-f]{40}$ ]] ||
     terminal_fatal "terminal PR-body claim #$t_number for '$id' has a malformed/missing head SHA '${t_head_sha:-?}' — refuse" || return 2
   case "$t_state" in
@@ -940,6 +961,7 @@ try_terminal_pr_body_release() {
   info "verified terminal PR-body claim #$t_number ($t_state) for '$id' on $PR_REPO — releasing without a ledger row"
   TERMINAL_PR_NUMBER="$t_number"
   TERMINAL_HEAD_SHA="$t_head_sha"
+  TERMINAL_HEAD_BRANCH="$t_head"
   TERMINAL_MERGE_SHA="$t_merge_sha"
   TERMINAL_STATE="$t_state"
   TERMINAL_MODE=1
@@ -1032,6 +1054,100 @@ resolve_registered_worktree_for_branch() {
   return 0
 }
 
+# One pure-read cleanup-target resolver shared by dry-run preview and live
+# branch-resolved cleanup (#271). Returns the exact cleanup branch plus zero
+# or one exact registered worktree path. Enumeration / stat / realpath only:
+# no worktree prune, fetch, status/index refresh, lock creation, ref update,
+# filesystem write, or GitHub mutation. Callers pass the already-verified
+# branch; this function never derives one via branch_for or wt_dir_for.
+#
+# Sets on success (return 0):
+#   CLEANUP_TARGET_BRANCH  the branch that was asked about
+#   CLEANUP_TARGET_WT      exact registered path, or "" when none
+# Sets on failure (return 1):
+#   CLEANUP_TARGET_REASON  why identity could not be trusted
+resolve_cleanup_target() {
+  local br="$1" id="$2"
+  CLEANUP_TARGET_BRANCH="$br"
+  CLEANUP_TARGET_WT=""
+  CLEANUP_TARGET_REASON=""
+  if [[ -z "$br" ]]; then
+    CLEANUP_TARGET_REASON="empty cleanup branch — refuse"
+    return 1
+  fi
+  if ! resolve_registered_worktree_for_branch "$br" "$id"; then
+    CLEANUP_TARGET_REASON="$TERM_WT_REASON"
+    return 1
+  fi
+  CLEANUP_TARGET_WT="$TERM_WT_PATH"
+  return 0
+}
+
+# Preview renderer for a branch-resolved claim. Consumes an already-verified
+# branch; never calls wt_dir_for or branch_for. Names identity and pending
+# live revalidation; does not promise deletion (#271).
+render_branch_resolved_preview() {
+  local id="$1" br="$2" shown
+  echo "  release claim:   $id"
+  if [[ -n "$CLEANUP_TARGET_WT" ]]; then
+    shown=$(phys_path "$CLEANUP_TARGET_WT")
+    shown="${shown:-$CLEANUP_TARGET_WT}"
+    if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
+      echo "    KEEP worktree:   $shown"
+    else
+      echo "    worktree target: $shown"
+    fi
+  else
+    if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
+      echo "    KEEP worktree:   no registered worktree"
+    else
+      echo "    worktree target: no registered worktree"
+    fi
+  fi
+  if [[ "$KEEP_BRANCH" -eq 1 ]]; then
+    echo "    KEEP branch:     $br"
+  else
+    echo "    branch target:   $br"
+  fi
+  echo "    live execution will revalidate clean status, exact/contained head SHA, branch/ref identity, claim renewal, and compare-and-swap conditions immediately before mutation"
+}
+
+# Terminal / open-PR dry-run planning: resolve then render using the stored
+# evidence branch. No branch_for, no wt_dir_for (#271).
+preview_verified_branch_cleanup() {
+  local id="$1" br="$2"
+  if [[ -z "$br" ]]; then
+    CLEANUP_TARGET_REASON="missing stored PR-evidence head branch"
+    return 1
+  fi
+  if ! resolve_cleanup_target "$br" "$id"; then
+    return 1
+  fi
+  render_branch_resolved_preview "$id" "$CLEANUP_TARGET_BRANCH"
+  return 0
+}
+
+# Open-PR dry-run: preview close + the same registered target live cleanup
+# would evaluate. Resolves before printing a plan so unsafe identity fails
+# closed rather than promising a close (#271).
+preview_open_pr_body_dry_run() {
+  local id="$PR_CLAIM_ID" br="$PR_HEAD_BRANCH"
+  if [[ -z "$br" ]]; then
+    CLEANUP_TARGET_REASON="missing stored PR-evidence head branch"
+    return 1
+  fi
+  if ! resolve_cleanup_target "$br" "$id"; then
+    return 1
+  fi
+  info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim (frozen open head $FROZEN_OPEN_HEAD_SHA)"
+  info "dry-run: would then verify the now-terminal PR and run the exact cleanup for worktree/branch '$br'"
+  if [[ -n "$PR_SIBLINGS" ]]; then
+    info "dry-run: would keep agent-claimed — sibling PR-body claim(s) remain: $(printf '%s' "$PR_SIBLINGS" | tr '\n' ' ')"
+  fi
+  render_branch_resolved_preview "$id" "$br"
+  return 0
+}
+
 # Query the *exact* remote branch via `git ls-remote --heads`, distinguishing
 # "the query itself failed" (network/auth/read failure — unreadable evidence)
 # from "the branch legitimately does not exist" (query succeeded, empty
@@ -1080,7 +1196,11 @@ query_remote_branch_exact() {
 # returns.
 terminal_cleanup_release() {
   local id="$1" br
-  br=$(branch_for "$id")
+  # Consume the PR-evidence head branch stored after the branch_for equality
+  # check. Never re-derive via branch_for (#271).
+  br="${TERMINAL_HEAD_BRANCH:-}"
+  [[ -n "$br" ]] ||
+    die "terminal cleanup for '$id' has no stored PR-evidence head branch — refuse"
 
   # Re-assert the binding at the mutation boundary itself, not only where the
   # evidence was fetched (#153 review P1). This function is the only place
@@ -1094,11 +1214,11 @@ terminal_cleanup_release() {
   local wt="" wt_present=0 wt_removed=0
 
   # --- resolve the exact registered worktree, never a guessed path --------
-  # (#153 blocker 1)
-  if ! resolve_registered_worktree_for_branch "$br" "$id"; then
-    reason="$TERM_WT_REASON"
-  elif [[ -n "$TERM_WT_PATH" ]]; then
-    wt="$TERM_WT_PATH"
+  # (#153 blocker 1, #271 shared resolver)
+  if ! resolve_cleanup_target "$br" "$id"; then
+    reason="$CLEANUP_TARGET_REASON"
+  elif [[ -n "$CLEANUP_TARGET_WT" ]]; then
+    wt="$CLEANUP_TARGET_WT"
     wt_present=1
   fi
 
@@ -2389,11 +2509,8 @@ EOF
     FROZEN_OPEN_SCOPE="$OPEN_EV_SCOPE"
     FROZEN_OPEN_URL="$OPEN_EV_URL"
     if [[ "$DRY" -eq 1 ]]; then
-      info "dry-run: would close PR #$PR_NUMBER to release the PR-body claim (frozen open head $FROZEN_OPEN_HEAD_SHA)"
-      info "dry-run: would then verify the now-terminal PR and run the exact cleanup for worktree/branch '$PR_HEAD_BRANCH'"
-      if [[ -n "$PR_SIBLINGS" ]]; then
-        info "dry-run: would keep agent-claimed — sibling PR-body claim(s) remain: $(printf '%s' "$PR_SIBLINGS" | tr '\n' ' ')"
-      fi
+      preview_open_pr_body_dry_run \
+        || die "cannot plan open-PR cleanup target for '$PR_CLAIM_ID': ${CLEANUP_TARGET_REASON:-unknown}"
       exit 0
     fi
     # --- complete authoritative union BEFORE gh pr close (#153 P1) ---------
@@ -2792,12 +2909,13 @@ guarded_remove_claim_artifacts() {
   fi
 
   # Resolve worktree only from porcelain by exact branch — never default path.
-  if ! resolve_registered_worktree_for_branch "$br" "$id"; then
-    warn "guarded artifact cleanup: worktree resolution refused: $TERM_WT_REASON"
+  # Same pure-read resolver dry-run preview uses (#271).
+  if ! resolve_cleanup_target "$br" "$id"; then
+    warn "guarded artifact cleanup: worktree resolution refused: $CLEANUP_TARGET_REASON"
     return 1
   fi
-  if [[ -n "$TERM_WT_PATH" ]]; then
-    wt="$TERM_WT_PATH"
+  if [[ -n "$CLEANUP_TARGET_WT" ]]; then
+    wt="$CLEANUP_TARGET_WT"
     wt_present=1
   fi
 
@@ -2997,40 +3115,65 @@ residual_after_release() {
 RESIDUAL_IDS=$(residual_after_release)
 
 if [[ "$DRY" -eq 1 ]]; then
+  # Fail-closed identity resolution before any plan text (#271). A pipeline
+  # `while` would swallow `die`; use a here-doc so refusal exits the process.
+  if [[ -n "$TARGET_IDS" && -z "$WORKTREE_PATH_ARG" ]]; then
+    while IFS= read -r id; do
+      [[ -n "$id" ]] || continue
+      if [[ "${TERMINAL_MODE:-0}" -eq 1 ]]; then
+        _plan_br="$TERMINAL_HEAD_BRANCH"
+        [[ -n "$_plan_br" ]] || die "terminal dry-run missing stored PR-evidence head branch for '$id'"
+      else
+        _plan_br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
+      fi
+      if ! resolve_cleanup_target "$_plan_br" "$id"; then
+        die "cannot plan cleanup target for '$id': $CLEANUP_TARGET_REASON"
+      fi
+    done <<EOF
+$TARGET_IDS
+EOF
+  fi
   echo "DRY RUN would:"
   echo "  claim-table repo: $CANONICAL (branch: $(git rev-parse --abbrev-ref HEAD), left untouched)"
   echo "  product repo:     ${REPO_ARG:-${PR_REPO:-(unresolved)}}"
   if [[ -n "$TARGET_IDS" ]]; then
-    printf '%s\n' "$TARGET_IDS" | while IFS= read -r id; do
+    while IFS= read -r id; do
       [[ -n "$id" ]] || continue
-      echo "  release claim:   $id"
-      if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
-        if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+      if [[ -n "$WORKTREE_PATH_ARG" ]]; then
+        echo "  release claim:   $id"
+        if [[ "$KEEP_WORKTREE" -eq 1 ]]; then
           echo "    KEEP worktree:   $WORKTREE_PATH_ARG"
         else
-          echo "    KEEP worktree:   $(wt_dir_for "$id")"
-        fi
-      else
-        if [[ -n "$WORKTREE_PATH_ARG" ]]; then
           echo "    remove worktree: $WORKTREE_PATH_ARG (exact registered path only)"
-        else
-          echo "    remove worktree: $(wt_dir_for "$id")"
         fi
-      fi
-      if [[ "$KEEP_BRANCH" -eq 1 ]]; then
-        echo "    KEEP branch:     ${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        if [[ "$KEEP_BRANCH" -eq 1 ]]; then
+          echo "    KEEP branch:     ${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        else
+          echo "    delete branch:   ${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        fi
+        echo "    live execution will revalidate clean status, exact/contained head SHA, branch/ref identity, claim renewal, and compare-and-swap conditions immediately before mutation"
       else
-        echo "    delete branch:   ${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        if [[ "${TERMINAL_MODE:-0}" -eq 1 ]]; then
+          _plan_br="$TERMINAL_HEAD_BRANCH"
+        else
+          _plan_br="${EXPECTED_BRANCH:-$(branch_for "$id")}"
+        fi
+        preview_verified_branch_cleanup "$id" "$_plan_br" \
+          || die "cannot plan cleanup target for '$id': ${CLEANUP_TARGET_REASON:-unknown}"
       fi
-    done
+    done <<EOF
+$TARGET_IDS
+EOF
   else
     echo "  release claim:   (none matched for issue $ISSUE)"
   fi
   if [[ -n "$RESIDUAL_IDS" ]]; then
-    printf '%s\n' "$RESIDUAL_IDS" | while IFS= read -r id; do
+    while IFS= read -r id; do
       [[ -n "$id" ]] || continue
       echo "  KEEP sibling claim: $id (and keep the agent-claimed label)"
-    done
+    done <<EOF
+$RESIDUAL_IDS
+EOF
   elif [[ "$KEEP_LABEL" -eq 1 ]]; then
     echo "  KEEP label agent-claimed on #$ISSUE (--keep-label: live sibling outside ledger)"
   else
