@@ -28,6 +28,7 @@ USAGE
   scripts/tests/run-all.sh [--only PATTERN] [--timeout SECONDS]
                            [--no-quarantine] [--list-quarantine] [--quiet]
   scripts/tests/run-all.sh --self-test-toolchain
+  scripts/tests/run-all.sh --metrics-contract-fixture
   scripts/tests/run-all.sh --help
 
   --only PATTERN          run only suites whose filename matches PATTERN
@@ -44,6 +45,12 @@ USAGE
                           and single-source pin wiring (no network, no sensors).
                           The ordinary path also runs these checks and fails the
                           gate if they go red.
+  --metrics-contract-fixture
+                          internal contract-test seam only. Exclusive;
+                          not a complete gate or release substitute.
+                          Do not combine with other modes. Does not run
+                          toolchain, discovery, timeout, injection, isolation,
+                          or scripts/tests/*.test.sh.
 
 EXIT
   0  everything required is green
@@ -657,28 +664,63 @@ ONLY=""
 TIMEOUT=600
 USE_QUARANTINE=1
 QUIET=0
+METRICS_CONTRACT_FIXTURE=0
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --only) ONLY="${2:-}"; shift 2 ;;
-    --timeout) TIMEOUT="${2:-}"; shift 2 ;;
-    --no-quarantine) USE_QUARANTINE=0; shift ;;
-    --quiet) QUIET=1; shift ;;
-    --list-quarantine)
-      echo "$QUARANTINE" | while IFS="$(printf '\t')" read -r s i r; do
-        [[ -n "$s" ]] || continue
-        printf '%-28s #%-4s %s\n' "$s" "$i" "$r"
-      done
-      exit 0 ;;
-    --self-test-toolchain)
-      self_test_toolchain
-      exit $?
-      ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "run-all.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
-  esac
-done
+# GIBSON_METRICS_CONTRACT_FIXTURE_PRESCAN
+# Presence-only. Do not parse ordinary flags here: --help / --list-quarantine /
+# --self-test-toolchain must keep origin/main immediate-exit semantics, so
+# trailing arguments cannot change those commands. Guard $# before expanding
+# "$@" — Bash 3.2 + set -u treats empty "$@" as unbound.
+if [[ $# -gt 0 ]]; then
+  for _gibson_arg in "$@"; do
+    if [[ "$_gibson_arg" == "--metrics-contract-fixture" ]]; then
+      METRICS_CONTRACT_FIXTURE=1
+      break
+    fi
+  done
+  unset _gibson_arg
+fi
 
+# GIBSON_METRICS_CONTRACT_FIXTURE_PARSE
+# Exclusive internal seam: fixture must be the one and only argument. Validate
+# now. Do not execute the fixture until the production metrics functions are
+# defined below.
+if [[ "$METRICS_CONTRACT_FIXTURE" -eq 1 ]]; then
+  if [[ $# -ne 1 || "$1" != "--metrics-contract-fixture" ]]; then
+    echo "run-all.sh: --metrics-contract-fixture is exclusive and cannot be combined with other modes" >&2
+    echo "run-all.sh: --metrics-contract-fixture is an internal contract-test seam, not a complete gate" >&2
+    usage >&2
+    exit 2
+  fi
+else
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --only) ONLY="${2:-}"; shift 2 ;;
+      --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+      --no-quarantine) USE_QUARANTINE=0; shift ;;
+      --quiet) QUIET=1; shift ;;
+      --list-quarantine)
+        echo "$QUARANTINE" | while IFS="$(printf '\t')" read -r s i r; do
+          [[ -n "$s" ]] || continue
+          printf '%-28s #%-4s %s\n' "$s" "$i" "$r"
+        done
+        exit 0 ;;
+      --self-test-toolchain)
+        self_test_toolchain
+        exit $?
+        ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "run-all.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    esac
+  done
+fi
+
+# GIBSON_METRICS_CONTRACT_FIXTURE_SKIP_PREAMBLE
+# Ordinary timeout, discovery, toolchain, injection, isolation, and suite
+# preamble. Skipped when --metrics-contract-fixture was selected above.
+# Body is intentionally unindented so this skip is a small conditional boundary
+# rather than a thousand-line re-indent of the ordinary path.
+if [[ "$METRICS_CONTRACT_FIXTURE" -ne 1 ]]; then
 case "$TIMEOUT" in
   ''|*[!0-9]*) echo "run-all.sh: --timeout wants a whole number of seconds" >&2; exit 2 ;;
 esac
@@ -1105,7 +1147,10 @@ else
   FAILED="$FAILED injection-scan-missing"
 fi
 
-# --- aggregate metrics (#274) -----------------------------------------------
+fi
+# GIBSON_METRICS_CONTRACT_FIXTURE_SKIP_PREAMBLE_END
+
+# --- aggregate metrics production seam (#274/#279) --------------------------
 # Exactly one terminal GIBSON_TEST_METRICS line, derived from selected suite
 # receipts. Not a static count and not a second parser of .agents/gate.json.
 # Precedence per selected suite (exactly once), from the last non-empty line:
@@ -1115,16 +1160,23 @@ fi
 # overflow input, fail closed. Metric-contract failure is bound into FAILED
 # before n_fail/GREEN/RED so the one final verdict cannot print GREEN. Do not
 # emit GIBSON_TEST_METRICS when the metric contract failed.
+# Defined once. Fixture mode skips the ordinary preamble above and dispatches
+# immediately after these functions, before sensor suites execute.
 GIBSON_METRICS_MAX_SAFE=9007199254740991
-METRIC_TOTAL=0
-METRIC_SKIPPED=0
-METRIC_TODO=0
-METRIC_EXPLICIT=0
-METRIC_SENTINEL=0
-METRIC_SENTINEL_NAMES=""
-METRIC_EXPLICIT_NAMES=""
-METRIC_CONTRACT_FAIL=0
-METRIC_CONTRACT_REASON=""
+
+# Reset production metric accumulators. Fixture and ordinary paths both call
+# this; it is not a test-only finalizer and does not emit receipts.
+gibson_metrics_init() {
+  METRIC_TOTAL=0
+  METRIC_SKIPPED=0
+  METRIC_TODO=0
+  METRIC_EXPLICIT=0
+  METRIC_SENTINEL=0
+  METRIC_SENTINEL_NAMES=""
+  METRIC_EXPLICIT_NAMES=""
+  METRIC_CONTRACT_FAIL=0
+  METRIC_CONTRACT_REASON=""
+}
 
 gibson_metrics_fail() {
   METRIC_CONTRACT_FAIL=1
@@ -1568,49 +1620,9 @@ gibson_metrics_verdict_probe() {
   ) 2>&1
 }
 
-# --- 4. sensor suites -------------------------------------------------------
-echo "== sensors"
-
-# Predicate used below: shell-construction diagnostics must never green a
-# nominally-passing suite (#153 review round 7). Mutation proof for the exact
-# six-unbound-variable class observed under set -u + unquoted fixture heredocs.
-suite_has_shell_construction_diag() {
-  # stdin: suite captured stdout+stderr
-  grep -qE 'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found'
-}
-{
-  _mut_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-runall-shell-diag.XXXXXX")
-  {
-    echo "  ok   — synthetic"
-    for _i in 1 2 3 4 5 6; do
-      echo "scripts/tests/release-claim.test.sh: line 1391: \$2: unbound variable"
-    done
-    echo "release-claim.test.sh: 507 passed, 0 failed"
-  } > "$_mut_probe"
-  if suite_has_shell_construction_diag < "$_mut_probe"; then
-    echo "${GRN}  ok${OFF}   — mutation: six-unbound-variable class is rejected by the shell-diag gate"
-  else
-    echo "${RED}  FAIL${OFF} — mutation: six-unbound-variable class slipped the shell-diag gate"
-    FAILED="$FAILED shell-diag-mutation"
-  fi
-  # Clean green tally with no diagnostics must not trip the gate.
-  {
-    echo "  ok   — synthetic"
-    echo "release-claim.test.sh: 507 passed, 0 failed"
-  } > "$_mut_probe"
-  if suite_has_shell_construction_diag < "$_mut_probe"; then
-    echo "${RED}  FAIL${OFF} — mutation: clean suite tally falsely tripped the shell-diag gate"
-    FAILED="$FAILED shell-diag-mutation-false-positive"
-  else
-    echo "${GRN}  ok${OFF}   — mutation: clean suite tally does not trip the shell-diag gate"
-  fi
-  rm -f "$_mut_probe"
-  unset _mut_probe _i
-}
-
-# Metric-contract mutation coverage (#274): synthetic receipts only — never a
-# static production count and never a parse of .agents/gate.json.
-{
+gibson_metrics_run_contract_mutations() {
+  # Synthetic receipts only — never a static production count and never a
+  # parse of .agents/gate.json. Shared by fixture and ordinary paths.
   gibson_metrics_assert_class \
     $'ok\nGIBSON_TEST_METRICS total=10 skipped=1 todo=2\n' \
     "machine 10 1 2" \
@@ -1877,6 +1889,101 @@ suite_has_shell_construction_diag() {
   fi
   unset _vout _vrc
 }
+
+# Internal contract-test seam (#279). Private literals only; no env/file/stdin
+# extra-argument injection. Derives the aggregate through the same production
+# classifier, contributor, reconciler, verdict binder, and aggregate emitter
+# as the ordinary path. Not a complete gate or release substitute.
+gibson_run_metrics_contract_fixture() {
+  local t0
+  t0=$SECONDS
+  RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; OFF=$'\033[0m'
+  [[ -t 1 ]] || { RED=""; GRN=""; YEL=""; OFF=""; }
+  FAILED=""
+  QUARANTINED=""
+  ESCAPED=""
+  verdict_rc=1
+  gibson_metrics_init
+  echo "run-all: --metrics-contract-fixture (internal contract-test seam; not a complete gate)"
+  gibson_metrics_run_contract_mutations
+  # Mutations run in subshells or only set FAILED. Re-init accumulators so the
+  # successful derive is a clean production contribute/bind/emit; FAILED is
+  # not an accumulator and is preserved.
+  gibson_metrics_init
+
+  # Private fixture receipts owned by this function. The terminal machine
+  # line is the classifier input; the preceding 10/1/2 human tally conflicts
+  # with it (human would be 13/2/0) and must not be used.
+  gibson_metrics_contribute \
+    $'10 passed, 1 failed, 2 skipped\nGIBSON_TEST_METRICS total=10 skipped=1 todo=2\n' \
+    "metrics-contract-fixture.machine.test.sh" || true
+  gibson_metrics_contribute \
+    $'4 passed, 1 failed, 3 skipped, 1 todo\n' \
+    "metrics-contract-fixture.tally.test.sh" || true
+  gibson_metrics_contribute \
+    $'legacy fixture has no tally line\n' \
+    "metrics-contract-fixture.legacy.test.sh" || true
+
+  echo
+  gibson_run_all_bind_and_print_verdict
+  echo "run-all metrics-contract-fixture wall: $((SECONDS - t0))s"
+  gibson_metrics_emit_aggregate_or_fail
+  return $?
+}
+
+# GIBSON_METRICS_CONTRACT_FIXTURE_DISPATCH
+# Execute only after production functions are defined and after the ordinary
+# preamble has been skipped. Must exit before sensor suites.
+if [[ "$METRICS_CONTRACT_FIXTURE" -eq 1 ]]; then
+  gibson_run_metrics_contract_fixture
+  exit $?
+fi
+
+gibson_metrics_init
+
+# --- 4. sensor suites -------------------------------------------------------
+echo "== sensors"
+
+# Predicate used below: shell-construction diagnostics must never green a
+# nominally-passing suite (#153 review round 7). Mutation proof for the exact
+# six-unbound-variable class observed under set -u + unquoted fixture heredocs.
+suite_has_shell_construction_diag() {
+  # stdin: suite captured stdout+stderr
+  grep -qE 'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found'
+}
+{
+  _mut_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-runall-shell-diag.XXXXXX")
+  {
+    echo "  ok   — synthetic"
+    for _i in 1 2 3 4 5 6; do
+      echo "scripts/tests/release-claim.test.sh: line 1391: \$2: unbound variable"
+    done
+    echo "release-claim.test.sh: 507 passed, 0 failed"
+  } > "$_mut_probe"
+  if suite_has_shell_construction_diag < "$_mut_probe"; then
+    echo "${GRN}  ok${OFF}   — mutation: six-unbound-variable class is rejected by the shell-diag gate"
+  else
+    echo "${RED}  FAIL${OFF} — mutation: six-unbound-variable class slipped the shell-diag gate"
+    FAILED="$FAILED shell-diag-mutation"
+  fi
+  # Clean green tally with no diagnostics must not trip the gate.
+  {
+    echo "  ok   — synthetic"
+    echo "release-claim.test.sh: 507 passed, 0 failed"
+  } > "$_mut_probe"
+  if suite_has_shell_construction_diag < "$_mut_probe"; then
+    echo "${RED}  FAIL${OFF} — mutation: clean suite tally falsely tripped the shell-diag gate"
+    FAILED="$FAILED shell-diag-mutation-false-positive"
+  else
+    echo "${GRN}  ok${OFF}   — mutation: clean suite tally does not trip the shell-diag gate"
+  fi
+  rm -f "$_mut_probe"
+  unset _mut_probe _i
+}
+
+# Metric-contract mutation coverage (#274): synthetic receipts only — never a
+# static production count and never a parse of .agents/gate.json.
+gibson_metrics_run_contract_mutations
 
 for suite in scripts/tests/*.test.sh; do
   name=$(basename "$suite")

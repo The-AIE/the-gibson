@@ -1737,119 +1737,522 @@ else
   ok "run-all.sh does not append a static GIBSON_TEST_METRICS count"
 fi
 
-metric_out=$(bash "$REPO_ROOT/scripts/tests/run-all.sh" --only args.test --timeout 120 --quiet 2>&1) || true
-metric_line=$(printf '%s\n' "$metric_out" | grep -E '^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$' || true)
+echo "# #279 metrics-contract-fixture early exclusive seam (same-artifact oracle)"
+RA="$REPO_ROOT/scripts/tests/run-all.sh"
+
+# Source: production classifier/contributor/reconciler/binder/emitter defined once.
+_prod_ok=1
+_fn=""
+_n=0
+for _fn in gibson_metrics_classify gibson_metrics_contribute \
+  gibson_metrics_reconcile_legacy_sentinels \
+  gibson_run_all_bind_and_print_verdict \
+  gibson_metrics_emit_aggregate_or_fail; do
+  _n=$(grep -c "^${_fn}()" "$RA" || true)
+  if [[ "$_n" -ne 1 ]]; then
+    _prod_ok=0
+    break
+  fi
+done
+if [[ "$_prod_ok" -eq 1 ]]; then
+  ok "production metrics functions are defined exactly once"
+else
+  bad "production metrics functions are missing or duplicated (${_fn}=${_n})"
+fi
+unset _prod_ok _fn _n
+
+# Source: fixture runner calls the shared production path, not a copied footer.
+if awk '
+  /^gibson_run_metrics_contract_fixture\(\)/ { p=1; next }
+  p && /^# GIBSON_METRICS_CONTRACT_FIXTURE_DISPATCH/ { p=0 }
+  p && /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\]/ { p=0 }
+  p && /gibson_metrics_contribute/ { c=1 }
+  p && /gibson_run_all_bind_and_print_verdict/ { b=1 }
+  p && /gibson_metrics_emit_aggregate_or_fail/ { e=1 }
+  p && /echo[[:space:]]+["'\''"]GIBSON_TEST_METRICS total=[0-9]+/ { stat=1 }
+  END { if (c && b && e && !stat) exit 0; exit 1 }
+' "$RA"; then
+  ok "fixture runner calls shared contribute/bind/emit (no static aggregate)"
+else
+  bad "fixture runner does not reuse the production contribute/bind/emit path"
+fi
+
+# Source: ordinary path still calls the same functions after the fixture dispatch.
+if awk '
+  /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\]/ { eq=NR }
+  /gibson_run_metrics_contract_fixture$/ { if (eq && NR <= eq+3) d=eq }
+  /for suite in scripts\/tests\/\*\.test.sh/ { s=NR }
+  s && /gibson_metrics_contribute/ { c=NR }
+  /gibson_run_all_bind_and_print_verdict/ && $0 !~ /\(\)/ { b=NR }
+  /gibson_metrics_emit_aggregate_or_fail/ && $0 !~ /\(\)/ { e=NR }
+  END { if (d && s && c && b && e && d < s && s <= c && c < b && b < e) exit 0; exit 1 }
+' "$RA"; then
+  ok "ordinary path calls shared contribute/bind/emit after fixture dispatch"
+else
+  bad "ordinary path no longer shares contribute/bind/emit after fixture dispatch"
+fi
+
+# Conditional/dispatch contract: parse+validate early without executing;
+# skip ordinary preamble when selected; define production functions once;
+# dispatch after those definitions and before sensor suites.
+_279_conditional_contract() {
+  awk '
+    /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\][[:space:]]*; then/ {
+      n_eq1++
+      eq1[n_eq1]=NR
+    }
+    /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -ne 1 \]\][[:space:]]*; then/ {
+      n_ne1++
+      skip_if=NR
+    }
+    /cannot be combined/ { comb=NR }
+    /echo "== toolchain"/ { tc=NR }
+    /SH_FILES=\$\(find scripts adapters/ { fd=NR }
+    /source "\$WALL_TIMEOUT_LIB"/ { wt=NR }
+    /echo "== injection-scan"/ { inj=NR }
+    /if \[\[ "\$TIMEOUT" -gt 0 \]\] && ! suite_timeout_capable/ { to=NR }
+    /echo "== sensors"/ { sensors=NR }
+    /for suite in scripts\/tests\/\*\.test.sh/ { su=NR }
+    /^# --- aggregate metrics/ { agg=NR }
+    /^gibson_metrics_classify\(\)/ { classify=NR }
+    /^gibson_run_metrics_contract_fixture\(\)/ { fixdef=NR }
+    /gibson_run_metrics_contract_fixture/ && $0 !~ /\(\)/ { calls[++n_calls]=NR }
+    /exit \$\?/ { exits[++n_exits]=NR }
+    END {
+      if (n_ne1 != 1 || n_eq1 < 2) exit 1
+      parse_if=eq1[1]
+      disp_if=eq1[n_eq1]
+      if (!parse_if || !skip_if || !disp_if || !comb || !agg) exit 1
+      if (!tc || !fd || !wt || !inj || !to || !sensors || !su) exit 1
+      if (!classify || !fixdef) exit 1
+      parse_exec=0
+      disp_call=0
+      for (i=1; i<=n_calls; i++) {
+        if (calls[i] > parse_if && calls[i] < skip_if) parse_exec=1
+        if (calls[i] > disp_if && calls[i] <= disp_if+4) disp_call=calls[i]
+      }
+      disp_exit=0
+      for (i=1; i<=n_exits; i++) {
+        if (exits[i] > disp_if && exits[i] <= disp_if+4) disp_exit=exits[i]
+      }
+      if (parse_exec) exit 1
+      if (!disp_call || !disp_exit) exit 1
+      if (!(parse_if < skip_if && comb > parse_if && comb < skip_if)) exit 1
+      if (!(skip_if < tc && skip_if < fd && skip_if < wt && skip_if < inj && skip_if < to)) exit 1
+      if (!(tc < agg && fd < agg && wt < agg && inj < agg && to < agg)) exit 1
+      if (!(agg < classify && classify < fixdef && fixdef < disp_if)) exit 1
+      if (!(disp_if < disp_call && disp_call < disp_exit && disp_exit <= disp_if+4)) exit 1
+      if (!(disp_if < sensors && disp_if < su && sensors < su)) exit 1
+      exit 0
+    }
+  ' "$1"
+}
+
+if _279_conditional_contract "$RA"; then
+  ok "fixture parse/skip/dispatch contract: validate early, skip preamble, dispatch after functions"
+else
+  bad "fixture parse/skip/dispatch contract failed (would fall through or execute too early)"
+fi
+
+# Source: fixture presence is a pre-scan; ordinary argv keeps origin/main
+# immediate --help / --list-quarantine / --self-test-toolchain / unknown-flag
+# behavior. Fixture mode is the one and only argument.
+_279_parser_contract() {
+  awk '
+    /for [_A-Za-z0-9]+ in "\$@"/ { forloop=NR }
+    forloop && !prescan_set && /METRICS_CONTRACT_FIXTURE=1/ {
+      if (NR <= forloop + 8) prescan_set=NR
+    }
+    /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\][[:space:]]*; then/ {
+      n_eq1++
+      if (n_eq1 == 1) parse_if=NR
+    }
+    parse_if && !sole && /\$# -ne 1/ {
+      if (NR > parse_if && NR <= parse_if + 8) sole=NR
+    }
+    /while \[\[ \$# -gt 0 \]\]/ { whiles[++nwhile]=NR }
+    /-h\|--help\) usage; exit 0/ { help_imm=NR }
+    /--list-quarantine\)/ { list_arm=NR }
+    /--self-test-toolchain\)/ { st_arm=NR }
+    /WANT_HELP=1/ { want=NR }
+    /--metrics-contract-fixture\)/ { fixture_arm=NR }
+    END {
+      if (!forloop || !prescan_set || !parse_if || !sole) exit 1
+      if (!(prescan_set < parse_if && sole > parse_if)) exit 1
+      if (nwhile < 1) exit 1
+      ord=whiles[nwhile]
+      if (ord < parse_if) exit 1
+      if (!help_imm || help_imm < ord) exit 1
+      if (!list_arm || list_arm < ord) exit 1
+      if (!st_arm || st_arm < ord) exit 1
+      if (list_arm > help_imm || st_arm > help_imm) exit 1
+      if (want) exit 1
+      if (fixture_arm) exit 1
+      exit 0
+    }
+  ' "$1"
+}
+
+if _279_parser_contract "$RA"; then
+  ok "fixture pre-scan plus origin/main ordinary parser (immediate help/list/self-test)"
+else
+  bad "ordinary parser contract failed (deferred flags or missing fixture sole-arg)"
+fi
+
+# Non-vacuity: the contract must test the actual skip/dispatch conditions.
+_mut_src=$(mktemp "${TMPDIR:-/tmp}/gibson-279-runall.XXXXXX")
+sed 's/METRICS_CONTRACT_FIXTURE" -ne 1/METRICS_CONTRACT_FIXTURE" -eq 1/' "$RA" > "$_mut_src"
+if _279_conditional_contract "$_mut_src"; then
+  bad "mutation: flipping preamble skip to -eq 1 still passed the conditional contract"
+else
+  ok "mutation: flipping preamble skip to -eq 1 turns the conditional contract red"
+fi
+sed '/if \[\[ "\$METRICS_CONTRACT_FIXTURE" -ne 1 \]\]/d' "$RA" > "$_mut_src"
+if _279_conditional_contract "$_mut_src"; then
+  bad "mutation: deleting preamble skip-if still passed the conditional contract"
+else
+  ok "mutation: deleting preamble skip-if turns the conditional contract red"
+fi
+sed '/^  gibson_run_metrics_contract_fixture$/d' "$RA" > "$_mut_src"
+if _279_conditional_contract "$_mut_src"; then
+  bad "mutation: deleting fixture dispatch call still passed the conditional contract"
+else
+  ok "mutation: deleting fixture dispatch call turns the conditional contract red"
+fi
+sed 's/\$# -ne 1/\$# -eq 1/' "$RA" > "$_mut_src"
+if _279_parser_contract "$_mut_src"; then
+  bad "mutation: inverting fixture sole-arg still passed the parser contract"
+else
+  ok "mutation: inverting fixture sole-arg turns the parser contract red"
+fi
+sed 's/-h|--help) usage; exit 0/-h|--help) WANT_HELP=1; shift/' "$RA" > "$_mut_src"
+if _279_parser_contract "$_mut_src"; then
+  bad "mutation: deferring --help still passed the parser contract"
+else
+  ok "mutation: deferring --help turns the parser contract red"
+fi
+sed '/for _gibson_arg in "\$@"/d' "$RA" > "$_mut_src"
+if _279_parser_contract "$_mut_src"; then
+  bad "mutation: deleting fixture pre-scan still passed the parser contract"
+else
+  ok "mutation: deleting fixture pre-scan turns the parser contract red"
+fi
+rm -f "$_mut_src"
+unset _mut_src
+unset -f _279_conditional_contract
+unset -f _279_parser_contract
+
+if grep -Fq 'internal contract-test seam only' "$RA" \
+   && grep -Fq 'not a complete gate or release substitute' "$RA"; then
+  ok "fixture mode is inventoried as incomplete and non-gating"
+else
+  bad "fixture mode is missing the non-gating inventory text"
+fi
+
+# Exclusive combinations: every ordinary mode/flag, any extra/repeated
+# argument, and reverse-order fixture combinations exit 2 with the exclusive
+# non-gating message (not the ordinary unknown-flag path).
+_exclusive_probe() {
+  local desc="$1"
+  shift
+  local out rc=0
+  out=$(bash "$RA" "$@" 2>&1) || rc=$?
+  if [[ "$rc" -eq 2 ]] \
+     && printf '%s\n' "$out" | grep -Fq 'cannot be combined' \
+     && printf '%s\n' "$out" | grep -Fq 'not a complete gate' \
+     && ! printf '%s\n' "$out" | grep -Fq 'unknown argument'; then
+    ok "fixture exclusive with ${desc} (exit 2)"
+  else
+    bad "fixture did not reject ${desc} (rc=${rc})"
+  fi
+}
+_exclusive_probe "--only" --metrics-contract-fixture --only args.test
+_exclusive_probe "--timeout" --metrics-contract-fixture --timeout 1
+_exclusive_probe "--no-quarantine" --metrics-contract-fixture --no-quarantine
+_exclusive_probe "--list-quarantine" --metrics-contract-fixture --list-quarantine
+_exclusive_probe "--self-test-toolchain" --metrics-contract-fixture --self-test-toolchain
+_exclusive_probe "--quiet" --metrics-contract-fixture --quiet
+_exclusive_probe "--help" --metrics-contract-fixture --help
+_exclusive_probe "repeated fixture" --metrics-contract-fixture --metrics-contract-fixture
+_exclusive_probe "unknown extra" --metrics-contract-fixture --definitely-not-a-flag
+_exclusive_probe "reverse --help" --help --metrics-contract-fixture
+_exclusive_probe "reverse --list-quarantine" --list-quarantine --metrics-contract-fixture
+_exclusive_probe "reverse --self-test-toolchain" --self-test-toolchain --metrics-contract-fixture
+unset -f _exclusive_probe
+
+# Ordinary parser parity with current-main immediate-exit semantics. Trailing
+# junk after --help / --list-quarantine / --self-test-toolchain must not become
+# unknown-flag failures. Do not invent a stricter ordinary contract.
+_ordinary_same() {
+  local desc="$1"
+  shift
+  local bare_rc=0 trail_rc=0
+  local bare trail
+  bare=$(bash "$RA" "$1" 2>&1) || bare_rc=$?
+  trail=$(bash "$RA" "$1" --definitely-not-a-flag 2>&1) || trail_rc=$?
+  if [[ "$trail_rc" -eq "$bare_rc" ]] \
+     && [[ "$trail" == "$bare" ]] \
+     && ! printf '%s\n' "$trail" | grep -Fq 'unknown argument'; then
+    ok "ordinary CLI: ${desc} matches bare ${1} (exit ${bare_rc})"
+  else
+    bad "ordinary CLI: ${desc} drifted (bare_rc=${bare_rc} trail_rc=${trail_rc})"
+  fi
+}
+_ordinary_same "--help --definitely-not-a-flag" --help
+_ordinary_same "--list-quarantine --definitely-not-a-flag" --list-quarantine
+unset -f _ordinary_same
+
+help_rc=0
+help_out=$(bash "$RA" --help 2>&1) || help_rc=$?
+if [[ "$help_rc" -eq 0 ]] \
+   && printf '%s\n' "$help_out" | grep -Fq 'WHAT IT DOES' \
+   && printf '%s\n' "$help_out" | grep -Fq 'internal contract-test seam only'; then
+  ok "ordinary CLI: --help exits 0 with usage"
+else
+  bad "ordinary CLI: --help drifted (rc=${help_rc})"
+fi
+
+list_rc=0
+list_out=$(bash "$RA" --list-quarantine 2>&1) || list_rc=$?
+if [[ "$list_rc" -eq 0 ]] \
+   && ! printf '%s\n' "$list_out" | grep -Fq 'unknown argument'; then
+  ok "ordinary CLI: --list-quarantine exits 0"
+else
+  bad "ordinary CLI: --list-quarantine drifted (rc=${list_rc})"
+fi
+
+st_rc=0
+st_out=$(bash "$RA" --self-test-toolchain 2>&1) || st_rc=$?
+st_trail_rc=0
+st_trail=$(bash "$RA" --self-test-toolchain --definitely-not-a-flag 2>&1) || st_trail_rc=$?
+if [[ "$st_rc" -eq "$st_trail_rc" ]] \
+   && printf '%s\n' "$st_out" | grep -Fq 'toolchain self-test' \
+   && printf '%s\n' "$st_trail" | grep -Fq 'toolchain self-test' \
+   && ! printf '%s\n' "$st_trail" | grep -Fq 'unknown argument'; then
+  ok "ordinary CLI: --self-test-toolchain --definitely-not-a-flag matches bare self-test (exit ${st_rc})"
+else
+  bad "ordinary CLI: --self-test-toolchain trailing-arg drifted (bare_rc=${st_rc} trail_rc=${st_trail_rc})"
+fi
+unset help_rc help_out list_rc list_out st_rc st_out st_trail_rc st_trail
+
+unk_rc=0
+unk_out=$(bash "$RA" --definitely-not-a-flag 2>&1) || unk_rc=$?
+if [[ "$unk_rc" -eq 2 ]] \
+   && printf '%s\n' "$unk_out" | grep -Fq 'unknown argument: --definitely-not-a-flag'; then
+  ok "ordinary CLI: unknown flag exits 2"
+else
+  bad "ordinary CLI: unknown flag drifted (rc=${unk_rc})"
+fi
+unset unk_rc unk_out
+
+# Capture fixture status and output exactly once.
+fixture_rc=0
+fixture_out=$(bash "$RA" --metrics-contract-fixture 2>&1) || fixture_rc=$?
+
+# Reject nonzero or empty output before any parsing/arithmetic.
+if [[ "$fixture_rc" -ne 0 ]]; then
+  bad "metrics-contract-fixture exited ${fixture_rc} (want 0): $(printf '%s\n' "$fixture_out" | tail -n 8)"
+elif [[ -z "$fixture_out" ]]; then
+  bad "metrics-contract-fixture produced empty output"
+else
+  ok "metrics-contract-fixture exited 0 with nonempty output"
+fi
+
+# Same-artifact oracle: exact 20/4/3, footer order, wall before footer, mutations.
+fixture_artifact_ok() {
+  local text="$1"
+  # Empty or whitespace-only is red before arithmetic.
+  if [[ -z "$text" ]] || ! printf '%s\n' "$text" | grep -q .; then
+    return 1
+  fi
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: duplicate machine metric fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: non-terminal machine evidence fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: malformed machine metric fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: malformed machine JSON fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: negative machine metric fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: fractional machine metric fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: overflow machine metric fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: prefix reserved counters fail closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: duplicate sentinel attribution refuses' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: name/count drift refuses' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: one suite cannot contribute both explicit assertions and a sentinel' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: explicit plus sign on a tally count fails closed' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: ordinary suite failure is RED with aggregate metrics' || return 1
+  printf '%s\n' "$text" | grep -Fq 'metrics mutation: green run still prints GREEN and aggregate metrics' || return 1
+  printf '%s\n' "$text" | grep -Fq 'internal contract-test seam; not a complete gate' || return 1
+  if printf '%s\n' "$text" | grep -Eq '^== (toolchain|shellcheck|bash -n|bash 3\.2|bash-4|SCRIPT_DIR|info/warn|tool guards|vendored|mjs unknown-flag|injection-scan|sensors)'; then
+    return 1
+  fi
+  if printf '%s\n' "$text" | grep -Eq '^run-all: toolchain self-test'; then
+    return 1
+  fi
+  if printf '%s\n' "$text" | grep -Eq 'args\.test\.sh:'; then
+    return 1
+  fi
+  printf '%s\n' "$text" | awk '
+    /^run-all metrics-contract-fixture wall: [0-9]+s$/ { w++ }
+    /^run-all legacy-sentinels: metrics-contract-fixture\.legacy\.test\.sh$/ { n++ }
+    /^run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1$/ { d++ }
+    /^GIBSON_TEST_METRICS total=20 skipped=4 todo=3$/ { m++ }
+    NF { q=pprev; pprev=prev; prev=last; last=$0 }
+    END {
+      if (w != 1) exit 1
+      if (n != 1) exit 1
+      if (d != 1) exit 1
+      if (m != 1) exit 1
+      if (last !~ /^GIBSON_TEST_METRICS total=20 skipped=4 todo=3$/) exit 1
+      if (prev !~ /^run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1$/) exit 1
+      if (pprev !~ /^run-all legacy-sentinels: metrics-contract-fixture\.legacy\.test\.sh$/) exit 1
+      if (q !~ /^run-all metrics-contract-fixture wall: [0-9]+s$/) exit 1
+      exit 0
+    }
+  '
+}
+
+if [[ "$fixture_rc" -eq 0 && -n "$fixture_out" ]] && fixture_artifact_ok "$fixture_out"; then
+  ok "fixture artifact is exact 20/4/3 with wall-before-footer and mutation evidence"
+else
+  bad "fixture artifact failed the same-artifact oracle (rc=${fixture_rc}): $(printf '%s\n' "$fixture_out" | tail -n 12)"
+fi
+
+metric_line=$(printf '%s\n' "$fixture_out" | grep -E '^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$' || true)
 metric_n=$(printf '%s\n' "$metric_line" | grep -c . || true)
-if [[ "$metric_n" -eq 1 ]]; then
-  ok "run-all --only args.test emits exactly one terminal GIBSON_TEST_METRICS line"
+if [[ "$fixture_rc" -eq 0 && "$metric_n" -eq 1 && "$metric_line" == "GIBSON_TEST_METRICS total=20 skipped=4 todo=3" ]]; then
+  ok "fixture emits exactly one terminal GIBSON_TEST_METRICS total=20 skipped=4 todo=3"
 else
-  bad "run-all --only args.test metric lines=$metric_n (want 1): ${metric_line}"
+  bad "fixture metric lines=${metric_n} (want exact 20/4/3): ${metric_line}"
 fi
-diag_line=$(printf '%s\n' "$metric_out" | grep -E '^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$' || true)
-if [[ -n "$diag_line" ]]; then
-  ok "run-all emits explicit-assertion / legacy-sentinel diagnostic subtotals"
+diag_line=$(printf '%s\n' "$fixture_out" | grep -E '^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$' || true)
+if [[ "$diag_line" == "run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1" ]]; then
+  ok "fixture subtotals are explicit-assertions=19 legacy-sentinels=1"
 else
-  bad "run-all missing metric-subtotals diagnostic: $(printf '%s\n' "$metric_out" | tail -n 8)"
+  bad "fixture subtotals drifted: ${diag_line}"
 fi
-# Aggregate machine line must be the final non-empty output line, with
-# exactly one diagnostic immediately before it.
-if printf '%s\n' "$metric_out" | awk '
-  /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/ { d++ }
-  /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/ { m++ }
-  NF { n++; prev=last; last=$0 }
-  END {
-    if (d != 1) exit 1
-    if (m != 1) exit 1
-    if (last !~ /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/) exit 1
-    if (prev !~ /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/) exit 1
-    exit 0
-  }
-'; then
-  ok "aggregate machine line is the final non-empty line with exactly one diagnostic immediately before it"
-else
-  bad "aggregate GIBSON_TEST_METRICS is not the final non-empty line immediately after the one metric-subtotals diagnostic"
-fi
-
-# #278 named legacy-sentinel diagnostic is non-machine, immediately before
-# the retained subtotals line. Empty list when legacy-sentinels=0.
-named_line=$(printf '%s\n' "$metric_out" | grep -E '^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$' || true)
+named_line=$(printf '%s\n' "$fixture_out" | grep -E '^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$' || true)
 named_n=$(printf '%s\n' "$named_line" | grep -c . || true)
-if [[ "$named_n" -eq 1 ]]; then
-  ok "run-all emits exactly one named legacy-sentinel diagnostic"
+if [[ "$named_n" -eq 1 && "$named_line" == "run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh" ]]; then
+  ok "fixture names exactly one legacy sentinel"
 else
-  bad "run-all named legacy-sentinel lines=$named_n (want 1): ${named_line}"
+  bad "fixture named legacy-sentinel lines=${named_n}: ${named_line}"
 fi
-if printf '%s\n' "$metric_out" | awk '
-  /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/ { n++ }
-  /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/ { d++ }
-  /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/ { m++ }
-  NF { pprev=prev; prev=last; last=$0 }
-  END {
-    if (n != 1) exit 1
-    if (d != 1) exit 1
-    if (m != 1) exit 1
-    if (last !~ /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/) exit 1
-    if (prev !~ /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/) exit 1
-    if (pprev !~ /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/) exit 1
-    exit 0
-  }
-'; then
-  ok "named legacy-sentinel diagnostic sits immediately before terminal subtotals"
+if printf '%s\n' "$fixture_out" | grep -Eq '^run-all metrics-contract-fixture wall: [0-9]+s$'; then
+  ok "fixture prints metrics-contract-fixture wall before the footer"
 else
-  bad "named legacy-sentinel diagnostic is not immediately before metric-subtotals"
+  bad "fixture missing metrics-contract-fixture wall receipt"
 fi
 
-parse_out=$(printf '%s\n' "$metric_out" | node "$REPO_ROOT/scripts/test-integrity.mjs" parse --input /dev/stdin 2>&1) || parse_rc=$?
-parse_rc=${parse_rc:-0}
-if [[ "$parse_rc" -eq 0 ]] && printf '%s\n' "$parse_out" | grep -q '"total":'; then
-  ok "test-integrity parses the run-all aggregate metrics"
+parse_rc=0
+parse_out=""
+if [[ "$fixture_rc" -ne 0 || -z "$fixture_out" ]]; then
+  bad "test-integrity skipped: fixture artifact was empty or nonzero"
 else
-  bad "test-integrity cannot parse run-all output (rc=${parse_rc}): ${parse_out}"
+  parse_out=$(printf '%s\n' "$fixture_out" | node "$REPO_ROOT/scripts/test-integrity.mjs" parse --input /dev/stdin 2>&1) || parse_rc=$?
+  if [[ "$parse_rc" -eq 0 ]] \
+     && printf '%s\n' "$parse_out" | grep -q '"total": 20' \
+     && printf '%s\n' "$parse_out" | grep -q '"skipped": 4' \
+     && printf '%s\n' "$parse_out" | grep -q '"todo": 3'; then
+    ok "test-integrity parses the fixture aggregate as 20/4/3"
+  else
+    bad "test-integrity cannot parse fixture output (rc=${parse_rc}): ${parse_out}"
+  fi
 fi
-# Live tally of the selected suite must equal explicit-assertions (no sentinels).
-args_tally=$(printf '%s\n' "$metric_out" | grep -oE 'args\.test\.sh: [0-9]+ passed, [0-9]+ failed' | tail -1)
-args_p=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
-args_f=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
-want_total=$((args_p + args_f))
-got_total=$(printf '%s\n' "$metric_line" | grep -oE 'total=[0-9]+' | head -1 | cut -d= -f2)
-got_explicit=$(printf '%s\n' "$diag_line" | grep -oE 'explicit-assertions=[0-9]+' | cut -d= -f2)
-got_sent=$(printf '%s\n' "$diag_line" | grep -oE 'legacy-sentinels=[0-9]+' | cut -d= -f2)
-if [[ "$got_total" == "$want_total" && "$got_explicit" == "$want_total" && "$got_sent" == "0" ]]; then
-  ok "aggregate total=${got_total} equals selected-suite tally (0 sentinels)"
+
+if [[ "$fixture_rc" -eq 0 ]] \
+   && ! printf '%s\n' "$fixture_out" | grep -Eq '^== (toolchain|shellcheck|bash -n|bash 3\.2|bash-4|SCRIPT_DIR|info/warn|tool guards|vendored|mjs unknown-flag|injection-scan|sensors)' \
+   && ! printf '%s\n' "$fixture_out" | grep -Eq '^run-all: toolchain self-test'; then
+  ok "fixture did not execute the skipped ordinary preamble"
 else
-  bad "aggregate drifted from selected-suite tally (tally=$want_total total=$got_total explicit=$got_explicit sentinels=$got_sent)"
+  bad "fixture executed the skipped ordinary preamble"
 fi
-if [[ "$got_sent" == "0" && "$named_line" == "run-all legacy-sentinels:" ]]; then
-  ok "zero-sentinel run names no suites"
+
+# Non-vacuity mutations against the same oracle (counted, deletion-sensitive).
+if ! fixture_artifact_ok ""; then
+  ok "mutation: empty fixture output is rejected before parsing"
 else
-  bad "zero-sentinel named list drifted (sent=$got_sent named=${named_line})"
+  bad "mutation: empty fixture output still passed the oracle"
 fi
-if printf '%s\n' "$metric_out" | grep -Eq '^run-all wall: [0-9]+s$'; then
-  ok "run-all prints total wall time"
+
+_zero_agg=$(printf '%s\n' "$fixture_out" | sed \
+  -e 's/GIBSON_TEST_METRICS total=20 skipped=4 todo=3/GIBSON_TEST_METRICS total=0 skipped=0 todo=0/' \
+  -e 's/explicit-assertions=19/explicit-assertions=0/')
+if fixture_artifact_ok "$_zero_agg"; then
+  bad "mutation: zero aggregate still passed the oracle"
 else
-  bad "run-all missing total wall time"
+  ok "mutation: zero aggregate turns the oracle red"
 fi
-if printf '%s\n' "$metric_out" | grep -Eq 'args\.test\.sh: [0-9]+ passed, [0-9]+ failed \([0-9]+s\)'; then
-  ok "run-all prints per-suite wall time"
+
+_no_mut=$(printf '%s\n' "$fixture_out" | grep -v 'metrics mutation:' || true)
+if fixture_artifact_ok "$_no_mut"; then
+  bad "mutation: deleting mutation evidence still passed the oracle"
 else
-  bad "run-all missing per-suite wall time"
+  ok "mutation: missing mutation evidence turns the oracle red"
 fi
-if printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics' \
-   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: green run still prints GREEN and aggregate metrics' \
-   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: ordinary suite failure is RED with aggregate metrics'; then
-  ok "run-all exercised metric-contract verdict-binding mutations"
+
+_reorder=$(printf '%s\n' \
+  'run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1' \
+  'run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh' \
+  'GIBSON_TEST_METRICS total=20 skipped=4 todo=3')
+# Keep mutation evidence from the live artifact but swap the footer order.
+_reorder_full=$(printf '%s\n' "$fixture_out" | awk '
+  /^run-all metrics-contract-fixture wall: / { next }
+  /^run-all legacy-sentinels:/ { next }
+  /^run-all metric-subtotals:/ { next }
+  /^GIBSON_TEST_METRICS total=/ { next }
+  { print }
+')
+_reorder_full=$(printf '%s\n' "$_reorder_full" \
+  'run-all metrics-contract-fixture wall: 0s' \
+  'run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1' \
+  'run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh' \
+  'GIBSON_TEST_METRICS total=20 skipped=4 todo=3')
+if fixture_artifact_ok "$_reorder_full"; then
+  bad "mutation: reordered footer still passed the oracle"
 else
-  bad "run-all missing metric-contract verdict-binding mutations"
+  ok "mutation: reordered footer turns the oracle red"
 fi
-if printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: tally then trailing status remains a sentinel' \
-   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: status then terminal tally contributes explicit assertions' \
-   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: duplicate sentinel attribution refuses' \
-   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: name/count drift refuses' \
-   && printf '%s\n' "$metric_out" | grep -Fq 'metrics mutation: one suite cannot contribute both explicit assertions and a sentinel'; then
-  ok "run-all exercised sentinel attribution and terminal-tally ordering mutations"
+
+_missing_name=$(printf '%s\n' "$fixture_out" | sed 's/run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh/run-all legacy-sentinels:/')
+if fixture_artifact_ok "$_missing_name"; then
+  bad "mutation: missing legacy name still passed the oracle"
 else
-  bad "run-all missing sentinel attribution / terminal-tally ordering mutations"
+  ok "mutation: missing legacy name turns the oracle red"
 fi
+
+# The empty-args_tally false-green: empty selected-suite tally arithmetic
+# becomes 0 and agrees with a zero/empty aggregate under -eq. The new oracle
+# must reject that artifact.
+_old_empty_tally_false_green() {
+  local artifact="$1"
+  local args_tally args_p args_f want_total got_total got_explicit got_sent
+  args_tally=$(printf '%s\n' "$artifact" | grep -oE 'args\.test\.sh: [0-9]+ passed, [0-9]+ failed' | tail -1)
+  args_p=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+  args_f=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
+  want_total=$((args_p + args_f))
+  got_total=$(printf '%s\n' "$artifact" | grep -oE 'total=[0-9]+' | head -1 | cut -d= -f2)
+  got_explicit=$(printf '%s\n' "$artifact" | grep -oE 'explicit-assertions=[0-9]+' | head -1 | cut -d= -f2)
+  got_sent=$(printf '%s\n' "$artifact" | grep -oE 'legacy-sentinels=[0-9]+' | head -1 | cut -d= -f2)
+  got_total=${got_total:-0}
+  got_explicit=${got_explicit:-0}
+  got_sent=${got_sent:-0}
+  [[ "$got_total" -eq "$want_total" && "$got_explicit" -eq "$want_total" && "$got_sent" -eq 0 ]]
+}
+_empty_zero=$'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=0\nGIBSON_TEST_METRICS total=0 skipped=0 todo=0'
+if _old_empty_tally_false_green "$_empty_zero" && ! fixture_artifact_ok "$_empty_zero"; then
+  ok "mutation: empty-args_tally zero-aggregate false-green is now red"
+else
+  bad "mutation: empty-args_tally false-green was not turned red"
+fi
+if _old_empty_tally_false_green "" && ! fixture_artifact_ok ""; then
+  ok "mutation: empty-artifact arithmetic false-green is now red"
+else
+  bad "mutation: empty-artifact arithmetic false-green was not turned red"
+fi
+unset _zero_agg _no_mut _reorder _reorder_full _missing_name _empty_zero
+unset -f _old_empty_tally_false_green
+
+# Alias the captured artifact for the retained footer-shape helpers below.
+metric_out=$fixture_out
 
 # Non-vacuity of the footer-shape assertion: syntactically valid footers that
 # move the named diagnostic, duplicate a name, or drift the count must fail.
@@ -1972,5 +2375,6 @@ else
 fi
 
 echo
+echo "ci-conventions wall: ${SECONDS}s"
 echo "ci-conventions.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
