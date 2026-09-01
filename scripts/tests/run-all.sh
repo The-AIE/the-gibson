@@ -1121,6 +1121,8 @@ METRIC_SKIPPED=0
 METRIC_TODO=0
 METRIC_EXPLICIT=0
 METRIC_SENTINEL=0
+METRIC_SENTINEL_NAMES=""
+METRIC_EXPLICIT_NAMES=""
 METRIC_CONTRACT_FAIL=0
 METRIC_CONTRACT_REASON=""
 
@@ -1385,6 +1387,16 @@ gibson_metrics_classify() {
   return 0
 }
 
+# True when $1 appears as a whole word in space-separated $2.
+gibson_metrics_name_in_list() {
+  local name="$1" list="$2"
+  [[ -n "$name" ]] || return 1
+  case " $list " in
+    *" $name "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 gibson_metrics_contribute() {
   local receipt="$1" name="$2" classified kind total skipped todo
   classified=$(gibson_metrics_classify "$receipt") || {
@@ -1397,20 +1409,69 @@ gibson_metrics_contribute() {
   todo=$(printf '%s\n' "$classified" | awk '{print $4}')
   case "$kind" in
     machine|tally)
+      if gibson_metrics_name_in_list "$name" "$METRIC_SENTINEL_NAMES"; then
+        gibson_metrics_fail "suite $name: explicit assertions and sentinel"
+        return 1
+      fi
       gibson_metrics_add_into METRIC_TOTAL "$total" || return 1
       gibson_metrics_add_into METRIC_SKIPPED "$skipped" || return 1
       gibson_metrics_add_into METRIC_TODO "$todo" || return 1
       gibson_metrics_add_into METRIC_EXPLICIT "$total" || return 1
+      if ! gibson_metrics_name_in_list "$name" "$METRIC_EXPLICIT_NAMES"; then
+        METRIC_EXPLICIT_NAMES="${METRIC_EXPLICIT_NAMES}${METRIC_EXPLICIT_NAMES:+ }$name"
+      fi
       ;;
     sentinel)
+      if gibson_metrics_name_in_list "$name" "$METRIC_EXPLICIT_NAMES"; then
+        gibson_metrics_fail "suite $name: explicit assertions and sentinel"
+        return 1
+      fi
+      if gibson_metrics_name_in_list "$name" "$METRIC_SENTINEL_NAMES"; then
+        gibson_metrics_fail "suite $name: duplicate sentinel attribution"
+        return 1
+      fi
       gibson_metrics_add_into METRIC_TOTAL 1 || return 1
       gibson_metrics_add_into METRIC_SENTINEL 1 || return 1
+      METRIC_SENTINEL_NAMES="${METRIC_SENTINEL_NAMES}${METRIC_SENTINEL_NAMES:+ }$name"
       ;;
     *)
       gibson_metrics_fail "suite $name: unknown kind $kind"
       return 1
       ;;
   esac
+}
+
+# Named legacy-sentinel list must match the numeric subtotal, contain no
+# duplicate names, and share no suite with explicit assertion attribution.
+gibson_metrics_reconcile_legacy_sentinels() {
+  local named=0 seen="" tok globoff=0 dup="" dual=""
+  case "$-" in *f*) globoff=1 ;; esac
+  set -f
+  # shellcheck disable=SC2086
+  for tok in $METRIC_SENTINEL_NAMES; do
+    case " $seen " in
+      *" $tok "*) dup=$tok; break ;;
+    esac
+    seen="${seen}${seen:+ }$tok"
+    named=$((named + 1))
+    case " $METRIC_EXPLICIT_NAMES " in
+      *" $tok "*) dual=$tok; break ;;
+    esac
+  done
+  if [[ "$globoff" -eq 0 ]]; then set +f; fi
+  if [[ -n "$dup" ]]; then
+    gibson_metrics_fail "duplicate sentinel attribution: $dup"
+    return 1
+  fi
+  if [[ -n "$dual" ]]; then
+    gibson_metrics_fail "suite $dual: explicit assertions and sentinel"
+    return 1
+  fi
+  if [[ "$named" -ne "$METRIC_SENTINEL" ]]; then
+    gibson_metrics_fail "legacy-sentinel name/count drift (named=${named} count=${METRIC_SENTINEL})"
+    return 1
+  fi
+  return 0
 }
 
 gibson_metrics_assert_class() {
@@ -1442,6 +1503,7 @@ gibson_metrics_assert_error() {
 # cannot display GREEN. Sets verdict_rc. Does not emit GIBSON_TEST_METRICS.
 gibson_run_all_bind_and_print_verdict() {
   local n_fail n_quar n_esc
+  gibson_metrics_reconcile_legacy_sentinels || true
   if [[ "$METRIC_CONTRACT_FAIL" -ne 0 ]]; then
     echo "run-all: metric contract RED — $METRIC_CONTRACT_REASON" >&2
     FAILED="$FAILED metric-contract"
@@ -1476,6 +1538,7 @@ gibson_metrics_emit_aggregate_or_fail() {
   if [[ "$METRIC_CONTRACT_FAIL" -ne 0 ]]; then
     return 1
   fi
+  echo "run-all legacy-sentinels:${METRIC_SENTINEL_NAMES:+ }${METRIC_SENTINEL_NAMES}"
   echo "run-all metric-subtotals: explicit-assertions=${METRIC_EXPLICIT} legacy-sentinels=${METRIC_SENTINEL}"
   echo "GIBSON_TEST_METRICS total=${METRIC_TOTAL} skipped=${METRIC_SKIPPED} todo=${METRIC_TODO}"
   return "$verdict_rc"
@@ -1496,6 +1559,8 @@ gibson_metrics_verdict_probe() {
     METRIC_TODO=0
     METRIC_EXPLICIT=3
     METRIC_SENTINEL=0
+    METRIC_SENTINEL_NAMES=""
+    METRIC_EXPLICIT_NAMES=""
     verdict_rc=1
     gibson_run_all_bind_and_print_verdict
     gibson_metrics_emit_aggregate_or_fail
@@ -1587,6 +1652,14 @@ suite_has_shell_construction_diag() {
     $'suite: 4 passed, 1 failed, 3 skipped, 1 todo\nmore output after tally\n' \
     "sentinel 1 0 0" \
     "non-terminal tally falls back to the visible legacy sentinel"
+  gibson_metrics_assert_class \
+    $'goose-recipes.test.sh: 218 passed, 0 failed, goose-validate: NOT\ngoose recipe validate status: NOT RUN\n' \
+    "sentinel 1 0 0" \
+    "tally then trailing status remains a sentinel"
+  gibson_metrics_assert_class \
+    $'goose recipe validate status: NOT RUN\ngoose-recipes.test.sh: 218 passed, 0 failed, goose-validate: NOT\n' \
+    "tally 218 0 0" \
+    "status then terminal tally contributes explicit assertions"
   gibson_metrics_assert_error \
     $'suite: -1 passed, 0 failed\n' \
     "negative tally fails closed"
@@ -1667,6 +1740,140 @@ suite_has_shell_construction_diag() {
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: suite-failure verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
     FAILED="$FAILED metrics-verdict-mutation"
+  fi
+
+  # #278 sentinel attribution / reconciliation mutations. Synthetic contributes
+  # in a subshell — never a recursive run-all and never a static production count.
+  _vrc=0
+  _vout=$(
+    exec 2>&1
+    FAILED=""
+    ESCAPED=""
+    QUARANTINED=""
+    METRIC_CONTRACT_FAIL=0
+    METRIC_CONTRACT_REASON=""
+    METRIC_TOTAL=0
+    METRIC_SKIPPED=0
+    METRIC_TODO=0
+    METRIC_EXPLICIT=0
+    METRIC_SENTINEL=0
+    METRIC_SENTINEL_NAMES=""
+    METRIC_EXPLICIT_NAMES=""
+    verdict_rc=1
+    gibson_metrics_contribute $'no tally\n' "dup.test.sh" || true
+    gibson_metrics_contribute $'no tally\n' "dup.test.sh" || true
+    gibson_run_all_bind_and_print_verdict
+    gibson_metrics_emit_aggregate_or_fail
+    exit $?
+  ) || _vrc=$?
+  if [[ "$_vrc" -ne 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — suite dup.test.sh: duplicate sentinel attribution' \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: duplicate sentinel attribution refuses"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: duplicate sentinel attribution (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-sentinel-attribution-mutation"
+  fi
+
+  _vrc=0
+  _vout=$(
+    exec 2>&1
+    FAILED=""
+    ESCAPED=""
+    QUARANTINED=""
+    METRIC_CONTRACT_FAIL=0
+    METRIC_CONTRACT_REASON=""
+    METRIC_TOTAL=0
+    METRIC_SKIPPED=0
+    METRIC_TODO=0
+    METRIC_EXPLICIT=0
+    METRIC_SENTINEL=0
+    METRIC_SENTINEL_NAMES=""
+    METRIC_EXPLICIT_NAMES=""
+    verdict_rc=1
+    gibson_metrics_contribute $'no tally\n' "drift.test.sh" || true
+    METRIC_SENTINEL=2
+    gibson_run_all_bind_and_print_verdict
+    gibson_metrics_emit_aggregate_or_fail
+    exit $?
+  ) || _vrc=$?
+  if [[ "$_vrc" -ne 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — legacy-sentinel name/count drift (named=1 count=2)' \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: name/count drift refuses"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: name/count drift (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-sentinel-attribution-mutation"
+  fi
+
+  _vrc=0
+  _vout=$(
+    exec 2>&1
+    FAILED=""
+    ESCAPED=""
+    QUARANTINED=""
+    METRIC_CONTRACT_FAIL=0
+    METRIC_CONTRACT_REASON=""
+    METRIC_TOTAL=0
+    METRIC_SKIPPED=0
+    METRIC_TODO=0
+    METRIC_EXPLICIT=0
+    METRIC_SENTINEL=0
+    METRIC_SENTINEL_NAMES=""
+    METRIC_EXPLICIT_NAMES=""
+    verdict_rc=1
+    gibson_metrics_contribute $'suite: 4 passed, 0 failed\n' "both.test.sh" || true
+    gibson_metrics_contribute $'no tally\n' "both.test.sh" || true
+    gibson_run_all_bind_and_print_verdict
+    gibson_metrics_emit_aggregate_or_fail
+    exit $?
+  ) || _vrc=$?
+  if [[ "$_vrc" -ne 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — suite both.test.sh: explicit assertions and sentinel' \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
+     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: one suite cannot contribute both explicit assertions and a sentinel"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: dual explicit/sentinel attribution (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-sentinel-attribution-mutation"
+  fi
+
+  _vrc=0
+  _vout=$(
+    exec 2>&1
+    FAILED=""
+    ESCAPED=""
+    QUARANTINED=""
+    METRIC_CONTRACT_FAIL=0
+    METRIC_CONTRACT_REASON=""
+    METRIC_TOTAL=0
+    METRIC_SKIPPED=0
+    METRIC_TODO=0
+    METRIC_EXPLICIT=0
+    METRIC_SENTINEL=0
+    METRIC_SENTINEL_NAMES=""
+    METRIC_EXPLICIT_NAMES=""
+    verdict_rc=1
+    gibson_metrics_contribute $'no tally\n' "zeta.test.sh" || true
+    gibson_metrics_contribute $'no tally\n' "alpha.test.sh" || true
+    gibson_run_all_bind_and_print_verdict
+    gibson_metrics_emit_aggregate_or_fail
+    exit $?
+  ) || _vrc=$?
+  if [[ "$_vrc" -eq 0 ]] \
+     && printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all legacy-sentinels: zeta.test.sh alpha.test.sh$' \
+     && printf '%s\n' "$_vout" | grep -Eq '^run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2$' \
+     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=2 skipped=0 todo=0$'; then
+    echo "${GRN}  ok${OFF}   — metrics mutation: named legacy-sentinel diagnostic matches the numeric subtotal"
+  else
+    echo "${RED}  FAIL${OFF} — metrics mutation: named sentinel diagnostic (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
+    FAILED="$FAILED metrics-sentinel-attribution-mutation"
   fi
   unset _vout _vrc
 }
