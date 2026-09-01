@@ -4682,7 +4682,74 @@ case "$1 $2" in
     headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
     printf '%s|%s|%s|%s|https://github.com/acme/e2e/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z|%s\n' \
       "$number" "$claim" "$scope" "$branch" "$number" "$headsha" >> "${GH_PR_FILE:-/dev/null}"
+    # claim-provenance.mjs rereads this exact body via `pr view --json`.
+    cat "$body_file" > "${GH_PR_FILE}.body"
     echo "https://github.com/acme/e2e/pull/$number"
+    ;;
+  "pr view")
+    # Production provenance reader (#273): gh pr view N --repo … --json
+    # number,url,body,headRefOid,headRefName,isCrossRepository,baseRefName,
+    # baseRefOid,state (base repository is taken from url; gh has no
+    # baseRepository field). An unmodelled read must fail closed, not succeed.
+    if [[ "${GH_E2E_PROVENANCE_UNMODELED:-0}" == 1 ]]; then
+      echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+      exit 64
+    fi
+    number=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json|--repo|--jq|-q) shift 2 ;;
+        *)
+          if [[ "$1" =~ ^[0-9]+$ ]]; then number="$1"; fi
+          shift
+          ;;
+      esac
+    done
+    row=$(grep -E "^${number}\\|" "${GH_PR_FILE}" 2>/dev/null | head -1)
+    branch=$(printf '%s\n' "$row" | cut -d'|' -f4)
+    headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+    [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    basesha=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+    [[ -n "$basesha" ]] || basesha="cccccccccccccccccccccccccccccccccccccccc"
+    if [[ "${GH_E2E_PROVENANCE_MISMATCH:-0}" == 1 ]]; then
+      # A real object that is not the reservation: GitHub reporting the
+      # branch-point SHA as headRefOid. The reader must consume this field
+      # and fail closed, not treat any 0-exit JSON as verified metadata.
+      headsha=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+      [[ -n "$headsha" ]] || headsha="ffffffffffffffffffffffffffffffffffffffff"
+    fi
+    node -e '
+      const fs = require("fs");
+      const number = process.argv[1];
+      const bodyPath = process.argv[2];
+      const head = process.argv[3];
+      const branch = process.argv[4];
+      const base = process.argv[5];
+      const body = fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath, "utf8") : "";
+      process.stdout.write(JSON.stringify({
+        number: Number(number),
+        url: "https://github.com/acme/e2e/pull/" + number,
+        body,
+        headRefOid: head,
+        headRefName: branch,
+        isCrossRepository: false,
+        baseRefName: "main",
+        baseRefOid: base,
+        state: "OPEN"
+      }));
+    ' "$number" "${GH_PR_FILE}.body" "$headsha" "${branch:-feat/unknown}" "$basesha"
+    ;;
+  api\ repos/*)
+    # Production provenance reader (#273): GET repos/<owner>/<name>/commits/<sha>
+    # for GitHub-resolved author/committer logins. Smallest truthful payload.
+    if [[ "${GH_E2E_PROVENANCE_UNMODELED:-0}" == 1 ]]; then
+      echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+      exit 64
+    fi
+    sha="${2##*/}"
+    login="${GIT_AUTHOR_NAME:-gibson-sensor}"
+    printf '{"sha":"%s","author":{"login":"%s"},"committer":{"login":"%s"},"commit":{}}\n' \
+      "$sha" "$login" "$login"
     ;;
   *)
     echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
@@ -4702,6 +4769,8 @@ out=$(cd "$ROOT/e2e/canon" && GIBSON_CANONICAL="$ROOT/e2e/canon" "$CLAIM" 200 ch
 check    "e2e: claim.sh reserves the issue and opens the draft PR" "$rc" "0"
 contains "e2e: claim label added"     "$(cat "$GH_LABELS_FILE")" "agent-claimed"
 contains "e2e: draft PR carries the claim" "$(cat "$GH_PR_FILE")" "issue-200-checkout-fix"
+contains "e2e: claim prints the reservation SHA" "$out" "reservation: "
+contains "e2e: claim prints a provenance receipt" "$out" "provenance-receipt"
 [[ -d "$ROOT/e2e/wt-200-checkout-fix" ]] && ok "e2e: worktree created" || bad "e2e: worktree missing"
 
 # Step 3: reservation PR reaches a terminal state (merged) — it drops out of
@@ -4725,6 +4794,47 @@ br=$(git -C "$ROOT/e2e/canon" branch --list 'feat/200-checkout-fix')
 remote_br=$(git -C "$ROOT/e2e/canon" ls-remote --heads origin 'feat/200-checkout-fix')
 [[ -z "$remote_br" ]] && ok "e2e: remote branch removed" || bad "e2e: remote branch survived release"
 lacks "e2e: label file no longer carries agent-claimed" "$(cat "$GH_LABELS_FILE")" "agent-claimed"
+
+# #273 · non-vacuity: the new pr view / commit-identity reads are load-bearing.
+# If they are unmodelled (the pre-fix e2e fake) or return a mismatched head,
+# claim.sh must fail closed on classification — never silently admit the lane.
+echo "#273 · unmodelled provenance reads fail closed (non-vacuity)"
+new_repo "$ROOT/e2e_unmodelled" acme/e2e
+export GH_PR_FILE="$ROOT/e2e_unmodelled/prs"
+: > "$GH_PR_FILE"
+export GH_LABELS_FILE="$ROOT/e2e_unmodelled/labels"
+: > "$GH_LABELS_FILE"
+export GH_PR_NEXT=1
+unset GH_PR_MERGED
+export GH_E2E_PROVENANCE_UNMODELED=1
+out=$(cd "$ROOT/e2e_unmodelled/canon" && GIBSON_CANONICAL="$ROOT/e2e_unmodelled/canon" "$CLAIM" 201 unmodelled-prov 'lib/checkout/**' 2>&1); rc=$?
+unset GH_E2E_PROVENANCE_UNMODELED
+[[ "$rc" -ne 0 ]] &&
+  ok "e2e unmodelled provenance: claim.sh exits nonzero" ||
+  bad "e2e unmodelled provenance: claim.sh exited 0: $out"
+contains "e2e unmodelled provenance: names classification failure" "$out" "v2 reservation classification failed"
+contains "e2e unmodelled provenance: names the unreadable live read" "$out" "live evidence unreadable"
+lacks    "e2e unmodelled provenance: never reports claim OK" "$out" "claim.sh: OK"
+lacks    "e2e unmodelled provenance: is not an overlap-admission refuse" "$out" "post-create admission refused"
+
+echo "#273 · mismatched provenance head fails closed (non-vacuity)"
+new_repo "$ROOT/e2e_mismatch" acme/e2e
+export GH_PR_FILE="$ROOT/e2e_mismatch/prs"
+: > "$GH_PR_FILE"
+export GH_LABELS_FILE="$ROOT/e2e_mismatch/labels"
+: > "$GH_LABELS_FILE"
+export GH_PR_NEXT=1
+unset GH_PR_MERGED
+export GH_E2E_PROVENANCE_MISMATCH=1
+out=$(cd "$ROOT/e2e_mismatch/canon" && GIBSON_CANONICAL="$ROOT/e2e_mismatch/canon" "$CLAIM" 202 mismatch-prov 'lib/checkout/**' 2>&1); rc=$?
+unset GH_E2E_PROVENANCE_MISMATCH
+[[ "$rc" -ne 0 ]] &&
+  ok "e2e mismatched provenance: claim.sh exits nonzero" ||
+  bad "e2e mismatched provenance: claim.sh exited 0: $out"
+contains "e2e mismatched provenance: names classification failure" "$out" "v2 reservation classification failed"
+contains "e2e mismatched provenance: required reservation was not verified" "$out" "was not verified"
+lacks    "e2e mismatched provenance: never reports claim OK" "$out" "claim.sh: OK"
+lacks    "e2e mismatched provenance: is not an overlap-admission refuse" "$out" "post-create admission refused"
 
 # ---------------------------------------------------------------------------
 # #153 review P1 · repository binding: PR evidence must come from THIS
