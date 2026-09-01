@@ -178,6 +178,18 @@ process.stdout.write(crypto.createHash("sha256").update(buf).digest("hex"));
 NODE
 }
 
+# One receipt string for local stdout and the hosted job summary (no drift).
+# run-all.sh re-emits only the suite tally, so GitHub logs never see stdout
+# evidence; append the same line to $GITHUB_STEP_SUMMARY when both Actions
+# variables are set. Local runs must not require those variables.
+emit_toobig_receipt() {
+  local receipt="$1"
+  printf '%s\n' "$receipt"
+  if [[ "${GITHUB_ACTIONS:-}" == "true" && -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    printf '%s\n' "$receipt" >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
 # --- help / usage ---
 out=$(node "$SENSOR" --help 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help exits 0 with WHAT/WHY" \
@@ -274,9 +286,13 @@ printf '%s\n' "$vout" | grep -qx 'number=4' \
 printf '%s\n' "$vout" | grep -qx 'sprint-contract-present' \
   && ok "toobig.json has Sprint contract section" \
   || bad "toobig.json Sprint contract section: $vout"
-printf '%s\n' "$vout" | grep -qx 'sprint-contract-checkboxes=11' \
-  && ok "toobig.json sprint contract has 11 checkboxes" \
-  || bad "toobig.json checkbox count: $vout"
+# Count is the already-captured validator token, not a second parse of the file.
+checkbox_n=$(printf '%s\n' "$vout" | sed -n 's/^sprint-contract-checkboxes=\([0-9][0-9]*\)$/\1/p')
+if [[ "$checkbox_n" == "11" ]]; then
+  ok "toobig.json sprint contract has 11 checkboxes"
+else
+  bad "toobig.json checkbox count: $vout"
+fi
 printf '%s\n' "$vout" | grep -qx 'affected-area=nonempty' \
   && ok "toobig.json Affected area nonempty" \
   || bad "toobig.json Affected area: $vout"
@@ -289,7 +305,9 @@ printf '%s\n' "$vout" | grep -qx 'tier=nonempty' \
 
 digest=$(fixture_sha256 "$ROOT/toobig.json")
 if printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
-  echo "toobig sha256=${digest} sprint-contract-checkboxes=11"
+  if printf '%s' "$checkbox_n" | grep -Eq '^[0-9]+$'; then
+    emit_toobig_receipt "toobig sha256=${digest} sprint-contract-checkboxes=${checkbox_n}"
+  fi
   ok "toobig fixture sha256 is 64-hex"
 else
   bad "toobig fixture sha256 not 64-hex: $digest"
