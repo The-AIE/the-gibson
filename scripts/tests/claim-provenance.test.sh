@@ -8,6 +8,7 @@ export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-gibson-sensor}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-sensor@gibson.invalid}"
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)
 READER="$SCRIPT_DIR/../claim-provenance.mjs"
 PASS=0
 FAIL=0
@@ -21,6 +22,15 @@ lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else
 pos() { POSITIVE=$((POSITIVE + 1)); ok "$1"; }
 adv() { ADVERSARIAL=$((ADVERSARIAL + 1)); ok "$1"; }
 adv_fail() { ADVERSARIAL=$((ADVERSARIAL + 1)); bad "$1"; }
+
+echo "pure · node --test scripts/claim-provenance.test.mjs"
+if ! command -v node >/dev/null 2>&1; then
+  bad "node not installed"
+elif node --test "$REPO_ROOT/scripts/claim-provenance.test.mjs"; then
+  ok "node --test scripts/claim-provenance.test.mjs"
+else
+  bad "node --test scripts/claim-provenance.test.mjs"
+fi
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-claim-provenance.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -700,5 +710,6 @@ else
 fi
 
 echo
-echo "claim-provenance.test.sh: $PASS passed, $FAIL failed; positive=$POSITIVE adversarial=$ADVERSARIAL"
+echo "positive=$POSITIVE adversarial=$ADVERSARIAL"
+echo "claim-provenance.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
