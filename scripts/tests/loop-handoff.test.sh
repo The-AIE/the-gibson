@@ -1491,13 +1491,13 @@ export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 export GIBSON_STAMP_NOW="2026-08-03T12:34:56Z"
 rm -f "${GIBSON_STAMP_STATE}.stamp-seq"
 write_state "$BRANCH" "$(head_sha)"
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 notes1=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 upd1=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 notes2=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 upd2=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 notes3=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 upd3=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 strict_utc_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
@@ -1528,9 +1528,9 @@ cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-before.md"
 write_state "$BRANCH" "$(head_sha)"
 rm -f "${GIBSON_STAMP_STATE}.stamp-seq"
 export GIBSON_STAMP_NOW="2026-08-03T12:34:56Z"
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-snap-a.md"
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-snap-b.md"
 # shellcheck disable=SC1091  # absolute path via $GIBSON; not relative to this file
 source "$GIBSON/scripts/silent-noop.sh"
