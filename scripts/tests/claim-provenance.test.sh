@@ -123,6 +123,7 @@ exit 64
 GH
 chmod +x "$BIN/gh"
 REAL_GH=$(command -v gh 2>/dev/null || true)
+REAL_NODE=$(command -v node 2>/dev/null || true)
 export PATH="$BIN:$PATH"
 
 echo "usage · --help and unknown flags"
@@ -401,12 +402,58 @@ export GH_PR_HEAD="$SHALLOW_RES"
 export GH_PR_BRANCH="$SHALLOW_BRANCH"
 export GH_PR_BASE_OID="$SHALLOW_BASE"
 out=$(run_reader "$ROOT/shallow/wt" 99 "$SHALLOW_RES" issue-42-shallow 42 "$SHALLOW_BRANCH" 2>/dev/null); rc=$?
-if echo "$out" | grep -q '"verified":true'; then
-  adv_fail "missing original parent still verified (rc=$rc): $out"
-elif echo "$out" | grep -q 'unreadable_object'; then
-  adv "missing original parent with coinciding trees reports unreadable_object"
+complete_missing_out="$out"
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | node -e '
+  let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => {
+    let j; try { j = JSON.parse(s); } catch { process.exit(2); }
+    const sha = process.argv[1];
+    const reasons = new Set([...(j.reasons || []), ...((j.unverified || []).flatMap(u => u.reasons || []))]);
+    const ok = j.schema === "gibson.claim-provenance/v1" && j.stable === true &&
+      j.reservation === null && (j.implementation || []).some(c => c.sha === sha) &&
+      ["unreadable_object", "wrong_parent", "rebased_reservation"].some(r => reasons.has(r));
+    process.exit(ok ? 0 : 1);
+  });
+' "$SHALLOW_RES"; then
+  adv "missing original parent is ordinary report-only provenance"
 else
-  adv_fail "missing original parent did not report unreadable_object (rc=$rc): $out"
+  adv_fail "missing original parent did not return an unverified report (rc=$rc): $out"
+fi
+out=$(run_reader "$ROOT/shallow/wt" 99 "$SHALLOW_RES" issue-42-shallow 42 "$SHALLOW_BRANCH" --require-verified-reservation "$SHALLOW_RES" 2>/dev/null); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"reservation":null'; then
+  adv "writer predicate refuses a missing original parent"
+else
+  adv_fail "writer accepted a missing original parent (rc=$rc): $out"
+fi
+
+grep -v -- '^- Reservation commit:' "$ROOT/shallow/body" > "$ROOT/shallow/body.incomplete"
+export GH_PR_BODY="$ROOT/shallow/body.incomplete"
+out=$(run_reader "$ROOT/shallow/wt" 99 "$SHALLOW_RES" issue-42-shallow 42 "$SHALLOW_BRANCH" 2>/dev/null); rc=$?
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | node -e '
+  let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => {
+    let j; try { j = JSON.parse(s); } catch { process.exit(2); }
+    const sha = process.argv[1];
+    const reasons = new Set([...(j.reasons || []), ...((j.unverified || []).flatMap(u => u.reasons || []))]);
+    const ok = j.schema === "gibson.claim-provenance/v1" && j.authority === "report-only" &&
+      j.stable === true && j.reservation === null && reasons.has("missing_marker") &&
+      (j.implementation || []).some(c => c.sha === sha && (c.reasons || []).includes("ordinary_introduced"));
+    process.exit(ok ? 0 : 1);
+  });
+' "$SHALLOW_RES"; then
+  adv "incomplete body with unreadable original remains ordinary report-only provenance"
+else
+  adv_fail "incomplete body escaped report-only classification (rc=$rc): $out"
+fi
+out=$(run_reader "$ROOT/shallow/wt" 99 "$SHALLOW_RES" issue-42-shallow 42 "$SHALLOW_BRANCH" --require-verified-reservation "$SHALLOW_RES" 2>/dev/null); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"reservation":null'; then
+  adv "writer predicate refuses incomplete body with unreadable original"
+else
+  adv_fail "writer accepted incomplete body with unreadable original (rc=$rc): $out"
+fi
+export GH_PR_BODY="$ROOT/shallow/body"
+if echo "$complete_missing_out" | grep -q '"verified":true'; then
+  adv_fail "missing original parent inherited the live-base tree: $complete_missing_out"
+else
+  adv "missing original parent never inherits the live-base tree"
 fi
 
 echo "exact-diff · writer predicate refuses stable CLOSED; report-only may read it"
@@ -659,11 +706,18 @@ record_historical_negative() {
   fi
   return 1
 }
-if [[ -n "$REAL_GH" && -x "$REAL_GH" ]] && \
+mkdir -p "$ROOT/no-node-path"
+if [[ "$REAL_NODE" == /* && -x "$REAL_NODE" ]] && \
+  PATH="$ROOT/no-node-path" "$REAL_NODE" -e 'process.exit(0)' >/dev/null 2>&1; then
+  adv "absolute node remains executable outside its installation PATH"
+else
+  adv_fail "absolute node was not captured before fake PATH isolation"
+fi
+if [[ -n "$REAL_GH" && -x "$REAL_GH" && -n "$REAL_NODE" && -x "$REAL_NODE" ]] && \
   "$REAL_GH" pr view 272 --repo "$LIVE_REPO" --json number >/dev/null 2>&1; then
   live_one() {
     local pr="$1" head="$2" claim="$3" issue="$4" branch="$5"
-    PATH="$(dirname "$REAL_GH"):/usr/bin:/bin" node "$READER" \
+    PATH="$(dirname "$REAL_GH"):/usr/bin:/bin" "$REAL_NODE" "$READER" \
       --repo "$LIVE_REPO" --pr "$pr" --expected-head "$head" \
       --claim-id "$claim" --issue "$issue" --branch "$branch" \
       --repo-path "$LIVE_PATH" --base main 2>/dev/null
@@ -695,7 +749,7 @@ if [[ -n "$REAL_GH" && -x "$REAL_GH" ]] && \
   printf '%s\n' "$live_out" > "$ROOT/live-283.receipt"
   echo "  live-receipt wrote $ROOT/live-283.receipt"
 else
-  echo "  note — live GitHub historical controls skipped (gh pr view unavailable)"
+  echo "  note — live GitHub historical controls skipped (gh auth or absolute node unavailable)"
 fi
 
 echo "exact-diff · fake-live failure cannot increment the historical positive tally"

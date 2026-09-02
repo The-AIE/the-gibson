@@ -163,8 +163,6 @@ function baseEvidence(extra = {}) {
     baseRepository: "acme/app",
     truncated: false,
     unreadable: false,
-    commits,
-    introducedOrder,
     parentTree: TREE.empty,
     ...extra,
     before: extra.before ?? defaultSnap,
