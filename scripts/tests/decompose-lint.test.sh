@@ -227,9 +227,9 @@ const payloadObj = {
         totalCount: page.totalCount,
         pageInfo: {
           hasNextPage: Boolean(page.hasNextPage),
-          endCursor: Object.prototype.hasOwnProperty.call(page, "endCursor")
-            ? page.endCursor
-            : null,
+          ...(Object.prototype.hasOwnProperty.call(page, "endCursor")
+            ? { endCursor: page.endCursor }
+            : {}),
         },
         nodes,
       },
@@ -608,6 +608,11 @@ emit_toobig_receipt() {
 out=$(node "$SENSOR" --help 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help exits 0 with WHAT/WHY" \
   || bad "help (rc=$rc): $out"
+if printf '%s\n' "$out" | grep -F -- '--allow-empty' | grep -q 'INTENTIONAL_EMPTY'; then
+  ok "help discloses --allow-empty INTENTIONAL_EMPTY exit 0"
+else
+  bad "help missing --allow-empty INTENTIONAL_EMPTY: $out"
+fi
 out=$(node "$SENSOR" 2>&1); rc=$?
 [[ "$rc" -eq 2 ]] && ok "no-args exits 2" || bad "no-args want 2 got $rc"
 
@@ -839,6 +844,15 @@ if printf '%s\n' "$out" | grep -q 'unknown flag'; then
 else
   ok "combined selectors: not an unknown-flag miss"
 fi
+
+out=$(run_repo --repo acme/app --label --all-open); rc=$?
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'combined selectors' \
+   && ! printf '%s\n' "$out" | grep -q 'unknown flag'; then
+  ok "label swallows --all-open: exit 2 before gh"
+else
+  bad "label swallows --all-open (rc=$rc): $out"
+fi
+expect_calls "label swallows --all-open" 0
 
 # --- repository selector plus --file ---
 out=$(run_repo --file "$ROOT/clean.json" --repo acme/app --all-open); rc=$?
@@ -1150,6 +1164,49 @@ else
 fi
 lacks_queue "repeated cursor" "$out"
 expect_calls "repeated cursor" 2
+
+# --- malformed outer terminal cursor (hasNextPage=false) ---
+cat > "$ROOT/scenario.json" <<JSON
+{
+  "sha": "$SHA_A",
+  "queries": {
+    "all-open": {
+      "pages": [
+        {"totalCount": 0, "hasNextPage": false, "nodes": []}
+      ]
+    }
+  }
+}
+JSON
+out=$(run_repo --repo acme/app --all-open); rc=$?
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: CURSOR'; then
+  ok "malformed terminal cursor missing field: INCOMPLETE: CURSOR exit 3"
+else
+  bad "malformed terminal cursor missing field (rc=$rc): $out"
+fi
+lacks_queue "malformed terminal cursor missing field" "$out"
+expect_calls "malformed terminal cursor missing field" 1
+
+cat > "$ROOT/scenario.json" <<JSON
+{
+  "sha": "$SHA_A",
+  "queries": {
+    "all-open": {
+      "pages": [
+        {"totalCount": 0, "hasNextPage": false, "endCursor": 7, "nodes": []}
+      ]
+    }
+  }
+}
+JSON
+out=$(run_repo --repo acme/app --all-open); rc=$?
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: CURSOR'; then
+  ok "malformed terminal cursor numeric type: INCOMPLETE: CURSOR exit 3"
+else
+  bad "malformed terminal cursor numeric type (rc=$rc): $out"
+fi
+lacks_queue "malformed terminal cursor numeric type" "$out"
+expect_calls "malformed terminal cursor numeric type" 1
 
 # --- page-cap exhaustion (shell gh; 100 calls, not 100 Node processes) ---
 install_page_cap_gh

@@ -132,6 +132,11 @@ ISSUE_BODY='## Sprint contract\n- [ ] a\n- [ ] b\n## Affected area\napp\n## Depe
 out=$(node "$SENSOR" --help 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help exits 0 with WHAT/WHY" \
   || bad "help (rc=$rc): $out"
+if printf '%s\n' "$out" | grep -F -- '--allow-empty' | grep -q 'INTENTIONAL_EMPTY'; then
+  ok "help discloses --allow-empty INTENTIONAL_EMPTY exit 0"
+else
+  bad "help missing --allow-empty INTENTIONAL_EMPTY: $out"
+fi
 out=$(node "$SENSOR" 2>&1); rc=$?
 [[ "$rc" -eq 2 ]] && ok "no-args exits 2" || bad "no-args want 2 got $rc"
 
@@ -262,6 +267,13 @@ out=$(run_repo --repo acme/app --allow-empty); rc=$?
   && ok "missing selector: --allow-empty is a modifier, not a selector" \
   || bad "missing selector allow-empty (rc=$rc): $out"
 expect_calls "missing selector allow-empty" 0
+
+out=$(run_repo --repo acme/app --label --all-open); rc=$?
+[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'combined selectors' \
+  && ! printf '%s\n' "$out" | grep -q 'unknown flag' \
+  && ok "label swallows --all-open: exit 2 before gh" \
+  || bad "label swallows --all-open (rc=$rc): $out"
+expect_calls "label swallows --all-open" 0
 
 cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","queries":{"all-open":{"pages":[{"totalCount":0,"hasNextPage":false,"endCursor":null,"nodes":[]}]}}}

@@ -47,6 +47,7 @@ USAGE
   node scripts/decompose-lint.mjs --repo acme/app --all-open
   node scripts/decompose-lint.mjs --repo acme/app --label name
   node scripts/decompose-lint.mjs --help
+  --allow-empty  changes a valid empty repository selection to INTENTIONAL_EMPTY exit 0
 
 EXAMPLES
   # After drafting bodies:
