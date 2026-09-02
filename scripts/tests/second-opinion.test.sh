@@ -204,7 +204,9 @@ fi
 echo "#290 · mixed verdicts, SHA freeze, stderr isolation"
 
 MATRIX=0
-MATRIX_EXPECT=24
+MATRIX_EXPECT=26
+POST_MUTANTS_KILLED=0
+POST_MUTANTS_SURVIVED=0
 begin_matrix() {
   MATRIX=$((MATRIX + 1))
   echo "#290 [$MATRIX] $1"
@@ -1030,6 +1032,877 @@ if [[ "$rc" -eq 2 ]] && echo "$out" | grep -q -- '--commit' && [[ "$(formal_coun
   ok "no-commit: missing --commit refuses before mutation"
 else
   bad "no-commit missing-commit rc=$rc count=$(formal_count) out=$out"
+fi
+
+# 25. empty-reviewer-selection (post-review AC)
+begin_matrix "empty-reviewer-selection"
+
+file_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    sha256sum "$1" | awk '{print $1}'
+  fi
+}
+
+copy_so_tree() {
+  mkdir -p "$1/scripts" "$1/playbooks"
+  cp "$GIBSON/playbooks/reviewer.md" "$1/playbooks/reviewer.md"
+  cp "$FORMAL_REVIEW" "$1/scripts/formal-review.sh"
+  cp "$SECOND_OPINION" "$1/scripts/second-opinion.sh"
+  chmod +x "$1/scripts/second-opinion.sh" "$1/scripts/formal-review.sh"
+}
+
+reviewer_call_total() {
+  local n=0 t
+  for t in codex claude grok; do
+    if [[ -s "$CALLS/$t.count" ]]; then
+      n=$((n + $(wc -l < "$CALLS/$t.count" | tr -d ' ')))
+    fi
+  done
+  printf '%s' "$n"
+}
+
+EMPTY_SEL_ERR='second-opinion.sh: ERROR: --reviewers must select at least one nonempty reviewer'
+PYTHON3=$(command -v python3 || true)
+if [[ -z "$PYTHON3" ]]; then
+  bad "empty-reviewer-selection: python3 required for the independent process-group watchdog"
+fi
+
+EMPTY_HARNESS="$ROOT/empty-sel-harness"
+mkdir -p "$EMPTY_HARNESS"
+# Exact stderr fixture: the required error line plus exactly one LF.
+EMPTY_SEL_ERR_FILE="$EMPTY_HARNESS/expected.stderr"
+printf '%s\n' "$EMPTY_SEL_ERR" > "$EMPTY_SEL_ERR_FILE"
+cat > "$EMPTY_HARNESS/watchdog.py" <<'PY'
+#!/usr/bin/env python3
+"""Independent 5s process-group watchdog. Exit 124 if the deadline fires."""
+import os
+import signal
+import subprocess
+import sys
+import time
+
+def reap(proc, pgid):
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        pass
+    time.sleep(0.2)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        try:
+            pid, _st = os.waitpid(-pgid, os.WNOHANG)
+        except OSError:
+            break
+        if pid == 0:
+            time.sleep(0.05)
+            continue
+    try:
+        proc.wait()
+    except Exception:
+        pass
+
+def main():
+    if len(sys.argv) < 3:
+        sys.stderr.write("watchdog.py: usage: watchdog.py SECONDS CMD...\n")
+        sys.exit(2)
+    limit = float(sys.argv[1])
+    cmd = sys.argv[2:]
+    proc = subprocess.Popen(cmd, preexec_fn=os.setpgrp, close_fds=False)
+    pgid = proc.pid
+    deadline = time.time() + limit
+    while True:
+        rc = proc.poll()
+        if rc is not None:
+            try:
+                os.waitpid(proc.pid, os.WNOHANG)
+            except OSError:
+                pass
+            sys.exit(rc)
+        if time.time() >= deadline:
+            reap(proc, pgid)
+            sys.exit(124)
+        time.sleep(0.05)
+
+if __name__ == "__main__":
+    main()
+PY
+chmod +x "$EMPTY_HARNESS/watchdog.py"
+
+cat > "$EMPTY_HARNESS/caller-shim.sh" <<SHIM
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${GIBSON_290_SHIM_INNER:-0}" != 1 ]]; then
+  export GIBSON_290_SHIM_INNER=1
+  exec "$PYTHON3" "$EMPTY_HARNESS/watchdog.py" 5 "\$0" "\$@"
+fi
+PRODUCTION_SECOND_OPINION="\${PRODUCTION_SECOND_OPINION:?}"
+REVIEWERS_VALUE="\$1"
+SO_REPO="\${SO_REPO:?}"
+SO_OUT="\${SO_OUT:?}"
+SO_BRANCH="\${SO_BRANCH:?}"
+SO_STATUS="\${SO_STATUS:?}"
+SO_INVOKE="\${SO_INVOKE:?}"
+printf '%s\n' "call" >> "\$SO_INVOKE"
+if "\$PRODUCTION_SECOND_OPINION" --repo "\$SO_REPO" --reviewers "\$REVIEWERS_VALUE" \
+    --author grok --base main --branch "\$SO_BRANCH" --out "\$SO_OUT" \
+    --pr 9 --github-repo acme/app; then
+  printf '%s\n' "status: ok" > "\$SO_STATUS"
+  exit 0
+else
+  rc=\$?
+  exit "\$rc"
+fi
+SHIM
+chmod +x "$EMPTY_HARNESS/caller-shim.sh"
+
+empty_sel_value() {
+  case "$1" in
+    1) printf '%s' "" ;;
+    2) printf '%s' "   " ;;
+    3) printf '%s' $'\t' ;;
+    4) printf '%s' "," ;;
+    5) printf '%s' $' ,\t,, ' ;;
+    *) return 1 ;;
+  esac
+}
+
+run_empty_sel_shim() {
+  local val="$1"
+  : > "$SO_INVOKE"
+  rm -f "$SO_STATUS"
+  GIBSON_FORMAL_REVIEW=1 GH_REVIEWER_TOKEN=test-reviewer-token \
+    PRODUCTION_SECOND_OPINION="$PRODUCTION_SECOND_OPINION" \
+    SO_REPO="$SO_REPO" SO_OUT="$SO_OUT" SO_BRANCH="$SO_BRANCH" \
+    SO_STATUS="$SO_STATUS" SO_INVOKE="$SO_INVOKE" \
+    "$EMPTY_HARNESS/caller-shim.sh" "$val" \
+    >"$SO_STDOUT" 2>"$SO_STDERR"
+  return $?
+}
+
+ES_CASES=0
+ES_SHIM_INVOCATIONS=0
+ES_BOUNDED=0
+ES_EXIT1=0
+ES_STDOUT_EMPTY=0
+ES_STDERR_EXACT=0
+ES_REVIEWER_CALLS=0
+ES_FORMAL_CALLS=0
+ES_GH_CALLS=0
+ES_STATUS_OK=0
+ES_MUTANTS_KILLED=0
+ES_GREEN_OK=1
+
+for i in 1 2 3 4 5; do
+  ES_CASES=$((ES_CASES + 1))
+  reset_formal
+  setup_repo
+  write_stub codex $'VERDICT: APPROVE\n' "" 0
+  write_stub claude $'VERDICT: APPROVE\n' "" 0
+  case_dir="$ROOT/empty-sel/$i"
+  mkdir -p "$case_dir"
+  SO_OUT="$case_dir/second-opinion.md"
+  SO_LOG="${SO_OUT%.md}.log"
+  SO_REPO="$REPO"
+  SO_BRANCH="$BRANCH"
+  SO_STATUS="$case_dir/status"
+  SO_INVOKE="$case_dir/invoke.log"
+  SO_STDOUT="$case_dir/stdout"
+  SO_STDERR="$case_dir/stderr"
+  canary_md="CANARY-MD-$i-BYTES"
+  canary_log="CANARY-LOG-$i-BYTES"
+  canary_md_file="$case_dir/expected-canary.md"
+  canary_log_file="$case_dir/expected-canary.log"
+  printf '%s' "$canary_md" > "$canary_md_file"
+  printf '%s' "$canary_log" > "$canary_log_file"
+  if [[ "$i" -le 2 ]]; then
+    rm -f "$SO_OUT" "$SO_LOG"
+    want_absent=1
+  else
+    cp "$canary_md_file" "$SO_OUT"
+    cp "$canary_log_file" "$SO_LOG"
+    want_absent=0
+  fi
+  val=$(empty_sel_value "$i")
+  PRODUCTION_SECOND_OPINION="$SECOND_OPINION"
+  : > "$GH_LOG"
+  run_empty_sel_shim "$val"
+  rc=$?
+  inv=$(wc -l < "$SO_INVOKE" 2>/dev/null | tr -d ' ')
+  [[ -z "$inv" ]] && inv=0
+  ES_SHIM_INVOCATIONS=$((ES_SHIM_INVOCATIONS + inv))
+  if [[ "$rc" -eq 124 ]]; then
+    bad "empty-sel case $i: watchdog fired (not an accepted exit 1)"
+    ES_GREEN_OK=0
+  else
+    ES_BOUNDED=$((ES_BOUNDED + 1))
+  fi
+  if [[ "$rc" -eq 1 ]]; then
+    ES_EXIT1=$((ES_EXIT1 + 1))
+  else
+    bad "empty-sel case $i: rc=$rc (want 1)"
+    ES_GREEN_OK=0
+  fi
+  if [[ ! -s "$SO_STDOUT" ]]; then
+    ES_STDOUT_EMPTY=$((ES_STDOUT_EMPTY + 1))
+  else
+    bad "empty-sel case $i: stdout not empty"
+    ES_GREEN_OK=0
+  fi
+  if cmp -s "$SO_STDERR" "$EMPTY_SEL_ERR_FILE"; then
+    ES_STDERR_EXACT=$((ES_STDERR_EXACT + 1))
+  else
+    bad "empty-sel case $i: stderr not exact vs one-line+LF fixture"
+    ES_GREEN_OK=0
+  fi
+  ES_REVIEWER_CALLS=$((ES_REVIEWER_CALLS + $(reviewer_call_total)))
+  ES_FORMAL_CALLS=$((ES_FORMAL_CALLS + $(formal_count)))
+  gh_n=$(wc -l < "$GH_LOG" 2>/dev/null | tr -d ' ')
+  [[ -z "$gh_n" ]] && gh_n=0
+  if [[ "$gh_n" -ne 0 ]]; then
+    bad "empty-sel case $i: GH_LOG lines=$gh_n (want 0)"
+    ES_GREEN_OK=0
+  fi
+  ES_GH_CALLS=$((ES_GH_CALLS + gh_n))
+  if [[ -f "$SO_STATUS" ]] && grep -qx 'status: ok' "$SO_STATUS"; then
+    ES_STATUS_OK=$((ES_STATUS_OK + 1))
+    bad "empty-sel case $i: wrote status: ok on a failing production run"
+    ES_GREEN_OK=0
+  fi
+  if [[ "$want_absent" -eq 1 ]]; then
+    if [[ -e "$SO_OUT" || -e "$SO_LOG" ]]; then
+      bad "empty-sel case $i: created report/sidecar that should stay absent"
+      ES_GREEN_OK=0
+    fi
+  else
+    if cmp -s "$SO_OUT" "$canary_md_file" && cmp -s "$SO_LOG" "$canary_log_file"; then
+      :
+    else
+      bad "empty-sel case $i: pre-existing canary not preserved byte-for-byte"
+      ES_GREEN_OK=0
+    fi
+  fi
+done
+
+if [[ "$ES_REVIEWER_CALLS" -ne 0 ]]; then
+  bad "empty-sel: reviewer_calls=$ES_REVIEWER_CALLS (want 0)"
+  ES_GREEN_OK=0
+fi
+if [[ "$ES_FORMAL_CALLS" -ne 0 ]]; then
+  bad "empty-sel: formal_calls=$ES_FORMAL_CALLS (want 0)"
+  ES_GREEN_OK=0
+fi
+if [[ "$ES_GH_CALLS" -ne 0 ]]; then
+  bad "empty-sel: github_calls=$ES_GH_CALLS (want 0)"
+  ES_GREEN_OK=0
+fi
+
+# Omitting --reviewers retains the codex,claude default (not one of the 5 shim cases).
+reset_formal
+setup_repo
+write_stub codex $'VERDICT: APPROVE\n' "" 0
+write_stub claude $'VERDICT: APPROVE\n' "" 0
+GIBSON_FORMAL_REVIEW=1 GH_REVIEWER_TOKEN=test-reviewer-token \
+  "$SECOND_OPINION" --repo "$REPO" --author grok \
+  --base main --branch "$BRANCH" --out "$OUT" \
+  --pr 9 --github-repo acme/app \
+  >"$ROOT/stdout-default-reviewers.txt" 2>"$ROOT/stderr-default-reviewers.txt"
+def_rc=$?
+if grep -q 'must select at least one nonempty reviewer' "$ROOT/stderr-default-reviewers.txt"; then
+  bad "omitting --reviewers hit the empty-selection refusal"
+  ES_GREEN_OK=0
+elif [[ "$def_rc" -eq 0 && -s "$CALLS/codex.count" && -s "$CALLS/claude.count" ]]; then
+  ok "omitting --reviewers retains the codex,claude default"
+else
+  bad "omitting --reviewers did not dispatch both default reviewers rc=$def_rc"
+  ES_GREEN_OK=0
+fi
+
+extract_empty_guard_block() {
+  awk '
+    /# --- #290 nonempty-reviewer-selection begin ---/ {keep=1}
+    keep {print}
+    /# --- #290 nonempty-reviewer-selection end ---/ {keep=0}
+  ' "$1"
+}
+
+count_empty_guard_markers() {
+  local n
+  n=$(grep -c '# --- #290 nonempty-reviewer-selection begin ---' "$1" 2>/dev/null || true)
+  printf '%s' "${n:-0}"
+}
+
+PROD_HASH_BEFORE=$(file_sha256 "$SECOND_OPINION")
+guard_n=$(count_empty_guard_markers "$SECOND_OPINION")
+if [[ "$guard_n" -eq 1 ]]; then
+  ok "empty-sel: production nonempty-token block found exactly once"
+else
+  bad "empty-sel: production guard markers=$guard_n (want 1)"
+  ES_GREEN_OK=0
+fi
+
+# Mutant EMPTY_REVIEWER_GUARD_REMOVED
+REMOVED_GIB="$ROOT/mut-empty-removed"
+copy_so_tree "$REMOVED_GIB"
+REMOVED_SO="$REMOVED_GIB/scripts/second-opinion.sh"
+hash_at_copy=$(file_sha256 "$SECOND_OPINION")
+state=keep
+: > "$REMOVED_SO"
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" == *"# --- #290 nonempty-reviewer-selection begin ---"* ]]; then
+    state=skip
+    continue
+  fi
+  if [[ "$line" == *"# --- #290 nonempty-reviewer-selection end ---"* ]]; then
+    state=keep
+    continue
+  fi
+  if [[ "$state" == keep ]]; then
+    printf '%s\n' "$line" >> "$REMOVED_SO"
+  fi
+done < "$SECOND_OPINION"
+chmod +x "$REMOVED_SO"
+removed_markers=$(count_empty_guard_markers "$REMOVED_SO")
+if [[ "$removed_markers" -eq 0 ]]; then
+  ok "EMPTY_REVIEWER_GUARD_REMOVED: deleted the delimited block once"
+else
+  bad "EMPTY_REVIEWER_GUARD_REMOVED: markers remain ($removed_markers)"
+fi
+PROD_HASH_AFTER_REMOVED=$(file_sha256 "$SECOND_OPINION")
+if [[ "$PROD_HASH_BEFORE" == "$PROD_HASH_AFTER_REMOVED" && "$hash_at_copy" == "$PROD_HASH_BEFORE" ]]; then
+  ok "EMPTY_REVIEWER_GUARD_REMOVED: unmodified production hash unchanged"
+else
+  bad "EMPTY_REVIEWER_GUARD_REMOVED: production hash drifted"
+fi
+
+reset_formal
+setup_repo
+write_stub codex $'VERDICT: APPROVE\n' "" 0
+write_stub claude $'VERDICT: APPROVE\n' "" 0
+case_dir="$ROOT/empty-sel/removed"
+mkdir -p "$case_dir"
+SO_OUT="$case_dir/second-opinion.md"
+SO_LOG="${SO_OUT%.md}.log"
+SO_REPO="$REPO"
+SO_BRANCH="$BRANCH"
+SO_STATUS="$case_dir/status"
+SO_INVOKE="$case_dir/invoke.log"
+SO_STDOUT="$case_dir/stdout"
+SO_STDERR="$case_dir/stderr"
+canary_md="CANARY-REMOVED-MD"
+canary_log="CANARY-REMOVED-LOG"
+printf '%s' "$canary_md" > "$case_dir/expected-canary.md"
+printf '%s' "$canary_log" > "$case_dir/expected-canary.log"
+cp "$case_dir/expected-canary.md" "$SO_OUT"
+cp "$case_dir/expected-canary.log" "$SO_LOG"
+PRODUCTION_SECOND_OPINION="$REMOVED_SO"
+run_empty_sel_shim ""
+rm_rc=$?
+rm_stdout_empty=0
+[[ ! -s "$SO_STDOUT" ]] && rm_stdout_empty=1
+rm_stderr_exact=0
+cmp -s "$SO_STDERR" "$EMPTY_SEL_ERR_FILE" && rm_stderr_exact=1
+rm_canary_ok=0
+cmp -s "$SO_OUT" "$case_dir/expected-canary.md" && cmp -s "$SO_LOG" "$case_dir/expected-canary.log" && rm_canary_ok=1
+rm_status_ok=0
+[[ -f "$SO_STATUS" ]] && grep -qx 'status: ok' "$SO_STATUS" && rm_status_ok=1
+# Kill on output/artifact/timing, not a status: ok count (mutant also fails).
+if [[ "$rm_rc" -eq 124 ]]; then
+  bad "EMPTY_REVIEWER_GUARD_REMOVED: watchdog fired"
+elif [[ "$rm_stdout_empty" -eq 1 && "$rm_canary_ok" -eq 1 && "$rm_stderr_exact" -eq 1 ]]; then
+  bad "EMPTY_REVIEWER_GUARD_REMOVED: survived output/artifact/stderr witnesses (vacuous)"
+  POST_MUTANTS_SURVIVED=$((POST_MUTANTS_SURVIVED + 1))
+else
+  POST_MUTANTS_KILLED=$((POST_MUTANTS_KILLED + 1))
+  ES_MUTANTS_KILLED=$((ES_MUTANTS_KILLED + 1))
+  echo "RED-BEFORE-GREEN EMPTY_REVIEWER_GUARD_REMOVED: rc=$rm_rc stdout_empty=$rm_stdout_empty canary_ok=$rm_canary_ok status_ok=$rm_status_ok stderr_exact=$rm_stderr_exact"
+  ok "EMPTY_REVIEWER_GUARD_REMOVED killed by output/artifact/timing (not status: ok count)"
+fi
+
+# Mutant EMPTY_REVIEWER_GUARD_MOVED_LATE
+LATE_GIB="$ROOT/mut-empty-late"
+copy_so_tree "$LATE_GIB"
+LATE_SO="$LATE_GIB/scripts/second-opinion.sh"
+hash_at_late_copy=$(file_sha256 "$SECOND_OPINION")
+BLOCK_FILE="$ROOT/empty-guard-block.txt"
+extract_empty_guard_block "$SECOND_OPINION" > "$BLOCK_FILE"
+if [[ ! -s "$BLOCK_FILE" ]]; then
+  bad "EMPTY_REVIEWER_GUARD_MOVED_LATE: failed to extract the delimited block"
+fi
+state=keep
+: > "$LATE_SO"
+inserted=0
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" == *"# --- #290 nonempty-reviewer-selection begin ---"* ]]; then
+    state=skip
+    continue
+  fi
+  if [[ "$line" == *"# --- #290 nonempty-reviewer-selection end ---"* ]]; then
+    state=keep
+    continue
+  fi
+  if [[ "$state" != keep ]]; then
+    continue
+  fi
+  printf '%s\n' "$line" >> "$LATE_SO"
+  if [[ "$line" == 'cat "$OUT"' && "$inserted" -eq 0 ]]; then
+    cat "$BLOCK_FILE" >> "$LATE_SO"
+    inserted=1
+  fi
+done < "$SECOND_OPINION"
+chmod +x "$LATE_SO"
+late_markers=$(count_empty_guard_markers "$LATE_SO")
+late_after_cat=0
+awk '
+  $0 == "cat \"$OUT\"" {saw=1}
+  saw && /# --- #290 nonempty-reviewer-selection begin ---/ {found=1}
+  END {exit found?0:1}
+' "$LATE_SO" && late_after_cat=1
+if [[ "$late_markers" -eq 1 && "$inserted" -eq 1 && "$late_after_cat" -eq 1 ]]; then
+  ok "EMPTY_REVIEWER_GUARD_MOVED_LATE: block moved once to immediately after cat \"\$OUT\""
+else
+  bad "EMPTY_REVIEWER_GUARD_MOVED_LATE: splice miss markers=$late_markers inserted=$inserted after_cat=$late_after_cat"
+fi
+PROD_HASH_AFTER_LATE=$(file_sha256 "$SECOND_OPINION")
+if [[ "$PROD_HASH_BEFORE" == "$PROD_HASH_AFTER_LATE" && "$hash_at_late_copy" == "$PROD_HASH_BEFORE" ]]; then
+  ok "EMPTY_REVIEWER_GUARD_MOVED_LATE: unmodified production hash unchanged"
+else
+  bad "EMPTY_REVIEWER_GUARD_MOVED_LATE: production hash drifted"
+fi
+
+reset_formal
+setup_repo
+write_stub codex $'VERDICT: APPROVE\n' "" 0
+write_stub claude $'VERDICT: APPROVE\n' "" 0
+case_dir="$ROOT/empty-sel/late"
+mkdir -p "$case_dir"
+SO_OUT="$case_dir/second-opinion.md"
+SO_LOG="${SO_OUT%.md}.log"
+SO_REPO="$REPO"
+SO_BRANCH="$BRANCH"
+SO_STATUS="$case_dir/status"
+SO_INVOKE="$case_dir/invoke.log"
+SO_STDOUT="$case_dir/stdout"
+SO_STDERR="$case_dir/stderr"
+canary_md="CANARY-LATE-MD"
+canary_log="CANARY-LATE-LOG"
+printf '%s' "$canary_md" > "$case_dir/expected-canary.md"
+printf '%s' "$canary_log" > "$case_dir/expected-canary.log"
+cp "$case_dir/expected-canary.md" "$SO_OUT"
+cp "$case_dir/expected-canary.log" "$SO_LOG"
+PRODUCTION_SECOND_OPINION="$LATE_SO"
+run_empty_sel_shim ""
+late_rc=$?
+late_stdout_empty=0
+[[ ! -s "$SO_STDOUT" ]] && late_stdout_empty=1
+late_stderr_exact=0
+cmp -s "$SO_STDERR" "$EMPTY_SEL_ERR_FILE" && late_stderr_exact=1
+late_canary_ok=0
+cmp -s "$SO_OUT" "$case_dir/expected-canary.md" && cmp -s "$SO_LOG" "$case_dir/expected-canary.log" && late_canary_ok=1
+late_status_ok=0
+[[ -f "$SO_STATUS" ]] && grep -qx 'status: ok' "$SO_STATUS" && late_status_ok=1
+if [[ "$late_rc" -eq 124 ]]; then
+  bad "EMPTY_REVIEWER_GUARD_MOVED_LATE: watchdog fired"
+  POST_MUTANTS_SURVIVED=$((POST_MUTANTS_SURVIVED + 1))
+elif [[ "$late_stdout_empty" -eq 1 && "$late_canary_ok" -eq 1 ]]; then
+  bad "EMPTY_REVIEWER_GUARD_MOVED_LATE: survived late stdout/report/canary witnesses"
+  POST_MUTANTS_SURVIVED=$((POST_MUTANTS_SURVIVED + 1))
+else
+  POST_MUTANTS_KILLED=$((POST_MUTANTS_KILLED + 1))
+  ES_MUTANTS_KILLED=$((ES_MUTANTS_KILLED + 1))
+  echo "RED-BEFORE-GREEN EMPTY_REVIEWER_GUARD_MOVED_LATE: rc=$late_rc stdout_empty=$late_stdout_empty canary_ok=$late_canary_ok status_ok=$late_status_ok stderr_exact=$late_stderr_exact"
+  ok "EMPTY_REVIEWER_GUARD_MOVED_LATE killed by late stdout/report/canary effects"
+fi
+
+if [[ "$ES_CASES" -eq 5 && "$ES_SHIM_INVOCATIONS" -eq 5 && "$ES_BOUNDED" -eq 5 \
+  && "$ES_EXIT1" -eq 5 && "$ES_STDOUT_EMPTY" -eq 5 && "$ES_STDERR_EXACT" -eq 5 \
+  && "$ES_REVIEWER_CALLS" -eq 0 && "$ES_FORMAL_CALLS" -eq 0 && "$ES_GH_CALLS" -eq 0 \
+  && "$ES_STATUS_OK" -eq 0 \
+  && "$ES_MUTANTS_KILLED" -eq 2 && "$ES_GREEN_OK" -eq 1 ]]; then
+  echo "empty-reviewer-selection cases=5 shim_invocations=5 bounded=5 exit=1 stdout=empty stderr=exact reviewer_calls=0 formal_calls=0 status_ok=0 mutants=2/2"
+  ok "empty-reviewer-selection receipt"
+else
+  bad "empty-reviewer-selection counters cases=$ES_CASES shim=$ES_SHIM_INVOCATIONS bounded=$ES_BOUNDED exit1=$ES_EXIT1 stdout=$ES_STDOUT_EMPTY stderr=$ES_STDERR_EXACT reviewer=$ES_REVIEWER_CALLS formal=$ES_FORMAL_CALLS github=$ES_GH_CALLS status_ok=$ES_STATUS_OK mutants=$ES_MUTANTS_KILLED/2 green=$ES_GREEN_OK"
+fi
+
+# 26. frozen-base-head-toctou (post-review AC)
+begin_matrix "frozen-base-head-toctou"
+
+TOCTOU_SENTINEL="TOCTOU-ORIGINAL-SENTINEL-B0-H1"
+HEAD_SENTINEL="TOCTOU-MOVED-HEAD-SENTINEL-H2"
+TOCTOU_SEAM='git -C "$REPO" diff "$BASE_SHA...$REVIEWED_SHA"'
+TOCTOU_SEAM_BASE='git -C "$REPO" diff "$BASE...$REVIEWED_SHA"'
+TOCTOU_SEAM_HEAD='git -C "$REPO" diff "$BASE_SHA...$BRANCH"'
+
+setup_toctou_repo() {
+  rm -rf "$REPO" "$ROOT/out"
+  mkdir -p "$REPO"
+  $GIT init -q "$REPO"
+  git -C "$REPO" symbolic-ref HEAD refs/heads/main
+  echo base > "$REPO/README.md"
+  $GIT -C "$REPO" add README.md
+  $GIT -C "$REPO" commit -q -m "B0"
+  B0=$(git -C "$REPO" rev-parse HEAD | tr 'A-F' 'a-f')
+  $GIT -C "$REPO" checkout -q -b "$BRANCH"
+  echo "$TOCTOU_SENTINEL" >> "$REPO/README.md"
+  $GIT -C "$REPO" commit -q -am "H1"
+  H1=$(git -C "$REPO" rev-parse HEAD | tr 'A-F' 'a-f')
+  $GIT -C "$REPO" checkout -q main
+  : > "$CALLS/codex.count"
+  rm -f "$CALLS/prompt.txt" "$CALLS/codex.prompt"
+}
+
+install_toctou_git() {
+  local mode="$1"
+  export GIBSON_290_REAL_GIT="$REAL_GIT"
+  export GIBSON_290_TOCTOU_REPO="$REPO"
+  export GIBSON_290_TOCTOU_MODE="$mode"
+  export GIBSON_290_TOCTOU_BASE="main"
+  export GIBSON_290_TOCTOU_BRANCH="$BRANCH"
+  export GIBSON_290_TOCTOU_B0="$B0"
+  export GIBSON_290_TOCTOU_H1="$H1"
+  export GIBSON_290_TOCTOU_HEAD_SENTINEL="$HEAD_SENTINEL"
+  export GIBSON_290_TOCTOU_DIR="$ROOT/toctou-$mode"
+  mkdir -p "$GIBSON_290_TOCTOU_DIR"
+  : > "$GIBSON_290_TOCTOU_DIR/resolve.log"
+  rm -f "$GIBSON_290_TOCTOU_DIR/moved.marker" \
+    "$GIBSON_290_TOCTOU_DIR/move-refused.marker" \
+    "$GIBSON_290_TOCTOU_DIR/diff.args" \
+    "$GIBSON_290_TOCTOU_DIR/h2.sha" \
+    "$GIBSON_290_TOCTOU_DIR/mb_frozen" \
+    "$GIBSON_290_TOCTOU_DIR/mb_moved" \
+    "$GIBSON_290_TOCTOU_DIR/expected.resolve"
+  # BIN/git is normally a symlink to the real git; writing through it would
+  # clobber the real binary (macOS "Operation not permitted").
+  rm -f "$BIN/git"
+  cat > "$BIN/git" <<'GIT'
+#!/usr/bin/env bash
+set -euo pipefail
+REAL="${GIBSON_290_REAL_GIT:?}"
+DIR="${GIBSON_290_TOCTOU_DIR:?}"
+REPO_T="${GIBSON_290_TOCTOU_REPO:?}"
+is_rev_parse=0
+is_verify=0
+is_quiet=0
+is_diff=0
+operand=""
+for a in "$@"; do
+  case "$a" in
+    rev-parse) is_rev_parse=1 ;;
+    --verify) is_verify=1 ;;
+    --quiet) is_quiet=1 ;;
+    diff) is_diff=1 ;;
+  esac
+  operand="$a"
+done
+if [[ "$is_rev_parse" -eq 1 && "$is_verify" -eq 1 && "$is_quiet" -eq 1 ]]; then
+  printf '%s\n' "$operand" >> "$DIR/resolve.log"
+  exec "$REAL" "$@"
+fi
+if [[ "$is_diff" -eq 1 ]]; then
+  printf '%s\n' "$*" >> "$DIR/diff.args"
+  if [[ ! -f "$DIR/moved.marker" && ! -f "$DIR/move-refused.marker" ]]; then
+    BASE_N="${GIBSON_290_TOCTOU_BASE:?}"
+    BR_N="${GIBSON_290_TOCTOU_BRANCH:?}"
+    printf '%s\n' "${BASE_N}^{commit}" "${BR_N}^{commit}" > "$DIR/expected.resolve"
+    if cmp -s "$DIR/resolve.log" "$DIR/expected.resolve"; then
+      : > "$DIR/moved.marker"
+      PATH="/usr/bin:/bin:/usr/local/bin"
+      B0="${GIBSON_290_TOCTOU_B0:?}"
+      H1="${GIBSON_290_TOCTOU_H1:?}"
+      "$REAL" -C "$REPO_T" merge-base "$B0" "$H1" > "$DIR/mb_frozen"
+      if [[ "${GIBSON_290_TOCTOU_MODE:?}" == "base-move" ]]; then
+        "$REAL" -C "$REPO_T" update-ref "refs/heads/${BASE_N}" "$H1"
+        "$REAL" -C "$REPO_T" merge-base "$BASE_N" "$H1" > "$DIR/mb_moved"
+      else
+        "$REAL" -C "$REPO_T" checkout -q "$BR_N"
+        printf '%s\n' "${GIBSON_290_TOCTOU_HEAD_SENTINEL:?}" >> "$REPO_T/README.md"
+        "$REAL" -C "$REPO_T" add README.md
+        "$REAL" -c user.email=test@gibson.invalid -c user.name=gibson-test -c commit.gpgsign=false \
+          -C "$REPO_T" commit -q -am "moved-head"
+        "$REAL" -C "$REPO_T" rev-parse HEAD | tr 'A-F' 'a-f' > "$DIR/h2.sha"
+        "$REAL" -C "$REPO_T" checkout -q "$BASE_N"
+      fi
+    else
+      : > "$DIR/move-refused.marker"
+    fi
+  fi
+  exec "$REAL" "$@"
+fi
+exec "$REAL" "$@"
+GIT
+  chmod +x "$BIN/git"
+}
+
+toctou_write_expected_resolve() {
+  printf '%s\n' "main^{commit}" "${BRANCH}^{commit}" > "$1"
+}
+
+toctou_resolve_log_exact() {
+  local dir="${GIBSON_290_TOCTOU_DIR:?}"
+  local expected="$dir/expected.resolve"
+  toctou_write_expected_resolve "$expected"
+  cmp -s "$dir/resolve.log" "$expected"
+}
+
+restore_git() {
+  ln -sf "$REAL_GIT" "$BIN/git"
+}
+
+replace_diff_seam_once() {
+  local file="$1" old="$2" new="$3"
+  "$PYTHON3" - "$file" "$old" "$new" <<'PY'
+import pathlib, sys
+path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+text = pathlib.Path(path).read_text()
+n = text.count(old)
+if n != 1:
+    sys.stderr.write("seam count %d for %r\n" % (n, old))
+    sys.exit(2)
+pathlib.Path(path).write_text(text.replace(old, new, 1))
+PY
+}
+
+run_toctou_so() {
+  local so_path="$1"
+  reset_formal
+  write_stub codex $'VERDICT: APPROVE\n' "" 0
+  GIBSON_FORMAL_REVIEW=1 GH_REVIEWER_TOKEN=test-reviewer-token \
+    "$so_path" --repo "$REPO" --reviewers codex --author grok \
+    --base main --branch "$BRANCH" --out "$OUT" \
+    --pr 9 --github-repo acme/app \
+    >"$ROOT/toctou.stdout" 2>"$ROOT/toctou.stderr"
+}
+
+TOCTOU_BASE_MOVES=0
+TOCTOU_HEAD_MOVES=0
+TOCTOU_MB_CHANGED=0
+TOCTOU_FROZEN_PAIR=fail
+TOCTOU_BASE_MUTANT=fail
+TOCTOU_HEAD_MUTANT=fail
+TOCTOU_MUTANTS_KILLED=0
+
+# Green base-move: B0 -> H1, freeze, move main to H1, frozen pair still shows sentinel.
+setup_toctou_repo
+install_toctou_git base-move
+run_toctou_so "$SECOND_OPINION"
+base_rc=$?
+prompt="$CALLS/codex.prompt"
+if [[ ! -s "$prompt" ]]; then
+  prompt="$CALLS/prompt.txt"
+fi
+mb_frozen=$(tr -d '\n' < "$GIBSON_290_TOCTOU_DIR/mb_frozen" 2>/dev/null || true)
+mb_moved=$(tr -d '\n' < "$GIBSON_290_TOCTOU_DIR/mb_moved" 2>/dev/null || true)
+mb_frozen=$(printf '%s' "$mb_frozen" | tr 'A-F' 'a-f')
+mb_moved=$(printf '%s' "$mb_moved" | tr 'A-F' 'a-f')
+name_diff=$("$REAL_GIT" -C "$REPO" diff "main...$H1" || true)
+if [[ -f "$GIBSON_290_TOCTOU_DIR/moved.marker" ]]; then
+  TOCTOU_BASE_MOVES=1
+  ok "toctou: requested base name moved after both freezes"
+else
+  bad "toctou: base name was not moved after freeze"
+fi
+if [[ "$mb_frozen" == "$B0" && "$mb_moved" == "$H1" && "$B0" != "$H1" ]]; then
+  TOCTOU_MB_CHANGED=1
+  ok "toctou: merge-base changed B0 -> H1 after moving the base name"
+else
+  bad "toctou: merge-base frozen=$mb_frozen moved=$mb_moved (want B0=$B0 H1=$H1)"
+fi
+if [[ -z "$name_diff" ]]; then
+  ok "toctou: re-resolving the moved base name yields an empty diff"
+else
+  bad "toctou: name re-resolution was not empty"
+fi
+if [[ "$base_rc" -eq 0 ]] && grep -qF "$TOCTOU_SENTINEL" "$prompt" 2>/dev/null \
+  && grep -q "Reviewed commit: \`$H1\`" "$OUT" \
+  && grep -q "Frozen base: \`$B0\`" "$OUT" \
+  && grep -qF "Diff: \`$B0...$H1\`" "$OUT" \
+  && grep -q "Reviewed commit: \`$H1\`" "$prompt" \
+  && grep -q "Frozen base: \`$B0\`" "$prompt" \
+  && grep -qF "Diff: \`$B0...$H1\`" "$prompt" \
+  && grep -q "Requested base (label only): \`main\`" "$prompt" \
+  && ! grep -qF "$HEAD_SENTINEL" "$prompt" 2>/dev/null \
+  && toctou_resolve_log_exact; then
+  TOCTOU_FROZEN_PAIR=pass
+  ok "toctou: frozen pair B0/H1 is the reviewer/report authority; sentinel survived the base move"
+else
+  bad "toctou: frozen-pair/sentinel miss rc=$base_rc resolve=$(tr '\n' '|' < "$GIBSON_290_TOCTOU_DIR/resolve.log" 2>/dev/null) report=$(grep -E 'Reviewed commit|Frozen base|Diff:' "$OUT" 2>/dev/null)"
+fi
+if grep -q "commit_id=$H1" "$GH_LOG" 2>/dev/null || [[ "$(formal_commit)" == "$H1" ]]; then
+  ok "toctou: formal-review --commit remains REVIEWED_SHA (H1)"
+else
+  bad "toctou: formal commit=$(formal_commit) want $H1"
+fi
+restore_git
+
+# Independent moved-head case.
+setup_toctou_repo
+install_toctou_git head-move
+run_toctou_so "$SECOND_OPINION"
+head_rc=$?
+prompt="$CALLS/codex.prompt"
+if [[ ! -s "$prompt" ]]; then
+  prompt="$CALLS/prompt.txt"
+fi
+H2=$(tr -d '\n' < "$GIBSON_290_TOCTOU_DIR/h2.sha" 2>/dev/null || true)
+if [[ -f "$GIBSON_290_TOCTOU_DIR/moved.marker" && -n "$H2" && "$H2" != "$H1" ]]; then
+  TOCTOU_HEAD_MOVES=1
+  ok "toctou: reviewed name advanced to H2 after both freezes"
+else
+  bad "toctou: head was not moved (H2='$H2')"
+fi
+if [[ "$head_rc" -eq 0 ]] && grep -qF "$TOCTOU_SENTINEL" "$prompt" 2>/dev/null \
+  && ! grep -qF "$HEAD_SENTINEL" "$prompt" 2>/dev/null \
+  && grep -q "Reviewed commit: \`$H1\`" "$OUT" \
+  && grep -q "Frozen base: \`$B0\`" "$OUT" \
+  && grep -qF "Diff: \`$B0...$H1\`" "$prompt" \
+  && toctou_resolve_log_exact; then
+  ok "toctou: frozen SHA-only diff retained the original sentinel and excluded the moved-head sentinel"
+  if [[ "$TOCTOU_FROZEN_PAIR" != pass ]]; then
+    TOCTOU_FROZEN_PAIR=pass
+  fi
+else
+  bad "toctou: moved-head leaked into frozen review rc=$head_rc H2=$H2 resolve=$(tr '\n' '|' < "$GIBSON_290_TOCTOU_DIR/resolve.log" 2>/dev/null)"
+  TOCTOU_FROZEN_PAIR=fail
+fi
+restore_git
+
+# Mutant BASE_NAME_RERESOLVED
+PROD_HASH_T0=$(file_sha256 "$SECOND_OPINION")
+seam_n=$(grep -cF "$TOCTOU_SEAM" "$SECOND_OPINION" || true)
+if [[ "$seam_n" -eq 1 ]]; then
+  ok "toctou: production SHA-only diff seam found exactly once"
+else
+  bad "toctou: production diff seam count=$seam_n (want 1)"
+fi
+BASE_MUT_GIB="$ROOT/mut-base-name"
+copy_so_tree "$BASE_MUT_GIB"
+BASE_MUT_SO="$BASE_MUT_GIB/scripts/second-opinion.sh"
+if replace_diff_seam_once "$BASE_MUT_SO" "$TOCTOU_SEAM" "$TOCTOU_SEAM_BASE"; then
+  ok "BASE_NAME_RERESOLVED: replaced the single SHA-only base operand"
+else
+  bad "BASE_NAME_RERESOLVED: failed to find/replace the unique seam"
+fi
+new_n=$(grep -cF "$TOCTOU_SEAM_BASE" "$BASE_MUT_SO" || true)
+old_n=$(grep -cF "$TOCTOU_SEAM" "$BASE_MUT_SO" || true)
+if [[ "$new_n" -eq 1 && "$old_n" -eq 0 ]]; then
+  ok "BASE_NAME_RERESOLVED: mutated seam present exactly once; original gone"
+else
+  bad "BASE_NAME_RERESOLVED: seam counts new=$new_n old=$old_n"
+fi
+PROD_HASH_T1=$(file_sha256 "$SECOND_OPINION")
+if [[ "$PROD_HASH_T0" == "$PROD_HASH_T1" ]]; then
+  ok "BASE_NAME_RERESOLVED: unmodified production hash unchanged"
+else
+  bad "BASE_NAME_RERESOLVED: production hash drifted"
+fi
+setup_toctou_repo
+install_toctou_git base-move
+run_toctou_so "$BASE_MUT_SO"
+bm_rc=$?
+prompt="$CALLS/codex.prompt"
+if [[ ! -s "$prompt" ]]; then
+  prompt="$CALLS/prompt.txt"
+fi
+diff_args=$(cat "$GIBSON_290_TOCTOU_DIR/diff.args" 2>/dev/null || true)
+executed_name_diff=0
+if [[ -f "$GIBSON_290_TOCTOU_DIR/diff.args" ]]; then
+  executed_name_diff=$(grep -cF "main...$H1" "$GIBSON_290_TOCTOU_DIR/diff.args" || true)
+fi
+[[ "$executed_name_diff" =~ ^[0-9]+$ ]] || executed_name_diff=0
+saw_sentinel=0
+grep -qF "$TOCTOU_SENTINEL" "$prompt" 2>/dev/null && saw_sentinel=1
+empty_moved_base=0
+grep -qF "empty diff for $B0...$H1" "$ROOT/toctou.stderr" 2>/dev/null && empty_moved_base=1
+bm_reviewer_calls=$(reviewer_call_total)
+bm_formal_calls=$(formal_count)
+if [[ "$executed_name_diff" -eq 1 && "$bm_rc" -eq 1 && "$empty_moved_base" -eq 1 \
+  && "$bm_reviewer_calls" -eq 0 && "$bm_formal_calls" -eq 0 && "$saw_sentinel" -eq 0 ]] \
+  && toctou_resolve_log_exact; then
+  TOCTOU_BASE_MUTANT=empty
+  TOCTOU_MUTANTS_KILLED=$((TOCTOU_MUTANTS_KILLED + 1))
+  POST_MUTANTS_KILLED=$((POST_MUTANTS_KILLED + 1))
+  echo "RED-BEFORE-GREEN BASE_NAME_RERESOLVED: rc=$bm_rc executed_name_diff=$executed_name_diff empty_moved_base_diff=$empty_moved_base reviewer_calls=$bm_reviewer_calls formal_calls=$bm_formal_calls sentinel_in_reviewer_input=$saw_sentinel diff_args=$(printf '%s' "$diff_args" | tr '\n' ' ')"
+  ok "BASE_NAME_RERESOLVED killed: moved-base name operand produced an empty review"
+else
+  POST_MUTANTS_SURVIVED=$((POST_MUTANTS_SURVIVED + 1))
+  bad "BASE_NAME_RERESOLVED survived executed_name_diff=$executed_name_diff empty_moved_base_diff=$empty_moved_base reviewer_calls=$bm_reviewer_calls formal_calls=$bm_formal_calls sentinel=$saw_sentinel rc=$bm_rc args=$diff_args resolve=$(tr '\n' '|' < "$GIBSON_290_TOCTOU_DIR/resolve.log" 2>/dev/null)"
+fi
+restore_git
+
+# Mutant HEAD_NAME_RERESOLVED
+PROD_HASH_T2=$(file_sha256 "$SECOND_OPINION")
+HEAD_MUT_GIB="$ROOT/mut-head-name"
+copy_so_tree "$HEAD_MUT_GIB"
+HEAD_MUT_SO="$HEAD_MUT_GIB/scripts/second-opinion.sh"
+if replace_diff_seam_once "$HEAD_MUT_SO" "$TOCTOU_SEAM" "$TOCTOU_SEAM_HEAD"; then
+  ok "HEAD_NAME_RERESOLVED: replaced the single SHA-only head operand"
+else
+  bad "HEAD_NAME_RERESOLVED: failed to find/replace the unique seam"
+fi
+new_n=$(grep -cF "$TOCTOU_SEAM_HEAD" "$HEAD_MUT_SO" || true)
+old_n=$(grep -cF "$TOCTOU_SEAM" "$HEAD_MUT_SO" || true)
+if [[ "$new_n" -eq 1 && "$old_n" -eq 0 ]]; then
+  ok "HEAD_NAME_RERESOLVED: mutated seam present exactly once; original gone"
+else
+  bad "HEAD_NAME_RERESOLVED: seam counts new=$new_n old=$old_n"
+fi
+PROD_HASH_T3=$(file_sha256 "$SECOND_OPINION")
+if [[ "$PROD_HASH_T2" == "$PROD_HASH_T3" && "$PROD_HASH_T0" == "$PROD_HASH_T3" ]]; then
+  ok "HEAD_NAME_RERESOLVED: unmodified production hash unchanged"
+else
+  bad "HEAD_NAME_RERESOLVED: production hash drifted"
+fi
+setup_toctou_repo
+install_toctou_git head-move
+run_toctou_so "$HEAD_MUT_SO"
+hm_rc=$?
+prompt="$CALLS/codex.prompt"
+if [[ ! -s "$prompt" ]]; then
+  prompt="$CALLS/prompt.txt"
+fi
+diff_args=$(cat "$GIBSON_290_TOCTOU_DIR/diff.args" 2>/dev/null || true)
+executed_head_name=0
+if [[ -f "$GIBSON_290_TOCTOU_DIR/diff.args" ]]; then
+  executed_head_name=$(grep -cF "$BRANCH" "$GIBSON_290_TOCTOU_DIR/diff.args" || true)
+fi
+[[ "$executed_head_name" =~ ^[0-9]+$ ]] || executed_head_name=0
+saw_moved=0
+grep -qF "$HEAD_SENTINEL" "$prompt" 2>/dev/null && saw_moved=1
+hm_reviewer_calls=$(reviewer_call_total)
+if [[ "$executed_head_name" -eq 1 && "$saw_moved" -eq 1 && "$hm_rc" -eq 0 && "$hm_reviewer_calls" -eq 1 ]] \
+  && toctou_resolve_log_exact; then
+  TOCTOU_HEAD_MUTANT=different
+  TOCTOU_MUTANTS_KILLED=$((TOCTOU_MUTANTS_KILLED + 1))
+  POST_MUTANTS_KILLED=$((POST_MUTANTS_KILLED + 1))
+  echo "RED-BEFORE-GREEN HEAD_NAME_RERESOLVED: rc=$hm_rc executed_head_name=$executed_head_name reviewer_calls=$hm_reviewer_calls moved_head_sentinel_in_reviewer_input=$saw_moved"
+  ok "HEAD_NAME_RERESOLVED killed: re-resolved head exposed the moved-head sentinel"
+else
+  POST_MUTANTS_SURVIVED=$((POST_MUTANTS_SURVIVED + 1))
+  bad "HEAD_NAME_RERESOLVED survived executed=$executed_head_name moved=$saw_moved reviewer_calls=$hm_reviewer_calls rc=$hm_rc args=$diff_args resolve=$(tr '\n' '|' < "$GIBSON_290_TOCTOU_DIR/resolve.log" 2>/dev/null)"
+fi
+restore_git
+
+if [[ "$TOCTOU_BASE_MOVES" -eq 1 && "$TOCTOU_HEAD_MOVES" -eq 1 \
+  && "$TOCTOU_MB_CHANGED" -eq 1 && "$TOCTOU_FROZEN_PAIR" == pass \
+  && "$TOCTOU_BASE_MUTANT" == empty && "$TOCTOU_HEAD_MUTANT" == different \
+  && "$TOCTOU_MUTANTS_KILLED" -eq 2 ]]; then
+  echo "frozen-base-head-toctou base_moves=1 head_moves=1 base_merge_base_changed=1 frozen_pair=pass base_name_mutant=empty head_name_mutant=different mutants=2/2"
+  ok "frozen-base-head-toctou receipt"
+else
+  bad "frozen-base-head-toctou counters base=$TOCTOU_BASE_MOVES head=$TOCTOU_HEAD_MOVES mb=$TOCTOU_MB_CHANGED pair=$TOCTOU_FROZEN_PAIR base_mut=$TOCTOU_BASE_MUTANT head_mut=$TOCTOU_HEAD_MUTANT killed=$TOCTOU_MUTANTS_KILLED"
+fi
+
+if [[ "$POST_MUTANTS_KILLED" -eq 4 && "$POST_MUTANTS_SURVIVED" -eq 0 ]]; then
+  echo "post-review-mutants total=4 killed=4 survived=0"
+  ok "post-review-mutants receipt"
+else
+  bad "post-review-mutants killed=$POST_MUTANTS_KILLED survived=$POST_MUTANTS_SURVIVED (want 4/0)"
 fi
 
 if [[ "$MATRIX" -eq "$MATRIX_EXPECT" ]]; then

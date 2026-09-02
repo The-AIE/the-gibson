@@ -44,10 +44,11 @@ OPTIONS
                     applies. Compensating control for Tier B: two independent
                     passes (caller enforces).
   --base REF        diff base (default: main; loop.sh passes the target repo's
-                    resolved default branch). Must resolve to a commit — an
-                    unresolvable base is an error, not a working-tree diff.
-  --branch REF      diff head (default: HEAD); same rule. The exact 40-hex SHA
-                    is frozen before dispatch and passed to formal-review.sh.
+                    resolved default branch). Resolved once to BASE_SHA before
+                    any diff; an unresolvable base is an error, not a
+                    working-tree diff. The name is a label after freeze.
+  --branch REF      diff head (default: HEAD); same rule. Resolved once to
+                    REVIEWED_SHA before any diff and passed to formal-review.sh.
   --gate-status S   what the local gate said, passed through to the reviewer
   --out PATH        write the combined report here (default: gibson/second-opinion.md)
 
@@ -94,6 +95,33 @@ info() { echo "second-opinion.sh: $*" >&2; }
 
 [[ -n "$REPO" ]] || { usage; exit 2; }
 [[ -d "$REPO" ]] || die "repo not a directory: $REPO"
+
+trim_ws() {
+  _trim="$1"
+  _trim="${_trim#"${_trim%%[![:space:]]*}"}"
+  _trim="${_trim%"${_trim##*[![:space:]]}"}"
+  printf '%s' "$_trim"
+}
+
+# --- #290 nonempty-reviewer-selection begin ---
+# After parsing/trimming the comma-separated selection, require at least one
+# nonempty token before git resolution, OUT/sidecar init, artifacts, dispatch,
+# report stdout, or formal-review setup. Whitespace/comma-only is not a default.
+_have_reviewer=0
+IFS=',' read -ra _rv_names <<< "$REVIEWERS"
+if [[ ${#_rv_names[@]} -gt 0 ]]; then
+  for _rv_name in "${_rv_names[@]}"; do
+    _rv_name=$(trim_ws "$_rv_name")
+    if [[ -n "$_rv_name" ]]; then
+      _have_reviewer=1
+      break
+    fi
+  done
+fi
+[[ "$_have_reviewer" -eq 1 ]] || die "--reviewers must select at least one nonempty reviewer"
+unset _have_reviewer _rv_names _rv_name
+# --- #290 nonempty-reviewer-selection end ---
+
 [[ -n "$TASK_FILE" ]] && TASK=$(cat "$TASK_FILE")
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -103,13 +131,6 @@ PLAYBOOK="$GIBSON/playbooks/reviewer.md"
 
 OUT="${OUT:-$REPO/gibson/second-opinion.md}"
 mkdir -p "$(dirname "$OUT")"
-
-trim_ws() {
-  _trim="$1"
-  _trim="${_trim#"${_trim%%[![:space:]]*}"}"
-  _trim="${_trim%"${_trim##*[![:space:]]}"}"
-  printf '%s' "$_trim"
-}
 
 # Strip at most one Markdown numeric-list marker ("1. ").
 strip_list_marker() {
@@ -219,19 +240,21 @@ slot_diagnostic() {
   esac
 }
 
-# Both endpoints must resolve to real commits in THIS repo. The old fallback
-# (`git diff BASE` when `BASE...BRANCH` failed) silently swapped the requested
-# review for a diff of the working tree against BASE — a different diff, usually
-# a much smaller one, reported as though the branch had been reviewed. A caller
-# that names refs which do not resolve gets an error, never a substitute.
-REVIEWED_SHA=""
-for ref in "$BASE" "$BRANCH"; do
-  resolved=$(git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) || \
-    die "ref '$ref' does not resolve to a commit in $REPO — refusing to review a different diff (no working-tree fallback)"
-  if [[ "$ref" == "$BRANCH" ]]; then
-    REVIEWED_SHA=$(printf '%s' "$resolved" | tr 'A-F' 'a-f')
-  fi
-done
+# Both endpoints must resolve to real commits in THIS repo. Each requested
+# name is resolved exactly once; after this, names are labels only. The old
+# fallback (`git diff BASE` when `BASE...BRANCH` failed) silently swapped the
+# requested review for a working-tree diff. A caller that names refs which do
+# not resolve gets an error, never a substitute. Diff content, emptiness,
+# truncation, report, and reviewer decisions use only the frozen SHA pair.
+BASE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BASE}^{commit}" 2>/dev/null) || \
+  die "ref '$BASE' does not resolve to a commit in $REPO — refusing to review a different diff (no working-tree fallback)"
+BASE_SHA=$(printf '%s' "$BASE_SHA" | tr 'A-F' 'a-f')
+[[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+  die "ref '$BASE' did not freeze to a 40-lowercase-hex SHA (got '${BASE_SHA:-empty}')"
+
+REVIEWED_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BRANCH}^{commit}" 2>/dev/null) || \
+  die "ref '$BRANCH' does not resolve to a commit in $REPO — refusing to review a different diff (no working-tree fallback)"
+REVIEWED_SHA=$(printf '%s' "$REVIEWED_SHA" | tr 'A-F' 'a-f')
 [[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]] || \
   die "ref '$BRANCH' did not freeze to a 40-lowercase-hex SHA (got '${REVIEWED_SHA:-empty}')"
 
@@ -239,13 +262,13 @@ done
 # reviewer is shown. `A...B` can still fail after both refs resolve — unrelated
 # histories have no merge base — and that is a hard error too.
 DIFF_ERR=$(mktemp)
-if ! DIFF=$(git -C "$REPO" diff "$BASE...$BRANCH" 2>"$DIFF_ERR"); then
+if ! DIFF=$(git -C "$REPO" diff "$BASE_SHA...$REVIEWED_SHA" 2>"$DIFF_ERR"); then
   reason=$(tail -n 3 "$DIFF_ERR")
   rm -f "$DIFF_ERR"
-  die "git diff $BASE...$BRANCH failed in $REPO: ${reason:-no detail}"
+  die "git diff $BASE_SHA...$REVIEWED_SHA failed in $REPO: ${reason:-no detail}"
 fi
 rm -f "$DIFF_ERR"
-[[ -n "$DIFF" ]] || die "empty diff for $BASE...$BRANCH — nothing to review"
+[[ -n "$DIFF" ]] || die "empty diff for $BASE_SHA...$REVIEWED_SHA — nothing to review"
 
 # 60k chars keeps the prompt inside every vendor's comfortable context window.
 MAX_DIFF=60000
@@ -275,8 +298,11 @@ You are reviewing someone else's work, read-only. Do not edit files, do not run
 destructive commands, do not touch git or GitHub.
 
 - Repository path: $REPO
-- Diff: \`$BASE...$BRANCH\`
+- Requested base (label only): \`$BASE\`
+- Requested branch (label only): \`$BRANCH\`
+- Frozen base: \`$BASE_SHA\`
 - Reviewed commit: \`$REVIEWED_SHA\`
+- Diff: \`$BASE_SHA...$REVIEWED_SHA\`
 - Author runtime: ${AUTHOR:-unknown}
 - Local green gate: ${GATE_STATUS:-unknown}
 $([[ -n "$TASK" ]] && printf '\n## Task the diff is meant to solve\n%s\n' "$TASK")
@@ -361,6 +387,7 @@ reviewed=0
 slot_i=0
 
 IFS=',' read -ra NAMES <<< "$REVIEWERS"
+if [[ ${#NAMES[@]} -gt 0 ]]; then
 for name in "${NAMES[@]}"; do
   name=$(trim_ws "$name")
   [[ -n "$name" ]] || continue
@@ -416,6 +443,7 @@ for name in "${NAMES[@]}"; do
   { echo "----- $name -----"; cat "$err_file"; } >> "$LOG"
   rm -f "$verdict_file" "$err_file"
 done
+fi
 
 # Render the combined Markdown report only after every requested slot has been
 # classified from its isolated verdict_file. The report is presentation only.
@@ -423,7 +451,10 @@ done
   echo "# Second opinion"
   echo ""
   echo "- Reviewed commit: \`$REVIEWED_SHA\`"
-  echo "- Diff: \`$BASE...$BRANCH\`"
+  echo "- Frozen base: \`$BASE_SHA\`"
+  echo "- Diff: \`$BASE_SHA...$REVIEWED_SHA\`"
+  echo "- Requested base (label only): \`$BASE\`"
+  echo "- Requested branch (label only): \`$BRANCH\`"
   echo ""
 } > "$OUT"
 
