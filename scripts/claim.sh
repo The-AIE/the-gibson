@@ -8,8 +8,11 @@ claim.sh — claim a GitHub issue and open an isolated worktree
 
 WHAT IT DOES
   Marks the issue as agent-claimed, refuses to claim something already claimed,
-  opens a draft pull request whose body carries the active-work claim, and creates
-  a git worktree + branch for the work. The default branch is never mutated.
+  opens a draft pull request whose body carries the v2 active-work claim
+  (schema, original branch point, reservation commit) after an empty v1-trailer
+  reservation commit, and creates a git worktree + branch for the work. After
+  post-create admission, `claim-provenance.mjs` must verify that reservation or
+  the new claim is rolled back. The default branch is never mutated.
 
   One file per claim, never a shared table: two lanes claiming at the same moment
   touch different paths, so their claim commits do not conflict. `docs/active-work.md`
@@ -247,6 +250,8 @@ command -v node >/dev/null ||
 run_sensor() { env -u NODE_OPTIONS -u NODE_REPL_EXTERNAL_MODULE node "$@"; }
 [[ -f "$SCRIPT_DIR/scope-overlap.mjs" ]] ||
   die "cannot find $SCRIPT_DIR/scope-overlap.mjs — refusing to claim without the authoritative overlap/admission sensor"
+[[ -f "$SCRIPT_DIR/claim-provenance.mjs" ]] ||
+  die "cannot find $SCRIPT_DIR/claim-provenance.mjs — refusing to claim without the report-only reservation reader"
 [[ -x "$SCRIPT_DIR/pr-claims.sh" ]] ||
   die "cannot execute $SCRIPT_DIR/pr-claims.sh — refusing to claim without the authoritative live-claim reader"
 
@@ -985,7 +990,21 @@ info "creating worktree $WT_DIR branch $BRANCH"
 git worktree add "$WT_DIR" -b "$BRANCH" "$DEFAULT_REMOTE_BRANCH"
 WORKTREE_CREATED=1
 
-git -C "$WT_DIR" commit --allow-empty -s -q -m "chore: reserve issue #$ISSUE for $CLAIM_ID" ||
+# Pin the original branch point before the empty reservation commit. The v2
+# PR body and v1 trailers bind this exact SHA; re-reading the ref later would
+# lose the identity if anything moved.
+ORIGINAL_BRANCH_POINT=$CLAIM_EXPECTED_OID
+[[ "$ORIGINAL_BRANCH_POINT" =~ ^[0-9a-f]{40}$ ]] ||
+  die "cannot pin the original branch point for the v2 reservation — refusing to continue without a 40-hex base SHA"
+
+RESERVE_MSG=$(printf '%s\n' \
+  "chore: reserve issue #${ISSUE} for ${CLAIM_ID}" \
+  "" \
+  "Gibson-Reservation: v1" \
+  "Gibson-Claim-ID: ${CLAIM_ID}" \
+  "Gibson-Issue: #${ISSUE}" \
+  "Gibson-Branch: ${BRANCH}")
+git -C "$WT_DIR" commit --allow-empty -s -q -m "$RESERVE_MSG" ||
   die "claim commit failed — no PR claim was recorded; re-run after resolving"
 # Re-pin BEFORE the push, not after it: the claim commit is now what this lane
 # owns on that branch, and every later CAS (worktree HEAD, local delete, remote
@@ -995,25 +1014,28 @@ git -C "$WT_DIR" commit --allow-empty -s -q -m "chore: reserve issue #$ISSUE for
 CLAIM_EXPECTED_OID=$(git -C "$WT_DIR" rev-parse HEAD 2>/dev/null || true)
 [[ "$CLAIM_EXPECTED_OID" =~ ^[0-9a-f]{40}$ ]] ||
   die "cannot read the claim commit this lane just created on $BRANCH — refusing to continue without an anchor for rollback"
+RESERVATION_SHA=$CLAIM_EXPECTED_OID
 
 git -C "$WT_DIR" push -q -u origin "$BRANCH" ||
   die "claim branch push failed — no PR claim was recorded; re-run after resolving"
 BRANCH_PUSHED=1
 
 BODY=$(mktemp "${TMPDIR:-/tmp}/gibson-claim-body.XXXXXX")
-cat > "$BODY" <<EOF
-## Active work
-
-- Active-work claim: $CLAIM_ID
-- Isolation: dedicated worktree
-- Issue: #$ISSUE
-- Claim scope: $SCOPE
-- Session: $SESSION
-- Claimed: $UTC
-
-This draft PR reserves the issue before implementation. The claim is released
-when this PR closes or merges.
-EOF
+{
+  printf '%s\n' "## Active work" ""
+  printf '%s\n' "- Claim schema: gibson.claim/v2"
+  printf '%s\n' "- Active-work claim: ${CLAIM_ID}"
+  printf '%s\n' "- Isolation: dedicated worktree"
+  printf '%s\n' "- Issue: #${ISSUE}"
+  printf '%s\n' "- Claim scope: ${SCOPE}"
+  printf '%s\n' "- Session: ${SESSION}"
+  printf '%s\n' "- Claimed: ${UTC}"
+  printf '%s\n' "- Original branch point: ${ORIGINAL_BRANCH_POINT}"
+  printf '%s\n' "- Reservation commit: ${RESERVATION_SHA}"
+  printf '%s\n' ""
+  printf '%s\n' "This draft PR reserves the issue before implementation. The claim is released"
+  printf '%s\n' "when this PR closes or merges."
+} > "$BODY"
 # Mark the attempt BEFORE the call. From this line on, a PR may exist no
 # matter what gh reports, and rollback must bind and close it before it
 # destroys anything (#153 review round 3, P1).
@@ -1059,20 +1081,44 @@ if ! run_sensor "$SCRIPT_DIR/scope-overlap.mjs" "${_adm_args[@]}"; then
 fi
 info "admission: PR #$PR_NUMBER holds $CLAIM_ID (verified against the live claim inventory)"
 
+# Report-only classification of the reservation this lane just published.
+# Failure here uses the existing guarded rollback: a v2 claim that cannot
+# prove its own reservation must not remain live. The reader resolves live
+# GitHub/git evidence itself; nothing hands it a JSON payload.
+PROVENANCE_JSON=""
+PROVENANCE_RC=0
+PROVENANCE_JSON=$(run_sensor "$SCRIPT_DIR/claim-provenance.mjs" \
+  --repo "$REPO" \
+  --pr "$PR_NUMBER" \
+  --expected-head "$RESERVATION_SHA" \
+  --claim-id "$CLAIM_ID" \
+  --issue "$ISSUE" \
+  --branch "$BRANCH" \
+  --repo-path "$WT_DIR" \
+  --base "$BASE" \
+  --require-verified-reservation "$RESERVATION_SHA") || PROVENANCE_RC=$?
+if [[ "$PROVENANCE_RC" -ne 0 ]]; then
+  die "v2 reservation classification failed for $CLAIM_ID (PR #$PR_NUMBER, reservation $RESERVATION_SHA) — rolling the new claim back rather than continuing with unverified provenance (reader exit $PROVENANCE_RC)
+  ${PROVENANCE_JSON:-<no receipt>}"
+fi
+info "reservation: $RESERVATION_SHA"
+
 LABEL_ADDED=0  # success — do not undo label
 CLAIM_COMPLETE=1
 trap - EXIT
 
-cat <<EOF
-claim.sh: OK
-  issue:    #$ISSUE
-  claim:    $CLAIM_ID
-  pr:       #$PR_NUMBER
-  branch:   $BRANCH
-  worktree: $WT_DIR
-  scope:    $SCOPE
-
-Next:
-  cd $WT_DIR
-  # install deps if needed, then gate-baseline.sh && implement
-EOF
+printf '%s\n' \
+  "claim.sh: OK" \
+  "  issue:       #$ISSUE" \
+  "  claim:       $CLAIM_ID" \
+  "  pr:          #$PR_NUMBER" \
+  "  branch:      $BRANCH" \
+  "  worktree:    $WT_DIR" \
+  "  scope:       $SCOPE" \
+  "  reservation: $RESERVATION_SHA" \
+  "" \
+  "claim.sh: provenance-receipt $PROVENANCE_JSON" \
+  "" \
+  "Next:" \
+  "  cd $WT_DIR" \
+  "  # install deps if needed, then gate-baseline.sh && implement"
