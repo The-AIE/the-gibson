@@ -17,16 +17,16 @@
  *
  * USAGE
  *   node decompose-lint.mjs --file issues.json
- *   node decompose-lint.mjs --repo org/name --label gibson
+ *   node decompose-lint.mjs --repo org/name --all-open
+ *   node decompose-lint.mjs --repo org/name --label name
  *   node decompose-lint.mjs --help
  *
  * issues.json shape:
  *   [{ "number": 1, "title": "...", "body": "...", "labels": ["tier-b"] }, ...]
  */
 
-import { readFileSync, existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import { parseFlags } from "./lib/args.mjs";
+import { loadIssueSet } from "./lib/issue-loader.mjs";
 
 function help() {
   console.log(`decompose-lint.mjs — validate decomposition quality (docs/04)
@@ -44,13 +44,14 @@ RISKS
 
 USAGE
   node scripts/decompose-lint.mjs --file draft.json
-  node scripts/decompose-lint.mjs --repo acme/app --label gibson
+  node scripts/decompose-lint.mjs --repo acme/app --all-open
+  node scripts/decompose-lint.mjs --repo acme/app --label name
   node scripts/decompose-lint.mjs --help
 
 EXAMPLES
   # After drafting bodies:
   node scripts/decompose-lint.mjs --file /tmp/issues.json
-  echo \$?  # 0 = clean
+  echo \$?  # 0 = clean, 1 = findings or EMPTY_SELECTION, 2 = usage, 3 = INCOMPLETE
 `);
 }
 
@@ -64,45 +65,20 @@ const opt = parseFlags(args, {
   flags: {
     "--file": { key: "file", default: null },
     "--repo": { key: "repo", default: null },
-    "--label": { key: "label", default: "gibson" },
+    "--label": { key: "label", multiple: true },
+    "--all-open": { key: "allOpen", type: "boolean" },
+    "--allow-empty": { key: "allowEmpty", type: "boolean" },
   },
 });
 
 function loadIssues() {
-  if (opt.file) {
-    if (!existsSync(opt.file)) {
-      console.error(`missing file: ${opt.file}`);
-      process.exit(2);
-    }
-    return JSON.parse(readFileSync(opt.file, "utf8"));
-  }
-  if (opt.repo) {
-    const r = spawnSync(
-      "gh",
-      [
-        "issue",
-        "list",
-        "-R",
-        opt.repo,
-        "--label",
-        opt.label,
-        "--state",
-        "open",
-        "--limit",
-        "100",
-        "--json",
-        "number,title,body,labels",
-      ],
-      { encoding: "utf8" }
-    );
-    if (r.status !== 0) {
-      console.error(r.stderr || "gh issue list failed");
-      process.exit(2);
-    }
-    return JSON.parse(r.stdout);
-  }
-  console.error("provide --file or --repo");
-  process.exit(2);
+  return loadIssueSet({
+    file: opt.file,
+    repo: opt.repo,
+    labels: opt.label,
+    allOpen: opt.allOpen,
+    allowEmpty: opt.allowEmpty,
+  });
 }
 
 function labelsOf(issue) {

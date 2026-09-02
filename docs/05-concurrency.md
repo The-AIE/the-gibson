@@ -44,13 +44,23 @@ Two mechanisms, used together:
    ```
    ## Active work
 
+   - Claim schema: gibson.claim/v2
    - Active-work claim: issue-42-password-reset
    - Isolation: dedicated worktree
    - Issue: #42
    - Claim scope: app/api/auth/** lib/email.ts
    - Session: grok@fleet-2
    - Claimed: 2026-08-02T10:14:07Z
+   - Original branch point: 0123456789abcdef0123456789abcdef01234567
+   - Reservation commit: fedcba9876543210fedcba9876543210fedcba98
    ```
+
+   The matching reservation commit (empty tree delta, single parent equal to
+   that original branch point) carries trailers `Gibson-Reservation: v1`,
+   `Gibson-Claim-ID`, `Gibson-Issue`, `Gibson-Branch`, and exactly one
+   `Signed-off-by` whose name/email match the commit author. Historical
+   claims without those markers remain ordinary introduced provenance — they
+   are never reinterpreted as verified metadata.
 
    No file anyone edits, so two lanes claiming at the same moment never conflict on
    a shared path (the old `docs/active-work.md` table *was* exactly the hot file
@@ -182,6 +192,36 @@ Two mechanisms, used together:
    local main/master). Both read `origin/main`/live GitHub
    state, not your working tree — a stale local checkout is how two lanes each
    conclude they are alone.
+
+   **Reservation provenance is report-only (#273).**
+   `scripts/claim-provenance.mjs` is the sole reader for the v2 claim body /
+   v1 reservation-commit schema (`gibson.claim-provenance/v1`). It classifies
+   at most one verified empty reservation separately from every ordinary
+   implementation commit, and it reports raw author/committer name, email, and
+   GitHub-resolved login without inferring vendor or reviewer independence.
+   Verification requires a same-repository (not fork) PR, the complete live
+   `baseRefOid..headRefOid` graph (never a body-selected range), a
+   first-introduced commit whose parent is the body-bound original branch
+   point, an identical tree, matching body/trailer/CLI bindings, a DCO that
+   matches the author, and identical complete before/after live identity — PR
+   number, exact head branch/OID, base ref/OID/repository, boolean
+   cross-repository, and a valid state (`OPEN`, `CLOSED`, or `MERGED`) — plus
+   claim-body projection. Head/body-only evidence never verifies. Duplicate,
+   missing, reordered, or conflicting markers/trailers, a nonempty tree, a
+   rebase, a copied claim, API truncation, identity/head/body/base drift, or
+   an unreadable original parent fail closed as ordinary introduced
+   provenance. The reader is never imported by `release-preflight.sh` and
+   never returns READY, APPROVE, merge, or release authority. `claim.sh`
+   invokes it only after post-create overlap admission succeeds, and the
+   writer predicate (`--require-verified-reservation`) requires both live
+   snapshots to be `OPEN`; a classification failure rolls the new claim back
+   through the existing guarded cleanup. Standalone report-only mode may
+   inspect a stable `OPEN`, `CLOSED`, or `MERGED` historical PR. Recover a rolled-back lane by fixing the
+   evidence (do not rewrite historical commits) and re-running `claim.sh`.
+   After this schema lands, the first post-merge v2 claim is the positive
+   live canary and must classify exactly one reservation before implementation
+   begins — keep `Refs #<issue>` on that landing PR until the canary succeeds;
+   do not close the tracking issue on merge alone.
 
 **One issue, one lane — unless you say otherwise.** `claim.sh` refuses an issue that
 already has a live claim: two builders took the same issue under different slugs and
