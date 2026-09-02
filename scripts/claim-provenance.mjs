@@ -1080,7 +1080,13 @@ export async function resolveLiveEvidence(opts) {
   const markers = parseV2BodyMarkers(before.body);
   const original = markers.values.originalBranchPoint || null;
   if (markers.complete && original && HEX40.test(original)) {
-    ensureCommit(repoPath, original, pr);
+    try {
+      ensureCommit(repoPath, original, pr);
+    } catch {
+      // Preserve the unreadable parent as classification evidence. Report-only
+      // mode must still return ordinary provenance; the writer predicate will
+      // refuse because no reservation can verify without this object.
+    }
   }
 
   const commits = [];
@@ -1124,8 +1130,14 @@ export async function resolveLiveEvidence(opts) {
     original !== baseOid &&
     !commits.some((c) => c.sha === original)
   ) {
-    const origCommit = readCommitGit(repoPath, original);
-    commits.push({ ...origCommit, readable: true });
+    try {
+      const origCommit = readCommitGit(repoPath, original);
+      commits.push({ ...origCommit, readable: true });
+    } catch {
+      // A missing body-supplied original is not a live-read failure. The
+      // classifier keeps every introduced commit ordinary and records the
+      // missing marker/object evidence instead of substituting the base tree.
+    }
   }
 
   const afterJson = readPr(repo, pr);
