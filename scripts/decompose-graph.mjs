@@ -51,6 +51,7 @@ USAGE
   node scripts/decompose-graph.mjs --repo acme/app --all-open
   node scripts/decompose-graph.mjs --repo acme/app --label name
   node scripts/decompose-graph.mjs --help
+  --allow-empty  changes a valid empty repository selection to INTENTIONAL_EMPTY exit 0
 
 EXAMPLES
   node scripts/decompose-graph.mjs --file /tmp/issues.json

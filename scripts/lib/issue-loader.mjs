@@ -61,13 +61,16 @@ function labelDigest(labels) {
   return createHash("sha256").update(JSON.stringify(labels), "utf8").digest("hex");
 }
 
-/** Nonempty, no controls, exact-deduped, sorted. OR-union query order follows this. */
+/** Nonempty, no controls, no leading --, exact-deduped, sorted. OR-union query order follows this. */
 function canonicalizeLabels(labels) {
   const unique = [];
   const seen = new Set();
   for (const l of labels) {
     if (!l) dieUsage("--label requires a nonempty name");
     if (CONTROL_RE.test(l)) dieUsage("--label contains a control character");
+    if (l.startsWith("--")) {
+      dieUsage("combined selectors: --label value must not begin with --");
+    }
     if (seen.has(l)) continue;
     seen.add(l);
     unique.push(l);
@@ -314,6 +317,15 @@ function paginate({ owner, name, label, kind }) {
     else if (conn.totalCount !== totalCount) incomplete("COUNT_MISMATCH");
 
     const { hasNextPage, endCursor } = conn.pageInfo;
+    if (!Object.prototype.hasOwnProperty.call(conn.pageInfo, "endCursor")) {
+      incomplete("CURSOR");
+    }
+    if (
+      endCursor !== null &&
+      (typeof endCursor !== "string" || endCursor.length === 0)
+    ) {
+      incomplete("CURSOR");
+    }
     if (hasNextPage) {
       if (typeof endCursor !== "string" || endCursor.length === 0) {
         incomplete("CURSOR");
