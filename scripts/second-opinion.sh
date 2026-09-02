@@ -10,13 +10,16 @@ WHAT IT DOES
   Renders playbooks/reviewer.md plus the branch diff and the local gate status,
   then runs one or more reviewer CLIs in their read-only / plan mode. Refuses to
   let a runner review its own work. Writes each verdict to a file and prints the
-  combined report.
+  combined report. Formal GitHub events are derived only from isolated per-slot
+  verdict files (never by re-parsing the combined report) and are bound to the
+  frozen 40-hex commit of the reviewed branch.
 
 WHY
   AGENTS.md Law 5: never grade your own homework. docs/20 rule 1: the model that
   wrote a change never reviews it — Grok implements, Codex or Claude reviews.
   Escalation is cheap here because reviewers only read; the expensive iteration
-  stays on the flat-rate implementer (docs/15).
+  stays on the flat-rate implementer (docs/15). Mixed verdicts must fail closed
+  rather than approve-first (#290).
 
 RISKS
   - The diff is sent to each reviewer's vendor backend. Never review a diff that
@@ -43,7 +46,8 @@ OPTIONS
   --base REF        diff base (default: main; loop.sh passes the target repo's
                     resolved default branch). Must resolve to a commit — an
                     unresolvable base is an error, not a working-tree diff.
-  --branch REF      diff head (default: HEAD); same rule
+  --branch REF      diff head (default: HEAD); same rule. The exact 40-hex SHA
+                    is frozen before dispatch and passed to formal-review.sh.
   --gate-status S   what the local gate said, passed through to the reviewer
   --out PATH        write the combined report here (default: gibson/second-opinion.md)
 
@@ -100,15 +104,136 @@ PLAYBOOK="$GIBSON/playbooks/reviewer.md"
 OUT="${OUT:-$REPO/gibson/second-opinion.md}"
 mkdir -p "$(dirname "$OUT")"
 
+trim_ws() {
+  _trim="$1"
+  _trim="${_trim#"${_trim%%[![:space:]]*}"}"
+  _trim="${_trim%"${_trim##*[![:space:]]}"}"
+  printf '%s' "$_trim"
+}
+
+# Strip at most one Markdown numeric-list marker ("1. ").
+strip_list_marker() {
+  _s="$1"
+  if [[ "$_s" =~ ^[0-9]+\.[[:space:]]+(.*)$ ]]; then
+    _s="${BASH_REMATCH[1]}"
+    _s=$(trim_ws "$_s")
+  fi
+  printf '%s' "$_s"
+}
+
+# Map an exact permitted first-line verdict to approve|request-changes.
+# Four forms only; PASS is not a PR-review approval synonym.
+exact_verdict_event() {
+  case "$1" in
+    "VERDICT: APPROVE"|"VERDICT: approve") printf '%s' "approve" ;;
+    "VERDICT: REQUEST_CHANGES"|"VERDICT: changes-requested") printf '%s' "request-changes" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# Standalone verdict-shaped line after trim + optional numeric-list marker.
+# Unrecognized tokens (PASS, etc.) are shaped but not mapped. Prose/quote/
+# heading prefixes do not match because the line must start with VERDICT:.
+verdict_shaped_line() {
+  [[ "$1" =~ ^VERDICT:[[:space:]]+[^[:space:]] ]]
+}
+
+# Classify one isolated reviewer stdout file. Never used on the combined report.
+# Sets _slot_state (named fail-closed or approve/request-changes).
+parse_isolated_verdict() {
+  local file="$1"
+  local first_nonblank="" first_event="" candidate event
+  local shaped_count=0 permitted_count=0 saw_approve=0 saw_rc=0
+  _slot_state=""
+
+  if [[ ! -f "$file" ]]; then
+    _slot_state=empty
+    return 0
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%$'\r'}
+    line=$(trim_ws "$line")
+    [[ -z "$line" ]] && continue
+    if [[ -z "$first_nonblank" ]]; then
+      first_nonblank="$line"
+    fi
+    candidate=$(strip_list_marker "$line")
+    event=$(exact_verdict_event "$candidate")
+    if [[ -n "$event" ]]; then
+      permitted_count=$((permitted_count + 1))
+      shaped_count=$((shaped_count + 1))
+      if [[ "$event" == "approve" ]]; then
+        saw_approve=1
+      else
+        saw_rc=1
+      fi
+    elif verdict_shaped_line "$candidate"; then
+      shaped_count=$((shaped_count + 1))
+    fi
+  done < "$file"
+
+  if [[ -z "$first_nonblank" ]]; then
+    _slot_state=empty
+    return 0
+  fi
+
+  first_event=$(exact_verdict_event "$(strip_list_marker "$first_nonblank")")
+  if [[ -z "$first_event" ]]; then
+    # First-line PASS / other unrecognized tokens are no-verdict unless a
+    # permitted form appears later (verdict-not-first → invalid).
+    if [[ "$permitted_count" -gt 0 ]]; then
+      _slot_state=invalid
+    else
+      _slot_state=no-verdict
+    fi
+    return 0
+  fi
+
+  if [[ "$shaped_count" -gt 1 ]]; then
+    if [[ "$saw_approve" -eq 1 && "$saw_rc" -eq 1 ]]; then
+      _slot_state=contradictory
+    elif [[ "$permitted_count" -gt 1 ]]; then
+      _slot_state=duplicate
+    else
+      _slot_state=invalid
+    fi
+    return 0
+  fi
+
+  _slot_state="$first_event"
+}
+
+slot_diagnostic() {
+  case "$1" in
+    same-author) printf '%s' "same-author" ;;
+    missing-cli) printf '%s' "missing-cli" ;;
+    unknown-reviewer) printf '%s' "unknown-reviewer" ;;
+    nonzero-exit) printf '%s' "nonzero-exit" ;;
+    empty) printf '%s' "empty" ;;
+    invalid) printf '%s' "invalid" ;;
+    duplicate) printf '%s' "duplicate" ;;
+    contradictory) printf '%s' "contradictory" ;;
+    no-verdict) printf '%s' "no-verdict" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # Both endpoints must resolve to real commits in THIS repo. The old fallback
 # (`git diff BASE` when `BASE...BRANCH` failed) silently swapped the requested
 # review for a diff of the working tree against BASE — a different diff, usually
 # a much smaller one, reported as though the branch had been reviewed. A caller
 # that names refs which do not resolve gets an error, never a substitute.
+REVIEWED_SHA=""
 for ref in "$BASE" "$BRANCH"; do
-  git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || \
+  resolved=$(git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}" 2>/dev/null) || \
     die "ref '$ref' does not resolve to a commit in $REPO — refusing to review a different diff (no working-tree fallback)"
+  if [[ "$ref" == "$BRANCH" ]]; then
+    REVIEWED_SHA=$(printf '%s' "$resolved" | tr 'A-F' 'a-f')
+  fi
 done
+[[ "$REVIEWED_SHA" =~ ^[0-9a-f]{40}$ ]] || \
+  die "ref '$BRANCH' did not freeze to a 40-lowercase-hex SHA (got '${REVIEWED_SHA:-empty}')"
 
 # stderr kept out of $DIFF: a warning must never end up inside the diff the
 # reviewer is shown. `A...B` can still fail after both refs resolve — unrelated
@@ -131,6 +256,13 @@ if [[ ${#DIFF} -gt $MAX_DIFF ]]; then
 fi
 
 PROMPT_FILE=$(mktemp)
+SLOT_DIR=$(mktemp -d)
+cleanup_so() {
+  rm -f "${PROMPT_FILE:-}"
+  rm -rf "${SLOT_DIR:-}"
+}
+trap cleanup_so EXIT
+
 {
   cat "$PLAYBOOK"
   cat <<EOF
@@ -144,6 +276,7 @@ destructive commands, do not touch git or GitHub.
 
 - Repository path: $REPO
 - Diff: \`$BASE...$BRANCH\`
+- Reviewed commit: \`$REVIEWED_SHA\`
 - Author runtime: ${AUTHOR:-unknown}
 - Local green gate: ${GATE_STATUS:-unknown}
 $([[ -n "$TASK" ]] && printf '\n## Task the diff is meant to solve\n%s\n' "$TASK")
@@ -183,9 +316,10 @@ split_reviewer() { # sets _rv_vendor _rv_model from $1
 run_reviewer() { # run_reviewer <vendor:model|vendor> <prompt-file>
   split_reviewer "$1"
   local vendor="$_rv_vendor" model="$_rv_model"
+  _rv_fail=""
   case "$vendor" in
     codex)
-      command -v codex >/dev/null || { info "codex CLI not found — skipping"; return 1; }
+      command -v codex >/dev/null || { info "codex CLI not found — skipping"; _rv_fail=missing-cli; return 1; }
       if [[ -n "$model" ]]; then
         codex exec --sandbox read-only --cd "$REPO" -m "$model" - < "$2"
       else
@@ -193,7 +327,7 @@ run_reviewer() { # run_reviewer <vendor:model|vendor> <prompt-file>
       fi
       ;;
     claude)
-      command -v claude >/dev/null || { info "claude CLI not found — skipping"; return 1; }
+      command -v claude >/dev/null || { info "claude CLI not found — skipping"; _rv_fail=missing-cli; return 1; }
       # stdin, not a positional arg: the rendered playbook starts with YAML
       # frontmatter ("---"), which claude's parser reads as an unknown option
       if [[ -n "$model" ]]; then
@@ -203,33 +337,44 @@ run_reviewer() { # run_reviewer <vendor:model|vendor> <prompt-file>
       fi
       ;;
     grok)
-      command -v grok >/dev/null || { info "grok CLI not found — skipping"; return 1; }
+      command -v grok >/dev/null || { info "grok CLI not found — skipping"; _rv_fail=missing-cli; return 1; }
       if [[ -n "$model" ]]; then
         grok --prompt-file "$2" --cwd "$REPO" --permission-mode plan --model "$model"
       else
         grok --prompt-file "$2" --cwd "$REPO" --permission-mode plan
       fi
       ;;
-    *) info "unknown reviewer: $vendor — skipping"; return 1 ;;
+    *) info "unknown reviewer: $vendor — skipping"; _rv_fail=unknown-reviewer; return 1 ;;
   esac
 }
 
 # The CLIs stream the review on stdout and their own tracing on stderr. Merging
 # the two interleaves log lines mid-sentence and buries the verdict, so the noise
 # goes to a sidecar log the next hat can ignore. RUST_LOG trims it at the source.
+# Raw stderr never enters the combined report, stdout, diagnostics, or formal body.
 LOG="${OUT%.md}.log"
 export RUST_LOG="${RUST_LOG:-error}"
 
 : > "$OUT"
 : > "$LOG"
 reviewed=0
+slot_i=0
+
 IFS=',' read -ra NAMES <<< "$REVIEWERS"
 for name in "${NAMES[@]}"; do
-  name=$(echo "$name" | tr -d '[:space:]')
+  name=$(trim_ws "$name")
   [[ -n "$name" ]] || continue
   split_reviewer "$name"
   vendor="$_rv_vendor"
   model="$_rv_model"
+  slot_i=$((slot_i + 1))
+  slot_id=$(printf '%02d' "$slot_i")
+  slot_name_file="$SLOT_DIR/$slot_id.name"
+  slot_state_file="$SLOT_DIR/$slot_id.state"
+  slot_stdout_file="$SLOT_DIR/$slot_id.stdout"
+  : > "$slot_stdout_file"
+  printf '%s\n' "$name" > "$slot_name_file"
+
   # Law 5: never same vendor unless solo-platform with an explicit different model
   # (fresh-context plan mode) — issue #69 degraded mode.
   if [[ -n "$AUTHOR" && "$vendor" == "$AUTHOR" ]]; then
@@ -243,62 +388,113 @@ for name in "${NAMES[@]}"; do
         codex)  name="codex:review"; info "solo-platform: rewriting reviewer to $name (fresh-context alt model)" ;;
         *) info "solo-platform: same-vendor $vendor with no model suffix — still dispatching plan-mode fresh context"; ;;
       esac
+      printf '%s\n' "$name" > "$slot_name_file"
     else
       info "skipping $name — it wrote this diff (AGENTS.md Law 5)"
+      printf '%s\n' "same-author" > "$slot_state_file"
       continue
     fi
   fi
+
   info "dispatching $name (read-only)"
   verdict_file=$(mktemp)
   err_file=$(mktemp)
+  _rv_fail=""
   if run_reviewer "$name" "$PROMPT_FILE" > "$verdict_file" 2>"$err_file"; then
     reviewed=$((reviewed + 1))
-    failed=0
+    parse_isolated_verdict "$verdict_file"
+    printf '%s\n' "$_slot_state" > "$slot_state_file"
   else
     info "$name returned non-zero — recording whatever it produced"
-    failed=1
-  fi
-  { echo "----- $name -----"; cat "$err_file"; } >> "$LOG"
-  {
-    echo "## Second opinion — $name"
-    echo ""
-    cat "$verdict_file"
-    # A failed reviewer usually says why on stderr (auth, quota) and nothing on
-    # stdout — surface that here rather than leaving a silent empty section.
-    if [[ "$failed" -eq 1 ]]; then
-      echo ""
-      echo "> $name failed. Last lines of stderr (full log: $LOG):"
-      echo '```'
-      tail -n 20 "$err_file"
-      echo '```'
+    if [[ -n "$_rv_fail" ]]; then
+      printf '%s\n' "$_rv_fail" > "$slot_state_file"
+    else
+      printf '%s\n' "nonzero-exit" > "$slot_state_file"
     fi
-    echo ""
-  } >> "$OUT"
+  fi
+  cat "$verdict_file" > "$slot_stdout_file"
+  { echo "----- $name -----"; cat "$err_file"; } >> "$LOG"
   rm -f "$verdict_file" "$err_file"
 done
-rm -f "$PROMPT_FILE"
+
+# Render the combined Markdown report only after every requested slot has been
+# classified from its isolated verdict_file. The report is presentation only.
+{
+  echo "# Second opinion"
+  echo ""
+  echo "- Reviewed commit: \`$REVIEWED_SHA\`"
+  echo "- Diff: \`$BASE...$BRANCH\`"
+  echo ""
+} > "$OUT"
+
+si=1
+while [[ "$si" -le "$slot_i" ]]; do
+  sid=$(printf '%02d' "$si")
+  sname=$(cat "$SLOT_DIR/$sid.name")
+  sstate=$(cat "$SLOT_DIR/$sid.state")
+  {
+    echo "## Second opinion — $sname"
+    echo ""
+    if [[ -s "$SLOT_DIR/$sid.stdout" ]]; then
+      cat "$SLOT_DIR/$sid.stdout"
+      echo ""
+    fi
+    if [[ "$sstate" != "approve" && "$sstate" != "request-changes" ]]; then
+      echo "> Slot \`$sname\` is fail-closed: $(slot_diagnostic "$sstate")."
+      echo ""
+    fi
+  } >> "$OUT"
+  info "slot:$sname state:$sstate"
+  si=$((si + 1))
+done
 
 cat "$OUT"
 [[ ! -s "$LOG" ]] || info "reviewer stderr in $LOG"
 [[ "$reviewed" -gt 0 ]] || die "no reviewer ran — install a second vendor's CLI, pass --reviewers, or use --solo-platform with a vendor:model reviewer (#69)"
 info "wrote $OUT"
 
-# Optional formal GitHub review (#67). When GIBSON_FORMAL_REVIEW=1 and a
-# reviewer token is configured, map the first VERDICT line to a formal review
-# under the dedicated identity. Builder GH_TOKEN is never used.
+# Optional formal GitHub review (#67 / #290). When GIBSON_FORMAL_REVIEW=1 and a
+# reviewer token is configured, map isolated slot states to one formal review
+# under the dedicated identity. Builder GH_TOKEN is never used. The combined
+# report is never re-parsed as authority.
+_fr_event=""
 if [[ "${GIBSON_FORMAL_REVIEW:-0}" == "1" && -n "${PR_NUMBER:-}" && -n "${REPO_SLUG:-${GITHUB_REPOSITORY:-}}" ]]; then
+  # --- #290 slot-authority begin ---
   _fr_event=""
-  # Canonical AGENTS.md tokens are APPROVE / REQUEST_CHANGES. approve and
-  # changes-requested are explicit aliases at this adapter boundary. PASS is
-  # not a PR-review approval synonym.
-  if grep -qiE 'VERDICT:[[:space:]]*approve([^A-Za-z]|$)' "$OUT" 2>/dev/null; then
-    _fr_event=approve
-  elif grep -qiE 'VERDICT:[[:space:]]*(REQUEST_CHANGES|changes-requested|request.changes)' "$OUT" 2>/dev/null; then
+  _any_rc=0
+  _all_approve=1
+  _nslots=0
+  si=1
+  while [[ "$si" -le "$slot_i" ]]; do
+    sid=$(printf '%02d' "$si")
+    sstate=$(cat "$SLOT_DIR/$sid.state")
+    _nslots=$((_nslots + 1))
+    if [[ "$sstate" == "request-changes" ]]; then
+      _any_rc=1
+    elif [[ "$sstate" != "approve" ]]; then
+      _all_approve=0
+    fi
+    si=$((si + 1))
+  done
+  if [[ "$_any_rc" -eq 1 ]]; then
     _fr_event=request-changes
+  elif [[ "$_nslots" -gt 0 && "$_all_approve" -eq 1 ]]; then
+    _fr_event=approve
+  else
+    _fr_event=""
   fi
-  if [[ -n "$_fr_event" && -f "$SCRIPT_DIR/formal-review.sh" ]]; then
+  # --- #290 slot-authority end ---
+  if [[ -z "$_fr_event" ]]; then
+    info "no formal review: fail-closed slot states (no formal event was created)"
+  elif [[ -f "$SCRIPT_DIR/formal-review.sh" ]]; then
     _fr_repo="${REPO_SLUG:-$GITHUB_REPOSITORY}"
-    "$SCRIPT_DIR/formal-review.sh" --pr "$PR_NUMBER" --repo "$_fr_repo"       --event "$_fr_event" --body-file "$OUT" ||       info "formal-review.sh failed — second-opinion.md still written (Law 8)"
+    if "$SCRIPT_DIR/formal-review.sh" --pr "$PR_NUMBER" --repo "$_fr_repo" \
+        --event "$_fr_event" --body-file "$OUT" --commit "$REVIEWED_SHA"; then
+      info "formal-review: $_fr_event commit:$REVIEWED_SHA"
+    else
+      info "formal-review.sh failed — no formal event was created; second-opinion.md still written (Law 8)"
+    fi
+  else
+    info "formal-review.sh missing — no formal event was created"
   fi
 fi
-
