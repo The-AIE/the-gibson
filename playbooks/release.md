@@ -52,6 +52,18 @@ unhealthy, **do not merge** — harden or escalate ([docs/23](../docs/23-deliver
 # Pre-merge verdict (read-only) — run this first; it decides the three calls
 # that used to be re-diagnosed by hand on every PR (L-013, L-015/L-021, L-033)
 <path-to-gibson>/scripts/release-preflight.sh 123
+# Reservation provenance is report-only (`scripts/claim-provenance.mjs`,
+# schema gibson.claim-provenance/v1). It does not feed READY/APPROVE, reviewer
+# independence, or merge/release authority. A verified empty reservation does
+# not launder later ordinary commits. `claim.sh` requires both live snapshots
+# to be OPEN; report-only inspection of a stable CLOSED or MERGED PR is allowed.
+#
+# Post-merge positive canary (#273): after the schema writer/reader land, the
+# first new v2 claim must classify exactly one reservation before implementation
+# begins. Keep `Refs #<issue>` on that landing PR until the canary succeeds;
+# do not close the tracking issue on merge alone. If the canary fails, existing
+# claim rollback closes only that new claim.
+#
 # Required pre-merge: hard-fails partial ships that would still close #N (L-013/L-025).
 # Partial is auto-detected from Related-only body or a partial marker; or pass --partial.
 # exit 0 READY · 1 BLOCKED · 4 ADMIN-CANDIDATE (pre-launch operator decision)
