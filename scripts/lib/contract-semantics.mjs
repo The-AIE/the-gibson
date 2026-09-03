@@ -3657,7 +3657,9 @@ function consumeVerdictAtom(atom, want, ti, ignoreCase) {
 function verdictAltMatchesLiteral(raw, token, dialect, ignoreCase) {
   const src = String(raw || "");
   const want = String(token || "");
-  if (!src || !want || src.length > 240 || want.length > 32) return false;
+  if (!src || !want || src.length > VERDICT_ALT_SRC_CAP || want.length > VERDICT_LITERAL_LEN_CAP) {
+    return false;
+  }
   const atoms = compileVerdictAltAtoms(src, dialect || "bre");
   if (!atoms) return false;
   const fold = Boolean(ignoreCase);
@@ -3716,6 +3718,8 @@ function splitUnescapedVerdictAlts(inner, dialect) {
   // Split only on depth-0 `|` that survived BRE normalization
   // (executable alternation). Nested groups and character classes keep
   // their interior `|`. Leftover `\|` / `\\|` runs are not grouping alts.
+  // Resource-exhausted nested depth returns null (distinct from an
+  // ordinary parts array); unclosed structure best-efforts the remainder.
   const parts = [];
   let start = 0;
   const src = String(inner || "");
@@ -3732,7 +3736,8 @@ function splitUnescapedVerdictAlts(inner, dialect) {
     const g = groupingDelimAt(src, i, mode);
     if (g && g.delim === "(") {
       const close = findMatchingGroupClose(src, g.index, mode);
-      if (close === -1) break;
+      if (close === GROUP_CLOSE_RESOURCE) return null;
+      if (close < 0) break;
       i = close + 1;
       continue;
     }
@@ -3750,7 +3755,48 @@ function splitUnescapedVerdictAlts(inner, dialect) {
   return parts;
 }
 
+// Balanced group depth / finite alternative-expansion bounds. Exhaustion
+// is distinct from invalid unclosed syntax and fail-closes via PASS.
 const MATCHER_GROUP_DEPTH_CAP = 32;
+const MATCHER_EXPAND_ALT_CAP = 64;
+const MATCHER_EXPAND_STATE_CAP = 128;
+const MATCHER_EXPAND_WORK_CAP = 4096;
+// Same length ceiling as verdictAltMatchesLiteral: group-quantifier
+// expansion only materializes strings that could still match a verdict
+// token. Keeps `*` / `{n,}` finite without exponential blow-up beyond
+// the existing state/generated/work caps. VERDICT_ALT_SRC_CAP is the
+// pattern-source ceiling of that matcher — produced sources longer
+// than this cannot be decided there and must fail closed when they
+// could still match a token.
+const VERDICT_LITERAL_LEN_CAP = 32;
+const VERDICT_ALT_SRC_CAP = 240;
+const GROUP_CLOSE_UNCLOSED = -1;
+const GROUP_CLOSE_RESOURCE = -2;
+
+function plantFailClosedVerdictTokens(tokens) {
+  tokens.add("PASS");
+  tokens.add("APPROVE");
+  tokens.add("REQUEST_CHANGES");
+}
+
+function newVerdictExpandCaps() {
+  return { depth: 0, work: 0, maxStates: 0, maxGenerated: 0 };
+}
+
+function verdictExpandBump(caps, n) {
+  caps.work += n;
+  return caps.work > MATCHER_EXPAND_WORK_CAP;
+}
+
+function verdictExpandNoteStates(caps, n) {
+  if (n > caps.maxStates) caps.maxStates = n;
+  return n > MATCHER_EXPAND_STATE_CAP || caps.maxStates > MATCHER_EXPAND_STATE_CAP;
+}
+
+function verdictExpandNoteGenerated(caps, n) {
+  if (n > caps.maxGenerated) caps.maxGenerated = n;
+  return n > MATCHER_EXPAND_ALT_CAP || caps.maxGenerated > MATCHER_EXPAND_ALT_CAP;
+}
 
 function skipRegexCharClass(src, i) {
   // POSIX `[[:name:]]` first, then a bracket expression. A `]` right
@@ -3797,15 +3843,18 @@ function groupingDelimAt(src, i, dialect) {
 function findMatchingGroupClose(src, openIndex, dialect) {
   // Matching `)`, not the first `)`. Skip escaped parens and `)` inside
   // character classes so `((PASS)|APPROVE)([^A-Za-z]|$)` keeps PASS.
-  if (src[openIndex] !== "(") return -1;
+  // Depth beyond MATCHER_GROUP_DEPTH_CAP returns GROUP_CLOSE_RESOURCE
+  // (fail-closed); invalid unclosed syntax returns GROUP_CLOSE_UNCLOSED
+  // (non-matching).
+  if (src[openIndex] !== "(") return GROUP_CLOSE_UNCLOSED;
   const mode = dialect || "bre";
   let depth = 1;
   let i = openIndex + 1;
   while (i < src.length) {
-    if (depth > MATCHER_GROUP_DEPTH_CAP) return -1;
+    if (depth > MATCHER_GROUP_DEPTH_CAP) return GROUP_CLOSE_RESOURCE;
     if (src[i] === "[") {
       const end = skipRegexCharClass(src, i);
-      if (end === -1) return -1;
+      if (end === -1) return GROUP_CLOSE_UNCLOSED;
       i = end;
       continue;
     }
@@ -3825,37 +3874,203 @@ function findMatchingGroupClose(src, openIndex, dialect) {
     }
     i += 1;
   }
-  return -1;
+  return GROUP_CLOSE_UNCLOSED;
 }
 
-function collectVerdictAltTokens(raw, tokens, dialect, ignoreCase) {
-  // Walk one alternative: nested groups recurse, non-group spans keep
-  // POSIX classes / quantifiers for lossless literal matching. Unclosed
-  // structure stops this alt; it does not plant PASS (a closed-quote
-  // dangling `(` must not swallow later PASS prose).
+/**
+ * Minimum characters this already-flattened alternative can consume.
+ * Uses compiled atom mins (so `A?` / `A\?` are 0), never raw source
+ * length (`A?` is two source chars but nullable). Unexpanded grouping
+ * or an uncompilable bound cannot be decided and returns null so the
+ * caller fail-closes rather than inventing a safe empty set.
+ */
+function verdictAltMinMatchedLen(src, dialect) {
+  const s = String(src || "");
+  const mode = dialect || "bre";
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] === "[") {
+      const end = skipRegexCharClass(s, i);
+      if (end === -1) return null;
+      i = end - 1;
+      continue;
+    }
+    const g = groupingDelimAt(s, i, mode);
+    if (g && g.delim === "(") return null;
+    if (s[i] === "\\") i += 1;
+  }
+  const atoms = compileVerdictAltAtoms(s, mode);
+  if (!atoms) return null;
+  let n = 0;
+  for (const atom of atoms) {
+    const min = Number(atom.min);
+    if (!Number.isFinite(min) || min < 0) return null;
+    n += min;
+  }
+  return n;
+}
+
+/**
+ * Materialize whole-group repetition (`(AX)?`, `(A)*`, `(AB){2}`, BRE
+ * `\(AX\)\?`) into a finite set of concrete strings. Quantifiers apply to
+ * the entire group alternative, not the last character of a flattened
+ * concatenation (`P(AX)?SS` → PSS|PAXSS, never PAX?SS). Bounds by the
+ * minimum matched length of each alternative (nullable `A?` is 0, not
+ * source length 2) plus the shared state/generated/work caps. A
+ * non-nullable repetition that already exceeds the verdict-token window
+ * is a sound empty set. Nullable or undecidable overlong repetition
+ * never returns that empty set: expand finitely or fail closed.
+ * Exhaustion returns "resource".
+ */
+function expandQuantifiedGroupAlts(groupAlts, min, max, caps, dialect) {
+  if (verdictExpandBump(caps, 1)) return { status: "resource" };
+  const alts = groupAlts.length ? groupAlts : [""];
+  const mode = dialect || "bre";
+  let minMatched = Infinity;
+  let longestSrc = 0;
+  for (const a of alts) {
+    const n = verdictAltMinMatchedLen(a, mode);
+    if (n === null) return { status: "resource" };
+    if (n < minMatched) minMatched = n;
+    if (a.length > longestSrc) longestSrc = a.length;
+  }
+  let effMax = max;
+  if (!Number.isFinite(effMax) || effMax > VERDICT_LITERAL_LEN_CAP) {
+    effMax = VERDICT_LITERAL_LEN_CAP;
+  }
+  if (minMatched > 0) {
+    const byLen = Math.ceil(VERDICT_LITERAL_LEN_CAP / minMatched);
+    if (byLen < effMax) effMax = byLen;
+    if (min > 0 && min * minMatched > VERDICT_LITERAL_LEN_CAP) {
+      return { status: "ok", alts: [] };
+    }
+  } else if (alts.every((a) => a.length === 0)) {
+    // All alternatives are empty: any positive repetition is still "".
+    effMax = Math.min(effMax, Math.max(min, 0));
+  }
+  if (min > effMax) {
+    if (minMatched === 0) {
+      // Nullable `{n}` / `{n,}` still matches empty; the token-length
+      // cap on unbounded max is not a sound reason to drop the branch.
+      if (!Number.isFinite(min) || min > MATCHER_EXPAND_WORK_CAP) {
+        return { status: "resource" };
+      }
+      effMax = min;
+    } else {
+      return { status: "ok", alts: [] };
+    }
+  }
+  if (minMatched === 0 && Number.isFinite(min) && min * longestSrc > VERDICT_ALT_SRC_CAP) {
+    // Produced source would exceed the matcher ceiling while still
+    // being able to match a short token. Fail closed, never empty.
+    return { status: "resource" };
+  }
+  const out = [];
+  let frontier = [""];
+  if (verdictExpandNoteStates(caps, frontier.length)) return { status: "resource" };
+  for (let count = 0; count <= effMax; count += 1) {
+    if (count >= min) {
+      for (const s of frontier) {
+        if (verdictExpandBump(caps, 1)) return { status: "resource" };
+        out.push(s);
+        if (verdictExpandNoteGenerated(caps, out.length)) {
+          return { status: "resource" };
+        }
+      }
+    }
+    if (count === effMax) break;
+    const next = [];
+    for (const prefix of frontier) {
+      for (const a of alts) {
+        if (verdictExpandBump(caps, 1)) return { status: "resource" };
+        next.push(prefix + a);
+        if (verdictExpandNoteStates(caps, next.length)) {
+          return { status: "resource" };
+        }
+      }
+    }
+    frontier = next;
+    if (verdictExpandNoteGenerated(caps, frontier.length)) {
+      return { status: "resource" };
+    }
+  }
+  return { status: "ok", alts: out };
+}
+
+/**
+ * Expand one alternative across nested groups into a finite set of flat
+ * literal strings (PA(S)S → PASS). Nested calls return those strings
+ * upward and must not addVerdictToken: only complete top-level matcher
+ * alternatives (the `outStrings == null` caller) may contribute verdict
+ * tokens, so `(PASS)X` does not plant PASS. A quantifier immediately
+ * after a balanced group applies to the whole group alternative (ERE
+ * `?`/`*`/`+`/`{m,n}` and BRE `\?`/`\+`/`\{m,n\}` / `*`). Bounds depth,
+ * work, frontier states, and generated alternatives; exhaustion returns
+ * "resource". Invalid unclosed structure returns "unclosed".
+ */
+function expandVerdictAlt(raw, tokens, dialect, ignoreCase, caps, outStrings) {
   const src = String(raw || "");
   const mode = dialect || "bre";
-  if (!src) return;
+  const fold = Boolean(ignoreCase);
+  if (!src) {
+    if (outStrings) outStrings.push("");
+    return "ok";
+  }
+  if (verdictExpandBump(caps, 1)) return "resource";
+  const pieces = [];
   let i = 0;
   let spanStart = 0;
-  const flush = (end) => {
-    const span = src.slice(spanStart, end);
-    if (span) addVerdictToken(tokens, span, mode, ignoreCase);
-  };
   while (i < src.length) {
+    if (verdictExpandBump(caps, 1)) return "resource";
     if (src[i] === "[") {
       const end = skipRegexCharClass(src, i);
-      if (end === -1) break;
+      if (end === -1) return "unclosed";
       i = end;
       continue;
     }
     const g = groupingDelimAt(src, i, mode);
     if (g && g.delim === "(") {
-      flush(i);
+      if (i > spanStart) pieces.push([src.slice(spanStart, i)]);
       const close = findMatchingGroupClose(src, g.index, mode);
-      if (close === -1) return;
-      collectVerdictGroupInnerTokens(src.slice(g.index + 1, close), tokens, mode, ignoreCase);
+      if (close === GROUP_CLOSE_RESOURCE) return "resource";
+      if (close < 0) return "unclosed";
+      if (caps.depth >= MATCHER_GROUP_DEPTH_CAP) return "resource";
+      const innerParts = splitUnescapedVerdictAlts(src.slice(g.index + 1, close), mode);
+      if (innerParts === null) return "resource";
+      const groupAlts = [];
+      caps.depth += 1;
+      for (const part of innerParts) {
+        if (verdictExpandBump(caps, 1)) {
+          caps.depth -= 1;
+          return "resource";
+        }
+        const nested = [];
+        const st = expandVerdictAlt(part, tokens, mode, fold, caps, nested);
+        if (st !== "ok") {
+          caps.depth -= 1;
+          return st;
+        }
+        for (const s of nested) {
+          groupAlts.push(s);
+          if (verdictExpandNoteGenerated(caps, groupAlts.length)) {
+            caps.depth -= 1;
+            return "resource";
+          }
+        }
+      }
+      caps.depth -= 1;
+      if (groupAlts.length === 0) groupAlts.push("");
       i = close + 1;
+      const q = parseVerdictAltQuantifier(src, i, mode);
+      let quantified = groupAlts;
+      if (q) {
+        // Whole-group quantifier: do not leave `?`/`*`/`+`/`{…}` attached
+        // to the following span (that flattens P(AX)?SS into PAX?SS).
+        const exp = expandQuantifiedGroupAlts(groupAlts, q.min, q.max, caps, mode);
+        if (exp.status !== "ok") return exp.status;
+        quantified = exp.alts;
+        i = q.next;
+      }
+      pieces.push(quantified);
       spanStart = i;
       continue;
     }
@@ -3865,32 +4080,76 @@ function collectVerdictAltTokens(raw, tokens, dialect, ignoreCase) {
     }
     i += 1;
   }
-  flush(src.length);
+  if (spanStart < src.length || pieces.length === 0) {
+    pieces.push([src.slice(spanStart)]);
+  }
+  let states = [""];
+  if (verdictExpandNoteStates(caps, states.length)) return "resource";
+  for (const piece of pieces) {
+    if (verdictExpandBump(caps, 1)) return "resource";
+    const next = [];
+    for (const prefix of states) {
+      for (const opt of piece) {
+        if (verdictExpandBump(caps, 1)) return "resource";
+        next.push(prefix + opt);
+        if (verdictExpandNoteStates(caps, next.length)) return "resource";
+      }
+    }
+    states = next;
+    if (verdictExpandNoteGenerated(caps, states.length)) return "resource";
+  }
+  if (verdictExpandNoteGenerated(caps, states.length)) return "resource";
+  for (const s of states) {
+    if (s && s.length > VERDICT_ALT_SRC_CAP) {
+      const minLen = verdictAltMinMatchedLen(s, mode);
+      if (minLen === null || minLen <= VERDICT_LITERAL_LEN_CAP) return "resource";
+      if (outStrings) outStrings.push(s);
+      continue;
+    }
+    // Nested expansion returns strings upward. Only the top-level
+    // matcher alternative (no outStrings collector) may plant tokens,
+    // so an inner PASS in `(PASS)X` is not a verdict by itself.
+    if (s && !outStrings) addVerdictToken(tokens, s, mode, fold);
+    if (outStrings) outStrings.push(s);
+  }
+  return "ok";
 }
 
-function collectVerdictGroupInnerTokens(inner, tokens, dialect, ignoreCase) {
-  for (const part of splitUnescapedVerdictAlts(inner, dialect)) {
-    collectVerdictAltTokens(part, tokens, dialect, ignoreCase);
+function collectVerdictGroupInnerTokens(inner, tokens, dialect, ignoreCase, caps) {
+  const parts = splitUnescapedVerdictAlts(inner, dialect);
+  if (parts === null) return "resource";
+  for (const part of parts) {
+    const st = expandVerdictAlt(part, tokens, dialect, ignoreCase, caps, null);
+    if (st !== "ok") return st;
   }
+  return "ok";
 }
 
 function collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) {
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a shell-slice
   // matcher cluster of balanced groups (and ungrouped |TOKEN siblings).
-  // Nested groups close at the matching `)`, not the first `)`. Unclosed
-  // groups stop the cluster without planting PASS so a closed-quote
-  // dangling `(` cannot swallow a later PASS matcher. `|VERDICT:` starts
-  // a new prefix: stop the cluster before that bar so lastIndex cannot
-  // skip an unconsumed PASS remainder. Double-quoted group-run-3 /
-  // alternation-run-1 leaves leftover `\(` while normalizing `|`; BRE
-  // leftover grouping delims still group so the executable top-level
-  // PASS alternative is visible. ERE `\(` / `\)` stay literals.
-  // Alternatives keep POSIX classes and quantifiers so
+  // Nested groups close at the matching `)`, not the first `)`. Nested
+  // group literals reassemble across groups (PA(S)S / P(A)SS / PAS(S))
+  // via bounded alternative expansion. Nested group strings are not
+  // committed as tokens (`(PASS)X` is PASSX, not PASS). A quantifier
+  // after a balanced group applies to the whole group (`P(AX)?SS` ≠
+  // `PAX?SS`), using min-matched length so nullable `(A?){17}PASS`
+  // still expands. Depth / state / generated-alt / work exhaustion
+  // returns "resource" for fail-closed PASS evidence.
+  // Unclosed groups stop the cluster without planting PASS so a
+  // closed-quote dangling `(` cannot swallow a later PASS matcher.
+  // `|VERDICT:` starts a new prefix: stop the cluster before that bar so
+  // lastIndex cannot skip an unconsumed PASS remainder. Double-quoted
+  // group-run-3 / alternation-run-1 leaves leftover `\(` while
+  // normalizing `|`; BRE leftover grouping delims still group so the
+  // executable top-level PASS alternative is visible. ERE `\(` / `\)`
+  // stay literals. Alternatives keep POSIX classes and quantifiers so
   // `PASS[[:space:]]*` / `P\?PASS` still tokenize as PASS rather than
   // PASSSPACE / PPASS. ignoreCase flows from grep `-i` into literal and
   // bracket/POSIX-class matching. Not a general regex parser.
   const mode = dialect || "bre";
   const fold = Boolean(ignoreCase);
+  const caps = newVerdictExpandCaps();
   const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
   let p;
   while ((p = prefixRe.exec(slice)) !== null) {
@@ -3903,8 +4162,17 @@ function collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) {
       const g = groupingDelimAt(slice, i, mode);
       if (g && g.delim === "(") {
         const close = findMatchingGroupClose(slice, g.index, mode);
-        if (close === -1) break;
-        collectVerdictGroupInnerTokens(slice.slice(g.index + 1, close), tokens, mode, fold);
+        if (close === GROUP_CLOSE_RESOURCE) return "resource";
+        if (close < 0) break;
+        const st = collectVerdictGroupInnerTokens(
+          slice.slice(g.index + 1, close),
+          tokens,
+          mode,
+          fold,
+          caps
+        );
+        if (st === "resource") return "resource";
+        if (st === "unclosed") break;
         i = close + 1;
         consumedTo = i;
       } else if (/[A-Za-z]/.test(slice[i] || "")) {
@@ -3927,6 +4195,7 @@ function collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) {
     // may hold a later VERDICT: prefix (`|VERDICT:...(PASS)`).
     prefixRe.lastIndex = Math.max(prefixRe.lastIndex, consumedTo);
   }
+  return "ok";
 }
 
 function stageHasVerdictMatcherShape(text) {
@@ -3999,7 +4268,11 @@ function harnessVerdictRegexGroupTokens(text) {
                 : match
           );
         }
-        collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase);
+        if (collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) === "resource") {
+          // Balanced depth / expansion bound exhaustion: deterministic
+          // fail-closed PASS evidence (same class as unresolved wrappers).
+          plantFailClosedVerdictTokens(tokens);
+        }
       }
     }
   }
@@ -4055,9 +4328,18 @@ function harnessAcceptsPass(text) {
  * `-f`/`--file` fail-closes rather than inventing file contents.
  * Introspection-only `command -v/-V` is not an executable matcher.
  * Nested matcher groups (ERE `((PASS)|APPROVE)` / `(APPROVE|(PASS))` and
- * BRE `\(APPROVE\|\(PASS\)\)`) close at the matching parenthesis. Unclosed
- * groups stop without planting PASS. Residual: non-VERDICT alternations
- * are not parsed.
+ * BRE `\(APPROVE\|\(PASS\)\)`) close at the matching parenthesis. Split
+ * tokens across nested groups (`PA(S)S` / `P(A)SS` / `PAS(S)`) reassemble
+ * via bounded alternative expansion. Nested expansion does not plant
+ * inner tokens (`(PASS)X` / BRE `\(PASS\)X` are not PASS). Group
+ * quantifiers bind the whole group (ERE `P(AX)?SS` / `P(A)*SS` /
+ * `P(A){0,1}SS` and BRE `P\(AX\)\?SS`), not the last flattened atom.
+ * Nullable quantified groups (`(A?){17}PASS`) use min-matched length,
+ * never raw source length; non-nullable overlong repetition may stay
+ * non-matching only when that bound is sound. Balanced depth beyond
+ * the cap, or expansion state/alt/work exhaustion, fail-closes with
+ * PASS evidence. Unclosed groups stop without planting PASS. Residual:
+ * non-VERDICT alternations are not parsed.
  * Residual #263/#264: not a general shell/regex parser. Residual #265:
  * pathological scan cost.
  *

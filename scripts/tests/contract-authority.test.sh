@@ -5072,6 +5072,9 @@ function bareVerdictScript(pattern) {
 function grepESingleQuotedScript(pattern) {
   return ["#!/bin/bash", "grep -E " + SQ + pattern + SQ].join("\n");
 }
+function grepBreSingleQuotedScript(pattern) {
+  return ["#!/bin/bash", "grep " + SQ + pattern + SQ].join("\n");
+}
 // Nested-group #241 false-green reproductions. Closing at the first
 // right parenthesis drops PASS from nested ERE groups and from a later
 // VERDICT prefix after a bar. Both-grouped nested alts keep PASS but
@@ -5117,6 +5120,67 @@ const nestedBreApproveOnly = [
   "#!/bin/bash",
   nestedBreApproveNeedle,
 ].join("\n");
+// BRE split-token forms (double-quoted source-run 1). After shell/BRE
+// leftover normalization these become PA(S)S / P(A)SS / PAS(S) /
+// P(A(S)S) and must reassemble to PASS the same way as the ERE forms.
+const splitBrePaSsNeedle = String.raw`grep "VERDICT:[[:space:]]*\(PA\(S\)S\|APPROVE\)"`;
+const splitBrePAssNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(A\)SS\|APPROVE\)"`;
+const splitBrePasSNeedle = String.raw`grep "VERDICT:[[:space:]]*\(PAS\(S\)\|APPROVE\)"`;
+const splitBreNestedNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(A\(S\)S\)\|APPROVE\)"`;
+const splitBreApproveControlNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPRO\(VE\)\|REQUEST_CHANGES\)"`;
+const splitBrePaSsDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", splitBrePaSsNeedle].join("\n");
+const splitBrePAssDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", splitBrePAssNeedle].join("\n");
+const splitBrePasSDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", splitBrePasSNeedle].join("\n");
+const splitBreNestedDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", splitBreNestedNeedle].join("\n");
+const splitBreApproveOnly = ["#!/bin/bash", splitBreApproveControlNeedle].join("\n");
+// BRE whole-group quantifiers (double-quoted source-run 1). After leftover
+// normalization these are P(AX)?SS / P(A)?SS / * / + / {0,1} forms. The
+// multi-char optional group must stay approve-only green; the single-char
+// optional group must still detect PASS.
+const groupQuantBreAxOptNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(AX\)\?SS\|APPROVE\|REQUEST_CHANGES\)"`;
+const groupQuantBreAOptNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(A\)\?SS\|APPROVE\|REQUEST_CHANGES\)"`;
+const groupQuantBreAxStarNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(AX\)*SS\|APPROVE\)"`;
+const groupQuantBreAStarNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(A\)*SS\|APPROVE\)"`;
+const groupQuantBreAxPlusNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(AX\)\+SS\|APPROVE\)"`;
+const groupQuantBreAPlusNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(A\)\+SS\|APPROVE\)"`;
+const groupQuantBreAxIntervalNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(AX\)\{0,1\}SS\|APPROVE\)"`;
+const groupQuantBreAIntervalNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(A\)\{0,1\}SS\|APPROVE\)"`;
+const groupQuantBreAxAltOptNeedle = String.raw`grep "VERDICT:[[:space:]]*\(P\(AX\|ZZ\)\?SS\|APPROVE\)"`;
+const groupQuantBreAsExact2Needle = String.raw`grep "VERDICT:[[:space:]]*\(P\(AS\)\{2\}\|APPROVE\)"`;
+const groupQuantBreAxOptDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAxOptNeedle].join("\n");
+const groupQuantBreAOptDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAOptNeedle].join("\n");
+const groupQuantBreAxStarDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAxStarNeedle].join("\n");
+const groupQuantBreAStarDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAStarNeedle].join("\n");
+const groupQuantBreAxPlusDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAxPlusNeedle].join("\n");
+const groupQuantBreAPlusDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAPlusNeedle].join("\n");
+const groupQuantBreAxIntervalDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAxIntervalNeedle].join("\n");
+const groupQuantBreAIntervalDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAIntervalNeedle].join("\n");
+const groupQuantBreAxAltOptDecoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAxAltOptNeedle].join("\n");
+const groupQuantBreAsExact2Decoy = ["#!/bin/bash", "# VERDICT: APPROVE", groupQuantBreAsExact2Needle].join("\n");
+// Nested partial-token suffix: inner PASS concatenated with X is not PASS
+// at runtime. Exact ERE/BRE witnesses from independent review.
+const nestedSuffixErePassXPat = "VERDICT:[[:space:]]*((PASS)X|APPROVE|REQUEST_CHANGES)";
+const nestedSuffixBrePassXPat = String.raw`VERDICT:[[:space:]]*\(\(PASS\)X\|APPROVE\|REQUEST_CHANGES\)`;
+const nestedSuffixErePassOrApprovePat = "VERDICT:[[:space:]]*((PASS)|APPROVE)";
+const nestedSuffixBrePassOrApprovePat = String.raw`VERDICT:[[:space:]]*\(\(PASS\)\|APPROVE\)`;
+const nestedSuffixErePassXGrep = grepESingleQuotedScript(nestedSuffixErePassXPat);
+const nestedSuffixBrePassXGrep = grepBreSingleQuotedScript(nestedSuffixBrePassXPat);
+const nestedSuffixErePassOrApproveGrep = grepESingleQuotedScript(nestedSuffixErePassOrApprovePat);
+const nestedSuffixBrePassOrApproveGrep = grepBreSingleQuotedScript(nestedSuffixBrePassOrApprovePat);
+// Nullable-group repetition: (A?){17} can consume zero characters so
+// (A?){17}PASS matches PASS. Non-nullable (AX){17} / (A){33} cannot.
+const nullableEre17Pat = "VERDICT:[[:space:]]*((A?){17}PASS|APPROVE|REQUEST_CHANGES)";
+const nullableBre17Pat = String.raw`VERDICT:[[:space:]]*\(\(A\?\)\{17\}PASS\|APPROVE\|REQUEST_CHANGES\)`;
+const overlongEreAx17Pat = "VERDICT:[[:space:]]*((AX){17}PASS|APPROVE|REQUEST_CHANGES)";
+const overlongBreAx17Pat = String.raw`VERDICT:[[:space:]]*\(\(AX\)\{17\}PASS\|APPROVE\|REQUEST_CHANGES\)`;
+const overlongEreA33Pat = "VERDICT:[[:space:]]*((A){33}PASS|APPROVE|REQUEST_CHANGES)";
+const overlongBreA33Pat = String.raw`VERDICT:[[:space:]]*\(\(A\)\{33\}PASS\|APPROVE\|REQUEST_CHANGES\)`;
+const nullableEre17Grep = grepESingleQuotedScript(nullableEre17Pat);
+const nullableBre17Grep = grepBreSingleQuotedScript(nullableBre17Pat);
+const overlongEreAx17Grep = grepESingleQuotedScript(overlongEreAx17Pat);
+const overlongBreAx17Grep = grepBreSingleQuotedScript(overlongBreAx17Pat);
+const overlongEreA33Grep = grepESingleQuotedScript(overlongEreA33Pat);
+const overlongBreA33Grep = grepBreSingleQuotedScript(overlongBreA33Pat);
 const literalNewlineErePassDecoy = [
   "#!/bin/bash",
   "grep -qE \"VERDICT:",
@@ -5314,6 +5378,57 @@ if (!nestedBrePassDecoy.includes(nestedBrePassNeedle) || nestedBrePassDecoy.incl
 }
 if (!nestedBreApproveOnly.includes(nestedBreApproveNeedle) || nestedBreApproveOnly.includes("PASS") || sourceBackslashRunLen(nestedBreApproveOnly, "(") !== 1) {
   throw new Error("nested BRE approve-only control lost escaped-group bytes");
+}
+if (!splitBrePaSsDecoy.includes(splitBrePaSsNeedle) || !splitBrePaSsDecoy.includes("PA\\(S\\)S") || sourceBackslashRunLen(splitBrePaSsDecoy, "(") !== 1) {
+  throw new Error("BRE split-token PA(S)S decoy lost escaped-group bytes");
+}
+if (!splitBrePAssDecoy.includes(splitBrePAssNeedle) || !splitBrePAssDecoy.includes("P\\(A\\)SS") || sourceBackslashRunLen(splitBrePAssDecoy, "(") !== 1) {
+  throw new Error("BRE split-token P(A)SS decoy lost escaped-group bytes");
+}
+if (!splitBrePasSDecoy.includes(splitBrePasSNeedle) || !splitBrePasSDecoy.includes("PAS\\(S\\)") || sourceBackslashRunLen(splitBrePasSDecoy, "(") !== 1) {
+  throw new Error("BRE split-token PAS(S) decoy lost escaped-group bytes");
+}
+if (!splitBreNestedDecoy.includes(splitBreNestedNeedle) || !splitBreNestedDecoy.includes("P\\(A\\(S\\)S\\)") || sourceBackslashRunLen(splitBreNestedDecoy, "(") !== 1) {
+  throw new Error("BRE split-token nested P(A(S)S) decoy lost escaped-group bytes");
+}
+if (!splitBreApproveOnly.includes(splitBreApproveControlNeedle) || splitBreApproveOnly.includes("PASS") || !splitBreApproveOnly.includes("APPRO\\(VE\\)") || sourceBackslashRunLen(splitBreApproveOnly, "(") !== 1) {
+  throw new Error("BRE split-token APPRO(VE) control lost escaped-group bytes");
+}
+if (!groupQuantBreAxOptDecoy.includes(groupQuantBreAxOptNeedle) || !groupQuantBreAxOptDecoy.includes("P\\(AX\\)\\?SS") || sourceBackslashRunLen(groupQuantBreAxOptDecoy, "(") !== 1) {
+  throw new Error("BRE group-quant P(AX)?SS control lost escaped-group bytes");
+}
+if (!groupQuantBreAOptDecoy.includes(groupQuantBreAOptNeedle) || !groupQuantBreAOptDecoy.includes("P\\(A\\)\\?SS") || sourceBackslashRunLen(groupQuantBreAOptDecoy, "(") !== 1) {
+  throw new Error("BRE group-quant P(A)?SS decoy lost escaped-group bytes");
+}
+if (!groupQuantBreAxStarDecoy.includes("P\\(AX\\)*SS") || !groupQuantBreAStarDecoy.includes("P\\(A\\)*SS")) {
+  throw new Error("BRE group-quant * fixtures lost escaped-group bytes");
+}
+if (!groupQuantBreAxPlusDecoy.includes("P\\(AX\\)\\+SS") || !groupQuantBreAPlusDecoy.includes("P\\(A\\)\\+SS")) {
+  throw new Error("BRE group-quant + fixtures lost escaped-group bytes");
+}
+if (!groupQuantBreAxIntervalDecoy.includes("P\\(AX\\)\\{0,1\\}SS") || !groupQuantBreAIntervalDecoy.includes("P\\(A\\)\\{0,1\\}SS")) {
+  throw new Error("BRE group-quant {0,1} fixtures lost escaped-group bytes");
+}
+if (!groupQuantBreAxAltOptDecoy.includes("P\\(AX\\|ZZ\\)\\?SS") || !groupQuantBreAsExact2Decoy.includes("P\\(AS\\)\\{2\\}")) {
+  throw new Error("BRE group-quant alternation / exact-{2} fixtures lost escaped-group bytes");
+}
+if (!nestedSuffixErePassXGrep.includes("grep -E ") || !nestedSuffixErePassXGrep.includes(nestedSuffixErePassXPat) || nestedSuffixErePassXGrep.includes("grep -E \"")) {
+  throw new Error("ERE nested-suffix (PASS)X fixture lost exact single-quoted witness");
+}
+if (!nestedSuffixBrePassXGrep.startsWith("#!/bin/bash\ngrep ") || !nestedSuffixBrePassXGrep.includes(nestedSuffixBrePassXPat) || sourceBackslashRunLen(nestedSuffixBrePassXGrep, "(") !== 1) {
+  throw new Error("BRE nested-suffix (PASS)X fixture lost exact single-quoted witness");
+}
+if (!nestedSuffixErePassOrApproveGrep.includes("((PASS)|APPROVE)") || !nestedSuffixBrePassOrApproveGrep.includes(nestedSuffixBrePassOrApprovePat)) {
+  throw new Error("nested-suffix true-positive ((PASS)|APPROVE) fixtures lost bytes");
+}
+if (!nullableEre17Grep.includes("((A?){17}PASS|APPROVE|REQUEST_CHANGES)") || !nullableBre17Grep.includes(nullableBre17Pat) || sourceBackslashRunLen(nullableBre17Grep, "(") !== 1) {
+  throw new Error("nullable (A?){17}PASS fixtures lost exact ERE/BRE witness bytes");
+}
+if (!overlongEreAx17Grep.includes("((AX){17}PASS") || !overlongBreAx17Grep.includes(overlongBreAx17Pat) || overlongEreAx17Grep.includes("A?") || overlongBreAx17Grep.includes("A\\?")) {
+  throw new Error("non-nullable overlong (AX){17} fixtures lost bytes or gained nullable A?");
+}
+if (!overlongEreA33Grep.includes("((A){33}PASS") || !overlongBreA33Grep.includes(overlongBreA33Pat) || overlongEreA33Grep.includes("A?") || overlongBreA33Grep.includes("A\\?")) {
+  throw new Error("non-nullable overlong (A){33} fixtures lost bytes or gained nullable A?");
 }
 if (!danglingCommentBrePass.includes(danglingCommentOpener) || !danglingCommentBrePass.includes(danglingCommentBrePassNeedle)) {
   throw new Error("danglingCommentBrePass lost comment+dangling BRE PASS bytes");
@@ -5529,6 +5644,13 @@ const grepProofs = [
   { name: "nested-bre-escaped-group-matches-APPROVE", script: nestedBrePassDecoy, sample: "VERDICT: APPROVE", want: true },
   { name: "nested-bre-escaped-group-control-does-not-match-PASS", script: nestedBreApproveOnly, sample: "VERDICT: PASS", want: false },
   { name: "nested-bre-escaped-group-control-matches-APPROVE", script: nestedBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-split-PA(S)S-matches-PASS", script: splitBrePaSsDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "bre-split-PA(S)S-matches-APPROVE", script: splitBrePaSsDecoy, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-split-P(A)SS-matches-PASS", script: splitBrePAssDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "bre-split-PAS(S)-matches-PASS", script: splitBrePasSDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "bre-split-P(A(S)S)-matches-PASS", script: splitBreNestedDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "bre-split-APPRO(VE)-control-does-not-match-PASS", script: splitBreApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "bre-split-APPRO(VE)-control-matches-APPROVE", script: splitBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "grep-E-escaped-approve-does-not-match-APPROVE", script: grepEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
   { name: "grep-qE-escaped-approve-does-not-match-APPROVE", script: grepQEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
   { name: "grep-Eq-escaped-approve-does-not-match-APPROVE", script: grepEQEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
@@ -5664,6 +5786,18 @@ const grepProofs = [
   { name: "grep-quoted-bundle-pass-matches-PASS", script: grepQuotedBundlePassGrepOnly, sample: "VERDICT: PASS", want: true },
   { name: "grep-quoted-bundle-approve-only-does-not-match-PASS", script: grepQuotedBundleApproveGrepOnly, sample: "VERDICT: PASS", want: false },
   { name: "grep-quoted-bundle-approve-only-matches-APPROVE", script: grepQuotedBundleApproveGrepOnly, sample: "VERDICT: APPROVE", want: true },
+  { name: "ere-nested-suffix-passX-does-not-match-PASS", script: nestedSuffixErePassXGrep, sample: "VERDICT: PASS", want: false },
+  { name: "ere-nested-suffix-passX-matches-APPROVE", script: nestedSuffixErePassXGrep, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-nested-suffix-passX-does-not-match-PASS", script: nestedSuffixBrePassXGrep, sample: "VERDICT: PASS", want: false },
+  { name: "bre-nested-suffix-passX-matches-APPROVE", script: nestedSuffixBrePassXGrep, sample: "VERDICT: APPROVE", want: true },
+  { name: "ere-nullable-17-matches-PASS", script: nullableEre17Grep, sample: "VERDICT: PASS", want: true },
+  { name: "ere-nullable-17-matches-APPROVE", script: nullableEre17Grep, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-nullable-17-matches-PASS", script: nullableBre17Grep, sample: "VERDICT: PASS", want: true },
+  { name: "bre-nullable-17-matches-APPROVE", script: nullableBre17Grep, sample: "VERDICT: APPROVE", want: true },
+  { name: "ere-overlong-AX17-does-not-match-PASS", script: overlongEreAx17Grep, sample: "VERDICT: PASS", want: false },
+  { name: "ere-overlong-AX17-matches-APPROVE", script: overlongEreAx17Grep, sample: "VERDICT: APPROVE", want: true },
+  { name: "bre-overlong-AX17-does-not-match-PASS", script: overlongBreAx17Grep, sample: "VERDICT: PASS", want: false },
+  { name: "bre-overlong-AX17-matches-APPROVE", script: overlongBreAx17Grep, sample: "VERDICT: APPROVE", want: true },
 ];
 for (const proof of grepProofs) {
   const receipt = runtimeGrepMatches(
@@ -7128,6 +7262,799 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
       throw new Error("collectMatcherClusterTokens missing leftover-vs-ERE grouping delimiter scan");
     }
     console.log("H241_OK nested-group-balanced-close-not-first-paren");
+  }
+  {
+    // Split-token nested groups: PA(S)S / P(A)SS / PAS(S) and a nested
+    // variant must reassemble to PASS on the production finding path.
+    // ERE uses bare groups; BRE uses double-quoted source-run-1 escapes
+    // that normalize to leftover grouping delims under the existing
+    // shell/BRE conventions. Paired APPRO(VE) controls stay approve-only
+    // green. Runtime oracles prove the executable forms still match
+    // VERDICT: PASS.
+    function nestDepth(n, body) {
+      return "(".repeat(n) + body + ")".repeat(n);
+    }
+    function depthRuntimeOracle(script, sample, wantMatch, label) {
+      const run = bashGrepRun(script, sample);
+      const err = String(run.stderr || "");
+      if (
+        run.status !== 0 &&
+        /invalid|repetition|overflow|memory|too complex|regex error|maximum|nested/i.test(err)
+      ) {
+        console.log(
+          "H241_SKIP balanced-depth-runtime-" + label +
+          " platform-rejected: " + err.trim().replace(/\s+/g, " ")
+        );
+        return "platform-rejected";
+      }
+      const matched = run.status === 0;
+      if (matched !== wantMatch) {
+        throw new Error(
+          "balanced-depth runtime oracle mismatch " + label +
+          " wantMatch=" + wantMatch + " status=" + run.status +
+          " stderr=" + JSON.stringify(err)
+        );
+      }
+      return "matched";
+    }
+    const splitPassFamily = [
+      { name: "PA(S)S", pat: "VERDICT:[[:space:]]*(PA(S)S|APPROVE)" },
+      { name: "P(A)SS", pat: "VERDICT:[[:space:]]*(P(A)SS|APPROVE)" },
+      { name: "PAS(S)", pat: "VERDICT:[[:space:]]*(PAS(S)|APPROVE)" },
+      { name: "P(A(S)S)", pat: "VERDICT:[[:space:]]*(P(A(S)S)|APPROVE)" },
+    ];
+    const splitControlPat = "VERDICT:[[:space:]]*(APPRO(VE)|REQUEST_CHANGES)";
+    for (const row of splitPassFamily) {
+      const script = grepESingleQuotedScript(row.pat);
+      const passFindings = verdictFindings(script);
+      if (!acceptsPass(passFindings)) {
+        throw new Error("split-token PASS false-green " + row.name + " got " + JSON.stringify(passFindings));
+      }
+      if (missingApprove(passFindings)) {
+        throw new Error("split-token PASS dropped APPROVE " + row.name + " got " + JSON.stringify(passFindings));
+      }
+      if (!bashGrepMatches(script, "VERDICT: PASS") || !bashGrepMatches(script, "VERDICT: APPROVE")) {
+        throw new Error("split-token runtime oracle failed " + row.name);
+      }
+      console.log("H241_OK split-token-" + row.name);
+    }
+    {
+      const control = grepESingleQuotedScript(splitControlPat);
+      const controlFindings = verdictFindings(control);
+      if (controlFindings.length) {
+        throw new Error("split-token APPRO(VE) control false-red got " + JSON.stringify(controlFindings));
+      }
+      if (bashGrepMatches(control, "VERDICT: PASS") || !bashGrepMatches(control, "VERDICT: APPROVE")) {
+        throw new Error("split-token APPRO(VE) control runtime mismatch");
+      }
+      console.log("H241_OK split-token-APPROVE-control");
+    }
+    const splitPassBreFamily = [
+      { name: "BRE-PA(S)S", script: splitBrePaSsDecoy },
+      { name: "BRE-P(A)SS", script: splitBrePAssDecoy },
+      { name: "BRE-PAS(S)", script: splitBrePasSDecoy },
+      { name: "BRE-P(A(S)S)", script: splitBreNestedDecoy },
+    ];
+    for (const row of splitPassBreFamily) {
+      const passFindings = verdictFindings(row.script);
+      if (!acceptsPass(passFindings)) {
+        throw new Error("split-token BRE PASS false-green " + row.name + " got " + JSON.stringify(passFindings));
+      }
+      if (missingApprove(passFindings)) {
+        throw new Error("split-token BRE PASS dropped APPROVE " + row.name + " got " + JSON.stringify(passFindings));
+      }
+      if (!bashGrepMatches(row.script, "VERDICT: PASS") || !bashGrepMatches(row.script, "VERDICT: APPROVE")) {
+        throw new Error("split-token BRE runtime oracle failed " + row.name);
+      }
+      console.log("H241_OK split-token-" + row.name);
+    }
+    {
+      const controlFindings = verdictFindings(splitBreApproveOnly);
+      if (controlFindings.length) {
+        throw new Error("split-token BRE APPRO(VE) control false-red got " + JSON.stringify(controlFindings));
+      }
+      if (bashGrepMatches(splitBreApproveOnly, "VERDICT: PASS") || !bashGrepMatches(splitBreApproveOnly, "VERDICT: APPROVE")) {
+        throw new Error("split-token BRE APPRO(VE) control runtime mismatch");
+      }
+      console.log("H241_OK split-token-BRE-APPROVE-control");
+    }
+    {
+      // Pre-repair tooth: flushing spans around groups without cartesian
+      // reassembly sees PA / S / S and never PASS.
+      function oldFlushNoReassembleHasPass(alt) {
+        const tokens = new Set();
+        const src = String(alt);
+        let i = 0;
+        let spanStart = 0;
+        const flush = (end) => {
+          const span = src.slice(spanStart, end).trim();
+          if (/^[A-Za-z][A-Za-z0-9_]*$/.test(span)) tokens.add(span.toUpperCase());
+        };
+        while (i < src.length) {
+          if (src[i] === "(") {
+            flush(i);
+            let depth = 1;
+            let j = i + 1;
+            while (j < src.length && depth > 0) {
+              if (src[j] === "(") depth += 1;
+              else if (src[j] === ")") depth -= 1;
+              j += 1;
+            }
+            if (depth !== 0) return tokens.has("PASS");
+            const inner = src.slice(i + 1, j - 1);
+            if (/^[A-Za-z][A-Za-z0-9_]*$/.test(inner.trim())) tokens.add(inner.trim().toUpperCase());
+            i = j;
+            spanStart = i;
+            continue;
+          }
+          i += 1;
+        }
+        flush(src.length);
+        return tokens.has("PASS");
+      }
+      const splitAlts = ["PA(S)S", "P(A)SS", "PAS(S)", "P(A(S)S)"];
+      for (const alt of splitAlts) {
+        if (oldFlushNoReassembleHasPass(alt)) {
+          throw new Error("pre-repair split-token tooth should miss PASS in " + alt);
+        }
+      }
+      console.log("H241_OK split-token-pre-repair-no-reassemble-tooth");
+    }
+    {
+      // Production-path source mutants: rewrite a temp copy of the trusted
+      // semantics module (no eval) and prove the live production assertion
+      // goes false-green when cross-group concatenation is disabled or
+      // resource-exhaustion propagation is removed.
+      const liveSemSrc = readFileSync(process.env.SEM, "utf8");
+      async function loadTrustedMutant(tag, transform) {
+        const dir = mkdtempSync(join(tmpdir(), "gibson-241-sem-mutant-"));
+        const out = join(dir, "contract-semantics-" + tag + ".mjs");
+        const mutated = transform(liveSemSrc);
+        if (mutated === liveSemSrc) {
+          throw new Error("source mutant " + tag + " did not change trusted semantics text");
+        }
+        writeFileSync(out, mutated);
+        const mod = await import(pathToFileURL(out).href + "?mutant=" + tag + "-" + Date.now());
+        return { mod, dir };
+      }
+      function mutantAcceptsPass(mod, script) {
+        const findings = mod.reviewVerdictVocabularyFindings({
+          agentsText,
+          harnessFiles: {
+            "scripts/second-opinion.sh": script,
+            "scripts/release-preflight.sh": approveOnly,
+          },
+        });
+        return acceptsPass(findings);
+      }
+      const ereSplitWitness = grepESingleQuotedScript("VERDICT:[[:space:]]*(PA(S)S|APPROVE)");
+      const breSplitWitness = splitBrePaSsDecoy;
+      const deepApproveWitness = grepESingleQuotedScript(
+        "VERDICT:[[:space:]]*" + nestDepth(33, "APPROVE|REQUEST_CHANGES")
+      );
+      if (!acceptsPass(verdictFindings(ereSplitWitness)) || !acceptsPass(verdictFindings(breSplitWitness))) {
+        throw new Error("live production path lost split-token PASS before mutant tooth");
+      }
+      if (!acceptsPass(verdictFindings(deepApproveWitness))) {
+        throw new Error("live production path lost depth-33 fail-closed PASS before mutant tooth");
+      }
+      {
+        const concatAnchor = "next.push(prefix + opt)";
+        const concatHits = liveSemSrc.split(concatAnchor).length - 1;
+        if (concatHits !== 1) {
+          throw new Error("cross-group concatenation mutant anchor count drifted: " + concatHits);
+        }
+        const { mod, dir } = await loadTrustedMutant("no-concat", (src) =>
+          src.replace(concatAnchor, "next.push(opt)")
+        );
+        try {
+          if (mutantAcceptsPass(mod, ereSplitWitness)) {
+            throw new Error("no-concat mutant still detects ERE PA(S)S — production wiring tooth lost");
+          }
+          if (mutantAcceptsPass(mod, breSplitWitness)) {
+            throw new Error("no-concat mutant still detects BRE PA\\(S\\)S — production wiring tooth lost");
+          }
+          console.log("H241_OK split-token-production-path-no-concat-mutant-tooth");
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+      {
+        const exhaustAnchor =
+          'if (collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) === "resource") {\n' +
+          "          // Balanced depth / expansion bound exhaustion: deterministic\n" +
+          "          // fail-closed PASS evidence (same class as unresolved wrappers).\n" +
+          "          plantFailClosedVerdictTokens(tokens);\n" +
+          "        }";
+        if (!liveSemSrc.includes(exhaustAnchor)) {
+          throw new Error("resource-exhaustion propagation mutant anchor missing");
+        }
+        const { mod, dir } = await loadTrustedMutant("no-exhaust", (src) =>
+          src.replace(
+            exhaustAnchor,
+            'if (collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) === "resource") {\n' +
+              "          /* mutant: drop resource-exhaustion propagation */\n" +
+              "        }"
+          )
+        );
+        try {
+          if (mutantAcceptsPass(mod, deepApproveWitness)) {
+            throw new Error("no-exhaust mutant still plants depth-33 fail-closed PASS — production wiring tooth lost");
+          }
+          console.log("H241_OK balanced-depth-production-path-no-exhaust-mutant-tooth");
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    }
+    // Balanced depth 31 stays within the cap; 33 / 64 / 200 exhaust it and
+    // fail closed with PASS evidence. Approve-only at depth 31 stays green;
+    // approve-only beyond the cap also fail-closes. Runtime oracles run at
+    // every listed depth when the local grep accepts the pattern; platform
+    // rejection is an explicit skip while semantic fail-closed stays binding.
+    const depthRows = [
+      { n: 31, passExpect: true, approveOnlyExpectPass: false },
+      { n: 33, passExpect: true, approveOnlyExpectPass: true },
+      { n: 64, passExpect: true, approveOnlyExpectPass: true },
+      { n: 200, passExpect: true, approveOnlyExpectPass: true },
+    ];
+    for (const row of depthRows) {
+      const passScript = grepESingleQuotedScript(
+        "VERDICT:[[:space:]]*" + nestDepth(row.n, "PASS|APPROVE")
+      );
+      const approveScript = grepESingleQuotedScript(
+        "VERDICT:[[:space:]]*" + nestDepth(row.n, "APPROVE|REQUEST_CHANGES")
+      );
+      const passFindings = verdictFindings(passScript);
+      if (acceptsPass(passFindings) !== row.passExpect) {
+        throw new Error(
+          "balanced-depth " + row.n + " PASS expect=" + row.passExpect +
+          " got " + JSON.stringify(passFindings)
+        );
+      }
+      const approveFindings = verdictFindings(approveScript);
+      const approveHit = acceptsPass(approveFindings);
+      if (approveHit !== row.approveOnlyExpectPass) {
+        throw new Error(
+          "balanced-depth " + row.n + " approve-only expectPass=" +
+          row.approveOnlyExpectPass + " got " + JSON.stringify(approveFindings)
+        );
+      }
+      const passReceipt = depthRuntimeOracle(
+        passScript, "VERDICT: PASS", true, row.n + "-PASS"
+      );
+      const approvePassReceipt = depthRuntimeOracle(
+        approveScript, "VERDICT: PASS", false, row.n + "-approve-only-PASS"
+      );
+      if (passReceipt === "matched" && approvePassReceipt === "matched") {
+        depthRuntimeOracle(
+          approveScript, "VERDICT: APPROVE", true, row.n + "-approve-only-APPROVE"
+        );
+      }
+      console.log("H241_OK balanced-depth-" + row.n + " runtime=" + passReceipt);
+    }
+    {
+      // Whole-group quantifiers: flattening P(AX)?SS into PAX?SS makes the
+      // analyzer accept VERDICT: PASS while executable ERE/BRE does not
+      // (false red / benign-control failure). P(A)?SS must still detect
+      // PASS. Cover ERE ?/*/+/{m,n}, BRE \?/\+/\{m,n\}/*, alternation
+      // inside the group, and multi-char exact counts that distinguish
+      // whole-group repetition from last-atom repetition.
+      const groupQuantFamily = [
+        {
+          name: "ere-P(AX)?SS-benign",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(AX)?SS|APPROVE|REQUEST_CHANGES)"),
+          expectPass: false,
+        },
+        {
+          name: "ere-P(A)?SS-detect",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A)?SS|APPROVE|REQUEST_CHANGES)"),
+          expectPass: true,
+        },
+        {
+          name: "ere-P(AX)*SS-benign",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(AX)*SS|APPROVE)"),
+          expectPass: false,
+        },
+        {
+          name: "ere-P(A)*SS-detect",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A)*SS|APPROVE)"),
+          expectPass: true,
+        },
+        {
+          name: "ere-P(AX)+SS-benign",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(AX)+SS|APPROVE)"),
+          expectPass: false,
+        },
+        {
+          name: "ere-P(A)+SS-detect",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A)+SS|APPROVE)"),
+          expectPass: true,
+        },
+        {
+          name: "ere-P(AX){0,1}SS-benign",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(AX){0,1}SS|APPROVE)"),
+          expectPass: false,
+        },
+        {
+          name: "ere-P(A){0,1}SS-detect",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A){0,1}SS|APPROVE)"),
+          expectPass: true,
+        },
+        {
+          name: "ere-P(AX|ZZ)?SS-benign-alternation",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(AX|ZZ)?SS|APPROVE)"),
+          expectPass: false,
+        },
+        {
+          name: "ere-P(A|X)?SS-detect-alternation",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A|X)?SS|APPROVE)"),
+          expectPass: true,
+        },
+        {
+          name: "ere-P(AS){2}-benign-exact-count",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(AS){2}|APPROVE)"),
+          expectPass: false,
+        },
+        {
+          name: "ere-P(A){1}SS-detect-exact-count",
+          script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A){1}SS|APPROVE)"),
+          expectPass: true,
+        },
+        { name: "bre-P(AX)?SS-benign", script: groupQuantBreAxOptDecoy, expectPass: false },
+        { name: "bre-P(A)?SS-detect", script: groupQuantBreAOptDecoy, expectPass: true },
+        { name: "bre-P(AX)*SS-benign", script: groupQuantBreAxStarDecoy, expectPass: false },
+        { name: "bre-P(A)*SS-detect", script: groupQuantBreAStarDecoy, expectPass: true },
+        { name: "bre-P(AX)+SS-benign", script: groupQuantBreAxPlusDecoy, expectPass: false },
+        { name: "bre-P(A)+SS-detect", script: groupQuantBreAPlusDecoy, expectPass: true },
+        { name: "bre-P(AX){0,1}SS-benign", script: groupQuantBreAxIntervalDecoy, expectPass: false },
+        { name: "bre-P(A){0,1}SS-detect", script: groupQuantBreAIntervalDecoy, expectPass: true },
+        { name: "bre-P(AX|ZZ)?SS-benign-alternation", script: groupQuantBreAxAltOptDecoy, expectPass: false },
+        { name: "bre-P(AS){2}-benign-exact-count", script: groupQuantBreAsExact2Decoy, expectPass: false },
+      ];
+      for (const row of groupQuantFamily) {
+        const findings = verdictFindings(row.script);
+        const hit = acceptsPass(findings);
+        if (hit !== row.expectPass) {
+          throw new Error(
+            "group-quant " + row.name + " expectPass=" + row.expectPass +
+            " got " + JSON.stringify(findings)
+          );
+        }
+        if (row.expectPass && missingApprove(findings)) {
+          throw new Error("group-quant " + row.name + " dropped canonical APPROVE");
+        }
+        const runtimePass = bashGrepMatches(row.script, "VERDICT: PASS");
+        if (runtimePass !== row.expectPass) {
+          throw new Error(
+            "group-quant runtime oracle mismatch " + row.name +
+            " expectPass=" + row.expectPass + " runtimePass=" + runtimePass
+          );
+        }
+        if (!bashGrepMatches(row.script, "VERDICT: APPROVE")) {
+          throw new Error("group-quant " + row.name + " lost APPROVE runtime match");
+        }
+        console.log("H241_OK group-quant-" + row.name);
+      }
+      {
+        // Pre-repair tooth: concatenate the group body into the prefix and
+        // leave the trailing quantifier on the following span (PAX?SS /
+        // PAS{2}). That falsely accepts PASS for multi-char group controls.
+        function oldFlattenGroupQuantHasPass(alt) {
+          const src = String(alt);
+          let i = 0;
+          let spanStart = 0;
+          const pieces = [];
+          while (i < src.length) {
+            if (src[i] === "(") {
+              if (i > spanStart) pieces.push(src.slice(spanStart, i));
+              let depth = 1;
+              let j = i + 1;
+              while (j < src.length && depth > 0) {
+                if (src[j] === "(") depth += 1;
+                else if (src[j] === ")") depth -= 1;
+                j += 1;
+              }
+              if (depth !== 0) return false;
+              pieces.push(src.slice(i + 1, j - 1));
+              i = j;
+              spanStart = i;
+              continue;
+            }
+            i += 1;
+          }
+          if (spanStart < src.length) pieces.push(src.slice(spanStart));
+          const flat = pieces.join("");
+          // Flat PAX?SS / PAS{2} / PAX*SS against PASS with last-atom quants.
+          function matchesPass(pat) {
+            const atoms = [];
+            let k = 0;
+            while (k < pat.length) {
+              const atom = { ch: pat[k], min: 1, max: 1 };
+              k += 1;
+              if (pat[k] === "?") {
+                atom.min = 0;
+                atom.max = 1;
+                k += 1;
+              } else if (pat[k] === "*") {
+                atom.min = 0;
+                atom.max = 8;
+                k += 1;
+              } else if (pat[k] === "+") {
+                atom.min = 1;
+                atom.max = 8;
+                k += 1;
+              } else if (pat[k] === "{") {
+                const c = pat.indexOf("}", k + 1);
+                const m = /^(\d+)(?:,(\d*))?$/.exec(pat.slice(k + 1, c));
+                if (m) {
+                  atom.min = Number(m[1]);
+                  atom.max = m[2] === undefined ? atom.min : m[2] === "" ? 8 : Number(m[2]);
+                  k = c + 1;
+                }
+              }
+              atoms.push(atom);
+            }
+            const want = "PASS";
+            function rec(ai, ti) {
+              if (ai === atoms.length) return ti === want.length;
+              const atom = atoms[ai];
+              let t = ti;
+              let n = 0;
+              while (n < atom.min) {
+                if (t >= want.length || want[t] !== atom.ch) return false;
+                t += 1;
+                n += 1;
+              }
+              while (n <= atom.max) {
+                if (rec(ai + 1, t)) return true;
+                if (n === atom.max || t >= want.length || want[t] !== atom.ch) break;
+                t += 1;
+                n += 1;
+              }
+              return false;
+            }
+            return rec(0, 0);
+          }
+          return matchesPass(flat);
+        }
+        const falseRedAlts = ["P(AX)?SS", "P(AX)*SS", "P(AX){0,1}SS", "P(AS){2}"];
+        for (const alt of falseRedAlts) {
+          if (!oldFlattenGroupQuantHasPass(alt)) {
+            throw new Error("pre-repair group-quant tooth should false-accept PASS for " + alt);
+          }
+        }
+        if (oldFlattenGroupQuantHasPass("P(A)?SS") !== true) {
+          throw new Error("pre-repair group-quant tooth lost real P(A)?SS detection");
+        }
+        console.log("H241_OK group-quant-pre-repair-flatten-last-atom-tooth");
+      }
+      {
+        // Production-path mutant: skip whole-group quantifier expansion so
+        // the trailing quantifier stays on the following span (PAX?SS).
+        const liveSemSrc = readFileSync(process.env.SEM, "utf8");
+        const benignWitness = grepESingleQuotedScript(
+          "VERDICT:[[:space:]]*(P(AX)?SS|APPROVE|REQUEST_CHANGES)"
+        );
+        const detectWitness = grepESingleQuotedScript(
+          "VERDICT:[[:space:]]*(P(A)?SS|APPROVE|REQUEST_CHANGES)"
+        );
+        const exact2Witness = grepESingleQuotedScript(
+          "VERDICT:[[:space:]]*(P(AS){2}|APPROVE)"
+        );
+        if (acceptsPass(verdictFindings(benignWitness))) {
+          throw new Error("live production path still false-reds ERE P(AX)?SS before mutant tooth");
+        }
+        if (!acceptsPass(verdictFindings(detectWitness))) {
+          throw new Error("live production path lost ERE P(A)?SS detection before mutant tooth");
+        }
+        if (acceptsPass(verdictFindings(exact2Witness))) {
+          throw new Error("live production path still false-reds ERE P(AS){2} before mutant tooth");
+        }
+        if (acceptsPass(verdictFindings(groupQuantBreAxOptDecoy))) {
+          throw new Error("live production path still false-reds BRE P(AX)?SS before mutant tooth");
+        }
+        if (!acceptsPass(verdictFindings(groupQuantBreAOptDecoy))) {
+          throw new Error("live production path lost BRE P(A)?SS detection before mutant tooth");
+        }
+        const quantAnchor =
+          "const q = parseVerdictAltQuantifier(src, i, mode);\n" +
+          "      let quantified = groupAlts;\n" +
+          "      if (q) {\n" +
+          "        // Whole-group quantifier: do not leave `?`/`*`/`+`/`{…}` attached\n" +
+          "        // to the following span (that flattens P(AX)?SS into PAX?SS).\n" +
+          "        const exp = expandQuantifiedGroupAlts(groupAlts, q.min, q.max, caps, mode);\n" +
+          "        if (exp.status !== \"ok\") return exp.status;\n" +
+          "        quantified = exp.alts;\n" +
+          "        i = q.next;\n" +
+          "      }";
+        if (!liveSemSrc.includes(quantAnchor)) {
+          throw new Error("group-quantifier expansion mutant anchor missing");
+        }
+        async function loadTrustedMutant(tag, transform) {
+          const dir = mkdtempSync(join(tmpdir(), "gibson-241-sem-mutant-"));
+          const out = join(dir, "contract-semantics-" + tag + ".mjs");
+          const mutated = transform(liveSemSrc);
+          if (mutated === liveSemSrc) {
+            throw new Error("source mutant " + tag + " did not change trusted semantics text");
+          }
+          writeFileSync(out, mutated);
+          const mod = await import(pathToFileURL(out).href + "?mutant=" + tag + "-" + Date.now());
+          return { mod, dir };
+        }
+        function mutantAcceptsPass(mod, script) {
+          const findings = mod.reviewVerdictVocabularyFindings({
+            agentsText,
+            harnessFiles: {
+              "scripts/second-opinion.sh": script,
+              "scripts/release-preflight.sh": approveOnly,
+            },
+          });
+          return acceptsPass(findings);
+        }
+        {
+          const { mod, dir } = await loadTrustedMutant("no-group-quant", (src) =>
+            src.replace(
+              quantAnchor,
+              "const q = parseVerdictAltQuantifier(src, i, mode);\n" +
+                "      let quantified = groupAlts;\n" +
+                "      if (q) {\n" +
+                "        /* mutant: leave group quantifier on the following span */\n" +
+                "      }"
+            )
+          );
+          try {
+            if (!mutantAcceptsPass(mod, benignWitness)) {
+              throw new Error("no-group-quant mutant no longer false-reds ERE P(AX)?SS — production wiring tooth lost");
+            }
+            if (!mutantAcceptsPass(mod, exact2Witness)) {
+              throw new Error("no-group-quant mutant no longer false-reds ERE P(AS){2} — production wiring tooth lost");
+            }
+            if (!mutantAcceptsPass(mod, groupQuantBreAxOptDecoy)) {
+              throw new Error("no-group-quant mutant no longer false-reds BRE P(AX)?SS — production wiring tooth lost");
+            }
+            if (!mutantAcceptsPass(mod, detectWitness)) {
+              throw new Error("no-group-quant mutant lost ERE P(A)?SS detection");
+            }
+            console.log("H241_OK group-quant-production-path-no-group-quant-mutant-tooth");
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+      }
+    }
+    {
+      // Nested partial-token false-red: inner PASS committed before the
+      // outer suffix X is applied. Runtime does not match VERDICT: PASS
+      // for ((PASS)X|APPROVE|REQUEST_CHANGES); true nested PASS controls
+      // remain detected. Nullable-group repetition: raw source length of
+      // A? is not a sound lower bound, so (A?){17}PASS must detect PASS.
+      // Non-nullable overlong (AX){17} / (A){33} stay approve-only green.
+      const nestedSuffixFamily = [
+        { name: "ere-(PASS)X-benign", script: nestedSuffixErePassXGrep, expectPass: false },
+        { name: "bre-(PASS)X-benign", script: nestedSuffixBrePassXGrep, expectPass: false },
+        { name: "ere-((PASS)|APPROVE)-detect", script: nestedSuffixErePassOrApproveGrep, expectPass: true },
+        { name: "bre-((PASS)|APPROVE)-detect", script: nestedSuffixBrePassOrApproveGrep, expectPass: true },
+        { name: "ere-PA(S)S-detect", script: grepESingleQuotedScript("VERDICT:[[:space:]]*(PA(S)S|APPROVE)"), expectPass: true },
+        { name: "ere-P(A)SS-detect", script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A)SS|APPROVE)"), expectPass: true },
+        { name: "ere-PAS(S)-detect", script: grepESingleQuotedScript("VERDICT:[[:space:]]*(PAS(S)|APPROVE)"), expectPass: true },
+        { name: "ere-P(A(S)S)-detect", script: grepESingleQuotedScript("VERDICT:[[:space:]]*(P(A(S)S)|APPROVE)"), expectPass: true },
+        { name: "bre-PA(S)S-detect", script: splitBrePaSsDecoy, expectPass: true },
+        { name: "bre-P(A)SS-detect", script: splitBrePAssDecoy, expectPass: true },
+        { name: "bre-PAS(S)-detect", script: splitBrePasSDecoy, expectPass: true },
+        { name: "bre-P(A(S)S)-detect", script: splitBreNestedDecoy, expectPass: true },
+        { name: "ere-nullable-(A?){17}PASS-detect", script: nullableEre17Grep, expectPass: true },
+        { name: "bre-nullable-(A?){17}PASS-detect", script: nullableBre17Grep, expectPass: true },
+        { name: "ere-(AX){17}PASS-benign-overlong", script: overlongEreAx17Grep, expectPass: false },
+        { name: "bre-(AX){17}PASS-benign-overlong", script: overlongBreAx17Grep, expectPass: false },
+        { name: "ere-(A){33}PASS-benign-overlong", script: overlongEreA33Grep, expectPass: false },
+        { name: "bre-(A){33}PASS-benign-overlong", script: overlongBreA33Grep, expectPass: false },
+      ];
+      for (const row of nestedSuffixFamily) {
+        const findings = verdictFindings(row.script);
+        const hit = acceptsPass(findings);
+        if (hit !== row.expectPass) {
+          throw new Error(
+            "nested-suffix/nullable " + row.name + " expectPass=" + row.expectPass +
+            " got " + JSON.stringify(findings)
+          );
+        }
+        if (row.expectPass && missingApprove(findings)) {
+          throw new Error("nested-suffix/nullable " + row.name + " dropped canonical APPROVE");
+        }
+        const runtimePass = bashGrepMatches(row.script, "VERDICT: PASS");
+        if (runtimePass !== row.expectPass) {
+          throw new Error(
+            "nested-suffix/nullable runtime oracle mismatch " + row.name +
+            " expectPass=" + row.expectPass + " runtimePass=" + runtimePass
+          );
+        }
+        if (!bashGrepMatches(row.script, "VERDICT: APPROVE")) {
+          throw new Error("nested-suffix/nullable " + row.name + " lost APPROVE runtime match");
+        }
+        console.log("H241_OK nested-suffix-nullable-" + row.name);
+      }
+      {
+        // Pre-repair tooth: walk nested groups and commit inner idents
+        // before the outer suffix is concatenated. (PASS)X plants PASS;
+        // ((PASS)|APPROVE) still detects the true positive.
+        function oldNestedInnerCommitHasPass(pat) {
+          const tokens = new Set();
+          function walk(src) {
+            let i = 0;
+            while (i < String(src).length) {
+              if (src[i] === "(") {
+                let depth = 1;
+                let j = i + 1;
+                while (j < src.length && depth > 0) {
+                  if (src[j] === "(") depth += 1;
+                  else if (src[j] === ")") depth -= 1;
+                  j += 1;
+                }
+                const inner = src.slice(i + 1, j - 1);
+                walk(inner);
+                const ident = inner.replace(/[()|]/g, "");
+                if (/^[A-Za-z][A-Za-z0-9_]*$/.test(ident)) tokens.add(ident.toUpperCase());
+                i = j;
+                continue;
+              }
+              i += 1;
+            }
+          }
+          walk(pat);
+          return tokens.has("PASS");
+        }
+        if (!oldNestedInnerCommitHasPass("(PASS)X")) {
+          throw new Error("pre-repair nested-suffix tooth should false-accept PASS for (PASS)X");
+        }
+        if (!oldNestedInnerCommitHasPass("((PASS)X|APPROVE|REQUEST_CHANGES)")) {
+          throw new Error("pre-repair nested-suffix tooth should false-accept PASS for exact ERE witness");
+        }
+        if (!oldNestedInnerCommitHasPass("((PASS)|APPROVE)")) {
+          throw new Error("pre-repair nested-suffix tooth lost true-positive ((PASS)|APPROVE)");
+        }
+        if (oldNestedInnerCommitHasPass("(APPROVE)X")) {
+          throw new Error("pre-repair nested-suffix tooth planted PASS for (APPROVE)X");
+        }
+        console.log("H241_OK nested-suffix-pre-repair-inner-commit-tooth");
+      }
+      {
+        // Pre-repair tooth: raw source length of A? is 2, so {17} is
+        // treated as exceeding the 32-char window (false green). AX{17}
+        // is the same numeric drop but that conclusion is sound.
+        function oldRawSourceLenDrops(altSrc, minRep) {
+          const minNonEmpty = String(altSrc).length;
+          const byLen = Math.ceil(32 / minNonEmpty);
+          return minRep > byLen;
+        }
+        if (!oldRawSourceLenDrops("A?", 17)) {
+          throw new Error("pre-repair raw-source-length tooth should drop nullable A?{17}");
+        }
+        if (!oldRawSourceLenDrops("AX", 17)) {
+          throw new Error("pre-repair raw-source-length tooth should drop non-nullable AX{17}");
+        }
+        if (oldRawSourceLenDrops("A", 17)) {
+          throw new Error("pre-repair raw-source-length tooth should keep non-nullable A{17} expandable");
+        }
+        console.log("H241_OK nullable-repetition-pre-repair-raw-source-length-tooth");
+      }
+      {
+        const liveSemSrc = readFileSync(process.env.SEM, "utf8");
+        async function loadTrustedMutant(tag, transform) {
+          const dir = mkdtempSync(join(tmpdir(), "gibson-241-sem-mutant-"));
+          const out = join(dir, "contract-semantics-" + tag + ".mjs");
+          const mutated = transform(liveSemSrc);
+          if (mutated === liveSemSrc) {
+            throw new Error("source mutant " + tag + " did not change trusted semantics text");
+          }
+          writeFileSync(out, mutated);
+          const mod = await import(pathToFileURL(out).href + "?mutant=" + tag + "-" + Date.now());
+          return { mod, dir };
+        }
+        function mutantAcceptsPass(mod, script) {
+          const findings = mod.reviewVerdictVocabularyFindings({
+            agentsText,
+            harnessFiles: {
+              "scripts/second-opinion.sh": script,
+              "scripts/release-preflight.sh": approveOnly,
+            },
+          });
+          return acceptsPass(findings);
+        }
+        if (acceptsPass(verdictFindings(nestedSuffixErePassXGrep))) {
+          throw new Error("live production path still false-reds ERE (PASS)X before mutant tooth");
+        }
+        if (acceptsPass(verdictFindings(nestedSuffixBrePassXGrep))) {
+          throw new Error("live production path still false-reds BRE (PASS)X before mutant tooth");
+        }
+        if (!acceptsPass(verdictFindings(nestedSuffixErePassOrApproveGrep))) {
+          throw new Error("live production path lost ERE ((PASS)|APPROVE) before mutant tooth");
+        }
+        if (!acceptsPass(verdictFindings(nullableEre17Grep))) {
+          throw new Error("live production path lost ERE (A?){17}PASS before mutant tooth");
+        }
+        if (!acceptsPass(verdictFindings(nullableBre17Grep))) {
+          throw new Error("live production path lost BRE (A?){17}PASS before mutant tooth");
+        }
+        if (acceptsPass(verdictFindings(overlongEreAx17Grep))) {
+          throw new Error("live production path false-reds ERE (AX){17}PASS before mutant tooth");
+        }
+        if (acceptsPass(verdictFindings(overlongBreAx17Grep))) {
+          throw new Error("live production path false-reds BRE (AX){17}PASS before mutant tooth");
+        }
+        const nestedCommitAnchor = "if (s && !outStrings) addVerdictToken(tokens, s, mode, fold);";
+        if ((liveSemSrc.split(nestedCommitAnchor).length - 1) !== 1) {
+          throw new Error("nested-commit mutant anchor count drifted");
+        }
+        {
+          const { mod, dir } = await loadTrustedMutant("nested-inner-commit", (src) =>
+            src.replace(nestedCommitAnchor, "if (s) addVerdictToken(tokens, s, mode, fold);")
+          );
+          try {
+            if (!mutantAcceptsPass(mod, nestedSuffixErePassXGrep)) {
+              throw new Error("nested-inner-commit mutant no longer false-reds ERE (PASS)X — production wiring tooth lost");
+            }
+            if (!mutantAcceptsPass(mod, nestedSuffixBrePassXGrep)) {
+              throw new Error("nested-inner-commit mutant no longer false-reds BRE (PASS)X — production wiring tooth lost");
+            }
+            if (!mutantAcceptsPass(mod, nestedSuffixErePassOrApproveGrep)) {
+              throw new Error("nested-inner-commit mutant lost ERE ((PASS)|APPROVE) detection");
+            }
+            console.log("H241_OK nested-suffix-production-path-inner-commit-mutant-tooth");
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+        const minMatchedAnchor = "const n = verdictAltMinMatchedLen(a, mode);";
+        if ((liveSemSrc.split(minMatchedAnchor).length - 1) !== 1) {
+          throw new Error("min-matched-length mutant anchor count drifted");
+        }
+        {
+          const { mod, dir } = await loadTrustedMutant("raw-source-len", (src) =>
+            src.replace(minMatchedAnchor, "const n = a.length;")
+          );
+          try {
+            if (mutantAcceptsPass(mod, nullableEre17Grep)) {
+              throw new Error("raw-source-len mutant no longer false-greens ERE (A?){17}PASS — production wiring tooth lost");
+            }
+            if (mutantAcceptsPass(mod, nullableBre17Grep)) {
+              throw new Error("raw-source-len mutant no longer false-greens BRE (A?){17}PASS — production wiring tooth lost");
+            }
+            if (mutantAcceptsPass(mod, overlongEreAx17Grep)) {
+              throw new Error("raw-source-len mutant false-reds sound ERE (AX){17}PASS control");
+            }
+            console.log("H241_OK nullable-repetition-production-path-raw-source-len-mutant-tooth");
+          } finally {
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+      }
+    }
+    {
+      const semSrc = readFileSync(process.env.SEM, "utf8");
+      if (!/GROUP_CLOSE_RESOURCE/.test(semSrc) || !/plantFailClosedVerdictTokens/.test(semSrc)) {
+        throw new Error("resource-exhausted group close / fail-closed PASS planting not modeled");
+      }
+      if (!/expandVerdictAlt/.test(semSrc) || !/MATCHER_EXPAND_STATE_CAP/.test(semSrc) || !/MATCHER_EXPAND_ALT_CAP/.test(semSrc) || !/MATCHER_EXPAND_WORK_CAP/.test(semSrc)) {
+        throw new Error("bounded verdict alternative expansion caps not modeled");
+      }
+      if (!/expandQuantifiedGroupAlts/.test(semSrc) || !/VERDICT_LITERAL_LEN_CAP/.test(semSrc)) {
+        throw new Error("whole-group quantifier expansion is not modeled");
+      }
+      if (!/PA\(S\)S|reassemble|alternative expansion/i.test(semSrc)) {
+        throw new Error("split-token reassembly is not documented in the matcher");
+      }
+      if (!/P\(AX\)\?SS|whole group/i.test(semSrc)) {
+        throw new Error("group-quantifier whole-group binding is not documented in the matcher");
+      }
+      if (!/s && !outStrings/.test(semSrc) || !/\(PASS\)X/.test(semSrc)) {
+        throw new Error("nested expansion still commits inner tokens before outer suffix");
+      }
+      if (!/verdictAltMinMatchedLen/.test(semSrc) || !/min-matched length/.test(semSrc) || !/VERDICT_ALT_SRC_CAP/.test(semSrc)) {
+        throw new Error("nullable quantified groups still use raw source length as a lower bound");
+      }
+      console.log("H241_OK nested-verdict-resource-exhaustion-and-expand-bounds-modeled");
+    }
   }
 }
 const expectedGates = ["G11", "G12", "G15"];
@@ -9849,6 +10776,152 @@ if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scr
   bad "benign nested BRE approve-only incorrectly matches PASS"
 fi
 mutate_nested_approve_only "BRE nested escaped group"
+
+echo "# 241 split-token and balanced-depth nested verdict mutations (sandbox CLI)"
+printf '%s\n' '#!/bin/bash' "grep -E 'VERDICT:[[:space:]]*(PA(S)S|APPROVE)'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE split-token PA(S)S"
+printf '%s\n' '#!/bin/bash' "grep -E 'VERDICT:[[:space:]]*(P(A)SS|APPROVE)'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE split-token P(A)SS"
+printf '%s\n' '#!/bin/bash' "grep -E 'VERDICT:[[:space:]]*(PAS(S)|APPROVE)'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE split-token PAS(S)"
+printf '%s\n' '#!/bin/bash' "grep -E 'VERDICT:[[:space:]]*(P(A(S)S)|APPROVE)'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE split-token P(A(S)S)"
+printf '%s\n' '#!/bin/bash' "grep -E 'VERDICT:[[:space:]]*(APPRO(VE)|REQUEST_CHANGES)'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "ERE split-token APPRO(VE) control"
+
+# BRE split-token equivalents (double-quoted source-run 1), paired with a
+# BRE APPRO(VE) approve-only control. Byte + executable runtime checks
+# mirror the nested BRE sandbox convention.
+mutate_bre_split_pass() {
+  local label="$1"
+  local want="$2"
+  # Split-token BRE forms (PA\(S\)S etc.) never contain a contiguous
+  # "PASS" substring; the want needle is the byte proof.
+  node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = process.argv[2];
+if (!t.includes(want) || !t.includes("APPROVE") || t.includes("REQUEST_CHANGES")) {
+  console.error("BRE split-token PASS decoy bytes mismatch want=" + want);
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" "$want" || {
+    bad "mutation BRE split-token PASS decoy bytes mismatch ($label)"
+  }
+  printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+    :
+  else
+    bad "mutation BRE split-token PASS decoy is not executable BRE ($label)"
+  fi
+  mutate_nested_pass "$label"
+}
+SPLIT_BRE_PA_SS=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(PA\\(S\\)S\\|APPROVE\\)"\n'
+printf '%s' "$SPLIT_BRE_PA_SS" > "$SANDBOX/scripts/second-opinion.sh"
+mutate_bre_split_pass "BRE split-token PA(S)S" 'grep "VERDICT:[[:space:]]*\(PA\(S\)S\|APPROVE\)"'
+SPLIT_BRE_P_ASS=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(P\\(A\\)SS\\|APPROVE\\)"\n'
+printf '%s' "$SPLIT_BRE_P_ASS" > "$SANDBOX/scripts/second-opinion.sh"
+mutate_bre_split_pass "BRE split-token P(A)SS" 'grep "VERDICT:[[:space:]]*\(P\(A\)SS\|APPROVE\)"'
+SPLIT_BRE_PAS_S=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(PAS\\(S\\)\\|APPROVE\\)"\n'
+printf '%s' "$SPLIT_BRE_PAS_S" > "$SANDBOX/scripts/second-opinion.sh"
+mutate_bre_split_pass "BRE split-token PAS(S)" 'grep "VERDICT:[[:space:]]*\(PAS\(S\)\|APPROVE\)"'
+SPLIT_BRE_NESTED=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(P\\(A\\(S\\)S\\)\\|APPROVE\\)"\n'
+printf '%s' "$SPLIT_BRE_NESTED" > "$SANDBOX/scripts/second-opinion.sh"
+mutate_bre_split_pass "BRE split-token P(A(S)S)" 'grep "VERDICT:[[:space:]]*\(P\(A\(S\)S\)\|APPROVE\)"'
+SPLIT_BRE_APPROVE=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\(APPRO\\(VE\\)\\|REQUEST_CHANGES\\)"\n'
+printf '%s' "$SPLIT_BRE_APPROVE" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\(APPRO\\(VE\\)\\|REQUEST_CHANGES\\)\"";
+if (!t.includes(want) || t.includes("PASS")) {
+  console.error("BRE split-token approve-only bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "benign BRE split-token approve-only bytes mismatch"
+}
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "benign BRE split-token approve-only is not executable BRE"
+fi
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign BRE split-token approve-only incorrectly matches PASS"
+fi
+mutate_nested_approve_only "BRE split-token APPRO(VE) control"
+
+# Depth 31 within cap: PASS decoy fails, approve-only stays green.
+node -e '
+const fs = require("fs");
+const n = 31;
+const pass = "(".repeat(n) + "PASS|APPROVE" + ")".repeat(n);
+fs.writeFileSync(process.argv[1], "#!/bin/bash\ngrep -E '\''VERDICT:[[:space:]]*" + pass + "'\''\n");
+' "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE balanced-depth 31 PASS"
+node -e '
+const fs = require("fs");
+const n = 31;
+const body = "(".repeat(n) + "APPROVE|REQUEST_CHANGES" + ")".repeat(n);
+fs.writeFileSync(process.argv[1], "#!/bin/bash\ngrep -E '\''VERDICT:[[:space:]]*" + body + "'\''\n");
+' "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "ERE balanced-depth 31 approve-only"
+
+# Depths beyond the cap fail closed (PASS evidence) even for approve-only.
+# When local grep accepts the nested pattern, also record an executable
+# runtime oracle; platform rejection is an explicit skip while the
+# semantic fail-closed mutation stays binding.
+for depth in 33 64 200; do
+  node -e '
+const fs = require("fs");
+const n = Number(process.argv[2]);
+const pass = "(".repeat(n) + "PASS|APPROVE" + ")".repeat(n);
+fs.writeFileSync(process.argv[1], "#!/bin/bash\ngrep -E '\''VERDICT:[[:space:]]*" + pass + "'\''\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$depth"
+  printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\"" \
+    >/dev/null 2>"$SANDBOX/scripts/.verdict-runtime.err"; then
+    ok "runtime oracle: ERE balanced-depth $depth PASS matches on local grep"
+  else
+    err=$(tr '\n' ' ' < "$SANDBOX/scripts/.verdict-runtime.err")
+    if echo "$err" | grep -Eqi 'invalid|repetition|overflow|memory|too complex|regex error|maximum|nested'; then
+      echo "  skip rationale: local grep rejected depth $depth ($err)"
+      ok "runtime oracle skipped: ERE balanced-depth $depth platform-rejected"
+    else
+      bad "runtime oracle: ERE balanced-depth $depth PASS should match (err=$err)"
+    fi
+  fi
+  mutate_nested_pass "ERE balanced-depth $depth PASS fail-closed"
+  node -e '
+const fs = require("fs");
+const n = Number(process.argv[2]);
+const body = "(".repeat(n) + "APPROVE|REQUEST_CHANGES" + ")".repeat(n);
+fs.writeFileSync(process.argv[1], "#!/bin/bash\ngrep -E '\''VERDICT:[[:space:]]*" + body + "'\''\n");
+' "$SANDBOX/scripts/second-opinion.sh" "$depth"
+  printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+  if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\"" \
+    >/dev/null 2>"$SANDBOX/scripts/.verdict-runtime.err"; then
+    bad "runtime oracle: ERE balanced-depth $depth approve-only must not match PASS"
+  else
+    err=$(tr '\n' ' ' < "$SANDBOX/scripts/.verdict-runtime.err")
+    if echo "$err" | grep -Eqi 'invalid|repetition|overflow|memory|too complex|regex error|maximum|nested'; then
+      echo "  skip rationale: local grep rejected depth $depth approve-only ($err)"
+      ok "runtime oracle skipped: ERE balanced-depth $depth approve-only platform-rejected"
+    else
+      ok "runtime oracle: ERE balanced-depth $depth approve-only does not match PASS"
+    fi
+  fi
+  mutate_nested_pass "ERE balanced-depth $depth approve-only fail-closed"
+done
+rm -f "$SANDBOX/scripts/.verdict-runtime.err"
+
 rm -f "$SANDBOX/scripts/.verdict-sample.txt"
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
