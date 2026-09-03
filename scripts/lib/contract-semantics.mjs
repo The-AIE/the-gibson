@@ -3712,75 +3712,220 @@ function addVerdictToken(tokens, raw, dialect, ignoreCase) {
   }
 }
 
-function splitUnescapedVerdictAlts(inner) {
-  // Split only on `|` that survived BRE normalization (executable
-  // alternation). Leftover `\|` / `\\|` runs are not grouping alts.
+function splitUnescapedVerdictAlts(inner, dialect) {
+  // Split only on depth-0 `|` that survived BRE normalization
+  // (executable alternation). Nested groups and character classes keep
+  // their interior `|`. Leftover `\|` / `\\|` runs are not grouping alts.
   const parts = [];
   let start = 0;
-  let slashes = 0;
   const src = String(inner || "");
-  for (let k = 0; k < src.length; k += 1) {
-    const c = src[k];
-    if (c === "\\") {
-      slashes += 1;
+  const mode = dialect || "bre";
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === "[") {
+      const end = skipRegexCharClass(src, i);
+      if (end === -1) break;
+      i = end;
       continue;
     }
-    if (c === "|" && slashes === 0) {
-      parts.push(src.slice(start, k));
-      start = k + 1;
+    const g = groupingDelimAt(src, i, mode);
+    if (g && g.delim === "(") {
+      const close = findMatchingGroupClose(src, g.index, mode);
+      if (close === -1) break;
+      i = close + 1;
+      continue;
     }
-    slashes = 0;
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === "|") {
+      parts.push(src.slice(start, i));
+      start = i + 1;
+    }
+    i += 1;
   }
   parts.push(src.slice(start));
   return parts;
 }
 
+const MATCHER_GROUP_DEPTH_CAP = 32;
+
+function skipRegexCharClass(src, i) {
+  // POSIX `[[:name:]]` first, then a bracket expression. A `]` right
+  // after `[` / `[^` is literal. Unclosed classes stop the scan.
+  if (src[i] !== "[") return i;
+  if (src.startsWith("[[:", i)) {
+    const close = src.indexOf(":]]", i + 3);
+    if (close !== -1) return close + 3;
+  }
+  let j = i + 1;
+  if (src[j] === "^") j += 1;
+  if (src[j] === "]") j += 1;
+  while (j < src.length) {
+    if (src[j] === "\\") {
+      j += 2;
+      continue;
+    }
+    if (src.startsWith("[:", j)) {
+      const close = src.indexOf(":]", j + 2);
+      if (close !== -1) {
+        j = close + 2;
+        continue;
+      }
+    }
+    if (src[j] === "]") return j + 1;
+    j += 1;
+  }
+  return -1;
+}
+
+function groupingDelimAt(src, i, dialect) {
+  // Grouping `(` / `)` at i. BRE leftover backslashes before those
+  // delims still group (mixed group-run-3 / alt-run-1). ERE `\(` / `\)`
+  // are literals, not groups.
+  if (src[i] === "(" || src[i] === ")") return { delim: src[i], index: i };
+  if (src[i] !== "\\") return null;
+  if ((dialect || "bre") !== "bre") return null;
+  let k = i;
+  while (src[k] === "\\") k += 1;
+  if (src[k] === "(" || src[k] === ")") return { delim: src[k], index: k };
+  return null;
+}
+
+function findMatchingGroupClose(src, openIndex, dialect) {
+  // Matching `)`, not the first `)`. Skip escaped parens and `)` inside
+  // character classes so `((PASS)|APPROVE)([^A-Za-z]|$)` keeps PASS.
+  if (src[openIndex] !== "(") return -1;
+  const mode = dialect || "bre";
+  let depth = 1;
+  let i = openIndex + 1;
+  while (i < src.length) {
+    if (depth > MATCHER_GROUP_DEPTH_CAP) return -1;
+    if (src[i] === "[") {
+      const end = skipRegexCharClass(src, i);
+      if (end === -1) return -1;
+      i = end;
+      continue;
+    }
+    const g = groupingDelimAt(src, i, mode);
+    if (g) {
+      if (g.delim === "(") depth += 1;
+      else {
+        depth -= 1;
+        if (depth === 0) return g.index;
+      }
+      i = g.index + 1;
+      continue;
+    }
+    if (src[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+function collectVerdictAltTokens(raw, tokens, dialect, ignoreCase) {
+  // Walk one alternative: nested groups recurse, non-group spans keep
+  // POSIX classes / quantifiers for lossless literal matching. Unclosed
+  // structure stops this alt; it does not plant PASS (a closed-quote
+  // dangling `(` must not swallow later PASS prose).
+  const src = String(raw || "");
+  const mode = dialect || "bre";
+  if (!src) return;
+  let i = 0;
+  let spanStart = 0;
+  const flush = (end) => {
+    const span = src.slice(spanStart, end);
+    if (span) addVerdictToken(tokens, span, mode, ignoreCase);
+  };
+  while (i < src.length) {
+    if (src[i] === "[") {
+      const end = skipRegexCharClass(src, i);
+      if (end === -1) break;
+      i = end;
+      continue;
+    }
+    const g = groupingDelimAt(src, i, mode);
+    if (g && g.delim === "(") {
+      flush(i);
+      const close = findMatchingGroupClose(src, g.index, mode);
+      if (close === -1) return;
+      collectVerdictGroupInnerTokens(src.slice(g.index + 1, close), tokens, mode, ignoreCase);
+      i = close + 1;
+      spanStart = i;
+      continue;
+    }
+    if (src[i] === "\\") {
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  flush(src.length);
+}
+
+function collectVerdictGroupInnerTokens(inner, tokens, dialect, ignoreCase) {
+  for (const part of splitUnescapedVerdictAlts(inner, dialect)) {
+    collectVerdictAltTokens(part, tokens, dialect, ignoreCase);
+  }
+}
+
 function collectMatcherClusterTokens(slice, tokens, dialect, ignoreCase) {
   // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a shell-slice
   // matcher cluster of balanced groups (and ungrouped |TOKEN siblings).
-  // A slice spans physical lines only while a shell quote remains open;
-  // a closed-quote dangling `(` cannot swallow a later PASS matcher.
-  // Double-quoted group-run-3 / alternation-run-1 leaves leftover `\(`
-  // while normalizing `|`; skip those leftover escapes so the executable
-  // top-level PASS alternative is visible. Alternatives keep POSIX
-  // classes and quantifiers so `PASS[[:space:]]*` / `P\?PASS` still
-  // tokenize as PASS rather than PASSSPACE / PPASS. ignoreCase flows
-  // from grep `-i` into literal and bracket/POSIX-class matching.
-  // Not a general regex parser.
+  // Nested groups close at the matching `)`, not the first `)`. Unclosed
+  // groups stop the cluster without planting PASS so a closed-quote
+  // dangling `(` cannot swallow a later PASS matcher. `|VERDICT:` starts
+  // a new prefix: stop the cluster before that bar so lastIndex cannot
+  // skip an unconsumed PASS remainder. Double-quoted group-run-3 /
+  // alternation-run-1 leaves leftover `\(` while normalizing `|`; BRE
+  // leftover grouping delims still group so the executable top-level
+  // PASS alternative is visible. ERE `\(` / `\)` stay literals.
+  // Alternatives keep POSIX classes and quantifiers so
+  // `PASS[[:space:]]*` / `P\?PASS` still tokenize as PASS rather than
+  // PASSSPACE / PPASS. ignoreCase flows from grep `-i` into literal and
+  // bracket/POSIX-class matching. Not a general regex parser.
   const mode = dialect || "bre";
   const fold = Boolean(ignoreCase);
   const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
   let p;
   while ((p = prefixRe.exec(slice)) !== null) {
     let i = p.index + p[0].length;
-    let k = i;
-    while (slice[k] === "\\") k += 1;
-    if (k > i && slice[k] === "(") i = k;
-    if (slice[i] !== "(") continue;
+    const open = groupingDelimAt(slice, i, mode);
+    if (!open || open.delim !== "(") continue;
+    i = open.index;
+    let consumedTo = i;
     while (i < slice.length) {
-      if (slice[i] === "(") {
-        const close = slice.indexOf(")", i + 1);
+      const g = groupingDelimAt(slice, i, mode);
+      if (g && g.delim === "(") {
+        const close = findMatchingGroupClose(slice, g.index, mode);
         if (close === -1) break;
-        const inner = slice.slice(i + 1, close);
-        for (const part of splitUnescapedVerdictAlts(inner)) {
-          addVerdictToken(tokens, part, mode, fold);
-        }
+        collectVerdictGroupInnerTokens(slice.slice(g.index + 1, close), tokens, mode, fold);
         i = close + 1;
+        consumedTo = i;
       } else if (/[A-Za-z]/.test(slice[i] || "")) {
         let j = i;
         while (j < slice.length && /[A-Za-z0-9_]/.test(slice[j])) j += 1;
         addVerdictToken(tokens, slice.slice(i, j), mode, fold);
         i = j;
+        consumedTo = i;
       } else {
         break;
       }
       if (slice[i] === "|") {
+        if (/^\s*VERDICT:/i.test(slice.slice(i + 1))) break;
         i += 1;
         continue;
       }
       break;
     }
-    prefixRe.lastIndex = Math.max(prefixRe.lastIndex, i);
+    // Advance only through consumed cluster text. Unconsumed remainder
+    // may hold a later VERDICT: prefix (`|VERDICT:...(PASS)`).
+    prefixRe.lastIndex = Math.max(prefixRe.lastIndex, consumedTo);
   }
 }
 
@@ -3909,7 +4054,10 @@ function harnessAcceptsPass(text) {
  * remaining recognized wrapper after a defensive cap fail-closes.
  * `-f`/`--file` fail-closes rather than inventing file contents.
  * Introspection-only `command -v/-V` is not an executable matcher.
- * Residual: nested groups and non-VERDICT alternations are not parsed.
+ * Nested matcher groups (ERE `((PASS)|APPROVE)` / `(APPROVE|(PASS))` and
+ * BRE `\(APPROVE\|\(PASS\)\)`) close at the matching parenthesis. Unclosed
+ * groups stop without planting PASS. Residual: non-VERDICT alternations
+ * are not parsed.
  * Residual #263/#264: not a general shell/regex parser. Residual #265:
  * pathological scan cost.
  *
