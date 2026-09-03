@@ -5066,6 +5066,57 @@ const grepEUnescapedPassDecoy = grepEreScript(
   "-E",
   `"VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)"`
 );
+function bareVerdictScript(pattern) {
+  return ["#!/bin/bash", pattern].join("\n");
+}
+function grepESingleQuotedScript(pattern) {
+  return ["#!/bin/bash", "grep -E " + SQ + pattern + SQ].join("\n");
+}
+// Nested-group #241 false-green reproductions. Closing at the first
+// right parenthesis drops PASS from nested ERE groups and from a later
+// VERDICT prefix after a bar. Both-grouped nested alts keep PASS but
+// drop APPROVE. A flat PASS|APPROVE matcher with no group after the
+// prefix is already rejected via the POSIX PASS fallback. Paired
+// controls keep canonical APPROVE|REQUEST_CHANGES.
+const nestedErePassFirstPat = "VERDICT:[[:space:]]*((PASS)|APPROVE)([^A-Za-z]|$)";
+const nestedErePassSecondPat = "VERDICT:[[:space:]]*(APPROVE|(PASS))";
+const nestedEreBothGroupedPat = "VERDICT:[[:space:]]*((APPROVE)|(PASS))";
+const nestedEreSecondPrefixPat = "VERDICT:[[:space:]]*(approve)|VERDICT:[[:space:]]*(PASS)";
+const nestedEreFlatPassApprovePat = "VERDICT:[[:space:]]*PASS|APPROVE";
+const nestedErePassFirstControlPat = "VERDICT:[[:space:]]*((APPROVE)|REQUEST_CHANGES)([^A-Za-z]|$)";
+const nestedErePassSecondControlPat = "VERDICT:[[:space:]]*(APPROVE|(REQUEST_CHANGES))";
+const nestedEreBothGroupedControlPat = "VERDICT:[[:space:]]*((APPROVE)|(REQUEST_CHANGES))";
+const nestedEreSecondPrefixControlPat = "VERDICT:[[:space:]]*(approve)|VERDICT:[[:space:]]*(REQUEST_CHANGES)";
+const nestedEreFlatApproveControlPat = "VERDICT:[[:space:]]*APPROVE|REQUEST_CHANGES";
+const nestedErePassFirstDecoy = bareVerdictScript(nestedErePassFirstPat);
+const nestedErePassSecondDecoy = bareVerdictScript(nestedErePassSecondPat);
+const nestedEreBothGroupedDecoy = bareVerdictScript(nestedEreBothGroupedPat);
+const nestedEreSecondPrefixDecoy = bareVerdictScript(nestedEreSecondPrefixPat);
+const nestedEreFlatPassApproveDecoy = bareVerdictScript(nestedEreFlatPassApprovePat);
+const nestedErePassFirstControl = bareVerdictScript(nestedErePassFirstControlPat);
+const nestedErePassSecondControl = bareVerdictScript(nestedErePassSecondControlPat);
+const nestedEreBothGroupedControl = bareVerdictScript(nestedEreBothGroupedControlPat);
+const nestedEreSecondPrefixControl = bareVerdictScript(nestedEreSecondPrefixControlPat);
+const nestedEreFlatApproveControl = bareVerdictScript(nestedEreFlatApproveControlPat);
+const nestedErePassFirstGrep = grepESingleQuotedScript(nestedErePassFirstPat);
+const nestedErePassSecondGrep = grepESingleQuotedScript(nestedErePassSecondPat);
+const nestedEreBothGroupedGrep = grepESingleQuotedScript(nestedEreBothGroupedPat);
+const nestedEreSecondPrefixGrep = grepESingleQuotedScript(nestedEreSecondPrefixPat);
+const nestedErePassFirstControlGrep = grepESingleQuotedScript(nestedErePassFirstControlPat);
+const nestedErePassSecondControlGrep = grepESingleQuotedScript(nestedErePassSecondControlPat);
+const nestedEreBothGroupedControlGrep = grepESingleQuotedScript(nestedEreBothGroupedControlPat);
+const nestedEreSecondPrefixControlGrep = grepESingleQuotedScript(nestedEreSecondPrefixControlPat);
+const nestedBrePassNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|\(PASS\)\)"`;
+const nestedBreApproveNeedle = String.raw`grep "VERDICT:[[:space:]]*\(APPROVE\|\(REQUEST_CHANGES\)\)"`;
+const nestedBrePassDecoy = [
+  "#!/bin/bash",
+  "# VERDICT: APPROVE",
+  nestedBrePassNeedle,
+].join("\n");
+const nestedBreApproveOnly = [
+  "#!/bin/bash",
+  nestedBreApproveNeedle,
+].join("\n");
 const literalNewlineErePassDecoy = [
   "#!/bin/bash",
   "grep -qE \"VERDICT:",
@@ -5242,6 +5293,27 @@ if (!grepEUnescapedApproveOnly.includes(grepEUnescapedApproveNeedle) || grepEUne
 }
 if (!grepEUnescapedPassDecoy.includes(grepEUnescapedPassNeedle) || grepEUnescapedPassDecoy.includes(grepEEscapedApproveNeedle)) {
   throw new Error("grepEUnescapedPassDecoy lost unescaped ERE PASS bytes");
+}
+if (!nestedErePassFirstDecoy.includes("((PASS)|APPROVE)([^A-Za-z]|$)") || nestedErePassFirstControl.includes("PASS")) {
+  throw new Error("nested ERE PASS-first fixtures lost nested-group / control bytes");
+}
+if (!nestedErePassSecondDecoy.includes("(APPROVE|(PASS))") || nestedErePassSecondControl.includes("PASS")) {
+  throw new Error("nested ERE PASS-second fixtures lost nested-group / control bytes");
+}
+if (!nestedEreBothGroupedDecoy.includes("((APPROVE)|(PASS))") || nestedEreBothGroupedControl.includes("PASS")) {
+  throw new Error("nested ERE both-grouped fixtures lost nested-group / control bytes");
+}
+if (!nestedEreSecondPrefixDecoy.includes("(approve)|VERDICT:[[:space:]]*(PASS)") || nestedEreSecondPrefixControl.includes("PASS")) {
+  throw new Error("nested ERE second-prefix fixtures lost remainder / control bytes");
+}
+if (!nestedEreFlatPassApproveDecoy.includes("PASS|APPROVE") || nestedEreFlatPassApproveDecoy.includes("(")) {
+  throw new Error("flat PASS|APPROVE fixture lost ungrouped bytes");
+}
+if (!nestedBrePassDecoy.includes(nestedBrePassNeedle) || nestedBrePassDecoy.includes(nestedBreApproveNeedle) || sourceBackslashRunLen(nestedBrePassDecoy, "(") !== 1) {
+  throw new Error("nested BRE PASS decoy lost escaped-group bytes");
+}
+if (!nestedBreApproveOnly.includes(nestedBreApproveNeedle) || nestedBreApproveOnly.includes("PASS") || sourceBackslashRunLen(nestedBreApproveOnly, "(") !== 1) {
+  throw new Error("nested BRE approve-only control lost escaped-group bytes");
 }
 if (!danglingCommentBrePass.includes(danglingCommentOpener) || !danglingCommentBrePass.includes(danglingCommentBrePassNeedle)) {
   throw new Error("danglingCommentBrePass lost comment+dangling BRE PASS bytes");
@@ -5443,6 +5515,20 @@ const grepProofs = [
   { name: "comment-apostrophe-then-approve-matches-APPROVE", script: commentApostrophePassThenApprove, sample: "VERDICT: APPROVE", want: true },
   { name: "grep-E-unescaped-approve-matches-APPROVE", script: grepEUnescapedApproveOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "grep-E-unescaped-pass-matches-PASS", script: grepEUnescapedPassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "nested-ere-pass-first-matches-PASS", script: nestedErePassFirstGrep, sample: "VERDICT: PASS", want: true },
+  { name: "nested-ere-pass-first-matches-APPROVE", script: nestedErePassFirstGrep, sample: "VERDICT: APPROVE", want: true },
+  { name: "nested-ere-pass-first-control-does-not-match-PASS", script: nestedErePassFirstControlGrep, sample: "VERDICT: PASS", want: false },
+  { name: "nested-ere-pass-first-control-matches-APPROVE", script: nestedErePassFirstControlGrep, sample: "VERDICT: APPROVE", want: true },
+  { name: "nested-ere-pass-second-matches-PASS", script: nestedErePassSecondGrep, sample: "VERDICT: PASS", want: true },
+  { name: "nested-ere-pass-second-control-does-not-match-PASS", script: nestedErePassSecondControlGrep, sample: "VERDICT: PASS", want: false },
+  { name: "nested-ere-both-grouped-matches-PASS", script: nestedEreBothGroupedGrep, sample: "VERDICT: PASS", want: true },
+  { name: "nested-ere-both-grouped-control-does-not-match-PASS", script: nestedEreBothGroupedControlGrep, sample: "VERDICT: PASS", want: false },
+  { name: "nested-ere-second-prefix-matches-PASS", script: nestedEreSecondPrefixGrep, sample: "VERDICT: PASS", want: true },
+  { name: "nested-ere-second-prefix-control-does-not-match-PASS", script: nestedEreSecondPrefixControlGrep, sample: "VERDICT: PASS", want: false },
+  { name: "nested-bre-escaped-group-matches-PASS", script: nestedBrePassDecoy, sample: "VERDICT: PASS", want: true },
+  { name: "nested-bre-escaped-group-matches-APPROVE", script: nestedBrePassDecoy, sample: "VERDICT: APPROVE", want: true },
+  { name: "nested-bre-escaped-group-control-does-not-match-PASS", script: nestedBreApproveOnly, sample: "VERDICT: PASS", want: false },
+  { name: "nested-bre-escaped-group-control-matches-APPROVE", script: nestedBreApproveOnly, sample: "VERDICT: APPROVE", want: true },
   { name: "grep-E-escaped-approve-does-not-match-APPROVE", script: grepEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
   { name: "grep-qE-escaped-approve-does-not-match-APPROVE", script: grepQEEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
   { name: "grep-Eq-escaped-approve-does-not-match-APPROVE", script: grepEQEscapedApproveOnly, sample: "VERDICT: APPROVE", want: false },
@@ -6909,6 +6995,141 @@ const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
     console.log("H241_OK cross-product-permission-" + row.name);
   }
 }
+{
+  // Nested matcher groups: closing at the first right parenthesis and
+  // advancing lastIndex through unconsumed remainder dropped executable
+  // PASS alternatives (#241 false green). Each PASS row is paired with
+  // an APPROVE|REQUEST_CHANGES control of the same shape.
+  function verdictFindings(script) {
+    return reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": script,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    });
+  }
+  function acceptsPass(findings) {
+    return findings.some((f) => f.code === "E_VERDICT_VOCABULARY" && /accepts VERDICT: PASS/.test(f.message));
+  }
+  function missingApprove(findings) {
+    return findings.some((f) => /does not accept VERDICT: APPROVE/.test(f.message));
+  }
+  const nestedFamily = [
+    { name: "ere-pass-first", pass: nestedErePassFirstDecoy, control: nestedErePassFirstControl, keepApprove: true },
+    { name: "ere-pass-second", pass: nestedErePassSecondDecoy, control: nestedErePassSecondControl, keepApprove: true },
+    { name: "ere-both-grouped", pass: nestedEreBothGroupedDecoy, control: nestedEreBothGroupedControl, keepApprove: true },
+    { name: "ere-second-prefix", pass: nestedEreSecondPrefixDecoy, control: nestedEreSecondPrefixControl, keepApprove: true },
+    { name: "ere-grep-pass-first", pass: nestedErePassFirstGrep, control: nestedErePassFirstControlGrep, keepApprove: true },
+    { name: "ere-grep-pass-second", pass: nestedErePassSecondGrep, control: nestedErePassSecondControlGrep, keepApprove: true },
+    { name: "bre-nested-escaped-group", pass: nestedBrePassDecoy, control: nestedBreApproveOnly, keepApprove: true },
+  ];
+  for (const row of nestedFamily) {
+    const passFindings = verdictFindings(row.pass);
+    if (!acceptsPass(passFindings)) {
+      throw new Error("nested-group PASS false-green " + row.name + " got " + JSON.stringify(passFindings));
+    }
+    if (row.keepApprove && missingApprove(passFindings)) {
+      throw new Error("nested-group PASS dropped canonical APPROVE " + row.name + " got " + JSON.stringify(passFindings));
+    }
+    const controlFindings = verdictFindings(row.control);
+    if (controlFindings.length) {
+      throw new Error("nested-group approve-only false-red " + row.name + " got " + JSON.stringify(controlFindings));
+    }
+    console.log("H241_OK nested-group-" + row.name);
+  }
+  {
+    const flatPass = verdictFindings(nestedEreFlatPassApproveDecoy);
+    if (!acceptsPass(flatPass)) {
+      throw new Error("flat PASS|APPROVE matcher must still be rejected got " + JSON.stringify(flatPass));
+    }
+    const flatControl = verdictFindings(nestedEreFlatApproveControl);
+    if (flatControl.length) {
+      throw new Error("flat APPROVE|REQUEST_CHANGES control false-red got " + JSON.stringify(flatControl));
+    }
+    console.log("H241_OK nested-group-flat-pass-approve-still-rejected");
+  }
+  {
+    // Pre-repair tooth: close at the first right parenthesis and
+    // advance lastIndex to the scan cursor, including unconsumed
+    // remainder. That drops PASS from nested groups and from a later
+    // VERDICT prefix after a bar.
+    function oldFirstParenCloseHasPass(slice) {
+      const tokens = new Set();
+      const prefixRe = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)/gi;
+      let p;
+      while ((p = prefixRe.exec(slice)) !== null) {
+        let i = p.index + p[0].length;
+        let k = i;
+        while (slice[k] === "\\") k += 1;
+        if (k > i && slice[k] === "(") i = k;
+        if (slice[i] !== "(") continue;
+        while (i < slice.length) {
+          if (slice[i] === "(") {
+            const close = slice.indexOf(")", i + 1);
+            if (close === -1) break;
+            const inner = slice.slice(i + 1, close);
+            for (const part of inner.split("|")) {
+              const ident = part.trim();
+              if (/^[A-Za-z][A-Za-z0-9_]*$/.test(ident)) tokens.add(ident.toUpperCase());
+            }
+            i = close + 1;
+          } else if (/[A-Za-z]/.test(slice[i] || "")) {
+            let j = i;
+            while (j < slice.length && /[A-Za-z0-9_]/.test(slice[j])) j += 1;
+            tokens.add(slice.slice(i, j).toUpperCase());
+            i = j;
+          } else {
+            break;
+          }
+          if (slice[i] === "|") {
+            i += 1;
+            continue;
+          }
+          break;
+        }
+        prefixRe.lastIndex = Math.max(prefixRe.lastIndex, i);
+      }
+      return tokens.has("PASS");
+    }
+    const oldMisses = [
+      nestedErePassFirstPat,
+      nestedErePassSecondPat,
+      nestedEreSecondPrefixPat,
+    ];
+    for (const pat of oldMisses) {
+      if (oldFirstParenCloseHasPass(pat)) {
+        throw new Error("pre-repair first-paren-close tooth should miss PASS in " + pat);
+      }
+    }
+    if (oldFirstParenCloseHasPass(nestedEreBothGroupedPat) !== true) {
+      throw new Error("pre-repair first-paren-close tooth lost PASS-second in both-grouped");
+    }
+    if (oldFirstParenCloseHasPass(nestedEreFlatPassApprovePat)) {
+      throw new Error("pre-repair first-paren-close tooth should not parse ungrouped PASS|APPROVE");
+    }
+    console.log("H241_OK nested-group-pre-repair-first-paren-close-tooth");
+  }
+  {
+    const semSrc = readFileSync(process.env.SEM, "utf8");
+    const start = semSrc.indexOf("function collectMatcherClusterTokens");
+    const end = semSrc.indexOf("function stageHasVerdictMatcherShape");
+    if (start < 0 || end <= start) {
+      throw new Error("cannot locate collectMatcherClusterTokens");
+    }
+    const body = semSrc.slice(start, end);
+    if (body.includes("indexOf(\")\")") || body.includes("indexOf(')')")) {
+      throw new Error("collectMatcherClusterTokens still closes groups at the first right parenthesis");
+    }
+    if (!/findMatchingGroupClose/.test(body) || !/consumedTo/.test(body)) {
+      throw new Error("collectMatcherClusterTokens missing balanced-group close / consumed-to lastIndex");
+    }
+    if (!/groupingDelimAt/.test(body)) {
+      throw new Error("collectMatcherClusterTokens missing leftover-vs-ERE grouping delimiter scan");
+    }
+    console.log("H241_OK nested-group-balanced-close-not-first-paren");
+  }
+}
 const expectedGates = ["G11", "G12", "G15"];
 const roleContracts = JSON.parse(
   readFileSync(join(repo, "config/policy/role-contracts.v1.json"), "utf8")
@@ -7027,6 +7248,161 @@ const rows = [
           "#!/bin/bash",
           "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)",
         ].join("\n"),
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-nested-ere-pass-first-group",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedErePassFirstDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-nested-ere-pass-first-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedErePassFirstControl,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-nested-ere-pass-second-group",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedErePassSecondDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-nested-ere-pass-second-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedErePassSecondControl,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-nested-ere-both-grouped",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedEreBothGroupedDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-nested-ere-both-grouped-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedEreBothGroupedControl,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-nested-ere-second-verdict-prefix",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedEreSecondPrefixDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-nested-ere-second-verdict-prefix-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedEreSecondPrefixControl,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-flat-pass-approve-matcher-rejected",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedEreFlatPassApproveDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+    ],
+  },
+  {
+    name: "pass-positive-flat-approve-request-changes-matcher",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedEreFlatApproveControl,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "pass-nested-bre-escaped-group",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedBrePassDecoy,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "pass-positive-nested-bre-escaped-group-approve-request-changes",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": nestedBreApproveOnly,
         "scripts/release-preflight.sh": approveOnly,
       },
     }),
@@ -9359,6 +9735,128 @@ else
   bad "benign harness POSIX APPROVE|REQUEST_CHANGES-only (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+echo "# 241 nested matcher-group false-green regressions (sandbox CLI)"
+mutate_nested_pass() {
+  local label="$1"
+  local out rc
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+    && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS' \
+    && echo "$out" | grep -q 'canonical PR-review positive verdict is APPROVE'; then
+    echo "  planted nested-group PASS failure line ($label):"
+    echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+    ok "mutation: $label nested PASS harness fails"
+  else
+    bad "mutation nested PASS ($label) (rc=$rc): $out"
+  fi
+}
+mutate_nested_approve_only() {
+  local label="$1"
+  local out rc
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "benign: $label nested APPROVE|REQUEST_CHANGES harness remains green"
+  else
+    bad "benign nested APPROVE-only ($label) (rc=$rc): $out"
+  fi
+}
+
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*((PASS)|APPROVE)([^A-Za-z]|$)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE ((PASS)|APPROVE) trailing class"
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*((APPROVE)|REQUEST_CHANGES)([^A-Za-z]|$)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "ERE ((APPROVE)|REQUEST_CHANGES) trailing class"
+
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(APPROVE|(PASS))' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE (APPROVE|(PASS))"
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(APPROVE|(REQUEST_CHANGES))' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "ERE (APPROVE|(REQUEST_CHANGES))"
+
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*((APPROVE)|(PASS))' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE ((APPROVE)|(PASS))"
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*((APPROVE)|(REQUEST_CHANGES))' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "ERE ((APPROVE)|(REQUEST_CHANGES))"
+
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(approve)|VERDICT:[[:space:]]*(PASS)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_pass "ERE second VERDICT prefix PASS"
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(approve)|VERDICT:[[:space:]]*(REQUEST_CHANGES)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "ERE second VERDICT prefix REQUEST_CHANGES"
+
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*PASS|APPROVE' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted flat PASS|APPROVE failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: flat PASS|APPROVE matcher is rejected"
+else
+  bad "mutation flat PASS|APPROVE (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*APPROVE|REQUEST_CHANGES' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+mutate_nested_approve_only "flat APPROVE|REQUEST_CHANGES"
+
+NESTED_BRE_PASS_SH=$'#!/bin/bash\n# VERDICT: APPROVE\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|\\(PASS\\)\\)"\n'
+printf '%s' "$NESTED_BRE_PASS_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\(APPROVE\\|\\(PASS\\)\\)\"";
+if (!t.includes(want) || !t.includes("PASS")) {
+  console.error("nested BRE PASS decoy bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "mutation nested BRE PASS decoy bytes mismatch"
+}
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "mutation nested BRE PASS decoy is not executable BRE"
+fi
+mutate_nested_pass "BRE nested escaped group"
+NESTED_BRE_APPROVE_SH=$'#!/bin/bash\ngrep "VERDICT:[[:space:]]*\\(APPROVE\\|\\(REQUEST_CHANGES\\)\\)"\n'
+printf '%s' "$NESTED_BRE_APPROVE_SH" > "$SANDBOX/scripts/second-opinion.sh"
+node -e '
+const fs = require("fs");
+const t = fs.readFileSync(process.argv[1], "utf8");
+const want = "grep \"VERDICT:[[:space:]]*\\(APPROVE\\|\\(REQUEST_CHANGES\\)\\)\"";
+if (!t.includes(want) || t.includes("PASS")) {
+  console.error("nested BRE approve-only bytes mismatch");
+  process.exit(1);
+}
+' "$SANDBOX/scripts/second-opinion.sh" || {
+  bad "benign nested BRE approve-only bytes mismatch"
+}
+printf '%s\n' 'VERDICT: APPROVE' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  :
+else
+  bad "benign nested BRE approve-only is not executable BRE"
+fi
+printf '%s\n' 'VERDICT: PASS' > "$SANDBOX/scripts/.verdict-sample.txt"
+if bash -c "$(grep '^grep ' "$SANDBOX/scripts/second-opinion.sh") \"$SANDBOX/scripts/.verdict-sample.txt\""; then
+  bad "benign nested BRE approve-only incorrectly matches PASS"
+fi
+mutate_nested_approve_only "BRE nested escaped group"
+rm -f "$SANDBOX/scripts/.verdict-sample.txt"
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "restore: sandbox remains green after nested matcher-group CLI mutations"
+else
+  bad "restore after nested matcher-group CLI mutations (rc=$rc): $out"
+fi
 
 echo "# 241 quoted argv/env bypass regressions (sandbox CLI)"
 mutate_quoted_argv_pass() {
