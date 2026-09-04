@@ -13,6 +13,7 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 
 command -v node >/dev/null || { echo "lesson-ledger-lint.test.sh: node required" >&2; exit 1; }
 
+ORIG_PATH="$PATH"
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-lesson-ledger-lint.XXXXXX") || {
   echo "lesson-ledger-lint.test.sh: mktemp -d failed" >&2
   exit 1
@@ -124,11 +125,23 @@ if [[ "${GH_MODE:-}" == "badjson" ]]; then
   echo "{"
   exit 0
 fi
+if [[ "$1" == "repo" && "$2" == "view" ]]; then
+  if [[ -f "$PWD/.gh-repo" ]]; then
+    cat "$PWD/.gh-repo"
+    exit 0
+  fi
+  echo "${GH_DECOY_REPO:-decoy/repo}"
+  exit 0
+fi
 if [[ "$1" == "api" ]]; then
   path="$2"
   case "$path" in
-    repos/*/issues/7)
+    repos/acme/app/issues/7)
       echo "${GH_STATE:-closed}"
+      exit 0
+      ;;
+    repos/*/issues/7)
+      echo "open"
       exit 0
       ;;
   esac
@@ -179,7 +192,23 @@ else
   bad "AC2 --offline (rc=$rc log=$(cat "$GH_LOG") out=$out)"
 fi
 
-echo "# AC3 test-pinned but not fixed"
+echo "# AC2 --root, not --repo: gh repo view must run in the target tree"
+printf '%s\n' 'acme/app' > "$AC2/.gh-repo"
+: > "$GH_LOG"
+unset GH_MODE GH_STATE
+export GITHUB_REPOSITORY=decoy/repo
+export GH_REPO=decoy/repo
+export GH_DECOY_REPO=decoy/repo
+GH_STATE=closed run_lint "$AC2"
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'issue #7' && echo "$out" | grep -q 'closed'; then
+  ok "AC2 mutation: --root wins over caller cwd / GITHUB_REPOSITORY"
+else
+  bad "AC2 --root repo inference (rc=$rc): $out"
+fi
+unset GITHUB_REPOSITORY GH_REPO GH_DECOY_REPO GH_STATE
+
+echo "# AC3 test name pins an unfixed lesson"
 AC3_BAD="$ROOT/ac3-bad"
 make_tree "$AC3_BAD"
 {
@@ -189,16 +218,79 @@ make_tree "$AC3_BAD"
 } > "$AC3_BAD/memory/LESSONS.md"
 {
   printf '%s\n' '#!/usr/bin/env bash'
-  printf '%s\n' "# pins $(lid 1) as a regression"
-  printf '%s\n' "echo \"$(lid 1) · planted pin\""
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "ok \"$(lid 1) releases dead lanes\""
 } > "$AC3_BAD/scripts/tests/planted.test.sh"
 run_lint "$AC3_BAD" --offline
 if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
     && echo "$out" | grep -q 'scripts/tests/planted.test.sh' \
     && echo "$out" | grep -q 'pins it'; then
-  ok "AC3 mutation: unfixed lesson pinned by test"
+  ok "AC3 mutation: unfixed lesson pinned by test name"
 else
-  bad "AC3 mutation (rc=$rc): $out"
+  bad "AC3 mutation test-name (rc=$rc): $out"
+fi
+
+echo "# AC3 @test name pins an unfixed lesson"
+AC3_AT="$ROOT/ac3-at"
+make_tree "$AC3_AT"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_AT/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "@test \"$(lid 1) still holds\""
+} > "$AC3_AT/scripts/tests/planted.test.sh"
+run_lint "$AC3_AT" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'scripts/tests/planted.test.sh' \
+    && echo "$out" | grep -q 'pins it'; then
+  ok "AC3 mutation: unfixed lesson pinned by @test name"
+else
+  bad "AC3 mutation @test (rc=$rc): $out"
+fi
+
+echo "# AC3 unrelated body comment is not a pin"
+AC3_COMMENT="$ROOT/ac3-comment"
+make_tree "$AC3_COMMENT"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_COMMENT/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"unrelated setup\""
+  printf '%s\n' "# historical note: $(lid 1) was filed in July"
+  printf '%s\n' 'true'
+} > "$AC3_COMMENT/scripts/tests/planted.test.sh"
+run_lint "$AC3_COMMENT" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+  && ok "AC3 clean: unrelated comment does not pin" \
+  || bad "AC3 unrelated comment (rc=$rc): $out"
+
+echo "# AC3 pin-keyword comment still pins"
+AC3_KW="$ROOT/ac3-kw"
+make_tree "$AC3_KW"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_KW/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"unrelated setup\""
+  printf '%s\n' "# pins $(lid 1) as a regression"
+} > "$AC3_KW/scripts/tests/planted.test.sh"
+run_lint "$AC3_KW" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+  ok "AC3 mutation: pin/regression comment still pins"
+else
+  bad "AC3 pin-keyword (rc=$rc): $out"
 fi
 
 echo "# AC3 clean: pinned lesson is fixed"
@@ -211,12 +303,33 @@ make_tree "$AC3_OK"
 } > "$AC3_OK/memory/LESSONS.md"
 {
   printf '%s\n' '#!/usr/bin/env bash'
-  printf '%s\n' "# pins $(lid 1) as a regression"
-  printf '%s\n' "echo \"$(lid 1) · planted pin\""
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "ok \"$(lid 1) releases dead lanes\""
 } > "$AC3_OK/scripts/tests/planted.test.sh"
 run_lint "$AC3_OK" --offline
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "AC3 clean: pinned lesson is fixed" \
   || bad "AC3 clean (rc=$rc): $out"
+
+echo "# AC3/AC6 claimed pinner that does not pin"
+AC3_FALSE="$ROOT/ac3-false-pinner"
+make_tree "$AC3_FALSE"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fixed (pinned by scripts/tests/planted.test.sh)"
+} > "$AC3_FALSE/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' 'echo "no lesson token here"'
+} > "$AC3_FALSE/scripts/tests/planted.test.sh"
+run_lint "$AC3_FALSE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'does not pin it'; then
+  ok "AC6 mutation: claimed pinner without ID fails"
+else
+  bad "AC6 false pinner (rc=$rc): $out"
+fi
 
 echo "# AC4 not strictly increasing / duplicate / missing fields"
 AC4_ORDER="$ROOT/ac4-order"
@@ -301,10 +414,74 @@ run_lint "$AC4_OK" --offline
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "AC4 clean: increasing IDs with fields" \
   || bad "AC4 clean (rc=$rc): $out"
 
+echo "# AC4 fenced example Status/Tags do not satisfy the real entry"
+AC4_FENCE="$ROOT/ac4-fence"
+make_tree "$AC4_FENCE"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  printf '%s\n' "## $(lid 1) · 2026-09-04 · fenced-fields"
+  printf '%s\n' "**What happened:** example in a fence:"
+  printf '%s\n' '```'
+  printf '%s\n' "## $(lid 99) · 2026-01-01 · phantom"
+  printf '%s\n' "**Status:** fixed"
+  printf '%s\n' "**Tags:** #example"
+  printf '%s\n' '```'
+} > "$AC4_FENCE/memory/LESSONS.md"
+run_lint "$AC4_FENCE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'missing \*\*Status:\*\*' \
+    && ! echo "$out" | grep -q "duplicate lesson ID $(lid 1)"; then
+  ok "AC4 mutation: fenced Status/Tags/heading are not real fields"
+else
+  bad "AC4 fence fields (rc=$rc): $out"
+fi
+
+echo "# AC4 fenced duplicate heading is not a phantom entry"
+AC4_FENCE_OK="$ROOT/ac4-fence-ok"
+make_tree "$AC4_FENCE_OK"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fixed"
+  printf '%s\n' '```'
+  printf '%s\n' "## $(lid 1) · 2026-01-01 · phantom-duplicate"
+  printf '%s\n' "**Status:** fixed"
+  printf '%s\n' "**Tags:** #example"
+  printf '%s\n' '```'
+  entry 2 "fixed"
+} > "$AC4_FENCE_OK/memory/LESSONS.md"
+run_lint "$AC4_FENCE_OK" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+  && ok "AC4 clean: fenced heading is not a duplicate" \
+  || bad "AC4 fence duplicate (rc=$rc): $out"
+
 echo "# live tree (AC6)"
-run_lint "$REPO_ROOT" --offline
+export PATH="$ORIG_PATH"
+unset GH_LOG GH_MODE GH_STATE GH_DECOY_REPO GH_REPO
+unset GITHUB_REPOSITORY || true
+LEDGER="$REPO_ROOT/memory/LESSONS.md"
+for n in 9 10 11; do
+  if grep -q "^## $(lid "$n") " "$LEDGER"; then
+    ok "live ledger has heading $(lid "$n")"
+  else
+    bad "live ledger missing heading $(lid "$n")"
+  fi
+done
+prev=0
+mono=1
+while IFS= read -r num; do
+  if [[ "$num" -le "$prev" ]]; then
+    mono=0
+    break
+  fi
+  prev=$num
+done < <(grep -E '^## L-[0-9]{3} ' "$LEDGER" | sed -E 's/^## L-0*([0-9]+) .*/\1/')
+[[ "$mono" -eq 1 && "$prev" -gt 0 ]] && ok "live ledger IDs strictly increasing" \
+  || bad "live ledger IDs not strictly increasing"
+run_lint "$REPO_ROOT"
 if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK'; then
-  ok "live tree passes with --offline"
+  ok "live tree passes the lint"
 else
   bad "live tree (rc=$rc): $out"
 fi

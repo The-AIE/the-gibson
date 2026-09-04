@@ -986,7 +986,7 @@ ordering rule as the `date -u -d` / `date -u -j -f` shim in `claims-status.sh`.
 **Rule of thumb:** a cross-platform fallback is only safe when the wrong branch
 *errors*. If a flag exists on both platforms with different meanings, order by
 which one you can detect, and give the chain a terminating default.
-**Status:** fixed (pinned by scripts/tests/gate.test.sh, scripts/tests/key-age-check.test.sh, scripts/tests/claim-reaper.test.sh)
+**Status:** fixed (pinned by scripts/tests/key-age-check.test.sh)
 **Tags:** #portability #shell #sensors
 
 ## L-051 · 2026-08-08 · unpinned-shellcheck-makes-exact-set-ratchet-nondeterministic
