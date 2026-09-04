@@ -173,12 +173,16 @@ function fieldValue(body, name) {
   const lines = body.split(/\r?\n/);
   const re = new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.*)$`);
   let fence = null;
+  let htmlComment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (fence) {
       if (isFenceClose(line, fence)) fence = null;
       continue;
     }
+    if (htmlComment) { if (line.includes("-->")) htmlComment = false; continue; }
+    if (/^\s*<!--/.test(line) && !line.includes("-->")) { htmlComment = true; continue; }
+    if (/^\s*<!--.*-->\s*$/.test(line)) continue;
     const open = fenceOpen(line);
     if (open) {
       fence = open;
@@ -214,12 +218,21 @@ function parseLedger(text) {
     entries.push(current);
     current = null;
   };
+  let htmlComment = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (fence) {
       if (isFenceClose(line, fence)) fence = null;
       continue;
     }
+    // An HTML comment block is not ledger content (Codex #316 round 3,
+    // finding 4): a commented-out template must not become an entry.
+    if (htmlComment) {
+      if (line.includes("-->")) htmlComment = false;
+      continue;
+    }
+    if (/^\s*<!--/.test(line) && !line.includes("-->")) { htmlComment = true; continue; }
+    if (/^\s*<!--.*-->\s*$/.test(line)) continue;
     const open = fenceOpen(line);
     if (open) {
       fence = open;
@@ -301,9 +314,13 @@ function quotedContainsId(line, id) {
 function isExplicitPinMarker(line, id) {
   if (!line.includes(id)) return false;
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (new RegExp(`#\\s*pins\\s+${escaped}\\b`, "i").test(line)) return true;
-  if (new RegExp(`\\bpin:\\s*${escaped}\\b`, "i").test(line)) return true;
-  if (new RegExp(`\\bregression:\\s*${escaped}\\b`, "i").test(line)) return true;
+  // A marker inside quoted data (`printf '%s\n' '# pins L-020' > fixture`) is
+  // fixture text, not a pin (Codex #316 round 3, finding 2). Only a line that
+  // IS a comment, or a bare `pin:`/`regression:` line, counts.
+  const trimmed = line.trim();
+  if (/^#/.test(trimmed)) return new RegExp(`#\\s*(?:pins?|pin:|regression:)\\s*${escaped}\\b`, "i").test(trimmed);
+  if (quotedContainsId(line, id)) return false;
+  if (new RegExp(`\\b(?:pin|regression):\\s*${escaped}\\b`, "i").test(line)) return true;
   return false;
 }
 
@@ -312,14 +329,19 @@ function isTestNameLine(line, id) {
   if (!line.includes(id)) return false;
   // A quoted grep/needle is not a test name.
   if (/\bgrep\b/.test(line)) return false;
-  if (/@(?:test|it)\b/.test(line)) return true;
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`@(?:test|it)\\s+["'](?:#\\s*)?${escaped}\\b`).test(line)) return true;
   if (!quotedContainsId(line, id)) return false;
+  // The ID must LEAD the quoted title (`ok "L-020 releases the lane"`,
+  // `echo "# L-020 · …"`, `it("L-020 …")`), so a needle or fixture string that
+  // merely mentions the ID (`echo "L-020"` written to a file, an assertion on
+  // fixture output) is not a test name (finding 2).
+  const leads = new RegExp(`["'](?:#\\s*)?${escaped}(?:\\s|·|:|$)`);
+  if (!leads.test(line)) return false;
   if (/^\s*(?:test|it|describe)\s*\(/.test(line)) return true;
-  if (/^\s*(ok|bad|expect|check|contains|lacks|file_contains)\b/.test(line)) {
-    return true;
-  }
-  // This repo's case titles: echo "L-NNN · …" with no pipe.
-  if (/^\s*echo\s+["']/.test(line) && !/\|/.test(line)) return true;
+  if (/^\s*(ok|bad|expect|check)\b/.test(line)) return true;
+  // This repo's case titles: echo "# L-NNN · …" with no pipe or redirect.
+  if (/^\s*echo\s+["']/.test(line) && !/[|>]/.test(line)) return true;
   return false;
 }
 
@@ -543,6 +565,11 @@ for (const e of entries) {
     for (const rel of pinners) {
       findings.push(`${e.id} is not fixed but ${rel} pins it`);
     }
+  }
+  // A `pinned by` claim that names no recognisable scripts/tests/*.test.sh
+  // path must not bypass verification (Codex #316 round 3, finding 3).
+  if (/pinned by/i.test(e.status || "") && claimedPinPaths(e.status).length === 0) {
+    findings.push(`${e.id} status claims 'pinned by' but names no scripts/tests/*.test.sh path`);
   }
   for (const rel of claimedPinPaths(e.status)) {
     const text = fileTexts.get(rel);
