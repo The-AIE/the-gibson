@@ -42,9 +42,10 @@ concurrency:
 jobs:
   review-evidence:
     name: Sweep review evidence (trusted base)
-    # A comment on a plain issue evaluates nothing (and, having no PR number,
-    # could not have been the event for any PR head).
-    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
+    # No job-level `if:` — deliberately. A run whose job is skipped still
+    # REPLACES the one queued run in the concurrency group, so a comment on a
+    # plain issue could displace a pending re-evaluation and then do nothing
+    # (Codex round 5, finding 2). Every event runs the full sweep instead.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -82,14 +83,20 @@ jobs:
         run: |
           set -uo pipefail
           : > heads.txt
-          if ! gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
+          listed=0
+          if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
               --jq '.[] | "\(.number) \(.head.sha)"' > heads.txt; then
+            listed=1
+          else
+            : > heads.txt
             echo "::notice::could not list open pull requests; publish will fail closed on the event head"
             echo "- open-PR listing failed; falling back to the event head" >> "$GITHUB_STEP_SUMMARY"
-            if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
-              printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" > heads.txt
-            fi
-            exit 1
+          fi
+          # The event's own head ALWAYS joins the set (Codex round 5, finding
+          # 3): a PR (re)opened between this listing and the sweep, or omitted
+          # by a stale listing, must still be stamped pending now.
+          if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" heads.txt; then
+            printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> heads.txt
           fi
           stamped=0
           while read -r n sha; do
@@ -101,6 +108,7 @@ jobs:
             stamped=$((stamped + 1))
           done < heads.txt
           echo "pending stamped on $stamped open PR head(s)"
+          [ "$listed" -eq 1 ] || exit 1
 
       - name: Evaluate every open PR at its current head (sweep)
         id: sweep
@@ -174,7 +182,20 @@ jobs:
             publish "$sha" "$state" "$desc"
             echo "- PR $n @ ${sha:0:7}: \`$state\` — $desc" >> "$GITHUB_STEP_SUMMARY"
             if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ] && [ "$state" = "failure" ]; then event_fail=1; fi
+            echo "$sha" >> published.txt
           done < results.jsonl
+          # Every head we stamped pending must have received a verdict; a head
+          # the sweep did not cover (listing skew, a PR closed mid-run) must not
+          # be left pending-or-stale — fail it closed (Codex round 5, finding 3).
+          touch published.txt
+          while read -r n sha; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
+            if ! grep -q "^$sha\$" published.txt; then
+              publish "$sha" "failure" "api-error: sweep produced no verdict for this head"
+              echo "- PR $n @ ${sha:0:7}: \`failure\` — no verdict from the sweep" >> "$GITHUB_STEP_SUMMARY"
+              if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ]; then event_fail=1; fi
+            fi
+          done < heads.txt
           if [ "$event_fail" -eq 1 ]; then
             echo "::error::review-evidence: this event's pull request failed closed (see published status)"
             exit 1

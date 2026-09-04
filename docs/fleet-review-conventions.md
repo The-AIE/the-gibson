@@ -117,9 +117,14 @@ head, a dropped run is harmless. A PR that closes needs no special recovery — 
 former sibling is just another open PR in the next sweep.
 
 **Evidence provenance is the creation, not the last edit.** GitHub lets any writer
-edit anyone's comment, so a receipt or attestation whose GraphQL `editor` is not its
-creator is ignored, and comments are ordered by `created_at`. A `DISMISSED` review
-takes part in newest-wins with no verdict, so dismissing a `CHANGES_REQUESTED` never
-resurrects an older `APPROVED`. Evidence created before the PR's most recent
-`base_ref_changed` timeline event is `stale-base` (pending): a retarget keeps the head
-SHA but changes the diff, so it must be reviewed again.
+edit anyone's comment, so: an App receipt that was edited at all is void (machines do
+not edit their receipts); an owner attestation edited by anyone but the owner, or
+edited with no recorded editor, is ignored; comments and attestations are ordered by
+`created_at`. A `DISMISSED` review takes part in newest-wins with no verdict, so
+dismissing a `CHANGES_REQUESTED` never resurrects an older `APPROVED`. A deleted
+comment is invisible to the API, so any `comment_deleted` timeline event at or after
+the newest eligible pass voids that pass (`evidence-deleted`, pending) until a fresh
+review. Evidence created at or before the PR's most recent `base_ref_changed` timeline
+event is `stale-base` (pending): a retarget keeps the head SHA but changes the diff.
+The job has no event narrowing at all: a skipped run still replaces the queued run in
+the group, so every event, including a comment on a plain issue, runs the sweep.

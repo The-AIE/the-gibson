@@ -53,6 +53,7 @@ export const REASONS = Object.freeze({
   "no-receipt-at-head": "pending",
   "stale-head-only": "pending",
   "stale-base": "pending",
+  "evidence-deleted": "pending",
   "same-vendor-reviewer": "failure",
   "identity-unresolved": "failure",
   "changes-requested": "failure",
@@ -208,7 +209,9 @@ export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
     .filter((x) => x.b && x.b["head-sha"] === headSha)
     .map((x) => ({ ...x, vendors: [...new Set(x.b["author-vendor"].split(",").map((v) => norm(v)).filter(Boolean))] }))
     .filter((x) => x.vendors.length > 0 && x.vendors.every((v) => allowed.includes(v)))
-    .sort((l, r) => timestamp(r.c) - timestamp(l.c));
+    // Order by CREATION: an edit moves updated_at and must not promote an
+    // older attestation over a newer one (Codex round 5, finding 5).
+    .sort((l, r) => (Date.parse(r.c?.created_at ?? "") || 0) - (Date.parse(l.c?.created_at ?? "") || 0));
   return hits[0] ? { vendors: hits[0].vendors, id: hits[0].c.id } : null;
 }
 
@@ -219,7 +222,14 @@ export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
 /** A comment edited by anyone other than its creator is not that creator's word (round 4, finding 1). */
 export function editedByOther(c) {
   const editor = c?.editor?.login ?? c?.editor ?? null;
+  // Edited with no recorded editor (deleted account, API gap) is unknown
+  // provenance: fail closed (Codex round 5, finding 6).
+  if (c?.edited === true && !editor) return true;
   return !!editor && norm(editor) !== norm(c?.user?.login);
+}
+/** An App receipt is machine-written; ANY edit voids it (round 5, finding 1). */
+export function editedAtAll(c) {
+  return c?.edited === true || !!(c?.editor?.login ?? c?.editor ?? null);
 }
 
 export function collectEvidence({ reviews, comments, identities, headSha, notBefore = 0 }) {
@@ -238,7 +248,8 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
     if (state !== "approved" && state !== "changes_requested" && state !== "dismissed") continue;
     if (norm(r?.commit_id) !== headSha) { staleReceipts += 1; continue; }
     const at = timestamp(r);
-    if (at < notBefore) { staleBase += 1; continue; }
+    // `<=`: a retarget in the same second as the review is not provably after it (round 5, finding 4).
+    if (notBefore > 0 && at <= notBefore) { staleBase += 1; continue; }
     const result = state === "approved" ? "pass" : state === "changes_requested" ? "fail" : "none";
     items.push({ identity: id, result, at, id: Number(r?.id ?? 0), source: "review" });
   }
@@ -248,13 +259,13 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
     const app = c?.performed_via_github_app;
     if (!app || norm(app.slug) !== norm(id.appSlug)) continue;
     if (id.appId !== null && Number(app.id) !== id.appId) continue;
-    if (editedByOther(c)) continue;
+    if (editedAtAll(c)) continue; // a machine-written receipt is never edited legitimately
     const b = parseBlock(c?.body, "review-evidence:v1", ["head-sha", "result"]);
     if (!b || !["pass", "fail"].includes(b.result)) continue;
     if (b["head-sha"] !== headSha) { staleReceipts += 1; continue; }
     // Provenance is the CREATION; an edit moves updated_at, so order by created_at.
     const at = Date.parse(c?.created_at ?? "") || timestamp(c);
-    if (at < notBefore) { staleBase += 1; continue; }
+    if (notBefore > 0 && at <= notBefore) { staleBase += 1; continue; }
     items.push({ identity: id, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" });
   }
   // Newest per identity. Review ids and comment ids are different resource
@@ -307,7 +318,16 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   const ineligible = newest.filter((e) => !eligible.includes(e));
   const base = { authorVendors: [...authors.vendors], attestation: att, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`) };
   if (eligible.some((e) => e.result === "fail")) return { state: "failure", reason: "changes-requested", detail: eligible.filter((e) => e.result === "fail").map((e) => e.identity.login).join(","), ...base };
-  if (eligible.some((e) => e.result === "pass")) return { state: "success", reason: "pass", detail: eligible.filter((e) => e.result === "pass").map((e) => e.identity.login).join(","), ...base };
+  if (eligible.some((e) => e.result === "pass")) {
+    // A deleted comment is invisible to REST, so a writer could delete an
+    // App's newer `fail` receipt and resurrect an older `pass` (round 5,
+    // finding 1). The timeline records `comment_deleted`: any deletion at or
+    // after the newest eligible pass voids that pass until a fresh review.
+    const newestPass = Math.max(...eligible.filter((e) => e.result === "pass").map((e) => e.at));
+    const deletedAfter = (timeline ?? []).filter((ev) => norm(ev?.event) === "comment_deleted" && (Date.parse(ev?.created_at ?? "") || 0) >= newestPass).length;
+    if (deletedAfter > 0) return { state: "pending", reason: "evidence-deleted", detail: `${deletedAfter} comment(s) deleted at/after the newest pass; review again`, ...base };
+    return { state: "success", reason: "pass", detail: eligible.filter((e) => e.result === "pass").map((e) => e.identity.login).join(","), ...base };
+  }
   if (ineligible.length > 0) return { state: "failure", reason: "same-vendor-reviewer", detail: ineligible.map((e) => `${e.identity.login}(${e.identity.vendor})`).join(","), ...base };
   if (staleBase > 0) return { state: "pending", reason: "stale-base", detail: `${staleBase} receipt(s) predate the last base retarget; review again`, ...base };
   if (staleReceipts > 0) return { state: "pending", reason: "stale-head-only", detail: `${staleReceipts} receipt(s) at other heads`, ...base };
@@ -361,18 +381,25 @@ async function loadInputs(args) {
   // attestation edited by anyone but its creator is not that creator's word
   // (round 4, finding 1). Fail closed if this lookup fails.
   const [owner, name] = args.repo.split("/");
-  const editors = new Map();
+  const edits = new Map(); // databaseId -> { editor: login|null }
   let cursor = null;
+  let complete = false;
   for (let page = 0; page < 20; page += 1) {
     const q = `query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){pullRequest(number:$n){comments(first:100,after:$c){nodes{databaseId lastEditedAt editor{login}} pageInfo{hasNextPage endCursor}}}}}`;
     const res = await ghJson(["graphql", "-f", `query=${q}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${Number(args.pr)}`, ...(cursor ? ["-F", `c=${cursor}`] : [])]).catch((e) => { throw new Error(`api-error:graphql-editors:${(e.message ?? "").slice(0, 60)}`); });
     const conn = res?.data?.repository?.pullRequest?.comments;
     if (!conn || !Array.isArray(conn.nodes)) throw new Error("api-error:graphql-editors:malformed");
-    for (const n of conn.nodes) if (n?.lastEditedAt && n?.editor?.login) editors.set(Number(n.databaseId), n.editor.login);
-    if (!conn.pageInfo?.hasNextPage) break;
+    // Any lastEditedAt marks the comment edited, even with no editor login
+    // (round 5, finding 6): unknown provenance fails closed downstream.
+    for (const n of conn.nodes) if (n?.lastEditedAt) edits.set(Number(n.databaseId), { editor: n?.editor?.login ?? null });
+    if (!conn.pageInfo?.hasNextPage) { complete = true; break; }
     cursor = conn.pageInfo.endCursor;
   }
-  for (const c of comments) if (editors.has(Number(c?.id))) c.editor = editors.get(Number(c.id));
+  if (!complete) throw new Error("api-error:graphql-editors:too-many-pages");
+  for (const c of comments) {
+    const e = edits.get(Number(c?.id));
+    if (e) { c.edited = true; if (e.editor) c.editor = e.editor; }
+  }
   return { pull, commits, reviews, comments, pullsForHead, timeline };
 }
 
