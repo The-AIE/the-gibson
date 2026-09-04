@@ -9,7 +9,9 @@
  *     2. A lesson's **Status:** is `fix-pending (issue #N)` and issue N is
  *        closed (gh api). `--offline` skips only this check and says so.
  *     3. A lesson is not `fixed` but a file under scripts/tests/ names its
- *        ID in a pin/regression comment or test name.
+ *        ID via an explicit pin marker (`# pins L-NNN`, `pin: L-NNN`,
+ *        `regression: L-NNN`) or a test/case name containing that ID.
+ *        A `fixed (pinned by X)` claim is checked against the same rule.
  *     4. IDs are not strictly increasing in file order, an ID appears twice,
  *        or an entry lacks **Status:** or **Tags:**.
  *
@@ -85,8 +87,22 @@ const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const PINNED_BY_PATH_RE = /scripts\/tests\/[A-Za-z0-9._/-]+\.test\.sh/g;
 const GH_TIMEOUT_MS = 20000;
 
-function isFenceLine(line) {
-  return /^ {0,3}```/.test(line);
+function fenceOpen(line) {
+  const m = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!m) return null;
+  const marker = m[2];
+  const info = m[3];
+  // CommonMark: a backtick fence's info string may not contain a backtick.
+  if (marker[0] === "`" && info.includes("`")) return null;
+  return { char: marker[0], len: marker.length };
+}
+
+function isFenceClose(line, fence) {
+  if (!fence) return false;
+  const m = /^( {0,3})(`{3,}|~{3,})\s*$/.exec(line);
+  if (!m) return false;
+  const marker = m[2];
+  return marker[0] === fence.char && marker.length >= fence.len;
 }
 
 function help() {
@@ -95,8 +111,9 @@ function help() {
 WHAT IT DOES
   Fails when a cited lesson identifier is absent from the ledger; when a
   lesson is fix-pending on a closed GitHub issue; when a test pins a lesson
-  that is not fixed; or when ledger IDs are duplicated, not strictly
-  increasing, or missing **Status:** / **Tags:**.
+  that is not fixed (explicit pin marker or test/case name only); or when
+  ledger IDs are duplicated, not strictly increasing, or missing **Status:**
+  / **Tags:**.
 
 WHY
   Status that nobody reads is not a ratchet. The ledger has to be mechanically
@@ -155,23 +172,28 @@ function isFixedStatus(status) {
 function fieldValue(body, name) {
   const lines = body.split(/\r?\n/);
   const re = new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.*)$`);
-  let inFence = false;
+  let fence = null;
   for (let i = 0; i < lines.length; i++) {
-    if (isFenceLine(lines[i])) {
-      inFence = !inFence;
+    const line = lines[i];
+    if (fence) {
+      if (isFenceClose(line, fence)) fence = null;
       continue;
     }
-    if (inFence) continue;
-    const m = lines[i].match(re);
+    const open = fenceOpen(line);
+    if (open) {
+      fence = open;
+      continue;
+    }
+    const m = line.match(re);
     if (!m) continue;
     const parts = [m[1]];
     for (let j = i + 1; j < lines.length; j++) {
-      const line = lines[j];
-      if (isFenceLine(line)) break;
-      if (/^\*\*[A-Za-z][^:*]*:\*\*/.test(line)) break;
-      if (/^##\s/.test(line)) break;
-      if (line.trim() === "") continue;
-      parts.push(line.trim());
+      const cont = lines[j];
+      if (fenceOpen(cont)) break;
+      if (/^\*\*[A-Za-z][^:*]*:\*\*/.test(cont)) break;
+      if (/^##\s/.test(cont)) break;
+      if (cont.trim() === "") continue;
+      parts.push(cont.trim());
     }
     return parts.join(" ").trim();
   }
@@ -182,8 +204,7 @@ function parseLedger(text) {
   const lines = text.split(/\r?\n/);
   const entries = [];
   let current = null;
-  let inFence = false;
-  let unclosedFence = false;
+  let fence = null;
   const flush = (endLine) => {
     if (!current) return;
     current.endLine = endLine;
@@ -194,12 +215,17 @@ function parseLedger(text) {
     current = null;
   };
   for (let i = 0; i < lines.length; i++) {
-    if (isFenceLine(lines[i])) {
-      inFence = !inFence;
+    const line = lines[i];
+    if (fence) {
+      if (isFenceClose(line, fence)) fence = null;
       continue;
     }
-    if (inFence) continue;
-    const m = lines[i].match(HEADING_RE);
+    const open = fenceOpen(line);
+    if (open) {
+      fence = open;
+      continue;
+    }
+    const m = line.match(HEADING_RE);
     if (m) {
       flush(i);
       current = {
@@ -210,7 +236,7 @@ function parseLedger(text) {
       };
     }
   }
-  if (inFence) unclosedFence = true;
+  const unclosedFence = fence != null;
   flush(lines.length);
   return { entries, unclosedFence };
 }
@@ -272,39 +298,38 @@ function quotedContainsId(line, id) {
   return false;
 }
 
-function isTestNameLine(line, id) {
-  if (isCommentLine(line)) return false;
+function isExplicitPinMarker(line, id) {
   if (!line.includes(id)) return false;
-  if (quotedContainsId(line, id)) return true;
-  if (/@(?:test|it)\b/.test(line)) return true;
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (new RegExp(`#\\s*pins\\s+${escaped}\\b`, "i").test(line)) return true;
+  if (new RegExp(`\\bpin:\\s*${escaped}\\b`, "i").test(line)) return true;
+  if (new RegExp(`\\bregression:\\s*${escaped}\\b`, "i").test(line)) return true;
   return false;
 }
 
-function isPinKeywordLine(line, id) {
+function isTestNameLine(line, id) {
+  if (isCommentLine(line)) return false;
   if (!line.includes(id)) return false;
-  return /\b(pin|pins|pinned|regression)\b/i.test(line);
-}
-
-function isHeaderContinue(line) {
-  const trimmed = line.trim();
-  return trimmed === "" || /^#!/.test(trimmed) || isCommentLine(line);
+  // A quoted grep/needle is not a test name.
+  if (/\bgrep\b/.test(line)) return false;
+  if (/@(?:test|it)\b/.test(line)) return true;
+  if (!quotedContainsId(line, id)) return false;
+  if (/^\s*(?:test|it|describe)\s*\(/.test(line)) return true;
+  if (/^\s*(ok|bad|expect|check|contains|lacks|file_contains)\b/.test(line)) {
+    return true;
+  }
+  // This repo's case titles: echo "L-NNN · …" with no pipe.
+  if (/^\s*echo\s+["']/.test(line) && !/\|/.test(line)) return true;
+  return false;
 }
 
 function filePinsId(rel, text, id) {
   if (!rel.startsWith("scripts/tests/") || rel === "scripts/tests") return false;
   const lines = text.split(/\r?\n/);
-  let inHeader = true;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (inHeader) {
-      if (isHeaderContinue(line)) {
-        if (line.includes(id)) return true;
-        continue;
-      }
-      inHeader = false;
-    }
     if (!line.includes(id)) continue;
-    if (isPinKeywordLine(line, id)) return true;
+    if (isExplicitPinMarker(line, id)) return true;
     if (isTestNameLine(line, id)) return true;
   }
   return false;
