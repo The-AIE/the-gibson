@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:a59784895d020d043fb7cbc5b989d6a6615d206c2eaa119e580570a1d3f99857
+# gibson-template-version: sha256:a6653a06aefb2fb5e64600e71557961425714ef3bc680297a806926569e3bf35
 # The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
 # Fill <angle> placeholders from the repo's gate commands.
@@ -64,10 +64,15 @@ jobs:
       # so a PR cannot raise its own budget. Exceptions are announced
       # (::warning:: + step summary), never a silent green.
       - name: Materialise pr-size sensor + budget from the trusted base
+        # Base = current tip of the target branch (fetched above), not
+        # pull_request.base.sha, which goes stale as the target advances.
         env:
-          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
+          GIBSON_PR_BASE=$(git rev-parse --verify "refs/remotes/origin/${BASE_REF}^{commit}") || {
+            echo "::error title=pr-size::cannot resolve base branch origin/${BASE_REF}"; exit 2; }
+          echo "GIBSON_PR_BASE=$GIBSON_PR_BASE" >> "$GITHUB_ENV"
           trusted="$RUNNER_TEMP/pr-size-trusted"
           mkdir -p "$trusted/scripts" "$trusted/config"
           for f in scripts/pr-size.mjs config/pr-size.v1.json; do
@@ -82,7 +87,6 @@ jobs:
           echo "PR_SIZE_TRUSTED=$trusted" >> "$GITHUB_ENV"
       - name: PR size (budget, or size-exception with owner sign-off — announced)
         env:
-          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GIBSON_PR_SIZE_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'size-exception') && '1' || '0' }}
         run: node "$PR_SIZE_TRUSTED/scripts/pr-size.mjs"
 

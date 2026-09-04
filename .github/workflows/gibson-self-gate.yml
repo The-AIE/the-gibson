@@ -227,10 +227,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
       - name: Materialise pr-size sensor + budget from the trusted base
+        # Base = current tip of the target branch (the merge ref's first parent),
+        # not pull_request.base.sha, which goes stale as the target advances and
+        # would count other people's merged work against this PR.
         env:
-          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           set -euo pipefail
+          GIBSON_PR_BASE=$(git rev-parse --verify "refs/remotes/origin/${BASE_REF}^{commit}") || {
+            echo "::error title=pr-size::cannot resolve base branch origin/${BASE_REF}"; exit 2; }
+          echo "GIBSON_PR_BASE=$GIBSON_PR_BASE" >> "$GITHUB_ENV"
           trusted="$RUNNER_TEMP/pr-size-trusted"
           mkdir -p "$trusted/scripts" "$trusted/config"
           for f in scripts/pr-size.mjs config/pr-size.v1.json; do
@@ -247,6 +253,5 @@ jobs:
           echo "PR_SIZE_TRUSTED=$trusted" >> "$GITHUB_ENV"
       - name: PR size (budget, or size-exception with owner sign-off — announced)
         env:
-          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GIBSON_PR_SIZE_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'size-exception') && '1' || '0' }}
         run: node "$PR_SIZE_TRUSTED/scripts/pr-size.mjs"
