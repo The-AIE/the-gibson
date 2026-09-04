@@ -169,6 +169,10 @@ for f in "$WF" "$TPL"; do
   grep -Eq 'run: node "\$PR_SIZE_TRUSTED/scripts/pr-size.mjs"' "$f" && ok "$f executes the trusted copy" || bad "$f: does not execute trusted copy"
   grep -Eq '^\s*run: node scripts/pr-size.mjs' "$f" && bad "$f: executes PR-controlled pr-size.mjs" || ok "$f: never executes the PR-controlled sensor"
   grep -q 'config/pr-size.v1.json' "$f" && ok "$f takes the budget config from the trusted base too" || bad "$f: config not from base"
+  # Base is the live tip of the target branch; pull_request.base.sha goes stale as the
+  # target advances and would charge other merged work to this PR.
+  grep -Eq 'refs/remotes/origin/\$\{BASE_REF\}\^\{commit\}' "$f" && ok "$f diffs against the base branch tip" || bad "$f: base not the branch tip"
+  grep -A4 'name: PR size' "$f" | grep -q 'base.sha' && bad "$f: pr-size step uses stale pull_request.base.sha" || ok "$f: pr-size step does not use base.sha"
 done
 
 echo
