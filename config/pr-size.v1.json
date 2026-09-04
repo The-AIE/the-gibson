@@ -1,0 +1,25 @@
+{
+  "$comment": "PR-size budget (scripts/pr-size.mjs). Review is only real when a reviewer can read the whole diff; a PR bigger than this needs the `size-exception` label, which is owner sign-off. Ratchet: tighten freely, loosen only with owner sign-off. Lines = added + deleted, from `git diff --numstat -M`. Calibrated 2026-09-04 on the last 30 merged PRs: chatterbuilt median 36 / p90 6489, the-gibson median 398, conference-os median 107.",
+  "exceptionLabel": "size-exception",
+  "budgets": {
+    "productLines": 400,
+    "productFiles": 15,
+    "totalLines": 1500,
+    "totalFiles": 40
+  },
+  "classes": {
+    "generated": [
+      "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock",
+      "Cargo.lock", "poetry.lock", "Pipfile.lock", "Gemfile.lock", "composer.lock", "go.sum",
+      "*.min.js", "*.min.css", "*.map", "*.snap", "*.svg", "*.lock",
+      "**/generated/**", "**/__generated__/**", "**/dist/**", "**/build/**", "**/vendor/**"
+    ],
+    "tests": [
+      "**/*.test.*", "**/*.spec.*", "**/__tests__/**", "**/tests/**", "**/test/**",
+      "**/fixtures/**", "**/__fixtures__/**", "**/__snapshots__/**", "**/e2e/**"
+    ],
+    "docs": [
+      "*.md", "**/*.md", "docs/**", "memory/**", "paper/**", "LICENSE*"
+    ]
+  }
+}
