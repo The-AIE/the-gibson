@@ -82,7 +82,12 @@ const ID_RE = /(?<![A-Za-z0-9])L-(\d{3})(?!\d)/g;
 const HEADING_RE = /^## (L-(\d{3}))\b/;
 const PENDING_ISSUE_RE = /fix-pending\s*\(\s*issue\s*#(\d+)/i;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const PINNED_BY_PATH_RE = /scripts\/tests\/[A-Za-z0-9._/-]+\.test\.sh/g;
 const GH_TIMEOUT_MS = 20000;
+
+function isFenceLine(line) {
+  return /^ {0,3}```/.test(line);
+}
 
 function help() {
   console.log(`lesson-ledger-lint.mjs — Law 9 ledger integrity sensor (#306)
@@ -150,12 +155,19 @@ function isFixedStatus(status) {
 function fieldValue(body, name) {
   const lines = body.split(/\r?\n/);
   const re = new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.*)$`);
+  let inFence = false;
   for (let i = 0; i < lines.length; i++) {
+    if (isFenceLine(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     const m = lines[i].match(re);
     if (!m) continue;
     const parts = [m[1]];
     for (let j = i + 1; j < lines.length; j++) {
       const line = lines[j];
+      if (isFenceLine(line)) break;
       if (/^\*\*[A-Za-z][^:*]*:\*\*/.test(line)) break;
       if (/^##\s/.test(line)) break;
       if (line.trim() === "") continue;
@@ -170,6 +182,8 @@ function parseLedger(text) {
   const lines = text.split(/\r?\n/);
   const entries = [];
   let current = null;
+  let inFence = false;
+  let unclosedFence = false;
   const flush = (endLine) => {
     if (!current) return;
     current.endLine = endLine;
@@ -180,6 +194,11 @@ function parseLedger(text) {
     current = null;
   };
   for (let i = 0; i < lines.length; i++) {
+    if (isFenceLine(lines[i])) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
     const m = lines[i].match(HEADING_RE);
     if (m) {
       flush(i);
@@ -191,8 +210,9 @@ function parseLedger(text) {
       };
     }
   }
+  if (inFence) unclosedFence = true;
   flush(lines.length);
-  return entries;
+  return { entries, unclosedFence };
 }
 
 function walkFiles(rootAbs, relDir, acc) {
@@ -238,25 +258,67 @@ function collectIds(text) {
   return hits;
 }
 
-function isPinLine(line, id) {
-  if (!line.includes(id)) return false;
+function isCommentLine(line) {
   const trimmed = line.replace(/^\s+/, "");
-  if (/^echo\s+["'].*/.test(trimmed) && trimmed.includes(id)) return true;
-  if (/\b(pin|pins|pinned|regression)\b/i.test(line)) return true;
-  if (/^#/.test(trimmed) || /^\/\//.test(trimmed)) return true;
+  return /^#/.test(trimmed) || /^\/\//.test(trimmed);
+}
+
+function quotedContainsId(line, id) {
+  const re = /(["'])(?:\\.|(?!\1).)*\1/g;
+  let m;
+  while ((m = re.exec(line)) !== null) {
+    if (m[0].includes(id)) return true;
+  }
   return false;
+}
+
+function isTestNameLine(line, id) {
+  if (isCommentLine(line)) return false;
+  if (!line.includes(id)) return false;
+  if (quotedContainsId(line, id)) return true;
+  if (/@(?:test|it)\b/.test(line)) return true;
+  return false;
+}
+
+function isPinKeywordLine(line, id) {
+  if (!line.includes(id)) return false;
+  return /\b(pin|pins|pinned|regression)\b/i.test(line);
+}
+
+function isHeaderContinue(line) {
+  const trimmed = line.trim();
+  return trimmed === "" || /^#!/.test(trimmed) || isCommentLine(line);
 }
 
 function filePinsId(rel, text, id) {
   if (!rel.startsWith("scripts/tests/") || rel === "scripts/tests") return false;
   const lines = text.split(/\r?\n/);
+  let inHeader = true;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (inHeader) {
+      if (isHeaderContinue(line)) {
+        if (line.includes(id)) return true;
+        continue;
+      }
+      inHeader = false;
+    }
     if (!line.includes(id)) continue;
-    if (isPinLine(line, id)) return true;
-    if (i < 20 && /^\s*#/.test(line)) return true;
+    if (isPinKeywordLine(line, id)) return true;
+    if (isTestNameLine(line, id)) return true;
   }
   return false;
+}
+
+function claimedPinPaths(status) {
+  if (!status || !/pinned by/i.test(status)) return [];
+  const idx = status.toLowerCase().lastIndexOf("pinned by");
+  const after = idx >= 0 ? status.slice(idx) : status;
+  const paths = [];
+  const re = new RegExp(PINNED_BY_PATH_RE.source, "g");
+  let m;
+  while ((m = re.exec(after)) !== null) paths.push(m[0]);
+  return paths;
 }
 
 function resolveRoot(raw) {
@@ -291,20 +353,33 @@ function resolveLedger(root, raw) {
   return abs;
 }
 
-function resolveRepo(flag) {
+function resolveRepo(flag, opts = {}) {
   if (flag) {
     if (!REPO_RE.test(flag)) die(`--repo must be owner/name (got ${JSON.stringify(flag)})`);
     return flag;
   }
-  const envRepo = process.env.GITHUB_REPOSITORY || "";
-  if (envRepo && REPO_RE.test(envRepo)) return envRepo;
+  const cwd = opts.cwd || process.cwd();
+  const ignoreAmbientRepo = Boolean(opts.ignoreAmbientRepo);
+  const env = {
+    ...process.env,
+    GH_PROMPT_DISABLED: "1",
+    NO_COLOR: "1",
+  };
+  if (ignoreAmbientRepo) {
+    delete env.GITHUB_REPOSITORY;
+    delete env.GH_REPO;
+  } else {
+    const envRepo = process.env.GITHUB_REPOSITORY || "";
+    if (envRepo && REPO_RE.test(envRepo)) return envRepo;
+  }
   const r = spawnSync(
     "gh",
     ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
     {
       encoding: "utf8",
       timeout: GH_TIMEOUT_MS,
-      env: { ...process.env, GH_PROMPT_DISABLED: "1", NO_COLOR: "1" },
+      cwd,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     }
   );
@@ -347,6 +422,7 @@ function ghIssueState(repo, n) {
   return state;
 }
 
+const rootFlagSet = opt.root != null;
 const root = resolveRoot(opt.root);
 const ledgerAbs = resolveLedger(root, opt.ledger);
 const ledgerRel = relPosix(root, ledgerAbs) || LEDGER_REL;
@@ -358,9 +434,13 @@ try {
   die(`cannot read ledger ${ledgerRel}: ${err.message}`);
 }
 
-const entries = parseLedger(ledgerText);
+const parsed = parseLedger(ledgerText);
+const entries = parsed.entries;
 const findings = [];
 const byId = new Map();
+if (parsed.unclosedFence) {
+  findings.push(`unclosed fenced code block in ${ledgerRel}`);
+}
 
 let prevNum = 0;
 for (const e of entries) {
@@ -430,15 +510,28 @@ for (const [rel, text] of fileTexts) {
 }
 
 for (const e of entries) {
-  if (isFixedStatus(e.status)) continue;
-  const pinners = [];
-  for (const [rel, text] of fileTexts) {
-    if (filePinsId(rel, text, e.id)) pinners.push(rel);
+  if (!isFixedStatus(e.status)) {
+    const pinners = [];
+    for (const [rel, text] of fileTexts) {
+      if (filePinsId(rel, text, e.id)) pinners.push(rel);
+    }
+    for (const rel of pinners) {
+      findings.push(`${e.id} is not fixed but ${rel} pins it`);
+    }
   }
-  for (const rel of pinners) {
-    findings.push(
-      `${e.id} is not fixed but ${rel} pins it`
-    );
+  for (const rel of claimedPinPaths(e.status)) {
+    const text = fileTexts.get(rel);
+    if (text == null) {
+      findings.push(
+        `${e.id} status claims pinned by ${rel} but that file is absent`
+      );
+      continue;
+    }
+    if (!filePinsId(rel, text, e.id)) {
+      findings.push(
+        `${e.id} status claims pinned by ${rel} but ${rel} does not pin it`
+      );
+    }
   }
 }
 
@@ -454,7 +547,10 @@ if (opt.offline) {
   if (pending.length > 0) {
     let repo;
     try {
-      repo = resolveRepo(opt.repo);
+      repo = resolveRepo(opt.repo, {
+        cwd: root,
+        ignoreAmbientRepo: rootFlagSet,
+      });
     } catch (err) {
       die(err.message || String(err));
     }
