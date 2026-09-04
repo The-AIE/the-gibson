@@ -35,8 +35,12 @@ JOBS=8
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --runs) RUNS="${2:-}"; shift 2 ;;
-    --jobs) JOBS="${2:-}"; shift 2 ;;
+    # A value flag with no operand is a usage error, never an endless loop
+    # (Codex round 2: `shift 2` fails without set -e and re-reads "$1").
+    --runs|--jobs)
+      [[ $# -ge 2 ]] || { echo "run-all-stress.sh: $1 requires a value" >&2; usage >&2; exit 2; }
+      if [[ "$1" == "--runs" ]]; then RUNS="$2"; else JOBS="$2"; fi
+      shift 2 ;;
     --timeout) echo "run-all-stress.sh: --timeout is not accepted; the canonical budget is the contract" >&2; exit 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "run-all-stress.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
