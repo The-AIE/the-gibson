@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:c9cf7e5dae87e838ca3a08500d5c4bbed897fef5d6d59943bb1f6ff857ea42a3
+# gibson-template-version: sha256:a59784895d020d043fb7cbc5b989d6a6615d206c2eaa119e580570a1d3f99857
 # The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
 # Fill <angle> placeholders from the repo's gate commands.
@@ -60,11 +60,31 @@ jobs:
         run: node scripts/check-active-work.mjs
       # Review is only real when a reviewer can read the diff (config/pr-size.v1.json,
       # vendor with scripts/pr-size.mjs). Label `size-exception` = owner sign-off.
-      - name: PR size within budget
+      # Sensor + budget run from the trusted BASE commit, never the PR merge ref,
+      # so a PR cannot raise its own budget. Exceptions are announced
+      # (::warning:: + step summary), never a silent green.
+      - name: Materialise pr-size sensor + budget from the trusted base
+        env:
+          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          trusted="$RUNNER_TEMP/pr-size-trusted"
+          mkdir -p "$trusted/scripts" "$trusted/config"
+          for f in scripts/pr-size.mjs config/pr-size.v1.json; do
+            if git cat-file -e "$GIBSON_PR_BASE:$f" 2>/dev/null; then
+              git show "$GIBSON_PR_BASE:$f" > "$trusted/$f"
+            else
+              echo "::warning title=pr-size::$f absent at trusted base $GIBSON_PR_BASE — bootstrap run uses the PR's copy; not tamper-proof until the sensor lands on the base branch"
+              echo "- pr-size bootstrap: \`$f\` taken from the PR merge ref (base lacks it)" >> "$GITHUB_STEP_SUMMARY"
+              cp "$f" "$trusted/$f"
+            fi
+          done
+          echo "PR_SIZE_TRUSTED=$trusted" >> "$GITHUB_ENV"
+      - name: PR size (budget, or size-exception with owner sign-off — announced)
         env:
           GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GIBSON_PR_SIZE_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'size-exception') && '1' || '0' }}
-        run: node scripts/pr-size.mjs
+        run: node "$PR_SIZE_TRUSTED/scripts/pr-size.mjs"
 
       - run: <generate>      # e.g. npx prisma generate
       - run: <typecheck>     # e.g. npx tsc --noEmit

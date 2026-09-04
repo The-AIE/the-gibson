@@ -2,7 +2,7 @@
 // pr-size.mjs — PR-size budget sensor.
 //
 // WHAT IT DOES
-//   Measures a PR's diff (`git diff --numstat -M base...head`), classifies each
+//   Measures a PR's diff (`git diff --numstat -z -M base...head`), classifies each
 //   file as product / tests / docs / generated using config/pr-size.v1.json,
 //   and fails when the product or total size exceeds the configured budgets.
 //   The `size-exception` label (owner sign-off) downgrades a breach to a
@@ -22,15 +22,23 @@
 // USAGE
 //   node scripts/pr-size.mjs [--base REF] [--head REF] [--exception]
 //                            [--config PATH] [--format text|json]
-//   node scripts/pr-size.mjs --numstat FILE    # offline: raw `git diff --numstat` output
+//   node scripts/pr-size.mjs --numstat FILE    # offline: raw `git diff --numstat [-z]` output
 //   Env: GIBSON_PR_BASE (default origin/main), GIBSON_PR_SIZE_EXCEPTION=1
+//   Under GITHUB_ACTIONS=true the verdict is also emitted as a ::notice::/
+//   ::warning::/::error:: annotation and appended to $GITHUB_STEP_SUMMARY, so
+//   an exception is never a silent green step.
+//
+// TRUST
+//   CI must run the copy of this script and its config from the trusted base
+//   ref, not from the PR merge ref — otherwise the PR under test can raise its
+//   own budget. See the pr-size job in .github/workflows/gibson-self-gate.yml.
 //
 // EXIT
 //   0 within budget (or breach under an exception)   1 budget exceeded
 //   2 usage / config / git error
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -136,29 +144,86 @@ export function classify(path, classes) {
   return "product";
 }
 
-// `git diff --numstat -M` rows: "<added>\t<deleted>\t<path>" where binary
-// files show "-\t-" and renames show "old => new" or "dir/{a => b}/file".
-export function parseNumstat(text) {
+function malformed(what) {
+  const err = new Error(`malformed numstat: ${what}`);
+  err.code = "E_MALFORMED";
+  return err;
+}
+
+function makeRow(a, d, path) {
+  if (!/^(-|\d+)$/.test(a) || !/^(-|\d+)$/.test(d) || !path) throw malformed(JSON.stringify([a, d, path]));
+  return { added: a === "-" ? 0 : Number(a), deleted: d === "-" ? 0 : Number(d), binary: a === "-", path };
+}
+
+// Git C-quotes paths with non-ASCII, control, quote or backslash bytes unless
+// core.quotePath=false: "docs/caf\303\251.md". Decode to the real UTF-8 path.
+export function unquoteGitPath(s) {
+  if (!(s.length >= 2 && s.startsWith('"') && s.endsWith('"'))) return s;
+  const inner = s.slice(1, -1);
+  const bytes = [];
+  const esc = { a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, '"': 34, "\\": 92 };
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i];
+    if (ch !== "\\") {
+      bytes.push(...Buffer.from(ch, "utf8"));
+      continue;
+    }
+    const n = inner[i + 1];
+    if (/[0-7]/.test(n)) {
+      const oct = inner.slice(i + 1, i + 4).match(/^[0-7]{1,3}/)[0];
+      bytes.push(parseInt(oct, 8));
+      i += oct.length;
+    } else if (n in esc) {
+      bytes.push(esc[n]);
+      i += 1;
+    } else throw malformed(`bad escape in quoted path ${s}`);
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+// NUL-delimited (`--numstat -z`): "<a>\t<d>\t<path>\0" per file; a rename is
+// "<a>\t<d>\t\0<old>\0<new>\0". Paths are raw (never quoted), so a literal
+// " => " or a tab in a filename cannot be mistaken for rename syntax.
+export function parseNumstatZ(text) {
+  const rows = [];
+  const toks = text.split("\0");
+  if (toks[toks.length - 1] !== "") throw malformed("-z output not NUL-terminated");
+  toks.pop();
+  for (let i = 0; i < toks.length; i += 1) {
+    const parts = toks[i].split("\t");
+    if (parts.length < 3) throw malformed(JSON.stringify(toks[i]));
+    const [a, d] = parts;
+    let path = parts.slice(2).join("\t");
+    if (path === "") {
+      if (i + 2 >= toks.length) throw malformed("truncated rename record");
+      path = toks[i + 2];
+      i += 2;
+    }
+    rows.push(makeRow(a, d, path));
+  }
+  return rows;
+}
+
+// Newline-delimited (`--numstat` without -z): "<a>\t<d>\t<path>" where binary
+// files show "-\t-", unusual paths are C-quoted, and renames show
+// "old => new" or "dir/{a => b}/file". Kept for offline fixtures; CI uses -z.
+export function parseNumstatText(text) {
   const rows = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     const parts = line.split("\t");
-    if (parts.length < 3) {
-      const err = new Error(`malformed numstat line: ${JSON.stringify(line)}`);
-      err.code = "E_MALFORMED";
-      throw err;
-    }
+    if (parts.length < 3) throw malformed(JSON.stringify(line));
     const [a, d] = parts;
     let path = parts.slice(2).join("\t");
-    path = path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/");
-    rows.push({
-      added: a === "-" ? 0 : Number(a),
-      deleted: d === "-" ? 0 : Number(d),
-      binary: a === "-",
-      path,
-    });
+    if (path.startsWith('"')) path = unquoteGitPath(path);
+    else path = path.replace(/\{[^{}]* => ([^{}]*)\}/g, "$1").replace(/^.* => /, "").replace(/\/\//g, "/");
+    rows.push(makeRow(a, d, path));
   }
   return rows;
+}
+
+export function parseNumstat(text) {
+  return text.includes("\0") ? parseNumstatZ(text) : parseNumstatText(text);
 }
 
 export function evaluate(rows, cfg, { exception = false } = {}) {
@@ -221,9 +286,26 @@ export function renderText(result, cfg) {
 
 function gitNumstat(base, head) {
   try {
-    return execFileSync("git", ["diff", "--numstat", "-M", `${base}...${head}`, "--"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", ["diff", "--numstat", "-z", "-M", `${base}...${head}`, "--"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
     throw new Error(`git diff ${base}...${head} failed: ${(e.stderr || e.message || "").toString().trim()}`);
+  }
+}
+
+// GitHub Actions: a green step must not hide an exception. Annotate the run
+// and write the full report to the job summary.
+function announceGitHub(result, cfg, text) {
+  if (process.env.GITHUB_ACTIONS !== "true") return;
+  const m = result.metrics;
+  const brief = `product ${m.productLines}/${cfg.budgets.productLines} lines, ${m.productFiles}/${cfg.budgets.productFiles} files; total ${m.totalLines}/${cfg.budgets.totalLines} lines`;
+  let line;
+  if (!result.breached) line = `::notice title=pr-size::within budget (${brief})`;
+  else if (result.exception) line = `::warning title=pr-size::OVER BUDGET — passing only under '${cfg.exceptionLabel}' owner sign-off (${brief})`;
+  else line = `::error title=pr-size::over budget (${brief})`;
+  console.log(line);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    const heading = result.breached ? (result.exception ? `### PR size: over budget — \`${cfg.exceptionLabel}\` applied` : "### PR size: over budget") : "### PR size: within budget";
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${heading}\n\n\`\`\`\n${text}\n\`\`\`\n`);
   }
 }
 
@@ -241,8 +323,10 @@ function main() {
     process.exit(2);
   }
   const result = evaluate(rows, cfg, { exception: args.exception });
+  const text = renderText(result, cfg);
   if (args.format === "json") console.log(JSON.stringify({ ...result, budgets: cfg.budgets }, null, 2));
-  else console.log(renderText(result, cfg));
+  else console.log(text);
+  announceGitHub(result, cfg, text);
   process.exit(result.ok ? 0 : 1);
 }
 
