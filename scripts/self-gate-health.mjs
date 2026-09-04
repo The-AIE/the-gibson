@@ -122,8 +122,10 @@ function pct(x) {
   return `${(x * 100).toFixed(1)}%`;
 }
 
-// Pure: runs -> { metrics, findings, ok }. Runs must be completed workflow
-// runs of the self-gate (any event), newest first is fine but not required.
+// Pure: runs -> { metrics, findings, ok }. Runs are workflow runs of the
+// self-gate (any event, any order); the newest windowRuns completed ones count.
+// "Red" includes PRs the gate correctly rejected, so prRedRate is an upper
+// bound on false reds; mainRedRate is the cleaner signal (main should be green).
 export function evaluate(runsInput, cfg) {
   const runs = (Array.isArray(runsInput) ? runsInput : runsInput?.workflow_runs) || null;
   if (!Array.isArray(runs)) {
@@ -131,8 +133,10 @@ export function evaluate(runsInput, cfg) {
     err.code = "E_MALFORMED";
     throw err;
   }
+  const startedAt = (r) => Date.parse(r.run_started_at || r.created_at || "") || 0;
   const completed = runs
     .filter((r) => r && r.status === "completed" && typeof r.conclusion === "string")
+    .sort((a, b) => startedAt(b) - startedAt(a))
     .slice(0, cfg.windowRuns);
 
   const main = completed.filter((r) => r.event === "push" && r.head_branch === "main");
