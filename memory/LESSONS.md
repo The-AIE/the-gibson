@@ -1799,7 +1799,7 @@ Gate and sensor PRs (#315 review-evidence, #316 ledger lint, #317 reachability) 
 
 ## L-085 · 2026-09-04 · never-run-gibson-suites-directly
 **What happened:** Run Gibson suites through scripts/tests/run-all.sh --only <substring>, never by path; and a Grok lane whose log ends on a suite is not thereby proven dead (cause of the 2026-09-04 lane deaths is unconfirmed).
-Three Grok lanes died on 2026-09-04 at 8, 15 and 49 minutes. fleet-vitals.sh logged no action (it logs every kill to ~/.claude/fleet/logs/), so the watchdog did not do it. The first explanation, "suites kill the caller's process group when run by path", was checked by Codex and is false: no suite in scripts/tests contains a process-group kill, and wall-timeout.test.sh signals a separate child group. Root cause remains unconfirmed.
+Three Grok lanes died on 2026-09-04 at 8, 15 and 49 minutes. fleet-vitals.sh logged no action (it logs every kill to ~/.claude/fleet/logs/), so the watchdog did not do it. The first explanation, "suites kill the caller's process group when run by path", was checked by Codex and does not hold: the process-group kills that do exist in scripts/tests (loop-fleet.test.sh `kill -TERM -"$wd1"`, wall-timeout.test.sh `kill -INT -"$_fg_pgid"`) target child groups those suites created, not the caller's group. Root cause remains unconfirmed.
 
 **Why:** run-all.sh gives each suite its own process group, a 600 s budget and a tally line; a suite run by path has none of that, and its output is not what the gate sees. And an unexplained death is not evidence for the next convenient story.
 
