@@ -694,5 +694,23 @@ else
 fi
 
 echo
+
+echo "# Codex #316 round 3: quoted markers, zero-path claims, HTML comments"
+R3="$ROOT/r3"; rm -rf "$R3"; mkdir -p "$R3/scripts/tests" "$R3/memory" "$R3/docs"
+# IDs are built with lid() so this test file never carries a literal lesson ID the live lint could read as a citation.
+A1=$(lid 1); A2=$(lid 2); A99=$(lid 99)
+{ printf '## %s · 2026-09-04 · quoted-marker-is-not-a-pin\n**What happened:** x\n**Status:** fixed (pinned by scripts/tests/q.test.sh)\n**Tags:** #x\n\n' "$A1"
+  printf '## %s · 2026-09-04 · claim-with-no-path\n**What happened:** x\n**Status:** fixed (pinned by q.test.sh)\n**Tags:** #x\n\n' "$A2"
+  printf '<!-- template, not an entry:\n## %s · 2026-09-04 · commented-out\n**Status:** fixed\n**Tags:** #x\n-->\n' "$A99"; } > "$R3/memory/LESSONS.md"
+printf '%s\n' '#!/bin/bash' "printf '%s\\n' '# pins $A1' > fixture" "echo \"$A1\" > needle" > "$R3/scripts/tests/q.test.sh"
+printf 'see %s\n' "$A99" > "$R3/docs/cite.md"
+run_lint "$R3" --offline
+printf '%s\n' "$out" | grep -q "$A1 status claims pinned by scripts/tests/q.test.sh but" && ok "r3-2: a quoted '# pins' marker in fixture data is not a pin" || bad "r3-2: quoted marker accepted: $out"
+printf '%s\n' "$out" | grep -q "$A2 status claims 'pinned by' but names no" && ok "r3-3: 'pinned by q.test.sh' (no scripts/tests path) is a finding, not a bypass" || bad "r3-3: zero-path claim bypassed: $out"
+printf '%s\n' "$out" | grep -q "cited $A99 is absent" && ok "r3-4: an entry inside an HTML comment is not an entry (its citation is dangling)" || bad "r3-4: commented template parsed as entry: $out"
+printf '%s\n' '#!/bin/bash' "# pins $A1" > "$R3/scripts/tests/q.test.sh"
+run_lint "$R3" --offline
+printf '%s\n' "$out" | grep -q "$A1 status claims" && bad "r3-2 control: a real comment-line marker was rejected: $out" || ok "r3-2 control: a real '# pins' comment line is a pin"
+
 echo "lesson-ledger-lint.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

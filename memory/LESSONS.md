@@ -112,7 +112,7 @@ state. No-progress journals once, increments shared failure and `--stale-budget`
 once each, never restores or hands off. state-corrupt and runner-failure take
 precedence and do not run the sensor. Stop at the earlier of error-budget or
 stale-budget with a distinct no-progress diagnosis.
-**Status:** fixed (grok branch + detection gap via #63; pinned by scripts/tests/silent-noop.test.sh)
+**Status:** fixed (grok branch + detection gap via #63)
 **Tags:** #grok #cli #harness-bug #permissions #L-008 #silent-noop
 
 ## L-009 · 2026-09-04 · claim-commit-never-moves-caller-checkout
@@ -545,7 +545,7 @@ treat pending ux-eval as product risk once path-filter would have skipped;
 still wait when UI paths are in the diff. (3) Do **not** loosen Tier C
 gates or drop live UX for real UI PRs. Distinct from L-012 (preview
 protection / soft-skip when a live target is needed).
-**Status:** fixed (pinned by scripts/tests/ux-surface.test.sh)
+**Status:** fix-pending (the-gibson#12; practiced on PR #165)
 **Tags:** #ci #ux-eval #preview #path-filter #solo-loop #release #local
 #process
 
@@ -986,7 +986,7 @@ ordering rule as the `date -u -d` / `date -u -j -f` shim in `claims-status.sh`.
 **Rule of thumb:** a cross-platform fallback is only safe when the wrong branch
 *errors*. If a flag exists on both platforms with different meanings, order by
 which one you can detect, and give the chain a terminating default.
-**Status:** fixed (pinned by scripts/tests/key-age-check.test.sh)
+**Status:** fixed in the test (#93) and production call sites (#99: gate.sh, gate-baseline.sh, loop.sh, claim-reaper.sh) with a gate.test.sh sensor that asserts two files on one filesystem get distinct path_dev_ino identities and that every production site is exact GNU-first form.
 **Tags:** #portability #shell #sensors
 
 ## L-051 · 2026-08-08 · unpinned-shellcheck-makes-exact-set-ratchet-nondeterministic
