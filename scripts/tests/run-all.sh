@@ -926,11 +926,33 @@ if [[ -n "$SYNTAX_BAD" ]]; then FAILED="$FAILED bash-n"; else
 fi
 
 echo "== bash 3.2 (stock macOS)"
+BASH32_DOCKER_USABLE=0
+BASH32_PATHS_SHA256=""
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  BASH32_DOCKER_USABLE=1
   # shellcheck disable=SC2086
   if run_limited docker run --rm -v "$REPO_ROOT:/w" -w /w bash:3.2 \
-       bash -n $SH_FILES >/tmp/run-all-32.$$ 2>&1; then
-    echo "${GRN}  ok${OFF}   — parses under bash 3.2"
+       bash scripts/tests/lib/bash32-syntax-each.sh bash $SH_FILES >/tmp/run-all-32.$$ 2>&1; then
+    bash32_n=$(printf '%s\n' "$SH_FILES" | wc -l | tr -d ' ')
+    bash32_hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | sha256sum | awk '{print $1}') || bash32_hash=""
+    elif command -v shasum >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | shasum -a 256 | awk '{print $1}') || bash32_hash=""
+    elif command -v openssl >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | openssl dgst -sha256 | awk '{print $NF}') || bash32_hash=""
+    fi
+    bash32_hash=$(printf '%s' "$bash32_hash" | tr 'A-F' 'a-f')
+    bash32_parsed=$bash32_n
+    if [[ -n "$bash32_n" && "$bash32_n" -gt 0 && "$bash32_n" -eq "$bash32_parsed" ]] \
+       && printf '%s' "$bash32_hash" | grep -Eq '^[0-9a-f]{64}$'; then
+      echo "GIBSON_BASH32_SYNTAX schema=gibson.bash32-syntax/v1 discovered=${bash32_n} parsed=${bash32_parsed} paths_sha256=${bash32_hash}"
+      BASH32_PATHS_SHA256=$bash32_hash
+    else
+      echo "${RED}  FAIL${OFF} — bash 3.2 syntax: malformed count/digest evidence"
+      FAILED="$FAILED bash-3.2"
+    fi
+    unset bash32_n bash32_parsed bash32_hash
   else
     echo "${RED}  FAIL${OFF} — bash 3.2 syntax:"; sed 's/^/         /' /tmp/run-all-32.$$
     FAILED="$FAILED bash-3.2"
@@ -2010,6 +2032,146 @@ suite_has_shell_construction_diag() {
 # static production count and never a parse of .agents/gate.json.
 gibson_metrics_run_contract_mutations
 
+# gibson_forward_bash32_bench begin
+# Forward one captured GIBSON_BASH32_BENCH line onto ordinary run-all stdout.
+# Usage: gibson_forward_bash32_bench <suite_ec> <expected_paths_sha256> <docker_usable>
+# Captured suite stdout/stderr is read from stdin. Bash 3.2 + set -u safe.
+# Stdout: the one validated receipt, or empty. Never assertion chatter.
+# Exit 0: forwarded, or not required (docker unused at the production preamble).
+# Exit 1: fail closed; no green receipt.
+#
+# Safe arithmetic digit bound: 18 decimal digits. 10^18-1 fits in signed
+# 64-bit, so $((candidate - baseline)) and the later -le 5000 test cannot
+# overflow once this bound holds. Baseline and candidate must be canonical
+# non-negative decimals (0, or [1-9][0-9]* with no leading zeros) of at
+# most 18 digits. Reported delta must be a canonical signed decimal of at
+# most 18 magnitude digits (optional leading '-', never -0, never leading
+# zeros). Recompute exact candidate-baseline only after those bounds hold.
+# Emit the sole receipt only when the reported delta string equals that
+# recomputed value exactly and the recomputed value is <= 5000. Overflow,
+# inconsistent delta, alternate encodings, or arithmetic errors emit no
+# receipt and return 1.
+gibson_forward_bash32_bench() {
+  local _fwd_ec _fwd_digest _fwd_usable _fwd_n _fwd_match _fwd_line
+  local _fwd_parsed _fwd_baseline _fwd_candidate _fwd_delta _fwd_hash
+  local _fwd_recomputed _fwd_mag _fwd_max_digits
+  _fwd_ec=${1-}
+  _fwd_digest=${2-}
+  _fwd_usable=${3-}
+  _fwd_max_digits=18
+
+  if [ "$_fwd_usable" = "0" ]; then
+    while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+      :
+    done
+    return 0
+  fi
+  if [ "$_fwd_usable" != "1" ]; then
+    while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+      :
+    done
+    return 1
+  fi
+
+  case "$_fwd_ec" in
+    0) ;;
+    *)
+      while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+        :
+      done
+      return 1
+      ;;
+  esac
+
+  _fwd_n=0
+  _fwd_match=""
+  while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+    case "$_fwd_line" in
+      GIBSON_BASH32_BENCH*)
+        _fwd_n=$((_fwd_n + 1))
+        _fwd_match=$_fwd_line
+        ;;
+    esac
+  done
+
+  if [ "$_fwd_n" -ne 1 ]; then
+    return 1
+  fi
+
+  _fwd_parsed=$(printf '%s\n' "$_fwd_match" | awk '
+    NF != 8 { exit 1 }
+    $1 != "GIBSON_BASH32_BENCH" { exit 1 }
+    $2 != "schema=gibson.bash32-bench/v1" { exit 1 }
+    $3 != "samples=3" { exit 1 }
+    $8 != "status=pass" { exit 1 }
+    {
+      n = split($4, b, "=")
+      if (n != 2 || b[1] != "baseline_median_ms") exit 1
+      n = split($5, c, "=")
+      if (n != 2 || c[1] != "candidate_median_ms") exit 1
+      n = split($6, d, "=")
+      if (n != 2 || d[1] != "delta_ms") exit 1
+      n = split($7, h, "=")
+      if (n != 2 || h[1] != "paths_sha256") exit 1
+      print b[2], c[2], d[2], h[2]
+      exit 0
+    }
+  ') || return 1
+
+  _fwd_baseline=$(printf '%s\n' "$_fwd_parsed" | awk '{print $1}')
+  _fwd_candidate=$(printf '%s\n' "$_fwd_parsed" | awk '{print $2}')
+  _fwd_delta=$(printf '%s\n' "$_fwd_parsed" | awk '{print $3}')
+  _fwd_hash=$(printf '%s\n' "$_fwd_parsed" | awk '{print $4}')
+
+  case "$_fwd_baseline" in
+    0) ;;
+    ''|*[!0-9]*) return 1 ;;
+    0*) return 1 ;;
+  esac
+  if [ "${#_fwd_baseline}" -gt "$_fwd_max_digits" ]; then
+    return 1
+  fi
+  case "$_fwd_candidate" in
+    0) ;;
+    ''|*[!0-9]*) return 1 ;;
+    0*) return 1 ;;
+  esac
+  if [ "${#_fwd_candidate}" -gt "$_fwd_max_digits" ]; then
+    return 1
+  fi
+  _fwd_mag=$_fwd_delta
+  case "$_fwd_delta" in
+    0) ;;
+    -*)
+      _fwd_mag=${_fwd_delta#-}
+      case "$_fwd_mag" in
+        ''|*[!0-9]*|0*) return 1 ;;
+      esac
+      ;;
+    ''|*[!0-9]*) return 1 ;;
+    0*) return 1 ;;
+  esac
+  if [ "${#_fwd_mag}" -gt "$_fwd_max_digits" ]; then
+    return 1
+  fi
+  if ! printf '%s' "$_fwd_hash" | grep -Eq '^[0-9a-f]{64}$'; then
+    return 1
+  fi
+  if [ "$_fwd_hash" != "$_fwd_digest" ]; then
+    return 1
+  fi
+  _fwd_recomputed=$((_fwd_candidate - _fwd_baseline)) || return 1
+  if [ "$_fwd_delta" != "$_fwd_recomputed" ]; then
+    return 1
+  fi
+  if ! [ "$_fwd_recomputed" -le 5000 ]; then
+    return 1
+  fi
+  printf '%s\n' "$_fwd_match"
+  return 0
+}
+# gibson_forward_bash32_bench end
+
 # Suites run as background processes (at most $JOBS at once), each capturing
 # stdout+stderr, exit code, and elapsed seconds into a scratch directory.
 # Reporting below consumes those captures in discovery order, so the printed
@@ -2142,7 +2304,21 @@ for suite in $SELECTED_SUITES; do
       head -20 | sed 's/^/         /'
   fi
 
-  if [[ -n "$shell_diag" ]]; then
+  # gibson_suite_loop_diag begin
+  # Require/forward the bash32 bench receipt only when the focused suite is
+  # nominally clean (exit 0, no shell-construction diagnostic). Nonzero exit
+  # and shell_diag keep their existing timeout/tally/quarantine/ordinary
+  # branches and must never print a benchmark receipt.
+  bash32_bench_ok=1
+  bash32_bench_line=""
+  if [[ "$name" == "bash32-syntax-each.test.sh" && "$ec" -eq 0 && -z "$shell_diag" ]]; then
+    bash32_bench_line=$(printf '%s\n' "$out" | gibson_forward_bash32_bench "$ec" "$BASH32_PATHS_SHA256" "$BASH32_DOCKER_USABLE") || bash32_bench_ok=0
+  fi
+
+  if [[ "$bash32_bench_ok" -eq 0 ]]; then
+    echo "${RED}  FAIL${OFF} — $name: bash 3.2 benchmark receipt missing or invalid (exit $ec, ${suite_elapsed}s)"
+    FAILED="$FAILED $name"
+  elif [[ -n "$shell_diag" ]]; then
     echo "${RED}  FAIL${OFF} — $name: shell construction diagnostic with tally '$tally' (exit $ec, ${suite_elapsed}s)"
     echo "$shell_diag" | head -6 | sed 's/^/         /'
     FAILED="$FAILED $name"
@@ -2152,6 +2328,9 @@ for suite in $SELECTED_SUITES; do
       ESCAPED="$ESCAPED $name"
     else
       echo "${GRN}  ok${OFF}   — $name: $tally (${suite_elapsed}s)"
+      if [[ -n "$bash32_bench_line" ]]; then
+        printf '%s\n' "$bash32_bench_line"
+      fi
     fi
   elif is_quarantined "$name"; then
     echo "${YEL}  KNOWN${OFF}— $name: $tally (quarantined, #$(quarantine_issue "$name"), ${suite_elapsed}s)"
@@ -2160,6 +2339,7 @@ for suite in $SELECTED_SUITES; do
     echo "${RED}  FAIL${OFF} — $name: $tally (exit $ec, ${suite_elapsed}s)"
     FAILED="$FAILED $name"
   fi
+  # gibson_suite_loop_diag end
 done
 
 # --- wall-time budget -------------------------------------------------------

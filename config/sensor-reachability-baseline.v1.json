@@ -1,0 +1,30 @@
+{
+  "schema": "gibson.sensor-reachability-baseline.v1",
+  "$comment": "Ratchet: orphanMax may only fall. A new top-level scripts/*.sh or *.mjs with no caller in scripts/tests/run-all.sh, .github/workflows/*.yml, ci/*.yml, scripts/loop.sh, scripts/loop-fleet.sh, or a fenced bash/sh block in playbooks/*.md is an ORPHAN and fails when count exceeds orphanMax. --update-baseline refuses to raise.",
+  "orphanMax": 23,
+  "orphans": [
+    "architecture-fitness.sh",
+    "claim-provenance.mjs",
+    "claim-provenance.test.mjs",
+    "claim-reaper.sh",
+    "contract-authority.mjs",
+    "contract-met.mjs",
+    "contract-read-check.mjs",
+    "decision-ledger.sh",
+    "decompose-graph.mjs",
+    "devin-supervisor.sh",
+    "digest.sh",
+    "formal-review.sh",
+    "gibson-template-drift.sh",
+    "key-age-check.sh",
+    "policy-manifest.mjs",
+    "pr-claims.sh",
+    "recipe-stamp.sh",
+    "scope-overlap.mjs",
+    "sensor-health-lib.mjs",
+    "sensor-health.test.mjs",
+    "setup-hooks.sh",
+    "truthful-status.mjs",
+    "upstream-sync.sh"
+  ]
+}
