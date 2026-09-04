@@ -704,6 +704,19 @@ run_lint "$R4" --offline
 printf '%s\n' "$out" | grep -qE "$B1 .*(missing|lacks|no) .*Status|$B1.*Status" && ok "r4-1: Status/Tags inside a mid-line HTML comment do not satisfy the entry" || bad "r4-1: mid-line comment satisfied the entry: $out"
 printf '%s\n' "$out" | grep -q "$B2 is not fixed but scripts/tests/t.test.sh pins it" && ok "r4-2: a trailing '# pins' comment on a code line is an explicit marker" || bad "r4-2: trailing marker not recognised: $out"
 
+
+echo "# Codex #316 round 5: quoted ID before a real trailing marker; title with the ID mid-string; two openers on one line"
+R5="$ROOT/r5"; rm -rf "$R5"; mkdir -p "$R5/scripts/tests" "$R5/memory"
+C1=$(lid 1); C2=$(lid 2); C3=$(lid 3)
+{ printf '## %s · 2026-09-04 · quoted-then-marker\n**What happened:** x\n**Status:** fix-pending (issue #1)\n**Tags:** #x\n\n' "$C1"
+  printf '## %s · 2026-09-04 · title-mid-id\n**What happened:** x\n**Status:** fix-pending (issue #1)\n**Tags:** #x\n\n' "$C2"
+  printf '## %s · 2026-09-04 · two-openers\n<!-- closed --> prose <!--\n**Status:** fixed\n**Tags:** #x\n-->\n' "$C3"; } > "$R5/memory/LESSONS.md"
+printf '%s\n' '#!/bin/bash' "grep -q '$C1' \"\$out\" # pins $C1" "ok \"claim cleanup regression $C2\"" > "$R5/scripts/tests/t.test.sh"
+run_lint "$R5" --offline
+printf '%s\n' "$out" | grep -q "$C1 is not fixed but scripts/tests/t.test.sh pins it" && ok "r5-1: a quoted ID earlier on the line does not veto a real trailing '# pins' marker" || bad "r5-1: trailing marker vetoed: $out"
+printf '%s\n' "$out" | grep -q "$C2 is not fixed but scripts/tests/t.test.sh pins it" && ok "r5-2: ok \"… regression L-NNN\" (ID mid-title) is a test name" || bad "r5-2: mid-title ID not recognised: $out"
+printf '%s\n' "$out" | grep -qE "$C3.*(Status|Tags)" && ok "r5-3: <!-- closed --> prose <!-- … --> still hides the commented fields" || bad "r5-3: second opener ignored: $out"
+
 echo
 
 echo "# Codex #316 round 3: quoted markers, zero-path claims, HTML comments"
