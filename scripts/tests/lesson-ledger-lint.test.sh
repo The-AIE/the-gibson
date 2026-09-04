@@ -717,6 +717,18 @@ printf '%s\n' "$out" | grep -q "$C1 is not fixed but scripts/tests/t.test.sh pin
 printf '%s\n' "$out" | grep -q "$C2 is not fixed but scripts/tests/t.test.sh pins it" && ok "r5-2: ok \"… regression L-NNN\" (ID mid-title) is a test name" || bad "r5-2: mid-title ID not recognised: $out"
 printf '%s\n' "$out" | grep -qE "$C3.*(Status|Tags)" && ok "r5-3: <!-- closed --> prose <!-- … --> still hides the commented fields" || bad "r5-3: second opener ignored: $out"
 
+
+echo "# Codex #316 round 6: title isolation — grep in a title, fixture lines carrying title-like text, assertion strings"
+R6="$ROOT/r6"; rm -rf "$R6"; mkdir -p "$R6/scripts/tests" "$R6/memory"
+D1=$(lid 1); D2=$(lid 2); D3=$(lid 3); D4=$(lid 4)
+{ for n in 1 2 3 4; do printf '## %s · 2026-09-04 · t%s\n**What happened:** x\n**Status:** fix-pending (issue #1)\n**Tags:** #x\n\n' "$(lid $n)" "$n"; done; } > "$R6/memory/LESSONS.md"
+printf '%s\n' '#!/bin/bash' "ok \"$D1 verifies grep handling\"" "printf '%s\\n' '@test \"$D2 works\"' > fixture" "test('unrelated', () => { expect(out).toBe('$D3'); })" "@test \"regression $D4\"" > "$R6/scripts/tests/t.test.sh"
+run_lint "$R6" --offline
+printf '%s\n' "$out" | grep -q "$D1 is not fixed but scripts/tests/t.test.sh pins it" && ok "r6-1: a title containing the word grep still pins" || bad "r6-1: grep veto: $out"
+printf '%s\n' "$out" | grep -q "$D2 is not fixed" && bad "r6-2a: fixture line carrying '@test \"L-NNN\"' text counted as a pin: $out" || ok "r6-2a: a printf fixture line is not a title"
+printf '%s\n' "$out" | grep -q "$D3 is not fixed" && bad "r6-2b: ID only in an assertion string counted as a pin: $out" || ok "r6-2b: an assertion string is not the title"
+printf '%s\n' "$out" | grep -q "$D4 is not fixed but scripts/tests/t.test.sh pins it" && ok "r6-2c: @test \"regression L-NNN\" (ID mid-title) pins" || bad "r6-2c: mid-title @test missed: $out"
+
 echo
 
 echo "# Codex #316 round 3: quoted markers, zero-path claims, HTML comments"
