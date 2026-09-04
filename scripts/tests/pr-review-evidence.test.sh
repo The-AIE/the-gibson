@@ -24,11 +24,13 @@ PREV=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 GROK='aie-agent-lanes-grok[bot]'; MINI='aie-agent-lanes-mini[bot]'; DEVIN='devin-ai-integration[bot]'; CR='coderabbitai[bot]'; OWNER=mrhinkle
 
 # ---- fixture builders --------------------------------------------------------
-fx_new() { d="$ROOT/$1"; mkdir -p "$d"; printf '{"number":1,"head":{"sha":"%s"},"user":{"login":"%s"}}' "$HEAD" "$OWNER" > "$d/pull.json"; echo '[]' > "$d/reviews.json"; echo '[]' > "$d/comments.json"; echo '[]' > "$d/commits.json"; echo "$d"; }
-# commits: each arg is "authorLogin" or "authorLogin|committerLogin" ("-" = null login, "web-flow" allowed)
-fx_commits() { d=$1; shift; { printf '['; sep=""; i=0; for spec in "$@"; do a=${spec%%|*}; c=${spec#*|}; [ "$c" = "$spec" ] && c=$a; i=$((i+1))
+fx_pull() { printf '{"number":1,"commits":%s,"head":{"sha":"%s"},"user":{"login":"%s"}}' "$2" "$HEAD" "$OWNER" > "$1/pull.json"; }
+fx_new() { d="$ROOT/$1"; mkdir -p "$d"; fx_pull "$d" 0; echo '[]' > "$d/reviews.json"; echo '[]' > "$d/comments.json"; echo '[]' > "$d/commits.json"; echo "$d"; }
+# commits: each arg "authorLogin[|committerLogin[|verified]]" ("-" = null login; "web-flow" allowed;
+# verified defaults to true = GitHub-signed, the only case a login is trusted without attestation)
+fx_commits() { d=$1; shift; { printf '['; sep=""; i=0; for spec in "$@"; do IFS='|' read -r a c v <<< "$spec"; [ -z "$c" ] && c=$a; [ -z "$v" ] && v=true; i=$((i+1))
   al='null'; [ "$a" != "-" ] && al="{\"login\":\"$a\"}"; cl='null'; [ "$c" != "-" ] && cl="{\"login\":\"$c\"}"
-  printf '%s{"sha":"c%039d","author":%s,"committer":%s,"commit":{"author":{"email":"x@example.invalid"},"committer":{"email":"x@example.invalid"}}}' "$sep" "$i" "$al" "$cl"; sep=","; done; printf ']'; } > "$d/commits.json"; }
+  printf '%s{"sha":"c%039d","author":%s,"committer":%s,"commit":{"verification":{"verified":%s,"reason":"fixture"},"author":{"email":"x@example.invalid"},"committer":{"email":"x@example.invalid"}}}' "$sep" "$i" "$al" "$cl" "$v"; sep=","; done; printf ']'; } > "$d/commits.json"; fx_pull "$d" "$#"; }
 # reviews: each arg "login|type|STATE|commit|id|ts"
 fx_reviews() { d=$1; shift; { printf '['; sep=""; for spec in "$@"; do IFS='|' read -r l t s c id ts <<< "$spec"
   printf '%s{"id":%s,"user":{"login":"%s","type":"%s"},"state":"%s","commit_id":"%s","submitted_at":"%s","performed_via_github_app":null}' "$sep" "$id" "$l" "$t" "$s" "$c" "$ts"; sep=","; done; printf ']'; } > "$d/reviews.json"; }
@@ -107,6 +109,26 @@ d=$(fx_new u); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HE
 expect "(u) PR head moved since the event" "$d" head-moved failure 1
 d=$(fx_new v); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" human)"
 expect "(v) owner attests 'human' (wrote it himself) + devin APPROVE" "$d" pass success 0
+
+echo "# Codex review of #315 — the five false-success paths, each closed"
+d=$(fx_new w1); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(w1) UNVERIFIED grok-login commit, no attestation (email is forgeable)" "$d" identity-unresolved failure 1
+d=$(fx_new w2); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" grok)"
+expect "(w2) unverified grok commit + owner attests grok + devin APPROVE" "$d" pass success 0
+d=$(fx_new w3); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" devin)"
+expect "(w3) forged grok login on a devin commit: attestation names devin → same-vendor" "$d" same-vendor-reviewer failure 1
+d=$(fx_new w4); fx_commits "$d" "$DEVIN|web-flow|false"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(w4) forged web-flow committer (unverified) is not ignored" "$d" identity-unresolved failure 1
+d=$(fx_new w5); fx_commits "$d" "$DEVIN|web-flow|true"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(w5) GitHub-signed web-flow committer is ignored" "$d" pass success 0
+d=$(fx_new w6); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open"},{"number":2,"state":"open"}]' > "$d/pulls-for-head.json"
+expect "(w6) head shared by two open PRs" "$d" ambiguous-head failure 1
+d=$(fx_new w7); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":2,"state":"open"},{"number":1,"state":"closed"}]' > "$d/pulls-for-head.json"
+expect "(w7) head belongs to a different open PR" "$d" ambiguous-head failure 1
+d=$(fx_new w8); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_pull "$d" 3
+expect "(w8) PR declares more commits than the API returned (250 cap)" "$d" api-error failure 1
+d=$(fx_new w9); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|9|2026-09-04T10:00:00Z"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|99999|2026-09-04T10:00:00Z|$(receipt "$HEAD" pass)"
+expect "(w9) same-second pass comment vs CHANGES_REQUESTED review: fail dominates" "$d" changes-requested failure 1
 
 echo "# AC3 — config and API faults never yield success"
 d=$(fx_new f1); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"

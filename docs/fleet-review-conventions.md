@@ -63,9 +63,13 @@ gh api -X PATCH repos/The-AIE/the-gibson/branches/main/protection/required_statu
 Every author and committer must resolve through the table; the reviewing identity's
 vendor must differ from every author vendor; `unknown` is never eligible.
 
-**The honest limit — owner-identity commits.** Claude, Codex, and Grok CLI lanes often
-commit under the owner's identity. A machine cannot attribute those to a vendor, so
-they are `identity-unresolved` (failure) unless the owner attests at the exact head:
+**The honest limit — unverified commits.** GitHub resolves a commit's login from the raw
+git email, which any pusher can set, so a login is trusted only when GitHub itself
+signed the commit (`commit.verification.verified`: API-created and web-UI commits,
+e.g. Devin's). Every CLI-made commit — the owner's, and the lane bots' via
+`bot-commit.sh` — is unsigned and therefore `identity-unresolved` (failure) unless the
+owner attests the vendor at the exact head. The coordinator posts this when it commits a
+lane; a GitHub-signed commit path for lane bots would retire it:
 
 ```
 <!-- owner-review-attestation:v1
@@ -80,7 +84,14 @@ the owner's word. The durable fix is per-lane bot identities (#67).
 **Reason tokens** (the status description, ≤140 chars): `pass` → success;
 `no-receipt-at-head`, `stale-head-only` → pending (blocks merge, no red);
 `same-vendor-reviewer`, `identity-unresolved`, `changes-requested`, `head-moved`,
-`config-error:<detail>`, `api-error:<detail>` → failure.
+`ambiguous-head` (the head is the head of more than one open PR: a commit status is
+keyed by SHA, so no verdict is published rather than one PR overwriting another's),
+`config-error:<detail>`, `api-error:<detail>` (including `commits-truncated`: the PR
+commits endpoint caps at 250 silently, so the count must match the PR's own) → failure.
+
+When activating, bind the required context to the GitHub Actions app so another
+write-capable integration cannot set it: pass `checks: [{context: "review-evidence",
+app_id: 15368}]` in the branch-protection payload instead of a bare context string.
 
 **Publish sequence.** Resolve head via API → POST `pending` first → evaluate → publish
 in an `if: always()` step. A crash or timeout publishes `failure`; a cancellation

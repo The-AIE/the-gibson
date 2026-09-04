@@ -23,30 +23,22 @@ permissions: {}
 
 concurrency:
   # Each run re-evaluates the FULL current PR state, so a superseded run's
-  # result is subsumed by the next one on the same PR; cancelling loses nothing.
+  # result is subsumed by the next one on the same PR; cancelling loses nothing
+  # — PROVIDED the replacement run actually evaluates. Codex review of #315
+  # (finding 2): a run whose job is skipped by an `if:` still cancels the
+  # in-flight run in its group, and then publishes nothing, leaving a prior
+  # `success` standing. So there is deliberately NO event narrowing below:
+  # every review submission and every PR comment re-evaluates (cheap: one
+  # status POST + a few API reads). The only guard is "this comment is on a
+  # pull request", and a plain issue never shares a number with a PR, so that
+  # skipped run can cancel nothing.
   group: pr-review-evidence-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   review-evidence:
     name: Evaluate review evidence (trusted base)
-    # Narrowed to events that can change the verdict:
-    # - pull_request_target: unconditional (a body edit can add/remove an
-    #   attestation-relevant reference; a synchronize moves the head).
-    # - pull_request_review: only a Bot-type reviewer can ever be evidence.
-    # - issue_comment: only on PRs; `created` is marker-gated, `edited` and
-    #   `deleted` are unconditional because a receipt can be retracted or
-    #   corrupted by editing/deleting it, which must re-evaluate.
-    if: >-
-      (github.event_name == 'pull_request_target') ||
-      (github.event_name == 'pull_request_review' &&
-       github.event.review.user.type == 'Bot') ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       (github.event.action == 'deleted' ||
-        github.event.action == 'edited' ||
-        contains(github.event.comment.body, 'review-evidence:v1') ||
-        contains(github.event.comment.body, 'owner-review-attestation:v1')))
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
