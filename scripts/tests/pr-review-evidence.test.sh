@@ -4,6 +4,7 @@
 # boolean cannot prove the diagnostic). Fixtures load through the SAME code
 # path as production (--fixture swaps only the transport), and the shipped
 # config/review-evidence.v1.json is used unless a case is about config faults.
+# The workflow's shell steps are extracted and EXECUTED with gh stubbed.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -18,6 +19,7 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 command -v node >/dev/null || { echo "pr-review-evidence.test.sh: node required"; exit 1; }
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-revev.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
+mkdir -p "$ROOT/bin"
 
 HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 PREV=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -34,10 +36,11 @@ fx_commits() { d=$1; shift; { printf '['; sep=""; i=0; for spec in "$@"; do IFS=
 # reviews: each arg "login|type|STATE|commit|id|ts"
 fx_reviews() { d=$1; shift; { printf '['; sep=""; for spec in "$@"; do IFS='|' read -r l t s c id ts <<< "$spec"
   printf '%s{"id":%s,"user":{"login":"%s","type":"%s"},"state":"%s","commit_id":"%s","submitted_at":"%s","performed_via_github_app":null}' "$sep" "$id" "$l" "$t" "$s" "$c" "$ts"; sep=","; done; printf ']'; } > "$d/reviews.json"; }
-# comments: each arg "login|assoc|appSlug|appId|id|ts|body"  (appSlug "-" = performed_via_github_app null)
-fx_comments() { d=$1; shift; { printf '['; sep=""; for spec in "$@"; do IFS='|' read -r l assoc slug appid id ts body <<< "$spec"
-  app='null'; [ "$slug" != "-" ] && app="{\"slug\":\"$slug\",\"id\":$appid}"
-  printf '%s{"id":%s,"user":{"login":"%s","type":"Bot"},"author_association":"%s","performed_via_github_app":%s,"created_at":"%s","body":"%s"}' "$sep" "$id" "$l" "$assoc" "$app" "$ts" "$body"; sep=","; done; printf ']'; } > "$d/comments.json"; }
+# comments: each arg "login|assoc|appSlug|appId|id|ts|body[|editor]"  (appSlug "-" = performed_via_github_app null; editor = login of last editor)
+fx_comments() { d=$1; shift; { printf '['; sep=""; for spec in "$@"; do IFS='|' read -r l assoc slug appid id ts body editor <<< "$spec"
+  app='null'; [ "$slug" != "-" ] && app="{\"slug\":\"$slug\",\"id\":$appid}"; ed=''; [ -n "${editor:-}" ] && ed=",\"editor\":\"$editor\""
+  printf '%s{"id":%s,"user":{"login":"%s","type":"Bot"},"author_association":"%s","performed_via_github_app":%s,"created_at":"%s","body":"%s"%s}' "$sep" "$id" "$l" "$assoc" "$app" "$ts" "$body" "$ed"; sep=","; done; printf ']'; } > "$d/comments.json"; }
+fx_timeline() { printf '[{"event":"base_ref_changed","created_at":"%s"}]' "$2" > "$1/timeline.json"; }
 receipt() { printf '<!-- review-evidence:v1\\nhead-sha: %s\\nresult: %s\\n-->' "$1" "$2"; }
 attest()  { printf '<!-- owner-review-attestation:v1\\nhead-sha: %s\\nauthor-vendor: %s\\n-->' "$1" "$2"; }
 
@@ -51,6 +54,7 @@ echo "# CLI contract (CONVENTIONS 2.1)"
 node "$EVAL" --definitely-not-a-flag >/dev/null 2>&1; [ $? -eq 2 ] && ok "unknown flag exits 2" || bad "unknown flag did not exit 2"
 node "$EVAL" --repo x/y --pr 1 >/dev/null 2>&1; [ $? -eq 2 ] && ok "missing --expected-head exits 2" || bad "missing required flag did not exit 2"
 node "$EVAL" --repo >/dev/null 2>&1; [ $? -eq 2 ] && ok "flag without value exits 2" || bad "flag without value did not exit 2"
+node "$EVAL" --repo x/y --sweep --pr 1 >/dev/null 2>&1; [ $? -eq 2 ] && ok "--sweep rejects --pr" || bad "--sweep with --pr did not exit 2"
 
 echo "# AC2 — evaluator scenarios against the SHIPPED config"
 d=$(fx_new a); fx_commits "$d" "$GROK"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
@@ -85,8 +89,8 @@ d=$(fx_new l); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HE
 expect "(l) fail receipt beside another identity's APPROVE" "$d" changes-requested failure 1
 d=$(fx_new m); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|7|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)"
 expect "(m) app receipt pass, no formal review" "$d" pass success 0
-d=$(fx_new n1); fx_commits "$d" "$GROK"; fx_reviews "$d" "$OWNER|User|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(n1) human APPROVE only" "$d" no-receipt-at-head pending 0
+d=$(fx_new n1); fx_commits "$d" "$GROK"; fx_reviews "$d" "some-human|User|APPROVED|$HEAD|1|2026-09-04T10:00:00Z" "$DEVIN|User|APPROVED|$HEAD|2|2026-09-04T10:00:00Z"
+expect "(n1) human APPROVE, and a listed login with user.type User" "$d" no-receipt-at-head pending 0
 d=$(fx_new n2); fx_commits "$d" "$GROK"; fx_reviews "$d" "some-other-app[bot]|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(n2) unlisted App APPROVE only" "$d" no-receipt-at-head pending 0
 d=$(fx_new n3); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|NONE|-|0|7|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)"
@@ -102,15 +106,15 @@ expect "(q) vendor-unknown author" "$d" identity-unresolved failure 1
 d=$(fx_new r); fx_commits "$d" "stranger"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(r) unlisted author login" "$d" identity-unresolved failure 1
 d=$(fx_new s); fx_commits "$d" "$GROK|web-flow"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(s) web-flow committer is ignored" "$d" pass success 0
+expect "(s) GitHub-signed web-flow committer is ignored" "$d" pass success 0
 d=$(fx_new t); fx_commits "$d" "$GROK|-"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(t) committer with no resolvable login" "$d" identity-unresolved failure 1
-d=$(fx_new u); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '{"number":1,"head":{"sha":"%s"},"user":{"login":"x"}}' "$PREV" > "$d/pull.json"
+d=$(fx_new u); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '{"number":1,"commits":1,"head":{"sha":"%s"},"user":{"login":"x"}}' "$PREV" > "$d/pull.json"
 expect "(u) PR head moved since the event" "$d" head-moved failure 1
 d=$(fx_new v); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" human)"
 expect "(v) owner attests 'human' (wrote it himself) + devin APPROVE" "$d" pass success 0
 
-echo "# Codex review of #315 — the five false-success paths, each closed"
+echo "# Codex round 1 — five false-success paths, each closed"
 d=$(fx_new w1); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(w1) UNVERIFIED grok-login commit, no attestation (email is forgeable)" "$d" identity-unresolved failure 1
 d=$(fx_new w2); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" grok)"
@@ -119,12 +123,14 @@ d=$(fx_new w3); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN|Bot
 expect "(w3) forged grok login on a devin commit: attestation names devin → same-vendor" "$d" same-vendor-reviewer failure 1
 d=$(fx_new w4); fx_commits "$d" "$DEVIN|web-flow|false"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(w4) forged web-flow committer (unverified) is not ignored" "$d" identity-unresolved failure 1
-d=$(fx_new w5); fx_commits "$d" "$DEVIN|web-flow|true"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(w5) GitHub-signed web-flow committer is ignored" "$d" pass success 0
 d=$(fx_new w6); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open","head":{"sha":"%s"}},{"number":2,"state":"open","head":{"sha":"%s"}}]' "$HEAD" "$HEAD" > "$d/pulls-for-head.json"
 expect "(w6) head shared by two open PRs" "$d" ambiguous-head failure 1
 d=$(fx_new w7); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":2,"state":"open","head":{"sha":"%s"}},{"number":1,"state":"closed","head":{"sha":"%s"}}]' "$HEAD" "$HEAD" > "$d/pulls-for-head.json"
 expect "(w7) head belongs to a different open PR" "$d" ambiguous-head failure 1
+d=$(fx_new w8); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_pull "$d" 3
+expect "(w8) PR declares more commits than the API returned (250 cap)" "$d" api-error failure 1
+d=$(fx_new w9); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|9|2026-09-04T10:00:00Z"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|99999|2026-09-04T10:00:00Z|$(receipt "$HEAD" pass)"
+expect "(w9) same-second pass comment vs CHANGES_REQUESTED review: fail dominates" "$d" changes-requested failure 1
 
 echo "# Codex round 2 — four more paths, each closed"
 d=$(fx_new x1); fx_commits "$d" "$GROK|$GROK|false" "$DEVIN|$DEVIN|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" grok)"
@@ -137,10 +143,20 @@ d=$(fx_new x4); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$H
 expect "(x4) a stacked PR merely CONTAINING this head is not a sibling" "$d" pass success 0
 d=$(fx_new x5); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open","head":{"sha":"%s"}},{"number":2,"state":"closed","head":{"sha":"%s"}}]' "$HEAD" "$HEAD" > "$d/pulls-for-head.json"
 expect "(x5) sibling with the same head has closed → unambiguous again" "$d" pass success 0
-d=$(fx_new w8); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_pull "$d" 3
-expect "(w8) PR declares more commits than the API returned (250 cap)" "$d" api-error failure 1
-d=$(fx_new w9); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|9|2026-09-04T10:00:00Z"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|99999|2026-09-04T10:00:00Z|$(receipt "$HEAD" pass)"
-expect "(w9) same-second pass comment vs CHANGES_REQUESTED review: fail dominates" "$d" changes-requested failure 1
+
+echo "# Codex round 4 — comment mutation, dismissal resurrection, base retarget"
+d=$(fx_new y1); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" claude)|$GROK"
+expect "(y1) owner attestation EDITED by another writer is ignored" "$d" identity-unresolved failure 1
+d=$(fx_new y2); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" claude)|$OWNER"
+expect "(y2) owner attestation edited by the owner still counts" "$d" pass success 0
+d=$(fx_new y3); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|7|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)|$OWNER"
+expect "(y3) app receipt edited by a human is ignored" "$d" no-receipt-at-head pending 0
+d=$(fx_new y4); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|2|2026-09-04T11:00:00Z" "$DEVIN|Bot|DISMISSED|$HEAD|3|2026-09-04T12:00:00Z"
+expect "(y4) APPROVE, CHANGES_REQUESTED, then a dismissal: nothing resurrects the approve" "$d" no-receipt-at-head pending 0
+d=$(fx_new y5); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_timeline "$d" "2026-09-04T11:00:00Z"
+expect "(y5) base retargeted AFTER the approve → stale-base" "$d" stale-base pending 0
+d=$(fx_new y6); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T12:00:00Z"; fx_timeline "$d" "2026-09-04T11:00:00Z"
+expect "(y6) approve AFTER the retarget → pass" "$d" pass success 0
 
 echo "# AC3 — config and API faults never yield success"
 d=$(fx_new f1); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
@@ -151,72 +167,77 @@ node -e 'const c=require(process.argv[1]);c.identities[2].vendor="unknown";proce
 node -e 'const c=require(process.argv[1]);c.identities[2].bogus=1;process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/unki.json"; expect "unknown identity key" "$d" config-error failure 1 "$ROOT/unki.json"
 node -e 'const c=require(process.argv[1]);c.identities.push({...c.identities[2]});process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/dup.json"; expect "duplicate login" "$d" config-error failure 1 "$ROOT/dup.json"
 rm -f "$d/commits.json";                           expect "missing fixture input (transport error)" "$d" api-error failure 1
-# live transport error: a gh stub that fails
-mkdir -p "$ROOT/bin"; printf '#!/bin/sh\necho "stub: boom" >&2; exit 22\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
+printf '#!/bin/sh\necho "stub: boom" >&2; exit 22\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
 OUT=$(PATH="$ROOT/bin:$PATH" node "$EVAL" --repo x/y --pr 1 --expected-head "$HEAD" 2>/dev/null); RC=$?
 printf '%s' "$OUT" | grep -q '"reason":"api-error"' && [ "$RC" -eq 1 ] && ok "gh api non-zero → api-error/failure" || bad "gh failure not api-error: rc=$RC $OUT"
 printf '#!/bin/sh\necho "<html>not json"\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
 OUT=$(PATH="$ROOT/bin:$PATH" node "$EVAL" --repo x/y --pr 1 --expected-head "$HEAD" 2>/dev/null); RC=$?
 printf '%s' "$OUT" | grep -q '"reason":"api-error"' && [ "$RC" -eq 1 ] && ok "gh api non-JSON → api-error/failure" || bad "gh non-JSON not api-error: rc=$RC $OUT"
+OUT=$(PATH="$ROOT/bin:$PATH" node "$EVAL" --repo x/y --sweep 2>/dev/null); RC=$?
+printf '%s' "$OUT" | grep -q '"reason":"api-error"' && [ "$RC" -eq 1 ] && ok "--sweep: open-PR listing failure → api-error line, exit 1" || bad "sweep listing failure: rc=$RC $OUT"
 
-echo "# AC1 — workflow publish sequence (static + executed publish step with gh stubbed)"
+echo "# AC1 — workflow: sweep design (static + executed steps with gh stubbed)"
 [ -f "$WF" ] && ok "workflow file present" || bad "workflow missing"
 grep -q '^permissions: {}' "$WF" && ok "workflow-level permissions: {}" || bad "no workflow-level permissions: {}"
 grep -q 'gibson:approved-pr-target 308' "$WF" && ok "pull_request_target waiver present" || bad "pull_request_target waiver missing"
-grep -q '^concurrency:' "$WF" && ok "concurrency declared" || bad "no concurrency block"
-pend=$(grep -n 'Invalidate prior exact-head status' "$WF" | head -1 | cut -d: -f1); evl=$(grep -n 'name: Evaluate current-head review evidence' "$WF" | cut -d: -f1); pub=$(grep -n 'name: Publish exact-head status' "$WF" | cut -d: -f1)
-[ -n "$pend" ] && [ -n "$evl" ] && [ "$pend" -lt "$evl" ] && ok "pending is posted BEFORE evaluation" || bad "pending step not before evaluate"
-[ -n "$pub" ] && [ "$evl" -lt "$pub" ] && ok "publish step after evaluate" || bad "publish step order"
-sed -n "${pub},\$p" "$WF" | grep -q 'if: always()' && ok "publish step runs on always()" || bad "publish step lacks always()"
-sed -n "${evl},${pub}p" "$WF" | grep -q 'continue-on-error: true' && sed -n "${evl},${pub}p" "$WF" | grep -q '::notice::' && ok "evaluate step: continue-on-error with visible notice (3.5)" || bad "evaluate step skip is silent"
-grep -E '^[[:space:]]*(- )?uses:' "$WF" | grep -vqE '@[0-9a-f]{40} # v' && bad "unpinned action" || ok "all actions SHA-pinned"
-grep -qE 'git (log|fetch|checkout).*(head|HEAD)' "$WF" && bad "workflow touches PR git objects" || ok "no git log / PR checkout in workflow"
-# Execute the publish step's shell with gh stubbed to capture the POSTed state.
-awk -v s="$pub" 'NR>=s && /run: \|/{f=1;next} f && /^      - name:/{exit} f{sub(/^          /,""); print}' "$WF" > "$ROOT/publish.sh"
-printf '#!/bin/sh\nfor a in "$@"; do case "$a" in state=*) echo "$a" >> "$GH_LOG";; esac; done\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
-pubrun() { : > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD TARGET_URL=http://t CANCELLED=$1 STATE=$2 REASON=$3 DESCRIPTION=$4 PATH="$ROOT/bin:$PATH" bash "$ROOT/publish.sh" >/dev/null 2>&1; cat "$ROOT/gh.log"; }
-[ "$(pubrun false success pass 'pass: devin')" = "state=success" ] && ok "publish: success → success" || bad "publish success"
-[ "$(pubrun false pending no-receipt-at-head 'x')" = "state=pending" ] && ok "publish: pending → pending" || bad "publish pending"
-[ "$(pubrun false failure same-vendor-reviewer 'x')" = "state=failure" ] && ok "publish: failure → failure" || bad "publish failure"
-[ "$(pubrun false '' '' '')" = "state=failure" ] && ok "publish: evaluator crashed (no outputs) → failure, never stale success" || bad "publish crash did not fail"
-[ "$(pubrun true success pass 'x')" = "state=pending" ] && ok "publish: cancelled → pending (supersession is not a verdict)" || bad "publish cancelled"
-# Codex round 2 finding 2: a failed head resolve must still publish (event head) — and say so if it cannot.
-out=$(: > "$ROOT/gh.log"; GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD RESOLVE_FAILED=true TARGET_URL=http://t CANCELLED=false STATE='' REASON='' DESCRIPTION='' PATH="$ROOT/bin:$PATH" bash "$ROOT/publish.sh" >/dev/null 2>&1; cat "$ROOT/gh.log")
-[ "$out" = "state=failure" ] && ok "publish: resolve failed, event head present → failure (never stale success)" || bad "publish resolve-failed: $out"
-: > "$ROOT/summary2"; GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary2" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA='' TARGET_URL=http://t CANCELLED=false STATE='' REASON='' DESCRIPTION='' PATH="$ROOT/bin:$PATH" bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary2" && ok "publish: no head at all → nonzero + loud summary line" || bad "publish with no head was silent (rc=$rc)"
-grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (sibling recovery)" || bad "closed missing from pull_request_target types"
-grep -q 'Re-evaluate open siblings' "$WF" && ok "sibling re-evaluation step present" || bad "no sibling re-evaluation step"
-# Codex round 3: serialized repo-wide, never cancelled; no jq flags through gh --jq; sibling step executes.
 grep -q 'gibson:stateful-ci' "$WF" && grep -q 'group: pr-review-evidence-serialized' "$WF" && grep -q 'cancel-in-progress: false' "$WF" && ok "runs serialized repo-wide, never cancelled (stateful-ci)" || bad "concurrency is not a single non-cancelling queue"
-grep -q 'cancel-in-progress: true' "$WF" && bad "cancel-in-progress: true present (cross-PR race / skipped-run cancel)" || ok "no cancel-in-progress: true"
-grep -qE -- '--jq[[:space:]]+--arg' "$WF" && bad "gh api --jq given jq flags (gh rejects them)" || ok "no jq flags passed through gh api --jq"
-sib=$(grep -n 'name: Re-evaluate open siblings' "$WF" | cut -d: -f1)
-awk -v s="$sib" 'NR>=s && /run: \|/{f=1;next} f && /^      - name:/{exit} f{sub(/^          /,""); print}' "$WF" > "$ROOT/sibling.sh"
-# gh stub: GET .../pulls returns two open PRs at HEAD (#1 = the closing PR, #2 = survivor) and one ancestor PR at PREV; POST captures state.
-cat > "$ROOT/bin/gh" <<GHSTUB
+grep -q 'cancel-in-progress: true' "$WF" && bad "cancel-in-progress: true present" || ok "no cancel-in-progress: true"
+grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (sibling recovers via the next sweep)" || bad "closed missing from pull_request_target types"
+grep -q -- '--sweep' "$WF" && ok "workflow runs the sweep" || bad "workflow does not run --sweep"
+pend=$(grep -n 'name: Stamp pending on every open PR head' "$WF" | cut -d: -f1); swp=$(grep -n 'name: Evaluate every open PR' "$WF" | cut -d: -f1); pub=$(grep -n 'name: Publish every head' "$WF" | cut -d: -f1)
+[ -n "$pend" ] && [ -n "$swp" ] && [ "$pend" -lt "$swp" ] && ok "pending is stamped BEFORE the sweep" || bad "pending step not before sweep"
+[ -n "$pub" ] && [ "$swp" -lt "$pub" ] && ok "publish step after sweep" || bad "publish step order"
+sed -n "${pub},$((pub+2))p" "$WF" | grep -q 'if: always()' && ok "publish step itself runs on always()" || bad "publish step lacks always()"
+for step in "$pend" "$swp"; do sed -n "${step},$((step+8))p" "$WF" | grep -q 'continue-on-error: true' || bad "step at $step not continue-on-error"; done
+sed -n "${pend},${swp}p" "$WF" | grep -q '::notice::' && sed -n "${swp},${pub}p" "$WF" | grep -q '::notice::' && ok "both continue-on-error steps announce (3.5)" || bad "a continue-on-error step is silent"
+n_uses=$(grep -cE '^[[:space:]]*(- )?uses:' "$WF"); [ "$n_uses" -ge 2 ] && ! grep -E '^[[:space:]]*(- )?uses:' "$WF" | grep -vqE '@[0-9a-f]{40} # v' && ok "all $n_uses actions SHA-pinned" || bad "unpinned action or none found"
+grep -qE 'git (log|fetch|checkout).*(head|HEAD)' "$WF" && bad "workflow touches PR git objects" || ok "no git log / PR checkout in workflow"
+grep -qE -- '--jq[[:space:]]+--arg' "$WF" && bad "gh api --jq given jq flags" || ok "no jq flags passed through gh api --jq"
+
+extract() { awk -v s="$1" 'NR>=s && /run: \|/{f=1;next} f && /^      - (name:|uses:|if:)/{exit} f{sub(/^          /,""); print}' "$WF"; }
+extract "$pend" > "$ROOT/pending.sh"; extract "$pub" > "$ROOT/publish.sh"
+WD="$ROOT/wd"; mkdir -p "$WD"
+# gh stub: list open PRs from $GH_LIST (or fail if GH_LIST_FAIL), capture POSTs as "sha state" lines.
+cat > "$ROOT/bin/gh" <<'GHSTUB'
 #!/bin/sh
-case "\$*" in
-  *"--method POST"*) for a in "\$@"; do case "\$a" in state=*) echo "\$a" >> "\$GH_LOG";; esac; done ;;
-  *"/pulls?"*) printf '[{"number":1,"state":"open","head":{"sha":"$HEAD"}},{"number":2,"state":"open","head":{"sha":"$HEAD"}},{"number":3,"state":"open","head":{"sha":"$PREV"}},{"number":4,"state":"closed","head":{"sha":"$HEAD"}}]' ;;
-  *) echo "stub: unexpected gh \$*" >&2; exit 9 ;;
+case "$*" in
+  *"--method POST"*) sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
+  *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
+  *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
 GHSTUB
 chmod +x "$ROOT/bin/gh"
-printf '#!/bin/sh\necho "eval-args: $*" >> "$GH_LOG"\nprintf %%s "{\\"state\\":\\"success\\",\\"reason\\":\\"pass\\",\\"detail\\":\\"stub\\"}"\n' > "$ROOT/bin/eval-stub"; chmod +x "$ROOT/bin/eval-stub"
-: > "$ROOT/gh.log"; : > "$ROOT/summary3"
-GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary3" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD PR_NUMBER=1 TARGET_URL=http://t REVIEW_EVIDENCE_EVAL="$ROOT/bin/eval-stub" PATH="$ROOT/bin:$PATH" bash "$ROOT/sibling.sh" >"$ROOT/sib.out" 2>&1; rc=$?
-if [ "$rc" -eq 0 ] && grep -q 'eval-args: .* --pr 2 ' "$ROOT/gh.log" && ! grep -q -- '--pr 3 ' "$ROOT/gh.log" && ! grep -q -- '--pr 4 ' "$ROOT/gh.log" && [ "$(grep -c '^state=success' "$ROOT/gh.log")" -eq 1 ] && grep -q 'sibling #2 re-evaluated: success' "$ROOT/summary3"; then ok "sibling step executes: re-evaluates only the open survivor at the same head (#2), not the ancestor (#3) or closed (#4)"; else bad "sibling step: rc=$rc log=$(cat "$ROOT/gh.log" | tr '\n' ' ') out=$(tail -3 "$ROOT/sib.out" | tr '\n' ' ')"; fi
-: > "$ROOT/gh.log"; : > "$ROOT/summary3"
-printf '#!/bin/sh\ncase "$*" in *"/pulls?"*) printf "[]";; *) exit 9;; esac\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
-GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary3" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD PR_NUMBER=1 TARGET_URL=http://t PATH="$ROOT/bin:$PATH" bash "$ROOT/sibling.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && grep -q 'no open sibling' "$ROOT/summary3" && ok "sibling step: no siblings → clean exit with summary line" || bad "sibling step with no siblings rc=$rc"
-printf '#!/bin/sh\ncase "$*" in *"/pulls?"*) echo "<html>";; *) exit 9;; esac\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
-GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary3" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD PR_NUMBER=1 TARGET_URL=http://t PATH="$ROOT/bin:$PATH" bash "$ROOT/sibling.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -ne 0 ] && ok "sibling step: non-JSON sibling list fails closed (rc=$rc)" || bad "sibling step accepted non-JSON"
-printf '#!/bin/sh\nfor a in "$@"; do case "$a" in state=*) echo "$a" >> "$GH_LOG";; esac; done\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
-rs=$(grep -n 'name: Resolve current pull-request head' "$WF" | cut -d: -f1); sed -n "${rs},${pend}p" "$WF" | grep -q 'continue-on-error: true' && sed -n "${rs},${pend}p" "$WF" | grep -q '::notice::' && ok "resolve step: continue-on-error with visible notice" || bad "resolve step failure would skip publish"
-grep -q 'may not be merged' "$ROOT/summary" && ok "non-success writes the merge-block line to the step summary" || bad "summary line missing"
+H2=cccccccccccccccccccccccccccccccccccccccc
+envrun() { ( cd "$WD" && GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" "$@" ); }
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 2 ] && grep -q "^$H2 pending" "$ROOT/gh.log" && ok "pending step: stamps pending on EVERY open head (2 of 2)" || bad "pending step: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST_FAIL=1 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q "^1 $HEAD" "$WD/heads.txt" && grep -q 'listing failed' "$ROOT/summary" && ok "pending step: listing fails → nonzero, event head recorded for fail-closed publish" || bad "pending step listing failure: rc=$rc heads=$(cat "$WD/heads.txt")"
+# publish: results present
+printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin"}\n{"number":2,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" "$H2" > "$WD/results.jsonl"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: every sweep line published; job green when the EVENT's PR is not failing" || bad "publish normal: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$ROOT/gh.log"; envrun env EVENT_PR_NUMBER=2 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: job red when the EVENT's PR failed closed" || bad "publish event-fail: rc=$rc"
+: > "$ROOT/gh.log"; envrun env EVENT_PR_NUMBER=1 CANCELLED=true bash "$ROOT/publish.sh" >/dev/null 2>&1
+[ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: cancelled → every head pending (supersession is not a verdict)" || bad "publish cancelled: $(tr '\n' ' ' < "$ROOT/gh.log")"
+# publish: sweep produced nothing
+rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep never ran → failure on EVERY stamped head, never a stale success" || bad "publish no-results: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+printf '{"number":null,"headSha":"","state":"failure","reason":"api-error","detail":"listing"}\n' > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep listing fault → failure on every stamped head" || bad "publish listing-fault: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$WD/heads.txt"; rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary" && ok "publish: nothing known at all → nonzero + loud summary line" || bad "publish nothing-known was silent (rc=$rc)"
+printf 'garbage not json\n' > "$WD/results.jsonl"; printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; : > "$ROOT/gh.log"
+envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -ge 1 ] && ok "publish: unparseable sweep output → failure, never success" || bad "publish garbage: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 if command -v actionlint >/dev/null 2>&1; then
   out=$(actionlint "$WF" 2>&1); [ $? -eq 0 ] && ok "actionlint clean" || bad "actionlint: $out"
 else

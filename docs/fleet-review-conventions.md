@@ -105,12 +105,21 @@ When activating, bind the required context to the GitHub Actions app so another
 write-capable integration cannot set it: pass `checks: [{context: "review-evidence",
 app_id: 15368}]` in the branch-protection payload instead of a bare context string.
 
-**Publish sequence.** Resolve head via API (event head as fallback) → POST `pending`
-first → evaluate → publish in an `if: always()` step. A crash or timeout publishes
-`failure`. A prior `success` never survives a re-evaluation (the conference-os #1458
-fail-open window). Runs are **serialized repo-wide and never cancelled**
-(`# gibson:stateful-ci`): the result is keyed by commit SHA but comment and review
-events carry no SHA, so per-PR groups let two PRs sharing a head race and the stale
-`success` land last. One queue means the last publish is computed from the latest
-state. On `closed`, open siblings sharing the head are re-evaluated so an
-`ambiguous-head` verdict recovers.
+**Every run is a full-state sweep.** Stamp `pending` on every open PR head first →
+evaluate every open PR at its current head (`--sweep`) → publish every head in an
+`if: always()` step. A crash or timeout publishes `failure` on every stamped head; a
+cancellation publishes `pending`. A prior `success` never survives a re-evaluation
+(the conference-os #1458 fail-open window). Runs are **serialized repo-wide and never
+cancelled** (`# gibson:stateful-ci`): the result is keyed by commit SHA but comment and
+review events carry no SHA, so per-PR groups let two PRs sharing a head race. GitHub
+may still replace a queued run with a newer one; because every run re-derives every
+head, a dropped run is harmless. A PR that closes needs no special recovery — its
+former sibling is just another open PR in the next sweep.
+
+**Evidence provenance is the creation, not the last edit.** GitHub lets any writer
+edit anyone's comment, so a receipt or attestation whose GraphQL `editor` is not its
+creator is ignored, and comments are ordered by `created_at`. A `DISMISSED` review
+takes part in newest-wins with no verdict, so dismissing a `CHANGES_REQUESTED` never
+resurrects an older `APPROVED`. Evidence created before the PR's most recent
+`base_ref_changed` timeline event is `stale-base` (pending): a retarget keeps the head
+SHA but changes the diff, so it must be reviewed again.

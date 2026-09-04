@@ -52,6 +52,7 @@ export const REASONS = Object.freeze({
   pass: "success",
   "no-receipt-at-head": "pending",
   "stale-head-only": "pending",
+  "stale-base": "pending",
   "same-vendor-reviewer": "failure",
   "identity-unresolved": "failure",
   "changes-requested": "failure",
@@ -77,17 +78,24 @@ function usage(msg) {
 }
 
 export function parseArgs(argv) {
-  const args = { repo: null, pr: null, expectedHead: null, config: "config/review-evidence.v1.json", githubOutput: null, fixture: null };
+  const args = { repo: null, pr: null, expectedHead: null, config: "config/review-evidence.v1.json", githubOutput: null, fixture: null, sweep: false };
   const map = { "--repo": "repo", "--pr": "pr", "--expected-head": "expectedHead", "--config": "config", "--github-output": "githubOutput", "--fixture": "fixture" };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === "--help" || a === "-h") { usage("help"); }
+    if (a === "--sweep") { args.sweep = true; continue; }
     if (!(a in map)) usage(`unknown flag: ${a}`);
     const v = argv[i + 1];
     if (v === undefined || v.startsWith("--")) usage(`${a} requires a value`);
     args[map[a]] = v; i += 1;
   }
-  for (const k of ["repo", "pr", "expectedHead"]) if (!args[k]) usage(`--${k === "expectedHead" ? "expected-head" : k} is required`);
+  if (!args.repo) usage("--repo is required");
+  if (args.sweep) {
+    // --sweep: evaluate EVERY open PR at its current head; one JSON line each.
+    if (args.pr || args.expectedHead || args.fixture) usage("--sweep takes no --pr/--expected-head/--fixture");
+    return args;
+  }
+  for (const k of ["pr", "expectedHead"]) if (!args[k]) usage(`--${k === "expectedHead" ? "expected-head" : k} is required`);
   if (!SHA40.test(args.expectedHead)) usage("--expected-head must be a 40-hex SHA");
   if (!/^\d+$/.test(args.pr)) usage("--pr must be a number");
   return args;
@@ -195,7 +203,7 @@ export function resolveAuthors(commits, identities, attestedVendor) {
  */
 export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
   const hits = comments
-    .filter((c) => norm(c?.user?.login) === norm(ownerLogin) && ["OWNER", "MEMBER"].includes(c?.author_association))
+    .filter((c) => norm(c?.user?.login) === norm(ownerLogin) && ["OWNER", "MEMBER"].includes(c?.author_association) && !editedByOther(c))
     .map((c) => ({ c, b: parseBlock(c?.body, "owner-review-attestation:v1", ["head-sha", "author-vendor"]) }))
     .filter((x) => x.b && x.b["head-sha"] === headSha)
     .map((x) => ({ ...x, vendors: [...new Set(x.b["author-vendor"].split(",").map((v) => norm(v)).filter(Boolean))] }))
@@ -208,18 +216,31 @@ export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
  * Collect review evidence. Returns per-identity newest evidence at head plus
  * whether any receipt exists at another head.
  */
-export function collectEvidence({ reviews, comments, identities, headSha }) {
+/** A comment edited by anyone other than its creator is not that creator's word (round 4, finding 1). */
+export function editedByOther(c) {
+  const editor = c?.editor?.login ?? c?.editor ?? null;
+  return !!editor && norm(editor) !== norm(c?.user?.login);
+}
+
+export function collectEvidence({ reviews, comments, identities, headSha, notBefore = 0 }) {
   const reviewers = identities.filter((i) => i.roles.includes("reviewer"));
   const byLogin = new Map(reviewers.map((i) => [norm(i.login), i]));
   const items = [];
   let staleReceipts = 0;
+  let staleBase = 0;
   for (const r of reviews ?? []) {
     const id = byLogin.get(norm(r?.user?.login));
     if (!id || r?.user?.type !== "Bot") continue;
     const state = norm(r?.state);
-    if (state !== "approved" && state !== "changes_requested") continue;
+    // DISMISSED takes part in newest-wins with result "none" (round 4,
+    // finding 1b): an author-dismissed CHANGES_REQUESTED must not resurrect
+    // an older APPROVE. PENDING/COMMENTED carry no verdict and are ignored.
+    if (state !== "approved" && state !== "changes_requested" && state !== "dismissed") continue;
     if (norm(r?.commit_id) !== headSha) { staleReceipts += 1; continue; }
-    items.push({ identity: id, result: state === "approved" ? "pass" : "fail", at: timestamp(r), id: Number(r?.id ?? 0), source: "review" });
+    const at = timestamp(r);
+    if (at < notBefore) { staleBase += 1; continue; }
+    const result = state === "approved" ? "pass" : state === "changes_requested" ? "fail" : "none";
+    items.push({ identity: id, result, at, id: Number(r?.id ?? 0), source: "review" });
   }
   for (const c of comments ?? []) {
     const id = byLogin.get(norm(c?.user?.login));
@@ -227,10 +248,14 @@ export function collectEvidence({ reviews, comments, identities, headSha }) {
     const app = c?.performed_via_github_app;
     if (!app || norm(app.slug) !== norm(id.appSlug)) continue;
     if (id.appId !== null && Number(app.id) !== id.appId) continue;
+    if (editedByOther(c)) continue;
     const b = parseBlock(c?.body, "review-evidence:v1", ["head-sha", "result"]);
     if (!b || !["pass", "fail"].includes(b.result)) continue;
     if (b["head-sha"] !== headSha) { staleReceipts += 1; continue; }
-    items.push({ identity: id, result: b.result, at: timestamp(c), id: Number(c?.id ?? 0), source: "comment" });
+    // Provenance is the CREATION; an edit moves updated_at, so order by created_at.
+    const at = Date.parse(c?.created_at ?? "") || timestamp(c);
+    if (at < notBefore) { staleBase += 1; continue; }
+    items.push({ identity: id, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" });
   }
   // Newest per identity. Review ids and comment ids are different resource
   // types with no cross-resource ordering, so a same-second tie between a
@@ -246,10 +271,11 @@ export function collectEvidence({ reviews, comments, identities, headSha }) {
       else if (it.result === cur.result && it.source === cur.source && it.id > cur.id) newest.set(k, it);
     }
   }
-  return { newest: [...newest.values()], staleReceipts };
+  // An identity whose newest evidence is a dismissal contributes nothing.
+  return { newest: [...newest.values()].filter((e) => e.result !== "none"), staleReceipts, staleBase };
 }
 
-export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, commits, reviews, comments, config }) {
+export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, commits, reviews, comments, timeline, config }) {
   const head = norm(headSha);
   if (head !== norm(expectedHead)) return { state: "failure", reason: "head-moved", detail: `pr head ${head.slice(0, 7)} != expected ${norm(expectedHead).slice(0, 7)}` };
   // A commit status is keyed by SHA, not by PR (Codex review of #315, finding 3):
@@ -273,13 +299,17 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   const att = ownerAttestation(comments ?? [], config.ownerLogin, head, config.attestationVendors);
   const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null);
   if (authors.unresolved.length > 0) return { state: "failure", reason: "identity-unresolved", detail: [...new Set(authors.unresolved)].join(","), authorVendors: [...authors.vendors], attestation: att };
-  const { newest, staleReceipts } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head });
+  // A base retarget keeps the head SHA but changes the diff (round 4,
+  // finding 3): evidence created before the last base_ref_changed is stale.
+  const notBefore = lastBaseChange(timeline);
+  const { newest, staleReceipts, staleBase } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head, notBefore });
   const eligible = newest.filter((e) => e.identity.vendor !== "unknown" && !authors.vendors.has(e.identity.vendor));
   const ineligible = newest.filter((e) => !eligible.includes(e));
   const base = { authorVendors: [...authors.vendors], attestation: att, evidence: newest.map((e) => `${e.identity.login}:${e.result}:${e.source}`) };
   if (eligible.some((e) => e.result === "fail")) return { state: "failure", reason: "changes-requested", detail: eligible.filter((e) => e.result === "fail").map((e) => e.identity.login).join(","), ...base };
   if (eligible.some((e) => e.result === "pass")) return { state: "success", reason: "pass", detail: eligible.filter((e) => e.result === "pass").map((e) => e.identity.login).join(","), ...base };
   if (ineligible.length > 0) return { state: "failure", reason: "same-vendor-reviewer", detail: ineligible.map((e) => `${e.identity.login}(${e.identity.vendor})`).join(","), ...base };
+  if (staleBase > 0) return { state: "pending", reason: "stale-base", detail: `${staleBase} receipt(s) predate the last base retarget; review again`, ...base };
   if (staleReceipts > 0) return { state: "pending", reason: "stale-head-only", detail: `${staleReceipts} receipt(s) at other heads`, ...base };
   return { state: "pending", reason: "no-receipt-at-head", detail: "no listed reviewer has reviewed this head", ...base };
 }
@@ -310,20 +340,51 @@ async function loadInputs(args) {
       const pull = await rd("pull.json");
       // pulls-for-head.json: open PRs whose head is this SHA (default: just this PR)
       const pullsForHead = (await rd("pulls-for-head.json", true)) ?? [{ number: pull?.number ?? Number(args.pr), state: "open", head: { sha: pull?.head?.sha } }];
-      return { pull, commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json"), pullsForHead };
+      // timeline.json: issue timeline events (base_ref_changed matters); default none.
+      const timeline = (await rd("timeline.json", true)) ?? [];
+      // comments.json entries may carry `editor` (login) — the GraphQL editor field.
+      return { pull, commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json"), pullsForHead, timeline };
     } catch (e) { throw new Error(`api-error:fixture:${e.message.slice(0, 80)}`); }
   }
   const base = `repos/${args.repo}`;
   const pull = await ghJson([`${base}/pulls/${args.pr}`]);
   const head = norm(pull?.head?.sha ?? "");
   if (!SHA40.test(head)) throw new Error("api-error:pull-head-missing");
-  const [commits, reviews, comments, pullsForHead] = await Promise.all([
+  const [commits, reviews, comments, pullsForHead, timeline] = await Promise.all([
     ghPages(`${base}/pulls/${args.pr}/commits?per_page=100`),
     ghPages(`${base}/pulls/${args.pr}/reviews?per_page=100`),
     ghPages(`${base}/issues/${args.pr}/comments?per_page=100`),
     ghPages(`${base}/commits/${head}/pulls?per_page=100`),
+    ghPages(`${base}/issues/${args.pr}/timeline?per_page=100`),
   ]);
-  return { pull, commits, reviews, comments, pullsForHead };
+  // REST does not expose who last edited a comment; GraphQL does. A receipt or
+  // attestation edited by anyone but its creator is not that creator's word
+  // (round 4, finding 1). Fail closed if this lookup fails.
+  const [owner, name] = args.repo.split("/");
+  const editors = new Map();
+  let cursor = null;
+  for (let page = 0; page < 20; page += 1) {
+    const q = `query($o:String!,$r:String!,$n:Int!,$c:String){repository(owner:$o,name:$r){pullRequest(number:$n){comments(first:100,after:$c){nodes{databaseId lastEditedAt editor{login}} pageInfo{hasNextPage endCursor}}}}}`;
+    const res = await ghJson(["graphql", "-f", `query=${q}`, "-F", `o=${owner}`, "-F", `r=${name}`, "-F", `n=${Number(args.pr)}`, ...(cursor ? ["-F", `c=${cursor}`] : [])]).catch((e) => { throw new Error(`api-error:graphql-editors:${(e.message ?? "").slice(0, 60)}`); });
+    const conn = res?.data?.repository?.pullRequest?.comments;
+    if (!conn || !Array.isArray(conn.nodes)) throw new Error("api-error:graphql-editors:malformed");
+    for (const n of conn.nodes) if (n?.lastEditedAt && n?.editor?.login) editors.set(Number(n.databaseId), n.editor.login);
+    if (!conn.pageInfo?.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+  for (const c of comments) if (editors.has(Number(c?.id))) c.editor = editors.get(Number(c.id));
+  return { pull, commits, reviews, comments, pullsForHead, timeline };
+}
+
+/** Timestamp of the PR's most recent base retarget, or 0. Receipts older than it are `stale-base`. */
+export function lastBaseChange(timeline) {
+  let t = 0;
+  for (const ev of timeline ?? []) {
+    if (norm(ev?.event) !== "base_ref_changed") continue;
+    const ts = Date.parse(ev?.created_at ?? "");
+    if (Number.isFinite(ts) && ts > t) t = ts;
+  }
+  return t;
 }
 
 function outputLines(head, r) {
@@ -331,30 +392,66 @@ function outputLines(head, r) {
   return [`head_sha=${head}`, `state=${r.state}`, `reason=${r.reason}`, `description=${desc}`];
 }
 
-export async function main(argv) {
-  const args = parseArgs(argv);
-  let result;
-  let head = norm(args.expectedHead);
+async function loadConfig(path) {
+  const text = await readFile(path, "utf8").catch((e) => { throw new Error(`config-error:unreadable:${e.code ?? e.message}`); });
+  let raw;
+  try { raw = JSON.parse(text); } catch (e) { throw new Error(`config-error:invalid-json:${e.message.slice(0, 60)}`); }
+  return validateConfig(raw);
+}
+
+function faultResult(e) {
+  const msg = e?.message ?? String(e);
+  if (msg.startsWith("config-error:") || msg.startsWith("api-error:")) {
+    const [reason, ...rest] = msg.split(":");
+    return { state: "failure", reason, detail: rest.join(":") };
+  }
+  return { state: "failure", reason: "api-error", detail: `evaluator-crashed:${msg.slice(0, 80)}` };
+}
+
+/** Evaluate one PR. Never throws; a fault is a failure result. */
+async function evaluateOne(args, config) {
+  let head = norm(args.expectedHead ?? "");
   try {
-    const text = await readFile(args.config, "utf8").catch((e) => { throw new Error(`config-error:unreadable:${e.code ?? e.message}`); });
-    let raw;
-    try { raw = JSON.parse(text); } catch (e) { throw new Error(`config-error:invalid-json:${e.message.slice(0, 60)}`); }
-    const config = validateConfig(raw);
     const inputs = await loadInputs(args);
     if (!SHA40.test(norm(inputs.pull?.head?.sha ?? ""))) throw new Error("api-error:pull-head-missing");
     head = norm(inputs.pull.head.sha);
-    result = evaluate({ headSha: head, expectedHead: args.expectedHead, prNumber: Number(args.pr), pull: inputs.pull, pullsForHead: inputs.pullsForHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, config });
+    const expectedHead = args.expectedHead ?? head;
+    const result = evaluate({ headSha: head, expectedHead, prNumber: Number(args.pr), pull: inputs.pull, pullsForHead: inputs.pullsForHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, timeline: inputs.timeline, config });
+    return { headSha: head, ...result };
   } catch (e) {
-    const msg = e?.message ?? String(e);
-    if (msg.startsWith("config-error:") || msg.startsWith("api-error:")) {
-      const [reason, ...rest] = msg.split(":");
-      result = { state: "failure", reason, detail: rest.join(":") };
-    } else if (msg === "help") { return; } else {
-      result = { state: "failure", reason: "api-error", detail: `evaluator-crashed:${msg.slice(0, 80)}` };
-    }
+    return { headSha: head, ...faultResult(e) };
   }
-  if (args.githubOutput) await appendFile(args.githubOutput, `${outputLines(head, result).join("\n")}\n`);
-  process.stdout.write(`${JSON.stringify({ headSha: head, ...result })}\n`);
+}
+
+export async function main(argv) {
+  const args = parseArgs(argv);
+  let config;
+  try { config = await loadConfig(args.config); } catch (e) {
+    const r = { headSha: norm(args.expectedHead ?? ""), ...faultResult(e) };
+    if (args.githubOutput) await appendFile(args.githubOutput, `${outputLines(r.headSha, r).join("\n")}\n`);
+    process.stdout.write(`${JSON.stringify(args.sweep ? { number: null, ...r } : r)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (args.sweep) {
+    // Full-state sweep (round 4, finding 2): every run re-evaluates EVERY open
+    // PR at its current head, so a queued run that GitHub replaces is harmless
+    // — the next run corrects every head. One JSON line per PR; exit 0 unless
+    // the PR list itself could not be read (that is a fault the caller must
+    // publish as failure on whatever head it knows).
+    let open;
+    try { open = await ghPages(`repos/${args.repo}/pulls?state=open&per_page=100`); }
+    catch (e) { process.stdout.write(`${JSON.stringify({ number: null, headSha: "", ...faultResult(e) })}\n`); process.exitCode = 1; return; }
+    for (const p of open) {
+      const n = Number(p?.number);
+      const r = await evaluateOne({ ...args, pr: String(n), expectedHead: norm(p?.head?.sha ?? "") || null }, config);
+      process.stdout.write(`${JSON.stringify({ number: n, ...r, description: `${r.reason}${r.detail ? `: ${r.detail}` : ""}`.replace(/[\r\n]+/g, " ").slice(0, 140) })}\n`);
+    }
+    return;
+  }
+  const result = await evaluateOne(args, config);
+  if (args.githubOutput) await appendFile(args.githubOutput, `${outputLines(result.headSha, result).join("\n")}\n`);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.state === "failure") process.exitCode = 1;
 }
 
