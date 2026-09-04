@@ -170,26 +170,38 @@ export function resolveAuthors(commits, identities, attestedVendor) {
       }
       const id = byLogin.get(norm(login));
       if (!id || !id.roles.includes("author")) { unresolved.push(login); continue; }
-      let vendor = id.vendor;
+      const vendor = id.vendor;
       if (vendor === "unknown") { unresolved.push(`${login}:vendor-unknown`); continue; }
       if (vendor === "owner" || !verified) {
         if (!attestedVendor) { unresolved.push(`${login}:${vendor === "owner" ? "owner" : "unverified"}-unattested`); continue; }
-        vendor = attestedVendor;
+        // Attestation is head-wide, so it UNIONS with what the login claims
+        // (Codex round 2, finding 1): an unsigned Devin commit under an
+        // attestation of `grok` makes BOTH devin and grok author vendors. The
+        // attestation can add vendors to the author set, never remove one.
+        for (const v of attestedVendor) if (v !== "human") vendors.add(v);
+        if (vendor !== "owner") vendors.add(vendor);
+        continue;
       }
-      if (vendor !== "human") vendors.add(vendor);
+      vendors.add(vendor);
     }
   }
   return { vendors, unresolved };
 }
 
-/** Owner attestation at the exact head: {vendor} or null. */
+/**
+ * Owner attestation at the exact head: { vendors: [...], id } or null.
+ * `author-vendor:` is a comma-separated list; every value must be in the
+ * allowed vocabulary or the attestation is ignored (fail closed, not partial).
+ */
 export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
   const hits = comments
     .filter((c) => norm(c?.user?.login) === norm(ownerLogin) && ["OWNER", "MEMBER"].includes(c?.author_association))
     .map((c) => ({ c, b: parseBlock(c?.body, "owner-review-attestation:v1", ["head-sha", "author-vendor"]) }))
-    .filter((x) => x.b && x.b["head-sha"] === headSha && allowed.includes(x.b["author-vendor"]))
+    .filter((x) => x.b && x.b["head-sha"] === headSha)
+    .map((x) => ({ ...x, vendors: [...new Set(x.b["author-vendor"].split(",").map((v) => norm(v)).filter(Boolean))] }))
+    .filter((x) => x.vendors.length > 0 && x.vendors.every((v) => allowed.includes(v)))
     .sort((l, r) => timestamp(r.c) - timestamp(l.c));
-  return hits[0] ? { vendor: hits[0].b["author-vendor"], id: hits[0].c.id } : null;
+  return hits[0] ? { vendors: hits[0].vendors, id: hits[0].c.id } : null;
 }
 
 /**
@@ -243,9 +255,14 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
   // A commit status is keyed by SHA, not by PR (Codex review of #315, finding 3):
   // two open PRs sharing a head would overwrite each other's verdict. Refuse
   // to publish a verdict for a head that belongs to more than one open PR.
-  const openForHead = (pullsForHead ?? []).filter((p) => norm(p?.state) === "open").map((p) => Number(p?.number));
+  // The commits/{sha}/pulls endpoint returns PRs *associated* with a commit
+  // (ancestors included), so filter to PRs whose HEAD is this SHA (round 2,
+  // finding 3): a stacked PR that merely contains this head is not a sibling.
+  const openForHead = (pullsForHead ?? [])
+    .filter((p) => norm(p?.state) === "open" && norm(p?.head?.sha) === head)
+    .map((p) => Number(p?.number));
   if (openForHead.length !== 1 || openForHead[0] !== Number(prNumber)) {
-    return { state: "failure", reason: "ambiguous-head", detail: `head belongs to open PRs [${openForHead.join(",")}], evaluating #${prNumber}` };
+    return { state: "failure", reason: "ambiguous-head", detail: `head is the head of open PRs [${openForHead.join(",")}], evaluating #${prNumber}` };
   }
   // The commits endpoint caps at 250 silently (finding 4): an omitted commit is
   // an unresolved author we never saw. Require the count to match the PR's own.
@@ -254,7 +271,7 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
     return { state: "failure", reason: "api-error", detail: `commits-truncated: pr declares ${declared}, fetched ${(commits ?? []).length}, cap ${PR_COMMITS_API_CAP}` };
   }
   const att = ownerAttestation(comments ?? [], config.ownerLogin, head, config.attestationVendors);
-  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendor ?? null);
+  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null);
   if (authors.unresolved.length > 0) return { state: "failure", reason: "identity-unresolved", detail: [...new Set(authors.unresolved)].join(","), authorVendors: [...authors.vendors], attestation: att };
   const { newest, staleReceipts } = collectEvidence({ reviews, comments, identities: config.identities, headSha: head });
   const eligible = newest.filter((e) => e.identity.vendor !== "unknown" && !authors.vendors.has(e.identity.vendor));
@@ -292,7 +309,7 @@ async function loadInputs(args) {
     try {
       const pull = await rd("pull.json");
       // pulls-for-head.json: open PRs whose head is this SHA (default: just this PR)
-      const pullsForHead = (await rd("pulls-for-head.json", true)) ?? [{ number: pull?.number ?? Number(args.pr), state: "open" }];
+      const pullsForHead = (await rd("pulls-for-head.json", true)) ?? [{ number: pull?.number ?? Number(args.pr), state: "open", head: { sha: pull?.head?.sha } }];
       return { pull, commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json"), pullsForHead };
     } catch (e) { throw new Error(`api-error:fixture:${e.message.slice(0, 80)}`); }
   }

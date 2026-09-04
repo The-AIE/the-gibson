@@ -78,8 +78,20 @@ author-vendor: grok|codex|claude|devin|human
 -->
 ```
 
-An attestation resolves identity only; it is never a review, and it is trusted on
-the owner's word. The durable fix is per-lane bot identities (#67).
+`author-vendor:` is a comma-separated list naming EVERY vendor that produced an
+unverified commit on this head. It is head-wide and it unions: an unsigned commit whose
+login resolves to a listed bot adds that bot's vendor too, so an attestation can add
+authors to the exclusion set, never remove one (a mixed Grok+Devin PR attested as
+`grok` still excludes Devin as a reviewer). A list containing an unknown value is
+ignored whole. An attestation resolves identity only; it is never a review, and it is
+trusted on the owner's word. The durable fix is per-lane bot identities (#67).
+
+**Residual window (documented, not hidden).** The workflow resolves the head via the
+API and falls back to the event's head so `pending` is stamped even when the API call
+fails. Review and comment events carry no head in their payload; if the API is down
+during one of those, nothing can be stamped and the step fails loudly with a summary
+line. A prior `success` on that head survives until the next event. Making the
+context required does not widen this window; it only makes the stale success visible.
 
 **Reason tokens** (the status description, ≤140 chars): `pass` → success;
 `no-receipt-at-head`, `stale-head-only` → pending (blocks merge, no red);
