@@ -21,6 +21,9 @@ jobs:
   sensors:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      issues: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { fetch-depth: 0 }
@@ -90,6 +93,13 @@ jobs:
       # AC4 (#307): fail when a new scripts/*.sh or *.mjs has no gate caller.
       - name: Sensor reachability
         run: node scripts/sensor-reachability.mjs
+
+      # Hosted Law 9 ledger lint (#326). Unconditional: docs/memory fast path
+      # must not skip it. GH_TOKEN is step-scoped; do not add --offline/--root/--ledger.
+      - name: Lesson ledger lint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/lesson-ledger-lint.mjs
 
       # Exact ShellCheck pin — machine source is scripts/tests/run-all.sh
       # (SHELLCHECK_REQUIRED_VERSION + SHELLCHECK_SHA256_LINUX_X86_64). Do not

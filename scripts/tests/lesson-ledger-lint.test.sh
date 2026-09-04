@@ -121,6 +121,21 @@ if [[ "${GH_MODE:-}" == "fail" ]]; then
   echo "simulated gh failure" >&2
   exit 1
 fi
+if [[ "${GH_MODE:-}" == "forbidden" ]]; then
+  echo "HTTP 403: Resource not accessible by integration" >&2
+  exit 1
+fi
+if [[ "${GH_MODE:-}" == "unauth" ]]; then
+  echo "HTTP 401: Bad credentials (authentication required)" >&2
+  exit 1
+fi
+# Fail only when GH_TOKEN is absent (unset). A set token falls through.
+if [[ "${GH_MODE:-}" == "missing_token" ]]; then
+  if [ -z "${GH_TOKEN+x}" ]; then
+    echo "HTTP 401: GH_TOKEN is unset (authentication required; no credentials)" >&2
+    exit 1
+  fi
+fi
 if [[ "${GH_MODE:-}" == "badjson" ]]; then
   echo "{"
   exit 0
@@ -179,6 +194,93 @@ GH_MODE=badjson run_lint "$AC2" --repo acme/app
 [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'unusable state\|gh api failed' \
   && ok "AC2 unusable gh payload fails closed" \
   || bad "AC2 badjson (rc=$rc): $out"
+
+echo "# L6/L7/L8 — closed-issue, fail-closed classes, sentinel redaction"
+SENTINEL='gh-token-sentinel-326-NOT-FOR-LOGS'
+# L6: fixture ledger with fix-pending on a closed issue names the ID and number.
+: > "$GH_LOG"
+unset GH_MODE
+GH_STATE=closed GH_TOKEN="$SENTINEL" run_lint "$AC2" --repo acme/app
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'issue #7' && echo "$out" | grep -q 'closed' \
+    && ! echo "$out" | grep -F -q "$SENTINEL"; then
+  ok "L6: closed fix-pending issue #7 names id + number; sentinel redacted"
+else
+  bad "L6 closed pending (rc=$rc): $out"
+fi
+
+# L7 helper: run with sentinel GH_TOKEN, expect nonzero, a class token, no leak.
+assert_l7() {
+  local name="$1" class_re="$2"
+  shift 2
+  : > "$GH_LOG"
+  GH_TOKEN="$SENTINEL" run_lint "$AC2" --repo acme/app "$@"
+  if [[ "$rc" -eq 0 ]]; then
+    bad "L7 $name: expected nonzero (out=$out)"
+    return
+  fi
+  if ! echo "$out" | grep -Ei -q "$class_re"; then
+    bad "L7 $name: diagnostic missing class /$class_re/ (out=$out)"
+    return
+  fi
+  if echo "$out" | grep -F -q "$SENTINEL"; then
+    bad "L8 $name: sentinel leaked in stdout+stderr"
+    return
+  fi
+  if echo "$out" | grep -Ei -q 'Authorization:|set -x|declare -x GH_TOKEN|printenv'; then
+    bad "L8 $name: env/header/trace dump in output: $out"
+    return
+  fi
+  ok "L7/L8 $name: fail-closed + class named + sentinel redacted"
+}
+
+# L7: insufficient permission (403)
+GH_MODE=forbidden assert_l7 "403 insufficient permission" '403|forbidden|permission|resource not accessible'
+
+# L7: unauthenticated credentials with a token present (401) — sentinel redacted
+GH_MODE=unauth assert_l7 "unauthenticated credentials (401)" '401|auth|credential|unauthor'
+
+# L7: true absent credentials — GH_TOKEN unset; stub fails only then.
+: > "$GH_LOG"
+unset GH_TOKEN
+GH_MODE=missing_token GH_TOKEN="$SENTINEL" GH_STATE=open run_lint "$AC2" --repo acme/app
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ! echo "$out" | grep -F -q "$SENTINEL"; then
+  ok "L7 control: missing_token mode with GH_TOKEN set reaches the API"
+else
+  bad "L7 missing_token control with token set (rc=$rc): $out"
+fi
+: > "$GH_LOG"
+unset GH_TOKEN
+unset GH_STATE
+GH_MODE=missing_token run_lint "$AC2" --repo acme/app
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Ei -q '401|auth|credential|unauthor|GH_TOKEN' \
+    && ! echo "$out" | grep -F -q "$SENTINEL" \
+    && ! echo "$out" | grep -Ei -q 'Authorization:|set -x|declare -x GH_TOKEN|printenv'; then
+  ok "L7: absent credentials (GH_TOKEN unset) fail-closed; class named"
+else
+  bad "L7 absent credentials (rc=$rc): $out"
+fi
+unset GH_MODE
+
+# L7: non-zero gh exit
+GH_MODE=fail assert_l7 "non-zero gh exit" 'gh api failed'
+
+# L7: malformed / unparseable API output
+GH_MODE=badjson assert_l7 "malformed API output" 'unusable state|gh api failed'
+
+# L7: gh transport failure (spawn error — no gh binary). Keep node on PATH.
+L7_NOPATH="$ROOT/nopath"
+mkdir -p "$L7_NOPATH"
+NODE_DIR=$(CDPATH='' cd -- "$(dirname -- "$(command -v node)")" && pwd)
+GH_TOKEN="$SENTINEL" PATH="$L7_NOPATH:$NODE_DIR" run_lint "$AC2" --repo acme/app
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -Ei -q 'ENOENT|spawn|not found|gh api failed|cannot resolve repo' \
+    && ! echo "$out" | grep -F -q "$SENTINEL"; then
+  ok "L7/L8 gh transport failure: fail-closed + sentinel redacted"
+else
+  bad "L7 transport (rc=$rc): $out"
+fi
+# Restore the stub PATH for remaining AC2 cases.
+export PATH="$ROOT/bin:$ORIG_PATH"
 
 echo "# AC2 --offline skips only the closed-issue check"
 : > "$GH_LOG"

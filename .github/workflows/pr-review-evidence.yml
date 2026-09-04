@@ -90,18 +90,18 @@ jobs:
           set -uo pipefail
           listed=0
           if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
-              --jq '.[] | "\(.number) \(.head.sha)"' > heads.txt; then
+              --jq '.[] | "\(.number) \(.head.sha)"' > "$RUNNER_TEMP/heads.txt"; then
             listed=1
           else
-            : > heads.txt
+            : > "$RUNNER_TEMP/heads.txt"
             echo "::notice::could not list open pull requests; publish will fail closed on the event head"
             echo "- open-PR listing failed; falling back to the event head" >> "$GITHUB_STEP_SUMMARY"
           fi
           # The event's own head ALWAYS joins the set (Codex round 5, finding
           # 3): a PR (re)opened between this listing and the sweep, or omitted
           # by a stale listing, must still be stamped pending now.
-          if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" heads.txt; then
-            printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> heads.txt
+          if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" "$RUNNER_TEMP/heads.txt"; then
+            printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> "$RUNNER_TEMP/heads.txt"
           fi
           # Pending is stamped ONLY on the event's own head (Codex round 8,
           # finding 1): stamping every open head on every event let a fork
@@ -148,7 +148,7 @@ jobs:
         run: |
           set -uo pipefail
           node scripts/pr-review-evidence.mjs --repo "$GH_REPO" --sweep \
-            --config config/review-evidence.v1.json > results.jsonl
+            --config config/review-evidence.v1.json > "$RUNNER_TEMP/results.jsonl"
           rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::notice::review-evidence sweep exited $rc; the published statuses carry the verdicts"
@@ -208,9 +208,20 @@ jobs:
               --jq '"\(.updated_at)|\(.head.sha)|\(.base.sha)|\(.comments)|\(.review_comments)|\(.commits)"' 2>/dev/null || echo "unavailable"
           }
           event_fail=0
+          # Cross-step artifacts live in RUNNER_TEMP so they survive checkout.
+          # Missing/unreadable heads must not publish a sweep success (the
+          # unverdicted-head loop would otherwise be skipped).
+          if [ ! -f "$RUNNER_TEMP/heads.txt" ] || [ ! -r "$RUNNER_TEMP/heads.txt" ]; then
+            echo "::error::review-evidence: heads file missing or unreadable; refusing to publish success"
+            echo "### review-evidence: NOT PUBLISHED — heads file missing or unreadable" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+              publish "$EVENT_HEAD_SHA" "failure" "api-error: heads file missing or unreadable" || true
+            fi
+            exit 1
+          fi
           # The sweep never ran or produced nothing: fail closed on every head we
           # stamped (or the event head). A cancellation is not a verdict: pending.
-          if [ ! -s results.jsonl ] || ! grep -qE '"number":[0-9]+' results.jsonl; then
+          if [ ! -s "$RUNNER_TEMP/results.jsonl" ] || ! grep -qE '"number":[0-9]+' "$RUNNER_TEMP/results.jsonl"; then
             state=failure; desc="api-error: sweep produced no verdicts"
             if [ "${CANCELLED}" = "true" ]; then state=pending; desc="SUPERSEDED: cancelled before a verdict"; fi
             n_pub=0
@@ -218,14 +229,14 @@ jobs:
               [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
               publish "$sha" "$state" "$desc" && n_pub=$((n_pub + 1))
               echo "### review-evidence: \`$state\` on PR $n — $desc" >> "$GITHUB_STEP_SUMMARY"
-            done < heads.txt
+            done < "$RUNNER_TEMP/heads.txt"
             if [ "$n_pub" -eq 0 ]; then
               echo "::error::review-evidence: no verdicts and no known heads; a prior status may be stale until the next event"
               echo "### review-evidence: NOT PUBLISHED — no verdicts and no known heads" >> "$GITHUB_STEP_SUMMARY"
             fi
             exit 1
           fi
-          : > published.txt
+          : > "$RUNNER_TEMP/published.txt"
           while IFS= read -r line; do
             [ -n "$line" ] || continue
             # shellcheck disable=SC2016  # the $ is a JS regex anchor inside the node program
@@ -252,21 +263,21 @@ jobs:
                 state=pending; desc="UNREVIEWED: state changed during evaluation; re-evaluating on the next sweep"
               fi
             fi
-            if publish "$sha" "$state" "$desc"; then echo "$sha" >> published.txt; fi
+            if publish "$sha" "$state" "$desc"; then echo "$sha" >> "$RUNNER_TEMP/published.txt"; fi
             echo "- PR $n @ ${sha:0:7}: \`$state\` — $desc" >> "$GITHUB_STEP_SUMMARY"
             if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ] && [ "$state" = "failure" ]; then event_fail=1; fi
-          done < results.jsonl
+          done < "$RUNNER_TEMP/results.jsonl"
           # Every head we stamped pending must have received a verdict; a head
           # the sweep did not cover (listing skew, a PR closed mid-run) must not
           # be left pending-or-stale — fail it closed (Codex round 5, finding 3).
           while read -r n sha; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
-            if ! grep -q "^$sha\$" published.txt; then
+            if ! grep -q "^$sha\$" "$RUNNER_TEMP/published.txt"; then
               publish "$sha" "failure" "api-error: sweep produced no verdict for this head" || true
               echo "- PR $n @ ${sha:0:7}: \`failure\` — no verdict from the sweep" >> "$GITHUB_STEP_SUMMARY"
               if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ]; then event_fail=1; fi
             fi
-          done < heads.txt
+          done < "$RUNNER_TEMP/heads.txt"
           if [ "$post_fail" -eq 1 ]; then
             echo "::error::review-evidence: at least one status write failed; the affected heads carry whatever was written before"
             exit 1
