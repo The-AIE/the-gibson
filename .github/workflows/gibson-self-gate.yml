@@ -87,6 +87,14 @@ jobs:
           fi
           echo "DCO: every commit in ${BASE_SHA}..${HEAD_SHA} has a Signed-off-by trailer"
 
+      # Law 9 ledger hygiene (#306) — invoked directly so the lint is a gate
+      # caller of record (#307's reachability ratchet) and enforced on every PR,
+      # not only exercised by its own test. Online: closed pending issues fail.
+      - name: Lesson ledger lint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/lesson-ledger-lint.mjs
+
       # AC4 (#307): fail when a new scripts/*.sh or *.mjs has no gate caller.
       - name: Sensor reachability
         run: node scripts/sensor-reachability.mjs
