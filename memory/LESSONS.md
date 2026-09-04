@@ -1774,3 +1774,79 @@ this?" If yes, it is a false-green. Enumerate the evasion space per
 **Harness fix:** keep dispatch specs OUT of the worktree — write them to the scratchpad and pass the path to the implementer — or `git rm --cached`/delete them before running bot-commit.sh. Check `git status --short` for non-source files before every bot-commit. Related: [[topic-fleet-verification-gotchas]].
 **Status:** intake 2026-09-04 from fleet memory `feedback_lane_spec_files_ship_in_bot_commits.md` (no sensor yet)
 **Tags:** #fleet #intake #lane #merge #worktree
+
+## L-083 · 2026-09-04 · review-round-cap-not-enforced
+**What happened:** The Gibson's review-round caps (A=1, B=2, C=3) are prose only; #315 took 9 Codex rounds. Count rounds mechanically and stop the lane at the cap.
+The review-round cap in AGENTS.md bound nobody on 2026-09-04: PR #315 (review-evidence sensor, Tier C) went 9 REQUEST_CHANGES rounds, #316 went 7, #317 went 3. Nothing counted.
+
+**Why:** a cap that nothing enforces is a wish. Each extra round cost ~40 min of reviewer time and produced residual issues (#321–#323) anyway.
+
+**How to apply:** count REQUEST_CHANGES verdicts per PR head lineage; at the cap, stop iterating and either split the PR or escalate to Mark with the open findings. Ratchet candidate: a sensor that reads the verdict receipts and stamps `review-rounds: N/cap` on the PR. See [[spec-review-first-and-grok-stall]] and [[tier-c-gate-prs-spec-reviewed-first]].
+**Harness fix:** count REQUEST_CHANGES verdicts per PR head lineage; at the cap, stop iterating and either split the PR or escalate to Mark with the open findings. Ratchet candidate: a sensor that reads the verdict receipts and stamps `review-rounds: N/cap` on the PR. See [[spec-review-first-and-grok-stall]] and [[tier-c-gate-prs-spec-reviewed-first]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_review_round_cap_not_enforced.md` (no sensor yet)
+**Tags:** #codex #fleet #gate #grok #intake #lane #review #sensor
+
+## L-084 · 2026-09-04 · tier-c-gate-prs-spec-reviewed-first
+**What happened:** Any PR that adds or changes a CI gate/sensor gets a Codex spec review before code, and is designed as an idempotent full-state sweep, not an event handler.
+Gate and sensor PRs (#315 review-evidence, #316 ledger lint, #317 reachability) each lost rounds to design questions that a spec review would have settled: what counts as evidence, what happens on edited/deleted comments, what a truncated listing means, who stamps what on which head.
+
+**Why:** a sensor is a claim about the whole repository's state. Event-driven designs miss edits, deletions, and reruns; the fix in every case was "make it a sweep that recomputes from full state and writes only on change".
+
+**How to apply:** before dispatching a Tier C gate lane, run spec-review.sh (Codex lens) on the design; require the sweep shape (idempotent, full-state, on-change writes, fingerprint re-check before success, closed reason tokens). See [[review-round-cap-not-enforced]].
+**Harness fix:** before dispatching a Tier C gate lane, run spec-review.sh (Codex lens) on the design; require the sweep shape (idempotent, full-state, on-change writes, fingerprint re-check before success, closed reason tokens). See [[review-round-cap-not-enforced]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_tier_c_gate_prs_spec_reviewed_first.md` (no sensor yet)
+**Tags:** #ci #claim #codex #fleet #gate #intake #lane #review #sensor
+
+## L-085 · 2026-09-04 · never-run-gibson-suites-directly
+**What happened:** Never run a Gibson test suite by path; use scripts/tests/run-all.sh --only <substring>. Suites kill their own process group when run directly.
+Grok lanes on 2026-09-04 died at 8, 15 and 49 minutes with no watchdog involvement. Cause: several suites (wall-timeout, claim) kill their own process group at cleanup; run directly from an agent's shell, that kills the agent.
+
+**Why:** run-all.sh gives every suite its own process group and a 600 s budget; a suite run by path inherits the caller's group.
+
+**How to apply:** `bash scripts/tests/run-all.sh --only wall-timeout` (substring match), never `bash scripts/tests/wall-timeout.test.sh`. Put that line in every Gibson lane spec. See [[grok-lane-pgrp-facts]].
+**Harness fix:** `bash scripts/tests/run-all.sh --only wall-timeout` (substring match), never `bash scripts/tests/wall-timeout.test.sh`. Put that line in every Gibson lane spec. See [[grok-lane-pgrp-facts]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_never_run_gibson_suites_directly.md` (no sensor yet)
+**Tags:** #claim #fleet #grok #intake #lane
+
+## L-086 · 2026-09-04 · grok-lane-pgrp-facts
+**What happened:** Facts for diagnosing a dead Grok lane on the Gibson: fleet-vitals only reaps zombies/hung runs; a lane killed at an odd minute with a test suite in its log killed itself.
+- fleet-vitals.sh runs every 5 min on both hosts and only acts on stalls, zombies and hung runs; it logs every action to ~/.claude/fleet/logs/. If there is no log line, the watchdog did not kill the lane.
+- macOS has no `setsid`; detached lanes use `nohup … & disown`, which keeps the agent in the dispatcher's process group.
+- A lane whose last log lines are a Gibson test suite run by path died of that suite's own pgrp kill (see [[never-run-gibson-suites-directly]]).
+- A Grok dispatched with an empty worktree path runs in $HOME; kill it and re-dispatch after verifying the claim succeeded.
+**Harness fix:** none yet — rule is prose; candidate for a sensor
+**Status:** intake 2026-09-04 from fleet memory `reference_grok_lane_pgrp_facts.md` (no sensor yet)
+**Tags:** #claim #fleet #grok #intake #lane #worktree
+
+## L-087 · 2026-09-04 · claim-rollback-closes-sibling-pr
+**What happened:** A failed claim.sh attempt's rollback closed a sibling open PR (#327) on the same issue. Check PR state after any failed claim.
+On 2026-09-04 a second claim attempt for #319 (scope token rejected: globs like `*.test.sh` are not allowed, only plain paths or a trailing `*`/`**`) rolled back and closed the already-open PR #327 for the same issue. The PR had to be reopened and readied by hand.
+
+**Why:** claim.sh's rollback cleans "everything for this issue", including PRs it did not open.
+
+**How to apply:** after any failed claim, run `gh pr list --state closed --search "<issue>"` and reopen what the rollback closed. Filed as a Gibson bug candidate; until fixed, never re-claim an issue that already has an open PR. See [[never-run-gibson-suites-directly]].
+**Harness fix:** after any failed claim, run `gh pr list --state closed --search "<issue>"` and reopen what the rollback closed. Filed as a Gibson bug candidate; until fixed, never re-claim an issue that already has an open PR. See [[never-run-gibson-suites-directly]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_claim_rollback_closes_sibling_pr.md` (no sensor yet)
+**Tags:** #claim #fleet #intake
+
+## L-088 · 2026-09-04 · sensor-crash-must-not-show-pending
+**What happened:** A crashed CI sensor that leaves its commit status at pending is indistinguishable from a healthy sensor awaiting input; crashes must stamp error (gibson #329).
+After #324, every review-evidence run on main crashed in its publish step, and every open PR head showed `review-evidence: pending — no listed reviewer has reviewed this head`. The state looked like "waiting for CodeRabbit"; it was an outage. The coordinator merged #327 over it only after reading the workflow logs.
+
+**Why:** no-op-looks-like-success ([[noop-indistinguishable-from-success]]): an absent or default signal reads as a good signal.
+
+**How to apply:** when a status is pending for longer than one sensor cycle, open the sensor's last run before believing the status. Ratchet: The-AIE/the-gibson#329 (a crashed run must overwrite the head status with `error` and the failed step).
+**Harness fix:** when a status is pending for longer than one sensor cycle, open the sensor's last run before believing the status. Ratchet: The-AIE/the-gibson#329 (a crashed run must overwrite the head status with `error` and the failed step).
+**Status:** intake 2026-09-04 from fleet memory `feedback_sensor_crash_must_not_show_pending.md` (no sensor yet)
+**Tags:** #ci #fleet #intake #review #sensor
+
+## L-089 · 2026-09-04 · bash-option-loop-shift2-guard
+**What happened:** In a bash option loop without set -e, `--flag) X="$2"; shift 2` loops forever when the operand is missing; check `$# -ge 2` first.
+Codex round 2 on Gibson PR #327 caught `run-all-stress.sh --runs` (no value) hanging: `shift 2` fails with one argument left, `set -e` is off, and the loop re-reads the same `$1` forever. Reproduced under Bash 3.2.
+
+**Why:** fleet scripts run `set -uo pipefail` without `-e` on purpose (honest exit classification), so a failed shift is silent.
+
+**How to apply:** every value-taking option does `[[ $# -ge 2 ]] || { usage >&2; exit 2; }` before reading `$2`. Add the missing-operand case to the script's test. See [[never-run-gibson-suites-directly]].
+**Harness fix:** every value-taking option does `[[ $# -ge 2 ]] || { usage >&2; exit 2; }` before reading `$2`. Add the missing-operand case to the script's test. See [[never-run-gibson-suites-directly]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_bash_option_loop_shift2_guard.md` (no sensor yet)
+**Tags:** #codex #fleet #intake
