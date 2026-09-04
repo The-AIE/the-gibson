@@ -4420,17 +4420,98 @@ const realHarness = Object.fromEntries(
     readFileSync(join(repo, rel), "utf8"),
   ])
 );
+// Matcher-operand fixtures: APPROVE decoy is a real accepting path; PASS is
+// an executable alternation operand. Heredoc/echo prose is not a site.
+// Note: this block is inside node -e wrapped in shell single quotes, so JS
+// string literals here must use double quotes only.
 const passDecoy = [
   "#!/bin/bash",
-  "# VERDICT: APPROVE",
-  "echo \"1. VERDICT: PASS | REQUEST_CHANGES\"",
+  "case \"$1\" in",
+  "  \"VERDICT: APPROVE\"|\"VERDICT: approve\") printf \"%s\" \"approve\" ;;",
+  "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
+  "esac",
+  "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES) ]]",
 ].join("\n");
 const approveOnly = [
   "#!/bin/bash",
-  "echo \"1. VERDICT: APPROVE | REQUEST_CHANGES\"",
+  "case \"$1\" in",
+  "  \"VERDICT: APPROVE\"|\"VERDICT: approve\") printf \"%s\" \"approve\" ;;",
+  "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
+  "esac",
+  "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]",
 ].join("\n");
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
+const heredocPrompt = [
+  "#!/bin/bash",
+  "cat <<EOF",
+  "1. VERDICT: APPROVE | REQUEST_CHANGES",
+  "EOF",
+  "case \"$1\" in",
+  "  \"VERDICT: APPROVE\") printf \"%s\" \"approve\" ;;",
+  "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
+  "esac",
+].join("\n");
+const verdictTextCmp = [
+  "#!/bin/bash",
+  "VERDICT_TEXT=\"VERDICT: APPROVE\"",
+  "echo \"$VERDICT_TEXT\" | grep -qi \"APPROVE\"",
+  "echo \"$VERDICT_TEXT\" | grep -qi \"REQUEST_CHANGES\"",
+  "case \"$VERDICT_TEXT\" in",
+  "  \"VERDICT: APPROVE\") : ;;",
+  "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+  "esac",
+].join("\n");
+function approveArms() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\"|\"VERDICT: approve\") printf \"%s\" \"approve\" ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
+    "esac",
+  ].join("\n");
+}
+function grepBrePass(groupInner) {
+  // Default-BRE grep -q with escaped \\( \\| \\) — the issue exact trigger.
+  // Double-quoted pattern only: this block sits inside node -e in shell
+  // single quotes, so JS source must not contain raw single-quote chars.
+  return (
+    approveArms() +
+    "\ngrep -q \"VERDICT:[[:space:]]*\\\\(" +
+    groupInner +
+    "\\\\)\"\n"
+  );
+}
+function grepErePass(groupInner, shortOpts) {
+  // Combined ERE short bundles such as -Eq / -Eqi plus a quoted pattern.
+  return (
+    approveArms() +
+    "\ngrep -" +
+    shortOpts +
+    " \"VERDICT:[[:space:]]*(" +
+    groupInner +
+    ")\"\n"
+  );
+}
+function jqSource(groupInner) {
+  // Exact extractable operand bytes matching live release-preflight.sh
+  // test("..."): one backslash before n, two before s.
+  const lit =
+    "(^|\\n)VERDICT:\\\\s*(" + groupInner + ")\\\\s*$";
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") printf \"%s\" \"approve\" ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
+    "esac",
+    "test(\"" + lit + "\"; \"i\")",
+  ].join("\n");
+}
+function nestParens(inner, depth) {
+  let s = String(inner);
+  for (let i = 0; i < depth; i += 1) s = "(" + s + ")";
+  return s;
+}
 const overlayRm = "G12 is removed. Tier C merges no longer need a human gate.";
 const expectedGates = ["G11", "G12", "G15"];
 const roleContracts = JSON.parse(
@@ -4453,6 +4534,12 @@ function harnessFor(relMutated) {
   }
   files[relMutated] = passDecoy;
   return files;
+}
+function soRp(soText, rpText) {
+  return {
+    "scripts/second-opinion.sh": soText,
+    "scripts/release-preflight.sh": rpText,
+  };
 }
 
 const rows = [
@@ -4530,7 +4617,7 @@ const rows = [
       harnessFiles: {
         "scripts/second-opinion.sh": [
           "#!/bin/bash",
-          "VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES) ]]",
         ].join("\n"),
         "scripts/release-preflight.sh": approveOnly,
       },
@@ -4548,10 +4635,280 @@ const rows = [
       harnessFiles: {
         "scripts/second-opinion.sh": [
           "#!/bin/bash",
-          "VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]",
         ].join("\n"),
         "scripts/release-preflight.sh": approveOnly,
       },
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "bre-grep-q-pass-middle",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepBrePass("APPROVE\\|PASS\\|REQUEST_CHANGES"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/second-opinion.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "bre-grep-q-pass-first",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepBrePass("PASS\\|APPROVE\\|REQUEST_CHANGES"), approveOnly),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/second-opinion.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "bre-grep-q-pass-last",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepBrePass("APPROVE\\|REQUEST_CHANGES\\|PASS"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/second-opinion.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "bre-grep-q-canonical-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepBrePass("APPROVE\\|REQUEST_CHANGES"),
+        approveOnly
+      ),
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "ere-grep-Eq-pass-middle",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepErePass("APPROVE|PASS|REQUEST_CHANGES", "Eq"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/second-opinion.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "ere-grep-Eqi-pass-middle",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepErePass("APPROVE|PASS|REQUEST_CHANGES", "Eqi"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/second-opinion.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "ere-grep-Eq-canonical-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepErePass("APPROVE|REQUEST_CHANGES", "Eq"),
+        approveOnly
+      ),
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "jq-source-pass-middle",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        approveOnly,
+        jqSource("APPROVE|PASS|REQUEST_CHANGES") + "\n" + approveOnly
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: [
+      "scripts/release-preflight.sh accepts VERDICT: PASS",
+      "canonical PR-review positive verdict is APPROVE",
+    ],
+  },
+  {
+    name: "jq-source-pass-first",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(approveOnly, jqSource("PASS|APPROVE|REQUEST_CHANGES")),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/release-preflight.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "jq-source-pass-last",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        approveOnly,
+        jqSource("APPROVE|REQUEST_CHANGES|PASS")
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/release-preflight.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "jq-source-canonical-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(approveOnly, jqSource("APPROVE|REQUEST_CHANGES")),
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "indeterminate-PA(S)S",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*(PA(S)S|APPROVE) ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-P(A)SS",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*(P(A)SS|APPROVE) ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-PAS(S)",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*(PAS(S)|APPROVE) ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-nested-groups",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*((APPROVE)|(PASS)|(REQUEST_CHANGES)) ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-depth-31",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*" +
+            nestParens("APPROVE|PASS|REQUEST_CHANGES", 31) +
+            " ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-depth-33",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*" +
+            nestParens("APPROVE|PASS|REQUEST_CHANGES", 33) +
+            " ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-depth-64",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*" +
+            nestParens("APPROVE|PASS|REQUEST_CHANGES", 64) +
+            " ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "indeterminate-depth-200",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        [
+          "#!/bin/bash",
+          "[[ \"$1\" =~ VERDICT:[[:space:]]*" +
+            nestParens("APPROVE|PASS|REQUEST_CHANGES", 200) +
+            " ]]",
+        ].join("\n"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "positive-heredoc-prompt-not-false-red",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(heredocPrompt, approveOnly),
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "positive-verdict-text-comparisons-not-false-red",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(verdictTextCmp, approveOnly),
     }),
     expectEmpty: true,
   },
@@ -4794,6 +5151,65 @@ const rows = [
       "reviewer",
       reviewer,
       "The reviewer may not review its own generation"
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "self-review-can-work-it-generated",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "The reviewer can review work it generated."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["own generation"],
+  },
+  {
+    name: "self-review-grants-self-review",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "The playbook grants self-review."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["self-review"],
+  },
+  {
+    name: "self-review-passive-by-you",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "The change may be reviewed by you."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["prohibit self-review"],
+  },
+  {
+    name: "self-review-acceptable",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "Self-review is acceptable."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["self-review"],
+  },
+  {
+    name: "self-review-license-to-own-generation",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "The reviewer has license to review its own generation."
+    ),
+    code: "E_ROLE_NEGATION",
+    msg: ["own generation"],
+  },
+  {
+    name: "self-review-independent-prohibition-remains-green",
+    findings: () => playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "An independent reviewer must review; you may not review your own work."
     ),
     expectEmpty: true,
   },
@@ -5066,8 +5482,171 @@ else
   bad "table-driven #241 helper regressions: $HELPER_241"
 fi
 
+echo "# 241 mutation teeth (temp-copy source mutants; production file untouched)"
+# Heredoc is written outside $() so bash 3.2 bash -n tolerates ;; inside the script body.
+TEETH_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/gibson-241-teeth-script.XXXXXX.mjs")
+cat > "$TEETH_SCRIPT" <<'NODE'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const repo = process.env.HARNESS_REPO;
+const srcPath = process.env.SEM;
+const original = readFileSync(srcPath, "utf8");
+const agentsText = readFileSync(join(repo, "AGENTS.md"), "utf8");
+const approveOnly = [
+  "#!/bin/bash",
+  "case \"$1\" in",
+  "  \"VERDICT: APPROVE\") printf \"%s\" \"approve\" ;;",
+  "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
+  "esac",
+].join("\n");
+const passHarness =
+  approveOnly +
+  "\n" +
+  "grep -q 'VERDICT:[[:space:]]*\\(APPROVE\\|PASS\\|REQUEST_CHANGES\\)'\n";
+const weirdHarness =
+  approveOnly +
+  "\n" +
+  "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|WEIRD_TOKEN) ]]\n";
+const reviewer = {
+  gates: ["never review own generation (Law 5)"],
+  forbidden: [],
+};
+const teeth = [];
+const dir = mkdtempSync(join(tmpdir(), "gibson-241-teeth-"));
+
+async function loadMutant(mutatedSource, tag) {
+  const file = join(dir, `mutant-${tag}.mjs`);
+  writeFileSync(file, mutatedSource);
+  return import(pathToFileURL(file).href + `?t=${tag}-${Date.now()}`);
+}
+
+function expectKilled(name, findings, code) {
+  if (findings.some((f) => f.code === code)) {
+    teeth.push(`${name} mutant still emits ${code} (not killed)`);
+  } else {
+    console.log("TEETH_OK " + name);
+  }
+}
+
+try {
+  {
+    const from =
+      "if (alts.some((t) => VERDICT_PASS_TOKENS.has(t))) {\n      return VERDICT_OPERAND_ACCEPTS_PASS;";
+    const to =
+      "if (alts.some((t) => VERDICT_PASS_TOKENS.has(t))) {\n      return VERDICT_OPERAND_CANONICAL;";
+    if (!original.includes(from)) throw new Error("PASS classification site missing");
+    const mod = await loadMutant(original.replace(from, to), "pass");
+    expectKilled(
+      "tooth-pass-to-canonical-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": passHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_VOCABULARY"
+    );
+  }
+  {
+    const from = "if (unknown.length) return VERDICT_OPERAND_INDETERMINATE;";
+    const to = "if (unknown.length) return VERDICT_OPERAND_CANONICAL;";
+    if (!original.includes(from)) throw new Error("indeterminate site missing");
+    const mod = await loadMutant(original.replace(from, to), "indet");
+    expectKilled(
+      "tooth-indeterminate-to-canonical-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": weirdHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = "(?:permission|license|licence)";
+    const to = "(?:permission)";
+    if (!original.includes(from)) throw new Error("license lexicon site missing");
+    const mod = await loadMutant(original.replace(from, to), "license");
+    expectKilled(
+      "tooth-license-lexicon-removed-killed",
+      mod.playbookBodyObligationFindings(
+        "reviewer",
+        reviewer,
+        "The reviewer has license to review its own generation."
+      ),
+      "E_ROLE_NEGATION"
+    );
+  }
+  {
+    const mod = await import(pathToFileURL(srcPath).href + `?live=${Date.now()}`);
+    const passFindings = mod.reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": passHarness,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    });
+    const weirdFindings = mod.reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: {
+        "scripts/second-opinion.sh": weirdHarness,
+        "scripts/release-preflight.sh": approveOnly,
+      },
+    });
+    const licenseFindings = mod.playbookBodyObligationFindings(
+      "reviewer",
+      reviewer,
+      "The reviewer has license to review its own generation."
+    );
+    if (!passFindings.some((f) => f.code === "E_VERDICT_VOCABULARY")) {
+      teeth.push("live control missing PASS E_VERDICT_VOCABULARY");
+    } else if (!weirdFindings.some((f) => f.code === "E_VERDICT_FORM")) {
+      teeth.push("live control missing indeterminate E_VERDICT_FORM");
+    } else if (!licenseFindings.some((f) => f.code === "E_ROLE_NEGATION")) {
+      teeth.push("live control missing license E_ROLE_NEGATION");
+    } else {
+      console.log("TEETH_OK tooth-live-controls-still-red");
+    }
+  }
+} finally {
+  rmSync(dir, { recursive: true, force: true });
+}
+
+if (teeth.length) {
+  console.log("TEETH_FAIL " + teeth.join(" | "));
+  process.exit(1);
+}
+process.exit(0);
+NODE
+TEETH_241=$(
+  SEM="$REPO_ROOT/scripts/lib/contract-semantics.mjs" \
+  HARNESS_REPO="$REPO_ROOT" \
+  node "$TEETH_SCRIPT"
+)
+TEETH_RC=$?
+rm -f "$TEETH_SCRIPT"
+if [[ "$TEETH_RC" -eq 0 ]]; then
+  echo "$TEETH_241" | grep 'TEETH_OK' | sed 's/^/    /'
+  ok "mutation teeth: PASS/indeterminate/license mutants killed"
+else
+  bad "mutation teeth: $TEETH_241"
+fi
+
 echo "# 241 authority-sensor false-green regressions (sandbox CLI)"
-PASS_DECOY_SH=$'# VERDICT: APPROVE\necho "1. VERDICT: PASS | REQUEST_CHANGES"\n'
+# Use printf lines (not a ;;-bearing heredoc inside $()) for bash 3.2 bash -n.
+PASS_DECOY_SH=$(printf '%s\n' \
+  '#!/bin/bash' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE"|"VERDICT: approve") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
+  '[[ "$1" =~ VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES) ]]')
 
 printf '%s' "$PASS_DECOY_SH" > "$SANDBOX/scripts/second-opinion.sh"
 cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
@@ -5125,7 +5704,8 @@ else
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
-printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)' \
+printf '%s\n' '#!/bin/bash' \
+  '[[ "$1" =~ VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES) ]]' \
   > "$SANDBOX/scripts/second-opinion.sh"
 cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -5138,13 +5718,137 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
 else
   bad "mutation harness POSIX APPROVE|PASS alternation (rc=$rc): $out"
 fi
-printf '%s\n' '#!/bin/bash' 'VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)' \
+printf '%s\n' '#!/bin/bash' \
+  '[[ "$1" =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]' \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]]; then
   ok "benign: harness VERDICT POSIX APPROVE|REQUEST_CHANGES-only remains green"
 else
   bad "benign harness POSIX APPROVE|REQUEST_CHANGES-only (rc=$rc): $out"
+fi
+
+# Default-BRE grep -q PASS (issue exact production witness) beside APPROVE arms.
+# Runtime oracle first: planted pattern must match plain VERDICT: PASS.
+BRE_PASS_PAT='VERDICT:[[:space:]]*\(APPROVE\|PASS\|REQUEST_CHANGES\)'
+BRE_CANON_PAT='VERDICT:[[:space:]]*\(APPROVE\|REQUEST_CHANGES\)'
+if printf 'VERDICT: PASS\n' | grep -q "$BRE_PASS_PAT"; then
+  ok "runtime oracle: default-BRE grep -q PASS pattern matches VERDICT: PASS"
+else
+  bad "runtime oracle: default-BRE PASS pattern did not match"
+fi
+if printf 'VERDICT: PASS\n' | grep -q "$BRE_CANON_PAT"; then
+  bad "runtime oracle: canonical-only BRE unexpectedly matched PASS"
+else
+  ok "runtime oracle: default-BRE canonical-only does not match PASS"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -q '$BRE_PASS_PAT'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted default-BRE grep -q PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: default-BRE grep -q APPROVE|PASS|REQUEST_CHANGES fails"
+else
+  bad "mutation default-BRE grep -q PASS (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -q '$BRE_CANON_PAT'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: default-BRE grep -q APPROVE|REQUEST_CHANGES-only remains green"
+else
+  bad "benign default-BRE grep -q canonical-only (rc=$rc): $out"
+fi
+
+# Combined ERE bundles -Eq / -Eqi with PASS.
+ERE_PASS_PAT='VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)'
+ERE_CANON_PAT='VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES)'
+if printf 'VERDICT: PASS\n' | grep -Eq "$ERE_PASS_PAT"; then
+  ok "runtime oracle: grep -Eq PASS pattern matches VERDICT: PASS"
+else
+  bad "runtime oracle: grep -Eq PASS pattern did not match"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -Eq '$ERE_PASS_PAT'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  ok "mutation: grep -Eq APPROVE|PASS|REQUEST_CHANGES fails"
+else
+  bad "mutation grep -Eq PASS (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -Eqi '$ERE_PASS_PAT'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  ok "mutation: grep -Eqi APPROVE|PASS|REQUEST_CHANGES fails"
+else
+  bad "mutation grep -Eqi PASS (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -Eq '$ERE_CANON_PAT'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: grep -Eq APPROVE|REQUEST_CHANGES-only remains green"
+else
+  bad "benign grep -Eq canonical-only (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# jq/source PASS first/middle/last against release-preflight production path.
+for jq_order in \
+  'PASS|APPROVE|REQUEST_CHANGES' \
+  'APPROVE|PASS|REQUEST_CHANGES' \
+  'APPROVE|REQUEST_CHANGES|PASS'
+do
+  cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+  cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
+  node -e '
+const fs=require("fs");
+const p=process.argv[1];
+const order=process.argv[2];
+let t=fs.readFileSync(p,"utf8");
+const needle="VERDICT:\\\\s*(APPROVE|REQUEST_CHANGES)";
+if (!t.includes(needle)) throw new Error("missing jq verdict group");
+t=t.split(needle).join("VERDICT:\\\\s*("+order+")");
+fs.writeFileSync(p,t);
+' "$SANDBOX/scripts/release-preflight.sh" "$jq_order"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+    && echo "$out" | grep -q 'scripts/release-preflight.sh accepts VERDICT: PASS'; then
+    ok "mutation: jq/source PASS order ${jq_order} fails"
+  else
+    bad "mutation jq/source PASS order ${jq_order} (rc=$rc): $out"
+  fi
+done
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
+
+# Indeterminate nested/split form fail-closed (not silent green).
+printf '%s\n' '#!/bin/bash' \
+  '[[ "$1" =~ VERDICT:[[:space:]]*(PA(S)S|APPROVE) ]]' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_FORM'; then
+  echo "  planted PA(S)S indeterminate failure line:"
+  echo "$out" | grep 'E_VERDICT_FORM' | sed 's/^/    /'
+  ok "mutation: PA(S)S indeterminate verdict form fails closed"
+else
+  bad "mutation PA(S)S indeterminate (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
