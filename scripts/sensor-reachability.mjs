@@ -151,7 +151,10 @@ function listTopLevelScripts(dir) {
   }
   const names = [];
   for (const ent of ents) {
-    if (!ent.isFile()) continue;
+    // Symlinks are inventoried too: Dirent.isFile() is false for a symlink,
+    // which let an uncalled symlinked script escape the ratchet (Codex #317
+    // round 2, finding 4). A dangling symlink counts as a script with no caller.
+    if (!ent.isFile() && !ent.isSymbolicLink()) continue;
     const n = ent.name;
     if (n.endsWith(".sh") || n.endsWith(".mjs")) names.push(n);
   }
@@ -202,6 +205,14 @@ function pathTokenPresent(line, relPath) {
     let wordStart = idx;
     while (wordStart > 0 && /[A-Za-z0-9_${}<>./-]/.test(stripped[wordStart - 1])) wordStart -= 1;
     if (wordStart !== idx && stripped[idx - 1] !== "/") continue;
+    // A parent prefix must be a checkout root, not a sibling tree
+    // (Codex #317 round 2, finding 2): `./`, `../`, `$ROOT/`, `${DIR}/`,
+    // `<placeholder>/`. `fixtures/scripts/x.sh` is a different file.
+    const parent = stripped.slice(wordStart, idx);
+    const segs = parent.split("/").filter(Boolean);
+    if (!segs.every((s) => /^(\.|\.\.|\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]+\}|<[^>]+>)$/.test(s))) continue;
+    // `VAR=scripts/x.sh cmd` is an assignment VALUE, not an invocation (finding 1).
+    if (wordStart > 0 && stripped[wordStart - 1] === "=") continue;
     const prefix = stripped.slice(0, wordStart).replace(/["'\\]+$/, "");
     if (isInvocationPosition(prefix)) return true;
   }
@@ -209,12 +220,19 @@ function pathTokenPresent(line, relPath) {
 }
 
 function isInvocationPosition(prefix) {
-  // The segment is everything after the last command separator.
-  const seg = prefix.split(/(?:\|\||&&|\|;|[;|(]|\$\(|\brun:\s*)/).pop() ?? "";
-  const words = seg.trim().split(/\s+/).filter(Boolean).filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)); // drop VAR=... prefixes
-  if (words.length === 0) return true; // command position
+  // The segment is everything after the last command separator; shell
+  // keywords that introduce a command (`if`, `while`, `!`, `then`, ...) are
+  // separators too (Codex #317 round 2, finding 3).
+  const seg = prefix.split(/(?:\|\||&&|\|;|[;|(]|\$\(|\brun:\s*|\b(?:if|elif|while|until|then|do|else)\s+|!\s+)/).pop() ?? "";
+  // Here-string: `bash <<< 'scripts/x.sh'` feeds the path to the interpreter.
+  const hereString = /<<<\s*["']?$/.test(seg.trim());
+  const words = seg.replace(/<<<\s*["']?$/, "").trim().split(/\s+/).filter(Boolean)
+    .map((w) => w.replace(/^["']+|["']+$/g, "")) // `"bash" scripts/x.sh`
+    .filter((w) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)); // drop VAR=... prefixes
+  if (words.length === 0) return !hereString; // command position (a bare here-string has no interpreter)
   const last = words[words.length - 1];
   const first = words[0];
+  if (hereString) return INTERPRETERS.has(first) || INTERPRETERS.has(last);
   if (NON_INVOKING.has(first)) return false;
   // Installing a script as an executable (loop.sh symlinks the boundary guard
   // in as `git`) wires it into a gate: count it.

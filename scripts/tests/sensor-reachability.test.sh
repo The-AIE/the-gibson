@@ -557,6 +557,37 @@ else
   bad "live tree exceeds baseline (rc=$live_rc err=$(cat "$ROOT/live.err") out=$live_out)"
 fi
 
+
+echo "# Codex #317 round 2: assignment value, sibling-tree prefix, quoted/if/here-string forms, symlinks"
+FX="$ROOT/fx-r2"
+seed_fixture "$FX"
+for s in assigned sibling quoted ifcond herestr; do printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/$s.sh"; done
+ln -s orphan.sh "$FX/scripts/linked.sh"
+ln -s does-not-exist.sh "$FX/scripts/dangling.sh"
+cat > "$FX/.github/workflows/r2.yml" <<'YML'
+name: r2
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: TARGET=scripts/assigned.sh echo done
+      - run: bash fixtures/scripts/sibling.sh
+      - run: "bash" scripts/quoted.sh
+      - run: if scripts/ifcond.sh; then echo ok; fi
+      - run: bash <<< 'scripts/herestr.sh'
+YML
+write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 9 orphan.sh
+run_sensor "$FX"
+printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/assigned.sh' && ok "r2-1: VAR=scripts/x.sh value is not an invocation" || bad "r2-1: assignment value counted: $(printf '%s\n' "$OUT" | grep assigned)"
+printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/sibling.sh' && ok "r2-2: fixtures/scripts/x.sh does not reach scripts/x.sh" || bad "r2-2: sibling tree matched: $(printf '%s\n' "$OUT" | grep sibling)"
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/quoted.sh' && ok "r2-3a: \"bash\" scripts/x.sh invokes" || bad "r2-3a quoted interpreter missed"
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/ifcond.sh' && ok "r2-3b: if scripts/x.sh; then invokes" || bad "r2-3b if-condition missed"
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/herestr.sh' && ok "r2-3c: bash <<< 'scripts/x.sh' invokes" || bad "r2-3c here-string missed"
+printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/linked.sh' && ok "r2-4: symlinked script is inventoried (ORPHAN when uncalled)" || bad "r2-4 symlink escaped: $(printf '%s\n' "$OUT" | grep -c linked)"
+printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/dangling.sh' && ok "r2-4: dangling symlink is inventoried as an orphan" || bad "r2-4 dangling symlink escaped"
+
 echo
 
 echo "# Codex #317 findings 3-5: invocation position, ./ boundary, committed-baseline ratchet"
