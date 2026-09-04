@@ -56,6 +56,7 @@ export const REASONS = Object.freeze({
   "identity-unresolved": "failure",
   "changes-requested": "failure",
   "head-moved": "failure",
+  "ambiguous-head": "failure",
   "config-error": "failure",
   "api-error": "failure",
 });
@@ -141,36 +142,40 @@ function timestamp(item) {
   return 0;
 }
 
-function loginFromEmail(email) {
-  const m = typeof email === "string" ? email.match(/^(?:\d+\+)?([A-Za-z0-9-]+(?:\[bot\])?)@users\.noreply\.github\.com$/i) : null;
-  return m ? m[1] : null;
-}
-
 /**
  * Resolve every introduced commit's author+committer to a vendor.
  * Returns { vendors:Set, unresolved:[login...] }.
+ *
+ * Identity boundary (Codex review of #315, finding 1): GitHub resolves a
+ * commit's `author.login` / `committer.login` from the raw git email, which any
+ * pusher can set. So a login is trusted ONLY when GitHub itself signed the
+ * commit (`commit.verification.verified === true`: API-created commits, web
+ * UI commits). An UNVERIFIED commit — every CLI-made commit, including the lane
+ * bots' — resolves only through the owner attestation at the exact head, which
+ * names the vendor on the owner's word. Never from raw email metadata.
  */
 export function resolveAuthors(commits, identities, attestedVendor) {
   const byLogin = new Map(identities.map((i) => [norm(i.login), i]));
   const vendors = new Set();
   const unresolved = [];
   for (const c of commits) {
-    const logins = [];
+    const verified = c?.commit?.verification?.verified === true;
+    const short = c?.sha?.slice(0, 7) ?? "?";
     for (const side of ["author", "committer"]) {
-      const login = c?.[side]?.login ?? loginFromEmail(c?.commit?.[side]?.email);
-      if (!login) { unresolved.push(`${side}:${c?.sha?.slice(0, 7) ?? "?"}:no-login`); continue; }
-      if (norm(login) === GITHUB_WEB_FLOW) continue;
-      logins.push(login);
-    }
-    for (const login of logins) {
+      const login = c?.[side]?.login ?? null;
+      if (!login) { unresolved.push(`${side}:${short}:no-login`); continue; }
+      if (norm(login) === GITHUB_WEB_FLOW) {
+        if (!verified) unresolved.push(`${side}:${short}:web-flow-unverified`);
+        continue;
+      }
       const id = byLogin.get(norm(login));
       if (!id || !id.roles.includes("author")) { unresolved.push(login); continue; }
       let vendor = id.vendor;
-      if (vendor === "owner") {
-        if (!attestedVendor) { unresolved.push(`${login}:owner-unattested`); continue; }
+      if (vendor === "unknown") { unresolved.push(`${login}:vendor-unknown`); continue; }
+      if (vendor === "owner" || !verified) {
+        if (!attestedVendor) { unresolved.push(`${login}:${vendor === "owner" ? "owner" : "unverified"}-unattested`); continue; }
         vendor = attestedVendor;
       }
-      if (vendor === "unknown") { unresolved.push(`${login}:vendor-unknown`); continue; }
       if (vendor !== "human") vendors.add(vendor);
     }
   }
@@ -215,18 +220,39 @@ export function collectEvidence({ reviews, comments, identities, headSha }) {
     if (b["head-sha"] !== headSha) { staleReceipts += 1; continue; }
     items.push({ identity: id, result: b.result, at: timestamp(c), id: Number(c?.id ?? 0), source: "comment" });
   }
+  // Newest per identity. Review ids and comment ids are different resource
+  // types with no cross-resource ordering, so a same-second tie between a
+  // review and a comment cannot be broken by id: on a tie, `fail` dominates
+  // (Codex review of #315, finding 5 — fail closed, never fail open).
   const newest = new Map();
   for (const it of items) {
     const k = norm(it.identity.login);
     const cur = newest.get(k);
-    if (!cur || it.at > cur.at || (it.at === cur.at && it.id > cur.id)) newest.set(k, it);
+    if (!cur || it.at > cur.at) { newest.set(k, it); continue; }
+    if (it.at === cur.at) {
+      if (it.result === "fail" && cur.result !== "fail") newest.set(k, it);
+      else if (it.result === cur.result && it.source === cur.source && it.id > cur.id) newest.set(k, it);
+    }
   }
   return { newest: [...newest.values()], staleReceipts };
 }
 
-export function evaluate({ headSha, expectedHead, commits, reviews, comments, config }) {
+export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, commits, reviews, comments, config }) {
   const head = norm(headSha);
   if (head !== norm(expectedHead)) return { state: "failure", reason: "head-moved", detail: `pr head ${head.slice(0, 7)} != expected ${norm(expectedHead).slice(0, 7)}` };
+  // A commit status is keyed by SHA, not by PR (Codex review of #315, finding 3):
+  // two open PRs sharing a head would overwrite each other's verdict. Refuse
+  // to publish a verdict for a head that belongs to more than one open PR.
+  const openForHead = (pullsForHead ?? []).filter((p) => norm(p?.state) === "open").map((p) => Number(p?.number));
+  if (openForHead.length !== 1 || openForHead[0] !== Number(prNumber)) {
+    return { state: "failure", reason: "ambiguous-head", detail: `head belongs to open PRs [${openForHead.join(",")}], evaluating #${prNumber}` };
+  }
+  // The commits endpoint caps at 250 silently (finding 4): an omitted commit is
+  // an unresolved author we never saw. Require the count to match the PR's own.
+  const declared = Number(pull?.commits);
+  if (!Number.isInteger(declared) || declared !== (commits ?? []).length || declared > PR_COMMITS_API_CAP) {
+    return { state: "failure", reason: "api-error", detail: `commits-truncated: pr declares ${declared}, fetched ${(commits ?? []).length}, cap ${PR_COMMITS_API_CAP}` };
+  }
   const att = ownerAttestation(comments ?? [], config.ownerLogin, head, config.attestationVendors);
   const authors = resolveAuthors(commits ?? [], config.identities, att?.vendor ?? null);
   if (authors.unresolved.length > 0) return { state: "failure", reason: "identity-unresolved", detail: [...new Set(authors.unresolved)].join(","), authorVendors: [...authors.vendors], attestation: att };
@@ -254,21 +280,33 @@ async function ghPages(endpoint) {
   return Array.isArray(pages) ? pages.flat() : [];
 }
 
+// GitHub's PR commits endpoint returns at most 250 commits, silently.
+const PR_COMMITS_API_CAP = 250;
+
 async function loadInputs(args) {
   if (args.fixture) {
-    const rd = async (n) => JSON.parse(await readFile(join(args.fixture, n), "utf8"));
+    const rd = async (n, optional) => {
+      try { return JSON.parse(await readFile(join(args.fixture, n), "utf8")); }
+      catch (e) { if (optional && e.code === "ENOENT") return undefined; throw e; }
+    };
     try {
-      return { pull: await rd("pull.json"), commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json") };
+      const pull = await rd("pull.json");
+      // pulls-for-head.json: open PRs whose head is this SHA (default: just this PR)
+      const pullsForHead = (await rd("pulls-for-head.json", true)) ?? [{ number: pull?.number ?? Number(args.pr), state: "open" }];
+      return { pull, commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json"), pullsForHead };
     } catch (e) { throw new Error(`api-error:fixture:${e.message.slice(0, 80)}`); }
   }
   const base = `repos/${args.repo}`;
-  const [pull, commits, reviews, comments] = await Promise.all([
-    ghJson([`${base}/pulls/${args.pr}`]),
+  const pull = await ghJson([`${base}/pulls/${args.pr}`]);
+  const head = norm(pull?.head?.sha ?? "");
+  if (!SHA40.test(head)) throw new Error("api-error:pull-head-missing");
+  const [commits, reviews, comments, pullsForHead] = await Promise.all([
     ghPages(`${base}/pulls/${args.pr}/commits?per_page=100`),
     ghPages(`${base}/pulls/${args.pr}/reviews?per_page=100`),
     ghPages(`${base}/issues/${args.pr}/comments?per_page=100`),
+    ghPages(`${base}/commits/${head}/pulls?per_page=100`),
   ]);
-  return { pull, commits, reviews, comments };
+  return { pull, commits, reviews, comments, pullsForHead };
 }
 
 function outputLines(head, r) {
@@ -288,7 +326,7 @@ export async function main(argv) {
     const inputs = await loadInputs(args);
     if (!SHA40.test(norm(inputs.pull?.head?.sha ?? ""))) throw new Error("api-error:pull-head-missing");
     head = norm(inputs.pull.head.sha);
-    result = evaluate({ headSha: head, expectedHead: args.expectedHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, config });
+    result = evaluate({ headSha: head, expectedHead: args.expectedHead, prNumber: Number(args.pr), pull: inputs.pull, pullsForHead: inputs.pullsForHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, config });
   } catch (e) {
     const msg = e?.message ?? String(e);
     if (msg.startsWith("config-error:") || msg.startsWith("api-error:")) {
