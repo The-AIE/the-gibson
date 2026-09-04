@@ -158,6 +158,22 @@ expect "(y5) base retargeted AFTER the approve → stale-base" "$d" stale-base p
 d=$(fx_new y6); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T12:00:00Z"; fx_timeline "$d" "2026-09-04T11:00:00Z"
 expect "(y6) approve AFTER the retarget → pass" "$d" pass success 0
 
+echo "# Codex round 5 — edit/delete tombstones, equal-second retarget, attestation order, nullable editor"
+d=$(fx_new z1); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|7|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)"; printf '[{"event":"comment_deleted","created_at":"2026-09-04T13:00:00Z"}]' > "$d/timeline.json"
+expect "(z1) a comment deleted AFTER the newest pass voids it (a deleted fail is invisible to REST)" "$d" evidence-deleted pending 0
+d=$(fx_new z2); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|7|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)"; printf '[{"event":"comment_deleted","created_at":"2026-09-04T11:00:00Z"}]' > "$d/timeline.json"
+expect "(z2) a comment deleted BEFORE the pass does not void it" "$d" pass success 0
+d=$(fx_new z3); fx_commits "$d" "$GROK"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|7|2026-09-04T12:00:00Z|$(receipt "$HEAD" pass)|$DEVIN"
+expect "(z3) an App receipt edited even by its own login is void" "$d" no-receipt-at-head pending 0
+d=$(fx_new z4); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T11:00:00Z"; fx_timeline "$d" "2026-09-04T11:00:00Z"
+expect "(z4) retarget in the SAME second as the approve → stale-base" "$d" stale-base pending 0
+d=$(fx_new z5); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T12:00:00Z"
+printf '[{"id":5,"user":{"login":"%s","type":"User"},"author_association":"MEMBER","performed_via_github_app":null,"created_at":"2026-09-04T09:00:00Z","updated_at":"2026-09-04T13:00:00Z","body":"%s"},{"id":6,"user":{"login":"%s","type":"User"},"author_association":"MEMBER","performed_via_github_app":null,"created_at":"2026-09-04T10:00:00Z","updated_at":"2026-09-04T10:00:00Z","body":"%s"}]' "$OWNER" "$(attest "$HEAD" claude)" "$OWNER" "$(attest "$HEAD" devin)" > "$d/comments.json"
+expect "(z5) older attestation (claude) edited later does not outrank the newer one (devin) → same-vendor" "$d" same-vendor-reviewer failure 1
+d=$(fx_new z6); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T12:00:00Z"
+printf '[{"id":5,"user":{"login":"%s","type":"User"},"author_association":"MEMBER","performed_via_github_app":null,"created_at":"2026-09-04T09:00:00Z","edited":true,"body":"%s"}]' "$OWNER" "$(attest "$HEAD" claude)" > "$d/comments.json"
+expect "(z6) attestation edited with NO recorded editor → unknown provenance, ignored" "$d" identity-unresolved failure 1
+
 echo "# AC3 — config and API faults never yield success"
 d=$(fx_new f1); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "missing config" "$d" config-error failure 1 "$ROOT/does-not-exist.json"
@@ -235,6 +251,15 @@ envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 
 : > "$WD/heads.txt"; rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary" && ok "publish: nothing known at all → nonzero + loud summary line" || bad "publish nothing-known was silent (rc=$rc)"
+# Codex round 5: event head always joins the stamped set; unstamped-but-unverdicted heads fail closed; job has no if:.
+H3=dddddddddddddddddddddddddddddddddddddddd
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n' "$HEAD")" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^3 $H3" "$WD/heads.txt" && grep -q "^$H3 pending" "$ROOT/gh.log" && ok "pending step: event head not in the listing is still stamped and recorded" || bad "event head not added: rc=$rc heads=$(tr '\n' ' ' < "$WD/heads.txt")"
+printf '1 %s\n3 %s\n' "$HEAD" "$H3" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin"}\n' "$HEAD" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+envrun env EVENT_PR_NUMBER=3 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q "^$H3 failure" "$ROOT/gh.log" && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: a stamped head with no sweep verdict is published failure (never left pending/stale)" || bad "unverdicted head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+awk '/^jobs:/{f=1} f && /^    if:/{print}' "$WF" | grep -q . && bad "job-level if: present (a skipped run still replaces the queued one)" || ok "no job-level if: — every event runs the sweep"
 printf 'garbage not json\n' > "$WD/results.jsonl"; printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; : > "$ROOT/gh.log"
 envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -ge 1 ] && ok "publish: unparseable sweep output → failure, never success" || bad "publish garbage: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
