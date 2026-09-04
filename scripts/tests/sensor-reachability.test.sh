@@ -84,7 +84,7 @@ run_sensor() {
 echo "# --help is Ask-Contract shaped"
 help_out=$(node "$SENSOR" --help 2>"$ROOT/help.err"); help_rc=$?
 if [[ "$help_rc" -eq 0 ]]; then ok "--help exits 0"; else bad "--help exited $help_rc"; fi
-if printf '%s\n' "$help_out" | grep -q 'WHAT IT DOES' && printf '%s\n' "$help_out" | grep -q 'RISKS'; then
+if printf '%s\n' "$help_out" | grep 'WHAT IT DOES' >/dev/null && printf '%s\n' "$help_out" | grep 'RISKS' >/dev/null; then
   ok "--help names WHAT IT DOES and RISKS"
 else
   bad "--help missing Ask-Contract fields"
@@ -106,24 +106,24 @@ printf '%s\n' 'export default 1' > "$FX/scripts/also.mjs"
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 2 orphan.sh also.mjs
 run_sensor "$FX"
 if [[ "$RC" -eq 0 ]]; then ok "clean fixture exits 0"; else bad "clean fixture rc=$RC err=$ERR out=$OUT"; fi
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/called.sh\tscripts/tests/run-all.sh:' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/called.sh\tscripts/tests/run-all.sh:' >/dev/null \
   && ok "called.sh is REACHABLE with invoking file:line" \
   || bad "called.sh not REACHABLE with file:line: $OUT"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/orphan.sh' \
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/orphan.sh' >/dev/null \
   && ok "orphan.sh is ORPHAN" \
   || bad "orphan.sh not ORPHAN: $OUT"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/also.mjs' \
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/also.mjs' >/dev/null \
   && ok "also.mjs is ORPHAN" \
   || bad "also.mjs not ORPHAN: $OUT"
 # Inventory is top-level only: a file under scripts/lib is not listed.
 mkdir -p "$FX/scripts/lib"
 printf '%s\n' '#!/bin/bash' 'echo lib' > "$FX/scripts/lib/hidden.sh"
 run_sensor "$FX"
-printf '%s\n' "$OUT" | grep -q 'scripts/lib/hidden.sh' \
+printf '%s\n' "$OUT" | grep 'scripts/lib/hidden.sh' >/dev/null \
   && bad "scripts/lib/ was inventoried" \
   || ok "scripts/lib/ is excluded from inventory"
-printf '%s\n' "$OUT" | grep -q 'scripts/tests/run-all.sh' \
-  && printf '%s\n' "$OUT" | grep -qE '^(REACHABLE|ORPHAN)[[:space:]]+scripts/tests/' \
+printf '%s\n' "$OUT" | grep 'scripts/tests/run-all.sh' >/dev/null \
+  && printf '%s\n' "$OUT" | grep -E '^(REACHABLE|ORPHAN)[[:space:]]+scripts/tests/' >/dev/null \
   && bad "scripts/tests/ was inventoried as a sensor" \
   || ok "scripts/tests/ is excluded from inventory"
 
@@ -151,10 +151,10 @@ MD
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 4 \
   orphan.sh also.mjs comment-only.sh prose-only.sh
 run_sensor "$FX"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/comment-only.sh' \
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/comment-only.sh' >/dev/null \
   && ok "YAML comment is not a caller" \
   || bad "comment-only.sh not ORPHAN: $OUT"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/prose-only.sh' \
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/prose-only.sh' >/dev/null \
   && ok "playbook prose / non-bash fence is not a caller" \
   || bad "prose-only.sh not ORPHAN: $OUT"
 
@@ -168,7 +168,7 @@ MD
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 4 \
   orphan.sh also.mjs comment-only.sh prose-only.sh
 run_sensor "$FX"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/fence-called.mjs\tplaybooks/builder.md:' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/fence-called.mjs\tplaybooks/builder.md:' >/dev/null \
   && ok "fenced bash block is a caller with file:line" \
   || bad "fence-called.mjs not REACHABLE: $OUT"
 
@@ -195,11 +195,11 @@ YML
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 4 \
   orphan.sh also.mjs comment-only.sh prose-only.sh
 run_sensor "$FX"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/loop-called.sh\tscripts/loop.sh:' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/loop-called.sh\tscripts/loop.sh:' >/dev/null \
   && ok "loop.sh is a caller" || bad "loop-called.sh: $OUT"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/ci-called.sh\tci/gate.yml:' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/ci-called.sh\tci/gate.yml:' >/dev/null \
   && ok "ci/*.yml is a caller" || bad "ci-called.sh: $OUT"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/wf-called.sh\t.github/workflows/x.yml:' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/wf-called.sh\t.github/workflows/x.yml:' >/dev/null \
   && ok "workflow yml is a caller" || bad "wf-called.sh: $OUT"
 
 echo "# AC2: orphan count over baseline exits 1; --update-baseline refuses to raise"
@@ -207,17 +207,17 @@ seed_fixture "$FX"
 printf '%s\n' '#!/bin/bash' 'echo extra' > "$FX/scripts/nothing-calls-me.sh"
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 1 orphan.sh
 run_sensor "$FX"
-if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -q 'exceeds baseline'; then
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep 'exceeds baseline' >/dev/null; then
   ok "AC4/AC2: synthetic nothing-calls-me.sh exceeds baseline (exit 1)"
 else
   bad "synthetic orphan did not fail (rc=$RC err=$ERR out=$OUT)"
 fi
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/nothing-calls-me.sh' \
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/nothing-calls-me.sh' >/dev/null \
   && ok "AC4: nothing-calls-me.sh classified ORPHAN" \
   || bad "nothing-calls-me.sh not ORPHAN: $OUT"
 
 run_sensor "$FX" --update-baseline
-if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -qi 'may only lower'; then
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -i 'may only lower' >/dev/null; then
   ok "AC2: --update-baseline refuses to raise and says so"
 else
   bad "update-baseline raise (rc=$RC err=$ERR)"
@@ -234,7 +234,7 @@ echo "# --update-baseline lowers when current < baseline"
 seed_fixture "$FX"
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 5 orphan.sh extra.sh
 run_sensor "$FX" --update-baseline
-if [[ "$RC" -eq 0 ]] && printf '%s\n' "$OUT" | grep -q 'baseline lowered 5 -> 1'; then
+if [[ "$RC" -eq 0 ]] && printf '%s\n' "$OUT" | grep 'baseline lowered 5 -> 1' >/dev/null; then
   ok "--update-baseline lowers 5 -> 1"
 else
   bad "lower failed (rc=$RC out=$OUT err=$ERR)"
@@ -250,14 +250,14 @@ echo "# fail closed: missing / malformed baseline"
 seed_fixture "$FX"
 rm -f "$FX/config/sensor-reachability-baseline.v1.json"
 run_sensor "$FX"
-if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -qi 'missing baseline'; then
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -i 'missing baseline' >/dev/null; then
   ok "missing baseline exits 1"
 else
   bad "missing baseline (rc=$RC err=$ERR)"
 fi
 printf '%s\n' '{not json' > "$FX/config/sensor-reachability-baseline.v1.json"
 run_sensor "$FX"
-if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -qi 'malformed'; then
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -i 'malformed' >/dev/null; then
   ok "malformed baseline exits 1"
 else
   bad "malformed baseline (rc=$RC err=$ERR)"
@@ -271,7 +271,7 @@ echo "# missing scripts/ is an error, not a green empty scan"
 mkdir -p "$ROOT/noscripts/config"
 write_baseline "$ROOT/noscripts/config/sensor-reachability-baseline.v1.json" 0
 run_sensor "$ROOT/noscripts"
-if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -qi 'scripts/'; then
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -i 'scripts/' >/dev/null; then
   ok "missing scripts/ exits 1"
 else
   bad "missing scripts/ (rc=$RC err=$ERR)"
@@ -279,14 +279,14 @@ fi
 
 echo "# AC3: live tree names the three Law sensors as ORPHAN"
 live_out=$(node "$SENSOR" --root "$REPO_ROOT" 2>"$ROOT/live.err"); live_rc=$?
-if printf '%s\n' "$live_out" | grep -q $'ORPHAN\tscripts/contract-met.mjs' \
-   && printf '%s\n' "$live_out" | grep -q $'ORPHAN\tscripts/truthful-status.mjs' \
-   && printf '%s\n' "$live_out" | grep -q $'ORPHAN\tscripts/contract-read-check.mjs'; then
+if printf '%s\n' "$live_out" | grep $'ORPHAN\tscripts/contract-met.mjs' >/dev/null \
+   && printf '%s\n' "$live_out" | grep $'ORPHAN\tscripts/truthful-status.mjs' >/dev/null \
+   && printf '%s\n' "$live_out" | grep $'ORPHAN\tscripts/contract-read-check.mjs' >/dev/null; then
   ok "AC3: contract-met, truthful-status, contract-read-check are ORPHAN"
 else
   bad "AC3 Law sensors not ORPHAN (rc=$live_rc): $live_out err=$(cat "$ROOT/live.err")"
 fi
-if printf '%s\n' "$live_out" | grep -q $'REACHABLE\tscripts/sensor-reachability.mjs'; then
+if printf '%s\n' "$live_out" | grep $'REACHABLE\tscripts/sensor-reachability.mjs' >/dev/null; then
   ok "this sensor is REACHABLE (self-gate wires it)"
 else
   bad "sensor-reachability.mjs is not REACHABLE from the self-gate: $live_out"
@@ -310,12 +310,12 @@ if awk '
     # next job-level key at same indent as sensors: ends the job
   }
   in_sensors { print }
-' "$WF" | grep -qE '^[[:space:]]*run:[[:space:]]+node[[:space:]]+scripts/sensor-reachability\.mjs[[:space:]]*$'; then
+' "$WF" | grep -E '^[[:space:]]*run:[[:space:]]+node[[:space:]]+scripts/sensor-reachability\.mjs[[:space:]]*$' >/dev/null; then
   ok "sensors job has run: node scripts/sensor-reachability.mjs"
 else
   # Narrower: the step exists in this workflow and is not under claim-isolation only.
   if grep -nE '^[[:space:]]*run:[[:space:]]+node[[:space:]]+scripts/sensor-reachability\.mjs[[:space:]]*$' "$WF" \
-     | grep -q . \
+     | grep  . >/dev/null \
      && awk '
           /^  sensors:/ { s=1 }
           /^  [A-Za-z0-9_-]+:/ && !/^  sensors:/ { s=0 }
@@ -383,12 +383,12 @@ dco_env=$(awk '
   hit && $0 ~ /^[[:space:]]*- name:/ { exit }
   hit { print }
 ' "$WF")
-if printf '%s\n' "$dco_env" | grep -q 'EVENT_NAME:'; then
+if printf '%s\n' "$dco_env" | grep 'EVENT_NAME:' >/dev/null; then
   ok "DCO step passes github.event_name via env:"
 else
   bad "DCO step missing EVENT_NAME env"
 fi
-if printf '%s\n' "$dco_env" | grep -q 'HEAD_SHA: \${{ github.event.pull_request.head.sha }}'; then
+if printf '%s\n' "$dco_env" | grep 'HEAD_SHA: \${{ github.event.pull_request.head.sha }}' >/dev/null; then
   ok "DCO step passes pull_request.head.sha via HEAD_SHA env"
 else
   bad "DCO step missing HEAD_SHA env from pull_request.head.sha"
@@ -437,7 +437,7 @@ run_dco() { # run_dco <repo> <event> [head_sha] -> sets DCO_OUT DCO_RC
 REPO_U=$(setup_dco_repo unsigned)
 run_dco "$REPO_U" pull_request
 unsigned_sha=$(git -C "$REPO_U" rev-parse --verify HEAD)
-if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep -q "$unsigned_sha"; then
+if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep "$unsigned_sha" >/dev/null; then
   ok "AC5: unsigned commit in fixture repo is red and prints the SHA"
 else
   bad "unsigned DCO (rc=$DCO_RC out=$DCO_OUT want sha=$unsigned_sha)"
@@ -461,8 +461,8 @@ fi
 
 run_dco "$REPO_S" push
 if [[ "$DCO_RC" -eq 0 ]] \
-   && printf '%s\n' "$DCO_OUT" | grep -q '::notice::DCO trailer check skipped' \
-   && printf '%s\n' "$DCO_SUMMARY" | grep -qi 'skipped'; then
+   && printf '%s\n' "$DCO_OUT" | grep '::notice::DCO trailer check skipped' >/dev/null \
+   && printf '%s\n' "$DCO_SUMMARY" | grep -i 'skipped' >/dev/null; then
   ok "AC5: push is a visible skip (notice + step summary), not silent"
 else
   bad "push skip (rc=$DCO_RC out=$DCO_OUT summary=$DCO_SUMMARY)"
@@ -488,7 +488,7 @@ $GIT -C "$REPO_M" merge -q --no-ff -m "Merge feat/dco" feat/dco
 DCO_MERGE=$(git -C "$REPO_M" rev-parse --verify HEAD)
 # Fixture validity: the synthetic merge itself is unsigned.
 run_dco "$REPO_M" pull_request "$DCO_MERGE"
-if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep -q "$DCO_MERGE"; then
+if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep "$DCO_MERGE" >/dev/null; then
   ok "unsigned synthetic merge is red when it is the range head"
 else
   bad "synthetic merge was not unsigned (rc=$DCO_RC out=$DCO_OUT merge=$DCO_MERGE)"
@@ -526,15 +526,15 @@ EOF
 $GIT -C "$REPO_B" commit -q -F "$ROOT/dco-bait-msg"
 bait_sha=$(git -C "$REPO_B" rev-parse --verify HEAD)
 bait_body=$(git -C "$REPO_B" log -1 --format=%B "$bait_sha")
-if ! printf '%s\n' "$bait_body" | grep -q '^Signed-off-by:'; then
+if ! printf '%s\n' "$bait_body" | grep '^Signed-off-by:' >/dev/null; then
   bad "body-bait fixture lost the Signed-off-by body line"
-elif printf '%s\n' "$bait_body" | git interpret-trailers --parse | grep -q '^Signed-off-by:'; then
+elif printf '%s\n' "$bait_body" | git interpret-trailers --parse | grep '^Signed-off-by:' >/dev/null; then
   bad "body-bait fixture was parsed as a real trailer (not a body-grep witness)"
 else
   ok "body-bait fixture: body grep would pass; interpret-trailers has no Signed-off-by"
 fi
 run_dco "$REPO_B" pull_request
-if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep -q "$bait_sha"; then
+if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep "$bait_sha" >/dev/null; then
   ok "finding 2: body-line Signed-off-by that is not a trailer is red"
 else
   bad "body-bait DCO (rc=$DCO_RC out=$DCO_OUT want sha=$bait_sha)"
@@ -580,13 +580,13 @@ jobs:
 YML
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 9 orphan.sh
 run_sensor "$FX"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/assigned.sh' && ok "r2-1: VAR=scripts/x.sh value is not an invocation" || bad "r2-1: assignment value counted: $(printf '%s\n' "$OUT" | grep assigned)"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/sibling.sh' && ok "r2-2: fixtures/scripts/x.sh does not reach scripts/x.sh" || bad "r2-2: sibling tree matched: $(printf '%s\n' "$OUT" | grep sibling)"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/quoted.sh' && ok "r2-3a: \"bash\" scripts/x.sh invokes" || bad "r2-3a quoted interpreter missed"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/ifcond.sh' && ok "r2-3b: if scripts/x.sh; then invokes" || bad "r2-3b if-condition missed"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/herestr.sh' && ok "r2-3c: bash <<< 'scripts/x.sh' invokes" || bad "r2-3c here-string missed"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/linked.sh' && ok "r2-4: symlinked script is inventoried (ORPHAN when uncalled)" || bad "r2-4 symlink escaped: $(printf '%s\n' "$OUT" | grep -c linked)"
-printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/dangling.sh' && ok "r2-4: dangling symlink is inventoried as an orphan" || bad "r2-4 dangling symlink escaped"
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/assigned.sh' >/dev/null && ok "r2-1: VAR=scripts/x.sh value is not an invocation" || bad "r2-1: assignment value counted: $(printf '%s\n' "$OUT" | grep assigned)"
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/sibling.sh' >/dev/null && ok "r2-2: fixtures/scripts/x.sh does not reach scripts/x.sh" || bad "r2-2: sibling tree matched: $(printf '%s\n' "$OUT" | grep sibling)"
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/quoted.sh' >/dev/null && ok "r2-3a: \"bash\" scripts/x.sh invokes" || bad "r2-3a quoted interpreter missed"
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/ifcond.sh' >/dev/null && ok "r2-3b: if scripts/x.sh; then invokes" || bad "r2-3b if-condition missed"
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/herestr.sh' >/dev/null && ok "r2-3c: bash <<< 'scripts/x.sh' invokes" || bad "r2-3c here-string missed"
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/linked.sh' >/dev/null && ok "r2-4: symlinked script is inventoried (ORPHAN when uncalled)" || bad "r2-4 symlink escaped: $(printf '%s\n' "$OUT" | grep -c linked)"
+printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/dangling.sh' >/dev/null && ok "r2-4: dangling symlink is inventoried as an orphan" || bad "r2-4 dangling symlink escaped"
 
 echo
 
@@ -622,20 +622,20 @@ YML
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 9 orphan.sh
 run_sensor "$FX"
 for s in echoed envval heredoc; do
-  printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/'"$s"'.sh' \
+  printf '%s\n' "$OUT" | grep $'ORPHAN\tscripts/'"$s"'.sh' >/dev/null \
     && ok "finding 3: scripts/$s.sh named but not executed is ORPHAN" \
     || bad "finding 3: scripts/$s.sh counted reachable: $(printf '%s\n' "$OUT" | grep "$s")"
 done
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/dotslash.sh' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/dotslash.sh' >/dev/null \
   && ok "finding 4: bash ./scripts/dotslash.sh is REACHABLE" \
   || bad "finding 4: ./ prefix missed: $(printf '%s\n' "$OUT" | grep dotslash)"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/flagged.sh' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/flagged.sh' >/dev/null \
   && ok "interpreter with flags and env prefix invokes (FOO=1 bash -x scripts/flagged.sh)" \
   || bad "flagged invocation missed: $(printf '%s\n' "$OUT" | grep flagged)"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/piped.sh' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/piped.sh' >/dev/null \
   && ok "after a pipe, node scripts/piped.sh invokes" \
   || bad "piped invocation missed: $(printf '%s\n' "$OUT" | grep piped)"
-printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/called.sh' \
+printf '%s\n' "$OUT" | grep $'REACHABLE\tscripts/called.sh' >/dev/null \
   && ok "control: bash scripts/called.sh still REACHABLE" || bad "control regressed"
 
 FX="$ROOT/fx-ratchet"
@@ -644,7 +644,7 @@ seed_fixture "$FX"
 printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/new-orphan.sh"
 write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 2 orphan.sh new-orphan.sh
 run_sensor "$FX"
-if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -q 'HIGHER than the committed'; then
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep 'HIGHER than the committed' >/dev/null; then
   ok "finding 5: hand-raised orphanMax (1→2) with a new orphan is RED against origin/main"
 else
   bad "finding 5: hand-raise passed (rc=$RC err=$ERR)"
@@ -655,7 +655,7 @@ run_sensor "$FX"
 rm -f "$FX/scripts/new-orphan.sh"; run_sensor "$FX"
 [[ "$RC" -eq 0 ]] && ok "finding 5 control: at the committed baseline → green" || bad "clean tree red (rc=$RC err=$ERR)"
 run_sensor "$FX" --ratchet-ref refs/does/not/exist
-[[ "$RC" -eq 0 ]] && printf '%s\n' "$ERR" | grep -q 'no committed baseline' && ok "unresolvable ratchet ref → note, working-tree check only" || bad "unresolvable ref handling (rc=$RC err=$ERR)"
+[[ "$RC" -eq 0 ]] && printf '%s\n' "$ERR" | grep 'no committed baseline' >/dev/null && ok "unresolvable ratchet ref → note, working-tree check only" || bad "unresolvable ref handling (rc=$RC err=$ERR)"
 
 echo "sensor-reachability.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

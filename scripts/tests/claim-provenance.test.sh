@@ -17,8 +17,8 @@ ADVERSARIAL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 pos() { POSITIVE=$((POSITIVE + 1)); ok "$1"; }
 adv() { ADVERSARIAL=$((ADVERSARIAL + 1)); ok "$1"; }
 adv_fail() { ADVERSARIAL=$((ADVERSARIAL + 1)); bad "$1"; }
@@ -216,7 +216,7 @@ export GH_PR_REPO="acme/app"
 export GH_PR_BASE_OID="$_BASE"
 out=$(run_reader "$ROOT/p1/wt" 99 "$RES" issue-42-demo 42 "$BRANCH" 2>/dev/null); rc=$?
 check "reservation-only reader exits 0" "$rc" "0"
-if echo "$out" | grep -q '"verified":true' && echo "$out" | grep -q "$RES"; then
+if echo "$out" | grep '"verified":true' >/dev/null && echo "$out" | grep "$RES" >/dev/null; then
   pos "reservation-only verifies the empty commit"
 else
   bad "reservation-only did not verify: $out"
@@ -238,7 +238,7 @@ git -C "$ROOT/p1/wt" push -q origin "$BRANCH"
 export GH_PR_HEAD="$IMPL1"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL1" issue-42-demo 42 "$BRANCH" 2>/dev/null); rc=$?
 check "one-impl reader exits 0" "$rc" "0"
-if echo "$out" | grep -q "$RES" && echo "$out" | grep -q "$IMPL1" && echo "$out" | grep -q '"verified":true'; then
+if echo "$out" | grep "$RES" >/dev/null && echo "$out" | grep "$IMPL1" >/dev/null && echo "$out" | grep '"verified":true' >/dev/null; then
   pos "one implementation commit stays ordinary beside the reservation"
 else
   bad "one-impl classification failed: $out"
@@ -256,7 +256,7 @@ git -C "$ROOT/p1/wt" push -q origin "$BRANCH"
 export GH_PR_HEAD="$IMPL2"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" 2>/dev/null); rc=$?
 check "two-impl reader exits 0" "$rc" "0"
-if echo "$out" | grep -q "$IMPL1" && echo "$out" | grep -q "$IMPL2" && echo "$out" | grep -q '"verified":true'; then
+if echo "$out" | grep "$IMPL1" >/dev/null && echo "$out" | grep "$IMPL2" >/dev/null && echo "$out" | grep '"verified":true' >/dev/null; then
   pos "two same-vendor implementation/fix commits stay ordinary"
 else
   bad "two-impl classification failed: $out"
@@ -267,7 +267,7 @@ cp "$ROOT/p1/body" "$ROOT/p1/body.dup"
 printf '%s\n' "- Active-work claim: issue-42-demo" >> "$ROOT/p1/body.dup"
 export GH_PR_BODY="$ROOT/p1/body.dup"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'duplicate_marker'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'duplicate_marker' >/dev/null; then
   adv "duplicate marker refuses verification"
 else
   adv_fail "duplicate marker still verified (rc=$rc): $out"
@@ -277,7 +277,7 @@ export GH_PR_BODY="$ROOT/p1/body"
 echo "adversarial · fork PR"
 export GH_PR_CROSS=true
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'fork_pr'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'fork_pr' >/dev/null; then
   adv "fork PR refuses verification"
 else
   adv_fail "fork PR still verified (rc=$rc): $out"
@@ -298,7 +298,7 @@ echo "adversarial · unstable head"
 export GH_PR_DRIFT=1
 export GH_PR_HEAD_DRIFT="$IMPL1"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'unstable_head|head_mismatch'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'unstable_head|head_mismatch' >/dev/null; then
   adv "head drift refuses verification"
 else
   adv_fail "head drift still verified (rc=$rc): $out"
@@ -309,7 +309,7 @@ export GH_PR_HEAD="$IMPL2"
 echo "adversarial · missing login"
 export GH_NO_LOGIN=1
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'login_ambiguity'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'login_ambiguity' >/dev/null; then
   adv "missing GitHub login refuses verification"
 else
   adv_fail "missing login still verified (rc=$rc): $out"
@@ -319,7 +319,7 @@ unset GH_NO_LOGIN
 echo "adversarial · truncated commit payload"
 export GH_TRUNCATED_COMMIT=1
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'truncated_api|unreadable_object'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'truncated_api|unreadable_object' >/dev/null; then
   adv "truncated commit payload refuses verification"
 else
   adv_fail "truncated commit still verified (rc=$rc): $out"
@@ -339,7 +339,7 @@ export GH_PR_BRANCH="feat/256-old"
 GH_PR_BASE_OID=$(git -C "$ROOT/hist/wt" rev-parse HEAD^)
 export GH_PR_BASE_OID
 out=$(run_reader "$ROOT/hist/wt" 272 "$OLD" issue-256-old 256 feat/256-old --require-verified-reservation "$OLD" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"reservation":null'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep '"reservation":null' >/dev/null; then
   adv "v1-less historical body is not a verified reservation"
 else
   adv_fail "v1-less body verified (rc=$rc): $out"
@@ -419,7 +419,7 @@ else
   adv_fail "missing original parent did not return an unverified report (rc=$rc): $out"
 fi
 out=$(run_reader "$ROOT/shallow/wt" 99 "$SHALLOW_RES" issue-42-shallow 42 "$SHALLOW_BRANCH" --require-verified-reservation "$SHALLOW_RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"reservation":null'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep '"reservation":null' >/dev/null; then
   adv "writer predicate refuses a missing original parent"
 else
   adv_fail "writer accepted a missing original parent (rc=$rc): $out"
@@ -444,13 +444,13 @@ else
   adv_fail "incomplete body escaped report-only classification (rc=$rc): $out"
 fi
 out=$(run_reader "$ROOT/shallow/wt" 99 "$SHALLOW_RES" issue-42-shallow 42 "$SHALLOW_BRANCH" --require-verified-reservation "$SHALLOW_RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"reservation":null'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep '"reservation":null' >/dev/null; then
   adv "writer predicate refuses incomplete body with unreadable original"
 else
   adv_fail "writer accepted incomplete body with unreadable original (rc=$rc): $out"
 fi
 export GH_PR_BODY="$ROOT/shallow/body"
-if echo "$complete_missing_out" | grep -q '"verified":true'; then
+if echo "$complete_missing_out" | grep '"verified":true' >/dev/null; then
   adv_fail "missing original parent inherited the live-base tree: $complete_missing_out"
 else
   adv "missing original parent never inherits the live-base tree"
@@ -463,13 +463,13 @@ export GH_PR_BRANCH="$BRANCH"
 export GH_PR_BASE_OID="$_BASE"
 export GH_PR_STATE=CLOSED
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"reservation":null'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep '"reservation":null' >/dev/null; then
   adv "writer predicate refuses a stable CLOSED snapshot"
 else
   adv_fail "writer predicate accepted stable CLOSED (rc=$rc): $out"
 fi
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" 2>/dev/null); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"verified":true'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep '"verified":true' >/dev/null; then
   adv "report-only may inspect a stable CLOSED snapshot"
 else
   adv_fail "report-only refused stable CLOSED (rc=$rc): $out"
@@ -496,9 +496,9 @@ export GH_PR_HEAD="$ONBASE_RES"
 export GH_PR_BRANCH="feat/42-onbase"
 export GH_PR_BASE_OID="$ONBASE_RES"
 out=$(run_reader "$ROOT/onbase/wt" 99 "$ONBASE_RES" issue-42-demo 42 feat/42-onbase --require-verified-reservation "$ONBASE_RES" 2>/dev/null); rc=$?
-if echo "$out" | grep -q '"verified":true'; then
+if echo "$out" | grep '"verified":true' >/dev/null; then
   adv_fail "reservation already on live base still verified: $out"
-elif [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'reservation_not_in_history|rebased_reservation'; then
+elif [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'reservation_not_in_history|rebased_reservation' >/dev/null; then
   adv "reservation already on the live base is not verified"
 else
   adv_fail "reservation already on live base was not fail-closed (rc=$rc): $out"
@@ -512,7 +512,7 @@ export GH_PR_BASE_OID="$_BASE"
 export GH_PR_JSON_NUMBER=100
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_PR_JSON_NUMBER
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'binding_mismatch'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'binding_mismatch' >/dev/null; then
   adv "mismatched live PR number is rejected"
 else
   adv_fail "mismatched PR number still verified (rc=$rc): $out"
@@ -522,7 +522,7 @@ echo "exact-diff · mismatched live head branch is rejected"
 export GH_PR_BRANCH="feat/copied-other"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 export GH_PR_BRANCH="$BRANCH"
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'binding_mismatch'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'binding_mismatch' >/dev/null; then
   adv "mismatched live head branch is rejected"
 else
   adv_fail "mismatched head branch still verified (rc=$rc): $out"
@@ -532,7 +532,7 @@ echo "exact-diff · mismatched live base ref is rejected"
 export GH_PR_BASE_REF=develop
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_PR_BASE_REF
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'binding_mismatch'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'binding_mismatch' >/dev/null; then
   adv "mismatched live base ref is rejected"
 else
   adv_fail "mismatched base ref still verified (rc=$rc): $out"
@@ -542,7 +542,7 @@ echo "exact-diff · mismatched live base repository is rejected"
 export GH_PR_JSON_REPO="other/fork"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_PR_JSON_REPO
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'binding_mismatch|fork_pr'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'binding_mismatch|fork_pr' >/dev/null; then
   adv "mismatched live base repository is rejected"
 else
   adv_fail "mismatched base repository still verified (rc=$rc): $out"
@@ -554,7 +554,7 @@ url_adv() {
   export GH_PR_URL="$url"
   out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
   unset GH_PR_URL
-  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'binding_mismatch|unreadable_object'; then
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'binding_mismatch|unreadable_object' >/dev/null; then
     adv "$name"
   else
     adv_fail "$name still verified (rc=$rc): $out"
@@ -570,7 +570,7 @@ url_adv "lookalike GitHub host" "https://github.com.evil/acme/app/pull/99"
 export GH_PR_URL="https://github.com/acme/app/pull/99"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" 2>/dev/null); rc=$?
 unset GH_PR_URL
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"verified":true'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep '"verified":true' >/dev/null; then
   pos "happy exact PR URL remains green without baseRepository"
 else
   bad "happy exact PR URL did not verify (rc=$rc): $out"
@@ -583,7 +583,7 @@ export GH_PR_BASE_OID_DRIFT="ffffffffffffffffffffffffffffffffffffffff"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_PR_DRIFT_BASE_OID GH_PR_BASE_OID_DRIFT
 export GH_PR_BASE_OID="$_BASE"
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'unstable_identity|binding_mismatch|unreadable_object'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'unstable_identity|binding_mismatch|unreadable_object' >/dev/null; then
   adv "drifting live base OID is rejected"
 else
   adv_fail "drifting base OID still verified (rc=$rc): $out"
@@ -594,7 +594,7 @@ rm -f "$ROOT/p1/body.views"
 export GH_PR_DRIFT_STATE=1
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_PR_DRIFT_STATE
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'unstable_identity|binding_mismatch'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'unstable_identity|binding_mismatch' >/dev/null; then
   adv "drifting live state is rejected"
 else
   adv_fail "drifting state still verified (rc=$rc): $out"
@@ -606,7 +606,7 @@ export GH_PR_BRANCH="feat/7-other"
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 feat/42-demo --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_PR_JSON_NUMBER
 export GH_PR_BRANCH="$BRANCH"
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'binding_mismatch'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'binding_mismatch' >/dev/null; then
   adv "copied reservation on another PR is rejected by live PR/base/branch binding"
 else
   adv_fail "copied reservation still verified via trailers only (rc=$rc): $out"
@@ -637,7 +637,7 @@ export GH_PR_HEAD="$MERGE_HEAD"
 export GH_PR_BRANCH="$MERGE_BRANCH"
 export GH_PR_BASE_OID="$MERGE_BASE"
 out=$(run_reader "$ROOT/merge/wt" 99 "$MERGE_HEAD" issue-42-merge 42 "$MERGE_BRANCH" 2>/dev/null); rc=$?
-if echo "$out" | grep -qF "$SIDE" && echo "$out" | grep -q "Mark Hinkle" && echo "$out" | grep -q '"verified":true'; then
+if echo "$out" | grep -F "$SIDE" >/dev/null && echo "$out" | grep "Mark Hinkle" >/dev/null && echo "$out" | grep '"verified":true' >/dev/null; then
   adv "merge second-parent-side commit is ordinary provenance with raw identity"
 else
   adv_fail "merge-side commit missing or reservation unverified (rc=$rc): $out"
@@ -651,7 +651,7 @@ export GH_PR_BASE_OID="$_BASE"
 export GH_PR_CROSS=true
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" 2>/dev/null); rc=$?
 unset GH_PR_CROSS
-if echo "$out" | grep -q 'fork_pr' && echo "$out" | node -e '
+if echo "$out" | grep 'fork_pr' >/dev/null && echo "$out" | node -e '
   let s=""; process.stdin.on("data", d => s += d); process.stdin.on("end", () => {
     const j = JSON.parse(s);
     const u = (j.unverified || [])[0];
@@ -667,7 +667,7 @@ echo "exact-diff · commit REST sha mismatch is rejected"
 export GH_COMMIT_SHA_MISMATCH=1
 out=$(run_reader "$ROOT/p1/wt" 99 "$IMPL2" issue-42-demo 42 "$BRANCH" --require-verified-reservation "$RES" 2>/dev/null); rc=$?
 unset GH_COMMIT_SHA_MISMATCH
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'binding_mismatch|unreadable_object'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'binding_mismatch|unreadable_object' >/dev/null; then
   adv "commit REST sha mismatch is rejected"
 else
   adv_fail "mismatched commit REST sha still verified (rc=$rc): $out"

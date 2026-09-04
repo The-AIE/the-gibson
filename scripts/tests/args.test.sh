@@ -40,7 +40,7 @@ stdout=$(node "$TI" journal-append --journal "$ROOT/j.jsonl" \
   --old "$ROOT/base.json" --new "$ROOT/head.json" \
   --reason '--because' 2>"$ROOT/err2"); rc=$?
 stderr=$(cat "$ROOT/err2")
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$stdout" | grep -q '"reason":"--because"'; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$stdout" | grep '"reason":"--because"' >/dev/null; then
   ok "inlined readFlag accepts --reason '--because' (value kept)"
 else
   bad "reason dash-leading value (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -50,7 +50,7 @@ echo "# --waiver-text with no following token is a usage error (exit 2)"
 stdout=$(node "$TI" compare --base "$ROOT/base.json" --head "$ROOT/head.json" \
   --waiver-text 2>"$ROOT/err3"); rc=$?
 stderr=$(cat "$ROOT/err3")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'requires a value'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'requires a value' >/dev/null; then
   ok "--waiver-text with nothing after exits 2 on stderr"
 else
   bad "missing waiver-text value (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -59,7 +59,7 @@ fi
 echo "# --definitely-not-a-flag is unknown (exit 2, stderr)"
 stdout=$(node "$TI" --definitely-not-a-flag 2>"$ROOT/err4"); rc=$?
 stderr=$(cat "$ROOT/err4")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "--definitely-not-a-flag exits 2 with unknown flag on stderr"
 else
   bad "unknown flag (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -69,7 +69,7 @@ CAW="$SCRIPT_DIR/../check-active-work.mjs"
 echo "# check-active-work.mjs --definitely-not-a-flag is unknown (exit 2, stderr)"
 stdout=$(node "$CAW" --definitely-not-a-flag 2>"$ROOT/err-caw1"); rc=$?
 stderr=$(cat "$ROOT/err-caw1")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "check-active-work.mjs --definitely-not-a-flag exits 2 with unknown flag on stderr"
 else
   bad "check-active-work unknown flag (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -78,7 +78,7 @@ fi
 echo "# check-active-work.mjs --help works"
 stdout=$(node "$CAW" --help 2>"$ROOT/err-caw2"); rc=$?
 stderr=$(cat "$ROOT/err-caw2")
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$stdout" | grep -q 'check-active-work'; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$stdout" | grep 'check-active-work' >/dev/null; then
   ok "check-active-work.mjs --help exits 0"
 else
   bad "check-active-work --help (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -111,7 +111,7 @@ console.log("should-have-exited");
 JS
 stdout=$(node "$ROOT/missing.mjs" 2>"$ROOT/err7"); rc=$?
 stderr=$(cat "$ROOT/err7")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'requires a value'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'requires a value' >/dev/null; then
   ok "args.mjs readFlag missing value exits 2 on stderr"
 else
   bad "args.mjs missing value (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -124,7 +124,7 @@ console.log("should-have-exited");
 JS
 stdout=$(node "$ROOT/unknown.mjs" 2>"$ROOT/err8"); rc=$?
 stderr=$(cat "$ROOT/err8")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "args.mjs rejectUnknownFlags unknown flag exits 2 on stderr"
 else
   bad "args.mjs unknown flag (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -138,7 +138,7 @@ console.log("should-have-exited");
 JS
 stdout=$(node "$ROOT/bool-then-unknown.mjs" 2>"$ROOT/err9"); rc=$?
 stderr=$(cat "$ROOT/err9")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "boolean --json then unknown flag is rejected (not swallowed as a value)"
 else
   bad "boolean then unknown (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -168,7 +168,7 @@ console.log("should-have-exited");
 JS
 stdout=$(node "$ROOT/dash-as-flag.mjs" 2>"$ROOT/err11"); rc=$?
 stderr=$(cat "$ROOT/err11")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --because'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --because' >/dev/null; then
   ok "without valueFlags, '--because' after --reason is unknown"
 else
   bad "empty valueFlags dash token (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -177,7 +177,7 @@ fi
 echo "# test-integrity parse rejects unknown flags"
 stdout=$(node "$TI" parse --input "$ROOT/base.json" --definitely-not-a-flag 2>"$ROOT/err12"); rc=$?
 stderr=$(cat "$ROOT/err12")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "test-integrity parse unknown flag exits 2 on stderr"
 else
   bad "parse unknown flag (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -187,7 +187,7 @@ echo "# test-integrity compare rejects unknown flags"
 stdout=$(node "$TI" compare --base "$ROOT/base.json" --head "$ROOT/head.json" \
   --definitely-not-a-flag 2>"$ROOT/err13"); rc=$?
 stderr=$(cat "$ROOT/err13")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "test-integrity compare unknown flag exits 2 on stderr"
 else
   bad "compare unknown flag (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -197,7 +197,7 @@ echo "# test-integrity compare --json then unknown flag is rejected"
 stdout=$(node "$TI" compare --base "$ROOT/base.json" --head "$ROOT/head.json" \
   --json --definitely-not-a-flag 2>"$ROOT/err14"); rc=$?
 stderr=$(cat "$ROOT/err14")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "test-integrity compare --json then unknown flag exits 2"
 else
   bad "compare --json then unknown (rc=$rc stdout=$stdout stderr=$stderr)"
@@ -208,7 +208,7 @@ stdout=$(node "$TI" journal-append --journal "$ROOT/j2.jsonl" \
   --old "$ROOT/base.json" --new "$ROOT/head.json" --reason ok \
   --definitely-not-a-flag 2>"$ROOT/err15"); rc=$?
 stderr=$(cat "$ROOT/err15")
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep -q 'unknown flag: --definitely-not-a-flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$stderr" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null; then
   ok "test-integrity journal-append unknown flag exits 2 on stderr"
 else
   bad "journal-append unknown flag (rc=$rc stdout=$stdout stderr=$stderr)"

@@ -869,7 +869,7 @@ if [[ "$(formal_event)" == "REQUEST_CHANGES" && "$(formal_commit)" == "$SHA" ]];
 else
   bad "argv: event=$(formal_event) commit=$(formal_commit)"
 fi
-if grep -q 'test-reviewer-token' "$GH_LOG" 2>/dev/null || grep -q 'GH_TOKEN=' "$GH_LOG" 2>/dev/null; then
+if grep -q 'test-reviewer-token' "$GH_LOG" 2>/dev/null || grep 'GH_TOKEN=' "$GH_LOG" 2>/dev/null; then
   bad "argv: token appeared in gh argv log"
 else
   ok "argv: reviewer token stayed out of gh argv"
@@ -1014,7 +1014,7 @@ else
   bad "no-commit: adapter missing commit_id/--commit"
 fi
 if grep -q -- '--commit "$REVIEWED_SHA"' "$SECOND_OPINION" \
-  || grep -q -- '--commit "$REVIEWED_SHA"' "$SECOND_OPINION"; then
+  || grep  -- '--commit "$REVIEWED_SHA"' "$SECOND_OPINION" >/dev/null; then
   ok "no-commit: second-opinion passes frozen SHA"
 else
   # allow split across lines
@@ -1028,7 +1028,7 @@ fi
 reset_formal
 out=$("$FORMAL_REVIEW" --pr 9 --repo acme/app --event approve --body LGTM 2>&1)
 rc=$?
-if [[ "$rc" -eq 2 ]] && echo "$out" | grep -q -- '--commit' && [[ "$(formal_count)" -eq 0 ]]; then
+if [[ "$rc" -eq 2 ]] && echo "$out" | grep  -- '--commit' >/dev/null && [[ "$(formal_count)" -eq 0 ]]; then
   ok "no-commit: missing --commit refuses before mutation"
 else
   bad "no-commit missing-commit rc=$rc count=$(formal_count) out=$out"
