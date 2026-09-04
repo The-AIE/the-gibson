@@ -180,10 +180,10 @@ function fieldValue(body, name) {
       if (isFenceClose(line, fence)) fence = null;
       continue;
     }
-    if (htmlComment) { if (line.includes("-->")) htmlComment = false; continue; }
-    const openIdx = line.indexOf("<!--");
-    if (openIdx >= 0 && line.indexOf("-->", openIdx) < 0) { htmlComment = true; continue; }
-    if (/^\s*<!--.*-->\s*$/.test(line)) continue;
+    if (htmlComment) { if (line.includes("-->")) { htmlComment = htmlScan(line.slice(line.indexOf("-->") + 3)).opensUnclosed; } continue; }
+    const st = htmlScan(line);
+    if (st.opensUnclosed) htmlComment = true;
+    if (st.hadComment) continue; // a field on a line that also carries comment markup is not a clean field
     const open = fenceOpen(line);
     if (open) {
       fence = open;
@@ -203,6 +203,27 @@ function fieldValue(body, name) {
     return parts.join(" ").trim();
   }
   return null;
+}
+
+/**
+ * Walk every `<!--` / `-->` on one line. Returns the text outside comments
+ * (`visible`), whether the line ends inside an unclosed comment
+ * (`opensUnclosed`), and whether any comment appeared (`hadComment`).
+ */
+function htmlScan(line) {
+  let visible = ""; let i = 0; let inside = false; let hadComment = false;
+  while (i < line.length) {
+    if (!inside) {
+      const o = line.indexOf("<!--", i);
+      if (o < 0) { visible += line.slice(i); break; }
+      visible += line.slice(i, o); inside = true; hadComment = true; i = o + 4;
+    } else {
+      const c = line.indexOf("-->", i);
+      if (c < 0) { i = line.length; break; }
+      inside = false; i = c + 3;
+    }
+  }
+  return { visible, opensUnclosed: inside, hadComment };
 }
 
 function parseLedger(text) {
@@ -229,17 +250,17 @@ function parseLedger(text) {
     // An HTML comment block is not ledger content (Codex #316 round 3,
     // finding 4): a commented-out template must not become an entry.
     if (htmlComment) {
-      if (line.includes("-->")) htmlComment = false;
+      if (line.includes("-->")) htmlComment = htmlScan(line.slice(line.indexOf("-->") + 3)).opensUnclosed;
       continue;
     }
-    // A comment may open mid-line (`prose <!--`): everything after `<!--`
-    // until `-->` is not ledger content (Codex #316 round 4, finding 1).
-    const openIdx = line.indexOf("<!--");
-    if (openIdx >= 0 && line.indexOf("-->", openIdx) < 0) {
-      htmlComment = true;
-      if (!/^\s*$/.test(line.slice(0, openIdx)) && HEADING_RE.test(line.slice(0, openIdx))) { /* heading before the comment still counts */ } else { continue; }
-    }
-    if (/^\s*<!--.*-->\s*$/.test(line)) continue;
+    // A comment may open mid-line, and a line may hold several openers and
+    // closers (`<!-- x --> <!--`): walk them all; the state after the LAST
+    // one wins (Codex #316 rounds 4–5). Content before the first opener is
+    // still content (a heading before a comment still counts).
+    const st = htmlScan(line);
+    if (st.opensUnclosed) htmlComment = true;
+    if (st.visible.trim() === "" && (st.opensUnclosed || st.hadComment)) continue;
+    if (st.hadComment) { const mh = st.visible.match(HEADING_RE); if (mh) { flush(i); current = { id: mh[1], num: Number(mh[2]), headingLine: i + 1, startLine: i }; } continue; }
     const open = fenceOpen(line);
     if (open) {
       fence = open;
@@ -325,13 +346,24 @@ function isExplicitPinMarker(line, id) {
   // fixture text, not a pin (Codex #316 round 3, finding 2). Only a line that
   // IS a comment, or a bare `pin:`/`regression:` line, counts.
   const trimmed = line.trim();
-  if (/^#/.test(trimmed)) return new RegExp(`#\\s*(?:pins?|pin:|regression:)\\s*${escaped}\\b`, "i").test(trimmed);
-  if (quotedContainsId(line, id)) return false;
-  // A trailing shell comment on a code line (`[[ … ]] # pins L-NNN`) is an
-  // explicit marker too (Codex #316 round 4, finding 2); the ID is outside
-  // quotes by the check above, so the `#` is a real comment.
-  if (new RegExp(`#\\s*(?:pins?|pin:|regression:)\\s*${escaped}\\b`, "i").test(line)) return true;
-  if (new RegExp(`\\b(?:pin|regression):\\s*${escaped}\\b`, "i").test(line)) return true;
+  const markerRe = new RegExp(`#\\s*(?:pins?|pin:|regression:)\\s*${escaped}\\b`, "i");
+  if (/^#/.test(trimmed)) return markerRe.test(trimmed);
+  // Split the line into code and trailing comment at the first `#` that is
+  // outside quotes (Codex #316 round 5, finding 1): a quoted copy of the ID
+  // in the code part (`grep -q 'L-001' … # pins L-001`) must not veto the
+  // real marker in the comment part.
+  let q = null; let cut = -1;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === "\\" && q === '"') { i++; continue; } if (ch === q) q = null; continue; }
+    if (ch === '"' || ch === "'") { q = ch; continue; }
+    if (ch === "#") { cut = i; break; }
+  }
+  const code = cut >= 0 ? line.slice(0, cut) : line;
+  const comment = cut >= 0 ? line.slice(cut) : "";
+  if (comment && markerRe.test(comment)) return true;
+  if (quotedContainsId(code, id)) return false;
+  if (new RegExp(`\\b(?:pin|regression):\\s*${escaped}\\b`, "i").test(code)) return true;
   return false;
 }
 
@@ -343,16 +375,15 @@ function isTestNameLine(line, id) {
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   if (new RegExp(`@(?:test|it)\\s+["'](?:#\\s*)?${escaped}\\b`).test(line)) return true;
   if (!quotedContainsId(line, id)) return false;
-  // The ID must LEAD the quoted title (`ok "L-020 releases the lane"`,
-  // `echo "# L-020 · …"`, `it("L-020 …")`), so a needle or fixture string that
-  // merely mentions the ID (`echo "L-020"` written to a file, an assertion on
-  // fixture output) is not a test name (finding 2).
-  const leads = new RegExp(`["'](?:#\\s*)?${escaped}(?:\\s|·|:|$)`);
-  if (!leads.test(line)) return false;
+  // A test/case TITLE containing the ID is a pin (the issue's rule): the
+  // quoted argument of ok/bad/expect/check or a test()/it()/describe() call
+  // is a title, wherever the ID sits in it (Codex #316 round 5, finding 2).
+  // A bare `echo "…"` is a title only when the ID LEADS it (`echo "# L-NNN ·"`)
+  // and nothing is piped or redirected — otherwise it is a needle or fixture.
   if (/^\s*(?:test|it|describe)\s*\(/.test(line)) return true;
   if (/^\s*(ok|bad|expect|check)\b/.test(line)) return true;
-  // This repo's case titles: echo "# L-NNN · …" with no pipe or redirect.
-  if (/^\s*echo\s+["']/.test(line) && !/[|>]/.test(line)) return true;
+  const leads = new RegExp(`["'](?:#\\s*)?${escaped}(?:\\s|·|:|$)`);
+  if (/^\s*echo\s+["']/.test(line) && !/[|>]/.test(line) && leads.test(line)) return true;
   return false;
 }
 

@@ -545,7 +545,7 @@ treat pending ux-eval as product risk once path-filter would have skipped;
 still wait when UI paths are in the diff. (3) Do **not** loosen Tier C
 gates or drop live UX for real UI PRs. Distinct from L-012 (preview
 protection / soft-skip when a live target is needed).
-**Status:** fix-pending (the-gibson#12; practiced on PR #165)
+**Status:** fixed (pinned by scripts/tests/ux-surface.test.sh; previously fix-pending the-gibson#12, practiced on PR #165)
 **Tags:** #ci #ux-eval #preview #path-filter #solo-loop #release #local
 #process
 
