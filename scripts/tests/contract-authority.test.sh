@@ -4493,6 +4493,22 @@ function grepErePass(groupInner, shortOpts) {
     ")\"\n"
   );
 }
+function grepQ(pat) {
+  return approveArms() + "\ngrep -q \"" + pat + "\"\n";
+}
+function grepMaxCountPass(pat) {
+  return approveArms() + "\ngrep -m 1 -q \"" + pat + "\"\n";
+}
+function grepUnknownArgv(pat) {
+  return approveArms() + "\ngrep --not-a-real-grep-option 1 \"" + pat + "\"\n";
+}
+function varIndirectPass() {
+  return (
+    approveArms() +
+    "\nPAT=\u0027VERDICT:[[:space:]]*(APPROVE|PASS)\u0027\n" +
+    "[[ \"$1\" =~ $PAT ]]\n"
+  );
+}
 function jqSource(groupInner) {
   // Exact extractable operand bytes matching live release-preflight.sh
   // test("..."): one backslash before n, two before s.
@@ -4892,6 +4908,98 @@ const rows = [
         ].join("\n"),
         approveOnly
       ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "blank-class-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepQ("VERDICT:[[:blank:]]*PASS"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "repeated-space-class-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepQ("VERDICT:[[:space:]][[:space:]]*PASS"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "charclass-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepQ("VERDICT:[Pp][Aa][Ss][Ss]"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "negated-class-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepQ("VERDICT:[^X]*PASS"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "alpha-class-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepQ("VERDICT:[[:alpha:]]*PASS"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "grep-m-1-q-pass",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepMaxCountPass("VERDICT:[[:space:]]*PASS"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_VOCABULARY",
+    msg: ["scripts/second-opinion.sh accepts VERDICT: PASS"],
+  },
+  {
+    name: "grep-m-1-q-canonical-only",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepMaxCountPass("VERDICT:[[:space:]]*APPROVE"),
+        approveOnly
+      ),
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "grep-unknown-opt-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(
+        grepUnknownArgv("VERDICT:[[:space:]]*PASS"),
+        approveOnly
+      ),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "var-indirect-pat-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(varIndirectPass(), approveOnly),
     }),
     code: "E_VERDICT_FORM",
     msg: ["scripts/second-opinion.sh", "indeterminate"],
@@ -5849,6 +5957,102 @@ if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_FORM'; then
   ok "mutation: PA(S)S indeterminate verdict form fails closed"
 else
   bad "mutation PA(S)S indeterminate (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+# Exact-head review 5108045280: unknown executable PASS operands, grep -m, opaque $PAT.
+plant_approve_grep() {
+  local pat=$1
+  printf '%s\n' '#!/bin/bash' \
+    'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+    "grep -q '$pat'" \
+    > "$SANDBOX/scripts/second-opinion.sh"
+  cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
+}
+while IFS='|' read -r name sample pat; do
+  if printf '%s\n' "$sample" | grep -q "$pat"; then
+    ok "runtime oracle: $name matcher accepts PASS"
+  else
+    bad "runtime oracle: $name matcher did not accept PASS"
+  fi
+  plant_approve_grep "$pat"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_FORM' \
+    && echo "$out" | grep -q 'scripts/second-opinion.sh'; then
+    ok "mutation: $name unknown PASS operand fails closed"
+  else
+    bad "mutation $name unknown PASS operand (rc=$rc): $out"
+  fi
+done <<'EOF'
+blank-class|VERDICT: PASS|VERDICT:[[:blank:]]*PASS
+repeated-space-class|VERDICT: PASS|VERDICT:[[:space:]][[:space:]]*PASS
+charclass-pass|VERDICT:PASS|VERDICT:[Pp][Aa][Ss][Ss]
+negated-class|VERDICT: PASS|VERDICT:[^X]*PASS
+alpha-class|VERDICT:PASS|VERDICT:[[:alpha:]]*PASS
+EOF
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+GREP_M_PASS_PAT='VERDICT:[[:space:]]*PASS'
+if printf 'VERDICT: PASS\n' | grep -m 1 -q "$GREP_M_PASS_PAT"; then
+  ok "runtime oracle: grep -m 1 -q PASS pattern matches VERDICT: PASS"
+else
+  bad "runtime oracle: grep -m 1 -q PASS pattern did not match"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -m 1 -q '$GREP_M_PASS_PAT'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_VOCABULARY' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh accepts VERDICT: PASS'; then
+  echo "  planted grep -m 1 -q PASS failure line:"
+  echo "$out" | grep 'E_VERDICT_VOCABULARY' | sed 's/^/    /'
+  ok "mutation: grep -m 1 -q VERDICT:[[:space:]]*PASS fails"
+else
+  bad "mutation grep -m 1 -q PASS (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep -m 1 -q 'VERDICT:[[:space:]]*APPROVE'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: grep -m 1 -q canonical APPROVE remains green"
+else
+  bad "benign grep -m 1 -q canonical APPROVE (rc=$rc): $out"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "grep --not-a-real-grep-option 1 'VERDICT:[[:space:]]*PASS'" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_FORM'; then
+  ok "mutation: unrecognized grep argv fails closed"
+else
+  bad "mutation unrecognized grep argv (rc=$rc): $out"
+fi
+cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
+
+VAR_PAT='VERDICT:[[:space:]]*(APPROVE|PASS)'
+if [[ "VERDICT: PASS" =~ $VAR_PAT ]]; then
+  ok "runtime oracle: unquoted \$PAT Bash regex accepts VERDICT: PASS"
+else
+  bad "runtime oracle: unquoted \$PAT Bash regex did not accept PASS"
+fi
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  "PAT='$VAR_PAT'" \
+  '[[ "$1" =~ $PAT ]]' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_VERDICT_FORM' \
+  && echo "$out" | grep -q 'scripts/second-opinion.sh'; then
+  echo "  planted opaque \$PAT failure line:"
+  echo "$out" | grep 'E_VERDICT_FORM' | sed 's/^/    /'
+  ok "mutation: opaque variable-indirected Bash regex fails closed"
+else
+  bad "mutation opaque \$PAT regex (rc=$rc): $out"
 fi
 cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 
