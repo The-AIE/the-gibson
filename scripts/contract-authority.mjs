@@ -109,7 +109,11 @@ export {
 };
 
 const DEFAULT_CONFIG_REL = "config/policy/mandatory-read-chain.v1.json";
-const MIN_MUTATION_HEADROOM_BYTES = 1024;
+// 1024 bytes are needed by the semantic-mutation fixtures in
+// scripts/tests/contract-authority.test.sh (they append clauses to a copy of
+// the live contract); the extra 512 keeps ordinary edits from landing on that
+// cliff and turning unrelated PRs red.
+const MIN_MUTATION_HEADROOM_BYTES = 1536;
 
 function help() {
   console.log(`contract-authority.mjs — #208 authority boundary + read-chain budget
@@ -322,7 +326,9 @@ if (
     `fixed mandatory load has ${mutationHeadroomBytes} bytes of mutation headroom; ` +
       `minimum ${MIN_MUTATION_HEADROOM_BYTES} required. Compact AGENTS.md to <= ` +
       `${Math.min(agentsBudget, chainBudget) - MIN_MUTATION_HEADROOM_BYTES} bytes ` +
-      `without raising the ${Math.min(agentsBudget, chainBudget)}-byte hard cap`
+      `without raising the ${Math.min(agentsBudget, chainBudget)}-byte hard cap: ` +
+      `move explanation, rationale, and reading lists into a non-normative docs/ ` +
+      `sub-file and leave a one-line pointer; only binding rules belong in AGENTS.md`
   );
 }
 

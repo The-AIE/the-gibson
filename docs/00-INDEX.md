@@ -47,6 +47,26 @@ If you only open one file, use the row that matches you. Glossary:
 5. Role playbook under [playbooks/](../playbooks/) when dispatched to that role
 6. Everything in the map below is **on-demand and non-normative**
 
+### On-demand reading by area
+
+Load only the area needed; these explain rather than govern:
+
+- Pipeline/roles/concurrency/gates/security: [02-sdlc-pipeline.md](02-sdlc-pipeline.md),
+  [03-roles.md](03-roles.md), [05-concurrency.md](05-concurrency.md),
+  [06-quality-gates.md](06-quality-gates.md), [08-security.md](08-security.md).
+- Memory/solo loop/human gates/operator mode: [09-memory-and-self-improvement.md](09-memory-and-self-improvement.md),
+  [11-solo-loop.md](11-solo-loop.md), [14-human-gates.md](14-human-gates.md),
+  [16-nontechnical-operation.md](16-nontechnical-operation.md).
+- Fork/delivery control: [18-fork-and-upstream.md](18-fork-and-upstream.md),
+  [23-delivery-control.md](23-delivery-control.md),
+  [playbooks/delivery-control.md](../playbooks/delivery-control.md).
+- Conventions/fleet review: [CONVENTIONS.md](CONVENTIONS.md),
+  [fleet-review-conventions.md](fleet-review-conventions.md) (a non-normative
+  pointer, not an added gate).
+
+Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
+`paper/`.
+
 ## 📚 Doctrine map (full set)
 
 | Order | Doc | One-line job |
