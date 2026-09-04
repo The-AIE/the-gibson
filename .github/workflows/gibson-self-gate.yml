@@ -140,11 +140,55 @@ jobs:
           echo "GIT_COMMITTER_NAME=gibson-ci"         >> "$GITHUB_ENV"
           echo "GIT_COMMITTER_EMAIL=ci@gibson.invalid" >> "$GITHUB_ENV"
 
+      # Docs-only fast path. When every changed file is explanation or memory
+      # (docs/, memory/, paper/, root *.md other than AGENTS.md/README.md) the
+      # scripts cannot have changed, so only the authority/doctrine sensors
+      # that read prose need to run. Fails closed: any file outside that set,
+      # an unknown base, or an empty diff => the full gate.
+      - name: Classify change
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          mode=full
+          if [ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "${BASE_SHA}...HEAD" -- 2>/dev/null || git diff --name-only "${BASE_SHA}" HEAD --)
+            if [ -n "$changed" ]; then
+              mode=docs
+              # git quotes unusual paths ("..."); those hit the default => full.
+              set -f
+              for f in $changed; do
+                case "$f" in
+                  docs/*|memory/*|paper/*) ;;
+                  AGENTS.md|README.md|CLAUDE.md) mode=full ;;
+                  */*) mode=full ;;
+                  *.md) ;;
+                  *) mode=full ;;
+                esac
+              done
+              set +f
+            fi
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "self-gate mode: $mode (base ${BASE_SHA:-<none>})"
+
       # Docker is present on ubuntu-latest, so run-all.sh also checks that every
       # script parses under bash 3.2 — stock macOS, where most of our
       # portability lessons were earned.
+      #
+      # GIBSON_GATE_WALL_BUDGET is the feedback-time ratchet: a green run that
+      # takes longer than this is RED. Lower it as suites get faster; raising
+      # it is a loosening and needs owner sign-off (AGENTS.md self-modification).
       - name: Run every sensor
+        if: steps.classify.outputs.mode != 'docs'
+        env:
+          GIBSON_GATE_WALL_BUDGET: "900"
         run: bash scripts/tests/run-all.sh --no-quarantine
+
+      - name: Run authority sensors (docs-only change)
+        if: steps.classify.outputs.mode == 'docs'
+        run: bash scripts/tests/run-all.sh --no-quarantine --only contract-authority,policy-manifest,laws-sensors,convention-sensors,architecture-fitness
 
       # Advisory: the burn-down view. Shows what the quarantine is hiding
       # without failing the build, so the list stays visible instead of
