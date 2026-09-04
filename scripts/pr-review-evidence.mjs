@@ -203,16 +203,21 @@ export function resolveAuthors(commits, identities, attestedVendor) {
  * allowed vocabulary or the attestation is ignored (fail closed, not partial).
  */
 export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
+  // Select the NEWEST owner attestation for this head by creation time, THEN
+  // validate it. A tampered newer attestation is a tombstone, not an absence
+  // (Codex round 6, finding 1): it must not fall through to an older one.
   const hits = comments
-    .filter((c) => norm(c?.user?.login) === norm(ownerLogin) && ["OWNER", "MEMBER"].includes(c?.author_association) && !editedByOther(c))
+    .filter((c) => norm(c?.user?.login) === norm(ownerLogin) && ["OWNER", "MEMBER"].includes(c?.author_association))
     .map((c) => ({ c, b: parseBlock(c?.body, "owner-review-attestation:v1", ["head-sha", "author-vendor"]) }))
-    .filter((x) => x.b && x.b["head-sha"] === headSha)
-    .map((x) => ({ ...x, vendors: [...new Set(x.b["author-vendor"].split(",").map((v) => norm(v)).filter(Boolean))] }))
-    .filter((x) => x.vendors.length > 0 && x.vendors.every((v) => allowed.includes(v)))
+    .filter((x) => editedByOther(x.c) || (x.b && x.b["head-sha"] === headSha))
     // Order by CREATION: an edit moves updated_at and must not promote an
     // older attestation over a newer one (Codex round 5, finding 5).
     .sort((l, r) => (Date.parse(r.c?.created_at ?? "") || 0) - (Date.parse(l.c?.created_at ?? "") || 0));
-  return hits[0] ? { vendors: hits[0].vendors, id: hits[0].c.id } : null;
+  const top = hits[0];
+  if (!top || editedByOther(top.c)) return null;
+  const vendors = [...new Set(top.b["author-vendor"].split(",").map((v) => norm(v)).filter(Boolean))];
+  if (vendors.length === 0 || !vendors.every((v) => allowed.includes(v))) return null;
+  return { vendors, id: top.c.id };
 }
 
 /**
@@ -259,12 +264,16 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
     const app = c?.performed_via_github_app;
     if (!app || norm(app.slug) !== norm(id.appSlug)) continue;
     if (id.appId !== null && Number(app.id) !== id.appId) continue;
-    if (editedAtAll(c)) continue; // a machine-written receipt is never edited legitimately
     const b = parseBlock(c?.body, "review-evidence:v1", ["head-sha", "result"]);
-    if (!b || !["pass", "fail"].includes(b.result)) continue;
-    if (b["head-sha"] !== headSha) { staleReceipts += 1; continue; }
     // Provenance is the CREATION; an edit moves updated_at, so order by created_at.
     const at = Date.parse(c?.created_at ?? "") || timestamp(c);
+    // An edited machine receipt is a TOMBSTONE, not an absence (Codex round 6,
+    // finding 1): it still takes its place in newest-wins with no verdict, so
+    // editing a newer `fail` can never resurrect an older `pass`. The body may
+    // have been rewritten, so bind the tombstone by the identity alone.
+    if (editedAtAll(c)) { items.push({ identity: id, result: "none", at, id: Number(c?.id ?? 0), source: "comment" }); continue; }
+    if (!b || !["pass", "fail"].includes(b.result)) continue;
+    if (b["head-sha"] !== headSha) { staleReceipts += 1; continue; }
     if (notBefore > 0 && at <= notBefore) { staleBase += 1; continue; }
     items.push({ identity: id, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" });
   }
@@ -278,8 +287,11 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
     const cur = newest.get(k);
     if (!cur || it.at > cur.at) { newest.set(k, it); continue; }
     if (it.at === cur.at) {
-      if (it.result === "fail" && cur.result !== "fail") newest.set(k, it);
-      else if (it.result === cur.result && it.source === cur.source && it.id > cur.id) newest.set(k, it);
+      // Same source: ids are monotonic, so the higher id is newer whatever its
+      // result — a same-second dismissal replaces an older approve (Codex
+      // round 6, finding 3). Cross-source: no ordering exists; fail dominates.
+      if (it.source === cur.source) { if (it.id > cur.id) newest.set(k, it); }
+      else if (it.result === "fail" && cur.result !== "fail") newest.set(k, it);
     }
   }
   // An identity whose newest evidence is a dismissal contributes nothing.
@@ -444,7 +456,7 @@ async function evaluateOne(args, config) {
     head = norm(inputs.pull.head.sha);
     const expectedHead = args.expectedHead ?? head;
     const result = evaluate({ headSha: head, expectedHead, prNumber: Number(args.pr), pull: inputs.pull, pullsForHead: inputs.pullsForHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, timeline: inputs.timeline, config });
-    return { headSha: head, ...result };
+    return { headSha: head, ...result, pull: inputs.pull };
   } catch (e) {
     return { headSha: head, ...faultResult(e) };
   }
@@ -472,11 +484,18 @@ export async function main(argv) {
     for (const p of open) {
       const n = Number(p?.number);
       const r = await evaluateOne({ ...args, pr: String(n), expectedHead: norm(p?.head?.sha ?? "") || null }, config);
-      process.stdout.write(`${JSON.stringify({ number: n, ...r, description: `${r.reason}${r.detail ? `: ${r.detail}` : ""}`.replace(/[\r\n]+/g, " ").slice(0, 140) })}\n`);
+      // State fingerprint at evaluation time; the publisher re-reads it right
+      // before writing a `success` and downgrades to pending if it moved
+      // (Codex round 6, finding 2). Same shape as the workflow's `fingerprint()`.
+      const fingerprint = r.pull
+        ? `${r.pull.updated_at ?? ""}|${norm(r.pull.head?.sha ?? "")}|${norm(r.pull.base?.sha ?? "")}|${r.pull.comments ?? ""}|${r.pull.review_comments ?? ""}|${r.pull.commits ?? ""}`
+        : "";
+      const { pull: _omit, ...rest } = r;
+      process.stdout.write(`${JSON.stringify({ number: n, ...rest, fingerprint, description: `${r.reason}${r.detail ? `: ${r.detail}` : ""}`.replace(/[\r\n]+/g, " ").slice(0, 140) })}\n`);
     }
     return;
   }
-  const result = await evaluateOne(args, config);
+  const { pull: _omit, ...result } = await evaluateOne(args, config);
   if (args.githubOutput) await appendFile(args.githubOutput, `${outputLines(result.headSha, result).join("\n")}\n`);
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (result.state === "failure") process.exitCode = 1;
