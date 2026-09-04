@@ -2197,11 +2197,13 @@ gibson_suite_read_capture() {
     _gs_ec=$(cat "$cap.ec")
   else
     # Wrapper died before recording rc. A wall-budget kill must never
-    # surface as "no tally line" (#319 AC4).
-    if [[ "$timeout" -gt 0 ]]; then
+    # surface as "no tally line" (#319 AC4) — but only a run that actually
+    # reached the budget is a timeout; a wrapper that died early (mkdir
+    # ENOSPC, setup failure) is a runner failure and stays RED as such.
+    if [[ "$timeout" -gt 0 && "$_gs_elapsed" -ge "$timeout" ]]; then
       _gs_ec=124
     else
-      _gs_out="run-all: suite produced no exit-code capture (runner crashed?)"
+      _gs_out="run-all: suite produced no exit-code capture after ${_gs_elapsed}s (runner/setup failure, not a timeout)"
       _gs_ec=1
     fi
   fi
@@ -2210,7 +2212,9 @@ gibson_suite_read_capture() {
   esac
 
   if [[ "$timeout" -gt 0 ]]; then
-    if [[ "$_gs_ec" -eq 124 ]]; then
+    # rc 124 is a timeout only when the wall was actually reached (5s slack);
+    # a suite that exits 124 early is an ordinary failure.
+    if [[ "$_gs_ec" -eq 124 && "$_gs_elapsed" -ge $((timeout - 5)) ]]; then
       _gs_tally="timed out after ${timeout}s"
       return 0
     fi
@@ -2241,74 +2245,6 @@ SUITE_CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-runall-suites.XXXXXX") || 
   echo "run-all.sh: mktemp for suite captures failed" >&2
   exit 2
 }
-# gibson_suite_env begin
-# Per-suite BASH_ENV: make grep -q consume all input so pipefail producers
-# (echo/printf of help text) are not killed at the first match (L-077 / #319).
-# Pin the real grep binary now: suites may put a stub named grep first on PATH.
-# type -P ignores functions/aliases so a previous wrapper cannot recurse.
-_GIBSON_REAL_GREP=$(type -P grep 2>/dev/null || true)
-if [[ ! -x "$_GIBSON_REAL_GREP" ]]; then
-  if [[ -x /usr/bin/grep ]]; then
-    _GIBSON_REAL_GREP=/usr/bin/grep
-  elif [[ -x /bin/grep ]]; then
-    _GIBSON_REAL_GREP=/bin/grep
-  else
-    echo "run-all.sh: cannot resolve a real grep binary for SIGPIPE-safe wrapper" >&2
-    exit 2
-  fi
-fi
-{
-  printf '_GIBSON_REAL_GREP=%s\n' "$_GIBSON_REAL_GREP"
-  cat <<'SUITEENV'
-# Sourced via BASH_ENV for every run-all suite (#319).
-grep() {
-  local _gq_quiet=0 _gq_end=0 _gq_a _gq_stripped
-  local _gq_args
-  _gq_args=()
-  for _gq_a in "$@"; do
-    if [[ "$_gq_end" -eq 1 ]]; then
-      continue
-    fi
-    case "$_gq_a" in
-      --) _gq_end=1 ;;
-      --quiet|--silent) _gq_quiet=1 ;;
-      --*) ;;
-      -*)
-        case "$_gq_a" in
-          *q*) _gq_quiet=1 ;;
-        esac
-        ;;
-    esac
-  done
-  if [[ "$_gq_quiet" -eq 0 ]]; then
-    "$_GIBSON_REAL_GREP" "$@"
-    return $?
-  fi
-  _gq_end=0
-  for _gq_a in "$@"; do
-    if [[ "$_gq_end" -eq 1 ]]; then
-      _gq_args+=("$_gq_a")
-      continue
-    fi
-    case "$_gq_a" in
-      --) _gq_end=1; _gq_args+=("$_gq_a") ;;
-      --quiet|--silent) ;;
-      --*) _gq_args+=("$_gq_a") ;;
-      -*)
-        _gq_stripped=$(printf '%s' "$_gq_a" | tr -d 'q')
-        if [[ "$_gq_stripped" != "-" ]]; then
-          _gq_args+=("$_gq_stripped")
-        fi
-        ;;
-      *) _gq_args+=("$_gq_a") ;;
-    esac
-  done
-  "$_GIBSON_REAL_GREP" "${_gq_args[@]+"${_gq_args[@]}"}" >/dev/null
-}
-SUITEENV
-} > "$SUITE_CAPTURE_DIR/suite-env.sh"
-unset _GIBSON_REAL_GREP
-# gibson_suite_env end
 
 # On EXIT/INT/TERM/HUP stop any suites still running (whole process trees —
 # a suite may have forked node/docker/git children) before removing captures,
@@ -2362,7 +2298,6 @@ run_suite_captured() {
         FLEET_WALL_TIMEOUT_TEST_HOLD_AFTER_LEADER_WAIT \
         FAKE_GH_STATE GIBSON_GH_MUTATION_LOG
   export TMPDIR="$suite_tmp"
-  export BASH_ENV="$SUITE_CAPTURE_DIR/suite-env.sh"
   run_limited "$suite" >"${cap}.out" 2>&1
   ec=$?
   _gs_write_cap
