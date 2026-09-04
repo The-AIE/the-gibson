@@ -1463,7 +1463,7 @@ fi
 # Unknown directory contents must never be deleted — either still in place or
 # under a same-parent quarantine name.
 if [[ -f "$REPO/gibson/loop-state.md/unknown-contents" ]] || \
-   find "$REPO/gibson" -name 'unknown-contents' 2>/dev/null | grep -q .; then
+   find "$REPO/gibson" -name 'unknown-contents' 2>/dev/null | grep  . >/dev/null; then
   ok "dir live loop-state: unknown contents preserved (not deleted)"
 else bad "dir live loop-state: unknown contents were deleted"; fi
 if ! grep -q 'restored loop-state byte-for-byte' "$ROOT/dir-live.err" 2>/dev/null || \
@@ -1538,7 +1538,7 @@ done
 write_valid_state "$VDIR/nopy.md"
 out=$(PATH="$NBIN" /bin/bash "$VALIDATOR" "$VDIR/nopy.md" 2>&1) || ec=$?
 ec=${ec:-0}
-if [[ $ec -ne 0 ]] && echo "$out" | grep -qi 'python3'; then
+if [[ $ec -ne 0 ]] && echo "$out" | grep -i 'python3' >/dev/null; then
   ok "missing python3: fail-closed with python3 diagnostic"
 else bad "missing python3: expected fail+diagnostic (ec=$ec out=$out)"; fi
 
@@ -2438,7 +2438,7 @@ fi
 
 # Help documents --stale-budget (GNU/BSD grep: -- ends options so the pattern
 # is not parsed as a flag).
-if bash "$LOOP" --help 2>/dev/null | grep -qF -- '--stale-budget'; then
+if bash "$LOOP" --help 2>/dev/null | grep -F -- '--stale-budget' >/dev/null; then
   ok "loop.sh --help documents --stale-budget"
 else
   bad "loop.sh --help missing --stale-budget"
@@ -2520,13 +2520,13 @@ else
   bad "cost path missing iteration row (lines=$lines rc=$rc err=$(tr '\n' ' ' <"$ROOT/cost-outcome.err"))"
 fi
 iter_line=$(grep '"event_kind":"iteration"' "$LEDGER" | tail -1)
-echo "$iter_line" | grep -q '"issue":141' \
+echo "$iter_line" | grep '"issue":141' >/dev/null \
   && ok "iteration row carries issue from validated state" \
   || bad "iteration missing issue: $iter_line"
-echo "$iter_line" | grep -q '"pr":154' \
+echo "$iter_line" | grep '"pr":154' >/dev/null \
   && ok "iteration row carries pr from validated state" \
   || bad "iteration missing pr: $iter_line"
-echo "$iter_line" | grep -q "\"join_key\":\"$JOIN_KEY\"" \
+echo "$iter_line" | grep "\"join_key\":\"$JOIN_KEY\"" >/dev/null \
   && ok "iteration shares join_key with selection" \
   || bad "iteration join: $iter_line"
 # Unvalidated/corrupt path must not attach hostile pr
@@ -2573,7 +2573,7 @@ HERMES_CMD="$CALLS/fake-runner.sh" \
 set -e
 hostile_iter=$(grep '"event_kind":"iteration"' "$LEDGER2" | tail -1 || true)
 if [[ -n "$hostile_iter" ]]; then
-  echo "$hostile_iter" | grep -qE '"pr":999' \
+  echo "$hostile_iter" | grep -E '"pr":999' >/dev/null \
     && bad "hostile unvalidated pr leaked into cost row: $hostile_iter" \
     || ok "corrupt path iteration omits hostile pr"
 else
@@ -2588,10 +2588,10 @@ J
 out=$("$GIBSON/scripts/cost-ledger.sh" summarize --ledger "$LEDGER" \
   --merged-json "$ROOT/merged-outcome.json" --format json 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] || bad "outcome summarize rc=$rc: $out"
-echo "$out" | grep -q '"merged_events": 2' \
+echo "$out" | grep '"merged_events": 2' >/dev/null \
   && ok "same join_key attributes selection+iteration to merged PR" \
   || bad "merged attribution: $out"
-echo "$out" | grep -q '"merged_prs_with_cost": 1' \
+echo "$out" | grep '"merged_prs_with_cost": 1' >/dev/null \
   && ok "one merged PR with cost via join" || bad "mwc outcome: $out"
 
 # Telemetry failure diagnostic (standalone resilience: warn, continue)

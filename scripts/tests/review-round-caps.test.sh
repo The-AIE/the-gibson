@@ -160,7 +160,7 @@ if node -e '
 else
   bad "committed config is not the documented A/B/C defaults: $(cat "$CAPS_DEFAULT")"
 fi
-if ! grep -nE 'caps?\s*=\s*[123]|A=1.*B=2.*C=3' "$LOOP" | grep -v review-round-caps | grep -q .; then
+if ! grep -nE 'caps?\s*=\s*[123]|A=1.*B=2.*C=3' "$LOOP" | grep -v review-round-caps | grep  . >/dev/null; then
   ok "loop.sh does not bake 1/2/3 caps as assignments"
 else
   # Soft: comments may mention the file's committed contents.

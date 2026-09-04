@@ -130,9 +130,9 @@ ISSUE_BODY='## Sprint contract\n- [ ] a\n- [ ] b\n## Affected area\napp\n## Depe
 
 # --- help / usage ---
 out=$(node "$SENSOR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help exits 0 with WHAT/WHY" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WHAT IT DOES' >/dev/null && ok "help exits 0 with WHAT/WHY" \
   || bad "help (rc=$rc): $out"
-if printf '%s\n' "$out" | grep -F -- '--allow-empty' | grep -q 'INTENTIONAL_EMPTY'; then
+if printf '%s\n' "$out" | grep -F -- '--allow-empty' | grep 'INTENTIONAL_EMPTY' >/dev/null; then
   ok "help discloses --allow-empty INTENTIONAL_EMPTY exit 0"
 else
   bad "help missing --allow-empty INTENTIONAL_EMPTY: $out"
@@ -158,9 +158,9 @@ cat > "$ROOT/cycle.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/cycle.json"); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi cycle && ok "cycle exits non-zero and names cycle" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i cycle >/dev/null && ok "cycle exits non-zero and names cycle" \
   || bad "cycle (rc=$rc): $out"
-echo "$out" | grep -qE '#1 → #2 → #1|#2 → #1 → #2' && ok "cycle prints closed path" \
+echo "$out" | grep -E '#1 → #2 → #1|#2 → #1 → #2' >/dev/null && ok "cycle prints closed path" \
   || bad "cycle path format: $out"
 
 # --- three-node cycle ---
@@ -172,7 +172,7 @@ cat > "$ROOT/cycle3.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/cycle3.json"); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi cycle && ok "3-cycle fails" || bad "3-cycle (rc=$rc): $out"
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i cycle >/dev/null && ok "3-cycle fails" || bad "3-cycle (rc=$rc): $out"
 
 # --- valid DAG: topo + critical path ---
 # 1 blocked by none; 2 blocked by 1; 3 blocked by 2; 4 blocked by 1
@@ -186,11 +186,11 @@ cat > "$ROOT/dag.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/dag.json"); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "valid DAG exits 0" || bad "DAG (rc=$rc): $out"
-echo "$out" | grep -q 'topological order:' && ok "prints topological order" || bad "no topo: $out"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null && ok "valid DAG exits 0" || bad "DAG (rc=$rc): $out"
+echo "$out" | grep 'topological order:' >/dev/null && ok "prints topological order" || bad "no topo: $out"
 # topo must have 1 before 2 before 3
 order=$(echo "$out" | sed -n 's/.*topological order: //p' | head -1)
-echo "$order" | grep -q '#1' && echo "$order" | grep -q '#2' && echo "$order" | grep -q '#3' \
+echo "$order" | grep '#1' >/dev/null && echo "$order" | grep '#2' >/dev/null && echo "$order" | grep '#3' >/dev/null \
   && ok "topo names all nodes" || bad "topo incomplete: $order"
 # positions: #1 before #2 before #3
 python3 - <<PY
@@ -207,10 +207,10 @@ PY
 [[ $? -eq 0 ]] && ok "topo respects 1 before 2 before 3" || bad "topo order wrong: $order"
 
 crit=$(echo "$out" | sed -n 's/.*critical path[^:]*: //p' | head -1)
-echo "$crit" | grep -q '#1' && echo "$crit" | grep -q '#2' && echo "$crit" | grep -q '#3' \
+echo "$crit" | grep '#1' >/dev/null && echo "$crit" | grep '#2' >/dev/null && echo "$crit" | grep '#3' >/dev/null \
   && ok "critical path includes 1→2→3 chain" || bad "critical path: $crit"
 # side branch 4 should not extend past 3
-echo "$out" | grep -qE 'critical path \(3 issues?\)' && ok "critical path length 3" \
+echo "$out" | grep -E 'critical path \(3 issues?\)' >/dev/null && ok "critical path length 3" \
   || bad "critical path length: $out"
 
 # --- missing / empty / none deps tolerated ---
@@ -240,7 +240,7 @@ cat > "$ROOT/bare.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/bare.json"); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '#31' && ok "bare #N dependency edge" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '#31' >/dev/null && ok "bare #N dependency edge" \
   || bad "bare (rc=$rc): $out"
 
 # --- missing file ---
@@ -258,19 +258,19 @@ b12='{"number":12,"updatedAt":"2026-01-03T00:00:00Z","title":"Twelve","body":"'"
 n7='{"number":7,"updatedAt":"2026-01-01T00:00:00Z","title":"Seven","body":"'"$ISSUE_BODY"'","labels":["tier-a"]}'
 
 out=$(run_repo --repo acme/app); rc=$?
-[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'missing repository selector' \
+[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'missing repository selector' >/dev/null \
   && ok "missing selector: exit 2 names missing selector" || bad "missing selector (rc=$rc): $out"
 expect_calls "missing selector" 0
 out=$(run_repo --repo acme/app --allow-empty); rc=$?
-[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'missing repository selector' \
-  && ! printf '%s\n' "$out" | grep -q 'unknown flag' \
+[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'missing repository selector' >/dev/null \
+  && ! printf '%s\n' "$out" | grep 'unknown flag' >/dev/null \
   && ok "missing selector: --allow-empty is a modifier, not a selector" \
   || bad "missing selector allow-empty (rc=$rc): $out"
 expect_calls "missing selector allow-empty" 0
 
 out=$(run_repo --repo acme/app --label --all-open); rc=$?
-[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'combined selectors' \
-  && ! printf '%s\n' "$out" | grep -q 'unknown flag' \
+[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'combined selectors' >/dev/null \
+  && ! printf '%s\n' "$out" | grep 'unknown flag' >/dev/null \
   && ok "label swallows --all-open: exit 2 before gh" \
   || bad "label swallows --all-open (rc=$rc): $out"
 expect_calls "label swallows --all-open" 0
@@ -279,12 +279,12 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","queries":{"all-open":{"pages":[{"totalCount":0,"hasNextPage":false,"endCursor":null,"nodes":[]}]}}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-[[ "$rc" -eq 1 ]] && printf '%s\n' "$out" | grep -q 'EMPTY_SELECTION: all-open' \
+[[ "$rc" -eq 1 ]] && printf '%s\n' "$out" | grep 'EMPTY_SELECTION: all-open' >/dev/null \
   && ok "empty selection: EMPTY_SELECTION exit 1 names all-open" || bad "empty selection (rc=$rc): $out"
 lacks_queue "empty selection" "$out"
 expect_calls "empty selection" 3
 out=$(run_repo --repo acme/app --all-open --allow-empty); rc=$?
-[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'INTENTIONAL_EMPTY: all-open' \
+[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'INTENTIONAL_EMPTY: all-open' >/dev/null \
   && ok "allowed empty: INTENTIONAL_EMPTY exit 0" || bad "allowed empty (rc=$rc): $out"
 lacks_queue "allowed empty" "$out"
 expect_calls "allowed empty" 3
@@ -297,10 +297,10 @@ cat > "$ROOT/scenario.json" <<JSON
 ]}}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK (3 issues, DAG)' \
-  && printf '%s\n' "$out" | grep -q 'loaded=3' && printf '%s\n' "$out" | grep -q 'totalCount=3' \
-  && printf '%s\n' "$out" | grep -q '#101' && printf '%s\n' "$out" | grep -q '#103' \
-  && printf '%s\n' "$out" | grep -q 'critical path' \
+[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK (3 issues, DAG)' >/dev/null \
+  && printf '%s\n' "$out" | grep 'loaded=3' >/dev/null && printf '%s\n' "$out" | grep 'totalCount=3' >/dev/null \
+  && printf '%s\n' "$out" | grep '#101' >/dev/null && printf '%s\n' "$out" | grep '#103' >/dev/null \
+  && printf '%s\n' "$out" | grep 'critical path' >/dev/null \
   && ok "three-page --all-open: OK 3-issue DAG including page-3 #103" \
   || bad "three-page --all-open (rc=$rc): $out"
 expect_calls "three-page --all-open" 9
@@ -312,16 +312,16 @@ cat > "$ROOT/scenario.json" <<JSON
 }}
 JSON
 out=$(run_repo --repo acme/app --label alpha --label beta); rc=$?
-[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK (3 issues, DAG)' \
-  && printf '%s\n' "$out" | grep -q 'loaded=3' && printf '%s\n' "$out" | grep -q 'unionTotal=3' \
-  && printf '%s\n' "$out" | grep -q 'sourceTotals=2,2' && ! printf '%s\n' "$out" | grep -q 'totalCount=' \
-  && printf '%s\n' "$out" | grep -q '#10' && printf '%s\n' "$out" | grep -q '#12' \
+[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK (3 issues, DAG)' >/dev/null \
+  && printf '%s\n' "$out" | grep 'loaded=3' >/dev/null && printf '%s\n' "$out" | grep 'unionTotal=3' >/dev/null \
+  && printf '%s\n' "$out" | grep 'sourceTotals=2,2' >/dev/null && ! printf '%s\n' "$out" | grep 'totalCount=' >/dev/null \
+  && printf '%s\n' "$out" | grep '#10' >/dev/null && printf '%s\n' "$out" | grep '#12' >/dev/null \
   && ok "repeated-label overlapping union: OR-union of 3 issues (not last-label-wins)" \
   || bad "repeated-label overlapping union (rc=$rc): $out"
 expect_calls "repeated-label overlapping union" 6
 out=$(run_repo --repo acme/app --label beta); rc=$?
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK (3 issues, DAG)' \
-   && printf '%s\n' "$out" | grep -q 'loaded=3' && printf '%s\n' "$out" | grep -q 'unionTotal=3'; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK (3 issues, DAG)' >/dev/null \
+   && printf '%s\n' "$out" | grep 'loaded=3' >/dev/null && printf '%s\n' "$out" | grep 'unionTotal=3' >/dev/null; then
   bad "last-label-wins: overlapping-union assertion still green"
 else
   ok "last-label-wins: overlapping-union assertion red"
@@ -332,7 +332,7 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","failApi":true,"rawStderr":"$HOSTILE_STDERR","queries":{"all-open":{"pages":[]}}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-[[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: API_FAILURE' \
+[[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: API_FAILURE' >/dev/null \
   && ! printf '%s\n' "$out" | grep -F -q "$HOSTILE_STDERR" \
   && ok "API failure: INCOMPLETE exit 3 with typed code, no raw stderr" \
   || bad "API failure (rc=$rc): $out"
@@ -340,7 +340,7 @@ lacks_queue "API failure" "$out"
 expect_calls "API failure" 1
 
 out=$(run_repo --repo acme/app --label $'OK\nDAG'); rc=$?
-[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'control character' \
+[[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'control character' >/dev/null \
   && ok "embedded newline label: usage exit 2 before gh" \
   || bad "embedded newline label (rc=$rc): $out"
 lacks_queue "embedded newline label" "$out"
@@ -350,7 +350,7 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","invalidShape":true,"queries":{}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-[[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE' \
+[[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null \
   && ok "strict-shape: invalid shape exits 3 INCOMPLETE" || bad "strict-shape (rc=$rc): $out"
 lacks_queue "strict-shape" "$out"
 expect_calls "strict-shape" 1
@@ -359,14 +359,14 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","shaAfter":"$SHA_B","queries":{"all-open":{"pages":[{"totalCount":1,"hasNextPage":false,"endCursor":null,"nodes":[$n7]}]}}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-[[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: STALE_OBSERVATION' \
+[[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: STALE_OBSERVATION' >/dev/null \
   && ok "default-branch drift: INCOMPLETE: STALE_OBSERVATION exit 3" \
   || bad "default-branch drift (rc=$rc): $out"
 lacks_queue "default-branch drift" "$out"
 expect_calls "default-branch drift" 3
 
 out=$(run_repo --file "$ROOT/dag.json"); rc=$?
-[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK' && printf '%s\n' "$out" | grep -q 'DAG' \
+[[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK' >/dev/null && printf '%s\n' "$out" | grep 'DAG' >/dev/null \
   && ok "preserved --file: DAG fixture still OK" || bad "preserved --file (rc=$rc): $out"
 expect_calls "preserved --file" 0
 

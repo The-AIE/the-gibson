@@ -159,7 +159,7 @@ legacy_row() { printf '| 2026-08-01T10:00:00Z | %s | app/legacy/** | grok@fleet-
 claims_status_calls_live() { # claims_status_calls_live <table-line>
   local id
   id=$(echo "$1" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  echo "$id" | grep -qE '^issue-'
+  echo "$id" | grep -E '^issue-' >/dev/null
 }
 
 if grep -q "grep -qE '\^issue-'" "$CLAIMS_STATUS"; then
@@ -501,7 +501,7 @@ run_sensor 1 lane nonexistent-base "an unresolvable base ref fails loudly" "cann
 out=$(cd "$REPO" && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=nonexistent-base \
       GITHUB_HEAD_REF=lane node "$SENSOR" 2>&1)
 rc=$?
-if [[ "$rc" -eq 0 ]] || grep -qi -- "no changed files detected" <<< "$out"; then
+if [[ "$rc" -eq 0 ]] || grep -i -- "no changed files detected" >/dev/null <<< "$out"; then
   bad "an unresolvable base must not report 'no changed files' (rc=$rc: $out)"
 else
   ok "an unresolvable base never claims the diff was empty"

@@ -30,8 +30,8 @@ FAIL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-claim-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -749,9 +749,9 @@ case "$1 $2" in
   "issue view") cat "$RACE_DIR/labels-$3" 2>/dev/null || echo "" ;;
   "issue edit")
     issue="$3"
-    if echo "$*" | grep -q -- '--add-label'; then
+    if echo "$*" | grep  -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "$RACE_DIR/labels-$issue"
-    elif echo "$*" | grep -q -- '--remove-label'; then
+    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then
       : > "$RACE_DIR/labels-$issue"
     fi
     ;;
@@ -1118,9 +1118,9 @@ case "$1 $2" in
     ;;
   "issue edit")
     echo "$*" >> "$LAG_STATE/label.log"
-    if echo "$*" | grep -q -- '--add-label'; then
+    if echo "$*" | grep  -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "$LAG_STATE/labels"
-    elif echo "$*" | grep -q -- '--remove-label'; then
+    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then
       : > "$LAG_STATE/labels"
     fi
     ;;
@@ -1314,7 +1314,7 @@ lag_fixture lagfloor 90 "$LAG_RIVAL_ROW"
 for floor_env in GIBSON_CLAIM_ADMIT_STABLE_READS=1 GIBSON_CLAIM_ADMIT_DELAY=0 GIBSON_CLAIM_ADMIT_ATTEMPTS=1; do
   out=$(cd "$ROOT/lagfloor/canon" && PATH="$ROOT/lagfloor/bin:$PATH" \
     env "$floor_env" LAG_RIVAL_AFTER=3 "$CLAIM" 87 floored 'lib/lag/**' 2>&1); rc=$?
-  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "below the production minimum"; then
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -F "below the production minimum" >/dev/null; then
     ok "$floor_env is refused, not honoured"
   else
     bad "$floor_env was accepted (rc=$rc): $out"
@@ -1566,10 +1566,10 @@ lacks "same-id known-PR path never removes the label" \
   "$(cat "$ROOT/lagsameidpr/state/label.log")" "--remove-label"
 # Honest diagnostic: surviving sibling, ambiguous multi-match, or still-live
 # claim after close. At least one must appear so a silent strip cannot hide.
-if echo "$out" | grep -qF "surviving sibling claim(s)" ||
-   echo "$out" | grep -qF "ambiguous evidence" ||
-   echo "$out" | grep -qF "STILL a live claim" ||
-   echo "$out" | grep -qF "may still be open"; then
+if echo "$out" | grep -F "surviving sibling claim(s)" >/dev/null ||
+   echo "$out" | grep -F "ambiguous evidence" >/dev/null ||
+   echo "$out" | grep -F "STILL a live claim" >/dev/null ||
+   echo "$out" | grep -F "may still be open" >/dev/null; then
   ok "same-id known-PR path names surviving/ambiguous/live evidence honestly"
 else
   bad "same-id known-PR path lacked an honest keep-label diagnostic: $out"
@@ -1937,8 +1937,8 @@ case "$1 $2" in
   "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
   "issue edit")
     echo "$*" >> "$STATE/label.log"
-    if echo "$*" | grep -q -- '--add-label'; then echo "agent-claimed" > "$STATE/labels"
-    elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
+    if echo "$*" | grep  -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
     # `list-open-numbers` (operation openPrNumbers) also carries
@@ -2001,8 +2001,8 @@ case "$1 $2" in
   "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
   "issue edit")
     echo "$*" >> "$STATE/label.log"
-    if echo "$*" | grep -q -- '--add-label'; then echo "agent-claimed" > "$STATE/labels"
-    elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
+    if echo "$*" | grep  -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
     # `list-open-numbers` (operation openPrNumbers) also carries
@@ -2641,7 +2641,7 @@ _before_head=$(cd "$ROOT/scope_star/canon" && git rev-parse HEAD)
 out=$(cd "$ROOT/scope_star/canon" && "$CLAIM" 701 star-scope '*' 2>&1); rc=$?
 check    "literal '*' scope exits nonzero" "$rc" "1"
 # Sensor must have seen the token (invalid grammar), not an expanded path list.
-if echo "$out" | grep -qiE 'invalid claim-scope|no literal path segment|scope overlap|refusing|ERROR'; then
+if echo "$out" | grep -iE 'invalid claim-scope|no literal path segment|scope overlap|refusing|ERROR' >/dev/null; then
   ok "literal '*' refused with a scope/validator diagnostic"
 else
   bad "literal '*' did not produce a scope refusal: $out"
@@ -2680,7 +2680,7 @@ _before_files=$(product_tree_snap "$ROOT/scope_mid/canon")
 _before_head=$(cd "$ROOT/scope_mid/canon" && git rev-parse HEAD)
 out=$(cd "$ROOT/scope_mid/canon" && "$CLAIM" 702 mid-glob 'a/**/b' 2>&1); rc=$?
 check    "literal 'a/**/b' scope exits nonzero" "$rc" "1"
-if echo "$out" | grep -qiE 'invalid claim-scope|ambiguous|refusing|ERROR|scope'; then
+if echo "$out" | grep -iE 'invalid claim-scope|ambiguous|refusing|ERROR|scope' >/dev/null; then
   ok "literal 'a/**/b' refused with a scope/validator diagnostic"
 else
   bad "literal 'a/**/b' did not produce a scope refusal: $out"
@@ -2713,7 +2713,7 @@ out=$(cd "$ROOT/scope_root/canon" && "$CLAIM" 704 root-wide '**' 2>&1); rc=$?
 check    "literal '**' against live narrow claim exits nonzero" "$rc" "1"
 # Root-wide must collide with the live narrow claim — not expand into the
 # directory named '**' or otherwise lose the token.
-if echo "$out" | grep -qiE 'overlap|collid|refusing|ERROR|issue-703-narrow'; then
+if echo "$out" | grep -iE 'overlap|collid|refusing|ERROR|issue-703-narrow' >/dev/null; then
   ok "literal '**' treated as root-wide and blocked unrelated live scope"
 else
   bad "literal '**' did not block as root-wide overlap: $out"
@@ -2780,7 +2780,7 @@ contains "empty --slice names no scope" "$out" "no scope given"
 # Detect the Bash 3.2 set -u empty-array expansion class without emitting the
 # construction-diag token into the suite tally stream.
 _uv_pat='unbound'' variable'
-if echo "$out" | grep -qF -- "$_uv_pat"; then
+if echo "$out" | grep -F -- "$_uv_pat" >/dev/null; then
   bad "empty --slice hit set-u empty-array expansion error"
 else
   ok "empty --slice avoided set-u empty-array expansion error"
