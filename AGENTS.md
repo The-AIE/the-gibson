@@ -354,18 +354,6 @@ Contract: `AGENTS.md`; overlay: `local/AGENTS.local.md`; dispatch prompts:
 
 ## On-demand (non-normative)
 
-Load only the area needed; these explain rather than govern:
-
-- Pipeline/roles/concurrency/gates/security: `docs/02-sdlc-pipeline.md`,
-  `docs/03-roles.md`, `docs/05-concurrency.md`, `docs/06-quality-gates.md`,
-  `docs/08-security.md`.
-- Memory/solo loop/human gates/operator mode: `docs/09-memory-and-self-improvement.md`,
-  `docs/11-solo-loop.md`, `docs/14-human-gates.md`,
-  `docs/16-nontechnical-operation.md`.
-- Fork/delivery control: `docs/18-fork-and-upstream.md`,
-  `docs/23-delivery-control.md`, `playbooks/delivery-control.md`.
-- Index/conventions/fleet review: `docs/00-INDEX.md`, `docs/CONVENTIONS.md`,
-  `docs/fleet-review-conventions.md` (a non-normative pointer, not an added gate).
-
-Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
-`paper/`. This repo's named sensors remain the operative gates.
+Load only the area needed; these explain rather than govern. The reading map
+by topic lives in `docs/00-INDEX.md` (§ "On-demand reading by area"). This
+repo's named sensors remain the operative gates.

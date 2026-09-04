@@ -25,19 +25,28 @@ WHY
   and nobody noticed (#90). A sensor nobody runs is documentation.
 
 USAGE
-  scripts/tests/run-all.sh [--only PATTERN] [--timeout SECONDS]
-                           [--no-quarantine] [--list-quarantine] [--quiet]
+  scripts/tests/run-all.sh [--only PATTERN] [--timeout SECONDS] [--jobs N]
+                           [--wall-budget SECONDS] [--no-quarantine]
+                           [--list-quarantine] [--quiet]
   scripts/tests/run-all.sh --self-test-toolchain
   scripts/tests/run-all.sh --metrics-contract-fixture
   scripts/tests/run-all.sh --help
 
-  --only PATTERN          run only suites whose filename matches PATTERN
+  --only PATTERN[,...]    run only suites whose filename contains any PATTERN
   --timeout SECONDS       per-suite timeout (default 600; 0 disables).
                           Nonzero values use scripts/lib/wall-timeout.sh
                           (perl/python3 process-group watchdog; Bash 3.2).
                           Fails closed before suites if that watchdog cannot
                           start; never silently unbounded. 0 is the explicit
                           opt-out.
+  --jobs N                run up to N suites concurrently (default: CPU count,
+                          or $GIBSON_TEST_JOBS). Output is still printed one
+                          suite at a time in discovery order, so the verdict
+                          and metrics are identical to a serial run. 1 = serial.
+  --wall-budget SECONDS   gate wall-time budget (default $GIBSON_GATE_WALL_BUDGET,
+                          else 0 = report only). A green run that takes longer
+                          than this is RED with the slowest suites named, so
+                          feedback time is a ratchet like any other sensor.
   --no-quarantine         treat quarantined suites as required — the burn-down view
   --list-quarantine       print the quarantine list with issue links and exit
   --quiet                 suite summary lines only, no per-assertion output
@@ -662,6 +671,8 @@ EOF
 
 ONLY=""
 TIMEOUT=600
+JOBS="${GIBSON_TEST_JOBS:-}"
+WALL_BUDGET="${GIBSON_GATE_WALL_BUDGET:-0}"
 USE_QUARANTINE=1
 QUIET=0
 METRICS_CONTRACT_FIXTURE=0
@@ -697,6 +708,8 @@ else
     case "$1" in
       --only) ONLY="${2:-}"; shift 2 ;;
       --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+      --jobs) JOBS="${2:-}"; shift 2 ;;
+      --wall-budget) WALL_BUDGET="${2:-}"; shift 2 ;;
       --no-quarantine) USE_QUARANTINE=0; shift ;;
       --quiet) QUIET=1; shift ;;
       --list-quarantine)
@@ -723,6 +736,18 @@ fi
 if [[ "$METRICS_CONTRACT_FIXTURE" -ne 1 ]]; then
 case "$TIMEOUT" in
   ''|*[!0-9]*) echo "run-all.sh: --timeout wants a whole number of seconds" >&2; exit 2 ;;
+esac
+
+# Suite concurrency. Suites are independent processes that sandbox themselves
+# under mktemp, so they can run side by side; only their reporting is serial.
+if [[ -z "$JOBS" ]]; then
+  JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+fi
+case "$JOBS" in
+  ''|*[!0-9]*|0) echo "run-all.sh: --jobs wants a whole number >= 1" >&2; exit 2 ;;
+esac
+case "$WALL_BUDGET" in
+  ''|*[!0-9]*) echo "run-all.sh: --wall-budget wants a whole number of seconds (0 = report only)" >&2; exit 2 ;;
 esac
 
 # Portable suite timeout (#260): reuse scripts/lib/wall-timeout.sh — do not
@@ -1985,9 +2010,96 @@ suite_has_shell_construction_diag() {
 # static production count and never a parse of .agents/gate.json.
 gibson_metrics_run_contract_mutations
 
+# Suites run as background processes (at most $JOBS at once), each capturing
+# stdout+stderr, exit code, and elapsed seconds into a scratch directory.
+# Reporting below consumes those captures in discovery order, so the printed
+# transcript, FAILED binding, and metrics do not depend on scheduling.
+SUITE_CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-runall-suites.XXXXXX") || {
+  echo "run-all.sh: mktemp for suite captures failed" >&2
+  exit 2
+}
+# On EXIT/INT/TERM/HUP stop any suites still running (whole process trees —
+# a suite may have forked node/docker/git children) before removing captures,
+# so a cancelled gate does not leave orphans burning the runner.
+suite_pids=()
+kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+  kill -TERM "$1" 2>/dev/null || true
+}
+run_all_cleanup() {
+  local p
+  for p in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+    kill -0 "$p" 2>/dev/null && kill_tree "$p"
+  done
+  for p in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+    wait "$p" 2>/dev/null || true
+  done
+  rm -rf "$SUITE_CAPTURE_DIR"
+}
+trap 'run_all_cleanup' EXIT
+trap 'run_all_cleanup; trap - INT; kill -INT $$' INT
+trap 'run_all_cleanup; trap - TERM; kill -TERM $$' TERM
+trap 'run_all_cleanup; trap - HUP; kill -HUP $$' HUP
+
+run_suite_captured() {
+  # $1 suite path, $2 capture prefix
+  local t0=$SECONDS ec
+  run_limited "$1" >"$2.out" 2>&1
+  ec=$?
+  echo "$ec" >"$2.ec"
+  echo "$((SECONDS - t0))" >"$2.elapsed"
+}
+
+# --only accepts a comma-separated list of substrings; any match selects.
+suite_selected() {
+  local name="$1" rest="$ONLY" pat
+  [[ -n "$rest" ]] || return 0
+  while [[ -n "$rest" ]]; do
+    pat="${rest%%,*}"
+    if [[ "$rest" == *,* ]]; then rest="${rest#*,}"; else rest=""; fi
+    [[ -n "$pat" && "$name" == *"$pat"* ]] && return 0
+  done
+  return 1
+}
+
+SELECTED_SUITES=""
 for suite in scripts/tests/*.test.sh; do
   name=$(basename "$suite")
-  [[ -z "$ONLY" || "$name" == *"$ONLY"* ]] || continue
+  suite_selected "$name" || continue
+  SELECTED_SUITES="$SELECTED_SUITES $suite"
+done
+
+# Bash 3.2 has no `wait -n`, so reap *any* finished child by polling: a slot
+# frees as soon as its suite ends, not when the oldest one does.
+reap_finished_suites() {
+  local p live=()
+  for p in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+    if kill -0 "$p" 2>/dev/null; then
+      live+=("$p")
+    else
+      wait "$p" 2>/dev/null
+    fi
+  done
+  suite_pids=("${live[@]+"${live[@]}"}")
+}
+
+echo "  (running up to $JOBS suites concurrently)"
+for suite in $SELECTED_SUITES; do
+  [[ -x "$suite" ]] || continue
+  while [[ "${#suite_pids[@]}" -ge "$JOBS" ]]; do
+    reap_finished_suites
+    [[ "${#suite_pids[@]}" -ge "$JOBS" ]] && sleep 0.2
+  done
+  run_suite_captured "$suite" "$SUITE_CAPTURE_DIR/$(basename "$suite")" &
+  suite_pids+=("$!")
+done
+for pid in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+  wait "$pid" 2>/dev/null
+done
+
+for suite in $SELECTED_SUITES; do
+  name=$(basename "$suite")
 
   if [[ ! -x "$suite" ]]; then
     echo "${RED}  FAIL${OFF} — $name is not executable"
@@ -1996,9 +2108,14 @@ for suite in scripts/tests/*.test.sh; do
     continue
   fi
 
-  suite_t0=$SECONDS
-  out=$(run_limited "$suite" 2>&1); ec=$?
-  suite_elapsed=$((SECONDS - suite_t0))
+  cap="$SUITE_CAPTURE_DIR/$name"
+  if [[ -s "$cap.ec" ]]; then
+    out=$(cat "$cap.out"); ec=$(cat "$cap.ec")
+    suite_elapsed=$(cat "$cap.elapsed" 2>/dev/null || echo 0)
+  else
+    out="run-all: suite produced no exit-code capture (runner crashed?)"; ec=1
+    suite_elapsed=0
+  fi
   gibson_metrics_contribute "$out" "$name" || true
   # grep -o, not a greedy sed capture: `.*([0-9]+ passed` eats all but the last
   # digit and turns "42 passed" into "2 passed".
@@ -2045,9 +2162,24 @@ for suite in scripts/tests/*.test.sh; do
   fi
 done
 
+# --- wall-time budget -------------------------------------------------------
+RUN_ALL_WALL=$((SECONDS - RUN_ALL_T0))
+if [[ "$WALL_BUDGET" -gt 0 && "$RUN_ALL_WALL" -gt "$WALL_BUDGET" ]]; then
+  echo
+  echo "${RED}  FAIL${OFF} — wall-budget: gate took ${RUN_ALL_WALL}s, budget ${WALL_BUDGET}s (jobs=$JOBS). Slowest suites:"
+  for f in "$SUITE_CAPTURE_DIR"/*.elapsed; do
+    [[ -f "$f" ]] || continue
+    printf '%s\t%s\n' "$(cat "$f")" "$(basename "${f%.elapsed}")"
+  done | sort -rn | head -5 | while IFS="$(printf '\t')" read -r secs sname; do
+    printf '         %5ss  %s\n' "$secs" "$sname"
+  done
+  echo "         Speed the slow suites up or split them; raising the budget is a ratchet loosening and needs owner sign-off."
+  FAILED="$FAILED wall-budget"
+fi
+
 # --- verdict ----------------------------------------------------------------
 echo
 gibson_run_all_bind_and_print_verdict
-echo "run-all wall: $((SECONDS - RUN_ALL_T0))s"
+echo "run-all wall: ${RUN_ALL_WALL}s (budget ${WALL_BUDGET}s, jobs=$JOBS)"
 gibson_metrics_emit_aggregate_or_fail
 exit $?

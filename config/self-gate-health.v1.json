@@ -1,0 +1,13 @@
+{
+  "$comment": "Budgets for the self-gate's own health (scripts/self-gate-health.mjs). These are ratchets: tighten freely, loosen only with owner sign-off (AGENTS.md self-modification bounds). Rates are fractions of completed runs in the window; wall seconds are the median of green runs.",
+  "workflowFile": "gibson-self-gate.yml",
+  "windowRuns": 60,
+  "minRuns": 10,
+  "budgets": {
+    "mainRedRate": 0.05,
+    "prRedRate": 0.30,
+    "prCancelledRate": 0.25,
+    "medianGreenWallSeconds": 1000
+  },
+  "ratchetNext": "medianGreenWallSeconds -> 600 once the 60-run window is entirely post-parallel-run-all (measured 901s serial on 2026-09-04)."
+}
