@@ -544,6 +544,28 @@ if awk '
 else
   bad "SC2086 exception is missing or no longer adjacent to the docker argv"
 fi
+if grep -Fq 'BASH32_DOCKER_USABLE=1' "$RUN_ALL" \
+   && grep -Fq 'BASH32_PATHS_SHA256=$bash32_hash' "$RUN_ALL"; then
+  ok "run-all.sh records preamble docker usability and syntax digest"
+else
+  bad "run-all.sh does not persist preamble docker usability and syntax digest"
+fi
+if grep -Fq 'gibson_forward_bash32_bench "$ec" "$BASH32_PATHS_SHA256" "$BASH32_DOCKER_USABLE"' "$RUN_ALL"; then
+  ok "run-all.sh forwards the bench receipt through the production function"
+else
+  bad "run-all.sh does not call the production bench forwarder with capture vars"
+fi
+if awk '
+  /out=\$\(cat "\$cap\.out"\); ec=\$\(cat "\$cap\.ec"\)/ { cap=NR }
+  cap && /gibson_forward_bash32_bench "\$ec" "\$BASH32_PATHS_SHA256" "\$BASH32_DOCKER_USABLE"/ { fwd=NR }
+  cap && /name" == "bash32-syntax-each.test.sh"/ { guard=NR }
+  /for suite in scripts\/tests\/\*\.test.sh/ { s=NR }
+  END { if (s && cap && guard && fwd && s < cap && cap < guard && guard < fwd) exit 0; exit 1 }
+' "$RUN_ALL"; then
+  ok "bench forwarder runs after capture and only for the focused suite"
+else
+  bad "bench forwarder is not wired to the capture-to-top-level seam"
+fi
 
 if grep -E '^[^#]*(mapfile|readarray|declare[[:space:]]+-A|\$\{[A-Za-z_][A-Za-z0-9_]*\^\^|\$\{[A-Za-z_][A-Za-z0-9_]*\,\,|&>>)' "$HELPER"; then
   bad "helper uses a Bash-4-only construct"
@@ -1038,6 +1060,211 @@ bench_over_budget_runner() {
 }
 run_fail_closed_bench bench_over_budget_runner "$ADV_HASH" "$ADV_N" >"$ROOT/adv.budget.out" 2>"$ROOT/adv.budget.err"
 assert_bench_no_receipt "over-budget candidate delta" "$?" "$ROOT/adv.budget.out" "$ROOT/adv.budget.err"
+
+echo "production capture/forwarding seam"
+FWD_BEGIN='# gibson_forward_bash32_bench begin'
+FWD_END='# gibson_forward_bash32_bench end'
+fwd_begin_n=$(grep -n "^${FWD_BEGIN}\$" "$RUN_ALL" | head -1 | cut -d: -f1)
+fwd_end_n=$(grep -n "^${FWD_END}\$" "$RUN_ALL" | head -1 | cut -d: -f1)
+FWD_SRC=$ROOT/fwd.prod.sh
+if [ -n "$fwd_begin_n" ] && [ -n "$fwd_end_n" ] && [ "$fwd_begin_n" -lt "$fwd_end_n" ]; then
+  ok "production forwarder markers are present once"
+  sed -n "${fwd_begin_n},${fwd_end_n}p" "$RUN_ALL" > "$FWD_SRC"
+else
+  bad "production forwarder markers are missing"
+  : > "$FWD_SRC"
+fi
+if grep -Eq '^gibson_forward_bash32_bench\(\) \{' "$FWD_SRC" \
+   && [ "$(grep -c '^gibson_forward_bash32_bench()' "$RUN_ALL")" -eq 1 ]; then
+  ok "extracted block is the sole production gibson_forward_bash32_bench"
+else
+  bad "extracted block is not the sole production forwarder"
+fi
+if grep -Eq '^gibson_forward_bash32_bench\(\)' "$SCRIPT_DIR/bash32-syntax-each.test.sh"; then
+  bad "focused suite defines a duplicate forwarder"
+else
+  ok "focused suite does not define a duplicate forwarder"
+fi
+FWD_SRC_HASH=$(paths_sha256 < "$FWD_SRC")
+FWD_REREAD=$ROOT/fwd.reread.sh
+sed -n "${fwd_begin_n},${fwd_end_n}p" "$RUN_ALL" > "$FWD_REREAD"
+FWD_REREAD_HASH=$(paths_sha256 < "$FWD_REREAD")
+if [ -n "$FWD_SRC_HASH" ] && [ "$FWD_SRC_HASH" = "$FWD_REREAD_HASH" ]; then
+  ok "sourced extract is the exact production marked region"
+else
+  bad "sourced extract is not the exact production marked region"
+fi
+if bash -n "$FWD_SRC" 2>/dev/null; then
+  ok "extracted production forwarder is syntactically valid"
+else
+  bad "extracted production forwarder failed bash -n"
+fi
+# shellcheck disable=SC1090
+. "$FWD_SRC"
+if [ "$(type -t gibson_forward_bash32_bench 2>/dev/null)" = function ]; then
+  ok "extracted production forwarder is callable"
+else
+  bad "extracted production forwarder did not define the function"
+fi
+
+SEAM_HASH=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WRONG_HASH=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+SEAM_VALID="GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=2 paths_sha256=${SEAM_HASH} status=pass"
+SEAM_CHATTER="  ok   — adversarial warmup failure emitted no GIBSON_BASH32_BENCH
+bash32-syntax-each.test.sh: 10 passed, 0 failed"
+
+run_fwd() {
+  FWD_OUT=$(printf '%s\n' "$4" | gibson_forward_bash32_bench "$1" "$2" "$3" 2>"$ROOT/fwd.err")
+  FWD_RC=$?
+  FWD_ERR=$(cat "$ROOT/fwd.err")
+}
+
+assert_fwd_pass() {
+  _label=$1
+  _want=$2
+  if [ "$FWD_RC" -eq 0 ] && [ "$FWD_OUT" = "$_want" ] && [ -z "$FWD_ERR" ]; then
+    ok "seam $_label"
+  else
+    bad "seam $_label (rc=$FWD_RC out=$(printf '%s' "$FWD_OUT" | tr '\n' '|') err=$(printf '%s' "$FWD_ERR" | tr '\n' '|'))"
+  fi
+}
+
+assert_fwd_fail() {
+  _label=$1
+  _hits=0
+  if printf '%s\n' "$FWD_OUT" | grep -q 'GIBSON_BASH32_BENCH'; then
+    _hits=1
+  fi
+  if [ "$FWD_RC" -ne 0 ] && [ -z "$FWD_OUT" ] && [ "$_hits" -eq 0 ]; then
+    ok "seam $_label emits no green receipt"
+  else
+    bad "seam $_label rc=$FWD_RC hits=$_hits out=$(printf '%s' "$FWD_OUT" | tr '\n' '|')"
+  fi
+}
+
+run_fwd 0 "$SEAM_HASH" 1 "${SEAM_CHATTER}
+${SEAM_VALID}
+${SEAM_CHATTER}"
+assert_fwd_pass "valid-one forwards exactly one validated line" "$SEAM_VALID"
+if [ "$(printf '%s\n' "$FWD_OUT" | wc -l | tr -d ' ')" -eq 1 ]; then
+  ok "seam valid-one has one-line cardinality"
+else
+  bad "seam valid-one line count drifted"
+fi
+if printf '%s\n' "$FWD_OUT" | grep -q 'ok   —'; then
+  bad "seam valid-one leaked assertion chatter"
+else
+  ok "seam valid-one does not expose assertion chatter"
+fi
+
+run_fwd 0 "$SEAM_HASH" 1 "$SEAM_CHATTER"
+assert_fwd_fail "missing"
+
+run_fwd 0 "$SEAM_HASH" 1 "${SEAM_VALID}
+${SEAM_VALID}"
+assert_fwd_fail "duplicate"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=2 paths_sha256=${SEAM_HASH} status=pass trailing"
+assert_fwd_fail "malformed"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=2 paths_sha256=${WRONG_HASH} status=pass"
+assert_fwd_fail "wrong digest"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=1 candidate_median_ms=6001 delta_ms=5001 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "over-budget"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH looks like a receipt but is not ${SEAM_HASH} status=pass"
+assert_fwd_fail "lookalike-only"
+
+run_fwd 1 "$SEAM_HASH" 1 "${SEAM_CHATTER}
+${SEAM_VALID}"
+assert_fwd_fail "failed-suite"
+
+run_fwd 0 "$SEAM_HASH" 0 "$SEAM_CHATTER"
+assert_fwd_pass "docker-unavailable missing is not required" ""
+
+run_fwd 0 "$SEAM_HASH" 0 "$SEAM_VALID"
+assert_fwd_pass "docker-unavailable does not forward a captured line" ""
+
+SEAM_BOUND="GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=5010 delta_ms=5000 paths_sha256=${SEAM_HASH} status=pass"
+run_fwd 0 "$SEAM_HASH" 1 "$SEAM_BOUND"
+assert_fwd_pass "delta_ms 5000 is in budget" "$SEAM_BOUND"
+
+SEAM_UNDER="GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=5009 delta_ms=4999 paths_sha256=${SEAM_HASH} status=pass"
+run_fwd 0 "$SEAM_HASH" 1 "$SEAM_UNDER"
+assert_fwd_pass "delta_ms 4999 is under budget" "$SEAM_UNDER"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=5011 delta_ms=5001 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "delta_ms 5001 is over budget"
+
+SEAM_ZERO="GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=10 delta_ms=0 paths_sha256=${SEAM_HASH} status=pass"
+run_fwd 0 "$SEAM_HASH" 1 "$SEAM_ZERO"
+assert_fwd_pass "zero delta is in budget" "$SEAM_ZERO"
+
+SEAM_NEG_BASE=12
+SEAM_NEG_CAND=9
+SEAM_NEG_DELTA=$((SEAM_NEG_CAND - SEAM_NEG_BASE))
+if [ "$SEAM_NEG_DELTA" = "-3" ]; then
+  ok "seam negative-delta fixture is exactly candidate minus baseline"
+else
+  bad "seam negative-delta fixture drifted (got $SEAM_NEG_DELTA want -3)"
+fi
+SEAM_NEG="GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=${SEAM_NEG_BASE} candidate_median_ms=${SEAM_NEG_CAND} delta_ms=${SEAM_NEG_DELTA} paths_sha256=${SEAM_HASH} status=pass"
+run_fwd 0 "$SEAM_HASH" 1 "$SEAM_NEG"
+assert_fwd_pass "negative delta under budget" "$SEAM_NEG"
+if [ "$FWD_RC" -eq 0 ] && printf '%s\n' "$FWD_OUT" | grep -Fq "delta_ms=${SEAM_NEG_DELTA}"; then
+  ok "seam negative-delta receipt preserves the exact recomputed relationship"
+else
+  bad "seam negative-delta receipt lost the exact recomputed relationship"
+fi
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=10 delta_ms=5000 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "inconsistent 10/10/5000"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=5 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "inconsistent positive delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=12 candidate_median_ms=9 delta_ms=-1 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "inconsistent negative delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=3 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "over-reported delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=1 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "under-reported delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=12 candidate_median_ms=9 delta_ms=-4 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "over-reported negative delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=12 candidate_median_ms=9 delta_ms=-2 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "under-reported negative delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=1000000000000000000 candidate_median_ms=1000000000000000000 delta_ms=0 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "huge 19-digit baseline"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=1000000000000000000 delta_ms=999999999999999990 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "huge 19-digit candidate"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=10 delta_ms=1000000000000000000 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "huge 19-digit delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=10 delta_ms=999999999999999999999999999999 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "huge overflow-bait delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=010 candidate_median_ms=12 delta_ms=2 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "leading-zero baseline"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=012 delta_ms=2 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "leading-zero candidate"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=02 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "leading-zero delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=+2 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "plus-prefixed delta"
+
+run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=-0 paths_sha256=${SEAM_HASH} status=pass"
+assert_fwd_fail "negative-zero delta"
 
 echo "T9 stock Darwin Bash 3.2"
 DARWIN_VER=$(/bin/bash --version 2>/dev/null | head -1)
