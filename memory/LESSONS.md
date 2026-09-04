@@ -1077,3 +1077,663 @@ comments as agent-visible input, and fail closed when pinned evidence cannot be
 read.
 **Status:** fixed in #208 follow-up
 **Tags:** #authority #sensors #mutation-testing #fail-closed #issue-208
+
+## L-057 · 2026-08-27 · new-ci-job-needs-its-own-dependency-install
+**What happened:** A new report-only CI job (ConferenceOS PR #1617) imported a
+shared lib module (which imports `typescript` at load time) but the workflow
+never ran `npm ci` before invoking the script. Every real hosted run crashed
+with `ERR_MODULE_NOT_FOUND`. Because the step was `continue-on-error: true`,
+the crash was silently converted into a green check — the sensor had never
+actually evaluated a single PR, including its own self-reported "0/20 false
+positives" measurement, which was therefore meaningless (the script never ran
+to produce it). An independent cross-vendor review (Codex) caught this by
+reading the actual hosted Actions log, not by trusting the PR's local claims.
+**Root cause:** `continue-on-error: true` (correct for an advisory, non-blocking
+sensor) converts EVERY failure mode into the same green signal, including
+"the check never ran at all." A missing dependency-install step is invisible
+locally (dev machines already have `node_modules`) and only surfaces on a
+clean CI runner.
+**Harness fix:** any new CI job that runs a script must install dependencies as
+an explicit early step, verified against a real hosted run (not just local),
+before any claim about the check's behavior (false-positive rate, pass/fail
+distribution) is trusted. `continue-on-error` sensors need a second, narrower
+guarantee: prove the step can fail in a way that's visible somewhere (a
+required upstream install step, a startup self-check) even though the sensor
+step itself can't block.
+**Status:** fixed in ConferenceOS #1617
+**Tags:** #ci #github-actions #false-gate-signal #dependency-install
+
+## L-058 · 2026-08-27 · dont-transform-git-diff-paths-before-classifying-them
+**What happened:** Same sensor as L-057, next two review rounds. First: the
+path parser called `.trim()` on `git diff --name-only -z` output, so a file
+literally named with a leading space (` tests/unit/fake.test.ts`) got
+normalized into a real `tests/` path and false-matched a "was this tested"
+classifier. Fixed narrowly. Third round: the SAME classifier also converted
+backslashes to forward slashes ("Windows path" defensiveness), so a file
+literally named with a backslash (`tests\unit\fake.test.ts` — a normal,
+Git-legal filename on Linux, not a path separator there) false-matched the
+same way. The second fix removed the transformation function entirely rather
+than patching around a third variant.
+**Root cause:** `git diff -z` already emits the canonical, separator-normalized
+form — Git internally only ever uses `/`, on every platform, and preserves
+filenames byte-for-byte with NUL termination specifically so tools don't have
+to guess where whitespace or separators belong. Any transformation applied to
+that output before classification is unnecessary by construction and can only
+ever manufacture a false match, never a legitimate one.
+**Harness fix:** when parsing `git diff`/`git log` machine-readable output
+(`-z`, `--name-only`, `--name-status`), treat the emitted path as already
+correct — no `.trim()`, no separator rewriting, no case-folding. If a
+transformation feels necessary, that's a signal the input source isn't
+actually raw git output.
+**Status:** fixed in ConferenceOS #1617 (both variants; regression tests added
+for both the leading-space and literal-backslash cases)
+**Tags:** #ci #git #false-gate-signal #path-parsing
+
+## L-059 · 2026-08-27 · npm-audit-fixAvailable-can-point-backward
+**What happened:** While scoping a security-gate CVE-severity ratchet
+(ConferenceOS #1613/#1612), the plan assumed `npm audit`'s suggested fix
+version for a Prisma-chain CVE (`6.12.0`) was an upgrade path. By the time the
+fix was dispatched (same day, fast-moving repo), the installed `prisma` was
+already at `7.9.1` — `6.12.0` was a downgrade, not a fix. The dispatched
+builder caught this by re-running `npm audit` fresh in its own worktree
+rather than trusting the coordinator's numbers, and correctly refused to
+take `--force`.
+**Root cause:** `npm audit`'s `fixAvailable` field names A version that
+resolves the advisory in its own dependency graph, not necessarily one that
+is newer than what's currently installed — on a fast-moving repo, "installed"
+and "what the coordinator checked earlier today" can already differ.
+**Harness fix:** any spec or issue that names a specific "fix to version X"
+must be treated as a claim to re-verify at execution time, not a fact to
+carry forward — the builder role should always re-run the actual audit/check
+locally before acting on a coordinator-supplied version number, and a spec
+should say so explicitly rather than assume its own numbers stay current.
+**Status:** working as designed once flagged; tracking issue corrected
+(ConferenceOS #1612)
+**Tags:** #security #dependencies #stale-spec #verify-dont-trust
+
+## L-060 · 2026-08-27 · dispatching-a-review-onto-a-pr-another-coordinator-already-owns-wastes-a-full-loop
+**What happened:** A second session ran a full 4-round dispatch → cross-vendor
+review → fix loop on ConferenceOS PRs #1616/#1617, unaware that the repo's
+primary coordinator (the launchd roster — the ONE coordinator for this repo
+per docs/13) was independently also working the same PRs on its own hourly
+cycle. The primary coordinator's own review completed and merged both PRs
+first. Separately, a THIRD agent (Devin) pushed one more commit onto the
+#1617 branch after the second session's last reviewed head — a benign 1-line
+test-isolation fix, but it meant the actually-merged commit was never
+reviewed by the loop the second session ran; it was covered only by the
+primary coordinator's own (different, valid) review pass.
+**Root cause:** "Count before you add" (docs/13) was not checked before
+dispatching — the second session had no visibility into whether a coordinator
+already owned these PRs, and the lane-collision surface (any agent, including
+Devin, can push to an open PR branch with no ownership arbiter) compounded it.
+**Harness fix:** before dispatching a review/fix loop onto an open PR, check
+for signs of an existing owning coordinator (recent bot activity, an
+attestation comment, a merge that lands mid-loop) — the same signals
+`lane-check.sh` already checks for claiming a NEW issue apply to reviewing an
+EXISTING PR too. No product harm resulted here, but the second session's
+review rounds 1-3 were fully redundant work once the primary coordinator's
+own cycle picked the PRs up.
+**Status:** no fix needed beyond the existing "count before you add" doctrine
+(docs/13) — logged because the collision was real and the doctrine wasn't
+checked, not because the doctrine was wrong
+**Tags:** #concurrency #coordination #fleet #devin
+
+## L-061 · 2026-08-19 · empty-agent-output-diagnosis
+**What happened:** A delegated Codex/Grok review that produces no verdict has four distinct causes — quota, a crashing MCP server, oversized tool input, and untrusted-directory refusal — and exit code 0 does not mean it worked.
+A delegated review that returns **no analysis** has at least four causes. They look
+identical from the shell, and **`codex exec` exits 0 on most of them** — never treat a
+zero exit or a plausible-looking log as a passing review.
+
+1. **Quota** (2026-08-04) — `ERROR: You've hit your usage limit`, landing in the *tail of
+   an earlier* file, not the empty one. Quota windows roll; test rather than trust the
+   stated reset time.
+2. **A crashing MCP server** (2026-08-19) — `rmcp::transport::worker: worker quit with
+   fatal: Transport channel closed, when AuthRequired`. One bad server kills the whole
+   session mid-run. Cost three reviews before it was spotted. Fix: `enabled = false` on
+   that server in `~/.codex/config.toml`.
+3. **Oversized tool-read input** (2026-08-19) — asking Codex to read a ~100KB diff via a
+   tool call at `xhigh` reasoning ends the run right after the tool output: no final
+   message, no `tokens used` marker, **exit 0**. Inline the content instead, and split it.
+4. **Untrusted directory** (2026-08-19) — `Not inside a trusted directory and
+   --skip-git-repo-check was not specified`, a 115-byte log, exit 1. Happens whenever the
+   dispatcher does not `cd` into a repo first.
+
+**Why it matters:** each of these can be reported as "the reviewer found nothing," which
+is the worst possible failure — it converts a broken tool into false assurance on a PR.
+
+**How to apply:** dispatch through **`~/.claude/fleet/codex-review.sh`**, which inlines the
+content, refuses input over 30KB, passes `--skip-git-repo-check`, and — the point of it —
+**requires a `VERDICT:` line outside the echoed prompt**, exiting non-zero and saying
+"do NOT report this as a passing review" when there isn't one. A healthy completed run ends
+with a `tokens used` line; its absence is the tell. Cheap liveness check first:
+`codex exec -s read-only "Reply with exactly: PONG" < /dev/null`.
+
+Related: [[feedback_mission_control_fleet_routing]], [[feedback_never_verify_with_the_authors_example]].
+**Harness fix:** dispatch through **`~/.claude/fleet/codex-review.sh`**, which inlines the content, refuses input over 30KB, passes `--skip-git-repo-check`, and — the point of it — **requires a `VERDICT:` line outside the echoed prompt**, exiting non-zero and saying "do NOT report this as a passing review" when there isn't one. A healthy completed run ends with a `tokens used` line; its absence is the tell. Cheap liveness check first: `codex exec -s read-only "Reply with exactly: PONG" < /dev/null`.
+**Status:** intake 2026-09-04 from fleet memory `feedback_empty_agent_output_diagnosis.md` (no sensor yet)
+**Tags:** #codex #diff #fleet #grok #intake #liveness #review
+
+## L-062 · 2026-08-09 · backgrounded-cli-agents-not-dead
+**What happened:** A backgrounded grok/codex run that prints nothing and 'exits' is usually still alive — ps before re-dispatching, or you get concurrent writers in one worktree.
+Backgrounding `grok --always-approve -p` or `codex exec` with `nohup … &` produces a run
+that looks dead within seconds: the wrapper returns, the log holds 0–200 bytes, and the
+harness reports the command completed with exit code 0. **The agent is usually still
+running.** Output is buffered and only flushes much later.
+
+On 2026-08-09 this caused a real collision on the conferenceos-website test-suite lane. Two
+Grok runs launched 40 seconds apart both looked dead, so a third worker (a Claude subagent)
+was dispatched into the same worktree. All three wrote concurrently — files were replaced
+wholesale mid-edit and a `tests/` tree was deleted out from under its own author. The
+subagent caught it by running `ps` and refused to add a fourth writer.
+
+**Why:** the "empty output = dead" heuristic from [[feedback_empty_agent_output_diagnosis]]
+covers quota exhaustion, where the process really is gone. Buffered-but-alive looks
+identical from the log alone, and the harness's completion notification describes the
+*wrapper*, not the agent. Trusting it violates the one-working-directory-per-agent rule in
+`~/.claude/FLEET.md` in the one way that rule exists to prevent.
+
+**How to apply:** before re-dispatching to the same directory, run
+`ps -eo pid,lstart,command | grep -E "codex exec|grok --always"` and confirm nothing is
+alive. If something is, either wait or `kill` it deliberately — do not add a writer. Prefer
+one owner per worktree over racing two vendors at the same task; when a dispatch genuinely
+needs replacing, kill the old PID first and reset the worktree (`git checkout --`) so the
+new owner starts from a known state rather than someone else's half-finished edits.
+
+Related: [[feedback_mission_control_fleet_routing]], [[feedback_delegate_coding_to_grok]].
+**Harness fix:** before re-dispatching to the same directory, run `ps -eo pid,lstart,command | grep -E "codex exec|grok --always"` and confirm nothing is alive. If something is, either wait or `kill` it deliberately — do not add a writer. Prefer one owner per worktree over racing two vendors at the same task; when a dispatch genuinely needs replacing, kill the old PID first and reset the worktree (`git checkout --`) so the new owner starts from a known state rather than someone else's half-finished edits.
+**Status:** intake 2026-09-04 from fleet memory `feedback_backgrounded_cli_agents_not_dead.md` (no sensor yet)
+**Tags:** #codex #fleet #grok #intake #lane #pid #worktree
+
+## L-063 · 2026-08-16 · timed-out-post-may-have-landed
+**What happened:** A timed-out tool call that POSTs can still succeed server-side — verify before retrying
+Two browser `javascript_tool` calls that POSTed to Mission Control's /api/tasks timed
+out client-side (30s, pane hidden) but BOTH succeeded server-side; a third retry via
+curl then made three duplicate tasks, and the dispatcher started two Grok runners in
+the same worktree (2026-08-16).
+
+**Why:** tool timeout ≠ request failure. Side-effectful requests (POST/PATCH) can land
+after the tool gives up.
+
+**How to apply:** after ANY timed-out call that had side effects, first QUERY for the
+effect (list tasks, check the resource) before retrying. For queues specifically,
+prefer idempotency: include a client-generated key in the title/description and check
+for it. Related: [[project-mission-control-gibson-view]].
+**Harness fix:** after ANY timed-out call that had side effects, first QUERY for the effect (list tasks, check the resource) before retrying. For queues specifically, prefer idempotency: include a client-generated key in the title/description and check for it. Related: [[project-mission-control-gibson-view]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_timed_out_post_may_have_landed.md` (no sensor yet)
+**Tags:** #fleet #grok #intake #worktree
+
+## L-064 · 2026-08-17 · codex-exec-stdin-hang
+**What happened:** codex exec hangs forever on \"Reading additional input from stdin...\" when launched without a closed stdin — redirect </dev/null.
+`codex exec -s read-only "<prompt>"` can hang indefinitely printing only
+`Reading additional input from stdin...` even though the prompt was passed as an
+argument. It burns a review slot silently: the process stays alive, the output
+file stays 0 bytes, and `ps` shows it running, so it looks like a slow review
+rather than a stuck one. Observed 2026-08-16: a cross-vendor review of COS PR
+#1360 sat for 26+ hours and produced nothing; exit code 144 on kill, with that
+one line as the entire output.
+
+**Why:** the fleet card's dispatch pattern
+(`codex exec -s read-only "review the diff in <repo>"`) does not close stdin.
+When launched from a non-interactive/backgrounded shell, codex waits on stdin
+for more prompt text that never arrives.
+
+**How to apply:** always redirect stdin when dispatching codex non-interactively —
+`codex exec -s read-only --cd <dir> "<prompt>" < /dev/null`. When a codex lane
+produces 0 bytes, check the output file for the stdin line *before* assuming a
+quota limit (see [[feedback_empty_agent_output_diagnosis]]) — the two failure
+modes look identical from `ps` but have different fixes. Related:
+[[feedback_backgrounded_cli_agents_not_dead]], [[feedback_mission_control_fleet_routing]].
+**Harness fix:** always redirect stdin when dispatching codex non-interactively — `codex exec -s read-only --cd <dir> "<prompt>" < /dev/null`. When a codex lane produces 0 bytes, check the output file for the stdin line *before* assuming a quota limit (see [[feedback_empty_agent_output_diagnosis]]) — the two failure modes look identical from `ps` but have different fixes. Related: [[feedback_backgrounded_cli_agents_not_dead]], [[feedback_mission_control_fleet_routing]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_codex_exec_stdin_hang.md` (no sensor yet)
+**Tags:** #codex #diff #fleet #intake #lane #review #stdin
+
+## L-065 · 2026-09-04 · never-reconstruct-sha-from-short-form
+**What happened:** Never write a full-length SHA you have not read verbatim from a command — reconstructing one from an abbreviated form fabricates an identifier.
+**Never write out a 40-character SHA unless the exact string was read verbatim from a
+command's output in this session.** If only the abbreviated form is on hand (`git rev-parse
+--short`, `git log --oneline`, a `${SHA:0:8}` in a status table), fetch the full value
+before using it:
+
+```bash
+gh pr view <n> --repo <owner/repo> --json headRefOid -q .headRefOid
+git rev-parse HEAD
+```
+
+Happened 2026-08-18 on conference-os PR #1393: only `1edb22a9` had ever been printed, and a
+full-length `1edb22a9e1e0e0d1cb8e93c0b7d0e0a6a5a06f9c` was written into an
+`owner-review-attestation:v1` block. The real head was `1edb22a914e828010c8b09ec5490f2bfd5992a0d`
+— first eight characters right, remaining thirty-two invented. It required a public
+retraction on the PR.
+
+**Why:** attestation, `--match-head-commit`, and `--force-with-lease` all take a full SHA.
+The gates match exactly, so a fabricated value fails closed and authorizes nothing — the
+damage is a false cryptographic identifier in a permanent audit record, not a bad merge.
+Inert is not the same as harmless.
+
+**How to apply:** any command or comment containing a 40-char hex string must have that
+string flow from a captured variable or a command substitution, never from composition.
+Prefer `SHA=$(gh pr view ... -q .headRefOid)` and interpolate `$SHA`. When a SHA must be
+typed into prose (a PR comment, a commit message), print it first and copy from that output.
+
+The same rule covers any opaque identifier that cannot be validated by inspection —
+installation IDs, deployment IDs, tokens, migration directory timestamps.
+
+Related: [[project_cos_pr_gate_fields]], [[feedback_never_gh_pr_update_branch_cos]],
+[[project_cos_attestation_self_review_block]].
+**Harness fix:** any command or comment containing a 40-char hex string must have that string flow from a captured variable or a command substitution, never from composition. Prefer `SHA=$(gh pr view ... -q .headRefOid)` and interpolate `$SHA`. When a SHA must be typed into prose (a PR comment, a commit message), print it first and copy from that output.
+**Status:** intake 2026-09-04 from fleet memory `feedback_never_reconstruct_sha_from_short_form.md` (no sensor yet)
+**Tags:** #fleet #intake #merge #review #sha
+
+## L-066 · 2026-09-04 · lane-check-before-claim
+**What happened:** Run lane-check.sh before claiming a conference-os issue — worktree lists and open PRs are lagging signals.
+Before claiming or dispatching any conference-os issue, run
+`FLEET_DRIVER=<task-name> ~/.claude/fleet/lane-check.sh --claim <issue>`.
+Exit 1 means taken. Never decide an issue is free from `git worktree list` or
+the open-PR list alone.
+
+**Why:** both signals lag reality. On 2026-08-18 `lane-1397` had a worktree and
+two commits at 14:59, but its PR did not exist and the canonical checkout did
+not register the worktree until 15:47. `cos-backlog-driver` claimed the same
+issue at 15:35 against both signals while both were silent, then had to retract
+the claim publicly. `ata-launch-driver` and `cos-backlog-driver` are separate
+scheduled tasks driving the same repo, so a peer driver is always assumed live.
+
+**How to apply:** the script checks six signals — worktree dirs on disk, local
+branches, remote branches, open PRs, live grok/codex processes, and a shared
+intent registry at `~/.claude/fleet/claims/` covering the window before any of
+the rest exist. Claims are atomic (noclobber) and advisory; one older than 12h
+reports stale. Release with `--release <issue>` when the PR opens. If you
+override a hit, name which hit and why — never silently. Wired as mandatory into
+both driver SKILL.md files and documented in [[fleet-card-discovery]].
+Related: [[feedback-mission-control-fleet-routing]], [[feedback-space-per-repo]].
+**Harness fix:** the script checks six signals — worktree dirs on disk, local branches, remote branches, open PRs, live grok/codex processes, and a shared intent registry at `~/.claude/fleet/claims/` covering the window before any of the rest exist. Claims are atomic (noclobber) and advisory; one older than 12h reports stale. Release with `--release <issue>` when the PR opens. If you override a hit, name which hit and why — never silently. Wired as mandatory into both driver SKILL.md files and documented in [[fleet-card-discovery]]. Related: [[feedback-mission-control-fleet-routing]], [[feedback-space-per-repo]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_lane_check_before_claim.md` (no sensor yet)
+**Tags:** #claim #codex #fleet #grok #intake #lane #worktree
+
+## L-067 · 2026-09-04 · never-verify-with-the-authors-example
+**What happened:** Never confirm a doc comment or PR claim using the example that claim supplies — pick the adversarial case the author didn't choose.
+**When code claims a property, verify it with an input the author did not pick.** Reusing
+the example from the doc comment or PR description restates the claim; it does not test it.
+Authors choose examples that work.
+
+Cost, 2026-08-18, conference-os PR #1393. `findUnresolvedLegalPlaceholders` matched
+`/\[([A-Z][A-Z0-9]+(?:[ _-][A-Z0-9]+)*)\]/g` and its comment said requiring ALL-CAPS keeps
+markdown links safe, citing `[Privacy Policy](/privacy)`. The attestation repeated that
+example and passed. But it only passes because it is *mixed case*. An ALL-CAPS label —
+`[FAQ](/faq)`, `[GDPR](/gdpr)`, `[CCPA](/ccpa)`, i.e. exactly how legal documents cite
+regulations — still matches and is wrongly reported as an unresolved placeholder. Filed as
+#1401 after the PR had merged. Effect: an organizer whose Terms cite GDPR is blocked from
+go-live by the readiness gate that PR introduced.
+
+**How to apply:** for any claimed invariant, spend thirty seconds building the case that
+breaks it before agreeing.
+- Regex "only matches X" -> feed it the near-miss that is *almost* X.
+- "Handles timezones" -> pick a zone where host, UTC, and target all disagree.
+- "Additive only" -> diff it, do not read the summary.
+- Boundary claims -> test the boundary value itself, not one comfortably inside.
+
+A one-line node/python probe against the real function beats reasoning about it. The four
+defects found in this session's own work all survived reasoning and died to a probe.
+
+Related: [[feedback_never_reconstruct_sha_from_short_form]], [[ai_verification_language]],
+[[project_cos_pr_gate_fields]].
+**Harness fix:** for any claimed invariant, spend thirty seconds building the case that breaks it before agreeing. - Regex "only matches X" -> feed it the near-miss that is *almost* X. - "Handles timezones" -> pick a zone where host, UTC, and target all disagree. - "Additive only" -> diff it, do not read the summary. - Boundary claims -> test the boundary value itself, not one comfortably inside.
+**Status:** intake 2026-09-04 from fleet memory `feedback_never_verify_with_the_authors_example.md` (no sensor yet)
+**Tags:** #claim #diff #fleet #gate #intake
+
+## L-068 · 2026-09-04 · verify-worker-by-pid-before-regating
+**What happened:** Before gating, committing, or re-dispatching on a worker's worktree, confirm the worker exited by PID — a long `-p` prompt truncates ps/pgrep pattern matches and makes a live Grok look dead
+2026-08-21: a Grok lane on chatterbuilt #521 looked finished (git showed 10 changed files, my
+`ps | grep` showed no matching process) so I ran the gate on its tree and dispatched a second Grok
+into the same worktree. The first Grok (pid 6466) was still running — the prompt passed via `-p`
+is long and contains an em-dash, so my pattern-based grep missed it. Two agents in one checkout
+for ~2 seconds before I killed the duplicate.
+
+**Why:** `ps`/`pgrep -f` pattern matches against a multi-KB argv are fragile (truncation, unicode,
+parentheses). Git state cannot tell you whether a worker is done; only the process can.
+
+**How to apply:** capture the worker's PID at dispatch (`$!` or `pgrep -n -f grok`), and wait with
+`kill -0 $pid` — never a text pattern. Do not gate, commit, or re-dispatch on a worktree until that
+PID is gone AND the worker's log shows its final summary. An almost-empty log with changed files
+means "still running", not "done quietly". Related: [[feedback_backgrounded_cli_agents_not_dead]],
+[[feedback_lane_check_before_claim]].
+**Harness fix:** capture the worker's PID at dispatch (`$!` or `pgrep -n -f grok`), and wait with `kill -0 $pid` — never a text pattern. Do not gate, commit, or re-dispatch on a worktree until that PID is gone AND the worker's log shows its final summary. An almost-empty log with changed files means "still running", not "done quietly". Related: [[feedback_backgrounded_cli_agents_not_dead]], [[feedback_lane_check_before_claim]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_verify_worker_by_pid_before_regating.md` (no sensor yet)
+**Tags:** #fleet #gate #grok #intake #lane #pid #worktree
+
+## L-069 · 2026-09-04 · never-wait-on-review-evidence
+**What happened:** A merge chain must not wait for "no pending checks" before attesting — review-evidence only clears after the attestation, so the wait can never be satisfied
+2026-08-21: I wrote merge chains as `wait until no check is pending → attest → merge`. On
+ConferenceOS that deadlocks: `review-evidence` is a required context that stays **pending until
+the owner attestation comment is posted**, so the precondition can never be met. #1471 and #1473
+both sat with Codex APPROVE and every other context green while their watchers spun.
+
+**Why:** `review-evidence` is not a CI result — it is the gate's record of *human/authorized*
+evidence at the exact head. Treating it like a build step inverts cause and effect.
+
+**How to apply:** wait only on the *machine* contexts — `quality`, `build-e2e-required`, `DCO`
+(plus `sast` / `Neon schema rehearsal` when they apply) — then post the attestation, then poll
+`repos/$R/commits/<sha>/status` for `review-evidence == success`, then merge with
+`--match-head-commit`. Also: the red **`Evaluate review evidence (trusted base)`** *check-run* is
+the #1458 cancellation artifact and is not the gate; the required target is the `review-evidence`
+**commit status**. Related: [[project_cos_pr_gate_fields]], [[feedback_review_evidence_trusted_rejection]],
+[[project_cos_branch_protection_truth]].
+**Harness fix:** wait only on the *machine* contexts — `quality`, `build-e2e-required`, `DCO` (plus `sast` / `Neon schema rehearsal` when they apply) — then post the attestation, then poll `repos/$R/commits/<sha>/status` for `review-evidence == success`, then merge with `--match-head-commit`. Also: the red **`Evaluate review evidence (trusted base)`** *check-run* is the #1458 cancellation artifact and is not the gate; the required target is the `review-evidence` **commit status**. Related: [[project_cos_pr_gate_fields]], [[feedback_review_evidence_trusted_rejection]], [[project_cos_branch_protection_truth]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_never_wait_on_review_evidence.md` (no sensor yet)
+**Tags:** #attest #ci #codex #fleet #gate #intake #merge #review #sha
+
+## L-070 · 2026-09-04 · guards-must-prove-not-assert
+**What happened:** The fleet's recurring defect class — a guard whose claim is broader than what it proves; check what is persisted, not what a caller asserts.
+Every ConferenceOS guard defect in the 2026-08-21 batch was one shape: **a guard whose claim is
+broader than what it proves.** Named instances:
+
+- **#1469 / PR #1482** — verified a caller-supplied `sourcePath` *label*, not the value. A company
+  invented in code passed by claiming a manifest-listed path. Fixed by requiring the value to occur
+  in the manifest-listed file. Then round 4 found it coerced the value *twice* — compared one form,
+  returned another — so compared ≠ persisted again.
+- **#1470 / PR #1478** — `isProductionDatabaseHost()` returned `false` when parsing failed, making
+  "cannot parse" and "is safe" the same branch. Also defaulted to a host set omitting demo
+  production, so the resolver printed a full `DATABASE_URL` **with password** to stdout.
+- **#1485 / PR #1486** — the ratchet built to catch this class *reproduced it*: a `Mutation-proof:`
+  marker requires an author to **name** a test, never that the test would fail. Provenance by
+  assertion again. Real enforcement filed as #1487.
+
+**How to apply:** when reviewing or designing a guard, ask what it *executes*, not what it accepts.
+Prefer output-level assertions (run the thing, inspect what was persisted) over source-text or
+syntax-position proxies. Treat these as automatic red flags:
+- a check that reads a value the caller supplies as evidence about that same caller;
+- any value coerced/normalized more than once between the check and the write;
+- `return false` / `return safe` on a parse or lookup failure — failure must refuse;
+- a gate that cannot fail without someone choosing to make it fail;
+- a sensor that does not include its own enforcement files in its scope.
+
+**Why:** none of these were caught by CI. All were caught by a careful reader or an adversarial
+cross-vendor review, usually 3–5 rounds in. Prose and markers bind only cooperating agents.
+See [[feedback_never_verify_with_the_authors_example]] and [[feedback_cos_sensors_fix_at_source]].
+**Harness fix:** when reviewing or designing a guard, ask what it *executes*, not what it accepts. Prefer output-level assertions (run the thing, inspect what was persisted) over source-text or syntax-position proxies. Treat these as automatic red flags: - a check that reads a value the caller supplies as evidence about that same caller; - any value coerced/normalized more than once between the check and the write; - `return false` / `return safe` on a parse or lookup failure — failure must refuse; - a gate that cannot fail without someone choosing to make it fail; - a sensor that does not include its own enforcement files in its scope.
+**Status:** intake 2026-09-04 from fleet memory `feedback_guards_must_prove_not_assert.md` (no sensor yet)
+**Tags:** #ci #claim #fleet #gate #intake #review #sensor
+
+## L-071 · 2026-09-04 · never-chunk-a-coherent-diff
+**What happened:** Chunking one logical change for review yields a graceful refusal that reads like a pass; send it whole with a raised cap.
+`codex-review.sh` refuses input over `CODEX_REVIEW_MAX_BYTES`. The tempting fix — split the diff —
+is wrong for a single logical change, and it has now cost real safety, not just rounds.
+
+**The evidence (2026-08-21, ConferenceOS PR #1478).** The diff was sent in chunks. Codex returned
+`REFUTE` on the allowlist/resolver chunk — a *graceful refusal to verdict*, which reads like
+"nothing blocking here." Re-sent as ONE WHOLE PACKET with the cap raised, the same reviewer on the
+same code returned `REQUEST_CHANGES` with four findings, including a path that printed a production
+`DATABASE_URL` with its password to stdout. **Chunking produced a verdict that looked like a pass
+and was not one.** Same failure had already appeared on #1472 and #1482.
+
+**How to apply:**
+- Split a diff ONLY where the parts are genuinely independent (unrelated files, separable concerns).
+- For one coherent change that exceeds the cap, raise `CODEX_REVIEW_MAX_BYTES` for that invocation
+  and send it whole.
+- `REFUTE` / any non-`VERDICT:` output is **not** a pass. Read the last `VERDICT:` line; if it is
+  the prompt echo, there was no verdict — diagnose, do not report a pass.
+- A bare `PASS` without the `VERDICT:` prefix is also not a verdict. Re-run stating the format
+  requirement rather than reading it generously — see [[feedback_never_wait_on_review_evidence]].
+**Harness fix:** - Split a diff ONLY where the parts are genuinely independent (unrelated files, separable concerns). - For one coherent change that exceeds the cap, raise `CODEX_REVIEW_MAX_BYTES` for that invocation and send it whole. - `REFUTE` / any non-`VERDICT:` output is **not** a pass. Read the last `VERDICT:` line; if it is the prompt echo, there was no verdict — diagnose, do not report a pass. - A bare `PASS` without the `VERDICT:` prefix is also not a verdict. Re-run stating the format requirement rather than reading it generously — see [[feedback_never_wait_on_review_evidence]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_never_chunk_a_coherent_diff.md` (no sensor yet)
+**Tags:** #codex #diff #fleet #intake #review
+
+## L-072 · 2026-09-04 · one-mutation-proves-one-mutation
+**What happened:** A mutation proof establishes only the mutation you performed — never read one red test as proving the whole class.
+Mutation-proving a test (break it → red → restore → green) is the right way to show a test is not
+vacuous. The trap is reading ONE red as proof of the class. It happened twice on 2026-08-21:
+
+- **PR #1486** — I mutated the workflow step with `continue-on-error: true`, saw 2 tests go red, and
+  called the "step is blocking" assertion proven. Codex then listed `if: ${{ false }}`,
+  `run: true || node …`, `run: node … || :`, and a skipped decoy job — all pass the assertion.
+- **PR #1462** — I appended a canonical `function githubIfRuns()` and saw 4 tests red. Codex's words:
+  *"the coordinator's mutation confirms the canonical spelling is caught, but not the broader
+  invariant"* — indentation, `async function`, `export const`, typed/destructured bindings, a
+  differently-named copy, and a third-file helper all evade it.
+
+**How to apply:**
+- Enumerate the evasion space FIRST, then mutate one case per branch you intend to claim. If the
+  space is open-ended (YAML step neutralization, regex-based source checks), pattern matching is the
+  wrong mechanism — either use a syntax-aware check (the repo already parses with the TypeScript
+  AST) or narrow the assertion's stated guarantee to exactly the forms it detects.
+- Validate the mutated artifact before believing the red. A `perl`/`sed` edit that corrupts YAML or
+  syntax produces a red that proves nothing — on #1486 my first attempt inserted mid-line and the
+  failures were parse noise. Re-check with a real parser, then re-run.
+- An honest narrow claim beats an overstated broad one. Say which forms are covered and which are not.
+
+**Why:** every finding in this batch was some version of claiming more than was proven — see
+[[feedback_guards_must_prove_not_assert]] and [[feedback_never_verify_with_the_authors_example]].
+**Harness fix:** - Enumerate the evasion space FIRST, then mutate one case per branch you intend to claim. If the space is open-ended (YAML step neutralization, regex-based source checks), pattern matching is the wrong mechanism — either use a syntax-aware check (the repo already parses with the TypeScript AST) or narrow the assertion's stated guarantee to exactly the forms it detects. - Validate the mutated artifact before believing the red. A `perl`/`sed` edit that corrupts YAML or syntax produces a red that proves nothing — on #1486 my first attempt inserted mid-line and the failures were parse noise. Re-check with a real parser, then re-run. - An honest narrow claim beats an overstated broad one. Say which forms are covered and which are not.
+**Status:** intake 2026-09-04 from fleet memory `feedback_one_mutation_proves_one_mutation.md` (no sensor yet)
+**Tags:** #claim #codex #fleet #intake
+
+## L-073 · 2026-09-04 · unstable-is-not-blocked
+**What happened:** A PR in UNSTABLE is mergeable — only NON-required checks are red; judge by the required contexts, never the rollup.
+`mergeStateStatus` rollups mislead. On 2026-08-22 two ConferenceOS PRs (#1468, #1490) sat unmerged
+while **all four required contexts were green**, because `UNSTABLE` was read as "blocked".
+
+- **BLOCKED** — a required context is failing/pending, or an owner gate is unsatisfied.
+- **UNSTABLE** — mergeable; some NON-required check is red.
+- **CLEAN** — everything green.
+
+ConferenceOS `main` requires exactly: `quality`, `build-e2e-required`, `DCO`, `review-evidence`.
+Re-query it (`gh api repos/<o>/<r>/branches/main/protection --jq '.required_status_checks.contexts'`)
+rather than trusting memory — it changes.
+
+Routinely-red NON-required checks that must never stop a merge: `Evaluate review evidence (trusted
+base)` when its runs were **cancelled** (COS #1458), `Agent quality sensors` while a sensor bug is
+being fixed, `Vercel – conference-os-demo` / `-ata` (intentional Ignored Build Step, #1391), `triage`
+and `Neon schema rehearsal` when *skipping*.
+
+**How to apply:** before concluding a PR is blocked, list the required contexts and check each one.
+`~/.claude/fleet/pr-queue-watch.sh` does this per PR and buckets them. See
+[[feedback_never_wait_on_review_evidence]].
+**Harness fix:** before concluding a PR is blocked, list the required contexts and check each one. `~/.claude/fleet/pr-queue-watch.sh` does this per PR and buckets them. See [[feedback_never_wait_on_review_evidence]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_unstable_is_not_blocked.md` (no sensor yet)
+**Tags:** #fleet #gate #intake #merge #review #sensor
+
+## L-074 · 2026-09-04 · lane-branch-must-be-the-pr-head
+**What happened:** Create a lane worktree ON the PR's head branch — branching off it orphans the work and makes attestations name a SHA the PR does not have.
+On 2026-08-22 I created a lane with
+`git worktree add ~/Code/lane-1468 -B fix/1458-preview-smoke-cancel origin/<PR head branch>` —
+a NEW branch off the PR's head branch. Four review rounds, several pushes and an owner attestation
+later, PR #1468's head was still the original commit: the work was on a branch the PR did not track,
+and the attestation named a SHA that was not the PR head, so `review-evidence` correctly refused it.
+
+**How to apply:**
+- Take the head branch name from the PR and USE it:
+  `git worktree add ~/Code/lane-<n> -B "$(gh pr view <n> --json headRefName --jq .headRefName)" "origin/$(gh pr view <n> --json headRefName --jq .headRefName)"`.
+- Before attesting, assert the PR head equals the SHA you are attesting:
+  `gh pr view <n> --json headRefOid` must match `git rev-parse HEAD` in the lane.
+- Recovery, if it already happened: if your branch is a strict superset
+  (`git merge-base --is-ancestor <pr-head> <your-branch>`), fast-forward the PR's real head branch
+  with `bot-push.sh` — never `gh pr update-branch`, which lands as the owner
+  ([[feedback_never_gh_pr_update_branch_cos]]).
+
+Related: [[feedback_never_reconstruct_sha_from_short_form]].
+**Harness fix:** - Take the head branch name from the PR and USE it: `git worktree add ~/Code/lane-<n> -B "$(gh pr view <n> --json headRefName --jq .headRefName)" "origin/$(gh pr view <n> --json headRefName --jq .headRefName)"`. - Before attesting, assert the PR head equals the SHA you are attesting: `gh pr view <n> --json headRefOid` must match `git rev-parse HEAD` in the lane. - Recovery, if it already happened: if your branch is a strict superset (`git merge-base --is-ancestor <pr-head> <your-branch>`), fast-forward the PR's real head branch with `bot-push.sh` — never `gh pr update-branch`, which lands as the owner ([[feedback_never_gh_pr_update_branch_cos]]).
+**Status:** intake 2026-09-04 from fleet memory `feedback_lane_branch_must_be_the_pr_head.md` (no sensor yet)
+**Tags:** #fleet #intake #lane #merge #review #sha #worktree
+
+## L-075 · 2026-09-04 · pr-base-sha-is-frozen
+**What happened:** A PR's base SHA is fixed when the PR opens — never load CI-gate code from it, or a stale-base PR bypasses the gate.
+`github.event.pull_request.base.sha` is frozen at PR-open time and does NOT advance when the base
+branch does. Two consequences, both hit on 2026-08-22:
+
+1. **A new CI step that executes code from the frozen base crashes on every older PR.** COS #1486 ran
+   its analyzer from the `trusted-base` checkout; every PR opened before it merged had a base without
+   the script — `ERR_MODULE_NOT_FOUND`, whole sensor job red, all in-flight PRs at once.
+2. **"Skip when the tool is absent from the base" is a REACHABLE BYPASS.** An author pushes a new head
+   to any still-open pre-gate PR; the `synchronize` run keeps the old base, the skip fires, and the
+   REQUIRED check reports success **without analyzing the new head**. Works from a fork. Telling the
+   author to rebase does not help — rebasing the head does not move the frozen base.
+
+**How to apply:** execute gate code from a ref guaranteed to contain it — for `pull_request_target`
+that is `github.sha` (the execution commit / base-branch tip) — and pass the frozen `base.sha` only as
+COMPARISON DATA. The fix that landed is COS #1494. Install the runtime in that checkout (`npm ci`) and
+make both SHAs resolvable, failing loudly if they are not: "cannot run" must never equal "passed"
+([[feedback_guards_must_prove_not_assert]]).
+**Harness fix:** execute gate code from a ref guaranteed to contain it — for `pull_request_target` that is `github.sha` (the execution commit / base-branch tip) — and pass the frozen `base.sha` only as COMPARISON DATA. The fix that landed is COS #1494. Install the runtime in that checkout (`npm ci`) and make both SHAs resolvable, failing loudly if they are not: "cannot run" must never equal "passed" ([[feedback_guards_must_prove_not_assert]]).
+**Status:** intake 2026-09-04 from fleet memory `feedback_pr_base_sha_is_frozen.md` (no sensor yet)
+**Tags:** #ci #fleet #gate #intake #sensor #sha
+
+## L-076 · 2026-09-04 · jointly-unsatisfiable-rules
+**What happened:** Two individually-correct rules can be jointly unsatisfiable — when a rule "keeps being forgotten", check whether following it is actually possible.
+On 2026-08-22 ConferenceOS lanes were drifting 69, 105 and 130 commits behind main, producing CI
+failures whose messages named entirely the wrong cause (a missing lockfile that was present; a
+missing export that existed). It looked like agents kept forgetting to sync.
+
+They could not sync. Two rules, each correct:
+
+1. **Keep the lane current with main** — otherwise CI runs current main's workflows and sensors
+   against a stale tree.
+2. **Push as the lane bot; never push commits authored by the owner** (#925 same-actor check makes
+   an owner-authored head un-attestable).
+
+Syncing pulls in main's MERGE commits — and the owner authors those, because the owner merges PRs.
+So `bot-push.sh` refused every post-sync push. Following rule 1 made rule 2 impossible. The drift was
+the only reachable state.
+
+**The fix was scope, not discipline:** the guard checked the whole push range; it now checks only
+commits the PR INTRODUCES (`--not origin/main`), and fails closed to the strict check when
+`origin/main` cannot be resolved. Verified both directions — an owner commit arriving from main is
+allowed, an owner commit made in the lane is still refused and named.
+
+**How to apply.** When a rule "keeps being violated", or a corrective action keeps not happening,
+first ask whether following it is POSSIBLE given the other rules and tooling. Reach for a test that
+exercises the two rules TOGETHER, not each alone — both guards passed their own tests. Symptoms that
+this is what you are looking at: a step everyone agrees on that never gets done; a tool that refuses
+in exactly the situation its companion tool creates; error messages that describe a downstream
+symptom rather than the blocked action.
+
+Related: [[feedback_guards_must_prove_not_assert]], [[feedback_never_verify_with_the_authors_example]].
+**Harness fix:** none yet — rule is prose; candidate for a sensor
+**Status:** intake 2026-09-04 from fleet memory `feedback_jointly_unsatisfiable_rules.md` (no sensor yet)
+**Tags:** #ci #fleet #intake #lane #merge
+
+## L-077 · 2026-09-04 · grep-q-pipefail-undercounts
+**What happened:** Under `set -o pipefail`, `producer | grep -q` is nondeterministic and silently fails — use `grep -c` (consumes all input) when the result feeds a count or an `&&`.
+`grep -q` exits at the FIRST match. If the producer (awk, cat, a long command) is still writing,
+it takes SIGPIPE and exits 141; under `set -o pipefail` the whole pipeline is then non-zero, so
+`... | grep -q PAT && count=$((count+1))` skips the increment. Whether it happens depends on
+buffering, so it looks like a flaky or wrong result, not a bug.
+
+On 2026-08-23 `finding-classes.sh` — the daily learning-loop metric — reported **0** for a class with
+**10** real hits this way. A hand-written copy of the same loop gave 10. The instrumented run showed
+the counter branch simply never executing.
+
+**How to apply:** in any script with `pipefail`, never put `grep -q` (or `head -n`, `-m1`) at the end
+of a pipeline whose exit status matters. Use `hits=$(producer | grep -c PAT)` and test the number —
+`grep -c` reads all input, so the producer always finishes cleanly. The fleet tooling tests now assert
+the counter has no `grep -q` in its counting pipeline.
+
+Related: [[feedback_guards_must_prove_not_assert]] — a measurement tool that undercounts is the defect
+class it exists to measure.
+**Harness fix:** in any script with `pipefail`, never put `grep -q` (or `head -n`, `-m1`) at the end of a pipeline whose exit status matters. Use `hits=$(producer | grep -c PAT)` and test the number — `grep -c` reads all input, so the producer always finishes cleanly. The fleet tooling tests now assert the counter has no `grep -q` in its counting pipeline.
+**Status:** intake 2026-09-04 from fleet memory `feedback_grep_q_pipefail_undercounts.md` (no sensor yet)
+**Tags:** #fleet #intake
+
+## L-078 · 2026-09-04 · reattest-at-live-head
+**What happened:** Read the PR head SHA immediately before attesting/reviewing, not from earlier in the session — a PR that gains a commit invalidates a stale attestation and the gate correctly refuses it.
+2026-08-23: attested ConferenceOS #1525 at head `3e198997` and could not understand why
+`review-evidence` stayed `pending`. The gate was working perfectly — it evaluated the LIVE head
+`8fe322a1` (the PR had gained an 18-line lib change + 64 lines of tests after I first read the SHA),
+found no attestation matching that head, and stamped pending with "awaiting evidence." Both my
+attestation AND the Codex review had been done against the stale `3e198997`.
+
+Root cause: I captured the head SHA early in the session and reused it. Concurrent lanes take time;
+a PR's head moves.
+
+**How to apply:**
+- Read `gh pr view N --json headRefOid` IMMEDIATELY before dispatching a review, and again immediately
+  before attesting. Never reuse a SHA read more than a few minutes earlier.
+- Before attesting, assert the independent review was against the CURRENT head, not an earlier one —
+  if the head moved since review, re-review the delta first.
+- `git diff A..B` can report 0 when the local ref lags; trust `gh api .../compare` or fetch first.
+- The gate refusing a stale attestation is CORRECT behavior, not a bug to work around. Do not nudge/
+  edit/re-trigger to force it through — fix the SHA.
+
+Related: [[feedback_pr_base_sha_is_frozen]] (base SHA frozen) is the mirror image — this is about the HEAD moving.
+**Harness fix:** - Read `gh pr view N --json headRefOid` IMMEDIATELY before dispatching a review, and again immediately before attesting. Never reuse a SHA read more than a few minutes earlier. - Before attesting, assert the independent review was against the CURRENT head, not an earlier one — if the head moved since review, re-review the delta first. - `git diff A..B` can report 0 when the local ref lags; trust `gh api .../compare` or fetch first. - The gate refusing a stale attestation is CORRECT behavior, not a bug to work around. Do not nudge/ edit/re-trigger to force it through — fix the SHA.
+**Status:** intake 2026-09-04 from fleet memory `feedback_reattest_at_live_head.md` (no sensor yet)
+**Tags:** #codex #diff #fleet #gate #intake #review #sha
+
+## L-079 · 2026-09-04 · scheduler-registration-verify
+**What happened:** Cowork scheduled tasks — creation/update can silently fail to register or flip enabled=false; always verify with a list call
+The Cowork scheduled-task registry is flaky in three observed ways (2026-08-19):
+(1) a SKILL.md directory can exist while the task was never registered — it never
+runs and nothing warns (this silently killed ata-launch-driver, cos-backlog-driver,
+and auto-remediation-promotion-review from 2026-08-15 for four days);
+(2) create_scheduled_task can report success while the task doesn't appear in
+list_scheduled_tasks (happened to cos-dispatch-pump);
+(3) update_scheduled_task with only prompt/description can flip enabled=false as a
+side effect, and unrelated tasks can lose their enabled state during registry churn.
+
+**Why:** "Created" ≠ "scheduled". A dead automation looks identical to a quiet one.
+
+**Update 2026-08-19 14:10:** the registry dropped ALL FIVE velocity tasks a second
+time. Root cause pattern: tasks created from inside a scheduled-task run session
+do not persist. RESOLUTION: the COS drivers now run on launchd (com.cos.review-pump
+hourly, com.cos.backlog-driver 2h, com.cos.launch-driver 4x daily, com.cos.daily-digest
+07:32) via ~/.claude/fleet/bin/run-driver.sh, which reads the SKILL.md bodies from
+~/.claude/scheduled-tasks/<name>/ — the on-disk prompts remain the source of truth.
+Cowork scheduled tasks are NOT used for COS drivers anymore.
+
+**How to apply:** After EVERY create/update/delete of a scheduled task, call
+list_scheduled_tasks and verify the task appears with enabled=true and a sane
+nextRunAt — and glance at the OTHER tasks' enabled flags too. Periodically diff
+`ls ~/.claude/scheduled-tasks/` against the list output to catch orphaned dirs.
+**Harness fix:** After EVERY create/update/delete of a scheduled task, call list_scheduled_tasks and verify the task appears with enabled=true and a sane nextRunAt — and glance at the OTHER tasks' enabled flags too. Periodically diff `ls ~/.claude/scheduled-tasks/` against the list output to catch orphaned dirs.
+**Status:** intake 2026-09-04 from fleet memory `feedback_scheduler_registration_verify.md` (no sensor yet)
+**Tags:** #diff #fleet #intake #review
+
+## L-080 · 2026-08-29 · review-diffs-three-dot
+**What happened:** Generate review diffs with three-dot (merge-base) `origin/main...HEAD`, never two-dot — two-dot shows main's newer commits as reversed and produces false FAIL verdicts
+On 2026-08-29, PR #1713's Codex review returned a false blocking FAIL ("PR removes resolveDefaultFrom") because the inlined diff was generated with `git diff origin/main..HEAD` after a sibling PR (#1710) had merged to main: two-dot diffs show main-side additions as deletions. A squash merge applies only merge-base-relative changes, so none of it was real.
+
+**Why:** two-dot = direct tree comparison; three-dot = merge-base comparison, which is what actually merges.
+
+**How to apply:** every `codex-review.sh` content diff and any reviewer-facing diff uses `git diff origin/main...HEAD` (three-dot). Better still, merge origin/main into the lane branch before generating the diff — that also pre-empts merge-time conflicts. Related: [[topic-fleet-verification-gotchas]].
+**Harness fix:** every `codex-review.sh` content diff and any reviewer-facing diff uses `git diff origin/main...HEAD` (three-dot). Better still, merge origin/main into the lane branch before generating the diff — that also pre-empts merge-time conflicts. Related: [[topic-fleet-verification-gotchas]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_review_diffs_three_dot.md` (no sensor yet)
+**Tags:** #codex #diff #fleet #intake #lane #merge #review
+
+## L-081 · 2026-08-24 · noop-indistinguishable-from-success
+**What happened:** A rehearsal/verification gate a no-op trivially satisfies proves nothing — require a positive attestation from trusted tooling.
+A verification gate that checks "did the artifact return to / match a captured
+state" is defeated by a **no-op**: if the process under test never ran, the
+artifact is unchanged, and the check passes having proven nothing. Found on the
+Neon COW schema-rehearsal gate (cos #1529/#1437 round 3): a malicious same-repo PR
+could poison `$GITHUB_PATH` / swap `node_modules/.bin` so the migrate/vitest steps
+silently no-op, leaving the DB byte-identical to the pre-apply baseline; the
+authentic rollback verifier then saw "no reverse diff, schema matches capture" and
+went green. The DB was never touched.
+
+**Why:** This is the sharp, testable form of [[feedback_guards_must_prove_not_assert]].
+The gate claimed "migrations apply and roll back cleanly" but only proved "the DB
+is unchanged," which a no-op satisfies for free. A fresh/isolated runner does NOT
+fix it — the missing thing is a *positive* attestation that the expected
+post-process state ever existed.
+
+**How to apply:** For any rehearsal/round-trip/rollback gate, require a trusted
+positive attestation, not just a match-to-baseline. Apply the untrusted input as
+DATA using TRUSTED tooling (don't let the thing under test supply its own verifier
+or PATH), capture the expected post-state with trusted tooling, and fail closed
+unless the live state equals that trusted post-state BEFORE checking the round-trip.
+When reviewing a verifier, always ask: "does a no-op / empty / unchanged input pass
+this?" If yes, it is a false-green. Enumerate the evasion space per
+[[feedback_one_mutation_proves_one_mutation]].
+**Harness fix:** For any rehearsal/round-trip/rollback gate, require a trusted positive attestation, not just a match-to-baseline. Apply the untrusted input as DATA using TRUSTED tooling (don't let the thing under test supply its own verifier or PATH), capture the expected post-state with trusted tooling, and fail closed unless the live state equals that trusted post-state BEFORE checking the round-trip. When reviewing a verifier, always ask: "does a no-op / empty / unchanged input pass this?" If yes, it is a false-green. Enumerate the evasion space per [[feedback_one_mutation_proves_one_mutation]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_noop_indistinguishable_from_success.md` (no sensor yet)
+**Tags:** #diff #fleet #gate #intake
+
+## L-082 · 2026-08-29 · lane-spec-files-ship-in-bot-commits
+**What happened:** bot-commit.sh stages EVERYTHING in the worktree — dispatch artifacts like LANE-SPEC.md get committed and merged to main unless removed first
+`~/.claude/fleet/bot-commit.sh` stages the entire worktree before committing. On 2026-08-29, LANE-SPEC.md (the dispatch spec written into the lane worktree root) shipped to conference-os main inside PR #1707's squash, then add/add-conflicted with the sibling lane's spec on #1708's merge-main (resolved by deleting it in the merge commit).
+
+**Why:** the spec file is coordination material, not repo content; two lanes both writing `LANE-SPEC.md` at the worktree root guarantees an add/add conflict the moment one merges.
+
+**How to apply:** keep dispatch specs OUT of the worktree — write them to the scratchpad and pass the path to the implementer — or `git rm --cached`/delete them before running bot-commit.sh. Check `git status --short` for non-source files before every bot-commit. Related: [[topic-fleet-verification-gotchas]].
+**Harness fix:** keep dispatch specs OUT of the worktree — write them to the scratchpad and pass the path to the implementer — or `git rm --cached`/delete them before running bot-commit.sh. Check `git status --short` for non-source files before every bot-commit. Related: [[topic-fleet-verification-gotchas]].
+**Status:** intake 2026-09-04 from fleet memory `feedback_lane_spec_files_ship_in_bot_commits.md` (no sensor yet)
+**Tags:** #fleet #intake #lane #merge #worktree
