@@ -557,6 +557,43 @@ else
   bad "live tree exceeds baseline (rc=$live_rc err=$(cat "$ROOT/live.err") out=$live_out)"
 fi
 
+echo "# L2/L3 — per-script REACHABLE row + orphan set equals committed baseline"
+ll_rel='scripts/lesson-ledger-lint.mjs'
+ll_line=$(awk '
+  /^  sensors:/ { s=1 }
+  /^  [A-Za-z0-9_-]+:/ && !/^  sensors:/ { s=0 }
+  s && /node[[:space:]]+scripts\/lesson-ledger-lint\.mjs/ { print NR; exit }
+' "$WF")
+if [[ -n "$ll_line" ]] && printf '%s\n' "$live_out" | grep -qx $'REACHABLE\t'"$ll_rel"$'\t.github/workflows/gibson-self-gate.yml:'"$ll_line"; then
+  ok "L2: REACHABLE row is exactly $ll_rel from .github/workflows/gibson-self-gate.yml:$ll_line"
+else
+  bad "L2: missing exact REACHABLE row (want .github/workflows/gibson-self-gate.yml:${ll_line:-?} got $(printf '%s\n' "$live_out" | grep "$ll_rel"))"
+fi
+if printf '%s\n' "$live_out" | grep -q $'REACHABLE\t'"$ll_rel"$'\tscripts/tests/run-all.sh:'; then
+  bad "L2: run-all.sh must not be the production caller for $ll_rel"
+else
+  ok "L2: run-all.sh is not a fake reachability caller for $ll_rel"
+fi
+printf '%s\n' "$live_out" | node -e '
+  const fs = require("fs");
+  const live = fs.readFileSync(0, "utf8");
+  const b = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  if (b.orphanMax !== 23) { console.error("orphanMax is " + b.orphanMax + " not 23"); process.exit(1); }
+  const emitted = [];
+  for (const line of live.split("\n")) {
+    if (line.startsWith("ORPHAN\t")) emitted.push(line.split("\t")[1].replace(/^scripts\//, ""));
+  }
+  emitted.sort();
+  const committed = [...b.orphans].sort();
+  if (emitted.length !== 23) { console.error("orphan count " + emitted.length + " not 23"); process.exit(1); }
+  if (emitted.join("\0") !== committed.join("\0")) {
+    console.error("orphan set mismatch emitted=" + emitted.join(",") + " committed=" + committed.join(","));
+    process.exit(1);
+  }
+' "$BASELINE" \
+  && ok "L3: orphan count is 23; orphanMax is 23; ORPHAN names equal committed orphans array" \
+  || bad "L3: baseline set integrity failed"
+
 
 echo "# Codex #317 round 2: assignment value, sibling-tree prefix, quoted/if/here-string forms, symlinks"
 FX="$ROOT/fx-r2"
@@ -656,6 +693,136 @@ rm -f "$FX/scripts/new-orphan.sh"; run_sensor "$FX"
 [[ "$RC" -eq 0 ]] && ok "finding 5 control: at the committed baseline → green" || bad "clean tree red (rc=$RC err=$ERR)"
 run_sensor "$FX" --ratchet-ref refs/does/not/exist
 [[ "$RC" -eq 0 ]] && printf '%s\n' "$ERR" | grep -q 'no committed baseline' && ok "unresolvable ratchet ref → note, working-tree check only" || bad "unresolvable ref handling (rc=$RC err=$ERR)"
+
+echo "# L4 — deleting or misspelling the hosted invocation drops the REACHABLE row"
+FX="$ROOT/fx-l4"
+rm -rf "$FX"
+mkdir -p "$FX/scripts" "$FX/scripts/tests" "$FX/.github/workflows" "$FX/config"
+printf '%s\n' 'export default 1' > "$FX/scripts/lesson-ledger-lint.mjs"
+printf '%s\n' '#!/bin/bash' 'echo called' > "$FX/scripts/called.sh"
+printf '%s\n' '#!/bin/bash' 'bash scripts/called.sh' > "$FX/scripts/tests/run-all.sh"
+write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 0
+cat > "$FX/.github/workflows/gibson-self-gate.yml" <<'YML'
+name: self-gate
+on: push
+permissions:
+  contents: read
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lesson ledger lint
+        run: node scripts/lesson-ledger-lint.mjs
+YML
+run_sensor "$FX"
+if [[ "$RC" -eq 0 ]] && printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/lesson-ledger-lint.mjs\t.github/workflows/gibson-self-gate.yml:'; then
+  ok "L4 control: hosted invocation is REACHABLE from gibson-self-gate.yml"
+else
+  bad "L4 control (rc=$RC out=$OUT err=$ERR)"
+fi
+# Delete the invocation.
+cat > "$FX/.github/workflows/gibson-self-gate.yml" <<'YML'
+name: self-gate
+on: push
+permissions:
+  contents: read
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lesson ledger lint
+        run: echo skipped
+YML
+run_sensor "$FX"
+if [[ "$RC" -eq 1 ]] && ! printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/lesson-ledger-lint.mjs\t' \
+   && printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/lesson-ledger-lint.mjs'; then
+  ok "L4 delete: reachability exits 1 and the REACHABLE row is gone"
+else
+  bad "L4 delete (rc=$RC out=$OUT err=$ERR)"
+fi
+# Misspell the invocation.
+cat > "$FX/.github/workflows/gibson-self-gate.yml" <<'YML'
+name: self-gate
+on: push
+permissions:
+  contents: read
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lesson ledger lint
+        run: node scripts/lesson-ledger-lint.mjss
+YML
+run_sensor "$FX"
+if [[ "$RC" -eq 1 ]] && ! printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/lesson-ledger-lint.mjs\t' \
+   && printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/lesson-ledger-lint.mjs'; then
+  ok "L4 misspell: reachability exits 1 and the REACHABLE row is gone"
+else
+  bad "L4 misspell (rc=$RC out=$OUT err=$ERR)"
+fi
+
+echo "# L5 — memory-only change classifies as docs; ledger-lint step has no if:"
+extract_classify_run() {
+  awk '
+    function leading(s,    n) {
+      n = 0
+      while (substr(s, n+1, 1) == " ") n++
+      return n
+    }
+    $0 ~ /^[[:space:]]*- name: Classify change[[:space:]]*$/ { hit=1; next }
+    hit && $0 ~ /^[[:space:]]*- name:/ { exit }
+    hit && match($0, /^[[:space:]]+run:[[:space:]]*[|]/) { inrun=1; rind=leading($0); next }
+    inrun {
+      if (length($0) && leading($0) <= rind && $0 ~ /^[[:space:]]*(- |[A-Za-z0-9_]+:)/) exit
+      prefix = rind + 2
+      if (leading($0) >= prefix) print substr($0, prefix + 1)
+      else print $0
+    }
+  ' "$WF"
+}
+CLASSIFY_SCRIPT="$ROOT/classify-step.sh"
+extract_classify_run > "$CLASSIFY_SCRIPT"
+if grep -q 'mode=docs' "$CLASSIFY_SCRIPT" && grep -q 'memory/\*\.md' "$CLASSIFY_SCRIPT"; then
+  ok "L5: extracted Classify change step names mode=docs and memory/*.md"
+else
+  bad "L5: classify extraction missing sentinels: $(head -20 "$CLASSIFY_SCRIPT")"
+fi
+REPO_D="$ROOT/classify-docs"
+rm -rf "$REPO_D"
+mkdir -p "$REPO_D/memory"
+$GIT init -q "$REPO_D"
+git -C "$REPO_D" symbolic-ref HEAD refs/heads/main
+echo base > "$REPO_D/memory/LESSONS.md"
+$GIT -C "$REPO_D" add memory/LESSONS.md
+$GIT -C "$REPO_D" commit -q -m "base"
+CLASSIFY_BASE=$(git -C "$REPO_D" rev-parse --verify HEAD)
+echo changed > "$REPO_D/memory/LESSONS.md"
+$GIT -C "$REPO_D" commit -q -am "memory only"
+: > "$ROOT/classify.out"
+CLASSIFY_OUT=$(
+  cd "$REPO_D" || exit 99
+  BASE_SHA="$CLASSIFY_BASE" GITHUB_OUTPUT="$ROOT/classify.out" bash "$CLASSIFY_SCRIPT" 2>&1
+)
+CLASSIFY_RC=$?
+CLASSIFY_MODE=$(sed -n 's/^mode=//p' "$ROOT/classify.out" | tail -1)
+if [[ "$CLASSIFY_RC" -eq 0 ]] && [[ "$CLASSIFY_MODE" == "docs" ]]; then
+  ok "L5: memory/LESSONS.md-only change classifies as mode=docs"
+else
+  bad "L5 classify docs (rc=$CLASSIFY_RC mode=$CLASSIFY_MODE out=$CLASSIFY_OUT)"
+fi
+# L1(c) companion: the live ledger-lint step itself has no if: (still runs on docs).
+ll_step=$(awk '
+  /^  sensors:/ { s=1 }
+  /^  [A-Za-z0-9_-]+:/ && !/^  sensors:/ { s=0 }
+  s && $0 ~ /^[[:space:]]*- name: Lesson ledger lint[[:space:]]*$/ { hit=1 }
+  s && hit { print }
+  s && hit && $0 ~ /^[[:space:]]*- name:/ && $0 !~ /Lesson ledger lint/ { exit }
+' "$WF")
+if printf '%s\n' "$ll_step" | grep -q 'if:'; then
+  bad "L5: ledger-lint step carries if: (would skip docs/memory fast path)"
+else
+  ok "L5: ledger-lint step has no if: so it still executes on mode=docs"
+fi
 
 echo "sensor-reachability.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

@@ -102,6 +102,11 @@ BASELINE="$SCRIPT_DIR/shellcheck-baseline.txt"
 # shellcheck source=lib/convention-sensors.sh
 . "$SCRIPT_DIR/lib/convention-sensors.sh"
 WORKFLOW_SELF_GATE="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
+# Split so this file cannot itself become a production reachability caller
+# for the ledger lint (run-all.sh is scanned by sensor-reachability.mjs).
+_GIBSON_LL_DIR='scripts'
+_GIBSON_LL_BASE='lesson-ledger-lint.mjs'
+_GIBSON_LL_REL="${_GIBSON_LL_DIR}/${_GIBSON_LL_BASE}"
 
 # Parse "ShellCheck … version: X.Y.Z" (or a bare X.Y.Z) → X.Y.Z, else empty.
 # Pure string logic — no PATH lookup — so offline self-tests can exercise it.
@@ -292,6 +297,322 @@ assert_workflow_shellcheck_pin_wiring() {
     return 1
   fi
   return 0
+}
+
+# Assert hosted lesson-ledger lint wiring in a workflow file (L1).
+# Comments that merely mention the script must NOT satisfy this. Full-line
+# comments are stripped before the check so commented-out command text cannot
+# pass. Prints a short reason on stdout and returns 1 on failure.
+#
+# Required (comment-stripped sensors job):
+#   - an active `node scripts/lesson-ledger-lint.mjs` invocation
+#   - no --offline / --root / --ledger flags on that step
+#   - no if: and no continue-on-error: on that step
+#   - the step sits in the sensors job (not another job or workflow)
+assert_workflow_ledger_lint_wiring() {
+  local wf="$1"
+  local filtered="" rc=0 out=""
+  if [[ ! -f "$wf" ]]; then
+    printf '%s' "missing workflow file"
+    return 1
+  fi
+  filtered=$(mktemp "${TMPDIR:-/tmp}/ll-lint-active.XXXXXX") || {
+    printf '%s' "mktemp failed for active-wiring filter"
+    return 1
+  }
+  if ! sed '/^[[:space:]]*#/d' "$wf" >"$filtered"; then
+    rm -f "$filtered"
+    printf '%s' "failed to strip full-line comments"
+    return 1
+  fi
+  out=$(awk -v needle="${_GIBSON_LL_REL}" '
+    function is_job(s) { return s ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ }
+    function job_name(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      sub(/:$/, "", s)
+      return s
+    }
+    function invokes(s,    i, before, c) {
+      i = index(s, needle)
+      if (i < 1) return 0
+      before = substr(s, 1, i - 1)
+      if (before !~ /node[[:space:]]+$/) return 0
+      c = substr(s, i + length(needle), 1)
+      if (c != "" && c !~ /[[:space:]]/) return 0
+      return 1
+    }
+    function has_flag(s, f,    i, c) {
+      i = index(s, f)
+      if (i < 1) return 0
+      c = substr(s, i + length(f), 1)
+      return (c == "" || c ~ /[[:space:]"'"'"']/)
+    }
+    function flush() {
+      if (step == "") return
+      if (!invokes(step)) return
+      found = 1
+      if (job != "sensors") wrong_job = 1
+      if (step ~ /(^|\n)[[:space:]]*(- )?if:/) bad_if = 1
+      if (step ~ /(^|\n)[[:space:]]*(- )?continue-on-error:/) bad_coe = 1
+      if (has_flag(step, "--offline")) bad_off = 1
+      if (has_flag(step, "--root")) bad_root = 1
+      if (has_flag(step, "--ledger")) bad_led = 1
+    }
+    {
+      if (is_job($0)) {
+        flush()
+        step = ""
+        job = job_name($0)
+        next
+      }
+      if ($0 ~ /^      - /) {
+        flush()
+        step = $0 "\n"
+        next
+      }
+      if (step != "") step = step $0 "\n"
+    }
+    END {
+      flush()
+      if (!found) {
+        printf "missing active node %s invocation in sensors job", needle
+        exit 1
+      }
+      r = ""
+      if (wrong_job) r = r "invocation not in sensors job; "
+      if (bad_if) r = r "lint step carries if:; "
+      if (bad_coe) r = r "lint step carries continue-on-error:; "
+      if (bad_off) r = r "lint step passes --offline; "
+      if (bad_root) r = r "lint step passes --root; "
+      if (bad_led) r = r "lint step passes --ledger; "
+      if (r != "") { printf "%s", r; exit 1 }
+      exit 0
+    }
+  ' "$filtered")
+  rc=$?
+  rm -f "$filtered"
+  if [[ "$rc" -ne 0 ]]; then
+    printf '%s' "${out:-wiring check failed}"
+    return 1
+  fi
+  return 0
+}
+
+# L9: least privilege on the live self-gate workflow only.
+# Workflow-level map is exactly contents: read; sensors job map is exactly
+# contents: read + issues: read (no extra grants, no write); claim-isolation
+# gains no job permission block and no token; GH_TOKEN is exactly the single
+# step-scoped value ${{ github.token }}.
+assert_workflow_ledger_lint_privilege() {
+  local wf="$1"
+  local filtered="" out="" rc=0
+  if [[ ! -f "$wf" ]]; then
+    printf '%s' "missing workflow file"
+    return 1
+  fi
+  filtered=$(mktemp "${TMPDIR:-/tmp}/ll-priv-active.XXXXXX") || {
+    printf '%s' "mktemp failed for privilege filter"
+    return 1
+  }
+  if ! sed '/^[[:space:]]*#/d' "$wf" >"$filtered"; then
+    rm -f "$filtered"
+    printf '%s' "failed to strip full-line comments"
+    return 1
+  fi
+  out=$(awk -v needle="${_GIBSON_LL_REL}" '
+    function is_job(s) { return s ~ /^  [A-Za-z0-9_-]+:[[:space:]]*$/ }
+    function job_name(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      sub(/:$/, "", s)
+      return s
+    }
+    function trim(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    function invokes(s,    i, before, c) {
+      i = index(s, needle)
+      if (i < 1) return 0
+      before = substr(s, 1, i - 1)
+      if (before !~ /node[[:space:]]+$/) return 0
+      c = substr(s, i + length(needle), 1)
+      if (c != "" && c !~ /[[:space:]]/) return 0
+      return 1
+    }
+    function extract_job_perm(jobtext,    n, a, i, line, in_p, out) {
+      n = split(jobtext, a, "\n")
+      in_p = 0
+      out = ""
+      for (i = 1; i <= n; i++) {
+        line = a[i]
+        if (line ~ /^    permissions:[[:space:]]*$/) { in_p = 1; out = line "\n"; continue }
+        if (line ~ /^    permissions:/) return line
+        if (in_p) {
+          if (line ~ /^      / || line ~ /^[[:space:]]*$/) out = out line "\n"
+          else return out
+        }
+      }
+      return out
+    }
+    function parse_perm_children(block,    n, a, i, line, k, v) {
+      delete p_val
+      p_n = 0
+      p_inline = ""
+      n = split(block, a, "\n")
+      for (i = 1; i <= n; i++) {
+        line = a[i]
+        if (line ~ /^[[:space:]]*$/) continue
+        if (line ~ /^[[:space:]]*permissions:[[:space:]]*$/) continue
+        if (line ~ /^[[:space:]]*permissions:/) {
+          v = line
+          sub(/^[[:space:]]*permissions:[[:space:]]*/, "", v)
+          p_inline = trim(v)
+          continue
+        }
+        if (line !~ /^[[:space:]]*[A-Za-z0-9_-]+:/) continue
+        k = trim(line)
+        v = k
+        sub(/:.*$/, "", k)
+        sub(/^[^:]+:[[:space:]]*/, "", v)
+        sub(/[[:space:]]+#.*$/, "", v)
+        v = trim(v)
+        if (k == "permissions") continue
+        p_n++
+        p_val[k] = v
+      }
+    }
+    function exact_map(want,    k, extra, missing, badval) {
+      extra = 0; missing = 0; badval = 0
+      if (p_inline != "") return 0
+      for (k in p_val) {
+        if (!(k in want)) extra = 1
+        else if (p_val[k] != want[k]) badval = 1
+      }
+      for (k in want) {
+        if (!(k in p_val)) missing = 1
+        else if (p_val[k] != want[k]) badval = 1
+      }
+      return (extra == 0 && missing == 0 && badval == 0 && p_n > 0)
+    }
+    BEGIN { in_wf_perm = 0; in_jobs = 0 }
+    /^jobs:/ { in_jobs = 1; in_wf_perm = 0; next }
+    /^permissions:/ && in_jobs == 0 {
+      in_wf_perm = 1
+      wf_perm = wf_perm $0 "\n"
+      next
+    }
+    in_wf_perm {
+      if ($0 ~ /^[A-Za-z0-9_-]+:/) { in_wf_perm = 0 }
+      else { wf_perm = wf_perm $0 "\n"; next }
+    }
+    in_jobs && is_job($0) {
+      if (job != "") jobs[job] = job_buf
+      job = job_name($0)
+      job_buf = ""
+      step = ""
+      next
+    }
+    {
+      if (job != "") job_buf = job_buf $0 "\n"
+      if ($0 ~ /^      - /) { step = $0 "\n"; next }
+      if (step != "") step = step $0 "\n"
+      if (invokes(step)) lint_step = step
+    }
+    END {
+      if (job != "") jobs[job] = job_buf
+      r = ""
+      delete wf_want
+      wf_want["contents"] = "read"
+      parse_perm_children(wf_perm)
+      if (!exact_map(wf_want) || p_n != 1) {
+        r = r "workflow-level permissions must be exactly contents: read; "
+      }
+      sensors = jobs["sensors"]
+      if (sensors == "") { r = r "missing sensors job; "; printf "%s", r; exit 1 }
+      sensors_perm = extract_job_perm(sensors)
+      if (sensors_perm == "") {
+        r = r "sensors job missing permissions block; "
+      } else {
+        delete job_want
+        job_want["contents"] = "read"
+        job_want["issues"] = "read"
+        parse_perm_children(sensors_perm)
+        if (!exact_map(job_want) || p_n != 2) {
+          r = r "sensors job permissions must be exactly contents: read plus issues: read (no extra grants, no write); "
+        }
+      }
+      iso = jobs["claim-isolation"]
+      iso_perm = extract_job_perm(iso)
+      if (iso_perm != "") r = r "claim-isolation gained a permissions block; "
+      if (iso ~ /GH_TOKEN/) r = r "claim-isolation gained GH_TOKEN; "
+      ntok = 0
+      whole = wf_perm
+      for (j in jobs) whole = whole jobs[j]
+      tmp = whole
+      while (match(tmp, /GH_TOKEN:/)) { ntok++; tmp = substr(tmp, RSTART + RLENGTH) }
+      if (ntok != 1) r = r "GH_TOKEN must appear exactly once (lint step env); "
+      if (lint_step == "") r = r "missing lint step for GH_TOKEN placement; "
+      else if (lint_step !~ /GH_TOKEN:/) r = r "GH_TOKEN not in lint step env; "
+      else if (lint_step !~ /env:/) r = r "GH_TOKEN not under step env:; "
+      else {
+        n = split(lint_step, sl, "\n")
+        tok_ok = 0
+        for (i = 1; i <= n; i++) {
+          if (sl[i] !~ /GH_TOKEN:/) continue
+          line = trim(sl[i])
+          sub(/^GH_TOKEN:[[:space:]]*/, "", line)
+          sub(/[[:space:]]+#.*$/, "", line)
+          line = trim(line)
+          if (line == "${{ github.token }}") tok_ok = 1
+          else r = r "GH_TOKEN is not exactly ${{ github.token }}; "
+        }
+        if (tok_ok == 0 && r !~ /GH_TOKEN is not exactly/) {
+          r = r "GH_TOKEN is not exactly ${{ github.token }}; "
+        }
+      }
+      if (r != "") { printf "%s", r; exit 1 }
+      exit 0
+    }
+  ' "$filtered")
+  rc=$?
+  rm -f "$filtered"
+  if [[ "$rc" -ne 0 ]]; then
+    printf '%s' "${out:-privilege check failed}"
+    return 1
+  fi
+  return 0
+}
+
+# Control fixture that should PASS assert_workflow_ledger_lint_wiring.
+# Heredoc body is data to sensor-reachability (skipped); needle is assembled
+# at runtime from split parts so this function source is not a fake caller.
+_write_good_ledger_lint_wiring_fixture() {
+  local dest="$1"
+  local invoke="node ${_GIBSON_LL_REL}"
+  cat >"$dest" <<EOF
+name: fixture-self-gate
+on: push
+permissions:
+  contents: read
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Lesson ledger lint
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: ${invoke}
+  claim-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
 }
 
 # Minimal executable wiring that should PASS the assertion (control fixture).
@@ -657,6 +978,193 @@ EOF
       echo "  FAIL — mutation digest restatement unexpectedly passed"; fail=1
     else
       echo "  ok   — mutation: digest restatement fails closed"
+    fi
+
+    rm -rf "$mut_dir"
+  fi
+
+  # L1/L9: hosted lesson-ledger lint wiring + least privilege (comment-stripped).
+  wf="$WORKFLOW_SELF_GATE"
+  if [[ ! -f "$wf" ]]; then
+    echo "  FAIL — missing workflow $wf"; fail=1
+  else
+    if reason=$(assert_workflow_ledger_lint_wiring "$wf"); then
+      echo "  ok   — sensors job has unconditional hosted ledger-lint invocation (no --offline/--root/--ledger, no if:/continue-on-error:)"
+    else
+      echo "  FAIL — ledger-lint wiring: ${reason}"; fail=1
+    fi
+    if reason=$(assert_workflow_ledger_lint_privilege "$wf"); then
+      echo "  ok   — sensors job permissions exactly contents:read + issues:read; workflow-level exactly contents:read; GH_TOKEN is step-scoped github.token"
+    else
+      echo "  FAIL — ledger-lint privilege: ${reason}"; fail=1
+    fi
+  fi
+  mut_dir=$(mktemp -d "${TMPDIR:-/tmp}/ll-lint-mut.XXXXXX") || {
+    echo "  FAIL — mktemp for ledger-lint wiring mutation fixtures"; fail=1; mut_dir=""
+  }
+  if [[ -n "$mut_dir" ]]; then
+    mut_wf="$mut_dir/good.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  ok   — mutation control: good hosted ledger-lint wiring passes"
+    else
+      echo "  FAIL — mutation control: good ledger-lint wiring rejected: ${reason}"; fail=1
+    fi
+
+    # Commented-out exact invocation must fail closed.
+    mut_wf="$mut_dir/commented-out.yml"
+    cat >"$mut_wf" <<EOF
+name: fixture-self-gate
+on: push
+permissions:
+  contents: read
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    steps:
+      # - name: Lesson ledger lint
+      #   run: node ${_GIBSON_LL_REL}
+  claim-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  FAIL — mutation commented-out ledger-lint unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: commented-out ledger-lint invocation fails closed"
+    fi
+
+    mut_wf="$mut_dir/if-false.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk '
+      /name: Lesson ledger lint/ { print; print "        if: false"; next }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  FAIL — mutation if:false ledger-lint unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: if: false on ledger-lint step fails closed"
+    fi
+
+    mut_wf="$mut_dir/if-docs.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk '
+      /name: Lesson ledger lint/ { print; print "        if: steps.classify.outputs.mode != '\''docs'\''"; next }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  FAIL — mutation if:docs-mode ledger-lint unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: if: steps.classify.outputs.mode != '\''docs'\'' fails closed"
+    fi
+
+    mut_wf="$mut_dir/continue-on-error.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk '
+      /name: Lesson ledger lint/ { print; print "        continue-on-error: true"; next }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  FAIL — mutation continue-on-error ledger-lint unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: continue-on-error: true on ledger-lint step fails closed"
+    fi
+
+    mut_wf="$mut_dir/offline.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk -v needle="${_GIBSON_LL_REL}" '
+      index($0, needle) { sub(needle, needle " --offline") }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  FAIL — mutation --offline ledger-lint unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: --offline added to ledger-lint step fails closed"
+    fi
+
+    # Invocation moved to a different workflow file: the self-gate copy has none.
+    mut_wf="$mut_dir/gibson-self-gate.yml"
+    cat >"$mut_wf" <<EOF
+name: fixture-self-gate
+on: push
+permissions:
+  contents: read
+jobs:
+  sensors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sensor reachability
+        run: node scripts/sensor-reachability.mjs
+  claim-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+    _write_good_ledger_lint_wiring_fixture "$mut_dir/other.yml"
+    if reason=$(assert_workflow_ledger_lint_wiring "$mut_wf"); then
+      echo "  FAIL — mutation moved-to-new-workflow unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: ledger-lint moved to a new workflow fails closed"
+    fi
+
+    # L9 privilege control + mutations (extra/write grant, secret/PAT token).
+    mut_wf="$mut_dir/priv-good.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_privilege "$mut_wf"); then
+      echo "  ok   — mutation control: exact least-privilege wiring passes"
+    else
+      echo "  FAIL — mutation control: good privilege rejected: ${reason}"; fail=1
+    fi
+
+    mut_wf="$mut_dir/priv-extra.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk '
+      /issues: read/ { print; print "      pull-requests: read"; next }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_privilege "$mut_wf"); then
+      echo "  FAIL — mutation extra sensors permission unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: extra sensors-job permission (pull-requests: read) fails closed"
+    fi
+
+    mut_wf="$mut_dir/priv-write.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk '
+      /^  sensors:/ { s=1 }
+      /^  [A-Za-z0-9_-]+:/ && !/^  sensors:/ { s=0 }
+      s && /issues: read/ { sub(/issues: read/, "issues: write") }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_privilege "$mut_wf"); then
+      echo "  FAIL — mutation write permission unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: sensors-job issues: write fails closed"
+    fi
+
+    mut_wf="$mut_dir/priv-secret.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk -v tok='${{ secrets.GITHUB_TOKEN }}' '
+      /GH_TOKEN:/ { print "          GH_TOKEN: " tok; next }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_privilege "$mut_wf"); then
+      echo "  FAIL — mutation secret token binding unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: GH_TOKEN secrets.GITHUB_TOKEN binding fails closed"
+    fi
+
+    mut_wf="$mut_dir/priv-pat.yml"
+    _write_good_ledger_lint_wiring_fixture "$mut_wf"
+    awk -v tok='${{ secrets.GH_PAT }}' '
+      /GH_TOKEN:/ { print "          GH_TOKEN: " tok; next }
+      { print }
+    ' "$mut_wf" >"$mut_wf.tmp" && mv "$mut_wf.tmp" "$mut_wf"
+    if reason=$(assert_workflow_ledger_lint_privilege "$mut_wf"); then
+      echo "  FAIL — mutation PAT token binding unexpectedly passed"; fail=1
+    else
+      echo "  ok   — mutation: GH_TOKEN secrets.GH_PAT binding fails closed"
     fi
 
     rm -rf "$mut_dir"
