@@ -367,24 +367,34 @@ function isExplicitPinMarker(line, id) {
   return false;
 }
 
+/**
+ * The TITLE of a test-name line is the first quoted argument after a
+ * title-bearing command at line start: `ok "…"`, `bad "…"`, `expect "…"`,
+ * `check "…"`, `@test "…"`, `test("…")`, `it("…")`, `describe("…")`, or a
+ * bare `echo "…"` with no pipe/redirect. Only that argument is judged
+ * (Codex #316 round 6): a fixture line that merely CONTAINS such text
+ * (`printf … '@test "L-NNN"' > fixture`) starts with printf and has no title;
+ * an assertion string later on the line is not the title.
+ */
+function titleOf(line) {
+  // ok/bad/expect/check may take one bare subcommand word before the title
+  // (`expect none "…"`, `check file "…"`).
+  const m = line.match(/^\s*(?:(?:ok|bad|expect|check)\s+(?:[A-Za-z_][A-Za-z0-9_-]*\s+)?|@(?:test|it)\s+|(?:test|it|describe)\s*\(\s*|echo\s+)(["'])((?:\\.|(?!\1).)*)\1/);
+  if (!m) return null;
+  if (/^\s*echo\b/.test(line) && /[|>]/.test(line)) return null;
+  return { text: m[2], isEcho: /^\s*echo\b/.test(line) };
+}
+
 function isTestNameLine(line, id) {
   if (isCommentLine(line)) return false;
   if (!line.includes(id)) return false;
-  // A quoted grep/needle is not a test name.
-  if (/\bgrep\b/.test(line)) return false;
+  const t = titleOf(line);
+  if (!t) return false;
   const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  if (new RegExp(`@(?:test|it)\\s+["'](?:#\\s*)?${escaped}\\b`).test(line)) return true;
-  if (!quotedContainsId(line, id)) return false;
-  // A test/case TITLE containing the ID is a pin (the issue's rule): the
-  // quoted argument of ok/bad/expect/check or a test()/it()/describe() call
-  // is a title, wherever the ID sits in it (Codex #316 round 5, finding 2).
-  // A bare `echo "…"` is a title only when the ID LEADS it (`echo "# L-NNN ·"`)
-  // and nothing is piped or redirected — otherwise it is a needle or fixture.
-  if (/^\s*(?:test|it|describe)\s*\(/.test(line)) return true;
-  if (/^\s*(ok|bad|expect|check)\b/.test(line)) return true;
-  const leads = new RegExp(`["'](?:#\\s*)?${escaped}(?:\\s|·|:|$)`);
-  if (/^\s*echo\s+["']/.test(line) && !/[|>]/.test(line) && leads.test(line)) return true;
-  return false;
+  // A title containing the ID pins it (the issue's rule); a bare echo title
+  // must LEAD with the ID (`echo "# L-NNN · …"`) so needles never qualify.
+  if (t.isEcho) return new RegExp(`^(?:#\\s*)?${escaped}(?:\\s|·|:|$)`).test(t.text);
+  return new RegExp(`(?:^|[^A-Za-z0-9])${escaped}(?![0-9])`).test(t.text);
 }
 
 function filePinsId(rel, text, id) {
