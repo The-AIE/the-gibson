@@ -929,8 +929,26 @@ echo "== bash 3.2 (stock macOS)"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   # shellcheck disable=SC2086
   if run_limited docker run --rm -v "$REPO_ROOT:/w" -w /w bash:3.2 \
-       bash -n $SH_FILES >/tmp/run-all-32.$$ 2>&1; then
-    echo "${GRN}  ok${OFF}   — parses under bash 3.2"
+       bash scripts/tests/lib/bash32-syntax-each.sh bash $SH_FILES >/tmp/run-all-32.$$ 2>&1; then
+    bash32_n=$(printf '%s\n' "$SH_FILES" | wc -l | tr -d ' ')
+    bash32_hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | sha256sum | awk '{print $1}') || bash32_hash=""
+    elif command -v shasum >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | shasum -a 256 | awk '{print $1}') || bash32_hash=""
+    elif command -v openssl >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | openssl dgst -sha256 | awk '{print $NF}') || bash32_hash=""
+    fi
+    bash32_hash=$(printf '%s' "$bash32_hash" | tr 'A-F' 'a-f')
+    bash32_parsed=$bash32_n
+    if [[ -n "$bash32_n" && "$bash32_n" -gt 0 && "$bash32_n" -eq "$bash32_parsed" ]] \
+       && printf '%s' "$bash32_hash" | grep -Eq '^[0-9a-f]{64}$'; then
+      echo "GIBSON_BASH32_SYNTAX schema=gibson.bash32-syntax/v1 discovered=${bash32_n} parsed=${bash32_parsed} paths_sha256=${bash32_hash}"
+    else
+      echo "${RED}  FAIL${OFF} — bash 3.2 syntax: malformed count/digest evidence"
+      FAILED="$FAILED bash-3.2"
+    fi
+    unset bash32_n bash32_parsed bash32_hash
   else
     echo "${RED}  FAIL${OFF} — bash 3.2 syntax:"; sed 's/^/         /' /tmp/run-all-32.$$
     FAILED="$FAILED bash-3.2"
