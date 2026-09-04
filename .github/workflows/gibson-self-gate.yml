@@ -28,6 +28,52 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
 
+      # AC5 (#307): Signed-off-by over merge-base..HEAD on pull_request.
+      # On push to main this is a no-op with a visible skip (not silent).
+      # github.event_name is not allowlisted in run: blocks — pass via env.
+      - name: DCO trailer check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            echo "::notice::DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)"
+            echo "DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "${BASE_SHA:-}" ]; then
+            echo "error: pull_request base SHA is empty; cannot walk merge-base..HEAD" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "error: cannot resolve pull_request base SHA" >&2
+            exit 1
+          fi
+          mb=$(git merge-base "${BASE_SHA}" HEAD) || {
+            echo "error: git merge-base failed" >&2
+            exit 1
+          }
+          unsigned=""
+          shas=$(git log --format=%H "${mb}..HEAD")
+          for sha in $shas; do
+            [ -n "$sha" ] || continue
+            body=$(git log -1 --format=%B "$sha")
+            if ! printf '%s\n' "$body" | grep -q '^Signed-off-by:'; then
+              unsigned="${unsigned}${sha}"$'\n'
+            fi
+          done
+          if [ -n "$unsigned" ]; then
+            echo "error: commit(s) missing Signed-off-by trailer:" >&2
+            printf '%s' "$unsigned" >&2
+            exit 1
+          fi
+          echo "DCO: every commit in ${mb}..HEAD has a Signed-off-by trailer"
+
+      # AC4 (#307): fail when a new scripts/*.sh or *.mjs has no gate caller.
+      - name: Sensor reachability
+        run: node scripts/sensor-reachability.mjs
+
       # Exact ShellCheck pin — machine source is scripts/tests/run-all.sh
       # (SHELLCHECK_REQUIRED_VERSION + SHELLCHECK_SHA256_LINUX_X86_64). Do not
       # restate version/digest here; extract strict assignment lines only.
