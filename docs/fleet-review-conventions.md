@@ -107,10 +107,17 @@ app_id: 15368}]` in the branch-protection payload instead of a bare context stri
 
 **Triggers are a trust boundary.** Only events whose workflow file GitHub reads from
 the default branch may trigger it: `pull_request_target`, `issue_comment`, `schedule`
-(every 10 minutes), `workflow_dispatch`. `pull_request_review` is a `pull_request`-class
-event that runs the workflow file from the PR's merge commit, so a collaborator could
-edit the workflow in a PR and use its status-write token; it is deliberately absent, and
-a review submitted with no other activity is picked up by the schedule sweep.
+(hourly). `pull_request_review` is a `pull_request`-class event that runs the workflow
+file from the PR's merge commit, so a collaborator could edit the workflow in a PR and
+use its status-write token; `workflow_dispatch` can be pointed at any branch's copy of
+the file. Both are deliberately absent (the first was proven live on #315 before it was
+removed); a review submitted with no other activity is picked up by the hourly sweep.
+
+**Status churn is a cap.** GitHub allows 1,000 statuses per commit and context; after
+that every write fails and whatever was last written freezes. So scheduled sweeps stamp
+no `pending` and write only when the state or description differs from the one on the
+head, and every status write is checked: a failed write is an error that makes the job
+red and is never counted as published.
 
 **Every run is a full-state sweep.** Stamp `pending` on every open PR head FIRST, before
 any checkout or tool setup → evaluate every open PR at its current head (`--sweep`) →

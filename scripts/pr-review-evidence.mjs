@@ -211,8 +211,9 @@ export function ownerAttestation(comments, ownerLogin, headSha, allowed) {
     .map((c) => ({ c, b: parseBlock(c?.body, "owner-review-attestation:v1", ["head-sha", "author-vendor"]) }))
     .filter((x) => editedByOther(x.c) || (x.b && x.b["head-sha"] === headSha))
     // Order by CREATION: an edit moves updated_at and must not promote an
-    // older attestation over a newer one (Codex round 5, finding 5).
-    .sort((l, r) => (Date.parse(r.c?.created_at ?? "") || 0) - (Date.parse(l.c?.created_at ?? "") || 0));
+    // older attestation over a newer one (Codex round 5, finding 5). Same
+    // second → higher comment id is newer (round 7 note).
+    .sort((l, r) => ((Date.parse(r.c?.created_at ?? "") || 0) - (Date.parse(l.c?.created_at ?? "") || 0)) || (Number(r.c?.id ?? 0) - Number(l.c?.id ?? 0)));
   const top = hits[0];
   if (!top || editedByOther(top.c)) return null;
   const vendors = [...new Set(top.b["author-vendor"].split(",").map((v) => norm(v)).filter(Boolean))];
