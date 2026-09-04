@@ -9,16 +9,24 @@ name: PR review evidence
 #
 # TRIGGERS ARE A TRUST BOUNDARY (Codex round 6, finding 4). Only events whose
 # workflow file GitHub reads from the DEFAULT branch may appear here:
-# pull_request_target, issue_comment, schedule, workflow_dispatch.
-# `pull_request_review` is a pull_request-class event and runs the workflow
-# file from the PR's merge commit — a collaborator could edit this file in a
-# PR and use its status-write token — so it is deliberately absent. Reviews
-# are picked up by the next comment, push, or the 10-minute schedule sweep.
+# pull_request_target, issue_comment, schedule. `pull_request_review` runs the
+# workflow file from the PR merge commit and `workflow_dispatch` can target any
+# branch's copy of this file, so both are deliberately absent. Reviews are
+# picked up by the next comment or push, or by the hourly schedule sweep.
 #
-# Design (after six adversarial review rounds on #315): every run is a FULL
-# STATE SWEEP. It stamps `pending` on every open PR head FIRST (before any
-# checkout), evaluates every open PR at its current head with trusted code,
-# then ALWAYS publishes a final state for each; a `success` is re-checked
+# STATUS CHURN IS A CAP (Codex round 7). GitHub allows 1,000 statuses per
+# (repo, SHA, context); a sweep that stamps pending + verdict on every
+# unchanged head every ten minutes exhausts a long-lived head in ~3.5 days and
+# then every write fails, freezing whatever was last written. So: the schedule
+# is hourly, scheduled runs stamp no pending and write a status ONLY when the
+# state or description differs from the one currently on the head, and EVERY
+# status POST is checked — a failed write is an error that makes the job red,
+# never a silently "published" head.
+#
+# Design (after seven adversarial review rounds on #315): every run is a FULL
+# STATE SWEEP. Event runs stamp `pending` on every open PR head FIRST (before
+# any checkout), evaluate every open PR at its current head with trusted code,
+# then ALWAYS publish a final state for each; a `success` is re-checked
 # against a fresh state fingerprint right before it is written.
 on:
   pull_request_target:
@@ -26,8 +34,7 @@ on:
   issue_comment:
     types: [created, edited, deleted]
   schedule:
-    - cron: "*/10 * * * *"
-  workflow_dispatch:
+    - cron: "17 * * * *"
 
 permissions: {}
 
@@ -61,6 +68,9 @@ jobs:
       GH_REPO: ${{ github.repository }}
       STATUS_CONTEXT: review-evidence
       TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # Scheduled runs are maintenance sweeps: no pending stamps, and writes
+      # only where the status actually changes (the churn cap above).
+      IS_SCHEDULE: ${{ github.event_name == 'schedule' }}
       # The event's own PR and head, if the event carries them. Used only to
       # (a) stamp pending when the open-PR listing fails and (b) make the job
       # red when THIS event's PR fails, so the check is visible on that PR.
@@ -93,17 +103,27 @@ jobs:
           if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" heads.txt; then
             printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> heads.txt
           fi
-          stamped=0
+          if [ "${IS_SCHEDULE:-false}" = "true" ]; then
+            echo "scheduled sweep: no pending stamps (writes happen only on change)"
+            [ "$listed" -eq 1 ] || exit 1
+            exit 0
+          fi
+          stamped=0; failed=0
           while read -r n sha; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
-            gh api --method POST "repos/$GH_REPO/statuses/$sha" \
-              -f state="pending" -f context="$STATUS_CONTEXT" \
-              -f description="IN PROGRESS: re-evaluating review evidence for PR $n" \
-              -f target_url="$TARGET_URL" >/dev/null
-            stamped=$((stamped + 1))
+            if gh api --method POST "repos/$GH_REPO/statuses/$sha" \
+                -f state="pending" -f context="$STATUS_CONTEXT" \
+                -f description="IN PROGRESS: re-evaluating review evidence for PR $n" \
+                -f target_url="$TARGET_URL" >/dev/null; then
+              stamped=$((stamped + 1))
+            else
+              failed=$((failed + 1))
+              echo "::error::could not stamp pending on PR $n @ ${sha:0:7} (status write failed — possibly the 1,000-status cap)"
+              echo "- pending stamp FAILED on PR $n @ ${sha:0:7}" >> "$GITHUB_STEP_SUMMARY"
+            fi
           done < heads.txt
-          echo "pending stamped on $stamped open PR head(s)"
-          [ "$listed" -eq 1 ] || exit 1
+          echo "pending stamped on $stamped open PR head(s); $failed failed"
+          [ "$listed" -eq 1 ] && [ "$failed" -eq 0 ] || exit 1
 
       - name: Checkout trusted default branch (never PR code)
         if: always()
@@ -143,10 +163,28 @@ jobs:
           CANCELLED: ${{ job.status == 'cancelled' }}
         run: |
           set -uo pipefail
-          publish() { # sha state description
-            gh api --method POST "repos/$GH_REPO/statuses/$1" \
-              -f state="$2" -f context="$STATUS_CONTEXT" \
-              -f description="${3:0:140}" -f target_url="$TARGET_URL" >/dev/null
+          post_fail=0
+          # current_status sha -> "state|description" of the context now on the head ("" if none)
+          current_status() {
+            # `gh api --jq` takes one expression and no jq flags; STATUS_CONTEXT is a
+            # fixed literal set above, safe to interpolate.
+            gh api "repos/$GH_REPO/commits/$1/status" \
+              --jq ".statuses[] | select(.context==\"$STATUS_CONTEXT\") | \"\(.state)|\(.description)\"" 2>/dev/null | head -1
+          }
+          publish() { # sha state description  -> writes, or skips on a scheduled run when unchanged
+            local sha="$1" state="$2" desc="${3:0:140}"
+            if [ "${IS_SCHEDULE:-false}" = "true" ]; then
+              cur=$(current_status "$sha")
+              if [ "$cur" = "$state|$desc" ]; then echo "unchanged: ${sha:0:7} $state"; return 0; fi
+            fi
+            if ! gh api --method POST "repos/$GH_REPO/statuses/$sha" \
+                -f state="$state" -f context="$STATUS_CONTEXT" \
+                -f description="$desc" -f target_url="$TARGET_URL" >/dev/null; then
+              post_fail=1
+              echo "::error::status write FAILED on ${sha:0:7} ($state) — possibly the 1,000-status cap; the head's status is NOT what this run computed"
+              echo "- status write FAILED on ${sha:0:7} ($state)" >> "$GITHUB_STEP_SUMMARY"
+              return 1
+            fi
           }
           # A `success` computed minutes ago may be stale: a fail receipt, a
           # retarget, or a same-head sibling can have arrived since (Codex
@@ -166,7 +204,7 @@ jobs:
             n_pub=0
             while read -r n sha; do
               [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
-              publish "$sha" "$state" "$desc"; n_pub=$((n_pub + 1))
+              publish "$sha" "$state" "$desc" && n_pub=$((n_pub + 1))
               echo "### review-evidence: \`$state\` on PR $n — $desc" >> "$GITHUB_STEP_SUMMARY"
             done < heads.txt
             if [ "$n_pub" -eq 0 ]; then
@@ -202,8 +240,7 @@ jobs:
                 state=pending; desc="UNREVIEWED: state changed during evaluation; re-evaluating on the next sweep"
               fi
             fi
-            publish "$sha" "$state" "$desc"
-            echo "$sha" >> published.txt
+            if publish "$sha" "$state" "$desc"; then echo "$sha" >> published.txt; fi
             echo "- PR $n @ ${sha:0:7}: \`$state\` — $desc" >> "$GITHUB_STEP_SUMMARY"
             if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ] && [ "$state" = "failure" ]; then event_fail=1; fi
           done < results.jsonl
@@ -213,11 +250,15 @@ jobs:
           while read -r n sha; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
             if ! grep -q "^$sha\$" published.txt; then
-              publish "$sha" "failure" "api-error: sweep produced no verdict for this head"
+              publish "$sha" "failure" "api-error: sweep produced no verdict for this head" || true
               echo "- PR $n @ ${sha:0:7}: \`failure\` — no verdict from the sweep" >> "$GITHUB_STEP_SUMMARY"
               if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ]; then event_fail=1; fi
             fi
           done < heads.txt
+          if [ "$post_fail" -eq 1 ]; then
+            echo "::error::review-evidence: at least one status write failed; the affected heads carry whatever was written before"
+            exit 1
+          fi
           if [ "$event_fail" -eq 1 ]; then
             echo "::error::review-evidence: this event's pull request failed closed (see published status)"
             exit 1

@@ -299,6 +299,36 @@ grep -q "^$HEAD pending" "$ROOT/gh.log" && ! grep -q "^$HEAD success" "$ROOT/gh.
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: fingerprint re-read fails → pending (fail closed)" || bad "publish fp-unavailable: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass","fingerprint":""}\n' "$HEAD" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: success line without a fingerprint → pending" || bad "publish no-fp: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+# Codex round 7: status-churn cap. No workflow_dispatch; hourly schedule; scheduled runs stamp no pending
+# and write only on change; every status POST is checked and a failure makes the job red.
+awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -q 'workflow_dispatch' && bad "workflow_dispatch present (runs any branch's copy of this file with the status token)" || ok "no workflow_dispatch trigger"
+awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -qE 'cron: "[0-9]+ \* \* \* \*"' && ok "schedule is hourly, not every few minutes (1,000-status cap per SHA)" || bad "schedule cron is not hourly: $(grep -n cron "$WF")"
+# gh stub v3: also answers commits/SHA/status with $GH_CUR ("state|desc") and fails POSTs when GH_POST_FAIL=1
+cat > "$ROOT/bin/gh" <<'GHSTUB'
+#!/bin/sh
+case "$*" in
+  *"--method POST"*) [ "${GH_POST_FAIL:-}" = "1" ] && { echo "HTTP 422: too many statuses" >&2; exit 22; }; sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
+  *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
+  *"/commits/"*"/status"*) printf '%s\n' "${GH_CUR:-}" ;;
+  *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
+  *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
+esac
+GHSTUB
+chmod +x "$ROOT/bin/gh"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' EVENT_HEAD_SHA='' bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && [ "$(wc -l < "$WD/heads.txt" | tr -d ' ')" -eq 2 ] && ok "schedule: pending step lists heads but stamps NOTHING" || bad "schedule pending: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && ok "schedule: unchanged verdict → NO status write (churn cap)" || bad "schedule unchanged wrote: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="pending|UNREVIEWED: no receipt at head" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "schedule: changed verdict → written" || bad "schedule changed not written: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "event run: always writes (pending was stamped first)" || bad "event run skipped a write: rc=$rc"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'status write FAILED' "$ROOT/summary" && ok "publish: a failed status POST is an error and the job is red (never 'published')" || bad "failed POST ignored: rc=$rc summary=$(tr '\n' ' ' < "$ROOT/summary")"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_LIST="$(printf '1 %s\n' "$HEAD")" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'pending stamp FAILED' "$ROOT/summary" && ok "pending step: a failed stamp is an error, not a silent skip" || bad "failed pending stamp ignored: rc=$rc"
 printf 'garbage not json\n' > "$WD/results.jsonl"; printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; : > "$ROOT/gh.log"
 envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -ge 1 ] && ok "publish: unparseable sweep output → failure, never success" || bad "publish garbage: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
