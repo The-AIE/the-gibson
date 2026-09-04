@@ -212,3 +212,20 @@ jobs:
         with: { node-version: 22 }
       - name: A PR may not edit another session's claim
         run: node scripts/check-active-work.mjs
+
+  # Review is only real when a reviewer can read the whole diff
+  # (config/pr-size.v1.json). The `size-exception` label is owner sign-off
+  # for imports/vendoring; the numbers are still printed.
+  pr-size:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22 }
+      - name: PR size within budget
+        env:
+          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GIBSON_PR_SIZE_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'size-exception') && '1' || '0' }}
+        run: node scripts/pr-size.mjs

@@ -26,7 +26,8 @@ cp /path/to/the-gibson/ci/gibson-gate.yml .github/workflows/
 #   2. Set TEST_COMMAND on BOTH test-integrity-base and test-integrity-head
 #      to the SAME literal as the gate job test step (e.g. npx vitest run).
 #      Never point TEST_COMMAND at .agents/gate.json — that path is PR-head controlled.
-#   3. Vendor scripts/test-integrity.mjs + scripts/check-active-work.mjs into the target
+#   3. Vendor scripts/test-integrity.mjs, scripts/check-active-work.mjs, scripts/pr-size.mjs
+#      (+ config/pr-size.v1.json) into the target
 cp /path/to/the-gibson/ci/security.yml .github/workflows/
 cp /path/to/the-gibson/ci/ux-eval.yml .github/workflows/
 # If schema exists:
@@ -55,6 +56,7 @@ set and wants any missing workflow to exit 1.
 
 - `test-integrity.mjs` (required for protected test-integrity grading)
 - `check-active-work.mjs` (claim isolation on the green-gate job)
+- `pr-size.mjs` + `config/pr-size.v1.json` (PR-size budget; label `size-exception` = owner sign-off)
 - `preview-url.sh`, `posture-probe.sh`, `route-inventory.mjs`
 
 ### Protected test-integrity (issue #70) — inert until #68 activates it

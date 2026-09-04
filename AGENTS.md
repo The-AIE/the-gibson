@@ -328,6 +328,8 @@ stale review on a new head.
 4. DCO/`Signed-off-by` survives the squash.
 5. Tier C / schema → **G12** human approval recorded.
 6. Schema PRs: serialized (one in flight), migration file present.
+7. PR within the size budget (`config/pr-size.v1.json`, sensor
+   `scripts/pr-size.mjs`), or owner-applied `size-exception` label.
 
 Purely technical, non-opinion changes need no extra owner click: a passing green
 gate plus an independent reviewer (Law 5) is authorization to merge.
