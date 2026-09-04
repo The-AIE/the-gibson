@@ -915,12 +915,12 @@ fi
 echo "== bash -n"
 SYNTAX_BAD=""
 for f in $SH_FILES; do
-  bash -n "$f" 2>/tmp/run-all-syntax.$$ || {
-    echo "${RED}  FAIL${OFF} — $f"; sed 's/^/         /' /tmp/run-all-syntax.$$
+  bash -n "$f" 2>"${TMPDIR:-/tmp}/run-all-syntax.$$" || {
+    echo "${RED}  FAIL${OFF} — $f"; sed 's/^/         /' "${TMPDIR:-/tmp}/run-all-syntax.$$"
     SYNTAX_BAD=1
   }
 done
-rm -f /tmp/run-all-syntax.$$
+rm -f "${TMPDIR:-/tmp}/run-all-syntax.$$"
 if [[ -n "$SYNTAX_BAD" ]]; then FAILED="$FAILED bash-n"; else
   echo "${GRN}  ok${OFF}   — $(echo "$SH_FILES" | wc -l | tr -d ' ') scripts parse"
 fi
@@ -932,7 +932,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   BASH32_DOCKER_USABLE=1
   # shellcheck disable=SC2086
   if run_limited docker run --rm -v "$REPO_ROOT:/w" -w /w bash:3.2 \
-       bash scripts/tests/lib/bash32-syntax-each.sh bash $SH_FILES >/tmp/run-all-32.$$ 2>&1; then
+       bash scripts/tests/lib/bash32-syntax-each.sh bash $SH_FILES >"${TMPDIR:-/tmp}/run-all-32.$$" 2>&1; then
     bash32_n=$(printf '%s\n' "$SH_FILES" | wc -l | tr -d ' ')
     bash32_hash=""
     if command -v sha256sum >/dev/null 2>&1; then
@@ -954,10 +954,10 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     fi
     unset bash32_n bash32_parsed bash32_hash
   else
-    echo "${RED}  FAIL${OFF} — bash 3.2 syntax:"; sed 's/^/         /' /tmp/run-all-32.$$
+    echo "${RED}  FAIL${OFF} — bash 3.2 syntax:"; sed 's/^/         /' "${TMPDIR:-/tmp}/run-all-32.$$"
     FAILED="$FAILED bash-3.2"
   fi
-  rm -f /tmp/run-all-32.$$
+  rm -f "${TMPDIR:-/tmp}/run-all-32.$$"
 else
   echo "${YEL}  SKIP${OFF} — no usable docker; bash 3.2 unverified on this host"
 fi
@@ -2172,6 +2172,67 @@ gibson_forward_bash32_bench() {
 }
 # gibson_forward_bash32_bench end
 
+# gibson_suite_read_capture begin
+# Classify one finished suite capture. Timeout wins over "no tally line".
+# $1 capture prefix (.out/.ec/.elapsed), $2 timeout seconds (0 = none).
+# Sets: _gs_out _gs_ec _gs_elapsed _gs_tally
+gibson_suite_read_capture() {
+  local cap="$1" timeout="${2:-0}"
+  _gs_out=""
+  _gs_ec=1
+  _gs_elapsed=0
+  _gs_tally="no tally line"
+
+  if [[ -f "$cap.out" ]]; then
+    _gs_out=$(cat "$cap.out" 2>/dev/null || true)
+  fi
+  if [[ -s "$cap.elapsed" ]]; then
+    _gs_elapsed=$(cat "$cap.elapsed" 2>/dev/null || echo 0)
+  fi
+  case "$_gs_elapsed" in
+    ''|*[!0-9]*) _gs_elapsed=0 ;;
+  esac
+
+  if [[ -s "$cap.ec" ]]; then
+    _gs_ec=$(cat "$cap.ec")
+  else
+    # Wrapper died before recording rc. A wall-budget kill must never
+    # surface as "no tally line" (#319 AC4).
+    if [[ "$timeout" -gt 0 ]]; then
+      _gs_ec=124
+    else
+      _gs_out="run-all: suite produced no exit-code capture (runner crashed?)"
+      _gs_ec=1
+    fi
+  fi
+  case "$_gs_ec" in
+    ''|*[!0-9]*) _gs_ec=1 ;;
+  esac
+
+  if [[ "$timeout" -gt 0 ]]; then
+    if [[ "$_gs_ec" -eq 124 ]]; then
+      _gs_tally="timed out after ${timeout}s"
+      return 0
+    fi
+    if [[ "$_gs_elapsed" -ge "$timeout" && "$_gs_ec" -ne 0 ]]; then
+      case "$_gs_ec" in
+        137|143|130)
+          _gs_ec=124
+          _gs_tally="timed out after ${timeout}s"
+          return 0
+          ;;
+      esac
+    fi
+  fi
+
+  if [[ -f "$cap.out" ]]; then
+    _gs_tally=$(grep -oE '[0-9]+ passed, [0-9]+ failed(, goose-validate: [^[:space:]]+)?' "$cap.out" 2>/dev/null | tail -1)
+  fi
+  [[ -n "$_gs_tally" ]] || _gs_tally="no tally line"
+  return 0
+}
+# gibson_suite_read_capture end
+
 # Suites run as background processes (at most $JOBS at once), each capturing
 # stdout+stderr, exit code, and elapsed seconds into a scratch directory.
 # Reporting below consumes those captures in discovery order, so the printed
@@ -2180,6 +2241,75 @@ SUITE_CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-runall-suites.XXXXXX") || 
   echo "run-all.sh: mktemp for suite captures failed" >&2
   exit 2
 }
+# gibson_suite_env begin
+# Per-suite BASH_ENV: make grep -q consume all input so pipefail producers
+# (echo/printf of help text) are not killed at the first match (L-077 / #319).
+# Pin the real grep binary now: suites may put a stub named grep first on PATH.
+# type -P ignores functions/aliases so a previous wrapper cannot recurse.
+_GIBSON_REAL_GREP=$(type -P grep 2>/dev/null || true)
+if [[ ! -x "$_GIBSON_REAL_GREP" ]]; then
+  if [[ -x /usr/bin/grep ]]; then
+    _GIBSON_REAL_GREP=/usr/bin/grep
+  elif [[ -x /bin/grep ]]; then
+    _GIBSON_REAL_GREP=/bin/grep
+  else
+    echo "run-all.sh: cannot resolve a real grep binary for SIGPIPE-safe wrapper" >&2
+    exit 2
+  fi
+fi
+{
+  printf '_GIBSON_REAL_GREP=%s\n' "$_GIBSON_REAL_GREP"
+  cat <<'SUITEENV'
+# Sourced via BASH_ENV for every run-all suite (#319).
+grep() {
+  local _gq_quiet=0 _gq_end=0 _gq_a _gq_stripped
+  local _gq_args
+  _gq_args=()
+  for _gq_a in "$@"; do
+    if [[ "$_gq_end" -eq 1 ]]; then
+      continue
+    fi
+    case "$_gq_a" in
+      --) _gq_end=1 ;;
+      --quiet|--silent) _gq_quiet=1 ;;
+      --*) ;;
+      -*)
+        case "$_gq_a" in
+          *q*) _gq_quiet=1 ;;
+        esac
+        ;;
+    esac
+  done
+  if [[ "$_gq_quiet" -eq 0 ]]; then
+    "$_GIBSON_REAL_GREP" "$@"
+    return $?
+  fi
+  _gq_end=0
+  for _gq_a in "$@"; do
+    if [[ "$_gq_end" -eq 1 ]]; then
+      _gq_args+=("$_gq_a")
+      continue
+    fi
+    case "$_gq_a" in
+      --) _gq_end=1; _gq_args+=("$_gq_a") ;;
+      --quiet|--silent) ;;
+      --*) _gq_args+=("$_gq_a") ;;
+      -*)
+        _gq_stripped=$(printf '%s' "$_gq_a" | tr -d 'q')
+        if [[ "$_gq_stripped" != "-" ]]; then
+          _gq_args+=("$_gq_stripped")
+        fi
+        ;;
+      *) _gq_args+=("$_gq_a") ;;
+    esac
+  done
+  "$_GIBSON_REAL_GREP" "${_gq_args[@]+"${_gq_args[@]}"}" >/dev/null
+}
+SUITEENV
+} > "$SUITE_CAPTURE_DIR/suite-env.sh"
+unset _GIBSON_REAL_GREP
+# gibson_suite_env end
+
 # On EXIT/INT/TERM/HUP stop any suites still running (whole process trees —
 # a suite may have forked node/docker/git children) before removing captures,
 # so a cancelled gate does not leave orphans burning the runner.
@@ -2206,11 +2336,37 @@ trap 'run_all_cleanup; trap - HUP; kill -HUP $$' HUP
 
 run_suite_captured() {
   # $1 suite path, $2 capture prefix
-  local t0=$SECONDS ec
-  run_limited "$1" >"$2.out" 2>&1
+  local t0=$SECONDS ec=1 suite="$1" cap="$2" suite_tmp
+  suite_tmp="${cap}.tmpdir"
+  mkdir -p "$suite_tmp" || return 1
+  _gs_write_cap() {
+    printf '%s\n' "${ec:-1}" >"${cap}.ec"
+    printf '%s\n' "$((SECONDS - t0))" >"${cap}.elapsed"
+  }
+  _gs_on_sig() {
+    ec="${1:-1}"
+    _gs_write_cap
+    trap - EXIT
+    exit "$ec"
+  }
+  trap '_gs_write_cap' EXIT
+  trap '_gs_on_sig 130' INT
+  trap '_gs_on_sig 143' TERM
+  trap '_gs_on_sig 129' HUP
+  unset FLEET_WALL_TIMEOUT_TEST_PUBLISH \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_READY \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_IN_GRACE \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_BEFORE_LEADER_TRACK \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_BEFORE_WATCHER_TRACK \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_BEFORE_WAIT \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_AFTER_LEADER_WAIT \
+        FAKE_GH_STATE GIBSON_GH_MUTATION_LOG
+  export TMPDIR="$suite_tmp"
+  export BASH_ENV="$SUITE_CAPTURE_DIR/suite-env.sh"
+  run_limited "$suite" >"${cap}.out" 2>&1
   ec=$?
-  echo "$ec" >"$2.ec"
-  echo "$((SECONDS - t0))" >"$2.elapsed"
+  _gs_write_cap
+  trap - EXIT INT TERM HUP
 }
 
 # --only accepts a comma-separated list of substrings; any match selects.
@@ -2278,13 +2434,15 @@ for suite in $SELECTED_SUITES; do
     out="run-all: suite produced no exit-code capture (runner crashed?)"; ec=1
     suite_elapsed=0
   fi
+  # Overlay timeout classification after the capture-to-locals seam that
+  # bash32-syntax-each.test.sh pins. Wall-budget kills must not surface as
+  # "no tally line" (#319 AC4). Grep the file, never echo "$out" (ARG_MAX).
+  gibson_suite_read_capture "$cap" "$TIMEOUT"
+  out="$_gs_out"
+  ec="$_gs_ec"
+  suite_elapsed="$_gs_elapsed"
+  tally="$_gs_tally"
   gibson_metrics_contribute "$out" "$name" || true
-  # grep -o, not a greedy sed capture: `.*([0-9]+ passed` eats all but the last
-  # digit and turns "42 passed" into "2 passed".
-  # Prefer extended tally (goose-validate disposition, #95); fall back to plain.
-  tally=$(echo "$out" | grep -oE '[0-9]+ passed, [0-9]+ failed(, goose-validate: [^[:space:]]+)?' | tail -1)
-  [[ -n "$tally" ]] || tally="no tally line"
-  [[ "$ec" -eq 124 ]] && tally="timed out after ${TIMEOUT}s"
 
   # Shell-construction diagnostics must never green a nominally-passing suite
   # (#153 review round 7). An unquoted heredoc under `set -u` can print
@@ -2296,12 +2454,12 @@ for suite in $SELECTED_SUITES; do
   if printf '%s\n' "$out" | suite_has_shell_construction_diag; then
     shell_diag=$(printf '%s\n' "$out" | grep -E \
       'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
-      head -20)
+      head -20 || true)
   fi
 
   if [[ "$QUIET" -eq 0 && ( "$ec" -ne 0 || -n "$shell_diag" ) ]]; then
-    echo "$out" | grep -E '^\s*FAIL|unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
-      head -20 | sed 's/^/         /'
+    printf '%s\n' "$out" | grep -E '^\s*FAIL|unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
+      head -20 | sed 's/^/         /' || true
   fi
 
   # gibson_suite_loop_diag begin

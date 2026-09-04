@@ -13,8 +13,9 @@ RUN_ALL="$DIR/run-all.sh"
 # shellcheck disable=SC1090,SC1091
 source "$WALL_LIB"
 
+PASS=0
 fails=0
-ok()  { printf '  ok   — %s\n' "$1"; }
+ok()  { printf '  ok   — %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL — %s\n' "$1"; fails=$((fails + 1)); }
 eq()  { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
 alive() { kill -0 "$1" 2>/dev/null; }
@@ -130,7 +131,7 @@ eq "leader-exit residual child is reaped" "$orphans" "0"
 echo "wall-timeout: fail-closed input and capability checks"
 for invalid in -1 abc 1.5; do
   out=$(bash "$RUN_ALL" --timeout "$invalid" --only NOMATCH 2>&1); ec=$?
-  if [[ "$ec" -eq 2 ]] && printf '%s\n' "$out" | grep -Fq 'whole number of seconds'; then
+  if [[ "$ec" -eq 2 ]] && printf '%s\n' "$out" | grep -F 'whole number of seconds' >/dev/null; then
     ok "invalid timeout '$invalid' is refused"
   else
     bad "invalid timeout '$invalid' was not a usage error (exit $ec)"
@@ -147,13 +148,13 @@ for c in bash cat dirname pwd awk; do
   ln -s "$p" "$PATH_INCAPABLE/$c"
 done
 out=$(PATH="$PATH_INCAPABLE" /bin/bash "$RUN_ALL" --timeout 5 --only NOMATCH 2>&1); ec=$?
-if [[ "$ec" -eq 2 ]] && printf '%s\n' "$out" | grep -Fq 'requires perl or python3'; then
+if [[ "$ec" -eq 2 ]] && printf '%s\n' "$out" | grep -F 'requires perl or python3' >/dev/null; then
   ok "missing portable runtime fails before suites with remediation"
 else
   bad "portable-runtime preflight was not reached (exit $ec): $out"
 fi
 
-grep -Fq 'timed out after ${TIMEOUT}s' "$RUN_ALL" \
+grep -Fq 'timed out after ${timeout}s' "$RUN_ALL" \
   && ok "timed-out disposition remains distinct" \
   || bad "timed-out disposition message is missing"
 
@@ -480,7 +481,7 @@ run_signal_fixture() {
 
   kill -s "$sig" "$wrapper" 2>/dev/null || true
 
-  if ! wait_file "$dir/in_grace" 80; then
+  if ! wait_file "$dir/in_grace" 200; then
     rm -f "$hold"
     reap_exact "$wrapper" "$foreign" "$leader" "$watcher" "$desc"
     bad "$sig fixture: in_grace never published"
@@ -592,7 +593,7 @@ else
     "$_fg_pgid" "$_fg_wrap" "$_fg_foreign" "$_fg_leader" "$_fg_watch" "$_fg_desc" > "$_fg/ids"
   if [[ "$_fg_pgid" =~ ^[1-9][0-9]*$ ]]; then
     kill -INT -"$_fg_pgid" 2>/dev/null || true
-    if ! wait_file "$_fg/in_grace" 80; then
+    if ! wait_file "$_fg/in_grace" 200; then
       rm -f "$_fg/hold-grace"
       reap_exact "$_fg_perl" "$_fg_wrap" "$_fg_foreign" "$_fg_leader" "$_fg_watch" "$_fg_desc" "$_fg_gl"
       bad "fg-INT: in_grace never published"
@@ -772,7 +773,7 @@ else
   _dg_watch=$(read_ident "$_dg/watcher.pid")
   _dg_leader=$(read_ident "$_dg/leader.pid")
   record_captured "$_dg_desc" "$_dg_watch" "$_dg_leader"
-  if ! wait_file "$_dg/in_grace" 80; then
+  if ! wait_file "$_dg/in_grace" 200; then
     rm -f "$_dg/hold-grace"
     reap_exact "$_dg_wrap" "$_dg_foreign" "$_dg_desc" "$_dg_watch" "$_dg_leader"
     bad "during-grace: timeout grace never published"
@@ -1080,7 +1081,7 @@ WRAP
   leader=$(read_ident "$dir/leader.pid")
   record_captured "$desc" "$watcher" "$leader"
   kill -s TERM "$wrapper" 2>/dev/null || true
-  if ! wait_file "$dir/in_grace" 80 || ! wait_contains "$dir/desc.signals" TERM 40; then
+  if ! wait_file "$dir/in_grace" 200 || ! wait_contains "$dir/desc.signals" TERM 40; then
     rm -f "$dir/hold-grace"
     reap_exact "$wrapper" "$desc" "$watcher" "$leader"
     bad "$mode-TERM: TERM grace was not observed"
@@ -1188,7 +1189,7 @@ else
   _rp_watch=$(read_ident "$_rp/watcher.pid")
   record_captured "$_rp_desc" "$_rp_watch"
   kill -s TERM "$_rp_wrap" 2>/dev/null || true
-  wait_file "$_rp/in_grace" 80 || true
+  wait_file "$_rp/in_grace" 200 || true
   rm -f "$_rp/hold-grace"
   wait "$_rp_wrap" 2>/dev/null || true
   wait_gone "$_rp_desc" 40 || true
@@ -1197,9 +1198,151 @@ else
   assert_absent_or_fail "repair watcher" "$_rp_watch"
 fi
 
-if [[ "$fails" -gt 0 ]]; then
-  echo "wall-timeout: $fails FAILED"
-  exit 1
+# =============================================================================
+# #319 — capture disposition: timeout never reports as "no tally line"
+# =============================================================================
+echo "wall-timeout: #319 capture disposition"
+
+CAP_FN="$ROOT/read-capture.sh"
+sed -n '/^# gibson_suite_read_capture begin$/,/^# gibson_suite_read_capture end$/p' "$RUN_ALL" > "$CAP_FN"
+_gs_out=""; _gs_ec=0; _gs_elapsed=0; _gs_tally=""
+if [[ -s "$CAP_FN" ]] && grep -F 'gibson_suite_read_capture()' "$CAP_FN" >/dev/null; then
+  ok "run-all exposes gibson_suite_read_capture"
+  # shellcheck disable=SC1090,SC1091
+  . "$CAP_FN"
+else
+  bad "run-all missing gibson_suite_read_capture"
 fi
-echo "wall-timeout: all passed"
-exit 0
+
+if declare -F gibson_suite_read_capture >/dev/null 2>&1; then
+  _cdir="$ROOT/cap-disp"
+  mkdir -p "$_cdir"
+
+  : > "$_cdir/empty.out"
+  printf '124\n' > "$_cdir/empty.ec"
+  printf '12\n' > "$_cdir/empty.elapsed"
+  gibson_suite_read_capture "$_cdir/empty" 10
+  eq "ec 124 with no tally reports timed out" "$_gs_tally" "timed out after 10s"
+  eq "ec 124 is preserved" "$_gs_ec" "124"
+
+  printf '3 passed, 1 failed\n' > "$_cdir/tally.out"
+  printf '124\n' > "$_cdir/tally.ec"
+  printf '12\n' > "$_cdir/tally.elapsed"
+  gibson_suite_read_capture "$_cdir/tally" 10
+  eq "ec 124 wins over an existing tally line" "$_gs_tally" "timed out after 10s"
+
+  printf '3 passed, 1 failed\n' > "$_cdir/ok.out"
+  printf '1\n' > "$_cdir/ok.ec"
+  printf '2\n' > "$_cdir/ok.elapsed"
+  gibson_suite_read_capture "$_cdir/ok" 10
+  eq "ordinary failure keeps the suite tally" "$_gs_tally" "3 passed, 1 failed"
+  eq "ordinary failure keeps exit code" "$_gs_ec" "1"
+
+  : > "$_cdir/miss.out"
+  rm -f "$_cdir/miss.ec"
+  printf '12\n' > "$_cdir/miss.elapsed"
+  gibson_suite_read_capture "$_cdir/miss" 10
+  eq "missing .ec under timeout reports timed out" "$_gs_tally" "timed out after 10s"
+  eq "missing .ec under timeout is 124" "$_gs_ec" "124"
+
+  : > "$_cdir/kill.out"
+  printf '137\n' > "$_cdir/kill.ec"
+  printf '10\n' > "$_cdir/kill.elapsed"
+  gibson_suite_read_capture "$_cdir/kill" 10
+  eq "SIGKILL at the wall reports timed out" "$_gs_tally" "timed out after 10s"
+  eq "SIGKILL at the wall is classified 124" "$_gs_ec" "124"
+
+  _mut="$ROOT/read-capture.mut.sh"
+  sed 's/_gs_ec" -eq 124/_gs_ec" -eq 999999/' "$CAP_FN" > "$_mut"
+  # shellcheck disable=SC1090,SC1091
+  . "$_mut"
+  : > "$_cdir/mut.out"
+  printf '124\n' > "$_cdir/mut.ec"
+  printf '12\n' > "$_cdir/mut.elapsed"
+  gibson_suite_read_capture "$_cdir/mut" 10
+  eq "mutation: ignoring 124 yields no tally line" "$_gs_tally" "no tally line"
+  # shellcheck disable=SC1090,SC1091
+  . "$CAP_FN"
+else
+  bad "gibson_suite_read_capture is not callable"
+fi
+
+echo "wall-timeout: #319 SIGPIPE-safe grep wrapper"
+SUITE_ENV="$ROOT/suite-env.sh"
+# Rebuild the production wrapper the same way run-all does: pin real grep,
+# then the quoted function body.
+_GIBSON_REAL_GREP=$(type -P grep 2>/dev/null || true)
+if [[ ! -x "$_GIBSON_REAL_GREP" ]]; then
+  if [[ -x /usr/bin/grep ]]; then
+    _GIBSON_REAL_GREP=/usr/bin/grep
+  elif [[ -x /bin/grep ]]; then
+    _GIBSON_REAL_GREP=/bin/grep
+  fi
+fi
+{
+  printf '_GIBSON_REAL_GREP=%s\n' "$_GIBSON_REAL_GREP"
+  sed -n '/^# Sourced via BASH_ENV for every run-all suite/,/^SUITEENV$/p' "$RUN_ALL" \
+    | sed '$d'
+} > "$SUITE_ENV"
+if [[ -s "$SUITE_ENV" ]] && grep -F '_GIBSON_REAL_GREP' "$SUITE_ENV" >/dev/null \
+   && grep -F 'Sourced via BASH_ENV' "$SUITE_ENV" >/dev/null; then
+  ok "run-all writes a BASH_ENV grep wrapper"
+else
+  bad "run-all missing BASH_ENV grep wrapper"
+  : > "$SUITE_ENV"
+fi
+
+# Pipe buffer on macOS is 16KiB; the producer must exceed it or printf
+# can finish before grep -q closes and the mutation becomes vacuous.
+_payload=$(printf '%s\n' 'cannot be combined' "$(python3 -c 'print("x"*200000)')" 'not a complete gate')
+_pipefail_grep_q() {
+  local envfile="$1"
+  # BASH_ENV empty disables run-all's inherited wrapper (mutation path).
+  BASH_ENV="$envfile" bash -c '
+    set -uo pipefail
+    out="$1"
+    if printf "%s\n" "$out" | grep -Fq "cannot be combined"; then
+      exit 0
+    fi
+    exit 1
+  ' bash "$_payload"
+}
+if _pipefail_grep_q "$SUITE_ENV"; then
+  ok "BASH_ENV grep wrapper: pipefail + grep -q on match-at-start payload succeeds"
+else
+  bad "BASH_ENV grep wrapper failed to make grep -q SIGPIPE-safe"
+fi
+if _pipefail_grep_q ""; then
+  bad "mutation: grep -q without the wrapper unexpectedly survived a match-at-start payload"
+else
+  ok "mutation: grep -q without the wrapper fails closed on match-at-start payload"
+fi
+
+echo "wall-timeout: #319 stress harness"
+STRESS="$DIR/run-all-stress.sh"
+if [[ -x "$STRESS" ]]; then
+  ok "run-all-stress.sh is executable"
+else
+  bad "run-all-stress.sh missing or not executable"
+fi
+_st_out=$(bash "$STRESS" --help 2>&1); _st_rc=$?
+if [[ "$_st_rc" -eq 0 ]] && printf '%s\n' "$_st_out" | grep -F 'N times' >/dev/null; then
+  ok "run-all-stress.sh --help names N parallel runs"
+else
+  bad "run-all-stress.sh --help failed (rc=$_st_rc)"
+fi
+_st_out=$(bash "$STRESS" --runs 0 2>&1); _st_rc=$?
+if [[ "$_st_rc" -eq 2 ]] && printf '%s\n' "$_st_out" | grep -F 'whole number' >/dev/null; then
+  ok "run-all-stress.sh --runs 0 is a usage error"
+else
+  bad "run-all-stress.sh --runs 0 was not refused (rc=$_st_rc)"
+fi
+_st_out=$(bash "$STRESS" --definitely-not 2>&1); _st_rc=$?
+if [[ "$_st_rc" -eq 2 ]] && printf '%s\n' "$_st_out" | grep -F 'unknown argument' >/dev/null; then
+  ok "run-all-stress.sh unknown flag exits 2"
+else
+  bad "run-all-stress.sh unknown flag was not a usage error (rc=$_st_rc)"
+fi
+
+echo "wall-timeout.test.sh: $PASS passed, $fails failed"
+[[ "$fails" -eq 0 ]]
