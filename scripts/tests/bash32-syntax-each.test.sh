@@ -558,13 +558,13 @@ fi
 if awk '
   /out=\$\(cat "\$cap\.out"\); ec=\$\(cat "\$cap\.ec"\)/ { cap=NR }
   cap && /gibson_forward_bash32_bench "\$ec" "\$BASH32_PATHS_SHA256" "\$BASH32_DOCKER_USABLE"/ { fwd=NR }
-  cap && /name" == "bash32-syntax-each.test.sh"/ { guard=NR }
+  cap && /name" == "bash32-syntax-each.test.sh" && "\$ec" -eq 0 && -z "\$shell_diag"/ { guard=NR }
   /for suite in scripts\/tests\/\*\.test.sh/ { s=NR }
   END { if (s && cap && guard && fwd && s < cap && cap < guard && guard < fwd) exit 0; exit 1 }
 ' "$RUN_ALL"; then
-  ok "bench forwarder runs after capture and only for the focused suite"
+  ok "bench forwarder runs after capture only for a nominally clean focused suite"
 else
-  bad "bench forwarder is not wired to the capture-to-top-level seam"
+  bad "bench forwarder is not wired to the nominally-clean capture-to-top-level seam"
 fi
 
 if grep -E '^[^#]*(mapfile|readarray|declare[[:space:]]+-A|\$\{[A-Za-z_][A-Za-z0-9_]*\^\^|\$\{[A-Za-z_][A-Za-z0-9_]*\,\,|&>>)' "$HELPER"; then
@@ -1265,6 +1265,153 @@ assert_fwd_fail "plus-prefixed delta"
 
 run_fwd 0 "$SEAM_HASH" 1 "GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=10 candidate_median_ms=12 delta_ms=-0 paths_sha256=${SEAM_HASH} status=pass"
 assert_fwd_fail "negative-zero delta"
+
+echo "production suite-loop diagnostic precedence"
+DIAG_BEGIN='# gibson_suite_loop_diag begin'
+DIAG_END='# gibson_suite_loop_diag end'
+diag_begin_n=$(grep -n "^[[:space:]]*${DIAG_BEGIN}\$" "$RUN_ALL" | head -1 | cut -d: -f1)
+diag_end_n=$(grep -n "^[[:space:]]*${DIAG_END}\$" "$RUN_ALL" | head -1 | cut -d: -f1)
+DIAG_SRC=$ROOT/suite.loop.diag.sh
+if [ -n "$diag_begin_n" ] && [ -n "$diag_end_n" ] && [ "$diag_begin_n" -lt "$diag_end_n" ]; then
+  ok "production suite-loop diag markers are present once"
+  {
+    printf '%s\n' 'run_prod_suite_loop_diag() {'
+    sed -n "${diag_begin_n},${diag_end_n}p" "$RUN_ALL"
+    printf '%s\n' '}'
+  } > "$DIAG_SRC"
+else
+  bad "production suite-loop diag markers are missing"
+  printf '%s\n' 'run_prod_suite_loop_diag() { :; }' > "$DIAG_SRC"
+fi
+if [ "$(grep -c "^[[:space:]]*${DIAG_BEGIN}\$" "$RUN_ALL")" -eq 1 ] \
+   && [ "$(grep -c "^[[:space:]]*${DIAG_END}\$" "$RUN_ALL")" -eq 1 ]; then
+  ok "production suite-loop diag markers are unique"
+else
+  bad "production suite-loop diag markers are not unique"
+fi
+if grep -Fq 'gibson_forward_bash32_bench ' "$DIAG_SRC"; then
+  sed 's/gibson_forward_bash32_bench /counted_gibson_forward_bash32_bench /' "$DIAG_SRC" > "$ROOT/suite.loop.diag.counted.sh"
+  mv "$ROOT/suite.loop.diag.counted.sh" "$DIAG_SRC"
+  ok "extracted suite-loop diag call is wrapped for call counting"
+else
+  bad "extracted suite-loop diag lost the production forwarder call"
+fi
+if bash -n "$DIAG_SRC" 2>/dev/null; then
+  ok "extracted suite-loop diag wrapper is syntactically valid"
+else
+  bad "extracted suite-loop diag wrapper failed bash -n"
+fi
+counted_gibson_forward_bash32_bench() {
+  printf '%s\n' called >> "$ROOT/fwd.calls"
+  gibson_forward_bash32_bench "$@"
+}
+is_quarantined() { return 1; }
+quarantine_issue() { printf '%s\n' ""; }
+# shellcheck disable=SC1090
+. "$DIAG_SRC"
+if [ "$(type -t run_prod_suite_loop_diag 2>/dev/null)" = function ]; then
+  ok "extracted suite-loop diag is callable"
+else
+  bad "extracted suite-loop diag did not define the wrapper"
+fi
+
+# Production suite-loop globals: consumed by the extracted run-all block.
+# shellcheck disable=SC2034
+run_loop_diag() {
+  name="bash32-syntax-each.test.sh"
+  ec=$1
+  shell_diag=$2
+  tally=$3
+  out=$4
+  suite_elapsed=7
+  RED=""
+  GRN=""
+  YEL=""
+  OFF=""
+  FAILED=""
+  ESCAPED=""
+  QUARANTINED=""
+  BASH32_PATHS_SHA256=$SEAM_HASH
+  BASH32_DOCKER_USABLE=1
+  : > "$ROOT/fwd.calls"
+  run_prod_suite_loop_diag >"$ROOT/loop.out"
+  LOOP_OUT=$(cat "$ROOT/loop.out")
+}
+
+fwd_call_count() {
+  if [ -f "$ROOT/fwd.calls" ]; then
+    wc -l < "$ROOT/fwd.calls" | tr -d ' '
+  else
+    printf '%s' 0
+  fi
+}
+
+assert_loop_no_receipt() {
+  _label=$1
+  _needle=$2
+  _want_calls=$3
+  _unwanted=$4
+  _hits=0
+  _unwanted_hits=0
+  if printf '%s\n' "$LOOP_OUT" | grep -q 'GIBSON_BASH32_BENCH'; then
+    _hits=1
+  fi
+  if [ -n "$_unwanted" ] && printf '%s\n' "$LOOP_OUT" | grep -q "$_unwanted"; then
+    _unwanted_hits=1
+  fi
+  _calls=$(fwd_call_count)
+  if printf '%s\n' "$LOOP_OUT" | grep -Fq "$_needle" \
+     && [ "$_calls" -eq "$_want_calls" ] \
+     && [ "$_hits" -eq 0 ] \
+     && [ "$_unwanted_hits" -eq 0 ] \
+     && printf '%s' "$FAILED" | grep -Fq "$name"; then
+    ok "loop-diag $_label"
+  else
+    bad "loop-diag $_label (calls=$_calls want=$_want_calls receipt=$_hits unwanted=$_unwanted_hits failed='$FAILED' out=$(printf '%s' "$LOOP_OUT" | tr '\n' '|'))"
+  fi
+}
+
+run_loop_diag 124 "" "timed out after 30s" "${SEAM_CHATTER}
+${SEAM_VALID}"
+assert_loop_no_receipt "timeout 124 keeps timed-out tally" \
+  "FAIL — bash32-syntax-each.test.sh: timed out after 30s (exit 124, 7s)" \
+  0 "benchmark receipt missing or invalid"
+
+run_loop_diag 0 "scripts/tests/bash32-syntax-each.test.sh: line 2: FOO: unbound variable" \
+  "10 passed, 0 failed" "${SEAM_CHATTER}
+${SEAM_VALID}
+scripts/tests/bash32-syntax-each.test.sh: line 2: FOO: unbound variable"
+assert_loop_no_receipt "shell diagnostic with exit 0 keeps shell-diag class" \
+  "FAIL — bash32-syntax-each.test.sh: shell construction diagnostic with tally '10 passed, 0 failed' (exit 0, 7s)" \
+  0 "benchmark receipt missing or invalid"
+
+run_loop_diag 1 "" "3 passed, 1 failed" "${SEAM_CHATTER}
+${SEAM_VALID}
+  FAIL — planted assertion"
+assert_loop_no_receipt "ordinary exit 1 keeps tally failure" \
+  "FAIL — bash32-syntax-each.test.sh: 3 passed, 1 failed (exit 1, 7s)" \
+  0 "benchmark receipt missing or invalid"
+
+run_loop_diag 0 "" "10 passed, 0 failed" "$SEAM_CHATTER"
+assert_loop_no_receipt "clean exit 0 with missing receipt fails closed" \
+  "FAIL — bash32-syntax-each.test.sh: bash 3.2 benchmark receipt missing or invalid (exit 0, 7s)" \
+  1 "shell construction diagnostic"
+
+run_loop_diag 0 "" "10 passed, 0 failed" "${SEAM_CHATTER}
+${SEAM_VALID}"
+_calls=$(fwd_call_count)
+_hits=0
+if printf '%s\n' "$LOOP_OUT" | grep -Fq "$SEAM_VALID"; then
+  _hits=1
+fi
+if printf '%s\n' "$LOOP_OUT" | grep -Fq "ok   — bash32-syntax-each.test.sh: 10 passed, 0 failed (7s)" \
+   && [ "$_calls" -eq 1 ] \
+   && [ "$_hits" -eq 1 ] \
+   && [ -z "$FAILED" ]; then
+  ok "loop-diag clean exit 0 forwards the validated receipt"
+else
+  bad "loop-diag clean pass (calls=$_calls receipt=$_hits failed='$FAILED' out=$(printf '%s' "$LOOP_OUT" | tr '\n' '|'))"
+fi
 
 echo "T9 stock Darwin Bash 3.2"
 DARWIN_VER=$(/bin/bash --version 2>/dev/null | head -1)

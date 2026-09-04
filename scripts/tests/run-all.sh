@@ -2304,9 +2304,14 @@ for suite in $SELECTED_SUITES; do
       head -20 | sed 's/^/         /'
   fi
 
+  # gibson_suite_loop_diag begin
+  # Require/forward the bash32 bench receipt only when the focused suite is
+  # nominally clean (exit 0, no shell-construction diagnostic). Nonzero exit
+  # and shell_diag keep their existing timeout/tally/quarantine/ordinary
+  # branches and must never print a benchmark receipt.
   bash32_bench_ok=1
   bash32_bench_line=""
-  if [[ "$name" == "bash32-syntax-each.test.sh" ]]; then
+  if [[ "$name" == "bash32-syntax-each.test.sh" && "$ec" -eq 0 && -z "$shell_diag" ]]; then
     bash32_bench_line=$(printf '%s\n' "$out" | gibson_forward_bash32_bench "$ec" "$BASH32_PATHS_SHA256" "$BASH32_DOCKER_USABLE") || bash32_bench_ok=0
   fi
 
@@ -2334,6 +2339,7 @@ for suite in $SELECTED_SUITES; do
     echo "${RED}  FAIL${OFF} — $name: $tally (exit $ec, ${suite_elapsed}s)"
     FAILED="$FAILED $name"
   fi
+  # gibson_suite_loop_diag end
 done
 
 # --- wall-time budget -------------------------------------------------------
