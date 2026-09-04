@@ -6,7 +6,9 @@
 #   lists every top-level scripts/*.{sh,mjs}, that an orphan over the baseline
 #   is red, that --update-baseline refuses to raise, that a synthetic
 #   nothing-calls-me.sh turns the check red, and that the self-gate DCO step
-#   fails unsigned commits in a fixture repo and passes signed ones.
+#   fails unsigned commits in a fixture repo and passes signed ones. A signed
+#   branch with an unsigned synthetic merge on top stays green (PR head, not
+#   HEAD). A body-line Signed-off-by that is not a git trailer is red.
 #
 # USAGE
 #   scripts/tests/sensor-reachability.test.sh
@@ -354,11 +356,18 @@ extract_dco_run() {
 
 DCO_SCRIPT="$ROOT/dco-step.sh"
 extract_dco_run > "$DCO_SCRIPT"
-if grep -q 'git log' "$DCO_SCRIPT" && grep -q -- '--format=%B' "$DCO_SCRIPT" \
-   && grep -q 'Signed-off-by:' "$DCO_SCRIPT" && grep -q 'merge-base' "$DCO_SCRIPT"; then
-  ok "extracted DCO step walks git log --format=%B over merge-base..HEAD"
+if grep -q 'git rev-list' "$DCO_SCRIPT" \
+   && grep -q 'interpret-trailers --parse' "$DCO_SCRIPT" \
+   && grep -q 'HEAD_SHA' "$DCO_SCRIPT" \
+   && grep -qE 'BASE_SHA\}?\.\.\$\{HEAD_SHA' "$DCO_SCRIPT"; then
+  ok "extracted DCO step walks git rev-list BASE_SHA..HEAD_SHA and parses trailers"
 else
-  bad "extracted DCO step missing required commands: $(head -20 "$DCO_SCRIPT")"
+  bad "extracted DCO step missing required commands: $(head -40 "$DCO_SCRIPT")"
+fi
+if grep -qE '\.\.HEAD(["[:space:]]|$)' "$DCO_SCRIPT"; then
+  bad "DCO step still walks ..HEAD (unsigned synthetic merge ref on pull_request)"
+else
+  ok "DCO step does not walk HEAD as the range end"
 fi
 
 awk '
@@ -368,11 +377,21 @@ awk '
   END { exit found ? 0 : 1 }
 ' "$WF" && ok "DCO step lives in the sensors job" || bad "DCO step not in sensors job"
 
-# Untrusted interpolation: EVENT_NAME / BASE_SHA come from env:, not run:.
-if grep -A2 'name: DCO trailer check' "$WF" | grep -q 'EVENT_NAME:'; then
+# Untrusted interpolation: EVENT_NAME / BASE_SHA / HEAD_SHA come from env:, not run:.
+dco_env=$(awk '
+  $0 ~ /^[[:space:]]*- name: DCO trailer check[[:space:]]*$/ { hit=1; next }
+  hit && $0 ~ /^[[:space:]]*- name:/ { exit }
+  hit { print }
+' "$WF")
+if printf '%s\n' "$dco_env" | grep -q 'EVENT_NAME:'; then
   ok "DCO step passes github.event_name via env:"
 else
   bad "DCO step missing EVENT_NAME env"
+fi
+if printf '%s\n' "$dco_env" | grep -q 'HEAD_SHA: \${{ github.event.pull_request.head.sha }}'; then
+  ok "DCO step passes pull_request.head.sha via HEAD_SHA env"
+else
+  bad "DCO step missing HEAD_SHA env from pull_request.head.sha"
 fi
 
 setup_dco_repo() { # setup_dco_repo <signed|unsigned>
@@ -395,15 +414,20 @@ setup_dco_repo() { # setup_dco_repo <signed|unsigned>
   echo "$repo"
 }
 
-run_dco() { # run_dco <repo> <event> -> sets DCO_OUT DCO_RC
+run_dco() { # run_dco <repo> <event> [head_sha] -> sets DCO_OUT DCO_RC
   local repo="$1" event="$2"
+  local head_sha="${3-}"
   local summary="$ROOT/dco-summary.md"
   : > "$summary"
   local base
   base=$(git -C "$repo" rev-parse --verify refs/heads/main)
+  if [[ -z "$head_sha" ]]; then
+    head_sha=$(git -C "$repo" rev-parse --verify HEAD)
+  fi
   DCO_OUT=$(
     cd "$repo" || exit 99
-    EVENT_NAME="$event" BASE_SHA="$base" GITHUB_STEP_SUMMARY="$summary" \
+    EVENT_NAME="$event" BASE_SHA="$base" HEAD_SHA="$head_sha" \
+      GITHUB_STEP_SUMMARY="$summary" \
       bash "$DCO_SCRIPT" 2>&1
   )
   DCO_RC=$?
@@ -444,6 +468,78 @@ else
   bad "push skip (rc=$DCO_RC out=$DCO_OUT summary=$DCO_SUMMARY)"
 fi
 
+echo "# finding 1: signed PR + unsigned synthetic merge at HEAD is green via HEAD_SHA"
+REPO_M="$ROOT/dco-synth-merge"
+rm -rf "$REPO_M"
+mkdir -p "$REPO_M"
+$GIT init -q "$REPO_M"
+git -C "$REPO_M" symbolic-ref HEAD refs/heads/main
+echo base > "$REPO_M/README.md"
+$GIT -C "$REPO_M" add README.md
+$GIT -C "$REPO_M" commit -q -m "base"
+$GIT -C "$REPO_M" checkout -q -b feat/dco
+echo work >> "$REPO_M/README.md"
+$GIT -C "$REPO_M" commit -q -s -am "work"
+DCO_PR_HEAD=$(git -C "$REPO_M" rev-parse --verify HEAD)
+# Detach at main so the merge does not move refs/heads/main (GitHub's
+# refs/pull/N/merge is not the base branch). Merge without -s → unsigned.
+$GIT -C "$REPO_M" checkout -q --detach main
+$GIT -C "$REPO_M" merge -q --no-ff -m "Merge feat/dco" feat/dco
+DCO_MERGE=$(git -C "$REPO_M" rev-parse --verify HEAD)
+# Fixture validity: the synthetic merge itself is unsigned.
+run_dco "$REPO_M" pull_request "$DCO_MERGE"
+if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep -q "$DCO_MERGE"; then
+  ok "unsigned synthetic merge is red when it is the range head"
+else
+  bad "synthetic merge was not unsigned (rc=$DCO_RC out=$DCO_OUT merge=$DCO_MERGE)"
+fi
+# Production shape: HEAD is the unsigned merge; HEAD_SHA is the signed PR tip.
+run_dco "$REPO_M" pull_request "$DCO_PR_HEAD"
+if [[ "$DCO_RC" -eq 0 ]]; then
+  ok "finding 1: signed branch + unsigned synthetic merge at HEAD is green via HEAD_SHA"
+else
+  bad "synthetic merge poisoned PR range (rc=$DCO_RC out=$DCO_OUT head=$DCO_PR_HEAD merge=$DCO_MERGE)"
+fi
+
+echo "# finding 2: Signed-off-by in the body is not a trailer"
+REPO_B="$ROOT/dco-body-bait"
+rm -rf "$REPO_B"
+mkdir -p "$REPO_B"
+$GIT init -q "$REPO_B"
+git -C "$REPO_B" symbolic-ref HEAD refs/heads/main
+echo base > "$REPO_B/README.md"
+$GIT -C "$REPO_B" add README.md
+$GIT -C "$REPO_B" commit -q -m "base"
+$GIT -C "$REPO_B" checkout -q -b feat/dco
+echo work >> "$REPO_B/README.md"
+$GIT -C "$REPO_B" add README.md
+cat > "$ROOT/dco-bait-msg" <<'EOF'
+work
+
+Discusses placement.
+
+Signed-off-by: gibson-sensor <sensor@gibson.invalid>
+
+This paragraph after the blank line means Git does not treat the
+Signed-off-by line as a trailer.
+EOF
+$GIT -C "$REPO_B" commit -q -F "$ROOT/dco-bait-msg"
+bait_sha=$(git -C "$REPO_B" rev-parse --verify HEAD)
+bait_body=$(git -C "$REPO_B" log -1 --format=%B "$bait_sha")
+if ! printf '%s\n' "$bait_body" | grep -q '^Signed-off-by:'; then
+  bad "body-bait fixture lost the Signed-off-by body line"
+elif printf '%s\n' "$bait_body" | git interpret-trailers --parse | grep -q '^Signed-off-by:'; then
+  bad "body-bait fixture was parsed as a real trailer (not a body-grep witness)"
+else
+  ok "body-bait fixture: body grep would pass; interpret-trailers has no Signed-off-by"
+fi
+run_dco "$REPO_B" pull_request
+if [[ "$DCO_RC" -ne 0 ]] && printf '%s\n' "$DCO_OUT" | grep -q "$bait_sha"; then
+  ok "finding 2: body-line Signed-off-by that is not a trailer is red"
+else
+  bad "body-bait DCO (rc=$DCO_RC out=$DCO_OUT want sha=$bait_sha)"
+fi
+
 echo "# live baseline is a non-negative integer ratchet"
 if node -e '
   const b = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -462,5 +558,73 @@ else
 fi
 
 echo
+
+echo "# Codex #317 findings 3-5: invocation position, ./ boundary, committed-baseline ratchet"
+FX="$ROOT/fx-inv"
+seed_fixture "$FX"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/echoed.sh"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/envval.sh"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/heredoc.sh"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/dotslash.sh"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/flagged.sh"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/piped.sh"
+cat > "$FX/.github/workflows/w.yml" <<'YML'
+name: w
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo scripts/echoed.sh
+      - run: cat scripts/echoed.sh
+        env:
+          TARGET: scripts/envval.sh
+      - run: |
+          cat <<'DOC'
+          scripts/heredoc.sh
+          DOC
+      - run: bash ./scripts/dotslash.sh
+      - run: FOO=1 bash -x scripts/flagged.sh --arg scripts/echoed.sh
+      - run: true | node scripts/piped.sh
+YML
+write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 9 orphan.sh
+run_sensor "$FX"
+for s in echoed envval heredoc; do
+  printf '%s\n' "$OUT" | grep -q $'ORPHAN\tscripts/'"$s"'.sh' \
+    && ok "finding 3: scripts/$s.sh named but not executed is ORPHAN" \
+    || bad "finding 3: scripts/$s.sh counted reachable: $(printf '%s\n' "$OUT" | grep "$s")"
+done
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/dotslash.sh' \
+  && ok "finding 4: bash ./scripts/dotslash.sh is REACHABLE" \
+  || bad "finding 4: ./ prefix missed: $(printf '%s\n' "$OUT" | grep dotslash)"
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/flagged.sh' \
+  && ok "interpreter with flags and env prefix invokes (FOO=1 bash -x scripts/flagged.sh)" \
+  || bad "flagged invocation missed: $(printf '%s\n' "$OUT" | grep flagged)"
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/piped.sh' \
+  && ok "after a pipe, node scripts/piped.sh invokes" \
+  || bad "piped invocation missed: $(printf '%s\n' "$OUT" | grep piped)"
+printf '%s\n' "$OUT" | grep -q $'REACHABLE\tscripts/called.sh' \
+  && ok "control: bash scripts/called.sh still REACHABLE" || bad "control regressed"
+
+FX="$ROOT/fx-ratchet"
+seed_fixture "$FX"
+( cd "$FX" && $GIT init -q && $GIT add -A && $GIT commit -q -m base && $GIT update-ref refs/remotes/origin/main HEAD ) || bad "ratchet fixture git setup"
+printf '%s\n' '#!/bin/bash' 'echo x' > "$FX/scripts/new-orphan.sh"
+write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 2 orphan.sh new-orphan.sh
+run_sensor "$FX"
+if [[ "$RC" -eq 1 ]] && printf '%s\n' "$ERR" | grep -q 'HIGHER than the committed'; then
+  ok "finding 5: hand-raised orphanMax (1→2) with a new orphan is RED against origin/main"
+else
+  bad "finding 5: hand-raise passed (rc=$RC err=$ERR)"
+fi
+write_baseline "$FX/config/sensor-reachability-baseline.v1.json" 1 orphan.sh
+run_sensor "$FX"
+[[ "$RC" -eq 1 ]] && ok "finding 5 control: new orphan over the committed max is still red (count)" || bad "count ratchet regressed (rc=$RC)"
+rm -f "$FX/scripts/new-orphan.sh"; run_sensor "$FX"
+[[ "$RC" -eq 0 ]] && ok "finding 5 control: at the committed baseline → green" || bad "clean tree red (rc=$RC err=$ERR)"
+run_sensor "$FX" --ratchet-ref refs/does/not/exist
+[[ "$RC" -eq 0 ]] && printf '%s\n' "$ERR" | grep -q 'no committed baseline' && ok "unresolvable ratchet ref → note, working-tree check only" || bad "unresolvable ref handling (rc=$RC err=$ERR)"
+
 echo "sensor-reachability.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
