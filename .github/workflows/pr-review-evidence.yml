@@ -103,27 +103,27 @@ jobs:
           if [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]] && ! grep -q " $EVENT_HEAD_SHA\$" heads.txt; then
             printf '%s %s\n' "${EVENT_PR_NUMBER:-0}" "$EVENT_HEAD_SHA" >> heads.txt
           fi
-          if [ "${IS_SCHEDULE:-false}" = "true" ]; then
-            echo "scheduled sweep: no pending stamps (writes happen only on change)"
+          # Pending is stamped ONLY on the event's own head (Codex round 8,
+          # finding 1): stamping every open head on every event let a fork
+          # author pace edits to burn a quiet victim head's 1,000-status
+          # budget. Other heads are written on change only, by the publisher.
+          # Scheduled runs and comment events with no PR head stamp nothing.
+          if [ "${IS_SCHEDULE:-false}" = "true" ] || ! [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "no event head to invalidate (scheduled or comment event): writes happen only on change"
             [ "$listed" -eq 1 ] || exit 1
             exit 0
           fi
-          stamped=0; failed=0
-          while read -r n sha; do
-            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
-            if gh api --method POST "repos/$GH_REPO/statuses/$sha" \
-                -f state="pending" -f context="$STATUS_CONTEXT" \
-                -f description="IN PROGRESS: re-evaluating review evidence for PR $n" \
-                -f target_url="$TARGET_URL" >/dev/null; then
-              stamped=$((stamped + 1))
-            else
-              failed=$((failed + 1))
-              echo "::error::could not stamp pending on PR $n @ ${sha:0:7} (status write failed — possibly the 1,000-status cap)"
-              echo "- pending stamp FAILED on PR $n @ ${sha:0:7}" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done < heads.txt
-          echo "pending stamped on $stamped open PR head(s); $failed failed"
-          [ "$listed" -eq 1 ] && [ "$failed" -eq 0 ] || exit 1
+          if gh api --method POST "repos/$GH_REPO/statuses/$EVENT_HEAD_SHA" \
+              -f state="pending" -f context="$STATUS_CONTEXT" \
+              -f description="IN PROGRESS: re-evaluating review evidence for PR ${EVENT_PR_NUMBER:-?}" \
+              -f target_url="$TARGET_URL" >/dev/null; then
+            echo "pending stamped on the event head ${EVENT_HEAD_SHA:0:7}"
+          else
+            echo "::error::could not stamp pending on the event head ${EVENT_HEAD_SHA:0:7} (status write failed — possibly the 1,000-status cap)"
+            echo "- pending stamp FAILED on the event head ${EVENT_HEAD_SHA:0:7}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          [ "$listed" -eq 1 ] || exit 1
 
       - name: Checkout trusted default branch (never PR code)
         if: always()
@@ -161,9 +161,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANCELLED: ${{ job.status == 'cancelled' }}
+          # continue-on-error turns the pending step's failure green; read its
+          # real outcome here so a failed pending stamp makes the job red
+          # (Codex round 8, finding 2).
+          HEADS_OUTCOME: ${{ steps.heads.outcome }}
         run: |
           set -uo pipefail
           post_fail=0
+          if [ "${HEADS_OUTCOME:-}" = "failure" ]; then
+            post_fail=1
+            echo "::error::the pending stamp step failed (listing or event-head write); see its log"
+            echo "- pending stamp step FAILED" >> "$GITHUB_STEP_SUMMARY"
+          fi
           # current_status sha -> "state|description" of the context now on the head ("" if none)
           current_status() {
             # `gh api --jq` takes one expression and no jq flags; STATUS_CONTEXT is a
@@ -171,9 +180,12 @@ jobs:
             gh api "repos/$GH_REPO/commits/$1/status" \
               --jq ".statuses[] | select(.context==\"$STATUS_CONTEXT\") | \"\(.state)|\(.description)\"" 2>/dev/null | head -1
           }
-          publish() { # sha state description  -> writes, or skips on a scheduled run when unchanged
+          publish() { # sha state description  -> writes; skips an unchanged non-event head (churn cap)
             local sha="$1" state="$2" desc="${3:0:140}"
-            if [ "${IS_SCHEDULE:-false}" = "true" ]; then
+            # The event head was stamped pending and MUST be written; every
+            # other head is written only when the verdict actually changes
+            # (Codex round 8, finding 1: bounded writes per head per day).
+            if [ "$sha" != "${EVENT_HEAD_SHA:-}" ]; then
               cur=$(current_status "$sha")
               if [ "$cur" = "$state|$desc" ]; then echo "unchanged: ${sha:0:7} $state"; return 0; fi
             fi
