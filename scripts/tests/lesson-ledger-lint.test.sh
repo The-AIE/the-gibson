@@ -272,6 +272,65 @@ run_lint "$AC3_COMMENT" --offline
   && ok "AC3 clean: unrelated comment does not pin" \
   || bad "AC3 unrelated comment (rc=$rc): $out"
 
+echo "# AC3 header comment is not a pin"
+AC3_HEADER="$ROOT/ac3-header"
+make_tree "$AC3_HEADER"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_HEADER/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' "# planted.test.sh — sensors for the $(lid 1) contract"
+  printf '%s\n' '#'
+  printf '%s\n' "#   These cases pin both directions ($(lid 1))."
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' 'echo "unrelated setup"'
+  printf '%s\n' 'true'
+} > "$AC3_HEADER/scripts/tests/planted.test.sh"
+run_lint "$AC3_HEADER" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+  && ok "AC3 clean: header comment does not pin" \
+  || bad "AC3 header comment (rc=$rc): $out"
+
+echo "# AC3 quoted occurrence is not a pin"
+AC3_QUOTED="$ROOT/ac3-quoted"
+make_tree "$AC3_QUOTED"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_QUOTED/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"\$out\" | grep -q '$(lid 1)' && ok help"
+} > "$AC3_QUOTED/scripts/tests/planted.test.sh"
+run_lint "$AC3_QUOTED" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+  && ok "AC3 clean: quoted grep is not a pin" \
+  || bad "AC3 quoted occurrence (rc=$rc): $out"
+
+echo "# AC3 loose 'pin' word is not a pin"
+AC3_LOOSE="$ROOT/ac3-loose-pin"
+make_tree "$AC3_LOOSE"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_LOOSE/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"unrelated setup\""
+  printf '%s\n' "# the $(lid 1) failure this sensor exists to catch. Pin the canonical key name."
+} > "$AC3_LOOSE/scripts/tests/planted.test.sh"
+run_lint "$AC3_LOOSE" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+  && ok "AC3 clean: loose pin word does not pin" \
+  || bad "AC3 loose pin word (rc=$rc): $out"
+
 echo "# AC3 pin-keyword comment still pins"
 AC3_KW="$ROOT/ac3-kw"
 make_tree "$AC3_KW"
@@ -288,9 +347,72 @@ make_tree "$AC3_KW"
 } > "$AC3_KW/scripts/tests/planted.test.sh"
 run_lint "$AC3_KW" --offline
 if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
-  ok "AC3 mutation: pin/regression comment still pins"
+  ok "AC3 mutation: # pins ID still pins"
 else
   bad "AC3 pin-keyword (rc=$rc): $out"
+fi
+
+echo "# AC3 pin: ID still pins"
+AC3_PINCOL="$ROOT/ac3-pin-colon"
+make_tree "$AC3_PINCOL"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_PINCOL/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"unrelated setup\""
+  printf '%s\n' "# pin: $(lid 1)"
+} > "$AC3_PINCOL/scripts/tests/planted.test.sh"
+run_lint "$AC3_PINCOL" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+  ok "AC3 mutation: pin: ID still pins"
+else
+  bad "AC3 pin-colon (rc=$rc): $out"
+fi
+
+echo "# AC3 regression: ID still pins"
+AC3_REG="$ROOT/ac3-regression"
+make_tree "$AC3_REG"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_REG/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"unrelated setup\""
+  printf '%s\n' "# regression: $(lid 1)"
+} > "$AC3_REG/scripts/tests/planted.test.sh"
+run_lint "$AC3_REG" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+  ok "AC3 mutation: regression: ID still pins"
+else
+  bad "AC3 regression-colon (rc=$rc): $out"
+fi
+
+echo "# AC3 header with explicit # pins still pins"
+AC3_HEADER_PIN="$ROOT/ac3-header-pin"
+make_tree "$AC3_HEADER_PIN"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fix-pending (issue #1)"
+} > "$AC3_HEADER_PIN/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' "# pins $(lid 1)"
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' 'true'
+} > "$AC3_HEADER_PIN/scripts/tests/planted.test.sh"
+run_lint "$AC3_HEADER_PIN" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+  ok "AC3 mutation: header # pins ID still pins"
+else
+  bad "AC3 header explicit pin (rc=$rc): $out"
 fi
 
 echo "# AC3 clean: pinned lesson is fixed"
@@ -329,6 +451,49 @@ if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
   ok "AC6 mutation: claimed pinner without ID fails"
 else
   bad "AC6 false pinner (rc=$rc): $out"
+fi
+
+echo "# AC6 claimed pinner that only has a header mention"
+AC6_HEADER="$ROOT/ac6-header-pinner"
+make_tree "$AC6_HEADER"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fixed (pinned by scripts/tests/planted.test.sh)"
+} > "$AC6_HEADER/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' "# planted.test.sh — sensors for $(lid 1)"
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' 'true'
+} > "$AC6_HEADER/scripts/tests/planted.test.sh"
+run_lint "$AC6_HEADER" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'does not pin it'; then
+  ok "AC6 mutation: claimed pinner with only a header mention fails"
+else
+  bad "AC6 header pinner (rc=$rc): $out"
+fi
+
+echo "# AC6 claimed pinner that only has a quoted occurrence"
+AC6_QUOTED="$ROOT/ac6-quoted-pinner"
+make_tree "$AC6_QUOTED"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fixed (pinned by scripts/tests/planted.test.sh)"
+} > "$AC6_QUOTED/memory/LESSONS.md"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -uo pipefail'
+  printf '%s\n' "echo \"\$out\" | grep -q '$(lid 1)' && ok help"
+} > "$AC6_QUOTED/scripts/tests/planted.test.sh"
+run_lint "$AC6_QUOTED" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'does not pin it'; then
+  ok "AC6 mutation: claimed pinner with only a quoted occurrence fails"
+else
+  bad "AC6 quoted pinner (rc=$rc): $out"
 fi
 
 echo "# AC4 not strictly increasing / duplicate / missing fields"
@@ -455,6 +620,48 @@ run_lint "$AC4_FENCE_OK" --offline
 [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
   && ok "AC4 clean: fenced heading is not a duplicate" \
   || bad "AC4 fence duplicate (rc=$rc): $out"
+
+echo "# AC4 tilde-fenced example Status/Tags do not satisfy the real entry"
+AC4_TILDE="$ROOT/ac4-tilde"
+make_tree "$AC4_TILDE"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  printf '%s\n' "## $(lid 1) · 2026-09-04 · tilde-fenced-fields"
+  printf '%s\n' "**What happened:** example in a tilde fence:"
+  printf '%s\n' '~~~'
+  printf '%s\n' "## $(lid 99) · 2026-01-01 · phantom"
+  printf '%s\n' "**Status:** fixed"
+  printf '%s\n' "**Tags:** #example"
+  printf '%s\n' '~~~'
+} > "$AC4_TILDE/memory/LESSONS.md"
+run_lint "$AC4_TILDE" --offline
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
+    && echo "$out" | grep -q 'missing \*\*Status:\*\*' \
+    && ! echo "$out" | grep -q "duplicate lesson ID $(lid 1)"; then
+  ok "AC4 mutation: tilde-fenced Status/Tags/heading are not real fields"
+else
+  bad "AC4 tilde fence fields (rc=$rc): $out"
+fi
+
+echo "# AC4 tilde-fenced duplicate heading is not a phantom entry"
+AC4_TILDE_OK="$ROOT/ac4-tilde-ok"
+make_tree "$AC4_TILDE_OK"
+{
+  printf '%s\n' '---'
+  printf '%s\n' ''
+  entry 1 "fixed"
+  printf '%s\n' '~~~markdown'
+  printf '%s\n' "## $(lid 1) · 2026-01-01 · phantom-duplicate"
+  printf '%s\n' "**Status:** fixed"
+  printf '%s\n' "**Tags:** #example"
+  printf '%s\n' '~~~'
+  entry 2 "fixed"
+} > "$AC4_TILDE_OK/memory/LESSONS.md"
+run_lint "$AC4_TILDE_OK" --offline
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+  && ok "AC4 clean: tilde-fenced heading is not a duplicate" \
+  || bad "AC4 tilde fence duplicate (rc=$rc): $out"
 
 echo "# live tree (AC6)"
 export PATH="$ORIG_PATH"

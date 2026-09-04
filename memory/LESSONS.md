@@ -35,7 +35,7 @@ compaction checkpoint; run total $120.68.
 **Harness fix:** bounded workers (one issue, exact file list, short output
 contract); fresh-context-per-hat; checkpoint before half the window; grind work
 routed to flat-rate pools (docs/15).
-**Status:** fixed (pinned by scripts/tests/cost-ledger.test.sh)
+**Status:** fixed
 **Tags:** #cost #routing
 
 ## L-004 · 2026-07 · docs-describe-aspiration-not-wiring
@@ -44,7 +44,7 @@ Branch was `main` — every main merge was a silent prod deploy.
 **Root cause:** documentation recorded intent, not verified configuration.
 **Harness fix:** adoption audits verify the real Production Branch and write the
 truth into the target AGENTS.md (docs/12, docs/13).
-**Status:** fixed (pinned by scripts/tests/git-configure.test.sh)
+**Status:** fixed
 **Tags:** #vercel #docs
 
 ## L-005 · 2026-07 · reviewer-absence-silently-skips
@@ -172,7 +172,7 @@ READY; inject bypass secret; fail/annotate non-pass (not skip-as-green) when
 Tier B/C needs preview. Guide: security/ux hats must not claim L5/L8/UX CI
 skip as hard-fail pass; compensate with live preview or prod posture when
 appropriate. **Do not** loosen Tier C human gates.
-**Status:** fixed (pinned by scripts/tests/ux-surface.test.sh)
+**Status:** fix-pending (the-gibson#2)
 **Tags:** #ci #preview #vercel #security #ux-eval #local
 
 ## L-013 · 2026-07-25 · partial-pr-autoclose-despite-related-only
@@ -209,7 +209,7 @@ same-author, post `gh pr review --comment` with final line exactly
 `VERDICT: APPROVE` (or `REQUEST_CHANGES`). Release treats that line as the
 merge gate when `reviewDecision` is empty/blocked for same-author. Prefer
 `REVIEWER_CMD` cross-vendor when set (true different identity).
-**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh, scripts/tests/formal-review.test.sh)
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh)
 **Tags:** #review #github #solo-loop #process #general
 
 ## L-020 · 2026-07-25 · gh-pr-merge-fails-when-worktree-holds-branch
@@ -249,7 +249,7 @@ squash with explicit checklist in the merge comment, or (b) obtain real
 `--approve` from a different GitHub identity / `REVIEWER_CMD` that can post
 a formal review. (2) Prefer (b) so admin is rare. (3) Always re-sync with
 `origin/main` under multi-lane fleet before merge attempts.
-**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh, scripts/tests/git-configure.test.sh)
+**Status:** fix-pending (guide; playbook not yet patched; practiced on PR #98)
 **Tags:** #release #github #branch-protection #solo-loop #review #general
 
 ## L-022 · 2026-07-25 · gitleaks-security-fast-cross-lane-until-pr-scoped
