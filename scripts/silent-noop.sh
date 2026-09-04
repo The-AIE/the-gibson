@@ -248,13 +248,17 @@ _silent_noop_fp() {
   # fallback here: `wc -c` cannot see `round: 1` become `round: 2`, so it would report
   # stagnation as progress — fail-open, the one thing this sensor may never do.
   if command -v sha256sum >/dev/null 2>&1; then
-    digest=$(printf '%s\n' "$body" | sha256sum 2>/dev/null | awk '{print $1}') || digest=""
+    # printf's own stderr is silenced: a hasher that exits before reading (the
+    # failing-hasher shadow, a sandbox denial) sends printf SIGPIPE, and the
+    # "write error: Broken pipe" text must not leak into the caller's output —
+    # it is the #319 silent-noop flake. The status still collapses to "".
+    digest=$(printf '%s\n' "$body" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}') || digest=""
   elif command -v shasum >/dev/null 2>&1; then
-    digest=$(printf '%s\n' "$body" | shasum -a 256 2>/dev/null | awk '{print $1}') || digest=""
+    digest=$(printf '%s\n' "$body" 2>/dev/null | shasum -a 256 2>/dev/null | awk '{print $1}') || digest=""
   else
     # POSIX fallback. Weaker than a digest but still content-sensitive, unlike a
     # byte count, which cannot see `round: 1` become `round: 2`.
-    digest=$(printf '%s\n' "$body" | cksum 2>/dev/null | awk '{print $1 "-" $2}') || digest=""
+    digest=$(printf '%s\n' "$body" 2>/dev/null | cksum 2>/dev/null | awk '{print $1 "-" $2}') || digest=""
   fi
 
   if [[ -z "$digest" ]]; then
