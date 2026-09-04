@@ -12,12 +12,13 @@ WHAT IT DOES
   Does not raise budgets or quarantine suites.
 
 USAGE
-  scripts/tests/run-all-stress.sh [--runs N] [--jobs J] [--timeout S]
+  scripts/tests/run-all-stress.sh [--runs N] [--jobs J]
   scripts/tests/run-all-stress.sh --help
 
   --runs N     repetitions (default 5)
   --jobs J     passed to run-all --jobs (default 8)
-  --timeout S  passed to run-all --timeout (omit = run-all default)
+  (no --timeout: the canonical per-suite budget is the contract; a stress run
+   that widened it would pass suites the real gate fails)
 
 EXIT
   0  every repetition was green
@@ -31,13 +32,12 @@ RUN_ALL="$SCRIPT_DIR/run-all.sh"
 
 RUNS=5
 JOBS=8
-TIMEOUT=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --runs) RUNS="${2:-}"; shift 2 ;;
     --jobs) JOBS="${2:-}"; shift 2 ;;
-    --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+    --timeout) echo "run-all-stress.sh: --timeout is not accepted; the canonical budget is the contract" >&2; exit 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "run-all-stress.sh: unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -49,11 +49,6 @@ esac
 case "$JOBS" in
   ''|*[!0-9]*|0) echo "run-all-stress.sh: --jobs wants a whole number >= 1" >&2; exit 2 ;;
 esac
-if [[ -n "$TIMEOUT" ]]; then
-  case "$TIMEOUT" in
-    ''|*[!0-9]*) echo "run-all-stress.sh: --timeout wants a whole number of seconds" >&2; exit 2 ;;
-  esac
-fi
 
 if [[ ! -f "$RUN_ALL" ]]; then
   echo "run-all-stress.sh: missing $RUN_ALL" >&2
@@ -66,11 +61,7 @@ i=1
 while [[ "$i" -le "$RUNS" ]]; do
   echo "run-all-stress: run $i/$RUNS jobs=$JOBS"
   rc=0
-  if [[ -n "$TIMEOUT" ]]; then
-    bash "$RUN_ALL" --no-quarantine --jobs "$JOBS" --timeout "$TIMEOUT" || rc=$?
-  else
     bash "$RUN_ALL" --no-quarantine --jobs "$JOBS" || rc=$?
-  fi
   if [[ "$rc" -ne 0 ]]; then
     echo "run-all-stress: RED on run $i/$RUNS (exit $rc)"
     fail=1

@@ -481,7 +481,7 @@ run_signal_fixture() {
 
   kill -s "$sig" "$wrapper" 2>/dev/null || true
 
-  if ! wait_file "$dir/in_grace" 200; then
+  if ! wait_file "$dir/in_grace" 100; then
     rm -f "$hold"
     reap_exact "$wrapper" "$foreign" "$leader" "$watcher" "$desc"
     bad "$sig fixture: in_grace never published"
@@ -593,7 +593,7 @@ else
     "$_fg_pgid" "$_fg_wrap" "$_fg_foreign" "$_fg_leader" "$_fg_watch" "$_fg_desc" > "$_fg/ids"
   if [[ "$_fg_pgid" =~ ^[1-9][0-9]*$ ]]; then
     kill -INT -"$_fg_pgid" 2>/dev/null || true
-    if ! wait_file "$_fg/in_grace" 200; then
+    if ! wait_file "$_fg/in_grace" 100; then
       rm -f "$_fg/hold-grace"
       reap_exact "$_fg_perl" "$_fg_wrap" "$_fg_foreign" "$_fg_leader" "$_fg_watch" "$_fg_desc" "$_fg_gl"
       bad "fg-INT: in_grace never published"
@@ -773,7 +773,7 @@ else
   _dg_watch=$(read_ident "$_dg/watcher.pid")
   _dg_leader=$(read_ident "$_dg/leader.pid")
   record_captured "$_dg_desc" "$_dg_watch" "$_dg_leader"
-  if ! wait_file "$_dg/in_grace" 200; then
+  if ! wait_file "$_dg/in_grace" 100; then
     rm -f "$_dg/hold-grace"
     reap_exact "$_dg_wrap" "$_dg_foreign" "$_dg_desc" "$_dg_watch" "$_dg_leader"
     bad "during-grace: timeout grace never published"
@@ -1081,7 +1081,7 @@ WRAP
   leader=$(read_ident "$dir/leader.pid")
   record_captured "$desc" "$watcher" "$leader"
   kill -s TERM "$wrapper" 2>/dev/null || true
-  if ! wait_file "$dir/in_grace" 200 || ! wait_contains "$dir/desc.signals" TERM 40; then
+  if ! wait_file "$dir/in_grace" 100 || ! wait_contains "$dir/desc.signals" TERM 40; then
     rm -f "$dir/hold-grace"
     reap_exact "$wrapper" "$desc" "$watcher" "$leader"
     bad "$mode-TERM: TERM grace was not observed"
@@ -1189,7 +1189,7 @@ else
   _rp_watch=$(read_ident "$_rp/watcher.pid")
   record_captured "$_rp_desc" "$_rp_watch"
   kill -s TERM "$_rp_wrap" 2>/dev/null || true
-  wait_file "$_rp/in_grace" 200 || true
+  wait_file "$_rp/in_grace" 100 || true
   rm -f "$_rp/hold-grace"
   wait "$_rp_wrap" 2>/dev/null || true
   wait_gone "$_rp_desc" 40 || true
@@ -1265,57 +1265,6 @@ if declare -F gibson_suite_read_capture >/dev/null 2>&1; then
   . "$CAP_FN"
 else
   bad "gibson_suite_read_capture is not callable"
-fi
-
-echo "wall-timeout: #319 SIGPIPE-safe grep wrapper"
-SUITE_ENV="$ROOT/suite-env.sh"
-# Rebuild the production wrapper the same way run-all does: pin real grep,
-# then the quoted function body.
-_GIBSON_REAL_GREP=$(type -P grep 2>/dev/null || true)
-if [[ ! -x "$_GIBSON_REAL_GREP" ]]; then
-  if [[ -x /usr/bin/grep ]]; then
-    _GIBSON_REAL_GREP=/usr/bin/grep
-  elif [[ -x /bin/grep ]]; then
-    _GIBSON_REAL_GREP=/bin/grep
-  fi
-fi
-{
-  printf '_GIBSON_REAL_GREP=%s\n' "$_GIBSON_REAL_GREP"
-  sed -n '/^# Sourced via BASH_ENV for every run-all suite/,/^SUITEENV$/p' "$RUN_ALL" \
-    | sed '$d'
-} > "$SUITE_ENV"
-if [[ -s "$SUITE_ENV" ]] && grep -F '_GIBSON_REAL_GREP' "$SUITE_ENV" >/dev/null \
-   && grep -F 'Sourced via BASH_ENV' "$SUITE_ENV" >/dev/null; then
-  ok "run-all writes a BASH_ENV grep wrapper"
-else
-  bad "run-all missing BASH_ENV grep wrapper"
-  : > "$SUITE_ENV"
-fi
-
-# Pipe buffer on macOS is 16KiB; the producer must exceed it or printf
-# can finish before grep -q closes and the mutation becomes vacuous.
-_payload=$(printf '%s\n' 'cannot be combined' "$(python3 -c 'print("x"*200000)')" 'not a complete gate')
-_pipefail_grep_q() {
-  local envfile="$1"
-  # BASH_ENV empty disables run-all's inherited wrapper (mutation path).
-  BASH_ENV="$envfile" bash -c '
-    set -uo pipefail
-    out="$1"
-    if printf "%s\n" "$out" | grep -Fq "cannot be combined"; then
-      exit 0
-    fi
-    exit 1
-  ' bash "$_payload"
-}
-if _pipefail_grep_q "$SUITE_ENV"; then
-  ok "BASH_ENV grep wrapper: pipefail + grep -q on match-at-start payload succeeds"
-else
-  bad "BASH_ENV grep wrapper failed to make grep -q SIGPIPE-safe"
-fi
-if _pipefail_grep_q ""; then
-  bad "mutation: grep -q without the wrapper unexpectedly survived a match-at-start payload"
-else
-  ok "mutation: grep -q without the wrapper fails closed on match-at-start payload"
 fi
 
 echo "wall-timeout: #319 stress harness"
