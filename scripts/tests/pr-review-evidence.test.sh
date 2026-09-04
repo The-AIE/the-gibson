@@ -163,7 +163,7 @@ echo "# AC1 — workflow publish sequence (static + executed publish step with g
 [ -f "$WF" ] && ok "workflow file present" || bad "workflow missing"
 grep -q '^permissions: {}' "$WF" && ok "workflow-level permissions: {}" || bad "no workflow-level permissions: {}"
 grep -q 'gibson:approved-pr-target 308' "$WF" && ok "pull_request_target waiver present" || bad "pull_request_target waiver missing"
-grep -q 'cancel-in-progress: true' "$WF" && ok "concurrency cancel-in-progress" || bad "no cancel-in-progress"
+grep -q '^concurrency:' "$WF" && ok "concurrency declared" || bad "no concurrency block"
 pend=$(grep -n 'Invalidate prior exact-head status' "$WF" | head -1 | cut -d: -f1); evl=$(grep -n 'name: Evaluate current-head review evidence' "$WF" | cut -d: -f1); pub=$(grep -n 'name: Publish exact-head status' "$WF" | cut -d: -f1)
 [ -n "$pend" ] && [ -n "$evl" ] && [ "$pend" -lt "$evl" ] && ok "pending is posted BEFORE evaluation" || bad "pending step not before evaluate"
 [ -n "$pub" ] && [ "$evl" -lt "$pub" ] && ok "publish step after evaluate" || bad "publish step order"
@@ -187,6 +187,34 @@ out=$(: > "$ROOT/gh.log"; GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summa
 [ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary2" && ok "publish: no head at all → nonzero + loud summary line" || bad "publish with no head was silent (rc=$rc)"
 grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (sibling recovery)" || bad "closed missing from pull_request_target types"
 grep -q 'Re-evaluate open siblings' "$WF" && ok "sibling re-evaluation step present" || bad "no sibling re-evaluation step"
+# Codex round 3: serialized repo-wide, never cancelled; no jq flags through gh --jq; sibling step executes.
+grep -q 'gibson:stateful-ci' "$WF" && grep -q 'group: pr-review-evidence-serialized' "$WF" && grep -q 'cancel-in-progress: false' "$WF" && ok "runs serialized repo-wide, never cancelled (stateful-ci)" || bad "concurrency is not a single non-cancelling queue"
+grep -q 'cancel-in-progress: true' "$WF" && bad "cancel-in-progress: true present (cross-PR race / skipped-run cancel)" || ok "no cancel-in-progress: true"
+grep -qE -- '--jq[[:space:]]+--arg' "$WF" && bad "gh api --jq given jq flags (gh rejects them)" || ok "no jq flags passed through gh api --jq"
+sib=$(grep -n 'name: Re-evaluate open siblings' "$WF" | cut -d: -f1)
+awk -v s="$sib" 'NR>=s && /run: \|/{f=1;next} f && /^      - name:/{exit} f{sub(/^          /,""); print}' "$WF" > "$ROOT/sibling.sh"
+# gh stub: GET .../pulls returns two open PRs at HEAD (#1 = the closing PR, #2 = survivor) and one ancestor PR at PREV; POST captures state.
+cat > "$ROOT/bin/gh" <<GHSTUB
+#!/bin/sh
+case "\$*" in
+  *"--method POST"*) for a in "\$@"; do case "\$a" in state=*) echo "\$a" >> "\$GH_LOG";; esac; done ;;
+  *"/pulls?"*) printf '[{"number":1,"state":"open","head":{"sha":"$HEAD"}},{"number":2,"state":"open","head":{"sha":"$HEAD"}},{"number":3,"state":"open","head":{"sha":"$PREV"}},{"number":4,"state":"closed","head":{"sha":"$HEAD"}}]' ;;
+  *) echo "stub: unexpected gh \$*" >&2; exit 9 ;;
+esac
+GHSTUB
+chmod +x "$ROOT/bin/gh"
+printf '#!/bin/sh\necho "eval-args: $*" >> "$GH_LOG"\nprintf %%s "{\\"state\\":\\"success\\",\\"reason\\":\\"pass\\",\\"detail\\":\\"stub\\"}"\n' > "$ROOT/bin/eval-stub"; chmod +x "$ROOT/bin/eval-stub"
+: > "$ROOT/gh.log"; : > "$ROOT/summary3"
+GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary3" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD PR_NUMBER=1 TARGET_URL=http://t REVIEW_EVIDENCE_EVAL="$ROOT/bin/eval-stub" PATH="$ROOT/bin:$PATH" bash "$ROOT/sibling.sh" >"$ROOT/sib.out" 2>&1; rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'eval-args: .* --pr 2 ' "$ROOT/gh.log" && ! grep -q -- '--pr 3 ' "$ROOT/gh.log" && ! grep -q -- '--pr 4 ' "$ROOT/gh.log" && [ "$(grep -c '^state=success' "$ROOT/gh.log")" -eq 1 ] && grep -q 'sibling #2 re-evaluated: success' "$ROOT/summary3"; then ok "sibling step executes: re-evaluates only the open survivor at the same head (#2), not the ancestor (#3) or closed (#4)"; else bad "sibling step: rc=$rc log=$(cat "$ROOT/gh.log" | tr '\n' ' ') out=$(tail -3 "$ROOT/sib.out" | tr '\n' ' ')"; fi
+: > "$ROOT/gh.log"; : > "$ROOT/summary3"
+printf '#!/bin/sh\ncase "$*" in *"/pulls?"*) printf "[]";; *) exit 9;; esac\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
+GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary3" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD PR_NUMBER=1 TARGET_URL=http://t PATH="$ROOT/bin:$PATH" bash "$ROOT/sibling.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -q 'no open sibling' "$ROOT/summary3" && ok "sibling step: no siblings → clean exit with summary line" || bad "sibling step with no siblings rc=$rc"
+printf '#!/bin/sh\ncase "$*" in *"/pulls?"*) echo "<html>";; *) exit 9;; esac\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
+GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary3" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD PR_NUMBER=1 TARGET_URL=http://t PATH="$ROOT/bin:$PATH" bash "$ROOT/sibling.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "sibling step: non-JSON sibling list fails closed (rc=$rc)" || bad "sibling step accepted non-JSON"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in state=*) echo "$a" >> "$GH_LOG";; esac; done\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
 rs=$(grep -n 'name: Resolve current pull-request head' "$WF" | cut -d: -f1); sed -n "${rs},${pend}p" "$WF" | grep -q 'continue-on-error: true' && sed -n "${rs},${pend}p" "$WF" | grep -q '::notice::' && ok "resolve step: continue-on-error with visible notice" || bad "resolve step failure would skip publish"
 grep -q 'may not be merged' "$ROOT/summary" && ok "non-success writes the merge-block line to the step summary" || bad "summary line missing"
 if command -v actionlint >/dev/null 2>&1; then

@@ -23,19 +23,19 @@ on:
 
 permissions: {}
 
+# gibson:stateful-ci — runs are SERIALIZED repo-wide and never cancelled.
+# The published result is keyed by commit SHA, but comment/review events carry
+# no SHA, so runs cannot be grouped by head. Grouping by PR number let two PRs
+# sharing a head race: A evaluates H, B opens at H and publishes
+# `ambiguous-head`, then A's stale `success` lands last and authorizes both
+# (Codex round 3, finding 1). One global queue means every run sees the state
+# left by the previous one, and the last publish is computed from the latest
+# state. No cancel-in-progress: a cancelled run publishes nothing, and a run
+# skipped by an `if:` would still cancel a live one (Codex round 1, finding 2).
+# Runs take about a minute; queueing is the price of a correct status.
 concurrency:
-  # Each run re-evaluates the FULL current PR state, so a superseded run's
-  # result is subsumed by the next one on the same PR; cancelling loses nothing
-  # — PROVIDED the replacement run actually evaluates. Codex review of #315
-  # (finding 2): a run whose job is skipped by an `if:` still cancels the
-  # in-flight run in its group, and then publishes nothing, leaving a prior
-  # `success` standing. So there is deliberately NO event narrowing below:
-  # every review submission and every PR comment re-evaluates (cheap: one
-  # status POST + a few API reads). The only guard is "this comment is on a
-  # pull request", and a plain issue never shares a number with a PR, so that
-  # skipped run can cancel nothing.
-  group: pr-review-evidence-${{ github.event.pull_request.number || github.event.issue.number }}
-  cancel-in-progress: true
+  group: pr-review-evidence-serialized
+  cancel-in-progress: false
 
 jobs:
   review-evidence:
@@ -188,25 +188,38 @@ jobs:
         # A commit status is keyed by SHA. When one of two PRs sharing a head
         # closes, the survivor's `ambiguous-head` verdict would never recover
         # on its own (Codex round 2, finding 4): re-run it here.
-        if: always() && env.EVENT_ACTION == 'closed' && steps.pull.outputs.head_sha != ''
+        # Uses the event head as fallback (Codex round 3, finding 3): a closed
+        # event always carries the head, even when the API resolve failed.
+        if: always() && env.EVENT_ACTION == 'closed' && (steps.pull.outputs.head_sha != '' || env.EVENT_HEAD_SHA != '')
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.pull.outputs.head_sha }}
-          PR_NUMBER: ${{ steps.pull.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pull.outputs.head_sha || env.EVENT_HEAD_SHA }}
+          PR_NUMBER: ${{ steps.pull.outputs.pr_number || github.event.pull_request.number }}
           TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2016  # $h/$me are jq variables, not shell
-          siblings=$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/pulls?per_page=100" \
-            --jq --arg h "$HEAD_SHA" --arg me "$PR_NUMBER" \
-            '.[] | select(.state=="open" and .head.sha==$h and (.number|tostring)!=$me) | .number')
+          # `gh api --jq` takes one expression and no jq flags (Codex round 3,
+          # finding 2): filter in node instead.
+          siblings=$(gh api --paginate "repos/$GH_REPO/commits/$HEAD_SHA/pulls?per_page=100" \
+            | HEAD_SHA="$HEAD_SHA" PR_NUMBER="$PR_NUMBER" node -e '
+              let s = ""; process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+                const h = (process.env.HEAD_SHA || "").toLowerCase(); const me = String(process.env.PR_NUMBER);
+                let list; try { list = JSON.parse(s); } catch { process.exit(3); }
+                if (!Array.isArray(list)) process.exit(3);
+                process.stdout.write(list
+                  .filter((p) => p && p.state === "open" && String((p.head || {}).sha || "").toLowerCase() === h && String(p.number) !== me)
+                  .map((p) => p.number).join("\n"));
+              });')
           if [ -z "$siblings" ]; then
             echo "::notice::no open sibling PR shares head $HEAD_SHA; nothing to re-evaluate"
             echo "- closed: no open sibling shares this head" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # REVIEW_EVIDENCE_EVAL lets the test suite substitute a stub evaluator.
+          eval_cmd="${REVIEW_EVIDENCE_EVAL:-node scripts/pr-review-evidence.mjs}"
           for n in $siblings; do
-            out=$(node scripts/pr-review-evidence.mjs --repo "$GH_REPO" --pr "$n" \
+            # shellcheck disable=SC2086  # eval_cmd is a command with args, split on purpose
+            out=$($eval_cmd --repo "$GH_REPO" --pr "$n" \
               --expected-head "$HEAD_SHA" --config config/review-evidence.v1.json || true)
             state=$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).state||"failure")}catch{process.stdout.write("failure")}})')
             desc=$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s);process.stdout.write(((r.reason||"api-error")+(r.detail?": "+r.detail:"")).slice(0,140))}catch{process.stdout.write("api-error: evaluator-crashed")}})')

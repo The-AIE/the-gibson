@@ -105,7 +105,12 @@ When activating, bind the required context to the GitHub Actions app so another
 write-capable integration cannot set it: pass `checks: [{context: "review-evidence",
 app_id: 15368}]` in the branch-protection payload instead of a bare context string.
 
-**Publish sequence.** Resolve head via API → POST `pending` first → evaluate → publish
-in an `if: always()` step. A crash or timeout publishes `failure`; a cancellation
-publishes `pending`. A prior `success` never survives a re-evaluation (the
-conference-os #1458 fail-open window).
+**Publish sequence.** Resolve head via API (event head as fallback) → POST `pending`
+first → evaluate → publish in an `if: always()` step. A crash or timeout publishes
+`failure`. A prior `success` never survives a re-evaluation (the conference-os #1458
+fail-open window). Runs are **serialized repo-wide and never cancelled**
+(`# gibson:stateful-ci`): the result is keyed by commit SHA but comment and review
+events carry no SHA, so per-PR groups let two PRs sharing a head race and the stale
+`success` land last. One queue means the last publish is computed from the latest
+state. On `closed`, open siblings sharing the head are re-evaluated so an
+`ambiguous-head` verdict recovers.
