@@ -114,10 +114,14 @@ the file. Both are deliberately absent (the first was proven live on #315 before
 removed); a review submitted with no other activity is picked up by the hourly sweep.
 
 **Status churn is a cap.** GitHub allows 1,000 statuses per commit and context; after
-that every write fails and whatever was last written freezes. So scheduled sweeps stamp
-no `pending` and write only when the state or description differs from the one on the
-head, and every status write is checked: a failed write is an error that makes the job
-red and is never counted as published.
+that every write fails and whatever was last written freezes. So `pending` is stamped
+only on the event's own head (never on every open head, which let a fork author pace
+edits to burn a quiet head's budget), every other head is written only when its state
+or description differs from the one already on it, scheduled sweeps stamp nothing, and
+every status write is checked: a failed write, including a failed pending stamp, makes
+the job red and is never counted as published. Residual: a scheduled sweep that crashes
+or times out before publishing leaves the previous status until the next successful
+sweep, at most an hour.
 
 **Every run is a full-state sweep.** Stamp `pending` on every open PR head FIRST, before
 any checkout or tool setup → evaluate every open PR at its current head (`--sweep`) →

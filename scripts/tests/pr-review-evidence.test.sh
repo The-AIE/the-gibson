@@ -241,7 +241,7 @@ H2=cccccccccccccccccccccccccccccccccccccccc
 envrun() { ( cd "$WD" && GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" "$@" ); }
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 0 ] && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 2 ] && grep -q "^$H2 pending" "$ROOT/gh.log" && ok "pending step: stamps pending on EVERY open head (2 of 2)" || bad "pending step: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+[ "$rc" -eq 0 ] && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] && grep -q "^$HEAD pending" "$ROOT/gh.log" && [ "$(wc -l < "$WD/heads.txt" | tr -d ' ')" -eq 2 ] && ok "pending step: stamps pending ONLY on the event head (2 heads listed, 1 stamped — churn cap)" || bad "pending step: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_LIST_FAIL=1 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q "^1 $HEAD" "$WD/heads.txt" && grep -q 'listing failed' "$ROOT/summary" && ok "pending step: listing fails → nonzero, event head recorded for fail-closed publish" || bad "pending step listing failure: rc=$rc heads=$(cat "$WD/heads.txt")"
@@ -249,21 +249,21 @@ GH_LIST_FAIL=1 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pen
 printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"
 printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"failure","reason":"same-vendor-reviewer","description":"same-vendor-reviewer: grok"}\n' "$HEAD" "$FP" "$H2" > "$WD/results.jsonl"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: every sweep line published; job green when the EVENT's PR is not failing" || bad "publish normal: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=2 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=2 EVENT_HEAD_SHA=$H2 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q "^$H2 failure" "$ROOT/gh.log" && ok "publish: job red when the EVENT's PR failed closed" || bad "publish event-fail: rc=$rc"
-: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 CANCELLED=true bash "$ROOT/publish.sh" >/dev/null 2>&1
+: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=true bash "$ROOT/publish.sh" >/dev/null 2>&1
 [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: cancelled → every head pending (supersession is not a verdict)" || bad "publish cancelled: $(tr '\n' ' ' < "$ROOT/gh.log")"
 # publish: sweep produced nothing
 rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep never ran → failure on EVERY stamped head, never a stale success" || bad "publish no-results: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 printf '{"number":null,"headSha":"","state":"failure","reason":"api-error","detail":"listing"}\n' > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -eq 2 ] && ok "publish: sweep listing fault → failure on every stamped head" || bad "publish listing-fault: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$WD/heads.txt"; rm -f "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary" && ok "publish: nothing known at all → nonzero + loud summary line" || bad "publish nothing-known was silent (rc=$rc)"
 # Codex round 5: event head always joins the stamped set; unstamped-but-unverdicted heads fail closed; job has no if:.
 H3=dddddddddddddddddddddddddddddddddddddddd
@@ -271,7 +271,7 @@ H3=dddddddddddddddddddddddddddddddddddddddd
 GH_LIST="$(printf '1 %s\n' "$HEAD")" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^3 $H3" "$WD/heads.txt" && grep -q "^$H3 pending" "$ROOT/gh.log" && ok "pending step: event head not in the listing is still stamped and recorded" || bad "event head not added: rc=$rc heads=$(tr '\n' ' ' < "$WD/heads.txt")"
 printf '1 %s\n3 %s\n' "$HEAD" "$H3" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
-GH_FP="$FP" envrun env EVENT_PR_NUMBER=3 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+GH_FP="$FP" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q "^$H3 failure" "$ROOT/gh.log" && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: a stamped head with no sweep verdict is published failure (never left pending/stale)" || bad "unverdicted head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 awk '/^jobs:/{f=1} f && /^    if:/{print}' "$WF" | grep -q . && bad "job-level if: present (a skipped run still replaces the queued one)" || ok "no job-level if: — every event runs the sweep"
 # Codex round 6: trigger trust boundary, pending before any checkout, publish freshness re-check.
@@ -291,13 +291,13 @@ GHSTUB
 chmod +x "$ROOT/bin/gh"
 FP='2026-09-04T12:00:00Z|h|b|3|0|2'
 printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
-: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: fingerprint unchanged → success written" || bad "publish fresh: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP='2026-09-04T12:05:00Z|h|b|4|0|2' envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP='2026-09-04T12:05:00Z|h|b|4|0|2' envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ! grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: state moved since evaluation → pending, never the stale success" || bad "publish stale: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP='unavailable' envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
+: > "$ROOT/gh.log"; GH_FP='unavailable' envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: fingerprint re-read fails → pending (fail closed)" || bad "publish fp-unavailable: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass","fingerprint":""}\n' "$HEAD" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass","fingerprint":""}\n' "$HEAD" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; GH_FP="$FP" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: success line without a fingerprint → pending" || bad "publish no-fp: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 # Codex round 7: status-churn cap. No workflow_dispatch; hourly schedule; scheduled runs stamp no pending
 # and write only on change; every status POST is checked and a failure makes the job red.
@@ -323,14 +323,21 @@ printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","s
 [ "$rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] && ok "schedule: unchanged verdict → NO status write (churn cap)" || bad "schedule unchanged wrote: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 : > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="pending|UNREVIEWED: no receipt at head" envrun env IS_SCHEDULE=true EVENT_PR_NUMBER='' CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "schedule: changed verdict → written" || bad "schedule changed not written: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "event run: always writes (pending was stamped first)" || bad "event run skipped a write: rc=$rc"
-: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'status write FAILED' "$ROOT/summary" && ok "publish: a failed status POST is an error and the job is red (never 'published')" || bad "failed POST ignored: rc=$rc summary=$(tr '\n' ' ' < "$ROOT/summary")"
 : > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_LIST="$(printf '1 %s\n' "$HEAD")" GH_POST_FAIL=1 envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q 'pending stamp FAILED' "$ROOT/summary" && ok "pending step: a failed stamp is an error, not a silent skip" || bad "failed pending stamp ignored: rc=$rc"
+# Codex round 8: event runs write non-event heads only on change; a failed pending step makes the job red.
+printf '1 %s\n2 %s\n' "$HEAD" "$H2" > "$WD/heads.txt"
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n{"number":2,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" "$H2" "$FP" > "$WD/results.jsonl"
+: > "$ROOT/gh.log"; GH_FP="$FP" GH_CUR="success|pass: devin" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && ! grep -q "^$H2 " "$ROOT/gh.log" && ok "event run: the event head is written; an unchanged NON-event head is not (no amplification)" || bad "event-run amplification: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+: > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_FP="$FP" GH_CUR="" envrun env IS_SCHEDULE=false EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD HEADS_OUTCOME=failure CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'pending stamp step FAILED' "$ROOT/summary" && ok "publish: a failed pending step (continue-on-error) still makes the job red" || bad "HEADS_OUTCOME failure ignored: rc=$rc"
 printf 'garbage not json\n' > "$WD/results.jsonl"; printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; : > "$ROOT/gh.log"
-envrun env EVENT_PR_NUMBER=1 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -ge 1 ] && ok "publish: unparseable sweep output → failure, never success" || bad "publish garbage: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 if command -v actionlint >/dev/null 2>&1; then
   out=$(actionlint "$WF" 2>&1); [ $? -eq 0 ] && ok "actionlint clean" || bad "actionlint: $out"
