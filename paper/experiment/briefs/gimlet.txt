@@ -1,0 +1,36 @@
+You are implementing one change in an existing Next.js + Prisma repository.
+
+Working directory (the ONLY tree you may read or modify): /work
+Dependencies are already installed (node_modules is present). Do not reinstall.
+
+---- TASK ----
+
+# Data integrity: materializeEventHeaderNav/materializeEventFooterNav can commit a partial set on validation failure
+
+## Found by CodeRabbit on PR #1236 (footer editor), confirmed to also apply to the already-merged header version
+
+Both `materializeEventHeaderNav` (`src/lib/nav-items-actions.ts`, merged via PR #1234 / #1223) and `materializeEventFooterNav` (PR #1236 / #1232, not yet merged) run their per-item validation (label length, `validateNavHref`) *inside* the `prisma.$transaction(async (tx) => {...})` callback, interleaved with `tx.navItem.create()` calls in a loop — validating item N only right before creating it.
+
+**The bug:** a Prisma interactive transaction only rolls back when the callback *throws*. Returning `{ ok: false, error: ... }` from inside the callback is a normal return — Prisma commits everything written so far. If item 3 of 7 fails validation, items 1–2 are already `tx.navItem.create()`d and get permanently persisted, even though the function reports failure to the caller.
+
+**Consequences:**
+1. The public override flips from `null` (code defaults) to a **partial**, incomplete set of rows — silently changing the live public header/footer to something the organizer never intended to save.
+2. Every retry then fails, because the `existingCount > 0` race-guard now matches the partially-committed rows — the organizer is stuck with no way to fix it themselves.
+
+## Fix
+Run full validation over every item first (using only in-memory data, zero writes), and only after everything validates, do a second pass that purely creates rows (no validation, no early-return risk inside it). Already applied to the footer version in PR #1236 before merge. The header version (`materializeEventHeaderNav`, live on `main` since PR #1234) still needs the same fix — tracked here, PR incoming.
+
+## Scope
+- Fix `materializeEventHeaderNav` in `src/lib/nav-items-actions.ts` using the same reorder-to-validate-first pattern.
+- No schema change. No behavior change for already-valid inputs — this only changes what happens on invalid ones (clean rejection instead of partial commit).
+- Add a regression test: a payload where a later item fails validation must result in zero `NavItem` rows created.
+
+---- DONE WHEN ----
+
+Your own judgment that the task is complete, AND these are green in /work:
+  npx prisma generate
+  npm run typecheck:ci
+  npm test   (where applicable)
+
+Do all work in /work. Do not create branches, commits, or pushes.
+When finished, state plainly what you changed and what you decided.

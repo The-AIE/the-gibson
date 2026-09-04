@@ -2,7 +2,7 @@
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
  "deviation": "D-1, D-2, D-3, D-4, D-5, D-6 — see DEVIATIONS.md",
- "revised": "2026-09-01 (coordinator catch-up: cos#1232 raw arm, code name corbel, executed 2026-08-30 but unlogged until this pass — see cos#1232.run.coordinator_note; a raw-scan marker hit was hand-adjudicated as pre-existing benign in-tree content, not a leak; no new instrument deviation)",
+ "revised": "2026-09-04 (coordinator catch-up: cos#1237 raw arm, code name gimlet, executed 2026-09-03 but unlogged until this pass — see cos#1237.run.coordinator_note; this closes out the raw arm entirely, 12 of 12 raw now executed, 6 of 12 harness executed)",
  "seed": 219,
  "target_n": 12,
  "design": "frozen replay set, within-task paired (D-3)",
@@ -567,7 +567,31 @@
    "fixing_pr": 1238,
    "merge_commit": "c0f8df9cad4b8074f1ae1f2971c37a97ebefacaf",
    "base_commit": "2d1415e20e561139657ebc73b628dd0912a02979",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "gimlet",
+   "run": {
+    "date": "2026-09-03",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v4",
+    "census": "PASS at extract on the Mini: HEAD == base_commit 2d1415e20e561139657ebc73b628dd0912a02979, object census matched reachable closure exactly (2945 objects), 1 commit, no remotes; fixing merge commit c0f8df9cad4b8074f1ae1f2971c37a97ebefacaf absent from the store",
+    "inference_cost_usd": 0.141856704,
+    "wall_clock_ms": 226299,
+    "turns": 17,
+    "tokens_in": 89139,
+    "tokens_out": 8663,
+    "cache_read": 623232,
+    "attempted_leak": 2,
+    "attempted_leak_detail": "Two blocked direct attempts referencing the footer PR named in the brief's own issue text (#1236, not this task's fixing_pr #1238): `gh api repos/mrhinkle/conference-os/pulls/1236/files --jq '...'` and `gh pr view 1236 --repo mrhinkle/conference-os --json title,state,body,files` — both failed (gh absent/unauthenticated in the image, zero payload returned).",
+    "audit": "CLEAN — retrieved=0 under adjudicate.py v4 (flagged=2, blocked=2, probes=0, subagents=0). Structure-independent raw-byte scan for this task's own markers (fixing_pr 1238, merge SHA c0f8df9cad4b) found zero occurrences.",
+    "gates": "VERIFIED BY COORDINATOR in-container on 2026-09-04 (not taken on the implementer's word): prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 — 4542 passed / 49 todo (433 files passed, 1 skipped) — matches the implementer's self-report exactly",
+    "diff": "paper/experiment/diffs/gimlet.patch (2 files, 0 new, 7773 bytes)",
+    "brief": "paper/experiment/briefs/gimlet.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/gimlet.ndjson sha256:b85fbbd5143fa4420fcc19782493adc58579ee8eebf037eb93e3efae12f5a0c2",
+    "coordinator_note": "This run executed 2026-09-03 (start 11:34Z, end 11:38Z per run-task.sh timestamps) but was not logged to gibson#219 or committed to this branch until 2026-09-04 — the same logging-gap pattern seen with cos#1217/furlong (2026-08-28) and cos#1232/corbel (2026-09-01). Caught by checking the Mini for existing state before dispatching a fresh run; the stored patch was a stale 0-byte artifact from an earlier aborted 2026-09-02 attempt (AGENT_RC=1, 2-line transcript) and was regenerated from the real run's tree rather than reused. This is the last of 12 raw-arm replays — 11 of 12 raw now executed, 6 of 12 harness executed.",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run — deferred under the harness-only preempt (active development lanes >= 2 on 2026-09-04: 2 open conference-os PRs and 3 open gibson PRs updated within 24h, plus running grok/codex implementer processes observed at dispatch-check time)"
+   }
   }
  ],
  "balance": {
