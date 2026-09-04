@@ -107,6 +107,14 @@ run_sensor "$TMP/mixed.json" "$TMP/cfg.json"
 [[ "$RC" -eq 0 ]] && ok "in-progress and non-main push runs ignored" || bad "mixed rc=$RC: $OUT"
 echo "$OUT" | grep -q "main: 0/12 red" && ok "main counts only main pushes" || bad "main count wrong: $OUT"
 
+# 6b. order-independent: 70 old main reds listed FIRST, 60 newest green after;
+#     the window must be the newest 60 by start time, not the first 60 lines.
+# shellcheck disable=SC2046
+gen_runs $(rep 70 push:main:failure:300) $(rep 30 push:main:success:300) $(rep 30 pull_request:feat:success:300) >"$TMP/shuffled.json"
+run_sensor "$TMP/shuffled.json" "$TMP/cfg.json"
+[[ "$RC" -eq 0 ]] && ok "window is newest-first by start time regardless of input order" || bad "shuffled rc=$RC: $OUT"
+echo "$OUT" | grep -q "main: 0/30 red" && ok "old reds outside the window are not measured" || bad "stale window: $OUT"
+
 # 7. malformed input / bad config / unknown flag -> exit 2
 echo '{"nope":1}' >"$TMP/bad.json"
 run_sensor "$TMP/bad.json" "$TMP/cfg.json"

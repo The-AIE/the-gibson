@@ -140,11 +140,12 @@ jobs:
           echo "GIT_COMMITTER_NAME=gibson-ci"         >> "$GITHUB_ENV"
           echo "GIT_COMMITTER_EMAIL=ci@gibson.invalid" >> "$GITHUB_ENV"
 
-      # Docs-only fast path. When every changed file is explanation or memory
-      # (docs/, memory/, paper/, root *.md other than AGENTS.md/README.md) the
-      # scripts cannot have changed, so only the authority/doctrine sensors
-      # that read prose need to run. Fails closed: any file outside that set,
-      # an unknown base, or an empty diff => the full gate.
+      # Docs-only fast path. When every changed file is Markdown explanation or
+      # memory (docs/, memory/, paper/, root *.md other than AGENTS.md/README.md/
+      # CLAUDE.md) the scripts cannot have changed, so only the authority/doctrine
+      # sensors that read prose need to run. Fails closed: any other file, an
+      # unknown base, or an empty diff => the full gate. --no-renames so a
+      # script renamed into docs/ still lists its source path (=> full).
       - name: Classify change
         id: classify
         env:
@@ -153,14 +154,14 @@ jobs:
           set -euo pipefail
           mode=full
           if [ -n "${BASE_SHA:-}" ] && git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            changed=$(git diff --name-only "${BASE_SHA}...HEAD" -- 2>/dev/null || git diff --name-only "${BASE_SHA}" HEAD --)
+            changed=$(git diff --no-renames --name-only "${BASE_SHA}...HEAD" -- 2>/dev/null || git diff --no-renames --name-only "${BASE_SHA}" HEAD --)
             if [ -n "$changed" ]; then
               mode=docs
               # git quotes unusual paths ("..."); those hit the default => full.
               set -f
               for f in $changed; do
                 case "$f" in
-                  docs/*|memory/*|paper/*) ;;
+                  docs/*.md|memory/*.md|paper/*.md) ;;
                   AGENTS.md|README.md|CLAUDE.md) mode=full ;;
                   */*) mode=full ;;
                   *.md) ;;

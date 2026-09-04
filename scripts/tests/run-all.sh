@@ -2018,7 +2018,29 @@ SUITE_CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-runall-suites.XXXXXX") || 
   echo "run-all.sh: mktemp for suite captures failed" >&2
   exit 2
 }
-trap 'rm -rf "$SUITE_CAPTURE_DIR"' EXIT
+# On EXIT/INT/TERM/HUP stop any suites still running (whole process trees —
+# a suite may have forked node/docker/git children) before removing captures,
+# so a cancelled gate does not leave orphans burning the runner.
+suite_pids=()
+kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+  kill -TERM "$1" 2>/dev/null || true
+}
+run_all_cleanup() {
+  local p
+  for p in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+    kill -0 "$p" 2>/dev/null && kill_tree "$p"
+  done
+  for p in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+    wait "$p" 2>/dev/null || true
+  done
+  rm -rf "$SUITE_CAPTURE_DIR"
+}
+trap 'run_all_cleanup' EXIT
+trap 'run_all_cleanup; trap - INT; kill -INT $$' INT
+trap 'run_all_cleanup; trap - TERM; kill -TERM $$' TERM
+trap 'run_all_cleanup; trap - HUP; kill -HUP $$' HUP
 
 run_suite_captured() {
   # $1 suite path, $2 capture prefix
@@ -2048,13 +2070,26 @@ for suite in scripts/tests/*.test.sh; do
   SELECTED_SUITES="$SELECTED_SUITES $suite"
 done
 
+# Bash 3.2 has no `wait -n`, so reap *any* finished child by polling: a slot
+# frees as soon as its suite ends, not when the oldest one does.
+reap_finished_suites() {
+  local p live=()
+  for p in "${suite_pids[@]+"${suite_pids[@]}"}"; do
+    if kill -0 "$p" 2>/dev/null; then
+      live+=("$p")
+    else
+      wait "$p" 2>/dev/null
+    fi
+  done
+  suite_pids=("${live[@]+"${live[@]}"}")
+}
+
 echo "  (running up to $JOBS suites concurrently)"
-suite_pids=()
 for suite in $SELECTED_SUITES; do
   [[ -x "$suite" ]] || continue
   while [[ "${#suite_pids[@]}" -ge "$JOBS" ]]; do
-    wait "${suite_pids[0]}" 2>/dev/null
-    suite_pids=("${suite_pids[@]:1}")
+    reap_finished_suites
+    [[ "${#suite_pids[@]}" -ge "$JOBS" ]] && sleep 0.2
   done
   run_suite_captured "$suite" "$SUITE_CAPTURE_DIR/$(basename "$suite")" &
   suite_pids+=("$!")
