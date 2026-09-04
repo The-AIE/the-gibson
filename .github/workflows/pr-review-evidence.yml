@@ -7,29 +7,33 @@ name: PR review evidence
 # repository to publish the `review-evidence` commit status on PR heads.
 # gibson:approved-pr-target 308
 #
-# Design (after four adversarial review rounds on #315): every run is a FULL
-# STATE SWEEP. It stamps `pending` on every open PR head first, evaluates
-# every open PR at its current head with trusted code, then ALWAYS publishes a
-# final state for each. Consequences that closed real findings:
-#   - a queued run that GitHub replaces is harmless: the next run re-derives
-#     and republishes every head (no per-PR identity in the run);
-#   - a PR that closes needs no special recovery: its former sibling is just
-#     another open PR in the next sweep;
-#   - a crash, cancel, or timeout can never leave a prior `success` standing:
-#     the pending stamp landed first and the publish step runs on always().
+# TRIGGERS ARE A TRUST BOUNDARY (Codex round 6, finding 4). Only events whose
+# workflow file GitHub reads from the DEFAULT branch may appear here:
+# pull_request_target, issue_comment, schedule, workflow_dispatch.
+# `pull_request_review` is a pull_request-class event and runs the workflow
+# file from the PR's merge commit — a collaborator could edit this file in a
+# PR and use its status-write token — so it is deliberately absent. Reviews
+# are picked up by the next comment, push, or the 10-minute schedule sweep.
+#
+# Design (after six adversarial review rounds on #315): every run is a FULL
+# STATE SWEEP. It stamps `pending` on every open PR head FIRST (before any
+# checkout), evaluates every open PR at its current head with trusted code,
+# then ALWAYS publishes a final state for each; a `success` is re-checked
+# against a fresh state fingerprint right before it is written.
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review, edited, closed]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
   issue_comment:
     types: [created, edited, deleted]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 permissions: {}
 
 # gibson:stateful-ci — runs are SERIALIZED repo-wide and never cancelled.
-# The published result is keyed by commit SHA, but comment/review events carry
-# no SHA, so runs cannot be grouped by head, and per-PR groups let two PRs
+# The published result is keyed by commit SHA, but comment events carry no
+# SHA, so runs cannot be grouped by head, and per-PR groups let two PRs
 # sharing a head race (Codex round 3). One queue plus a full sweep means the
 # last publish is always computed from the latest state. No cancel-in-progress:
 # a cancelled run publishes nothing, and a skipped run would still cancel a
@@ -63,26 +67,17 @@ jobs:
       EVENT_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
       EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
-      - name: Checkout trusted default branch (never PR code)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          fetch-depth: 1
-          persist-credentials: false
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: 22 }
-
-      - name: Stamp pending on every open PR head (FIRST)
+      - name: Stamp pending on every open PR head (FIRST, before any checkout)
         id: heads
         # continue-on-error so a listing failure still reaches the publish step,
         # which then fails closed on whatever head it knows (CONVENTIONS 3.5).
+        # Nothing precedes this step (Codex round 6, finding 5): a checkout or
+        # tool-setup failure must not leave a prior success unstamped.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          : > heads.txt
           listed=0
           if gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
               --jq '.[] | "\(.number) \(.head.sha)"' > heads.txt; then
@@ -109,6 +104,18 @@ jobs:
           done < heads.txt
           echo "pending stamped on $stamped open PR head(s)"
           [ "$listed" -eq 1 ] || exit 1
+
+      - name: Checkout trusted default branch (never PR code)
+        if: always()
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - if: always()
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22 }
 
       - name: Evaluate every open PR at its current head (sweep)
         id: sweep
@@ -141,6 +148,15 @@ jobs:
               -f state="$2" -f context="$STATUS_CONTEXT" \
               -f description="${3:0:140}" -f target_url="$TARGET_URL" >/dev/null
           }
+          # A `success` computed minutes ago may be stale: a fail receipt, a
+          # retarget, or a same-head sibling can have arrived since (Codex
+          # round 6, finding 2). Re-read the PR's state fingerprint right
+          # before writing; if it moved, write pending — the next sweep
+          # (already queued by that very event) recomputes it.
+          fingerprint() { # pr-number -> "updated_at|head|base|comments|review_comments|commits"
+            gh api "repos/$GH_REPO/pulls/$1" \
+              --jq '"\(.updated_at)|\(.head.sha)|\(.base.sha)|\(.comments)|\(.review_comments)|\(.commits)"' 2>/dev/null || echo "unavailable"
+          }
           event_fail=0
           # The sweep never ran or produced nothing: fail closed on every head we
           # stamped (or the event head). A cancellation is not a verdict: pending.
@@ -159,6 +175,7 @@ jobs:
             fi
             exit 1
           fi
+          : > published.txt
           while IFS= read -r line; do
             [ -n "$line" ] || continue
             # shellcheck disable=SC2016  # the $ is a JS regex anchor inside the node program
@@ -169,25 +186,30 @@ jobs:
                   const st = ["success", "pending", "failure"].includes(r.state) ? r.state : "failure";
                   const sha = /^[0-9a-f]{40}$/.test(String(r.headSha || "")) ? r.headSha : "";
                   // Unit separator, not tab: bash `read` collapses empty tab-separated fields.
-                  process.stdout.write([r.number ?? "", sha, st, String(r.description || r.reason || "api-error").replace(/[\r\n\t\x1f]+/g, " ")].join("\x1f"));
-                } catch { process.stdout.write("\x1f\x1ffailure\x1fapi-error: unparseable sweep line"); }
+                  process.stdout.write([r.number ?? "", sha, st, String(r.description || r.reason || "api-error").replace(/[\r\n\t\x1f]+/g, " "), String(r.fingerprint || "")].join("\x1f"));
+                } catch { process.stdout.write("\x1f\x1ffailure\x1fapi-error: unparseable sweep line\x1f"); }
               });')
-            IFS=$'\x1f' read -r n sha state desc <<< "$parsed"
+            IFS=$'\x1f' read -r n sha state desc fp <<< "$parsed"
             if [ -z "$sha" ]; then
               echo "::error::sweep line without a head SHA: $desc"
               echo "- sweep line without a head SHA: $desc" >> "$GITHUB_STEP_SUMMARY"
               event_fail=1; continue
             fi
             if [ "${CANCELLED}" = "true" ]; then state=pending; desc="SUPERSEDED: cancelled before a verdict"; fi
+            if [ "$state" = "success" ]; then
+              now=$(fingerprint "$n")
+              if [ -z "$fp" ] || [ "$now" != "$fp" ]; then
+                state=pending; desc="UNREVIEWED: state changed during evaluation; re-evaluating on the next sweep"
+              fi
+            fi
             publish "$sha" "$state" "$desc"
+            echo "$sha" >> published.txt
             echo "- PR $n @ ${sha:0:7}: \`$state\` — $desc" >> "$GITHUB_STEP_SUMMARY"
             if [ -n "${EVENT_PR_NUMBER:-}" ] && [ "$n" = "$EVENT_PR_NUMBER" ] && [ "$state" = "failure" ]; then event_fail=1; fi
-            echo "$sha" >> published.txt
           done < results.jsonl
           # Every head we stamped pending must have received a verdict; a head
           # the sweep did not cover (listing skew, a PR closed mid-run) must not
           # be left pending-or-stale — fail it closed (Codex round 5, finding 3).
-          touch published.txt
           while read -r n sha; do
             [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || continue
             if ! grep -q "^$sha\$" published.txt; then
