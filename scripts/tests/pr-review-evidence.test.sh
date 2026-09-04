@@ -121,10 +121,22 @@ d=$(fx_new w4); fx_commits "$d" "$DEVIN|web-flow|false"; fx_reviews "$d" "$GROK|
 expect "(w4) forged web-flow committer (unverified) is not ignored" "$d" identity-unresolved failure 1
 d=$(fx_new w5); fx_commits "$d" "$DEVIN|web-flow|true"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(w5) GitHub-signed web-flow committer is ignored" "$d" pass success 0
-d=$(fx_new w6); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open"},{"number":2,"state":"open"}]' > "$d/pulls-for-head.json"
+d=$(fx_new w6); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open","head":{"sha":"%s"}},{"number":2,"state":"open","head":{"sha":"%s"}}]' "$HEAD" "$HEAD" > "$d/pulls-for-head.json"
 expect "(w6) head shared by two open PRs" "$d" ambiguous-head failure 1
-d=$(fx_new w7); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":2,"state":"open"},{"number":1,"state":"closed"}]' > "$d/pulls-for-head.json"
+d=$(fx_new w7); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":2,"state":"open","head":{"sha":"%s"}},{"number":1,"state":"closed","head":{"sha":"%s"}}]' "$HEAD" "$HEAD" > "$d/pulls-for-head.json"
 expect "(w7) head belongs to a different open PR" "$d" ambiguous-head failure 1
+
+echo "# Codex round 2 — four more paths, each closed"
+d=$(fx_new x1); fx_commits "$d" "$GROK|$GROK|false" "$DEVIN|$DEVIN|false"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" grok)"
+expect "(x1) mixed UNSIGNED grok+devin, attestation grok, devin APPROVE: attestation unions, never launders" "$d" same-vendor-reviewer failure 1
+d=$(fx_new x2); fx_commits "$d" "$GROK|$GROK|false" "$DEVIN|$DEVIN|false"; fx_reviews "$d" "$CR|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" 'grok, devin')"
+expect "(x2) attestation lists both vendors; a third vendor (coderabbit) reviews" "$d" pass success 0
+d=$(fx_new x3); fx_commits "$d" "$OWNER"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" 'claude,bogus')"
+expect "(x3) attestation list with an unknown vendor is ignored whole" "$d" identity-unresolved failure 1
+d=$(fx_new x4); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open","head":{"sha":"%s"}},{"number":2,"state":"open","head":{"sha":"%s"}}]' "$HEAD" "$PREV" > "$d/pulls-for-head.json"
+expect "(x4) a stacked PR merely CONTAINING this head is not a sibling" "$d" pass success 0
+d=$(fx_new x5); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; printf '[{"number":1,"state":"open","head":{"sha":"%s"}},{"number":2,"state":"closed","head":{"sha":"%s"}}]' "$HEAD" "$HEAD" > "$d/pulls-for-head.json"
+expect "(x5) sibling with the same head has closed → unambiguous again" "$d" pass success 0
 d=$(fx_new w8); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_pull "$d" 3
 expect "(w8) PR declares more commits than the API returned (250 cap)" "$d" api-error failure 1
 d=$(fx_new w9); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|9|2026-09-04T10:00:00Z"; fx_comments "$d" "$DEVIN|NONE|devin-ai-integration|811515|99999|2026-09-04T10:00:00Z|$(receipt "$HEAD" pass)"
@@ -168,6 +180,14 @@ pubrun() { : > "$ROOT/gh.log"; : > "$ROOT/summary"; GH_LOG="$ROOT/gh.log" GITHUB
 [ "$(pubrun false failure same-vendor-reviewer 'x')" = "state=failure" ] && ok "publish: failure → failure" || bad "publish failure"
 [ "$(pubrun false '' '' '')" = "state=failure" ] && ok "publish: evaluator crashed (no outputs) → failure, never stale success" || bad "publish crash did not fail"
 [ "$(pubrun true success pass 'x')" = "state=pending" ] && ok "publish: cancelled → pending (supersession is not a verdict)" || bad "publish cancelled"
+# Codex round 2 finding 2: a failed head resolve must still publish (event head) — and say so if it cannot.
+out=$(: > "$ROOT/gh.log"; GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA=$HEAD RESOLVE_FAILED=true TARGET_URL=http://t CANCELLED=false STATE='' REASON='' DESCRIPTION='' PATH="$ROOT/bin:$PATH" bash "$ROOT/publish.sh" >/dev/null 2>&1; cat "$ROOT/gh.log")
+[ "$out" = "state=failure" ] && ok "publish: resolve failed, event head present → failure (never stale success)" || bad "publish resolve-failed: $out"
+: > "$ROOT/summary2"; GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary2" GH_REPO=x/y STATUS_CONTEXT=review-evidence HEAD_SHA='' TARGET_URL=http://t CANCELLED=false STATE='' REASON='' DESCRIPTION='' PATH="$ROOT/bin:$PATH" bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'NOT PUBLISHED' "$ROOT/summary2" && ok "publish: no head at all → nonzero + loud summary line" || bad "publish with no head was silent (rc=$rc)"
+grep -qE 'types: \[.*closed.*\]' "$WF" && ok "closed is a trigger (sibling recovery)" || bad "closed missing from pull_request_target types"
+grep -q 'Re-evaluate open siblings' "$WF" && ok "sibling re-evaluation step present" || bad "no sibling re-evaluation step"
+rs=$(grep -n 'name: Resolve current pull-request head' "$WF" | cut -d: -f1); sed -n "${rs},${pend}p" "$WF" | grep -q 'continue-on-error: true' && sed -n "${rs},${pend}p" "$WF" | grep -q '::notice::' && ok "resolve step: continue-on-error with visible notice" || bad "resolve step failure would skip publish"
 grep -q 'may not be merged' "$ROOT/summary" && ok "non-success writes the merge-block line to the step summary" || bad "summary line missing"
 if command -v actionlint >/dev/null 2>&1; then
   out=$(actionlint "$WF" 2>&1); [ $? -eq 0 ] && ok "actionlint clean" || bad "actionlint: $out"

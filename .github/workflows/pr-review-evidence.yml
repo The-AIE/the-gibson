@@ -8,12 +8,14 @@ name: PR review evidence
 # gibson:approved-pr-target 308
 #
 # Publish sequence (conference-os #1458 class — the fail-open window is the
-# whole point): resolve head via API → POST `pending` on that head FIRST →
-# evaluate with trusted code → ALWAYS publish a final state, so a crash,
-# cancel, or timeout can never leave a prior `success` standing.
+# whole point): resolve head via API (event head as fallback) → POST `pending`
+# on that head FIRST → evaluate with trusted code → ALWAYS publish a final
+# state, so a crash, cancel, or timeout can never leave a prior `success`
+# standing. `closed` is a trigger so a sibling PR sharing a head is
+# re-evaluated when the other one closes (Codex round 2, finding 4).
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, edited]
+    types: [opened, reopened, synchronize, ready_for_review, edited, closed]
   pull_request_review:
     types: [submitted, edited, dismissed]
   issue_comment:
@@ -49,30 +51,45 @@ jobs:
     env:
       GH_REPO: ${{ github.repository }}
       STATUS_CONTEXT: review-evidence
+      # Event-payload head: the fallback when the API resolve fails, so a
+      # `pending` can still be stamped (Codex round 2, finding 2). Empty on
+      # comment/review events, where the API is the only source — that
+      # residual window is documented in docs/fleet-review-conventions.md.
+      EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      EVENT_ACTION: ${{ github.event.action }}
     steps:
-      - name: Resolve current pull-request head (API, not the event payload)
+      - name: Resolve current pull-request head (API, event head as fallback)
         id: pull
+        timeout-minutes: 3
+        # continue-on-error so the pending/publish steps still run on an API
+        # failure; the failure is announced here and the published status
+        # carries `api-error` (CONVENTIONS 3.5 — never a silent green).
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
             echo "::error::event did not identify a pull request"
             exit 1
           fi
-          head_sha=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '.head.sha')
-          if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::could not resolve a 40-hex head for PR #$PR_NUMBER"
-            exit 1
-          fi
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          head_sha=$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq '.head.sha' 2>/dev/null || true)
+          if [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::notice::could not resolve PR $PR_NUMBER head via API; falling back to the event head (may be empty on comment events)"
+          echo "- head resolve via API failed for PR $PR_NUMBER; event-head fallback used" >> "$GITHUB_STEP_SUMMARY"
+          echo "resolve_failed=true" >> "$GITHUB_OUTPUT"
+          exit 1
 
       - name: Invalidate prior exact-head status (pending FIRST)
+        if: always() && env.EVENT_ACTION != 'closed' && (steps.pull.outputs.head_sha != '' || env.EVENT_HEAD_SHA != '')
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.pull.outputs.head_sha }}
+          HEAD_SHA: ${{ steps.pull.outputs.head_sha || env.EVENT_HEAD_SHA }}
           TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -83,17 +100,20 @@ jobs:
             -f target_url="$TARGET_URL" >/dev/null
 
       - name: Checkout trusted default branch (never PR code)
+        if: always()
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - if: always()
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
 
       - name: Evaluate current-head review evidence
         id: evidence
+        if: always() && env.EVENT_ACTION != 'closed' && steps.pull.outputs.head_sha != ''
         # continue-on-error so the publish step below always runs; a failure
         # here is surfaced as a visible notice AND as the published status —
         # it is never converted into a green (CONVENTIONS 3.5).
@@ -118,10 +138,11 @@ jobs:
           exit "$rc"
 
       - name: Publish exact-head status (always)
-        if: always() && steps.pull.outputs.head_sha != ''
+        if: always() && env.EVENT_ACTION != 'closed'
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.pull.outputs.head_sha }}
+          HEAD_SHA: ${{ steps.pull.outputs.head_sha || env.EVENT_HEAD_SHA }}
+          RESOLVE_FAILED: ${{ steps.pull.outputs.resolve_failed }}
           STATE: ${{ steps.evidence.outputs.state }}
           REASON: ${{ steps.evidence.outputs.reason }}
           DESCRIPTION: ${{ steps.evidence.outputs.description }}
@@ -129,15 +150,24 @@ jobs:
           TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          if [ -z "${HEAD_SHA:-}" ]; then
+            # No head from the API and none in the event (comment/review event
+            # during an API outage): nothing can be stamped. Say so loudly.
+            echo "::error::review-evidence: no head SHA available; a prior status on this head may be stale until the next event"
+            echo "### review-evidence: NOT PUBLISHED — no head SHA (API resolve failed on a comment/review event)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # Cancellation is not a verdict: stamp pending (blocks merge, no red).
-          # Anything else without a state means the evaluator crashed before
-          # writing outputs: publish failure, never leave a prior success.
+          # Anything else without a state means the evaluator crashed or never
+          # ran: publish failure, never leave a prior success.
           case "${CANCELLED}:${STATE}" in
             true:*)      state=pending; desc="SUPERSEDED: cancelled before a verdict" ;;
             *:success)   state=success; desc="${DESCRIPTION:-pass}" ;;
             *:pending)   state=pending; desc="UNREVIEWED: ${DESCRIPTION:-no receipt at head}" ;;
             *:failure)   state=failure; desc="${DESCRIPTION:-failure}" ;;
-            *)           state=failure; desc="api-error: evaluator-crashed (no verdict written)" ;;
+            *)           state=failure
+                         if [ "${RESOLVE_FAILED:-}" = "true" ]; then desc="api-error: head resolve failed (event head used)"
+                         else desc="api-error: evaluator-crashed (no verdict written)"; fi ;;
           esac
           gh api --method POST "repos/$GH_REPO/statuses/$HEAD_SHA" \
             -f state="$state" \
@@ -153,6 +183,39 @@ jobs:
               echo "This head may not be merged. A pending status blocks merge exactly like a failure; only success authorizes a merge."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Re-evaluate open siblings sharing this head (on close)
+        # A commit status is keyed by SHA. When one of two PRs sharing a head
+        # closes, the survivor's `ambiguous-head` verdict would never recover
+        # on its own (Codex round 2, finding 4): re-run it here.
+        if: always() && env.EVENT_ACTION == 'closed' && steps.pull.outputs.head_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.pull.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.pull.outputs.pr_number }}
+          TARGET_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # $h/$me are jq variables, not shell
+          siblings=$(gh api "repos/$GH_REPO/commits/$HEAD_SHA/pulls?per_page=100" \
+            --jq --arg h "$HEAD_SHA" --arg me "$PR_NUMBER" \
+            '.[] | select(.state=="open" and .head.sha==$h and (.number|tostring)!=$me) | .number')
+          if [ -z "$siblings" ]; then
+            echo "::notice::no open sibling PR shares head $HEAD_SHA; nothing to re-evaluate"
+            echo "- closed: no open sibling shares this head" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for n in $siblings; do
+            out=$(node scripts/pr-review-evidence.mjs --repo "$GH_REPO" --pr "$n" \
+              --expected-head "$HEAD_SHA" --config config/review-evidence.v1.json || true)
+            state=$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).state||"failure")}catch{process.stdout.write("failure")}})')
+            desc=$(printf '%s' "$out" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const r=JSON.parse(s);process.stdout.write(((r.reason||"api-error")+(r.detail?": "+r.detail:"")).slice(0,140))}catch{process.stdout.write("api-error: evaluator-crashed")}})')
+            case "$state" in success|pending|failure) ;; *) state=failure ;; esac
+            gh api --method POST "repos/$GH_REPO/statuses/$HEAD_SHA" \
+              -f state="$state" -f context="$STATUS_CONTEXT" \
+              -f description="$desc" -f target_url="$TARGET_URL" >/dev/null
+            echo "- sibling #$n re-evaluated: $state — $desc" >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Enforce exact-head review evidence
         if: steps.evidence.outcome == 'failure' && steps.evidence.outputs.state != 'pending'
