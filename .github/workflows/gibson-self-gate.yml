@@ -215,7 +215,9 @@ jobs:
 
   # Review is only real when a reviewer can read the whole diff
   # (config/pr-size.v1.json). The `size-exception` label is owner sign-off
-  # for imports/vendoring; the numbers are still printed.
+  # for imports/vendoring; the numbers are still printed and announced.
+  # The sensor and its budget are executed from the trusted BASE commit, not
+  # the PR merge ref, so a PR cannot raise its own budget or stub the sensor.
   pr-size:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
@@ -224,8 +226,27 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
-      - name: PR size within budget
+      - name: Materialise pr-size sensor + budget from the trusted base
+        env:
+          GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          trusted="$RUNNER_TEMP/pr-size-trusted"
+          mkdir -p "$trusted/scripts" "$trusted/config"
+          for f in scripts/pr-size.mjs config/pr-size.v1.json; do
+            if git cat-file -e "$GIBSON_PR_BASE:$f" 2>/dev/null; then
+              git show "$GIBSON_PR_BASE:$f" > "$trusted/$f"
+            else
+              # Bootstrap only: reachable solely while the sensor has never landed
+              # on the base branch. Once on main this branch is dead code.
+              echo "::warning title=pr-size::$f absent at trusted base $GIBSON_PR_BASE — bootstrap run uses the PR's copy; not tamper-proof until the sensor lands on the base branch"
+              echo "- pr-size bootstrap: \`$f\` taken from the PR merge ref (base lacks it)" >> "$GITHUB_STEP_SUMMARY"
+              cp "$f" "$trusted/$f"
+            fi
+          done
+          echo "PR_SIZE_TRUSTED=$trusted" >> "$GITHUB_ENV"
+      - name: PR size (budget, or size-exception with owner sign-off — announced)
         env:
           GIBSON_PR_BASE: ${{ github.event.pull_request.base.sha }}
           GIBSON_PR_SIZE_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'size-exception') && '1' || '0' }}
-        run: node scripts/pr-size.mjs
+        run: node "$PR_SIZE_TRUSTED/scripts/pr-size.mjs"

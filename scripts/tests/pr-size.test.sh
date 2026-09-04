@@ -32,7 +32,9 @@ cat >"$TMP/cfg.json" <<'EOF'
 }
 EOF
 TAB=$(printf '\t')
-run_sensor() { node "$SENSOR" --config "$TMP/cfg.json" --numstat "$@"; }
+# Hermetic: the suite itself may run under Actions; only the explicit tests below opt in.
+run_sensor() { env -u GITHUB_ACTIONS -u GITHUB_STEP_SUMMARY node "$SENSOR" --config "$TMP/cfg.json" --numstat "$@"; }
+run_sensor_gha() { GITHUB_ACTIONS=true GITHUB_STEP_SUMMARY="${GHA_SUMMARY:-}" node "$SENSOR" --config "$TMP/cfg.json" --numstat "$@"; }
 
 # --- within budget
 printf '40%s10%ssrc/a.ts\n5%s5%sREADME.md\n200%s0%sscripts/tests/x.test.sh\n' "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" >"$TMP/small.txt"
@@ -85,6 +87,56 @@ node -e '
   if (j.metrics.productFiles !== 3 || j.metrics.productLines !== 10) { console.error(j.metrics); process.exit(1); }
 ' "$out" && ok "binary and rename numstat rows parse" || bad "numstat parse: $out"
 
+# --- NUL-delimited (-z) rows: raw paths, rename records, literal " => " and non-ASCII
+NUL_FIX="$TMP/z.bin"
+printf '3\t3\tscripts/tests/t.test.sh\0' >"$NUL_FIX"
+printf '2\t2\t\0old/x.ts\0new/y.ts\0' >>"$NUL_FIX"                    # rename record
+printf '4\t0\tdocs/caf\303\251.md\0' >>"$NUL_FIX"                       # UTF-8 path, unquoted under -z
+printf '1\t0\tsrc/a => b.ts\0' >>"$NUL_FIX"                              # ordinary name containing " => "
+printf -- '-\t-\tassets/logo.png\0' >>"$NUL_FIX"                          # binary
+out=$(run_sensor "$NUL_FIX" --format json 2>&1); rc=$?
+[[ $rc -eq 0 ]] && ok "-z fixture exits 0" || bad "-z fixture rc=$rc: $out"
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  const paths = j.largest.map(f => f.path).sort();
+  const want = ["assets/logo.png","docs/café.md","new/y.ts","scripts/tests/t.test.sh","src/a => b.ts"];
+  if (JSON.stringify(paths) !== JSON.stringify(want)) { console.error(paths); process.exit(1); }
+  if (j.byClass.docs.lines !== 4 || j.byClass.docs.files !== 1) { console.error("docs", j.byClass.docs); process.exit(1); }
+  if (j.metrics.productFiles !== 3 || j.metrics.productLines !== 5) { console.error(j.metrics); process.exit(1); }
+' "$out" && ok "-z: rename, UTF-8 docs path classified as docs, literal ' => ' kept verbatim" || bad "-z parse: $out"
+printf '3\t3\tsrc/a.ts\0001\t1\tsrc/b.ts' >"$TMP/z-trunc.bin"
+run_sensor "$TMP/z-trunc.bin" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "-z stream missing final NUL exits 2" || bad "truncated -z rc=$rc"
+printf '2\t2\t\0old/x.ts\0' >"$TMP/z-ren.bin"
+run_sensor "$TMP/z-ren.bin" >/dev/null 2>&1; rc=$?
+[[ $rc -eq 2 ]] && ok "-z truncated rename record exits 2" || bad "truncated rename rc=$rc"
+
+# --- text mode: C-quoted path (core.quotePath default) is decoded and classified
+printf '4%s0%s"docs/caf\\303\\251.md"\n' "$TAB" "$TAB" >"$TMP/quoted.txt"
+out=$(run_sensor "$TMP/quoted.txt" --format json 2>&1); rc=$?
+node -e '
+  const j = JSON.parse(process.argv[1]);
+  if (j.largest[0].path !== "docs/café.md" || j.byClass.docs.files !== 1 || j.metrics.productFiles !== 0) { console.error(j.largest, j.byClass); process.exit(1); }
+' "$out" && ok "C-quoted text path decodes to docs/café.md and counts as docs" || bad "quoted path: rc=$rc $out"
+
+# --- the sensor asks git for -z output
+grep -q '"--numstat", "-z"' "$SENSOR" && ok "live git call uses --numstat -z" || bad "git call is not NUL-delimited"
+
+# --- GitHub Actions: exception is announced, never a silent green
+SUMMARY="$TMP/summary.md"; : >"$SUMMARY"
+out=$(GHA_SUMMARY="$SUMMARY" run_sensor_gha "$TMP/lines.txt" --exception 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"::warning title=pr-size::OVER BUDGET"* && "$out" == *"size-exception"* ]] \
+  && ok "exception emits a ::warning:: annotation naming the label" || bad "no annotation on exception rc=$rc: $out"
+grep -q 'size-exception' "$SUMMARY" && grep -q 'productLines: 110 > 100' "$SUMMARY" \
+  && ok "exception written to GITHUB_STEP_SUMMARY with the numbers" || bad "step summary: $(cat "$SUMMARY")"
+: >"$SUMMARY"
+out=$(GHA_SUMMARY="$SUMMARY" run_sensor_gha "$TMP/lines.txt" 2>&1); rc=$?
+[[ $rc -eq 1 && "$out" == *"::error title=pr-size::"* ]] && ok "unexcepted breach emits ::error::" || bad "no ::error:: rc=$rc: $out"
+out=$(run_sensor_gha "$TMP/small.txt" 2>&1); rc=$?
+[[ $rc -eq 0 && "$out" == *"::notice title=pr-size::within budget"* ]] && ok "within budget emits ::notice::" || bad "no ::notice:: rc=$rc: $out"
+out=$(run_sensor "$TMP/lines.txt" --exception 2>&1)
+[[ "$out" != *"::warning"* ]] && ok "no annotations outside GitHub Actions" || bad "annotation leaked outside CI"
+
 # --- empty diff is fine
 : >"$TMP/empty.txt"
 run_sensor "$TMP/empty.txt" >/dev/null 2>&1; rc=$?
@@ -106,11 +158,18 @@ node "$SENSOR" --config "$CFG" --base HEAD~1 --head HEAD >/dev/null 2>&1; rc=$?
 
 # --- workflow wiring: runs on PRs, label maps to the exception env, not swallowed
 WF=".github/workflows/gibson-self-gate.yml"
-grep -q 'scripts/pr-size.mjs' "$WF" && ok "self-gate runs pr-size" || bad "self-gate does not run pr-size"
-grep -q "size-exception" "$WF" && ok "self-gate maps the size-exception label" || bad "label not wired"
-grep -E 'pr-size.mjs.*\|\| *true' "$WF" >/dev/null && bad "pr-size result swallowed with || true" || ok "pr-size result not swallowed"
 TPL="ci/gibson-gate.yml"
-grep -q 'scripts/pr-size.mjs' "$TPL" && ok "target-repo template runs pr-size" || bad "template does not run pr-size"
+for f in "$WF" "$TPL"; do
+  grep -q 'scripts/pr-size.mjs' "$f" && ok "$f runs pr-size" || bad "$f does not run pr-size"
+  grep -q "size-exception" "$f" && ok "$f maps the size-exception label" || bad "$f: label not wired"
+  grep -E 'pr-size.mjs.*\|\| *true' "$f" >/dev/null && bad "$f: pr-size result swallowed with || true" || ok "$f: pr-size result not swallowed"
+  # Trusted-base execution: the sensor and budget come from base.sha via git show,
+  # and the run step never executes the PR tree's scripts/pr-size.mjs directly.
+  grep -Eq 'git show "\$GIBSON_PR_BASE:\$f"' "$f" && ok "$f materialises sensor+config from the trusted base" || bad "$f: sensor not taken from base"
+  grep -Eq 'run: node "\$PR_SIZE_TRUSTED/scripts/pr-size.mjs"' "$f" && ok "$f executes the trusted copy" || bad "$f: does not execute trusted copy"
+  grep -Eq '^\s*run: node scripts/pr-size.mjs' "$f" && bad "$f: executes PR-controlled pr-size.mjs" || ok "$f: never executes the PR-controlled sensor"
+  grep -q 'config/pr-size.v1.json' "$f" && ok "$f takes the budget config from the trusted base too" || bad "$f: config not from base"
+done
 
 echo
 echo "pr-size.test.sh: $PASS passed, $FAIL failed"
