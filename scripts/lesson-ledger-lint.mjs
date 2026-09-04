@@ -181,7 +181,8 @@ function fieldValue(body, name) {
       continue;
     }
     if (htmlComment) { if (line.includes("-->")) htmlComment = false; continue; }
-    if (/^\s*<!--/.test(line) && !line.includes("-->")) { htmlComment = true; continue; }
+    const openIdx = line.indexOf("<!--");
+    if (openIdx >= 0 && line.indexOf("-->", openIdx) < 0) { htmlComment = true; continue; }
     if (/^\s*<!--.*-->\s*$/.test(line)) continue;
     const open = fenceOpen(line);
     if (open) {
@@ -231,7 +232,13 @@ function parseLedger(text) {
       if (line.includes("-->")) htmlComment = false;
       continue;
     }
-    if (/^\s*<!--/.test(line) && !line.includes("-->")) { htmlComment = true; continue; }
+    // A comment may open mid-line (`prose <!--`): everything after `<!--`
+    // until `-->` is not ledger content (Codex #316 round 4, finding 1).
+    const openIdx = line.indexOf("<!--");
+    if (openIdx >= 0 && line.indexOf("-->", openIdx) < 0) {
+      htmlComment = true;
+      if (!/^\s*$/.test(line.slice(0, openIdx)) && HEADING_RE.test(line.slice(0, openIdx))) { /* heading before the comment still counts */ } else { continue; }
+    }
     if (/^\s*<!--.*-->\s*$/.test(line)) continue;
     const open = fenceOpen(line);
     if (open) {
@@ -320,6 +327,10 @@ function isExplicitPinMarker(line, id) {
   const trimmed = line.trim();
   if (/^#/.test(trimmed)) return new RegExp(`#\\s*(?:pins?|pin:|regression:)\\s*${escaped}\\b`, "i").test(trimmed);
   if (quotedContainsId(line, id)) return false;
+  // A trailing shell comment on a code line (`[[ … ]] # pins L-NNN`) is an
+  // explicit marker too (Codex #316 round 4, finding 2); the ID is outside
+  // quotes by the check above, so the `#` is a real comment.
+  if (new RegExp(`#\\s*(?:pins?|pin:|regression:)\\s*${escaped}\\b`, "i").test(line)) return true;
   if (new RegExp(`\\b(?:pin|regression):\\s*${escaped}\\b`, "i").test(line)) return true;
   return false;
 }

@@ -693,6 +693,17 @@ else
   bad "live tree (rc=$rc): $out"
 fi
 
+
+echo "# Codex #316 round 4: mid-line HTML comment; trailing '# pins' on a code line"
+R4="$ROOT/r4"; rm -rf "$R4"; mkdir -p "$R4/scripts/tests" "$R4/memory"
+B1=$(lid 1); B2=$(lid 2)
+{ printf '## %s · 2026-09-04 · midline-comment\nvisible prose <!--\n**Status:** fixed\n**Tags:** #fixture\n-->\n\n' "$B1"
+  printf '## %s · 2026-09-04 · trailing-marker\n**What happened:** x\n**Status:** fix-pending (issue #1)\n**Tags:** #x\n' "$B2"; } > "$R4/memory/LESSONS.md"
+printf '%s\n' '#!/bin/bash' "[[ \"\$a\" = \"\$b\" ]] # pins $B2" > "$R4/scripts/tests/t.test.sh"
+run_lint "$R4" --offline
+printf '%s\n' "$out" | grep -qE "$B1 .*(missing|lacks|no) .*Status|$B1.*Status" && ok "r4-1: Status/Tags inside a mid-line HTML comment do not satisfy the entry" || bad "r4-1: mid-line comment satisfied the entry: $out"
+printf '%s\n' "$out" | grep -q "$B2 is not fixed but scripts/tests/t.test.sh pins it" && ok "r4-2: a trailing '# pins' comment on a code line is an explicit marker" || bad "r4-2: trailing marker not recognised: $out"
+
 echo
 
 echo "# Codex #316 round 3: quoted markers, zero-path claims, HTML comments"
