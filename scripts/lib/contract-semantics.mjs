@@ -2435,16 +2435,23 @@ function tokenizeFlatAlternation(inner) {
     .filter(Boolean);
 }
 
+/** `$VAR` / `${VAR}` matcher operands. Variables are not resolved. */
+function isOpaqueShellVarOperand(raw) {
+  return /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(String(raw || "").trim());
+}
+
 /**
  * Classify one matcher pattern operand as CANONICAL, ACCEPTS_PASS, or
  * INDETERMINATE. Finite allowlist only — nested/split/depth forms fail
- * closed without recursive expansion.
+ * closed without recursive expansion. Extracted verdict-bearing operands
+ * that are neither canonical nor PASS-classified are INDETERMINATE.
  *
  * @param {string} raw
  * @returns {"CANONICAL"|"ACCEPTS_PASS"|"INDETERMINATE"|null}
  */
 export function classifyVerdictMatcherOperand(raw) {
   const original = String(raw || "");
+  if (isOpaqueShellVarOperand(original)) return VERDICT_OPERAND_INDETERMINATE;
   if (!/VERDICT:/i.test(original)) return null;
   const norm = normalizeMatcherOperand(original);
   const verdictAt = norm.search(/VERDICT:/i);
@@ -2492,11 +2499,7 @@ export function classifyVerdictMatcherOperand(raw) {
     .replace(/[^A-Z0-9_]/g, "");
   if (VERDICT_PASS_TOKENS.has(single)) return VERDICT_OPERAND_ACCEPTS_PASS;
   if (VERDICT_CANONICAL_TOKENS.has(single)) return VERDICT_OPERAND_CANONICAL;
-  // Prose-like remainder with spaces/pipes but no group — not a matcher form.
-  if (/[|]/.test(rest) || /[()]/.test(rest) || /\\/.test(rest)) {
-    return VERDICT_OPERAND_INDETERMINATE;
-  }
-  return null;
+  return VERDICT_OPERAND_INDETERMINATE;
 }
 
 /**
@@ -2568,11 +2571,35 @@ function grepFamilyBase(word) {
   return slash === -1 ? w : w.slice(slash + 1);
 }
 
+/** Finite grep short options that consume the next argv word. */
+const GREP_ONE_ARG_SHORT = new Set(["e", "f", "m", "A", "B", "C", "D", "d"]);
+/** Finite grep short options that do not consume a following word. */
+const GREP_ZERO_ARG_SHORT = new Set([
+  ..."qiEFGPwxvclLnHhosarRby".split(""),
+]);
+/** Finite grep long options that consume a value (`--name VALUE` or `--name=`). */
+const GREP_ONE_ARG_LONG = new Set([
+  "regexp", "file", "max-count", "after-context", "before-context", "context",
+  "devices", "directories", "label", "exclude", "exclude-from", "exclude-dir",
+  "include", "binary-files",
+]);
+/** Finite grep long options that take no value. */
+const GREP_ZERO_ARG_LONG = new Set([
+  "ignore-case", "extended-regexp", "fixed-strings", "basic-regexp",
+  "perl-regexp", "word-regexp", "line-regexp", "invert-match", "count",
+  "files-with-matches", "files-without-match", "line-number", "with-filename",
+  "no-filename", "only-matching", "no-messages", "text", "recursive",
+  "dereference-recursive", "quiet", "silent",
+]);
+const GREP_INDETERMINATE_ARGV = "VERDICT: INDETERMINATE_GREP_ARGV";
+
 /**
  * Extract VERDICT-bearing grep/egrep pattern operands from one physical
  * line. Recognizes default-BRE positional patterns (`grep -q '…'`),
- * combined short bundles (`grep -Eq` / `grep -Eqi`), and `-e`/`--regexp`
- * forms. Patterns without VERDICT: (e.g. `grep -qi APPROVE`) are ignored.
+ * combined short bundles (`grep -Eq` / `grep -Eqi`), `-e`/`--regexp`,
+ * and a finite table of argument-consuming options (`-m 1`, `--max-count`).
+ * Unrecognized or ambiguous argv fails closed rather than guessing the
+ * positional pattern. Not a general grep/shell parser.
  */
 function extractGrepVerdictOperandsFromLine(line) {
   const words = boundedLineShellWords(line);
@@ -2582,6 +2609,7 @@ function extractGrepVerdictOperandsFromLine(line) {
     if (base !== "grep" && base !== "egrep") continue;
     let j = i + 1;
     let positional = null;
+    let ambiguous = false;
     while (j < words.length) {
       const arg = words[j];
       if (arg === "--") {
@@ -2597,6 +2625,7 @@ function extractGrepVerdictOperandsFromLine(line) {
       if (arg === "--regexp" || arg === "-e") {
         j += 1;
         if (j < words.length) out.push(words[j]);
+        else ambiguous = true;
         j += 1;
         continue;
       }
@@ -2606,25 +2635,61 @@ function extractGrepVerdictOperandsFromLine(line) {
         j += 1;
         continue;
       }
+      if (arg.startsWith("--")) {
+        const eq = arg.indexOf("=");
+        const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+        if (GREP_ONE_ARG_LONG.has(name)) {
+          if (eq !== -1) {
+            j += 1;
+            continue;
+          }
+          j += 1;
+          if (j < words.length) j += 1;
+          else ambiguous = true;
+          continue;
+        }
+        if (eq === -1 && GREP_ZERO_ARG_LONG.has(name)) {
+          j += 1;
+          continue;
+        }
+        ambiguous = true;
+        break;
+      }
       if (arg.startsWith("-") && arg !== "-") {
-        // Short/long options including bundled -Eq / -Eqi / -qi / -q.
-        // Letters q/i/E do not consume a separate pattern operand.
-        j += 1;
-        continue;
+        const body = arg.slice(1);
+        if (body.length === 1 && GREP_ONE_ARG_SHORT.has(body)) {
+          j += 1;
+          if (j < words.length) j += 1;
+          else ambiguous = true;
+          continue;
+        }
+        if (body.length > 1 && GREP_ONE_ARG_SHORT.has(body[0])) {
+          // Attached value (`-m1`). Not a general bundled parser.
+          j += 1;
+          continue;
+        }
+        if ([...body].every((ch) => GREP_ZERO_ARG_SHORT.has(ch))) {
+          j += 1;
+          continue;
+        }
+        ambiguous = true;
+        break;
       }
       if (positional == null) positional = arg;
       j += 1;
     }
-    if (positional != null) out.push(positional);
+    if (ambiguous) out.push(GREP_INDETERMINATE_ARGV);
+    else if (positional != null) out.push(positional);
   }
   return out.filter((p) => /VERDICT:/i.test(String(p || "")));
 }
 
 /**
  * Collect matcher pattern operands from the two canonical harness files.
- * Sites: case-arm literals, `[[ =~ ]]` operands, jq test() strings, and
- * grep/egrep pattern operands (default BRE `-q`, bundled `-Eq`/`-Eqi`,
- * and `-e`/`--regexp`). Heredoc prompt prose and bare
+ * Sites: case-arm literals, `[[ =~ ]]` operands (including opaque `$VAR`),
+ * jq test() strings, and grep/egrep pattern operands (default BRE `-q`,
+ * bundled `-Eq`/`-Eqi`, `-e`/`--regexp`, and finite argument-consuming
+ * options such as `-m`). Heredoc prompt prose and bare
  * `$VERDICT_TEXT | grep -qi TOKEN` comparisons are not sites.
  *
  * @param {string} text
@@ -2648,12 +2713,16 @@ export function extractHarnessMatcherOperands(text) {
 
   // [[ ... =~ OPERAND ]] — OPERAND may be bare or quoted. Use \S+ so
   // character-classes like [[:space:]] inside the operand are kept; the
-  // trailing space before ]] terminates the bare operand.
+  // trailing space before ]] terminates the bare operand. Opaque
+  // `$VAR` / `${VAR}` operands are kept and classified indeterminate;
+  // variables are not resolved.
   {
     const re = /=~\s*(?:"([^"]*)"|'([^']*)'|(\S+))\s*\]\]/gi;
     let m;
     while ((m = re.exec(src)) !== null) {
-      push(m[1] || m[2] || m[3] || "");
+      const operand = m[1] || m[2] || m[3] || "";
+      if (isOpaqueShellVarOperand(operand)) out.push(operand.trim());
+      else push(operand);
     }
   }
 
