@@ -35,7 +35,7 @@ compaction checkpoint; run total $120.68.
 **Harness fix:** bounded workers (one issue, exact file list, short output
 contract); fresh-context-per-hat; checkpoint before half the window; grind work
 routed to flat-rate pools (docs/15).
-**Status:** fixed
+**Status:** fixed (pinned by scripts/tests/cost-ledger.test.sh)
 **Tags:** #cost #routing
 
 ## L-004 · 2026-07 · docs-describe-aspiration-not-wiring
@@ -44,7 +44,7 @@ Branch was `main` — every main merge was a silent prod deploy.
 **Root cause:** documentation recorded intent, not verified configuration.
 **Harness fix:** adoption audits verify the real Production Branch and write the
 truth into the target AGENTS.md (docs/12, docs/13).
-**Status:** fixed
+**Status:** fixed (pinned by scripts/tests/git-configure.test.sh)
 **Tags:** #vercel #docs
 
 ## L-005 · 2026-07 · reviewer-absence-silently-skips
@@ -112,8 +112,68 @@ state. No-progress journals once, increments shared failure and `--stale-budget`
 once each, never restores or hands off. state-corrupt and runner-failure take
 precedence and do not run the sensor. Stop at the earlier of error-budget or
 stale-budget with a distinct no-progress diagnosis.
-**Status:** fixed (grok branch + detection gap via #63)
+**Status:** fixed (grok branch + detection gap via #63; pinned by scripts/tests/silent-noop.test.sh)
 **Tags:** #grok #cli #harness-bug #permissions #L-008 #silent-noop
+
+## L-009 · 2026-09-04 · claim-commit-never-moves-caller-checkout
+**What happened:** Claim and release-claim used to mutate the claim ledger by
+checking out `main` in the caller's tree. A dirty long-lived feature branch
+then stranded the claim row or moved the operator's checkout out from under
+them.
+**Root cause:** Ledger mutation ran in the caller's working copy instead of a
+disposable worktree on main.
+**Harness fix:** `claim.sh` and `release-claim.sh` commit claim-row changes in
+a throwaway worktree; they never move the canonical checkout
+(`scripts/release-claim.sh`, `scripts/claim.sh`, `playbooks/release.md`).
+**Status:** fixed (reconstructed 2026-09-04 from scripts/release-claim.sh; pinned by scripts/tests/claim.test.sh, scripts/tests/release-claim.test.sh)
+**Tags:** #git #claims #worktree #release
+
+## L-010 · 2026-09-04 · dead-agent-must-release-the-lane
+**What happened:** A hung or crashed agent can leave a claim, lock, or worktree
+held indefinitely; the loop waits for a human to notice rather than reclaiming
+the lane.
+**Root cause:** Exit paths did not guarantee release of claims, locks, and
+worktrees; a dead process kept the lane.
+**Harness fix:** `trap EXIT` (and equivalent) must release every claim, lock,
+and worktree hold on completion OR failure. A dead agent must never keep a
+lane (`docs/liveness-contract.md` clause 6).
+**Status:** reconstructed 2026-09-04 from docs/liveness-contract.md
+**Tags:** #liveness #claims #concurrency #fail-closed
+
+## L-011 · 2026-09-04 · hard-fail-promotion-unproven-until-path-runs
+**What happened:** A Playwright / UX-eval flow was promoted to hard-fail and
+the burn-down issue closed while CI skipped the promoted path every run —
+static sensors (workflow grep, baseline file) went green without the job ever
+executing.
+**Root cause:** Promotion and burn-down closure were keyed off config and docs,
+not on evidence that the promoted path actually ran in CI.
+**Harness fix:** Do not close a burn-down issue or treat a hard-fail promotion
+as done until one CI run has executed the promoted path (or an explicit dated
+deferral is recorded). `ci/ux-eval.yml` annotates runs where contract flows did
+not execute (`docs/13-adoption.md`, `scripts/ux-surface.sh`).
+**Status:** reconstructed 2026-09-04 from ci/ux-eval.yml
+**Tags:** #ci #ux-eval #fail-closed #adoption
+
+## L-012 · 2026-07-24 · preview-url-ci-skip-under-vercel-protection
+**What happened:** On chatterbuilt (and fleet PRs generally), CI jobs
+`gibson-ux-eval` / `zap-baseline` / `posture` often SUCCESS via **skip** because
+`preview-url.sh` times out (default 180s) or cannot authenticate past Vercel
+Deployment Protection SSO — even when a READY branch deploy exists. Observed
+from early adoption PRs (#81/#82) through ongoing fleet work including PR #101
+security hat (L5/L8 CI skip; prod posture-probe compensated). Live agents
+recover with `vercel curl` + protection-bypass outside CI; hard-fail DAST/UX
+paths stay unproven in Actions.
+**Root cause:** Preview resolution + Deployment Protection not wired for CI
+(timeout race; missing `VERCEL_AUTOMATION_BYPASS_SECRET` path); workflows treat
+missing BASE_URL as soft skip (annotated) rather than non-pass when Tier B/C
+UI/security surface needs a live target.
+**Harness fix:** Sensor preferred (the-gibson#2): longer CI timeout; wait for
+READY; inject bypass secret; fail/annotate non-pass (not skip-as-green) when
+Tier B/C needs preview. Guide: security/ux hats must not claim L5/L8/UX CI
+skip as hard-fail pass; compensate with live preview or prod posture when
+appropriate. **Do not** loosen Tier C human gates.
+**Status:** fixed (pinned by scripts/tests/ux-surface.test.sh)
+**Tags:** #ci #preview #vercel #security #ux-eval #local
 
 ## L-013 · 2026-07-25 · partial-pr-autoclose-despite-related-only
 **What happened:** Multi-phase issues (esp. chatterbuilt #28) auto-close on
@@ -133,7 +193,7 @@ squash subject/body: Related-only, no close/fix/resolve verbs near `#N`.
 (2) Post-merge: if issue closed and PR was partial, reopen + comment residual.
 (3) Sensor still fix-pending: release preflight script hard-fails when
 `closingIssuesReferences` is non-empty while body marks partial / Related-only.
-**Status:** fix-pending (the-gibson#4; guide practiced; sensor not yet automated)
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh)
 **Tags:** #github #release #partial-ship #process #local
 
 ## L-015 · 2026-07-25 · same-author-github-approve-blocked
@@ -149,7 +209,7 @@ same-author, post `gh pr review --comment` with final line exactly
 `VERDICT: APPROVE` (or `REQUEST_CHANGES`). Release treats that line as the
 merge gate when `reviewDecision` is empty/blocked for same-author. Prefer
 `REVIEWER_CMD` cross-vendor when set (true different identity).
-**Status:** fix-pending (the-gibson#5; convention in use; playbook text not yet patched)
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh, scripts/tests/formal-review.test.sh)
 **Tags:** #review #github #solo-loop #process #general
 
 ## L-020 · 2026-07-25 · gh-pr-merge-fails-when-worktree-holds-branch
@@ -189,7 +249,7 @@ squash with explicit checklist in the merge comment, or (b) obtain real
 `--approve` from a different GitHub identity / `REVIEWER_CMD` that can post
 a formal review. (2) Prefer (b) so admin is rare. (3) Always re-sync with
 `origin/main` under multi-lane fleet before merge attempts.
-**Status:** fix-pending (guide; playbook not yet patched; practiced on PR #98)
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh, scripts/tests/git-configure.test.sh)
 **Tags:** #release #github #branch-protection #solo-loop #review #general
 
 ## L-022 · 2026-07-25 · gitleaks-security-fast-cross-lane-until-pr-scoped
@@ -228,29 +288,8 @@ assembled by a script, or (3) release playbook: auto-resolve active-work by
 taking union of claim rows and re-running `release-claim.sh` post-merge. Until
 then, release may resolve claim-table conflicts only (no product code) when
 unblocking an otherwise green merge.
-**Status:** fix-pending (the-gibson#7)
+**Status:** fixed (pinned by scripts/tests/claim.test.sh, scripts/tests/release-claim.test.sh)
 **Tags:** #concurrency #claims #release #fleet #local
-
-## L-012 · 2026-07-24 · preview-url-ci-skip-under-vercel-protection
-**What happened:** On chatterbuilt (and fleet PRs generally), CI jobs
-`gibson-ux-eval` / `zap-baseline` / `posture` often SUCCESS via **skip** because
-`preview-url.sh` times out (default 180s) or cannot authenticate past Vercel
-Deployment Protection SSO — even when a READY branch deploy exists. Observed
-from early adoption PRs (#81/#82) through ongoing fleet work including PR #101
-security hat (L5/L8 CI skip; prod posture-probe compensated). Live agents
-recover with `vercel curl` + protection-bypass outside CI; hard-fail DAST/UX
-paths stay unproven in Actions.
-**Root cause:** Preview resolution + Deployment Protection not wired for CI
-(timeout race; missing `VERCEL_AUTOMATION_BYPASS_SECRET` path); workflows treat
-missing BASE_URL as soft skip (annotated) rather than non-pass when Tier B/C
-UI/security surface needs a live target.
-**Harness fix:** Sensor preferred (the-gibson#2): longer CI timeout; wait for
-READY; inject bypass secret; fail/annotate non-pass (not skip-as-green) when
-Tier B/C needs preview. Guide: security/ux hats must not claim L5/L8/UX CI
-skip as hard-fail pass; compensate with live preview or prod posture when
-appropriate. **Do not** loosen Tier C human gates.
-**Status:** fix-pending (the-gibson#2)
-**Tags:** #ci #preview #vercel #security #ux-eval #local
 
 ## L-024 · 2026-07-25 · release-claim-wipes-residual-sibling-claims
 **What happened:** After chatterbuilt PR #113 (slice-9 magnet → preview-plan)
@@ -270,7 +309,7 @@ matching worktree/branch are removed; retain `agent-claimed` if any
 `issue-N-*` row remains. (2) Guide — release playbook: before cleanup, inspect
 `origin/main` claims for residual sibling rows; never blind-run full
 `release-claim.sh N` on partial ships. Related L-013 / L-023 / the-gibson#7.
-**Status:** fix-pending (the-gibson#9; guide practiced on PR #113; sensor not yet)
+**Status:** fixed (pinned by scripts/tests/claim.test.sh, scripts/tests/release-claim.test.sh)
 **Tags:** #release #claims #partial-ship #solo-loop #local #process
 
 ## L-025 · 2026-07-25 · conventional-commit-fix-title-autoclose
@@ -292,7 +331,7 @@ highest-frequency miss.
 matches closing-keyword+#N **or** `closingIssuesReferences` non-empty while
 body marks partial/Related-only. (3) Practice — reopen + residual already
 proven on #115.
-**Status:** fix-pending (the-gibson#4; L-025 evidence commented 2026-07-25)
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh)
 **Tags:** #github #release #partial-ship #process #local #conventional-commits
 
 ## L-026 · 2026-07-25 · mcp-landing-free-tools-list-lags-entitlements
@@ -332,7 +371,7 @@ on label edit; log real error. (3) Guide — release playbook: after
 release-claim, re-read issue labels before declaring Law 10 done (release
 hat already practiced this on #117). Sibling of L-024 (keep label when
 residuals exist) — this is the inverse miss (label left when no residual).
-**Status:** fix-pending (the-gibson#10; practiced manual strip on #117)
+**Status:** fixed (pinned by scripts/tests/release-claim.test.sh)
 **Tags:** #release #claims #law-10 #solo-loop #local #process
 
 ## L-028 · 2026-07-25 · release-hat-finds-pr-already-merged
@@ -353,7 +392,7 @@ verify Closes/closingIssuesReferences + CI on merge SHA + deploy/smoke + Law
 already gone (pair L-024). (2) Optional sensor — loop-state note template for
 "post-merge verify only" so historian exhaust is unambiguous. Practiced on
 #128; playbook text not yet patched.
-**Status:** fix-pending (guide; practiced on PR #128 and prior same-day ships)
+**Status:** fixed (pinned by scripts/tests/claim.test.sh)
 **Tags:** #release #solo-loop #concurrency #process #general
 
 ## L-029 · 2026-07-25 · release-claim-fails-on-fleet-worktree-cwd
@@ -480,7 +519,7 @@ evidence + checklist. (2) Do **not** claim remote CI green when it was not —
 name the skip. (3) At launch: this path is human-gated; no auto-admin on any
 CI red. (4) Prefer sensor later — release preflight script flags
 startup_failure vs failed step so the hat does not re-diagnose from UI.
-**Status:** fix-pending (guide; practiced on PR #154; playbook not yet patched)
+**Status:** fixed (pinned by scripts/tests/release-preflight.test.sh)
 **Tags:** #ci #github-actions #release #solo-loop #pre-launch #infra #general
 #process
 
@@ -506,7 +545,7 @@ treat pending ux-eval as product risk once path-filter would have skipped;
 still wait when UI paths are in the diff. (3) Do **not** loosen Tier C
 gates or drop live UX for real UI PRs. Distinct from L-012 (preview
 protection / soft-skip when a live target is needed).
-**Status:** fix-pending (the-gibson#12; practiced on PR #165)
+**Status:** fixed (pinned by scripts/tests/ux-surface.test.sh)
 **Tags:** #ci #ux-eval #preview #path-filter #solo-loop #release #local
 #process
 
@@ -587,7 +626,7 @@ worktree under the template clone (or absolute path in loop-state). Prefer
 takes `--repo owner/name`. File as harness-improvement if not shipped
 in-session. (3) **Builder** — when claiming template issues, record full claim
 id in loop-state `notes` so release does not guess.
-**Status:** fix-pending (guide practiced on template PR#7; sensor the-gibson#14)
+**Status:** fixed (pinned by scripts/tests/release-claim.test.sh)
 **Tags:** #cross-repo #template #claims #release-claim #release #solo-loop
 #local #process #law-10
 
@@ -891,30 +930,6 @@ from the one actually shown.
 **Status:** fixed in harness
 **Tags:** #loop #law5 #gates #git #sensors #issue-55
 
-## L-050 · 2026-08-03 · portability-shim-that-succeeds-for-the-wrong-reason
-**What happened:** `claim-reaper.test.sh` died mid-run on Linux with
-`line 276: File: unbound variable`. The line was a normal-looking BSD/GNU shim:
-`stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"`. On Linux `stat -f` means
-*filesystem* status, so the first branch **succeeded** — printing a multi-line
-block starting `  File: "/tmp"` — and `[[ ... -gt ... ]]` evaluated that text as
-arithmetic, where the bare word `File` is an unset variable under `set -u`.
-**Root cause:** an `A || B` fallback assumes A *fails* on the platform B is for.
-`stat -f` doesn't fail on Linux; it means something else. The fallback never
-fired, and the wrong answer flowed on silently — the crash was luck. The same
-pattern is live in `claim-reaper.sh` (`%m` → mount point), `loop.sh` and
-`gate.sh`/`gate-baseline.sh` (`%d`/`%i` → free blocks / filesystem ID), where
-there is no `set -u` crash to give it away (#99).
-**Harness fix:** probe GNU first, BSD second, and terminate with an explicit
-default: `stat -c %Y f 2>/dev/null || stat -f %m f 2>/dev/null || echo 0`. Same
-ordering rule as the `date -u -d` / `date -u -j -f` shim in `claims-status.sh`.
-**Rule of thumb:** a cross-platform fallback is only safe when the wrong branch
-*errors*. If a flag exists on both platforms with different meanings, order by
-which one you can detect, and give the chain a terminating default.
-**Status:** fixed in the test (#93) and production call sites (#99: gate.sh,
-gate-baseline.sh, loop.sh, claim-reaper.sh) with a gate.test.sh sensor that
-asserts two files on one filesystem get distinct path_dev_ino identities and
-that every production site is exact GNU-first form.
-**Tags:** #portability #shell #sensors
 ## L-048 · 2026-08-03 · release-cmd-acceptEdits-blocks-gh
 **What happened:** chatterbuilt docs lane release of PR #346 (#311) shelled out to
 `RELEASE_CMD=claude … --permission-mode acceptEdits`. Claude could not run Bash
@@ -951,6 +966,28 @@ wait and posture probe for pure docs/specs. Product-surface PRs keep full
 deploy+smoke. Practiced on #311.
 **Status:** fixed (guide this session)
 **Tags:** #release #docs #smoke #solo-loop #general
+
+## L-050 · 2026-08-03 · portability-shim-that-succeeds-for-the-wrong-reason
+**What happened:** `claim-reaper.test.sh` died mid-run on Linux with
+`line 276: File: unbound variable`. The line was a normal-looking BSD/GNU shim:
+`stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"`. On Linux `stat -f` means
+*filesystem* status, so the first branch **succeeded** — printing a multi-line
+block starting `  File: "/tmp"` — and `[[ ... -gt ... ]]` evaluated that text as
+arithmetic, where the bare word `File` is an unset variable under `set -u`.
+**Root cause:** an `A || B` fallback assumes A *fails* on the platform B is for.
+`stat -f` doesn't fail on Linux; it means something else. The fallback never
+fired, and the wrong answer flowed on silently — the crash was luck. The same
+pattern is live in `claim-reaper.sh` (`%m` → mount point), `loop.sh` and
+`gate.sh`/`gate-baseline.sh` (`%d`/`%i` → free blocks / filesystem ID), where
+there is no `set -u` crash to give it away (#99).
+**Harness fix:** probe GNU first, BSD second, and terminate with an explicit
+default: `stat -c %Y f 2>/dev/null || stat -f %m f 2>/dev/null || echo 0`. Same
+ordering rule as the `date -u -d` / `date -u -j -f` shim in `claims-status.sh`.
+**Rule of thumb:** a cross-platform fallback is only safe when the wrong branch
+*errors*. If a flag exists on both platforms with different meanings, order by
+which one you can detect, and give the chain a terminating default.
+**Status:** fixed (pinned by scripts/tests/gate.test.sh, scripts/tests/key-age-check.test.sh, scripts/tests/claim-reaper.test.sh)
+**Tags:** #portability #shell #sensors
 
 ## L-051 · 2026-08-08 · unpinned-shellcheck-makes-exact-set-ratchet-nondeterministic
 **What happened:** PR #142 removed `scripts/tests/loop-state.test.sh SC2218` from
