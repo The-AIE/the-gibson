@@ -2597,8 +2597,9 @@ export function classifyVerdictMatcherOperand(raw) {
 /**
  * Quote/comment walk matching boundedLineShellWords: single quotes are
  * literal; double quotes honor backslash; an unquoted `#` starts a
- * trailing shell comment. Used to keep case-arm collection off
- * inline-comment prose and quoted display text.
+ * trailing shell comment only at word start (index 0 or after space/tab).
+ * Mid-word `#` is ordinary text (e.g. tag=x#not-comment). Used to keep
+ * case-arm collection off inline-comment prose and quoted display text.
  */
 function stripUnquotedShellComment(line) {
   const src = String(line || "");
@@ -2629,7 +2630,13 @@ function stripUnquotedShellComment(line) {
       i += 2;
       continue;
     }
-    if (c === "#") return src.slice(0, i);
+    if (c === "#") {
+      if (i === 0 || src[i - 1] === " " || src[i - 1] === "\t") {
+        return src.slice(0, i);
+      }
+      i += 1;
+      continue;
+    }
     i += 1;
   }
   return src;
@@ -2939,6 +2946,13 @@ export function extractHarnessMatcherOperands(text) {
       unquotedRe.lastIndex = 0;
       let um;
       while ((um = unquotedRe.exec(executable)) !== null) {
+        // Escaped parentheses are printf/prose, not case-arm syntax.
+        const openEscaped =
+          um[1] === "(" && executable[um.index - 1] === "\\";
+        const closeIdx = executable.indexOf(")", um.index + um[0].length);
+        const closeEscaped =
+          closeIdx > 0 && executable[closeIdx - 1] === "\\";
+        if (openEscaped || closeEscaped) continue;
         const rawArm = String(um[2] || "");
         const verdictRel = rawArm.search(/VERDICT:/i);
         if (verdictRel < 0) continue;

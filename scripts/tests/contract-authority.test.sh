@@ -4624,6 +4624,26 @@ function unquotedGlobCommentAndQuotedProse() {
     "printf \"%s\\n\" \"example VERDICT:*PASS)\"",
   ].join("\n");
 }
+function midWordHashGlobPassArm() {
+  return [
+    "#!/bin/bash",
+    "tag=x#not-comment; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function escapedParenPrintfProse() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+    "printf '%s\\n' \\(VERDICT:\\*PASS\\)",
+  ].join("\n");
+}
 function mustBeIndeterminate(name, raw) {
   return () => {
     const kind = classifyVerdictMatcherOperand(raw);
@@ -5522,6 +5542,23 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "mid-word-hash-glob-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(midWordHashGlobPassArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "escaped-paren-printf-prose-not-false-red",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(escapedParenPrintfProse(), approveOnly),
+    }),
+    expectEmpty: true,
+  },
+  {
     name: "positive-heredoc-prompt-not-false-red",
     findings: () => reviewVerdictVocabularyFindings({
       agentsText,
@@ -6168,6 +6205,10 @@ const leadingStarGlobHarness =
   "#!/bin/bash\ncase \"$value\" in\n  *VERDICT:*PASS) : ;;\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const commentAndQuotedProseHarness =
   "#!/bin/bash\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n: # rejected pattern VERDICT:*PASS)\nprintf '%s\\n' \"example VERDICT:*PASS)\"\n";
+const midWordHashGlobHarness =
+  "#!/bin/bash\ntag=x#not-comment; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const escapedParenPrintfHarness =
+  "#!/bin/bash\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\nprintf '%s\\n' \\(VERDICT:\\*PASS\\)\n";
 const reviewer = {
   gates: ["never review own generation (Law 5)"],
   forbidden: [],
@@ -6539,6 +6580,52 @@ try {
         agentsText,
         harnessFiles: {
           "scripts/second-opinion.sh": commentAndQuotedProseHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `    if (c === "#") {
+      if (i === 0 || src[i - 1] === " " || src[i - 1] === "\\t") {
+        return src.slice(0, i);
+      }
+      i += 1;
+      continue;
+    }`;
+    const to = `    if (c === "#") return src.slice(0, i);`;
+    if (!original.includes(from)) throw new Error("mid-word hash comment-start site missing");
+    const mod = await loadMutant(original.replace(from, to), "midhash");
+    expectKilled(
+      "tooth-mid-word-hash-comment-boundary-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": midWordHashGlobHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `        // Escaped parentheses are printf/prose, not case-arm syntax.
+        const openEscaped =
+          um[1] === "(" && executable[um.index - 1] === "\\\\";
+        const closeIdx = executable.indexOf(")", um.index + um[0].length);
+        const closeEscaped =
+          closeIdx > 0 && executable[closeIdx - 1] === "\\\\";
+        if (openEscaped || closeEscaped) continue;`;
+    const to = `        if (false) continue;`;
+    if (!original.includes(from)) throw new Error("escaped-paren case-arm skip site missing");
+    const mod = await loadMutant(original.replace(from, to), "escparen");
+    expectRevives(
+      "tooth-escaped-paren-printf-prose-load-bearing",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": escapedParenPrintfHarness,
           "scripts/release-preflight.sh": approveOnly,
         },
       }),
@@ -7212,6 +7299,35 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: inline-comment and quoted-prose VERDICT:*PASS) are not case-arm sites"
 else
   bad "benign comment/quoted-prose case-arm (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'tag=x#not-comment; case "$1" in VERDICT:*PASS) printf HIT ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: mid-word # before VERDICT:*PASS) case arm fails closed"
+else
+  bad "mutation mid-word hash VERDICT:*PASS glob (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  "printf '%s\\n' \\(VERDICT:\\*PASS\\)" \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: escaped-paren printf \\(VERDICT:*PASS\\) is not a case-arm site"
+else
+  bad "benign escaped-paren printf prose (rc=$rc): $out"
 fi
 
 printf '%s\n' '#!/bin/bash' \
