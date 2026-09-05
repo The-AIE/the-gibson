@@ -2397,14 +2397,10 @@ echo
 GREPQ_HITS=$(perl -e '
 use strict; use warnings;
 
-# Grep options that consume the following word as a value (short letters, long names)
 my %ARG1_SHORT = map { $_ => 1 } qw(e f m A B C D d);
-my %ARG0_SHORT = map { $_ => 1 } split //, "qiEFGPwxvclLnHhosarRby";
 my %ARG1_LONG  = map { $_ => 1 } qw(regexp file max-count after-context before-context context devices directories label exclude exclude-from exclude-dir include binary-files);
 my %ARG0_LONG  = map { $_ => 1 } qw(ignore-case extended-regexp fixed-strings basic-regexp perl-regexp word-regexp line-regexp invert-match count files-with-matches files-without-match line-number with-filename no-filename only-matching no-messages text recursive dereference-recursive quiet silent);
 
-# Split a code-text line into shell-ish words (quote-aware, good enough for
-# test-fixture-style lines; not a full shell parser).
 sub words {
   my ($line) = @_;
   my @w; my $cur = ""; my $i = 0; my $n = length($line);
@@ -2426,11 +2422,11 @@ sub words {
   return @w;
 }
 
-# Does this "grep ARGS..." word list contain -q/--quiet/--silent as a real
-# flag (not consumed as another options value, not a bare positional)
+# Does a "grep ARGS..." word list contain -q/--quiet/--silent as a real
+# flag, correctly walking past value-consuming options and their values?
 sub grep_is_quiet {
   my (@w) = @_;
-  my $i = 1;  # skip element 0, which is the literal word "grep"/"egrep"
+  my $i = 1; # element 0 is the literal word "grep"/"egrep"
   while ($i < @w) {
     my $w = $w[$i];
     last if $w eq "--";
@@ -2440,31 +2436,82 @@ sub grep_is_quiet {
       if ($name eq "quiet" || $name eq "silent") { return 1; }
       if ($ARG1_LONG{$name}) { $i += ($eq ? 1 : 2); next; }
       if ($ARG0_LONG{$name}) { $i += 1; next; }
-      $i += 1; next; # unknown long option: assume no value consumed
-    }
-    if ($w =~ /^-([A-Za-z]+)$/) {
-      my $body = $1;
-      if (length($body) == 1 && $ARG1_SHORT{$body}) { $i += 2; next; } # consumes next word
-      if (length($body) > 1 && $ARG1_SHORT{substr($body,0,1)}) { $i += 1; next; } # attached value, e.g. -m1
-      return 1 if $body =~ /q/; # bundled zero-arg letters incl. q
       $i += 1; next;
     }
-    last; # first non-option word: stop (pattern/file)
+    if ($w =~ /^-(.+)$/) {
+      my $body = $1;
+      my $first = substr($body, 0, 1);
+      if ($ARG1_SHORT{$first}) {
+        # This whole word is one value-consuming option: -eSOMETHING (attached
+        # value, may be any characters incl. digits) or -e alone (consumes
+        # the next word). Either way this word contributes no quiet flag.
+        $i += (length($body) > 1 ? 1 : 2);
+        next;
+      }
+      # A bundle of independent zero-arg short flags: q may appear anywhere.
+      return 1 if $body =~ /q/;
+      $i += 1; next;
+    }
+    last; # first non-option word: stop this segment
   }
   return 0;
 }
 
+# Split code text into pipeline segments on an unescaped, non-"||" pipe
+# character, respecting single/double quotes. Returns (leading_text, seg1,
+# seg2, ...) where leading_text is everything before the first real pipe
+# (or the whole line if there is no pipe).
+sub pipe_segments {
+  my ($line) = @_;
+  my @segs; my $cur = ""; my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { $cur .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+    if ($in_d) {
+      if ($c eq chr(92) && $i + 1 < $n) { $cur .= substr($line, $i, 2); $i += 2; next; }
+      $cur .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $cur .= $c; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $cur .= $c; $i++; next; }
+    if ($c eq "|") {
+      if ($i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= "||"; $i += 2; next; }
+      push @segs, $cur; $cur = ""; $i++; next;
+    }
+    $cur .= $c; $i++;
+  }
+  push @segs, $cur;
+  return @segs;
+}
+
+sub segment_is_quiet_grep {
+  my ($seg) = @_;
+  return 0 unless $seg =~ /^[ \t]*(grep|egrep)\b(.*)$/;
+  my ($name, $rest) = ($1, $2);
+  return grep_is_quiet($name, words($rest));
+}
+
+my $yaml_block_scalar_re = qr/^[\w.\-]+:\s*[|>][+\-0-9]*\s*$/;
+
+# Emits JS code with comments removed and string/template literals
+# UNWRAPPED to their runtime value (delimiter quotes dropped, backslash
+# escapes resolved). A string passed to an exec-like call (execSync, etc.)
+# often IS the real shell command at runtime, so its unwrapped content is
+# scanned as shell text, same as any other code on the line; an inert
+# string that merely contains matching text is a rare, acceptable false
+# positive for this ratchet (see PR discussion). Quote state (in_s/in_d/
+# in_t) and block-comment state persist ACROSS lines: a template literal
+# or an unclosed /* may legitimately span multiple physical lines.
 sub mjs_code_lines {
   my ($path) = @_;
   open my $fh, "<", $_ or return ();
   my @raw = <$fh>; close $fh;
   my @out;
-  my $in_block = 0;
+  my $in_block = 0; my $in_s = 0; my $in_d = 0; my $in_t = 0;
   for my $line (@raw) {
     chomp $line;
     my $code = "";
     my $i = 0; my $n = length($line);
-    my $in_s = 0; my $in_d = 0; my $in_t = 0;
     while ($i < $n) {
       if ($in_block) {
         my $close = index($line, "*/", $i);
@@ -2472,13 +2519,25 @@ sub mjs_code_lines {
         $i = $close + 2; $in_block = 0; next;
       }
       my $c = substr($line, $i, 1);
-      if ($in_s) { $code .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
-      if ($in_d) { $code .= $c; $i++; $in_d = 0 if $c eq chr(34); next; }
-      if ($in_t) { $code .= $c; $i++; $in_t = 0 if $c eq chr(96); next; }
-      if ($c eq chr(39)) { $in_s = 1; $code .= $c; $i++; next; }
-      if ($c eq chr(34)) { $in_d = 1; $code .= $c; $i++; next; }
-      if ($c eq chr(96)) { $in_t = 1; $code .= $c; $i++; next; }
-      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "/") { last; } # line comment: stop
+      if ($in_s) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_s = 0 if $c eq chr(39); next if $c eq chr(39);
+        $code .= $c; next;
+      }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_d = 0 if $c eq chr(34); next if $c eq chr(34);
+        $code .= $c; next;
+      }
+      if ($in_t) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_t = 0 if $c eq chr(96); next if $c eq chr(96);
+        $code .= $c; next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+      if ($c eq chr(96)) { $in_t = 1; $i++; next; }
+      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "/") { last; }
       if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "*") {
         my $close = index($line, "*/", $i + 2);
         if ($close == -1) { $in_block = 1; $i = $n; last; }
@@ -2498,15 +2557,25 @@ sub sh_code_lines {
   my @out;
   for my $line (@raw) {
     chomp $line;
-    (my $trim = $line) =~ s/^\s+//;
-    push @out, ($trim =~ /^#/) ? "" : $line;
+    my $code = "";
+    my $i = 0; my $n = length($line);
+    my $in_s = 0; my $in_d = 0;
+    while ($i < $n) {
+      my $c = substr($line, $i, 1);
+      if ($in_s) { $code .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i, 2); $i += 2; next; }
+        $code .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $code .= $c; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $code .= $c; $i++; next; }
+      if ($c eq "#") { last; }
+      $code .= $c; $i++;
+    }
+    push @out, $code;
   }
   return @out;
 }
-
-# A YAML block-scalar header ("run: |", "script: |-", "run: |2", "cmd: >+")
-# is not a shell pipe continuation, even though it ends in a pipe character.
-my $yaml_block_scalar_re = qr/^[\w.\-]+:\s*[|>][+\-0-9]*\s*$/;
 
 sub scan_file {
   my ($path) = @_;
@@ -2516,30 +2585,21 @@ sub scan_file {
   for my $i (0 .. $#lines) {
     my $line = $lines[$i];
     (my $trim = $line) =~ s/^\s+//;
-    # same-line: split on the LAST unescaped pipe that is not part of a double pipe,
-    # then check whether the segment after it is a grep invocation with -q.
-    my ($same_line_grep_name, $same_line_grep_rest);
-    if ($line =~ /(?:^|[^|])\|[ \t]*(grep|egrep)\b(.*)$/) {
-      ($same_line_grep_name, $same_line_grep_rest) = ($1, $2);
+    my @segs = pipe_segments($line);
+    my $hit = 0;
+    for my $s (1 .. $#segs) {
+      if (segment_is_quiet_grep($segs[$s])) { $hit = 1; last; }
     }
-    if (defined $same_line_grep_name) {
-      my @w = ($same_line_grep_name, words($same_line_grep_rest));
-      if (grep_is_quiet(@w)) {
-        print "$path:" . ($i + 1) . ": $line\n";
-        $prev_trim = $trim if $trim ne "";
-        next;
-      }
+    if ($hit) {
+      print "$path:" . ($i + 1) . ": $line\n";
+      $prev_trim = $trim if $trim ne "";
+      next;
     }
-    my $prev_is_continuation = ($prev_trim =~ /(?<!\|)\|$/) && ($prev_trim !~ $yaml_block_scalar_re);
-    my ($bare_grep_name, $bare_grep_rest);
-    if ($line =~ /^[ \t]*(grep|egrep)\b(.*)$/) {
-      ($bare_grep_name, $bare_grep_rest) = ($1, $2);
-    }
-    if ($prev_is_continuation && defined $bare_grep_name) {
-      my @w = ($bare_grep_name, words($bare_grep_rest));
-      if (grep_is_quiet(@w)) {
-        print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
-      }
+    if (@segs == 1
+        && $prev_trim =~ /(?<!\|)\|$/
+        && $prev_trim !~ $yaml_block_scalar_re
+        && segment_is_quiet_grep($segs[0])) {
+      print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
     }
     $prev_trim = $trim if $trim ne "";
   }
@@ -2565,14 +2625,10 @@ grepq_scan() {
   ( cd "$GREPQ_MUT" && perl -e '
 use strict; use warnings;
 
-# Grep options that consume the following word as a value (short letters, long names)
 my %ARG1_SHORT = map { $_ => 1 } qw(e f m A B C D d);
-my %ARG0_SHORT = map { $_ => 1 } split //, "qiEFGPwxvclLnHhosarRby";
 my %ARG1_LONG  = map { $_ => 1 } qw(regexp file max-count after-context before-context context devices directories label exclude exclude-from exclude-dir include binary-files);
 my %ARG0_LONG  = map { $_ => 1 } qw(ignore-case extended-regexp fixed-strings basic-regexp perl-regexp word-regexp line-regexp invert-match count files-with-matches files-without-match line-number with-filename no-filename only-matching no-messages text recursive dereference-recursive quiet silent);
 
-# Split a code-text line into shell-ish words (quote-aware, good enough for
-# test-fixture-style lines; not a full shell parser).
 sub words {
   my ($line) = @_;
   my @w; my $cur = ""; my $i = 0; my $n = length($line);
@@ -2594,11 +2650,11 @@ sub words {
   return @w;
 }
 
-# Does this "grep ARGS..." word list contain -q/--quiet/--silent as a real
-# flag (not consumed as another options value, not a bare positional)
+# Does a "grep ARGS..." word list contain -q/--quiet/--silent as a real
+# flag, correctly walking past value-consuming options and their values?
 sub grep_is_quiet {
   my (@w) = @_;
-  my $i = 1;  # skip element 0, which is the literal word "grep"/"egrep"
+  my $i = 1; # element 0 is the literal word "grep"/"egrep"
   while ($i < @w) {
     my $w = $w[$i];
     last if $w eq "--";
@@ -2608,31 +2664,82 @@ sub grep_is_quiet {
       if ($name eq "quiet" || $name eq "silent") { return 1; }
       if ($ARG1_LONG{$name}) { $i += ($eq ? 1 : 2); next; }
       if ($ARG0_LONG{$name}) { $i += 1; next; }
-      $i += 1; next; # unknown long option: assume no value consumed
-    }
-    if ($w =~ /^-([A-Za-z]+)$/) {
-      my $body = $1;
-      if (length($body) == 1 && $ARG1_SHORT{$body}) { $i += 2; next; } # consumes next word
-      if (length($body) > 1 && $ARG1_SHORT{substr($body,0,1)}) { $i += 1; next; } # attached value, e.g. -m1
-      return 1 if $body =~ /q/; # bundled zero-arg letters incl. q
       $i += 1; next;
     }
-    last; # first non-option word: stop (pattern/file)
+    if ($w =~ /^-(.+)$/) {
+      my $body = $1;
+      my $first = substr($body, 0, 1);
+      if ($ARG1_SHORT{$first}) {
+        # This whole word is one value-consuming option: -eSOMETHING (attached
+        # value, may be any characters incl. digits) or -e alone (consumes
+        # the next word). Either way this word contributes no quiet flag.
+        $i += (length($body) > 1 ? 1 : 2);
+        next;
+      }
+      # A bundle of independent zero-arg short flags: q may appear anywhere.
+      return 1 if $body =~ /q/;
+      $i += 1; next;
+    }
+    last; # first non-option word: stop this segment
   }
   return 0;
 }
 
+# Split code text into pipeline segments on an unescaped, non-"||" pipe
+# character, respecting single/double quotes. Returns (leading_text, seg1,
+# seg2, ...) where leading_text is everything before the first real pipe
+# (or the whole line if there is no pipe).
+sub pipe_segments {
+  my ($line) = @_;
+  my @segs; my $cur = ""; my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { $cur .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+    if ($in_d) {
+      if ($c eq chr(92) && $i + 1 < $n) { $cur .= substr($line, $i, 2); $i += 2; next; }
+      $cur .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $cur .= $c; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $cur .= $c; $i++; next; }
+    if ($c eq "|") {
+      if ($i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= "||"; $i += 2; next; }
+      push @segs, $cur; $cur = ""; $i++; next;
+    }
+    $cur .= $c; $i++;
+  }
+  push @segs, $cur;
+  return @segs;
+}
+
+sub segment_is_quiet_grep {
+  my ($seg) = @_;
+  return 0 unless $seg =~ /^[ \t]*(grep|egrep)\b(.*)$/;
+  my ($name, $rest) = ($1, $2);
+  return grep_is_quiet($name, words($rest));
+}
+
+my $yaml_block_scalar_re = qr/^[\w.\-]+:\s*[|>][+\-0-9]*\s*$/;
+
+# Emits JS code with comments removed and string/template literals
+# UNWRAPPED to their runtime value (delimiter quotes dropped, backslash
+# escapes resolved). A string passed to an exec-like call (execSync, etc.)
+# often IS the real shell command at runtime, so its unwrapped content is
+# scanned as shell text, same as any other code on the line; an inert
+# string that merely contains matching text is a rare, acceptable false
+# positive for this ratchet (see PR discussion). Quote state (in_s/in_d/
+# in_t) and block-comment state persist ACROSS lines: a template literal
+# or an unclosed /* may legitimately span multiple physical lines.
 sub mjs_code_lines {
   my ($path) = @_;
   open my $fh, "<", $_ or return ();
   my @raw = <$fh>; close $fh;
   my @out;
-  my $in_block = 0;
+  my $in_block = 0; my $in_s = 0; my $in_d = 0; my $in_t = 0;
   for my $line (@raw) {
     chomp $line;
     my $code = "";
     my $i = 0; my $n = length($line);
-    my $in_s = 0; my $in_d = 0; my $in_t = 0;
     while ($i < $n) {
       if ($in_block) {
         my $close = index($line, "*/", $i);
@@ -2640,13 +2747,25 @@ sub mjs_code_lines {
         $i = $close + 2; $in_block = 0; next;
       }
       my $c = substr($line, $i, 1);
-      if ($in_s) { $code .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
-      if ($in_d) { $code .= $c; $i++; $in_d = 0 if $c eq chr(34); next; }
-      if ($in_t) { $code .= $c; $i++; $in_t = 0 if $c eq chr(96); next; }
-      if ($c eq chr(39)) { $in_s = 1; $code .= $c; $i++; next; }
-      if ($c eq chr(34)) { $in_d = 1; $code .= $c; $i++; next; }
-      if ($c eq chr(96)) { $in_t = 1; $code .= $c; $i++; next; }
-      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "/") { last; } # line comment: stop
+      if ($in_s) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_s = 0 if $c eq chr(39); next if $c eq chr(39);
+        $code .= $c; next;
+      }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_d = 0 if $c eq chr(34); next if $c eq chr(34);
+        $code .= $c; next;
+      }
+      if ($in_t) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_t = 0 if $c eq chr(96); next if $c eq chr(96);
+        $code .= $c; next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+      if ($c eq chr(96)) { $in_t = 1; $i++; next; }
+      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "/") { last; }
       if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "*") {
         my $close = index($line, "*/", $i + 2);
         if ($close == -1) { $in_block = 1; $i = $n; last; }
@@ -2666,15 +2785,25 @@ sub sh_code_lines {
   my @out;
   for my $line (@raw) {
     chomp $line;
-    (my $trim = $line) =~ s/^\s+//;
-    push @out, ($trim =~ /^#/) ? "" : $line;
+    my $code = "";
+    my $i = 0; my $n = length($line);
+    my $in_s = 0; my $in_d = 0;
+    while ($i < $n) {
+      my $c = substr($line, $i, 1);
+      if ($in_s) { $code .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i, 2); $i += 2; next; }
+        $code .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $code .= $c; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $code .= $c; $i++; next; }
+      if ($c eq "#") { last; }
+      $code .= $c; $i++;
+    }
+    push @out, $code;
   }
   return @out;
 }
-
-# A YAML block-scalar header ("run: |", "script: |-", "run: |2", "cmd: >+")
-# is not a shell pipe continuation, even though it ends in a pipe character.
-my $yaml_block_scalar_re = qr/^[\w.\-]+:\s*[|>][+\-0-9]*\s*$/;
 
 sub scan_file {
   my ($path) = @_;
@@ -2684,30 +2813,21 @@ sub scan_file {
   for my $i (0 .. $#lines) {
     my $line = $lines[$i];
     (my $trim = $line) =~ s/^\s+//;
-    # same-line: split on the LAST unescaped pipe that is not part of a double pipe,
-    # then check whether the segment after it is a grep invocation with -q.
-    my ($same_line_grep_name, $same_line_grep_rest);
-    if ($line =~ /(?:^|[^|])\|[ \t]*(grep|egrep)\b(.*)$/) {
-      ($same_line_grep_name, $same_line_grep_rest) = ($1, $2);
+    my @segs = pipe_segments($line);
+    my $hit = 0;
+    for my $s (1 .. $#segs) {
+      if (segment_is_quiet_grep($segs[$s])) { $hit = 1; last; }
     }
-    if (defined $same_line_grep_name) {
-      my @w = ($same_line_grep_name, words($same_line_grep_rest));
-      if (grep_is_quiet(@w)) {
-        print "$path:" . ($i + 1) . ": $line\n";
-        $prev_trim = $trim if $trim ne "";
-        next;
-      }
+    if ($hit) {
+      print "$path:" . ($i + 1) . ": $line\n";
+      $prev_trim = $trim if $trim ne "";
+      next;
     }
-    my $prev_is_continuation = ($prev_trim =~ /(?<!\|)\|$/) && ($prev_trim !~ $yaml_block_scalar_re);
-    my ($bare_grep_name, $bare_grep_rest);
-    if ($line =~ /^[ \t]*(grep|egrep)\b(.*)$/) {
-      ($bare_grep_name, $bare_grep_rest) = ($1, $2);
-    }
-    if ($prev_is_continuation && defined $bare_grep_name) {
-      my @w = ($bare_grep_name, words($bare_grep_rest));
-      if (grep_is_quiet(@w)) {
-        print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
-      }
+    if (@segs == 1
+        && $prev_trim =~ /(?<!\|)\|$/
+        && $prev_trim !~ $yaml_block_scalar_re
+        && segment_is_quiet_grep($segs[0])) {
+      print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
     }
     $prev_trim = $trim if $trim ne "";
   }
@@ -2776,6 +2896,26 @@ printf 'yes x %s %s -e x -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
 : > "$GREPQ_MUT/scripts/tests/planted.sh"
 printf 'run: |\n  %s -q pattern file\n' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
 [ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: yaml block-scalar header mistaken for a pipe continuation]"
+: > "$GREPQ_MUT/.github/workflows/planted.yml"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'yes x %s %s -m1 -q x\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [attached-digit short option grep -m1 -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s %s -v z %s %s -q x\n' '|' "$GQ" '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [second grep in a multi-segment pipeline missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'execSync("printf \\"https://example.test\\" %s %s -q ok")\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs escaped-quote string content missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+printf 'const t = `\nhttps://x %s\n  %s -q y\n`;\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs multiline template literal missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+printf 'echo ok # example: yes x %s %s -q x\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: sh trailing inline # comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'run: echo ok # example: yes x %s %s -q x\n' '|' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: yaml trailing inline # comment]"
 : > "$GREPQ_MUT/.github/workflows/planted.yml"
 rm -rf "$GREPQ_MUT"
 if [ -z "$GREPQ_MISSED" ]; then
