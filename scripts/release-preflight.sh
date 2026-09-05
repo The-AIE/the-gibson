@@ -430,8 +430,9 @@ if [[ -n "$VERDICT_TEXT" ]]; then
   elif [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
     BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
   elif echo "$VERDICT_TEXT" | grep -i 'REQUEST_CHANGES' >/dev/null; then
-    BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ("\
-"$VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
+    _msg="reviewer posted VERDICT: REQUEST_CHANGES ("
+    _msg+="$VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})"
+    BLOCKERS+=("$_msg")
   elif echo "$VERDICT_TEXT" | grep -i 'APPROVE' >/dev/null; then
     if [[ -z "$VERDICT_LOGIN" ]]; then
       # Defensive: authorless APPROVE is filtered above; still fail closed.
@@ -444,11 +445,13 @@ if [[ -n "$VERDICT_TEXT" ]]; then
       # L-015: GitHub refuses self-approval, so the comment is the only signal
       # the solo loop can produce. Real, but it is not an independent identity.
       SAME_AUTHOR_REVIEW=1
-      ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ("\
-"$AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
+      _msg="L-015/L-021: VERDICT: APPROVE came from the PR author ("
+      _msg+="$AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback."
+      ADMIN_REASONS+=("$_msg")
     else
-      NOTES+=("VERDICT: APPROVE from "\
-"$VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity)")
+      _msg="VERDICT: APPROVE from "
+      _msg+="$VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity)"
+      NOTES+=("$_msg")
     fi
   else
     BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")
