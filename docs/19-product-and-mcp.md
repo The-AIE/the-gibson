@@ -13,6 +13,13 @@ nav_order: 19
 > open-source toolkit relates to the paid guided experience. It is the business and
 > product map, not day-to-day operator steps.
 
+> **Implementation status (verified 2026-09-05):** this chapter describes the
+> intended product front door, not a claim that the Foreman MCP tools below are
+> shipped in this repository. The currently available open-source journey is
+> [QUICKSTART](../QUICKSTART.md) plus the [adoption playbook](../playbooks/adopt.md).
+> The zero-ceremony setup remains tracked by
+> [issue #176](https://github.com/The-AIE/the-gibson/issues/176).
+
 *(Names confirmed 2026-07-24: **Foreman** and **CodeWright**.)*
 
 ## The naming system (the whole product in one story)
@@ -61,6 +68,30 @@ promoted to a full product: **tools that return skills** — procedural knowledg
 served just-in-time, versioned server-side (updating a skill updates every user's
 next session, no client change), with the doctrine's guardrails embedded in the
 tool output itself.
+
+## Intended customer journey
+
+Foreman removes the repository-path ceremony from the open-source operator
+journey; it does not remove the consequences or owner gates:
+
+1. The user connects Foreman to the assistant they already use.
+2. They select or authorize one GitHub application repository.
+3. CodeWright asks only the business questions that change the recommendation
+   and produces a plain-language Blueprint.
+4. Foreman audits the repository read-only and explains the highest-impact gaps.
+5. Foreman prepares an adoption pull request; the user reviews what it does,
+   why it is needed, and its risks before approving it.
+6. The user requests features and fixes in normal language, oriented around their
+   application rather than around the Gibson repository.
+7. Foreman runs the delivery loop and interrupts only with bounded decision cards
+   for genuine owner actions.
+8. The user receives verified completion and status summaries in the same chat.
+
+The underlying repository boundary does not change: Gibson supplies the harness,
+while every application mutation occurs in a target-repo worktree. Foreman simply
+binds those two roles server-side so the customer does not have to manage local
+paths. Until that product front door ships, operators follow the canonical
+[two-repository journey in doc 13](13-adoption.md#repository-boundary-and-user-journey).
 
 ## Tool surface (v1)
 
