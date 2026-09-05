@@ -1,0 +1,825 @@
+diff --git a/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx b/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx
+index 43bae4f..1fba8b4 100644
+--- a/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx
+@@ -10,6 +10,7 @@ import { useRouter } from 'next/navigation';
+ import { Handshake, Pencil, Plus, Trash2, X } from 'lucide-react';
+ import type { CommunityPartnerRow } from '@/lib/community-partners';
+ import type { CommunityPartnerFormInput } from '@/lib/community-partners-core';
++import { EventImageUploadButton } from '@/components/organizer/event-image-upload-button';
+ import {
+   createCommunityPartnerAction,
+   updateCommunityPartnerAction,
+@@ -198,16 +199,43 @@ export default function CommunityPartnersManager({
+                 placeholder="Meetup, nonprofit, or community org"
+               />
+             </label>
+-            <label className="block text-sm text-gray-300">
+-              Logo URL
+-              <input
+-                type="url"
+-                value={form.logoUrl}
+-                onChange={(e) => setForm((f) => ({ ...f, logoUrl: e.target.value }))}
+-                className={fieldClass}
+-                placeholder="https://…"
+-              />
+-            </label>
++            <div className="block text-sm text-gray-300">
++              <span className="block">Logo</span>
++              <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-start">
++                <input
++                  type="url"
++                  value={form.logoUrl}
++                  onChange={(e) =>
++                    setForm((f) => ({ ...f, logoUrl: e.target.value }))
++                  }
++                  className={`${fieldClass} mt-0 min-w-0 flex-1`}
++                  placeholder="https://… or upload"
++                  aria-label="Logo URL"
++                />
++                <EventImageUploadButton
++                  eventId={eventId}
++                  kind="logo"
++                  disabled={isPending}
++                  onUploaded={(url) =>
++                    setForm((f) => ({ ...f, logoUrl: url }))
++                  }
++                />
++              </div>
++              <span className="mt-1 block text-xs text-gray-500">
++                Upload a PNG, JPG, or WebP (max 4MB), or paste an https:// image
++                URL. Do not paste an inlined image (data:…).
++              </span>
++              {form.logoUrl.trim() ? (
++                <div className="mt-2 inline-flex h-10 items-center rounded border border-gray-600 bg-white px-2">
++                  {/* eslint-disable-next-line @next/next/no-img-element */}
++                  <img
++                    src={form.logoUrl.trim()}
++                    alt=""
++                    className="max-h-8 max-w-[120px] object-contain"
++                  />
++                </div>
++              ) : null}
++            </div>
+             <label className="block text-sm text-gray-300">
+               Free-pass quota <span className="text-red-400">*</span>
+               <input
+diff --git a/src/app/(admin)/organizer/events/[slug]/settings/sections/attendee-organizations.tsx b/src/app/(admin)/organizer/events/[slug]/settings/sections/attendee-organizations.tsx
+index 3471be7..ab0dcec 100644
+--- a/src/app/(admin)/organizer/events/[slug]/settings/sections/attendee-organizations.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/settings/sections/attendee-organizations.tsx
+@@ -9,6 +9,7 @@ import { useState } from 'react';
+ import { ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react';
+ import { toast } from 'sonner';
+ import { urlFieldError } from '@/lib/url-field-guard';
++import { EventImageUploadButton } from '@/components/organizer/event-image-upload-button';
+ import {
+   createAttendeeOrganization,
+   deleteAttendeeOrganization,
+@@ -34,24 +35,10 @@ interface AttendeeOrganizationsSectionProps {
+  * #322: organizer CRUD for the public event hero logo marquee.
+  * Empty list → marquee omitted on the public page (no placeholders).
+  *
+- * Logo field is a plain HTTPS URL (same pattern as branding/logo fields),
+- * NOT a file upload — a deliberate, documented judgment call from the round-1
+- * Codex review, still open for the next round:
+- *
+- * Issue #322's acceptance criteria literally said "name + logo upload," and
+- * this codebase now has a working UploadThing pipeline (#972 Production Hub
+- * attachments) with exactly the exact-MIME-allowlist pattern (no SVG) this
+- * field would want. Wiring it here would still be schema-free — an upload
+- * flow can populate this same `logoUrl String?` field — but the router
+- * lives in `src/app/api/uploadthing/core.ts`, which is a #972 Production Hub
+- * file this round is explicitly scoped to leave untouched. Bolting on a
+- * second FileRouter (new auth check, new MIME allowlist, new client upload
+- * button) to reuse the *pattern* without touching that file is a real option,
+- * but it is new Tier-C-adjacent surface area (auth + upload + persistence)
+- * on top of the four HIGH + five MEDIUM fixes already landing in this round,
+- * and it deserves its own focused review rather than being squeezed in here.
+- * Kept URL-only for round 1; the next review round should decide whether to
+- * spend that upload-wiring effort now.
++ * Logo uses the shared eventImage UploadThing path (#1099) so organizers
++ * upload a file and persist a hosted URL — same pipeline as event banner /
++ * logo / hero and community-partner logos. Manual HTTPS URL paste still
++ * works; inlined `data:` images are rejected by urlFieldError.
+  */
+ export default function AttendeeOrganizationsSection({
+   eventId,
+@@ -203,6 +190,7 @@ export default function AttendeeOrganizationsSection({
+           {orgs.map((org, index) => (
+             <AttendeeOrgRow
+               key={org.id}
++              eventId={eventId}
+               org={org}
+               index={index}
+               total={orgs.length}
+@@ -240,17 +228,28 @@ export default function AttendeeOrganizationsSection({
+               htmlFor="attendee-org-new-logo"
+               className="mb-1 block text-xs font-medium text-gray-400"
+             >
+-              Logo URL (optional)
++              Logo (optional)
+             </label>
+-            <input
+-              id="attendee-org-new-logo"
+-              type="url"
+-              value={newLogoUrl}
+-              onChange={(e) => setNewLogoUrl(e.target.value)}
+-              placeholder="https://example.com/logo.svg"
+-              className="w-full rounded-md border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white"
+-              disabled={isBusy}
+-            />
++            <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
++              <input
++                id="attendee-org-new-logo"
++                type="url"
++                value={newLogoUrl}
++                onChange={(e) => setNewLogoUrl(e.target.value)}
++                placeholder="https://… or upload"
++                className="min-w-0 w-full flex-1 rounded-md border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white"
++                disabled={isBusy}
++              />
++              <EventImageUploadButton
++                eventId={eventId}
++                kind="logo"
++                disabled={isBusy}
++                onUploaded={setNewLogoUrl}
++              />
++            </div>
++            <p className="mt-1 text-xs text-gray-500">
++              Upload PNG, JPG, or WebP (max 4MB), or paste an https:// URL.
++            </p>
+           </div>
+         </div>
+         <button
+@@ -277,6 +276,7 @@ export default function AttendeeOrganizationsSection({
+ }
+ 
+ function AttendeeOrgRow({
++  eventId,
+   org,
+   index,
+   total,
+@@ -285,6 +285,7 @@ function AttendeeOrgRow({
+   onSave,
+   onDelete,
+ }: {
++  eventId: string;
+   org: AttendeeOrganizationDto;
+   index: number;
+   total: number;
+@@ -332,15 +333,23 @@ function AttendeeOrgRow({
+           className="w-full rounded-md border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white"
+           disabled={disabled}
+         />
+-        <input
+-          type="url"
+-          value={logoUrl}
+-          onChange={(e) => setLogoUrl(e.target.value)}
+-          aria-label={`Logo URL for ${org.name}`}
+-          placeholder="https://example.com/logo.svg"
+-          className="w-full rounded-md border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white"
+-          disabled={disabled}
+-        />
++        <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
++          <input
++            type="url"
++            value={logoUrl}
++            onChange={(e) => setLogoUrl(e.target.value)}
++            aria-label={`Logo URL for ${org.name}`}
++            placeholder="https://… or upload"
++            className="min-w-0 w-full flex-1 rounded-md border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white"
++            disabled={disabled}
++          />
++          <EventImageUploadButton
++            eventId={eventId}
++            kind="logo"
++            disabled={disabled}
++            onUploaded={setLogoUrl}
++          />
++        </div>
+         {logoUrl.trim() ? (
+           <div
+             className="inline-block rounded-md p-2"
+diff --git a/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx b/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx
+index c4f7e54..ad732ec 100644
+--- a/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/settings/sections/event-details.tsx
+@@ -21,7 +21,7 @@ import {
+   type ScheduleOnDateChange,
+ } from '../actions';
+ import { toast } from 'sonner';
+-import { EventImageUploadButton } from './event-image-upload';
++import { EventImageUploadButton } from '@/components/organizer/event-image-upload-button';
+ // Reused destructive-action confirmation pattern (#322 / #1193): ConfirmDialog
+ // is the only structured confirm dialog in this codebase (schedule-builder,
+ // attendee-organizations, task-collab-panel). Import across the settings/
+diff --git a/src/app/(admin)/organizer/events/[slug]/settings/sections/event-image-upload.tsx b/src/app/(admin)/organizer/events/[slug]/settings/sections/event-image-upload.tsx
+index cfc6378..ea4f353 100644
+--- a/src/app/(admin)/organizer/events/[slug]/settings/sections/event-image-upload.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/settings/sections/event-image-upload.tsx
+@@ -5,89 +5,7 @@
+  * via any medium, is strictly prohibited.
+  */
+ 
+-import { toast } from 'sonner';
+-import { UploadButton } from '@/lib/uploadthing';
+-import { extractUploadRejectionMessage } from '@/lib/project-collab-core';
+-import type { EventImageKind } from '@/lib/event-image-upload';
+-
+-type EventImageUploadButtonProps = {
+-  eventId: string;
+-  kind: EventImageKind;
+-  /** Called with the hosted UploadThing URL after a successful upload. */
+-  onUploaded: (url: string) => void;
+-  disabled?: boolean;
+-};
+-
+-/**
+- * UploadThing button that populates an existing controlled image-URL input
+- * (#1099). Manual paste into the URL field continues to work unchanged —
+- * this only *writes* the hosted URL into parent state on success.
+- */
+-export function EventImageUploadButton({
+-  eventId,
+-  kind,
+-  onUploaded,
+-  disabled = false,
+-}: EventImageUploadButtonProps) {
+-  return (
+-    <div
+-      className={
+-        disabled
+-          ? 'pointer-events-none opacity-50'
+-          : 'shrink-0 [&_label]:cursor-pointer'
+-      }
+-      aria-disabled={disabled || undefined}
+-    >
+-      <UploadButton
+-        endpoint="eventImage"
+-        input={{ eventId, kind }}
+-        onClientUploadComplete={(res) => {
+-          // Surface server-side post-upload rejections instead of silently
+-          // ignoring `{ ok: false }` (same discipline as task attachments).
+-          const rejectionMessage = extractUploadRejectionMessage(res);
+-          if (rejectionMessage) {
+-            toast.error(rejectionMessage);
+-            return;
+-          }
+-          const first = res?.[0];
+-          const serverData = first?.serverData as
+-            | { ok?: boolean; url?: string }
+-            | undefined;
+-          const url =
+-            (serverData?.ok !== false && serverData?.url) ||
+-            first?.ufsUrl ||
+-            first?.url;
+-          if (!url || typeof url !== 'string') {
+-            toast.error('Upload completed but no URL was returned');
+-            return;
+-          }
+-          onUploaded(url);
+-          toast.success(
+-            kind === 'logo'
+-              ? 'Logo uploaded'
+-              : kind === 'hero'
+-                ? 'Hero image uploaded'
+-                : 'Banner uploaded'
+-          );
+-        }}
+-        onUploadError={(error) => {
+-          toast.error(error.message || 'Upload failed');
+-        }}
+-        appearance={{
+-          button:
+-            'ut-ready:bg-gray-800 ut-uploading:bg-gray-700 text-xs text-gray-200 rounded-md px-3 py-2 border border-gray-600 hover:bg-gray-700',
+-          allowedContent: 'text-[10px] text-gray-500',
+-          container: 'flex flex-col items-start gap-1',
+-        }}
+-        content={{
+-          button({ ready, isUploading }) {
+-            if (isUploading) return 'Uploading…';
+-            if (ready) return 'Upload';
+-            return 'Preparing…';
+-          },
+-          allowedContent: 'PNG, JPG, or WebP',
+-        }}
+-      />
+-    </div>
+-  );
+-}
++/** @deprecated Import from `@/components/organizer/event-image-upload-button`. */
++export {
++  EventImageUploadButton,
++} from '@/components/organizer/event-image-upload-button';
+diff --git a/src/app/(admin)/organizer/events/[slug]/settings/sections/public-page.tsx b/src/app/(admin)/organizer/events/[slug]/settings/sections/public-page.tsx
+index 60a0b47..12476d4 100644
+--- a/src/app/(admin)/organizer/events/[slug]/settings/sections/public-page.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/settings/sections/public-page.tsx
+@@ -53,7 +53,7 @@ import {
+   type EventPageSectionDto,
+ } from '../actions';
+ import AttendeeOrganizationsSection from './attendee-organizations';
+-import { EventImageUploadButton } from './event-image-upload';
++import { EventImageUploadButton } from '@/components/organizer/event-image-upload-button';
+ 
+ interface PublicPageSectionProps {
+   event: Event;
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts b/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
+index 3c76b48..927458f 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
+@@ -403,6 +403,21 @@ export async function addSponsorAction(slug: string, eventId: string, input: Spo
+   }
+ }
+ 
++export async function setEventSponsorLogoAction(
++  slug: string,
++  eventSponsorId: string,
++  logoUrl: string | null
++): Promise<ActionResult> {
++  try {
++    await requireAdmin();
++    await sponsorship.setEventSponsorLogo(eventSponsorId, logoUrl);
++    refresh(slug);
++    return { success: true };
++  } catch (error) {
++    return fail(error);
++  }
++}
++
+ export async function setSponsorPaidAction(slug: string, eventSponsorId: string, paid: boolean): Promise<ActionResult> {
+   try {
+     await requireAdmin();
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
+index a54199f..80e62fa 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
+@@ -45,6 +45,7 @@ import {
+   getVenueLayoutsForEventAction,
+   instantiateVenueBoothsAction,
+   addSponsorAction,
++  setEventSponsorLogoAction,
+   setSponsorPaidAction,
+   removeSponsorAction,
+   setBenefitStatusAction,
+@@ -54,6 +55,7 @@ import {
+   allocateCompTicketsAction
+ } from './actions';
+ import { EmptyState, ErrorBanner } from '@/components/organizer';
++import { EventImageUploadButton } from '@/components/organizer/event-image-upload-button';
+ 
+ type TierFull = SponsorTier & {
+   benefitItems: SponsorBenefit[];
+@@ -133,7 +135,14 @@ const emptyBenefitForm = {
+ };
+ const emptyAddOnForm = { name: '', description: '', price: '', inventory: '1' };
+ const emptyBoothForm = { sizeLabel: '10x10', prefix: '', startNumber: '101', count: '10', price: '' };
+-const emptySponsorForm = { companyName: '', contactName: '', contactEmail: '', website: '', tierId: '' };
++const emptySponsorForm = {
++  companyName: '',
++  contactName: '',
++  contactEmail: '',
++  website: '',
++  logoUrl: '',
++  tierId: '',
++};
+ 
+ export default function SponsorshipManager({
+   eventId,
+@@ -1542,6 +1551,7 @@ function SponsorsTab({
+         contactName: form.contactName,
+         contactEmail: form.contactEmail,
+         website: form.website || null,
++        logoUrl: form.logoUrl || null,
+         tierId: form.tierId,
+       })
+     );
+@@ -1576,6 +1586,28 @@ function SponsorsTab({
+             <input required value={form.contactName} onChange={(e) => setForm({ ...form, contactName: e.target.value })} className={inputClass} placeholder="Contact name *" />
+             <input required type="email" value={form.contactEmail} onChange={(e) => setForm({ ...form, contactEmail: e.target.value })} className={inputClass} placeholder="Contact email *" />
+             <input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} className={inputClass} placeholder="Website (https://…)" />
++            <div className="md:col-span-2">
++              <label className="mb-1 block text-xs text-gray-400">Logo</label>
++              <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
++                <input
++                  type="url"
++                  value={form.logoUrl}
++                  onChange={(e) => setForm({ ...form, logoUrl: e.target.value })}
++                  className={`${inputClass} min-w-0 flex-1`}
++                  placeholder="https://… or upload"
++                  aria-label="Sponsor logo URL"
++                />
++                <EventImageUploadButton
++                  eventId={eventId}
++                  kind="logo"
++                  disabled={isPending}
++                  onUploaded={(url) => setForm({ ...form, logoUrl: url })}
++                />
++              </div>
++              <p className="mt-1 text-xs text-gray-500">
++                Upload PNG, JPG, or WebP (max 4MB), or paste an https:// image URL.
++              </p>
++            </div>
+           </div>
+           <div className="flex gap-2">
+             <button type="submit" disabled={isPending} className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50">
+@@ -1659,7 +1691,17 @@ function SponsorsTab({
+             </div>
+ 
+             {expanded === es.id && (
+-              <div className="mt-4 border-t border-gray-700 pt-4 grid grid-cols-1 lg:grid-cols-2 gap-6">
++              <div className="mt-4 border-t border-gray-700 pt-4 space-y-6">
++                <SponsorLogoEditor
++                  eventId={eventId}
++                  slug={slug}
++                  eventSponsorId={es.id}
++                  companyName={es.sponsor.companyName}
++                  initialLogoUrl={es.logoUrl || es.sponsor.logoUrl || ''}
++                  run={run}
++                  isPending={isPending}
++                />
++                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                 <div>
+                   <h4 className="text-sm font-medium text-gray-300 mb-2">Benefit checklist</h4>
+                   {effectiveBenefits.length === 0 && (
+@@ -1939,6 +1981,7 @@ function SponsorsTab({
+                   })()}
+                 </div>
+               </div>
++              </div>
+             )}
+           </div>
+         );
+@@ -1963,6 +2006,84 @@ function SponsorsTab({
+   );
+ }
+ 
++// ─── Sponsor logo editor (shared eventImage upload pipeline) ─
++
++function SponsorLogoEditor({
++  eventId,
++  slug,
++  eventSponsorId,
++  companyName,
++  initialLogoUrl,
++  run,
++  isPending,
++}: {
++  eventId: string;
++  slug: string;
++  eventSponsorId: string;
++  companyName: string;
++  initialLogoUrl: string;
++  run: RunFn;
++  isPending: boolean;
++}) {
++  const [logoUrl, setLogoUrl] = useState(initialLogoUrl);
++  const dirty = (logoUrl.trim() || '') !== (initialLogoUrl.trim() || '');
++
++  return (
++    <div className="rounded-lg border border-gray-700 bg-gray-900/40 p-3">
++      <h4 className="text-sm font-medium text-gray-300 mb-2">Logo</h4>
++      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
++        <input
++          type="url"
++          value={logoUrl}
++          onChange={(e) => setLogoUrl(e.target.value)}
++          className="w-full min-w-0 flex-1 rounded-lg border border-gray-600 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-blue-500 focus:outline-none"
++          placeholder="https://… or upload"
++          aria-label={`Logo URL for ${companyName}`}
++          disabled={isPending}
++        />
++        <EventImageUploadButton
++          eventId={eventId}
++          kind="logo"
++          disabled={isPending}
++          onUploaded={setLogoUrl}
++        />
++      </div>
++      <p className="mt-1 text-xs text-gray-500">
++        Upload PNG, JPG, or WebP (max 4MB), or paste an https:// image URL. Save
++        to apply.
++      </p>
++      {logoUrl.trim() ? (
++        <div className="mt-2 inline-flex h-10 items-center rounded border border-gray-600 bg-white px-2">
++          {/* eslint-disable-next-line @next/next/no-img-element */}
++          <img
++            src={logoUrl.trim()}
++            alt=""
++            className="max-h-8 max-w-[140px] object-contain"
++          />
++        </div>
++      ) : null}
++      <div className="mt-2">
++        <button
++          type="button"
++          disabled={isPending || !dirty}
++          onClick={() =>
++            run(() =>
++              setEventSponsorLogoAction(
++                slug,
++                eventSponsorId,
++                logoUrl.trim() || null
++              )
++            )
++          }
++          className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
++        >
++          Save logo
++        </button>
++      </div>
++    </div>
++  );
++}
++
+ // ─── Inventory & revenue tracker ───────────────────────────
+ 
+ function TrackerTab({
+diff --git a/src/components/organizer/event-image-upload-button.tsx b/src/components/organizer/event-image-upload-button.tsx
+new file mode 100644
+index 0000000..42b6954
+--- /dev/null
++++ b/src/components/organizer/event-image-upload-button.tsx
+@@ -0,0 +1,95 @@
++'use client';
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { toast } from 'sonner';
++import { UploadButton } from '@/lib/uploadthing';
++import { extractUploadRejectionMessage } from '@/lib/project-collab-core';
++import type { EventImageKind } from '@/lib/event-image-upload';
++
++type EventImageUploadButtonProps = {
++  eventId: string;
++  kind: EventImageKind;
++  /** Called with the hosted UploadThing URL after a successful upload. */
++  onUploaded: (url: string) => void;
++  disabled?: boolean;
++};
++
++/**
++ * Shared UploadThing button that writes a hosted URL into a controlled
++ * image-URL input (#1099). Used by event settings (banner/logo/hero) and by
++ * organizer sponsor / partner logo fields — one upload pipeline, not a
++ * per-screen FileReader/`data:` inline. Manual paste into the URL field
++ * continues to work unchanged; this only *writes* the hosted URL on success.
++ */
++export function EventImageUploadButton({
++  eventId,
++  kind,
++  onUploaded,
++  disabled = false,
++}: EventImageUploadButtonProps) {
++  return (
++    <div
++      className={
++        disabled
++          ? 'pointer-events-none opacity-50'
++          : 'shrink-0 [&_label]:cursor-pointer'
++      }
++      aria-disabled={disabled || undefined}
++    >
++      <UploadButton
++        endpoint="eventImage"
++        input={{ eventId, kind }}
++        onClientUploadComplete={(res) => {
++          // Surface server-side post-upload rejections instead of silently
++          // ignoring `{ ok: false }` (same discipline as task attachments).
++          const rejectionMessage = extractUploadRejectionMessage(res);
++          if (rejectionMessage) {
++            toast.error(rejectionMessage);
++            return;
++          }
++          const first = res?.[0];
++          const serverData = first?.serverData as
++            | { ok?: boolean; url?: string }
++            | undefined;
++          const url =
++            (serverData?.ok !== false && serverData?.url) ||
++            first?.ufsUrl ||
++            first?.url;
++          if (!url || typeof url !== 'string') {
++            toast.error('Upload completed but no URL was returned');
++            return;
++          }
++          onUploaded(url);
++          toast.success(
++            kind === 'logo'
++              ? 'Logo uploaded'
++              : kind === 'hero'
++                ? 'Hero image uploaded'
++                : 'Banner uploaded'
++          );
++        }}
++        onUploadError={(error) => {
++          toast.error(error.message || 'Upload failed');
++        }}
++        appearance={{
++          button:
++            'ut-ready:bg-gray-800 ut-uploading:bg-gray-700 text-xs text-gray-200 rounded-md px-3 py-2 border border-gray-600 hover:bg-gray-700',
++          allowedContent: 'text-[10px] text-gray-500',
++          container: 'flex flex-col items-start gap-1',
++        }}
++        content={{
++          button({ ready, isUploading }) {
++            if (isUploading) return 'Uploading…';
++            if (ready) return 'Upload';
++            return 'Preparing…';
++          },
++          allowedContent: 'PNG, JPG, or WebP',
++        }}
++      />
++    </div>
++  );
++}
+diff --git a/src/components/organizer/index.ts b/src/components/organizer/index.ts
+index 61474ab..6fe9df4 100644
+--- a/src/components/organizer/index.ts
++++ b/src/components/organizer/index.ts
+@@ -12,3 +12,4 @@ export {
+ } from './error-banner';
+ export { PageHeader, type PageHeaderProps } from './page-header';
+ export { LoadingBlock, type LoadingBlockProps } from './loading-block';
++export { EventImageUploadButton } from './event-image-upload-button';
+diff --git a/src/lib/services/sponsorship.ts b/src/lib/services/sponsorship.ts
+index b43d796..575d353 100644
+--- a/src/lib/services/sponsorship.ts
++++ b/src/lib/services/sponsorship.ts
+@@ -962,12 +962,57 @@ export async function addSponsorToEvent(eventId: string, input: z.infer<typeof s
+       throw new Error(`${sponsor.companyName} is already a sponsor of this event.`);
+     }
+     return tx.eventSponsor.create({
+-      data: { eventId, sponsorId: sponsor.id, tierId: tier.id },
++      data: {
++        eventId,
++        sponsorId: sponsor.id,
++        tierId: tier.id,
++        // Event-level logo override so public pages (`es.logoUrl || sponsor.logoUrl`)
++        // pick up an upload even when the Sponsor row already existed by email.
++        logoUrl: data.logoUrl || null,
++      },
+       include: { sponsor: true, tier: true },
+     });
+   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+ }
+ 
++/**
++ * Set or clear EventSponsor.logoUrl (event-level override). Empty/null clears.
++ * Used by the organizer sponsorship manager after a hosted-URL upload or paste.
++ */
++export async function setEventSponsorLogo(
++  eventSponsorId: string,
++  logoUrl: string | null | undefined
++) {
++  const es = await prisma.eventSponsor.findUnique({
++    where: { id: eventSponsorId },
++    select: { id: true, sponsorId: true },
++  });
++  if (!es) throw new Error("Sponsorship not found.");
++
++  const normalized =
++    logoUrl == null || logoUrl === ""
++      ? null
++      : normalizeOptionalHttpUrl(logoUrl, {
++          label: "Sponsor logo URL",
++          kind: "image",
++        });
++
++  return prisma.$transaction(async (tx) => {
++    const updated = await tx.eventSponsor.update({
++      where: { id: eventSponsorId },
++      data: { logoUrl: normalized },
++    });
++    // Keep the catalog Sponsor logo in sync so public pages that fall back
++    // to Sponsor.logoUrl (and other events sharing the same Sponsor row)
++    // see the same hosted URL the organizer just set or cleared.
++    await tx.sponsor.update({
++      where: { id: es.sponsorId },
++      data: { logoUrl: normalized },
++    });
++    return updated;
++  });
++}
++
+ export async function setSponsorPaid(eventSponsorId: string, paid: boolean) {
+   return prisma.eventSponsor.update({ where: { id: eventSponsorId }, data: { paid } });
+ }
+diff --git a/tests/unit/set-event-sponsor-logo.test.ts b/tests/unit/set-event-sponsor-logo.test.ts
+new file mode 100644
+index 0000000..6dd51e4
+--- /dev/null
++++ b/tests/unit/set-event-sponsor-logo.test.ts
+@@ -0,0 +1,108 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++
++const mocks = vi.hoisted(() => ({
++  eventSponsorFindUnique: vi.fn(),
++  eventSponsorUpdate: vi.fn(),
++  sponsorUpdate: vi.fn(),
++  transaction: vi.fn(),
++}));
++
++vi.mock('@/lib/db', () => ({
++  prisma: {
++    eventSponsor: {
++      findUnique: mocks.eventSponsorFindUnique,
++      update: mocks.eventSponsorUpdate,
++    },
++    sponsor: {
++      update: mocks.sponsorUpdate,
++    },
++    $transaction: mocks.transaction,
++  },
++}));
++
++import { setEventSponsorLogo } from '@/lib/services/sponsorship';
++
++describe('setEventSponsorLogo', () => {
++  beforeEach(() => {
++    vi.clearAllMocks();
++    mocks.eventSponsorFindUnique.mockResolvedValue({
++      id: 'es_1',
++      sponsorId: 'sp_1',
++    });
++    mocks.transaction.mockImplementation(
++      async (fn: (tx: {
++        eventSponsor: { update: typeof mocks.eventSponsorUpdate };
++        sponsor: { update: typeof mocks.sponsorUpdate };
++      }) => unknown) =>
++        fn({
++          eventSponsor: { update: mocks.eventSponsorUpdate },
++          sponsor: { update: mocks.sponsorUpdate },
++        })
++    );
++    mocks.eventSponsorUpdate.mockResolvedValue({
++      id: 'es_1',
++      logoUrl: 'https://utfs.io/f/logo.png',
++    });
++    mocks.sponsorUpdate.mockResolvedValue({
++      id: 'sp_1',
++      logoUrl: 'https://utfs.io/f/logo.png',
++    });
++  });
++
++  it('writes a hosted image URL onto EventSponsor and Sponsor', async () => {
++    const result = await setEventSponsorLogo(
++      'es_1',
++      'https://utfs.io/f/logo.png'
++    );
++
++    expect(result).toEqual(
++      expect.objectContaining({ logoUrl: 'https://utfs.io/f/logo.png' })
++    );
++    expect(mocks.eventSponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'es_1' },
++      data: { logoUrl: 'https://utfs.io/f/logo.png' },
++    });
++    expect(mocks.sponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'sp_1' },
++      data: { logoUrl: 'https://utfs.io/f/logo.png' },
++    });
++  });
++
++  it('clears both EventSponsor and Sponsor logo URLs', async () => {
++    mocks.eventSponsorUpdate.mockResolvedValue({ id: 'es_1', logoUrl: null });
++
++    await setEventSponsorLogo('es_1', '');
++
++    expect(mocks.eventSponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'es_1' },
++      data: { logoUrl: null },
++    });
++    expect(mocks.sponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'sp_1' },
++      data: { logoUrl: null },
++    });
++  });
++
++  it('rejects unsafe / non-image schemes', async () => {
++    await expect(
++      setEventSponsorLogo('es_1', 'javascript:alert(1)')
++    ).rejects.toThrow(/logo/i);
++    await expect(
++      setEventSponsorLogo('es_1', 'data:image/png;base64,abc')
++    ).rejects.toThrow();
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++
++  it('fails closed when the EventSponsor is missing', async () => {
++    mocks.eventSponsorFindUnique.mockResolvedValue(null);
++    await expect(
++      setEventSponsorLogo('missing', 'https://cdn.example.com/a.png')
++    ).rejects.toThrow(/not found/i);
++  });
++});

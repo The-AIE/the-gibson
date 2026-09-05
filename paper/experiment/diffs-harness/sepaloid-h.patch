@@ -1,0 +1,315 @@
+diff --git a/src/app/(public)/events/[eventSlug]/cfp/page.tsx b/src/app/(public)/events/[eventSlug]/cfp/page.tsx
+index aedb8df..60092ea 100644
+--- a/src/app/(public)/events/[eventSlug]/cfp/page.tsx
++++ b/src/app/(public)/events/[eventSlug]/cfp/page.tsx
+@@ -3,12 +3,12 @@
+  * Unauthorized copying, modification, or distribution of this file,
+  * via any medium, is strictly prohibited.
+  */
+-import { format } from 'date-fns';
+ import { AlertCircle } from 'lucide-react';
+ import Link from 'next/link';
+ import { notFound } from 'next/navigation';
+ import { prisma } from '@/lib/db';
+ import { loadPastTalkExamples } from '@/lib/cfp-past-talks';
++import { resolveCfpPublicCopy } from '@/lib/cfp-public-state';
+ import CfpForm from './cfp-form';
+ 
+ interface CfpPageProps {
+@@ -37,33 +37,33 @@ export default async function CfpPage({ params }: CfpPageProps) {
+ 
+   if (!event) notFound();
+ 
+-  if (!event.cfpOpen) {
++  const cfpCopy = resolveCfpPublicCopy({
++    cfpOpen: event.cfpOpen,
++    cfpCloseDate: event.cfpCloseDate,
++  });
++
++  if (cfpCopy.state !== 'open') {
+     return (
+       <div className="min-h-screen bg-gray-50 py-12">
+         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+           <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-8 text-center">
+             <AlertCircle className="mx-auto mb-4 h-12 w-12 text-yellow-600" />
+             <h1 className="text-2xl font-bold text-yellow-900 mb-2">
+-              CFP Currently Closed
++              {cfpCopy.heading}
+             </h1>
+-            <p className="text-yellow-800">
+-              The call for proposals for {event.name} is not currently open.
+-            </p>
+-            {event.cfpCloseDate && (
+-              <p className="text-sm text-yellow-700 mt-2">
+-                CFP closed on {format(event.cfpCloseDate, 'MMMM d, yyyy')}
++            <p className="text-yellow-800">{cfpCopy.body}</p>
++            {cfpCopy.state === 'not-open-yet' && (
++              <p className="mt-4 text-sm text-yellow-800">
++                Want a heads-up when it opens?{' '}
++                <Link
++                  href={`/events/${event.slug}/speak`}
++                  className="font-semibold text-nebula-700 underline hover:text-nebula-800"
++                >
++                  Join the speaker interest list
++                </Link>
++                .
+               </p>
+             )}
+-            <p className="mt-4 text-sm text-yellow-800">
+-              Want a heads-up when it opens?{' '}
+-              <Link
+-                href={`/events/${event.slug}/speak`}
+-                className="font-semibold text-nebula-700 underline hover:text-nebula-800"
+-              >
+-                Join the speaker interest list
+-              </Link>
+-              .
+-            </p>
+           </div>
+         </div>
+       </div>
+diff --git a/src/lib/cfp-public-state.ts b/src/lib/cfp-public-state.ts
+new file mode 100644
+index 0000000..5ae3f65
+--- /dev/null
++++ b/src/lib/cfp-public-state.ts
+@@ -0,0 +1,81 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { format } from 'date-fns';
++
++/**
++ * Public CFP banner copy resolved from Event.cfpOpen + Event.cfpCloseDate + now.
++ * Pure — no I/O. Injectable `now` for unit tests.
++ *
++ * "opens in October" is fixed product copy for the current CFP calendar; there
++ * is no cfpOpenDate field, so the month is not derived from schema.
++ */
++
++export type CfpPublicState = 'not-open-yet' | 'open' | 'closed';
++export type CfpPublicTense = 'future' | 'present' | 'past';
++
++export type CfpPublicCopy = {
++  state: CfpPublicState;
++  tense: CfpPublicTense;
++  heading: string;
++  body: string;
++};
++
++function formatCloseDate(date: Date): string {
++  return format(date, 'd MMMM yyyy');
++}
++
++function isCloseDatePastOrEqual(cfpCloseDate: Date, now: Date): boolean {
++  return cfpCloseDate.getTime() <= now.getTime();
++}
++
++/**
++ * Resolve public CFP heading/body/tense from the submission flag and close date.
++ *
++ * - `cfpOpen === true` → always `open` (form gate); closes-on clause only when
++ *   the close date is still in the future.
++ * - `cfpOpen === false` + null or future close → `not-open-yet` (never past tense).
++ * - `cfpOpen === false` + past/equal close → `closed`.
++ */
++export function resolveCfpPublicCopy(input: {
++  cfpOpen: boolean;
++  cfpCloseDate: Date | null;
++  now?: Date;
++}): CfpPublicCopy {
++  const now = input.now ?? new Date();
++  const { cfpOpen, cfpCloseDate } = input;
++
++  if (cfpOpen) {
++    const closesClause =
++      cfpCloseDate != null && !isCloseDatePastOrEqual(cfpCloseDate, now)
++        ? ` It closes on ${formatCloseDate(cfpCloseDate)}.`
++        : '';
++    return {
++      state: 'open',
++      tense: 'present',
++      heading: 'CFP Open',
++      body: `The call for proposals is open.${closesClause}`,
++    };
++  }
++
++  if (cfpCloseDate != null && isCloseDatePastOrEqual(cfpCloseDate, now)) {
++    return {
++      state: 'closed',
++      tense: 'past',
++      heading: 'CFP Closed',
++      body: `The call for proposals closed on ${formatCloseDate(cfpCloseDate)}.`,
++    };
++  }
++
++  // Flag closed + null or future close date: not open yet (never past tense).
++  return {
++    state: 'not-open-yet',
++    tense: 'future',
++    heading: 'CFP Opens Soon',
++    // Hard-coded month for the current CFP calendar — not derived from schema.
++    body: 'The call for proposals opens in October.',
++  };
++}
+diff --git a/tests/unit/cfp-marketing-pages.test.ts b/tests/unit/cfp-marketing-pages.test.ts
+index b5e86a6..91df917 100644
+--- a/tests/unit/cfp-marketing-pages.test.ts
++++ b/tests/unit/cfp-marketing-pages.test.ts
+@@ -34,14 +34,21 @@ describe('CFP marketing pages wiring (#26 #24 #58)', () => {
+     expect(source).toContain('Notify me when CFP opens');
+   });
+ 
+-  it('closed CFP page links to speaker interest list', () => {
++  it('CFP page resolves tense via helper and links interest list when not open yet', () => {
+     const source = readFileSync(
+       join(root, 'src/app/(public)/events/[eventSlug]/cfp/page.tsx'),
+       'utf8'
+     );
++    expect(source).toContain('resolveCfpPublicCopy');
++    expect(source).toContain("cfpCopy.state !== 'open'");
++    expect(source).toContain("cfpCopy.state === 'not-open-yet'");
++    expect(source).toContain('Join the speaker interest list');
+     expect(source).toContain('/speak');
++    expect(source).not.toContain('CFP Currently Closed');
+     expect(source).toContain('loadPastTalkExamples');
+     expect(source).toContain('pastTalkExamples');
++    // Open path keeps CfpForm; helper open heading/body are not required on the form chrome.
++    expect(source).toContain('<CfpForm');
+   });
+ 
+   it('CFP form surfaces past-talk examples and first-timer path', () => {
+diff --git a/tests/unit/cfp-public-state.test.ts b/tests/unit/cfp-public-state.test.ts
+new file mode 100644
+index 0000000..11c75ee
+--- /dev/null
++++ b/tests/unit/cfp-public-state.test.ts
+@@ -0,0 +1,125 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { describe, expect, it } from 'vitest';
++import { resolveCfpPublicCopy } from '../../src/lib/cfp-public-state';
++
++const PAST_TENSE_CLOSED = /closed on/i;
++const CLOSED_HEADINGS = /CFP (Currently )?Closed/;
++
++describe('resolveCfpPublicCopy', () => {
++  it('treats flag-closed + future close date as not-open-yet (ATA 2027 bug shape)', () => {
++    // Production bug: cfpOpen false, cfpCloseDate 2027-02-01, now ~2026-08-16.
++    const copy = resolveCfpPublicCopy({
++      cfpOpen: false,
++      cfpCloseDate: new Date('2027-02-01T00:00:00.000Z'),
++      now: new Date('2026-08-16T12:00:00.000Z'),
++    });
++
++    expect(copy.state).toBe('not-open-yet');
++    expect(copy.tense).toBe('future');
++    expect(copy.heading).toBe('CFP Opens Soon');
++    expect(copy.body).toBe('The call for proposals opens in October.');
++    expect(copy.heading).not.toMatch(/closed/i);
++    expect(copy.body).not.toMatch(/closed/i);
++    expect(copy.body).not.toMatch(PAST_TENSE_CLOSED);
++    expect(copy.heading).not.toMatch(CLOSED_HEADINGS);
++  });
++
++  it('treats flag-closed + past close date as closed with past-tense copy', () => {
++    const copy = resolveCfpPublicCopy({
++      cfpOpen: false,
++      cfpCloseDate: new Date('2026-02-01T00:00:00.000Z'),
++      now: new Date('2026-08-16T12:00:00.000Z'),
++    });
++
++    expect(copy.state).toBe('closed');
++    expect(copy.tense).toBe('past');
++    expect(copy.heading).toBe('CFP Closed');
++    expect(copy.body).toMatch(PAST_TENSE_CLOSED);
++    expect(copy.body).toContain('1 February 2026');
++    expect(copy.body).toBe(
++      'The call for proposals closed on 1 February 2026.'
++    );
++  });
++
++  it('treats flag-closed + null close date as not-open-yet', () => {
++    const copy = resolveCfpPublicCopy({
++      cfpOpen: false,
++      cfpCloseDate: null,
++      now: new Date('2026-08-16T12:00:00.000Z'),
++    });
++
++    expect(copy.state).toBe('not-open-yet');
++    expect(copy.tense).toBe('future');
++    expect(copy.heading).toBe('CFP Opens Soon');
++    expect(copy.body).toBe('The call for proposals opens in October.');
++    expect(copy.body).not.toMatch(PAST_TENSE_CLOSED);
++    expect(copy.heading).not.toBe('CFP Closed');
++    expect(copy.heading).not.toBe('CFP Currently Closed');
++  });
++
++  it('treats flag-open + future close date as open with closes-on clause', () => {
++    const copy = resolveCfpPublicCopy({
++      cfpOpen: true,
++      cfpCloseDate: new Date('2027-02-01T00:00:00.000Z'),
++      now: new Date('2026-08-16T12:00:00.000Z'),
++    });
++
++    expect(copy.state).toBe('open');
++    expect(copy.tense).toBe('present');
++    expect(copy.heading).toBe('CFP Open');
++    expect(copy.body).toMatch(/^The call for proposals is open\./);
++    expect(copy.body).toContain('closes on 1 February 2027');
++    expect(copy.body).toBe(
++      'The call for proposals is open. It closes on 1 February 2027.'
++    );
++    expect(copy.body).not.toMatch(PAST_TENSE_CLOSED);
++  });
++
++  it('never emits past-tense closed copy while close date is in the future', () => {
++    const fixtures = [
++      {
++        cfpOpen: false,
++        cfpCloseDate: new Date('2027-02-01T00:00:00.000Z'),
++      },
++      {
++        cfpOpen: true,
++        cfpCloseDate: new Date('2027-02-01T00:00:00.000Z'),
++      },
++      { cfpOpen: false, cfpCloseDate: null },
++    ] as const;
++
++    const now = new Date('2026-08-16T12:00:00.000Z');
++
++    for (const input of fixtures) {
++      const copy = resolveCfpPublicCopy({ ...input, now });
++      expect(copy.body).not.toMatch(PAST_TENSE_CLOSED);
++      expect(copy.heading).not.toBe('CFP Closed');
++      expect(copy.heading).not.toBe('CFP Currently Closed');
++      expect(copy.state).not.toBe('closed');
++    }
++  });
++
++  it('omits closes clause when open flag is true but close date is past or null', () => {
++    const pastClose = resolveCfpPublicCopy({
++      cfpOpen: true,
++      cfpCloseDate: new Date('2020-01-01T00:00:00.000Z'),
++      now: new Date('2026-08-16T12:00:00.000Z'),
++    });
++    expect(pastClose.state).toBe('open');
++    expect(pastClose.body).toBe('The call for proposals is open.');
++    expect(pastClose.body).not.toMatch(/closed/i);
++
++    const nullClose = resolveCfpPublicCopy({
++      cfpOpen: true,
++      cfpCloseDate: null,
++      now: new Date('2026-08-16T12:00:00.000Z'),
++    });
++    expect(nullClose.state).toBe('open');
++    expect(nullClose.body).toBe('The call for proposals is open.');
++  });
++});

@@ -1,0 +1,77 @@
+{
+ "note": "code-name -> task/arm. The blind judge NEVER receives this file.",
+ "mapping": {
+  "bucranium": {
+   "task": "cos#1245",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "mediumize": {
+   "task": "cos#1221",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "cardines": {
+   "task": "cos#1327",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "sesame": {
+   "task": "cos#1226",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "nonjury": {
+   "task": "cos#1253",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "sepaloid": {
+   "task": "cos#1367",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "blowgun": {
+   "task": "cos#1220",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "gantline": {
+   "task": "cos#1313",
+   "arm": "raw",
+   "run_date": "2026-08-22",
+   "runner": "ab219-runner:2"
+  },
+  "nettler": {
+   "task": "cos#1214",
+   "arm": "raw",
+   "run_date": "2026-08-23",
+   "runner": "ab219-runner:2"
+  },
+  "furlong": {
+   "task": "cos#1217",
+   "arm": "raw",
+   "run_date": "2026-08-27",
+   "runner": "ab219-runner:2"
+  },
+  "corbel": {
+   "task": "cos#1232",
+   "arm": "raw",
+   "run_date": "2026-08-30",
+   "runner": "ab219-runner:2"
+  },
+  "gimlet": {
+   "task": "cos#1237",
+   "arm": "raw",
+   "run_date": "2026-09-03",
+   "runner": "ab219-runner:2"
+  }
+ }
+}

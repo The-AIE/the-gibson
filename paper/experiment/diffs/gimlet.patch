@@ -1,0 +1,206 @@
+diff --git a/src/lib/nav-items-actions.ts b/src/lib/nav-items-actions.ts
+index 12f1be5..f57c15c 100644
+--- a/src/lib/nav-items-actions.ts
++++ b/src/lib/nav-items-actions.ts
+@@ -429,9 +429,26 @@ export async function materializeEventHeaderNav(input: {
+           .slice()
+           .sort((a, b) => a.order - b.order);
+ 
+-        const realIdByTemp = new Map<string, string>();
+-
+-        for (const item of tops) {
++        // Validate every item in memory before any writes. Returning
++        // `{ ok: false }` from an interactive transaction does NOT roll
++        // back — Prisma commits whatever was written. Interleaving
++        // validate+create would leave a partial EVENT HEADER override
++        // live if a later item failed (and the existingCount race-guard
++        // would then block retries).
++        const itemByTemp = new Map(
++          input.items.map((item) => [item.tempId, item] as const)
++        );
++        type ValidatedItem = {
++          tempId: string;
++          parentTempId: string | null;
++          label: string;
++          href: string;
++          external: boolean;
++          visible: boolean;
++          order: number;
++        };
++        const validated: ValidatedItem[] = [];
++        for (const item of [...tops, ...children]) {
+           const label = item.label.trim();
+           if (label.length === 0) {
+             return { ok: false, error: 'Label is required.' };
+@@ -452,16 +469,42 @@ export async function materializeEventHeaderNav(input: {
+           if (!hrefCheck.ok) {
+             return { ok: false, error: hrefCheck.reason };
+           }
++          if (item.parentTempId !== null) {
++            const parent = itemByTemp.get(item.parentTempId);
++            if (
++              !parent ||
++              parent.parentTempId !== null ||
++              parent.href.trim() !== '#'
++            ) {
++              return {
++                ok: false,
++                error: 'Only a group can hold nested links.',
++              };
++            }
++          }
++          validated.push({
++            tempId: item.tempId,
++            parentTempId: item.parentTempId,
++            label,
++            href,
++            external: item.external,
++            visible: item.visible,
++            order: item.order,
++          });
++        }
+ 
++        // Pure create pass — no validation, no early `{ ok: false }` returns.
++        const realIdByTemp = new Map<string, string>();
++        for (const item of validated.filter((v) => v.parentTempId === null)) {
+           const created = await tx.navItem.create({
+             data: {
+               scope: 'EVENT',
+               placement: 'HEADER',
+               eventId: input.eventId,
+               parentId: null,
+-              label,
+-              href,
+-              external: href === '#' ? false : item.external,
++              label: item.label,
++              href: item.href,
++              external: item.href === '#' ? false : item.external,
+               visible: item.visible,
+               order: item.order,
+             },
+@@ -470,48 +513,23 @@ export async function materializeEventHeaderNav(input: {
+           realIdByTemp.set(item.tempId, created.id);
+         }
+ 
+-        for (const item of children) {
+-          const label = item.label.trim();
+-          if (label.length === 0) {
+-            return { ok: false, error: 'Label is required.' };
+-          }
+-          if (label.length > MAX_LABEL_LENGTH) {
+-            return {
+-              ok: false,
+-              error: `Label must be ${MAX_LABEL_LENGTH} characters or fewer.`,
+-            };
+-          }
+-          const href = item.href.trim();
+-          const hrefCheck = validateNavHref(
+-            'EVENT',
+-            href,
+-            item.external,
+-            event.slug
+-          );
+-          if (!hrefCheck.ok) {
+-            return { ok: false, error: hrefCheck.reason };
+-          }
+-
++        for (const item of validated.filter((v) => v.parentTempId !== null)) {
+           const parentRealId = realIdByTemp.get(item.parentTempId!);
+           if (!parentRealId) {
+-            return { ok: false, error: 'A nested link points at a missing parent.' };
++            // Pre-validated; missing map entry is a logic bug — throw so
++            // the interactive transaction rolls back rather than commit.
++            throw new Error(
++              'materializeEventHeaderNav: missing parent id after validation'
++            );
+           }
+-          const parent = await tx.navItem.findUnique({
+-            where: { id: parentRealId },
+-            select: { href: true, parentId: true },
+-          });
+-          if (!parent || parent.href !== '#' || parent.parentId !== null) {
+-            return { ok: false, error: 'Only a group can hold nested links.' };
+-          }
+-
+           await tx.navItem.create({
+             data: {
+               scope: 'EVENT',
+               placement: 'HEADER',
+               eventId: input.eventId,
+               parentId: parentRealId,
+-              label,
+-              href,
++              label: item.label,
++              href: item.href,
+               external: item.external,
+               visible: item.visible,
+               order: item.order,
+diff --git a/tests/unit/nav-items-actions.test.ts b/tests/unit/nav-items-actions.test.ts
+index 24a6f21..0c6bfe6 100644
+--- a/tests/unit/nav-items-actions.test.ts
++++ b/tests/unit/nav-items-actions.test.ts
+@@ -635,33 +635,10 @@ describe('materializeEventHeaderNav (#1223)', () => {
+     mocks.navItemCount.mockResolvedValue(0);
+ 
+     let createSeq = 0;
+-    const createdIds: string[] = [];
+-    mocks.navItemCreate.mockImplementation(
+-      async (args: { data: { label: string; href: string; parentId: string | null } }) => {
+-        createSeq += 1;
+-        const id = `real-${createSeq}`;
+-        createdIds.push(id);
+-        // Group parents need a findUnique on create of children.
+-        if (args.data.href === '#' && args.data.parentId === null) {
+-          mocks.navItemFindUnique.mockResolvedValueOnce({
+-            href: '#',
+-            parentId: null,
+-          });
+-        }
+-        return { id };
+-      }
+-    );
+-
+-    // Children look up their parent after tops are created — return group shape.
+-    mocks.navItemFindUnique.mockImplementation(
+-      async (args: { where: { id: string } }) => {
+-        // Any real id created for a group top is a group.
+-        if (String(args.where.id).startsWith('real-')) {
+-          return { href: '#', parentId: null };
+-        }
+-        return null;
+-      }
+-    );
++    mocks.navItemCreate.mockImplementation(async () => {
++      createSeq += 1;
++      return { id: `real-${createSeq}` };
++    });
+ 
+     const result = await materializeEventHeaderNav({
+       eventId: 'evt_1',
+@@ -708,6 +685,26 @@ describe('materializeEventHeaderNav (#1223)', () => {
+     expect(result.ok).toBe(false);
+     expect(mocks.transaction).not.toHaveBeenCalled();
+   });
++
++  it('rejects a later invalid item with zero rows created (no partial commit)', async () => {
++    const items = seededItems('demo');
++    expect(items.length).toBeGreaterThan(2);
++    // Invalidate a later item so validate-then-create must reject with
++    // zero writes (returning ok:false mid-create would commit earlier rows).
++    items[items.length - 1]!.label = '   ';
++
++    mocks.eventFindUnique.mockResolvedValue({ slug: 'demo' });
++    mocks.navItemCount.mockResolvedValue(0);
++
++    const result = await materializeEventHeaderNav({
++      eventId: 'evt_1',
++      items,
++    });
++
++    expect(result.ok).toBe(false);
++    expect(result.error).toMatch(/label is required/i);
++    expect(mocks.navItemCreate).not.toHaveBeenCalled();
++  });
+ });
+ 
+ describe('deleteNavItem', () => {

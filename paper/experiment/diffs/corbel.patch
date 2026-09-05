@@ -1,0 +1,1491 @@
+diff --git a/prisma/migrations/20260830120000_nav_placement_event_footer/migration.sql b/prisma/migrations/20260830120000_nav_placement_event_footer/migration.sql
+new file mode 100644
+index 0000000..0600d3c
+--- /dev/null
++++ b/prisma/migrations/20260830120000_nav_placement_event_footer/migration.sql
+@@ -0,0 +1,11 @@
++-- Additive: EVENT-scoped public footer links via NavItem (custom footer editor).
++-- FOOTER is EVENT-only in application code; SITE continues to use
++-- FOOTER_LEGAL / FOOTER_EVENTS for the homepage directory columns.
++--
++-- Nothing is renamed, dropped, or reordered. Postgres allows
++-- ALTER TYPE ... ADD VALUE inside a transaction as long as the new value is
++-- not used in the same transaction — this migration only declares it.
++-- IF NOT EXISTS keeps the migration safe to re-run against a database where
++-- the value was already applied out of band.
++
++ALTER TYPE "NavPlacement" ADD VALUE IF NOT EXISTS 'FOOTER';
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index d8e718e..6d41a08 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -4024,20 +4024,21 @@ model ProjectTemplate {
+ // rows exist for a given scope+placement(+event) — a fresh install still
+ // ships a sane menu with zero rows in this table.
+ 
+-/// SITE = sitewide surfaces (header, footer). EVENT = a single event's
+-/// header nav, keyed by eventId.
++/// SITE = sitewide surfaces (header, footer columns). EVENT = a single
++/// event's header nav and optional public footer links, keyed by eventId.
+ enum NavScope {
+   SITE
+   EVENT
+ }
+ 
+ /// Which rendered surface a row belongs to. FOOTER_LEGAL and FOOTER_EVENTS
+-/// are SITE-only (the homepage site-directory grid); EVENT rows are always
+-/// HEADER (an event has no footer link columns of its own today).
++/// are SITE-only (the homepage site-directory grid). FOOTER is EVENT-only
++/// (the per-event public footer link row). HEADER is valid for both scopes.
+ enum NavPlacement {
+   HEADER
+   FOOTER_LEGAL
+   FOOTER_EVENTS
++  FOOTER
+ }
+ 
+ model NavItem {
+diff --git a/src/app/(admin)/organizer/events/[slug]/navigation/page.tsx b/src/app/(admin)/organizer/events/[slug]/navigation/page.tsx
+index 5b4d366..5b7081a 100644
+--- a/src/app/(admin)/organizer/events/[slug]/navigation/page.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/navigation/page.tsx
+@@ -9,7 +9,10 @@ import { notFound } from 'next/navigation';
+ import { requireAdminOrDemoEvent } from '@/lib/auth';
+ import { prisma } from '@/lib/db';
+ import { listNavItemRows } from '@/lib/nav-items-query';
+-import { seedRowsFromNavEntries } from '@/lib/nav-items';
++import {
++  defaultEventFooterLinks,
++  seedRowsFromNavEntries,
++} from '@/lib/nav-items';
+ import { NavItemEditor } from '@/components/organizer/nav-item-editor';
+ import { resolvePublicTicketCta } from '@/lib/external-ticket';
+ import { publicEventNav } from '@/lib/public-event-nav';
+@@ -20,10 +23,11 @@ interface EventNavigationPageProps {
+ 
+ /**
+  * #832 / #1223: per-event navigation editor. When the organizer has saved
+- * EVENT HEADER rows, those override `publicEventNav()` on the public site.
+- * When zero rows exist, the public renderer still uses code defaults — and
+- * this page seeds the editor with that same `publicEventNav()` tree so the
+- * organizer sees (and first-saves) the live header instead of an empty list.
++ * EVENT HEADER / FOOTER rows, those override the code-derived public
++ * surfaces. When zero rows exist for a placement, the public renderer still
++ * uses code defaults — and this page seeds the editor with that same tree
++ * so the organizer sees (and first-saves) the live links instead of an
++ * empty list.
+  */
+ export default async function EventNavigationPage({
+   params,
+@@ -46,11 +50,18 @@ export default async function EventNavigationPage({
+   });
+   if (!event) notFound();
+ 
+-  const dbRows = await listNavItemRows({
+-    scope: 'EVENT',
+-    placement: 'HEADER',
+-    eventId: event.id,
+-  });
++  const [headerDbRows, footerDbRows] = await Promise.all([
++    listNavItemRows({
++      scope: 'EVENT',
++      placement: 'HEADER',
++      eventId: event.id,
++    }),
++    listNavItemRows({
++      scope: 'EVENT',
++      placement: 'FOOTER',
++      eventId: event.id,
++    }),
++  ]);
+ 
+   // Same ticket CTA resolution the public brand payload uses
+   // (`public-brand.ts` → `public-layout-client.tsx` → `publicEventNav`).
+@@ -69,9 +80,9 @@ export default async function EventNavigationPage({
+ 
+   // #1223: zero DB rows → seed editor with the exact live defaults. Do not
+   // invent options; mirror the public client's publicEventNav call.
+-  const rows =
+-    dbRows.length > 0
+-      ? dbRows
++  const headerRows =
++    headerDbRows.length > 0
++      ? headerDbRows
+       : seedRowsFromNavEntries(
+           publicEventNav(event.slug, {
+             externalTicketUrl:
+@@ -80,32 +91,53 @@ export default async function EventNavigationPage({
+             cfpOpen: event.cfpOpen === true,
+           })
+         );
+-  const showingSeededDefaults = dbRows.length === 0;
++  const showingSeededHeader = headerDbRows.length === 0;
++
++  const footerRows =
++    footerDbRows.length > 0
++      ? footerDbRows
++      : seedRowsFromNavEntries(defaultEventFooterLinks(event.slug));
++  const showingSeededFooter = footerDbRows.length === 0;
+ 
+   return (
+     <div>
+       <div className="mb-8">
+         <h1 className="text-2xl font-bold text-white">Navigation</h1>
+         <p className="mt-2 max-w-2xl text-gray-400">
+-          {showingSeededDefaults
+-            ? "Showing the live built-in header for this event. Your first save writes the full list below as this event's custom navigation."
+-            : "Choose what appears in this event's public header. These links replace the built-in defaults on the public site."}
++          Choose what appears in this event&apos;s public header and footer.
++          Drag links to reorder. Your first save for each section writes the
++          full list as a custom configuration; until then visitors see the
++          built-in defaults.
+         </p>
+       </div>
+-      <NavItemEditor
+-        scope="EVENT"
+-        placement="HEADER"
+-        eventId={event.id}
+-        title="Event header"
+-        description={
+-          showingSeededDefaults
+-            ? 'Default items are a preview of what visitors see today. Editing any of them saves the entire list so nothing is dropped.'
+-            : undefined
+-        }
+-        allowGroups
+-        initialRows={rows}
+-        registerHref={registerHref}
+-      />
++      <div className="space-y-6">
++        <NavItemEditor
++          scope="EVENT"
++          placement="HEADER"
++          eventId={event.id}
++          title="Event header"
++          description={
++            showingSeededHeader
++              ? 'Default items are a preview of what visitors see today. Editing any of them saves the entire list so nothing is dropped.'
++              : undefined
++          }
++          allowGroups
++          initialRows={headerRows}
++          registerHref={registerHref}
++        />
++        <NavItemEditor
++          scope="EVENT"
++          placement="FOOTER"
++          eventId={event.id}
++          title="Event footer"
++          description={
++            showingSeededFooter
++              ? 'Default footer links match the public event footer today. Editing any of them saves the entire list so nothing is dropped. Drag to reorder.'
++              : 'Links shown in the public event footer. Drag to reorder.'
++          }
++          initialRows={footerRows}
++        />
++      </div>
+     </div>
+   );
+ }
+diff --git a/src/app/(public)/events/[eventSlug]/layout.tsx b/src/app/(public)/events/[eventSlug]/layout.tsx
+index 41eba2f..11d3f63 100644
+--- a/src/app/(public)/events/[eventSlug]/layout.tsx
++++ b/src/app/(public)/events/[eventSlug]/layout.tsx
+@@ -19,6 +19,7 @@ import {
+   DemoRoleSelector,
+ } from '@/components/demo-discovery';
+ import { EventPublicFooter } from '@/components/event-public-footer';
++import { getEventFooterLinks } from '@/lib/nav-items-query';
+ import { readDemoSessionCookies } from '@/lib/demo-mode-session-server';
+ import {
+   CSP_NONCE_HEADER,
+@@ -74,6 +75,7 @@ export default async function EventPublicLayout({
+   const event = await prisma.event.findUnique({
+     where: { slug: eventSlug },
+     select: {
++      id: true,
+       name: true,
+       logoUrl: true,
+       xHandle: true,
+@@ -109,6 +111,7 @@ export default async function EventPublicLayout({
+   }
+ 
+   const visualTemplate = resolveVisualTemplate(event.features);
++  const footerLinks = await getEventFooterLinks(event.id, eventSlug);
+ 
+   // #116: PRIVATE + password → gate all public event pages behind unlock cookie.
+   const onAccessPath = await isEventAccessPath(eventSlug);
+@@ -253,6 +256,7 @@ s.parentNode.insertBefore(b,s)})(window.lintrk);`}
+           websiteUrl: event.websiteUrl,
+         }}
+         visualTemplate={visualTemplate}
++        links={footerLinks}
+       />
+     </div>
+   );
+diff --git a/src/components/event-public-footer.tsx b/src/components/event-public-footer.tsx
+index d3a7b84..20a26c8 100644
+--- a/src/components/event-public-footer.tsx
++++ b/src/components/event-public-footer.tsx
+@@ -7,6 +7,7 @@
+ import Link from 'next/link';
+ import { SocialIcon } from '@/components/social-icon';
+ import { SpaceBackground } from '@/components/space-background';
++import { defaultEventFooterLinks, type NavLink } from '@/lib/nav-items';
+ import {
+   resolveVisualTemplate,
+   type VisualTemplateId,
+@@ -24,12 +25,20 @@ export type EventPublicFooterProps = {
+   /** Raw Event.features or already-resolved template id. */
+   visualTemplate?: VisualTemplateId | 'orbit' | 'broadside' | null;
+   features?: unknown;
++  /**
++   * Organizer-configured footer links (EVENT FOOTER NavItems), or the
++   * shipped defaults from `defaultEventFooterLinks`. When omitted, the
++   * component falls back to those defaults so existing call sites keep
++   * working in tests.
++   */
++  links?: readonly NavLink[];
+ };
+ 
+ /**
+  * Site-wide footer for every public event page (#322).
+  * Rendered from the event layout so schedule/speakers/sponsors/etc. share it.
+  * Socials live here (not the hero). Empty socials/logo degrade gracefully.
++ * Link order/labels come from EVENT FOOTER NavItems when configured.
+  */
+ export function EventPublicFooter({
+   eventSlug,
+@@ -38,6 +47,7 @@ export function EventPublicFooter({
+   social,
+   visualTemplate,
+   features,
++  links,
+ }: EventPublicFooterProps) {
+   const template: VisualTemplateId =
+     visualTemplate && (visualTemplate === 'orbit' || visualTemplate === 'broadside')
+@@ -50,13 +60,7 @@ export function EventPublicFooter({
+   const websiteUrl = social?.websiteUrl?.trim() || null;
+   const hasSocials = Boolean(xHandle || linkedinUrl || websiteUrl);
+ 
+-  const standardLinks: { href: string; label: string }[] = [
+-    { href: `/events/${eventSlug}`, label: 'Overview' },
+-    { href: `/events/${eventSlug}/schedule`, label: 'Schedule' },
+-    { href: `/events/${eventSlug}/speakers`, label: 'Speakers' },
+-    { href: `/events/${eventSlug}/sponsors`, label: 'Sponsors' },
+-    { href: `/events/${eventSlug}/policies`, label: 'Policies' },
+-  ];
++  const standardLinks = links ?? defaultEventFooterLinks(eventSlug);
+ 
+   const linkClass = isBroadside
+     ? 'text-sm text-stone-600 transition-colors hover:text-stone-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-700'
+@@ -147,18 +151,31 @@ export function EventPublicFooter({
+             ) : null}
+           </div>
+ 
+-          {/* Standard event links */}
+-          <nav aria-label="Event pages">
+-            <ul className="flex flex-wrap gap-x-6 gap-y-2">
+-              {standardLinks.map((link) => (
+-                <li key={link.href}>
+-                  <Link href={link.href} className={linkClass}>
+-                    {link.label}
+-                  </Link>
+-                </li>
+-              ))}
+-            </ul>
+-          </nav>
++          {/* Event page links — defaults or organizer EVENT FOOTER rows */}
++          {standardLinks.length > 0 ? (
++            <nav aria-label="Event pages">
++              <ul className="flex flex-wrap gap-x-6 gap-y-2">
++                {standardLinks.map((link) => (
++                  <li key={`${link.href}:${link.label}`}>
++                    {link.external ? (
++                      <a
++                        href={link.href}
++                        target="_blank"
++                        rel="noopener noreferrer"
++                        className={linkClass}
++                      >
++                        {link.label}
++                      </a>
++                    ) : (
++                      <Link href={link.href} className={linkClass}>
++                        {link.label}
++                      </Link>
++                    )}
++                  </li>
++                ))}
++              </ul>
++            </nav>
++          ) : null}
+         </div>
+ 
+         <div
+diff --git a/src/components/organizer/nav-item-editor.tsx b/src/components/organizer/nav-item-editor.tsx
+index 3c58ab0..dbbdd1f 100644
+--- a/src/components/organizer/nav-item-editor.tsx
++++ b/src/components/organizer/nav-item-editor.tsx
+@@ -8,16 +8,14 @@
+ /**
+  * #832: shared navigation-editor UI. Used by both
+  * `/organizer/admin/navigation` (site header + the two footer columns) and
+- * `/organizer/events/[slug]/navigation` (one event's header nav) — the
+- * add/rename/reorder/hide/nest/delete mechanics are identical, only the
++ * `/organizer/events/[slug]/navigation` (one event's header + footer) —
++ * the add/rename/reorder/hide/nest/delete mechanics are identical, only the
+  * scope/placement/eventId target and whether grouping is offered differ.
+  *
+- * Reordering is up/down buttons (matching this codebase's existing pattern
+- * in `tickets/ticket-types-manager.tsx`'s tier reordering), not drag-and-drop
+- * — the issue's own sketch says "reorder (drag)" but up/down buttons satisfy
+- * the acceptance criterion ("reordering persists ... without a deploy")
+- * without adding a new dependency, and match how the rest of the organizer
+- * UI already does this.
++ * Reordering: drag-and-drop via `@dnd-kit/core` (already a dependency for
++ * schedule/projects boards) plus up/down buttons for keyboard / precise
++ * nudges. Sibling order persists through `reorderNavItems` / `moveNavItem`
++ * against the existing `NavItem.order` column — no new schema field.
+  *
+  * Nesting is decided only at creation time (a new link can be created
+  * top-level or under an existing top-level item) — an existing row's parent
+@@ -30,12 +28,23 @@
+ 
+ import { useState, useTransition } from 'react';
+ import { useRouter } from 'next/navigation';
++import {
++  DndContext,
++  PointerSensor,
++  useDraggable,
++  useDroppable,
++  useSensor,
++  useSensors,
++  type DragEndEvent,
++} from '@dnd-kit/core';
++import { CSS } from '@dnd-kit/utilities';
+ import {
+   ArrowDown,
+   ArrowUp,
+   Eye,
+   EyeOff,
+   FolderPlus,
++  GripVertical,
+   Pencil,
+   Plus,
+   Trash2,
+@@ -44,10 +53,11 @@ import {
+ import type { NavPlacement, NavScope } from '@prisma/client';
+ import {
+   deleteNavItem,
+-  materializeEventHeaderNav,
++  materializeEventNav,
+   moveNavItem,
++  reorderNavItems,
+   upsertNavItem,
+-  type MaterializeEventHeaderNavItem,
++  type MaterializeEventNavItem,
+ } from '@/lib/nav-items-actions';
+ import {
+   hasRenderedNavHref,
+@@ -97,6 +107,167 @@ function byOrder(a: NavItemRow, b: NavItemRow): number {
+   return a.order - b.order;
+ }
+ 
++function materializePlacementOf(
++  placement: NavPlacement
++): 'HEADER' | 'FOOTER' {
++  return placement === 'FOOTER' ? 'FOOTER' : 'HEADER';
++}
++
++function applySiblingOrder(
++  rows: NavItemRow[],
++  parentId: string | null,
++  orderedSiblingIds: string[]
++): NavItemRow[] {
++  const orderById = new Map(
++    orderedSiblingIds.map((id, index) => [id, index] as const)
++  );
++  return rows.map((row) => {
++    if (row.parentId !== parentId) return row;
++    const nextOrder = orderById.get(row.id);
++    return nextOrder === undefined ? row : { ...row, order: nextOrder };
++  });
++}
++
++interface NavRowProps {
++  row: NavItemRow;
++  siblings: NavItemRow[];
++  indent: boolean;
++  pending: boolean;
++  onMove: (row: NavItemRow, direction: 'up' | 'down') => void;
++  onToggleVisible: (row: NavItemRow) => void;
++  onEdit: (row: NavItemRow) => void;
++  onRemove: (row: NavItemRow) => void;
++}
++
++function NavEditorRow({
++  row,
++  siblings,
++  indent,
++  pending,
++  onMove,
++  onToggleVisible,
++  onEdit,
++  onRemove,
++}: NavRowProps) {
++  const idx = siblings.findIndex((s) => s.id === row.id);
++  const isGroupHeader = row.href === '#' && row.parentId === null;
++  const {
++    attributes,
++    listeners,
++    setNodeRef: setDragRef,
++    transform,
++    isDragging,
++  } = useDraggable({ id: row.id, disabled: pending });
++  // Distinct droppable id — dnd-kit forbids registering the same id as
++  // both a draggable and a droppable in one context.
++  const { setNodeRef: setDropRef, isOver } = useDroppable({
++    id: `drop:${row.id}`,
++    disabled: pending,
++  });
++
++  function setNodeRef(node: HTMLElement | null) {
++    setDragRef(node);
++    setDropRef(node);
++  }
++
++  const style = transform
++    ? { transform: CSS.Translate.toString(transform) }
++    : undefined;
++
++  return (
++    <li
++      ref={setNodeRef}
++      style={style}
++      className={`flex flex-wrap items-center justify-between gap-2 rounded-md border bg-gray-800 px-3 py-2 text-sm ${
++        indent ? 'ml-6' : ''
++      } ${
++        isOver && !isDragging
++          ? 'border-blue-500'
++          : 'border-gray-700'
++      } ${isDragging ? 'opacity-60' : ''}`}
++    >
++      <div className="flex min-w-0 items-start gap-2">
++        <button
++          type="button"
++          className="mt-0.5 cursor-grab rounded p-1 text-gray-500 hover:bg-gray-700 hover:text-gray-300 active:cursor-grabbing disabled:opacity-30"
++          aria-label={`Drag to reorder ${row.label}`}
++          disabled={pending}
++          {...listeners}
++          {...attributes}
++        >
++          <GripVertical size={14} />
++        </button>
++        <div className="min-w-0">
++          <p className={`font-medium ${row.visible ? 'text-white' : 'text-gray-500'}`}>
++            {row.label}
++            {isSeededNavItemId(row.id) && (
++              <span className="ml-2 rounded border border-sky-700/60 bg-sky-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
++                Default
++              </span>
++            )}
++            {!row.visible && (
++              <span className="ml-2 text-xs uppercase tracking-wide text-gray-500">
++                Hidden
++              </span>
++            )}
++          </p>
++          <p className="truncate text-xs text-gray-400">
++            {isGroupHeader ? 'Group — links live in its children' : row.href}
++            {row.external && ' · opens in new tab'}
++          </p>
++        </div>
++      </div>
++      <div className="flex shrink-0 items-center gap-1">
++        <button
++          type="button"
++          onClick={() => onMove(row, 'up')}
++          disabled={pending || idx <= 0}
++          aria-label={`Move ${row.label} up`}
++          className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
++        >
++          <ArrowUp size={14} />
++        </button>
++        <button
++          type="button"
++          onClick={() => onMove(row, 'down')}
++          disabled={pending || idx === -1 || idx >= siblings.length - 1}
++          aria-label={`Move ${row.label} down`}
++          className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
++        >
++          <ArrowDown size={14} />
++        </button>
++        <button
++          type="button"
++          onClick={() => onToggleVisible(row)}
++          disabled={pending}
++          aria-label={row.visible ? `Hide ${row.label}` : `Show ${row.label}`}
++          className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
++        >
++          {row.visible ? <Eye size={14} /> : <EyeOff size={14} />}
++        </button>
++        <button
++          type="button"
++          onClick={() => onEdit(row)}
++          disabled={pending}
++          aria-label={`Edit ${row.label}`}
++          className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
++        >
++          <Pencil size={14} />
++        </button>
++        <button
++          type="button"
++          onClick={() => onRemove(row)}
++          disabled={pending}
++          aria-label={`Delete ${row.label}`}
++          className="rounded p-1.5 text-red-400 hover:bg-gray-700 disabled:opacity-30"
++        >
++          <Trash2 size={14} />
++        </button>
++      </div>
++    </li>
++  );
++}
++
+ export function NavItemEditor({
+   scope,
+   placement,
+@@ -120,6 +291,9 @@ export function NavItemEditor({
+   const [formOpen, setFormOpen] = useState(false);
+   const [error, setError] = useState<string | null>(null);
+   const [pending, startTransition] = useTransition();
++  const sensors = useSensors(
++    useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
++  );
+ 
+   const tops = rows.filter((r) => r.parentId === null).sort(byOrder);
+   const childrenOf = (id: string) => rows.filter((r) => r.parentId === id).sort(byOrder);
+@@ -144,7 +318,7 @@ export function NavItemEditor({
+     ? rows.length === 0 || hasRenderedNavHref(rows, registerHref)
+     : true;
+ 
+-  function toMaterializeItems(nextRows: NavItemRow[]): MaterializeEventHeaderNavItem[] {
++  function toMaterializeItems(nextRows: NavItemRow[]): MaterializeEventNavItem[] {
+     return nextRows.map((row) => ({
+       tempId: row.id,
+       parentTempId: row.parentId,
+@@ -167,8 +341,9 @@ export function NavItemEditor({
+     if (!eventId) {
+       return { ok: false, error: 'Missing event context.' };
+     }
+-    return materializeEventHeaderNav({
++    return materializeEventNav({
+       eventId,
++      placement: materializePlacementOf(placement),
+       items: toMaterializeItems(nextRows),
+     });
+   }
+@@ -409,78 +584,64 @@ export function NavItemEditor({
+     });
+   }
+ 
+-  function renderRow(row: NavItemRow, siblings: NavItemRow[], indent: boolean) {
+-    const idx = siblings.findIndex((s) => s.id === row.id);
+-    const isGroupHeader = row.href === '#' && row.parentId === null;
+-    return (
+-      <li
+-        key={row.id}
+-        className={`flex flex-wrap items-center justify-between gap-2 rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm ${indent ? 'ml-6' : ''}`}
+-      >
+-        <div className="min-w-0">
+-          <p className={`font-medium ${row.visible ? 'text-white' : 'text-gray-500'}`}>
+-            {row.label}
+-            {isSeededNavItemId(row.id) && (
+-              <span className="ml-2 rounded border border-sky-700/60 bg-sky-950/40 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-300">
+-                Default
+-              </span>
+-            )}
+-            {!row.visible && <span className="ml-2 text-xs uppercase tracking-wide text-gray-500">Hidden</span>}
+-          </p>
+-          <p className="truncate text-xs text-gray-400">
+-            {isGroupHeader ? 'Group — links live in its children' : row.href}
+-            {row.external && ' · opens in new tab'}
+-          </p>
+-        </div>
+-        <div className="flex shrink-0 items-center gap-1">
+-          <button
+-            type="button"
+-            onClick={() => move(row, 'up')}
+-            disabled={pending || idx <= 0}
+-            aria-label={`Move ${row.label} up`}
+-            className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
+-          >
+-            <ArrowUp size={14} />
+-          </button>
+-          <button
+-            type="button"
+-            onClick={() => move(row, 'down')}
+-            disabled={pending || idx === -1 || idx >= siblings.length - 1}
+-            aria-label={`Move ${row.label} down`}
+-            className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
+-          >
+-            <ArrowDown size={14} />
+-          </button>
+-          <button
+-            type="button"
+-            onClick={() => toggleVisible(row)}
+-            disabled={pending}
+-            aria-label={row.visible ? `Hide ${row.label}` : `Show ${row.label}`}
+-            className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
+-          >
+-            {row.visible ? <Eye size={14} /> : <EyeOff size={14} />}
+-          </button>
+-          <button
+-            type="button"
+-            onClick={() => openEdit(row)}
+-            disabled={pending}
+-            aria-label={`Edit ${row.label}`}
+-            className="rounded p-1.5 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
+-          >
+-            <Pencil size={14} />
+-          </button>
+-          <button
+-            type="button"
+-            onClick={() => remove(row)}
+-            disabled={pending}
+-            aria-label={`Delete ${row.label}`}
+-            className="rounded p-1.5 text-red-400 hover:bg-gray-700 disabled:opacity-30"
+-          >
+-            <Trash2 size={14} />
+-          </button>
+-        </div>
+-      </li>
+-    );
++  function onDragEnd(event: DragEndEvent) {
++    const activeId = String(event.active.id);
++    const rawOverId = event.over ? String(event.over.id) : null;
++    if (!rawOverId) return;
++    const overId = rawOverId.startsWith('drop:')
++      ? rawOverId.slice('drop:'.length)
++      : rawOverId;
++    if (!overId || activeId === overId) return;
++
++    const activeRow = rows.find((r) => r.id === activeId);
++    const overRow = rows.find((r) => r.id === overId);
++    if (!activeRow || !overRow) return;
++    // Only reorder within the same parent — never re-parent via drag.
++    if (activeRow.parentId !== overRow.parentId) {
++      setError('Links can only be reordered within the same group.');
++      return;
++    }
++
++    const siblings = rows
++      .filter((r) => r.parentId === activeRow.parentId)
++      .sort(byOrder);
++    const from = siblings.findIndex((s) => s.id === activeId);
++    const to = siblings.findIndex((s) => s.id === overId);
++    if (from === -1 || to === -1 || from === to) return;
++
++    const nextSiblings = siblings.slice();
++    const [moved] = nextSiblings.splice(from, 1);
++    if (!moved) return;
++    nextSiblings.splice(to, 0, moved);
++    const orderedSiblingIds = nextSiblings.map((s) => s.id);
++
++    setError(null);
++    startTransition(async () => {
++      if (seededDefaults) {
++        const nextRows = applySiblingOrder(
++          rows,
++          activeRow.parentId,
++          orderedSiblingIds
++        );
++        const result = await materializeWorkingSet(nextRows);
++        if (!result.ok) {
++          setError(result.error ?? 'Something went wrong.');
++          return;
++        }
++        router.refresh();
++        return;
++      }
++
++      const result = await reorderNavItems({
++        anchorId: activeId,
++        orderedSiblingIds,
++      });
++      if (!result.ok) {
++        setError(result.error ?? 'Something went wrong.');
++        return;
++      }
++      router.refresh();
++    });
+   }
+ 
+   return (
+@@ -523,15 +684,39 @@ export function NavItemEditor({
+           No custom links yet — the public site is showing its built-in defaults for this section.
+         </p>
+       ) : (
+-        <ul className="space-y-2">
+-          {tops.flatMap((top) => {
+-            const children = childrenOf(top.id);
+-            return [
+-              renderRow(top, tops, false),
+-              ...children.map((child) => renderRow(child, children, true)),
+-            ];
+-          })}
+-        </ul>
++        <DndContext sensors={sensors} onDragEnd={onDragEnd}>
++          <ul className="space-y-2">
++            {tops.flatMap((top) => {
++              const children = childrenOf(top.id);
++              return [
++                <NavEditorRow
++                  key={top.id}
++                  row={top}
++                  siblings={tops}
++                  indent={false}
++                  pending={pending}
++                  onMove={move}
++                  onToggleVisible={toggleVisible}
++                  onEdit={openEdit}
++                  onRemove={remove}
++                />,
++                ...children.map((child) => (
++                  <NavEditorRow
++                    key={child.id}
++                    row={child}
++                    siblings={children}
++                    indent
++                    pending={pending}
++                    onMove={move}
++                    onToggleVisible={toggleVisible}
++                    onEdit={openEdit}
++                    onRemove={remove}
++                  />
++                )),
++              ];
++            })}
++          </ul>
++        </DndContext>
+       )}
+ 
+       {formOpen && (
+diff --git a/src/lib/nav-items-actions.ts b/src/lib/nav-items-actions.ts
+index 6ed329a..0ce26ea 100644
+--- a/src/lib/nav-items-actions.ts
++++ b/src/lib/nav-items-actions.ts
+@@ -57,11 +57,36 @@ async function revalidateFor({ scope, eventSlug }: RevalidateTarget) {
+     return;
+   }
+   if (eventSlug) {
+-    revalidatePath(`/events/${eventSlug}`);
++    // Event public footer lives in the event layout, so invalidate the
++    // layout tree (not just the index page) after FOOTER / HEADER edits.
++    revalidatePath(`/events/${eventSlug}`, 'layout');
+     revalidatePath(`/organizer/events/${eventSlug}/navigation`);
+   }
+ }
+ 
++/** Scope/placement pairs the editors and public renderers actually use. */
++function isAllowedScopePlacement(
++  scope: NavScope,
++  placement: NavPlacement
++): boolean {
++  if (scope === 'SITE') {
++    return (
++      placement === 'HEADER' ||
++      placement === 'FOOTER_LEGAL' ||
++      placement === 'FOOTER_EVENTS'
++    );
++  }
++  return placement === 'HEADER' || placement === 'FOOTER';
++}
++
++function isFooterPlacement(placement: NavPlacement): boolean {
++  return (
++    placement === 'FOOTER' ||
++    placement === 'FOOTER_LEGAL' ||
++    placement === 'FOOTER_EVENTS'
++  );
++}
++
+ export interface UpsertNavItemInput {
+   /** Present = update that row. Absent = create a new one. */
+   id?: string;
+@@ -219,6 +244,12 @@ async function createNew(
+   input: UpsertNavItemInput,
+   fields: { label: string; href: string }
+ ): Promise<TxResult> {
++  if (!isAllowedScopePlacement(input.scope, input.placement)) {
++    return {
++      ok: false,
++      error: 'That navigation section is not valid for this scope.',
++    };
++  }
+   if (input.scope === 'EVENT' && !input.eventId) {
+     return { ok: false, error: 'Missing event context.' };
+   }
+@@ -240,6 +271,14 @@ async function createNew(
+ 
+   const parentId = input.parentId ?? null;
+ 
++  // Footer columns are flat lists — nesting is HEADER-only.
++  if (parentId && isFooterPlacement(input.placement)) {
++    return { ok: false, error: 'Footer links cannot be nested.' };
++  }
++  if (fields.href === '#' && isFooterPlacement(input.placement)) {
++    return { ok: false, error: 'Footer sections cannot contain groups.' };
++  }
++
+   if (parentId && fields.href === '#') {
+     return { ok: false, error: 'Groups can only be top-level.' };
+   }
+@@ -340,18 +379,18 @@ export async function deleteNavItem(
+ }
+ 
+ /**
+- * #1223: first save from code-derived event header defaults. When the
+- * organizer has never written EVENT HEADER rows for this event, the editor
+- * shows a seeded preview of `publicEventNav()`. Any first mutation must
+- * persist the *entire* working set — not just the one row the organizer
+- * touched — so the public override (null → use code defaults) never flips
+- * to a one-item DB override that silently drops the rest.
++ * #1223 / event footer editor: first save from code-derived defaults.
++ * When the organizer has never written EVENT rows for this placement, the
++ * editor shows a seeded preview. Any first mutation must persist the
++ * *entire* working set — not just the one row the organizer touched — so
++ * the public override (null/empty → use code defaults) never flips to a
++ * one-item DB override that silently drops the rest.
+  *
+- * Refuses if any EVENT HEADER rows already exist (another tab or a race
+- * already materialised the set); the client should refresh and retry with
+- * the normal single-row mutations.
++ * Refuses if any rows already exist for that placement (another tab or a
++ * race already materialised the set); the client should refresh and retry
++ * with the normal single-row mutations.
+  */
+-export interface MaterializeEventHeaderNavItem {
++export interface MaterializeEventNavItem {
+   /** Client-side temp id (including `seed:…` ids from the preview). */
+   tempId: string;
+   /** Parent's temp id, or null for top-level. */
+@@ -363,15 +402,25 @@ export interface MaterializeEventHeaderNavItem {
+   order: number;
+ }
+ 
+-export async function materializeEventHeaderNav(input: {
++/** @deprecated Prefer MaterializeEventNavItem — kept for existing imports. */
++export type MaterializeEventHeaderNavItem = MaterializeEventNavItem;
++
++export async function materializeEventNav(input: {
+   eventId: string;
+-  items: MaterializeEventHeaderNavItem[];
++  placement: 'HEADER' | 'FOOTER';
++  items: MaterializeEventNavItem[];
+ }): Promise<NavItemActionResult> {
+   await requireAdmin();
+ 
+   if (!input.eventId) {
+     return { ok: false, error: 'Missing event context.' };
+   }
++  if (!isAllowedScopePlacement('EVENT', input.placement)) {
++    return {
++      ok: false,
++      error: 'That navigation section is not valid for this scope.',
++    };
++  }
+   if (input.items.length === 0) {
+     return {
+       ok: false,
+@@ -391,6 +440,12 @@ export async function materializeEventHeaderNav(input: {
+     if (item.parentTempId !== null && item.href.trim() === '#') {
+       return { ok: false, error: 'Groups can only be top-level.' };
+     }
++    if (item.parentTempId !== null && isFooterPlacement(input.placement)) {
++      return { ok: false, error: 'Footer links cannot be nested.' };
++    }
++    if (item.href.trim() === '#' && isFooterPlacement(input.placement)) {
++      return { ok: false, error: 'Footer sections cannot contain groups.' };
++    }
+   }
+ 
+   try {
+@@ -407,7 +462,7 @@ export async function materializeEventHeaderNav(input: {
+         const existingCount = await tx.navItem.count({
+           where: {
+             scope: 'EVENT',
+-            placement: 'HEADER',
++            placement: input.placement,
+             eventId: input.eventId,
+           },
+         });
+@@ -433,7 +488,7 @@ export async function materializeEventHeaderNav(input: {
+         // Validate every item fully before any tx.navItem.create() call. A
+         // Prisma interactive transaction only rolls back on throw — an
+         // early `return { ok: false }` after some creates already ran would
+-        // commit a partial header and permanently block retries behind the
++        // commit a partial set and permanently block retries behind the
+         // existingCount guard above (#1237, found by CodeRabbit on #1236).
+         for (const item of tops) {
+           const label = item.label.trim();
+@@ -492,7 +547,7 @@ export async function materializeEventHeaderNav(input: {
+           const created = await tx.navItem.create({
+             data: {
+               scope: 'EVENT',
+-              placement: 'HEADER',
++              placement: input.placement,
+               eventId: input.eventId,
+               parentId: null,
+               label: item.label.trim(),
+@@ -513,7 +568,7 @@ export async function materializeEventHeaderNav(input: {
+           await tx.navItem.create({
+             data: {
+               scope: 'EVENT',
+-              placement: 'HEADER',
++              placement: input.placement,
+               eventId: input.eventId,
+               parentId: parentRealId,
+               label: item.label.trim(),
+@@ -546,6 +601,18 @@ export async function materializeEventHeaderNav(input: {
+   }
+ }
+ 
++/** #1223 compatibility wrapper around `materializeEventNav` for HEADER. */
++export async function materializeEventHeaderNav(input: {
++  eventId: string;
++  items: MaterializeEventNavItem[];
++}): Promise<NavItemActionResult> {
++  return materializeEventNav({
++    eventId: input.eventId,
++    placement: 'HEADER',
++    items: input.items,
++  });
++}
++
+ export async function moveNavItem(
+   id: string,
+   direction: 'up' | 'down'
+@@ -609,3 +676,117 @@ export async function moveNavItem(
+     throw error;
+   }
+ }
++
++/**
++ * Drag-and-drop reorder: rewrite sibling `order` values to match
++ * `orderedSiblingIds` (ascending 0..n-1). The list must be exactly the
++ * current sibling set for the moved row's parent — same scope/placement/
++ * eventId/parentId — so a partial or cross-section payload is rejected.
++ */
++export async function reorderNavItems(input: {
++  /** Any sibling id used to resolve the section + parent. */
++  anchorId: string;
++  orderedSiblingIds: string[];
++}): Promise<NavItemActionResult> {
++  await requireAdmin();
++
++  if (input.orderedSiblingIds.length === 0) {
++    return { ok: false, error: 'Nothing to reorder.' };
++  }
++  const unique = new Set(input.orderedSiblingIds);
++  if (unique.size !== input.orderedSiblingIds.length) {
++    return { ok: false, error: 'Duplicate ids in the reorder payload.' };
++  }
++  if (!unique.has(input.anchorId)) {
++    return {
++      ok: false,
++      error: 'The moved item must appear in the ordered sibling list.',
++    };
++  }
++
++  try {
++    const result = await prisma.$transaction(
++      async (tx): Promise<TxResult> => {
++        const anchor = await tx.navItem.findUnique({
++          where: { id: input.anchorId },
++          select: {
++            id: true,
++            scope: true,
++            placement: true,
++            eventId: true,
++            parentId: true,
++          },
++        });
++        if (!anchor) {
++          return { ok: false, error: 'Item not found.' };
++        }
++
++        const siblings = await tx.navItem.findMany({
++          where: {
++            scope: anchor.scope,
++            placement: anchor.placement,
++            eventId: anchor.eventId,
++            parentId: anchor.parentId,
++          },
++          select: { id: true },
++        });
++        const siblingIds = new Set(siblings.map((s) => s.id));
++        if (siblingIds.size !== input.orderedSiblingIds.length) {
++          return {
++            ok: false,
++            error: 'Reorder list does not match the current sibling set.',
++          };
++        }
++        for (const id of input.orderedSiblingIds) {
++          if (!siblingIds.has(id)) {
++            return {
++              ok: false,
++              error: 'Reorder list does not match the current sibling set.',
++            };
++          }
++        }
++
++        // Two-phase write avoids unique-ish collisions if a future unique
++        // constraint is added: first park orders in a high band, then set
++        // the final 0..n-1 sequence.
++        const parkBase = input.orderedSiblingIds.length + 1000;
++        for (let i = 0; i < input.orderedSiblingIds.length; i++) {
++          await tx.navItem.update({
++            where: { id: input.orderedSiblingIds[i]! },
++            data: { order: parkBase + i },
++          });
++        }
++        for (let i = 0; i < input.orderedSiblingIds.length; i++) {
++          await tx.navItem.update({
++            where: { id: input.orderedSiblingIds[i]! },
++            data: { order: i },
++          });
++        }
++
++        const eventSlug = await resolveEventSlug(
++          tx,
++          anchor.scope,
++          anchor.eventId
++        );
++        return { ok: true, scope: anchor.scope, eventSlug };
++      },
++      { isolationLevel: 'Serializable' }
++    );
++    if (result.ok) {
++      await revalidateFor({ scope: result.scope, eventSlug: result.eventSlug });
++      return { ok: true };
++    }
++    return result;
++  } catch (error) {
++    if (hasPrismaErrorCode(error, RECORD_NOT_FOUND_CODE)) {
++      return { ok: false, error: 'Item not found.' };
++    }
++    if (isSerializationFailure(error)) {
++      return {
++        ok: false,
++        error: 'Someone else just reordered this navigation — please retry.',
++      };
++    }
++    throw error;
++  }
++}
+diff --git a/src/lib/nav-items-query.ts b/src/lib/nav-items-query.ts
+index 78fc1cb..048a0a6 100644
+--- a/src/lib/nav-items-query.ts
++++ b/src/lib/nav-items-query.ts
+@@ -19,6 +19,7 @@ import type { NavPlacement, NavScope } from '@prisma/client';
+ import { prisma } from '@/lib/db';
+ import {
+   buildNavTree,
++  defaultEventFooterLinks,
+   flattenToLinks,
+   DEFAULT_SITE_FOOTER_EVENTS_LINKS,
+   DEFAULT_SITE_FOOTER_LEGAL_LINKS,
+@@ -99,6 +100,22 @@ export async function getEventHeaderNavOverride(
+   return buildNavTree(rows);
+ }
+ 
++/**
++ * Per-event public footer links. Falls back to `defaultEventFooterLinks`
++ * when no EVENT FOOTER rows exist (or the read failed). An all-hidden
++ * configuration yields an empty list — intentional, same as site footers.
++ */
++export async function getEventFooterLinks(
++  eventId: string,
++  eventSlug: string
++): Promise<NavLink[]> {
++  const rows = await fetchRows({ scope: 'EVENT', placement: 'FOOTER', eventId });
++  if (rows === null || rows.length === 0) {
++    return [...defaultEventFooterLinks(eventSlug)];
++  }
++  return flattenToLinks(buildNavTree(rows));
++}
++
+ // ─── Editor read side (includes hidden rows, needs ids to edit) ───────────
+ 
+ export async function listNavItemRows(where: {
+diff --git a/src/lib/nav-items.ts b/src/lib/nav-items.ts
+index 80dfa1f..f024928 100644
+--- a/src/lib/nav-items.ts
++++ b/src/lib/nav-items.ts
+@@ -62,6 +62,22 @@ export const DEFAULT_SITE_FOOTER_EVENTS_LINKS: readonly NavLink[] = [
+   { href: '/speakers', label: 'Speakers' },
+ ];
+ 
++/**
++ * Per-event public footer links (`EventPublicFooter`'s former hardcoded
++ * `standardLinks`). Used when zero EVENT FOOTER `NavItem` rows exist —
++ * same null-override pattern as the event header (#1223 / #832).
++ */
++export function defaultEventFooterLinks(eventSlug: string): readonly NavLink[] {
++  const base = `/events/${eventSlug}`;
++  return [
++    { href: base, label: 'Overview' },
++    { href: `${base}/schedule`, label: 'Schedule' },
++    { href: `${base}/speakers`, label: 'Speakers' },
++    { href: `${base}/sponsors`, label: 'Sponsors' },
++    { href: `${base}/policies`, label: 'Policies' },
++  ];
++}
++
+ // ─── Tree building ─────────────────────────────────────────────────────────
+ 
+ function bySiblingOrder(a: NavItemRow, b: NavItemRow): number {
+@@ -147,7 +163,7 @@ export function hasRenderedNavHref(
+  * Synthetic id prefix for rows the event navigation editor shows when the
+  * organizer has not yet saved any EVENT HEADER `NavItem` rows. These ids
+  * never exist in the database; the first editor mutation materializes the
+- * full working set via `materializeEventHeaderNav`.
++ * full working set via `materializeEventNav`.
+  */
+ export const SEEDED_NAV_ID_PREFIX = 'seed:' as const;
+ 
+diff --git a/tests/unit/nav-item-editor.test.ts b/tests/unit/nav-item-editor.test.ts
+index 878af4b..a8a50e2 100644
+--- a/tests/unit/nav-item-editor.test.ts
++++ b/tests/unit/nav-item-editor.test.ts
+@@ -18,7 +18,9 @@ const actionMocks = vi.hoisted(() => ({
+   deleteNavItem: vi.fn(),
+   moveNavItem: vi.fn(),
+   upsertNavItem: vi.fn(),
++  materializeEventNav: vi.fn(),
+   materializeEventHeaderNav: vi.fn(),
++  reorderNavItems: vi.fn(),
+   refresh: vi.fn(),
+ }));
+ 
+@@ -30,7 +32,31 @@ vi.mock('@/lib/nav-items-actions', () => ({
+   deleteNavItem: actionMocks.deleteNavItem,
+   moveNavItem: actionMocks.moveNavItem,
+   upsertNavItem: actionMocks.upsertNavItem,
++  materializeEventNav: actionMocks.materializeEventNav,
+   materializeEventHeaderNav: actionMocks.materializeEventHeaderNav,
++  reorderNavItems: actionMocks.reorderNavItems,
++}));
++
++vi.mock('@dnd-kit/core', () => ({
++  DndContext: ({ children }: { children: unknown }) => children,
++  PointerSensor: function PointerSensor() {},
++  useSensor: vi.fn(),
++  useSensors: vi.fn(() => []),
++  useDraggable: () => ({
++    attributes: {},
++    listeners: {},
++    setNodeRef: vi.fn(),
++    transform: null,
++    isDragging: false,
++  }),
++  useDroppable: () => ({
++    setNodeRef: vi.fn(),
++    isOver: false,
++  }),
++}));
++
++vi.mock('@dnd-kit/utilities', () => ({
++  CSS: { Translate: { toString: () => undefined } },
+ }));
+ 
+ import { NavItemEditor } from '@/components/organizer/nav-item-editor';
+@@ -133,10 +159,10 @@ describe('NavItemEditor first-save materialize (#1223)', () => {
+         IS_REACT_ACT_ENVIRONMENT: boolean;
+       }
+     ).IS_REACT_ACT_ENVIRONMENT = true;
+-    actionMocks.materializeEventHeaderNav.mockResolvedValue({ ok: true });
++    actionMocks.materializeEventNav.mockResolvedValue({ ok: true });
+     actionMocks.upsertNavItem.mockResolvedValue({ ok: true });
+     actionMocks.refresh.mockReset();
+-    actionMocks.materializeEventHeaderNav.mockClear();
++    actionMocks.materializeEventNav.mockClear();
+     actionMocks.upsertNavItem.mockClear();
+   });
+ 
+@@ -181,12 +207,14 @@ describe('NavItemEditor first-save materialize (#1223)', () => {
+     });
+ 
+     expect(actionMocks.upsertNavItem).not.toHaveBeenCalled();
+-    expect(actionMocks.materializeEventHeaderNav).toHaveBeenCalledTimes(1);
+-    const payload = actionMocks.materializeEventHeaderNav.mock.calls[0]![0] as {
++    expect(actionMocks.materializeEventNav).toHaveBeenCalledTimes(1);
++    const payload = actionMocks.materializeEventNav.mock.calls[0]![0] as {
+       eventId: string;
++      placement: string;
+       items: Array<{ label: string; visible: boolean }>;
+     };
+     expect(payload.eventId).toBe('evt_1');
++    expect(payload.placement).toBe('HEADER');
+     // Full working set, not just Schedule.
+     expect(payload.items.length).toBe(seeded.length);
+     expect(payload.items.map((i) => i.label)).toEqual(
+diff --git a/tests/unit/nav-items-actions.test.ts b/tests/unit/nav-items-actions.test.ts
+index 3703664..8d8f8d9 100644
+--- a/tests/unit/nav-items-actions.test.ts
++++ b/tests/unit/nav-items-actions.test.ts
+@@ -77,10 +77,13 @@ vi.mock('@/lib/db', () => ({
+ import {
+   deleteNavItem,
+   materializeEventHeaderNav,
++  materializeEventNav,
+   moveNavItem,
++  reorderNavItems,
+   upsertNavItem,
+ } from '@/lib/nav-items-actions';
+ import {
++  defaultEventFooterLinks,
+   seedRowsFromNavEntries,
+   type NavItemRow,
+ } from '@/lib/nav-items';
+@@ -172,7 +175,7 @@ describe('upsertNavItem — create: validation', () => {
+       where: { id: 'evt_real' },
+       select: { slug: true },
+     });
+-    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/real-event');
++    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/real-event', 'layout');
+     expect(mocks.revalidatePath).toHaveBeenCalledWith(
+       '/organizer/events/real-event/navigation'
+     );
+@@ -664,12 +667,47 @@ describe('materializeEventHeaderNav (#1223)', () => {
+     expect(createdLabels).toContain('Speakers');
+     expect(createdLabels).toContain('Register');
+     expect(createdLabels).toContain('About');
+-    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/demo');
++    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/demo', 'layout');
+     expect(mocks.revalidatePath).toHaveBeenCalledWith(
+       '/organizer/events/demo/navigation'
+     );
+   });
+ 
++  it('materializes EVENT FOOTER rows with FOOTER placement', async () => {
++    const items = seedRowsFromNavEntries(defaultEventFooterLinks('demo')).map(
++      (row: NavItemRow) => ({
++        tempId: row.id,
++        parentTempId: row.parentId,
++        label: row.label,
++        href: row.href,
++        external: row.external,
++        visible: row.visible,
++        order: row.order,
++      })
++    );
++
++    mocks.eventFindUnique.mockResolvedValue({ slug: 'demo' });
++    mocks.navItemCount.mockResolvedValue(0);
++    mocks.navItemCreate.mockImplementation(async () => ({ id: 'real-1' }));
++
++    const result = await materializeEventNav({
++      eventId: 'evt_1',
++      placement: 'FOOTER',
++      items,
++    });
++
++    expect(result.ok).toBe(true);
++    expect(mocks.navItemCreate).toHaveBeenCalledTimes(items.length);
++    expect(
++      mocks.navItemCreate.mock.calls.every(
++        (call: unknown[]) =>
++          (call[0] as { data: { placement: string } }).data.placement ===
++          'FOOTER'
++      )
++    ).toBe(true);
++    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/demo', 'layout');
++  });
++
+   it('refuses when EVENT HEADER rows already exist', async () => {
+     mocks.eventFindUnique.mockResolvedValue({ slug: 'demo' });
+     mocks.navItemCount.mockResolvedValue(3);
+@@ -757,7 +795,7 @@ describe('deleteNavItem', () => {
+     mocks.navItemDelete.mockResolvedValue(undefined);
+     const result = await deleteNavItem('row-1');
+     expect(result.ok).toBe(true);
+-    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/real-event');
++    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/real-event', 'layout');
+     expect(mocks.revalidatePath).toHaveBeenCalledWith(
+       '/organizer/events/real-event/navigation'
+     );
+@@ -848,9 +886,69 @@ describe('moveNavItem', () => {
+     mocks.eventFindUnique.mockResolvedValue({ slug: 'real-event' });
+     const result = await moveNavItem('b', 'up');
+     expect(result.ok).toBe(true);
+-    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/real-event');
++    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/real-event', 'layout');
+     expect(mocks.revalidatePath).toHaveBeenCalledWith(
+       '/organizer/events/real-event/navigation'
+     );
+   });
+ });
++
++describe('reorderNavItems', () => {
++  beforeEach(() => {
++    mocks.navItemFindUnique.mockResolvedValue({
++      id: 'a',
++      scope: 'EVENT',
++      placement: 'FOOTER',
++      eventId: 'evt_1',
++      parentId: null,
++    });
++    mocks.navItemFindMany.mockResolvedValue([
++      { id: 'a' },
++      { id: 'b' },
++      { id: 'c' },
++    ]);
++    mocks.eventFindUnique.mockResolvedValue({ slug: 'demo' });
++  });
++
++  it('rewrites sibling order to match the drag payload', async () => {
++    const result = await reorderNavItems({
++      anchorId: 'a',
++      orderedSiblingIds: ['c', 'a', 'b'],
++    });
++    expect(result.ok).toBe(true);
++    // Two-phase write: park, then final 0..n-1.
++    expect(mocks.navItemUpdate).toHaveBeenCalledTimes(6);
++    expect(mocks.navItemUpdate).toHaveBeenNthCalledWith(4, {
++      where: { id: 'c' },
++      data: { order: 0 },
++    });
++    expect(mocks.navItemUpdate).toHaveBeenNthCalledWith(5, {
++      where: { id: 'a' },
++      data: { order: 1 },
++    });
++    expect(mocks.navItemUpdate).toHaveBeenNthCalledWith(6, {
++      where: { id: 'b' },
++      data: { order: 2 },
++    });
++    expect(mocks.revalidatePath).toHaveBeenCalledWith('/events/demo', 'layout');
++  });
++
++  it('rejects a payload that does not match the sibling set', async () => {
++    const result = await reorderNavItems({
++      anchorId: 'a',
++      orderedSiblingIds: ['a', 'b'],
++    });
++    expect(result.ok).toBe(false);
++    expect(result.error).toMatch(/sibling set/i);
++    expect(mocks.navItemUpdate).not.toHaveBeenCalled();
++  });
++
++  it('rejects when the anchor is missing from the ordered list', async () => {
++    const result = await reorderNavItems({
++      anchorId: 'a',
++      orderedSiblingIds: ['b', 'c', 'x'],
++    });
++    expect(result.ok).toBe(false);
++    expect(result.error).toMatch(/ordered sibling list/i);
++  });
++});
+diff --git a/tests/unit/nav-items-query.test.ts b/tests/unit/nav-items-query.test.ts
+index 1e13bec..14ed410 100644
+--- a/tests/unit/nav-items-query.test.ts
++++ b/tests/unit/nav-items-query.test.ts
+@@ -6,6 +6,7 @@
+ 
+ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ import {
++  defaultEventFooterLinks,
+   DEFAULT_SITE_FOOTER_EVENTS_LINKS,
+   DEFAULT_SITE_FOOTER_LEGAL_LINKS,
+   DEFAULT_SITE_HEADER_LINKS,
+@@ -25,6 +26,7 @@ vi.mock('@/lib/db', () => ({
+ }));
+ 
+ import {
++  getEventFooterLinks,
+   getEventHeaderNavOverride,
+   getSiteFooterEventsLinks,
+   getSiteFooterLegalLinks,
+@@ -81,5 +83,43 @@ describe('navigation read fallbacks', () => {
+       DEFAULT_SITE_FOOTER_LEGAL_LINKS
+     );
+     await expect(getEventHeaderNavOverride('evt_1')).resolves.toBeNull();
++    await expect(getEventFooterLinks('evt_1', 'demo')).resolves.toEqual(
++      defaultEventFooterLinks('demo')
++    );
++  });
++});
++
++describe('getEventFooterLinks', () => {
++  it('falls back to defaultEventFooterLinks when no rows exist', async () => {
++    mocks.findMany.mockResolvedValue([]);
++    await expect(getEventFooterLinks('evt_1', 'demo')).resolves.toEqual(
++      defaultEventFooterLinks('demo')
++    );
++  });
++
++  it('returns flattened visible links when EVENT FOOTER rows exist', async () => {
++    mocks.findMany.mockResolvedValue([
++      {
++        id: '1',
++        label: 'Agenda',
++        href: '/events/demo/schedule',
++        visible: true,
++        external: false,
++        order: 0,
++        parentId: null,
++      },
++      {
++        id: '2',
++        label: 'Hidden',
++        href: '/events/demo/speakers',
++        visible: false,
++        external: false,
++        order: 1,
++        parentId: null,
++      },
++    ]);
++    await expect(getEventFooterLinks('evt_1', 'demo')).resolves.toEqual([
++      { href: '/events/demo/schedule', label: 'Agenda' },
++    ]);
+   });
+ });
+diff --git a/tests/unit/nav-items.test.ts b/tests/unit/nav-items.test.ts
+index 71aed6b..a09632f 100644
+--- a/tests/unit/nav-items.test.ts
++++ b/tests/unit/nav-items.test.ts
+@@ -7,6 +7,7 @@
+ import { describe, expect, it } from 'vitest';
+ import {
+   buildNavTree,
++  defaultEventFooterLinks,
+   flattenToLinks,
+   hasRenderedNavHref,
+   isSeededNavItemId,
+@@ -172,6 +173,25 @@ describe('hasRenderedNavHref', () => {
+   });
+ });
+ 
++describe('defaultEventFooterLinks', () => {
++  it('matches the historical EventPublicFooter standard links', () => {
++    expect(defaultEventFooterLinks('demo')).toEqual([
++      { href: '/events/demo', label: 'Overview' },
++      { href: '/events/demo/schedule', label: 'Schedule' },
++      { href: '/events/demo/speakers', label: 'Speakers' },
++      { href: '/events/demo/sponsors', label: 'Sponsors' },
++      { href: '/events/demo/policies', label: 'Policies' },
++    ]);
++  });
++
++  it('seeds editor rows that round-trip through buildNavTree', () => {
++    const defaults = defaultEventFooterLinks('ata');
++    const rows = seedRowsFromNavEntries(defaults);
++    expect(rowsAreSeededDefaults(rows)).toBe(true);
++    expect(flattenToLinks(buildNavTree(rows))).toEqual([...defaults]);
++  });
++});
++
+ describe('seedRowsFromNavEntries (#1223)', () => {
+   it('seeded-defaults-shown-when-zero-rows: mirrors publicEventNav labels and hrefs', () => {
+     const entries = publicEventNav('all-things-ai-2027', {

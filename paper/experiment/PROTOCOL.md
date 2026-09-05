@@ -189,3 +189,114 @@ a stated limitation.
 Replay measures task difficulty under each arm, not whether a change would have shipped;
 the leakage audit detects consultation of the real fix but cannot make it impossible.
 Both are stated as limitations of the design in the paper. Neither is argued away.
+
+---
+
+## Amendment D-2 (2026-08-21) — governs where it conflicts with D-1 and the registered text
+
+Cause and full accounting, including two rejected drafts: `DEVIATIONS.md` (D-2). The first
+replay under D-1 was voided — the implementer retrieved the fixing PR and post-fix file
+contents as its opening move. D-1 detects that but does not prevent it. Owner decisions
+2026-08-21: isolation applies to **both** arms; the runner is hosted on the Mac Mini; a
+**blocked** attempt is logged, not voiding.
+
+### Threat model
+
+- **A — network** to GitHub. Needs credentials: the repo is private and unauthenticated
+  retrieval of the fixing PR returns **404**.
+- **B — local filesystem.** Any checkout with the future history yields the fix via one
+  `git show`, with **no** credentials. Higher-value vector.
+
+**No host-side sandbox on either Mac closes both.** Measured: `codex -s workspace-write`
+denies network but reads the canonical checkout (`RC=0`); a Grok `strict`-based profile
+denies the canonical checkout but not network (`HTTP:200`), and was defeated anyway via the
+temp trees and `~/.grok`, both of which any workable profile must grant.
+
+### Leakage control — layer 0: containerized runner
+
+Isolation comes from the **container**, not the host. The Mini is *not* clean —
+`~/workspace/conference-os` there contains the fixing commit — it is simply always on and
+already running colima.
+
+- Image `ab219-runner:2`
+  (`sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08`), from
+  `node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`
+  plus `git` and `@xai-official/grok@1.0.3`. Empty agent `HOME`.
+- The frozen tree is built on the laptop under the D-1 census, shipped as a tarball, and the
+  **census is re-verified on the Mini after transfer**. It is mounted alone at `/work`.
+- `auth.json` is mounted as a **single read-only FILE** at `/home/agent/.grok/auth.json`,
+  never as a directory. Mounting the directory causes Grok to persist session state to the
+  host, which would carry the previous run's transcript into the next container — the
+  retained-session-store defect, reintroduced by mount shape. Verified after the fix: the
+  agent authenticates and **no host-side session state is created**.
+- `--rm`, so agent state lands in the ephemeral layer and is destroyed with the container.
+
+```bash
+docker run --rm \
+  -v <SCRATCH>:/work \
+  -v <BRIEF>:/brief.txt:ro \
+  -v <AUTH_JSON_FILE>:/home/agent/.grok/auth.json:ro \
+  -w /work ab219-runner:2 \
+  grok --always-approve --cwd /work --model <PINNED_MODEL> \
+       --output-format streaming-messages-json --prompt-file /brief.txt
+```
+
+**Probe before every run** (assumption is what voided the first attempt):
+
+| probe | required result |
+|---|---|
+| `ls /Users` | No such file or directory |
+| repo copies in container | none |
+| fix commit from `/work` | could not get object info |
+| `gh`, `~/.config/gh`, `~/.ssh` | absent; `GH_TOKEN` unset |
+| `~/.grok` config | absent (no MCP servers) |
+| private repo unauthenticated | 404 |
+
+### Audit rule (amended)
+
+- **Successful retrieval** of out-of-tree information → run is **void** and re-run.
+- **Blocked attempt** → recorded in `attempted_leak`, run stands.
+- The distinction must be evidenced by decoding tool results, never inferred from command
+  text. Attempt counts are reported as a finding: the raw arm reached for the answer as its
+  opening move in both independent sessions run so far.
+
+### Model pinning
+
+Runs pin `--model` explicitly and record it (`cos#1245`: **grok-4.5**). Both arms use the
+same platform and pinned model, which removes a confound but **narrows the estimand**: H7
+was registered over a platform mix and is now tested for one model. Reported as a limitation.
+
+### Brief
+
+**Verbatim issue text** plus the working directory — no sanitization. The container closes
+the lookup vector, so sanitization would only delete requirements, and it would interact
+with arm (the harness spec gate can compensate where raw cannot).
+
+Limitation: the frozen tree may name its own task — at `cos#1245`'s base commit,
+`docs/ata-config-todo.md` links the issue and describes the work. Brief-blinding conceals
+task identity less than D-1 claimed; it does not reveal the solution.
+
+### Dependency pre-provisioning
+
+`npm ci && npx prisma generate`, run by the coordinator in the mounted tree before the
+implementer session. Excluded from metrics 3–4 in both arms.
+
+Stated honestly: `npm ci` executes `postinstall` and several dependency install scripts with
+network, so this is **not** information-free, and the exclusion **changes** registered metric
+accounting rather than leaving it untouched. It is identical work in both arms, Node/npm are
+pinned by the image digest, and the lockfile is the base commit's.
+
+### Harness-arm isolation
+
+- implementer — `ab219-runner:1`, as above;
+- cross-vendor reviewer — not the implementing platform; receives the exported patch and the
+  brief **only**, with no repository mount and no GitHub credential;
+- spec gate and captain — operate on the issue text and the patch only.
+
+### Limitations created by this amendment
+
+Egress is **not** restricted to the inference endpoint: the container reaches the public
+internet, and the clean run used that to fetch build tools. Retrieval of this fix remains
+impossible without a credential the container lacks, but egress allowlisting is unbuilt and
+is the next hardening. The estimand is narrowed to one model. Replay measures task
+difficulty under each arm, not whether a change would have shipped.

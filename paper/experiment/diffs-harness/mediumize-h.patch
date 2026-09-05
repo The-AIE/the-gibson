@@ -1,0 +1,3192 @@
+diff --git a/prisma/migrations/20260822120000_sponsor_contacts/migration.sql b/prisma/migrations/20260822120000_sponsor_contacts/migration.sql
+new file mode 100644
+index 0000000..551fa5d
+--- /dev/null
++++ b/prisma/migrations/20260822120000_sponsor_contacts/migration.sql
+@@ -0,0 +1,217 @@
++-- Many contacts per Sponsor / community partner (roles on membership).
++-- Additive only: new enum, new SponsorContact join table, optional
++-- CrmContact.sponsorId account FK (#1215). Flat Sponsor.contact* columns
++-- are intentionally retained for dual-write / legacy readers.
++--
++-- Existing flat contact* rows are backfilled into CrmContact +
++-- SponsorContact in the DO block below (idempotent). The TypeScript
++-- helper/scripts/backfill-sponsor-contacts.ts remains for repair runs.
++
++-- CreateEnum
++CREATE TYPE "SponsorContactRole" AS ENUM (
++  'PRIMARY',
++  'BILLING',
++  'MARKETING',
++  'ONSITE',
++  'SIGNATORY',
++  'OTHER'
++);
++
++-- CreateTable
++-- roles default empty: PRIMARY membership is expressed by isPrimary=true
++-- (and the PRIMARY role when the app writes). Avoids DEFAULT PRIMARY with
++-- isPrimary=false contradictions on raw inserts.
++CREATE TABLE "SponsorContact" (
++    "id" TEXT NOT NULL,
++    "sponsorId" TEXT NOT NULL,
++    "contactId" TEXT NOT NULL,
++    "roles" "SponsorContactRole"[] DEFAULT ARRAY[]::"SponsorContactRole"[],
++    "isPrimary" BOOLEAN NOT NULL DEFAULT false,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "SponsorContact_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "SponsorContact_sponsorId_contactId_key"
++  ON "SponsorContact"("sponsorId", "contactId");
++
++CREATE INDEX "SponsorContact_contactId_idx"
++  ON "SponsorContact"("contactId");
++
++CREATE INDEX "SponsorContact_sponsorId_isPrimary_idx"
++  ON "SponsorContact"("sponsorId", "isPrimary");
++
++-- At most one primary membership per sponsor.
++CREATE UNIQUE INDEX "SponsorContact_sponsor_primary_uq"
++  ON "SponsorContact" ("sponsorId") WHERE "isPrimary" = true;
++
++-- AlterTable: optional account link on CrmContact (#1215)
++ALTER TABLE "CrmContact" ADD COLUMN IF NOT EXISTS "sponsorId" TEXT;
++
++CREATE INDEX IF NOT EXISTS "CrmContact_sponsorId_idx"
++  ON "CrmContact"("sponsorId");
++
++-- AddForeignKey
++ALTER TABLE "SponsorContact"
++  ADD CONSTRAINT "SponsorContact_sponsorId_fkey"
++  FOREIGN KEY ("sponsorId") REFERENCES "Sponsor"("id")
++  ON DELETE CASCADE ON UPDATE CASCADE;
++
++ALTER TABLE "SponsorContact"
++  ADD CONSTRAINT "SponsorContact_contactId_fkey"
++  FOREIGN KEY ("contactId") REFERENCES "CrmContact"("id")
++  ON DELETE CASCADE ON UPDATE CASCADE;
++
++ALTER TABLE "CrmContact"
++  ADD CONSTRAINT "CrmContact_sponsorId_fkey"
++  FOREIGN KEY ("sponsorId") REFERENCES "Sponsor"("id")
++  ON DELETE SET NULL ON UPDATE CASCADE;
++
++-- Idempotent data backfill: flat Sponsor.contact* → CrmContact + SponsorContact.
++-- Uses the singleton site Organization (oldest by createdAt), matching
++-- getSiteOrganizationId(). Sponsors without EventSponsor are included.
++-- Idempotency is per (sponsor, normalized email), not "any membership exists".
++DO $$
++DECLARE
++  org_id TEXT;
++  r RECORD;
++  contact_id TEXT;
++  first_name TEXT;
++  last_name TEXT;
++  email_norm TEXT;
++  make_primary BOOLEAN;
++  space_pos INT;
++  trimmed_name TEXT;
++BEGIN
++  SELECT id INTO org_id FROM "Organization" ORDER BY "createdAt" ASC LIMIT 1;
++  IF org_id IS NULL THEN
++    RETURN;
++  END IF;
++
++  FOR r IN
++    SELECT
++      s.id AS sponsor_id,
++      s."companyName" AS company_name,
++      s."contactName" AS contact_name,
++      s."contactEmail" AS contact_email,
++      s."contactPhone" AS contact_phone
++    FROM "Sponsor" s
++    WHERE length(trim(s."contactEmail")) > 0
++      AND position('@' in trim(s."contactEmail")) > 1
++  LOOP
++    email_norm := lower(trim(r.contact_email));
++    IF email_norm IS NULL OR email_norm = '' THEN
++      CONTINUE;
++    END IF;
++
++    -- Already migrated this flat contact onto this sponsor.
++    IF EXISTS (
++      SELECT 1
++      FROM "SponsorContact" sc
++      JOIN "CrmContact" c ON c.id = sc."contactId"
++      WHERE sc."sponsorId" = r.sponsor_id
++        AND c.email = email_norm
++    ) THEN
++      CONTINUE;
++    END IF;
++
++    trimmed_name := trim(COALESCE(r.contact_name, ''));
++    space_pos := position(' ' in trimmed_name);
++    IF trimmed_name = '' THEN
++      first_name := NULL;
++      last_name := NULL;
++    ELSIF space_pos = 0 THEN
++      first_name := trimmed_name;
++      last_name := NULL;
++    ELSE
++      first_name := substr(trimmed_name, 1, space_pos - 1);
++      last_name := nullif(trim(substr(trimmed_name, space_pos + 1)), '');
++    END IF;
++
++    SELECT c.id INTO contact_id
++    FROM "CrmContact" c
++    WHERE c."organizationId" = org_id AND c.email = email_norm;
++
++    IF contact_id IS NULL THEN
++      contact_id := 'scbf_' || md5(r.sponsor_id || ':' || email_norm);
++      BEGIN
++        INSERT INTO "CrmContact" (
++          "id", "organizationId", "email", "firstName", "lastName",
++          "phone", "companyName", "source", "roleHints", "sponsorId",
++          "isProspect", "tags", "createdAt", "updatedAt"
++        ) VALUES (
++          contact_id,
++          org_id,
++          email_norm,
++          first_name,
++          last_name,
++          r.contact_phone,
++          r.company_name,
++          'sponsor_flat_backfill',
++          ARRAY['sponsor']::text[],
++          r.sponsor_id,
++          false,
++          ARRAY[]::text[],
++          NOW(),
++          NOW()
++        );
++      EXCEPTION
++        WHEN unique_violation THEN
++          SELECT c.id INTO contact_id
++          FROM "CrmContact" c
++          WHERE c."organizationId" = org_id AND c.email = email_norm;
++      END;
++
++      SELECT c.id INTO contact_id
++      FROM "CrmContact" c
++      WHERE c."organizationId" = org_id AND c.email = email_norm;
++    END IF;
++
++    IF contact_id IS NULL THEN
++      CONTINUE;
++    END IF;
++
++    -- Account pointer: set when unset; never steal from another sponsor.
++    UPDATE "CrmContact"
++    SET "sponsorId" = r.sponsor_id,
++        "updatedAt" = NOW()
++    WHERE id = contact_id
++      AND ("sponsorId" IS NULL OR "sponsorId" = r.sponsor_id);
++
++    IF EXISTS (
++      SELECT 1 FROM "CrmContact"
++      WHERE id = contact_id
++        AND "sponsorId" IS NOT NULL
++        AND "sponsorId" <> r.sponsor_id
++    ) THEN
++      CONTINUE;
++    END IF;
++
++    SELECT NOT EXISTS (
++      SELECT 1 FROM "SponsorContact"
++      WHERE "sponsorId" = r.sponsor_id AND "isPrimary" = true
++    ) INTO make_primary;
++
++    BEGIN
++      INSERT INTO "SponsorContact" (
++        "id", "sponsorId", "contactId", "roles", "isPrimary", "createdAt", "updatedAt"
++      ) VALUES (
++        'scbm_' || md5(r.sponsor_id || ':' || contact_id),
++        r.sponsor_id,
++        contact_id,
++        CASE
++          WHEN make_primary THEN ARRAY['PRIMARY', 'BILLING']::"SponsorContactRole"[]
++          ELSE ARRAY['BILLING']::"SponsorContactRole"[]
++        END,
++        make_primary,
++        NOW(),
++        NOW()
++      );
++    EXCEPTION
++      WHEN unique_violation THEN
++        NULL; -- membership already present
++    END;
++  END LOOP;
++END $$;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 1c0ea2d..3129295 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -1390,6 +1390,9 @@ model Sponsor {
+   website       String?
+   logoUrl       String?
+   description   String?
++  /// Denormalized primary-contact snapshot for legacy readers. Source of
++  /// truth for people is SponsorContact (+ CrmContact); dual-write keeps
++  /// these columns aligned with the primary membership.
+   contactName   String
+   contactEmail  String
+   contactPhone  String?
+@@ -1398,9 +1401,45 @@ model Sponsor {
+   clerkUserId   String?
+   events        EventSponsor[]
+   offsiteEvents OffsiteEvent[]
++  /// Many people per sponsor company (#1215 / multi-contact).
++  contacts      SponsorContact[]
++  /// CrmContacts whose account pointer points at this company.
++  crmContacts   CrmContact[]
+   createdAt     DateTime       @default(now())
+ }
+ 
++/// Roles a person can hold on a Sponsor membership. A membership may hold
++/// one or more roles (e.g. PRIMARY + BILLING).
++enum SponsorContactRole {
++  PRIMARY
++  BILLING
++  MARKETING
++  ONSITE
++  SIGNATORY
++  OTHER
++}
++
++/// Join: many CrmContact people ↔ one Sponsor company, with roles on the
++/// membership. Flat Sponsor.contact* columns remain as the primary snapshot.
++model SponsorContact {
++  id         String               @id @default(cuid())
++  sponsorId  String
++  sponsor    Sponsor              @relation(fields: [sponsorId], references: [id], onDelete: Cascade)
++  contactId  String
++  contact    CrmContact           @relation(fields: [contactId], references: [id], onDelete: Cascade)
++  /// Empty default: PRIMARY is expressed via isPrimary (+ PRIMARY in roles
++  /// when the app writes). Avoids DEFAULT PRIMARY with isPrimary=false.
++  roles      SponsorContactRole[] @default([])
++  /// At most one primary membership per sponsor (partial unique index in SQL).
++  isPrimary  Boolean              @default(false)
++  createdAt  DateTime             @default(now())
++  updatedAt  DateTime             @updatedAt
++
++  @@unique([sponsorId, contactId])
++  @@index([contactId])
++  @@index([sponsorId, isPrimary])
++}
++
+ model EventSponsor {
+   id              String                 @id @default(cuid())
+   eventId         String
+@@ -2916,6 +2955,10 @@ model CrmContact {
+   phone          String?
+   companyName    String?
+   jobTitle       String?
++  /// Optional account link to the Sponsor company this person belongs to
++  /// (#1215). companyName remains a display/import cache.
++  sponsorId      String?
++  sponsor        Sponsor?         @relation(fields: [sponsorId], references: [id], onDelete: SetNull)
+   /// import | backfill | manual | registration | …
+   source         String?
+   /// Outreach-only contact (CSV prospect). Never treated as an attendee;
+@@ -2930,6 +2973,8 @@ model CrmContact {
+   /// environments that applied an earlier revision of the contact-spine migration.
+   updatedAt      DateTime         @default(now()) @updatedAt
+   links          CrmContactLink[]
++  /// Sponsor company memberships (roles live on the join, not the person).
++  sponsorContacts SponsorContact[]
+   /// #1250 Provider enrichment (1:1). Entered contact fields stay untouched.
+   enrichment     CrmContactEnrichment?
+   /// #1313 name-collision review rows against this contact
+@@ -2938,6 +2983,7 @@ model CrmContact {
+   @@unique([organizationId, email])
+   @@index([organizationId, lastName, firstName])
+   @@index([organizationId, isProspect])
++  @@index([sponsorId])
+ }
+ 
+ /// #1250 Side-by-side enrichment for a CrmContact. Separate 1:1 model so the
+diff --git a/scripts/backfill-sponsor-contacts.ts b/scripts/backfill-sponsor-contacts.ts
+new file mode 100644
+index 0000000..bcc0823
+--- /dev/null
++++ b/scripts/backfill-sponsor-contacts.ts
+@@ -0,0 +1,89 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * Repair / re-run backfill: Sponsor flat contact* columns → CrmContact +
++ * SponsorContact (PRIMARY + BILLING when no primary exists).
++ *
++ * The additive migration already runs an idempotent SQL backfill. This
++ * script repairs rows missed after partial writes or for environments that
++ * applied an earlier revision of the migration. Idempotency is per
++ * (sponsor, normalized email); sponsors without EventSponsor are included
++ * via the singleton site Organization.
++ *
++ * Usage (stub server-only so @/lib/db can load outside Next):
++ *   node --require ./scripts/stub-server-only.cjs --import tsx \
++ *     scripts/backfill-sponsor-contacts.ts
++ *   node --require ./scripts/stub-server-only.cjs --import tsx \
++ *     scripts/backfill-sponsor-contacts.ts --apply
++ */
++
++import { createPrismaClient } from '@/lib/prisma-factory';
++import { backfillSponsorContactsFromFlat } from '@/lib/sponsor-contacts';
++import {
++  DEFAULT_PROTECTED_DATABASE_HOSTS,
++  matchesProtectedDatabaseHost,
++} from '../src/lib/protected-database-hosts';
++
++function parseArgs(argv: string[]) {
++  const apply = argv.includes('--apply');
++  return { dryRun: !apply, apply };
++}
++
++function isForbiddenProductionHost(
++  databaseUrl: string | undefined,
++  force: string | undefined,
++): boolean {
++  if (!databaseUrl) return false;
++  if (force === '1') return false;
++  let host = '';
++  try {
++    host = new URL(databaseUrl).hostname;
++  } catch {
++    return true;
++  }
++  return matchesProtectedDatabaseHost(host);
++}
++
++async function main() {
++  const { dryRun } = parseArgs(process.argv.slice(2));
++
++  if (
++    isForbiddenProductionHost(
++      process.env.DATABASE_URL,
++      process.env.BACKFILL_FORCE,
++    )
++  ) {
++    console.error(
++      '\nRefusing backfill: DATABASE_URL points at a protected production host.\n' +
++        `  Known markers include ${DEFAULT_PROTECTED_DATABASE_HOSTS[0]}.\n` +
++        '  Point DATABASE_URL at a non-prod branch, or set BACKFILL_FORCE=1\n' +
++        '  after an explicit ops decision.\n',
++    );
++    process.exit(1);
++  }
++
++  const prisma = createPrismaClient();
++  try {
++    console.log(
++      dryRun
++        ? 'Dry-run (pass --apply to write).'
++        : 'Applying sponsor flat-contact backfill…',
++    );
++    const stats = await backfillSponsorContactsFromFlat({
++      db: prisma,
++      dryRun,
++    });
++    console.log(JSON.stringify(stats, null, 2));
++  } finally {
++    await prisma.$disconnect();
++  }
++}
++
++main().catch((err) => {
++  console.error(err);
++  process.exit(1);
++});
+diff --git a/scripts/stub-server-only.cjs b/scripts/stub-server-only.cjs
+new file mode 100644
+index 0000000..4db44e6
+--- /dev/null
++++ b/scripts/stub-server-only.cjs
+@@ -0,0 +1,38 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * Preload for one-shot scripts that import app modules marked `server-only`.
++ * Mirrors vitest's alias of `server-only` → `server-only/empty.js`.
++ *
++ * Usage:
++ *   node --require ./scripts/stub-server-only.cjs --import tsx \
++ *     scripts/backfill-sponsor-contacts.ts --apply
++ */
++
++const Module = require("module");
++const path = require("path");
++
++const empty = path.join(
++  __dirname,
++  "..",
++  "node_modules",
++  "server-only",
++  "empty.js",
++);
++
++const original = Module._resolveFilename;
++Module._resolveFilename = function resolveServerOnlyStub(
++  request,
++  parent,
++  isMain,
++  options,
++) {
++  if (request === "server-only") {
++    return empty;
++  }
++  return original.call(this, request, parent, isMain, options);
++};
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts b/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
+index b0ae8c5..f94c618 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
+@@ -8,9 +8,17 @@
+ import { createLogger } from "@/lib/logger";
+ import { requireAdmin, getCurrentUser } from '@/lib/auth';
+ import { revalidatePath } from 'next/cache';
++import type { SponsorContactRole } from '@prisma/client';
+ import * as sponsorship from '@/lib/services/sponsorship';
+ import * as venueBoothLayouts from '@/lib/services/venue-booth-layout';
+ import { prisma } from '@/lib/db';
++import {
++  SPONSOR_CONTACT_ROLES,
++  removeSponsorContact,
++  setSponsorContactRoles,
++  setSponsorPrimaryContact,
++  upsertSponsorContact,
++} from '@/lib/sponsor-contacts';
+ 
+ const log = createLogger("slug-sponsorship-actions");
+ 
+@@ -440,6 +448,173 @@ export async function removeSponsorAction(slug: string, eventSponsorId: string):
+   }
+ }
+ 
++// ─── Sponsor contacts (many people per company) ───────────
++
++export type SponsorContactInput = {
++  email: string;
++  name: string;
++  phone?: string | null;
++  roles: SponsorContactRole[];
++  isPrimary?: boolean;
++};
++
++function parseSponsorContactRoles(roles: unknown): SponsorContactRole[] | null {
++  if (!Array.isArray(roles)) return null;
++  const allowed = new Set<string>(SPONSOR_CONTACT_ROLES);
++  const parsed = roles.filter(
++    (r): r is SponsorContactRole =>
++      typeof r === 'string' && allowed.has(r),
++  );
++  return parsed.length > 0 ? parsed : null;
++}
++
++async function assertEventSponsorOnSlug(
++  slug: string,
++  eventSponsorId: string,
++): Promise<{ eventId: string; sponsorId: string } | null> {
++  const event = await resolveEventBySlug(slug);
++  if (!event) return null;
++  const es = await prisma.eventSponsor.findFirst({
++    where: { id: eventSponsorId, eventId: event.id },
++    select: { id: true, eventId: true, sponsorId: true },
++  });
++  if (!es) return null;
++  return { eventId: es.eventId, sponsorId: es.sponsorId };
++}
++
++/**
++ * Add or update a person on a sponsor company (billing, marketing, on-site, …).
++ */
++export async function upsertSponsorContactAction(
++  slug: string,
++  eventSponsorId: string,
++  input: SponsorContactInput,
++): Promise<ActionResult> {
++  try {
++    await requireAdmin();
++    const scope = await assertEventSponsorOnSlug(slug, eventSponsorId);
++    if (!scope) return { success: false, error: 'Sponsorship not found' };
++
++    const roles = parseSponsorContactRoles(input.roles);
++    if (!roles) {
++      return { success: false, error: 'Select at least one contact role.' };
++    }
++
++    const sponsor = await prisma.sponsor.findUnique({
++      where: { id: scope.sponsorId },
++      select: { companyName: true },
++    });
++    if (!sponsor) return { success: false, error: 'Sponsor not found' };
++
++    const result = await upsertSponsorContact({
++      sponsorId: scope.sponsorId,
++      eventId: scope.eventId,
++      email: input.email,
++      name: input.name,
++      phone: input.phone,
++      companyName: sponsor.companyName,
++      roles,
++      isPrimary: input.isPrimary === true,
++      source: 'sponsor_contact_action',
++    });
++
++    if (result.status === 'invalid_email') {
++      return { success: false, error: 'Enter a valid contact email.' };
++    }
++    if (result.status === 'skipped_no_organization') {
++      return {
++        success: false,
++        error: 'Organization is not set up yet; cannot save CRM contacts.',
++      };
++    }
++    if (result.status === 'conflict_other_sponsor') {
++      return {
++        success: false,
++        error:
++          'That email already belongs to a different sponsor company. Use a different address or unlink them there first.',
++      };
++    }
++
++    refresh(slug);
++    return { success: true };
++  } catch (error) {
++    return fail(error);
++  }
++}
++
++export async function setSponsorContactRolesAction(
++  slug: string,
++  eventSponsorId: string,
++  contactId: string,
++  roles: SponsorContactRole[],
++): Promise<ActionResult> {
++  try {
++    await requireAdmin();
++    const scope = await assertEventSponsorOnSlug(slug, eventSponsorId);
++    if (!scope) return { success: false, error: 'Sponsorship not found' };
++
++    const parsed = parseSponsorContactRoles(roles);
++    if (!parsed) {
++      return { success: false, error: 'Select at least one contact role.' };
++    }
++
++    await setSponsorContactRoles({
++      sponsorId: scope.sponsorId,
++      contactId,
++      roles: parsed,
++    });
++    refresh(slug);
++    return { success: true };
++  } catch (error) {
++    return fail(error);
++  }
++}
++
++export async function setSponsorPrimaryContactAction(
++  slug: string,
++  eventSponsorId: string,
++  contactId: string,
++): Promise<ActionResult> {
++  try {
++    await requireAdmin();
++    const scope = await assertEventSponsorOnSlug(slug, eventSponsorId);
++    if (!scope) return { success: false, error: 'Sponsorship not found' };
++
++    await setSponsorPrimaryContact({
++      sponsorId: scope.sponsorId,
++      contactId,
++    });
++    refresh(slug);
++    return { success: true };
++  } catch (error) {
++    return fail(error);
++  }
++}
++
++export async function removeSponsorContactAction(
++  slug: string,
++  eventSponsorId: string,
++  contactId: string,
++): Promise<ActionResult> {
++  try {
++    await requireAdmin();
++    const scope = await assertEventSponsorOnSlug(slug, eventSponsorId);
++    if (!scope) return { success: false, error: 'Sponsorship not found' };
++
++    const result = await removeSponsorContact({
++      sponsorId: scope.sponsorId,
++      contactId,
++    });
++    if (result.status === 'rejected') {
++      return { success: false, error: result.reason };
++    }
++    refresh(slug);
++    return { success: true };
++  } catch (error) {
++    return fail(error);
++  }
++}
++
+ export async function setBenefitStatusAction(
+   slug: string,
+   eventSponsorId: string,
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/page.tsx b/src/app/(admin)/organizer/events/[slug]/sponsorship/page.tsx
+index 563d5c1..d91b8ac 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/page.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/page.tsx
+@@ -47,7 +47,24 @@ export default async function SponsorshipPage({ params }: SponsorshipPageProps)
+       sponsors: {
+         orderBy: { createdAt: 'asc' },
+         include: {
+-          sponsor: true,
++          sponsor: {
++            include: {
++              contacts: {
++                orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
++                include: {
++                  contact: {
++                    select: {
++                      id: true,
++                      email: true,
++                      firstName: true,
++                      lastName: true,
++                      phone: true,
++                    },
++                  },
++                },
++              },
++            },
++          },
+           tier: { include: { benefitItems: { orderBy: { displayOrder: 'asc' } } } },
+           benefitStatuses: true,
+           addOns: { include: { addOn: true } },
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsor-contacts-panel.tsx b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsor-contacts-panel.tsx
+new file mode 100644
+index 0000000..e62a285
+--- /dev/null
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsor-contacts-panel.tsx
+@@ -0,0 +1,284 @@
++'use client';
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { useMemo, useState } from 'react';
++import type { SponsorContactRole } from '@prisma/client';
++import { Plus, Star, Trash2, X } from 'lucide-react';
++import {
++  removeSponsorContactAction,
++  setSponsorPrimaryContactAction,
++  upsertSponsorContactAction,
++} from './actions';
++
++export type SponsorContactView = {
++  id: string;
++  contactId: string;
++  roles: SponsorContactRole[];
++  isPrimary: boolean;
++  email: string;
++  name: string;
++  phone: string | null;
++};
++
++/** Mirrors SPONSOR_CONTACT_ROLES — kept local so this client file never imports the server lib. */
++const SELECTABLE_ROLES: SponsorContactRole[] = [
++  'BILLING',
++  'MARKETING',
++  'ONSITE',
++  'SIGNATORY',
++  'OTHER',
++];
++
++const ROLE_LABELS: Record<SponsorContactRole, string> = {
++  PRIMARY: 'Primary',
++  BILLING: 'Billing',
++  MARKETING: 'Marketing',
++  ONSITE: 'On-site',
++  SIGNATORY: 'Signatory',
++  OTHER: 'Other',
++};
++
++const emptyForm = {
++  name: '',
++  email: '',
++  phone: '',
++  roles: ['BILLING'] as SponsorContactRole[],
++  isPrimary: false,
++};
++
++export function SponsorContactsPanel({
++  slug,
++  eventSponsorId,
++  contacts,
++  inputClass,
++  run,
++  isPending,
++}: {
++  slug: string;
++  eventSponsorId: string;
++  contacts: SponsorContactView[];
++  inputClass: string;
++  run: (
++    fn: () => Promise<{ success: boolean; error?: string }>,
++    opts?: { onSuccess?: () => void },
++  ) => void;
++  isPending: boolean;
++}) {
++  const [showForm, setShowForm] = useState(false);
++  const [form, setForm] = useState(emptyForm);
++
++  const sorted = useMemo(
++    () =>
++      [...contacts].sort((a, b) => {
++        if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
++        return a.name.localeCompare(b.name);
++      }),
++    [contacts],
++  );
++
++  const toggleRole = (role: SponsorContactRole) => {
++    setForm((prev) => {
++      const has = prev.roles.includes(role);
++      const roles = has
++        ? prev.roles.filter((r) => r !== role)
++        : [...prev.roles, role];
++      return { ...prev, roles: roles.length > 0 ? roles : prev.roles };
++    });
++  };
++
++  const submit = () => {
++    run(
++      () =>
++        upsertSponsorContactAction(slug, eventSponsorId, {
++          name: form.name,
++          email: form.email,
++          phone: form.phone || null,
++          roles: form.roles,
++          isPrimary: form.isPrimary,
++        }),
++      {
++        onSuccess: () => {
++          setForm(emptyForm);
++          setShowForm(false);
++        },
++      },
++    );
++  };
++
++  return (
++    <div>
++      <div className="mb-2 flex items-center justify-between gap-2">
++        <h4 className="text-sm font-medium text-gray-300">Contacts</h4>
++        <button
++          type="button"
++          disabled={isPending}
++          onClick={() => setShowForm((v) => !v)}
++          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-blue-300 hover:bg-gray-700/60"
++        >
++          {showForm ? (
++            <>
++              <X className="h-3.5 w-3.5" /> Cancel
++            </>
++          ) : (
++            <>
++              <Plus className="h-3.5 w-3.5" /> Add contact
++            </>
++          )}
++        </button>
++      </div>
++
++      {sorted.length === 0 && (
++        <p className="text-xs text-gray-500 mb-2">
++          No linked contacts yet. The flat primary fields still work; add
++          billing, marketing, on-site, or signatory people here.
++        </p>
++      )}
++
++      <ul className="space-y-2 mb-3">
++        {sorted.map((c) => (
++          <li
++            key={c.id}
++            className="rounded-lg border border-gray-700/80 bg-gray-900/40 px-3 py-2"
++          >
++            <div className="flex items-start justify-between gap-2">
++              <div className="min-w-0">
++                <div className="flex flex-wrap items-center gap-2">
++                  <span className="text-sm font-medium text-white truncate">
++                    {c.name || c.email}
++                  </span>
++                  {c.isPrimary && (
++                    <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">
++                      Primary
++                    </span>
++                  )}
++                </div>
++                <p className="text-xs text-gray-400 truncate">{c.email}</p>
++                {c.phone && (
++                  <p className="text-xs text-gray-500">{c.phone}</p>
++                )}
++                <div className="mt-1 flex flex-wrap gap-1">
++                  {c.roles.map((role) => (
++                    <span
++                      key={role}
++                      className="rounded bg-gray-700/70 px-1.5 py-0.5 text-[10px] text-gray-300"
++                    >
++                      {ROLE_LABELS[role] ?? role}
++                    </span>
++                  ))}
++                </div>
++              </div>
++              <div className="flex shrink-0 gap-1">
++                {!c.isPrimary && (
++                  <button
++                    type="button"
++                    title="Make primary"
++                    disabled={isPending}
++                    onClick={() =>
++                      run(() =>
++                        setSponsorPrimaryContactAction(
++                          slug,
++                          eventSponsorId,
++                          c.contactId,
++                        ),
++                      )
++                    }
++                    className="rounded p-1.5 text-gray-500 hover:bg-gray-700 hover:text-amber-300"
++                  >
++                    <Star className="h-3.5 w-3.5" />
++                  </button>
++                )}
++                <button
++                  type="button"
++                  title="Remove contact"
++                  disabled={isPending}
++                  onClick={() =>
++                    run(() =>
++                      removeSponsorContactAction(
++                        slug,
++                        eventSponsorId,
++                        c.contactId,
++                      ),
++                    )
++                  }
++                  className="rounded p-1.5 text-gray-500 hover:bg-gray-700 hover:text-red-400"
++                >
++                  <Trash2 className="h-3.5 w-3.5" />
++                </button>
++              </div>
++            </div>
++          </li>
++        ))}
++      </ul>
++
++      {showForm && (
++        <div className="space-y-2 rounded-lg border border-gray-700 bg-gray-900/50 p-3">
++          <input
++            required
++            value={form.name}
++            onChange={(e) => setForm({ ...form, name: e.target.value })}
++            className={inputClass}
++            placeholder="Contact name *"
++          />
++          <input
++            required
++            type="email"
++            value={form.email}
++            onChange={(e) => setForm({ ...form, email: e.target.value })}
++            className={inputClass}
++            placeholder="Contact email *"
++          />
++          <input
++            value={form.phone}
++            onChange={(e) => setForm({ ...form, phone: e.target.value })}
++            className={inputClass}
++            placeholder="Phone (optional)"
++          />
++          <fieldset className="space-y-1">
++            <legend className="text-xs text-gray-400">Roles</legend>
++            <div className="flex flex-wrap gap-2">
++              {SELECTABLE_ROLES.map((role) => (
++                  <label
++                    key={role}
++                    className="inline-flex items-center gap-1.5 text-xs text-gray-300"
++                  >
++                    <input
++                      type="checkbox"
++                      checked={form.roles.includes(role)}
++                      onChange={() => toggleRole(role)}
++                      className="rounded border-gray-600"
++                    />
++                    {ROLE_LABELS[role]}
++                  </label>
++                ))}
++            </div>
++          </fieldset>
++          <label className="inline-flex items-center gap-2 text-xs text-gray-300">
++            <input
++              type="checkbox"
++              checked={form.isPrimary}
++              onChange={(e) =>
++                setForm({ ...form, isPrimary: e.target.checked })
++              }
++              className="rounded border-gray-600"
++            />
++            Make primary / billing snapshot
++          </label>
++          <button
++            type="button"
++            disabled={
++              isPending || !form.name.trim() || !form.email.trim()
++            }
++            onClick={submit}
++            className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-50"
++          >
++            Save contact
++          </button>
++        </div>
++      )}
++    </div>
++  );
++}
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
+index 4a0a51a..f39f09b 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
+@@ -17,6 +17,8 @@ import type {
+   EventSponsor,
+   Sponsor,
+   SponsorBenefitStatus,
++  SponsorContact,
++  SponsorContactRole,
+   VirtualBooth,
+   VirtualBoothOffer,
+   VirtualBoothAsset,
+@@ -56,6 +58,7 @@ import {
+ } from './actions';
+ import { EmptyState, ErrorBanner } from '@/components/organizer';
+ import { HostedImageField } from '@/components/hosted-image-field';
++import { SponsorContactsPanel } from './sponsor-contacts-panel';
+ 
+ type TierFull = SponsorTier & {
+   benefitItems: SponsorBenefit[];
+@@ -70,8 +73,18 @@ type BoothFull = BoothSpace & {
+   eventSponsor: (EventSponsor & { sponsor: Sponsor }) | null;
+ };
+ 
++type SponsorContactMembership = SponsorContact & {
++  contact: {
++    id: string;
++    email: string;
++    firstName: string | null;
++    lastName: string | null;
++    phone: string | null;
++  };
++};
++
+ type EventSponsorFull = EventSponsor & {
+-  sponsor: Sponsor;
++  sponsor: Sponsor & { contacts: SponsorContactMembership[] };
+   tier: SponsorTier & { benefitItems: SponsorBenefit[] };
+   benefitStatuses: SponsorBenefitStatus[];
+   addOns: (EventSponsorAddOn & { addOn: SponsorAddOn })[];
+@@ -79,6 +92,15 @@ type EventSponsorFull = EventSponsor & {
+   virtualBooth: (VirtualBooth & { offers: VirtualBoothOffer[]; assets: VirtualBoothAsset[] }) | null;
+ };
+ 
++function contactDisplayName(
++  contact: SponsorContactMembership['contact'],
++): string {
++  const parts = [contact.firstName?.trim(), contact.lastName?.trim()].filter(
++    Boolean,
++  );
++  return parts.join(' ').trim() || contact.email;
++}
++
+ type CompUsageView = {
+   allotment: number;
+   claimed: number;
+@@ -1783,6 +1805,22 @@ function SponsorsTab({
+                     run={run}
+                     isPending={isPending}
+                   />
++                  <SponsorContactsPanel
++                    slug={slug}
++                    eventSponsorId={es.id}
++                    contacts={(es.sponsor.contacts ?? []).map((m) => ({
++                      id: m.id,
++                      contactId: m.contact.id,
++                      roles: m.roles as SponsorContactRole[],
++                      isPrimary: m.isPrimary,
++                      email: m.contact.email,
++                      name: contactDisplayName(m.contact),
++                      phone: m.contact.phone,
++                    }))}
++                    inputClass={inputClass}
++                    run={run}
++                    isPending={isPending}
++                  />
+                   <div>
+                     <h4 className="text-sm font-medium text-gray-300 mb-2">Add-ons</h4>
+                     {es.addOns.length > 0 && (
+diff --git a/src/app/(public)/events/[eventSlug]/media-partners/actions.ts b/src/app/(public)/events/[eventSlug]/media-partners/actions.ts
+index 7880f6c..4e22094 100644
+--- a/src/app/(public)/events/[eventSlug]/media-partners/actions.ts
++++ b/src/app/(public)/events/[eventSlug]/media-partners/actions.ts
+@@ -33,6 +33,7 @@ import type { MediaPartnerApplication, Prisma } from '@prisma/client';
+ import {
+   sendMediaPartnerThankYouEmail,
+ } from '@/lib/media-partner-thank-you';
++import { dualWriteSponsorPrimaryContact } from '@/lib/sponsor-contacts';
+ 
+ const log = createLogger('media-partner-application');
+ 
+@@ -389,6 +390,18 @@ async function decideMediaPartnerApplication(
+         });
+       }
+ 
++      // Applicant → SponsorContact (PRIMARY + BILLING + MARKETING for media).
++      await dualWriteSponsorPrimaryContact({
++        sponsorId: sponsor.id,
++        companyName: application.orgName,
++        contactName: application.contactName,
++        contactEmail: application.contactEmail,
++        eventId: application.eventId,
++        extraRoles: ['MARKETING'],
++        source: 'media_partner_approve',
++        db: tx,
++      });
++
+       return { eventSponsorId: eventSponsor.id };
+     });
+ 
+diff --git a/src/lib/community-partners.ts b/src/lib/community-partners.ts
+index 3dfdcd5..7203efd 100644
+--- a/src/lib/community-partners.ts
++++ b/src/lib/community-partners.ts
+@@ -25,6 +25,7 @@ import {
+   type PartnerKind,
+ } from '@/lib/community-partners-core';
+ import { publicEventSponsorWhere } from '@/lib/public-sponsors';
++import { dualWriteSponsorPrimaryContact } from '@/lib/sponsor-contacts';
+ 
+ export type CommunityPartnerRow = {
+   /** AffiliateOrganization id — primary handle for quota. */
+@@ -324,6 +325,15 @@ export async function createCommunityPartner(
+       },
+     });
+ 
++    await dualWriteSponsorPrimaryContact({
++      sponsorId: sponsor.id,
++      companyName: name,
++      contactName,
++      contactEmail,
++      eventId,
++      db: tx,
++    });
++
+     return { id: org.id };
+   });
+ }
+@@ -365,8 +375,8 @@ export async function updateCommunityPartner(
+     freeText: input.notes,
+   });
+ 
+-  await prisma.$transaction([
+-    prisma.affiliateOrganization.update({
++  await prisma.$transaction(async (tx) => {
++    await tx.affiliateOrganization.update({
+       where: { id: org.id },
+       data: {
+         name,
+@@ -375,8 +385,8 @@ export async function updateCommunityPartner(
+         quota: input.quota,
+         notes,
+       },
+-    }),
+-    prisma.sponsor.update({
++    });
++    await tx.sponsor.update({
+       where: { id: eventSponsor.sponsorId },
+       data: {
+         companyName: name,
+@@ -385,15 +395,23 @@ export async function updateCommunityPartner(
+         contactName,
+         contactEmail,
+       },
+-    }),
+-    prisma.eventSponsor.update({
++    });
++    await tx.eventSponsor.update({
+       where: { id: eventSponsor.id },
+       data: {
+         logoUrl: input.logoUrl ?? null,
+         notes,
+       },
+-    }),
+-  ]);
++    });
++    await dualWriteSponsorPrimaryContact({
++      sponsorId: eventSponsor.sponsorId,
++      companyName: name,
++      contactName,
++      contactEmail,
++      eventId,
++      db: tx,
++    });
++  });
+ }
+ 
+ export async function deleteCommunityPartner(
+diff --git a/src/lib/services/sponsorship.ts b/src/lib/services/sponsorship.ts
+index 002f49b..20c6d99 100644
+--- a/src/lib/services/sponsorship.ts
++++ b/src/lib/services/sponsorship.ts
+@@ -38,6 +38,7 @@ import {
+   resolveCompAllotment,
+   compClaimUnavailableReason,
+ } from "@/lib/sponsor-comp-tickets";
++import { dualWriteSponsorPrimaryContact } from "@/lib/sponsor-contacts";
+ import {
+   createRegistrationInInventoryTransaction,
+   runInventoryTransaction,
+@@ -961,10 +962,22 @@ export async function addSponsorToEvent(eventId: string, input: z.infer<typeof s
+     if (existing) {
+       throw new Error(`${sponsor.companyName} is already a sponsor of this event.`);
+     }
+-    return tx.eventSponsor.create({
++    const eventSponsor = await tx.eventSponsor.create({
+       data: { eventId, sponsorId: sponsor.id, tierId: tier.id },
+       include: { sponsor: true, tier: true },
+     });
++    // Dual-write flat primary contact → CrmContact + SponsorContact.
++    // Soft-fail skip (no org) must not block sponsorship signup.
++    await dualWriteSponsorPrimaryContact({
++      sponsorId: sponsor.id,
++      companyName: sponsor.companyName,
++      contactName: sponsor.contactName,
++      contactEmail: sponsor.contactEmail,
++      contactPhone: sponsor.contactPhone,
++      eventId,
++      db: tx,
++    });
++    return eventSponsor;
+   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+ }
+ 
+diff --git a/src/lib/sponsor-contacts.ts b/src/lib/sponsor-contacts.ts
+new file mode 100644
+index 0000000..775a2c6
+--- /dev/null
++++ b/src/lib/sponsor-contacts.ts
+@@ -0,0 +1,886 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import type {
++  CrmContact,
++  Prisma,
++  PrismaClient,
++  SponsorContact,
++  SponsorContactRole,
++} from "@prisma/client";
++import { prisma } from "@/lib/db";
++import { normalizeCrmEmail } from "@/lib/crm/local-core";
++import { createLogger } from "@/lib/logger";
++
++const log = createLogger("sponsor-contacts");
++
++type DbClient = PrismaClient | Prisma.TransactionClient;
++
++function resolveDb(db?: DbClient): DbClient {
++  return db ?? prisma;
++}
++
++export const SPONSOR_CONTACT_ROLES = [
++  "PRIMARY",
++  "BILLING",
++  "MARKETING",
++  "ONSITE",
++  "SIGNATORY",
++  "OTHER",
++] as const satisfies readonly SponsorContactRole[];
++
++export type SponsorContactRoleValue = (typeof SPONSOR_CONTACT_ROLES)[number];
++
++export type SponsorContactWithPerson = SponsorContact & {
++  contact: Pick<
++    CrmContact,
++    | "id"
++    | "email"
++    | "firstName"
++    | "lastName"
++    | "phone"
++    | "companyName"
++    | "organizationId"
++    | "sponsorId"
++  >;
++};
++
++export type ResolvedSponsorContact = {
++  email: string;
++  name: string;
++  phone: string | null;
++  contactId: string | null;
++  membershipId: string | null;
++  roles: SponsorContactRole[];
++  source: "membership" | "flat";
++};
++
++/** Split "Ada Lovelace" → first / remainder. Empty → both null. */
++export function splitContactName(name: string | null | undefined): {
++  firstName: string | null;
++  lastName: string | null;
++} {
++  const trimmed = (name ?? "").trim();
++  if (!trimmed) return { firstName: null, lastName: null };
++  const space = trimmed.indexOf(" ");
++  if (space < 0) return { firstName: trimmed, lastName: null };
++  const firstName = trimmed.slice(0, space).trim();
++  const lastName = trimmed.slice(space + 1).trim();
++  return {
++    firstName: firstName || null,
++    lastName: lastName || null,
++  };
++}
++
++export function displayNameFromParts(
++  firstName: string | null | undefined,
++  lastName: string | null | undefined,
++  fallback = "",
++): string {
++  const parts = [firstName?.trim(), lastName?.trim()].filter(
++    (p): p is string => Boolean(p),
++  );
++  return parts.join(" ").trim() || fallback;
++}
++
++export function normalizeSponsorContactRoles(
++  roles: readonly SponsorContactRole[] | null | undefined,
++): SponsorContactRole[] {
++  const set = new Set<SponsorContactRole>();
++  for (const role of roles ?? []) {
++    if ((SPONSOR_CONTACT_ROLES as readonly string[]).includes(role)) {
++      set.add(role);
++    }
++  }
++  return Array.from(set);
++}
++
++/**
++ * Keep `roles` and `isPrimary` aligned: primary memberships always carry
++ * PRIMARY; non-primary memberships never carry PRIMARY alone as a substitute
++ * for isPrimary.
++ */
++export function syncPrimaryRoleFlag(input: {
++  roles: readonly SponsorContactRole[] | null | undefined;
++  isPrimary: boolean;
++}): { roles: SponsorContactRole[]; isPrimary: boolean } {
++  const roles = new Set(normalizeSponsorContactRoles(input.roles));
++  if (input.isPrimary) {
++    roles.add("PRIMARY");
++    return { roles: Array.from(roles), isPrimary: true };
++  }
++  roles.delete("PRIMARY");
++  // Non-primary with no remaining roles → OTHER so the row is not role-empty
++  // in a way that confuses role pickers.
++  if (roles.size === 0) roles.add("OTHER");
++  return { roles: Array.from(roles), isPrimary: false };
++}
++
++/**
++ * Prefer a membership that holds `role`, else the designated primary
++ * (isPrimary), else a membership carrying the PRIMARY role, else null.
++ *
++ * When multiple memberships claim the same role, prefer the primary one.
++ */
++export function pickMembershipForRole<
++  T extends { roles: readonly SponsorContactRole[]; isPrimary: boolean },
++>(memberships: readonly T[], role: SponsorContactRole): T | null {
++  const withRole = memberships.filter((m) => m.roles.includes(role));
++  if (withRole.length === 1) return withRole[0]!;
++  if (withRole.length > 1) {
++    return withRole.find((m) => m.isPrimary) ?? withRole[0]!;
++  }
++  if (role === "PRIMARY") {
++    return (
++      memberships.find((m) => m.isPrimary) ??
++      memberships.find((m) => m.roles.includes("PRIMARY")) ??
++      null
++    );
++  }
++  return (
++    memberships.find((m) => m.isPrimary) ??
++    memberships.find((m) => m.roles.includes("PRIMARY")) ??
++    null
++  );
++}
++
++/**
++ * Organization resolution for CrmContact rows created from a Sponsor.
++ *
++ * ConferenceOS is one Organization per deployment (see getSiteOrganizationId).
++ * Event has no organizationId; EventSponsor is not a tenancy signal. Callers
++ * may still pass an explicit organizationId. Returns null only when no
++ * Organization row exists yet (fresh install / pre-setup).
++ */
++export async function resolveOrganizationIdForSponsor(input: {
++  organizationId?: string | null;
++  eventId?: string | null;
++  sponsorId?: string | null;
++  db?: DbClient;
++}): Promise<string | null> {
++  const db = resolveDb(input.db);
++  if (input.organizationId?.trim()) return input.organizationId.trim();
++
++  const org = await db.organization.findFirst({
++    select: { id: true },
++    orderBy: { createdAt: "asc" },
++  });
++  return org?.id ?? null;
++}
++
++async function ensureSponsorContactLink(
++  db: DbClient,
++  input: {
++    contactId: string;
++    sponsorId: string;
++    eventId?: string | null;
++  },
++): Promise<void> {
++  await db.crmContactLink.upsert({
++    where: {
++      contactId_subjectKind_subjectId: {
++        contactId: input.contactId,
++        subjectKind: "SPONSOR_CONTACT",
++        subjectId: input.sponsorId,
++      },
++    },
++    create: {
++      contactId: input.contactId,
++      eventId: input.eventId ?? null,
++      subjectKind: "SPONSOR_CONTACT",
++      subjectId: input.sponsorId,
++    },
++    update: {
++      ...(input.eventId
++        ? { eventId: input.eventId }
++        : {}),
++    },
++  });
++}
++
++export async function listSponsorContacts(
++  sponsorId: string,
++  db: DbClient = resolveDb(),
++): Promise<SponsorContactWithPerson[]> {
++  return db.sponsorContact.findMany({
++    where: { sponsorId },
++    include: {
++      contact: {
++        select: {
++          id: true,
++          email: true,
++          firstName: true,
++          lastName: true,
++          phone: true,
++          companyName: true,
++          organizationId: true,
++          sponsorId: true,
++        },
++      },
++    },
++    orderBy: [{ isPrimary: "desc" }, { createdAt: "asc" }],
++  });
++}
++
++export type UpsertSponsorContactInput = {
++  organizationId?: string | null;
++  eventId?: string | null;
++  sponsorId: string;
++  email: string;
++  name?: string | null;
++  phone?: string | null;
++  companyName?: string | null;
++  roles?: SponsorContactRole[];
++  isPrimary?: boolean;
++  /** Defaults to sponsor_contact_upsert; backfill uses sponsor_flat_backfill. */
++  source?: string;
++  db?: DbClient;
++};
++
++export type UpsertSponsorContactResult =
++  | {
++      status: "upserted";
++      contactId: string;
++      membershipId: string;
++      organizationId: string;
++    }
++  | { status: "skipped_no_organization" }
++  | { status: "invalid_email" }
++  | {
++      status: "conflict_other_sponsor";
++      contactId: string;
++      existingSponsorId: string;
++    };
++
++/**
++ * Upsert CrmContact + SponsorContact (+ optional CrmContactLink) and, when
++ * primary, dual-write Sponsor.contactName/Email/Phone.
++ *
++ * CrmContact.sponsorId is the single account pointer. A person may not be
++ * membership-linked to a second Sponsor while pointing at another company —
++ * that returns conflict_other_sponsor so Sponsor.contacts and
++ * Sponsor.crmContacts stay aligned.
++ */
++export async function upsertSponsorContact(
++  input: UpsertSponsorContactInput,
++): Promise<UpsertSponsorContactResult> {
++  const db = resolveDb(input.db);
++  const email = normalizeCrmEmail(input.email);
++  if (!email) return { status: "invalid_email" };
++
++  const organizationId = await resolveOrganizationIdForSponsor({
++    organizationId: input.organizationId,
++    eventId: input.eventId,
++    sponsorId: input.sponsorId,
++    db,
++  });
++  if (!organizationId) return { status: "skipped_no_organization" };
++
++  const wantPrimary =
++    input.isPrimary === true ||
++    (input.isPrimary !== false &&
++      (input.roles ?? []).includes("PRIMARY"));
++  const synced = syncPrimaryRoleFlag({
++    roles: input.roles,
++    isPrimary: wantPrimary,
++  });
++  const { firstName, lastName } = splitContactName(input.name);
++  const phone = input.phone?.trim() || null;
++  const companyName = input.companyName?.trim() || null;
++  const source = input.source ?? "sponsor_contact_upsert";
++
++  const run = async (tx: DbClient): Promise<UpsertSponsorContactResult> => {
++    const existing = await tx.crmContact.findUnique({
++      where: {
++        organizationId_email: { organizationId, email },
++      },
++    });
++
++    if (
++      existing?.sponsorId &&
++      existing.sponsorId !== input.sponsorId
++    ) {
++      return {
++        status: "conflict_other_sponsor",
++        contactId: existing.id,
++        existingSponsorId: existing.sponsorId,
++      };
++    }
++
++    const roleHints = Array.from(
++      new Set([...(existing?.roleHints ?? []), "sponsor"]),
++    ).slice(0, 20);
++
++    const contact = await tx.crmContact.upsert({
++      where: {
++        organizationId_email: { organizationId, email },
++      },
++      create: {
++        organizationId,
++        email,
++        firstName,
++        lastName,
++        phone,
++        companyName,
++        source,
++        roleHints: ["sponsor"],
++        sponsorId: input.sponsorId,
++      },
++      update: {
++        ...(!existing?.firstName && firstName ? { firstName } : {}),
++        ...(!existing?.lastName && lastName ? { lastName } : {}),
++        ...(!existing?.phone && phone ? { phone } : {}),
++        ...(!existing?.companyName && companyName ? { companyName } : {}),
++        sponsorId: input.sponsorId,
++        roleHints,
++      },
++    });
++
++    if (synced.isPrimary) {
++      // Drop PRIMARY role from former primaries when clearing isPrimary.
++      const formerPrimaries = await tx.sponsorContact.findMany({
++        where: {
++          sponsorId: input.sponsorId,
++          isPrimary: true,
++          NOT: { contactId: contact.id },
++        },
++        select: { id: true, roles: true },
++      });
++      for (const former of formerPrimaries) {
++        const demoted = syncPrimaryRoleFlag({
++          roles: former.roles,
++          isPrimary: false,
++        });
++        await tx.sponsorContact.update({
++          where: { id: former.id },
++          data: { isPrimary: false, roles: demoted.roles },
++        });
++      }
++    }
++
++    const membership = await tx.sponsorContact.upsert({
++      where: {
++        sponsorId_contactId: {
++          sponsorId: input.sponsorId,
++          contactId: contact.id,
++        },
++      },
++      create: {
++        sponsorId: input.sponsorId,
++        contactId: contact.id,
++        roles: synced.roles,
++        isPrimary: synced.isPrimary,
++      },
++      update: {
++        roles: synced.roles,
++        isPrimary: synced.isPrimary,
++      },
++    });
++
++    if (synced.isPrimary || membership.isPrimary) {
++      const flatName =
++        displayNameFromParts(contact.firstName, contact.lastName, email) ||
++        email;
++      await tx.sponsor.update({
++        where: { id: input.sponsorId },
++        data: {
++          contactName: flatName,
++          contactEmail: contact.email,
++          contactPhone: contact.phone,
++        },
++      });
++    }
++
++    if (input.eventId) {
++      await ensureSponsorContactLink(tx, {
++        contactId: contact.id,
++        sponsorId: input.sponsorId,
++        eventId: input.eventId,
++      });
++    } else {
++      const eventLink = await tx.eventSponsor.findFirst({
++        where: { sponsorId: input.sponsorId },
++        orderBy: { createdAt: "asc" },
++        select: { eventId: true },
++      });
++      if (eventLink) {
++        await ensureSponsorContactLink(tx, {
++          contactId: contact.id,
++          sponsorId: input.sponsorId,
++          eventId: eventLink.eventId,
++        });
++      }
++    }
++
++    return {
++      status: "upserted",
++      contactId: contact.id,
++      membershipId: membership.id,
++      organizationId,
++    };
++  };
++
++  // Nested transactions are not supported on Prisma interactive txs; when
++  // the caller already passed a tx client, run inline.
++  if (input.db) {
++    return run(db);
++  }
++  return prisma.$transaction((tx) => run(tx));
++}
++
++/**
++ * Dual-write helper for create/update paths that already set flat columns.
++ * Ensures CrmContact + primary SponsorContact (PRIMARY + BILLING by default).
++ */
++export async function dualWriteSponsorPrimaryContact(input: {
++  sponsorId: string;
++  companyName: string;
++  contactName: string;
++  contactEmail: string;
++  contactPhone?: string | null;
++  organizationId?: string | null;
++  eventId?: string | null;
++  /** Extra roles beyond PRIMARY+BILLING (e.g. MARKETING for media partners). */
++  extraRoles?: SponsorContactRole[];
++  source?: string;
++  db?: DbClient;
++}): Promise<UpsertSponsorContactResult> {
++  const roles = normalizeSponsorContactRoles([
++    "PRIMARY",
++    "BILLING",
++    ...(input.extraRoles ?? []),
++  ]);
++  return upsertSponsorContact({
++    sponsorId: input.sponsorId,
++    organizationId: input.organizationId,
++    eventId: input.eventId,
++    email: input.contactEmail,
++    name: input.contactName,
++    phone: input.contactPhone,
++    companyName: input.companyName,
++    roles,
++    isPrimary: true,
++    source: input.source ?? "sponsor_dual_write",
++    db: input.db,
++  });
++}
++
++export async function setSponsorContactRoles(input: {
++  sponsorId: string;
++  contactId: string;
++  roles: SponsorContactRole[];
++  /** When true, also make this membership primary (and demote others). */
++  isPrimary?: boolean;
++  db?: DbClient;
++}): Promise<SponsorContact> {
++  const db = resolveDb(input.db);
++
++  const run = async (tx: DbClient) => {
++    const existing = await tx.sponsorContact.findUnique({
++      where: {
++        sponsorId_contactId: {
++          sponsorId: input.sponsorId,
++          contactId: input.contactId,
++        },
++      },
++    });
++    if (!existing) {
++      throw new Error("Sponsor contact membership not found.");
++    }
++
++    // Explicit isPrimary wins; otherwise keep existing primary or promote
++    // when the new roles include PRIMARY.
++    const isPrimary =
++      input.isPrimary !== undefined
++        ? input.isPrimary
++        : existing.isPrimary || input.roles.includes("PRIMARY");
++
++    const synced = syncPrimaryRoleFlag({
++      roles: input.roles,
++      isPrimary,
++    });
++
++    if (synced.isPrimary && !existing.isPrimary) {
++      const formerPrimaries = await tx.sponsorContact.findMany({
++        where: {
++          sponsorId: input.sponsorId,
++          isPrimary: true,
++          NOT: { contactId: input.contactId },
++        },
++        select: { id: true, roles: true },
++      });
++      for (const former of formerPrimaries) {
++        const demoted = syncPrimaryRoleFlag({
++          roles: former.roles,
++          isPrimary: false,
++        });
++        await tx.sponsorContact.update({
++          where: { id: former.id },
++          data: { isPrimary: false, roles: demoted.roles },
++        });
++      }
++    }
++
++    return tx.sponsorContact.update({
++      where: { id: existing.id },
++      data: { roles: synced.roles, isPrimary: synced.isPrimary },
++    });
++  };
++
++  if (input.db) return run(db);
++  return prisma.$transaction((tx) => run(tx));
++}
++
++export async function setSponsorPrimaryContact(input: {
++  sponsorId: string;
++  contactId: string;
++  db?: DbClient;
++}): Promise<SponsorContactWithPerson> {
++  const db = resolveDb(input.db);
++
++  const run = async (tx: DbClient) => {
++    const membership = await tx.sponsorContact.findUnique({
++      where: {
++        sponsorId_contactId: {
++          sponsorId: input.sponsorId,
++          contactId: input.contactId,
++        },
++      },
++      include: {
++        contact: {
++          select: {
++            id: true,
++            email: true,
++            firstName: true,
++            lastName: true,
++            phone: true,
++            companyName: true,
++            organizationId: true,
++            sponsorId: true,
++          },
++        },
++      },
++    });
++    if (!membership) {
++      throw new Error("Sponsor contact membership not found.");
++    }
++
++    const formerPrimaries = await tx.sponsorContact.findMany({
++      where: {
++        sponsorId: input.sponsorId,
++        isPrimary: true,
++        NOT: { contactId: input.contactId },
++      },
++      select: { id: true, roles: true },
++    });
++    for (const former of formerPrimaries) {
++      const demoted = syncPrimaryRoleFlag({
++        roles: former.roles,
++        isPrimary: false,
++      });
++      await tx.sponsorContact.update({
++        where: { id: former.id },
++        data: { isPrimary: false, roles: demoted.roles },
++      });
++    }
++
++    const synced = syncPrimaryRoleFlag({
++      roles: membership.roles,
++      isPrimary: true,
++    });
++
++    const updated = await tx.sponsorContact.update({
++      where: { id: membership.id },
++      data: { isPrimary: true, roles: synced.roles },
++      include: {
++        contact: {
++          select: {
++            id: true,
++            email: true,
++            firstName: true,
++            lastName: true,
++            phone: true,
++            companyName: true,
++            organizationId: true,
++            sponsorId: true,
++          },
++        },
++      },
++    });
++
++    const flatName =
++      displayNameFromParts(
++        updated.contact.firstName,
++        updated.contact.lastName,
++        updated.contact.email,
++      ) || updated.contact.email;
++
++    await tx.sponsor.update({
++      where: { id: input.sponsorId },
++      data: {
++        contactName: flatName,
++        contactEmail: updated.contact.email,
++        contactPhone: updated.contact.phone,
++      },
++    });
++
++    return updated;
++  };
++
++  if (input.db) return run(db);
++  return prisma.$transaction((tx) => run(tx));
++}
++
++/**
++ * Unlink a contact from a sponsor. Refuses to remove the last primary when
++ * flat columns are still required — promote another contact first, or keep
++ * at least one PRIMARY membership.
++ */
++export async function removeSponsorContact(input: {
++  sponsorId: string;
++  contactId: string;
++  db?: DbClient;
++}): Promise<{ status: "removed" } | { status: "rejected"; reason: string }> {
++  const db = resolveDb(input.db);
++
++  const run = async (tx: DbClient) => {
++    const membership = await tx.sponsorContact.findUnique({
++      where: {
++        sponsorId_contactId: {
++          sponsorId: input.sponsorId,
++          contactId: input.contactId,
++        },
++      },
++    });
++    if (!membership) {
++      return { status: "removed" as const };
++    }
++
++    if (membership.isPrimary || membership.roles.includes("PRIMARY")) {
++      const others = await tx.sponsorContact.count({
++        where: {
++          sponsorId: input.sponsorId,
++          NOT: { contactId: input.contactId },
++        },
++      });
++      if (others === 0) {
++        return {
++          status: "rejected" as const,
++          reason:
++            "Cannot remove the last primary sponsor contact while flat columns are still required. Add another contact and mark it primary first.",
++        };
++      }
++      const next = await tx.sponsorContact.findFirst({
++        where: {
++          sponsorId: input.sponsorId,
++          NOT: { contactId: input.contactId },
++        },
++        orderBy: { createdAt: "asc" },
++        select: { contactId: true },
++      });
++      if (!next) {
++        return {
++          status: "rejected" as const,
++          reason: "Cannot remove the last primary sponsor contact.",
++        };
++      }
++      await setSponsorPrimaryContact({
++        sponsorId: input.sponsorId,
++        contactId: next.contactId,
++        db: tx,
++      });
++    }
++
++    await tx.sponsorContact.delete({
++      where: {
++        sponsorId_contactId: {
++          sponsorId: input.sponsorId,
++          contactId: input.contactId,
++        },
++      },
++    });
++    return { status: "removed" as const };
++  };
++
++  if (input.db) return run(db);
++  return prisma.$transaction((tx) => run(tx));
++}
++
++export async function resolveSponsorEmail(
++  sponsorId: string,
++  role: SponsorContactRole = "BILLING",
++  db: DbClient = resolveDb(),
++): Promise<ResolvedSponsorContact | null> {
++  const memberships = await listSponsorContacts(sponsorId, db);
++  const picked = pickMembershipForRole(memberships, role);
++  if (picked) {
++    const name =
++      displayNameFromParts(
++        picked.contact.firstName,
++        picked.contact.lastName,
++        picked.contact.email,
++      ) || picked.contact.email;
++    return {
++      email: picked.contact.email,
++      name,
++      phone: picked.contact.phone,
++      contactId: picked.contact.id,
++      membershipId: picked.id,
++      roles: picked.roles,
++      source: "membership",
++    };
++  }
++
++  const sponsor = await db.sponsor.findUnique({
++    where: { id: sponsorId },
++    select: {
++      contactEmail: true,
++      contactName: true,
++      contactPhone: true,
++    },
++  });
++  const email = normalizeCrmEmail(sponsor?.contactEmail);
++  if (!email || !sponsor) return null;
++  return {
++    email,
++    name: sponsor.contactName?.trim() || email,
++    phone: sponsor.contactPhone,
++    contactId: null,
++    membershipId: null,
++    roles: ["PRIMARY", "BILLING"],
++    source: "flat",
++  };
++}
++
++export type BackfillSponsorContactsStats = {
++  scanned: number;
++  upserted: number;
++  skippedNoEmail: number;
++  skippedNoOrganization: number;
++  skippedAlreadyLinked: number;
++  skippedOtherSponsor: number;
++  errors: number;
++};
++
++/**
++ * Idempotent backfill: for each Sponsor with a non-empty contactEmail and a
++ * resolvable site Organization, upsert CrmContact + SponsorContact
++ * (PRIMARY + BILLING when no primary exists yet).
++ *
++ * Idempotency is per (sponsorId, normalized email) membership — not "any
++ * SponsorContact already exists". Sponsors without EventSponsor are included.
++ */
++export async function backfillSponsorContactsFromFlat(options?: {
++  db?: DbClient;
++  dryRun?: boolean;
++  limit?: number;
++}): Promise<BackfillSponsorContactsStats> {
++  const db = resolveDb(options?.db);
++  const dryRun = options?.dryRun ?? false;
++  const stats: BackfillSponsorContactsStats = {
++    scanned: 0,
++    upserted: 0,
++    skippedNoEmail: 0,
++    skippedNoOrganization: 0,
++    skippedAlreadyLinked: 0,
++    skippedOtherSponsor: 0,
++    errors: 0,
++  };
++
++  const sponsors = await db.sponsor.findMany({
++    where: {
++      contactEmail: { not: "" },
++    },
++    select: {
++      id: true,
++      companyName: true,
++      contactName: true,
++      contactEmail: true,
++      contactPhone: true,
++      contacts: {
++        select: {
++          id: true,
++          isPrimary: true,
++          contact: { select: { email: true } },
++        },
++      },
++      events: {
++        orderBy: { createdAt: "asc" },
++        select: { eventId: true },
++        take: 1,
++      },
++    },
++    take: options?.limit,
++  });
++
++  for (const sponsor of sponsors) {
++    stats.scanned += 1;
++    const email = normalizeCrmEmail(sponsor.contactEmail);
++    if (!email) {
++      stats.skippedNoEmail += 1;
++      continue;
++    }
++
++    const alreadyLinked = sponsor.contacts.some(
++      (m) => normalizeCrmEmail(m.contact.email) === email,
++    );
++    if (alreadyLinked) {
++      stats.skippedAlreadyLinked += 1;
++      continue;
++    }
++
++    const eventId = sponsor.events[0]?.eventId ?? null;
++    const hasPrimary = sponsor.contacts.some((m) => m.isPrimary);
++
++    if (dryRun) {
++      const organizationId = await resolveOrganizationIdForSponsor({
++        eventId,
++        sponsorId: sponsor.id,
++        db,
++      });
++      if (!organizationId) {
++        stats.skippedNoOrganization += 1;
++        continue;
++      }
++      stats.upserted += 1;
++      continue;
++    }
++
++    try {
++      const result = await upsertSponsorContact({
++        sponsorId: sponsor.id,
++        companyName: sponsor.companyName,
++        name: sponsor.contactName,
++        email,
++        phone: sponsor.contactPhone,
++        eventId,
++        roles: hasPrimary
++          ? (["BILLING"] as SponsorContactRole[])
++          : (["PRIMARY", "BILLING"] as SponsorContactRole[]),
++        isPrimary: !hasPrimary,
++        source: "sponsor_flat_backfill",
++        db,
++      });
++      if (result.status === "upserted") {
++        stats.upserted += 1;
++      } else if (result.status === "skipped_no_organization") {
++        stats.skippedNoOrganization += 1;
++      } else if (result.status === "conflict_other_sponsor") {
++        stats.skippedOtherSponsor += 1;
++      } else {
++        stats.skippedNoEmail += 1;
++      }
++    } catch (err) {
++      stats.errors += 1;
++      log.warn("sponsor flat backfill failed for one sponsor", {
++        sponsorId: sponsor.id,
++        error: err instanceof Error ? err.message : "unknown",
++      });
++    }
++  }
++
++  return stats;
++}
+diff --git a/tests/unit/community-partner-sponsor-contacts.test.ts b/tests/unit/community-partner-sponsor-contacts.test.ts
+new file mode 100644
+index 0000000..4b8cc29
+--- /dev/null
++++ b/tests/unit/community-partner-sponsor-contacts.test.ts
+@@ -0,0 +1,112 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * Community partners share SponsorContact — create/update dual-write.
++ */
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++
++const mocks = vi.hoisted(() => ({
++  dualWrite: vi.fn(),
++  transaction: vi.fn(),
++  tierFindFirst: vi.fn(),
++  tierCreate: vi.fn(),
++  affiliateCreate: vi.fn(),
++  affiliateUpdate: vi.fn(),
++  sponsorCreate: vi.fn(),
++  eventSponsorCreate: vi.fn(),
++  eventSponsorUpdate: vi.fn(),
++}));
++
++vi.mock('@/lib/sponsor-contacts', () => ({
++  dualWriteSponsorPrimaryContact: mocks.dualWrite,
++}));
++
++vi.mock('@/lib/db', () => ({
++  prisma: {
++    sponsorTier: {
++      findFirst: mocks.tierFindFirst,
++      create: mocks.tierCreate,
++    },
++    affiliateOrganization: {
++      create: mocks.affiliateCreate,
++      update: mocks.affiliateUpdate,
++    },
++    sponsor: { create: mocks.sponsorCreate },
++    eventSponsor: {
++      create: mocks.eventSponsorCreate,
++      update: mocks.eventSponsorUpdate,
++    },
++    $transaction: mocks.transaction,
++  },
++}));
++
++import { createCommunityPartner } from '@/lib/community-partners';
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.tierFindFirst.mockResolvedValue({
++    id: 'tier-cp',
++    name: 'Community Partner',
++    price: 0,
++  });
++  mocks.transaction.mockImplementation(async (fn: (tx: unknown) => Promise<unknown>) => {
++    const tx = {
++      affiliateOrganization: {
++        create: mocks.affiliateCreate,
++        update: mocks.affiliateUpdate,
++      },
++      sponsor: { create: mocks.sponsorCreate },
++      eventSponsor: {
++        create: mocks.eventSponsorCreate,
++        update: mocks.eventSponsorUpdate,
++      },
++    };
++    return fn(tx);
++  });
++  mocks.affiliateCreate.mockResolvedValue({ id: 'aff-1' });
++  mocks.sponsorCreate.mockResolvedValue({ id: 'sponsor-1' });
++  mocks.eventSponsorCreate.mockResolvedValue({ id: 'es-1' });
++  mocks.affiliateUpdate.mockResolvedValue({});
++  mocks.eventSponsorUpdate.mockResolvedValue({});
++  mocks.dualWrite.mockResolvedValue({
++    status: 'upserted',
++    contactId: 'crm-1',
++    membershipId: 'sc-1',
++    organizationId: 'org-1',
++  });
++});
++
++describe('createCommunityPartner dual-write', () => {
++  it('writes SponsorContact via dualWriteSponsorPrimaryContact', async () => {
++    const result = await createCommunityPartner('event-1', {
++      name: 'Local Nonprofit',
++      contactName: 'Casey',
++      contactEmail: 'casey@nonprofit.example',
++      website: null,
++      notes: null,
++      quota: 5,
++      logoUrl: null,
++    });
++
++    expect(result).toEqual({ id: 'aff-1' });
++    expect(mocks.sponsorCreate).toHaveBeenCalledWith({
++      data: expect.objectContaining({
++        companyName: 'Local Nonprofit',
++        contactEmail: 'casey@nonprofit.example',
++      }),
++    });
++    expect(mocks.dualWrite).toHaveBeenCalledWith(
++      expect.objectContaining({
++        sponsorId: 'sponsor-1',
++        companyName: 'Local Nonprofit',
++        contactName: 'Casey',
++        contactEmail: 'casey@nonprofit.example',
++        eventId: 'event-1',
++      }),
++    );
++  });
++});
+diff --git a/tests/unit/media-partner-approve.test.ts b/tests/unit/media-partner-approve.test.ts
+index c59e7bc..c03ce4b 100644
+--- a/tests/unit/media-partner-approve.test.ts
++++ b/tests/unit/media-partner-approve.test.ts
+@@ -69,8 +69,17 @@ vi.mock('@/lib/bot-protection', () => ({
+ vi.mock('next/headers', () => ({
+   headers: vi.fn().mockResolvedValue({ get: () => null }),
+ }));
++vi.mock('@/lib/sponsor-contacts', () => ({
++  dualWriteSponsorPrimaryContact: vi.fn().mockResolvedValue({
++    status: 'upserted',
++    contactId: 'crm-1',
++    membershipId: 'sc-1',
++    organizationId: 'org-1',
++  }),
++}));
+ 
+ import { updateMediaPartnerApplicationStatus } from '@/app/(public)/events/[eventSlug]/media-partners/actions';
++import { dualWriteSponsorPrimaryContact } from '@/lib/sponsor-contacts';
+ 
+ const BASE_APP = {
+   id: 'mpa-1',
+@@ -179,6 +188,15 @@ describe('updateMediaPartnerApplicationStatus approve (#1248)', () => {
+         fields: expect.objectContaining({ eventSponsorId: 'es-1' }),
+       })
+     );
++    expect(dualWriteSponsorPrimaryContact).toHaveBeenCalledWith(
++      expect.objectContaining({
++        sponsorId: 'sponsor-1',
++        contactEmail: 'alex@outlet.example',
++        eventId: 'event-1',
++        extraRoles: ['MARKETING'],
++        source: 'media_partner_approve',
++      })
++    );
+   });
+ 
+   it('rejects unauthorized callers (approve unreachable without organizer rights)', async () => {
+diff --git a/tests/unit/sponsor-contacts.test.ts b/tests/unit/sponsor-contacts.test.ts
+new file mode 100644
+index 0000000..3be6433
+--- /dev/null
++++ b/tests/unit/sponsor-contacts.test.ts
+@@ -0,0 +1,947 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import type { SponsorContactRole } from '@prisma/client';
++
++type ContactRow = {
++  id: string;
++  organizationId: string;
++  email: string;
++  firstName: string | null;
++  lastName: string | null;
++  phone: string | null;
++  companyName: string | null;
++  source: string | null;
++  roleHints: string[];
++  sponsorId: string | null;
++};
++
++type MembershipRow = {
++  id: string;
++  sponsorId: string;
++  contactId: string;
++  roles: SponsorContactRole[];
++  isPrimary: boolean;
++  createdAt: Date;
++  updatedAt: Date;
++};
++
++type SponsorRow = {
++  id: string;
++  companyName: string;
++  contactName: string;
++  contactEmail: string;
++  contactPhone: string | null;
++};
++
++type EventSponsorRow = {
++  id: string;
++  eventId: string;
++  sponsorId: string;
++  createdAt: Date;
++};
++
++type LinkRow = {
++  id: string;
++  contactId: string;
++  eventId: string | null;
++  subjectKind: string;
++  subjectId: string;
++};
++
++const store = vi.hoisted(() => ({
++  orgId: 'org-1' as string | null,
++  contacts: [] as ContactRow[],
++  memberships: [] as MembershipRow[],
++  sponsors: [] as SponsorRow[],
++  eventSponsors: [] as EventSponsorRow[],
++  links: [] as LinkRow[],
++  nextId: 1,
++}));
++
++function resetStore() {
++  store.orgId = 'org-1';
++  store.contacts = [];
++  store.memberships = [];
++  store.sponsors = [];
++  store.eventSponsors = [];
++  store.links = [];
++  store.nextId = 1;
++}
++
++function id(prefix: string) {
++  store.nextId += 1;
++  return `${prefix}-${store.nextId}`;
++}
++
++vi.mock('@/lib/db', () => {
++  const api = {
++    organization: {
++      findFirst: vi.fn(async () =>
++        store.orgId ? { id: store.orgId } : null,
++      ),
++    },
++    eventSponsor: {
++      findFirst: vi.fn(
++        async ({
++          where,
++        }: {
++          where: { sponsorId?: string };
++        }) => {
++          const rows = store.eventSponsors
++            .filter((e) =>
++              where.sponsorId ? e.sponsorId === where.sponsorId : true,
++            )
++            .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
++          return rows[0]
++            ? { id: rows[0].id, eventId: rows[0].eventId }
++            : null;
++        },
++      ),
++    },
++    crmContact: {
++      findUnique: vi.fn(
++        async ({
++          where,
++        }: {
++          where: {
++            organizationId_email?: { organizationId: string; email: string };
++          };
++        }) => {
++          const key = where.organizationId_email;
++          if (!key) return null;
++          return (
++            store.contacts.find(
++              (c) =>
++                c.organizationId === key.organizationId &&
++                c.email === key.email,
++            ) ?? null
++          );
++        },
++      ),
++      upsert: vi.fn(
++        async ({
++          where,
++          create,
++          update,
++        }: {
++          where: {
++            organizationId_email: { organizationId: string; email: string };
++          };
++          create: ContactRow;
++          update: Partial<ContactRow>;
++        }) => {
++          const key = where.organizationId_email;
++          const existing = store.contacts.find(
++            (c) =>
++              c.organizationId === key.organizationId && c.email === key.email,
++          );
++          if (existing) {
++            Object.assign(existing, update);
++            return existing;
++          }
++          const row: ContactRow = {
++            id: create.id ?? id('crm'),
++            organizationId: create.organizationId,
++            email: create.email,
++            firstName: create.firstName ?? null,
++            lastName: create.lastName ?? null,
++            phone: create.phone ?? null,
++            companyName: create.companyName ?? null,
++            source: create.source ?? null,
++            roleHints: create.roleHints ?? [],
++            sponsorId: create.sponsorId ?? null,
++          };
++          store.contacts.push(row);
++          return row;
++        },
++      ),
++    },
++    sponsorContact: {
++      findMany: vi.fn(
++        async ({
++          where,
++        }: {
++          where: {
++            sponsorId: string;
++            isPrimary?: boolean;
++            NOT?: { contactId: string };
++          };
++          select?: unknown;
++        }) => {
++          return store.memberships
++            .filter((m) => {
++              if (m.sponsorId !== where.sponsorId) return false;
++              if (
++                where.isPrimary !== undefined &&
++                m.isPrimary !== where.isPrimary
++              )
++                return false;
++              if (where.NOT && m.contactId === where.NOT.contactId) return false;
++              return true;
++            })
++            .map((m) => ({
++              ...m,
++              contact: store.contacts.find((c) => c.id === m.contactId)!,
++            }))
++            .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary));
++        },
++      ),
++      findUnique: vi.fn(
++        async ({
++          where,
++        }: {
++          where: {
++            sponsorId_contactId?: { sponsorId: string; contactId: string };
++            id?: string;
++          };
++        }) => {
++          const m = where.sponsorId_contactId
++            ? store.memberships.find(
++                (row) =>
++                  row.sponsorId === where.sponsorId_contactId!.sponsorId &&
++                  row.contactId === where.sponsorId_contactId!.contactId,
++              )
++            : store.memberships.find((row) => row.id === where.id);
++          if (!m) return null;
++          return {
++            ...m,
++            contact: store.contacts.find((c) => c.id === m.contactId)!,
++          };
++        },
++      ),
++      findFirst: vi.fn(
++        async ({
++          where,
++        }: {
++          where: { sponsorId: string; NOT?: { contactId: string } };
++        }) => {
++          return (
++            store.memberships.find(
++              (m) =>
++                m.sponsorId === where.sponsorId &&
++                (!where.NOT || m.contactId !== where.NOT.contactId),
++            ) ?? null
++          );
++        },
++      ),
++      count: vi.fn(
++        async ({
++          where,
++        }: {
++          where: { sponsorId: string; NOT?: { contactId: string } };
++        }) =>
++          store.memberships.filter(
++            (m) =>
++              m.sponsorId === where.sponsorId &&
++              (!where.NOT || m.contactId !== where.NOT.contactId),
++          ).length,
++      ),
++      updateMany: vi.fn(
++        async ({
++          where,
++          data,
++        }: {
++          where: {
++            sponsorId: string;
++            isPrimary?: boolean;
++            NOT?: { contactId: string };
++          };
++          data: { isPrimary: boolean };
++        }) => {
++          let count = 0;
++          for (const m of store.memberships) {
++            if (m.sponsorId !== where.sponsorId) continue;
++            if (where.isPrimary !== undefined && m.isPrimary !== where.isPrimary)
++              continue;
++            if (where.NOT && m.contactId === where.NOT.contactId) continue;
++            m.isPrimary = data.isPrimary;
++            count += 1;
++          }
++          return { count };
++        },
++      ),
++      upsert: vi.fn(
++        async ({
++          where,
++          create,
++          update,
++        }: {
++          where: {
++            sponsorId_contactId: { sponsorId: string; contactId: string };
++          };
++          create: {
++            sponsorId: string;
++            contactId: string;
++            roles: SponsorContactRole[];
++            isPrimary: boolean;
++          };
++          update: Partial<MembershipRow>;
++        }) => {
++          const existing = store.memberships.find(
++            (m) =>
++              m.sponsorId === where.sponsorId_contactId.sponsorId &&
++              m.contactId === where.sponsorId_contactId.contactId,
++          );
++          if (existing) {
++            Object.assign(existing, update);
++            existing.updatedAt = new Date();
++            return existing;
++          }
++          const row: MembershipRow = {
++            id: id('sc'),
++            sponsorId: create.sponsorId,
++            contactId: create.contactId,
++            roles: create.roles,
++            isPrimary: create.isPrimary,
++            createdAt: new Date(),
++            updatedAt: new Date(),
++          };
++          store.memberships.push(row);
++          return row;
++        },
++      ),
++      update: vi.fn(
++        async ({
++          where,
++          data,
++        }: {
++          where: {
++            id?: string;
++            sponsorId_contactId?: { sponsorId: string; contactId: string };
++          };
++          data: Partial<MembershipRow>;
++        }) => {
++          const m = where.id
++            ? store.memberships.find((row) => row.id === where.id)
++            : store.memberships.find(
++                (row) =>
++                  row.sponsorId === where.sponsorId_contactId!.sponsorId &&
++                  row.contactId === where.sponsorId_contactId!.contactId,
++              );
++          if (!m) throw new Error('membership missing');
++          Object.assign(m, data);
++          return {
++            ...m,
++            contact: store.contacts.find((c) => c.id === m.contactId)!,
++          };
++        },
++      ),
++      delete: vi.fn(
++        async ({
++          where,
++        }: {
++          where: {
++            sponsorId_contactId: { sponsorId: string; contactId: string };
++          };
++        }) => {
++          const idx = store.memberships.findIndex(
++            (m) =>
++              m.sponsorId === where.sponsorId_contactId.sponsorId &&
++              m.contactId === where.sponsorId_contactId.contactId,
++          );
++          if (idx >= 0) store.memberships.splice(idx, 1);
++          return {};
++        },
++      ),
++    },
++    sponsor: {
++      findUnique: vi.fn(
++        async ({ where }: { where: { id: string } }) =>
++          store.sponsors.find((s) => s.id === where.id) ?? null,
++      ),
++      findMany: vi.fn(async () =>
++        store.sponsors.map((s) => ({
++          ...s,
++          contacts: store.memberships
++            .filter((m) => m.sponsorId === s.id)
++            .map((m) => {
++              const contact = store.contacts.find((c) => c.id === m.contactId)!;
++              return {
++                id: m.id,
++                isPrimary: m.isPrimary,
++                contact: { email: contact.email },
++              };
++            }),
++          events: store.eventSponsors
++            .filter((e) => e.sponsorId === s.id)
++            .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
++            .map((e) => ({ eventId: e.eventId })),
++        })),
++      ),
++      update: vi.fn(
++        async ({
++          where,
++          data,
++        }: {
++          where: { id: string };
++          data: Partial<SponsorRow>;
++        }) => {
++          const s = store.sponsors.find((row) => row.id === where.id);
++          if (!s) throw new Error('sponsor missing');
++          Object.assign(s, data);
++          return s;
++        },
++      ),
++    },
++    crmContactLink: {
++      upsert: vi.fn(
++        async ({
++          where,
++          create,
++        }: {
++          where: {
++            contactId_subjectKind_subjectId: {
++              contactId: string;
++              subjectKind: string;
++              subjectId: string;
++            };
++          };
++          create: {
++            contactId: string;
++            eventId: string | null;
++            subjectKind: string;
++            subjectId: string;
++          };
++        }) => {
++          const key = where.contactId_subjectKind_subjectId;
++          const existing = store.links.find(
++            (l) =>
++              l.contactId === key.contactId &&
++              l.subjectKind === key.subjectKind &&
++              l.subjectId === key.subjectId,
++          );
++          if (existing) return existing;
++          const row: LinkRow = {
++            id: id('link'),
++            contactId: create.contactId,
++            eventId: create.eventId,
++            subjectKind: create.subjectKind,
++            subjectId: create.subjectId,
++          };
++          store.links.push(row);
++          return row;
++        },
++      ),
++    },
++    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) =>
++      fn(api),
++    ),
++  };
++  return { prisma: api };
++});
++
++import {
++  backfillSponsorContactsFromFlat,
++  dualWriteSponsorPrimaryContact,
++  normalizeSponsorContactRoles,
++  pickMembershipForRole,
++  removeSponsorContact,
++  resolveSponsorEmail,
++  setSponsorPrimaryContact,
++  splitContactName,
++  syncPrimaryRoleFlag,
++  upsertSponsorContact,
++} from '@/lib/sponsor-contacts';
++
++beforeEach(() => {
++  resetStore();
++  vi.clearAllMocks();
++});
++
++describe('splitContactName', () => {
++  it('splits first token / remainder', () => {
++    expect(splitContactName('Ada Lovelace')).toEqual({
++      firstName: 'Ada',
++      lastName: 'Lovelace',
++    });
++    expect(splitContactName('Madonna')).toEqual({
++      firstName: 'Madonna',
++      lastName: null,
++    });
++    expect(splitContactName('  ')).toEqual({
++      firstName: null,
++      lastName: null,
++    });
++    expect(splitContactName('Grace Brewster Hopper')).toEqual({
++      firstName: 'Grace',
++      lastName: 'Brewster Hopper',
++    });
++  });
++});
++
++describe('pickMembershipForRole / normalizeSponsorContactRoles', () => {
++  it('prefers role match (primary when tied), then designated primary', () => {
++    const rows = [
++      {
++        id: '1',
++        roles: ['MARKETING'] as SponsorContactRole[],
++        isPrimary: false,
++      },
++      {
++        id: '2',
++        roles: ['PRIMARY', 'BILLING'] as SponsorContactRole[],
++        isPrimary: true,
++      },
++      {
++        id: '3',
++        roles: ['BILLING'] as SponsorContactRole[],
++        isPrimary: false,
++      },
++    ];
++    expect(pickMembershipForRole(rows, 'BILLING')?.id).toBe('2');
++    expect(pickMembershipForRole(rows, 'MARKETING')?.id).toBe('1');
++    expect(pickMembershipForRole(rows, 'ONSITE')?.id).toBe('2');
++    expect(pickMembershipForRole(rows, 'PRIMARY')?.id).toBe('2');
++    expect(pickMembershipForRole([], 'BILLING')).toBeNull();
++  });
++
++  it('does not invent PRIMARY for empty roles; syncPrimaryRoleFlag aligns flags', () => {
++    expect(normalizeSponsorContactRoles([])).toEqual([]);
++    expect(normalizeSponsorContactRoles(['BILLING', 'BILLING'])).toEqual([
++      'BILLING',
++    ]);
++    expect(syncPrimaryRoleFlag({ roles: ['BILLING'], isPrimary: true })).toEqual(
++      {
++        roles: expect.arrayContaining(['BILLING', 'PRIMARY']),
++        isPrimary: true,
++      },
++    );
++    expect(
++      syncPrimaryRoleFlag({ roles: ['PRIMARY', 'BILLING'], isPrimary: false }),
++    ).toEqual({
++      roles: ['BILLING'],
++      isPrimary: false,
++    });
++  });
++});
++
++describe('upsertSponsorContact dual-write', () => {
++  it('creates CrmContact + primary SponsorContact and updates flat columns', async () => {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Old',
++      contactEmail: 'old@acme.example',
++      contactPhone: null,
++    });
++    store.eventSponsors.push({
++      id: 'es-1',
++      eventId: 'event-1',
++      sponsorId: 'sponsor-1',
++      createdAt: new Date('2026-01-01'),
++    });
++
++    const result = await upsertSponsorContact({
++      sponsorId: 'sponsor-1',
++      eventId: 'event-1',
++      email: 'Ada@Acme.example',
++      name: 'Ada Lovelace',
++      phone: '555-0100',
++      companyName: 'Acme',
++      roles: ['PRIMARY', 'BILLING'],
++      isPrimary: true,
++    });
++
++    expect(result).toMatchObject({ status: 'upserted' });
++    expect(store.contacts).toHaveLength(1);
++    expect(store.contacts[0]).toMatchObject({
++      email: 'ada@acme.example',
++      firstName: 'Ada',
++      lastName: 'Lovelace',
++      phone: '555-0100',
++      companyName: 'Acme',
++      sponsorId: 'sponsor-1',
++      roleHints: expect.arrayContaining(['sponsor']),
++    });
++    expect(store.memberships).toHaveLength(1);
++    expect(store.memberships[0]).toMatchObject({
++      sponsorId: 'sponsor-1',
++      isPrimary: true,
++      roles: expect.arrayContaining(['PRIMARY', 'BILLING']),
++    });
++    expect(store.sponsors[0]).toMatchObject({
++      contactName: 'Ada Lovelace',
++      contactEmail: 'ada@acme.example',
++      contactPhone: '555-0100',
++    });
++    expect(store.links).toHaveLength(1);
++    expect(store.links[0]).toMatchObject({
++      subjectKind: 'SPONSOR_CONTACT',
++      subjectId: 'sponsor-1',
++      eventId: 'event-1',
++    });
++  });
++
++  it('is idempotent on second upsert (no duplicate memberships/contacts)', async () => {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada',
++      contactEmail: 'ada@acme.example',
++      contactPhone: null,
++    });
++    store.eventSponsors.push({
++      id: 'es-1',
++      eventId: 'event-1',
++      sponsorId: 'sponsor-1',
++      createdAt: new Date(),
++    });
++
++    await dualWriteSponsorPrimaryContact({
++      sponsorId: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada Lovelace',
++      contactEmail: 'ada@acme.example',
++      eventId: 'event-1',
++    });
++    await dualWriteSponsorPrimaryContact({
++      sponsorId: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada Lovelace',
++      contactEmail: 'ada@acme.example',
++      eventId: 'event-1',
++    });
++
++    expect(store.contacts).toHaveLength(1);
++    expect(store.memberships).toHaveLength(1);
++    expect(store.links).toHaveLength(1);
++  });
++
++  it('allows multiple people on one sponsor', async () => {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada',
++      contactEmail: 'ada@acme.example',
++      contactPhone: null,
++    });
++    store.eventSponsors.push({
++      id: 'es-1',
++      eventId: 'event-1',
++      sponsorId: 'sponsor-1',
++      createdAt: new Date(),
++    });
++
++    await upsertSponsorContact({
++      sponsorId: 'sponsor-1',
++      eventId: 'event-1',
++      email: 'ada@acme.example',
++      name: 'Ada',
++      roles: ['PRIMARY', 'BILLING'],
++      isPrimary: true,
++    });
++    await upsertSponsorContact({
++      sponsorId: 'sponsor-1',
++      eventId: 'event-1',
++      email: 'marketing@acme.example',
++      name: 'Mo Marketer',
++      roles: ['MARKETING'],
++      isPrimary: false,
++    });
++
++    expect(store.contacts).toHaveLength(2);
++    expect(store.memberships).toHaveLength(2);
++    expect(store.memberships.filter((m) => m.isPrimary)).toHaveLength(1);
++  });
++
++  it('resolves organization without EventSponsor (site singleton org)', async () => {
++    store.sponsors.push({
++      id: 'orphan',
++      companyName: 'Ghost',
++      contactName: 'G',
++      contactEmail: 'g@ghost.example',
++      contactPhone: null,
++    });
++    const result = await upsertSponsorContact({
++      sponsorId: 'orphan',
++      email: 'g@ghost.example',
++      name: 'G Host',
++      roles: ['PRIMARY', 'BILLING'],
++      isPrimary: true,
++    });
++    expect(result).toMatchObject({ status: 'upserted' });
++    expect(store.contacts).toHaveLength(1);
++    expect(store.memberships).toHaveLength(1);
++  });
++
++  it('skips when no Organization row exists', async () => {
++    store.orgId = null;
++    store.sponsors.push({
++      id: 'orphan',
++      companyName: 'Ghost',
++      contactName: 'G',
++      contactEmail: 'g@ghost.example',
++      contactPhone: null,
++    });
++    const result = await upsertSponsorContact({
++      sponsorId: 'orphan',
++      email: 'g@ghost.example',
++      name: 'G',
++      isPrimary: true,
++    });
++    expect(result).toEqual({ status: 'skipped_no_organization' });
++    expect(store.contacts).toHaveLength(0);
++  });
++
++  it('refuses linking a contact that already belongs to another sponsor', async () => {
++    store.sponsors.push(
++      {
++        id: 'sponsor-a',
++        companyName: 'Acme',
++        contactName: 'Ada',
++        contactEmail: 'ada@acme.example',
++        contactPhone: null,
++      },
++      {
++        id: 'sponsor-b',
++        companyName: 'Beta',
++        contactName: 'Bob',
++        contactEmail: 'bob@beta.example',
++        contactPhone: null,
++      },
++    );
++    await upsertSponsorContact({
++      sponsorId: 'sponsor-a',
++      email: 'shared@agency.example',
++      name: 'Sam Shared',
++      roles: ['PRIMARY'],
++      isPrimary: true,
++    });
++    const conflict = await upsertSponsorContact({
++      sponsorId: 'sponsor-b',
++      email: 'shared@agency.example',
++      name: 'Sam Shared',
++      roles: ['MARKETING'],
++      isPrimary: false,
++    });
++    expect(conflict).toMatchObject({
++      status: 'conflict_other_sponsor',
++      existingSponsorId: 'sponsor-a',
++    });
++    expect(store.memberships).toHaveLength(1);
++    expect(store.contacts[0]!.sponsorId).toBe('sponsor-a');
++  });
++});
++
++describe('setSponsorPrimaryContact / resolveSponsorEmail / remove', () => {
++  async function seedTwoContacts() {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada',
++      contactEmail: 'ada@acme.example',
++      contactPhone: null,
++    });
++    store.eventSponsors.push({
++      id: 'es-1',
++      eventId: 'event-1',
++      sponsorId: 'sponsor-1',
++      createdAt: new Date(),
++    });
++    await upsertSponsorContact({
++      sponsorId: 'sponsor-1',
++      eventId: 'event-1',
++      email: 'ada@acme.example',
++      name: 'Ada',
++      roles: ['PRIMARY', 'BILLING'],
++      isPrimary: true,
++    });
++    await upsertSponsorContact({
++      sponsorId: 'sponsor-1',
++      eventId: 'event-1',
++      email: 'bill@acme.example',
++      name: 'Bill',
++      phone: '555-9',
++      roles: ['BILLING'],
++      isPrimary: false,
++    });
++  }
++
++  it('changing primary updates flat columns', async () => {
++    await seedTwoContacts();
++    const bill = store.contacts.find((c) => c.email === 'bill@acme.example')!;
++    await setSponsorPrimaryContact({
++      sponsorId: 'sponsor-1',
++      contactId: bill.id,
++    });
++    expect(store.sponsors[0]).toMatchObject({
++      contactName: 'Bill',
++      contactEmail: 'bill@acme.example',
++      contactPhone: '555-9',
++    });
++    expect(
++      store.memberships.find((m) => m.contactId === bill.id)?.isPrimary,
++    ).toBe(true);
++    expect(store.memberships.filter((m) => m.isPrimary)).toHaveLength(1);
++  });
++
++  it('resolveSponsorEmail prefers BILLING membership then primary then flat', async () => {
++    await seedTwoContacts();
++    const billing = await resolveSponsorEmail('sponsor-1', 'BILLING');
++    // Both have BILLING; pickMembershipForRole returns first match in list
++    // (primary sorted first by listSponsorContacts mock).
++    expect(billing?.email).toBeTruthy();
++    expect(billing?.source).toBe('membership');
++
++    const flatOnly = await resolveSponsorEmail('missing', 'BILLING');
++    expect(flatOnly).toBeNull();
++
++    store.sponsors.push({
++      id: 'flat-only',
++      companyName: 'Solo',
++      contactName: 'Sam',
++      contactEmail: 'sam@solo.example',
++      contactPhone: null,
++    });
++    const fromFlat = await resolveSponsorEmail('flat-only', 'BILLING');
++    expect(fromFlat).toMatchObject({
++      email: 'sam@solo.example',
++      name: 'Sam',
++      source: 'flat',
++    });
++  });
++
++  it('refuses to remove the last primary without another contact', async () => {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada',
++      contactEmail: 'ada@acme.example',
++      contactPhone: null,
++    });
++    store.eventSponsors.push({
++      id: 'es-1',
++      eventId: 'event-1',
++      sponsorId: 'sponsor-1',
++      createdAt: new Date(),
++    });
++    await upsertSponsorContact({
++      sponsorId: 'sponsor-1',
++      eventId: 'event-1',
++      email: 'ada@acme.example',
++      name: 'Ada',
++      roles: ['PRIMARY'],
++      isPrimary: true,
++    });
++    const contactId = store.contacts[0]!.id;
++    const result = await removeSponsorContact({
++      sponsorId: 'sponsor-1',
++      contactId,
++    });
++    expect(result).toMatchObject({ status: 'rejected' });
++    expect(store.memberships).toHaveLength(1);
++  });
++
++  it('removing a primary promotes another and keeps flat columns resolvable', async () => {
++    await seedTwoContacts();
++    const ada = store.contacts.find((c) => c.email === 'ada@acme.example')!;
++    const result = await removeSponsorContact({
++      sponsorId: 'sponsor-1',
++      contactId: ada.id,
++    });
++    expect(result).toEqual({ status: 'removed' });
++    expect(store.memberships).toHaveLength(1);
++    expect(store.memberships[0]!.isPrimary).toBe(true);
++    expect(store.sponsors[0]!.contactEmail).toBe('bill@acme.example');
++  });
++});
++
++describe('backfillSponsorContactsFromFlat', () => {
++  it('backfills from flat columns including sponsors without EventSponsor', async () => {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada Lovelace',
++      contactEmail: 'ada@acme.example',
++      contactPhone: '555',
++    });
++    store.eventSponsors.push({
++      id: 'es-1',
++      eventId: 'event-1',
++      sponsorId: 'sponsor-1',
++      createdAt: new Date(),
++    });
++    // No EventSponsor — still backfilled via site Organization.
++    store.sponsors.push({
++      id: 'orphan',
++      companyName: 'Ghost',
++      contactName: 'G Host',
++      contactEmail: 'g@ghost.example',
++      contactPhone: null,
++    });
++
++    const first = await backfillSponsorContactsFromFlat();
++    expect(first.upserted).toBe(2);
++    expect(first.skippedNoOrganization).toBe(0);
++    expect(store.contacts).toHaveLength(2);
++    expect(store.memberships).toHaveLength(2);
++    expect(
++      store.memberships.find((m) => m.sponsorId === 'sponsor-1')!.roles,
++    ).toEqual(expect.arrayContaining(['PRIMARY', 'BILLING']));
++    expect(
++      store.contacts.find((c) => c.email === 'ada@acme.example')!.source,
++    ).toBe('sponsor_flat_backfill');
++
++    const second = await backfillSponsorContactsFromFlat();
++    expect(second.upserted).toBe(0);
++    expect(second.skippedAlreadyLinked).toBe(2);
++    expect(store.contacts).toHaveLength(2);
++    expect(store.memberships).toHaveLength(2);
++  });
++
++  it('still migrates flat primary when another contact was added first', async () => {
++    store.sponsors.push({
++      id: 'sponsor-1',
++      companyName: 'Acme',
++      contactName: 'Ada Lovelace',
++      contactEmail: 'ada@acme.example',
++      contactPhone: null,
++    });
++    // Pre-existing marketing contact that is already primary — seeded without
++    // dual-writing flat columns so the legacy flat email remains Ada's.
++    store.contacts.push({
++      id: 'crm-mkt',
++      organizationId: 'org-1',
++      email: 'marketing@acme.example',
++      firstName: 'Mo',
++      lastName: 'Marketer',
++      phone: null,
++      companyName: 'Acme',
++      source: 'manual',
++      roleHints: ['sponsor'],
++      sponsorId: 'sponsor-1',
++    });
++    store.memberships.push({
++      id: 'sc-mkt',
++      sponsorId: 'sponsor-1',
++      contactId: 'crm-mkt',
++      roles: ['PRIMARY', 'MARKETING'],
++      isPrimary: true,
++      createdAt: new Date(),
++      updatedAt: new Date(),
++    });
++    expect(store.memberships).toHaveLength(1);
++
++    const stats = await backfillSponsorContactsFromFlat();
++    expect(stats.upserted).toBe(1);
++    expect(stats.skippedAlreadyLinked).toBe(0);
++    expect(store.contacts.map((c) => c.email).sort()).toEqual([
++      'ada@acme.example',
++      'marketing@acme.example',
++    ]);
++    expect(store.memberships).toHaveLength(2);
++    // Flat contact becomes BILLING (non-primary) because a primary already exists.
++    const adaMembership = store.memberships.find(
++      (m) =>
++        m.contactId ===
++        store.contacts.find((c) => c.email === 'ada@acme.example')!.id,
++    )!;
++    expect(adaMembership.isPrimary).toBe(false);
++    expect(adaMembership.roles).toEqual(['BILLING']);
++  });
++});

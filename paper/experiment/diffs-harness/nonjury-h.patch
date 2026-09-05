@@ -1,0 +1,204 @@
+diff --git a/src/lib/esp/sync.ts b/src/lib/esp/sync.ts
+index 82f8408..03a9415 100644
+--- a/src/lib/esp/sync.ts
++++ b/src/lib/esp/sync.ts
+@@ -22,7 +22,10 @@ import {
+   registrationSignupFlowTags,
+ } from "@/lib/esp/signup-routing";
+ import { openRegistrationAnswerValue } from "@/lib/registration-answer-encryption";
+-import { resolveEspBinding } from "@/lib/site-integration-settings";
++import {
++  resolveEspBinding,
++  type SiteEspBinding,
++} from "@/lib/site-integration-settings";
+ 
+ /** Only Beehiiv has a configurable field-mapping engine today (#80). */
+ const FIELD_MAPPING_INTEGRATION_ID = "beehiiv";
+@@ -98,7 +101,8 @@ interface BulkSyncResult {
+ }
+ 
+ export async function syncRegistration(
+-  registrationId: string
++  registrationId: string,
++  preResolvedBinding?: SiteEspBinding,
+ ): Promise<SyncResult> {
+   // Captured once the registration/event are loaded so the catch block can
+   // log which event/provider a failed sync belongs to (the `registration`
+@@ -145,13 +149,17 @@ export async function syncRegistration(
+       };
+     }
+ 
+-    const espBinding = await resolveEspBinding({
+-      eventFallback: {
+-        espEnabled: registration.event.espEnabled,
+-        espProvider: registration.event.espProvider,
+-        espListId: registration.event.espListId,
+-      },
+-    });
++    // bulkSyncEvent resolves once per event and passes the binding in;
++    // single-registration callers still resolve on demand.
++    const espBinding =
++      preResolvedBinding ??
++      (await resolveEspBinding({
++        eventFallback: {
++          espEnabled: registration.event.espEnabled,
++          espProvider: registration.event.espProvider,
++          espListId: registration.event.espListId,
++        },
++      }));
+ 
+     eventContext = {
+       id: registration.event.id,
+@@ -412,9 +420,9 @@ export async function bulkSyncEvent(eventSlug: string): Promise<BulkSyncResult>
+       errors: [],
+     };
+ 
+-    // Sync each registration
++    // Sync each registration, reusing the binding resolved above.
+     for (const registration of registrations) {
+-      const syncResult = await syncRegistration(registration.id);
++      const syncResult = await syncRegistration(registration.id, espBinding);
+       if (syncResult.success) {
+         result.synced++;
+       } else {
+diff --git a/tests/unit/esp-sync-bulk.test.ts b/tests/unit/esp-sync-bulk.test.ts
+new file mode 100644
+index 0000000..bf9ab46
+--- /dev/null
++++ b/tests/unit/esp-sync-bulk.test.ts
+@@ -0,0 +1,135 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++const mocks = vi.hoisted(() => ({
++  eventFindUnique: vi.fn(),
++  registrationFindMany: vi.fn(),
++  registrationFindUnique: vi.fn(),
++  registrationUpdate: vi.fn(),
++  registrationQuestionFindMany: vi.fn(),
++  eventIntegrationFindUnique: vi.fn(),
++  espSyncCreate: vi.fn(),
++  getEspProvider: vi.fn(),
++  providerGetContact: vi.fn(),
++  providerApplyTag: vi.fn(),
++  providerAddContact: vi.fn(),
++  providerUpdateContact: vi.fn(),
++  resolveEspBinding: vi.fn(),
++}));
++
++vi.mock("@/lib/db", () => ({
++  prisma: {
++    event: {
++      findUnique: mocks.eventFindUnique,
++    },
++    registration: {
++      findMany: mocks.registrationFindMany,
++      findUnique: mocks.registrationFindUnique,
++      update: mocks.registrationUpdate,
++    },
++    registrationQuestion: {
++      findMany: mocks.registrationQuestionFindMany,
++    },
++    eventIntegration: {
++      findUnique: mocks.eventIntegrationFindUnique,
++    },
++    espSync: {
++      create: mocks.espSyncCreate,
++    },
++  },
++}));
++
++vi.mock("@/lib/esp/index", () => ({
++  getEspProvider: mocks.getEspProvider,
++}));
++
++vi.mock("@/lib/site-integration-settings", () => ({
++  resolveEspBinding: mocks.resolveEspBinding,
++}));
++
++import { bulkSyncEvent } from "../../src/lib/esp/sync";
++
++const EVENT = {
++  id: "evt_1",
++  slug: "test-event",
++  espProvider: "BEEHIIV",
++  espListId: "pub_123",
++  espEnabled: true,
++};
++
++function registrationRow(id: string, email: string) {
++  return {
++    id,
++    email,
++    firstName: "Ada",
++    lastName: "Lovelace",
++    organization: "Analytical Engines Inc",
++    jobTitle: "Engineer",
++    espSynced: false,
++    checkInAt: null,
++    answers: [] as { questionId: string; value: unknown }[],
++    event: { ...EVENT },
++    ticketType: { name: "General" },
++  };
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.getEspProvider.mockResolvedValue({
++    getContact: mocks.providerGetContact,
++    applyTag: mocks.providerApplyTag,
++    addContact: mocks.providerAddContact,
++    updateContact: mocks.providerUpdateContact,
++    removeTag: vi.fn(),
++  });
++  mocks.eventFindUnique.mockResolvedValue(EVENT);
++  mocks.registrationQuestionFindMany.mockResolvedValue([]);
++  mocks.eventIntegrationFindUnique.mockResolvedValue(null);
++  mocks.resolveEspBinding.mockImplementation(
++    async (opts?: { eventFallback?: unknown }) =>
++      opts?.eventFallback ?? {
++        espEnabled: false,
++        espProvider: null,
++        espListId: null,
++      },
++  );
++  mocks.espSyncCreate.mockResolvedValue({});
++  mocks.registrationUpdate.mockResolvedValue({});
++  mocks.providerGetContact.mockResolvedValue(null);
++  mocks.providerAddContact.mockImplementation(async (params: { email: string }) => ({
++    externalId: `ext_${params.email}`,
++    email: params.email,
++  }));
++});
++
++describe("bulkSyncEvent — ESP binding resolution", () => {
++  it("resolves the ESP binding exactly once for an N-registration bulk sync", async () => {
++    const unsynced = [{ id: "reg_1" }, { id: "reg_2" }, { id: "reg_3" }];
++    mocks.registrationFindMany.mockResolvedValue(unsynced);
++    mocks.registrationFindUnique.mockImplementation(async ({ where }: { where: { id: string } }) => {
++      const emails: Record<string, string> = {
++        reg_1: "a@example.com",
++        reg_2: "b@example.com",
++        reg_3: "c@example.com",
++      };
++      return registrationRow(where.id, emails[where.id] ?? `${where.id}@example.com`);
++    });
++
++    const result = await bulkSyncEvent("test-event");
++
++    expect(mocks.resolveEspBinding).toHaveBeenCalledTimes(1);
++    expect(result).toEqual({
++      total: 3,
++      synced: 3,
++      failed: 0,
++      errors: [],
++    });
++    expect(mocks.providerAddContact).toHaveBeenCalledTimes(3);
++    expect(mocks.registrationUpdate).toHaveBeenCalledTimes(3);
++  });
++});

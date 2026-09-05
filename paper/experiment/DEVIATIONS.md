@@ -158,3 +158,558 @@ Codex FAILED r3 on residue of the same two findings; both fixed:
    behavior verified by test.
 2. The one remaining "fresh replays in both arms" sentence (in this file's r1
    record) aligned with the 12-run single-arm design stated in the amendment.
+
+---
+
+## D-2 — containerized implementer isolation for both arms
+
+**Raised:** 2026-08-21. **Author:** Claude (coordinator).
+**Owner decisions:** Mark, 2026-08-21 — (i) isolation applies to **both** arms; (ii) the
+runner is hosted on the always-on Mac Mini; (iii) a *blocked* leakage attempt is logged as
+a metric and does not void a run (see "Audit rule, amended").
+**Status:** proposed. **Supersedes two earlier drafts of D-2**, both of which are recorded
+below rather than deleted, because the way they failed is the finding.
+
+### What went wrong
+
+The first replay executed under D-1 — `cos#1245`, raw arm, 2026-08-21 — was **void on the
+leakage audit**. All three D-1 layers were applied correctly; this is a design defect, not
+an execution mistake:
+
+| layer | result |
+|---|---|
+| 1. total object census | PASS — 3,136 objects, store == `HEAD` closure, 1 commit, no remotes |
+| 2. blind brief | PASS — scanned clean before dispatch |
+| 3. post-run transcript audit | **HIT — void** |
+
+The implementer's first action, before reading any file in the frozen tree, was
+`gh issue view 1245`. It then read the fixing PR (#1351), that PR's merge commit, and — via
+`gh api .../contents/<path>?ref=<merge_commit>` — the **post-fix contents of two of the
+files it went on to edit**. Its own third command, `git show 9e4b1b89…`, failed locally:
+the census-truncated tree worked. It routed around it.
+
+D-1 acknowledged the truncated tree "is not isolation" and booked the remainder as a
+limitation, on the premise that residual consultation would be **undetectable**. The
+observed behavior was the opposite — overt, immediate, total, trivially detected. Under D-1
+the arms had a **detector and no control**, so runs void indefinitely rather than producing
+data.
+
+### Two rejected drafts, and why they are on the record
+
+**Draft 1 — `codex exec -s workspace-write` (network denial).** Rejected after probing the
+second vector. Codex denies child-process network but confines *writes*, not reads: it read
+`/Users/mrhinkle/Code/conference-os/package.json` with `RC=0`. It would have closed the
+lesser vector while leaving the entire future history readable by `cat`. The draft was
+written after testing **one** vector.
+
+**Draft 2 — a Grok sandbox profile (`extends = "strict"` plus a deny list).** Reviewed
+adversarially by Codex, which returned **BLOCK** on seven findings. Verified and confirmed:
+the profile was defeated from **inside its own sandbox**.
+
+```
+git -C /private/tmp/conferenceos-final-monitor-…/repo show --stat 9e4b1b89…
+  commit 9e4b1b89459e589db396cb229c80e90369da2b2e
+      Merge pull request #1351 from The-AIE/fix/1245-retire-accent-orange
+  RC=0
+```
+
+The failure is structural, not a gap in a list. Any workable profile **must** grant the
+temp tree — the frozen scratch clone lives there — and the fleet routinely leaves
+full-history worktrees in those same directories. It must also grant `~/.grok` for session
+persistence, and that directory still held the voided run's own transcript
+(`grep -rl 'gh issue view 1245' ~/.grok/sessions` succeeded from inside the sandbox).
+
+**Conclusion carried forward: no host-side sandbox on either Mac closes the leak.** The
+generalization "coverage is by allowlist, so unenumerated copies are covered by
+construction" was **wrong** — it held for `$HOME` and was over-extended to paths the
+profile actually grants.
+
+### The threat model
+
+| vector | yields | credentials |
+|---|---|---|
+| **A — network** to GitHub | issue, fixing PR, merge commit, post-fix file contents | yes: repo is **private**, unauthenticated `GET /repos/…/pulls/1351` returns **404** (probed) |
+| **B — local filesystem** | the entire future history including the fix, via one `git show` | **none** |
+
+B is the higher-value vector. The voided run used A only because A was easiest.
+
+### The change: a containerized runner, hosted on the Mac Mini
+
+Isolation comes from the **container**, not from the choice of host. The Mini is not a
+clean machine: `~/workspace/conference-os` there **contains the fixing commit**, alongside
+~27 git directories, many `cos-lanes/lane-*` worktrees, `~/.config/gh/hosts.yml`, an SSH
+key, and 164 Grok sessions. Running bare on the Mini would leak exactly as the laptop did.
+The Mini was chosen because it is always on and already runs colima, so the build was cheap.
+
+**Runner.** Docker on colima. Image `ab219-runner:1`
+(`sha256:36e61e1b902d6a6007a173188afac1b84531142cd314fcd0316f1c1356de24ff`), built from
+`node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3`
+plus `git` and `@xai-official/grok@1.0.3`, with an empty agent `HOME`.
+
+**Tree handling.** The frozen tree is built on the laptop under the D-1 census, shipped as
+a tarball, and the **census is re-verified on the Mini after transfer** before any run.
+It is mounted alone at `/work`. Nothing else from either host filesystem is mounted, except
+`~/.grok/auth.json` read-only, which carries xAI inference auth and no repository access.
+
+**Verified before the run, by probe — not assumed:**
+
+| probe | result |
+|---|---|
+| `ls /Users` | `No such file or directory` |
+| repo copies anywhere in the container | none found |
+| fix commit reachable from `/work` | `could not get object info` |
+| `gh` binary, `~/.config/gh`, `~/.ssh` | absent; `GH_TOKEN` unset |
+| `~/.grok` (config) | absent — **no MCP servers configured** |
+| private repo, unauthenticated | `404` |
+
+This closes **vector B absolutely** (nothing else is mounted) and **vector A** by leaving no
+credential in the container at all. It also closes, by construction, the three defects that
+blocked draft 2: the temp trees, the retained session store, and the MCP channel.
+
+**Defect found and fixed in the runner itself (2026-08-21, after the first clean run).**
+The first runner mounted a host *directory* at `/home/agent/.grok` to supply `auth.json`.
+Grok writes session state into that directory, so the run's own transcript persisted to the
+host at `~/ab219/authmnt/sessions/%2Fwork/…/chat_history.jsonl` — and would have been
+mounted into the **next** run's container. That is the same retained-session-store defect
+Codex blocked draft 2 on, reintroduced by the mount shape, and it falsified the "per-run
+state, `--rm`" claim.
+
+Fixed: `auth.json` is mounted as a **single read-only file** into a writable `.grok`
+directory baked into the image, so session state lands in the container's ephemeral layer
+and is destroyed with `--rm`. Image `ab219-runner:2`
+(`sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08`). Verified:
+the agent authenticates (`AUTH_OK`) and **no host-side session state is created**. The
+polluted directory was moved aside rather than deleted, so the incident stays inspectable.
+
+This does **not** invalidate the `cos#1245` run: that container started from a freshly
+created mount containing only `auth.json`, so nothing from a prior session was present. The
+pollution was written during the run and would only have affected run 2 onward.
+
+**It was tested adversarially by the implementer itself.** In the clean run, the opening
+moves were `gh issue list`, `gh issue view 1245`, `gh api repos/…/issues/1245`, and
+`gh pr view 1241`. All returned **`gh: command not found`**; the transcript `tool_result`
+payloads were decoded to confirm zero information transferred.
+
+### Audit rule, amended (owner decision)
+
+D-1's rule was "any audit hit voids the run," written when there was **no prevention**. With
+prevention in place, a blocked attempt is expected and is evidence the control works.
+
+- A **successful retrieval** of out-of-tree information still voids the run.
+- A **blocked attempt** is recorded in a new `attempted_leak` metric and does **not** void.
+- The distinction must be evidenced by decoding the tool results, not inferred from the
+  command text.
+
+The attempt count is reported as a finding in its own right: the raw arm reached for the
+answer as its opening move in **both** independent sessions.
+
+### Model pinning (closes a real defect in draft 2)
+
+Draft 2 claimed pinning the CLI held "the model constant." That was false — the dispatch
+omitted `--model`. Runs now pin the model explicitly and record it; the clean `cos#1245`
+run was **`grok-4.5`**, recorded from the transcript.
+
+Consequence, stated rather than buried: with one platform and one pinned model in both
+arms, the estimand is **narrower than registered**. H7 was registered over a platform mix;
+under D-2 it is tested for `grok-4.5` specifically. This is a genuine narrowing of external
+validity, reported as such. It is also a gain in internal validity — platform and model are
+now held constant across arms, removing a confound the v1 design tolerated.
+
+### Brief: verbatim issue text, no sanitization
+
+Draft 2 proposed replacing `#NNNN` cross-references with opaque tokens. Codex objected that
+this **deletes requirements** rather than sanitizing them, and interacts with arm — the
+harness spec gate can compensate for missing context where the raw arm cannot. The
+objection is accepted. Because the container closes the lookup vector, sanitization buys
+nothing, so the brief is the **verbatim issue text plus the working directory**, exactly as
+registered in D-1.
+
+**Limitation, newly discovered and stated:** the frozen tree names its own task.
+`docs/ata-config-todo.md` at `cos#1245`'s base commit already links the issue and describes
+the work, which is how the implementer obtained the number. Brief-blinding therefore
+conceals less than D-1 claimed. It reveals task *identity*, not the solution, so the
+measurement stands — but the rule should not claim more than it delivers.
+
+### Dependency pre-provisioning, with its costs stated honestly
+
+The done-gate needs `node_modules`. The coordinator runs `npm ci && npx prisma generate` in
+the mounted tree **before** the implementer session.
+
+Codex's objection is accepted in full: `npm ci` executes the root `postinstall` and several
+dependency install scripts with network access, so provisioning is **not** information-free,
+and excluding it **does change** registered metric accounting rather than leaving metrics
+3–4 untouched. Recorded as a deliberate change, not a neutral normalization:
+
+- provisioning is identical work in both arms, so the exclusion does not favor either;
+- Node and npm are now pinned by the image digest, which the host-side design did not do;
+- the lockfile is the base commit's, so ordinary registry resolution carries no post-base
+  information — but lifecycle scripts are acknowledged as an unpinned surface.
+
+### Harness-arm isolation (closes draft 2's incoherence)
+
+Draft 2 assigned Codex "the same profile" while that profile was Grok-only, with no wrapper
+or auth story. Under D-2 every harness stage that could inject the real fix runs against the
+**same mounted tree in the same runner**, or against the exported patch alone:
+
+- **implementer** — `ab219-runner:1`, as above;
+- **cross-vendor reviewer** — must not be the implementing platform, receives the exported
+  patch and the brief **only**, with no repository mount and no GitHub credential;
+- **spec gate and captain** — operate on the issue text and the patch only.
+
+### Void and attempt ledger
+
+`assignments.json` carries `void_runs` per task and an `attempted_leak` count per run. A
+voided run leaves `status` at `ready`. The paper reports attempts per completed task, and
+blocked-leak attempts, in both arms.
+
+### What this costs, stated plainly
+
+Both arms work inside a container without the ambient host toolchain. Network egress is
+**not** restricted to the inference endpoint — the container reaches the public internet,
+and the clean run used that to fetch build tools (pandoc, pip). Retrieval of *this* fix is
+impossible without a credential the container does not have, and the private repo returns
+404, but egress allowlisting remains unbuilt and is the next hardening if the residual is
+judged unacceptable.
+
+The estimand is narrowed to one model. Replay measures task difficulty under each arm, not
+whether a change would have shipped. Neither is argued away.
+
+### What is NOT changed
+
+Arm assignments are untouched — `cos#1245` keeps `raw`, never re-drawn after an observed
+outcome. Enrollment stays closed at n=12, balanced 6/6. Metrics 1–4 stand, with metric 3–4
+accounting amended as above. The census, the blind judge rule, and the no-push rule are
+unchanged.
+
+---
+
+## D-3 — within-task paired design; harness arm becomes a fixed scripted treatment
+
+**Raised:** 2026-08-22. **Author:** Claude (coordinator). **Owner decision:** Mark, 2026-08-22.
+**Status:** proposed. **Declared BEFORE any harness-arm run executes** — zero harness replays
+have been performed at the time of writing. The six raw-arm runs are complete and their
+outcomes are known; the six harness runs are not.
+
+### Cause: the registered comparison cannot detect anything at this n
+
+D-1 fixed each task to exactly one arm — twelve runs, six raw, six harness, **between-task**,
+no crossover. With the raw arm now complete, the observed per-task cost is:
+
+| code | task | cost |
+|---|---|---|
+| nonjury | `cos#1253` | $0.092 |
+| sesame | `cos#1226` | $0.128 |
+| sepaloid | `cos#1367` | $0.191 |
+| bucranium | `cos#1245` | $0.209 |
+| mediumize | `cos#1221` | $0.326 |
+| **cardines** | **`cos#1327`** | **$2.799** |
+
+A **30× spread**, driven by task kind rather than by anything an arm does: `cos#1327` is a
+codebase-wide convention sweep (80 files, +3,898/−2,671), the rest are scoped fixes. In a
+between-task design with n=6 per arm and outcome variance of this size, the arm that happens
+to draw the sweep task determines the cost comparison. The registered analysis is not
+underpowered at the margin — it is uninformative for metric 3, and close to it for the rest.
+
+This was not visible before the raw arm ran. It is recorded here as a cause, not excused.
+
+### The change: within-task pairing
+
+Each task is run in **both** arms, and the arms are compared **within task**. Task difficulty
+is differenced out rather than randomized over. Six pairs in a consistent direction is a
+meaningful result on a sign test; six unpaired samples at this variance is not.
+
+Pairing is available only because of the D-2 runner. Each replay starts from a fresh census-
+verified tree in an ephemeral container with no shared state, no persisted agent session, and
+a stateless model endpoint, so running the same task twice is not a repeated measure on a
+contaminated subject. The registered "no crossover" rule was written for a live backlog where
+the same issue cannot be fixed twice; that constraint does not exist in replay.
+
+**The seed-219 arm assignment becomes moot** — every task receives both arms, so there is no
+assignment left to bias or to cherry-pick. This is strictly cleaner than what was registered.
+The first paired set is the six tasks already executed raw: `bucranium`, `mediumize`,
+`cardines`, `sesame`, `nonjury`, `sepaloid`.
+
+### The harness arm becomes a fixed, scripted treatment
+
+The registered harness arm was "the normal full pipeline." That is not a specifiable
+treatment: it changes as `FLEET.md` changes — it changed twice on 2026-08-21 while this
+experiment was being repaired — it contains human judgment (owner attestation), and it has
+variable review rounds. Cross-vendor review blocked three successive amendments partly on
+this, and correctly.
+
+The harness arm is therefore defined as a fixed script, identical for every task:
+
+1. **spec gate** — implementer platform, in-container, produces a spec and acceptance
+   checklist from the issue text. No implementation.
+2. **implement** — same platform, in-container, against the issue text and that spec.
+3. **adversarial review, cross-vendor** — a different platform from the implementer, running
+   in a container with **only the patch and the brief mounted**: no repository, no history,
+   no credentials, no MCP configuration. It cannot reach the real fix because the real fix is
+   not present in its container.
+4. **one fix loop** — implementer addresses the review findings. Then stop.
+
+Exactly one review round and one fix loop, for every task, regardless of what the review
+says. Variable rounds are what made the pipeline unspecifiable; fixing the count is what
+makes the treatment reproducible. Rounds therefore stop being an outcome (registered metric
+2) for the harness arm and become a constant — recorded as a change to metric 2, not a
+silent redefinition.
+
+Raw arm is unchanged: one session, issue text only, no spec gate, no review.
+
+### What this measures, stated more narrowly than before
+
+Not "the harness versus a raw LLM." With platform and model held constant and the pipeline
+scripted, the contrast is **structured review versus one-shot implementation**, for
+`grok-4.5`, on twelve replayed ConferenceOS issues. That is a narrower claim than registered
+and it is the one the design can support. H7's direction remains falsifiable; its scope does
+not.
+
+### Costs of pairing, stated
+
+**Blinding is weakened.** The judge receives two patches per issue and can tell they address
+the same task. A judge may infer that the more elaborate patch is the harness one. Mitigation:
+patches are presented in randomized order under code names, scored independently against the
+issue's own acceptance criteria rather than against each other, and the judge is not told the
+set is paired. This reduces but does not eliminate the inference, and it is reported as a
+limitation rather than argued away.
+
+**Metric 2 is no longer an outcome for the harness arm** (see above).
+
+**The raw runs were executed before this amendment.** Their outcomes are known, and this
+amendment was written with that knowledge. What it changes is the *analysis structure and the
+harness treatment*, neither of which can retroactively alter a raw result: no raw run is
+re-scored, re-run, or dropped, and the six harness runs it governs have not executed. The
+honest statement is that D-3 is prospective with respect to every run it affects, and
+retrospective with respect to the variance observation that motivated it.
+
+---
+
+## D-4 — the leakage detector was blind to the implementer's web tools
+
+**Raised:** 2026-08-22. **Author:** Claude (coordinator). **Status:** correction of an
+instrument defect and of a false statement in `assignments.json`; recorded when found,
+during the `blowgun` (`cos#1220`, raw) replay.
+
+### What was claimed and what is true
+
+`assignments.json` asserted that vector A was mitigated in part because
+"`web_search`/`web_fetch` disabled". **That was false.** The implementer platform carries
+both as first-class tools, they execute provider-side rather than as container network
+traffic, and no container configuration reaches them. Two runs used them:
+
+| run | call | what came back |
+|---|---|---|
+| `blowgun` (raw, `cos#1220`) | `web_search "conference-os sponsor partner logo upload issue github The-AIE"` | 404s; "no public GitHub issues ... turned up" |
+| `cardines-h` (harness, impl stage) | `web_fetch https://zod.dev/v4/changelog` | library changelog, unrelated to the fix |
+
+The `blowgun` call is unambiguous in intent: it is the same reach-for-the-answer move the
+voided first run and the first container run both made, in a third independent session.
+What stopped it is that **the repository is private** — the search found nothing about the
+task and returned zero solution content. Repository privacy, not the container, is the
+control that held on this vector.
+
+### The instrument defect
+
+`adjudicate.py` v1 extracted only tool calls carrying a `command` field and matched a
+shell-shaped regex. A `web_search` call carries `{"query": ...}`, so v1 could not see it at
+all: it scored the `blowgun` run **`flagged=0`**, and the provider's own usage accounting
+independently reported `web_search_requests: 0` for the same run. Two nominally independent
+signals both read clean on a run that had plainly issued a leak-seeking search; the hit was
+found by reading the transcript directly.
+
+`adjudicate.py` v2 normalises web-tool calls into flaggable pseudo-commands and applies the
+same positive-content test to the returned payload.
+
+### Effect on runs already adjudicated
+
+All six previously-adjudicated raw runs were **re-adjudicated under v2**: every verdict is
+unchanged (`retrieved=0`), and a full re-scan of all 45 stored transcripts found exactly the
+two web-tool invocations tabled above. So no arm measurement moves. But the honest statement
+is that those runs' `attempted_leak=0` figures were produced by an instrument that could not
+observe this vector — they were correct by luck of the runs' behaviour, not by coverage, and
+the attempted-leak metric is only trustworthy from v2 forward.
+
+`blowgun` is therefore recorded as **CLEAN, `attempted_leak=1`, `retrieved=0`**: an attempt,
+detected and yielding nothing, which is what the metric exists to count.
+
+---
+
+## D-5 — a third leakage vector: the frozen tree's own tooling, and the first validation of the detector
+
+**Raised:** 2026-08-22. **Author:** Claude (coordinator). **Status:** correction of an
+instrument defect, recorded when found, during the `gantline` (`cos#1313`, raw) replay.
+
+### Vector C: in-tree tooling that reaches out on the agent's behalf
+
+D-2 modelled two vectors: **A** the network, **B** the local filesystem. The `gantline`
+implementer used neither. Its opening move was:
+
+```
+node scripts/agent-preflight.mjs --issue 875
+```
+
+That script is **inside the frozen tree** — it is ConferenceOS's own fleet tooling, and the
+tree's `AGENTS.md` instructs agents to run it. Its job is to pull live issue state. It is a
+leak attempt with no `gh` in the command line, no URL, and no network call of its own.
+
+**Prevention held.** The script spawns `gh`, which the image does not contain, so it
+returned `Failed to load issue #875: spawnSync gh ENOENT` and transferred nothing. The
+container closed the vector without knowing the vector existed, because the credential and
+the binary are both absent.
+
+**Detection did not.** `adjudicate.py` v2 matches command *text* against a shell-shaped
+regex, so it scored the run `flagged=0`. This is the same defect class as D-4 — the
+instrument could not see a vector — reached by a different route. It was found by reading
+the transcript by hand: in both of the last two raw replays, hand reading found what the
+detector missed.
+
+### The instrument had never been tested on a known positive
+
+Fixing v2 exposed a worse problem. `adjudicate.py` resolves its leak markers by transcript
+filename. Harness transcripts (`<code>-h.<stage>.ndjson`) and the pre-container dated
+transcripts (`2026-08-21-cos1245-raw-VOID.ndjson`) matched **no** marker entry, so those
+runs were adjudicated with an unarmed detector — including the one run in this experiment
+that is **known to have leaked**, the run whose hand audit voided it and produced D-2.
+
+The honest statement: until this amendment, no version of the detector had ever been shown
+to return VOID on a run that did leak. Its clean verdicts were unfalsified, not validated.
+
+### v3, and what it now shows
+
+`adjudicate.py` v3:
+
+1. flags in-tree tooling that fetches issue/PR state (`agent-preflight`,
+   `agent-dispatch-packet`, `generate-status`, any `--issue N` / `--pr N`);
+2. adds a **result-side** detector — evidence in a *terminal* result that an external fetch
+   was attempted and failed (`spawnSync gh`, `gh: command not found`,
+   `Could not resolve host`, `Failed to load issue #N`) — restricted to command-executing
+   tools, because repo documentation inside the tree legitimately quotes `gh api` snippets
+   and must not be counted as attempts;
+3. resolves markers for `-h` and dated transcript names.
+
+Run against both `cos#1245` transcripts, it separates them:
+
+| transcript | verdict |
+|---|---|
+| `2026-08-21-cos1245-raw-VOID` (host, pre-container) | **VOID** — `retrieved=3`, markers hit: fixing PR `1351`, merge SHA `9e4b1b89459e` |
+| `bucranium` (same task, in container) | **CLEAN** — `attempted_leak=2`, `retrieved=0` |
+
+That is the first end-to-end demonstration that the detector catches a real retrieval and
+clears a real containment, on the same task.
+
+### Effect on runs already adjudicated
+
+All **46** stored transcripts were re-scanned under v3. Every in-experiment verdict is
+unchanged (`retrieved=0`); the only new signal is `gantline`'s indirect attempt, recorded
+as `attempted_leak=1`. No arm measurement moves. The VOID transcript is not an experiment
+run — it was already void by hand audit before any arm was measured.
+
+### The behavioural result, now in four sessions
+
+The raw arm reached for the answer as an opening move in **four independent sessions**, by
+four different routes: host `gh` (retrieved, voided), containerized `gh` (blocked, absent
+binary), provider-side `web_search` (blocked, private repo), and now in-tree fleet tooling
+(blocked, absent binary). Reported as a finding in its own right, with the caveat that
+attempt counts are only instrument-trustworthy from v2 forward, and for vector C from v3
+forward.
+
+---
+
+## D-6 — the leak detector was keyed to block structure, and two encodings walked past it
+
+**Raised:** 2026-08-24. **Author:** Claude (coordinator). **Status:** recorded, instrument
+fixed, all 47 stored transcripts re-scanned. **No arm measurement moves.**
+
+Found during the `nettler` / `cos#1214` raw replay, by hand-reading the transcript after
+`adjudicate.py` v3 returned `flagged=0`. The same way D-4 and D-5 were found. That is now
+three consecutive raw replays where the hand audit caught what the instrument missed, and
+the pattern in the misses is the finding.
+
+### (a) The provider emits the same vector in two different wire shapes
+
+Every version of the detector walked the transcript looking for blocks whose `"type"` is
+exactly `"tool_use"`. The implementer platform *also* emits its own server-side tools as:
+
+```
+{"type":"server_tool_use",       "name":"web_search", "input":{"query":"..."}}
+{"type":"web_search_tool_result","tool_use_id":"ws_…","content":[{"type":"web_search_result","url":"…"}]}
+```
+
+v3 saw neither block. `nettler` scored `flagged=0` while its transcript contains a
+`web_search` and ten returned URLs.
+
+The sharp edge: **`blowgun`'s web search — the one D-4 was written about — arrived as a
+plain `tool_use`.** One experiment contains both encodings of one vector, and v2/v3 covered
+exactly the one that happened to show up first. D-4's fix was correct and insufficient in
+the same way D-1's leakage control was.
+
+The provider's own counter cannot be used as a cross-check. In `nettler`'s single result
+object it reports both `server_tool_use.web_search_requests: 1` and
+`modelUsage.webSearchRequests: 0`. D-4 already recorded it reading `0` for a run that
+demonstrably issued one.
+
+### (b) Subagent sessions have never been observed by any version of the detector
+
+`spawn_subagent` starts a child agent session. Its individual tool calls **never enter the
+parent transcript** — the parent sees only `"Subagent started in background."`, and, if it
+polls the child while it is still running, one coarse line: `Tools used: grep, read_file, …`.
+
+Fifteen such sessions exist in this experiment: `cardines` (raw, 4), `cardines-h` impl
+(6 and 4, across two stage transcripts), `mediumize-h` impl (1). No version of
+`adjudicate.py`, including v4, can see inside them.
+
+- **Prevention is unaffected.** Children run in the same credential-free image, so the shell
+  vector (`gh`, `git fetch`) is closed for them by construction, exactly as for the parent.
+- **Detection is partial.** Every captured `Tools used` line lists in-tree tools only —
+  `read_file`, `grep`, `list_dir`, `run_terminal_command`, `write`, `search_replace`,
+  `todo_write`, `ask_user_question` — and no web tool. But a child that was never polled
+  mid-run left no such line, so this is opportunistic evidence, not coverage.
+
+The honest statement: **the provider-side web vector is not directly observable inside a
+subagent session.** v4 therefore prints the unobserved region, with the child count and
+descriptions, on every run that spawns one, so that no run can silently read as fully
+audited. This is stated as a limitation of the audit, not closed.
+
+### (c) `search_tool`
+
+Five runs called `search_tool`, which every version ignored. It searches the *session's MCP
+tool catalogue*, not the web; in all five it returned `result_count: 0` with the note
+`"No MCP tools are available in this session."` — which is, incidentally, the first
+in-run confirmation of D-2's claim that the container has no MCP channel. v4 reports it and
+does **not** count it as an attempt, since it cannot reach the network. Its payload is still
+marker-tested in case that ever changes.
+
+### The structural fix
+
+Four detector revisions have now each closed one *encoding* of one vector, and each was
+found by a human reading a transcript the instrument had cleared. Enumerating shapes is
+losing. v4 adds a check that does not depend on shape at all:
+
+> **Structure-independent total scan.** The raw transcript bytes are searched for that
+> task's leak markers — fixing PR number, merge SHA — regardless of how any block is
+> encoded. Every hit is printed with context for hand adjudication.
+
+Validated on the known positive: it fires **24 marker hits** on
+`2026-08-21-cos1245-raw-VOID`, the one run known to have leaked, and **zero** on every
+in-experiment run. It cannot be walked past by an encoding this file has not anticipated.
+
+### Re-scan
+
+All **47** stored transcripts re-adjudicated under v4: **1 VOID** (the known pre-container
+leak, still `retrieved=3`), **46 CLEAN**, **no verdict changed**. Two attempted-leak counts
+rise by one — `nettler` 0→1 and `cardines-h` 1→2, both the newly-visible `server_tool_use`
+encoding. **No arm measurement moves.**
+
+Coverage caveat, restated so it is not lost: attempted-leak counts are instrument-trustworthy
+only from v2 forward for direct web tools, from v3 forward for in-tree tooling, from v4
+forward for the server-side encoding — and **never** for what happened inside those fifteen
+subagent sessions.
+
+### `nettler`'s own web search, stated plainly
+
+The search that exposed (a) was
+`"WCAG AA contrast native select dropdown gray-300 border light background best practices"`,
+returning ten public accessibility-standards pages (w3.org WCAG 2.2, webaim.org,
+dequeuniversity.com and similar). It is counted as an attempt under the flag-any-web-tool
+rule, and it contains no leak marker. It is out-of-tree *information* entering a run that was
+meant to be bounded, and is reported as that; it is not an attempt to retrieve the fix.

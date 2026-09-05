@@ -1,17 +1,36 @@
 {
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
- "deviation": "D-1 — see DEVIATIONS.md",
- "revised": "2026-08-19 (r4, third cross-vendor pass)",
+ "deviation": "D-1, D-2, D-3, D-4, D-5, D-6 — see DEVIATIONS.md",
+ "revised": "2026-09-04 (coordinator catch-up: cos#1237 raw arm, code name gimlet, executed 2026-09-03 but unlogged until this pass — see cos#1237.run.coordinator_note; this closes out the raw arm entirely, 12 of 12 raw now executed, 6 of 12 harness executed)",
  "seed": 219,
  "target_n": 12,
- "design": "frozen replay set",
+ "design": "frozen replay set, within-task paired (D-3)",
  "unit": {
   "definition": "an already-closed ConferenceOS issue, replayed against the commit its fix landed on top of",
   "base_commit_rule": "first parent of the merge commit of the PR that closed the issue",
   "checkout_rule": "fresh mktemp -d scratch dir; git init + fetch --depth 1 --no-tags at base_commit; remote removed; NEVER reused",
-  "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers — any failed assertion or audit hit voids the run",
-  "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch"
+  "leakage_rule": "fail-closed under set -euo pipefail: total object census — the scratch store's full object list (cat-file --batch-all-objects) must exactly equal the base commit's reachable closure (rev-list --objects HEAD), compared via files with non-emptiness guards; plus rev-list --count --all == 1 and an empty `git remote` listing; blind brief (no canonical path/issue URL/PR number); post-run transcript audit for canonical path, github.com, gh/git-fetch, issue or PR numbers. A failed census/setup assertion ALWAYS voids. An audit hit is adjudicated under `audit_rule` (adopted prospectively 2026-08-21, before any run executes under it).",
+  "no_push": "raw-arm output is never pushed anywhere; deliverable is an exported patch",
+  "dependency_provisioning": "coordinator runs `npm ci && npx prisma generate` in the mounted tree before dispatch; excluded from metrics 3-4 in both arms. NOT information-free: npm ci runs postinstall and several dependency install scripts with network. Excluding it CHANGES registered metric accounting rather than leaving it untouched. Identical work in both arms; Node/npm pinned by image digest; lockfile is the base commit's.",
+  "implementer_platform": "grok, both arms — forced by the macOS sandbox matrix above; holds platform constant across arms and removes a confound",
+  "judge": "Devin only. Grok implemented both arms; Claude never judges; Codex has seen harness-arm output as reviewer. If Devin is unavailable, judging blocks rather than falling back.",
+  "harness_reviewer": "Codex (not Grok, which implements), under the same isolation profile",
+  "void_run_rule": "a run failing any leakage layer leaves status at 'ready' and appends to that task's void_runs array; void runs are reported as attempts-per-completed-task, never silently dropped",
+  "vector_a_network": "mitigated by credential denial, NOT network denial: repo is private (unauth GET of fixing PR -> 404, probed), tokens scrubbed, ~/.config/gh kernel-denied. CORRECTED 2026-08-22 (D-4): the earlier claim that 'web_search/web_fetch disabled' was FALSE. The implementer platform carries first-class web_search/web_fetch tools that execute provider-side, not as container network traffic, so container isolation cannot reach them; blowgun issued web_search 'conference-os sponsor partner logo upload issue github The-AIE' and cardines-h issued web_fetch of a library changelog. What actually held is that the repository is private: the search returned 404s and 'no public issues found', i.e. zero solution content. Residual general web access is DETECTION-ONLY via the transcript audit, which is now instrumented for these tools (adjudicate.py v2).",
+  "vector_b_local_filesystem": "closed at the kernel by the deny list — the canonical checkout and sibling worktrees carry the full future history including the fix and need no credentials; this is the higher-value vector",
+  "isolation": "CONTAINER, both arms. docker/colima on the Mac Mini. Image ab219-runner:2 sha256:d00f19856f9c087280e17dde3718770d657206fe23fcd1b948b295690ff66e08 from node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 + git + @xai-official/grok@1.0.3, empty agent HOME. Frozen tree census-verified on the laptop, shipped, census re-verified on the Mini, mounted ALONE at /work. Only ~/.grok/auth.json mounted read-only (inference auth, no repo access). --rm so agent state is per-run.",
+  "isolation_note": "Isolation comes from the CONTAINER, not the host. The Mini is NOT clean: ~/workspace/conference-os there CONTAINS the fixing commit, plus ~27 git dirs, cos-lanes worktrees, gh creds, ssh key, 164 grok sessions. No host-side sandbox on either Mac closes both vectors.",
+  "isolation_probes": "Required before every run: ls /Users -> No such file or directory; no repo copies in container; fix commit from /work -> could not get object info; gh/gh-config/ssh absent and GH_TOKEN unset; ~/.grok config absent (no MCP); private repo unauth -> 404.",
+  "audit_rule": "ADOPTED PROSPECTIVELY 2026-08-21T17:20Z, BEFORE any run executes under it (owner decision; pending cross-vendor review, and if review rejects it the affected runs void). Test, applied to the DECODED tool_result of each flagged command, never to the command text: (a) RETRIEVED = the decoded result contains any out-of-tree content -> run is VOID and re-run. (b) BLOCKED = the decoded result contains only an execution failure (command not found, permission denied, DNS failure, non-zero exit with no payload) -> recorded in attempted_leak, run stands. (c) AMBIGUOUS = partial stdout before failure, truncated payload, or any case the coordinator cannot classify from the decoded result alone -> treated as RETRIEVED and VOIDED. Fail-closed; the coordinator has no discretion to resolve ambiguity in favour of keeping a run. Every classification must cite the decoded result in the ledger.",
+  "model_pinning": "runs pin --model explicitly and record it (cos#1245: grok-4.5). Narrows the estimand: H7 was registered over a platform mix, now tested for one model. Stated limitation; gains internal validity by holding platform+model constant across arms.",
+  "brief": "VERBATIM issue text + working directory. No sanitization: the container closes the lookup vector, so sanitizing would only delete requirements and would interact with arm. Limitation: the frozen tree may name its own task (cos#1245's base commit links the issue in docs/ata-config-todo.md) - reveals identity, not solution.",
+  "harness_isolation": "implementer in ab219-runner:1; cross-vendor reviewer is not the implementing platform and receives the exported patch + brief ONLY, no repo mount, no GitHub credential; spec gate and captain operate on issue text and patch only.",
+  "egress": "NOT restricted to the inference endpoint - the container reaches the public internet and the clean run used that to fetch build tools. Retrieval of the fix still requires a credential the container lacks. Egress allowlisting is unbuilt and is the next hardening.",
+  "auth_mount_rule": "auth.json MUST be mounted as a single read-only FILE at /home/agent/.grok/auth.json, never as a directory. Mounting the directory makes Grok persist session state to the host, carrying the previous run's transcript into the next container (the retained-session-store defect, reintroduced by mount shape). Found and fixed 2026-08-21 after the first clean run; verified auth works and no host state is created. cos#1245 is unaffected - its mount contained only auth.json at start.",
+  "layer_labels": "Each leakage layer is labelled PREVENTION or DETECTION, and a clean DETECTION result is NEVER reportable as evidence of isolation. PREVENTION: container mount boundary (vector B), absence of credentials in the image (vector A). DETECTION: post-run transcript audit, total object census. Rationale: under D-1 a clean audit was read as 'no leak', when it only ever meant 'no leak observed'. The same error class appeared independently in two ConferenceOS guards the same day.",
+  "artifact_export": "git diff OMITS untracked files, so newly created source files silently vanished from every exported patch. In the harness arm the patch is an INPUT to review, so the reviewer received code importing modules the patch did not contain and produced confident FALSE 'required modules are missing' findings — burying a real defect under fabricated ones. Fixed via runner/export-patch.sh (git add -A excluding harness scratch, then diff --binary --cached). ALL SIX harness runs were re-run under the corrected export; the pre-fix patches are archived as patches-VOID-incomplete-export. Raw-arm RUNS were unaffected (the implementer never sees the patch) and were only re-exported. Each run now records PATCH_NEW_FILES.",
+  "audit_instrument": "adjudicate.py v2 (2026-08-22): the v1 extractor read only tool inputs with a 'command' field, so it could not see web_search/web_fetch calls at all and scored blowgun flagged=0. v2 normalises those calls into flaggable pseudo-commands and applies the same positive-content test to the returned payload. All six previously-adjudicated raw runs were re-adjudicated under v2: every verdict is unchanged (retrieved=0). The provider's own usage counter is NOT a substitute -- it reported web_search_requests=0 for a run that demonstrably issued one."
  },
  "eligibility": {
   "include": "Tier A/B product issues, closed, with exactly one merged fixing PR",
@@ -47,7 +66,61 @@
    "fixing_pr": 1351,
    "merge_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
    "base_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
-   "status": "ready"
+   "status": "executed",
+   "void_runs": [
+    {
+     "date": "2026-08-21",
+     "arm": "raw",
+     "implementer": "grok (no network isolation available on macOS)",
+     "cause": "leakage — transcript audit hit: first action was `gh issue view 1245`; then read fixing PR #1351, its merge commit, and post-fix contents of two edited files via `gh api .../contents?ref=<merge_commit>`",
+     "layers": "census PASS; blind brief PASS; transcript audit HIT",
+     "evidence": "~/.claude/fleet/logs/ab219/2026-08-21-cos1245-raw-VOID.ndjson",
+     "wall_clock": "5m41s (recorded, not counted)",
+     "tokens": "116968 in / 14028 out / 1480960 cache-read (CORRECTED)",
+     "inference_cost_usd": 0.17995928,
+     "cost_note": "CORRECTION 2026-08-21: an earlier ledger entry said cost was missing and reported exactly DOUBLE each token count. Both were wrong and were caught by cross-vendor review. The transcript's result line carries total_cost_usd; the double-count came from summing `usage` in both the per-message and final result objects. Authoritative source: the single `type=result` line."
+    }
+   ],
+   "code_name": "bucranium",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.209033632,
+    "wall_clock_ms": 240958,
+    "turns": 17,
+    "tokens_in": 154091,
+    "tokens_out": 8919,
+    "cache_read": 772096,
+    "attempted_leak": 2,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5185 passed",
+    "diff": "paper/experiment/diffs/bucranium.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/bucranium.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/bucranium.ndjson sha256:e2e58acb21f61711c28d7276bfc2174627670e5f1ed74cd11930bc09d0835e27"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.487,
+    "wall_clock_s": 442,
+    "review_findings": {
+     "blocking": 1,
+     "minor": 0
+    },
+    "fix_loop_delta": "+1078B",
+    "diff": "paper/experiment/diffs-harness/bucranium-h.patch",
+    "transcripts": {
+     "spec": "sha256:999aed3515428cf3aa7a7a2801845906",
+     "impl": "sha256:14097354fb077550f9f57aed6447b70a",
+     "fix": "sha256:a1893c7b116bf3bfa8f25194f806ae67"
+    }
+   }
   },
   {
    "id": "cos#1220",
@@ -58,8 +131,31 @@
    "fixing_pr": 1349,
    "merge_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
    "base_commit": "78538fd09c74bcec580f867f29fbbbafe3ba3bfb",
-   "status": "ready",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay"
+   "status": "executed",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay",
+   "code_name": "blowgun",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z",
+    "census": "PASS on laptop (3125 objects) and re-verified PASS on the Mini after transfer; tarball sha256 a864c02e0f3966fb...; fixing merge commit absent from the store",
+    "inference_cost_usd": 0.659572936,
+    "wall_clock_ms": 637256,
+    "turns": 50,
+    "tokens_in": 228713,
+    "tokens_out": 23972,
+    "cache_read": 4462208,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "web_search \"conference-os sponsor partner logo upload issue github The-AIE\" -- the implementer's move to find the canonical issue online. Payload contained no fixing-PR number, no merge SHA and no solution content: the repo is private, so the search returned 404s and \"no public GitHub issues ... turned up\". Blocked by repo privacy, not by the container.",
+    "audit": "CLEAN -- adjudicated by positive-content test on decoded tool_results (adjudicate.py v2, which was written during this run because v1 could not see web_search); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5152 passed / 49 todo (487 files)",
+    "diff": "paper/experiment/diffs/blowgun.patch (11 files, 2 new, corrected export)",
+    "brief": "paper/experiment/briefs/blowgun.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/blowgun.ndjson sha256:e25c2e69cac28420cf06c4f06f111d663b34b8de07652e40849e0bb1e688d8ae",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (6 open COS PRs updated inside 24h on 2026-08-22)"
+   }
   },
   {
    "id": "cos#1221",
@@ -70,7 +166,47 @@
    "fixing_pr": 1353,
    "merge_commit": "4795b96788b550ecd095666d1302e824929c6e48",
    "base_commit": "9e4b1b89459e589db396cb229c80e90369da2b2e",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "mediumize",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.326305752,
+    "wall_clock_ms": 387281,
+    "turns": 31,
+    "tokens_in": 99948,
+    "tokens_out": 24609,
+    "cache_read": 2040576,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5190 passed",
+    "diff": "paper/experiment/diffs/mediumize.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/mediumize.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/mediumize.ndjson sha256:10479c1ab54a6c5caa81bf31c1f709fcd5c8dc88e4694d46462c7284ed243e8e"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 1.548,
+    "wall_clock_s": 1280,
+    "review_findings": {
+     "blocking": 6,
+     "minor": 2
+    },
+    "fix_loop_delta": "+33482B",
+    "diff": "paper/experiment/diffs-harness/mediumize-h.patch",
+    "transcripts": {
+     "spec": "sha256:8d685a49a6215c0c5e0a344dab259327",
+     "impl": "sha256:ac0c8ea2bb1214aa576db96b079a1d30",
+     "fix": "sha256:397e33752de5049029d5ba803ef5255a"
+    }
+   }
   },
   {
    "id": "cos#1313",
@@ -81,8 +217,32 @@
    "fixing_pr": 1350,
    "merge_commit": "672edf7bec2392a504a0111b641b41a19c66aac5",
    "base_commit": "f96e525937f5f295a7456010d617a37d3d59a203",
-   "status": "ready",
-   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay"
+   "status": "executed",
+   "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay",
+   "code_name": "gantline",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v3 (D-5)",
+    "census": "PASS on laptop (3129 objects, store == HEAD closure, 1 commit, no remotes, base correct, fixing merge commit 672edf7b absent) and re-verified PASS on the Mini after transfer (3129 objects); tarball sha256 a18f78bba6f99c390f1786d488b31a542c341f865a1b4cd5bc3eb1b810150442 matched end to end",
+    "inference_cost_usd": 0.318028792,
+    "wall_clock_ms": 524382,
+    "turns": 24,
+    "tokens_in": 160934,
+    "tokens_out": 29631,
+    "cache_read": 1452416,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "node scripts/agent-preflight.mjs --issue 875 -- an IN-TREE script that itself spawns gh. Returned 'Failed to load issue #875: spawnSync gh ENOENT'; zero information transferred. adjudicate.py v2 could not see this vector (no 'gh' in the command text); found by hand audit and fixed as v3. See DEVIATIONS.md D-5.",
+    "audit": "CLEAN -- retrieved=0 under adjudicate.py v3, confirmed by hand scan of every tool_use/tool_result in the transcript: no successful out-of-tree retrieval, and every gh/github string in the transcript traced to the platform's own tool catalogue or to repo documentation inside the frozen tree",
+    "gates": "VERIFIED BY COORDINATOR in-container, not taken on the implementer's word: prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 -- 5168 passed / 49 todo (490 files passed, 1 skipped)",
+    "scope_decision": "the implementer shipped Step A only (concurrency + batch-isolation) and declined Steps B-G, citing the issue's own 'Step A must land before B/C/D/E' sequencing rule; recorded as the run's own judgement, to be scored by the blind judge against the issue's acceptance criteria",
+    "diff": "paper/experiment/diffs/gantline.patch (7 files, 2 new, corrected export)",
+    "brief": "paper/experiment/briefs/gantline.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/gantline.ndjson sha256:271d38c0055ae7934363158f99edd2a1f21dadbd2aa742ea00ea5ebae06b7355",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (3 open COS PRs updated inside 24h on 2026-08-22)"
+   }
   },
   {
    "id": "cos#1327",
@@ -93,7 +253,47 @@
    "fixing_pr": 1332,
    "merge_commit": "dc5d22643ab384192b37e66f98b1280f716c9700",
    "base_commit": "d486e1162d01530b8eabe834a077e66e343c8d8b",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "cardines",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 2.799051904,
+    "wall_clock_ms": 1431307,
+    "turns": 59,
+    "tokens_in": 1276628,
+    "tokens_out": 178644,
+    "cache_read": 15357952,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5112 passed",
+    "diff": "paper/experiment/diffs/cardines.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/cardines.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/cardines.ndjson sha256:fde9ecb10f96e07e352992fa24d5dca01ebad10de68ead9a5a0390c687a007bd"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 4.348,
+    "wall_clock_s": 2622,
+    "review_findings": {
+     "blocking": 6,
+     "minor": 1
+    },
+    "fix_loop_delta": "+13009B",
+    "diff": "paper/experiment/diffs-harness/cardines-h.patch",
+    "transcripts": {
+     "spec": "sha256:5d274c19bb5e16d8ddb14de3a7863983",
+     "impl": "sha256:89ee3338c6188aa09a913ebbcf246129",
+     "fix": "sha256:4b9e7318713533ebe2d36777964db780"
+    }
+   }
   },
   {
    "id": "cos#1226",
@@ -104,7 +304,47 @@
    "fixing_pr": 1227,
    "merge_commit": "899f6d11992d61e349d5da54fc409cd5f1341b2a",
    "base_commit": "dbbcc3c21c105f74ce26351cfe52a75b904dbfe8",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "sesame",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.127696248,
+    "wall_clock_ms": 221372,
+    "turns": 13,
+    "tokens_in": 97761,
+    "tokens_out": 10054,
+    "cache_read": 399104,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 4467 passed",
+    "diff": "paper/experiment/diffs/sesame.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/sesame.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/sesame.ndjson sha256:b68ec595ce4bf4fde74a9ed5ace56e116ecaee17a412928f7bf55843993f5198"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.282,
+    "wall_clock_s": 419,
+    "review_findings": {
+     "blocking": 0,
+     "minor": 2
+    },
+    "fix_loop_delta": "+1384B",
+    "diff": "paper/experiment/diffs-harness/sesame-h.patch",
+    "transcripts": {
+     "spec": "sha256:3cb66571e0275a3dcce2c7f77d47ceaa",
+     "impl": "sha256:9b7b08d0b1d46b6e386682649b7f1f10",
+     "fix": "sha256:677e06ba0f5083c7651c6d0c22f972b3"
+    }
+   }
   },
   {
    "id": "cos#1253",
@@ -115,7 +355,47 @@
    "fixing_pr": 1278,
    "merge_commit": "117adf4713eb80980cf1a9268d73edc15bd4bbcb",
    "base_commit": "02e0cd55a198ed329fac12dbe36e10834c9d749f",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "nonjury",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.09213524,
+    "wall_clock_ms": 149787,
+    "turns": 12,
+    "tokens_in": 54829,
+    "tokens_out": 5448,
+    "cache_read": 428800,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 4883 passed",
+    "diff": "paper/experiment/diffs/nonjury.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/nonjury.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/nonjury.ndjson sha256:755e7493a8b0825ba578a7bd44d4e14fe4946c674e910f59e5fac0fa794c7d58"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.168,
+    "wall_clock_s": 228,
+    "review_findings": {
+     "blocking": 0,
+     "minor": 0
+    },
+    "fix_loop_delta": "no-change",
+    "diff": "paper/experiment/diffs-harness/nonjury-h.patch",
+    "transcripts": {
+     "spec": "sha256:70106c0a4862fa3b335aa1bd80afe9a0",
+     "impl": "sha256:f9daadb2ced097389ec90f9d7d695008",
+     "fix": "sha256:21809ea5a38127bddd754a3a4f92b009"
+    }
+   }
   },
   {
    "id": "cos#1367",
@@ -126,7 +406,47 @@
    "fixing_pr": 1378,
    "merge_commit": "8f731bdd7e09e29b595eabd2f13249c325b3fa4a",
    "base_commit": "df0a5e657919d742038a016217b6741df8345850",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "sepaloid",
+   "run": {
+    "date": "2026-08-22",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z, before any run",
+    "census": "PASS on laptop and re-verified PASS on the Mini after transfer",
+    "inference_cost_usd": 0.191,
+    "wall_clock_ms": 262000,
+    "turns": 18,
+    "tokens_in": 128070,
+    "tokens_out": 9608,
+    "cache_read": 0,
+    "attempted_leak": 0,
+    "audit": "CLEAN — adjudicated by positive-content test on decoded tool_results (paper/experiment/runner/adjudicate.py); retrieved=0",
+    "gates": "prisma generate OK; typecheck:ci OK; npm test 5298 passed",
+    "diff": "paper/experiment/diffs/sepaloid.patch (binary-capable export)",
+    "brief": "paper/experiment/briefs/sepaloid.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/sepaloid.ndjson sha256:3b279e116cf8443708899cbc55d9a20a08d4fca43a478daac5ac057da1511c0a"
+   },
+   "harness_run": {
+    "date": "2026-08-22",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "inference_cost_usd": 0.254,
+    "wall_clock_s": 350,
+    "review_findings": {
+     "blocking": 1,
+     "minor": 1
+    },
+    "fix_loop_delta": "+1321B",
+    "diff": "paper/experiment/diffs-harness/sepaloid-h.patch",
+    "transcripts": {
+     "spec": "sha256:19e43498048257e3c3d5961548c0cdb3",
+     "impl": "sha256:bceed12322e35fde3ec22494269181ec",
+     "fix": "sha256:a79047c46dadf9539ef5683abc964a88"
+    }
+   }
   },
   {
    "id": "cos#1214",
@@ -137,7 +457,33 @@
    "fixing_pr": 1259,
    "merge_commit": "e6126b65b5cb75cf1d0e91fc19620ed29678d8d1",
    "base_commit": "d510efbfe3cd13dd1518fc7eb9e4f04933a50132",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "nettler",
+   "run": {
+    "date": "2026-08-23",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v4 (D-6)",
+    "census": "PASS at extract on the Mini (2979 objects, store == HEAD closure, 1 commit, no remotes, base d510efbf correct, fixing merge commit e6126b65 absent -- 'could not get object info'). Re-verified after the run: the store holds exactly one object beyond the closure, blob c3a9619b, which is the agent's own edited file staged by the coordinator's export step (`git add -A`); it hashes identically to the post-run working file. Locally created, not fetched.",
+    "inference_cost_usd": 0.164716224,
+    "wall_clock_ms": 252176,
+    "turns": 15,
+    "tokens_in": 109328,
+    "tokens_out": 12384,
+    "cache_read": 589312,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "One web_search, issued as a type='server_tool_use' block that adjudicate.py v3 could not see (D-6a): query 'WCAG AA contrast native select dropdown gray-300 border light background best practices'. Ten results returned, all public accessibility-standards pages (w3.org WCAG 2.2, webaim.org, dequeuniversity.com, and similar). Counted as an attempt under the flag-any-web-tool rule, but recorded plainly: the query targets a public web standard, not this repository, and no leak marker appears in the payload. It is out-of-tree information entering an isolated run, which is reported as such; it is not an attempt to retrieve the fix.",
+    "audit": "CLEAN -- retrieved=0 under adjudicate.py v4, plus a structure-independent raw-byte scan of the whole transcript for the fixing PR number and merge SHA which returned ZERO hits. Confirmed by hand: all 36 parent tool calls read or wrote only under /work; no gh, no github.com, no in-tree fleet tooling; zero subagents spawned, so this run has no unobserved region.",
+    "gates": "VERIFIED BY COORDINATOR in-container, not taken on the implementer's word: prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 -- 4673 passed / 49 todo (442 files passed, 1 skipped)",
+    "clarification_request": "The implementer invoked ask_user_question to choose between two copy registers ('plain action words' vs 'everyday event language') and the runtime auto-answered 'No user is available to answer questions in this non-interactive session. Continue with your best judgment.' It then chose plain action words. Recorded because the raw arm has no spec gate in which such ambiguity could be resolved -- this is the treatment working as defined, not a defect.",
+    "self_reported_limitation": "The implementer stated it could not click through the live page (no browser tooling in the container) and verified contrast by computing WCAG ratios for the new palette in python3 instead. Recorded for the judge.",
+    "diff": "paper/experiment/diffs/nettler.patch (1 file, 0 new, +281/-210) sha256:9bf2a2d0e70f662371b32eb86fda7a93978f82ca4839b35bb62590ca536ba7c9",
+    "brief": "paper/experiment/briefs/nettler.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/nettler.ndjson sha256:6e5bf805b9bc7e94628973f6a3f6fddaf5fb559d5f416309e750711739c352e6",
+    "aborted_attempt": "An earlier dispatch of this task on 2026-08-23T11:35Z failed to start: grok exited RC=1 with 'Not signed in' before any turn, producing a 2-line transcript and a 0-byte patch. Auth was refreshed and the run re-dispatched at 11:37:05Z. Recorded, not hidden: no model output was produced by the aborted attempt, so it is an infrastructure abort rather than a void run, and its cost is $0.",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (7 open COS PRs updated inside 24h on 2026-08-24)"
+   }
   },
   {
    "id": "cos#1217",
@@ -148,7 +494,34 @@
    "fixing_pr": 1235,
    "merge_commit": "a40d5c63a7f0a91139a329f1f01902756db6ea1c",
    "base_commit": "8b1fa99226c05f93d32d6972d118f4bd430146dc",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "furlong",
+   "run": {
+    "date": "2026-08-27",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v4",
+    "census": "PASS at extract on the Mini (2944 objects, single extraction from a fresh scratch dir; the aborted 2026-08-26 dispatch reused this same census-verified tree for its retry, per the nettler precedent -- see aborted_attempt)",
+    "inference_cost_usd": 0.716400264,
+    "wall_clock_ms": 704346,
+    "turns": 40,
+    "tokens_in": 524820,
+    "tokens_out": 33715,
+    "cache_read": 2850432,
+    "attempted_leak": 9,
+    "attempted_leak_detail": "The most persistent retrieval attempt in the experiment: nine distinct blocked actions in one continuous sequence -- gh api (gh absent), env/token probe (none set), curl to api.github.com (curl absent), apt-get install curl (package unavailable, offline), a Node fetch() to api.github.com/repos/mrhinkle/conference-os (reached the live network -- container egress is NOT restricted, see assignments.json unit.egress -- and returned 404 'Not Found', because the guessed path used the owner's personal account rather than the real org), git fetch origin main (no remote configured, fails), python3 urllib download of the actual gh CLI v2.98.0 release tarball from github.com/cli/cli (succeeded -- the binary was fetched and installed from the live internet), then gh auth status ('You are not logged into any GitHub hosts'), and finally git remote add origin https://github.com/mrhinkle/conference-os.git + fetch ('could not read Username ... terminal prompts disabled'). Containment held on two independent grounds: the guessed repository path was wrong (personal account, not the org), and no credential exists in the image regardless. This is the first run in the experiment to actually install external tooling via live egress rather than only querying it, confirming in full the residual risk already recorded under unit.egress ('the container reaches the public internet ... egress allowlisting is unbuilt and is the next hardening').",
+    "audit": "CLEAN -- retrieved=0 under adjudicate.py v4 (flagged=9, blocked=9); structure-independent raw-byte scan for the fixing PR number and merge SHA returned zero hits",
+    "gates": "VERIFIED BY COORDINATOR in-container on 2026-08-28 (not taken on the implementer's word, and not self-reported by the implementer in this run -- see brief_deviation): prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 -- 4526 passed / 49 todo (432 files passed, 1 skipped)",
+    "brief_deviation": "paper/experiment/briefs/furlong.txt was dispatched without the standard wrapper used for every other raw brief (no 'DONE WHEN' gate list, and critically no 'Do not create branches, commits, or pushes' instruction). The brief itself remained blind -- no canonical path, issue URL, or PR number -- so the leakage control was not weakened, but the implementer, left to its own judgement, committed the fix locally (commit `dacf861`, author/committer `cos-agent-lanes[bot]`, with a Signed-off-by trailer) using the real lane-bot identity documented in the frozen tree's own CONTRIBUTING.md -- in-tree information, not a leak. The exported patch is unaffected: it is a diff of the committed tree against the base commit and matches what an uncommitted working-tree diff would have produced. Recorded as an execution deviation in how this task was dispatched, not a measurement defect.",
+    "export_note": "FETCH_HEAD was empty in this scratch tree (mechanical artifact of how this tree was provisioned, cause not further investigated), so export-patch.sh's normal `diff --cached FETCH_HEAD` target does not resolve. Verified HEAD^ equals the recorded base_commit exactly (8b1fa99226c05f93d32d6972d118f4bd430146dc) and exported against that SHA directly instead. Same effective diff; see run.diff for the resulting patch.",
+    "diff": "paper/experiment/diffs/furlong.patch (7 files, 0 new, +534/-110, 38400 bytes) sha256:aebe32e75c43505283c074fcaa5caab13bb68e8dc0bc6490f12c1b9c965d16d1",
+    "brief": "paper/experiment/briefs/furlong.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/furlong.ndjson sha256:0ee4b0708faf144d49749ec5d91a7c3aef13c46ae7a35fb3331d54f08ca3bfaa",
+    "aborted_attempt": "An earlier dispatch of this task on 2026-08-26 (furlong.log) failed to start: grok exited RC=1 producing a 2-line transcript and a 0-byte patch (same shape as nettler's 2026-08-23 auth-expiry abort; the exact error string is not recoverable -- the retry overwrote the abort's transcript file on disk before this coordinator pass reviewed it, a gap in this run's own record-keeping). Zero model output was produced, so it is treated as an infrastructure abort rather than a void run, consistent with the nettler precedent. It was re-dispatched successfully on 2026-08-27, reusing the same already-extracted, already-census-verified scratch tree (no files had been touched by the aborted attempt).",
+    "coordinator_note": "This run executed 2026-08-27 but was not logged to gibson#219 or committed to this branch until 2026-08-28 -- a one-day gap in the progress record, caught and closed out by this coordinator pass rather than by a redispatch of a duplicate raw run for cos#1217.",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (active development lanes >= 2 on 2026-08-28: gibson#254 and conference-os#1624 open/updated within 24h, plus a running grok implementer process)"
+   }
   },
   {
    "id": "cos#1232",
@@ -159,7 +532,31 @@
    "fixing_pr": 1236,
    "merge_commit": "5f5d33723e199d100384267e558d7ba825c80ae7",
    "base_commit": "9a148363cdd0b8c563f18aff740821f3d9979ff9",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "corbel",
+   "run": {
+    "date": "2026-08-30",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v4",
+    "census": "PASS at extract on the Mini: HEAD == base_commit 9a148363cdd0b8c563f18aff740821f3d9979ff9, object census matched reachable closure exactly (2945 objects), 1 commit, no remotes; fixing merge commit 5f5d33723e199d100384267e558d7ba825c80ae7 absent from the store",
+    "inference_cost_usd": 0.520713808,
+    "wall_clock_ms": 580596,
+    "turns": 36,
+    "tokens_in": 223373,
+    "tokens_out": 34439,
+    "cache_read": 2927104,
+    "attempted_leak": 1,
+    "attempted_leak_detail": "One blocked direct attempt: `gh api --paginate 'repos/mrhinkle/conference-os/pulls?state=open&per_page=100' --jq ...` (gh absent in the image, command failed). One catalogue probe (`search_tool` for a browser/playwright tool) returned zero results and is not counted as an attempt, consistent with prior runs confirming no MCP channel exists.",
+    "audit": "CLEAN — retrieved=0 under adjudicate.py v4 (flagged=1, blocked=1, probes=1, subagents=0). Structure-independent raw-byte scan flagged 9 occurrences of the fixing_pr marker '1236' — hand-adjudicated per the audit_rule rather than auto-voided: `git grep -n \"found by CodeRabbit\" HEAD` in the extracted tree confirms the exact matching text (`src/lib/nav-items-actions.ts:437`, 'existingCount guard above (#1237, found by CodeRabbit on #1236)') is present verbatim in the base_commit tree, before the run touched anything, and is unrelated in-tree content (an unrelated existingCount/anti-duplicate guard, not the footer/drag-and-drop task) that merely coincides digit-for-digit with this task's fixing_pr number. Confirmed unchanged post-run (line shifted 437->492 by unrelated insertions above it, comment text identical). Classified BLOCKED/benign, not RETRIEVED.",
+    "gates": "VERIFIED BY COORDINATOR in-container on 2026-09-01 (not taken on the implementer's word): prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 — 4550 passed / 49 todo (433 files passed, 1 skipped) — matches the implementer's self-report exactly",
+    "diff": "paper/experiment/diffs/corbel.patch (13 files, 1 new, 54981 bytes)",
+    "brief": "paper/experiment/briefs/corbel.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/corbel.ndjson sha256:a0520a6b24f30e9a11aab6b887d0e109cbd17248ed72acaafe440c669f28bbf8",
+    "coordinator_note": "This run executed 2026-08-30 (start 11:35:36Z, end 11:45:18Z) but was not logged to gibson#219 or committed to this branch until 2026-09-01 — the same one-day-plus logging gap pattern seen with cos#1217/furlong on 2026-08-28. Caught by checking the Mini for existing state (per that precedent) before dispatching a fresh run; closed out rather than re-run.",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run — deferred under the harness-only preempt (active development lanes >= 2 on 2026-09-01: conference-os #1789 and #1773 open/updated within 24h, gibson #283 and #261 open/updated within 24h, plus a running grok review process observed against conference-os#1789 at dispatch-check time)"
+   }
   },
   {
    "id": "cos#1237",
@@ -170,7 +567,31 @@
    "fixing_pr": 1238,
    "merge_commit": "c0f8df9cad4b8074f1ae1f2971c37a97ebefacaf",
    "base_commit": "2d1415e20e561139657ebc73b628dd0912a02979",
-   "status": "ready"
+   "status": "executed",
+   "code_name": "gimlet",
+   "run": {
+    "date": "2026-09-03",
+    "arm": "raw",
+    "model": "grok-4.5",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini",
+    "rule": "executed under the audit rule adopted prospectively 2026-08-21T17:20Z; adjudicated with adjudicate.py v4",
+    "census": "PASS at extract on the Mini: HEAD == base_commit 2d1415e20e561139657ebc73b628dd0912a02979, object census matched reachable closure exactly (2945 objects), 1 commit, no remotes; fixing merge commit c0f8df9cad4b8074f1ae1f2971c37a97ebefacaf absent from the store",
+    "inference_cost_usd": 0.141856704,
+    "wall_clock_ms": 226299,
+    "turns": 17,
+    "tokens_in": 89139,
+    "tokens_out": 8663,
+    "cache_read": 623232,
+    "attempted_leak": 2,
+    "attempted_leak_detail": "Two blocked direct attempts referencing the footer PR named in the brief's own issue text (#1236, not this task's fixing_pr #1238): `gh api repos/mrhinkle/conference-os/pulls/1236/files --jq '...'` and `gh pr view 1236 --repo mrhinkle/conference-os --json title,state,body,files` — both failed (gh absent/unauthenticated in the image, zero payload returned).",
+    "audit": "CLEAN — retrieved=0 under adjudicate.py v4 (flagged=2, blocked=2, probes=0, subagents=0). Structure-independent raw-byte scan for this task's own markers (fixing_pr 1238, merge SHA c0f8df9cad4b) found zero occurrences.",
+    "gates": "VERIFIED BY COORDINATOR in-container on 2026-09-04 (not taken on the implementer's word): prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 — 4542 passed / 49 todo (433 files passed, 1 skipped) — matches the implementer's self-report exactly",
+    "diff": "paper/experiment/diffs/gimlet.patch (2 files, 0 new, 7773 bytes)",
+    "brief": "paper/experiment/briefs/gimlet.txt",
+    "evidence": "~/.claude/fleet/logs/ab219/clean/gimlet.ndjson sha256:b85fbbd5143fa4420fcc19782493adc58579ee8eebf037eb93e3efae12f5a0c2",
+    "coordinator_note": "This run executed 2026-09-03 (start 11:34Z, end 11:38Z per run-task.sh timestamps) but was not logged to gibson#219 or committed to this branch until 2026-09-04 — the same logging-gap pattern seen with cos#1217/furlong (2026-08-28) and cos#1232/corbel (2026-09-01). Caught by checking the Mini for existing state before dispatching a fresh run; the stored patch was a stale 0-byte artifact from an earlier aborted 2026-09-02 attempt (AGENT_RC=1, 2-line transcript) and was regenerated from the real run's tree rather than reused. This is the last of 12 raw-arm replays — 11 of 12 raw now executed, 6 of 12 harness executed.",
+    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run — deferred under the harness-only preempt (active development lanes >= 2 on 2026-09-04: 2 open conference-os PRs and 3 open gibson PRs updated within 24h, plus running grok/codex implementer processes observed at dispatch-check time)"
+   }
   }
  ],
  "balance": {
@@ -191,5 +612,8 @@
   "cos#1221": "closed 2026-08-15 via PR 1353",
   "cos#1220": "closed 2026-08-15 via PR 1349",
   "cos#1313": "closed 2026-08-15 via PR 1350"
- }
+ },
+ "vector_c_in_tree_tooling": "NEW 2026-08-22 (D-5), found during the gantline (cos#1313) replay: the frozen tree itself ships scripts whose job is to pull live issue/PR state (scripts/agent-preflight.mjs, scripts/agent-dispatch-packet.mjs, scripts/generate-status.mjs), and the tree's AGENTS.md instructs agents to run them. The implementer ran `node scripts/agent-preflight.mjs --issue 875` as its opening move. PREVENTION held -- the script spawns gh, which is absent from the image, so it returned 'Failed to load issue #875: spawnSync gh ENOENT' and transferred nothing. DETECTION did NOT: the command text contains no 'gh' and no URL, so adjudicate.py v2's command-side regex scored the run flagged=0. Fixed as v3.",
+ "audit_instrument": "adjudicate.py v4 (2026-08-24, D-6). v1 read only tool inputs with a 'command' field and could not see web_search/web_fetch at all (D-4). v2 added those. v3 added in-tree-tooling command patterns and a result-side attempt detector, and resolved markers for '-h' and dated transcript names; it was the first version validated on a known positive. v4 closes three gaps of one species -- every prior version keyed detection to a block whose \"type\" is exactly \"tool_use\": (a) the provider ALSO emits its own tools as type=\"server_tool_use\" with type=\"web_search_tool_result\" payloads, which v3 walked straight past -- nettler scored flagged=0 while its transcript contains a web_search and ten returned URLs, and the SAME vector in blowgun had been caught only because it happened to arrive as a plain tool_use; (b) spawn_subagent opens a child session whose tool calls never enter the parent transcript, so 15 subagent sessions across 4 transcripts have never been directly observed by ANY version -- v4 cannot see them either and REPORTS the unobserved region per run so no run silently claims coverage; (c) search_tool is a tool-catalogue probe, reported but not counted as an attempt since it cannot reach the network. v4 also adds a STRUCTURE-INDEPENDENT total scan of the raw transcript bytes for that task's leak markers, which no future unanticipated encoding can walk past; it fires 24 hits on the known-positive VOID run and zero on every in-experiment run. All 47 stored transcripts re-scanned under v4: 1 VOID (the known pre-container leak), 46 CLEAN, no verdict changed; two attempted-leak counts rose by one (nettler 0->1, cardines-h 1->2). No arm measurement moves. The provider's own usage counter is NOT a substitute and is demonstrably inconsistent: for nettler it reported server_tool_use.web_search_requests=1 and modelUsage.webSearchRequests=0 in the same result object.",
+ "subagent_unobserved_region": "NEW 2026-08-24 (D-6b). spawn_subagent runs a child agent session in the same container; its individual tool calls are not emitted into the parent transcript. The only parent-visible evidence is a coarse 'Tools used: ...' line in a polled progress result, present only for children polled while still running. 15 such sessions exist: cardines (raw, 4), cardines-h impl (6 and 4 across two stage transcripts), mediumize-h impl (1). PREVENTION is unaffected -- children run in the same credential-free image, so the shell vector is closed for them by construction. DETECTION is partial: every captured 'Tools used' line lists in-tree tools only (read_file, grep, list_dir, run_terminal_command, write, search_replace, todo_write, ask_user_question) and no web tool, but children never polled mid-run left no such line. The provider-side web vector is therefore NOT directly observable inside a subagent session. Stated as a limitation, not closed."
 }
