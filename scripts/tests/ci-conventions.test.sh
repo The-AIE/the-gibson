@@ -2382,45 +2382,142 @@ echo
 # git-configure.sh label-cache check on main at cdf72ff). A consuming grep
 # (stdout to /dev/null) has the same exit semantics and cannot lose that race.
 # Part 1 (#334) covered scripts/tests; this is part 2: every .sh/.mjs/.yml under
-# scripts/ and .github/workflows, allowlist EMPTY. The regex sees -q in ANY
-# short cluster, after long options (`--binary-files=text -q`), plus
-# --quiet/--silent; `||` is not a pipe. Pins L-077 (grep-q-pipefail-undercounts).
-grepq_re='(^|[^|])\|[[:space:]]*grep([[:space:]]+(-[A-Za-z]+|--[a-z-]+(=[^[:space:]]*)?))*[[:space:]]+(-[A-Za-z]*q|--quiet|--silent)'
-# Comment lines (#, *, //) are prose, not pipelines; the sensor's own regex and
-# mutation lines are excluded by name.
-grepq_hits=$(grep -rnE "$grepq_re" scripts .github/workflows --include='*.sh' --include='*.mjs' --include='*.yml' 2>/dev/null \
-  | grep -vE ':[0-9]+:[[:space:]]*(#|\*|//)' \
-  | grep -vE '^scripts/tests/ci-conventions\.test\.sh:[0-9]+:grepq_' || true)
-if [ -z "$grepq_hits" ]; then
-  ok "L-077: no piped quiet grep under scripts/ or .github/workflows (allowlist empty)"
+# scripts/ and .github/workflows, allowlist EMPTY. Pins L-077
+# (grep-q-pipefail-undercounts).
+#
+# A line-oriented grep regex cannot see: a `|` at the END of one line with
+# `grep -q` alone on the next (Codex round 1 on #339: `seq 1 N |\n  grep -q x`
+# is a reachable false green); .mjs block comments (`/* ... */` spanning
+# lines with no per-line `*`); or an over-broad self-exclusion that hides a
+# real violation merely because its variable name happened to start the same
+# way the sensor's own source does. The perl scanner below tracks per-line
+# comment state per file type and the previous line's trailing pipe instead
+# of a single-pass grep pipeline; it does not exclude anything by name — the
+# sensor's own source was verified empirically to not self-trigger.
+GREPQ_HITS=$(perl -e '
+use strict; use warnings;
+my $re      = qr/(?:^|[^|])\|[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
+my $bare_re = qr/^[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
+sub scan_file {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return;
+  my @lines = <$fh>; close $fh;
+  my $is_mjs = $path =~ /\.mjs$/;
+  my $in_block = 0;
+  my $prev_trim = "";
+  for my $i (0 .. $#lines) {
+    chomp(my $line = $lines[$i]);
+    (my $trim = $line) =~ s/^\s+//;
+    my $is_comment = 0;
+    if ($is_mjs) {
+      if ($in_block) { $is_comment = 1; $in_block = 0 if $trim =~ m{\*/}; }
+      elsif ($trim =~ m{^//}) { $is_comment = 1; }
+      elsif ($trim =~ m{^/\*}) { $is_comment = 1; $in_block = 1 unless $trim =~ m{\*/}; }
+    } else {
+      $is_comment = 1 if $trim =~ /^#/;
+    }
+    if (!$is_comment) {
+      if ($line =~ $re) {
+        print "$path:" . ($i + 1) . ": $line\n";
+      } elsif ($line =~ $bare_re && $prev_trim =~ /(?<!\|)\|$/) {
+        print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
+      }
+    }
+    $prev_trim = $trim if $trim ne "";
+  }
+}
+use File::Find;
+find(sub {
+  return unless -f $_;
+  return unless /\.(sh|mjs|yml)$/;
+  scan_file($File::Find::name);
+}, "scripts", ".github/workflows");
+')
+if [ -z "$GREPQ_HITS" ]; then
+  ok "L-077: no piped quiet grep under scripts/ or .github/workflows (line-continuation and .mjs-block-comment aware, no self-exclusion)"
 else
-  bad "L-077: piped quiet grep found: $(printf '%s\n' "$grepq_hits" | head -3 | tr '\n' ' ')"
+  bad "L-077: piped quiet grep found: $(printf '%s\n' "$GREPQ_HITS" | head -3 | tr '\n' ' ')"
 fi
-# mutation: every quiet form must be caught on its own, and the non-pipe `||`
-# form must not be, or the sensor is decoration. (semicolon-separated so this
-# line is not itself a piped quiet grep)
-grepq_mut=$(mktemp -d "${TMPDIR:-/tmp}/grepq-mut.XXXXXX")
-mkdir -p "$grepq_mut/scripts/tests" "$grepq_mut/.github/workflows"
-grepq_forms='grep -q x;grep -qiF -- x;grep -F -q x;grep -E -q x;grep -F --quiet x;grep -i --silent x;grep -Eq x;grep --binary-files=text -q x;grep --color=never -F -q x'
-grepq_missed=""
-_old_ifs=$IFS; IFS=';'
-for _form in $grepq_forms; do
-  printf 'echo x %s %s\n' '|' "$_form" > "$grepq_mut/scripts/tests/planted.sh"
-  (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts .github/workflows --include='*.sh' --include='*.mjs' --include='*.yml' >/dev/null 2>&1) || grepq_missed="$grepq_missed [$_form]"
-done
-IFS=$_old_ifs
-rm -f "$grepq_mut/scripts/tests/planted.sh"
-printf 'run: echo x %s grep -q x\n' '|' > "$grepq_mut/.github/workflows/planted.yml"
-(cd "$grepq_mut" && grep -rnE "$grepq_re" scripts .github/workflows --include='*.sh' --include='*.mjs' --include='*.yml' >/dev/null 2>&1) || grepq_missed="$grepq_missed [workflow yml]"
-rm -f "$grepq_mut/.github/workflows/planted.yml"
-printf 'cmd %s grep -q x file\n' '||' > "$grepq_mut/scripts/tests/planted.sh"
-if (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts .github/workflows --include='*.sh' >/dev/null 2>&1); then grepq_missed="$grepq_missed [false-positive on ||]"; fi
-if [ -z "$grepq_missed" ]; then
-  ok "L-077 mutation: every planted quiet-grep form is caught (incl. workflow yml, long-option-before-q); || is not a pipe"
+# mutation: every quiet form (same-line, continuation, and mjs-block-comment
+# suppression) must be caught or correctly ignored, or the sensor is decoration.
+GREPQ_MUT=$(mktemp -d "${TMPDIR:-/tmp}/grepq-mut.XXXXXX")
+mkdir -p "$GREPQ_MUT/scripts/tests" "$GREPQ_MUT/.github/workflows"
+grepq_scan() {
+  ( cd "$GREPQ_MUT" && perl -e '
+use strict; use warnings;
+my $re      = qr/(?:^|[^|])\|[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
+my $bare_re = qr/^[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
+sub scan_file {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return;
+  my @lines = <$fh>; close $fh;
+  my $is_mjs = $path =~ /\.mjs$/;
+  my $in_block = 0;
+  my $prev_trim = "";
+  for my $i (0 .. $#lines) {
+    chomp(my $line = $lines[$i]);
+    (my $trim = $line) =~ s/^\s+//;
+    my $is_comment = 0;
+    if ($is_mjs) {
+      if ($in_block) { $is_comment = 1; $in_block = 0 if $trim =~ m{\*/}; }
+      elsif ($trim =~ m{^//}) { $is_comment = 1; }
+      elsif ($trim =~ m{^/\*}) { $is_comment = 1; $in_block = 1 unless $trim =~ m{\*/}; }
+    } else {
+      $is_comment = 1 if $trim =~ /^#/;
+    }
+    if (!$is_comment) {
+      if ($line =~ $re) { print "$path:" . ($i + 1) . ": $line\n"; }
+      elsif ($line =~ $bare_re && $prev_trim =~ /(?<!\|)\|$/) { print "$path:" . ($i + 1) . ": $line\n"; }
+    }
+    $prev_trim = $trim if $trim ne "";
+  }
+}
+use File::Find;
+find(sub { return unless -f $_; return unless /\.(sh|mjs|yml)$/; scan_file($File::Find::name); }, "scripts", ".github/workflows");
+' )
+}
+GREPQ_MISSED=""
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'seq 1 3 %s\n  %s -q 1\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [continuation-pipe]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf '%s -q x file\n' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: unpiped grep -q on a file]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'x || %s -q y file\n' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: ||]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf '# echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: sh comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf '/*\necho x %s %s -q y\n*/\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: mjs block comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs executable line missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'echo x %s %s -F -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [split-cluster -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'echo x %s %s --binary-files=text -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [long-option-before-q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'run: echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [workflow yml missed]"
+rm -rf "$GREPQ_MUT"
+if [ -z "$GREPQ_MISSED" ]; then
+  ok "L-077 mutation: every planted form caught or correctly ignored (continuation, comments incl. mjs blocks, ||, split clusters, long options, yml)"
 else
-  bad "L-077 mutation: sensor defect:$grepq_missed"
+  bad "L-077 mutation: sensor defect:$GREPQ_MISSED"
 fi
-rm -rf "$grepq_mut"
 
 echo "ci-conventions wall: ${SECONDS}s"
 echo "ci-conventions.test.sh: $PASS passed, $FAIL failed"
