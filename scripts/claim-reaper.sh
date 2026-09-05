@@ -543,8 +543,8 @@ fetch_remote_ledger_ref() {
   if ! ls_out=$(git ls-remote --heads origin refs/heads/main refs/heads/master 2>&1); then
     return 1
   fi
-  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/main$' && main_present=1
-  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/master$' && master_present=1
+  printf '%s\n' "$ls_out" | grep -E $'[\t ]refs/heads/main$' >/dev/null && main_present=1
+  printf '%s\n' "$ls_out" | grep -E $'[\t ]refs/heads/master$' >/dev/null && master_present=1
   if [[ "$main_present" -eq 1 ]]; then
     base=main
   elif [[ "$master_present" -eq 1 ]]; then
@@ -1233,7 +1233,7 @@ comment_already_posted() {
   body=$(gh api "repos/${repo}/issues/${issue}/comments" --paginate -q '.[].body' 2>/dev/null || true)
   # Fail closed if we cannot query: treat as "unknown" by returning 2 via caller.
   # Here: empty body from API failure vs no comments — use a side channel.
-  printf '%s' "$body" | grep -qF -- "$marker"
+  printf '%s' "$body" | grep -F -- "$marker" >/dev/null
 }
 
 # Post handoff comment. Never include absolute worktree paths.
@@ -1270,7 +1270,7 @@ EOF
     warn "could not list comments on $repo#$issue — refusing comment post (fail closed)"
     return 1
   fi
-  if printf '%s' "$existing" | grep -qF -- "$marker"; then
+  if printf '%s' "$existing" | grep -F -- "$marker" >/dev/null; then
     info "handoff comment already present for $id — skipping post"
     return 0
   fi
@@ -1394,8 +1394,8 @@ journal_has_claim_released_handoff_failed() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
       *" INCOMPLETE op=reap:${id}:"*)
-        if printf '%s' "$line" | grep -qF 'reason=handoff_comment_failed' \
-          && printf '%s' "$line" | grep -qE '(^|[[:space:]])claim_released=1([[:space:]]|$)'; then
+        if printf '%s' "$line" | grep -F 'reason=handoff_comment_failed' >/dev/null \
+          && printf '%s' "$line" | grep -E '(^|[[:space:]])claim_released=1([[:space:]]|$)' >/dev/null; then
           return 0
         fi
         ;;
@@ -1559,7 +1559,7 @@ if [[ "$HAS_ACTIVE" -eq 1 ]]; then
     [[ -n "$cid" ]] || continue
     [[ "$cid" == "claim-id" || "$cid" == "---" ]] && continue
     [[ "$cid" =~ ^-+$ ]] && continue
-    echo "$cid" | grep -qE '^issue-' || continue
+    echo "$cid" | grep -E '^issue-' >/dev/null || continue
     if ! valid_claim_id "$cid"; then
       printf 'REFUSE\t%s\t\t\t\t\tmalformed_claim_id\tdocs/active-work.md\t\t\n' \
         "$cid" >> "$IDENTITY_REFUSE_TMP"
@@ -1926,7 +1926,7 @@ while IFS= read -r row || [[ -n "$row" ]]; do
   # migrated/dual representation could be reaped through the ledger after
   # the open-PR loop already decided the live claim is protected.
   if [[ -n "$OPEN_PR_PROTECTED_IDS" ]] &&
-     printf '%s\n' "$OPEN_PR_PROTECTED_IDS" | grep -qxF -- "$id"; then
+     printf '%s\n' "$OPEN_PR_PROTECTED_IDS" | grep -xF -- "$id" >/dev/null; then
     plan_row KEEP open_pr_body "$last_active" "$age" "${wt_path:-}" >> "$PLAN_TMP"
     continue
   fi

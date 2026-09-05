@@ -162,7 +162,7 @@ claims_status_calls_live() { # claims_status_calls_live <table-line>
   echo "$id" | grep -E '^issue-' >/dev/null
 }
 
-if grep -q "grep -qE '\^issue-'" "$CLAIMS_STATUS"; then
+if grep -q "grep -E '\^issue-' >/dev/null" "$CLAIMS_STATUS"; then
   ok "claims-status.sh still selects legacy rows on the ^issue- prefix"
 else
   bad "claims-status.sh no longer uses the ^issue- prefix — realign CLAIM_ID in the sensor"

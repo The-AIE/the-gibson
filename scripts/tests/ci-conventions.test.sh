@@ -2375,47 +2375,764 @@ else
 fi
 
 echo
-# --- #332: no piped grep with -q under scripts/tests (grep-q-pipefail-undercounts)
+# --- #332 / L-077: no piped quiet grep anywhere under scripts/ or .github/workflows
 # A quiet grep exits at the first match. A producer still writing then takes
 # SIGPIPE, and under pipefail the pipeline is 141, so an if-test on that
-# pipeline silently goes false (pr-claims.test.sh on main at a6afb5f). A
-# consuming grep (stdout to /dev/null) has the same exit semantics and cannot
-# lose that race. This is part 1 of the lesson grep-q-pipefail-undercounts; it is
-# deliberately NOT pinned to that lesson ID until part 2 (scripts/, workflows)
-# lands and the lesson can honestly read fixed. Scope is scripts/tests. The
-# allowlist holds only files under a live claim when this landed (#301, #325);
-# the follow-up on #332 empties it and widens the scope.
-# The regex sees -q in ANY option cluster (`grep -F -q`), plus --quiet/--silent,
-# and `||` is not a pipe.
-grepq_re='(^|[^|])\|[[:space:]]*grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*q|--quiet|--silent)'
-grepq_allow='scripts/tests/contract-authority\.test\.sh|scripts/tests/pr-review-evidence\.test\.sh'
-grepq_hits=$(grep -rnE "$grepq_re" scripts/tests --include='*.sh' 2>/dev/null | grep -vE "^($grepq_allow):" || true)
-if [ -z "$grepq_hits" ]; then
-  ok "#332: no piped quiet grep under scripts/tests (allowlist: 2 files under live claims)"
+# pipeline silently goes false (pr-claims.test.sh on main at a6afb5f; the
+# git-configure.sh label-cache check on main at cdf72ff). A consuming grep
+# (stdout to /dev/null) has the same exit semantics and cannot lose that race.
+# Part 1 (#334) covered scripts/tests; this is part 2: every .sh/.mjs/.yml under
+# scripts/ and .github/workflows, allowlist EMPTY. Pins L-077
+# (grep-q-pipefail-undercounts).
+#
+# A line-oriented grep regex cannot see: a `|` at the END of one line with
+# `grep -q` alone on the next (Codex round 1 on #339: `seq 1 N |\n  grep -q x`
+# is a reachable false green); .mjs block comments (`/* ... */` spanning
+# lines with no per-line `*`); or an over-broad self-exclusion that hides a
+# real violation merely because its variable name happened to start the same
+# way the sensor's own source does. The perl scanner below tracks per-line
+# comment state per file type and the previous line's trailing pipe instead
+# of a single-pass grep pipeline; it does not exclude anything by name — the
+# sensor's own source was verified empirically to not self-trigger.
+GREPQ_HITS=$(perl -e '
+use strict; use warnings;
+
+my %ARG1_SHORT = map { $_ => 1 } qw(e f m A B C D d);
+my %ARG1_LONG  = map { $_ => 1 } qw(regexp file max-count after-context before-context context devices directories label exclude exclude-from exclude-dir include binary-files);
+my %ARG0_LONG  = map { $_ => 1 } qw(ignore-case extended-regexp fixed-strings basic-regexp perl-regexp word-regexp line-regexp invert-match count files-with-matches files-without-match line-number with-filename no-filename only-matching no-messages text recursive dereference-recursive quiet silent);
+
+sub words {
+  my ($line) = @_;
+  my @w; my $cur = ""; my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { if ($c eq chr(39)) { $in_s = 0; } else { $cur .= $c; } $i++; next; }
+    if ($in_d) {
+      if ($c eq chr(34)) { $in_d = 0; $i++; next; }
+      if ($c eq chr(92) && $i + 1 < $n) { $cur .= substr($line, $i, 2); $i += 2; next; }
+      $cur .= $c; $i++; next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+    if ($c =~ /\s/) { push @w, $cur if $cur ne ""; $cur = ""; $i++; next; }
+    $cur .= $c; $i++;
+  }
+  push @w, $cur if $cur ne "";
+  return @w;
+}
+
+# GNU grep permutes options past positional arguments by default, so a
+# quiet flag can legally appear after the pattern/file words too; this
+# walker never stops at a positional word, it just skips over it. It also
+# tolerates leading NAME=value environment assignments before the command
+# name (handled by the caller, not here).
+sub grep_is_quiet {
+  my (@w) = @_;
+  my $i = 1; # element 0 is the literal word "grep"/"egrep"
+  while ($i < @w) {
+    my $w = $w[$i];
+    if ($w eq "--") { $i += 1; last; }
+    if ($w =~ /^--/) {
+      my ($name, $eq) = $w =~ /^--([a-z-]+)(=.*)?$/;
+      $name //= "";
+      if ($name eq "quiet" || $name eq "silent") { return 1; }
+      if ($ARG1_LONG{$name}) { $i += ($eq ? 1 : 2); next; }
+      if ($ARG0_LONG{$name}) { $i += 1; next; }
+      $i += 1; next;
+    }
+    if ($w =~ /^-(.+)$/) {
+      my $body = $1;
+      # Walk the bundled short letters one at a time: the first
+      # value-consuming letter absorbs everything after it in this same
+      # word (its attached value), or the next word if nothing follows;
+      # zero-arg letters bundle freely and q may appear among them.
+      my @chars = split //, $body;
+      my $j = 0;
+      while ($j < @chars) {
+        my $ch = $chars[$j];
+        if ($ARG1_SHORT{$ch}) {
+          my $has_attached = ($j < $#chars);
+          $i += ($has_attached ? 1 : 2);
+          last;
+        }
+        return 1 if $ch eq "q";
+        $j++;
+      }
+      $i += 1 if $j >= @chars; # word was all zero-arg letters, none consumed above
+      next;
+    }
+    $i += 1; next; # a positional word (pattern/file): skip it, keep scanning (permuted options)
+  }
+  return 0;
+}
+
+sub pipe_segments {
+  my ($line) = @_;
+  my @segs; my $cur = ""; my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { $cur .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+    if ($in_d) {
+      if ($c eq chr(92) && $i + 1 < $n) { $cur .= substr($line, $i, 2); $i += 2; next; }
+      $cur .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $cur .= $c; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $cur .= $c; $i++; next; }
+    if ($c eq chr(92) && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= substr($line, $i, 2); $i += 2; next; }
+    if ($c eq "|") {
+      if ($i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= "||"; $i += 2; next; }
+      push @segs, $cur; $cur = "";
+      # |& (bash: pipe stdout+stderr) is still one pipe boundary; skip the &
+      # too so the next segment does not start with a stray & character.
+      $i += ($i + 1 < $n && substr($line, $i + 1, 1) eq "&") ? 2 : 1;
+      next;
+    }
+    $cur .= $c; $i++;
+  }
+  push @segs, $cur;
+  return @segs;
+}
+
+# Only the command immediately after a pipe receives that pipe stdin; a
+# later command joined by &&, ||, or ; on the same segment is a separate,
+# unpiped invocation and is out of scope for THIS check (it has no SIGPIPE
+# exposure since nothing feeds it via a pipe). Truncate at the first such
+# unquoted boundary before scanning for a quiet grep.
+sub truncate_at_command_separator {
+  my ($line) = @_;
+  my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { $i++; $in_s = 0 if $c eq chr(39); next; }
+    if ($in_d) {
+      if ($c eq chr(92) && $i + 1 < $n) { $i += 2; next; }
+      $i++; $in_d = 0 if $c eq chr(34); next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+    if ($c eq ";") { return substr($line, 0, $i); }
+    if ($c eq "&") {
+      # Two shapes of redirect involve &, neither a command separator:
+      # [n]>&word / [n]<&word (fd duplicate: & sits directly after > or
+      # <; any leading fd digit comes BEFORE that operator, not between
+      # it and &, so no digit look-back is needed here) and &>word /
+      # &>>word (both-streams redirect: & sits directly before >). Only
+      # a bare & matching neither shape is background/and-list.
+      my $prev = $i > 0 ? substr($line, $i - 1, 1) : "";
+      my $next = $i + 1 < $n ? substr($line, $i + 1, 1) : "";
+      if ($prev eq ">" || $prev eq "<" || $next eq ">") { $i++; next; }
+      return substr($line, 0, $i);
+    }
+    if ($c eq "|" && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") {
+      return substr($line, 0, $i);
+    }
+    $i++;
+  }
+  return $line;
+}
+
+# A command word optionally preceded by one or more NAME=value environment
+# assignments (e.g. "LC_ALL=C grep -q x").
+sub segment_is_quiet_grep {
+  my ($seg) = @_;
+  $seg = truncate_at_command_separator($seg);
+  my @w = words($seg);
+  my $start = 0;
+  while ($start < @w && $w[$start] =~ /^[A-Za-z_][A-Za-z0-9_]*=/) { $start++; }
+  return 0 unless $start < @w;
+  return 0 unless $w[$start] eq "grep" || $w[$start] eq "egrep";
+  return grep_is_quiet(@w[$start .. $#w]);
+}
+
+my $yaml_block_scalar_re = qr/^[\w.\-]+:\s*[|>][+\-0-9]*\s*$/;
+
+sub mjs_code_lines {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return ();
+  my @raw = <$fh>; close $fh;
+  my @out;
+  my $in_block = 0; my $in_s = 0; my $in_d = 0; my $in_t = 0;
+  for my $line (@raw) {
+    chomp $line;
+    my $code = "";
+    my $i = 0; my $n = length($line);
+    while ($i < $n) {
+      if ($in_block) {
+        my $close = index($line, "*/", $i);
+        if ($close == -1) { $i = $n; last; }
+        $i = $close + 2; $in_block = 0; next;
+      }
+      my $c = substr($line, $i, 1);
+      if ($in_s) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_s = 0 if $c eq chr(39); next if $c eq chr(39);
+        $code .= $c; next;
+      }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_d = 0 if $c eq chr(34); next if $c eq chr(34);
+        $code .= $c; next;
+      }
+      if ($in_t) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_t = 0 if $c eq chr(96); next if $c eq chr(96);
+        $code .= $c; next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+      if ($c eq chr(96)) { $in_t = 1; $i++; next; }
+      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "/") { last; }
+      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "*") {
+        my $close = index($line, "*/", $i + 2);
+        if ($close == -1) { $in_block = 1; $i = $n; last; }
+        $i = $close + 2; next;
+      }
+      $code .= $c; $i++;
+    }
+    push @out, $code;
+  }
+  return @out;
+}
+
+# NOTE: this does not evaluate JavaScript. A shell command assembled by
+# runtime concatenation, e.g. execSync("yes x | " + "grep -q x") or a
+# template interpolation whose substituted expression itself contains
+# the pipe/grep text, is invisible here: each string/template literal is
+# scanned as its own independent unit, never joined across a + or ${...}
+# boundary. Doing that would require partially evaluating JavaScript
+# expressions, a different order of problem than this text-level ratchet
+# takes on. Documented limitation, not a silent gap.
+sub sh_code_lines {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return ();
+  my @raw = <$fh>; close $fh;
+  my @out;
+  for my $line (@raw) {
+    chomp $line;
+    my $code = "";
+    my $i = 0; my $n = length($line);
+    my $in_s = 0; my $in_d = 0;
+    while ($i < $n) {
+      my $c = substr($line, $i, 1);
+      if ($in_s) { $code .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i, 2); $i += 2; next; }
+        $code .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $code .= $c; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $code .= $c; $i++; next; }
+      # A shell comment starts at a # that is the first character of a
+      # word (start of line, or preceded by whitespace) — not e.g. the #
+      # in a parameter expansion (${value#prefix}) or a bare word
+      # (foo#bar).
+      if ($c eq "#" && ($i == 0 || substr($line, $i - 1, 1) =~ /\s/)) { last; }
+      $code .= $c; $i++;
+    }
+    push @out, $code;
+  }
+  return @out;
+}
+
+sub scan_file {
+  my ($path) = @_;
+  my $is_mjs = $path =~ /\.mjs$/;
+  my @lines = $is_mjs ? mjs_code_lines($path) : sh_code_lines($path);
+  my $prev_trim = "";
+  for my $i (0 .. $#lines) {
+    my $line = $lines[$i];
+    (my $trim = $line) =~ s/^\s+//;
+    my @segs = pipe_segments($line);
+    my $hit = 0;
+    for my $s (1 .. $#segs) {
+      if (segment_is_quiet_grep($segs[$s])) { $hit = 1; last; }
+    }
+    if ($hit) {
+      print "$path:" . ($i + 1) . ": $line\n";
+      $prev_trim = $trim if $trim ne "";
+      next;
+    }
+    if (@segs == 1
+        && $prev_trim =~ /(?<!\|)\|$/
+        && $prev_trim !~ $yaml_block_scalar_re
+        && segment_is_quiet_grep($segs[0])) {
+      print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
+    }
+    $prev_trim = $trim if $trim ne "";
+  }
+}
+
+# Known, deliberate limitations (accepted tradeoffs, not silent gaps):
+#  - A .sh/.yml comment is recognized only when # starts at column 0 or is
+#    preceded by whitespace, not after every command-separator (e.g. a
+#    literal ";#comment" is not recognized as a comment start).
+#  - A pipeline or option list continued onto the next physical line via a
+#    trailing backslash (not a bare trailing |) is not tracked; only the
+#    "ends in a literal |" continuation form is.
+#  - Escape handling inside an unquoted grep pattern/argument (e.g. a
+#    backslash-escaped semicolon or quote character within the pattern
+#    itself, as opposed to shell-level quoting) is not modeled.
+#  - A grep wrapped in a compound command or another command (a brace
+#    group, a subshell, a case/esac arm, `command grep`, `env … grep`) is
+#    not recognized as still receiving the pipelines stdin.
+#  - Heredoc bodies and other here-document-style data are scanned as
+#    ordinary lines, so example shell text inside a heredoc can read as a
+#    real violation.
+#  - A .mjs shell command assembled by runtime string concatenation or
+#    template interpolation (execSync("a | " + "grep -q b")) is invisible;
+#    catching it would require partially evaluating JavaScript.
+# Each of these was reproduced adversarially during review and judged out
+# of scope for a text-level ratchet: none currently exists anywhere in this
+# repository (confirmed by the full-tree scan this PR ran clean against),
+# and closing them fully would mean writing most of a real bash/JS parser.
+
+use File::Find;
+find(sub {
+  return unless -f $_;
+  return unless /\.(sh|mjs|yml)$/;
+  scan_file($File::Find::name);
+}, "scripts", ".github/workflows");
+')
+if [ -z "$GREPQ_HITS" ]; then
+  ok "L-077: no piped quiet grep under scripts/ or .github/workflows (line-continuation and .mjs-block-comment aware, no self-exclusion)"
 else
-  bad "#332: piped quiet grep under scripts/tests: $(printf '%s\n' "$grepq_hits" | head -3 | tr '\n' ' ')"
+  bad "L-077: piped quiet grep found: $(printf '%s\n' "$GREPQ_HITS" | head -3 | tr '\n' ' ')"
 fi
-# mutation: every quiet form must be caught on its own, and the non-pipe `||`
-# form must not be, or the sensor is decoration.
-grepq_mut=$(mktemp -d "${TMPDIR:-/tmp}/grepq-mut.XXXXXX")
-mkdir -p "$grepq_mut/scripts/tests"
-# (semicolon-separated so this line is not itself a piped quiet grep)
-grepq_forms='grep -q x;grep -qiF -- x;grep -F -q x;grep -E -q x;grep -F --quiet x;grep -i --silent x;grep -Eq x'
-grepq_missed=""
-_old_ifs=$IFS; IFS=';'
-for _form in $grepq_forms; do
-  printf 'echo x %s %s\n' '|' "$_form" > "$grepq_mut/scripts/tests/planted.sh"
-  (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1) || grepq_missed="$grepq_missed [$_form]"
-done
-IFS=$_old_ifs
-printf 'cmd %s grep -q x file\n' '||' > "$grepq_mut/scripts/tests/planted.sh"
-if (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1); then grepq_missed="$grepq_missed [false-positive on ||]"; fi
-if [ -z "$grepq_missed" ]; then
-  ok "#332 mutation: every planted quiet-grep form is caught; || is not a pipe"
+# mutation: every quiet form (same-line, continuation, and mjs-block-comment
+# suppression) must be caught or correctly ignored, or the sensor is decoration.
+GREPQ_MUT=$(mktemp -d "${TMPDIR:-/tmp}/grepq-mut.XXXXXX")
+mkdir -p "$GREPQ_MUT/scripts/tests" "$GREPQ_MUT/.github/workflows"
+grepq_scan() {
+  ( cd "$GREPQ_MUT" && perl -e '
+use strict; use warnings;
+
+my %ARG1_SHORT = map { $_ => 1 } qw(e f m A B C D d);
+my %ARG1_LONG  = map { $_ => 1 } qw(regexp file max-count after-context before-context context devices directories label exclude exclude-from exclude-dir include binary-files);
+my %ARG0_LONG  = map { $_ => 1 } qw(ignore-case extended-regexp fixed-strings basic-regexp perl-regexp word-regexp line-regexp invert-match count files-with-matches files-without-match line-number with-filename no-filename only-matching no-messages text recursive dereference-recursive quiet silent);
+
+sub words {
+  my ($line) = @_;
+  my @w; my $cur = ""; my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { if ($c eq chr(39)) { $in_s = 0; } else { $cur .= $c; } $i++; next; }
+    if ($in_d) {
+      if ($c eq chr(34)) { $in_d = 0; $i++; next; }
+      if ($c eq chr(92) && $i + 1 < $n) { $cur .= substr($line, $i, 2); $i += 2; next; }
+      $cur .= $c; $i++; next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+    if ($c =~ /\s/) { push @w, $cur if $cur ne ""; $cur = ""; $i++; next; }
+    $cur .= $c; $i++;
+  }
+  push @w, $cur if $cur ne "";
+  return @w;
+}
+
+# GNU grep permutes options past positional arguments by default, so a
+# quiet flag can legally appear after the pattern/file words too; this
+# walker never stops at a positional word, it just skips over it. It also
+# tolerates leading NAME=value environment assignments before the command
+# name (handled by the caller, not here).
+sub grep_is_quiet {
+  my (@w) = @_;
+  my $i = 1; # element 0 is the literal word "grep"/"egrep"
+  while ($i < @w) {
+    my $w = $w[$i];
+    if ($w eq "--") { $i += 1; last; }
+    if ($w =~ /^--/) {
+      my ($name, $eq) = $w =~ /^--([a-z-]+)(=.*)?$/;
+      $name //= "";
+      if ($name eq "quiet" || $name eq "silent") { return 1; }
+      if ($ARG1_LONG{$name}) { $i += ($eq ? 1 : 2); next; }
+      if ($ARG0_LONG{$name}) { $i += 1; next; }
+      $i += 1; next;
+    }
+    if ($w =~ /^-(.+)$/) {
+      my $body = $1;
+      # Walk the bundled short letters one at a time: the first
+      # value-consuming letter absorbs everything after it in this same
+      # word (its attached value), or the next word if nothing follows;
+      # zero-arg letters bundle freely and q may appear among them.
+      my @chars = split //, $body;
+      my $j = 0;
+      while ($j < @chars) {
+        my $ch = $chars[$j];
+        if ($ARG1_SHORT{$ch}) {
+          my $has_attached = ($j < $#chars);
+          $i += ($has_attached ? 1 : 2);
+          last;
+        }
+        return 1 if $ch eq "q";
+        $j++;
+      }
+      $i += 1 if $j >= @chars; # word was all zero-arg letters, none consumed above
+      next;
+    }
+    $i += 1; next; # a positional word (pattern/file): skip it, keep scanning (permuted options)
+  }
+  return 0;
+}
+
+sub pipe_segments {
+  my ($line) = @_;
+  my @segs; my $cur = ""; my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { $cur .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+    if ($in_d) {
+      if ($c eq chr(92) && $i + 1 < $n) { $cur .= substr($line, $i, 2); $i += 2; next; }
+      $cur .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $cur .= $c; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $cur .= $c; $i++; next; }
+    if ($c eq chr(92) && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= substr($line, $i, 2); $i += 2; next; }
+    if ($c eq "|") {
+      if ($i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= "||"; $i += 2; next; }
+      push @segs, $cur; $cur = "";
+      # |& (bash: pipe stdout+stderr) is still one pipe boundary; skip the &
+      # too so the next segment does not start with a stray & character.
+      $i += ($i + 1 < $n && substr($line, $i + 1, 1) eq "&") ? 2 : 1;
+      next;
+    }
+    $cur .= $c; $i++;
+  }
+  push @segs, $cur;
+  return @segs;
+}
+
+# Only the command immediately after a pipe receives that pipe stdin; a
+# later command joined by &&, ||, or ; on the same segment is a separate,
+# unpiped invocation and is out of scope for THIS check (it has no SIGPIPE
+# exposure since nothing feeds it via a pipe). Truncate at the first such
+# unquoted boundary before scanning for a quiet grep.
+sub truncate_at_command_separator {
+  my ($line) = @_;
+  my $i = 0; my $n = length($line);
+  my $in_s = 0; my $in_d = 0;
+  while ($i < $n) {
+    my $c = substr($line, $i, 1);
+    if ($in_s) { $i++; $in_s = 0 if $c eq chr(39); next; }
+    if ($in_d) {
+      if ($c eq chr(92) && $i + 1 < $n) { $i += 2; next; }
+      $i++; $in_d = 0 if $c eq chr(34); next;
+    }
+    if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+    if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+    if ($c eq ";") { return substr($line, 0, $i); }
+    if ($c eq "&") {
+      # Two shapes of redirect involve &, neither a command separator:
+      # [n]>&word / [n]<&word (fd duplicate: & sits directly after > or
+      # <; any leading fd digit comes BEFORE that operator, not between
+      # it and &, so no digit look-back is needed here) and &>word /
+      # &>>word (both-streams redirect: & sits directly before >). Only
+      # a bare & matching neither shape is background/and-list.
+      my $prev = $i > 0 ? substr($line, $i - 1, 1) : "";
+      my $next = $i + 1 < $n ? substr($line, $i + 1, 1) : "";
+      if ($prev eq ">" || $prev eq "<" || $next eq ">") { $i++; next; }
+      return substr($line, 0, $i);
+    }
+    if ($c eq "|" && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") {
+      return substr($line, 0, $i);
+    }
+    $i++;
+  }
+  return $line;
+}
+
+# A command word optionally preceded by one or more NAME=value environment
+# assignments (e.g. "LC_ALL=C grep -q x").
+sub segment_is_quiet_grep {
+  my ($seg) = @_;
+  $seg = truncate_at_command_separator($seg);
+  my @w = words($seg);
+  my $start = 0;
+  while ($start < @w && $w[$start] =~ /^[A-Za-z_][A-Za-z0-9_]*=/) { $start++; }
+  return 0 unless $start < @w;
+  return 0 unless $w[$start] eq "grep" || $w[$start] eq "egrep";
+  return grep_is_quiet(@w[$start .. $#w]);
+}
+
+my $yaml_block_scalar_re = qr/^[\w.\-]+:\s*[|>][+\-0-9]*\s*$/;
+
+sub mjs_code_lines {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return ();
+  my @raw = <$fh>; close $fh;
+  my @out;
+  my $in_block = 0; my $in_s = 0; my $in_d = 0; my $in_t = 0;
+  for my $line (@raw) {
+    chomp $line;
+    my $code = "";
+    my $i = 0; my $n = length($line);
+    while ($i < $n) {
+      if ($in_block) {
+        my $close = index($line, "*/", $i);
+        if ($close == -1) { $i = $n; last; }
+        $i = $close + 2; $in_block = 0; next;
+      }
+      my $c = substr($line, $i, 1);
+      if ($in_s) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_s = 0 if $c eq chr(39); next if $c eq chr(39);
+        $code .= $c; next;
+      }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_d = 0 if $c eq chr(34); next if $c eq chr(34);
+        $code .= $c; next;
+      }
+      if ($in_t) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i + 1, 1); $i += 2; next; }
+        $i++; $in_t = 0 if $c eq chr(96); next if $c eq chr(96);
+        $code .= $c; next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $i++; next; }
+      if ($c eq chr(96)) { $in_t = 1; $i++; next; }
+      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "/") { last; }
+      if ($c eq "/" && $i + 1 < $n && substr($line, $i + 1, 1) eq "*") {
+        my $close = index($line, "*/", $i + 2);
+        if ($close == -1) { $in_block = 1; $i = $n; last; }
+        $i = $close + 2; next;
+      }
+      $code .= $c; $i++;
+    }
+    push @out, $code;
+  }
+  return @out;
+}
+
+# NOTE: this does not evaluate JavaScript. A shell command assembled by
+# runtime concatenation, e.g. execSync("yes x | " + "grep -q x") or a
+# template interpolation whose substituted expression itself contains
+# the pipe/grep text, is invisible here: each string/template literal is
+# scanned as its own independent unit, never joined across a + or ${...}
+# boundary. Doing that would require partially evaluating JavaScript
+# expressions, a different order of problem than this text-level ratchet
+# takes on. Documented limitation, not a silent gap.
+sub sh_code_lines {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return ();
+  my @raw = <$fh>; close $fh;
+  my @out;
+  for my $line (@raw) {
+    chomp $line;
+    my $code = "";
+    my $i = 0; my $n = length($line);
+    my $in_s = 0; my $in_d = 0;
+    while ($i < $n) {
+      my $c = substr($line, $i, 1);
+      if ($in_s) { $code .= $c; $i++; $in_s = 0 if $c eq chr(39); next; }
+      if ($in_d) {
+        if ($c eq chr(92) && $i + 1 < $n) { $code .= substr($line, $i, 2); $i += 2; next; }
+        $code .= $c; $i++; $in_d = 0 if $c eq chr(34); next;
+      }
+      if ($c eq chr(39)) { $in_s = 1; $code .= $c; $i++; next; }
+      if ($c eq chr(34)) { $in_d = 1; $code .= $c; $i++; next; }
+      # A shell comment starts at a # that is the first character of a
+      # word (start of line, or preceded by whitespace) — not e.g. the #
+      # in a parameter expansion (${value#prefix}) or a bare word
+      # (foo#bar).
+      if ($c eq "#" && ($i == 0 || substr($line, $i - 1, 1) =~ /\s/)) { last; }
+      $code .= $c; $i++;
+    }
+    push @out, $code;
+  }
+  return @out;
+}
+
+sub scan_file {
+  my ($path) = @_;
+  my $is_mjs = $path =~ /\.mjs$/;
+  my @lines = $is_mjs ? mjs_code_lines($path) : sh_code_lines($path);
+  my $prev_trim = "";
+  for my $i (0 .. $#lines) {
+    my $line = $lines[$i];
+    (my $trim = $line) =~ s/^\s+//;
+    my @segs = pipe_segments($line);
+    my $hit = 0;
+    for my $s (1 .. $#segs) {
+      if (segment_is_quiet_grep($segs[$s])) { $hit = 1; last; }
+    }
+    if ($hit) {
+      print "$path:" . ($i + 1) . ": $line\n";
+      $prev_trim = $trim if $trim ne "";
+      next;
+    }
+    if (@segs == 1
+        && $prev_trim =~ /(?<!\|)\|$/
+        && $prev_trim !~ $yaml_block_scalar_re
+        && segment_is_quiet_grep($segs[0])) {
+      print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
+    }
+    $prev_trim = $trim if $trim ne "";
+  }
+}
+
+# Known, deliberate limitations (accepted tradeoffs, not silent gaps):
+#  - A .sh/.yml comment is recognized only when # starts at column 0 or is
+#    preceded by whitespace, not after every command-separator (e.g. a
+#    literal ";#comment" is not recognized as a comment start).
+#  - A pipeline or option list continued onto the next physical line via a
+#    trailing backslash (not a bare trailing |) is not tracked; only the
+#    "ends in a literal |" continuation form is.
+#  - Escape handling inside an unquoted grep pattern/argument (e.g. a
+#    backslash-escaped semicolon or quote character within the pattern
+#    itself, as opposed to shell-level quoting) is not modeled.
+#  - A grep wrapped in a compound command or another command (a brace
+#    group, a subshell, a case/esac arm, `command grep`, `env … grep`) is
+#    not recognized as still receiving the pipelines stdin.
+#  - Heredoc bodies and other here-document-style data are scanned as
+#    ordinary lines, so example shell text inside a heredoc can read as a
+#    real violation.
+#  - A .mjs shell command assembled by runtime string concatenation or
+#    template interpolation (execSync("a | " + "grep -q b")) is invisible;
+#    catching it would require partially evaluating JavaScript.
+# Each of these was reproduced adversarially during review and judged out
+# of scope for a text-level ratchet: none currently exists anywhere in this
+# repository (confirmed by the full-tree scan this PR ran clean against),
+# and closing them fully would mean writing most of a real bash/JS parser.
+
+use File::Find;
+find(sub { return unless -f $_; return unless /\.(sh|mjs|yml)$/; scan_file($File::Find::name); }, "scripts", ".github/workflows");
+' )
+}
+GREPQ_MISSED=""
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'seq 1 3 %s\n  %s -q 1\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [continuation-pipe]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf '%s -q x file\n' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: unpiped grep -q on a file]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'x || %s -q y file\n' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: ||]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf '# echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: sh comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf '/*\necho x %s %s -q y\n*/\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: mjs block comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs executable line missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'echo x %s %s -F -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [split-cluster -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'echo x %s %s --binary-files=text -q y\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [long-option-before-q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep; printf 'run: echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [workflow yml missed]"
+: > "$GREPQ_MUT/.github/workflows/planted.yml"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf '/* note */ execSync("seq 1 3 %s %s -q 1");\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs same-line inline block comment before real code missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'const n = 1; /* echo x %s %s -q y */\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: mjs same-line trailing block comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'execSync("curl https://example.test/data %s %s -q ok");\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs string containing :// mistaken for a comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s %s -e x -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [split option-argument grep -e x -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'run: |\n  %s -q pattern file\n' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: yaml block-scalar header mistaken for a pipe continuation]"
+: > "$GREPQ_MUT/.github/workflows/planted.yml"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'yes x %s %s -m1 -q x\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [attached-digit short option grep -m1 -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s %s -v z %s %s -q x\n' '|' "$GQ" '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [second grep in a multi-segment pipeline missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'execSync("printf \\"https://example.test\\" %s %s -q ok")\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs escaped-quote string content missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+printf 'const t = `\nhttps://x %s\n  %s -q y\n`;\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs multiline template literal missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+printf 'echo ok # example: yes x %s %s -q x\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: sh trailing inline # comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'run: echo ok # example: yes x %s %s -q x\n' '|' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: yaml trailing inline # comment]"
+: > "$GREPQ_MUT/.github/workflows/planted.yml"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'yes ${value#prefix} %s %s -q x\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [unquoted-# parameter expansion mistaken for a comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes foo#bar %s %s -q foo\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [bare word containing # mistaken for a comment]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'printf %%s Usage: producer \\%s %s -q pattern\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: escaped literal pipe in usage text]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s LC_ALL=C %s -q x\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [env-var-prefixed grep -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'printf %%s keep %s %s -vequiet\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: -vequiet is -v -e quiet, no real q flag]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s %s pattern -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [permuted grep pattern -q missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf '[[ 1 -eq 1 ]] && echo x %s grep -i y >/dev/null && ! %s -q z file\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: unrelated later && grep -q reading a file, not the pipe target]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'printf x %s %s x >/dev/null & %s -q y file\n' '|' "$GQ" "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: unrelated backgrounded & grep -q reading a file, not the pipe target]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'yes x %s %s x 2>&1 -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [2>&1 redirect target mistaken for a command separator]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s%s %s -q x\n' '|' '&' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [|& combined stdout+stderr pipe missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'seq 1 3 %s %s 1 &>/dev/null -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [&>/dev/null redirect target mistaken for a command separator]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'producer %s %s x >2%s %s -q y file\n' '|' "$GQ" '&' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: >2 (redirect to a file named 2) then a real & separator misread as a redirect]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+rm -rf "$GREPQ_MUT"
+if [ -z "$GREPQ_MISSED" ]; then
+  ok "L-077 mutation: every planted form caught or correctly ignored (continuation, comments incl. mjs blocks, ||, split clusters, long options, yml)"
 else
-  bad "#332 mutation: sensor defect:$grepq_missed"
+  bad "L-077 mutation: sensor defect:$GREPQ_MISSED"
 fi
-rm -rf "$grepq_mut"
 
 echo "ci-conventions wall: ${SECONDS}s"
 echo "ci-conventions.test.sh: $PASS passed, $FAIL failed"

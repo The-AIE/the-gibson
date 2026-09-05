@@ -398,7 +398,7 @@ EOF
 # True when PR number $1 is still listed as open. Callers must have proven the
 # read itself succeeded via read_open_pr_numbers first.
 open_pr_number_present() {
-  printf '%s\n' "$OPEN_NUMBERS" | grep -qxF -- "$1"
+  printf '%s\n' "$OPEN_NUMBERS" | grep -xF -- "$1" >/dev/null
 }
 
 # Every live claim id: PR-body claims (authoritative) plus the legacy ledger
@@ -461,7 +461,7 @@ if [[ -z "$SAME_ISSUE" ]]; then
   read_issue_labels ||
     die "cannot read the labels on #$ISSUE from $REPO — refusing to claim on an unread label state: $LABEL_READ_ERR"
   EXISTING_LABELS="$ISSUE_LABELS"
-  if echo ",$EXISTING_LABELS," | grep -q ',agent-claimed,'; then
+  if echo ",$EXISTING_LABELS," | grep ',agent-claimed,' >/dev/null; then
     die "issue #$ISSUE carries agent-claimed but no claim file exists.
   Either a lane is mid-claim right now, or a previous release left the label behind.
   Check, then remove the stale label by hand before claiming."
@@ -471,7 +471,7 @@ if [[ -n "$SAME_ISSUE" && "$SLICE" -eq 1 ]]; then
   info "slice claim: #$ISSUE also held by $(echo "$SAME_ISSUE" | tr '\n' ' ')"
 fi
 
-if echo "$LIVE_IDS" | grep -qx "$CLAIM_ID"; then
+if echo "$LIVE_IDS" | grep -x "$CLAIM_ID" >/dev/null; then
   die "claim $CLAIM_ID already exists — pick another slug, or release it first"
 fi
 
@@ -864,7 +864,7 @@ EOF
     leftover "agent-claimed on #$ISSUE (kept: its current state could not be read — $LABEL_READ_ERR)"
     return 1
   fi
-  if ! echo ",$ISSUE_LABELS," | grep -q ',agent-claimed,'; then
+  if ! echo ",$ISSUE_LABELS," | grep ',agent-claimed,' >/dev/null; then
     info "rollback: agent-claimed is already absent from #$ISSUE — nothing to remove"
     return 0
   fi
@@ -877,7 +877,7 @@ EOF
     leftover "agent-claimed on #$ISSUE (removal could not be verified — $LABEL_READ_ERR)"
     return 1
   fi
-  if echo ",$ISSUE_LABELS," | grep -q ',agent-claimed,'; then
+  if echo ",$ISSUE_LABELS," | grep ',agent-claimed,' >/dev/null; then
     leftover "agent-claimed on #$ISSUE (still present after removal)"
     return 1
   fi
@@ -955,7 +955,7 @@ trap cleanup_claim EXIT
 # state cannot support either answer (#153 review P1 0C).
 read_issue_labels ||
   die "cannot read the labels on #$ISSUE from $REPO before adding agent-claimed — refusing to mutate on an unread label state: $LABEL_READ_ERR"
-if echo ",$ISSUE_LABELS," | grep -q ',agent-claimed,'; then
+if echo ",$ISSUE_LABELS," | grep ',agent-claimed,' >/dev/null; then
   LABEL_PRE_PRESENT=1
 fi
 

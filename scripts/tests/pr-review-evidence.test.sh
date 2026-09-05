@@ -196,12 +196,12 @@ node -e 'const c=require(process.argv[1]);c.identities.push({...c.identities[2]}
 rm -f "$d/commits.json";                           expect "missing fixture input (transport error)" "$d" api-error failure 1
 printf '#!/bin/sh\necho "stub: boom" >&2; exit 22\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
 OUT=$(PATH="$ROOT/bin:$PATH" node "$EVAL" --repo x/y --pr 1 --expected-head "$HEAD" 2>/dev/null); RC=$?
-printf '%s' "$OUT" | grep -q '"reason":"api-error"' && [ "$RC" -eq 1 ] && ok "gh api non-zero → api-error/failure" || bad "gh failure not api-error: rc=$RC $OUT"
+printf '%s' "$OUT" | grep '"reason":"api-error"' >/dev/null && [ "$RC" -eq 1 ] && ok "gh api non-zero → api-error/failure" || bad "gh failure not api-error: rc=$RC $OUT"
 printf '#!/bin/sh\necho "<html>not json"\n' > "$ROOT/bin/gh"; chmod +x "$ROOT/bin/gh"
 OUT=$(PATH="$ROOT/bin:$PATH" node "$EVAL" --repo x/y --pr 1 --expected-head "$HEAD" 2>/dev/null); RC=$?
-printf '%s' "$OUT" | grep -q '"reason":"api-error"' && [ "$RC" -eq 1 ] && ok "gh api non-JSON → api-error/failure" || bad "gh non-JSON not api-error: rc=$RC $OUT"
+printf '%s' "$OUT" | grep '"reason":"api-error"' >/dev/null && [ "$RC" -eq 1 ] && ok "gh api non-JSON → api-error/failure" || bad "gh non-JSON not api-error: rc=$RC $OUT"
 OUT=$(PATH="$ROOT/bin:$PATH" node "$EVAL" --repo x/y --sweep 2>/dev/null); RC=$?
-printf '%s' "$OUT" | grep -q '"reason":"api-error"' && [ "$RC" -eq 1 ] && ok "--sweep: open-PR listing failure → api-error line, exit 1" || bad "sweep listing failure: rc=$RC $OUT"
+printf '%s' "$OUT" | grep '"reason":"api-error"' >/dev/null && [ "$RC" -eq 1 ] && ok "--sweep: open-PR listing failure → api-error line, exit 1" || bad "sweep listing failure: rc=$RC $OUT"
 
 echo "# AC1 — workflow: sweep design (static + executed steps with gh stubbed)"
 [ -f "$WF" ] && ok "workflow file present" || bad "workflow missing"
@@ -214,10 +214,10 @@ grep -q -- '--sweep' "$WF" && ok "workflow runs the sweep" || bad "workflow does
 pend=$(grep -n 'name: Stamp pending on every open PR head' "$WF" | cut -d: -f1); swp=$(grep -n 'name: Evaluate every open PR' "$WF" | cut -d: -f1); pub=$(grep -n 'name: Publish every head' "$WF" | cut -d: -f1)
 [ -n "$pend" ] && [ -n "$swp" ] && [ "$pend" -lt "$swp" ] && ok "pending is stamped BEFORE the sweep" || bad "pending step not before sweep"
 [ -n "$pub" ] && [ "$swp" -lt "$pub" ] && ok "publish step after sweep" || bad "publish step order"
-sed -n "${pub},$((pub+2))p" "$WF" | grep -q 'if: always()' && ok "publish step itself runs on always()" || bad "publish step lacks always()"
-for step in "$pend" "$swp"; do sed -n "${step},$((step+8))p" "$WF" | grep -q 'continue-on-error: true' || bad "step at $step not continue-on-error"; done
-sed -n "${pend},${swp}p" "$WF" | grep -q '::notice::' && sed -n "${swp},${pub}p" "$WF" | grep -q '::notice::' && ok "both continue-on-error steps announce (3.5)" || bad "a continue-on-error step is silent"
-n_uses=$(grep -cE '^[[:space:]]*(- )?uses:' "$WF"); [ "$n_uses" -ge 2 ] && ! grep -E '^[[:space:]]*(- )?uses:' "$WF" | grep -vqE '@[0-9a-f]{40} # v' && ok "all $n_uses actions SHA-pinned" || bad "unpinned action or none found"
+sed -n "${pub},$((pub+2))p" "$WF" | grep 'if: always()' >/dev/null && ok "publish step itself runs on always()" || bad "publish step lacks always()"
+for step in "$pend" "$swp"; do sed -n "${step},$((step+8))p" "$WF" | grep 'continue-on-error: true' >/dev/null || bad "step at $step not continue-on-error"; done
+sed -n "${pend},${swp}p" "$WF" | grep '::notice::' >/dev/null && sed -n "${swp},${pub}p" "$WF" | grep '::notice::' >/dev/null && ok "both continue-on-error steps announce (3.5)" || bad "a continue-on-error step is silent"
+n_uses=$(grep -cE '^[[:space:]]*(- )?uses:' "$WF"); [ "$n_uses" -ge 2 ] && ! grep -E '^[[:space:]]*(- )?uses:' "$WF" | grep -vE '@[0-9a-f]{40} # v' >/dev/null && ok "all $n_uses actions SHA-pinned" || bad "unpinned action or none found"
 grep -qE 'git (log|fetch|checkout).*(head|HEAD)' "$WF" && bad "workflow touches PR git objects" || ok "no git log / PR checkout in workflow"
 grep -qE -- '--jq[[:space:]]+--arg' "$WF" && bad "gh api --jq given jq flags" || ok "no jq flags passed through gh api --jq"
 
@@ -273,11 +273,11 @@ GH_LIST="$(printf '1 %s\n' "$HEAD")" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA
 printf '1 %s\n3 %s\n' "$HEAD" "$H3" > "$WD/heads.txt"; printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_FP="$FP" envrun env EVENT_PR_NUMBER=3 EVENT_HEAD_SHA=$H3 CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && grep -q "^$H3 failure" "$ROOT/gh.log" && grep -q "^$HEAD success" "$ROOT/gh.log" && ok "publish: a stamped head with no sweep verdict is published failure (never left pending/stale)" || bad "unverdicted head: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
-awk '/^jobs:/{f=1} f && /^    if:/{print}' "$WF" | grep -q . && bad "job-level if: present (a skipped run still replaces the queued one)" || ok "no job-level if: — every event runs the sweep"
+awk '/^jobs:/{f=1} f && /^    if:/{print}' "$WF" | grep . >/dev/null && bad "job-level if: present (a skipped run still replaces the queued one)" || ok "no job-level if: — every event runs the sweep"
 # Codex round 6: trigger trust boundary, pending before any checkout, publish freshness re-check.
-awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -qE '^\s*pull_request_review' && bad "pull_request_review trigger present (runs the workflow file from the PR merge commit)" || ok "no pull_request-class trigger: workflow file always read from the default branch"
-awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -q 'schedule:' && ok "schedule sweep present (reviews are picked up without a review-event trigger)" || bad "no schedule trigger"
-first_step=$(awk '/^    steps:/{f=1;next} f && /^      - /{print; exit}' "$WF"); printf '%s' "$first_step" | grep -q 'Stamp pending' && ok "pending stamp is the FIRST step (before checkout/setup-node)" || bad "first step is not the pending stamp: $first_step"
+awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -E '^\s*pull_request_review' >/dev/null && bad "pull_request_review trigger present (runs the workflow file from the PR merge commit)" || ok "no pull_request-class trigger: workflow file always read from the default branch"
+awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep 'schedule:' >/dev/null && ok "schedule sweep present (reviews are picked up without a review-event trigger)" || bad "no schedule trigger"
+first_step=$(awk '/^    steps:/{f=1;next} f && /^      - /{print; exit}' "$WF"); printf '%s' "$first_step" | grep 'Stamp pending' >/dev/null && ok "pending stamp is the FIRST step (before checkout/setup-node)" || bad "first step is not the pending stamp: $first_step"
 # publish freshness: gh stub answers pulls/N with $GH_FP
 cat > "$ROOT/bin/gh" <<'GHSTUB'
 #!/bin/sh
@@ -301,8 +301,8 @@ printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","descriptio
 grep -q "^$HEAD pending" "$ROOT/gh.log" && ok "publish: success line without a fingerprint → pending" || bad "publish no-fp: log=$(tr '\n' ' ' < "$ROOT/gh.log")"
 # Codex round 7: status-churn cap. No workflow_dispatch; hourly schedule; scheduled runs stamp no pending
 # and write only on change; every status POST is checked and a failure makes the job red.
-awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -q 'workflow_dispatch' && bad "workflow_dispatch present (runs any branch's copy of this file with the status token)" || ok "no workflow_dispatch trigger"
-awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -qE 'cron: "[0-9]+ \* \* \* \*"' && ok "schedule is hourly, not every few minutes (1,000-status cap per SHA)" || bad "schedule cron is not hourly: $(grep -n cron "$WF")"
+awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep 'workflow_dispatch' >/dev/null && bad "workflow_dispatch present (runs any branch's copy of this file with the status token)" || ok "no workflow_dispatch trigger"
+awk '/^on:/{f=1} /^permissions:/{f=0} f' "$WF" | grep -E 'cron: "[0-9]+ \* \* \* \*"' >/dev/null && ok "schedule is hourly, not every few minutes (1,000-status cap per SHA)" || bad "schedule cron is not hourly: $(grep -n cron "$WF")"
 # gh stub v3: also answers commits/SHA/status with $GH_CUR ("state|desc") and fails POSTs when GH_POST_FAIL=1
 cat > "$ROOT/bin/gh" <<'GHSTUB'
 #!/bin/sh

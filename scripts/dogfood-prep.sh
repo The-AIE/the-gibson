@@ -193,7 +193,7 @@ fi
 if [[ -n "$RUNNER" ]]; then
   if out=$("$LOOP" --runner "$RUNNER" --repo "$REPO" --repo-slug "$SLUG" \
       --gibson "$GIBSON" --print-prompt --once 2>&1); then
-    if echo "$out" | grep -qiE 'hat|loop|AGENTS|builder|Law'; then
+    if echo "$out" | grep -iE 'hat|loop|AGENTS|builder|Law' >/dev/null; then
       ok "loop --print-prompt rendered a non-empty prompt"
     else
       warn "print-prompt returned but content looks thin"

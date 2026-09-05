@@ -1667,7 +1667,7 @@ the counter has no `grep -q` in its counting pipeline.
 Related: [[feedback_guards_must_prove_not_assert]] — a measurement tool that undercounts is the defect
 class it exists to measure.
 **Harness fix:** in any script with `pipefail`, never put `grep -q` (or `head -n`, `-m1`) at the end of a pipeline whose exit status matters. Use `hits=$(producer | grep -c PAT)` and test the number — `grep -c` reads all input, so the producer always finishes cleanly. The fleet tooling tests now assert the counter has no `grep -q` in its counting pipeline.
-**Status:** intake 2026-09-04 from fleet memory `feedback_grep_q_pipefail_undercounts.md` (no sensor yet)
+**Status:** fixed — scripts/tests/ci-conventions.test.sh L-077 check: no piped quiet grep under scripts/ or .github/workflows (allowlist empty), with a planted-violation mutation; sweep landed in #334 (tests) and the #332 part-2 PR (production scripts, workflows)
 **Tags:** #fleet #intake
 
 ## L-078 · 2026-09-04 · reattest-at-live-head
