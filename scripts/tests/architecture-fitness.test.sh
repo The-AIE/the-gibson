@@ -33,14 +33,14 @@ check() {
   fi
 }
 contains() {
-  if printf '%s' "$2" | grep -qF -- "$3"; then
+  if printf '%s' "$2" | grep -F -- "$3" >/dev/null; then
     ok "$1"
   else
     bad "$1 (missing '$3')"
   fi
 }
 lacks() {
-  if printf '%s' "$2" | grep -qF -- "$3"; then
+  if printf '%s' "$2" | grep -F -- "$3" >/dev/null; then
     bad "$1 (unexpected '$3')"
   else
     ok "$1"

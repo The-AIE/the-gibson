@@ -56,7 +56,7 @@ expect_rc() {
 }
 
 expect_no_receipt() {
-  if printf '%s\n' "$H_OUT" | grep -q 'GIBSON_BASH32_SYNTAX'; then
+  if printf '%s\n' "$H_OUT" | grep 'GIBSON_BASH32_SYNTAX' >/dev/null; then
     bad "$1 emitted a syntax receipt"
   else
     ok "$1 emitted no syntax receipt"
@@ -64,7 +64,7 @@ expect_no_receipt() {
 }
 
 expect_named() {
-  if printf '%s\n' "$H_ERR" | grep -Fq "$1"; then
+  if printf '%s\n' "$H_ERR" | grep -F "$1" >/dev/null; then
     ok "$2"
   else
     bad "$2 (missing path $1)"
@@ -72,7 +72,7 @@ expect_named() {
 }
 
 expect_not_named() {
-  if printf '%s\n' "$H_ERR" | grep -Fq "$1"; then
+  if printf '%s\n' "$H_ERR" | grep -F "$1" >/dev/null; then
     bad "$2 (unexpected path $1)"
   else
     ok "$2"
@@ -88,7 +88,7 @@ call_count() {
 }
 
 hex64() {
-  printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'
+  printf '%s' "$1" | grep -E '^[0-9a-f]{64}$' >/dev/null
 }
 
 paths_sha256() {
@@ -264,7 +264,7 @@ if [ "$(call_count)" -eq 0 ]; then
 else
   bad "T1 no arguments made $(call_count) parser calls"
 fi
-if printf '%s\n' "$H_ERR" | grep -q 'unbound var'; then
+if printf '%s\n' "$H_ERR" | grep 'unbound var' >/dev/null; then
   bad "T1 empty argv aborted under set -u"
 else
   ok "T1 empty argv is usage 2 without a set -u abort"
@@ -324,7 +324,7 @@ run_helper "$FAKE" "$VALID" "$BAD"
 expect_rc 1 "T3 valid then invalid exits 1"
 expect_named "$BAD" "T3 names the invalid second path"
 expect_not_named "$VALID" "T3 does not name the valid first path"
-if printf '%s\n' "$H_ERR" | grep -Fq "fake-parser: syntax error"; then
+if printf '%s\n' "$H_ERR" | grep -F "fake-parser: syntax error" >/dev/null; then
   ok "T3 preserves parser stderr"
 else
   bad "T3 dropped parser stderr"
@@ -440,7 +440,7 @@ else
 fi
 expect_named "$BAD" "T12 names the first failing path"
 expect_named "$BAD2" "T12 names the second failing path"
-if printf '%s\n' "$H_ERR" | grep -c -F "fake-parser: syntax error" | grep -qx 2; then
+if printf '%s\n' "$H_ERR" | grep -c -F "fake-parser: syntax error" | grep -x 2 >/dev/null; then
   ok "T12 preserves both parser stderr messages"
 else
   bad "T12 dropped a parser stderr message"
@@ -492,7 +492,7 @@ if grep -E 'bash[[:space:]]+scripts/tests/lib/bash32-syntax-each\.sh[[:space:]]+
 else
   bad "run-all.sh does not pass parser bash plus SH_FILES to the helper"
 fi
-if grep -nE 'docker run' "$RUN_ALL" | grep -q 'bash -n \$SH_FILES'; then
+if grep -nE 'docker run' "$RUN_ALL" | grep 'bash -n \$SH_FILES' >/dev/null; then
   bad "run-all.sh still batches bash -n \$SH_FILES inside docker"
 else
   ok "run-all.sh no longer batches bash -n \$SH_FILES inside docker"
@@ -853,7 +853,7 @@ printf '%s\n' "$BAD" > "$FAKE_FAILS"
 H_OUT=$(bash "$M7" "$FAKE" "$VALID" "$BAD" 2>"$ROOT/h.err")
 H_RC=$?
 H_ERR=$(cat "$ROOT/h.err")
-if printf '%s\n' "$H_ERR" | grep -Fq "$BAD"; then
+if printf '%s\n' "$H_ERR" | grep -F "$BAD" >/dev/null; then
   note_survive "M7 survived T3 (failed path still named)"
 else
   note_kill "M7 killed T3 (failed path omitted from stderr)"
@@ -1132,7 +1132,7 @@ assert_fwd_pass() {
 assert_fwd_fail() {
   _label=$1
   _hits=0
-  if printf '%s\n' "$FWD_OUT" | grep -q 'GIBSON_BASH32_BENCH'; then
+  if printf '%s\n' "$FWD_OUT" | grep 'GIBSON_BASH32_BENCH' >/dev/null; then
     _hits=1
   fi
   if [ "$FWD_RC" -ne 0 ] && [ -z "$FWD_OUT" ] && [ "$_hits" -eq 0 ]; then
@@ -1151,7 +1151,7 @@ if [ "$(printf '%s\n' "$FWD_OUT" | wc -l | tr -d ' ')" -eq 1 ]; then
 else
   bad "seam valid-one line count drifted"
 fi
-if printf '%s\n' "$FWD_OUT" | grep -q 'ok   —'; then
+if printf '%s\n' "$FWD_OUT" | grep 'ok   —' >/dev/null; then
   bad "seam valid-one leaked assertion chatter"
 else
   ok "seam valid-one does not expose assertion chatter"
@@ -1212,7 +1212,7 @@ fi
 SEAM_NEG="GIBSON_BASH32_BENCH schema=gibson.bash32-bench/v1 samples=3 baseline_median_ms=${SEAM_NEG_BASE} candidate_median_ms=${SEAM_NEG_CAND} delta_ms=${SEAM_NEG_DELTA} paths_sha256=${SEAM_HASH} status=pass"
 run_fwd 0 "$SEAM_HASH" 1 "$SEAM_NEG"
 assert_fwd_pass "negative delta under budget" "$SEAM_NEG"
-if [ "$FWD_RC" -eq 0 ] && printf '%s\n' "$FWD_OUT" | grep -Fq "delta_ms=${SEAM_NEG_DELTA}"; then
+if [ "$FWD_RC" -eq 0 ] && printf '%s\n' "$FWD_OUT" | grep -F "delta_ms=${SEAM_NEG_DELTA}" >/dev/null; then
   ok "seam negative-delta receipt preserves the exact recomputed relationship"
 else
   bad "seam negative-delta receipt lost the exact recomputed relationship"
@@ -1353,18 +1353,18 @@ assert_loop_no_receipt() {
   _unwanted=$4
   _hits=0
   _unwanted_hits=0
-  if printf '%s\n' "$LOOP_OUT" | grep -q 'GIBSON_BASH32_BENCH'; then
+  if printf '%s\n' "$LOOP_OUT" | grep 'GIBSON_BASH32_BENCH' >/dev/null; then
     _hits=1
   fi
-  if [ -n "$_unwanted" ] && printf '%s\n' "$LOOP_OUT" | grep -q "$_unwanted"; then
+  if [ -n "$_unwanted" ] && printf '%s\n' "$LOOP_OUT" | grep "$_unwanted" >/dev/null; then
     _unwanted_hits=1
   fi
   _calls=$(fwd_call_count)
-  if printf '%s\n' "$LOOP_OUT" | grep -Fq "$_needle" \
+  if printf '%s\n' "$LOOP_OUT" | grep -F "$_needle" >/dev/null \
      && [ "$_calls" -eq "$_want_calls" ] \
      && [ "$_hits" -eq 0 ] \
      && [ "$_unwanted_hits" -eq 0 ] \
-     && printf '%s' "$FAILED" | grep -Fq "$name"; then
+     && printf '%s' "$FAILED" | grep -F "$name" >/dev/null; then
     ok "loop-diag $_label"
   else
     bad "loop-diag $_label (calls=$_calls want=$_want_calls receipt=$_hits unwanted=$_unwanted_hits failed='$FAILED' out=$(printf '%s' "$LOOP_OUT" | tr '\n' '|'))"
@@ -1401,10 +1401,10 @@ run_loop_diag 0 "" "10 passed, 0 failed" "${SEAM_CHATTER}
 ${SEAM_VALID}"
 _calls=$(fwd_call_count)
 _hits=0
-if printf '%s\n' "$LOOP_OUT" | grep -Fq "$SEAM_VALID"; then
+if printf '%s\n' "$LOOP_OUT" | grep -F "$SEAM_VALID" >/dev/null; then
   _hits=1
 fi
-if printf '%s\n' "$LOOP_OUT" | grep -Fq "ok   — bash32-syntax-each.test.sh: 10 passed, 0 failed (7s)" \
+if printf '%s\n' "$LOOP_OUT" | grep -F "ok   — bash32-syntax-each.test.sh: 10 passed, 0 failed (7s)" >/dev/null \
    && [ "$_calls" -eq 1 ] \
    && [ "$_hits" -eq 1 ] \
    && [ -z "$FAILED" ]; then

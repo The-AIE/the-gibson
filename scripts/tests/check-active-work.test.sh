@@ -159,7 +159,7 @@ legacy_row() { printf '| 2026-08-01T10:00:00Z | %s | app/legacy/** | grok@fleet-
 claims_status_calls_live() { # claims_status_calls_live <table-line>
   local id
   id=$(echo "$1" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  echo "$id" | grep -qE '^issue-'
+  echo "$id" | grep -E '^issue-' >/dev/null
 }
 
 if grep -q "grep -qE '\^issue-'" "$CLAIMS_STATUS"; then
