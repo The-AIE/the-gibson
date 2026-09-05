@@ -4518,6 +4518,93 @@ function grepEqVarPat() {
     "grep -Eq \"$PAT\"\n"
   );
 }
+function grepEVarPat() {
+  return (
+    approveArms() +
+    "\nPAT=\u0027VERDICT:[[:space:]]*(APPROVE|PASS)\u0027\n" +
+    "grep -e \"$PAT\"\n"
+  );
+}
+function grepRegexpVarPat() {
+  return (
+    approveArms() +
+    "\nPAT=\u0027VERDICT:[[:space:]]*(APPROVE|PASS)\u0027\n" +
+    "grep --regexp \"$PAT\"\n"
+  );
+}
+function grepRegexpEqVarPat() {
+  return (
+    approveArms() +
+    "\nPAT=\u0027VERDICT:[[:space:]]*(APPROVE|PASS)\u0027\n" +
+    "grep --regexp=$PAT\n"
+  );
+}
+function grepMultiEVarPat() {
+  return (
+    approveArms() +
+    "\nPAT=\u0027VERDICT:[[:space:]]*(APPROVE|PASS)\u0027\n" +
+    "grep -e \"$PAT\" -e \"VERDICT: APPROVE\"\n"
+  );
+}
+function prefixAltGrep() {
+  return approveArms() + "\ngrep -Eq \"PASS|VERDICT:[[:space:]]*APPROVE\"\n";
+}
+function suffixAltGrep() {
+  return approveArms() + "\ngrep -Eq \"VERDICT:[[:space:]]*APPROVE|PASS\"\n";
+}
+function unquotedGlobPassArm() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  VERDICT:*PASS) : ;;",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function unquotedGlobQmarkPassArm() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  VERDICT:?PASS) : ;;",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function unquotedGlobApproveDecoyArm() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  VERDICT:*APPROVE) : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function mustBeIndeterminate(name, raw) {
+  return () => {
+    const kind = classifyVerdictMatcherOperand(raw);
+    if (kind !== "INDETERMINATE") {
+      return [{
+        code: "E_FALSE_GREEN",
+        message: name + " classified " + kind + " want INDETERMINATE",
+      }];
+    }
+    return [];
+  };
+}
+function mustExtractSentinel(name, text) {
+  return () => {
+    const ops = extractHarnessMatcherOperands(text);
+    if (!ops.includes("VERDICT: INDETERMINATE_GREP_ARGV")) {
+      return [{
+        code: "E_FALSE_GREEN",
+        message: name + " missing INDETERMINATE_GREP_ARGV got " + JSON.stringify(ops),
+      }];
+    }
+    return [];
+  };
+}
 function grepFilePatterns() {
   return approveArms() + "\ngrep -f verdict-patterns.txt\n";
 }
@@ -5214,6 +5301,105 @@ const rows = [
     msg: ["scripts/second-opinion.sh", "indeterminate"],
   },
   {
+    name: "prefix-alt-pass-before-verdict-not-canonical",
+    findings: mustBeIndeterminate(
+      "prefix-alt-pass-before-verdict",
+      "PASS|VERDICT:[[:space:]]*APPROVE"
+    ),
+    expectEmpty: true,
+  },
+  {
+    name: "prefix-alt-pass-before-verdict-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(prefixAltGrep(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "suffix-alt-approve-or-pass-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(suffixAltGrep(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "grep-e-dollar-pat-emits-sentinel",
+    findings: mustExtractSentinel("grep-e-dollar-pat", grepEVarPat()),
+    expectEmpty: true,
+  },
+  {
+    name: "grep-e-dollar-pat-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepEVarPat(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "grep-regexp-dollar-pat-emits-sentinel",
+    findings: mustExtractSentinel("grep-regexp-dollar-pat", grepRegexpVarPat()),
+    expectEmpty: true,
+  },
+  {
+    name: "grep-regexp-dollar-pat-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepRegexpVarPat(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "grep-regexp-equals-dollar-pat-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepRegexpEqVarPat(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "grep-multi-e-dollar-pat-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(grepMultiEVarPat(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "unquoted-glob-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(unquotedGlobPassArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "unquoted-glob-qmark-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(unquotedGlobQmarkPassArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "unquoted-glob-approve-decoy-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(unquotedGlobApproveDecoyArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
     name: "positive-heredoc-prompt-not-false-red",
     findings: () => reviewVerdictVocabularyFindings({
       agentsText,
@@ -5843,6 +6029,14 @@ const echoQuotedHarness =
   "#!/bin/bash\necho \"VERDICT: APPROVE\"\n";
 const globArmHarness =
   "#!/bin/bash\ncase \"$1\" in\n  *\"VERDICT: APPROVE\"*) : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const prefixAltHarness =
+  approveOnly +
+  "\ngrep -Eq 'PASS|VERDICT:[[:space:]]*APPROVE'\n";
+const grepEVarPatHarness =
+  approveOnly +
+  "\nPAT='VERDICT:[[:space:]]*(APPROVE|PASS)'\ngrep -e \"$PAT\"\n";
+const unquotedGlobHarness =
+  "#!/bin/bash\ncase \"$1\" in\n  VERDICT:*PASS) : ;;\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const reviewer = {
   gates: ["never review own generation (Law 5)"],
   forbidden: [],
@@ -6053,6 +6247,80 @@ try {
         agentsText,
         harnessFiles: {
           "scripts/second-opinion.sh": globArmHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `function matcherPrefixIsSignificant(prefix) {
+  let s = String(prefix || "").trim();
+  s = s.replace(/^\\(\\^\\|\\\\n\\)/, "");
+  s = s.replace(/^\\(\\^\\|\\n\\)/, "");
+  s = s.replace(/^\\^/, "");
+  return s.trim().length > 0;
+}`;
+    const to = `function matcherPrefixIsSignificant(prefix) {
+  return false; // prefix-alternation-not-canonical disabled
+}`;
+    if (!original.includes(from)) throw new Error("prefix-alternation site missing");
+    const mod = await loadMutant(original.replace(from, to), "prefixalt");
+    expectKilled(
+      "tooth-prefix-alternation-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": prefixAltHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `function pushGrepPatternOperand(out, operand) {
+  // grep-var-explicit-indeterminate: -e/--regexp $PAT is not resolved.
+  if (isOpaqueShellVarOperand(operand)) {
+    out.push(GREP_INDETERMINATE_ARGV);
+  } else {
+    out.push(operand);
+  }
+}`;
+    const to = `function pushGrepPatternOperand(out, operand) {
+  out.push(operand);
+}`;
+    if (!original.includes(from)) throw new Error("grep-var-explicit site missing");
+    const mod = await loadMutant(original.replace(from, to), "grepe");
+    expectKilled(
+      "tooth-grep-e-regexp-dollar-pat-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": grepEVarPatHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `    // unquoted-case-glob-indeterminate: VERDICT:*PASS) and any unquoted
+    // case arm containing VERDICT is glob language, not an allowlisted
+    // exact quoted arm. Comment lines are not sites (same as grep).
+    // Exclude quotes/parens so jq test() and quoted arms are not re-read.
+    // Terminator is ")" so heredoc prose with "|" is not a site.
+    const unquotedRe =
+      /(^|[\\s|])(VERDICT:[^\\n"'()]+?)(?=\\s*\\))/gi;`;
+    const to = `    const unquotedRe = /NEVER_MATCH_UNQUOTED_CASE_VERDICT/gi;`;
+    if (!original.includes(from)) throw new Error("unquoted case-glob site missing");
+    const mod = await loadMutant(original.replace(from, to), "unquotedarm");
+    expectKilled(
+      "tooth-unquoted-case-glob-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": unquotedGlobHarness,
           "scripts/release-preflight.sh": approveOnly,
         },
       }),
@@ -6538,6 +6806,126 @@ if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null 
   ok "mutation: grep -Eq \"\$PAT\" fails closed"
 else
   bad "mutation grep -Eq \$PAT (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'grep -Eq "PASS|VERDICT:[[:space:]]*APPROVE"' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: prefix-alt PASS|VERDICT:...APPROVE fails closed"
+else
+  bad "mutation prefix-alt PASS|VERDICT (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'grep -Eq "VERDICT:[[:space:]]*APPROVE|PASS"' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: suffix-alt VERDICT:...APPROVE|PASS fails closed"
+else
+  bad "mutation suffix-alt APPROVE|PASS (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
+  'grep -e "$PAT"' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: grep -e \"\$PAT\" fails closed"
+else
+  bad "mutation grep -e \$PAT (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
+  'grep --regexp "$PAT"' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: grep --regexp \"\$PAT\" fails closed"
+else
+  bad "mutation grep --regexp \$PAT (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
+  'grep --regexp=$PAT' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: grep --regexp=\$PAT attached value fails closed"
+else
+  bad "mutation grep --regexp=\$PAT (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
+  'grep -e "$PAT" -e "VERDICT: APPROVE"' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: grep multiple -e \"\$PAT\" plus canonical decoy fails closed"
+else
+  bad "mutation grep multi -e \$PAT (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  VERDICT:*PASS) : ;;' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: unquoted VERDICT:*PASS) case glob fails closed"
+else
+  bad "mutation unquoted VERDICT:*PASS glob (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  VERDICT:?PASS) : ;;' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: unquoted VERDICT:?PASS) qmark glob fails closed"
+else
+  bad "mutation unquoted VERDICT:?PASS glob (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  VERDICT:*APPROVE) : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: unquoted VERDICT:*APPROVE) decoy glob fails closed"
+else
+  bad "mutation unquoted VERDICT:*APPROVE glob (rc=$rc): $out"
 fi
 
 printf '%s\n' '#!/bin/bash' \

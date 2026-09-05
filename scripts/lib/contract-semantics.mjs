@@ -2428,6 +2428,19 @@ function stripVerdictAnchorNoise(rest) {
 }
 
 /**
+ * True when text before VERDICT: is matcher language (an alternation
+ * branch, extra atoms) rather than a known line-prefix/anchor group.
+ * prefix-alternation-not-canonical: never strip PASS| into CANONICAL.
+ */
+function matcherPrefixIsSignificant(prefix) {
+  let s = String(prefix || "").trim();
+  s = s.replace(/^\(\^\|\\n\)/, "");
+  s = s.replace(/^\(\^\|\n\)/, "");
+  s = s.replace(/^\^/, "");
+  return s.trim().length > 0;
+}
+
+/**
  * True when a single alternation/literal payload is not an exact
  * uppercase identifier. Wildcards, classes, quantifiers, optional
  * punctuation, hyphens, escapes, and lowercase all fail closed.
@@ -2479,6 +2492,10 @@ export function classifyVerdictMatcherOperand(raw) {
   }
   const verdictAt = norm.search(/VERDICT:/i);
   if (verdictAt < 0) return null;
+  const prefix = norm.slice(0, verdictAt);
+  if (matcherPrefixIsSignificant(prefix)) {
+    return VERDICT_OPERAND_INDETERMINATE; // prefix-alternation-not-canonical
+  }
   let rest = norm.slice(verdictAt + "VERDICT:".length);
   rest = stripVerdictAnchorNoise(rest);
 
@@ -2624,6 +2641,15 @@ const GREP_ZERO_ARG_LONG = new Set([
 ]);
 const GREP_INDETERMINATE_ARGV = "VERDICT: INDETERMINATE_GREP_ARGV";
 
+function pushGrepPatternOperand(out, operand) {
+  // grep-var-explicit-indeterminate: -e/--regexp $PAT is not resolved.
+  if (isOpaqueShellVarOperand(operand)) {
+    out.push(GREP_INDETERMINATE_ARGV);
+  } else {
+    out.push(operand);
+  }
+}
+
 /**
  * Extract VERDICT-bearing grep/egrep pattern operands from one physical
  * line. Recognizes default-BRE positional patterns (`grep -q '…'`),
@@ -2649,20 +2675,20 @@ function extractGrepVerdictOperandsFromLine(line) {
         break;
       }
       if (arg.startsWith("--regexp=")) {
-        out.push(arg.slice("--regexp=".length));
+        pushGrepPatternOperand(out, arg.slice("--regexp=".length));
         j += 1;
         continue;
       }
       if (arg === "--regexp" || arg === "-e") {
         j += 1;
-        if (j < words.length) out.push(words[j]);
+        if (j < words.length) pushGrepPatternOperand(out, words[j]);
         else ambiguous = true;
         j += 1;
         continue;
       }
       // Attached -ePATTERN only (not bundled -Eq / -Eqi).
       if (/^-e[^-=]/.test(arg)) {
-        out.push(arg.slice(2));
+        pushGrepPatternOperand(out, arg.slice(2));
         j += 1;
         continue;
       }
@@ -2776,6 +2802,31 @@ export function extractHarnessMatcherOperands(text) {
     const globRe = /\*["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["']\*/gi;
     let gm;
     while ((gm = globRe.exec(src)) !== null) push(gm[0]);
+  }
+  {
+    // unquoted-case-glob-indeterminate: VERDICT:*PASS) and any unquoted
+    // case arm containing VERDICT is glob language, not an allowlisted
+    // exact quoted arm. Comment lines are not sites (same as grep).
+    // Exclude quotes/parens so jq test() and quoted arms are not re-read.
+    // Terminator is ")" so heredoc prose with "|" is not a site.
+    const unquotedRe =
+      /(^|[\s|])(VERDICT:[^\n"'()]+?)(?=\s*\))/gi;
+    for (const line of src.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      unquotedRe.lastIndex = 0;
+      let um;
+      while ((um = unquotedRe.exec(line)) !== null) {
+        const arm = String(um[2] || "").trim();
+        if (!arm) continue;
+        const kind = classifyVerdictMatcherOperand(arm);
+        if (kind === VERDICT_OPERAND_INDETERMINATE) {
+          push(arm);
+        } else {
+          push("VERDICT: INDETERMINATE_CASE_ARM");
+        }
+      }
+    }
   }
 
   // [[ ... =~ OPERAND ]] — OPERAND may be bare or quoted. Use \S+ so
