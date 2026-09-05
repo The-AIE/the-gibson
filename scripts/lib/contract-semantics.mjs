@@ -2412,12 +2412,18 @@ function normalizeMatcherOperand(raw) {
   return s;
 }
 
+function stripLeadingMatcherAnchors(s) {
+  let t = String(s || "");
+  t = t.replace(/^\(\^\|\\n\)/, "");
+  t = t.replace(/^\(\^\|\n\)/, "");
+  t = t.replace(/^\^/, "");
+  return t;
+}
+
 function stripVerdictAnchorNoise(rest) {
   let s = String(rest || "");
   // Leading anchors / line-prefix groups used by the live jq body_verdict.
-  s = s.replace(/^\(\^\|\\n\)/, "");
-  s = s.replace(/^\(\^\|\n\)/, "");
-  s = s.replace(/^\^/, "");
+  s = stripLeadingMatcherAnchors(s);
   // Whitespace-class between VERDICT: and the token/group (`[[:space:]]*`, `\s*`).
   s = s.replace(/^(?:\[\[:space:\]\][*+]+|\\s[*+]+|\s+)/, "");
   // Trailing whitespace-class and end anchor.
@@ -2428,15 +2434,43 @@ function stripVerdictAnchorNoise(rest) {
 }
 
 /**
+ * If `s` is one wrapping group around the whole expression, return the
+ * inner text (plus a trailing `$` when that was the only suffix). Depth
+ * must return to 0 only at the last relevant character — `(A)(B)…` is
+ * two groups and is left untouched. grouped-anchor-not-indeterminate.
+ */
+function unwrapWholeExpressionGroup(s) {
+  const src = String(s || "");
+  if (!src.startsWith("(")) return src;
+  let depth = 0;
+  let closeAt = -1;
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+    if (ch !== ")") continue;
+    depth -= 1;
+    if (depth < 0) return src;
+    if (depth === 0) {
+      closeAt = i;
+      break;
+    }
+  }
+  if (closeAt < 0) return src;
+  const lastRelevant = src.endsWith("$") ? src.length - 2 : src.length - 1;
+  if (lastRelevant < 1 || closeAt !== lastRelevant) return src;
+  return src.slice(1, closeAt) + (src.endsWith("$") ? "$" : "");
+}
+
+/**
  * True when text before VERDICT: is matcher language (an alternation
  * branch, extra atoms) rather than a known line-prefix/anchor group.
  * prefix-alternation-not-canonical: never strip PASS| into CANONICAL.
  */
 function matcherPrefixIsSignificant(prefix) {
-  let s = String(prefix || "").trim();
-  s = s.replace(/^\(\^\|\\n\)/, "");
-  s = s.replace(/^\(\^\|\n\)/, "");
-  s = s.replace(/^\^/, "");
+  const s = stripLeadingMatcherAnchors(String(prefix || "").trim());
   return s.trim().length > 0;
 }
 
@@ -2490,13 +2524,17 @@ export function classifyVerdictMatcherOperand(raw) {
   if (/\(\?[a-z]*i[a-z]*\)/i.test(original) || /\(\?[a-z]*i[a-z]*\)/i.test(norm)) {
     return VERDICT_OPERAND_INDETERMINATE;
   }
-  const verdictAt = norm.search(/VERDICT:/i);
+  // Strip known line-prefix anchors, then one enclosing group, before
+  // reading the prefix. `^(VERDICT:…)$` is canonical-only; a leftover
+  // `(` after stripping `^` is not itself a significant prefix.
+  const prepared = unwrapWholeExpressionGroup(stripLeadingMatcherAnchors(norm));
+  const verdictAt = prepared.search(/VERDICT:/i);
   if (verdictAt < 0) return null;
-  const prefix = norm.slice(0, verdictAt);
+  const prefix = prepared.slice(0, verdictAt);
   if (matcherPrefixIsSignificant(prefix)) {
     return VERDICT_OPERAND_INDETERMINATE; // prefix-alternation-not-canonical
   }
-  let rest = norm.slice(verdictAt + "VERDICT:".length);
+  let rest = prepared.slice(verdictAt + "VERDICT:".length);
   rest = stripVerdictAnchorNoise(rest);
 
   // Generic shape detector: any non-space token (PASS, APPROVE!, WOBBLE).
@@ -2556,6 +2594,82 @@ export function classifyVerdictMatcherOperand(raw) {
  * Not a general shell parser: no ANSI-C $'...', no line continuations,
  * no nested scripts, no heredoc bodies.
  */
+/**
+ * Quote/comment walk matching boundedLineShellWords: single quotes are
+ * literal; double quotes honor backslash; an unquoted `#` starts a
+ * trailing shell comment. Used to keep case-arm collection off
+ * inline-comment prose and quoted display text.
+ */
+function stripUnquotedShellComment(line) {
+  const src = String(line || "");
+  let i = 0;
+  let state = "none";
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      i += 1;
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      i += 1;
+      if (c === "\\") {
+        if (i < src.length) i += 1;
+        continue;
+      }
+      if (c === '"') state = "none";
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      state = c === "'" ? "single" : "double";
+      i += 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < src.length) {
+      i += 2;
+      continue;
+    }
+    if (c === "#") return src.slice(0, i);
+    i += 1;
+  }
+  return src;
+}
+
+function shellQuoteStateAt(line, index) {
+  const src = String(line || "");
+  let state = "none";
+  let i = 0;
+  const end = Math.max(0, Math.min(index, src.length));
+  while (i < end) {
+    const c = src[i];
+    if (state === "single") {
+      i += 1;
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      i += 1;
+      if (c === "\\") {
+        if (i < end) i += 1;
+        continue;
+      }
+      if (c === '"') state = "none";
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      state = c === "'" ? "single" : "double";
+      i += 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < src.length) {
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  return state;
+}
+
 function boundedLineShellWords(line) {
   const src = String(line || "");
   const words = [];
@@ -2809,15 +2923,29 @@ export function extractHarnessMatcherOperands(text) {
     // exact quoted arm. Comment lines are not sites (same as grep).
     // Exclude quotes/parens so jq test() and quoted arms are not re-read.
     // Terminator is ")" so heredoc prose with "|" is not a site.
+    // Capture the whole case-pattern from the nearest `(`, `|`,
+    // whitespace, or line-start so `(VERDICT:…)` and `*VERDICT:…`
+    // are sites. Payload before VERDICT: may only be glob intros
+    // (`*`, `?`, `[`) — not jq `{verdict:` field names.
+    // Skip matches inside quotes (quoted arms are the earlier
+    // allowlist) and after an unquoted `#` comment.
     const unquotedRe =
-      /(^|[\s|])(VERDICT:[^\n"'()]+?)(?=\s*\))/gi;
+      /(^|[\s|(])([[*?]*VERDICT:[^\n"'()]*?)(?=\s*\))/gi;
     for (const line of src.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
+      const executable = stripUnquotedShellComment(line);
+      if (!executable.trim()) continue;
       unquotedRe.lastIndex = 0;
       let um;
-      while ((um = unquotedRe.exec(line)) !== null) {
-        const arm = String(um[2] || "").trim();
+      while ((um = unquotedRe.exec(executable)) !== null) {
+        const rawArm = String(um[2] || "");
+        const verdictRel = rawArm.search(/VERDICT:/i);
+        if (verdictRel < 0) continue;
+        const verdictAbs =
+          um.index + String(um[1] || "").length + verdictRel;
+        if (shellQuoteStateAt(executable, verdictAbs) !== "none") continue;
+        const arm = rawArm.trim();
         if (!arm) continue;
         const kind = classifyVerdictMatcherOperand(arm);
         if (kind === VERDICT_OPERAND_INDETERMINATE) {
