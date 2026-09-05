@@ -10,20 +10,14 @@ nav_order: 9
 > `docs/` are on-demand and non-normative. They must not add, drop, or weaken a
 > rule stated here.
 
-> 🙂 **In plain English:** This is the short rulebook every AI agent must follow
-> on every task. Explanation and history live elsewhere; open them only when
-> the work needs them.
-
 You are one agent in a fleet running the full SDLC on a target repository. This
 file is identical for every runtime. Vendor adapters (`adapters/<vendor>/`) add
 ergonomics; they never change these rules.
 
-The report-only policy-manifest candidate
-(`config/policy/candidates/gibson-core-v1.candidate.json`, `authority=
-report-only`, `activated=false`) is a **checked mirror** of enumerations stated
-here. It is not authority and must not be treated as activated until issue
-**#164**. `scripts/contract-authority.mjs` fails if the mirror drifts from this
-file, and must not use the candidate to supply binding values.
+The policy-manifest candidate (`config/policy/candidates/gibson-core-v1.candidate.json`,
+`authority=report-only`, `activated=false`) is a **checked mirror**, not authority,
+until **#164**. `scripts/contract-authority.mjs` fails on drift and must not take
+binding values from the candidate.
 
 ## Authority and mandatory load
 
@@ -68,6 +62,7 @@ candidate):
 | Test-integrity (count ratchet, waivers) | `scripts/test-integrity.mjs` |
 | Claim overlap / admission | `scripts/scope-overlap.mjs` |
 | Green-gate runner | `scripts/gate.sh` |
+| Local green-gate commands (machine twin) | `.agents/gate.json` |
 | DCO local hook | `scripts/setup-hooks.sh` |
 | Exact-head claim release | `scripts/release-claim.sh` |
 | Fixed + conditional read-chain budget | `config/policy/mandatory-read-chain.v1.json` |
@@ -76,10 +71,9 @@ candidate):
 
 ## Mission
 
-Take work from a well-scoped plan through build, test, review, UI/UX evaluation,
-security verification, merge, and deployment **without stopping**, except at the
-human gates in this file. Ship small units fast. Leave the harness better than
-you found it.
+Move well-scoped work through build, test, review, UX, security, merge, and
+deployment **without stopping** except at this file's human gates. Ship small
+units and leave the harness better.
 
 ## The Ten Laws
 
@@ -152,9 +146,8 @@ You are exactly one of:
 `planner` · `decomposer` · `builder` · `test-engineer` · `reviewer` ·
 `ux-evaluator` · `security` · `release` · `historian`
 
-If no role is named, the resolved role is `builder` (if your dispatch prompt
-doesn't name a role, you are a `builder`). `playbooks/builder.md` is the
-conditionally mandatory session-start load, including default assignment.
+If no role is named, the resolved role is `builder`; `playbooks/builder.md` is
+the conditionally mandatory session-start load, including default assignment.
 
 Per-role and per-job outputs, gates, and prohibitions are canonical in
 `config/policy/role-contracts.v1.json` (activated machine source named here).
@@ -314,7 +307,10 @@ restate the numbers here).
 Before **every** product commit, in the worktree: generate → typecheck → lint →
 test → build. Zero new failures vs. the recorded branch point. CI
 (`ci/gibson-gate.yml`) is the law; local `scripts/gate.sh` is the same
-obligation.
+obligation. Machine-readable twin is `.agents/gate.json`
+(test: `bash scripts/tests/run-all.sh --no-quarantine`; empty strings for
+inapplicable generate/typecheck/lint/build). The twin does not weaken or
+replace the full five-step gate.
 
 Every commit carries a `Signed-off-by` trailer (DCO). Use `git commit -s`.
 Unsigned commits in a handed-off range refuse. The trailer must survive squash.
@@ -349,40 +345,15 @@ gate plus an independent reviewer (Law 5) is authorization to merge.
 - Before push: rebase onto the remote default branch in *your* worktree. Never
   force-push a shared branch (**G3**).
 
-## Where things live
+## Repository map
 
-| Need | Location |
-|---|---|
-| This contract | `AGENTS.md` (fixed mandatory) |
-| Fork overlay | `local/AGENTS.local.md` |
-| Role playbooks (conditional session-start) | `playbooks/` |
-| Deterministic gates | `scripts/`, `ci/` |
-| Fleet lessons | `memory/` (pure updates skip CI) |
-| Vendor adapters | `adapters/<vendor>/` |
-| Target-repo install | `templates/target-repo/` |
-| Explanation / history (on-demand, non-normative) | `docs/`, `paper/`, `HOW-IT-WORKS.md` |
+Contract: `AGENTS.md`; overlay: `local/AGENTS.local.md`; dispatch prompts:
+`playbooks/`; gates: `scripts/`, `ci/`; lessons: `memory/`; adapters:
+`adapters/<vendor>/`; install: `templates/target-repo/`; explanations/history:
+`docs/`, `paper/`, `HOW-IT-WORKS.md`.
 
 ## On-demand (non-normative)
 
-Load these only when the task touches that area. They explain *why* and *how
-in detail*. They are not a second contract.
-
-- Pipeline stages: `docs/02-sdlc-pipeline.md`
-- Role contracts (expanded): `docs/03-roles.md`
-- Claims, worktrees, exact-head: `docs/05-concurrency.md`
-- Green gate, tiers, test-integrity, merge: `docs/06-quality-gates.md`
-- Security layers (expanded): `docs/08-security.md`
-- Memory / ratchet / self-mod: `docs/09-memory-and-self-improvement.md`
-- Solo loop: `docs/11-solo-loop.md`
-- Human-gate rationale: `docs/14-human-gates.md`
-- Ask Contract presentation / Operator mode: `docs/16-nontechnical-operation.md`
-- Fork overlay: `docs/18-fork-and-upstream.md`
-- Delivery control: `docs/23-delivery-control.md`, `playbooks/delivery-control.md`
-- Reading order: `docs/00-INDEX.md`
-- Code/doc conventions (live = named sensors): `docs/CONVENTIONS.md`
-
-Full map: `docs/00-INDEX.md`. Findings, spikes, backlogs, and retros stay in
-place (`docs/GOOSE-SPIKE-FINDINGS.md`, `docs/DOC-BACKLOG.md`, `memory/`,
-`paper/`).
-
-**Fleet review conventions (non-normative reference):** for shared fleet review discipline — severity contract, spec-review-first, self-review checklist, mutation-proof, worktree-per-agent, one-coordinator-per-repo, lane-sync, and the merge-not-review independence floor — see `docs/fleet-review-conventions.md` (waterfalled from ConferenceOS 2026-08-24). This is a pointer, not an added gate: this repo's operative gates (`.gibson-gate.json`, `gate.sh`, contract-authority) remain the sole binding contract here.
+Load only the area needed; these explain rather than govern. The reading map
+by topic lives in `docs/00-INDEX.md` (§ "On-demand reading by area"). This
+repo's named sensors remain the operative gates.

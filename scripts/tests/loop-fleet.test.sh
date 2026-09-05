@@ -7,6 +7,43 @@ set -uo pipefail
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 FLEET="$REPO_ROOT/scripts/loop-fleet.sh"
+LOOP="$REPO_ROOT/scripts/loop.sh"
+RUN_ALL="$REPO_ROOT/scripts/tests/run-all.sh"
+WALL_TIMEOUT_TEST="$REPO_ROOT/scripts/tests/wall-timeout.test.sh"
+WALL_TIMEOUT_LIB="$REPO_ROOT/scripts/lib/wall-timeout.sh"
+
+# Copy the fleet driver with its sibling helper so SCRIPT_DIR-relative source
+# (and symlink resolution) still finds scripts/lib/wall-timeout.sh.
+copy_fleet_tree() {
+  local dest="$1"
+  mkdir -p "$dest/lib"
+  cp "$FLEET" "$dest/loop-fleet.sh"
+  cp "$WALL_TIMEOUT_LIB" "$dest/lib/wall-timeout.sh"
+  chmod +x "$dest/loop-fleet.sh"
+  printf '%s\n' "$dest/loop-fleet.sh"
+}
+
+wall_timeout_definitions() {
+  local scan_root
+  for scan_root in "$@"; do
+    if [[ -f "$scan_root" ]]; then
+      grep -HnE '^[[:space:]]*(function[[:space:]]+)?run_with_wall_timeout[[:space:]]*(\(\))?[[:space:]]*\{' \
+        "$scan_root" 2>/dev/null || true
+    elif [[ -d "$scan_root" ]]; then
+      find "$scan_root" -type f -name '*.sh' -exec grep -HnE \
+        '^[[:space:]]*(function[[:space:]]+)?run_with_wall_timeout[[:space:]]*(\(\))?[[:space:]]*\{' {} + \
+        2>/dev/null || true
+    fi
+  done
+}
+
+wall_timeout_suite_present() {
+  [[ -f "$1" && -x "$1" && "$(basename "$1")" == "wall-timeout.test.sh" ]]
+}
+
+wall_timeout_is_quarantined() {
+  awk '$1 == "wall-timeout.test.sh" { found=1 } END { exit found ? 0 : 1 }'
+}
 
 PASS=0
 FAIL=0
@@ -337,7 +374,7 @@ if [[ "$1" == "pr" && "$2" == "list" ]]; then
   fi
   if [[ -n "${GH_STUB_PR_FILE:-}" && -f "${GH_STUB_PR_FILE}" ]]; then
     # File may be legacy JSON array or pre-rendered TSV.
-    if head -c 1 "${GH_STUB_PR_FILE}" | grep -q '\['; then
+    if head -c 1 "${GH_STUB_PR_FILE}" | grep '\[' >/dev/null; then
       _stub_emit_pr_list_tsv "$(cat "${GH_STUB_PR_FILE}")"
     else
       cat "${GH_STUB_PR_FILE}"
@@ -433,7 +470,7 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
     head=$(printf '%s' "$frag" | sed -n 's/.*"headRefName"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     state="OPEN"
     # Optional "state" in fixture.
-    if printf '%s' "$frag" | grep -q '"state"[[:space:]]*:'; then
+    if printf '%s' "$frag" | grep '"state"[[:space:]]*:' >/dev/null; then
       state=$(printf '%s' "$frag" | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     fi
     printf '%s\t%s\t%s\n' "$num" "$head" "$state"
@@ -650,9 +687,9 @@ export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
 TARGET_ABS=$(abs_path "$TARGET")
 out=$(run_fleet --status) || true
-echo "$out" | grep -q 'profile=gibson-dogfood' && ok "status prints profile name" || bad "status missing profile: $out"
-echo "$out" | grep -q "target_repo=$TARGET_ABS" && ok "status prints absolute target repo" || bad "status missing target: $out"
-echo "$out" | grep -q 'expected_slug=mrhinkle/the-gibson' && ok "status prints expected slug" || bad "status missing slug: $out"
+echo "$out" | grep 'profile=gibson-dogfood' >/dev/null && ok "status prints profile name" || bad "status missing profile: $out"
+echo "$out" | grep "target_repo=$TARGET_ABS" >/dev/null && ok "status prints absolute target repo" || bad "status missing target: $out"
+echo "$out" | grep 'expected_slug=mrhinkle/the-gibson' >/dev/null && ok "status prints expected slug" || bad "status missing slug: $out"
 
 reset_calls
 # recreate profile target after reset may have pruned worktrees; repo still exists
@@ -683,11 +720,11 @@ fi
 
 # idempotent status after start
 out=$(run_fleet --status) || true
-echo "$out" | grep -q 'docs' && ok "status lists docs lane" || bad "status missing docs lane"
+echo "$out" | grep 'docs' >/dev/null && ok "status lists docs lane" || bad "status missing docs lane"
 
 # halt
 out=$(run_fleet --halt) || { bad "halt failed: $out"; }
-echo "$out" | grep -q 'profile=gibson-dogfood' && ok "halt prints profile identity" || bad "halt missing identity"
+echo "$out" | grep 'profile=gibson-dogfood' >/dev/null && ok "halt prints profile identity" || bad "halt missing identity"
 [[ -f "$ROOT/fleet/lane-docs/gibson/HALT" ]] && ok "halt wrote gibson/HALT" || bad "HALT missing after --halt"
 
 # --- Chatterbuilt-shaped scopes (fixture only — not live queues) -----------
@@ -753,16 +790,16 @@ write_profile "$PROF" \
   "lane=only|7|docs/**|docs"
 unset FLEET_PROFILE || true
 out=$(run_fleet --profile "$PROF" --status) || true
-echo "$out" | grep -q 'profile=selector' && ok "--profile PATH works" || bad "--profile failed: $out"
+echo "$out" | grep 'profile=selector' >/dev/null && ok "--profile PATH works" || bad "--profile failed: $out"
 
 # relative profile path refused
 out=$(run_fleet --profile "relative/path.profile" --status 2>&1) && bad "relative profile should fail" || {
-  echo "$out" | grep -qi 'absolute' && ok "relative profile path refused" || bad "unclear relative fail: $out"
+  echo "$out" | grep -i 'absolute' >/dev/null && ok "relative profile path refused" || bad "unclear relative fail: $out"
 }
 
 # missing profile
 out=$(run_fleet --status 2>&1) && bad "missing profile should fail" || {
-  echo "$out" | grep -qi 'profile' && ok "missing profile refused" || bad "unclear missing profile: $out"
+  echo "$out" | grep -i 'profile' >/dev/null && ok "missing profile refused" || bad "unclear missing profile: $out"
 }
 
 # --- hostile / malformed profiles (zero launches) --------------------------
@@ -784,7 +821,7 @@ zero_launch_case() {
     bad "$label: launched $after runners on failure path"
     return
   fi
-  if ! echo "$out" | grep -qiE "$reason_re"; then
+  if ! echo "$out" | grep -iE "$reason_re" >/dev/null; then
     bad "$label: expected refusal matching /$reason_re/, got: $out"
     return
   fi
@@ -1081,7 +1118,7 @@ out=$(
     GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "same-runner reviewer should fail" || {
-  echo "$out" | grep -qi 'REVIEWER_CMD\|grading\|own work' && ok "self-review refused" || bad "unclear self-review fail: $out"
+  echo "$out" | grep -i 'REVIEWER_CMD\|grading\|own work' >/dev/null && ok "self-review refused" || bad "unclear self-review fail: $out"
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "self-review path launched zero runners" || bad "self-review launched $lc"
@@ -1130,7 +1167,7 @@ out=$(run_fleet --start) || { bad "pidid start failed: $out"; }
 # Status must NOT report "running" — kill -0 alone would false-positive.
 printf '%s\n' "$$" > "$LOG_DIR/docs.pid"
 out=$(run_fleet --status) || true
-if echo "$out" | grep -E '^docs[[:space:]]' | grep -q 'running'; then
+if echo "$out" | grep -E '^docs[[:space:]]' | grep 'running' >/dev/null; then
   bad "unrelated live PID treated as lane (status=$out)"
 else
   ok "unrelated live PID not treated as lane"
@@ -1204,7 +1241,7 @@ if pid_check=$(
 ); then
   :
 fi
-echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep 'running' >/dev/null \
   && ok "planted healthy lane reports running" \
   || bad "planted healthy lane not running: $pid_check"
 : > "$CALLS/launches.log"
@@ -1518,7 +1555,7 @@ out=$(
     GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "hanging fetch should fail closed: $out" || {
-  echo "$out" | grep -qi 'timeout\|wall-clock\|timed out\|exceeded' \
+  echo "$out" | grep -i 'timeout\|wall-clock\|timed out\|exceeded' >/dev/null \
     && ok "hanging fetch fails closed on wall timeout" \
     || bad "unclear hang-fetch fail: $out"
 }
@@ -1618,7 +1655,7 @@ out=$(
     GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "hanging ls-remote should fail closed: $out" || {
-  echo "$out" | grep -qi 'timeout\|wall-clock\|timed out\|exceeded\|ls-remote' \
+  echo "$out" | grep -i 'timeout\|wall-clock\|timed out\|exceeded\|ls-remote' >/dev/null \
     && ok "hanging ls-remote fails closed on wall timeout" \
     || bad "unclear hang-ls-remote fail: $out"
 }
@@ -1658,7 +1695,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "absolute same-provider reviewer should fail" || {
-  echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+  echo "$out" | grep -i 'REVIEWER_CMD\|same provider\|provider' >/dev/null \
     && ok "absolute same-provider reviewer refused" \
     || bad "unclear abs same-provider fail: $out"
 }
@@ -1682,7 +1719,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "absolute same-provider release should fail" || {
-  echo "$out" | grep -qi 'RELEASE_CMD\|third identity\|same provider\|provider' \
+  echo "$out" | grep -i 'RELEASE_CMD\|third identity\|same provider\|provider' >/dev/null \
     && ok "absolute same-provider release refused" \
     || bad "unclear abs same-provider release fail: $out"
 }
@@ -1703,7 +1740,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "misleading trailing codex arg should fail" || {
-  echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+  echo "$out" | grep -i 'REVIEWER_CMD\|same provider\|provider' >/dev/null \
     && ok "misleading trailing vendor word refused" \
     || bad "unclear misleading-arg fail: $out"
 }
@@ -1727,7 +1764,7 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
       GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
       "$FLEET" --start 2>&1
   ) && bad "relative same-provider reviewer should fail" || {
-    echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+    echo "$out" | grep -i 'REVIEWER_CMD\|same provider\|provider' >/dev/null \
       && ok "relative same-provider reviewer refused" \
       || bad "unclear relative same-provider fail: $out"
   }
@@ -1803,7 +1840,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "env grok reviewer bypass should fail" || {
-  echo "$out" | grep -qi 'REVIEWER_CMD\|same provider\|provider' \
+  echo "$out" | grep -i 'REVIEWER_CMD\|same provider\|provider' >/dev/null \
     && ok "env grok reviewer bypass refused" \
     || bad "unclear env-grok reviewer fail: $out"
 }
@@ -1825,7 +1862,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "env grok release bypass should fail" || {
-  echo "$out" | grep -qi 'RELEASE_CMD\|third identity\|same provider\|provider' \
+  echo "$out" | grep -i 'RELEASE_CMD\|third identity\|same provider\|provider' >/dev/null \
     && ok "env grok release bypass refused" \
     || bad "unclear env-grok release fail: $out"
 }
@@ -1847,7 +1884,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "quoted reviewer path should fail closed" || {
-  echo "$out" | grep -qi 'provider\|REVIEWER_CMD\|cannot resolve\|identity' \
+  echo "$out" | grep -i 'provider\|REVIEWER_CMD\|cannot resolve\|identity' >/dev/null \
     && ok "quoted reviewer path fail-closed" \
     || bad "unclear quoted-path fail: $out"
 }
@@ -1932,7 +1969,7 @@ wd1=$(tr -d '[:space:]' < "$WD_PF")
   && ok "watchdog first start armed pid $wd1" \
   || bad "watchdog first pid invalid/dead: $wd1"
 cmd1=$(ps -p "$wd1" -o command= 2>/dev/null || ps -p "$wd1" -o args= 2>/dev/null || true)
-echo "$cmd1" | grep -q '45' \
+echo "$cmd1" | grep '45' >/dev/null \
   && ok "watchdog cmdline carries original deadline 45" \
   || bad "watchdog cmdline missing deadline: $cmd1"
 
@@ -1942,7 +1979,7 @@ out2=$(run_wd_start) || { bad "watchdog second start failed: $out2"; }
 wd2=$(tr -d '[:space:]' < "$WD_PF" 2>/dev/null || true)
 [[ "$wd1" == "$wd2" ]] && ok "repeated start kept same watchdog pid $wd1" \
   || bad "watchdog pid changed: first=$wd1 second=$wd2 out2=$out2"
-echo "$out2" | grep -qi 'already running\|leaving deadline' \
+echo "$out2" | grep -i 'already running\|leaving deadline' >/dev/null \
   && ok "second start reports existing watchdog" \
   || bad "second start did not report existing watchdog: $out2"
 cmd2=$(ps -p "$wd1" -o command= 2>/dev/null || ps -p "$wd1" -o args= 2>/dev/null || true)
@@ -1990,7 +2027,7 @@ export GH_STUB_MODE=ok
 zero_launch_case "four-lane profile exceeds WIP" 'WIP|1-3|3 lanes|allows 1' --start
 # message mentions WIP / 3 lanes (duplicate explicit assert for clarity)
 out=$(run_fleet --start 2>&1) && true
-echo "$out" | grep -qiE 'WIP|1-3|3 lanes|allows 1' \
+echo "$out" | grep -iE 'WIP|1-3|3 lanes|allows 1' >/dev/null \
   && ok "four-lane error names WIP limit" \
   || bad "four-lane error unclear: $out"
 
@@ -2204,7 +2241,7 @@ STATE
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "foreign ownership should fail: $out" || {
-  echo "$out" | grep -qiE 'foreign|not in configured queue|refuse to resume' \
+  echo "$out" | grep -iE 'foreign|not in configured queue|refuse to resume' >/dev/null \
     && ok "foreign ownership refused" \
     || bad "unclear foreign fail: $out"
 }
@@ -2243,7 +2280,7 @@ export GH_STUB_ISSUE_DIR="$ISSUEDIR"
 export GH_STUB_PR_JSON='[{"number":1,"headRefName":"feat/220-ok","body":"## Active work\n\n- Active-work claim: issue-220-ok\n"}]'
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "future claimed issue should fail: $out" || {
-  echo "$out" | grep -qiE 'agent-claimed|221' \
+  echo "$out" | grep -iE 'agent-claimed|221' >/dev/null \
     && ok "future queue claim still strict" \
     || bad "unclear future-claim fail: $out"
 }
@@ -2317,7 +2354,7 @@ rm -f "$LOG_DIR/docs.pid"
 export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-own-slice","body":"## Active work\n\n- Active-work claim: issue-270-own-slice\n"}]'
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "unbound claimed should fail: $out" || {
-  echo "$out" | grep -qiE 'no pr: or handoff:|unbound|refuse to resume' \
+  echo "$out" | grep -iE 'no pr: or handoff:|unbound|refuse to resume' >/dev/null \
     && ok "claimed without pr/handoff refused" \
     || bad "unclear unbound-claim fail: $out"
 }
@@ -2342,7 +2379,7 @@ rm -f "$LOG_DIR/docs.pid"
 export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-foreign-agent","body":"## Active work\n\n- Active-work claim: issue-270-foreign-agent\n"}]'
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "mismatched PR number should fail: $out" || {
-  echo "$out" | grep -qiE 'pr:#?999|not found open|not bound|mismatched|refuse' \
+  echo "$out" | grep -iE 'pr:#?999|not found open|not bound|mismatched|refuse' >/dev/null \
     && ok "mismatched PR number refused" \
     || bad "unclear mismatched-PR fail: $out"
 }
@@ -2369,7 +2406,7 @@ rm -f "$LOG_DIR/docs.pid"
 export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-other-branch","body":"## Active work\n\n- Active-work claim: issue-270-other-branch\n"}]'
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "mismatched branch should fail: $out" || {
-  echo "$out" | grep -qiE 'handoff|does not match|branch' \
+  echo "$out" | grep -iE 'handoff|does not match|branch' >/dev/null \
     && ok "mismatched handoff branch refused" \
     || bad "unclear mismatched-branch fail: $out"
 }
@@ -2394,7 +2431,7 @@ rm -f "$LOG_DIR/docs.pid"
 export GH_STUB_PR_JSON='[{"number":370,"headRefName":"feat/270-own","body":"## Active work\n\n- Active-work claim: issue-270-own\n"},{"number":371,"headRefName":"feat/270-foreign","body":"## Active work\n\n- Active-work claim: issue-270-foreign\n"}]'
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "foreign sibling PR should fail: $out" || {
-  echo "$out" | grep -qiE '371|foreign|not bound|refuse' \
+  echo "$out" | grep -iE '371|foreign|not bound|refuse' >/dev/null \
     && ok "foreign same-issue sibling PR refused" \
     || bad "unclear foreign-sibling fail: $out"
 }
@@ -2473,7 +2510,7 @@ notes: >
 STATE
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "healthy foreign issue should fail: $out" || {
-  echo "$out" | grep -qiE 'not in configured queue|foreign|refuse' \
+  echo "$out" | grep -iE 'not in configured queue|foreign|refuse' >/dev/null \
     && ok "healthy foreign-issue refused" \
     || bad "unclear healthy-foreign fail: $out"
 }
@@ -2527,7 +2564,7 @@ export GH_STUB_ISSUE_DIR="$ISSUEDIR"
 export GH_STUB_PR_JSON='[{"number":391,"headRefName":"feat/291-current","body":"## Active work\n\n- Active-work claim: issue-291-current\n"}]'
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "open prior should fail: $out" || {
-  echo "$out" | grep -qiE 'prior queue item #290|still OPEN|refuse to advance|no skip/park' \
+  echo "$out" | grep -iE 'prior queue item #290|still OPEN|refuse to advance|no skip/park' >/dev/null \
     && ok "open prior refused" \
     || bad "unclear open-prior fail: $out"
 }
@@ -2648,7 +2685,7 @@ out=$(
     GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "no-perl/no-python should fail closed: $out" || {
-  echo "$out" | grep -qiE 'perl|python3|process group|wall-timeout' \
+  echo "$out" | grep -iE 'perl|python3|process group|wall-timeout' >/dev/null \
     && ok "no-perl/no-python fails closed before bare child" \
     || bad "unclear no-pp fail: $out"
 }
@@ -2694,7 +2731,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "docs/** vs docs/nested/** should overlap (literal tokens): $out" || {
-  echo "$out" | grep -qiE 'scope overlap|docs/\*\*.*docs/nested|docs/nested.*docs/\*\*' \
+  echo "$out" | grep -iE 'scope overlap|docs/\*\*.*docs/nested|docs/nested.*docs/\*\*' >/dev/null \
     && ok "literal docs/** overlaps docs/nested/** despite cwd matches" \
     || bad "noglob overlap miss or unclear: $out"
 }
@@ -2781,9 +2818,9 @@ wdb=$(tr -d '[:space:]' < "$WD_B")
 # Status identity
 stA=$(run_iso "$PROF_A" --status) || true
 stB=$(run_iso "$PROF_B" --status) || true
-echo "$stA" | grep -q 'profile=isoAlpha' && echo "$stA" | grep -qE 'docs' \
+echo "$stA" | grep 'profile=isoAlpha' >/dev/null && echo "$stA" | grep -E 'docs' >/dev/null \
   && ok "isoAlpha status identity" || bad "isoAlpha status: $stA"
-echo "$stB" | grep -q 'profile=isoBeta' && echo "$stB" | grep -qE 'docs' \
+echo "$stB" | grep 'profile=isoBeta' >/dev/null && echo "$stB" | grep -E 'docs' >/dev/null \
   && ok "isoBeta status identity" || bad "isoBeta status: $stB"
 # Halt only Alpha — Beta HALT must not appear
 outH=$(run_iso "$PROF_A" --halt) || { bad "isoAlpha halt failed: $outH"; }
@@ -2950,7 +2987,7 @@ outC2=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C2" \
     "$FLEET" --profile "$PROF_C2" --start 2>&1
 ) && bad "same-name different target shared fleet_dir should fail: $outC2" || {
-  echo "$outC2" | grep -qiE 'identity|mismatch|refuse to reuse' \
+  echo "$outC2" | grep -iE 'identity|mismatch|refuse to reuse' >/dev/null \
     && ok "same-name different-target shared fleet_dir refused" \
     || bad "unclear collide fail: $outC2"
 }
@@ -2967,7 +3004,7 @@ outCS=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C2" \
     "$FLEET" --profile "$PROF_C2" --status 2>&1
 ) && bad "status on foreign identity should fail: $outCS" || {
-  echo "$outCS" | grep -qiE 'identity|mismatch|refuse' \
+  echo "$outCS" | grep -iE 'identity|mismatch|refuse' >/dev/null \
     && ok "status refuses foreign shared fleet_dir" \
     || bad "unclear status-collide fail: $outCS"
 }
@@ -2980,7 +3017,7 @@ outCH=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF_C2" \
     "$FLEET" --profile "$PROF_C2" --halt 2>&1
 ) && bad "halt on foreign identity should fail: $outCH" || {
-  echo "$outCH" | grep -qiE 'identity|mismatch|refuse' \
+  echo "$outCH" | grep -iE 'identity|mismatch|refuse' >/dev/null \
     && ok "halt refuses foreign shared fleet_dir" \
     || bad "unclear halt-collide fail: $outCH"
 }
@@ -3007,7 +3044,7 @@ export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "sixth field should fail: $out" || {
-  echo "$out" | grep -qiE 'more than 5 fields|5 fields|too many fields|sixth|extra' \
+  echo "$out" | grep -iE 'more than 5 fields|5 fields|too many fields|sixth|extra' >/dev/null \
     && ok "sixth lane field rejected" \
     || bad "unclear sixth-field fail: $out"
 }
@@ -3029,7 +3066,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "hostile reserved runner should fail: $out" || {
-  echo "$out" | grep -qiE 'runner route|reserved runner|safe inert|shell syntax|disallowed|hostile' \
+  echo "$out" | grep -iE 'runner route|reserved runner|safe inert|shell syntax|disallowed|hostile' >/dev/null \
     && ok "hostile reserved runner rejected" \
     || bad "unclear reserved-runner fail: $out"
 }
@@ -3052,7 +3089,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "semicolon reserved runner should fail: $out" || {
-  echo "$out" | grep -qiE 'runner route|reserved runner|safe inert|shell syntax|disallowed|hostile' \
+  echo "$out" | grep -iE 'runner route|reserved runner|safe inert|shell syntax|disallowed|hostile' >/dev/null \
     && ok "semicolon reserved runner rejected" \
     || bad "unclear semicolon-runner fail: $out"
 }
@@ -3138,7 +3175,7 @@ export GH_STUB_PR_JSON='[{"number":510,"headRefName":"feat/410-aw-claim","body":
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "missing claim should fail: $out" || {
-  echo "$out" | grep -qiE 'Active-work claim|no .*claim|refuse to resume' \
+  echo "$out" | grep -iE 'Active-work claim|no .*claim|refuse to resume' >/dev/null \
     && ok "missing active-work claim refused" \
     || bad "unclear missing-claim fail: $out"
 }
@@ -3150,7 +3187,7 @@ export GH_STUB_PR_JSON='[{"number":510,"headRefName":"feat/410-aw-claim","body":
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "duplicate claim should fail: $out" || {
-  echo "$out" | grep -qiE '2 .*Active-work claim|exactly one|duplicate' \
+  echo "$out" | grep -iE '2 .*Active-work claim|exactly one|duplicate' >/dev/null \
     && ok "duplicate active-work claim refused" \
     || bad "unclear duplicate-claim fail: $out"
 }
@@ -3162,7 +3199,7 @@ export GH_STUB_PR_JSON='[{"number":510,"headRefName":"feat/410-aw-claim","body":
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "malformed claim should fail: $out" || {
-  echo "$out" | grep -qiE 'malformed|want issue-|refuse to resume' \
+  echo "$out" | grep -iE 'malformed|want issue-|refuse to resume' >/dev/null \
     && ok "malformed active-work claim refused" \
     || bad "unclear malformed-claim fail: $out"
 }
@@ -3174,7 +3211,7 @@ export GH_STUB_PR_JSON='[{"number":510,"headRefName":"feat/410-aw-claim","body":
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "foreign-issue claim should fail: $out" || {
-  echo "$out" | grep -qiE 'foreign issue|issue-999|want issue-410' \
+  echo "$out" | grep -iE 'foreign issue|issue-999|want issue-410' >/dev/null \
     && ok "foreign-issue active-work claim refused" \
     || bad "unclear foreign-issue-claim fail: $out"
 }
@@ -3186,7 +3223,7 @@ export GH_STUB_PR_JSON='[{"number":510,"headRefName":"feat/410-aw-claim","body":
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "foreign-slug claim should fail: $out" || {
-  echo "$out" | grep -qiE 'foreign slug|does not match head|expected .issue-410-aw-claim' \
+  echo "$out" | grep -iE 'foreign slug|does not match head|expected .issue-410-aw-claim' >/dev/null \
     && ok "foreign-slug active-work claim refused" \
     || bad "unclear foreign-slug-claim fail: $out"
 }
@@ -3220,7 +3257,7 @@ export GH_STUB_PR_JSON='[{"number":511,"headRefName":"fix/410-hotfix-lane","body
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "trailing claim text should fail: $out" || {
-  echo "$out" | grep -qiE 'malformed|does not match head|foreign slug|refuse to resume' \
+  echo "$out" | grep -iE 'malformed|does not match head|foreign slug|refuse to resume' >/dev/null \
     && ok "trailing claim text refused" \
     || bad "unclear trailing-claim-text fail: $out"
 }
@@ -3355,7 +3392,7 @@ out=$(
     FLEET_PROFILE="$PROF_NOPY" \
     "$FLEET" --profile "$PROF_NOPY" --start 2>&1
 ) && bad "no-python3 should fail preflight: $out" || {
-  echo "$out" | grep -qi 'python3' \
+  echo "$out" | grep -i 'python3' >/dev/null \
     && ok "no-python3 fails closed at preflight with python3 diagnostic" \
     || bad "no-python3 unclear fail: $out"
 }
@@ -3368,7 +3405,7 @@ export GH_STUB_PR_LIST_RAW='{"not":"an-array"}'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_nojq --start 2>&1) && bad "malformed list formatter output should fail: $out" || {
-  echo "$out" | grep -qiE 'missing TAB|invalid number|malformed|refuse|cannot list' \
+  echo "$out" | grep -iE 'missing TAB|invalid number|malformed|refuse|cannot list' >/dev/null \
     && ok "malformed PR list formatter output refused" \
     || bad "unclear malformed-list fail: $out"
 }
@@ -3381,7 +3418,7 @@ export GH_STUB_PR_LIST_RAW=$'\tfeat/420-nojq\n'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_nojq --start 2>&1) && bad "missing number row should fail: $out" || {
-  echo "$out" | grep -qiE 'invalid number|missing TAB|refuse' \
+  echo "$out" | grep -iE 'invalid number|missing TAB|refuse' >/dev/null \
     && ok "missing number row refused" \
     || bad "unclear missing-number-row fail: $out"
 }
@@ -3430,7 +3467,7 @@ rm -f "$LOG_DIR/docs.pid"
 export GH_STUB_PR_LIST_FAIL=1
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "list formatter failure should fail: $out" || {
-  echo "$out" | grep -qiE 'cannot list open PRs|pr list failure|simulated pr list' \
+  echo "$out" | grep -iE 'cannot list open PRs|pr list failure|simulated pr list' >/dev/null \
     && ok "PR list formatter failure refused" \
     || bad "unclear list-formatter-fail: $out"
 }
@@ -3443,7 +3480,7 @@ export GH_STUB_PR_LIST_RAW='this is not tsv metadata at all'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "garbage list metadata should fail: $out" || {
-  echo "$out" | grep -qiE 'missing TAB|invalid number|refuse|cannot list' \
+  echo "$out" | grep -iE 'missing TAB|invalid number|refuse|cannot list' >/dev/null \
     && ok "garbage list metadata refused" \
     || bad "unclear garbage-list fail: $out"
 }
@@ -3539,7 +3576,7 @@ BODY
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "hostile body without exact claim should fail: $out" || {
-  echo "$out" | grep -qiE 'Active-work claim|no .*claim|refuse to resume|foreign' \
+  echo "$out" | grep -iE 'Active-work claim|no .*claim|refuse to resume|foreign' >/dev/null \
     && ok "hostile body without exact claim refused" \
     || bad "unclear hostile-no-claim fail: $out"
 }
@@ -3591,7 +3628,7 @@ rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 : > "$GH_STUB_LOG"
 out=$(run_fleet --start 2>&1) && bad "body fetch failure should fail: $out" || {
-  echo "$out" | grep -qiE 'cannot fetch body|simulated pr body' \
+  echo "$out" | grep -iE 'cannot fetch body|simulated pr body' >/dev/null \
     && ok "PR body fetch failure refused" \
     || bad "unclear body-fetch-failure: $out"
 }
@@ -3611,7 +3648,7 @@ rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 : > "$GH_STUB_LOG"
 out=$(run_fleet --start 2>&1) && bad "view failure should fail: $out" || {
-  echo "$out" | grep -qiE 'cannot view state-bound PR|re-verify failed|simulated pr view' \
+  echo "$out" | grep -iE 'cannot view state-bound PR|re-verify failed|simulated pr view' >/dev/null \
     && ok "PR view failure refused" \
     || bad "unclear view-failure fail: $out"
 }
@@ -3631,7 +3668,7 @@ export GH_STUB_PR_VIEW_META=$'999\tfeat/423-race\tOPEN'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "number mismatch race should fail: $out" || {
-  echo "$out" | grep -qiE 'number mismatch|list/view race|refuse' \
+  echo "$out" | grep -iE 'number mismatch|list/view race|refuse' >/dev/null \
     && ok "list/view number mismatch refused" \
     || bad "unclear number-mismatch fail: $out"
 }
@@ -3643,7 +3680,7 @@ export GH_STUB_PR_VIEW_META=$'523\tfeat/423-other-head\tOPEN'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "head mismatch race should fail: $out" || {
-  echo "$out" | grep -qiE 'head mismatch|list/view race|refuse' \
+  echo "$out" | grep -iE 'head mismatch|list/view race|refuse' >/dev/null \
     && ok "list/view head mismatch refused" \
     || bad "unclear head-mismatch fail: $out"
 }
@@ -3655,7 +3692,7 @@ export GH_STUB_PR_VIEW_META=$'523\tfeat/423-race\tCLOSED'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "closed-state race should fail: $out" || {
-  echo "$out" | grep -qiE 'not OPEN|closed-state race|state=CLOSED' \
+  echo "$out" | grep -iE 'not OPEN|closed-state race|state=CLOSED' >/dev/null \
     && ok "closed-state race refused" \
     || bad "unclear closed-state fail: $out"
 }
@@ -3668,7 +3705,7 @@ export GH_STUB_PR_VIEW_META='not-meta-at-all'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "malformed view metadata should fail: $out" || {
-  echo "$out" | grep -qiE 're-verify metadata is malformed|malformed|refuse' \
+  echo "$out" | grep -iE 're-verify metadata is malformed|malformed|refuse' >/dev/null \
     && ok "malformed view metadata refused" \
     || bad "unclear malformed-view-meta fail: $out"
 }
@@ -3682,7 +3719,7 @@ export GH_STUB_PR_LIST_RAW=$'523\tfeat/423-race\n523\tfeat/423-dup\n'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "duplicate PR numbers should fail: $out" || {
-  echo "$out" | grep -qiE 'duplicate PR number|ambiguous inventory|refuse' \
+  echo "$out" | grep -iE 'duplicate PR number|ambiguous inventory|refuse' >/dev/null \
     && ok "duplicate PR numbers refused" \
     || bad "unclear dup-number fail: $out"
 }
@@ -3694,7 +3731,7 @@ export GH_STUB_PR_LIST_RAW=$'523\tfeat/423-race\n524\tfeat/423-race\n'
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "duplicate heads should fail: $out" || {
-  echo "$out" | grep -qiE 'duplicate/conflicting headRefName|ambiguous inventory|refuse' \
+  echo "$out" | grep -iE 'duplicate/conflicting headRefName|ambiguous inventory|refuse' >/dev/null \
     && ok "duplicate heads refused" \
     || bad "unclear dup-head fail: $out"
 }
@@ -3714,7 +3751,7 @@ export GH_STUB_PR_FILE="$TRUNC_FILE"
 rm -f "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "truncation limit should fail: $out" || {
-  echo "$out" | grep -qiE 'truncation risk|limit 1000|refuse to hide conflicts' \
+  echo "$out" | grep -iE 'truncation risk|limit 1000|refuse to hide conflicts' >/dev/null \
     && ok "truncation at limit refused" \
     || bad "unclear truncation fail: $out"
 }
@@ -3764,7 +3801,7 @@ HMISS_PID=$!
 printf '%s\n' "$HMISS_PID" > "$LOG_DIR/docs.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "healthy missing state should fail: $out" || {
-  echo "$out" | grep -qiE 'healthy pid|missing/invalid|loop-state|fail closed' \
+  echo "$out" | grep -iE 'healthy pid|missing/invalid|loop-state|fail closed' >/dev/null \
     && ok "healthy missing-state refused" \
     || bad "unclear healthy-missing-state fail: $out"
 }
@@ -3812,7 +3849,7 @@ HALT_BEFORE=0
 STATE_BEFORE=$(cat "$ROOT/fleet/lane-docs/gibson/loop-state.md" 2>/dev/null || true)
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "foreign marker should fail: $out" || {
-  echo "$out" | grep -qiE 'identity|mismatch|refuse to reuse' \
+  echo "$out" | grep -iE 'identity|mismatch|refuse to reuse' >/dev/null \
     && ok "foreign lane marker refused before pid reuse" \
     || bad "unclear foreign-marker fail: $out"
 }
@@ -3863,7 +3900,7 @@ notes: >
   no-space hat
 STATE
 out=$(run_fleet --status) || { bad "status with no-space hat failed: $out"; }
-echo "$out" | grep -E 'docs[[:space:]]+440' | grep -q 'reviewer' \
+echo "$out" | grep -E 'docs[[:space:]]+440' | grep 'reviewer' >/dev/null \
   && ok "status displays no-space hat:reviewer" \
   || bad "status missed no-space hat: $out"
 
@@ -3878,7 +3915,7 @@ ID
 printf '%s\n' "1" > "$LOG_DIR/docs.pid"
 PID_BEFORE=$(cat "$LOG_DIR/docs.pid")
 out=$(run_fleet --status 2>&1) && bad "status foreign lane should fail: $out" || {
-  echo "$out" | grep -qiE 'identity|mismatch|refuse' \
+  echo "$out" | grep -iE 'identity|mismatch|refuse' >/dev/null \
     && ok "status refuses mismatched lane identity" \
     || bad "unclear status-mismatch fail: $out"
 }
@@ -3938,7 +3975,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --profile "$PROF" --start 2>&1
 ) && bad "status failure should fail closed: $out" || {
-  echo "$out" | grep -qiE 'cleanliness|status --porcelain|exit 128|simulated status' \
+  echo "$out" | grep -iE 'cleanliness|status --porcelain|exit 128|simulated status' >/dev/null \
     && ok "git status failure refused as unclean probe" \
     || bad "unclear dirty-fail fail: $out"
 }
@@ -3965,7 +4002,7 @@ export FLEET_PROFILE="$PROF"
 export GH_STUB_MODE=ok
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "duplicate name= should fail: $out" || {
-  echo "$out" | grep -qiE "duplicate scalar key 'name'|duplicate scalar" \
+  echo "$out" | grep -iE "duplicate scalar key 'name'|duplicate scalar" >/dev/null \
     && ok "duplicate name= scalar refused" \
     || bad "unclear dup-name fail: $out"
 }
@@ -3988,7 +4025,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "duplicate repo= should fail: $out" || {
-  echo "$out" | grep -qiE "duplicate scalar key 'repo'|duplicate scalar" \
+  echo "$out" | grep -iE "duplicate scalar key 'repo'|duplicate scalar" >/dev/null \
     && ok "duplicate repo= scalar refused" \
     || bad "unclear dup-repo fail: $out"
 }
@@ -4119,7 +4156,7 @@ done
   && ok "concurrent start exactly one watchdog parent (wcount=$wcount)" \
   || bad "concurrent start watchdog parent count=$wcount (want 1; two timers or none)"
 cmdw=$(ps -p "$wdc" -o command= 2>/dev/null || ps -p "$wdc" -o args= 2>/dev/null || true)
-echo "$cmdw" | grep -q '90' \
+echo "$cmdw" | grep '90' >/dev/null \
   && ok "concurrent watchdog deadline stable (90) in pid $wdc" \
   || bad "concurrent watchdog cmdline missing deadline: $cmdw"
 # Foreign PID untouched.
@@ -4235,7 +4272,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "live foreign reservation should fail closed: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*watchdog reservation|refuse to arm a second timer' \
+  echo "$out" | grep -iE 'fleet:.*watchdog reservation|refuse to arm a second timer' >/dev/null \
     && ok "live foreign reservation fails closed with fleet: diagnostic" \
     || bad "unclear live-reservation fail: $out"
 }
@@ -4342,7 +4379,7 @@ else
   bad "TOCTOU reclaim deleted/mutated competing reservation: $(cat "$WD_PF" 2>/dev/null || echo missing) out=$OUTT"
 fi
 # Starter must not have armed a second timer over the competitor.
-if echo "$OUTT" | grep -q 'watchdog armed'; then
+if echo "$OUTT" | grep 'watchdog armed' >/dev/null; then
   bad "TOCTOU starter falsely armed over competing reservation: $OUTT"
 else
   ok "TOCTOU starter did not arm a second timer (rc=$SRC)"
@@ -4377,8 +4414,7 @@ echo "TOCTOU sensor fails against unconditional stale-file removal (mutation)"
 # Behavioral proof: a defective reclaim that rm -f's without re-read would
 # unlink the live competitor installed after pause-entered. Sensor must FAIL
 # against that defective body (mutation receipt).
-MUT_FLEET="$ROOT/mut-loop-fleet-uncond-rm.sh"
-cp "$FLEET" "$MUT_FLEET"
+MUT_FLEET=$(copy_fleet_tree "$ROOT/mut-toctou")
 # Replace the re-read+rm block with unconditional rm (old defective pattern).
 # Keep the pause-entered marker so the sensor still interleaves correctly.
 if ! python3 - "$MUT_FLEET" <<'PY'
@@ -4519,11 +4555,11 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "immediate-exit watchdog should fail closed: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*watchdog failed to start|no live non-zombie|exited before arm' \
+  echo "$out" | grep -iE 'fleet:.*watchdog failed to start|no live non-zombie|exited before arm' >/dev/null \
     && ok "immediate-exit watchdog fails closed with fleet: diagnostic" \
     || bad "unclear immediate-exit fail: $out"
 }
-if echo "$out" | grep -q 'watchdog armed'; then
+if echo "$out" | grep 'watchdog armed' >/dev/null; then
   bad "immediate-exit produced false armed evidence: $out"
 else
   ok "immediate-exit produced zero false armed evidence"
@@ -4583,11 +4619,11 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "publish-fail watchdog should fail closed: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*publish failed|untracked timer|pidfile publish' \
+  echo "$out" | grep -iE 'fleet:.*publish failed|untracked timer|pidfile publish' >/dev/null \
     && ok "publish-fail watchdog fails closed with fleet: diagnostic" \
     || bad "unclear publish-fail: $out"
 }
-if echo "$out" | grep -q 'watchdog armed'; then
+if echo "$out" | grep 'watchdog armed' >/dev/null; then
   bad "publish-fail produced false armed evidence: $out"
 else
   ok "publish-fail produced zero false armed evidence"
@@ -4653,11 +4689,11 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "missing SLEEP_CMD should fail closed: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*SLEEP_CMD|not executable|not found' \
+  echo "$out" | grep -iE 'fleet:.*SLEEP_CMD|not executable|not found' >/dev/null \
     && ok "missing SLEEP_CMD fails closed before arm" \
     || bad "unclear SLEEP_CMD fail: $out"
 }
-if echo "$out" | grep -q 'watchdog armed'; then
+if echo "$out" | grep 'watchdog armed' >/dev/null; then
   bad "missing SLEEP_CMD produced false armed: $out"
 else
   ok "missing SLEEP_CMD produced zero armed evidence"
@@ -4695,7 +4731,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
     "$FLEET" --profile "$PROF" --start 2>&1
 ) && bad "HOME-unset defaults should fail: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*HOME|fleet_dir default requires HOME|log_dir default requires HOME' \
+  echo "$out" | grep -iE 'fleet:.*HOME|fleet_dir default requires HOME|log_dir default requires HOME' >/dev/null \
     && ok "HOME unset defaults fail closed with fleet: diagnostic" \
     || bad "unclear HOME-unset fail: $out"
 }
@@ -4760,7 +4796,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "non-executable LOOP_SH should fail: $out" || {
-  echo "$out" | grep -qiE 'not executable|loop driver is not executable' \
+  echo "$out" | grep -iE 'not executable|loop driver is not executable' >/dev/null \
     && ok "non-executable LOOP_SH refused before launch" \
     || bad "unclear non-exec LOOP_SH fail: $out"
 }
@@ -4782,6 +4818,86 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "executable LOOP_SH still launches via direct path" \
   || bad "exec LOOP_SH launches=$lc out=$out"
 rm -f "$NONEXEC"
+
+# --- #269: shared helper wiring, no live duplicate, symlink-safe source ----
+echo "wall-timeout shared helper wiring (#269)"
+_wt_defs=$(wall_timeout_definitions "$REPO_ROOT/scripts" "$REPO_ROOT/adapters")
+_wt_def_count=$(printf '%s\n' "$_wt_defs" | awk 'NF { n++ } END { print n + 0 }')
+if [[ "$_wt_def_count" == "1" ]] \
+  && printf '%s\n' "$_wt_defs" | grep -F "$WALL_TIMEOUT_LIB:" >/dev/null; then
+  ok "scripts/adapters contain exactly one wall-timeout definition (shared helper)"
+else
+  bad "wall-timeout definition parity failed (count=$_wt_def_count): $_wt_defs"
+fi
+if grep -nE 'source "\$WALL_TIMEOUT_LIB"' "$FLEET" >/dev/null 2>&1 \
+  && grep -n 'lib/wall-timeout.sh' "$FLEET" >/dev/null 2>&1; then
+  ok "loop-fleet.sh sources scripts/lib/wall-timeout.sh"
+else
+  bad "loop-fleet.sh does not source the shared wall-timeout helper"
+fi
+if grep -n 'wall-timeout.sh' "$LOOP" >/dev/null 2>&1 \
+  && ! wall_timeout_definitions "$LOOP" | grep . >/dev/null; then
+  ok "loop.sh sources wall-timeout without redefining it"
+else
+  bad "loop.sh wiring does not preserve the single shared definition"
+fi
+if wall_timeout_suite_present "$WALL_TIMEOUT_TEST"; then
+  ok "wall-timeout.test.sh remains executable and auto-discoverable"
+else
+  bad "wall-timeout.test.sh is missing or non-executable"
+fi
+_wt_quarantine=$(bash "$RUN_ALL" --list-quarantine 2>/dev/null || true)
+if printf '%s\n' "$_wt_quarantine" | wall_timeout_is_quarantined; then
+  bad "wall-timeout.test.sh is quarantined"
+else
+  ok "wall-timeout.test.sh is absent from run-all quarantine"
+fi
+
+# Non-vacuity for all three external protection predicates.
+_wt_injected_quarantine=$(printf '%-28s #%-4s %s\n' 'wall-timeout.test.sh' '9999' 'mutation')
+if printf '%s\n' "$_wt_injected_quarantine" | wall_timeout_is_quarantined; then
+  ok "quarantine sensor catches injected space-formatted entry"
+else
+  bad "quarantine sensor false-green against injected entry"
+fi
+_wt_nonexec="$ROOT/wall-timeout.test.sh"
+: > "$_wt_nonexec"
+chmod 0644 "$_wt_nonexec"
+if ! wall_timeout_suite_present "$_wt_nonexec" \
+  && ! wall_timeout_suite_present "$ROOT/missing-wall-timeout.test.sh"; then
+  ok "suite-presence sensor rejects non-executable and missing mutations"
+else
+  bad "suite-presence sensor accepted a non-executable or missing mutation"
+fi
+
+# Meta-sensor: injecting a live duplicate must fail the same definition count.
+_dup_dir="$ROOT/dup-wall"
+mkdir -p "$_dup_dir"
+_dup_fleet=$(copy_fleet_tree "$_dup_dir")
+printf '\nrun_with_wall_timeout() {\n  false\n}\n' >> "$_dup_fleet"
+_dup_defs=$(wall_timeout_definitions "$_dup_dir")
+_dup_count=$(printf '%s\n' "$_dup_defs" | awk 'NF { n++ } END { print n + 0 }')
+if [[ "$_dup_count" == "2" ]]; then
+  ok "duplicate sensor fails closed when a live copy is reintroduced"
+else
+  bad "definition sensor missed injected duplicate (count=$_dup_count): $_dup_defs"
+fi
+rm -rf "$_dup_dir"
+
+# Symlink-safe: invoke the driver through a symlink in another directory.
+_sy="$ROOT/symlink-fleet"
+mkdir -p "$_sy"
+ln -s "$FLEET" "$_sy/loop-fleet.sh"
+if [[ -x "$_sy/loop-fleet.sh" ]]; then
+  _sy_out=$(bash "$_sy/loop-fleet.sh" --help 2>&1) || true
+  if printf '%s\n' "$_sy_out" | grep -iE 'missing lib/wall-timeout|did not define run_with_wall_timeout' >/dev/null; then
+    bad "symlink invocation could not resolve repo-contained wall-timeout helper: $_sy_out"
+  else
+    ok "symlink invocation resolves repo-contained wall-timeout.sh"
+  fi
+else
+  bad "could not create loop-fleet.sh symlink"
+fi
 
 # --- CR: residual process-group cleanup after leader exit ------------------
 echo "wall-timeout residual group kill after leader exit"
@@ -4899,7 +5015,7 @@ else
   bad "unrelated PID $UNRELATED_PID was killed by residual cleanup"
 fi
 # Natural exit must not be reported as wall-clock timeout (preserve exit status path).
-if echo "$out" | grep -qiE 'exceeded wall-clock timeout'; then
+if echo "$out" | grep -iE 'exceeded wall-clock timeout' >/dev/null; then
   bad "leader-exit path incorrectly reported wall-clock timeout: $out"
 else
   ok "leader-exit path preserved non-timeout status sequencing"
@@ -4933,7 +5049,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
     "$FLEET" --profile "$PROF" --start 2>&1
 ) && bad "missing profile gibson= should fail: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*gibson path is not a directory|not a directory' \
+  echo "$out" | grep -iE 'fleet:.*gibson path is not a directory|not a directory' >/dev/null \
     && ok "missing profile gibson= fails with fleet: diagnostic" \
     || bad "unclear missing-gibson fail: $out"
 }
@@ -4963,7 +5079,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok \
     "$FLEET" --profile "$PROF" --start 2>&1
 ) && bad "missing env GIBSON should fail: $out" || {
-  echo "$out" | grep -qiE 'fleet:.*GIBSON path is not a directory|not a directory' \
+  echo "$out" | grep -iE 'fleet:.*GIBSON path is not a directory|not a directory' >/dev/null \
     && ok "missing env GIBSON fails with fleet: diagnostic" \
     || bad "unclear missing-env-GIBSON fail: $out"
 }
@@ -5022,7 +5138,7 @@ echo "$out" | grep -F "'$FLEET_DIR_ABS/$FLEET_BASE --profile" \
   && ok "dead-lane status hint uses absolute DRIVER_SELF" \
   || {
     # If status path didn't emit the hint (lane not DEAD), still require no bare ./loop-fleet
-    if echo "$out" | grep -qE "One or more lanes are down"; then
+    if echo "$out" | grep -E "One or more lanes are down" >/dev/null; then
       bad "dead-lane hint not absolute: $out"
     else
       # Force DEAD: remove base so health is BASE-GONE / DEAD
@@ -5128,7 +5244,7 @@ else
   bad "#141 meta: empty readiness probe set should fail closed (rc=${_rp_rc} diag=${_rp_diag})"
 fi
 # Unknown-family comment + --version; no bare second probe (historical line shape)
-if grep -A4 'Unknown family:' "$FLEET" | grep -q -- '--version' \
+if grep -A4 'Unknown family:' "$FLEET" | grep -- '--version' >/dev/null \
   && ! grep -nE 'run_with_wall_timeout "\$limit" "\$exe"\s*(</dev/null\s*)?>"\$outf"' "$FLEET" >/dev/null; then
   ok "#141 structure: unknown family uses --version only (no bare invoke)"
 else
@@ -5243,58 +5359,58 @@ grep -q '^reason=primary_ready$' "$ROOT/logs/docs.runner-status" \
   && ok "reason=primary_ready" \
   || bad "reason missing"
 out=$(run_fleet --status) || true
-echo "$out" | grep -q 'grind-a' \
+echo "$out" | grep 'grind-a' >/dev/null \
   && ok "status shows selected runner" \
   || bad "status missing grind-a: $out"
 [[ -f "$ROOT/logs/runner-selection.jsonl" ]] && ok "telemetry jsonl created" || bad "no telemetry"
 TEL_LINE=$(tail -1 "$ROOT/logs/runner-selection.jsonl")
-echo "$TEL_LINE" | grep -q 'gibson.fleet.runner_selection.v1' \
+echo "$TEL_LINE" | grep 'gibson.fleet.runner_selection.v1' >/dev/null \
   && ok "telemetry schema present" || bad "telemetry missing schema"
-echo "$TEL_LINE" | grep -q '"selected_runner":"grind-a"' \
+echo "$TEL_LINE" | grep '"selected_runner":"grind-a"' >/dev/null \
   && ok "telemetry selected_runner" || bad "telemetry selected: $TEL_LINE"
-echo "$TEL_LINE" | grep -q '"join_key":' \
+echo "$TEL_LINE" | grep '"join_key":' >/dev/null \
   && ok "telemetry join_key present" || bad "telemetry missing join_key"
-echo "$TEL_LINE" | grep -q '"wall_ms":' \
+echo "$TEL_LINE" | grep '"wall_ms":' >/dev/null \
   && ok "telemetry wall_ms present" || bad "telemetry missing wall_ms"
-echo "$TEL_LINE" | grep -q '"fallback_reason":' \
+echo "$TEL_LINE" | grep '"fallback_reason":' >/dev/null \
   && ok "telemetry fallback_reason present" || bad "telemetry missing fallback_reason"
-echo "$TEL_LINE" | grep -q '"selected_pool":' \
+echo "$TEL_LINE" | grep '"selected_pool":' >/dev/null \
   && ok "telemetry selected_pool present" || bad "telemetry missing pool"
-echo "$TEL_LINE" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+echo "$TEL_LINE" | grep -iE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' >/dev/null \
   && bad "telemetry leaked credential-like material" \
   || ok "telemetry has no credential material"
 # Cost-ledger join row for primary selection (#141)
 [[ -f "$ROOT/logs/cost-ledger.jsonl" ]] && ok "cost-ledger.jsonl created on selection" \
   || bad "missing cost-ledger.jsonl after primary selection"
 CL_LINE=$(tail -1 "$ROOT/logs/cost-ledger.jsonl")
-echo "$CL_LINE" | grep -q 'gibson.cost.v1' \
+echo "$CL_LINE" | grep 'gibson.cost.v1' >/dev/null \
   && ok "cost-ledger schema gibson.cost.v1" || bad "cost-ledger schema: $CL_LINE"
-echo "$CL_LINE" | grep -q '"event_kind":"selection"' \
+echo "$CL_LINE" | grep '"event_kind":"selection"' >/dev/null \
   && ok "cost-ledger event_kind=selection" || bad "cost-ledger kind: $CL_LINE"
-echo "$CL_LINE" | grep -q '"join_key":' \
+echo "$CL_LINE" | grep '"join_key":' >/dev/null \
   && ok "cost-ledger join_key present" || bad "cost-ledger missing join_key: $CL_LINE"
-echo "$CL_LINE" | grep -q '"requested_runner":"grind-a"' \
+echo "$CL_LINE" | grep '"requested_runner":"grind-a"' >/dev/null \
   && ok "cost-ledger requested_runner" || bad "cost-ledger req: $CL_LINE"
-echo "$CL_LINE" | grep -q '"runner":"grind-a"' \
+echo "$CL_LINE" | grep '"runner":"grind-a"' >/dev/null \
   && ok "cost-ledger actual runner" || bad "cost-ledger runner: $CL_LINE"
-echo "$CL_LINE" | grep -q '"fallback_reason":"primary_ready"' \
+echo "$CL_LINE" | grep '"fallback_reason":"primary_ready"' >/dev/null \
   && ok "cost-ledger fallback_reason primary_ready" || bad "cost-ledger reason: $CL_LINE"
-echo "$CL_LINE" | grep -q '"issue":501' \
+echo "$CL_LINE" | grep '"issue":501' >/dev/null \
   && ok "cost-ledger issue from queue" || bad "cost-ledger issue: $CL_LINE"
 # Must not invent tokens/costs
-echo "$CL_LINE" | grep -qE '"tokens"|"acus"|"cost"' \
+echo "$CL_LINE" | grep -E '"tokens"|"acus"|"cost"' >/dev/null \
   && bad "cost-ledger fabricated usage fields: $CL_LINE" \
   || ok "cost-ledger has no fabricated tokens/costs"
 # Join env propagated into loop.sh
 [[ -f "$CALLS/launches.log.join" ]] || bad "missing join env log"
 JOIN_ENV=$(tail -1 "$CALLS/launches.log.join")
-echo "$JOIN_ENV" | grep -q 'key=fleet-sel:v1:' \
+echo "$JOIN_ENV" | grep 'key=fleet-sel:v1:' >/dev/null \
   && ok "loop env received join key" || bad "join env key: $JOIN_ENV"
-echo "$JOIN_ENV" | grep -q 'req=grind-a' \
+echo "$JOIN_ENV" | grep 'req=grind-a' >/dev/null \
   && ok "loop env received requested runner" || bad "join env req: $JOIN_ENV"
-echo "$JOIN_ENV" | grep -q 'reason=primary_ready' \
+echo "$JOIN_ENV" | grep 'reason=primary_ready' >/dev/null \
   && ok "loop env received fallback reason" || bad "join env reason: $JOIN_ENV"
-echo "$JOIN_ENV" | grep -q "ledger=$ROOT/logs/cost-ledger.jsonl" \
+echo "$JOIN_ENV" | grep "ledger=$ROOT/logs/cost-ledger.jsonl" >/dev/null \
   && ok "loop env received ledger path" || bad "join env ledger: $JOIN_ENV"
 # join_key matches across selection telemetry + cost ledger + env
 TEL_JOIN=$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["join_key"])' "$TEL_LINE")
@@ -5346,16 +5462,16 @@ else
 fi
 # Fallback selection joins into cost-ledger + loop env
 CL_FB=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
-echo "$CL_FB" | grep -q '"runner":"fallback-y"' \
+echo "$CL_FB" | grep '"runner":"fallback-y"' >/dev/null \
   && ok "fallback cost-ledger actual runner" || bad "fallback cl runner: $CL_FB"
-echo "$CL_FB" | grep -q '"requested_runner":"primary-x"' \
+echo "$CL_FB" | grep '"requested_runner":"primary-x"' >/dev/null \
   && ok "fallback cost-ledger requested primary" || bad "fallback cl req: $CL_FB"
-echo "$CL_FB" | grep -q 'primary_not_ready' \
+echo "$CL_FB" | grep 'primary_not_ready' >/dev/null \
   && ok "fallback cost-ledger reason" || bad "fallback cl reason: $CL_FB"
 JOIN_FB=$(tail -1 "$CALLS/launches.log.join" 2>/dev/null || true)
-echo "$JOIN_FB" | grep -q 'req=primary-x' \
+echo "$JOIN_FB" | grep 'req=primary-x' >/dev/null \
   && ok "fallback loop env requested primary" || bad "fallback join env: $JOIN_FB"
-echo "$JOIN_FB" | grep -q 'reason=primary_not_ready' \
+echo "$JOIN_FB" | grep 'reason=primary_not_ready' >/dev/null \
   && ok "fallback loop env reason" || bad "fallback join env reason: $JOIN_FB"
 
 echo "all-unavailable fail closed"
@@ -5382,14 +5498,14 @@ export FLEET_PROFILE="$PROF"
 export FLEET_READINESS_DIR
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "all-unavailable should fail: $out" || {
-  echo "$out" | grep -qiE 'no declared runner is ready|not ready|fail closed' \
+  echo "$out" | grep -iE 'no declared runner is ready|not ready|fail closed' >/dev/null \
     && ok "all-unavailable actionable diagnostic" \
     || bad "unclear all-unavailable fail: $out"
 }
-echo "$out" | grep -q 'gone-a' && echo "$out" | grep -q 'gone-b' \
+echo "$out" | grep 'gone-a' >/dev/null && echo "$out" | grep 'gone-b' >/dev/null \
   && ok "diagnostic names providers" \
   || bad "diagnostic missing provider names: $out"
-echo "$out" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+echo "$out" | grep -iE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' >/dev/null \
   && bad "diagnostic leaked credential-like material" \
   || ok "diagnostic has no credential material"
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
@@ -5427,7 +5543,7 @@ export REVIEWER_CMD="codex-stub review"
 export RELEASE_CMD="claude-stub release"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "role-conflict fallback should fail: $out" || {
-  echo "$out" | grep -qiE 'three-role|collides|REVIEWER|provider|role' \
+  echo "$out" | grep -iE 'three-role|collides|REVIEWER|provider|role' >/dev/null \
     && ok "actual-runner role conflict refused" \
     || bad "unclear role-conflict fail: $out"
 }
@@ -5455,7 +5571,7 @@ export FLEET_PROFILE="$PROF"
 export FLEET_READINESS_DIR
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "ready primary role conflict should fail: $out" || {
-  echo "$out" | grep -qiE 'three-role|collides|provider|role' \
+  echo "$out" | grep -iE 'three-role|collides|provider|role' >/dev/null \
     && ok "ready primary role conflict refused" \
     || bad "unclear primary role fail: $out"
 }
@@ -5488,7 +5604,7 @@ export FLEET_READINESS_TIMEOUT=2
 rm -f "$CALLS/ready-hang-hang-runner.pid" "$CALLS/ready-hang-hang-runner-desc.pid"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "hang readiness should fail: $out" || {
-  echo "$out" | grep -qiE 'timeout|not ready|no declared runner' \
+  echo "$out" | grep -iE 'timeout|not ready|no declared runner' >/dev/null \
     && ok "hang readiness fails closed" \
     || bad "unclear hang-ready fail: $out"
 }
@@ -5553,8 +5669,8 @@ export FLEET_READINESS_DIR
 out=$(run_fleet --start) || { bad "persist start failed: $out"; }
 SEL1=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
 out=$(run_fleet --status) || true
-echo "$out" | grep -q 'persist-b' && ok "status shows actual persist-b" || bad "status missing persist-b: $out"
-echo "$out" | grep -q 'persist-a' && ok "status shows requested persist-a" || bad "status missing requested: $out"
+echo "$out" | grep 'persist-b' >/dev/null && ok "status shows actual persist-b" || bad "status missing persist-b: $out"
+echo "$out" | grep 'persist-a' >/dev/null && ok "status shows requested persist-a" || bad "status missing requested: $out"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start) || { bad "idempotent restart failed: $out"; }
 SEL2=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
@@ -5564,7 +5680,7 @@ grep -q '^requested_primary=persist-a$' "$ROOT/logs/docs.runner-status" \
   && ok "idempotent restart preserved requested primary" \
   || bad "requested primary lost"
 out=$(run_fleet --status) || true
-echo "$out" | grep -q 'degraded\|persist-b' \
+echo "$out" | grep 'degraded\|persist-b' >/dev/null \
   && ok "status after restart still shows fallback state" \
   || bad "status lost degraded state: $out"
 
@@ -5586,7 +5702,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "empty route token should fail: $out" || {
-  echo "$out" | grep -qiE 'empty token|runner route|disallowed|hostile' \
+  echo "$out" | grep -iE 'empty token|runner route|disallowed|hostile' >/dev/null \
     && ok "empty route token rejected" \
     || bad "unclear empty-token fail: $out"
 }
@@ -5607,7 +5723,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "duplicate route token should fail: $out" || {
-  echo "$out" | grep -qiE 'duplicate runner|route' \
+  echo "$out" | grep -iE 'duplicate runner|route' >/dev/null \
     && ok "duplicate route token rejected" \
     || bad "unclear dup-route fail: $out"
 }
@@ -5629,7 +5745,7 @@ PROF="$ROOT/profiles/r141-space.profile"
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "space token should fail: $out" || {
-  echo "$out" | grep -qiE 'disallowed|runner route|safe inert|hostile' \
+  echo "$out" | grep -iE 'disallowed|runner route|safe inert|hostile' >/dev/null \
     && ok "space in route token rejected" \
     || bad "unclear space-token fail: $out"
 }
@@ -5666,10 +5782,10 @@ out=$(run_fleet --start) || { bad "space log_dir start failed: $out"; }
   && ok "cost-ledger written under log_dir with spaces" \
   || bad "missing cost-ledger in spaced log_dir"
 SPACE_CL=$(tail -1 "$SPACED_LOG/cost-ledger.jsonl")
-echo "$SPACE_CL" | grep -q '"join_key":' \
+echo "$SPACE_CL" | grep '"join_key":' >/dev/null \
   && ok "spaced cost-ledger has join_key" || bad "spaced cl: $SPACE_CL"
 JOIN_SP=$(tail -1 "$CALLS/launches.log.join")
-echo "$JOIN_SP" | grep -q "ledger=$SPACED_LOG/cost-ledger.jsonl" \
+echo "$JOIN_SP" | grep "ledger=$SPACED_LOG/cost-ledger.jsonl" >/dev/null \
   && ok "loop env ledger path preserves spaces" || bad "spaced join env: $JOIN_SP"
 
 echo "routing path has no external network"
@@ -5699,14 +5815,14 @@ export FLEET_READINESS_TIMEOUT=5
 : > "$CALLS/launches.log"
 out=$(run_fleet --start) || { bad "pool-default start failed: $out"; }
 CL_POOL=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
-echo "$CL_POOL" | grep -q '"pool":"provider-grok"' \
+echo "$CL_POOL" | grep '"pool":"provider-grok"' >/dev/null \
   && ok "default pool is provider-grok (no invented plan shape)" \
   || bad "pool default invented plan: $CL_POOL"
-echo "$CL_POOL" | grep -qE '"pool":"(flat-rate-grok|subscription-grok)"' \
+echo "$CL_POOL" | grep -E '"pool":"(flat-rate-grok|subscription-grok)"' >/dev/null \
   && bad "pool still uses invented flat-rate/subscription label: $CL_POOL" \
   || ok "no flat-rate/subscription invented without pool_map"
 # flat_rate must not be asserted true for undeclared provider-only pools
-echo "$CL_POOL" | grep -q '"flat_rate":true' \
+echo "$CL_POOL" | grep '"flat_rate":true' >/dev/null \
   && bad "flat_rate invented for provider-only pool: $CL_POOL" \
   || ok "provider-only pool leaves flat_rate unset"
 
@@ -5734,10 +5850,10 @@ export FLEET_READINESS_DIR
 : > "$CALLS/launches.log"
 out=$(run_fleet --start) || { bad "pool_map start failed: $out"; }
 CL_MAP=$(tail -1 "$ROOT/logs/cost-ledger.jsonl" 2>/dev/null || true)
-echo "$CL_MAP" | grep -q '"pool":"flat-rate-grok"' \
+echo "$CL_MAP" | grep '"pool":"flat-rate-grok"' >/dev/null \
   && ok "pool_map applies operator-declared plan shape" \
   || bad "pool_map ignored: $CL_MAP"
-echo "$CL_MAP" | grep -q '"flat_rate":true' \
+echo "$CL_MAP" | grep '"flat_rate":true' >/dev/null \
   && ok "flat_rate true only from declared flat-rate-* label" \
   || bad "flat_rate missing after pool_map: $CL_MAP"
 # Bad pool_map shapes fail closed
@@ -5754,7 +5870,7 @@ write_profile "$PROF_BAD" \
   "lane=docs|522|docs/**|bad map|grok"
 export FLEET_PROFILE="$PROF_BAD"
 out=$(run_fleet --start 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi pool_map \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i pool_map >/dev/null \
   && ok "invalid pool_map fails closed" || bad "bad pool_map accepted rc=$rc: $out"
 
 echo "#141 join keys collision-resistant in same UTC second"
@@ -5807,8 +5923,8 @@ with open("'"$ROOT/logs-join/cost-ledger.jsonl"'") as f:
 print(keys[-1] if keys else "")
 ')
 # Both keys share frozen ts prefix but must differ via discriminator
-echo "$KEY1" | grep -q '20260806T100000Z' \
-  && echo "$KEY2" | grep -q '20260806T100000Z' \
+echo "$KEY1" | grep '20260806T100000Z' >/dev/null \
+  && echo "$KEY2" | grep '20260806T100000Z' >/dev/null \
   && ok "frozen-time join keys share UTC second" \
   || bad "frozen ts missing k1=$KEY1 k2=$KEY2"
 if [[ -n "$KEY1" && -n "$KEY2" && "$KEY1" != "$KEY2" ]]; then
@@ -5942,7 +6058,7 @@ for fam in codex claude hermes; do
     && ok "$fam reason records primary_not_ready" \
     || bad "$fam reason missing primary_not_ready: $(cat "$ROOT/logs/docs.runner-status" 2>/dev/null)"
   # Diagnostic path must not leak probe stderr (logged-out messages stay discarded).
-  echo "$out" | grep -qiE 'not logged in|not authenticated|api[_-]?key|Bearer |password=' \
+  echo "$out" | grep -iE 'not logged in|not authenticated|api[_-]?key|Bearer |password=' >/dev/null \
     && bad "$fam start output leaked probe/credential-like material: $out" \
     || ok "$fam start output has no probe/credential material"
   auth_issue=$((auth_issue + 1))
@@ -6032,7 +6148,7 @@ if grep -qE 'invoke name=grok argv=--version$' "$GROK_PROBE_LOG" \
 else
   ok "grok models-fail did not regress to version-only readiness"
 fi
-echo "$out" | grep -qiE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' \
+echo "$out" | grep -iE 'api[_-]?key|Bearer |password=|sk-[a-zA-Z0-9]{10}' >/dev/null \
   && bad "grok models-fail leaked credential-like material: $out" \
   || ok "grok models-fail output has no credential material"
 
@@ -6157,7 +6273,7 @@ PERSIST_ROLE_PID=$!
 printf '%s\n' "$PERSIST_ROLE_PID" > "$ROOT/logs/docs.pid"
 # Prove status shows running before role flip.
 pid_check=$(run_fleet --status 2>&1) || true
-echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep 'running' >/dev/null \
   && ok "persist-role planted healthy running lane" \
   || bad "persist-role not running: $pid_check"
 # Change reviewer to same provider as the live builder (safe-builder).
@@ -6165,7 +6281,7 @@ export REVIEWER_CMD="safe-builder review"
 : > "$CALLS/launches.log"
 : > "$CALLS/ready-probe-persist-role.log"
 out=$(run_fleet --start 2>&1) && bad "persist-role role-flip should fail: $out" || {
-  echo "$out" | grep -qiE 'collides|REVIEWER|provider|grade|already-running|selected runner' \
+  echo "$out" | grep -iE 'collides|REVIEWER|provider|grade|already-running|selected runner' >/dev/null \
     && ok "persist-role role-flip refused on already-running revalidation" \
     || bad "unclear persist-role fail: $out"
 }
@@ -6240,7 +6356,7 @@ printf '%s\n' "$PERSIST_EMPTY_PID" > "$ROOT/logs/docs.pid"
 } > "$ROOT/logs/docs.runner-status"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "persist-empty selected should fail: $out" || {
-  echo "$out" | grep -qiE 'selected_runner is empty|empty/missing|refuse' \
+  echo "$out" | grep -iE 'selected_runner is empty|empty/missing|refuse' >/dev/null \
     && ok "persist-empty selected_runner refused" \
     || bad "unclear persist-empty fail: $out"
 }
@@ -6310,7 +6426,7 @@ PERSIST_MISSING_PID=$!
 printf '%s\n' "$PERSIST_MISSING_PID" > "$ROOT/logs/docs.pid"
 # Prove status shows running before status file is removed.
 pid_check=$(run_fleet --status 2>&1) || true
-echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep 'running' >/dev/null \
   && ok "persist-missing planted healthy running lane" \
   || bad "persist-missing not running: $pid_check"
 # Drop only the runner-status evidence; leave live process + pidfile intact.
@@ -6321,7 +6437,7 @@ rm -f "$ROOT/logs/docs.runner-status"
 : > "$CALLS/launches.log"
 : > "$CALLS/ready-probe-persist-missing.log"
 out=$(run_fleet --start 2>&1) && bad "persist-missing should fail closed: $out" || {
-  echo "$out" | grep -qiE 'missing runner-status|refuse to invent|restore a verified|Halt and restart' \
+  echo "$out" | grep -iE 'missing runner-status|refuse to invent|restore a verified|Halt and restart' >/dev/null \
     && ok "persist-missing clear refusal when status absent" \
     || bad "unclear persist-missing fail: $out"
 }
@@ -6433,7 +6549,7 @@ bash -c 'while true; do sleep 30; done' \
 ABS_PATH_PID=$!
 printf '%s\n' "$ABS_PATH_PID" > "$ROOT/logs/docs.pid"
 pid_check=$(run_fleet --status 2>&1) || true
-echo "$pid_check" | grep -E '^docs[[:space:]]' | grep -q 'running' \
+echo "$pid_check" | grep -E '^docs[[:space:]]' | grep 'running' >/dev/null \
   && ok "abs-path planted healthy running lane" \
   || bad "abs-path not running: $pid_check"
 SEL_BEFORE=$(grep '^selected_runner=' "$ROOT/logs/docs.runner-status" | head -1)
@@ -6522,7 +6638,7 @@ export REVIEWER_CMD="codex-stub review"
 export RELEASE_CMD="claude-stub release"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "relative multipath route should fail: $out" || {
-  echo "$out" | grep -qiE 'malformed relative path|hostile|disallowed|runner route' \
+  echo "$out" | grep -iE 'malformed relative path|hostile|disallowed|runner route' >/dev/null \
     && ok "relative multipath route token refused" \
     || bad "unclear relative multipath fail: $out"
 }
@@ -6544,7 +6660,7 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "dotdot path route should fail: $out" || {
-  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|hostile|disallowed|runner route" \
+  echo "$out" | grep -iE "disallowed '\\.\\.'|path segments|hostile|disallowed|runner route" >/dev/null \
     && ok "dotdot path route token refused" \
     || bad "unclear dotdot path fail: $out"
 }
@@ -6568,7 +6684,7 @@ PROF="$ROOT/profiles/r141-shell-abs.profile"
 export FLEET_PROFILE="$PROF"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "shell-metachar abs route should fail: $out" || {
-  echo "$out" | grep -qiE 'hostile|shell|disallowed|safe inert|runner route' \
+  echo "$out" | grep -iE 'hostile|shell|disallowed|safe inert|runner route' >/dev/null \
     && ok "shell-metachar route token refused" \
     || bad "unclear shell-metachar fail: $out"
 }
@@ -6642,7 +6758,7 @@ printf '%s\n' "$PERSIST_HOSTILE_PID" > "$ROOT/logs/docs.pid"
 : > "$CALLS/launches.log"
 : > "$CALLS/ready-probe-persist-hostile.log"
 out=$(run_fleet --start 2>&1) && bad "persist-hostile selected should fail: $out" || {
-  echo "$out" | grep -qiE 'hostile|shell/control|disallowed|selected_runner' \
+  echo "$out" | grep -iE 'hostile|shell/control|disallowed|selected_runner' >/dev/null \
     && ok "persist-hostile selected_runner refused" \
     || bad "unclear persist-hostile fail: $out"
 }
@@ -6669,7 +6785,7 @@ fi
 : > "$CALLS/launches.log"
 : > "$CALLS/ready-probe-persist-hostile.log"
 out=$(run_fleet --start 2>&1) && bad "persist-relpath selected should fail: $out" || {
-  echo "$out" | grep -qiE 'malformed relative path|hostile|disallowed|selected_runner' \
+  echo "$out" | grep -iE 'malformed relative path|hostile|disallowed|selected_runner' >/dev/null \
     && ok "persist-relpath selected_runner refused" \
     || bad "unclear persist-relpath fail: $out"
 }
@@ -6691,7 +6807,7 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 : > "$CALLS/launches.log"
 : > "$CALLS/ready-probe-persist-hostile.log"
 out=$(run_fleet --start 2>&1) && bad "persist-dotdot selected should fail: $out" || {
-  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|hostile|disallowed|selected_runner" \
+  echo "$out" | grep -iE "disallowed '\\.\\.'|path segments|hostile|disallowed|selected_runner" >/dev/null \
     && ok "persist-dotdot selected_runner refused" \
     || bad "unclear persist-dotdot fail: $out"
 }
@@ -6730,7 +6846,7 @@ export REVIEWER_CMD="codex-stub review"
 export RELEASE_CMD="claude-stub release"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "global malformed RUNNER should fail: $out" || {
-  echo "$out" | grep -qiE 'malformed relative path|selection candidate|global runner|hostile|disallowed' \
+  echo "$out" | grep -iE 'malformed relative path|selection candidate|global runner|hostile|disallowed' >/dev/null \
     && ok "global malformed RUNNER refused at selection" \
     || bad "unclear global malformed fail: $out"
 }
@@ -6758,7 +6874,7 @@ export REVIEWER_CMD="codex-stub review"
 export RELEASE_CMD="claude-stub release"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "global dotdot RUNNER should fail: $out" || {
-  echo "$out" | grep -qiE "disallowed '\\.\\.'|path segments|selection candidate|global runner|hostile|disallowed" \
+  echo "$out" | grep -iE "disallowed '\\.\\.'|path segments|selection candidate|global runner|hostile|disallowed" >/dev/null \
     && ok "global dotdot RUNNER refused at selection" \
     || bad "unclear global dotdot fail: $out"
 }
@@ -6955,7 +7071,7 @@ export RELEASE_CMD="claude-stub release"
 rm -f "$BIN/missing-global-runner-xyz"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "omitted-route missing global should fail: $out" || {
-  echo "$out" | grep -qiE 'missing-global-runner-xyz|not found on PATH|runner' \
+  echo "$out" | grep -iE 'missing-global-runner-xyz|not found on PATH|runner' >/dev/null \
     && ok "omitted-route missing global refused" \
     || bad "unclear omit-miss fail: $out"
 }
@@ -6986,7 +7102,7 @@ export REVIEWER_CMD="codex-stub review"
 export RELEASE_CMD="claude-stub release"
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "actual selected role conflict should fail: $out" || {
-  echo "$out" | grep -qiE 'three-role|collides|REVIEWER|provider|grade' \
+  echo "$out" | grep -iE 'three-role|collides|REVIEWER|provider|grade' >/dev/null \
     && ok "actual selected runner role conflict refused" \
     || bad "unclear actual-role fail: $out"
 }
@@ -7025,7 +7141,7 @@ else
   bad "#152 reclaim comments still overclaim atomicity"
 fi
 # Static: watcher reaped before leader wait (ordering contract in source).
-if grep -n 'Stop/reap the watcher BEFORE wait-reaping the leader' "$FLEET" >/dev/null 2>&1; then
+if grep -n 'Stop/reap the watcher BEFORE wait-reaping the leader' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1; then
   ok "#152 wall-timeout documents watcher-before-leader reap ordering"
 else
   bad "#152 missing watcher-before-leader reap ordering contract"
@@ -7120,7 +7236,7 @@ needs-mark
 TMPL
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "gated label last in order should refuse: $out" || {
-  echo "$out" | grep -qiE "gated label 'needs-mark'" \
+  echo "$out" | grep -iE "gated label 'needs-mark'" >/dev/null \
     && ok "gated label last in order still refused" \
     || bad "unclear gated-last refuse: $out"
 }
@@ -7176,7 +7292,7 @@ enhancement
 TMPL
 : > "$CALLS/launches.log"
 out=$(run_fleet --start 2>&1) && bad "real tier-c with hostile body should refuse: $out" || {
-  echo "$out" | grep -qiE "gated label 'tier-c'" \
+  echo "$out" | grep -iE "gated label 'tier-c'" >/dev/null \
     && ok "hostile body cannot hide real gated label" \
     || bad "unclear tier-c hide refuse: $out"
 }
@@ -7236,7 +7352,7 @@ out=$(
     GIT_TERMINAL_PROMPT=0 GH_STUB_MODE=ok FLEET_PROFILE="$PROF" \
     "$FLEET" --start 2>&1
 ) && bad "grace timeout hang should fail: $out" || {
-  echo "$out" | grep -qiE 'exceeded wall-clock timeout|timeout' \
+  echo "$out" | grep -iE 'exceeded wall-clock timeout|timeout' >/dev/null \
     && ok "TERM-grace path reports wall-clock timeout" \
     || bad "unclear grace-timeout fail: $out"
 }
@@ -7291,7 +7407,7 @@ out=$(
     "$FLEET" --start 2>&1
 ) && bad "large timeout hang should fail closed: $out" || {
   # die path on 124: "exceeded wall-clock timeout (${limit}s)"
-  echo "$out" | grep -qiE 'exceeded wall-clock timeout \(3s\)' \
+  echo "$out" | grep -iE 'exceeded wall-clock timeout \(3s\)' >/dev/null \
     && ok "large/custom timeout 3s returns fail-closed 124 path" \
     || bad "large timeout missing 124 path evidence: $out"
 }
@@ -7323,7 +7439,7 @@ if awk '
   infn && /wait "\$watcher"/ {w=NR}
   infn && /wait "\$pid"/ {p=NR}
   infn && /^}/ {if(w&&p){exit (w<p)?0:1}; exit 1}
-' "$FLEET"; then
+' "$WALL_TIMEOUT_LIB"; then
   ok "watcher wait precedes leader wait in run_with_wall_timeout"
 else
   bad "watcher/leader wait ordering inverted or missing"
@@ -7419,7 +7535,7 @@ STUB
   if [[ $rc_start -eq 0 ]]; then
     fail_reasons="${fail_reasons}expected_fail_closed;"
   fi
-  if ! echo "$out" | grep -qiE 'exceeded wall-clock timeout \(30s\)|exceeded wall-clock timeout'; then
+  if ! echo "$out" | grep -iE 'exceeded wall-clock timeout \(30s\)|exceeded wall-clock timeout' >/dev/null; then
     fail_reasons="${fail_reasons}missing_124_timeout;"
   fi
   if [[ $elapsed -lt 1 || $elapsed -gt 15 ]]; then
@@ -7527,10 +7643,10 @@ else
 fi
 
 # Structural: real date + tick branches set parent_forced; hook forces preconditions only.
-if grep -n 'parent_forced=1' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'pfb_precond' "$FLEET" >/dev/null 2>&1 \
-  && grep -n 'date:?\*|tick:?\*' "$FLEET" >/dev/null 2>&1; then
+if grep -n 'parent_forced=1' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1 \
+  && grep -n 'FLEET_WALL_TIMEOUT_TEST_PARENT_FALLBACK' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1 \
+  && grep -n 'pfb_precond' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1 \
+  && grep -n 'date:?\*|tick:?\*' "$WALL_TIMEOUT_LIB" >/dev/null 2>&1; then
   ok "parent-fallback structure: parent_forced ownership + precondition-only hook"
 else
   bad "parent-fallback structure: missing parent_forced or precondition hook"
@@ -7546,7 +7662,7 @@ if awk '
     if (seen && $0 ~ /status_file/ && $0 ~ /timeout/) { boundary=1; exit }
   }
   END { exit (failed || !seen || !boundary ? 1 : 0) }
-' "$FLEET"; then
+' "$WALL_TIMEOUT_LIB"; then
   ok "parent-fallback hook is precondition-only (no timeout write / parent_forced)"
 else
   bad "parent-fallback hook still writes timeout or sets parent_forced"
@@ -7554,9 +7670,8 @@ fi
 
 # --- mutation receipt 1: neutralize date-branch parent_forced=1 -------------
 echo "parent-fallback DATE mutation: sensor must fail without date parent_forced"
-MUT_DATE="$ROOT/mut-loop-fleet-pfb-date.sh"
-cp "$FLEET" "$MUT_DATE"
-if ! python3 - "$MUT_DATE" <<'PY'
+MUT_DATE=$(copy_fleet_tree "$ROOT/mut-pfb-date")
+if ! python3 - "$ROOT/mut-pfb-date/lib/wall-timeout.sh" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -7590,8 +7705,8 @@ then
   bad "date mutation harness could not patch date-branch body"
 fi
 chmod +x "$MUT_DATE"
-if [[ -f "$MUT_DATE.mutation-miss" ]]; then
-  bad "date mutation fail-closed: $(cat "$MUT_DATE.mutation-miss")"
+if [[ -f "$ROOT/mut-pfb-date/lib/wall-timeout.sh.mutation-miss" ]]; then
+  bad "date mutation fail-closed: $(cat "$ROOT/mut-pfb-date/lib/wall-timeout.sh.mutation-miss")"
 else
   # Behavioral: date sensor against mutated copy must NOT fully pass.
   if pfb_run_probe "$MUT_DATE" date md1; then
@@ -7599,20 +7714,19 @@ else
   else
     # Must fail on TERM (or grace) — not merely launch noise.
     reasons=$(cat "$CALLS/pfb-md1.fail" 2>/dev/null || echo missing)
-    if echo "$reasons" | grep -qE 'no_TERM|grace_elapsed_0'; then
+    if echo "$reasons" | grep -E 'no_TERM|grace_elapsed_0' >/dev/null; then
       ok "date mutation receipt: sensor fails without date-branch parent_forced (reasons=$reasons)"
     else
       bad "date mutation failed for unexpected reasons (want no_TERM/grace): $reasons detail=$(cat "$CALLS/pfb-md1.detail" 2>/dev/null)"
     fi
   fi
 fi
-rm -f "$MUT_DATE" "$MUT_DATE.mutation-miss"
+rm -rf "$ROOT/mut-pfb-date"
 
 # --- mutation receipt 2: neutralize tick-branch parent_forced=1 -------------
 echo "parent-fallback TICK mutation: sensor must fail without tick parent_forced"
-MUT_TICK="$ROOT/mut-loop-fleet-pfb-tick.sh"
-cp "$FLEET" "$MUT_TICK"
-if ! python3 - "$MUT_TICK" <<'PY'
+MUT_TICK=$(copy_fleet_tree "$ROOT/mut-pfb-tick")
+if ! python3 - "$ROOT/mut-pfb-tick/lib/wall-timeout.sh" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -7644,21 +7758,21 @@ then
   bad "tick mutation harness could not patch tick-branch body"
 fi
 chmod +x "$MUT_TICK"
-if [[ -f "$MUT_TICK.mutation-miss" ]]; then
-  bad "tick mutation fail-closed: $(cat "$MUT_TICK.mutation-miss")"
+if [[ -f "$ROOT/mut-pfb-tick/lib/wall-timeout.sh.mutation-miss" ]]; then
+  bad "tick mutation fail-closed: $(cat "$ROOT/mut-pfb-tick/lib/wall-timeout.sh.mutation-miss")"
 else
   if pfb_run_probe "$MUT_TICK" tick mt1; then
     bad "tick mutation false-green: sensor still passed without tick parent_forced=1"
   else
     reasons=$(cat "$CALLS/pfb-mt1.fail" 2>/dev/null || echo missing)
-    if echo "$reasons" | grep -qE 'no_TERM|grace_elapsed_0'; then
+    if echo "$reasons" | grep -E 'no_TERM|grace_elapsed_0' >/dev/null; then
       ok "tick mutation receipt: sensor fails without tick-branch parent_forced (reasons=$reasons)"
     else
       bad "tick mutation failed for unexpected reasons (want no_TERM/grace): $reasons detail=$(cat "$CALLS/pfb-mt1.detail" 2>/dev/null)"
     fi
   fi
 fi
-rm -f "$MUT_TICK" "$MUT_TICK.mutation-miss"
+rm -rf "$ROOT/mut-pfb-tick"
 
 # =============================================================================
 # #181 · scope-overlap parity (fleet integration + pure-kernel differential)

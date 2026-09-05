@@ -35,17 +35,17 @@ help_out=$("$SENSOR" --help 2>"$ROOT/help.err")
 help_rc=$?
 if [[ "$help_rc" -eq 0 ]]; then ok "--help exits 0"
 else bad "--help exited $help_rc"; fi
-if echo "$help_out" | grep -q 'WHAT IT DOES' && echo "$help_out" | grep -q 'RISKS'; then
+if echo "$help_out" | grep 'WHAT IT DOES' >/dev/null && echo "$help_out" | grep 'RISKS' >/dev/null; then
   ok "--help names WHAT IT DOES and RISKS"
 else
   bad "--help missing Ask-Contract fields"
 fi
-if echo "$help_out" | grep -q 'OWNER DECISION' && echo "$help_out" | grep -q '180d'; then
+if echo "$help_out" | grep 'OWNER DECISION' >/dev/null && echo "$help_out" | grep '180d' >/dev/null; then
   ok "--help names the owner-gated 180d cadence"
 else
   bad "--help missing owner-gated cadence note"
 fi
-if echo "$help_out" | grep -q 'advisory'; then
+if echo "$help_out" | grep 'advisory' >/dev/null; then
   ok "--help says the sensor is advisory"
 else
   bad "--help does not say advisory"
@@ -110,22 +110,22 @@ out=$("$SENSOR" --threshold 180 "$fresh" 2>"$ROOT/fresh.err")
 fresh_rc=$?
 if [[ "$fresh_rc" -eq 0 ]]; then ok "fresh key exits 0"
 else bad "fresh key exited $fresh_rc"; fi
-if echo "$out" | grep -q ' PATH' || echo "$out" | grep -q '^PATH'; then
+if echo "$out" | grep ' PATH' >/dev/null || echo "$out" | grep '^PATH' >/dev/null; then
   ok "table has a PATH header"
 else
   bad "table missing PATH header: $out"
 fi
-if echo "$out" | grep -q " $fresh" || echo "$out" | grep -F "$fresh" | grep -q 'OK'; then
+if echo "$out" | grep " $fresh" >/dev/null || echo "$out" | grep -F "$fresh" | grep 'OK' >/dev/null; then
   ok "fresh key row is OK"
 else
   # row is "path ... OK"
-  if echo "$out" | grep -F "$fresh" | grep -q 'OK'; then
+  if echo "$out" | grep -F "$fresh" | grep 'OK' >/dev/null; then
     ok "fresh key row is OK"
   else
     bad "fresh key row not OK: $out"
   fi
 fi
-if echo "$out" | grep -F "$fresh" | grep -q 'OK'; then
+if echo "$out" | grep -F "$fresh" | grep 'OK' >/dev/null; then
   :
 fi
 if [[ ! -s "$ROOT/fresh.err" ]]; then ok "fresh run is quiet on stderr"
@@ -143,7 +143,7 @@ out=$("$SENSOR" --threshold 180 --now "$now_stale" "$old" 2>"$ROOT/stale.err")
 stale_rc=$?
 if [[ "$stale_rc" -eq 0 ]]; then ok "STALE key exits 0 (advisory)"
 else bad "STALE key exited $stale_rc (advisory must stay 0)"; fi
-if echo "$out" | grep -F "$old" | grep -q 'STALE'; then
+if echo "$out" | grep -F "$old" | grep 'STALE' >/dev/null; then
   ok "old key row is STALE"
 else
   bad "old key row not STALE: $out"
@@ -154,7 +154,7 @@ out=$("$SENSOR" --threshold 180 "$ROOT/does-not-exist.pem" 2>"$ROOT/miss.err")
 miss_rc=$?
 if [[ "$miss_rc" -eq 0 ]]; then ok "MISSING path exits 0"
 else bad "MISSING path exited $miss_rc"; fi
-if echo "$out" | grep -q 'MISSING'; then
+if echo "$out" | grep 'MISSING' >/dev/null; then
   ok "missing path row is MISSING"
 else
   bad "missing path row not MISSING: $out"
@@ -169,12 +169,12 @@ out=$("$SENSOR" --threshold 180 "$ROOT/link.pem" "$ROOT/dir" 2>"$ROOT/spec.err")
 spec_rc=$?
 if [[ "$spec_rc" -eq 0 ]]; then ok "symlink/dir run exits 0"
 else bad "symlink/dir run exited $spec_rc"; fi
-if echo "$out" | grep -F "$ROOT/link.pem" | grep -q 'SYMLINK'; then
+if echo "$out" | grep -F "$ROOT/link.pem" | grep 'SYMLINK' >/dev/null; then
   ok "symlink row is SYMLINK"
 else
   bad "symlink row not SYMLINK: $out"
 fi
-if echo "$out" | grep -F "$ROOT/dir" | grep -q 'NOT-A-FILE'; then
+if echo "$out" | grep -F "$ROOT/dir" | grep 'NOT-A-FILE' >/dev/null; then
   ok "directory row is NOT-A-FILE"
 else
   bad "directory row not NOT-A-FILE: $out"
@@ -183,12 +183,12 @@ fi
 echo "never prints key material"
 # Reuse the STALE/OK outputs plus a dedicated run
 out=$("$SENSOR" --threshold 180 "$fresh" "$old" 2>/dev/null)
-if echo "$out" | grep -qF "$MARKER"; then
+if echo "$out" | grep -F "$MARKER" >/dev/null; then
   bad "stdout contained dummy key material"
 else
   ok "stdout does not contain key material"
 fi
-if echo "$out" | grep -qiE 'BEGIN (RSA |OPENSSH )?PRIVATE KEY'; then
+if echo "$out" | grep -iE 'BEGIN (RSA |OPENSSH )?PRIVATE KEY' >/dev/null; then
   bad "stdout looked like a PEM block"
 else
   ok "stdout has no PEM header"
@@ -205,7 +205,7 @@ echo "GNU-first stat (L-050 / #99)"
 if grep -q 'stat -c %Y' "$SENSOR" && grep -q 'stat -f %m' "$SENSOR"; then
   # -c must appear before -f on the production mtime line
   line=$(grep -E 'stat -c %Y' "$SENSOR" | head -1)
-  if echo "$line" | grep -q 'stat -f %m'; then
+  if echo "$line" | grep 'stat -f %m' >/dev/null; then
     ok "mtime line is GNU-first (stat -c then stat -f)"
   else
     bad "GNU and BSD stat are not on the same fallback line: $line"

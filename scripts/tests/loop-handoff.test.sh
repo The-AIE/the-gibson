@@ -1049,7 +1049,7 @@ $GIT -C "$REPO" checkout -q main
 # commits (as the driver guarantees before any review) while its branch names
 # still point somewhere else.
 git -C "$REPO" fetch -q origin main "$BRANCH"
-if git -C "$REPO" diff --stat "main...$BRANCH" | grep -q 'STALE-LOCAL-ONLY'; then
+if git -C "$REPO" diff --stat "main...$BRANCH" | grep 'STALE-LOCAL-ONLY' >/dev/null; then
   ok "fixture: the local branch names describe a diff of their own"
 else
   bad "fixture bug: the local refs are not stale"
@@ -1491,13 +1491,13 @@ export GIBSON_STAMP_STATE="$REPO/gibson/loop-state.md"
 export GIBSON_STAMP_NOW="2026-08-03T12:34:56Z"
 rm -f "${GIBSON_STAMP_STATE}.stamp-seq"
 write_state "$BRANCH" "$(head_sha)"
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 notes1=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 upd1=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 notes2=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 upd2=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 notes3=$(awk -F': ' '/^notes:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 upd3=$(awk -F': ' '/^updated:/{print $2; exit}' "$GIBSON_STAMP_STATE")
 strict_utc_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
@@ -1528,9 +1528,9 @@ cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-before.md"
 write_state "$BRANCH" "$(head_sha)"
 rm -f "${GIBSON_STAMP_STATE}.stamp-seq"
 export GIBSON_STAMP_NOW="2026-08-03T12:34:56Z"
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-snap-a.md"
-"$CALLS/stamp-and-noop.sh"
+"$CALLS/stamp-and-noop.sh" </dev/null
 cp "$GIBSON_STAMP_STATE" "$ROOT/frozen-snap-b.md"
 # shellcheck disable=SC1091  # absolute path via $GIBSON; not relative to this file
 source "$GIBSON/scripts/silent-noop.sh"
@@ -2485,7 +2485,7 @@ run_concurrent_loop_burst() {
   conc_waited=0
   while [[ $conc_waited -lt 90 ]]; do
     # shellcheck disable=SC2009
-    if ! jobs -rp 2>/dev/null | grep -q .; then
+    if ! jobs -rp 2>/dev/null | grep . >/dev/null; then
       break
     fi
     sleep 0.5
@@ -2493,7 +2493,7 @@ run_concurrent_loop_burst() {
   done
   still_running=0
   # shellcheck disable=SC2046
-  if jobs -rp 2>/dev/null | grep -q .; then
+  if jobs -rp 2>/dev/null | grep . >/dev/null; then
     still_running=1
     # shellcheck disable=SC2046
     kill $(jobs -rp) 2>/dev/null || true
@@ -2728,7 +2728,7 @@ fi
 if grep -nE 'rm -f "\$gate"|rm -f "\$HALT_LOCK_RECLAIM_GATE"|rm -rf "\$gate"|rm -rf "\$HALT_LOCK_RECLAIM_GATE"' "$LOOP" \
     | grep -vE '^[0-9]+:[[:space:]]*#|^[[:space:]]*#' \
     | grep -v '/pid' \
-    | grep -q .; then
+    | grep . >/dev/null; then
   bad "kernel-gate: loop.sh still rm's the reclaim gate pathname"
 else
   ok "kernel-gate: no bare reclaim-gate pathname rm in loop.sh"
@@ -3829,13 +3829,13 @@ sleep 0.1 2>/dev/null || sleep 1
 touch "$aba_dir/may_release"
 conc_waited=0
 while [[ $conc_waited -lt 60 ]]; do
-  if ! jobs -rp 2>/dev/null | grep -q .; then
+  if ! jobs -rp 2>/dev/null | grep . >/dev/null; then
     break
   fi
   sleep 0.1 2>/dev/null || sleep 1
   conc_waited=$((conc_waited + 1))
 done
-if jobs -rp 2>/dev/null | grep -q .; then
+if jobs -rp 2>/dev/null | grep . >/dev/null; then
   bad "kernel-gate-aba: concurrent children exceeded wait budget"
   # shellcheck disable=SC2046
   kill $(jobs -rp) 2>/dev/null || true
@@ -3863,7 +3863,7 @@ while [[ $i -lt $aba_n ]]; do
   fi
   i=$((i + 1))
 done
-if find "$aba_dir/violations" -type f 2>/dev/null | grep -q .; then
+if find "$aba_dir/violations" -type f 2>/dev/null | grep . >/dev/null; then
   aba_bad=1
   aba_sample="${aba_sample} violations=$(find "$aba_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
 fi
@@ -4097,7 +4097,7 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
       break
     fi
     # If any violation files already appeared, still let the pack finish.
-    if find "$round_dir/violations" -type f 2>/dev/null | grep -q .; then
+    if find "$round_dir/violations" -type f 2>/dev/null | grep . >/dev/null; then
       break
     fi
     sleep 0.01 2>/dev/null || true
@@ -4108,13 +4108,13 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
   # Wait for children (bounded).
   conc_waited=0
   while [[ $conc_waited -lt 120 ]]; do
-    if ! jobs -rp 2>/dev/null | grep -q .; then
+    if ! jobs -rp 2>/dev/null | grep . >/dev/null; then
       break
     fi
     sleep 0.1 2>/dev/null || sleep 1
     conc_waited=$((conc_waited + 1))
   done
-  if jobs -rp 2>/dev/null | grep -q .; then
+  if jobs -rp 2>/dev/null | grep . >/dev/null; then
     bad "reclaim-stress round $reclaim_round ($seed_kind): children exceeded wait budget"
     reclaim_stress_fail=1
     # shellcheck disable=SC2046
@@ -4145,7 +4145,7 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
     fi
     i=$((i + 1))
   done
-  if find "$round_dir/violations" -type f 2>/dev/null | grep -q .; then
+  if find "$round_dir/violations" -type f 2>/dev/null | grep . >/dev/null; then
     round_bad=1
     sample="${sample} violations=$(find "$round_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
   fi

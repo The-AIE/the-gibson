@@ -2360,6 +2360,26 @@ export const CANONICAL_REVIEW_HARNESS_FILES = [
 
 const REVIEW_VERDICT_TOKEN_RE = /\bVERDICT:\s*([A-Za-z][A-Za-z0-9_-]*)/g;
 
+/** Finite classifier kinds for harness matcher operands. */
+export const VERDICT_OPERAND_CANONICAL = "CANONICAL";
+export const VERDICT_OPERAND_ACCEPTS_PASS = "ACCEPTS_PASS";
+export const VERDICT_OPERAND_INDETERMINATE = "INDETERMINATE";
+
+const VERDICT_CANONICAL_TOKENS = new Set([
+  "APPROVE",
+  "REQUEST_CHANGES",
+]);
+const VERDICT_PASS_TOKENS = new Set(["PASS"]);
+/** Live second-opinion shape detector operand after normalize. */
+const VERDICT_SHAPE_OPERAND_RE =
+  /^\^?VERDICT:\[\[:space:\]\]\+\[\^\[:space:\]\]$/;
+/** Live case-arm aliases that are exact-string matches, not regex languages. */
+const VERDICT_LIVE_CASE_ARM_ALIASES = new Set([
+  "APPROVE",
+  "REQUEST_CHANGES",
+  "CHANGES_REQUESTED",
+]);
+
 function collectVerdictTokens(text) {
   const tokens = new Set();
   const src = String(text || "");
@@ -2372,57 +2392,464 @@ function collectVerdictTokens(text) {
   return tokens;
 }
 
-function harnessAcceptsApprove(text) {
-  const t = String(text || "");
-  if (/VERDICT:\\s\*\(APPROVE/.test(t)) return true;
-  if (/VERDICT:\\s\*\(APPROVE\|REQUEST_CHANGES\)/.test(t)) return true;
-  if (/VERDICT:\[\[:space:\]\]\*approve/i.test(t)) return true;
-  if (/VERDICT:\[\[:space:\]\]\*\(APPROVE/i.test(t)) return true;
-  if (/VERDICT:\s*APPROVE\b/i.test(t)) return true;
-  if (/VERDICT:\s*approve\b/.test(t)) return true;
-  if (/\bAPPROVE\|REQUEST_CHANGES\b/.test(t) && /\bVERDICT\b/.test(t)) return true;
+/**
+ * Normalize a matcher operand for finite classification only: collapse
+ * shell-embedded jq double-backslashes once, map BRE `\(` `\)` `\|` to
+ * ERE forms, and drop surrounding quotes. Not a general unescape.
+ */
+function normalizeMatcherOperand(raw) {
+  let s = String(raw || "").trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    s = s.slice(1, -1);
+  }
+  // jq-in-shell source often stores `\\s` (two bytes) for one regex `\s`.
+  s = s.replace(/\\\\/g, "\\");
+  // BRE escaped group/alternation markers → flat ERE-shaped text.
+  s = s.replace(/\\[(]/g, "(").replace(/\\[)]/g, ")").replace(/\\[|]/g, "|");
+  return s;
+}
+
+function stripVerdictAnchorNoise(rest) {
+  let s = String(rest || "");
+  // Leading anchors / line-prefix groups used by the live jq body_verdict.
+  s = s.replace(/^\(\^\|\\n\)/, "");
+  s = s.replace(/^\(\^\|\n\)/, "");
+  s = s.replace(/^\^/, "");
+  // Whitespace-class between VERDICT: and the token/group (`[[:space:]]*`, `\s*`).
+  s = s.replace(/^(?:\[\[:space:\]\][*+]+|\\s[*+]+|\s+)/, "");
+  // Trailing whitespace-class and end anchor.
+  s = s.replace(/(?:\[\[:space:\]\][*+]+|\\s[*+]+|\s+)$/, "");
+  s = s.replace(/\$$/, "");
+  s = s.replace(/(?:\[\[:space:\]\][*+]+|\\s[*+]+|\s+)$/, "");
+  return s.trim();
+}
+
+/**
+ * True when a single alternation/literal payload is not an exact
+ * uppercase identifier. Wildcards, classes, quantifiers, optional
+ * punctuation, hyphens, escapes, and lowercase all fail closed.
+ * lossy-alt-normalize-forbidden: never strip these into CANONICAL.
+ */
+function verdictPayloadIsNonLiteral(tok) {
+  const t = String(tok || "");
+  if (!t) return true;
+  if (t !== t.toUpperCase()) return true;
+  if (/[.*+?{}[\]\\-]/.test(t)) return true;
+  if (!/^[A-Z][A-Z0-9_]*$/.test(t)) return true;
   return false;
 }
 
-function harnessVerdictRegexGroupTokens(text) {
-  const tokens = new Set();
-  const t = String(text || "");
-  // VERDICT: then JS `\s*` or POSIX `[[:space:]]*`, then a pipe group.
-  const re = /VERDICT:(?:\\s\*|\[\[:space:\]\]\*|\s*)\(([^)]*)\)/gi;
-  let m;
-  while ((m = re.exec(t)) !== null) {
-    for (const part of m[1].split("|")) {
-      const tok = String(part || "")
-        .replace(/[^A-Za-z0-9_]/g, "")
-        .toUpperCase();
-      if (tok) tokens.add(tok);
-    }
+function tokenizeFlatAlternation(inner) {
+  const parts = String(inner || "").split("|");
+  const tokens = [];
+  for (const part of parts) {
+    const t = String(part || "").trim();
+    // Empty alt (including a stripped wildcard) is not a canonical token.
+    if (!t || verdictPayloadIsNonLiteral(t)) return null;
+    tokens.push(t);
   }
   return tokens;
 }
 
-function harnessAcceptsPass(text) {
-  const t = String(text || "");
-  if (/VERDICT:\\s\*\(PASS/.test(t)) return true;
-  if (/VERDICT:\[\[:space:\]\]\*PASS/i.test(t)) return true;
-  if (/VERDICT:\s*PASS\b/i.test(t)) return true;
-  if (/\bVERDICT: PASS\b/.test(t)) return true;
-  // PASS as a regex alternative in a VERDICT matcher, including an
-  // APPROVE-first group such as VERDICT:[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES).
-  // Not a general regex parser: nested groups and non-VERDICT alternations
-  // that later feed a matcher are residual NLP/regex limitations.
-  if (/\bVERDICT\b/.test(t) && /\bAPPROVE\|PASS\b/.test(t)) return true;
-  if (harnessVerdictRegexGroupTokens(t).has("PASS")) return true;
-  return false;
+/** `$VAR` / `${VAR}` matcher operands. Variables are not resolved. */
+function isOpaqueShellVarOperand(raw) {
+  return /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(String(raw || "").trim());
+}
+
+/**
+ * Classify one matcher pattern operand as CANONICAL, ACCEPTS_PASS, or
+ * INDETERMINATE. Finite allowlist only — nested/split/depth forms fail
+ * closed without recursive expansion. Extracted verdict-bearing operands
+ * that are neither canonical nor PASS-classified are INDETERMINATE.
+ *
+ * @param {string} raw
+ * @returns {"CANONICAL"|"ACCEPTS_PASS"|"INDETERMINATE"|null}
+ */
+export function classifyVerdictMatcherOperand(raw) {
+  const original = String(raw || "");
+  if (isOpaqueShellVarOperand(original)) return VERDICT_OPERAND_INDETERMINATE;
+  if (!/VERDICT:/i.test(original)) return null;
+  const norm = normalizeMatcherOperand(original);
+  // Inline case-insensitive flags expand the language (approve vs APPROVE).
+  if (/\(\?[a-z]*i[a-z]*\)/i.test(original) || /\(\?[a-z]*i[a-z]*\)/i.test(norm)) {
+    return VERDICT_OPERAND_INDETERMINATE;
+  }
+  const verdictAt = norm.search(/VERDICT:/i);
+  if (verdictAt < 0) return null;
+  let rest = norm.slice(verdictAt + "VERDICT:".length);
+  rest = stripVerdictAnchorNoise(rest);
+
+  // Generic shape detector: any non-space token (PASS, APPROVE!, WOBBLE).
+  // Not an allowlisted acceptor — do not promote to CANONICAL and do not
+  // fail the live shape+allowlist harness (return null = ignore).
+  // shape-matcher-not-canonical: never return CANONICAL for this operand.
+  if (
+    VERDICT_SHAPE_OPERAND_RE.test(norm) ||
+    /^\[\[:space:\]\]\+\[\^\[:space:\]\]$/.test(rest)
+  ) {
+    return null; // shape-matcher-not-canonical
+  }
+
+  // Nested or split parentheses inside the payload → indeterminate.
+  if (rest.includes("(")) {
+    if (!(rest.startsWith("(") && rest.endsWith(")"))) {
+      return VERDICT_OPERAND_INDETERMINATE;
+    }
+    const inner = rest.slice(1, -1);
+    if (/[()]/.test(inner)) {
+      return VERDICT_OPERAND_INDETERMINATE;
+    }
+    const alts = tokenizeFlatAlternation(inner);
+    if (!Array.isArray(alts) || !alts.length) {
+      return VERDICT_OPERAND_INDETERMINATE;
+    }
+    const unknown = alts.filter(
+      (t) => !VERDICT_CANONICAL_TOKENS.has(t) && !VERDICT_PASS_TOKENS.has(t)
+    );
+    if (unknown.length) return VERDICT_OPERAND_INDETERMINATE;
+    if (alts.some((t) => VERDICT_PASS_TOKENS.has(t))) {
+      return VERDICT_OPERAND_ACCEPTS_PASS;
+    }
+    if (alts.some((t) => VERDICT_CANONICAL_TOKENS.has(t))) {
+      return VERDICT_OPERAND_CANONICAL;
+    }
+    return VERDICT_OPERAND_INDETERMINATE;
+  }
+
+  // Exact single-token literals only. Do not strip metacharacters,
+  // punctuation, hyphens, or case into an allowlisted token.
+  const exact = rest.trim();
+  if (!exact || verdictPayloadIsNonLiteral(exact)) {
+    if (exact && exact.toUpperCase() === "PASS" && !/[.*+?{}[\]\\]/.test(exact)) {
+      return VERDICT_OPERAND_ACCEPTS_PASS;
+    }
+    return VERDICT_OPERAND_INDETERMINATE;
+  }
+  if (VERDICT_PASS_TOKENS.has(exact)) return VERDICT_OPERAND_ACCEPTS_PASS;
+  if (VERDICT_CANONICAL_TOKENS.has(exact)) return VERDICT_OPERAND_CANONICAL;
+  return VERDICT_OPERAND_INDETERMINATE;
+}
+
+/**
+ * Bounded one-line quote-aware words for grep argv only. Handles
+ * single/double quotes and backslash escapes inside double quotes.
+ * Not a general shell parser: no ANSI-C $'...', no line continuations,
+ * no nested scripts, no heredoc bodies.
+ */
+function boundedLineShellWords(line) {
+  const src = String(line || "");
+  const words = [];
+  let i = 0;
+  while (i < src.length) {
+    while (i < src.length && /[ \t]/.test(src[i])) i += 1;
+    if (i >= src.length) break;
+    // Unquoted comment start ends the executable remainder of the line.
+    if (src[i] === "#") break;
+    let word = "";
+    let state = "none";
+    while (i < src.length) {
+      const c = src[i];
+      if (state === "single") {
+        i += 1;
+        if (c === "'") state = "none";
+        else word += c;
+        continue;
+      }
+      if (state === "double") {
+        i += 1;
+        if (c === "\\") {
+          if (i < src.length) {
+            word += src[i];
+            i += 1;
+          }
+          continue;
+        }
+        if (c === '"') state = "none";
+        else word += c;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        state = c === "'" ? "single" : "double";
+        i += 1;
+        continue;
+      }
+      if (c === "\\" && i + 1 < src.length) {
+        word += src[i + 1];
+        i += 2;
+        continue;
+      }
+      if (/[ \t]/.test(c) || c === "#") break;
+      word += c;
+      i += 1;
+    }
+    if (word) words.push(word);
+  }
+  return words;
+}
+
+function grepFamilyBase(word) {
+  let w = String(word || "");
+  if (
+    (w.startsWith("'") && w.endsWith("'")) ||
+    (w.startsWith('"') && w.endsWith('"'))
+  ) {
+    w = w.slice(1, -1);
+  }
+  const slash = w.lastIndexOf("/");
+  return slash === -1 ? w : w.slice(slash + 1);
+}
+
+/** Finite grep short options that consume the next argv word. */
+const GREP_ONE_ARG_SHORT = new Set(["e", "f", "m", "A", "B", "C", "D", "d"]);
+/** Finite grep short options that do not consume a following word. */
+const GREP_ZERO_ARG_SHORT = new Set([
+  ..."qiEFGPwxvclLnHhosarRby".split(""),
+]);
+/** Finite grep long options that consume a value (`--name VALUE` or `--name=`). */
+const GREP_ONE_ARG_LONG = new Set([
+  "regexp", "file", "max-count", "after-context", "before-context", "context",
+  "devices", "directories", "label", "exclude", "exclude-from", "exclude-dir",
+  "include", "binary-files",
+]);
+/** Finite grep long options that take no value. */
+const GREP_ZERO_ARG_LONG = new Set([
+  "ignore-case", "extended-regexp", "fixed-strings", "basic-regexp",
+  "perl-regexp", "word-regexp", "line-regexp", "invert-match", "count",
+  "files-with-matches", "files-without-match", "line-number", "with-filename",
+  "no-filename", "only-matching", "no-messages", "text", "recursive",
+  "dereference-recursive", "quiet", "silent",
+]);
+const GREP_INDETERMINATE_ARGV = "VERDICT: INDETERMINATE_GREP_ARGV";
+
+/**
+ * Extract VERDICT-bearing grep/egrep pattern operands from one physical
+ * line. Recognizes default-BRE positional patterns (`grep -q '…'`),
+ * combined short bundles (`grep -Eq` / `grep -Eqi`), `-e`/`--regexp`,
+ * and a finite table of argument-consuming options (`-m 1`, `--max-count`).
+ * Unrecognized or ambiguous argv fails closed rather than guessing the
+ * positional pattern. Not a general grep/shell parser.
+ */
+function extractGrepVerdictOperandsFromLine(line) {
+  const words = boundedLineShellWords(line);
+  const out = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const base = grepFamilyBase(words[i]);
+    if (base !== "grep" && base !== "egrep") continue;
+    let j = i + 1;
+    let positional = null;
+    let ambiguous = false;
+    while (j < words.length) {
+      const arg = words[j];
+      if (arg === "--") {
+        j += 1;
+        if (j < words.length && positional == null) positional = words[j];
+        break;
+      }
+      if (arg.startsWith("--regexp=")) {
+        out.push(arg.slice("--regexp=".length));
+        j += 1;
+        continue;
+      }
+      if (arg === "--regexp" || arg === "-e") {
+        j += 1;
+        if (j < words.length) out.push(words[j]);
+        else ambiguous = true;
+        j += 1;
+        continue;
+      }
+      // Attached -ePATTERN only (not bundled -Eq / -Eqi).
+      if (/^-e[^-=]/.test(arg)) {
+        out.push(arg.slice(2));
+        j += 1;
+        continue;
+      }
+      if (arg.startsWith("--")) {
+        const eq = arg.indexOf("=");
+        const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+        if (GREP_ONE_ARG_LONG.has(name)) {
+          // Pattern-file contents are not resolved — fail closed.
+          if (name === "file") out.push(GREP_INDETERMINATE_ARGV);
+          if (eq !== -1) {
+            j += 1;
+            continue;
+          }
+          j += 1;
+          if (j < words.length) j += 1;
+          else ambiguous = true;
+          continue;
+        }
+        if (eq === -1 && GREP_ZERO_ARG_LONG.has(name)) {
+          j += 1;
+          continue;
+        }
+        ambiguous = true;
+        break;
+      }
+      if (arg.startsWith("-") && arg !== "-") {
+        const body = arg.slice(1);
+        if (body.length === 1 && GREP_ONE_ARG_SHORT.has(body)) {
+          // grep-f-file-indeterminate: -f FILE is an unresolved pattern source.
+          if (body === "f") out.push(GREP_INDETERMINATE_ARGV);
+          j += 1;
+          if (j < words.length) j += 1;
+          else ambiguous = true;
+          continue;
+        }
+        if (body.length > 1 && GREP_ONE_ARG_SHORT.has(body[0])) {
+          // Attached value (`-m1`). Not a general bundled parser.
+          if (body[0] === "f") out.push(GREP_INDETERMINATE_ARGV);
+          j += 1;
+          continue;
+        }
+        if ([...body].every((ch) => GREP_ZERO_ARG_SHORT.has(ch))) {
+          j += 1;
+          continue;
+        }
+        ambiguous = true;
+        break;
+      }
+      if (positional == null) positional = arg;
+      j += 1;
+    }
+    if (ambiguous) out.push(GREP_INDETERMINATE_ARGV);
+    else if (positional != null) {
+      // grep-var-positional-indeterminate: $PAT / ${PAT} is not resolved.
+      if (isOpaqueShellVarOperand(positional)) {
+        out.push(GREP_INDETERMINATE_ARGV);
+      } else {
+        out.push(positional);
+      }
+    }
+  }
+  return out.filter((p) => /VERDICT:/i.test(String(p || "")));
+}
+
+/**
+ * Collect matcher pattern operands from the two canonical harness files.
+ * Sites: case-arm literals, `[[ =~ ]]` operands (including opaque `$VAR`),
+ * jq test() strings, and grep/egrep pattern operands (default BRE `-q`,
+ * bundled `-Eq`/`-Eqi`, `-e`/`--regexp`, and finite argument-consuming
+ * options such as `-m`). Heredoc prompt prose and bare
+ * `$VERDICT_TEXT | grep -qi TOKEN` comparisons are not sites.
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function extractHarnessMatcherOperands(text) {
+  const src = String(text || "");
+  const out = [];
+  const push = (operand) => {
+    const s = String(operand || "").trim();
+    if (s && /VERDICT:/i.test(s)) out.push(s);
+  };
+
+  // case-arm-position-only: quoted VERDICT: TOKEN followed by | or ), so
+  // echo "VERDICT: APPROVE" is not an acceptor. Glob *"VERDICT: TOKEN"*
+  // is collected separately as indeterminate (fenced/multiple-verdict).
+  {
+    const re =
+      /(^|[\s|])["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["'](?=\s*(?:\)|\|\s*["']|\|\s*$))/gi;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const operand = m[2] || m[1];
+      const token = String(operand || "")
+        .replace(/^VERDICT:\s*/i, "")
+        .trim();
+      const folded = token.toUpperCase().replace(/-/g, "_");
+      if (token === "APPROVE" || token === "REQUEST_CHANGES") {
+        push(operand);
+      } else if (folded === "PASS") {
+        push(operand);
+      } else if (VERDICT_LIVE_CASE_ARM_ALIASES.has(folded)) {
+        // Live exact-string aliases (approve, changes-requested): not regex
+        // sites and not allowlisted spellings. Skip so the live harness
+        // stays green via its exact APPROVE / REQUEST_CHANGES arms.
+      } else {
+        push(operand);
+      }
+    }
+  }
+  {
+    const globRe = /\*["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["']\*/gi;
+    let gm;
+    while ((gm = globRe.exec(src)) !== null) push(gm[0]);
+  }
+
+  // [[ ... =~ OPERAND ]] — OPERAND may be bare or quoted. Use \S+ so
+  // character-classes like [[:space:]] inside the operand are kept; the
+  // trailing space before ]] terminates the bare operand. Opaque
+  // `$VAR` / `${VAR}` operands are kept and classified indeterminate;
+  // variables are not resolved.
+  {
+    const re = /=~\s*(?:"([^"]*)"|'([^']*)'|(\S+))\s*\]\]/gi;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const operand = m[1] || m[2] || m[3] || "";
+      if (isOpaqueShellVarOperand(operand)) out.push(operand.trim());
+      else push(operand);
+    }
+  }
+
+  // jq test("...") string literals (shell-embedded). capture() named-group
+  // wrappers are parallel to test() in the live harness; classifying them
+  // separately would require a general regex parser (#264 residual).
+  {
+    const re = /\btest\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)')/gi;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const lit = m[1] != null ? m[1] : m[2];
+      if (lit && /VERDICT:/i.test(lit)) push(lit);
+    }
+  }
+
+  // grep/egrep pattern operands per physical line (comment lines skipped).
+  for (const line of src.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    for (const pat of extractGrepVerdictOperandsFromLine(line)) push(pat);
+  }
+
+  return out;
+}
+
+function classifyHarnessVerdictOperands(text) {
+  let sawCanonicalApprove = false;
+  let acceptsPass = false;
+  let indeterminate = false;
+  for (const operand of extractHarnessMatcherOperands(text)) {
+    const kind = classifyVerdictMatcherOperand(operand);
+    if (kind === VERDICT_OPERAND_ACCEPTS_PASS) {
+      acceptsPass = true;
+      // PASS groups that also list APPROVE still count as an APPROVE path.
+      if (/APPROVE/i.test(normalizeMatcherOperand(operand))) {
+        sawCanonicalApprove = true;
+      }
+      continue;
+    }
+    if (kind === VERDICT_OPERAND_INDETERMINATE) {
+      indeterminate = true;
+      continue;
+    }
+    if (kind !== VERDICT_OPERAND_CANONICAL) continue;
+    const norm = normalizeMatcherOperand(operand);
+    // Canonical approval requires the exact APPROVE token, not the generic
+    // shape detector (shape-matcher-not-canonical).
+    if (/\bAPPROVE\b/.test(norm)) { // shape-matcher-not-canonical
+      sawCanonicalApprove = true;
+    }
+  }
+  return { sawCanonicalApprove, acceptsPass, indeterminate };
 }
 
 /**
  * Document and merge-harness reviewer verdicts must agree. Missing harness
- * files fail closed (cannot determine authority). A VERDICT regex group
- * that lists PASS as an alternative (including APPROVE-first
- * `[[:space:]]*(APPROVE|PASS|REQUEST_CHANGES)`) is a harness accept of
- * PASS; `APPROVE|REQUEST_CHANGES` without PASS stays green. Residual:
- * nested groups and non-VERDICT alternations are not parsed.
+ * files fail closed (cannot determine authority). Matcher operands are
+ * classified by a finite three-way allowlist (CANONICAL / ACCEPTS_PASS /
+ * INDETERMINATE). PASS alternatives emit E_VERDICT_VOCABULARY regardless
+ * of APPROVE decoys; nested/split/depth forms emit E_VERDICT_FORM.
  *
  * @param {{
  *   agentsText: string,
@@ -2490,9 +2917,9 @@ export function reviewVerdictVocabularyFindings(input) {
       });
       continue;
     }
-    const acceptsApprove = harnessAcceptsApprove(text);
-    const acceptsPass = harnessAcceptsPass(text);
-    if (!acceptsApprove) {
+    const { sawCanonicalApprove, acceptsPass, indeterminate } =
+      classifyHarnessVerdictOperands(text);
+    if (!sawCanonicalApprove) {
       findings.push({
         code: "E_VERDICT_VOCABULARY",
         message: `${rel} does not accept VERDICT: ${CANONICAL_REVIEW_VERDICT_POSITIVE} (document/harness disagreement)`,
@@ -2502,6 +2929,12 @@ export function reviewVerdictVocabularyFindings(input) {
       findings.push({
         code: "E_VERDICT_VOCABULARY",
         message: `${rel} accepts VERDICT: PASS; canonical PR-review positive verdict is ${CANONICAL_REVIEW_VERDICT_POSITIVE}`,
+      });
+    }
+    if (indeterminate) {
+      findings.push({
+        code: "E_VERDICT_FORM",
+        message: `${rel} has indeterminate executable VERDICT matcher operand (fail closed)`,
       });
     }
   }
@@ -2902,10 +3335,11 @@ const BODY_SKIP_GREEN_RE =
 const BODY_SKIP_GREEN_RE2 =
   /\b(?:may|can)\s+skip\b[\s\S]{0,60}\bgreen gate\b/i;
 const PERMISSION_PRED_RE =
-  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized)|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+permission\s+to|may|can|permitted|allowed|authorized)\b/gi;
+  /\b(?:(?:is|are)\s+(?:permitted|allowed|authorized|acceptable)|(?:allowed|permitted|authorized)\s+to|(?:has|have|had)\s+(?:(?:a|the)\s+)?(?:permission|license|licence)\s+to|may|can|grants?|permitted|allowed|authorized|acceptable)\b/gi;
 const OWN_WORK_TOPIC_RE =
-  /\b(?:(?:its|their|your|our|my)\s+own(?:\s+(?:work|generation))?|own\s+work|review of\s+(?:its|their|your|our|my)\s+own)\b/i;
+  /\b(?:(?:its|their|your|our|my)\s+own(?:\s+(?:work|generation))?|own\s+work|review of\s+(?:its|their|your|our|my)\s+own|work\s+(?:it|they|you|he|she)\s+generated)\b/i;
 const REVIEW_ACT_RE = /\b(?:review|evaluate|evaluating|grade|grading)\b/i;
+const REVIEWED_BY_YOU_RE = /\breviewed\s+by\s+you\b/i;
 
 function grantPolarityUnits(hay) {
   const out = [];
@@ -2992,6 +3426,10 @@ function sameAgentGrantAt(text, span) {
   if (/\b(?:be\s+)?reviewed\s+by\s+(?:the\s+)?same[\s-]?agent\b/i.test(afterEnd)) {
     return true;
   }
+  // Narrow #241 gap: passive "reviewed by you" is a self-identity grant.
+  if (REVIEWED_BY_YOU_RE.test(afterEnd) || REVIEWED_BY_YOU_RE.test(after)) {
+    return true;
+  }
   return false;
 }
 
@@ -3021,7 +3459,10 @@ function selfReviewGrantTopic(unit) {
     }
   }
   if (!sameAgentGrant && !ownGrant) return null;
-  if (/\bgenerat/i.test(text) && /\b(?:own|self)\b/i.test(text) && ownWorkGrantedIn(text)) {
+  if (
+    (/\bgenerat/i.test(text) && /\b(?:own|self)\b/i.test(text) && ownWorkGrantedIn(text)) ||
+    (/\bwork\s+(?:it|they|you|he|she)\s+generated\b/i.test(text) && ownWorkGrantedIn(text))
+  ) {
     return "own generation";
   }
   if (/\bself[\s-]?review\b/i.test(text) && !clauseSubjectIsIndependent(text)) {
@@ -3039,8 +3480,9 @@ function selfReviewGrantTopic(unit) {
  * under local not/except/`other than` polarity are not grants. Noun
  * permission (`has permission to`) is a grant. Local modal/passive
  * polarity is classified before a grant is recorded. Residual: this is
- * not general NLP — besides/aside from/apart from and license-to-X
- * paraphrases are not modeled.
+ * not general NLP — besides/aside from/apart from remain residual. Narrow
+ * #241 lexicon additions: can+work-generated, grants, by you, acceptable,
+ * and license/licence to.
  */
 function bodySelfReviewGrantTopic(hay) {
   for (const unit of grantPolarityUnits(hay)) {

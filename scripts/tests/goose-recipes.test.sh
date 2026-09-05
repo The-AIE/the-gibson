@@ -2295,7 +2295,7 @@ expect_fail() {
   local name="$1" out="$2" rc="$3" needle="${4:-}"
   if [[ "$rc" -ne 0 ]]; then
     if [[ -n "$needle" ]]; then
-      if echo "$out" | grep -q "$needle"; then
+      if echo "$out" | grep "$needle" >/dev/null; then
         ok "$name"
       else
         bad "$name (rc=$rc but missing needle '$needle'): $out"
@@ -2421,7 +2421,7 @@ for role in "${ROLE_RECIPES[@]}"; do
     bad "${role}.yaml playbook-sha256 drift (pin=${pinned:0:12}… actual=${actual:0:12}…) — recompute after playbook edit"
   fi
   # No @latest in role recipes (belt + suspenders; structural checker also enforces)
-  if grep -nE '@latest|[[:space:]]latest[[:space:]]*$' "$recipe" | grep -vE '^\s*#' | grep -vqE 'do not|never|not |unpinned|comment'; then
+  if grep -nE '@latest|[[:space:]]latest[[:space:]]*$' "$recipe" | grep -vE '^\s*#' | grep -vE 'do not|never|not |unpinned|comment' >/dev/null; then
     # Allow only comment mentions of latest
     if grep -nE '@latest' "$recipe" | grep -vE '#|do not|never|unpinned|Example'; then
       bad "${role}.yaml contains @latest pin"
@@ -2526,7 +2526,7 @@ else
 fi
 
 # Must not embed real secret-shaped values or absolute private homes as examples
-if grep -E '/Users/[^/]+/' "$FINDINGS_TEMPLATE" | grep -vqE 'placeholder|example|<|Absolute path to the Gibson'; then
+if grep -E '/Users/[^/]+/' "$FINDINGS_TEMPLATE" | grep -vE 'placeholder|example|<|Absolute path to the Gibson' >/dev/null; then
   # template should not show concrete /Users/me secrets; allow none
   if grep -E '/Users/[a-zA-Z0-9._-]+/' "$FINDINGS_TEMPLATE"; then
     bad "findings template contains absolute private home path"
@@ -5091,8 +5091,11 @@ else
 fi
 
 echo
-# Tally line includes optional-validate disposition so run-all / greps cannot
-# treat "exit 0 + N passed" as "goose validated" when status is NOT RUN (#95).
-echo "goose-recipes.test.sh: $PASS passed, $FAIL failed, goose-validate: $GOOSE_VALIDATE_STATUS"
+# Informational validate status is not terminal evidence (#278): run-all
+# classifies the last non-empty line only. Keep the tally last, in the exact
+# supported suffix shape. The optional goose-validate clause is a single
+# non-space token so greps cannot treat "exit 0 + N passed" as "goose
+# validated" when status is NOT RUN (#95).
 echo "goose recipe validate status: $GOOSE_VALIDATE_STATUS"
+echo "goose-recipes.test.sh: $PASS passed, $FAIL failed, goose-validate: ${GOOSE_VALIDATE_STATUS%% *}"
 [[ "$FAIL" -eq 0 ]]
