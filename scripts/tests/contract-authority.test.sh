@@ -4662,6 +4662,20 @@ function operatorAdjacentHashComment() {
     "esac;# note VERDICT:*PASS)",
   ].join("\n");
 }
+function extglobOpHashLiteralPassArm(op) {
+  return [
+    "#!/bin/bash",
+    "shopt -s extglob",
+    "case \"$1\" in",
+    "  " + op + "(#literal|VERDICT:*PASS)) printf \"unsafe match\\n\" ;;",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function extglobAtHashLiteralPassArm() {
+  return extglobOpHashLiteralPassArm("@");
+}
 function commandSubstHashComment() {
   return [
     "#!/bin/bash",
@@ -4771,6 +4785,18 @@ function mustExtractSentinel(name, text) {
       return [{
         code: "E_FALSE_GREEN",
         message: name + " missing INDETERMINATE_GREP_ARGV got " + JSON.stringify(ops),
+      }];
+    }
+    return [];
+  };
+}
+function mustExtractLexical(name, text) {
+  return () => {
+    const ops = extractHarnessMatcherOperands(text);
+    if (!ops.includes("VERDICT: INDETERMINATE_LEXICAL")) {
+      return [{
+        code: "E_FALSE_GREEN",
+        message: name + " missing INDETERMINATE_LEXICAL got " + JSON.stringify(ops),
       }];
     }
     return [];
@@ -5675,6 +5701,42 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "extglob-at-hash-literal-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(extglobAtHashLiteralPassArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "extglob-plus-hash-literal-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(extglobOpHashLiteralPassArm("+"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "extglob-qmark-hash-literal-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(extglobOpHashLiteralPassArm("?"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "extglob-star-hash-literal-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(extglobOpHashLiteralPassArm("*"), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
     name: "command-subst-hash-comment-fail-closed",
     findings: () => reviewVerdictVocabularyFindings({
       agentsText,
@@ -5682,6 +5744,14 @@ const rows = [
     }),
     code: "E_VERDICT_FORM",
     msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "command-subst-hash-comment-is-dollar-lexical",
+    findings: mustExtractLexical(
+      "command-subst-hash-comment-is-dollar-lexical",
+      commandSubstHashComment()
+    ),
+    expectEmpty: true,
   },
   {
     name: "escaped-paren-literal-case-arm-fail-closed",
@@ -6401,6 +6471,8 @@ const escapedSpaceHashHarness =
   "#!/bin/bash\ntag=x\\ #not-comment; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const operatorAdjacentHashHarness =
   "#!/bin/bash\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac;# note VERDICT:*PASS)\n";
+const extglobAtHashLiteralPassHarness =
+  "#!/bin/bash\nshopt -s extglob\ncase \"$1\" in\n  @(#literal|VERDICT:*PASS)) printf \"unsafe match\\n\" ;;\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const escapedParenLiteralArmHarness =
   "#!/bin/bash\ncase \"$value\" in\n  \\(VERDICT:*PASS\\)) printf pass ;;\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const evenBackslashCloseHarness =
@@ -6852,8 +6924,7 @@ try {
   {
     const from = `    prev === ";" ||
     prev === "|" ||
-    prev === "&" ||
-    prev === "("`;
+    prev === "&"`;
     const to = `    false`;
     if (!original.includes(from)) throw new Error("operator-adjacent comment-start site missing");
     const mod = await loadMutant(original.replace(from, to), "ophash");
@@ -6863,6 +6934,28 @@ try {
         agentsText,
         harnessFiles: {
           "scripts/second-opinion.sh": operatorAdjacentHashHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `    prev === ";" ||
+    prev === "|" ||
+    prev === "&"`;
+    const to = `    prev === ";" ||
+    prev === "|" ||
+    prev === "&" ||
+    prev === "("`;
+    if (!original.includes(from)) throw new Error("paren-not-comment-boundary site missing");
+    const mod = await loadMutant(original.replace(from, to), "parenhash");
+    expectKilled(
+      "tooth-extglob-paren-not-comment-boundary-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": extglobAtHashLiteralPassHarness,
           "scripts/release-preflight.sh": approveOnly,
         },
       }),
@@ -7798,6 +7891,55 @@ if [[ "$rc" -eq 0 ]]; then
   ok "benign: operator-adjacent ;# comment VERDICT:*PASS) is not a case-arm site"
 else
   bad "benign operator-adjacent hash comment (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'shopt -s extglob' \
+  'case "$1" in' \
+  '  @(#literal|VERDICT:*PASS)) printf "unsafe match\n" ;;' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: extglob @(#literal|VERDICT:*PASS) case arm fails closed"
+else
+  bad "mutation extglob at-hash-literal VERDICT:*PASS (rc=$rc): $out"
+fi
+
+for extglob_op in '+' '?' '*'; do
+  printf '%s\n' '#!/bin/bash' \
+    'shopt -s extglob' \
+    'case "$1" in' \
+    "  ${extglob_op}(#literal|VERDICT:*PASS)) printf \"unsafe match\\n\" ;;" \
+    '  "VERDICT: APPROVE") : ;;' \
+    '  "VERDICT: REQUEST_CHANGES") : ;;' \
+    'esac' \
+    > "$SANDBOX/scripts/second-opinion.sh"
+  out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+  if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+    && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+    ok "mutation: extglob ${extglob_op}(#literal|VERDICT:*PASS) case arm fails closed"
+  else
+    bad "mutation extglob ${extglob_op}-hash-literal VERDICT:*PASS (rc=$rc): $out"
+  fi
+done
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  VERDICT:*PAS[#S]) printf HIT ;;' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: bracket-class VERDICT:*PAS[#S]) case arm fails closed"
+else
+  bad "mutation bracket-class hash VERDICT:*PAS[#S] (rc=$rc): $out"
 fi
 
 printf '%s\n' '#!/bin/bash' \

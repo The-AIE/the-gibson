@@ -2620,7 +2620,10 @@ function shellSubstitutionStartAt(src, i) {
 
 /**
  * Unquoted `#` starts a comment at start-of-line, after unescaped
- * whitespace, or after an unescaped shell operator `;` `|` `&` `(`.
+ * whitespace, or after an unescaped command separator `;` `|` `&`.
+ * `(` is not a separator here: `@(`, `!(`, `?(`, `*(`, `+(` are
+ * extglob operators where `#` is pattern text, not a comment.
+ * `$(#` is already fail-closed by the `$`/backtick bailout above.
  * An escaped preceding space (odd backslash run) is still mid-word.
  */
 function isShellCommentStart(src, i) {
@@ -2634,8 +2637,7 @@ function isShellCommentStart(src, i) {
     prev === "\t" ||
     prev === ";" ||
     prev === "|" ||
-    prev === "&" ||
-    prev === "("
+    prev === "&"
   );
 }
 
@@ -2659,7 +2661,7 @@ function indexOfCaseArmCloseParen(src, fromIndex) {
  * Quote/comment walk matching boundedLineShellWords: single quotes are
  * literal; double quotes honor backslash; an unquoted `#` starts a
  * trailing shell comment at start-of-line, after unescaped whitespace,
- * or after an unescaped `;` `|` `&` `(`. Mid-word `#` is ordinary text
+ * or after an unescaped `;` `|` `&`. Mid-word `#` is ordinary text
  * (e.g. tag=x#not-comment). Escaped spaces are not comment boundaries.
  * Unquoted or double-quoted `$` or backtick return SHELL_LEXICAL_AMBIGUOUS
  * instead of guessing past an expansion whose runtime value is not in the
