@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/images/branding/gibson-logo-lockup.png" alt="The Gibson — three energized supercomputer towers with the tagline Hack the Planet" width="720">
+</p>
+
 # The Gibson
 
 **The open source harness for vibecoders.**
