@@ -2398,30 +2398,54 @@ GREPQ_HITS=$(perl -e '
 use strict; use warnings;
 my $re      = qr/(?:^|[^|])\|[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
 my $bare_re = qr/^[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
+sub code_lines {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return ();
+  my @raw = <$fh>; close $fh;
+  my $is_mjs = $path =~ /\.mjs$/;
+  my @out;
+  my $in_block = 0;
+  for my $i (0 .. $#raw) {
+    chomp(my $line = $raw[$i]);
+    if (!$is_mjs) {
+      (my $trim = $line) =~ s/^\s+//;
+      push @out, ($trim =~ /^#/) ? "" : $line;
+      next;
+    }
+    my $code = "";
+    my $rest = $line;
+    while (1) {
+      if ($in_block) {
+        if ($rest =~ s{^.*?\*/}{}s) { $in_block = 0; next; }
+        else { $rest = ""; last; }
+      }
+      my $slash_slash = index($rest, "//");
+      my $block_open  = index($rest, "/*");
+      if ($slash_slash == -1 && $block_open == -1) { $code .= $rest; last; }
+      if ($slash_slash != -1 && ($block_open == -1 || $slash_slash < $block_open)) {
+        $code .= substr($rest, 0, $slash_slash);
+        last;
+      }
+      $code .= substr($rest, 0, $block_open);
+      $rest = substr($rest, $block_open + 2);
+      if ($rest =~ s{^.*?\*/}{}s) { next; }
+      else { $in_block = 1; $rest = ""; last; }
+    }
+    push @out, $code;
+  }
+  return @out;
+}
 sub scan_file {
   my ($path) = @_;
-  open my $fh, "<", $_ or return;
-  my @lines = <$fh>; close $fh;
-  my $is_mjs = $path =~ /\.mjs$/;
-  my $in_block = 0;
+  my @lines = code_lines($path);
   my $prev_trim = "";
   for my $i (0 .. $#lines) {
-    chomp(my $line = $lines[$i]);
+    my $line = $lines[$i];
     (my $trim = $line) =~ s/^\s+//;
-    my $is_comment = 0;
-    if ($is_mjs) {
-      if ($in_block) { $is_comment = 1; $in_block = 0 if $trim =~ m{\*/}; }
-      elsif ($trim =~ m{^//}) { $is_comment = 1; }
-      elsif ($trim =~ m{^/\*}) { $is_comment = 1; $in_block = 1 unless $trim =~ m{\*/}; }
-    } else {
-      $is_comment = 1 if $trim =~ /^#/;
-    }
-    if (!$is_comment) {
-      if ($line =~ $re) {
-        print "$path:" . ($i + 1) . ": $line\n";
-      } elsif ($line =~ $bare_re && $prev_trim =~ /(?<!\|)\|$/) {
-        print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
-      }
+    if ($line =~ $re) {
+      print "$path:" . ($i + 1) . ": $line\n";
+    } elsif ($line =~ $bare_re && $prev_trim =~ /(?<!\|)\|$/) {
+      print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
     }
     $prev_trim = $trim if $trim ne "";
   }
@@ -2447,27 +2471,54 @@ grepq_scan() {
 use strict; use warnings;
 my $re      = qr/(?:^|[^|])\|[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
 my $bare_re = qr/^[ \t]*grep(?:[ \t]+(?:-[A-Za-z]+|--[a-z-]+(?:=\S*)?))*[ \t]+(?:-[A-Za-z]*q|--quiet|--silent)\b/;
+sub code_lines {
+  my ($path) = @_;
+  open my $fh, "<", $_ or return ();
+  my @raw = <$fh>; close $fh;
+  my $is_mjs = $path =~ /\.mjs$/;
+  my @out;
+  my $in_block = 0;
+  for my $i (0 .. $#raw) {
+    chomp(my $line = $raw[$i]);
+    if (!$is_mjs) {
+      (my $trim = $line) =~ s/^\s+//;
+      push @out, ($trim =~ /^#/) ? "" : $line;
+      next;
+    }
+    my $code = "";
+    my $rest = $line;
+    while (1) {
+      if ($in_block) {
+        if ($rest =~ s{^.*?\*/}{}s) { $in_block = 0; next; }
+        else { $rest = ""; last; }
+      }
+      my $slash_slash = index($rest, "//");
+      my $block_open  = index($rest, "/*");
+      if ($slash_slash == -1 && $block_open == -1) { $code .= $rest; last; }
+      if ($slash_slash != -1 && ($block_open == -1 || $slash_slash < $block_open)) {
+        $code .= substr($rest, 0, $slash_slash);
+        last;
+      }
+      $code .= substr($rest, 0, $block_open);
+      $rest = substr($rest, $block_open + 2);
+      if ($rest =~ s{^.*?\*/}{}s) { next; }
+      else { $in_block = 1; $rest = ""; last; }
+    }
+    push @out, $code;
+  }
+  return @out;
+}
 sub scan_file {
   my ($path) = @_;
-  open my $fh, "<", $_ or return;
-  my @lines = <$fh>; close $fh;
-  my $is_mjs = $path =~ /\.mjs$/;
-  my $in_block = 0;
+  my @lines = code_lines($path);
   my $prev_trim = "";
   for my $i (0 .. $#lines) {
-    chomp(my $line = $lines[$i]);
+    my $line = $lines[$i];
     (my $trim = $line) =~ s/^\s+//;
-    my $is_comment = 0;
-    if ($is_mjs) {
-      if ($in_block) { $is_comment = 1; $in_block = 0 if $trim =~ m{\*/}; }
-      elsif ($trim =~ m{^//}) { $is_comment = 1; }
-      elsif ($trim =~ m{^/\*}) { $is_comment = 1; $in_block = 1 unless $trim =~ m{\*/}; }
-    } else {
-      $is_comment = 1 if $trim =~ /^#/;
-    }
-    if (!$is_comment) {
-      if ($line =~ $re) { print "$path:" . ($i + 1) . ": $line\n"; }
-      elsif ($line =~ $bare_re && $prev_trim =~ /(?<!\|)\|$/) { print "$path:" . ($i + 1) . ": $line\n"; }
+    if ($line =~ $re) {
+      print "$path:" . ($i + 1) . ": $line\n";
+    } elsif ($line =~ $bare_re && $prev_trim =~ /(?<!\|)\|$/) {
+      print "$path:" . ($i + 1) . ": $line  (continuation: previous line ends in |)\n";
     }
     $prev_trim = $trim if $trim ne "";
   }
@@ -2512,6 +2563,17 @@ GQ=grep; printf 'echo x %s %s --binary-files=text -q y\n' '|' "$GQ" > "$GREPQ_MU
 # shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
 GQ=grep; printf 'run: echo x %s %s -q y\n' '|' "$GQ" > "$GREPQ_MUT/.github/workflows/planted.yml"
 [ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [workflow yml missed]"
+: > "$GREPQ_MUT/.github/workflows/planted.yml"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf '/* note */ execSync("seq 1 3 %s %s -q 1");\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [mjs same-line inline block comment before real code missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.mjs"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'const n = 1; /* echo x %s %s -q y */\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.mjs"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: mjs same-line trailing block comment]"
 rm -rf "$GREPQ_MUT"
 if [ -z "$GREPQ_MISSED" ]; then
   ok "L-077 mutation: every planted form caught or correctly ignored (continuation, comments incl. mjs blocks, ||, split clusters, long options, yml)"
