@@ -470,8 +470,8 @@ fetch_remote_base() {
     CLEANUP_FETCH_REASON="git ls-remote --heads origin failed (unreadable remote, not ref absence): $ls_out"
     return 1
   fi
-  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/main$' && main_present=1
-  printf '%s\n' "$ls_out" | grep -Eq $'[\t ]refs/heads/master$' && master_present=1
+  printf '%s\n' "$ls_out" | grep -E $'[\t ]refs/heads/main$' >/dev/null && main_present=1
+  printf '%s\n' "$ls_out" | grep -E $'[\t ]refs/heads/master$' >/dev/null && master_present=1
   if [[ "$main_present" -eq 1 ]]; then
     base=main
   elif [[ "$master_present" -eq 1 ]]; then
@@ -1340,7 +1340,7 @@ terminal_cleanup_release() {
       if ! fresh_term_live=$(claim_ids_all); then
         safe=0
         reason="cannot read authoritative ledger at $fresh_term_ref before terminal artifact mutation — refuse"
-      elif printf '%s\n' "$fresh_term_live" | grep -qxF -- "$id"; then
+      elif printf '%s\n' "$fresh_term_live" | grep -xF -- "$id" >/dev/null; then
         safe=0
         reason="same-ID ledger row for '$id' is live at $fresh_term_ref before terminal artifact mutation — renewed/live generation; refuse worktree/branch/label mutation (bound to PR #$TERMINAL_PR_NUMBER head $TERMINAL_HEAD_SHA, not claim id alone)"
       fi
@@ -1372,7 +1372,7 @@ terminal_cleanup_release() {
       warn "cannot read authoritative ledger at $ref $context — refuse (unreadable is not absence); preserve remaining artifacts and label"
       return 1
     fi
-    if printf '%s\n' "$live" | grep -qxF -- "$id"; then
+    if printf '%s\n' "$live" | grep -xF -- "$id" >/dev/null; then
       warn "same-ID ledger row for '$id' is live at $ref $context — renewed/live generation; refuse remaining mutation (bound to PR #$TERMINAL_PR_NUMBER head $TERMINAL_HEAD_SHA, not claim id alone)"
       return 1
     fi
@@ -1607,7 +1607,7 @@ EOF
       # (#153 exact-head P1) A surviving same-ID ledger row is live work, not
       # a residual to ignore. Terminal cleanup must preserve artifacts/label
       # when the exact target id is still present on the ledger.
-      if printf '%s\n' "$fresh_live" | grep -qxF -- "$id"; then
+      if printf '%s\n' "$fresh_live" | grep -xF -- "$id" >/dev/null; then
         warn "same-ID ledger row for '$id' is still live after terminal cleanup — refuse artifact deletion success; preserving agent-claimed"
         incomplete=1
         preserve_label=1
@@ -1668,7 +1668,7 @@ EOF
       if [[ "$LABELS" == "?" ]]; then
         warn "could not read labels on $repo#$ISSUE — sibling-claim label preservation UNVERIFIED"
         incomplete=1
-      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+      elif ! echo ",$LABELS," | grep ',agent-claimed,' >/dev/null; then
         warn "agent-claimed is ABSENT on $repo#$ISSUE — sibling claim(s) remain but the label is missing; re-add it by hand"
         incomplete=1
       else
@@ -1680,7 +1680,7 @@ EOF
       if [[ "$LABELS" == "?" ]]; then
         warn "could not read labels on $repo#$ISSUE — --keep-label preservation UNVERIFIED"
         incomplete=1
-      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+      elif ! echo ",$LABELS," | grep ',agent-claimed,' >/dev/null; then
         warn "agent-claimed is ABSENT on $repo#$ISSUE — --keep-label required the label to stay"
         incomplete=1
       else
@@ -1694,7 +1694,7 @@ EOF
       if [[ "$LABELS" == "?" ]]; then
         warn "could not re-read labels on #$ISSUE — agent-claimed removal UNVERIFIED"
         incomplete=1
-      elif echo ",$LABELS," | grep -q ',agent-claimed,'; then
+      elif echo ",$LABELS," | grep ',agent-claimed,' >/dev/null; then
         warn "agent-claimed is STILL on $repo#$ISSUE — remove it by hand"
         incomplete=1
       else
@@ -2000,7 +2000,7 @@ EOF
 # True when PR number $1 is still listed as open. Callers must have already
 # proven the read itself succeeded via read_open_pr_numbers.
 open_pr_number_present() {
-  printf '%s\n' "$OPEN_NUMBERS" | grep -qxF -- "$1"
+  printf '%s\n' "$OPEN_NUMBERS" | grep -xF -- "$1" >/dev/null
 }
 
 # Bound open-PR evidence for one exact claim id + PR number (#153 freeze P1).
@@ -2334,7 +2334,7 @@ revalidate_authoritative_union_soft() {
       pr_id=$(cut -f2 <<<"$pr_row")
       pr_number=$(cut -f1 <<<"$pr_row")
       [[ -n "$pr_id" ]] || continue
-      if printf '%s\n' "$ids" | grep -qxF -- "$pr_id"; then
+      if printf '%s\n' "$ids" | grep -xF -- "$pr_id" >/dev/null; then
         # Same-ID open PR always protects — claim id is not generation identity.
         UNION_REFUSE_REASON="open PR #$pr_number carries exact claim id '$pr_id' ($context)"
         warn "revalidate union ($context): $UNION_REFUSE_REASON"
@@ -2736,7 +2736,7 @@ EOF
         if ! OPEN_WT_LIST=$(git worktree list --porcelain 2>&1); then
           warn "cannot enumerate registered worktrees — cannot prove worktree cleanup for '$PR_HEAD_BRANCH': $OPEN_WT_LIST"
           OPEN_INCOMPLETE=1
-        elif printf '%s\n' "$OPEN_WT_LIST" | grep -qxF "branch refs/heads/$PR_HEAD_BRANCH"; then
+        elif printf '%s\n' "$OPEN_WT_LIST" | grep -xF "branch refs/heads/$PR_HEAD_BRANCH" >/dev/null; then
           OPEN_LEFTOVERS="${OPEN_LEFTOVERS}  registered worktree on branch '$PR_HEAD_BRANCH'"$'\n'
         fi
       fi
@@ -2809,8 +2809,8 @@ if [[ "$CLAIM_ID_SET" -eq 1 ]]; then
   if ! claim_id_for_issue "$CLAIM_ID_ARG"; then
     die "--claim-id '$CLAIM_ID_ARG' does not belong to issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
   fi
-  if ! printf '%s\n' "$ALL_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
-    if printf '%s\n' "$ALL_LIVE_IDS" | grep -qxF -- "$CLAIM_ID_ARG"; then
+  if ! printf '%s\n' "$ALL_IDS" | grep -xF -- "$CLAIM_ID_ARG" >/dev/null; then
+    if printf '%s\n' "$ALL_LIVE_IDS" | grep -xF -- "$CLAIM_ID_ARG" >/dev/null; then
       die "--claim-id '$CLAIM_ID_ARG' is live but not a claim for issue $ISSUE${PREFIX:+ (prefix $PREFIX)}"
     fi
     # --pr binds this lookup to one exact PR (#153 review P2). Without it the
@@ -3109,7 +3109,7 @@ residual_after_release() {
   local id
   printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
     [[ -n "$id" ]] || continue
-    printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id" || printf '%s\n' "$id"
+    printf '%s\n' "$TARGET_IDS" | grep -xF -- "$id" >/dev/null || printf '%s\n' "$id"
   done
 }
 RESIDUAL_IDS=$(residual_after_release)
@@ -3535,7 +3535,7 @@ Post-merge cleanup per Law 10 / docs/05." || exit 1
         local _pid _pnum
         _pnum=$(cut -f1 <<<"$_prline")
         _pid=$(cut -f2 <<<"$_prline")
-        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pid"; then
+        if printf '%s\n' "$TARGET_IDS" | grep -xF -- "$_pid" >/dev/null; then
           echo "release-claim.sh: ERROR: pre-push: open PR #${_pnum} carries exact claim id '${_pid}' — refuse remote ledger push" >&2
           exit 1
         fi
@@ -3793,7 +3793,7 @@ if [[ -n "$TARGET_IDS" ]]; then
     targets_remaining=$(
       printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
         [[ -n "$id" ]] || continue
-        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id"; then
+        if printf '%s\n' "$TARGET_IDS" | grep -xF -- "$id" >/dev/null; then
           printf '%s\n' "$id"
         fi
       done
@@ -3801,7 +3801,7 @@ if [[ -n "$TARGET_IDS" ]]; then
     RESIDUAL_IDS=$(
       printf '%s\n' "$ALL_IDS" | while IFS= read -r id; do
         [[ -n "$id" ]] || continue
-        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$id"; then
+        if printf '%s\n' "$TARGET_IDS" | grep -xF -- "$id" >/dev/null; then
           :
         else
           printf '%s\n' "$id"
@@ -3858,7 +3858,7 @@ if [[ -n "$TARGET_IDS" ]]; then
         _pr_id=$(cut -f2 <<<"$_pr_row")
         [[ -n "$_pr_id" ]] || continue
         claim_id_for_issue "$_pr_id" || continue
-        if printf '%s\n' "$TARGET_IDS" | grep -qxF -- "$_pr_id"; then
+        if printf '%s\n' "$TARGET_IDS" | grep -xF -- "$_pr_id" >/dev/null; then
           _open_pr_same_id="${_open_pr_same_id}${_pr_id}"$'\n'
         fi
         _open_pr_siblings="${_open_pr_siblings}${_pr_id}"$'\n'
@@ -3929,7 +3929,7 @@ if [[ -n "$TARGET_IDS" && "$DEFER_WT_BRANCH" -eq 1 ]]; then
           _still=""
           while IFS= read -r _t; do
             [[ -n "$_t" ]] || continue
-            if printf '%s\n' "$post_live" | grep -qxF -- "$_t"; then
+            if printf '%s\n' "$post_live" | grep -xF -- "$_t" >/dev/null; then
               _still="${_still}${_t} "
             fi
           done <<EOF
@@ -4022,7 +4022,7 @@ if command -v gh >/dev/null; then
       if [[ "$LABELS" == "?" ]]; then
         warn "could not read labels on $REPO#$ISSUE — residual-claim label preservation UNVERIFIED"
         INCOMPLETE=1
-      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+      elif ! echo ",$LABELS," | grep ',agent-claimed,' >/dev/null; then
         warn "agent-claimed is ABSENT on $REPO#$ISSUE — residual claims remain but the label is missing; re-add it by hand"
         INCOMPLETE=1
       else
@@ -4043,7 +4043,7 @@ if command -v gh >/dev/null; then
       if [[ "$LABELS" == "?" ]]; then
         warn "could not read labels on $REPO#$ISSUE — --keep-label preservation UNVERIFIED"
         INCOMPLETE=1
-      elif ! echo ",$LABELS," | grep -q ',agent-claimed,'; then
+      elif ! echo ",$LABELS," | grep ',agent-claimed,' >/dev/null; then
         warn "agent-claimed is ABSENT on $REPO#$ISSUE — --keep-label required the label to stay, but it is not present. Re-add it or re-claim before declaring Law 10 done."
         INCOMPLETE=1
       else
@@ -4062,7 +4062,7 @@ if command -v gh >/dev/null; then
     if [[ "$LABELS" == "?" ]]; then
       warn "could not re-read labels on #$ISSUE — agent-claimed removal UNVERIFIED"
       INCOMPLETE=1
-    elif echo ",$LABELS," | grep -q ',agent-claimed,'; then
+    elif echo ",$LABELS," | grep ',agent-claimed,' >/dev/null; then
       warn "agent-claimed is STILL on $REPO#$ISSUE — remove it by hand before declaring Law 10 done"
       INCOMPLETE=1
     else

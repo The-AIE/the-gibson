@@ -144,7 +144,7 @@ dco_unsigned_shas() {
   [[ -n "$log_out" ]] || return 0
   while IFS= read -r sha; do
     [[ -n "$sha" ]] || continue
-    if git -C "$repo" log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+    if git -C "$repo" log -1 --format=%B "$sha" | grep -iE '^Signed-off-by:[[:space:]]+' >/dev/null; then
       continue
     fi
     printf '%s\n' "$sha"
@@ -659,7 +659,7 @@ case "$CMD" in
           label_degraded=1
           remote_status="degraded"
           info "remote halt check degraded: gibson-halt label query failed (gh exit $halt_ec) — continuing with local HALT/GIBSON_HALT only"
-        elif printf '%s' "$halt_out" | grep -q '[0-9]'; then
+        elif printf '%s' "$halt_out" | grep '[0-9]' >/dev/null; then
           remote_status="halted"
           remote_kind="label"
           remote_reason="kill switch: gibson-halt label on an open issue — refusing handoff (remove the label to allow a fresh launch)"
@@ -689,7 +689,7 @@ case "$CMD" in
                 remote_status="halted"
                 remote_kind="sentinel"
                 remote_reason="kill switch: .gibson-halt sentinel on origin/${halt_def} — refusing handoff (delete the file from the default branch to allow a fresh launch)"
-              elif printf '%s' "$halt_out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+              elif printf '%s' "$halt_out" | grep -Ei 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404' >/dev/null; then
                 if [[ "$label_degraded" -eq 1 ]]; then
                   remote_status="degraded"
                 else
