@@ -4619,9 +4619,9 @@ case "$1 $2" in
   "repo view") echo "acme/e2e" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit")
-    if echo "$*" | grep  -- '--add-label' >/dev/null; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "${GH_LABELS_FILE:-/dev/null}"
-    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "${GH_LABELS_FILE:-/dev/null}"
     fi
     ;;
@@ -5372,7 +5372,7 @@ if grep -nE '\*pullRequests\*\|\*openPrNumbers\*\)\s*exit\s+0' "$0" |
     }
     { seen[NR]=$0 }
     END { exit bad+0 }
-  ' "$0" | grep  . >/dev/null; then
+  ' "$0" | grep . >/dev/null; then
     bad "a release-claim fake still accepts pullRequests/openPrNumbers by keyword alone"
   else
     ok "no release-claim fake accepts inventory shape by keyword alone"
@@ -6735,7 +6735,7 @@ lacks "fetch failure no gh mutation" "$(cat "$GH_LOG" 2>/dev/null)" "MUTATED-LAB
 
 echo "#153 r15 · production cleanup has no force/rm-rf/branch -D for claim artifacts"
 if grep -E 'git worktree remove --force|git branch -D|rm -rf "\$wt"|rm -rf "\$\{wt' "$RC" | \
-   grep -v 'tmpwt\|gibson-release-claim\|comment\|#' | grep  . >/dev/null; then
+   grep -v 'tmpwt\|gibson-release-claim\|comment\|#' | grep . >/dev/null; then
   # Allow only disposable strip tmpwt force; claim artifact paths must not match.
   hits=$(grep -nE 'git worktree remove --force|git branch -D' "$RC" | grep -v 'tmpwt' || true)
   if [[ -n "$hits" ]]; then

@@ -106,7 +106,7 @@ reset_logs() {
 
 echo "help / missing token"
 out=$("$FR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep 'L-015' >/dev/null && echo "$out" | grep  -- '--commit' >/dev/null \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'L-015' >/dev/null && echo "$out" | grep -- '--commit' >/dev/null \
   && ok "help" || bad "help"
 unset GH_REVIEWER_TOKEN GIBSON_REVIEWER_TOKEN GH_TOKEN
 out=$("$FR" --pr 1 --repo a/b --event approve --commit "$COMMIT" 2>&1); rc=$?
@@ -117,7 +117,7 @@ echo "missing / invalid commit refused before mutation"
 reset_logs
 export GH_REVIEWER_TOKEN="reviewer-secret-token"
 out=$("$FR" --pr 9 --repo acme/app --event approve --body LGTM 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep  -- '--commit' >/dev/null && ! grep -q reviews "$GH_LOG" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -- '--commit' >/dev/null && ! grep -q reviews "$GH_LOG" \
   && ok "missing --commit exits 2 before gh" \
   || bad "missing commit (rc=$rc log=$(cat "$GH_LOG") out=$out)"
 out=$("$FR" --pr 9 --repo acme/app --event approve --commit "$BAD_UPPER" --body LGTM 2>&1); rc=$?
@@ -137,7 +137,7 @@ export GH_REVIEWER_TOKEN="reviewer-secret-token"
 out=$("$FR" --pr 9 --repo acme/app --event approve --commit "$COMMIT" --dry-run 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && echo "$out" | grep 'dry-run' >/dev/null && echo "$out" | grep "$COMMIT" >/dev/null \
   && ok "dry-run" || bad "dry-run (rc=$rc): $out"
-if grep -q 'reviews' "$GH_LOG" 2>/dev/null || grep 'pr review' "$GH_LOG" 2>/dev/null; then
+if grep -q 'reviews' "$GH_LOG" 2>/dev/null || grep -q 'pr review' "$GH_LOG" 2>/dev/null; then
   bad "dry-run called mutation API"
 else
   ok "dry-run no API post"
@@ -219,7 +219,7 @@ awk '
   }
 ' "$FR" > "$ROOT/raw-field-fr.sh"
 chmod +x "$ROOT/raw-field-fr.sh"
-if grep -q -- '-F "body=@' "$ROOT/raw-field-fr.sh" || grep  -- '--field "body=@' "$ROOT/raw-field-fr.sh" >/dev/null; then
+if grep -q -- '-F "body=@' "$ROOT/raw-field-fr.sh" || grep -q -- '--field "body=@' "$ROOT/raw-field-fr.sh"; then
   bad "red: throwaway copy still uses typed-field for body (mutation vacuous)"
 else
   ok "red: throwaway copy forced body onto raw-field"

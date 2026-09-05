@@ -1920,7 +1920,7 @@ if gh_log_empty; then
 else
   bad "enterprise latch + github.com origin must not touch gh (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
 fi
-if grep -q 'without querying a different repo' "$errf" || grep 'still latched for' "$errf" >/dev/null; then
+if grep -q 'without querying a different repo' "$errf" || grep -q 'still latched for' "$errf"; then
   ok "enterprise latch + github.com origin prints source-mismatch recovery guidance"
 else
   bad "enterprise latch + github.com origin silent (stderr=$(tr '\n' ' ' <"$errf"))"
@@ -2290,7 +2290,7 @@ else
   bad "changed origin must not query source-b (log=$(tr '\n' '|' <"$CALLS/gh.log"))"
 fi
 if grep -q 'previously confirmed remote kill switch still latched' "$errf" \
-    || grep 'stopping without querying a different repo' "$errf" >/dev/null \
+    || grep -q 'stopping without querying a different repo' "$errf" \
     || journal_says "without querying a different repo"; then
   ok "changed origin prints explicit recovery guidance"
 else
@@ -2326,7 +2326,7 @@ if [[ "$sup_rc" -eq 75 ]] && gh_log_empty; then
 else
   bad "supervisor mismatched-source handling failed (rc=$sup_rc log=$(tr '\n' '|' <"$CALLS/gh.log") stderr=$(tr '\n' ' ' <"$sup_err"))"
 fi
-if grep -q 'without querying a different repo' "$sup_err" || grep 'still latched for' "$sup_err" >/dev/null; then
+if grep -q 'without querying a different repo' "$sup_err" || grep -q 'still latched for' "$sup_err"; then
   ok "supervisor prints source-mismatch recovery guidance"
 else
   bad "supervisor silent on source mismatch (stderr=$(tr '\n' ' ' <"$sup_err"))"
@@ -2485,7 +2485,7 @@ run_concurrent_loop_burst() {
   conc_waited=0
   while [[ $conc_waited -lt 90 ]]; do
     # shellcheck disable=SC2009
-    if ! jobs -rp 2>/dev/null | grep  . >/dev/null; then
+    if ! jobs -rp 2>/dev/null | grep . >/dev/null; then
       break
     fi
     sleep 0.5
@@ -2493,7 +2493,7 @@ run_concurrent_loop_burst() {
   done
   still_running=0
   # shellcheck disable=SC2046
-  if jobs -rp 2>/dev/null | grep  . >/dev/null; then
+  if jobs -rp 2>/dev/null | grep . >/dev/null; then
     still_running=1
     # shellcheck disable=SC2046
     kill $(jobs -rp) 2>/dev/null || true
@@ -2728,7 +2728,7 @@ fi
 if grep -nE 'rm -f "\$gate"|rm -f "\$HALT_LOCK_RECLAIM_GATE"|rm -rf "\$gate"|rm -rf "\$HALT_LOCK_RECLAIM_GATE"' "$LOOP" \
     | grep -vE '^[0-9]+:[[:space:]]*#|^[[:space:]]*#' \
     | grep -v '/pid' \
-    | grep  . >/dev/null; then
+    | grep . >/dev/null; then
   bad "kernel-gate: loop.sh still rm's the reclaim gate pathname"
 else
   ok "kernel-gate: no bare reclaim-gate pathname rm in loop.sh"
@@ -3829,13 +3829,13 @@ sleep 0.1 2>/dev/null || sleep 1
 touch "$aba_dir/may_release"
 conc_waited=0
 while [[ $conc_waited -lt 60 ]]; do
-  if ! jobs -rp 2>/dev/null | grep  . >/dev/null; then
+  if ! jobs -rp 2>/dev/null | grep . >/dev/null; then
     break
   fi
   sleep 0.1 2>/dev/null || sleep 1
   conc_waited=$((conc_waited + 1))
 done
-if jobs -rp 2>/dev/null | grep  . >/dev/null; then
+if jobs -rp 2>/dev/null | grep . >/dev/null; then
   bad "kernel-gate-aba: concurrent children exceeded wait budget"
   # shellcheck disable=SC2046
   kill $(jobs -rp) 2>/dev/null || true
@@ -3863,7 +3863,7 @@ while [[ $i -lt $aba_n ]]; do
   fi
   i=$((i + 1))
 done
-if find "$aba_dir/violations" -type f 2>/dev/null | grep  . >/dev/null; then
+if find "$aba_dir/violations" -type f 2>/dev/null | grep . >/dev/null; then
   aba_bad=1
   aba_sample="${aba_sample} violations=$(find "$aba_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
 fi
@@ -4097,7 +4097,7 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
       break
     fi
     # If any violation files already appeared, still let the pack finish.
-    if find "$round_dir/violations" -type f 2>/dev/null | grep  . >/dev/null; then
+    if find "$round_dir/violations" -type f 2>/dev/null | grep . >/dev/null; then
       break
     fi
     sleep 0.01 2>/dev/null || true
@@ -4108,13 +4108,13 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
   # Wait for children (bounded).
   conc_waited=0
   while [[ $conc_waited -lt 120 ]]; do
-    if ! jobs -rp 2>/dev/null | grep  . >/dev/null; then
+    if ! jobs -rp 2>/dev/null | grep . >/dev/null; then
       break
     fi
     sleep 0.1 2>/dev/null || sleep 1
     conc_waited=$((conc_waited + 1))
   done
-  if jobs -rp 2>/dev/null | grep  . >/dev/null; then
+  if jobs -rp 2>/dev/null | grep . >/dev/null; then
     bad "reclaim-stress round $reclaim_round ($seed_kind): children exceeded wait budget"
     reclaim_stress_fail=1
     # shellcheck disable=SC2046
@@ -4145,7 +4145,7 @@ while [[ $reclaim_round -le $RECLAIM_STRESS_ROUNDS ]]; do
     fi
     i=$((i + 1))
   done
-  if find "$round_dir/violations" -type f 2>/dev/null | grep  . >/dev/null; then
+  if find "$round_dir/violations" -type f 2>/dev/null | grep . >/dev/null; then
     round_bad=1
     sample="${sample} violations=$(find "$round_dir/violations" -type f -exec cat {} \; 2>/dev/null | tr '\n' '|');"
   fi

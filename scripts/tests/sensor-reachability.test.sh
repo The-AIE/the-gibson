@@ -315,7 +315,7 @@ if awk '
 else
   # Narrower: the step exists in this workflow and is not under claim-isolation only.
   if grep -nE '^[[:space:]]*run:[[:space:]]+node[[:space:]]+scripts/sensor-reachability\.mjs[[:space:]]*$' "$WF" \
-     | grep  . >/dev/null \
+     | grep . >/dev/null \
      && awk '
           /^  sensors:/ { s=1 }
           /^  [A-Za-z0-9_-]+:/ && !/^  sensors:/ { s=0 }

@@ -4836,7 +4836,7 @@ else
   bad "loop-fleet.sh does not source the shared wall-timeout helper"
 fi
 if grep -n 'wall-timeout.sh' "$LOOP" >/dev/null 2>&1 \
-  && ! wall_timeout_definitions "$LOOP" | grep  . >/dev/null; then
+  && ! wall_timeout_definitions "$LOOP" | grep . >/dev/null; then
   ok "loop.sh sources wall-timeout without redefining it"
 else
   bad "loop.sh wiring does not preserve the single shared definition"
@@ -5244,7 +5244,7 @@ else
   bad "#141 meta: empty readiness probe set should fail closed (rc=${_rp_rc} diag=${_rp_diag})"
 fi
 # Unknown-family comment + --version; no bare second probe (historical line shape)
-if grep -A4 'Unknown family:' "$FLEET" | grep  -- '--version' >/dev/null \
+if grep -A4 'Unknown family:' "$FLEET" | grep -- '--version' >/dev/null \
   && ! grep -nE 'run_with_wall_timeout "\$limit" "\$exe"\s*(</dev/null\s*)?>"\$outf"' "$FLEET" >/dev/null; then
   ok "#141 structure: unknown family uses --version only (no bare invoke)"
 else

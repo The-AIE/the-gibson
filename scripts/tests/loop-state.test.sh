@@ -1463,7 +1463,7 @@ fi
 # Unknown directory contents must never be deleted — either still in place or
 # under a same-parent quarantine name.
 if [[ -f "$REPO/gibson/loop-state.md/unknown-contents" ]] || \
-   find "$REPO/gibson" -name 'unknown-contents' 2>/dev/null | grep  . >/dev/null; then
+   find "$REPO/gibson" -name 'unknown-contents' 2>/dev/null | grep . >/dev/null; then
   ok "dir live loop-state: unknown contents preserved (not deleted)"
 else bad "dir live loop-state: unknown contents were deleted"; fi
 if ! grep -q 'restored loop-state byte-for-byte' "$ROOT/dir-live.err" 2>/dev/null || \

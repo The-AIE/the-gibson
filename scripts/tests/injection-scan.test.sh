@@ -47,7 +47,7 @@ echo "clean input stays quiet"
 printf '# A normal skill\n\nRun `npm test` — em-dashes, accents (café), emoji 🚀 are all fine.\n' \
   > "$ROOT/clean.md"
 out=$("$SCAN" "$ROOT/clean.md" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep  clean >/dev/null; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep clean >/dev/null; then
   ok "no false positive on ordinary prose"
 else
   bad "no false positive on ordinary prose (rc=$rc, out=$out)"

@@ -1770,7 +1770,7 @@ else
 fi
 # No temp leaks under evil or the (now symlink) nest path as gate-owned regulars
 leaked_parent=0
-if find "$EVIL_OUT" -name '.base.json.*' 2>/dev/null | grep  . >/dev/null; then
+if find "$EVIL_OUT" -name '.base.json.*' 2>/dev/null | grep . >/dev/null; then
   leaked_parent=1
 fi
 if [[ "$leaked_parent" -eq 0 ]]; then

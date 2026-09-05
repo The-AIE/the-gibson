@@ -333,7 +333,7 @@ cat > "$ROOT/scenario.json" <<JSON
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
 [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: API_FAILURE' >/dev/null \
-  && ! printf '%s\n' "$out" | grep -F -q "$HOSTILE_STDERR" \
+  && ! printf '%s\n' "$out" | grep -F "$HOSTILE_STDERR" >/dev/null \
   && ok "API failure: INCOMPLETE exit 3 with typed code, no raw stderr" \
   || bad "API failure (rc=$rc): $out"
 lacks_queue "API failure" "$out"
