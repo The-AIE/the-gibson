@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Gibson owner journey prototype</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#screen-root">Skip to the current step</a>
+    <div class="app-shell">
+      <header class="topbar">
+        <img
+          class="brand-mark"
+          src="../../assets/images/branding/gibson-logo-lockup.svg"
+          alt="Gibson"
+          width="276"
+          height="64"
+        >
+        <div class="prototype-label" aria-label="Prototype safety boundary">
+          <span class="prototype-dot" aria-hidden="true"></span>
+          <span>Interactive prototype · No GitHub connection · No code changes.</span>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside class="journey-panel" aria-label="Journey progress">
+          <p class="eyebrow">Owner journey</p>
+          <p class="journey-intro">From idea to a decision you control.</p>
+          <ol id="journey-steps" class="journey-steps"></ol>
+          <div class="privacy-note">
+            <span aria-hidden="true">◎</span>
+            <p>Your request and feedback stay in this browser session.</p>
+          </div>
+        </aside>
+
+        <main id="screen-root" class="screen" tabindex="-1"></main>
+      </div>
+
+      <footer class="footer-bar">
+        <p>Gibson keeps authority with the owner.</p>
+        <button id="reset-demo" class="text-button" type="button">Reset prototype</button>
+      </footer>
+    </div>
+
+    <div id="live-status" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
