@@ -6,8 +6,13 @@ import { describe, it } from "node:test";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  CHECKED_IN_INVENTORY_EXCLUSIONS,
+  INVENTORY_CAPABILITY_REASONS,
   REQUIRED_REPO_OWNED_PATHS,
   REASON,
+  REVIEW_EVIDENCE_EVENTS,
+  REVIEW_EVIDENCE_WINDOW_DAYS,
+  REVIEW_EVIDENCE_WORKFLOW_PATH,
   SCHEMA_ID,
   STANDING_ISSUE_NUMBER,
   STATES,
@@ -15,11 +20,20 @@ import {
   buildFingerprint,
   classifySensor,
   compareUpdatedAtThenId,
+  discoverCheckedInWorkflows,
   evaluateTargetJobs,
   freezeContext,
+  FRESHNESS_CREATED_QUERY_SLACK_DAYS,
+  freshnessCreatedQueryFloor,
+  freshnessCreatedQueryLookbackDays,
+  freshnessCreatedQueryShards,
+  GITHUB_WORKFLOW_RERUN_HORIZON_DAYS,
+  inventoryCheckedInWorkflows,
+  isCheckedInRepoOwnedFreshnessPolicy,
   isExemptNonTargetSkip,
   joinPolicies,
   loadRegistryFile,
+  mergeWorkflowRunsById,
   partitionRuns,
   PAGES_WORKFLOW_PATH,
   publishStandingUnknown,
@@ -28,6 +42,7 @@ import {
   runSensorHealthAudit,
   selectLatestRun,
   shouldComment,
+  validateInventoryExclusions,
   validateRegistry,
 } from "./sensor-health-lib.mjs";
 {
@@ -55,6 +70,8 @@ const OLD_HEAD = "06e49cf900922aeb38cf2550f3ece911dfe1bff3";
 const reg = () => loadRegistryFile(ROOT);
 const selfGate = () =>
   reg().policies.find((p) => p.path === ".github/workflows/gibson-self-gate.yml");
+const reviewEvidence = () =>
+  reg().policies.find((p) => p.path === REVIEW_EVIDENCE_WORKFLOW_PATH);
 function ctx(sha = HEAD) {
   const c = freezeContext({
     repo: { full_name: "The-AIE/the-gibson", default_branch: "main" },
@@ -75,6 +92,7 @@ function run(p) {
     conclusion: p.conclusion ?? "success",
     updated_at: p.updated_at ?? "2026-08-30T11:00:00Z",
     created_at: p.created_at ?? "2026-08-30T10:00:00Z",
+    run_attempt: p.run_attempt ?? 1,
     actor: { login: p.actor ?? "mrhinkle" },
   };
 }
@@ -104,6 +122,7 @@ const WFS = [
   { id: 2, name: "Sensor health", path: ".github/workflows/sensor-health.yml", state: "active" },
   { id: 3, name: "Code security", path: "dynamic/github-code-scanning/code-security-risk-assessment", state: "active" },
   { id: 4, name: "pages", path: "dynamic/pages/pages-build-deployment", state: "active" },
+  { id: 5, name: "PR review evidence", path: REVIEW_EVIDENCE_WORKFLOW_PATH, state: "active" },
 ];
 function head(sha = HEAD, has_pages = true) {
   return [
@@ -132,6 +151,18 @@ function fetch(handlers) {
     return res(500, { message: `unhandled ${method} ${u}` });
   };
 }
+function isExactUtcDate(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+function createdFilterIncludesDate(created, dateStr) {
+  if (!created) return false;
+  if (isExactUtcDate(created)) return created === dateStr;
+  const gte = typeof created === "string" && created.match(/^>=(\d{4}-\d{2}-\d{2})$/);
+  if (gte) return dateStr >= gte[1];
+  const range = typeof created === "string" && created.match(/^(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})$/);
+  if (range) return dateStr >= range[1] && dateStr <= range[2];
+  return false;
+}
 function classifyGate(runs, jobs) {
   return classifySensor({
     name: "Gibson self-gate",
@@ -157,16 +188,17 @@ function greenCoreHandlers(has_pages, workflows = WFS, { emptyPages = false } = 
       respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
     },
     {
-      match: (u) => /\/workflows\/[234]\/runs\?/.test(u),
+      match: (u) => /\/workflows\/[2-5]\/runs\?/.test(u),
       respond: (u) => {
-        if (emptyPages && /\/workflows\/4\/runs\?/.test(u)) {
+        const id = Number(u.match(/workflows\/(\d+)/)[1]);
+        if (emptyPages && id === 4) {
           return res(200, { workflow_runs: [] });
         }
         return res(200, {
           workflow_runs: [
             run({
-              id: 400 + Number(u.match(/workflows\/(\d+)/)[1]),
-              event: u.includes("/workflows/2/") ? "schedule" : "dynamic",
+              id: 400 + id,
+              event: id === 2 || id === 5 ? "schedule" : "dynamic",
               updated_at: "2026-08-30T10:00:00Z",
             }),
           ],
@@ -451,17 +483,19 @@ describe("matrix 10-13 audit integration", () => {
         respond: () => res(200, { jobs: [job({ id: 77, name: "sensors" })] }),
       },
       {
-        match: (u) => /\/workflows\/[234]\/runs\?/.test(u),
-        respond: (u) =>
-          res(200, {
+        match: (u) => /\/workflows\/[2-5]\/runs\?/.test(u),
+        respond: (u) => {
+          const id = Number(u.match(/workflows\/(\d+)/)[1]);
+          return res(200, {
             workflow_runs: [
               run({
-                id: 400 + Number(u.match(/workflows\/(\d+)/)[1]),
-                event: u.includes("/workflows/2/") ? "schedule" : "dynamic",
+                id: 400 + id,
+                event: id === 2 || id === 5 ? "schedule" : "dynamic",
                 updated_at: "2026-08-30T10:00:00Z",
               }),
             ],
-          }),
+          });
+        },
       },
       {
         match: (u, m) => m === "GET" && /\/issues\/212$/.test(u),
@@ -700,7 +734,7 @@ describe("matrix 14 + mutations + fingerprint", () => {
     });
     assert.match(body, /Budget: requests=3 pages=2/);
     assert.match(body, /sensor-health-fingerprint/);
-    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 4);
+    assert.equal(JSON.parse(readFileSync(join(ROOT, "config/sensor-health-observation.v1.json"), "utf8")).policies.length, 5);
   });
 });
 describe("coordinator gap controls", () => {
@@ -805,9 +839,16 @@ describe("coordinator gap controls", () => {
           return res(200, { workflow_runs: [run({ id: 100, updated_at: "2026-08-30T11:00:00Z" })] });
         }
         if (/\/jobs/.test(u)) return res(200, { jobs: [job({ id: 1, name: "sensors" })] });
-        if (/\/workflows\/[34]\/runs\?/.test(u)) {
+        if (/\/workflows\/[3-5]\/runs\?/.test(u)) {
+          const id = Number(u.match(/workflows\/(\d+)/)[1]);
           return res(200, {
-            workflow_runs: [run({ id: 800, event: "dynamic", updated_at: "2026-08-30T10:00:00Z" })],
+            workflow_runs: [
+              run({
+                id: 800 + id,
+                event: id === 5 ? "schedule" : "dynamic",
+                updated_at: "2026-08-30T10:00:00Z",
+              }),
+            ],
           });
         }
         return res(500, { message: u });
@@ -1044,7 +1085,7 @@ describe("coordinator gap controls", () => {
       repository: "The-AIE/the-gibson",
       registry: reg(),
       observationTime: OBS,
-      fetchImpl: fetch(greenCoreHandlers(false, [WFS[0], WFS[1], WFS[2], malformedPages])),
+      fetchImpl: fetch(greenCoreHandlers(false, [WFS[0], WFS[1], WFS[2], WFS[4], malformedPages])),
     });
     assert.equal(result.exitCode, 1);
     assert.ok(
@@ -1089,5 +1130,742 @@ describe("coordinator gap controls", () => {
     assert.match(commentBody, new RegExp(PAGES_WORKFLOW_PATH));
     assert.match(commentBody, /repo\.has_pages=false/);
     assert.equal(/all previously reported sensors are healthy again/i.test(commentBody), false);
+  });
+});
+describe("issue 346 pr-review-evidence registry and inventory", () => {
+  const PATH = REVIEW_EVIDENCE_WORKFLOW_PATH;
+  const extraPlant = ".github/workflows/unregistered-plant.yml";
+  const testedExclusion = {
+    path: extraPlant,
+    capabilityReason: "capability-disabled:has_pages=false",
+  };
+  it("production row is freshness with exact trusted-base triggers and windowDays 1", () => {
+    const p = reviewEvidence();
+    assert.ok(p, PATH);
+    assert.equal(p.mode, "freshness");
+    assert.equal(p.windowDays, REVIEW_EVIDENCE_WINDOW_DAYS);
+    assert.equal(p.windowDays, 1);
+    assert.deepEqual([...p.events].sort(), [...REVIEW_EVIDENCE_EVENTS].sort());
+    assert.equal(REQUIRED_REPO_OWNED_PATHS.includes(PATH), true);
+    assert.deepEqual(CHECKED_IN_INVENTORY_EXCLUSIONS, []);
+  });
+  it("registry validation rejects a duplicate review-evidence path", () => {
+    const r = reg();
+    const ev = reviewEvidence();
+    assert.throws(
+      () => validateRegistry({ ...r, policies: [...r.policies, { ...ev }] }),
+      /duplicate/
+    );
+  });
+  it("registry validation rejects a missing review-evidence workflow row", () => {
+    const r = reg();
+    assert.throws(
+      () => validateRegistry({ ...r, policies: r.policies.filter((p) => p.path !== PATH) }),
+      /missing required repo-owned/
+    );
+  });
+  for (const drop of REVIEW_EVIDENCE_EVENTS) {
+    it(`mutating required trigger ${drop} out of the row fails validation`, () => {
+      const r = reg();
+      assert.throws(
+        () =>
+          validateRegistry({
+            ...r,
+            policies: r.policies.map((p) =>
+              p.path === PATH ? { ...p, events: p.events.filter((e) => e !== drop) } : p
+            ),
+          }),
+        /pr-review-evidence events must be exactly/
+      );
+    });
+  }
+  it("registry validation rejects an extra trigger on the review-evidence row", () => {
+    const r = reg();
+    assert.throws(
+      () =>
+        validateRegistry({
+          ...r,
+          policies: r.policies.map((p) =>
+            p.path === PATH ? { ...p, events: [...p.events, "workflow_dispatch"] } : p
+          ),
+        }),
+      /pr-review-evidence events must be exactly/
+    );
+  });
+  it("registry validation rejects unsupported and wrong modes on the review-evidence row", () => {
+    const r = reg();
+    assert.throws(
+      () =>
+        validateRegistry({
+          ...r,
+          policies: r.policies.map((p) => (p.path === PATH ? { ...p, mode: "hourly" } : p)),
+        }),
+      /mode must be one of/
+    );
+    assert.throws(
+      () =>
+        validateRegistry({
+          ...r,
+          policies: r.policies.map((p) => (p.path === PATH ? { ...p, mode: "current-head" } : p)),
+        }),
+      /pr-review-evidence mode must remain freshness/
+    );
+    assert.throws(
+      () =>
+        validateRegistry({
+          ...r,
+          policies: r.policies.map((p) => (p.path === PATH ? { ...p, mode: "pr-sample" } : p)),
+        }),
+      /pr-review-evidence mode must remain freshness/
+    );
+  });
+  it("registry validation rejects a freshness window wider than one day", () => {
+    const r = reg();
+    assert.throws(
+      () =>
+        validateRegistry({
+          ...r,
+          policies: r.policies.map((p) => (p.path === PATH ? { ...p, windowDays: 2 } : p)),
+        }),
+      /windowDays must not exceed 1/
+    );
+    assert.throws(
+      () =>
+        validateRegistry({
+          ...r,
+          policies: r.policies.map((p) => (p.path === PATH ? { ...p, windowDays: 30 } : p)),
+        }),
+      /windowDays must not exceed 1/
+    );
+  });
+  it("inventory is clean for live checked-in workflows; deleting the row is unconfigured-workflow", () => {
+    const r = reg();
+    const files = discoverCheckedInWorkflows(ROOT);
+    assert.ok(files.includes(PATH));
+    const live = inventoryCheckedInWorkflows({ checkedInPaths: files, policies: r.policies });
+    assert.equal(
+      live.rows.some((row) => row.joinError),
+      false,
+      live.rows.filter((row) => row.joinError).map((row) => `${row.path}:${row.joinError}`).join(",")
+    );
+    const deleted = inventoryCheckedInWorkflows({
+      checkedInPaths: files,
+      policies: r.policies.filter((p) => p.path !== PATH),
+    });
+    assert.ok(
+      deleted.rows.some(
+        (row) => row.path === PATH && row.joinError === REASON.UNCONFIGURED_WORKFLOW
+      )
+    );
+    const missingFile = inventoryCheckedInWorkflows({
+      checkedInPaths: files.filter((f) => f !== PATH),
+      policies: r.policies,
+    });
+    assert.ok(
+      missingFile.rows.some(
+        (row) => row.path === PATH && row.joinError === REASON.CONFIGURED_WORKFLOW_MISSING
+      )
+    );
+  });
+  it("inventory fails closed on an unregistered checked-in workflow and duplicate path", () => {
+    const r = reg();
+    const files = discoverCheckedInWorkflows(ROOT);
+    const planted = inventoryCheckedInWorkflows({
+      checkedInPaths: [...files, extraPlant],
+      policies: r.policies,
+    });
+    assert.ok(
+      planted.rows.some(
+        (row) => row.path === extraPlant && row.joinError === REASON.UNCONFIGURED_WORKFLOW
+      )
+    );
+    const dup = inventoryCheckedInWorkflows({
+      checkedInPaths: [...files, PATH],
+      policies: r.policies,
+    });
+    assert.ok(
+      dup.rows.some((row) => row.path === PATH && row.joinError === REASON.MALFORMED_EVIDENCE)
+    );
+  });
+  it("explicit inventory exclusion requires an exact tested path/reason binding", () => {
+    const r = reg();
+    const files = discoverCheckedInWorkflows(ROOT);
+    assert.deepEqual(CHECKED_IN_INVENTORY_EXCLUSIONS, []);
+    assert.equal(
+      INVENTORY_CAPABILITY_REASONS.includes(testedExclusion.capabilityReason),
+      true
+    );
+    assert.throws(
+      () => validateInventoryExclusions([testedExclusion]),
+      /exact tested workflow path/
+    );
+    assert.throws(
+      () =>
+        inventoryCheckedInWorkflows({
+          checkedInPaths: [...files, extraPlant],
+          policies: r.policies,
+          exclusions: [testedExclusion],
+        }),
+      /exact tested workflow path/
+    );
+    const planted = inventoryCheckedInWorkflows({
+      checkedInPaths: [...files, extraPlant],
+      policies: r.policies,
+    });
+    assert.ok(
+      planted.rows.some(
+        (row) => row.path === extraPlant && row.joinError === REASON.UNCONFIGURED_WORKFLOW
+      )
+    );
+    assert.throws(
+      () => validateInventoryExclusions([{ path: extraPlant, capabilityReason: "because-i-said-so" }]),
+      /tested closed capability reason/
+    );
+    assert.throws(
+      () =>
+        inventoryCheckedInWorkflows({
+          checkedInPaths: files,
+          policies: r.policies,
+          exclusions: [{ path: extraPlant, capabilityReason: "because-i-said-so" }],
+        }),
+      /tested closed capability reason/
+    );
+    assert.throws(
+      () =>
+        inventoryCheckedInWorkflows({
+          checkedInPaths: files,
+          policies: r.policies,
+          exclusions: [{ path: PATH, capabilityReason: testedExclusion.capabilityReason }],
+        }),
+      /cannot exclude required sensor/
+    );
+    assert.throws(
+      () => validateInventoryExclusions([testedExclusion, { ...testedExclusion }]),
+      /duplicate/
+    );
+    assert.throws(() => validateInventoryExclusions(null), /must be an array/);
+    assert.throws(() => validateInventoryExclusions([null]), /must be an object/);
+    assert.throws(
+      () => validateInventoryExclusions([{ capabilityReason: testedExclusion.capabilityReason }]),
+      /path must be a non-empty string/
+    );
+    assert.throws(
+      () => validateInventoryExclusions([{ path: extraPlant }]),
+      /tested closed capability reason/
+    );
+  });
+  it("fixtures: recent success is OK; missing, stale, failed, cancelled, ambiguous are not", () => {
+    const p = reviewEvidence();
+    const c = ctx();
+    const classify = (runs, extra = {}) =>
+      classifySensor({
+        name: "review-evidence",
+        path: p.path,
+        policy: p,
+        runs,
+        ctx: c,
+        evidenceComplete: true,
+        ...extra,
+      });
+    for (const event of REVIEW_EVIDENCE_EVENTS) {
+      const okRow = classify([
+        run({
+          id: 3460 + event.length,
+          event,
+          conclusion: "success",
+          updated_at: "2026-08-30T11:00:00Z",
+        }),
+      ]);
+      assert.equal(okRow.state, STATES.OK, event);
+    }
+    const missing = classify([]);
+    assert.notEqual(missing.state, STATES.OK);
+    assert.equal(missing.state, STATES.IDLE);
+    const stale = classify([
+      run({
+        id: 3462,
+        event: "schedule",
+        conclusion: "success",
+        updated_at: "2026-08-20T10:00:00Z",
+      }),
+    ]);
+    assert.notEqual(stale.state, STATES.OK);
+    assert.equal(stale.state, STATES.IDLE);
+    const failed = classify([
+      run({
+        id: 3463,
+        event: "issue_comment",
+        conclusion: "failure",
+        updated_at: "2026-08-30T11:00:00Z",
+      }),
+    ]);
+    assert.notEqual(failed.state, STATES.OK);
+    assert.equal(failed.state, STATES.FAILING);
+    const cancelled = classify([
+      run({
+        id: 3464,
+        event: "schedule",
+        conclusion: "cancelled",
+        updated_at: "2026-08-30T11:00:00Z",
+      }),
+    ]);
+    assert.notEqual(cancelled.state, STATES.OK);
+    assert.equal(cancelled.state, STATES.FAILING);
+    const ambiguous = classify([
+      {
+        id: 3465,
+        event: "schedule",
+        status: "completed",
+        conclusion: "success",
+        updated_at: "not-a-date",
+      },
+    ]);
+    assert.equal(ambiguous.state, STATES.UNKNOWN);
+    assert.notEqual(ambiguous.state, STATES.OK);
+    const pendingOnly = classify([
+      {
+        id: 3466,
+        event: "pull_request_target",
+        status: "in_progress",
+        conclusion: null,
+        updated_at: "2026-08-30T11:00:00Z",
+      },
+    ]);
+    assert.equal(pendingOnly.state, STATES.UNKNOWN);
+    assert.notEqual(pendingOnly.state, STATES.OK);
+    const wrongEvent = classify([
+      run({
+        id: 3467,
+        event: "push",
+        conclusion: "success",
+        updated_at: "2026-08-30T11:00:00Z",
+      }),
+    ]);
+    assert.notEqual(wrongEvent.state, STATES.OK);
+  });
+  it("existing self-gate, sensor-health, dynamic security, and disabled Pages stay unchanged", async () => {
+    const r = reg();
+    const sg = selfGate();
+    assert.deepEqual([sg.mode, sg.events, sg.targetChecks], ["current-head", ["push"], ["sensors"]]);
+    const sh = r.policies.find((p) => p.path === ".github/workflows/sensor-health.yml");
+    assert.equal(sh.mode, "freshness");
+    assert.equal(sh.windowDays, 2);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sh), true);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(reviewEvidence()), true);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sg), false);
+    const sec = r.policies.find(
+      (p) => p.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+    );
+    assert.equal(sec.mode, "freshness");
+    assert.deepEqual(sec.events, ["dynamic"]);
+    assert.equal(sec.windowDays, 30);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sec), false);
+    const pages = r.policies.find((p) => p.path === PAGES_WORKFLOW_PATH);
+    assert.deepEqual(pages.enabledWhen, { repoField: "has_pages", equals: true });
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(pages), false);
+    const disabled = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: r,
+      observationTime: OBS,
+      fetchImpl: fetch(greenCoreHandlers(false)),
+    });
+    assert.equal(disabled.exitCode, 0);
+    assert.ok(disabled.report.rows.every((row) => row.state === STATES.OK));
+    assert.ok(!disabled.report.rows.some((row) => row.path === PAGES_WORKFLOW_PATH));
+    assert.equal(disabled.report.rows.find((row) => row.path === PATH)?.state, STATES.OK);
+    const enabledUrls = [];
+    const enabledImpl = fetch(greenCoreHandlers(true));
+    const enabled = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: r,
+      observationTime: OBS,
+      fetchImpl: async (url, init) => {
+        enabledUrls.push(String(url));
+        return enabledImpl(url, init);
+      },
+    });
+    assert.equal(enabled.exitCode, 0);
+    assert.equal(enabled.report.rows.find((row) => row.path === sg.path)?.state, STATES.OK);
+    assert.equal(enabled.report.rows.find((row) => row.path === sh.path)?.state, STATES.OK);
+    assert.equal(enabled.report.rows.find((row) => row.path === sec.path)?.state, STATES.OK);
+    assert.equal(enabled.report.rows.find((row) => row.path === PATH)?.state, STATES.OK);
+    const reviewUrls = enabledUrls.filter((u) => /\/workflows\/5\/runs\?/.test(u));
+    const reviewFloor = freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const reviewShards = freshnessCreatedQueryShards(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const reviewEvents = new Set(reviewUrls.map((u) => new URL(u).searchParams.get("event")));
+    for (const event of REVIEW_EVIDENCE_EVENTS) {
+      assert.ok(reviewEvents.has(event), event);
+    }
+    assert.equal(reviewShards[0].created, "2026-07-29");
+    assert.equal(reviewShards.at(-1).created, "2026-08-30");
+    assert.ok(reviewShards[0].created < reviewFloor);
+    const seenPairs = new Set();
+    for (const u of reviewUrls) {
+      const created = new URL(u).searchParams.get("created");
+      const event = new URL(u).searchParams.get("event");
+      assert.equal(isExactUtcDate(created), true, u);
+      assert.notEqual(created, `>=${reviewFloor}`, u);
+      seenPairs.add(`${event}\0${created}`);
+    }
+    for (const event of REVIEW_EVIDENCE_EVENTS) {
+      for (const shard of reviewShards) {
+        assert.ok(seenPairs.has(`${event}\0${shard.created}`), `${event} ${shard.created}`);
+      }
+    }
+    const dynUrls = enabledUrls.filter((u) => /\/workflows\/[34]\/runs\?/.test(u));
+    assert.ok(dynUrls.length > 0);
+    assert.ok(dynUrls.every((u) => new URL(u).searchParams.get("event") !== "dynamic"));
+    const selfUrls = enabledUrls.filter((u) => /\/workflows\/1\/runs\?/.test(u));
+    assert.ok(selfUrls.every((u) => new URL(u).searchParams.get("event") === "push"));
+  });
+  it("created query floor is the UTC date of observationTime minus windowDays", () => {
+    assert.equal(freshnessCreatedQueryFloor(OBS, 1), "2026-08-29");
+    assert.equal(freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS), "2026-08-29");
+    assert.equal(freshnessCreatedQueryFloor(OBS, 2), "2026-08-28");
+  });
+  it("freshness created shards cover rerun horizon plus slack as disjoint UTC days", () => {
+    assert.equal(GITHUB_WORKFLOW_RERUN_HORIZON_DAYS, 30);
+    assert.equal(FRESHNESS_CREATED_QUERY_SLACK_DAYS, 1);
+    assert.equal(freshnessCreatedQueryLookbackDays(1), 32);
+    assert.equal(freshnessCreatedQueryLookbackDays(REVIEW_EVIDENCE_WINDOW_DAYS), 32);
+    assert.equal(freshnessCreatedQueryLookbackDays(2), 33);
+    const oneDayFloor = freshnessCreatedQueryFloor(OBS, 1);
+    const shards = freshnessCreatedQueryShards(OBS, 1);
+    assert.equal(shards.length, 33);
+    assert.equal(shards[0].created, "2026-07-29");
+    assert.equal(shards.at(-1).created, "2026-08-30");
+    assert.ok(shards[0].created < oneDayFloor);
+    const created = shards.map((s) => s.created);
+    assert.equal(new Set(created).size, created.length);
+    for (let i = 1; i < created.length; i++) {
+      assert.ok(created[i] > created[i - 1], `${created[i - 1]} -> ${created[i]}`);
+    }
+    const sensorShards = freshnessCreatedQueryShards(OBS, 2);
+    assert.equal(sensorShards[0].created, "2026-07-28");
+    assert.equal(sensorShards.at(-1).created, "2026-08-30");
+    assert.equal(sensorShards.length, 34);
+    const newer = run({ id: 1, updated_at: "2026-08-30T11:50:00Z" });
+    const older = run({ id: 1, updated_at: "2026-08-30T11:00:00Z" });
+    assert.equal(mergeWorkflowRunsById([older, newer, older]).length, 1);
+    assert.equal(mergeWorkflowRunsById([older, newer, older])[0].updated_at, "2026-08-30T11:50:00Z");
+    const malformed = { event: "schedule", status: "completed", conclusion: "success" };
+    assert.equal(mergeWorkflowRunsById([newer, malformed]).length, 2);
+  });
+  it("lifetime >500 flood stays OK when each review-evidence event is created-filtered to a small in-window subset", async () => {
+    const requested = [];
+    const oneDayFloor = freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const shards = freshnessCreatedQueryShards(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const inWindow = {
+      pull_request_target: run({
+        id: 5101,
+        event: "pull_request_target",
+        conclusion: "success",
+        created_at: "2026-08-30T10:00:00Z",
+        updated_at: "2026-08-30T11:00:00Z",
+      }),
+      issue_comment: run({
+        id: 5102,
+        event: "issue_comment",
+        conclusion: "success",
+        created_at: "2026-08-30T10:00:00Z",
+        updated_at: "2026-08-30T10:30:00Z",
+      }),
+      schedule: run({
+        id: 5103,
+        event: "schedule",
+        conclusion: "success",
+        created_at: "2026-08-30T10:00:00Z",
+        updated_at: "2026-08-30T10:00:00Z",
+      }),
+    };
+    const floodPage = (page, perPage) =>
+      Array.from({ length: perPage }, (_, i) =>
+        run({
+          id: 800000 + (page - 1) * perPage + i,
+          event: "schedule",
+          conclusion: "success",
+          updated_at: "2026-07-01T00:00:00Z",
+        })
+      );
+    const core = fetch(greenCoreHandlers(true));
+    const result = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      runPageCap: 5,
+      perPage: 100,
+      fetchImpl: async (url, init) => {
+        const u = String(url);
+        if (/\/workflows\/5\/runs\?/.test(u)) {
+          requested.push(u);
+          const parsed = new URL(u);
+          const event = parsed.searchParams.get("event");
+          const created = parsed.searchParams.get("created");
+          const page = Number(parsed.searchParams.get("page") || 1);
+          const perPage = Number(parsed.searchParams.get("per_page") || 100);
+          const boundedDay =
+            REVIEW_EVIDENCE_EVENTS.includes(event) && isExactUtcDate(created);
+          if (!boundedDay) {
+            return res(200, { workflow_runs: floodPage(page, perPage) });
+          }
+          const hits = inWindow[event] && createdFilterIncludesDate(created, "2026-08-30")
+            ? [inWindow[event]]
+            : [];
+          return res(200, { workflow_runs: hits });
+        }
+        return core(url, init);
+      },
+    });
+    assert.ok(requested.length > 0, "review-evidence runs endpoint was not queried");
+    const unfiltered = requested.filter((u) => {
+      const p = new URL(u).searchParams;
+      return !p.get("event") || !p.get("created");
+    });
+    assert.equal(
+      unfiltered.length,
+      0,
+      `unfiltered lifetime fetch would paginate-cap: ${unfiltered.join(" | ")}`
+    );
+    assert.ok(
+      requested.some((u) => new URL(u).searchParams.get("created") === "2026-07-29"),
+      "query set missing rerun-horizon shard 2026-07-29"
+    );
+    assert.equal(
+      requested.every((u) => {
+        const created = new URL(u).searchParams.get("created");
+        return created === `>=${oneDayFloor}` || (isExactUtcDate(created) && created >= oneDayFloor);
+      }),
+      false,
+      "reverted to a one-day created floor"
+    );
+    const eventsSeen = new Set();
+    const createdSeen = new Set();
+    for (const u of requested) {
+      const p = new URL(u).searchParams;
+      const created = p.get("created");
+      assert.equal(isExactUtcDate(created), true, u);
+      assert.notEqual(created, `>=${oneDayFloor}`, u);
+      eventsSeen.add(p.get("event"));
+      createdSeen.add(created);
+    }
+    for (const event of REVIEW_EVIDENCE_EVENTS) {
+      assert.ok(eventsSeen.has(event), `missing event query ${event}`);
+    }
+    for (const shard of shards) {
+      assert.ok(createdSeen.has(shard.created), `missing shard ${shard.created}`);
+    }
+    assert.equal(requested.length, REVIEW_EVIDENCE_EVENTS.length * shards.length);
+    const row = result.report.rows.find((r) => r.path === PATH);
+    assert.ok(row);
+    assert.equal(row.state, STATES.OK);
+    assert.notEqual(row.reasonClass, REASON.PAGINATION_CAP);
+    assert.equal(row.selectedRunId, 5101);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.report.rows.find((r) => r.path === ".github/workflows/gibson-self-gate.yml")?.state, STATES.OK);
+    assert.equal(result.report.rows.find((r) => r.path === ".github/workflows/sensor-health.yml")?.state, STATES.OK);
+    assert.equal(
+      result.report.rows.find(
+        (r) => r.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+      )?.state,
+      STATES.OK
+    );
+  });
+  it("older rerun updated in-window is not OK when a newer-created run succeeded", async () => {
+    const oneDayFloor = freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const shards = freshnessCreatedQueryShards(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const oldFailure = run({
+      id: 34601,
+      event: "schedule",
+      conclusion: "failure",
+      created_at: "2026-08-01T09:00:00Z",
+      updated_at: "2026-08-30T11:50:00Z",
+      run_attempt: 2,
+    });
+    const recentSuccess = run({
+      id: 34602,
+      event: "issue_comment",
+      conclusion: "success",
+      created_at: "2026-08-30T10:00:00Z",
+      updated_at: "2026-08-30T11:00:00Z",
+      run_attempt: 1,
+    });
+    const requested = [];
+    const core = fetch(greenCoreHandlers(true));
+    const result = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      runPageCap: 5,
+      perPage: 100,
+      fetchImpl: async (url, init) => {
+        const u = String(url);
+        if (/\/workflows\/5\/runs\?/.test(u)) {
+          requested.push(u);
+          const parsed = new URL(u);
+          const event = parsed.searchParams.get("event");
+          const created = parsed.searchParams.get("created");
+          const page = Number(parsed.searchParams.get("page") || 1);
+          const perPage = Number(parsed.searchParams.get("per_page") || 100);
+          if (!event || !created) {
+            return res(
+              200,
+              {
+                workflow_runs: Array.from({ length: perPage }, (_, i) =>
+                  run({
+                    id: 900000 + (page - 1) * perPage + i,
+                    event: "schedule",
+                    conclusion: "success",
+                    updated_at: "2026-07-01T00:00:00Z",
+                  })
+                ),
+              }
+            );
+          }
+          const hits = [];
+          if (event === oldFailure.event && createdFilterIncludesDate(created, "2026-08-01")) {
+            hits.push(oldFailure);
+          }
+          if (event === recentSuccess.event && createdFilterIncludesDate(created, "2026-08-30")) {
+            hits.push(recentSuccess);
+          }
+          return res(200, { workflow_runs: hits });
+        }
+        return core(url, init);
+      },
+    });
+    assert.equal(requested.some((u) => !new URL(u).searchParams.get("created")), false);
+    assert.ok(requested.some((u) => new URL(u).searchParams.get("created") === "2026-07-29"));
+    assert.ok(requested.some((u) => new URL(u).searchParams.get("created") === "2026-08-01"));
+    assert.equal(
+      requested.every((u) => {
+        const created = new URL(u).searchParams.get("created");
+        return created === `>=${oneDayFloor}` || (isExactUtcDate(created) && created >= oneDayFloor);
+      }),
+      false,
+      "reverted to a one-day created floor"
+    );
+    assert.equal(requested.length, REVIEW_EVIDENCE_EVENTS.length * shards.length);
+    const row = result.report.rows.find((r) => r.path === PATH);
+    assert.ok(row);
+    assert.notEqual(row.state, STATES.OK);
+    assert.equal(row.state, STATES.FAILING);
+    assert.equal(row.reasonClass, REASON.LATEST_NON_SUCCESS);
+    assert.equal(row.selectedRunId, 34601);
+    assert.equal(result.exitCode, 1);
+    const cancelled = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      fetchImpl: async (url, init) => {
+        const u = String(url);
+        if (/\/workflows\/5\/runs\?/.test(u)) {
+          const parsed = new URL(u);
+          const event = parsed.searchParams.get("event");
+          const created = parsed.searchParams.get("created");
+          const hits = [];
+          if (event === "schedule" && createdFilterIncludesDate(created, "2026-08-01")) {
+            hits.push({ ...oldFailure, conclusion: "cancelled" });
+          }
+          if (event === "issue_comment" && createdFilterIncludesDate(created, "2026-08-30")) {
+            hits.push(recentSuccess);
+          }
+          return res(200, { workflow_runs: hits });
+        }
+        return core(url, init);
+      },
+    });
+    const cancelledRow = cancelled.report.rows.find((r) => r.path === PATH);
+    assert.notEqual(cancelledRow.state, STATES.OK);
+    assert.equal(cancelledRow.state, STATES.FAILING);
+    assert.equal(cancelledRow.selectedRunId, 34601);
+  });
+  it("a capped, failed, or malformed shard remains non-OK even with other in-window successes", async () => {
+    const shards = freshnessCreatedQueryShards(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const capShard = shards[0].created;
+    const successFor = (event, id) =>
+      run({
+        id,
+        event,
+        conclusion: "success",
+        created_at: "2026-08-30T10:00:00Z",
+        updated_at: "2026-08-30T11:00:00Z",
+      });
+    const core = fetch(greenCoreHandlers(true));
+    const reviewFetch = (onIssueCommentCapShard) => async (url, init) => {
+      const u = String(url);
+      if (/\/workflows\/5\/runs\?/.test(u)) {
+        const parsed = new URL(u);
+        const event = parsed.searchParams.get("event");
+        const created = parsed.searchParams.get("created");
+        const page = Number(parsed.searchParams.get("page") || 1);
+        const perPage = Number(parsed.searchParams.get("per_page") || 100);
+        assert.equal(isExactUtcDate(created), true, u);
+        assert.ok(REVIEW_EVIDENCE_EVENTS.includes(event), event);
+        if (event === "issue_comment" && created === capShard) {
+          return onIssueCommentCapShard({ page, perPage, url: u, created });
+        }
+        const hits = createdFilterIncludesDate(created, "2026-08-30")
+          ? [successFor(event, event === "schedule" ? 6103 : event === "issue_comment" ? 6102 : 6101)]
+          : [];
+        return res(200, { workflow_runs: hits });
+      }
+      return core(url, init);
+    };
+    const capped = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      runPageCap: 5,
+      perPage: 100,
+      fetchImpl: reviewFetch(({ page, perPage }) =>
+        res(
+          200,
+          {
+            workflow_runs: Array.from({ length: perPage }, (_, i) =>
+              successFor("issue_comment", 700000 + (page - 1) * perPage + i)
+            ),
+          }
+        )
+      ),
+    });
+    const cappedRow = capped.report.rows.find((r) => r.path === PATH);
+    assert.ok(cappedRow);
+    assert.notEqual(cappedRow.state, STATES.OK);
+    assert.equal(cappedRow.state, STATES.UNKNOWN);
+    assert.equal(cappedRow.reasonClass, REASON.PAGINATION_CAP);
+    assert.equal(capped.exitCode, 1);
+    assert.ok(capped.report.budget.capsHit >= 1);
+    const failed = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      fetchImpl: reviewFetch(() => res(500, { message: "shard query failed" })),
+    });
+    const failedRow = failed.report.rows.find((r) => r.path === PATH);
+    assert.ok(failedRow);
+    assert.notEqual(failedRow.state, STATES.OK);
+    assert.equal(failedRow.state, STATES.UNKNOWN);
+    assert.equal(failedRow.reasonClass, REASON.API_ERROR);
+    assert.equal(failed.exitCode, 1);
+    const malformed = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      fetchImpl: reviewFetch(() => res(200, { workflow_runs: null })),
+    });
+    const malformedRow = malformed.report.rows.find((r) => r.path === PATH);
+    assert.ok(malformedRow);
+    assert.notEqual(malformedRow.state, STATES.OK);
+    assert.equal(malformedRow.state, STATES.UNKNOWN);
+    assert.equal(malformedRow.reasonClass, REASON.MALFORMED_EVIDENCE);
+    assert.equal(malformed.exitCode, 1);
   });
 });

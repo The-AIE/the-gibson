@@ -15,6 +15,12 @@
       "windowDays": 2
     },
     {
+      "path": ".github/workflows/pr-review-evidence.yml",
+      "mode": "freshness",
+      "events": ["pull_request_target", "issue_comment", "schedule"],
+      "windowDays": 1
+    },
+    {
       "path": "dynamic/github-code-scanning/code-security-risk-assessment",
       "mode": "freshness",
       "events": ["dynamic"],
