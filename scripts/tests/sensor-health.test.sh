@@ -230,6 +230,44 @@ if [[ "$INV_RC" -eq 0 ]] && grep -q 'inventory-and-mutation-witnesses-ok' <<<"$I
 else
   bad "review-evidence inventory + mutation witnesses (rc=$INV_RC out=$INV_OUT)"
 fi
+set +e
+SHARD_OUT=$(node --input-type=module <<'JS'
+import {
+  FRESHNESS_CREATED_QUERY_SLACK_DAYS,
+  GITHUB_WORKFLOW_RERUN_HORIZON_DAYS,
+  REVIEW_EVIDENCE_WINDOW_DAYS,
+  freshnessCreatedQueryFloor,
+  freshnessCreatedQueryLookbackDays,
+  freshnessCreatedQueryShards,
+} from "./scripts/sensor-health-lib.mjs";
+const obs = new Date("2026-08-30T12:00:00.000Z");
+const oneDay = freshnessCreatedQueryFloor(obs, REVIEW_EVIDENCE_WINDOW_DAYS);
+if (oneDay !== "2026-08-29") throw new Error(`one-day floor ${oneDay}`);
+if (GITHUB_WORKFLOW_RERUN_HORIZON_DAYS !== 30) throw new Error("rerun horizon");
+if (FRESHNESS_CREATED_QUERY_SLACK_DAYS !== 1) throw new Error("date slack");
+if (freshnessCreatedQueryLookbackDays(1) !== 32) throw new Error("lookback");
+const shards = freshnessCreatedQueryShards(obs, 1);
+if (shards.length !== 33) throw new Error(`shard count ${shards.length}`);
+if (shards[0].created !== "2026-07-29") throw new Error(`first ${shards[0].created}`);
+if (shards.at(-1).created !== "2026-08-30") throw new Error(`last ${shards.at(-1).created}`);
+if (!(shards[0].created < oneDay)) throw new Error("shards collapsed to one-day created floor");
+if (shards.some((s) => !/^\d{4}-\d{2}-\d{2}$/.test(s.created))) throw new Error("unbounded or ranged shard");
+if (shards.some((s) => s.created.startsWith(">="))) throw new Error("open created>= shard");
+const seen = new Set();
+for (const s of shards) {
+  if (seen.has(s.created)) throw new Error(`duplicate shard ${s.created}`);
+  seen.add(s.created);
+}
+console.log("created-shard-boundaries-ok");
+JS
+)
+SHARD_RC=$?
+set -e
+if [[ "$SHARD_RC" -eq 0 ]] && grep -q 'created-shard-boundaries-ok' <<<"$SHARD_OUT"; then
+  ok "freshness created-shard boundaries"
+else
+  bad "freshness created-shard boundaries (rc=$SHARD_RC out=$SHARD_OUT)"
+fi
 if [[ "$FAIL" -eq 0 ]]; then
   echo "sensor-health.test.sh: $PASS passed, 0 failed"
   exit 0

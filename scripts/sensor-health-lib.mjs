@@ -9,6 +9,10 @@ export const STANDING_ISSUE_NUMBER = 212;
 export const DEFAULT_RUN_PAGE_CAP = 5;
 export const DEFAULT_PER_PAGE = 100;
 export const MIN_RUNS_FOR_BLIND = 3;
+/** Official GitHub rerun limit: 30 days after the initial run. */
+export const GITHUB_WORKFLOW_RERUN_HORIZON_DAYS = 30;
+/** Extra UTC calendar day so date-granular `created` queries cover the exact 30*86400s floor. */
+export const FRESHNESS_CREATED_QUERY_SLACK_DAYS = 1;
 export const REGISTRY_REL = "config/sensor-health-observation.v1.json";
 export const REASON = Object.freeze({
   CURRENT_HEAD_RED: "current-head-red",
@@ -1171,11 +1175,66 @@ export function isCheckedInRepoOwnedFreshnessPolicy(policy) {
   );
 }
 
-/** UTC date of observationTime minus windowDays; used as the server-side `created>=` floor. */
+/** UTC date of observationTime minus windowDays (local freshness window date, not the server query). */
 export function freshnessCreatedQueryFloor(observationTime, windowDays) {
   const ts = observationTime instanceof Date ? observationTime : new Date(observationTime);
   const days = Number.isInteger(windowDays) && windowDays > 0 ? windowDays : 0;
   return new Date(ts.getTime() - days * 86400_000).toISOString().slice(0, 10);
+}
+
+function utcDateString(instant) {
+  const ts = instant instanceof Date ? instant : new Date(instant);
+  if (Number.isNaN(ts.getTime())) return null;
+  return ts.toISOString().slice(0, 10);
+}
+
+function nextUtcDate(dateStr) {
+  const t = Date.parse(`${dateStr}T00:00:00.000Z`);
+  if (Number.isNaN(t)) return null;
+  return new Date(t + 86400_000).toISOString().slice(0, 10);
+}
+
+/** Created-time lookback that covers windowDays + GitHub rerun horizon + date-floor slack. */
+export function freshnessCreatedQueryLookbackDays(windowDays) {
+  const days = Number.isInteger(windowDays) && windowDays > 0 ? windowDays : 0;
+  return days + GITHUB_WORKFLOW_RERUN_HORIZON_DAYS + FRESHNESS_CREATED_QUERY_SLACK_DAYS;
+}
+
+/**
+ * Disjoint per-UTC-day `created` shards covering every run that can still have
+ * `updated_at` inside the local freshness window (rerunnable horizon + slack).
+ */
+export function freshnessCreatedQueryShards(observationTime, windowDays) {
+  const end = utcDateString(observationTime);
+  if (!end) return [];
+  const ts = observationTime instanceof Date ? observationTime : new Date(observationTime);
+  const start = new Date(ts.getTime() - freshnessCreatedQueryLookbackDays(windowDays) * 86400_000)
+    .toISOString()
+    .slice(0, 10);
+  if (start > end) return [];
+  const shards = [];
+  for (let d = start; d && d <= end; d = nextUtcDate(d)) {
+    shards.push({ created: d });
+  }
+  return shards;
+}
+
+/** Deterministic by numeric id: keep the record that sorts first by updated_at then id. */
+export function mergeWorkflowRunsById(runs) {
+  const byId = new Map();
+  const withoutId = [];
+  for (const run of runs || []) {
+    const id = Number(run?.id);
+    if (!run || typeof run !== "object" || !Number.isFinite(id)) {
+      withoutId.push(run);
+      continue;
+    }
+    const prev = byId.get(id);
+    if (prev === undefined || compareUpdatedAtThenId(run, prev) < 0) {
+      byId.set(id, run);
+    }
+  }
+  return [...byId.values(), ...withoutId];
 }
 
 export async function paginateList({
@@ -1611,29 +1670,35 @@ export async function runSensorHealthAudit({
             }
           }
         } else if (isCheckedInRepoOwnedFreshnessPolicy(policy)) {
-          const createdFloor = freshnessCreatedQueryFloor(ctx.observationTime, policy.windowDays);
-          const merged = [];
-          for (const event of policy.events) {
-            const result = await paginateWorkflowField(
-              (page, pp) => {
-                const q = new URLSearchParams({
-                  event,
-                  created: `>=${createdFloor}`,
-                  per_page: String(pp),
-                  page: String(page),
-                });
-                return `/repos/${repository}/actions/workflows/${joinRow.workflowId}/runs?${q}`;
-              },
-              requireWorkflowRuns
-            );
-            if (result.capExhausted && !result.complete) {
-              capExhausted = true;
-              evidenceComplete = false;
-              budget.capsHit += 1;
+          const shards = freshnessCreatedQueryShards(ctx.observationTime, policy.windowDays);
+          if (shards.length === 0) {
+            evidenceComplete = false;
+          } else {
+            const merged = [];
+            for (const event of policy.events) {
+              for (const shard of shards) {
+                const result = await paginateWorkflowField(
+                  (page, pp) => {
+                    const q = new URLSearchParams({
+                      event,
+                      created: shard.created,
+                      per_page: String(pp),
+                      page: String(page),
+                    });
+                    return `/repos/${repository}/actions/workflows/${joinRow.workflowId}/runs?${q}`;
+                  },
+                  requireWorkflowRuns
+                );
+                if (result.capExhausted && !result.complete) {
+                  capExhausted = true;
+                  evidenceComplete = false;
+                  budget.capsHit += 1;
+                }
+                merged.push(...result.items);
+              }
             }
-            merged.push(...result.items);
+            runs = mergeWorkflowRunsById(merged);
           }
-          runs = merged;
         } else {
           const result = await paginateWorkflowField(
             (page, pp) =>
