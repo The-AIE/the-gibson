@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // sensor-health-lib.mjs — #256 classifier + audit.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 export const SCHEMA_ID = "gibson.sensor-health.observation.v1";
@@ -51,11 +51,31 @@ const PENDING_STATUSES = new Set([
   "requested",
   "pending",
 ]);
+export const REVIEW_EVIDENCE_WORKFLOW_PATH = ".github/workflows/pr-review-evidence.yml";
+export const REVIEW_EVIDENCE_EVENTS = Object.freeze([
+  "pull_request_target",
+  "issue_comment",
+  "schedule",
+]);
+export const REVIEW_EVIDENCE_WINDOW_DAYS = 1;
 export const REQUIRED_REPO_OWNED_PATHS = Object.freeze([
   ".github/workflows/gibson-self-gate.yml",
   ".github/workflows/sensor-health.yml",
+  REVIEW_EVIDENCE_WORKFLOW_PATH,
 ]);
 export const PAGES_WORKFLOW_PATH = "dynamic/pages/pages-build-deployment";
+export const CHECKED_IN_WORKFLOW_DIR = ".github/workflows";
+/**
+ * Closed exact path ↔ capability-reason bindings used by inventory.
+ * Empty: every checked-in workflow is a standing sensor. A future
+ * exclusion is an explicit code/test change that names both the path
+ * and the reason; callers cannot supply an allowlist.
+ */
+export const CHECKED_IN_INVENTORY_EXCLUSIONS = Object.freeze([]);
+/** Closed reason vocabulary. A listed reason is not sufficient without an exact path binding. */
+export const INVENTORY_CAPABILITY_REASONS = Object.freeze([
+  "capability-disabled:has_pages=false",
+]);
 export function repoRootFromModule(moduleUrl = import.meta.url) {
   return resolve(dirname(fileURLToPath(moduleUrl)), "..");
 }
@@ -77,6 +97,13 @@ function requireNonEmptyStringArray(value, loc, errors) {
   if (value.some((x) => typeof x !== "string" || !x)) {
     errors.push(`${loc} entries must be non-empty strings`);
   }
+}
+function sameStringSet(actual, required) {
+  if (!Array.isArray(actual) || actual.length !== required.length) return false;
+  if (actual.some((e) => typeof e !== "string" || !e)) return false;
+  if (new Set(actual).size !== required.length) return false;
+  const got = new Set(actual);
+  return required.every((e) => got.has(e));
 }
 /** Only accepted capability condition: { repoField: "has_pages", equals: true }. */
 function assertClosedEnabledWhen(ew, loc, errors) {
@@ -197,6 +224,26 @@ export function validateRegistry(doc) {
   if (sensorHealth) {
     if (sensorHealth.mode !== "freshness") errors.push("sensor-health mode must remain freshness");
     if (sensorHealth.windowDays !== 2) errors.push("sensor-health windowDays must remain 2");
+  }
+  const reviewEvidence = doc.policies.find((p) => p?.path === REVIEW_EVIDENCE_WORKFLOW_PATH);
+  if (reviewEvidence) {
+    if (reviewEvidence.mode !== "freshness") {
+      errors.push("pr-review-evidence mode must remain freshness");
+    }
+    if (
+      typeof reviewEvidence.windowDays === "number" &&
+      Number.isInteger(reviewEvidence.windowDays) &&
+      reviewEvidence.windowDays > REVIEW_EVIDENCE_WINDOW_DAYS
+    ) {
+      errors.push("pr-review-evidence freshness windowDays must not exceed 1");
+    } else if (reviewEvidence.windowDays !== REVIEW_EVIDENCE_WINDOW_DAYS) {
+      errors.push("pr-review-evidence windowDays must remain 1");
+    }
+    if (!sameStringSet(reviewEvidence.events, REVIEW_EVIDENCE_EVENTS)) {
+      errors.push(
+        "pr-review-evidence events must be exactly pull_request_target, issue_comment, and schedule"
+      );
+    }
   }
   if (errors.length) return failRegistry(errors.join("; "), errors);
   return {
@@ -417,6 +464,107 @@ export function evaluateCapabilities(policies, hasPages) {
     }
   }
   return { enabled, exclusions, capabilityUnknown };
+}
+function isExactExclusionBinding(entry, bindings) {
+  return bindings.some(
+    (b) => b.path === entry.path && b.capabilityReason === entry.capabilityReason
+  );
+}
+export function validateInventoryExclusions(exclusions) {
+  if (!Array.isArray(exclusions)) {
+    return failRegistry("inventory exclusions must be an array");
+  }
+  const errors = [];
+  const seen = new Set();
+  const required = new Set(REQUIRED_REPO_OWNED_PATHS);
+  const allowedReasons = new Set(INVENTORY_CAPABILITY_REASONS);
+  const allowedBindings = CHECKED_IN_INVENTORY_EXCLUSIONS;
+  for (let i = 0; i < exclusions.length; i++) {
+    const x = exclusions[i];
+    const loc = `inventoryExclusions[${i}]`;
+    if (!x || typeof x !== "object" || Array.isArray(x)) {
+      errors.push(`${loc} must be an object`);
+      continue;
+    }
+    let pathOk = false;
+    if (typeof x.path !== "string" || !x.path) {
+      errors.push(`${loc}.path must be a non-empty string`);
+    } else if (seen.has(x.path)) {
+      errors.push(`${loc}.path duplicate: ${x.path}`);
+    } else if (required.has(x.path)) {
+      errors.push(`${loc}.path cannot exclude required sensor ${x.path}`);
+    } else {
+      seen.add(x.path);
+      pathOk = true;
+    }
+    const reasonOk =
+      typeof x.capabilityReason === "string" && allowedReasons.has(x.capabilityReason);
+    if (!reasonOk) {
+      errors.push(`${loc}.capabilityReason must be a tested closed capability reason`);
+    } else if (pathOk && !isExactExclusionBinding(x, allowedBindings)) {
+      errors.push(
+        `${loc} must bind an exact tested workflow path to its exact capability reason`
+      );
+    }
+  }
+  if (errors.length) return failRegistry(errors.join("; "), errors);
+  return exclusions.map((x) => ({ path: x.path, capabilityReason: x.capabilityReason }));
+}
+export function discoverCheckedInWorkflows(repoRoot) {
+  const dir = join(repoRoot, CHECKED_IN_WORKFLOW_DIR);
+  let ents;
+  try {
+    ents = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    const e = new Error(
+      `checked-in workflow directory unreadable at ${CHECKED_IN_WORKFLOW_DIR}: ${err.message}`
+    );
+    e.code = "E_INVENTORY";
+    throw e;
+  }
+  const files = [];
+  for (const ent of ents) {
+    if (!ent.isFile() && !ent.isSymbolicLink()) continue;
+    if (!/\.ya?ml$/i.test(ent.name)) continue;
+    files.push(`${CHECKED_IN_WORKFLOW_DIR}/${ent.name}`);
+  }
+  files.sort();
+  return files;
+}
+export function inventoryCheckedInWorkflows({
+  checkedInPaths,
+  policies,
+  exclusions = CHECKED_IN_INVENTORY_EXCLUSIONS,
+} = {}) {
+  if (!Array.isArray(checkedInPaths)) {
+    return failRegistry("checked-in workflow inventory paths must be an array");
+  }
+  const validated = validateInventoryExclusions(exclusions);
+  const excluded = new Set(validated.map((e) => e.path));
+  const active = [];
+  for (let i = 0; i < checkedInPaths.length; i++) {
+    const path = checkedInPaths[i];
+    if (typeof path !== "string" || !path) {
+      active.push({
+        id: i + 1,
+        name: "(malformed)",
+        path: String(path ?? ""),
+        state: "active",
+      });
+      continue;
+    }
+    if (excluded.has(path)) continue;
+    active.push({
+      id: i + 1,
+      name: path,
+      path,
+      state: "active",
+    });
+  }
+  const repoOwned = (policies || []).filter(
+    (p) => typeof p?.path === "string" && p.path.startsWith(`${CHECKED_IN_WORKFLOW_DIR}/`)
+  );
+  return joinPolicies(active, repoOwned);
 }
 function hasPagesFrozenEqual(a, b) {
   if (!a?.ok && !b?.ok) return (a?.detail || "") === (b?.detail || "");

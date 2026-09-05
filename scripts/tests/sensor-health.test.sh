@@ -92,6 +92,144 @@ for mjs in scripts/sensor-health.mjs scripts/sensor-health-lib.mjs; do
   fi
 done
 [[ -f config/sensor-health-observation.v1.json ]] && ok "registry present" || bad "missing registry"
+set +e
+INV_OUT=$(node --input-type=module <<'JS'
+import {
+  CHECKED_IN_INVENTORY_EXCLUSIONS,
+  REVIEW_EVIDENCE_EVENTS,
+  REVIEW_EVIDENCE_WINDOW_DAYS,
+  REVIEW_EVIDENCE_WORKFLOW_PATH,
+  REASON,
+  discoverCheckedInWorkflows,
+  inventoryCheckedInWorkflows,
+  loadRegistryFile,
+  validateInventoryExclusions,
+  validateRegistry,
+} from "./scripts/sensor-health-lib.mjs";
+const root = process.cwd();
+const r = loadRegistryFile(root);
+const row = r.policies.find((p) => p.path === REVIEW_EVIDENCE_WORKFLOW_PATH);
+if (!row) throw new Error("review-evidence row missing");
+if (row.mode !== "freshness") throw new Error(`mode ${row.mode}`);
+if (row.windowDays !== REVIEW_EVIDENCE_WINDOW_DAYS) throw new Error(`windowDays ${row.windowDays}`);
+const got = new Set(row.events);
+if (REVIEW_EVIDENCE_EVENTS.some((e) => !got.has(e)) || row.events.length !== REVIEW_EVIDENCE_EVENTS.length) {
+  throw new Error(`events ${JSON.stringify(row.events)}`);
+}
+const files = discoverCheckedInWorkflows(root);
+const live = inventoryCheckedInWorkflows({ checkedInPaths: files, policies: r.policies });
+if (live.rows.some((x) => x.joinError)) throw new Error("live inventory not clean");
+const deleted = inventoryCheckedInWorkflows({
+  checkedInPaths: files,
+  policies: r.policies.filter((p) => p.path !== REVIEW_EVIDENCE_WORKFLOW_PATH),
+});
+if (!deleted.rows.some((x) => x.path === REVIEW_EVIDENCE_WORKFLOW_PATH && x.joinError === REASON.UNCONFIGURED_WORKFLOW)) {
+  throw new Error("row deletion did not yield unconfigured-workflow");
+}
+const extra = ".github/workflows/unregistered-plant.yml";
+const planted = inventoryCheckedInWorkflows({
+  checkedInPaths: [...files, extra],
+  policies: r.policies,
+});
+if (!planted.rows.some((x) => x.path === extra && x.joinError === REASON.UNCONFIGURED_WORKFLOW)) {
+  throw new Error("planted workflow did not yield unconfigured-workflow");
+}
+if (CHECKED_IN_INVENTORY_EXCLUSIONS.length !== 0) {
+  throw new Error("live inventory exclusions must remain empty");
+}
+const pagesPlant = { path: extra, capabilityReason: "capability-disabled:has_pages=false" };
+let pagesPlantThrew = false;
+try {
+  validateInventoryExclusions([pagesPlant]);
+} catch {
+  pagesPlantThrew = true;
+}
+if (!pagesPlantThrew) throw new Error("planted workflow with Pages reason did not fail closed");
+let pagesPlantInvThrew = false;
+try {
+  inventoryCheckedInWorkflows({
+    checkedInPaths: [...files, extra],
+    policies: r.policies,
+    exclusions: [pagesPlant],
+  });
+} catch {
+  pagesPlantInvThrew = true;
+}
+if (!pagesPlantInvThrew) throw new Error("inventory accepted planted workflow with Pages reason");
+let requiredExclThrew = false;
+try {
+  validateInventoryExclusions([{
+    path: REVIEW_EVIDENCE_WORKFLOW_PATH,
+    capabilityReason: "capability-disabled:has_pages=false",
+  }]);
+} catch {
+  requiredExclThrew = true;
+}
+if (!requiredExclThrew) throw new Error("required sensor exclusion did not fail closed");
+let dupExclThrew = false;
+try {
+  validateInventoryExclusions([pagesPlant, { ...pagesPlant }]);
+} catch {
+  dupExclThrew = true;
+}
+if (!dupExclThrew) throw new Error("duplicate exclusion did not fail closed");
+let malformedExclThrew = false;
+try {
+  validateInventoryExclusions([null]);
+} catch {
+  malformedExclThrew = true;
+}
+if (!malformedExclThrew) throw new Error("malformed exclusion did not fail closed");
+for (const drop of REVIEW_EVIDENCE_EVENTS) {
+  let threw = false;
+  try {
+    validateRegistry({
+      ...r,
+      policies: r.policies.map((p) =>
+        p.path === REVIEW_EVIDENCE_WORKFLOW_PATH
+          ? { ...p, events: p.events.filter((e) => e !== drop) }
+          : p
+      ),
+    });
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error(`trigger mutation ${drop} did not fail`);
+}
+let wideThrew = false;
+try {
+  validateRegistry({
+    ...r,
+    policies: r.policies.map((p) =>
+      p.path === REVIEW_EVIDENCE_WORKFLOW_PATH ? { ...p, windowDays: 2 } : p
+    ),
+  });
+} catch {
+  wideThrew = true;
+}
+if (!wideThrew) throw new Error("windowDays 2 did not fail");
+let modeThrew = false;
+try {
+  validateRegistry({
+    ...r,
+    policies: r.policies.map((p) =>
+      p.path === REVIEW_EVIDENCE_WORKFLOW_PATH ? { ...p, mode: "hourly" } : p
+    ),
+  });
+} catch {
+  modeThrew = true;
+}
+if (!modeThrew) throw new Error("unsupported mode did not fail");
+console.log("inventory-and-mutation-witnesses-ok");
+JS
+)
+INV_RC=$?
+set -e
+if [[ "$INV_RC" -eq 0 ]] && grep -q 'inventory-and-mutation-witnesses-ok' <<<"$INV_OUT"; then
+  ok "review-evidence inventory + mutation witnesses"
+else
+  bad "review-evidence inventory + mutation witnesses (rc=$INV_RC out=$INV_OUT)"
+fi
 if [[ "$FAIL" -eq 0 ]]; then
   echo "sensor-health.test.sh: $PASS passed, 0 failed"
   exit 0
