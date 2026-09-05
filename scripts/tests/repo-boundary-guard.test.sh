@@ -1112,7 +1112,7 @@ fi
 after_blob=$(git -C "$ROOT" rev-parse :README.md 2>/dev/null || true)
 # README must remain staged; first protected may still be staged alongside it.
 if [[ -n "$rb_legit_blob" && "$after_blob" == "$rb_legit_blob" ]] &&
-   git -C "$ROOT" diff --cached --name-only | grep -qx 'README.md'; then
+   git -C "$ROOT" diff --cached --name-only | grep -x 'README.md' >/dev/null; then
   ok "rollback-fail shim: legitimate README remains staged byte-for-byte"
 else
   bad "rollback-fail shim: README survival (blob before=$rb_legit_blob after=$after_blob staged=$(git -C "$ROOT" diff --cached --name-only | tr '\n' ' '))"

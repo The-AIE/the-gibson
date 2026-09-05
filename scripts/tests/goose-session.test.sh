@@ -81,7 +81,7 @@ else
   bad "permission-map missing autonomy-modes citation"
 fi
 # green_gate always_allow so enforcement is never permission-blocked
-if grep -A3 'green_gate_scripts' "$PERM" | grep -q always_allow; then
+if grep -A3 'green_gate_scripts' "$PERM" | grep always_allow >/dev/null; then
   ok "green_gate_scripts always_allow (enforcement not prompt-blocked)"
 else
   bad "green_gate_scripts must be always_allow"
@@ -217,17 +217,17 @@ fi
 echo "session.sh dry-run-lifecycle + status"
 # ---------------------------------------------------------------------------
 if out=$("$SESSION" dry-run-lifecycle 2>&1); then
-  echo "$out" | grep -q 'BLOCKED' && ok "session dry-run-lifecycle emits BLOCKED" || bad "dry-run missing BLOCKED"
-  echo "$out" | grep -q 'fail-closed proven offline' && ok "session dry-run completes" || bad "dry-run incomplete"
+  echo "$out" | grep 'BLOCKED' >/dev/null && ok "session dry-run-lifecycle emits BLOCKED" || bad "dry-run missing BLOCKED"
+  echo "$out" | grep 'fail-closed proven offline' >/dev/null && ok "session dry-run completes" || bad "dry-run incomplete"
 else
   bad "session dry-run-lifecycle failed: $out"
 fi
-if "$SESSION" status 2>&1 | grep -q 'Doctrine mount order'; then
+if "$SESSION" status 2>&1 | grep 'Doctrine mount order' >/dev/null; then
   ok "session status shows doctrine mount order"
 else
   bad "session status missing doctrine"
 fi
-if "$SESSION" status 2>&1 | grep -qi 'Gibson'; then
+if "$SESSION" status 2>&1 | grep -i 'Gibson' >/dev/null; then
   ok "session status is Gibson-branded"
 else
   bad "session status missing Gibson brand"

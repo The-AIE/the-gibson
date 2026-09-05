@@ -46,7 +46,7 @@ help_out=$("$SETUP" --help 2>"$ROOT/help.err")
 help_rc=$?
 if [[ "$help_rc" -eq 0 ]]; then ok "setup-hooks.sh --help exits 0"
 else bad "setup-hooks.sh --help exited $help_rc"; fi
-if echo "$help_out" | grep -q 'WHAT IT DOES' && echo "$help_out" | grep -q 'RISKS'; then
+if echo "$help_out" | grep 'WHAT IT DOES' >/dev/null && echo "$help_out" | grep 'RISKS' >/dev/null; then
   ok "setup-hooks.sh --help names WHAT IT DOES and RISKS"
 else
   bad "setup-hooks.sh --help missing Ask-Contract fields"
@@ -145,7 +145,7 @@ if [[ "$before" == "$after" ]]; then
 else
   bad "already-present trailer was rewritten: $after"
 fi
-if grep -c -iE '^Signed-off-by:[[:space:]]+' "$msg" | grep -qx 1; then
+if grep -c -iE '^Signed-off-by:[[:space:]]+' "$msg" | grep -x 1 >/dev/null; then
   ok "already-present trailer was not duplicated"
 else
   bad "trailer count changed: $(cat "$msg")"
