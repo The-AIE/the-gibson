@@ -13,8 +13,8 @@ relative_links:
   collections: false
 
 # just-the-docs settings
-logo: "/the-gibson/assets/images/branding/gibson-social-preview.png"
-favicon_ico: "/the-gibson/assets/images/branding/favicon.ico"
+logo: "/assets/images/branding/gibson-site-logo.png"
+favicon_ico: "/assets/images/branding/favicon.ico"
 search_enabled: true
 heading_anchors: true
 color_scheme: light
