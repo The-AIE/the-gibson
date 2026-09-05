@@ -1161,6 +1161,23 @@ export function renderIssueBody(report) {
 function createBudget() {
   return { requests: 0, pages: 0, capsHit: 0, cacheHits: 0 };
 }
+/** True only for checked-in `.github/workflows` freshness policies, never dynamic/pseudo sensors. */
+export function isCheckedInRepoOwnedFreshnessPolicy(policy) {
+  return (
+    !!policy &&
+    policy.mode === "freshness" &&
+    typeof policy.path === "string" &&
+    policy.path.startsWith(`${CHECKED_IN_WORKFLOW_DIR}/`)
+  );
+}
+
+/** UTC date of observationTime minus windowDays; used as the server-side `created>=` floor. */
+export function freshnessCreatedQueryFloor(observationTime, windowDays) {
+  const ts = observationTime instanceof Date ? observationTime : new Date(observationTime);
+  const days = Number.isInteger(windowDays) && windowDays > 0 ? windowDays : 0;
+  return new Date(ts.getTime() - days * 86400_000).toISOString().slice(0, 10);
+}
+
 export async function paginateList({
   fetchPage,
   perPage = DEFAULT_PER_PAGE,
@@ -1593,6 +1610,30 @@ export async function runSensorHealthAudit({
               }
             }
           }
+        } else if (isCheckedInRepoOwnedFreshnessPolicy(policy)) {
+          const createdFloor = freshnessCreatedQueryFloor(ctx.observationTime, policy.windowDays);
+          const merged = [];
+          for (const event of policy.events) {
+            const result = await paginateWorkflowField(
+              (page, pp) => {
+                const q = new URLSearchParams({
+                  event,
+                  created: `>=${createdFloor}`,
+                  per_page: String(pp),
+                  page: String(page),
+                });
+                return `/repos/${repository}/actions/workflows/${joinRow.workflowId}/runs?${q}`;
+              },
+              requireWorkflowRuns
+            );
+            if (result.capExhausted && !result.complete) {
+              capExhausted = true;
+              evidenceComplete = false;
+              budget.capsHit += 1;
+            }
+            merged.push(...result.items);
+          }
+          runs = merged;
         } else {
           const result = await paginateWorkflowField(
             (page, pp) =>

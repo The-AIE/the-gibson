@@ -23,7 +23,9 @@ import {
   discoverCheckedInWorkflows,
   evaluateTargetJobs,
   freezeContext,
+  freshnessCreatedQueryFloor,
   inventoryCheckedInWorkflows,
+  isCheckedInRepoOwnedFreshnessPolicy,
   isExemptNonTargetSkip,
   joinPolicies,
   loadRegistryFile,
@@ -1430,14 +1432,19 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     const sh = r.policies.find((p) => p.path === ".github/workflows/sensor-health.yml");
     assert.equal(sh.mode, "freshness");
     assert.equal(sh.windowDays, 2);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sh), true);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(reviewEvidence()), true);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sg), false);
     const sec = r.policies.find(
       (p) => p.path === "dynamic/github-code-scanning/code-security-risk-assessment"
     );
     assert.equal(sec.mode, "freshness");
     assert.deepEqual(sec.events, ["dynamic"]);
     assert.equal(sec.windowDays, 30);
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(sec), false);
     const pages = r.policies.find((p) => p.path === PAGES_WORKFLOW_PATH);
     assert.deepEqual(pages.enabledWhen, { repoField: "has_pages", equals: true });
+    assert.equal(isCheckedInRepoOwnedFreshnessPolicy(pages), false);
     const disabled = await runSensorHealthAudit({
       token: "t",
       repository: "The-AIE/the-gibson",
@@ -1449,17 +1456,203 @@ describe("issue 346 pr-review-evidence registry and inventory", () => {
     assert.ok(disabled.report.rows.every((row) => row.state === STATES.OK));
     assert.ok(!disabled.report.rows.some((row) => row.path === PAGES_WORKFLOW_PATH));
     assert.equal(disabled.report.rows.find((row) => row.path === PATH)?.state, STATES.OK);
+    const enabledUrls = [];
+    const enabledImpl = fetch(greenCoreHandlers(true));
     const enabled = await runSensorHealthAudit({
       token: "t",
       repository: "The-AIE/the-gibson",
       registry: r,
       observationTime: OBS,
-      fetchImpl: fetch(greenCoreHandlers(true)),
+      fetchImpl: async (url, init) => {
+        enabledUrls.push(String(url));
+        return enabledImpl(url, init);
+      },
     });
     assert.equal(enabled.exitCode, 0);
     assert.equal(enabled.report.rows.find((row) => row.path === sg.path)?.state, STATES.OK);
     assert.equal(enabled.report.rows.find((row) => row.path === sh.path)?.state, STATES.OK);
     assert.equal(enabled.report.rows.find((row) => row.path === sec.path)?.state, STATES.OK);
     assert.equal(enabled.report.rows.find((row) => row.path === PATH)?.state, STATES.OK);
+    const reviewUrls = enabledUrls.filter((u) => /\/workflows\/5\/runs\?/.test(u));
+    const reviewFloor = freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const reviewEvents = new Set(reviewUrls.map((u) => new URL(u).searchParams.get("event")));
+    for (const event of REVIEW_EVIDENCE_EVENTS) {
+      assert.ok(reviewEvents.has(event), event);
+    }
+    assert.ok(
+      reviewUrls.every((u) => {
+        const created = new URL(u).searchParams.get("created");
+        return created === `>=${reviewFloor}` && u.includes(`created=${encodeURIComponent(`>=${reviewFloor}`)}`);
+      })
+    );
+    const dynUrls = enabledUrls.filter((u) => /\/workflows\/[34]\/runs\?/.test(u));
+    assert.ok(dynUrls.length > 0);
+    assert.ok(dynUrls.every((u) => new URL(u).searchParams.get("event") !== "dynamic"));
+    const selfUrls = enabledUrls.filter((u) => /\/workflows\/1\/runs\?/.test(u));
+    assert.ok(selfUrls.every((u) => new URL(u).searchParams.get("event") === "push"));
+  });
+  it("created query floor is the UTC date of observationTime minus windowDays", () => {
+    assert.equal(freshnessCreatedQueryFloor(OBS, 1), "2026-08-29");
+    assert.equal(freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS), "2026-08-29");
+    assert.equal(freshnessCreatedQueryFloor(OBS, 2), "2026-08-28");
+  });
+  it("lifetime >500 flood stays OK when each review-evidence event is created-filtered to a small in-window subset", async () => {
+    const requested = [];
+    const createdFloor = freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const encodedCreated = encodeURIComponent(`>=${createdFloor}`);
+    const inWindow = {
+      pull_request_target: run({
+        id: 5101,
+        event: "pull_request_target",
+        conclusion: "success",
+        updated_at: "2026-08-30T11:00:00Z",
+      }),
+      issue_comment: run({
+        id: 5102,
+        event: "issue_comment",
+        conclusion: "success",
+        updated_at: "2026-08-30T10:30:00Z",
+      }),
+      schedule: run({
+        id: 5103,
+        event: "schedule",
+        conclusion: "success",
+        updated_at: "2026-08-30T10:00:00Z",
+      }),
+    };
+    const floodPage = (page, perPage) =>
+      Array.from({ length: perPage }, (_, i) =>
+        run({
+          id: 800000 + (page - 1) * perPage + i,
+          event: "schedule",
+          conclusion: "success",
+          updated_at: "2026-07-01T00:00:00Z",
+        })
+      );
+    const core = fetch(greenCoreHandlers(true));
+    const result = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      runPageCap: 5,
+      perPage: 100,
+      fetchImpl: async (url, init) => {
+        const u = String(url);
+        if (/\/workflows\/5\/runs\?/.test(u)) {
+          requested.push(u);
+          const parsed = new URL(u);
+          const event = parsed.searchParams.get("event");
+          const created = parsed.searchParams.get("created");
+          const page = Number(parsed.searchParams.get("page") || 1);
+          const perPage = Number(parsed.searchParams.get("per_page") || 100);
+          const filtered =
+            REVIEW_EVIDENCE_EVENTS.includes(event) && created === `>=${createdFloor}`;
+          if (!filtered) {
+            return res(200, { workflow_runs: floodPage(page, perPage) });
+          }
+          return res(200, { workflow_runs: inWindow[event] ? [inWindow[event]] : [] });
+        }
+        return core(url, init);
+      },
+    });
+    assert.ok(requested.length > 0, "review-evidence runs endpoint was not queried");
+    const unfiltered = requested.filter((u) => {
+      const p = new URL(u).searchParams;
+      return !p.get("event") || !p.get("created");
+    });
+    assert.equal(
+      unfiltered.length,
+      0,
+      `unfiltered lifetime fetch would paginate-cap: ${unfiltered.join(" | ")}`
+    );
+    const eventsSeen = new Set();
+    for (const u of requested) {
+      const p = new URL(u).searchParams;
+      assert.equal(p.get("created"), `>=${createdFloor}`);
+      assert.ok(u.includes(`created=${encodedCreated}`), u);
+      eventsSeen.add(p.get("event"));
+    }
+    for (const event of REVIEW_EVIDENCE_EVENTS) {
+      assert.ok(eventsSeen.has(event), `missing event query ${event}`);
+    }
+    const row = result.report.rows.find((r) => r.path === PATH);
+    assert.ok(row);
+    assert.equal(row.state, STATES.OK);
+    assert.notEqual(row.reasonClass, REASON.PAGINATION_CAP);
+    assert.equal(row.selectedRunId, 5101);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.report.rows.find((r) => r.path === ".github/workflows/gibson-self-gate.yml")?.state, STATES.OK);
+    assert.equal(result.report.rows.find((r) => r.path === ".github/workflows/sensor-health.yml")?.state, STATES.OK);
+    assert.equal(
+      result.report.rows.find(
+        (r) => r.path === "dynamic/github-code-scanning/code-security-risk-assessment"
+      )?.state,
+      STATES.OK
+    );
+  });
+  it("a capped or failed per-event freshness query remains non-OK even with other in-window successes", async () => {
+    const createdFloor = freshnessCreatedQueryFloor(OBS, REVIEW_EVIDENCE_WINDOW_DAYS);
+    const successFor = (event, id) =>
+      run({
+        id,
+        event,
+        conclusion: "success",
+        updated_at: "2026-08-30T11:00:00Z",
+      });
+    const core = fetch(greenCoreHandlers(true));
+    const reviewFetch = (onIssueComment) => async (url, init) => {
+      const u = String(url);
+      if (/\/workflows\/5\/runs\?/.test(u)) {
+        const parsed = new URL(u);
+        const event = parsed.searchParams.get("event");
+        const created = parsed.searchParams.get("created");
+        const page = Number(parsed.searchParams.get("page") || 1);
+        const perPage = Number(parsed.searchParams.get("per_page") || 100);
+        assert.equal(created, `>=${createdFloor}`);
+        assert.ok(REVIEW_EVIDENCE_EVENTS.includes(event), event);
+        if (event === "issue_comment") return onIssueComment({ page, perPage, url: u });
+        return res(200, { workflow_runs: [successFor(event, event === "schedule" ? 6103 : 6101)] });
+      }
+      return core(url, init);
+    };
+    const capped = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      runPageCap: 5,
+      perPage: 100,
+      fetchImpl: reviewFetch(({ page, perPage }) =>
+        res(
+          200,
+          {
+            workflow_runs: Array.from({ length: perPage }, (_, i) =>
+              successFor("issue_comment", 700000 + (page - 1) * perPage + i)
+            ),
+          }
+        )
+      ),
+    });
+    const cappedRow = capped.report.rows.find((r) => r.path === PATH);
+    assert.ok(cappedRow);
+    assert.notEqual(cappedRow.state, STATES.OK);
+    assert.equal(cappedRow.state, STATES.UNKNOWN);
+    assert.equal(cappedRow.reasonClass, REASON.PAGINATION_CAP);
+    assert.equal(capped.exitCode, 1);
+    assert.ok(capped.report.budget.capsHit >= 1);
+    const failed = await runSensorHealthAudit({
+      token: "t",
+      repository: "The-AIE/the-gibson",
+      registry: reg(),
+      observationTime: OBS,
+      fetchImpl: reviewFetch(() => res(500, { message: "event query failed" })),
+    });
+    const failedRow = failed.report.rows.find((r) => r.path === PATH);
+    assert.ok(failedRow);
+    assert.notEqual(failedRow.state, STATES.OK);
+    assert.equal(failedRow.state, STATES.UNKNOWN);
+    assert.equal(failedRow.reasonClass, REASON.API_ERROR);
+    assert.equal(failed.exitCode, 1);
   });
 });
