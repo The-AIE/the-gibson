@@ -15,6 +15,21 @@ risks. Technical terms are explained inline.
 Assume you have: a GitHub account, a target app repo, and at least one agent CLI
 (Grok recommended for grind; Claude or Codex fine too).
 
+### The mental model: two repo paths, one agent
+
+During adoption, one agent session needs two paths:
+
+- **The Gibson repo** supplies the read-only rulebook, playbook, scripts, and
+  templates.
+- **The target repo** is the application being adopted. All proposed changes go
+  into an isolated worktree of this repo and arrive as a pull request.
+
+You do not open one agent for Gibson and another for the app, and the app is
+never copied into the Gibson repo. After adoption, day-to-day product work starts
+from the target repo; a Gibson launcher, adapter, or explicit prompt continues to
+supply the harness. The canonical repository boundary and full user journey live
+in [docs/13](docs/13-adoption.md#repository-boundary-and-user-journey).
+
 ### Single-model is the primary path
 
 **One model is enough** — full statement:
@@ -83,6 +98,20 @@ Example path: `~/Code/acme-app` with GitHub `acme/acme-app`.
 | **Risks** | Medium: CI can block merges if miscalibrated. Fixable by adjusting workflows or burn-down issues. Nothing goes live until you merge. |
 
 **With an agent:**
+
+Give one session both roles explicitly:
+
+```text
+Use ~/Code/the-gibson as the read-only Gibson harness to adopt
+~/Code/acme-app (GitHub: acme/acme-app).
+
+Audit first. Prepare adoption changes only in an isolated worktree of acme-app
+and return them as a pull request. Do not put application code in the Gibson
+repo. Explain every owner action with the Ask Contract before asking me to act.
+Runtimes: grok.
+```
+
+One headless equivalent is:
 
 ```bash
 cd ~/Code/the-gibson
@@ -182,13 +211,43 @@ Optional multi-model upgrade (not required):
 
 ---
 
+## Step 7 — Work from the target repo day to day
+
+| | |
+|---|---|
+| **What I'm asking** | Make the adopted application your working project. |
+| **What it does** | Keeps product code, issues, claims, pull requests, and deploy evidence with the application while Gibson supplies the process. |
+| **Why** | Gibson is the harness, not the product repository. Separating them prevents app changes from contaminating the shared rulebook. |
+| **Risks** | Low. A plain agent session that is not launched with the Gibson contract has only the target repo's local instructions, not the full harness. |
+
+For an interactive task, open the target repo and name the Gibson harness in the
+session unless your adapter already injects it:
+
+```text
+Workspace: ~/Code/acme-app
+Use ~/Code/the-gibson as the Gibson harness.
+Build issue #42 in an isolated target-repo worktree.
+```
+
+For an unattended loop, the command can run from anywhere because both roles are
+explicit in its arguments:
+
+```bash
+~/Code/the-gibson/scripts/loop.sh --runner grok \
+  --repo ~/Code/acme-app --repo-slug acme/acme-app --solo-platform
+```
+
+The user stays oriented around `acme-app`; Gibson remains the reusable harness.
+
+---
+
 ## Next
 
 - Full operator habits: [GUIDE.md](GUIDE.md)  
 - Overnight grind: [docs/11](docs/11-solo-loop.md)  
 - Owner-facing prompts: [docs/prompts.md](docs/prompts.md)  
 - End-goal checklist: [docs/21-operator-readiness.md](docs/21-operator-readiness.md)  
-- Second repo: repeat Steps 2–6  
+- Second repo: repeat Steps 2–7 with the same Gibson clone
 - Fork sync: `scripts/upstream-sync.sh`  
 - Reading map: [docs/00-INDEX.md](docs/00-INDEX.md)
 

@@ -52,6 +52,22 @@ Runtimes: grok, claude-code
 # Or interactive: "Adopt the acme-app repo"
 ```
 
+## Repository boundary
+
+Follow the canonical boundary in
+[docs/13](../docs/13-adoption.md#repository-boundary-and-user-journey): this is
+one agent session with two repository roles.
+
+- Treat the Gibson canonical checkout as a read-only harness source.
+- Treat the target canonical checkout as a read-only audit source and worktree
+  anchor.
+- Make adoption changes only in a claimed, isolated worktree of the target repo.
+- Open the adoption PR against the target repo, never against Gibson.
+- Never copy the application into Gibson or edit application code there.
+
+Starting the session in Gibson only loads this playbook. It does not change the
+working-repository boundary, and it does not require a second agent session.
+
 **Typical human approvals you'll request (Ask Contract each time):**
 
 1. Permission to open an adoption PR (CI + AGENTS section).
@@ -182,6 +198,28 @@ immediately; whole-codebase hard-fail when burn-down completes.
 3. **Canary:** one real Tier A issue per runtime through the full pipeline.
 4. Seed memory: adoption report → first DECISIONS entries (fork or target as
    appropriate).
+
+## Step 6 — Hand off the day-to-day operating model
+
+End adoption with an owner-facing handoff that names both paths and makes the
+working boundary unambiguous:
+
+1. **Interactive command or prompt:** open the target as the workspace and name
+   the Gibson checkout as the harness unless an adapter injects it already.
+2. **Unattended command:** give the exact
+   `<gibson>/scripts/loop.sh --repo <target> --repo-slug <owner/repo>` form for
+   the installed runtime.
+3. **Where truth lives:** product issues, claims, pull requests, CI, and deploy
+   evidence live with the target; reusable doctrine and launch scripts live with
+   Gibson.
+4. **Where work happens:** all application mutations remain in target-repo
+   worktrees, never either canonical checkout.
+5. **How to add another repo:** repeat adoption against the new target using the
+   same Gibson checkout unless the owner intentionally selects another fork or
+   policy version.
+
+Do not report adoption complete while leaving the user with the impression that
+future application work starts by editing or developing inside the Gibson repo.
 
 ---
 
