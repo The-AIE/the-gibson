@@ -30,8 +30,8 @@ FAIL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-claim-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -139,6 +139,75 @@ case "$1 $2" in
           "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
           "CLOSED" "${cross:-false}" "" "acme/app" "$created" "$updated"
       done < "${GH_PR_FILE}.closed" 2>/dev/null
+    fi
+    ;;
+  "pr view")
+    number=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json|--repo|--jq|-q) shift 2 ;;
+        *)
+          if [[ "$1" =~ ^[0-9]+$ ]]; then number="$1"; fi
+          shift
+          ;;
+      esac
+    done
+    body_file="${GH_PR_FILE}.body"
+    row=$(grep -E "^${number}\\|" "${GH_PR_FILE}" 2>/dev/null | head -1)
+    branch=$(printf '%s\n' "$row" | cut -d'|' -f4)
+    headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+    [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    baseref="main"
+    basesha=$(git ls-remote origin "refs/heads/main" 2>/dev/null | cut -f1)
+    if [[ -z "$basesha" ]]; then
+      baseref="master"
+      basesha=$(git ls-remote origin "refs/heads/master" 2>/dev/null | cut -f1)
+    fi
+    [[ -n "$basesha" ]] || basesha="cccccccccccccccccccccccccccccccccccccccc"
+    if [[ "${GH_PROVENANCE_DRIFT:-0}" == 1 ]]; then
+      n=$(cat "${GH_PR_FILE}.viewcount" 2>/dev/null || echo 0)
+      n=$((n + 1))
+      echo "$n" > "${GH_PR_FILE}.viewcount"
+      if [[ "$n" -ge 2 ]]; then
+        headsha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      fi
+    fi
+    [[ "${GH_PROVENANCE_FAIL:-0}" == 1 ]] && exit 1
+    cross="${GH_PR_CROSS:-false}"
+    truncated="${GH_PROVENANCE_TRUNCATED:-0}"
+    node -e '
+      const fs = require("fs");
+      const number = process.argv[1];
+      const bodyPath = process.argv[2];
+      const head = process.argv[3];
+      const branch = process.argv[4];
+      const cross = process.argv[5] === "true";
+      const truncated = process.argv[6] === "1";
+      const base = process.argv[7];
+      const baseRef = process.argv[8];
+      const body = fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath, "utf8") : "";
+      const out = {
+        number: Number(number),
+        url: "https://github.com/acme/app/pull/" + number,
+        body: truncated ? body.slice(0, 24) : body,
+        headRefOid: head,
+        headRefName: branch,
+        isCrossRepository: cross,
+        baseRefName: baseRef,
+        baseRefOid: base,
+        state: process.env.GH_PR_STATE || "OPEN"
+      };
+      process.stdout.write(JSON.stringify(out));
+    ' "$number" "$body_file" "$headsha" "${branch:-feat/unknown}" "$cross" "$truncated" "$basesha" "$baseref"
+    ;;
+  api\ repos/*)
+    sha="${2##*/}"
+    login="${GIT_AUTHOR_NAME:-gibson-sensor}"
+    if [[ "${GH_PROVENANCE_NO_LOGIN:-0}" == 1 ]]; then
+      printf '{"sha":"%s","author":null,"committer":null,"commit":{}}\n' "$sha"
+    else
+      printf '{"sha":"%s","author":{"login":"%s"},"committer":{"login":"%s"},"commit":{}}\n' \
+        "$sha" "$login" "$login"
     fi
     ;;
   "pr create")
@@ -253,10 +322,10 @@ export GIBSON_SESSION="tester@box"
 # do not already prove.
 #
 # So the broad fixtures run an explicitly patched COPY of the whole toolchain.
-# claim.sh resolves scope-overlap.mjs, pr-claims.sh and lib/claim-guards.sh
-# from its OWN directory, so the copy has to be a complete one; the only edit
-# is a single surgical substitution that removes the blocking call from
-# spaceReads and nothing else. Everything the barrier REQUIRES — consecutive
+# claim.sh resolves scope-overlap.mjs, pr-claims.sh, claim-provenance.mjs and
+# lib/claim-guards.sh from its OWN directory, so the copy has to be a complete
+# one; the only edit is a single surgical substitution that removes the blocking
+# call from spaceReads and nothing else. Everything the barrier REQUIRES — consecutive
 # matching reads that all contain this lane's own claim, the floor, the
 # safe-integer bounds — is the production code path.
 #
@@ -267,6 +336,7 @@ FASTDIR="$ROOT/scripts-fast"
 mkdir -p "$FASTDIR/lib"
 cp "$SCRIPT_DIR/../claim.sh"            "$FASTDIR/claim.sh"
 cp "$SCRIPT_DIR/../pr-claims.sh"        "$FASTDIR/pr-claims.sh"
+cp "$SCRIPT_DIR/../claim-provenance.mjs" "$FASTDIR/claim-provenance.mjs"
 cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$FASTDIR/lib/claim-guards.sh"
 cp "$SCRIPT_DIR/../lib/args.mjs"        "$FASTDIR/lib/args.mjs"
 # The marked region is the wait AND the monotonic measurement that verifies
@@ -346,6 +416,19 @@ contains "creates a PR-body claim" "$(cat "$GH_PR_FILE")" "issue-42-password-res
 body=$(cat "$GH_PR_FILE")
 contains "records the scope"   "$body" "app/api/auth/**"
 contains "records the session" "$(cat "${GH_PR_FILE}.body")" "- Session: tester@box"
+contains "writes v2 claim schema" "$(cat "${GH_PR_FILE}.body")" "- Claim schema: gibson.claim/v2"
+contains "binds original branch point" "$(cat "${GH_PR_FILE}.body")" "- Original branch point: "
+contains "binds reservation commit" "$(cat "${GH_PR_FILE}.body")" "- Reservation commit: "
+contains "prints the reservation SHA" "$out" "reservation:"
+contains "prints a provenance receipt" "$out" "gibson.claim-provenance/v1"
+contains "receipt is report-only" "$out" '"authority":"report-only"'
+lacks "receipt is not merge authority" "$out" '"READY"'
+res_msg=$(git -C "$ROOT/a/wt-42-password-reset" log -1 --format=%B)
+contains "v1 reservation trailer" "$res_msg" "Gibson-Reservation: v1"
+contains "claim-id trailer" "$res_msg" "Gibson-Claim-ID: issue-42-password-reset"
+contains "issue trailer" "$res_msg" "Gibson-Issue: #42"
+contains "branch trailer" "$res_msg" "Gibson-Branch: feat/42-password-reset"
+contains "DCO trailer present" "$res_msg" "Signed-off-by: ${GIT_AUTHOR_NAME} <${GIT_AUTHOR_EMAIL}>"
 table=$(cd "$ROOT/a/canon" && git show origin/main:docs/active-work.md)
 lacks "does not append to the shared table" "$table" "issue-42"
 head_before=$(cd "$ROOT/a/canon" && git rev-parse origin/main)
@@ -666,9 +749,9 @@ case "$1 $2" in
   "issue view") cat "$RACE_DIR/labels-$3" 2>/dev/null || echo "" ;;
   "issue edit")
     issue="$3"
-    if echo "$*" | grep -q -- '--add-label'; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "$RACE_DIR/labels-$issue"
-    elif echo "$*" | grep -q -- '--remove-label'; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "$RACE_DIR/labels-$issue"
     fi
     ;;
@@ -722,8 +805,61 @@ case "$1 $2" in
     echo $((number + 1)) > "$RACE_DIR/next"
     printf '%s|%s|%s|%s|https://github.com/%s/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z\n' \
       "$number" "$claim" "$scope" "$branch" "$RACE_REPO" "$number" >> "$RACE_DIR/prs"
+    mkdir -p "$RACE_DIR/bodies"
+    cat "$body_file" > "$RACE_DIR/bodies/$number"
+    printf '%s\n' "$branch" > "$RACE_DIR/branch-$number"
     unlock
     echo "https://github.com/$RACE_REPO/pull/$number"
+    ;;
+  "pr view")
+    number=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json|--repo|--jq|-q) shift 2 ;;
+        *)
+          if [[ "$1" =~ ^[0-9]+$ ]]; then number="$1"; fi
+          shift
+          ;;
+      esac
+    done
+    branch=$(cat "$RACE_DIR/branch-$number" 2>/dev/null || true)
+    headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+    [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    baseref="main"
+    basesha=$(git ls-remote origin "refs/heads/main" 2>/dev/null | cut -f1)
+    if [[ -z "$basesha" ]]; then
+      baseref="master"
+      basesha=$(git ls-remote origin "refs/heads/master" 2>/dev/null | cut -f1)
+    fi
+    [[ -n "$basesha" ]] || basesha="cccccccccccccccccccccccccccccccccccccccc"
+    node -e '
+      const fs = require("fs");
+      const number = process.argv[1];
+      const bodyPath = process.argv[2];
+      const head = process.argv[3];
+      const branch = process.argv[4];
+      const repo = process.argv[5];
+      const base = process.argv[6];
+      const baseRef = process.argv[7];
+      const body = fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath, "utf8") : "";
+      process.stdout.write(JSON.stringify({
+        number: Number(number),
+        url: "https://github.com/" + repo + "/pull/" + number,
+        body,
+        headRefOid: head,
+        headRefName: branch,
+        isCrossRepository: false,
+        baseRefName: baseRef,
+        baseRefOid: base,
+        state: process.env.GH_PR_STATE || "OPEN"
+      }));
+    ' "$number" "$RACE_DIR/bodies/$number" "$headsha" "${branch:-feat/unknown}" "$RACE_REPO" "$basesha" "$baseref"
+    ;;
+  api\ repos/*)
+    sha="${2##*/}"
+    login="${GIT_AUTHOR_NAME:-gibson-sensor}"
+    printf '{"sha":"%s","author":{"login":"%s"},"committer":{"login":"%s"},"commit":{}}\n' \
+      "$sha" "$login" "$login"
     ;;
   "pr close")
     number="$3"
@@ -982,9 +1118,9 @@ case "$1 $2" in
     ;;
   "issue edit")
     echo "$*" >> "$LAG_STATE/label.log"
-    if echo "$*" | grep -q -- '--add-label'; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "$LAG_STATE/labels"
-    elif echo "$*" | grep -q -- '--remove-label'; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "$LAG_STATE/labels"
     fi
     ;;
@@ -1068,7 +1204,59 @@ case "$1 $2" in
     printf '%s\t%s\t%s\t%s\thttps://github.com/acme/app/pull/%s\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\t%s\n' \
       "$LAG_SELF_PR" "$claim" "$scope" "$branch" "$LAG_SELF_PR" \
       "${LAG_SELF_CROSS:-false}" > "$LAG_STATE/self"
+    cat "$body_file" > "$LAG_STATE/body"
+    printf '%s\n' "$branch" > "$LAG_STATE/branch"
     echo "https://github.com/acme/app/pull/$LAG_SELF_PR"
+    ;;
+  "pr view")
+    number=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json|--repo|--jq|-q) shift 2 ;;
+        *)
+          if [[ "$1" =~ ^[0-9]+$ ]]; then number="$1"; fi
+          shift
+          ;;
+      esac
+    done
+    branch=$(cat "$LAG_STATE/branch" 2>/dev/null || true)
+    headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+    [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    baseref="main"
+    basesha=$(git ls-remote origin "refs/heads/main" 2>/dev/null | cut -f1)
+    if [[ -z "$basesha" ]]; then
+      baseref="master"
+      basesha=$(git ls-remote origin "refs/heads/master" 2>/dev/null | cut -f1)
+    fi
+    [[ -n "$basesha" ]] || basesha="cccccccccccccccccccccccccccccccccccccccc"
+    node -e '
+      const fs = require("fs");
+      const number = process.argv[1];
+      const bodyPath = process.argv[2];
+      const head = process.argv[3];
+      const branch = process.argv[4];
+      const cross = process.argv[5] === "true";
+      const base = process.argv[6];
+      const baseRef = process.argv[7];
+      const body = fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath, "utf8") : "";
+      process.stdout.write(JSON.stringify({
+        number: Number(number),
+        url: "https://github.com/acme/app/pull/" + number,
+        body,
+        headRefOid: head,
+        headRefName: branch,
+        isCrossRepository: cross,
+        baseRefName: baseRef,
+        baseRefOid: base,
+        state: process.env.GH_PR_STATE || "OPEN"
+      }));
+    ' "${number:-$LAG_SELF_PR}" "$LAG_STATE/body" "$headsha" "${branch:-feat/unknown}" "${LAG_SELF_CROSS:-false}" "$basesha" "$baseref"
+    ;;
+  api\ repos/*)
+    sha="${2##*/}"
+    login="${GIT_AUTHOR_NAME:-gibson-sensor}"
+    printf '{"sha":"%s","author":{"login":"%s"},"committer":{"login":"%s"},"commit":{}}\n' \
+      "$sha" "$login" "$login"
     ;;
   "pr close")
     echo "closed $3" >> "$LAG_STATE/close.log"
@@ -1126,7 +1314,7 @@ lag_fixture lagfloor 90 "$LAG_RIVAL_ROW"
 for floor_env in GIBSON_CLAIM_ADMIT_STABLE_READS=1 GIBSON_CLAIM_ADMIT_DELAY=0 GIBSON_CLAIM_ADMIT_ATTEMPTS=1; do
   out=$(cd "$ROOT/lagfloor/canon" && PATH="$ROOT/lagfloor/bin:$PATH" \
     env "$floor_env" LAG_RIVAL_AFTER=3 "$CLAIM" 87 floored 'lib/lag/**' 2>&1); rc=$?
-  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "below the production minimum"; then
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -F "below the production minimum" >/dev/null; then
     ok "$floor_env is refused, not honoured"
   else
     bad "$floor_env was accepted (rc=$rc): $out"
@@ -1144,6 +1332,7 @@ echo "#153 · that refusal is the barrier's doing, not the fixture's"
 CTL_DIR="$ROOT/ctl-scripts"
 mkdir -p "$CTL_DIR/lib"
 cp "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../pr-claims.sh" "$SCRIPT_DIR/../scope-overlap.mjs" "$CTL_DIR/"
+cp "$SCRIPT_DIR/../claim-provenance.mjs" "$CTL_DIR/claim-provenance.mjs"
 cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$CTL_DIR/lib/"
 cp "$SCRIPT_DIR/../lib/args.mjs" "$CTL_DIR/lib/args.mjs"
 chmod +x "$CTL_DIR/claim.sh" "$CTL_DIR/pr-claims.sh"
@@ -1377,10 +1566,10 @@ lacks "same-id known-PR path never removes the label" \
   "$(cat "$ROOT/lagsameidpr/state/label.log")" "--remove-label"
 # Honest diagnostic: surviving sibling, ambiguous multi-match, or still-live
 # claim after close. At least one must appear so a silent strip cannot hide.
-if echo "$out" | grep -qF "surviving sibling claim(s)" ||
-   echo "$out" | grep -qF "ambiguous evidence" ||
-   echo "$out" | grep -qF "STILL a live claim" ||
-   echo "$out" | grep -qF "may still be open"; then
+if echo "$out" | grep -F "surviving sibling claim(s)" >/dev/null ||
+   echo "$out" | grep -F "ambiguous evidence" >/dev/null ||
+   echo "$out" | grep -F "STILL a live claim" >/dev/null ||
+   echo "$out" | grep -F "may still be open" >/dev/null; then
   ok "same-id known-PR path names surviving/ambiguous/live evidence honestly"
 else
   bad "same-id known-PR path lacked an honest keep-label diagnostic: $out"
@@ -1748,8 +1937,8 @@ case "$1 $2" in
   "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
   "issue edit")
     echo "$*" >> "$STATE/label.log"
-    if echo "$*" | grep -q -- '--add-label'; then echo "agent-claimed" > "$STATE/labels"
-    elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
+    if echo "$*" | grep -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
     # `list-open-numbers` (operation openPrNumbers) also carries
@@ -1812,8 +2001,8 @@ case "$1 $2" in
   "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
   "issue edit")
     echo "$*" >> "$STATE/label.log"
-    if echo "$*" | grep -q -- '--add-label'; then echo "agent-claimed" > "$STATE/labels"
-    elif echo "$*" | grep -q -- '--remove-label'; then : > "$STATE/labels"; fi
+    if echo "$*" | grep -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
     # `list-open-numbers` (operation openPrNumbers) also carries
@@ -2043,7 +2232,8 @@ for v in GIBSON_CLAIM_TEST_ROLLBACK_HOOK RELEASE_CLAIM_TEST_DIRTY_HOOK \
 done
 # And the general shape: no production claim/release script may execute a
 # command taken from an environment variable.
-for prod in "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh" "$SCRIPT_DIR/../pr-claims.sh"; do
+for prod in "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh" \
+            "$SCRIPT_DIR/../pr-claims.sh" "$SCRIPT_DIR/../claim-provenance.mjs"; do
   if grep -nE '^[[:space:]]*"\$\{?[A-Z_]*(HOOK|CMD|EXEC)[A-Z_]*' "$prod" >/dev/null; then
     bad "$(basename "$prod") executes a command named by an environment variable"
   else
@@ -2260,7 +2450,7 @@ echo "#153 round 4 · no production script names an executable through the envir
 # execute from something a caller controls. Neither may come back.
 for prod in "$SCRIPT_DIR/../claim.sh" "$SCRIPT_DIR/../release-claim.sh" \
             "$SCRIPT_DIR/../pr-claims.sh" "$SCRIPT_DIR/../lib/claim-guards.sh" \
-            "$SCRIPT_DIR/../scope-overlap.mjs"; do
+            "$SCRIPT_DIR/../scope-overlap.mjs" "$SCRIPT_DIR/../claim-provenance.mjs"; do
   name=$(basename "$prod")
   if grep -nE '_TEST_[A-Z_]*HOOK|_HOOK\b' "$prod" | grep -vE '^\s*[0-9]+:\s*#|removed|no production hook|there is deliberately' >/dev/null; then
     bad "$name references a test hook variable"
@@ -2451,7 +2641,7 @@ _before_head=$(cd "$ROOT/scope_star/canon" && git rev-parse HEAD)
 out=$(cd "$ROOT/scope_star/canon" && "$CLAIM" 701 star-scope '*' 2>&1); rc=$?
 check    "literal '*' scope exits nonzero" "$rc" "1"
 # Sensor must have seen the token (invalid grammar), not an expanded path list.
-if echo "$out" | grep -qiE 'invalid claim-scope|no literal path segment|scope overlap|refusing|ERROR'; then
+if echo "$out" | grep -iE 'invalid claim-scope|no literal path segment|scope overlap|refusing|ERROR' >/dev/null; then
   ok "literal '*' refused with a scope/validator diagnostic"
 else
   bad "literal '*' did not produce a scope refusal: $out"
@@ -2490,7 +2680,7 @@ _before_files=$(product_tree_snap "$ROOT/scope_mid/canon")
 _before_head=$(cd "$ROOT/scope_mid/canon" && git rev-parse HEAD)
 out=$(cd "$ROOT/scope_mid/canon" && "$CLAIM" 702 mid-glob 'a/**/b' 2>&1); rc=$?
 check    "literal 'a/**/b' scope exits nonzero" "$rc" "1"
-if echo "$out" | grep -qiE 'invalid claim-scope|ambiguous|refusing|ERROR|scope'; then
+if echo "$out" | grep -iE 'invalid claim-scope|ambiguous|refusing|ERROR|scope' >/dev/null; then
   ok "literal 'a/**/b' refused with a scope/validator diagnostic"
 else
   bad "literal 'a/**/b' did not produce a scope refusal: $out"
@@ -2523,7 +2713,7 @@ out=$(cd "$ROOT/scope_root/canon" && "$CLAIM" 704 root-wide '**' 2>&1); rc=$?
 check    "literal '**' against live narrow claim exits nonzero" "$rc" "1"
 # Root-wide must collide with the live narrow claim — not expand into the
 # directory named '**' or otherwise lose the token.
-if echo "$out" | grep -qiE 'overlap|collid|refusing|ERROR|issue-703-narrow'; then
+if echo "$out" | grep -iE 'overlap|collid|refusing|ERROR|issue-703-narrow' >/dev/null; then
   ok "literal '**' treated as root-wide and blocked unrelated live scope"
 else
   bad "literal '**' did not block as root-wide overlap: $out"
@@ -2542,6 +2732,40 @@ fi
 # ===========================================================================
 # #153 CodeRabbit · empty --slice under Bash 3.2 set -u
 # ===========================================================================
+echo "#273 · unverified v2 classification rolls the new claim back"
+new_repo "$ROOT/provfail"
+export GH_PROVENANCE_FAIL=1
+out=$(cd "$ROOT/provfail/canon" && "$CLAIM" 273 unverified 'scripts/claim.sh' 2>&1); rc=$?
+unset GH_PROVENANCE_FAIL
+check "unverified provenance exits nonzero" "$rc" "1"
+contains "names classification failure" "$out" "v2 reservation classification failed"
+test ! -e "$ROOT/provfail/wt-273-unverified" \
+  && ok "unverified provenance rolled back its worktree" ||
+  bad "unverified provenance left its worktree"
+test -z "$(git -C "$ROOT/provfail/canon" branch --list 'feat/273-unverified')" &&
+  ok "unverified provenance rolled back its local branch" ||
+  bad "unverified provenance left its local branch"
+test -z "$(git -C "$ROOT/provfail/canon" ls-remote --heads origin 'feat/273-unverified')" &&
+  ok "unverified provenance rolled back its remote branch" ||
+  bad "unverified provenance left its remote branch"
+
+echo "#273 · writer predicate refuses a stable CLOSED PR and rolls the claim back"
+new_repo "$ROOT/provclosed"
+export GH_PR_STATE=CLOSED
+out=$(cd "$ROOT/provclosed/canon" && "$CLAIM" 273 closed-writer 'scripts/claim.sh' 2>&1); rc=$?
+unset GH_PR_STATE
+check "stable CLOSED writer provenance exits nonzero" "$rc" "1"
+contains "CLOSED writer names classification failure" "$out" "v2 reservation classification failed"
+test ! -e "$ROOT/provclosed/wt-273-closed-writer" \
+  && ok "CLOSED writer rolled back its worktree" ||
+  bad "CLOSED writer left its worktree"
+test -z "$(git -C "$ROOT/provclosed/canon" branch --list 'feat/273-closed-writer')" &&
+  ok "CLOSED writer rolled back its local branch" ||
+  bad "CLOSED writer left its local branch"
+test -z "$(git -C "$ROOT/provclosed/canon" ls-remote --heads origin 'feat/273-closed-writer')" &&
+  ok "CLOSED writer rolled back its remote branch" ||
+  bad "CLOSED writer left its remote branch"
+
 echo "#153 CodeRabbit · --slice with no scope paths exits 2 (Bash 3.2 set -u safe)"
 # Under Bash 3.2 with set -u, expanding an empty SCOPE_PARTS before the length
 # check aborts with a set-u array expansion error instead of the intended usage
@@ -2556,7 +2780,7 @@ contains "empty --slice names no scope" "$out" "no scope given"
 # Detect the Bash 3.2 set -u empty-array expansion class without emitting the
 # construction-diag token into the suite tally stream.
 _uv_pat='unbound'' variable'
-if echo "$out" | grep -qF -- "$_uv_pat"; then
+if echo "$out" | grep -F -- "$_uv_pat" >/dev/null; then
   bad "empty --slice hit set-u empty-array expansion error"
 else
   ok "empty --slice avoided set-u empty-array expansion error"

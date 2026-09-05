@@ -29,8 +29,8 @@ FAIL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 # A typo'd assertion must never be a silent no-op (#153 review round 5): bash
 # calls this hook when a command name does not resolve, so an undefined helper
 # is a COUNTED failure instead of a stderr line under a green tally. Returning
@@ -315,6 +315,8 @@ rc=$?
 check "scoped dry-run exits 0" "$rc" "0"
 contains "issue-15-* matches" "$out" "issue-15-checkout-totals"
 lacks    "issue-115-* does not match issue 15" "$out" "issue-115-unrelated"
+contains "no-worktree dry-run names absence" "$out" "no registered worktree"
+lacks    "no-worktree dry-run does not fabricate default path" "$out" "wt-15-checkout-totals"
 out=$(cd "$ROOT/a/canon" && "$RC" 5 --prefix template --claim-id issue-template-5-palette-tokens --repo acme/tmpl --dry-run 2>&1)
 contains "--prefix finds the namespaced id" "$out" "issue-template-5-palette-tokens"
 contains "--repo names the product repo" "$out" "acme/tmpl"
@@ -608,7 +610,7 @@ out=$(cd "$ROOT/unborn/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
 rc=$?
 check "unborn main hard-fails (not empty ledger)" "$rc" "1"
 # Fail-closed on fetch failure (no local/cached fallback) or unresolved remote ref.
-if echo "$out" | grep -qE 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref'; then
+if echo "$out" | grep -E 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref' >/dev/null; then
   ok "names cannot resolve/fetch ledger ref"
 else
   bad "names cannot resolve/fetch ledger ref (got: $out)"
@@ -637,7 +639,7 @@ new_repo "$ROOT/badref"
 out=$(cd "$ROOT/badref/canon" && "$RC" 18 --keep-label 2>&1)
 rc=$?
 check "deleted main/master hard-fails" "$rc" "1"
-if echo "$out" | grep -qE 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref'; then
+if echo "$out" | grep -E 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref' >/dev/null; then
   ok "hard-fail message on missing ref/fetch"
 else
   bad "hard-fail message on missing ref/fetch (got: $out)"
@@ -766,7 +768,7 @@ new_repo "$ROOT/missingblob"
   # Shape: root tree + docs tree readable, path entry present, blob gone.
   git cat-file -e "$tree"
   git cat-file -e "$docs_tree"
-  git ls-tree "origin/main" -- docs/active-work.md | grep -q 'active-work.md'
+  git ls-tree "origin/main" -- docs/active-work.md | grep 'active-work.md' >/dev/null
   if git cat-file -e "origin/main:docs/active-work.md" 2>/dev/null; then
     echo "setup failed: blob still readable" >&2
     exit 1
@@ -882,7 +884,7 @@ new_repo "$ROOT/missingclaimblob"
   git cat-file -e "$root_tree"
   git cat-file -e "$docs_tree"
   git cat-file -e "$claims_tree"
-  git ls-tree "origin/main" docs/claims/ | grep -q 'issue-18-live-slice.md'
+  git ls-tree "origin/main" docs/claims/ | grep 'issue-18-live-slice.md' >/dev/null
   if git cat-file -e "origin/main:docs/claims/issue-18-live-slice.md" 2>/dev/null; then
     echo "setup failed: claim blob still readable" >&2
     exit 1
@@ -1337,7 +1339,7 @@ while read -r _old new ref; do
   esac
   content=$(git cat-file -p "$new:docs/active-work.md" 2>/dev/null || true)
   [[ -n "$content" ]] || continue
-  printf '%s\n' "$content" | grep -qF 'issue-15-sibling-racer' && continue
+  printf '%s\n' "$content" | grep -F 'issue-15-sibling-racer' >/dev/null && continue
   newcontent=$(printf '%s\n' "$content" '| 2026-08-02 | issue-15-sibling-racer | src/race | session:z |')
   newblob=$(printf '%s\n' "$newcontent" | git hash-object -w --stdin)
   # Rebuild the root tree from $new, replacing docs/active-work.md.
@@ -1472,7 +1474,7 @@ rc=$?
 [[ "$rc" -eq 0 || "$rc" -eq 3 ]] && ok "scoped legacy release exits 0 or incomplete-3 (rc=$rc)" \
   || bad "scoped legacy release unexpected rc=$rc: $out"
 # Residual sibling and/or incomplete artifact cleanup both preserve the label.
-if echo "$out" | grep -qE 'residual claims remain|preserving agent-claimed'; then
+if echo "$out" | grep -E 'residual claims remain|preserving agent-claimed' >/dev/null; then
   ok "keeps label for residual sibling or incomplete cleanup"
 else
   bad "keeps label for residual sibling (missing residual/preserve wording): $out"
@@ -2285,11 +2287,14 @@ export PATH="$ROOT/bin:$PATH"
 
 out=$(cd "$ROOT/kw73/canon" && "$RC" 15 --claim-id issue-15-only-lane --keep-worktree --keep-branch --dry-run 2>&1)
 rc=$?
-check "keep-worktree dry-run exits 0" "$rc" "0"
-contains "dry-run keeps worktree" "$out" "KEEP worktree:"
-contains "dry-run keeps branch" "$out" "KEEP branch:"
-lacks    "dry-run does not plan remove worktree" "$out" "remove worktree:"
-lacks    "dry-run does not plan delete branch" "$out" "delete branch:"
+# Unregistered directory at the historical default path is unsafe identity
+# (#271): dry-run must fail closed rather than preview KEEP of a guessed path.
+# Live --keep-worktree --keep-branch still succeeds below (it skips artifact
+# cleanup); the apply contract is unchanged.
+check "keep-worktree dry-run fails closed on unregistered default-path decoy" "$rc" "1"
+contains "keep-worktree dry-run names unregistered historical path" "$out" "not a registered git worktree"
+lacks    "keep-worktree dry-run does not print KEEP plan for the decoy" "$out" "KEEP worktree:"
+lacks    "keep-worktree dry-run does not print a remove plan" "$out" "remove worktree:"
 
 # Apply with --keep-worktree: claim row gone, worktree remains, branch kept.
 export GH_STATE="$ROOT/kw73/gh-state"
@@ -3857,7 +3862,7 @@ rm -f "$GH_STATE" "$GH_LOG"
 printf '824\tissue-324-keep-worktree-no-keep-branch-case\tlib/x/**\t324\tfeat/324-keep-worktree-no-keep-branch-case\t%s\thttps://github.com/acme/app/pull/824\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
   "$KWNB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
 out=$(cd "$ROOT/kwnb1/canon" && "$RC" 324 --claim-id issue-324-keep-worktree-no-keep-branch-case --repo acme/app --keep-worktree 2>&1); rc=$?
-check    "--keep-worktree without --keep-branch exits 3"     "$rc" "3"
+check    "--keep-worktree without --keep-branch fails preflight" "$rc" "1"
 contains "names the retained-worktree-loses-branch refusal"  "$out" "a retained worktree must not lose its branch"
 lacks    "does not claim success"                             "$out" "OK —"
 [[ -d "$ROOT/kwnb1/wt-324-keep-worktree-no-keep-branch-case" ]] &&
@@ -4044,7 +4049,7 @@ printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":820,"state":"M
 out=$(cd "$ROOT/urlnum1/canon" && PATH="$ROOT/urlnum1/bin-json:$PATH" GH_JSON_OPEN="$GH_JSON_OPEN" GH_JSON_ALL="$GH_JSON_ALL" "$RC" 320 --claim-id issue-320-urlnum-case --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "URL pull-number mismatch propagates and refuses (rc=$rc)" \
   || bad "URL pull-number mismatch did not refuse (rc=$rc): $out"
-echo "$out" | grep -qiE 'pull-number|cannot verify terminal PR-body claim evidence' \
+echo "$out" | grep -iE 'pull-number|cannot verify terminal PR-body claim evidence' >/dev/null \
   && ok "names the propagated pr-claims.sh failure" \
   || bad "missing propagated failure detail: $out"
 [[ -d "$ROOT/urlnum1/wt-320-urlnum-case" ]] &&
@@ -4565,8 +4570,8 @@ out=$(cd "$ROOT/openambig/canon" && "$RC" 408 --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "multi-slice bare release refuses" || bad "multi-slice bare release exits 0: $out"
 # (#153 exact-head) Message names the open-PR ambiguity; accept either the
 # historical wording or the exact-id/issue-union wording.
-if echo "$out" | grep -qF 'multiple live open PR claims' || \
-   echo "$out" | grep -qF 'multiple live PR claims'; then
+if echo "$out" | grep -F 'multiple live open PR claims' >/dev/null || \
+   echo "$out" | grep -F 'multiple live PR claims' >/dev/null; then
   ok "names the ambiguity"
 else
   bad "names the ambiguity (missing multi open-PR refuse): $out"
@@ -4614,9 +4619,9 @@ case "$1 $2" in
   "repo view") echo "acme/e2e" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit")
-    if echo "$*" | grep -q -- '--add-label'; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "${GH_LABELS_FILE:-/dev/null}"
-    elif echo "$*" | grep -q -- '--remove-label'; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "${GH_LABELS_FILE:-/dev/null}"
     fi
     ;;
@@ -4677,7 +4682,74 @@ case "$1 $2" in
     headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
     printf '%s|%s|%s|%s|https://github.com/acme/e2e/pull/%s|2026-08-09T00:00:00Z|2026-08-09T00:00:00Z|%s\n' \
       "$number" "$claim" "$scope" "$branch" "$number" "$headsha" >> "${GH_PR_FILE:-/dev/null}"
+    # claim-provenance.mjs rereads this exact body via `pr view --json`.
+    cat "$body_file" > "${GH_PR_FILE}.body"
     echo "https://github.com/acme/e2e/pull/$number"
+    ;;
+  "pr view")
+    # Production provenance reader (#273): gh pr view N --repo … --json
+    # number,url,body,headRefOid,headRefName,isCrossRepository,baseRefName,
+    # baseRefOid,state (base repository is taken from url; gh has no
+    # baseRepository field). An unmodelled read must fail closed, not succeed.
+    if [[ "${GH_E2E_PROVENANCE_UNMODELED:-0}" == 1 ]]; then
+      echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+      exit 64
+    fi
+    number=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --json|--repo|--jq|-q) shift 2 ;;
+        *)
+          if [[ "$1" =~ ^[0-9]+$ ]]; then number="$1"; fi
+          shift
+          ;;
+      esac
+    done
+    row=$(grep -E "^${number}\\|" "${GH_PR_FILE}" 2>/dev/null | head -1)
+    branch=$(printf '%s\n' "$row" | cut -d'|' -f4)
+    headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+    [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    basesha=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+    [[ -n "$basesha" ]] || basesha="cccccccccccccccccccccccccccccccccccccccc"
+    if [[ "${GH_E2E_PROVENANCE_MISMATCH:-0}" == 1 ]]; then
+      # A real object that is not the reservation: GitHub reporting the
+      # branch-point SHA as headRefOid. The reader must consume this field
+      # and fail closed, not treat any 0-exit JSON as verified metadata.
+      headsha=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+      [[ -n "$headsha" ]] || headsha="ffffffffffffffffffffffffffffffffffffffff"
+    fi
+    node -e '
+      const fs = require("fs");
+      const number = process.argv[1];
+      const bodyPath = process.argv[2];
+      const head = process.argv[3];
+      const branch = process.argv[4];
+      const base = process.argv[5];
+      const body = fs.existsSync(bodyPath) ? fs.readFileSync(bodyPath, "utf8") : "";
+      process.stdout.write(JSON.stringify({
+        number: Number(number),
+        url: "https://github.com/acme/e2e/pull/" + number,
+        body,
+        headRefOid: head,
+        headRefName: branch,
+        isCrossRepository: false,
+        baseRefName: "main",
+        baseRefOid: base,
+        state: "OPEN"
+      }));
+    ' "$number" "${GH_PR_FILE}.body" "$headsha" "${branch:-feat/unknown}" "$basesha"
+    ;;
+  api\ repos/*)
+    # Production provenance reader (#273): GET repos/<owner>/<name>/commits/<sha>
+    # for GitHub-resolved author/committer logins. Smallest truthful payload.
+    if [[ "${GH_E2E_PROVENANCE_UNMODELED:-0}" == 1 ]]; then
+      echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
+      exit 64
+    fi
+    sha="${2##*/}"
+    login="${GIT_AUTHOR_NAME:-gibson-sensor}"
+    printf '{"sha":"%s","author":{"login":"%s"},"committer":{"login":"%s"},"commit":{}}\n' \
+      "$sha" "$login" "$login"
     ;;
   *)
     echo "fake gh (e2e fixture): unmodelled invocation 'gh $*' — refusing rather than answering a query this fixture does not model" >&2
@@ -4697,6 +4769,8 @@ out=$(cd "$ROOT/e2e/canon" && GIBSON_CANONICAL="$ROOT/e2e/canon" "$CLAIM" 200 ch
 check    "e2e: claim.sh reserves the issue and opens the draft PR" "$rc" "0"
 contains "e2e: claim label added"     "$(cat "$GH_LABELS_FILE")" "agent-claimed"
 contains "e2e: draft PR carries the claim" "$(cat "$GH_PR_FILE")" "issue-200-checkout-fix"
+contains "e2e: claim prints the reservation SHA" "$out" "reservation: "
+contains "e2e: claim prints a provenance receipt" "$out" "provenance-receipt"
 [[ -d "$ROOT/e2e/wt-200-checkout-fix" ]] && ok "e2e: worktree created" || bad "e2e: worktree missing"
 
 # Step 3: reservation PR reaches a terminal state (merged) — it drops out of
@@ -4720,6 +4794,47 @@ br=$(git -C "$ROOT/e2e/canon" branch --list 'feat/200-checkout-fix')
 remote_br=$(git -C "$ROOT/e2e/canon" ls-remote --heads origin 'feat/200-checkout-fix')
 [[ -z "$remote_br" ]] && ok "e2e: remote branch removed" || bad "e2e: remote branch survived release"
 lacks "e2e: label file no longer carries agent-claimed" "$(cat "$GH_LABELS_FILE")" "agent-claimed"
+
+# #273 · non-vacuity: the new pr view / commit-identity reads are load-bearing.
+# If they are unmodelled (the pre-fix e2e fake) or return a mismatched head,
+# claim.sh must fail closed on classification — never silently admit the lane.
+echo "#273 · unmodelled provenance reads fail closed (non-vacuity)"
+new_repo "$ROOT/e2e_unmodelled" acme/e2e
+export GH_PR_FILE="$ROOT/e2e_unmodelled/prs"
+: > "$GH_PR_FILE"
+export GH_LABELS_FILE="$ROOT/e2e_unmodelled/labels"
+: > "$GH_LABELS_FILE"
+export GH_PR_NEXT=1
+unset GH_PR_MERGED
+export GH_E2E_PROVENANCE_UNMODELED=1
+out=$(cd "$ROOT/e2e_unmodelled/canon" && GIBSON_CANONICAL="$ROOT/e2e_unmodelled/canon" "$CLAIM" 201 unmodelled-prov 'lib/checkout/**' 2>&1); rc=$?
+unset GH_E2E_PROVENANCE_UNMODELED
+[[ "$rc" -ne 0 ]] &&
+  ok "e2e unmodelled provenance: claim.sh exits nonzero" ||
+  bad "e2e unmodelled provenance: claim.sh exited 0: $out"
+contains "e2e unmodelled provenance: names classification failure" "$out" "v2 reservation classification failed"
+contains "e2e unmodelled provenance: names the unreadable live read" "$out" "live evidence unreadable"
+lacks    "e2e unmodelled provenance: never reports claim OK" "$out" "claim.sh: OK"
+lacks    "e2e unmodelled provenance: is not an overlap-admission refuse" "$out" "post-create admission refused"
+
+echo "#273 · mismatched provenance head fails closed (non-vacuity)"
+new_repo "$ROOT/e2e_mismatch" acme/e2e
+export GH_PR_FILE="$ROOT/e2e_mismatch/prs"
+: > "$GH_PR_FILE"
+export GH_LABELS_FILE="$ROOT/e2e_mismatch/labels"
+: > "$GH_LABELS_FILE"
+export GH_PR_NEXT=1
+unset GH_PR_MERGED
+export GH_E2E_PROVENANCE_MISMATCH=1
+out=$(cd "$ROOT/e2e_mismatch/canon" && GIBSON_CANONICAL="$ROOT/e2e_mismatch/canon" "$CLAIM" 202 mismatch-prov 'lib/checkout/**' 2>&1); rc=$?
+unset GH_E2E_PROVENANCE_MISMATCH
+[[ "$rc" -ne 0 ]] &&
+  ok "e2e mismatched provenance: claim.sh exits nonzero" ||
+  bad "e2e mismatched provenance: claim.sh exited 0: $out"
+contains "e2e mismatched provenance: names classification failure" "$out" "v2 reservation classification failed"
+contains "e2e mismatched provenance: required reservation was not verified" "$out" "was not verified"
+lacks    "e2e mismatched provenance: never reports claim OK" "$out" "claim.sh: OK"
+lacks    "e2e mismatched provenance: is not an overlap-admission refuse" "$out" "post-create admission refused"
 
 # ---------------------------------------------------------------------------
 # #153 review P1 · repository binding: PR evidence must come from THIS
@@ -4841,7 +4956,7 @@ out=$(cd "$ROOT/bindnoorigin/canon" && "$RC" 704 --claim-id issue-704-no-origin 
 [[ "$rc" -ne 0 ]] && ok "origin-less checkout exits nonzero" || bad "origin-less checkout exits 0: $out"
 # Fetch of remote ledger base fails closed first when origin is missing; the
 # binding helper also names an unreadable origin. Either is a correct refuse.
-if echo "$out" | grep -qE 'no readable origin remote|cannot fetch remote ledger base'; then
+if echo "$out" | grep -E 'no readable origin remote|cannot fetch remote ledger base' >/dev/null; then
   ok "names the unreadable origin identity or fetch refuse"
 else
   bad "names the unreadable origin identity (got: $out)"
@@ -4946,12 +5061,12 @@ out=$(cd "$ROOT/unresolved/canon" && PATH="$ROOT/unresolved/bin:$PATH" \
 check    "unresolved identity exits 1"                "$rc" "1"
 # Origin removed → fetch of remote ledger base fails closed before identity
 # binding (no local/cached fallback). That is a correct refuse.
-if echo "$out" | grep -qE -- 'cannot fetch remote ledger base|cannot resolve the GitHub repository identity|no readable origin remote'; then
+if echo "$out" | grep -E -- 'cannot fetch remote ledger base|cannot resolve the GitHub repository identity|no readable origin remote' >/dev/null; then
   ok "names the unresolved repository identity or fetch refuse"
 else
   bad "names the unresolved repository identity (got: $out)"
 fi
-if echo "$out" | grep -qE -- 'cannot fetch remote ledger base|no readable origin|pass --repo'; then
+if echo "$out" | grep -E -- 'cannot fetch remote ledger base|no readable origin|pass --repo' >/dev/null; then
   ok "tells the operator to pass --repo or names fetch/origin refuse"
 else
   bad "tells the operator to pass --repo (got: $out)"
@@ -5257,7 +5372,7 @@ if grep -nE '\*pullRequests\*\|\*openPrNumbers\*\)\s*exit\s+0' "$0" |
     }
     { seen[NR]=$0 }
     END { exit bad+0 }
-  ' "$0" | grep -q .; then
+  ' "$0" | grep . >/dev/null; then
     bad "a release-claim fake still accepts pullRequests/openPrNumbers by keyword alone"
   else
     ok "no release-claim fake accepts inventory shape by keyword alone"
@@ -5295,21 +5410,21 @@ esac
 FAKE
 chmod +x "$ROOT/fakeapi/bin/gh"
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api user 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "expected 'api graphql" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "expected 'api graphql" >/dev/null &&
   ok "unknown REST gh api user fails closed (not empty inventory)" ||
   bad "unknown REST gh api greened (rc=$rc): $out"
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { viewer { login } }' 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "unmodelled GraphQL" >/dev/null &&
   ok "graphql without inventory shape fails closed" ||
   bad "non-inventory graphql greened (rc=$rc): $out"
 # Mutation: pullRequests/openPrNumbers keywords WITHOUT the pagination contract
 # must be rejected — this is the exact class round 6 left green.
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { repository { pullRequests(first: 1) { nodes { number } } } }' 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "unmodelled GraphQL" >/dev/null &&
   ok "pullRequests keyword without pagination contract fails closed" ||
   bad "keyword-only pullRequests greened (rc=$rc): $out"
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query openPrNumbers { repository { pullRequests { nodes { number } } } }' 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "unmodelled GraphQL" >/dev/null &&
   ok "openPrNumbers keyword without pagination contract fails closed" ||
   bad "keyword-only openPrNumbers greened (rc=$rc): $out"
 # Full contract (what pr-claims.sh actually sends) still returns empty success.
@@ -5480,13 +5595,13 @@ path = sys.argv[1]
 text = open(path).read()
 # Replace only the open-inventory match filter form introduced by the fix.
 old = '    # Shared issue matcher (#153 namespaced open-claim P1): never hard-code\n    # ^issue-${ISSUE}- so namespaced ids like issue-template-5-x are seen.\n    claim_id_for_issue "$pr_id" || continue\n'
-new = '    # MUTATED DEFECT: numeric-only open-PR filter\n    echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue\n'
+new = '    # MUTATED DEFECT: numeric-only open-PR filter\n    echo "$pr_id" | grep -E "^issue-${ISSUE}-" >/dev/null || continue\n'
 if old not in text:
     # Fallback: any claim_id_for_issue "$pr_id" || continue in open path
     import re
     text2, n = re.subn(
         r'claim_id_for_issue "\$pr_id" \|\| continue',
-        'echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue',
+        'echo "$pr_id" | grep -E "^issue-${ISSUE}-" >/dev/null || continue',
         text,
         count=1,
     )
@@ -5525,7 +5640,7 @@ export GH_PR_OPEN_TSV2="$ROOT/openns3/open2.tsv"
 out=$(cd "$ROOT/openns3/canon" && "$_rc_copy" 5 --prefix template --claim-id issue-template-5-ns-mut --repo acme/app 2>&1); rc=$?
 # With numeric-only filter, issue-template-5-ns-mut is invisible as an open
 # match (does not match ^issue-5-), so the open-PR close path never runs.
-if echo "$out" | grep -qF 'closing PR #963'; then
+if echo "$out" | grep -F 'closing PR #963' >/dev/null; then
   bad "mutation: numeric-only filter still closed the namespaced PR (unexpected)"
 else
   ok "mutation receipt: numeric-only filter ignores namespaced open target (no close)"
@@ -6052,7 +6167,7 @@ rc=$?
 files=$(cd "$ROOT/mixmut/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/mixmut/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
 # With guard gone, both representations should be stripped (sensor would fail).
-if [[ "$rc" -eq 0 ]] && ! echo "$files" | grep -q 'issue-830-mix' && ! echo "$table" | grep -q 'issue-830-mix'; then
+if [[ "$rc" -eq 0 ]] && ! echo "$files" | grep 'issue-830-mix' >/dev/null && ! echo "$table" | grep 'issue-830-mix' >/dev/null; then
   ok "mutation receipt: neutralizing mixed guard deletes both representations (sensor would fail)"
 else
   bad "mutation receipt: neutralizing mixed guard did not re-enable dual delete (rc=$rc files=$files out=$(echo "$out" | tail -5))"
@@ -6455,7 +6570,7 @@ out=$(cd "$ROOT/secleg/canon" && PATH="$ROOT/secleg/shim:$ROOT/secleg/bin:$PATH"
 files=$(cd "$ROOT/secleg/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/secleg/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
 # BOTH representations must survive untouched on refusal — one surviving is not enough.
-if echo "$files" | grep -q 'issue-860-secleg' && echo "$table" | grep -q 'issue-860-secleg'; then
+if echo "$files" | grep 'issue-860-secleg' >/dev/null && echo "$table" | grep 'issue-860-secleg' >/dev/null; then
   ok "second ledger rep: BOTH representations survived untouched"
 else
   bad "second ledger rep: not both representations survived (files='$files' table='$table')"
@@ -6559,7 +6674,7 @@ elif true; then
     --expected-claim-path docs/claims/issue-851-revalmut.md \
     --keep-worktree --keep-branch 2>&1); rc=$?
   files=$(cd "$ROOT/revalmut/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
-  if ! echo "$files" | grep -q 'issue-851-revalmut'; then
+  if ! echo "$files" | grep 'issue-851-revalmut' >/dev/null; then
     ok "mutation receipt: killing reval allows strip (sensor would fail)"
   else
     bad "mutation receipt: mutant did not strip (rc=$rc files=$files): $(echo "$out" | tail -8)"
@@ -6620,7 +6735,7 @@ lacks "fetch failure no gh mutation" "$(cat "$GH_LOG" 2>/dev/null)" "MUTATED-LAB
 
 echo "#153 r15 · production cleanup has no force/rm-rf/branch -D for claim artifacts"
 if grep -E 'git worktree remove --force|git branch -D|rm -rf "\$wt"|rm -rf "\$\{wt' "$RC" | \
-   grep -v 'tmpwt\|gibson-release-claim\|comment\|#' | grep -q .; then
+   grep -v 'tmpwt\|gibson-release-claim\|comment\|#' | grep . >/dev/null; then
   # Allow only disposable strip tmpwt force; claim artifact paths must not match.
   hits=$(grep -nE 'git worktree remove --force|git branch -D' "$RC" | grep -v 'tmpwt' || true)
   if [[ -n "$hits" ]]; then
@@ -6967,7 +7082,7 @@ out=$(cd "$ROOT/ncasleg/canon" && PATH="$ROOT/ncasleg/shim:$ROOT/ncasleg/bin:$PA
 [[ "$rc" -ne 0 ]] && ok "non-CAS late legacy: refuses nonzero" || bad "non-CAS late legacy exited 0: $out"
 files=$(cd "$ROOT/ncasleg/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/ncasleg/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
-if echo "$files" | grep -q 'issue-891-ncasleg' && echo "$table" | grep -q 'issue-891-ncasleg'; then
+if echo "$files" | grep 'issue-891-ncasleg' >/dev/null && echo "$table" | grep 'issue-891-ncasleg' >/dev/null; then
   ok "non-CAS late legacy: BOTH representations survived"
 else
   bad "non-CAS late legacy: not both survived (files='$files' table='$table')"
@@ -7173,8 +7288,8 @@ else
   ok "stream-capture: no recursive rm -rf on capture dir"
 fi
 # Signal cleanup must not clear handles without verified unlink.
-if grep -A20 '_rc_capture_cleanup_temps' "$_SC_LIB" | grep -q '_RC_CAP_OUTF=""' && \
-   grep -B5 -A5 '_RC_CAP_OUTF=""' "$_SC_LIB" | grep -q '_rc_capture_unlink_one\|unlink'; then
+if grep -A20 '_rc_capture_cleanup_temps' "$_SC_LIB" | grep '_RC_CAP_OUTF=""' >/dev/null && \
+   grep -B5 -A5 '_RC_CAP_OUTF=""' "$_SC_LIB" | grep '_rc_capture_unlink_one\|unlink' >/dev/null; then
   ok "stream-capture: handle clear is gated on verified unlink"
 else
   # Accept if cleanup only clears after successful unlink helper.
@@ -7190,6 +7305,730 @@ else
     bad "stream-capture: cleanup may clear handles without verified unlink"
   fi
 fi
+
+echo "#271 · dry-run previews the exact registered worktree live cleanup will use"
+# Never page git output: a pager under run-all's process-group watchdog can
+# ignore TERM and wedge the suite until the wall clock expires.
+export GIT_PAGER=cat
+export GIT_TERMINAL_PROMPT=0
+# Existing live-path fixtures already asserted above and must stay green:
+#   unreg1 (unregistered/non-directory default path),
+#   wrongbr1 (worktree on the wrong branch),
+#   ambig1 (ambiguous registration),
+#   nondef1 (non-default registered path),
+#   head-branch mismatch (terminal evidence),
+#   kwnb1 (live --keep-worktree without --keep-branch fails common preflight).
+# The executable sym271, nond271, and canon271 fixtures below additionally pin
+# registered-symlink, registered-non-directory, and canonical-checkout-alias
+# refusals through the same shared resolver used by dry-run and live cleanup.
+
+extract_fn() { # file function-name
+  local file="$1" name="$2"
+  awk -v n="$name" '
+    BEGIN { re = "^" n "\\(\\)" }
+    $0 ~ re { grab=1 }
+    grab {
+      print
+      line=$0
+      for (i=1; i<=length(line); i++) {
+        c=substr(line,i,1)
+        if (c=="{") depth++
+        if (c=="}") depth--
+      }
+      if (depth<=0 && /}/) exit
+    }
+  ' "$file"
+}
+
+norm_preview() {
+  local s="$1" phys_root
+  phys_root=$(CDPATH='' cd "$ROOT" && pwd -P)
+  s=$(printf '%s\n' "$s" | sed "s|$phys_root|TEST_ROOT|g")
+  s=$(printf '%s\n' "$s" | sed "s|$ROOT|TEST_ROOT|g")
+  printf '%s\n' "$s"
+}
+
+write_git_log_shim() { # dir logfile
+  local dir="$1" log="$2"
+  mkdir -p "$ROOT/$dir/gitlog"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'echo "git $*" >> %q\n' "$log"
+    printf 'exec %q "$@"\n' "$REAL_GIT"
+  } > "$ROOT/$dir/gitlog/git"
+  chmod +x "$ROOT/$dir/gitlog/git"
+}
+
+write_gh_log_shim() { # dir real_gh logfile
+  local dir="$1" real="$2" log="$3"
+  mkdir -p "$ROOT/$dir/ghlog"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'echo "gh $*" >> %q\n' "$log"
+    printf 'exec %q "$@"\n' "$real"
+  } > "$ROOT/$dir/ghlog/gh"
+  chmod +x "$ROOT/$dir/ghlog/gh"
+}
+
+assert_mutation_free_logs() { # label gitlog ghlog
+  local label="$1" gitlog="$2" ghlog="$3" hits=""
+  if grep -E 'worktree remove|worktree prune|worktree move|worktree lock|update-ref|branch -D|branch -d' "$gitlog" >/dev/null 2>&1; then
+    hits="${hits} git-worktree/ref"
+  fi
+  if grep -E '(^| )push( |$)|(^| )commit( |$)' "$gitlog" >/dev/null 2>&1; then
+    hits="${hits} git-push/commit"
+  fi
+  if grep -E 'pr close|pr edit|issue edit|--remove-label|--add-label' "$ghlog" >/dev/null 2>&1; then
+    hits="${hits} gh-mutate"
+  fi
+  if [[ -z "$hits" ]]; then
+    ok "$label: invocation logs are mutation-free"
+  else
+    bad "$label: mutation leaked ($hits): git=$(cat "$gitlog" 2>/dev/null) gh=$(cat "$ghlog" 2>/dev/null)"
+  fi
+}
+
+snapshot_release_state() { # canon outfile wt decoy
+  local canon="$1" outf="$2" wt="$3" decoy="$4"
+  {
+    echo "=== worktree list ==="
+    git --no-pager -C "$canon" worktree list --porcelain 2>/dev/null || true
+    echo "=== worktrees files ==="
+    if [[ -d "$canon/.git/worktrees" ]]; then
+      find "$canon/.git/worktrees" \( -type f -o -type l \) | sort
+    fi
+    echo "=== local heads ==="
+    git --no-pager -C "$canon" for-each-ref --format='%(refname) %(objectname)' refs/heads
+    echo "=== remote heads ==="
+    git --no-pager -C "$canon" ls-remote --heads origin
+    echo "=== ledger table ==="
+    git --no-pager -C "$canon" show origin/main:docs/active-work.md 2>/dev/null || true
+    echo "=== ledger files ==="
+    git --no-pager -C "$canon" ls-tree -r --name-only origin/main docs/claims 2>/dev/null || true
+    echo "=== wt ==="
+    if [[ -n "$wt" && -e "$wt" ]]; then
+      find "$wt" | sort
+    else
+      echo "(absent)"
+    fi
+    echo "=== decoy ==="
+    if [[ -n "$decoy" && -e "$decoy" ]]; then
+      find "$decoy" | sort
+    else
+      echo "(absent)"
+    fi
+    echo "=== labels/pr fixtures ==="
+    cat "${GH_PR_ALL_TSV:-/dev/null}" 2>/dev/null || true
+    cat "${GH_PR_OPEN_TSV:-/dev/null}" 2>/dev/null || true
+    cat "${GH_STATE:-/dev/null}" 2>/dev/null || true
+  } > "$outf"
+}
+
+copy_rc_bundle() { # dest
+  mkdir -p "$1/scripts/lib"
+  cp "$RC" "$1/scripts/release-claim.sh"
+  cp "$SCRIPT_DIR/../lib/claim-guards.sh" "$1/scripts/lib/"
+  cp "$SCRIPT_DIR/../lib/stream-capture.sh" "$1/scripts/lib/"
+  cp "$SCRIPT_DIR/../pr-claims.sh" "$1/scripts/pr-claims.sh"
+  chmod +x "$1/scripts/release-claim.sh" "$1/scripts/pr-claims.sh"
+}
+
+_271_PATH="$PATH"
+_RC_REPO=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
+_BP="ea1dff3212054443347b36bb586e584422ab32bc"
+
+# --- source-level sensors -------------------------------------------------
+_term_fn=$(extract_fn "$RC" terminal_cleanup_release)
+_prev_fn=$(extract_fn "$RC" preview_verified_branch_cleanup)
+_open_fn=$(extract_fn "$RC" preview_open_pr_body_dry_run)
+_rend_fn=$(extract_fn "$RC" render_branch_resolved_preview)
+_res_fn=$(extract_fn "$RC" resolve_cleanup_target)
+_inner_fn=$(extract_fn "$RC" resolve_registered_worktree_for_branch)
+
+if [[ -z "$_term_fn" || -z "$_prev_fn" || -z "$_open_fn" || -z "$_rend_fn" || -z "$_res_fn" || -z "$_inner_fn" ]]; then
+  bad "source: failed to extract one or more #271 functions"
+else
+  ok "source: extracted shared resolver, preview, and terminal cleanup functions"
+fi
+if printf '%s\n' "$_rend_fn" "$_prev_fn" "$_open_fn" "$_term_fn" "$_res_fn" \
+    | grep -E '\$\(wt_dir_for|wt_dir_for "' >/dev/null; then
+  bad "source: branch-resolved preview/cleanup seam calls wt_dir_for"
+else
+  ok "source: branch-resolved preview/cleanup seam does not call wt_dir_for"
+fi
+if printf '%s\n' "$_inner_fn" | grep 'wt_dir_for "' >/dev/null; then
+  ok "source: historical-path decoy check remains inside resolve_registered_worktree_for_branch"
+else
+  bad "source: historical-path decoy check missing from resolve_registered_worktree_for_branch"
+fi
+if printf '%s\n' "$_term_fn" "$_prev_fn" "$_open_fn" \
+    | grep -E '\$\(branch_for|branch_for "' >/dev/null; then
+  bad "source: terminal planning/cleanup re-derives branch_for"
+else
+  ok "source: terminal planning/cleanup consumes stored evidence branch (no branch_for)"
+fi
+if printf '%s\n' "$_res_fn" | grep -E 'worktree prune|git fetch|status --porcelain|update-ref|gh ' >/dev/null; then
+  bad "source: resolve_cleanup_target is not pure-read"
+else
+  ok "source: resolve_cleanup_target is pure-read (no prune/fetch/status/ref/gh)"
+fi
+if grep -q 'preview_verified_branch_cleanup' "$RC" \
+   && grep -q 'resolve_cleanup_target' "$RC" \
+   && grep -q 'TERMINAL_HEAD_BRANCH' "$RC"; then
+  ok "source: shared resolver and stored evidence branch are present"
+else
+  bad "source: shared resolver or TERMINAL_HEAD_BRANCH missing"
+fi
+
+# --- primary: registered non-default path, decoy at wt_dir_for default ----
+ND_SHA=$(term_fixture nd271 271 nondefault-preview)
+git -C "$ROOT/nd271/canon" worktree remove --force "$ROOT/nd271/wt-271-nondefault-preview" >/dev/null 2>&1
+git -C "$ROOT/nd271/canon" worktree add -q "$ROOT/nd271/actual-nondefault" feat/271-nondefault-preview
+mkdir -p "$ROOT/nd271/wt-271-nondefault-preview"
+echo decoy-marker > "$ROOT/nd271/wt-271-nondefault-preview/decoy.txt"
+ND_SHOWN=$(CDPATH='' cd "$ROOT/nd271/actual-nondefault" && pwd -P)
+export GH_PR_ALL_TSV="$ROOT/nd271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/nd271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/nd271/gh-state"
+export GH_LOG="$ROOT/nd271/gh.log"
+export GH_PR_CLOSE_LOG="$ROOT/nd271/close.log"
+export GH_LABELS="agent-claimed,tier-b"
+export GH_ALL_LOG="$ROOT/nd271/gh-all.log"
+export GH_GIT_LOG="$ROOT/nd271/git-all.log"
+: > "$GH_ALL_LOG"
+: > "$GH_GIT_LOG"
+: > "$GH_LOG"
+: > "$GH_PR_CLOSE_LOG"
+rm -f "$GH_STATE"
+printf '871\tissue-271-nondefault-preview\tlib/x/**\t271\tfeat/271-nondefault-preview\t%s\thttps://github.com/acme/app/pull/871\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$ND_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+write_git_log_shim nd271 "$GH_GIT_LOG"
+write_gh_log_shim nd271 "$ROOT/term/bin/gh" "$GH_ALL_LOG"
+snapshot_release_state "$ROOT/nd271/canon" "$ROOT/nd271/before.snap" \
+  "$ROOT/nd271/actual-nondefault" "$ROOT/nd271/wt-271-nondefault-preview"
+out=$(cd "$ROOT/nd271/canon" && PATH="$ROOT/nd271/gitlog:$ROOT/nd271/ghlog:$PATH" \
+  "$RC" 271 --claim-id issue-271-nondefault-preview --repo acme/app --dry-run 2>&1); rc=$?
+check "primary non-default dry-run exits 0" "$rc" "0"
+contains "primary names registered path" "$out" "$ND_SHOWN"
+contains "primary names exact branch" "$out" "feat/271-nondefault-preview"
+contains "primary names pending revalidation" "$out" "live execution will revalidate clean status, exact/contained head SHA, branch/ref identity, claim renewal, and compare-and-swap conditions immediately before mutation"
+lacks    "primary excludes decoy string" "$out" "wt-271-nondefault-preview"
+lacks    "primary does not promise removal" "$out" "remove worktree:"
+lacks    "primary does not promise branch delete" "$out" "delete branch:"
+nd_norm=$(norm_preview "$out")
+contains "primary normalized registered path" "$nd_norm" "TEST_ROOT/nd271/actual-nondefault"
+lacks    "primary normalized excludes decoy" "$nd_norm" "wt-271-nondefault-preview"
+snapshot_release_state "$ROOT/nd271/canon" "$ROOT/nd271/after.snap" \
+  "$ROOT/nd271/actual-nondefault" "$ROOT/nd271/wt-271-nondefault-preview"
+if cmp -s "$ROOT/nd271/before.snap" "$ROOT/nd271/after.snap"; then
+  ok "primary dry-run snapshot is mutation-invariant"
+else
+  bad "primary dry-run mutated state: $(diff -u "$ROOT/nd271/before.snap" "$ROOT/nd271/after.snap" | head -40)"
+fi
+assert_mutation_free_logs "primary" "$GH_GIT_LOG" "$GH_ALL_LOG"
+if [[ -s "$GH_GIT_LOG" && -s "$GH_ALL_LOG" ]]; then
+  ok "primary mutation-log shims were exercised (non-empty git and gh logs)"
+else
+  bad "primary mutation-log proof is vacuous (git_bytes=$(wc -c < "$GH_GIT_LOG" 2>/dev/null || echo 0) gh_bytes=$(wc -c < "$GH_ALL_LOG" 2>/dev/null || echo 0))"
+fi
+[[ -f "$ROOT/nd271/wt-271-nondefault-preview/decoy.txt" ]] \
+  && ok "primary decoy untouched on disk" || bad "primary decoy was touched"
+[[ -d "$ROOT/nd271/actual-nondefault" ]] \
+  && ok "primary registered worktree untouched" || bad "primary registered worktree was removed"
+
+# Red against the exact unpatched branch-point blob.
+if git -C "$_RC_REPO" cat-file -e "${_BP}:scripts/release-claim.sh" 2>/dev/null; then
+  copy_rc_bundle "$ROOT/unpatched271"
+  git --no-pager -C "$_RC_REPO" show "${_BP}:scripts/release-claim.sh" \
+    > "$ROOT/unpatched271/scripts/release-claim.sh"
+  chmod +x "$ROOT/unpatched271/scripts/release-claim.sh"
+  if bash -n "$ROOT/unpatched271/scripts/release-claim.sh"; then
+    ok "unpatched branch-point script is syntactically valid"
+  else
+    bad "unpatched branch-point script failed bash -n"
+  fi
+  out_bp=$(cd "$ROOT/nd271/canon" && PATH="$ROOT/term/bin:$PATH" \
+    "$ROOT/unpatched271/scripts/release-claim.sh" 271 \
+    --claim-id issue-271-nondefault-preview --repo acme/app --dry-run 2>&1); rc_bp=$?
+  if echo "$out_bp" | grep -F 'wt-271-nondefault-preview' >/dev/null \
+     && ! echo "$out_bp" | grep -F "$ND_SHOWN" >/dev/null; then
+    ok "red-before-green: unpatched preview names the wt_dir_for decoy, not the registered path"
+  else
+    bad "red-before-green: unpatched preview did not show the decoy regression (rc=$rc_bp out=$out_bp)"
+  fi
+else
+  bad "red-before-green: branch-point blob ${_BP}:scripts/release-claim.sh is not in this object store"
+fi
+
+# --- no registered worktree, no historical decoy --------------------------
+NONE_SHA=$(term_fixture none271 272 no-wt-preview)
+git -C "$ROOT/none271/canon" worktree remove --force "$ROOT/none271/wt-272-no-wt-preview" >/dev/null 2>&1
+export GH_PR_ALL_TSV="$ROOT/none271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/none271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/none271/gh-state"
+export GH_LOG="$ROOT/none271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '872\tissue-272-no-wt-preview\tlib/x/**\t272\tfeat/272-no-wt-preview\t%s\thttps://github.com/acme/app/pull/872\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NONE_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/none271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 272 --claim-id issue-272-no-wt-preview --repo acme/app --dry-run 2>&1); rc=$?
+check "no-registered-worktree dry-run exits 0" "$rc" "0"
+contains "names no registered worktree" "$out" "no registered worktree"
+lacks    "does not fabricate default path" "$out" "wt-272-no-wt-preview"
+
+# --- ambiguous registration fails closed before a plan --------------------
+AMB_SHA=$(term_fixture amb271 273 ambig-preview)
+git -C "$ROOT/amb271/canon" worktree add -q --force "$ROOT/amb271/wt-decoy-ambig" feat/273-ambig-preview
+export GH_PR_ALL_TSV="$ROOT/amb271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/amb271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/amb271/gh-state"
+export GH_LOG="$ROOT/amb271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '873\tissue-273-ambig-preview\tlib/x/**\t273\tfeat/273-ambig-preview\t%s\thttps://github.com/acme/app/pull/873\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$AMB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/amb271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 273 --claim-id issue-273-ambig-preview --repo acme/app --dry-run 2>&1); rc=$?
+check "ambiguous dry-run fails closed" "$rc" "1"
+contains "ambiguous dry-run names ambiguity" "$out" "ambiguous"
+lacks    "ambiguous dry-run prints no successful plan header" "$out" "DRY RUN would:"
+[[ -d "$ROOT/amb271/wt-273-ambig-preview" ]] \
+  && ok "ambiguous dry-run: original worktree untouched" || bad "ambiguous dry-run removed original"
+[[ -d "$ROOT/amb271/wt-decoy-ambig" ]] \
+  && ok "ambiguous dry-run: decoy worktree untouched" || bad "ambiguous dry-run removed decoy"
+
+# --- unreadable worktree list fails closed --------------------------------
+UNR_SHA=$(term_fixture unr271 274 unread-preview)
+export GH_PR_ALL_TSV="$ROOT/unr271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/unr271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/unr271/gh-state"
+export GH_LOG="$ROOT/unr271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '874\tissue-274-unread-preview\tlib/x/**\t274\tfeat/274-unread-preview\t%s\thttps://github.com/acme/app/pull/874\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$UNR_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+mkdir -p "$ROOT/unr271/gitwrap"
+cat > "$ROOT/unr271/gitwrap/git" <<WRAP
+#!/usr/bin/env bash
+if [[ "\$*" == *"worktree list"* ]]; then
+  echo "fatal: simulated unreadable worktree list" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "\$@"
+WRAP
+chmod +x "$ROOT/unr271/gitwrap/git"
+out=$(cd "$ROOT/unr271/canon" && PATH="$ROOT/unr271/gitwrap:$ROOT/term/bin:$PATH" \
+  "$RC" 274 --claim-id issue-274-unread-preview --repo acme/app --dry-run 2>&1); rc=$?
+check "unreadable registration dry-run fails closed" "$rc" "1"
+contains "unreadable dry-run names list failure" "$out" "cannot enumerate registered worktrees"
+lacks    "unreadable dry-run prints no successful plan" "$out" "DRY RUN would:"
+[[ -d "$ROOT/unr271/wt-274-unread-preview" ]] \
+  && ok "unreadable dry-run: worktree untouched" || bad "unreadable dry-run removed worktree"
+
+# --- registered symlink/non-directory/canonical-alias paths fail closed ---
+# These are live terminal-path fixtures, not source-presence assertions. Each
+# uses Git's retained worktree registration so the corresponding production
+# resolver branch executes before any artifact mutation.
+
+SYM_SHA=$(term_fixture sym271 281 registered-symlink)
+SYM_PATH="$ROOT/sym271/wt-281-registered-symlink"
+SYM_MOVED="$ROOT/sym271/registered-symlink-target"
+mv "$SYM_PATH" "$SYM_MOVED"
+ln -s "$SYM_MOVED" "$SYM_PATH"
+export GH_PR_ALL_TSV="$ROOT/sym271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/sym271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/sym271/gh-state"
+export GH_LOG="$ROOT/sym271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '881\tissue-281-registered-symlink\tlib/x/**\t281\tfeat/281-registered-symlink\t%s\thttps://github.com/acme/app/pull/881\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$SYM_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/sym271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 281 --claim-id issue-281-registered-symlink --repo acme/app 2>&1); rc=$?
+check "registered symlink release exits 3" "$rc" "3"
+contains "registered symlink names refusal" "$out" "registered worktree path is a symlink"
+lacks "registered symlink does not claim success" "$out" "OK —"
+[[ -L "$SYM_PATH" && -d "$SYM_MOVED" ]] \
+  && ok "registered symlink refusal preserves link and target worktree" \
+  || bad "registered symlink refusal mutated link/target worktree"
+br=$(git -C "$ROOT/sym271/canon" branch --list 'feat/281-registered-symlink')
+[[ -n "$br" ]] && ok "registered symlink refusal preserves local branch" \
+  || bad "registered symlink refusal deleted local branch"
+remote_br=$(git -C "$ROOT/sym271/canon" ls-remote --heads origin 'feat/281-registered-symlink')
+[[ -n "$remote_br" ]] && ok "registered symlink refusal preserves remote branch" \
+  || bad "registered symlink refusal deleted remote branch"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] \
+  && ok "registered symlink refusal never edits the label" \
+  || bad "registered symlink refusal attempted a label edit"
+
+NOND_SHA=$(term_fixture nond271 282 registered-not-directory)
+NOND_PATH="$ROOT/nond271/wt-282-registered-not-directory"
+NOND_MOVED="$ROOT/nond271/registered-not-directory-target"
+mv "$NOND_PATH" "$NOND_MOVED"
+printf 'not-a-directory\n' > "$NOND_PATH"
+export GH_PR_ALL_TSV="$ROOT/nond271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/nond271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/nond271/gh-state"
+export GH_LOG="$ROOT/nond271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '882\tissue-282-registered-not-directory\tlib/x/**\t282\tfeat/282-registered-not-directory\t%s\thttps://github.com/acme/app/pull/882\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$NOND_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/nond271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 282 --claim-id issue-282-registered-not-directory --repo acme/app 2>&1); rc=$?
+check "registered non-directory release exits 3" "$rc" "3"
+contains "registered non-directory names refusal" "$out" "registered worktree path is missing or not a directory"
+lacks "registered non-directory does not claim success" "$out" "OK —"
+[[ -f "$NOND_PATH" && -d "$NOND_MOVED" ]] \
+  && ok "registered non-directory refusal preserves file and moved worktree" \
+  || bad "registered non-directory refusal mutated file/moved worktree"
+br=$(git -C "$ROOT/nond271/canon" branch --list 'feat/282-registered-not-directory')
+[[ -n "$br" ]] && ok "registered non-directory refusal preserves local branch" \
+  || bad "registered non-directory refusal deleted local branch"
+remote_br=$(git -C "$ROOT/nond271/canon" ls-remote --heads origin 'feat/282-registered-not-directory')
+[[ -n "$remote_br" ]] && ok "registered non-directory refusal preserves remote branch" \
+  || bad "registered non-directory refusal deleted remote branch"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] \
+  && ok "registered non-directory refusal never edits the label" \
+  || bad "registered non-directory refusal attempted a label edit"
+
+CANON_SHA=$(term_fixture canon271 283 canonical-alias)
+CANON_REAL="$ROOT/canon271/wt-283-canonical-alias"
+CANON_ALIAS="$ROOT/canon271/canonical-alias"
+git -C "$ROOT/canon271/canon" worktree remove --force "$CANON_REAL" >/dev/null 2>&1
+git -C "$ROOT/canon271/canon" checkout -q feat/283-canonical-alias
+ln -s "$ROOT/canon271/canon" "$CANON_ALIAS"
+export GH_PR_ALL_TSV="$ROOT/canon271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/canon271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/canon271/gh-state"
+export GH_LOG="$ROOT/canon271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '883\tissue-283-canonical-alias\tlib/x/**\t283\tfeat/283-canonical-alias\t%s\thttps://github.com/acme/app/pull/883\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$CANON_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/canon271/canon" && GIBSON_CANONICAL="$CANON_ALIAS" PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 283 --claim-id issue-283-canonical-alias --repo acme/app 2>&1); rc=$?
+check "canonical-checkout alias release exits 3" "$rc" "3"
+contains "canonical-checkout alias names refusal" "$out" "canonical checkout itself"
+lacks "canonical-checkout alias does not claim success" "$out" "OK —"
+check "canonical-checkout alias preserves checked-out feature branch" \
+  "$(git -C "$ROOT/canon271/canon" branch --show-current)" "feat/283-canonical-alias"
+[[ -L "$CANON_ALIAS" && -d "$ROOT/canon271/canon" ]] \
+  && ok "canonical-checkout alias refusal preserves alias and canonical checkout" \
+  || bad "canonical-checkout alias refusal mutated alias/canonical checkout"
+remote_br=$(git -C "$ROOT/canon271/canon" ls-remote --heads origin 'feat/283-canonical-alias')
+[[ -n "$remote_br" ]] && ok "canonical-checkout alias refusal preserves remote branch" \
+  || bad "canonical-checkout alias refusal deleted remote branch"
+[[ -z "$(cat "$GH_LOG" 2>/dev/null)" ]] \
+  && ok "canonical-checkout alias refusal never edits the label" \
+  || bad "canonical-checkout alias refusal attempted a label edit"
+
+# --- unregistered historical-path decoy fails closed ----------------------
+new_repo "$ROOT/dec271" acme/app
+mkdir -p "$ROOT/dec271/wt-275-decoy-preview"
+echo decoy > "$ROOT/dec271/wt-275-decoy-preview/decoy.txt"
+export GH_PR_ALL_TSV="$ROOT/dec271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/dec271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/dec271/gh-state"
+export GH_LOG="$ROOT/dec271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '875\tissue-275-decoy-preview\tlib/x/**\t275\tfeat/275-decoy-preview\t%s\thttps://github.com/acme/app/pull/875\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$HEX40" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/dec271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 275 --claim-id issue-275-decoy-preview --repo acme/app --dry-run 2>&1); rc=$?
+check "historical-path decoy dry-run fails closed" "$rc" "1"
+contains "decoy dry-run names unregistered historical path" "$out" "not a registered git worktree"
+lacks    "decoy dry-run prints no worktree target plan" "$out" "worktree target:"
+[[ -f "$ROOT/dec271/wt-275-decoy-preview/decoy.txt" ]] \
+  && ok "decoy dry-run left unregistered directory intact" || bad "decoy dry-run deleted the decoy"
+
+# --- --keep-worktree --keep-branch previews the same resolved artifacts ---
+KEEP_SHA=$(term_fixture keep271 276 keep-both-preview)
+git -C "$ROOT/keep271/canon" worktree remove --force "$ROOT/keep271/wt-276-keep-both-preview" >/dev/null 2>&1
+git -C "$ROOT/keep271/canon" worktree add -q "$ROOT/keep271/kept-actual" feat/276-keep-both-preview
+KEEP_SHOWN=$(CDPATH='' cd "$ROOT/keep271/kept-actual" && pwd -P)
+export GH_PR_ALL_TSV="$ROOT/keep271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/keep271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/keep271/gh-state"
+export GH_LOG="$ROOT/keep271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '876\tissue-276-keep-both-preview\tlib/x/**\t276\tfeat/276-keep-both-preview\t%s\thttps://github.com/acme/app/pull/876\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$KEEP_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/keep271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 276 --claim-id issue-276-keep-both-preview --repo acme/app \
+  --keep-worktree --keep-branch --dry-run 2>&1); rc=$?
+check "keep-both dry-run exits 0" "$rc" "0"
+contains "keep-both names registered path" "$out" "$KEEP_SHOWN"
+contains "keep-both keeps worktree" "$out" "KEEP worktree:"
+contains "keep-both keeps branch" "$out" "KEEP branch:"
+lacks    "keep-both does not plan remove" "$out" "remove worktree:"
+lacks    "keep-both does not plan delete branch" "$out" "delete branch:"
+lacks    "keep-both excludes default-path guess" "$out" "wt-276-keep-both-preview"
+
+# --- --keep-worktree without --keep-branch fails preflight ----------------
+KWNB_SHA=$(term_fixture kwnb271 277 keep-wt-no-br)
+export GH_PR_ALL_TSV="$ROOT/kwnb271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/kwnb271/open.tsv"
+: > "$GH_PR_OPEN_TSV"
+export GH_STATE="$ROOT/kwnb271/gh-state"
+export GH_LOG="$ROOT/kwnb271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+printf '877\tissue-277-keep-wt-no-br\tlib/x/**\t277\tfeat/277-keep-wt-no-br\t%s\thttps://github.com/acme/app/pull/877\tMERGED\tfalse\t%s\tacme/app\t2026-08-05T00:00:00Z\t2026-08-06T00:00:00Z\n' \
+  "$KWNB_SHA" "$HEX40" > "$GH_PR_ALL_TSV"
+out=$(cd "$ROOT/kwnb271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 277 --claim-id issue-277-keep-wt-no-br --repo acme/app \
+  --keep-worktree --dry-run 2>&1); rc=$?
+check "keep-worktree without keep-branch dry-run fails preflight" "$rc" "1"
+contains "keep-wt/no-br names retained-worktree rule" "$out" "retained worktree must not lose its branch"
+lacks    "keep-wt/no-br prints no KEEP/delete plan" "$out" "KEEP worktree:"
+lacks    "keep-wt/no-br prints no delete-branch plan" "$out" "delete branch:"
+[[ -d "$ROOT/kwnb271/wt-277-keep-wt-no-br" ]] \
+  && ok "keep-wt/no-br dry-run left worktree" || bad "keep-wt/no-br dry-run removed worktree"
+
+# --- ordinary ledger previews the same registered target live uses --------
+unset GH_PR_ALL_TSV GH_PR_OPEN_TSV GH_PR_ALL_EXIT GH_PR_OPEN_EXIT GH_PR_CLOSE_LOG
+unset GH_PR_OPEN_TSV2 GH_PR_OPEN_EXIT2 GH_OPEN_CALLS GH_PR_OPEN_HEAD_SHA
+new_repo "$ROOT/led271"
+(
+  cd "$ROOT/led271/canon" || exit 1
+  git checkout -q main
+  cat > docs/active-work.md <<'TABLE'
+| when | claim-id | scope | who |
+|---|---|---|---|
+| 2026-08-01 | issue-278-ledger-preview | src/only | session:a |
+| 2026-08-01 | issue-115-unrelated | src/x | session:c |
+TABLE
+  git add -A && git commit -qm "ledger preview" && git push -q origin main
+  git branch -f feat/278-ledger-preview HEAD
+  git push -q origin feat/278-ledger-preview
+  git worktree add -q "$ROOT/led271/actual-ledger-wt" feat/278-ledger-preview
+  mkdir -p "$ROOT/led271/wt-278-ledger-preview"
+  echo decoy > "$ROOT/led271/wt-278-ledger-preview/decoy.txt"
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+LED_SHOWN=$(CDPATH='' cd "$ROOT/led271/actual-ledger-wt" && pwd -P)
+out=$(cd "$ROOT/led271/canon" && "$RC" 278 --claim-id issue-278-ledger-preview --dry-run 2>&1); rc=$?
+check "ordinary ledger dry-run exits 0" "$rc" "0"
+contains "ledger dry-run names registered path" "$out" "$LED_SHOWN"
+contains "ledger dry-run names branch" "$out" "feat/278-ledger-preview"
+lacks    "ledger dry-run excludes decoy" "$out" "wt-278-ledger-preview"
+lacks    "ledger dry-run does not promise removal" "$out" "remove worktree:"
+
+# The ordinary-ledger live path must enforce the same retained-worktree rule
+# as terminal cleanup instead of keeping the worktree and deleting its refs.
+export GH_STATE="$ROOT/led271/gh-state"
+export GH_LOG="$ROOT/led271/gh.log"
+export GH_LABELS="agent-claimed,tier-b"
+rm -f "$GH_STATE" "$GH_LOG"
+snapshot_release_state "$ROOT/led271/canon" "$ROOT/led271/before-live-keep.snap" \
+  "$ROOT/led271/actual-ledger-wt" "$ROOT/led271/wt-278-ledger-preview"
+out=$(cd "$ROOT/led271/canon" && PATH="$ROOT/term/bin:$PATH" \
+  "$RC" 278 --claim-id issue-278-ledger-preview --keep-worktree 2>&1); rc=$?
+check "ordinary ledger keep-worktree/no-keep-branch fails preflight" "$rc" "1"
+contains "ordinary ledger names retained-worktree refusal" "$out" "a retained worktree must not lose its branch"
+lacks "ordinary ledger keep-worktree refusal does not claim success" "$out" "OK —"
+snapshot_release_state "$ROOT/led271/canon" "$ROOT/led271/after-live-keep.snap" \
+  "$ROOT/led271/actual-ledger-wt" "$ROOT/led271/wt-278-ledger-preview"
+if cmp -s "$ROOT/led271/before-live-keep.snap" "$ROOT/led271/after-live-keep.snap"; then
+  ok "ordinary ledger keep-worktree preflight is mutation-invariant"
+else
+  bad "ordinary ledger keep-worktree preflight mutated state"
+fi
+[[ -d "$ROOT/led271/actual-ledger-wt" ]] \
+  && ok "ordinary ledger refusal preserves registered worktree" \
+  || bad "ordinary ledger refusal removed registered worktree"
+br=$(git -C "$ROOT/led271/canon" branch --list 'feat/278-ledger-preview')
+[[ -n "$br" ]] && ok "ordinary ledger refusal preserves local branch" \
+  || bad "ordinary ledger refusal deleted local branch"
+remote_br=$(git -C "$ROOT/led271/canon" ls-remote --heads origin 'feat/278-ledger-preview')
+[[ -n "$remote_br" ]] && ok "ordinary ledger refusal preserves remote branch" \
+  || bad "ordinary ledger refusal deleted remote branch"
+
+# --- claim-reaper CAS preview still uses explicit --worktree-path ---------
+new_repo "$ROOT/cas271"
+WT_CAS="$ROOT/cas271/wt-registered-cas"
+(
+  cd "$ROOT/cas271/canon" || exit 1
+  git checkout -q main
+  mkdir -p docs/claims
+  cat > docs/claims/issue-279-cas-preview.md <<EOF
+claim: issue-279-cas-preview
+issue: 279
+claimed: 2026-08-01T00:00:00Z
+scope: x
+session: t
+branch: feat/279-cas-preview
+worktree: $WT_CAS
+EOF
+  : > docs/active-work.md
+  git add -A && git commit -qm "cas preview" && git push -q origin main
+  git rev-parse HEAD:docs/claims/issue-279-cas-preview.md > "$ROOT/cas271/blob"
+  git worktree add -b feat/279-cas-preview "$WT_CAS" HEAD >/dev/null 2>&1
+  git checkout -q long-lived-feature
+) >/dev/null 2>&1
+CAS_BLOB=$(cat "$ROOT/cas271/blob")
+out=$(cd "$ROOT/cas271/canon" && "$RC" 279 --claim-id issue-279-cas-preview \
+  --expected-claim-blob "$CAS_BLOB" --expected-source file \
+  --expected-claim-path docs/claims/issue-279-cas-preview.md \
+  --worktree-path "$WT_CAS" --expected-branch feat/279-cas-preview \
+  --keep-worktree --keep-branch --dry-run 2>&1); rc=$?
+check "CAS dry-run exits 0" "$rc" "0"
+contains "CAS dry-run names explicit --worktree-path" "$out" "$WT_CAS"
+contains "CAS dry-run keeps explicit path" "$out" "KEEP worktree:"
+
+# --- open-PR dry-run names the registered path, does not close ------------
+open_fixture open271 280 open-preview
+git -C "$ROOT/open271/canon" worktree remove --force "$ROOT/open271/wt-280-open-preview" >/dev/null 2>&1
+git -C "$ROOT/open271/canon" worktree add -q "$ROOT/open271/open-actual" feat/280-open-preview
+OPEN_SHOWN=$(CDPATH='' cd "$ROOT/open271/open-actual" && pwd -P)
+open_row 880 issue-280-open-preview 'lib/x/**' feat/280-open-preview > "$GH_PR_OPEN_TSV"
+export GH_GIT_LOG="$ROOT/open271/git-all.log"
+export GH_ALL_LOG="$ROOT/open271/gh-all.log"
+: > "$GH_GIT_LOG"
+: > "$GH_ALL_LOG"
+write_git_log_shim open271 "$GH_GIT_LOG"
+write_gh_log_shim open271 "$ROOT/term/bin/gh" "$GH_ALL_LOG"
+: > "$ROOT/open271/close.log"
+snapshot_release_state "$ROOT/open271/canon" "$ROOT/open271/before.snap" \
+  "$ROOT/open271/open-actual" ""
+out=$(cd "$ROOT/open271/canon" && PATH="$ROOT/open271/gitlog:$ROOT/open271/ghlog:$PATH" \
+  "$RC" 280 --claim-id issue-280-open-preview --repo acme/app --dry-run 2>&1); rc=$?
+check "open-PR dry-run exits 0" "$rc" "0"
+contains "open-PR dry-run names the close" "$out" "would close PR #880"
+contains "open-PR dry-run names registered path" "$out" "$OPEN_SHOWN"
+contains "open-PR dry-run names pending revalidation" "$out" "live execution will revalidate"
+_open_close_n=$(wc -l < "$ROOT/open271/close.log" | tr -d ' ')
+check "open-PR dry-run closed nothing" "${_open_close_n:-0}" "0"
+snapshot_release_state "$ROOT/open271/canon" "$ROOT/open271/after.snap" \
+  "$ROOT/open271/open-actual" ""
+if cmp -s "$ROOT/open271/before.snap" "$ROOT/open271/after.snap"; then
+  ok "open-PR dry-run snapshot is mutation-invariant"
+else
+  bad "open-PR dry-run mutated state: $(diff -u "$ROOT/open271/before.snap" "$ROOT/open271/after.snap" | head -40)"
+fi
+assert_mutation_free_logs "open-PR" "$GH_GIT_LOG" "$GH_ALL_LOG"
+
+# --- mutations: each new guard is non-vacuous -----------------------------
+echo "#271 · mutations remain syntactically valid and turn the relevant assertion red"
+
+# M1: preview uses wt_dir_for again — primary regression returns.
+copy_rc_bundle "$ROOT/mut1"
+perl -i -pe 's/^preview_verified_branch_cleanup\(\) \{/preview_verified_branch_cleanup() { echo "MUTATED_WT_DIR_FOR"; echo "    worktree target: \$(wt_dir_for \$1)"; return 0;/' \
+  "$ROOT/mut1/scripts/release-claim.sh"
+export GH_PR_ALL_TSV="$ROOT/nd271/all.tsv"
+export GH_PR_OPEN_TSV="$ROOT/nd271/open.tsv"
+if grep -q 'MUTATED_WT_DIR_FOR' "$ROOT/mut1/scripts/release-claim.sh" \
+   && bash -n "$ROOT/mut1/scripts/release-claim.sh"; then
+  ok "mutation M1 (wt_dir_for preview) is syntactically valid"
+  out_m1=$(cd "$ROOT/nd271/canon" && PATH="$ROOT/term/bin:$PATH" \
+    "$ROOT/mut1/scripts/release-claim.sh" 271 \
+    --claim-id issue-271-nondefault-preview --repo acme/app --dry-run 2>&1)
+  if echo "$out_m1" | grep -F 'wt-271-nondefault-preview' >/dev/null \
+     && ! echo "$out_m1" | grep -F "$ND_SHOWN" >/dev/null; then
+    ok "mutation M1 turns the primary registered-path assertion red"
+  else
+    bad "mutation M1 did not restore the decoy preview (out=$out_m1)"
+  fi
+else
+  bad "mutation M1 failed to apply or failed bash -n"
+fi
+
+# M2: terminal_cleanup_release re-derives branch_for — source sensor red.
+copy_rc_bundle "$ROOT/mut2"
+perl -i -pe 's/br="\$\{TERMINAL_HEAD_BRANCH:-\}"/br="\$(branch_for \$id)" # MUTATED_BRANCH_FOR/' \
+  "$ROOT/mut2/scripts/release-claim.sh"
+if grep -q 'MUTATED_BRANCH_FOR' "$ROOT/mut2/scripts/release-claim.sh" \
+   && bash -n "$ROOT/mut2/scripts/release-claim.sh"; then
+  ok "mutation M2 (branch_for in terminal cleanup) is syntactically valid"
+  _m2_fn=$(extract_fn "$ROOT/mut2/scripts/release-claim.sh" terminal_cleanup_release)
+  if printf '%s\n' "$_m2_fn" | grep -E '\$\(branch_for|branch_for "' >/dev/null; then
+    ok "mutation M2 turns the terminal evidence-branch source assertion red"
+  else
+    bad "mutation M2 did not reintroduce branch_for into terminal_cleanup_release"
+  fi
+else
+  bad "mutation M2 failed to apply or failed bash -n"
+fi
+
+# M3: drop keep-worktree/keep-branch common preflight — impossible plan prints.
+copy_rc_bundle "$ROOT/mut3"
+perl -i -pe 's/if \[\[ "\$KEEP_WORKTREE" -eq 1 && "\$KEEP_BRANCH" -eq 0 \]\]; then/if false; then # MUTATED_KEEP_PREFLIGHT/' \
+  "$ROOT/mut3/scripts/release-claim.sh"
+if grep -q 'MUTATED_KEEP_PREFLIGHT' "$ROOT/mut3/scripts/release-claim.sh" \
+   && bash -n "$ROOT/mut3/scripts/release-claim.sh"; then
+  ok "mutation M3 (drop keep-preflight) is syntactically valid"
+  export GH_PR_ALL_TSV="$ROOT/kwnb271/all.tsv"
+  export GH_PR_OPEN_TSV="$ROOT/kwnb271/open.tsv"
+  out_m3=$(cd "$ROOT/kwnb271/canon" && PATH="$ROOT/term/bin:$PATH" \
+    "$ROOT/mut3/scripts/release-claim.sh" 277 \
+    --claim-id issue-277-keep-wt-no-br --repo acme/app --keep-worktree --dry-run 2>&1); rc_m3=$?
+  if [[ "$rc_m3" -eq 0 ]] && echo "$out_m3" | grep -F 'KEEP worktree:' >/dev/null \
+     && echo "$out_m3" | grep -E 'branch target:|delete branch:' >/dev/null; then
+    ok "mutation M3 turns the keep-worktree/no-keep-branch preflight assertion red"
+  else
+    bad "mutation M3 did not print an impossible keep/delete plan (rc=$rc_m3 out=$out_m3)"
+  fi
+else
+  bad "mutation M3 failed to apply or failed bash -n"
+fi
+
+# M4: no-registered-worktree path prints a fabricated default instead of absence.
+copy_rc_bundle "$ROOT/mut4"
+perl -i -pe 's/echo "    worktree target: no registered worktree"/echo "    worktree target: \$(wt_dir_for \$id)" # MUTATED_NO_WT/' \
+  "$ROOT/mut4/scripts/release-claim.sh"
+if grep -q 'MUTATED_NO_WT' "$ROOT/mut4/scripts/release-claim.sh" \
+   && bash -n "$ROOT/mut4/scripts/release-claim.sh"; then
+  ok "mutation M4 (fabricate default on no-worktree) is syntactically valid"
+  export GH_PR_ALL_TSV="$ROOT/none271/all.tsv"
+  export GH_PR_OPEN_TSV="$ROOT/none271/open.tsv"
+  out_m4=$(cd "$ROOT/none271/canon" && PATH="$ROOT/term/bin:$PATH" \
+    "$ROOT/mut4/scripts/release-claim.sh" 272 \
+    --claim-id issue-272-no-wt-preview --repo acme/app --dry-run 2>&1)
+  if echo "$out_m4" | grep -F 'wt-272-no-wt-preview' >/dev/null \
+     && ! echo "$out_m4" | grep -F 'no registered worktree' >/dev/null; then
+    ok "mutation M4 turns the no-registered-worktree assertion red"
+  else
+    bad "mutation M4 did not fabricate the default path (out=$out_m4)"
+  fi
+else
+  bad "mutation M4 failed to apply or failed bash -n"
+fi
+
+# M5: skip ambiguity fail-closed — plan prints despite two registered paths.
+copy_rc_bundle "$ROOT/mut5"
+perl -i -pe 's/if \[\[ "\$match_count" -gt 1 \]\]; then/if [[ "\$match_count" -gt 1 ]]; then match_count=1; fi; if false; then # MUTATED_AMBIG/' \
+  "$ROOT/mut5/scripts/release-claim.sh"
+if grep -q 'MUTATED_AMBIG' "$ROOT/mut5/scripts/release-claim.sh" \
+   && bash -n "$ROOT/mut5/scripts/release-claim.sh"; then
+  ok "mutation M5 (skip ambiguity refuse) is syntactically valid"
+  export GH_PR_ALL_TSV="$ROOT/amb271/all.tsv"
+  export GH_PR_OPEN_TSV="$ROOT/amb271/open.tsv"
+  out_m5=$(cd "$ROOT/amb271/canon" && PATH="$ROOT/term/bin:$PATH" \
+    "$ROOT/mut5/scripts/release-claim.sh" 273 \
+    --claim-id issue-273-ambig-preview --repo acme/app --dry-run 2>&1); rc_m5=$?
+  if [[ "$rc_m5" -eq 0 ]] && echo "$out_m5" | grep -F 'DRY RUN would:' >/dev/null; then
+    ok "mutation M5 turns the ambiguous-registration fail-closed assertion red"
+  else
+    bad "mutation M5 still failed closed (rc=$rc_m5 out=$out_m5)"
+  fi
+else
+  bad "mutation M5 failed to apply or failed bash -n"
+fi
+
+PATH="$_271_PATH"
 
 echo "#153 round 8 · standalone suite exit gate rejects construction diags"
 _guard_probe=$(mktemp "${TMPDIR:-/tmp}/gibson-rc-guard.XXXXXX")

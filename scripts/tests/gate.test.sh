@@ -15,6 +15,12 @@
 #
 # USAGE
 #   scripts/tests/gate.test.sh
+#   scripts/tests/gate.test.sh --self-contract
+#
+# Ordinary no-argument path: lightweight generated gate.json metrics only.
+# It is discovered by run-all.sh and MUST remain non-recursive (never invoke
+# --self-contract or the production run-all suite).
+# Opt-in --self-contract: disjoint exact-SHA production baseline fixture.
 set -uo pipefail
 
 # Hermetic git identity (#101): suites that commit must not read ambient global
@@ -29,6 +35,7 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 TI="$SCRIPT_DIR/../test-integrity.mjs"
 GATE="$SCRIPT_DIR/../gate.sh"
 BASELINE_SH="$SCRIPT_DIR/../gate-baseline.sh"
+REPO_ROOT=$(CDPATH='' cd "$SCRIPT_DIR/../.." && pwd)
 
 PASS=0
 FAIL=0
@@ -37,6 +44,225 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 
 command -v node >/dev/null || { echo "gate.test.sh: node is required"; exit 1; }
 command -v git  >/dev/null || { echo "gate.test.sh: git is required"; exit 1; }
+
+# --- opt-in --self-contract path (exact-SHA production baseline; disjoint) ---
+# Resolves SOURCE_SHA from the committed candidate under review, checks out
+# that exact SHA in a clean detached fixture, and runs the one full
+# production gate-baseline. Unknown flags fail. This function is never
+# called from the ordinary no-argument path below.
+SELF_CONTRACT_FIXTURE=""
+SELF_CONTRACT_KIND=""
+cleanup_self_contract() {
+  if [[ -z "${SELF_CONTRACT_FIXTURE:-}" ]]; then
+    return 0
+  fi
+  if [[ "${SELF_CONTRACT_KIND:-}" == worktree ]]; then
+    git -C "$REPO_ROOT" worktree remove --force "$SELF_CONTRACT_FIXTURE" >/dev/null 2>&1 \
+      || rm -rf "$SELF_CONTRACT_FIXTURE"
+  else
+    rm -rf "$SELF_CONTRACT_FIXTURE"
+  fi
+  SELF_CONTRACT_FIXTURE=""
+}
+
+run_self_contract() {
+  local SOURCE_SHA fixture_sha base_out elapsed t0 rc out recorded_sha recorded_test
+  local fixture_helper fixture_root fixture_helper_dir resolved_helper
+  SOURCE_SHA=$(git -C "$REPO_ROOT" rev-parse HEAD) || {
+    bad "self-contract: git rev-parse HEAD failed"
+    return 1
+  }
+  case "$SOURCE_SHA" in
+    *[!0-9a-f]*) bad "self-contract: HEAD SHA is not hex: $SOURCE_SHA"; return 1 ;;
+  esac
+  if [[ ${#SOURCE_SHA} -ne 40 && ${#SOURCE_SHA} -ne 64 ]]; then
+    bad "self-contract: HEAD SHA length ${#SOURCE_SHA} is not 40 or 64"
+    return 1
+  fi
+  echo "self-contract: SOURCE_SHA=$SOURCE_SHA"
+
+  SELF_CONTRACT_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/gibson-self-contract.XXXXXX") || {
+    bad "self-contract: mktemp failed"
+    return 1
+  }
+  rmdir "$SELF_CONTRACT_FIXTURE" || true
+  SELF_CONTRACT_KIND=""
+  if git -C "$REPO_ROOT" worktree add --detach "$SELF_CONTRACT_FIXTURE" "$SOURCE_SHA" >/dev/null 2>&1; then
+    SELF_CONTRACT_KIND=worktree
+  else
+    mkdir -p "$SELF_CONTRACT_FIXTURE"
+    if git clone --local --quiet "$REPO_ROOT" "$SELF_CONTRACT_FIXTURE" >/dev/null 2>&1 \
+      && git -C "$SELF_CONTRACT_FIXTURE" checkout --detach --quiet "$SOURCE_SHA" >/dev/null 2>&1; then
+      SELF_CONTRACT_KIND=clone
+    else
+      bad "self-contract: could not create detached fixture at $SOURCE_SHA"
+      rm -rf "$SELF_CONTRACT_FIXTURE"
+      SELF_CONTRACT_FIXTURE=""
+      return 1
+    fi
+  fi
+  trap cleanup_self_contract EXIT
+
+  fixture_sha=$(git -C "$SELF_CONTRACT_FIXTURE" rev-parse HEAD) || {
+    bad "self-contract: fixture rev-parse failed"
+    return 1
+  }
+  if [[ "$fixture_sha" == "$SOURCE_SHA" ]]; then
+    ok "self-contract: fixture HEAD equals SOURCE_SHA"
+  else
+    bad "self-contract: fixture HEAD $fixture_sha != SOURCE_SHA $SOURCE_SHA"
+    return 1
+  fi
+  if [[ -n "$(git -C "$SELF_CONTRACT_FIXTURE" status --porcelain)" ]]; then
+    bad "self-contract: fixture is not clean (untracked/dirty files present)"
+    return 1
+  else
+    ok "self-contract: fixture working tree is clean"
+  fi
+
+  # Isolated baseline; ignore developer env overrides and preexisting files.
+  unset GIBSON_GENERATE GIBSON_TYPECHECK GIBSON_LINT GIBSON_TEST GIBSON_BUILD
+  unset GIBSON_TEST_INTEGRITY_TEXT
+  base_out="$SELF_CONTRACT_FIXTURE/.gibson-self-contract-baseline.json"
+  if [[ -e "$base_out" ]]; then
+    bad "self-contract: isolated baseline path already exists"
+    return 1
+  fi
+
+  # Exact-SHA authority: invoke the fixture-owned helper, never the mutable
+  # source-tree BASELINE_SH. An uncommitted edit of the source helper must not
+  # be able to forge evidence attributed to SOURCE_SHA. Any helper path must
+  # resolve inside the fixture (regular file; no symlink escape).
+  fixture_helper="$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"
+  if [[ -L "$fixture_helper" ]]; then
+    bad "self-contract: fixture helper is a symlink (must be the exact candidate file)"
+    return 1
+  fi
+  if [[ ! -f "$fixture_helper" ]]; then
+    bad "self-contract: fixture helper missing at $fixture_helper"
+    return 1
+  fi
+  fixture_root=$(CDPATH='' cd -- "$SELF_CONTRACT_FIXTURE" && pwd) || {
+    bad "self-contract: could not resolve fixture root"
+    return 1
+  }
+  fixture_helper_dir=$(CDPATH='' cd -- "$(dirname -- "$fixture_helper")" && pwd) || {
+    bad "self-contract: could not resolve fixture helper directory"
+    return 1
+  }
+  resolved_helper="${fixture_helper_dir}/$(basename -- "$fixture_helper")"
+  case "$resolved_helper" in
+    "$fixture_root"/*) ;;
+    *)
+      bad "self-contract: helper path escaped fixture: $resolved_helper"
+      return 1
+      ;;
+  esac
+
+  echo "self-contract: running one full production gate-baseline (no focused substitute)"
+  t0=$SECONDS
+  out=$(cd "$SELF_CONTRACT_FIXTURE" && bash "$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh" --out "$base_out" 2>&1)
+  rc=$?
+  elapsed=$((SECONDS - t0))
+  echo "self-contract: gate-baseline wall ${elapsed}s"
+  printf '%s\n' "$out" | grep -E 'wall:| ok | FAIL |run-all:' | tail -n 40 | sed 's/^/         /'
+
+  if [[ "$rc" -ne 0 ]]; then
+    bad "self-contract: gate-baseline.sh exited $rc"
+    printf '%s\n' "$out" | tail -n 30 | sed 's/^/         /'
+    return 1
+  fi
+  if [[ ! -f "$base_out" ]]; then
+    bad "self-contract: baseline file missing at $base_out"
+    return 1
+  fi
+  ok "self-contract: gate-baseline.sh exited 0"
+
+  recorded_sha=$(node -e '
+    const fs=require("fs");
+    const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    if(!j.test_metrics || typeof j.test_metrics.total!=="number") process.exit(2);
+    process.stdout.write(String(j.git_sha||""));
+  ' "$base_out") || {
+    bad "self-contract: baseline is not parseable / lacks test_metrics"
+    return 1
+  }
+  if [[ "$recorded_sha" == "$SOURCE_SHA" ]]; then
+    ok "self-contract: recorded git_sha equals SOURCE_SHA"
+  else
+    bad "self-contract: recorded git_sha $recorded_sha != SOURCE_SHA $SOURCE_SHA"
+    return 1
+  fi
+  recorded_test=$(node -e '
+    const fs=require("fs");
+    const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    process.stdout.write(String((j.commands&&j.commands.test)||""));
+  ' "$base_out")
+  if [[ "$recorded_test" == "bash scripts/tests/run-all.sh --no-quarantine" ]]; then
+    ok "self-contract: baseline recorded the canonical --no-quarantine test command"
+  else
+    bad "self-contract: baseline test command was '$recorded_test'"
+    return 1
+  fi
+}
+
+SELF_CONTRACT=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-contract)
+      SELF_CONTRACT=1
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: scripts/tests/gate.test.sh [--self-contract]"
+      exit 0
+      ;;
+    *)
+      echo "gate.test.sh: unknown flag: $1" >&2
+      echo "Usage: scripts/tests/gate.test.sh [--self-contract]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$SELF_CONTRACT" -eq 1 ]]; then
+  run_self_contract
+  echo
+  echo "gate.test.sh: $PASS passed, $FAIL failed"
+  [[ "$FAIL" -eq 0 ]]
+  exit $?
+fi
+
+# --- ordinary no-argument path (non-recursive; disjoint from --self-contract) ---
+
+# Lightweight static pin of the --self-contract authority boundary. Does not
+# run the full exact-SHA suite (that path is opt-in and may not run while
+# this worktree is uncommitted).
+{
+  _gt="$SCRIPT_DIR/gate.test.sh"
+  if grep -Fq 'bash "$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"' "$_gt"; then
+    ok "self-contract source invokes \$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"
+  else
+    bad "self-contract source missing fixture-owned gate-baseline.sh invocation"
+  fi
+  if awk '
+    /^run_self_contract\(\)/ { p=1 }
+    p && /bash[[:space:]]+"\$BASELINE_SH"/ { hit=1 }
+    p && /^SELF_CONTRACT=/ { p=0 }
+    END { exit hit ? 0 : 1 }
+  ' "$_gt"; then
+    bad "self-contract source still invokes mutable \$BASELINE_SH (forges SOURCE_SHA)"
+  else
+    ok "self-contract source does not invoke mutable \$BASELINE_SH"
+  fi
+  if grep -Fq 'helper path escaped fixture' "$_gt" \
+    && grep -Fq '"$fixture_root"/*' "$_gt"; then
+    ok "self-contract source requires helper path to resolve inside the fixture"
+  else
+    bad "self-contract source missing in-fixture helper path bound"
+  fi
+  unset _gt
+}
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-gate-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -54,14 +280,24 @@ compare() { # base head waiver_text [trusted]
 }
 
 # ---------------------------------------------------------------------------
+echo "unknown flags fail closed (ordinary path stays non-recursive)"
+# ---------------------------------------------------------------------------
+unk_out=$(bash "$SCRIPT_DIR/gate.test.sh" --not-a-real-flag 2>&1); unk_rc=$?
+if [[ "$unk_rc" -eq 2 ]] && printf '%s\n' "$unk_out" | grep 'unknown flag: --not-a-real-flag' >/dev/null; then
+  ok "unknown flag exits 2 without running fixtures"
+else
+  bad "unknown flag (rc=$unk_rc): $unk_out"
+fi
+
+# ---------------------------------------------------------------------------
 echo "deletion without waiver hard-fails with exact total delta"
 # ---------------------------------------------------------------------------
 write_metrics "$ROOT/b1.json" 10 0 0
 write_metrics "$ROOT/h1.json" 7 0 0
 out=$(compare "$ROOT/b1.json" "$ROOT/h1.json" ""); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'test-integrity' \
-  && echo "$out" | grep -qE 'dropped by 3|removed 3' \
-  && echo "$out" | grep -q '10' && echo "$out" | grep -q '7'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'test-integrity' >/dev/null \
+  && echo "$out" | grep -E 'dropped by 3|removed 3' >/dev/null \
+  && echo "$out" | grep '10' >/dev/null && echo "$out" | grep '7' >/dev/null; then
   ok "deletion/no waiver fails with test-integrity and delta 3 (10→7)"
 else
   bad "deletion/no waiver (rc=$rc): $out"
@@ -73,8 +309,8 @@ echo "new skip/todo without waiver hard-fails with exact skip delta"
 write_metrics "$ROOT/b2.json" 10 0 0
 write_metrics "$ROOT/h2.json" 10 2 1
 out=$(compare "$ROOT/b2.json" "$ROOT/h2.json" ""); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'test-integrity' \
-  && echo "$out" | grep -qE 'skip/todo rose by 3|skip \+3'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'test-integrity' >/dev/null \
+  && echo "$out" | grep -E 'skip/todo rose by 3|skip \+3' >/dev/null; then
   ok "new skip/todo/no waiver fails with exact skip delta 3"
 else
   bad "new skip/no waiver (rc=$rc): $out"
@@ -87,9 +323,9 @@ write_metrics "$ROOT/b3.json" 10 1 0
 write_metrics "$ROOT/h3.json" 8 2 0
 waiver=$'## Notes\nTest-integrity: removed 2 for obsolete fixtures after #70\nTest-integrity: skip +1 for flaky external API pending #71\n'
 out=$(compare "$ROOT/b3.json" "$ROOT/h3.json" "$waiver"); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
-  && echo "$out" | grep -q 'removed 2' && echo "$out" | grep -q 'skip +1' \
-  && echo "$out" | grep -q 'obsolete fixtures'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'WAIVER accepted' >/dev/null \
+  && echo "$out" | grep 'removed 2' >/dev/null && echo "$out" | grep 'skip +1' >/dev/null \
+  && echo "$out" | grep 'obsolete fixtures' >/dev/null; then
   ok "exact visible delta-consistent waiver passes and surfaces reason"
 else
   bad "exact waiver (rc=$rc): $out"
@@ -98,7 +334,7 @@ fi
 # Combined single-line form
 waiver2='Test-integrity: removed 2, skip +1 for both intentional under #70'
 out=$(compare "$ROOT/b3.json" "$ROOT/h3.json" "$waiver2"); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WAIVER accepted' >/dev/null \
   && ok "combined waiver line accepted" \
   || bad "combined waiver (rc=$rc): $out"
 
@@ -117,8 +353,8 @@ hidden=$'Looks fine\n<!--\nTest-integrity: removed 3 for secretly gone\n-->\n'
 write_metrics "$ROOT/b4.json" 10 0 0
 write_metrics "$ROOT/h4.json" 7 0 0
 out=$(compare "$ROOT/b4.json" "$ROOT/h4.json" "$hidden"); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'dropped by 3' \
-  && ! echo "$out" | grep -q 'WAIVER accepted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'dropped by 3' >/dev/null \
+  && ! echo "$out" | grep 'WAIVER accepted' >/dev/null; then
   ok "HTML-comment waiver cannot authorize a deletion"
 else
   bad "hidden HTML waiver (rc=$rc): $out"
@@ -145,7 +381,7 @@ done
 # Wrong delta
 out=$(compare "$ROOT/b4.json" "$ROOT/h4.json" \
   'Test-integrity: removed 2 for undercount'); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'wrong delta'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'wrong delta' >/dev/null; then
   ok "wrong-delta waiver fails closed"
 else
   bad "wrong-delta waiver (rc=$rc): $out"
@@ -156,7 +392,7 @@ write_metrics "$ROOT/b4s.json" 10 0 0
 write_metrics "$ROOT/h4s.json" 10 4 0
 out=$(compare "$ROOT/b4s.json" "$ROOT/h4s.json" \
   'Test-integrity: skip +2 for undercount'); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'wrong delta'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'wrong delta' >/dev/null; then
   ok "wrong skip-delta waiver fails closed"
 else
   bad "wrong skip-delta (rc=$rc): $out"
@@ -177,7 +413,7 @@ do
   printf '%s\n' "$badjson" > "$ROOT/bad.json"
   write_metrics "$ROOT/ok.json" 5 0 0
   out=$(compare "$ROOT/ok.json" "$ROOT/bad.json" 2>&1); rc=$?
-  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'unparseable|must be|exceeds|test-integrity'; then
+  if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'unparseable|must be|exceeds|test-integrity' >/dev/null; then
     ok "malformed metrics rejected: ${badjson:0:40}…"
   else
     bad "malformed metrics accepted: $badjson → $out"
@@ -187,7 +423,7 @@ done
 # Unparseable runner output
 printf 'all good, trust me\n' > "$ROOT/garbage.txt"
 out=$(node "$TI" parse --input "$ROOT/garbage.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'could not parse'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'could not parse' >/dev/null; then
   ok "unparseable runner output fails closed"
 else
   bad "unparseable runner output (rc=$rc): $out"
@@ -196,8 +432,8 @@ fi
 # Explicit metrics contract
 printf 'GIBSON_TEST_METRICS total=12 skipped=1 todo=2\n' > "$ROOT/explicit.txt"
 out=$(node "$TI" parse --input "$ROOT/explicit.txt" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 12' \
-  && echo "$out" | grep -q '"skipped": 1' && echo "$out" | grep -q '"todo": 2'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 12' >/dev/null \
+  && echo "$out" | grep '"skipped": 1' >/dev/null && echo "$out" | grep '"todo": 2' >/dev/null; then
   ok "GIBSON_TEST_METRICS kv contract parses"
 else
   bad "explicit kv parse (rc=$rc): $out"
@@ -205,24 +441,24 @@ fi
 
 printf 'GIBSON_TEST_METRICS {"total":9,"skipped":0,"todo":1}\n' > "$ROOT/explicitj.txt"
 out=$(node "$TI" parse --input "$ROOT/explicitj.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 9' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 9' >/dev/null \
   && ok "GIBSON_TEST_METRICS JSON contract parses" \
   || bad "explicit json parse (rc=$rc): $out"
 
 # Vitest / jest / node:test shapes
 printf 'Tests  8 passed | 2 skipped (10)\n' > "$ROOT/vitest.txt"
 out=$(node "$TI" parse --input "$ROOT/vitest.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' && echo "$out" | grep -q '"skipped": 2' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null && echo "$out" | grep '"skipped": 2' >/dev/null \
   && ok "vitest summary parses" || bad "vitest parse (rc=$rc): $out"
 
 printf 'Tests:       1 skipped, 9 passed, 10 total\n' > "$ROOT/jest.txt"
 out=$(node "$TI" parse --input "$ROOT/jest.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "jest summary parses" || bad "jest parse (rc=$rc): $out"
 
 printf '# tests 10\n# pass 8\n# skip 1\n# todo 1\n# fail 0\n' > "$ROOT/node.txt"
 out=$(node "$TI" parse --input "$ROOT/node.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"todo": 1' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"todo": 1' >/dev/null \
   && ok "node:test counters parse" || bad "node:test parse (rc=$rc): $out"
 
 # ---------------------------------------------------------------------------
@@ -231,7 +467,7 @@ echo "added tests / reduced skips pass without waiver"
 write_metrics "$ROOT/b5.json" 10 3 0
 write_metrics "$ROOT/h5.json" 14 1 0
 out=$(compare "$ROOT/b5.json" "$ROOT/h5.json" ""); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -qiE 'rose by 4|PASS'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -iE 'rose by 4|PASS' >/dev/null; then
   ok "added tests and reduced skips pass without waiver"
 else
   bad "improvement path (rc=$rc): $out"
@@ -279,7 +515,7 @@ cat > "$FAKE/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$FAKE" && bash "$BASELINE_SH" --out "$FAKE/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'regenerat|--reason|test-integrity'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'regenerat|--reason|test-integrity' >/dev/null; then
   ok "baseline reduction without --regenerate/--reason fails closed"
 else
   bad "silent baseline shrink (rc=$rc): $out"
@@ -293,7 +529,7 @@ grep -qE '"total":[[:space:]]*10' "$FAKE/.gibson-baseline.json" \
 # --regenerate without --reason
 out=$(cd "$FAKE" && bash "$BASELINE_SH" --out "$FAKE/.gibson-baseline.json" \
   --regenerate 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'reason'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'reason' >/dev/null; then
   ok "regenerate without --reason fails closed"
 else
   bad "regenerate without reason (rc=$rc): $out"
@@ -381,8 +617,8 @@ cat > "$GDIR/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$GDIR" && bash "$GATE" --baseline "$GDIR/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'test-integrity' \
-  && echo "$out" | grep -qE 'dropped by 2|removed 2'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'test-integrity' >/dev/null \
+  && echo "$out" | grep -E 'dropped by 2|removed 2' >/dev/null; then
   ok "gate.sh fails on deletion with test-integrity diagnosis"
 else
   bad "gate.sh deletion (rc=$rc): $out"
@@ -391,8 +627,8 @@ fi
 # With correct waiver via env (inert PR body)
 out=$(cd "$GDIR" && GIBSON_TEST_INTEGRITY_TEXT='Test-integrity: removed 2 for obsolete under #70' \
   bash "$GATE" --baseline "$GDIR/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
-  && echo "$out" | grep -q 'obsolete under #70'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'WAIVER accepted' >/dev/null \
+  && echo "$out" | grep 'obsolete under #70' >/dev/null; then
   ok "gate.sh accepts exact waiver and surfaces it for the reviewer"
 else
   bad "gate.sh waiver (rc=$rc): $out"
@@ -409,18 +645,37 @@ cat > "$GDIR/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$GDIR" && bash "$GATE" --baseline "$GDIR/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'test-integrity' \
-  && echo "$out" | grep -qE 'skip/todo rose by 2|skip \+2'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'test-integrity' >/dev/null \
+  && echo "$out" | grep -E 'skip/todo rose by 2|skip \+2' >/dev/null; then
   ok "gate.sh fails on new skips with exact delta"
 else
   bad "gate.sh new skips (rc=$rc): $out"
+fi
+
+# Restore original lightweight metrics → gate.sh green. This mutation/restore
+# fixture is disjoint from --self-contract: it never invokes the production
+# run-all suite or the exact-SHA baseline path.
+cat > "$GDIR/.agents/gate.json" <<'JSON'
+{
+  "generate": "",
+  "typecheck": "true",
+  "lint": "true",
+  "test": "printf 'GIBSON_TEST_METRICS total=5 skipped=0 todo=0\\n'",
+  "build": "true"
+}
+JSON
+out=$(cd "$GDIR" && bash "$GATE" --baseline "$GDIR/.gibson-baseline.json" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'GREEN' >/dev/null; then
+  ok "gate.sh returns green after restore of original metrics"
+else
+  bad "gate.sh restore green (rc=$rc): $out"
 fi
 
 # Trusted-source labeling: CI path never treats a local baseline as self-authorizing
 write_metrics "$ROOT/ci-base.json" 10 0 0
 write_metrics "$ROOT/ci-head.json" 9 0 0
 out=$(compare "$ROOT/ci-base.json" "$ROOT/ci-head.json" "" "merge-base"); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'merge-base'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep 'merge-base' >/dev/null; then
   ok "compare surfaces trusted-source=merge-base (CI anchor, not local baseline)"
 else
   bad "trusted-source labeling (rc=$rc): $out"
@@ -451,7 +706,7 @@ cat > "$GDIR/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$GDIR" && bash "$GATE" --baseline "$GDIR/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'typecheck|newly failing|FAIL'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'typecheck|newly failing|FAIL' >/dev/null; then
   ok "gate.sh still hard-fails on new typecheck failures"
 else
   bad "failure baseline weakened (rc=$rc): $out"
@@ -469,7 +724,7 @@ echo "blocker 1: explicit GIBSON_TEST_METRICS cannot spoof past a real runner su
 printf 'Tests  7 passed (7)\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/spoof.txt"
 out=$(node "$TI" parse --input "$ROOT/spoof.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted' >/dev/null; then
   ok "conflicting explicit+runner metrics fail closed (no self-authorization)"
 else
   bad "spoofed explicit metrics accepted or wrong error (rc=$rc): $out"
@@ -481,7 +736,7 @@ write_metrics "$ROOT/spoof-base.json" 10 0 0
 # head metrics file of 7 fails integrity vs base 10 without waiver.
 write_metrics "$ROOT/spoof-head-honest.json" 7 0 0
 out=$(compare "$ROOT/spoof-base.json" "$ROOT/spoof-head-honest.json" ""); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'dropped by 3|removed 3' >/dev/null; then
   ok "honest head total=7 vs base=10 still hard-fails (delta 3)"
 else
   bad "honest head compare (rc=$rc): $out"
@@ -490,7 +745,7 @@ fi
 # Explicit alone (no runner summary) remains the vendor-blind contract
 printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' > "$ROOT/explicit-only.txt"
 out=$(node "$TI" parse --input "$ROOT/explicit-only.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "explicit-only GIBSON_TEST_METRICS still parses" \
   || bad "explicit-only broken (rc=$rc): $out"
 
@@ -498,7 +753,7 @@ out=$(node "$TI" parse --input "$ROOT/explicit-only.txt" 2>&1); rc=$?
 printf 'Tests  10 passed (10)\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/agree.txt"
 out=$(node "$TI" parse --input "$ROOT/agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "agreeing explicit+runner sources accepted" \
   || bad "agreeing sources (rc=$rc): $out"
 
@@ -510,7 +765,7 @@ echo "blocker 1b: every explicit GIBSON_TEST_METRICS line is collected (no first
 printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS total=7 skipped=0 todo=0\n' \
   > "$ROOT/multi-kv-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/multi-kv-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted' >/dev/null; then
   ok "conflicting multi-explicit KV lines fail closed (not first-match total=10)"
 else
   bad "multi-kv first-match bypass (rc=$rc): $out"
@@ -520,7 +775,7 @@ fi
 printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS {"total":7,"skipped":0,"todo":0}\n' \
   > "$ROOT/multi-kv-json-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/multi-kv-json-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted' >/dev/null; then
   ok "conflicting explicit KV then JSON fail closed"
 else
   bad "kv+json first-match bypass (rc=$rc): $out"
@@ -530,7 +785,7 @@ fi
 printf 'GIBSON_TEST_METRICS total=7 skipped=0 todo=0\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/multi-kv-conflict-rev.txt"
 out=$(node "$TI" parse --input "$ROOT/multi-kv-conflict-rev.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted' >/dev/null; then
   ok "conflicting multi-explicit lines fail regardless of order"
 else
   bad "multi-kv reverse-order bypass (rc=$rc): $out"
@@ -540,7 +795,7 @@ fi
 printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/multi-kv-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/multi-kv-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "identical multi-explicit KV lines accepted" \
   || bad "identical multi-explicit broken (rc=$rc): $out"
 
@@ -548,7 +803,7 @@ out=$(node "$TI" parse --input "$ROOT/multi-kv-agree.txt" 2>&1); rc=$?
 printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nGIBSON_TEST_METRICS {"total":10,"skipped":0,"todo":0}\n' \
   > "$ROOT/multi-kv-json-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/multi-kv-json-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "identical explicit KV+JSON lines accepted" \
   || bad "identical kv+json broken (rc=$rc): $out"
 
@@ -556,7 +811,7 @@ out=$(node "$TI" parse --input "$ROOT/multi-kv-json-agree.txt" 2>&1); rc=$?
 printf 'GIBSON_TEST_METRICS total=10 skipped=0 todo=0\nTests  7 passed (7)\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/multi-explicit-runner.txt"
 out=$(node "$TI" parse --input "$ROOT/multi-explicit-runner.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted' >/dev/null; then
   ok "duplicate fake explicit + honest runner fails closed"
 else
   bad "multi-explicit+runner spoof (rc=$rc): $out"
@@ -572,7 +827,7 @@ echo "blocker 1c: every native runner summary is collected (no first/last-only)"
 printf 'Tests: 10 passed, 10 total\nTests: 7 passed, 7 total\n' \
   > "$ROOT/jest-multi-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/jest-multi-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted|native' >/dev/null; then
   ok "conflicting repeated Jest summaries fail closed (not first-match total=10)"
 else
   bad "jest multi first-match bypass (rc=$rc): $out"
@@ -582,7 +837,7 @@ fi
 printf '# tests 10\n# pass 10\n# skip 0\n# todo 0\n# tests 7\n# pass 7\n# skip 0\n# todo 0\n' \
   > "$ROOT/node-multi-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/node-multi-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted|native' >/dev/null; then
   ok "conflicting repeated node:test counters fail closed (not first-match total=10)"
 else
   bad "node:test multi first-match bypass (rc=$rc): $out"
@@ -592,7 +847,7 @@ fi
 printf '# tests 10\n# skip 0\n# todo 0\n# tests 10\n# skip 5\n# todo 0\n' \
   > "$ROOT/node-multi-skip-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/node-multi-skip-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted|native' >/dev/null; then
   ok "node:test repeated blocks with conflicting skip fail closed (no mixed counters)"
 else
   bad "node:test mixed-skip fabrication (rc=$rc): $out"
@@ -602,7 +857,7 @@ fi
 printf '1..10\nok 1 - a\nok 2 - b\n1..7\nok 1 - c\n' \
   > "$ROOT/tap-multi-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-multi-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted|native' >/dev/null; then
   ok "conflicting repeated TAP plans fail closed (not first-match 1..10)"
 else
   bad "tap multi first-match bypass (rc=$rc): $out"
@@ -612,7 +867,7 @@ fi
 printf 'Tests  7 passed (7)\nTests  10 passed (10)\n' \
   > "$ROOT/vitest-multi-honest-first.txt"
 out=$(node "$TI" parse --input "$ROOT/vitest-multi-honest-first.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted|native' >/dev/null; then
   ok "conflicting Vitest summaries fail closed (not last-match total=10)"
 else
   bad "vitest last-match bypass (rc=$rc): $out"
@@ -622,7 +877,7 @@ fi
 printf 'Tests  10 passed (10)\nTests  7 passed (7)\n' \
   > "$ROOT/vitest-multi-honest-last.txt"
 out=$(node "$TI" parse --input "$ROOT/vitest-multi-honest-last.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple sources|untrusted|native'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple sources|untrusted|native' >/dev/null; then
   ok "conflicting Vitest summaries fail regardless of order"
 else
   bad "vitest reverse-order bypass (rc=$rc): $out"
@@ -632,28 +887,28 @@ fi
 printf 'Tests: 10 passed, 10 total\nTests: 10 passed, 10 total\n' \
   > "$ROOT/jest-multi-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/jest-multi-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "identical repeated Jest summaries accepted" \
   || bad "identical jest multi broken (rc=$rc): $out"
 
 printf '# tests 10\n# skip 0\n# tests 10\n# skip 0\n' \
   > "$ROOT/node-multi-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/node-multi-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "identical repeated node:test counters accepted" \
   || bad "identical node multi broken (rc=$rc): $out"
 
 printf '1..10\nok 1\n1..10\nok 2\n' \
   > "$ROOT/tap-multi-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-multi-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "identical repeated TAP plans accepted" \
   || bad "identical tap multi broken (rc=$rc): $out"
 
 printf 'Tests  10 passed (10)\nTests  10 passed (10)\n' \
   > "$ROOT/vitest-multi-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/vitest-multi-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "identical repeated Vitest summaries accepted" \
   || bad "identical vitest multi broken (rc=$rc): $out"
 
@@ -667,7 +922,7 @@ echo "blocker 1d: node:test collects every # skip/# todo in a tests region"
 printf '# tests 10\n# pass 8\n# skip 0\n# skip 2\n# todo 0\n' \
   > "$ROOT/node-skip-order-a.txt"
 out=$(node "$TI" parse --input "$ROOT/node-skip-order-a.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|skip'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|skip' >/dev/null; then
   ok "node:test # skip 0 then # skip 2 fails closed (not first-match skip=0)"
 else
   bad "node skip order-a first-match bypass (rc=$rc): $out"
@@ -677,7 +932,7 @@ fi
 printf '# tests 10\n# pass 8\n# skip 2\n# skip 0\n# todo 0\n' \
   > "$ROOT/node-skip-order-b.txt"
 out=$(node "$TI" parse --input "$ROOT/node-skip-order-b.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|skip'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|skip' >/dev/null; then
   ok "node:test # skip 2 then # skip 0 fails closed (not first-match skip=2)"
 else
   bad "node skip order-b first-match bypass (rc=$rc): $out"
@@ -687,7 +942,7 @@ fi
 printf '# tests 10\n# pass 8\n# skip 2\n# skip 2\n# todo 0\n' \
   > "$ROOT/node-skip-identical.txt"
 out=$(node "$TI" parse --input "$ROOT/node-skip-identical.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"skipped": 2' && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"skipped": 2' >/dev/null && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "node:test identical repeated # skip 2 accepted" \
   || bad "node identical skip broken (rc=$rc): $out"
 
@@ -695,7 +950,7 @@ out=$(node "$TI" parse --input "$ROOT/node-skip-identical.txt" 2>&1); rc=$?
 printf '# tests 10\n# pass 8\n# skip 0\n# todo 0\n# todo 2\n' \
   > "$ROOT/node-todo-order-a.txt"
 out=$(node "$TI" parse --input "$ROOT/node-todo-order-a.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|todo'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|todo' >/dev/null; then
   ok "node:test # todo 0 then # todo 2 fails closed (not first-match todo=0)"
 else
   bad "node todo order-a first-match bypass (rc=$rc): $out"
@@ -705,7 +960,7 @@ fi
 printf '# tests 10\n# pass 8\n# skip 0\n# todo 2\n# todo 0\n' \
   > "$ROOT/node-todo-order-b.txt"
 out=$(node "$TI" parse --input "$ROOT/node-todo-order-b.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|todo'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|todo' >/dev/null; then
   ok "node:test # todo 2 then # todo 0 fails closed (not first-match todo=2)"
 else
   bad "node todo order-b first-match bypass (rc=$rc): $out"
@@ -715,7 +970,7 @@ fi
 printf '# tests 10\n# pass 8\n# skip 0\n# todo 2\n# todo 2\n' \
   > "$ROOT/node-todo-identical.txt"
 out=$(node "$TI" parse --input "$ROOT/node-todo-identical.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"todo": 2' && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"todo": 2' >/dev/null && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "node:test identical repeated # todo 2 accepted" \
   || bad "node identical todo broken (rc=$rc): $out"
 
@@ -730,7 +985,7 @@ echo "blocker 1e: TAP binds SKIP/TODO to the correct plan region"
 printf 'ok 1 - a\nok 2 - b # SKIP reason-a\nok 3 - c\n1..10\nok 1 - d\nok 2 - e # SKIP reason-b\nok 3 - f\n1..10\n' \
   > "$ROOT/tap-plan-end-skip-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-plan-end-skip-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' && echo "$out" | grep -q '"skipped": 1' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null && echo "$out" | grep '"skipped": 1' >/dev/null \
   && ok "TAP repeated plan-at-end with one SKIP each → skipped=1 (not whole-stream 2)" \
   || bad "tap plan-region skip fabrication (rc=$rc): $out"
 
@@ -738,7 +993,7 @@ out=$(node "$TI" parse --input "$ROOT/tap-plan-end-skip-agree.txt" 2>&1); rc=$?
 printf 'ok 1 - a # SKIP only\n1..10\nok 1 - b # SKIP one\nok 2 - c # SKIP two\n1..10\n' \
   > "$ROOT/tap-plan-end-skip-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-plan-end-skip-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|native|skip'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|native|skip' >/dev/null; then
   ok "TAP repeated plans with conflicting SKIP counts fail closed"
 else
   bad "tap skip-conflict accepted (rc=$rc): $out"
@@ -748,7 +1003,7 @@ fi
 printf 'ok 1 - a\nok 2 - b # TODO later-a\n1..10\nok 1 - c\nok 2 - d # TODO later-b\n1..10\n' \
   > "$ROOT/tap-plan-end-todo-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-plan-end-todo-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 10' && echo "$out" | grep -q '"todo": 1' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 10' >/dev/null && echo "$out" | grep '"todo": 1' >/dev/null \
   && ok "TAP repeated plan-at-end with one TODO each → todo=1 (not whole-stream 2)" \
   || bad "tap plan-region todo fabrication (rc=$rc): $out"
 
@@ -756,7 +1011,7 @@ out=$(node "$TI" parse --input "$ROOT/tap-plan-end-todo-agree.txt" 2>&1); rc=$?
 printf 'ok 1 - a # TODO only\n1..10\nok 1 - b # TODO one\nok 2 - c # TODO two\n1..10\n' \
   > "$ROOT/tap-plan-end-todo-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-plan-end-todo-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|native|todo'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|native|todo' >/dev/null; then
   ok "TAP repeated plans with conflicting TODO counts fail closed"
 else
   bad "tap todo-conflict accepted (rc=$rc): $out"
@@ -766,7 +1021,7 @@ fi
 printf 'ok 1 - a\nok 2 - b # SKIP reason\n1..10\nok 1 - c\nok 2 - d # SKIP reason\n1..10\nGIBSON_TEST_METRICS total=10 skipped=1 todo=0\n' \
   > "$ROOT/tap-explicit-native-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-explicit-native-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"skipped": 1' && echo "$out" | grep -q '"total": 10' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"skipped": 1' >/dev/null && echo "$out" | grep '"total": 10' >/dev/null \
   && ok "TAP plan-region + agreeing explicit metrics accepted" \
   || bad "tap explicit-native agree broken (rc=$rc): $out"
 
@@ -774,7 +1029,7 @@ out=$(node "$TI" parse --input "$ROOT/tap-explicit-native-agree.txt" 2>&1); rc=$
 printf 'ok 1 - a # SKIP x\n1..10\nok 1 - b # SKIP y\n1..10\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/tap-explicit-native-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/tap-explicit-native-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted' >/dev/null; then
   ok "TAP plan-region + conflicting explicit metrics fail closed"
 else
   bad "tap explicit-native conflict spoof (rc=$rc): $out"
@@ -784,7 +1039,7 @@ fi
 printf '# tests 10\n# skip 2\n# skip 2\n# todo 0\nGIBSON_TEST_METRICS total=10 skipped=2 todo=0\n' \
   > "$ROOT/node-explicit-native-agree.txt"
 out=$(node "$TI" parse --input "$ROOT/node-explicit-native-agree.txt" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"skipped": 2' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"skipped": 2' >/dev/null \
   && ok "node:test multi-skip + agreeing explicit accepted" \
   || bad "node explicit-native agree broken (rc=$rc): $out"
 
@@ -792,7 +1047,7 @@ out=$(node "$TI" parse --input "$ROOT/node-explicit-native-agree.txt" 2>&1); rc=
 printf '# tests 10\n# skip 0\n# skip 2\n# todo 0\nGIBSON_TEST_METRICS total=10 skipped=0 todo=0\n' \
   > "$ROOT/node-explicit-native-conflict.txt"
 out=$(node "$TI" parse --input "$ROOT/node-explicit-native-conflict.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted|skip'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted|skip' >/dev/null; then
   ok "node:test multi-skip + conflicting explicit fails closed (no first-match agree)"
 else
   bad "node explicit-native first-match spoof (rc=$rc): $out"
@@ -806,7 +1061,7 @@ write_metrics "$ROOT/w-b1.json" 10 0 0
 write_metrics "$ROOT/w-h1.json" 9 0 0
 out=$(compare "$ROOT/w-b1.json" "$ROOT/w-h1.json" \
   'Test-integrity: removed 1, skip +999 for overclaim'); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'wrong delta|skip'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'wrong delta|skip' >/dev/null; then
   ok "waiver overclaim skip +999 with actual skip 0 fails"
 else
   bad "skip overclaim accepted (rc=$rc): $out"
@@ -817,7 +1072,7 @@ write_metrics "$ROOT/w-b2.json" 10 0 0
 write_metrics "$ROOT/w-h2.json" 10 1 0
 out=$(compare "$ROOT/w-b2.json" "$ROOT/w-h2.json" \
   'Test-integrity: removed 999, skip +1 for overclaim'); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'wrong delta|removed'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'wrong delta|removed' >/dev/null; then
   ok "waiver overclaim removed 999 with actual removed 0 fails"
 else
   bad "removed overclaim accepted (rc=$rc): $out"
@@ -828,7 +1083,7 @@ write_metrics "$ROOT/w-b3.json" 10 0 0
 write_metrics "$ROOT/w-h3.json" 10 0 0
 out=$(compare "$ROOT/w-b3.json" "$ROOT/w-h3.json" \
   'Test-integrity: removed 999 for phantom'); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'no integrity reduction|unchanged|wrong delta'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'no integrity reduction|unchanged|wrong delta' >/dev/null; then
   ok "waiver with no integrity reduction fails"
 else
   bad "phantom waiver accepted (rc=$rc): $out"
@@ -839,7 +1094,7 @@ write_metrics "$ROOT/w-b4.json" 10 1 0
 write_metrics "$ROOT/w-h4.json" 8 2 0
 out=$(compare "$ROOT/w-b4.json" "$ROOT/w-h4.json" \
   'Test-integrity: removed 2, skip +1 for both intentional under #70'); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WAIVER accepted' >/dev/null \
   && ok "exact dual-dimension waiver still accepted" \
   || bad "exact dual waiver broken (rc=$rc): $out"
 
@@ -851,7 +1106,7 @@ echo "blocker 5: metrics beyond Number.MAX_SAFE_INTEGER fail closed"
 printf 'GIBSON_TEST_METRICS total=9007199254740993 skipped=0 todo=0\n' \
   > "$ROOT/unsafe-kv.txt"
 out=$(node "$TI" parse --input "$ROOT/unsafe-kv.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'safe integer|unparseable|exceeds|precision' >/dev/null; then
   ok "unsafe integer string total=9007199254740993 rejected"
 else
   bad "unsafe kv total accepted (rc=$rc): $out"
@@ -860,7 +1115,7 @@ fi
 printf 'GIBSON_TEST_METRICS {"total":"9007199254740993","skipped":0,"todo":0}\n' \
   > "$ROOT/unsafe-json.txt"
 out=$(node "$TI" parse --input "$ROOT/unsafe-json.txt" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'safe integer|unparseable|exceeds|precision' >/dev/null; then
   ok "unsafe integer JSON string total rejected"
 else
   bad "unsafe json total accepted (rc=$rc): $out"
@@ -870,7 +1125,7 @@ fi
 printf '%s\n' '{"total":"9007199254740993","skipped":0,"todo":0}' > "$ROOT/unsafe-head.json"
 write_metrics "$ROOT/safe-base.json" 10 0 0
 out=$(compare "$ROOT/safe-base.json" "$ROOT/unsafe-head.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision|test-integrity'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'safe integer|unparseable|exceeds|precision|test-integrity' >/dev/null; then
   ok "compare rejects unsafe head total string (…993 vs safe base)"
 else
   bad "unsafe compare accepted (rc=$rc): $out"
@@ -884,7 +1139,7 @@ out=$(compare "$ROOT/safe-max.json" "$ROOT/safe-max.json" 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && ok "MAX_SAFE_INTEGER 9007199254740991 accepted as metrics total" \
   || bad "MAX_SAFE_INTEGER rejected (rc=$rc): $out"
 out=$(compare "$ROOT/safe-max.json" "$ROOT/unsafe-max1.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'safe integer|unparseable|exceeds|precision'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'safe integer|unparseable|exceeds|precision' >/dev/null; then
   ok "9007199254740993 vs 9007199254740991 does not silently collapse"
 else
   bad "safe-integer collapse (rc=$rc): $out"
@@ -1001,7 +1256,7 @@ write_metrics "$ROOT/t-head.json" 7 0 0
 out=$(node "$WT_BASE/scripts/test-integrity.mjs" compare \
   --base "$ROOT/t-base.json" --head "$ROOT/t-head.json" \
   --trusted-source "merge-base:sim" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'dropped by 3|removed 3' >/dev/null; then
   ok "trusted merge-base helper reports deletion delta (not always-green)"
 else
   bad "trusted helper failed to diagnose (rc=$rc): $out"
@@ -1009,7 +1264,7 @@ fi
 # Hostile head helper → would PASS (proves why CI must not use it)
 out=$(node "$HOSTILE/test-integrity.mjs" compare \
   --base "$ROOT/t-base.json" --head "$ROOT/t-head.json" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -qi 'hostile\|PASS'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep -i 'hostile\|PASS' >/dev/null; then
   ok "hostile head helper would self-approve (CI must load merge-base copy)"
 else
   bad "hostile helper fixture broken (rc=$rc): $out"
@@ -1043,8 +1298,8 @@ else
   bad "nested TAP fixture missing expected plans/counters: $(cat "$NEST_DIR/nested.tap")"
 fi
 out=$(node "$TI" parse --input "$NEST_DIR/nested.tap" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 2' \
-  && echo "$out" | grep -q '"skipped": 0'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 2' >/dev/null \
+  && echo "$out" | grep '"skipped": 0' >/dev/null; then
   ok "real node:test nested describe suite parses total=2 (no false plan conflict)"
 else
   bad "nested node:test TAP parse (rc=$rc): $out"
@@ -1061,8 +1316,8 @@ EOF
 node --test --test-reporter=tap "$NEST_DIR/nested-skip.test.mjs" \
   >"$NEST_DIR/nested-skip.tap" 2>/dev/null || true
 out=$(node "$TI" parse --input "$NEST_DIR/nested-skip.tap" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 2' \
-  && echo "$out" | grep -q '"skipped": 1'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 2' >/dev/null \
+  && echo "$out" | grep '"skipped": 1' >/dev/null; then
   ok "real node:test nested suite with it.skip → skipped=1"
 else
   bad "nested skip parse (rc=$rc): $out"
@@ -1079,8 +1334,8 @@ EOF
 node --test --test-reporter=tap "$NEST_DIR/nested-todo.test.mjs" \
   >"$NEST_DIR/nested-todo.tap" 2>/dev/null || true
 out=$(node "$TI" parse --input "$NEST_DIR/nested-todo.tap" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"total": 2' \
-  && echo "$out" | grep -q '"todo": 1'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep '"total": 2' >/dev/null \
+  && echo "$out" | grep '"todo": 1' >/dev/null; then
   ok "real node:test nested suite with todo → todo=1"
 else
   bad "nested todo parse (rc=$rc): $out"
@@ -1089,7 +1344,7 @@ fi
 # Genuinely repeated top-level TAP plans still conflict (not weakened)
 printf '1..10\nok 1 - a\n1..7\nok 1 - b\n' >"$NEST_DIR/top-conflict.tap"
 out=$(node "$TI" parse --input "$NEST_DIR/top-conflict.tap" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'conflict|disagree|multiple|untrusted'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'conflict|disagree|multiple|untrusted' >/dev/null; then
   ok "repeated top-level TAP plans still fail closed after nested-plan fix"
 else
   bad "top-level TAP conflict weakened (rc=$rc): $out"
@@ -1099,7 +1354,7 @@ fi
 printf '# Subtest: outer\n    ok 1 - a\n    ok 2 - b\n    1..2\nok 1 - outer\n1..1\n' \
   >"$NEST_DIR/hierarchical-only.tap"
 out=$(node "$TI" parse --input "$NEST_DIR/hierarchical-only.tap" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'could not parse|fail closed|unparseable'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'could not parse|fail closed|unparseable' >/dev/null; then
   ok "hierarchical TAP without # tests / explicit fails closed (no invented total)"
 else
   bad "hierarchical-only TAP should fail closed (rc=$rc): $out"
@@ -1266,7 +1521,7 @@ if [[ "$victim_bl_after" == "VICTIM_BASELINE_SENTINEL_DO_NOT_TRUNCATE" ]]; then
 else
   bad "OUT symlink pre-poison: victim truncated/changed: $victim_bl_after"
 fi
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'symlink|refuse|fail closed'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'symlink|refuse|fail closed' >/dev/null; then
   ok "OUT symlink pre-poison: gate fails closed"
 else
   bad "OUT symlink pre-poison: expected fail closed (rc=$rc): $out"
@@ -1307,7 +1562,7 @@ if [[ "$victim_j_after" == "VICTIM_JOURNAL_SENTINEL_DO_NOT_TRUNCATE" ]]; then
 else
   bad "JOURNAL symlink pre-poison: victim truncated/changed: $victim_j_after"
 fi
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'symlink|refuse|fail closed|journal'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'symlink|refuse|fail closed|journal' >/dev/null; then
   ok "JOURNAL symlink pre-poison: gate fails closed"
 else
   bad "JOURNAL symlink pre-poison: expected fail closed (rc=$rc): $out"
@@ -1393,8 +1648,8 @@ cat >"$AUTH/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$AUTH" && bash "$GATE" --baseline "$AUTH/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'authority drift|disappeared|baseline' \
-  && ! echo "$out" | grep -q 'GREEN'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'authority drift|disappeared|baseline' >/dev/null \
+  && ! echo "$out" | grep 'GREEN' >/dev/null; then
   ok "baseline authority: deletion during lower-total test is RED (no GREEN)"
 else
   bad "baseline deletion allowed GREEN or wrong error (rc=$rc): $out"
@@ -1423,8 +1678,8 @@ cat >"$AUTH/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$AUTH" && bash "$GATE" --baseline "$AUTH/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'authority drift|content changed|replaced|leaf' \
-  && ! echo "$out" | grep -q 'GREEN'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'authority drift|content changed|replaced|leaf' >/dev/null \
+  && ! echo "$out" | grep 'GREEN' >/dev/null; then
   ok "baseline authority: replacement during lower-total test is RED (no GREEN)"
 else
   bad "baseline replacement allowed GREEN or wrong error (rc=$rc): $out"
@@ -1453,8 +1708,8 @@ cat >"$AUTH/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$AUTH" && bash "$GATE" --baseline "$AUTH/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'authority drift|content changed' \
-  && ! echo "$out" | grep -q 'GREEN'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'authority drift|content changed' >/dev/null \
+  && ! echo "$out" | grep 'GREEN' >/dev/null; then
   ok "baseline authority: content change during lower-total test is RED (no GREEN)"
 else
   bad "baseline content change allowed GREEN or wrong error (rc=$rc): $out"
@@ -1507,7 +1762,7 @@ EOF
 out=$(cd "$PARENT_ATK" && bash "$BASELINE_SH" --out "$OUT_NEST" 2>&1); rc=$?
 evil_count=$(find "$EVIL_OUT" -type f 2>/dev/null | wc -l | tr -d ' ')
 # No new baseline/temp files should land in the evil parent
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'parent|symlink|authority drift|refuse' \
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'parent|symlink|authority drift|refuse' >/dev/null \
   && [[ "$evil_count" -eq 0 ]]; then
   ok "OUT parent replace: fails closed, no partial write into evil parent"
 else
@@ -1515,7 +1770,7 @@ else
 fi
 # No temp leaks under evil or the (now symlink) nest path as gate-owned regulars
 leaked_parent=0
-if find "$EVIL_OUT" -name '.base.json.*' 2>/dev/null | grep -q .; then
+if find "$EVIL_OUT" -name '.base.json.*' 2>/dev/null | grep . >/dev/null; then
   leaked_parent=1
 fi
 if [[ "$leaked_parent" -eq 0 ]]; then
@@ -1567,9 +1822,9 @@ if [[ "$victim_jp_after" == "VICTIM_JOURNAL_PARENT_SENTINEL" ]]; then
 else
   bad "JOURNAL parent replace: victim changed: $victim_jp_after"
 fi
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'parent|symlink|authority drift|refuse|journal' \
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'parent|symlink|authority drift|refuse|journal' >/dev/null \
   && [[ "$evil_j_count" -eq 0 ]] \
-  && ! echo "$out" | grep -q 'GREEN'; then
+  && ! echo "$out" | grep 'GREEN' >/dev/null; then
   ok "JOURNAL parent replace: fails closed, no journal partial in evil parent"
 else
   bad "JOURNAL parent replace (rc=$rc evil_files=$evil_j_count): $out"
@@ -1614,7 +1869,7 @@ cat >"$GEN_ISO/.agents/gate.json" <<'JSON'
 }
 JSON
 out=$(cd "$GEN_ISO" && bash "$GATE" --baseline "$GEN_ISO/.gibson-baseline.json" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && ! echo "$out" | grep -q 'GREEN'; then
+if [[ "$rc" -ne 0 ]] && ! echo "$out" | grep 'GREEN' >/dev/null; then
   ok "gate.sh generate isolation: authority pollution + baseline delete + total=1 is RED (no GREEN)"
 else
   bad "gate.sh generate isolation allowed GREEN or zero exit (rc=$rc): $out"
@@ -1639,7 +1894,7 @@ cat >"$GEN_BL/.agents/gate.json" <<'JSON'
 JSON
 (cd "$GEN_BL" && bash "$BASELINE_SH" --out "$GEN_BL/.gibson-baseline.json") >/dev/null 2>&1
 PRIOR_BYTES=$(cat -- "$GEN_BL/.gibson-baseline.json")
-printf '%s' "$PRIOR_BYTES" | grep -qE '"total":[[:space:]]*10' \
+printf '%s' "$PRIOR_BYTES" | grep -E '"total":[[:space:]]*10' >/dev/null \
   || bad "generate-isolation baseline setup: expected total=10"
 JOURNAL_PATH="$GEN_BL/.gibson/test-integrity-journal.jsonl"
 rm -f "$JOURNAL_PATH"
@@ -1663,9 +1918,9 @@ journal_after=$(cat -- "$JOURNAL_PATH" 2>/dev/null || echo "")
 if [[ "$rc" -ne 0 ]] \
   && [[ "$AFTER_BYTES" == "$PRIOR_BYTES" ]] \
   && [[ ! -f "$JOURNAL_PATH" || -z "${journal_after// }" ]] \
-  && ! echo "$journal_after" | grep -qiE 'hostile-parent-eval|regenerate|total' \
-  && echo "$out" | grep -qiE 'test-integrity|regenerate|reduce' \
-  && printf '%s' "$AFTER_BYTES" | grep -qE '"total":[[:space:]]*10'; then
+  && ! echo "$journal_after" | grep -iE 'hostile-parent-eval|regenerate|total' >/dev/null \
+  && echo "$out" | grep -iE 'test-integrity|regenerate|reduce' >/dev/null \
+  && printf '%s' "$AFTER_BYTES" | grep -E '"total":[[:space:]]*10' >/dev/null; then
   ok "gate-baseline.sh generate isolation: PRIOR_OUT pollution + 10→1 without --regenerate refused; bytes preserved; no fake journal"
 else
   bad "gate-baseline.sh generate isolation (rc=$rc journal=$(echo "$journal_after" | head -c 80) after_total=$(printf '%s' "$AFTER_BYTES" | grep -oE '\"total\":[ ]*[0-9]+' | head -1)): $out"
@@ -1706,8 +1961,8 @@ cat >"$CANARY/.agents/gate.json" <<'JSON'
 JSON
 out=$(cd "$CANARY" && bash "$GATE" --baseline "$CANARY/.gibson-baseline.json" 2>&1); rc=$?
 # Trap fire is a whole line only — do not match the generate command string.
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'GREEN' \
-  && ! echo "$out" | grep -qx 'CANARY_TRAP_FIRED_ON_EXIT'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'GREEN' >/dev/null \
+  && ! echo "$out" | grep -x 'CANARY_TRAP_FIRED_ON_EXIT' >/dev/null; then
   ok "generate child-isolation canary: parent cwd/IFS/traps/options intact (GREEN total=10)"
 else
   bad "generate child-isolation canary failed (rc=$rc): $out"
@@ -1716,7 +1971,7 @@ fi
 out=$(cd "$CANARY" && bash "$BASELINE_SH" --out "$CANARY/.gibson-baseline.json" 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]] \
   && grep -qE '"total":[[:space:]]*10' "$CANARY/.gibson-baseline.json" 2>/dev/null \
-  && ! echo "$out" | grep -qx 'CANARY_TRAP_FIRED_ON_EXIT'; then
+  && ! echo "$out" | grep -x 'CANARY_TRAP_FIRED_ON_EXIT' >/dev/null; then
   ok "gate-baseline child-isolation canary: parent state intact; total=10 preserved"
 else
   bad "gate-baseline child-isolation canary (rc=$rc): $out"
@@ -1735,7 +1990,7 @@ CI_YML="$SCRIPT_DIR/../../ci/gibson-gate.yml"
 # Negative / structural bans strip full-line comments so prose cannot trip them.
 ci_has() { [[ -n "$CI_YML" ]] && grep -qE "$1" "$CI_YML"; }
 ci_code() { grep -vE '^[[:space:]]*#' "$CI_YML" | sed 's/[[:space:]]#.*//'; }
-ci_has_not() { [[ -n "$CI_YML" ]] && ! ci_code | grep -qE "$1"; }
+ci_has_not() { [[ -n "$CI_YML" ]] && ! ci_code | grep -E "$1" >/dev/null; }
 
 echo "phase-2 CI: four jobs, unique required name, always() final"
 if ci_has 'test-integrity-resolve:' \
@@ -1751,9 +2006,9 @@ fi
 
 # Final depends on all three priors
 if ci_has 'needs:' \
-  && grep -A6 '^  test-integrity:' "$CI_YML" | grep -q 'test-integrity-resolve' \
-  && grep -A6 '^  test-integrity:' "$CI_YML" | grep -q 'test-integrity-base' \
-  && grep -A6 '^  test-integrity:' "$CI_YML" | grep -q 'test-integrity-head'; then
+  && grep -A6 '^  test-integrity:' "$CI_YML" | grep 'test-integrity-resolve' >/dev/null \
+  && grep -A6 '^  test-integrity:' "$CI_YML" | grep 'test-integrity-base' >/dev/null \
+  && grep -A6 '^  test-integrity:' "$CI_YML" | grep 'test-integrity-head' >/dev/null; then
   ok "final test-integrity needs resolve + base + head"
 else
   bad "final job does not depend on all three prior jobs"
@@ -1792,10 +2047,10 @@ else
 fi
 
 # Job-level permission grant: final has pull-requests: read; capture jobs contents only
-if grep -A20 'test-integrity-resolve:' "$CI_YML" | grep -q 'contents: read' \
-  && grep -A30 'test-integrity-base:' "$CI_YML" | grep -q 'contents: read' \
-  && grep -A30 'test-integrity-head:' "$CI_YML" | grep -q 'contents: read' \
-  && grep -A25 '^  test-integrity:' "$CI_YML" | grep -q 'pull-requests: read'; then
+if grep -A20 'test-integrity-resolve:' "$CI_YML" | grep 'contents: read' >/dev/null \
+  && grep -A30 'test-integrity-base:' "$CI_YML" | grep 'contents: read' >/dev/null \
+  && grep -A30 'test-integrity-head:' "$CI_YML" | grep 'contents: read' >/dev/null \
+  && grep -A25 '^  test-integrity:' "$CI_YML" | grep 'pull-requests: read' >/dev/null; then
   ok "resolve/capture contents:read; final contents+pull-requests:read"
 else
   bad "job-level permission grants incorrect"
@@ -1814,7 +2069,7 @@ if ci_has 'persist-credentials: false' \
     case "$line" in
       *uses:*)
         sha=$(printf '%s\n' "$line" | sed -n 's/.*@\([0-9a-fA-F]*\).*/\1/p')
-        if ! printf '%s' "$sha" | grep -qE '^[0-9a-fA-F]{40}$'; then
+        if ! printf '%s' "$sha" | grep -E '^[0-9a-fA-F]{40}$' >/dev/null; then
           bad_pin=1
           bad "action not pinned to full SHA: $line"
         fi
@@ -1977,9 +2232,9 @@ out=$(node "$ART/grader/test-integrity.mjs" compare \
   --base "$ART/base-m.json" --head "$ART/head-m.json" \
   --waiver-text "" \
   --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3' \
-  && echo "$out" | grep -q '10' && echo "$out" | grep -q '7' \
-  && echo "$out" | grep -q "merge-base:${MB_SHA}"; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'dropped by 3|removed 3' >/dev/null \
+  && echo "$out" | grep '10' >/dev/null && echo "$out" | grep '7' >/dev/null \
+  && echo "$out" | grep "merge-base:${MB_SHA}" >/dev/null; then
   ok "failing base total 10 vs passing head total 7 still compares and fails 10→7"
 else
   bad "failing-base compare (rc=$rc): $out"
@@ -2000,7 +2255,7 @@ HOSTILE
 out=$(node "$ART/grader/test-integrity.mjs" compare \
   --base "$ART/base-m.json" --head "$ART/head-m.json" \
   --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
-if [[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3'; then
+if [[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'dropped by 3|removed 3' >/dev/null; then
   ok "hostile head always-green helper ignored; trusted base helper still fails"
 else
   bad "trusted grader did not fail deletion (rc=$rc): $out"
@@ -2017,7 +2272,7 @@ rm -f "$HOSTILE2/test-integrity.mjs"
 out=$(node "$ART/grader/test-integrity.mjs" compare \
   --base "$ART/base-m.json" --head "$ART/head-m.json" \
   --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'dropped by 3|removed 3' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'dropped by 3|removed 3' >/dev/null \
   && ok "head deletes helper; base/merge-base helper still grades" \
   || bad "grader without head helper (rc=$rc): $out"
 
@@ -2034,8 +2289,8 @@ out=$(node "$ART/grader/test-integrity.mjs" compare \
   --base "$ART/base-m.json" --head "$ART/head-m.json" \
   --waiver-file "$ART/waiver-ok.txt" \
   --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WAIVER accepted' \
-  && echo "$out" | grep -q 'removed 3' && echo "$out" | grep -q 'obsolete suite'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'WAIVER accepted' >/dev/null \
+  && echo "$out" | grep 'removed 3' >/dev/null && echo "$out" | grep 'obsolete suite' >/dev/null; then
   ok "exact visible waiver passes and is surfaced (inert --waiver-file)"
 else
   bad "exact waiver via file (rc=$rc): $out"
@@ -2046,7 +2301,7 @@ out=$(node "$ART/grader/test-integrity.mjs" compare \
   --base "$ART/base-m.json" --head "$ART/head-m.json" \
   --waiver-file "$ART/waiver-hidden.txt" \
   --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && ! echo "$out" | grep -q 'WAIVER accepted' \
+[[ "$rc" -ne 0 ]] && ! echo "$out" | grep 'WAIVER accepted' >/dev/null \
   && ok "hidden HTML waiver via --waiver-file fails closed" \
   || bad "hidden waiver accepted (rc=$rc): $out"
 
@@ -2055,7 +2310,7 @@ out=$(node "$ART/grader/test-integrity.mjs" compare \
   --base "$ART/base-m.json" --head "$ART/head-m.json" \
   --waiver-file "$ART/waiver-wrong.txt" \
   --trusted-source "merge-base:${MB_SHA}" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'wrong delta' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'wrong delta' >/dev/null \
   && ok "wrong-delta waiver via --waiver-file fails closed" \
   || bad "wrong-delta waiver (rc=$rc): $out"
 
@@ -2314,10 +2569,10 @@ fi
   cd "$CX"
   out=$(resolve_unique_merge_base "$CX_LEFT" "$CX_RIGHT" 2>&1); rc=$?
   if [ "$rc" -ne 0 ] \
-    && echo "$out" | grep -q 'ambiguous/criss-cross' \
-    && echo "$out" | grep -q 'exactly one' \
-    && echo "$out" | grep -qE 'returned 2|2 best' \
-    && ! echo "$out" | grep -qE '^[0-9a-fA-F]{40}$'; then
+    && echo "$out" | grep 'ambiguous/criss-cross' >/dev/null \
+    && echo "$out" | grep 'exactly one' >/dev/null \
+    && echo "$out" | grep -E 'returned 2|2 best' >/dev/null \
+    && ! echo "$out" | grep -E '^[0-9a-fA-F]{40}$' >/dev/null; then
     ok "criss-cross: resolve_unique_merge_base fails closed (no arbitrary grader authority)"
   else
     bad "criss-cross should fail closed (rc=$rc): $out"
@@ -2398,8 +2653,8 @@ sim_resolve_helper() {
   esac
 }
 out=$(sim_resolve_helper "" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'update or rebase' \
-  && echo "$out" | grep -q 'missing' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'update or rebase' >/dev/null \
+  && echo "$out" | grep 'missing' >/dev/null \
   && ok "missing trusted helper yields explicit update/rebase failure" \
   || bad "missing helper message (rc=$rc): $out"
 out=$(sim_resolve_helper "120000 blob deadbeef\tscripts/test-integrity.mjs" 2>&1); rc=$?
@@ -2417,9 +2672,9 @@ out=$(sim_resolve_helper "100755 blob deadbeef\tscripts/test-integrity.mjs" 2>&1
 
 echo "phase-2 offline: base/head use separate job/workspace definitions"
 # Distinct job keys and distinct artifact names in the template
-if grep -c 'test-integrity-base-' "$CI_YML" | grep -q '[1-9]' \
-  && grep -c 'test-integrity-head-' "$CI_YML" | grep -q '[1-9]' \
-  && ! grep -A2 'test-integrity-base:' "$CI_YML" | grep -q 'test-integrity-head' \
+if grep -c 'test-integrity-base-' "$CI_YML" | grep '[1-9]' >/dev/null \
+  && grep -c 'test-integrity-head-' "$CI_YML" | grep '[1-9]' >/dev/null \
+  && ! grep -A2 'test-integrity-base:' "$CI_YML" | grep 'test-integrity-head' >/dev/null \
   && grep -q 'ti-artifact' "$CI_YML"; then
   ok "base/head separate job keys, artifact names, and workspace paths"
 else

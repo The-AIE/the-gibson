@@ -64,8 +64,8 @@ add_ok() {
 
 echo "=== help / usage ==="
 out=$("$TOOL" --help 2>&1) || true
-echo "$out" | grep -q "PENDING" && ok "help mentions PENDING-only" || bad "help missing PENDING"
-echo "$out" | grep -q "EXIT" && ok "help documents exit codes" || bad "help missing EXIT"
+echo "$out" | grep "PENDING" >/dev/null && ok "help mentions PENDING-only" || bad "help missing PENDING"
+echo "$out" | grep "EXIT" >/dev/null && ok "help documents exit codes" || bad "help missing EXIT"
 rc=0; "$TOOL" 2>/dev/null || rc=$?
 check "no-args exits 2" "$rc" "2"
 
@@ -330,10 +330,10 @@ fi
 echo
 echo "=== list/status formats ==="
 out=$("$TOOL" status --ledger "$L" 2>/dev/null)
-echo "$out" | grep -q "pending:" && ok "status has pending" || bad "status missing pending"
+echo "$out" | grep "pending:" >/dev/null && ok "status has pending" || bad "status missing pending"
 out=$("$TOOL" list --ledger "$L" --format markdown 2>/dev/null)
-echo "$out" | grep -q "WHAT:" && ok "markdown list has WHAT" || bad "markdown missing WHAT"
-echo "$out" | grep -q "IF YOU WAIT:" && ok "markdown list has IF YOU WAIT" || bad "markdown missing IF YOU WAIT"
+echo "$out" | grep "WHAT:" >/dev/null && ok "markdown list has WHAT" || bad "markdown missing WHAT"
+echo "$out" | grep "IF YOU WAIT:" >/dev/null && ok "markdown list has IF YOU WAIT" || bad "markdown missing IF YOU WAIT"
 out=$("$TOOL" list --ledger "$L" --format json 2>/dev/null)
 python3 -c 'import json,sys; o=json.loads(sys.stdin.read()); assert o["schema"]=="decision-ledger-list:v1"' <<<"$out" \
   && ok "json list schema" || bad "json list schema"

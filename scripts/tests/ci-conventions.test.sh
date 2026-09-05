@@ -53,7 +53,7 @@ collect_workflows() {
 # True when a workflow line is a flow-style sequence-item mapping (`- { ... }`).
 # Do not inspect keys — any such line is an unsupported YAML shape.
 is_flow_style_step_line() {
-  printf '%s\n' "$1" | grep -Eq '^[[:space:]]*-[[:space:]]*\{'
+  printf '%s\n' "$1" | grep -E '^[[:space:]]*-[[:space:]]*\{' >/dev/null
 }
 
 # Strip leading whitespace, then an optional YAML list dash, then more
@@ -120,7 +120,7 @@ check_sha_pin() {
       fi
       trimmed=$(normalize_uses_line "$line")
       [[ "$trimmed" == uses:* ]] || continue
-      if printf '%s\n' "$trimmed" | grep -Eq "^uses:[[:space:]]*[\"']?[^@\"'[:space:]]+@${SHA40}[\"']?[[:space:]]+#[[:space:]]*.+"; then
+      if printf '%s\n' "$trimmed" | grep -E "^uses:[[:space:]]*[\"']?[^@\"'[:space:]]+@${SHA40}[\"']?[[:space:]]+#[[:space:]]*.+" >/dev/null; then
         pinned=$((pinned + 1))
         continue
       fi
@@ -417,7 +417,7 @@ is_soft_coe() {
 # ::notice::. Mid-string (`echo "prefix ::warning:: x"`) and shell comments
 # (`do_scan # ::warning::`) do not satisfy this.
 has_annotation_emission() {
-  printf '%s\n' "$1" | grep -Eq \
+  printf '%s\n' "$1" | grep -E >/dev/null \
     '^[[:space:]]*(echo|printf)[[:space:]]+["'\'']?::(warning|notice)::'
 }
 
@@ -428,7 +428,7 @@ has_step_summary_append() {
   local line stripped
   while IFS= read -r line; do
     stripped=${line%%#*}
-    if printf '%s\n' "$stripped" | grep -Eq '>>[[:space:]]*["'\'']?\$\{?GITHUB_STEP_SUMMARY(\}|[^A-Za-z0-9_]|$)'; then
+    if printf '%s\n' "$stripped" | grep -E '>>[[:space:]]*["'\'']?\$\{?GITHUB_STEP_SUMMARY(\}|[^A-Za-z0-9_]|$)' >/dev/null; then
       return 0
     fi
   done <<< "$1"
@@ -711,7 +711,7 @@ assert_planted() {
   local desc="$2"
   local needle="$3"
   local got="$4"
-  if printf '%s\n' "$got" | grep -Fq "$needle"; then
+  if printf '%s\n' "$got" | grep -F "$needle" >/dev/null; then
     ok "mutation $n: $desc"
     echo "  PLANTED[$n] FAIL — $got"
   else
@@ -894,7 +894,7 @@ fi
 echo "# gibson-template-drift.sh --repo without a value is usage (exit 2)"
 drift_rc=0
 drift_out=$("$DRIFT_SH" --repo 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 2 ]] && printf '%s\n' "$drift_out" | grep -Eq 'Usage|USAGE|--repo'; then
+if [[ "$drift_rc" -eq 2 ]] && printf '%s\n' "$drift_out" | grep -E 'Usage|USAGE|--repo' >/dev/null; then
   ok "--repo with no value prints usage and exits 2"
 else
   bad "--repo with no value: expected exit 2 + usage, got rc=${drift_rc} out=${drift_out}"
@@ -903,7 +903,7 @@ fi
 echo "# live ci/*.yml template stamps are current"
 drift_rc=0
 drift_out=$("$DRIFT_SH" --gibson "$REPO_ROOT" --repo "$REPO_ROOT" 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 0 ]] && printf '%s\n' "$drift_out" | grep -Fq 'drift=0'; then
+if [[ "$drift_rc" -eq 0 ]] && printf '%s\n' "$drift_out" | grep -F 'drift=0' >/dev/null; then
   ok "all live ci/*.yml stamps match their content"
 else
   bad "live template stamp drift (rc=${drift_rc} out=${drift_out})"
@@ -1200,7 +1200,7 @@ on: push
 YML
 drift_rc=0
 got=$("$DRIFT_SH" --gibson "$MUT/17" --repo "$MUT/17-repo" 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "DRIFT  planted.yml  template stamp missing"; then
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -F "DRIFT  planted.yml  template stamp missing" >/dev/null; then
   ok "mutation 17: template missing stamp prints diagnostic and exits 1"
   echo "  PLANTED[17] FAIL — $got"
 else
@@ -1233,7 +1233,7 @@ permissions: {}
 YML
 drift_rc=0
 got=$("$DRIFT_SH" --gibson "$MUT/18" --repo "$MUT/18-repo" 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "DRIFT  planted.yml  installed stamp missing"; then
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -F "DRIFT  planted.yml  installed stamp missing" >/dev/null; then
   ok "mutation 18: installed workflow missing stamp prints diagnostic and exits 1"
   echo "  PLANTED[18] FAIL — $got"
 else
@@ -1434,7 +1434,7 @@ permissions: {}
 YML
 drift_rc=0
 got=$("$DRIFT_SH" --gibson "$MUT/29" --repo "$MUT/29-repo" 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "template stamp mismatch"; then
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -F "template stamp mismatch" >/dev/null; then
   ok "mutation 29: stale template stamp fails with diagnostic"
   echo "  PLANTED[29] FAIL — $got"
 else
@@ -1452,8 +1452,8 @@ stamp_fixture "$MUT/30/ci/planted.yml"
 : > "$MUT/30-repo/.github/workflows/planted.yml"
 drift_rc=0
 got=$("$DRIFT_SH" --gibson "$MUT/30" --repo "$MUT/30-repo" 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "installed stamp missing" \
-  && printf '%s\n' "$got" | grep -Fq "drift=1"; then
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -F "installed stamp missing" >/dev/null \
+  && printf '%s\n' "$got" | grep -F "drift=1" >/dev/null; then
   ok "mutation 30: zero-byte install emits DRIFT + summary"
   echo "  PLANTED[30] FAIL — $got"
 else
@@ -1473,8 +1473,8 @@ empty_hash=$(fixture_content_hash "$MUT/31-repo/.github/workflows/empty-body")
 printf '# gibson-template-version: sha256:%s\n' "$empty_hash" > "$MUT/31-repo/.github/workflows/planted.yml"
 drift_rc=0
 got=$("$DRIFT_SH" --gibson "$MUT/31" --repo "$MUT/31-repo" 2>&1) || drift_rc=$?
-if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -Fq "content hash mismatch" \
-  && printf '%s\n' "$got" | grep -Fq "drift=1"; then
+if [[ "$drift_rc" -eq 1 ]] && printf '%s\n' "$got" | grep -F "content hash mismatch" >/dev/null \
+  && printf '%s\n' "$got" | grep -F "drift=1" >/dev/null; then
   ok "mutation 31: stamp-only install emits DRIFT + summary"
   echo "  PLANTED[31] FAIL — $got"
 else
@@ -1494,7 +1494,7 @@ default_rc=0
 strict_rc=0
 strict_out=$("$DRIFT_SH" --gibson "$MUT/32" --repo "$MUT/32-repo" --strict-missing 2>&1) || strict_rc=$?
 if [[ "$default_rc" -eq 0 && "$strict_rc" -eq 1 ]] \
-  && printf '%s\n' "$strict_out" | grep -Fq "MISSING install"; then
+  && printf '%s\n' "$strict_out" | grep -F "MISSING install" >/dev/null; then
   ok "mutation 32: --strict-missing fails while default remains optional"
   echo "  PLANTED[32] FAIL — $strict_out"
 else
@@ -1519,7 +1519,7 @@ printf '%s\n' "prisma migrate deploy ${loss_a}${loss_b}" > "$MUT/33/repo/scripts
 git -C "$MUT/33/repo" add scripts/migrate.sh
 scan_rc=0
 got=$(destructive_flag_hits "$MUT/33/repo") || scan_rc=$?
-if [[ "$scan_rc" -eq 0 ]] && printf '%s\n' "$got" | grep -Fq "scripts/migrate.sh:1"; then
+if [[ "$scan_rc" -eq 0 ]] && printf '%s\n' "$got" | grep -F "scripts/migrate.sh:1" >/dev/null; then
   ok "mutation 34: planted destructive migration flag fails with file:line"
   echo "  PLANTED[34] FAIL — $got"
 else
@@ -1612,6 +1612,811 @@ YML
 got=$(check_concurrency "$MUT/39") || true
 assert_clean 39 "PR-only cancellation expression is accepted" "$got"
 
+# --- #274 machine-readable self-gate contract --------------------------------
+echo "# #274 command consistency (AGENTS.md, gate.json, sensors job, run-all --no-quarantine)"
+
+GATE_JSON="$REPO_ROOT/.agents/gate.json"
+CANON_TEST='bash scripts/tests/run-all.sh --no-quarantine'
+if [[ ! -f "$GATE_JSON" ]]; then
+  bad "missing .agents/gate.json (Gibson must not fall through to generic defaults)"
+else
+  gate_vals=$(node -e '
+    const g=require(process.argv[1]);
+    const keys=["generate","typecheck","lint","test","build"];
+    for (const k of keys) {
+      if (!Object.prototype.hasOwnProperty.call(g,k)) process.exit(2);
+      process.stdout.write(k+"="+JSON.stringify(g[k])+"\n");
+    }
+  ' "$GATE_JSON") || { bad "gate.json is not parseable or missing a step key"; gate_vals=""; }
+  if [[ -n "$gate_vals" ]]; then
+    printf '%s\n' "$gate_vals" | grep -x 'generate=""' >/dev/null \
+      && ok "gate.json generate is an explicit empty string" \
+      || bad "gate.json generate is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -x 'typecheck=""' >/dev/null \
+      && ok "gate.json typecheck is an explicit empty string" \
+      || bad "gate.json typecheck is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -x 'lint=""' >/dev/null \
+      && ok "gate.json lint is an explicit empty string" \
+      || bad "gate.json lint is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -x 'build=""' >/dev/null \
+      && ok "gate.json build is an explicit empty string" \
+      || bad "gate.json build is not an explicit empty string"
+    printf '%s\n' "$gate_vals" | grep -x "test=\"${CANON_TEST}\"" >/dev/null \
+      && ok "gate.json test is exactly ${CANON_TEST}" \
+      || bad "gate.json test drifted (got $(printf '%s\n' "$gate_vals" | grep '^test='))"
+  fi
+fi
+
+if grep -Fq "$CANON_TEST" "$REPO_ROOT/AGENTS.md" \
+  && grep -Fq '.agents/gate.json' "$REPO_ROOT/AGENTS.md"; then
+  ok "AGENTS.md names .agents/gate.json and the canonical --no-quarantine command"
+else
+  bad "AGENTS.md missing machine-readable twin pointer or canonical command"
+fi
+if tr '\n' ' ' < "$REPO_ROOT/AGENTS.md" | grep -F 'generate → typecheck → lint → test → build' >/dev/null; then
+  ok "AGENTS.md still states the full five-step green gate (twin does not weaken it)"
+else
+  bad "AGENTS.md no longer states generate → typecheck → lint → test → build"
+fi
+
+WF="$REPO_ROOT/.github/workflows/gibson-self-gate.yml"
+sensors_cmd=$(awk '
+  /^  sensors:/ { in_job=1; next }
+  in_job && /^  [A-Za-z0-9_]+:/ { in_job=0 }
+  in_job && /^      - name: Run every sensor$/ { in_step=1; next }
+  in_step && /^      - name:/ { in_step=0 }
+  in_job && in_step && /^        run:/ {
+    sub(/^        run:[[:space:]]*/, "")
+    print
+    exit
+  }
+' "$WF")
+if [[ "$sensors_cmd" == "$CANON_TEST" ]]; then
+  ok "workflow sensors job Run every sensor is exactly ${CANON_TEST}"
+else
+  bad "workflow sensors job drifted (got '${sensors_cmd}', want exactly '${CANON_TEST}')"
+fi
+
+echo "# #274 metric-contract failure binds into ordinary GREEN/RED before n_fail"
+if awk '
+  /FAILED="\$FAILED metric-contract"/ { bind=NR }
+  /n_fail=\$\(echo "\$FAILED"/ { nfail=NR }
+  END { if (bind && nfail && bind < nfail) exit 0; exit 1 }
+' "$REPO_ROOT/scripts/tests/run-all.sh"; then
+  ok "metric-contract is bound into FAILED before n_fail is computed"
+else
+  bad "metric-contract failure is not bound into FAILED before n_fail"
+fi
+
+echo "# #278 legacy-sentinel attribution reconciles before the GREEN/RED bind"
+RA="$REPO_ROOT/scripts/tests/run-all.sh"
+if awk '
+  /gibson_metrics_reconcile_legacy_sentinels/ && $0 !~ /\(\)/ { rec=NR }
+  /FAILED="\$FAILED metric-contract"/ { bind=NR }
+  /n_fail=\$\(echo "\$FAILED"/ { nfail=NR }
+  END { if (rec && bind && nfail && rec < bind && bind < nfail) exit 0; exit 1 }
+' "$RA"; then
+  ok "legacy-sentinel reconcile runs before metric-contract bind and n_fail"
+else
+  bad "legacy-sentinel reconcile is not ordered before metric-contract bind / n_fail"
+fi
+if grep -Fq 'duplicate sentinel attribution' "$RA" \
+  && grep -Fq 'legacy-sentinel name/count drift' "$RA" \
+  && grep -Fq 'explicit assertions and sentinel' "$RA"; then
+  ok "run-all.sh fails closed on duplicate sentinel, name/count drift, and dual contribution"
+else
+  bad "run-all.sh missing fail-closed sentinel attribution guards"
+fi
+# Non-vacuity: deleting each guard string must turn the corresponding grep red.
+_mut_src=$(mktemp "${TMPDIR:-/tmp}/gibson-278-runall.XXXXXX")
+sed -e '/duplicate sentinel attribution/d' \
+    -e '/legacy-sentinel name\/count drift/d' \
+    -e '/explicit assertions and sentinel/d' \
+    "$RA" > "$_mut_src"
+if grep -Fq 'duplicate sentinel attribution' "$_mut_src" \
+   || grep -Fq 'legacy-sentinel name/count drift' "$_mut_src" \
+   || grep -Fq 'explicit assertions and sentinel' "$_mut_src"; then
+  bad "mutation: deleting sentinel attribution guards still grepped true (vacuous)"
+else
+  ok "mutation: deleting sentinel attribution guards turns the source check red"
+fi
+rm -f "$_mut_src"
+unset _mut_src
+
+echo "# #274 run-all metric contract (no static count, no second gate.json parser)"
+if grep -E 'require\(.*gate\.json|readFileSync\([^)]*gate\.json' \
+     "$REPO_ROOT/scripts/tests/run-all.sh" >/dev/null; then
+  bad "run-all.sh parses .agents/gate.json (second config parser forbidden)"
+else
+  ok "run-all.sh does not parse .agents/gate.json"
+fi
+if grep -E 'echo[[:space:]]+["'\'']GIBSON_TEST_METRICS total=[0-9]+' \
+     "$REPO_ROOT/scripts/tests/run-all.sh" >/dev/null; then
+  bad "run-all.sh appends a static GIBSON_TEST_METRICS count"
+else
+  ok "run-all.sh does not append a static GIBSON_TEST_METRICS count"
+fi
+
+echo "# #279 metrics-contract-fixture early exclusive seam (same-artifact oracle)"
+RA="$REPO_ROOT/scripts/tests/run-all.sh"
+
+# Source: production classifier/contributor/reconciler/binder/emitter defined once.
+_prod_ok=1
+_fn=""
+_n=0
+for _fn in gibson_metrics_classify gibson_metrics_contribute \
+  gibson_metrics_reconcile_legacy_sentinels \
+  gibson_run_all_bind_and_print_verdict \
+  gibson_metrics_emit_aggregate_or_fail; do
+  _n=$(grep -c "^${_fn}()" "$RA" || true)
+  if [[ "$_n" -ne 1 ]]; then
+    _prod_ok=0
+    break
+  fi
+done
+if [[ "$_prod_ok" -eq 1 ]]; then
+  ok "production metrics functions are defined exactly once"
+else
+  bad "production metrics functions are missing or duplicated (${_fn}=${_n})"
+fi
+unset _prod_ok _fn _n
+
+# Source: fixture runner calls the shared production path, not a copied footer.
+if awk '
+  /^gibson_run_metrics_contract_fixture\(\)/ { p=1; next }
+  p && /^# GIBSON_METRICS_CONTRACT_FIXTURE_DISPATCH/ { p=0 }
+  p && /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\]/ { p=0 }
+  p && /gibson_metrics_contribute/ { c=1 }
+  p && /gibson_run_all_bind_and_print_verdict/ { b=1 }
+  p && /gibson_metrics_emit_aggregate_or_fail/ { e=1 }
+  p && /echo[[:space:]]+["'\''"]GIBSON_TEST_METRICS total=[0-9]+/ { stat=1 }
+  END { if (c && b && e && !stat) exit 0; exit 1 }
+' "$RA"; then
+  ok "fixture runner calls shared contribute/bind/emit (no static aggregate)"
+else
+  bad "fixture runner does not reuse the production contribute/bind/emit path"
+fi
+
+# Source: ordinary path still calls the same functions after the fixture dispatch.
+if awk '
+  /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\]/ { eq=NR }
+  /gibson_run_metrics_contract_fixture$/ { if (eq && NR <= eq+3) d=eq }
+  /for suite in scripts\/tests\/\*\.test.sh/ { s=NR }
+  s && /gibson_metrics_contribute/ { c=NR }
+  /gibson_run_all_bind_and_print_verdict/ && $0 !~ /\(\)/ { b=NR }
+  /gibson_metrics_emit_aggregate_or_fail/ && $0 !~ /\(\)/ { e=NR }
+  END { if (d && s && c && b && e && d < s && s <= c && c < b && b < e) exit 0; exit 1 }
+' "$RA"; then
+  ok "ordinary path calls shared contribute/bind/emit after fixture dispatch"
+else
+  bad "ordinary path no longer shares contribute/bind/emit after fixture dispatch"
+fi
+
+# Conditional/dispatch contract: parse+validate early without executing;
+# skip ordinary preamble when selected; define production functions once;
+# dispatch after those definitions and before sensor suites.
+_279_conditional_contract() {
+  awk '
+    /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\][[:space:]]*; then/ {
+      n_eq1++
+      eq1[n_eq1]=NR
+    }
+    /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -ne 1 \]\][[:space:]]*; then/ {
+      n_ne1++
+      skip_if=NR
+    }
+    /cannot be combined/ { comb=NR }
+    /echo "== toolchain"/ { tc=NR }
+    /SH_FILES=\$\(find scripts adapters/ { fd=NR }
+    /source "\$WALL_TIMEOUT_LIB"/ { wt=NR }
+    /echo "== injection-scan"/ { inj=NR }
+    /if \[\[ "\$TIMEOUT" -gt 0 \]\] && ! suite_timeout_capable/ { to=NR }
+    /echo "== sensors"/ { sensors=NR }
+    /for suite in scripts\/tests\/\*\.test.sh/ { su=NR }
+    /^# --- aggregate metrics/ { agg=NR }
+    /^gibson_metrics_classify\(\)/ { classify=NR }
+    /^gibson_run_metrics_contract_fixture\(\)/ { fixdef=NR }
+    /gibson_run_metrics_contract_fixture/ && $0 !~ /\(\)/ { calls[++n_calls]=NR }
+    /exit \$\?/ { exits[++n_exits]=NR }
+    END {
+      if (n_ne1 != 1 || n_eq1 < 2) exit 1
+      parse_if=eq1[1]
+      disp_if=eq1[n_eq1]
+      if (!parse_if || !skip_if || !disp_if || !comb || !agg) exit 1
+      if (!tc || !fd || !wt || !inj || !to || !sensors || !su) exit 1
+      if (!classify || !fixdef) exit 1
+      parse_exec=0
+      disp_call=0
+      for (i=1; i<=n_calls; i++) {
+        if (calls[i] > parse_if && calls[i] < skip_if) parse_exec=1
+        if (calls[i] > disp_if && calls[i] <= disp_if+4) disp_call=calls[i]
+      }
+      disp_exit=0
+      for (i=1; i<=n_exits; i++) {
+        if (exits[i] > disp_if && exits[i] <= disp_if+4) disp_exit=exits[i]
+      }
+      if (parse_exec) exit 1
+      if (!disp_call || !disp_exit) exit 1
+      if (!(parse_if < skip_if && comb > parse_if && comb < skip_if)) exit 1
+      if (!(skip_if < tc && skip_if < fd && skip_if < wt && skip_if < inj && skip_if < to)) exit 1
+      if (!(tc < agg && fd < agg && wt < agg && inj < agg && to < agg)) exit 1
+      if (!(agg < classify && classify < fixdef && fixdef < disp_if)) exit 1
+      if (!(disp_if < disp_call && disp_call < disp_exit && disp_exit <= disp_if+4)) exit 1
+      if (!(disp_if < sensors && disp_if < su && sensors < su)) exit 1
+      exit 0
+    }
+  ' "$1"
+}
+
+if _279_conditional_contract "$RA"; then
+  ok "fixture parse/skip/dispatch contract: validate early, skip preamble, dispatch after functions"
+else
+  bad "fixture parse/skip/dispatch contract failed (would fall through or execute too early)"
+fi
+
+# Source: fixture presence is a pre-scan; ordinary argv keeps origin/main
+# immediate --help / --list-quarantine / --self-test-toolchain / unknown-flag
+# behavior. Fixture mode is the one and only argument.
+_279_parser_contract() {
+  awk '
+    /for [_A-Za-z0-9]+ in "\$@"/ { forloop=NR }
+    forloop && !prescan_set && /METRICS_CONTRACT_FIXTURE=1/ {
+      if (NR <= forloop + 8) prescan_set=NR
+    }
+    /if \[\[ "\$METRICS_CONTRACT_FIXTURE" -eq 1 \]\][[:space:]]*; then/ {
+      n_eq1++
+      if (n_eq1 == 1) parse_if=NR
+    }
+    parse_if && !sole && /\$# -ne 1/ {
+      if (NR > parse_if && NR <= parse_if + 8) sole=NR
+    }
+    /while \[\[ \$# -gt 0 \]\]/ { whiles[++nwhile]=NR }
+    /-h\|--help\) usage; exit 0/ { help_imm=NR }
+    /--list-quarantine\)/ { list_arm=NR }
+    /--self-test-toolchain\)/ { st_arm=NR }
+    /WANT_HELP=1/ { want=NR }
+    /--metrics-contract-fixture\)/ { fixture_arm=NR }
+    END {
+      if (!forloop || !prescan_set || !parse_if || !sole) exit 1
+      if (!(prescan_set < parse_if && sole > parse_if)) exit 1
+      if (nwhile < 1) exit 1
+      ord=whiles[nwhile]
+      if (ord < parse_if) exit 1
+      if (!help_imm || help_imm < ord) exit 1
+      if (!list_arm || list_arm < ord) exit 1
+      if (!st_arm || st_arm < ord) exit 1
+      if (list_arm > help_imm || st_arm > help_imm) exit 1
+      if (want) exit 1
+      if (fixture_arm) exit 1
+      exit 0
+    }
+  ' "$1"
+}
+
+if _279_parser_contract "$RA"; then
+  ok "fixture pre-scan plus origin/main ordinary parser (immediate help/list/self-test)"
+else
+  bad "ordinary parser contract failed (deferred flags or missing fixture sole-arg)"
+fi
+
+# Non-vacuity: the contract must test the actual skip/dispatch conditions.
+_mut_src=$(mktemp "${TMPDIR:-/tmp}/gibson-279-runall.XXXXXX")
+sed 's/METRICS_CONTRACT_FIXTURE" -ne 1/METRICS_CONTRACT_FIXTURE" -eq 1/' "$RA" > "$_mut_src"
+if _279_conditional_contract "$_mut_src"; then
+  bad "mutation: flipping preamble skip to -eq 1 still passed the conditional contract"
+else
+  ok "mutation: flipping preamble skip to -eq 1 turns the conditional contract red"
+fi
+sed '/if \[\[ "\$METRICS_CONTRACT_FIXTURE" -ne 1 \]\]/d' "$RA" > "$_mut_src"
+if _279_conditional_contract "$_mut_src"; then
+  bad "mutation: deleting preamble skip-if still passed the conditional contract"
+else
+  ok "mutation: deleting preamble skip-if turns the conditional contract red"
+fi
+sed '/^  gibson_run_metrics_contract_fixture$/d' "$RA" > "$_mut_src"
+if _279_conditional_contract "$_mut_src"; then
+  bad "mutation: deleting fixture dispatch call still passed the conditional contract"
+else
+  ok "mutation: deleting fixture dispatch call turns the conditional contract red"
+fi
+sed 's/\$# -ne 1/\$# -eq 1/' "$RA" > "$_mut_src"
+if _279_parser_contract "$_mut_src"; then
+  bad "mutation: inverting fixture sole-arg still passed the parser contract"
+else
+  ok "mutation: inverting fixture sole-arg turns the parser contract red"
+fi
+sed 's/-h|--help) usage; exit 0/-h|--help) WANT_HELP=1; shift/' "$RA" > "$_mut_src"
+if _279_parser_contract "$_mut_src"; then
+  bad "mutation: deferring --help still passed the parser contract"
+else
+  ok "mutation: deferring --help turns the parser contract red"
+fi
+sed '/for _gibson_arg in "\$@"/d' "$RA" > "$_mut_src"
+if _279_parser_contract "$_mut_src"; then
+  bad "mutation: deleting fixture pre-scan still passed the parser contract"
+else
+  ok "mutation: deleting fixture pre-scan turns the parser contract red"
+fi
+rm -f "$_mut_src"
+unset _mut_src
+unset -f _279_conditional_contract
+unset -f _279_parser_contract
+
+if grep -Fq 'internal contract-test seam only' "$RA" \
+   && grep -Fq 'not a complete gate or release substitute' "$RA"; then
+  ok "fixture mode is inventoried as incomplete and non-gating"
+else
+  bad "fixture mode is missing the non-gating inventory text"
+fi
+
+# Exclusive combinations: every ordinary mode/flag, any extra/repeated
+# argument, and reverse-order fixture combinations exit 2 with the exclusive
+# non-gating message (not the ordinary unknown-flag path).
+_exclusive_probe() {
+  local desc="$1"
+  shift
+  local out rc=0
+  out=$(bash "$RA" "$@" 2>&1) || rc=$?
+  if [[ "$rc" -eq 2 ]] \
+     && printf '%s\n' "$out" | grep -F 'cannot be combined' >/dev/null \
+     && printf '%s\n' "$out" | grep -F 'not a complete gate' >/dev/null \
+     && ! printf '%s\n' "$out" | grep -F 'unknown argument' >/dev/null; then
+    ok "fixture exclusive with ${desc} (exit 2)"
+  else
+    bad "fixture did not reject ${desc} (rc=${rc})"
+  fi
+}
+_exclusive_probe "--only" --metrics-contract-fixture --only args.test
+_exclusive_probe "--timeout" --metrics-contract-fixture --timeout 1
+_exclusive_probe "--no-quarantine" --metrics-contract-fixture --no-quarantine
+_exclusive_probe "--list-quarantine" --metrics-contract-fixture --list-quarantine
+_exclusive_probe "--self-test-toolchain" --metrics-contract-fixture --self-test-toolchain
+_exclusive_probe "--quiet" --metrics-contract-fixture --quiet
+_exclusive_probe "--help" --metrics-contract-fixture --help
+_exclusive_probe "repeated fixture" --metrics-contract-fixture --metrics-contract-fixture
+_exclusive_probe "unknown extra" --metrics-contract-fixture --definitely-not-a-flag
+_exclusive_probe "reverse --help" --help --metrics-contract-fixture
+_exclusive_probe "reverse --list-quarantine" --list-quarantine --metrics-contract-fixture
+_exclusive_probe "reverse --self-test-toolchain" --self-test-toolchain --metrics-contract-fixture
+unset -f _exclusive_probe
+
+# Ordinary parser parity with current-main immediate-exit semantics. Trailing
+# junk after --help / --list-quarantine / --self-test-toolchain must not become
+# unknown-flag failures. Do not invent a stricter ordinary contract.
+_ordinary_same() {
+  local desc="$1"
+  shift
+  local bare_rc=0 trail_rc=0
+  local bare trail
+  bare=$(bash "$RA" "$1" 2>&1) || bare_rc=$?
+  trail=$(bash "$RA" "$1" --definitely-not-a-flag 2>&1) || trail_rc=$?
+  if [[ "$trail_rc" -eq "$bare_rc" ]] \
+     && [[ "$trail" == "$bare" ]] \
+     && ! printf '%s\n' "$trail" | grep -F 'unknown argument' >/dev/null; then
+    ok "ordinary CLI: ${desc} matches bare ${1} (exit ${bare_rc})"
+  else
+    bad "ordinary CLI: ${desc} drifted (bare_rc=${bare_rc} trail_rc=${trail_rc})"
+  fi
+}
+_ordinary_same "--help --definitely-not-a-flag" --help
+_ordinary_same "--list-quarantine --definitely-not-a-flag" --list-quarantine
+unset -f _ordinary_same
+
+help_rc=0
+help_out=$(bash "$RA" --help 2>&1) || help_rc=$?
+if [[ "$help_rc" -eq 0 ]] \
+   && printf '%s\n' "$help_out" | grep -F 'WHAT IT DOES' >/dev/null \
+   && printf '%s\n' "$help_out" | grep -F 'internal contract-test seam only' >/dev/null; then
+  ok "ordinary CLI: --help exits 0 with usage"
+else
+  bad "ordinary CLI: --help drifted (rc=${help_rc})"
+fi
+
+list_rc=0
+list_out=$(bash "$RA" --list-quarantine 2>&1) || list_rc=$?
+if [[ "$list_rc" -eq 0 ]] \
+   && ! printf '%s\n' "$list_out" | grep -F 'unknown argument' >/dev/null; then
+  ok "ordinary CLI: --list-quarantine exits 0"
+else
+  bad "ordinary CLI: --list-quarantine drifted (rc=${list_rc})"
+fi
+
+st_rc=0
+st_out=$(bash "$RA" --self-test-toolchain 2>&1) || st_rc=$?
+st_trail_rc=0
+st_trail=$(bash "$RA" --self-test-toolchain --definitely-not-a-flag 2>&1) || st_trail_rc=$?
+if [[ "$st_rc" -eq "$st_trail_rc" ]] \
+   && printf '%s\n' "$st_out" | grep -F 'toolchain self-test' >/dev/null \
+   && printf '%s\n' "$st_trail" | grep -F 'toolchain self-test' >/dev/null \
+   && ! printf '%s\n' "$st_trail" | grep -F 'unknown argument' >/dev/null; then
+  ok "ordinary CLI: --self-test-toolchain --definitely-not-a-flag matches bare self-test (exit ${st_rc})"
+else
+  bad "ordinary CLI: --self-test-toolchain trailing-arg drifted (bare_rc=${st_rc} trail_rc=${st_trail_rc})"
+fi
+unset help_rc help_out list_rc list_out st_rc st_out st_trail_rc st_trail
+
+unk_rc=0
+unk_out=$(bash "$RA" --definitely-not-a-flag 2>&1) || unk_rc=$?
+if [[ "$unk_rc" -eq 2 ]] \
+   && printf '%s\n' "$unk_out" | grep -F 'unknown argument: --definitely-not-a-flag' >/dev/null; then
+  ok "ordinary CLI: unknown flag exits 2"
+else
+  bad "ordinary CLI: unknown flag drifted (rc=${unk_rc})"
+fi
+unset unk_rc unk_out
+
+# Capture fixture status and output exactly once.
+fixture_rc=0
+fixture_out=$(bash "$RA" --metrics-contract-fixture 2>&1) || fixture_rc=$?
+
+# Reject nonzero or empty output before any parsing/arithmetic.
+if [[ "$fixture_rc" -ne 0 ]]; then
+  bad "metrics-contract-fixture exited ${fixture_rc} (want 0): $(printf '%s\n' "$fixture_out" | tail -n 8)"
+elif [[ -z "$fixture_out" ]]; then
+  bad "metrics-contract-fixture produced empty output"
+else
+  ok "metrics-contract-fixture exited 0 with nonempty output"
+fi
+
+# Same-artifact oracle: exact 20/4/3, footer order, wall before footer, mutations.
+fixture_artifact_ok() {
+  local text="$1"
+  # Empty or whitespace-only is red before arithmetic.
+  if [[ -z "$text" ]] || ! printf '%s\n' "$text" | grep . >/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$text" | grep -F 'metrics mutation: duplicate machine metric fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: non-terminal machine evidence fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: malformed machine metric fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: malformed machine JSON fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: negative machine metric fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: fractional machine metric fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: overflow machine metric fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: prefix reserved counters fail closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: duplicate sentinel attribution refuses' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: name/count drift refuses' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: one suite cannot contribute both explicit assertions and a sentinel' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: explicit plus sign on a tally count fails closed' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: ordinary suite failure is RED with aggregate metrics' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'metrics mutation: green run still prints GREEN and aggregate metrics' >/dev/null || return 1
+  printf '%s\n' "$text" | grep -F 'internal contract-test seam; not a complete gate' >/dev/null || return 1
+  if printf '%s\n' "$text" | grep -E '^== (toolchain|shellcheck|bash -n|bash 3\.2|bash-4|SCRIPT_DIR|info/warn|tool guards|vendored|mjs unknown-flag|injection-scan|sensors)' >/dev/null; then
+    return 1
+  fi
+  if printf '%s\n' "$text" | grep -E '^run-all: toolchain self-test' >/dev/null; then
+    return 1
+  fi
+  if printf '%s\n' "$text" | grep -E 'args\.test\.sh:' >/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$text" | awk '
+    /^run-all metrics-contract-fixture wall: [0-9]+s$/ { w++ }
+    /^run-all legacy-sentinels: metrics-contract-fixture\.legacy\.test\.sh$/ { n++ }
+    /^run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1$/ { d++ }
+    /^GIBSON_TEST_METRICS total=20 skipped=4 todo=3$/ { m++ }
+    NF { q=pprev; pprev=prev; prev=last; last=$0 }
+    END {
+      if (w != 1) exit 1
+      if (n != 1) exit 1
+      if (d != 1) exit 1
+      if (m != 1) exit 1
+      if (last !~ /^GIBSON_TEST_METRICS total=20 skipped=4 todo=3$/) exit 1
+      if (prev !~ /^run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1$/) exit 1
+      if (pprev !~ /^run-all legacy-sentinels: metrics-contract-fixture\.legacy\.test\.sh$/) exit 1
+      if (q !~ /^run-all metrics-contract-fixture wall: [0-9]+s$/) exit 1
+      exit 0
+    }
+  '
+}
+
+if [[ "$fixture_rc" -eq 0 && -n "$fixture_out" ]] && fixture_artifact_ok "$fixture_out"; then
+  ok "fixture artifact is exact 20/4/3 with wall-before-footer and mutation evidence"
+else
+  bad "fixture artifact failed the same-artifact oracle (rc=${fixture_rc}): $(printf '%s\n' "$fixture_out" | tail -n 12)"
+fi
+
+metric_line=$(printf '%s\n' "$fixture_out" | grep -E '^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$' || true)
+metric_n=$(printf '%s\n' "$metric_line" | grep -c . || true)
+if [[ "$fixture_rc" -eq 0 && "$metric_n" -eq 1 && "$metric_line" == "GIBSON_TEST_METRICS total=20 skipped=4 todo=3" ]]; then
+  ok "fixture emits exactly one terminal GIBSON_TEST_METRICS total=20 skipped=4 todo=3"
+else
+  bad "fixture metric lines=${metric_n} (want exact 20/4/3): ${metric_line}"
+fi
+diag_line=$(printf '%s\n' "$fixture_out" | grep -E '^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$' || true)
+if [[ "$diag_line" == "run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1" ]]; then
+  ok "fixture subtotals are explicit-assertions=19 legacy-sentinels=1"
+else
+  bad "fixture subtotals drifted: ${diag_line}"
+fi
+named_line=$(printf '%s\n' "$fixture_out" | grep -E '^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$' || true)
+named_n=$(printf '%s\n' "$named_line" | grep -c . || true)
+if [[ "$named_n" -eq 1 && "$named_line" == "run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh" ]]; then
+  ok "fixture names exactly one legacy sentinel"
+else
+  bad "fixture named legacy-sentinel lines=${named_n}: ${named_line}"
+fi
+if printf '%s\n' "$fixture_out" | grep -E '^run-all metrics-contract-fixture wall: [0-9]+s$' >/dev/null; then
+  ok "fixture prints metrics-contract-fixture wall before the footer"
+else
+  bad "fixture missing metrics-contract-fixture wall receipt"
+fi
+
+parse_rc=0
+parse_out=""
+if [[ "$fixture_rc" -ne 0 || -z "$fixture_out" ]]; then
+  bad "test-integrity skipped: fixture artifact was empty or nonzero"
+else
+  parse_out=$(printf '%s\n' "$fixture_out" | node "$REPO_ROOT/scripts/test-integrity.mjs" parse --input /dev/stdin 2>&1) || parse_rc=$?
+  if [[ "$parse_rc" -eq 0 ]] \
+     && printf '%s\n' "$parse_out" | grep '"total": 20' >/dev/null \
+     && printf '%s\n' "$parse_out" | grep '"skipped": 4' >/dev/null \
+     && printf '%s\n' "$parse_out" | grep '"todo": 3' >/dev/null; then
+    ok "test-integrity parses the fixture aggregate as 20/4/3"
+  else
+    bad "test-integrity cannot parse fixture output (rc=${parse_rc}): ${parse_out}"
+  fi
+fi
+
+if [[ "$fixture_rc" -eq 0 ]] \
+   && ! printf '%s\n' "$fixture_out" | grep -E '^== (toolchain|shellcheck|bash -n|bash 3\.2|bash-4|SCRIPT_DIR|info/warn|tool guards|vendored|mjs unknown-flag|injection-scan|sensors)' >/dev/null \
+   && ! printf '%s\n' "$fixture_out" | grep -E '^run-all: toolchain self-test' >/dev/null; then
+  ok "fixture did not execute the skipped ordinary preamble"
+else
+  bad "fixture executed the skipped ordinary preamble"
+fi
+
+# Non-vacuity mutations against the same oracle (counted, deletion-sensitive).
+if ! fixture_artifact_ok ""; then
+  ok "mutation: empty fixture output is rejected before parsing"
+else
+  bad "mutation: empty fixture output still passed the oracle"
+fi
+
+_zero_agg=$(printf '%s\n' "$fixture_out" | sed \
+  -e 's/GIBSON_TEST_METRICS total=20 skipped=4 todo=3/GIBSON_TEST_METRICS total=0 skipped=0 todo=0/' \
+  -e 's/explicit-assertions=19/explicit-assertions=0/')
+if fixture_artifact_ok "$_zero_agg"; then
+  bad "mutation: zero aggregate still passed the oracle"
+else
+  ok "mutation: zero aggregate turns the oracle red"
+fi
+
+_no_mut=$(printf '%s\n' "$fixture_out" | grep -v 'metrics mutation:' || true)
+if fixture_artifact_ok "$_no_mut"; then
+  bad "mutation: deleting mutation evidence still passed the oracle"
+else
+  ok "mutation: missing mutation evidence turns the oracle red"
+fi
+
+_reorder=$(printf '%s\n' \
+  'run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1' \
+  'run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh' \
+  'GIBSON_TEST_METRICS total=20 skipped=4 todo=3')
+# Keep mutation evidence from the live artifact but swap the footer order.
+_reorder_full=$(printf '%s\n' "$fixture_out" | awk '
+  /^run-all metrics-contract-fixture wall: / { next }
+  /^run-all legacy-sentinels:/ { next }
+  /^run-all metric-subtotals:/ { next }
+  /^GIBSON_TEST_METRICS total=/ { next }
+  { print }
+')
+_reorder_full=$(printf '%s\n' "$_reorder_full" \
+  'run-all metrics-contract-fixture wall: 0s' \
+  'run-all metric-subtotals: explicit-assertions=19 legacy-sentinels=1' \
+  'run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh' \
+  'GIBSON_TEST_METRICS total=20 skipped=4 todo=3')
+if fixture_artifact_ok "$_reorder_full"; then
+  bad "mutation: reordered footer still passed the oracle"
+else
+  ok "mutation: reordered footer turns the oracle red"
+fi
+
+_missing_name=$(printf '%s\n' "$fixture_out" | sed 's/run-all legacy-sentinels: metrics-contract-fixture.legacy.test.sh/run-all legacy-sentinels:/')
+if fixture_artifact_ok "$_missing_name"; then
+  bad "mutation: missing legacy name still passed the oracle"
+else
+  ok "mutation: missing legacy name turns the oracle red"
+fi
+
+# The empty-args_tally false-green: empty selected-suite tally arithmetic
+# becomes 0 and agrees with a zero/empty aggregate under -eq. The new oracle
+# must reject that artifact.
+_old_empty_tally_false_green() {
+  local artifact="$1"
+  local args_tally args_p args_f want_total got_total got_explicit got_sent
+  args_tally=$(printf '%s\n' "$artifact" | grep -oE 'args\.test\.sh: [0-9]+ passed, [0-9]+ failed' | tail -1)
+  args_p=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+  args_f=$(printf '%s\n' "$args_tally" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
+  want_total=$((args_p + args_f))
+  got_total=$(printf '%s\n' "$artifact" | grep -oE 'total=[0-9]+' | head -1 | cut -d= -f2)
+  got_explicit=$(printf '%s\n' "$artifact" | grep -oE 'explicit-assertions=[0-9]+' | head -1 | cut -d= -f2)
+  got_sent=$(printf '%s\n' "$artifact" | grep -oE 'legacy-sentinels=[0-9]+' | head -1 | cut -d= -f2)
+  got_total=${got_total:-0}
+  got_explicit=${got_explicit:-0}
+  got_sent=${got_sent:-0}
+  [[ "$got_total" -eq "$want_total" && "$got_explicit" -eq "$want_total" && "$got_sent" -eq 0 ]]
+}
+_empty_zero=$'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=0\nGIBSON_TEST_METRICS total=0 skipped=0 todo=0'
+if _old_empty_tally_false_green "$_empty_zero" && ! fixture_artifact_ok "$_empty_zero"; then
+  ok "mutation: empty-args_tally zero-aggregate false-green is now red"
+else
+  bad "mutation: empty-args_tally false-green was not turned red"
+fi
+if _old_empty_tally_false_green "" && ! fixture_artifact_ok ""; then
+  ok "mutation: empty-artifact arithmetic false-green is now red"
+else
+  bad "mutation: empty-artifact arithmetic false-green was not turned red"
+fi
+unset _zero_agg _no_mut _reorder _reorder_full _missing_name _empty_zero
+unset -f _old_empty_tally_false_green
+
+# Alias the captured artifact for the retained footer-shape helpers below.
+metric_out=$fixture_out
+
+# Non-vacuity of the footer-shape assertion: syntactically valid footers that
+# move the named diagnostic, duplicate a name, or drift the count must fail.
+footer_shape_ok() {
+  awk '
+    /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/ { n++ }
+    /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/ { d++ }
+    /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/ { m++ }
+    NF { pprev=prev; prev=last; last=$0 }
+    END {
+      if (n != 1) exit 1
+      if (d != 1) exit 1
+      if (m != 1) exit 1
+      if (last !~ /^GIBSON_TEST_METRICS total=[0-9]+ skipped=[0-9]+ todo=[0-9]+$/) exit 1
+      if (prev !~ /^run-all metric-subtotals: explicit-assertions=[0-9]+ legacy-sentinels=[0-9]+$/) exit 1
+      if (pprev !~ /^run-all legacy-sentinels:( [A-Za-z0-9._-]+)*$/) exit 1
+      exit 0
+    }
+  '
+}
+named_matches_subtotal() {
+  awk '
+    BEGIN { named=0; sent=""; dup=0 }
+    /^run-all legacy-sentinels:/ {
+      line=$0
+      sub(/^run-all legacy-sentinels: ?/, "", line)
+      named=0
+      dup=0
+      delete seen
+      if (line != "") named=split(line, a, / /)
+      for (i=1; i<=named; i++) {
+        if (a[i] in seen) { dup=1 }
+        seen[a[i]]=1
+      }
+    }
+    /legacy-sentinels=[0-9]+/ && /explicit-assertions=/ {
+      if (match($0, /legacy-sentinels=[0-9]+/)) {
+        split(substr($0, RSTART), kv, /=/)
+        sent=kv[2]+0
+      }
+    }
+    END {
+      if (dup) exit 1
+      if (named == sent) exit 0
+      exit 1
+    }
+  '
+}
+if printf '%s\n' "$metric_out" | named_matches_subtotal; then
+  ok "live named list reconciles with legacy-sentinels subtotal"
+else
+  bad "live named list does not reconcile with legacy-sentinels subtotal"
+fi
+_good_footer=$(printf '%s\n' \
+  'run-all legacy-sentinels: zeta.test.sh alpha.test.sh' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2' \
+  'GIBSON_TEST_METRICS total=2 skipped=0 todo=0')
+if printf '%s\n' "$_good_footer" | footer_shape_ok \
+   && printf '%s\n' "$_good_footer" | named_matches_subtotal; then
+  ok "mutation control: well-formed named sentinel footer is accepted"
+else
+  bad "mutation control: well-formed named sentinel footer was rejected"
+fi
+_swap_footer=$(printf '%s\n' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=1' \
+  'run-all legacy-sentinels: foo.test.sh' \
+  'GIBSON_TEST_METRICS total=1 skipped=0 todo=0')
+if printf '%s\n' "$_swap_footer" | footer_shape_ok; then
+  bad "mutation: named diagnostic after subtotals still passed the footer shape check"
+else
+  ok "mutation: named diagnostic after subtotals fails the footer shape check"
+fi
+_dup_footer=$(printf '%s\n' \
+  'run-all legacy-sentinels: foo.test.sh foo.test.sh' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2' \
+  'GIBSON_TEST_METRICS total=2 skipped=0 todo=0')
+if printf '%s\n' "$_dup_footer" | named_matches_subtotal; then
+  bad "mutation: duplicate sentinel name still passed name/count reconciliation"
+else
+  ok "mutation: duplicate sentinel name turns name/count reconciliation red"
+fi
+_drift_footer=$(printf '%s\n' \
+  'run-all legacy-sentinels: foo.test.sh' \
+  'run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2' \
+  'GIBSON_TEST_METRICS total=2 skipped=0 todo=0')
+if printf '%s\n' "$_drift_footer" | named_matches_subtotal; then
+  bad "mutation: name/count drift still passed reconciliation"
+else
+  ok "mutation: name/count drift turns reconciliation red"
+fi
+unset _good_footer _swap_footer _dup_footer _drift_footer
+
+echo "# #274 ordinary gate.test.sh is non-recursive and disjoint from --self-contract"
+GT="$REPO_ROOT/scripts/tests/gate.test.sh"
+if grep -Fq 'ordinary no-argument path (non-recursive; disjoint from --self-contract)' "$GT" \
+  && grep -Fq 'opt-in --self-contract path (exact-SHA production baseline; disjoint)' "$GT"; then
+  ok "gate.test.sh marks ordinary and --self-contract fixtures as disjoint"
+else
+  bad "gate.test.sh missing explicit disjoint-fixture markers"
+fi
+# Ordinary path must not invoke the production suite or --self-contract as a
+# command. Quoted comparisons and usage text may name the canonical command.
+if grep -nE '(^|[;|&][[:space:]]*)bash[[:space:]]+scripts/tests/run-all\.sh[[:space:]]+--no-quarantine' "$GT" >/dev/null; then
+  bad "gate.test.sh ordinary path would invoke the production run-all suite"
+else
+  ok "gate.test.sh does not invoke bash scripts/tests/run-all.sh --no-quarantine"
+fi
+# A recursive self-call with --self-contract (not usage text / flag parser) is
+# forbidden. Unknown-flag probes may invoke gate.test.sh with other flags.
+if grep -nE 'bash[[:space:]].*gate\.test\.sh[[:space:]]+--self-contract' "$GT" >/dev/null; then
+  bad "gate.test.sh invokes itself with --self-contract (would recurse under run-all)"
+else
+  ok "gate.test.sh does not invoke itself with --self-contract"
+fi
+if grep -Fq 'bash "$SELF_CONTRACT_FIXTURE/scripts/gate-baseline.sh"' "$GT" \
+  && grep -Fq 'helper path escaped fixture' "$GT"; then
+  ok "self-contract source invokes fixture-owned helper with in-fixture path bound"
+else
+  bad "self-contract source missing fixture-owned helper invocation or in-fixture bound"
+fi
+
 echo
+# --- #332: no piped grep with -q under scripts/tests (grep-q-pipefail-undercounts)
+# A quiet grep exits at the first match. A producer still writing then takes
+# SIGPIPE, and under pipefail the pipeline is 141, so an if-test on that
+# pipeline silently goes false (pr-claims.test.sh on main at a6afb5f). A
+# consuming grep (stdout to /dev/null) has the same exit semantics and cannot
+# lose that race. This is part 1 of the lesson grep-q-pipefail-undercounts; it is
+# deliberately NOT pinned to that lesson ID until part 2 (scripts/, workflows)
+# lands and the lesson can honestly read fixed. Scope is scripts/tests. The
+# allowlist holds only files under a live claim when this landed (#301, #325);
+# the follow-up on #332 empties it and widens the scope.
+# The regex sees -q in ANY option cluster (`grep -F -q`), plus --quiet/--silent,
+# and `||` is not a pipe.
+grepq_re='(^|[^|])\|[[:space:]]*grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*q|--quiet|--silent)'
+grepq_allow='scripts/tests/contract-authority\.test\.sh|scripts/tests/pr-review-evidence\.test\.sh'
+grepq_hits=$(grep -rnE "$grepq_re" scripts/tests --include='*.sh' 2>/dev/null | grep -vE "^($grepq_allow):" || true)
+if [ -z "$grepq_hits" ]; then
+  ok "#332: no piped quiet grep under scripts/tests (allowlist: 2 files under live claims)"
+else
+  bad "#332: piped quiet grep under scripts/tests: $(printf '%s\n' "$grepq_hits" | head -3 | tr '\n' ' ')"
+fi
+# mutation: every quiet form must be caught on its own, and the non-pipe `||`
+# form must not be, or the sensor is decoration.
+grepq_mut=$(mktemp -d "${TMPDIR:-/tmp}/grepq-mut.XXXXXX")
+mkdir -p "$grepq_mut/scripts/tests"
+# (semicolon-separated so this line is not itself a piped quiet grep)
+grepq_forms='grep -q x;grep -qiF -- x;grep -F -q x;grep -E -q x;grep -F --quiet x;grep -i --silent x;grep -Eq x'
+grepq_missed=""
+_old_ifs=$IFS; IFS=';'
+for _form in $grepq_forms; do
+  printf 'echo x %s %s\n' '|' "$_form" > "$grepq_mut/scripts/tests/planted.sh"
+  (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1) || grepq_missed="$grepq_missed [$_form]"
+done
+IFS=$_old_ifs
+printf 'cmd %s grep -q x file\n' '||' > "$grepq_mut/scripts/tests/planted.sh"
+if (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1); then grepq_missed="$grepq_missed [false-positive on ||]"; fi
+if [ -z "$grepq_missed" ]; then
+  ok "#332 mutation: every planted quiet-grep form is caught; || is not a pipe"
+else
+  bad "#332 mutation: sensor defect:$grepq_missed"
+fi
+rm -rf "$grepq_mut"
+
+echo "ci-conventions wall: ${SECONDS}s"
 echo "ci-conventions.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

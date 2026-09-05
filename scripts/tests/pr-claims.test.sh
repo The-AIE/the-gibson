@@ -40,8 +40,8 @@ FAIL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qiF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qiF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -iF -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -iF -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-prclaims-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -94,11 +94,11 @@ if [[ "$1" == "api" && "$2" == "graphql" ]]; then
     *'$endCursor'*) ;;
     *) contract_fail "query declares no \$endCursor variable — gh has nothing to advance the cursor with" ;;
   esac
-  printf '%s' "$query" | grep -Eq 'after:[[:space:]]*\$endCursor' || \
+  printf '%s' "$query" | grep -E 'after:[[:space:]]*\$endCursor' >/dev/null || \
     contract_fail "query never passes \$endCursor to pullRequests(after:) — every page would be page 1"
-  printf '%s' "$query" | grep -Eq 'pageInfo[[:space:]]*\{[^}]*hasNextPage' || \
+  printf '%s' "$query" | grep -E 'pageInfo[[:space:]]*\{[^}]*hasNextPage' >/dev/null || \
     contract_fail "query does not select pageInfo.hasNextPage — gh cannot tell whether another page exists"
-  printf '%s' "$query" | grep -Eq 'pageInfo[[:space:]]*\{[^}]*endCursor' || \
+  printf '%s' "$query" | grep -E 'pageInfo[[:space:]]*\{[^}]*endCursor' >/dev/null || \
     contract_fail "query does not select pageInfo.endCursor — gh has no cursor for the next page"
   pages_file="${GH_PAGES:?GH_PAGES not set}"
   # An unreadable/unparseable page set is an API failure, not "zero pages" —
@@ -786,10 +786,10 @@ contains "list sees the marked claim"     "$out" "issue-21-held"
 lacks    "list cannot see the stripped PR" "$out" "	22	"
 out=$("$PC" list-open-numbers acme/app 2>&1); rc=$?
 check "list-open-numbers exits 0"         "$rc" "0"
-echo "$out" | grep -qx '22' &&
+echo "$out" | grep -x '22' >/dev/null &&
   ok "the stripped PR is still reported as open" ||
   bad "the stripped PR vanished from the open-number inventory: $out"
-echo "$out" | grep -qx '21' &&
+echo "$out" | grep -x '21' >/dev/null &&
   ok "the marked PR is reported as open too" ||
   bad "the marked PR is missing from the open-number inventory: $out"
 
