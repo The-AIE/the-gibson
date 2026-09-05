@@ -2368,12 +2368,17 @@ export const VERDICT_OPERAND_INDETERMINATE = "INDETERMINATE";
 const VERDICT_CANONICAL_TOKENS = new Set([
   "APPROVE",
   "REQUEST_CHANGES",
-  "CHANGES_REQUESTED",
 ]);
 const VERDICT_PASS_TOKENS = new Set(["PASS"]);
 /** Live second-opinion shape detector operand after normalize. */
 const VERDICT_SHAPE_OPERAND_RE =
   /^\^?VERDICT:\[\[:space:\]\]\+\[\^\[:space:\]\]$/;
+/** Live case-arm aliases that are exact-string matches, not regex languages. */
+const VERDICT_LIVE_CASE_ARM_ALIASES = new Set([
+  "APPROVE",
+  "REQUEST_CHANGES",
+  "CHANGES_REQUESTED",
+]);
 
 function collectVerdictTokens(text) {
   const tokens = new Set();
@@ -2422,17 +2427,31 @@ function stripVerdictAnchorNoise(rest) {
   return s.trim();
 }
 
+/**
+ * True when a single alternation/literal payload is not an exact
+ * uppercase identifier. Wildcards, classes, quantifiers, optional
+ * punctuation, hyphens, escapes, and lowercase all fail closed.
+ * lossy-alt-normalize-forbidden: never strip these into CANONICAL.
+ */
+function verdictPayloadIsNonLiteral(tok) {
+  const t = String(tok || "");
+  if (!t) return true;
+  if (t !== t.toUpperCase()) return true;
+  if (/[.*+?{}[\]\\-]/.test(t)) return true;
+  if (!/^[A-Z][A-Z0-9_]*$/.test(t)) return true;
+  return false;
+}
+
 function tokenizeFlatAlternation(inner) {
-  return String(inner || "")
-    .split("|")
-    .map((part) =>
-      String(part || "")
-        .trim()
-        .toUpperCase()
-        .replace(/-/g, "_")
-        .replace(/[^A-Z0-9_]/g, "")
-    )
-    .filter(Boolean);
+  const parts = String(inner || "").split("|");
+  const tokens = [];
+  for (const part of parts) {
+    const t = String(part || "").trim();
+    // Empty alt (including a stripped wildcard) is not a canonical token.
+    if (!t || verdictPayloadIsNonLiteral(t)) return null;
+    tokens.push(t);
+  }
+  return tokens;
 }
 
 /** `$VAR` / `${VAR}` matcher operands. Variables are not resolved. */
@@ -2454,17 +2473,24 @@ export function classifyVerdictMatcherOperand(raw) {
   if (isOpaqueShellVarOperand(original)) return VERDICT_OPERAND_INDETERMINATE;
   if (!/VERDICT:/i.test(original)) return null;
   const norm = normalizeMatcherOperand(original);
+  // Inline case-insensitive flags expand the language (approve vs APPROVE).
+  if (/\(\?[a-z]*i[a-z]*\)/i.test(original) || /\(\?[a-z]*i[a-z]*\)/i.test(norm)) {
+    return VERDICT_OPERAND_INDETERMINATE;
+  }
   const verdictAt = norm.search(/VERDICT:/i);
   if (verdictAt < 0) return null;
   let rest = norm.slice(verdictAt + "VERDICT:".length);
   rest = stripVerdictAnchorNoise(rest);
 
-  // Live second-opinion shape detector: any non-space token, not PASS accept.
+  // Generic shape detector: any non-space token (PASS, APPROVE!, WOBBLE).
+  // Not an allowlisted acceptor — do not promote to CANONICAL and do not
+  // fail the live shape+allowlist harness (return null = ignore).
+  // shape-matcher-not-canonical: never return CANONICAL for this operand.
   if (
     VERDICT_SHAPE_OPERAND_RE.test(norm) ||
     /^\[\[:space:\]\]\+\[\^\[:space:\]\]$/.test(rest)
   ) {
-    return VERDICT_OPERAND_CANONICAL;
+    return null; // shape-matcher-not-canonical
   }
 
   // Nested or split parentheses inside the payload → indeterminate.
@@ -2477,7 +2503,9 @@ export function classifyVerdictMatcherOperand(raw) {
       return VERDICT_OPERAND_INDETERMINATE;
     }
     const alts = tokenizeFlatAlternation(inner);
-    if (!alts.length) return VERDICT_OPERAND_INDETERMINATE;
+    if (!Array.isArray(alts) || !alts.length) {
+      return VERDICT_OPERAND_INDETERMINATE;
+    }
     const unknown = alts.filter(
       (t) => !VERDICT_CANONICAL_TOKENS.has(t) && !VERDICT_PASS_TOKENS.has(t)
     );
@@ -2491,14 +2519,17 @@ export function classifyVerdictMatcherOperand(raw) {
     return VERDICT_OPERAND_INDETERMINATE;
   }
 
-  // Exact single-token literals (case arms): VERDICT: APPROVE etc.
-  const single = rest
-    .trim()
-    .toUpperCase()
-    .replace(/-/g, "_")
-    .replace(/[^A-Z0-9_]/g, "");
-  if (VERDICT_PASS_TOKENS.has(single)) return VERDICT_OPERAND_ACCEPTS_PASS;
-  if (VERDICT_CANONICAL_TOKENS.has(single)) return VERDICT_OPERAND_CANONICAL;
+  // Exact single-token literals only. Do not strip metacharacters,
+  // punctuation, hyphens, or case into an allowlisted token.
+  const exact = rest.trim();
+  if (!exact || verdictPayloadIsNonLiteral(exact)) {
+    if (exact && exact.toUpperCase() === "PASS" && !/[.*+?{}[\]\\]/.test(exact)) {
+      return VERDICT_OPERAND_ACCEPTS_PASS;
+    }
+    return VERDICT_OPERAND_INDETERMINATE;
+  }
+  if (VERDICT_PASS_TOKENS.has(exact)) return VERDICT_OPERAND_ACCEPTS_PASS;
+  if (VERDICT_CANONICAL_TOKENS.has(exact)) return VERDICT_OPERAND_CANONICAL;
   return VERDICT_OPERAND_INDETERMINATE;
 }
 
@@ -2639,6 +2670,8 @@ function extractGrepVerdictOperandsFromLine(line) {
         const eq = arg.indexOf("=");
         const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
         if (GREP_ONE_ARG_LONG.has(name)) {
+          // Pattern-file contents are not resolved — fail closed.
+          if (name === "file") out.push(GREP_INDETERMINATE_ARGV);
           if (eq !== -1) {
             j += 1;
             continue;
@@ -2658,6 +2691,8 @@ function extractGrepVerdictOperandsFromLine(line) {
       if (arg.startsWith("-") && arg !== "-") {
         const body = arg.slice(1);
         if (body.length === 1 && GREP_ONE_ARG_SHORT.has(body)) {
+          // grep-f-file-indeterminate: -f FILE is an unresolved pattern source.
+          if (body === "f") out.push(GREP_INDETERMINATE_ARGV);
           j += 1;
           if (j < words.length) j += 1;
           else ambiguous = true;
@@ -2665,6 +2700,7 @@ function extractGrepVerdictOperandsFromLine(line) {
         }
         if (body.length > 1 && GREP_ONE_ARG_SHORT.has(body[0])) {
           // Attached value (`-m1`). Not a general bundled parser.
+          if (body[0] === "f") out.push(GREP_INDETERMINATE_ARGV);
           j += 1;
           continue;
         }
@@ -2679,7 +2715,14 @@ function extractGrepVerdictOperandsFromLine(line) {
       j += 1;
     }
     if (ambiguous) out.push(GREP_INDETERMINATE_ARGV);
-    else if (positional != null) out.push(positional);
+    else if (positional != null) {
+      // grep-var-positional-indeterminate: $PAT / ${PAT} is not resolved.
+      if (isOpaqueShellVarOperand(positional)) {
+        out.push(GREP_INDETERMINATE_ARGV);
+      } else {
+        out.push(positional);
+      }
+    }
   }
   return out.filter((p) => /VERDICT:/i.test(String(p || "")));
 }
@@ -2703,12 +2746,36 @@ export function extractHarnessMatcherOperands(text) {
     if (s && /VERDICT:/i.test(s)) out.push(s);
   };
 
-  // case arm literals only: "VERDICT: APPROVE" / 'VERDICT: approve'
-  // (token only — not prose sentences that happen to start with VERDICT:).
+  // case-arm-position-only: quoted VERDICT: TOKEN followed by | or ), so
+  // echo "VERDICT: APPROVE" is not an acceptor. Glob *"VERDICT: TOKEN"*
+  // is collected separately as indeterminate (fenced/multiple-verdict).
   {
-    const re = /["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["']/gi;
+    const re =
+      /(^|[\s|])["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["'](?=\s*(?:\)|\|\s*["']|\|\s*$))/gi;
     let m;
-    while ((m = re.exec(src)) !== null) push(m[1]);
+    while ((m = re.exec(src)) !== null) {
+      const operand = m[2] || m[1];
+      const token = String(operand || "")
+        .replace(/^VERDICT:\s*/i, "")
+        .trim();
+      const folded = token.toUpperCase().replace(/-/g, "_");
+      if (token === "APPROVE" || token === "REQUEST_CHANGES") {
+        push(operand);
+      } else if (folded === "PASS") {
+        push(operand);
+      } else if (VERDICT_LIVE_CASE_ARM_ALIASES.has(folded)) {
+        // Live exact-string aliases (approve, changes-requested): not regex
+        // sites and not allowlisted spellings. Skip so the live harness
+        // stays green via its exact APPROVE / REQUEST_CHANGES arms.
+      } else {
+        push(operand);
+      }
+    }
+  }
+  {
+    const globRe = /\*["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["']\*/gi;
+    let gm;
+    while ((gm = globRe.exec(src)) !== null) push(gm[0]);
   }
 
   // [[ ... =~ OPERAND ]] — OPERAND may be bare or quoted. Use \S+ so
@@ -2768,7 +2835,9 @@ function classifyHarnessVerdictOperands(text) {
     }
     if (kind !== VERDICT_OPERAND_CANONICAL) continue;
     const norm = normalizeMatcherOperand(operand);
-    if (/APPROVE/i.test(norm) || VERDICT_SHAPE_OPERAND_RE.test(norm)) {
+    // Canonical approval requires the exact APPROVE token, not the generic
+    // shape detector (shape-matcher-not-canonical).
+    if (/\bAPPROVE\b/.test(norm)) { // shape-matcher-not-canonical
       sawCanonicalApprove = true;
     }
   }
