@@ -78,6 +78,18 @@ audit → contract install → CI gates → baseline burn-down → canary issue 
 runtime. You approve the adoption PR and any burn-down spending. Done means: a
 Tier A issue flows end-to-end with zero touches from you.
 
+This is one agent session with two paths, not two agents: Gibson is the read-only
+harness source; the application is the target. The agent audits the target's
+canonical checkout, writes only in a claimed target-repo worktree, and opens the
+adoption PR against the target. The canonical boundary and complete owner journey
+are in [docs/13](docs/13-adoption.md#repository-boundary-and-user-journey).
+
+After adoption, make the application repo your normal workspace. Interactive
+sessions still receive Gibson through their adapter or prompt; unattended runs
+receive both roles through `scripts/loop.sh --repo <target>`. You should think
+“I am building `my-app` under Gibson,” not “I am building inside Gibson.” Reuse
+the same Gibson checkout when you adopt the next app.
+
 ## 6. Tune the harness
 
 - **Correct behavior:** don't re-instruct agents ad hoc — file a lesson or edit

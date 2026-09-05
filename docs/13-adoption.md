@@ -25,6 +25,58 @@ settings changes, installs. **Every one of those asks follows the Ask Contract**
 terminology explained inline and each step narrated. No bare commands, no
 unexplained approvals, regardless of how technical the user seems.
 
+## Repository boundary and user journey
+
+> **Canonical statement.** Adoption uses one agent session with two repository
+> roles. The Gibson canonical checkout supplies the harness and stays read-only.
+> The target canonical checkout supplies application truth and stays read-only.
+> Adoption changes happen only in an isolated worktree of the target repository
+> and reach its default branch through a pull request. After adoption, day-to-day
+> product work is target-repo work; Gibson remains the reusable harness supplied
+> by the launcher, adapter, or explicit session prompt.
+
+| Location | Purpose | Mutation during adoption |
+|---|---|---|
+| Gibson canonical checkout | Doctrine, adoption playbook, scripts, and templates | None; read-only source |
+| Target canonical checkout | Application source, repository facts, and worktree anchor | None; audit and worktree creation only |
+| Target adoption worktree | Proposed contract, gates, and target-specific wiring | Yes, within the claimed scope |
+
+The user does **not** need two agents or two conversations. They open one agent
+and supply both paths: “use this Gibson checkout to adopt this application
+repository.” Starting the session from the Gibson checkout is a convenient way
+to load the adoption playbook; it does not make Gibson the application workspace.
+Never copy the application into Gibson, edit application code in Gibson, or edit
+either canonical checkout.
+
+From the user's point of view, adoption is:
+
+1. Install or update one Gibson checkout.
+2. Choose one target application repository.
+3. Give one agent the Gibson path, target path, GitHub remote, and intended
+   runtime(s).
+4. Receive a read-only harnessability audit and a plain-language fix-list.
+5. Receive an adoption pull request in the target repository.
+6. Approve only the consequential owner actions identified by the Ask Contract,
+   then merge the adoption pull request.
+7. Run one small Tier A canary through the complete delivery loop.
+8. Make the target repository the normal project for future product requests.
+
+There are two supported operating forms after adoption:
+
+- **Interactive:** open the agent with the target repo as its workspace and have
+  the Gibson contract supplied by an adapter or explicit prompt. The agent claims
+  and edits only target-repo worktrees.
+- **Loop:** run Gibson's `scripts/loop.sh` with `--repo <target>`. The launcher
+  owns the harness context while builders still work only in target-repo
+  worktrees.
+
+A generic agent launched with only the target repo's harness-neutral `AGENTS.md`
+can read the application's development facts, but it is not thereby running the
+full Gibson harness. The launcher, adapter, or prompt must supply that harness.
+To adopt another application, repeat this journey with the same Gibson checkout;
+do not clone a separate Gibson for every target unless an intentionally different
+fork or policy version is required.
+
 ## Step 1 — Harnessability audit (read-only)
 
 Required sensor: `scripts/git-configure.sh --audit --repo owner/name --path <checkout>`
