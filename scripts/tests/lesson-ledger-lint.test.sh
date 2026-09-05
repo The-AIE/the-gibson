@@ -58,20 +58,20 @@ run_lint() {
 
 echo "# help / unknown flag"
 out=$(node "$SENSOR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'Law 9' && ok "help" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'Law 9' >/dev/null && ok "help" \
   || bad "help (rc=$rc): $out"
 out=$(node "$SENSOR" --definitely-not-a-flag 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'unknown flag' && ok "unknown flag exit 2" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'unknown flag' >/dev/null && ok "unknown flag exit 2" \
   || bad "unknown flag (rc=$rc): $out"
 out=$(node "$SENSOR" --root 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'requires a value' && ok "--root missing value exit 2" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'requires a value' >/dev/null && ok "--root missing value exit 2" \
   || bad "--root missing value (rc=$rc): $out"
 
 echo "# missing ledger fails closed"
 MISSING="$ROOT/no-ledger"
 make_tree "$MISSING"
 run_lint "$MISSING" --offline
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'ledger not found' && ok "missing ledger exits nonzero" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'ledger not found' >/dev/null && ok "missing ledger exits nonzero" \
   || bad "missing ledger (rc=$rc): $out"
 
 echo "# AC1 cited identifier absent"
@@ -85,8 +85,8 @@ make_tree "$AC1_BAD"
 } > "$AC1_BAD/memory/LESSONS.md"
 printf 'See %s in the harness.\n' "$(lid 99)" > "$AC1_BAD/docs/cite.md"
 run_lint "$AC1_BAD" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 99)" \
-    && echo "$out" | grep -q 'docs/cite.md:1'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 99)" >/dev/null \
+    && echo "$out" | grep 'docs/cite.md:1' >/dev/null; then
   ok "AC1 mutation: missing cited id names file:line and id"
 else
   bad "AC1 mutation (rc=$rc): $out"
@@ -102,7 +102,7 @@ make_tree "$AC1_OK"
 } > "$AC1_OK/memory/LESSONS.md"
 printf 'See %s in the harness.\n' "$(lid 1)" > "$AC1_OK/docs/cite.md"
 run_lint "$AC1_OK" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "AC1 clean: cited id present" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null && ok "AC1 clean: cited id present" \
   || bad "AC1 clean (rc=$rc): $out"
 
 echo "# AC2 closed issue"
@@ -157,8 +157,8 @@ export GH_LOG="$ROOT/gh.log"
 : > "$GH_LOG"
 
 GH_STATE=closed run_lint "$AC2" --repo acme/app
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'issue #7' && echo "$out" | grep -q 'closed'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'issue #7' >/dev/null && echo "$out" | grep 'closed' >/dev/null; then
   ok "AC2 mutation: closed pending issue exits 1"
 else
   bad "AC2 mutation closed (rc=$rc): $out"
@@ -166,17 +166,17 @@ fi
 
 : > "$GH_LOG"
 GH_STATE=open run_lint "$AC2" --repo acme/app
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "AC2 clean: open pending issue" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null && ok "AC2 clean: open pending issue" \
   || bad "AC2 clean open (rc=$rc): $out"
 
 : > "$GH_LOG"
 GH_MODE=fail run_lint "$AC2" --repo acme/app
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'gh api failed' && ok "AC2 gh error fails closed" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'gh api failed' >/dev/null && ok "AC2 gh error fails closed" \
   || bad "AC2 gh error (rc=$rc): $out"
 
 : > "$GH_LOG"
 GH_MODE=badjson run_lint "$AC2" --repo acme/app
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'unusable state\|gh api failed' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'unusable state\|gh api failed' >/dev/null \
   && ok "AC2 unusable gh payload fails closed" \
   || bad "AC2 badjson (rc=$rc): $out"
 
@@ -184,8 +184,8 @@ echo "# AC2 --offline skips only the closed-issue check"
 : > "$GH_LOG"
 unset GH_STATE
 GH_MODE=fail run_lint "$AC2" --repo acme/app --offline
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
-    && echo "$out" | grep -qF -- '--offline: skipping closed-issue check' \
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
+    && echo "$out" | grep -F -- '--offline: skipping closed-issue check' >/dev/null \
     && [[ ! -s "$GH_LOG" ]]; then
   ok "AC2 --offline skips check, says so, does not call gh"
 else
@@ -200,8 +200,8 @@ export GITHUB_REPOSITORY=decoy/repo
 export GH_REPO=decoy/repo
 export GH_DECOY_REPO=decoy/repo
 GH_STATE=closed run_lint "$AC2"
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'issue #7' && echo "$out" | grep -q 'closed'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'issue #7' >/dev/null && echo "$out" | grep 'closed' >/dev/null; then
   ok "AC2 mutation: --root wins over caller cwd / GITHUB_REPOSITORY"
 else
   bad "AC2 --root repo inference (rc=$rc): $out"
@@ -222,9 +222,9 @@ make_tree "$AC3_BAD"
   printf '%s\n' "ok \"$(lid 1) releases dead lanes\""
 } > "$AC3_BAD/scripts/tests/planted.test.sh"
 run_lint "$AC3_BAD" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'scripts/tests/planted.test.sh' \
-    && echo "$out" | grep -q 'pins it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'scripts/tests/planted.test.sh' >/dev/null \
+    && echo "$out" | grep 'pins it' >/dev/null; then
   ok "AC3 mutation: unfixed lesson pinned by test name"
 else
   bad "AC3 mutation test-name (rc=$rc): $out"
@@ -244,9 +244,9 @@ make_tree "$AC3_AT"
   printf '%s\n' "@test \"$(lid 1) still holds\""
 } > "$AC3_AT/scripts/tests/planted.test.sh"
 run_lint "$AC3_AT" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'scripts/tests/planted.test.sh' \
-    && echo "$out" | grep -q 'pins it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'scripts/tests/planted.test.sh' >/dev/null \
+    && echo "$out" | grep 'pins it' >/dev/null; then
   ok "AC3 mutation: unfixed lesson pinned by @test name"
 else
   bad "AC3 mutation @test (rc=$rc): $out"
@@ -268,7 +268,7 @@ make_tree "$AC3_COMMENT"
   printf '%s\n' 'true'
 } > "$AC3_COMMENT/scripts/tests/planted.test.sh"
 run_lint "$AC3_COMMENT" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
   && ok "AC3 clean: unrelated comment does not pin" \
   || bad "AC3 unrelated comment (rc=$rc): $out"
 
@@ -290,7 +290,7 @@ make_tree "$AC3_HEADER"
   printf '%s\n' 'true'
 } > "$AC3_HEADER/scripts/tests/planted.test.sh"
 run_lint "$AC3_HEADER" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
   && ok "AC3 clean: header comment does not pin" \
   || bad "AC3 header comment (rc=$rc): $out"
 
@@ -305,10 +305,10 @@ make_tree "$AC3_QUOTED"
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -uo pipefail'
-  printf '%s\n' "echo \"\$out\" | grep -q '$(lid 1)' && ok help"
+  printf '%s\n' "echo \"\$out\" | grep '$(lid 1)' >/dev/null && ok help"
 } > "$AC3_QUOTED/scripts/tests/planted.test.sh"
 run_lint "$AC3_QUOTED" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
   && ok "AC3 clean: quoted grep is not a pin" \
   || bad "AC3 quoted occurrence (rc=$rc): $out"
 
@@ -327,7 +327,7 @@ make_tree "$AC3_LOOSE"
   printf '%s\n' "# the $(lid 1) failure this sensor exists to catch. Pin the canonical key name."
 } > "$AC3_LOOSE/scripts/tests/planted.test.sh"
 run_lint "$AC3_LOOSE" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
   && ok "AC3 clean: loose pin word does not pin" \
   || bad "AC3 loose pin word (rc=$rc): $out"
 
@@ -346,7 +346,7 @@ make_tree "$AC3_KW"
   printf '%s\n' "# pins $(lid 1) as a regression"
 } > "$AC3_KW/scripts/tests/planted.test.sh"
 run_lint "$AC3_KW" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep 'pins it' >/dev/null; then
   ok "AC3 mutation: # pins ID still pins"
 else
   bad "AC3 pin-keyword (rc=$rc): $out"
@@ -367,7 +367,7 @@ make_tree "$AC3_PINCOL"
   printf '%s\n' "# pin: $(lid 1)"
 } > "$AC3_PINCOL/scripts/tests/planted.test.sh"
 run_lint "$AC3_PINCOL" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep 'pins it' >/dev/null; then
   ok "AC3 mutation: pin: ID still pins"
 else
   bad "AC3 pin-colon (rc=$rc): $out"
@@ -388,7 +388,7 @@ make_tree "$AC3_REG"
   printf '%s\n' "# regression: $(lid 1)"
 } > "$AC3_REG/scripts/tests/planted.test.sh"
 run_lint "$AC3_REG" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep 'pins it' >/dev/null; then
   ok "AC3 mutation: regression: ID still pins"
 else
   bad "AC3 regression-colon (rc=$rc): $out"
@@ -409,7 +409,7 @@ make_tree "$AC3_HEADER_PIN"
   printf '%s\n' 'true'
 } > "$AC3_HEADER_PIN/scripts/tests/planted.test.sh"
 run_lint "$AC3_HEADER_PIN" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'pins it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep 'pins it' >/dev/null; then
   ok "AC3 mutation: header # pins ID still pins"
 else
   bad "AC3 header explicit pin (rc=$rc): $out"
@@ -429,7 +429,7 @@ make_tree "$AC3_OK"
   printf '%s\n' "ok \"$(lid 1) releases dead lanes\""
 } > "$AC3_OK/scripts/tests/planted.test.sh"
 run_lint "$AC3_OK" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "AC3 clean: pinned lesson is fixed" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null && ok "AC3 clean: pinned lesson is fixed" \
   || bad "AC3 clean (rc=$rc): $out"
 
 echo "# AC3/AC6 claimed pinner that does not pin"
@@ -446,8 +446,8 @@ make_tree "$AC3_FALSE"
   printf '%s\n' 'echo "no lesson token here"'
 } > "$AC3_FALSE/scripts/tests/planted.test.sh"
 run_lint "$AC3_FALSE" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'does not pin it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'does not pin it' >/dev/null; then
   ok "AC6 mutation: claimed pinner without ID fails"
 else
   bad "AC6 false pinner (rc=$rc): $out"
@@ -468,8 +468,8 @@ make_tree "$AC6_HEADER"
   printf '%s\n' 'true'
 } > "$AC6_HEADER/scripts/tests/planted.test.sh"
 run_lint "$AC6_HEADER" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'does not pin it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'does not pin it' >/dev/null; then
   ok "AC6 mutation: claimed pinner with only a header mention fails"
 else
   bad "AC6 header pinner (rc=$rc): $out"
@@ -486,11 +486,11 @@ make_tree "$AC6_QUOTED"
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -uo pipefail'
-  printf '%s\n' "echo \"\$out\" | grep -q '$(lid 1)' && ok help"
+  printf '%s\n' "echo \"\$out\" | grep '$(lid 1)' >/dev/null && ok help"
 } > "$AC6_QUOTED/scripts/tests/planted.test.sh"
 run_lint "$AC6_QUOTED" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'does not pin it'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'does not pin it' >/dev/null; then
   ok "AC6 mutation: claimed pinner with only a quoted occurrence fails"
 else
   bad "AC6 quoted pinner (rc=$rc): $out"
@@ -506,8 +506,8 @@ make_tree "$AC4_ORDER"
   entry 2 "fixed"
 } > "$AC4_ORDER/memory/LESSONS.md"
 run_lint "$AC4_ORDER" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'not strictly increasing' \
-    && echo "$out" | grep -q "$(lid 3)" && echo "$out" | grep -q "$(lid 2)"; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep 'not strictly increasing' >/dev/null \
+    && echo "$out" | grep "$(lid 3)" >/dev/null && echo "$out" | grep "$(lid 2)" >/dev/null; then
   ok "AC4 mutation: non-monotonic IDs"
 else
   bad "AC4 order (rc=$rc): $out"
@@ -522,7 +522,7 @@ make_tree "$AC4_DUP"
   entry 1 "fixed"
 } > "$AC4_DUP/memory/LESSONS.md"
 run_lint "$AC4_DUP" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "duplicate lesson ID $(lid 1)"; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "duplicate lesson ID $(lid 1)" >/dev/null; then
   ok "AC4 mutation: duplicate ID"
 else
   bad "AC4 dup (rc=$rc): $out"
@@ -540,8 +540,8 @@ make_tree "$AC4_STATUS"
   printf '%s\n' "**Tags:** #fixture"
 } > "$AC4_STATUS/memory/LESSONS.md"
 run_lint "$AC4_STATUS" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'missing \*\*Status:\*\*'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'missing \*\*Status:\*\*' >/dev/null; then
   ok "AC4 mutation: missing Status"
 else
   bad "AC4 status (rc=$rc): $out"
@@ -559,8 +559,8 @@ make_tree "$AC4_TAGS"
   printf '%s\n' "**Status:** fixed"
 } > "$AC4_TAGS/memory/LESSONS.md"
 run_lint "$AC4_TAGS" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'missing \*\*Tags:\*\*'; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'missing \*\*Tags:\*\*' >/dev/null; then
   ok "AC4 mutation: missing Tags"
 else
   bad "AC4 tags (rc=$rc): $out"
@@ -576,7 +576,7 @@ make_tree "$AC4_OK"
   entry 5 "fixed"
 } > "$AC4_OK/memory/LESSONS.md"
 run_lint "$AC4_OK" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "AC4 clean: increasing IDs with fields" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null && ok "AC4 clean: increasing IDs with fields" \
   || bad "AC4 clean (rc=$rc): $out"
 
 echo "# AC4 fenced example Status/Tags do not satisfy the real entry"
@@ -594,9 +594,9 @@ make_tree "$AC4_FENCE"
   printf '%s\n' '```'
 } > "$AC4_FENCE/memory/LESSONS.md"
 run_lint "$AC4_FENCE" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'missing \*\*Status:\*\*' \
-    && ! echo "$out" | grep -q "duplicate lesson ID $(lid 1)"; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'missing \*\*Status:\*\*' >/dev/null \
+    && ! echo "$out" | grep "duplicate lesson ID $(lid 1)" >/dev/null; then
   ok "AC4 mutation: fenced Status/Tags/heading are not real fields"
 else
   bad "AC4 fence fields (rc=$rc): $out"
@@ -617,7 +617,7 @@ make_tree "$AC4_FENCE_OK"
   entry 2 "fixed"
 } > "$AC4_FENCE_OK/memory/LESSONS.md"
 run_lint "$AC4_FENCE_OK" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
   && ok "AC4 clean: fenced heading is not a duplicate" \
   || bad "AC4 fence duplicate (rc=$rc): $out"
 
@@ -636,9 +636,9 @@ make_tree "$AC4_TILDE"
   printf '%s\n' '~~~'
 } > "$AC4_TILDE/memory/LESSONS.md"
 run_lint "$AC4_TILDE" --offline
-if [[ "$rc" -eq 1 ]] && echo "$out" | grep -q "$(lid 1)" \
-    && echo "$out" | grep -q 'missing \*\*Status:\*\*' \
-    && ! echo "$out" | grep -q "duplicate lesson ID $(lid 1)"; then
+if [[ "$rc" -eq 1 ]] && echo "$out" | grep "$(lid 1)" >/dev/null \
+    && echo "$out" | grep 'missing \*\*Status:\*\*' >/dev/null \
+    && ! echo "$out" | grep "duplicate lesson ID $(lid 1)" >/dev/null; then
   ok "AC4 mutation: tilde-fenced Status/Tags/heading are not real fields"
 else
   bad "AC4 tilde fence fields (rc=$rc): $out"
@@ -659,7 +659,7 @@ make_tree "$AC4_TILDE_OK"
   entry 2 "fixed"
 } > "$AC4_TILDE_OK/memory/LESSONS.md"
 run_lint "$AC4_TILDE_OK" --offline
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null \
   && ok "AC4 clean: tilde-fenced heading is not a duplicate" \
   || bad "AC4 tilde fence duplicate (rc=$rc): $out"
 
@@ -687,7 +687,7 @@ done < <(grep -E '^## L-[0-9]{3} ' "$LEDGER" | sed -E 's/^## L-0*([0-9]+) .*/\1/
 [[ "$mono" -eq 1 && "$prev" -gt 0 ]] && ok "live ledger IDs strictly increasing" \
   || bad "live ledger IDs not strictly increasing"
 run_lint "$REPO_ROOT"
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK'; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null; then
   ok "live tree passes the lint"
 else
   bad "live tree (rc=$rc): $out"
@@ -701,8 +701,8 @@ B1=$(lid 1); B2=$(lid 2)
   printf '## %s · 2026-09-04 · trailing-marker\n**What happened:** x\n**Status:** fix-pending (issue #1)\n**Tags:** #x\n' "$B2"; } > "$R4/memory/LESSONS.md"
 printf '%s\n' '#!/bin/bash' "[[ \"\$a\" = \"\$b\" ]] # pins $B2" > "$R4/scripts/tests/t.test.sh"
 run_lint "$R4" --offline
-printf '%s\n' "$out" | grep -qE "$B1 .*(missing|lacks|no) .*Status|$B1.*Status" && ok "r4-1: Status/Tags inside a mid-line HTML comment do not satisfy the entry" || bad "r4-1: mid-line comment satisfied the entry: $out"
-printf '%s\n' "$out" | grep -q "$B2 is not fixed but scripts/tests/t.test.sh pins it" && ok "r4-2: a trailing '# pins' comment on a code line is an explicit marker" || bad "r4-2: trailing marker not recognised: $out"
+printf '%s\n' "$out" | grep -E "$B1 .*(missing|lacks|no) .*Status|$B1.*Status" >/dev/null && ok "r4-1: Status/Tags inside a mid-line HTML comment do not satisfy the entry" || bad "r4-1: mid-line comment satisfied the entry: $out"
+printf '%s\n' "$out" | grep "$B2 is not fixed but scripts/tests/t.test.sh pins it" >/dev/null && ok "r4-2: a trailing '# pins' comment on a code line is an explicit marker" || bad "r4-2: trailing marker not recognised: $out"
 
 
 echo "# Codex #316 round 5: quoted ID before a real trailing marker; title with the ID mid-string; two openers on one line"
@@ -713,9 +713,9 @@ C1=$(lid 1); C2=$(lid 2); C3=$(lid 3)
   printf '## %s · 2026-09-04 · two-openers\n<!-- closed --> prose <!--\n**Status:** fixed\n**Tags:** #x\n-->\n' "$C3"; } > "$R5/memory/LESSONS.md"
 printf '%s\n' '#!/bin/bash' "grep -q '$C1' \"\$out\" # pins $C1" "ok \"claim cleanup regression $C2\"" > "$R5/scripts/tests/t.test.sh"
 run_lint "$R5" --offline
-printf '%s\n' "$out" | grep -q "$C1 is not fixed but scripts/tests/t.test.sh pins it" && ok "r5-1: a quoted ID earlier on the line does not veto a real trailing '# pins' marker" || bad "r5-1: trailing marker vetoed: $out"
-printf '%s\n' "$out" | grep -q "$C2 is not fixed but scripts/tests/t.test.sh pins it" && ok "r5-2: ok \"… regression L-NNN\" (ID mid-title) is a test name" || bad "r5-2: mid-title ID not recognised: $out"
-printf '%s\n' "$out" | grep -qE "$C3.*(Status|Tags)" && ok "r5-3: <!-- closed --> prose <!-- … --> still hides the commented fields" || bad "r5-3: second opener ignored: $out"
+printf '%s\n' "$out" | grep "$C1 is not fixed but scripts/tests/t.test.sh pins it" >/dev/null && ok "r5-1: a quoted ID earlier on the line does not veto a real trailing '# pins' marker" || bad "r5-1: trailing marker vetoed: $out"
+printf '%s\n' "$out" | grep "$C2 is not fixed but scripts/tests/t.test.sh pins it" >/dev/null && ok "r5-2: ok \"… regression L-NNN\" (ID mid-title) is a test name" || bad "r5-2: mid-title ID not recognised: $out"
+printf '%s\n' "$out" | grep -E "$C3.*(Status|Tags)" >/dev/null && ok "r5-3: <!-- closed --> prose <!-- … --> still hides the commented fields" || bad "r5-3: second opener ignored: $out"
 
 
 echo "# Codex #316 round 6: title isolation — grep in a title, fixture lines carrying title-like text, assertion strings"
@@ -724,10 +724,10 @@ D1=$(lid 1); D2=$(lid 2); D3=$(lid 3); D4=$(lid 4)
 { for n in 1 2 3 4; do printf '## %s · 2026-09-04 · t%s\n**What happened:** x\n**Status:** fix-pending (issue #1)\n**Tags:** #x\n\n' "$(lid $n)" "$n"; done; } > "$R6/memory/LESSONS.md"
 printf '%s\n' '#!/bin/bash' "ok \"$D1 verifies grep handling\"" "printf '%s\\n' '@test \"$D2 works\"' > fixture" "test('unrelated', () => { expect(out).toBe('$D3'); })" "@test \"regression $D4\"" > "$R6/scripts/tests/t.test.sh"
 run_lint "$R6" --offline
-printf '%s\n' "$out" | grep -q "$D1 is not fixed but scripts/tests/t.test.sh pins it" && ok "r6-1: a title containing the word grep still pins" || bad "r6-1: grep veto: $out"
-printf '%s\n' "$out" | grep -q "$D2 is not fixed" && bad "r6-2a: fixture line carrying '@test \"L-NNN\"' text counted as a pin: $out" || ok "r6-2a: a printf fixture line is not a title"
-printf '%s\n' "$out" | grep -q "$D3 is not fixed" && bad "r6-2b: ID only in an assertion string counted as a pin: $out" || ok "r6-2b: an assertion string is not the title"
-printf '%s\n' "$out" | grep -q "$D4 is not fixed but scripts/tests/t.test.sh pins it" && ok "r6-2c: @test \"regression L-NNN\" (ID mid-title) pins" || bad "r6-2c: mid-title @test missed: $out"
+printf '%s\n' "$out" | grep "$D1 is not fixed but scripts/tests/t.test.sh pins it" >/dev/null && ok "r6-1: a title containing the word grep still pins" || bad "r6-1: grep veto: $out"
+printf '%s\n' "$out" | grep "$D2 is not fixed" >/dev/null && bad "r6-2a: fixture line carrying '@test \"L-NNN\"' text counted as a pin: $out" || ok "r6-2a: a printf fixture line is not a title"
+printf '%s\n' "$out" | grep "$D3 is not fixed" >/dev/null && bad "r6-2b: ID only in an assertion string counted as a pin: $out" || ok "r6-2b: an assertion string is not the title"
+printf '%s\n' "$out" | grep "$D4 is not fixed but scripts/tests/t.test.sh pins it" >/dev/null && ok "r6-2c: @test \"regression L-NNN\" (ID mid-title) pins" || bad "r6-2c: mid-title @test missed: $out"
 
 echo
 
@@ -741,12 +741,12 @@ A1=$(lid 1); A2=$(lid 2); A99=$(lid 99)
 printf '%s\n' '#!/bin/bash' "printf '%s\\n' '# pins $A1' > fixture" "echo \"$A1\" > needle" > "$R3/scripts/tests/q.test.sh"
 printf 'see %s\n' "$A99" > "$R3/docs/cite.md"
 run_lint "$R3" --offline
-printf '%s\n' "$out" | grep -q "$A1 status claims pinned by scripts/tests/q.test.sh but" && ok "r3-2: a quoted '# pins' marker in fixture data is not a pin" || bad "r3-2: quoted marker accepted: $out"
-printf '%s\n' "$out" | grep -q "$A2 status claims 'pinned by' but names no" && ok "r3-3: 'pinned by q.test.sh' (no scripts/tests path) is a finding, not a bypass" || bad "r3-3: zero-path claim bypassed: $out"
-printf '%s\n' "$out" | grep -q "cited $A99 is absent" && ok "r3-4: an entry inside an HTML comment is not an entry (its citation is dangling)" || bad "r3-4: commented template parsed as entry: $out"
+printf '%s\n' "$out" | grep "$A1 status claims pinned by scripts/tests/q.test.sh but" >/dev/null && ok "r3-2: a quoted '# pins' marker in fixture data is not a pin" || bad "r3-2: quoted marker accepted: $out"
+printf '%s\n' "$out" | grep "$A2 status claims 'pinned by' but names no" >/dev/null && ok "r3-3: 'pinned by q.test.sh' (no scripts/tests path) is a finding, not a bypass" || bad "r3-3: zero-path claim bypassed: $out"
+printf '%s\n' "$out" | grep "cited $A99 is absent" >/dev/null && ok "r3-4: an entry inside an HTML comment is not an entry (its citation is dangling)" || bad "r3-4: commented template parsed as entry: $out"
 printf '%s\n' '#!/bin/bash' "# pins $A1" > "$R3/scripts/tests/q.test.sh"
 run_lint "$R3" --offline
-printf '%s\n' "$out" | grep -q "$A1 status claims" && bad "r3-2 control: a real comment-line marker was rejected: $out" || ok "r3-2 control: a real '# pins' comment line is a pin"
+printf '%s\n' "$out" | grep "$A1 status claims" >/dev/null && bad "r3-2 control: a real comment-line marker was rejected: $out" || ok "r3-2 control: a real '# pins' comment line is a pin"
 
 echo "lesson-ledger-lint.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

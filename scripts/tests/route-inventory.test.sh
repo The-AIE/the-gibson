@@ -22,31 +22,31 @@ trap 'rm -rf "$ROOT"' EXIT
 
 # --- help ---
 out=$(node "$SENSOR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help exits 0 with WHAT/WHY" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WHAT IT DOES' >/dev/null && ok "help exits 0 with WHAT/WHY" \
   || bad "help (rc=$rc): $out"
 
 # --- unknown flag fails closed (typo must not scan cwd) ---
 out=$(node "$SENSOR" --definitely-not-a-flag 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'unknown flag: --definitely-not-a-flag' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null \
   && ok "unknown flag exits 2 with exact message" \
   || bad "unknown flag (rc=$rc): $out"
 
 # --- typo'd --root must not fall through to cwd ---
 out=$(node "$SENSOR" --rot "$ROOT" 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'unknown flag: --rot' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'unknown flag: --rot' >/dev/null \
   && ok "--rot typo is unknown flag (not silent cwd scan)" \
   || bad "--rot (rc=$rc): $out"
 
 # --- missing value ---
 out=$(node "$SENSOR" --root 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'requires a value' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'requires a value' >/dev/null \
   && ok "--root without value exits 2" \
   || bad "--root missing value (rc=$rc): $out"
 
 # --- no app/ under root ---
 mkdir -p "$ROOT/empty"
 out=$(node "$SENSOR" --root "$ROOT/empty" 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'no app' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'no app' >/dev/null \
   && ok "missing app/ exits 2" \
   || bad "missing app (rc=$rc): $out"
 
@@ -57,12 +57,12 @@ touch "$ROOT/app/dashboard/page.tsx"
 touch "$ROOT/app/api/health/route.ts"
 
 out=$(node "$SENSOR" --root "$ROOT" 2>/dev/null); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"path"' && ok "emits JSON with path fields" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"path"' >/dev/null && ok "emits JSON with path fields" \
   || bad "JSON emit (rc=$rc): $out"
-echo "$out" | grep -q '"/"' && ok "includes root page" || bad "missing root: $out"
-echo "$out" | grep -q '/dashboard' && ok "includes /dashboard" || bad "missing dashboard: $out"
-echo "$out" | grep -q '/api/health' && ok "includes /api/health handler" || bad "missing api: $out"
-echo "$out" | grep -q '"roles"' && ok "includes roles array" || bad "no roles: $out"
+echo "$out" | grep '"/"' >/dev/null && ok "includes root page" || bad "missing root: $out"
+echo "$out" | grep '/dashboard' >/dev/null && ok "includes /dashboard" || bad "missing dashboard: $out"
+echo "$out" | grep '/api/health' >/dev/null && ok "includes /api/health handler" || bad "missing api: $out"
+echo "$out" | grep '"roles"' >/dev/null && ok "includes roles array" || bad "no roles: $out"
 
 # --- --out writes file ---
 out=$(node "$SENSOR" --root "$ROOT" --out "$ROOT/matrix.json" 2>&1); rc=$?
@@ -73,14 +73,14 @@ grep -q 'generated_at' "$ROOT/matrix.json" && ok "matrix has generated_at" \
 
 # --- --roles overrides defaults ---
 out=$(node "$SENSOR" --root "$ROOT" --roles admin,guest 2>/dev/null); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"guest"' && ok "--roles accepted" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"guest"' >/dev/null && ok "--roles accepted" \
   || bad "--roles (rc=$rc): $out"
 
 # --- unexpected positional must not scan cwd or write --out (#202) ---
 pos_out="$ROOT/should-not-exist.json"
 out=$(node "$SENSOR" /tmp/example --out "$pos_out" 2>"$ROOT/pos.err"); rc=$?
 stderr=$(cat "$ROOT/pos.err")
-[[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
+[[ "$rc" -eq 2 ]] && echo "$stderr" | grep 'unexpected argument' >/dev/null \
   && [[ -z "$out" ]] && [[ ! -f "$pos_out" ]] \
   && ok "bare positional exits 2 with unexpected argument and writes no file" \
   || bad "bare positional (rc=$rc stdout=$(printf %s "$out" | wc -c) file=$([[ -f $pos_out ]] && echo yes || echo no)): $stderr"
@@ -89,7 +89,7 @@ stderr=$(cat "$ROOT/pos.err")
 dash_out="$ROOT/should-not-exist-dash.json"
 node "$SENSOR" -- --root "$ROOT" --out "$dash_out" 2>"$ROOT/dash.err" >/dev/null; rc=$?
 stderr=$(cat "$ROOT/dash.err")
-[[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
+[[ "$rc" -eq 2 ]] && echo "$stderr" | grep 'unexpected argument' >/dev/null \
   && [[ ! -f "$dash_out" ]] \
   && ok "argument after -- exits 2 with unexpected argument and writes no file" \
   || bad "after -- (rc=$rc file=$([[ -f $dash_out ]] && echo yes || echo no)): $stderr"
@@ -98,7 +98,7 @@ stderr=$(cat "$ROOT/dash.err")
 trail_out="$ROOT/should-not-exist-trail.json"
 node "$SENSOR" --root "$ROOT" --out "$trail_out" /tmp/example 2>"$ROOT/trail.err" >/dev/null; rc=$?
 stderr=$(cat "$ROOT/trail.err")
-[[ "$rc" -eq 2 ]] && echo "$stderr" | grep -q 'unexpected argument' \
+[[ "$rc" -eq 2 ]] && echo "$stderr" | grep 'unexpected argument' >/dev/null \
   && [[ ! -f "$trail_out" ]] \
   && ok "trailing positional exits 2 and does not write --out" \
   || bad "trailing positional (rc=$rc file=$([[ -f $trail_out ]] && echo yes || echo no)): $stderr"

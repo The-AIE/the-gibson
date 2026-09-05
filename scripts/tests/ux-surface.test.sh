@@ -27,7 +27,7 @@ expect() {
   rc=$?
   local got=none
   [[ "$rc" -eq 1 ]] && got=ui
-  if [[ "$got" == "$want" ]] && echo "$out" | grep -q "surface=$want"; then
+  if [[ "$got" == "$want" ]] && echo "$out" | grep "surface=$want" >/dev/null; then
     ok "$desc"
   else
     bad "$desc (want $want, got $got / $out)"

@@ -20,9 +20,9 @@ command -v node >/dev/null || { echo "convention-sensors.test.sh: node required"
 echo "# vendored mjs self-containment"
 
 listed=$(cs_list_vendored_mjs "$REPO_ROOT") || { bad "list vendored mjs (plumbing)"; listed=""; }
-echo "$listed" | grep -qx 'scripts/test-integrity.mjs' \
-  && echo "$listed" | grep -qx 'scripts/check-active-work.mjs' \
-  && echo "$listed" | grep -qx 'scripts/route-inventory.mjs' \
+echo "$listed" | grep -x 'scripts/test-integrity.mjs' >/dev/null \
+  && echo "$listed" | grep -x 'scripts/check-active-work.mjs' >/dev/null \
+  && echo "$listed" | grep -x 'scripts/route-inventory.mjs' >/dev/null \
   && ok "sparse-checkout + README name the three vendored mjs files" \
   || bad "vendored list: $listed"
 
@@ -38,7 +38,7 @@ cp "$REPO_ROOT/scripts/test-integrity.mjs" "$ROOT/isolated/test-integrity.mjs"
 cp "$REPO_ROOT/scripts/check-active-work.mjs" "$ROOT/isolated/check-active-work.mjs"
 cp "$REPO_ROOT/scripts/route-inventory.mjs" "$ROOT/isolated/route-inventory.mjs"
 out=$(node "$ROOT/isolated/test-integrity.mjs" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'test-integrity' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'test-integrity' >/dev/null \
   && ok "isolated test-integrity.mjs --help works without lib/" \
   || bad "isolated test-integrity (rc=$rc): $out"
 out=$(node "$ROOT/isolated/check-active-work.mjs" --help 2>&1); rc=$?
@@ -51,7 +51,7 @@ mkdir -p "$ROOT/ri-app/app/dashboard"
 printf '%s\n' 'export default function Page(){return null}' > "$ROOT/ri-app/app/page.tsx"
 printf '%s\n' 'export default function Dash(){return null}' > "$ROOT/ri-app/app/dashboard/page.tsx"
 out=$(node "$ROOT/isolated/route-inventory.mjs" --root "$ROOT/ri-app" 2>/dev/null); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"/dashboard"' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"/dashboard"' >/dev/null \
   && ok "isolated route-inventory.mjs scans app/ fixture without lib/" \
   || bad "isolated route-inventory (rc=$rc): $out"
 
@@ -72,15 +72,15 @@ printf '%s\n' 'name: dummy' > "$BARE/ci/gibson-gate.yml"
   printf '%s\n' 'console.log("planted");'
 } > "$BARE/scripts/planted-vendor.mjs"
 bare_listed=$(cs_list_vendored_mjs "$BARE") || { bad "list bare-name vendored mjs"; bare_listed=""; }
-if echo "$bare_listed" | grep -qx 'scripts/planted-vendor.mjs' \
-    && ! echo "$bare_listed" | grep -qx 'scripts/example.mjs' \
-    && ! echo "$bare_listed" | grep -q 'skip-me.mjs'; then
+if echo "$bare_listed" | grep -x 'scripts/planted-vendor.mjs' >/dev/null \
+    && ! echo "$bare_listed" | grep -x 'scripts/example.mjs' >/dev/null \
+    && ! echo "$bare_listed" | grep 'skip-me.mjs' >/dev/null; then
   ok "README bare name planted-vendor.mjs maps to scripts/planted-vendor.mjs"
 else
   bad "bare-name list missing planted-vendor or pulled prose: $bare_listed"
 fi
 hits=$(cs_vendored_selfcontained "$BARE"); rc=$?
-if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep -q 'from'; then
+if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep 'from' >/dev/null; then
   echo "  planted README-listed bare-name relative-import failure line:"
   printf '%s\n' "$hits" | sed 's/^/    /'
   ok "mutation: relative import in README-listed bare-name file fails"
@@ -98,7 +98,7 @@ mut="$ROOT/mut-vendored.mjs"
   printf '%s\n' 'console.log("mutant");'
 } > "$mut"
 hits=$(cs_mjs_relative_import_hits "$mut"); rc=$?
-if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep -q 'from' && printf '%s\n' "$hits" | grep -qE ':2: '; then
+if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep 'from' >/dev/null && printf '%s\n' "$hits" | grep -E ':2: ' >/dev/null; then
   echo "  planted relative-import failure line:"
   printf '%s\n' "$hits" | sed 's/^/    /'
   ok "mutation: vendored-file fixture with relative import fails the sensor"
@@ -113,8 +113,8 @@ plant_rel() {
   local expect_line="${5:-}"
   printf '%s\n' '#!/usr/bin/env node' "$src" > "$ROOT/$name"
   hits=$(cs_mjs_relative_import_hits "$ROOT/$name"); rc=$?
-  if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep -q "$needle"; then
-    if [[ -n "$expect_line" ]] && ! printf '%s\n' "$hits" | grep -qE ":${expect_line}: "; then
+  if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep "$needle" >/dev/null; then
+    if [[ -n "$expect_line" ]] && ! printf '%s\n' "$hits" | grep -E ":${expect_line}: " >/dev/null; then
       bad "mutation $label wrong line (want :${expect_line}:): $hits"
       return
     fi
@@ -142,8 +142,8 @@ utf_import="$ROOT/mut-utf8-import.mjs"
   printf '%s\n' 'import {x} from "./z.mjs" // keep-me-in-diag café — �'
 } > "$utf_import"
 hits=$(cs_mjs_relative_import_hits "$utf_import"); rc=$?
-if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep -qE ':2: ' \
-    && printf '%s\n' "$hits" | grep -q 'keep-me-in-diag'; then
+if [[ "$rc" -eq 1 ]] && printf '%s\n' "$hits" | grep -E ':2: ' >/dev/null \
+    && printf '%s\n' "$hits" | grep 'keep-me-in-diag' >/dev/null; then
   echo "  planted utf8-import failure line:"
   printf '%s\n' "$hits" | sed 's/^/    /'
   ok "mutation: U+FFFD/em-dash file still reports orig file:line"

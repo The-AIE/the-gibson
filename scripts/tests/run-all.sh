@@ -945,7 +945,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     bash32_hash=$(printf '%s' "$bash32_hash" | tr 'A-F' 'a-f')
     bash32_parsed=$bash32_n
     if [[ -n "$bash32_n" && "$bash32_n" -gt 0 && "$bash32_n" -eq "$bash32_parsed" ]] \
-       && printf '%s' "$bash32_hash" | grep -Eq '^[0-9a-f]{64}$'; then
+       && printf '%s' "$bash32_hash" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
       echo "GIBSON_BASH32_SYNTAX schema=gibson.bash32-syntax/v1 discovered=${bash32_n} parsed=${bash32_parsed} paths_sha256=${bash32_hash}"
       BASH32_PATHS_SHA256=$bash32_hash
     else
@@ -1090,7 +1090,7 @@ while IFS= read -r f; do
     _tf=${line%%  *}
     _rest=${line#*  }
     _tt=${_rest%%  *}
-    if echo "$TOOL_GUARD_BASELINE" | grep -qxF "${_tf}	${_tt}"; then
+    if echo "$TOOL_GUARD_BASELINE" | grep -xF "${_tf}	${_tt}" >/dev/null; then
       continue
     fi
     TOOL_GUARD_HITS="${TOOL_GUARD_HITS}${line}"$'\n'
@@ -1105,7 +1105,7 @@ while IFS= read -r row; do
   bf=${row%%	*}; bt=${row#*	}
   [[ -f "$bf" ]] || { TOOL_GUARD_STALE="${TOOL_GUARD_STALE}${row} (missing file)"$'\n'; continue; }
   _now=$(cs_tool_guard_hits "$bf") || true
-  if ! printf '%s\n' "$_now" | grep -q "  ${bt}  "; then
+  if ! printf '%s\n' "$_now" | grep "  ${bt}  " >/dev/null; then
     TOOL_GUARD_STALE="${TOOL_GUARD_STALE}${row}"$'\n'
   fi
 done <<< "$TOOL_GUARD_BASELINE"
@@ -1373,10 +1373,10 @@ gibson_metrics_bounds_ok() {
 # Callers pass the exact terminal tally suffix, not a prefixed line.
 gibson_metrics_tally_count() {
   local line="$1" word="$2" default="$3" raw n num
-  if printf '%s\n' "$line" | grep -Eq -- "-[0-9]+[[:space:]]+${word}"; then
+  if printf '%s\n' "$line" | grep -E -- "-[0-9]+[[:space:]]+${word}" >/dev/null; then
     return 1
   fi
-  if printf '%s\n' "$line" | grep -Eq -- "[+][0-9]+[[:space:]]+${word}"; then
+  if printf '%s\n' "$line" | grep -E -- "[+][0-9]+[[:space:]]+${word}" >/dev/null; then
     return 1
   fi
   n=$(printf '%s\n' "$line" | grep -oE "[0-9]+(\.[0-9]+)?[[:space:]]+${word}" | grep -c . || true)
@@ -1405,7 +1405,7 @@ gibson_metrics_tally_suffix() {
 }
 
 gibson_metrics_is_exact_tally() {
-  printf '%s\n' "$1" | grep -Eq \
+  printf '%s\n' "$1" | grep -E >/dev/null \
     "(^|[^0-9+-])${gibson_metrics_tally_suffix_re}[[:space:]]*$"
 }
 
@@ -1428,7 +1428,7 @@ gibson_metrics_classify() {
     return 1
   fi
   if [[ "$machine_n" -eq 1 ]]; then
-    if ! printf '%s\n' "$last" | grep -Eq "$gibson_metrics_marker_re"; then
+    if ! printf '%s\n' "$last" | grep -E "$gibson_metrics_marker_re" >/dev/null; then
       echo "error non-terminal-machine-metric"
       return 1
     fi
@@ -1443,15 +1443,15 @@ gibson_metrics_classify() {
     echo "machine ${_gmt} ${_gms} ${_gmd}"
     return 0
   fi
-  if printf '%s\n' "$last" | grep -Eq -- '-[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if printf '%s\n' "$last" | grep -E -- '-[0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error negative-tally"
     return 1
   fi
-  if printf '%s\n' "$last" | grep -Eq '[+][0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if printf '%s\n' "$last" | grep -E '[+][0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error signed-tally"
     return 1
   fi
-  if printf '%s\n' "$last" | grep -Eq '[0-9]+\.[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if printf '%s\n' "$last" | grep -E '[0-9]+\.[0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error fractional-tally"
     return 1
   fi
@@ -1465,7 +1465,7 @@ gibson_metrics_classify() {
     return 1
   fi
   prefix=${last%"$suffix"}
-  if [[ -n "$prefix" ]] && printf '%s\n' "$prefix" | grep -Eq '[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if [[ -n "$prefix" ]] && printf '%s\n' "$prefix" | grep -E '[0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error prefix-tally-counter"
     return 1
   fi
@@ -1765,10 +1765,10 @@ gibson_metrics_run_contract_mutations() {
   _vrc=0
   _vout=$(gibson_metrics_verdict_probe "" "" 1 "synthetic-verdict-bind") || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — synthetic-verdict-bind' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — synthetic-verdict-bind' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: metric-contract verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1778,10 +1778,10 @@ gibson_metrics_run_contract_mutations() {
   _vrc=0
   _vout=$(gibson_metrics_verdict_probe "" "" 0 "") || _vrc=$?
   if [[ "$_vrc" -eq 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS total=' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: green run still prints GREEN and aggregate metrics"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: green verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1791,10 +1791,10 @@ gibson_metrics_run_contract_mutations() {
   _vrc=0
   _vout=$(gibson_metrics_verdict_probe "foo.test.sh" "" 0 "") || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED'; then
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS total=' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: ordinary suite failure is RED with aggregate metrics"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: suite-failure verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1826,10 +1826,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — suite dup.test.sh: duplicate sentinel attribution' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — suite dup.test.sh: duplicate sentinel attribution' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: duplicate sentinel attribution refuses"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: duplicate sentinel attribution (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1859,10 +1859,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — legacy-sentinel name/count drift (named=1 count=2)' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — legacy-sentinel name/count drift (named=1 count=2)' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: name/count drift refuses"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: name/count drift (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1892,10 +1892,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — suite both.test.sh: explicit assertions and sentinel' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — suite both.test.sh: explicit assertions and sentinel' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: one suite cannot contribute both explicit assertions and a sentinel"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: dual explicit/sentinel attribution (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1925,10 +1925,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -eq 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all legacy-sentinels: zeta.test.sh alpha.test.sh$' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2$' \
-     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=2 skipped=0 todo=0$'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all legacy-sentinels: zeta.test.sh alpha.test.sh$' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2$' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS total=2 skipped=0 todo=0$' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: named legacy-sentinel diagnostic matches the numeric subtotal"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: named sentinel diagnostic (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -2154,7 +2154,7 @@ gibson_forward_bash32_bench() {
   if [ "${#_fwd_mag}" -gt "$_fwd_max_digits" ]; then
     return 1
   fi
-  if ! printf '%s' "$_fwd_hash" | grep -Eq '^[0-9a-f]{64}$'; then
+  if ! printf '%s' "$_fwd_hash" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
     return 1
   fi
   if [ "$_fwd_hash" != "$_fwd_digest" ]; then
