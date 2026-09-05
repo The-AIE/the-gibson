@@ -2483,7 +2483,11 @@ sub pipe_segments {
     if ($c eq chr(92) && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= substr($line, $i, 2); $i += 2; next; }
     if ($c eq "|") {
       if ($i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= "||"; $i += 2; next; }
-      push @segs, $cur; $cur = ""; $i++; next;
+      push @segs, $cur; $cur = "";
+      # |& (bash: pipe stdout+stderr) is still one pipe boundary; skip the &
+      # too so the next segment does not start with a stray & character.
+      $i += ($i + 1 < $n && substr($line, $i + 1, 1) eq "&") ? 2 : 1;
+      next;
     }
     $cur .= $c; $i++;
   }
@@ -2510,7 +2514,17 @@ sub truncate_at_command_separator {
     if ($c eq chr(39)) { $in_s = 1; $i++; next; }
     if ($c eq chr(34)) { $in_d = 1; $i++; next; }
     if ($c eq ";") { return substr($line, 0, $i); }
-    if ($c eq "&") { return substr($line, 0, $i); } # single & (background) or && (and-list): either way, truncate
+    if ($c eq "&") {
+      # A redirect target (2>&1, >&2, <&3, N>&-) is not a command
+      # separator: it is part of the >/< operator immediately before it,
+      # possibly through one or more digits (the fd number). Only a bare
+      # & with no such redirect context is background/and-list.
+      my $j = $i - 1;
+      $j-- while ($j >= 0 && substr($line, $j, 1) =~ /[0-9]/);
+      my $prev = $j >= 0 ? substr($line, $j, 1) : "";
+      if ($prev eq ">" || $prev eq "<") { $i++; next; }
+      return substr($line, 0, $i);
+    }
     if ($c eq "|" && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") {
       return substr($line, 0, $i);
     }
@@ -2779,7 +2793,11 @@ sub pipe_segments {
     if ($c eq chr(92) && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= substr($line, $i, 2); $i += 2; next; }
     if ($c eq "|") {
       if ($i + 1 < $n && substr($line, $i + 1, 1) eq "|") { $cur .= "||"; $i += 2; next; }
-      push @segs, $cur; $cur = ""; $i++; next;
+      push @segs, $cur; $cur = "";
+      # |& (bash: pipe stdout+stderr) is still one pipe boundary; skip the &
+      # too so the next segment does not start with a stray & character.
+      $i += ($i + 1 < $n && substr($line, $i + 1, 1) eq "&") ? 2 : 1;
+      next;
     }
     $cur .= $c; $i++;
   }
@@ -2806,7 +2824,17 @@ sub truncate_at_command_separator {
     if ($c eq chr(39)) { $in_s = 1; $i++; next; }
     if ($c eq chr(34)) { $in_d = 1; $i++; next; }
     if ($c eq ";") { return substr($line, 0, $i); }
-    if ($c eq "&") { return substr($line, 0, $i); } # single & (background) or && (and-list): either way, truncate
+    if ($c eq "&") {
+      # A redirect target (2>&1, >&2, <&3, N>&-) is not a command
+      # separator: it is part of the >/< operator immediately before it,
+      # possibly through one or more digits (the fd number). Only a bare
+      # & with no such redirect context is background/and-list.
+      my $j = $i - 1;
+      $j-- while ($j >= 0 && substr($line, $j, 1) =~ /[0-9]/);
+      my $prev = $j >= 0 ? substr($line, $j, 1) : "";
+      if ($prev eq ">" || $prev eq "<") { $i++; next; }
+      return substr($line, 0, $i);
+    }
     if ($c eq "|" && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") {
       return substr($line, 0, $i);
     }
@@ -3080,6 +3108,14 @@ printf '[[ 1 -eq 1 ]] && echo x %s grep -i y >/dev/null && ! %s -q z file\n' '|'
 GQ=grep
 printf 'printf x %s %s x >/dev/null & %s -q y file\n' '|' "$GQ" "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
 [ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: unrelated backgrounded & grep -q reading a file, not the pipe target]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'yes x %s %s x 2>&1 -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [2>&1 redirect target mistaken for a command separator]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'yes x %s%s %s -q x\n' '|' '&' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [|& combined stdout+stderr pipe missed]"
 : > "$GREPQ_MUT/scripts/tests/planted.sh"
 rm -rf "$GREPQ_MUT"
 if [ -z "$GREPQ_MISSED" ]; then
