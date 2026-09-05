@@ -125,7 +125,7 @@ if [[ "$MIN_UPDATED_SET" -eq 1 ]]; then
   if [[ -z "$MIN_UPDATED" ]]; then
     die_usage "--min-updated requires a nonempty UTC timestamp (omit the flag for no bound; empty is never 'no bound')"
   fi
-  if ! printf '%s' "$MIN_UPDATED" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+  if ! printf '%s' "$MIN_UPDATED" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' >/dev/null; then
     fail "invalid --min-updated (want YYYY-MM-DDTHH:MM:SSZ): $MIN_UPDATED"
   fi
 fi

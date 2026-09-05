@@ -142,11 +142,11 @@ while IFS= read -r f; do
   [[ -z "$f" ]] && continue
   skip=0
   for np in ${NON_SURFACE_PATTERNS[@]+"${NON_SURFACE_PATTERNS[@]}"}; do
-    if echo "$f" | grep -qE "$np"; then skip=1; break; fi
+    if echo "$f" | grep -E "$np" >/dev/null; then skip=1; break; fi
   done
   [[ "$skip" -eq 1 ]] && continue
   for sp in "${SURFACE_PATTERNS[@]}"; do
-    if echo "$f" | grep -qE "$sp"; then
+    if echo "$f" | grep -E "$sp" >/dev/null; then
       MATCHED="$MATCHED$f"$'\n'
       [[ -z "$FIRST" ]] && FIRST="$f"
       break

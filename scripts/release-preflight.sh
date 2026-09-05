@@ -145,7 +145,7 @@ TITLE=$(jqr '.title // ""')
 BODY=$(jqr '.body // ""')
 
 title_has_close_kw=0
-if printf '%s' "$TITLE" | grep -Eiq \
+if printf '%s' "$TITLE" | grep -Ei >/dev/null \
   '(^|[^A-Za-z])(fix|close|resolve|closes|fixes|resolves)[[:space:]]*\(?#[[:digit:]]+'; then
   title_has_close_kw=1
 fi
@@ -153,14 +153,14 @@ fi
 auto_partial=0
 if [[ "$PARTIAL" -eq 1 ]]; then
   auto_partial=1
-elif printf '%s' "$BODY" | grep -Eiq \
+elif printf '%s' "$BODY" | grep -Ei >/dev/null \
   '(^|[[:space:][:punct:]])(\[partial\]|partial[[:space:]]+ship|partial:)'; then
   auto_partial=1
 else
   # Related-only: Related #N present, no closing keyword for any issue.
-  if printf '%s' "$BODY" | grep -Eiq \
+  if printf '%s' "$BODY" | grep -Ei >/dev/null \
     '(^|[[:space:]])related:[[:space:]]*#?[[:digit:]]+|(^|[[:space:]])related[[:space:]]+#[[:digit:]]+'; then
-    if ! printf '%s' "$BODY" | grep -Eiq \
+    if ! printf '%s' "$BODY" | grep -Ei >/dev/null \
       '(^|[[:space:]])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]*\(?#[[:digit:]]+'; then
       auto_partial=1
     fi
@@ -418,9 +418,9 @@ if [[ -n "$VERDICT_TEXT" ]]; then
     BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is SHA-bound to ${VERDICT_SHA:0:7} but current head is absent/null — cannot verify binding (fail closed)")
   elif [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
     BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
-  elif echo "$VERDICT_TEXT" | grep -qi 'REQUEST_CHANGES'; then
+  elif echo "$VERDICT_TEXT" | grep -i 'REQUEST_CHANGES' >/dev/null; then
     BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
-  elif echo "$VERDICT_TEXT" | grep -qi 'APPROVE'; then
+  elif echo "$VERDICT_TEXT" | grep -i 'APPROVE' >/dev/null; then
     if [[ -z "$VERDICT_LOGIN" ]]; then
       # Defensive: authorless APPROVE is filtered above; still fail closed.
       BLOCKERS+=("VERDICT: APPROVE has no author — fail closed (cannot count as independent)")

@@ -124,14 +124,14 @@ PY
 validate_path_arg() {
   local label="$1" path="$2"
   validate_scalar "$label" "$path"
-  if printf '%s' "$path" | grep -Eq '(^|/)\.\.(/|$)'; then
+  if printf '%s' "$path" | grep -E '(^|/)\.\.(/|$)' >/dev/null; then
     die_valid "$label rejects path traversal"
   fi
 }
 
 validate_utc_ts() {
   local ts="$1" label="$2"
-  if ! printf '%s' "$ts" | grep -Eq "$TS_RE"; then
+  if ! printf '%s' "$ts" | grep -E "$TS_RE" >/dev/null; then
     die_valid "$label must be strict UTC YYYY-MM-DDTHH:MM:SSZ"
   fi
   python3 - "$ts" <<'PY' || die_valid "invalid calendar timestamp for $label: $ts"
@@ -733,7 +733,7 @@ load_loop_state() {
     die_corrupt "loop-state snapshot missing required hat/updated fields"
   fi
   # Facts older than period start are stale/unknown — never current healthy.
-  if printf '%s' "$updated" | grep -Eq "$TS_RE"; then
+  if printf '%s' "$updated" | grep -E "$TS_RE" >/dev/null; then
     local up_epoch now_epoch period_epoch
     up_epoch=$(ts_to_epoch "$updated")
     now_epoch=$(ts_to_epoch "$NOW_TS")
@@ -849,7 +849,7 @@ main() {
 
   if [[ -n "$REPO_FILTER" ]]; then
     validate_scalar "repo" "$REPO_FILTER"
-    if ! printf '%s' "$REPO_FILTER" | grep -Eq "$REPO_RE"; then
+    if ! printf '%s' "$REPO_FILTER" | grep -E "$REPO_RE" >/dev/null; then
       die_valid "repo must be owner/name"
     fi
   fi
