@@ -1799,7 +1799,7 @@ Gate and sensor PRs (#315 review-evidence, #316 ledger lint, #317 reachability) 
 
 ## L-085 · 2026-09-04 · never-run-gibson-suites-directly
 **What happened:** Run Gibson suites through scripts/tests/run-all.sh --only <substring>, never by path; and a Grok lane whose log ends on a suite is not thereby proven dead (cause of the 2026-09-04 lane deaths is unconfirmed).
-Three Grok lanes died on 2026-09-04 at 8, 15 and 49 minutes. fleet-vitals.sh logged no action (it logs every kill to ~/.claude/fleet/logs/), so the watchdog did not do it. The first explanation, "suites kill the caller's process group when run by path", was checked by Codex and does not hold: the process-group kills that do exist in scripts/tests (loop-fleet.test.sh `kill -TERM -"$wd1"`, wall-timeout.test.sh `kill -INT -"$_fg_pgid"`) target child groups those suites created, not the caller's group. Root cause remains unconfirmed.
+Three Grok lanes died on 2026-09-04 at 8, 15 and 49 minutes. fleet-vitals.sh logged no action (it logs every kill to ~/.claude/fleet/logs/), so the watchdog did not do it. The first explanation, "suites kill the caller's process group when run by path", was checked by Codex and does not hold: the process-group kills that do exist in scripts/tests (loop-fleet.test.sh `kill -TERM -"$wd1"`, wall-timeout.test.sh `kill -INT -"$_fg_pgid"`) target child groups those suites created, not the caller's group. Root cause CONFIRMED later the same day (see L-089): the fleet watchdog killed them.
 
 **Why:** run-all.sh gives each suite its own process group, a 600 s budget and a tally line; a suite run by path has none of that, and its output is not what the gate sees. And an unexplained death is not evidence for the next convenient story.
 
@@ -1840,3 +1840,10 @@ Codex round 2 on Gibson PR #327 caught `run-all-stress.sh --runs` (no value) han
 **Harness fix:** every value-taking option does `[[ $# -ge 2 ]] || { usage >&2; exit 2; }` before reading `$2`, and the script's test covers the missing-operand case.
 **Status:** intake 2026-09-04 from fleet memory `feedback_bash_option_loop_shift2_guard.md` (no sensor yet)
 **Tags:** #codex #fleet #intake
+
+## L-089 · 2026-09-04 · fleet-vitals-flat-cpu-kills-waiting-grok
+**What happened:** Four Grok lanes died on 2026-09-04 at 8, 15, 49 and 9 minutes with no error in their logs. `~/.claude/fleet/bin/fleet-vitals.sh` (launchd, every 5 min, both Macs) killed them: its stall rule sent TERM/KILL to any `.grok/bin/grok` or `codex exec` process older than 5 minutes whose CPU time was identical across a single 12-second gap. vitals-actions.log 20:01:47 and 21:10:28 each show `stalls_killed=1`; the 21:10 kill took the #301 repair lane seconds after it had written its fix and before it could run the suite or print its summary.
+**Why:** a CLI agent waiting on a model reply does no local work; flat CPU over 12 seconds is its normal state, not a stall. The rule measured the wrong thing for the process it was guarding, and the earlier investigation (L-085) missed the log line by grepping the wrong window, so the absence of evidence was read as evidence of absence.
+**Harness fix:** a runner is stalled only when its CPU time stays flat across consecutive vitals runs for `VITALS_STALL_FLAT_SECS` (default 1200 s), tracked per pid in `$FLEET/state/vitals-cpu-<pid>`; `VITALS_DRY_RUN=1` reports instead of killing. Proven on a synthetic `exec -a …/.grok/bin/grok sleep` process: watched on first sight, DRY-RUN kill once its flat-since stamp is 1300 s old. Before declaring any lane dead, read `vitals-actions.log` for the exact minute and `git status` in the lane worktree — a killed lane may have finished its edit.
+**Status:** fixed (fleet-vitals.sh patched 2026-09-04; Mini copy to sync) — no Gibson sensor yet
+**Tags:** #fleet #grok #watchdog #liveness
