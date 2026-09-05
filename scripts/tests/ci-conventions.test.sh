@@ -2515,14 +2515,15 @@ sub truncate_at_command_separator {
     if ($c eq chr(34)) { $in_d = 1; $i++; next; }
     if ($c eq ";") { return substr($line, 0, $i); }
     if ($c eq "&") {
-      # A redirect target (2>&1, >&2, <&3, N>&-) is not a command
-      # separator: it is part of the >/< operator immediately before it,
-      # possibly through one or more digits (the fd number). Only a bare
-      # & with no such redirect context is background/and-list.
-      my $j = $i - 1;
-      $j-- while ($j >= 0 && substr($line, $j, 1) =~ /[0-9]/);
-      my $prev = $j >= 0 ? substr($line, $j, 1) : "";
-      if ($prev eq ">" || $prev eq "<") { $i++; next; }
+      # Two shapes of redirect involve &, neither a command separator:
+      # [n]>&word / [n]<&word (fd duplicate: & sits directly after > or
+      # <; any leading fd digit comes BEFORE that operator, not between
+      # it and &, so no digit look-back is needed here) and &>word /
+      # &>>word (both-streams redirect: & sits directly before >). Only
+      # a bare & matching neither shape is background/and-list.
+      my $prev = $i > 0 ? substr($line, $i - 1, 1) : "";
+      my $next = $i + 1 < $n ? substr($line, $i + 1, 1) : "";
+      if ($prev eq ">" || $prev eq "<" || $next eq ">") { $i++; next; }
       return substr($line, 0, $i);
     }
     if ($c eq "|" && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") {
@@ -2825,14 +2826,15 @@ sub truncate_at_command_separator {
     if ($c eq chr(34)) { $in_d = 1; $i++; next; }
     if ($c eq ";") { return substr($line, 0, $i); }
     if ($c eq "&") {
-      # A redirect target (2>&1, >&2, <&3, N>&-) is not a command
-      # separator: it is part of the >/< operator immediately before it,
-      # possibly through one or more digits (the fd number). Only a bare
-      # & with no such redirect context is background/and-list.
-      my $j = $i - 1;
-      $j-- while ($j >= 0 && substr($line, $j, 1) =~ /[0-9]/);
-      my $prev = $j >= 0 ? substr($line, $j, 1) : "";
-      if ($prev eq ">" || $prev eq "<") { $i++; next; }
+      # Two shapes of redirect involve &, neither a command separator:
+      # [n]>&word / [n]<&word (fd duplicate: & sits directly after > or
+      # <; any leading fd digit comes BEFORE that operator, not between
+      # it and &, so no digit look-back is needed here) and &>word /
+      # &>>word (both-streams redirect: & sits directly before >). Only
+      # a bare & matching neither shape is background/and-list.
+      my $prev = $i > 0 ? substr($line, $i - 1, 1) : "";
+      my $next = $i + 1 < $n ? substr($line, $i + 1, 1) : "";
+      if ($prev eq ">" || $prev eq "<" || $next eq ">") { $i++; next; }
       return substr($line, 0, $i);
     }
     if ($c eq "|" && $i + 1 < $n && substr($line, $i + 1, 1) eq "|") {
@@ -3116,6 +3118,14 @@ printf 'yes x %s %s x 2>&1 -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.s
 : > "$GREPQ_MUT/scripts/tests/planted.sh"
 printf 'yes x %s%s %s -q x\n' '|' '&' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
 [ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [|& combined stdout+stderr pipe missed]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+# shellcheck disable=SC2209 # intentional: a plain string that happens to look like a command name
+GQ=grep
+printf 'seq 1 3 %s %s 1 &>/dev/null -q\n' '|' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -n "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [&>/dev/null redirect target mistaken for a command separator]"
+: > "$GREPQ_MUT/scripts/tests/planted.sh"
+printf 'producer %s %s x >2%s %s -q y file\n' '|' "$GQ" '&' "$GQ" > "$GREPQ_MUT/scripts/tests/planted.sh"
+[ -z "$(grepq_scan)" ] || GREPQ_MISSED="$GREPQ_MISSED [false-positive: >2 (redirect to a file named 2) then a real & separator misread as a redirect]"
 : > "$GREPQ_MUT/scripts/tests/planted.sh"
 rm -rf "$GREPQ_MUT"
 if [ -z "$GREPQ_MISSED" ]; then
