@@ -2589,17 +2589,81 @@ export function classifyVerdictMatcherOperand(raw) {
 }
 
 /**
- * Bounded one-line quote-aware words for grep argv only. Handles
- * single/double quotes and backslash escapes inside double quotes.
- * Not a general shell parser: no ANSI-C $'...', no line continuations,
- * no nested scripts, no heredoc bodies.
+ * Sentinel from stripUnquotedShellComment: the single/double-quote walker
+ * saw an unquoted or double-quoted `$` or backtick and must not guess
+ * comment/paren boundaries past that expansion marker.
  */
+const SHELL_LEXICAL_AMBIGUOUS = Object.freeze({ indeterminateLexical: true });
+const LEXICAL_INDETERMINATE_OPERAND = "VERDICT: INDETERMINATE_LEXICAL";
+
+function backslashRunLengthBefore(src, index) {
+  let n = 0;
+  for (let j = index - 1; j >= 0 && src[j] === "\\"; j -= 1) n += 1;
+  return n;
+}
+
+/** Odd backslash run immediately before `index` means `src[index]` is escaped. */
+function isEscapedAt(src, index) {
+  return index > 0 && backslashRunLengthBefore(src, index) % 2 === 1;
+}
+
+/**
+ * Fail-closed: every bash substitution/expansion that can introduce content
+ * not visible in the static source begins with an unquoted or double-quoted
+ * `$` or backtick. Bail on the marker character; do not enumerate which
+ * construct follows `$` (`$(`, `${`, `$'`, `$VAR`, `$1`, `$((`, …).
+ */
+function shellSubstitutionStartAt(src, i) {
+  const c = src[i];
+  return c === "`" || c === "$";
+}
+
+/**
+ * Unquoted `#` starts a comment at start-of-line, after unescaped
+ * whitespace, or after an unescaped shell operator `;` `|` `&` `(`.
+ * An escaped preceding space (odd backslash run) is still mid-word.
+ */
+function isShellCommentStart(src, i) {
+  if (src[i] !== "#") return false;
+  if (i === 0) return true;
+  if (isEscapedAt(src, i)) return false;
+  if (isEscapedAt(src, i - 1)) return false;
+  const prev = src[i - 1];
+  return (
+    prev === " " ||
+    prev === "\t" ||
+    prev === ";" ||
+    prev === "|" ||
+    prev === "&" ||
+    prev === "("
+  );
+}
+
+/**
+ * First syntactically-unescaped `)` at or after `fromIndex`, allowing
+ * only whitespace and escaped literal `)` in between. Does not scan the
+ * rest of the line for a later unrelated `)`.
+ */
+function indexOfCaseArmCloseParen(src, fromIndex) {
+  let i = fromIndex;
+  while (i < src.length) {
+    while (i < src.length && (src[i] === " " || src[i] === "\t")) i += 1;
+    if (i >= src.length || src[i] !== ")") return -1;
+    if (!isEscapedAt(src, i)) return i;
+    i += 1;
+  }
+  return -1;
+}
+
 /**
  * Quote/comment walk matching boundedLineShellWords: single quotes are
  * literal; double quotes honor backslash; an unquoted `#` starts a
- * trailing shell comment only at word start (index 0 or after space/tab).
- * Mid-word `#` is ordinary text (e.g. tag=x#not-comment). Used to keep
- * case-arm collection off inline-comment prose and quoted display text.
+ * trailing shell comment at start-of-line, after unescaped whitespace,
+ * or after an unescaped `;` `|` `&` `(`. Mid-word `#` is ordinary text
+ * (e.g. tag=x#not-comment). Escaped spaces are not comment boundaries.
+ * Unquoted or double-quoted `$` or backtick return SHELL_LEXICAL_AMBIGUOUS
+ * instead of guessing past an expansion whose runtime value is not in the
+ * static source.
  */
 function stripUnquotedShellComment(line) {
   const src = String(line || "");
@@ -2613,16 +2677,16 @@ function stripUnquotedShellComment(line) {
       continue;
     }
     if (state === "double") {
-      i += 1;
       if (c === "\\") {
-        if (i < src.length) i += 1;
+        i += i + 1 < src.length ? 2 : 1;
         continue;
       }
-      if (c === '"') state = "none";
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      state = c === "'" ? "single" : "double";
+      if (c === '"') {
+        state = "none";
+        i += 1;
+        continue;
+      }
+      if (shellSubstitutionStartAt(src, i)) return SHELL_LEXICAL_AMBIGUOUS;
       i += 1;
       continue;
     }
@@ -2630,10 +2694,14 @@ function stripUnquotedShellComment(line) {
       i += 2;
       continue;
     }
+    if (shellSubstitutionStartAt(src, i)) return SHELL_LEXICAL_AMBIGUOUS;
+    if (c === "'" || c === '"') {
+      state = c === "'" ? "single" : "double";
+      i += 1;
+      continue;
+    }
     if (c === "#") {
-      if (i === 0 || src[i - 1] === " " || src[i - 1] === "\t") {
-        return src.slice(0, i);
-      }
+      if (isShellCommentStart(src, i)) return src.slice(0, i);
       i += 1;
       continue;
     }
@@ -2677,6 +2745,12 @@ function shellQuoteStateAt(line, index) {
   return state;
 }
 
+/**
+ * Bounded one-line quote-aware words for grep argv only. Handles
+ * single/double quotes and backslash escapes inside double quotes.
+ * Not a general shell parser: no ANSI-C $'...', no line continuations,
+ * no nested scripts, no heredoc bodies.
+ */
 function boundedLineShellWords(line) {
   const src = String(line || "");
   const words = [];
@@ -2942,17 +3016,22 @@ export function extractHarnessMatcherOperands(text) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith("#")) continue;
       const executable = stripUnquotedShellComment(line);
+      if (executable === SHELL_LEXICAL_AMBIGUOUS) {
+        if (/VERDICT:/i.test(line)) push(LEXICAL_INDETERMINATE_OPERAND);
+        continue;
+      }
       if (!executable.trim()) continue;
       unquotedRe.lastIndex = 0;
       let um;
       while ((um = unquotedRe.exec(executable)) !== null) {
-        // Escaped parentheses are printf/prose, not case-arm syntax.
-        const openEscaped =
-          um[1] === "(" && executable[um.index - 1] === "\\";
-        const closeIdx = executable.indexOf(")", um.index + um[0].length);
-        const closeEscaped =
-          closeIdx > 0 && executable[closeIdx - 1] === "\\";
-        if (openEscaped || closeEscaped) continue;
+        // Terminator is the first syntactically-unescaped `)` after the
+        // match (backslash parity). Escaped `)` is a literal in the
+        // pattern; printf prose with no unescaped closer is not an arm.
+        const closeIdx = indexOfCaseArmCloseParen(
+          executable,
+          um.index + um[0].length
+        );
+        if (closeIdx < 0) continue;
         const rawArm = String(um[2] || "");
         const verdictRel = rawArm.search(/VERDICT:/i);
         if (verdictRel < 0) continue;

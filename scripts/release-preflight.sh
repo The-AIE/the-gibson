@@ -271,8 +271,10 @@ MALFORMED_EVIDENCE=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS
   def body_verdict:
     if .body == null then empty
     elif (.body | type) != "string" then empty
-    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i")) then
-      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v
+    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*" +
+      "$"; "i")) then
+      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*" +
+      "$"; "im")).v
     else empty end;
   def login_of:
     (((.author // {}) | .login // "") // "");
@@ -323,8 +325,10 @@ VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
   def body_verdict:
     if .body == null then empty
     elif (.body | type) != "string" then empty
-    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*$"; "i")) then
-      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*$"; "im")).v
+    elif (.body | test("(^|\n)VERDICT:\\s*(APPROVE|REQUEST_CHANGES)\\s*" +
+      "$"; "i")) then
+      (.body | capture("(?<v>VERDICT:\\s*(APPROVE|REQUEST_CHANGES))\\s*" +
+      "$"; "im")).v
     else empty end;
   def formal_verdict:
     if .state == "APPROVED" then "VERDICT: APPROVE"
@@ -361,7 +365,14 @@ VERDICT_EVENT=$(echo "$PR_JSON" | jq -r --arg re "$ISO_AT_RE" "$JQ_ISO_DEFS"'
       state: ""
     })
   ]
-  | map(. as $e | ($e | event_verdict) as $v | select($v != null and $v != "") | $e + {verdict: $v})
+  | map(
+      . as $e
+      | ($e | event_verdict) as $v
+      | select($v != null and $v != "")
+      | $e + { "verdict":
+          $v
+        }
+    )
   | map(select(valid_at))
   # Authorless APPROVE is never independent and never clears the gate — drop it.
   # Authorless REQUEST_CHANGES still blocks (fail closed).
@@ -419,7 +430,8 @@ if [[ -n "$VERDICT_TEXT" ]]; then
   elif [[ "$STALE_HEAD_VERDICT" -eq 1 ]]; then
     BLOCKERS+=("newest VERDICT ($VERDICT_TEXT from $VERDICT_LOGIN via $VERDICT_SOURCE at $VERDICT_AT) is bound to stale head ${VERDICT_SHA:0:7}, not current head ${HEAD_OID:0:7} — re-review the tip (fail closed)")
   elif echo "$VERDICT_TEXT" | grep -i 'REQUEST_CHANGES' >/dev/null; then
-    BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ($VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
+    BLOCKERS+=("reviewer posted VERDICT: REQUEST_CHANGES ("\
+"$VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown})")
   elif echo "$VERDICT_TEXT" | grep -i 'APPROVE' >/dev/null; then
     if [[ -z "$VERDICT_LOGIN" ]]; then
       # Defensive: authorless APPROVE is filtered above; still fail closed.
@@ -432,9 +444,11 @@ if [[ -n "$VERDICT_TEXT" ]]; then
       # L-015: GitHub refuses self-approval, so the comment is the only signal
       # the solo loop can produce. Real, but it is not an independent identity.
       SAME_AUTHOR_REVIEW=1
-      ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ($AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
+      ADMIN_REASONS+=("L-015/L-021: VERDICT: APPROVE came from the PR author ("\
+"$AUTHOR); GitHub blocks self-approval, so no formal review can exist. Prefer a REVIEWER_CMD cross-vendor identity; admin merge is the fallback.")
     else
-      NOTES+=("VERDICT: APPROVE from $VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity)")
+      NOTES+=("VERDICT: APPROVE from "\
+"$VERDICT_LOGIN via $VERDICT_SOURCE at ${VERDICT_AT:-unknown} (independent identity)")
     fi
   else
     BLOCKERS+=("no formal approval and no VERDICT: line — review is fail-closed (Law 5)")

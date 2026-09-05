@@ -4440,7 +4440,6 @@ const approveOnly = [
   "  \"VERDICT: APPROVE\"|\"VERDICT: approve\") printf \"%s\" \"approve\" ;;",
   "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
   "esac",
-  "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]",
 ].join("\n");
 const passProse = realHarness["scripts/second-opinion.sh"] +
   "\nPASS is not a PR-review approval synonym\n";
@@ -4644,6 +4643,103 @@ function escapedParenPrintfProse() {
     "printf '%s\\n' \\(VERDICT:\\*PASS\\)",
   ].join("\n");
 }
+function escapedSpaceBeforeHashGlobPassArm() {
+  return [
+    "#!/bin/bash",
+    "tag=x\\ #not-comment; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function operatorAdjacentHashComment() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac;# note VERDICT:*PASS)",
+  ].join("\n");
+}
+function commandSubstHashComment() {
+  return [
+    "#!/bin/bash",
+    "x=$(# note VERDICT:*PASS)",
+    "  printf safe",
+    ")",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function escapedParenLiteralCaseArm() {
+  return [
+    "#!/bin/bash",
+    "case \"$value\" in",
+    "  \\(VERDICT:*PASS\\)) printf pass ;;",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function evenBackslashCaseArmClose() {
+  return [
+    "#!/bin/bash",
+    "case \"$value\" in",
+    "  VERDICT:*PASS\\\\) printf pass ;;",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function commandSubstNestedQuoteHidesArm() {
+  return [
+    "#!/bin/bash",
+    "out=\"$(printf \"%s\" \" # display\")\"; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function backtickNestedQuoteHidesArm() {
+  return [
+    "#!/bin/bash",
+    "out=\"`printf \"%s\" \" # display\"`\"; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function ansiCQuoteHidesArm() {
+  return [
+    "#!/bin/bash",
+    "printf \u0027%s\\n\u0027 $\u0027safe\\\u0027 # display\u0027; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function paramExpansionHashHidesArm() {
+  return [
+    "#!/bin/bash",
+    "out=${var# #display}; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac",
+    "case \"$1\" in",
+    "  \"VERDICT: APPROVE\") : ;;",
+    "  \"VERDICT: REQUEST_CHANGES\") : ;;",
+    "esac",
+  ].join("\n");
+}
+function plainDollarOneSameLineQuotedArms() {
+  return [
+    "#!/bin/bash",
+    "case \"$1\" in \"VERDICT: APPROVE\") printf HIT ;; \"VERDICT: REQUEST_CHANGES\") : ;; esac",
+  ].join("\n");
+}
 function mustBeIndeterminate(name, raw) {
   return () => {
     const kind = classifyVerdictMatcherOperand(raw);
@@ -4722,17 +4818,20 @@ function notCanonical(name, raw) {
   };
 }
 function jqSource(groupInner) {
-  // Exact extractable operand bytes matching live release-preflight.sh
-  // test("..."): one backslash before n, two before s.
-  const lit =
-    "(^|\\n)VERDICT:\\\\s*(" + groupInner + ")\\\\s*$";
+  // Extractable operand bytes matching live release-preflight.sh test("...").
+  // Trailing `$` is concatenated on the next physical line so the per-line
+  // expansion-marker bail does not treat the regex end-anchor as a `$`
+  // expansion. One backslash before n, two before s.
+  const litHead =
+    "(^|\\n)VERDICT:\\\\s*(" + groupInner + ")\\\\s*";
   return [
     "#!/bin/bash",
     "case \"$1\" in",
     "  \"VERDICT: APPROVE\") printf \"%s\" \"approve\" ;;",
     "  \"VERDICT: REQUEST_CHANGES\") printf \"%s\" \"request-changes\" ;;",
     "esac",
-    "test(\"" + lit + "\"; \"i\")",
+    "test(\"" + litHead + "\" +",
+    "\"$\"; \"i\")",
   ].join("\n");
 }
 function nestParens(inner, depth) {
@@ -4863,7 +4962,7 @@ const rows = [
       harnessFiles: {
         "scripts/second-opinion.sh": [
           "#!/bin/bash",
-          "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]",
+          "[[ x =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]",
         ].join("\n"),
         "scripts/release-preflight.sh": approveOnly,
       },
@@ -5559,6 +5658,95 @@ const rows = [
     expectEmpty: true,
   },
   {
+    name: "escaped-space-before-hash-glob-pass-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(escapedSpaceBeforeHashGlobPassArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "operator-adjacent-hash-comment-not-false-red",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(operatorAdjacentHashComment(), approveOnly),
+    }),
+    expectEmpty: true,
+  },
+  {
+    name: "command-subst-hash-comment-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(commandSubstHashComment(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "escaped-paren-literal-case-arm-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(escapedParenLiteralCaseArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "even-backslash-case-arm-close-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(evenBackslashCaseArmClose(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "command-subst-nested-quote-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(commandSubstNestedQuoteHidesArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "backtick-nested-quote-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(backtickNestedQuoteHidesArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "ansi-c-quote-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(ansiCQuoteHidesArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "param-expansion-hash-fail-closed",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(paramExpansionHashHidesArm(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
+    name: "plain-dollar-one-same-line-fail-closed-by-design",
+    findings: () => reviewVerdictVocabularyFindings({
+      agentsText,
+      harnessFiles: soRp(plainDollarOneSameLineQuotedArms(), approveOnly),
+    }),
+    code: "E_VERDICT_FORM",
+    msg: ["scripts/second-opinion.sh", "indeterminate"],
+  },
+  {
     name: "positive-heredoc-prompt-not-false-red",
     findings: () => reviewVerdictVocabularyFindings({
       agentsText,
@@ -6171,7 +6359,7 @@ const passHarness =
 const weirdHarness =
   approveOnly +
   "\n" +
-  "[[ \"$1\" =~ VERDICT:[[:space:]]*(APPROVE|WEIRD_TOKEN) ]]\n";
+  "[[ x =~ VERDICT:[[:space:]]*(APPROVE|WEIRD_TOKEN) ]]\n";
 const wildcardAltHarness =
   approveOnly +
   "\n" +
@@ -6209,6 +6397,22 @@ const midWordHashGlobHarness =
   "#!/bin/bash\ntag=x#not-comment; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const escapedParenPrintfHarness =
   "#!/bin/bash\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\nprintf '%s\\n' \\(VERDICT:\\*PASS\\)\n";
+const escapedSpaceHashHarness =
+  "#!/bin/bash\ntag=x\\ #not-comment; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const operatorAdjacentHashHarness =
+  "#!/bin/bash\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac;# note VERDICT:*PASS)\n";
+const escapedParenLiteralArmHarness =
+  "#!/bin/bash\ncase \"$value\" in\n  \\(VERDICT:*PASS\\)) printf pass ;;\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const evenBackslashCloseHarness =
+  "#!/bin/bash\ncase \"$value\" in\n  VERDICT:*PASS\\\\) printf pass ;;\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const commandSubstNestedQuoteHarness =
+  "#!/bin/bash\nout=\"$(printf \"%s\" \" # display\")\"; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const backtickNestedQuoteHarness =
+  "#!/bin/bash\nout=\"`printf \"%s\" \" # display\"`\"; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const ansiCQuoteHarness =
+  "#!/bin/bash\nprintf '%s\\n' $'safe\\' # display'; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
+const paramExpansionHashHarness =
+  "#!/bin/bash\nout=${var# #display}; case \"$1\" in VERDICT:*PASS) printf HIT ;; esac\ncase \"$1\" in\n  \"VERDICT: APPROVE\") : ;;\n  \"VERDICT: REQUEST_CHANGES\") : ;;\nesac\n";
 const reviewer = {
   gates: ["never review own generation (Law 5)"],
   forbidden: [],
@@ -6588,9 +6792,7 @@ try {
   }
   {
     const from = `    if (c === "#") {
-      if (i === 0 || src[i - 1] === " " || src[i - 1] === "\\t") {
-        return src.slice(0, i);
-      }
+      if (isShellCommentStart(src, i)) return src.slice(0, i);
       i += 1;
       continue;
     }`;
@@ -6610,13 +6812,11 @@ try {
     );
   }
   {
-    const from = `        // Escaped parentheses are printf/prose, not case-arm syntax.
-        const openEscaped =
-          um[1] === "(" && executable[um.index - 1] === "\\\\";
-        const closeIdx = executable.indexOf(")", um.index + um[0].length);
-        const closeEscaped =
-          closeIdx > 0 && executable[closeIdx - 1] === "\\\\";
-        if (openEscaped || closeEscaped) continue;`;
+    const from = `        const closeIdx = indexOfCaseArmCloseParen(
+          executable,
+          um.index + um[0].length
+        );
+        if (closeIdx < 0) continue;`;
     const to = `        if (false) continue;`;
     if (!original.includes(from)) throw new Error("escaped-paren case-arm skip site missing");
     const mod = await loadMutant(original.replace(from, to), "escparen");
@@ -6626,6 +6826,173 @@ try {
         agentsText,
         harnessFiles: {
           "scripts/second-opinion.sh": escapedParenPrintfHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `  if (isEscapedAt(src, i - 1)) return false;`;
+    const to = `  if (false) return false;`;
+    if (!original.includes(from)) throw new Error("escaped-space comment-boundary site missing");
+    const mod = await loadMutant(original.replace(from, to), "escspace");
+    expectKilled(
+      "tooth-escaped-space-hash-boundary-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": escapedSpaceHashHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `    prev === ";" ||
+    prev === "|" ||
+    prev === "&" ||
+    prev === "("`;
+    const to = `    false`;
+    if (!original.includes(from)) throw new Error("operator-adjacent comment-start site missing");
+    const mod = await loadMutant(original.replace(from, to), "ophash");
+    expectRevives(
+      "tooth-operator-adjacent-hash-comment-load-bearing",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": operatorAdjacentHashHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from =
+      "function shellSubstitutionStartAt(src, i) {\n" +
+      "  const c = src[i];\n" +
+      "  return c === \"`\" || c === \"$\";\n" +
+      "}";
+    const to = "function shellSubstitutionStartAt(src, i) { return false; }";
+    if (!original.includes(from)) throw new Error("fail-closed substitution site missing");
+    const mod = await loadMutant(original.replace(from, to), "failclosed");
+    expectKilled(
+      "tooth-command-subst-fail-closed-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": commandSubstNestedQuoteHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+    expectKilled(
+      "tooth-backtick-fail-closed-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": backtickNestedQuoteHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+    expectKilled(
+      "tooth-ansi-c-quote-fail-closed-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": ansiCQuoteHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+    expectKilled(
+      "tooth-param-expansion-fail-closed-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": paramExpansionHashHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from =
+      "function shellSubstitutionStartAt(src, i) {\n" +
+      "  const c = src[i];\n" +
+      "  return c === \"`\" || c === \"$\";\n" +
+      "}";
+    const to =
+      "function shellSubstitutionStartAt(src, i) {\n" +
+      "  const c = src[i];\n" +
+      "  if (c === \"`\") return true;\n" +
+      "  if (c === \"$\" && src[i + 1] === \"(\") return true;\n" +
+      "  if (c === \"$\" && src[i + 1] === \"'\") return true;\n" +
+      "  return false;\n" +
+      "}";
+    if (!original.includes(from)) throw new Error("general expansion-marker site missing");
+    const mod = await loadMutant(original.replace(from, to), "threetoken");
+    expectKilled(
+      "tooth-general-dollar-marker-load-bearing",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": paramExpansionHashHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `function isEscapedAt(src, index) {
+  return index > 0 && backslashRunLengthBefore(src, index) % 2 === 1;
+}`;
+    const to = `function isEscapedAt(src, index) {
+  return index > 0 && src[index - 1] === "\\\\";
+}`;
+    if (!original.includes(from)) throw new Error("backslash-parity isEscapedAt site missing");
+    const mod = await loadMutant(original.replace(from, to), "parity");
+    expectKilled(
+      "tooth-even-backslash-close-paren-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": evenBackslashCloseHarness,
+          "scripts/release-preflight.sh": approveOnly,
+        },
+      }),
+      "E_VERDICT_FORM"
+    );
+  }
+  {
+    const from = `        const closeIdx = indexOfCaseArmCloseParen(
+          executable,
+          um.index + um[0].length
+        );
+        if (closeIdx < 0) continue;`;
+    const to = `        const openEscaped =
+          um[1] === "(" && isEscapedAt(executable, um.index);
+        const closeIdx = indexOfCaseArmCloseParen(
+          executable,
+          um.index + um[0].length
+        );
+        if (openEscaped || closeIdx < 0) continue;`;
+    if (!original.includes(from)) throw new Error("case-arm close-paren site missing for escaped-open tooth");
+    const mod = await loadMutant(original.replace(from, to), "escopen");
+    expectKilled(
+      "tooth-escaped-paren-literal-arm-killed",
+      mod.reviewVerdictVocabularyFindings({
+        agentsText,
+        harnessFiles: {
+          "scripts/second-opinion.sh": escapedParenLiteralArmHarness,
           "scripts/release-preflight.sh": approveOnly,
         },
       }),
@@ -6768,7 +7135,7 @@ else
   bad "mutation harness POSIX APPROVE|PASS alternation (rc=$rc): $out"
 fi
 printf '%s\n' '#!/bin/bash' \
-  '[[ "$1" =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]' \
+  '[[ x =~ VERDICT:[[:space:]]*(APPROVE|REQUEST_CHANGES) ]]' \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]]; then
@@ -6792,7 +7159,10 @@ else
   ok "runtime oracle: default-BRE canonical-only does not match PASS"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -q '$BRE_PASS_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
@@ -6806,7 +7176,10 @@ else
   bad "mutation default-BRE grep -q PASS (rc=$rc): $out"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -q '$BRE_CANON_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -6825,7 +7198,10 @@ else
   bad "runtime oracle: grep -Eq PASS pattern did not match"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq '$ERE_PASS_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -6836,7 +7212,10 @@ else
   bad "mutation grep -Eq PASS (rc=$rc): $out"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eqi '$ERE_PASS_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -6847,7 +7226,10 @@ else
   bad "mutation grep -Eqi PASS (rc=$rc): $out"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq '$ERE_CANON_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -6905,7 +7287,10 @@ cp "$REPO_ROOT/scripts/second-opinion.sh" "$SANDBOX/scripts/second-opinion.sh"
 plant_approve_grep() {
   local pat=$1
   printf '%s\n' '#!/bin/bash' \
-    'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+    'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
     "grep -q '$pat'" \
     > "$SANDBOX/scripts/second-opinion.sh"
   cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
@@ -6940,7 +7325,10 @@ else
   bad "runtime oracle: grep -m 1 -q PASS pattern did not match"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -m 1 -q '$GREP_M_PASS_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
@@ -6954,7 +7342,10 @@ else
   bad "mutation grep -m 1 -q PASS (rc=$rc): $out"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -m 1 -q 'VERDICT:[[:space:]]*APPROVE'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -6964,7 +7355,10 @@ else
   bad "benign grep -m 1 -q canonical APPROVE (rc=$rc): $out"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep --not-a-real-grep-option 1 'VERDICT:[[:space:]]*PASS'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -6982,7 +7376,10 @@ else
   bad "runtime oracle: unquoted \$PAT Bash regex did not accept PASS"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "PAT='$VAR_PAT'" \
   '[[ "$1" =~ $PAT ]]' \
   > "$SANDBOX/scripts/second-opinion.sh"
@@ -7005,7 +7402,10 @@ else
   bad "runtime oracle: wildcard-alt .* did not match VERDICT: PASS"
 fi
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq '$WILDCARD_ALT_PAT'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 cp "$REPO_ROOT/scripts/release-preflight.sh" "$SANDBOX/scripts/release-preflight.sh"
@@ -7018,7 +7418,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq 'VERDICT:[[:space:]]*APPROVE.*'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7029,7 +7432,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq 'VERDICT:[[:space:]]*APPROVE?'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7040,7 +7446,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq 'VERDICT:[[:space:]]*approve'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7051,7 +7460,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq 'VERDICT:[[:space:]]*REQUEST-CHANGES'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7062,7 +7474,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   "grep -Eq 'VERDICT:[[:space:]]*(APPROVE|CHANGES_REQUESTED)'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7101,7 +7516,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
   'grep -Eq "$PAT"' \
   > "$SANDBOX/scripts/second-opinion.sh"
@@ -7114,7 +7532,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'grep -Eq "PASS|VERDICT:[[:space:]]*APPROVE"' \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7126,7 +7547,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'grep -Eq "VERDICT:[[:space:]]*APPROVE|PASS"' \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7138,7 +7562,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
   'grep -e "$PAT"' \
   > "$SANDBOX/scripts/second-opinion.sh"
@@ -7151,7 +7578,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
   'grep --regexp "$PAT"' \
   > "$SANDBOX/scripts/second-opinion.sh"
@@ -7164,7 +7594,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
   'grep --regexp=$PAT' \
   > "$SANDBOX/scripts/second-opinion.sh"
@@ -7177,7 +7610,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'PAT="VERDICT:[[:space:]]*(APPROVE|PASS)"' \
   'grep -e "$PAT" -e "VERDICT: APPROVE"' \
   > "$SANDBOX/scripts/second-opinion.sh"
@@ -7234,8 +7670,11 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
-  'grep -Eq "^(VERDICT:[[:space:]]*APPROVE)$"' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
+  "grep -Eq '^(VERDICT:[[:space:]]*APPROVE)$'" \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]]; then
@@ -7245,7 +7684,10 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'grep -Eq "(PASS|VERDICT:[[:space:]]*APPROVE)"' \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
@@ -7331,7 +7773,156 @@ else
 fi
 
 printf '%s\n' '#!/bin/bash' \
-  'case "$1" in "VERDICT: APPROVE") printf "%s" "approve" ;; "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;; esac' \
+  'tag=x\ #not-comment; case "$1" in VERDICT:*PASS) printf HIT ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: escaped-space before # VERDICT:*PASS) case arm fails closed"
+else
+  bad "mutation escaped-space hash VERDICT:*PASS glob (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac;# note VERDICT:*PASS)' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "benign: operator-adjacent ;# comment VERDICT:*PASS) is not a case-arm site"
+else
+  bad "benign operator-adjacent hash comment (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'x=$(# note VERDICT:*PASS)' \
+  '  printf safe' \
+  ')' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: \$(# comment line with VERDICT:*PASS) fails closed"
+else
+  bad "mutation command-subst hash comment (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$value" in' \
+  '  \(VERDICT:*PASS\)) printf pass ;;' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: escaped-paren literal case arm \(VERDICT:*PASS\)) fails closed"
+else
+  bad "mutation escaped-paren literal case arm (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$value" in' \
+  '  VERDICT:*PASS\\) printf pass ;;' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: even-backslash VERDICT:*PASS\\\\) case arm fails closed"
+else
+  bad "mutation even-backslash case-arm close (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'out="$(printf "%s" " # display")"; case "$1" in VERDICT:*PASS) printf HIT ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: nested \$( quote walk VERDICT:*PASS) fails closed"
+else
+  bad "mutation command-subst nested quote (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'out="`printf "%s" " # display"`"; case "$1" in VERDICT:*PASS) printf HIT ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: nested backtick quote walk VERDICT:*PASS) fails closed"
+else
+  bad "mutation backtick nested quote (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  "printf '%s\\n' \$'safe\\' # display'; case \"\$1\" in VERDICT:*PASS) printf HIT ;; esac" \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: ANSI-C \$' quoting VERDICT:*PASS) fails closed"
+else
+  bad "mutation ANSI-C quote (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'out=${var# #display}; case "$1" in VERDICT:*PASS) printf HIT ;; esac' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") : ;;' \
+  '  "VERDICT: REQUEST_CHANGES") : ;;' \
+  'esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: param-expansion \${var# #display} VERDICT:*PASS) fails closed"
+else
+  bad "mutation param-expansion hash (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in "VERDICT: APPROVE") printf HIT ;; "VERDICT: REQUEST_CHANGES") : ;; esac' \
+  > "$SANDBOX/scripts/second-opinion.sh"
+out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]] && printf '%s\n' "$out" | grep 'E_VERDICT_FORM' >/dev/null \
+  && printf '%s\n' "$out" | grep 'scripts/second-opinion.sh' >/dev/null; then
+  ok "mutation: same-line quoted \$1 + VERDICT: APPROVE fails closed (by design)"
+else
+  bad "mutation plain dollar-one same-line (rc=$rc): $out"
+fi
+
+printf '%s\n' '#!/bin/bash' \
+  'case "$1" in' \
+  '  "VERDICT: APPROVE") printf "%s" "approve" ;;' \
+  '  "VERDICT: REQUEST_CHANGES") printf "%s" "request-changes" ;;' \
+  'esac' \
   'grep -f verdict-patterns.txt' \
   > "$SANDBOX/scripts/second-opinion.sh"
 out=$(node "$TOOL" --repo-root "$SANDBOX" 2>&1); rc=$?
