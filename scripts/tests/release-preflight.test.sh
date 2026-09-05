@@ -21,7 +21,7 @@ FAIL=0
 ok()  { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-preflight-test.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
@@ -176,7 +176,7 @@ check "reviewDecision=APPROVED + newer comment REQUEST_CHANGES is BLOCKED" "$rc"
 contains "names REQUEST_CHANGES from stream" "$out" "REQUEST_CHANGES"
 contains "names the newer commenter" "$out" "codex-reviewer"
 # Must not claim READY just because formal approval exists.
-if echo "$out" | grep -qF "READY"; then bad "must not report READY when newer REQUEST_CHANGES exists"; else ok "does not report READY under stale formal approval"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "must not report READY when newer REQUEST_CHANGES exists"; else ok "does not report READY under stale formal approval"; fi
 
 echo "#61 · malformed/null timestamps and authorless events fail closed"
 # Null-time APPROVE must never outrank a valid REQUEST_CHANGES.
@@ -290,7 +290,7 @@ out=$(run "$f_bogus_ts"); rc=$?
 check "bogus prefix timestamp APPROVE does not outrank valid REQUEST_CHANGES" "$rc" "1"
 contains "selects valid REQUEST_CHANGES over bogus-ts APPROVE" "$out" "REQUEST_CHANGES"
 contains "names the valid reviewer" "$out" "good-reviewer"
-if echo "$out" | grep -qF "READY"; then bad "must not report READY when only valid event is REQUEST_CHANGES"; else ok "does not report READY under bogus-ts APPROVE"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "must not report READY when only valid event is REQUEST_CHANGES"; else ok "does not report READY under bogus-ts APPROVE"; fi
 
 # Sole event is a prefix-looking but incomplete timestamp: fail closed, not READY.
 f_only_bogus=$(fixture only_bogus '.reviewDecision = "" | .headRefOid = "1111111111111111111111111111111111111111" |
@@ -302,7 +302,7 @@ f_only_bogus=$(fixture only_bogus '.reviewDecision = "" | .headRefOid = "1111111
   }]')
 out=$(run "$f_only_bogus"); rc=$?
 check "sole incomplete timestamp APPROVE is BLOCKED (fail closed)" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "incomplete timestamp must not yield READY"; else ok "incomplete-ts sole APPROVE is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "incomplete timestamp must not yield READY"; else ok "incomplete-ts sole APPROVE is not READY"; fi
 
 # Incomplete fractional / missing timezone forms are not accepted either.
 f_incomplete_iso=$(fixture incomplete_iso '.reviewDecision = "" |
@@ -335,8 +335,8 @@ out=$(run "$f_imposs_date"); rc=$?
 check "impossible calendar APPROVE does not outrank valid REQUEST_CHANGES" "$rc" "1"
 contains "selects valid REQUEST_CHANGES over imposs-date APPROVE" "$out" "REQUEST_CHANGES"
 contains "names the valid reviewer under imposs-date" "$out" "good-reviewer"
-if echo "$out" | grep -qF "READY"; then bad "must not report READY when only valid event is REQUEST_CHANGES"; else ok "does not report READY under imposs-date APPROVE"; fi
-if echo "$out" | grep -qF "bogus-calendar"; then bad "impossible-date APPROVE must not be selected as the winning event"; else ok "impossible-date author is not the winning event"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "must not report READY when only valid event is REQUEST_CHANGES"; else ok "does not report READY under imposs-date APPROVE"; fi
+if echo "$out" | grep -F "bogus-calendar" >/dev/null; then bad "impossible-date APPROVE must not be selected as the winning event"; else ok "impossible-date author is not the winning event"; fi
 
 # Sole impossible-date formal APPROVED: malformed formal, not READY via fallback.
 f_only_imposs=$(fixture only_imposs '.reviewDecision = "APPROVED" | .headRefOid = "1111111111111111111111111111111111111111" |
@@ -349,7 +349,7 @@ f_only_imposs=$(fixture only_imposs '.reviewDecision = "APPROVED" | .headRefOid 
   }]')
 out=$(run "$f_only_imposs"); rc=$?
 check "sole impossible calendar formal APPROVED is BLOCKED" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "impossible calendar formal must not yield READY"; else ok "impossible-date sole formal is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "impossible calendar formal must not yield READY"; else ok "impossible-date sole formal is not READY"; fi
 
 # Apr 31 / non-leap Feb 29 are also impossible (not merely "odd").
 f_apr31=$(fixture apr31 '.reviewDecision = "" |
@@ -360,7 +360,7 @@ f_apr31=$(fixture apr31 '.reviewDecision = "" |
   }]')
 out=$(run "$f_apr31"); rc=$?
 check "April 31 is not a valid calendar date" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "Apr 31 APPROVE must not be READY"; else ok "Apr 31 APPROVE is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "Apr 31 APPROVE must not be READY"; else ok "Apr 31 APPROVE is not READY"; fi
 
 f_nonleap=$(fixture nonleap '.reviewDecision = "" |
   .comments = [{
@@ -370,7 +370,7 @@ f_nonleap=$(fixture nonleap '.reviewDecision = "" |
   }]')
 out=$(run "$f_nonleap"); rc=$?
 check "non-leap Feb 29 is not a valid calendar date" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "2023-02-29 APPROVE must not be READY"; else ok "non-leap Feb 29 is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "2023-02-29 APPROVE must not be READY"; else ok "non-leap Feb 29 is not READY"; fi
 
 echo "#61 P1 · boundary-valid leap/date/offset instants must still be accepted"
 # Round-trip validation must not over-reject real GitHub-shaped instants.
@@ -451,7 +451,7 @@ f_imposs_off=$(fixture imposs_off '.reviewDecision = "" |
   }]')
 out=$(run "$f_imposs_off"); rc=$?
 check "impossible calendar with +00:00 offset is BLOCKED" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "imposs+offset must not be READY"; else ok "imposs+offset is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "imposs+offset must not be READY"; else ok "imposs+offset is not READY"; fi
 
 echo "#61 P1 · chronological sort normalizes offsets and fractional spellings"
 # Raw .at text sort is a false-green: wall "17:00+05:30" sorts after "16:00Z"
@@ -473,8 +473,8 @@ out=$(run "$f_off_chrono"); rc=$?
 check "older +05:30 APPROVE must not beat newer Z REQUEST_CHANGES" "$rc" "1"
 contains "names newer REQUEST_CHANGES under offset chrono" "$out" "REQUEST_CHANGES"
 contains "names newer-zulu-blocker" "$out" "newer-zulu-blocker"
-if echo "$out" | grep -qF "READY"; then bad "offset text-sort must not yield READY"; else ok "offset chrono is not READY"; fi
-if echo "$out" | grep -qF "older-offset-approver"; then bad "older offset APPROVE must not win"; else ok "older offset APPROVE is not the winning event"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "offset text-sort must not yield READY"; else ok "offset chrono is not READY"; fi
+if echo "$out" | grep -F "older-offset-approver" >/dev/null; then bad "older offset APPROVE must not win"; else ok "older offset APPROVE is not the winning event"; fi
 
 # Equal true instants spelled with offset vs Z: REQUEST_CHANGES wins by tie precedence.
 f_off_tie=$(fixture off_tie '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
@@ -494,7 +494,7 @@ out=$(run "$f_off_tie"); rc=$?
 check "equal-instant +05:30 APPROVE vs Z REQUEST_CHANGES prefers REQUEST_CHANGES" "$rc" "1"
 contains "offset equal-instant prefers REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
 contains "names zulu-tie-blocker" "$out" "zulu-tie-blocker"
-if echo "$out" | grep -qF "READY"; then bad "equal-instant offset tie must not be READY"; else ok "equal-instant offset tie is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "equal-instant offset tie must not be READY"; else ok "equal-instant offset tie is not READY"; fi
 
 # Equal true instants with/without trailing .000 fraction spelling.
 f_frac_tie=$(fixture frac_tie '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
@@ -514,7 +514,7 @@ out=$(run "$f_frac_tie"); rc=$?
 check "equal-instant Z vs .000Z prefers REQUEST_CHANGES" "$rc" "1"
 contains "fraction spelling equal-instant prefers REQUEST_CHANGES" "$out" "REQUEST_CHANGES"
 contains "names frac-tie-blocker" "$out" "frac-tie-blocker"
-if echo "$out" | grep -qF "READY"; then bad "fraction spelling tie must not be READY"; else ok "fraction spelling tie is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "fraction spelling tie must not be READY"; else ok "fraction spelling tie is not READY"; fi
 
 # Distinct sub-second fractions must order chronologically (not collapse to ties).
 f_frac_order=$(fixture frac_order '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |
@@ -553,7 +553,7 @@ f_ns9_order=$(fixture ns9_order '.reviewDecision = "" | .headRefOid = "bbbbbbbbb
 out=$(run "$f_ns9_order"); rc=$?
 check "later 9-digit fractional APPROVE beats earlier 9-digit REQUEST_CHANGES" "$rc" "0"
 contains "names late-ns9-approver" "$out" "late-ns9-approver"
-if echo "$out" | grep -qF "early-ns9-blocker"; then bad "earlier 9-digit RC must not win"; else ok "earlier 9-digit RC is not the winning event"; fi
+if echo "$out" | grep -F "early-ns9-blocker" >/dev/null; then bad "earlier 9-digit RC must not win"; else ok "earlier 9-digit RC is not the winning event"; fi
 
 # Exact collapse reproducer: older RC .1234567890Z vs newer APPROVE .1234567891Z.
 # Accepting unlimited frac then truncating the chrono key to 9 digits made these
@@ -579,9 +579,9 @@ f_frac10_collapse=$(fixture frac10_collapse '.reviewDecision = "" | .headRefOid 
 out=$(run "$f_frac10_collapse"); rc=$?
 check "10+ fractional digits formal pair is BLOCKED (malformed, not truncate-tie)" "$rc" "1"
 contains "names 10+ frac as malformed formal" "$out" "malformed"
-if echo "$out" | grep -qF "READY"; then bad "10+ frac formal pair must not READY"; else ok "10+ frac formal pair is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "10+ frac formal pair must not READY"; else ok "10+ frac formal pair is not READY"; fi
 # Must not select either event as a usable chronological winner via truncate-tie.
-if echo "$out" | grep -qE 'VERDICT: (APPROVE|REQUEST_CHANGES).*(old-rc-10frac|new-appr-10frac)'; then
+if echo "$out" | grep -E 'VERDICT: (APPROVE|REQUEST_CHANGES).*(old-rc-10frac|new-appr-10frac)' >/dev/null; then
   bad "10+ frac stamps must not enter the sortable event stream"
 else
   ok "10+ frac stamps never enter the sortable event stream"
@@ -600,7 +600,7 @@ f_only_frac10=$(fixture only_frac10 '.reviewDecision = "APPROVED" | .headRefOid 
 out=$(run "$f_only_frac10"); rc=$?
 check "sole 10+ fractional formal APPROVED is BLOCKED" "$rc" "1"
 contains "names overprecise formal as malformed" "$out" "malformed"
-if echo "$out" | grep -qF "READY"; then bad "10+ frac sole formal must not READY via aggregate"; else ok "10+ frac sole formal not recovered via reviewDecision"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "10+ frac sole formal must not READY via aggregate"; else ok "10+ frac sole formal not recovered via reviewDecision"; fi
 
 # Digits past the ninth never reorder the stream: a 10+ "later" APPROVE comment
 # cannot outrank a valid earlier REQUEST_CHANGES (it never enters the stream).
@@ -621,8 +621,8 @@ out=$(run "$f_frac10_vs_valid"); rc=$?
 check "10+ frac APPROVE cannot outrank valid 9-digit REQUEST_CHANGES" "$rc" "1"
 contains "selects valid RC over 10+ frac APPROVE" "$out" "REQUEST_CHANGES"
 contains "names valid-rc reviewer" "$out" "valid-rc"
-if echo "$out" | grep -qF "overprecise-approver"; then bad "10+ frac APPROVE must not be selected"; else ok "10+ frac APPROVE is not the winning event"; fi
-if echo "$out" | grep -qF "READY"; then bad "must not READY when only valid event is REQUEST_CHANGES"; else ok "does not READY under 10+ frac APPROVE"; fi
+if echo "$out" | grep -F "overprecise-approver" >/dev/null; then bad "10+ frac APPROVE must not be selected"; else ok "10+ frac APPROVE is not the winning event"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "must not READY when only valid event is REQUEST_CHANGES"; else ok "does not READY under 10+ frac APPROVE"; fi
 
 # Comment-only 10+ frac APPROVE (no formal): drop from stream, fail closed.
 f_comment_frac10=$(fixture comment_frac10 '.reviewDecision = "" |
@@ -633,7 +633,7 @@ f_comment_frac10=$(fixture comment_frac10 '.reviewDecision = "" |
   }]')
 out=$(run "$f_comment_frac10"); rc=$?
 check "sole comment APPROVE with 10+ fractional digits is BLOCKED" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "comment 10+ frac must not READY"; else ok "comment 10+ frac is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "comment 10+ frac must not READY"; else ok "comment 10+ frac is not READY"; fi
 
 echo "#61 P1 · malformed verdict-bearing comments hard-block (no drop-then-recover)"
 # Exact regression 1: valid formal APPROVED at .123456789Z, later comment
@@ -657,18 +657,18 @@ check "valid formal APPROVED + later malformed RC comment is BLOCKED" "$rc" "1"
 contains "names later malformed RC as malformed evidence" "$out" "malformed"
 contains "names later 10+ frac RC stamp in evidence" "$out" "1234567891"
 contains "names REQUEST_CHANGES in malformed evidence" "$out" "VERDICT: REQUEST_CHANGES"
-if echo "$out" | grep -qF "READY"; then
+if echo "$out" | grep -F "READY" >/dev/null; then
   bad "must not READY by selecting older formal APPROVED after dropping malformed later RC"
 else
   ok "does not READY under older formal + later malformed RC"
 fi
 # Must not treat the older formal alone as a clear independent approval path.
-if echo "$out" | grep -qF "independent identity"; then
+if echo "$out" | grep -F "independent identity" >/dev/null; then
   bad "older formal APPROVE must not be selected as gate-clearing when later RC is malformed"
 else
   ok "older formal APPROVE is not selected as gate-clearing under later malformed RC"
 fi
-if echo "$out" | grep -qF "formal-approver"; then
+if echo "$out" | grep -F "formal-approver" >/dev/null; then
   bad "older formal-approver must not appear as selected winning event under later malformed RC"
 else
   ok "older formal-approver is not the selected winning event"
@@ -686,12 +686,12 @@ out=$(run "$f_sole_malformed_approve_agg"); rc=$?
 check "reviewDecision=APPROVED + sole malformed VERDICT: APPROVE comment is BLOCKED" "$rc" "1"
 contains "names sole malformed comment as malformed evidence" "$out" "malformed"
 contains "names 10+ frac APPROVE stamp in evidence" "$out" "1234567890"
-if echo "$out" | grep -qF "READY"; then
+if echo "$out" | grep -F "READY" >/dev/null; then
   bad "must not READY via reviewDecision aggregate after dropping malformed APPROVE comment"
 else
   ok "does not READY via reviewDecision after malformed APPROVE comment"
 fi
-if echo "$out" | grep -qF "formal GitHub approval present"; then
+if echo "$out" | grep -F "formal GitHub approval present" >/dev/null; then
   bad "must not use reviewDecision aggregate when malformed verdict comment was discarded"
 else
   ok "no reviewDecision aggregate recovery after malformed verdict comment"
@@ -708,12 +708,12 @@ out=$(run "$f_authorless_comment_agg"); rc=$?
 check "reviewDecision=APPROVED + authorless VERDICT: APPROVE comment is BLOCKED" "$rc" "1"
 contains "names authorless comment as malformed evidence" "$out" "malformed"
 contains "names authorless in malformed evidence" "$out" "(authorless)"
-if echo "$out" | grep -qF "READY"; then
+if echo "$out" | grep -F "READY" >/dev/null; then
   bad "authorless APPROVE comment must not READY via reviewDecision aggregate"
 else
   ok "authorless APPROVE comment not recovered via reviewDecision"
 fi
-if echo "$out" | grep -qF "formal GitHub approval present"; then
+if echo "$out" | grep -F "formal GitHub approval present" >/dev/null; then
   bad "authorless APPROVE must not recover via reviewDecision aggregate"
 else
   ok "no aggregate recovery after authorless APPROVE comment"
@@ -728,7 +728,7 @@ f_ordinary_bad_ts=$(fixture ordinary_bad_ts '.reviewDecision = "APPROVED" | .rev
   }]')
 out=$(run "$f_ordinary_bad_ts"); rc=$?
 check "ordinary non-verdict comment with bad timestamp does not block aggregate" "$rc" "0"
-if echo "$out" | grep -qF "malformed"; then
+if echo "$out" | grep -F "malformed" >/dev/null; then
   bad "ordinary comment must not be collected as malformed relevant evidence"
 else
   ok "ordinary non-verdict comment is not malformed evidence"
@@ -748,7 +748,7 @@ f_formal_vs_body=$(fixture formal_vs_body '.reviewDecision = "CHANGES_REQUESTED"
 out=$(run "$f_formal_vs_body"); rc=$?
 check "CHANGES_REQUESTED + body VERDICT: APPROVE is BLOCKED" "$rc" "1"
 contains "names REQUEST_CHANGES despite body APPROVE" "$out" "REQUEST_CHANGES"
-if echo "$out" | grep -qE 'READY|independent identity'; then
+if echo "$out" | grep -E 'READY|independent identity' >/dev/null; then
   bad "body APPROVE must not authorize over formal CHANGES_REQUESTED"
 else
   ok "body APPROVE does not authorize over formal CHANGES_REQUESTED"
@@ -765,7 +765,7 @@ f_dismissed=$(fixture dismissed_approve '.reviewDecision = "" | .headRefOid = "3
   }]')
 out=$(run "$f_dismissed"); rc=$?
 check "DISMISSED review with body VERDICT: APPROVE is BLOCKED" "$rc" "1"
-if echo "$out" | grep -qF "READY"; then bad "DISMISSED+APPROVE body must not be READY"; else ok "DISMISSED does not authorize via body APPROVE"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "DISMISSED+APPROVE body must not be READY"; else ok "DISMISSED does not authorize via body APPROVE"; fi
 contains "fail closed without usable independent APPROVE" "$out" "Law 5"
 
 echo "#61 P1 · SHA-bound + malformed formal fail closed before aggregate fallback"
@@ -781,7 +781,7 @@ f_null_head=$(fixture null_head '.reviewDecision = "APPROVED" | .headRefOid = nu
 out=$(run "$f_null_head"); rc=$?
 check "SHA-bound APPROVE with null headRefOid is BLOCKED" "$rc" "1"
 contains "names missing/unverifiable head binding" "$out" "head"
-if echo "$out" | grep -qF "READY"; then bad "null head must not READY via formal or reviewDecision"; else ok "null head is not READY"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "null head must not READY via formal or reviewDecision"; else ok "null head is not READY"; fi
 
 # Null-time formal APPROVED must not be dropped then recovered via reviewDecision.
 f_null_time_formal=$(fixture null_time_formal '.reviewDecision = "APPROVED" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
@@ -795,7 +795,7 @@ f_null_time_formal=$(fixture null_time_formal '.reviewDecision = "APPROVED" | .h
 out=$(run "$f_null_time_formal"); rc=$?
 check "null-time formal APPROVED is BLOCKED (not recovered via reviewDecision)" "$rc" "1"
 contains "names malformed formal evidence" "$out" "malformed"
-if echo "$out" | grep -qF "READY"; then bad "null-time formal must not READY via aggregate"; else ok "null-time formal not recovered via reviewDecision"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "null-time formal must not READY via aggregate"; else ok "null-time formal not recovered via reviewDecision"; fi
 
 # Authorless formal APPROVED must not be dropped then recovered via reviewDecision.
 f_authorless_formal=$(fixture authorless_formal '.reviewDecision = "APPROVED" | .headRefOid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" |
@@ -809,7 +809,7 @@ f_authorless_formal=$(fixture authorless_formal '.reviewDecision = "APPROVED" | 
 out=$(run "$f_authorless_formal"); rc=$?
 check "authorless formal APPROVED is BLOCKED (not recovered via reviewDecision)" "$rc" "1"
 contains "names malformed/authorless formal" "$out" "malformed"
-if echo "$out" | grep -qF "READY"; then bad "authorless formal must not READY via aggregate"; else ok "authorless formal not recovered via reviewDecision"; fi
+if echo "$out" | grep -F "READY" >/dev/null; then bad "authorless formal must not READY via aggregate"; else ok "authorless formal not recovered via reviewDecision"; fi
 
 echo "#61 · stale-head verdict fails closed when source binds a commit SHA"
 f_stale=$(fixture stale_head '.reviewDecision = "" | .headRefOid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" |

@@ -148,12 +148,12 @@ setup_repo unsigned
 SHA=$(head_sha)
 BASE=$(base_sha)
 # Prove the base itself is unsigned — a whole-history check would refuse this.
-if git -C "$REPO" log -1 --format=%B "$BASE" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+if git -C "$REPO" log -1 --format=%B "$BASE" | grep -iE '^Signed-off-by:[[:space:]]+' >/dev/null; then
   bad "fixture bug: base commit must stay unsigned"
 else
   ok "fixture: base commit is unsigned (range-only check)"
 fi
-if git -C "$REPO" log -1 --format=%B "$SHA" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+if git -C "$REPO" log -1 --format=%B "$SHA" | grep -iE '^Signed-off-by:[[:space:]]+' >/dev/null; then
   bad "fixture bug: work commit must be unsigned in this case"
 else
   ok "fixture: work commit is unsigned"
@@ -183,12 +183,12 @@ echo "supervisor handoff --dry-run of a fully signed range does not refuse for D
 setup_repo signed
 SHA=$(head_sha)
 BASE=$(base_sha)
-if git -C "$REPO" log -1 --format=%B "$BASE" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+if git -C "$REPO" log -1 --format=%B "$BASE" | grep -iE '^Signed-off-by:[[:space:]]+' >/dev/null; then
   bad "fixture bug: signed-range case must keep the base unsigned"
 else
   ok "fixture: signed-range base is still unsigned"
 fi
-if git -C "$REPO" log -1 --format=%B "$SHA" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+if git -C "$REPO" log -1 --format=%B "$SHA" | grep -iE '^Signed-off-by:[[:space:]]+' >/dev/null; then
   ok "fixture: work commit is signed"
 else
   bad "fixture bug: work commit is not signed"

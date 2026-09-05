@@ -29,8 +29,8 @@ FAIL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 # Install a sibling reaper copy with the real production stream-capture helper
 # at the path production resolves ($dest_dir/lib/stream-capture.sh). Without
@@ -124,7 +124,7 @@ case "$1" in
       done
       printf '%s\n' "$body" >> "${GH_COMMENTS_FILE:-/dev/null}"
       # refuse absolute worktree-looking paths in comment
-      if printf '%s' "$body" | grep -qE '/Users/|/home/|/private/|/tmp/gibson'; then
+      if printf '%s' "$body" | grep -E '/Users/|/home/|/private/|/tmp/gibson' >/dev/null; then
         echo "FAKE-GH: absolute path leaked into comment" >&2
         exit 1
       fi
@@ -132,7 +132,7 @@ case "$1" in
     fi
     if [[ "${1:-}" == "edit" ]]; then
       log "EDIT $*"
-      if printf '%s' "$*" | grep -q -- '--remove-label'; then
+      if printf '%s' "$*" | grep -- '--remove-label' >/dev/null; then
         : > "${GH_STATE:-/tmp/gh-reaper-state}"
       fi
       exit 0
@@ -516,7 +516,7 @@ echo "#73 · repeated apply is idempotent and comment-deduplicated"
 out_repeat=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/apply/canon" --claim-id issue-40-dead --apply 2>&1)
 rc2=$?
 check "repeat apply exits 0" "$rc2" "0"
-if echo "$out_repeat" | grep -qiE 'absent|idempotent|nothing to reap|already'; then
+if echo "$out_repeat" | grep -iE 'absent|idempotent|nothing to reap|already' >/dev/null; then
   ok "repeat apply mentions absent or skip"
 else
   bad "repeat apply mentions absent or skip (got: $(echo "$out_repeat" | tail -3 | tr '\n' ' '))"
@@ -793,7 +793,7 @@ unset GH_GRAPHQL_FAIL
 
 # ---------------------------------------------------------------------------
 echo "#73 · never closes an issue (no gh issue close)"
-if grep -n 'issue close\|--close\|state.*closed' "$REAPER" | grep -v 'never close' | grep -q .; then
+if grep -n 'issue close\|--close\|state.*closed' "$REAPER" | grep -v 'never close' | grep . >/dev/null; then
   bad "reaper source mentions issue close"
 else
   ok "reaper source does not close issues"
@@ -821,12 +821,12 @@ export GH_PR_COUNT=0
 out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/fetchfail/canon" 2>&1)
 rc=$?
 # Must not plan REAP from cached ledger after fetch failure.
-if echo "$out" | grep -q 'REAP   issue-91-fetchfail'; then
+if echo "$out" | grep 'REAP   issue-91-fetchfail' >/dev/null; then
   bad "fetch failure must not REAP from cached claim"
 else
   ok "fetch failure does not REAP cached claim"
 fi
-if [[ "$rc" -ne 0 ]] || echo "$out" | grep -qiE 'fetch|refuse|ERROR'; then
+if [[ "$rc" -ne 0 ]] || echo "$out" | grep -iE 'fetch|refuse|ERROR' >/dev/null; then
   ok "fetch failure exits refuse/error path"
 else
   bad "fetch failure should fail closed (rc=$rc)"
@@ -902,7 +902,7 @@ if grep -qF 'gibson-claim-reaper:issue-92-renew' "$GH_COMMENTS_FILE" 2>/dev/null
 else
   ok "renewal CAS failure posted no released handoff marker"
 fi
-if echo "$out" | grep -q 'OK released'; then
+if echo "$out" | grep 'OK released' >/dev/null; then
   bad "renewal must not print overall success"
 else
   ok "renewal prints no overall success"
@@ -989,7 +989,7 @@ if grep -qF 'gibson-claim-reaper:issue-93-legrenew' "$GH_COMMENTS_FILE" 2>/dev/n
 else
   ok "legacy renewal posted no released handoff marker"
 fi
-if echo "$out" | grep -q 'OK released'; then
+if echo "$out" | grep 'OK released' >/dev/null; then
   bad "legacy renewal must not print overall success"
 else
   ok "legacy renewal prints no overall success"
@@ -1046,7 +1046,7 @@ if [[ "$rc" -eq 3 ]]; then
 else
   bad "comment-fail after release should exit 3 (got $rc)"
 fi
-if echo "$out" | grep -q 'OK released'; then
+if echo "$out" | grep 'OK released' >/dev/null; then
   bad "comment-fail must not print overall success"
 else
   ok "comment-fail prints no overall success"
@@ -1337,7 +1337,7 @@ EOF
 out=$(GIBSON_CLAIMS_NOW_EPOCH="$STALE_NOW" run_reaper "$ROOT/dupbody/canon" 2>&1)
 contains "duplicate or mismatch refuse" "$out" "REFUSE"
 # Must not plan a successful REAP for the aliased id while duplicates exist
-if echo "$out" | grep -q 'REAP   issue-98-one'; then
+if echo "$out" | grep 'REAP   issue-98-one' >/dev/null; then
   bad "duplicate body IDs must not REAP"
 else
   ok "duplicate body IDs do not REAP"
@@ -1367,15 +1367,15 @@ out=$(
 )
 rc=$?
 # Must not silently skip: either re-evaluate/release or warn still_live
-if echo "$out" | grep -qiE 'still_live|revivify|re-evaluat|OK released issue-99-readd|completed_but_still_live'; then
+if echo "$out" | grep -iE 'still_live|revivify|re-evaluat|OK released issue-99-readd|completed_but_still_live' >/dev/null; then
   ok "completed+live re-evaluates or releases"
 else
-  if echo "$out" | grep -qi 'skip' && echo "$out" | grep -qi 'idempotent' && ! echo "$out" | grep -qiE 'still_live|re-evaluat|revivify'; then
+  if echo "$out" | grep -i 'skip' >/dev/null && echo "$out" | grep -i 'idempotent' >/dev/null && ! echo "$out" | grep -iE 'still_live|re-evaluat|revivify' >/dev/null; then
     bad "silently skipped live claim after COMPLETED"
   else
     # If it released without the exact words, claim file gone is success
     files=$(git -C "$ROOT/readd/canon" fetch -q origin; git -C "$ROOT/readd/canon" ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
-    if echo "$files" | grep -q 'issue-99-readd'; then
+    if echo "$files" | grep 'issue-99-readd' >/dev/null; then
       bad "live claim after COMPLETED neither released nor warned (rc=$rc)"
       echo "$out" | tail -20
     else
@@ -1525,7 +1525,7 @@ out=$(
 rc=$?
 lacks    "stale-ls-remote apply must not invoke release" "$out" "FAKE-RC must not run"
 lacks    "stale-ls-remote apply must not OK released" "$out" "OK released"
-if echo "$out" | grep -qiE 'remote_branch_changed|REFUSE|refuse|INCOMPLETE'; then
+if echo "$out" | grep -iE 'remote_branch_changed|REFUSE|refuse|INCOMPLETE' >/dev/null; then
   ok "stale-ls-remote apply refuses (rc=$rc)"
 else
   bad "stale-ls-remote apply did not refuse (rc=$rc out=$(echo "$out" | tail -5 | tr '\n' ' '))"
@@ -1628,18 +1628,18 @@ out=$(
 )
 rc=$?
 lacks    "must not invoke release when remote SHA changed" "$out" "FAKE-RC should not"
-if echo "$out" | grep -qiE 'remote_branch_changed|SHA changed'; then
+if echo "$out" | grep -iE 'remote_branch_changed|SHA changed' >/dev/null; then
   ok "pre-mutation refused on remote SHA change"
-elif [[ "$rc" -eq 3 ]] && echo "$out" | grep -qiE 'refuse|INCOMPLETE|moving_evidence|no longer stale'; then
+elif [[ "$rc" -eq 3 ]] && echo "$out" | grep -iE 'refuse|INCOMPLETE|moving_evidence|no longer stale' >/dev/null; then
   ok "apply incomplete/refused after remote mid-flight change (rc=3)"
 else
-  if echo "$out" | grep -q 'OK released'; then
+  if echo "$out" | grep 'OK released' >/dev/null; then
     bad "released despite remote SHA change (rc=$rc)"
     echo "$out" | tail -30
   else
     # Still alive claim + non-success is acceptable
     files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" fetch -q origin; PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" ls-tree --name-only origin/main docs/claims/)
-    if echo "$files" | grep -q 'issue-102-remote-race'; then
+    if echo "$files" | grep 'issue-102-remote-race' >/dev/null; then
       ok "claim survives remote SHA change without release (rc=$rc)"
     else
       bad "claim released or missing after remote race (rc=$rc)"
@@ -1650,7 +1650,7 @@ fi
 files=$(PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" fetch -q origin; PATH="/usr/bin:/bin:$PATH" git -C "$ROOT/remote_race/canon" ls-tree --name-only origin/main docs/claims/)
 contains "claim row survives remote race" "$files" "issue-102-remote-race.md"
 # Prefer the explicit reason when present
-if echo "$out" | grep -qi 'remote_branch_changed'; then
+if echo "$out" | grep -i 'remote_branch_changed' >/dev/null; then
   ok "journal/reason remote_branch_changed observed"
 fi
 
@@ -1755,11 +1755,11 @@ out=$(
 rc=$?
 check "remote-query-fail dry-run exits 0" "$rc" "0"
 contains "REFUSE on remote query failure" "$out" "REFUSE"
-if echo "$out" | grep -qE 'remote_query_failed|remote_fetch_failed|REFUSE[[:space:]]+issue-104-rmtfail'; then
+if echo "$out" | grep -E 'remote_query_failed|remote_fetch_failed|REFUSE[[:space:]]+issue-104-rmtfail' >/dev/null; then
   ok "remote query/fetch failure REFUSEs claim"
 else
   # Any REFUSE line for this claim is acceptable
-  if echo "$out" | grep -q 'REFUSE   issue-104-rmtfail'; then
+  if echo "$out" | grep 'REFUSE   issue-104-rmtfail' >/dev/null; then
     ok "remote failure REFUSE line present"
   else
     bad "expected REFUSE for remote query failure"
@@ -2570,7 +2570,7 @@ out=$(
 )
 # With the defect restored, the old open row must be classified STALE and
 # release-spy must fire — proving the committed sensor would go red.
-if echo "$out" | grep -qF 'STALE PR #55 claim issue-55-parked' && \
+if echo "$out" | grep -F 'STALE PR #55 claim issue-55-parked' >/dev/null && \
    [[ "$(grep -c RELEASE_INVOKED "$ROOT/malinv/spy.log" 2>/dev/null || echo 0)" -ge 1 ]]; then
   ok "mutation receipt: restoring age-based STALE reaps the open PR (sensor would fail)"
 else
@@ -2829,9 +2829,9 @@ out2=$(
   GIBSON_REAPER_RELEASE_CMD="$spy_mix" \
     "$ROOT/mixmutr/claim-reaper.sh" --repo acme/app --claim-id issue-860-mix 2>&1
 )
-if echo "$out2" | grep -q 'mixed_ledger_representations'; then
+if echo "$out2" | grep 'mixed_ledger_representations' >/dev/null; then
   bad "mutation receipt: mixed REFUSE still present after skip: $out2"
-elif echo "$out2" | grep -q 'REAP   issue-860-mix'; then
+elif echo "$out2" | grep 'REAP   issue-860-mix' >/dev/null; then
   ok "mutation receipt: skipping mixed guard plans REAP (sensor would fail)"
 else
   bad "mutation receipt: skipping mixed guard did not re-enable REAP: $out2"
@@ -2865,7 +2865,7 @@ check "local-empty-HEAD dry-run exits 0" "$rc" "0"
 contains "local-empty-HEAD inventories remote claim" "$out" "issue-870-remote-only"
 lacks "local-empty-HEAD never nothing-to-reap from HEAD" "$out" "nothing to reap"
 # Must REAP or at least plan the remote claim, not exit early as empty.
-if echo "$out" | grep -qE 'REAP   issue-870-remote-only|KEEP   issue-870-remote-only|REFUSE   issue-870-remote-only'; then
+if echo "$out" | grep -E 'REAP   issue-870-remote-only|KEEP   issue-870-remote-only|REFUSE   issue-870-remote-only' >/dev/null; then
   ok "local-empty-HEAD plans the remote claim (not empty from HEAD)"
 else
   bad "local-empty-HEAD did not inventory remote claim: $out"
@@ -3548,7 +3548,7 @@ _install_abs180_gh "$ROOT/abs180mut/bin" "$ROOT/abs180mut/comments" "$ROOT/abs18
 # under the already-absent recovery proof branch (comments sit between the if and
 # the assignment, so use a wide before-context).
 if grep -qF '_abs_repo="${PR_REPO:-}"' "$_reaper_mut" && \
-   grep -B12 -F '_abs_repo="${PR_REPO:-}"' "$_reaper_mut" | grep -qF 'journal_has_claim_released_handoff_failed'; then
+   grep -B12 -F '_abs_repo="${PR_REPO:-}"' "$_reaper_mut" | grep -F 'journal_has_claim_released_handoff_failed' >/dev/null; then
   ok "mutation anchor: already-absent recovery binds _abs_repo to PR_REPO"
 else
   bad "mutation-miss: production missing _abs_repo=\"\${PR_REPO:-}\" under recovery proof"

@@ -27,12 +27,12 @@ check() {
   fi
 }
 contains() {
-  if echo "$2" | grep -qF -- "$3"; then ok "$1"
+  if printf '%s\n' "$2" | grep -F -- "$3" >/dev/null; then ok "$1"
   else bad "$1 (missing '$3')"
   fi
 }
 lacks() {
-  if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"
+  if printf '%s\n' "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"
   else ok "$1"
   fi
 }
@@ -1727,10 +1727,5 @@ contains "live green TI PASS" "$out" "[PASS] test-integrity-canary"
 contains "live green READY" "$out" "VERDICT: READY"
 
 echo ""
-echo "======================================"
-echo " git-configure tests: $PASS pass, $FAIL fail"
-echo "======================================"
-if [[ "$FAIL" -gt 0 ]]; then
-  exit 1
-fi
-exit 0
+echo "git-configure.test.sh: $PASS passed, $FAIL failed"
+[[ "$FAIL" -eq 0 ]]

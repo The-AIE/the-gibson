@@ -325,7 +325,7 @@ expect_incomplete() {
   local name="$1" calls="$2"
   shift 2
   out=$(run_repo "$@"); rc=$?
-  if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+  if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
     ok "$name: INCOMPLETE exit 3"
   else
     bad "$name (rc=$rc): $out"
@@ -336,28 +336,28 @@ expect_incomplete() {
 
 assert_missing_selector() {
   local rc="$1" out="$2"
-  [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'missing repository selector'
+  [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'missing repository selector' >/dev/null
 }
 
 assert_three_page_lint() {
   local rc="$1" out="$2"
-  [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK (3 issues)' \
-    && printf '%s\n' "$out" | grep -q 'loaded=3' \
-    && printf '%s\n' "$out" | grep -q 'totalCount=3'
+  [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK (3 issues)' >/dev/null \
+    && printf '%s\n' "$out" | grep 'loaded=3' >/dev/null \
+    && printf '%s\n' "$out" | grep 'totalCount=3' >/dev/null
 }
 
 assert_overlap_union() {
   local rc="$1" out="$2"
-  [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK (3 issues)' \
-    && printf '%s\n' "$out" | grep -q 'loaded=3' \
-    && printf '%s\n' "$out" | grep -q 'unionTotal=3' \
-    && printf '%s\n' "$out" | grep -q 'sourceTotals=2,2' \
-    && ! printf '%s\n' "$out" | grep -q 'totalCount='
+  [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK (3 issues)' >/dev/null \
+    && printf '%s\n' "$out" | grep 'loaded=3' >/dev/null \
+    && printf '%s\n' "$out" | grep 'unionTotal=3' >/dev/null \
+    && printf '%s\n' "$out" | grep 'sourceTotals=2,2' >/dev/null \
+    && ! printf '%s\n' "$out" | grep 'totalCount=' >/dev/null
 }
 
 assert_stale() {
   local rc="$1" out="$2"
-  [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: STALE_OBSERVATION'
+  [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: STALE_OBSERVATION' >/dev/null
 }
 
 check_logged_queries() {
@@ -606,9 +606,9 @@ emit_toobig_receipt() {
 
 # --- help / usage ---
 out=$(node "$SENSOR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help exits 0 with WHAT/WHY" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WHAT IT DOES' >/dev/null && ok "help exits 0 with WHAT/WHY" \
   || bad "help (rc=$rc): $out"
-if printf '%s\n' "$out" | grep -F -- '--allow-empty' | grep -q 'INTENTIONAL_EMPTY'; then
+if printf '%s\n' "$out" | grep -F -- '--allow-empty' | grep 'INTENTIONAL_EMPTY' >/dev/null; then
   ok "help discloses --allow-empty INTENTIONAL_EMPTY exit 0"
 else
   bad "help missing --allow-empty INTENTIONAL_EMPTY: $out"
@@ -618,13 +618,13 @@ out=$(node "$SENSOR" 2>&1); rc=$?
 
 # --- unknown flag ---
 out=$(node "$SENSOR" --definitely-not-a-flag 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'unknown flag: --definitely-not-a-flag' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'unknown flag: --definitely-not-a-flag' >/dev/null \
   && ok "unknown flag exits 2" \
   || bad "unknown flag (rc=$rc): $out"
 
 # --- missing value ---
 out=$(node "$SENSOR" --file 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'requires a value' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'requires a value' >/dev/null \
   && ok "--file without value exits 2" \
   || bad "--file missing (rc=$rc): $out"
 
@@ -640,7 +640,7 @@ cat > "$ROOT/clean.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/clean.json"); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'OK' && ok "clean issue exits 0" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'OK' >/dev/null && ok "clean issue exits 0" \
   || bad "clean (rc=$rc): $out"
 
 # --- missing sprint contract ---
@@ -655,7 +655,7 @@ cat > "$ROOT/nocontract.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/nocontract.json"); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'sprint contract\|contract' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'sprint contract\|contract' >/dev/null \
   && ok "missing contract fails" \
   || bad "nocontract (rc=$rc): $out"
 
@@ -671,7 +671,7 @@ cat > "$ROOT/noarea.json" <<'JSON'
 ]
 JSON
 out=$(run "$ROOT/noarea.json"); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'Affected area' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'Affected area' >/dev/null \
   && ok "missing affected area fails" \
   || bad "noarea (rc=$rc): $out"
 
@@ -693,16 +693,16 @@ NODE
 
 # Prove the exact path production will receive, before invoking production.
 vout=$(validate_issue_artifact "$ROOT/toobig.json" 2>&1); vrc=$?
-printf '%s\n' "$vout" | grep -qx 'PARSE_OK' \
+printf '%s\n' "$vout" | grep -x 'PARSE_OK' >/dev/null \
   && ok "toobig.json is valid JSON" \
   || bad "toobig.json parse (rc=$vrc): $vout"
-printf '%s\n' "$vout" | grep -qx 'issues=1' \
+printf '%s\n' "$vout" | grep -x 'issues=1' >/dev/null \
   && ok "toobig.json parses as one issue" \
   || bad "toobig.json issue count: $vout"
-printf '%s\n' "$vout" | grep -qx 'number=4' \
+printf '%s\n' "$vout" | grep -x 'number=4' >/dev/null \
   && ok "toobig.json issue number is 4" \
   || bad "toobig.json issue number: $vout"
-printf '%s\n' "$vout" | grep -qx 'sprint-contract-present' \
+printf '%s\n' "$vout" | grep -x 'sprint-contract-present' >/dev/null \
   && ok "toobig.json has Sprint contract section" \
   || bad "toobig.json Sprint contract section: $vout"
 # Count is the already-captured validator token, not a second parse of the file.
@@ -712,19 +712,19 @@ if [[ "$checkbox_n" == "11" ]]; then
 else
   bad "toobig.json checkbox count: $vout"
 fi
-printf '%s\n' "$vout" | grep -qx 'affected-area=nonempty' \
+printf '%s\n' "$vout" | grep -x 'affected-area=nonempty' >/dev/null \
   && ok "toobig.json Affected area nonempty" \
   || bad "toobig.json Affected area: $vout"
-printf '%s\n' "$vout" | grep -qx 'dependencies=nonempty' \
+printf '%s\n' "$vout" | grep -x 'dependencies=nonempty' >/dev/null \
   && ok "toobig.json Dependencies nonempty" \
   || bad "toobig.json Dependencies: $vout"
-printf '%s\n' "$vout" | grep -qx 'tier=nonempty' \
+printf '%s\n' "$vout" | grep -x 'tier=nonempty' >/dev/null \
   && ok "toobig.json Tier nonempty" \
   || bad "toobig.json Tier: $vout"
 
 digest=$(fixture_sha256 "$ROOT/toobig.json")
-if printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
-  if printf '%s' "$checkbox_n" | grep -Eq '^[0-9]+$'; then
+if printf '%s' "$digest" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
+  if printf '%s' "$checkbox_n" | grep -E '^[0-9]+$' >/dev/null; then
     emit_toobig_receipt "toobig sha256=${digest} sprint-contract-checkboxes=${checkbox_n}"
   fi
   ok "toobig fixture sha256 is 64-hex"
@@ -767,8 +767,8 @@ bnout=$(bash -n "$SCRIPT_DIR/decompose-lint.test.sh" 2>&1); bnrc=$?
 
 mvout=$(validate_issue_artifact "$ROOT/toobig.mut.json" 2>&1); mvrc=$?
 if [[ "$mvrc" -eq 1 ]] \
-   && printf '%s\n' "$mvout" | grep -q '^PARSE_FAIL' \
-   && printf '%s\n' "$mvout" | grep -qE 'SyntaxError|Bad control character'; then
+   && printf '%s\n' "$mvout" | grep '^PARSE_FAIL' >/dev/null \
+   && printf '%s\n' "$mvout" | grep -E 'SyntaxError|Bad control character' >/dev/null; then
   ok "mutated artifact fails JSON parse (not policy)"
 else
   bad "mutant validator want PARSE_FAIL rc=1 got rc=$mvrc: $mvout"
@@ -810,21 +810,21 @@ JSON
 
 # --- missing selector ---
 out=$(run_repo --repo acme/app); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'missing repository selector'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'missing repository selector' >/dev/null; then
   ok "missing selector: exit 2 names missing selector"
 else
   bad "missing selector (rc=$rc): $out"
 fi
 expect_calls "missing selector" 0
-if printf '%s\n' "$out" | grep -q 'unknown flag'; then
+if printf '%s\n' "$out" | grep 'unknown flag' >/dev/null; then
   bad "missing selector: should not be unknown-flag"
 else
   ok "missing selector: not an unknown-flag miss"
 fi
 
 out=$(run_repo --repo acme/app --allow-empty); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'missing repository selector' \
-   && ! printf '%s\n' "$out" | grep -q 'unknown flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'missing repository selector' >/dev/null \
+   && ! printf '%s\n' "$out" | grep 'unknown flag' >/dev/null; then
   ok "missing selector: --allow-empty is a modifier, not a selector"
 else
   bad "missing selector allow-empty (rc=$rc): $out"
@@ -833,21 +833,21 @@ expect_calls "missing selector allow-empty" 0
 
 # --- combined selectors ---
 out=$(run_repo --repo acme/app --all-open --label alpha); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'combined selectors'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'combined selectors' >/dev/null; then
   ok "combined selectors: exit 2"
 else
   bad "combined selectors (rc=$rc): $out"
 fi
 expect_calls "combined selectors" 0
-if printf '%s\n' "$out" | grep -q 'unknown flag'; then
+if printf '%s\n' "$out" | grep 'unknown flag' >/dev/null; then
   bad "combined selectors: should not be unknown-flag"
 else
   ok "combined selectors: not an unknown-flag miss"
 fi
 
 out=$(run_repo --repo acme/app --label --all-open); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'combined selectors' \
-   && ! printf '%s\n' "$out" | grep -q 'unknown flag'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'combined selectors' >/dev/null \
+   && ! printf '%s\n' "$out" | grep 'unknown flag' >/dev/null; then
   ok "label swallows --all-open: exit 2 before gh"
 else
   bad "label swallows --all-open (rc=$rc): $out"
@@ -856,7 +856,7 @@ expect_calls "label swallows --all-open" 0
 
 # --- repository selector plus --file ---
 out=$(run_repo --file "$ROOT/clean.json" --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q -- '--file'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -- '--file' >/dev/null; then
   ok "repository selector plus --file: --all-open exits 2"
 else
   bad "file+all-open (rc=$rc): $out"
@@ -864,7 +864,7 @@ fi
 expect_calls "file+all-open" 0
 
 out=$(run_repo --file "$ROOT/clean.json" --label alpha); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q -- '--file'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -- '--file' >/dev/null; then
   ok "repository selector plus --file: --label exits 2"
 else
   bad "file+label (rc=$rc): $out"
@@ -872,7 +872,7 @@ fi
 expect_calls "file+label" 0
 
 out=$(run_repo --file "$ROOT/nope.json" --all-open); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q -- '--file'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -- '--file' >/dev/null; then
   ok "repository selector plus --file: missing file still selector error"
 else
   bad "file-missing+all-open (rc=$rc): $out"
@@ -893,7 +893,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 1 ]] && printf '%s\n' "$out" | grep -q 'EMPTY_SELECTION: all-open'; then
+if [[ "$rc" -eq 1 ]] && printf '%s\n' "$out" | grep 'EMPTY_SELECTION: all-open' >/dev/null; then
   ok "empty selection: EMPTY_SELECTION exit 1 names all-open"
 else
   bad "empty selection (rc=$rc): $out"
@@ -903,7 +903,7 @@ expect_calls "empty selection" 3
 
 # --- allowed empty ---
 out=$(run_repo --repo acme/app --all-open --allow-empty); rc=$?
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'INTENTIONAL_EMPTY: all-open'; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'INTENTIONAL_EMPTY: all-open' >/dev/null; then
   ok "allowed empty: INTENTIONAL_EMPTY exit 0"
 else
   bad "allowed empty (rc=$rc): $out"
@@ -939,9 +939,9 @@ else
 fi
 expect_calls "three-page --all-open" 9
 qout=$(check_logged_queries 2>&1); qrc=$?
-if [[ "$qrc" -eq 0 ]] && printf '%s\n' "$qout" | grep -q 'QUERY_OK' \
-   && printf '%s\n' "$qout" | grep -q 'QUERY_SHAPE_CONTROL drop-OPEN' \
-   && printf '%s\n' "$qout" | grep -q 'QUERY_SHAPE_CONTROL drop-totalCount'; then
+if [[ "$qrc" -eq 0 ]] && printf '%s\n' "$qout" | grep 'QUERY_OK' >/dev/null \
+   && printf '%s\n' "$qout" | grep 'QUERY_SHAPE_CONTROL drop-OPEN' >/dev/null \
+   && printf '%s\n' "$qout" | grep 'QUERY_SHAPE_CONTROL drop-totalCount' >/dev/null; then
   ok "logged-query shape control: required OPEN/totalCount present; static drop of each fails the checker"
 else
   bad "logged-query shape control (rc=$qrc): $qout"
@@ -966,11 +966,11 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --label alpha --label beta); rc=$?
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK (2 issues)' \
-   && printf '%s\n' "$out" | grep -q 'loaded=2' \
-   && printf '%s\n' "$out" | grep -q 'unionTotal=2' \
-   && printf '%s\n' "$out" | grep -q 'sourceTotals=1,1' \
-   && ! printf '%s\n' "$out" | grep -q 'totalCount='; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK (2 issues)' >/dev/null \
+   && printf '%s\n' "$out" | grep 'loaded=2' >/dev/null \
+   && printf '%s\n' "$out" | grep 'unionTotal=2' >/dev/null \
+   && printf '%s\n' "$out" | grep 'sourceTotals=1,1' >/dev/null \
+   && ! printf '%s\n' "$out" | grep 'totalCount=' >/dev/null; then
   ok "repeated-label disjoint union: OK 2 issues with unionTotal not API totalCount"
 else
   bad "repeated-label disjoint union (rc=$rc): $out"
@@ -1043,8 +1043,8 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","failApi":true,"rawStderr":"$HOSTILE_STDERR","queries":{"all-open":{"pages":[]}}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: API_FAILURE' \
-   && ! printf '%s\n' "$out" | grep -F -q "$HOSTILE_STDERR"; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: API_FAILURE' >/dev/null \
+   && ! printf '%s\n' "$out" | grep -F "$HOSTILE_STDERR" >/dev/null; then
   ok "API failure: INCOMPLETE exit 3 with typed code, no raw stderr"
 else
   bad "API failure (rc=$rc): $out"
@@ -1057,7 +1057,7 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","invalidJson":true,"queries":{"all-open":{"pages":[]}}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "invalid JSON/ANSI: invalid JSON exits 3 INCOMPLETE"
 else
   bad "invalid JSON (rc=$rc): $out"
@@ -1079,7 +1079,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "invalid JSON/ANSI: ANSI-contaminated output exits 3 INCOMPLETE"
 else
   bad "ANSI output (rc=$rc): $out"
@@ -1092,7 +1092,7 @@ cat > "$ROOT/scenario.json" <<JSON
 {"sha":"$SHA_A","invalidShape":true,"queries":{}}
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "invalid shape/count: invalid shape exits 3 INCOMPLETE"
 else
   bad "invalid shape (rc=$rc): $out"
@@ -1113,7 +1113,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "invalid shape/count: count mismatch exits 3 INCOMPLETE"
 else
   bad "count mismatch (rc=$rc): $out"
@@ -1135,7 +1135,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "repeated/missing cursor: missing cursor exits 3 INCOMPLETE"
 else
   bad "missing cursor (rc=$rc): $out"
@@ -1157,7 +1157,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "repeated/missing cursor: repeated cursor exits 3 INCOMPLETE"
 else
   bad "repeated cursor (rc=$rc): $out"
@@ -1179,7 +1179,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: CURSOR'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: CURSOR' >/dev/null; then
   ok "malformed terminal cursor missing field: INCOMPLETE: CURSOR exit 3"
 else
   bad "malformed terminal cursor missing field (rc=$rc): $out"
@@ -1200,7 +1200,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: CURSOR'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: CURSOR' >/dev/null; then
   ok "malformed terminal cursor numeric type: INCOMPLETE: CURSOR exit 3"
 else
   bad "malformed terminal cursor numeric type (rc=$rc): $out"
@@ -1211,7 +1211,7 @@ expect_calls "malformed terminal cursor numeric type" 1
 # --- page-cap exhaustion (shell gh; 100 calls, not 100 Node processes) ---
 install_page_cap_gh
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: PAGE_CAP'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: PAGE_CAP' >/dev/null; then
   ok "page-cap exhaustion: INCOMPLETE: PAGE_CAP exit 3"
 else
   bad "page-cap exhaustion (rc=$rc): $out"
@@ -1239,7 +1239,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --label alpha --label beta); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE' >/dev/null; then
   ok "conflicting duplicate: INCOMPLETE exit 3"
 else
   bad "conflicting duplicate (rc=$rc): $out"
@@ -1262,7 +1262,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: STALE_OBSERVATION'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: STALE_OBSERVATION' >/dev/null; then
   ok "default-branch drift: INCOMPLETE: STALE_OBSERVATION exit 3"
 else
   bad "default-branch drift (rc=$rc): $out"
@@ -1290,7 +1290,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep -q 'INCOMPLETE: STALE_OBSERVATION'; then
+if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: STALE_OBSERVATION' >/dev/null; then
   ok "issue-set drift: INCOMPLETE: STALE_OBSERVATION exit 3"
 else
   bad "issue-set drift (rc=$rc): $out"
@@ -1313,8 +1313,8 @@ for lab in OK DAG critical-path capacity; do
 }
 JSON
   out=$(run_repo --repo acme/app --label "$lab"); rc=$?
-  if [[ "$rc" -eq 1 ]] && printf '%s\n' "$out" | grep -q 'EMPTY_SELECTION: labels count=1 digest=' \
-     && printf '%s\n' "$out" | grep -Eq 'digest=[0-9a-f]{64}'; then
+  if [[ "$rc" -eq 1 ]] && printf '%s\n' "$out" | grep 'EMPTY_SELECTION: labels count=1 digest=' >/dev/null \
+     && printf '%s\n' "$out" | grep -E 'digest=[0-9a-f]{64}' >/dev/null; then
     ok "hostile label $lab: EMPTY_SELECTION digest only"
   else
     bad "hostile label $lab (rc=$rc): $out"
@@ -1336,7 +1336,7 @@ cat > "$ROOT/scenario.json" <<JSON
 }
 JSON
 out=$(run_repo --repo acme/app --label OK --allow-empty); rc=$?
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'INTENTIONAL_EMPTY: labels count=1 digest='; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'INTENTIONAL_EMPTY: labels count=1 digest=' >/dev/null; then
   ok "hostile label OK allowed-empty: INTENTIONAL_EMPTY digest only"
 else
   bad "hostile label OK allow-empty (rc=$rc): $out"
@@ -1345,7 +1345,7 @@ lacks_queue "hostile label OK allow-empty" "$out"
 
 # --- control-character labels are usage errors before gh ---
 out=$(run_repo --repo acme/app --label $'OK\nDAG'); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'control character'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'control character' >/dev/null; then
   ok "embedded newline label: usage exit 2 before gh"
 else
   bad "embedded newline label (rc=$rc): $out"
@@ -1354,7 +1354,7 @@ lacks_queue "embedded newline label" "$out"
 expect_calls "embedded newline label" 0
 
 out=$(run_repo --repo acme/app --label $'\033[32mOK'); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -q 'control character'; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep 'control character' >/dev/null; then
   ok "embedded ANSI label: usage exit 2 before gh"
 else
   bad "embedded ANSI label (rc=$rc): $out"
@@ -1569,7 +1569,7 @@ out=$(
   PATH="$ROOT/bin:$PATH" \
   node "$SENSOR" --file "$ROOT/clean.json" 2>&1
 ); rc=$?
-if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep -q 'OK'; then
+if [[ "$rc" -eq 0 ]] && printf '%s\n' "$out" | grep 'OK' >/dev/null; then
   ok "preserved --file: clean fixture still OK"
 else
   bad "preserved --file (rc=$rc): $out"
