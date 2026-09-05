@@ -144,3 +144,19 @@ reimplemented as a portable check rather than staying a claim on ponytail.dev's 
 Until then, the decision ladder is available as doctrine text for any playbook that wants it;
 using the actual Ponytail/Caveman tools interactively in an individual Claude session (not as a
 Gibson-core mechanism) remains fine and separate from this decision.
+
+## D-011 · 2026-09-05 · Tier C minimum review-independence level is E3 + owner merge
+Decided: for #161's taxonomy (E0 self-check .. E4 human authority), the formal
+minimum for Tier C changes is **E3 (cross-vendor independent review, exact-head
+bound)** as the technical floor, with the repository owner's own merge action
+required on top — matching G12 practice already in force. A cross-vendor E3
+review is a claim, not proof: the merging party re-runs the checks and reads
+the diff before merging on it (existing FLEET.md rule), so this does not permit
+merging on an unread AI approval.
+Rejected (for now): E4 (a named human reading the diff before any merge,
+independent of the merge click itself) — assessed as materially slower per PR
+without a demonstrated gap E3 + re-verified merge doesn't already close.
+Revisit when: a Tier C merge ships a defect that E3 + re-verification should
+have caught but a human diff-read would not have missed, or #161's remaining
+tiers (A, B, schema, security, delivery-control) are decided and a consistent
+scheme across all of them turns out to need Tier C revisited.
