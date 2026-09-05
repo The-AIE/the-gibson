@@ -626,5 +626,146 @@ case "$out" in
 esac
 
 echo
+echo "large-body immediate-exit hasher is deterministic under pipefail (#318)"
+# Producer-side EPIPE: body must exceed a typical pipe buffer so printf cannot
+# finish after the hasher has gone. Ignore SIGPIPE in the child so the write
+# returns EPIPE and would leak "write error: Broken pipe" without isolation.
+# Repeat 100 times; each iteration must be exact stdout, empty stderr, status 0.
+LARGE_EPIPE="$ROOT/large-epipe.md"
+awk 'BEGIN {
+  print "# Gibson loop state"
+  print "updated: 2026-08-02T00:00:00Z"
+  print "hat: builder"
+  print "round: 0"
+  for (i = 0; i < 8192; i++) printf "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+}' > "$LARGE_EPIPE"
+
+FAKEBIN_EPIPE="$ROOT/fakebin-epipe"
+mkdir -p "$FAKEBIN_EPIPE"
+for hasher in sha256sum shasum cksum; do
+  printf '#!/bin/sh\nexit 7\n' > "$FAKEBIN_EPIPE/$hasher"
+  chmod +x "$FAKEBIN_EPIPE/$hasher"
+done
+
+# Control: the same large body with a working hasher is still a real digest.
+large_ok_err="$ROOT/large-ok.err"
+: > "$large_ok_err"
+out=$(bash -c '
+  set -euo pipefail
+  source "$1"
+  _silent_noop_fp "$2"
+' silent-noop-test "$SENSOR" "$LARGE_EPIPE" 2>"$large_ok_err")
+large_ok_rc=$?
+case "$out" in
+  state:*)
+    if [[ $large_ok_rc -eq 0 && ! -s "$large_ok_err" ]]; then
+      ok "control: large body with working hasher still yields state:<digest>"
+    else
+      bad "control: large working hasher leaked or died (rc=$large_ok_rc err='$(tr '\n' ' ' < "$large_ok_err")')"
+    fi
+    ;;
+  *) bad "control: large body working hasher was not a digest (got '$out')" ;;
+esac
+
+epipe_fail=0
+epipe_i=0
+while [[ $epipe_i -lt 100 ]]; do
+  epipe_i=$((epipe_i + 1))
+  epipe_err="$ROOT/epipe.err"
+  : > "$epipe_err"
+  epipe_out=$(PATH="$FAKEBIN_EPIPE:$PATH" bash -c '
+    set -euo pipefail
+    trap "" PIPE
+    source "$1"
+    _silent_noop_fp "$2"
+    printf " SURVIVED"
+  ' silent-noop-test "$SENSOR" "$LARGE_EPIPE" 2>"$epipe_err")
+  epipe_rc=$?
+  if [[ "$epipe_out" != "sentinel:unhashable SURVIVED" || -s "$epipe_err" || $epipe_rc -ne 0 ]]; then
+    epipe_fail=$((epipe_fail + 1))
+    bad "large-body immediate-exit hasher iter $epipe_i (out='$epipe_out' rc=$epipe_rc err='$(tr '\n' ' ' < "$epipe_err")')"
+    break
+  fi
+done
+if [[ $epipe_fail -eq 0 && $epipe_i -eq 100 ]]; then
+  ok "large-body immediate-exit hasher: 100/100 exact sentinel:unhashable, status 0, empty stderr"
+fi
+
+# Combined 2>&1 capture must stay exact too — the original flake mixed the
+# diagnostic into the required NOOP/sentinel string.
+out=$(PATH="$FAKEBIN_EPIPE:$PATH" bash -c '
+  set -euo pipefail
+  trap "" PIPE
+  source "$1"
+  _silent_noop_fp "$2"
+  printf " SURVIVED"
+' silent-noop-test "$SENSOR" "$LARGE_EPIPE" 2>&1)
+[[ "$out" == "sentinel:unhashable SURVIVED" ]] \
+  && ok "large-body immediate-exit hasher 2>&1 capture is exactly sentinel:unhashable" \
+  || bad "large-body 2>&1 capture was not exact (got '$out')"
+
+# C3: two unhashable fingerprints, and valid digest → unhashable, stay NOOP
+# with no diagnostic mixed into the captured result.
+out=$(PATH="$FAKEBIN_EPIPE:$PATH" bash -c '
+  set -euo pipefail
+  trap "" PIPE
+  source "$1"
+  silent_noop_progressed "$2" "$2" && echo PROGRESS || echo NOOP
+' silent-noop-test "$SENSOR" "$LARGE_EPIPE" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: large unhashable/unhashable is exact NOOP" \
+  || bad "progressed: large unhashable pair was not exact NOOP (got '$out')"
+
+out=$(bash -c '
+  set -euo pipefail
+  trap "" PIPE
+  source "$1"
+  before="$2"
+  after="$3"
+  real_fp=$(_silent_noop_fp "$before")
+  fa=$(PATH="'"$FAKEBIN_EPIPE"':$PATH" bash -c "
+    set -euo pipefail
+    trap \"\" PIPE
+    source \"\$1\"
+    _silent_noop_fp \"\$2\"
+  " silent-noop-test "$1" "$after" 2>&1)
+  case "$real_fp" in state:*) ;; *) echo "BAD_BEFORE:$real_fp"; exit 0 ;; esac
+  case "$fa" in sentinel:unhashable) ;; *) echo "BAD_AFTER:$fa"; exit 0 ;; esac
+  case "$fa" in state:*) echo PROGRESS ;; *) echo NOOP ;; esac
+' silent-noop-test "$SENSOR" "$ROOT/before.md" "$LARGE_EPIPE" 2>&1)
+[[ "$out" == "NOOP" ]] \
+  && ok "progressed: working digest → large unhashable is exact NOOP" \
+  || bad "progressed: digest→large-unhashable was not exact NOOP (got '$out')"
+
+# Mutation teeth: a throwaway copy without the subshell isolation must fail
+# the large-body exact assertion under ignored SIGPIPE. Candidate is untouched.
+MUT_SRC="$ROOT/silent-noop.unprotected.sh"
+sed -e '/exec 2>\/dev\/null/d' -e "/trap '' PIPE/d" "$SENSOR" > "$MUT_SRC"
+if grep -F "trap '' PIPE" "$MUT_SRC" >/dev/null; then
+  bad "mutation copy still contains PIPE isolation"
+elif grep -F "exec 2>/dev/null" "$MUT_SRC" >/dev/null; then
+  bad "mutation copy still contains subshell stderr isolation"
+else
+  mut_out=$(PATH="$FAKEBIN_EPIPE:$PATH" bash -c '
+    set -euo pipefail
+    trap "" PIPE
+    source "$1"
+    _silent_noop_fp "$2"
+    printf " SURVIVED"
+  ' silent-noop-test "$MUT_SRC" "$LARGE_EPIPE" 2>&1)
+  mut_rc=$?
+  if [[ "$mut_out" == "sentinel:unhashable SURVIVED" && $mut_rc -eq 0 ]]; then
+    bad "mutation: unprotected producer pipeline still matched exact sentinel (assertion has no teeth)"
+  else
+    ok "mutation: unprotected producer pipeline fails the large-body exact assertion"
+  fi
+fi
+if grep -F "trap '' PIPE" "$SENSOR" >/dev/null && grep -F "exec 2>/dev/null" "$SENSOR" >/dev/null; then
+  ok "candidate still has EPIPE isolation after mutation copy"
+else
+  bad "candidate lost EPIPE isolation — mutation edited the source"
+fi
+
+echo
 echo "silent-noop.test.sh: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]
