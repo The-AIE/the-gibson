@@ -106,22 +106,22 @@ reset_logs() {
 
 echo "help / missing token"
 out=$("$FR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'L-015' && echo "$out" | grep -q -- '--commit' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'L-015' >/dev/null && echo "$out" | grep -- '--commit' >/dev/null \
   && ok "help" || bad "help"
 unset GH_REVIEWER_TOKEN GIBSON_REVIEWER_TOKEN GH_TOKEN
 out=$("$FR" --pr 1 --repo a/b --event approve --commit "$COMMIT" 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'GH_REVIEWER_TOKEN' && ok "missing token exits 2" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'GH_REVIEWER_TOKEN' >/dev/null && ok "missing token exits 2" \
   || bad "missing token (rc=$rc): $out"
 
 echo "missing / invalid commit refused before mutation"
 reset_logs
 export GH_REVIEWER_TOKEN="reviewer-secret-token"
 out=$("$FR" --pr 9 --repo acme/app --event approve --body LGTM 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q -- '--commit' && ! grep -q reviews "$GH_LOG" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -- '--commit' >/dev/null && ! grep -q reviews "$GH_LOG" \
   && ok "missing --commit exits 2 before gh" \
   || bad "missing commit (rc=$rc log=$(cat "$GH_LOG") out=$out)"
 out=$("$FR" --pr 9 --repo acme/app --event approve --commit "$BAD_UPPER" --body LGTM 2>&1); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -qi 'invalid --commit' && ! grep -q reviews "$GH_LOG" \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -i 'invalid --commit' >/dev/null && ! grep -q reviews "$GH_LOG" \
   && ok "uppercase SHA refused before mutation" \
   || bad "uppercase (rc=$rc log=$(cat "$GH_LOG") out=$out)"
 out=$("$FR" --pr 9 --repo acme/app --event approve --commit deadbeef --body LGTM 2>&1); rc=$?
@@ -135,7 +135,7 @@ echo "dry-run with token"
 reset_logs
 export GH_REVIEWER_TOKEN="reviewer-secret-token"
 out=$("$FR" --pr 9 --repo acme/app --event approve --commit "$COMMIT" --dry-run 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'dry-run' && echo "$out" | grep -q "$COMMIT" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'dry-run' >/dev/null && echo "$out" | grep "$COMMIT" >/dev/null \
   && ok "dry-run" || bad "dry-run (rc=$rc): $out"
 if grep -q 'reviews' "$GH_LOG" 2>/dev/null || grep -q 'pr review' "$GH_LOG" 2>/dev/null; then
   bad "dry-run called mutation API"
@@ -151,13 +151,13 @@ grep -q '/reviews' "$GH_LOG" && ok "create-review API invoked" || bad "log: $(ca
 grep -q "commit_id=$COMMIT" "$GH_LOG" && ok "exact commit_id on argv" || bad "flags: $(cat "$GH_LOG")"
 [[ -s "$GH_EVENT_LOG" && "$(tr -d '\n' < "$GH_EVENT_LOG")" == "APPROVE" ]] \
   && ok "approve event field" || bad "event: $(cat "$GH_EVENT_LOG" 2>/dev/null)"
-echo "$out" | grep -q 'gibson-reviewer-bot' && ok "identity in log" || bad "who: $out"
+echo "$out" | grep 'gibson-reviewer-bot' >/dev/null && ok "identity in log" || bad "who: $out"
 if grep -q 'pr review' "$GH_LOG" || [[ -s "$GH_PR_REVIEW_LOG" ]]; then
   bad "approve used gh pr review"
 else
   ok "approve did not use gh pr review"
 fi
-echo "$out" | grep -q "$COMMIT" && ok "approve log names the commit" || bad "approve log missing commit"
+echo "$out" | grep "$COMMIT" >/dev/null && ok "approve log names the commit" || bad "approve log missing commit"
 
 echo "request-changes"
 reset_logs
@@ -253,7 +253,7 @@ reset_logs
 export GH_FAIL_REVIEW=1
 out=$("$FR" --pr 9 --repo acme/app --event approve --commit "$COMMIT" --body LGTM 2>&1); rc=$?
 unset GH_FAIL_REVIEW
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -qi 'failed to create review' \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -i 'failed to create review' >/dev/null \
   && [[ ! -s "$GH_REVIEW_COUNT" || "$(wc -l < "$GH_REVIEW_COUNT" | tr -d ' ')" -eq 0 ]] \
   && ok "adapter failure exits 1 without a created event" \
   || bad "adapter failure (rc=$rc out=$out count=$(cat "$GH_REVIEW_COUNT"))"
