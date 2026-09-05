@@ -26,12 +26,12 @@ mkdir -p "$ROOT/app/docs"
 if out=$("$PREP" --repo "$ROOT/app" --repo-slug wrong/slug --check-only 2>&1); then
   bad "mismatched slug should fail"
 else
-  echo "$out" | grep -q "does not match" && ok "slug mismatch fails closed" || bad "unclear slug failure: $out"
+  echo "$out" | grep "does not match" >/dev/null && ok "slug mismatch fails closed" || bad "unclear slug failure: $out"
 fi
 
 # --- match slug green (no runner) ---
 if out=$("$PREP" --repo "$ROOT/app" --repo-slug acme/app --check-only 2>&1); then
-  echo "$out" | grep -q 'GREEN' && ok "matching slug preflight GREEN" || bad "no GREEN: $out"
+  echo "$out" | grep 'GREEN' >/dev/null && ok "matching slug preflight GREEN" || bad "no GREEN: $out"
 else
   bad "matching slug should pass check-only: $out"
 fi
@@ -42,7 +42,7 @@ touch "$ROOT/app/gibson/HALT"
 if out=$("$PREP" --repo "$ROOT/app" --repo-slug acme/app --check-only 2>&1); then
   bad "HALT present should fail"
 else
-  echo "$out" | grep -qi 'HALT' && ok "HALT present fails closed" || bad "no HALT mention"
+  echo "$out" | grep -i 'HALT' >/dev/null && ok "HALT present fails closed" || bad "no HALT mention"
 fi
 rm -f "$ROOT/app/gibson/HALT"
 
@@ -50,7 +50,7 @@ rm -f "$ROOT/app/gibson/HALT"
 if out=$("$PREP" --repo "$ROOT/app" --repo-slug acme/app --runner grok --run 2>&1); then
   bad "--run without confirm should fail"
 else
-  echo "$out" | grep -q 'confirm YES' && ok "--run requires --confirm YES" || bad "no confirm message: $out"
+  echo "$out" | grep 'confirm YES' >/dev/null && ok "--run requires --confirm YES" || bad "no confirm message: $out"
 fi
 
 # --- unknown runner fails on --run ---
@@ -64,7 +64,7 @@ fi
 if out=$("$PREP" --repo "$ROOT/app" --repo-slug acme/app --runner goose --check-only 2>&1); then
   bad "goose runner should fail closed while unwired"
 else
-  echo "$out" | grep -qi 'goose' && ok "goose runner parked/rejected" || bad "goose not mentioned"
+  echo "$out" | grep -i 'goose' >/dev/null && ok "goose runner parked/rejected" || bad "goose not mentioned"
 fi
 
 # --- playbook + evidence docs present ---

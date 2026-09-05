@@ -68,44 +68,44 @@ gen_runs $(rep 12 push:main:success:300) $(rep 12 pull_request:feat:success:300)
 write_cfg "$TMP/cfg.json" 0.05 0.30 0.25 900 10
 run_sensor "$TMP/green.json" "$TMP/cfg.json"
 [[ "$RC" -eq 0 ]] && ok "all-green window exits 0" || bad "all-green window rc=$RC: $OUT"
-echo "$OUT" | grep -q "self-gate-health: OK" && ok "OK verdict line" || bad "missing OK verdict: $OUT"
+echo "$OUT" | grep "self-gate-health: OK" >/dev/null && ok "OK verdict line" || bad "missing OK verdict: $OUT"
 
 # 2. main red rate over budget -> RED, named
 # shellcheck disable=SC2046
 gen_runs $(rep 10 push:main:success:300) $(rep 2 push:main:failure:300) $(rep 12 pull_request:feat:success:300) >"$TMP/mainred.json"
 run_sensor "$TMP/mainred.json" "$TMP/cfg.json"
 [[ "$RC" -eq 1 ]] && ok "main red 2/12 > 5% exits 1" || bad "main red rc=$RC: $OUT"
-echo "$OUT" | grep -q "E_MAINREDRATE" && ok "names mainRedRate finding" || bad "no mainRedRate finding: $OUT"
-echo "$OUT" | grep -q "ratchet loosening" && ok "loosening needs sign-off wording" || bad "missing sign-off wording"
+echo "$OUT" | grep "E_MAINREDRATE" >/dev/null && ok "names mainRedRate finding" || bad "no mainRedRate finding: $OUT"
+echo "$OUT" | grep "ratchet loosening" >/dev/null && ok "loosening needs sign-off wording" || bad "missing sign-off wording"
 
 # 3. PR cancellations over budget -> RED; timed_out counts as red
 # shellcheck disable=SC2046
 gen_runs $(rep 12 push:main:success:300) $(rep 6 pull_request:feat:success:300) $(rep 4 pull_request:feat:cancelled:30) $(rep 2 pull_request:feat:timed_out:1800) >"$TMP/prcancel.json"
 run_sensor "$TMP/prcancel.json" "$TMP/cfg.json"
 [[ "$RC" -eq 1 ]] && ok "pr cancelled 4/12 > 25% exits 1" || bad "pr cancel rc=$RC: $OUT"
-echo "$OUT" | grep -q "E_PRCANCELLEDRATE" && ok "names prCancelledRate finding" || bad "no prCancelledRate finding: $OUT"
-echo "$OUT" | grep -q "2/12 red" && ok "timed_out counted as red" || bad "timed_out not counted as red: $OUT"
+echo "$OUT" | grep "E_PRCANCELLEDRATE" >/dev/null && ok "names prCancelledRate finding" || bad "no prCancelledRate finding: $OUT"
+echo "$OUT" | grep "2/12 red" >/dev/null && ok "timed_out counted as red" || bad "timed_out not counted as red: $OUT"
 
 # 4. slow green median over budget -> RED
 # shellcheck disable=SC2046
 gen_runs $(rep 12 push:main:success:1000) $(rep 12 pull_request:feat:success:1000) >"$TMP/slow.json"
 run_sensor "$TMP/slow.json" "$TMP/cfg.json"
 [[ "$RC" -eq 1 ]] && ok "median wall 1000s > 900s exits 1" || bad "slow rc=$RC: $OUT"
-echo "$OUT" | grep -q "E_MEDIANGREENWALLSECONDS" && ok "names medianGreenWallSeconds finding" || bad "no wall finding: $OUT"
+echo "$OUT" | grep "E_MEDIANGREENWALLSECONDS" >/dev/null && ok "names medianGreenWallSeconds finding" || bad "no wall finding: $OUT"
 
 # 5. insufficient samples -> budget not applied, exit 0, and says so
 # shellcheck disable=SC2046
 gen_runs $(rep 3 push:main:failure:300) $(rep 12 pull_request:feat:success:300) >"$TMP/thin.json"
 run_sensor "$TMP/thin.json" "$TMP/cfg.json"
 [[ "$RC" -eq 0 ]] && ok "3 main runs < minRuns 10: budget not applied" || bad "thin rc=$RC: $OUT"
-echo "$OUT" | grep -q "mainRedRate: 3 sample(s) < minRuns" && ok "insufficient-data note printed" || bad "no insufficient note: $OUT"
+echo "$OUT" | grep "mainRedRate: 3 sample(s) < minRuns" >/dev/null && ok "insufficient-data note printed" || bad "no insufficient note: $OUT"
 
 # 6. in-progress and non-main pushes are ignored; window cap respected
 # shellcheck disable=SC2046
 gen_runs $(rep 5 push:main:in_progress:0) $(rep 12 push:feature-x:failure:300) $(rep 12 push:main:success:300) $(rep 12 pull_request:feat:success:300) >"$TMP/mixed.json"
 run_sensor "$TMP/mixed.json" "$TMP/cfg.json"
 [[ "$RC" -eq 0 ]] && ok "in-progress and non-main push runs ignored" || bad "mixed rc=$RC: $OUT"
-echo "$OUT" | grep -q "main: 0/12 red" && ok "main counts only main pushes" || bad "main count wrong: $OUT"
+echo "$OUT" | grep "main: 0/12 red" >/dev/null && ok "main counts only main pushes" || bad "main count wrong: $OUT"
 
 # 6b. order-independent: 70 old main reds listed FIRST, 60 newest green after;
 #     the window must be the newest 60 by start time, not the first 60 lines.
@@ -113,7 +113,7 @@ echo "$OUT" | grep -q "main: 0/12 red" && ok "main counts only main pushes" || b
 gen_runs $(rep 70 push:main:failure:300) $(rep 30 push:main:success:300) $(rep 30 pull_request:feat:success:300) >"$TMP/shuffled.json"
 run_sensor "$TMP/shuffled.json" "$TMP/cfg.json"
 [[ "$RC" -eq 0 ]] && ok "window is newest-first by start time regardless of input order" || bad "shuffled rc=$RC: $OUT"
-echo "$OUT" | grep -q "main: 0/30 red" && ok "old reds outside the window are not measured" || bad "stale window: $OUT"
+echo "$OUT" | grep "main: 0/30 red" >/dev/null && ok "old reds outside the window are not measured" || bad "stale window: $OUT"
 
 # 7. malformed input / bad config / unknown flag -> exit 2
 echo '{"nope":1}' >"$TMP/bad.json"

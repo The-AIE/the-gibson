@@ -915,27 +915,49 @@ fi
 echo "== bash -n"
 SYNTAX_BAD=""
 for f in $SH_FILES; do
-  bash -n "$f" 2>/tmp/run-all-syntax.$$ || {
-    echo "${RED}  FAIL${OFF} — $f"; sed 's/^/         /' /tmp/run-all-syntax.$$
+  bash -n "$f" 2>"${TMPDIR:-/tmp}/run-all-syntax.$$" || {
+    echo "${RED}  FAIL${OFF} — $f"; sed 's/^/         /' "${TMPDIR:-/tmp}/run-all-syntax.$$"
     SYNTAX_BAD=1
   }
 done
-rm -f /tmp/run-all-syntax.$$
+rm -f "${TMPDIR:-/tmp}/run-all-syntax.$$"
 if [[ -n "$SYNTAX_BAD" ]]; then FAILED="$FAILED bash-n"; else
   echo "${GRN}  ok${OFF}   — $(echo "$SH_FILES" | wc -l | tr -d ' ') scripts parse"
 fi
 
 echo "== bash 3.2 (stock macOS)"
+BASH32_DOCKER_USABLE=0
+BASH32_PATHS_SHA256=""
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  BASH32_DOCKER_USABLE=1
   # shellcheck disable=SC2086
   if run_limited docker run --rm -v "$REPO_ROOT:/w" -w /w bash:3.2 \
-       bash -n $SH_FILES >/tmp/run-all-32.$$ 2>&1; then
-    echo "${GRN}  ok${OFF}   — parses under bash 3.2"
+       bash scripts/tests/lib/bash32-syntax-each.sh bash $SH_FILES >"${TMPDIR:-/tmp}/run-all-32.$$" 2>&1; then
+    bash32_n=$(printf '%s\n' "$SH_FILES" | wc -l | tr -d ' ')
+    bash32_hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | sha256sum | awk '{print $1}') || bash32_hash=""
+    elif command -v shasum >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | shasum -a 256 | awk '{print $1}') || bash32_hash=""
+    elif command -v openssl >/dev/null 2>&1; then
+      bash32_hash=$(printf '%s\n' "$SH_FILES" | LC_ALL=C sort | openssl dgst -sha256 | awk '{print $NF}') || bash32_hash=""
+    fi
+    bash32_hash=$(printf '%s' "$bash32_hash" | tr 'A-F' 'a-f')
+    bash32_parsed=$bash32_n
+    if [[ -n "$bash32_n" && "$bash32_n" -gt 0 && "$bash32_n" -eq "$bash32_parsed" ]] \
+       && printf '%s' "$bash32_hash" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
+      echo "GIBSON_BASH32_SYNTAX schema=gibson.bash32-syntax/v1 discovered=${bash32_n} parsed=${bash32_parsed} paths_sha256=${bash32_hash}"
+      BASH32_PATHS_SHA256=$bash32_hash
+    else
+      echo "${RED}  FAIL${OFF} — bash 3.2 syntax: malformed count/digest evidence"
+      FAILED="$FAILED bash-3.2"
+    fi
+    unset bash32_n bash32_parsed bash32_hash
   else
-    echo "${RED}  FAIL${OFF} — bash 3.2 syntax:"; sed 's/^/         /' /tmp/run-all-32.$$
+    echo "${RED}  FAIL${OFF} — bash 3.2 syntax:"; sed 's/^/         /' "${TMPDIR:-/tmp}/run-all-32.$$"
     FAILED="$FAILED bash-3.2"
   fi
-  rm -f /tmp/run-all-32.$$
+  rm -f "${TMPDIR:-/tmp}/run-all-32.$$"
 else
   echo "${YEL}  SKIP${OFF} — no usable docker; bash 3.2 unverified on this host"
 fi
@@ -1068,7 +1090,7 @@ while IFS= read -r f; do
     _tf=${line%%  *}
     _rest=${line#*  }
     _tt=${_rest%%  *}
-    if echo "$TOOL_GUARD_BASELINE" | grep -qxF "${_tf}	${_tt}"; then
+    if echo "$TOOL_GUARD_BASELINE" | grep -xF "${_tf}	${_tt}" >/dev/null; then
       continue
     fi
     TOOL_GUARD_HITS="${TOOL_GUARD_HITS}${line}"$'\n'
@@ -1083,7 +1105,7 @@ while IFS= read -r row; do
   bf=${row%%	*}; bt=${row#*	}
   [[ -f "$bf" ]] || { TOOL_GUARD_STALE="${TOOL_GUARD_STALE}${row} (missing file)"$'\n'; continue; }
   _now=$(cs_tool_guard_hits "$bf") || true
-  if ! printf '%s\n' "$_now" | grep -q "  ${bt}  "; then
+  if ! printf '%s\n' "$_now" | grep "  ${bt}  " >/dev/null; then
     TOOL_GUARD_STALE="${TOOL_GUARD_STALE}${row}"$'\n'
   fi
 done <<< "$TOOL_GUARD_BASELINE"
@@ -1351,10 +1373,10 @@ gibson_metrics_bounds_ok() {
 # Callers pass the exact terminal tally suffix, not a prefixed line.
 gibson_metrics_tally_count() {
   local line="$1" word="$2" default="$3" raw n num
-  if printf '%s\n' "$line" | grep -Eq -- "-[0-9]+[[:space:]]+${word}"; then
+  if printf '%s\n' "$line" | grep -E -- "-[0-9]+[[:space:]]+${word}" >/dev/null; then
     return 1
   fi
-  if printf '%s\n' "$line" | grep -Eq -- "[+][0-9]+[[:space:]]+${word}"; then
+  if printf '%s\n' "$line" | grep -E -- "[+][0-9]+[[:space:]]+${word}" >/dev/null; then
     return 1
   fi
   n=$(printf '%s\n' "$line" | grep -oE "[0-9]+(\.[0-9]+)?[[:space:]]+${word}" | grep -c . || true)
@@ -1383,7 +1405,7 @@ gibson_metrics_tally_suffix() {
 }
 
 gibson_metrics_is_exact_tally() {
-  printf '%s\n' "$1" | grep -Eq \
+  printf '%s\n' "$1" | grep -E >/dev/null \
     "(^|[^0-9+-])${gibson_metrics_tally_suffix_re}[[:space:]]*$"
 }
 
@@ -1406,7 +1428,7 @@ gibson_metrics_classify() {
     return 1
   fi
   if [[ "$machine_n" -eq 1 ]]; then
-    if ! printf '%s\n' "$last" | grep -Eq "$gibson_metrics_marker_re"; then
+    if ! printf '%s\n' "$last" | grep -E "$gibson_metrics_marker_re" >/dev/null; then
       echo "error non-terminal-machine-metric"
       return 1
     fi
@@ -1421,15 +1443,15 @@ gibson_metrics_classify() {
     echo "machine ${_gmt} ${_gms} ${_gmd}"
     return 0
   fi
-  if printf '%s\n' "$last" | grep -Eq -- '-[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if printf '%s\n' "$last" | grep -E -- '-[0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error negative-tally"
     return 1
   fi
-  if printf '%s\n' "$last" | grep -Eq '[+][0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if printf '%s\n' "$last" | grep -E '[+][0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error signed-tally"
     return 1
   fi
-  if printf '%s\n' "$last" | grep -Eq '[0-9]+\.[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if printf '%s\n' "$last" | grep -E '[0-9]+\.[0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error fractional-tally"
     return 1
   fi
@@ -1443,7 +1465,7 @@ gibson_metrics_classify() {
     return 1
   fi
   prefix=${last%"$suffix"}
-  if [[ -n "$prefix" ]] && printf '%s\n' "$prefix" | grep -Eq '[0-9]+[[:space:]]+(passed|failed|skipped|todo)'; then
+  if [[ -n "$prefix" ]] && printf '%s\n' "$prefix" | grep -E '[0-9]+[[:space:]]+(passed|failed|skipped|todo)' >/dev/null; then
     echo "error prefix-tally-counter"
     return 1
   fi
@@ -1743,10 +1765,10 @@ gibson_metrics_run_contract_mutations() {
   _vrc=0
   _vout=$(gibson_metrics_verdict_probe "" "" 1 "synthetic-verdict-bind") || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — synthetic-verdict-bind' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — synthetic-verdict-bind' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: metric-contract failure is RED without GREEN or aggregate metrics"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: metric-contract verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1756,10 +1778,10 @@ gibson_metrics_run_contract_mutations() {
   _vrc=0
   _vout=$(gibson_metrics_verdict_probe "" "" 0 "") || _vrc=$?
   if [[ "$_vrc" -eq 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS total=' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: green run still prints GREEN and aggregate metrics"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: green verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1769,10 +1791,10 @@ gibson_metrics_run_contract_mutations() {
   _vrc=0
   _vout=$(gibson_metrics_verdict_probe "foo.test.sh" "" 0 "") || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED'; then
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS total=' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: ordinary suite failure is RED with aggregate metrics"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: suite-failure verdict bind (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1804,10 +1826,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — suite dup.test.sh: duplicate sentinel attribution' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — suite dup.test.sh: duplicate sentinel attribution' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: duplicate sentinel attribution refuses"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: duplicate sentinel attribution (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1837,10 +1859,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — legacy-sentinel name/count drift (named=1 count=2)' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — legacy-sentinel name/count drift (named=1 count=2)' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: name/count drift refuses"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: name/count drift (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1870,10 +1892,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -ne 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: metric contract RED — suite both.test.sh: explicit assertions and sentinel' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all: RED' \
-     && ! printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && ! printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: metric contract RED — suite both.test.sh: explicit assertions and sentinel' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all: RED' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && ! printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: one suite cannot contribute both explicit assertions and a sentinel"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: dual explicit/sentinel attribution (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -1903,10 +1925,10 @@ gibson_metrics_run_contract_mutations() {
     exit $?
   ) || _vrc=$?
   if [[ "$_vrc" -eq 0 ]] \
-     && printf '%s\n' "$_vout" | grep -Fq 'run-all: GREEN' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all legacy-sentinels: zeta.test.sh alpha.test.sh$' \
-     && printf '%s\n' "$_vout" | grep -Eq '^run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2$' \
-     && printf '%s\n' "$_vout" | grep -Eq '^GIBSON_TEST_METRICS total=2 skipped=0 todo=0$'; then
+     && printf '%s\n' "$_vout" | grep -F 'run-all: GREEN' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all legacy-sentinels: zeta.test.sh alpha.test.sh$' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^run-all metric-subtotals: explicit-assertions=0 legacy-sentinels=2$' >/dev/null \
+     && printf '%s\n' "$_vout" | grep -E '^GIBSON_TEST_METRICS total=2 skipped=0 todo=0$' >/dev/null; then
     echo "${GRN}  ok${OFF}   — metrics mutation: named legacy-sentinel diagnostic matches the numeric subtotal"
   else
     echo "${RED}  FAIL${OFF} — metrics mutation: named sentinel diagnostic (rc=${_vrc} out=$(printf '%s' "$_vout" | tr '\n' '|'))"
@@ -2010,6 +2032,211 @@ suite_has_shell_construction_diag() {
 # static production count and never a parse of .agents/gate.json.
 gibson_metrics_run_contract_mutations
 
+# gibson_forward_bash32_bench begin
+# Forward one captured GIBSON_BASH32_BENCH line onto ordinary run-all stdout.
+# Usage: gibson_forward_bash32_bench <suite_ec> <expected_paths_sha256> <docker_usable>
+# Captured suite stdout/stderr is read from stdin. Bash 3.2 + set -u safe.
+# Stdout: the one validated receipt, or empty. Never assertion chatter.
+# Exit 0: forwarded, or not required (docker unused at the production preamble).
+# Exit 1: fail closed; no green receipt.
+#
+# Safe arithmetic digit bound: 18 decimal digits. 10^18-1 fits in signed
+# 64-bit, so $((candidate - baseline)) and the later -le 5000 test cannot
+# overflow once this bound holds. Baseline and candidate must be canonical
+# non-negative decimals (0, or [1-9][0-9]* with no leading zeros) of at
+# most 18 digits. Reported delta must be a canonical signed decimal of at
+# most 18 magnitude digits (optional leading '-', never -0, never leading
+# zeros). Recompute exact candidate-baseline only after those bounds hold.
+# Emit the sole receipt only when the reported delta string equals that
+# recomputed value exactly and the recomputed value is <= 5000. Overflow,
+# inconsistent delta, alternate encodings, or arithmetic errors emit no
+# receipt and return 1.
+gibson_forward_bash32_bench() {
+  local _fwd_ec _fwd_digest _fwd_usable _fwd_n _fwd_match _fwd_line
+  local _fwd_parsed _fwd_baseline _fwd_candidate _fwd_delta _fwd_hash
+  local _fwd_recomputed _fwd_mag _fwd_max_digits
+  _fwd_ec=${1-}
+  _fwd_digest=${2-}
+  _fwd_usable=${3-}
+  _fwd_max_digits=18
+
+  if [ "$_fwd_usable" = "0" ]; then
+    while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+      :
+    done
+    return 0
+  fi
+  if [ "$_fwd_usable" != "1" ]; then
+    while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+      :
+    done
+    return 1
+  fi
+
+  case "$_fwd_ec" in
+    0) ;;
+    *)
+      while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+        :
+      done
+      return 1
+      ;;
+  esac
+
+  _fwd_n=0
+  _fwd_match=""
+  while IFS= read -r _fwd_line || [ -n "${_fwd_line:-}" ]; do
+    case "$_fwd_line" in
+      GIBSON_BASH32_BENCH*)
+        _fwd_n=$((_fwd_n + 1))
+        _fwd_match=$_fwd_line
+        ;;
+    esac
+  done
+
+  if [ "$_fwd_n" -ne 1 ]; then
+    return 1
+  fi
+
+  _fwd_parsed=$(printf '%s\n' "$_fwd_match" | awk '
+    NF != 8 { exit 1 }
+    $1 != "GIBSON_BASH32_BENCH" { exit 1 }
+    $2 != "schema=gibson.bash32-bench/v1" { exit 1 }
+    $3 != "samples=3" { exit 1 }
+    $8 != "status=pass" { exit 1 }
+    {
+      n = split($4, b, "=")
+      if (n != 2 || b[1] != "baseline_median_ms") exit 1
+      n = split($5, c, "=")
+      if (n != 2 || c[1] != "candidate_median_ms") exit 1
+      n = split($6, d, "=")
+      if (n != 2 || d[1] != "delta_ms") exit 1
+      n = split($7, h, "=")
+      if (n != 2 || h[1] != "paths_sha256") exit 1
+      print b[2], c[2], d[2], h[2]
+      exit 0
+    }
+  ') || return 1
+
+  _fwd_baseline=$(printf '%s\n' "$_fwd_parsed" | awk '{print $1}')
+  _fwd_candidate=$(printf '%s\n' "$_fwd_parsed" | awk '{print $2}')
+  _fwd_delta=$(printf '%s\n' "$_fwd_parsed" | awk '{print $3}')
+  _fwd_hash=$(printf '%s\n' "$_fwd_parsed" | awk '{print $4}')
+
+  case "$_fwd_baseline" in
+    0) ;;
+    ''|*[!0-9]*) return 1 ;;
+    0*) return 1 ;;
+  esac
+  if [ "${#_fwd_baseline}" -gt "$_fwd_max_digits" ]; then
+    return 1
+  fi
+  case "$_fwd_candidate" in
+    0) ;;
+    ''|*[!0-9]*) return 1 ;;
+    0*) return 1 ;;
+  esac
+  if [ "${#_fwd_candidate}" -gt "$_fwd_max_digits" ]; then
+    return 1
+  fi
+  _fwd_mag=$_fwd_delta
+  case "$_fwd_delta" in
+    0) ;;
+    -*)
+      _fwd_mag=${_fwd_delta#-}
+      case "$_fwd_mag" in
+        ''|*[!0-9]*|0*) return 1 ;;
+      esac
+      ;;
+    ''|*[!0-9]*) return 1 ;;
+    0*) return 1 ;;
+  esac
+  if [ "${#_fwd_mag}" -gt "$_fwd_max_digits" ]; then
+    return 1
+  fi
+  if ! printf '%s' "$_fwd_hash" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
+    return 1
+  fi
+  if [ "$_fwd_hash" != "$_fwd_digest" ]; then
+    return 1
+  fi
+  _fwd_recomputed=$((_fwd_candidate - _fwd_baseline)) || return 1
+  if [ "$_fwd_delta" != "$_fwd_recomputed" ]; then
+    return 1
+  fi
+  if ! [ "$_fwd_recomputed" -le 5000 ]; then
+    return 1
+  fi
+  printf '%s\n' "$_fwd_match"
+  return 0
+}
+# gibson_forward_bash32_bench end
+
+# gibson_suite_read_capture begin
+# Classify one finished suite capture. Timeout wins over "no tally line".
+# $1 capture prefix (.out/.ec/.elapsed), $2 timeout seconds (0 = none).
+# Sets: _gs_out _gs_ec _gs_elapsed _gs_tally
+gibson_suite_read_capture() {
+  local cap="$1" timeout="${2:-0}"
+  _gs_out=""
+  _gs_ec=1
+  _gs_elapsed=0
+  _gs_tally="no tally line"
+
+  if [[ -f "$cap.out" ]]; then
+    _gs_out=$(cat "$cap.out" 2>/dev/null || true)
+  fi
+  if [[ -s "$cap.elapsed" ]]; then
+    _gs_elapsed=$(cat "$cap.elapsed" 2>/dev/null || echo 0)
+  fi
+  case "$_gs_elapsed" in
+    ''|*[!0-9]*) _gs_elapsed=0 ;;
+  esac
+
+  if [[ -s "$cap.ec" ]]; then
+    _gs_ec=$(cat "$cap.ec")
+  else
+    # Wrapper died before recording rc. A wall-budget kill must never
+    # surface as "no tally line" (#319 AC4) — but only a run that actually
+    # reached the budget is a timeout; a wrapper that died early (mkdir
+    # ENOSPC, setup failure) is a runner failure and stays RED as such.
+    if [[ "$timeout" -gt 0 && "$_gs_elapsed" -ge "$timeout" ]]; then
+      _gs_ec=124
+    else
+      _gs_out="run-all: suite produced no exit-code capture after ${_gs_elapsed}s (runner/setup failure, not a timeout)"
+      _gs_ec=1
+    fi
+  fi
+  case "$_gs_ec" in
+    ''|*[!0-9]*) _gs_ec=1 ;;
+  esac
+
+  if [[ "$timeout" -gt 0 ]]; then
+    # rc 124 is a timeout only when the wall was actually reached (5s slack);
+    # a suite that exits 124 early is an ordinary failure.
+    if [[ "$_gs_ec" -eq 124 && "$_gs_elapsed" -ge $((timeout - 5)) ]]; then
+      _gs_tally="timed out after ${timeout}s"
+      return 0
+    fi
+    if [[ "$_gs_elapsed" -ge "$timeout" && "$_gs_ec" -ne 0 ]]; then
+      case "$_gs_ec" in
+        137|143|130)
+          _gs_ec=124
+          _gs_tally="timed out after ${timeout}s"
+          return 0
+          ;;
+      esac
+    fi
+  fi
+
+  if [[ -f "$cap.out" ]]; then
+    _gs_tally=$(grep -oE '[0-9]+ passed, [0-9]+ failed(, goose-validate: [^[:space:]]+)?' "$cap.out" 2>/dev/null | tail -1)
+  fi
+  [[ -n "$_gs_tally" ]] || _gs_tally="no tally line"
+  return 0
+}
+# gibson_suite_read_capture end
+
 # Suites run as background processes (at most $JOBS at once), each capturing
 # stdout+stderr, exit code, and elapsed seconds into a scratch directory.
 # Reporting below consumes those captures in discovery order, so the printed
@@ -2018,6 +2245,7 @@ SUITE_CAPTURE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/gibson-runall-suites.XXXXXX") || 
   echo "run-all.sh: mktemp for suite captures failed" >&2
   exit 2
 }
+
 # On EXIT/INT/TERM/HUP stop any suites still running (whole process trees —
 # a suite may have forked node/docker/git children) before removing captures,
 # so a cancelled gate does not leave orphans burning the runner.
@@ -2044,11 +2272,36 @@ trap 'run_all_cleanup; trap - HUP; kill -HUP $$' HUP
 
 run_suite_captured() {
   # $1 suite path, $2 capture prefix
-  local t0=$SECONDS ec
-  run_limited "$1" >"$2.out" 2>&1
+  local t0=$SECONDS ec=1 suite="$1" cap="$2" suite_tmp
+  suite_tmp="${cap}.tmpdir"
+  mkdir -p "$suite_tmp" || return 1
+  _gs_write_cap() {
+    printf '%s\n' "${ec:-1}" >"${cap}.ec"
+    printf '%s\n' "$((SECONDS - t0))" >"${cap}.elapsed"
+  }
+  _gs_on_sig() {
+    ec="${1:-1}"
+    _gs_write_cap
+    trap - EXIT
+    exit "$ec"
+  }
+  trap '_gs_write_cap' EXIT
+  trap '_gs_on_sig 130' INT
+  trap '_gs_on_sig 143' TERM
+  trap '_gs_on_sig 129' HUP
+  unset FLEET_WALL_TIMEOUT_TEST_PUBLISH \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_READY \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_IN_GRACE \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_BEFORE_LEADER_TRACK \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_BEFORE_WATCHER_TRACK \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_BEFORE_WAIT \
+        FLEET_WALL_TIMEOUT_TEST_HOLD_AFTER_LEADER_WAIT \
+        FAKE_GH_STATE GIBSON_GH_MUTATION_LOG
+  export TMPDIR="$suite_tmp"
+  run_limited "$suite" >"${cap}.out" 2>&1
   ec=$?
-  echo "$ec" >"$2.ec"
-  echo "$((SECONDS - t0))" >"$2.elapsed"
+  _gs_write_cap
+  trap - EXIT INT TERM HUP
 }
 
 # --only accepts a comma-separated list of substrings; any match selects.
@@ -2116,13 +2369,15 @@ for suite in $SELECTED_SUITES; do
     out="run-all: suite produced no exit-code capture (runner crashed?)"; ec=1
     suite_elapsed=0
   fi
+  # Overlay timeout classification after the capture-to-locals seam that
+  # bash32-syntax-each.test.sh pins. Wall-budget kills must not surface as
+  # "no tally line" (#319 AC4). Grep the file, never echo "$out" (ARG_MAX).
+  gibson_suite_read_capture "$cap" "$TIMEOUT"
+  out="$_gs_out"
+  ec="$_gs_ec"
+  suite_elapsed="$_gs_elapsed"
+  tally="$_gs_tally"
   gibson_metrics_contribute "$out" "$name" || true
-  # grep -o, not a greedy sed capture: `.*([0-9]+ passed` eats all but the last
-  # digit and turns "42 passed" into "2 passed".
-  # Prefer extended tally (goose-validate disposition, #95); fall back to plain.
-  tally=$(echo "$out" | grep -oE '[0-9]+ passed, [0-9]+ failed(, goose-validate: [^[:space:]]+)?' | tail -1)
-  [[ -n "$tally" ]] || tally="no tally line"
-  [[ "$ec" -eq 124 ]] && tally="timed out after ${TIMEOUT}s"
 
   # Shell-construction diagnostics must never green a nominally-passing suite
   # (#153 review round 7). An unquoted heredoc under `set -u` can print
@@ -2134,15 +2389,29 @@ for suite in $SELECTED_SUITES; do
   if printf '%s\n' "$out" | suite_has_shell_construction_diag; then
     shell_diag=$(printf '%s\n' "$out" | grep -E \
       'unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
-      head -20)
+      head -20 || true)
   fi
 
   if [[ "$QUIET" -eq 0 && ( "$ec" -ne 0 || -n "$shell_diag" ) ]]; then
-    echo "$out" | grep -E '^\s*FAIL|unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
-      head -20 | sed 's/^/         /'
+    printf '%s\n' "$out" | grep -E '^\s*FAIL|unbound variable|command not found|:[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[[:space:]]+not found' |
+      head -20 | sed 's/^/         /' || true
   fi
 
-  if [[ -n "$shell_diag" ]]; then
+  # gibson_suite_loop_diag begin
+  # Require/forward the bash32 bench receipt only when the focused suite is
+  # nominally clean (exit 0, no shell-construction diagnostic). Nonzero exit
+  # and shell_diag keep their existing timeout/tally/quarantine/ordinary
+  # branches and must never print a benchmark receipt.
+  bash32_bench_ok=1
+  bash32_bench_line=""
+  if [[ "$name" == "bash32-syntax-each.test.sh" && "$ec" -eq 0 && -z "$shell_diag" ]]; then
+    bash32_bench_line=$(printf '%s\n' "$out" | gibson_forward_bash32_bench "$ec" "$BASH32_PATHS_SHA256" "$BASH32_DOCKER_USABLE") || bash32_bench_ok=0
+  fi
+
+  if [[ "$bash32_bench_ok" -eq 0 ]]; then
+    echo "${RED}  FAIL${OFF} — $name: bash 3.2 benchmark receipt missing or invalid (exit $ec, ${suite_elapsed}s)"
+    FAILED="$FAILED $name"
+  elif [[ -n "$shell_diag" ]]; then
     echo "${RED}  FAIL${OFF} — $name: shell construction diagnostic with tally '$tally' (exit $ec, ${suite_elapsed}s)"
     echo "$shell_diag" | head -6 | sed 's/^/         /'
     FAILED="$FAILED $name"
@@ -2152,6 +2421,9 @@ for suite in $SELECTED_SUITES; do
       ESCAPED="$ESCAPED $name"
     else
       echo "${GRN}  ok${OFF}   — $name: $tally (${suite_elapsed}s)"
+      if [[ -n "$bash32_bench_line" ]]; then
+        printf '%s\n' "$bash32_bench_line"
+      fi
     fi
   elif is_quarantined "$name"; then
     echo "${YEL}  KNOWN${OFF}— $name: $tally (quarantined, #$(quarantine_issue "$name"), ${suite_elapsed}s)"
@@ -2160,6 +2432,7 @@ for suite in $SELECTED_SUITES; do
     echo "${RED}  FAIL${OFF} — $name: $tally (exit $ec, ${suite_elapsed}s)"
     FAILED="$FAILED $name"
   fi
+  # gibson_suite_loop_diag end
 done
 
 # --- wall-time budget -------------------------------------------------------

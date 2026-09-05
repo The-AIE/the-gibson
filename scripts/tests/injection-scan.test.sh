@@ -26,7 +26,7 @@ detects() { # name escape
   printf 'harmless text%bmore text\n' "$2" > "$f"
   local out rc
   out=$("$SCAN" "$f" 2>&1); rc=$?
-  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -qF "$1"; then
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F "$1" >/dev/null; then
     ok "detects $1"
   else
     bad "detects $1 (rc=$rc, out=$out)"
@@ -47,7 +47,7 @@ echo "clean input stays quiet"
 printf '# A normal skill\n\nRun `npm test` — em-dashes, accents (café), emoji 🚀 are all fine.\n' \
   > "$ROOT/clean.md"
 out=$("$SCAN" "$ROOT/clean.md" 2>&1); rc=$?
-if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q clean; then
+if [[ "$rc" -eq 0 ]] && echo "$out" | grep clean >/dev/null; then
   ok "no false positive on ordinary prose"
 else
   bad "no false positive on ordinary prose (rc=$rc, out=$out)"
@@ -64,8 +64,8 @@ out=$("$SCAN" --all "$SCOPE/thing.png" 2>&1); rc=$?
 echo "reporting"
 printf 'line one\nline two\xe2\x80\x8b\n' > "$ROOT/where.md"
 out=$("$SCAN" "$ROOT/where.md" 2>&1)
-echo "$out" | grep -q "where.md:2:" && ok "names the file and line" || bad "names the file and line ($out)"
-echo "$out" | grep -q "ZERO WIDTH SPACE" && ok "names the codepoint" || bad "names the codepoint"
+echo "$out" | grep "where.md:2:" >/dev/null && ok "names the file and line" || bad "names the file and line ($out)"
+echo "$out" | grep "ZERO WIDTH SPACE" >/dev/null && ok "names the codepoint" || bad "names the codepoint"
 
 echo "the harness scans itself clean"
 out=$(cd "$SCRIPT_DIR/../.." && "$SCAN" 2>&1); rc=$?

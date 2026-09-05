@@ -28,6 +28,77 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22 }
 
+      # AC5 (#307): Signed-off-by over the PR's own commits only.
+      # On pull_request, actions/checkout is the unsigned synthetic merge
+      # ref — walk github.event.pull_request.head.sha, never HEAD.
+      # On push to main this is a no-op with a visible skip (not silent).
+      # github.event_name is not allowlisted in run: blocks — pass via env.
+      - name: DCO trailer check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT_NAME}" != "pull_request" ]; then
+            echo "::notice::DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)"
+            echo "DCO trailer check skipped on ${EVENT_NAME} (not a pull_request)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "${BASE_SHA:-}" ]; then
+            echo "error: pull_request base SHA is empty; cannot walk BASE_SHA..HEAD_SHA" >&2
+            exit 1
+          fi
+          if [ -z "${HEAD_SHA:-}" ]; then
+            echo "error: pull_request head SHA is empty; cannot walk BASE_SHA..HEAD_SHA" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "error: cannot resolve pull_request base SHA" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "error: cannot resolve pull_request head SHA" >&2
+            exit 1
+          fi
+          unsigned=""
+          shas=$(git rev-list "${BASE_SHA}..${HEAD_SHA}") || {
+            echo "error: git rev-list ${BASE_SHA}..${HEAD_SHA} failed" >&2
+            exit 1
+          }
+          for sha in $shas; do
+            [ -n "$sha" ] || continue
+            body=$(git log -1 --format=%B "$sha") || {
+              echo "error: cannot read commit message for ${sha}" >&2
+              exit 1
+            }
+            trailers=$(printf '%s\n' "$body" | git interpret-trailers --parse) || {
+              echo "error: git interpret-trailers --parse failed for ${sha}" >&2
+              exit 1
+            }
+            if ! printf '%s\n' "$trailers" | grep -q '^Signed-off-by:'; then
+              unsigned="${unsigned}${sha}"$'\n'
+            fi
+          done
+          if [ -n "$unsigned" ]; then
+            echo "error: commit(s) missing Signed-off-by trailer:" >&2
+            printf '%s' "$unsigned" >&2
+            exit 1
+          fi
+          echo "DCO: every commit in ${BASE_SHA}..${HEAD_SHA} has a Signed-off-by trailer"
+
+      # Law 9 ledger hygiene (#306) — invoked directly so the lint is a gate
+      # caller of record (#307's reachability ratchet) and enforced on every PR,
+      # not only exercised by its own test. Online: closed pending issues fail.
+      - name: Lesson ledger lint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/lesson-ledger-lint.mjs
+
+      # AC4 (#307): fail when a new scripts/*.sh or *.mjs has no gate caller.
+      - name: Sensor reachability
+        run: node scripts/sensor-reachability.mjs
+
       # Exact ShellCheck pin — machine source is scripts/tests/run-all.sh
       # (SHELLCHECK_REQUIRED_VERSION + SHELLCHECK_SHA256_LINUX_X86_64). Do not
       # restate version/digest here; extract strict assignment lines only.
