@@ -239,27 +239,27 @@ _silent_noop_fp() {
     return 0
   fi
 
-  # Every digest assignment ends in `|| digest=""`. The driver sources this under
-  # `set -euo pipefail`, and a hash binary that *exists but fails* (broken install,
-  # sandbox denial, exhausted fd/memory) makes the pipeline non-zero under pipefail.
-  # A bare assignment would then abort the caller before the sentinel below is ever
-  # printed — the sensor would take the loop down instead of failing closed. Collapse
-  # to an empty digest and let `sentinel:unhashable` stand. Deliberately no byte-count
-  # fallback here: `wc -c` cannot see `round: 1` become `round: 2`, so it would report
-  # stagnation as progress — fail-open, the one thing this sensor may never do.
-  if command -v sha256sum >/dev/null 2>&1; then
-    # printf's own stderr is silenced: a hasher that exits before reading (the
-    # failing-hasher shadow, a sandbox denial) sends printf SIGPIPE, and the
-    # "write error: Broken pipe" text must not leak into the caller's output —
-    # it is the #319 silent-noop flake. The status still collapses to "".
-    digest=$(printf '%s\n' "$body" 2>/dev/null | sha256sum 2>/dev/null | awk '{print $1}') || digest=""
-  elif command -v shasum >/dev/null 2>&1; then
-    digest=$(printf '%s\n' "$body" 2>/dev/null | shasum -a 256 2>/dev/null | awk '{print $1}') || digest=""
-  else
-    # POSIX fallback. Weaker than a digest but still content-sensitive, unlike a
-    # byte count, which cannot see `round: 1` become `round: 2`.
-    digest=$(printf '%s\n' "$body" 2>/dev/null | cksum 2>/dev/null | awk '{print $1 "-" $2}') || digest=""
-  fi
+  # Digest the normalized body. The assignment ends in `|| digest=""` so a hasher
+  # that exists but fails cannot abort a `set -euo pipefail` driver. A consumer
+  # that exits before the producer drains is the #318 class: bash builtin printf
+  # reports "write error: Broken pipe", and that diagnostic is captured with the
+  # expected sentinel under `2>&1` so the suite goes red on a schedule race.
+  # Isolate the pipeline in a subshell that discards its own stderr and ignores
+  # SIGPIPE so the write returns EPIPE instead of killing the caller; collapse
+  # empty/failed digest to sentinel:unhashable. Preference order is unchanged.
+  # Deliberately no byte-count fallback: `wc -c` cannot see `round: 1` become
+  # `round: 2`, so it would report stagnation as progress — fail-open.
+  digest=$(
+    exec 2>/dev/null
+    trap '' PIPE
+    if command -v sha256sum >/dev/null 2>&1; then
+      printf '%s\n' "$body" | sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+      printf '%s\n' "$body" | shasum -a 256 | awk '{print $1}'
+    else
+      printf '%s\n' "$body" | cksum | awk '{print $1 "-" $2}'
+    fi
+  ) || digest=""
 
   if [[ -z "$digest" ]]; then
     printf 'sentinel:unhashable'
