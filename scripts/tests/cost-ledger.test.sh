@@ -223,7 +223,7 @@ else
   bad "call site missing or before def (call=$call_line fn=$fn_line)"
 fi
 # Call must not sit under L-008 startup before the main loop
-if grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | grep  . >/dev/null; then
+if grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | grep . >/dev/null; then
   meter_line=$(grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
   loop_line=$(grep -n '^while true; do' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
   if [[ -n "$meter_line" && -n "$loop_line" && "$meter_line" -gt "$loop_line" ]]; then

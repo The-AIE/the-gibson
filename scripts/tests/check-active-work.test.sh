@@ -501,7 +501,7 @@ run_sensor 1 lane nonexistent-base "an unresolvable base ref fails loudly" "cann
 out=$(cd "$REPO" && GITHUB_EVENT_NAME=pull_request GITHUB_BASE_REF=nonexistent-base \
       GITHUB_HEAD_REF=lane node "$SENSOR" 2>&1)
 rc=$?
-if [[ "$rc" -eq 0 ]] || grep -i -- "no changed files detected" >/dev/null <<< "$out"; then
+if [[ "$rc" -eq 0 ]] || grep -qi -- "no changed files detected" <<< "$out"; then
   bad "an unresolvable base must not report 'no changed files' (rc=$rc: $out)"
 else
   ok "an unresolvable base never claims the diff was empty"

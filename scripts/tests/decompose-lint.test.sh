@@ -856,7 +856,7 @@ expect_calls "label swallows --all-open" 0
 
 # --- repository selector plus --file ---
 out=$(run_repo --file "$ROOT/clean.json" --repo acme/app --all-open); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep  -- '--file' >/dev/null; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -- '--file' >/dev/null; then
   ok "repository selector plus --file: --all-open exits 2"
 else
   bad "file+all-open (rc=$rc): $out"
@@ -864,7 +864,7 @@ fi
 expect_calls "file+all-open" 0
 
 out=$(run_repo --file "$ROOT/clean.json" --label alpha); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep  -- '--file' >/dev/null; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -- '--file' >/dev/null; then
   ok "repository selector plus --file: --label exits 2"
 else
   bad "file+label (rc=$rc): $out"
@@ -872,7 +872,7 @@ fi
 expect_calls "file+label" 0
 
 out=$(run_repo --file "$ROOT/nope.json" --all-open); rc=$?
-if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep  -- '--file' >/dev/null; then
+if [[ "$rc" -eq 2 ]] && printf '%s\n' "$out" | grep -- '--file' >/dev/null; then
   ok "repository selector plus --file: missing file still selector error"
 else
   bad "file-missing+all-open (rc=$rc): $out"
@@ -1044,7 +1044,7 @@ cat > "$ROOT/scenario.json" <<JSON
 JSON
 out=$(run_repo --repo acme/app --all-open); rc=$?
 if [[ "$rc" -eq 3 ]] && printf '%s\n' "$out" | grep 'INCOMPLETE: API_FAILURE' >/dev/null \
-   && ! printf '%s\n' "$out" | grep -F -q "$HOSTILE_STDERR"; then
+   && ! printf '%s\n' "$out" | grep -F "$HOSTILE_STDERR" >/dev/null; then
   ok "API failure: INCOMPLETE exit 3 with typed code, no raw stderr"
 else
   bad "API failure (rc=$rc): $out"

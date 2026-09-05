@@ -477,7 +477,7 @@ else
   bad "run-all.sh is missing the v1 syntax receipt"
 fi
 if grep -Fq 'ok${OFF}   — parses under bash 3.2' "$RUN_ALL" \
-  || grep -F 'parses under bash 3.2' "$RUN_ALL" >/dev/null; then
+  || grep -Fq 'parses under bash 3.2' "$RUN_ALL"; then
   bad "run-all.sh still prints the old fixed bash 3.2 ok text"
 else
   ok "run-all.sh no longer prints the old fixed bash 3.2 ok text"

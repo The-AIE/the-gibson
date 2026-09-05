@@ -71,7 +71,7 @@ out=$(run_case 3 \
   'STATE_FILE="$STATE"; write_state() { :; }; printf "# Gibson loop state\nupdated: 2026-08-02T00:00:00Z\nhat: builder\nround: 0\n" > "$STATE"' \
   'printf "# Gibson loop state\nupdated: 2026-08-02T00:00:0${i}Z\nhat: builder\nround: 0\n" > "$STATE"' \
   5)
-if echo "$out" | grep  TRIP >/dev/null; then
+if echo "$out" | grep TRIP >/dev/null; then
   ok "a clock-only 'update' still trips the budget"
 else
   bad "clock-only update never trips — sensor certifies an L-008 run ($(echo "$out" | tr '\n' ' '))"
@@ -86,7 +86,7 @@ out=$(run_case 3 \
   'STATE_FILE="$STATE"; printf "# Gibson loop state\nupdated: t\nhat: builder\nround: 0\n" > "$STATE"' \
   'printf "# Gibson loop state\nupdated: t\nhat: builder\nround: %s\n" "$i" > "$STATE"' \
   5)
-if echo "$out" | grep  TRIP >/dev/null; then
+if echo "$out" | grep TRIP >/dev/null; then
   bad "advancing state wrongly tripped ($(echo "$out" | tr '\n' ' '))"
 else
   ok "advancing round= never trips"
@@ -96,26 +96,26 @@ out=$(run_case 2 \
   'STATE_FILE="$STATE"; printf "hat: builder\nround: 1\n" > "$STATE"' \
   'printf "hat: builder\nround: %s\n" "$((i + 1))" > "$STATE"' \
   4)
-echo "$out" | grep  TRIP >/dev/null \
+echo "$out" | grep TRIP >/dev/null \
   && bad "same-length content change read as stagnation ($(echo "$out" | tr '\n' ' '))" \
   || ok "same-length content change counts as progress"
 
 echo
 echo "fails closed when it cannot read the state"
 out=$(run_case 2 'STATE_FILE="$STATE"; rm -f "$STATE"' ':' 4)
-echo "$out" | grep  TRIP >/dev/null \
+echo "$out" | grep TRIP >/dev/null \
   && ok "a missing state file trips" \
   || bad "missing state file never trips ($(echo "$out" | tr '\n' ' '))"
 
 out=$(run_case 2 \
   'STATE_FILE="$STATE"; printf "hat: builder\n" > "$STATE"; chmod 000 "$STATE"' ':' 4)
-echo "$out" | grep  TRIP >/dev/null \
+echo "$out" | grep TRIP >/dev/null \
   && ok "an unreadable state file trips" \
   || bad "unreadable state file never trips — sensor silently disabled ($(echo "$out" | tr '\n' ' '))"
 chmod 644 "$ROOT/loop-state.md" 2>/dev/null
 
 out=$(run_case 2 'STATE_FILE=""' ':' 4)
-echo "$out" | grep  TRIP >/dev/null \
+echo "$out" | grep TRIP >/dev/null \
   && ok "an unset STATE_FILE trips" \
   || bad "unset STATE_FILE never trips ($(echo "$out" | tr '\n' ' '))"
 
@@ -157,7 +157,7 @@ out=$(env -u NOOP_BUDGET bash -c '
   silent_noop_init
   silent_noop_check && echo SURVIVED
 ' silent-noop-test "$SENSOR" "$ROOT/strict.md" 2>&1)
-echo "$out" | grep  SURVIVED >/dev/null \
+echo "$out" | grep SURVIVED >/dev/null \
   && ok "clean iteration under set -euo pipefail" \
   || bad "died under set -euo pipefail ($out)"
 

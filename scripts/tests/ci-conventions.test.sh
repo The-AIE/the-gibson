@@ -1714,8 +1714,8 @@ sed -e '/duplicate sentinel attribution/d' \
     -e '/explicit assertions and sentinel/d' \
     "$RA" > "$_mut_src"
 if grep -Fq 'duplicate sentinel attribution' "$_mut_src" \
-   || grep -F 'legacy-sentinel name/count drift' "$_mut_src" >/dev/null \
-   || grep -F 'explicit assertions and sentinel' "$_mut_src" >/dev/null; then
+   || grep -Fq 'legacy-sentinel name/count drift' "$_mut_src" \
+   || grep -Fq 'explicit assertions and sentinel' "$_mut_src"; then
   bad "mutation: deleting sentinel attribution guards still grepped true (vacuous)"
 else
   ok "mutation: deleting sentinel attribution guards turns the source check red"
@@ -2062,7 +2062,7 @@ fi
 fixture_artifact_ok() {
   local text="$1"
   # Empty or whitespace-only is red before arithmetic.
-  if [[ -z "$text" ]] || ! printf '%s\n' "$text" | grep  . >/dev/null; then
+  if [[ -z "$text" ]] || ! printf '%s\n' "$text" | grep . >/dev/null; then
     return 1
   fi
   printf '%s\n' "$text" | grep -F 'metrics mutation: duplicate machine metric fails closed' >/dev/null || return 1
@@ -2383,25 +2383,37 @@ echo
 # lose that race. This is part 1 of the lesson grep-q-pipefail-undercounts; it is
 # deliberately NOT pinned to that lesson ID until part 2 (scripts/, workflows)
 # lands and the lesson can honestly read fixed. Scope is scripts/tests. The
-# allowlist holds only files under
-# a live claim when this landed (#301, #325); the follow-up on #332 empties it
-# and widens the scope to scripts/ and .github/workflows.
-grepq_re='\|[[:space:]]*grep[[:space:]]+-[A-Za-z]*q'
-grepq_allow='scripts/tests/contract-authority.test.sh|scripts/tests/pr-review-evidence.test.sh'
+# allowlist holds only files under a live claim when this landed (#301, #325);
+# the follow-up on #332 empties it and widens the scope.
+# The regex sees -q in ANY option cluster (`grep -F -q`), plus --quiet/--silent,
+# and `||` is not a pipe.
+grepq_re='(^|[^|])\|[[:space:]]*grep([[:space:]]+-[A-Za-z]+)*[[:space:]]+(-[A-Za-z]*q|--quiet|--silent)'
+grepq_allow='scripts/tests/contract-authority\.test\.sh|scripts/tests/pr-review-evidence\.test\.sh'
 grepq_hits=$(grep -rnE "$grepq_re" scripts/tests --include='*.sh' 2>/dev/null | grep -vE "^($grepq_allow):" || true)
 if [ -z "$grepq_hits" ]; then
   ok "#332: no piped quiet grep under scripts/tests (allowlist: 2 files under live claims)"
 else
   bad "#332: piped quiet grep under scripts/tests: $(printf '%s\n' "$grepq_hits" | head -3 | tr '\n' ' ')"
 fi
-# mutation: the sensor must catch a planted violation, or it is decoration.
+# mutation: every quiet form must be caught on its own, and the non-pipe `||`
+# form must not be, or the sensor is decoration.
 grepq_mut=$(mktemp -d "${TMPDIR:-/tmp}/grepq-mut.XXXXXX")
 mkdir -p "$grepq_mut/scripts/tests"
-printf 'echo x %s grep -q x\n' '|' > "$grepq_mut/scripts/tests/planted.sh"
-if (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1); then
-  ok "#332 mutation: planted piped quiet grep is caught"
+# (semicolon-separated so this line is not itself a piped quiet grep)
+grepq_forms='grep -q x;grep -qiF -- x;grep -F -q x;grep -E -q x;grep -F --quiet x;grep -i --silent x;grep -Eq x'
+grepq_missed=""
+_old_ifs=$IFS; IFS=';'
+for _form in $grepq_forms; do
+  printf 'echo x %s %s\n' '|' "$_form" > "$grepq_mut/scripts/tests/planted.sh"
+  (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1) || grepq_missed="$grepq_missed [$_form]"
+done
+IFS=$_old_ifs
+printf 'cmd %s grep -q x file\n' '||' > "$grepq_mut/scripts/tests/planted.sh"
+if (cd "$grepq_mut" && grep -rnE "$grepq_re" scripts/tests --include='*.sh' >/dev/null 2>&1); then grepq_missed="$grepq_missed [false-positive on ||]"; fi
+if [ -z "$grepq_missed" ]; then
+  ok "#332 mutation: every planted quiet-grep form is caught; || is not a pipe"
 else
-  bad "#332 mutation: planted piped quiet grep NOT caught"
+  bad "#332 mutation: sensor defect:$grepq_missed"
 fi
 rm -rf "$grepq_mut"
 

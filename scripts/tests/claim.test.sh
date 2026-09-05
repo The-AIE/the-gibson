@@ -749,9 +749,9 @@ case "$1 $2" in
   "issue view") cat "$RACE_DIR/labels-$3" 2>/dev/null || echo "" ;;
   "issue edit")
     issue="$3"
-    if echo "$*" | grep  -- '--add-label' >/dev/null; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "$RACE_DIR/labels-$issue"
-    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "$RACE_DIR/labels-$issue"
     fi
     ;;
@@ -1118,9 +1118,9 @@ case "$1 $2" in
     ;;
   "issue edit")
     echo "$*" >> "$LAG_STATE/label.log"
-    if echo "$*" | grep  -- '--add-label' >/dev/null; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "$LAG_STATE/labels"
-    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "$LAG_STATE/labels"
     fi
     ;;
@@ -1937,8 +1937,8 @@ case "$1 $2" in
   "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
   "issue edit")
     echo "$*" >> "$STATE/label.log"
-    if echo "$*" | grep  -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
-    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
+    if echo "$*" | grep -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
     # `list-open-numbers` (operation openPrNumbers) also carries
@@ -2001,8 +2001,8 @@ case "$1 $2" in
   "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
   "issue edit")
     echo "$*" >> "$STATE/label.log"
-    if echo "$*" | grep  -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
-    elif echo "$*" | grep  -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
+    if echo "$*" | grep -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
     # `list-open-numbers` (operation openPrNumbers) also carries

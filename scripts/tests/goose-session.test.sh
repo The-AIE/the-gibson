@@ -81,7 +81,7 @@ else
   bad "permission-map missing autonomy-modes citation"
 fi
 # green_gate always_allow so enforcement is never permission-blocked
-if grep -A3 'green_gate_scripts' "$PERM" | grep  always_allow >/dev/null; then
+if grep -A3 'green_gate_scripts' "$PERM" | grep always_allow >/dev/null; then
   ok "green_gate_scripts always_allow (enforcement not prompt-blocked)"
 else
   bad "green_gate_scripts must be always_allow"

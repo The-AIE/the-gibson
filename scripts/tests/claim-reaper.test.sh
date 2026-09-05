@@ -132,7 +132,7 @@ case "$1" in
     fi
     if [[ "${1:-}" == "edit" ]]; then
       log "EDIT $*"
-      if printf '%s' "$*" | grep  -- '--remove-label' >/dev/null; then
+      if printf '%s' "$*" | grep -- '--remove-label' >/dev/null; then
         : > "${GH_STATE:-/tmp/gh-reaper-state}"
       fi
       exit 0
@@ -793,7 +793,7 @@ unset GH_GRAPHQL_FAIL
 
 # ---------------------------------------------------------------------------
 echo "#73 · never closes an issue (no gh issue close)"
-if grep -n 'issue close\|--close\|state.*closed' "$REAPER" | grep -v 'never close' | grep  . >/dev/null; then
+if grep -n 'issue close\|--close\|state.*closed' "$REAPER" | grep -v 'never close' | grep . >/dev/null; then
   bad "reaper source mentions issue close"
 else
   ok "reaper source does not close issues"
@@ -3466,7 +3466,7 @@ if grep -Eqx 'acme/app|other/app' "$ROOT/abs180amb/list-repos.log" 2>/dev/null; 
 else
   ok "ambiguous-absent never resolved inventory identity"
 fi
-if [[ -s "$ROOT/abs180amb/comments" ]] || grep -F 'gibson-claim-reaper:issue-180-absamb' "$ROOT/abs180amb/comments" 2>/dev/null; then
+if [[ -s "$ROOT/abs180amb/comments" ]] || grep -qF 'gibson-claim-reaper:issue-180-absamb' "$ROOT/abs180amb/comments" 2>/dev/null; then
   bad "ambiguous-absent must not post handoff: $(cat "$ROOT/abs180amb/comments")"
 else
   ok "ambiguous-absent posted no handoff comment"
