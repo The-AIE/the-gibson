@@ -29,8 +29,8 @@ FAIL=0
 ok()   { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad()  { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-contains() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+contains() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 # A typo'd assertion must never be a silent no-op (#153 review round 5): bash
 # calls this hook when a command name does not resolve, so an undefined helper
 # is a COUNTED failure instead of a stderr line under a green tally. Returning
@@ -610,7 +610,7 @@ out=$(cd "$ROOT/unborn/canon" && "$RC" 18 --keep-label --dry-run 2>&1)
 rc=$?
 check "unborn main hard-fails (not empty ledger)" "$rc" "1"
 # Fail-closed on fetch failure (no local/cached fallback) or unresolved remote ref.
-if echo "$out" | grep -qE 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref'; then
+if echo "$out" | grep -E 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref' >/dev/null; then
   ok "names cannot resolve/fetch ledger ref"
 else
   bad "names cannot resolve/fetch ledger ref (got: $out)"
@@ -639,7 +639,7 @@ new_repo "$ROOT/badref"
 out=$(cd "$ROOT/badref/canon" && "$RC" 18 --keep-label 2>&1)
 rc=$?
 check "deleted main/master hard-fails" "$rc" "1"
-if echo "$out" | grep -qE 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref'; then
+if echo "$out" | grep -E 'cannot fetch remote ledger base|cannot resolve a valid ledger commit ref' >/dev/null; then
   ok "hard-fail message on missing ref/fetch"
 else
   bad "hard-fail message on missing ref/fetch (got: $out)"
@@ -768,7 +768,7 @@ new_repo "$ROOT/missingblob"
   # Shape: root tree + docs tree readable, path entry present, blob gone.
   git cat-file -e "$tree"
   git cat-file -e "$docs_tree"
-  git ls-tree "origin/main" -- docs/active-work.md | grep -q 'active-work.md'
+  git ls-tree "origin/main" -- docs/active-work.md | grep 'active-work.md' >/dev/null
   if git cat-file -e "origin/main:docs/active-work.md" 2>/dev/null; then
     echo "setup failed: blob still readable" >&2
     exit 1
@@ -884,7 +884,7 @@ new_repo "$ROOT/missingclaimblob"
   git cat-file -e "$root_tree"
   git cat-file -e "$docs_tree"
   git cat-file -e "$claims_tree"
-  git ls-tree "origin/main" docs/claims/ | grep -q 'issue-18-live-slice.md'
+  git ls-tree "origin/main" docs/claims/ | grep 'issue-18-live-slice.md' >/dev/null
   if git cat-file -e "origin/main:docs/claims/issue-18-live-slice.md" 2>/dev/null; then
     echo "setup failed: claim blob still readable" >&2
     exit 1
@@ -1339,7 +1339,7 @@ while read -r _old new ref; do
   esac
   content=$(git cat-file -p "$new:docs/active-work.md" 2>/dev/null || true)
   [[ -n "$content" ]] || continue
-  printf '%s\n' "$content" | grep -qF 'issue-15-sibling-racer' && continue
+  printf '%s\n' "$content" | grep -F 'issue-15-sibling-racer' >/dev/null && continue
   newcontent=$(printf '%s\n' "$content" '| 2026-08-02 | issue-15-sibling-racer | src/race | session:z |')
   newblob=$(printf '%s\n' "$newcontent" | git hash-object -w --stdin)
   # Rebuild the root tree from $new, replacing docs/active-work.md.
@@ -1474,7 +1474,7 @@ rc=$?
 [[ "$rc" -eq 0 || "$rc" -eq 3 ]] && ok "scoped legacy release exits 0 or incomplete-3 (rc=$rc)" \
   || bad "scoped legacy release unexpected rc=$rc: $out"
 # Residual sibling and/or incomplete artifact cleanup both preserve the label.
-if echo "$out" | grep -qE 'residual claims remain|preserving agent-claimed'; then
+if echo "$out" | grep -E 'residual claims remain|preserving agent-claimed' >/dev/null; then
   ok "keeps label for residual sibling or incomplete cleanup"
 else
   bad "keeps label for residual sibling (missing residual/preserve wording): $out"
@@ -4049,7 +4049,7 @@ printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":820,"state":"M
 out=$(cd "$ROOT/urlnum1/canon" && PATH="$ROOT/urlnum1/bin-json:$PATH" GH_JSON_OPEN="$GH_JSON_OPEN" GH_JSON_ALL="$GH_JSON_ALL" "$RC" 320 --claim-id issue-320-urlnum-case --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "URL pull-number mismatch propagates and refuses (rc=$rc)" \
   || bad "URL pull-number mismatch did not refuse (rc=$rc): $out"
-echo "$out" | grep -qiE 'pull-number|cannot verify terminal PR-body claim evidence' \
+echo "$out" | grep -iE 'pull-number|cannot verify terminal PR-body claim evidence' >/dev/null \
   && ok "names the propagated pr-claims.sh failure" \
   || bad "missing propagated failure detail: $out"
 [[ -d "$ROOT/urlnum1/wt-320-urlnum-case" ]] &&
@@ -4570,8 +4570,8 @@ out=$(cd "$ROOT/openambig/canon" && "$RC" 408 --repo acme/app 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "multi-slice bare release refuses" || bad "multi-slice bare release exits 0: $out"
 # (#153 exact-head) Message names the open-PR ambiguity; accept either the
 # historical wording or the exact-id/issue-union wording.
-if echo "$out" | grep -qF 'multiple live open PR claims' || \
-   echo "$out" | grep -qF 'multiple live PR claims'; then
+if echo "$out" | grep -F 'multiple live open PR claims' >/dev/null || \
+   echo "$out" | grep -F 'multiple live PR claims' >/dev/null; then
   ok "names the ambiguity"
 else
   bad "names the ambiguity (missing multi open-PR refuse): $out"
@@ -4619,9 +4619,9 @@ case "$1 $2" in
   "repo view") echo "acme/e2e" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit")
-    if echo "$*" | grep -q -- '--add-label'; then
+    if echo "$*" | grep -- '--add-label' >/dev/null; then
       echo "agent-claimed" > "${GH_LABELS_FILE:-/dev/null}"
-    elif echo "$*" | grep -q -- '--remove-label'; then
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then
       : > "${GH_LABELS_FILE:-/dev/null}"
     fi
     ;;
@@ -4956,7 +4956,7 @@ out=$(cd "$ROOT/bindnoorigin/canon" && "$RC" 704 --claim-id issue-704-no-origin 
 [[ "$rc" -ne 0 ]] && ok "origin-less checkout exits nonzero" || bad "origin-less checkout exits 0: $out"
 # Fetch of remote ledger base fails closed first when origin is missing; the
 # binding helper also names an unreadable origin. Either is a correct refuse.
-if echo "$out" | grep -qE 'no readable origin remote|cannot fetch remote ledger base'; then
+if echo "$out" | grep -E 'no readable origin remote|cannot fetch remote ledger base' >/dev/null; then
   ok "names the unreadable origin identity or fetch refuse"
 else
   bad "names the unreadable origin identity (got: $out)"
@@ -5061,12 +5061,12 @@ out=$(cd "$ROOT/unresolved/canon" && PATH="$ROOT/unresolved/bin:$PATH" \
 check    "unresolved identity exits 1"                "$rc" "1"
 # Origin removed → fetch of remote ledger base fails closed before identity
 # binding (no local/cached fallback). That is a correct refuse.
-if echo "$out" | grep -qE -- 'cannot fetch remote ledger base|cannot resolve the GitHub repository identity|no readable origin remote'; then
+if echo "$out" | grep -E -- 'cannot fetch remote ledger base|cannot resolve the GitHub repository identity|no readable origin remote' >/dev/null; then
   ok "names the unresolved repository identity or fetch refuse"
 else
   bad "names the unresolved repository identity (got: $out)"
 fi
-if echo "$out" | grep -qE -- 'cannot fetch remote ledger base|no readable origin|pass --repo'; then
+if echo "$out" | grep -E -- 'cannot fetch remote ledger base|no readable origin|pass --repo' >/dev/null; then
   ok "tells the operator to pass --repo or names fetch/origin refuse"
 else
   bad "tells the operator to pass --repo (got: $out)"
@@ -5372,7 +5372,7 @@ if grep -nE '\*pullRequests\*\|\*openPrNumbers\*\)\s*exit\s+0' "$0" |
     }
     { seen[NR]=$0 }
     END { exit bad+0 }
-  ' "$0" | grep -q .; then
+  ' "$0" | grep . >/dev/null; then
     bad "a release-claim fake still accepts pullRequests/openPrNumbers by keyword alone"
   else
     ok "no release-claim fake accepts inventory shape by keyword alone"
@@ -5410,21 +5410,21 @@ esac
 FAKE
 chmod +x "$ROOT/fakeapi/bin/gh"
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api user 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "expected 'api graphql" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "expected 'api graphql" >/dev/null &&
   ok "unknown REST gh api user fails closed (not empty inventory)" ||
   bad "unknown REST gh api greened (rc=$rc): $out"
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { viewer { login } }' 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "unmodelled GraphQL" >/dev/null &&
   ok "graphql without inventory shape fails closed" ||
   bad "non-inventory graphql greened (rc=$rc): $out"
 # Mutation: pullRequests/openPrNumbers keywords WITHOUT the pagination contract
 # must be rejected — this is the exact class round 6 left green.
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query { repository { pullRequests(first: 1) { nodes { number } } } }' 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "unmodelled GraphQL" >/dev/null &&
   ok "pullRequests keyword without pagination contract fails closed" ||
   bad "keyword-only pullRequests greened (rc=$rc): $out"
 out=$(PATH="$ROOT/fakeapi/bin:$PATH" gh api graphql -f query='query openPrNumbers { repository { pullRequests { nodes { number } } } }' 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q "unmodelled GraphQL" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep "unmodelled GraphQL" >/dev/null &&
   ok "openPrNumbers keyword without pagination contract fails closed" ||
   bad "keyword-only openPrNumbers greened (rc=$rc): $out"
 # Full contract (what pr-claims.sh actually sends) still returns empty success.
@@ -5595,13 +5595,13 @@ path = sys.argv[1]
 text = open(path).read()
 # Replace only the open-inventory match filter form introduced by the fix.
 old = '    # Shared issue matcher (#153 namespaced open-claim P1): never hard-code\n    # ^issue-${ISSUE}- so namespaced ids like issue-template-5-x are seen.\n    claim_id_for_issue "$pr_id" || continue\n'
-new = '    # MUTATED DEFECT: numeric-only open-PR filter\n    echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue\n'
+new = '    # MUTATED DEFECT: numeric-only open-PR filter\n    echo "$pr_id" | grep -E "^issue-${ISSUE}-" >/dev/null || continue\n'
 if old not in text:
     # Fallback: any claim_id_for_issue "$pr_id" || continue in open path
     import re
     text2, n = re.subn(
         r'claim_id_for_issue "\$pr_id" \|\| continue',
-        'echo "$pr_id" | grep -qE "^issue-${ISSUE}-" || continue',
+        'echo "$pr_id" | grep -E "^issue-${ISSUE}-" >/dev/null || continue',
         text,
         count=1,
     )
@@ -5640,7 +5640,7 @@ export GH_PR_OPEN_TSV2="$ROOT/openns3/open2.tsv"
 out=$(cd "$ROOT/openns3/canon" && "$_rc_copy" 5 --prefix template --claim-id issue-template-5-ns-mut --repo acme/app 2>&1); rc=$?
 # With numeric-only filter, issue-template-5-ns-mut is invisible as an open
 # match (does not match ^issue-5-), so the open-PR close path never runs.
-if echo "$out" | grep -qF 'closing PR #963'; then
+if echo "$out" | grep -F 'closing PR #963' >/dev/null; then
   bad "mutation: numeric-only filter still closed the namespaced PR (unexpected)"
 else
   ok "mutation receipt: numeric-only filter ignores namespaced open target (no close)"
@@ -6167,7 +6167,7 @@ rc=$?
 files=$(cd "$ROOT/mixmut/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/mixmut/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
 # With guard gone, both representations should be stripped (sensor would fail).
-if [[ "$rc" -eq 0 ]] && ! echo "$files" | grep -q 'issue-830-mix' && ! echo "$table" | grep -q 'issue-830-mix'; then
+if [[ "$rc" -eq 0 ]] && ! echo "$files" | grep 'issue-830-mix' >/dev/null && ! echo "$table" | grep 'issue-830-mix' >/dev/null; then
   ok "mutation receipt: neutralizing mixed guard deletes both representations (sensor would fail)"
 else
   bad "mutation receipt: neutralizing mixed guard did not re-enable dual delete (rc=$rc files=$files out=$(echo "$out" | tail -5))"
@@ -6570,7 +6570,7 @@ out=$(cd "$ROOT/secleg/canon" && PATH="$ROOT/secleg/shim:$ROOT/secleg/bin:$PATH"
 files=$(cd "$ROOT/secleg/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/secleg/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
 # BOTH representations must survive untouched on refusal — one surviving is not enough.
-if echo "$files" | grep -q 'issue-860-secleg' && echo "$table" | grep -q 'issue-860-secleg'; then
+if echo "$files" | grep 'issue-860-secleg' >/dev/null && echo "$table" | grep 'issue-860-secleg' >/dev/null; then
   ok "second ledger rep: BOTH representations survived untouched"
 else
   bad "second ledger rep: not both representations survived (files='$files' table='$table')"
@@ -6674,7 +6674,7 @@ elif true; then
     --expected-claim-path docs/claims/issue-851-revalmut.md \
     --keep-worktree --keep-branch 2>&1); rc=$?
   files=$(cd "$ROOT/revalmut/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
-  if ! echo "$files" | grep -q 'issue-851-revalmut'; then
+  if ! echo "$files" | grep 'issue-851-revalmut' >/dev/null; then
     ok "mutation receipt: killing reval allows strip (sensor would fail)"
   else
     bad "mutation receipt: mutant did not strip (rc=$rc files=$files): $(echo "$out" | tail -8)"
@@ -6735,7 +6735,7 @@ lacks "fetch failure no gh mutation" "$(cat "$GH_LOG" 2>/dev/null)" "MUTATED-LAB
 
 echo "#153 r15 · production cleanup has no force/rm-rf/branch -D for claim artifacts"
 if grep -E 'git worktree remove --force|git branch -D|rm -rf "\$wt"|rm -rf "\$\{wt' "$RC" | \
-   grep -v 'tmpwt\|gibson-release-claim\|comment\|#' | grep -q .; then
+   grep -v 'tmpwt\|gibson-release-claim\|comment\|#' | grep . >/dev/null; then
   # Allow only disposable strip tmpwt force; claim artifact paths must not match.
   hits=$(grep -nE 'git worktree remove --force|git branch -D' "$RC" | grep -v 'tmpwt' || true)
   if [[ -n "$hits" ]]; then
@@ -7082,7 +7082,7 @@ out=$(cd "$ROOT/ncasleg/canon" && PATH="$ROOT/ncasleg/shim:$ROOT/ncasleg/bin:$PA
 [[ "$rc" -ne 0 ]] && ok "non-CAS late legacy: refuses nonzero" || bad "non-CAS late legacy exited 0: $out"
 files=$(cd "$ROOT/ncasleg/canon" && git fetch -q origin && git ls-tree --name-only origin/main docs/claims/ 2>/dev/null || true)
 table=$(cd "$ROOT/ncasleg/canon" && git show origin/main:docs/active-work.md 2>/dev/null || true)
-if echo "$files" | grep -q 'issue-891-ncasleg' && echo "$table" | grep -q 'issue-891-ncasleg'; then
+if echo "$files" | grep 'issue-891-ncasleg' >/dev/null && echo "$table" | grep 'issue-891-ncasleg' >/dev/null; then
   ok "non-CAS late legacy: BOTH representations survived"
 else
   bad "non-CAS late legacy: not both survived (files='$files' table='$table')"
@@ -7288,8 +7288,8 @@ else
   ok "stream-capture: no recursive rm -rf on capture dir"
 fi
 # Signal cleanup must not clear handles without verified unlink.
-if grep -A20 '_rc_capture_cleanup_temps' "$_SC_LIB" | grep -q '_RC_CAP_OUTF=""' && \
-   grep -B5 -A5 '_RC_CAP_OUTF=""' "$_SC_LIB" | grep -q '_rc_capture_unlink_one\|unlink'; then
+if grep -A20 '_rc_capture_cleanup_temps' "$_SC_LIB" | grep '_RC_CAP_OUTF=""' >/dev/null && \
+   grep -B5 -A5 '_RC_CAP_OUTF=""' "$_SC_LIB" | grep '_rc_capture_unlink_one\|unlink' >/dev/null; then
   ok "stream-capture: handle clear is gated on verified unlink"
 else
   # Accept if cleanup only clears after successful unlink helper.
@@ -7456,7 +7456,7 @@ if printf '%s\n' "$_rend_fn" "$_prev_fn" "$_open_fn" "$_term_fn" "$_res_fn" \
 else
   ok "source: branch-resolved preview/cleanup seam does not call wt_dir_for"
 fi
-if printf '%s\n' "$_inner_fn" | grep -q 'wt_dir_for "'; then
+if printf '%s\n' "$_inner_fn" | grep 'wt_dir_for "' >/dev/null; then
   ok "source: historical-path decoy check remains inside resolve_registered_worktree_for_branch"
 else
   bad "source: historical-path decoy check missing from resolve_registered_worktree_for_branch"
@@ -7551,8 +7551,8 @@ if git -C "$_RC_REPO" cat-file -e "${_BP}:scripts/release-claim.sh" 2>/dev/null;
   out_bp=$(cd "$ROOT/nd271/canon" && PATH="$ROOT/term/bin:$PATH" \
     "$ROOT/unpatched271/scripts/release-claim.sh" 271 \
     --claim-id issue-271-nondefault-preview --repo acme/app --dry-run 2>&1); rc_bp=$?
-  if echo "$out_bp" | grep -qF 'wt-271-nondefault-preview' \
-     && ! echo "$out_bp" | grep -qF "$ND_SHOWN"; then
+  if echo "$out_bp" | grep -F 'wt-271-nondefault-preview' >/dev/null \
+     && ! echo "$out_bp" | grep -F "$ND_SHOWN" >/dev/null; then
     ok "red-before-green: unpatched preview names the wt_dir_for decoy, not the registered path"
   else
     bad "red-before-green: unpatched preview did not show the decoy regression (rc=$rc_bp out=$out_bp)"
@@ -7936,8 +7936,8 @@ if grep -q 'MUTATED_WT_DIR_FOR' "$ROOT/mut1/scripts/release-claim.sh" \
   out_m1=$(cd "$ROOT/nd271/canon" && PATH="$ROOT/term/bin:$PATH" \
     "$ROOT/mut1/scripts/release-claim.sh" 271 \
     --claim-id issue-271-nondefault-preview --repo acme/app --dry-run 2>&1)
-  if echo "$out_m1" | grep -qF 'wt-271-nondefault-preview' \
-     && ! echo "$out_m1" | grep -qF "$ND_SHOWN"; then
+  if echo "$out_m1" | grep -F 'wt-271-nondefault-preview' >/dev/null \
+     && ! echo "$out_m1" | grep -F "$ND_SHOWN" >/dev/null; then
     ok "mutation M1 turns the primary registered-path assertion red"
   else
     bad "mutation M1 did not restore the decoy preview (out=$out_m1)"
@@ -7975,8 +7975,8 @@ if grep -q 'MUTATED_KEEP_PREFLIGHT' "$ROOT/mut3/scripts/release-claim.sh" \
   out_m3=$(cd "$ROOT/kwnb271/canon" && PATH="$ROOT/term/bin:$PATH" \
     "$ROOT/mut3/scripts/release-claim.sh" 277 \
     --claim-id issue-277-keep-wt-no-br --repo acme/app --keep-worktree --dry-run 2>&1); rc_m3=$?
-  if [[ "$rc_m3" -eq 0 ]] && echo "$out_m3" | grep -qF 'KEEP worktree:' \
-     && echo "$out_m3" | grep -qE 'branch target:|delete branch:'; then
+  if [[ "$rc_m3" -eq 0 ]] && echo "$out_m3" | grep -F 'KEEP worktree:' >/dev/null \
+     && echo "$out_m3" | grep -E 'branch target:|delete branch:' >/dev/null; then
     ok "mutation M3 turns the keep-worktree/no-keep-branch preflight assertion red"
   else
     bad "mutation M3 did not print an impossible keep/delete plan (rc=$rc_m3 out=$out_m3)"
@@ -7997,8 +7997,8 @@ if grep -q 'MUTATED_NO_WT' "$ROOT/mut4/scripts/release-claim.sh" \
   out_m4=$(cd "$ROOT/none271/canon" && PATH="$ROOT/term/bin:$PATH" \
     "$ROOT/mut4/scripts/release-claim.sh" 272 \
     --claim-id issue-272-no-wt-preview --repo acme/app --dry-run 2>&1)
-  if echo "$out_m4" | grep -qF 'wt-272-no-wt-preview' \
-     && ! echo "$out_m4" | grep -qF 'no registered worktree'; then
+  if echo "$out_m4" | grep -F 'wt-272-no-wt-preview' >/dev/null \
+     && ! echo "$out_m4" | grep -F 'no registered worktree' >/dev/null; then
     ok "mutation M4 turns the no-registered-worktree assertion red"
   else
     bad "mutation M4 did not fabricate the default path (out=$out_m4)"
@@ -8019,7 +8019,7 @@ if grep -q 'MUTATED_AMBIG' "$ROOT/mut5/scripts/release-claim.sh" \
   out_m5=$(cd "$ROOT/amb271/canon" && PATH="$ROOT/term/bin:$PATH" \
     "$ROOT/mut5/scripts/release-claim.sh" 273 \
     --claim-id issue-273-ambig-preview --repo acme/app --dry-run 2>&1); rc_m5=$?
-  if [[ "$rc_m5" -eq 0 ]] && echo "$out_m5" | grep -qF 'DRY RUN would:'; then
+  if [[ "$rc_m5" -eq 0 ]] && echo "$out_m5" | grep -F 'DRY RUN would:' >/dev/null; then
     ok "mutation M5 turns the ambiguous-registration fail-closed assertion red"
   else
     bad "mutation M5 still failed closed (rc=$rc_m5 out=$out_m5)"

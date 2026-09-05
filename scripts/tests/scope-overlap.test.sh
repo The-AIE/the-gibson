@@ -20,7 +20,7 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 # sitting quietly underneath a green tally. Same signature and semantics as
 # the `lacks` in claim.test.sh and release-claim.test.sh, so a reader moving
 # between the three suites does not have to check which one this is.
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 # …and the ratchet for the class, not just the instance. bash calls this hook
 # when a command name does not resolve, so a mistyped or not-yet-written
 # assertion becomes a COUNTED failure instead of a stderr line the tally never
@@ -158,14 +158,14 @@ run_so_prod() {
 
 echo "help / usage"
 out=$(node "$SENSOR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' && ok "help" || bad "help rc=$rc"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WHAT IT DOES' >/dev/null && ok "help" || bad "help rc=$rc"
 out=$(node "$SENSOR" 2>&1); rc=$?
 [[ "$rc" -eq 2 ]] && ok "no-args exits 2" || bad "no-args $rc"
 
 echo "overlapping scope refused"
 setup_repo a
 out=$(run_so "$ROOT/a/canon" --scope 'app/api/auth/login.ts'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-7-password-reset' && ok "overlap with file claim" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-7-password-reset' >/dev/null && ok "overlap with file claim" \
   || bad "overlap (rc=$rc): $out"
 
 echo "disjoint scope allowed"
@@ -174,7 +174,7 @@ out=$(run_so "$ROOT/a/canon" --scope 'components/nav/**'); rc=$?
 
 echo "legacy-row overlap detected"
 out=$(run_so "$ROOT/a/canon" --scope 'src/legacy/foo.ts'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-9-legacy-only' && ok "legacy overlap" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-9-legacy-only' >/dev/null && ok "legacy overlap" \
   || bad "legacy (rc=$rc): $out"
 
 echo "exact same glob refused"
@@ -193,13 +193,13 @@ setup_repo b
   git remote set-url origin /nonexistent/path/to/origin
 )
 out=$(run_so "$ROOT/b/canon" --scope 'anything/**'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'fetch|refuse' && ok "fetch failure refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'fetch|refuse' >/dev/null && ok "fetch failure refuses" \
   || bad "fetch fail (rc=$rc): $out"
 
 echo "json mode on overlap"
 setup_repo c
 out=$(run_so "$ROOT/c/canon" --scope 'app/api/**' --json); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q '"ok": false' && ok "json overlap" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep '"ok": false' >/dev/null && ok "json overlap" \
   || bad "json (rc=$rc): $out"
 
 echo "claim.sh sources sensor (static)"
@@ -259,7 +259,7 @@ unset GH_PR_EXIT
 
 echo "cross-issue live PR-body claim is refused (#153)"
 out=$(run_so "$ROOT/d/canon" --scope 'components/nav/Item.tsx' --repo acme/app --claim-id issue-21-nav-tweak --issue 21); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-20-nav-shell' && ok "cross-issue PR-body overlap refused" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-20-nav-shell' >/dev/null && ok "cross-issue PR-body overlap refused" \
   || bad "cross-issue PR-body overlap (rc=$rc): $out"
 
 echo "disjoint scope coexists with a live PR-body claim on a different issue (#153)"
@@ -273,7 +273,7 @@ out=$(run_so "$ROOT/d/canon" --scope 'components/nav/Item.tsx'); rc=$?
 echo "malformed/truncated PR-claim row fails closed (#153)"
 printf '502\tissue-31-broken\tsrc/x/**\n' > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-32-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'malformed|truncated' && ok "malformed PR row refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'malformed|truncated' >/dev/null && ok "malformed PR row refuses" \
   || bad "malformed PR row (rc=$rc): $out"
 
 echo "duplicate PR-claim id across two PRs fails closed (#153)"
@@ -282,40 +282,40 @@ echo "duplicate PR-claim id across two PRs fails closed (#153)"
   printf '602\tissue-33-dup\tsrc/b/**\tfeat/33-dup-2\thttps://github.com/acme/app/pull/602\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 } > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-34-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'duplicate' && ok "duplicate PR-claim id refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'duplicate' >/dev/null && ok "duplicate PR-claim id refuses" \
   || bad "duplicate PR-claim id (rc=$rc): $out"
 
 echo "gh/pr-claims failure fails closed when --repo was given (#153)"
 export GH_PR_EXIT=1
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-35-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'cannot read live PR-body claims|refuse' && ok "gh failure refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'cannot read live PR-body claims|refuse' >/dev/null && ok "gh failure refuses" \
   || bad "gh failure (rc=$rc): $out"
 unset GH_PR_EXIT
 
 echo "malformed --repo shape is rejected before any query (#153)"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo 'not-a-repo'); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi "owner/name" && ok "malformed --repo rejected" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i "owner/name" >/dev/null && ok "malformed --repo rejected" \
   || bad "malformed --repo (rc=$rc): $out"
 
 echo "missing/empty claim scope on a live PR-body claim fails closed (#153 AC6)"
 printf '701\tissue-40-empty-scope\t\tfeat/40-empty-scope\thttps://github.com/acme/app/pull/701\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-41-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'missing/empty claim scope' && ok "missing scope refuses (never silently empty)" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'missing/empty claim scope' >/dev/null && ok "missing scope refuses (never silently empty)" \
   || bad "missing scope (rc=$rc): $out"
 
 echo "missing/unsafe head branch on a live PR-body claim fails closed (#153 AC6)"
 printf '702\tissue-42-bad-branch\tsrc/a/**\t\thttps://github.com/acme/app/pull/702\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-43-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'missing/unsafe head branch' && ok "missing branch refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'missing/unsafe head branch' >/dev/null && ok "missing branch refuses" \
   || bad "missing branch (rc=$rc): $out"
 
 echo "PR URL repository mismatch vs --repo fails closed (#153 AC3)"
 printf '703\tissue-44-wrong-repo\tsrc/a/**\tfeat/44-wrong-repo\thttps://github.com/other-org/other-app/pull/703\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-45-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'unexpected repository identity' && ok "URL-repo mismatch refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'unexpected repository identity' >/dev/null && ok "URL-repo mismatch refuses" \
   || bad "URL-repo mismatch (rc=$rc): $out"
 # Reset fixture for anything appended after this block.
 printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://github.com/acme/app/pull/501\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
@@ -349,7 +349,7 @@ GH_JSON="$ROOT/dupbody.json"
 printf '{"data":{"repository":{"pullRequests":{"nodes":[{"number":950,"body":"- Active-work claim: issue-50-dup-body\\n- Active-work claim: issue-50-dup-body\\n- Claim scope: unrelated/dup/**\\n- Issue: #50","headRefName":"feat/50-dup-body","url":"https://github.com/acme/app/pull/950","createdAt":"2026-08-05T00:00:00Z","updatedAt":"2026-08-06T00:00:00Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' \
   > "$GH_JSON"
 out=$(PATH="$ROOT/bin-json:$PATH" GH_JSON="$GH_JSON" run_so "$ROOT/d/canon" --scope 'unrelated/**' --repo acme/app --claim-id issue-51-x); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'duplicate|cannot read live PR-body claims|refuse' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'duplicate|cannot read live PR-body claims|refuse' >/dev/null \
   && ok "duplicate-in-body propagates to scope-overlap.mjs fail-closed" \
   || bad "duplicate-in-body (rc=$rc): $out"
 
@@ -364,14 +364,14 @@ echo "--admit-pr · a LOWER-numbered overlapping PR claim refuses this lane"
   printf '801\tissue-61-shared-util\tlib/shared/util.ts\tfeat/61-shared-util\thttps://github.com/acme/app/pull/801\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n'
 } > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/util.ts' --repo acme/app --claim-id issue-61-shared-util --issue 61 --admit-pr 801); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-60-shared-lib' && ok "later lane stands down for the lower PR number" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-60-shared-lib' >/dev/null && ok "later lane stands down for the lower PR number" \
   || bad "later lane was admitted (rc=$rc): $out"
-echo "$out" | grep -qi 'admission refused' && ok "names the admission refusal" || bad "no admission wording: $out"
+echo "$out" | grep -i 'admission refused' >/dev/null && ok "names the admission refusal" || bad "no admission wording: $out"
 
 echo "--admit-pr · a HIGHER-numbered overlapping PR claim yields to this lane"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-60-shared-lib --issue 60 --admit-pr 800); rc=$?
 [[ "$rc" -eq 0 ]] && ok "earlier lane is admitted over the later one" || bad "earlier lane refused (rc=$rc): $out"
-echo "$out" | grep -q 'yields to PR #800' && ok "names the yielding lane" || bad "no yield wording: $out"
+echo "$out" | grep 'yields to PR #800' >/dev/null && ok "names the yielding lane" || bad "no yield wording: $out"
 
 echo "--admit-pr · exactly one of two racing lanes is admitted"
 rc_low=0; rc_high=0
@@ -385,8 +385,8 @@ survivors=0
 
 echo "--admit-pr · an inventory that cannot see this lane's own claim refuses it"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/shared/**' --repo acme/app --claim-id issue-62-invisible --issue 62 --admit-pr 999); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'is not in the live claim inventory' \
-  && echo "$out" | grep -qiE 'could not obtain a stable (live-claim|combined PR\+ledger claim) inventory' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'is not in the live claim inventory' >/dev/null \
+  && echo "$out" | grep -iE 'could not obtain a stable (live-claim|combined PR\+ledger claim) inventory' >/dev/null \
   && ok "invisible own claim refuses" \
   || bad "invisible own claim admitted (rc=$rc): $out"
 
@@ -394,18 +394,18 @@ echo "--admit-pr · a LEDGER claim always beats an admission candidate"
 printf '810\tissue-63-ledger-race\tapp/api/auth/**\tfeat/63-ledger-race\thttps://github.com/acme/app/pull/810\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'app/api/auth/**' --repo acme/app --claim-id issue-63-ledger-race --issue 63 --admit-pr 810); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-7-password-reset' && ok "ledger claim beats the admission candidate" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-7-password-reset' >/dev/null && ok "ledger claim beats the admission candidate" \
   || bad "ledger claim did not refuse admission (rc=$rc): $out"
 
 echo "--admit-pr · usage errors are refused before any query"
 out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-64-x --admit-pr 'abc'); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'pull-request number' && ok "non-numeric --admit-pr rejected" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'pull-request number' >/dev/null && ok "non-numeric --admit-pr rejected" \
   || bad "non-numeric --admit-pr (rc=$rc): $out"
 out=$(run_so "$ROOT/d/canon" --scope 'x/**' --claim-id issue-64-x --admit-pr 810); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --repo' && ok "--admit-pr without --repo rejected" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'requires --repo' >/dev/null && ok "--admit-pr without --repo rejected" \
   || bad "--admit-pr without --repo (rc=$rc): $out"
 out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --admit-pr 810); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --claim-id' && ok "--admit-pr without --claim-id rejected" \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'requires --claim-id' >/dev/null && ok "--admit-pr without --claim-id rejected" \
   || bad "--admit-pr without --claim-id (rc=$rc): $out"
 
 # --- #153 review round 3, P1: there is NO forged-evidence path --------------
@@ -448,7 +448,7 @@ for forged in "$FORGED_EMPTY" "$FORGED_SELF"; do
   # …and on stdin, in case the option was replaced by a pipe.
   out=$(run_so "$ROOT/d/canon" --scope 'lib/gate/handlers.ts' --repo acme/app \
     --claim-id issue-66-late --issue 66 --admit-pr 700 < "$forged"); rc=$?
-  [[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
+  [[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-65-settled' >/dev/null \
     && ok "stdin $fname is ignored; the live conflicting claim still refuses" \
     || bad "stdin $fname changed the verdict (rc=$rc): $out"
 done
@@ -458,7 +458,7 @@ done
 # inventory itself stops carrying the rival.
 out=$(run_so "$ROOT/d/canon" --scope 'lib/gate/handlers.ts' --repo acme/app \
   --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-65-settled' >/dev/null \
   && ok "the live inventory alone decides admission" \
   || bad "live admission verdict wrong (rc=$rc): $out"
 printf '700\tissue-66-late\tlib/gate/handlers.ts\tfeat/66-late\thttps://github.com/acme/app/pull/700\t2026-08-05T00:00:00Z\t2026-08-05T00:00:00Z\tfalse\n' \
@@ -498,7 +498,7 @@ floor_case() { # label VAR=value expect-substring
   out=$(env "$assign" node "$SENSOR" --repo-path "$ROOT/d/canon" --base main \
     --scope 'lib/unrelated/**' --repo acme/app --claim-id issue-65-settled \
     --issue 65 --admit-pr 640 2>&1); rc=$?
-  if [[ "$rc" -eq 2 ]] && echo "$out" | grep -qF "$want"; then
+  if [[ "$rc" -eq 2 ]] && echo "$out" | grep -F "$want" >/dev/null; then
     ok "$label"
   else
     bad "$label (rc=$rc): $out"
@@ -518,19 +518,19 @@ floor_case "a non-numeric barrier value is refused" \
 # admitted on a single sample never gets one.
 out=$(GIBSON_CLAIM_ADMIT_STABLE_READS=1 run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' \
   --repo acme/app --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
-[[ "$rc" -eq 2 ]] && ! echo "$out" | grep -q 'quiescent' \
+[[ "$rc" -eq 2 ]] && ! echo "$out" | grep 'quiescent' >/dev/null \
   && ok "a below-floor barrier never reaches the admission decision" \
   || bad "below-floor barrier still decided (rc=$rc): $out"
 # Raising the barrier is allowed.
 out=$(GIBSON_CLAIM_ADMIT_STABLE_READS=4 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
   GIBSON_CLAIM_ADMIT_DELAY=1 run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' \
   --repo acme/app --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '4 consecutive matching read' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '4 consecutive matching read' >/dev/null \
   && ok "the barrier may be RAISED" || bad "raising the barrier failed (rc=$rc): $out"
 out=$(GIBSON_CLAIM_ADMIT_STABLE_READS=4 GIBSON_CLAIM_ADMIT_ATTEMPTS=3 \
   run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
   --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -q 'cannot be smaller than' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep 'cannot be smaller than' >/dev/null \
   && ok "an unsatisfiable barrier is a usage error" || bad "unsatisfiable barrier (rc=$rc): $out"
 
 echo "#153 · admission decides only on a QUIESCENT inventory"
@@ -563,7 +563,7 @@ out=$(PATH="$ROOT/bin-lag:$PATH" LAG_RIVAL_AFTER=3 \
   GIBSON_CLAIM_ADMIT_STABLE_READS=3 GIBSON_CLAIM_ADMIT_ATTEMPTS=8 \
   run_so "$ROOT/d/canon" --scope 'app/api/auth/handlers.ts' --repo acme/app \
   --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-65-settled' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-65-settled' >/dev/null \
   && ok "a rival visible only after this lane's own row still refuses it" \
   || bad "late rival was missed (rc=$rc): $out"
 rm -f "$LAG_READS"
@@ -571,7 +571,7 @@ out=$(PATH="$ROOT/bin-lag:$PATH" LAG_CHURN=1 \
   GIBSON_CLAIM_ADMIT_ATTEMPTS=4 \
   run_so "$ROOT/d/canon" --scope 'lib/unrelated/**' --repo acme/app \
   --claim-id issue-66-late --issue 66 --admit-pr 700); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'could not obtain a stable (live-claim|combined PR\+ledger claim) inventory' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'could not obtain a stable (live-claim|combined PR\+ledger claim) inventory' >/dev/null \
   && ok "an inventory that never settles refuses rather than guesses" \
   || bad "unsettled inventory admitted (rc=$rc): $out"
 unset LAG_READS
@@ -583,7 +583,7 @@ echo "#153 · admission refuses a second lane on the SAME issue without --slice"
 } > "$GH_PR_TSV"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/two/**' --repo acme/app \
   --claim-id issue-65-other --issue 65 --admit-pr 700); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue #65 is already held' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue #65 is already held' >/dev/null \
   && ok "disjoint scopes do not license two lanes on one issue" \
   || bad "same-issue second lane admitted (rc=$rc): $out"
 out=$(run_so "$ROOT/d/canon" --scope 'lib/one/**' --repo acme/app \
@@ -595,7 +595,7 @@ out=$(run_so "$ROOT/d/canon" --scope 'lib/two/**' --repo acme/app --slice \
 [[ "$rc" -eq 0 ]] && ok "--slice permits the disjoint same-issue sibling" \
   || bad "--slice same-issue sibling refused (rc=$rc): $out"
 out=$(run_so "$ROOT/d/canon" --scope 'x/**' --repo acme/app --claim-id issue-65-other --admit-pr 700); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'requires --issue' \
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'requires --issue' >/dev/null \
   && ok "--admit-pr without --issue is refused" || bad "--admit-pr without --issue (rc=$rc): $out"
 
 # Reset the fixture for anything appended after this block.
@@ -708,7 +708,7 @@ live_scope_case() { # label scope-string expect(refuse|admit) [needle]
   out=$(run_so "$ROOT/v/canon" --scope 'components/nav/Item.tsx' --repo acme/app \
     --claim-id issue-21-nav-tweak --issue 21); rc=$?
   if [[ "$expect" == "refuse" ]]; then
-    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -qF "$needle"; }; then
+    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -F "$needle" >/dev/null; }; then
       ok "$label"
     else
       bad "$label (rc=$rc): $out"
@@ -757,7 +757,7 @@ printf '501\tissue-20-nav-shell\t**\tfeat/20-nav-shell\thttps://github.com/acme/
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/v/canon" --scope 'totally/unrelated/elsewhere.md' --repo acme/app \
   --claim-id issue-22-elsewhere --issue 22); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-20-nav-shell' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-20-nav-shell' >/dev/null &&
   ok "the root-wide scope also collides with a path sharing no prefix" ||
   bad "a root-wide live claim was treated as non-overlapping (rc=$rc): $out"
 
@@ -807,7 +807,7 @@ printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://g
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/v/canon" --scope 'app/billing/**' --repo acme/app \
   --claim-id issue-25-billing --issue 25); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'repository-identity column' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'repository-identity column' >/dev/null &&
   ok "a non-boolean identity column refuses" || bad "non-boolean identity accepted (rc=$rc): $out"
 
 echo "#153 round 5 · a truncated 7-field row refuses (the identity column is required)"
@@ -815,7 +815,7 @@ printf '501\tissue-20-nav-shell\tcomponents/nav/**\tfeat/20-nav-shell\thttps://g
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/v/canon" --scope 'app/billing/**' --repo acme/app \
   --claim-id issue-25-billing --issue 25); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'want 8 tab-separated fields' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'want 8 tab-separated fields' >/dev/null &&
   ok "a pre-#153-round-5 seven-field row refuses" || bad "seven-field row accepted (rc=$rc): $out"
 
 echo "#153 round 5 · this lane's own admission row may not be a FORK"
@@ -823,7 +823,7 @@ printf '640\tissue-65-settled\tlib/sentinel/**\tfeat/65-settled\thttps://github.
   > "$GH_PR_TSV"
 out=$(run_so "$ROOT/v/canon" --scope 'lib/sentinel/other.ts' --repo acme/app \
   --claim-id issue-65-settled --issue 65 --admit-pr 640); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'cross-repository (fork) pull request' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'cross-repository (fork) pull request' >/dev/null &&
   ok "an admission row that is a fork refuses" || bad "a fork admission row was accepted (rc=$rc): $out"
 
 # Reset the shared inventory for the barrier fixtures that follow.
@@ -884,10 +884,10 @@ if [[ "$rc" -ne 0 || "$payload_elapsed" -ge 2 ]]; then
 else
   bad "the preload payload bought a successful immediate admission (rc=$rc, ${payload_elapsed}s): $out"
 fi
-echo "$out" | grep -q 'did not actually elapse' &&
+echo "$out" | grep 'did not actually elapse' >/dev/null &&
   ok "the refusal names the spacing that never happened" ||
   bad "the refusal does not name the unspaced barrier: $out"
-echo "$out" | grep -q 'NODE_OPTIONS is set in this process' &&
+echo "$out" | grep 'NODE_OPTIONS is set in this process' >/dev/null &&
   ok "the refusal names the inherited runtime configuration" ||
   bad "the refusal does not mention NODE_OPTIONS: $out"
 lacks "the payload run never reports admission" "$out" "scope-overlap: OK"
@@ -975,7 +975,7 @@ bound_case() { # label VAR=value expect-substring
   out=$(env "$assign" node "$SENSOR" --repo-path "$ROOT/s/canon" --base main \
     --scope 'lib/sentinel/other.ts' --repo acme/app --claim-id issue-65-settled \
     --issue 65 --admit-pr 640 2>&1); rc=$?
-  if [[ "$rc" -eq 2 ]] && echo "$out" | grep -qF "$want"; then
+  if [[ "$rc" -eq 2 ]] && echo "$out" | grep -F "$want" >/dev/null; then
     ok "$label"
   else
     bad "$label (rc=$rc): $out"
@@ -1022,8 +1022,8 @@ else
   bad "the shipped barrier defaults changed — they must stay 6 / 2 / 2"
 fi
 # The maxima are documented where an operator will look.
-if node "$SENSOR" --help 2>&1 | grep -q 'max 60' &&
-   node "$SENSOR" --help 2>&1 | grep -q 'max 30'; then
+if node "$SENSOR" --help 2>&1 | grep 'max 60' >/dev/null &&
+   node "$SENSOR" --help 2>&1 | grep 'max 30' >/dev/null; then
   ok "--help documents the maxima"
 else
   bad "--help does not document the barrier maxima"
@@ -1066,7 +1066,7 @@ setup_repo led
 # overlapping scope is still detected. If this went green-on-nothing the
 # fail-closed assertions below would be meaningless.
 out=$(PATH="$ROOT/bin-gitshim:$PATH" run_so "$ROOT/led/canon" --scope 'app/api/auth/login.ts'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-7-password-reset' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-7-password-reset' >/dev/null \
   && ok "control: the git shim passes ordinary reads through" \
   || bad "control: the git shim broke the baseline (rc=$rc): $out"
 
@@ -1077,7 +1077,7 @@ ledger_fail_case() { # label FAIL_ON expect-substring
     --scope 'components/totally-unrelated/**' 2>&1); rc=$?
   # The scope is deliberately DISJOINT from every ledger claim: a green run
   # here means the failed read silently became an empty ledger.
-  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -qF "$want"; then
+  if [[ "$rc" -eq 1 ]] && echo "$out" | grep -F "$want" >/dev/null; then
     ok "$label"
   else
     bad "$label (rc=$rc): $out"
@@ -1110,7 +1110,7 @@ C
   $GIT add -A && $GIT commit -q -m "claim without scope" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/noscope/canon" --scope 'components/totally-unrelated/**'); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -q "has 0 'scope:' lines" \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep "has 0 'scope:' lines" >/dev/null \
   && ok "a per-file claim with no scope: line refuses" \
   || bad "missing scope line did not poison the decision (rc=$rc): $out"
 
@@ -1123,7 +1123,7 @@ setup_repo emptyscope
   $GIT add -A && $GIT commit -q -m "claim with empty scope" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/emptyscope/canon" --scope 'components/totally-unrelated/**'); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -q "empty 'scope:' value" \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep "empty 'scope:' value" >/dev/null \
   && ok "a per-file claim with an empty scope refuses" \
   || bad "empty scope did not poison the decision (rc=$rc): $out"
 
@@ -1136,7 +1136,7 @@ setup_repo dupscope
   $GIT add -A && $GIT commit -q -m "claim with two scopes" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/dupscope/canon" --scope 'components/totally-unrelated/**'); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -q "2 'scope:' lines" \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep "2 'scope:' lines" >/dev/null \
   && ok "a per-file claim with duplicate scope lines refuses" \
   || bad "duplicate scope lines did not poison the decision (rc=$rc): $out"
 
@@ -1153,7 +1153,7 @@ setup_repo truncrow
   $GIT add -A && $GIT commit -q -m "truncated legacy row" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/truncrow/canon" --scope 'components/totally-unrelated/**'); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -qE 'is truncated|empty scope column' \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep -E 'is truncated|empty scope column' >/dev/null \
   && ok "a legacy row with no scope column refuses" \
   || bad "truncated legacy row did not poison the decision (rc=$rc): $out"
 
@@ -1168,7 +1168,7 @@ setup_repo truncrow2
   $GIT add -A && $GIT commit -q -m "legacy row with no trailing pipe" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/truncrow2/canon" --scope 'components/totally-unrelated/**'); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'is truncated' \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep 'is truncated' >/dev/null \
   && ok "a legacy row whose claim id is the last cell refuses" \
   || bad "no-trailing-pipe legacy row did not poison the decision (rc=$rc): $out"
 
@@ -1182,7 +1182,7 @@ setup_repo emptyrow
   $GIT add -A && $GIT commit -q -m "legacy row with empty scope" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/emptyrow/canon" --scope 'components/totally-unrelated/**'); rc=$?
-[[ "$rc" -eq 1 ]] && echo "$out" | grep -q 'empty scope column' \
+[[ "$rc" -eq 1 ]] && echo "$out" | grep 'empty scope column' >/dev/null \
   && ok "a legacy row with an empty scope column refuses" \
   || bad "empty legacy scope cell did not poison the decision (rc=$rc): $out"
 
@@ -1232,7 +1232,7 @@ legacy_file_scope_case() { # label scope expect(refuse|admit) [needle]
   ) >/dev/null 2>&1
   out=$(run_so "$root/canon" --scope 'a/x/b' --claim-id issue-91-new); rc=$?
   if [[ "$expect" == "refuse" ]]; then
-    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -qF "$needle"; }; then
+    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -F "$needle" >/dev/null; }; then
       ok "$label"
     else
       bad "$label (rc=$rc): $out"
@@ -1271,7 +1271,7 @@ legacy_table_scope_case() { # label scope expect(refuse|admit) [needle]
   ) >/dev/null 2>&1
   out=$(run_so "$root/canon" --scope 'a/x/b' --claim-id issue-93-new); rc=$?
   if [[ "$expect" == "refuse" ]]; then
-    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -qF "$needle"; }; then
+    if [[ "$rc" -ne 0 ]] && { [[ -z "$needle" ]] || echo "$out" | grep -F "$needle" >/dev/null; }; then
       ok "$label"
     else
       bad "$label (rc=$rc): $out"
@@ -1297,19 +1297,19 @@ legacy_table_scope_case "table valid src/legacy/** still admits a disjoint path"
 echo "#153 round 6 · operator --scope uses the same safe grammar"
 setup_repo opscope
 out=$(run_so "$ROOT/opscope/canon" --scope 'a/**/b'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "invalid claim-scope token" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -F "invalid claim-scope token" >/dev/null &&
   ok "operator --scope a/**/b refuses" ||
   bad "operator a/**/b was not refused (rc=$rc): $out"
 out=$(run_so "$ROOT/opscope/canon" --scope '*'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "invalid claim-scope token" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -F "invalid claim-scope token" >/dev/null &&
   ok "operator --scope * refuses" ||
   bad "operator * was not refused (rc=$rc): $out"
 out=$(run_so "$ROOT/opscope/canon" --scope '/'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qE 'empty path segment|invalid claim-scope token' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -E 'empty path segment|invalid claim-scope token' >/dev/null &&
   ok "operator --scope / refuses" ||
   bad "operator / was not refused (rc=$rc): $out"
 out=$(run_so "$ROOT/opscope/canon" --scope 'lib/ok/**' --scope 'a/**/b'); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qF "invalid claim-scope token" &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -F "invalid claim-scope token" >/dev/null &&
   ok "operator mixed valid/invalid refuses" ||
   bad "operator mixed scopes were not refused (rc=$rc): $out"
 # Deliberate root-wide ** from the operator collides with any live claim that
@@ -1322,7 +1322,7 @@ setup_repo oproot
   $GIT add -A && $GIT commit -q -m "seed" && $GIT push -q origin main
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/oproot/canon" --scope '**' --claim-id issue-95-root); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'issue-94-seed' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'issue-94-seed' >/dev/null &&
   ok "operator --scope ** overlaps every live claim" ||
   bad "operator ** did not collide with a live claim (rc=$rc): $out"
 
@@ -1357,7 +1357,7 @@ T
 ) >/dev/null 2>&1
 # Proposed scope overlaps only the legacy row, not the per-file row.
 out=$(run_so "$ROOT/mixadm/canon" --scope 'app/api/auth/login.ts' --claim-id issue-97-new); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qiE 'mixed|ambiguous|duplicate' &&
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -iE 'mixed|ambiguous|duplicate' >/dev/null &&
   ok "mixed ledger admission refuses (legacy overlap not silent-dropped)" ||
   bad "mixed ledger admission greened or missed mixed reason (rc=$rc): $out"
 
@@ -1386,7 +1386,7 @@ out=$(node "$_mix_mut/scope-overlap.mjs" --repo-path "$ROOT/mixadm/canon" --base
   --claim-id issue-97-new --scope 'app/api/auth/login.ts' 2>&1); rc=$?
 if [[ "$rc" -eq 0 ]]; then
   ok "mutation receipt: silent prefer-file admits (sensor would fail)"
-elif echo "$out" | grep -qiE 'mixed|ambiguous mixed'; then
+elif echo "$out" | grep -iE 'mixed|ambiguous mixed' >/dev/null; then
   bad "mutation receipt: mixed refuse still active after prefer-file restore: $out"
 else
   bad "mutation receipt: mutant still nonzero (rc=$rc): $out"
@@ -1424,7 +1424,7 @@ T
 ) >/dev/null 2>&1
 out=$(run_so "$ROOT/idmis/canon" --scope 'lib/unrelated/**' --claim-id issue-97-new); rc=$?
 [[ "$rc" -ne 0 ]] && ok "identity mismatch: refuses nonzero" || bad "identity mismatch admitted (rc=$rc): $out"
-echo "$out" | grep -qiE 'identity mismatch|filename id|claim identity|claim:' && \
+echo "$out" | grep -iE 'identity mismatch|filename id|claim identity|claim:' >/dev/null && \
   ok "identity mismatch: names identity defect" || \
   ok "identity mismatch: refused (msg=$(echo "$out" | head -1))"
 
@@ -1454,7 +1454,7 @@ out=$(node "$_id_mut/scope-overlap.mjs" --repo-path "$ROOT/idmis/canon" --base m
 # wording must be gone, OR it admits.
 if [[ "$rc" -eq 0 ]]; then
   ok "mutation receipt: filename-only identity admits (sensor would fail)"
-elif ! echo "$out" | grep -qi 'identity mismatch'; then
+elif ! echo "$out" | grep -i 'identity mismatch' >/dev/null; then
   ok "mutation receipt: filename-only no longer identity-refuses (rc=$rc)"
 else
   bad "mutation receipt: mutant still identity-refuses: $out"
@@ -1784,19 +1784,19 @@ out=$(node "$SENSOR" --pair --help docs/a.md 2>&1); rc=$?
 # `--help` is a valid literal token and is disjoint from docs/a.md. Bind the
 # exact production-kernel answer and exit semantics, not merely the output shape.
 if [[ "$rc" -eq 0 && "$out" == "disjoint" ]] &&
-   ! echo "$out" | grep -q 'WHAT IT DOES'; then
+   ! echo "$out" | grep 'WHAT IT DOES' >/dev/null; then
   ok "#181 --pair --help docs/a.md binds operands (disjoint/0, no help text)"
 else
   bad "#181 --pair --help was not pair mode (rc=$rc out=$out)"
 fi
 # Normal --help still works when it is not the first --pair command.
 out=$(node "$SENSOR" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'WHAT IT DOES' &&
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'WHAT IT DOES' >/dev/null &&
   ok "#181 bare --help still prints usage" ||
   bad "#181 bare --help broken (rc=$rc)"
 # --pair with wrong arity remains a usage error (exit 2).
 out=$(node "$SENSOR" --pair only-one 2>&1); rc=$?
-[[ "$rc" -eq 2 ]] && echo "$out" | grep -qi 'exactly two tokens' &&
+[[ "$rc" -eq 2 ]] && echo "$out" | grep -i 'exactly two tokens' >/dev/null &&
   ok "#181 --pair arity error still exits 2" ||
   bad "#181 --pair arity (rc=$rc out=$out)"
 

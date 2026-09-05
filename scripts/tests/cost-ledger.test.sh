@@ -15,9 +15,9 @@ LEDGER="$ROOT/cost-ledger.jsonl"
 
 echo "help"
 out=$("$CL" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'L-003' && ok "help" || bad "help"
-echo "$out" | grep -q 'join-key\|join_key' && ok "help documents join-key" || bad "help missing join-key"
-echo "$out" | grep -q 'merged-json' && ok "help documents --merged-json" || bad "help missing merged-json"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'L-003' >/dev/null && ok "help" || bad "help"
+echo "$out" | grep 'join-key\|join_key' >/dev/null && ok "help documents join-key" || bad "help missing join-key"
+echo "$out" | grep 'merged-json' >/dev/null && ok "help documents --merged-json" || bad "help missing merged-json"
 
 echo "append + summarize (legacy rows)"
 rm -f "$LEDGER"
@@ -30,10 +30,10 @@ lines=$(wc -l < "$LEDGER" | tr -d ' ')
 [[ "$lines" = "2" ]] && ok "two JSONL events" || bad "lines=$lines"
 
 out=$("$CL" summarize --ledger "$LEDGER" --format text 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '2 event' && ok "summarize text" || bad "sum (rc=$rc): $out"
-echo "$out" | grep -q 'tokens: unknown\|tokens (from' && ok "tokens honesty line" || bad "tokens line: $out"
-echo "$out" | grep -q 'flat-rate' && ok "by pool includes flat-rate" || bad "pool: $out"
-echo "$out" | grep -q 'metered' && ok "by pool includes metered" || bad "metered: $out"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '2 event' >/dev/null && ok "summarize text" || bad "sum (rc=$rc): $out"
+echo "$out" | grep 'tokens: unknown\|tokens (from' >/dev/null && ok "tokens honesty line" || bad "tokens line: $out"
+echo "$out" | grep 'flat-rate' >/dev/null && ok "by pool includes flat-rate" || bad "pool: $out"
+echo "$out" | grep 'metered' >/dev/null && ok "by pool includes metered" || bad "metered: $out"
 
 echo "honest cost-per-merged-PR (legacy pr field)"
 cat > "$ROOT/merged.json" <<'J'
@@ -41,18 +41,18 @@ cat > "$ROOT/merged.json" <<'J'
 J
 out=$("$CL" summarize --ledger "$LEDGER" --merged-json "$ROOT/merged.json" --format text 2>&1)
 # Both events have pr=5; PR 6 has no cost data — not zero-cost success.
-echo "$out" | grep -qE '1 of 2 merged PRs with cost data' \
+echo "$out" | grep -E '1 of 2 merged PRs with cost data' >/dev/null \
   && ok "cpm reports 1 of 2 with cost data" || bad "cpm: $out"
-echo "$out" | grep -q 'PR #6: no attributed events' \
+echo "$out" | grep 'PR #6: no attributed events' >/dev/null \
   && ok "merged PR without cost not zero-success" || bad "pr6 line: $out"
-echo "$out" | grep -q 'PR #5: events=2' \
+echo "$out" | grep 'PR #5: events=2' >/dev/null \
   && ok "merged PR #5 has 2 events" || bad "pr5 line: $out"
 
 out=$("$CL" summarize --ledger "$LEDGER" --merged-json "$ROOT/merged.json" --format json 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'cost_per_merged_pr' && ok "json summary" || bad "json: $out"
-echo "$out" | grep -q '"tokens_known_events": 1' && ok "tokens_known_events=1" || bad "known: $out"
-echo "$out" | grep -q '"merged_prs_with_cost": 1' && ok "json merged_prs_with_cost=1" || bad "mwc: $out"
-echo "$out" | grep -q '"merged_events": 2' && ok "json merged_events=2" || bad "me: $out"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'cost_per_merged_pr' >/dev/null && ok "json summary" || bad "json: $out"
+echo "$out" | grep '"tokens_known_events": 1' >/dev/null && ok "tokens_known_events=1" || bad "known: $out"
+echo "$out" | grep '"merged_prs_with_cost": 1' >/dev/null && ok "json merged_prs_with_cost=1" || bad "mwc: $out"
+echo "$out" | grep '"merged_events": 2' >/dev/null && ok "json merged_events=2" || bad "me: $out"
 # Incomplete coverage: total_tokens must be null (not a partial sum presented as total)
 py_tt=$(python3 -c '
 import json,sys
@@ -66,7 +66,7 @@ print("ok")
 [[ "$py_tt" == "ok" ]] && ok "json total_tokens null on incomplete coverage" || bad "total_tokens honesty: $py_tt out=$out"
 # --merged-since alias still works
 out=$("$CL" summarize --ledger "$LEDGER" --merged-since "$ROOT/merged.json" --format text 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'cost-per-merged-PR' && ok "merged-since alias" || bad "alias: $out"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'cost-per-merged-PR' >/dev/null && ok "merged-since alias" || bad "alias: $out"
 
 echo "optional join fields on append"
 rm -f "$LEDGER"
@@ -91,13 +91,13 @@ mkdir -p "$ROOT/dir with spaces"
   --event-kind selection --issue 501 --now 2026-08-06T09:00:00Z
 
 line1=$(head -1 "$SPACE_LEDGER")
-echo "$line1" | grep -q '"join_key":"fleet-sel:v1:p:docs:primary-x:fallback-y:20260806T100000Z"' \
+echo "$line1" | grep '"join_key":"fleet-sel:v1:p:docs:primary-x:fallback-y:20260806T100000Z"' >/dev/null \
   && ok "append join_key" || bad "line1 join: $line1"
-echo "$line1" | grep -q '"requested_runner":"primary-x"' \
+echo "$line1" | grep '"requested_runner":"primary-x"' >/dev/null \
   && ok "append requested_runner" || bad "line1 req: $line1"
-echo "$line1" | grep -q '"event_kind":"selection"' \
+echo "$line1" | grep '"event_kind":"selection"' >/dev/null \
   && ok "append event_kind selection" || bad "line1 kind: $line1"
-echo "$line1" | grep -qE '"tokens"' \
+echo "$line1" | grep -E '"tokens"' >/dev/null \
   && bad "selection row must not invent tokens: $line1" \
   || ok "selection row has no tokens"
 
@@ -108,13 +108,13 @@ J
 out=$("$CL" summarize --ledger "$SPACE_LEDGER" --merged-json "$ROOT/merged-join.json" --format json 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] || bad "join summarize failed rc=$rc: $out"
 # Selection (no pr) + iteration (pr=88) share join_key → both merged; pr=77 unmerged; other selection unmerged
-echo "$out" | grep -q '"merged_events": 2' && ok "join maps selection+iteration as merged" || bad "merged_events: $out"
-echo "$out" | grep -q '"unmerged_events": 2' && ok "unmerged events counted" || bad "unmerged: $out"
-echo "$out" | grep -q '"merged_prs_with_cost": 1' && ok "one merged PR with cost" || bad "mwc join: $out"
+echo "$out" | grep '"merged_events": 2' >/dev/null && ok "join maps selection+iteration as merged" || bad "merged_events: $out"
+echo "$out" | grep '"unmerged_events": 2' >/dev/null && ok "unmerged events counted" || bad "unmerged: $out"
+echo "$out" | grep '"merged_prs_with_cost": 1' >/dev/null && ok "one merged PR with cost" || bad "mwc join: $out"
 # wall for merged = 40 + 1500 = 1540
-echo "$out" | grep -q '"merged_wall_ms": 1540' && ok "merged wall_ms via join" || bad "mwall: $out"
+echo "$out" | grep '"merged_wall_ms": 1540' >/dev/null && ok "merged wall_ms via join" || bad "mwall: $out"
 text=$("$CL" summarize --ledger "$SPACE_LEDGER" --merged-json "$ROOT/merged-join.json" --format text 2>&1)
-echo "$text" | grep -q 'PR #88: events=2' && ok "text per-PR via join" || bad "text pr88: $text"
+echo "$text" | grep 'PR #88: events=2' >/dev/null && ok "text per-PR via join" || bad "text pr88: $text"
 
 echo "unmerged-only outcome"
 cat > "$ROOT/merged-none.json" <<'J'
@@ -122,9 +122,9 @@ cat > "$ROOT/merged-none.json" <<'J'
 J
 out=$("$CL" summarize --ledger "$SPACE_LEDGER" --merged-json "$ROOT/merged-none.json" --format text 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] || bad "unmerged summarize rc=$rc"
-echo "$out" | grep -q '0 of 1 merged PRs with cost data' \
+echo "$out" | grep '0 of 1 merged PRs with cost data' >/dev/null \
   && ok "unmerged outcome not zero-cost" || bad "unmerged text: $out"
-echo "$out" | grep -q 'PR #999: no attributed events' \
+echo "$out" | grep 'PR #999: no attributed events' >/dev/null \
   && ok "unknown merged PR lacks cost data" || bad "pr999: $out"
 
 echo "malformed inputs fail closed"
@@ -160,7 +160,7 @@ cat > "$ROOT/merged-amb.json" <<'J'
 [{"number":1},{"number":2}]
 J
 out=$("$CL" summarize --ledger "$AMB" --merged-json "$ROOT/merged-amb.json" 2>&1); rc=$?
-[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi ambiguous \
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -i ambiguous >/dev/null \
   && ok "ambiguous join_key → exit 3" || bad "amb rc=$rc: $out"
 
 # Direct-PR vs join-map: any same join_key with two different PRs is caught
@@ -223,7 +223,7 @@ else
   bad "call site missing or before def (call=$call_line fn=$fn_line)"
 fi
 # Call must not sit under L-008 startup before the main loop
-if grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | grep -q .; then
+if grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | grep . >/dev/null; then
   meter_line=$(grep -n 'Cost meter' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
   loop_line=$(grep -n '^while true; do' "$SCRIPT_DIR/../loop.sh" | head -1 | cut -d: -f1)
   if [[ -n "$meter_line" && -n "$loop_line" && "$meter_line" -gt "$loop_line" ]]; then
@@ -349,7 +349,7 @@ print("ok")
 ' "$out" 2>&1) || true
 [[ "$py_out" == "ok" ]] && ok "mixed known/unknown tokens → null average" || bad "mixed tok: $py_out"
 text=$("$CL" summarize --ledger "$MIX" --merged-json "$ROOT/merged-mix.json" --format text 2>&1)
-echo "$text" | grep -q 'tokens=unknown' \
+echo "$text" | grep 'tokens=unknown' >/dev/null \
   && ok "text reports tokens unknown on partial coverage" || bad "text mixed: $text"
 
 echo "hostile JSONL event types fail closed"
@@ -357,32 +357,32 @@ echo "hostile JSONL event types fail closed"
 printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1,"pr":true}' \
   > "$ROOT/hostile-bool.jsonl"
 out=$("$CL" summarize --ledger "$ROOT/hostile-bool.jsonl" 2>&1); rc=$?
-[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi boolean \
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -i boolean >/dev/null \
   && ok "boolean pr rejected" || bad "bool pr rc=$rc: $out"
 # Numeric string pr
 printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1,"pr":"12"}' \
   > "$ROOT/hostile-str.jsonl"
 out=$("$CL" summarize --ledger "$ROOT/hostile-str.jsonl" 2>&1); rc=$?
-[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi string \
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -i string >/dev/null \
   && ok "string pr rejected" || bad "str pr rc=$rc: $out"
 # Float wall_ms
 printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1.5}' \
   > "$ROOT/hostile-float.jsonl"
 out=$("$CL" summarize --ledger "$ROOT/hostile-float.jsonl" 2>&1); rc=$?
-[[ "$rc" -eq 3 ]] && echo "$out" | grep -qi float \
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -i float >/dev/null \
   && ok "float wall_ms rejected" || bad "float wall rc=$rc: $out"
 # Negative tokens
 printf '%s\n' '{"schema":"gibson.cost.v1","ts":"2026-08-06T10:00:00Z","runner":"x","pool":"p","hat":"h","wall_ms":1,"tokens":-3}' \
   > "$ROOT/hostile-neg.jsonl"
 out=$("$CL" summarize --ledger "$ROOT/hostile-neg.jsonl" 2>&1); rc=$?
-[[ "$rc" -eq 3 ]] && echo "$out" | grep -qiE 'non-negative|negative' \
+[[ "$rc" -eq 3 ]] && echo "$out" | grep -iE 'non-negative|negative' >/dev/null \
   && ok "negative tokens rejected" || bad "neg tok rc=$rc: $out"
 # Valid legacy row still summarizes
 LEG="$ROOT/legacy-ok.jsonl"
 "$CL" append --ledger "$LEG" --runner grok --pool flat-rate --hat builder \
   --wall-ms 10 --issue 1 --pr 2 --now 2026-08-06T10:00:00Z
 out=$("$CL" summarize --ledger "$LEG" --format json 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q '"events": 1' \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep '"events": 1' >/dev/null \
   && ok "valid legacy gibson.cost.v1 still summarizes" || bad "legacy: rc=$rc $out"
 
 echo "loop.sh outcome evidence + telemetry policy structure"
@@ -416,7 +416,7 @@ else
     grab {print}
     grab && /^\}$/ {exit}
   ' "$SCRIPT_DIR/../loop-fleet.sh")
-  if printf '%s\n' "$pool_body" | grep -qE 'flat-rate-grok|subscription-codex'; then
+  if printf '%s\n' "$pool_body" | grep -E 'flat-rate-grok|subscription-codex' >/dev/null; then
     bad "pool_for_provider still invents plan shape from vendor"
   else
     ok "pool_for_provider does not invent plan shape from vendor"

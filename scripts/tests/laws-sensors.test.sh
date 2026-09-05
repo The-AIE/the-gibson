@@ -18,7 +18,7 @@ trap 'rm -rf "$ROOT"' EXIT
 
 echo "# Law 1 — contract-read-check"
 out=$(node "$L1" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'Law 1' && ok "L1 help" || bad "L1 help"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'Law 1' >/dev/null && ok "L1 help" || bad "L1 help"
 
 cat > "$ROOT/good.receipt" <<'R'
 agents=AGENTS.md
@@ -53,7 +53,7 @@ out=$(node "$L1" --body-file "$ROOT/body-bad.md" 2>&1); rc=$?
 
 echo "# Law 6 — contract-met"
 out=$(node "$L6" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'Law 6' && ok "L6 help" || bad "L6 help"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'Law 6' >/dev/null && ok "L6 help" || bad "L6 help"
 
 cat > "$ROOT/issue.json" <<'J'
 {
@@ -69,7 +69,7 @@ Closes #42
 All done.
 P
 out=$(node "$L6" --issue-file "$ROOT/issue.json" --pr-body-file "$ROOT/pr-bad.md" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'AC2' && ok "L6 open criteria refuse close" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'AC2' >/dev/null && ok "L6 open criteria refuse close" \
   || bad "L6 bad close (rc=$rc): $out"
 
 cat > "$ROOT/pr-good.md" <<'P'
@@ -91,7 +91,7 @@ cat > "$ROOT/pr-noclose.md" <<'P'
 Work in progress toward #42 — does not fully resolve #42
 P
 out=$(node "$L6" --issue-file "$ROOT/issue.json" --pr-body-file "$ROOT/pr-noclose.md" 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -qi 'N/A\|no close' && ok "L6 no close keyword is N/A" \
+[[ "$rc" -eq 0 ]] && echo "$out" | grep -i 'N/A\|no close' >/dev/null && ok "L6 no close keyword is N/A" \
   || bad "L6 noclose (rc=$rc): $out"
 
 cat > "$ROOT/issue-all-checked.json" <<'J'
@@ -109,7 +109,7 @@ out=$(node "$L6" --issue-file "$ROOT/issue-all-checked.json" --pr-body-file "$RO
 
 echo "# Law 8 — truthful-status"
 out=$(node "$L8" --help 2>&1); rc=$?
-[[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'Law 8' && ok "L8 help" || bad "L8 help"
+[[ "$rc" -eq 0 ]] && echo "$out" | grep 'Law 8' >/dev/null && ok "L8 help" || bad "L8 help"
 
 out=$(node "$L8" --claimed success --gate-exit 0 2>&1); rc=$?
 [[ "$rc" -eq 0 ]] && ok "L8 success + exit 0" || bad "L8 green (rc=$rc): $out"
@@ -123,7 +123,7 @@ status: NOT RUN
 197 passed, 0 failed
 L
 out=$(node "$L8" --claimed success --log-file "$ROOT/notrun.log" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -qi 'NOT RUN' && ok "L8 NOT RUN under success refuses" \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep -i 'NOT RUN' >/dev/null && ok "L8 NOT RUN under success refuses" \
   || bad "L8 notrun (rc=$rc): $out"
 
 cat > "$ROOT/failed.log" <<'L'
