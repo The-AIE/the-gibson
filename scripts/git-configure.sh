@@ -478,7 +478,7 @@ parse_actions_run_url() {
     "$prefix"*)
       id="${v#"$prefix"}"
       # positive integer only — no trailing slash, query, or path
-      if printf '%s' "$id" | grep -Eq '^[1-9][0-9]{0,18}$'; then
+      if printf '%s' "$id" | grep -E '^[1-9][0-9]{0,18}$' >/dev/null; then
         printf '%s' "$id"
         return 0
       fi
@@ -525,7 +525,7 @@ verify_live_actions_check() {
     return 1
   fi
   # 40-lowercase-hex head_sha only
-  if ! printf '%s' "$head_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+  if ! printf '%s' "$head_sha" | grep -E '^[0-9a-f]{40}$' >/dev/null; then
     return 1
   fi
 
@@ -1043,7 +1043,7 @@ audit_labels() {
   missing=""
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    if ! printf '%s\n' "$LABELS_CACHE" | grep -Fxq -- "$name"; then
+    if ! printf '%s\n' "$LABELS_CACHE" | grep -Fx -- "$name" >/dev/null; then
       missing="${missing}${name}"$'\n'
     fi
   done <<EOF
@@ -1075,7 +1075,7 @@ apply_labels() {
   fi
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    if printf '%s\n' "$LABELS_CACHE" | grep -Fxq -- "$name"; then
+    if printf '%s\n' "$LABELS_CACHE" | grep -Fx -- "$name" >/dev/null; then
       continue
     fi
     color=$(label_color "$name")
@@ -1099,7 +1099,7 @@ EOF
   fi
   while IFS= read -r name; do
     [[ -z "$name" ]] && continue
-    if ! printf '%s\n' "$LABELS_CACHE" | grep -Fxq -- "$name"; then
+    if ! printf '%s\n' "$LABELS_CACHE" | grep -Fx -- "$name" >/dev/null; then
       record ERROR "labels" "post-apply readback missing label $(sq "$name")"
       HAD_APPLY_FAILURE=1
       return 1
@@ -1309,7 +1309,7 @@ audit_branch_protection() {
     local err
     err=$(cat "$errfile" 2>/dev/null || true)
     rm -f "$errfile"
-    if printf '%s' "$err" | grep -qi 'Not Found\|404\|Branch not protected'; then
+    if printf '%s' "$err" | grep -i 'Not Found\|404\|Branch not protected' >/dev/null; then
       record OWNER_REQUIRED "protection.${role}" \
         "branch $(sq "$branch") is NOT PROTECTED — owner must run delivery-control apply-branch-protection (docs/23); this script will not apply protection"
       plan_line "OWNER: scripts/delivery-control/apply-branch-protection.sh --repo $(sq "$REPO") --apply   # after dry-run + Mark approval"
@@ -1575,7 +1575,7 @@ audit_workflow_context_evidence() {
 
   while IFS= read -r ctx; do
     [[ -z "$ctx" ]] && continue
-    if printf '%s\n' "$installed_names" | grep -Fqi -- "$ctx"; then
+    if printf '%s\n' "$installed_names" | grep -Fi -- "$ctx" >/dev/null; then
       record PASS "workflow-static.${ctx}" \
         "static workflow/config mentions context $(sq "$ctx") (NOT execution evidence)"
     else
@@ -1589,8 +1589,8 @@ EOF
 
   # test-integrity canary: static evidence NEVER upgrades to executed PASS.
   # Only a live-validated Actions run + exact check name may PASS.
-  if printf '%s\n' "$REQUIRED_CONTEXTS_NL" | grep -Fxq -- "test-integrity" \
-    || printf '%s\n' "$installed_names" | grep -Fqi -- "test-integrity"; then
+  if printf '%s\n' "$REQUIRED_CONTEXTS_NL" | grep -Fx -- "test-integrity" >/dev/null \
+    || printf '%s\n' "$installed_names" | grep -Fi -- "test-integrity" >/dev/null; then
     local ti_obs="${GIBSON_TEST_INTEGRITY_OBSERVED_RUN:-}"
     local ti_id="" ti_vr=0
     if [[ -n "$ti_obs" ]]; then

@@ -1423,7 +1423,7 @@ remote_halted_live() {
     # evidence; do not let a later sentinel 404 present a trustworthy "clear".
     label_degraded=1
     info "remote halt check degraded: gibson-halt label query failed (gh exit $ec) — continuing with local HALT/GIBSON_HALT only; fix gh auth/network to restore the remote stop"
-  elif printf '%s' "$out" | grep -q '[0-9]'; then
+  elif printf '%s' "$out" | grep '[0-9]' >/dev/null; then
     REMOTE_HALT_KIND="label"
     HALT_REASON="remote halt: gibson-halt label on an open issue — stopping (remove the label to allow a fresh launch, or write gibson/HALT to make permanent)"
     info "$HALT_REASON"
@@ -1456,7 +1456,7 @@ remote_halted_live() {
   # 404 Not Found = no sentinel only when the repo was already proven reachable
   # by a successful label query. If the label query was degraded, a 404 is not
   # trustworthy clear (private/wrong/missing repo often 404s too).
-  if printf '%s' "$out" | grep -Eqi 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404'; then
+  if printf '%s' "$out" | grep -Ei 'Not Found|"status"[[:space:]]*:[[:space:]]*"?404' >/dev/null; then
     if [[ "$label_degraded" -eq 1 ]]; then
       REMOTE_HALT_STATUS="degraded"
       return 1
@@ -2112,9 +2112,9 @@ resolve_issue_tier() {
         labels=$(gh issue view "$issue" --json labels --jq '.labels[].name' 2>/dev/null || true)
       fi
       # Prefer the first matching label; last-wins if several (should not happen).
-      printf '%s\n' "$labels" | grep -qiE '^tier-c$' && t=C
-      printf '%s\n' "$labels" | grep -qiE '^tier-b$' && t=B
-      printf '%s\n' "$labels" | grep -qiE '^tier-a$' && t=A
+      printf '%s\n' "$labels" | grep -iE '^tier-c$' >/dev/null && t=C
+      printf '%s\n' "$labels" | grep -iE '^tier-b$' >/dev/null && t=B
+      printf '%s\n' "$labels" | grep -iE '^tier-a$' >/dev/null && t=A
     fi
   fi
   printf '%s\n' "$t"
@@ -2459,7 +2459,7 @@ dco_unsigned_shas() {
   [[ -n "$log_out" ]] || return 0
   while IFS= read -r sha; do
     [[ -n "$sha" ]] || continue
-    if git -C "$repo" log -1 --format=%B "$sha" | grep -qiE '^Signed-off-by:[[:space:]]+'; then
+    if git -C "$repo" log -1 --format=%B "$sha" | grep -iE '^Signed-off-by:[[:space:]]+' >/dev/null; then
       continue
     fi
     printf '%s\n' "$sha"

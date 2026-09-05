@@ -76,7 +76,7 @@ jobs:
               echo "error: git interpret-trailers --parse failed for ${sha}" >&2
               exit 1
             }
-            if ! printf '%s\n' "$trailers" | grep -q '^Signed-off-by:'; then
+            if ! printf '%s\n' "$trailers" | grep '^Signed-off-by:' >/dev/null; then
               unsigned="${unsigned}${sha}"$'\n'
             fi
           done
@@ -134,11 +134,11 @@ jobs:
           version=$(extract_strict SHELLCHECK_REQUIRED_VERSION '[0-9]+\.[0-9]+\.[0-9]+')
           digest=$(extract_strict SHELLCHECK_SHA256_LINUX_X86_64 '[0-9a-f]{64}')
           # Re-validate shapes/non-emptiness after extract (fail closed).
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! printf '%s' "$version" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null; then
             echo "error: bad version shape after extract: '${version}'" >&2
             exit 1
           fi
-          if ! printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$'; then
+          if ! printf '%s' "$digest" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
             echo "error: bad digest shape after extract (want 64 lowercase hex): '${digest}'" >&2
             exit 1
           fi
@@ -161,11 +161,11 @@ jobs:
             echo "error: empty pin step outputs (version='${SC_VERSION}' digest length=${#SC_SHA256})" >&2
             exit 1
           fi
-          if ! printf '%s' "$SC_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! printf '%s' "$SC_VERSION" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null; then
             echo "error: bad SC_VERSION shape: '${SC_VERSION}'" >&2
             exit 1
           fi
-          if ! printf '%s' "$SC_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
+          if ! printf '%s' "$SC_SHA256" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
             echo "error: bad SC_SHA256 shape (want 64 lowercase hex)" >&2
             exit 1
           fi

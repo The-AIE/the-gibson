@@ -225,7 +225,7 @@ claim_to_epoch() {
 emit() { # claimed | claim-id | scope | session
   local claimed="$1" id="$2" scope="$3" session="$4"
   if [[ -n "$ONLY_ISSUE" ]]; then
-    echo "$id" | grep -qE "^issue-([A-Za-z][A-Za-z0-9]*-)?${ONLY_ISSUE}-" || return 0
+    echo "$id" | grep -E "^issue-([A-Za-z][A-Za-z0-9]*-)?${ONLY_ISSUE}-" >/dev/null || return 0
   fi
   local age="" stamp
   # A claim with an unparseable date is still a claim (no STALE marker).
@@ -240,7 +240,7 @@ emit() { # claimed | claim-id | scope | session
 emit_pr() { # number | claim-id | scope | head | url | created | updated
   local number="$1" id="$2" scope="$3" head="$4" url="$5" created="$6" updated="$7"
   if [[ -n "$ONLY_ISSUE" ]]; then
-    echo "$id" | grep -qE "^issue-([A-Za-z][A-Za-z0-9]*-)?${ONLY_ISSUE}-" || return 0
+    echo "$id" | grep -E "^issue-([A-Za-z][A-Za-z0-9]*-)?${ONLY_ISSUE}-" >/dev/null || return 0
   fi
   local stamp age="" claimed="$created"
   stamp=$(claim_to_epoch "$claimed")
@@ -330,7 +330,7 @@ fi
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   id=$(echo "$line" | awk -F'|' '{print $3}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-  echo "$id" | grep -qE '^issue-' || continue
+  echo "$id" | grep -E '^issue-' >/dev/null || continue
   emit "$(echo "$line" | awk -F'|' '{print $2}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \
        "$id" \
        "$(echo "$line" | awk -F'|' '{print $4}' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" \

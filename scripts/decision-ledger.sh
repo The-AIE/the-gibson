@@ -165,7 +165,7 @@ validate_path_arg() {
   local label="$1" path="$2"
   validate_scalar "$label" "$path"
   # Refuse any path component that is exactly ".." (path traversal).
-  if printf '%s' "$path" | grep -Eq '(^|/)\.\.(/|$)'; then
+  if printf '%s' "$path" | grep -E '(^|/)\.\.(/|$)' >/dev/null; then
     die_valid "$label rejects path traversal: $path"
   fi
 }
@@ -542,7 +542,7 @@ PY
 
 validate_utc_ts() {
   local ts="$1" label="$2"
-  if ! printf '%s' "$ts" | grep -Eq "$TS_RE"; then
+  if ! printf '%s' "$ts" | grep -E "$TS_RE" >/dev/null; then
     die_valid "$label must be strict UTC YYYY-MM-DDTHH:MM:SSZ"
   fi
   python3 - "$ts" <<'PY' || die_valid "invalid calendar timestamp: $ts"
@@ -1105,7 +1105,7 @@ in_list() {
 
 validate_add_fields() {
   validate_scalar "repo" "$REPO"
-  if ! printf '%s' "$REPO" | grep -Eq "$REPO_RE"; then
+  if ! printf '%s' "$REPO" | grep -E "$REPO_RE" >/dev/null; then
     die_valid "repo must be owner/name with safe characters"
   fi
   case "$REPO" in
@@ -1121,7 +1121,7 @@ validate_add_fields() {
   esac
 
   validate_scalar "gate" "$GATE"
-  if ! printf '%s' "$GATE" | grep -Eq "$GATE_RE"; then
+  if ! printf '%s' "$GATE" | grep -E "$GATE_RE" >/dev/null; then
     die_valid "gate must be exact G1..G16 (uppercase G, no G0/G17)"
   fi
 
@@ -1135,7 +1135,7 @@ validate_add_fields() {
   validate_scalar "source-sha" "$SOURCE_SHA"
   # normalize SHA to lowercase for identity
   SOURCE_SHA=$(printf '%s' "$SOURCE_SHA" | tr 'A-F' 'a-f')
-  if ! printf '%s' "$SOURCE_SHA" | grep -Eq "$SHA_RE"; then
+  if ! printf '%s' "$SOURCE_SHA" | grep -E "$SHA_RE" >/dev/null; then
     die_valid "source-sha must be exactly 40 hex characters"
   fi
 
@@ -1380,7 +1380,7 @@ PY
 cmd_show() {
   validate_scalar "id" "$SHOW_ID"
   SHOW_ID=$(printf '%s' "$SHOW_ID" | tr 'A-F' 'a-f')
-  if ! printf '%s' "$SHOW_ID" | grep -Eq "$ID_RE"; then
+  if ! printf '%s' "$SHOW_ID" | grep -E "$ID_RE" >/dev/null; then
     die_valid "id must be 64 lowercase hex"
   fi
   acquire_lock

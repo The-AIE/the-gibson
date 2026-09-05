@@ -71,7 +71,7 @@ echo "posture-probe: GET $URL → $code"
 headers_lc=$(tr -d '\r' < "$HDR" | awk 'BEGIN{IGNORECASE=1} {print tolower($0)}')
 
 has_header() {
-  echo "$headers_lc" | grep -qiE "^$1:"
+  echo "$headers_lc" | grep -iE "^$1:" >/dev/null
 }
 header_val() {
   echo "$headers_lc" | awk -F': ' -v k="$(echo "$1" | tr '[:upper:]' '[:lower:]')" 'tolower($1)==k {print $2; exit}'
@@ -99,7 +99,7 @@ esac
 csp=$(header_val "content-security-policy")
 if has_header "x-frame-options"; then
   ok "X-Frame-Options present"
-elif echo "$csp" | grep -qi "frame-ancestors"; then
+elif echo "$csp" | grep -i "frame-ancestors" >/dev/null; then
   ok "CSP frame-ancestors present"
 else
   die "missing frame protection (X-Frame-Options or CSP frame-ancestors)"
@@ -108,7 +108,7 @@ fi
 # nosniff
 if has_header "x-content-type-options"; then
   xcto=$(header_val "x-content-type-options")
-  if echo "$xcto" | grep -qi "nosniff"; then
+  if echo "$xcto" | grep -i "nosniff" >/dev/null; then
     ok "X-Content-Type-Options: nosniff"
   else
     die "X-Content-Type-Options present but not nosniff"
@@ -121,12 +121,12 @@ fi
 if grep -qi '^set-cookie:' "$HDR"; then
   while IFS= read -r line; do
     low=$(echo "$line" | tr '[:upper:]' '[:lower:]')
-    echo "$low" | grep -q 'httponly' || die "cookie missing HttpOnly: $line"
+    echo "$low" | grep 'httponly' >/dev/null || die "cookie missing HttpOnly: $line"
     case "$URL" in https://*)
-      echo "$low" | grep -q 'secure' || die "cookie missing Secure: $line"
+      echo "$low" | grep 'secure' >/dev/null || die "cookie missing Secure: $line"
       ;;
     esac
-    echo "$low" | grep -qE 'samesite=(lax|strict|none)' || die "cookie missing SameSite: $line"
+    echo "$low" | grep -E 'samesite=(lax|strict|none)' >/dev/null || die "cookie missing SameSite: $line"
   done < <(tr -d '\r' < "$HDR" | grep -i '^set-cookie:')
   ok "Set-Cookie flags checked"
 else
