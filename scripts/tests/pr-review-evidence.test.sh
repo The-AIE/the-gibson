@@ -238,7 +238,7 @@ GHSTUB
 chmod +x "$ROOT/bin/gh"
 FP='2026-09-04T12:00:00Z|h|b|3|0|2'
 H2=cccccccccccccccccccccccccccccccccccccccc
-envrun() { ( cd "$WD" && GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" "$@" ); }
+envrun() { ( cd "$WD" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" "$@" ); }
 : > "$ROOT/gh.log"; : > "$ROOT/summary"
 GH_LIST="$(printf '1 %s\n2 %s\n' "$HEAD" "$H2")" envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/pending.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && [ "$(grep -c ' pending$' "$ROOT/gh.log")" -eq 1 ] && grep -q "^$HEAD pending" "$ROOT/gh.log" && [ "$(wc -l < "$WD/heads.txt" | tr -d ' ')" -eq 2 ] && ok "pending step: stamps pending ONLY on the event head (2 heads listed, 1 stamped — churn cap)" || bad "pending step: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
@@ -339,6 +339,17 @@ printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","descriptio
 printf 'garbage not json\n' > "$WD/results.jsonl"; printf '1 %s\n' "$HEAD" > "$WD/heads.txt"; : > "$ROOT/gh.log"
 envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1; rc=$?
 [ "$rc" -ne 0 ] && [ "$(grep -c ' failure$' "$ROOT/gh.log")" -ge 1 ] && ok "publish: unparseable sweep output → failure, never success" || bad "publish garbage: rc=$rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+
+# #324: cross-step files must survive the workspace clean that actions/checkout performs between
+# the pending step and the publish step. Simulate: pending step writes into RUNNER_TEMP, the
+# workspace directory is wiped, the publish step still finds the heads file.
+WS="$ROOT/ws"; rm -rf "$WS"; mkdir -p "$WS"; : > "$ROOT/gh.log"; : > "$ROOT/summary"
+( cd "$WS" && GH_LIST="$(printf '1 %s\n' "$HEAD")" RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t PATH="$ROOT/bin:$PATH" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false bash "$ROOT/pending.sh" >/dev/null 2>&1 )
+rm -rf "$WS"; mkdir -p "$WS"   # the checkout wipes the workspace
+printf '{"number":1,"headSha":"%s","state":"success","reason":"pass","description":"pass: devin","fingerprint":"%s"}\n' "$HEAD" "$FP" > "$WD/results.jsonl"
+: > "$ROOT/gh.log"; ( cd "$WS" && RUNNER_TEMP="$WD" GH_LOG="$ROOT/gh.log" GITHUB_STEP_SUMMARY="$ROOT/summary" GH_REPO=x/y STATUS_CONTEXT=review-evidence TARGET_URL=http://t GH_FP="$FP" PATH="$ROOT/bin:$PATH" EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD IS_SCHEDULE=false CANCELLED=false bash "$ROOT/publish.sh" >/dev/null 2>&1 ); rc=$?
+[ "$rc" -eq 0 ] && grep -q "^$HEAD success" "$ROOT/gh.log" && [ -s "$WD/heads.txt" ] && ok "#324: heads file written before the workspace wipe is read by the publish step (RUNNER_TEMP)" || bad "#324: publish after workspace wipe rc=$rc heads=$(cat "$WD/heads.txt" 2>/dev/null)"
+grep -qE '(^|[^$/])heads\.txt' "$WF" && bad "#324: a bare heads.txt reference remains in the workflow" || ok "#324: every cross-step file is addressed under RUNNER_TEMP"
 if command -v actionlint >/dev/null 2>&1; then
   out=$(actionlint "$WF" 2>&1); [ $? -eq 0 ] && ok "actionlint clean" || bad "actionlint: $out"
 else
