@@ -51,6 +51,19 @@ and must not be treated as do-not-contradict authority.
 | 13 | Screenshots throughout docs | **open** — real captures, not mockups: a decision card arriving in chat, a PR with gates green, a UX-eval report + screenshot gallery, the solo-loop journal, the MC dashboard. Capture during the Phase 2 end-to-end demo so every image is an artifact of a real run. Store in `docs/assets/`, alt text mandatory, embed in VIBECODING / EXAMPLES / QUICKSTART / GUIDE |
 | 14 | Copy-paste prompts library | **open** — `docs/prompts.md` (nav title "Copy-Paste Prompts"): "say this to your agent" blocks for each common moment — start a plan, adopt a repo, claim an issue, request a review, run the solo loop, ask for a site audit. One fenced block per prompt, one when-to-use sentence above it; cross-link from QUICKSTART, GUIDE, and every playbook's How-to section |
 
+## P3 — borrowed-pattern follow-ups (2026-08-27)
+
+Doctrine landed for these; the enforcement/runnable half is still open. Each item
+names the doc that owns the doctrine and the artifact tier it should land as
+(doc 28's artifact ladder — sensor beats guide beats memory).
+
+| # | Item | Doc | Status |
+|---|---|---|---|
+| 15 | Guarded state-transition guard (claims, loop-state, decision packages) | [29-guarded-state-transitions](29-guarded-state-transitions.md) | **open** — needs a transition-table format decision + a guard script; illustrative example in the doc is not a claim about current `scripts/claim.sh` behavior |
+| 16 | PreToolUse-style lesson injection (Claude Code adapter first) | [09-memory-and-self-improvement](09-memory-and-self-improvement.md) | **open** — blocked on the *memory/LESSONS-INDEX.md* generator (§7.3 of [CONVENTIONS.md](CONVENTIONS.md)) landing first |
+| 17 | Rate-limit-window field on `scripts/cost-ledger.sh` | [15-model-economics](15-model-economics.md) | **open** — extend only for runtimes that actually report window state; never invent one |
+| 18 | Panel-summary aggregator (branches run / findings / verified-dropped count) | [27-lightweight-mcts-panel](27-lightweight-mcts-panel.md) | **open** — doctrine (union over consensus) is usable without it; this only makes panel coverage visible in one place |
+
 ## Also delivered (usage docs)
 
 - [QUICKSTART.md](../QUICKSTART.md) — clone → adopted  
