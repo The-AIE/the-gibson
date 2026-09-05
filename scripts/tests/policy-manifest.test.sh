@@ -17,8 +17,8 @@ FAIL=0
 ok()  { echo "  ok   — $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 check() { if [[ "$2" == "$3" ]]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; fi; }
-has() { if echo "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
-lacks() { if echo "$2" | grep -qF -- "$3"; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
+has() { if echo "$2" | grep -F -- "$3" >/dev/null; then ok "$1"; else bad "$1 (missing '$3')"; fi; }
+lacks() { if echo "$2" | grep -F -- "$3" >/dev/null; then bad "$1 (unexpected '$3')"; else ok "$1"; fi; }
 
 command_not_found_handle() {
   bad "the suite invoked an undefined command '$1' — a shell error may never coexist with a green tally"
@@ -206,7 +206,7 @@ for (const s of c.provenance.sources) {
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
 ' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
 out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -q 'G7' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep 'G7' >/dev/null \
   && ok "consistency: AGENTS.md G7 omission drifts even when docs/14 agrees" \
   || bad "consistency AGENTS G7 omission vs agreeing docs (rc=$rc): $out"
 cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
@@ -228,7 +228,7 @@ for (const s of c.provenance.sources) {
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
 ' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
 out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -Eq 'historian|archivist' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep -E 'historian|archivist' >/dev/null \
   && ok "consistency: AGENTS.md role rename drifts even when docs/03 agrees" \
   || bad "consistency AGENTS role rename vs agreeing docs (rc=$rc): $out"
 cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
@@ -250,7 +250,7 @@ for (const s of c.provenance.sources) {
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
 ' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
 out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -q 'ELEVEN' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep 'ELEVEN' >/dev/null \
   && ok "consistency: AGENTS.md stage addition drifts even when docs/02 agrees" \
   || bad "consistency AGENTS stage addition vs agreeing docs (rc=$rc): $out"
 cp "$REPO_ROOT/AGENTS.md" "$AGENTS_DRIFT/AGENTS.md"
@@ -272,7 +272,7 @@ for (const s of c.provenance.sources) {
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
 ' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
 out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -q 'planner' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep 'planner' >/dev/null \
   && ok "consistency: AGENTS.md pair addition drifts even when docs/03 agrees" \
   || bad "consistency AGENTS pair addition vs agreeing docs (rc=$rc): $out"
 
@@ -294,7 +294,7 @@ for (const s of c.provenance.sources) {
 fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
 ' "$AGENTS_DRIFT/config/policy/candidates/gibson-core-v1.candidate.json" "$AGENTS_DRIFT"
 out=$(run_tool check-consistency --repo-root "$AGENTS_DRIFT" --manifest "config/policy/candidates/gibson-core-v1.candidate.json" 2>&1); rc=$?
-[[ "$rc" -ne 0 ]] && echo "$out" | grep -q 'E_CONSISTENCY_DRIFT' && echo "$out" | grep -Eq 'tier D|tier C' \
+[[ "$rc" -ne 0 ]] && echo "$out" | grep 'E_CONSISTENCY_DRIFT' >/dev/null && echo "$out" | grep -E 'tier D|tier C' >/dev/null \
   && ok "consistency: AGENTS.md tier rename drifts even when docs/06 agrees" \
   || bad "consistency AGENTS tier drift vs agreeing docs (rc=$rc): $out"
 
@@ -410,7 +410,7 @@ has "delete gate code" "$out" "E_GATE_MISSING"
 mut_validate "m-rename-gate.json" 'c.humanGates = c.humanGates.map(g => g.id === "G7" ? Object.assign({}, g, { id: "G99" }) : g);' --no-digest-check
 [[ "$rc" -ne 0 ]] && ok "rename gate fails closed" || bad "rename gate unexpectedly passed"
 # either unknown id or missing G7
-if echo "$out" | grep -Eq 'E_UNKNOWN_ID|E_GATE_ID|E_GATE_MISSING'; then
+if echo "$out" | grep -E 'E_UNKNOWN_ID|E_GATE_ID|E_GATE_MISSING' >/dev/null; then
   ok "rename gate diagnosed"
 else
   bad "rename gate missing expected error code"
@@ -505,7 +505,7 @@ mut_validate "m-ambig.json" '
   c.forkExtensions.conflictDisposition = "merge";
 ' --no-digest-check
 [[ "$rc" -ne 0 ]] && ok "ambiguous override fails closed" || bad "ambiguous override passed"
-if echo "$out" | grep -q "E_AMBIGUOUS_OVERRIDE"; then
+if echo "$out" | grep "E_AMBIGUOUS_OVERRIDE" >/dev/null; then
   ok "ambiguous override code"
 else
   bad "ambiguous override missing E_AMBIGUOUS_OVERRIDE"
@@ -868,7 +868,7 @@ ABS_OUTSIDE="$ROOT/outside-candidate.json"
 cp "$CANDIDATE" "$ABS_OUTSIDE"
 out=$(run_tool validate --manifest "$ABS_OUTSIDE" --repo-root "$MUT" --no-digest-check 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "absolute manifest outside root refused" || bad "absolute manifest outside root accepted"
-if echo "$out" | grep -Eqi 'absolute|refused|repo-root'; then
+if echo "$out" | grep -Ei 'absolute|refused|repo-root' >/dev/null; then
   ok "absolute manifest escape diagnosed"
 else
   bad "absolute manifest escape missing diagnosis (out=$out)"
@@ -887,7 +887,7 @@ cp "$CANDIDATE" "$OUTSIDE_FOR_MANIFEST/leaked-candidate.json"
 ln -s "$OUTSIDE_FOR_MANIFEST/leaked-candidate.json" "$MUT/m-manifest-escape.json"
 out=$(run_tool validate --manifest "m-manifest-escape.json" --repo-root "$MUT" --no-digest-check 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "manifest symlink escape refused" || bad "manifest symlink escape accepted"
-if echo "$out" | grep -Eqi 'realpath escapes|symlink|absolute|unsafe|refused'; then
+if echo "$out" | grep -Ei 'realpath escapes|symlink|absolute|unsafe|refused' >/dev/null; then
   ok "manifest symlink escape diagnosed"
 else
   bad "manifest symlink escape missing diagnosis (out=$out)"
@@ -903,7 +903,7 @@ ln -s "$OUTSIDE_SCHEMA" "$SCHEMA_ESCAPE_MINI/config/policy/schema/policy-manifes
 cp "$CANDIDATE" "$SCHEMA_ESCAPE_MINI/config/policy/candidates/gibson-core-v1.candidate.json"
 out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$SCHEMA_ESCAPE_MINI" --no-digest-check 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "schema symlink escape refused" || bad "schema symlink escape accepted"
-if echo "$out" | grep -Eqi 'realpath escapes|symlink|schema|path:'; then
+if echo "$out" | grep -Ei 'realpath escapes|symlink|schema|path:' >/dev/null; then
   ok "schema symlink escape diagnosed"
 else
   bad "schema symlink escape missing diagnosis (out=$out)"
@@ -997,7 +997,7 @@ mutate_json "$CANDIDATE" "$MINI/config/policy/candidates/gibson-core-v1.candidat
 '
 out=$(run_tool validate --manifest "config/policy/candidates/gibson-core-v1.candidate.json" --repo-root "$MINI" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "symlink escape fails closed" || bad "symlink escape passed (rc=$rc)"
-if echo "$out" | grep -Eq 'E_PROVENANCE_PATH_ESCAPE|realpath escapes|symlink'; then
+if echo "$out" | grep -E 'E_PROVENANCE_PATH_ESCAPE|realpath escapes|symlink' >/dev/null; then
   ok "symlink escape diagnosed"
 else
   bad "symlink escape missing escape diagnosis (out=$out)"
@@ -1141,12 +1141,12 @@ tally_sensor_receipts_file() {
         fi
         ok_lines=$((ok_lines + 1))
         local body="${line#SENSOR_OK }"
-        if printf '%s\n' "$seen_oks" | grep -qxF -- "$body"; then
+        if printf '%s\n' "$seen_oks" | grep -xF -- "$body" >/dev/null; then
           bad "sensor duplicate receipt: $body"
         else
           seen_oks="${seen_oks}${body}"$'\n'
         fi
-        if ! printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -qxF -- "$body"; then
+        if ! printf '%s\n' "$EXPECTED_SWAP_RECEIPTS" | grep -xF -- "$body" >/dev/null; then
           bad "sensor unexpected receipt: $body"
         fi
         ;;
@@ -2117,7 +2117,7 @@ console.log("PROSE_SUMMARY " + JSON.stringify({ bad }));
 process.exit(bad === 0 ? 0 : 1);
 '
 ) || true
-if echo "$PROSE_SCAN_OUT" | grep -qE "PROSE_(OK|BAD|SUMMARY)"; then
+if echo "$PROSE_SCAN_OUT" | grep -E "PROSE_(OK|BAD|SUMMARY)" >/dev/null; then
   while IFS= read -r line; do
     case "$line" in
       PROSE_OK\ *) ok "${line#PROSE_OK }" ;;
@@ -2146,8 +2146,8 @@ fi
 # Static: consumed hook payloads must not pass a raw fd property.
 # Match only an `fd` key inside the payload object — not later `let fd`.
 if grep -E 'invokeConsumedSafeReadHook\(beforeOpen, \{[^}]*\bfd\b' "$TOOL" || \
-   grep -n 'invokeConsumedSafeReadHook(afterOpen' -A 8 "$TOOL" | grep -qE '^\s+fd[,:]' || \
-   grep -n 'invokeConsumedSafeReadHook(afterIdentity' -A 8 "$TOOL" | grep -qE '^\s+fd[,:]'; then
+   grep -n 'invokeConsumedSafeReadHook(afterOpen' -A 8 "$TOOL" | grep -E '^\s+fd[,:]' >/dev/null || \
+   grep -n 'invokeConsumedSafeReadHook(afterIdentity' -A 8 "$TOOL" | grep -E '^\s+fd[,:]' >/dev/null; then
   bad "safe-read hook payload still passes raw fd"
 else
   ok "safe-read hook call sites are fd-opaque"
@@ -2447,14 +2447,14 @@ console.log("HOOK_LC_SUMMARY " + JSON.stringify({ ok: results.ok.length, bad: re
 process.exit(results.bad.length === 0 ? 0 : 1);
 '
 ) || HOOK_LC_RC=$?
-if echo "$HOOK_LC_OUT" | grep -qE "HOOK_LC_(OK|BAD|SUMMARY)"; then
+if echo "$HOOK_LC_OUT" | grep -E "HOOK_LC_(OK|BAD|SUMMARY)" >/dev/null; then
   while IFS= read -r line; do
     case "$line" in
       HOOK_LC_OK\ *) ok "${line#HOOK_LC_OK }" ;;
       HOOK_LC_BAD\ *) bad "${line#HOOK_LC_BAD }" ;;
     esac
   done <<< "$HOOK_LC_OUT"
-  if [[ "$HOOK_LC_RC" -ne 0 ]] && ! echo "$HOOK_LC_OUT" | grep -q "HOOK_LC_BAD "; then
+  if [[ "$HOOK_LC_RC" -ne 0 ]] && ! echo "$HOOK_LC_OUT" | grep "HOOK_LC_BAD " >/dev/null; then
     bad "hook lifecycle probe exited non-zero without HOOK_LC_BAD (rc=$HOOK_LC_RC)"
   fi
 else
@@ -2551,10 +2551,10 @@ try {
 }
 ' 2>&1
   ) || true
-  if echo "$HOOK_STAGE_OUT" | grep -q "HOOK_STAGE_DEFECT_REPRODUCED_ALL" && \
-     echo "$HOOK_STAGE_OUT" | grep -q '"name":"beforeOpen"' && \
-     echo "$HOOK_STAGE_OUT" | grep -q '"name":"afterOpen"' && \
-     echo "$HOOK_STAGE_OUT" | grep -q '"name":"afterIdentity"'; then
+  if echo "$HOOK_STAGE_OUT" | grep "HOOK_STAGE_DEFECT_REPRODUCED_ALL" >/dev/null && \
+     echo "$HOOK_STAGE_OUT" | grep '"name":"beforeOpen"' >/dev/null && \
+     echo "$HOOK_STAGE_OUT" | grep '"name":"afterOpen"' >/dev/null && \
+     echo "$HOOK_STAGE_OUT" | grep '"name":"afterIdentity"' >/dev/null; then
     ok "stage-local mutation persists beforeOpen after pre-stage failure"
     ok "stage-local mutation persists afterOpen after pre-stage failure"
     ok "stage-local mutation persists afterIdentity after pre-stage failure"
@@ -2656,9 +2656,9 @@ try {
 }
 ' 2>&1
   ) || true
-  if echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED_BOTH" && \
-     echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED afterOpen" && \
-     echo "$FD_EXPOSE_OUT" | grep -q "FD_EXPOSE_DEFECT_REPRODUCED afterIdentity"; then
+  if echo "$FD_EXPOSE_OUT" | grep "FD_EXPOSE_DEFECT_REPRODUCED_BOTH" >/dev/null && \
+     echo "$FD_EXPOSE_OUT" | grep "FD_EXPOSE_DEFECT_REPRODUCED afterOpen" >/dev/null && \
+     echo "$FD_EXPOSE_OUT" | grep "FD_EXPOSE_DEFECT_REPRODUCED afterIdentity" >/dev/null; then
     ok "fd-expose mutation reproduces unrelated-descriptor close for afterOpen"
     ok "fd-expose mutation reproduces unrelated-descriptor close for afterIdentity"
   else
@@ -2768,7 +2768,7 @@ ln -sfn "$OUTSIDE_PROV/leaked.md" "$MINI_PROV/docs/later-escape.md"
 ' "$MINI_PROV" "$CANDIDATE" "$MINI_PROV/cand-later.json"
 out=$(run_tool check-consistency --repo-root "$MINI_PROV" --manifest "cand-later.json" 2>&1); rc=$?
 [[ "$rc" -ne 0 ]] && ok "later provenance symlink escape fails consistency" || bad "later symlink escape accepted (out=$out)"
-if echo "$out" | grep -Eq 'E_PROVENANCE_PATH_ESCAPE|E_PROVENANCE_PATH'; then
+if echo "$out" | grep -E 'E_PROVENANCE_PATH_ESCAPE|E_PROVENANCE_PATH' >/dev/null; then
   ok "later source emits provenance path/escape code"
 else
   bad "later source missing provenance escape code (out=$out)"
@@ -2932,7 +2932,7 @@ try {
 ' 2>&1
 ) || FINAL_RV_RC=$?
 
-if [[ "$FINAL_RV_RC" -eq 0 ]] && echo "$FINAL_RV_OUT" | grep -q "FINAL_RV_PASS"; then
+if [[ "$FINAL_RV_RC" -eq 0 ]] && echo "$FINAL_RV_OUT" | grep "FINAL_RV_PASS" >/dev/null; then
   ok "final revalidation root identity failure errors without I_CONSISTENCY_OK"
 else
   bad "final revalidation root identity failure not fail-closed (rc=$FINAL_RV_RC out=$FINAL_RV_OUT)"
@@ -3085,7 +3085,7 @@ try {
 }
 ' 2>&1
 ) || true
-if echo "$NARROW_OUT" | grep -q "NARROW_DEFECT_REPRODUCED"; then
+if echo "$NARROW_OUT" | grep "NARROW_DEFECT_REPRODUCED" >/dev/null; then
   ok "narrow E_PROVENANCE filter mutation reproduces false I_CONSISTENCY_OK"
 else
   bad "narrow filter mutation did not reproduce defect (out=$NARROW_OUT)"
@@ -3201,9 +3201,9 @@ try {
 ' 2>&1
 ) || FD_PROBE_RC=$?
 FD_PROBE_RC=${FD_PROBE_RC:-0}
-if echo "$FD_PROBE_OUT" | grep -q "FD_PROBE_SKIP"; then
+if echo "$FD_PROBE_OUT" | grep "FD_PROBE_SKIP" >/dev/null; then
   ok "fd growth probe skipped (no /dev/fd enumeration)"
-elif [[ "$FD_PROBE_RC" -eq 0 ]] && echo "$FD_PROBE_OUT" | grep -q "FD_PROBE_OK"; then
+elif [[ "$FD_PROBE_RC" -eq 0 ]] && echo "$FD_PROBE_OUT" | grep "FD_PROBE_OK" >/dev/null; then
   ok "no fd growth across repeated success + injected-error API calls"
 else
   bad "fd growth probe failed (rc=$FD_PROBE_RC out=$FD_PROBE_OUT)"
@@ -3255,7 +3255,7 @@ PROBE_OUT=$(
   bash "$MKTEMP_PROBE/probe.sh" 2>&1
 ) || PROBE_RC=$?
 PROBE_RC=${PROBE_RC:-0}
-if [[ "$PROBE_RC" -ne 0 ]] && echo "$PROBE_OUT" | grep -q "PROBE_MKTEMP_FAILED"; then
+if [[ "$PROBE_RC" -ne 0 ]] && echo "$PROBE_OUT" | grep "PROBE_MKTEMP_FAILED" >/dev/null; then
   ok "mktemp failure exits before trap/child writes"
 else
   bad "mktemp failure probe did not fail closed (rc=$PROBE_RC out=$PROBE_OUT)"
@@ -3285,7 +3285,7 @@ exit 0
 PROBE
 EMPTY_OUT=$(bash "$MKTEMP_PROBE/probe-empty.sh" 2>&1) || EMPTY_RC=$?
 EMPTY_RC=${EMPTY_RC:-0}
-if [[ "$EMPTY_RC" -ne 0 ]] && echo "$EMPTY_OUT" | grep -q "PROBE_EMPTY_REJECTED"; then
+if [[ "$EMPTY_RC" -ne 0 ]] && echo "$EMPTY_OUT" | grep "PROBE_EMPTY_REJECTED" >/dev/null; then
   ok "empty ROOT rejected before child path construction"
 else
   bad "empty ROOT not rejected (rc=$EMPTY_RC out=$EMPTY_OUT)"

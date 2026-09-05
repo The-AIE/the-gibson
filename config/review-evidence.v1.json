@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "1.0.0",
+  "context": "review-evidence",
+  "ownerLogin": "mrhinkle",
+  "attestationVendors": ["grok", "codex", "claude", "devin", "human"],
+  "identities": [
+    {
+      "login": "aie-agent-lanes-grok[bot]",
+      "appSlug": "aie-agent-lanes-grok",
+      "appId": 4603934,
+      "vendor": "grok",
+      "roles": ["author", "reviewer"]
+    },
+    {
+      "login": "aie-agent-lanes-mini[bot]",
+      "appSlug": "aie-agent-lanes-mini",
+      "appId": 4603933,
+      "vendor": "unknown",
+      "roles": ["author", "reviewer"]
+    },
+    {
+      "login": "devin-ai-integration[bot]",
+      "appSlug": "devin-ai-integration",
+      "appId": 811515,
+      "vendor": "devin",
+      "roles": ["author", "reviewer"]
+    },
+    {
+      "login": "coderabbitai[bot]",
+      "appSlug": "coderabbitai",
+      "appId": 347564,
+      "vendor": "coderabbit",
+      "roles": ["reviewer"]
+    },
+    {
+      "login": "mrhinkle",
+      "appSlug": null,
+      "appId": null,
+      "vendor": "owner",
+      "roles": ["author"]
+    }
+  ]
+}

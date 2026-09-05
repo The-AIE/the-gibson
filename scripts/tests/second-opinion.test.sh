@@ -1028,7 +1028,7 @@ fi
 reset_formal
 out=$("$FORMAL_REVIEW" --pr 9 --repo acme/app --event approve --body LGTM 2>&1)
 rc=$?
-if [[ "$rc" -eq 2 ]] && echo "$out" | grep -q -- '--commit' && [[ "$(formal_count)" -eq 0 ]]; then
+if [[ "$rc" -eq 2 ]] && echo "$out" | grep -- '--commit' >/dev/null && [[ "$(formal_count)" -eq 0 ]]; then
   ok "no-commit: missing --commit refuses before mutation"
 else
   bad "no-commit missing-commit rc=$rc count=$(formal_count) out=$out"

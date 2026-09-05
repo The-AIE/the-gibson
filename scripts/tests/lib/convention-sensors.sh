@@ -732,7 +732,7 @@ cs_tool_guard_hits() {
     if [[ "$rc" -eq 0 ]]; then
       while IFS= read -r line; do
         [[ -z "$line" ]] && continue
-        if [[ "$tool" == "gh" ]] && printf '%s\n' "$line" | grep -q 'GH_BIN='; then
+        if [[ "$tool" == "gh" ]] && printf '%s\n' "$line" | grep 'GH_BIN=' >/dev/null; then
           continue
         fi
         nr=${line%%:*}
