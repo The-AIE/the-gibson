@@ -473,8 +473,15 @@ echo "static scan (app.js): forbidden channels and wording"
 # the bare global `location` identifier directly (not as a property of some
 # other object) — both require a literal `=` immediately after, and the bare
 # form must NOT be preceded by `.`/alnum/`_` (i.e. it is not somebody's
-# `.location` property).
-FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|new[[:space:]]+Worker|importScripts|import\(|window\.open|window\.location[[:space:]]*=[^=]|location\.href|location\.assign|location\.replace|document\.location|(^|[^.[:alnum:]_])location[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
+# `.location` property). Optional whitespace is allowed around each `.` in
+# the member-access alternatives (Codex round-4 finding: a statement can be
+# reformatted with the property access itself split across lines, e.g.
+# `window\n  .location = "...";`, which a bare `\.` would miss). `new` in
+# the Worker alternative is `\b`-bounded on the left (Codex round-4 finding:
+# without it, "...renew Worker.reset()" — a `renew` variable followed
+# unrelated by a `Worker.reset()` call — matched as a false "new Worker",
+# since "new" is a literal suffix of "renew").
+FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|\bnew[[:space:]]+Worker\b|importScripts|import\(|window[[:space:]]*\.[[:space:]]*open|window[[:space:]]*\.[[:space:]]*location[[:space:]]*=[^=]|location[[:space:]]*\.[[:space:]]*href|location[[:space:]]*\.[[:space:]]*assign|location[[:space:]]*\.[[:space:]]*replace|document[[:space:]]*\.[[:space:]]*location|(^|[^.[:alnum:]_])location[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
 
 # Flattens the whole file to one line (newlines -> spaces) before matching,
 # so a statement split across lines — e.g.
@@ -485,7 +492,24 @@ FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|Service
 # executing) assignment can trivially cross (Codex round-3 finding). This
 # also hardens every other alternative in FORBIDDEN_JS_RE against the same
 # blind spot, not only the location ones.
-check_forbidden_js() { ! tr '\n' ' ' < "$1" | grep -qE "$FORBIDDEN_JS_RE"; }
+#
+# Uses `grep -c` (count, reads to EOF) rather than `grep -q` (exits at the
+# first match) at the end of this piped command (repo lesson L-077,
+# scripts/tests/ci-conventions.test.sh: under `set -o pipefail` — active via
+# this file's own `set -uo pipefail` — `producer | grep -q` is
+# nondeterministic. `grep -q` can exit the instant it finds a match while
+# `tr` is still writing; `tr` then takes SIGPIPE and exits nonzero, and
+# pipefail reports THAT nonzero exit for the whole pipeline instead of
+# grep's own successful "found a match" status, silently flipping a real
+# violation into a reported "clean" file on a sufficiently large input
+# (Codex round-4 finding — this exact `ci-conventions.test.sh` L-077 sensor
+# would itself have flagged the previous `grep -q` form as a repo-wide
+# convention violation).
+check_forbidden_js() {
+  local hits
+  hits=$(tr '\n' ' ' < "$1" | grep -cE "$FORBIDDEN_JS_RE")
+  [ "${hits:-0}" -eq 0 ]
+}
 
 check_forbidden_js "$APP_JS" && ok "no forbidden network/navigation/innerHTML token in app.js" || bad "a forbidden network/navigation/innerHTML token was found in app.js"
 
@@ -526,7 +550,9 @@ NET_MUTATIONS=(
   'fetch("https://example.invalid/exfiltrate");'
   'window.location = "https://example.invalid/";'
   $'window.location =\n  "https://example.invalid/";'
+  $'window\n  .location =\n  "https://example.invalid/";'
   'new WebSocket("wss://example.invalid");'
+  $'new\n  Worker("worker.js");'
   'window.open("https://example.invalid/");'
 )
 NET_ALL_CAUGHT=1
@@ -536,7 +562,7 @@ for mutation in "${NET_MUTATIONS[@]}"; do
   printf '\n%s\n' "$mutation" >> "$mutant_file"
   check_forbidden_js "$mutant_file" && NET_ALL_CAUGHT=0
 done
-[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, single-line and multiline window.location assignment, WebSocket, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
+[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, single-line/multiline/dot-split window.location assignment, WebSocket, split new Worker, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
 
 # D2 — false-positive control: ordinary, non-navigating code that merely
 # mentions "location" as a property name, a read, or a comparison must NOT
@@ -549,6 +575,11 @@ BENIGN_LOCATION_SNIPPETS=(
   'if (window.location === cached) { return; }'
   'model.location = "local";'
   'var msg = "window.location";'
+  # Codex round-4 finding: a `new`-suffixed identifier immediately followed
+  # by an unrelated `Worker.reset()` call on the next line, once flattened
+  # to one line, contains the literal substring "new Worker" purely by
+  # coincidence — this constructs no worker.
+  $'const renew = true\nconst Worker = { reset() {} }\nconst shouldRenew = renew\nWorker.reset()'
 )
 BENIGN_ALL_CLEAN=1
 for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
@@ -557,7 +588,7 @@ for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
   printf '\n%s\n' "$snippet" >> "$benign_file"
   check_forbidden_js "$benign_file" || BENIGN_ALL_CLEAN=0
 done
-[[ "$BENIGN_ALL_CLEAN" -eq 1 ]] && ok "false-positive control: a plain window.location read/comparison, an unrelated .location property, and a string literal all pass cleanly (no navigation is actually performed)" || bad "the forbidden-channel sensor false-positives on ordinary, non-navigating code"
+[[ "$BENIGN_ALL_CLEAN" -eq 1 ]] && ok "false-positive control: a plain window.location read/comparison, an unrelated .location property, a string literal, and a coincidental cross-line \"new...Worker\" substring all pass cleanly (no navigation or worker construction is actually performed)" || bad "the forbidden-channel sensor false-positives on ordinary, non-navigating code"
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
