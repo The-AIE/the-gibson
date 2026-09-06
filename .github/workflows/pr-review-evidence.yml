@@ -279,3 +279,43 @@ jobs:
             echo "::error::review-evidence: this event's pull request failed closed (see published status)"
             exit 1
           fi
+
+      - name: Stamp error on the event head if publish crashed
+        # #329: if the publish step itself crashed (missing file, unset var, a
+        # bug in this script) the event head is still `pending` from the first
+        # step — indistinguishable from "healthy sensor, awaiting review".
+        # `if: failure()` runs only when a non-continue-on-error step failed;
+        # a sweep that found real failures is published by the step above and
+        # does not by itself fail the job. Publish may also exit 1 AFTER
+        # writing a real verdict (event PR failed closed); that head is no
+        # longer pending, and we leave the verdict in place.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if ! [[ "${EVENT_HEAD_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "no event head to correct (scheduled or comment event)"
+            exit 0
+          fi
+          # `gh api --jq` takes one expression and no jq flags; STATUS_CONTEXT
+          # is a fixed literal set above, safe to interpolate. The stub in
+          # tests may return "state|description"; take the state token.
+          cur=$(gh api "repos/$GH_REPO/commits/$EVENT_HEAD_SHA/status" \
+            --jq ".statuses[] | select(.context==\"$STATUS_CONTEXT\") | .state" 2>/dev/null | head -1 || true)
+          cur_state=${cur%%|*}
+          if [ "$cur_state" = "failure" ] || [ "$cur_state" = "success" ] || [ "$cur_state" = "error" ]; then
+            echo "event head already has '$cur_state'; not overwriting with crash-error"
+            exit 0
+          fi
+          desc="error: review-evidence sensor crashed evaluating this head — see the run for detail"
+          if gh api --method POST "repos/$GH_REPO/statuses/$EVENT_HEAD_SHA" \
+              -f state="error" -f context="$STATUS_CONTEXT" \
+              -f description="$desc" -f target_url="$TARGET_URL" >/dev/null; then
+            echo "error stamped on the event head ${EVENT_HEAD_SHA:0:7} (publish crashed)"
+            echo "- error stamped on the event head ${EVENT_HEAD_SHA:0:7} (publish crashed)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::could not stamp error on the event head ${EVENT_HEAD_SHA:0:7} after publish crashed (status write failed — possibly the 1,000-status cap)"
+            echo "- error stamp FAILED on the event head ${EVENT_HEAD_SHA:0:7}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
