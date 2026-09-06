@@ -1,0 +1,7 @@
+{
+  "blockedLabel": "dependency-blocked",
+  "blockedRatioMax": 0.40,
+  "blockerQuietDays": 7,
+  "minDependents": 3,
+  "requestTimeoutMs": 30000
+}

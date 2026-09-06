@@ -57,6 +57,12 @@ feasible tier** — prose-only lessons are tracked as debt:
    (cross-vendor review-verdict evidence, #315) runs via
    `.github/workflows/pr-review-evidence.yml`. All three block merge on every
    PR/push, not just their own tests.
+8. **Backlog health (daily, live)** — `scripts/backlog-health.mjs` via the
+   "Classify backlog health and comment on #212" step in
+   `.github/workflows/sensor-health.yml`. Posts a colour comment on #212
+   headed `### backlog-health — <observationTime>`. A RED finding is a real
+   blocked-queue state, not a broken sensor: the step stays green on
+   RED/YELLOW/GREEN and fails only when the observation is INCOMPLETE.
 
 ## The spec gate (pre-work)
 
