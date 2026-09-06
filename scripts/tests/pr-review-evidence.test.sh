@@ -309,7 +309,7 @@ cat > "$ROOT/bin/gh" <<'GHSTUB'
 case "$*" in
   *"--method POST"*) [ "${GH_POST_FAIL:-}" = "1" ] && { echo "HTTP 422: too many statuses" >&2; exit 22; }; sha=""; st=""; for a in "$@"; do case "$a" in repos/*/statuses/*) sha=${a##*/};; state=*) st=${a#state=};; esac; done; echo "$sha $st" >> "$GH_LOG" ;;
   *"pulls?state=open"*) [ "${GH_LIST_FAIL:-}" = "1" ] && exit 22; printf '%s\n' "$GH_LIST" ;;
-  *"/commits/"*"/status"*) printf '%s\n' "${GH_CUR:-}" ;;
+  *"/commits/"*"/status"*) [ "${GH_GET_FAIL:-}" = "1" ] && { echo "HTTP 502: bad gateway" >&2; exit 22; }; printf '%s\n' "${GH_CUR:-}" ;;
   *"/pulls/"*) printf '%s' "${GH_FP:-unavailable}" ;;
   *) echo "stub: unexpected gh $*" >&2; exit 9 ;;
 esac
@@ -361,16 +361,64 @@ if [ -n "$rec" ] && [ -n "$pub" ]; then
     && bad "#329: a step sits between publish and the crash-error recovery" \
     || ok "#329: crash-error step is immediately after publish"
 fi
-sed -n "${rec},$((rec+15))p" "$WF" | grep 'if: failure()' >/dev/null \
-  && ! sed -n "${rec},$((rec+15))p" "$WF" | grep 'if: always()' >/dev/null \
-  && ok "#329: crash-error step is if: failure() (not always())" \
-  || bad "#329: crash-error step trigger is not if: failure()"
+# The YAML `if:` key — not a substring in the step's comment block. Codex
+# round 2: grepping a line range that includes `# ... if: failure() ...`
+# stayed green after the real key was deleted (Actions then defaults to
+# success(), so recovery never runs after a Publish crash).
+crash_error_if_is_failure() {
+  local file="$1" rec_line
+  rec_line=$(grep -n 'name: Stamp error on the event head if publish crashed' "$file" | head -1 | cut -d: -f1)
+  [ -n "$rec_line" ] || return 1
+  awk -v s="$rec_line" '
+    NR < s { next }
+    NR > s && /^      - / { exit }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*run:/ { exit }
+    /^[[:space:]]*if:[[:space:]]*failure\(\)[[:space:]]*$/ { found=1 }
+    END { exit found ? 0 : 1 }
+  ' "$file"
+}
+mutate_crash_error_if() {
+  local out="$1" mode="$2"
+  awk -v rec="$rec" -v mode="$mode" '
+    NR < rec { print; next }
+    NR > rec && /^      - / { rest=1 }
+    rest { print; next }
+    /^[[:space:]]*#/ { print; next }
+    /^[[:space:]]*run:/ { rest=1; print; next }
+    /^[[:space:]]*if:[[:space:]]*failure\(\)[[:space:]]*$/ {
+      if (mode == "delete") next
+      if (mode == "always") sub(/failure\(\)/, "always()")
+    }
+    { print }
+  ' "$WF" > "$out"
+}
+if crash_error_if_is_failure "$WF"; then
+  ok "#329: crash-error step YAML if: key is failure() (comments ignored)"
+else
+  bad "#329: crash-error step trigger is not a YAML if: failure() key"
+fi
+# Non-vacuousness: comments still mention `if: failure()`; the real key is
+# wrong. The helper must FAIL — this is the Codex round-2 planted defect.
+mutate_crash_error_if "$ROOT/wf-always.yml" always
+if crash_error_if_is_failure "$ROOT/wf-always.yml"; then
+  bad "#329 mutation: if: always() (comments still say failure()) still passed"
+else
+  ok "#329 mutation: if: always() with comments mentioning failure() is rejected"
+fi
+mutate_crash_error_if "$ROOT/wf-deleted.yml" delete
+if crash_error_if_is_failure "$ROOT/wf-deleted.yml"; then
+  bad "#329 mutation: deleted if: key (comments still say failure()) still passed"
+else
+  ok "#329 mutation: deleted YAML if: key with comments mentioning failure() is rejected"
+fi
 extract "$rec" > "$ROOT/recover.sh"
 grep -q 'state="error"' "$ROOT/recover.sh" && grep -q 'review-evidence sensor crashed' "$ROOT/recover.sh" \
   && grep -q 'target_url="$TARGET_URL"' "$ROOT/recover.sh" \
   && grep -q 'EVENT_HEAD_SHA' "$ROOT/recover.sh" && grep -qF '[0-9a-f]{40}' "$ROOT/recover.sh" \
-  && ok "#329: recovery POSTs state=error, names the crash, reuses TARGET_URL, guards 40-hex SHA" \
-  || bad "#329: recovery script missing error POST / SHA guard / TARGET_URL (see $ROOT/recover.sh)"
+  && grep -q 'status read FAILED' "$ROOT/recover.sh" && ! grep -qF '|| true' "$ROOT/recover.sh" \
+  && ok "#329: recovery POSTs state=error, names the crash, reuses TARGET_URL, guards 40-hex SHA, GET failure is not swallowed" \
+  || bad "#329: recovery script missing error POST / SHA guard / TARGET_URL / GET fail-closed (see $ROOT/recover.sh)"
 
 # Crash: heads.txt gone (the live #324 class of incident). Publish exits
 # nonzero without overwriting pending; recovery then stamps error.
@@ -411,6 +459,32 @@ GH_CUR="failure|same-vendor-reviewer: grok" \
 [ "$rec_rc" -eq 0 ] && grep -q "^$HEAD failure" "$ROOT/gh.log" && ! grep -q "^$HEAD error" "$ROOT/gh.log" \
   && ok "#329: recovery no-ops when publish already wrote a terminal failure (does not clobber with error)" \
   || bad "#329: recovery clobbered a published failure: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+
+# Same guard, success branch (a POST can succeed and the step still exit 1).
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_CUR="success|pass: devin" \
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+[ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && ok "#329: recovery no-ops when publish already wrote success (does not clobber with error)" \
+  || bad "#329: recovery clobbered a published success: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+
+# Same guard, error branch (do not POST another error over an existing one).
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_CUR="error|error: review-evidence sensor crashed evaluating this head — see the run for detail" \
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+[ "$rec_rc" -eq 0 ] && [ ! -s "$ROOT/gh.log" ] \
+  && ok "#329: recovery no-ops when the head already has error" \
+  || bad "#329: recovery re-posted error over existing error: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log")"
+
+# A failed status GET must not be treated as "no terminal status". Concrete
+# Codex round-2 sequence: publish wrote a real verdict, GET transiently
+# fails, recovery must exit nonzero WITHOUT POSTing error.
+: > "$ROOT/gh.log"; : > "$ROOT/summary"
+GH_GET_FAIL=1 GH_CUR="failure|same-vendor-reviewer: grok" \
+  envrun env EVENT_PR_NUMBER=1 EVENT_HEAD_SHA=$HEAD bash "$ROOT/recover.sh" >/dev/null 2>&1; rec_rc=$?
+[ "$rec_rc" -ne 0 ] && [ ! -s "$ROOT/gh.log" ] && grep -q 'status read FAILED' "$ROOT/summary" \
+  && ok "#329: failed status GET exits nonzero and does not POST error (does not clobber)" \
+  || bad "#329: failed GET posted or looked green: rc=$rec_rc log=$(tr '\n' ' ' < "$ROOT/gh.log") summary=$(tr '\n' ' ' < "$ROOT/summary")"
 
 # Scheduled/comment event: no 40-hex event head → recovery writes nothing.
 : > "$ROOT/gh.log"; : > "$ROOT/summary"

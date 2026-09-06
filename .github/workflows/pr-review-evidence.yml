@@ -289,6 +289,11 @@ jobs:
         # does not by itself fail the job. Publish may also exit 1 AFTER
         # writing a real verdict (event PR failed closed); that head is no
         # longer pending, and we leave the verdict in place.
+        # A failed status GET is not "no prior verdict": exit nonzero without
+        # POSTing. Same-head TOCTOU (another writer between GET and POST) is a
+        # known limit — GitHub statuses have no compare-and-swap; this
+        # workflow's serialized queue (gibson:stateful-ci) prevents another
+        # review-evidence run from interleaving.
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
@@ -298,11 +303,19 @@ jobs:
             echo "no event head to correct (scheduled or comment event)"
             exit 0
           fi
-          # `gh api --jq` takes one expression and no jq flags; STATUS_CONTEXT
-          # is a fixed literal set above, safe to interpolate. The stub in
-          # tests may return "state|description"; take the state token.
-          cur=$(gh api "repos/$GH_REPO/commits/$EVENT_HEAD_SHA/status" \
-            --jq ".statuses[] | select(.context==\"$STATUS_CONTEXT\") | .state" 2>/dev/null | head -1 || true)
+          # GET success/failure is independent of whether a matching status
+          # exists. A failed GET must not be treated as "no terminal verdict"
+          # (Codex round 2): do not POST. `gh api --jq` takes one expression
+          # and no jq flags; STATUS_CONTEXT is a fixed literal set above,
+          # safe to interpolate. The stub in tests may return
+          # "state|description"; take the state token.
+          if ! cur=$(gh api "repos/$GH_REPO/commits/$EVENT_HEAD_SHA/status" \
+            --jq ".statuses[] | select(.context==\"$STATUS_CONTEXT\") | .state"); then
+            echo "::error::could not read current status on the event head ${EVENT_HEAD_SHA:0:7} after publish crashed; not guessing — crash-error not stamped"
+            echo "- status read FAILED on the event head ${EVENT_HEAD_SHA:0:7}; crash-error not stamped" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          cur=${cur%%$'\n'*}
           cur_state=${cur%%|*}
           if [ "$cur_state" = "failure" ] || [ "$cur_state" = "success" ] || [ "$cur_state" = "error" ]; then
             echo "event head already has '$cur_state'; not overwriting with crash-error"
