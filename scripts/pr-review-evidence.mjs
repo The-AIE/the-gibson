@@ -22,8 +22,9 @@
  *     refused for any vendor that already has a real App reviewer identity.
  *     Per identity the newest evidence at this head wins.
  *   - Eligibility: the reviewer's vendor differs from every resolved author
- *     vendor; `unknown` is never eligible. Human reviews, unlisted Apps, and
- *     comments not performed via a listed App are not evidence.
+ *     vendor; `unknown` is never eligible. Human reviews and comments from
+ *     an unlisted App, or a listed App but the wrong slug/id, are not
+ *     evidence unless they carry an owner-attested-review receipt instead.
  *
  * WHY
  *   Retro 2026-09-04: 16 of 34 merges had no cross-vendor verdict on GitHub,
@@ -252,31 +253,53 @@ function appReviewerVendors(identities) {
   return new Set(identities.filter((i) => i.roles.includes("reviewer") && i.appSlug).map((i) => i.vendor));
 }
 
+// The identity key every `owner-attested-review:v1` item is filed under in
+// `collectEvidence`'s per-identity newest-wins map. Fixed and NOT derived
+// from the comment body (see below) — every such comment shares one poster
+// (the owner), so `reviewer-vendor` is the only thing that could otherwise
+// distinguish one from another, and it lives in the exact content an edit
+// can tamper with.
+const OWNER_EXTERNAL_REVIEW_LOGIN = "owner-attested-review";
+
 /**
  * Owner-countersigned review from a vendor with no GitHub App on this repo
  * (e.g. Codex, run locally via codex-review.sh — there is no "codex[bot]"
  * App to post a `review-evidence:v1` comment through). Mirrors
  * `ownerAttestation`'s exact trust boundary (OWNER/MEMBER login match,
- * exact-head bound, edited-by-other is a tombstone not a fallback) but
- * carries a review verdict rather than an author-vendor claim.
- * Returns a synthetic reviewer "identity" item, or null.
+ * exact-head bound) but carries a review verdict rather than an
+ * author-vendor claim. Returns a synthetic reviewer "identity" item, a
+ * `{ stale: true }` marker, or null (not evidence at all).
+ *
+ * Tombstone binding (#366 review round 1, finding 1): every App-authored
+ * receipt tombs by a login GitHub itself signs (`c.user.login`), which an
+ * edit cannot change. An owner-attested-review comment has no such
+ * body-independent signal — `reviewer-vendor` IS the claim, and an editor
+ * who is not the owner can rewrite it. So `editedByOther` is checked FIRST,
+ * before any attempt to parse the (possibly rewritten) body, and the
+ * tombstone is filed under the ONE FIXED key every owner-attested-review
+ * comment uses (`OWNER_EXTERNAL_REVIEW_LOGIN`), never a vendor read from
+ * current content. This means a tampered comment tombs the whole
+ * owner-countersigned-review slot regardless of what it now claims — the
+ * safe direction, since which vendor it USED to claim is unknowable from
+ * the API's current-state view. (Consequence, accepted for now: only one
+ * App-less vendor's review is tracked at a time per head; a second
+ * concurrent one would compete for the same slot. Not this repo's use
+ * case today — extend with a stable per-comment-id key if it becomes one.)
  */
 export function ownerAttestedReview(c, ownerLogin, headSha, allowedVendors, blockedVendors) {
   if (norm(c?.user?.login) !== norm(ownerLogin) || !["OWNER", "MEMBER"].includes(c?.author_association)) return null;
+  const at = Date.parse(c?.created_at ?? "") || timestamp(c);
+  if (editedByOther(c)) {
+    return { identity: { login: OWNER_EXTERNAL_REVIEW_LOGIN, vendor: "unknown", roles: ["reviewer"] }, result: "none", at, id: Number(c?.id ?? 0), source: "comment" };
+  }
   const b = parseBlock(c?.body, "owner-attested-review:v1", ["head-sha", "reviewer-vendor", "result"]);
   if (!b) return null;
-  const at = Date.parse(c?.created_at ?? "") || timestamp(c);
   const vendor = b["reviewer-vendor"];
-  const id = { login: `external-review:${vendor || "unknown"}`, vendor: vendor || "unknown", roles: ["reviewer"] };
-  // An edit by anyone but the owner voids this receipt as a tombstone — same
-  // rule as `ownerAttestation` (round 6, finding 1: a tampered newer entry
-  // must not fall through to an older, still-valid one).
-  if (editedByOther(c)) return { identity: id, result: "none", at, id: Number(c?.id ?? 0), source: "comment" };
   if (!vendor || !allowedVendors.includes(vendor) || vendor === "unknown" || vendor === "owner") return null;
   if (blockedVendors.has(vendor)) return null;
   if (!["pass", "fail"].includes(b.result)) return null;
   if (b["head-sha"] !== headSha) return { stale: true };
-  return { identity: id, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" };
+  return { identity: { login: OWNER_EXTERNAL_REVIEW_LOGIN, vendor, roles: ["reviewer"] }, result: b.result, at, id: Number(c?.id ?? 0), source: "comment" };
 }
 
 export function collectEvidence({ reviews, comments, identities, headSha, notBefore = 0, ownerLogin = null, attestationVendors = [] }) {

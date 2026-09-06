@@ -373,8 +373,10 @@ d=$(fx_new x6); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2
 expect "(x6) owner-attested review at a stale head" "$d" stale-head-only pending 0
 d=$(fx_new x7); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T10:00:00Z|$(extreview "$HEAD" codex fail)" "$OWNER|MEMBER|-|0|10|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex pass)"
 expect "(x7) newest-wins: older codex FAIL, newer codex PASS" "$d" pass success 0
-d=$(fx_new x8); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T10:00:00Z|$(extreview "$HEAD" codex pass)|$DEVIN"
-expect "(x8) a newer codex PASS edited by someone other than the owner is a tombstone, not evidence" "$d" no-receipt-at-head pending 0
+d=$(fx_new x8); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T10:00:00Z|$(extreview "$HEAD" codex pass)" "$OWNER|MEMBER|-|0|10|2026-09-04T12:00:00Z|lgtm|$DEVIN"
+expect "(x8) resurrection attack: a later comment WIPED ENTIRELY by a non-owner (unparseable body) must NOT resurrect the earlier PASS — review round 1, finding 1" "$d" no-receipt-at-head pending 0
+d=$(fx_new x8b); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T10:00:00Z|$(extreview "$HEAD" codex pass)" "$OWNER|MEMBER|-|0|10|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude fail)|$DEVIN"
+expect "(x8b) tombstone binds to a fixed key, not the tampered comment's rewritten vendor field" "$d" no-receipt-at-head pending 0
 d=$(fx_new x9); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex fail)"
 expect "(x9) real devin APPROVE + owner-attested codex FAIL → fail dominates" "$d" changes-requested failure 1
 d=$(fx_new x10); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" bogus-vendor pass)"
@@ -385,6 +387,10 @@ d=$(fx_new x12); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|NONE|-|0|9|20
 expect "(x12) owner login without OWNER/MEMBER association is not evidence" "$d" no-receipt-at-head pending 0
 d=$(fx_new x13); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude pass)"
 expect "(x13) claude (no App identity) is a valid external vendor, distinct from grok author" "$d" pass success 0
+d=$(fx_new x14); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" devin pass)"
+expect "(x14) fake devin claim on a grok PR (different vendor than author) is refused — isolates the App-vendor block, not same-vendor-reviewer" "$d" no-receipt-at-head pending 0
+d=$(fx_new x15); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" coderabbit pass)"
+expect "(x15) fake coderabbit claim is refused too — coderabbit can't even reach the block list, config rejects it from attestationVendors outright" "$d" no-receipt-at-head pending 0
 
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
