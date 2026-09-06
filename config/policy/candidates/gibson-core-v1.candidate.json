@@ -22,7 +22,7 @@
         "id": "src.agents-contract",
         "path": "AGENTS.md",
         "digestAlgorithm": "sha256",
-        "digest": "57b22d52c72060bd6c20281965e5f10d09932db4df333095675cac731dfce1f3",
+        "digest": "9f7585ec4e8eb44df0a05ce9b915e11a1f1b1ad4207edcfd010bdfd696570d8c",
         "role": "human-readable-contract"
       },
       {
@@ -36,7 +36,7 @@
         "id": "src.quality-gates",
         "path": "docs/06-quality-gates.md",
         "digestAlgorithm": "sha256",
-        "digest": "c22587e83b3d30b2517eeb8921e6fc3d83f3e3b4b2c5143609484340d67d2a13",
+        "digest": "857db6ea484211ba2ab03dda8f29b07b2be91f4ba3a33412f6d3a6219f2c4455",
         "role": "explanatory-history"
       },
       {

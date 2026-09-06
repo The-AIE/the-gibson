@@ -160,3 +160,22 @@ Revisit when: a Tier C merge ships a defect that E3 + re-verification should
 have caught but a human diff-read would not have missed, or #161's remaining
 tiers (A, B, schema, security, delivery-control) are decided and a consistent
 scheme across all of them turns out to need Tier C revisited.
+
+## D-012 · 2026-09-06 · Tier A/B minimum review-independence level is E2
+Decided: for #161's taxonomy (E0 self-check .. E4 human authority), the formal
+minimum for Tier A (routine) and Tier B (elevated) changes is **E2** — a
+separate evaluator identity or same-vendor different model, independently
+invoked and read-only. This sits above a same-actor self-check (E0) or a
+fresh-context pass by the same actor (E1), which never count as independent,
+but below the cross-vendor, exact-head-bound bar (E3) D-011 already set for
+Tier C. Schema, security boundaries, and delivery-control changes were not
+separately addressed here: AGENTS.md's existing Risk tiers table already
+routes money/auth/security-boundary/schema/prod-data changes into Tier C, so
+they inherit D-011's E3 + owner-merge minimum rather than needing a distinct
+decision.
+Rejected (for now): requiring E3 for Tier A/B too — assessed as
+disproportionate for routine/elevated work; E2 already rules out solo
+self-review while not imposing cross-vendor overhead on every PR.
+Revisit when: Tier A/B defect data shows E2 letting through what a
+cross-vendor E3 pass would have caught, or a genuinely separate schema/
+security/delivery-control tier (distinct from Tier C) is proposed.
