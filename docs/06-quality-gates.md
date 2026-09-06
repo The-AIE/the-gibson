@@ -201,9 +201,11 @@ they never drift out without a reviewer saying so).
 reviewing an exact head, a same-vendor different-model pass, a fresh-context
 pass by the same model, an adversarial self-check, deterministic CI. One
 canonical taxonomy (issue #161) replaces that loose language. `AGENTS.md`
-cites this table by level name (`config/review-round-caps.json`-style
-citation) rather than restating it, per its own hard byte cap — this page is
-the canonical definition.
+cites this table by level name rather than restating it, per its own hard
+byte cap — but this page is non-normative (banner above): it restates the
+vocabulary for readability. `AGENTS.md`'s citation and the decisions in
+`memory/DECISIONS.md` (D-011, D-012) remain the authority for what each
+tier actually requires.
 
 | Level | Meaning |
 |---|---|
@@ -233,11 +235,18 @@ level above E0 for that head.
   review, without imposing Tier C's cross-vendor overhead on routine and
   elevated work.
 
-Schema, security-boundary, and delivery-control changes were not given a
-separate decision: `AGENTS.md`'s Risk tiers table above already routes
+Schema and security-boundary changes were not given a separate decision:
+`AGENTS.md`'s Risk tiers table above already routes
 money/auth/security-boundary/schema/prod-data changes into Tier C, so they
-inherit D-011's minimum rather than needing one of their own. Track any
-future revision under issue #161.
+inherit D-011's minimum rather than needing one of their own.
+
+**Still undecided:** delivery-control (`AGENTS.md`'s own separate binding
+section, not part of the Risk tiers table above) has no minimum yet — #161's
+acceptance criteria list it as its own owner decision, and #161's authority
+boundary forbids inferring one. A delivery-control change that isn't also
+money/auth/security-boundary/schema/prod-data falls back to whatever review
+practice this file already describes for its tier absent a decided E-level
+floor. Track under issue #161.
 
 ## Review lenses
 

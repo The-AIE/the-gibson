@@ -168,14 +168,18 @@ separate evaluator identity or same-vendor different model, independently
 invoked and read-only. This sits above a same-actor self-check (E0) or a
 fresh-context pass by the same actor (E1), which never count as independent,
 but below the cross-vendor, exact-head-bound bar (E3) D-011 already set for
-Tier C. Schema, security boundaries, and delivery-control changes were not
-separately addressed here: AGENTS.md's existing Risk tiers table already
-routes money/auth/security-boundary/schema/prod-data changes into Tier C, so
-they inherit D-011's E3 + owner-merge minimum rather than needing a distinct
-decision.
+Tier C. Schema and security boundaries were not separately addressed here:
+AGENTS.md's existing Risk tiers table already routes
+money/auth/security-boundary/schema/prod-data changes into Tier C, so they
+inherit D-011's E3 + owner-merge minimum rather than needing a distinct
+decision. Delivery-control (AGENTS.md's own separate binding section, not
+part of the Risk tiers table) is NOT addressed by this decision and has no
+minimum yet — #161's acceptance criteria name it as its own owner decision,
+and inferring one here would violate #161's own authority boundary.
 Rejected (for now): requiring E3 for Tier A/B too — assessed as
 disproportionate for routine/elevated work; E2 already rules out solo
 self-review while not imposing cross-vendor overhead on every PR.
 Revisit when: Tier A/B defect data shows E2 letting through what a
-cross-vendor E3 pass would have caught, or a genuinely separate schema/
-security/delivery-control tier (distinct from Tier C) is proposed.
+cross-vendor E3 pass would have caught, delivery-control's minimum is
+decided separately, or a genuinely separate schema/security tier (distinct
+from Tier C) is proposed.
