@@ -29,3 +29,45 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node scripts/self-gate-health.mjs
+      # Classify the open-issue blocked share (#309/#343). The classifier's
+      # own exit contract is the step's: RED/YELLOW/GREEN exit 0 (a real
+      # finding, not a broken sensor). Only INCOMPLETE is nonzero. Posts a
+      # new comment on #212; never PATCHes the issue body (sensor-health.mjs
+      # owns renderIssueBody). BACKLOG_HEALTH_FIXTURE / BACKLOG_HEALTH_NOW
+      # are test seams and unset in production.
+      - name: Classify backlog health and comment on #212
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          REPORT="${RUNNER_TEMP}/backlog-health.md"
+          RAW="${RUNNER_TEMP}/backlog-health.raw"
+          ERR="${RUNNER_TEMP}/backlog-health.err"
+          OBS="${BACKLOG_HEALTH_NOW:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
+          if [ -n "${BACKLOG_HEALTH_FIXTURE:-}" ]; then
+            set -- --fixture "$BACKLOG_HEALTH_FIXTURE" --now "$OBS"
+          else
+            set -- --repo "${GITHUB_REPOSITORY}" --now "$OBS"
+          fi
+          if node scripts/backlog-health.mjs "$@" >"$RAW" 2>"$ERR"; then
+            {
+              printf '### backlog-health — %s\n\n' "$OBS"
+              cat "$RAW"
+            } >"$REPORT"
+            cat "$REPORT"
+            if ! node -e 'const fs = require("fs"); process.stdout.write(JSON.stringify({ body: fs.readFileSync(process.argv[1], "utf8") }));' \
+              "$REPORT" \
+              | gh api --method POST \
+                "repos/${GITHUB_REPOSITORY}/issues/212/comments" \
+                --input - >/dev/null
+            then
+              echo "PUBLISH_FAILED: comment POST to issue #212 failed" >&2
+              exit 1
+            fi
+          else
+            rc=$?
+            cat "$ERR" >&2
+            cat "$RAW" >&2
+            exit "$rc"
+          fi
