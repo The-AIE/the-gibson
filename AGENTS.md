@@ -294,13 +294,48 @@ enough (the gates decide, not the feeling).
 |---|---|---|
 | **A** | Routine: UI copy, isolated components, docs, tests. | Solo independent review; standard gates |
 | **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files. | Full-lens review; UX eval if visible |
-| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** human merge gate; serialize when stateful |
+| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** human merge gate; serialize when stateful. Minimum independence: **E3 + owner merge** (below). |
 
 Tier is assigned at decomposition and re-checked at review. Diffs may drift
 **into** Tier C; they never drift out without a reviewer saying so.
 
 Review round caps are canonical in `config/review-round-caps.json` (do not
 restate the numbers here).
+
+## Review independence levels
+
+"Review" has meant several different things in practice: a different agent
+reviewing an exact head, a same-vendor different-model pass, a fresh-context
+pass by the same model, an adversarial self-check, deterministic CI. One
+canonical taxonomy (issue #161) replaces that loose language:
+
+| Level | Meaning |
+|---|---|
+| **E0** | Self-check: same execution context/actor. Never independent review. |
+| **E1** | Fresh-context evaluation: same model/provider identity, isolated context. Reduces anchoring; does not create a different accountable identity. |
+| **E2** | Separate evaluator identity or same-vendor different model: independently invoked and read-only. |
+| **E3** | Cross-vendor independent review: different provider and identity, exact-head bound. |
+| **E4** | Human authority: owner/authorized reviewer decision. |
+
+A level is achieved, not claimed: it is read from actual observed identities
+(builder/evaluator/reviewer provider, model, agent identity, session/run
+identity), isolation, capabilities, and an exact-head binding — never
+inferred from a parallel-review *strategy* or from silence. Exact-head
+staleness invalidates an otherwise-valid review at that level. A reviewer
+capable of mutating the reviewed head cannot supply independence at any
+level above E0 for that head.
+
+**Decided minimum:** Tier C requires **E3 + the owner's own merge action**
+(D-011, `memory/DECISIONS.md`) — a cross-vendor E3 review is a claim, not
+proof; the merging party still re-runs checks and reads the diff before
+merging on it. This does not permit merging on an unread AI approval.
+
+**Not yet decided:** the minimum level for Tier A, Tier B, schema, security,
+and delivery-control changes. Nothing in this section raises or lowers what
+those tiers currently require elsewhere in this file — Tier A/B's existing
+"Solo independent review" / "Full-lens review" treatment above is unchanged
+until an owner decision sets an explicit minimum. Do not infer or assign one
+from this table; track that decision under issue #161.
 
 ## Commit, PR, and merge
 

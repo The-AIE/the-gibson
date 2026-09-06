@@ -188,6 +188,23 @@ vendor-blind on purpose. Sensors live in `scripts/test-integrity.mjs` and
 Tier is assigned at decomposition and re-checked at review (diffs drift into Tier C;
 they never drift out without a reviewer saying so).
 
+## Review independence levels
+
+> 🙂 **In plain English:** not all "reviews" are equally independent. A model
+> re-reading its own work with a clean slate can catch typos, but it's still
+> the same accountable actor. The levels below (binding definitions in
+> [`AGENTS.md`](../AGENTS.md#review-independence-levels)) give a shared name
+> for how independent a review actually was, from **E0** (self-check — doesn't
+> count) up through **E3** (a different vendor's model, bound to the exact
+> head) to **E4** (a human's own decision).
+
+The only settled minimum today is Tier C: **E3 + the owner's own merge click**
+(decision D-011). Tier A/B, schema, security, and delivery-control minimums
+are not yet decided — this page doesn't change what those tiers currently
+require; it exists so a future decision can be written once, in one place,
+using one vocabulary, instead of relitigating what "independent review" means
+per tier.
+
 ## Review lenses
 
 Six lenses; findings cite file:line and state the failure scenario, not just the smell:
