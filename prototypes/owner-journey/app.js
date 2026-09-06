@@ -355,22 +355,26 @@ if (typeof document !== 'undefined') {
       }
     }
 
+    // Both return whether the storage operation actually succeeded (Safari
+    // private mode and quota exhaustion are realistic ways for `setItem`/
+    // `removeItem` to throw even though `getItem` worked moments earlier).
+    // The caller surfaces failure as the same accessible notice hydration
+    // uses, rather than silently pretending the write or clear happened.
     function savePersisted(projectId) {
       try {
         window.localStorage.setItem(STORAGE_KEY, serializePersisted(projectId));
+        return true;
       } catch (e) {
-        // Storage may be unavailable (private mode, quota, disabled). The
-        // demo still works for this session; it just will not be
-        // remembered next time. No user-visible error is required for a
-        // best-effort convenience write.
+        return false;
       }
     }
 
     function clearPersisted() {
       try {
         window.localStorage.removeItem(STORAGE_KEY);
+        return true;
       } catch (e) {
-        // Same best-effort reasoning as savePersisted.
+        return false;
       }
     }
 
@@ -451,13 +455,55 @@ if (typeof document !== 'undefined') {
       renderFeedbackList();
     }
 
-    function dispatch(action, payload) {
-      if (action === 'reset') clearPersisted();
-      state = transition(state, action, payload);
-      if (action === 'select_project' && state.screen === 'readiness') {
-        savePersisted(state.projectId);
+    // Re-derived on every 'input' event AND right after Reset clears the
+    // field programmatically, so the byte counter and submit button never
+    // show stale state from before a clear.
+    function updateFieldValidity(textareaId, counterId, submitId, max, isValidFn) {
+      var textarea = byId(textareaId);
+      if (!textarea) return;
+      var bytes = utf8ByteLength(textarea.value);
+      var counter = byId(counterId);
+      if (counter) {
+        counter.textContent = bytes + ' / ' + max + ' bytes';
+        counter.classList.toggle('is-over', bytes > max);
       }
+      var submit = byId(submitId);
+      if (submit) submit.disabled = !isValidFn(textarea.value);
+    }
+
+    function updateRequestValidity() {
+      updateFieldValidity('request-text', 'request-counter', 'request-submit', REQUEST_MAX_BYTES, isValidRequestText);
+    }
+
+    function updateFeedbackValidity() {
+      updateFieldValidity('preview-feedback-text', 'preview-feedback-counter', 'preview-submit-feedback', FEEDBACK_MAX_BYTES, isValidFeedbackText);
+    }
+
+    function dispatch(action, payload) {
+      var storageFailed = false;
+      if (action === 'reset') {
+        storageFailed = !clearPersisted();
+        // Reset clears only the namespaced storage key (per the contract) —
+        // but the LIVE page also holds typed, never-persisted request and
+        // feedback text in two textareas. Leaving that visible after Reset
+        // would show stale workflow data on a screen that claims a fresh
+        // start, so both are cleared here too.
+        var requestTextarea = byId('request-text');
+        if (requestTextarea) requestTextarea.value = '';
+        var feedbackTextarea = byId('preview-feedback-text');
+        if (feedbackTextarea) feedbackTextarea.value = '';
+      }
+
+      state = transition(state, action, payload);
+
+      if (action === 'select_project' && state.screen === 'readiness') {
+        if (!savePersisted(state.projectId)) storageFailed = true;
+      }
+      if (storageFailed) state = withNotice(state, STORAGE_UNAVAILABLE_NOTICE);
+
       render();
+      updateRequestValidity();
+      updateFeedbackValidity();
     }
 
     function wireClick(id, action, getPayload) {
@@ -466,19 +512,6 @@ if (typeof document !== 'undefined') {
       el.addEventListener('click', function () {
         dispatch(action, getPayload ? getPayload() : undefined);
       });
-    }
-
-    function wireByteCounter(textareaId, counterId, max) {
-      var textarea = byId(textareaId);
-      var counter = byId(counterId);
-      if (!textarea || !counter) return;
-      var update = function () {
-        var bytes = utf8ByteLength(textarea.value);
-        counter.textContent = bytes + ' / ' + max + ' bytes';
-        counter.classList.toggle('is-over', bytes > max);
-      };
-      textarea.addEventListener('input', update);
-      update();
     }
 
     document.addEventListener('DOMContentLoaded', function () {
@@ -499,11 +532,8 @@ if (typeof document !== 'undefined') {
         return byId('request-text').value;
       });
       wireClick('request-back', 'back');
-      wireByteCounter('request-text', 'request-counter', REQUEST_MAX_BYTES);
-      byId('request-text').addEventListener('input', function () {
-        var submit = byId('request-submit');
-        if (submit) submit.disabled = !isValidRequestText(byId('request-text').value);
-      });
+      var requestTextarea = byId('request-text');
+      if (requestTextarea) requestTextarea.addEventListener('input', updateRequestValidity);
 
       wireClick('blueprint-start', 'start_demo');
       wireClick('blueprint-back', 'back');
@@ -518,16 +548,8 @@ if (typeof document !== 'undefined') {
       wireClick('preview-submit-feedback', 'submit_feedback', function () {
         return byId('preview-feedback-text').value;
       });
-      byId('preview-feedback-text').addEventListener('input', function () {
-        var submit = byId('preview-submit-feedback');
-        if (submit) submit.disabled = !isValidFeedbackText(byId('preview-feedback-text').value);
-        var counter = byId('preview-feedback-counter');
-        if (counter) {
-          var bytes = utf8ByteLength(byId('preview-feedback-text').value);
-          counter.textContent = bytes + ' / ' + FEEDBACK_MAX_BYTES + ' bytes';
-          counter.classList.toggle('is-over', bytes > FEEDBACK_MAX_BYTES);
-        }
-      });
+      var feedbackTextarea = byId('preview-feedback-text');
+      if (feedbackTextarea) feedbackTextarea.addEventListener('input', updateFeedbackValidity);
       wireClick('preview-continue', 'continue', function () { return undefined; });
       wireClick('preview-back', 'back');
       // Clear the feedback textbox after a successful submit so the byte
@@ -538,7 +560,7 @@ if (typeof document !== 'undefined') {
           var textarea = byId('preview-feedback-text');
           if (textarea && isValidFeedbackText(textarea.value)) {
             textarea.value = '';
-            textarea.dispatchEvent(new Event('input'));
+            updateFeedbackValidity();
           }
         });
       }
@@ -569,6 +591,8 @@ if (typeof document !== 'undefined') {
 
       state = loadPersisted();
       render();
+      updateRequestValidity();
+      updateFeedbackValidity();
     });
   })();
 }
