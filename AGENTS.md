@@ -294,13 +294,13 @@ enough (the gates decide, not the feeling).
 |---|---|---|
 | **A** | Routine: UI copy, isolated components, docs, tests. | Solo independent review; standard gates |
 | **B** | Elevated: shared modules, API routes, data reads, >150 lines or >6 files. | Full-lens review; UX eval if visible |
-| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** human merge gate; serialize when stateful |
+| **C** | Money, auth, consent/PII, security boundaries, schema, incident alerting, prod data. | Fan-out + adversarial review + **G12** human merge gate; serialize when stateful. Min. E3 + owner merge (D-011). |
 
 Tier is assigned at decomposition and re-checked at review. Diffs may drift
 **into** Tier C; they never drift out without a reviewer saying so.
 
-Review round caps are canonical in `config/review-round-caps.json` (do not
-restate the numbers here).
+Round caps: `config/review-round-caps.json`. Independence levels (E0-E4):
+`docs/06-quality-gates.md` (#161). Min.: C=E3+owner (D-011), A/B=E2 (D-012).
 
 ## Commit, PR, and merge
 

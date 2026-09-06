@@ -188,6 +188,66 @@ vendor-blind on purpose. Sensors live in `scripts/test-integrity.mjs` and
 Tier is assigned at decomposition and re-checked at review (diffs drift into Tier C;
 they never drift out without a reviewer saying so).
 
+## Review independence levels
+
+> 🙂 **In plain English:** not all "reviews" are equally independent. A model
+> re-reading its own work with a clean slate can catch typos, but it's still
+> the same accountable actor. The levels below give a shared name for how
+> independent a review actually was, from **E0** (self-check — doesn't count)
+> up through **E3** (a different vendor's model, bound to the exact head) to
+> **E4** (a human's own decision).
+
+"Review" has meant several different things in practice: a different agent
+reviewing an exact head, a same-vendor different-model pass, a fresh-context
+pass by the same model, an adversarial self-check, deterministic CI. One
+canonical taxonomy (issue #161) replaces that loose language. `AGENTS.md`
+cites this table by level name rather than restating it, per its own hard
+byte cap — but this page is non-normative (banner above): it restates the
+vocabulary for readability. `AGENTS.md`'s citation and the decisions in
+`memory/DECISIONS.md` (D-011, D-012) remain the authority for what each
+tier actually requires.
+
+| Level | Meaning |
+|---|---|
+| **E0** | Self-check: same execution context/actor. Never independent review. |
+| **E1** | Fresh-context evaluation: same model/provider identity, isolated context. Reduces anchoring; does not create a different accountable identity. |
+| **E2** | Separate evaluator identity or same-vendor different model: independently invoked and read-only. |
+| **E3** | Cross-vendor independent review: different provider and identity, exact-head bound. |
+| **E4** | Human authority: owner/authorized reviewer decision. |
+
+A level is achieved, not claimed: it is read from actual observed identities
+(builder/evaluator/reviewer provider, model, agent identity, session/run
+identity), isolation, capabilities, and an exact-head binding — never
+inferred from a parallel-review *strategy* or from silence. Exact-head
+staleness invalidates an otherwise-valid review at that level. A reviewer
+capable of mutating the reviewed head cannot supply independence at any
+level above E0 for that head.
+
+**Decided minimums:**
+
+- Tier C requires **E3 + the owner's own merge action** (D-011,
+  `memory/DECISIONS.md`) — a cross-vendor E3 review is a claim, not proof;
+  the merging party still re-runs checks and reads the diff before merging
+  on it. This does not permit merging on an unread AI approval.
+- Tier A and Tier B require **E2** (D-012) — a separate evaluator identity
+  or same-vendor different model, independently invoked and read-only.
+  Rules out a same-actor self-check or fresh-context pass counting as
+  review, without imposing Tier C's cross-vendor overhead on routine and
+  elevated work.
+
+Schema and security-boundary changes were not given a separate decision:
+`AGENTS.md`'s Risk tiers table above already routes
+money/auth/security-boundary/schema/prod-data changes into Tier C, so they
+inherit D-011's minimum rather than needing one of their own.
+
+**Still undecided:** delivery-control (`AGENTS.md`'s own separate binding
+section, not part of the Risk tiers table above) has no minimum yet — #161's
+acceptance criteria list it as its own owner decision, and #161's authority
+boundary forbids inferring one. A delivery-control change that isn't also
+money/auth/security-boundary/schema/prod-data falls back to whatever review
+practice this file already describes for its tier absent a decided E-level
+floor. Track under issue #161.
+
 ## Review lenses
 
 Six lenses; findings cite file:line and state the failure scenario, not just the smell:
