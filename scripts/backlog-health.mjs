@@ -218,7 +218,10 @@ export function inMovedWindow(createdAt, observationTime, blockerQuietDays) {
 }
 
 function prSource(event) {
-  return event.source || event.subject || null;
+  // CrossReferencedEvent and ConnectedEvent both expose the referencing
+  // issue/PR as `source`. ConnectedEvent.subject is the connected issue
+  // (often this blocker), not the merged PR — do not fall back to it.
+  return (event && event.source) || null;
 }
 
 export function eventQualifies(event, reachableOids) {
@@ -542,7 +545,7 @@ const QUERY_TIMELINE = `query BacklogTimeline($owner: String!, $name: String!, $
           }
           ... on ConnectedEvent {
             createdAt
-            subject {
+            source {
               __typename
               ... on PullRequest { number merged state }
               ... on Issue { number }
@@ -559,11 +562,18 @@ const QUERY_TIMELINE = `query BacklogTimeline($owner: String!, $name: String!, $
   }
 }`;
 
-const QUERY_REACHABLE = `query BacklogReachable($owner: String!, $name: String!, $oid: GitObjectID!, $refName: String!) {
+// object(oid:) is GitObjectID; compare(headRef:) is String!. Same SHA, two
+// variables — GraphQL checks each usage against its own argument type.
+// Ref.compare treats the named ref as base and $headRef as head, so BEHIND
+// means the referenced commit is an ancestor of the default branch.
+// GitHub GraphQL has no two-OID compare (Repository/Commit have no compare
+// field), so the base is the live default-branch tip, not the OID observed
+// at listing time.
+const QUERY_REACHABLE = `query BacklogReachable($owner: String!, $name: String!, $oid: GitObjectID!, $headRef: String!, $refName: String!) {
   repository(owner: $owner, name: $name) {
     object(oid: $oid) { ... on Commit { oid } }
     ref(qualifiedName: $refName) {
-      compare(headRef: $oid) { status behindBy }
+      compare(headRef: $headRef) { status behindBy }
     }
   }
 }`;
@@ -828,7 +838,32 @@ export function graphqlStubFromWorld(world) {
   }
 
   const reachable = new Set(world.reachableOids || []);
+  const identicalOids = new Set(world.identicalOids || []);
+  const aheadOids = new Set(world.aheadOids || []);
   const reachableFailures = new Set(world.reachableFailures || []);
+  const compareBody = (commitOid, compareStatus) => ({
+    data: {
+      repository: {
+        object: { oid: commitOid },
+        ref: {
+          compare: {
+            status: compareStatus,
+            behindBy:
+              compareStatus === "BEHIND" || compareStatus === "DIVERGED" ? 1 : 0,
+          },
+        },
+      },
+    },
+  });
+  const pushReachable = (commitOid, compareStatus) => {
+    if (ops.some((e) => e.op === "reachable" && e.oid === commitOid)) return;
+    ops.push({
+      op: "reachable",
+      oid: commitOid,
+      status: 200,
+      body: compareBody(commitOid, compareStatus),
+    });
+  };
   for (const commitOid of reachable) {
     if (reachableFailures.has(commitOid)) {
       ops.push({
@@ -839,21 +874,11 @@ export function graphqlStubFromWorld(world) {
       });
       continue;
     }
-    ops.push({
-      op: "reachable",
-      oid: commitOid,
-      status: 200,
-      body: {
-        data: {
-          repository: {
-            object: { oid: commitOid },
-            ref: { compare: { status: "AHEAD", behindBy: 0 } },
-          },
-        },
-      },
-    });
+    pushReachable(commitOid, identicalOids.has(commitOid) ? "IDENTICAL" : "BEHIND");
   }
   const allOids = new Set(reachable);
+  for (const extra of aheadOids) allOids.add(extra);
+  for (const extra of identicalOids) allOids.add(extra);
   for (const info of Object.values(cited)) {
     for (const ev of (info && info.timeline) || []) {
       if (ev && ev.__typename === "ReferencedEvent" && ev.commit && ev.commit.oid) {
@@ -863,24 +888,8 @@ export function graphqlStubFromWorld(world) {
   }
   for (const commitOid of allOids) {
     if (ops.some((e) => e.op === "reachable" && e.oid === commitOid)) continue;
-    ops.push({
-      op: "reachable",
-      oid: commitOid,
-      status: 200,
-      body: {
-        data: {
-          repository: {
-            object: { oid: commitOid },
-            ref: {
-              compare: {
-                status: reachable.has(commitOid) ? "AHEAD" : "DIVERGED",
-                behindBy: reachable.has(commitOid) ? 0 : 1,
-              },
-            },
-          },
-        },
-      },
-    });
+    if (reachableFailures.has(commitOid)) continue;
+    pushReachable(commitOid, aheadOids.has(commitOid) ? "AHEAD" : "DIVERGED");
   }
 
   const listingNodes = [];
@@ -1219,6 +1228,7 @@ export async function loadFromGraphql({
       owner,
       name,
       oid: commitOid,
+      headRef: commitOid,
       refName: defaultRefName,
     });
     if (!result.complete) {
@@ -1232,11 +1242,13 @@ export async function loadFromGraphql({
     const repo = result.data && result.data.repository;
     const obj = repo && repo.object;
     const cmp = repo && repo.ref && repo.ref.compare;
+    // Default branch is the base; $headRef is the referenced commit. BEHIND
+    // (head is ancestor of base) and IDENTICAL mean reachable from main.
+    // AHEAD is a descendant/unmerged commit — the opposite.
     const reachable =
       Boolean(obj && obj.oid) &&
       cmp &&
-      (cmp.status === "AHEAD" || cmp.status === "IDENTICAL") &&
-      Number(cmp.behindBy || 0) === 0;
+      (cmp.status === "BEHIND" || cmp.status === "IDENTICAL");
     if (reachable) reachableOids.add(commitOid);
   }
 

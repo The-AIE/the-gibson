@@ -99,6 +99,39 @@ for k in blockedLabel blockedRatioMax blockerQuietDays minDependents requestTime
   fi
 done
 
+echo "# GraphQL schema-shape contracts (the stub cannot catch these)"
+if grep -F 'query BacklogReachable($owner: String!, $name: String!, $oid: GitObjectID!, $headRef: String!, $refName: String!)' "$SENSOR" >/dev/null; then
+  ok "QUERY_REACHABLE declares \$headRef: String! separately from \$oid: GitObjectID!"
+else
+  bad "QUERY_REACHABLE missing separately-typed \$headRef: String!"
+fi
+if grep -F 'compare(headRef: $headRef)' "$SENSOR" >/dev/null; then
+  ok "compare uses \$headRef (String!), not \$oid"
+else
+  bad "compare does not use \$headRef"
+fi
+if grep -E 'compare\(headRef: \$oid\)' "$SENSOR" >/dev/null; then
+  bad "compare still passes \$oid (GitObjectID) as headRef"
+else
+  ok "compare does not pass \$oid as headRef"
+fi
+ce_frag=$(awk '/\.\.\. on ConnectedEvent \{/,/\.\.\. on IssueComment/' "$SENSOR")
+if has_f "$ce_frag" "source {"; then
+  ok "ConnectedEvent queries source"
+else
+  bad "ConnectedEvent missing source selection"
+fi
+if has_f "$ce_frag" "subject"; then
+  bad "ConnectedEvent still queries subject"
+else
+  ok "ConnectedEvent does not query subject"
+fi
+if grep -F 'cmp.status === "BEHIND"' "$SENSOR" >/dev/null && ! grep -F 'cmp.status === "AHEAD"' "$SENSOR" >/dev/null; then
+  ok "reachability accepts BEHIND, not AHEAD"
+else
+  bad "reachability still treats AHEAD as reachable or misses BEHIND"
+fi
+
 echo "# AC1 regex source byte-identical to decompose-graph.mjs"
 re_out=$(SENSOR_URL="$SENSOR_URL" DECOMPOSE="$DECOMPOSE" node --input-type=module <<'JS'
 import { readFileSync } from "node:fs";
@@ -477,7 +510,7 @@ const truth = [
     {
       __typename: "ConnectedEvent",
       createdAt: IN,
-      subject: { __typename: "PullRequest", number: 9, merged: true, state: "MERGED" },
+      source: { __typename: "PullRequest", number: 9, merged: true, state: "MERGED" },
     },
     "YELLOW",
   ],
@@ -513,6 +546,40 @@ for (const [id, event] of truth) {
   });
 }
 
+world("TT-connected-source-pr", {
+  issues: seven(cite161),
+  cited: {
+    161: {
+      number: 161,
+      state: "OPEN",
+      timeline: [
+        {
+          __typename: "ConnectedEvent",
+          createdAt: IN,
+          source: { __typename: "PullRequest", number: 9, merged: true, state: "MERGED" },
+          subject: { __typename: "Issue", number: 161 },
+        },
+      ],
+    },
+  },
+});
+world("TT-connected-subject-only", {
+  issues: seven(cite161),
+  cited: {
+    161: {
+      number: 161,
+      state: "OPEN",
+      timeline: [
+        {
+          __typename: "ConnectedEvent",
+          createdAt: IN,
+          subject: { __typename: "PullRequest", number: 9, merged: true, state: "MERGED" },
+        },
+      ],
+    },
+  },
+});
+
 world("TT-ref-reach", {
   issues: seven(cite161),
   reachableOids: ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
@@ -542,6 +609,42 @@ world("TT-ref-unreach", {
           __typename: "ReferencedEvent",
           createdAt: IN,
           commit: { oid: "cccccccccccccccccccccccccccccccccccccccc" },
+        },
+      ],
+    },
+  },
+});
+world("TT-ref-ahead", {
+  issues: seven(cite161),
+  reachableOids: [],
+  aheadOids: ["dddddddddddddddddddddddddddddddddddddddd"],
+  cited: {
+    161: {
+      number: 161,
+      state: "OPEN",
+      timeline: [
+        {
+          __typename: "ReferencedEvent",
+          createdAt: IN,
+          commit: { oid: "dddddddddddddddddddddddddddddddddddddddd" },
+        },
+      ],
+    },
+  },
+});
+world("TT-ref-identical", {
+  issues: seven(cite161),
+  reachableOids: ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+  identicalOids: ["eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+  cited: {
+    161: {
+      number: 161,
+      state: "OPEN",
+      timeline: [
+        {
+          __typename: "ReferencedEvent",
+          createdAt: IN,
+          commit: { oid: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" },
         },
       ],
     },
@@ -685,6 +788,10 @@ run_case TT-assigned 0 RED "#161 lastMovedAt"
 run_case TT-before-window 0 RED "#161 lastMovedAt"
 run_case TT-ref-reach 0 YELLOW "ReferencedEvent"
 run_case TT-ref-unreach 0 RED "#161 lastMovedAt"
+run_case TT-ref-ahead 0 RED "#161 lastMovedAt"
+run_case TT-ref-identical 0 YELLOW "ReferencedEvent"
+run_case TT-connected-source-pr 0 YELLOW "ConnectedEvent"
+run_case TT-connected-subject-only 0 RED "#161 lastMovedAt"
 
 echo "# AbortSignal.timeout actually fires"
 to_out=$(SENSOR_URL="$SENSOR_URL" node --input-type=module <<'JS'
