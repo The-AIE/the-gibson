@@ -78,6 +78,7 @@ var RESULT_TEXT = 'Demo complete. No code was changed or deployed.';
 var SAFE_WAIT_NOTICE = 'Nothing was approved. Waiting changes nothing, and you can look again before deciding.';
 var INVALID_STORAGE_NOTICE = 'Saved project selection could not be used, so this demo restarted at Connect.';
 var STORAGE_UNAVAILABLE_NOTICE = 'Local storage is unavailable in this browser, so nothing will be remembered between visits.';
+var RESET_CLEAR_FAILED_NOTICE = 'This demo could not clear its saved data. Storage is not responding to changes, so a previous selection may still be restored next time.';
 
 // The complete Ask Contract card shown at `decision`. Static content only —
 // never derived from user text — so there is no path from typed input to an
@@ -309,6 +310,7 @@ if (typeof module !== 'undefined' && module.exports) {
     SAFE_WAIT_NOTICE: SAFE_WAIT_NOTICE,
     INVALID_STORAGE_NOTICE: INVALID_STORAGE_NOTICE,
     STORAGE_UNAVAILABLE_NOTICE: STORAGE_UNAVAILABLE_NOTICE,
+    RESET_CLEAR_FAILED_NOTICE: RESET_CLEAR_FAILED_NOTICE,
     ASK_CONTRACT: ASK_CONTRACT,
     utf8ByteLength: utf8ByteLength,
     isValidProjectId: isValidProjectId,
@@ -369,12 +371,31 @@ if (typeof document !== 'undefined') {
       }
     }
 
+    // Returns true when Reset can be trusted to have actually made the
+    // saved binding unrestorable, false only when storage is stuck enough
+    // that it cannot. A `removeItem` failure alone is NOT reported as
+    // failure: some storage backends reject deletes while still accepting
+    // writes, and silently reporting "cleared" while the old, still-valid
+    // value sits there would let a later reload silently restore it — the
+    // exact gap Codex found (round 2, finding 1). So a failed `removeItem`
+    // falls back to overwriting the key with a value that will fail
+    // closed-shape validation on every future read (`hydrate('')` cannot
+    // parse), which is functionally equivalent to removal for this
+    // contract's purposes. Only if BOTH the delete and the overwrite throw
+    // — storage refusing every mutation — does this report failure, and
+    // even then the caller's notice says a previous selection MAY be
+    // restored, not that nothing will be (see RESET_CLEAR_FAILED_NOTICE).
     function clearPersisted() {
       try {
         window.localStorage.removeItem(STORAGE_KEY);
         return true;
       } catch (e) {
-        return false;
+        try {
+          window.localStorage.setItem(STORAGE_KEY, '');
+          return true;
+        } catch (e2) {
+          return false;
+        }
       }
     }
 
@@ -480,9 +501,9 @@ if (typeof document !== 'undefined') {
     }
 
     function dispatch(action, payload) {
-      var storageFailed = false;
+      var storageNotice = null;
       if (action === 'reset') {
-        storageFailed = !clearPersisted();
+        if (!clearPersisted()) storageNotice = RESET_CLEAR_FAILED_NOTICE;
         // Reset clears only the namespaced storage key (per the contract) —
         // but the LIVE page also holds typed, never-persisted request and
         // feedback text in two textareas. Leaving that visible after Reset
@@ -497,9 +518,9 @@ if (typeof document !== 'undefined') {
       state = transition(state, action, payload);
 
       if (action === 'select_project' && state.screen === 'readiness') {
-        if (!savePersisted(state.projectId)) storageFailed = true;
+        if (!savePersisted(state.projectId)) storageNotice = STORAGE_UNAVAILABLE_NOTICE;
       }
-      if (storageFailed) state = withNotice(state, STORAGE_UNAVAILABLE_NOTICE);
+      if (storageNotice) state = withNotice(state, storageNotice);
 
       render();
       updateRequestValidity();
