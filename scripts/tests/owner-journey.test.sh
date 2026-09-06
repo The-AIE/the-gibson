@@ -60,6 +60,14 @@ function ok(desc) { lines.push('OK\t' + desc); }
 function bad(desc, extra) { lines.push('FAIL\t' + desc + (extra !== undefined ? ' :: ' + JSON.stringify(extra) : '')); }
 function check(desc, cond, extra) { cond ? ok(desc) : bad(desc, extra); }
 function eq(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+// A deep snapshot taken BEFORE calling transition(), so a reducer that
+// mutates its input object in place and returns that same reference cannot
+// make an eq(result, originalReference) comparison vacuously true (Codex
+// round-2 finding: `eq(APP.transition(s, action, payload), s)` compares the
+// result against the very reference that may have just been mutated, so an
+// in-place mutation makes the check trivially "pass"). Comparing against a
+// snapshot taken first is immune to that.
+function snapshot(state) { return JSON.parse(JSON.stringify(state)); }
 
 // ---- constants ----
 check('RESULT_TEXT is the exact required sentence', APP.RESULT_TEXT === 'Demo complete. No code was changed or deployed.', APP.RESULT_TEXT);
@@ -167,8 +175,9 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
       if (LEGAL[key]) return;
       checked += 1;
       const before = { screen: screen, projectId: 'demo-storefront', requestText: 'x', feedback: ['y'], notice: null };
+      const expected = snapshot(before); // taken BEFORE the call: see the `snapshot()` comment above
       const after = APP.transition(before, action, 'demo-storefront');
-      if (!eq(before, after)) {
+      if (!eq(expected, after)) {
         allUnchanged = false;
         failures.push(key + ' -> ' + JSON.stringify(after));
       }
@@ -180,21 +189,48 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
 // ---- invalid payload on an otherwise-legal action must also fail closed.
 // Each assertion compares the FULL state object, not just `.screen` — a
 // mutant that keeps the same screen but corrupts projectId/requestText/
-// feedback on an invalid payload must still be caught. ----
+// feedback on an invalid payload must still be caught. Every call below
+// gets its OWN freshly-built state object (never reused across checks) and
+// the expected value is a `snapshot()` taken BEFORE transition() runs, so a
+// reducer that mutated its input in place and returned that same reference
+// cannot make the comparison vacuously true (Codex round-2 finding: the
+// previous version reused one `s` reference as both the call's input and
+// the comparison target, so an in-place `state.feedback.push(...)` mutation
+// that then returned `state` unchanged would still read as "unchanged"). ----
 (function () {
-  let s = { screen: 'connect', projectId: null, requestText: null, feedback: [], notice: null };
-  check('select_project with an unlisted id leaves the ENTIRE state unchanged', eq(APP.transition(s, 'select_project', 'not-a-real-id'), s));
+  function unchanged(state, action, payload) {
+    const expected = snapshot(state);
+    const after = APP.transition(state, action, payload);
+    return eq(expected, after);
+  }
 
-  s = { screen: 'request', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null };
-  check('create_blueprint with blank text leaves the entire state unchanged', eq(APP.transition(s, 'create_blueprint', '   '), s));
-  check('create_blueprint with 4097-byte text leaves the entire state unchanged', eq(APP.transition(s, 'create_blueprint', 'a'.repeat(4097)), s));
+  check('select_project with an unlisted id leaves the ENTIRE state unchanged', unchanged({ screen: 'connect', projectId: null, requestText: null, feedback: [], notice: null }, 'select_project', 'not-a-real-id'));
+  check('create_blueprint with blank text leaves the entire state unchanged', unchanged({ screen: 'request', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null }, 'create_blueprint', '   '));
+  check('create_blueprint with 4097-byte text leaves the entire state unchanged', unchanged({ screen: 'request', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null }, 'create_blueprint', 'a'.repeat(4097)));
+  check('start_demo with no request text leaves the entire state unchanged (defense in depth)', unchanged({ screen: 'blueprint', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null }, 'start_demo'));
+  check('submit_feedback with blank text leaves the entire state unchanged (records nothing)', unchanged({ screen: 'preview', projectId: 'demo-storefront', requestText: 'x', feedback: [], notice: null }, 'submit_feedback', ''));
+  check('submit_feedback with 2049-byte text leaves the entire state unchanged', unchanged({ screen: 'preview', projectId: 'demo-storefront', requestText: 'x', feedback: [], notice: null }, 'submit_feedback', 'z'.repeat(2049)));
+})();
 
-  s = { screen: 'blueprint', projectId: 'demo-storefront', requestText: null, feedback: [], notice: null };
-  check('start_demo with no request text leaves the entire state unchanged (defense in depth)', eq(APP.transition(s, 'start_demo'), s));
-
-  s = { screen: 'preview', projectId: 'demo-storefront', requestText: 'x', feedback: [], notice: null };
-  check('submit_feedback with blank text leaves the entire state unchanged (records nothing)', eq(APP.transition(s, 'submit_feedback', ''), s));
-  check('submit_feedback with 2049-byte text leaves the entire state unchanged', eq(APP.transition(s, 'submit_feedback', 'z'.repeat(2049)), s));
+// ---- an adversarial reducer that mutates its input in place is itself
+// caught by the above (proves the snapshot-based comparison, not just the
+// real reducer, is exercised): a hand-written mutating stand-in that pushes
+// onto the SAME feedback array and returns the SAME object reference must
+// fail `unchanged()`, where the old `eq(result, s)` shape would have missed
+// it entirely. ----
+(function () {
+  function mutatingRejectFeedback(state) {
+    state.feedback.push('smuggled in place');
+    return state; // same reference, "unchanged" by naive reference/JSON-of-self comparisons
+  }
+  function unchanged(transitionFn, state, action, payload) {
+    const expected = snapshot(state);
+    const after = transitionFn(state, action, payload);
+    return eq(expected, after);
+  }
+  const fixture = { screen: 'preview', projectId: 'demo-storefront', requestText: 'x', feedback: [], notice: null };
+  check('mutation witness (in-place mutation on rejection): the real transition() truly leaves feedback empty on a rejected submit', unchanged(APP.transition, { screen: 'preview', projectId: 'demo-storefront', requestText: 'x', feedback: [], notice: null }, 'submit_feedback', '') === true);
+  check('mutation witness (in-place mutation on rejection): the snapshot-based check catches an in-place-mutating stand-in that the old reference-reusing check would have missed', unchanged(mutatingRejectFeedback, fixture, 'submit_feedback', '') === false);
 })();
 
 // ---- hostile HTML is only ever carried as inert data ----
@@ -311,9 +347,13 @@ check('serializePersisted output is <= 256 UTF-8 bytes', APP.utf8ByteLength(APP.
     return APP.transition(state, action, payload);
   }
   function noDirectResultJump(transitionFn) {
-    const before = APP.initialState();
-    const after = transitionFn(before, 'jump_to_result');
-    return eq(before, after);
+    // Two SEPARATE initialState() calls (not one shared reference passed
+    // in and then compared against itself) — initialState() always returns
+    // a fresh object, so `expected` cannot be the same reference `after`
+    // even if transitionFn mutated its input in place and returned it.
+    const expected = APP.initialState();
+    const after = transitionFn(APP.initialState(), 'jump_to_result');
+    return eq(expected, after);
   }
   check('predicate "no direct-result jump" passes against the real transition()', noDirectResultJump(APP.transition) === true);
   check('mutation witness (direct-result transition): the SAME predicate catches the mutant', noDirectResultJump(mutantTransition) === false);
@@ -423,7 +463,18 @@ check_no_remote "$INDEX_HTML" && ok "no remote/protocol-relative script or style
 echo
 echo "static scan (app.js): forbidden channels and wording"
 
-FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|new[[:space:]]+Worker|importScripts|import\(|window\.open|window\.location|location\.href|location\.assign|location\.replace|document\.location|\blocation[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
+# Deliberately narrow on the location-assignment alternatives (Codex round-2
+# finding: an earlier, broader version matched ANY read of `window.location`
+# (a plain reference or comparison, not just a mutating assignment) and ANY
+# property literally named "location" on an arbitrary object (`\b` matches
+# right after a `.`, so `model.location = ...` — nothing to do with browser
+# navigation — was a false positive). Only two shapes actually cause
+# navigation: assigning the whole `window.location` object, or reassigning
+# the bare global `location` identifier directly (not as a property of some
+# other object) — both require a literal `=` immediately after, and the bare
+# form must NOT be preceded by `.`/alnum/`_` (i.e. it is not somebody's
+# `.location` property).
+FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|new[[:space:]]+Worker|importScripts|import\(|window\.open|window\.location[[:space:]]*=[^=]|location\.href|location\.assign|location\.replace|document\.location|(^|[^.[:alnum:]_])location[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
 
 check_forbidden_js() { ! grep -nE "$FORBIDDEN_JS_RE" "$1" >/dev/null; }
 
@@ -476,6 +527,27 @@ for mutation in "${NET_MUTATIONS[@]}"; do
   check_forbidden_js "$mutant_file" && NET_ALL_CAUGHT=0
 done
 [[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, window.location assignment, WebSocket, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
+
+# D2 — false-positive control: ordinary, non-navigating code that merely
+# mentions "location" as a property name, a read, or a comparison must NOT
+# trip the sensor (Codex round-2 finding: an earlier, broader regex flagged
+# `const current = window.location;`, `window.location === cached`,
+# `model.location = "local"`, and even a string literal containing the text
+# "window.location" — none of which perform navigation).
+BENIGN_LOCATION_SNIPPETS=(
+  'var current = window.location;'
+  'if (window.location === cached) { return; }'
+  'model.location = "local";'
+  'var msg = "window.location";'
+)
+BENIGN_ALL_CLEAN=1
+for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
+  benign_file="$TMP_DIR/app.benign-net-$(echo "$snippet" | cksum | cut -d' ' -f1).js"
+  cp "$APP_JS" "$benign_file"
+  printf '\n%s\n' "$snippet" >> "$benign_file"
+  check_forbidden_js "$benign_file" || BENIGN_ALL_CLEAN=0
+done
+[[ "$BENIGN_ALL_CLEAN" -eq 1 ]] && ok "false-positive control: a plain window.location read/comparison, an unrelated .location property, and a string literal all pass cleanly (no navigation is actually performed)" || bad "the forbidden-channel sensor false-positives on ordinary, non-navigating code"
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
