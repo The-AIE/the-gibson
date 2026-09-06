@@ -157,9 +157,7 @@ node "$SENSOR" --config "$CFG" --base HEAD~1 --head HEAD >/dev/null 2>&1; rc=$?
 [[ $rc -eq 0 || $rc -eq 1 ]] && ok "shipped config evaluates a real diff (rc=$rc)" || bad "live run rc=$rc"
 
 # --- workflow wiring: runs on PRs, label maps to the exception env, not swallowed.
-# The self-gate is mandatory; the target-repo template is checked once it is wired.
-WF_FILES=(.github/workflows/gibson-self-gate.yml)
-grep -q 'pr-size' ci/gibson-gate.yml && WF_FILES+=(ci/gibson-gate.yml)
+WF_FILES=(.github/workflows/gibson-self-gate.yml ci/gibson-gate.yml)
 for f in "${WF_FILES[@]}"; do
   grep -q 'scripts/pr-size.mjs' "$f" && ok "$f runs pr-size" || bad "$f does not run pr-size"
   grep -q "size-exception" "$f" && ok "$f maps the size-exception label" || bad "$f: label not wired"

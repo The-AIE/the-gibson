@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:e6e97e55ab6232ddd88d611a48b8fc019837cb63d2d2133da5e851b95a625e3b
+# gibson-template-version: sha256:a17975018716f64d81e30b72aa7ae0949bc069ede5b3319153ae2360884b69c4
 # The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
 # Fill <angle> placeholders from the repo's gate commands.
@@ -58,6 +58,28 @@ jobs:
         run: git fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
       - name: Claim isolation
         run: node scripts/check-active-work.mjs
+      # Review is only real when a reviewer can read the diff. Vendor
+      # scripts/pr-size.mjs + config/pr-size.v1.json from The Gibson; label
+      # `size-exception` = owner sign-off, still announced. Sensor + budget run
+      # from the trusted base tip, never the PR merge ref.
+      - name: PR size (trusted-base sensor; size-exception announced, never silent)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GIBSON_PR_SIZE_EXCEPTION: ${{ contains(github.event.pull_request.labels.*.name, 'size-exception') && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          GIBSON_PR_BASE=$(git rev-parse --verify "refs/remotes/origin/${BASE_REF}^{commit}") || {
+            echo "::error title=pr-size::cannot resolve base branch origin/${BASE_REF}"; exit 2; }
+          export GIBSON_PR_BASE
+          trusted="$RUNNER_TEMP/pr-size-trusted"
+          mkdir -p "$trusted/scripts" "$trusted/config"
+          for f in scripts/pr-size.mjs config/pr-size.v1.json; do
+            git show "$GIBSON_PR_BASE:$f" > "$trusted/$f" 2>/dev/null || {
+              echo "::warning::pr-size skipped: $f not on base $GIBSON_PR_BASE (PR copy is never executed)"
+              echo "- pr-size: skipped, \`$f\` absent on base $GIBSON_PR_BASE" >> "$GITHUB_STEP_SUMMARY"
+              exit 0; }
+          done
+          node "$trusted/scripts/pr-size.mjs"
 
       - run: <generate>      # e.g. npx prisma generate
       - run: <typecheck>     # e.g. npx tsc --noEmit
