@@ -308,7 +308,8 @@ jobs:
           mkdir -p "$trusted/scripts" "$trusted/config"
           for f in scripts/pr-size.mjs config/pr-size.v1.json; do
             git show "$GIBSON_PR_BASE:$f" > "$trusted/$f" 2>/dev/null || {
-              echo "::warning title=pr-size::$f not on base $GIBSON_PR_BASE — sensor skipped (PR copy is never executed)"
-              echo "- pr-size: skipped, \`$f\` absent on base $GIBSON_PR_BASE" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+              echo "::warning::pr-size skipped: $f not on base $GIBSON_PR_BASE (PR copy is never executed)"
+              echo "- pr-size: skipped, \`$f\` absent on base $GIBSON_PR_BASE" >> "$GITHUB_STEP_SUMMARY"
+              exit 0; }
           done
           node "$trusted/scripts/pr-size.mjs"
