@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // sensor-health-lib.mjs — #256 classifier + audit.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 export const SCHEMA_ID = "gibson.sensor-health.observation.v1";
@@ -9,6 +9,10 @@ export const STANDING_ISSUE_NUMBER = 212;
 export const DEFAULT_RUN_PAGE_CAP = 5;
 export const DEFAULT_PER_PAGE = 100;
 export const MIN_RUNS_FOR_BLIND = 3;
+/** Official GitHub rerun limit: 30 days after the initial run. */
+export const GITHUB_WORKFLOW_RERUN_HORIZON_DAYS = 30;
+/** Extra UTC calendar day so date-granular `created` queries cover the exact 30*86400s floor. */
+export const FRESHNESS_CREATED_QUERY_SLACK_DAYS = 1;
 export const REGISTRY_REL = "config/sensor-health-observation.v1.json";
 export const REASON = Object.freeze({
   CURRENT_HEAD_RED: "current-head-red",
@@ -51,11 +55,31 @@ const PENDING_STATUSES = new Set([
   "requested",
   "pending",
 ]);
+export const REVIEW_EVIDENCE_WORKFLOW_PATH = ".github/workflows/pr-review-evidence.yml";
+export const REVIEW_EVIDENCE_EVENTS = Object.freeze([
+  "pull_request_target",
+  "issue_comment",
+  "schedule",
+]);
+export const REVIEW_EVIDENCE_WINDOW_DAYS = 1;
 export const REQUIRED_REPO_OWNED_PATHS = Object.freeze([
   ".github/workflows/gibson-self-gate.yml",
   ".github/workflows/sensor-health.yml",
+  REVIEW_EVIDENCE_WORKFLOW_PATH,
 ]);
 export const PAGES_WORKFLOW_PATH = "dynamic/pages/pages-build-deployment";
+export const CHECKED_IN_WORKFLOW_DIR = ".github/workflows";
+/**
+ * Closed exact path ↔ capability-reason bindings used by inventory.
+ * Empty: every checked-in workflow is a standing sensor. A future
+ * exclusion is an explicit code/test change that names both the path
+ * and the reason; callers cannot supply an allowlist.
+ */
+export const CHECKED_IN_INVENTORY_EXCLUSIONS = Object.freeze([]);
+/** Closed reason vocabulary. A listed reason is not sufficient without an exact path binding. */
+export const INVENTORY_CAPABILITY_REASONS = Object.freeze([
+  "capability-disabled:has_pages=false",
+]);
 export function repoRootFromModule(moduleUrl = import.meta.url) {
   return resolve(dirname(fileURLToPath(moduleUrl)), "..");
 }
@@ -77,6 +101,13 @@ function requireNonEmptyStringArray(value, loc, errors) {
   if (value.some((x) => typeof x !== "string" || !x)) {
     errors.push(`${loc} entries must be non-empty strings`);
   }
+}
+function sameStringSet(actual, required) {
+  if (!Array.isArray(actual) || actual.length !== required.length) return false;
+  if (actual.some((e) => typeof e !== "string" || !e)) return false;
+  if (new Set(actual).size !== required.length) return false;
+  const got = new Set(actual);
+  return required.every((e) => got.has(e));
 }
 /** Only accepted capability condition: { repoField: "has_pages", equals: true }. */
 function assertClosedEnabledWhen(ew, loc, errors) {
@@ -197,6 +228,26 @@ export function validateRegistry(doc) {
   if (sensorHealth) {
     if (sensorHealth.mode !== "freshness") errors.push("sensor-health mode must remain freshness");
     if (sensorHealth.windowDays !== 2) errors.push("sensor-health windowDays must remain 2");
+  }
+  const reviewEvidence = doc.policies.find((p) => p?.path === REVIEW_EVIDENCE_WORKFLOW_PATH);
+  if (reviewEvidence) {
+    if (reviewEvidence.mode !== "freshness") {
+      errors.push("pr-review-evidence mode must remain freshness");
+    }
+    if (
+      typeof reviewEvidence.windowDays === "number" &&
+      Number.isInteger(reviewEvidence.windowDays) &&
+      reviewEvidence.windowDays > REVIEW_EVIDENCE_WINDOW_DAYS
+    ) {
+      errors.push("pr-review-evidence freshness windowDays must not exceed 1");
+    } else if (reviewEvidence.windowDays !== REVIEW_EVIDENCE_WINDOW_DAYS) {
+      errors.push("pr-review-evidence windowDays must remain 1");
+    }
+    if (!sameStringSet(reviewEvidence.events, REVIEW_EVIDENCE_EVENTS)) {
+      errors.push(
+        "pr-review-evidence events must be exactly pull_request_target, issue_comment, and schedule"
+      );
+    }
   }
   if (errors.length) return failRegistry(errors.join("; "), errors);
   return {
@@ -417,6 +468,107 @@ export function evaluateCapabilities(policies, hasPages) {
     }
   }
   return { enabled, exclusions, capabilityUnknown };
+}
+function isExactExclusionBinding(entry, bindings) {
+  return bindings.some(
+    (b) => b.path === entry.path && b.capabilityReason === entry.capabilityReason
+  );
+}
+export function validateInventoryExclusions(exclusions) {
+  if (!Array.isArray(exclusions)) {
+    return failRegistry("inventory exclusions must be an array");
+  }
+  const errors = [];
+  const seen = new Set();
+  const required = new Set(REQUIRED_REPO_OWNED_PATHS);
+  const allowedReasons = new Set(INVENTORY_CAPABILITY_REASONS);
+  const allowedBindings = CHECKED_IN_INVENTORY_EXCLUSIONS;
+  for (let i = 0; i < exclusions.length; i++) {
+    const x = exclusions[i];
+    const loc = `inventoryExclusions[${i}]`;
+    if (!x || typeof x !== "object" || Array.isArray(x)) {
+      errors.push(`${loc} must be an object`);
+      continue;
+    }
+    let pathOk = false;
+    if (typeof x.path !== "string" || !x.path) {
+      errors.push(`${loc}.path must be a non-empty string`);
+    } else if (seen.has(x.path)) {
+      errors.push(`${loc}.path duplicate: ${x.path}`);
+    } else if (required.has(x.path)) {
+      errors.push(`${loc}.path cannot exclude required sensor ${x.path}`);
+    } else {
+      seen.add(x.path);
+      pathOk = true;
+    }
+    const reasonOk =
+      typeof x.capabilityReason === "string" && allowedReasons.has(x.capabilityReason);
+    if (!reasonOk) {
+      errors.push(`${loc}.capabilityReason must be a tested closed capability reason`);
+    } else if (pathOk && !isExactExclusionBinding(x, allowedBindings)) {
+      errors.push(
+        `${loc} must bind an exact tested workflow path to its exact capability reason`
+      );
+    }
+  }
+  if (errors.length) return failRegistry(errors.join("; "), errors);
+  return exclusions.map((x) => ({ path: x.path, capabilityReason: x.capabilityReason }));
+}
+export function discoverCheckedInWorkflows(repoRoot) {
+  const dir = join(repoRoot, CHECKED_IN_WORKFLOW_DIR);
+  let ents;
+  try {
+    ents = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    const e = new Error(
+      `checked-in workflow directory unreadable at ${CHECKED_IN_WORKFLOW_DIR}: ${err.message}`
+    );
+    e.code = "E_INVENTORY";
+    throw e;
+  }
+  const files = [];
+  for (const ent of ents) {
+    if (!ent.isFile() && !ent.isSymbolicLink()) continue;
+    if (!/\.ya?ml$/i.test(ent.name)) continue;
+    files.push(`${CHECKED_IN_WORKFLOW_DIR}/${ent.name}`);
+  }
+  files.sort();
+  return files;
+}
+export function inventoryCheckedInWorkflows({
+  checkedInPaths,
+  policies,
+  exclusions = CHECKED_IN_INVENTORY_EXCLUSIONS,
+} = {}) {
+  if (!Array.isArray(checkedInPaths)) {
+    return failRegistry("checked-in workflow inventory paths must be an array");
+  }
+  const validated = validateInventoryExclusions(exclusions);
+  const excluded = new Set(validated.map((e) => e.path));
+  const active = [];
+  for (let i = 0; i < checkedInPaths.length; i++) {
+    const path = checkedInPaths[i];
+    if (typeof path !== "string" || !path) {
+      active.push({
+        id: i + 1,
+        name: "(malformed)",
+        path: String(path ?? ""),
+        state: "active",
+      });
+      continue;
+    }
+    if (excluded.has(path)) continue;
+    active.push({
+      id: i + 1,
+      name: path,
+      path,
+      state: "active",
+    });
+  }
+  const repoOwned = (policies || []).filter(
+    (p) => typeof p?.path === "string" && p.path.startsWith(`${CHECKED_IN_WORKFLOW_DIR}/`)
+  );
+  return joinPolicies(active, repoOwned);
 }
 function hasPagesFrozenEqual(a, b) {
   if (!a?.ok && !b?.ok) return (a?.detail || "") === (b?.detail || "");
@@ -1013,6 +1165,78 @@ export function renderIssueBody(report) {
 function createBudget() {
   return { requests: 0, pages: 0, capsHit: 0, cacheHits: 0 };
 }
+/** True only for checked-in `.github/workflows` freshness policies, never dynamic/pseudo sensors. */
+export function isCheckedInRepoOwnedFreshnessPolicy(policy) {
+  return (
+    !!policy &&
+    policy.mode === "freshness" &&
+    typeof policy.path === "string" &&
+    policy.path.startsWith(`${CHECKED_IN_WORKFLOW_DIR}/`)
+  );
+}
+
+/** UTC date of observationTime minus windowDays (local freshness window date, not the server query). */
+export function freshnessCreatedQueryFloor(observationTime, windowDays) {
+  const ts = observationTime instanceof Date ? observationTime : new Date(observationTime);
+  const days = Number.isInteger(windowDays) && windowDays > 0 ? windowDays : 0;
+  return new Date(ts.getTime() - days * 86400_000).toISOString().slice(0, 10);
+}
+
+function utcDateString(instant) {
+  const ts = instant instanceof Date ? instant : new Date(instant);
+  if (Number.isNaN(ts.getTime())) return null;
+  return ts.toISOString().slice(0, 10);
+}
+
+function nextUtcDate(dateStr) {
+  const t = Date.parse(`${dateStr}T00:00:00.000Z`);
+  if (Number.isNaN(t)) return null;
+  return new Date(t + 86400_000).toISOString().slice(0, 10);
+}
+
+/** Created-time lookback that covers windowDays + GitHub rerun horizon + date-floor slack. */
+export function freshnessCreatedQueryLookbackDays(windowDays) {
+  const days = Number.isInteger(windowDays) && windowDays > 0 ? windowDays : 0;
+  return days + GITHUB_WORKFLOW_RERUN_HORIZON_DAYS + FRESHNESS_CREATED_QUERY_SLACK_DAYS;
+}
+
+/**
+ * Disjoint per-UTC-day `created` shards covering every run that can still have
+ * `updated_at` inside the local freshness window (rerunnable horizon + slack).
+ */
+export function freshnessCreatedQueryShards(observationTime, windowDays) {
+  const end = utcDateString(observationTime);
+  if (!end) return [];
+  const ts = observationTime instanceof Date ? observationTime : new Date(observationTime);
+  const start = new Date(ts.getTime() - freshnessCreatedQueryLookbackDays(windowDays) * 86400_000)
+    .toISOString()
+    .slice(0, 10);
+  if (start > end) return [];
+  const shards = [];
+  for (let d = start; d && d <= end; d = nextUtcDate(d)) {
+    shards.push({ created: d });
+  }
+  return shards;
+}
+
+/** Deterministic by numeric id: keep the record that sorts first by updated_at then id. */
+export function mergeWorkflowRunsById(runs) {
+  const byId = new Map();
+  const withoutId = [];
+  for (const run of runs || []) {
+    const id = Number(run?.id);
+    if (!run || typeof run !== "object" || !Number.isFinite(id)) {
+      withoutId.push(run);
+      continue;
+    }
+    const prev = byId.get(id);
+    if (prev === undefined || compareUpdatedAtThenId(run, prev) < 0) {
+      byId.set(id, run);
+    }
+  }
+  return [...byId.values(), ...withoutId];
+}
+
 export async function paginateList({
   fetchPage,
   perPage = DEFAULT_PER_PAGE,
@@ -1444,6 +1668,36 @@ export async function runSensorHealthAudit({
                 jobCache.set(cacheKey, jobs);
               }
             }
+          }
+        } else if (isCheckedInRepoOwnedFreshnessPolicy(policy)) {
+          const shards = freshnessCreatedQueryShards(ctx.observationTime, policy.windowDays);
+          if (shards.length === 0) {
+            evidenceComplete = false;
+          } else {
+            const merged = [];
+            for (const event of policy.events) {
+              for (const shard of shards) {
+                const result = await paginateWorkflowField(
+                  (page, pp) => {
+                    const q = new URLSearchParams({
+                      event,
+                      created: shard.created,
+                      per_page: String(pp),
+                      page: String(page),
+                    });
+                    return `/repos/${repository}/actions/workflows/${joinRow.workflowId}/runs?${q}`;
+                  },
+                  requireWorkflowRuns
+                );
+                if (result.capExhausted && !result.complete) {
+                  capExhausted = true;
+                  evidenceComplete = false;
+                  budget.capsHit += 1;
+                }
+                merged.push(...result.items);
+              }
+            }
+            runs = mergeWorkflowRunsById(merged);
           }
         } else {
           const result = await paginateWorkflowField(

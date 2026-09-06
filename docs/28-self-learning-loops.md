@@ -50,6 +50,13 @@ feasible tier** — prose-only lessons are tracked as debt:
 6. **Knowledge drift** — corrected wrong beliefs become retired-fact rules
    (conference-os `scripts/check-doc-facts.mjs` is the house pattern; port
    pending here).
+7. **Self-gate sensors (every PR/push)** — `scripts/lesson-ledger-lint.mjs`
+   (Law 9 ledger hygiene, #316) and `scripts/sensor-reachability.mjs`
+   (orphan-sensor ratchet, #317) run as steps in
+   `.github/workflows/gibson-self-gate.yml`; `scripts/pr-review-evidence.mjs`
+   (cross-vendor review-verdict evidence, #315) runs via
+   `.github/workflows/pr-review-evidence.yml`. All three block merge on every
+   PR/push, not just their own tests.
 
 ## The spec gate (pre-work)
 

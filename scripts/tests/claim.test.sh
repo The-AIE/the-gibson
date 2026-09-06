@@ -756,6 +756,13 @@ case "$1 $2" in
     fi
     ;;
   "api graphql")
+    # Bound open evidence (openPrClaimEvidence) also carries states:[OPEN], so
+    # match it before list-open-numbers / the generic open inventory. rollback_pr
+    # SHA-binds the close to this lane's reservation (#331).
+    want_open_evidence=0
+    for a in "$@"; do
+      case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac
+    done
     # `list-open-numbers` is named openPrNumbers and its query also carries
     # `states: [OPEN]`, so match it first.
     want_numbers=0
@@ -767,7 +774,29 @@ case "$1 $2" in
       case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac
     done
     lock
-    if [[ "$want_numbers" -eq 1 ]]; then
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      want_num=""
+      for a in "$@"; do
+        case "$a" in
+          *"select(.number == "*)
+            want_num=$(printf '%s' "$a" | sed -n 's/.*select(\.number == \([0-9][0-9]*\)).*/\1/p' | head -1)
+            ;;
+        esac
+      done
+      while IFS='|' read -r number claim scope branch url created updated; do
+        [[ -n "$claim" ]] || continue
+        [[ -z "$want_num" || "$number" == "$want_num" ]] || continue
+        issue=""
+        if [[ "$claim" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?([0-9]+)- ]]; then
+          issue="${BASH_REMATCH[2]}"
+        fi
+        headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+        [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tOPEN\tfalse\t%s\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
+          "$RACE_REPO" "$created" "$updated"
+      done < "$RACE_DIR/prs"
+    elif [[ "$want_numbers" -eq 1 ]]; then
       cut -d'|' -f1 "$RACE_DIR/prs" 2>/dev/null | grep -E '^[0-9]+$' || true
     elif [[ "$want_open" -eq 1 ]]; then
       while IFS='|' read -r number claim scope branch url created updated; do
@@ -1036,6 +1065,16 @@ case "$1 $2" in
   # list-open-numbers (openPrNumbers) is body-agnostic and also empty here:
   # this fixture never published a PR that claim.sh can re-find by number.
   "api graphql")
+    want_open_evidence=0
+    for a in "$@"; do case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac; done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      branch="feat/77-blind"
+      headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+      [[ -n "$headsha" ]] || exit 0
+      printf '4242\tissue-77-blind\tlib/blind/**\t77\t%s\t%s\thttps://github.com/acme/app/pull/4242\tOPEN\tfalse\tacme/app\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+        "$branch" "$headsha"
+      exit 0
+    fi
     for a in "$@"; do
       case "$a" in
         *"openPrNumbers"*|*"states: [OPEN]"*) exit 0 ;;
@@ -1125,6 +1164,37 @@ case "$1 $2" in
     fi
     ;;
   "api graphql")
+    # Bound open evidence (openPrClaimEvidence) also carries states:[OPEN], so
+    # match it before list-open-numbers / the generic open inventory. rollback_pr
+    # SHA-binds the close to this lane's reservation (#331).
+    want_open_evidence=0
+    for a in "$@"; do case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac; done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      want_num=""
+      for a in "$@"; do
+        case "$a" in
+          *"select(.number == "*)
+            want_num=$(printf '%s' "$a" | sed -n 's/.*select(\.number == \([0-9][0-9]*\)).*/\1/p' | head -1)
+            ;;
+        esac
+      done
+      if [[ -f "$LAG_STATE/self" ]]; then
+        while IFS=$'\t' read -r number claim scope branch url created updated cross; do
+          [[ -n "$claim" ]] || continue
+          [[ -z "$want_num" || "$number" == "$want_num" ]] || continue
+          issue=""
+          if [[ "$claim" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?([0-9]+)- ]]; then
+            issue="${BASH_REMATCH[2]}"
+          fi
+          headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+          [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tOPEN\t%s\tacme/app\t%s\t%s\n' \
+            "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
+            "${cross:-false}" "$created" "$updated"
+        done < "$LAG_STATE/self"
+      fi
+      exit 0
+    fi
     # `list-open-numbers` (operation openPrNumbers) also carries
     # `states: [OPEN]`, so match it first. It is body-agnostic: this lane's own
     # PR stays in it until `pr close` actually removes it.
@@ -1941,6 +2011,25 @@ case "$1 $2" in
     elif echo "$*" | grep -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
     ;;
   "api graphql")
+    # Bound open evidence SHA-binds rollback_pr (#331). Use the real branch
+    # head so a legitimate unparseable-create still closes THIS run's PR.
+    want_open_evidence=0
+    for a in "$@"; do case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac; done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      while IFS=$'\t' read -r number claim scope branch url created updated cross; do
+        [[ -n "$claim" ]] || continue
+        issue=""
+        if [[ "$claim" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?([0-9]+)- ]]; then
+          issue="${BASH_REMATCH[2]}"
+        fi
+        headsha=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)
+        [[ -n "$headsha" ]] || headsha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tOPEN\t%s\tacme/app\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
+          "${cross:-false}" "$created" "$updated"
+      done < "$STATE/open"
+      exit 0
+    fi
     # `list-open-numbers` (operation openPrNumbers) also carries
     # `states: [OPEN]`, so match it first. It is body-agnostic and derived
     # from the same store, so a PR that `pr close` removed is gone from it too.
@@ -2105,7 +2194,20 @@ case "$1 $2" in
   "repo view") echo "acme/app" ;;
   "issue view") cat "${GH_LABELS_FILE:-/dev/null}" 2>/dev/null || echo "" ;;
   "issue edit") echo "$*" >> "${GH_LOG:-/dev/null}" ;;
-  "api graphql") : ;;
+  "api graphql")
+    want_open_evidence=0
+    for a in "$@"; do case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac; done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      headsha=$(git ls-remote origin "refs/heads/$BR" 2>/dev/null | cut -f1)
+      [[ -n "$headsha" ]] || exit 0
+      issue="${BR#feat/}"
+      issue="${issue%%-*}"
+      slug="${BR#feat/${issue}-}"
+      printf '7777\tissue-%s-%s\tlib/%s/**\t%s\t%s\t%s\thttps://github.com/acme/app/pull/7777\tOPEN\tfalse\tacme/app\t2026-08-09T00:00:00Z\t2026-08-09T00:00:00Z\n' \
+        "$issue" "$slug" "$slug" "$issue" "$BR" "$headsha"
+      exit 0
+    fi
+    ;;
   "pr create") echo "https://github.com/acme/app/pull/7777" ;;
   "pr close")
     echo "closed $3" >> "${GH_CLOSE_LOG:-/dev/null}"
@@ -2797,6 +2899,143 @@ if [[ -d "$ROOT/emptyslice/wt-910-noscope" ]] || \
 else
   ok "empty --slice created no worktree"
 fi
+
+# ===========================================================================
+# #331 — rollback must never close another lane's PR
+# ===========================================================================
+# 2026-09-04: a failed second claim.sh for #319 (invalid glob `*.test.sh`)
+# closed PR #327, which the first successful claim had opened. rollback_pr
+# adopted that PR's number from the live inventory by claim-id/branch match
+# and closed it without proving the head SHA was THIS run's reservation.
+echo "#331 · invalid scope on a second claim does not close the first PR"
+new_repo "$ROOT/331scope"
+out=$(cd "$ROOT/331scope/canon" && "$CLAIM" 331 first-lane 'scripts/claim.sh' 2>&1); rc=$?
+check "first claim on #331 succeeds" "$rc" "0"
+contains "first claim published a PR-body row" "$(cat "$GH_PR_FILE")" "issue-331-first-lane"
+first_pr_row=$(cat "$GH_PR_FILE")
+out=$(cd "$ROOT/331scope/canon" && "$CLAIM" 331 first-lane '*.test.sh' 2>&1); rc=$?
+check "same-slug invalid scope exits nonzero" "$rc" "1"
+contains "invalid glob is refused before inventory/adoption" "$out" "invalid claim-scope token"
+contains "names the offending glob" "$out" "*.test.sh"
+lacks "invalid glob never reaches already-claimed" "$out" "already claimed"
+lacks "invalid glob never claims a rollback close" "$out" "rollback: closed"
+check "first PR is still the live row" "$(cat "$GH_PR_FILE")" "$first_pr_row"
+if [[ -s "${GH_PR_FILE}.closed" ]]; then
+  bad "invalid-scope retry closed the first PR: $(cat "${GH_PR_FILE}.closed")"
+else
+  ok "invalid-scope retry closed no PR"
+fi
+
+out=$(cd "$ROOT/331scope/canon" && "$CLAIM" 331 other-lane '*.test.sh' --slice 2>&1); rc=$?
+check "slice+invalid-scope exits nonzero" "$rc" "1"
+contains "slice+invalid-scope is refused before inventory/adoption" "$out" "invalid claim-scope token"
+lacks "slice+invalid-scope never claims a rollback close" "$out" "rollback: closed"
+check "first PR survives a slice with invalid scope" "$(cat "$GH_PR_FILE")" "$first_pr_row"
+if [[ -s "${GH_PR_FILE}.closed" ]]; then
+  bad "slice+invalid-scope closed the first PR: $(cat "${GH_PR_FILE}.closed")"
+else
+  ok "slice+invalid-scope closed no PR"
+fi
+
+echo "#331 · rollback still closes this lane's OWN PR; a sibling on the same issue is untouched"
+new_repo "$ROOT/331own"
+out=$(cd "$ROOT/331own/canon" && "$CLAIM" 331 first-lane 'scripts/claim.sh' 2>&1); rc=$?
+check "sibling first-lane claim succeeds" "$rc" "0"
+contains "sibling first-lane is live" "$(cat "$GH_PR_FILE")" "issue-331-first-lane"
+export GH_PROVENANCE_FAIL=1
+out=$(cd "$ROOT/331own/canon" && "$CLAIM" 331 second-lane 'scripts/tests/claim.test.sh' --slice 2>&1); rc=$?
+unset GH_PROVENANCE_FAIL
+check "second-lane provenance failure exits nonzero" "$rc" "1"
+contains "second-lane closed its own PR" "$out" "closed this lane's own PR #"
+contains "first-lane sibling is still live" "$(cat "$GH_PR_FILE")" "issue-331-first-lane"
+lacks "first-lane sibling was not moved to closed" "$(cat "${GH_PR_FILE}.closed" 2>/dev/null)" "issue-331-first-lane"
+contains "second-lane own PR was closed" "$(cat "${GH_PR_FILE}.closed" 2>/dev/null)" "issue-331-second-lane"
+
+echo "#331 · rollback refuses to close a PR whose head SHA is not this run's reservation"
+# Same adoption path as the unparseable-but-visible create (#153 prfound):
+# this run never parsed a PR number, inventory shows a matching claim-id and
+# branch, but the bound open head SHA is a foreign commit — the first
+# successful claim's reservation, not this run's. Must not close it.
+new_repo "$ROOT/331sha"
+mkdir -p "$ROOT/331sha/bin"
+cat > "$ROOT/331sha/bin/gh" <<'SHA331GH'
+#!/usr/bin/env bash
+STATE="${SHA331_STATE:?}"
+case "$1 $2" in
+  "repo view") echo "acme/app" ;;
+  "issue view") cat "$STATE/labels" 2>/dev/null || echo "" ;;
+  "issue edit")
+    echo "$*" >> "$STATE/label.log"
+    if echo "$*" | grep -- '--add-label' >/dev/null; then echo "agent-claimed" > "$STATE/labels"
+    elif echo "$*" | grep -- '--remove-label' >/dev/null; then : > "$STATE/labels"; fi
+    ;;
+  "api graphql")
+    want_open_evidence=0
+    for a in "$@"; do case "$a" in *"openPrClaimEvidence"*) want_open_evidence=1 ;; esac; done
+    if [[ "$want_open_evidence" -eq 1 ]]; then
+      while IFS=$'\t' read -r number claim scope branch url created updated cross; do
+        [[ -n "$claim" ]] || continue
+        issue=""
+        if [[ "$claim" =~ ^issue-([A-Za-z][A-Za-z0-9]*-)?([0-9]+)- ]]; then
+          issue="${BASH_REMATCH[2]}"
+        fi
+        # Foreign reservation — not this run's CLAIM_EXPECTED_OID.
+        headsha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\tOPEN\t%s\tacme/app\t%s\t%s\n' \
+          "$number" "$claim" "$scope" "$issue" "$branch" "$headsha" "$url" \
+          "${cross:-false}" "$created" "$updated"
+      done < "$STATE/open"
+      exit 0
+    fi
+    want_numbers=0
+    for a in "$@"; do case "$a" in *"openPrNumbers"*) want_numbers=1 ;; esac; done
+    if [[ "$want_numbers" -eq 1 ]]; then
+      cut -f1 "$STATE/open" 2>/dev/null | grep -E '^[0-9]+$' || true
+      exit 0
+    fi
+    want_open=0
+    for a in "$@"; do case "$a" in *"states: [OPEN]"*) want_open=1 ;; esac; done
+    [[ "$want_open" -eq 1 ]] || exit 0
+    cat "$STATE/open" 2>/dev/null
+    exit 0
+    ;;
+  "pr create")
+    branch=""
+    while [[ $# -gt 0 ]]; do case "$1" in --head) branch="$2"; shift 2 ;; *) shift ;; esac; done
+    printf '327\tissue-331-adopted\tscripts/claim.sh\t%s\thttps://github.com/acme/app/pull/327\t2026-09-04T20:00:00Z\t2026-09-04T20:00:00Z\tfalse\n' \
+      "$branch" > "$STATE/open"
+    echo "the pull request was created, somewhere"
+    ;;
+  "pr close")
+    echo "closed $3" >> "$STATE/close.log"
+    : > "$STATE/open"
+    ;;
+  *)
+    echo "fake gh (331sha): unmodelled invocation 'gh $*' — refusing" >&2
+    exit 64
+    ;;
+esac
+exit 0
+SHA331GH
+chmod +x "$ROOT/331sha/bin/gh"
+export SHA331_STATE="$ROOT/331sha/state"
+mkdir -p "$SHA331_STATE"
+: > "$SHA331_STATE/labels"
+: > "$SHA331_STATE/label.log"
+: > "$SHA331_STATE/close.log"
+: > "$SHA331_STATE/open"
+out=$(cd "$ROOT/331sha/canon" && PATH="$ROOT/331sha/bin:$PATH" \
+  "$CLAIM" 331 adopted 'scripts/claim.sh' 2>&1); rc=$?
+[[ "$rc" -ne 0 ]] && ok "SHA-mismatched adoption exits nonzero" || bad "SHA-mismatched adoption exited 0: $out"
+contains "reports an incomplete rollback" "$out" "INCOMPLETE"
+contains "names the reservation SHA mismatch" "$out" "not this lane's reservation commit"
+lacks "never claims it closed the adopted PR" "$out" "rollback: closed"
+check "never called gh pr close on the adopted PR" "$(grep -c . "$SHA331_STATE/close.log" || true)" "0"
+contains "adopted PR is still open" "$(cat "$SHA331_STATE/open")" "issue-331-adopted"
+test -d "$ROOT/331sha/wt-331-adopted" \
+  && ok "SHA-mismatched adoption keeps the worktree" || bad "SHA-mismatched adoption destroyed the worktree"
+contains "SHA-mismatched adoption keeps agent-claimed" "$(cat "$SHA331_STATE/labels")" "agent-claimed"
+unset SHA331_STATE
 
 echo
 echo "claim.test.sh: $PASS passed, $FAIL failed"

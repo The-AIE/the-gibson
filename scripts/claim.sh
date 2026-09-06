@@ -210,6 +210,52 @@ SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 die() { echo "claim.sh: ERROR: $*" >&2; exit 1; }
 info() { echo "claim.sh: $*" >&2; }
 
+# --- local scope-token grammar (#331) ---------------------------------------
+# Cheap, no inventory, no network. A glob like `*.test.sh` must refuse here
+# rather than after this run has read a live inventory or bound a PR number
+# (gibson#331). Same grammar as scope-overlap.mjs / loop-fleet.sh (#181).
+scope_token_is_safe() {
+  local token="$1" seg rest last literals=0
+  local LC_ALL=C LANG=C
+  [[ -n "$token" ]] || return 1
+  [[ "$token" == "**" ]] && return 0
+  case "$token" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  rest="$token"
+  while [[ -n "$rest" ]]; do
+    case "$rest" in
+      */*)
+        seg="${rest%%/*}"
+        rest="${rest#*/}"
+        last=0
+        ;;
+      *)
+        seg="$rest"
+        rest=""
+        last=1
+        ;;
+    esac
+    if [[ "$seg" == "*" || "$seg" == "**" ]]; then
+      [[ "$last" -eq 1 ]] || return 1
+      continue
+    fi
+    [[ "$seg" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+    if [[ "$seg" == "." || "$seg" == ".." ]]; then
+      return 1
+    fi
+    literals=$((literals + 1))
+  done
+  [[ "$literals" -ge 1 ]] || return 1
+  return 0
+}
+
+for s in "${SCOPE_PARTS[@]}"; do
+  if ! scope_token_is_safe "$s"; then
+    die "invalid claim-scope token '$s' (canonical grammar: '**' or plain segments with optional trailing '*'/'**'; refusing before any inventory read or PR-number adoption — #331)"
+  fi
+done
+
 # Shared cleanup guards (#153 review P1 0D) — the same worktree resolution and
 # exact remote-branch query release-claim.sh's terminal cleanup uses. Rollback
 # is a destructive path; it must not run without them.
@@ -531,6 +577,7 @@ leftover() { ROLLBACK_LEFTOVERS="${ROLLBACK_LEFTOVERS}  - $1"$'\n'; }
 ROLLBACK_INVENTORY_FRESH=0
 rollback_pr() {
   local matches="" count row num id head cross
+  local bound_rows bound_rc bound_count bound_sha
   ROLLBACK_INVENTORY_FRESH=0
   if [[ "$PR_CREATE_ATTEMPTED" -ne 1 ]]; then
     return 0
@@ -619,6 +666,35 @@ EOF
 
   # PR_NUMBER is bound here — either parsed from this lane's own create, or
   # discovered above and proven to carry this lane's claim id and branch.
+  # That is still not enough to close it (#331): an inventory row can be a
+  # previous successful claim on the same issue/branch. Close only when the
+  # PR's head SHA is this run's own reservation commit — the same exact-head
+  # discipline release-claim.sh uses. Anything unproven is kept, named, and
+  # reported rather than closed.
+  if [[ ! "$CLAIM_EXPECTED_OID" =~ ^[0-9a-f]{40}$ ]]; then
+    leftover "PR #$PR_NUMBER (kept: this lane has no pinned reservation commit to prove the PR head against — refusing to close a PR that is not SHA-bound to this run)"
+    return 1
+  fi
+  bound_rc=0
+  bound_rows=$("$SCRIPT_DIR/pr-claims.sh" find-open-pr "$REPO" "$CLAIM_ID" "$PR_NUMBER" 2>&1) || bound_rc=$?
+  if [[ "$bound_rc" -ne 0 ]]; then
+    leftover "PR #$PR_NUMBER (kept: cannot read bound open PR evidence to prove its head SHA is this lane's reservation $CLAIM_EXPECTED_OID — $bound_rows)"
+    return 1
+  fi
+  bound_count=$(printf '%s' "$bound_rows" | grep -c . || true)
+  if [[ "$bound_count" -ne 1 ]]; then
+    leftover "PR #$PR_NUMBER (kept: bound open evidence did not yield exactly one row for claim '$CLAIM_ID' on that PR (got $bound_count) — refusing to close without SHA proof that it is this run's reservation $CLAIM_EXPECTED_OID)"
+    return 1
+  fi
+  bound_sha=$(printf '%s' "$bound_rows" | cut -f6)
+  if [[ ! "$bound_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    leftover "PR #$PR_NUMBER (kept: bound open evidence has a malformed/missing head SHA '${bound_sha:-<empty>}' — refusing to close without SHA proof that it is this run's reservation $CLAIM_EXPECTED_OID)"
+    return 1
+  fi
+  if [[ "$bound_sha" != "$CLAIM_EXPECTED_OID" ]]; then
+    leftover "PR #$PR_NUMBER (kept: its head SHA is $bound_sha, not this lane's reservation commit $CLAIM_EXPECTED_OID — refusing to close a PR that is not this run's own reservation)"
+    return 1
+  fi
   if ! gh pr close "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1; then
     leftover "PR #$PR_NUMBER (kept: gh pr close failed — this lane's claim may still be LIVE. Close it by hand; nothing else was removed)"
     return 1
