@@ -466,22 +466,37 @@ echo "static scan (app.js): forbidden channels and wording"
 # Deliberately narrow on the location-assignment alternatives (Codex round-2
 # finding: an earlier, broader version matched ANY read of `window.location`
 # (a plain reference or comparison, not just a mutating assignment) and ANY
-# property literally named "location" on an arbitrary object (`\b` matches
-# right after a `.`, so `model.location = ...` — nothing to do with browser
-# navigation — was a false positive). Only two shapes actually cause
-# navigation: assigning the whole `window.location` object, or reassigning
-# the bare global `location` identifier directly (not as a property of some
-# other object) — both require a literal `=` immediately after, and the bare
-# form must NOT be preceded by `.`/alnum/`_` (i.e. it is not somebody's
-# `.location` property). Optional whitespace is allowed around each `.` in
-# the member-access alternatives (Codex round-4 finding: a statement can be
-# reformatted with the property access itself split across lines, e.g.
-# `window\n  .location = "...";`, which a bare `\.` would miss). `new` in
-# the Worker alternative is `\b`-bounded on the left (Codex round-4 finding:
-# without it, "...renew Worker.reset()" — a `renew` variable followed
-# unrelated by a `Worker.reset()` call — matched as a false "new Worker",
-# since "new" is a literal suffix of "renew").
-FORBIDDEN_JS_RE='fetch\(|XMLHttpRequest|sendBeacon|WebSocket|EventSource|ServiceWorker|serviceWorker|\bnew[[:space:]]+Worker\b|importScripts|import\(|window[[:space:]]*\.[[:space:]]*open|window[[:space:]]*\.[[:space:]]*location[[:space:]]*=[^=]|location[[:space:]]*\.[[:space:]]*href|location[[:space:]]*\.[[:space:]]*assign|location[[:space:]]*\.[[:space:]]*replace|document[[:space:]]*\.[[:space:]]*location|(^|[^.[:alnum:]_])location[[:space:]]*=[^=]|\.innerHTML[[:space:]]*='
+# property literally named "location" on an arbitrary object — was a false
+# positive). Only two shapes actually cause navigation: assigning the whole
+# `window.location` object, or reassigning the bare global `location`
+# identifier directly (not as a property of some other object) — both
+# require a literal `=` immediately after. Optional whitespace is allowed
+# around each `.` in the member-access alternatives (Codex round-4 finding:
+# a statement can be reformatted with the property access itself split
+# across lines, e.g. `window\n  .location = "...";`, which a bare `\.`
+# would miss).
+#
+# Every bare-identifier alternative below (fetch, XMLHttpRequest,
+# sendBeacon, WebSocket, EventSource, ServiceWorker, serviceWorker, new
+# .. Worker, importScripts, import, window, location, document) is
+# bounded on BOTH sides by `(^|[^[:alnum:]_$])` / `([^[:alnum:]_$]|$)`
+# rather than grep's own `\b`. Two independent gaps forced this (Codex
+# round-4 and round-5 findings), and both come from the same root cause —
+# grep's `\b` is not a JavaScript identifier boundary:
+#   1. `\b` alone gave no LEFT boundary at all for "window"/"new" in some
+#      alternatives, so `mainwindow.location = ...` (ends in "window") and
+#      `...renew\nWorker.reset()` (ends in "new", flattened adjacent to an
+#      unrelated "Worker") both false-matched.
+#   2. `\b` treats only `[A-Za-z0-9_]` as "word" characters, but `$` is a
+#      legal JavaScript identifier character grep doesn't know about, so
+#      even a `\b`-bounded pattern false-matched `$new` (a variable) before
+#      "Worker", and `Worker$Factory` (an unrelated class name) after
+#      "new". The explicit `[^[:alnum:]_$]` class treats `$` as an
+#      identifier character on both sides, closing that gap for good
+#      instead of chasing one more `\b` variant.
+FORBIDDEN_ID_L='(^|[^[:alnum:]_$])'
+FORBIDDEN_ID_R='([^[:alnum:]_$]|$)'
+FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*open|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*href|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*assign|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*replace|${FORBIDDEN_ID_L}document[[:space:]]*\\.[[:space:]]*location|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
 
 # Flattens the whole file to one line (newlines -> spaces) before matching,
 # so a statement split across lines — e.g.
@@ -580,6 +595,19 @@ BENIGN_LOCATION_SNIPPETS=(
   # to one line, contains the literal substring "new Worker" purely by
   # coincidence — this constructs no worker.
   $'const renew = true\nconst Worker = { reset() {} }\nconst shouldRenew = renew\nWorker.reset()'
+  # Codex round-5 findings: "window" had no LEFT identifier boundary, so an
+  # identifier merely ENDING in "window" false-matched...
+  $'const mainwindow = {};\nmainwindow\n  .location = "local";'
+  # ...and grep's `\b` does not know `$` is a legal JS identifier character,
+  # so a `$`-prefixed variable before "Worker"...
+  $'const $new = true;\nconst Worker = { reset() {} };\nconst shouldRenew = $new\nWorker.reset()'
+  # ...and a `$`-suffixed class name after "new" both slipped past a
+  # `\b`-only boundary.
+  $'class Worker$Factory {}\nconst localObject = new Worker$Factory();'
+  # Proactive control (same root cause, not yet demonstrated by Codex but
+  # closed by the same both-sided-boundary fix): an identifier merely
+  # ending in "fetch" is not a call to the forbidden global.
+  'function prefetchData() { return 1; }'
 )
 BENIGN_ALL_CLEAN=1
 for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
