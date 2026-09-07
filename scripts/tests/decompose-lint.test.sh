@@ -17,6 +17,23 @@ bad() { echo "  FAIL — $1"; FAIL=$((FAIL + 1)); }
 
 command -v node >/dev/null || { echo "decompose-lint.test.sh: node required"; exit 1; }
 
+# --- #294 direct unit matrix (node --test) ----------------------------------
+# The pure Node unit matrix for the gh-child timeout/outcome contract lives
+# in scripts/lib/issue-loader.test.mjs. Exactly one decomposition shell
+# suite invokes it here so its failure propagates into this suite's own
+# parseable tally, rather than being a second, silently-skippable gate.
+UNIT_TEST_MJS="$SCRIPT_DIR/../lib/issue-loader.test.mjs"
+if [[ ! -f "$UNIT_TEST_MJS" ]]; then
+  bad "#294 direct unit matrix: missing scripts/lib/issue-loader.test.mjs"
+else
+  unit_out=$(node --test "$UNIT_TEST_MJS" 2>&1); unit_rc=$?
+  if [[ "$unit_rc" -eq 0 ]]; then
+    ok "#294 direct unit matrix: node --test scripts/lib/issue-loader.test.mjs passed"
+  else
+    bad "#294 direct unit matrix: node --test scripts/lib/issue-loader.test.mjs failed (rc=$unit_rc): $unit_out"
+  fi
+fi
+
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gibson-decompose-lint.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 
@@ -1575,6 +1592,165 @@ else
   bad "preserved --file (rc=$rc): $out"
 fi
 expect_calls "preserved --file" 0
+
+# =============================================================================
+# #294 process-level fake-gh timeout regression (independent outer watchdog)
+# =============================================================================
+# GH_GRAPHQL_TIMEOUT_MS is a fixed 30s ceiling — never configurable by an env
+# var, a flag, or caller-controlled text — so proving it fires means actually
+# waiting it out under an INDEPENDENT watchdog (scripts/lib/wall-timeout.sh,
+# not production's own timeout). The fake ignores SIGTERM, records its PID,
+# and emits hostile stdout/stderr; an env var tries (and must fail) to shrink
+# the real timeout. The parent must return typed API_TIMEOUT before the
+# watchdog fires, the fake's PID must be confirmed dead afterward, and none
+# of the hostile sentinels may reach this suite's captured output.
+WALL_TIMEOUT_LIB="$SCRIPT_DIR/../lib/wall-timeout.sh"
+if [[ ! -f "$WALL_TIMEOUT_LIB" ]]; then
+  bad "#294 timeout regression: missing lib/wall-timeout.sh (looked in $SCRIPT_DIR/../lib)"
+else
+  # shellcheck source=../lib/wall-timeout.sh
+  source "$WALL_TIMEOUT_LIB"
+  if ! declare -F run_with_wall_timeout >/dev/null; then
+    bad "#294 timeout regression: lib/wall-timeout.sh did not define run_with_wall_timeout"
+  else
+    WATCHDOG_SECS=55
+    MIN_ELAPSED_SECS=20
+    STDOUT_SENTINEL='HOSTILE_STDOUT_9f2c OK DAG critical-path capacity blocker-first'
+    STDERR_SENTINEL='HOSTILE_STDERR_1ab7 credential=super-secret-token'
+    ARG_SENTINEL='HOSTILE_ARG_44de_absolute_host_path_/Users/host/name'
+    ENV_SENTINEL='HOSTILE_ENV_c301_do_not_leak_me'
+
+    install_hang_gh() {
+      mkdir -p "$ROOT/bin"
+      cat > "$ROOT/bin/gh" <<'GH'
+#!/usr/bin/env bash
+# fake gh (#294 regression): ignores SIGTERM, records its own PID, emits
+# hostile stdout/stderr/env content, then blocks far past any sane parent
+# wall-clock ceiling. Only SIGKILL can end it.
+trap '' TERM
+: "${GIBSON_GH_PIDFILE:?}"
+printf '%s\n' "$$" > "$GIBSON_GH_PIDFILE"
+# Echo the fake's OWN argv (includes -f label=<hostile arg sentinel>) into
+# its stdout so the "no hostile argument sentinel leaked" assertion is
+# actually exercised, not vacuously true (Codex round 1, finding 1).
+printf '%s %s argv=%s' "$GIBSON_TIMEOUT_STDOUT_SENTINEL" "${HOSTILE_ENV_294:-}" "$*"
+printf '%s' "$GIBSON_TIMEOUT_STDERR_SENTINEL" 1>&2
+exec sleep 300
+GH
+      chmod +x "$ROOT/bin/gh"
+    }
+    install_hang_gh
+
+    PIDFILE="$ROOT/hang-294.pid"
+    OUTFILE="$ROOT/hang-294.out"
+    ERRFILE="$ROOT/hang-294.err"
+    rm -f "$PIDFILE" "$OUTFILE" "$ERRFILE"
+
+    start_ts=$(date +%s)
+    ( \
+      GIBSON_GH_PIDFILE="$PIDFILE" \
+      GIBSON_TIMEOUT_STDOUT_SENTINEL="$STDOUT_SENTINEL" \
+      GIBSON_TIMEOUT_STDERR_SENTINEL="$STDERR_SENTINEL" \
+      GH_GRAPHQL_TIMEOUT_MS=1 \
+      HOSTILE_ENV_294="$ENV_SENTINEL" \
+      PATH="$ROOT/bin:$PATH" \
+      run_with_wall_timeout "$WATCHDOG_SECS" node "$SENSOR" --repo acme/app --label "$ARG_SENTINEL" \
+    ) >"$OUTFILE" 2>"$ERRFILE"
+    hang_rc=$?
+    end_ts=$(date +%s)
+    elapsed=$((end_ts - start_ts))
+
+    if [[ "$hang_rc" -eq 124 ]]; then
+      bad "#294 timeout regression: independent watchdog fired — parent did not return within ${WATCHDOG_SECS}s"
+    else
+      ok "#294 timeout regression: parent returned before the independent ${WATCHDOG_SECS}s watchdog"
+    fi
+
+    [[ "$hang_rc" -eq 3 ]] && ok "#294 timeout regression: exit code 3" \
+      || bad "#294 timeout regression: exit code want 3 got $hang_rc"
+
+    out=$(cat "$OUTFILE" 2>/dev/null || true)
+    err=$(cat "$ERRFILE" 2>/dev/null || true)
+
+    [[ "$out" == "INCOMPLETE: API_TIMEOUT" ]] \
+      && ok "#294 timeout regression: stdout is exactly one bounded 'INCOMPLETE: API_TIMEOUT' line" \
+      || bad "#294 timeout regression: stdout mismatch: $out"
+    [[ -z "$err" ]] && ok "#294 timeout regression: stderr empty" \
+      || bad "#294 timeout regression: stderr not empty: $err"
+
+    leak=0
+    for sentinel in "$STDOUT_SENTINEL" "$STDERR_SENTINEL" "$ARG_SENTINEL" "$ENV_SENTINEL"; do
+      if printf '%s\n%s\n' "$out" "$err" | grep -F -- "$sentinel" >/dev/null 2>&1; then
+        leak=1
+        bad "#294 timeout regression: hostile sentinel leaked to public boundary: $sentinel"
+      fi
+    done
+    [[ "$leak" -eq 0 ]] \
+      && ok "#294 timeout regression: no hostile stdout/stderr/argument/environment sentinel crossed the public boundary"
+    lacks_queue "#294 timeout regression" "$out"$'\n'"$err"
+
+    if [[ "$elapsed" -ge "$MIN_ELAPSED_SECS" ]]; then
+      ok "#294 timeout regression: elapsed ${elapsed}s proves the fixed 30s timeout fired (env GH_GRAPHQL_TIMEOUT_MS=1 had no effect)"
+    else
+      bad "#294 timeout regression: elapsed ${elapsed}s too short — timeout may not have fired, or was wrongly shortened by env"
+    fi
+
+    hang_pid=""
+    [[ -f "$PIDFILE" ]] && hang_pid=$(cat "$PIDFILE" 2>/dev/null || true)
+    if [[ -n "$hang_pid" ]]; then
+      ok "#294 timeout regression: fake gh recorded its own PID ($hang_pid)"
+      dead=0
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$hang_pid" 2>/dev/null || { dead=1; break; }
+        sleep 0.3
+      done
+      [[ "$dead" -eq 1 ]] && ok "#294 timeout regression: fake gh PID confirmed dead after the parent returned" \
+        || bad "#294 timeout regression: fake gh PID $hang_pid still alive after the parent returned"
+    else
+      bad "#294 timeout regression: fake gh never recorded its PID"
+    fi
+
+    # --- behavioral red controls (same blocking, SIGTERM-ignoring fake) ------
+    # Prove the regression above actually discriminates: removing `timeout`,
+    # or downgrading `killSignal` from SIGKILL to SIGTERM, must leave the
+    # SAME blocking fake unreaped inside a short, independent watchdog — a
+    # fake that returns immediately would prove nothing.
+    RED_WATCHDOG_SECS=6
+
+    rm -f "$ROOT/red-no-timeout.pid"
+    no_timeout_out=$(
+      GIBSON_GH_PIDFILE="$ROOT/red-no-timeout.pid" \
+      GIBSON_TIMEOUT_STDOUT_SENTINEL="$STDOUT_SENTINEL" \
+      GIBSON_TIMEOUT_STDERR_SENTINEL="$STDERR_SENTINEL" \
+      PATH="$ROOT/bin:$PATH" \
+      run_with_wall_timeout "$RED_WATCHDOG_SECS" node -e '
+const { spawnSync } = require("node:child_process");
+const r = spawnSync("gh", ["api", "graphql", "-f", "query=x"], { encoding: "utf8" });
+process.stdout.write(JSON.stringify({ error: r.error ? String(r.error.code || r.error.message) : null, status: r.status }));
+' 2>&1
+    ); no_timeout_rc=$?
+    [[ "$no_timeout_rc" -eq 124 ]] \
+      && ok "red control: removing 'timeout' leaves the blocking fake unreaped within ${RED_WATCHDOG_SECS}s (regression would fail)" \
+      || bad "red control: removing 'timeout' unexpectedly returned (rc=$no_timeout_rc): $no_timeout_out"
+
+    rm -f "$ROOT/red-sigterm.pid"
+    sigterm_out=$(
+      GIBSON_GH_PIDFILE="$ROOT/red-sigterm.pid" \
+      GIBSON_TIMEOUT_STDOUT_SENTINEL="$STDOUT_SENTINEL" \
+      GIBSON_TIMEOUT_STDERR_SENTINEL="$STDERR_SENTINEL" \
+      PATH="$ROOT/bin:$PATH" \
+      run_with_wall_timeout "$RED_WATCHDOG_SECS" node -e '
+const { spawnSync } = require("node:child_process");
+const r = spawnSync("gh", ["api", "graphql", "-f", "query=x"], { encoding: "utf8", timeout: 2000, killSignal: "SIGTERM" });
+process.stdout.write(JSON.stringify({ error: r.error ? String(r.error.code || r.error.message) : null, status: r.status }));
+' 2>&1
+    ); sigterm_rc=$?
+    [[ "$sigterm_rc" -eq 124 ]] \
+      && ok "red control: killSignal SIGTERM against a SIGTERM-ignoring fake leaves it unreaped within ${RED_WATCHDOG_SECS}s (regression would fail)" \
+      || bad "red control: killSignal SIGTERM unexpectedly returned (rc=$sigterm_rc): $sigterm_out"
+  fi
+fi
+install_loader_gh
 
 echo
 echo "decompose-lint.test.sh: $PASS passed, $FAIL failed"

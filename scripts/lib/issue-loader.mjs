@@ -19,6 +19,16 @@ import { dieUsage } from "./args.mjs";
 export const PAGE_SIZE = 100;
 export const PAGE_CAP = 100;
 
+/**
+ * Wall-clock ceiling for every production `gh` child (#294). Fixed and
+ * hardcoded: never raised, disabled, or replaced by an environment
+ * variable, a CLI flag, or caller-controlled issue/PR text. Applied via
+ * both `timeout` and `killSignal: "SIGKILL"` on every `spawnSync("gh", ...)`
+ * call so a wedged CLI, credential helper, or transport cannot hang the
+ * read indefinitely.
+ */
+export const GH_GRAPHQL_TIMEOUT_MS = 30_000;
+
 const ANSI_RE = /\x1b\[/;
 const CONTROL_RE = /[\u0000-\u001F\u007F-\u009F]/;
 const OID_RE = /^[0-9a-f]{40}$/;
@@ -28,6 +38,7 @@ const DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
 const INCOMPLETE_REASONS = new Set([
   "API_FAILURE",
+  "API_TIMEOUT",
   "ANSI_OUTPUT",
   "INVALID_JSON",
   "INVALID_SHAPE",
@@ -135,18 +146,44 @@ function parseGhJson(stdout, status) {
   return parsed;
 }
 
-function ghGraphql(query, vars) {
+/**
+ * Run one bounded `gh` child and map its outcome to the exact public
+ * contract (#294). `spawnFn` defaults to the real, synchronous
+ * `node:child_process.spawnSync` — production never overrides this
+ * parameter; it exists only so a pure Node unit test can inject a fake
+ * runner. There is no environment variable, flag, or other hidden path
+ * that changes the timeout, the kill signal, or which runner is used.
+ *
+ * Inspection order is load-bearing: `result.error?.code === "ETIMEDOUT"`
+ * is checked before `status`, `signal`, `stdout`, or `stderr` so a timed
+ * out child can never fall through into an exit-code or JSON-shape branch
+ * (and its buffered stdout/stderr — which may already hold hostile
+ * provider output collected before the kill — is never read or printed).
+ *
+ * @param {string} query
+ * @param {{owner: string, name: string, after: string|null, label?: string}} vars
+ * @param {typeof spawnSync} [spawnFn]
+ */
+export function ghGraphql(query, vars, spawnFn = spawnSync) {
   const args = ["api", "graphql", "-f", `query=${query}`];
   args.push("-f", `owner=${vars.owner}`, "-f", `name=${vars.name}`);
   if (vars.after == null) args.push("-F", "after=null");
   else args.push("-f", `after=${vars.after}`);
   if (vars.label != null) args.push("-f", `label=${vars.label}`);
-  const r = spawnSync("gh", args, {
+  const r = spawnFn("gh", args, {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
+    timeout: GH_GRAPHQL_TIMEOUT_MS,
+    killSignal: "SIGKILL",
   });
+  if (r.error && r.error.code === "ETIMEDOUT") {
+    incomplete("API_TIMEOUT");
+  }
   if (r.error && r.error.code === "ENOENT") {
     incomplete("API_FAILURE", "GH_NOT_FOUND");
+  }
+  if (r.error) {
+    incomplete("API_FAILURE", "GH_EXIT");
   }
   return parseGhJson(r.stdout, r.status);
 }
