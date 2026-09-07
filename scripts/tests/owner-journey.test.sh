@@ -530,14 +530,22 @@ echo "static scan (app.js): forbidden channels and wording"
 #        (c) `adapter(window)?.open(...)` is a helper-return member access,
 #            not a grouped global, but `\)*` treated the argument `)` as a
 #            grouped receiver and false-redded.
-#      Member-access alternatives are now TWO forms each:
-#        - direct/operator-guarded: left boundary excludes `(`, so a call
-#          like `adapter(window)?.open` is not a match; trailing closers
-#          allow whitespace between nested `)` (`(shouldOpen && window)?.open`);
-#        - grouped-at-open: an explicit `\(+` prefix whose `(` is not after
-#          an identifier, plus an optional `|| ident` / `?? ident` tail, plus
-#          the same whitespace-tolerant closers (`(window)?.open`,
-#          `(window || fallbackWindow)?.open`, `((window) )?.open`).
+#      Round 11 then found the two-form split still missed ordinary
+#      *combinations* of those same shapes:
+#        (d) closers BEFORE the fallback operator
+#            (`((window) || fallbackWindow)?.open(...)`) still executed;
+#        (e) the grouped form's `\(+` could start at the inner `(` of
+#            `adapter((window || fallbackWindow))?.open(...)`, so the
+#            helper-argument exclusion did not apply to grouped fallbacks.
+#      Member-access alternatives are now ONE unified form each:
+#        left boundary excludes `(`, so neither `adapter(window)?.open`
+#        nor `adapter((window || x))?.open` can start a match; optional
+#        `\(*` opening parens; identifier; whitespace-tolerant closers;
+#        optional `||`/`??` ident tail (ident itself may be parenthesized);
+#        more closers; optional `?` then `.` then the terminal. That covers
+#        direct, `&& window`, `(window)`, `((window) )`, `(window || x)`,
+#        and `((window) || x)` without treating a helper argument as the
+#        receiver.
 #
 # KNOWN, ACCEPTED RESIDUAL LIMITATION (Codex round-8 finding, same threat
 # model as ci-conventions.test.sh's own documented residuals): the dot-
@@ -555,31 +563,31 @@ echo "static scan (app.js): forbidden channels and wording"
 # STRICT (reject something harmless), never too permissive — the opposite
 # of a missed real channel — so it is accepted rather than chased further.
 #
-# A second residual of the same class (Codex round-10, after the grouped
-# forms above): grep still cannot parse arbitrary JS expressions. Exotic
-# receivers — ternary, comma operator, `window && other` (where the
-# receiver is `other`, not window), computed access, identifier
-# construction — remain out of scope for this drift sensor. The ordinary
-# formatter/||/??/helper-argument shapes Codex demonstrated are in scope
-# and covered; chasing a full expression grammar would be the tokenizer
-# we already declined to add.
+# A second residual of the same class (Codex rounds 10–11, after the
+# unified grouped/fallback/helper form above): grep still cannot parse
+# arbitrary JS expressions. Exotic receivers — ternary, comma operator,
+# `window && other` (where the receiver is `other`, not window), computed
+# access, identifier construction — remain out of scope for this drift
+# sensor. The ordinary formatter/||/??/helper-argument shapes Codex
+# demonstrated, including their combinations, are in scope and covered;
+# chasing a full expression grammar would be the tokenizer we already
+# declined to add.
 FORBIDDEN_ID_L='(^|[^[:alnum:]_$])'
 FORBIDDEN_ID_R='([^[:alnum:]_$]|$)'
 # '(' is legal punctuation, but treating it as a member-access left
-# boundary makes `adapter(window)?.open` look like a grouped global.
-# Direct/operator-guarded alternatives use this tighter class instead.
+# boundary makes `adapter(window)?.open` and
+# `adapter((window || x))?.open` look like grouped globals.
 FORBIDDEN_ID_L_NOPAREN='(^|[^[:alnum:]_$(])'
 # Formatter whitespace between nested closers: `window)`, `window))`,
-# `window) )`.
+# `window) )`. Used on BOTH sides of the optional fallback tail so
+# `((window) || fallbackWindow)` is visible.
 FORBIDDEN_CLOSERS='[[:space:]]*([[:space:]]*\))*[[:space:]]*'
 # `(window || fallbackWindow)` / `(window ?? fallbackWindow)` — window is
-# still the value when it is truthy. `&&` after window is not included:
-# that makes the right operand the receiver.
-FORBIDDEN_OR_TAIL='([[:space:]]*(\|\||\?\?)[[:space:]]*[[:alnum:]_$]+)*'
-# Tight `(window` / `((window` / `( (window` whose `(` is not after an
-# identifier (excludes `adapter(window)`).
-FORBIDDEN_OPEN_GROUP="${FORBIDDEN_ID_L}[[:space:]]*\\(+[[:space:]]*"
-FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L_NOPAREN}window${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_OPEN_GROUP}window${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}window${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_OPEN_GROUP}window${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L_NOPAREN}location${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_OPEN_GROUP}location${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}location${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_OPEN_GROUP}location${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}location${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_OPEN_GROUP}location${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}document${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|${FORBIDDEN_OPEN_GROUP}document${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
+# still the value when it is truthy. The fallback ident may itself be
+# parenthesized. `&&` after window is not included: that makes the right
+# operand the receiver.
+FORBIDDEN_OR_TAIL='([[:space:]]*(\|\||\?\?)[[:space:]]*\(*[[:alnum:]_$]+\)*)*'
+FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*window${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*window${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*location${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*location${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*location${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*document${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
 
 # Flattens the whole file to one line (newlines -> spaces) before matching,
 # so a statement split across lines — e.g.
@@ -696,6 +704,12 @@ NET_MUTATIONS=(
   '(window || fallbackWindow)?.open("https://example.invalid/");'
   '(location || fallbackLocation).href;'
   '(document || fallbackDocument)?.location;'
+  # Codex round-11 finding: closers BEFORE the fallback operator still
+  # evaluate to the real global when it is truthy.
+  '((window) || fallbackWindow)?.open("https://example.invalid/");'
+  '((location) ?? fallbackLocation)?.assign("https://example.invalid/");'
+  '((document) || fallbackDocument)?.location;'
+  '((window) || (fallbackWindow))?.open("https://example.invalid/");'
 )
 NET_ALL_CAUGHT=1
 for mutation in "${NET_MUTATIONS[@]}"; do
@@ -758,6 +772,13 @@ BENIGN_LOCATION_SNIPPETS=(
   'adapter(location).replace("local-state");'
   'snapshot(document).location;'
   'adapter(window).location = "local-state";'
+  # Codex round-11 finding: grouped fallbacks inside a helper argument
+  # are still helper-return member access, not grouped-global receivers.
+  'adapter((window || fallbackWindow))?.open("local-panel");'
+  'snapshot((location || fallbackLocation)).href;'
+  'adapter((location ?? fallbackLocation)).replace("local-state");'
+  'snapshot((document || fallbackDocument)).location;'
+  'adapter(((window)))?.open("local-panel");'
 )
 BENIGN_ALL_CLEAN=1
 for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
