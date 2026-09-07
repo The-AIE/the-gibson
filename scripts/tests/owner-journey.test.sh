@@ -537,9 +537,23 @@ FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpR
 # (Codex round-4 finding — this exact `ci-conventions.test.sh` L-077 sensor
 # would itself have flagged the previous `grep -q` form as a repo-wide
 # convention violation).
+# After flattening, also collapses any run of whitespace immediately
+# around a `.` down to a bare `.` (Codex round-7 finding): the bare-
+# `location` alternative's exclusion only inspects the SINGLE character
+# immediately before "location" to tell "someone's `.location` property"
+# apart from "the bare global identifier" — correct when the dot is
+# adjacent, but `model.\n  location = "local";` (an ordinary dot-at-
+# end-of-line reformat of real, valid, non-navigating code) flattens to
+# `model. location = "local";`, putting a SPACE, not a dot, immediately
+# before "location". Collapsing dot-adjacent whitespace first turns that
+# back into `model.location = "local";`, so the existing adjacent-dot
+# exclusion applies correctly regardless of how many lines or how much
+# indentation originally separated the dot from its property name — the
+# same fix that closes this for every member-access alternative at once,
+# rather than special-casing the bare-location exclusion alone.
 check_forbidden_js() {
   local hits
-  hits=$(tr '\n' ' ' < "$1" | grep -cE "$FORBIDDEN_JS_RE")
+  hits=$(tr '\n' ' ' < "$1" | sed -E 's/[[:space:]]*\.[[:space:]]*/./g' | grep -cE "$FORBIDDEN_JS_RE")
   [ "${hits:-0}" -eq 0 ]
 }
 
@@ -588,6 +602,10 @@ NET_MUTATIONS=(
   $'new\n  Worker("worker.js");'
   'window.open("https://example.invalid/");'
   $'import\n("https://example.invalid/exfiltrate.mjs");'
+  # Proactive control for the round-7 dot-normalization fix: a real
+  # window.open(...) call reformatted with the dot at end-of-line must
+  # still be caught, not just tolerated as a false-positive fix.
+  $'window.\n  open("https://example.invalid/");'
 )
 NET_ALL_CAUGHT=1
 for mutation in "${NET_MUTATIONS[@]}"; do
@@ -635,6 +653,14 @@ BENIGN_LOCATION_SNIPPETS=(
   'function inspect(document) { return document.locationCache; }'
   'location.assignment();'
   'location.replacement();'
+  # Codex round-7 finding: an ordinary dot-at-end-of-line reformat puts a
+  # SPACE (not a dot) immediately before "location" once flattened, which
+  # the bare-location exclusion's single-preceding-character check missed.
+  $'const model = {};\nmodel.\n  location = "local";'
+  # Proactive control for the same fix, other direction: an identifier
+  # merely SHARING "window" via a dot-at-end-of-line split is still not the
+  # global object.
+  $'const w = window;\nw.\n  location = "local";'
 )
 BENIGN_ALL_CLEAN=1
 for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
