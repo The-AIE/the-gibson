@@ -156,7 +156,8 @@ exact_verdict_event() {
 # Unrecognized tokens (PASS, etc.) are shaped but not mapped. Prose/quote/
 # heading prefixes do not match because the line must start with VERDICT:.
 verdict_shaped_line() {
-  [[ "$1" =~ ^VERDICT:[[:space:]]+[^[:space:]] ]]
+  [[ "$1" =~ \
+^VERDICT:[[:space:]]+[^[:space:]] ]]
 }
 
 # Classify one isolated reviewer stdout file. Never used on the combined report.

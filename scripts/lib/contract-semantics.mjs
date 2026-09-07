@@ -2412,12 +2412,18 @@ function normalizeMatcherOperand(raw) {
   return s;
 }
 
+function stripLeadingMatcherAnchors(s) {
+  let t = String(s || "");
+  t = t.replace(/^\(\^\|\\n\)/, "");
+  t = t.replace(/^\(\^\|\n\)/, "");
+  t = t.replace(/^\^/, "");
+  return t;
+}
+
 function stripVerdictAnchorNoise(rest) {
   let s = String(rest || "");
   // Leading anchors / line-prefix groups used by the live jq body_verdict.
-  s = s.replace(/^\(\^\|\\n\)/, "");
-  s = s.replace(/^\(\^\|\n\)/, "");
-  s = s.replace(/^\^/, "");
+  s = stripLeadingMatcherAnchors(s);
   // Whitespace-class between VERDICT: and the token/group (`[[:space:]]*`, `\s*`).
   s = s.replace(/^(?:\[\[:space:\]\][*+]+|\\s[*+]+|\s+)/, "");
   // Trailing whitespace-class and end anchor.
@@ -2425,6 +2431,47 @@ function stripVerdictAnchorNoise(rest) {
   s = s.replace(/\$$/, "");
   s = s.replace(/(?:\[\[:space:\]\][*+]+|\\s[*+]+|\s+)$/, "");
   return s.trim();
+}
+
+/**
+ * If `s` is one wrapping group around the whole expression, return the
+ * inner text (plus a trailing `$` when that was the only suffix). Depth
+ * must return to 0 only at the last relevant character — `(A)(B)…` is
+ * two groups and is left untouched. grouped-anchor-not-indeterminate.
+ */
+function unwrapWholeExpressionGroup(s) {
+  const src = String(s || "");
+  if (!src.startsWith("(")) return src;
+  let depth = 0;
+  let closeAt = -1;
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "(") {
+      depth += 1;
+      continue;
+    }
+    if (ch !== ")") continue;
+    depth -= 1;
+    if (depth < 0) return src;
+    if (depth === 0) {
+      closeAt = i;
+      break;
+    }
+  }
+  if (closeAt < 0) return src;
+  const lastRelevant = src.endsWith("$") ? src.length - 2 : src.length - 1;
+  if (lastRelevant < 1 || closeAt !== lastRelevant) return src;
+  return src.slice(1, closeAt) + (src.endsWith("$") ? "$" : "");
+}
+
+/**
+ * True when text before VERDICT: is matcher language (an alternation
+ * branch, extra atoms) rather than a known line-prefix/anchor group.
+ * prefix-alternation-not-canonical: never strip PASS| into CANONICAL.
+ */
+function matcherPrefixIsSignificant(prefix) {
+  const s = stripLeadingMatcherAnchors(String(prefix || "").trim());
+  return s.trim().length > 0;
 }
 
 /**
@@ -2477,9 +2524,17 @@ export function classifyVerdictMatcherOperand(raw) {
   if (/\(\?[a-z]*i[a-z]*\)/i.test(original) || /\(\?[a-z]*i[a-z]*\)/i.test(norm)) {
     return VERDICT_OPERAND_INDETERMINATE;
   }
-  const verdictAt = norm.search(/VERDICT:/i);
+  // Strip known line-prefix anchors, then one enclosing group, before
+  // reading the prefix. `^(VERDICT:…)$` is canonical-only; a leftover
+  // `(` after stripping `^` is not itself a significant prefix.
+  const prepared = unwrapWholeExpressionGroup(stripLeadingMatcherAnchors(norm));
+  const verdictAt = prepared.search(/VERDICT:/i);
   if (verdictAt < 0) return null;
-  let rest = norm.slice(verdictAt + "VERDICT:".length);
+  const prefix = prepared.slice(0, verdictAt);
+  if (matcherPrefixIsSignificant(prefix)) {
+    return VERDICT_OPERAND_INDETERMINATE; // prefix-alternation-not-canonical
+  }
+  let rest = prepared.slice(verdictAt + "VERDICT:".length);
   rest = stripVerdictAnchorNoise(rest);
 
   // Generic shape detector: any non-space token (PASS, APPROVE!, WOBBLE).
@@ -2531,6 +2586,165 @@ export function classifyVerdictMatcherOperand(raw) {
   if (VERDICT_PASS_TOKENS.has(exact)) return VERDICT_OPERAND_ACCEPTS_PASS;
   if (VERDICT_CANONICAL_TOKENS.has(exact)) return VERDICT_OPERAND_CANONICAL;
   return VERDICT_OPERAND_INDETERMINATE;
+}
+
+/**
+ * Sentinel from stripUnquotedShellComment: the single/double-quote walker
+ * saw an unquoted or double-quoted `$` or backtick and must not guess
+ * comment/paren boundaries past that expansion marker.
+ */
+const SHELL_LEXICAL_AMBIGUOUS = Object.freeze({ indeterminateLexical: true });
+const LEXICAL_INDETERMINATE_OPERAND = "VERDICT: INDETERMINATE_LEXICAL";
+
+function backslashRunLengthBefore(src, index) {
+  let n = 0;
+  for (let j = index - 1; j >= 0 && src[j] === "\\"; j -= 1) n += 1;
+  return n;
+}
+
+/** Odd backslash run immediately before `index` means `src[index]` is escaped. */
+function isEscapedAt(src, index) {
+  return index > 0 && backslashRunLengthBefore(src, index) % 2 === 1;
+}
+
+/**
+ * Fail-closed: every bash substitution/expansion that can introduce content
+ * not visible in the static source begins with an unquoted or double-quoted
+ * `$` or backtick. Bail on the marker character; do not enumerate which
+ * construct follows `$` (`$(`, `${`, `$'`, `$VAR`, `$1`, `$((`, …).
+ */
+function shellSubstitutionStartAt(src, i) {
+  const c = src[i];
+  return c === "`" || c === "$";
+}
+
+/**
+ * Unquoted `#` starts a comment at start-of-line, after unescaped
+ * whitespace, or after an unescaped command separator `;` `|` `&`.
+ * `(` is not a separator here: `@(`, `!(`, `?(`, `*(`, `+(` are
+ * extglob operators where `#` is pattern text, not a comment.
+ * `$(#` is already fail-closed by the `$`/backtick bailout above.
+ * An escaped preceding space (odd backslash run) is still mid-word.
+ */
+function isShellCommentStart(src, i) {
+  if (src[i] !== "#") return false;
+  if (i === 0) return true;
+  if (isEscapedAt(src, i)) return false;
+  if (isEscapedAt(src, i - 1)) return false;
+  const prev = src[i - 1];
+  return (
+    prev === " " ||
+    prev === "\t" ||
+    prev === ";" ||
+    prev === "|" ||
+    prev === "&"
+  );
+}
+
+/**
+ * First syntactically-unescaped `)` at or after `fromIndex`, allowing
+ * only whitespace and escaped literal `)` in between. Does not scan the
+ * rest of the line for a later unrelated `)`.
+ */
+function indexOfCaseArmCloseParen(src, fromIndex) {
+  let i = fromIndex;
+  while (i < src.length) {
+    while (i < src.length && (src[i] === " " || src[i] === "\t")) i += 1;
+    if (i >= src.length || src[i] !== ")") return -1;
+    if (!isEscapedAt(src, i)) return i;
+    i += 1;
+  }
+  return -1;
+}
+
+/**
+ * Quote/comment walk matching boundedLineShellWords: single quotes are
+ * literal; double quotes honor backslash; an unquoted `#` starts a
+ * trailing shell comment at start-of-line, after unescaped whitespace,
+ * or after an unescaped `;` `|` `&`. Mid-word `#` is ordinary text
+ * (e.g. tag=x#not-comment). Escaped spaces are not comment boundaries.
+ * Unquoted or double-quoted `$` or backtick return SHELL_LEXICAL_AMBIGUOUS
+ * instead of guessing past an expansion whose runtime value is not in the
+ * static source.
+ */
+function stripUnquotedShellComment(line) {
+  const src = String(line || "");
+  let i = 0;
+  let state = "none";
+  while (i < src.length) {
+    const c = src[i];
+    if (state === "single") {
+      i += 1;
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      if (c === "\\") {
+        i += i + 1 < src.length ? 2 : 1;
+        continue;
+      }
+      if (c === '"') {
+        state = "none";
+        i += 1;
+        continue;
+      }
+      if (shellSubstitutionStartAt(src, i)) return SHELL_LEXICAL_AMBIGUOUS;
+      i += 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < src.length) {
+      i += 2;
+      continue;
+    }
+    if (shellSubstitutionStartAt(src, i)) return SHELL_LEXICAL_AMBIGUOUS;
+    if (c === "'" || c === '"') {
+      state = c === "'" ? "single" : "double";
+      i += 1;
+      continue;
+    }
+    if (c === "#") {
+      if (isShellCommentStart(src, i)) return src.slice(0, i);
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return src;
+}
+
+function shellQuoteStateAt(line, index) {
+  const src = String(line || "");
+  let state = "none";
+  let i = 0;
+  const end = Math.max(0, Math.min(index, src.length));
+  while (i < end) {
+    const c = src[i];
+    if (state === "single") {
+      i += 1;
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (state === "double") {
+      i += 1;
+      if (c === "\\") {
+        if (i < end) i += 1;
+        continue;
+      }
+      if (c === '"') state = "none";
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      state = c === "'" ? "single" : "double";
+      i += 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < src.length) {
+      i += 2;
+      continue;
+    }
+    i += 1;
+  }
+  return state;
 }
 
 /**
@@ -2624,6 +2838,15 @@ const GREP_ZERO_ARG_LONG = new Set([
 ]);
 const GREP_INDETERMINATE_ARGV = "VERDICT: INDETERMINATE_GREP_ARGV";
 
+function pushGrepPatternOperand(out, operand) {
+  // grep-var-explicit-indeterminate: -e/--regexp $PAT is not resolved.
+  if (isOpaqueShellVarOperand(operand)) {
+    out.push(GREP_INDETERMINATE_ARGV);
+  } else {
+    out.push(operand);
+  }
+}
+
 /**
  * Extract VERDICT-bearing grep/egrep pattern operands from one physical
  * line. Recognizes default-BRE positional patterns (`grep -q '…'`),
@@ -2649,20 +2872,20 @@ function extractGrepVerdictOperandsFromLine(line) {
         break;
       }
       if (arg.startsWith("--regexp=")) {
-        out.push(arg.slice("--regexp=".length));
+        pushGrepPatternOperand(out, arg.slice("--regexp=".length));
         j += 1;
         continue;
       }
       if (arg === "--regexp" || arg === "-e") {
         j += 1;
-        if (j < words.length) out.push(words[j]);
+        if (j < words.length) pushGrepPatternOperand(out, words[j]);
         else ambiguous = true;
         j += 1;
         continue;
       }
       // Attached -ePATTERN only (not bundled -Eq / -Eqi).
       if (/^-e[^-=]/.test(arg)) {
-        out.push(arg.slice(2));
+        pushGrepPatternOperand(out, arg.slice(2));
         j += 1;
         continue;
       }
@@ -2776,6 +2999,57 @@ export function extractHarnessMatcherOperands(text) {
     const globRe = /\*["'](VERDICT:\s*[A-Za-z][A-Za-z0-9_-]*)["']\*/gi;
     let gm;
     while ((gm = globRe.exec(src)) !== null) push(gm[0]);
+  }
+  {
+    // unquoted-case-glob-indeterminate: VERDICT:*PASS) and any unquoted
+    // case arm containing VERDICT is glob language, not an allowlisted
+    // exact quoted arm. Comment lines are not sites (same as grep).
+    // Exclude quotes/parens so jq test() and quoted arms are not re-read.
+    // Terminator is ")" so heredoc prose with "|" is not a site.
+    // Capture the whole case-pattern from the nearest `(`, `|`,
+    // whitespace, or line-start so `(VERDICT:…)` and `*VERDICT:…`
+    // are sites. Payload before VERDICT: may only be glob intros
+    // (`*`, `?`, `[`) — not jq `{verdict:` field names.
+    // Skip matches inside quotes (quoted arms are the earlier
+    // allowlist) and after an unquoted `#` comment.
+    const unquotedRe =
+      /(^|[\s|(])([[*?]*VERDICT:[^\n"'()]*?)(?=\s*\))/gi;
+    for (const line of src.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const executable = stripUnquotedShellComment(line);
+      if (executable === SHELL_LEXICAL_AMBIGUOUS) {
+        if (/VERDICT:/i.test(line)) push(LEXICAL_INDETERMINATE_OPERAND);
+        continue;
+      }
+      if (!executable.trim()) continue;
+      unquotedRe.lastIndex = 0;
+      let um;
+      while ((um = unquotedRe.exec(executable)) !== null) {
+        // Terminator is the first syntactically-unescaped `)` after the
+        // match (backslash parity). Escaped `)` is a literal in the
+        // pattern; printf prose with no unescaped closer is not an arm.
+        const closeIdx = indexOfCaseArmCloseParen(
+          executable,
+          um.index + um[0].length
+        );
+        if (closeIdx < 0) continue;
+        const rawArm = String(um[2] || "");
+        const verdictRel = rawArm.search(/VERDICT:/i);
+        if (verdictRel < 0) continue;
+        const verdictAbs =
+          um.index + String(um[1] || "").length + verdictRel;
+        if (shellQuoteStateAt(executable, verdictAbs) !== "none") continue;
+        const arm = rawArm.trim();
+        if (!arm) continue;
+        const kind = classifyVerdictMatcherOperand(arm);
+        if (kind === VERDICT_OPERAND_INDETERMINATE) {
+          push(arm);
+        } else {
+          push("VERDICT: INDETERMINATE_CASE_ARM");
+        }
+      }
+    }
   }
 
   // [[ ... =~ OPERAND ]] — OPERAND may be bare or quoted. Use \S+ so
