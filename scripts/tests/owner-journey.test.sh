@@ -511,9 +511,30 @@ echo "static scan (app.js): forbidden channels and wording"
 #      call parenthesis itself (`fetch\n("/x")` -> `fetch ("/x")`), which a
 #      still-executing dynamic call can trivially be split across. Both now
 #      allow `[[:space:]]*` before their `(`.
+#   5. (Codex round-8 finding) ordinary optional chaining — `window?.open(...)`,
+#      `location?.assign(...)` — still executes the call when the left side
+#      exists (which it always does for the real global objects), but the
+#      member-access alternatives required a literal `.` with no `?`. Each
+#      now allows an optional `\?` immediately before its `.`.
+#
+# KNOWN, ACCEPTED RESIDUAL LIMITATION (Codex round-8 finding, same threat
+# model as ci-conventions.test.sh's own documented residuals): the dot-
+# whitespace normalization below operates on raw flattened TEXT, with no
+# awareness of comments or string/template-literal content. Prose that
+# happens to end a sentence in "." immediately before a forbidden word on
+# the next line — e.g. a comment or a user-facing string ending
+# "...stays safe.\ninnerHTML is never used." — would be normalized into
+# "safe.innerHTML" and reported as a hit even though no code executes.
+# Fully distinguishing code from comments/strings requires a real
+# JavaScript tokenizer, which is disproportionate for a drift sensor whose
+# actual security boundary is the review process, not this grep (the same
+# reasoning ci-conventions.test.sh states for its own residual evasions).
+# This direction is also the SAFE one: it can only make the sensor too
+# STRICT (reject something harmless), never too permissive — the opposite
+# of a missed real channel — so it is accepted rather than chased further.
 FORBIDDEN_ID_L='(^|[^[:alnum:]_$])'
 FORBIDDEN_ID_R='([^[:alnum:]_$]|$)'
-FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}window[[:space:]]*\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}document[[:space:]]*\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
+FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}window[[:space:]]*\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}document[[:space:]]*\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
 
 # Flattens the whole file to one line (newlines -> spaces) before matching,
 # so a statement split across lines — e.g.
@@ -606,6 +627,11 @@ NET_MUTATIONS=(
   # window.open(...) call reformatted with the dot at end-of-line must
   # still be caught, not just tolerated as a false-positive fix.
   $'window.\n  open("https://example.invalid/");'
+  # Codex round-8 finding: optional chaining still performs real navigation
+  # when the left side exists, as it always does for window/location.
+  'window?.open("https://example.invalid/");'
+  'location?.assign("https://example.invalid/");'
+  'location?.replace("https://example.invalid/");'
 )
 NET_ALL_CAUGHT=1
 for mutation in "${NET_MUTATIONS[@]}"; do
