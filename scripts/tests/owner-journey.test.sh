@@ -516,6 +516,16 @@ echo "static scan (app.js): forbidden channels and wording"
 #      exists (which it always does for the real global objects), but the
 #      member-access alternatives required a literal `.` with no `?`. Each
 #      now allows an optional `\?` immediately before its `.`.
+#   6. (Codex round-9 finding) a parenthesized or guarded optional-chain
+#      base — `(window)?.open(...)`, `(shouldOpen && window)?.open(...)` —
+#      still executes when the parenthesized expression evaluates to the
+#      real object, but a literal `)` between the identifier and its `?.`
+#      was not tolerated. Each alternative now also allows `\)*` between
+#      the identifier and the optional `?`/`.` — this only requires the
+#      identifier itself to appear with a normal boundary before it
+#      (satisfied regardless of how complex the surrounding expression is,
+#      e.g. `shouldOpen && `), not that the whole wrapping expression be
+#      understood.
 #
 # KNOWN, ACCEPTED RESIDUAL LIMITATION (Codex round-8 finding, same threat
 # model as ci-conventions.test.sh's own documented residuals): the dot-
@@ -534,7 +544,7 @@ echo "static scan (app.js): forbidden channels and wording"
 # of a missed real channel — so it is accepted rather than chased further.
 FORBIDDEN_ID_L='(^|[^[:alnum:]_$])'
 FORBIDDEN_ID_R='([^[:alnum:]_$]|$)'
-FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}window[[:space:]]*\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}document[[:space:]]*\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
+FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L}window[[:space:]]*\\)*[[:space:]]*\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}window[[:space:]]*\\)*[[:space:]]*\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L}location[[:space:]]*\\)*[[:space:]]*\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\)*[[:space:]]*\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}location[[:space:]]*\\)*[[:space:]]*\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}document[[:space:]]*\\)*[[:space:]]*\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
 
 # Flattens the whole file to one line (newlines -> spaces) before matching,
 # so a statement split across lines — e.g.
@@ -632,6 +642,12 @@ NET_MUTATIONS=(
   'window?.open("https://example.invalid/");'
   'location?.assign("https://example.invalid/");'
   'location?.replace("https://example.invalid/");'
+  # Codex round-9 finding: a parenthesized or guarded optional-chain base
+  # still executes when the parenthesized expression evaluates to the real
+  # object.
+  '(window)?.open("https://example.invalid/");'
+  '(shouldOpen && window)?.open("https://example.invalid/");'
+  '(location)?.assign("https://example.invalid/");'
 )
 NET_ALL_CAUGHT=1
 for mutation in "${NET_MUTATIONS[@]}"; do
