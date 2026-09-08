@@ -503,6 +503,14 @@ echo "static scan (app.js): forbidden channels and wording"
 #     properties, not those channels. Exact identifier/property boundaries:
 #     mainwindow and locationCache are not those members. Helper-call results
 #     stay opaque: adapter(globalThis.window).open is not window.open.
+#   - direct open and location on globalThis are the same channels as
+#     window.open and global location (dot, computed, assign, href/assign/
+#     replace). A read of globalThis.location stays clean. foo.globalThis.open
+#     and foo.globalThis.location.assign stay local.
+#   - parenthesizing a call or constructor target is semantically transparent.
+#     (fetch)("x"), (window.fetch)("x"), (fetch)?.("x"), and
+#     new (globalThis["Worker"])(...) keep the callee/constructor identity.
+#     A helper-call result stays opaque: adapter(fetch)("local") is not fetch.
 #   - a bare location identifier used as an assignment target, including
 #     object/array destructuring (and default-value forms), is the same
 #     navigation assignment as location = ...; a read such as {x: location}
@@ -518,8 +526,11 @@ echo "static scan (app.js): forbidden channels and wording"
 # computed members.
 # Slash lexical goal uses delimiter frames, not a flat previous-token table:
 # object-literal } is an expression (division can follow); block } starts a
-# statement (regex can follow). Function/switch/catch bodies are blocks.
-# Control-header ) of if/while/for/with starts a statement (regex can
+# statement (regex can follow). Function/class declaration bodies are
+# statement boundaries (regex may follow); function/class expression bodies
+# are expressions (division may follow) — stored as delimiter/body form
+# metadata, not a global function/class close rule. Switch/catch bodies stay
+# blocks. Control-header ) of if/while/for/with starts a statement (regex can
 # follow); call/group ) is an expression (division can follow). A line
 # terminator after return makes a following { a block (ASI), not an object.
 # Unknown delimiter roles fail closed.
@@ -588,13 +599,20 @@ const STMT_BODY_KWS = mapOf([
   'else', 'do', 'try', 'finally', 'catch', 'default', 'static'
 ]);
 
-function isHeaderParen(last, last2) {
+function isHeaderParen(tokens) {
+  const last = tokens.length ? tokens[tokens.length - 1] : null;
+  const last2 = tokens.length >= 2 ? tokens[tokens.length - 2] : null;
+  const last3 = tokens.length >= 3 ? tokens[tokens.length - 3] : null;
   if (!last) return false;
   if (last.kind === 'ident') {
     if (last.value === 'function' || last.value === 'catch' || last.value === 'switch') {
       return true;
     }
     if (last2 && last2.kind === 'ident' && last2.value === 'function') return true;
+    if (last2 && last2.kind === 'punct' && last2.value === '*' &&
+        last3 && last3.kind === 'ident' && last3.value === 'function') {
+      return true;
+    }
   }
   if (last.kind === 'punct' && last.value === '*' &&
       last2 && last2.kind === 'ident' && last2.value === 'function') {
@@ -603,14 +621,99 @@ function isHeaderParen(last, last2) {
   return false;
 }
 
-function classifyParen(last, last2) {
+function keywordForm(prev, delimStack) {
+  if (!prev) return 'declaration';
+  if (prev.kind === 'ident') {
+    if (prev.value === 'export' || prev.value === 'default') return 'declaration';
+    if (STMT_BODY_KWS[prev.value]) return 'declaration';
+    if (EXPR_KWS[prev.value]) return 'expression';
+    return 'unknown';
+  }
+  if (prev.kind !== 'punct') return 'unknown';
+  const v = prev.value;
+  if (v === ';' || v === '{' || v === '}') return 'declaration';
+  if (v === ':') {
+    const top = delimStack[delimStack.length - 1];
+    if (top && top.type === '{' && top.role === 'object') return 'expression';
+    return 'declaration';
+  }
+  if (v === '=' || ASSIGN_OPS[v] || v === '(' || v === '[' || v === ',' ||
+      v === '?' || v === '!' || v === '~' || v === '+' || v === '-' ||
+      v === '*' || v === '/' || v === '%' || v === '**' ||
+      v === '&' || v === '|' || v === '^' || v === '&&' || v === '||' || v === '??' ||
+      v === '<' || v === '>' || v === '<=' || v === '>=' || v === '==' || v === '===' ||
+      v === '!=' || v === '!==' || v === '<<' || v === '>>' || v === '>>>' ||
+      v === '...' || v === '=>') {
+    return 'expression';
+  }
+  return 'unknown';
+}
+
+function headerForm(tokens, delimStack) {
+  let i = tokens.length - 1;
+  if (i < 0) return null;
+  if (tokens[i].kind === 'ident' &&
+      tokens[i].value !== 'function' &&
+      tokens[i].value !== 'catch' &&
+      tokens[i].value !== 'switch') {
+    i--;
+  }
+  if (i >= 0 && tokens[i].kind === 'punct' && tokens[i].value === '*') i--;
+  if (i < 0 || tokens[i].kind !== 'ident') return null;
+  if (tokens[i].value === 'catch' || tokens[i].value === 'switch') return null;
+  if (tokens[i].value !== 'function') return null;
+  if (i > 0 && tokens[i - 1].kind === 'ident' && tokens[i - 1].value === 'async') i--;
+  return keywordForm(i > 0 ? tokens[i - 1] : null, delimStack);
+}
+
+function classBodyRole(tokens, delimStack) {
+  const end = tokens.length - 1;
+  if (end < 0) return null;
+  let classIdx = -1;
+  const last = tokens[end];
+  if (last.kind === 'ident' && last.value === 'class') {
+    classIdx = end;
+  } else if (last.kind === 'ident' && end >= 1 &&
+             tokens[end - 1].kind === 'ident' && tokens[end - 1].value === 'class') {
+    classIdx = end - 1;
+  } else {
+    const ctx = { indeterminate: false };
+    const heritage = consumeExprEndingAt(tokens, end, ctx);
+    if (ctx.indeterminate) return null;
+    const ext = heritage.start > 0 ? tokens[heritage.start - 1] : null;
+    if (!ext || ext.kind !== 'ident' || ext.value !== 'extends') return null;
+    let i = heritage.start - 2;
+    if (i >= 0 && tokens[i].kind === 'ident' && tokens[i].value !== 'class') i--;
+    if (i < 0 || tokens[i].kind !== 'ident' || tokens[i].value !== 'class') return null;
+    classIdx = i;
+  }
+  if (classIdx < 0) return null;
+  const form = keywordForm(classIdx > 0 ? tokens[classIdx - 1] : null, delimStack);
+  if (form === 'expression') return 'expr-body';
+  if (form === 'declaration') return 'decl-body';
+  return 'unknown';
+}
+
+function bodyRoleFromHeader(lastClosed) {
+  if (!lastClosed || lastClosed.type !== '(') return null;
+  if (lastClosed.role === 'control') return 'block';
+  if (lastClosed.role === 'header') {
+    if (lastClosed.form === 'expression') return 'expr-body';
+    if (lastClosed.form === 'declaration') return 'decl-body';
+    if (lastClosed.form == null) return 'block';
+    return 'unknown';
+  }
+  return null;
+}
+
+function classifyParen(last, last2, tokens) {
   if (last && last.kind === 'ident' && CONTROL_HEADERS[last.value]) return 'control';
-  if (isHeaderParen(last, last2)) return 'header';
+  if (isHeaderParen(tokens)) return 'header';
   if (isCallCalleeSuffix(last)) return 'call';
   return 'group';
 }
 
-function classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLineTerm) {
+function classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLineTerm, tokens) {
   if (!last) return 'block';
   if (last.kind === 'ident') {
     if (STMT_BODY_KWS[last.value]) return 'block';
@@ -618,16 +721,18 @@ function classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLin
       if (last.value === 'return' && sawLineTerm) return 'block';
       return 'object';
     }
+    const classRole = classBodyRole(tokens, delimStack);
+    if (classRole !== null) return classRole;
     return 'unknown';
   }
   if (last.kind !== 'punct') return 'block';
   const v = last.value;
-  if (v === '=>') return 'block';
+  if (v === '=>') return 'expr-body';
   if (v === ')') {
-    if (lastClosed && lastClosed.type === '(' &&
-        (lastClosed.role === 'control' || lastClosed.role === 'header')) {
-      return 'block';
-    }
+    const fromHeader = bodyRoleFromHeader(lastClosed);
+    if (fromHeader) return fromHeader;
+    const classRole = classBodyRole(tokens, delimStack);
+    if (classRole !== null) return classRole;
     return 'unknown';
   }
   if (v === '}' || v === ';' || v === '{') return 'block';
@@ -666,8 +771,8 @@ function slashGoal(last, lastClosed) {
   }
   if (v === '}') {
     if (!lastClosed || lastClosed.type !== '{') return 'unknown';
-    if (lastClosed.role === 'object') return 'div';
-    if (lastClosed.role === 'block') return 'regex';
+    if (lastClosed.role === 'object' || lastClosed.role === 'expr-body') return 'div';
+    if (lastClosed.role === 'block' || lastClosed.role === 'decl-body') return 'regex';
     return 'unknown';
   }
   return 'regex';
@@ -846,7 +951,7 @@ function tokenize(src) {
       if (interp.length) interp[interp.length - 1] += 1;
       delimStack.push({
         type: '{',
-        role: classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLineTerm),
+        role: classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLineTerm, tokens),
         ternary: 0
       });
     } else if (op.value === '}') {
@@ -858,7 +963,10 @@ function tokenize(src) {
       if (!closedBrace.ok) return fail('unbalanced-delimiter');
       lastClosed = closedBrace.frame;
     } else if (op.value === '(') {
-      delimStack.push({ type: '(', role: classifyParen(last, last2), ternary: 0 });
+      const role = classifyParen(last, last2, tokens);
+      const frame = { type: '(', role: role, ternary: 0 };
+      if (role === 'header') frame.form = headerForm(tokens, delimStack);
+      delimStack.push(frame);
     } else if (op.value === ')') {
       const closedParen = popDelim('(');
       if (!closedParen.ok) return fail('unbalanced-delimiter');
@@ -1149,27 +1257,34 @@ function hasTopLevel(tokens, start, end, opSet) {
   return s.ok && s.parts.length > 1;
 }
 
-function possibleGlobals(tokens, start, end, ctx) {
-  const empty = new Set();
+function emptyExpr() {
+  return { globals: new Set(), names: new Set() };
+}
+
+function exprSpan(tokens, start, end, ctx) {
+  const empty = emptyExpr();
   if (ctx.indeterminate) return empty;
   if (start > end) { ctx.indeterminate = true; return empty; }
 
   const orSplit = splitTopLevel(tokens, start, end, { '||': 1, '??': 1 });
   if (!orSplit.ok) { ctx.indeterminate = true; return empty; }
   if (orSplit.parts.length > 1) {
-    const union = new Set();
+    const globals = new Set();
+    const names = new Set();
     for (let p = 0; p < orSplit.parts.length; p++) {
       const part = orSplit.parts[p];
-      possibleGlobals(tokens, part.start, part.end, ctx).forEach(function (g) { union.add(g); });
+      const info = exprSpan(tokens, part.start, part.end, ctx);
+      info.globals.forEach(function (g) { globals.add(g); });
+      info.names.forEach(function (n) { names.add(n); });
     }
-    return union;
+    return { globals: globals, names: names };
   }
 
   const andSplit = splitTopLevel(tokens, start, end, { '&&': 1 });
   if (!andSplit.ok) { ctx.indeterminate = true; return empty; }
   if (andSplit.parts.length > 1) {
     const last = andSplit.parts[andSplit.parts.length - 1];
-    return possibleGlobals(tokens, last.start, last.end, ctx);
+    return exprSpan(tokens, last.start, last.end, ctx);
   }
 
   if (hasTopLevel(tokens, start, end, { '?': 1, ',': 1 })) {
@@ -1183,7 +1298,7 @@ function possibleGlobals(tokens, start, end, ctx) {
     ctx.indeterminate = true;
     return empty;
   }
-  return lhs.globals;
+  return { globals: lhs.globals, names: lhs.names };
 }
 
 function isGlobalObject(globals) {
@@ -1199,7 +1314,13 @@ function memberIdentity(objGlobals, key) {
     names.add('globalThis');
   }
   if (key === 'document' && isGlobalObject(objGlobals)) names.add('document');
-  if (key === 'location' && objGlobals.has('window')) names.add('location');
+  if (key === 'location' && isGlobalObject(objGlobals)) names.add('location');
+  return names;
+}
+
+function terminalNames(name) {
+  const names = new Set();
+  if (name) names.add(name);
   return names;
 }
 
@@ -1212,71 +1333,80 @@ function receiverEndBeforeComputed(tokens, openIdx) {
 
 function consumeExprEndingAt(tokens, end, ctx) {
   const empty = new Set();
-  if (ctx.indeterminate) return { start: 0, globals: empty };
-  if (end < 0 || end >= tokens.length) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+  const noNames = new Set();
+  if (ctx.indeterminate) return { start: 0, globals: empty, names: noNames };
+  if (end < 0 || end >= tokens.length) {
+    ctx.indeterminate = true;
+    return { start: 0, globals: empty, names: noNames };
+  }
   const tok = tokens[end];
 
   if (tok.kind === 'punct' && tok.value === ')') {
     const open = matchingOpen(tokens, end);
-    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty, names: noNames }; }
     const before = open > 0 ? tokens[open - 1] : null;
     if (isCallCalleeSuffix(before)) {
       let calleeEnd = open - 1;
       if (before.value === '?.') calleeEnd = open - 2;
       const callee = consumeExprEndingAt(tokens, calleeEnd, ctx);
-      return { start: callee.start, globals: empty };
+      return { start: callee.start, globals: empty, names: noNames };
     }
-    const inner = possibleGlobals(tokens, open + 1, end - 1, ctx);
+    const inner = exprSpan(tokens, open + 1, end - 1, ctx);
     let start = open;
     if (before && before.kind === 'ident' && before.value === 'new') start = open - 1;
-    return { start: start, globals: inner };
+    return { start: start, globals: inner.globals, names: inner.names };
   }
 
   if (tok.kind === 'punct' && tok.value === ']') {
     const open = matchingOpen(tokens, end);
-    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty, names: noNames }; }
     if (!isComputedMemberOpen(tokens, open)) {
-      return { start: open, globals: empty };
+      return { start: open, globals: empty, names: noNames };
     }
     const recEnd = receiverEndBeforeComputed(tokens, open);
-    if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty, names: noNames }; }
     const obj = consumeExprEndingAt(tokens, recEnd, ctx);
     const key = constantKey(tokens, open + 1, end - 1);
-    const names = key === null ? empty : memberIdentity(obj.globals, key);
-    return { start: obj.start, globals: names };
+    const gset = key === null ? empty : memberIdentity(obj.globals, key);
+    return { start: obj.start, globals: gset, names: terminalNames(key) };
   }
 
   if (tok.kind === 'punct' && tok.value === '}') {
     const open = matchingOpen(tokens, end);
-    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
-    return { start: open, globals: empty };
+    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty, names: noNames }; }
+    return { start: open, globals: empty, names: noNames };
   }
 
   if (tok.kind === 'ident') {
     if (end > 0 && isDotTok(tokens[end - 1])) {
       const recEnd = end - 2;
-      if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+      if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty, names: noNames }; }
       const obj = consumeExprEndingAt(tokens, recEnd, ctx);
-      return { start: obj.start, globals: memberIdentity(obj.globals, tok.value) };
+      return {
+        start: obj.start,
+        globals: memberIdentity(obj.globals, tok.value),
+        names: terminalNames(tok.value)
+      };
     }
-    const names = new Set();
-    if (RELEVANT_GLOBALS[tok.value]) names.add(tok.value);
+    const gset = new Set();
+    if (RELEVANT_GLOBALS[tok.value]) gset.add(tok.value);
     if (GLOBAL_OBJECTS[tok.value]) {
-      names.add(tok.value);
+      gset.add('window');
+      gset.add('globalThis');
     }
     let start = end;
     if (end > 0 && tokens[end - 1].kind === 'ident' && tokens[end - 1].value === 'new') {
       start = end - 1;
     }
-    return { start: start, globals: names };
+    return { start: start, globals: gset, names: terminalNames(tok.value) };
   }
 
   if (tok.kind === 'string' || tok.kind === 'number' || tok.kind === 'regex' || tok.kind === 'template') {
-    return { start: end, globals: empty };
+    return { start: end, globals: empty, names: noNames };
   }
 
   ctx.indeterminate = true;
-  return { start: end, globals: empty };
+  return { start: end, globals: empty, names: noNames };
 }
 
 function constantKey(tokens, start, end) {
@@ -1308,7 +1438,10 @@ function isAssignAfter(tokens, idx) {
 function isGroupingParenOpen(tokens, openIdx) {
   const before = openIdx > 0 ? tokens[openIdx - 1] : null;
   if (!before) return true;
-  if (before.kind === 'ident') return false;
+  if (before.kind === 'ident') {
+    if (before.value === 'new') return true;
+    return false;
+  }
   if (isCallCalleeSuffix(before)) return false;
   return true;
 }
@@ -1389,22 +1522,70 @@ function isAssignTarget(tokens, exprStart, exprEnd) {
   return false;
 }
 
-function constructorIdent(tokens, afterNew) {
-  let i = afterNew;
-  while (i < tokens.length && tokens[i].kind === 'punct' && tokens[i].value === '(') {
-    const before = i > 0 ? tokens[i - 1] : null;
-    if (before && before.kind === 'ident' && before.value !== 'new' && !NOT_CALLEE[before.value]) {
-      break;
-    }
-    if (before && isCallCalleeSuffix(before) && !(before.kind === 'ident' && before.value === 'new')) {
-      break;
-    }
+function constructorLhsEnd(tokens, start) {
+  if (start >= tokens.length) return null;
+  let i = start;
+  const t = tokens[i];
+  if (t.kind === 'punct' && t.value === '(') {
     const close = matchingClose(tokens, i);
     if (close < 0) return null;
-    i = i + 1;
+    i = close;
+  } else if (t.kind !== 'ident') {
+    return null;
   }
-  if (i < tokens.length && tokens[i].kind === 'ident') return tokens[i].value;
+  while (i + 1 < tokens.length) {
+    const n = tokens[i + 1];
+    if (!n || n.kind !== 'punct') break;
+    if (n.value === '.' || n.value === '?.') {
+      const p = i + 2 < tokens.length ? tokens[i + 2] : null;
+      if (p && p.kind === 'ident') {
+        i = i + 2;
+        continue;
+      }
+      if (p && p.kind === 'punct' && p.value === '[') {
+        const c = matchingClose(tokens, i + 2);
+        if (c < 0) return null;
+        i = c;
+        continue;
+      }
+      break;
+    }
+    if (n.value === '[') {
+      if (!isComputedMemberOpen(tokens, i + 1)) break;
+      const c = matchingClose(tokens, i + 1);
+      if (c < 0) return null;
+      i = c;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+
+function constructorIdent(tokens, afterNew) {
+  const ctx = { indeterminate: false };
+  const end = constructorLhsEnd(tokens, afterNew);
+  if (end == null) return null;
+  const info = consumeExprEndingAt(tokens, end, ctx);
+  if (ctx.indeterminate || !info.names) return null;
+  if (info.names.has('Worker')) return 'Worker';
   return null;
+}
+
+function calleeNamesAtCall(tokens, openIdx) {
+  if (openIdx <= 0) return new Set();
+  const before = tokens[openIdx - 1];
+  if (!isCallCalleeSuffix(before)) return new Set();
+  let calleeEnd = openIdx - 1;
+  if (before.value === '?.') calleeEnd = openIdx - 2;
+  if (calleeEnd < 0) return new Set();
+  // Unknown callees (IIFEs, unmodeled expressions) are opaque, not
+  // file-level indeterminate. Fail closed only happens when a known
+  // channel is involved (handled by member/computed checks).
+  const ctx = { indeterminate: false };
+  const callee = consumeExprEndingAt(tokens, calleeEnd, ctx);
+  if (ctx.indeterminate) return new Set();
+  return callee.names || new Set();
 }
 
 function detect(tokens) {
@@ -1428,6 +1609,11 @@ function detect(tokens) {
                i + 2 < tokens.length && tokens[i + 2].kind === 'punct' && tokens[i + 2].value === '(') {
         hit('fetch-call');
       }
+    }
+
+    if (tok.kind === 'punct' && tok.value === '(') {
+      const names = calleeNamesAtCall(tokens, i);
+      if (names.has('fetch')) hit('fetch-call');
     }
 
     if (tok.kind === 'ident' && tok.value === 'import') {
@@ -1504,18 +1690,24 @@ function isCallAfter(tokens, idx) {
 
 function isConstructExpr(tokens, exprStart) {
   if (exprStart < 0 || exprStart >= tokens.length) return false;
-  const at = tokens[exprStart];
+  let i = exprStart;
+  while (i > 0 && tokens[i - 1].kind === 'punct' && tokens[i - 1].value === '(') {
+    const open = i - 1;
+    if (!isGroupingParenOpen(tokens, open)) break;
+    i = open;
+  }
+  const at = tokens[i];
   if (at && at.kind === 'ident' && at.value === 'new') return true;
-  if (exprStart === 0) return false;
-  const before = tokens[exprStart - 1];
+  if (i === 0) return false;
+  const before = tokens[i - 1];
   return !!(before && before.kind === 'ident' && before.value === 'new');
 }
 
 function applyMemberRule(name, globals, assign, hit, extras) {
   extras = extras || {};
-  if (name === 'open' && globals.has('window')) hit('window.open');
+  if (name === 'open' && isGlobalObject(globals)) hit('window.open');
   if (name === 'location' && globals.has('document')) hit('document.location');
-  if (name === 'location' && globals.has('window') && assign) hit('window.location=');
+  if (name === 'location' && isGlobalObject(globals) && assign) hit('window.location=');
   if (LOCATION_PROPS[name] && globals.has('location')) hit('location.' + name);
   if (name === 'innerHTML' && assign) hit('innerHTML=');
   if (FORBIDDEN_IDENTS[name]) hit('ident:' + name);
@@ -1961,6 +2153,46 @@ assert_clean_valid_snippet "function-body close regex window.open" 'function f()
 assert_clean_valid_snippet "switch-body close regex fetch" 'switch (x) {} /fetch(x)/.test(text);'
 assert_clean_valid_snippet "catch-body close regex fetch" 'try {} catch (e) {} /fetch(x)/.test(text);'
 assert_clean_valid_snippet "return-ASI block then regex window.open" $'function f(){ return\n{a:1}\n/window.open/.test("x"); }'
+
+# Codex tokenizer round-4 finding 1: direct globalThis open/location aliases
+# are the same channels as window.open and global location.
+assert_forbidden_valid_snippet "direct globalThis.open call" 'globalThis.open("x");'
+assert_forbidden_valid_snippet "computed globalThis.open call" 'globalThis["open"]("x");'
+assert_forbidden_valid_snippet "direct globalThis.location.assign" 'globalThis.location.assign("x");'
+assert_forbidden_valid_snippet "computed globalThis.location.replace" 'globalThis["location"].replace("x");'
+assert_forbidden_valid_snippet "direct globalThis.location.href assignment" 'globalThis.location.href = "x";'
+assert_forbidden_valid_snippet "direct globalThis.location assignment" 'globalThis.location = "x";'
+assert_clean_valid_snippet "globalThis.location read stays clean" 'const current = globalThis.location;'
+assert_clean_valid_snippet "globalThis.opened stays distinct" 'globalThis.opened("local");'
+assert_clean_valid_snippet "local foo.globalThis.open stays local" 'foo.globalThis.open("local");'
+assert_clean_valid_snippet "local foo.globalThis.location.assign stays local" 'foo.globalThis.location.assign("local");'
+
+# Codex tokenizer round-4 finding 2: function/class declaration close is a
+# statement boundary (regex may follow); expression close is an expression
+# (division may follow). Encoded as delimiter/body form metadata.
+assert_forbidden_valid_snippet "function-expression close division fetch" 'const q = function() {} / fetch("x") / 2;'
+assert_forbidden_valid_snippet "named function-expression close division window.open" 'const q = function f() {} / window.open("x") / 2;'
+assert_forbidden_valid_snippet "async function-expression close division fetch" 'const q = async function() {} / fetch("x") / 2;'
+assert_forbidden_valid_snippet "class-expression close division fetch" 'const q = class {} / fetch("x") / 2;'
+assert_clean_valid_snippet "function-declaration close regex window.open" 'function f() {} /window.open/.test("x");'
+assert_clean_valid_snippet "generator-declaration close regex fetch" 'function* f() {} /fetch(x)/.test(text);'
+assert_clean_valid_snippet "async function-declaration close regex fetch" 'async function f() {} /fetch(x)/.test(text);'
+assert_clean_valid_snippet "class-declaration close regex fetch" 'class C {} /fetch(x)/.test(text);'
+
+# Codex tokenizer round-4 finding 3: grouping around a call or constructor
+# target is semantically transparent; helper-call results stay opaque.
+assert_forbidden_valid_snippet "grouped fetch call" '(fetch)("x");'
+assert_forbidden_valid_snippet "double-grouped fetch call" '((fetch))("x");'
+assert_forbidden_valid_snippet "grouped window.fetch call" '(window.fetch)("x");'
+assert_forbidden_valid_snippet "grouped computed window.fetch call" '(window["fetch"])("x");'
+assert_forbidden_valid_snippet "grouped optional fetch call" '(fetch)?.("x");'
+assert_forbidden_valid_snippet "grouped new Worker constructor identity" 'new (Worker)("worker.js");'
+assert_forbidden_valid_snippet "grouped computed new globalThis.Worker" 'new (globalThis["Worker"])("worker.js");'
+assert_clean_valid_snippet "fetch identifier read stays clean" 'const f = fetch;'
+assert_clean_valid_snippet "helper call with fetch argument then call stays opaque" 'adapter(fetch)("local");'
+assert_clean_valid_snippet "grouped helper call with fetch argument then call stays opaque" '(adapter(fetch))("local");'
+assert_clean_valid_snippet "grouped computed fetch read without call stays clean" '(obj["fetch"]);'
+assert_clean_valid_snippet "grouped new WorkerFactory stays distinct" 'new (WorkerFactory)("local");'
 
 if snippet_is_valid_js '{a:{b:1}} / window.open("x") / 2'; then
   bad "syntax validator accepted invalid statement-position nested-object division"
