@@ -463,172 +463,759 @@ check_no_remote "$INDEX_HTML" && ok "no remote/protocol-relative script or style
 echo
 echo "static scan (app.js): forbidden channels and wording"
 
-# Deliberately narrow on the location-assignment alternatives (Codex round-2
-# finding: an earlier, broader version matched ANY read of `window.location`
-# (a plain reference or comparison, not just a mutating assignment) and ANY
-# property literally named "location" on an arbitrary object — was a false
-# positive). Only two shapes actually cause navigation: assigning the whole
-# `window.location` object, or reassigning the bare global `location`
-# identifier directly (not as a property of some other object) — both
-# require a literal `=` immediately after. Optional whitespace is allowed
-# around each `.` in the member-access alternatives (Codex round-4 finding:
-# a statement can be reformatted with the property access itself split
-# across lines, e.g. `window\n  .location = "...";`, which a bare `\.`
-# would miss).
+# Forbidden-channel sensor: a purpose-built JavaScript tokenizer/lexer, not
+# an ERE. Twelve review rounds showed that matching formatter whitespace,
+# nested grouping, helper-call arguments, and ||/?? fallbacks with a flattened
+# regex does not converge; the owner replaced that mechanism. The ERE is not
+# retained as a decision path.
 #
-# Every bare-identifier alternative below (fetch, XMLHttpRequest,
-# sendBeacon, WebSocket, EventSource, ServiceWorker, serviceWorker, new
-# .. Worker, importScripts, import, window, location, document) is
-# bounded on BOTH sides by `(^|[^[:alnum:]_$])` / `([^[:alnum:]_$]|$)`
-# rather than grep's own `\b`. Two independent gaps forced this (Codex
-# round-4 and round-5 findings), and both come from the same root cause —
-# grep's `\b` is not a JavaScript identifier boundary:
-#   1. `\b` alone gave no LEFT boundary at all for "window"/"new" in some
-#      alternatives, so `mainwindow.location = ...` (ends in "window") and
-#      `...renew\nWorker.reset()` (ends in "new", flattened adjacent to an
-#      unrelated "Worker") both false-matched.
-#   2. `\b` treats only `[A-Za-z0-9_]` as "word" characters, but `$` is a
-#      legal JavaScript identifier character grep doesn't know about, so
-#      even a `\b`-bounded pattern false-matched `$new` (a variable) before
-#      "Worker", and `Worker$Factory` (an unrelated class name) after
-#      "new". The explicit `[^[:alnum:]_$]` class treats `$` as an
-#      identifier character on both sides, closing that gap for good
-#      instead of chasing one more `\b` variant.
-#   3. (Codex round-6 finding) the TERMINAL identifier in each member-access
-#      alternative (`open`, `href`, `assign`, `replace`, the bare
-#      `document.location`) had a right boundary applied to everything
-#      EXCEPT itself, so a longer, unrelated property name starting with
-#      that word — `window.opened`, `location.hrefCache`,
-#      `location.assignment()`, `document.locationCache` — still
-#      substring-matched. Each now also carries `FORBIDDEN_ID_R` after its
-#      own terminal word. (`window.location=` is naturally exempt: it
-#      already requires a literal `=` immediately after "location", which a
-#      longer property name like "locationCache" can never be immediately
-#      followed by.)
-#   4. (Codex round-6 finding) `fetch\(`/`import\(` required the `(`
-#      immediately after the keyword with NO whitespace, but flattening
-#      inserts exactly one space for a statement reformatted across the
-#      call parenthesis itself (`fetch\n("/x")` -> `fetch ("/x")`), which a
-#      still-executing dynamic call can trivially be split across. Both now
-#      allow `[[:space:]]*` before their `(`.
-#   5. (Codex round-8 finding) ordinary optional chaining — `window?.open(...)`,
-#      `location?.assign(...)` — still executes the call when the left side
-#      exists (which it always does for the real global objects), but the
-#      member-access alternatives required a literal `.` with no `?`. Each
-#      now allows an optional `\?` immediately before its `.`.
-#   6. (Codex round-9 finding) a parenthesized or guarded optional-chain
-#      base — `(window)?.open(...)`, `(shouldOpen && window)?.open(...)` —
-#      still executes when the parenthesized expression evaluates to the
-#      real object, but a literal `)` between the identifier and its `?.`
-#      was not tolerated.
-#   7. (Codex round-10 finding) a contiguous `\)*` after the identifier was
-#      the wrong approximation of grouping:
-#        (a) formatter whitespace between nested closers
-#            (`((window) )?.open(...)`) still executed and was missed;
-#        (b) `(window || fallbackWindow)?.open(...)` still executed the
-#            global when window is truthy, and was missed;
-#        (c) `adapter(window)?.open(...)` is a helper-return member access,
-#            not a grouped global, but `\)*` treated the argument `)` as a
-#            grouped receiver and false-redded.
-#      Round 11 then found the two-form split still missed ordinary
-#      *combinations* of those same shapes:
-#        (d) closers BEFORE the fallback operator
-#            (`((window) || fallbackWindow)?.open(...)`) still executed;
-#        (e) the grouped form's `\(+` could start at the inner `(` of
-#            `adapter((window || fallbackWindow))?.open(...)`, so the
-#            helper-argument exclusion did not apply to grouped fallbacks.
-#      Member-access alternatives are now ONE unified form each:
-#        left boundary excludes `(`, so neither `adapter(window)?.open`
-#        nor `adapter((window || x))?.open` can start a match; optional
-#        `\(*` opening parens; identifier; whitespace-tolerant closers;
-#        optional `||`/`??` ident tail (ident itself may be parenthesized);
-#        more closers; optional `?` then `.` then the terminal. That covers
-#        direct, `&& window`, `(window)`, `((window) )`, `(window || x)`,
-#        and `((window) || x)` without treating a helper argument as the
-#        receiver.
+# The lexer emits identifier, punctuation/operator, and literal tokens and
+# ignores whitespace and comments. Text inside strings, regex bodies, and
+# template-literal raw portions is not executable. ${...} interpolations are
+# tokenized, including nested templates and braces. Malformed or lexically
+# indeterminate input fails closed (nonzero), never reports clean.
 #
-# KNOWN, ACCEPTED RESIDUAL LIMITATION (Codex round-8 finding, same threat
-# model as ci-conventions.test.sh's own documented residuals): the dot-
-# whitespace normalization below operates on raw flattened TEXT, with no
-# awareness of comments or string/template-literal content. Prose that
-# happens to end a sentence in "." immediately before a forbidden word on
-# the next line — e.g. a comment or a user-facing string ending
-# "...stays safe.\ninnerHTML is never used." — would be normalized into
-# "safe.innerHTML" and reported as a hit even though no code executes.
-# Fully distinguishing code from comments/strings requires a real
-# JavaScript tokenizer, which is disproportionate for a drift sensor whose
-# actual security boundary is the review process, not this grep (the same
-# reasoning ci-conventions.test.sh states for its own residual evasions).
-# This direction is also the SAFE one: it can only make the sensor too
-# STRICT (reject something harmless), never too permissive — the opposite
-# of a missed real channel — so it is accepted rather than chased further.
-#
-# A second residual of the same class (Codex rounds 10–11, after the
-# unified grouped/fallback/helper form above): grep still cannot parse
-# arbitrary JS expressions. Exotic receivers — ternary, comma operator,
-# `window && other` (where the receiver is `other`, not window), computed
-# access, identifier construction — remain out of scope for this drift
-# sensor. The ordinary formatter/||/??/helper-argument shapes Codex
-# demonstrated, including their combinations, are in scope and covered;
-# chasing a full expression grammar would be the tokenizer we already
-# declined to add.
-FORBIDDEN_ID_L='(^|[^[:alnum:]_$])'
-FORBIDDEN_ID_R='([^[:alnum:]_$]|$)'
-# '(' is legal punctuation, but treating it as a member-access left
-# boundary makes `adapter(window)?.open` and
-# `adapter((window || x))?.open` look like grouped globals.
-FORBIDDEN_ID_L_NOPAREN='(^|[^[:alnum:]_$(])'
-# Formatter whitespace between nested closers: `window)`, `window))`,
-# `window) )`. Used on BOTH sides of the optional fallback tail so
-# `((window) || fallbackWindow)` is visible.
-FORBIDDEN_CLOSERS='[[:space:]]*([[:space:]]*\))*[[:space:]]*'
-# `(window || fallbackWindow)` / `(window ?? fallbackWindow)` — window is
-# still the value when it is truthy. The fallback ident may itself be
-# parenthesized. `&&` after window is not included: that makes the right
-# operand the receiver.
-FORBIDDEN_OR_TAIL='([[:space:]]*(\|\||\?\?)[[:space:]]*\(*[[:alnum:]_$]+\)*)*'
-FORBIDDEN_JS_RE="${FORBIDDEN_ID_L}fetch[[:space:]]*\\(|${FORBIDDEN_ID_L}XMLHttpRequest${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}sendBeacon${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}WebSocket${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}EventSource${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}ServiceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}serviceWorker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}new[[:space:]]+Worker${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}importScripts${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L}import[[:space:]]*\\(|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*window${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*open${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*window${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location[[:space:]]*=[^=]|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*location${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*href${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*location${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*assign${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*location${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*replace${FORBIDDEN_ID_R}|${FORBIDDEN_ID_L_NOPAREN}[[:space:]]*\\(*[[:space:]]*document${FORBIDDEN_CLOSERS}${FORBIDDEN_OR_TAIL}${FORBIDDEN_CLOSERS}\\??\\.[[:space:]]*location${FORBIDDEN_ID_R}|(^|[^.[:alnum:]_\$])location[[:space:]]*=[^=]|\\.innerHTML[[:space:]]*="
-
-# Flattens the whole file to one line (newlines -> spaces) before matching,
-# so a statement split across lines — e.g.
-#   window.location =
-#     "https://example.invalid/";
-# — is still caught. A plain line-by-line `grep` requires the post-`=`
-# character on the SAME line as the `=`, which a reformatted (but still
-# executing) assignment can trivially cross (Codex round-3 finding). This
-# also hardens every other alternative in FORBIDDEN_JS_RE against the same
-# blind spot, not only the location ones.
-#
-# Uses `grep -c` (count, reads to EOF) rather than `grep -q` (exits at the
-# first match) at the end of this piped command (repo lesson L-077,
-# scripts/tests/ci-conventions.test.sh: under `set -o pipefail` — active via
-# this file's own `set -uo pipefail` — `producer | grep -q` is
-# nondeterministic. `grep -q` can exit the instant it finds a match while
-# `tr` is still writing; `tr` then takes SIGPIPE and exits nonzero, and
-# pipefail reports THAT nonzero exit for the whole pipeline instead of
-# grep's own successful "found a match" status, silently flipping a real
-# violation into a reported "clean" file on a sufficiently large input
-# (Codex round-4 finding — this exact `ci-conventions.test.sh` L-077 sensor
-# would itself have flagged the previous `grep -q` form as a repo-wide
-# convention violation).
-# After flattening, also collapses any run of whitespace immediately
-# around a `.` down to a bare `.` (Codex round-7 finding): the bare-
-# `location` alternative's exclusion only inspects the SINGLE character
-# immediately before "location" to tell "someone's `.location` property"
-# apart from "the bare global identifier" — correct when the dot is
-# adjacent, but `model.\n  location = "local";` (an ordinary dot-at-
-# end-of-line reformat of real, valid, non-navigating code) flattens to
-# `model. location = "local";`, putting a SPACE, not a dot, immediately
-# before "location". Collapsing dot-adjacent whitespace first turns that
-# back into `model.location = "local";`, so the existing adjacent-dot
-# exclusion applies correctly regardless of how many lines or how much
-# indentation originally separated the dot from its property name — the
-# same fix that closes this for every member-access alternative at once,
-# rather than special-casing the bare-location exclusion alone.
+# Member-access classification (the receiver immediately left of . / ?. or a
+# computed [...]):
+#   - direct and arbitrarily parenthesized window/location/document are visible
+#   - top-level || / ?? fallbacks are visible through grouping; any reachable
+#     operand that is the relevant global makes the access forbidden
+#   - call results are opaque: a global used only as an argument to
+#     adapter(...) / snapshot(...) does not make the call's return value that
+#     global. Do not descend through call-argument parentheses.
+#   - && is not a fallback; (window && other)?.open has other as the receiver
+# Identifier matches are exact ($ and alnum are identifier characters), so
+# prefetchData, mainwindow, $new, Worker$Factory are not the forbidden names.
+# window.location assignment is distinct from a read or === comparison.
+# document.location and location.href/assign/replace are member access.
+# Constant computed members (window["open"]) are detected; a non-constant
+# computed key on a relevant global fails closed. The whole file is tokenized
+# and checked before the function returns clean (no grep -q / SIGPIPE).
 check_forbidden_js() {
-  local hits
-  hits=$(tr '\n' ' ' < "$1" | sed -E 's/[[:space:]]*\.[[:space:]]*/./g' | grep -cE "$FORBIDDEN_JS_RE")
-  [ "${hits:-0}" -eq 0 ]
+  OJ_FORBIDDEN_TARGET="$1" node --input-type=commonjs <<'NODE'
+'use strict';
+/**
+ * Bounded JavaScript tokenizer + forbidden-channel detector for issue #348.
+ * Not a full parser. Fail closed on malformed or lexically indeterminate input.
+ */
+const fs = require('fs');
+
+function mapOf(keys) {
+  const o = Object.create(null);
+  for (let i = 0; i < keys.length; i++) o[keys[i]] = true;
+  return o;
+}
+
+const FORBIDDEN_IDENTS = mapOf([
+  'XMLHttpRequest', 'sendBeacon', 'WebSocket', 'EventSource',
+  'ServiceWorker', 'serviceWorker', 'importScripts'
+]);
+
+const RELEVANT_GLOBALS = mapOf(['window', 'location', 'document']);
+
+const NOT_CALLEE = mapOf([
+  'if', 'else', 'while', 'for', 'switch', 'catch', 'function',
+  'return', 'void', 'typeof', 'delete', 'await', 'case', 'do',
+  'try', 'finally', 'with', 'class', 'const', 'let', 'var',
+  'new', 'throw', 'yield', 'in', 'instanceof', 'of',
+  'extends', 'static', 'default', 'export', 'from',
+  'break', 'continue', 'debugger'
+]);
+
+const ASSIGN_OPS = mapOf([
+  '=', '+=', '-=', '*=', '/=', '%=', '**=',
+  '&=', '|=', '^=', '<<=', '>>=', '>>>=',
+  '&&=', '||=', '??='
+]);
+
+const LOCATION_PROPS = mapOf(['href', 'assign', 'replace']);
+
+function isIdentStart(c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_' || c === '$';
+}
+function isIdentPart(c) {
+  return isIdentStart(c) || (c >= '0' && c <= '9');
+}
+function isDigit(c) { return c >= '0' && c <= '9'; }
+function isHex(c) {
+  return isDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+function isLineTerm(c) { return c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029'; }
+
+function canStartRegex(last) {
+  if (!last) return true;
+  if (last.kind === 'ident') {
+    return !!NOT_CALLEE[last.value] && last.value !== 'this' && last.value !== 'super';
+  }
+  if (last.kind !== 'punct') return false;
+  const v = last.value;
+  if (v === ')' || v === ']' || v === '++' || v === '--') return false;
+  return true;
+}
+
+function tokenize(src) {
+  const tokens = [];
+  const n = src.length;
+  let i = 0;
+  let last = null;
+  const interp = [];
+
+  function emit(tok) {
+    tokens.push(tok);
+    last = tok;
+  }
+  function peek(k) { return i + k < n ? src[i + k] : ''; }
+  function fail(msg) { return { ok: false, error: msg, tokens: tokens }; }
+
+  if (i < n && src.charCodeAt(0) === 0xFEFF) i = 1;
+  if (src[0] === '#' && src[1] === '!') {
+    while (i < n && !isLineTerm(src[i])) i++;
+  }
+
+  while (i < n) {
+    const c = src[i];
+
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v' ||
+        c === '\u00a0' || c === '\u2028' || c === '\u2029') {
+      i++;
+      continue;
+    }
+
+    if (c === '/' && peek(1) === '/') {
+      i += 2;
+      while (i < n && !isLineTerm(src[i])) i++;
+      continue;
+    }
+    if (c === '/' && peek(1) === '*') {
+      i += 2;
+      let closed = false;
+      while (i < n) {
+        if (src[i] === '*' && peek(1) === '/') { i += 2; closed = true; break; }
+        i++;
+      }
+      if (!closed) return fail('unterminated-block-comment');
+      continue;
+    }
+
+    if (c === '/' && canStartRegex(last)) {
+      i++;
+      let inClass = false;
+      let closed = false;
+      while (i < n) {
+        const r = src[i];
+        if (isLineTerm(r)) return fail('unterminated-regex');
+        if (r === '\\') {
+          i += 1;
+          if (i >= n) return fail('unterminated-regex');
+          i += 1;
+          continue;
+        }
+        if (r === '[' && !inClass) { inClass = true; i++; continue; }
+        if (r === ']' && inClass) { inClass = false; i++; continue; }
+        if (r === '/' && !inClass) { i++; closed = true; break; }
+        i++;
+      }
+      if (!closed) return fail('unterminated-regex');
+      while (i < n && ((src[i] >= 'a' && src[i] <= 'z') || (src[i] >= 'A' && src[i] <= 'Z'))) i++;
+      emit({ kind: 'regex', value: '/' });
+      continue;
+    }
+
+    if (c === "'" || c === '"') {
+      const q = c;
+      i++;
+      let value = '';
+      let closed = false;
+      while (i < n) {
+        const s = src[i];
+        if (isLineTerm(s) && s !== '\u2028' && s !== '\u2029') return fail('unterminated-string');
+        if (s === '\\') {
+          const u = unescapeOne(src, i);
+          if (!u.ok) return fail(u.error);
+          value += u.ch;
+          i = u.next;
+          continue;
+        }
+        if (s === q) { i++; closed = true; break; }
+        value += s;
+        i++;
+      }
+      if (!closed) return fail('unterminated-string');
+      emit({ kind: 'string', value: value });
+      continue;
+    }
+
+    if (c === '`') {
+      const t = lexTemplate(src, i, emit, interp);
+      if (!t.ok) return fail(t.error);
+      i = t.next;
+      last = tokens.length ? tokens[tokens.length - 1] : last;
+      continue;
+    }
+
+    if (isIdentStart(c)) {
+      let j = i + 1;
+      while (j < n && isIdentPart(src[j])) j++;
+      emit({ kind: 'ident', value: src.slice(i, j) });
+      i = j;
+      continue;
+    }
+
+    if (isDigit(c) || (c === '.' && isDigit(peek(1)))) {
+      const num = lexNumber(src, i);
+      if (!num.ok) return fail(num.error);
+      emit({ kind: 'number', value: num.value });
+      i = num.next;
+      continue;
+    }
+
+    const op = lexOperator(src, i);
+    if (!op.ok) return fail(op.error || 'unexpected-char');
+    if (op.value === '}' && interp.length && interp[interp.length - 1] === 0) {
+      interp.pop();
+      const resumed = resumeTemplate(src, op.next, emit, interp);
+      if (!resumed.ok) return fail(resumed.error);
+      i = resumed.next;
+      last = tokens.length ? tokens[tokens.length - 1] : last;
+      continue;
+    }
+    if (op.value === '{') {
+      if (interp.length) interp[interp.length - 1] += 1;
+    } else if (op.value === '}') {
+      if (interp.length) {
+        interp[interp.length - 1] -= 1;
+        if (interp[interp.length - 1] < 0) return fail('unbalanced-brace');
+      }
+    }
+    emit({ kind: 'punct', value: op.value });
+    i = op.next;
+  }
+
+  if (interp.length) return fail('unterminated-template-interpolation');
+  const bal = delimiterBalance(tokens);
+  if (!bal.ok) return fail(bal.error);
+  return { ok: true, tokens: tokens };
+}
+
+function delimiterBalance(tokens) {
+  let dp = 0, db = 0, dc = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.kind !== 'punct') continue;
+    if (t.value === '(') dp++;
+    else if (t.value === ')') dp--;
+    else if (t.value === '[') db++;
+    else if (t.value === ']') db--;
+    else if (t.value === '{') dc++;
+    else if (t.value === '}') dc--;
+    if (dp < 0 || db < 0 || dc < 0) return { ok: false, error: 'unbalanced-delimiter' };
+  }
+  if (dp !== 0 || db !== 0 || dc !== 0) return { ok: false, error: 'unbalanced-delimiter' };
+  return { ok: true };
+}
+
+function unescapeOne(src, i) {
+  // i points at backslash
+  const n = src.length;
+  if (i + 1 >= n) return { ok: false, error: 'unterminated-escape' };
+  const e = src[i + 1];
+  if (e === 'n') return { ok: true, ch: '\n', next: i + 2 };
+  if (e === 'r') return { ok: true, ch: '\r', next: i + 2 };
+  if (e === 't') return { ok: true, ch: '\t', next: i + 2 };
+  if (e === 'b') return { ok: true, ch: '\b', next: i + 2 };
+  if (e === 'f') return { ok: true, ch: '\f', next: i + 2 };
+  if (e === 'v') return { ok: true, ch: '\v', next: i + 2 };
+  if (e === '0') return { ok: true, ch: '\0', next: i + 2 };
+  if (e === '\\' || e === "'" || e === '"' || e === '`' || e === '$' || e === '/') {
+    return { ok: true, ch: e, next: i + 2 };
+  }
+  if (e === 'x') {
+    if (i + 3 >= n || !isHex(src[i + 2]) || !isHex(src[i + 3])) {
+      return { ok: false, error: 'bad-hex-escape' };
+    }
+    return { ok: true, ch: String.fromCharCode(parseInt(src.slice(i + 2, i + 4), 16)), next: i + 4 };
+  }
+  if (e === 'u') {
+    if (src[i + 2] === '{') {
+      let j = i + 3;
+      let hex = '';
+      while (j < n && isHex(src[j])) { hex += src[j]; j++; }
+      if (!hex || src[j] !== '}') return { ok: false, error: 'bad-unicode-escape' };
+      const cp = parseInt(hex, 16);
+      if (cp > 0x10FFFF) return { ok: false, error: 'bad-unicode-escape' };
+      return { ok: true, ch: String.fromCodePoint(cp), next: j + 1 };
+    }
+    if (i + 5 >= n) return { ok: false, error: 'bad-unicode-escape' };
+    const h = src.slice(i + 2, i + 6);
+    if (![h[0], h[1], h[2], h[3]].every(isHex)) return { ok: false, error: 'bad-unicode-escape' };
+    return { ok: true, ch: String.fromCharCode(parseInt(h, 16)), next: i + 6 };
+  }
+  if (isLineTerm(e)) {
+    let next = i + 2;
+    if (e === '\r' && src[i + 2] === '\n') next++;
+    return { ok: true, ch: '', next: next };
+  }
+  return { ok: true, ch: e, next: i + 2 };
+}
+
+function lexTemplate(src, i, emit, interp) {
+  // i points at opening backtick. Raw text is not executable. ${ starts interpolation.
+  return resumeTemplateFrom(src, i + 1, emit, interp);
+}
+
+function resumeTemplate(src, i, emit, interp) {
+  return resumeTemplateFrom(src, i, emit, interp);
+}
+
+function resumeTemplateFrom(src, i, emit, interp) {
+  const n = src.length;
+  let raw = '';
+  let hasInterp = false;
+  while (i < n) {
+    const c = src[i];
+    if (c === '\\') {
+      const u = unescapeOne(src, i);
+      if (!u.ok) return { ok: false, error: u.error };
+      raw += u.ch;
+      i = u.next;
+      continue;
+    }
+    if (c === '`') {
+      i++;
+      if (!hasInterp) emit({ kind: 'string', value: raw, template: true });
+      else emit({ kind: 'template', value: '' });
+      return { ok: true, next: i };
+    }
+    if (c === '$' && src[i + 1] === '{') {
+      hasInterp = true;
+      i += 2;
+      interp.push(0);
+      return { ok: true, next: i };
+    }
+    raw += c;
+    i++;
+  }
+  return { ok: false, error: 'unterminated-template' };
+}
+
+function lexNumber(src, i) {
+  const n = src.length;
+  const start = i;
+  if (src[i] === '0' && (src[i + 1] === 'x' || src[i + 1] === 'X')) {
+    i += 2;
+    if (i >= n || !isHex(src[i])) return { ok: false, error: 'bad-number' };
+    while (i < n && (isHex(src[i]) || src[i] === '_')) i++;
+    return { ok: true, value: src.slice(start, i), next: i };
+  }
+  if (src[i] === '0' && (src[i + 1] === 'b' || src[i + 1] === 'B' || src[i + 1] === 'o' || src[i + 1] === 'O')) {
+    i += 2;
+    if (i >= n || !isDigit(src[i])) return { ok: false, error: 'bad-number' };
+    while (i < n && (isDigit(src[i]) || src[i] === '_')) i++;
+    return { ok: true, value: src.slice(start, i), next: i };
+  }
+  if (src[i] === '.') {
+    i++;
+    while (i < n && (isDigit(src[i]) || src[i] === '_')) i++;
+  } else {
+    while (i < n && (isDigit(src[i]) || src[i] === '_')) i++;
+    if (src[i] === '.') {
+      i++;
+      while (i < n && (isDigit(src[i]) || src[i] === '_')) i++;
+    }
+  }
+  if (src[i] === 'e' || src[i] === 'E') {
+    i++;
+    if (src[i] === '+' || src[i] === '-') i++;
+    if (i >= n || !isDigit(src[i])) return { ok: false, error: 'bad-number' };
+    while (i < n && (isDigit(src[i]) || src[i] === '_')) i++;
+  }
+  if (src[i] === 'n') i++;
+  return { ok: true, value: src.slice(start, i), next: i };
+}
+
+function lexOperator(src, i) {
+  const n = src.length;
+  const c = src[i];
+  const c2 = i + 1 < n ? src[i + 1] : '';
+  const c3 = i + 2 < n ? src[i + 2] : '';
+  const c4 = i + 3 < n ? src[i + 3] : '';
+
+  function take(len) {
+    return { ok: true, value: src.slice(i, i + len), next: i + len };
+  }
+
+  if (c === '.' && c2 === '.' && c3 === '.') return take(3);
+  if (c === '?' && c2 === '?' && c3 === '=') return take(3);
+  if (c === '?' && c2 === '?') return take(2);
+  if (c === '?' && c2 === '.') {
+    if (isDigit(c3)) return take(1);
+    return take(2);
+  }
+  if (c === '=' && c2 === '=' && c3 === '=') return take(3);
+  if (c === '!' && c2 === '=' && c3 === '=') return take(3);
+  if (c === '=' && c2 === '=') return take(2);
+  if (c === '!' && c2 === '=') return take(2);
+  if (c === '=' && c2 === '>') return take(2);
+  if (c === '&' && c2 === '&' && c3 === '=') return take(3);
+  if (c === '|' && c2 === '|' && c3 === '=') return take(3);
+  if (c === '&' && c2 === '&') return take(2);
+  if (c === '|' && c2 === '|') return take(2);
+  if (c === '+' && c2 === '+') return take(2);
+  if (c === '-' && c2 === '-') return take(2);
+  if (c === '*' && c2 === '*' && c3 === '=') return take(3);
+  if (c === '*' && c2 === '*') return take(2);
+  if (c === '<' && c2 === '<' && c3 === '=') return take(3);
+  if (c === '>' && c2 === '>' && c3 === '>' && c4 === '=') return take(4);
+  if (c === '>' && c2 === '>' && c3 === '>') return take(3);
+  if (c === '>' && c2 === '>' && c3 === '=') return take(3);
+  if (c === '<' && c2 === '<') return take(2);
+  if (c === '>' && c2 === '>') return take(2);
+  if (c === '<' && c2 === '=') return take(2);
+  if (c === '>' && c2 === '=') return take(2);
+  if (c === '+' && c2 === '=') return take(2);
+  if (c === '-' && c2 === '=') return take(2);
+  if (c === '*' && c2 === '=') return take(2);
+  if (c === '/' && c2 === '=') return take(2);
+  if (c === '%' && c2 === '=') return take(2);
+  if (c === '&' && c2 === '=') return take(2);
+  if (c === '|' && c2 === '=') return take(2);
+  if (c === '^' && c2 === '=') return take(2);
+
+  const singles = '()[]{};,~?:.,<>=!+-*/%&|^';
+  if (singles.indexOf(c) !== -1) return take(1);
+  return { ok: false, error: 'unexpected-char:' + JSON.stringify(c) };
+}
+
+function matchingOpen(tokens, closeIdx) {
+  const close = tokens[closeIdx].value;
+  const open = close === ')' ? '(' : close === ']' ? '[' : '{';
+  let depth = 0;
+  for (let i = closeIdx; i >= 0; i--) {
+    const t = tokens[i];
+    if (t.kind !== 'punct') continue;
+    if (t.value === close) depth++;
+    else if (t.value === open) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function matchingClose(tokens, openIdx) {
+  const open = tokens[openIdx].value;
+  const close = open === '(' ? ')' : open === '[' ? ']' : '}';
+  let depth = 0;
+  for (let i = openIdx; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.kind !== 'punct') continue;
+    if (t.value === open) depth++;
+    else if (t.value === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function isDotTok(t) {
+  return t && t.kind === 'punct' && (t.value === '.' || t.value === '?.');
+}
+
+function isCallCalleeSuffix(before) {
+  if (!before) return false;
+  if (before.kind === 'ident') return !NOT_CALLEE[before.value];
+  if (before.kind === 'punct') {
+    return before.value === ')' || before.value === ']' || before.value === '?.';
+  }
+  return false;
+}
+
+function splitTopLevel(tokens, start, end, opSet) {
+  const parts = [];
+  let dp = 0, db = 0, dc = 0;
+  let partStart = start;
+  for (let i = start; i <= end; i++) {
+    const t = tokens[i];
+    if (t.kind !== 'punct') continue;
+    const v = t.value;
+    if (v === '(') dp++;
+    else if (v === ')') dp--;
+    else if (v === '[') db++;
+    else if (v === ']') db--;
+    else if (v === '{') dc++;
+    else if (v === '}') dc--;
+    else if (dp === 0 && db === 0 && dc === 0 && opSet[v]) {
+      parts.push({ start: partStart, end: i - 1 });
+      partStart = i + 1;
+    }
+    if (dp < 0 || db < 0 || dc < 0) return { ok: false, parts: [] };
+  }
+  parts.push({ start: partStart, end: end });
+  return { ok: true, parts: parts };
+}
+
+function hasTopLevel(tokens, start, end, opSet) {
+  const s = splitTopLevel(tokens, start, end, opSet);
+  return s.ok && s.parts.length > 1;
+}
+
+function possibleGlobals(tokens, start, end, ctx) {
+  const empty = new Set();
+  if (ctx.indeterminate) return empty;
+  if (start > end) { ctx.indeterminate = true; return empty; }
+
+  const orSplit = splitTopLevel(tokens, start, end, { '||': 1, '??': 1 });
+  if (!orSplit.ok) { ctx.indeterminate = true; return empty; }
+  if (orSplit.parts.length > 1) {
+    const union = new Set();
+    for (let p = 0; p < orSplit.parts.length; p++) {
+      const part = orSplit.parts[p];
+      possibleGlobals(tokens, part.start, part.end, ctx).forEach(function (g) { union.add(g); });
+    }
+    return union;
+  }
+
+  const andSplit = splitTopLevel(tokens, start, end, { '&&': 1 });
+  if (!andSplit.ok) { ctx.indeterminate = true; return empty; }
+  if (andSplit.parts.length > 1) {
+    const last = andSplit.parts[andSplit.parts.length - 1];
+    return possibleGlobals(tokens, last.start, last.end, ctx);
+  }
+
+  if (hasTopLevel(tokens, start, end, { '?': 1, ',': 1 })) {
+    ctx.indeterminate = true;
+    return empty;
+  }
+
+  const lhs = consumeExprEndingAt(tokens, end, ctx);
+  if (ctx.indeterminate) return empty;
+  if (lhs.start !== start) {
+    ctx.indeterminate = true;
+    return empty;
+  }
+  return lhs.globals;
+}
+
+function consumeExprEndingAt(tokens, end, ctx) {
+  const empty = new Set();
+  if (ctx.indeterminate) return { start: 0, globals: empty };
+  if (end < 0 || end >= tokens.length) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+  const tok = tokens[end];
+
+  if (tok.kind === 'punct' && tok.value === ')') {
+    const open = matchingOpen(tokens, end);
+    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    const before = open > 0 ? tokens[open - 1] : null;
+    if (isCallCalleeSuffix(before)) {
+      let calleeEnd = open - 1;
+      if (before.value === '?.') calleeEnd = open - 2;
+      const callee = consumeExprEndingAt(tokens, calleeEnd, ctx);
+      return { start: callee.start, globals: empty };
+    }
+    const inner = possibleGlobals(tokens, open + 1, end - 1, ctx);
+    let start = open;
+    if (before && before.kind === 'ident' && before.value === 'new') start = open - 1;
+    return { start: start, globals: inner };
+  }
+
+  if (tok.kind === 'punct' && tok.value === ']') {
+    const open = matchingOpen(tokens, end);
+    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    const obj = consumeExprEndingAt(tokens, open - 1, ctx);
+    return { start: obj.start, globals: empty };
+  }
+
+  if (tok.kind === 'punct' && tok.value === '}') {
+    const open = matchingOpen(tokens, end);
+    if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    return { start: open, globals: empty };
+  }
+
+  if (tok.kind === 'ident') {
+    if (end > 0 && isDotTok(tokens[end - 1])) {
+      const obj = consumeExprEndingAt(tokens, end - 2, ctx);
+      return { start: obj.start, globals: empty };
+    }
+    const names = new Set();
+    if (RELEVANT_GLOBALS[tok.value]) names.add(tok.value);
+    let start = end;
+    if (end > 0 && tokens[end - 1].kind === 'ident' && tokens[end - 1].value === 'new') {
+      start = end - 1;
+    }
+    return { start: start, globals: names };
+  }
+
+  if (tok.kind === 'string' || tok.kind === 'number' || tok.kind === 'regex' || tok.kind === 'template') {
+    return { start: end, globals: empty };
+  }
+
+  ctx.indeterminate = true;
+  return { start: end, globals: empty };
+}
+
+function constantKey(tokens, start, end) {
+  if (start !== end) return null;
+  const t = tokens[start];
+  if (t.kind === 'string') return t.value;
+  if (t.kind === 'number') return t.value;
+  return null;
+}
+
+function isComputedMemberOpen(tokens, i) {
+  if (i === 0) return false;
+  const before = tokens[i - 1];
+  if (before.kind === 'ident') return true;
+  if (before.kind === 'string' || before.kind === 'number' || before.kind === 'template' || before.kind === 'regex') {
+    return true;
+  }
+  if (before.kind === 'punct') {
+    return before.value === ')' || before.value === ']' || before.value === '?.';
+  }
+  return false;
+}
+
+function isAssignAfter(tokens, idx) {
+  if (idx >= tokens.length) return false;
+  return tokens[idx].kind === 'punct' && !!ASSIGN_OPS[tokens[idx].value];
+}
+
+function constructorIdent(tokens, afterNew) {
+  let i = afterNew;
+  while (i < tokens.length && tokens[i].kind === 'punct' && tokens[i].value === '(') {
+    const before = i > 0 ? tokens[i - 1] : null;
+    if (before && before.kind === 'ident' && before.value !== 'new' && !NOT_CALLEE[before.value]) {
+      break;
+    }
+    if (before && isCallCalleeSuffix(before) && !(before.kind === 'ident' && before.value === 'new')) {
+      break;
+    }
+    const close = matchingClose(tokens, i);
+    if (close < 0) return null;
+    i = i + 1;
+  }
+  if (i < tokens.length && tokens[i].kind === 'ident') return tokens[i].value;
+  return null;
+}
+
+function detect(tokens) {
+  const ctx = { indeterminate: false };
+  const hits = [];
+
+  function hit(kind) { hits.push(kind); }
+
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    const next = i + 1 < tokens.length ? tokens[i + 1] : null;
+    const prev = i > 0 ? tokens[i - 1] : null;
+
+    if (tok.kind === 'ident' && FORBIDDEN_IDENTS[tok.value]) {
+      hit('ident:' + tok.value);
+    }
+
+    if (tok.kind === 'ident' && tok.value === 'fetch') {
+      if (next && next.kind === 'punct' && next.value === '(') hit('fetch-call');
+      else if (next && next.kind === 'punct' && next.value === '?.' &&
+               i + 2 < tokens.length && tokens[i + 2].kind === 'punct' && tokens[i + 2].value === '(') {
+        hit('fetch-call');
+      }
+    }
+
+    if (tok.kind === 'ident' && tok.value === 'import') {
+      if (next && next.kind === 'punct' && next.value === '(') hit('dynamic-import');
+    }
+
+    if (tok.kind === 'ident' && tok.value === 'new') {
+      const ctor = constructorIdent(tokens, i + 1);
+      if (ctor === 'Worker') hit('new-Worker');
+    }
+
+    if (tok.kind === 'ident' && tok.value === 'location' && !isDotTok(prev)) {
+      if (isAssignAfter(tokens, i + 1)) hit('bare-location-assign');
+    }
+
+    if (tok.kind === 'punct' && (tok.value === '.' || tok.value === '?.')) {
+      checkMember(tokens, i, ctx, hit);
+      if (ctx.indeterminate) return { ok: false, error: 'indeterminate-member', hits: hits };
+    }
+
+    if (tok.kind === 'punct' && tok.value === '[' && isComputedMemberOpen(tokens, i)) {
+      checkComputed(tokens, i, ctx, hit);
+      if (ctx.indeterminate) return { ok: false, error: 'indeterminate-computed', hits: hits };
+    }
+  }
+
+  return { ok: true, hits: hits };
+}
+
+function receiverGlobals(tokens, objEnd, ctx) {
+  const rec = consumeExprEndingAt(tokens, objEnd, ctx);
+  if (ctx.indeterminate) return new Set();
+  return rec.globals;
+}
+
+function checkMember(tokens, dotIndex, ctx, hit) {
+  if (dotIndex < 1) return;
+  const prop = tokens[dotIndex + 1];
+  if (!prop || prop.kind !== 'ident') return;
+  const name = prop.value;
+  const globals = receiverGlobals(tokens, dotIndex - 1, ctx);
+  if (ctx.indeterminate) return;
+  const assign = isAssignAfter(tokens, dotIndex + 2);
+  applyMemberRule(name, globals, assign, hit);
+}
+
+function checkComputed(tokens, openIdx, ctx, hit) {
+  const close = matchingClose(tokens, openIdx);
+  if (close < 0) { ctx.indeterminate = true; return; }
+  const globals = receiverGlobals(tokens, openIdx - 1, ctx);
+  if (ctx.indeterminate) return;
+  const key = constantKey(tokens, openIdx + 1, close - 1);
+  if (key === null) {
+    if (globals.has('window') || globals.has('location') || globals.has('document')) {
+      ctx.indeterminate = true;
+    }
+    return;
+  }
+  const assign = isAssignAfter(tokens, close + 1);
+  applyMemberRule(key, globals, assign, hit);
+}
+
+function applyMemberRule(name, globals, assign, hit) {
+  if (name === 'open' && globals.has('window')) hit('window.open');
+  if (name === 'location' && globals.has('document')) hit('document.location');
+  if (name === 'location' && globals.has('window') && assign) hit('window.location=');
+  if (LOCATION_PROPS[name] && globals.has('location')) hit('location.' + name);
+  if (name === 'innerHTML' && assign) hit('innerHTML=');
+}
+
+function checkSource(src) {
+  const lex = tokenize(src);
+  if (!lex.ok) return { exit: 2, error: lex.error, hits: [] };
+  const det = detect(lex.tokens);
+  if (!det.ok) return { exit: 2, error: det.error, hits: det.hits || [] };
+  if (det.hits.length) return { exit: 1, error: null, hits: det.hits };
+  return { exit: 0, error: null, hits: [] };
+}
+
+const file = process.env.OJ_FORBIDDEN_TARGET;
+if (!file) {
+  process.stderr.write('forbidden-js-check: missing target path\n');
+  process.exit(2);
+}
+let src;
+try { src = fs.readFileSync(file, 'utf8'); }
+catch (e) {
+  process.stderr.write('forbidden-js-check: read failed\n');
+  process.exit(2);
+}
+const result = checkSource(src);
+if (process.env.OJ_FORBIDDEN_DEBUG) {
+  process.stderr.write(JSON.stringify(result) + '\n');
+}
+process.exit(result.exit);
+
+NODE
 }
 
 check_forbidden_js "$APP_JS" && ok "no forbidden network/navigation/innerHTML token in app.js" || bad "a forbidden network/navigation/innerHTML token was found in app.js"
@@ -710,6 +1297,9 @@ NET_MUTATIONS=(
   '((location) ?? fallbackLocation)?.assign("https://example.invalid/");'
   '((document) || fallbackDocument)?.location;'
   '((window) || (fallbackWindow))?.open("https://example.invalid/");'
+  # Codex round-12 finding: grouped || fallback with closers before the
+  # operator, split across lines. The receiver can still be window.
+  $'((window) || (\n  fallbackWindow\n))?.open("https://example.invalid/");'
 )
 NET_ALL_CAUGHT=1
 for mutation in "${NET_MUTATIONS[@]}"; do
@@ -779,6 +1369,10 @@ BENIGN_LOCATION_SNIPPETS=(
   'adapter((location ?? fallbackLocation)).replace("local-state");'
   'snapshot((document || fallbackDocument)).location;'
   'adapter(((window)))?.open("local-panel");'
+  # Codex round-12 finding: helper call whose argument is a grouped
+  # fallback, with the call parens themselves split across lines. .open
+  # is invoked on the helper return value, not on window.
+  $'adapter(\n  (window || fallbackWindow)\n)?.open("local-panel");'
 )
 BENIGN_ALL_CLEAN=1
 for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
@@ -788,6 +1382,72 @@ for snippet in "${BENIGN_LOCATION_SNIPPETS[@]}"; do
   check_forbidden_js "$benign_file" || BENIGN_ALL_CLEAN=0
 done
 [[ "$BENIGN_ALL_CLEAN" -eq 1 ]] && ok "false-positive control: plain reads/comparisons, unrelated properties, string literals, \$-containing identifiers, a coincidental cross-line \"new...Worker\" substring, and longer property names sharing a prefix with a forbidden term all pass cleanly" || bad "the forbidden-channel sensor false-positives on ordinary, non-navigating code"
+
+
+# Tokenizer/expression adversarial matrix. Each case is appended to a copy of
+# the real app.js and run through the same check_forbidden_js. Every claimed
+# lexer/expression branch has a dedicated case.
+echo
+echo "tokenizer/expression adversarial matrix"
+
+assert_forbidden_snippet() {
+  local name="$1"
+  local snippet="$2"
+  local mutant_file
+  mutant_file="$TMP_DIR/app.lex-mut-$(echo "$name" | cksum | cut -d' ' -f1).js"
+  cp "$APP_JS" "$mutant_file"
+  printf '\n%s\n' "$snippet" >> "$mutant_file"
+  if check_forbidden_js "$mutant_file"; then
+    bad "tokenizer mutation missed: $name"
+  else
+    ok "tokenizer mutation detected: $name"
+  fi
+}
+
+assert_clean_snippet() {
+  local name="$1"
+  local snippet="$2"
+  local benign_file
+  benign_file="$TMP_DIR/app.lex-benign-$(echo "$name" | cksum | cut -d' ' -f1).js"
+  cp "$APP_JS" "$benign_file"
+  printf '\n%s\n' "$snippet" >> "$benign_file"
+  if check_forbidden_js "$benign_file"; then
+    ok "tokenizer control clean: $name"
+  else
+    bad "tokenizer false-red: $name"
+  fi
+}
+
+assert_clean_snippet "forbidden names in a line comment" '// fetch("https://example.invalid/"); XMLHttpRequest; window.open("x");'
+assert_clean_snippet "forbidden names in a block comment" '/* new Worker("w.js"); location.assign("x"); innerHTML = "y"; */'
+assert_clean_snippet "forbidden names in an ordinary string" 'var msg = "window.open(x) fetch(y) new Worker";'
+assert_clean_snippet "forbidden names in template raw text" 'var t = `location.assign("x") window.open("y")`;'
+assert_clean_snippet "forbidden names in a regex literal" 'var r = /new Worker/; var r2 = /window\.open/;'
+assert_forbidden_snippet "forbidden expression inside template interpolation" 'var t = `${window.open("x")}`;'
+assert_forbidden_snippet "comments between receiver/operator/property" 'window/*c*/./*c*/open("https://example.invalid/");'
+assert_forbidden_snippet "line comments in a fallback chain" $'(window // left\n  || /* mid */ fallbackWindow)?.open("https://example.invalid/");'
+assert_forbidden_snippet "nested grouping around window" '(((window)))?.open("https://example.invalid/");'
+assert_forbidden_snippet "|| later operand is window" '(fallbackWindow || window)?.open("https://example.invalid/");'
+assert_forbidden_snippet "?? later operand is window" '(fallbackWindow ?? window)?.open("https://example.invalid/");'
+assert_forbidden_snippet "?? first operand is window" '(window ?? fallbackWindow)?.open("https://example.invalid/");'
+assert_forbidden_snippet "&& proceeding operand is window" '(other && window)?.open("https://example.invalid/");'
+assert_clean_snippet "&& is not a fallback operator" '(window && other)?.open("local-panel");'
+assert_clean_snippet "helper call with nested grouped fallback argument" $'adapter(\n  ((window) || (\n    fallbackWindow\n  ))\n)?.open("local-panel");'
+assert_clean_snippet "longer $-legal identifiers" $'function $fetch() { return 1; }\nconst importScripts$ = 1;\nconst XMLHttpRequest2 = {};'
+assert_clean_snippet "terminal-property prefixes remain distinct" $'window.opened();\nlocation.hrefCache;\nlocation.assignment();\nlocation.replacement();\ndocument.locationCache;'
+assert_forbidden_snippet "constant computed window.open" 'window["open"]("https://example.invalid/");'
+assert_forbidden_snippet "constant computed window.location assignment" "window['location'] = 'https://example.invalid/';"
+assert_clean_snippet "constant computed decoy opened" 'window["opened"]("local-panel");'
+assert_clean_snippet "constant computed decoy other receiver" 'foo["open"]("local-panel");'
+assert_forbidden_snippet "XMLHttpRequest identifier" 'var X = XMLHttpRequest;'
+assert_forbidden_snippet "sendBeacon identifier" 'navigator.sendBeacon("https://example.invalid/");'
+assert_forbidden_snippet "EventSource identifier" 'new EventSource("/events");'
+assert_forbidden_snippet "ServiceWorker identifier" 'var r = ServiceWorker;'
+assert_forbidden_snippet "serviceWorker identifier" 'navigator.serviceWorker.register("sw.js");'
+assert_forbidden_snippet "importScripts identifier" 'importScripts("worker.js");'
+assert_forbidden_snippet "bare location assignment" 'location = "https://example.invalid/";'
+assert_forbidden_snippet "grouped new Worker" 'new (Worker)("worker.js");'
+assert_forbidden_snippet "fail closed on unterminated string" 'var x = "unterminated'
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
