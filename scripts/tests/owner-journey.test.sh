@@ -484,6 +484,16 @@ echo "static scan (app.js): forbidden channels and wording"
 #     adapter(...) / snapshot(...) does not make the call's return value that
 #     global. Do not descend through call-argument parentheses.
 #   - && is not a fallback; (window && other)?.open has other as the receiver
+#   - window.location (dot, optional, constant-computed, grouped) is the same
+#     navigation object as the bare location global when it is the receiver of
+#     .href / .assign / .replace. A read or === comparison of window.location
+#     itself stays clean. foo.location is not the navigation global.
+#   - a forbidden member used as an assignment target in an object/array
+#     destructuring pattern (including grouping and default-value forms) is
+#     forbidden; object-literal values, destructuring *from* window, and
+#     arbitrary foo.location targets are not.
+#   - array literals are not computed-member suffixes; optional computed
+#     access (foo?.["bar"]) analyzes the receiver before ?..
 # Identifier matches are exact ($ and alnum are identifier characters), so
 # prefetchData, mainwindow, $new, Worker$Factory are not the forbidden names.
 # window.location assignment is distinct from a read or === comparison.
@@ -997,6 +1007,19 @@ function possibleGlobals(tokens, start, end, ctx) {
   return lhs.globals;
 }
 
+function locationIdentity(objGlobals, key) {
+  const names = new Set();
+  if (key === 'location' && objGlobals && objGlobals.has('window')) names.add('location');
+  return names;
+}
+
+function receiverEndBeforeComputed(tokens, openIdx) {
+  if (openIdx <= 0) return -1;
+  const before = tokens[openIdx - 1];
+  if (before && before.kind === 'punct' && before.value === '?.') return openIdx - 2;
+  return openIdx - 1;
+}
+
 function consumeExprEndingAt(tokens, end, ctx) {
   const empty = new Set();
   if (ctx.indeterminate) return { start: 0, globals: empty };
@@ -1022,8 +1045,15 @@ function consumeExprEndingAt(tokens, end, ctx) {
   if (tok.kind === 'punct' && tok.value === ']') {
     const open = matchingOpen(tokens, end);
     if (open < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
-    const obj = consumeExprEndingAt(tokens, open - 1, ctx);
-    return { start: obj.start, globals: empty };
+    if (!isComputedMemberOpen(tokens, open)) {
+      return { start: open, globals: empty };
+    }
+    const recEnd = receiverEndBeforeComputed(tokens, open);
+    if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+    const obj = consumeExprEndingAt(tokens, recEnd, ctx);
+    const key = constantKey(tokens, open + 1, end - 1);
+    const names = key === null ? empty : locationIdentity(obj.globals, key);
+    return { start: obj.start, globals: names };
   }
 
   if (tok.kind === 'punct' && tok.value === '}') {
@@ -1034,8 +1064,10 @@ function consumeExprEndingAt(tokens, end, ctx) {
 
   if (tok.kind === 'ident') {
     if (end > 0 && isDotTok(tokens[end - 1])) {
-      const obj = consumeExprEndingAt(tokens, end - 2, ctx);
-      return { start: obj.start, globals: empty };
+      const recEnd = end - 2;
+      if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
+      const obj = consumeExprEndingAt(tokens, recEnd, ctx);
+      return { start: obj.start, globals: locationIdentity(obj.globals, tok.value) };
     }
     const names = new Set();
     if (RELEVANT_GLOBALS[tok.value]) names.add(tok.value);
@@ -1078,6 +1110,90 @@ function isComputedMemberOpen(tokens, i) {
 function isAssignAfter(tokens, idx) {
   if (idx >= tokens.length) return false;
   return tokens[idx].kind === 'punct' && !!ASSIGN_OPS[tokens[idx].value];
+}
+
+function isGroupingParenOpen(tokens, openIdx) {
+  const before = openIdx > 0 ? tokens[openIdx - 1] : null;
+  if (!before) return true;
+  if (before.kind === 'ident') return false;
+  if (isCallCalleeSuffix(before)) return false;
+  return true;
+}
+
+function skipWrappingParens(tokens, start, end) {
+  let s = start;
+  let e = end;
+  while (e + 1 < tokens.length && tokens[e + 1].kind === 'punct' && tokens[e + 1].value === ')') {
+    const open = matchingOpen(tokens, e + 1);
+    if (open < 0 || open > s) break;
+    if (!isGroupingParenOpen(tokens, open)) break;
+    s = open;
+    e = e + 1;
+  }
+  return { start: s, end: e };
+}
+
+function findPatternCloserFrom(tokens, fromIdx) {
+  let dp = 0, db = 0, dc = 0;
+  for (let i = fromIdx; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.kind !== 'punct') continue;
+    const v = t.value;
+    if (v === '(') dp++;
+    else if (v === ')') {
+      if (dp === 0 && db === 0 && dc === 0) return -1;
+      dp--;
+    } else if (v === '[') db++;
+    else if (v === ']') {
+      if (db === 0 && dp === 0 && dc === 0) return i;
+      db--;
+    } else if (v === '{') dc++;
+    else if (v === '}') {
+      if (dc === 0 && dp === 0 && db === 0) return i;
+      dc--;
+    }
+  }
+  return -1;
+}
+
+function isAssignTarget(tokens, exprStart, exprEnd) {
+  let start = exprStart;
+  let end = exprEnd;
+  if (start < 0 || end < start || end >= tokens.length) return false;
+
+  for (let step = 0; step < tokens.length; step++) {
+    const wrapped = skipWrappingParens(tokens, start, end);
+    start = wrapped.start;
+    end = wrapped.end;
+    if (end + 1 >= tokens.length) return false;
+    const next = tokens[end + 1];
+    if (!next || next.kind !== 'punct') return false;
+    if (ASSIGN_OPS[next.value]) return true;
+
+    if (next.value === ',') {
+      const closer = findPatternCloserFrom(tokens, end + 1);
+      if (closer < 0) return false;
+      const open = matchingOpen(tokens, closer);
+      if (open < 0 || open > start || closer <= end) return false;
+      if (tokens[closer].value === ']' && isComputedMemberOpen(tokens, open)) return false;
+      start = open;
+      end = closer;
+      continue;
+    }
+
+    if (next.value === '}' || next.value === ']') {
+      const closer = end + 1;
+      const open = matchingOpen(tokens, closer);
+      if (open < 0 || open > start) return false;
+      if (next.value === ']' && isComputedMemberOpen(tokens, open)) return false;
+      start = open;
+      end = closer;
+      continue;
+    }
+
+    return false;
+  }
+  return false;
 }
 
 function constructorIdent(tokens, afterNew) {
@@ -1148,37 +1264,33 @@ function detect(tokens) {
   return { ok: true, hits: hits };
 }
 
-function receiverGlobals(tokens, objEnd, ctx) {
-  const rec = consumeExprEndingAt(tokens, objEnd, ctx);
-  if (ctx.indeterminate) return new Set();
-  return rec.globals;
-}
-
 function checkMember(tokens, dotIndex, ctx, hit) {
   if (dotIndex < 1) return;
   const prop = tokens[dotIndex + 1];
   if (!prop || prop.kind !== 'ident') return;
   const name = prop.value;
-  const globals = receiverGlobals(tokens, dotIndex - 1, ctx);
+  const rec = consumeExprEndingAt(tokens, dotIndex - 1, ctx);
   if (ctx.indeterminate) return;
-  const assign = isAssignAfter(tokens, dotIndex + 2);
-  applyMemberRule(name, globals, assign, hit);
+  const assign = isAssignTarget(tokens, rec.start, dotIndex + 1);
+  applyMemberRule(name, rec.globals, assign, hit);
 }
 
 function checkComputed(tokens, openIdx, ctx, hit) {
   const close = matchingClose(tokens, openIdx);
   if (close < 0) { ctx.indeterminate = true; return; }
-  const globals = receiverGlobals(tokens, openIdx - 1, ctx);
+  const recEnd = receiverEndBeforeComputed(tokens, openIdx);
+  if (recEnd < 0) { ctx.indeterminate = true; return; }
+  const rec = consumeExprEndingAt(tokens, recEnd, ctx);
   if (ctx.indeterminate) return;
   const key = constantKey(tokens, openIdx + 1, close - 1);
   if (key === null) {
-    if (globals.has('window') || globals.has('location') || globals.has('document')) {
+    if (rec.globals.has('window') || rec.globals.has('location') || rec.globals.has('document')) {
       ctx.indeterminate = true;
     }
     return;
   }
-  const assign = isAssignAfter(tokens, close + 1);
-  applyMemberRule(key, globals, assign, hit);
+  const assign = isAssignTarget(tokens, rec.start, close);
+  applyMemberRule(key, rec.globals, assign, hit);
 }
 
 function applyMemberRule(name, globals, assign, hit) {
@@ -1243,7 +1355,8 @@ check_css_clean "$STYLES_CSS" && ok "no @import and no remote/protocol-relative 
 # =============================================================================
 # Section 5 — mutation witnesses D-G (AC10): run the SAME check function
 # against a deliberately broken copy of the real file and confirm it now
-# fails, proving the grep-based sensor above is not vacuous.
+# fails, proving the tokenizer-based forbidden-channel sensor above is not
+# vacuous.
 # =============================================================================
 echo
 echo "mutation witnesses (static channels + wording)"
@@ -1448,6 +1561,51 @@ assert_forbidden_snippet "importScripts identifier" 'importScripts("worker.js");
 assert_forbidden_snippet "bare location assignment" 'location = "https://example.invalid/";'
 assert_forbidden_snippet "grouped new Worker" 'new (Worker)("worker.js");'
 assert_forbidden_snippet "fail closed on unterminated string" 'var x = "unterminated'
+
+# Codex tokenizer round-1 finding 1: window.location is the navigation object.
+assert_forbidden_snippet "window.location.assign" 'window.location.assign("https://example.invalid/");'
+assert_forbidden_snippet "window.location.replace" 'window.location.replace("https://example.invalid/");'
+assert_forbidden_snippet "window.location.href assignment" 'window.location.href = "https://example.invalid/";'
+assert_forbidden_snippet "grouped window.location.assign" '(window.location).assign("https://example.invalid/");'
+assert_forbidden_snippet "optional window.location.assign" 'window?.location.assign("https://example.invalid/");'
+assert_forbidden_snippet "window.location optional assign" 'window.location?.assign("https://example.invalid/");'
+assert_forbidden_snippet "comments and whitespace in window.location.assign" $'window  /*c*/ . /*c*/ location\n  .  assign("https://example.invalid/");'
+assert_forbidden_snippet "constant computed window.location.assign" 'window["location"].assign("https://example.invalid/");'
+assert_forbidden_snippet "constant computed window.location.replace" "window['location'].replace('https://example.invalid/');"
+assert_forbidden_snippet "optional constant computed window.location.href assignment" 'window?.["location"].href = "https://example.invalid/";'
+assert_forbidden_snippet "grouped window.location.replace" '(window.location).replace("https://example.invalid/");'
+assert_forbidden_snippet "grouped window.location.href assignment" '(window.location).href = "https://example.invalid/";'
+assert_clean_snippet "arbitrary foo.location.assign is not navigation" 'foo.location.assign("https://example.invalid/");'
+assert_clean_snippet "arbitrary foo.location.replace is not navigation" 'foo.location.replace("https://example.invalid/");'
+assert_clean_snippet "arbitrary foo.location.href assignment is not navigation" 'foo.location.href = "https://example.invalid/";'
+assert_clean_snippet "window.location read stays clean" 'var current = window.location;'
+assert_clean_snippet "window.location comparison stays clean" 'if (window.location === cached) { return; }'
+
+# Codex tokenizer round-1 finding 2: destructuring assignment targets.
+assert_forbidden_snippet "object destructuring window.location target" '({x: window.location} = source);'
+assert_forbidden_snippet "array destructuring window.location target" '[window.location] = ["https://example.invalid/"];'
+assert_forbidden_snippet "grouped object destructuring window.location target" '({x: (window.location)} = source);'
+assert_forbidden_snippet "grouped array destructuring window.location target" '[(window.location)] = ["https://example.invalid/"];'
+assert_forbidden_snippet "nested object destructuring window.location target" '({a: {b: window.location}} = source);'
+assert_forbidden_snippet "nested array-in-object destructuring window.location target" '({a: [window.location]} = source);'
+assert_forbidden_snippet "nested object-in-array destructuring window.location target" '[{x: window.location}] = source;'
+assert_forbidden_snippet "destructuring default window.location target" '({x: window.location = "https://example.invalid/"} = source);'
+assert_forbidden_snippet "computed object destructuring window.location target" '({x: window["location"]} = source);'
+assert_clean_snippet "object literal window.location value is a read" 'var o = { x: window.location };'
+assert_clean_snippet "declaration destructures from window" 'const { href } = window;'
+assert_clean_snippet "arbitrary foo.location object destructuring target" '({x: foo.location} = source);'
+assert_clean_snippet "arbitrary foo.location array destructuring target" '[foo.location] = ["https://example.invalid/"];'
+assert_clean_snippet "computed key read of window.location is not an assignment target" 'arr[window.location] = "local";'
+
+# Codex tokenizer round-1 finding 3: array literals vs computed / optional computed.
+assert_clean_snippet "array literal map is not computed access" '["x"].map(String);'
+assert_clean_snippet "optional computed read on unrelated object" 'foo?.["bar"];'
+assert_clean_snippet "nested array literal map is not computed access" '[["x"]].map(String);'
+assert_clean_snippet "ordinary computed read on unrelated object" 'foo["bar"];'
+assert_clean_snippet "optional computed call on unrelated object" 'foo?.["bar"]();'
+assert_clean_snippet "non-constant computed read on unrelated object" 'foo[bar];'
+assert_forbidden_snippet "optional constant computed window.open" 'window?.["open"]("https://example.invalid/");'
+assert_forbidden_snippet "fail closed on non-constant computed window key" 'window[dyn].assign("https://example.invalid/");'
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
