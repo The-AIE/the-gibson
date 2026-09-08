@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gibson owner journey (local demo)</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="app-header">
+  <p class="boundary-banner">Simulated local demo — no GitHub connection, no code changes, no deployment, no money spent.</p>
+  <button type="button" class="reset-button" data-reset>Reset demo</button>
+</header>
+
+<div id="app-notice" class="app-notice" role="alert" hidden></div>
+
+<main>
+
+  <section id="screen-connect" class="screen">
+    <h2>Connect</h2>
+    <p>Pick one example project below to see how Gibson would review it. This is a static example — nothing is fetched from a real repository, and no account is ever contacted.</p>
+    <p>If this were connected to a real repository, read-only access would let Gibson read commit history, read file contents, and read open issues and pull requests. It would <strong>not</strong> grant write access, merge rights, deployment credentials, billing access, or admin settings.</p>
+    <p><strong>In this demo, none of that access is actually granted.</strong> No repository is contacted; the project below is a fixed label used only to drive the rest of this simulation.</p>
+    <ul class="project-list">
+      <li>
+        <button type="button" class="project-button" data-select-project="demo-storefront">
+          <span class="project-name">Storefront Demo</span>
+          <span class="project-summary">A small example storefront web app.</span>
+        </button>
+      </li>
+      <li>
+        <button type="button" class="project-button" data-select-project="demo-support-portal">
+          <span class="project-name">Support Portal Demo</span>
+          <span class="project-summary">A small example customer-support ticketing app.</span>
+        </button>
+      </li>
+      <li>
+        <button type="button" class="project-button" data-select-project="demo-internal-crm">
+          <span class="project-name">Internal CRM Demo</span>
+          <span class="project-summary">A small example internal customer-record app.</span>
+        </button>
+      </li>
+    </ul>
+  </section>
+
+  <section id="screen-readiness" class="screen" hidden>
+    <h2>Readiness</h2>
+    <p>Selected example: <strong id="readiness-project-name"></strong></p>
+    <p class="simulation-label">Simulated readiness check — not a real audit of any real repository.</p>
+    <ul class="readiness-list">
+      <li>Continuous integration configured (simulated): Yes</li>
+      <li>Automated tests present (simulated): Partial</li>
+      <li>Branch protection on the main branch (simulated): Yes</li>
+      <li>Recent, human-readable commit history (simulated): Yes</li>
+    </ul>
+    <p>These results are fixed example data. They do not reflect any real project, and no real check ran to produce them.</p>
+    <div class="actions">
+      <button type="button" id="readiness-back">Back</button>
+      <button type="button" id="readiness-continue" class="primary">Continue</button>
+    </div>
+  </section>
+
+  <section id="screen-request" class="screen" hidden>
+    <h2>Request</h2>
+    <p>Describe, in plain language, the outcome you want. This text stays in this browser tab only.</p>
+    <label for="request-text">What outcome do you want?</label>
+    <textarea id="request-text" rows="5" placeholder="Example: Make the checkout page easier to use on a phone."></textarea>
+    <p id="request-counter" class="byte-counter">0 / 4096 bytes</p>
+    <div class="actions">
+      <button type="button" id="request-back">Back</button>
+      <button type="button" id="request-submit" class="primary" disabled>Create blueprint</button>
+    </div>
+  </section>
+
+  <section id="screen-blueprint" class="screen" hidden>
+    <h2>Blueprint</h2>
+    <p>Example: <strong id="blueprint-project-name"></strong></p>
+    <dl class="blueprint-fields">
+      <dt>Goal</dt>
+      <dd id="blueprint-goal"></dd>
+      <dt>Scope</dt>
+      <dd>This demo will simulate understanding your request, planning a solution, building it, checking it, and preparing it for review — without touching any real repository.</dd>
+      <dt>Success criteria</dt>
+      <dd>You can see every phase of the simulated journey and reach a clearly labeled result.</dd>
+      <dt>Assumptions</dt>
+      <dd>The selected project is a static example. No credentials, environment, or real code exist for it in this demo.</dd>
+      <dt>Owner decisions</dt>
+      <dd>You decide whether to approve or wait at the Decision screen. Nothing proceeds without your explicit action.</dd>
+    </dl>
+    <div class="actions">
+      <button type="button" id="blueprint-back">Back</button>
+      <button type="button" id="blueprint-start" class="primary" disabled>Start demo</button>
+    </div>
+  </section>
+
+  <section id="screen-work" class="screen" hidden>
+    <h2>Work</h2>
+    <p class="simulation-label">Simulated work — no agent runs and no tool executes anything real.</p>
+    <ol class="work-steps">
+      <li id="work-step-understanding">Understanding</li>
+      <li id="work-step-planning">Planning</li>
+      <li id="work-step-building">Building</li>
+      <li id="work-step-checking">Checking</li>
+      <li id="work-step-ready_for_review">Ready for review</li>
+    </ol>
+    <div class="actions">
+      <button type="button" id="work-action" class="primary" data-action="advance_work">Advance</button>
+    </div>
+  </section>
+
+  <section id="screen-preview" class="screen" hidden>
+    <h2>Preview</h2>
+    <p class="simulation-label">Simulated before/after — a fixed example, not a real change to any real product.</p>
+    <div class="preview-compare">
+      <div>
+        <h3>Before (current, simulated)</h3>
+        <p>The example checkout page shows five form fields on one long scroll with no visual grouping.</p>
+      </div>
+      <div>
+        <h3>After (simulated result)</h3>
+        <p>The example checkout page groups the same five fields into two short, labeled steps.</p>
+      </div>
+    </div>
+    <label for="preview-feedback-text">Leave feedback (kept in this tab only, not saved)</label>
+    <textarea id="preview-feedback-text" rows="3" placeholder="Example: This looks close, but step two needs a progress indicator."></textarea>
+    <p id="preview-feedback-counter" class="byte-counter">0 / 2048 bytes</p>
+    <div class="actions">
+      <button type="button" id="preview-submit-feedback" disabled>Submit feedback</button>
+    </div>
+    <ul id="preview-feedback-list" class="feedback-list"></ul>
+    <div class="actions">
+      <button type="button" id="preview-back">Back</button>
+      <button type="button" id="preview-continue" class="primary">Continue</button>
+    </div>
+  </section>
+
+  <section id="screen-decision" class="screen" hidden>
+    <h2>Decision</h2>
+    <p class="simulation-label">Simulated release decision — approving here does not release, deploy, merge, or spend anything real.</p>
+    <dl class="ask-contract">
+      <dt>What I'm asking</dt>
+      <dd id="ask-contract-asking"></dd>
+      <dt>What it does</dt>
+      <dd id="ask-contract-what"></dd>
+      <dt>Why</dt>
+      <dd id="ask-contract-why"></dd>
+      <dt>Risks/undo</dt>
+      <dd id="ask-contract-risks"></dd>
+      <dt>Recommendation</dt>
+      <dd id="ask-contract-recommendation"></dd>
+      <dt>Safe-wait behavior</dt>
+      <dd id="ask-contract-safe-wait"></dd>
+      <dt>Destination</dt>
+      <dd id="ask-contract-destination"></dd>
+      <dt>Evidence status</dt>
+      <dd id="ask-contract-evidence"></dd>
+    </dl>
+    <div class="actions">
+      <button type="button" id="decision-back">Back</button>
+      <button type="button" id="decision-wait">Wait</button>
+      <button type="button" id="decision-approve" class="primary">Approve</button>
+    </div>
+  </section>
+
+  <section id="screen-result" class="screen" hidden>
+    <h2>Result</h2>
+    <p id="result-text" class="result-text"></p>
+    <p>This demo showed the intended Gibson product journey end to end. No repository was read, no agent ran, and nothing was deployed.</p>
+    <div class="actions">
+      <button type="button" id="result-reset" class="primary">Start over</button>
+    </div>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
