@@ -494,13 +494,25 @@ echo "static scan (app.js): forbidden channels and wording"
 #     arbitrary foo.location targets are not.
 #   - array literals are not computed-member suffixes; optional computed
 #     access (foo?.["bar"]) analyzes the receiver before ?..
+#   - a terminal window or document member (dot, optional, constant-computed,
+#     grouped) keeps that global identity through a qualifier chain, so
+#     globalThis.window.open and globalThis.document.location are the same
+#     channels as the unqualified forms. Exact identifier/property boundaries:
+#     mainwindow and locationCache are not those members. Helper-call results
+#     stay opaque: adapter(globalThis.window).open is not window.open.
 # Identifier matches are exact ($ and alnum are identifier characters), so
 # prefetchData, mainwindow, $new, Worker$Factory are not the forbidden names.
 # window.location assignment is distinct from a read or === comparison.
 # document.location and location.href/assign/replace are member access.
 # Constant computed members (window["open"]) are detected; a non-constant
-# computed key on a relevant global fails closed. The whole file is tokenized
-# and checked before the function returns clean (no grep -q / SIGPIPE).
+# computed key on a relevant global fails closed.
+# Slash lexical goal uses delimiter frames, not a flat previous-token table:
+# object-literal } is an expression (division can follow); block } starts a
+# statement (regex can follow). Control-header ) of if/while/for/with starts
+# a statement (regex can follow); call/group ) is an expression (division
+# can follow). Unknown delimiter roles fail closed.
+# The whole file is tokenized and checked before the function returns clean
+# (no grep -q / SIGPIPE).
 check_forbidden_js() {
   OJ_FORBIDDEN_TARGET="$1" node --input-type=commonjs <<'NODE'
 'use strict';
@@ -552,15 +564,78 @@ function isHex(c) {
 }
 function isLineTerm(c) { return c === '\n' || c === '\r' || c === '\u2028' || c === '\u2029'; }
 
-function canStartRegex(last) {
-  if (!last) return true;
+const CONTROL_HEADERS = mapOf(['if', 'while', 'for', 'with']);
+
+const EXPR_KWS = mapOf([
+  'return', 'throw', 'yield', 'void', 'typeof', 'delete', 'await', 'case',
+  'new', 'of', 'in', 'instanceof'
+]);
+
+const STMT_BODY_KWS = mapOf([
+  'else', 'do', 'try', 'finally', 'catch', 'default', 'static'
+]);
+
+function classifyParen(last) {
+  if (last && last.kind === 'ident' && CONTROL_HEADERS[last.value]) return 'control';
+  if (isCallCalleeSuffix(last)) return 'call';
+  return 'group';
+}
+
+function classifyBrace(last, lastClosed, delimStack, lastColonWasTernary) {
+  if (!last) return 'block';
   if (last.kind === 'ident') {
-    return !!NOT_CALLEE[last.value] && last.value !== 'this' && last.value !== 'super';
+    if (STMT_BODY_KWS[last.value]) return 'block';
+    if (EXPR_KWS[last.value]) return 'object';
+    return 'unknown';
   }
-  if (last.kind !== 'punct') return false;
+  if (last.kind !== 'punct') return 'block';
   const v = last.value;
-  if (v === ')' || v === ']' || v === '++' || v === '--') return false;
-  return true;
+  if (v === '=>') return 'block';
+  if (v === ')') {
+    if (lastClosed && lastClosed.type === '(' && lastClosed.role === 'control') return 'block';
+    return 'unknown';
+  }
+  if (v === '}' || v === ';' || v === '{') return 'block';
+  if (v === ':') {
+    if (lastColonWasTernary) return 'object';
+    const top = delimStack[delimStack.length - 1];
+    if (top && top.type === '{' && top.role === 'object') return 'object';
+    return 'block';
+  }
+  if (v === '=' || ASSIGN_OPS[v] || v === '(' || v === '[' || v === ',' ||
+      v === '?' || v === '!' || v === '~' || v === '+' || v === '-' ||
+      v === '*' || v === '/' || v === '%' || v === '**' ||
+      v === '&' || v === '|' || v === '^' || v === '&&' || v === '||' || v === '??' ||
+      v === '<' || v === '>' || v === '<=' || v === '>=' || v === '==' || v === '===' ||
+      v === '!=' || v === '!==' || v === '<<' || v === '>>' || v === '>>>' ||
+      v === '...') {
+    return 'object';
+  }
+  return 'unknown';
+}
+
+function slashGoal(last, lastClosed) {
+  if (!last) return 'regex';
+  if (last.kind === 'ident') {
+    if (last.value === 'this' || last.value === 'super') return 'div';
+    return NOT_CALLEE[last.value] ? 'regex' : 'div';
+  }
+  if (last.kind !== 'punct') return 'div';
+  const v = last.value;
+  if (v === ']' || v === '++' || v === '--') return 'div';
+  if (v === ')') {
+    if (!lastClosed || lastClosed.type !== '(') return 'unknown';
+    if (lastClosed.role === 'control') return 'regex';
+    if (lastClosed.role === 'call' || lastClosed.role === 'group') return 'div';
+    return 'unknown';
+  }
+  if (v === '}') {
+    if (!lastClosed || lastClosed.type !== '{') return 'unknown';
+    if (lastClosed.role === 'object') return 'div';
+    if (lastClosed.role === 'block') return 'regex';
+    return 'unknown';
+  }
+  return 'regex';
 }
 
 function tokenize(src) {
@@ -569,6 +644,9 @@ function tokenize(src) {
   let i = 0;
   let last = null;
   const interp = [];
+  const delimStack = [{ type: 'root', role: 'block', ternary: 0 }];
+  let lastClosed = null;
+  let lastColonWasTernary = false;
 
   function emit(tok) {
     tokens.push(tok);
@@ -576,6 +654,24 @@ function tokenize(src) {
   }
   function peek(k) { return i + k < n ? src[i + k] : ''; }
   function fail(msg) { return { ok: false, error: msg, tokens: tokens }; }
+  function popDelim(type) {
+    if (delimStack.length <= 1) return { ok: false };
+    const top = delimStack[delimStack.length - 1];
+    if (top.type !== type) return { ok: false };
+    delimStack.pop();
+    return { ok: true, frame: top };
+  }
+  function alignInterpDelims() {
+    let interpDelims = 0;
+    for (let k = 0; k < delimStack.length; k++) {
+      if (delimStack[k].type === 'interp') interpDelims++;
+    }
+    while (interpDelims < interp.length) {
+      delimStack.push({ type: 'interp', role: 'expr', ternary: 0 });
+      interpDelims++;
+      last = { kind: 'punct', value: '(' };
+    }
+  }
 
   if (i < n && src.charCodeAt(0) === 0xFEFF) i = 1;
   if (src[0] === '#' && src[1] === '!') {
@@ -607,28 +703,32 @@ function tokenize(src) {
       continue;
     }
 
-    if (c === '/' && canStartRegex(last)) {
-      i++;
-      let inClass = false;
-      let closed = false;
-      while (i < n) {
-        const r = src[i];
-        if (isLineTerm(r)) return fail('unterminated-regex');
-        if (r === '\\') {
-          i += 1;
-          if (i >= n) return fail('unterminated-regex');
-          i += 1;
-          continue;
-        }
-        if (r === '[' && !inClass) { inClass = true; i++; continue; }
-        if (r === ']' && inClass) { inClass = false; i++; continue; }
-        if (r === '/' && !inClass) { i++; closed = true; break; }
+    if (c === '/') {
+      const goal = slashGoal(last, lastClosed);
+      if (goal === 'unknown') return fail('indeterminate-slash');
+      if (goal === 'regex') {
         i++;
+        let inClass = false;
+        let closed = false;
+        while (i < n) {
+          const r = src[i];
+          if (isLineTerm(r)) return fail('unterminated-regex');
+          if (r === '\\') {
+            i += 1;
+            if (i >= n) return fail('unterminated-regex');
+            i += 1;
+            continue;
+          }
+          if (r === '[' && !inClass) { inClass = true; i++; continue; }
+          if (r === ']' && inClass) { inClass = false; i++; continue; }
+          if (r === '/' && !inClass) { i++; closed = true; break; }
+          i++;
+        }
+        if (!closed) return fail('unterminated-regex');
+        while (i < n && ((src[i] >= 'a' && src[i] <= 'z') || (src[i] >= 'A' && src[i] <= 'Z'))) i++;
+        emit({ kind: 'regex', value: '/' });
+        continue;
       }
-      if (!closed) return fail('unterminated-regex');
-      while (i < n && ((src[i] >= 'a' && src[i] <= 'z') || (src[i] >= 'A' && src[i] <= 'Z'))) i++;
-      emit({ kind: 'regex', value: '/' });
-      continue;
     }
 
     if (c === "'" || c === '"') {
@@ -660,6 +760,7 @@ function tokenize(src) {
       if (!t.ok) return fail(t.error);
       i = t.next;
       last = tokens.length ? tokens[tokens.length - 1] : last;
+      alignInterpDelims();
       continue;
     }
 
@@ -683,19 +784,49 @@ function tokenize(src) {
     if (!op.ok) return fail(op.error || 'unexpected-char');
     if (op.value === '}' && interp.length && interp[interp.length - 1] === 0) {
       interp.pop();
+      const closedInterp = popDelim('interp');
+      if (!closedInterp.ok) return fail('unbalanced-interp');
+      lastClosed = closedInterp.frame;
       const resumed = resumeTemplate(src, op.next, emit, interp);
       if (!resumed.ok) return fail(resumed.error);
       i = resumed.next;
       last = tokens.length ? tokens[tokens.length - 1] : last;
+      alignInterpDelims();
       continue;
     }
     if (op.value === '{') {
       if (interp.length) interp[interp.length - 1] += 1;
+      delimStack.push({
+        type: '{',
+        role: classifyBrace(last, lastClosed, delimStack, lastColonWasTernary),
+        ternary: 0
+      });
     } else if (op.value === '}') {
       if (interp.length) {
         interp[interp.length - 1] -= 1;
         if (interp[interp.length - 1] < 0) return fail('unbalanced-brace');
       }
+      const closedBrace = popDelim('{');
+      if (!closedBrace.ok) return fail('unbalanced-delimiter');
+      lastClosed = closedBrace.frame;
+    } else if (op.value === '(') {
+      delimStack.push({ type: '(', role: classifyParen(last), ternary: 0 });
+    } else if (op.value === ')') {
+      const closedParen = popDelim('(');
+      if (!closedParen.ok) return fail('unbalanced-delimiter');
+      lastClosed = closedParen.frame;
+    } else if (op.value === '[') {
+      delimStack.push({ type: '[', role: 'array', ternary: 0 });
+    } else if (op.value === ']') {
+      const closedBracket = popDelim('[');
+      if (!closedBracket.ok) return fail('unbalanced-delimiter');
+      lastClosed = closedBracket.frame;
+    } else if (op.value === '?') {
+      delimStack[delimStack.length - 1].ternary += 1;
+    } else if (op.value === ':') {
+      const top = delimStack[delimStack.length - 1];
+      lastColonWasTernary = top.ternary > 0;
+      if (lastColonWasTernary) top.ternary -= 1;
     }
     emit({ kind: 'punct', value: op.value });
     i = op.next;
@@ -1007,8 +1138,10 @@ function possibleGlobals(tokens, start, end, ctx) {
   return lhs.globals;
 }
 
-function locationIdentity(objGlobals, key) {
+function memberIdentity(objGlobals, key) {
   const names = new Set();
+  if (key === 'window') names.add('window');
+  if (key === 'document') names.add('document');
   if (key === 'location' && objGlobals && objGlobals.has('window')) names.add('location');
   return names;
 }
@@ -1052,7 +1185,7 @@ function consumeExprEndingAt(tokens, end, ctx) {
     if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
     const obj = consumeExprEndingAt(tokens, recEnd, ctx);
     const key = constantKey(tokens, open + 1, end - 1);
-    const names = key === null ? empty : locationIdentity(obj.globals, key);
+    const names = key === null ? empty : memberIdentity(obj.globals, key);
     return { start: obj.start, globals: names };
   }
 
@@ -1067,7 +1200,7 @@ function consumeExprEndingAt(tokens, end, ctx) {
       const recEnd = end - 2;
       if (recEnd < 0) { ctx.indeterminate = true; return { start: 0, globals: empty }; }
       const obj = consumeExprEndingAt(tokens, recEnd, ctx);
-      return { start: obj.start, globals: locationIdentity(obj.globals, tok.value) };
+      return { start: obj.start, globals: memberIdentity(obj.globals, tok.value) };
     }
     const names = new Set();
     if (RELEVANT_GLOBALS[tok.value]) names.add(tok.value);
@@ -1531,6 +1664,62 @@ assert_clean_snippet() {
   fi
 }
 
+# Newly added fixtures must be syntactically valid JavaScript. A malformed
+# snippet that happens to fail-closed is not a successful forbidden detection.
+snippet_is_valid_js() {
+  local snippet="$1"
+  local syntax_file
+  syntax_file="$TMP_DIR/snippet-syntax-$(echo "$snippet" | cksum | cut -d' ' -f1).js"
+  printf '%s\n' "$snippet" > "$syntax_file"
+  node --check "$syntax_file" >/dev/null 2>&1
+}
+
+assert_forbidden_valid_snippet() {
+  local name="$1"
+  local snippet="$2"
+  local mutant_file
+  local rc
+  if ! snippet_is_valid_js "$snippet"; then
+    bad "malformed fixture (not credited as forbidden): $name"
+    return
+  fi
+  mutant_file="$TMP_DIR/app.lex-mut-$(echo "$name" | cksum | cut -d' ' -f1).js"
+  cp "$APP_JS" "$mutant_file"
+  printf '\n%s\n' "$snippet" >> "$mutant_file"
+  check_forbidden_js "$mutant_file"
+  rc=$?
+  if [[ "$rc" -eq 1 ]]; then
+    ok "tokenizer mutation detected: $name"
+  elif [[ "$rc" -eq 0 ]]; then
+    bad "tokenizer mutation missed: $name"
+  else
+    bad "tokenizer indeterminate on valid JS: $name"
+  fi
+}
+
+assert_clean_valid_snippet() {
+  local name="$1"
+  local snippet="$2"
+  local benign_file
+  local rc
+  if ! snippet_is_valid_js "$snippet"; then
+    bad "malformed fixture (not credited as clean): $name"
+    return
+  fi
+  benign_file="$TMP_DIR/app.lex-benign-$(echo "$name" | cksum | cut -d' ' -f1).js"
+  cp "$APP_JS" "$benign_file"
+  printf '\n%s\n' "$snippet" >> "$benign_file"
+  check_forbidden_js "$benign_file"
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "tokenizer control clean: $name"
+  elif [[ "$rc" -eq 1 ]]; then
+    bad "tokenizer false-red: $name"
+  else
+    bad "tokenizer indeterminate on valid JS: $name"
+  fi
+}
+
 assert_clean_snippet "forbidden names in a line comment" '// fetch("https://example.invalid/"); XMLHttpRequest; window.open("x");'
 assert_clean_snippet "forbidden names in a block comment" '/* new Worker("w.js"); location.assign("x"); innerHTML = "y"; */'
 assert_clean_snippet "forbidden names in an ordinary string" 'var msg = "window.open(x) fetch(y) new Worker";'
@@ -1606,6 +1795,43 @@ assert_clean_snippet "optional computed call on unrelated object" 'foo?.["bar"](
 assert_clean_snippet "non-constant computed read on unrelated object" 'foo[bar];'
 assert_forbidden_snippet "optional constant computed window.open" 'window?.["open"]("https://example.invalid/");'
 assert_forbidden_snippet "fail closed on non-constant computed window key" 'window[dyn].assign("https://example.invalid/");'
+
+# Codex tokenizer round-2 finding 1: qualified relevant-global member paths.
+assert_forbidden_valid_snippet "qualified globalThis.window.open" 'globalThis.window.open("https://example.invalid/");'
+assert_forbidden_valid_snippet "qualified globalThis.window.location.assign" 'globalThis.window.location.assign("https://example.invalid/");'
+assert_forbidden_valid_snippet "qualified window.window.open" 'window.window.open("https://example.invalid/");'
+assert_forbidden_valid_snippet "qualified globalThis.document.location" 'globalThis.document.location;'
+assert_forbidden_valid_snippet "qualified constant computed globalThis.window.open" 'globalThis["window"]["open"]("x");'
+assert_forbidden_valid_snippet "qualified optional globalThis.window.location.replace" 'globalThis?.window?.location?.replace("x");'
+assert_forbidden_valid_snippet "grouped qualified globalThis.window.open" '(globalThis.window).open("x");'
+assert_forbidden_valid_snippet "qualified computed window.window.location.href assignment" 'window["window"].location.href = "x";'
+assert_forbidden_valid_snippet "qualified computed globalThis.document.location" 'globalThis["document"].location;'
+assert_clean_valid_snippet "qualified mainwindow.opened stays distinct" 'globalThis.mainwindow.opened();'
+assert_clean_valid_snippet "qualified document.locationCache stays distinct" 'foo.document.locationCache;'
+assert_clean_valid_snippet "helper call with qualified globalThis.window argument" 'adapter(globalThis.window).open("local");'
+
+# Codex tokenizer round-2 finding 2: slash lexical goal is delimiter-framed.
+assert_forbidden_valid_snippet "object-literal division window.open" 'const q = {a: 1} / window.open("x") / 2;'
+assert_forbidden_valid_snippet "object-literal division fetch" 'const q = {a: 1} / fetch("x") / 2;'
+assert_forbidden_valid_snippet "nested object-literal division window.open" 'const q = {a:{b:1}} / window.open("x") / 2;'
+assert_forbidden_valid_snippet "call-close division fetch" 'foo() / fetch("x") / 2;'
+assert_forbidden_valid_snippet "group-close division window.open" '(value) / window.open("x") / 2;'
+assert_forbidden_valid_snippet "array-close division fetch" '[1] / fetch("x") / 2;'
+assert_clean_valid_snippet "if-header regex window.open" 'if (ok) /window.open/.test(text);'
+assert_clean_valid_snippet "if-header regex fetch" 'if (ok) /fetch(x)/.test(text);'
+assert_clean_valid_snippet "while-header regex window.open" 'while (ok) /window.open/.test(text);'
+assert_clean_valid_snippet "for-header regex fetch" 'for (; ok;) /fetch(x)/.test(text);'
+assert_clean_valid_snippet "with-header regex window.open" 'with (obj) /window.open/.test(text);'
+assert_clean_valid_snippet "block-close regex fetch after if" 'if (ok) {} /fetch(x)/.test(text);'
+assert_clean_valid_snippet "declaration regex-literal control" 'var r = /window.open/;'
+assert_clean_valid_snippet "assignment regex-literal control" 'r = /fetch(x)/;'
+assert_clean_valid_snippet "regex class and escaped slash" 'var r = /[window.open]/; var r2 = /window\/open/; var r3 = /[\/]/;'
+
+if snippet_is_valid_js '{a:{b:1}} / window.open("x") / 2'; then
+  bad "syntax validator accepted invalid statement-position nested-object division"
+else
+  ok "syntax validator rejects invalid statement-position nested-object division"
+fi
 
 # E — removed simulation disclaimer.
 MUTANT_HTML_NODISCLAIMER="$TMP_DIR/index.mutant-nodisclaimer.html"
