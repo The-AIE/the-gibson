@@ -494,23 +494,35 @@ echo "static scan (app.js): forbidden channels and wording"
 #     arbitrary foo.location targets are not.
 #   - array literals are not computed-member suffixes; optional computed
 #     access (foo?.["bar"]) analyzes the receiver before ?..
-#   - a terminal window or document member (dot, optional, constant-computed,
-#     grouped) keeps that global identity through a qualifier chain, so
-#     globalThis.window.open and globalThis.document.location are the same
-#     channels as the unqualified forms. Exact identifier/property boundaries:
+#   - window and globalThis are global-object identities. A terminal window
+#     or document member (dot, optional, constant-computed, grouped) keeps
+#     that identity only when the receiver is already a global object, so
+#     globalThis.window.open, globalThis.document.location, and window.window
+#     are the same channels as the unqualified forms. foo.window.open,
+#     foo["window"].open, and ({window:{open(){}}}).window.open are local
+#     properties, not those channels. Exact identifier/property boundaries:
 #     mainwindow and locationCache are not those members. Helper-call results
 #     stay opaque: adapter(globalThis.window).open is not window.open.
+#   - a bare location identifier used as an assignment target, including
+#     object/array destructuring (and default-value forms), is the same
+#     navigation assignment as location = ...; a read such as {x: location}
+#     or a renamed destructure {location: localLocation} is not.
 # Identifier matches are exact ($ and alnum are identifier characters), so
 # prefetchData, mainwindow, $new, Worker$Factory are not the forbidden names.
 # window.location assignment is distinct from a read or === comparison.
 # document.location and location.href/assign/replace are member access.
-# Constant computed members (window["open"]) are detected; a non-constant
-# computed key on a relevant global fails closed.
+# Constant computed members (window["open"], window["fetch"](),
+# navigator["sendBeacon"]) match the identifier/dot spelling with the same
+# call/new constraints; a non-constant computed key on a relevant global
+# fails closed. String-literal contents and object-literal keys are not
+# computed members.
 # Slash lexical goal uses delimiter frames, not a flat previous-token table:
 # object-literal } is an expression (division can follow); block } starts a
-# statement (regex can follow). Control-header ) of if/while/for/with starts
-# a statement (regex can follow); call/group ) is an expression (division
-# can follow). Unknown delimiter roles fail closed.
+# statement (regex can follow). Function/switch/catch bodies are blocks.
+# Control-header ) of if/while/for/with starts a statement (regex can
+# follow); call/group ) is an expression (division can follow). A line
+# terminator after return makes a following { a block (ASI), not an object.
+# Unknown delimiter roles fail closed.
 # The whole file is tokenized and checked before the function returns clean
 # (no grep -q / SIGPIPE).
 check_forbidden_js() {
@@ -533,7 +545,8 @@ const FORBIDDEN_IDENTS = mapOf([
   'ServiceWorker', 'serviceWorker', 'importScripts'
 ]);
 
-const RELEVANT_GLOBALS = mapOf(['window', 'location', 'document']);
+const RELEVANT_GLOBALS = mapOf(['window', 'location', 'document', 'globalThis']);
+const GLOBAL_OBJECTS = mapOf(['window', 'globalThis']);
 
 const NOT_CALLEE = mapOf([
   'if', 'else', 'while', 'for', 'switch', 'catch', 'function',
@@ -575,24 +588,46 @@ const STMT_BODY_KWS = mapOf([
   'else', 'do', 'try', 'finally', 'catch', 'default', 'static'
 ]);
 
-function classifyParen(last) {
+function isHeaderParen(last, last2) {
+  if (!last) return false;
+  if (last.kind === 'ident') {
+    if (last.value === 'function' || last.value === 'catch' || last.value === 'switch') {
+      return true;
+    }
+    if (last2 && last2.kind === 'ident' && last2.value === 'function') return true;
+  }
+  if (last.kind === 'punct' && last.value === '*' &&
+      last2 && last2.kind === 'ident' && last2.value === 'function') {
+    return true;
+  }
+  return false;
+}
+
+function classifyParen(last, last2) {
   if (last && last.kind === 'ident' && CONTROL_HEADERS[last.value]) return 'control';
+  if (isHeaderParen(last, last2)) return 'header';
   if (isCallCalleeSuffix(last)) return 'call';
   return 'group';
 }
 
-function classifyBrace(last, lastClosed, delimStack, lastColonWasTernary) {
+function classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLineTerm) {
   if (!last) return 'block';
   if (last.kind === 'ident') {
     if (STMT_BODY_KWS[last.value]) return 'block';
-    if (EXPR_KWS[last.value]) return 'object';
+    if (EXPR_KWS[last.value]) {
+      if (last.value === 'return' && sawLineTerm) return 'block';
+      return 'object';
+    }
     return 'unknown';
   }
   if (last.kind !== 'punct') return 'block';
   const v = last.value;
   if (v === '=>') return 'block';
   if (v === ')') {
-    if (lastClosed && lastClosed.type === '(' && lastClosed.role === 'control') return 'block';
+    if (lastClosed && lastClosed.type === '(' &&
+        (lastClosed.role === 'control' || lastClosed.role === 'header')) {
+      return 'block';
+    }
     return 'unknown';
   }
   if (v === '}' || v === ';' || v === '{') return 'block';
@@ -643,6 +678,8 @@ function tokenize(src) {
   const n = src.length;
   let i = 0;
   let last = null;
+  let last2 = null;
+  let sawLineTerm = false;
   const interp = [];
   const delimStack = [{ type: 'root', role: 'block', ternary: 0 }];
   let lastClosed = null;
@@ -650,7 +687,14 @@ function tokenize(src) {
 
   function emit(tok) {
     tokens.push(tok);
+    last2 = last;
     last = tok;
+    sawLineTerm = false;
+  }
+  function syncLastFromTokens() {
+    last = tokens.length ? tokens[tokens.length - 1] : last;
+    last2 = tokens.length >= 2 ? tokens[tokens.length - 2] : null;
+    sawLineTerm = false;
   }
   function peek(k) { return i + k < n ? src[i + k] : ''; }
   function fail(msg) { return { ok: false, error: msg, tokens: tokens }; }
@@ -669,7 +713,9 @@ function tokenize(src) {
     while (interpDelims < interp.length) {
       delimStack.push({ type: 'interp', role: 'expr', ternary: 0 });
       interpDelims++;
+      last2 = last;
       last = { kind: 'punct', value: '(' };
+      sawLineTerm = false;
     }
   }
 
@@ -683,6 +729,7 @@ function tokenize(src) {
 
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v' ||
         c === '\u00a0' || c === '\u2028' || c === '\u2029') {
+      if (isLineTerm(c)) sawLineTerm = true;
       i++;
       continue;
     }
@@ -697,6 +744,7 @@ function tokenize(src) {
       let closed = false;
       while (i < n) {
         if (src[i] === '*' && peek(1) === '/') { i += 2; closed = true; break; }
+        if (isLineTerm(src[i])) sawLineTerm = true;
         i++;
       }
       if (!closed) return fail('unterminated-block-comment');
@@ -759,7 +807,7 @@ function tokenize(src) {
       const t = lexTemplate(src, i, emit, interp);
       if (!t.ok) return fail(t.error);
       i = t.next;
-      last = tokens.length ? tokens[tokens.length - 1] : last;
+      syncLastFromTokens();
       alignInterpDelims();
       continue;
     }
@@ -790,7 +838,7 @@ function tokenize(src) {
       const resumed = resumeTemplate(src, op.next, emit, interp);
       if (!resumed.ok) return fail(resumed.error);
       i = resumed.next;
-      last = tokens.length ? tokens[tokens.length - 1] : last;
+      syncLastFromTokens();
       alignInterpDelims();
       continue;
     }
@@ -798,7 +846,7 @@ function tokenize(src) {
       if (interp.length) interp[interp.length - 1] += 1;
       delimStack.push({
         type: '{',
-        role: classifyBrace(last, lastClosed, delimStack, lastColonWasTernary),
+        role: classifyBrace(last, lastClosed, delimStack, lastColonWasTernary, sawLineTerm),
         ternary: 0
       });
     } else if (op.value === '}') {
@@ -810,7 +858,7 @@ function tokenize(src) {
       if (!closedBrace.ok) return fail('unbalanced-delimiter');
       lastClosed = closedBrace.frame;
     } else if (op.value === '(') {
-      delimStack.push({ type: '(', role: classifyParen(last), ternary: 0 });
+      delimStack.push({ type: '(', role: classifyParen(last, last2), ternary: 0 });
     } else if (op.value === ')') {
       const closedParen = popDelim('(');
       if (!closedParen.ok) return fail('unbalanced-delimiter');
@@ -1138,11 +1186,20 @@ function possibleGlobals(tokens, start, end, ctx) {
   return lhs.globals;
 }
 
+function isGlobalObject(globals) {
+  return !!(globals && (globals.has('window') || globals.has('globalThis')));
+}
+
 function memberIdentity(objGlobals, key) {
   const names = new Set();
-  if (key === 'window') names.add('window');
-  if (key === 'document') names.add('document');
-  if (key === 'location' && objGlobals && objGlobals.has('window')) names.add('location');
+  if (!objGlobals || !key) return names;
+  if (GLOBAL_OBJECTS[key] && isGlobalObject(objGlobals)) {
+    names.add(key);
+    names.add('window');
+    names.add('globalThis');
+  }
+  if (key === 'document' && isGlobalObject(objGlobals)) names.add('document');
+  if (key === 'location' && objGlobals.has('window')) names.add('location');
   return names;
 }
 
@@ -1204,6 +1261,9 @@ function consumeExprEndingAt(tokens, end, ctx) {
     }
     const names = new Set();
     if (RELEVANT_GLOBALS[tok.value]) names.add(tok.value);
+    if (GLOBAL_OBJECTS[tok.value]) {
+      names.add(tok.value);
+    }
     let start = end;
     if (end > 0 && tokens[end - 1].kind === 'ident' && tokens[end - 1].value === 'new') {
       start = end - 1;
@@ -1380,7 +1440,7 @@ function detect(tokens) {
     }
 
     if (tok.kind === 'ident' && tok.value === 'location' && !isDotTok(prev)) {
-      if (isAssignAfter(tokens, i + 1)) hit('bare-location-assign');
+      if (isAssignTarget(tokens, i, i)) hit('bare-location-assign');
     }
 
     if (tok.kind === 'punct' && (tok.value === '.' || tok.value === '?.')) {
@@ -1417,21 +1477,50 @@ function checkComputed(tokens, openIdx, ctx, hit) {
   if (ctx.indeterminate) return;
   const key = constantKey(tokens, openIdx + 1, close - 1);
   if (key === null) {
-    if (rec.globals.has('window') || rec.globals.has('location') || rec.globals.has('document')) {
+    if (rec.globals.has('window') || rec.globals.has('location') ||
+        rec.globals.has('document') || rec.globals.has('globalThis')) {
       ctx.indeterminate = true;
     }
     return;
   }
   const assign = isAssignTarget(tokens, rec.start, close);
-  applyMemberRule(key, rec.globals, assign, hit);
+  applyMemberRule(key, rec.globals, assign, hit, {
+    call: isCallAfter(tokens, close + 1),
+    construct: isConstructExpr(tokens, rec.start)
+  });
 }
 
-function applyMemberRule(name, globals, assign, hit) {
+function isCallAfter(tokens, idx) {
+  if (idx >= tokens.length) return false;
+  const t = tokens[idx];
+  if (t.kind === 'punct' && t.value === '(') return true;
+  if (t.kind === 'punct' && t.value === '?.' &&
+      idx + 1 < tokens.length && tokens[idx + 1].kind === 'punct' &&
+      tokens[idx + 1].value === '(') {
+    return true;
+  }
+  return false;
+}
+
+function isConstructExpr(tokens, exprStart) {
+  if (exprStart < 0 || exprStart >= tokens.length) return false;
+  const at = tokens[exprStart];
+  if (at && at.kind === 'ident' && at.value === 'new') return true;
+  if (exprStart === 0) return false;
+  const before = tokens[exprStart - 1];
+  return !!(before && before.kind === 'ident' && before.value === 'new');
+}
+
+function applyMemberRule(name, globals, assign, hit, extras) {
+  extras = extras || {};
   if (name === 'open' && globals.has('window')) hit('window.open');
   if (name === 'location' && globals.has('document')) hit('document.location');
   if (name === 'location' && globals.has('window') && assign) hit('window.location=');
   if (LOCATION_PROPS[name] && globals.has('location')) hit('location.' + name);
   if (name === 'innerHTML' && assign) hit('innerHTML=');
+  if (FORBIDDEN_IDENTS[name]) hit('ident:' + name);
+  if (name === 'fetch' && extras.call) hit('fetch-call');
+  if (name === 'Worker' && extras.construct) hit('new-Worker');
 }
 
 function checkSource(src) {
@@ -1826,6 +1915,52 @@ assert_clean_valid_snippet "block-close regex fetch after if" 'if (ok) {} /fetch
 assert_clean_valid_snippet "declaration regex-literal control" 'var r = /window.open/;'
 assert_clean_valid_snippet "assignment regex-literal control" 'r = /fetch(x)/;'
 assert_clean_valid_snippet "regex class and escaped slash" 'var r = /[window.open]/; var r2 = /window\/open/; var r3 = /[\/]/;'
+
+# Codex tokenizer round-3 finding 1: only a global-object receiver promotes
+# terminal window/document identity. Arbitrary local properties stay local.
+assert_clean_valid_snippet "local foo.window.open is not navigation" 'foo.window.open("local-panel");'
+assert_clean_valid_snippet "local computed foo.window.open is not navigation" 'foo["window"].open("local-panel");'
+assert_clean_valid_snippet "local foo.document.location is not navigation" 'foo.document.location;'
+assert_clean_valid_snippet "object-literal window.open is not navigation" '({window:{open(){}}}).window.open();'
+assert_clean_valid_snippet "helper call with qualified globalThis.window argument stays opaque" 'adapter(globalThis.window).open("local");'
+assert_forbidden_valid_snippet "globalThis.window.open remains forbidden" 'globalThis.window.open("x");'
+assert_forbidden_valid_snippet "computed globalThis.window.open remains forbidden" 'globalThis["window"]["open"]("x");'
+assert_forbidden_valid_snippet "globalThis.document.location remains forbidden" 'globalThis.document.location;'
+assert_forbidden_valid_snippet "computed globalThis.document.location remains forbidden" 'globalThis["document"].location;'
+assert_forbidden_valid_snippet "window.window.open remains forbidden" 'window.window.open("x");'
+assert_clean_valid_snippet "arbitrary foo.location.assign stays clean" 'foo.location.assign("https://example.invalid/");'
+assert_clean_valid_snippet "terminal-property prefixes stay distinct from window.open" 'window.opened();'
+
+# Codex tokenizer round-3 finding 2: constant-computed spellings match the
+# identifier/dot channel with the same call/new constraints.
+assert_forbidden_valid_snippet "computed window.fetch call" 'window["fetch"]("x");'
+assert_forbidden_valid_snippet "computed globalThis.fetch call" 'globalThis["fetch"]("x");'
+assert_forbidden_valid_snippet "computed new globalThis.XMLHttpRequest" 'new globalThis["XMLHttpRequest"]();'
+assert_forbidden_valid_snippet "computed navigator.sendBeacon" 'navigator["sendBeacon"]("x");'
+assert_forbidden_valid_snippet "computed navigator.serviceWorker.register" 'navigator["serviceWorker"].register("x");'
+assert_forbidden_valid_snippet "computed self.importScripts" 'self["importScripts"]("x");'
+assert_forbidden_valid_snippet "computed new globalThis.Worker" 'new globalThis["Worker"]("worker.js");'
+assert_forbidden_valid_snippet "computed new globalThis.WebSocket" 'new globalThis["WebSocket"]("ws://example.invalid/");'
+assert_clean_valid_snippet "computed prefetchData decoy stays clean" 'window["prefetchData"]("x");'
+assert_clean_valid_snippet "computed WorkerFactory decoy stays clean" 'globalThis["WorkerFactory"]();'
+assert_clean_valid_snippet "object-literal fetch/sendBeacon keys are not computed members" 'const labels = {"fetch": "local", "sendBeacon": "local"};'
+assert_clean_valid_snippet "computed fetch read without call stays clean" 'obj["fetch"];'
+
+# Codex tokenizer round-3 finding 3: bare location as a destructuring
+# assignment target is the same navigation assignment as location = ...
+assert_forbidden_valid_snippet "object destructuring bare location target" '({x: location} = source);'
+assert_forbidden_valid_snippet "array destructuring bare location target" '[location] = ["x"];'
+assert_forbidden_valid_snippet "destructuring default bare location target" '({x: location = "x"} = source);'
+assert_clean_valid_snippet "object-literal location value is a read" 'const o = {x: location};'
+assert_clean_valid_snippet "array-literal location value is a read" 'const a = [location];'
+assert_clean_valid_snippet "renamed destructure of location property is not a target" 'const {location: localLocation} = source;'
+
+# Codex tokenizer round-3 finding 4: function/switch/catch bodies and
+# return+ASI make the following { a block, so a following slash is regex.
+assert_clean_valid_snippet "function-body close regex window.open" 'function f() {} /window.open/.test("x");'
+assert_clean_valid_snippet "switch-body close regex fetch" 'switch (x) {} /fetch(x)/.test(text);'
+assert_clean_valid_snippet "catch-body close regex fetch" 'try {} catch (e) {} /fetch(x)/.test(text);'
+assert_clean_valid_snippet "return-ASI block then regex window.open" $'function f(){ return\n{a:1}\n/window.open/.test("x"); }'
 
 if snippet_is_valid_js '{a:{b:1}} / window.open("x") / 2'; then
   bad "syntax validator accepted invalid statement-position nested-object division"
