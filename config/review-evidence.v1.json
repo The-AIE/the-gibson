@@ -24,10 +24,9 @@
       "login": "aie-agent-lanes-mini[bot]",
       "appSlug": "aie-agent-lanes-mini",
       "appId": 4603933,
-      "vendor": "unknown",
+      "vendor": "codex",
       "roles": [
-        "author",
-        "reviewer"
+        "author"
       ]
     },
     {
