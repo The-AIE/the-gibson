@@ -100,9 +100,9 @@ expect "(n4) receipt with wrong app id" "$d" no-receipt-at-head pending 0
 d=$(fx_new o); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|DISMISSED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(o) DISMISSED only" "$d" no-receipt-at-head pending 0
 d=$(fx_new p); fx_commits "$d" "$GROK"; fx_reviews "$d" "$MINI|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(p) vendor-unknown identity (mini) APPROVE is never eligible" "$d" same-vendor-reviewer failure 1
+expect "(p) mini author-only identity APPROVE is not reviewer evidence" "$d" no-receipt-at-head pending 0
 d=$(fx_new q); fx_commits "$d" "$MINI"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(q) vendor-unknown author" "$d" identity-unresolved failure 1
+expect "(q) mini author maps to codex; devin review is eligible" "$d" pass success 0
 d=$(fx_new r); fx_commits "$d" "stranger"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(r) unlisted author login" "$d" identity-unresolved failure 1
 d=$(fx_new s); fx_commits "$d" "$GROK|web-flow"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
