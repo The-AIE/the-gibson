@@ -69,9 +69,10 @@ export const REASONS = Object.freeze({
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const VENDORS = new Set(["grok", "codex", "claude", "devin", "coderabbit", "owner", "unknown"]);
+const AUTHOR_COMMIT_VENDORS = new Set(["grok", "codex", "claude", "devin"]);
 const ROLES = new Set(["author", "reviewer"]);
 const CONFIG_KEYS = new Set(["schemaVersion", "context", "ownerLogin", "attestationVendors", "identities"]);
-const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles"]);
+const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "authorCommits"]);
 // GitHub's own committer for web-UI edits; not a vendor, not an author of record.
 const GITHUB_WEB_FLOW = "web-flow";
 
@@ -132,6 +133,19 @@ export function validateConfig(cfg) {
     if (!VENDORS.has(id.vendor)) fail(`identity:vendor:${id.login}`);
     if (!Array.isArray(id.roles) || id.roles.length === 0 || id.roles.some((r) => !ROLES.has(r))) fail(`identity:roles:${id.login}`);
     if (id.roles.includes("reviewer") && id.login.endsWith("[bot]") && !id.appSlug) fail(`identity:reviewer-needs-appSlug:${id.login}`);
+    if (Object.prototype.hasOwnProperty.call(id, "authorCommits")) {
+      const ac = id.authorCommits;
+      if (!Array.isArray(ac) || ac.length === 0) fail(`identity:authorCommits:${id.login}`);
+      const seenSha = new Set();
+      for (const sha of ac) {
+        if (typeof sha !== "string" || !SHA40.test(sha)) fail(`identity:authorCommits:${id.login}`);
+        if (seenSha.has(sha)) fail(`identity:authorCommits:${id.login}`);
+        seenSha.add(sha);
+      }
+      const authorOnly = id.roles.length === 1 && id.roles[0] === "author";
+      const vendorOk = AUTHOR_COMMIT_VENDORS.has(id.vendor) && cfg.attestationVendors.includes(id.vendor);
+      if (!authorOnly || !vendorOk) fail(`identity:authorCommits:${id.login}`);
+    }
   }
   return cfg;
 }
@@ -173,7 +187,10 @@ export function resolveAuthors(commits, identities, attestedVendor) {
   const unresolved = [];
   for (const c of commits) {
     const verified = c?.commit?.verification?.verified === true;
-    const short = c?.sha?.slice(0, 7) ?? "?";
+    // Runtime SHA may be absent or a non-string; never throw on `.slice` before
+    // the per-identity allowlist can return a structured denial.
+    const sha = typeof c?.sha === "string" ? c.sha : "";
+    const short = typeof c?.sha === "string" ? c.sha.slice(0, 7) : "?";
     for (const side of ["author", "committer"]) {
       const login = c?.[side]?.login ?? null;
       if (!login) { unresolved.push(`${side}:${short}:no-login`); continue; }
@@ -183,6 +200,14 @@ export function resolveAuthors(commits, identities, attestedVendor) {
       }
       const id = byLogin.get(norm(login));
       if (!id || !id.roles.includes("author")) { unresolved.push(login); continue; }
+      if (Array.isArray(id.authorCommits)) {
+        // Restriction precedes verified-commit handling and owner attestation.
+        // Compare complete immutable SHAs only — no prefix, case-fold, or range.
+        if (!id.authorCommits.includes(sha)) {
+          unresolved.push(`${login}:commit-not-allowed`);
+          continue;
+        }
+      }
       const vendor = id.vendor;
       if (vendor === "unknown") { unresolved.push(`${login}:vendor-unknown`); continue; }
       if (vendor === "owner" || !verified) {
