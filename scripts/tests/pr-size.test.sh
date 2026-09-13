@@ -211,5 +211,10 @@ for f in "${WF_FILES[@]}"; do
 done
 
 echo
-echo "pr-size.test.sh: $PASS passed, $FAIL failed"
+if [[ $FAIL -eq 0 ]]; then
+  echo "pr-size.test.sh: $PASS passed"
+else
+  echo "pr-size.test.sh: $PASS passed, $FAIL failed"
+fi
+echo "GIBSON_TEST_METRICS total=$((PASS + FAIL)) skipped=0 todo=0"
 [[ $FAIL -eq 0 ]]
