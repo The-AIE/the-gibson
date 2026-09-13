@@ -24,15 +24,19 @@ mkdir -p "$ROOT/bin"
 HEAD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 PREV=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 GROK='aie-agent-lanes-grok[bot]'; MINI='aie-agent-lanes-mini[bot]'; DEVIN='devin-ai-integration[bot]'; CR='coderabbitai[bot]'; OWNER=mrhinkle
+MINI_SHA1=5ced13878f802c5810bdf098b954e0759cb659e5
+MINI_SHA2=a36c6272560b785307c3b47d3f69e6be81ec2979
 
 # ---- fixture builders --------------------------------------------------------
 fx_pull() { printf '{"number":1,"commits":%s,"head":{"sha":"%s"},"user":{"login":"%s"}}' "$2" "$HEAD" "$OWNER" > "$1/pull.json"; }
 fx_new() { d="$ROOT/$1"; mkdir -p "$d"; fx_pull "$d" 0; echo '[]' > "$d/reviews.json"; echo '[]' > "$d/comments.json"; echo '[]' > "$d/commits.json"; echo "$d"; }
-# commits: each arg "authorLogin[|committerLogin[|verified]]" ("-" = null login; "web-flow" allowed;
-# verified defaults to true = GitHub-signed, the only case a login is trusted without attestation)
-fx_commits() { d=$1; shift; { printf '['; sep=""; i=0; for spec in "$@"; do IFS='|' read -r a c v <<< "$spec"; [ -z "$c" ] && c=$a; [ -z "$v" ] && v=true; i=$((i+1))
+# commits: each arg "authorLogin[|committerLogin[|verified[|sha]]]" ("-" = null login; "web-flow" allowed;
+# verified defaults to true = GitHub-signed, the only case a login is trusted without attestation;
+# sha defaults to the existing c%039d fixture id — explicit SHA is opt-in and does not change other cases)
+fx_commits() { d=$1; shift; { printf '['; sep=""; i=0; for spec in "$@"; do IFS='|' read -r a c v sha <<< "$spec"; [ -z "$c" ] && c=$a; [ -z "$v" ] && v=true; i=$((i+1))
   al='null'; [ "$a" != "-" ] && al="{\"login\":\"$a\"}"; cl='null'; [ "$c" != "-" ] && cl="{\"login\":\"$c\"}"
-  printf '%s{"sha":"c%039d","author":%s,"committer":%s,"commit":{"verification":{"verified":%s,"reason":"fixture"},"author":{"email":"x@example.invalid"},"committer":{"email":"x@example.invalid"}}}' "$sep" "$i" "$al" "$cl" "$v"; sep=","; done; printf ']'; } > "$d/commits.json"; fx_pull "$d" "$#"; }
+  if [ -n "${sha:-}" ]; then csha=$sha; else csha=$(printf 'c%039d' "$i"); fi
+  printf '%s{"sha":"%s","author":%s,"committer":%s,"commit":{"verification":{"verified":%s,"reason":"fixture"},"author":{"email":"x@example.invalid"},"committer":{"email":"x@example.invalid"}}}' "$sep" "$csha" "$al" "$cl" "$v"; sep=","; done; printf ']'; } > "$d/commits.json"; fx_pull "$d" "$#"; }
 # reviews: each arg "login|type|STATE|commit|id|ts"
 fx_reviews() { d=$1; shift; { printf '['; sep=""; for spec in "$@"; do IFS='|' read -r l t s c id ts <<< "$spec"
   printf '%s{"id":%s,"user":{"login":"%s","type":"%s"},"state":"%s","commit_id":"%s","submitted_at":"%s","performed_via_github_app":null}' "$sep" "$id" "$l" "$t" "$s" "$c" "$ts"; sep=","; done; printf ']'; } > "$d/reviews.json"; }
@@ -49,6 +53,13 @@ run() { OUT=$(node "$EVAL" --repo x/y --pr 1 --expected-head "$HEAD" --fixture "
   REASON=$(printf '%s' "$OUT" | sed -nE 's/.*"reason":"([^"]+)".*/\1/p'); STATE=$(printf '%s' "$OUT" | sed -nE 's/.*"state":"([^"]+)".*/\1/p'); }
 expect() { # expect NAME DIR reason state rc [cfg]
   run "$2" "${6:-}"; if [ "$REASON" = "$3" ] && [ "$STATE" = "$4" ] && [ "$RC" -eq "$5" ]; then ok "$1 → $3/$4/rc=$5"; else bad "$1: want $3/$4/rc=$5 got ${REASON:-?}/${STATE:-?}/rc=$RC: $OUT $(cat "$ROOT/err")"; fi; }
+av_json() { printf '%s' "$OUT" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{try{process.stdout.write(JSON.stringify(JSON.parse(s).authorVendors||[]))}catch{process.stdout.write("[]")}})'; }
+expect_av() { # expect_av NAME '["codex"]'  — set-equality on last run's authorVendors
+  got=$(av_json); want=$2
+  if node -e 'const g=JSON.parse(process.argv[1]).slice().sort().join(","); const w=JSON.parse(process.argv[2]).slice().sort().join(","); process.exit(g===w?0:1)' "$got" "$want"; then ok "$1 authorVendors=$want"; else bad "$1 authorVendors: want $want got $got: $OUT"; fi; }
+expect_detail() { # expect_detail NAME needle
+  printf '%s' "$OUT" | grep -F -- "$2" >/dev/null && ok "$1 detail has $2" || bad "$1 detail missing $2: $OUT"; }
+set_commit_sha() { node -e 'const fs=require("fs"); const p=process.argv[1]; const v=process.argv[2]; const j=JSON.parse(fs.readFileSync(p,"utf8")); if(v==="DELETE") delete j[0].sha; else if(v==="NUM") j[0].sha=12345; else if(v==="OBJ") j[0].sha={slice:true}; else j[0].sha=v; fs.writeFileSync(p, JSON.stringify(j));' "$1" "$2"; }
 
 echo "# CLI contract (CONVENTIONS 2.1)"
 node "$EVAL" --definitely-not-a-flag >/dev/null 2>&1; [ $? -eq 2 ] && ok "unknown flag exits 2" || bad "unknown flag did not exit 2"
@@ -100,9 +111,10 @@ expect "(n4) receipt with wrong app id" "$d" no-receipt-at-head pending 0
 d=$(fx_new o); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|DISMISSED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(o) DISMISSED only" "$d" no-receipt-at-head pending 0
 d=$(fx_new p); fx_commits "$d" "$GROK"; fx_reviews "$d" "$MINI|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(p) vendor-unknown identity (mini) APPROVE is never eligible" "$d" same-vendor-reviewer failure 1
-d=$(fx_new q); fx_commits "$d" "$MINI"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
-expect "(q) vendor-unknown author" "$d" identity-unresolved failure 1
+expect "(p) Mini APPROVE is ignored because it is author-only" "$d" no-receipt-at-head pending 0
+d=$(fx_new q); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(q) allowed Mini SHA is Codex-attributed" "$d" pass success 0
+expect_av "(q)" '["codex"]'
 d=$(fx_new r); fx_commits "$d" "stranger"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
 expect "(r) unlisted author login" "$d" identity-unresolved failure 1
 d=$(fx_new s); fx_commits "$d" "$GROK|web-flow"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
@@ -542,6 +554,132 @@ d=$(fx_new x14); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|
 expect "(x14) fake devin claim on a grok PR (different vendor than author) is refused — isolates the App-vendor block, not same-vendor-reviewer" "$d" no-receipt-at-head pending 0
 d=$(fx_new x15); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" coderabbit pass)"
 expect "(x15) fake coderabbit claim is refused too — coderabbit can't even reach the block list, config rejects it from attestationVendors outright" "$d" no-receipt-at-head pending 0
+
+echo "# #385 — trusted Mini Codex attribution (authorCommits allowlist)"
+d=$(fx_new 385both); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1" "$MINI|$MINI|true|$MINI_SHA2"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-both) both approved Mini SHAs resolve to Codex" "$d" pass success 0
+expect_av "(385-both)" '["codex"]'
+d=$(fx_new 385sha2); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA2"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-sha2) second approved Mini SHA is Codex-attributed" "$d" pass success 0
+expect_av "(385-sha2)" '["codex"]'
+
+# Denied SHAs stay unresolved even with verified=true AND owner attestation.
+wrong=${MINI_SHA1%?}6
+d=$(fx_new 385chg); fx_commits "$d" "$MINI|$MINI|true|$wrong"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+expect "(385-changed) one-character-changed Mini SHA is unresolved" "$d" identity-unresolved failure 1
+expect_detail "(385-changed)" "commit-not-allowed"
+d=$(fx_new 385other); fx_commits "$d" "$MINI|$MINI|true|$HEAD"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+expect "(385-other) another full Mini SHA is unresolved" "$d" identity-unresolved failure 1
+expect_detail "(385-other)" "commit-not-allowed"
+d=$(fx_new 385short); fx_commits "$d" "$MINI|$MINI|true|5ced138"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+expect "(385-short) short Mini SHA is unresolved" "$d" identity-unresolved failure 1
+expect_detail "(385-short)" "commit-not-allowed"
+d=$(fx_new 385miss); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+set_commit_sha "$d/commits.json" DELETE
+expect "(385-missing) missing Mini SHA is unresolved" "$d" identity-unresolved failure 1
+expect_detail "(385-missing)" "commit-not-allowed"
+d=$(fx_new 385num); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+set_commit_sha "$d/commits.json" NUM
+expect "(385-num) numeric Mini SHA is structured denial, not a crash" "$d" identity-unresolved failure 1
+expect_detail "(385-num)" "commit-not-allowed"
+d=$(fx_new 385obj); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+set_commit_sha "$d/commits.json" OBJ
+expect "(385-obj) object Mini SHA with .slice is structured denial, not a crash" "$d" identity-unresolved failure 1
+expect_detail "(385-obj)" "commit-not-allowed"
+d=$(fx_new 385up); fx_commits "$d" "$MINI|$MINI|true|$(printf '%s' "$MINI_SHA1" | tr 'a-f' 'A-F')"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+expect "(385-upper) uppercase Mini SHA is unresolved" "$d" identity-unresolved failure 1
+expect_detail "(385-upper)" "commit-not-allowed"
+
+# Unsigned allowed SHA: attestation + independent review still required.
+d=$(fx_new 385u0); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-unattested) unsigned allowed Mini SHA without attestation" "$d" identity-unresolved failure 1
+expect_detail "(385-unattested)" "unverified-unattested"
+d=$(fx_new 385ustale); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$PREV" codex)"
+expect "(385-stale-att) unsigned allowed Mini SHA with stale attestation" "$d" identity-unresolved failure 1
+d=$(fx_new 385uinv); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" bogus)"
+expect "(385-invalid-att) unsigned allowed Mini SHA with invalid attestation" "$d" identity-unresolved failure 1
+d=$(fx_new 385upend); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+expect "(385-att-noreview) unsigned allowed Mini SHA with valid attestation, no review" "$d" no-receipt-at-head pending 0
+expect_av "(385-att-noreview)" '["codex"]'
+d=$(fx_new 385uok); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" codex)"
+expect "(385-att-review) unsigned allowed Mini SHA with attestation + independent App review" "$d" pass success 0
+expect_av "(385-att-review)" '["codex"]'
+
+# Reviewer eligibility: Codex cannot review its own allowed author; Claude or a listed App can.
+d=$(fx_new 385cx); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" codex pass)"
+expect "(385-codex-review) Codex reviewer PASS is rejected for allowed Codex authors" "$d" same-vendor-reviewer failure 1
+d=$(fx_new 385cl); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_comments "$d" "$OWNER|MEMBER|-|0|9|2026-09-04T12:00:00Z|$(extreview "$HEAD" claude pass)"
+expect "(385-claude-review) eligible Claude owner-attested review passes" "$d" pass success 0
+d=$(fx_new 385cr); fx_commits "$d" "$MINI|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$CR|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-cr-review) configured independent App review passes" "$d" pass success 0
+
+# Attestation unions with Codex; both contributing vendors are ineligible reviewers.
+d=$(fx_new 385un); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_reviews "$d" "$CR|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" grok)"
+expect "(385-union) attesting grok unions with Codex, never replaces it" "$d" pass success 0
+expect_av "(385-union)" '["codex","grok"]'
+d=$(fx_new 385ung); fx_commits "$d" "$MINI|$MINI|false|$MINI_SHA1"; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"; fx_comments "$d" "$OWNER|MEMBER|-|0|5|2026-09-04T09:00:00Z|$(attest "$HEAD" grok)"
+expect "(385-union-grok) grok reviewer is ineligible after grok attestation" "$d" same-vendor-reviewer failure 1
+
+# Wrong login on an allowed SHA does not acquire Codex provenance; mixed sides fail.
+d=$(fx_new 385wronglogin); fx_commits "$d" "$GROK|$GROK|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-wrong-login) allowed SHA under grok login is grok, not Codex" "$d" pass success 0
+expect_av "(385-wrong-login)" '["grok"]'
+d=$(fx_new 385stranger); fx_commits "$d" "stranger|stranger|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-unlisted-login) allowed SHA under unlisted login is unresolved" "$d" identity-unresolved failure 1
+d=$(fx_new 385noc); fx_commits "$d" "$MINI|-|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-no-committer) Mini author with missing committer fails" "$d" identity-unresolved failure 1
+d=$(fx_new 385noa); fx_commits "$d" "-|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-no-author) Mini committer with missing author fails" "$d" identity-unresolved failure 1
+d=$(fx_new 385mix); fx_commits "$d" "$MINI|stranger|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-unrelated-committer) Mini author with unrelated committer fails" "$d" identity-unresolved failure 1
+d=$(fx_new 385mix2); fx_commits "$d" "stranger|$MINI|true|$MINI_SHA1"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+expect "(385-unrelated-author) Mini committer with unrelated author fails" "$d" identity-unresolved failure 1
+
+# Unrestricted identities stay unrestricted; Mini record is pinned.
+node -e '
+const c=require(process.argv[1]);
+const mini=c.identities.find((i)=>i.login==="aie-agent-lanes-mini[bot]");
+const want=["5ced13878f802c5810bdf098b954e0759cb659e5","a36c6272560b785307c3b47d3f69e6be81ec2979"];
+const pin=mini && mini.appSlug==="aie-agent-lanes-mini" && mini.appId===4603933 && mini.vendor==="codex"
+  && JSON.stringify(mini.roles)==="[\"author\"]" && JSON.stringify(mini.authorCommits)===JSON.stringify(want)
+  && Object.keys(mini).sort().join(",")==="appId,appSlug,authorCommits,login,roles,vendor";
+const others=c.identities.filter((i)=>i!==mini);
+const othersOk=others.every((i)=>!Object.prototype.hasOwnProperty.call(i,"authorCommits"));
+const grok=c.identities.find((i)=>i.login==="aie-agent-lanes-grok[bot]");
+const grokOk=grok && grok.vendor==="grok" && grok.appSlug==="aie-agent-lanes-grok" && grok.appId===4603934 && JSON.stringify(grok.roles)==="[\"author\",\"reviewer\"]";
+const devin=c.identities.find((i)=>i.login==="devin-ai-integration[bot]");
+const devinOk=devin && devin.vendor==="devin" && devin.appSlug==="devin-ai-integration" && devin.appId===811515 && JSON.stringify(devin.roles)==="[\"author\",\"reviewer\"]";
+const cog=c.identities.find((i)=>i.login==="cognition-team");
+const cogOk=cog && cog.vendor==="devin" && cog.appSlug===null && cog.appId===null && JSON.stringify(cog.roles)==="[\"author\"]";
+const cr=c.identities.find((i)=>i.login==="coderabbitai[bot]");
+const crOk=cr && cr.vendor==="coderabbit" && cr.appSlug==="coderabbitai" && cr.appId===347564 && JSON.stringify(cr.roles)==="[\"reviewer\"]";
+const owner=c.identities.find((i)=>i.login==="mrhinkle");
+const ownerOk=owner && owner.vendor==="owner" && owner.appSlug===null && owner.appId===null && JSON.stringify(owner.roles)==="[\"author\"]";
+if(!(pin && othersOk && grokOk && devinOk && cogOk && crOk && ownerOk)) process.exit(1);
+' "$CFG" && ok "(385-pin) Mini record and other identities pinned" || bad "(385-pin) Mini/other identity record mismatch"
+
+# Malformed allowlists and incompatible vendor/role combinations fail config validation.
+d=$(fx_new 385cfg); fx_commits "$d" "$GROK"; fx_reviews "$d" "$DEVIN|Bot|APPROVED|$HEAD|1|2026-09-04T10:00:00Z"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits=[]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-empty.json"
+expect "(385-cfg-empty) empty authorCommits" "$d" config-error failure 1 "$ROOT/ac-empty.json"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits=null; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-null.json"
+expect "(385-cfg-null) null authorCommits" "$d" config-error failure 1 "$ROOT/ac-null.json"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits="nope"; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-str.json"
+expect "(385-cfg-str) non-array authorCommits" "$d" config-error failure 1 "$ROOT/ac-str.json"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits=[m.authorCommits[0], m.authorCommits[0]]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-dup.json"
+expect "(385-cfg-dup) duplicate authorCommits" "$d" config-error failure 1 "$ROOT/ac-dup.json"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits=["5ced138"]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-short.json"
+expect "(385-cfg-short) short authorCommits SHA" "$d" config-error failure 1 "$ROOT/ac-short.json"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits=[m.authorCommits[0].toUpperCase()]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-up.json"
+expect "(385-cfg-upper) uppercase authorCommits SHA" "$d" config-error failure 1 "$ROOT/ac-up.json"
+node -e 'const c=require(process.argv[1]); const m=c.identities.find(i=>i.login.includes("mini")); m.authorCommits=[1]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-num.json"
+expect "(385-cfg-nonstring) nonstring authorCommits entry" "$d" config-error failure 1 "$ROOT/ac-num.json"
+node -e 'const c=require(process.argv[1]); const g=c.identities.find(i=>i.login.includes("grok")); g.authorCommits=["5ced13878f802c5810bdf098b954e0759cb659e5"]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-rev.json"
+expect "(385-cfg-reviewer) authorCommits on reviewer-capable identity" "$d" config-error failure 1 "$ROOT/ac-rev.json"
+node -e 'const c=require(process.argv[1]); const o=c.identities.find(i=>i.login==="mrhinkle"); o.authorCommits=["5ced13878f802c5810bdf098b954e0759cb659e5"]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-own.json"
+expect "(385-cfg-owner) authorCommits on owner identity" "$d" config-error failure 1 "$ROOT/ac-own.json"
+node -e 'const c=require(process.argv[1]); const cr=c.identities.find(i=>i.login.includes("coderabbit")); cr.roles=["author"]; cr.authorCommits=["5ced13878f802c5810bdf098b954e0759cb659e5"]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-cr.json"
+expect "(385-cfg-coderabbit) authorCommits on coderabbit vendor" "$d" config-error failure 1 "$ROOT/ac-cr.json"
 
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
