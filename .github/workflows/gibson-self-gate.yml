@@ -124,7 +124,7 @@ jobs:
               echo "error: expected exactly one strict ${key}=<${re}> line in ${pin_file}, found ${count}" >&2
               exit 1
             fi
-            val="${matches#${key}=}"
+            val="${matches#"$key"=}"
             if [ -z "$val" ]; then
               echo "error: empty ${key} in ${pin_file}" >&2
               exit 1
@@ -206,10 +206,12 @@ jobs:
       # has nothing to do with the code (#101 tracks making them hermetic).
       - name: Test git identity
         run: |
-          echo "GIT_AUTHOR_NAME=gibson-ci"            >> "$GITHUB_ENV"
-          echo "GIT_AUTHOR_EMAIL=ci@gibson.invalid"   >> "$GITHUB_ENV"
-          echo "GIT_COMMITTER_NAME=gibson-ci"         >> "$GITHUB_ENV"
-          echo "GIT_COMMITTER_EMAIL=ci@gibson.invalid" >> "$GITHUB_ENV"
+          {
+            echo "GIT_AUTHOR_NAME=gibson-ci"
+            echo "GIT_AUTHOR_EMAIL=ci@gibson.invalid"
+            echo "GIT_COMMITTER_NAME=gibson-ci"
+            echo "GIT_COMMITTER_EMAIL=ci@gibson.invalid"
+          } >> "$GITHUB_ENV"
 
       # Docs-only fast path. When every changed file is Markdown explanation or
       # memory (docs/, memory/, paper/, root *.md other than AGENTS.md/README.md/
@@ -283,3 +285,50 @@ jobs:
         with: { node-version: 22 }
       - name: A PR may not edit another session's claim
         run: node scripts/check-active-work.mjs
+
+  # Review is only real when a reviewer can read the whole diff
+  # (config/pr-size.v1.json); `size-exception` is informational until owner-attestation wiring exists.
+  # Sensor + budget run from the trusted base tip, never from the PR merge ref.
+  pr-size:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: 22 }
+      - name: PR size (trusted-base sensor; label is informational only)
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GIBSON_PR_SIZE_EXCEPTION: "0"
+        run: |
+          set -euo pipefail
+          GIBSON_PR_BASE=$(git rev-parse --verify "${EVENT_BASE_SHA}^{commit}") || {
+            echo "::error title=pr-size::cannot resolve pull_request.base.sha ${EVENT_BASE_SHA}"; exit 2; }
+          GIBSON_PR_HEAD=$(git rev-parse --verify "${EVENT_HEAD_SHA}^{commit}") || {
+            echo "::error title=pr-size::cannot resolve pull_request.head.sha ${EVENT_HEAD_SHA}"; exit 2; }
+          export GIBSON_PR_BASE GIBSON_PR_HEAD
+          trusted="$RUNNER_TEMP/pr-size-trusted"
+          mkdir -p "$trusted/scripts" "$trusted/config"
+          missing=0
+          for f in scripts/pr-size.mjs config/pr-size.v1.json; do
+            if ! git cat-file -e "$GIBSON_PR_BASE:$f" 2>/dev/null; then
+              missing=$((missing + 1))
+              continue
+            fi
+            git show "$GIBSON_PR_BASE:$f" > "$trusted/$f" || {
+              echo "::error title=pr-size::failed to extract $f from trusted base $GIBSON_PR_BASE"
+              exit 2
+            }
+          done
+          if [ "$missing" -eq 2 ]; then
+            echo "::warning::pr-size not-enforced: sensor and config absent on base $GIBSON_PR_BASE (PR copy is never executed)"
+            echo "- pr-size: not-enforced; both trusted-base files absent on $GIBSON_PR_BASE" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error title=pr-size::partial trusted-base install on $GIBSON_PR_BASE"
+            exit 2
+          fi
+          node "$trusted/scripts/pr-size.mjs" --base "$GIBSON_PR_BASE" --head "$GIBSON_PR_HEAD"
