@@ -134,6 +134,18 @@
    "status": "executed",
    "note": "also traversed the real pipeline pre-amendment; that PR history is supplementary observational data only — the arm measurement is a fresh harness replay",
    "code_name": "blowgun",
+   "void_runs": [
+    {
+     "date": "2026-09-16",
+     "arm": "harness",
+     "cause": "infra failure, not leakage — grok CLI not signed in inside the ab219-runner container dispatched from the Mac Mini (\"Error: Not signed in. To authenticate without a browser, run: grok login --device-code\"), repeated identically across all three harness stages (spec/impl/fix). Zero-byte diffs at blowgun-h.patch and blowgun-h-round1.patch; blowgun-h.review.txt contains a review pass but over empty/no-op input.",
+     "layers": "not reached — dispatch/auth precondition failed before any leakage layer could run",
+     "evidence": "Mac Mini ~/ab219/runs/blowgun-h.{start,end,err,spec,impl,fix}.ndjson, blowgun-h.review.txt; .start 2026-09-16T11:49:41Z, .end 2026-09-16T11:49:50Z (9s)",
+     "wall_clock_s": 9,
+     "inference_cost_usd": 0.0,
+     "coordinator_note": "Found unlogged on the Mini during the 2026-09-17 advance pass, per the furlong/corbel/gimlet precedent of checking for unlogged runs before dispatching. Separately, the laptop's Codex desktop-app auth also shows a 401 invalid_refresh_token at the same timestamp (2026-09-16T11:49:46Z) — both vendor CLIs had expired/broken auth simultaneously that morning. Flagged for Mark: grok CLI on the Mac Mini needs `grok login --device-code` before any further harness or raw dispatch will succeed."
+    }
+   ],
    "run": {
     "date": "2026-08-22",
     "arm": "raw",
