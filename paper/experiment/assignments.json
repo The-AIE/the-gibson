@@ -2,7 +2,7 @@
  "version": 2,
  "supersedes": "v1 (registered 2026-08-15, live-backlog enrollment)",
  "deviation": "D-1, D-2, D-3, D-4, D-5, D-6 — see DEVIATIONS.md",
- "revised": "2026-09-04 (coordinator catch-up: cos#1237 raw arm, code name gimlet, executed 2026-09-03 but unlogged until this pass — see cos#1237.run.coordinator_note; this closes out the raw arm entirely, 12 of 12 raw now executed, 6 of 12 harness executed)",
+ "revised": "2026-09-18 (cos#1220 harness arm, code name blowgun-h, executed clean — see cos#1220.harness_run.coordinator_note; 7 of 12 harness now executed. A same-day void run preceding it (stale pre-fail-closed harness-task.sh + expired Codex reviewer auth on the Mac Mini) is recorded in cos#1220.void_runs and fixed at the root before the clean re-run.)",
  "seed": 219,
  "target_n": 12,
  "design": "frozen replay set, within-task paired (D-3)",
@@ -144,6 +144,16 @@
      "wall_clock_s": 9,
      "inference_cost_usd": 0.0,
      "coordinator_note": "Found unlogged on the Mini during the 2026-09-17 advance pass, per the furlong/corbel/gimlet precedent of checking for unlogged runs before dispatching. Separately, the laptop's Codex desktop-app auth also shows a 401 invalid_refresh_token at the same timestamp (2026-09-16T11:49:46Z) — both vendor CLIs had expired/broken auth simultaneously that morning. Flagged for Mark: grok CLI on the Mac Mini needs `grok login --device-code` before any further harness or raw dispatch will succeed."
+    },
+    {
+     "date": "2026-09-18",
+     "arm": "harness",
+     "cause": "infra defect, not leakage — the Mac Mini's deployed ~/ab219/harness-task.sh had regressed to a stale pre-fail-closed revision (predating the 2026-08-22 'artifact-export defect found and fixed' hardening): it used `codex exec -s read-only` instead of `--dangerously-bypass-approvals-and-sandbox`, used raw `git diff --binary FETCH_HEAD` instead of the corrected export-patch.sh, and — critically — carried NO REVIEW_INVALID/FINDINGS_END validity gate at all. The Codex reviewer's own auth token had independently expired (401 invalid_refresh_token, same failure class as the grok CLI's 2026-09-16 void run) and every review call failed outright, yet the stale script printed REVIEW_OK unconditionally and fed 70 lines of raw 401-error log into the Stage D fix loop as if they were review findings, then reported FINAL_PATCH and DONE. Caught only by hand-inspection of blowgun-h.review.txt: 'FINDINGS_END' appeared solely as an artifact of the echoed prompt text ('End with FINDINGS_END.'), not as real reviewer output.",
+     "layers": "spec and implement stages ran for real (SPEC_OK bytes=17514, IMPL_OK patch=40265), but the review layer never executed and the fix-loop stage consumed contaminated input — the run is void from Stage C forward",
+     "evidence": "Mac Mini ~/ab219/runs/blowgun-h.review.txt (70 lines, all codex_login::auth::manager / 401 Unauthorized / invalid_refresh_token errors); ~/ab219/harness-task.sh.stale-20260918-backup preserves the defective script as deployed",
+     "wall_clock_s": 940,
+     "inference_cost_usd": 0.93649872,
+     "coordinator_note": "Discovered during the 2026-09-18 advance pass while gathering data to log what looked like a clean REVIEW_OK/DONE run. Fixed at the root: (1) diffed the live Mini script against paper/experiment/runner/harness-task.sh in the repo and found the Mini copy missing all D-3 hardening; redeployed the canonical version (byte-identical to the Mini's own harness-task.v4.sh, confirming the fix had been written and validated before but never promoted to the live filename); (2) refreshed ~/ab219/codex-auth.json from the host's own valid ~/.codex/auth.json, smoke-tested before reuse. Re-dispatched cleanly as the same code name (blowgun-h) per the void-run rule — a void run is discarded and re-run, never patched up. This is a script-deployment/sync defect (Mini out of sync with repo), not a change to experimental design, so no DEVIATIONS.md amendment is proposed; flagging for Mark that the Mini's ab219 script directory needs a sync check before future dispatches, since this could have been logged as a false-clean harness completion had the review text not been read by hand."
     }
    ],
    "run": {
@@ -165,8 +175,40 @@
     "gates": "prisma generate OK; typecheck:ci OK; npm test 5152 passed / 49 todo (487 files)",
     "diff": "paper/experiment/diffs/blowgun.patch (11 files, 2 new, corrected export)",
     "brief": "paper/experiment/briefs/blowgun.txt",
-    "evidence": "~/.claude/fleet/logs/ab219/clean/blowgun.ndjson sha256:e25c2e69cac28420cf06c4f06f111d663b34b8de07652e40849e0bb1e688d8ae",
-    "harness_pending": "D-3 pairing: the harness half of this task is NOT yet run -- deferred under the harness-only preempt (6 open COS PRs updated inside 24h on 2026-08-22)"
+    "evidence": "~/.claude/fleet/logs/ab219/clean/blowgun.ndjson sha256:e25c2e69cac28420cf06c4f06f111d663b34b8de07652e40849e0bb1e688d8ae"
+   },
+   "harness_run": {
+    "date": "2026-09-18",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "runner": "ab219-runner:2 / ab219-reviewer:1 containers, docker/colima on Mac Mini, corrected harness-task.sh (matches repo paper/experiment/runner/harness-task.sh byte-for-byte) after the same-day void run below",
+    "census": "PASS at extract — 3125 objects, HEAD == base_commit 78538fd09c74bcec580f867f29fbbbafe3ba3bfb, 1 commit, no remotes; fixing merge commit f96e525937f5f295a7456010d617a37d3d59a203 absent from the store",
+    "inference_cost_usd": 0.770573416,
+    "wall_clock_s": 1108,
+    "turns": {
+     "spec": 16,
+     "impl": 34,
+     "fix": 17
+    },
+    "tokens_in": 349004,
+    "tokens_out": 43823,
+    "cache_read": 4351488,
+    "review_findings": {
+     "blocking": 4,
+     "minor": 2
+    },
+    "fix_loop_delta": "+1283B",
+    "gates": "VERIFIED BY COORDINATOR in-container, not taken on the implementer's word: prisma generate RC=0; typecheck:ci RC=0; npm test RC=0 — 5174 passed / 49 todo (488 files passed, 1 skipped)",
+    "audit": "CLEAN — adjudicate.py v4 across all three stage transcripts (spec/impl/fix): retrieved=0, raw_marker_hits=0 in every stage. One blocked web_search in the spec stage (public terms — 'ConferenceOS sponsor partner logo upload IMAGE_REMOTE_HOSTS UploadThing' — not the fixing PR number or merge SHA); one uncounted search_tool catalogue probe in the implement stage (cannot reach network, consistent with every prior run confirming no MCP channel exists).",
+    "diff": "paper/experiment/diffs-harness/blowgun-h.patch (10 files, 3 new, 44964 bytes)",
+    "brief": "paper/experiment/briefs/blowgun.txt",
+    "transcripts": {
+     "spec": "sha256:276d6596d973477ad607581cba42b4ab04e405470b77e030f2a6916f5963e1ac",
+     "impl": "sha256:4a2b6aead58bb4d2b3de4af763544996dbdecc93ae34790b6f7d7a8fd1ed326f",
+     "fix": "sha256:eb6e405b25d27edc66c2731c462e558b32561a244a08f8eeb668427339a616df"
+    },
+    "coordinator_note": "First harness run in the experiment where the reviewer's four BLOCKING findings are substantive scope/correctness gaps (incomplete shared-upload surface, event-logo write bleeding into the global Sponsor record, no IMAGE_REMOTE_HOSTS/CSP coverage) rather than the near-clean passes seen on bucranium/nonjury/sesame. Recorded for the blind judge as-is; the fix loop is the treatment's only remediation round by design (D-3), so unresolved BLOCKING findings after Stage D are a measured outcome, not a defect in this run."
    }
   },
   {

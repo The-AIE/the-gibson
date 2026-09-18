@@ -1,0 +1,1269 @@
+diff --git a/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx b/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx
+index 43bae4f..fe71fa0 100644
+--- a/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/community-partners/community-partners-manager.tsx
+@@ -10,6 +10,8 @@ import { useRouter } from 'next/navigation';
+ import { Handshake, Pencil, Plus, Trash2, X } from 'lucide-react';
+ import type { CommunityPartnerRow } from '@/lib/community-partners';
+ import type { CommunityPartnerFormInput } from '@/lib/community-partners-core';
++import { SponsorPartnerLogoUploadButton } from '@/components/organizer/sponsor-partner-logo-upload';
++import { urlFieldError } from '@/lib/url-field-guard';
+ import {
+   createCommunityPartnerAction,
+   updateCommunityPartnerAction,
+@@ -63,6 +65,8 @@ function formToInput(form: PartnerFormState): CommunityPartnerFormInput {
+ 
+ const fieldClass =
+   'mt-1 w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none';
++const fieldClassFlush =
++  'w-full rounded-md border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none';
+ 
+ export default function CommunityPartnersManager({
+   eventId,
+@@ -106,6 +110,15 @@ export default function CommunityPartnersManager({
+   const handleSubmit = (e: React.FormEvent) => {
+     e.preventDefault();
+     setError(null);
++    // #1209: reject inlined data: images before the server-action body limit.
++    const logoError = urlFieldError(form.logoUrl, {
++      label: 'Logo URL',
++      allowSiteRelativePath: false,
++    });
++    if (logoError) {
++      setError(logoError);
++      return;
++    }
+     const input = formToInput(form);
+     startTransition(async () => {
+       const result = editingId
+@@ -198,16 +211,40 @@ export default function CommunityPartnersManager({
+                 placeholder="Meetup, nonprofit, or community org"
+               />
+             </label>
+-            <label className="block text-sm text-gray-300">
+-              Logo URL
+-              <input
+-                type="url"
+-                value={form.logoUrl}
+-                onChange={(e) => setForm((f) => ({ ...f, logoUrl: e.target.value }))}
+-                className={fieldClass}
+-                placeholder="https://…"
+-              />
+-            </label>
++            <div className="block text-sm text-gray-300">
++              <span className="block">Logo</span>
++              <div className="mt-1 flex flex-col gap-2 sm:flex-row sm:items-start">
++                <input
++                  type="url"
++                  value={form.logoUrl}
++                  onChange={(e) =>
++                    setForm((f) => ({ ...f, logoUrl: e.target.value }))
++                  }
++                  className={fieldClassFlush}
++                  placeholder="https://…"
++                  aria-label="Logo URL"
++                />
++                <SponsorPartnerLogoUploadButton
++                  eventId={eventId}
++                  disabled={isPending}
++                  onUploaded={(url) =>
++                    setForm((f) => ({ ...f, logoUrl: url }))
++                  }
++                />
++              </div>
++              <span className="mt-1 block text-xs text-gray-500">
++                Upload a PNG, JPG, or WebP, or paste a hosted HTTPS URL. Do not
++                paste an inlined data: image.
++              </span>
++              {form.logoUrl ? (
++                // eslint-disable-next-line @next/next/no-img-element
++                <img
++                  src={form.logoUrl}
++                  alt=""
++                  className="mt-2 h-10 w-10 rounded object-contain bg-white p-0.5"
++                />
++              ) : null}
++            </div>
+             <label className="block text-sm text-gray-300">
+               Free-pass quota <span className="text-red-400">*</span>
+               <input
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts b/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
+index 3c76b48..0557cf2 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/actions.ts
+@@ -414,6 +414,32 @@ export async function setSponsorPaidAction(slug: string, eventSponsorId: string,
+   }
+ }
+ 
++export async function updateEventSponsorLogoAction(
++  slug: string,
++  eventSponsorId: string,
++  logoUrl: string | null
++): Promise<ActionResult> {
++  try {
++    await requireAdmin();
++    const event = await resolveEventBySlug(slug);
++    if (!event) {
++      return { success: false, error: 'Event not found' };
++    }
++    const owned = await prisma.eventSponsor.findFirst({
++      where: { id: eventSponsorId, eventId: event.id },
++      select: { id: true },
++    });
++    if (!owned) {
++      return { success: false, error: 'Sponsorship not found' };
++    }
++    await sponsorship.updateEventSponsorLogo(eventSponsorId, logoUrl);
++    refresh(slug);
++    return { success: true };
++  } catch (error) {
++    return fail(error);
++  }
++}
++
+ export async function removeSponsorAction(slug: string, eventSponsorId: string): Promise<ActionResult> {
+   try {
+     await requireAdmin();
+diff --git a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
+index a54199f..c74b679 100644
+--- a/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/sponsorship/sponsorship-manager.tsx
+@@ -46,6 +46,7 @@ import {
+   instantiateVenueBoothsAction,
+   addSponsorAction,
+   setSponsorPaidAction,
++  updateEventSponsorLogoAction,
+   removeSponsorAction,
+   setBenefitStatusAction,
+   setInventoryCommitmentAction,
+@@ -54,6 +55,8 @@ import {
+   allocateCompTicketsAction
+ } from './actions';
+ import { EmptyState, ErrorBanner } from '@/components/organizer';
++import { SponsorPartnerLogoUploadButton } from '@/components/organizer/sponsor-partner-logo-upload';
++import { urlFieldError } from '@/lib/url-field-guard';
+ 
+ type TierFull = SponsorTier & {
+   benefitItems: SponsorBenefit[];
+@@ -133,7 +136,14 @@ const emptyBenefitForm = {
+ };
+ const emptyAddOnForm = { name: '', description: '', price: '', inventory: '1' };
+ const emptyBoothForm = { sizeLabel: '10x10', prefix: '', startNumber: '101', count: '10', price: '' };
+-const emptySponsorForm = { companyName: '', contactName: '', contactEmail: '', website: '', tierId: '' };
++const emptySponsorForm = {
++  companyName: '',
++  contactName: '',
++  contactEmail: '',
++  website: '',
++  logoUrl: '',
++  tierId: '',
++};
+ 
+ export default function SponsorshipManager({
+   eventId,
+@@ -1506,6 +1516,8 @@ function SponsorsTab({
+   const [showForm, setShowForm] = useState(false);
+   const [form, setForm] = useState(emptySponsorForm);
+   const [expanded, setExpanded] = useState<string | null>(null);
++  const [logoDrafts, setLogoDrafts] = useState<Record<string, string>>({});
++  const [logoError, setLogoError] = useState<string | null>(null);
+   const [allotmentDrafts, setAllotmentDrafts] = useState<Record<string, string>>({});
+   const [allocateDrafts, setAllocateDrafts] = useState<
+     Record<string, { ticketTypeId: string; count: string; expiryDays: string }>
+@@ -1536,12 +1548,22 @@ function SponsorsTab({
+ 
+   const submit = (e: React.FormEvent) => {
+     e.preventDefault();
++    const logoFieldError = urlFieldError(form.logoUrl, {
++      label: 'Logo URL',
++      allowSiteRelativePath: false,
++    });
++    if (logoFieldError) {
++      setLogoError(logoFieldError);
++      return;
++    }
++    setLogoError(null);
+     run(() =>
+       addSponsorAction(slug, eventId, {
+         companyName: form.companyName,
+         contactName: form.contactName,
+         contactEmail: form.contactEmail,
+         website: form.website || null,
++        logoUrl: form.logoUrl || null,
+         tierId: form.tierId,
+       })
+     );
+@@ -1549,6 +1571,33 @@ function SponsorsTab({
+     setForm(emptySponsorForm);
+   };
+ 
++  const currentLogoFor = (es: EventSponsorFull) =>
++    logoDrafts[es.id] ?? es.logoUrl ?? es.sponsor.logoUrl ?? '';
++
++  const saveLogo = (es: EventSponsorFull) => {
++    const next = currentLogoFor(es);
++    const logoFieldError = urlFieldError(next, {
++      label: 'Logo URL',
++      allowSiteRelativePath: false,
++    });
++    if (logoFieldError) {
++      setLogoError(logoFieldError);
++      return;
++    }
++    setLogoError(null);
++    run(
++      () => updateEventSponsorLogoAction(slug, es.id, next.trim() || null),
++      {
++        onSuccess: () => {
++          setLogoDrafts((drafts) => {
++            const { [es.id]: _removed, ...rest } = drafts;
++            return rest;
++          });
++        },
++      }
++    );
++  };
++
+   return (
+     <div className="space-y-4">
+       <div className="flex justify-between items-center">
+@@ -1576,7 +1625,47 @@ function SponsorsTab({
+             <input required value={form.contactName} onChange={(e) => setForm({ ...form, contactName: e.target.value })} className={inputClass} placeholder="Contact name *" />
+             <input required type="email" value={form.contactEmail} onChange={(e) => setForm({ ...form, contactEmail: e.target.value })} className={inputClass} placeholder="Contact email *" />
+             <input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} className={inputClass} placeholder="Website (https://…)" />
++            <div className="md:col-span-2 space-y-2">
++              <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
++                <input
++                  type="url"
++                  value={form.logoUrl}
++                  onChange={(e) => {
++                    setLogoError(null);
++                    setForm({ ...form, logoUrl: e.target.value });
++                  }}
++                  className={inputClass}
++                  placeholder="Logo URL (https://…)"
++                  aria-label="Logo URL"
++                />
++                <SponsorPartnerLogoUploadButton
++                  eventId={eventId}
++                  disabled={isPending}
++                  onUploaded={(url) => {
++                    setLogoError(null);
++                    setForm((f) => ({ ...f, logoUrl: url }));
++                  }}
++                />
++              </div>
++              <p className="text-xs text-gray-500">
++                Optional. Upload a PNG, JPG, or WebP, or paste a hosted HTTPS URL.
++                Do not paste an inlined data: image.
++              </p>
++              {form.logoUrl ? (
++                // eslint-disable-next-line @next/next/no-img-element
++                <img
++                  src={form.logoUrl}
++                  alt=""
++                  className="h-10 w-10 rounded object-contain bg-white p-0.5"
++                />
++              ) : null}
++            </div>
+           </div>
++          {logoError && (
++            <p role="alert" className="text-sm text-red-300">
++              {logoError}
++            </p>
++          )}
+           <div className="flex gap-2">
+             <button type="submit" disabled={isPending} className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50">
+               Add sponsor
+@@ -1614,6 +1703,14 @@ function SponsorsTab({
+             <div className="flex items-start justify-between gap-4">
+               <button className="text-left flex-1" onClick={() => setExpanded(expanded === es.id ? null : es.id)}>
+                 <div className="flex items-center gap-3 flex-wrap">
++                  {(es.logoUrl || es.sponsor.logoUrl) ? (
++                    // eslint-disable-next-line @next/next/no-img-element
++                    <img
++                      src={(es.logoUrl || es.sponsor.logoUrl)!}
++                      alt=""
++                      className="h-8 w-8 rounded object-contain bg-white p-0.5"
++                    />
++                  ) : null}
+                   <h3 className="font-semibold text-white">{es.sponsor.companyName}</h3>
+                   <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs text-blue-300">{es.tier.name}</span>
+                   {es.paid ? (
+@@ -1659,7 +1756,65 @@ function SponsorsTab({
+             </div>
+ 
+             {expanded === es.id && (
+-              <div className="mt-4 border-t border-gray-700 pt-4 grid grid-cols-1 lg:grid-cols-2 gap-6">
++              <div className="mt-4 border-t border-gray-700 pt-4 space-y-6">
++                <div className="space-y-2">
++                  <h4 className="text-sm font-medium text-gray-300">Logo</h4>
++                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
++                    <input
++                      type="url"
++                      value={currentLogoFor(es)}
++                      onChange={(e) => {
++                        setLogoError(null);
++                        setLogoDrafts((drafts) => ({
++                          ...drafts,
++                          [es.id]: e.target.value,
++                        }));
++                      }}
++                      className={inputClass}
++                      placeholder="https://…"
++                      aria-label={`Logo URL for ${es.sponsor.companyName}`}
++                    />
++                    <SponsorPartnerLogoUploadButton
++                      eventId={eventId}
++                      disabled={isPending}
++                      successMessage="Logo uploaded — save logo to apply"
++                      onUploaded={(url) => {
++                        setLogoError(null);
++                        setLogoDrafts((drafts) => ({
++                          ...drafts,
++                          [es.id]: url,
++                        }));
++                      }}
++                    />
++                    <button
++                      type="button"
++                      disabled={isPending}
++                      onClick={() => saveLogo(es)}
++                      className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-50 shrink-0"
++                    >
++                      Save logo
++                    </button>
++                  </div>
++                  <p className="text-xs text-gray-500">
++                    Upload a PNG, JPG, or WebP, or paste a hosted HTTPS URL.
++                    Saves on this event&apos;s placement; seeds the company
++                    default logo only when it is still empty.
++                  </p>
++                  {currentLogoFor(es) ? (
++                    // eslint-disable-next-line @next/next/no-img-element
++                    <img
++                      src={currentLogoFor(es)}
++                      alt=""
++                      className="h-10 w-10 rounded object-contain bg-white p-0.5"
++                    />
++                  ) : null}
++                  {logoError && expanded === es.id && (
++                    <p role="alert" className="text-sm text-red-300">
++                      {logoError}
++                    </p>
++                  )}
++                </div>
++                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                 <div>
+                   <h4 className="text-sm font-medium text-gray-300 mb-2">Benefit checklist</h4>
+                   {effectiveBenefits.length === 0 && (
+@@ -1939,6 +2094,7 @@ function SponsorsTab({
+                   })()}
+                 </div>
+               </div>
++              </div>
+             )}
+           </div>
+         );
+diff --git a/src/app/api/uploadthing/core.ts b/src/app/api/uploadthing/core.ts
+index a6e7634..6f5009d 100644
+--- a/src/app/api/uploadthing/core.ts
++++ b/src/app/api/uploadthing/core.ts
+@@ -825,6 +825,109 @@ export const ourFileRouter = {
+         userId: metadata.userId,
+       };
+     }),
++
++  /**
++   * Sponsor / community-partner logos (organizer surfaces).
++   *
++   * Security boundary:
++   * - Auth: site admin only — matches createCommunityPartnerAction /
++   *   addSponsorAction requireAdmin() gates. Checked inline via
++   *   getCurrentUser() (UploadThingError, not redirect). Also verifies the
++   *   eventId exists so uploads are scoped to a real event.
++   * - Types: exact MIME routes only (png/jpeg/webp; no SVG XSS vector).
++   * - Cap: 4MB (logo-sized; reuses event-image logo helpers — same policy
++   *   as organizationImage / profileAvatar; no parallel MIME/size table).
++   * - Persistence: onUploadComplete returns the hosted URL only; the client
++   *   writes it into the form's logoUrl field and the existing save action
++   *   persists it. Rejected uploads are cleaned up via rejectUploadedFile.
++   */
++  sponsorPartnerLogo: f(PROFILE_AVATAR_UPLOADTHING_ROUTES)
++    .input(
++      z.object({
++        eventId: z
++          .string()
++          .trim()
++          .min(8)
++          .max(64)
++          .regex(/^[a-z][a-z0-9_-]*$/i, 'Invalid event id'),
++      })
++    )
++    .middleware(async ({ input, files }) => {
++      if (!isClerkConfigured) {
++        throw new UploadThingError('Unauthorized');
++      }
++      const user = await getCurrentUser();
++      if (!user || user.role !== 'admin') {
++        throw new UploadThingError('Unauthorized');
++      }
++
++      const event = await prisma.event.findFirst({
++        where: { id: input.eventId },
++        select: { id: true, slug: true },
++      });
++      if (!event) {
++        throw new UploadThingError('Event not found');
++      }
++
++      const candidates = validateEventImageUploadCandidate(
++        files.map((file) => ({
++          name: file.name,
++          size: file.size,
++          type: file.type,
++        })),
++        'logo'
++      );
++      if (!candidates.ok) {
++        throw new UploadThingError(candidates.error);
++      }
++
++      return {
++        userId: user.id,
++        eventId: event.id,
++        eventSlug: event.slug,
++      };
++    })
++    .onUploadComplete(async ({ metadata, file }) => {
++      const contentType = file.type || 'application/octet-stream';
++      if (!isAllowedEventImageContentType(contentType)) {
++        log.error(
++          'Rejected sponsor-partner-logo content type after upload',
++          contentType
++        );
++        return rejectUploadedFile(file.key, {
++          ok: false as const,
++          error: 'File type not allowed',
++        });
++      }
++      if (
++        !Number.isFinite(file.size) ||
++        file.size <= 0 ||
++        file.size > EVENT_IMAGE_LOGO_MAX_BYTES
++      ) {
++        return rejectUploadedFile(file.key, {
++          ok: false as const,
++          error: `File must be between 1 byte and ${EVENT_IMAGE_LOGO_MAX_BYTES} bytes`,
++        });
++      }
++
++      const url = file.ufsUrl || file.url;
++      if (!url || !isAllowedUploadThingUrl(url)) {
++        log.error('Rejected non-UploadThing sponsor-partner-logo URL');
++        return rejectUploadedFile(file.key, {
++          ok: false as const,
++          error: 'Invalid file URL',
++        });
++      }
++
++      return {
++        ok: true as const,
++        url,
++        contentType,
++        sizeBytes: file.size,
++        eventId: metadata.eventId,
++        userId: metadata.userId,
++      };
++    }),
+ } satisfies FileRouter;
+ 
+ export type OurFileRouter = typeof ourFileRouter;
+diff --git a/src/components/organizer/sponsor-partner-logo-upload.tsx b/src/components/organizer/sponsor-partner-logo-upload.tsx
+new file mode 100644
+index 0000000..7ff2bc2
+--- /dev/null
++++ b/src/components/organizer/sponsor-partner-logo-upload.tsx
+@@ -0,0 +1,90 @@
++'use client';
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { toast } from 'sonner';
++import { UploadButton } from '@/lib/uploadthing';
++import { extractUploadRejectionMessage } from '@/lib/project-collab-core';
++
++type SponsorPartnerLogoUploadButtonProps = {
++  eventId: string;
++  /** Called with the hosted UploadThing HTTPS URL after a successful upload. */
++  onUploaded: (url: string) => void;
++  disabled?: boolean;
++  /** Toast copy after a successful upload. */
++  successMessage?: string;
++};
++
++/**
++ * UploadThing control for sponsor / community-partner logos.
++ *
++ * Reuses the shared event-image MIME/size policy (PNG/JPEG/WebP, 4MB) via the
++ * `sponsorPartnerLogo` route — same UploadThing stack as eventImage /
++ * organizationImage. Writes a CSP-allowlisted hosted URL into parent state;
++ * never base64/data: into the input. Manual HTTPS paste still works; form
++ * save remains the DB write path.
++ */
++export function SponsorPartnerLogoUploadButton({
++  eventId,
++  onUploaded,
++  disabled = false,
++  successMessage = 'Logo uploaded — save to apply',
++}: SponsorPartnerLogoUploadButtonProps) {
++  return (
++    <div
++      className={
++        disabled
++          ? 'pointer-events-none opacity-50'
++          : 'shrink-0 [&_label]:cursor-pointer'
++      }
++      aria-disabled={disabled || undefined}
++    >
++      <UploadButton
++        endpoint="sponsorPartnerLogo"
++        input={{ eventId }}
++        disabled={disabled}
++        onClientUploadComplete={(res) => {
++          const rejectionMessage = extractUploadRejectionMessage(res);
++          if (rejectionMessage) {
++            toast.error(rejectionMessage);
++            return;
++          }
++          const first = res?.[0];
++          const serverData = first?.serverData as
++            | { ok?: boolean; url?: string }
++            | undefined;
++          const url =
++            (serverData?.ok !== false && serverData?.url) ||
++            first?.ufsUrl ||
++            first?.url;
++          if (!url || typeof url !== 'string') {
++            toast.error('Upload completed but no URL was returned');
++            return;
++          }
++          onUploaded(url);
++          toast.success(successMessage);
++        }}
++        onUploadError={(error) => {
++          toast.error(error.message || 'Upload failed');
++        }}
++        appearance={{
++          button:
++            'ut-ready:bg-gray-800 ut-uploading:bg-gray-700 text-xs text-gray-200 rounded-md px-3 py-2 border border-gray-600 hover:bg-gray-700',
++          allowedContent: 'text-[10px] text-gray-500',
++          container: 'flex flex-col items-start gap-1',
++        }}
++        content={{
++          button({ ready, isUploading }) {
++            if (isUploading) return 'Uploading…';
++            if (ready) return 'Upload';
++            return 'Preparing…';
++          },
++          allowedContent: 'PNG, JPG, or WebP · max 4MB',
++        }}
++      />
++    </div>
++  );
++}
+diff --git a/src/lib/field-help.ts b/src/lib/field-help.ts
+index abb71a0..c1c6cdc 100644
+--- a/src/lib/field-help.ts
++++ b/src/lib/field-help.ts
+@@ -297,7 +297,7 @@ export const FIELD_HELP = {
+     learnMoreKey: 'event-operations',
+   },
+   'media-partner.logoUrl': {
+-    hint: 'HTTPS URL to a logo image (PNG/SVG preferred). Displayed on your partner page and thank-you email.',
++    hint: 'Paste a hosted HTTPS logo URL (PNG/JPEG/WebP). Do not paste a data: image. Organizers can upload a file after approval.',
+     learnMoreKey: 'event-operations',
+   },
+   'media-partner.description': {
+diff --git a/src/lib/media-partner-application.ts b/src/lib/media-partner-application.ts
+index 0219672..0488df6 100644
+--- a/src/lib/media-partner-application.ts
++++ b/src/lib/media-partner-application.ts
+@@ -126,7 +126,7 @@ const trimmedRequired = (label: string, min: number, max: number) =>
+ export const mediaPartnerApplicationFormSchema = z.object({
+   orgName: trimmedRequired('Organization name', 2, 200),
+   website: httpUrlOrEmptySchema('Website'),
+-  logoUrl: httpUrlOrEmptySchema('Logo URL'),
++  logoUrl: httpUrlOrEmptySchema('Logo URL', 2_048, 'image'),
+   description: z
+     .string()
+     .trim()
+diff --git a/src/lib/services/sponsorship.ts b/src/lib/services/sponsorship.ts
+index b43d796..d3ab0ee 100644
+--- a/src/lib/services/sponsorship.ts
++++ b/src/lib/services/sponsorship.ts
+@@ -962,7 +962,14 @@ export async function addSponsorToEvent(eventId: string, input: z.infer<typeof s
+       throw new Error(`${sponsor.companyName} is already a sponsor of this event.`);
+     }
+     return tx.eventSponsor.create({
+-      data: { eventId, sponsorId: sponsor.id, tierId: tier.id },
++      data: {
++        eventId,
++        sponsorId: sponsor.id,
++        tierId: tier.id,
++        // Persist on the event join so public `es.logoUrl || sponsor.logoUrl`
++        // works even when the Sponsor row already existed without a logo.
++        logoUrl: data.logoUrl || null,
++      },
+       include: { sponsor: true, tier: true },
+     });
+   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+@@ -972,6 +979,55 @@ export async function setSponsorPaid(eventSponsorId: string, paid: boolean) {
+   return prisma.eventSponsor.update({ where: { id: eventSponsorId }, data: { paid } });
+ }
+ 
++/**
++ * Set or clear the logo on one event sponsorship placement (EventSponsor.logoUrl).
++ *
++ * Public pages resolve `es.logoUrl || sponsor.logoUrl`. This editor is
++ * event-scoped: it always writes the join row, and only *seeds*
++ * Sponsor.logoUrl when that company default is still null. It never
++ * overwrites or clears Sponsor.logoUrl — doing so would change or blank
++ * logos on other events that rely on the company fallback.
++ */
++export async function updateEventSponsorLogo(
++  eventSponsorId: string,
++  logoUrl: string | null | undefined
++) {
++  const es = await prisma.eventSponsor.findUnique({
++    where: { id: eventSponsorId },
++    select: {
++      id: true,
++      sponsorId: true,
++      sponsor: { select: { logoUrl: true } },
++    },
++  });
++  if (!es) throw new Error('Sponsorship not found.');
++
++  const normalized =
++    logoUrl == null || logoUrl === ''
++      ? null
++      : normalizeOptionalHttpUrl(logoUrl, { label: 'Logo URL', kind: 'image' });
++
++  // Seed the company default only when empty; never overwrite or clear it.
++  if (normalized && !es.sponsor.logoUrl) {
++    await prisma.$transaction([
++      prisma.eventSponsor.update({
++        where: { id: es.id },
++        data: { logoUrl: normalized },
++      }),
++      prisma.sponsor.update({
++        where: { id: es.sponsorId },
++        data: { logoUrl: normalized },
++      }),
++    ]);
++    return;
++  }
++
++  await prisma.eventSponsor.update({
++    where: { id: es.id },
++    data: { logoUrl: normalized },
++  });
++}
++
+ /**
+  * Set or clear EventSponsor.contractUrl. The URL is sealed at rest under
+  * FIELD_AAD.EVENT_SPONSOR_CONTRACT_URL (#95 / I-14). Empty/null clears.
+diff --git a/tests/unit/community-partners-core.test.ts b/tests/unit/community-partners-core.test.ts
+index 17e4b99..354c6c7 100644
+--- a/tests/unit/community-partners-core.test.ts
++++ b/tests/unit/community-partners-core.test.ts
+@@ -190,6 +190,28 @@ describe('parseCommunityPartnerInput', () => {
+       }).ok
+     ).toBe(false);
+   });
++
++  it('rejects inlined data: logo URIs', () => {
++    expect(
++      parseCommunityPartnerInput({
++        name: 'Ok',
++        logoUrl: 'data:image/png;base64,iVBORw0KGgo=',
++        quota: 1,
++      }).ok
++    ).toBe(false);
++  });
++
++  it('accepts UploadThing-hosted HTTPS logo URLs', () => {
++    const result = parseCommunityPartnerInput({
++      name: 'Ok',
++      logoUrl: 'https://utfs.io/f/partner-logo',
++      quota: 1,
++    });
++    expect(result.ok).toBe(true);
++    if (result.ok) {
++      expect(result.value.logoUrl).toBe('https://utfs.io/f/partner-logo');
++    }
++  });
+ });
+ 
+ describe('syntheticPartnerContactEmail', () => {
+diff --git a/tests/unit/media-partner-application-validation.test.ts b/tests/unit/media-partner-application-validation.test.ts
+index 13068bc..751b69e 100644
+--- a/tests/unit/media-partner-application-validation.test.ts
++++ b/tests/unit/media-partner-application-validation.test.ts
+@@ -49,6 +49,22 @@ describe('mediaPartnerApplicationFormSchema (#1248)', () => {
+     });
+     expect(result.success).toBe(false);
+   });
++
++  it('rejects inlined data: logo URIs', () => {
++    const result = mediaPartnerApplicationFormSchema.safeParse({
++      ...valid,
++      logoUrl: 'data:image/png;base64,iVBORw0KGgo=',
++    });
++    expect(result.success).toBe(false);
++  });
++
++  it('accepts hosted HTTPS logo URLs', () => {
++    const parsed = mediaPartnerApplicationFormSchema.parse({
++      ...valid,
++      logoUrl: 'https://utfs.io/f/media-logo',
++    });
++    expect(parsed.logoUrl).toBe('https://utfs.io/f/media-logo');
++  });
+ });
+ 
+ describe('assertMediaPartnerApplicationStatusTransition', () => {
+diff --git a/tests/unit/sponsor-partner-logo-uploadthing.test.ts b/tests/unit/sponsor-partner-logo-uploadthing.test.ts
+new file mode 100644
+index 0000000..007582e
+--- /dev/null
++++ b/tests/unit/sponsor-partner-logo-uploadthing.test.ts
+@@ -0,0 +1,356 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * Unit coverage for the sponsorPartnerLogo UploadThing route — admin-only
++ * auth, event existence, MIME/size rejection, and happy-path hosted URL return.
++ */
++
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++import { UploadThingError } from 'uploadthing/server';
++import { EVENT_IMAGE_LOGO_MAX_BYTES } from '@/lib/event-image-upload';
++
++const mocks = vi.hoisted(() => ({
++  isClerkConfigured: true as boolean,
++  getCurrentUser: vi.fn(),
++  eventFindFirst: vi.fn(),
++  attachmentFindUnique: vi.fn(),
++  deleteUploadThingFiles: vi.fn(),
++}));
++
++vi.mock('@/lib/auth', () => ({
++  get isClerkConfigured() {
++    return mocks.isClerkConfigured;
++  },
++  getCurrentUser: mocks.getCurrentUser,
++}));
++
++vi.mock('@/lib/db', () => ({
++  prisma: {
++    event: { findFirst: mocks.eventFindFirst },
++    projectTaskAttachment: {
++      findUnique: mocks.attachmentFindUnique,
++    },
++    projectTask: { findFirst: vi.fn() },
++    $transaction: (fn: (tx: unknown) => unknown) => fn({}),
++  },
++}));
++
++vi.mock('@/lib/event-member', () => ({
++  requireEventMemberAction: vi.fn(),
++}));
++
++vi.mock('@/lib/uploadthing-cleanup', () => ({
++  deleteUploadThingFiles: mocks.deleteUploadThingFiles,
++}));
++
++vi.mock('@/lib/activity-write-server', () => ({
++  recordActivity: vi.fn().mockResolvedValue({ ok: true }),
++}));
++
++import { ourFileRouter } from '@/app/api/uploadthing/core';
++
++const ADMIN = {
++  id: 'user_admin_1',
++  email: 'admin@example.com',
++  firstName: 'Ada',
++  lastName: 'Admin',
++  imageUrl: null,
++  role: 'admin' as const,
++};
++
++const ATTENDEE = { ...ADMIN, id: 'user_attendee_1', role: 'attendee' as const };
++const EVENT = { id: 'event_abc123', slug: 'acme-2027' };
++
++type MiddlewareFn = (args: {
++  input: { eventId: string };
++  files: Array<{ name: string; size: number; type: string }>;
++}) => Promise<Record<string, unknown>>;
++
++type OnUploadCompleteFn = (args: {
++  metadata: { userId: string; eventId: string; eventSlug: string };
++  file: {
++    key: string;
++    name: string;
++    size: number;
++    type: string;
++    url: string;
++    ufsUrl: string;
++  };
++}) => Promise<Record<string, unknown>>;
++
++function middleware(): MiddlewareFn {
++  return (
++    ourFileRouter.sponsorPartnerLogo as unknown as { middleware: MiddlewareFn }
++  ).middleware;
++}
++
++function onUploadComplete(): OnUploadCompleteFn {
++  return (
++    ourFileRouter.sponsorPartnerLogo as unknown as {
++      onUploadComplete: OnUploadCompleteFn;
++    }
++  ).onUploadComplete;
++}
++
++async function expectUploadThingError(
++  promise: Promise<unknown>,
++  message: string | RegExp
++) {
++  await expect(promise).rejects.toSatisfy((err: unknown) => {
++    const msg =
++      err instanceof Error
++        ? err.message
++        : typeof err === 'string'
++          ? err
++          : String(err);
++    if (typeof message === 'string') {
++      return msg.includes(message) || msg === message;
++    }
++    return message.test(msg);
++  });
++}
++
++describe('sponsorPartnerLogo UploadThing route', () => {
++  beforeEach(() => {
++    vi.clearAllMocks();
++    mocks.isClerkConfigured = true;
++    mocks.getCurrentUser.mockResolvedValue(ADMIN);
++    mocks.eventFindFirst.mockResolvedValue(EVENT);
++    mocks.attachmentFindUnique.mockResolvedValue(null);
++    mocks.deleteUploadThingFiles.mockResolvedValue({
++      attempted: 1,
++      deleted: true,
++      orphanedKeys: [],
++    });
++  });
++
++  describe('middleware — authz rejection', () => {
++    it('rejects when Clerk is not configured', async () => {
++      mocks.isClerkConfigured = false;
++
++      await expectUploadThingError(
++        middleware()({
++          input: { eventId: EVENT.id },
++          files: [{ name: 'logo.png', size: 1024, type: 'image/png' }],
++        }),
++        /Unauthorized/i
++      );
++
++      expect(mocks.getCurrentUser).not.toHaveBeenCalled();
++    });
++
++    it('rejects unauthenticated callers', async () => {
++      mocks.getCurrentUser.mockResolvedValue(null);
++
++      await expectUploadThingError(
++        middleware()({
++          input: { eventId: EVENT.id },
++          files: [{ name: 'logo.png', size: 1024, type: 'image/png' }],
++        }),
++        /Unauthorized/i
++      );
++    });
++
++    it('rejects non-admin callers', async () => {
++      mocks.getCurrentUser.mockResolvedValue(ATTENDEE);
++
++      await expectUploadThingError(
++        middleware()({
++          input: { eventId: EVENT.id },
++          files: [{ name: 'logo.png', size: 1024, type: 'image/png' }],
++        }),
++        /Unauthorized/i
++      );
++    });
++
++    it('rejects when the event id does not resolve', async () => {
++      mocks.eventFindFirst.mockResolvedValue(null);
++
++      await expectUploadThingError(
++        middleware()({
++          input: { eventId: 'event_missing' },
++          files: [{ name: 'logo.png', size: 1024, type: 'image/png' }],
++        }),
++        /Event not found/i
++      );
++    });
++  });
++
++  describe('middleware — content-type and size rejection', () => {
++    it('rejects SVG before presign', async () => {
++      await expectUploadThingError(
++        middleware()({
++          input: { eventId: EVENT.id },
++          files: [{ name: 'x.svg', size: 200, type: 'image/svg+xml' }],
++        }),
++        /not allowed/i
++      );
++    });
++
++    it('rejects an oversized logo (>4MB) before presign', async () => {
++      await expectUploadThingError(
++        middleware()({
++          input: { eventId: EVENT.id },
++          files: [
++            {
++              name: 'logo.png',
++              size: EVENT_IMAGE_LOGO_MAX_BYTES + 1,
++              type: 'image/png',
++            },
++          ],
++        }),
++        /byte/i
++      );
++    });
++
++    it('passes auth + a valid candidate through with event metadata', async () => {
++      const meta = await middleware()({
++        input: { eventId: EVENT.id },
++        files: [{ name: 'logo.webp', size: 4096, type: 'image/webp' }],
++      });
++
++      expect(meta).toEqual(
++        expect.objectContaining({
++          userId: ADMIN.id,
++          eventId: EVENT.id,
++          eventSlug: EVENT.slug,
++        })
++      );
++    });
++  });
++
++  describe('onUploadComplete', () => {
++    const baseMeta = {
++      userId: ADMIN.id,
++      eventId: EVENT.id,
++      eventSlug: EVENT.slug,
++    };
++
++    it('rejects a non-image content type and cleans up the provider file', async () => {
++      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
++
++      const result = await onUploadComplete()({
++        metadata: baseMeta,
++        file: {
++          key: 'ut_key_bad_type',
++          name: 'x.pdf',
++          size: 1024,
++          type: 'application/pdf',
++          url: 'https://utfs.io/f/ut_key_bad_type',
++          ufsUrl: 'https://utfs.io/f/ut_key_bad_type',
++        },
++      });
++
++      expect(result).toEqual(
++        expect.objectContaining({ ok: false, error: 'File type not allowed' })
++      );
++      expect(mocks.deleteUploadThingFiles).toHaveBeenCalledWith([
++        'ut_key_bad_type',
++      ]);
++      errorSpy.mockRestore();
++    });
++
++    it('rejects an oversized logo and cleans up the provider file', async () => {
++      const result = await onUploadComplete()({
++        metadata: baseMeta,
++        file: {
++          key: 'ut_key_big_logo',
++          name: 'logo.png',
++          size: EVENT_IMAGE_LOGO_MAX_BYTES + 100,
++          type: 'image/png',
++          url: 'https://utfs.io/f/ut_key_big_logo',
++          ufsUrl: 'https://utfs.io/f/ut_key_big_logo',
++        },
++      });
++
++      expect(result).toEqual(
++        expect.objectContaining({
++          ok: false,
++          error: expect.stringMatching(/byte/i),
++        })
++      );
++      expect(mocks.deleteUploadThingFiles).toHaveBeenCalledWith([
++        'ut_key_big_logo',
++      ]);
++    });
++
++    it('rejects a non-UploadThing URL and cleans up the provider file', async () => {
++      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
++
++      const result = await onUploadComplete()({
++        metadata: baseMeta,
++        file: {
++          key: 'ut_key_evil',
++          name: 'logo.png',
++          size: 1024,
++          type: 'image/png',
++          url: 'https://evil.example/f/ut_key_evil',
++          ufsUrl: 'https://evil.example/f/ut_key_evil',
++        },
++      });
++
++      expect(result).toEqual(
++        expect.objectContaining({ ok: false, error: 'Invalid file URL' })
++      );
++      expect(mocks.deleteUploadThingFiles).toHaveBeenCalledWith(['ut_key_evil']);
++      errorSpy.mockRestore();
++    });
++
++    it('never deletes a fileKey that a ProjectTaskAttachment row already owns', async () => {
++      mocks.attachmentFindUnique.mockResolvedValue({ id: 'att_owns_it' });
++
++      const result = await onUploadComplete()({
++        metadata: baseMeta,
++        file: {
++          key: 'ut_key_owned',
++          name: 'logo.png',
++          size: 1024,
++          type: 'image/svg+xml',
++          url: 'https://utfs.io/f/ut_key_owned',
++          ufsUrl: 'https://utfs.io/f/ut_key_owned',
++        },
++      });
++
++      expect(result).toEqual(expect.objectContaining({ ok: false }));
++      expect(mocks.deleteUploadThingFiles).not.toHaveBeenCalled();
++    });
++
++    it('returns the hosted URL on a valid upload (no Prisma write)', async () => {
++      const result = await onUploadComplete()({
++        metadata: baseMeta,
++        file: {
++          key: 'ut_key_ok',
++          name: 'logo.webp',
++          size: 2048,
++          type: 'image/webp',
++          url: 'https://utfs.io/f/ut_key_ok',
++          ufsUrl: 'https://utfs.io/f/ut_key_ok',
++        },
++      });
++
++      expect(result).toEqual(
++        expect.objectContaining({
++          ok: true,
++          url: 'https://utfs.io/f/ut_key_ok',
++          contentType: 'image/webp',
++          sizeBytes: 2048,
++          eventId: EVENT.id,
++          userId: ADMIN.id,
++        })
++      );
++      expect(mocks.deleteUploadThingFiles).not.toHaveBeenCalled();
++    });
++  });
++
++  describe('UploadThingError shape smoke', () => {
++    it('UploadThingError is constructible (route throws this class)', () => {
++      const err = new UploadThingError('Unauthorized');
++      expect(err).toBeInstanceOf(Error);
++      expect(String(err.message || err)).toMatch(/Unauthorized/);
++    });
++  });
++});
+diff --git a/tests/unit/sponsorship-url-validation.test.ts b/tests/unit/sponsorship-url-validation.test.ts
+index f6adf20..4cd2c99 100644
+--- a/tests/unit/sponsorship-url-validation.test.ts
++++ b/tests/unit/sponsorship-url-validation.test.ts
+@@ -69,4 +69,39 @@ describe('sponsorship URL schemas', () => {
+       virtualBoothInputSchema.safeParse({ videoUrl: ' '.repeat(2_049) }).success
+     ).toBe(false);
+   });
++
++  it('rejects inlined data: sponsor logo URIs', () => {
++    expect(
++      sponsorSignupSchema.safeParse({
++        companyName: 'Acme',
++        contactName: 'Ada',
++        contactEmail: 'ada@acmecorp.io',
++        logoUrl: 'data:image/png;base64,iVBORw0KGgo=',
++        tierId: 'tier-1',
++      }).success
++    ).toBe(false);
++  });
++
++  it('accepts UploadThing-hosted HTTPS sponsor logos', () => {
++    expect(
++      sponsorSignupSchema.parse({
++        companyName: 'Acme',
++        contactName: 'Ada',
++        contactEmail: 'ada@acmecorp.io',
++        logoUrl: 'https://utfs.io/f/sponsor-logo',
++        tierId: 'tier-1',
++      }).logoUrl
++    ).toBe('https://utfs.io/f/sponsor-logo');
++  });
++
++  it('allows omitting the optional logo URL', () => {
++    expect(
++      sponsorSignupSchema.parse({
++        companyName: 'Acme',
++        contactName: 'Ada',
++        contactEmail: 'ada@acmecorp.io',
++        tierId: 'tier-1',
++      }).logoUrl
++    ).toBeUndefined();
++  });
+ });
+diff --git a/tests/unit/update-event-sponsor-logo.test.ts b/tests/unit/update-event-sponsor-logo.test.ts
+new file mode 100644
+index 0000000..3b43c60
+--- /dev/null
++++ b/tests/unit/update-event-sponsor-logo.test.ts
+@@ -0,0 +1,118 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * Unit coverage for updateEventSponsorLogo — event-scoped EventSponsor.logoUrl
++ * writes, with Sponsor.logoUrl seeded only when currently null.
++ */
++
++import { beforeEach, describe, expect, it, vi } from 'vitest';
++
++const mocks = vi.hoisted(() => ({
++  eventSponsorFindUnique: vi.fn(),
++  eventSponsorUpdate: vi.fn(),
++  sponsorUpdate: vi.fn(),
++  transaction: vi.fn(),
++}));
++
++vi.mock('@/lib/db', () => ({
++  prisma: {
++    eventSponsor: {
++      findUnique: mocks.eventSponsorFindUnique,
++      update: mocks.eventSponsorUpdate,
++    },
++    sponsor: {
++      update: mocks.sponsorUpdate,
++    },
++    $transaction: mocks.transaction,
++  },
++}));
++
++import { updateEventSponsorLogo } from '@/lib/services/sponsorship';
++
++describe('updateEventSponsorLogo', () => {
++  beforeEach(() => {
++    vi.clearAllMocks();
++    mocks.eventSponsorFindUnique.mockResolvedValue({
++      id: 'es_1',
++      sponsorId: 'sp_1',
++      sponsor: { logoUrl: null },
++    });
++    mocks.eventSponsorUpdate.mockResolvedValue({});
++    mocks.sponsorUpdate.mockResolvedValue({});
++    mocks.transaction.mockImplementation(async (ops: unknown[]) => ops);
++  });
++
++  it('rejects data: URIs', async () => {
++    await expect(
++      updateEventSponsorLogo(
++        'es_1',
++        'data:image/png;base64,iVBORw0KGgo='
++      )
++    ).rejects.toThrow(/HTTPS|Logo URL/i);
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++
++  it('rejects http (non-HTTPS) image URLs', async () => {
++    await expect(
++      updateEventSponsorLogo('es_1', 'http://cdn.example.com/logo.png')
++    ).rejects.toThrow(/HTTPS/i);
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++
++  it('writes EventSponsor and seeds Sponsor.logoUrl when company default is empty', async () => {
++    const url = 'https://utfs.io/f/logo-abc';
++    await updateEventSponsorLogo('es_1', url);
++
++    expect(mocks.transaction).toHaveBeenCalled();
++    expect(mocks.eventSponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'es_1' },
++      data: { logoUrl: url },
++    });
++    expect(mocks.sponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'sp_1' },
++      data: { logoUrl: url },
++    });
++  });
++
++  it('does not overwrite an existing Sponsor.logoUrl on set', async () => {
++    mocks.eventSponsorFindUnique.mockResolvedValue({
++      id: 'es_1',
++      sponsorId: 'sp_1',
++      sponsor: { logoUrl: 'https://utfs.io/f/company-default' },
++    });
++    const url = 'https://utfs.io/f/event-specific';
++    await updateEventSponsorLogo('es_1', url);
++
++    expect(mocks.eventSponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'es_1' },
++      data: { logoUrl: url },
++    });
++    expect(mocks.sponsorUpdate).not.toHaveBeenCalled();
++  });
++
++  it('clears only EventSponsor.logoUrl — never the global Sponsor logo', async () => {
++    mocks.eventSponsorFindUnique.mockResolvedValue({
++      id: 'es_1',
++      sponsorId: 'sp_1',
++      sponsor: { logoUrl: 'https://utfs.io/f/company-default' },
++    });
++    await updateEventSponsorLogo('es_1', '');
++
++    expect(mocks.eventSponsorUpdate).toHaveBeenCalledWith({
++      where: { id: 'es_1' },
++      data: { logoUrl: null },
++    });
++    expect(mocks.sponsorUpdate).not.toHaveBeenCalled();
++  });
++
++  it('throws when the event sponsor does not exist', async () => {
++    mocks.eventSponsorFindUnique.mockResolvedValue(null);
++    await expect(
++      updateEventSponsorLogo('es_missing', 'https://utfs.io/f/x')
++    ).rejects.toThrow(/not found/i);
++  });
++});
