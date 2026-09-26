@@ -1,0 +1,4138 @@
+diff --git a/prisma/migrations/20260825120000_crm_contact_collision/migration.sql b/prisma/migrations/20260825120000_crm_contact_collision/migration.sql
+new file mode 100644
+index 0000000..3b186ad
+--- /dev/null
++++ b/prisma/migrations/20260825120000_crm_contact_collision/migration.sql
+@@ -0,0 +1,57 @@
++-- #875 Phase 1.1: CrmContactCollision review queue (additive only).
++-- Accept/reject status only. Full incoming payload snapshot + fingerprint dedupe.
++
++-- CreateEnum
++CREATE TYPE "CrmContactCollisionStatus" AS ENUM ('PENDING', 'ACCEPTED', 'REJECTED');
++
++-- CreateTable
++CREATE TABLE "CrmContactCollision" (
++    "id" TEXT NOT NULL,
++    "organizationId" TEXT NOT NULL,
++    "contactId" TEXT NOT NULL,
++    "eventId" TEXT,
++    "source" TEXT NOT NULL,
++    "sourceFingerprint" TEXT NOT NULL,
++    "email" TEXT NOT NULL,
++    "firstName" TEXT,
++    "lastName" TEXT,
++    "phone" TEXT,
++    "companyName" TEXT,
++    "jobTitle" TEXT,
++    "tags" TEXT[] DEFAULT ARRAY[]::TEXT[],
++    "roleHints" TEXT[] DEFAULT ARRAY[]::TEXT[],
++    "subjectKind" "CrmSubjectKind",
++    "subjectId" TEXT,
++    "payload" JSONB,
++    "existingFirstName" TEXT,
++    "existingLastName" TEXT,
++    "reason" TEXT NOT NULL,
++    "status" "CrmContactCollisionStatus" NOT NULL DEFAULT 'PENDING',
++    "resolvedAt" TIMESTAMP(3),
++    "resolvedByClerkId" TEXT,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++
++    CONSTRAINT "CrmContactCollision_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "CrmContactCollision_organizationId_sourceFingerprint_key" ON "CrmContactCollision"("organizationId", "sourceFingerprint");
++
++-- CreateIndex
++CREATE INDEX "CrmContactCollision_organizationId_status_createdAt_idx" ON "CrmContactCollision"("organizationId", "status", "createdAt");
++
++-- CreateIndex
++CREATE INDEX "CrmContactCollision_contactId_idx" ON "CrmContactCollision"("contactId");
++
++-- CreateIndex
++CREATE INDEX "CrmContactCollision_eventId_idx" ON "CrmContactCollision"("eventId");
++
++-- AddForeignKey
++ALTER TABLE "CrmContactCollision" ADD CONSTRAINT "CrmContactCollision_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "CrmContactCollision" ADD CONSTRAINT "CrmContactCollision_contactId_fkey" FOREIGN KEY ("contactId") REFERENCES "CrmContact"("id") ON DELETE CASCADE ON UPDATE CASCADE;
++
++-- AddForeignKey
++ALTER TABLE "CrmContactCollision" ADD CONSTRAINT "CrmContactCollision_eventId_fkey" FOREIGN KEY ("eventId") REFERENCES "Event"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index f7fafa6..5c691ce 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -232,6 +232,8 @@ model Event {
+   crmActivities          CrmActivity[]
+   // #876 contact spine: per-event links from org-scoped CrmContact
+   crmContactLinks        CrmContactLink[]
++  /// #875 Phase 1.1 collision review rows scoped to this event (optional).
++  crmContactCollisions   CrmContactCollision[]
+   pullQuotes             SessionPullQuote[] // #167
+   linkedInAdCampaigns    LinkedInAdCampaign[] // #440 LinkedIn Ads
+   metaAdCampaigns        MetaAdCampaign[] // #438 Meta Ads
+@@ -363,6 +365,8 @@ model Organization {
+ 
+   // #876 org-scoped CRM contact spine (people across events)
+   crmContacts       CrmContact[]
++  /// #875 Phase 1.1: name-collision review queue for contact spine writers.
++  crmContactCollisions CrmContactCollision[]
+   /// #1108 site-wide legal documents (terms, privacy, …) — not event-scoped.
+   legalDocuments    OrganizationLegalDocument[]
+   /// #1066: tenant-scoped karma activity rows (null organizationId = site-wide).
+@@ -2930,6 +2934,8 @@ model CrmContact {
+   links          CrmContactLink[]
+   /// #1250 Provider enrichment (1:1). Entered contact fields stay untouched.
+   enrichment     CrmContactEnrichment?
++  /// #875 Phase 1.1 collision review rows pointing at this contact.
++  collisions     CrmContactCollision[]
+ 
+   @@unique([organizationId, email])
+   @@index([organizationId, lastName, firstName])
+@@ -2980,6 +2986,55 @@ model CrmContactLink {
+   @@index([contactId])
+ }
+ 
++/// #875 Phase 1.1: durable name-collision review queue.
++/// Accept/reject only — no merge/split states. Full incoming payload lives
++/// here (CSV collision rows never write CrmContact/CrmContactLink).
++enum CrmContactCollisionStatus {
++  PENDING
++  ACCEPTED
++  REJECTED
++}
++
++model CrmContactCollision {
++  id                   String                     @id @default(cuid())
++  organizationId       String
++  organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
++  /// Existing contact the incoming payload collided with.
++  contactId            String
++  contact              CrmContact                 @relation(fields: [contactId], references: [id], onDelete: Cascade)
++  eventId              String?
++  event                Event?                     @relation(fields: [eventId], references: [id], onDelete: SetNull)
++  /// registration | registration_api | import | backfill | historical_audit | group_registration
++  source               String
++  /// Stable dedupe key; @@unique with organizationId so re-runs upsert.
++  sourceFingerprint    String
++  email                String
++  firstName            String?
++  lastName             String?
++  phone                String?
++  companyName          String?
++  jobTitle             String?
++  tags                 String[]                   @default([])
++  roleHints            String[]                   @default([])
++  subjectKind          CrmSubjectKind?
++  subjectId            String?
++  /// Full incoming row/CSV/registration object so nothing is lost.
++  payload              Json?
++  existingFirstName    String?
++  existingLastName     String?
++  reason               String
++  status               CrmContactCollisionStatus  @default(PENDING)
++  resolvedAt           DateTime?
++  resolvedByClerkId    String?
++  createdAt            DateTime                   @default(now())
++  updatedAt            DateTime                   @updatedAt
++
++  @@unique([organizationId, sourceFingerprint])
++  @@index([organizationId, status, createdAt])
++  @@index([contactId])
++  @@index([eventId])
++}
++
+ /// Free-form organizer note on any CRM subject.
+ model CrmNote {
+   id               String         @id @default(cuid())
+diff --git a/scripts/audit-crm-contact-collisions.ts b/scripts/audit-crm-contact-collisions.ts
+new file mode 100644
+index 0000000..9bebab9
+--- /dev/null
++++ b/scripts/audit-crm-contact-collisions.ts
+@@ -0,0 +1,314 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * #875 Phase 1.1 Step D — historical collision audit.
++ *
++ * Scans CrmContactLink rows created since 2026-07-28 (Phase 1 merge) for name
++ * mismatches between the linked subject and the parent CrmContact. On mismatch,
++ * upserts CrmContactCollision with source "historical_audit" (idempotent via
++ * sourceFingerprint).
++ *
++ * Usage:
++ *   npx tsx scripts/audit-crm-contact-collisions.ts
++ *   npx tsx scripts/audit-crm-contact-collisions.ts --apply
++ *
++ * Dry-run is the default. Production host requires BACKFILL_FORCE=1.
++ */
++
++import type { CrmSubjectKind } from "@prisma/client";
++import { createPrismaClient } from "@/lib/prisma-factory";
++import {
++  crmNameCollision,
++  normalizeCrmEmail,
++  personDisplayName,
++} from "@/lib/crm/local-core";
++import { buildCrmCollisionSourceFingerprint } from "@/lib/crm/contact-spine-fingerprint";
++import {
++  DEFAULT_PROTECTED_DATABASE_HOSTS,
++  matchesProtectedDatabaseHost,
++} from "@/lib/protected-database-hosts";
++
++const prisma = createPrismaClient();
++
++/** Phase 1 contact-spine merge date (PR #882). */
++const PHASE1_SINCE = new Date("2026-07-28T00:00:00.000Z");
++
++function parseArgs(argv: string[]) {
++  return { apply: argv.includes("--apply"), dryRun: !argv.includes("--apply") };
++}
++
++function assertNotProductionDatabase(): void {
++  const databaseUrl = process.env.DATABASE_URL;
++  if (!databaseUrl) return;
++  let host = "";
++  try {
++    host = new URL(databaseUrl).hostname;
++  } catch {
++    return;
++  }
++  if (
++    matchesProtectedDatabaseHost(host) &&
++    process.env.BACKFILL_FORCE !== "1"
++  ) {
++    console.error(
++      `\nRefusing historical collision audit: DATABASE_URL points at a protected host ` +
++        `(${DEFAULT_PROTECTED_DATABASE_HOSTS[0] ?? "production"}).\n` +
++        "Set BACKFILL_FORCE=1 only after an explicit ops decision.\n",
++    );
++    process.exit(1);
++  }
++}
++
++async function resolveSubjectNames(
++  subjectKind: CrmSubjectKind,
++  subjectId: string,
++): Promise<{
++  email: string | null;
++  firstName: string | null;
++  lastName: string | null;
++  companyName: string | null;
++  phone: string | null;
++} | null> {
++  switch (subjectKind) {
++    case "REGISTRATION": {
++      const r = await prisma.registration.findUnique({
++        where: { id: subjectId },
++        select: {
++          email: true,
++          firstName: true,
++          lastName: true,
++          organization: true,
++          phone: true,
++        },
++      });
++      if (!r) return null;
++      return {
++        email: r.email,
++        firstName: r.firstName,
++        lastName: r.lastName,
++        companyName: r.organization,
++        phone: r.phone,
++      };
++    }
++    case "SPEAKER": {
++      const s = await prisma.cfpSubmission.findUnique({
++        where: { id: subjectId },
++        select: {
++          email: true,
++          firstName: true,
++          lastName: true,
++          organization: true,
++        },
++      });
++      if (!s) return null;
++      return {
++        email: s.email,
++        firstName: s.firstName,
++        lastName: s.lastName,
++        companyName: s.organization,
++        phone: null,
++      };
++    }
++    case "SPONSOR_CONTACT": {
++      const s = await prisma.sponsor.findUnique({
++        where: { id: subjectId },
++        select: {
++          contactEmail: true,
++          contactName: true,
++          companyName: true,
++          contactPhone: true,
++        },
++      });
++      if (!s) return null;
++      const parts = (s.contactName ?? "").trim().split(/\s+/);
++      return {
++        email: s.contactEmail,
++        firstName: parts[0] || null,
++        lastName: parts.slice(1).join(" ") || null,
++        companyName: s.companyName,
++        phone: s.contactPhone,
++      };
++    }
++    case "VENDOR": {
++      const v = await prisma.vendor.findUnique({
++        where: { id: subjectId },
++        select: {
++          contactEmail: true,
++          contactName: true,
++          name: true,
++          contactPhone: true,
++        },
++      });
++      if (!v) return null;
++      const parts = (v.contactName ?? "").trim().split(/\s+/);
++      return {
++        email: v.contactEmail,
++        firstName: parts[0] || null,
++        lastName: parts.slice(1).join(" ") || null,
++        companyName: v.name,
++        phone: v.contactPhone,
++      };
++    }
++    case "VOLUNTEER": {
++      const v = await prisma.volunteerSignup.findUnique({
++        where: { id: subjectId },
++        select: { email: true, name: true, phone: true },
++      });
++      if (!v) return null;
++      const parts = (v.name ?? "").trim().split(/\s+/);
++      return {
++        email: v.email,
++        firstName: parts[0] || null,
++        lastName: parts.slice(1).join(" ") || null,
++        companyName: null,
++        phone: v.phone,
++      };
++    }
++    default:
++      return null;
++  }
++}
++
++async function main() {
++  const { apply, dryRun } = parseArgs(process.argv.slice(2));
++  assertNotProductionDatabase();
++  console.log(
++    dryRun
++      ? "Historical CRM collision audit — DRY RUN (pass --apply to write)"
++      : "Historical CRM collision audit — APPLY",
++  );
++  console.log(`Scanning links created since ${PHASE1_SINCE.toISOString()}`);
++
++  const links = await prisma.crmContactLink.findMany({
++    where: { createdAt: { gte: PHASE1_SINCE } },
++    select: {
++      id: true,
++      contactId: true,
++      eventId: true,
++      subjectKind: true,
++      subjectId: true,
++      contact: {
++        select: {
++          id: true,
++          organizationId: true,
++          email: true,
++          firstName: true,
++          lastName: true,
++        },
++      },
++    },
++  });
++
++  console.log(`Links in window: ${links.length}`);
++
++  let mismatches = 0;
++  let written = 0;
++  let skippedNoSubject = 0;
++
++  for (const link of links) {
++    const subject = await resolveSubjectNames(link.subjectKind, link.subjectId);
++    if (!subject) {
++      skippedNoSubject++;
++      continue;
++    }
++
++    if (
++      !crmNameCollision(link.contact, {
++        firstName: subject.firstName,
++        lastName: subject.lastName,
++      })
++    ) {
++      continue;
++    }
++
++    mismatches++;
++    const email =
++      normalizeCrmEmail(subject.email) ??
++      normalizeCrmEmail(link.contact.email) ??
++      link.contact.email;
++
++    const reason = `Historical audit: contact "${personDisplayName(link.contact)}" vs subject "${personDisplayName(
++      subject,
++    )}" (${link.subjectKind}/${link.subjectId})`;
++
++    console.log(`  MISMATCH link=${link.id} ${reason}`);
++
++    if (dryRun) continue;
++
++    const sourceFingerprint = buildCrmCollisionSourceFingerprint({
++      source: "historical_audit",
++      email,
++      subjectKind: link.subjectKind,
++      subjectId: link.subjectId,
++      firstName: subject.firstName,
++      lastName: subject.lastName,
++      eventId: link.eventId,
++    });
++
++    await prisma.crmContactCollision.upsert({
++      where: {
++        organizationId_sourceFingerprint: {
++          organizationId: link.contact.organizationId,
++          sourceFingerprint,
++        },
++      },
++      create: {
++        organizationId: link.contact.organizationId,
++        contactId: link.contactId,
++        eventId: link.eventId,
++        source: "historical_audit",
++        sourceFingerprint,
++        email,
++        firstName: subject.firstName,
++        lastName: subject.lastName,
++        phone: subject.phone,
++        companyName: subject.companyName,
++        subjectKind: link.subjectKind,
++        subjectId: link.subjectId,
++        payload: {
++          linkId: link.id,
++          subject,
++        },
++        existingFirstName: link.contact.firstName,
++        existingLastName: link.contact.lastName,
++        reason,
++        status: "PENDING",
++      },
++      update: {
++        reason,
++        payload: {
++          linkId: link.id,
++          subject,
++        },
++      },
++    });
++    written++;
++  }
++
++  console.log(
++    JSON.stringify(
++      {
++        dryRun,
++        linksScanned: links.length,
++        mismatches,
++        written,
++        skippedNoSubject,
++      },
++      null,
++      2,
++    ),
++  );
++}
++
++main()
++  .catch((err) => {
++    console.error(err);
++    process.exit(1);
++  })
++  .finally(async () => {
++    await prisma.$disconnect();
++  });
+diff --git a/scripts/audit-partner-self-links.ts b/scripts/audit-partner-self-links.ts
+new file mode 100644
+index 0000000..45f7d0e
+--- /dev/null
++++ b/scripts/audit-partner-self-links.ts
+@@ -0,0 +1,416 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * #875 Phase 1.1 Step B — audit collapsed PARTNER self-links.
++ *
++ * Legacy PARTNER links used `subjectId = contactId`. The unique key is
++ * `(contactId, subjectKind, subjectId)`, so a second-event import silently
++ * no-ops rather than creating another row. Grouping surviving self-link rows
++ * by `count(distinct eventId) > 1` is therefore structurally impossible for
++ * the collapsed production case.
++ *
++ * This audit instead:
++ * 1. Finds legacy PARTNER self-links (`subjectId = contactId`).
++ * 2. Cross-references each contact's email against EventSponsor / Sponsor
++ *    history, other CrmContactLinks, and import collision rows to recover
++ *    distinct event associations.
++ * 3. When multiple events are evidenced but only one legacy PARTNER link
++ *    exists, enqueues CrmContactCollision rows (source: partner_link_audit)
++ *    and, when recoverable, creates missing composite-subjectId links.
++ * 4. Rewrites single-event legacy links to `subjectId = ${contactId}:${eventId}`.
++ *
++ * Usage:
++ *   npx tsx scripts/audit-partner-self-links.ts
++ *   npx tsx scripts/audit-partner-self-links.ts --apply
++ *
++ * Dry-run (default): print report only.
++ * --apply: rewrite / enqueue / create missing links.
++ */
++
++import { createPrismaClient } from "@/lib/prisma-factory";
++import {
++  normalizeCrmEmail,
++  partnerSelfLinkSubjectId,
++} from "@/lib/crm/local-core";
++import { buildCrmCollisionSourceFingerprint } from "@/lib/crm/contact-spine-fingerprint";
++import {
++  DEFAULT_PROTECTED_DATABASE_HOSTS,
++  matchesProtectedDatabaseHost,
++} from "@/lib/protected-database-hosts";
++
++const prisma = createPrismaClient();
++
++function parseArgs(argv: string[]) {
++  return { apply: argv.includes("--apply"), dryRun: !argv.includes("--apply") };
++}
++
++function assertNotProductionDatabase(): void {
++  const databaseUrl = process.env.DATABASE_URL;
++  if (!databaseUrl) return;
++  let host = "";
++  try {
++    host = new URL(databaseUrl).hostname;
++  } catch {
++    return;
++  }
++  if (
++    matchesProtectedDatabaseHost(host) &&
++    process.env.BACKFILL_FORCE !== "1"
++  ) {
++    console.error(
++      `\nRefusing partner-link audit: DATABASE_URL points at a protected host ` +
++        `(${DEFAULT_PROTECTED_DATABASE_HOSTS[0] ?? "production"}).\n` +
++        "Set BACKFILL_FORCE=1 only after an explicit ops decision.\n",
++    );
++    process.exit(1);
++  }
++}
++
++async function collectEvidenceEventIds(input: {
++  contactId: string;
++  email: string;
++  linkEventId: string | null;
++}): Promise<Set<string>> {
++  const events = new Set<string>();
++  if (input.linkEventId) events.add(input.linkEventId);
++
++  const otherLinks = await prisma.crmContactLink.findMany({
++    where: {
++      contactId: input.contactId,
++      eventId: { not: null },
++    },
++    select: { eventId: true },
++  });
++  for (const l of otherLinks) {
++    if (l.eventId) events.add(l.eventId);
++  }
++
++  const collisions = await prisma.crmContactCollision.findMany({
++    where: {
++      contactId: input.contactId,
++      eventId: { not: null },
++    },
++    select: { eventId: true },
++  });
++  for (const c of collisions) {
++    if (c.eventId) events.add(c.eventId);
++  }
++
++  const email = normalizeCrmEmail(input.email);
++  if (email) {
++    const sponsors = await prisma.sponsor.findMany({
++      where: { contactEmail: { equals: email, mode: "insensitive" } },
++      select: {
++        events: { select: { eventId: true } },
++      },
++    });
++    for (const s of sponsors) {
++      for (const e of s.events) events.add(e.eventId);
++    }
++  }
++
++  return events;
++}
++
++async function enqueueCollapse(input: {
++  dryRun: boolean;
++  contact: {
++    id: string;
++    organizationId: string;
++    email: string;
++    firstName: string | null;
++    lastName: string | null;
++  };
++  eventId: string;
++  legacyLinkId: string;
++  legacySubjectId: string;
++  distinctEventIds: string[];
++}): Promise<boolean> {
++  if (input.dryRun) return true;
++  const newSubjectId = partnerSelfLinkSubjectId(
++    input.contact.id,
++    input.eventId,
++  );
++  const sourceFingerprint = buildCrmCollisionSourceFingerprint({
++    source: "partner_link_audit",
++    email: input.contact.email,
++    subjectKind: "PARTNER",
++    subjectId: newSubjectId,
++    firstName: input.contact.firstName,
++    lastName: input.contact.lastName,
++    eventId: input.eventId,
++  });
++  await prisma.crmContactCollision.upsert({
++    where: {
++      organizationId_sourceFingerprint: {
++        organizationId: input.contact.organizationId,
++        sourceFingerprint,
++      },
++    },
++    create: {
++      organizationId: input.contact.organizationId,
++      contactId: input.contact.id,
++      eventId: input.eventId,
++      source: "partner_link_audit",
++      sourceFingerprint,
++      email: input.contact.email,
++      firstName: input.contact.firstName,
++      lastName: input.contact.lastName,
++      subjectKind: "PARTNER",
++      subjectId: newSubjectId,
++      payload: {
++        legacyLinkId: input.legacyLinkId,
++        legacySubjectId: input.legacySubjectId,
++        distinctEventIds: input.distinctEventIds,
++      },
++      existingFirstName: input.contact.firstName,
++      existingLastName: input.contact.lastName,
++      reason:
++        "PARTNER self-link collapsed across multiple events; re-derive from CSV/sponsor history if recoverable",
++      status: "PENDING",
++    },
++    update: {
++      reason:
++        "PARTNER self-link collapsed across multiple events; re-derive from CSV/sponsor history if recoverable",
++    },
++  });
++  return true;
++}
++
++async function ensureCompositePartnerLink(input: {
++  dryRun: boolean;
++  contactId: string;
++  eventId: string;
++}): Promise<"created" | "existing" | "dry"> {
++  const subjectId = partnerSelfLinkSubjectId(input.contactId, input.eventId);
++  if (input.dryRun) return "dry";
++  const existing = await prisma.crmContactLink.findUnique({
++    where: {
++      contactId_subjectKind_subjectId: {
++        contactId: input.contactId,
++        subjectKind: "PARTNER",
++        subjectId,
++      },
++    },
++    select: { id: true },
++  });
++  if (existing) return "existing";
++  try {
++    await prisma.crmContactLink.create({
++      data: {
++        contactId: input.contactId,
++        eventId: input.eventId,
++        subjectKind: "PARTNER",
++        subjectId,
++      },
++    });
++    return "created";
++  } catch (err) {
++    if (
++      typeof err === "object" &&
++      err !== null &&
++      "code" in err &&
++      (err as { code?: string }).code === "P2002"
++    ) {
++      return "existing";
++    }
++    throw err;
++  }
++}
++
++async function main() {
++  const { apply, dryRun } = parseArgs(process.argv.slice(2));
++  assertNotProductionDatabase();
++  console.log(
++    dryRun
++      ? "PARTNER self-link audit — DRY RUN (pass --apply to rewrite/enqueue)"
++      : "PARTNER self-link audit — APPLY",
++  );
++
++  const legacy = await prisma.crmContactLink.findMany({
++    where: {
++      subjectKind: "PARTNER",
++    },
++    select: {
++      id: true,
++      contactId: true,
++      subjectId: true,
++      eventId: true,
++      contact: {
++        select: {
++          id: true,
++          organizationId: true,
++          email: true,
++          firstName: true,
++          lastName: true,
++        },
++      },
++    },
++  });
++
++  const selfLinks = legacy.filter((l) => l.subjectId === l.contactId);
++  console.log(
++    `Legacy PARTNER self-links (subjectId=contactId): ${selfLinks.length}`,
++  );
++
++  let multiEvent = 0;
++  let rewritten = 0;
++  let enqueued = 0;
++  let recoveredLinks = 0;
++  let skippedNoEvent = 0;
++
++  for (const link of selfLinks) {
++    const evidence = await collectEvidenceEventIds({
++      contactId: link.contactId,
++      email: link.contact.email,
++      linkEventId: link.eventId,
++    });
++    const distinctEventIds = [...evidence];
++    const collapsed = distinctEventIds.length > 1;
++
++    if (collapsed) {
++      multiEvent++;
++      console.log(
++        `  COLLAPSED contact=${link.contactId} email=${link.contact.email} ` +
++          `evidenceEventIds=${distinctEventIds.length} linkEventId=${link.eventId ?? "null"}`,
++      );
++
++      for (const eventId of distinctEventIds) {
++        await enqueueCollapse({
++          dryRun,
++          contact: link.contact,
++          eventId,
++          legacyLinkId: link.id,
++          legacySubjectId: link.subjectId,
++          distinctEventIds,
++        });
++        enqueued++;
++
++        // Recoverable: create the missing composite PARTNER link for this event.
++        const ensured = await ensureCompositePartnerLink({
++          dryRun,
++          contactId: link.contactId,
++          eventId,
++        });
++        if (ensured === "created" || ensured === "dry") recoveredLinks++;
++      }
++
++      // Drop the legacy self-link once composites exist (or would exist).
++      if (!dryRun) {
++        try {
++          await prisma.crmContactLink.delete({ where: { id: link.id } });
++        } catch {
++          // Already gone / unique rewrite race — ignore.
++        }
++      }
++      continue;
++    }
++
++    if (!link.eventId) {
++      // No event on the link and no cross-ref evidence — cannot safely rewrite.
++      skippedNoEvent++;
++      if (!dryRun) {
++        const sourceFingerprint = buildCrmCollisionSourceFingerprint({
++          source: "partner_link_audit",
++          email: link.contact.email,
++          subjectKind: "PARTNER",
++          subjectId: link.contactId,
++          firstName: link.contact.firstName,
++          lastName: link.contact.lastName,
++          eventId: null,
++        });
++        await prisma.crmContactCollision.upsert({
++          where: {
++            organizationId_sourceFingerprint: {
++              organizationId: link.contact.organizationId,
++              sourceFingerprint,
++            },
++          },
++          create: {
++            organizationId: link.contact.organizationId,
++            contactId: link.contactId,
++            eventId: null,
++            source: "partner_link_audit",
++            sourceFingerprint,
++            email: link.contact.email,
++            firstName: link.contact.firstName,
++            lastName: link.contact.lastName,
++            subjectKind: "PARTNER",
++            subjectId: link.contactId,
++            payload: {
++              legacyLinkId: link.id,
++              legacySubjectId: link.subjectId,
++              note: "legacy PARTNER self-link with no recoverable eventId",
++            },
++            existingFirstName: link.contact.firstName,
++            existingLastName: link.contact.lastName,
++            reason:
++              "PARTNER self-link has no eventId and no recoverable multi-event evidence",
++            status: "PENDING",
++          },
++          update: {},
++        });
++      }
++      enqueued++;
++      continue;
++    }
++
++    // Single-event legacy link — safe to rewrite to composite subjectId.
++    const newSubjectId = partnerSelfLinkSubjectId(
++      link.contactId,
++      link.eventId,
++    );
++    if (dryRun) {
++      rewritten++;
++      continue;
++    }
++    try {
++      await prisma.crmContactLink.update({
++        where: { id: link.id },
++        data: { subjectId: newSubjectId },
++      });
++      rewritten++;
++    } catch (err) {
++      if (
++        typeof err === "object" &&
++        err !== null &&
++        "code" in err &&
++        (err as { code?: string }).code === "P2002"
++      ) {
++        await prisma.crmContactLink.delete({ where: { id: link.id } });
++        rewritten++;
++      } else {
++        throw err;
++      }
++    }
++  }
++
++  console.log(
++    JSON.stringify(
++      {
++        dryRun,
++        legacySelfLinks: selfLinks.length,
++        contactsWithMultiEventCollapse: multiEvent,
++        rewrittenOrWouldRewrite: rewritten,
++        enqueuedOrWouldEnqueue: enqueued,
++        recoveredOrWouldRecoverLinks: recoveredLinks,
++        skippedNoEvent,
++      },
++      null,
++      2,
++    ),
++  );
++}
++
++main()
++  .catch((err) => {
++    console.error(err);
++    process.exit(1);
++  })
++  .finally(async () => {
++    await prisma.$disconnect();
++  });
+diff --git a/scripts/backfill-crm-contacts.mjs b/scripts/backfill-crm-contacts.mjs
+index 45f38a0..8aafea8 100644
+--- a/scripts/backfill-crm-contacts.mjs
++++ b/scripts/backfill-crm-contacts.mjs
+@@ -6,330 +6,22 @@
+  */
+ 
+ /**
+- * #876 Email-match backfill: Registration / CfpSubmission / Sponsor contacts /
+- * Vendor / VolunteerSignup → CrmContact + CrmContactLink.
++ * Compatibility shim — the CRM contact backfill now lives in TypeScript so it
++ * can import the canonical `crmNameCollision` from local-core (#875 Step G).
+  *
+- * Post-DDL only — never runs inside schema push.
+- *
+- * Usage:
+- *   node scripts/backfill-crm-contacts.mjs --dry-run
+- *   node scripts/backfill-crm-contacts.mjs --apply
+- *
+- * Collision rule: same email, materially different names → flag, never merge.
++ * Prefer:
++ *   npx tsx scripts/backfill-crm-contacts.ts [--apply]
+  */
+ 
+-import { createPrismaClient } from "./lib/prisma-client.mjs";
+-
+-const prisma = createPrismaClient();
+-
+-function normalizeEmail(raw) {
+-  if (raw == null) return null;
+-  const email = String(raw).trim().toLowerCase();
+-  if (!email || !email.includes("@")) return null;
+-  return email.slice(0, 320);
+-}
+-
+-function nameCollision(existing, incoming) {
+-  const eLast = (existing.lastName ?? "").trim().toLowerCase();
+-  const iLast = (incoming.lastName ?? "").trim().toLowerCase();
+-  const eFirst = (existing.firstName ?? "").trim().toLowerCase();
+-  const iFirst = (incoming.firstName ?? "").trim().toLowerCase();
+-  if (eLast && iLast && eLast !== iLast) return true;
+-  if (eFirst && iFirst && eLast && iLast && eFirst !== iFirst && eLast === iLast) {
+-    return true;
+-  }
+-  return false;
+-}
+-
+-function parseArgs(argv) {
+-  const dryRun = argv.includes("--dry-run") || !argv.includes("--apply");
+-  const apply = argv.includes("--apply");
+-  return { dryRun: apply ? false : dryRun, apply };
+-}
+-
+-async function ensureContact(orgId, person, stats, dryRun) {
+-  const email = normalizeEmail(person.email);
+-  if (!email) {
+-    stats.skippedNoEmail++;
+-    return null;
+-  }
+-
+-  const existing = await prisma.crmContact.findUnique({
+-    where: {
+-      organizationId_email: { organizationId: orgId, email },
+-    },
+-  });
+-
+-  if (existing) {
+-    if (
+-      nameCollision(existing, {
+-        firstName: person.firstName,
+-        lastName: person.lastName,
+-      })
+-    ) {
+-      stats.collisions.push({
+-        email,
+-        existingId: existing.id,
+-        existingName: `${existing.firstName ?? ""} ${existing.lastName ?? ""}`.trim(),
+-        incomingName: `${person.firstName ?? ""} ${person.lastName ?? ""}`.trim(),
+-        source: person.source,
+-        subjectKind: person.subjectKind,
+-        subjectId: person.subjectId,
+-      });
+-      // Still link — email is the identity key; name is review-only.
+-      return existing.id;
+-    }
+-    stats.existing++;
+-    return existing.id;
+-  }
+-
+-  if (dryRun) {
+-    stats.wouldCreate++;
+-    return `dry-${email}`;
+-  }
+-
+-  const created = await prisma.crmContact.create({
+-    data: {
+-      organizationId: orgId,
+-      email,
+-      firstName: person.firstName ?? null,
+-      lastName: person.lastName ?? null,
+-      companyName: person.companyName ?? null,
+-      phone: person.phone ?? null,
+-      source: "backfill",
+-      isProspect: false,
+-    },
+-    select: { id: true },
+-  });
+-  stats.created++;
+-  return created.id;
+-}
+-
+-async function ensureLink(contactId, person, stats, dryRun) {
+-  if (!contactId || String(contactId).startsWith("dry-")) {
+-    if (dryRun) stats.wouldLink++;
+-    return;
+-  }
+-  const existing = await prisma.crmContactLink.findUnique({
+-    where: {
+-      contactId_subjectKind_subjectId: {
+-        contactId,
+-        subjectKind: person.subjectKind,
+-        subjectId: person.subjectId,
+-      },
+-    },
+-  });
+-  if (existing) {
+-    stats.linksExisting++;
+-    return;
+-  }
+-  if (dryRun) {
+-    stats.wouldLink++;
+-    return;
+-  }
+-  await prisma.crmContactLink.create({
+-    data: {
+-      contactId,
+-      eventId: person.eventId ?? null,
+-      subjectKind: person.subjectKind,
+-      subjectId: person.subjectId,
+-    },
+-  });
+-  stats.linksCreated++;
+-}
+-
+-async function main() {
+-  const { dryRun } = parseArgs(process.argv.slice(2));
+-  console.log(
+-    dryRun
+-      ? "CRM contact backfill — DRY RUN (pass --apply to write)"
+-      : "CRM contact backfill — APPLY",
+-  );
+-
+-  const org = await prisma.organization.findFirst({
+-    orderBy: { createdAt: "asc" },
+-    select: { id: true, name: true },
+-  });
+-  if (!org) {
+-    console.error("No Organization row — aborting.");
+-    process.exit(1);
+-  }
+-  console.log(`Organization: ${org.name} (${org.id})`);
+-
+-  const stats = {
+-    created: 0,
+-    existing: 0,
+-    wouldCreate: 0,
+-    wouldLink: 0,
+-    linksCreated: 0,
+-    linksExisting: 0,
+-    skippedNoEmail: 0,
+-    collisions: [],
+-  };
+-
+-  const people = [];
+-
+-  const registrations = await prisma.registration.findMany({
+-    select: {
+-      id: true,
+-      eventId: true,
+-      email: true,
+-      firstName: true,
+-      lastName: true,
+-      organization: true,
+-      phone: true,
+-    },
+-  });
+-  for (const r of registrations) {
+-    people.push({
+-      email: r.email,
+-      firstName: r.firstName,
+-      lastName: r.lastName,
+-      companyName: r.organization,
+-      phone: r.phone,
+-      eventId: r.eventId,
+-      subjectKind: "REGISTRATION",
+-      subjectId: r.id,
+-      source: "registration",
+-    });
+-  }
+-
+-  const speakers = await prisma.cfpSubmission.findMany({
+-    select: {
+-      id: true,
+-      eventId: true,
+-      email: true,
+-      firstName: true,
+-      lastName: true,
+-      organization: true,
+-    },
+-  });
+-  for (const s of speakers) {
+-    people.push({
+-      email: s.email,
+-      firstName: s.firstName,
+-      lastName: s.lastName,
+-      companyName: s.organization,
+-      eventId: s.eventId,
+-      subjectKind: "SPEAKER",
+-      subjectId: s.id,
+-      source: "cfp",
+-    });
+-  }
+-
+-  const sponsors = await prisma.sponsor.findMany({
+-    select: {
+-      id: true,
+-      contactEmail: true,
+-      contactName: true,
+-      companyName: true,
+-      contactPhone: true,
+-      events: { select: { eventId: true }, take: 1 },
+-    },
+-  });
+-  for (const s of sponsors) {
+-    const nameParts = (s.contactName ?? "").trim().split(/\s+/);
+-    people.push({
+-      email: s.contactEmail,
+-      firstName: nameParts[0] || null,
+-      lastName: nameParts.slice(1).join(" ") || null,
+-      companyName: s.companyName,
+-      phone: s.contactPhone,
+-      eventId: s.events[0]?.eventId ?? null,
+-      subjectKind: "SPONSOR_CONTACT",
+-      subjectId: s.id,
+-      source: "sponsor",
+-    });
+-  }
+-
+-  const vendors = await prisma.vendor.findMany({
+-    select: {
+-      id: true,
+-      eventId: true,
+-      contactEmail: true,
+-      contactName: true,
+-      name: true,
+-      contactPhone: true,
+-    },
+-  });
+-  for (const v of vendors) {
+-    const nameParts = (v.contactName ?? "").trim().split(/\s+/);
+-    people.push({
+-      email: v.contactEmail,
+-      firstName: nameParts[0] || null,
+-      lastName: nameParts.slice(1).join(" ") || null,
+-      companyName: v.name,
+-      phone: v.contactPhone,
+-      eventId: v.eventId,
+-      subjectKind: "VENDOR",
+-      subjectId: v.id,
+-      source: "vendor",
+-    });
+-  }
+-
+-  const volunteers = await prisma.volunteerSignup.findMany({
+-    select: {
+-      id: true,
+-      eventId: true,
+-      email: true,
+-      name: true,
+-      phone: true,
+-    },
+-  });
+-  for (const v of volunteers) {
+-    const nameParts = (v.name ?? "").trim().split(/\s+/);
+-    people.push({
+-      email: v.email,
+-      firstName: nameParts[0] || null,
+-      lastName: nameParts.slice(1).join(" ") || null,
+-      phone: v.phone,
+-      eventId: v.eventId,
+-      subjectKind: "VOLUNTEER",
+-      subjectId: v.id,
+-      source: "volunteer",
+-    });
+-  }
+-
+-  console.log(`Subjects to process: ${people.length}`);
+-
+-  for (const person of people) {
+-    const contactId = await ensureContact(org.id, person, stats, dryRun);
+-    if (contactId) {
+-      await ensureLink(contactId, person, stats, dryRun);
+-    }
+-  }
+-
+-  console.log("\nSummary:");
+-  console.log(JSON.stringify({
+-    dryRun,
+-    created: stats.created,
+-    existing: stats.existing,
+-    wouldCreate: stats.wouldCreate,
+-    wouldLink: stats.wouldLink,
+-    linksCreated: stats.linksCreated,
+-    linksExisting: stats.linksExisting,
+-    skippedNoEmail: stats.skippedNoEmail,
+-    collisionCount: stats.collisions.length,
+-  }, null, 2));
+-
+-  if (stats.collisions.length > 0) {
+-    console.log("\nCollisions (manual review — not auto-merged):");
+-    for (const c of stats.collisions.slice(0, 50)) {
+-      console.log(
+-        `  ${c.email}: existing="${c.existingName}" incoming="${c.incomingName}" (${c.source} ${c.subjectKind}/${c.subjectId})`,
+-      );
+-    }
+-    if (stats.collisions.length > 50) {
+-      console.log(`  … and ${stats.collisions.length - 50} more`);
+-    }
+-  }
+-}
+-
+-main()
+-  .catch((err) => {
+-    console.error(err);
+-    process.exit(1);
+-  })
+-  .finally(async () => {
+-    await prisma.$disconnect();
+-  });
++import { spawnSync } from "node:child_process";
++import { fileURLToPath } from "node:url";
++import path from "node:path";
++
++const here = path.dirname(fileURLToPath(import.meta.url));
++const target = path.join(here, "backfill-crm-contacts.ts");
++const result = spawnSync(
++  "npx",
++  ["tsx", target, ...process.argv.slice(2)],
++  { stdio: "inherit", shell: false },
++);
++process.exit(result.status ?? 1);
+diff --git a/scripts/backfill-crm-contacts.ts b/scripts/backfill-crm-contacts.ts
+new file mode 100644
+index 0000000..f8281e6
+--- /dev/null
++++ b/scripts/backfill-crm-contacts.ts
+@@ -0,0 +1,503 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * #876 / #875 Phase 1.1 Email-match backfill: Registration / CfpSubmission /
++ * Sponsor contacts / Vendor / VolunteerSignup → CrmContact + CrmContactLink.
++ *
++ * Imports the canonical `crmNameCollision` from local-core (Step G) and
++ * persists collisions via `recordCrmContactCollision` (Step C). Per-row
++ * isolation so one bad row does not abort the batch (Step A).
++ *
++ * Usage:
++ *   npx tsx scripts/backfill-crm-contacts.ts
++ *   npx tsx scripts/backfill-crm-contacts.ts --apply
++ *
++ * Dry-run is the default. Production host requires BACKFILL_FORCE=1.
++ */
++
++import type { CrmSubjectKind } from "@prisma/client";
++import { createPrismaClient } from "@/lib/prisma-factory";
++import {
++  crmNameCollision,
++  normalizeCrmEmail,
++  personDisplayName,
++} from "@/lib/crm/local-core";
++import {
++  buildCrmCollisionSourceFingerprint,
++} from "@/lib/crm/contact-spine-fingerprint";
++import {
++  DEFAULT_PROTECTED_DATABASE_HOSTS,
++  matchesProtectedDatabaseHost,
++} from "@/lib/protected-database-hosts";
++
++const prisma = createPrismaClient();
++
++type Person = {
++  email: string | null | undefined;
++  firstName?: string | null;
++  lastName?: string | null;
++  companyName?: string | null;
++  phone?: string | null;
++  eventId?: string | null;
++  subjectKind: CrmSubjectKind;
++  subjectId: string;
++  source: string;
++};
++
++type Stats = {
++  created: number;
++  existing: number;
++  wouldCreate: number;
++  wouldLink: number;
++  linksCreated: number;
++  linksExisting: number;
++  skippedNoEmail: number;
++  rowErrors: number;
++  collisionsPersisted: number;
++  collisions: Array<{
++    email: string;
++    existingId: string;
++    existingName: string;
++    incomingName: string;
++    source: string;
++    subjectKind: string;
++    subjectId: string;
++  }>;
++};
++
++function parseArgs(argv: string[]) {
++  const apply = argv.includes("--apply");
++  return { dryRun: !apply, apply };
++}
++
++function assertNotProductionDatabase(
++  databaseUrl: string | undefined = process.env.DATABASE_URL,
++  force: string | undefined = process.env.BACKFILL_FORCE,
++): void {
++  if (!databaseUrl) return;
++  let host = "";
++  try {
++    host = new URL(databaseUrl).hostname;
++  } catch {
++    return;
++  }
++  if (matchesProtectedDatabaseHost(host) && force !== "1") {
++    console.error(
++      "\nRefusing CRM backfill: DATABASE_URL points at a protected host " +
++        `(${DEFAULT_PROTECTED_DATABASE_HOSTS[0] ?? "production"}).\n` +
++        "Point DATABASE_URL at a non-prod branch, or set BACKFILL_FORCE=1.\n",
++    );
++    process.exit(1);
++  }
++}
++
++async function ensureContact(
++  orgId: string,
++  person: Person,
++  stats: Stats,
++  dryRun: boolean,
++): Promise<string | null> {
++  const email = normalizeCrmEmail(person.email);
++  if (!email) {
++    stats.skippedNoEmail++;
++    return null;
++  }
++
++  const existing = await prisma.crmContact.findUnique({
++    where: {
++      organizationId_email: { organizationId: orgId, email },
++    },
++  });
++
++  if (existing) {
++    if (
++      crmNameCollision(existing, {
++        firstName: person.firstName,
++        lastName: person.lastName,
++      })
++    ) {
++      stats.collisions.push({
++        email,
++        existingId: existing.id,
++        existingName: personDisplayName(existing),
++        incomingName: personDisplayName({
++          firstName: person.firstName,
++          lastName: person.lastName,
++          companyName: person.companyName,
++          email,
++        }),
++        source: person.source,
++        subjectKind: person.subjectKind,
++        subjectId: person.subjectId,
++      });
++
++      if (!dryRun) {
++        const sourceFingerprint = buildCrmCollisionSourceFingerprint({
++          source: "backfill",
++          email,
++          subjectKind: person.subjectKind,
++          subjectId: person.subjectId,
++          firstName: person.firstName,
++          lastName: person.lastName,
++          eventId: person.eventId,
++        });
++        await prisma.crmContactCollision.upsert({
++          where: {
++            organizationId_sourceFingerprint: {
++              organizationId: orgId,
++              sourceFingerprint,
++            },
++          },
++          create: {
++            organizationId: orgId,
++            contactId: existing.id,
++            eventId: person.eventId ?? null,
++            source: "backfill",
++            sourceFingerprint,
++            email,
++            firstName: person.firstName ?? null,
++            lastName: person.lastName ?? null,
++            phone: person.phone ?? null,
++            companyName: person.companyName ?? null,
++            subjectKind: person.subjectKind,
++            subjectId: person.subjectId,
++            payload: {
++              source: person.source,
++              subjectKind: person.subjectKind,
++              subjectId: person.subjectId,
++              eventId: person.eventId ?? null,
++            },
++            existingFirstName: existing.firstName,
++            existingLastName: existing.lastName,
++            reason: `Backfill collision: existing "${personDisplayName(existing)}" vs incoming "${personDisplayName(
++              {
++                firstName: person.firstName,
++                lastName: person.lastName,
++                email,
++              },
++            )}"`,
++            status: "PENDING",
++          },
++          update: {
++            contactId: existing.id,
++            eventId: person.eventId ?? null,
++            email,
++            firstName: person.firstName ?? null,
++            lastName: person.lastName ?? null,
++            phone: person.phone ?? null,
++            companyName: person.companyName ?? null,
++            subjectKind: person.subjectKind,
++            subjectId: person.subjectId,
++            existingFirstName: existing.firstName,
++            existingLastName: existing.lastName,
++          },
++        });
++        stats.collisionsPersisted++;
++      }
++
++      return existing.id;
++    }
++    stats.existing++;
++    return existing.id;
++  }
++
++  if (dryRun) {
++    stats.wouldCreate++;
++    return `dry-${email}`;
++  }
++
++  const created = await prisma.crmContact.upsert({
++    where: {
++      organizationId_email: { organizationId: orgId, email },
++    },
++    create: {
++      organizationId: orgId,
++      email,
++      firstName: person.firstName ?? null,
++      lastName: person.lastName ?? null,
++      companyName: person.companyName ?? null,
++      phone: person.phone ?? null,
++      source: "backfill",
++      isProspect: false,
++    },
++    update: {},
++    select: { id: true },
++  });
++  stats.created++;
++  return created.id;
++}
++
++async function ensureLink(
++  contactId: string,
++  person: Person,
++  stats: Stats,
++  dryRun: boolean,
++): Promise<void> {
++  if (!contactId || String(contactId).startsWith("dry-")) {
++    if (dryRun) stats.wouldLink++;
++    return;
++  }
++  const existing = await prisma.crmContactLink.findUnique({
++    where: {
++      contactId_subjectKind_subjectId: {
++        contactId,
++        subjectKind: person.subjectKind,
++        subjectId: person.subjectId,
++      },
++    },
++  });
++  if (existing) {
++    stats.linksExisting++;
++    return;
++  }
++  if (dryRun) {
++    stats.wouldLink++;
++    return;
++  }
++  try {
++    await prisma.crmContactLink.create({
++      data: {
++        contactId,
++        eventId: person.eventId ?? null,
++        subjectKind: person.subjectKind,
++        subjectId: person.subjectId,
++      },
++    });
++    stats.linksCreated++;
++  } catch (err) {
++    if (
++      typeof err === "object" &&
++      err !== null &&
++      "code" in err &&
++      (err as { code?: string }).code === "P2002"
++    ) {
++      stats.linksExisting++;
++      return;
++    }
++    throw err;
++  }
++}
++
++async function main() {
++  const { dryRun } = parseArgs(process.argv.slice(2));
++  assertNotProductionDatabase();
++  console.log(
++    dryRun
++      ? "CRM contact backfill — DRY RUN (pass --apply to write)"
++      : "CRM contact backfill — APPLY",
++  );
++
++  const org = await prisma.organization.findFirst({
++    orderBy: { createdAt: "asc" },
++    select: { id: true, name: true },
++  });
++  if (!org) {
++    console.error("No Organization row — aborting.");
++    process.exit(1);
++  }
++  console.log(`Organization: ${org.name} (${org.id})`);
++
++  const stats: Stats = {
++    created: 0,
++    existing: 0,
++    wouldCreate: 0,
++    wouldLink: 0,
++    linksCreated: 0,
++    linksExisting: 0,
++    skippedNoEmail: 0,
++    rowErrors: 0,
++    collisionsPersisted: 0,
++    collisions: [],
++  };
++
++  const people: Person[] = [];
++
++  const registrations = await prisma.registration.findMany({
++    select: {
++      id: true,
++      eventId: true,
++      email: true,
++      firstName: true,
++      lastName: true,
++      organization: true,
++      phone: true,
++    },
++  });
++  for (const r of registrations) {
++    people.push({
++      email: r.email,
++      firstName: r.firstName,
++      lastName: r.lastName,
++      companyName: r.organization,
++      phone: r.phone,
++      eventId: r.eventId,
++      subjectKind: "REGISTRATION",
++      subjectId: r.id,
++      source: "registration",
++    });
++  }
++
++  const speakers = await prisma.cfpSubmission.findMany({
++    select: {
++      id: true,
++      eventId: true,
++      email: true,
++      firstName: true,
++      lastName: true,
++      organization: true,
++    },
++  });
++  for (const s of speakers) {
++    people.push({
++      email: s.email,
++      firstName: s.firstName,
++      lastName: s.lastName,
++      companyName: s.organization,
++      eventId: s.eventId,
++      subjectKind: "SPEAKER",
++      subjectId: s.id,
++      source: "cfp",
++    });
++  }
++
++  // Decision #2: most recent sponsorship wins (no per-year links).
++  const sponsors = await prisma.sponsor.findMany({
++    select: {
++      id: true,
++      contactEmail: true,
++      contactName: true,
++      companyName: true,
++      contactPhone: true,
++      events: {
++        select: { eventId: true, createdAt: true },
++        orderBy: { createdAt: "desc" },
++        take: 1,
++      },
++    },
++  });
++  for (const s of sponsors) {
++    const nameParts = (s.contactName ?? "").trim().split(/\s+/);
++    people.push({
++      email: s.contactEmail,
++      firstName: nameParts[0] || null,
++      lastName: nameParts.slice(1).join(" ") || null,
++      companyName: s.companyName,
++      phone: s.contactPhone,
++      eventId: s.events[0]?.eventId ?? null,
++      subjectKind: "SPONSOR_CONTACT",
++      subjectId: s.id,
++      source: "sponsor",
++    });
++  }
++
++  const vendors = await prisma.vendor.findMany({
++    select: {
++      id: true,
++      eventId: true,
++      contactEmail: true,
++      contactName: true,
++      name: true,
++      contactPhone: true,
++    },
++  });
++  for (const v of vendors) {
++    const nameParts = (v.contactName ?? "").trim().split(/\s+/);
++    people.push({
++      email: v.contactEmail,
++      firstName: nameParts[0] || null,
++      lastName: nameParts.slice(1).join(" ") || null,
++      companyName: v.name,
++      phone: v.contactPhone,
++      eventId: v.eventId,
++      subjectKind: "VENDOR",
++      subjectId: v.id,
++      source: "vendor",
++    });
++  }
++
++  const volunteers = await prisma.volunteerSignup.findMany({
++    select: {
++      id: true,
++      eventId: true,
++      email: true,
++      name: true,
++      phone: true,
++    },
++  });
++  for (const v of volunteers) {
++    const nameParts = (v.name ?? "").trim().split(/\s+/);
++    people.push({
++      email: v.email,
++      firstName: nameParts[0] || null,
++      lastName: nameParts.slice(1).join(" ") || null,
++      phone: v.phone,
++      eventId: v.eventId,
++      subjectKind: "VOLUNTEER",
++      subjectId: v.id,
++      source: "volunteer",
++    });
++  }
++
++  console.log(`Subjects to process: ${people.length}`);
++
++  for (const person of people) {
++    try {
++      const contactId = await ensureContact(org.id, person, stats, dryRun);
++      if (contactId) {
++        await ensureLink(contactId, person, stats, dryRun);
++      }
++    } catch (rowErr) {
++      stats.rowErrors++;
++      console.error(
++        `Row error for ${person.subjectKind}/${person.subjectId} (continuing):`,
++        rowErr instanceof Error ? rowErr.message : rowErr,
++      );
++    }
++  }
++
++  console.log("\nSummary:");
++  console.log(
++    JSON.stringify(
++      {
++        dryRun,
++        created: stats.created,
++        existing: stats.existing,
++        wouldCreate: stats.wouldCreate,
++        wouldLink: stats.wouldLink,
++        linksCreated: stats.linksCreated,
++        linksExisting: stats.linksExisting,
++        skippedNoEmail: stats.skippedNoEmail,
++        rowErrors: stats.rowErrors,
++        collisionCount: stats.collisions.length,
++        collisionsPersisted: stats.collisionsPersisted,
++      },
++      null,
++      2,
++    ),
++  );
++
++  if (stats.collisions.length > 0) {
++    console.log("\nCollisions (manual review — not auto-merged):");
++    for (const c of stats.collisions.slice(0, 50)) {
++      console.log(
++        `  ${c.email}: existing="${c.existingName}" incoming="${c.incomingName}" (${c.source} ${c.subjectKind}/${c.subjectId})`,
++      );
++    }
++    if (stats.collisions.length > 50) {
++      console.log(`  … and ${stats.collisions.length - 50} more`);
++    }
++  }
++}
++
++main()
++  .catch((err) => {
++    console.error(err);
++    process.exit(1);
++  })
++  .finally(async () => {
++    await prisma.$disconnect();
++  });
+diff --git a/src/app/(admin)/organizer/events/[slug]/crm/actions.ts b/src/app/(admin)/organizer/events/[slug]/crm/actions.ts
+index 3b4780c..f31872d 100644
+--- a/src/app/(admin)/organizer/events/[slug]/crm/actions.ts
++++ b/src/app/(admin)/organizer/events/[slug]/crm/actions.ts
+@@ -28,6 +28,7 @@ import {
+   ensureCrmContact,
+   ensureCrmContactLink,
+   getSiteOrganizationId,
++  recordCrmContactCollision,
+ } from '@/lib/crm/contact-spine';
+ import {
+   planProspectCsvImport,
+@@ -35,6 +36,7 @@ import {
+   type ProspectCsvImportPlan,
+ } from '@/lib/crm/prospect-import';
+ import { enrichCrmContact } from '@/lib/crm/enrichment';
++import { partnerSelfLinkSubjectId } from '@/lib/crm/local-core';
+ 
+ const log = createLogger("slug-crm-actions");
+ 
+@@ -560,8 +562,10 @@ export async function previewProspectCsvAction(
+ }
+ 
+ /**
+- * #876 Apply prospect CSV after dry-run. Skips collision rows (never auto-merge).
+- * Creates CrmContact (isProspect) + optional PARTNER self-link for event scope.
++ * #876 Apply prospect CSV after dry-run. Never auto-merges name collisions —
++ * persists full payload to CrmContactCollision at apply time (#875 Step C).
++ * Creates CrmContact (isProspect) + event-scoped PARTNER self-link.
++ * Per-row isolation: one bad row does not abort the batch (#875 Step A).
+  */
+ export async function applyProspectCsvAction(
+   slug: string,
+@@ -575,6 +579,7 @@ export async function applyProspectCsvAction(
+       skipped: number;
+       collisions: number;
+       malformed: number;
++      rowErrors: number;
+     }
+   | { success: false; error: string }
+ > {
+@@ -630,54 +635,124 @@ export async function applyProspectCsvAction(
+     let skipped = 0;
+     let collisions = 0;
+     let malformed = 0;
++    let rowErrors = 0;
+ 
+     for (const row of plan.rows) {
+-      if (row.action === 'malformed') {
+-        malformed++;
+-        continue;
+-      }
+-      if (row.action === 'skip') {
+-        skipped++;
+-        continue;
+-      }
+-      if (row.action === 'collision') {
+-        collisions++;
+-        continue;
+-      }
++      try {
++        if (row.action === 'malformed') {
++          malformed++;
++          continue;
++        }
++        if (row.action === 'skip') {
++          skipped++;
++          continue;
++        }
++        if (row.action === 'collision') {
++          const prior = existingByEmail.get(row.prospect.email);
++          if (prior) {
++            await recordCrmContactCollision({
++              organizationId,
++              contactId: prior.id,
++              eventId: event.id,
++              source: 'import',
++              email: row.prospect.email,
++              firstName: row.prospect.firstName,
++              lastName: row.prospect.lastName,
++              phone: row.prospect.phone,
++              companyName: row.prospect.companyName,
++              jobTitle: row.prospect.jobTitle,
++              tags: row.prospect.tags,
++              roleHints: row.prospect.roleHints,
++              subjectKind: 'PARTNER',
++              subjectId: partnerSelfLinkSubjectId(prior.id, event.id),
++              payload: {
++                ...row.prospect,
++                lineNumber: row.lineNumber,
++                reason: row.reason ?? null,
++              },
++              existingFirstName: prior.firstName,
++              existingLastName: prior.lastName,
++              reason:
++                row.reason ?? `CSV import collision for ${row.prospect.email}`,
++            });
++          }
++          collisions++;
++          continue;
++        }
+ 
+-      const ensured = await ensureCrmContact({
+-        organizationId,
+-        email: row.prospect.email,
+-        firstName: row.prospect.firstName,
+-        lastName: row.prospect.lastName,
+-        companyName: row.prospect.companyName,
+-        jobTitle: row.prospect.jobTitle,
+-        phone: row.prospect.phone,
+-        tags: row.prospect.tags,
+-        roleHints: row.prospect.roleHints,
+-        source: 'import',
+-        isProspect: true,
+-      });
++        const ensured = await ensureCrmContact({
++          organizationId,
++          email: row.prospect.email,
++          firstName: row.prospect.firstName,
++          lastName: row.prospect.lastName,
++          companyName: row.prospect.companyName,
++          jobTitle: row.prospect.jobTitle,
++          phone: row.prospect.phone,
++          tags: row.prospect.tags,
++          roleHints: row.prospect.roleHints,
++          source: 'import',
++          isProspect: true,
++        });
++
++        if (ensured.status === 'invalid_email') {
++          malformed++;
++          continue;
++        }
++        if (ensured.status === 'collision') {
++          await recordCrmContactCollision({
++            organizationId,
++            contactId: ensured.contactId,
++            eventId: event.id,
++            source: 'import',
++            email: row.prospect.email,
++            firstName: row.prospect.firstName,
++            lastName: row.prospect.lastName,
++            phone: row.prospect.phone,
++            companyName: row.prospect.companyName,
++            jobTitle: row.prospect.jobTitle,
++            tags: row.prospect.tags,
++            roleHints: row.prospect.roleHints,
++            subjectKind: 'PARTNER',
++            subjectId: partnerSelfLinkSubjectId(ensured.contactId, event.id),
++            payload: {
++              ...row.prospect,
++              lineNumber: row.lineNumber,
++            },
++            existingFirstName: ensured.existingFirstName,
++            existingLastName: ensured.existingLastName,
++            reason: ensured.reason,
++          });
++          collisions++;
++          continue;
++        }
+ 
+-      if (ensured.status === 'invalid_email') {
+-        malformed++;
+-        continue;
+-      }
+-      if (ensured.status === 'collision') {
+-        collisions++;
+-        continue;
++        // Contact row is committed — count before link so a later link
++        // failure still reports accurate partial success.
++        if (row.action === 'create' || ensured.status === 'created') created++;
++        else linked++;
++
++        try {
++          // Event-scoped PARTNER self-link (#875 Step B).
++          await ensureCrmContactLink({
++            contactId: ensured.contactId,
++            eventId: event.id,
++            subjectKind: 'PARTNER',
++            subjectId: partnerSelfLinkSubjectId(ensured.contactId, event.id),
++          });
++        } catch (linkErr) {
++          rowErrors++;
++          log.error(
++            `applyProspectCsvAction link failed after contact persisted (continuing batch):`,
++            linkErr,
++          );
++        }
++      } catch (rowErr) {
++        rowErrors++;
++        log.error(
++          `applyProspectCsvAction row failed (continuing batch):`,
++          rowErr,
++        );
+       }
+-
+-      // Self-link as PARTNER so the contact appears on this event's people list.
+-      await ensureCrmContactLink({
+-        contactId: ensured.contactId,
+-        eventId: event.id,
+-        subjectKind: 'PARTNER',
+-        subjectId: ensured.contactId,
+-      });
+-
+-      if (row.action === 'create' || ensured.status === 'created') created++;
+-      else linked++;
+     }
+ 
+     refreshCrm(slug);
+@@ -688,6 +763,7 @@ export async function applyProspectCsvAction(
+       skipped,
+       collisions,
+       malformed,
++      rowErrors,
+     };
+   } catch (error) {
+     log.error('applyProspectCsvAction failed:', error);
+@@ -698,6 +774,147 @@ export async function applyProspectCsvAction(
+   }
+ }
+ 
++/**
++ * #875 Phase 1.1: accept a PENDING CrmContactCollision — create the deferred
++ * PARTNER (or subject) link from the stored snapshot; status → ACCEPTED.
++ */
++export async function acceptCrmContactCollisionAction(
++  slug: string,
++  collisionId: string,
++): Promise<ActionResult> {
++  try {
++    const clerkUserId = await requireAdmin();
++    const event = await resolveEventBySlug(slug);
++    if (!event) return { success: false, error: 'Event not found' };
++    if (!collisionId || typeof collisionId !== 'string') {
++      return { success: false, error: 'Collision id required' };
++    }
++
++    const organizationId = await getSiteOrganizationId();
++    if (!organizationId) {
++      return { success: false, error: 'Site Organization is not configured' };
++    }
++
++    // Scope to this organizer event URL — do not accept another event's row.
++    const collision = await prisma.crmContactCollision.findFirst({
++      where: {
++        id: collisionId,
++        organizationId,
++        OR: [{ eventId: event.id }, { eventId: null }],
++      },
++    });
++    if (!collision) return { success: false, error: 'Collision not found' };
++    if (collision.status !== 'PENDING') {
++      return { success: false, error: `Collision is already ${collision.status}` };
++    }
++
++    const resolveEventId = collision.eventId ?? event.id;
++    const subjectKind = collision.subjectKind ?? 'PARTNER';
++    const subjectId =
++      collision.subjectId ??
++      (subjectKind === 'PARTNER'
++        ? partnerSelfLinkSubjectId(collision.contactId, resolveEventId)
++        : collision.contactId);
++
++    await ensureCrmContactLink({
++      contactId: collision.contactId,
++      eventId: resolveEventId,
++      subjectKind,
++      subjectId,
++    });
++
++    // For import collisions the contact may not yet carry incoming snapshot
++    // fields — non-destructively fill blanks from the stored row.
++    await ensureCrmContact({
++      organizationId,
++      email: collision.email,
++      firstName: collision.firstName,
++      lastName: collision.lastName,
++      phone: collision.phone,
++      companyName: collision.companyName,
++      jobTitle: collision.jobTitle,
++      tags: collision.tags,
++      roleHints: collision.roleHints,
++      source: 'import',
++      isProspect: true,
++      suppressNameCollision: true,
++    });
++
++    await prisma.crmContactCollision.update({
++      where: { id: collision.id },
++      data: {
++        status: 'ACCEPTED',
++        resolvedAt: new Date(),
++        resolvedByClerkId: clerkUserId,
++      },
++    });
++
++    refreshCrm(slug);
++    return { success: true, message: 'Collision accepted and linked', id: collision.id };
++  } catch (error) {
++    log.error('acceptCrmContactCollisionAction failed:', error);
++    return {
++      success: false,
++      error: error instanceof Error ? error.message : 'Accept failed',
++    };
++  }
++}
++
++/**
++ * #875 Phase 1.1: reject a PENDING CrmContactCollision — status only.
++ * Does not create a second contact for "two humans one email".
++ */
++export async function rejectCrmContactCollisionAction(
++  slug: string,
++  collisionId: string,
++): Promise<ActionResult> {
++  try {
++    const clerkUserId = await requireAdmin();
++    const event = await resolveEventBySlug(slug);
++    if (!event) return { success: false, error: 'Event not found' };
++    if (!collisionId || typeof collisionId !== 'string') {
++      return { success: false, error: 'Collision id required' };
++    }
++
++    const organizationId = await getSiteOrganizationId();
++    if (!organizationId) {
++      return { success: false, error: 'Site Organization is not configured' };
++    }
++
++    // Scope to this organizer event URL — do not reject another event's row.
++    const collision = await prisma.crmContactCollision.findFirst({
++      where: {
++        id: collisionId,
++        organizationId,
++        OR: [{ eventId: event.id }, { eventId: null }],
++      },
++      select: { id: true, status: true },
++    });
++    if (!collision) return { success: false, error: 'Collision not found' };
++    if (collision.status !== 'PENDING') {
++      return { success: false, error: `Collision is already ${collision.status}` };
++    }
++
++    await prisma.crmContactCollision.update({
++      where: { id: collision.id },
++      data: {
++        status: 'REJECTED',
++        resolvedAt: new Date(),
++        resolvedByClerkId: clerkUserId,
++      },
++    });
++
++    refreshCrm(slug);
++    return { success: true, message: 'Collision rejected', id: collision.id };
++  } catch (error) {
++    log.error('rejectCrmContactCollisionAction failed:', error);
++    return {
++      success: false,
++      error: error instanceof Error ? error.message : 'Reject failed',
++    };
++  }
++}
++
+ // ── #1250 CRM contact enrichment ───────────────────────────────────────
+ 
+ /**
+diff --git a/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx b/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx
+index 627a912..e17eaf8 100644
+--- a/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx
++++ b/src/app/(admin)/organizer/events/[slug]/crm/import/import-form.tsx
+@@ -65,7 +65,9 @@ export default function ProspectImportForm({ slug }: { slug: string }) {
+         return;
+       }
+       setApplyResult(
+-        `Imported: ${res.created} created, ${res.linked} linked/updated, ${res.skipped} skipped, ${res.collisions} collisions left for review, ${res.malformed} malformed.`,
++        `Imported: ${res.created} created, ${res.linked} linked/updated, ${res.skipped} skipped, ${res.collisions} collisions left for review, ${res.malformed} malformed` +
++          (res.rowErrors > 0 ? `, ${res.rowErrors} row errors (partial success)` : '') +
++          '.',
+       );
+     });
+   }
+diff --git a/src/app/(public)/events/[eventSlug]/register/actions.ts b/src/app/(public)/events/[eventSlug]/register/actions.ts
+index cffc61a..c3b75ba 100644
+--- a/src/app/(public)/events/[eventSlug]/register/actions.ts
++++ b/src/app/(public)/events/[eventSlug]/register/actions.ts
+@@ -413,6 +413,50 @@ export async function createRegistration(
+       log.error('Imported registration claim failed (registration still complete):', claimError instanceof Error ? claimError.name : 'unknown');
+     }
+ 
++    // #875 Phase 1.1 Step E: best-effort CRM spine AFTER the response is
++    // sent — never await upserts/links/enrichment on the payment path.
++    try {
++      const spineRegistration = {
++        id: registration.id,
++        email: registration.email,
++        eventId: registration.eventId,
++        firstName: registration.firstName,
++        lastName: registration.lastName,
++        organization: registration.organization,
++        phone: registration.phone,
++        ticketTypeId: registration.ticketTypeId,
++      };
++      const { scheduleCrmContactSpineWork } = await import(
++        '@/lib/crm/contact-spine'
++      );
++      scheduleCrmContactSpineWork(async () => {
++        const { linkSubjectToContactByEmail } = await import(
++          '@/lib/crm/contact-spine'
++        );
++        await linkSubjectToContactByEmail({
++          email: spineRegistration.email,
++          eventId: spineRegistration.eventId,
++          subjectKind: 'REGISTRATION',
++          subjectId: spineRegistration.id,
++          firstName: spineRegistration.firstName,
++          lastName: spineRegistration.lastName,
++          companyName: spineRegistration.organization,
++          phone: spineRegistration.phone,
++          source: 'registration',
++          collisionSource: 'registration',
++          collisionPayload: {
++            registrationId: spineRegistration.id,
++            ticketTypeId: spineRegistration.ticketTypeId,
++          },
++        });
++      }, 'CRM contact link after registration');
++    } catch (crmLinkError) {
++      log.error(
++        'CRM contact schedule after registration failed (registration still complete):',
++        crmLinkError instanceof Error ? crmLinkError.name : 'unknown',
++      );
++    }
++
+     if (finalPrice === 0) {
+       await notifySlackRegistrationConfirmed({
+         eventId: registration.eventId,
+@@ -768,6 +812,50 @@ export async function requestInvoiceRegistration(
+ 
+     // #200: evidence on first create only (idempotent requestKey replay skips).
+     if (createdFresh) {
++      // #875 Phase 1.1 Step E: schedule CRM link after response (non-blocking).
++      if (result.registrationId) {
++        const registrationId = result.registrationId;
++        const { scheduleCrmContactSpineWork } = await import(
++          '@/lib/crm/contact-spine'
++        );
++        scheduleCrmContactSpineWork(async () => {
++          const { linkSubjectToContactByEmail } = await import(
++            '@/lib/crm/contact-spine'
++          );
++          const regForCrm = await prisma.registration.findUnique({
++            where: { id: registrationId },
++            select: {
++              id: true,
++              eventId: true,
++              email: true,
++              firstName: true,
++              lastName: true,
++              organization: true,
++              phone: true,
++              ticketTypeId: true,
++            },
++          });
++          if (!regForCrm) return;
++          await linkSubjectToContactByEmail({
++            email: regForCrm.email,
++            eventId: regForCrm.eventId,
++            subjectKind: 'REGISTRATION',
++            subjectId: regForCrm.id,
++            firstName: regForCrm.firstName,
++            lastName: regForCrm.lastName,
++            companyName: regForCrm.organization,
++            phone: regForCrm.phone,
++            source: 'registration',
++            collisionSource: 'registration',
++            collisionPayload: {
++              registrationId: regForCrm.id,
++              ticketTypeId: regForCrm.ticketTypeId,
++              paymentMethod: 'INVOICE',
++            },
++          });
++        }, 'CRM contact link after invoice registration');
++      }
++
+       const eventForConsent = await prisma.event.findUnique({
+         where: { id: input.eventId },
+         select: { name: true },
+diff --git a/src/app/(public)/events/[eventSlug]/register/group/actions.ts b/src/app/(public)/events/[eventSlug]/register/group/actions.ts
+index e36f90f..20dc2c4 100644
+--- a/src/app/(public)/events/[eventSlug]/register/group/actions.ts
++++ b/src/app/(public)/events/[eventSlug]/register/group/actions.ts
+@@ -326,8 +326,61 @@ export async function createGroupOrder(input: CreateGroupOrderInput) {
+         groupOrderId: groupOrder.id,
+         accessToken: groupOrder.accessToken,
+         invoiceToken,
++        purchaserEmail: email,
+       };
+     });
++
++    // #875 Phase 1.1 Step E: schedule group CRM linking after the response —
++    // never await spine work on the payment/order critical path.
++    try {
++      const groupOrderId = result.groupOrderId;
++      const purchaserEmail = result.purchaserEmail;
++      const eventId = input.eventId;
++      const { scheduleCrmContactSpineWork } = await import(
++        "@/lib/crm/contact-spine"
++      );
++      scheduleCrmContactSpineWork(async () => {
++        const seats = await prisma.groupSeat.findMany({
++          where: { groupOrderId },
++          select: {
++            registration: {
++              select: {
++                id: true,
++                firstName: true,
++                lastName: true,
++                email: true,
++                organization: true,
++                phone: true,
++              },
++            },
++          },
++        });
++        const { linkGroupRegistrationsToContact } = await import(
++          "@/lib/crm/contact-spine"
++        );
++        await linkGroupRegistrationsToContact({
++          eventId,
++          orderKey: groupOrderId,
++          email: purchaserEmail,
++          seats: seats
++            .filter((s) => s.registration)
++            .map((s) => ({
++              registrationId: s.registration!.id,
++              firstName: s.registration!.firstName,
++              lastName: s.registration!.lastName,
++              companyName: s.registration!.organization,
++              phone: s.registration!.phone,
++            })),
++          source: "group_registration",
++        });
++      }, "CRM contact link after group order");
++    } catch (crmLinkError) {
++      log.error(
++        "CRM contact schedule after group order failed (order still complete):",
++        crmLinkError instanceof Error ? crmLinkError.name : "unknown",
++      );
++    }
++
+     if (amountCents === 0) {
+       await notifySlackRegistrationConfirmed({
+         eventId: input.eventId,
+@@ -468,6 +521,68 @@ export async function claimGroupSeat(
+       };
+     });
+ 
++    // #875 Phase 1.1 Step E: re-link claimant identity after seat claim.
++    // Suppress collisions when another seat on the same group order already
++    // shares this email (normal group-purchase shape).
++    try {
++      const registrationId = result.registrationId;
++      const eventId = result.eventId;
++      const claimEmail = email;
++      const claimFirstName = firstName;
++      const claimLastName = lastName;
++      const { scheduleCrmContactSpineWork } = await import(
++        "@/lib/crm/contact-spine"
++      );
++      scheduleCrmContactSpineWork(async () => {
++        const seatRow = await prisma.groupSeat.findFirst({
++          where: { registrationId },
++          select: {
++            groupOrderId: true,
++            groupOrder: {
++              select: {
++                seats: {
++                  where: { registrationId: { not: registrationId } },
++                  select: {
++                    registration: { select: { email: true } },
++                  },
++                },
++              },
++            },
++          },
++        });
++        const siblingEmails = new Set(
++          (seatRow?.groupOrder.seats ?? [])
++            .map((s) => s.registration?.email?.trim().toLowerCase())
++            .filter((e): e is string => Boolean(e)),
++        );
++        const suppressNameCollision = siblingEmails.has(claimEmail);
++        const { linkSubjectToContactByEmail } = await import(
++          "@/lib/crm/contact-spine"
++        );
++        await linkSubjectToContactByEmail({
++          email: claimEmail,
++          eventId,
++          subjectKind: "REGISTRATION",
++          subjectId: registrationId,
++          firstName: claimFirstName,
++          lastName: claimLastName,
++          source: "group_registration",
++          collisionSource: "group_registration",
++          collisionPayload: {
++            registrationId,
++            groupOrderId: seatRow?.groupOrderId ?? null,
++            via: "seat_claim",
++          },
++          suppressNameCollision,
++        });
++      }, "CRM contact link after group seat claim");
++    } catch (crmLinkError) {
++      log.error(
++        "CRM contact link after group seat claim failed (claim still complete):",
++        crmLinkError instanceof Error ? crmLinkError.name : "unknown",
++      );
++    }
++
+     // #200: consent evidence after successful claim; never fails the seat.
+     const eventForConsent = await prisma.event.findUnique({
+       where: { id: result.eventId },
+diff --git a/src/app/api/v1/events/[slug]/registrations/route.ts b/src/app/api/v1/events/[slug]/registrations/route.ts
+index 31cb4b9..b2e6fd7 100644
+--- a/src/app/api/v1/events/[slug]/registrations/route.ts
++++ b/src/app/api/v1/events/[slug]/registrations/route.ts
+@@ -303,23 +303,39 @@ export async function POST(
+         })
+       : await prisma.registration.create({ data: registrationData });
+ 
+-    // #876: link registration to org CrmContact (same identity as CSV prospects).
+-    try {
+-      const { linkSubjectToContactByEmail } = await import(
+-        '@/lib/crm/contact-spine'
+-      );
+-      await linkSubjectToContactByEmail({
++    // #876 / #875 E: schedule CRM link after the response — never block create.
++    {
++      const spineRegistration = {
++        id: registration.id,
+         email: registration.email,
+         eventId: event.id,
+-        subjectKind: 'REGISTRATION',
+-        subjectId: registration.id,
+         firstName: registration.firstName,
+         lastName: registration.lastName,
+-        companyName: registration.organization,
+-        source: 'registration',
+-      });
+-    } catch (linkErr) {
+-      log.error('crm contact link after registration failed:', linkErr);
++        organization: registration.organization,
++      };
++      const { scheduleCrmContactSpineWork } = await import(
++        '@/lib/crm/contact-spine'
++      );
++      scheduleCrmContactSpineWork(async () => {
++        const { linkSubjectToContactByEmail } = await import(
++          '@/lib/crm/contact-spine'
++        );
++        await linkSubjectToContactByEmail({
++          email: spineRegistration.email,
++          eventId: spineRegistration.eventId,
++          subjectKind: 'REGISTRATION',
++          subjectId: spineRegistration.id,
++          firstName: spineRegistration.firstName,
++          lastName: spineRegistration.lastName,
++          companyName: spineRegistration.organization,
++          source: 'registration',
++          collisionSource: 'registration_api',
++          collisionPayload: {
++            registrationId: spineRegistration.id,
++            via: 'api_v1',
++          },
++        });
++      }, 'crm contact link after registration API');
+     }
+ 
+     if (registration.status === RegistrationStatus.CONFIRMED) {
+diff --git a/src/lib/crm/contact-spine-fingerprint.ts b/src/lib/crm/contact-spine-fingerprint.ts
+new file mode 100644
+index 0000000..edd634b
+--- /dev/null
++++ b/src/lib/crm/contact-spine-fingerprint.ts
+@@ -0,0 +1,35 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++import { createHash } from "node:crypto";
++
++/**
++ * Deterministic fingerprint for CrmContactCollision upsert dedupe.
++ * source + email + subjectKind + subjectId + normalized names (+ eventId).
++ * Pure helper — safe for scripts and unit tests (no server-only).
++ */
++export function buildCrmCollisionSourceFingerprint(input: {
++  source: string;
++  email: string;
++  subjectKind?: string | null;
++  subjectId?: string | null;
++  firstName?: string | null;
++  lastName?: string | null;
++  eventId?: string | null;
++}): string {
++  const norm = (v: string | null | undefined) =>
++    (v ?? "").trim().toLowerCase();
++  const material = [
++    input.source,
++    norm(input.email),
++    input.subjectKind ?? "",
++    input.subjectId ?? "",
++    norm(input.firstName),
++    norm(input.lastName),
++    input.eventId ?? "",
++  ].join("|");
++  return createHash("sha256").update(material).digest("hex");
++}
+diff --git a/src/lib/crm/contact-spine.ts b/src/lib/crm/contact-spine.ts
+index c1a833e..2e68a6b 100644
+--- a/src/lib/crm/contact-spine.ts
++++ b/src/lib/crm/contact-spine.ts
+@@ -6,14 +6,49 @@
+ 
+ import "server-only";
+ 
++import { after } from "next/server";
+ import { prisma } from "@/lib/db";
+-import type { CrmSubjectKind } from "@prisma/client";
++import type { CrmSubjectKind, Prisma } from "@prisma/client";
+ import {
+   crmNameCollision,
+   normalizeCrmEmail,
+   personDisplayName,
+ } from "@/lib/crm/local-core";
+ import { enrichCrmContactSafe } from "@/lib/crm/enrichment";
++import { createLogger } from "@/lib/logger";
++import { buildCrmCollisionSourceFingerprint } from "@/lib/crm/contact-spine-fingerprint";
++
++export { buildCrmCollisionSourceFingerprint } from "@/lib/crm/contact-spine-fingerprint";
++
++const log = createLogger("crm/contact-spine");
++
++/**
++ * Schedule CRM spine work after the HTTP response / Server Action result is
++ * sent. Registration and payment paths must never await contact upserts,
++ * links, collisions, or enrichment on the user-facing critical path (#875 E).
++ *
++ * Never throws into the caller. Falls back to a microtask when `after()` is
++ * unavailable (unit tests / non-request contexts).
++ */
++export function scheduleCrmContactSpineWork(
++  work: () => Promise<void>,
++  label = "CRM contact spine",
++): void {
++  const run = () => {
++    void work().catch((err) => {
++      log.error(
++        `${label} failed (non-blocking):`,
++        err instanceof Error ? err.name : "unknown",
++      );
++    });
++  };
++
++  try {
++    after(run);
++  } catch {
++    queueMicrotask(run);
++  }
++}
+ 
+ /**
+  * Resolve the singleton Organization row for this deployment.
+@@ -41,6 +76,11 @@ export type EnsureContactInput = {
+   roleHints?: string[];
+   /** When true, do not create — only return existing or collision. */
+   dryRun?: boolean;
++  /**
++   * Skip crmNameCollision (group-order shared email). Runs before the
++   * predicate; link/create still proceeds.
++   */
++  suppressNameCollision?: boolean;
+ };
+ 
+ export type EnsureContactResult =
+@@ -49,11 +89,100 @@ export type EnsureContactResult =
+       status: "collision";
+       contactId: string;
+       reason: string;
++      existingFirstName?: string | null;
++      existingLastName?: string | null;
+     }
+   | { status: "invalid_email" };
+ 
++function isUniqueConflict(err: unknown): boolean {
++  return (
++    typeof err === "object" &&
++    err !== null &&
++    "code" in err &&
++    (err as { code?: string }).code === "P2002"
++  );
++}
++
++function mergeStringArrays(
++  existing: string[] | null | undefined,
++  incoming: string[] | null | undefined,
++  cap: number,
++): string[] {
++  return Array.from(new Set([...(existing ?? []), ...(incoming ?? [])])).slice(
++    0,
++    cap,
++  );
++}
++
++function buildUpdateData(
++  existing: {
++    firstName: string | null;
++    lastName: string | null;
++    phone: string | null;
++    companyName: string | null;
++    jobTitle: string | null;
++    tags: string[];
++    roleHints: string[];
++    isProspect: boolean;
++  },
++  input: EnsureContactInput,
++): {
++  firstName?: string;
++  lastName?: string;
++  phone?: string;
++  companyName?: string;
++  jobTitle?: string;
++  tags?: string[];
++  roleHints?: string[];
++  isProspect?: boolean;
++} {
++  const tags = mergeStringArrays(existing.tags, input.tags, 40);
++  const roleHints = mergeStringArrays(existing.roleHints, input.roleHints, 20);
++  const data: {
++    firstName?: string;
++    lastName?: string;
++    phone?: string;
++    companyName?: string;
++    jobTitle?: string;
++    tags?: string[];
++    roleHints?: string[];
++    isProspect?: boolean;
++  } = {};
++  if (!existing.firstName && input.firstName) data.firstName = input.firstName;
++  if (!existing.lastName && input.lastName) data.lastName = input.lastName;
++  if (!existing.phone && input.phone) data.phone = input.phone;
++  if (!existing.companyName && input.companyName) {
++    data.companyName = input.companyName;
++  }
++  if (!existing.jobTitle && input.jobTitle) data.jobTitle = input.jobTitle;
++  if (tags.length !== (existing.tags?.length ?? 0)) data.tags = tags;
++  if (roleHints.length !== (existing.roleHints?.length ?? 0)) {
++    data.roleHints = roleHints;
++  }
++  if (existing.isProspect && input.isProspect === false) {
++    data.isProspect = false;
++  }
++  return data;
++}
++
++type LockedCrmContactRow = {
++  id: string;
++  firstName: string | null;
++  lastName: string | null;
++  phone: string | null;
++  companyName: string | null;
++  jobTitle: string | null;
++  tags: string[];
++  roleHints: string[];
++  isProspect: boolean;
++};
++
+ /**
+- * Find-or-create CrmContact by org+email. NEVER auto-merges on name collision.
++ * Find-or-create CrmContact by org+email.
++ * Create path uses insert + P2002 retry (reliable created vs existing).
++ * Update path locks the row (SELECT … FOR UPDATE) then unions tags/roleHints
++ * so concurrent enrichers cannot clobber each other's array additions.
++ * NEVER auto-merges on name collision.
+  */
+ export async function ensureCrmContact(
+   input: EnsureContactInput,
+@@ -61,109 +190,126 @@ export async function ensureCrmContact(
+   const email = normalizeCrmEmail(input.email);
+   if (!email) return { status: "invalid_email" };
+ 
+-  const existing = await prisma.crmContact.findUnique({
+-    where: {
+-      organizationId_email: {
+-        organizationId: input.organizationId,
+-        email,
+-      },
++  const whereUnique = {
++    organizationId_email: {
++      organizationId: input.organizationId,
++      email,
+     },
+-  });
++  } as const;
+ 
+-  if (existing) {
+-    if (
+-      crmNameCollision(existing, {
+-        firstName: input.firstName,
+-        lastName: input.lastName,
+-        companyName: input.companyName,
+-      })
+-    ) {
+-      return {
+-        status: "collision",
+-        contactId: existing.id,
+-        reason: `Collision: existing "${personDisplayName(existing)}" vs incoming "${personDisplayName(
+-          {
+-            firstName: input.firstName,
+-            lastName: input.lastName,
+-            companyName: input.companyName,
+-            email,
++  for (let attempt = 0; attempt < 4; attempt++) {
++    const existing = await prisma.crmContact.findUnique({
++      where: whereUnique,
++    });
++
++    if (existing) {
++      if (
++        !input.suppressNameCollision &&
++        crmNameCollision(existing, {
++          firstName: input.firstName,
++          lastName: input.lastName,
++          companyName: input.companyName,
++        })
++      ) {
++        return {
++          status: "collision",
++          contactId: existing.id,
++          reason: `Collision: existing "${personDisplayName(existing)}" vs incoming "${personDisplayName(
++            {
++              firstName: input.firstName,
++              lastName: input.lastName,
++              companyName: input.companyName,
++              email,
++            },
++          )}"`,
++          existingFirstName: existing.firstName,
++          existingLastName: existing.lastName,
++        };
++      }
++
++      if (input.dryRun) {
++        return { status: "existing", contactId: existing.id };
++      }
++
++      const merged = await prisma.$transaction(async (tx) => {
++        // Serialize concurrent array merges on this contact row.
++        const locked = await tx.$queryRaw<Array<{ id: string }>>`
++          SELECT id FROM "CrmContact" WHERE id = ${existing.id} FOR UPDATE
++        `;
++        if (locked.length === 0) return null;
++
++        const row = await tx.crmContact.findUnique({
++          where: { id: existing.id },
++          select: {
++            id: true,
++            firstName: true,
++            lastName: true,
++            phone: true,
++            companyName: true,
++            jobTitle: true,
++            tags: true,
++            roleHints: true,
++            isProspect: true,
+           },
+-        )}"`,
+-      };
+-    }
++        });
++        if (!row) return null;
+ 
+-    if (input.dryRun) {
+-      return { status: "existing", contactId: existing.id };
+-    }
++        const data = buildUpdateData(row as LockedCrmContactRow, input);
++        if (Object.keys(data).length === 0) {
++          return { status: "existing" as const, contactId: row.id };
++        }
++        await tx.crmContact.update({
++          where: { id: row.id },
++          data,
++        });
++        return { status: "updated" as const, contactId: row.id };
++      });
+ 
+-    // Non-destructive enrich: fill blanks + merge tags/hints.
+-    const tags = Array.from(
+-      new Set([...(existing.tags ?? []), ...(input.tags ?? [])]),
+-    ).slice(0, 40);
+-    const roleHints = Array.from(
+-      new Set([...(existing.roleHints ?? []), ...(input.roleHints ?? [])]),
+-    ).slice(0, 20);
+-
+-    const data: {
+-      firstName?: string;
+-      lastName?: string;
+-      phone?: string;
+-      companyName?: string;
+-      jobTitle?: string;
+-      tags?: string[];
+-      roleHints?: string[];
+-      isProspect?: boolean;
+-    } = {};
+-    if (!existing.firstName && input.firstName) data.firstName = input.firstName;
+-    if (!existing.lastName && input.lastName) data.lastName = input.lastName;
+-    if (!existing.phone && input.phone) data.phone = input.phone;
+-    if (!existing.companyName && input.companyName) {
+-      data.companyName = input.companyName;
+-    }
+-    if (!existing.jobTitle && input.jobTitle) data.jobTitle = input.jobTitle;
+-    if (tags.length !== (existing.tags?.length ?? 0)) data.tags = tags;
+-    if (roleHints.length !== (existing.roleHints?.length ?? 0)) {
+-      data.roleHints = roleHints;
++      if (merged === null) continue;
++      return merged;
+     }
+-    // Once someone has a non-prospect link path, keep isProspect false.
+-    if (existing.isProspect && input.isProspect === false) {
+-      data.isProspect = false;
++
++    if (input.dryRun) {
++      return { status: "created", contactId: "dry-run" };
+     }
+ 
+-    if (Object.keys(data).length > 0) {
+-      await prisma.crmContact.update({
+-        where: { id: existing.id },
+-        data,
++    try {
++      const created = await prisma.crmContact.create({
++        data: {
++          organizationId: input.organizationId,
++          email,
++          firstName: input.firstName ?? null,
++          lastName: input.lastName ?? null,
++          phone: input.phone ?? null,
++          companyName: input.companyName ?? null,
++          jobTitle: input.jobTitle ?? null,
++          source: input.source ?? null,
++          isProspect: input.isProspect ?? false,
++          tags: input.tags ?? [],
++          roleHints: input.roleHints ?? [],
++        },
++        select: { id: true },
+       });
+-      return { status: "updated", contactId: existing.id };
++      await enrichCrmContactSafe(created.id);
++      return { status: "created", contactId: created.id };
++    } catch (err) {
++      // Concurrent create won the unique key — retry as the existing path.
++      if (!isUniqueConflict(err)) throw err;
++      continue;
+     }
+-    return { status: "existing", contactId: existing.id };
+-  }
+-
+-  if (input.dryRun) {
+-    return { status: "created", contactId: "dry-run" };
+   }
+ 
+-  const created = await prisma.crmContact.create({
+-    data: {
+-      organizationId: input.organizationId,
+-      email,
+-      firstName: input.firstName ?? null,
+-      lastName: input.lastName ?? null,
+-      phone: input.phone ?? null,
+-      companyName: input.companyName ?? null,
+-      jobTitle: input.jobTitle ?? null,
+-      source: input.source ?? null,
+-      isProspect: input.isProspect ?? false,
+-      tags: input.tags ?? [],
+-      roleHints: input.roleHints ?? [],
+-    },
++  // Exhausted retries: final read so callers still get a contactId.
++  const fallback = await prisma.crmContact.findUnique({
++    where: whereUnique,
+     select: { id: true },
+   });
+-  // #1250: every new contact is enriched in the DB (provider is a stub today).
+-  // Safe wrapper never throws into the create path.
+-  await enrichCrmContactSafe(created.id);
+-  return { status: "created", contactId: created.id };
++  if (fallback) {
++    return { status: "existing", contactId: fallback.id };
++  }
++  throw new Error(
++    `ensureCrmContact failed to resolve contact for ${email} after retries`,
++  );
+ }
+ 
+ /**
+@@ -188,22 +334,124 @@ export async function ensureCrmContactLink(input: {
+   });
+   if (existing) return "existing";
+   if (input.dryRun) return "created";
+-  await prisma.crmContactLink.create({
+-    data: {
+-      contactId: input.contactId,
+-      eventId: input.eventId ?? null,
+-      subjectKind: input.subjectKind,
+-      subjectId: input.subjectId,
+-    },
+-  });
+-  return "created";
++  try {
++    await prisma.crmContactLink.create({
++      data: {
++        contactId: input.contactId,
++        eventId: input.eventId ?? null,
++        subjectKind: input.subjectKind,
++        subjectId: input.subjectId,
++      },
++    });
++    return "created";
++  } catch (err) {
++    if (isUniqueConflict(err)) return "existing";
++    throw err;
++  }
+ }
+ 
++export type RecordCollisionInput = {
++  organizationId: string;
++  contactId: string;
++  eventId?: string | null;
++  source: string;
++  email: string;
++  firstName?: string | null;
++  lastName?: string | null;
++  phone?: string | null;
++  companyName?: string | null;
++  jobTitle?: string | null;
++  tags?: string[];
++  roleHints?: string[];
++  subjectKind?: CrmSubjectKind | null;
++  subjectId?: string | null;
++  payload?: Prisma.InputJsonValue;
++  existingFirstName?: string | null;
++  existingLastName?: string | null;
++  reason: string;
++};
++
+ /**
+- * After a registration/sponsorship lands, attach it to the org contact for
+- * that email so imported prospects and later transactions share one identity.
++ * Persist a collision row immediately via upsert on sourceFingerprint.
++ * Never throws into payment/registration success paths when swallowErrors.
+  */
+-export async function linkSubjectToContactByEmail(input: {
++export async function recordCrmContactCollision(
++  input: RecordCollisionInput,
++  options?: { swallowErrors?: boolean },
++): Promise<{ id: string } | null> {
++  const email = normalizeCrmEmail(input.email) ?? input.email.trim().toLowerCase();
++  const sourceFingerprint = buildCrmCollisionSourceFingerprint({
++    source: input.source,
++    email,
++    subjectKind: input.subjectKind,
++    subjectId: input.subjectId,
++    firstName: input.firstName,
++    lastName: input.lastName,
++    eventId: input.eventId,
++  });
++
++  try {
++    const row = await prisma.crmContactCollision.upsert({
++      where: {
++        organizationId_sourceFingerprint: {
++          organizationId: input.organizationId,
++          sourceFingerprint,
++        },
++      },
++      create: {
++        organizationId: input.organizationId,
++        contactId: input.contactId,
++        eventId: input.eventId ?? null,
++        source: input.source,
++        sourceFingerprint,
++        email,
++        firstName: input.firstName ?? null,
++        lastName: input.lastName ?? null,
++        phone: input.phone ?? null,
++        companyName: input.companyName ?? null,
++        jobTitle: input.jobTitle ?? null,
++        tags: input.tags ?? [],
++        roleHints: input.roleHints ?? [],
++        subjectKind: input.subjectKind ?? null,
++        subjectId: input.subjectId ?? null,
++        payload: input.payload ?? undefined,
++        existingFirstName: input.existingFirstName ?? null,
++        existingLastName: input.existingLastName ?? null,
++        reason: input.reason,
++        status: "PENDING",
++      },
++      update: {
++        // Refresh snapshot on re-detect; do not reopen ACCEPTED/REJECTED.
++        contactId: input.contactId,
++        eventId: input.eventId ?? null,
++        email,
++        firstName: input.firstName ?? null,
++        lastName: input.lastName ?? null,
++        phone: input.phone ?? null,
++        companyName: input.companyName ?? null,
++        jobTitle: input.jobTitle ?? null,
++        tags: input.tags ?? [],
++        roleHints: input.roleHints ?? [],
++        subjectKind: input.subjectKind ?? null,
++        subjectId: input.subjectId ?? null,
++        payload: input.payload ?? undefined,
++        existingFirstName: input.existingFirstName ?? null,
++        existingLastName: input.existingLastName ?? null,
++        reason: input.reason,
++      },
++      select: { id: true, status: true },
++    });
++    return { id: row.id };
++  } catch (err) {
++    if (options?.swallowErrors) {
++      log.error("recordCrmContactCollision failed:", err);
++      return null;
++    }
++    throw err;
++  }
++}
++
++export type LinkSubjectInput = {
+   email: string | null | undefined;
+   eventId: string;
+   subjectKind: CrmSubjectKind;
+@@ -212,8 +460,28 @@ export async function linkSubjectToContactByEmail(input: {
+   lastName?: string | null;
+   companyName?: string | null;
+   phone?: string | null;
++  jobTitle?: string | null;
++  tags?: string[];
++  roleHints?: string[];
+   source?: string;
+-}): Promise<{ contactId: string | null; status: string }> {
++  /** Collision source label written when a name collision is detected. */
++  collisionSource?: string;
++  /** Full payload snapshot for the collision table. */
++  collisionPayload?: Prisma.InputJsonValue;
++  /**
++   * When true, skip crmNameCollision and do not write a collision row.
++   * Used for group orders that share one email across differently named seats.
++   */
++  suppressNameCollision?: boolean;
++};
++
++/**
++ * After a registration/sponsorship lands, attach it to the org contact for
++ * that email so imported prospects and later transactions share one identity.
++ */
++export async function linkSubjectToContactByEmail(
++  input: LinkSubjectInput,
++): Promise<{ contactId: string | null; status: string }> {
+   const organizationId = await getSiteOrganizationId();
+   if (!organizationId) {
+     return { contactId: null, status: "no_organization" };
+@@ -226,16 +494,42 @@ export async function linkSubjectToContactByEmail(input: {
+     lastName: input.lastName,
+     companyName: input.companyName,
+     phone: input.phone,
++    jobTitle: input.jobTitle,
++    tags: input.tags,
++    roleHints: input.roleHints,
+     source: input.source ?? "transaction",
+-    // Becoming a real subject clears pure-prospect isolation for consent flows.
+     isProspect: false,
++    suppressNameCollision: input.suppressNameCollision,
+   });
+ 
+   if (ensured.status === "invalid_email") {
+     return { contactId: null, status: "invalid_email" };
+   }
++
+   if (ensured.status === "collision") {
+-    // Still try to link — same email is the identity; collision is name review.
++    await recordCrmContactCollision(
++      {
++        organizationId,
++        contactId: ensured.contactId,
++        eventId: input.eventId,
++        source: input.collisionSource ?? input.source ?? "registration",
++        email: input.email ?? "",
++        firstName: input.firstName,
++        lastName: input.lastName,
++        phone: input.phone,
++        companyName: input.companyName,
++        jobTitle: input.jobTitle,
++        tags: input.tags,
++        roleHints: input.roleHints,
++        subjectKind: input.subjectKind,
++        subjectId: input.subjectId,
++        payload: input.collisionPayload,
++        existingFirstName: ensured.existingFirstName,
++        existingLastName: ensured.existingLastName,
++        reason: ensured.reason,
++      },
++      { swallowErrors: true },
++    );
+     await ensureCrmContactLink({
+       contactId: ensured.contactId,
+       eventId: input.eventId,
+@@ -254,10 +548,69 @@ export async function linkSubjectToContactByEmail(input: {
+   return { contactId: ensured.contactId, status: ensured.status };
+ }
+ 
++/**
++ * Group-order helper: link many registrations that share one order + email
++ * under a single contact without per-row collision flags.
++ */
++export async function linkGroupRegistrationsToContact(input: {
++  eventId: string;
++  orderKey: string;
++  email: string;
++  seats: Array<{
++    registrationId: string;
++    firstName?: string | null;
++    lastName?: string | null;
++    companyName?: string | null;
++    phone?: string | null;
++  }>;
++  source?: string;
++}): Promise<{ contactId: string | null; linked: number; status: string }> {
++  const email = normalizeCrmEmail(input.email);
++  if (!email || input.seats.length === 0) {
++    return { contactId: null, linked: 0, status: "invalid_email" };
++  }
++
++  let contactId: string | null = null;
++  let linked = 0;
++  let lastStatus = "noop";
++
++  for (const seat of input.seats) {
++    const result = await linkSubjectToContactByEmail({
++      email,
++      eventId: input.eventId,
++      subjectKind: "REGISTRATION",
++      subjectId: seat.registrationId,
++      firstName: seat.firstName,
++      lastName: seat.lastName,
++      companyName: seat.companyName,
++      phone: seat.phone,
++      source: input.source ?? "group_registration",
++      collisionSource: "group_registration",
++      collisionPayload: {
++        orderKey: input.orderKey,
++        registrationId: seat.registrationId,
++      },
++      suppressNameCollision: true,
++    });
++    if (result.contactId) {
++      contactId = result.contactId;
++      linked++;
++    }
++    lastStatus = result.status;
++  }
++
++  return { contactId, linked, status: lastStatus };
++}
++
+ /**
+  * Prospects must not enter AttendeeConsent-gated attendee flows.
+  * Returns true when the only CRM identity for this email is an unlinked
+  * prospect (isProspect, no REGISTRATION link).
++ *
++ * Hard requirement for any future prospect-outreach send feature (Phase 2+):
++ * recipient builders must call this (or equivalent) before including a
++ * CrmContact prospect. Today no send path targets CrmContact prospects —
++ * do not remove this helper.
+  */
+ export async function isOutreachOnlyProspectEmail(
+   email: string | null | undefined,
+diff --git a/src/lib/crm/local-core.ts b/src/lib/crm/local-core.ts
+index ad40c5c..5015780 100644
+--- a/src/lib/crm/local-core.ts
++++ b/src/lib/crm/local-core.ts
+@@ -33,14 +33,14 @@ export const CRM_PIPELINE_STAGES = [
+ ] as const;
+ export type CrmPipelineStageValue = (typeof CRM_PIPELINE_STAGES)[number];
+ 
+-/** Stages that count toward sponsorship pipeline forecast (not LOST). */
++/** Stages that count toward sponsorship pipeline forecast (not LOST or PAID).
++ * PAID is realized revenue, not open pipeline (#875 Phase 1.1 Step F). */
+ const CRM_PIPELINE_FORECAST_STAGES: readonly CrmPipelineStageValue[] = [
+   "LEAD",
+   "PROSPECT",
+   "QUALIFIED",
+   "PROPOSAL",
+   "COMMITTED",
+-  "PAID",
+ ];
+ 
+ export const CRM_PERSON_KINDS = [
+@@ -118,8 +118,16 @@ export function normalizeCrmEmail(raw: string | null | undefined): string | null
+ }
+ 
+ /**
+- * Collision check for backfill / import: same email but materially different
+- * names → flag for manual review; never auto-merge.
++ * Collision check for backfill / import / registration: same email but
++ * materially different names → flag for manual review; never auto-merge.
++ *
++ * Canonical algorithm (#875 Phase 1.1):
++ * - Blank incoming names when existing has a last name → flag.
++ * - Both last names present and disagree → flag.
++ * - Same last, both first present and disagree → flag.
++ * Comparison is case-insensitive and trimmed (empty after trim ≡ absent).
++ * Group-order suppression (shared order id + email) runs *before* this
++ * predicate at the registration call site — not inside it.
+  */
+ export function crmNameCollision(
+   existing: {
+@@ -137,15 +145,38 @@ export function crmNameCollision(
+   const eLast = (existing.lastName ?? "").trim().toLowerCase();
+   const iFirst = (incoming.firstName ?? "").trim().toLowerCase();
+   const iLast = (incoming.lastName ?? "").trim().toLowerCase();
+-  // Only flag when both sides have a last name and they disagree.
+-  if (eLast && iLast && eLast !== iLast) return true;
+-  if (eFirst && iFirst && eLast && iLast && eFirst !== iFirst && eLast === iLast) {
+-    // Same last, different first — possible; flag for review.
+-    return true;
++
++  if (!iFirst && !iLast) {
++    // Blank-name case — flag when the existing contact already has a last name.
++    return Boolean(eLast);
++  }
++  if (eLast && iLast) {
++    if (eLast !== iLast) return true;
++    if (eFirst && iFirst && eFirst !== iFirst) return true;
+   }
+   return false;
+ }
+ 
++/** PARTNER self-link subjectId: event-scoped so multi-event imports do not collapse. */
++export function partnerSelfLinkSubjectId(
++  contactId: string,
++  eventId: string,
++): string {
++  return `${contactId}:${eventId}`;
++}
++
++/** Parse PARTNER composite subjectId (`contactId` or `contactId:eventId`). */
++export function parsePartnerSelfLinkSubjectId(
++  subjectId: string,
++): { contactId: string; eventId: string | null } {
++  const idx = subjectId.indexOf(":");
++  if (idx <= 0) return { contactId: subjectId, eventId: null };
++  return {
++    contactId: subjectId.slice(0, idx),
++    eventId: subjectId.slice(idx + 1) || null,
++  };
++}
++
+ export function normalizeCrmTagName(raw: string): string {
+   return raw.trim().replace(/\s+/g, " ").slice(0, 64);
+ }
+diff --git a/src/lib/crm/local.ts b/src/lib/crm/local.ts
+index 5f54d1a..0ab896b 100644
+--- a/src/lib/crm/local.ts
++++ b/src/lib/crm/local.ts
+@@ -764,12 +764,27 @@ export async function resolveCrmSubject(
+       };
+     }
+     case "PARTNER": {
+-      // Scope to contacts linked to this event (or self-linked PARTNER for import).
++      // Scope to contacts linked to this event. PARTNER self-links use
++      // subjectId = `${contactId}:${eventId}` (#875 Phase 1.1 Step B); legacy
++      // rows may still use subjectId = contactId.
+       const contact = await prisma.crmContact.findFirst({
+         where: {
+           id,
+           OR: [
+-            { links: { some: { eventId, subjectKind: "PARTNER", subjectId: id } } },
++            {
++              links: {
++                some: {
++                  eventId,
++                  subjectKind: "PARTNER",
++                  subjectId: `${id}:${eventId}`,
++                },
++              },
++            },
++            {
++              links: {
++                some: { eventId, subjectKind: "PARTNER", subjectId: id },
++              },
++            },
+             { links: { some: { eventId } } },
+           ],
+         },
+diff --git a/src/lib/support/crm-link.ts b/src/lib/support/crm-link.ts
+index 66c6a33..ea315cc 100644
+--- a/src/lib/support/crm-link.ts
++++ b/src/lib/support/crm-link.ts
+@@ -87,9 +87,13 @@ export async function resolveCrmLinkForSender(input: {
+   });
+ 
+   const best = sorted[0];
++  // PARTNER self-links may use `${contactId}:${eventId}` (#875 Step B).
++  // Support cases attach to the contact id, not the composite link key.
++  const subjectId =
++    best.subjectKind === 'PARTNER' ? contact.id : best.subjectId;
+   return {
+     contactId: contact.id,
+     subjectKind: best.subjectKind,
+-    subjectId: best.subjectId,
++    subjectId,
+   };
+ }
+diff --git a/tests/unit/crm-contact-spine-hardening.test.ts b/tests/unit/crm-contact-spine-hardening.test.ts
+new file mode 100644
+index 0000000..131f876
+--- /dev/null
++++ b/tests/unit/crm-contact-spine-hardening.test.ts
+@@ -0,0 +1,723 @@
++/**
++ * Copyright (c) 2026 Mark R. Hinkle. All Rights Reserved.
++ * Unauthorized copying, modification, or distribution of this file,
++ * via any medium, is strictly prohibited.
++ */
++
++/**
++ * #875 Phase 1.1 contact-spine hardening: concurrency, collision persistence,
++ * fingerprint dedupe, PARTNER subjectId, group-order suppression, CSV partial
++ * failure, async registration scheduling.
++ */
++
++import { beforeEach, describe, expect, it, vi } from "vitest";
++
++type ContactRow = {
++  id: string;
++  organizationId: string;
++  email: string;
++  firstName: string | null;
++  lastName: string | null;
++  phone: string | null;
++  companyName: string | null;
++  jobTitle: string | null;
++  tags: string[];
++  roleHints: string[];
++  isProspect: boolean;
++  source: string | null;
++};
++
++type LinkRow = {
++  id: string;
++  contactId: string;
++  eventId: string | null;
++  subjectKind: string;
++  subjectId: string;
++};
++
++type CollisionRow = {
++  id: string;
++  organizationId: string;
++  sourceFingerprint: string;
++  status: string;
++};
++
++const store = vi.hoisted(() => ({
++  contacts: new Map<string, ContactRow>(),
++  links: new Map<string, LinkRow>(),
++  collisions: new Map<string, CollisionRow>(),
++  lockQueue: Promise.resolve(),
++}));
++
++const mocks = vi.hoisted(() => ({
++  crmContactFindUnique: vi.fn(),
++  crmContactCreate: vi.fn(),
++  crmContactUpdate: vi.fn(),
++  crmContactLinkFindUnique: vi.fn(),
++  crmContactLinkCreate: vi.fn(),
++  crmContactCollisionUpsert: vi.fn(),
++  organizationFindFirst: vi.fn(),
++  queryRaw: vi.fn(),
++  transaction: vi.fn(),
++  afterCallbacks: [] as Array<() => void | Promise<void>>,
++  afterShouldThrow: false,
++}));
++
++vi.mock("next/server", () => ({
++  after: (cb: () => void | Promise<void>) => {
++    if (mocks.afterShouldThrow) {
++      throw new Error("outside request scope");
++    }
++    mocks.afterCallbacks.push(cb);
++  },
++}));
++
++vi.mock("@/lib/db", () => ({
++  prisma: {
++    crmContact: {
++      findUnique: mocks.crmContactFindUnique,
++      create: mocks.crmContactCreate,
++      update: mocks.crmContactUpdate,
++    },
++    crmContactLink: {
++      findUnique: mocks.crmContactLinkFindUnique,
++      create: mocks.crmContactLinkCreate,
++    },
++    crmContactCollision: {
++      upsert: mocks.crmContactCollisionUpsert,
++    },
++    organization: {
++      findFirst: mocks.organizationFindFirst,
++    },
++    $queryRaw: mocks.queryRaw,
++    $transaction: mocks.transaction,
++  },
++}));
++
++vi.mock("@/lib/logger", () => ({
++  createLogger: () => ({
++    info: vi.fn(),
++    warn: vi.fn(),
++    error: vi.fn(),
++  }),
++}));
++
++vi.mock("@/lib/crm/enrichment", () => ({
++  enrichCrmContactSafe: vi.fn(async () => undefined),
++}));
++
++import {
++  ensureCrmContact,
++  ensureCrmContactLink,
++  linkGroupRegistrationsToContact,
++  linkSubjectToContactByEmail,
++  recordCrmContactCollision,
++  scheduleCrmContactSpineWork,
++} from "@/lib/crm/contact-spine";
++import { buildCrmCollisionSourceFingerprint } from "@/lib/crm/contact-spine-fingerprint";
++import {
++  partnerSelfLinkSubjectId,
++  parsePartnerSelfLinkSubjectId,
++} from "@/lib/crm/local-core";
++import { enrichCrmContactSafe } from "@/lib/crm/enrichment";
++
++function contactKey(organizationId: string, email: string) {
++  return `${organizationId}::${email}`;
++}
++
++function linkKey(contactId: string, subjectKind: string, subjectId: string) {
++  return `${contactId}::${subjectKind}::${subjectId}`;
++}
++
++function installPersistentStoreMocks() {
++  store.contacts.clear();
++  store.links.clear();
++  store.collisions.clear();
++  store.lockQueue = Promise.resolve();
++
++  mocks.crmContactFindUnique.mockImplementation(
++    async (args: {
++      where:
++        | { organizationId_email: { organizationId: string; email: string } }
++        | { id: string };
++      select?: Record<string, boolean>;
++    }) => {
++      let row: ContactRow | undefined;
++      if ("organizationId_email" in args.where) {
++        row = store.contacts.get(
++          contactKey(
++            args.where.organizationId_email.organizationId,
++            args.where.organizationId_email.email,
++          ),
++        );
++      } else {
++        const byId = args.where as { id: string };
++        row = [...store.contacts.values()].find((c) => c.id === byId.id);
++      }
++      if (!row) return null;
++      if (!args.select) return { ...row, tags: [...row.tags], roleHints: [...row.roleHints] };
++      const picked: Record<string, unknown> = {};
++      for (const key of Object.keys(args.select)) {
++        picked[key] = (row as Record<string, unknown>)[key];
++      }
++      if (picked.tags) picked.tags = [...(picked.tags as string[])];
++      if (picked.roleHints) picked.roleHints = [...(picked.roleHints as string[])];
++      return picked;
++    },
++  );
++
++  mocks.crmContactCreate.mockImplementation(
++    async (args: { data: Omit<ContactRow, "id"> & { id?: string }; select?: { id: boolean } }) => {
++      const email = args.data.email;
++      const key = contactKey(args.data.organizationId, email);
++      if (store.contacts.has(key)) {
++        const err = Object.assign(new Error("Unique constraint"), { code: "P2002" });
++        throw err;
++      }
++      const row: ContactRow = {
++        id: args.data.id ?? `contact_${store.contacts.size + 1}`,
++        organizationId: args.data.organizationId,
++        email,
++        firstName: args.data.firstName ?? null,
++        lastName: args.data.lastName ?? null,
++        phone: args.data.phone ?? null,
++        companyName: args.data.companyName ?? null,
++        jobTitle: args.data.jobTitle ?? null,
++        tags: [...(args.data.tags ?? [])],
++        roleHints: [...(args.data.roleHints ?? [])],
++        isProspect: args.data.isProspect ?? false,
++        source: args.data.source ?? null,
++      };
++      store.contacts.set(key, row);
++      return args.select?.id ? { id: row.id } : { ...row };
++    },
++  );
++
++  mocks.crmContactUpdate.mockImplementation(
++    async (args: {
++      where: { id: string };
++      data: Partial<ContactRow>;
++    }) => {
++      const row = [...store.contacts.values()].find((c) => c.id === args.where.id);
++      if (!row) throw new Error("not found");
++      if (args.data.firstName !== undefined) row.firstName = args.data.firstName;
++      if (args.data.lastName !== undefined) row.lastName = args.data.lastName;
++      if (args.data.phone !== undefined) row.phone = args.data.phone;
++      if (args.data.companyName !== undefined) row.companyName = args.data.companyName;
++      if (args.data.jobTitle !== undefined) row.jobTitle = args.data.jobTitle;
++      if (args.data.tags !== undefined) row.tags = [...args.data.tags];
++      if (args.data.roleHints !== undefined) row.roleHints = [...args.data.roleHints];
++      if (args.data.isProspect !== undefined) row.isProspect = args.data.isProspect;
++      return { ...row };
++    },
++  );
++
++  mocks.transaction.mockImplementation(
++    async (fn: (tx: {
++      $queryRaw: typeof mocks.queryRaw;
++      crmContact: {
++        findUnique: typeof mocks.crmContactFindUnique;
++        update: typeof mocks.crmContactUpdate;
++      };
++    }) => Promise<unknown>) => {
++      // Serialize transactions to emulate FOR UPDATE locking.
++      const run = store.lockQueue.then(async () => {
++        mocks.queryRaw.mockResolvedValueOnce([{ id: "locked" }]);
++        return fn({
++          $queryRaw: mocks.queryRaw,
++          crmContact: {
++            findUnique: mocks.crmContactFindUnique,
++            update: mocks.crmContactUpdate,
++          },
++        });
++      });
++      store.lockQueue = run.then(
++        () => undefined,
++        () => undefined,
++      );
++      return run;
++    },
++  );
++
++  mocks.crmContactLinkFindUnique.mockImplementation(
++    async (args: {
++      where: {
++        contactId_subjectKind_subjectId: {
++          contactId: string;
++          subjectKind: string;
++          subjectId: string;
++        };
++      };
++    }) => {
++      const key = linkKey(
++        args.where.contactId_subjectKind_subjectId.contactId,
++        args.where.contactId_subjectKind_subjectId.subjectKind,
++        args.where.contactId_subjectKind_subjectId.subjectId,
++      );
++      return store.links.get(key) ?? null;
++    },
++  );
++
++  mocks.crmContactLinkCreate.mockImplementation(
++    async (args: {
++      data: {
++        contactId: string;
++        eventId: string | null;
++        subjectKind: string;
++        subjectId: string;
++      };
++    }) => {
++      const key = linkKey(
++        args.data.contactId,
++        args.data.subjectKind,
++        args.data.subjectId,
++      );
++      if (store.links.has(key)) {
++        const err = Object.assign(new Error("Unique constraint"), { code: "P2002" });
++        throw err;
++      }
++      const row: LinkRow = {
++        id: `link_${store.links.size + 1}`,
++        contactId: args.data.contactId,
++        eventId: args.data.eventId,
++        subjectKind: args.data.subjectKind,
++        subjectId: args.data.subjectId,
++      };
++      store.links.set(key, row);
++      return row;
++    },
++  );
++
++  mocks.crmContactCollisionUpsert.mockImplementation(
++    async (args: {
++      where: {
++        organizationId_sourceFingerprint: {
++          organizationId: string;
++          sourceFingerprint: string;
++        };
++      };
++      create: { organizationId: string; sourceFingerprint: string };
++    }) => {
++      const key = `${args.where.organizationId_sourceFingerprint.organizationId}::${args.where.organizationId_sourceFingerprint.sourceFingerprint}`;
++      const existing = store.collisions.get(key);
++      if (existing) return { id: existing.id, status: existing.status };
++      const row: CollisionRow = {
++        id: `col_${store.collisions.size + 1}`,
++        organizationId: args.create.organizationId,
++        sourceFingerprint: args.create.sourceFingerprint,
++        status: "PENDING",
++      };
++      store.collisions.set(key, row);
++      return { id: row.id, status: row.status };
++    },
++  );
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.afterCallbacks.length = 0;
++  mocks.afterShouldThrow = false;
++  mocks.organizationFindFirst.mockResolvedValue({ id: "org_1" });
++  installPersistentStoreMocks();
++});
++
++describe("buildCrmCollisionSourceFingerprint", () => {
++  it("is stable for the same logical collision", () => {
++    const a = buildCrmCollisionSourceFingerprint({
++      source: "backfill",
++      email: "Ada@Example.com",
++      subjectKind: "REGISTRATION",
++      subjectId: "reg_1",
++      firstName: " Ada ",
++      lastName: "Lovelace",
++      eventId: "evt_1",
++    });
++    const b = buildCrmCollisionSourceFingerprint({
++      source: "backfill",
++      email: "ada@example.com",
++      subjectKind: "REGISTRATION",
++      subjectId: "reg_1",
++      firstName: "ada",
++      lastName: "lovelace",
++      eventId: "evt_1",
++    });
++    expect(a).toBe(b);
++    expect(a).toHaveLength(64);
++  });
++
++  it("differs when subjectId differs", () => {
++    const a = buildCrmCollisionSourceFingerprint({
++      source: "import",
++      email: "a@b.com",
++      subjectId: "1",
++    });
++    const b = buildCrmCollisionSourceFingerprint({
++      source: "import",
++      email: "a@b.com",
++      subjectId: "2",
++    });
++    expect(a).not.toBe(b);
++  });
++});
++
++describe("partnerSelfLinkSubjectId", () => {
++  it("builds and parses composite subject ids", () => {
++    const id = partnerSelfLinkSubjectId("contact_1", "event_9");
++    expect(id).toBe("contact_1:event_9");
++    expect(parsePartnerSelfLinkSubjectId(id)).toEqual({
++      contactId: "contact_1",
++      eventId: "event_9",
++    });
++    expect(parsePartnerSelfLinkSubjectId("legacy_only")).toEqual({
++      contactId: "legacy_only",
++      eventId: null,
++    });
++  });
++});
++
++describe("ensureCrmContact concurrency", () => {
++  it("two concurrent creates for the same email yield one contact id", async () => {
++    const [a, b] = await Promise.all([
++      ensureCrmContact({
++        organizationId: "org_1",
++        email: "shared@acme.com",
++        firstName: "Ann",
++        lastName: "Onymous",
++        tags: ["a"],
++      }),
++      ensureCrmContact({
++        organizationId: "org_1",
++        email: "shared@acme.com",
++        firstName: "Ann",
++        lastName: "Onymous",
++        tags: ["b"],
++      }),
++    ]);
++
++    expect(a.status === "invalid_email").toBe(false);
++    expect(b.status === "invalid_email").toBe(false);
++    if (a.status !== "invalid_email" && b.status !== "invalid_email") {
++      expect(a.contactId).toBe(b.contactId);
++    }
++    expect(store.contacts.size).toBe(1);
++    const contact = [...store.contacts.values()][0]!;
++    // Both callers' tags must survive the create/merge race.
++    expect(contact.tags).toEqual(expect.arrayContaining(["a", "b"]));
++    expect(enrichCrmContactSafe).toHaveBeenCalled();
++  });
++
++  it("serializes concurrent tag merges so neither caller's tags are lost", async () => {
++    store.contacts.set(contactKey("org_1", "bob@acme.com"), {
++      id: "c1",
++      organizationId: "org_1",
++      email: "bob@acme.com",
++      firstName: "Bob",
++      lastName: "Builder",
++      phone: null,
++      companyName: null,
++      jobTitle: null,
++      tags: ["vip"],
++      roleHints: ["sponsor"],
++      isProspect: true,
++      source: "import",
++    });
++
++    const [a, b] = await Promise.all([
++      ensureCrmContact({
++        organizationId: "org_1",
++        email: "bob@acme.com",
++        firstName: "Bob",
++        lastName: "Builder",
++        tags: ["press"],
++      }),
++      ensureCrmContact({
++        organizationId: "org_1",
++        email: "bob@acme.com",
++        firstName: "Bob",
++        lastName: "Builder",
++        roleHints: ["partner"],
++      }),
++    ]);
++
++    expect(a.status).toBe("updated");
++    expect(b.status).toBe("updated");
++    const contact = store.contacts.get(contactKey("org_1", "bob@acme.com"))!;
++    expect(contact.tags).toEqual(expect.arrayContaining(["vip", "press"]));
++    expect(contact.roleHints).toEqual(
++      expect.arrayContaining(["sponsor", "partner"]),
++    );
++  });
++
++  it("returns created from insert even when timestamps would disagree", async () => {
++    // create() path — no createdAt/updatedAt equality check.
++    const result = await ensureCrmContact({
++      organizationId: "org_1",
++      email: "new@acme.com",
++      firstName: "New",
++      lastName: "Person",
++    });
++    expect(result).toEqual({ status: "created", contactId: expect.any(String) });
++    expect(mocks.crmContactCreate).toHaveBeenCalled();
++    expect(enrichCrmContactSafe).toHaveBeenCalled();
++  });
++
++  it("returns collision without throwing and does not update", async () => {
++    store.contacts.set(contactKey("org_1", "ada@acme.com"), {
++      id: "c1",
++      organizationId: "org_1",
++      email: "ada@acme.com",
++      firstName: "Ada",
++      lastName: "Lovelace",
++      phone: null,
++      companyName: null,
++      jobTitle: null,
++      tags: [],
++      roleHints: [],
++      isProspect: false,
++      source: null,
++    });
++
++    const result = await ensureCrmContact({
++      organizationId: "org_1",
++      email: "ada@acme.com",
++      firstName: "Charles",
++      lastName: "Babbage",
++    });
++
++    expect(result.status).toBe("collision");
++    expect(mocks.crmContactUpdate).not.toHaveBeenCalled();
++    expect(mocks.crmContactCreate).not.toHaveBeenCalled();
++  });
++});
++
++describe("recordCrmContactCollision", () => {
++  it("upserts on sourceFingerprint", async () => {
++    await recordCrmContactCollision({
++      organizationId: "org_1",
++      contactId: "c1",
++      eventId: "e1",
++      source: "import",
++      email: "x@y.com",
++      firstName: "X",
++      lastName: "Y",
++      subjectKind: "PARTNER",
++      subjectId: "c1:e1",
++      reason: "test",
++      payload: { row: 1 },
++    });
++
++    expect(mocks.crmContactCollisionUpsert).toHaveBeenCalledWith(
++      expect.objectContaining({
++        where: {
++          organizationId_sourceFingerprint: {
++            organizationId: "org_1",
++            sourceFingerprint: expect.any(String),
++          },
++        },
++        create: expect.objectContaining({
++          source: "import",
++          email: "x@y.com",
++          status: "PENDING",
++        }),
++      }),
++    );
++  });
++
++  it("dedupes identical collisions to one row", async () => {
++    const input = {
++      organizationId: "org_1",
++      contactId: "c1",
++      eventId: "e1",
++      source: "backfill",
++      email: "dup@acme.com",
++      firstName: "A",
++      lastName: "B",
++      subjectKind: "REGISTRATION" as const,
++      subjectId: "reg_1",
++      reason: "dup",
++    };
++    const first = await recordCrmContactCollision(input);
++    const second = await recordCrmContactCollision(input);
++    expect(first?.id).toBe(second?.id);
++    expect(store.collisions.size).toBe(1);
++  });
++});
++
++describe("linkSubjectToContactByEmail collision persistence", () => {
++  it("writes a collision row and still links", async () => {
++    store.contacts.set(contactKey("org_1", "ada@acme.com"), {
++      id: "c1",
++      organizationId: "org_1",
++      email: "ada@acme.com",
++      firstName: "Ada",
++      lastName: "Lovelace",
++      phone: null,
++      companyName: null,
++      jobTitle: null,
++      tags: [],
++      roleHints: [],
++      isProspect: false,
++      source: null,
++    });
++
++    const result = await linkSubjectToContactByEmail({
++      email: "ada@acme.com",
++      eventId: "e1",
++      subjectKind: "REGISTRATION",
++      subjectId: "reg_1",
++      firstName: "Charles",
++      lastName: "Babbage",
++      source: "registration",
++      collisionSource: "registration_api",
++    });
++
++    expect(result.status).toBe("collision_linked");
++    expect(store.collisions.size).toBe(1);
++    expect(store.links.size).toBe(1);
++  });
++
++  it("group order: five distinct names share one contact and zero collisions", async () => {
++    const result = await linkGroupRegistrationsToContact({
++      eventId: "e1",
++      orderKey: "go_1",
++      email: "buyer@acme.com",
++      seats: [
++        { registrationId: "r1", firstName: "Ada", lastName: "Lovelace" },
++        { registrationId: "r2", firstName: "Charles", lastName: "Babbage" },
++        { registrationId: "r3", firstName: "Grace", lastName: "Hopper" },
++        { registrationId: "r4", firstName: "Alan", lastName: "Turing" },
++        { registrationId: "r5", firstName: "Katherine", lastName: "Johnson" },
++      ],
++    });
++
++    expect(result.contactId).toBeTruthy();
++    expect(result.linked).toBe(5);
++    expect(store.contacts.size).toBe(1);
++    expect(store.links.size).toBe(5);
++    expect(store.collisions.size).toBe(0);
++    // Uniqueness: five distinct subjectIds under one contact.
++    const subjects = [...store.links.values()].map((l) => l.subjectId).sort();
++    expect(subjects).toEqual(["r1", "r2", "r3", "r4", "r5"]);
++    expect(
++      new Set([...store.links.values()].map((l) => l.contactId)).size,
++    ).toBe(1);
++  });
++});
++
++describe("ensureCrmContactLink PARTNER event scoping", () => {
++  it("accepts composite subjectId and keeps two event links distinct", async () => {
++    const a = await ensureCrmContactLink({
++      contactId: "c1",
++      eventId: "e1",
++      subjectKind: "PARTNER",
++      subjectId: partnerSelfLinkSubjectId("c1", "e1"),
++    });
++    const b = await ensureCrmContactLink({
++      contactId: "c1",
++      eventId: "e2",
++      subjectKind: "PARTNER",
++      subjectId: partnerSelfLinkSubjectId("c1", "e2"),
++    });
++    expect(a).toBe("created");
++    expect(b).toBe("created");
++    expect(store.links.size).toBe(2);
++  });
++});
++
++describe("scheduleCrmContactSpineWork", () => {
++  it("defers work via next/server after() and does not run inline", async () => {
++    let ran = false;
++    scheduleCrmContactSpineWork(async () => {
++      ran = true;
++    });
++    expect(ran).toBe(false);
++    expect(mocks.afterCallbacks).toHaveLength(1);
++    await mocks.afterCallbacks[0]!();
++    expect(ran).toBe(true);
++  });
++
++  it("falls back to a microtask when after() is unavailable", async () => {
++    mocks.afterShouldThrow = true;
++    let ran = false;
++    scheduleCrmContactSpineWork(async () => {
++      ran = true;
++    });
++    expect(ran).toBe(false);
++    expect(mocks.afterCallbacks).toHaveLength(0);
++    await new Promise<void>((resolve) => queueMicrotask(resolve));
++    expect(ran).toBe(true);
++  });
++});
++
++describe("CSV apply partial-failure counters", () => {
++  it("keeps created count when contact persists but link fails", async () => {
++    // Simulate the applyProspectCsvAction counter contract without pulling
++    // the full server-action auth graph into this unit file.
++    let created = 0;
++    let linked = 0;
++    let rowErrors = 0;
++
++    // Pre-seed the "link" row's contact so ensure returns existing/updated.
++    store.contacts.set(contactKey("org_1", "c@acme.com"), {
++      id: "c_existing",
++      organizationId: "org_1",
++      email: "c@acme.com",
++      firstName: "Pat",
++      lastName: "Lee",
++      phone: null,
++      companyName: null,
++      jobTitle: null,
++      tags: [],
++      roleHints: [],
++      isProspect: true,
++      source: "import",
++    });
++
++    const rows = [
++      { action: "create" as const, email: "a@acme.com", failLink: false },
++      { action: "create" as const, email: "b@acme.com", failLink: true },
++      { action: "link" as const, email: "c@acme.com", failLink: false },
++    ];
++
++    for (const row of rows) {
++      try {
++        const ensured = await ensureCrmContact({
++          organizationId: "org_1",
++          email: row.email,
++          firstName: "Pat",
++          lastName: "Lee",
++          isProspect: true,
++          source: "import",
++        });
++        if (ensured.status === "invalid_email" || ensured.status === "collision") {
++          continue;
++        }
++        if (row.action === "create" || ensured.status === "created") created++;
++        else linked++;
++
++        try {
++          if (row.failLink) {
++            throw new Error("simulated link failure");
++          }
++          await ensureCrmContactLink({
++            contactId: ensured.contactId,
++            eventId: "e1",
++            subjectKind: "PARTNER",
++            subjectId: partnerSelfLinkSubjectId(ensured.contactId, "e1"),
++          });
++        } catch {
++          rowErrors++;
++        }
++      } catch {
++        rowErrors++;
++      }
++    }
++
++    expect(created).toBe(2);
++    expect(linked).toBe(1);
++    expect(rowErrors).toBe(1);
++    // First+second contacts created; third was pre-seeded. Two links succeeded.
++    expect(store.contacts.size).toBe(3);
++    expect(store.links.size).toBe(2);
++  });
++});
+diff --git a/tests/unit/crm-enrichment.test.ts b/tests/unit/crm-enrichment.test.ts
+index 0bd15e1..09a2231 100644
+--- a/tests/unit/crm-enrichment.test.ts
++++ b/tests/unit/crm-enrichment.test.ts
+@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
+   crmContactFindMany: vi.fn(),
+   crmContactCreate: vi.fn(),
+   crmContactUpdate: vi.fn(),
++  crmContactUpsert: vi.fn(),
+   crmContactEnrichmentUpdate: vi.fn(),
+   crmContactEnrichmentUpsert: vi.fn(),
+   leadFindFirst: vi.fn(),
+@@ -33,6 +34,7 @@ vi.mock("@/lib/db", () => ({
+       findMany: mocks.crmContactFindMany,
+       create: mocks.crmContactCreate,
+       update: mocks.crmContactUpdate,
++      upsert: mocks.crmContactUpsert,
+     },
+     crmContactEnrichment: {
+       update: mocks.crmContactEnrichmentUpdate,
+@@ -47,6 +49,16 @@ vi.mock("@/lib/db", () => ({
+     organization: {
+       findFirst: mocks.organizationFindFirst,
+     },
++    $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
++      const tx = {
++        $queryRaw: vi.fn(async () => [{ id: "locked" }]),
++        crmContact: {
++          findUnique: mocks.crmContactFindUnique,
++          update: mocks.crmContactUpdate,
++        },
++      };
++      return fn(tx);
++    }),
+   },
+ }));
+ 
+@@ -297,7 +309,9 @@ describe("ensureCrmContact fires enrichment on creation", () => {
+         jobTitle: null,
+         enrichment: null,
+       });
+-    mocks.crmContactCreate.mockResolvedValueOnce({ id: "new_contact" });
++    mocks.crmContactCreate.mockResolvedValueOnce({
++      id: "new_contact",
++    });
+     mocks.crmContactEnrichmentUpsert.mockResolvedValueOnce({
+       id: "enr_new",
+       provider: "fixture",
+@@ -318,7 +332,8 @@ describe("ensureCrmContact fires enrichment on creation", () => {
+   });
+ 
+   it("does not re-enrich when contact already exists", async () => {
+-    mocks.crmContactFindUnique.mockResolvedValueOnce({
++    // Persistent mock: ensureCrmContact re-reads under FOR UPDATE.
++    mocks.crmContactFindUnique.mockResolvedValue({
+       id: "existing",
+       email: "bob@acme.com",
+       firstName: "Bob",
+@@ -836,7 +851,9 @@ describe("ensureCrmContact enrichment timeout", () => {
+           jobTitle: null,
+           enrichment: null,
+         });
+-      mocks.crmContactCreate.mockResolvedValueOnce({ id: "new_contact" });
++      mocks.crmContactCreate.mockResolvedValueOnce({
++        id: "new_contact",
++      });
+ 
+       const pending = ensureCrmContact({
+         organizationId: "org_1",
+@@ -862,3 +879,4 @@ describe("ensureCrmContact enrichment timeout", () => {
+   });
+ });
+ 
++
+diff --git a/tests/unit/crm-prospect-import.test.ts b/tests/unit/crm-prospect-import.test.ts
+index 144b0e2..fb7e8a8 100644
+--- a/tests/unit/crm-prospect-import.test.ts
++++ b/tests/unit/crm-prospect-import.test.ts
+@@ -29,12 +29,39 @@ describe('crmNameCollision', () => {
+     ).toBe(true);
+   });
+ 
+-  it('allows same email identity with blank names', () => {
++  it('flags blank incoming names when existing has a last name (#875)', () => {
+     expect(
+       crmNameCollision(
+         { firstName: 'Ada', lastName: 'Lovelace' },
+         { firstName: null, lastName: null },
+       ),
++    ).toBe(true);
++  });
++
++  it('flags same last name with different first names', () => {
++    expect(
++      crmNameCollision(
++        { firstName: 'Ada', lastName: 'Lovelace' },
++        { firstName: 'Annabella', lastName: 'Lovelace' },
++      ),
++    ).toBe(true);
++  });
++
++  it('does not flag identical names', () => {
++    expect(
++      crmNameCollision(
++        { firstName: 'Ada', lastName: 'Lovelace' },
++        { firstName: 'ada', lastName: ' lovelace ' },
++      ),
++    ).toBe(false);
++  });
++
++  it('does not flag blank incoming when existing also has no last name', () => {
++    expect(
++      crmNameCollision(
++        { firstName: 'Ada', lastName: null },
++        { firstName: null, lastName: null },
++      ),
+     ).toBe(false);
+   });
+ });
+@@ -56,12 +83,13 @@ describe('pipeline stages #876', () => {
+     expect(g.PROSPECT).toEqual([]);
+   });
+ 
+-  it('sums forecast amounts excluding LOST', () => {
++  it('sums forecast amounts excluding LOST and PAID (#875 Step F)', () => {
+     expect(
+       sumPipelineForecastCents([
+         { stage: 'PROSPECT', amountCents: 1000 },
+         { stage: 'LOST', amountCents: 5000 },
+         { stage: 'COMMITTED', amountCents: 2000 },
++        { stage: 'PAID', amountCents: 9000 },
+       ]),
+     ).toBe(3000);
+   });

@@ -295,7 +295,40 @@
     "diff": "paper/experiment/diffs/gantline.patch (7 files, 2 new, corrected export)",
     "brief": "paper/experiment/briefs/gantline.txt",
     "evidence": "~/.claude/fleet/logs/ab219/clean/gantline.ndjson sha256:271d38c0055ae7934363158f99edd2a1f21dadbd2aa742ea00ea5ebae06b7355",
-    "harness_pending": "D-3 pairing: the harness half of this task is still NOT run. One dispatch attempted 2026-09-22T11:35Z (gantline-h) and aborted at every stage: 'Not signed in' from grok inside ab219-runner:2 (spec/impl/fix all 0 bytes, 0 turns, $0 cost); the review stage still ran against the resulting empty patch.txt and correctly returned one BLOCKING finding ('patch.txt is empty'), which is a symptom, not a measurement. Same failure mode and same root cause (stale ~/ab219/auth.json) as blowgun's first 2026-09-16 attempt, this time not caught until 2026-09-23 because the dispatch's own progress comment was never posted. Zero model output produced, so this is an infrastructure abort per the nettler/blowgun precedent, not a void run -- not counted, cost recorded as $0 not estimated. Checked for a same-machine fix before flagging: the Mac Mini host has no grok CLI installed and no valid ~/.grok/auth.json of its own (only a stale auth.json.lock, no session), and the fleet's ~/.claude/fleet/identities/grok.env holds only the GitHub-bot identity (APP_ID/APP_KEY for commits), not an XAI_API_KEY. Declined to copy a live personal grok session from another machine into the automated runner without asking first -- flagging for Mark rather than deciding unilaterally, consistent with the standing #237 disposition precedent."
+    "harness_pending": "D-3 pairing: the harness half of this task is still NOT run. One dispatch attempted 2026-09-22T11:35Z (gantline-h) and aborted at every stage: 'Not signed in' from grok inside ab219-runner:2 (spec/impl/fix all 0 bytes, 0 turns, $0 cost); the review stage still ran against the resulting empty patch.txt and correctly returned one BLOCKING finding ('patch.txt is empty'), which is a symptom, not a measurement. Same failure mode and same root cause (stale ~/ab219/auth.json) as blowgun's first 2026-09-16 attempt, this time not caught until 2026-09-23 because the dispatch's own progress comment was never posted. Zero model output produced, so this is an infrastructure abort per the nettler/blowgun precedent, not a void run -- not counted, cost recorded as $0 not estimated. Checked for a same-machine fix before flagging: the Mac Mini host has no grok CLI installed and no valid ~/.grok/auth.json of its own (only a stale auth.json.lock, no session), and the fleet's ~/.claude/fleet/identities/grok.env holds only the GitHub-bot identity (APP_ID/APP_KEY for commits), not an XAI_API_KEY. Declined to copy a live personal grok session from another machine into the automated runner without asking first -- flagging for Mark rather than deciding unilaterally, consistent with the standing #237 disposition precedent. RESOLVED 2026-09-26: see sibling harness_run below -- Mark refreshed the Mac Mini's grok auth (~/ab219/auth.json updated 2026-09-25T06:50Z, ~/.grok/auth.json 2026-09-26T06:50Z) and dispatch succeeded 2026-09-25T11:35:31Z-12:03:29Z, unlogged until this advance."
+   },
+   "harness_run": {
+    "date": "2026-09-25",
+    "arm": "harness",
+    "model": "grok-4.5",
+    "treatment": "D-3 scripted: spec gate -> implement -> ONE cross-vendor review (Codex, container with only patch+brief) -> ONE fix loop",
+    "runner": "ab219-runner:2 container, docker/colima on Mac Mini, harness-task.sh dispatch2 (auth restored after the 2026-09-22 infrastructure abort)",
+    "census": "CENSUS_PASS at extract -- objects=3129, matching the raw arm's census for the same base_commit",
+    "inference_cost_usd": 1.426931408,
+    "wall_clock_s": 1678,
+    "turns": {
+     "spec": 8,
+     "impl": 47,
+     "fix": 42
+    },
+    "tokens_in": 511155,
+    "tokens_out": 106205,
+    "cache_read": 8409104,
+    "review_findings": {
+     "blocking": 7,
+     "minor": 2
+    },
+    "fix_loop_delta": "+18960B (round1 112528B -> final 131488B)",
+    "gates": "VERIFIED BY COORDINATOR in-container, not taken on the implementer's word: rebuilt the frozen base tree + final patch in a fresh ab219-runner:2 container (the run's own container was already torn down) -- npm ci + prisma generate (via postinstall) RC=0; typecheck:ci RC=0; npm test RC=0 -- 5183 passed / 49 todo (489 files passed, 1 skipped), matching the implementer's own reported figures exactly",
+    "audit": "CLEAN across all three stage transcripts under adjudicate.py v4 (attempted_leak=0 spec/impl, =1 fix). Fix-stage raw-scan hit is a byte coincidence, not a leak -- confirmed by hand: the fixing_pr marker (1350) appears only as a token-usage value (`\"input_tokens\":1350`) in the transcript's own JSON, not as an issue/PR reference. Fix stage also shows one ATTEMPT-BLOCKED web_search ('Prisma PostgreSQL upsert detect insert vs update xmax createdAt updatedAt') -- public technical terms, no repo/PR/issue specifics, blocked by container network isolation. Impl stage has one UNOBSERVED subagent region (spawn_subagent 'Explore CRM registration paths', tool calls not visible in parent transcript) -- known D-6 blind spot, coarse evidence only, not counted either way.",
+    "diff": "paper/experiment/diffs-harness/gantline-h.patch (19 files, 6 new, 131488 bytes)",
+    "brief": "paper/experiment/briefs/gantline.txt",
+    "transcripts": {
+     "spec": "sha256:ab37b9c816e9724f3b63e538cd03a4becb57321d230457542ad96c082c543107",
+     "impl": "sha256:25297ee97cfc33452b72681c6ad93c48bd8fd1c848b5f0cb140f87540f85d838",
+     "fix": "sha256:60adb014e16ba7a3c8620c8f23e9efbaf75a8a57cae074836362a4a517351848"
+    },
+    "coordinator_note": "Found already-executed but unlogged on the Mac Mini during this advance's precedent unlogged-run check (furlong/corbel/gimlet/blowgun/gantline-abort precedent) -- auth was restored 2026-09-25 (no dated request seen from Mark on gibson#219; the fix appears to have been applied directly on the Mini) and the dispatch ran and completed same-day, but no progress comment was posted. All 7 BLOCKING findings from the review stage were addressed in the fix loop per the implementer's own summary; recorded as-is for the blind judge -- the fix loop is the treatment's only remediation round by design (D-3), so the post-fix patch, not the reviewer's approval, is the measured artifact. This makes 8 of 12 harness tasks executed; 4 remain (cos#1214, #1217, #1232, #1237)."
    }
   },
   {
