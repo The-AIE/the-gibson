@@ -107,6 +107,7 @@ Findings, backlogs, retros, and other history remain in `docs/`, `memory/`, and
 | — | [goose-spike-findings](GOOSE-SPIKE-FINDINGS.md) | #28 paperwork pass only — no live runtime spike; scaffold permitted, runtime still gated |
 | — | [autonomy-modes](autonomy-modes.md) | Four modes + per-tool overrides mapped to Goose; no new Gibson session defaults |
 | — | [conventions](CONVENTIONS.md) | Code & doc target contract — live vs planned state, retrofit batches, and owner gates |
+| — | [brand-kit](../assets/images/branding/README.md) | Logo, lockups, tagline, colors and usage rules (2026-09-27) |
 
 ## Worked examples & ops
 

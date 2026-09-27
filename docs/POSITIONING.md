@@ -11,6 +11,12 @@
 **Chatterbuilt bundle**: everything commercial packaged together. **ConferenceOS** is the
 reference demonstration of that bundle in use.
 
+**Public tagline (decided 2026-09-27):** "The governance harness for your coding agents."
+Short form: "Governance for coding agents." It replaces "the open source harness for
+vibecoders" on the README and the brand lockups. The Gibson governs how coding agents
+work; it does not improve their coding. Logo, lockups and usage rules live in the
+[brand kit](../assets/images/branding/README.md).
+
 ## The stack
 
 | Layer | Name | What it is | How it's sold |
@@ -59,7 +65,8 @@ public use, per the AIOS/Rutgers rule.
 - Reframe red-team as `playbooks/red-team/`; PR #22's `red-team/PROTOCOL.md` over-claimed the harness.
 - Fix `red-team/PRIOR-ART.md`: Goose and ruv's metaharness are harness-level **peers**; use
   build-on-vs-borrow, and the metaharness spike applies to **Gibson first**.
-- Gibson's public README should read "the open source harness for vibecoders."
+- ~~Gibson's public README should read "the open source harness for vibecoders."~~ Superseded
+  2026-09-27: the README leads with "The governance harness for your coding agents." (see above).
 
 ## metaharness fit
 ruv's metaharness ("separate the factory from the product; users see only your brand") mirrors the
