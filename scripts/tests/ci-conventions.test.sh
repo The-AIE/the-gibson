@@ -705,6 +705,67 @@ check_operator_literals() {
   return "$failed"
 }
 
+# (i) gitleaks runs as the pinned MIT CLI, never gitleaks/gitleaks-action
+# (#412): the Action refuses to run on organization-owned repos without a paid
+# GITLEAKS_LICENSE secret, so an unmodified template goes red on adoption.
+check_gitleaks_action() {
+  local root="$1"
+  local failed=0
+  local f rel
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rel=${f#"$root"/}
+    if grep -Eq '^[^#]*uses:[[:space:]]*["'"'"']?gitleaks/gitleaks-action' "$f"; then
+      echo "$rel uses gitleaks/gitleaks-action (license-gated on org repos; use the pinned CLI)"
+      failed=1
+    fi
+  done < <(collect_workflows "$root")
+  return "$failed"
+}
+
+# (j) the gate job's git fetches authenticate, before PR-head code runs (#412).
+# Checkout uses persist-credentials: false, so a bare `git fetch origin` is
+# anonymous and private repos refuse it. Every git fetch in a job named `gate`
+# must carry a per-command extraheader, and the job token must enter the step
+# environment before the first `npm ci`/`npm install`.
+check_gate_fetch_auth() {
+  local root="$1"
+  local failed=0
+  local f rel viol
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    rel=${f#"$root"/}
+    viol=$(awk '
+      /^jobs:/ { in_jobs=1; next }
+      /^[^[:space:]#]/ { in_jobs=0; in_gate=0 }
+      in_jobs && /^  gate:[[:space:]]*$/ { in_gate=1; next }
+      in_gate && /^  [^[:space:]#]/ { in_gate=0 }
+      !in_gate { next }
+      /^[[:space:]]*#/ { next }
+      {
+        line=$0
+        sub(/[[:space:]]#.*$/, "", line)
+        if (cont != "") line = cont " " line
+        if (line ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, "", line); cont=line; next }
+        cont=""
+        if (line ~ /(^|[^[:alnum:]_.-])git[[:space:]]/ && line ~ /[[:space:]]fetch([[:space:]]|$)/ && line !~ /extraheader/) {
+          sub(/^[[:space:]]*(-[[:space:]]*)?(run:[[:space:]]*)?/, "", line)
+          print "unauthenticated git fetch in gate job: " line
+        }
+        if (!tok && line ~ /github\.token|secrets\.GITHUB_TOKEN/) tok=NR
+        if (!npm && line ~ /npm[[:space:]]+(ci|install)/) npm=NR
+      }
+      END { if (tok && npm && npm < tok) print "gate job token enters the step env after npm ci (PR-head code already ran)" }
+    ' "$f")
+    [[ -n "$viol" ]] || continue
+    while IFS= read -r line; do
+      echo "$rel $line"
+    done <<< "$viol"
+    failed=1
+  done < <(collect_workflows "$root")
+  return "$failed"
+}
+
 # Report a planted-fixture failure. needle must appear in the check output.
 assert_planted() {
   local n="$1"
@@ -915,6 +976,28 @@ if [[ -z "$op_viol" ]]; then
   ok "templates/ and ci/ are free of mrhinkle and /Users/ literals"
 else
   bad "$op_viol"
+fi
+
+echo "# (i) gitleaks runs as the pinned CLI, not gitleaks/gitleaks-action (#412)"
+gl_viol=$(check_gitleaks_action "$REPO_ROOT") || true
+if [[ -z "$gl_viol" ]]; then
+  ok "no workflow uses the license-gated gitleaks/gitleaks-action"
+else
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    bad "$line"
+  done <<< "$gl_viol"
+fi
+
+echo "# (j) gate job git fetches authenticate before npm ci (#412)"
+fa_viol=$(check_gate_fetch_auth "$REPO_ROOT") || true
+if [[ -z "$fa_viol" ]]; then
+  ok "gate job fetches carry an extraheader and precede npm ci"
+else
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    bad "$line"
+  done <<< "$fa_viol"
 fi
 
 # --- mutation coverage: one planted fixture per sensor ---------------------
@@ -1611,6 +1694,114 @@ jobs: {}
 YML
 got=$(check_concurrency "$MUT/39") || true
 assert_clean 39 "PR-only cancellation expression is accepted" "$got"
+
+# 40. gitleaks/gitleaks-action (license-gated on org repos, #412)
+mkdir -p "$MUT/40/ci"
+cat > "$MUT/40/ci/planted.yml" <<'YML'
+name: planted-gitleaks-action
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+YML
+got=$(check_gitleaks_action "$MUT/40") || true
+assert_planted 40 "gitleaks/gitleaks-action under ci/" \
+  "ci/planted.yml uses gitleaks/gitleaks-action" "$got"
+
+# 41. pinned gitleaks CLI; a commented-out Action line is not a use (must pass)
+mkdir -p "$MUT/41/ci"
+cat > "$MUT/41/ci/planted.yml" <<'YML'
+name: planted-gitleaks-cli
+on: push
+permissions: {}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      # uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+      - name: Secrets
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .
+YML
+got=$(check_gitleaks_action "$MUT/41") || true
+assert_clean 41 "pinned gitleaks CLI is accepted" "$got"
+
+# 42. bare git fetch origin in the gate job (anonymous on private repos, #412)
+mkdir -p "$MUT/42/ci"
+cat > "$MUT/42/ci/planted.yml" <<'YML'
+name: planted-anon-fetch
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the PR base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - run: npm ci --include=dev
+YML
+got=$(check_gate_fetch_auth "$MUT/42") || true
+assert_planted 42 "unauthenticated git fetch origin in the gate job" \
+  "ci/planted.yml unauthenticated git fetch in gate job: git fetch --no-tags" "$got"
+
+# 43. authenticated fetch, but after npm ci (token visible to PR-head code)
+mkdir -p "$MUT/43/ci"
+cat > "$MUT/43/ci/planted.yml" <<'YML'
+name: planted-token-after-install
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci --include=dev
+      - name: Fetch the PR base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+YML
+got=$(check_gate_fetch_auth "$MUT/43") || true
+assert_planted 43 "gate job token enters env after npm ci" \
+  "ci/planted.yml gate job token enters the step env after npm ci" "$got"
+
+# 44. authenticated fetch before npm ci; bare fetches in other jobs are out of
+#     scope (must pass)
+mkdir -p "$MUT/44/ci"
+cat > "$MUT/44/ci/planted.yml" <<'YML'
+name: planted-auth-fetch
+on: pull_request
+permissions: {}
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      # git fetch origin in a comment is not a fetch
+      - name: Fetch the PR base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            fetch --no-tags --prune origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+      - run: npm ci --include=dev
+  other:
+    runs-on: ubuntu-latest
+    steps:
+      - run: git fetch origin main
+YML
+got=$(check_gate_fetch_auth "$MUT/44") || true
+assert_clean 44 "authenticated gate fetch before npm ci is accepted" "$got"
 
 # --- #274 machine-readable self-gate contract --------------------------------
 echo "# #274 command consistency (AGENTS.md, gate.json, sensors job, run-all --no-quarantine)"
