@@ -1,4 +1,4 @@
-# gibson-template-version: sha256:2fab356941dc32e509e2e86bf6ffbf3bc1204c0f51f47ebc3eff09aa0f974041
+# gibson-template-version: sha256:b991a98a60d9470974b52578727c47ddadac17b499619e2c0b5f01a24e3fb6da
 # The Gibson — green gate + protected test-integrity CI (template)
 # Install as .github/workflows/gibson-gate.yml in the target repo (docs/13).
 # Fill <angle> placeholders from the repo's gate commands.
@@ -54,6 +54,7 @@ jobs:
         # anonymous fetches (issue #412). Authenticate this one fetch with a
         # per-command header (masked, never written to .git/config). Runs before
         # `npm ci` so no PR-head code has executed while the token is in env.
+        # GitHub Enterprise Server: replace https://github.com/ with your host.
         env:
           BASE_REF: ${{ github.base_ref }}
           GH_TOKEN: ${{ github.token }}
@@ -87,17 +88,26 @@ jobs:
       - name: Secrets (gitleaks)
         # MIT CLI, not the GitHub Action: the Action needs a paid GITLEAKS_LICENSE
         # on organization-owned repos (issue #412). Pinned release,
-        # checksum-verified before execution.
+        # checksum-verified before execution. Scans the PR's commits only, as the
+        # Action did: the CLI default is every branch's full history, so one old
+        # secret on any branch would turn every PR red. Findings appear
+        # (redacted) in the job log; there is no PR comment or SARIF upload.
         env:
           GITLEAKS_VERSION: 8.30.1
           GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          for sha in "$BASE_SHA" "$HEAD_SHA"; do
+            [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "::error::malformed PR SHA '$sha' (fail closed)"; exit 1; }
+          done
           tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" gitleaks
-          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 \
+            --log-opts="--no-merges ${BASE_SHA}..${HEAD_SHA}" .
       - name: SAST (semgrep)
         run: pipx run semgrep ci --config p/owasp-top-ten --config p/secrets
       - name: Supply chain
