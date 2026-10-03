@@ -190,3 +190,14 @@ single provider's rate ceiling.
 Do not weaken exact-head CI, cross-vendor review (rule 1), or owner gates to
 "save tokens." Missing usage stays unknown; never invent dollar prices in the
 orchestration layer.
+
+## Recording owner orders
+
+Records in an owner-order file come only from an explicit owner instruction.
+They are append-only `gibson.owner-order.v1` JSON Lines. `scripts/queue-order.mjs`
+resolves the newest instant for one repository. It never parses prose, an epic
+child map, file position, or a calendar date that has no time. A `HOLD` from
+that resolver blocks dispatch from that record set until a newer unambiguous
+order exists. This section does not record an order. It is explanation only;
+the banner at the top of this file still applies, and nothing here adds a rule
+beyond [`AGENTS.md`](../AGENTS.md).
