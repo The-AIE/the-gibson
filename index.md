@@ -31,13 +31,11 @@ live, and customer data.
 
 ## The goal
 
-The Gibson is a harness for capable, autonomous software engineering. You give
-it an outcome. Agents plan the work, write the code, test it, review each
-other's changes, and ship it. No agent grades its own work: a different agent
-reviews every change, from a different vendor whenever one is available, and
-nothing merges without passing tests and a security scan. Changes to what users
-see get clicked through in a real browser, the way a customer would. You get
-pulled in for [sixteen written reasons](docs/14-human-gates.md), such as
-spending money, going live, or touching customer data. The crew handles
-everything else. When it gets something wrong, the fix goes back into the rules
-so the same mistake doesn't happen twice.
+The Gibson is a capable, autonomous software engineering harness. You give it an
+outcome. Agents plan the work, write the code, test it, and ship it. A different
+agent reviews every change, from a different vendor when one is available.
+Nothing merges without passing tests and a security scan, and changes users can
+see get tested in a real browser. The crew stops for you on [sixteen
+conditions](docs/14-human-gates.md), such as spending money, going live, or
+touching customer data. It handles the rest. When it makes a mistake, the fix
+goes into the rules.
