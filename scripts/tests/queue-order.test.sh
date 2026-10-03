@@ -340,7 +340,7 @@ grep -i -q 'why' <<<"$LAST_OUT" && ok "help says why" || bad "help missing why"
 grep -i -q 'risks' <<<"$LAST_OUT" && ok "help says risks" || bad "help missing risks"
 grep -i -q 'examples' <<<"$LAST_OUT" && ok "help says examples" || bad "help missing examples"
 assert_out "short help exits 0" 0 "$(node "$TOOL" -h)" -h
-assert_usage "no args" 
+assert_usage "no args"
 assert_usage "missing repo" --file "$FIX/control.jsonl"
 assert_usage "missing file" --repo "$REPO"
 assert_usage "file missing value" --file
@@ -589,8 +589,15 @@ fi
 
 mv "$BIN/gh" "$BIN/gh.off"
 : > "$GH_LOG"
+# spawnSync looks up gh on PATH. Renaming the fixture is not enough: Ubuntu
+# runners have /usr/bin/gh, and /bin can be that same directory (usrmerge).
+ln -s "$(command -v cat)" "$BIN/cat"
+missing_path="$PATH"
+PATH="$BIN"
 assert_out "missing gh holds" 3 "HOLD: gh is not available" \
   --file "$FIX/check-order.jsonl" --repo "$REPO" --check-issues
+PATH="$missing_path"
+rm -f "$BIN/cat"
 mv "$BIN/gh.off" "$BIN/gh"
 
 printf '\n%s\n' "=== summary ==="
