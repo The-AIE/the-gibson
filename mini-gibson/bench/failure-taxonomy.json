@@ -1,0 +1,16 @@
+{
+  "schema_version": "gibson-bench-failures/v0.1",
+  "labels": [
+    "wrong_tool",
+    "invalid_arguments",
+    "insufficient_investigation",
+    "wrong_file",
+    "incorrect_implementation",
+    "failed_test_ignored",
+    "bad_diagnosis",
+    "unsuccessful_repair",
+    "premature_completion",
+    "verifier_caught_defect",
+    "timeout_or_infrastructure"
+  ]
+}
