@@ -1,10 +1,13 @@
 <p align="center">
-  <img src="assets/images/branding/gibson-logo-lockup.png" alt="The Gibson — three energized supercomputer towers with the tagline Hack the Planet" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/images/branding/gibson-lockup-stacked-dark.svg">
+    <img src="assets/images/branding/gibson-lockup-stacked.svg" alt="The Gibson: a G made of two rings around an amber core, with the tagline The governance harness for your coding agents" width="300">
+  </picture>
 </p>
 
 # The Gibson
 
-**The open source harness for vibecoders.**
+**The governance harness for your coding agents.**
 
 A portable, self-improving SDLC harness for agent fleets: describe what you want in
 plain language, and the fleet plans, builds, tests, reviews, and ships it under gates
