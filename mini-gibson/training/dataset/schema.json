@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mini Gibson historical trajectory",
+  "type": "object",
+  "required": ["episode_id", "repo", "task", "trajectory", "outcome", "provenance"],
+  "properties": {
+    "episode_id": {"type": "string"},
+    "repo": {"type": "string"},
+    "issue": {"type": ["integer", "null"]},
+    "pr": {"type": ["integer", "null"]},
+    "task": {"type": "string"},
+    "trajectory": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["phase", "evidence"],
+        "properties": {
+          "phase": {"type": "string"},
+          "evidence": {"type": "array", "items": {"type": "object"}}
+        }
+      }
+    },
+    "outcome": {"enum": ["merged", "closed_unmerged", "follow_up_required", "unknown"]},
+    "provenance": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  }
+}
