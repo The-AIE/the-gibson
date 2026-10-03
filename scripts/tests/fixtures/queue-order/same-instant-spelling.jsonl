@@ -1,0 +1,2 @@
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T15:00:00Z","repo":"The-AIE/the-gibson","order":[1],"source":"https://example.test/owner-order/spell-z"}
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T11:00:00-04:00","repo":"The-AIE/the-gibson","order":[2],"source":"https://example.test/owner-order/spell-offset"}

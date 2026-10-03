@@ -1,0 +1,2 @@
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T10:00:00-05:00","repo":"The-AIE/the-gibson","order":[5],"source":"https://example.test/owner-order/offset-later"}
+{"schema":"gibson.owner-order.v1","issued_at":"2026-10-03T14:00:00Z","repo":"The-AIE/the-gibson","order":[6],"source":"https://example.test/owner-order/zulu-earlier"}
