@@ -25,7 +25,6 @@
  * EXIT
  *   0 winning order JSON   2 usage   3 HOLD
  */
-
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
@@ -39,11 +38,9 @@ const ALLOWED_KEYS = new Set([
   "source",
   "supersedes",
 ]);
-
 // Strict RFC 3339: T separator, seconds, optional fraction, Z or numeric offset.
 const RFC3339 =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
-
 function help() {
   process.stdout.write(`queue-order.mjs — resolve the newest explicit owner order for one repository
 
