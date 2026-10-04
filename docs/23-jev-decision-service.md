@@ -1,6 +1,6 @@
 ---
-title: "23 · Optional Jev decision service"
-nav_order: 23
+title: "Optional Jev decision service"
+nav_order: 30
 ---
 
 # Optional Jev decision service
@@ -34,7 +34,7 @@ GIBSON_JEV_ENABLED=1 node scripts/jev-decision.mjs --request summary.json --out 
 
 `GIBSON_JEV_ENABLED` accepts only `0` or `1` and overrides `enabled` for that CLI invocation. When disabled, no key is required and there are zero network requests. CLI configuration/file/JSON errors exit 2 with sanitized diagnostics. Flag parsing follows repository conventions and may echo an invalid option token or enum value, so credentials must stay in the environment. An unavailable service returns an explicit fallback receipt with exit 0. A receipt write failure exits 1. Output basenames must match `jev-[a-z0-9-]+.json`. Files are created exclusively with private permissions; existing files and Gibson's review-receipt filenames are refused. Each output is immutable rather than a replaceable gate receipt.
 
-The supervisor loop additionally requires both `GIBSON_JEV_ENABLED=1` and `GIBSON_JEV_OPERATOR_MODE=1`. The second flag is the operator's explicit assertion that the loop is outside causal scoring. The hook runs only after review-round eligibility and skips calls when halted. It sends only failure count, an unknown phase/infrastructure summary, a red gate status, and zero infrastructure retries (the loop does not maintain that telemetry). It writes a unique `gibson/jev-escalation-*.json` receipt and a filename-only journal entry. Nothing reads that receipt into a coding prompt, second-opinion artifact, evidence receipt, loop state, retry decision, or supervisor handoff. Missing credentials, service failures, and hook timeouts leave the existing escalation path in control.
+The supervisor loop additionally requires both `GIBSON_JEV_ENABLED=1` and `GIBSON_JEV_OPERATOR_MODE=1`. The second flag is the operator's explicit assertion that the loop is outside causal scoring. The hook runs only after review-round eligibility and skips calls when halted. It sends only failure count, an unknown phase/infrastructure summary, a red gate status, and zero infrastructure retries (the loop does not maintain that telemetry). It writes a unique `gibson/jev-escalation-*.json` receipt and a filename-only journal entry. Nothing reads that receipt into a coding prompt, second-opinion artifact, evidence receipt, loop state, retry decision, or supervisor handoff. The loop-summary adapter accepts the four native runners (`grok`, `codex`, `claude`, `hermes`) and counts from 0 to 100; unsupported runner values or counts produce a configuration error and leave escalation in control. Missing credentials, service failures, and hook timeouts also leave the existing escalation path in control.
 
 ## Summary request
 
@@ -65,10 +65,17 @@ The default `experiment_policy` is `excluded_from_scored_loop`. A request declar
 
 Do not set the loop's operator flags during benchmark scoring. Perform anomaly triage only after outcomes and scores are locked if it is declared outside the scored loop. Do not feed advice into an implementing agent unless explicitly included identically across arms; this implementation never does so. Do not use Jev advice to retry task failures merely to obtain a pass.
 
-`integrations/jev/receipt.schema.json` documents receipts. They contain the validated typed answers (including probabilities/confidence when available), state SHA-256, effective policy SHA-256, question-set version, model/endpoint, latency, experiment mode, status, and a fixed fallback/error reason. They contain no raw state, key, provider error text, code, or free-form explanation. Low-confidence responses retain validated answers for audit but have `status=fallback`; they are not actionable advice. Noul uncertainty is measured by the larger of yes/no probability; Choice/Score use provider confidence. Thresholds need validation on your own workload. A successful API response is not a gate success, an approval, or a `VERIFIED` award.
+`integrations/jev/receipt.schema.json` documents receipts. They contain the validated typed answers (including probabilities/confidence when available), state SHA-256, effective policy SHA-256, question-set version, model/endpoint, latency, experiment mode, status, and a fixed fallback/error reason. They contain no raw state, key, provider error text, code, or free-form explanation. State hashes are integrity fingerprints, not encryption or anonymization: a small state space can be enumerated to recover the hashed values. Low-confidence responses retain validated answers for audit but have `status=fallback`; they are not actionable advice. Noul uncertainty is measured by the larger of yes/no probability; Choice/Score use provider confidence. Thresholds need validation on your own workload. A successful API response is not a gate success, an approval, or a `VERIFIED` award.
 
 ## Validation and limitations
 
-The offline suite `scripts/tests/jev-decision.test.sh` exercises fixed official response shapes, disabled behavior, malformed/oversized data, credential handling, full-body deadlines, confidence fallback, scored-loop refusal, frozen policy matching, immutable output, and no execution authority. It uses stubbed responses and no real API key. Existing loop, handoff, review-round, state, and gate suites exercise the unchanged deterministic path.
+The offline suite `scripts/tests/jev-decision.test.sh` exercises fixed official response shapes, disabled behavior, malformed/oversized data, credential handling, full-body deadlines, confidence fallback, scored-loop refusal, frozen policy matching, immutable output, and no execution authority. It uses stubbed responses and no real API key. Existing loop, handoff, review-round, state, and gate suites exercise the unchanged deterministic path. Older loop suites inherit the parent environment, so enabled operator flags and a real key can trigger live calls during those tests. For an offline full run, clear those variables for that command:
+
+```bash
+env -u GIBSON_JEV_ENABLED -u GIBSON_JEV_OPERATOR_MODE -u TYPESAFE_API_KEY \
+  bash scripts/tests/run-all.sh --no-quarantine
+```
+
+The dedicated Jev test wrapper clears these variables itself. A local timeout does not establish that the provider did not process or charge for a request. Receipts do not retain provider usage or cost, so they do not provide billing reconciliation.
 
 This draft does not claim live TypeSafe connectivity, decision quality, model calibration, availability, cross-arm fairness, a tool interception layer, benchmark execution, or production readiness. There is no alternative provider/generative fallback, automatic retry/route/permission change, or verified model promotion. Activation and any provider spend are separate owner decisions. The pinned model and question set require a reviewed code/config change before upgrading.
