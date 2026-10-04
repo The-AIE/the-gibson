@@ -1,0 +1,37 @@
+{
+  "apiVersion": "gibson.dev/v1alpha1",
+  "kind": "OptionalDecisionService",
+  "name": "jev",
+  "status": "OPTIONAL_NOT_CRITICAL_PATH",
+  "authority": "advisory",
+  "coding_model": false,
+  "enabled_by_default": false,
+  "credentials_env": [
+    "TYPESAFE_API_KEY"
+  ],
+  "provider_endpoint": "https://api.typesafe.ai/v1/systemone",
+  "model": "jev-1.13.0",
+  "question_set_version": "gibson.jev.questions/v1",
+  "allowed_uses": [
+    "supervisor-escalation",
+    "model-or-agent-routing",
+    "tool-call-guard",
+    "benchmark-anomaly-triage"
+  ],
+  "forbidden_uses": [
+    "generate_code",
+    "award_verified",
+    "replace_evidence_gate",
+    "silently_change_tool_permissions",
+    "inspect_hidden_benchmark_answers",
+    "retry_failed_tasks_until_pass",
+    "automatic_dispatch"
+  ],
+  "causal_experiment_policy": {
+    "default": "excluded_from_scored_loop",
+    "alternative": "identical_across_all_arms",
+    "routing": "operator_only"
+  },
+  "cli": "scripts/jev-decision.mjs",
+  "documentation": "docs/23-jev-decision-service.md"
+}

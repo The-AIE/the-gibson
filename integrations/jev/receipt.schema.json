@@ -1,0 +1,558 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-gibson.dev/integrations/jev/receipt.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "gibson.jev.receipt/v1"
+    },
+    "authority": {
+      "const": "advisory"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "disabled",
+        "advisory",
+        "fallback"
+      ]
+    },
+    "use": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "supervisor-escalation",
+            "model-or-agent-routing",
+            "tool-call-guard",
+            "benchmark-anomaly-triage"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "experiment_mode": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "operator",
+            "outside-scored-loop",
+            "scored"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "model": {
+      "anyOf": [
+        {
+          "const": "jev-1.13.0"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "endpoint": {
+      "const": "https://api.typesafe.ai/v1/systemone"
+    },
+    "question_set_version": {
+      "const": "gibson.jev.questions/v1"
+    },
+    "request_state_hash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy_hash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "typed_answers": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "choice"
+                },
+                "choice": {
+                  "type": "string",
+                  "enum": [
+                    "continue",
+                    "retry_infrastructure",
+                    "stop",
+                    "human_escalation"
+                  ]
+                },
+                "probabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "continue": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "retry_infrastructure": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "stop": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "human_escalation": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "continue",
+                    "retry_infrastructure",
+                    "stop",
+                    "human_escalation"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "choice",
+                "probabilities",
+                "confidence"
+              ]
+            },
+            "needs_human": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "noul"
+                },
+                "noul": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "noul"
+              ]
+            },
+            "run_risk": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "score"
+                },
+                "score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2
+                },
+                "legend": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "0": {
+                      "const": "low"
+                    },
+                    "1": {
+                      "const": "medium"
+                    },
+                    "2": {
+                      "const": "high"
+                    }
+                  },
+                  "required": [
+                    "0",
+                    "1",
+                    "2"
+                  ]
+                },
+                "probabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "0": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "1": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "2": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "0",
+                    "1",
+                    "2"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "score",
+                "legend",
+                "probabilities",
+                "confidence"
+              ]
+            }
+          },
+          "required": [
+            "action",
+            "needs_human",
+            "run_risk"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "route": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "choice"
+                },
+                "choice": {
+                  "type": "string",
+                  "enum": [
+                    "hermes",
+                    "codex",
+                    "claude_code",
+                    "grok",
+                    "human"
+                  ]
+                },
+                "probabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "hermes": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "codex": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "claude_code": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "grok": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "human": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "hermes",
+                    "codex",
+                    "claude_code",
+                    "grok",
+                    "human"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "choice",
+                "probabilities",
+                "confidence"
+              ]
+            }
+          },
+          "required": [
+            "route"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "allow_tool_call": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "noul"
+                },
+                "noul": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "noul"
+              ]
+            },
+            "risk": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "score"
+                },
+                "score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2
+                },
+                "legend": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "0": {
+                      "const": "low"
+                    },
+                    "1": {
+                      "const": "medium"
+                    },
+                    "2": {
+                      "const": "high"
+                    }
+                  },
+                  "required": [
+                    "0",
+                    "1",
+                    "2"
+                  ]
+                },
+                "probabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "0": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "1": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "2": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "0",
+                    "1",
+                    "2"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "score",
+                "legend",
+                "probabilities",
+                "confidence"
+              ]
+            }
+          },
+          "required": [
+            "allow_tool_call",
+            "risk"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "anomaly_class": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "choice"
+                },
+                "choice": {
+                  "type": "string",
+                  "enum": [
+                    "expected_task_failure",
+                    "infrastructure_failure",
+                    "telemetry_corruption",
+                    "requires_human_review"
+                  ]
+                },
+                "probabilities": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "expected_task_failure": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "infrastructure_failure": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "telemetry_corruption": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "requires_human_review": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    }
+                  },
+                  "required": [
+                    "expected_task_failure",
+                    "infrastructure_failure",
+                    "telemetry_corruption",
+                    "requires_human_review"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              },
+              "required": [
+                "type",
+                "choice",
+                "probabilities",
+                "confidence"
+              ]
+            }
+          },
+          "required": [
+            "anomaly_class"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "fallback_or_error": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "disabled",
+            "invalid_config",
+            "invalid_request",
+            "routing_requires_operator_mode",
+            "scored_loop_excluded",
+            "halted",
+            "missing_credentials",
+            "operator_mode_required",
+            "timeout",
+            "invalid_response",
+            "response_too_large",
+            "authentication_failed",
+            "rate_limited",
+            "provider_unavailable",
+            "low_confidence"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "fallback": {
+      "const": "deterministic_or_human"
+    }
+  },
+  "required": [
+    "schema",
+    "authority",
+    "status",
+    "use",
+    "experiment_mode",
+    "model",
+    "endpoint",
+    "question_set_version",
+    "request_state_hash",
+    "policy_hash",
+    "typed_answers",
+    "latency_ms",
+    "fallback_or_error",
+    "fallback"
+  ],
+  "description": "Advisory audit data only; never proof of a gate verdict or execution permission. Runtime additionally enforces probability sums/winners and weighted scores."
+}

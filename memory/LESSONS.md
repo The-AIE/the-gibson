@@ -1847,3 +1847,19 @@ Codex round 2 on Gibson PR #327 caught `run-all-stress.sh --runs` (no value) han
 **Harness fix:** a runner is stalled only when its CPU time stays flat across consecutive vitals runs for `VITALS_STALL_FLAT_SECS` (default 1200 s), tracked per pid in `$FLEET/state/vitals-cpu-<pid>`; `VITALS_DRY_RUN=1` reports instead of killing. Proven on a synthetic `exec -a …/.grok/bin/grok sleep` process: watched on first sight, DRY-RUN kill once its flat-since stamp is 1300 s old. Before declaring any lane dead, read `vitals-actions.log` for the exact minute and `git status` in the lane worktree — a killed lane may have finished its edit.
 **Status:** fixed (fleet-vitals.sh patched 2026-09-04; Mini copy to sync) — no Gibson sensor yet
 **Tags:** #fleet #grok #watchdog #liveness
+
+## L-090 · 2026-10-04 · preserve-full-suite-timeout-evidence
+**What happened:** While implementing #430, the unchanged branch-point baseline and the Jev worktree full run both reached the existing 600-second per-suite limit in `contract-authority.test.sh` with eight concurrent suites. The changed branch also timed out in `loop-fleet.test.sh` and `release-claim.test.sh`. The recorded baseline failure counter was 87 matching output lines, not 87 failed assertions; the changed run recorded 91 and was refused by the gate. Test integrity reported exactly 110 additional assertions (5143 to 5253), with no added skips/todos. The Jev suite passed 110/110.
+**Why:** cause remains unresolved. A wall-clock expiry, a parser's aggregate line count, and an assertion failure are different observations. A later retry or green comparison does not establish the cause or erase the failed run.
+**How to apply:** retain baseline SHA/configuration, individual suite exit codes and timing/output receipts, and the final gate comparison. Report timeouts separately from assertion failures; preserve every assertion and skip/todo count when investigating. No gate or timeout policy change is authorized by this observation.
+**Harness fix:** none in #430; the integration does not change the test runner or contract-authority sensor.
+**Status:** observed twice locally; cause unresolved, no sensor change.
+**Tags:** #ci #evidence #timeout #test-integrity
+
+## L-091 · 2026-10-04 · validate-new-doc-authority-marker-before-full-suite
+**What happened:** The new #430 Jev documentation page lacked the exact non-normative authority marker required for doctrine pages. The eight-job run's partial contract-authority output already contained `E_BANNER`; the lower-concurrency run completed the suite with 402 passing and three failing assertions for that same missing marker. A timeout summary alone hid this concrete source defect until individual receipts were inspected.
+**Why:** the page was not checked with the direct authority sensor before the long suite. Timeouts and real assertion failures can coexist; neither can stand in for the other.
+**How to apply:** run the direct contract-authority check after adding a doctrine page, and inspect failing suites' assertion output even when their terminal status is a timeout. Add the existing non-normative marker; do not weaken the sensor, skip the assertions, or infer a cause from a retry.
+**Harness fix:** the Jev page now includes the existing marker; no authority or sensor policy changes.
+**Status:** missing marker reproduced, corrected in #430; clean full-suite verification follows.
+**Tags:** #docs #authority #ci #evidence
