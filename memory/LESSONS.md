@@ -1863,3 +1863,11 @@ Codex round 2 on Gibson PR #327 caught `run-all-stress.sh --runs` (no value) han
 **Harness fix:** the Jev page now includes the existing marker; no authority or sensor policy changes.
 **Status:** missing marker reproduced, corrected in #430; clean full-suite verification follows.
 **Tags:** #docs #authority #ci #evidence
+
+## L-092 · 2026-10-04 · structured-schemas-count-against-pr-size-budget
+**What happened:** The trusted-base PR-size check rejected #432 at implementation head `2143ecfe26b761191f3d0c6cc3bc6b07baec5737` (1308 product lines / 2067 total) and follow-up head `2c71f38885757951e34795ea7a231f96e52a3c17` (1308 product lines / 2126 total). The existing budgets are 400 product and 1500 total lines. Both results are retained; the local full gate and independent reviews passed separately.
+**Why:** the size sensor classifies the three new JSON schema files as product; they alone contribute 952 lines in the follow-up diff. Schema completeness and passing runtime tests do not satisfy the separate review-size budget.
+**How to apply:** check the trusted-base size result while planning structured interfaces, including schema and test lines. Keep over-budget results explicit in a draft and resolve their disposition through the existing owner process; do not reclassify schema files as generated or manufacture a local exception.
+**Harness fix:** none in #430; no size budget, class rule, workflow, or merge gate changed. The draft also reports its separate unresolved trusted bot identity/review-evidence requirement.
+**Status:** observed on two published implementation heads; size-budget disposition unresolved.
+**Tags:** #ci #review #schema #evidence
