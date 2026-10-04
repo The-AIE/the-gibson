@@ -1,0 +1,356 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-gibson.dev/integrations/jev/request.schema.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use": {
+          "const": "supervisor-escalation"
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "phase": {
+              "type": "string",
+              "enum": [
+                "plan",
+                "decompose",
+                "build",
+                "test",
+                "review",
+                "ux-eval",
+                "security",
+                "merge",
+                "deploy",
+                "retro",
+                "unknown"
+              ]
+            },
+            "infrastructure_health": {
+              "type": "string",
+              "enum": [
+                "healthy",
+                "degraded",
+                "unavailable",
+                "unknown"
+              ]
+            },
+            "consecutive_failures": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "retry_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "gate_status": {
+              "type": "string",
+              "enum": [
+                "unknown",
+                "red",
+                "green"
+              ]
+            },
+            "halted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "phase",
+            "infrastructure_health",
+            "consecutive_failures",
+            "retry_count",
+            "gate_status",
+            "halted"
+          ]
+        },
+        "experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "outside-scored-loop",
+                "scored"
+              ]
+            },
+            "frozen_policy_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      },
+      "required": [
+        "use",
+        "state",
+        "experiment"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use": {
+          "const": "model-or-agent-routing"
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "phase": {
+              "type": "string",
+              "enum": [
+                "plan",
+                "decompose",
+                "build",
+                "test",
+                "review",
+                "ux-eval",
+                "security",
+                "merge",
+                "deploy",
+                "retro",
+                "unknown"
+              ]
+            },
+            "required_capability": {
+              "type": "string",
+              "enum": [
+                "coding",
+                "review",
+                "operations",
+                "human_judgment"
+              ]
+            },
+            "infrastructure_health": {
+              "type": "string",
+              "enum": [
+                "healthy",
+                "degraded",
+                "unavailable",
+                "unknown"
+              ]
+            }
+          },
+          "required": [
+            "phase",
+            "required_capability",
+            "infrastructure_health"
+          ]
+        },
+        "experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "outside-scored-loop",
+                "scored"
+              ]
+            },
+            "frozen_policy_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      },
+      "required": [
+        "use",
+        "state",
+        "experiment"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use": {
+          "const": "tool-call-guard"
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tool_name": {
+              "type": "string",
+              "enum": [
+                "read_file",
+                "write_file",
+                "shell",
+                "network",
+                "git",
+                "unknown"
+              ]
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "read",
+                "write",
+                "execute",
+                "delete",
+                "publish",
+                "unknown"
+              ]
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "local",
+                "staging",
+                "production",
+                "external",
+                "unknown"
+              ]
+            },
+            "has_credentials": {
+              "type": "boolean"
+            },
+            "touches_sensitive_data": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "tool_name",
+            "operation",
+            "scope",
+            "has_credentials",
+            "touches_sensitive_data"
+          ]
+        },
+        "experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "outside-scored-loop",
+                "scored"
+              ]
+            },
+            "frozen_policy_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      },
+      "required": [
+        "use",
+        "state",
+        "experiment"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use": {
+          "const": "benchmark-anomaly-triage"
+        },
+        "state": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "task_result": {
+              "type": "string",
+              "enum": [
+                "passed",
+                "failed",
+                "blocked",
+                "unknown"
+              ]
+            },
+            "failure_category": {
+              "type": "string",
+              "enum": [
+                "task",
+                "infrastructure",
+                "telemetry",
+                "unknown"
+              ]
+            },
+            "telemetry_integrity": {
+              "type": "string",
+              "enum": [
+                "valid",
+                "corrupt",
+                "missing",
+                "unknown"
+              ]
+            },
+            "infrastructure_health": {
+              "type": "string",
+              "enum": [
+                "healthy",
+                "degraded",
+                "unavailable",
+                "unknown"
+              ]
+            },
+            "attempt_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "task_result",
+            "failure_category",
+            "telemetry_integrity",
+            "infrastructure_health",
+            "attempt_count"
+          ]
+        },
+        "experiment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "operator",
+                "outside-scored-loop",
+                "scored"
+              ]
+            },
+            "frozen_policy_hash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        }
+      },
+      "required": [
+        "use",
+        "state",
+        "experiment"
+      ]
+    }
+  ]
+}

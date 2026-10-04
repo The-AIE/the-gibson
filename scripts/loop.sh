@@ -2226,11 +2226,30 @@ refuse_review_round_if_capped() {
   return 1
 }
 
+# Jev records advice only. Its receipt is never a prompt, review, retry decision,
+# permission, or supervisor handoff input. Explicit operator mode keeps this hook
+# out of scored causal experiments; those use the standalone service contract.
+jev_escalation_advice() {
+  [[ "${GIBSON_JEV_ENABLED:-0}" == "1" && "${GIBSON_JEV_OPERATOR_MODE:-0}" == "1" ]] || return 0
+  if halted; then return 0; fi
+  command -v node >/dev/null 2>&1 || { info "Jev advisory skipped — node unavailable"; return 0; }
+  local advice
+  advice="$STATE_DIR/jev-escalation-$(date -u +%Y%m%d%H%M%S)-$$-${RANDOM}.json"
+  if run_with_wall_timeout 15 node "$SCRIPT_DIR/../scripts/jev-decision.mjs" \
+      --loop-summary --failures "$failures" --runner "$RUNNER" --out "$advice" >/dev/null 2>&1; then
+    printf '\nJev advisory receipt (no execution authority): %s\n' "${advice##*/}" >> "$JOURNAL"
+  else
+    info "Jev advisory unavailable — existing deterministic escalation continues"
+    printf '\nJev advisory receipt unavailable; existing deterministic escalation continues.\n' >> "$JOURNAL"
+  fi
+}
+
 escalate() {
   if ! refuse_review_round_if_capped second-opinion; then
     info "second-opinion skipped — review-round cap reached or config unreadable"
     exit 1
   fi
+  jev_escalation_advice
   local out="$REVIEW_ARTIFACT"
   info "escalating after $failures consecutive failures — reviewers: $REVIEWERS"
   # The receipt is dropped even though escalation no longer touches the pre-handoff

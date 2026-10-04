@@ -1,0 +1,7 @@
+{
+  "enabled": false,
+  "model": "jev-1.13.0",
+  "timeout_ms": 2000,
+  "min_confidence": 0.8,
+  "experiment_policy": "excluded_from_scored_loop"
+}

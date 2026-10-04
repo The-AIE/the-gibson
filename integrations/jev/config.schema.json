@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://the-gibson.dev/integrations/jev/config.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "model": {
+      "const": "jev-1.13.0"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 50,
+      "maximum": 10000
+    },
+    "min_confidence": {
+      "type": "number",
+      "minimum": 0.5,
+      "maximum": 1
+    },
+    "experiment_policy": {
+      "type": "string",
+      "enum": [
+        "excluded_from_scored_loop",
+        "identical_across_all_arms"
+      ]
+    }
+  },
+  "required": [
+    "enabled",
+    "model",
+    "timeout_ms",
+    "min_confidence",
+    "experiment_policy"
+  ]
+}
