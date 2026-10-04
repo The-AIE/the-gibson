@@ -11,7 +11,7 @@ const flags = parseFlags(process.argv.slice(2), {flags: {
   '--help': {key: 'help', type: 'boolean'}, '-h': {key: 'help', type: 'boolean'},
   '--config': {key: 'config'}, '--request': {key: 'request'}, '--out': {key: 'out'},
   '--loop-summary': {key: 'loop', type: 'boolean'}, '--failures': {key: 'failures'},
-  '--runner': {key: 'runner', type: 'enum', values: ['grok', 'codex', 'claude']},
+  '--runner': {key: 'runner', type: 'enum', values: ['grok', 'codex', 'claude', 'hermes']},
 }});
 function usageError() { console.error('jev-decision: invalid configuration, input, or output path'); process.exit(2); }
 if (flags.help) {

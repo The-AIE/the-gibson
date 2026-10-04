@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, statSync, existsSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, statSync, existsSync, symlinkSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 
 const root = process.env.JEVMODULE_ROOT || fileURLToPath(new URL('../..', import.meta.url));
 const { DEFAULT_CONFIG, QUESTION_SETS, QUESTION_SET_VERSION, policyHash,
@@ -641,6 +641,58 @@ for (const scenario of [
       if (!scenario.capped) {
         assert.deepEqual(readFileSync(variables, 'utf8').trim().split('\n'), ['7', 'codex', 'claude,grok', review, receipt]);
       }
+    });
+  });
+}
+
+for (const runner of ['grok', 'codex', 'claude', 'hermes']) {
+  test(`AC1/3/5: real loop hook, deadline helper and CLI create a private fallback receipt for native ${runner}`, () => {
+    withFixtures(({ folder }) => {
+      const journal = resolve(folder, 'journal.md');
+      const review = resolve(folder, 'second-opinion.md');
+      const evidence = resolve(folder, 'review-receipt.json');
+      const variables = resolve(folder, 'variables.txt');
+      const shell = resolve(folder, 'real-hook.sh');
+      writeFileSync(review, 'EXISTING_REVIEW_ARTIFACT');
+      writeFileSync(evidence, 'EXISTING_DETERMINISTIC_REVIEW_RECEIPT');
+      writeFileSync(shell, [
+        'set -eu', '. "$TEST_WALL_TIMEOUT"',
+        'STATE_DIR="$TEST_FOLDER"', 'SCRIPT_DIR="$TEST_SCRIPT_DIR"', 'JOURNAL="$TEST_JOURNAL"',
+        'REVIEW_ARTIFACT="$TEST_REVIEW"', 'REVIEW_RECEIPT="$TEST_EVIDENCE"',
+        'failures=7', 'RUNNER="$TEST_RUNNER"', 'REVIEWERS=claude,grok',
+        'info() { printf "%s\\n" "$*" >> "$TEST_INFO"; }',
+        'halted() { return 1; }', loopFunction('jev_escalation_advice'),
+        'jev_escalation_advice',
+        'printf "%s\\n" "$failures" "$RUNNER" "$REVIEWERS" "$REVIEW_ARTIFACT" "$REVIEW_RECEIPT" > "$TEST_VARIABLES"',
+      ].join('\n'));
+      // Fresh child environment deliberately omits all real provider credentials.
+      // The hook resolves the same Node runtime as this test, and executes the
+      // production CLI and process-tree deadline helper without replacements.
+      const environment = {
+        PATH: `${dirname(process.execPath)}:${process.env.PATH || ''}`,
+        GIBSON_JEV_ENABLED: '1', GIBSON_JEV_OPERATOR_MODE: '1',
+        TEST_FOLDER: folder, TEST_SCRIPT_DIR: resolve(root, 'scripts'),
+        TEST_WALL_TIMEOUT: resolve(root, 'scripts/lib/wall-timeout.sh'), TEST_RUNNER: runner,
+        TEST_JOURNAL: journal, TEST_REVIEW: review, TEST_EVIDENCE: evidence,
+        TEST_VARIABLES: variables, TEST_INFO: resolve(folder, 'info.txt'),
+      };
+      assert.equal(Object.hasOwn(environment, 'TYPESAFE_API_KEY'), false);
+      const result = spawnSync('bash', [shell], { env: environment, encoding: 'utf8', timeout: 18000 });
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(review, 'utf8'), 'EXISTING_REVIEW_ARTIFACT');
+      assert.equal(readFileSync(evidence, 'utf8'), 'EXISTING_DETERMINISTIC_REVIEW_RECEIPT');
+      assert.deepEqual(readFileSync(variables, 'utf8').trim().split('\n'), ['7', runner, 'claude,grok', review, evidence]);
+      const files = readdirSync(folder).filter(name => /^jev-escalation-[0-9]+-[0-9]+-[0-9]+\.json$/.test(name));
+      assert.equal(files.length, 1, `${runner} must produce a real CLI receipt`);
+      const output = resolve(folder, files[0]);
+      const receipt = JSON.parse(readFileSync(output, 'utf8'));
+      assertReceipt(receipt, 'fallback');
+      assert.equal(receipt.fallback_or_error, 'missing_credentials');
+      assert.equal(receipt.use, 'supervisor-escalation');
+      assert.equal(receipt.experiment_mode, 'operator');
+      assert.equal(statSync(output).mode & 0o777, 0o600);
+      assert.ok(readFileSync(journal, 'utf8').includes('no execution authority'));
     });
   });
 }
