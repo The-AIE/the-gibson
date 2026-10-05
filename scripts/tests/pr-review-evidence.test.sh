@@ -681,6 +681,46 @@ expect "(385-cfg-owner) authorCommits on owner identity" "$d" config-error failu
 node -e 'const c=require(process.argv[1]); const cr=c.identities.find(i=>i.login.includes("coderabbit")); cr.roles=["author"]; cr.authorCommits=["5ced13878f802c5810bdf098b954e0759cb659e5"]; process.stdout.write(JSON.stringify(c))' "$CFG" > "$ROOT/ac-cr.json"
 expect "(385-cfg-coderabbit) authorCommits on coderabbit vendor" "$d" config-error failure 1 "$ROOT/ac-cr.json"
 
+echo "# owner gate carve-outs (Mark 2026-10-05): relaxed identity outside carve-out paths"
+fx_files() { d=$1; shift; { printf '['; sep=""; for f in "$@"; do printf '%s{"filename":"%s"}' "$sep" "$f"; sep=","; done; printf ']'; } > "$d/files.json"; }
+set_msg() { node -e 'const fs=require("fs");const p=process.argv[1];const j=JSON.parse(fs.readFileSync(p,"utf8"));j[Number(process.argv[2])].commit.message=process.argv[3];fs.writeFileSync(p,JSON.stringify(j));' "$1/commits.json" "$2" "$3"; }
+DEVIN_OK="$DEVIN|Bot|APPROVED|$HEAD|1|2026-10-05T10:00:00Z"
+TRAILER_GROK=$'fix: thing\n\nAgent-Vendor: grok\nSigned-off-by: Mark Hinkle <mrhinkle@gmail.com>'
+d=$(fx_new cg1); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" docs/guide.md scripts/digest.sh; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg1) unsigned lane bot, non-carve-out files, devin APPROVE" "$d" pass success 0; expect_av "(cg1)" '["grok"]'
+d=$(fx_new cg2); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" docs/guide.md AGENTS.md; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg2) unsigned lane bot touching AGENTS.md stays owner-gated" "$d" identity-unresolved failure 1; expect_detail "(cg2)" "owner-carve-out:AGENTS.md"
+d=$(fx_new cg3); fx_commits "$d" "$GROK|$GROK|false"; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg3) unknown file list keeps the strict path" "$d" identity-unresolved failure 1
+d=$(fx_new cg4); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "$TRAILER_GROK"; fx_files "$d" scripts/claim.sh; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg4) owner-identity commit with Agent-Vendor: grok trailer" "$d" pass success 0; expect_av "(cg4)" '["grok"]'
+d=$(fx_new cg5); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "$TRAILER_GROK"; fx_files "$d" scripts/claim.sh; fx_reviews "$d" "$GROK|Bot|APPROVED|$HEAD|1|2026-10-05T10:00:00Z"
+expect "(cg5) trailer vendor still bars a same-vendor reviewer" "$d" same-vendor-reviewer failure 1
+d=$(fx_new cg6); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "fix: no trailer"; fx_files "$d" scripts/claim.sh; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg6) owner-identity commit without a trailer needs attestation" "$d" identity-unresolved failure 1; expect_detail "(cg6)" "mrhinkle:owner-unattested"
+d=$(fx_new cg7); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "$TRAILER_GROK"; fx_files "$d" scripts/claim.sh prisma/migrations/20261005/migration.sql; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg7) schema/migration path keeps the owner requirement" "$d" identity-unresolved failure 1; expect_detail "(cg7)" "owner-carve-out:prisma/migrations"
+d=$(fx_new cg8); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "$TRAILER_GROK"; fx_files "$d" .github/workflows/pr-review-evidence.yml; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg8) control-plane workflow keeps the owner requirement" "$d" identity-unresolved failure 1
+d=$(fx_new cg9); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" src/billing/invoice.ts; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg9) billing path keeps the owner requirement" "$d" identity-unresolved failure 1
+for f in CLAUDE.md apps/x/AGENTS.md .grok/settings.json .codex/config.toml .agents/gate.json config/review-evidence.v1.json config/policy/candidates/gibson-core-v1.candidate.json scripts/pr-review-evidence.mjs src/lib/stripe-client.ts src/lib/api-key.ts .env.local db/schema.prisma db/seed.sql src/checkout/page.tsx; do
+  d=$(fx_new "cgx-$(printf '%s' "$f" | tr '/.' '__')"); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" "$f"; fx_reviews "$d" "$DEVIN_OK"
+  expect "(cgx) carve-out $f" "$d" identity-unresolved failure 1
+done
+d=$(fx_new cg10); fx_commits "$d" "some-bot[bot]|some-bot[bot]|false"; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg10) unlisted bot is never relaxed" "$d" identity-unresolved failure 1
+d=$(fx_new cg11); fx_commits "$d" "$DEVIN|$DEVIN|false"; fx_files "$d" docs/guide.md; fx_reviews "$d" "$CR|Bot|APPROVED|$HEAD|1|2026-10-05T10:00:00Z"
+expect "(cg11) only aie-agent-lanes-* bots are relaxed when unsigned" "$d" identity-unresolved failure 1
+d=$(fx_new cg12); fx_commits "$d" "$MINI|$MINI|false"; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg12) authorCommits restriction still precedes relaxation" "$d" identity-unresolved failure 1; expect_detail "(cg12)" "commit-not-allowed"
+d=$(fx_new cg13); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" AGENTS.md; fx_reviews "$d" "$DEVIN_OK"; fx_comments "$d" "$OWNER|OWNER|-|0|9|2026-10-05T11:00:00Z|$(attest "$HEAD" grok)"
+expect "(cg13) carve-out passes with the owner attestation" "$d" pass success 0
+d=$(fx_new cg14); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 $'x\n\nAgent-Vendor: owner'; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg14) a non-author trailer vendor does not resolve" "$d" identity-unresolved failure 1
+d=$(fx_new cg15); fx_commits "$d" "$GROK|$GROK|false" "$OWNER|$OWNER|false"; set_msg "$d" 1 $'y\n\nAgent-Vendor: claude'; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
+expect "(cg15) mixed lane bot + trailer commits union vendors" "$d" pass success 0; expect_av "(cg15)" '["grok","claude"]'
+
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
