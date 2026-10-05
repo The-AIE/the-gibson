@@ -269,9 +269,13 @@ if [[ "$1" == "issue" && "$2" == "view" ]]; then
       state="OPEN"
       labels_tsv=$'needs-mark\nenhancement'
       ;;
-    gated-tier-c)
+    gated-schema)
       state="OPEN"
-      labels_tsv="tier-c"
+      labels_tsv="owner-gate-schema"
+      ;;
+    gated-sensitive)
+      state="OPEN"
+      labels_tsv="owner-gate-sensitive"
       ;;
     gated-decision)
       state="OPEN"
@@ -1017,7 +1021,7 @@ export FLEET_PROFILE="$PROF"
 zero_launch_case "closed issue" 'is not open|state=CLOSED' --start
 
 # gated labels
-for mode in gated-needs-mark gated-tier-c gated-decision gated-blocked gated-halt; do
+for mode in gated-needs-mark gated-schema gated-sensitive gated-decision gated-blocked gated-halt; do
   export GH_STUB_MODE="$mode"
   PROF="$ROOT/profiles/${mode}.profile"
   write_profile "$PROF" \
@@ -7211,6 +7215,33 @@ lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "1" ]] && ok "hostile description cannot manufacture gated labels" \
   || bad "description manufactured gate launches=$lc out=$out"
 
+# (1b) Owner gate carve-outs (Mark 2026-10-05): a real `tier-c` label is no
+# longer a dispatch stop, so the lane launches.
+reset_calls
+TARGET=$(setup_target_repo hostlabtc acme/widget)
+PROF="$ROOT/profiles/hostlabtc.profile"
+write_profile "$PROF" \
+  "version=1" \
+  "name=hostlabtc" \
+  "repo=$TARGET" \
+  "slug=acme/widget" \
+  "gibson=$ROOT/gibson" \
+  "fleet_dir=$ROOT/fleet" \
+  "log_dir=$ROOT/logs" \
+  "runner=fake-runner" \
+  "lane=docs|605|docs/**|docs only"
+export FLEET_PROFILE="$PROF"
+cat > "$ISSUEDIR/605.tmpl" <<'TMPL'
+OPEN
+tier-c
+enhancement
+TMPL
+: > "$CALLS/launches.log"
+out=$(run_fleet --start) || { bad "tier-c label should no longer gate dispatch: $out"; }
+lc=$(echo "$(launch_count)" | tr -d '[:space:]')
+[[ "$lc" == "1" ]] && ok "tier-c is not a dispatch gate (2026-10-05 carve-outs)" \
+  || bad "tier-c still gated launches=$lc out=$out"
+
 # (2) Gated label last after many decoys → must refuse (order cannot hide).
 reset_calls
 TARGET=$(setup_target_repo hostlab2 acme/widget)
@@ -7287,14 +7318,14 @@ write_profile "$PROF" \
 export FLEET_PROFILE="$PROF"
 cat > "$ISSUEDIR/604.tmpl" <<'TMPL'
 OPEN
-tier-c
+owner-gate-schema
 enhancement
 TMPL
 : > "$CALLS/launches.log"
-out=$(run_fleet --start 2>&1) && bad "real tier-c with hostile body should refuse: $out" || {
-  echo "$out" | grep -iE "gated label 'tier-c'" >/dev/null \
+out=$(run_fleet --start 2>&1) && bad "real owner-gate-schema with hostile body should refuse: $out" || {
+  echo "$out" | grep -iE "gated label 'owner-gate-schema'" >/dev/null \
     && ok "hostile body cannot hide real gated label" \
-    || bad "unclear tier-c hide refuse: $out"
+    || bad "unclear owner-gate-schema hide refuse: $out"
 }
 lc=$(echo "$(launch_count)" | tr -d '[:space:]')
 [[ "$lc" == "0" ]] && ok "hostile-body gated launched zero" || bad "hostile-body gated launched $lc"
