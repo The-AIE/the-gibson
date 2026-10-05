@@ -1359,7 +1359,10 @@ ensure_watchdog() {
 
 # --- preflight (fail closed before any runner launch) -----------------------
 
-GATED_LABELS="needs-mark decision blocked tier-c gibson-halt"
+# Owner gate carve-outs (Mark, 2026-10-05): `tier-c` is no longer a dispatch
+# stop. Human holds (`needs-mark`, `decision`, `blocked`, `gibson-halt`) and the
+# owner carve-out labels for schema/migrations and secrets/billing remain.
+GATED_LABELS="needs-mark decision blocked gibson-halt owner-gate-schema owner-gate-sensitive"
 
 label_is_gated() {
   local lab="$1" g
@@ -1787,7 +1790,7 @@ check_issue_preflight() {
   while IFS= read -r lab || [[ -n "$lab" ]]; do
     [[ -n "$lab" ]] || continue
     if label_is_gated "$lab"; then
-      die "lane $lane: issue #$issue carries gated label '$lab' (needs-mark|decision|blocked|tier-c|gibson-halt)"
+      die "lane $lane: issue #$issue carries gated label '$lab' (needs-mark|decision|blocked|gibson-halt|owner-gate-schema|owner-gate-sensitive)"
     fi
     if [[ "$lab" == "agent-claimed" ]]; then
       if [[ "$mode" == "own" ]]; then
