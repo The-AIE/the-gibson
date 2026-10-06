@@ -76,6 +76,62 @@ const IDENTITY_KEYS = new Set(["login", "appSlug", "appId", "vendor", "roles", "
 // GitHub's own committer for web-UI edits; not a vendor, not an author of record.
 const GITHUB_WEB_FLOW = "web-flow";
 
+// Owner gate carve-outs (Mark, 2026-10-05). The owner-attestation requirement
+// for unsigned or owner-identity commits is kept ONLY when a PR touches one of
+// these paths: (a) agent rule and control-plane files, (b) secrets/billing,
+// (c) schema and migrations. Everywhere else a listed lane bot
+// (aie-agent-lanes-*[bot]) resolves without an attestation even when its CLI
+// commit is unsigned, and an owner-identity commit resolves to the vendor named
+// by its `Agent-Vendor:` trailer. An unknown file list is treated as a
+// carve-out (fail closed: the strict, attestation-required path).
+const LANE_BOT_LOGIN = /^aie-agent-lanes-[a-z0-9-]+\[bot\]$/;
+const AGENT_RULE_FILE_NAMES = new Set(["agents.md", "claude.md"]);
+const CARVE_OUT_PATTERNS = [
+  // (a) agent rule and control-plane files
+  /^\.(grok|codex|agents)\//i,
+  /^\.github\//i,
+  /^config\/review-evidence\.v1\.json$/i,
+  /^config\/policy\//i,
+  /^scripts\/pr-review-evidence\.mjs$/i,
+  // (b) secrets, Stripe, billing, checkout, payments, api keys
+  /(^|\/)[^/]*(secret|stripe)[^/]*\.[cm]?[jt]sx?$/i,
+  /(^|\/)[^/]*api[-_]?key[^/]*\.[cm]?[jt]sx?$/i,
+  /(^|\/)(checkout|billing|payments?)(\/|$)/i,
+  /(^|\/)\.env($|\.)/i,
+  // (c) schema and migrations
+  /(^|\/)migrations?\//i,
+  /(^|\/)schema\.prisma$/i,
+  /\.sql$/i,
+];
+// GitHub's PR files endpoint returns at most 3000 files, silently.
+const PR_FILES_API_CAP = 3000;
+
+/** First carve-out path a PR touches, `null` if none; `"<unknown>"` when the file list is not known. */
+export function carveOutPath(files) {
+  if (!Array.isArray(files) || files.length >= PR_FILES_API_CAP) return "<unknown>";
+  for (const f of files) {
+    const names = [f?.filename, f?.previous_filename].filter((n) => n !== undefined && n !== null);
+    if (names.length === 0) return "<unknown>";
+    for (const n of names) {
+      if (typeof n !== "string" || n === "") return "<unknown>";
+      const base = n.split("/").pop().toLowerCase();
+      if (AGENT_RULE_FILE_NAMES.has(base) || CARVE_OUT_PATTERNS.some((re) => re.test(n))) return n;
+    }
+  }
+  return null;
+}
+
+/** Vendors named by `Agent-Vendor:` trailers in a commit message (only real author vendors). */
+export function trailerVendors(message) {
+  if (typeof message !== "string") return [];
+  const out = new Set();
+  for (const m of message.matchAll(/^Agent-Vendor:[ \t]*([A-Za-z0-9_-]+)[ \t]*$/gim)) {
+    const v = norm(m[1]);
+    if (AUTHOR_COMMIT_VENDORS.has(v)) out.add(v);
+  }
+  return [...out];
+}
+
 const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
 
 function usage(msg) {
@@ -181,7 +237,7 @@ function timestamp(item) {
  * bots' — resolves only through the owner attestation at the exact head, which
  * names the vendor on the owner's word. Never from raw email metadata.
  */
-export function resolveAuthors(commits, identities, attestedVendor) {
+export function resolveAuthors(commits, identities, attestedVendor, { relaxed = false } = {}) {
   const byLogin = new Map(identities.map((i) => [norm(i.login), i]));
   const vendors = new Set();
   const unresolved = [];
@@ -210,6 +266,22 @@ export function resolveAuthors(commits, identities, attestedVendor) {
       }
       const vendor = id.vendor;
       if (vendor === "unknown") { unresolved.push(`${login}:vendor-unknown`); continue; }
+      // Outside the carve-outs (2026-10-05): a listed lane bot resolves to its
+      // vendor even unsigned, and an owner-identity commit resolves through its
+      // Agent-Vendor trailer. An attestation still unions in its vendors.
+      if (relaxed && !verified && vendor !== "owner" && LANE_BOT_LOGIN.test(norm(login)) && AUTHOR_COMMIT_VENDORS.has(vendor)) {
+        vendors.add(vendor);
+        if (attestedVendor) for (const v of attestedVendor) if (v !== "human") vendors.add(v);
+        continue;
+      }
+      if (relaxed && vendor === "owner") {
+        const tv = trailerVendors(c?.commit?.message);
+        if (tv.length > 0) {
+          for (const v of tv) vendors.add(v);
+          if (attestedVendor) for (const v of attestedVendor) if (v !== "human") vendors.add(v);
+          continue;
+        }
+      }
       if (vendor === "owner" || !verified) {
         if (!attestedVendor) { unresolved.push(`${login}:${vendor === "owner" ? "owner" : "unverified"}-unattested`); continue; }
         // Attestation is head-wide, so it UNIONS with what the login claims
@@ -403,7 +475,7 @@ export function collectEvidence({ reviews, comments, identities, headSha, notBef
   return { newest: [...newest.values()].filter((e) => e.result !== "none"), staleReceipts, staleBase };
 }
 
-export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, commits, reviews, comments, timeline, config }) {
+export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, commits, reviews, comments, timeline, config, files }) {
   const head = norm(headSha);
   if (head !== norm(expectedHead)) return { state: "failure", reason: "head-moved", detail: `pr head ${head.slice(0, 7)} != expected ${norm(expectedHead).slice(0, 7)}` };
   // A commit status is keyed by SHA, not by PR (Codex review of #315, finding 3):
@@ -425,8 +497,14 @@ export function evaluate({ headSha, expectedHead, prNumber, pull, pullsForHead, 
     return { state: "failure", reason: "api-error", detail: `commits-truncated: pr declares ${declared}, fetched ${(commits ?? []).length}, cap ${PR_COMMITS_API_CAP}` };
   }
   const att = ownerAttestation(comments ?? [], config.ownerLogin, head, config.attestationVendors);
-  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null);
-  if (authors.unresolved.length > 0) return { state: "failure", reason: "identity-unresolved", detail: [...new Set(authors.unresolved)].join(","), authorVendors: [...authors.vendors], attestation: att };
+  // Owner gate carve-outs (2026-10-05): relaxed identity resolution only when
+  // the PR provably touches no carve-out path.
+  const carveOut = carveOutPath(files);
+  const authors = resolveAuthors(commits ?? [], config.identities, att?.vendors ?? null, { relaxed: carveOut === null });
+  if (authors.unresolved.length > 0) {
+    const why = carveOut && carveOut !== "<unknown>" ? `;owner-carve-out:${carveOut}` : "";
+    return { state: "failure", reason: "identity-unresolved", detail: `${[...new Set(authors.unresolved)].join(",")}${why}`, authorVendors: [...authors.vendors], attestation: att, carveOut };
+  }
   // A base retarget keeps the head SHA but changes the diff (round 4,
   // finding 3): evidence created before the last base_ref_changed is stale.
   const notBefore = lastBaseChange(timeline);
@@ -480,19 +558,23 @@ async function loadInputs(args) {
       // timeline.json: issue timeline events (base_ref_changed matters); default none.
       const timeline = (await rd("timeline.json", true)) ?? [];
       // comments.json entries may carry `editor` (login) — the GraphQL editor field.
-      return { pull, commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json"), pullsForHead, timeline };
+      // files.json: PR files (filename/previous_filename); absent = unknown list,
+      // which keeps the strict owner-attestation path (fail closed).
+      const files = await rd("files.json", true);
+      return { pull, commits: await rd("commits.json"), reviews: await rd("reviews.json"), comments: await rd("comments.json"), pullsForHead, timeline, files };
     } catch (e) { throw new Error(`api-error:fixture:${e.message.slice(0, 80)}`); }
   }
   const base = `repos/${args.repo}`;
   const pull = await ghJson([`${base}/pulls/${args.pr}`]);
   const head = norm(pull?.head?.sha ?? "");
   if (!SHA40.test(head)) throw new Error("api-error:pull-head-missing");
-  const [commits, reviews, comments, pullsForHead, timeline] = await Promise.all([
+  const [commits, reviews, comments, pullsForHead, timeline, files] = await Promise.all([
     ghPages(`${base}/pulls/${args.pr}/commits?per_page=100`),
     ghPages(`${base}/pulls/${args.pr}/reviews?per_page=100`),
     ghPages(`${base}/issues/${args.pr}/comments?per_page=100`),
     ghPages(`${base}/commits/${head}/pulls?per_page=100`),
     ghPages(`${base}/issues/${args.pr}/timeline?per_page=100`),
+    ghPages(`${base}/pulls/${args.pr}/files?per_page=100`),
   ]);
   // REST does not expose who last edited a comment; GraphQL does. A receipt or
   // attestation edited by anyone but its creator is not that creator's word
@@ -517,7 +599,7 @@ async function loadInputs(args) {
     const e = edits.get(Number(c?.id));
     if (e) { c.edited = true; if (e.editor) c.editor = e.editor; }
   }
-  return { pull, commits, reviews, comments, pullsForHead, timeline };
+  return { pull, commits, reviews, comments, pullsForHead, timeline, files };
 }
 
 /** Timestamp of the PR's most recent base retarget, or 0. Receipts older than it are `stale-base`. */
@@ -560,7 +642,7 @@ async function evaluateOne(args, config) {
     if (!SHA40.test(norm(inputs.pull?.head?.sha ?? ""))) throw new Error("api-error:pull-head-missing");
     head = norm(inputs.pull.head.sha);
     const expectedHead = args.expectedHead ?? head;
-    const result = evaluate({ headSha: head, expectedHead, prNumber: Number(args.pr), pull: inputs.pull, pullsForHead: inputs.pullsForHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, timeline: inputs.timeline, config });
+    const result = evaluate({ headSha: head, expectedHead, prNumber: Number(args.pr), pull: inputs.pull, pullsForHead: inputs.pullsForHead, commits: inputs.commits, reviews: inputs.reviews, comments: inputs.comments, timeline: inputs.timeline, config, files: inputs.files });
     return { headSha: head, ...result, pull: inputs.pull };
   } catch (e) {
     return { headSha: head, ...faultResult(e) };
