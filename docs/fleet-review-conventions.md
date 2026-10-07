@@ -86,6 +86,49 @@ authors to the exclusion set, never remove one (a mixed Grok+Devin PR attested a
 ignored whole. An attestation resolves identity only; it is never a review, and it is
 trusted on the owner's word. The durable fix is per-lane bot identities (#67).
 
+**Owner delegate: a model review instead of the owner's word (#450).** With no
+attestation at the head, an independent review from a different model vendor can
+resolve identity in its place. That covers both the trailered owner-identity commit and
+the carve-out paths (`.github/`, agent instruction files, `config/policy/`, this
+evaluator and its config, secrets/billing, schema/migrations). It counts only when
+**all** of these hold:
+
+1. The reviewer is an identity in `config/review-evidence.v1.json` marked
+   `"ownerDelegate": true`. Config validation allows that flag only on a `[bot]` login
+   bound to one GitHub App (`appSlug` **and** integer `appId`), with roles exactly
+   `["reviewer"]` and a single model vendor (`grok|codex|claude|devin`). Multi-model
+   panels and the owner can never be delegates.
+2. Its newest evidence at the **exact head** is a pass: a formal `APPROVED` review, or
+   an unedited App-authored `review-evidence:v1` receipt with `result: pass`. The
+   body's first non-blank line must also be `VERDICT: APPROVE` (the
+   `second-opinion.sh` contract, mirrored by `verdictOf`). `VERDICT: PASS`, quoted,
+   late, duplicate or contradictory verdicts don't count. A `VERDICT: REQUEST_CHANGES`
+   or `CHANGES_REQUESTED` is a fail.
+3. Every commit resolves under the relaxed rules: GitHub-signed listed logins,
+   unsigned `aie-agent-lanes-*` bots, and owner-identity commits that carry an
+   `Agent-Vendor:` trailer. A trailer-less owner commit is never delegate-cleared,
+   because its vendor can't be known. It still needs the attestation.
+4. The delegate's vendor differs from every vendor resolved that way, and no
+   cross-vendor reviewer has a fail at the head.
+
+The review state (`APPROVED`) can only be set by the App itself, so the state is the
+unforgeable half. A writer could edit a review body, but that can't turn a `COMMENTED`
+review into a pass. A plain comment from any account, the owner included, is never a
+delegate review, and neither is an `owner-attested-review:v1` countersign. Delegate
+evidence counts as an ordinary review too: a delegate `APPROVED` with no VERDICT line
+isn't evidence at all. The owner attestation is unchanged and stays an optional
+override. When it's present, the delegate path isn't consulted, and registering a
+delegate App doesn't retire `owner-attested-review:v1` for that vendor.
+
+`claude[bot]` (Anthropic's Claude GitHub App, `claude`, id 1236702) is the registered
+delegate. Registering it is config only, but it becomes live evidence only after the
+owner (a) installs that App on the repository, (b) adds an `ANTHROPIC_API_KEY`
+repository secret, and (c) adds a workflow (for example `anthropics/claude-code-action`)
+that submits a formal review as `claude[bot]` at the head, with a body whose first line
+is `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`. The status then updates on the next
+event or the hourly sweep. Because the workflow runs trusted default-branch code, a PR
+that changes this evaluator is judged by the old rules until it merges.
+
 **Residual window (documented, not hidden).** The workflow resolves the head via the
 API and falls back to the event's head so `pending` is stamped even when the API call
 fails. Review and comment events carry no head in their payload; if the API is down

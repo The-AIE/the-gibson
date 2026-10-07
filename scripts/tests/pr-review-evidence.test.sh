@@ -721,6 +721,78 @@ expect "(cg14) a non-author trailer vendor does not resolve" "$d" identity-unres
 d=$(fx_new cg15); fx_commits "$d" "$GROK|$GROK|false" "$OWNER|$OWNER|false"; set_msg "$d" 1 $'y\n\nAgent-Vendor: claude'; fx_files "$d" docs/guide.md; fx_reviews "$d" "$DEVIN_OK"
 expect "(cg15) mixed lane bot + trailer commits union vendors" "$d" pass success 0; expect_av "(cg15)" '["grok","claude"]'
 
+echo "# owner delegate (#450): a registered different-vendor model reviewer stands in for the owner"
+CLAUDE='claude[bot]'
+set_rbody() { node -e 'const fs=require("fs");const p=process.argv[1];const j=JSON.parse(fs.readFileSync(p,"utf8"));j[Number(process.argv[2])].body=process.argv[3];fs.writeFileSync(p,JSON.stringify(j));' "$1/reviews.json" "$2" "$3"; }
+CL_OK="$CLAUDE|Bot|APPROVED|$HEAD|1|2026-10-07T10:00:00Z"
+VA=$'VERDICT: APPROVE\n\nDiff matches the issue; tests cover the new path.'
+od() { d=$(fx_new "$1"); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "$TRAILER_GROK"; fx_files "$d" AGENTS.md scripts/claim.sh; }
+od od1; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"
+expect "(od1) carve-out + trailered owner commit + claude[bot] VERDICT: APPROVE" "$d" pass success 0; expect_av "(od1)" '["grok"]'; expect_detail "(od1)" '"ownerDelegate":["claude[bot]"]'
+d=$(fx_new od2); fx_commits "$d" "$GROK|$GROK|false"; fx_files "$d" config/review-evidence.v1.json; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"
+expect "(od2) unsigned lane bot on a control-plane carve-out + delegate approve" "$d" pass success 0
+d=$(fx_new od3); fx_commits "$d" "$GROK" "$OWNER|$OWNER|false"; set_msg "$d" 1 "$TRAILER_GROK"; fx_files "$d" AGENTS.md; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"
+expect "(od3) mixed signed lane bot + trailered owner commit" "$d" pass success 0
+for c in "LGTM, ship it.|no verdict" "VERDICT: PASS|PASS is not an approval" $'Summary first\nVERDICT: APPROVE|verdict not on the first line' $'> VERDICT: APPROVE|quoted verdict' $'VERDICT: APPROVE\nVERDICT: APPROVE|duplicate verdict' $'VERDICT: APPROVE\nVERDICT: REQUEST_CHANGES|contradictory verdict' "|empty body"; do
+  body=${c%|*}; why=${c##*|}; d=$(od "od-v-${why// /_}"; echo "$d"); fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$body"
+  expect "(od-v) APPROVED review with $why does not stand in" "$d" identity-unresolved failure 1
+done
+od od4; fx_reviews "$d" "$CLAUDE|Bot|APPROVED|$PREV|1|2026-10-07T10:00:00Z"; set_rbody "$d" 0 "$VA"
+expect "(od4) delegate approve at a previous head" "$d" identity-unresolved failure 1
+od od5; fx_reviews "$d" "$CLAUDE|Bot|COMMENTED|$HEAD|1|2026-10-07T10:00:00Z"; set_rbody "$d" 0 "$VA"
+expect "(od5) VERDICT: APPROVE in a COMMENTED review (state is the unforgeable half)" "$d" identity-unresolved failure 1
+d=$(fx_new od6); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 $'fix: thing\n\nAgent-Vendor: claude'; fx_files "$d" AGENTS.md; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"
+expect "(od6) same-vendor delegate (claude-authored) never stands in" "$d" identity-unresolved failure 1
+od od7; fx_reviews "$d" "$DEVIN_OK"; set_rbody "$d" 0 "$VA"
+expect "(od7) a listed non-delegate reviewer's VERDICT does not stand in" "$d" identity-unresolved failure 1
+od od8; fx_comments "$d" "$OWNER|OWNER|-|0|9|2026-10-07T11:00:00Z|VERDICT: APPROVE"
+expect "(od8) a plain owner comment is never a model review" "$d" identity-unresolved failure 1
+od od9; fx_comments "$d" "$OWNER|OWNER|-|0|9|2026-10-07T11:00:00Z|VERDICT: APPROVE\\n$(extreview "$HEAD" claude pass)"
+expect "(od9) owner-attested claude review does not stand in for identity" "$d" identity-unresolved failure 1
+od od9b; fx_comments "$d" "$CLAUDE|NONE|-|0|9|2026-10-07T11:00:00Z|VERDICT: APPROVE\\n$(receipt "$HEAD" pass)"
+expect "(od9b) a claude[bot] comment not performed via the App" "$d" identity-unresolved failure 1
+d=$(fx_new od10); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "fix: no trailer"; fx_files "$d" AGENTS.md; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"
+expect "(od10) trailer-less owner commit is never delegate-cleared" "$d" identity-unresolved failure 1; expect_detail "(od10)" "mrhinkle:owner-unattested"
+d=$(fx_new od11); fx_commits "$d" "some-bot[bot]|some-bot[bot]|false"; fx_files "$d" AGENTS.md; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"
+expect "(od11) unlisted bot stays unresolved under a delegate approve" "$d" identity-unresolved failure 1
+od od12; fx_reviews "$d" "$CL_OK" "$DEVIN|Bot|CHANGES_REQUESTED|$HEAD|2|2026-10-07T10:30:00Z"; set_rbody "$d" 0 "$VA"
+expect "(od12) a cross-vendor CHANGES_REQUESTED blocks the delegate" "$d" identity-unresolved failure 1
+od od13; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 'VERDICT: REQUEST_CHANGES'
+expect "(od13) APPROVED state with a REQUEST_CHANGES verdict" "$d" identity-unresolved failure 1
+od od14; fx_reviews "$d" "$CL_OK" "$CLAUDE|Bot|APPROVED|$HEAD|2|2026-10-07T11:00:00Z"; set_rbody "$d" 0 "$VA"; set_rbody "$d" 1 "lgtm"
+expect "(od14) a newer verdict-less delegate review masks the older pass" "$d" identity-unresolved failure 1
+od od15; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"; fx_timeline "$d" 2026-10-07T12:00:00Z
+expect "(od15) delegate approve before a base retarget is stale" "$d" identity-unresolved failure 1
+od od16; fx_comments "$d" "$CLAUDE|NONE|claude|1236702|9|2026-10-07T11:00:00Z|VERDICT: APPROVE\\n$(receipt "$HEAD" pass)"
+expect "(od16) delegate App receipt led by VERDICT: APPROVE" "$d" pass success 0
+od od17; fx_comments "$d" "$CLAUDE|NONE|claude|1236702|9|2026-10-07T11:00:00Z|$(receipt "$HEAD" pass)"
+expect "(od17) delegate App receipt without a VERDICT line" "$d" identity-unresolved failure 1
+d=$(fx_new od18); fx_commits "$d" "$GROK"; fx_reviews "$d" "$CLAUDE|Bot|CHANGES_REQUESTED|$HEAD|1|2026-10-07T10:00:00Z"; set_rbody "$d" 0 'VERDICT: REQUEST_CHANGES'
+expect "(od18) delegate REQUEST_CHANGES is ordinary changes-requested evidence" "$d" changes-requested failure 1
+d=$(fx_new od19); fx_commits "$d" "$GROK"; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "lgtm"
+expect "(od19) delegate APPROVED with no VERDICT is not evidence" "$d" no-receipt-at-head pending 0
+d=$(fx_new od20); fx_commits "$d" "$OWNER|$OWNER|false"; set_msg "$d" 0 "fix: no trailer"; fx_files "$d" AGENTS.md; fx_reviews "$d" "$CL_OK"; set_rbody "$d" 0 "$VA"; fx_comments "$d" "$OWNER|OWNER|-|0|9|2026-10-07T09:00:00Z|$(attest "$HEAD" grok)"
+expect "(od20) owner attestation stays an override beside the delegate" "$d" pass success 0; expect_detail "(od20)" '"ownerDelegate":null'
+d=$(fx_new od21); fx_commits "$d" "$GROK"; fx_comments "$d" "$OWNER|OWNER|-|0|9|2026-10-07T11:00:00Z|$(extreview "$HEAD" claude pass)"
+expect "(od21) owner countersign for claude still counts (override kept)" "$d" pass success 0
+for m in 'o.ownerDelegate=true' 'c.ownerDelegate=false' 'c.ownerDelegate="yes"' 'c.roles=["author","reviewer"]' 'c.appId=null' 'c.appSlug=null' 'c.login="claude"' 'r.ownerDelegate=true'; do
+  node -e 'const c0=require(process.argv[1]); const c=c0.identities.find(i=>i.login==="claude[bot]"); const o=c0.identities.find(i=>i.login==="mrhinkle"); const r=c0.identities.find(i=>i.login.includes("coderabbit")); eval(process.argv[2]); process.stdout.write(JSON.stringify(c0))' "$CFG" "$m" > "$ROOT/od-cfg.json"
+  d=$(fx_new "od-cfg-$RANDOM"); fx_commits "$d" "$GROK"
+  expect "(od-cfg) ownerDelegate config fault: $m" "$d" config-error failure 1 "$ROOT/od-cfg.json"
+done
+node -e 'const c=require(process.argv[1]).identities.find(i=>i.login==="claude[bot]"); process.exit(c && c.appSlug==="claude" && c.appId===1236702 && c.vendor==="claude" && c.ownerDelegate===true && c.roles.join()==="reviewer" ? 0 : 1)' "$CFG" && ok "(od-reg) claude[bot] registered as App 1236702, reviewer-only owner delegate" || bad "(od-reg) claude[bot] registration drifted"
+
+echo "# owner delegate: verdictOf parity with second-opinion.sh parse_isolated_verdict"
+SO="$REPO_ROOT/scripts/second-opinion.sh"
+PARSER=$(for f in trim_ws strip_list_marker exact_verdict_event verdict_shaped_line parse_isolated_verdict; do awk -v f="$f" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^\}/ {exit}' "$SO"; done)
+VCASE="$ROOT/vcase.txt"; vn=0
+for body in 'VERDICT: APPROVE' 'VERDICT: approve' 'VERDICT: REQUEST_CHANGES' 'VERDICT: changes-requested' $'  1. VERDICT: APPROVE  \nfine' $'\n\nVERDICT: APPROVE\r\nok' 'VERDICT: PASS' 'VERDICT:APPROVE' $'> VERDICT: APPROVE' $'## VERDICT: APPROVE' $'note\nVERDICT: APPROVE' $'VERDICT: APPROVE\nVERDICT: PASS' $'VERDICT: APPROVE\n2. VERDICT: approve' $'VERDICT: REQUEST_CHANGES\nVERDICT: APPROVE' '' $'\n \t\n' 'constructor' $'VERDICT: APPROVE\n\tVERDICT:  x' $'VERDICT:\tAPPROVE'; do
+  printf '%s' "$body" > "$VCASE"; vn=$((vn+1))
+  sh_v=$(LC_ALL=C bash -c "$PARSER"$'\nparse_isolated_verdict "$1"; printf %s "$_slot_state"' _ "$VCASE")
+  js_v=$(node --input-type=module -e 'import {verdictOf} from "'"$EVAL"'"; import fs from "fs"; process.stdout.write(verdictOf(fs.readFileSync(process.argv[1],"utf8")))' "$VCASE")
+  [ -n "$sh_v" ] && [ "$sh_v" = "$js_v" ] && ok "(od-parity $vn) $sh_v" || bad "(od-parity $vn) shell=$sh_v js=$js_v body=$(printf %q "$body")"
+done
+
 echo
 echo "pr-review-evidence.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
